@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# sgt-status — Show git status across every repo in a project
+# Usage: sgt-status <project>
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+
+[[ $# -ge 1 ]] || _die "Usage: sgt-status <project>"
+PROJECT="$1"
+CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
+[[ -f "$CONFIG_FILE" ]] || _die "Project not found: $PROJECT (looked for $CONFIG_FILE)"
+_require_yq
+
+echo "=== $PROJECT  (dev_root: $DEV_ROOT) ==="
+echo ""
+
+repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
+
+for ((i=0; i<repo_count; i++)); do
+  name="$(yq ".repos[$i].name" "$CONFIG_FILE")"
+  raw_path="$(yq ".repos[$i].path" "$CONFIG_FILE")"
+  path="$(_resolve_path "$raw_path")"
+
+  echo "--- $name ($path) ---"
+
+  if [[ ! -d "$path" ]]; then
+    echo "  NOT CLONED"
+    echo ""
+    continue
+  fi
+
+  if [[ ! -d "$path/.git" ]]; then
+    echo "  NOT A GIT REPO"
+    echo ""
+    continue
+  fi
+
+  branch="$(git -C "$path" branch --show-current 2>/dev/null || echo "unknown")"
+  echo "  branch: $branch"
+
+  status_output="$(git -C "$path" status --porcelain 2>/dev/null)"
+  if [[ -z "$status_output" ]]; then
+    echo "  clean"
+  else
+    echo "$status_output" | sed 's/^/  /'
+  fi
+
+  upstream="$(git -C "$path" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)"
+  if [[ -n "$upstream" ]]; then
+    ahead="$(git -C "$path" rev-list --count '@{upstream}..HEAD' 2>/dev/null || echo 0)"
+    behind="$(git -C "$path" rev-list --count 'HEAD..@{upstream}' 2>/dev/null || echo 0)"
+    if [[ "$ahead" -gt 0 || "$behind" -gt 0 ]]; then
+      echo "  ahead: $ahead  behind: $behind"
+    fi
+  fi
+
+  echo ""
+done

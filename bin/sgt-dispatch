@@ -1,0 +1,357 @@
+#!/usr/bin/env bash
+# sgt-dispatch — Dispatch subagents across repos in a project
+#
+# Creates an isolated git worktree per repo, writes a mission brief into each,
+# and spawns an agent (tmux window locally, or babydriver remotely).
+#
+# Usage:
+#   sgt-dispatch <project> "<brief>" [options]
+#
+# Options:
+#   --repos repo1,repo2,...   Repos to dispatch (required)
+#   --branch <name>           Branch name for all worktrees (default: derived from brief)
+#   --remote                  Dispatch to cleanthes via babydriver (default: local tmux)
+#   --deps "repo1>repo2,..."  Dependency ordering: repo1 must finish before repo2 starts
+#   --dry-run                 Print what would happen, don't execute
+#
+# Examples:
+#   sgt-dispatch smith "Add OAuth via Google" --repos smith,smith-app,smith-infra
+#   sgt-dispatch smith "Fix the login bug" --repos smith-app --branch fix/login-bug
+#   sgt-dispatch smith "Upgrade etcd" --repos smith,smith-infra --remote
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+
+# ── Parse args ───────────────────────────────────────────────────────────────
+
+[[ $# -ge 2 ]] || _die "Usage: sgt-dispatch <project> \"<brief>\" [options]"
+PROJECT="$1"; shift
+BRIEF="$1";   shift
+
+CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
+[[ -f "$CONFIG_FILE" ]] || _die "Project not found: $PROJECT (looked for $CONFIG_FILE)"
+
+REPOS_ARG=""
+BRANCH_ARG=""
+DEPS_ARG=""
+REMOTE=false
+DRY_RUN=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repos)   REPOS_ARG="$2";  shift 2 ;;
+    --branch)  BRANCH_ARG="$2"; shift 2 ;;
+    --deps)    DEPS_ARG="$2";   shift 2 ;;
+    --remote)  REMOTE=true;     shift   ;;
+    --dry-run) DRY_RUN=true;    shift   ;;
+    *) _die "Unknown option: $1" ;;
+  esac
+done
+
+[[ -n "$REPOS_ARG" ]] || _die "Must specify --repos. Run 'bin/sgt-context $PROJECT' to see available repos."
+
+_require_yq
+_require_git
+$REMOTE || _require_tmux
+
+# ── Generate task ID ──────────────────────────────────────────────────────────
+
+_rand6() { dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | cut -c1-6; }
+
+slug="$(echo "$BRIEF" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//' | cut -c1-24 | sed 's/-$//')"
+TASK_ID="${slug}-$(_rand6)"
+
+# ── Determine branch name ─────────────────────────────────────────────────────
+
+if [[ -n "$BRANCH_ARG" ]]; then
+  BRANCH="$BRANCH_ARG"
+else
+  bslug="$(echo "$BRIEF" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//' | cut -c1-40 | sed 's/-$//')"
+  if [[ "$bslug" =~ ^(feat|fix|chore|refactor|docs|test)- ]]; then
+    BRANCH="${bslug/-//}"
+  else
+    BRANCH="feat/$bslug"
+  fi
+fi
+
+TASK_DIR="$FLEET_DIR/$TASK_ID"
+TMUX_SESSION="sgt-$TASK_ID"
+
+echo ""
+echo "=== sgt-dispatch: $PROJECT ==="
+echo "brief:   $BRIEF"
+echo "task-id: $TASK_ID"
+echo "branch:  $BRANCH"
+echo "backend: $($REMOTE && echo "babydriver (remote)" || echo "tmux (local)")"
+echo ""
+
+# ── Validate repos ────────────────────────────────────────────────────────────
+
+repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
+TARGET_REPOS=()
+IFS=',' read -ra TARGET_REPOS <<< "$REPOS_ARG"
+
+for rname in "${TARGET_REPOS[@]}"; do
+  found=false
+  for ((i=0; i<repo_count; i++)); do
+    n="$(yq ".repos[$i].name" "$CONFIG_FILE")"
+    [[ "$n" == "$rname" ]] && found=true && break
+  done
+  $found || _die "Repo '$rname' not found in project $PROJECT"
+done
+
+# ── Parse dependency order ────────────────────────────────────────────────────
+# Format: "infra>api,infra>app" → infra must finish before api and app
+# Store in a temp file: "<dependent> <prereq>" one per line
+
+DEPS_TMP="$(mktemp)"
+trap 'rm -f "$DEPS_TMP"' EXIT
+
+if [[ -n "$DEPS_ARG" ]]; then
+  IFS=',' read -ra dep_pairs <<< "$DEPS_ARG"
+  for pair in "${dep_pairs[@]}"; do
+    prereq="${pair%%>*}"
+    dependent="${pair##*>}"
+    echo "$dependent $prereq" >> "$DEPS_TMP"
+  done
+fi
+
+# Look up comma-separated prereqs for a repo
+_wait_for() {
+  grep "^$1 " "$DEPS_TMP" 2>/dev/null | awk '{print $2}' | paste -sd ',' - 2>/dev/null || true
+}
+
+# ── Create fleet task directory ───────────────────────────────────────────────
+
+if $DRY_RUN; then
+  echo "[dry-run] fleet dir: $TASK_DIR"
+else
+  mkdir -p "$TASK_DIR"
+  printf "Project: %s\nBrief:   %s\nBranch:  %s\nRepos:   %s\n" \
+    "$PROJECT" "$BRIEF" "$BRANCH" "${TARGET_REPOS[*]}" > "$TASK_DIR/brief.md"
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$TASK_DIR/started"
+fi
+
+# ── Create tmux session (local only) ─────────────────────────────────────────
+
+if ! $REMOTE && ! $DRY_RUN; then
+  tmux new-session -d -s "$TMUX_SESSION" -n "sergeant" 2>/dev/null || true
+  echo "tmux session: $TMUX_SESSION"
+  echo ""
+fi
+
+# ── Dispatch per repo ─────────────────────────────────────────────────────────
+
+for rname in "${TARGET_REPOS[@]}"; do
+  # Find repo index in config
+  for ((i=0; i<repo_count; i++)); do
+    n="$(yq ".repos[$i].name" "$CONFIG_FILE")"
+    [[ "$n" == "$rname" ]] && break
+  done
+
+  raw_path="$(yq ".repos[$i].path" "$CONFIG_FILE")"
+  repo_path="$(_resolve_path "$raw_path")"
+  repo_url="$(yq ".repos[$i].url // \"\"" "$CONFIG_FILE")"
+  repo_role="$(yq ".repos[$i].role // \"\"" "$CONFIG_FILE")"
+  repo_group="$(yq ".repos[$i].group // \"\"" "$CONFIG_FILE")"
+
+  echo "--- $rname ---"
+
+  if [[ ! -d "$repo_path/.git" ]]; then
+    echo "  SKIP: not cloned at $repo_path (run bin/sgt-sync $PROJECT first)"
+    echo ""
+    continue
+  fi
+
+  # ── Resolve merged instructions (defaults → group → repo) ──────────────────
+
+  default_inst="$(yq '.defaults.agent_instructions // ""' "$CONFIG_FILE")"
+  group_inst=""
+  if [[ -n "$repo_group" && "$repo_group" != "null" ]]; then
+    group_inst="$(yq ".groups.\"$repo_group\".agent_instructions // \"\"" "$CONFIG_FILE")"
+  fi
+  repo_inst="$(yq ".repos[$i].agent_instructions // \"\"" "$CONFIG_FILE")"
+
+  merged=""
+  [[ -n "$default_inst" && "$default_inst" != "null" ]] && merged+="$default_inst"$'\n'
+  [[ -n "$group_inst"   && "$group_inst"   != "null" ]] && merged+="$group_inst"$'\n'
+  [[ -n "$repo_inst"    && "$repo_inst"    != "null" ]] && merged+="$repo_inst"$'\n'
+
+  # ── Resolve dependencies ────────────────────────────────────────────────────
+
+  wait_for="$(_wait_for "$rname")"
+  deps_section=""
+  if [[ -n "$wait_for" ]]; then
+    deps_section="## Dependencies"$'\n\n'
+    IFS=',' read -ra prereqs <<< "$wait_for"
+    for prereq in "${prereqs[@]}"; do
+      prereq_fleet="$TASK_DIR/$prereq"
+      deps_section+="Wait for \`$prereq\` to complete before opening your PR."$'\n'
+      deps_section+="Check fleet state: \`cat $prereq_fleet/status\`"$'\n'
+      deps_section+="(or check worktree directly: \`cat \$(cat $prereq_fleet/worktree)/.sergeant-status\`)"$'\n\n'
+    done
+  fi
+
+  # ── Determine worktree strategy ────────────────────────────────────────────
+  # Prefer treehouse if treehouse.toml exists in the repo (pre-warmed pool).
+  # Fall back to plain git worktree add otherwise.
+
+  repo_task_dir="$TASK_DIR/$rname"
+  use_treehouse=false
+  if [[ -f "$repo_path/treehouse.toml" ]] && command -v treehouse &>/dev/null; then
+    use_treehouse=true
+  fi
+
+  if $DRY_RUN; then
+    if $use_treehouse; then
+      echo "  worktree: treehouse lease (pool: ~/.treehouse/)"
+    else
+      echo "  worktree: $(dirname "$repo_path")/${rname}-sgt-${TASK_ID}"
+    fi
+    echo "  branch:   $BRANCH"
+    [[ -n "$wait_for" ]] && echo "  waits for: $wait_for"
+    echo ""
+    continue
+  fi
+
+  # ── Acquire worktree ─────────────────────────────────────────────────────────
+
+  mkdir -p "$repo_task_dir"
+  echo "$BRANCH"    > "$repo_task_dir/branch"
+  echo "dispatched" > "$repo_task_dir/status"
+  [[ -n "$wait_for" ]] && echo "$wait_for" > "$repo_task_dir/wait_for"
+
+  if $use_treehouse; then
+    _info "acquiring treehouse lease for $rname ..."
+    lease_holder="sgt-${TASK_ID}-${rname}"
+    worktree_path="$(cd "$repo_path" && treehouse get --lease --lease-holder "$lease_holder" 2>/dev/null)"
+    if [[ -z "$worktree_path" ]]; then
+      _info "WARNING: treehouse lease failed — falling back to git worktree add"
+      use_treehouse=false
+    else
+      _info "leased: $worktree_path"
+      echo "treehouse"      > "$repo_task_dir/wt_type"
+      echo "$lease_holder"  > "$repo_task_dir/wt_holder"
+      # Create and checkout the task branch in the leased worktree
+      if git -C "$worktree_path" show-ref --verify --quiet "refs/heads/$BRANCH" 2>/dev/null; then
+        git -C "$worktree_path" checkout "$BRANCH" 2>&1 | sed 's/^/    /'
+      else
+        git -C "$worktree_path" checkout -b "$BRANCH" 2>&1 | sed 's/^/    /'
+      fi
+    fi
+  fi
+
+  if ! $use_treehouse; then
+    worktree_path="$(dirname "$repo_path")/${rname}-sgt-${TASK_ID}"
+    echo "git" > "$repo_task_dir/wt_type"
+    _info "creating git worktree: $worktree_path"
+    if [[ -d "$worktree_path" ]]; then
+      _info "already exists — reusing"
+    else
+      if git -C "$repo_path" show-ref --verify --quiet "refs/heads/$BRANCH" 2>/dev/null; then
+        git -C "$repo_path" worktree add "$worktree_path" "$BRANCH" 2>&1 | sed 's/^/    /'
+      else
+        git -C "$repo_path" worktree add -b "$BRANCH" "$worktree_path" 2>&1 | sed 's/^/    /'
+      fi
+    fi
+  fi
+
+  echo "$worktree_path" > "$repo_task_dir/worktree"
+
+  # ── Write brief ─────────────────────────────────────────────────────────────
+
+  role_line=""
+  if [[ -n "$repo_role" && "$repo_role" != "null" ]]; then
+    role_line="Role: $repo_role"
+  fi
+
+  cat > "$worktree_path/.sergeant-brief.md" << BRIEF_EOF
+# Sergeant Brief
+
+**Task ID:** $TASK_ID
+**Project:** $PROJECT
+**Repo:** $rname
+**Branch:** $BRANCH
+**Worktree:** $worktree_path
+**Fleet state:** $repo_task_dir/
+
+---
+
+## Mission
+
+$BRIEF
+
+This agent is responsible for the **$rname** repo only.
+$role_line
+
+$deps_section
+## Active instructions
+
+$merged
+
+---
+
+## Deliver
+
+When your work is complete:
+
+1. All tests pass and lint is clean.
+2. Changes are committed on branch \`$BRANCH\`.
+3. PR is open via \`gh pr create\`.
+4. Write the PR URL:
+   \`echo "https://github.com/..." > .sergeant-result\`
+5. Write your final status:
+   - Success: \`echo "done" > .sergeant-status\`
+   - Failure: \`echo "failed: <reason>" > .sergeant-status\`
+
+The primary sergeant session is watching via \`bin/sgt-watch $TASK_ID\`.
+BRIEF_EOF
+
+  echo "in_progress" > "$repo_task_dir/status"
+  _info "brief written → $worktree_path/.sergeant-brief.md"
+
+  # ── Spawn agent ─────────────────────────────────────────────────────────────
+
+  if $REMOTE; then
+    if ! command -v babydriver &>/dev/null; then
+      _info "WARNING: babydriver not found — start manually: cd $worktree_path && $AGENT_CMD"
+    else
+      remote_url="${repo_url:-$(git -C "$repo_path" remote get-url origin 2>/dev/null || echo "")}"
+      if [[ -z "$remote_url" ]]; then
+        _info "WARNING: no remote URL for $rname — cannot dispatch via babydriver"
+      else
+        gh_repo="$(echo "$remote_url" | sed 's|.*github\.com[:/]||;s|\.git$||')"
+        brief_oneline="$(echo "$BRIEF" | head -1)"
+        _info "dispatching via babydriver → $gh_repo"
+        babydriver start \
+          --repo "$gh_repo" \
+          --task "${rname}:${brief_oneline} [sgt:${TASK_ID}] — read .sergeant-brief.md" \
+          --worktree 2>&1 | sed 's/^/    /' || _info "WARNING: babydriver start failed"
+      fi
+    fi
+  else
+    _info "spawning tmux window '$rname' in session $TMUX_SESSION"
+    tmux new-window -t "$TMUX_SESSION:" -n "$rname" -c "$worktree_path" \
+      "$AGENT_CMD" 2>/dev/null || \
+      _info "WARNING: tmux window failed — start manually: cd $worktree_path && $AGENT_CMD"
+  fi
+
+  echo ""
+done
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+
+if ! $DRY_RUN; then
+  echo "=== dispatch complete ==="
+  echo ""
+  echo "Task ID: $TASK_ID"
+  echo "Fleet:   $TASK_DIR"
+  if ! $REMOTE; then
+    echo "Attach:  tmux attach -t $TMUX_SESSION"
+  fi
+  echo "Watch:   bin/sgt-watch $TASK_ID"
+  echo ""
+fi

@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# sgt-watch — Monitor a dispatched fleet and report outcomes
+#
+# Watches the status files written by worker agents into the fleet directory.
+# Workers signal completion by writing .sergeant-status and .sergeant-result
+# in their worktrees; sgt-dispatch mirrors those back to fleet state on each poll.
+#
+# Usage:
+#   sgt-watch <task-id>              # watch a specific task
+#   sgt-watch --list                 # list all known tasks
+#   sgt-watch --sync <task-id>       # one-shot sync worktree → fleet state, then exit
+#
+# Workers write:
+#   <worktree>/.sergeant-status    → "done" or "failed: <reason>"
+#   <worktree>/.sergeant-result    → PR URL or report path
+#
+# Fleet state mirrors:
+#   ~/.local/share/sergeant/fleet/<task-id>/<repo>/status
+#   ~/.local/share/sergeant/fleet/<task-id>/<repo>/result
+
+set -euo pipefail
+
+FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
+POLL_INTERVAL="${SERGEANT_WATCH_INTERVAL:-5}"  # seconds
+
+_die() { echo "ERROR: $*" >&2; exit 1; }
+
+# ── --list mode ───────────────────────────────────────────────────────────────
+
+if [[ "${1:-}" == "--list" ]]; then
+  if [[ ! -d "$FLEET_DIR" ]] || [[ -z "$(ls -A "$FLEET_DIR" 2>/dev/null)" ]]; then
+    echo "No tasks found in $FLEET_DIR"
+    exit 0
+  fi
+  echo "Active tasks:"
+  echo ""
+  for task_dir in "$FLEET_DIR"/*/; do
+    task_id="$(basename "$task_dir")"
+    started="$(cat "$task_dir/started" 2>/dev/null || echo "unknown")"
+    brief="$(grep '^Brief:' "$task_dir/brief.md" 2>/dev/null | sed 's/^Brief: *//' | cut -c1-60 || echo "")"
+
+    # Count repo statuses
+    total=0; done_count=0; failed_count=0; in_progress=0
+    for repo_dir in "$task_dir"/*/; do
+      [[ -d "$repo_dir" ]] || continue
+      total=$((total+1))
+      s="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
+      case "$s" in
+        done)        done_count=$((done_count+1)) ;;
+        failed*)     failed_count=$((failed_count+1)) ;;
+        in_progress) in_progress=$((in_progress+1)) ;;
+      esac
+    done
+
+    echo "  $task_id"
+    echo "    brief:   $brief"
+    echo "    started: $started"
+    echo "    repos:   $total total — $done_count done, $in_progress in-progress, $failed_count failed"
+    echo ""
+  done
+  exit 0
+fi
+
+# ── --sync mode ───────────────────────────────────────────────────────────────
+
+_sync_task() {
+  local task_id="$1"
+  local task_dir="$FLEET_DIR/$task_id"
+  [[ -d "$task_dir" ]] || _die "Task not found: $task_id (looked in $FLEET_DIR)"
+
+  for repo_dir in "$task_dir"/*/; do
+    [[ -d "$repo_dir" ]] || continue
+    repo_name="$(basename "$repo_dir")"
+    worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
+    [[ -n "$worktree" ]] || continue
+
+    # Sync .sergeant-status from worktree → fleet
+    if [[ -f "$worktree/.sergeant-status" ]]; then
+      wt_status="$(cat "$worktree/.sergeant-status" | tr -d '\n')"
+      fleet_status="$(cat "$repo_dir/status" 2>/dev/null || echo "")"
+      if [[ "$wt_status" != "$fleet_status" ]]; then
+        echo "$wt_status" > "$repo_dir/status"
+      fi
+    fi
+
+    # Sync .sergeant-result from worktree → fleet
+    if [[ -f "$worktree/.sergeant-result" ]]; then
+      cp "$worktree/.sergeant-result" "$repo_dir/result" 2>/dev/null || true
+    fi
+  done
+}
+
+if [[ "${1:-}" == "--sync" ]]; then
+  [[ $# -ge 2 ]] || _die "Usage: sgt-watch --sync <task-id>"
+  _sync_task "$2"
+  exit 0
+fi
+
+# ── Watch mode ────────────────────────────────────────────────────────────────
+
+[[ $# -ge 1 ]] || _die "Usage: sgt-watch <task-id>"
+TASK_ID="$1"
+TASK_DIR="$FLEET_DIR/$TASK_ID"
+[[ -d "$TASK_DIR" ]] || _die "Task not found: $TASK_ID (looked in $FLEET_DIR)"
+
+brief_line="$(grep '^Brief:' "$TASK_DIR/brief.md" 2>/dev/null | sed 's/^Brief: *//' || echo "$TASK_ID")"
+
+echo "=== sgt-watch: $brief_line ==="
+echo "task: $TASK_ID"
+echo "fleet: $TASK_DIR"
+echo "polling every ${POLL_INTERVAL}s — Ctrl-C to detach"
+echo ""
+
+_print_status() {
+  local task_dir="$1"
+  local all_done=true
+  local any_failed=false
+
+  for repo_dir in "$task_dir"/*/; do
+    [[ -d "$repo_dir" ]] || continue
+    repo_name="$(basename "$repo_dir")"
+    status="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
+    result="$(cat "$repo_dir/result" 2>/dev/null || echo "")"
+    worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
+
+    case "$status" in
+      done)
+        icon="✓"
+        ;;
+      failed*)
+        icon="✗"
+        any_failed=true
+        ;;
+      in_progress|dispatched)
+        icon="…"
+        all_done=false
+        ;;
+      *)
+        icon="?"
+        all_done=false
+        ;;
+    esac
+
+    printf "  %s  %-20s  %s\n" "$icon" "$repo_name" "$status"
+    if [[ -n "$result" ]]; then
+      printf "       %-20s  → %s\n" "" "$result"
+    fi
+  done
+
+  echo ""
+  $all_done && return 0
+  $any_failed && return 2
+  return 1
+}
+
+declare -A LAST_STATUS=()
+
+while true; do
+  _sync_task "$TASK_ID"
+
+  # Check if status changed — only reprint when something changes
+  current_snapshot=""
+  for repo_dir in "$TASK_DIR"/*/; do
+    [[ -d "$repo_dir" ]] || continue
+    repo_name="$(basename "$repo_dir")"
+    status="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
+    current_snapshot+="$repo_name:$status "
+  done
+
+  if [[ "${LAST_STATUS[snapshot]+x}" == "" || "${LAST_STATUS[snapshot]}" != "$current_snapshot" ]]; then
+    LAST_STATUS[snapshot]="$current_snapshot"
+    echo "$(date '+%H:%M:%S')"
+    _print_status "$TASK_DIR" && {
+      echo "All repos done."
+      echo ""
+      # Print final results
+      any_results=false
+      for repo_dir in "$TASK_DIR"/*/; do
+        result="$(cat "$repo_dir/result" 2>/dev/null || echo "")"
+        if [[ -n "$result" ]]; then
+          repo_name="$(basename "$repo_dir")"
+          echo "  $repo_name: $result"
+          any_results=true
+        fi
+      done
+      $any_results && echo ""
+      exit 0
+    } || true
+  fi
+
+  sleep "$POLL_INTERVAL"
+done

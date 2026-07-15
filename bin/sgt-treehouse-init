@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# sgt-treehouse-init — Initialize treehouse pools in a project's repos
+#
+# Runs `treehouse init` in each repo that doesn't already have a treehouse.toml.
+# Optionally filters to specific groups.
+#
+# Usage:
+#   sgt-treehouse-init <project>                  # all repos
+#   sgt-treehouse-init <project> --groups core,frontend,infra
+#
+# After running this, sgt-dispatch will automatically use treehouse for those repos.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+
+[[ $# -ge 1 ]] || _die "Usage: sgt-treehouse-init <project> [--groups g1,g2,...]"
+PROJECT="$1"; shift
+CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
+[[ -f "$CONFIG_FILE" ]] || _die "Project not found: $PROJECT"
+_require_yq
+command -v treehouse &>/dev/null || _die "treehouse is required: install from https://github.com/kunchenguid/treehouse"
+
+GROUPS_FILTER=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --groups) GROUPS_FILTER="$2"; shift 2 ;;
+    *) _die "Unknown option: $1" ;;
+  esac
+done
+
+echo "=== sgt-treehouse-init: $PROJECT ==="
+echo ""
+
+repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
+
+for ((i=0; i<repo_count; i++)); do
+  rname="$(yq ".repos[$i].name" "$CONFIG_FILE")"
+  raw_path="$(yq ".repos[$i].path" "$CONFIG_FILE")"
+  repo_path="$(_resolve_path "$raw_path")"
+  repo_group="$(yq ".repos[$i].group // \"\"" "$CONFIG_FILE")"
+
+  # Filter by group if specified
+  if [[ -n "$GROUPS_FILTER" ]]; then
+    match=false
+    IFS=',' read -ra filter_groups <<< "$GROUPS_FILTER"
+    for g in "${filter_groups[@]}"; do
+      [[ "$repo_group" == "$g" ]] && match=true && break
+    done
+    if ! $match; then
+      continue
+    fi
+  fi
+
+  echo "--- $rname ---"
+
+  if [[ ! -d "$repo_path/.git" ]]; then
+    echo "  SKIP: not cloned"
+    echo ""
+    continue
+  fi
+
+  if [[ -f "$repo_path/treehouse.toml" ]]; then
+    echo "  already initialized"
+    treehouse status 2>&1 | sed 's/^/  /'
+  else
+    echo "  initializing treehouse ..."
+    (cd "$repo_path" && treehouse init 2>&1 | sed 's/^/  /')
+    echo "  done — treehouse.toml created"
+  fi
+
+  echo ""
+done
+
+echo "=== complete ==="
+echo ""
+echo "sgt-dispatch will now use treehouse for initialized repos."
+echo "Tip: commit treehouse.toml in each repo so the pool config is tracked."

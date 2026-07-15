@@ -1,0 +1,97 @@
+# Example Sergeant project configuration.
+# Lives at: ~/.config/sergeant/<name>.yaml
+# The filename (without .yaml) is the project identifier.
+
+# Required. Must match the filename.
+name: myapp
+
+# Optional. Human-readable description.
+description: >
+  My SaaS application — Go API backend, SvelteKit frontend,
+  and Kubernetes infra managed with Helm/ArgoCD.
+
+# Required. Ordered list of repositories in this project.
+repos:
+  - name: myapp-api
+    # Absolute path on disk. ~ is expanded to $HOME.
+    path: ~/Dev/myapp/myapp-api
+    # Optional: git remote, used by sgt-sync to clone if path doesn't exist.
+    url: git@github.com:myorg/myapp-api.git
+    # Optional: logical group this repo belongs to (must match a groups key).
+    group: backend
+    # Optional: human description of this repo's role.
+    role: Go REST API — handles auth, billing, and core business logic.
+    # Optional: agent instructions specific to this repo.
+    # These override group-level instructions.
+    agent_instructions: |
+      Go 1.22 service. Module path: github.com/myorg/myapp-api.
+      Run `go test ./...` before committing.
+      Run `golangci-lint run` for linting.
+      Never modify generated protobuf files in pkg/proto/.
+
+  - name: myapp-app
+    path: ~/Dev/myapp/myapp-app
+    url: git@github.com:myorg/myapp-app.git
+    group: frontend
+    role: SvelteKit frontend — user dashboard and marketing pages.
+    agent_instructions: |
+      SvelteKit with TypeScript. Package manager: pnpm.
+      Run `pnpm test` and `pnpm lint` before committing.
+      Design tokens live in src/lib/theme.ts — do not hardcode colors.
+
+  - name: myapp-infra
+    path: ~/Dev/myapp/myapp-infra
+    url: git@github.com:myorg/myapp-infra.git
+    group: infra
+    role: Helm charts and ArgoCD application manifests for EKS.
+    agent_instructions: |
+      Helm 3 charts. Validate with `helm lint charts/`.
+      ArgoCD apps in argocd/. Never edit generated manifests directly.
+      Bump image tags in values/production.yaml for deploys.
+
+  - name: myapp-shared
+    path: ~/Dev/myapp/myapp-shared
+    url: git@github.com:myorg/myapp-shared.git
+    # No group — standalone repo with no inherited instructions.
+    role: Shared TypeScript types and validation schemas.
+
+# Optional. Logical groupings with shared agent instructions.
+groups:
+  backend:
+    description: Go backend services.
+    agent_instructions: |
+      All Go services. Follow the patterns in pkg/middleware/ for new middleware.
+      Shared error types are in pkg/errors/. Do not define new error types inline.
+
+  frontend:
+    description: SvelteKit frontend applications.
+    agent_instructions: |
+      All SvelteKit with TypeScript. Use the component library in src/lib/components/.
+      Avoid importing from other groups directly; use the API instead.
+
+  infra:
+    description: Kubernetes infrastructure and deployment tooling.
+    agent_instructions: |
+      Infrastructure changes require a review comment explaining the blast radius.
+      Never delete namespaces or PVCs without explicit confirmation.
+
+# Optional. Cross-repo knowledge graph configuration.
+graphify:
+  # Required if graphify block is present. Output directory for the graph.
+  output: ~/Dev/myapp/graphify-out/
+  # Optional. Only graph repos in these groups. Default: all repos.
+  include_groups: [backend, frontend]
+  # Optional. Exclude paths matching these globs from graphify traversal.
+  exclude_patterns:
+    - "**/node_modules/**"
+    - "**/vendor/**"
+    - "**/.git/**"
+    - "**/dist/**"
+
+# Optional. Defaults applied to every repo before group + repo instructions.
+defaults:
+  agent_instructions: |
+    This is the myapp project. All changes that touch a public interface
+    (API contract, shared types, infrastructure) must be noted in the PR
+    description so downstream repos can be updated.
+    All branches must be named: <type>/<short-description> (e.g., feat/add-oauth).

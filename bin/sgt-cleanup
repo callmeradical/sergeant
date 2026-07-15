@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# sgt-cleanup — Remove worktrees and fleet state for a completed task
+#
+# Handles both treehouse-leased worktrees (treehouse return) and
+# plain git worktrees (git worktree remove).
+#
+# Usage:
+#   sgt-cleanup <task-id>           # remove all worktrees + fleet state
+#   sgt-cleanup <task-id> <repo>    # remove one repo's worktree only
+
+set -euo pipefail
+
+FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
+
+_die() { echo "ERROR: $*" >&2; exit 1; }
+
+[[ $# -ge 1 ]] || _die "Usage: sgt-cleanup <task-id> [repo]"
+TASK_ID="$1"
+FILTER_REPO="${2:-}"
+TASK_DIR="$FLEET_DIR/$TASK_ID"
+[[ -d "$TASK_DIR" ]] || _die "Task not found: $TASK_ID"
+
+echo "=== sgt-cleanup: $TASK_ID ==="
+echo ""
+
+for repo_dir in "$TASK_DIR"/*/; do
+  [[ -d "$repo_dir" ]] || continue
+  repo_name="$(basename "$repo_dir")"
+
+  if [[ -n "$FILTER_REPO" && "$repo_name" != "$FILTER_REPO" ]]; then
+    continue
+  fi
+
+  worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
+  status="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
+  wt_type="$(cat "$repo_dir/wt_type" 2>/dev/null || echo "git")"
+
+  echo "--- $repo_name (status: $status, type: $wt_type) ---"
+
+  if [[ -z "$worktree" ]]; then
+    echo "  no worktree recorded — skipping"
+    echo ""
+    continue
+  fi
+
+  if [[ ! -d "$worktree" ]]; then
+    echo "  worktree not found or already removed: $worktree"
+    echo ""
+    continue
+  fi
+
+  if [[ "$wt_type" == "treehouse" ]]; then
+    # Find the main repo path to run treehouse return from
+    # Worktree is inside ~/.treehouse/<slug>/<n>/<repo-name>
+    # We need to run treehouse return from the main repo that owns the pool
+    #
+    # Strategy: find the main repo by looking at the .git file inside the worktree
+    git_file="$worktree/.git"
+    if [[ -f "$git_file" ]]; then
+      # .git file contains: gitdir: /path/to/main/.git/worktrees/<name>
+      git_dir_line="$(cat "$git_file")"
+      git_dir="${git_dir_line#gitdir: }"
+      # main repo .git is two levels up from .git/worktrees/<name>
+      main_git="$(dirname "$(dirname "$git_dir")")"
+      main_repo="$(dirname "$main_git")"
+      echo "  returning treehouse lease: $worktree"
+      (cd "$main_repo" && treehouse return "$worktree" --force 2>&1 | sed 's/^/  /') || {
+        echo "  WARNING: treehouse return failed — removing directory directly"
+        rm -rf "$worktree"
+      }
+    else
+      echo "  WARNING: no .git file in worktree — removing directly"
+      rm -rf "$worktree"
+    fi
+  else
+    # Plain git worktree — find main repo as sibling (name before -sgt- suffix)
+    repo_base_name="$(basename "$worktree" | sed "s/-sgt-${TASK_ID}$//")"
+    repo_base="$(dirname "$worktree")/$repo_base_name"
+
+    if [[ -d "$repo_base/.git" ]]; then
+      echo "  removing git worktree: $worktree"
+      git -C "$repo_base" worktree remove "$worktree" --force 2>&1 | sed 's/^/  /' || {
+        echo "  WARNING: git worktree remove failed — removing directory directly"
+        rm -rf "$worktree"
+      }
+    else
+      echo "  WARNING: main repo not found at $repo_base — removing directory directly"
+      rm -rf "$worktree"
+    fi
+  fi
+
+  echo ""
+done
+
+# Only remove fleet state if cleaning all repos (no FILTER_REPO)
+if [[ -z "$FILTER_REPO" ]]; then
+  echo "Removing fleet state: $TASK_DIR"
+  rm -rf "$TASK_DIR"
+fi
+
+echo "Done."

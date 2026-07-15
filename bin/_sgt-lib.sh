@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# _sgt-lib.sh — Shared helpers sourced by all sgt-* scripts.
+# Source this file; do not execute it directly.
+#
+# Provides: _die, _info, _require_*, _resolve_path, and the SGT_* env vars.
+
+[[ "${SGT_LIB_LOADED:-}" == "1" ]] && return 0
+SGT_LIB_LOADED=1
+
+# ── Configurable env vars ─────────────────────────────────────────────────────
+
+SERGEANT_CONFIG="${SERGEANT_CONFIG:-$HOME/.config/sergeant}"
+FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
+AGENT_CMD="${SERGEANT_AGENT:-opencode}"
+
+# ── Global config (dev_root) ──────────────────────────────────────────────────
+
+DEV_ROOT="$HOME/Dev"  # sensible default
+
+_sgt_load_global_config() {
+  local cfg="$SERGEANT_CONFIG/config.yaml"
+  if [[ -f "$cfg" ]] && command -v yq &>/dev/null; then
+    local dr
+    dr="$(yq '.dev_root // ""' "$cfg" 2>/dev/null | tr -d '\n')"
+    if [[ -n "$dr" && "$dr" != "null" ]]; then
+      DEV_ROOT="${dr/#\~/$HOME}"
+    fi
+  fi
+}
+
+_sgt_load_global_config
+
+# ── Path resolution ───────────────────────────────────────────────────────────
+# Absolute paths (/...) and home-relative paths (~...) pass through unchanged.
+# Everything else is resolved relative to DEV_ROOT.
+#
+# Examples (DEV_ROOT=~/Dev):
+#   ~/Dev/smith/ascend-arch-smith   → /Users/you/Dev/smith/ascend-arch-smith
+#   smith/ascend-arch-smith         → /Users/you/Dev/smith/ascend-arch-smith
+#   /opt/repos/myapp                → /opt/repos/myapp
+
+_resolve_path() {
+  local p="$1"
+  if [[ "$p" == /* ]]; then
+    echo "$p"
+  elif [[ "$p" == ~* ]]; then
+    echo "${p/#\~/$HOME}"
+  else
+    echo "$DEV_ROOT/$p"
+  fi
+}
+
+# ── Common helpers ────────────────────────────────────────────────────────────
+
+_die()  { echo "ERROR: $*" >&2; exit 1; }
+_info() { echo "  $*"; }
+
+_require_yq() {
+  command -v yq &>/dev/null || _die "yq is required: brew install yq"
+}
+_require_tmux() {
+  command -v tmux &>/dev/null || _die "tmux is required: brew install tmux"
+}
+_require_git() {
+  command -v git &>/dev/null || _die "git is required"
+}
+_require_treehouse() {
+  command -v treehouse &>/dev/null || _die "treehouse is required: install from https://github.com/kunchenguid/treehouse"
+}

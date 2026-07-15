@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# sgt-graphify — Run graphify across all repos in a project
+#
+# Reads graphify.output from the project YAML and runs graphify in each
+# configured repo (filtered by include_groups if set).
+#
+# Usage: sgt-graphify <project>
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+
+_require_graphify() {
+  command -v graphify &>/dev/null || _die "graphify is required. See graphify documentation to install."
+}
+
+[[ $# -ge 1 ]] || _die "Usage: sgt-graphify <project>"
+PROJECT="$1"
+CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
+[[ -f "$CONFIG_FILE" ]] || _die "Project not found: $PROJECT (looked for $CONFIG_FILE)"
+_require_yq
+_require_graphify
+
+graphify_output="$(yq '.graphify.output // ""' "$CONFIG_FILE")"
+if [[ -z "$graphify_output" || "$graphify_output" == "null" ]]; then
+  _die "No graphify.output configured in $CONFIG_FILE"
+fi
+graphify_output="$(_resolve_path "$graphify_output")"
+
+# Build include_groups list for filtering (bash 3 compatible)
+INCLUDE_GROUPS=""
+if yq '.graphify.include_groups // []' "$CONFIG_FILE" 2>/dev/null | grep -q '[^][]'; then
+  INCLUDE_GROUPS="$(yq '.graphify.include_groups[]' "$CONFIG_FILE" 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
+fi
+
+_in_include_groups() {
+  local group="$1"
+  [[ -z "$INCLUDE_GROUPS" ]] && return 0  # no filter → include all
+  [[ -z "$group" || "$group" == "null" ]] && return 1
+  echo ",$INCLUDE_GROUPS," | grep -q ",${group},"
+}
+
+echo "=== sgt-graphify: $PROJECT ==="
+echo "output: $graphify_output"
+echo ""
+
+mkdir -p "$graphify_output"
+
+repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
+
+for ((i=0; i<repo_count; i++)); do
+  repo_name="$(yq ".repos[$i].name" "$CONFIG_FILE")"
+  raw_path="$(yq ".repos[$i].path" "$CONFIG_FILE")"
+  path="$(_resolve_path "$raw_path")"
+  group="$(yq ".repos[$i].group // \"\"" "$CONFIG_FILE")"
+
+  if ! _in_include_groups "$group"; then
+    echo "--- $repo_name (skipped — not in include_groups) ---"
+    continue
+  fi
+
+  if [[ ! -d "$path" ]]; then
+    echo "--- $repo_name (skipped — not cloned at $path) ---"
+    continue
+  fi
+
+  echo "--- $repo_name ---"
+  echo "  path: $path"
+  graphify update "$path" --output "$graphify_output" 2>&1 | sed 's/^/  /' || {
+    echo "  WARNING: graphify failed for $repo_name"
+  }
+  echo ""
+done
+
+echo "=== done ==="
+echo ""
+
+if [[ -f "$graphify_output/GRAPH_REPORT.md" ]]; then
+  echo "Graph report available at: $graphify_output/GRAPH_REPORT.md"
+fi
