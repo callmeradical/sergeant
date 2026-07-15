@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# sgt-td-list — Show td tasks across all repos in a project
+#
+# Queries each repo's td database and prints a unified view.
+# Requires td to be installed and initialized in each repo.
+#
+# Usage:
+#   sgt-td-list <project>                    # open tasks across all repos
+#   sgt-td-list <project> --all              # all statuses
+#   sgt-td-list <project> --status open      # specific status
+#   sgt-td-list <project> --priority P1      # filter by priority
+#   sgt-td-list <project> --repos smith,smith-app  # specific repos only
+#   sgt-td-list <project> --json             # machine-readable output
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+
+_require_td() {
+  command -v td &>/dev/null || _die "td is required. See your td installation."
+}
+
+[[ $# -ge 1 ]] || _die "Usage: sgt-td-list <project> [options]"
+PROJECT="$1"; shift
+
+CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
+[[ -f "$CONFIG_FILE" ]] || _die "Project not found: $PROJECT"
+_require_yq
+_require_td
+
+# ── Parse options ─────────────────────────────────────────────────────────────
+
+STATUS_FILTER="open"
+PRIORITY_FILTER=""
+REPOS_ARG=""
+JSON_OUT=false
+TD_ALL=false
+EXTRA_FLAGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --all)           TD_ALL=true;            shift   ;;
+    --status)        STATUS_FILTER="$2";     shift 2 ;;
+    --priority)      PRIORITY_FILTER="$2";   shift 2 ;;
+    --repos)         REPOS_ARG="$2";         shift 2 ;;
+    --json)          JSON_OUT=true;          shift   ;;
+    *)               EXTRA_FLAGS+=("$1");    shift   ;;
+  esac
+done
+
+# Build td filter expression
+TD_FILTER=""
+if ! $TD_ALL && [[ -n "$STATUS_FILTER" ]]; then
+  TD_FILTER="status=$STATUS_FILTER"
+fi
+if [[ -n "$PRIORITY_FILTER" ]]; then
+  if [[ -n "$TD_FILTER" ]]; then
+    TD_FILTER="$TD_FILTER AND priority=$PRIORITY_FILTER"
+  else
+    TD_FILTER="priority=$PRIORITY_FILTER"
+  fi
+fi
+
+# ── Resolve target repos ───────────────────────────────────────────────────────
+
+repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
+TARGET_REPOS=()
+
+if [[ -n "$REPOS_ARG" ]]; then
+  IFS=',' read -ra TARGET_REPOS <<< "$REPOS_ARG"
+else
+  for ((i=0; i<repo_count; i++)); do
+    TARGET_REPOS+=("$(yq ".repos[$i].name" "$CONFIG_FILE")")
+  done
+fi
+
+# ── Collect tasks per repo ────────────────────────────────────────────────────
+
+all_results="[]"
+
+if $JSON_OUT; then
+  # JSON mode: emit array of {repo, task} objects
+  combined="[]"
+  for rname in "${TARGET_REPOS[@]}"; do
+    raw_path="$(yq ".repos[] | select(.name == \"$rname\") | .path" "$CONFIG_FILE")"
+    repo_path="$(_resolve_path "$raw_path")"
+
+    [[ -d "$repo_path/.git" ]] || continue
+
+    tasks_json="$(td list --json --work-dir "$repo_path" \
+      ${TD_FILTER:+--filter "$TD_FILTER"} \
+      "${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}" 2>/dev/null || echo "[]")"
+
+    [[ "$tasks_json" == "[]" || -z "$tasks_json" ]] && continue
+
+    # Tag each task with its repo
+    tagged="$(echo "$tasks_json" | python3 -c "
+import sys, json
+tasks = json.load(sys.stdin)
+repo = '$rname'
+for t in tasks:
+    t['_repo'] = repo
+print(json.dumps(tasks))
+" 2>/dev/null || echo "[]")"
+
+    combined="$(echo "$combined $tagged" | python3 -c "
+import sys, json
+parts = sys.stdin.read().split()
+merged = []
+for p in parts:
+    try: merged.extend(json.loads(p))
+    except: pass
+merged.sort(key=lambda t: (t.get('priority','P9'), t.get('_repo','')))
+print(json.dumps(merged, indent=2))
+" 2>/dev/null || echo "[]")"
+  done
+  echo "$combined"
+  exit 0
+fi
+
+# ── Human-readable output ─────────────────────────────────────────────────────
+
+echo "=== $PROJECT tasks$([ -n "$TD_FILTER" ] && echo " [$TD_FILTER]" || true) ==="
+echo ""
+
+total=0
+
+for rname in "${TARGET_REPOS[@]}"; do
+  raw_path="$(yq ".repos[] | select(.name == \"$rname\") | .path" "$CONFIG_FILE" 2>/dev/null || echo "")"
+  [[ -z "$raw_path" || "$raw_path" == "null" ]] && continue
+  repo_path="$(_resolve_path "$raw_path")"
+
+  [[ -d "$repo_path/.git" ]] || continue
+
+  # Check if td is initialized in this repo
+  tasks_json="$(td list --json --work-dir "$repo_path" \
+    ${TD_FILTER:+--filter "$TD_FILTER"} \
+    "${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}" 2>/dev/null || echo "[]")"
+
+  [[ "$tasks_json" == "[]" || -z "$tasks_json" ]] && continue
+
+  count="$(echo "$tasks_json" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)"
+  [[ "$count" -eq 0 ]] && continue
+
+  total=$((total + count))
+  echo "── $rname ($count)"
+
+  echo "$tasks_json" | python3 -c "
+import sys, json
+tasks = json.load(sys.stdin)
+# Sort by priority then status
+order = {'P0':0,'P1':1,'P2':2,'P3':3,'P4':4}
+tasks.sort(key=lambda t: (order.get(t.get('priority','P4'), 4), t.get('title','')))
+for t in tasks:
+    tid    = t.get('id','?')
+    title  = t.get('title','')[:65]
+    prio   = t.get('priority','')
+    status = t.get('status','')
+    ttype  = t.get('type','')
+    print(f'   {tid}  [{prio}]  {status:<12}  {title}')
+" 2>/dev/null
+
+  echo ""
+done
+
+if [[ $total -eq 0 ]]; then
+  echo "No tasks found."
+else
+  echo "$total task(s) total"
+fi

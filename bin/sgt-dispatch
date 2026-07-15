@@ -6,9 +6,11 @@
 #
 # Usage:
 #   sgt-dispatch <project> "<brief>" [options]
+#   sgt-dispatch <project> --td <task-id> [options]   # brief from td task
 #
 # Options:
-#   --repos repo1,repo2,...   Repos to dispatch (required)
+#   --repos repo1,repo2,...   Repos to dispatch (required unless --td auto-detects)
+#   --td <task-id>            Pull brief and context from a td task
 #   --branch <name>           Branch name for all worktrees (default: derived from brief)
 #   --remote                  Dispatch to cleanthes via babydriver (default: local tmux)
 #   --deps "repo1>repo2,..."  Dependency ordering: repo1 must finish before repo2 starts
@@ -16,8 +18,8 @@
 #
 # Examples:
 #   sgt-dispatch smith "Add OAuth via Google" --repos smith,smith-app,smith-infra
-#   sgt-dispatch smith "Fix the login bug" --repos smith-app --branch fix/login-bug
-#   sgt-dispatch smith "Upgrade etcd" --repos smith,smith-infra --remote
+#   sgt-dispatch smith --td td-a3cf60 --repos smith
+#   sgt-dispatch smith --td td-a3cf60   # auto-detects repo from td db
 
 set -euo pipefail
 
@@ -27,31 +29,97 @@ source "$SCRIPT_DIR/_sgt-lib.sh"
 
 # ── Parse args ───────────────────────────────────────────────────────────────
 
-[[ $# -ge 2 ]] || _die "Usage: sgt-dispatch <project> \"<brief>\" [options]"
+[[ $# -ge 1 ]] || _die "Usage: sgt-dispatch <project> \"<brief>\" [options]"
 PROJECT="$1"; shift
-BRIEF="$1";   shift
 
 CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
 [[ -f "$CONFIG_FILE" ]] || _die "Project not found: $PROJECT (looked for $CONFIG_FILE)"
 
+BRIEF=""
 REPOS_ARG=""
 BRANCH_ARG=""
 DEPS_ARG=""
+TD_TASK_ID=""
 REMOTE=false
 DRY_RUN=false
 
+# Brief is optional positional arg (not present when --td is used)
+if [[ $# -gt 0 && "${1:0:2}" != "--" ]]; then
+  BRIEF="$1"; shift
+fi
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --repos)   REPOS_ARG="$2";  shift 2 ;;
-    --branch)  BRANCH_ARG="$2"; shift 2 ;;
-    --deps)    DEPS_ARG="$2";   shift 2 ;;
-    --remote)  REMOTE=true;     shift   ;;
-    --dry-run) DRY_RUN=true;    shift   ;;
+    --repos)   REPOS_ARG="$2";   shift 2 ;;
+    --td)      TD_TASK_ID="$2";  shift 2 ;;
+    --branch)  BRANCH_ARG="$2";  shift 2 ;;
+    --deps)    DEPS_ARG="$2";    shift 2 ;;
+    --remote)  REMOTE=true;      shift   ;;
+    --dry-run) DRY_RUN=true;     shift   ;;
     *) _die "Unknown option: $1" ;;
   esac
 done
 
-[[ -n "$REPOS_ARG" ]] || _die "Must specify --repos. Run 'bin/sgt-context $PROJECT' to see available repos."
+# ── Resolve td task (if --td provided) ───────────────────────────────────────
+
+TD_CONTEXT=""
+TD_REPO=""
+
+if [[ -n "$TD_TASK_ID" ]]; then
+  command -v td &>/dev/null || _die "--td requires td to be installed"
+  _require_yq
+
+  # Find which repo owns this task by trying each repo's td db
+  repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
+  for ((i=0; i<repo_count; i++)); do
+    rname="$(yq ".repos[$i].name" "$CONFIG_FILE")"
+    raw_path="$(yq ".repos[$i].path" "$CONFIG_FILE")"
+    repo_path="$(_resolve_path "$raw_path")"
+    [[ -d "$repo_path/.git" ]] || continue
+
+    task_json="$(td list --json --work-dir "$repo_path" \
+      --filter "id=$TD_TASK_ID" 2>/dev/null || echo "[]")"
+    count="$(echo "$task_json" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)"
+
+    if [[ "$count" -gt 0 ]]; then
+      TD_REPO="$rname"
+      TD_REPO_PATH="$repo_path"
+
+      # Pull title and description for brief
+      td_title="$(echo "$task_json" | python3 -c "
+import sys,json; t=json.load(sys.stdin)[0]
+print(t.get('title',''))
+" 2>/dev/null)"
+
+      td_desc="$(echo "$task_json" | python3 -c "
+import sys,json; t=json.load(sys.stdin)[0]
+print(t.get('description',''))
+" 2>/dev/null)"
+
+      # Get full context from td
+      TD_CONTEXT="$(td context "$TD_TASK_ID" --work-dir "$repo_path" 2>/dev/null || echo "")"
+
+      # Set brief from td title if not provided
+      [[ -z "$BRIEF" ]] && BRIEF="$td_title"
+
+      # Auto-set repos if not specified
+      [[ -z "$REPOS_ARG" ]] && REPOS_ARG="$rname"
+
+      break
+    fi
+  done
+
+  if [[ -z "$TD_REPO" ]]; then
+    _die "td task $TD_TASK_ID not found in any repo of project $PROJECT"
+  fi
+
+  echo "td task: $TD_TASK_ID in $TD_REPO"
+  echo "title:   $BRIEF"
+  echo ""
+fi
+
+[[ -n "$BRIEF" ]]     || _die "Provide a brief or use --td <task-id>"
+[[ -n "$REPOS_ARG" ]] || _die "Must specify --repos. Run 'sgt-context $PROJECT' to see available repos."
 
 _require_yq
 _require_git
@@ -132,6 +200,7 @@ else
   mkdir -p "$TASK_DIR"
   printf "Project: %s\nBrief:   %s\nBranch:  %s\nRepos:   %s\n" \
     "$PROJECT" "$BRIEF" "$BRANCH" "${TARGET_REPOS[*]}" > "$TASK_DIR/brief.md"
+  [[ -n "$TD_TASK_ID" ]] && echo "$TD_TASK_ID" > "$TASK_DIR/td_task"
   date -u +%Y-%m-%dT%H:%M:%SZ > "$TASK_DIR/started"
 fi
 
@@ -268,6 +337,35 @@ for rname in "${TARGET_REPOS[@]}"; do
     role_line="Role: $repo_role"
   fi
 
+  # Build td section for brief (only when --td was used and this is the owning repo)
+  td_section=""
+  if [[ -n "$TD_TASK_ID" && "$rname" == "$TD_REPO" ]]; then
+    td_section="## Task management
+
+This work is tracked in td as: \`$TD_TASK_ID\`
+
+At session start:
+\`\`\`
+td start $TD_TASK_ID --work-dir .
+\`\`\`
+
+Log meaningful progress:
+\`\`\`
+td log \"message\" --work-dir .
+\`\`\`
+
+Before writing .sergeant-status=done, hand off:
+\`\`\`
+td handoff $TD_TASK_ID --work-dir .
+td review $TD_TASK_ID --work-dir .
+\`\`\`
+
+Full task context:
+$TD_CONTEXT"
+    # Store td task ID in fleet state
+    echo "$TD_TASK_ID" > "$repo_task_dir/td_task"
+  fi
+
   cat > "$worktree_path/.sergeant-brief.md" << BRIEF_EOF
 # Sergeant Brief
 
@@ -277,6 +375,7 @@ for rname in "${TARGET_REPOS[@]}"; do
 **Branch:** $BRANCH
 **Worktree:** $worktree_path
 **Fleet state:** $repo_task_dir/
+$([ -n "$TD_TASK_ID" ] && echo "**td task:** $TD_TASK_ID" || true)
 
 ---
 
@@ -288,6 +387,8 @@ This agent is responsible for the **$rname** repo only.
 $role_line
 
 $deps_section
+$td_section
+
 ## Active instructions
 
 $merged
@@ -307,7 +408,7 @@ When your work is complete:
    - Success: \`echo "done" > .sergeant-status\`
    - Failure: \`echo "failed: <reason>" > .sergeant-status\`
 
-The primary sergeant session is watching via \`bin/sgt-watch $TASK_ID\`.
+The primary sergeant session is watching via \`sgt-watch $TASK_ID\`.
 BRIEF_EOF
 
   echo "in_progress" > "$repo_task_dir/status"

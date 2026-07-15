@@ -63,10 +63,12 @@ These scripts in `bin/` are your hands. Use them before doing anything manually.
 | `bin/sgt-context <project>` | Emit full agent context block for a project |
 | `bin/sgt-graphify <project>` | Run graphify across all repos, write to configured output |
 | `bin/sgt-dispatch <project> "<brief>" [options]` | Create worktrees + spawn agent per repo |
+| `bin/sgt-dispatch <project> --td <id>` | Dispatch from a td task (auto-detects repo) |
 | `bin/sgt-watch <task-id>` | Monitor fleet until all workers done |
 | `bin/sgt-watch --list` | List all active tasks |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees + fleet state when done |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
+| `bin/sgt-td-list <project>` | Show td tasks across all repos in a project |
 
 Always prefer these scripts over doing the equivalent manually with multiple shell calls. They understand the YAML schema.
 
@@ -109,14 +111,54 @@ defaults:                          # optional: defaults applied to all repos
 When the user brings you a task:
 
 1. **Load context** — `sgt-context <project>`. Understand the repos, groups, and instructions.
-2. **Decompose** — identify which repos are affected, what each needs to do, and the dependency order.
-3. **Confirm the plan** — state the breakdown to the user before dispatching. Get confirmation.
-4. **Dispatch** — `sgt-dispatch <project> "<brief>" --repos <list> [--deps <order>]`
-5. **Monitor** — `sgt-watch <task-id>`. Report status as workers complete.
-6. **Reconcile** — surface PR links, merge order, and any cross-repo implications.
-7. **Clean up** — `sgt-cleanup <task-id>` once all PRs are merged.
+2. **Check the queue** — `sgt-td-list <project>` to surface open td tasks. If the user's request maps to one, use `--td <id>` when dispatching.
+3. **Decompose** — identify which repos are affected, what each needs to do, and the dependency order.
+4. **Confirm the plan** — state the breakdown to the user before dispatching. Get confirmation.
+5. **Dispatch** — `sgt-dispatch <project> "<brief>" --repos <list>` or `sgt-dispatch <project> --td <id>`
+6. **Monitor** — `sgt-watch <task-id>`. Report status as workers complete.
+7. **Reconcile** — surface PR links, merge order, and any cross-repo implications.
+8. **Clean up** — `sgt-cleanup <task-id>` once all PRs are merged.
 
 Load the **dispatch** skill (`skills/dispatch/SKILL.md`) for the full protocol.
+
+---
+
+## td task management integration
+
+Sergeant integrates with `td` — the task management CLI used inside project repos.
+
+### Surfacing the queue
+
+```bash
+sgt-td-list smith                  # open tasks across all repos
+sgt-td-list smith --priority P1    # filter by priority
+sgt-td-list smith --all            # all statuses
+sgt-td-list smith --json           # machine-readable
+```
+
+### Dispatching from a td task
+
+```bash
+# Brief, repo, and branch are all derived from the td task automatically
+sgt-dispatch smith --td td-a3cf60
+
+# Override the repo if needed
+sgt-dispatch smith --td td-a3cf60 --repos smith,smith-app
+```
+
+When `--td` is used:
+- The task title becomes the brief
+- The owning repo is auto-detected by scanning each repo's td database
+- The branch name is derived from the task title
+- The `.sergeant-brief.md` written into the worktree includes full td lifecycle instructions: `td start`, `td log`, `td handoff`, `td review`
+
+### What workers do with td
+
+Each dispatched worker receives td instructions in their brief:
+1. `td start <id>` — claim the task at session start
+2. `td log "..."` — log meaningful progress
+3. `td handoff <id>` — capture state before finishing
+4. `td review <id>` — submit for review once PR is open
 
 ---
 

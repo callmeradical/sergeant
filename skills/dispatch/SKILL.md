@@ -19,6 +19,17 @@ Prerequisites:
 
 ## Protocol
 
+### Step 0 — Check the td queue
+
+Before planning from scratch, see if the task already exists in td:
+
+```bash
+sgt-td-list <project>
+sgt-td-list <project> --priority P1
+```
+
+If the user's request maps to an open td task, use `--td <id>` when dispatching. The brief, branch name, and full task context are pulled from td automatically — and the worker's brief will include `td start`, `td log`, `td handoff`, and `td review` instructions so the task lifecycle is tracked end-to-end.
+
 ### Step 1 — Confirm the plan
 
 Before dispatching, state clearly:
@@ -41,8 +52,20 @@ Ask for confirmation before dispatching.
 
 ### Step 2 — Dispatch
 
+**From a td task (preferred when one exists):**
+
 ```bash
-bin/sgt-dispatch <project> "<brief>" \
+# Auto-detects repo, derives brief and branch from the task
+sgt-dispatch <project> --td <task-id>
+
+# Override repo if the task touches more than the owning repo
+sgt-dispatch <project> --td <task-id> --repos smith,smith-app
+```
+
+**From a free-form brief:**
+
+```bash
+sgt-dispatch <project> "<brief>" \
   --repos <repo1>,<repo2>,<repo3> \
   --branch <branch-name> \
   --deps "<prereq>><dependent>,..." \
