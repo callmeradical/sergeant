@@ -1,0 +1,123 @@
+[tools]
+# No runtime tools required — sergeant is pure bash.
+
+# ── Tasks ─────────────────────────────────────────────────────────────────────
+
+[tasks.install]
+description = "Symlink sgt-* scripts into ~/.local/bin so they're on your PATH"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "$MISE_ORIGINAL_CWD")" && pwd)/$(basename "$MISE_ORIGINAL_CWD")"
+# Resolve to actual repo root regardless of where mise is invoked from
+REPO_DIR="$(git -C "${MISE_PROJECT_ROOT:-.}" rev-parse --show-toplevel 2>/dev/null || echo "${MISE_PROJECT_ROOT:-.}")"
+BIN_DIR="$REPO_DIR/bin"
+TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
+
+mkdir -p "$TARGET_DIR"
+
+linked=0
+for f in "$BIN_DIR"/sgt-* "$BIN_DIR"/_sgt-lib.sh; do
+  [[ -f "$f" ]] || continue
+  name="$(basename "$f")"
+  ln -sf "$f" "$TARGET_DIR/$name"
+  echo "  linked: $TARGET_DIR/$name -> $f"
+  linked=$((linked+1))
+done
+
+echo ""
+echo "Installed $linked scripts to $TARGET_DIR"
+
+# Check PATH
+if ! echo "$PATH" | tr ':' '\\n' | grep -qxF "$TARGET_DIR"; then
+  echo ""
+  echo "WARNING: $TARGET_DIR is not on your PATH."
+  echo "Add this to your shell config (~/.zshrc or ~/.bashrc):"
+  echo "  export PATH=\"$TARGET_DIR:\\$PATH\""
+fi
+"""
+
+[tasks.uninstall]
+description = "Remove sgt-* symlinks from ~/.local/bin"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
+removed=0
+
+for f in "$TARGET_DIR"/sgt-* "$TARGET_DIR"/_sgt-lib.sh; do
+  [[ -L "$f" ]] || continue
+  # Only remove if it points back into the sergeant repo
+  target="$(readlink "$f")"
+  if [[ "$target" == *"/sergeant/bin/"* ]]; then
+    rm "$f"
+    echo "  removed: $f"
+    removed=$((removed+1))
+  fi
+done
+
+echo ""
+echo "Removed $removed symlinks from $TARGET_DIR"
+"""
+
+[tasks.check]
+description = "Verify required and optional dependencies are installed"
+run = """
+#!/usr/bin/env bash
+
+ok=true
+
+_check() {
+  local name="$1" cmd="$2" required="$3" hint="$4"
+  if command -v "$cmd" &>/dev/null; then
+    version="$($cmd --version 2>&1 | head -1 | tr -d '\\n')"
+    printf "  %-14s  ✓  %s\\n" "$name" "$version"
+  else
+    if [[ "$required" == "required" ]]; then
+      printf "  %-14s  ✗  MISSING — %s\\n" "$name" "$hint"
+      ok=false
+    else
+      printf "  %-14s  -  not installed (optional) — %s\\n" "$name" "$hint"
+    fi
+  fi
+}
+
+echo "=== sergeant dependency check ==="
+echo ""
+echo "Required:"
+_check "yq"         yq         required  "brew install yq"
+_check "git"        git        required  "install Xcode command line tools"
+_check "gh"         gh         required  "brew install gh"
+_check "tmux"       tmux       required  "brew install tmux"
+
+echo ""
+echo "Optional:"
+_check "treehouse"  treehouse  optional  "https://github.com/kunchenguid/treehouse"
+_check "graphify"   graphify   optional  "https://github.com/kunchenguid/graphify"
+_check "babydriver" babydriver optional  "remote dispatch to cleanthes"
+_check "mise"       mise       optional  "brew install mise"
+
+echo ""
+if $ok; then
+  echo "All required dependencies present."
+else
+  echo "Install missing required dependencies before using sergeant."
+  exit 1
+fi
+"""
+
+[tasks.update]
+description = "Pull latest changes from origin and reinstall symlinks"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR="$(git -C "${MISE_PROJECT_ROOT:-.}" rev-parse --show-toplevel)"
+echo "Pulling latest sergeant ..."
+git -C "$REPO_DIR" pull --ff-only
+echo ""
+echo "Reinstalling ..."
+mise run install
+"""
