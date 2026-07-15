@@ -69,6 +69,7 @@ These scripts in `bin/` are your hands. Use them before doing anything manually.
 | `bin/sgt-cleanup <task-id>` | Remove worktrees + fleet state when done |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
 | `bin/sgt-td-list <project>` | Show td tasks across all repos in a project |
+| `bin/sgt-td-create <project> "<title>" --repos <list>` | Create td tasks in repos (called automatically by sgt-dispatch) |
 
 Always prefer these scripts over doing the equivalent manually with multiple shell calls. They understand the YAML schema.
 
@@ -151,6 +152,21 @@ When `--td` is used:
 - The owning repo is auto-detected by scanning each repo's td database
 - The branch name is derived from the task title
 - The `.sergeant-brief.md` written into the worktree includes full td lifecycle instructions: `td start`, `td log`, `td handoff`, `td review`
+
+### Dispatching new work (no existing td task)
+
+When the user brings you new work that has no td task yet, `sgt-dispatch` creates the td tasks automatically before spawning workers:
+
+```bash
+# sergeant creates td tasks in smith and smith-app, then dispatches
+sgt-dispatch smith "Add OAuth via Google" --repos smith,smith-app
+```
+
+To create tasks manually without dispatching:
+
+```bash
+sgt-td-create smith "Add OAuth via Google" --repos smith,smith-app --priority P1
+```
 
 ### What workers do with td
 

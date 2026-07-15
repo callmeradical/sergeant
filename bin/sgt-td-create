@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# sgt-td-create — Create td tasks in project repos for a cross-repo brief
+#
+# Creates one td task per specified repo, with a shared title and per-repo
+# description. Returns the created task IDs so sgt-dispatch can use them.
+#
+# Usage:
+#   sgt-td-create <project> "<title>" --repos repo1,repo2 [options]
+#
+# Options:
+#   --repos repo1,repo2,...   Repos to create tasks in (required)
+#   --description "<text>"    Shared description for all tasks
+#   --type <type>             Task type: bug|feature|task|chore (default: task)
+#   --priority <P0-P4>        Priority (default: P1)
+#   --parent <id>             Parent epic ID (applies to all tasks)
+#   --json                    Output created task IDs as JSON
+#
+# Output (default): one line per repo: "<repo>  <task-id>  <title>"
+# Output (--json):  array of {repo, task_id, title, work_dir}
+#
+# Example:
+#   ids=$(sgt-td-create smith "feat: add OAuth" --repos smith,smith-app --json)
+#   # then pass each id to sgt-dispatch --td
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+
+_require_td() {
+  command -v td &>/dev/null || _die "td is required."
+}
+
+[[ $# -ge 2 ]] || _die "Usage: sgt-td-create <project> \"<title>\" --repos <list> [options]"
+PROJECT="$1"; shift
+TITLE="$1";   shift
+
+CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
+[[ -f "$CONFIG_FILE" ]] || _die "Project not found: $PROJECT"
+_require_yq
+_require_td
+
+REPOS_ARG=""
+DESCRIPTION=""
+TASK_TYPE="task"
+PRIORITY="P1"
+PARENT=""
+JSON_OUT=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repos)       REPOS_ARG="$2";    shift 2 ;;
+    --description) DESCRIPTION="$2";  shift 2 ;;
+    --type)        TASK_TYPE="$2";    shift 2 ;;
+    --priority)    PRIORITY="$2";     shift 2 ;;
+    --parent)      PARENT="$2";       shift 2 ;;
+    --json)        JSON_OUT=true;     shift   ;;
+    *) _die "Unknown option: $1" ;;
+  esac
+done
+
+[[ -n "$REPOS_ARG" ]] || _die "Must specify --repos"
+
+TARGET_REPOS=()
+IFS=',' read -ra TARGET_REPOS <<< "$REPOS_ARG"
+
+repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
+
+# Validate all repos exist
+for rname in "${TARGET_REPOS[@]}"; do
+  found=false
+  for ((i=0; i<repo_count; i++)); do
+    n="$(yq ".repos[$i].name" "$CONFIG_FILE")"
+    [[ "$n" == "$rname" ]] && found=true && break
+  done
+  $found || _die "Repo '$rname' not found in project $PROJECT"
+done
+
+# ── Create tasks ──────────────────────────────────────────────────────────────
+
+results="[]"
+
+for rname in "${TARGET_REPOS[@]}"; do
+  # Look up repo path
+  for ((i=0; i<repo_count; i++)); do
+    n="$(yq ".repos[$i].name" "$CONFIG_FILE")"
+    [[ "$n" == "$rname" ]] && break
+  done
+
+  raw_path="$(yq ".repos[$i].path" "$CONFIG_FILE")"
+  repo_path="$(_resolve_path "$raw_path")"
+
+  [[ -d "$repo_path/.git" ]] || {
+    $JSON_OUT || echo "SKIP  $rname  (not cloned)"
+    continue
+  }
+
+  # Check td is initialized in this repo
+  td list --json --work-dir "$repo_path" --limit 1 &>/dev/null || {
+    $JSON_OUT || echo "SKIP  $rname  (td not initialized — run: td init --work-dir $repo_path)"
+    continue
+  }
+
+  # Build description: shared text + repo-specific context
+  repo_role="$(yq ".repos[$i].role // \"\"" "$CONFIG_FILE")"
+  full_desc="${DESCRIPTION}"
+  if [[ -n "$repo_role" && "$repo_role" != "null" ]]; then
+    if [[ -n "$full_desc" ]]; then
+      full_desc="$full_desc
+
+Repo role: $repo_role"
+    else
+      full_desc="Repo role: $repo_role"
+    fi
+  fi
+
+  # Build td create command
+  td_args=(
+    create "$TITLE"
+    --type "$TASK_TYPE"
+    --priority "$PRIORITY"
+    --work-dir "$repo_path"
+    --json
+  )
+  [[ -n "$full_desc" ]] && td_args+=(--description "$full_desc")
+  [[ -n "$PARENT"    ]] && td_args+=(--parent "$PARENT")
+
+  result="$(td "${td_args[@]}" 2>/dev/null)"
+  task_id="$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null)"
+
+  if [[ -z "$task_id" ]]; then
+    $JSON_OUT || echo "FAIL  $rname  (td create failed)"
+    continue
+  fi
+
+  if $JSON_OUT; then
+    entry="{\"repo\":\"$rname\",\"task_id\":\"$task_id\",\"title\":\"$TITLE\",\"work_dir\":\"$repo_path\"}"
+    results="$(echo "$results $entry" | python3 -c "
+import sys, json
+parts = sys.stdin.read().split()
+merged = []
+for p in parts:
+    try: merged.extend([json.loads(p)] if not isinstance(json.loads(p), list) else json.loads(p))
+    except: pass
+print(json.dumps(merged, indent=2))
+" 2>/dev/null || echo "[]")"
+  else
+    printf "%-20s  %s  %s\n" "$rname" "$task_id" "$TITLE"
+  fi
+done
+
+$JSON_OUT && echo "$results"

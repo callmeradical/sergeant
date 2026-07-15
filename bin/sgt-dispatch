@@ -125,6 +125,40 @@ _require_yq
 _require_git
 $REMOTE || _require_tmux
 
+# ── Auto-create td tasks when no --td given ───────────────────────────────────
+# If td is available and we weren't given a specific task ID, create td tasks
+# in each target repo now so the work is tracked end-to-end.
+#
+# We store a map of repo→task_id in a temp file so the brief-writing loop
+# can inject the right td task ID per repo.
+
+REPO_TD_MAP="$(mktemp)"
+trap 'rm -f "$REPO_TD_MAP" "${DEPS_TMP:-}"' EXIT
+
+if [[ -z "$TD_TASK_ID" ]] && command -v td &>/dev/null && ! $DRY_RUN; then
+  echo "Creating td tasks ..."
+  td_results="$("$SCRIPT_DIR/sgt-td-create" "$PROJECT" "$BRIEF" \
+    --repos "$REPOS_ARG" \
+    --type task \
+    --priority P1 \
+    --json 2>/dev/null || echo "[]")"
+
+  # Write repo→task_id to temp map
+  echo "$td_results" | python3 -c "
+import sys, json
+results = json.load(sys.stdin)
+for r in results:
+    print(r['repo'] + ' ' + r['task_id'])
+" 2>/dev/null > "$REPO_TD_MAP" || true
+
+  if [[ -s "$REPO_TD_MAP" ]]; then
+    while IFS=' ' read -r rname tid; do
+      echo "  created $tid in $rname"
+    done < "$REPO_TD_MAP"
+    echo ""
+  fi
+fi
+
 # ── Generate task ID ──────────────────────────────────────────────────────────
 
 _rand6() { dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | cut -c1-6; }
@@ -176,7 +210,8 @@ done
 # Store in a temp file: "<dependent> <prereq>" one per line
 
 DEPS_TMP="$(mktemp)"
-trap 'rm -f "$DEPS_TMP"' EXIT
+# Note: REPO_TD_MAP trap already set above; update it to also cover DEPS_TMP
+trap 'rm -f "$REPO_TD_MAP" "$DEPS_TMP"' EXIT
 
 if [[ -n "$DEPS_ARG" ]]; then
   IFS=',' read -ra dep_pairs <<< "$DEPS_ARG"
@@ -337,16 +372,32 @@ for rname in "${TARGET_REPOS[@]}"; do
     role_line="Role: $repo_role"
   fi
 
-  # Build td section for brief (only when --td was used and this is the owning repo)
-  td_section=""
+  # Resolve td task ID for this repo:
+  # --td flag: use provided ID (only for the owning repo)
+  # auto-created: look up from the map
+  REPO_TD_TASK_ID=""
   if [[ -n "$TD_TASK_ID" && "$rname" == "$TD_REPO" ]]; then
+    REPO_TD_TASK_ID="$TD_TASK_ID"
+  elif [[ -f "$REPO_TD_MAP" ]]; then
+    REPO_TD_TASK_ID="$(grep "^$rname " "$REPO_TD_MAP" 2>/dev/null | awk '{print $2}' || true)"
+  fi
+
+  # Build td section for brief
+  td_section=""
+  if [[ -n "$REPO_TD_TASK_ID" ]]; then
+    # Fetch full context if this came from --td
+    repo_td_context=""
+    if [[ -n "$TD_CONTEXT" && "$rname" == "$TD_REPO" ]]; then
+      repo_td_context="$TD_CONTEXT"
+    fi
+
     td_section="## Task management
 
-This work is tracked in td as: \`$TD_TASK_ID\`
+This work is tracked in td as: \`$REPO_TD_TASK_ID\`
 
 At session start:
 \`\`\`
-td start $TD_TASK_ID --work-dir .
+td start $REPO_TD_TASK_ID --work-dir .
 \`\`\`
 
 Log meaningful progress:
@@ -356,14 +407,12 @@ td log \"message\" --work-dir .
 
 Before writing .sergeant-status=done, hand off:
 \`\`\`
-td handoff $TD_TASK_ID --work-dir .
-td review $TD_TASK_ID --work-dir .
+td handoff $REPO_TD_TASK_ID --work-dir .
+td review $REPO_TD_TASK_ID --work-dir .
 \`\`\`
-
-Full task context:
-$TD_CONTEXT"
+$([ -n "$repo_td_context" ] && printf '\nFull task context:\n%s' "$repo_td_context" || true)"
     # Store td task ID in fleet state
-    echo "$TD_TASK_ID" > "$repo_task_dir/td_task"
+    echo "$REPO_TD_TASK_ID" > "$repo_task_dir/td_task"
   fi
 
   cat > "$worktree_path/.sergeant-brief.md" << BRIEF_EOF
@@ -375,7 +424,7 @@ $TD_CONTEXT"
 **Branch:** $BRANCH
 **Worktree:** $worktree_path
 **Fleet state:** $repo_task_dir/
-$([ -n "$TD_TASK_ID" ] && echo "**td task:** $TD_TASK_ID" || true)
+$([ -n "$REPO_TD_TASK_ID" ] && echo "**td task:** $REPO_TD_TASK_ID" || true)
 
 ---
 

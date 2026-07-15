@@ -161,11 +161,25 @@ Each dispatched agent is expected to:
 
 ---
 
+## td task creation
+
+`sgt-dispatch` automatically creates td tasks in each target repo before spawning workers — **whether or not you use `--td`**. Every piece of dispatched work is tracked in td from the start.
+
+The created task IDs are injected into each worker's `.sergeant-brief.md` with the full `td start` / `td log` / `td handoff` / `td review` lifecycle.
+
+To create tasks manually without dispatching:
+```bash
+sgt-td-create <project> "<title>" --repos repo1,repo2 --priority P1
+```
+
+---
+
 ## Flags reference
 
 | Flag | Description |
 |---|---|
 | `--repos repo1,repo2` | Which repos to dispatch (required) |
+| `--td <task-id>` | Dispatch from an existing td task; brief derived from task title |
 | `--branch <name>` | Branch name used in all worktrees (default: derived from brief) |
 | `--deps "a>b,a>c"` | `a` must complete before `b` and `c` can merge |
 | `--remote` | Dispatch via babydriver to cleanthes instead of local tmux |
