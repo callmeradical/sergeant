@@ -180,7 +180,11 @@ else
 fi
 
 TASK_DIR="$FLEET_DIR/$TASK_ID"
-TMUX_SESSION="sgt-$TASK_ID"
+# All dispatches share a single "sgt" tmux session — each task gets its own
+# windows within it. This keeps tmux list-sessions clean.
+# Override with SERGEANT_TMUX_SESSION=<name> if you want task-scoped sessions.
+SGT_TMUX_SESSION="${SERGEANT_TMUX_SESSION:-sgt}"
+TMUX_SESSION="$SGT_TMUX_SESSION"
 
 echo ""
 echo "=== sgt-dispatch: $PROJECT ==="
@@ -250,6 +254,7 @@ fi
 # ── Create tmux session (local only) ─────────────────────────────────────────
 
 if ! $REMOTE && ! $DRY_RUN; then
+  # Create the shared session if it doesn't exist yet; no-op if already running.
   tmux new-session -d -s "$TMUX_SESSION" -n "sergeant" 2>/dev/null || true
   echo "tmux session: $TMUX_SESSION"
   echo ""
@@ -494,10 +499,14 @@ BRIEF_EOF
       fi
     fi
   else
-    _info "spawning tmux window '$rname' in session $TMUX_SESSION"
+    # Window name: <short-task-id>/<repo> so multiple tasks don't collide
+    # in the shared "sgt" session. E.g. "feat-abc123/smith-app"
+    SHORT_TASK="${TASK_ID:0:12}"
+    WINDOW_NAME="${SHORT_TASK}/${rname}"
+    _info "spawning tmux window '$WINDOW_NAME' in session $TMUX_SESSION"
     AGENT_INIT_MSG="Read the .sergeant-brief.md file and execute the mission."
     AGENT_RUN_CMD="$(_sgt_agent_run_cmd "$AGENT_CMD" "$AGENT_INIT_MSG")"
-    tmux new-window -t "$TMUX_SESSION:" -n "$rname" -c "$worktree_path" \
+    tmux new-window -t "$TMUX_SESSION:" -n "$WINDOW_NAME" -c "$worktree_path" \
       "$AGENT_RUN_CMD" 2>/dev/null || \
       _info "WARNING: tmux window failed — start manually: cd $worktree_path && $AGENT_RUN_CMD"
   fi
@@ -513,7 +522,7 @@ if ! $DRY_RUN; then
   echo "Task ID: $TASK_ID"
   echo "Fleet:   $TASK_DIR"
   if ! $REMOTE; then
-    echo "Observe: tmux attach -t $TMUX_SESSION  (read-only; agents are non-interactive)"
+    echo "Observe: tmux attach -t $TMUX_SESSION  (windows: ${SHORT_TASK:-$TASK_ID}/<repo>)"
   fi
   echo "Watch:   bin/sgt-watch $TASK_ID"
   echo ""
