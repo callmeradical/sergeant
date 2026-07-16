@@ -495,9 +495,14 @@ BRIEF_EOF
     fi
   else
     _info "spawning tmux window '$rname' in session $TMUX_SESSION"
+    # Agents are non-interactive: opencode run starts with the brief as the
+    # first prompt and exits when done. --auto approves permissions without
+    # blocking. Output stays visible in the tmux window for inspection.
+    AGENT_INIT_MSG="Read the .sergeant-brief.md file and execute the mission."
+    AGENT_RUN_CMD="${AGENT_CMD} run --auto '${AGENT_INIT_MSG}'"
     tmux new-window -t "$TMUX_SESSION:" -n "$rname" -c "$worktree_path" \
-      "$AGENT_CMD" 2>/dev/null || \
-      _info "WARNING: tmux window failed — start manually: cd $worktree_path && $AGENT_CMD"
+      "$AGENT_RUN_CMD" 2>/dev/null || \
+      _info "WARNING: tmux window failed — start manually: cd $worktree_path && $AGENT_RUN_CMD"
   fi
 
   echo ""
@@ -511,7 +516,7 @@ if ! $DRY_RUN; then
   echo "Task ID: $TASK_ID"
   echo "Fleet:   $TASK_DIR"
   if ! $REMOTE; then
-    echo "Attach:  tmux attach -t $TMUX_SESSION"
+    echo "Observe: tmux attach -t $TMUX_SESSION  (read-only; agents are non-interactive)"
   fi
   echo "Watch:   bin/sgt-watch $TASK_ID"
   echo ""
