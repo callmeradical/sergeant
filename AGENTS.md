@@ -70,6 +70,8 @@ These scripts in `bin/` are your hands. Use them before doing anything manually.
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
 | `bin/sgt-td-list <project>` | Show td tasks across all repos in a project |
 | `bin/sgt-td-create <project> "<title>" --repos <list>` | Create td tasks in repos (called automatically by sgt-dispatch) |
+| `bin/sgt-notify <task-id> "<message>"` | Inject agent completion message into the primary session pane |
+| `wiki-daily-digest [--date YYYY-MM-DD] [--since DATE] [--dry-run]` | Synthesize opencode session history into `~/wiki/sessions/` |
 
 Always prefer these scripts over doing the equivalent manually with multiple shell calls. They understand the YAML schema.
 
@@ -240,6 +242,30 @@ If the user wants to register a new project or edit an existing one:
 2. For edit: read the existing YAML, make the change, write it back.
 3. Run `sgt-list` to confirm it appears.
 4. Run `sgt-sync <name>` if new repos were added and the user wants them cloned.
+
+---
+
+## Wiki integration
+
+Sergeant writes to `~/wiki/.captures/` automatically on dispatch, agent completion, and cleanup. The curated wiki at `~/wiki/` is maintained separately by `wiki-daily-digest`.
+
+### Automatic captures (happen without any action)
+- `sgt-dispatch` — writes an activity entry when a fleet is launched (task, project, branch, repos, brief)
+- `sgt-notify` — writes an activity entry when an agent reports done or failed (includes PR URL)
+- `sgt-cleanup` — writes an activity entry when worktrees are removed (includes final status)
+
+### Daily digest cron (runs at 6am via launchd)
+`wiki-daily-digest --date yesterday` synthesizes the previous day's opencode sessions into `~/wiki/sessions/YYYY-MM-DD.md`. It uses `~/wiki/SCHEMA.md` as the authoritative instructions — the schema owns the format.
+
+### Manual backfill
+```bash
+wiki-daily-digest --date 2026-07-15   # one specific day
+wiki-daily-digest --since 2026-07-14  # every day from that date to yesterday
+wiki-daily-digest --dry-run           # preview without writing
+```
+
+### What the digest covers
+The digest reads the full assistant conversation from `opencode.db`, enriches with merged PRs (`gh`) and td task completions, and produces a synthesized session page — not a transcript. It cross-links to existing entity/decision pages in the wiki and emits a `<!-- wiki-candidates -->` block for new pages worth creating.
 
 ---
 
