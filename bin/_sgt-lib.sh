@@ -11,7 +11,7 @@ SGT_LIB_LOADED=1
 
 SERGEANT_CONFIG="${SERGEANT_CONFIG:-$HOME/.config/sergeant}"
 FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
-AGENT_CMD="${SERGEANT_AGENT:-opencode}"
+AGENT_CMD="${SERGEANT_AGENT:-opencode}"  # override: SERGEANT_AGENT=claude
 
 # ── Global config (dev_root) ──────────────────────────────────────────────────
 
@@ -54,6 +54,36 @@ _resolve_path() {
 
 _die()  { echo "ERROR: $*" >&2; exit 1; }
 _info() { echo "  $*"; }
+
+# ── Agent command builder ─────────────────────────────────────────────────────
+# _sgt_agent_run_cmd <agent> <message>
+#
+# Returns the shell command string to launch a non-interactive agent session
+# with <message> as the first prompt, using the correct flags for each agent.
+#
+# Supported agents:
+#   opencode   → opencode run --auto "<message>"
+#   claude     → claude --dangerously-skip-permissions "<message>"
+#   (default)  → <agent> run --auto "<message>"   (opencode-style fallback)
+
+_sgt_agent_run_cmd() {
+  local agent="$1"
+  local message="$2"
+  local bin
+  bin="$(basename "$agent")"
+
+  case "$bin" in
+    claude)
+      # claude: pass message as positional arg with dangerously-skip-permissions
+      # to bypass all permission dialogs in autonomous mode.
+      printf '%s --dangerously-skip-permissions %q' "$agent" "$message"
+      ;;
+    opencode|oc|*)
+      # opencode (and unknown agents): use `run --auto` for non-interactive mode.
+      printf '%s run --auto %q' "$agent" "$message"
+      ;;
+  esac
+}
 
 # ── Wiki integration ──────────────────────────────────────────────────────────
 # _sgt_wiki_write <title> <type> <description> <tags> <body>

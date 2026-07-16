@@ -277,3 +277,4 @@ The digest reads the full assistant conversation from `opencode.db`, enriches wi
 - Never modify repos in `~/.config/sergeant/` — that is config, not code.
 - Never commit secrets. Project YAMLs may contain paths but should not contain credentials.
 - The `sgt-*` scripts are on PATH (symlinked via `mise run install`). Use the bare command names.
+- `SERGEANT_AGENT` — override the agent binary used for dispatch. Supported values: `opencode` (default), `claude`. Each agent gets the right non-interactive flags automatically (`opencode run --auto` / `claude --dangerously-skip-permissions`).
