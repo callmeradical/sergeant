@@ -10,9 +10,9 @@
 
 set -euo pipefail
 
-FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
-
-_die() { echo "ERROR: $*" >&2; exit 1; }
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
 
 [[ $# -ge 1 ]] || _die "Usage: sgt-cleanup <task-id> [repo]"
 TASK_ID="$1"
@@ -95,6 +95,21 @@ done
 # Only remove fleet state if cleaning all repos (no FILTER_REPO)
 if [[ -z "$FILTER_REPO" ]]; then
   echo "Removing fleet state: $TASK_DIR"
+
+  # ── Wiki: log the cleanup event ─────────────────────────────────────────
+  _result="$(cat "$TASK_DIR/"*"/.sergeant-result" 2>/dev/null | head -1 || true)"
+  _status="$(cat "$TASK_DIR/"*"/.sergeant-status" 2>/dev/null | head -1 || true)"
+  _sgt_wiki_write \
+    "sgt-cleanup: $TASK_ID" \
+    "activity" \
+    "Cleaned up task $TASK_ID (${_status:-unknown})" \
+    "sergeant,cleanup,$TASK_ID" \
+    "## Cleanup
+
+- **Task ID:** \`$TASK_ID\`
+- **Final status:** ${_status:-unknown}
+- **Result:** ${_result:-none}"
+
   rm -rf "$TASK_DIR"
 fi
 

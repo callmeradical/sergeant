@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# sgt-notify — Inject a completion notification into the primary sergeant session.
+#
+# Called by workers when they finish a task. Reads the primary tmux pane recorded
+# at dispatch time and sends a message into it via tmux send-keys.
+#
+# Usage:
+#   sgt-notify <task-id> "<message>"
+#
+# The message is injected into the OpenCode session that dispatched the task,
+# appearing as if the user typed it. OpenCode then responds naturally.
+#
+# Examples:
+#   sgt-notify fix-argocd-adopt-orphan-0bd2da "done: PR https://github.com/.../pull/217"
+#   sgt-notify feat-gitops-post-promoti-5f5be4 "failed: helm lint error in values.yaml"
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+
+[[ $# -ge 2 ]] || _die "Usage: sgt-notify <task-id> \"<message>\""
+
+TASK_ID="$1"
+MESSAGE="$2"
+
+TASK_DIR="$FLEET_DIR/$TASK_ID"
+
+# ── Resolve primary pane ──────────────────────────────────────────────────────
+
+PRIMARY_PANE_FILE="$TASK_DIR/primary_pane"
+
+if [[ ! -f "$PRIMARY_PANE_FILE" ]]; then
+  echo "sgt-notify: no primary_pane recorded for task $TASK_ID — cannot notify" >&2
+  echo "  (was this task dispatched with an older version of sgt-dispatch?)" >&2
+  exit 0  # non-fatal: worker still finishes, just no ping
+fi
+
+PRIMARY_PANE="$(cat "$PRIMARY_PANE_FILE")"
+
+if [[ -z "$PRIMARY_PANE" ]]; then
+  echo "sgt-notify: primary_pane file is empty for task $TASK_ID — skipping" >&2
+  exit 0
+fi
+
+# ── Verify pane exists ────────────────────────────────────────────────────────
+
+if ! tmux has-session -t "${PRIMARY_PANE%%.*}" 2>/dev/null; then
+  echo "sgt-notify: primary session '${PRIMARY_PANE%%:*}' is gone — skipping notify" >&2
+  exit 0
+fi
+
+# ── Inject notification ───────────────────────────────────────────────────────
+
+# Format: agent tells the primary session what happened, referencing the task.
+INJECT="Agent task $TASK_ID reported: $MESSAGE"
+
+echo "sgt-notify: injecting into pane $PRIMARY_PANE" >&2
+
+# Send the message followed by Enter so OpenCode picks it up as a user message.
+tmux send-keys -t "$PRIMARY_PANE" "$INJECT" Enter
+
+echo "sgt-notify: sent." >&2
+
+# ── Wiki: log the completion event ───────────────────────────────────────────
+_is_done=$(echo "$MESSAGE" | grep -q "^done" && echo "true" || echo "false")
+_pr_url=$(echo "$MESSAGE" | grep -oE 'https://github\.com/[^ ]+' | head -1 || true)
+_wiki_type="activity"
+_wiki_body="## Agent Completion
+
+- **Task ID:** \`$TASK_ID\`
+- **Result:** $MESSAGE
+- **PR:** ${_pr_url:+[$_pr_url]($_pr_url)}${_pr_url:-none}"
+
+_sgt_wiki_write \
+  "sgt-notify: $TASK_ID ${_is_done:+completed}${_is_done:-reported}" \
+  "$_wiki_type" \
+  "Agent $TASK_ID: $MESSAGE" \
+  "sergeant,notify,$TASK_ID" \
+  "$_wiki_body"
