@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
-# wiki-daily-digest — Synthesize a daily wiki session digest from opencode history.
+# wiki-daily-digest — Synthesize a daily wiki session digest from AI agent history.
 #
-# Reads today's (or a given date's) opencode sessions from the SQLite database,
-# extracts meaningful assistant content, enriches with merged PRs and td task
-# completions, calls the Anthropic API to synthesize a structured digest, and
-# writes it to ~/wiki/sessions/YYYY-MM-DD.md.
+# Reads sessions from opencode, goose, and claude for a given date, extracts
+# meaningful assistant content, enriches with merged PRs and td task completions,
+# calls the Anthropic API (using ~/wiki/SCHEMA.md as instructions) to synthesize
+# a structured digest, and writes it to ~/wiki/sessions/YYYY-MM-DD.md.
 #
 # Usage:
 #   wiki-daily-digest                    # synthesize today
 #   wiki-daily-digest --date 2026-07-15  # synthesize a specific date
+#   wiki-daily-digest --date yesterday   # synthesize yesterday (used by cron)
 #   wiki-daily-digest --dry-run          # print prompt + raw content, no write
 #   wiki-daily-digest --since 2026-07-14 # backfill: run for each day since date
 #
+# Sources:
+#   - opencode  ~/.local/share/opencode/opencode.db (SQLite)
+#   - goose     ~/.local/share/goose/sessions/sessions.db (SQLite)
+#   - claude    ~/.claude/projects/**/*.jsonl (JSONL)
+#
 # Dependencies:
-#   - sqlite3
-#   - python3 (stdlib only — uses urllib for API call)
-#   - opencode.db at ~/.local/share/opencode/opencode.db
+#   - sqlite3, python3 (stdlib only)
 #   - Anthropic key at ~/.local/share/opencode/auth.json
-#   - write.sh at ~/.opencode/skills/write-to-wiki/scripts/write.sh
 #   - gh (optional — for PR enrichment)
 #   - td (optional — for task enrichment)
 
@@ -29,6 +32,8 @@ source "$SCRIPT_DIR/_sgt-lib.sh"
 # ── Config ────────────────────────────────────────────────────────────────────
 
 OPENCODE_DB="${OPENCODE_DB:-$HOME/.local/share/opencode/opencode.db}"
+GOOSE_DB="${GOOSE_DB:-$HOME/.local/share/goose/sessions/sessions.db}"
+CLAUDE_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
 OPENCODE_AUTH="${OPENCODE_AUTH:-$HOME/.local/share/opencode/auth.json}"
 WIKI_ROOT="${WIKI_ROOT:-$HOME/wiki}"
 WIKI_SESSIONS_DIR="$WIKI_ROOT/sessions"
@@ -131,6 +136,139 @@ ORDER BY p.time_created ASC;" 2>/dev/null | tr '\n' ' ')"
 
   # Truncate to MAX_CHARS
   echo "${content:0:$MAX_CHARS_PER_SESSION}"
+}
+
+# Extract goose sessions for a given date
+_extract_goose_sessions() {
+  local date="$1"
+  [[ -f "$GOOSE_DB" ]] || return 0
+
+  sqlite3 "$GOOSE_DB" "
+SELECT
+  s.id,
+  COALESCE(NULLIF(s.name,''), 'goose session') as title,
+  s.working_dir,
+  s.created_at,
+  s.updated_at
+FROM sessions s
+WHERE date(s.updated_at) = '$date'
+ORDER BY s.created_at ASC;" 2>/dev/null
+}
+
+# Extract goose assistant content from a session
+_extract_goose_content() {
+  local session_id="$1"
+  [[ -f "$GOOSE_DB" ]] || return 0
+
+  local content
+  content="$(sqlite3 "$GOOSE_DB" "
+SELECT substr(m.content_json, 1, 2000)
+FROM messages m
+WHERE m.session_id = '$session_id'
+  AND m.role = 'assistant'
+ORDER BY m.created_at ASC;" 2>/dev/null | python3 -c "
+import sys, json
+out = []
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try:
+        parts = json.loads(line)
+        if isinstance(parts, list):
+            for p in parts:
+                if isinstance(p, dict) and p.get('type') == 'text':
+                    out.append(p.get('text',''))
+        elif isinstance(parts, str):
+            out.append(parts)
+    except:
+        out.append(line)
+print(' '.join(out))
+" 2>/dev/null | tr '\n' ' ')"
+
+  echo "${content:0:$MAX_CHARS_PER_SESSION}"
+}
+
+# Extract claude (claude.ai CLI) sessions for a given date
+_extract_claude_sessions() {
+  local date="$1"
+  [[ -d "$CLAUDE_PROJECTS_DIR" ]] || return 0
+
+  python3 - "$CLAUDE_PROJECTS_DIR" "$date" "$MAX_CHARS_PER_SESSION" <<'PYEOF'
+import sys, json, os, glob
+from datetime import datetime, timezone
+
+projects_dir = sys.argv[1]
+target_date  = sys.argv[2]
+max_chars    = int(sys.argv[3])
+
+for jsonl_path in sorted(glob.glob(os.path.join(projects_dir, '**', '*.jsonl'), recursive=True)):
+    title = None
+    directory = os.path.basename(os.path.dirname(jsonl_path))
+    # Decode encoded path: -Users-lcromley-Dev- -> ~/Dev
+    directory = directory.replace('-Users-lcromley-', '~/')
+    first_ts = None
+    last_ts  = None
+    content_parts = []
+
+    try:
+        with open(jsonl_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except:
+                    continue
+
+                # Grab title
+                if d.get('type') == 'ai-title' and not title:
+                    title = d.get('aiTitle') or d.get('title') or d.get('value')
+
+                # Grab timestamps from messages
+                ts_raw = d.get('timestamp')
+                if ts_raw:
+                    try:
+                        if isinstance(ts_raw, str):
+                            dt = datetime.fromisoformat(ts_raw.replace('Z','+00:00'))
+                            ts = dt.timestamp()
+                        else:
+                            ts = ts_raw / 1000 if ts_raw > 1e10 else ts_raw
+                        if first_ts is None or ts < first_ts:
+                            first_ts = ts
+                        if last_ts is None or ts > last_ts:
+                            last_ts = ts
+                    except:
+                        pass
+
+                # Grab assistant text
+                if d.get('type') == 'assistant':
+                    msg = d.get('message', {})
+                    for block in msg.get('content', []):
+                        if isinstance(block, dict) and block.get('type') == 'text':
+                            content_parts.append(block.get('text', ''))
+    except:
+        continue
+
+    if not last_ts:
+        continue
+
+    dt_last = datetime.fromtimestamp(last_ts)
+    if dt_last.strftime('%Y-%m-%d') != target_date:
+        continue
+    if not title:
+        title = f"claude session ({directory})"
+
+    dt_first = datetime.fromtimestamp(first_ts) if first_ts else dt_last
+    content = ' '.join(content_parts)[:max_chars]
+    session_id = os.path.splitext(os.path.basename(jsonl_path))[0]
+
+    print(f"{session_id}|{title}|{directory}|{dt_first.strftime('%Y-%m-%d %H:%M:%S')}|{dt_last.strftime('%Y-%m-%d %H:%M:%S')}|claude")
+    # Write content to a temp file keyed by session_id for retrieval
+    tmp = f"/tmp/wiki_claude_{session_id}.txt"
+    with open(tmp, 'w') as out:
+        out.write(content)
+PYEOF
 }
 
 # Fetch merged PRs for a date across known smith repos
@@ -285,21 +423,58 @@ for DATE in "${DATES[@]}"; do
     continue
   fi
 
-  # Build per-session content blocks
+  # Build per-session content blocks — opencode
   sessions_content=""
   while IFS='|' read -r sid title directory created updated cost; do
     [[ -z "$sid" ]] && continue
-    echo "  extracting: $title ($cost)"
+    echo "  [opencode] $title ($cost)"
     content="$(_extract_session_content "$sid")"
-    sessions_content+="### Session: $title
-Directory: $directory
-Time: $created → $updated | Cost: \$$cost
+    sessions_content+="### [opencode] $title
+Directory: $directory | Time: $created → $updated | Cost: \$$cost
 
 $content
 
 ---
 "
   done <<< "$sessions_raw"
+
+  # Goose sessions
+  echo "  querying goose sessions..."
+  goose_raw="$(_extract_goose_sessions "$DATE")"
+  if [[ -n "$goose_raw" ]]; then
+    while IFS='|' read -r sid title working_dir created updated; do
+      [[ -z "$sid" ]] && continue
+      echo "  [goose] $title"
+      content="$(_extract_goose_content "$sid")"
+      sessions_content+="### [goose] $title
+Directory: $working_dir | Time: $created → $updated
+
+$content
+
+---
+"
+    done <<< "$goose_raw"
+  fi
+
+  # Claude sessions
+  echo "  querying claude sessions..."
+  claude_raw="$(_extract_claude_sessions "$DATE")"
+  if [[ -n "$claude_raw" ]]; then
+    while IFS='|' read -r sid title directory created updated tool; do
+      [[ -z "$sid" ]] && continue
+      echo "  [claude] $title"
+      content=""
+      tmp_file="/tmp/wiki_claude_${sid}.txt"
+      [[ -f "$tmp_file" ]] && content="$(cat "$tmp_file")" && rm -f "$tmp_file"
+      sessions_content+="### [claude] $title
+Directory: $directory | Time: $created → $updated
+
+$content
+
+---
+"
+    done <<< "$claude_raw"
+  fi
 
   # Enrich with PRs and tasks
   echo "  fetching merged PRs..."
@@ -350,7 +525,7 @@ $prs
 ### Completed Tasks
 $td_tasks
 
-### Session Content (extracted from opencode history)
+### Session Content (extracted from opencode, goose, and claude history)
 $sessions_content
 
 ---
