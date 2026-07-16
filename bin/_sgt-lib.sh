@@ -11,7 +11,25 @@ SGT_LIB_LOADED=1
 
 SERGEANT_CONFIG="${SERGEANT_CONFIG:-$HOME/.config/sergeant}"
 FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
-AGENT_CMD="${SERGEANT_AGENT:-opencode}"  # override: SERGEANT_AGENT=claude
+# Auto-detect the running agent from environment signals, then allow override.
+# Detection order:
+#   1. SERGEANT_AGENT env var — explicit override always wins
+#   2. OPENCODE / OPENCODE_PID — set by opencode when running a session
+#   3. CLAUDE_CODE_SESSION_ID — set by Claude Code when running a session
+#   4. Fallback: opencode
+_sgt_detect_agent() {
+  if [[ -n "${SERGEANT_AGENT:-}" ]]; then
+    echo "$SERGEANT_AGENT"
+  elif [[ -n "${OPENCODE:-}" || -n "${OPENCODE_PID:-}" ]]; then
+    echo "opencode"
+  elif [[ -n "${CLAUDE_CODE_SESSION_ID:-}" || -n "${CLAUDE_CODE_SESSION_NAME:-}" ]]; then
+    echo "claude"
+  else
+    echo "opencode"
+  fi
+}
+
+AGENT_CMD="${SERGEANT_AGENT:-$(_sgt_detect_agent)}"
 
 # ── Global config (dev_root) ──────────────────────────────────────────────────
 
