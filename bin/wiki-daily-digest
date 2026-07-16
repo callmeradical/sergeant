@@ -1,0 +1,396 @@
+#!/usr/bin/env bash
+# wiki-daily-digest — Synthesize a daily wiki session digest from opencode history.
+#
+# Reads today's (or a given date's) opencode sessions from the SQLite database,
+# extracts meaningful assistant content, enriches with merged PRs and td task
+# completions, calls the Anthropic API to synthesize a structured digest, and
+# writes it to ~/wiki/sessions/YYYY-MM-DD.md.
+#
+# Usage:
+#   wiki-daily-digest                    # synthesize today
+#   wiki-daily-digest --date 2026-07-15  # synthesize a specific date
+#   wiki-daily-digest --dry-run          # print prompt + raw content, no write
+#   wiki-daily-digest --since 2026-07-14 # backfill: run for each day since date
+#
+# Dependencies:
+#   - sqlite3
+#   - python3 (stdlib only — uses urllib for API call)
+#   - opencode.db at ~/.local/share/opencode/opencode.db
+#   - Anthropic key at ~/.local/share/opencode/auth.json
+#   - write.sh at ~/.opencode/skills/write-to-wiki/scripts/write.sh
+#   - gh (optional — for PR enrichment)
+#   - td (optional — for task enrichment)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_sgt-lib.sh"
+
+# ── Config ────────────────────────────────────────────────────────────────────
+
+OPENCODE_DB="${OPENCODE_DB:-$HOME/.local/share/opencode/opencode.db}"
+OPENCODE_AUTH="${OPENCODE_AUTH:-$HOME/.local/share/opencode/auth.json}"
+WIKI_ROOT="${WIKI_ROOT:-$HOME/wiki}"
+WIKI_SESSIONS_DIR="$WIKI_ROOT/sessions"
+WIKI_SCHEMA="$WIKI_ROOT/SCHEMA.md"
+WRITE_SH="${WRITE_SH:-$HOME/.opencode/skills/write-to-wiki/scripts/write.sh}"
+MODEL="${WIKI_DIGEST_MODEL:-claude-haiku-4-5}"
+MAX_CHARS_PER_SESSION="${MAX_CHARS_PER_SESSION:-8000}"
+DRY_RUN=false
+TARGET_DATE=""
+SINCE_DATE=""
+
+# ── Args ──────────────────────────────────────────────────────────────────────
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --date)    TARGET_DATE="$2"; shift 2 ;;
+    --since)   SINCE_DATE="$2";  shift 2 ;;
+    --dry-run) DRY_RUN=true;     shift ;;
+    --model)   MODEL="$2";       shift 2 ;;
+    *)         _die "Unknown arg: $1. Usage: wiki-daily-digest [--date YYYY-MM-DD] [--since YYYY-MM-DD] [--dry-run]" ;;
+  esac
+done
+
+# ── Resolve date(s) ───────────────────────────────────────────────────────────
+
+if [[ -n "$SINCE_DATE" ]]; then
+  # Build list of dates from SINCE_DATE to yesterday
+  DATES=()
+  d="$SINCE_DATE"
+  today="$(date +%Y-%m-%d)"
+  while [[ "$d" < "$today" ]]; do
+    DATES+=("$d")
+    d="$(date -j -v+1d -f "%Y-%m-%d" "$d" "+%Y-%m-%d" 2>/dev/null || date -d "$d +1 day" +%Y-%m-%d)"
+  done
+elif [[ -n "$TARGET_DATE" ]]; then
+  # Allow "yesterday" as a convenience alias
+  if [[ "$TARGET_DATE" == "yesterday" ]]; then
+    TARGET_DATE="$(date -j -v-1d +%Y-%m-%d 2>/dev/null || date -d yesterday +%Y-%m-%d)"
+  fi
+  DATES=("$TARGET_DATE")
+else
+  DATES=("$(date +%Y-%m-%d)")
+fi
+
+# ── Prereq checks ─────────────────────────────────────────────────────────────
+
+[[ -f "$OPENCODE_DB" ]]    || _die "opencode.db not found at $OPENCODE_DB"
+[[ -f "$OPENCODE_AUTH" ]]  || _die "opencode auth.json not found at $OPENCODE_AUTH"
+[[ -f "$WIKI_SCHEMA" ]]    || _die "SCHEMA.md not found at $WIKI_SCHEMA"
+command -v sqlite3  &>/dev/null || _die "sqlite3 is required"
+command -v python3  &>/dev/null || _die "python3 is required"
+
+ANTHROPIC_KEY="$(python3 -c "
+import json, sys
+d = json.load(open('$OPENCODE_AUTH'))
+print(d.get('anthropic', {}).get('key', ''))
+" 2>/dev/null)"
+[[ -n "$ANTHROPIC_KEY" ]] || _die "No Anthropic key found in $OPENCODE_AUTH"
+
+mkdir -p "$WIKI_SESSIONS_DIR"
+
+# ── Functions ─────────────────────────────────────────────────────────────────
+
+# Extract sessions for a given date from opencode.db
+_extract_sessions() {
+  local date="$1"
+  local start_ts end_ts
+  start_ts="$(python3 -c "import datetime; print(int(datetime.datetime(*(int(x) for x in '$date'.split('-'))).timestamp() * 1000))")"
+  end_ts="$(python3 -c "import datetime; print(int((datetime.datetime(*(int(x) for x in '$date'.split('-'))) + datetime.timedelta(days=1)).timestamp() * 1000))")"
+
+  sqlite3 "$OPENCODE_DB" "
+SELECT
+  s.id,
+  s.title,
+  s.directory,
+  datetime(s.time_created/1000, 'unixepoch', 'localtime') as created,
+  datetime(s.time_updated/1000, 'unixepoch', 'localtime') as updated,
+  printf('%.2f', s.cost) as cost
+FROM session s
+WHERE s.time_updated >= $start_ts
+  AND s.time_updated < $end_ts
+  AND s.parent_id IS NULL
+  AND s.title NOT LIKE 'New session%'
+ORDER BY s.time_created ASC;" 2>/dev/null
+}
+
+# Extract assistant text from a session (truncated to MAX_CHARS)
+_extract_session_content() {
+  local session_id="$1"
+  local content
+  content="$(sqlite3 "$OPENCODE_DB" "
+SELECT json_extract(p.data, '$.text')
+FROM part p
+JOIN message m ON p.message_id = m.id
+WHERE m.session_id = '$session_id'
+  AND json_extract(m.data, '$.role') = 'assistant'
+  AND json_extract(p.data, '$.type') = 'text'
+  AND length(json_extract(p.data, '$.text')) > 20
+ORDER BY p.time_created ASC;" 2>/dev/null | tr '\n' ' ')"
+
+  # Truncate to MAX_CHARS
+  echo "${content:0:$MAX_CHARS_PER_SESSION}"
+}
+
+# Fetch merged PRs for a date across known smith repos
+_fetch_merged_prs() {
+  local date="$1"
+  if ! command -v gh &>/dev/null; then echo "(gh not available)"; return; fi
+
+  local prs=""
+  for repo in ascend-arch-smith ascend-arch-smith-infra ascend-arch-smith-app ascend-arch-smith-integration; do
+    local repo_path
+    repo_path="$(_resolve_path "smith/$repo")"
+    [[ -d "$repo_path" ]] || continue
+    local result
+    result="$(cd "$repo_path" && gh pr list --state merged \
+      --json number,title,mergedAt,body \
+      --jq ".[] | select(.mergedAt | startswith(\"$date\")) | \"- [\(.number)] \(.title)\"" \
+      2>/dev/null || echo "")"
+    [[ -n "$result" ]] && prs+="$repo:
+$result
+"
+  done
+  echo "${prs:-(none found)}"
+}
+
+# Fetch td tasks completed on a date across smith repos
+_fetch_td_tasks() {
+  local date="$1"
+  if ! command -v td &>/dev/null; then echo "(td not available)"; return; fi
+
+  local tasks=""
+  for repo_path in "$(_resolve_path "smith/ascend-arch-smith")" "$(_resolve_path "smith/ascend-arch-smith-infra")"; do
+    [[ -d "$repo_path" ]] || continue
+    local result
+    result="$(cd "$repo_path" && td list --all --json 2>/dev/null | python3 -c "
+import sys, json
+tasks = json.load(sys.stdin)
+for t in tasks:
+    updated = t.get('updated_at','')
+    if updated.startswith('$date') and t.get('status') in ('closed','review'):
+        print(f'- [{t[\"id\"]}] {t[\"title\"]} [{t[\"status\"]}]')
+" 2>/dev/null || echo "")"
+    [[ -n "$result" ]] && tasks+="$repo_path:
+$result
+"
+  done
+  echo "${tasks:-(none found)}"
+}
+
+# Call Anthropic API to synthesize the digest
+_synthesize() {
+  local prompt="$1"
+  local tmp_prompt
+  tmp_prompt="$(mktemp)"
+  printf '%s' "$prompt" > "$tmp_prompt"
+
+  python3 - "$ANTHROPIC_KEY" "$MODEL" "$tmp_prompt" <<'PYEOF'
+import sys, json, urllib.request, urllib.error
+
+api_key    = sys.argv[1]
+model      = sys.argv[2]
+prompt_file = sys.argv[3]
+
+with open(prompt_file) as f:
+    prompt = f.read()
+
+payload = {
+    "model": model,
+    "max_tokens": 2048,
+    "messages": [{"role": "user", "content": prompt}]
+}
+
+req = urllib.request.Request(
+    "https://api.anthropic.com/v1/messages",
+    data=json.dumps(payload).encode(),
+    headers={
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    },
+    method="POST"
+)
+
+try:
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = json.loads(resp.read())
+        print(data["content"][0]["text"])
+except urllib.error.HTTPError as e:
+    print(f"API error {e.code}: {e.read().decode()}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+
+  rm -f "$tmp_prompt"
+}
+
+# Write a session page
+_write_wiki_page() {
+  local date="$1" body="$2"
+  local page="$WIKI_SESSIONS_DIR/$date.md"
+
+  if $DRY_RUN; then
+    echo "=== DRY RUN: would write to $page ==="
+    echo "$body"
+    return
+  fi
+
+  # Write the file directly (don't use write.sh — we want precise frontmatter)
+  cat > "$page" <<EOF
+---
+type: session
+title: $date
+description: Daily digest — $date
+tags: [session, smith, digest]
+updated: $date
+---
+
+$body
+EOF
+
+  # Update wiki index if the session is new
+  if ! grep -q "$date" "$WIKI_ROOT/index.md" 2>/dev/null; then
+    # Extract one-line summary from body (first non-empty line after the heading)
+    local summary
+    summary="$(echo "$body" | grep -A2 "^## Summary" | tail -1 | sed 's/^[[:space:]]*//' | head -c 100)"
+    sed -i '' "/^## Sessions/a\\
+* [$date](sessions/$date.md) — ${summary:-daily digest}" \
+      "$WIKI_ROOT/index.md" 2>/dev/null || true
+  fi
+
+  # Append to log
+  echo "## [$date] ingest | daily digest from opencode session history" >> "$WIKI_ROOT/log.md"
+
+  echo "  wrote: $page"
+}
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
+
+for DATE in "${DATES[@]}"; do
+  echo "=== wiki-daily-digest: $DATE ==="
+
+  # Skip if already written (unless dry-run)
+  if [[ -f "$WIKI_SESSIONS_DIR/$DATE.md" ]] && ! $DRY_RUN; then
+    echo "  already exists: $WIKI_SESSIONS_DIR/$DATE.md — skipping (delete to re-run)"
+    continue
+  fi
+
+  # Collect sessions
+  echo "  querying opencode sessions..."
+  sessions_raw="$(_extract_sessions "$DATE")"
+
+  if [[ -z "$sessions_raw" ]]; then
+    echo "  no sessions found for $DATE — skipping"
+    continue
+  fi
+
+  # Build per-session content blocks
+  sessions_content=""
+  while IFS='|' read -r sid title directory created updated cost; do
+    [[ -z "$sid" ]] && continue
+    echo "  extracting: $title ($cost)"
+    content="$(_extract_session_content "$sid")"
+    sessions_content+="### Session: $title
+Directory: $directory
+Time: $created → $updated | Cost: \$$cost
+
+$content
+
+---
+"
+  done <<< "$sessions_raw"
+
+  # Enrich with PRs and tasks
+  echo "  fetching merged PRs..."
+  prs="$(_fetch_merged_prs "$DATE")"
+
+  echo "  fetching td tasks..."
+  td_tasks="$(_fetch_td_tasks "$DATE")"
+
+  # Load SCHEMA.md as the authoritative instructions
+  schema="$(cat "$WIKI_SCHEMA")"
+
+  # Load existing index for cross-reference context
+  index_context=""
+  if [[ -f "$WIKI_ROOT/index.md" ]]; then
+    index_context="$(cat "$WIKI_ROOT/index.md")"
+  fi
+
+  # Load the existing session page if it exists (for update-in-place)
+  existing_session=""
+  if [[ -f "$WIKI_SESSIONS_DIR/$DATE.md" ]]; then
+    existing_session="$(cat "$WIKI_SESSIONS_DIR/$DATE.md")"
+  fi
+
+  # Build synthesis prompt driven entirely by SCHEMA.md
+  PROMPT="You are the LLM maintainer of a personal wiki. Your instructions are in SCHEMA.md below.
+
+---
+## SCHEMA.md (your authoritative instructions)
+
+$schema
+
+---
+## Current wiki index (for cross-reference)
+
+$index_context
+
+---
+## Existing session page for $DATE (empty if none yet)
+
+$existing_session
+
+---
+## Source material for $DATE
+
+### Merged Pull Requests
+$prs
+
+### Completed Tasks
+$td_tasks
+
+### Session Content (extracted from opencode history)
+$sessions_content
+
+---
+## Your task
+
+Following the SCHEMA.md instructions exactly, write (or update) the sessions/ page for $DATE.
+
+The sessions/ page format per SCHEMA.md:
+- One page per day with meaningful work
+- A synthesized digest — not a raw log
+- Covers: what was worked on, decisions made, blockers hit, outcomes
+- Links to entities/decisions/features touched using wiki-relative paths
+
+Use the index to cross-link to existing entity/decision pages where relevant.
+If you identify new entities, decisions, or patterns worth a dedicated page, note them
+in a fenced block labelled \`<!-- wiki-candidates -->\` at the end — the cron job
+will capture these for follow-up.
+
+Write only the markdown body (no frontmatter, no top-level title heading).
+Be specific and technical. Include PR numbers, loop IDs, system names. No filler."
+
+  if $DRY_RUN; then
+    echo "=== PROMPT ==="
+    echo "$PROMPT"
+    echo "=== END PROMPT ==="
+    continue
+  fi
+
+  # Synthesize
+  echo "  calling $MODEL for synthesis..."
+  digest="$(_synthesize "$PROMPT" <<< "$PROMPT")"
+
+  if [[ -z "$digest" ]]; then
+    echo "  ERROR: synthesis returned empty — skipping $DATE"
+    continue
+  fi
+
+  _write_wiki_page "$DATE" "$digest"
+  echo "  done."
+  echo ""
+done
+
+echo "wiki-daily-digest complete."

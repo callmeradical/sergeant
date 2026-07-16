@@ -227,6 +227,13 @@ _wait_for() {
   grep "^$1 " "$DEPS_TMP" 2>/dev/null | awk '{print $2}' | paste -sd ',' - 2>/dev/null || true
 }
 
+# ── Capture primary pane (for sgt-notify callbacks) ──────────────────────────
+
+PRIMARY_PANE=""
+if [[ -n "${TMUX:-}" ]]; then
+  PRIMARY_PANE="$(tmux display-message -p '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)"
+fi
+
 # ── Create fleet task directory ───────────────────────────────────────────────
 
 if $DRY_RUN; then
@@ -237,6 +244,7 @@ else
     "$PROJECT" "$BRIEF" "$BRANCH" "${TARGET_REPOS[*]}" > "$TASK_DIR/brief.md"
   [[ -n "$TD_TASK_ID" ]] && echo "$TD_TASK_ID" > "$TASK_DIR/td_task"
   date -u +%Y-%m-%dT%H:%M:%SZ > "$TASK_DIR/started"
+  [[ -n "$PRIMARY_PANE" ]] && echo "$PRIMARY_PANE" > "$TASK_DIR/primary_pane"
 fi
 
 # ── Create tmux session (local only) ─────────────────────────────────────────
@@ -456,6 +464,9 @@ When your work is complete:
 5. Write your final status:
    - Success: \`echo "done" > .sergeant-status\`
    - Failure: \`echo "failed: <reason>" > .sergeant-status\`
+6. Notify the primary session (replace URL with actual PR URL):
+   - Success: \`sgt-notify $TASK_ID "done: PR https://github.com/..."\`
+   - Failure: \`sgt-notify $TASK_ID "failed: <reason>"\`
 
 The primary sergeant session is watching via \`sgt-watch $TASK_ID\`.
 BRIEF_EOF
@@ -504,4 +515,22 @@ if ! $DRY_RUN; then
   fi
   echo "Watch:   bin/sgt-watch $TASK_ID"
   echo ""
+
+  # ── Wiki: log the dispatch event ─────────────────────────────────────────
+  _wiki_body="## Dispatch
+
+- **Task ID:** \`$TASK_ID\`
+- **Project:** $PROJECT
+- **Branch:** \`$BRANCH\`
+- **Repos:** ${REPOS_ARG:-auto}
+- **Backend:** ${REMOTE:+remote (babydriver)}${REMOTE:-local (tmux)}
+- **td task:** ${TD_TASK_ID:+\`$TD_TASK_ID\`}${TD_TASK_ID:-none}
+- **Brief:** $BRIEF"
+
+  _sgt_wiki_write \
+    "sgt-dispatch: $BRIEF" \
+    "activity" \
+    "Dispatched $TASK_ID to project $PROJECT" \
+    "sergeant,dispatch,$PROJECT" \
+    "$_wiki_body"
 fi

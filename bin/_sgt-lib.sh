@@ -55,6 +55,35 @@ _resolve_path() {
 _die()  { echo "ERROR: $*" >&2; exit 1; }
 _info() { echo "  $*"; }
 
+# ── Wiki integration ──────────────────────────────────────────────────────────
+# _sgt_wiki_write <title> <type> <description> <tags> <body>
+#
+# Writes an OKF document to ~/wiki/.captures/ via the write.sh script.
+# Never fatal — wiki failures are silently swallowed.
+#
+# Args:
+#   $1  title        — document title (e.g. "Dispatched fix/add-oauth to smith")
+#   $2  type         — OKF type (e.g. "activity", "session", "decision")
+#   $3  description  — one-line summary
+#   $4  tags         — comma-separated (e.g. "sergeant,smith,dispatch")
+#   $5  body         — markdown body text
+
+_SGT_WIKI_SCRIPT="${HOME}/.opencode/skills/write-to-wiki/scripts/write.sh"
+_SGT_WIKI_ROOT="${WIKI_ROOT:-${HOME}/wiki/.captures}"
+
+_sgt_wiki_write() {
+  local title="$1" type="$2" description="$3" tags="$4" body="$5"
+  [[ -x "$_SGT_WIKI_SCRIPT" ]] || return 0
+  [[ "${SGT_WIKI_DISABLED:-0}" == "1" ]] && return 0
+  bash "$_SGT_WIKI_SCRIPT" \
+    --title "$title" \
+    --type "$type" \
+    --description "$description" \
+    --tags "$tags" \
+    --wiki-root "$_SGT_WIKI_ROOT" \
+    "$body" 2>/dev/null || true
+}
+
 _require_yq() {
   command -v yq &>/dev/null || _die "yq is required: brew install yq"
 }
