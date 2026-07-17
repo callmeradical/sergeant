@@ -414,12 +414,17 @@ for DATE in "${DATES[@]}"; do
     continue
   fi
 
-  # Collect sessions
+  # Collect sessions from all sources
   echo "  querying opencode sessions..."
   sessions_raw="$(_extract_sessions "$DATE")"
+  echo "  querying goose sessions..."
+  goose_raw_check="$(_extract_goose_sessions "$DATE")"
+  echo "  querying claude sessions..."
+  claude_raw_check="$(_extract_claude_sessions "$DATE")"
 
-  if [[ -z "$sessions_raw" ]]; then
-    echo "  no sessions found for $DATE — skipping"
+  # Skip only if ALL sources are empty
+  if [[ -z "$sessions_raw" && -z "$goose_raw_check" && -z "$claude_raw_check" ]]; then
+    echo "  no sessions found in any source for $DATE — skipping"
     continue
   fi
 
@@ -438,9 +443,8 @@ $content
 "
   done <<< "$sessions_raw"
 
-  # Goose sessions
-  echo "  querying goose sessions..."
-  goose_raw="$(_extract_goose_sessions "$DATE")"
+  # Goose sessions (already fetched above)
+  goose_raw="$goose_raw_check"
   if [[ -n "$goose_raw" ]]; then
     while IFS='|' read -r sid title working_dir created updated; do
       [[ -z "$sid" ]] && continue
@@ -456,9 +460,8 @@ $content
     done <<< "$goose_raw"
   fi
 
-  # Claude sessions
-  echo "  querying claude sessions..."
-  claude_raw="$(_extract_claude_sessions "$DATE")"
+  # Claude sessions (already fetched above)
+  claude_raw="$claude_raw_check"
   if [[ -n "$claude_raw" ]]; then
     while IFS='|' read -r sid title directory created updated tool; do
       [[ -z "$sid" ]] && continue
