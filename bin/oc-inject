@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# PROTOTYPE: oc-inject — inject a message into an OpenCode session out-of-band
+#
+# Usage:
+#   oc-inject "message text"                    # inject into primary session
+#   oc-inject "message text" <session-id>       # inject into specific session
+#   oc-inject --status                          # show registry state
+#
+# The companion plugin (~/.config/opencode/plugins/oc-inject.js) watches
+# ~/.local/share/opencode/inbox/ and injects messages when the session is
+# idle, or queues them if busy.
+#
+# DELETE when prototype question is answered.
+
+set -euo pipefail
+
+INBOX="$HOME/.local/share/opencode/inbox"
+REGISTRY="$INBOX/.registry.json"
+
+# ── helpers ────────────────────────────────────────────────────────────────
+die()    { echo "oc-inject: $*" >&2; exit 1; }
+require(){ command -v "$1" >/dev/null || die "requires $1"; }
+
+require jq
+
+# ── --status ───────────────────────────────────────────────────────────────
+if [[ "${1:-}" == "--status" ]]; then
+  if [[ ! -f "$REGISTRY" ]]; then
+    echo "no registry — is the oc-inject plugin loaded in opencode?"
+    exit 1
+  fi
+  echo "=== oc-inject registry ==="
+  jq . "$REGISTRY"
+  exit 0
+fi
+
+# ── main ───────────────────────────────────────────────────────────────────
+MESSAGE="${1:-}"
+SESSION_ID="${2:-}"
+
+[[ -z "$MESSAGE" ]] && die "usage: oc-inject \"message\" [session-id]"
+
+mkdir -p "$INBOX"
+
+# If no session given, try registry
+if [[ -z "$SESSION_ID" && -f "$REGISTRY" ]]; then
+  SESSION_ID=$(jq -r '.primarySession // empty' "$REGISTRY" 2>/dev/null || true)
+fi
+
+# Build the .msg file (JSON so plugin can parse session target)
+TMPFILE=$(mktemp "$INBOX/XXXXXX.msg")
+if [[ -n "$SESSION_ID" ]]; then
+  printf '%s' "$(jq -nc --arg text "$MESSAGE" --arg sessionId "$SESSION_ID" \
+    '{text: $text, sessionId: $sessionId}')" > "$TMPFILE"
+else
+  # Plain text — plugin will use primarySession
+  printf '%s' "$MESSAGE" > "$TMPFILE"
+fi
+
+echo "oc-inject: queued → $(basename "$TMPFILE")"
+if [[ -f "$REGISTRY" ]]; then
+  BUSY=$(jq -r --arg s "$SESSION_ID" '.sessions[$s].busy // "unknown"' "$REGISTRY" 2>/dev/null || echo "unknown")
+  QUEUED=$(jq -r --arg s "$SESSION_ID" '.sessions[$s].queued // 0' "$REGISTRY" 2>/dev/null || echo "0")
+  echo "oc-inject: session busy=$BUSY queued_before=$QUEUED"
+fi

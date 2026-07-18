@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 # sgt-notify — Inject a completion notification into the primary sergeant session.
 #
-# Called by workers when they finish a task. Reads the primary tmux pane recorded
-# at dispatch time and sends a message into it via tmux send-keys.
+# Called by workers when they finish a task. Prefers oc-inject (OpenCode plugin)
+# which queues messages when the session is busy and injects without taking over
+# the prompt bar. Falls back to raw tmux send-keys when not running inside OpenCode.
 #
 # Usage:
 #   sgt-notify <task-id> "<message>"
-#
-# The message is injected into the OpenCode session that dispatched the task,
-# appearing as if the user typed it. OpenCode then responds naturally.
 #
 # Examples:
 #   sgt-notify fix-argocd-adopt-orphan-0bd2da "done: PR https://github.com/.../pull/217"
@@ -24,49 +22,59 @@ source "$SCRIPT_DIR/_sgt-lib.sh"
 
 TASK_ID="$1"
 MESSAGE="$2"
-
-TASK_DIR="$FLEET_DIR/$TASK_ID"
-
-# ── Resolve primary pane ──────────────────────────────────────────────────────
-
-PRIMARY_PANE_FILE="$TASK_DIR/primary_pane"
-
-if [[ ! -f "$PRIMARY_PANE_FILE" ]]; then
-  echo "sgt-notify: no primary_pane recorded for task $TASK_ID — cannot notify" >&2
-  echo "  (was this task dispatched with an older version of sgt-dispatch?)" >&2
-  exit 0  # non-fatal: worker still finishes, just no ping
-fi
-
-PRIMARY_PANE="$(cat "$PRIMARY_PANE_FILE")"
-
-if [[ -z "$PRIMARY_PANE" ]]; then
-  echo "sgt-notify: primary_pane file is empty for task $TASK_ID — skipping" >&2
-  exit 0
-fi
-
-# ── Verify pane exists ────────────────────────────────────────────────────────
-
-if ! tmux has-session -t "${PRIMARY_PANE%%.*}" 2>/dev/null; then
-  echo "sgt-notify: primary session '${PRIMARY_PANE%%:*}' is gone — skipping notify" >&2
-  exit 0
-fi
-
-# ── Inject notification ───────────────────────────────────────────────────────
-
-# Format: agent tells the primary session what happened, referencing the task.
 INJECT="Agent task $TASK_ID reported: $MESSAGE"
 
-echo "sgt-notify: injecting into pane $PRIMARY_PANE" >&2
+TASK_DIR="$FLEET_DIR/$TASK_ID"
+OC_INJECT_BIN="$SCRIPT_DIR/oc-inject"
+OC_REGISTRY="$HOME/.local/share/opencode/inbox/.registry.json"
 
-# Send the message followed by Enter so OpenCode picks it up as a user message.
-tmux send-keys -t "$PRIMARY_PANE" "$INJECT" Enter
+# ── Prefer oc-inject ─────────────────────────────────────────────────────────
+# oc-inject writes to the OpenCode session directly via the plugin API:
+#  - If session is idle → injects immediately as a new conversation turn
+#  - If session is busy → queues the message, drains on next idle
+#  - Never takes over the prompt bar
+if [[ -f "$OC_INJECT_BIN" && -f "$OC_REGISTRY" ]]; then
+  "$OC_INJECT_BIN" "$INJECT"
+  echo "sgt-notify: sent via oc-inject." >&2
+  # Skip tmux fallback entirely when oc-inject is available
+  _notify_done=1
+elif command -v oc-inject >/dev/null 2>&1 && [[ -f "$OC_REGISTRY" ]]; then
+  oc-inject "$INJECT"
+  echo "sgt-notify: sent via oc-inject (PATH)." >&2
+  _notify_done=1
+else
+  _notify_done=0
+fi
 
-echo "sgt-notify: sent." >&2
+# ── Fallback: tmux send-keys ─────────────────────────────────────────────────
+if [[ "$_notify_done" -eq 0 ]]; then
+  PRIMARY_PANE_FILE="$TASK_DIR/primary_pane"
+
+  if [[ ! -f "$PRIMARY_PANE_FILE" ]]; then
+    echo "sgt-notify: no primary_pane and no oc-inject registry — cannot notify" >&2
+    exit 0
+  fi
+
+  PRIMARY_PANE="$(cat "$PRIMARY_PANE_FILE")"
+
+  if [[ -z "$PRIMARY_PANE" ]]; then
+    echo "sgt-notify: primary_pane file empty — skipping" >&2
+    exit 0
+  fi
+
+  if ! tmux has-session -t "${PRIMARY_PANE%%.*}" 2>/dev/null; then
+    echo "sgt-notify: tmux session gone — skipping" >&2
+    exit 0
+  fi
+
+  echo "sgt-notify: injecting via tmux into pane $PRIMARY_PANE" >&2
+  tmux send-keys -t "$PRIMARY_PANE" "$INJECT" Enter
+  echo "sgt-notify: sent via tmux." >&2
+fi
 
 # ── Wiki: log the completion event ───────────────────────────────────────────
 _is_done=$(echo "$MESSAGE" | grep -q "^done" && echo "true" || echo "false")
 _pr_url=$(echo "$MESSAGE" | grep -oE 'https://github\.com/[^ ]+' | head -1 || true)
-_wiki_type="activity"
 _wiki_body="## Agent Completion
 
 - **Task ID:** \`$TASK_ID\`
@@ -75,7 +83,7 @@ _wiki_body="## Agent Completion
 
 _sgt_wiki_write \
   "sgt-notify: $TASK_ID ${_is_done:+completed}${_is_done:-reported}" \
-  "$_wiki_type" \
+  "activity" \
   "Agent $TASK_ID: $MESSAGE" \
   "sergeant,notify,$TASK_ID" \
   "$_wiki_body"

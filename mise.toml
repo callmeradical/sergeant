@@ -18,13 +18,23 @@ TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
 mkdir -p "$TARGET_DIR"
 
 linked=0
-for f in "$BIN_DIR"/sgt-* "$BIN_DIR"/_sgt-lib.sh; do
+for f in "$BIN_DIR"/sgt-* "$BIN_DIR"/_sgt-lib.sh "$BIN_DIR/oc-inject" "$BIN_DIR/wiki-daily-digest"; do
   [[ -f "$f" ]] || continue
   name="$(basename "$f")"
   ln -sf "$f" "$TARGET_DIR/$name"
   echo "  linked: $TARGET_DIR/$name -> $f"
   linked=$((linked+1))
 done
+
+# Symlink the OpenCode plugin
+OC_PLUGIN_DIR="$HOME/.config/opencode/plugins"
+OC_PLUGIN_SRC="$REPO_DIR/opencode/plugins/oc-inject.js"
+if [[ -f "$OC_PLUGIN_SRC" ]]; then
+  mkdir -p "$OC_PLUGIN_DIR"
+  ln -sf "$OC_PLUGIN_SRC" "$OC_PLUGIN_DIR/oc-inject.js"
+  echo "  linked: $OC_PLUGIN_DIR/oc-inject.js -> $OC_PLUGIN_SRC"
+  echo "  NOTE: restart OpenCode to activate the oc-inject plugin"
+fi
 
 echo ""
 echo "Installed $linked scripts to $TARGET_DIR"
@@ -47,7 +57,7 @@ set -euo pipefail
 TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
 removed=0
 
-for f in "$TARGET_DIR"/sgt-* "$TARGET_DIR"/_sgt-lib.sh; do
+for f in "$TARGET_DIR"/sgt-* "$TARGET_DIR"/_sgt-lib.sh "$TARGET_DIR/oc-inject" "$TARGET_DIR/wiki-daily-digest"; do
   [[ -L "$f" ]] || continue
   # Only remove if it points back into the sergeant repo
   target="$(readlink "$f")"
