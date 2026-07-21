@@ -217,4 +217,5 @@ sgt-td-create <project> "<title>" --repos repo1,repo2 --priority P1
 | Worktree creation fails | Check if branch already exists; use `--branch` with a unique name |
 | babydriver dispatch fails | Run `babydriver usage` to check env health; ensure `BABYDRIVER_SERVER` is set |
 | Fleet state is stale | Run `bin/sgt-watch --sync <task-id>` to force a one-shot sync |
-| Need to retry a failed repo | Fix the worktree manually, then re-write `.sergeant-status: done` |
+| Need to recover a waiting or orphaned worker | Use `bin/sgt-respond <task-id> <repo> "<response>"`; do not mark it done manually |
+| Need to retry a failed repo | Fix the underlying issue, then write both `.sergeant-result` and `.sergeant-status=done` only after every completion gate passes |

@@ -221,7 +221,7 @@ Load the **dispatch** skill (`skills/dispatch/SKILL.md`) for the full planning +
 
 ### Fleet state
 
-Each task creates a directory at `~/.local/share/sergeant/fleet/<task-id>/`. Workers signal completion by writing `.sergeant-status` and `.sergeant-result` in their worktree. `sgt-watch` syncs those into fleet state and reports.
+Each task creates a directory at `~/.local/share/sergeant/fleet/<task-id>/`. Workers report status, escalation messages, and results from their worktree; terminal completion requires both `.sergeant-status=done` and `.sergeant-result`. `sgt-watch` syncs those files into fleet state and reports.
 
 ---
 
@@ -250,11 +250,11 @@ If the user wants to register a new project or edit an existing one:
 
 ## Wiki integration
 
-Sergeant writes to `~/wiki/.captures/` automatically on dispatch, agent completion, and cleanup. The curated wiki at `~/wiki/` is maintained separately by `wiki-daily-digest`.
+Sergeant writes to `~/wiki/.captures/` automatically on dispatch, worker escalations/completions, and cleanup. The curated wiki at `~/wiki/` is maintained separately by `wiki-daily-digest`.
 
 ### Automatic captures (happen without any action)
 - `sgt-dispatch` — writes an activity entry when a fleet is launched (task, project, branch, repos, brief)
-- `sgt-notify` — writes an activity entry when an agent reports done or failed (includes PR URL)
+- `sgt-notify` — writes an activity entry when a worker reports an escalation or terminal outcome (includes PR URL when present)
 - `sgt-cleanup` — writes an activity entry when worktrees are removed (includes final status)
 
 ### Daily digest cron (runs at 6am via launchd)

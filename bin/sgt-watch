@@ -11,9 +11,9 @@
 #   sgt-watch --sync <task-id>       # one-shot sync worktree → fleet state, then exit
 #
 # Workers write:
-#   <worktree>/.sergeant-status    → in_progress, needs_input, blocked, done, failed
+#   <worktree>/.sergeant-status    → in_progress, needs_input, blocked, orphaned, done, failed: <reason>
 #   <worktree>/.sergeant-message   → escalation context, evidence, and question
-#   <worktree>/.sergeant-result    → PR URL or report path
+#   <worktree>/.sergeant-result    → PR URL or report path; required with status=done
 #
 # Fleet state mirrors:
 #   ~/.local/share/sergeant/fleet/<task-id>/<repo>/status
@@ -216,7 +216,9 @@ _sync_remote_repo() {
     [[ -n "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
     printf 'orphaned\n' > "$repo_dir/status"
     printf 'remote dispatch metadata is incomplete\n' > "$repo_dir/diagnostic"
-    [[ -n "$worktree" ]] && "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+    if [[ -n "$worktree" ]]; then
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+    fi
     return
   fi
 
@@ -224,7 +226,9 @@ _sync_remote_repo() {
     [[ -n "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
     printf 'orphaned\n' > "$repo_dir/status"
     printf 'babydriver is unavailable for remote fleet sync\n' > "$repo_dir/diagnostic"
-    [[ -n "$worktree" ]] && "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+    if [[ -n "$worktree" ]]; then
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+    fi
     return
   fi
 
@@ -240,7 +244,9 @@ _sync_remote_repo() {
     } > "$repo_dir/diagnostic"
     [[ -n "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
     printf 'orphaned\n' > "$repo_dir/status"
-    [[ -n "$worktree" ]] && "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+    if [[ -n "$worktree" ]]; then
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+    fi
     return
   fi
 
@@ -254,7 +260,9 @@ _sync_remote_repo() {
     } > "$repo_dir/diagnostic"
     [[ -n "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
     printf 'orphaned\n' > "$repo_dir/status"
-    [[ -n "$worktree" ]] && "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+    if [[ -n "$worktree" ]]; then
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+    fi
     return
   fi
 
@@ -275,7 +283,9 @@ _sync_remote_repo() {
     } > "$repo_dir/diagnostic"
     [[ -n "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
     printf 'orphaned\n' > "$repo_dir/status"
-    [[ -n "$worktree" ]] && "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+    if [[ -n "$worktree" ]]; then
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+    fi
     return
   fi
 

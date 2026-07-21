@@ -82,7 +82,9 @@ if [[ "$backend" == "remote-babydriver" ]]; then
     [[ -n "$worktree" && -d "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
     printf 'orphaned\n' > "$REPO_DIR/status"
     printf 'remote response delivery metadata is incomplete\n' > "$REPO_DIR/diagnostic"
-    [[ -n "$worktree" && -d "$worktree" ]] && "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_DIR" "$worktree" || true
+    if [[ -n "$worktree" && -d "$worktree" ]]; then
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_DIR" "$worktree" || true
+    fi
     _die "Remote worker relaunch metadata is incomplete for $TASK_ID/$REPO"
   fi
   if ! restart_output="$(babydriver restart "$remote_session" --window "$restart_target" 2>&1)"; then
@@ -92,7 +94,9 @@ if [[ "$backend" == "remote-babydriver" ]]; then
     } > "$REPO_DIR/diagnostic"
     [[ -n "$worktree" && -d "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
     printf 'orphaned\n' > "$REPO_DIR/status"
-    [[ -n "$worktree" && -d "$worktree" ]] && "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_DIR" "$worktree" || true
+    if [[ -n "$worktree" && -d "$worktree" ]]; then
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_DIR" "$worktree" || true
+    fi
     _die "Remote worker relaunch failed for $TASK_ID/$REPO"
   fi
   rm -f "$REPO_DIR/diagnostic" "$REPO_DIR/message"
