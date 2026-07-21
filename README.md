@@ -119,12 +119,28 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-sync <project>` | Clone missing repos, pull existing ones |
 | `bin/sgt-context <project>` | Emit full agent context block for a project |
 | `bin/sgt-graphify <project>` | Run graphify across all repos → knowledge graph |
+| `bin/sgt-doctor [project] [--json]` | Diagnose a Sergeant installation without changing it |
 | `bin/sgt-dispatch <project> "<brief>" [options]` | Dispatch agents across repos |
 | `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Route a no-mistakes finding to a gate, td, ignore, or user escalation |
 | `bin/sgt-watch <task-id>` | Monitor dispatched fleet |
 | `bin/sgt-respond <task-id> <repo> "<response>"` | Respond to and resume a waiting worker |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees and fleet state |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
+
+### Diagnose an installation
+
+Run all checks, or limit project-specific checks to one project:
+
+```bash
+sgt-doctor
+sgt-doctor smith
+sgt-doctor --project smith --json
+```
+
+The command exits `0` when healthy, `1` when only warnings exist, `2` when any
+check fails, and `64` for invalid arguments. Diagnostics are read-only, redact
+credential-like values, and never print GitHub tokens. See
+[`docs/doctor.md`](docs/doctor.md) for the check and JSON contracts.
 
 ### Deferred no-mistakes findings
 
@@ -146,14 +162,15 @@ Agent-loaded skills for structured workflows:
 
 ## Requirements
 
-- `td` — task CLI, required for brief-based `sgt-dispatch` runs, `sgt-no-mistakes-finding`, and `sgt-td-*` commands
+- `td` — repository-local task lifecycle integration. Required for brief-based `sgt-dispatch` runs, `sgt-no-mistakes-finding`, and `sgt-td-*`; optional otherwise
 - `yq` — YAML parser: `brew install yq`
 - `git` and `gh` — for repo operations and PRs
 - `tmux` — for local agent dispatch
 - `treehouse` — pre-warmed worktree pools (optional but recommended for dispatch)
 - `graphify` — knowledge graph generation (optional, needed for `sgt-graphify`)
 - `babydriver` — remote dispatch to cleanthes (optional)
-- A supported agent harness: OpenCode or Claude Code
+- `no-mistakes` — validated delivery pipeline (optional)
+- A supported agent harness: OpenCode, Claude Code, Goose, etc.
 
 ## License
 

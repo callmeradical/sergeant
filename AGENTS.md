@@ -62,6 +62,7 @@ These scripts in `bin/` are your hands. Use them before doing anything manually.
 | `bin/sgt-sync <project>` | Clone missing repos, pull existing ones |
 | `bin/sgt-context <project>` | Emit full agent context block for a project |
 | `bin/sgt-graphify <project>` | Run graphify across all repos, write to configured output |
+| `bin/sgt-doctor [project] [--json]` | Read-only installation, project, integration, and fleet diagnostics |
 | `bin/sgt-dispatch <project> "<brief>" [options]` | Create worktrees + spawn agent per repo |
 | `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Apply a finding disposition and create/update owning-repo td debt |
 | `bin/sgt-dispatch <project> --td <id>` | Dispatch from a td task (auto-detects repo) |

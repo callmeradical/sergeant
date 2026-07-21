@@ -118,6 +118,14 @@ else
 fi
 """
 
+[tasks.test]
+description = "Run Sergeant shell regression tests"
+run = "bash tests/run.sh"
+
+[tasks.lint]
+description = "Run ShellCheck for sgt-doctor and its regression tests"
+run = "shellcheck bin/sgt-doctor tests/*.sh"
+
 [tasks.update]
 description = "Pull latest changes from origin and reinstall symlinks"
 run = """
