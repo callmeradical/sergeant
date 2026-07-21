@@ -135,16 +135,12 @@ Repo role: $repo_role"
   fi
 
   if $JSON_OUT; then
-    entry="{\"repo\":\"$rname\",\"task_id\":\"$task_id\",\"title\":\"$TITLE\",\"work_dir\":\"$repo_path\"}"
-    results="$(echo "$results $entry" | python3 -c "
-import sys, json
-parts = sys.stdin.read().split()
-merged = []
-for p in parts:
-    try: merged.extend([json.loads(p)] if not isinstance(json.loads(p), list) else json.loads(p))
-    except: pass
-print(json.dumps(merged, indent=2))
-" 2>/dev/null || echo "[]")"
+    results="$(python3 -c '
+import json, sys
+results = json.loads(sys.argv[1])
+results.append({"repo": sys.argv[2], "task_id": sys.argv[3], "title": sys.argv[4], "work_dir": sys.argv[5]})
+print(json.dumps(results))
+' "$results" "$rname" "$task_id" "$TITLE" "$repo_path")"
   else
     printf "%-20s  %s  %s\n" "$rname" "$task_id" "$TITLE"
   fi

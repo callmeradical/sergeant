@@ -114,13 +114,16 @@ fi
 [[ -n "$BRIEF" ]]     || _die "Provide a brief or use --td <task-id>"
 [[ -n "$REPOS_ARG" ]] || _die "Must specify --repos. Run 'sgt-context $PROJECT' to see available repos."
 
+TARGET_REPOS=()
+IFS=',' read -ra TARGET_REPOS <<< "$REPOS_ARG"
+
 _require_yq
 _require_git
 $REMOTE || _require_tmux
 
 # ── Auto-create td tasks when no --td given ───────────────────────────────────
-# If td is available and we weren't given a specific task ID, create td tasks
-# in each target repo now so the work is tracked end-to-end.
+# When we weren't given a specific task ID, create td tasks in each target repo
+# now so the work is tracked end-to-end.
 #
 # We store a map of repo→task_id in a temp file so the brief-writing loop
 # can inject the right td task ID per repo.
@@ -128,21 +131,31 @@ $REMOTE || _require_tmux
 REPO_TD_MAP="$(mktemp)"
 trap 'rm -f "$REPO_TD_MAP" "${DEPS_TMP:-}"' EXIT
 
-if [[ -z "$TD_TASK_ID" ]] && command -v td &>/dev/null && ! $DRY_RUN; then
+if [[ -z "$TD_TASK_ID" ]] && ! $DRY_RUN; then
+  command -v td &>/dev/null || _die "td is required for brief-only dispatch"
   echo "Creating td tasks ..."
-  td_results="$("$SCRIPT_DIR/sgt-td-create" "$PROJECT" "$BRIEF" \
+  if ! td_results="$("$SCRIPT_DIR/sgt-td-create" "$PROJECT" "$BRIEF" \
     --repos "$REPOS_ARG" \
     --type task \
     --priority P1 \
-    --json 2>/dev/null || echo "[]")"
+    --json 2>&1)"; then
+    _die "td task creation failed: $td_results"
+  fi
 
   # Write repo→task_id to temp map
-  echo "$td_results" | python3 -c "
+  if ! echo "$td_results" | python3 -c "
 import sys, json
 results = json.load(sys.stdin)
 for r in results:
     print(r['repo'] + ' ' + r['task_id'])
-" 2>/dev/null > "$REPO_TD_MAP" || true
+" 2>/dev/null > "$REPO_TD_MAP"; then
+    _die "failed to inject td task results"
+  fi
+
+  for rname in "${TARGET_REPOS[@]}"; do
+    awk -v repo="$rname" '$1 == repo && NF == 2 { found = 1 } END { exit !found }' "$REPO_TD_MAP" || \
+      _die "missing td task for selected repo: $rname"
+  done
 
   if [[ -s "$REPO_TD_MAP" ]]; then
     while IFS=' ' read -r rname tid; do
@@ -190,8 +203,6 @@ echo ""
 # ── Validate repos ────────────────────────────────────────────────────────────
 
 repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
-TARGET_REPOS=()
-IFS=',' read -ra TARGET_REPOS <<< "$REPOS_ARG"
 
 for rname in "${TARGET_REPOS[@]}"; do
   found=false
