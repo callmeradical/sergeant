@@ -73,9 +73,10 @@ _cleanup_response_transport() {
 
 _finalize_submitted_response() {
   local response_id="$1"
-  [[ -n "$response_id" ]] || return 0
   _sgt_response_lock_acquire "$REPO_STATE"
-  printf '%s\n' "$response_id" > "$WORKTREE/.sergeant-response-ack"
+  if [[ -n "$response_id" ]]; then
+    printf '%s\n' "$response_id" > "$WORKTREE/.sergeant-response-ack"
+  fi
   _cleanup_response_transport
   _sgt_response_lock_release
 }
@@ -174,6 +175,7 @@ _wait_for_response() {
   local response response_id
   WAIT_RESPONSE_MESSAGE=""
   RESPONSE_SUBMISSION_ID=""
+  RESPONSE_SUBMISSION_PENDING=0
   while true; do
     if [[ -f "$WORKTREE/.sergeant-response" ]]; then
       _sgt_response_lock_acquire "$REPO_STATE"
@@ -206,6 +208,7 @@ _wait_for_response() {
           printf -v WAIT_RESPONSE_MESSAGE 'Sergeant response: %s\nStart deterministic recovery from fleet files at %s, especially diagnostic and worker.log, and reconcile them with git state before continuing.' "$response" "$REPO_STATE"
         fi
         RESPONSE_SUBMISSION_ID="$response_id"
+        RESPONSE_SUBMISSION_PENDING=1
         break
       fi
       _sgt_response_lock_release
@@ -242,8 +245,6 @@ fi
 while true; do
   _run_turn "$next_message"
   exit_code=$?
-  _finalize_submitted_response "${RESPONSE_SUBMISSION_ID:-}"
-  RESPONSE_SUBMISSION_ID=""
   status="$(_status)"
   _sync_state
 
@@ -260,6 +261,11 @@ while true; do
         fi
         exit $?
       fi
+      if [[ "${RESPONSE_SUBMISSION_PENDING:-0}" == "1" ]]; then
+        _finalize_submitted_response "${RESPONSE_SUBMISSION_ID:-}"
+        RESPONSE_SUBMISSION_PENDING=0
+        RESPONSE_SUBMISSION_ID=""
+      fi
       "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
       _wait_for_response
       next_message="$WAIT_RESPONSE_MESSAGE"
@@ -269,11 +275,21 @@ while true; do
         _orphan 1 "terminal status done requires .sergeant-result"
         exit $?
       fi
+      if [[ "${RESPONSE_SUBMISSION_PENDING:-0}" == "1" ]]; then
+        _finalize_submitted_response "${RESPONSE_SUBMISSION_ID:-}"
+        RESPONSE_SUBMISSION_PENDING=0
+        RESPONSE_SUBMISSION_ID=""
+      fi
       _sync_state
       rm -f "$DIAGNOSTIC"
       exit 0
       ;;
     failed:*)
+      if [[ "${RESPONSE_SUBMISSION_PENDING:-0}" == "1" ]]; then
+        _finalize_submitted_response "${RESPONSE_SUBMISSION_ID:-}"
+        RESPONSE_SUBMISSION_PENDING=0
+        RESPONSE_SUBMISSION_ID=""
+      fi
       exit 1
       ;;
     *)

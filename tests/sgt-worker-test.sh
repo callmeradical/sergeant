@@ -98,6 +98,11 @@ case "$FAKE_MODE:$turn" in
     printf 'done\n' > .sergeant-status
     printf 'recovered result\n' > .sergeant-result
     ;;
+  submitted_response_missing_session:1)
+    [[ "$*" == *"Use option A"* ]]
+    printf 'needs_input\n' > .sergeant-status
+    printf 'Need a response but no session was emitted.\n' > .sergeant-message
+    ;;
   resume_after_submitted_response:1)
     [[ "$*" == *"--session ses-test-123"* ]]
     [[ "$*" != *"Use option A"* ]]
@@ -105,6 +110,12 @@ case "$FAKE_MODE:$turn" in
     [[ ! -e .sergeant-response ]]
     printf 'done\n' > .sergeant-status
     printf 'resumed without replay result\n' > .sergeant-result
+    ;;
+  legacy_response_cleanup:1)
+    [[ "$*" == *"--session ses-test-123"* ]]
+    [[ "$*" == *"Use option A"* ]]
+    printf 'done\n' > .sergeant-status
+    printf 'legacy cleanup result\n' > .sergeant-result
     ;;
   serialized_response:1)
     [[ "$*" == *"new response"* ]]
@@ -228,6 +239,40 @@ PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" \
   "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_agent" "initial mission"
 [[ "$(cat "$case_root/worktree/.sergeant-result")" == 'resumed without replay result' ]]
 [[ ! -e "$case_root/worktree/.sergeant-response" && ! -e "$case_root/state/response" ]]
+
+case_root="$TEST_ROOT/submitted-response-missing-session"
+mkdir -p "$case_root/worktree" "$case_root/state"
+printf 'orphaned\n' > "$case_root/worktree/.sergeant-status"
+printf 'td-123\n' > "$case_root/state/td_task"
+printf 'Use option A\n' > "$case_root/worktree/.sergeant-response"
+printf 'response-id-123\n' > "$case_root/worktree/.sergeant-response-id"
+printf 'Use option A\n' > "$case_root/state/response"
+printf 'response-id-123\n' > "$case_root/state/response_id"
+set +e
+PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" \
+  FAKE_MODE=submitted_response_missing_session FAKE_STATE="$case_root" \
+  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_agent" "initial mission"
+status=$?
+set -e
+[[ "$status" -ne 0 ]]
+[[ "$(cat "$case_root/worktree/.sergeant-status")" == 'orphaned' ]]
+[[ "$(cat "$case_root/worktree/.sergeant-response")" == 'Use option A' ]]
+[[ "$(cat "$case_root/state/response")" == 'Use option A' ]]
+[[ ! -e "$case_root/worktree/.sergeant-response-ack" ]]
+grep -Fq 'OpenCode turn did not provide a resumable session ID' "$case_root/state/diagnostic"
+
+case_root="$TEST_ROOT/legacy-response-cleanup"
+mkdir -p "$case_root/worktree" "$case_root/state"
+printf 'orphaned\n' > "$case_root/worktree/.sergeant-status"
+printf 'ses-test-123\n' > "$case_root/state/session_id"
+printf 'Use option A\n' > "$case_root/worktree/.sergeant-response"
+printf 'Use option A\n' > "$case_root/state/response"
+PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" \
+  FAKE_MODE=legacy_response_cleanup FAKE_STATE="$case_root" \
+  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_agent" "initial mission"
+[[ "$(cat "$case_root/worktree/.sergeant-result")" == 'legacy cleanup result' ]]
+[[ ! -e "$case_root/worktree/.sergeant-response" && ! -e "$case_root/state/response" ]]
+[[ ! -e "$case_root/worktree/.sergeant-response-ack" ]]
 
 case_root="$TEST_ROOT/serialized-response"
 mkdir -p "$case_root/worktree" "$case_root/state/response.lock"
