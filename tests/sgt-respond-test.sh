@@ -42,6 +42,10 @@ cat > "$fake_bin/babydriver" <<'EOF'
 printf '%s\n' "$*" >> "$BABYDRIVER_LOG"
 case "$1" in
   restart)
+    if [[ -n "${REMOTE_RESPONSE_PATH:-}" ]]; then
+      [[ -f "$REMOTE_RESPONSE_PATH" ]] || exit 29
+      [[ "$(cat "$REMOTE_RESPONSE_PATH")" == "${REMOTE_RESPONSE_TEXT:-}" ]] || exit 31
+    fi
     [[ "${FAIL_RESTART:-0}" == 0 ]] || exit 23
     ;;
 esac
@@ -191,34 +195,40 @@ grep -Fq 'handoff td-123' "$TEST_ROOT/empty-pane-td.log"
 
 remote_repo_state="$fleet/task-1/remote"
 remote_worktree="$TEST_ROOT/remote-worktree"
-mkdir -p "$remote_repo_state" "$remote_worktree"
+remote_project_dir="$TEST_ROOT/remote-project"
+mkdir -p "$remote_repo_state" "$remote_worktree" "$remote_project_dir"
 printf '%s\n' "$remote_worktree" > "$remote_repo_state/worktree"
 printf 'remote-babydriver\n' > "$remote_repo_state/backend"
 printf 'remote-drive\n' > "$remote_repo_state/remote_session"
 printf 'remote-window\n' > "$remote_repo_state/remote_window"
+printf '%s\n' "$remote_project_dir" > "$remote_repo_state/remote_project_dir"
 printf 'td-remote-789\n' > "$remote_repo_state/remote_td_task"
 printf 'needs_input\n' > "$remote_repo_state/status"
 printf 'needs_input\n' > "$remote_worktree/.sergeant-status"
 printf 'Need a remote answer.\n' > "$remote_worktree/.sergeant-message"
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/remote-live.log" BABYDRIVER_LOG="$TEST_ROOT/remote-babydriver.log" \
 TD_LOG="$TEST_ROOT/remote-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
+REMOTE_RESPONSE_PATH="$remote_project_dir/.sergeant-response" REMOTE_RESPONSE_TEXT='remote response' \
   "$ROOT_DIR/bin/sgt-respond" task-1 remote 'remote response' >/dev/null
 [[ "$(cat "$remote_repo_state/status")" == 'in_progress' ]]
 [[ "$(cat "$remote_worktree/.sergeant-status")" == 'in_progress' ]]
 remote_response_id="$(cat "$remote_repo_state/response_id")"
 [[ "$remote_response_id" =~ ^[a-f0-9]{32}$ ]]
 [[ ! -e "$remote_repo_state/response" && ! -e "$remote_worktree/.sergeant-response" ]]
+[[ "$(cat "$remote_project_dir/.sergeant-response")" == 'remote response' ]]
 grep -Fq 'restart remote-drive --window remote-window' "$TEST_ROOT/remote-babydriver.log"
 [[ ! -e "$remote_repo_state/message" && ! -e "$remote_worktree/.sergeant-message" ]]
 grep -Fq 'log td-remote-789' "$TEST_ROOT/remote-td.log"
 
 remote_name_repo_state="$fleet/task-1/remote-name"
 remote_name_worktree="$TEST_ROOT/remote-name-worktree"
-mkdir -p "$remote_name_repo_state" "$remote_name_worktree"
+remote_name_project_dir="$TEST_ROOT/remote-name-project"
+mkdir -p "$remote_name_repo_state" "$remote_name_worktree" "$remote_name_project_dir"
 printf '%s\n' "$remote_name_worktree" > "$remote_name_repo_state/worktree"
 printf 'remote-babydriver\n' > "$remote_name_repo_state/backend"
 printf 'remote-drive\n' > "$remote_name_repo_state/remote_session"
 printf 'remote-window\n' > "$remote_name_repo_state/remote_window"
+printf '%s\n' "$remote_name_project_dir" > "$remote_name_repo_state/remote_project_dir"
 printf 'remote-window:Need a remote answer. [sgt:task-1]\n' > "$remote_name_repo_state/remote_task_name"
 printf 'td-remote-name-123\n' > "$remote_name_repo_state/remote_td_task"
 printf 'needs_input\n' > "$remote_name_repo_state/status"
@@ -226,10 +236,12 @@ printf 'needs_input\n' > "$remote_name_worktree/.sergeant-status"
 printf 'Need a remote answer.\n' > "$remote_name_worktree/.sergeant-message"
 PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-name-babydriver.log" \
 TD_LOG="$TEST_ROOT/remote-name-td.log" TD_RESPONSE_FILE="$remote_name_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
+REMOTE_RESPONSE_PATH="$remote_name_project_dir/.sergeant-response" REMOTE_RESPONSE_TEXT='remote name response' \
   "$ROOT_DIR/bin/sgt-respond" task-1 remote-name 'remote name response' >/dev/null
 [[ "$(cat "$remote_name_repo_state/status")" == 'in_progress' ]]
 [[ "$(cat "$remote_name_worktree/.sergeant-status")" == 'in_progress' ]]
 [[ ! -e "$remote_name_repo_state/response" && ! -e "$remote_name_worktree/.sergeant-response" ]]
+[[ "$(cat "$remote_name_project_dir/.sergeant-response")" == 'remote name response' ]]
 grep -Fq 'restart remote-drive --window remote-window:Need a remote answer. [sgt:task-1]' "$TEST_ROOT/remote-name-babydriver.log"
 [[ ! -e "$remote_name_repo_state/message" && ! -e "$remote_name_worktree/.sergeant-message" ]]
 printf 'needs_input\n' > "$remote_repo_state/status"
@@ -237,11 +249,13 @@ printf 'needs_input\n' > "$remote_worktree/.sergeant-status"
 printf 'Need another remote answer.\n' > "$remote_worktree/.sergeant-message"
 PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-duplicate.log" \
 TD_LOG="$TEST_ROOT/remote-duplicate-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
+REMOTE_RESPONSE_PATH="$remote_project_dir/.sergeant-response" REMOTE_RESPONSE_TEXT='remote response 2' \
   "$ROOT_DIR/bin/sgt-respond" task-1 remote 'remote response 2' >/dev/null
 [[ "$(cat "$remote_repo_state/status")" == 'in_progress' ]]
 [[ "$(cat "$remote_worktree/.sergeant-status")" == 'in_progress' ]]
 [[ ! -e "$remote_repo_state/response" && ! -e "$remote_worktree/.sergeant-response" ]]
 [[ "$(cat "$remote_repo_state/response_id")" != "$remote_response_id" ]]
+[[ "$(cat "$remote_project_dir/.sergeant-response")" == 'remote response 2' ]]
 grep -Fq 'restart remote-drive --window remote-window' "$TEST_ROOT/remote-duplicate.log"
 grep -Fq 'log td-remote-789' "$TEST_ROOT/remote-duplicate-td.log"
 
@@ -263,13 +277,34 @@ printf 'needs_input\n' > "$remote_worktree/.sergeant-status"
 set +e
 PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-babydriver-fail.log" FAIL_RESTART=1 \
 TD_LOG="$TEST_ROOT/remote-fail-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
+REMOTE_RESPONSE_PATH="$remote_project_dir/.sergeant-response" REMOTE_RESPONSE_TEXT='remote failure' \
   "$ROOT_DIR/bin/sgt-respond" task-1 remote 'remote failure' >/dev/null 2>&1
 status=$?
 set -e
 [[ "$status" -ne 0 ]]
 [[ "$(cat "$remote_repo_state/status")" == 'orphaned' ]]
 grep -Fq 'babydriver restart failed for remote-drive/remote-window' "$remote_repo_state/diagnostic"
+[[ "$(cat "$remote_repo_state/response")" == 'remote failure' ]]
+[[ "$(cat "$remote_worktree/.sergeant-response")" == 'remote failure' ]]
+failed_remote_response_id="$(cat "$remote_repo_state/response_id")"
+[[ "$failed_remote_response_id" =~ ^[a-f0-9]{32}$ ]]
+[[ "$(cat "$remote_project_dir/.sergeant-response")" == 'remote failure' ]]
+
+printf 'orphaned\n' > "$remote_repo_state/status"
+printf 'needs_input\n' > "$remote_worktree/.sergeant-status"
+PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-babydriver-retry.log" \
+TD_LOG="$TEST_ROOT/remote-retry-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
+REMOTE_RESPONSE_PATH="$remote_project_dir/.sergeant-response" REMOTE_RESPONSE_TEXT='remote failure' \
+  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'ignored retry text' >/dev/null 2>"$TEST_ROOT/remote-retry.err"
+[[ "$(cat "$remote_repo_state/status")" == 'in_progress' ]]
+[[ "$(cat "$remote_worktree/.sergeant-status")" == 'in_progress' ]]
+[[ "$(cat "$remote_repo_state/response_id")" == "$failed_remote_response_id" ]]
 [[ ! -e "$remote_repo_state/response" && ! -e "$remote_worktree/.sergeant-response" ]]
+grep -Fq 'reusing stored recovery response' "$TEST_ROOT/remote-retry.err"
+if [[ -e "$TEST_ROOT/remote-retry-td.log" ]]; then
+  printf 'remote retry should not log a duplicate td decision\n' >&2
+  exit 1
+fi
 
 printf 'needs_input\n' > "$remote_name_repo_state/status"
 printf 'needs_input\n' > "$remote_name_worktree/.sergeant-status"
@@ -277,12 +312,38 @@ rm -f "$remote_name_worktree/.sergeant-response" "$remote_name_repo_state/respon
 set +e
 PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-name-babydriver-fail.log" FAIL_RESTART=1 \
 TD_LOG="$TEST_ROOT/remote-name-fail-td.log" TD_RESPONSE_FILE="$remote_name_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
+REMOTE_RESPONSE_PATH="$remote_name_project_dir/.sergeant-response" REMOTE_RESPONSE_TEXT='remote name failure' \
   "$ROOT_DIR/bin/sgt-respond" task-1 remote-name 'remote name failure' >/dev/null 2>&1
 status=$?
 set -e
 [[ "$status" -ne 0 ]]
 [[ "$(cat "$remote_name_repo_state/status")" == 'orphaned' ]]
 grep -Fq 'babydriver restart failed for remote-drive/remote-window:Need a remote answer. [sgt:task-1]' "$remote_name_repo_state/diagnostic"
-[[ ! -e "$remote_name_repo_state/response" && ! -e "$remote_name_worktree/.sergeant-response" ]]
+[[ "$(cat "$remote_name_repo_state/response")" == 'remote name failure' ]]
+[[ "$(cat "$remote_name_worktree/.sergeant-response")" == 'remote name failure' ]]
+[[ "$(cat "$remote_name_project_dir/.sergeant-response")" == 'remote name failure' ]]
+
+remote_missing_repo_state="$fleet/task-1/remote-missing"
+remote_missing_worktree="$TEST_ROOT/remote-missing-worktree"
+mkdir -p "$remote_missing_repo_state" "$remote_missing_worktree"
+printf '%s\n' "$remote_missing_worktree" > "$remote_missing_repo_state/worktree"
+printf 'remote-babydriver\n' > "$remote_missing_repo_state/backend"
+printf 'remote-drive\n' > "$remote_missing_repo_state/remote_session"
+printf 'remote-window\n' > "$remote_missing_repo_state/remote_window"
+printf 'td-remote-missing\n' > "$remote_missing_repo_state/remote_td_task"
+printf 'needs_input\n' > "$remote_missing_repo_state/status"
+printf 'needs_input\n' > "$remote_missing_worktree/.sergeant-status"
+set +e
+PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-missing-babydriver.log" \
+TD_LOG="$TEST_ROOT/remote-missing-td.log" TD_RESPONSE_FILE="$remote_missing_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-respond" task-1 remote-missing 'remote missing path' >/dev/null 2>&1
+status=$?
+set -e
+[[ "$status" -ne 0 ]]
+[[ "$(cat "$remote_missing_repo_state/status")" == 'orphaned' ]]
+[[ "$(cat "$remote_missing_repo_state/response")" == 'remote missing path' ]]
+[[ "$(cat "$remote_missing_worktree/.sergeant-response")" == 'remote missing path' ]]
+grep -Fq 'remote response delivery path is unavailable' "$remote_missing_repo_state/diagnostic"
+[[ ! -e "$TEST_ROOT/remote-missing-babydriver.log" ]]
 
 printf 'sgt-respond resumes workers: ok\n'

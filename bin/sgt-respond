@@ -39,23 +39,6 @@ case "$status" in
   needs_input|blocked|orphaned) ;;
   *) _die "Worker status '$status' is not waiting or resumable; response was not published" ;;
 esac
-if [[ -f "$REPO_DIR/response" || (-n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-response") ]]; then
-  _die "A Sergeant response is already pending consumption for $TASK_ID/$REPO"
-fi
-
-_clear_published_response() {
-  rm -f "$REPO_DIR/response"
-  if [[ -n "$worktree" && -d "$worktree" ]]; then
-    rm -f "$worktree/.sergeant-response"
-  fi
-}
-
-response_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-if [[ -n "$worktree" && -d "$worktree" ]]; then
-  printf '%s' "$response_id" | "$SCRIPT_DIR/sgt-td-memory" response "$REPO_DIR" "$worktree" || true
-elif [[ -f "$REPO_DIR/td_task" || -f "$REPO_DIR/remote_td_task" ]]; then
-  printf 'td-memory: worktree unavailable; response decision receipt could not be logged before fleet-only delivery\n' >> "$REPO_DIR/diagnostic"
-fi
 
 _atomic_write() {
   local target="$1"
@@ -66,11 +49,57 @@ _atomic_write() {
   mv "$temporary" "$target"
 }
 
-_atomic_write "$REPO_DIR/response" "$RESPONSE"
-_atomic_write "$REPO_DIR/response_id" "$response_id"
-if [[ -n "$worktree" && -d "$worktree" ]]; then
-  _atomic_write "$worktree/.sergeant-response" "$RESPONSE"
-elif [[ "$backend" != "remote-babydriver" ]]; then
+_clear_local_response_transport() {
+  rm -f "$REPO_DIR/response"
+  if [[ -n "$worktree" && -d "$worktree" ]]; then
+    rm -f "$worktree/.sergeant-response"
+  fi
+}
+
+_publish_local_response_transport() {
+  local response="$1"
+  _atomic_write "$REPO_DIR/response" "$response"
+  if [[ -n "$worktree" && -d "$worktree" ]]; then
+    _atomic_write "$worktree/.sergeant-response" "$response"
+  fi
+}
+
+_publish_remote_response_transport() {
+  local remote_root="$1"
+  local response="$2"
+  local remote_target="$remote_root/.sergeant-response"
+  [[ -n "$remote_root" ]] || return 1
+  [[ -d "$remote_root" ]] || return 1
+  _atomic_write "$remote_target" "$response"
+  [[ -f "$remote_target" ]] || return 1
+}
+
+pending_response=""
+if [[ -f "$REPO_DIR/response" ]]; then
+  pending_response="$(cat "$REPO_DIR/response")"
+elif [[ -n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-response" ]]; then
+  pending_response="$(cat "$worktree/.sergeant-response")"
+fi
+
+response_id="$(cat "$REPO_DIR/response_id" 2>/dev/null || true)"
+if [[ -n "$pending_response" ]]; then
+  [[ "$status" == "orphaned" ]] || _die "A Sergeant response is already pending consumption for $TASK_ID/$REPO"
+  if [[ "$RESPONSE" != "$pending_response" ]]; then
+    printf 'sgt-respond: reusing stored recovery response for orphaned worker %s/%s; supplied text was ignored.\n' "$TASK_ID" "$REPO" >&2
+  fi
+  RESPONSE="$pending_response"
+else
+  response_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  if [[ -n "$worktree" && -d "$worktree" ]]; then
+    printf '%s' "$response_id" | "$SCRIPT_DIR/sgt-td-memory" response "$REPO_DIR" "$worktree" || true
+  elif [[ -f "$REPO_DIR/td_task" || -f "$REPO_DIR/remote_td_task" ]]; then
+    printf 'td-memory: worktree unavailable; response decision receipt could not be logged before fleet-only delivery\n' >> "$REPO_DIR/diagnostic"
+  fi
+  _publish_local_response_transport "$RESPONSE"
+  _atomic_write "$REPO_DIR/response_id" "$response_id"
+fi
+
+if [[ "$backend" != "remote-babydriver" && ( -z "$worktree" || ! -d "$worktree" ) ]]; then
   echo "sgt-respond: worktree unavailable; only fleet state was written."
   _sgt_response_lock_release
   trap - EXIT
@@ -80,10 +109,32 @@ fi
 if [[ "$backend" == "remote-babydriver" ]]; then
   remote_session="$(cat "$REPO_DIR/remote_session" 2>/dev/null || true)"
   remote_window="$(cat "$REPO_DIR/remote_window" 2>/dev/null || true)"
+  remote_project_dir="$(cat "$REPO_DIR/remote_project_dir" 2>/dev/null || true)"
   remote_task_name="$(cat "$REPO_DIR/remote_task_name" 2>/dev/null || true)"
   restart_target="${remote_task_name:-$remote_window}"
+  if [[ -z "$remote_project_dir" || ! -d "$remote_project_dir" ]]; then
+    [[ -n "$worktree" && -d "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
+    printf 'orphaned\n' > "$REPO_DIR/status"
+    printf 'remote response delivery path is unavailable: %s\n' "${remote_project_dir:-missing remote_project_dir}" > "$REPO_DIR/diagnostic"
+    if [[ -n "$worktree" && -d "$worktree" ]]; then
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_DIR" "$worktree" || true
+    fi
+    _sgt_response_lock_release
+    trap - EXIT
+    _die "Remote worker response delivery is unavailable for $TASK_ID/$REPO"
+  fi
+  if ! _publish_remote_response_transport "$remote_project_dir" "$RESPONSE"; then
+    [[ -n "$worktree" && -d "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
+    printf 'orphaned\n' > "$REPO_DIR/status"
+    printf 'remote response delivery failed for %s/.sergeant-response\n' "$remote_project_dir" > "$REPO_DIR/diagnostic"
+    if [[ -n "$worktree" && -d "$worktree" ]]; then
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_DIR" "$worktree" || true
+    fi
+    _sgt_response_lock_release
+    trap - EXIT
+    _die "Remote worker response delivery failed for $TASK_ID/$REPO"
+  fi
   if ! command -v babydriver >/dev/null 2>&1 || [[ -z "$remote_session" || -z "$restart_target" ]]; then
-    _clear_published_response
     [[ -n "$worktree" && -d "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
     printf 'orphaned\n' > "$REPO_DIR/status"
     printf 'remote response delivery metadata is incomplete\n' > "$REPO_DIR/diagnostic"
@@ -95,7 +146,6 @@ if [[ "$backend" == "remote-babydriver" ]]; then
     _die "Remote worker relaunch metadata is incomplete for $TASK_ID/$REPO"
   fi
   if ! restart_output="$(babydriver restart "$remote_session" --window "$restart_target" 2>&1)"; then
-    _clear_published_response
     {
       printf 'babydriver restart failed for %s/%s\n' "$remote_session" "$restart_target"
       printf '%s\n' "$restart_output"
@@ -109,7 +159,7 @@ if [[ "$backend" == "remote-babydriver" ]]; then
     trap - EXIT
     _die "Remote worker relaunch failed for $TASK_ID/$REPO"
   fi
-  _clear_published_response
+  _clear_local_response_transport
   rm -f "$REPO_DIR/diagnostic" "$REPO_DIR/message"
   [[ -n "$worktree" && -d "$worktree" ]] && {
     rm -f "$worktree/.sergeant-message"
