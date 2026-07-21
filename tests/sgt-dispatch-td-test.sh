@@ -584,6 +584,150 @@ printf 'sgt-dispatch unexpected td result rollback: ok\n'
 : > "$TEST_ROOT/td-delete.log"
 rm -f "$TEST_ROOT"/td-active/* "$TEST_ROOT"/td-counter/*
 
+cat > "$TEST_ROOT/bin/sgt-td-create" <<EOF
+#!/usr/bin/env bash
+results="\$("$ROOT_DIR/bin/sgt-td-create" "\$@")"
+status=\$?
+if [[ "\$status" -eq 0 ]]; then
+  RESULTS="\$results" python3 - <<'PY'
+import json
+import os
+
+items = json.loads(os.environ["RESULTS"])
+items[1]["task_id"] = ""
+print(json.dumps(items))
+PY
+fi
+exit "\$status"
+EOF
+chmod +x "$TEST_ROOT/bin/sgt-td-create"
+
+TD_MODE=success dispatch_capture test "Reject empty task ids" --repos app,api
+
+[[ "$status" -ne 0 ]] || {
+  printf 'dispatch succeeded after empty td task ids\n' >&2
+  exit 1
+}
+[[ "$output" == *"invalid td task id for repo: api"* ]] || {
+  printf 'dispatch did not report empty td task ids:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$(wc -l < "$TEST_ROOT/td-delete.log")" -eq 2 ]] || {
+  printf 'dispatch did not roll back created tasks after empty td task ids\n' >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/tmux.log" ]] || {
+  printf 'dispatch spawned tmux after empty td task ids\n' >&2
+  exit 1
+}
+[[ "$(find "$TEST_ROOT/td-active" -type f | wc -l)" -eq 0 ]] || {
+  printf 'empty td task ids left active cards behind\n' >&2
+  exit 1
+}
+
+printf 'sgt-dispatch empty td task id rollback: ok\n'
+
+: > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+: > "$TEST_ROOT/td-delete.log"
+rm -f "$TEST_ROOT"/td-active/* "$TEST_ROOT"/td-counter/*
+
+cat > "$TEST_ROOT/bin/sgt-td-create" <<EOF
+#!/usr/bin/env bash
+results="\$("$ROOT_DIR/bin/sgt-td-create" "\$@")"
+status=\$?
+if [[ "\$status" -eq 0 ]]; then
+  RESULTS="\$results" python3 - <<'PY'
+import json
+import os
+
+items = json.loads(os.environ["RESULTS"])
+items[1]["task_id"] = "td api 2"
+print(json.dumps(items))
+PY
+fi
+exit "\$status"
+EOF
+chmod +x "$TEST_ROOT/bin/sgt-td-create"
+
+TD_MODE=success dispatch_capture test "Reject whitespace task ids" --repos app,api
+
+[[ "$status" -ne 0 ]] || {
+  printf 'dispatch succeeded after whitespace td task ids\n' >&2
+  exit 1
+}
+[[ "$output" == *"invalid td task id for repo: api"* ]] || {
+  printf 'dispatch did not report whitespace td task ids:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$(wc -l < "$TEST_ROOT/td-delete.log")" -eq 2 ]] || {
+  printf 'dispatch did not roll back created tasks after whitespace td task ids\n' >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/tmux.log" ]] || {
+  printf 'dispatch spawned tmux after whitespace td task ids\n' >&2
+  exit 1
+}
+[[ "$(find "$TEST_ROOT/td-active" -type f | wc -l)" -eq 0 ]] || {
+  printf 'whitespace td task ids left active cards behind\n' >&2
+  exit 1
+}
+
+printf 'sgt-dispatch whitespace td task id rollback: ok\n'
+
+: > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+: > "$TEST_ROOT/td-delete.log"
+rm -f "$TEST_ROOT"/td-active/* "$TEST_ROOT"/td-counter/*
+
+cat > "$TEST_ROOT/bin/sgt-td-create" <<EOF
+#!/usr/bin/env bash
+results="\$("$ROOT_DIR/bin/sgt-td-create" "\$@")"
+status=\$?
+if [[ "\$status" -eq 0 ]]; then
+  RESULTS="\$results" python3 - <<'PY'
+import json
+import os
+
+items = json.loads(os.environ["RESULTS"])
+items[1]["task_id"] = items[0]["task_id"]
+print(json.dumps(items))
+PY
+fi
+exit "\$status"
+EOF
+chmod +x "$TEST_ROOT/bin/sgt-td-create"
+
+TD_MODE=success dispatch_capture test "Reject duplicate task ids" --repos app,api
+
+[[ "$status" -ne 0 ]] || {
+  printf 'dispatch succeeded after duplicate td task ids\n' >&2
+  exit 1
+}
+[[ "$output" == *"duplicate td task id: td-app-1"* ]] || {
+  printf 'dispatch did not report duplicate td task ids:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$(wc -l < "$TEST_ROOT/td-delete.log")" -eq 2 ]] || {
+  printf 'dispatch did not roll back created tasks after duplicate td task ids\n' >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/tmux.log" ]] || {
+  printf 'dispatch spawned tmux after duplicate td task ids\n' >&2
+  exit 1
+}
+[[ "$(find "$TEST_ROOT/td-active" -type f | wc -l)" -eq 0 ]] || {
+  printf 'duplicate td task ids left active cards behind\n' >&2
+  exit 1
+}
+
+printf 'sgt-dispatch duplicate td task id rollback: ok\n'
+
+: > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+: > "$TEST_ROOT/td-delete.log"
+rm -f "$TEST_ROOT"/td-active/* "$TEST_ROOT"/td-counter/*
+
 cp "$ROOT_DIR/bin/sgt-td-create" "$TEST_ROOT/bin/sgt-td-create"
 TD_MODE=existing_td dispatch_success test --td td-existing --repos app
 

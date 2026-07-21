@@ -189,6 +189,7 @@ import sys
 
 selected = [repo for repo in os.environ["TARGET_REPOS_CSV"].split(",") if repo]
 seen = set()
+seen_task_ids = set()
 
 try:
     results = json.loads(os.environ["TD_RESULTS"])
@@ -209,13 +210,20 @@ for item in results:
     if not isinstance(repo, str) or not isinstance(task_id, str):
         print("failed to inject td task results", file=sys.stderr)
         raise SystemExit(1)
+    if not task_id or any(ch.isspace() for ch in task_id):
+        print(f"invalid td task id for repo: {repo}", file=sys.stderr)
+        raise SystemExit(1)
     if repo not in selected:
         print(f"unexpected td task result for repo: {repo}", file=sys.stderr)
         raise SystemExit(1)
     if repo in seen:
         print(f"duplicate td task result for repo: {repo}", file=sys.stderr)
         raise SystemExit(1)
+    if task_id in seen_task_ids:
+        print(f"duplicate td task id: {task_id}", file=sys.stderr)
+        raise SystemExit(1)
     seen.add(repo)
+    seen_task_ids.add(task_id)
     print(f"{repo} {task_id}")
 
 for repo in selected:
