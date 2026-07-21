@@ -138,11 +138,14 @@ printf 'orphaned\n' > "$task/remote/status"
 printf 'orphaned\n' > "$TEST_ROOT/remote-wt/.sergeant-status"
 printf 'preserved remote answer\n' > "$task/remote/response"
 printf 'preserved remote answer\n' > "$TEST_ROOT/remote-wt/.sergeant-response"
+printf '0123456789abcdef0123456789abcdef\n' > "$TEST_ROOT/remote-wt/.sergeant-response-id"
 printf '0123456789abcdef0123456789abcdef\n' > "$task/remote/response_id"
 printf '0123456789abcdef0123456789abcdef\n' > "$task/remote/remote_response_pending_id"
 printf 'retryable\n' > "$task/remote/remote_response_pending_state"
 printf 'blocked\n' > "$task/remote/remote_response_pending_checkpoint_status"
 printf 'Remote blocker remains active after failed restart.\n' > "$task/remote/remote_response_pending_checkpoint_message"
+printf '1\n' > "$task/remote/remote_response_pending_checkpoint_generation"
+printf '1\n' > "$TEST_ROOT/remote-project/.sergeant-gate-generation"
 printf 'babydriver restart failed for remote-drive/remote-window:review follow-up [sgt:task-1]\nexit 23\n' > "$task/remote/diagnostic"
 cat > "$TEST_ROOT/remote-status.json" <<'EOF'
 {"tmux_alive":true,"tasks":[{"name":"remote-window:review follow-up [sgt:task-1]","status":"blocked","message":"Remote blocker remains active after failed restart.","task_id":"td-remote-1"}]}
@@ -168,7 +171,9 @@ REMOTE_RESPONSE_TEXT='preserved remote answer' \
 [[ "$(cat "$task/remote/remote_response_pending_state")" == 'awaiting_consumption' ]]
 [[ "$(cat "$task/remote/response")" == 'preserved remote answer' ]]
 [[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-response")" == 'preserved remote answer' ]]
+[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-response-id")" == '0123456789abcdef0123456789abcdef' ]]
 [[ "$(cat "$TEST_ROOT/remote-project/.sergeant-response")" == 'preserved remote answer' ]]
+[[ "$(cat "$TEST_ROOT/remote-project/.sergeant-response-id")" == '0123456789abcdef0123456789abcdef' ]]
 [[ ! -s "$TEST_ROOT/remote-retry.err" ]]
 if [[ -e "$TEST_ROOT/remote-retry-td.log" ]]; then
   printf 'watch-preserved retry should not log a duplicate td decision\n' >&2
@@ -202,7 +207,7 @@ if [[ -e "$TEST_ROOT/remote-stale-duplicate-td.log" ]]; then
   exit 1
 fi
 
-rm -f "$TEST_ROOT/remote-project/.sergeant-response"
+rm -f "$TEST_ROOT/remote-project/.sergeant-response" "$TEST_ROOT/remote-project/.sergeant-response-id"
 cat > "$TEST_ROOT/remote-status.json" <<'EOF'
 {"tmux_alive":true,"tasks":[{"name":"remote-window:review follow-up [sgt:task-1]","status":"blocked","message":"Remote blocker remains active after failed restart.","task_id":"td-remote-1"}]}
 EOF
@@ -228,9 +233,18 @@ if [[ -e "$TEST_ROOT/remote-gap-duplicate-td.log" ]]; then
   exit 1
 fi
 
+printf '0123456789abcdef0123456789abcdef\n' > "$TEST_ROOT/remote-project/.sergeant-response-ack"
 cat > "$TEST_ROOT/remote-status.json" <<'EOF'
-{"tmux_alive":true,"tasks":[{"name":"remote-window:review follow-up [sgt:task-1]","status":"blocked","message":"New blocker after consumption.","task_id":"td-remote-1"}]}
+{"tmux_alive":true,"tasks":[{"name":"remote-window:review follow-up [sgt:task-1]","status":"blocked","message":"Remote blocker remains active after failed restart.","task_id":"td-remote-1"}]}
 EOF
+PATH="$fake_bin:$PATH" TASK_ROOT="$task" TD_LOG="$TEST_ROOT/td.log" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
+BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TEST_ROOT/remote-logs.txt" \
+  "$ROOT_DIR/bin/sgt-watch" --sync task-1
+[[ "$(cat "$task/remote/status")" == "in_progress" ]]
+[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == "in_progress" ]]
+[[ "$(cat "$task/remote/remote_response_pending_state")" == 'awaiting_status_transition' ]]
+
+printf '2\n' > "$TEST_ROOT/remote-project/.sergeant-gate-generation"
 PATH="$fake_bin:$PATH" TASK_ROOT="$task" TD_LOG="$TEST_ROOT/td.log" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
 BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TEST_ROOT/remote-logs.txt" \
   "$ROOT_DIR/bin/sgt-watch" --sync task-1
@@ -238,7 +252,8 @@ BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TE
 [[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == "blocked" ]]
 [[ ! -e "$task/remote/response" && ! -e "$TEST_ROOT/remote-wt/.sergeant-response" ]]
 [[ ! -e "$task/remote/remote_response_pending_id" && ! -e "$task/remote/remote_response_pending_state" ]]
-grep -Fq 'New blocker after consumption.' "$task/remote/message"
+[[ ! -e "$TEST_ROOT/remote-project/.sergeant-response-ack" && ! -e "$TEST_ROOT/remote-project/.sergeant-response-id" ]]
+grep -Fq 'Remote blocker remains active after failed restart.' "$task/remote/message"
 
 PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/remote-next-gate.log" \
 TD_LOG="$TEST_ROOT/remote-next-gate-td.log" REMOTE_RESPONSE_PATH="$TEST_ROOT/remote-project/.sergeant-response" \

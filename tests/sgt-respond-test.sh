@@ -77,6 +77,7 @@ grep -Fq 'log td-123' "$TEST_ROOT/td.log"
 grep -Fq -- '--decision' "$TEST_ROOT/td.log"
 grep -Eq 'response-id=[a-f0-9]{32}' "$TEST_ROOT/td.log"
 [[ "$(cat "$repo_state/response_id")" =~ ^[a-f0-9]{32}$ ]]
+[[ "$(cat "$worktree/.sergeant-response-id")" == "$(cat "$repo_state/response_id")" ]]
 if grep -Fq 'sha256=' "$TEST_ROOT/td.log"; then
   printf 'response-derived digest leaked into td\n' >&2
   exit 1
@@ -218,7 +219,9 @@ remote_response_id="$(cat "$remote_repo_state/response_id")"
 [[ "$(cat "$remote_repo_state/remote_response_pending_state")" == 'awaiting_consumption' ]]
 [[ "$(cat "$remote_repo_state/response")" == 'remote response' ]]
 [[ "$(cat "$remote_worktree/.sergeant-response")" == 'remote response' ]]
+[[ "$(cat "$remote_worktree/.sergeant-response-id")" == "$remote_response_id" ]]
 [[ "$(cat "$remote_project_dir/.sergeant-response")" == 'remote response' ]]
+[[ "$(cat "$remote_project_dir/.sergeant-response-id")" == "$remote_response_id" ]]
 grep -Fq 'restart remote-drive --window remote-window' "$TEST_ROOT/remote-babydriver.log"
 [[ ! -e "$remote_repo_state/message" && ! -e "$remote_worktree/.sergeant-message" ]]
 grep -Fq 'log td-remote-789' "$TEST_ROOT/remote-td.log"
@@ -278,6 +281,7 @@ REMOTE_RESPONSE_PATH="$remote_project_dir/.sergeant-response" REMOTE_RESPONSE_TE
 [[ "$(cat "$remote_worktree/.sergeant-status")" == 'in_progress' ]]
 [[ "$(cat "$remote_repo_state/response_id")" == "$remote_response_id" ]]
 [[ "$(cat "$remote_repo_state/remote_response_pending_state")" == 'awaiting_consumption' ]]
+[[ "$(cat "$remote_project_dir/.sergeant-response-id")" == "$remote_response_id" ]]
 grep -Fq 'restart remote-drive --window remote-window' "$TEST_ROOT/remote-orphan-retry.log"
 if [[ -e "$TEST_ROOT/remote-orphan-retry-td.log" ]]; then
   printf 'remote orphan retry should not log a duplicate td decision\n' >&2

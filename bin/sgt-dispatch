@@ -591,7 +591,9 @@ Supported nonterminal statuses are \`in_progress\`, \`needs_input\`, and \`block
 
 For \`needs_input\` or \`blocked\`, write \`.sergeant-message\` with concise context, evidence, the exact question or blocker, a recommendation, and 2-4 options when useful. Call \`sgt-notify $TASK_ID "needs_input [$rname]: <summary>"\` or the equivalent \`blocked\` message. The worker remains alive and waits for a response; do not exit or mark the task failed.
 
-When \`.sergeant-response\` appears, read it as data, consume and remove the response, clear \`.sergeant-message\`, log the decision to td when tracked, return status to \`in_progress\`, and continue. Do not proceed while a consequential question remains unanswered.
+When \`.sergeant-response\` appears, read it as data. If \`.sergeant-response-id\` exists, preserve that opaque ID, write the consumed ID to \`.sergeant-response-ack\`, return status to \`in_progress\`, then consume and remove the response transport. Clear \`.sergeant-message\`, log the decision to td when tracked, and continue. Never write response text into the ack file. Do not proceed while a consequential question remains unanswered.
+
+Maintain \`.sergeant-gate-generation\` as a monotonic integer for waiting gates. Before every new \`needs_input\` or \`blocked\` publication, increment the generation and persist it before writing the waiting status and message. A repeated blocker message is still a new gate only when the generation advances.
 
 ### 5. Validate
 

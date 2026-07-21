@@ -49,29 +49,52 @@ _atomic_write() {
   mv "$temporary" "$target"
 }
 
+_read_generation_file() {
+  local path="$1"
+  local value
+  if [[ -f "$path" ]]; then
+    value="$(cat "$path" | tr -d '\n' || true)"
+  else
+    value=""
+  fi
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$value"
+  else
+    printf '0\n'
+  fi
+}
+
 _clear_local_response_transport() {
   rm -f "$REPO_DIR/response"
   if [[ -n "$worktree" && -d "$worktree" ]]; then
-    rm -f "$worktree/.sergeant-response"
+    rm -f "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" "$worktree/.sergeant-response-ack"
   fi
 }
 
 _publish_local_response_transport() {
   local response="$1"
+  local response_id="$2"
   _atomic_write "$REPO_DIR/response" "$response"
   if [[ -n "$worktree" && -d "$worktree" ]]; then
+    rm -f "$worktree/.sergeant-response-ack"
     _atomic_write "$worktree/.sergeant-response" "$response"
+    _atomic_write "$worktree/.sergeant-response-id" "$response_id"
   fi
 }
 
 _publish_remote_response_transport() {
   local remote_root="$1"
   local response="$2"
+  local response_id="$3"
   local remote_target="$remote_root/.sergeant-response"
+  local remote_id_target="$remote_root/.sergeant-response-id"
   [[ -n "$remote_root" ]] || return 1
   [[ -d "$remote_root" ]] || return 1
+  rm -f "$remote_root/.sergeant-response-ack"
   _atomic_write "$remote_target" "$response"
+  _atomic_write "$remote_id_target" "$response_id"
   [[ -f "$remote_target" ]] || return 1
+  [[ -f "$remote_id_target" ]] || return 1
 }
 
 _write_remote_pending_marker() {
@@ -84,13 +107,16 @@ _write_remote_pending_marker() {
 _write_remote_pending_checkpoint() {
   local checkpoint_status="$1"
   local checkpoint_message="$2"
+  local checkpoint_generation="$3"
   _atomic_write "$REPO_DIR/remote_response_pending_checkpoint_status" "$checkpoint_status"
   _atomic_write "$REPO_DIR/remote_response_pending_checkpoint_message" "$checkpoint_message"
+  _atomic_write "$REPO_DIR/remote_response_pending_checkpoint_generation" "$checkpoint_generation"
 }
 
 _clear_remote_pending_marker() {
   rm -f "$REPO_DIR/remote_response_pending_id" "$REPO_DIR/remote_response_pending_state" \
-    "$REPO_DIR/remote_response_pending_checkpoint_status" "$REPO_DIR/remote_response_pending_checkpoint_message"
+    "$REPO_DIR/remote_response_pending_checkpoint_status" "$REPO_DIR/remote_response_pending_checkpoint_message" \
+    "$REPO_DIR/remote_response_pending_checkpoint_generation"
 }
 
 pending_response=""
@@ -129,17 +155,27 @@ else
   elif [[ -f "$REPO_DIR/td_task" || -f "$REPO_DIR/remote_td_task" ]]; then
     printf 'td-memory: worktree unavailable; response decision receipt could not be logged before fleet-only delivery\n' >> "$REPO_DIR/diagnostic"
   fi
-  _publish_local_response_transport "$RESPONSE"
+  _publish_local_response_transport "$RESPONSE" "$response_id"
   _atomic_write "$REPO_DIR/response_id" "$response_id"
   if [[ "$backend" == "remote-babydriver" ]]; then
     _write_remote_pending_marker "$response_id" "retryable"
     waiting_message=""
+    waiting_generation=0
     if [[ -n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-message" ]]; then
       waiting_message="$(cat "$worktree/.sergeant-message")"
     elif [[ -f "$REPO_DIR/message" ]]; then
       waiting_message="$(cat "$REPO_DIR/message")"
     fi
-    _write_remote_pending_checkpoint "$status" "$waiting_message"
+    if [[ -n "$worktree" && -d "$worktree" ]]; then
+      waiting_generation="$(_read_generation_file "$worktree/.sergeant-gate-generation")"
+    fi
+    if [[ "$waiting_generation" == "0" ]]; then
+      remote_project_dir_for_generation="$(cat "$REPO_DIR/remote_project_dir" 2>/dev/null || true)"
+      if [[ -n "$remote_project_dir_for_generation" && -d "$remote_project_dir_for_generation" ]]; then
+        waiting_generation="$(_read_generation_file "$remote_project_dir_for_generation/.sergeant-gate-generation")"
+      fi
+    fi
+    _write_remote_pending_checkpoint "$status" "$waiting_message" "$waiting_generation"
   fi
 fi
 
@@ -167,7 +203,7 @@ if [[ "$backend" == "remote-babydriver" ]]; then
     trap - EXIT
     _die "Remote worker response delivery is unavailable for $TASK_ID/$REPO"
   fi
-  if ! _publish_remote_response_transport "$remote_project_dir" "$RESPONSE"; then
+  if ! _publish_remote_response_transport "$remote_project_dir" "$RESPONSE" "$response_id"; then
     [[ -n "$worktree" && -d "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
     printf 'orphaned\n' > "$REPO_DIR/status"
     printf 'remote response delivery failed for %s/.sergeant-response\n' "$remote_project_dir" > "$REPO_DIR/diagnostic"

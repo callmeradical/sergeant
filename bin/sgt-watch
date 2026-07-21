@@ -202,11 +202,27 @@ _map_remote_status() {
   esac
 }
 
+_read_generation_file() {
+  local path="$1"
+  local value
+  if [[ -f "$path" ]]; then
+    value="$(cat "$path" | tr -d '\n' || true)"
+  else
+    value=""
+  fi
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$value"
+  else
+    printf '0\n'
+  fi
+}
+
 _sync_remote_repo() {
   local repo_dir="$1"
   local worktree session window task_identifier status_output remote_logs remote_project_dir remote_response_path
   local current_status existing_diagnostic pending_response preserve_orphan_checkpoint remote_pending_id remote_pending_state remote_response_present
-  local remote_pending_checkpoint_status remote_pending_checkpoint_message
+  local remote_pending_checkpoint_status remote_pending_checkpoint_message remote_pending_checkpoint_generation
+  local remote_response_id_path remote_response_ack_path remote_gate_generation_path remote_response_ack_id remote_gate_generation remote_pending_acknowledged remote_generation_advanced
   local remote_fields=() tmux_alive raw_status mapped_status result message diagnostic task_id matched
   worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
   session="$(cat "$repo_dir/remote_session" 2>/dev/null || true)"
@@ -220,6 +236,7 @@ _sync_remote_repo() {
   remote_pending_state="$(cat "$repo_dir/remote_response_pending_state" 2>/dev/null || true)"
   remote_pending_checkpoint_status="$(cat "$repo_dir/remote_response_pending_checkpoint_status" 2>/dev/null || true)"
   remote_pending_checkpoint_message="$(cat "$repo_dir/remote_response_pending_checkpoint_message" 2>/dev/null || true)"
+  remote_pending_checkpoint_generation="$(cat "$repo_dir/remote_response_pending_checkpoint_generation" 2>/dev/null || true)"
   pending_response=""
   if [[ -f "$repo_dir/response" ]]; then
     pending_response="$(cat "$repo_dir/response")"
@@ -230,13 +247,30 @@ _sync_remote_repo() {
   remote_response_present=0
   if [[ -n "$remote_project_dir" ]]; then
     remote_response_path="$remote_project_dir/.sergeant-response"
+    remote_response_id_path="$remote_project_dir/.sergeant-response-id"
+    remote_response_ack_path="$remote_project_dir/.sergeant-response-ack"
+    remote_gate_generation_path="$remote_project_dir/.sergeant-gate-generation"
     [[ -f "$remote_response_path" ]] && remote_response_present=1
+    if [[ -f "$remote_response_ack_path" ]]; then
+      remote_response_ack_id="$(cat "$remote_response_ack_path" | tr -d '\n' || true)"
+    else
+      remote_response_ack_id=""
+    fi
+    remote_gate_generation="$(_read_generation_file "$remote_gate_generation_path")"
+  else
+    remote_response_id_path=""
+    remote_response_ack_path=""
+    remote_gate_generation_path=""
+    remote_response_ack_id=""
+    remote_gate_generation=0
   fi
 
   _clear_verified_remote_response_transport() {
     rm -f "$repo_dir/response" "$repo_dir/remote_response_pending_id" "$repo_dir/remote_response_pending_state"
     rm -f "$repo_dir/remote_response_pending_checkpoint_status" "$repo_dir/remote_response_pending_checkpoint_message"
-    [[ -n "$worktree" ]] && rm -f "$worktree/.sergeant-response"
+    rm -f "$repo_dir/remote_response_pending_checkpoint_generation"
+    [[ -n "$worktree" ]] && rm -f "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" "$worktree/.sergeant-response-ack"
+    [[ -n "$remote_response_id_path" ]] && rm -f "$remote_response_id_path" "$remote_response_ack_path"
   }
 
   if [[ -z "$session" || -z "$window" ]]; then
@@ -335,6 +369,17 @@ _sync_remote_repo() {
     message="Remote worker is in_review; completion gates are still pending."
   fi
   preserve_orphan_checkpoint=0
+  remote_pending_acknowledged=0
+  if [[ -n "$remote_pending_id" && -n "$remote_response_ack_id" && "$remote_response_ack_id" == "$remote_pending_id" ]]; then
+    remote_pending_acknowledged=1
+  fi
+  if [[ ! "$remote_pending_checkpoint_generation" =~ ^[0-9]+$ ]]; then
+    remote_pending_checkpoint_generation=0
+  fi
+  remote_generation_advanced=0
+  if (( remote_gate_generation > remote_pending_checkpoint_generation )); then
+    remote_generation_advanced=1
+  fi
   if [[ "$remote_pending_state" == "awaiting_consumption" && "$remote_response_present" == "0" ]]; then
     printf 'awaiting_status_transition\n' > "$repo_dir/remote_response_pending_state"
     remote_pending_state="awaiting_status_transition"
@@ -350,13 +395,18 @@ _sync_remote_repo() {
     fi
   fi
   if [[ "$remote_pending_state" == "awaiting_status_transition" ]]; then
-    if [[ "$mapped_status" == "in_progress" || "$mapped_status" == "done" || "$mapped_status" == failed:* ]]; then
+    if [[ "$remote_pending_acknowledged" == "1" && ( "$mapped_status" == "in_progress" || "$mapped_status" == "orphaned" || "$mapped_status" == "done" || "$mapped_status" == failed:* ) ]]; then
       _clear_verified_remote_response_transport
       remote_pending_id=""
       remote_pending_state=""
       pending_response=""
     elif [[ "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" ]]; then
-      if [[ "$mapped_status" == "$remote_pending_checkpoint_status" && "$message" == "$remote_pending_checkpoint_message" ]]; then
+      if [[ "$remote_pending_acknowledged" == "1" && "$remote_generation_advanced" == "1" ]]; then
+        _clear_verified_remote_response_transport
+        remote_pending_id=""
+        remote_pending_state=""
+        pending_response=""
+      else
         if [[ "$current_status" == "orphaned" ]]; then
           mapped_status="orphaned"
           [[ -n "$existing_diagnostic" ]] && diagnostic="$existing_diagnostic"
@@ -365,11 +415,6 @@ _sync_remote_repo() {
           message=""
           diagnostic=""
         fi
-      else
-        _clear_verified_remote_response_transport
-        remote_pending_id=""
-        remote_pending_state=""
-        pending_response=""
       fi
     fi
   fi

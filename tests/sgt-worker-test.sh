@@ -141,9 +141,11 @@ run_wait_resume_case() {
   local worker_pid=$!
 
   wait_for_file "$worktree/.sergeant-message"
+  wait_for_file "$worktree/.sergeant-gate-generation"
   [[ ! -e "$repo_state/result" ]]
   kill -0 "$worker_pid"
   [[ "$(cat "$worktree/.sergeant-status")" == "$expected_status" ]]
+  [[ "$(cat "$worktree/.sergeant-gate-generation")" == "1" ]]
   printf 'Use option A\n' > "$worktree/.sergeant-response"
   wait "$worker_pid"
 

@@ -50,6 +50,23 @@ _sync_state() {
   fi
 }
 
+_next_gate_generation() {
+  local current
+  if [[ -f "$WORKTREE/.sergeant-gate-generation" ]]; then
+    current="$(cat "$WORKTREE/.sergeant-gate-generation" | tr -d '\n' || true)"
+  else
+    current=""
+  fi
+  if [[ ! "$current" =~ ^[0-9]+$ ]]; then
+    current=0
+  fi
+  printf '%s\n' "$((current + 1))"
+}
+
+_record_gate_generation() {
+  printf '%s\n' "$(_next_gate_generation)" > "$WORKTREE/.sergeant-gate-generation"
+}
+
 _orphan() {
   local exit_code="$1"
   local reason="$2"
@@ -141,15 +158,22 @@ _run_turn() {
 }
 
 _wait_for_response() {
-  local response
+  local response response_id
   while true; do
     if [[ -f "$WORKTREE/.sergeant-response" ]]; then
       _sgt_response_lock_acquire "$REPO_STATE"
       if [[ -f "$WORKTREE/.sergeant-response" ]]; then
         response="$(cat "$WORKTREE/.sergeant-response")"
+        response_id="$(cat "$WORKTREE/.sergeant-response-id" 2>/dev/null | tr -d '\n' || true)"
+        if [[ -z "$response_id" ]]; then
+          response_id="$(cat "$REPO_STATE/response_id" 2>/dev/null | tr -d '\n' || true)"
+        fi
         printf 'in_progress\n' > "$WORKTREE/.sergeant-status"
         printf 'in_progress\n' > "$REPO_STATE/status"
-        rm -f "$WORKTREE/.sergeant-response" "$REPO_STATE/response" "$REPO_STATE/response_id"
+        if [[ -n "$response_id" ]]; then
+          printf '%s\n' "$response_id" > "$WORKTREE/.sergeant-response-ack"
+        fi
+        rm -f "$WORKTREE/.sergeant-response" "$WORKTREE/.sergeant-response-id" "$REPO_STATE/response" "$REPO_STATE/response_id"
         rm -f "$WORKTREE/.sergeant-message" "$REPO_STATE/message"
         _sgt_response_lock_release
         break
@@ -197,6 +221,7 @@ while true; do
 
   case "$status" in
     needs_input|blocked)
+      _record_gate_generation
       agent_name="$(basename "$AGENT")"
       if [[ ! -f "$REPO_STATE/session_id" ]]; then
         [[ "$exit_code" -ne 0 ]] || exit_code=1
