@@ -256,6 +256,14 @@ check_project_config() {
   done
 }
 
+fleet_task_project() {
+  local fleet_task_dir="$1"
+  if [[ ! -f "$fleet_task_dir/brief.md" ]]; then
+    return 1
+  fi
+  sed -n 's/^Project: *//p' "$fleet_task_dir/brief.md" | head -n1
+}
+
 YQ_OK=0
 if command -v yq >/dev/null 2>&1; then
   if yq_version="$(yq --version 2>&1)"; then
@@ -387,6 +395,10 @@ if [[ -d "$SERGEANT_FLEET" ]]; then
   shopt -s nullglob
   for fleet_task_dir in "$SERGEANT_FLEET"/*; do
     [[ -d "$fleet_task_dir" ]] || continue
+    if [[ -n "$PROJECT" ]]; then
+      fleet_project="$(fleet_task_project "$fleet_task_dir" || true)"
+      [[ "$fleet_project" == "$PROJECT" ]] || continue
+    fi
     fleet_task="$(basename "$fleet_task_dir")"
     for fleet_repo_dir in "$fleet_task_dir"/*; do
       [[ -d "$fleet_repo_dir" ]] || continue

@@ -220,6 +220,25 @@ test_orphaned_fleet_worker_is_broken() {
   assert_contains "$output" "orphaned worker requires recovery"
 }
 
+test_project_filter_ignores_unrelated_fleet_tasks() {
+  local output status repo_state
+  setup_fixture
+  repo_state="$SERGEANT_FLEET/task-123/app"
+  mkdir -p "$repo_state"
+  printf '%s\n' 'Project: other' > "$SERGEANT_FLEET/task-123/brief.md"
+  printf '%s\n' orphaned > "$repo_state/status"
+  printf '%s\n' "$HOME/dev/app" > "$repo_state/worktree"
+
+  set +e
+  output="$("$DOCTOR" app 2>&1)"
+  status=$?
+  set -e
+
+  assert_eq 0 "$status"
+  assert_contains "$output" "[PASS] fleet.state"
+  assert_not_contains "$output" "fleet.task-123.app"
+}
+
 test_uninitialized_td_database_is_degraded() {
   local output status
   setup_fixture
@@ -769,6 +788,8 @@ test_mismatched_installed_link_is_degraded
 echo "PASS: mismatched installed link"
 test_orphaned_fleet_worker_is_broken
 echo "PASS: orphaned fleet worker"
+test_project_filter_ignores_unrelated_fleet_tasks
+echo "PASS: project-scoped fleet filter"
 test_uninitialized_td_database_is_degraded
 echo "PASS: uninitialized td database"
 test_diagnostics_redact_secrets

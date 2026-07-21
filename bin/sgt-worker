@@ -189,7 +189,19 @@ _goose_session_name() {
 }
 
 _goose_sessions_db() {
-  printf '%s\n' "${GOOSE_DB:-$HOME/.local/share/goose/sessions/sessions.db}"
+  local existing resolved
+  if [[ -f "$REPO_STATE/goose_sessions_db" ]]; then
+    existing="$(tr -d '\n' < "$REPO_STATE/goose_sessions_db" || true)"
+  else
+    existing=""
+  fi
+  if [[ -n "$existing" ]]; then
+    printf '%s\n' "$existing"
+    return
+  fi
+  resolved="${GOOSE_DB:-$HOME/.local/share/goose/sessions/sessions.db}"
+  printf '%s\n' "$resolved" > "$REPO_STATE/goose_sessions_db"
+  printf '%s\n' "$resolved"
 }
 
 _goose_has_resume_state() {

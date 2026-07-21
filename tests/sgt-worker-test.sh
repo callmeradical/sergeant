@@ -91,6 +91,21 @@ case "$FAKE_MODE:$turn" in
     printf 'done\n' > .sergeant-status
     printf 'validated Goose result\n' > .sergeant-result
     ;;
+  goose_custom_db_resume:1)
+    [[ "$*" == *"run --output-format json -n sgt-goose-custom-db-resume-state -t initial mission"* ]]
+    [[ "$*" != *" -r "* ]]
+    record_goose_session "sgt-goose-custom-db-resume-state"
+    printf 'needs_input\n' > .sergeant-status
+    printf 'Choose A or B.\n' > .sergeant-message
+    printf '%s\n' '{"type":"message","content":"goose turn one"}'
+    ;;
+  goose_custom_db_resume:2)
+    [[ "$*" == *"run --output-format json -n sgt-goose-custom-db-resume-state -r -t"* ]]
+    [[ "$*" == *"Use option A"* ]]
+    [[ "$*" == *"same session"* ]]
+    printf 'done\n' > .sergeant-status
+    printf 'validated Goose custom DB result\n' > .sergeant-result
+    ;;
   goose_missing_resume_evidence:1)
     [[ "$*" == *"run --output-format json -n sgt-goose-missing-resume-evidence-state -t initial mission"* ]]
     [[ "$*" != *" -r "* ]]
@@ -270,6 +285,27 @@ grep -Fq -- 'run --output-format json -n sgt-goose-needs-input-state -r -t' "$ca
 if grep -Fq 'session_name: No such file or directory' "$case_root/output.log"; then
   exit 1
 fi
+
+case_root="$TEST_ROOT/goose-custom-db-resume"
+mkdir -p "$case_root/worktree" "$case_root/state"
+printf 'td-123\n' > "$case_root/state/td_task"
+PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" GOOSE_DB="$case_root/custom-goose/sessions.db" \
+  FAKE_MODE=goose_custom_db_resume FAKE_STATE="$case_root" SGT_WORKER_POLL_INTERVAL=0.01 \
+  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_goose" "initial mission" \
+  > "$case_root/output.log" 2>&1 &
+worker_pid=$!
+wait_for_file "$case_root/worktree/.sergeant-message"
+kill "$worker_pid"
+wait "$worker_pid" || true
+[[ "$(cat "$case_root/state/goose_sessions_db")" == "$case_root/custom-goose/sessions.db" ]]
+printf 'Use option A\n' > "$case_root/worktree/.sergeant-response"
+printf 'response-id-123\n' > "$case_root/worktree/.sergeant-response-id"
+printf 'response-id-123\n' > "$case_root/state/response_id"
+PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" FAKE_MODE=goose_custom_db_resume FAKE_STATE="$case_root" \
+  SGT_WORKER_POLL_INTERVAL=0.01 "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_goose" \
+  "initial mission" > "$case_root/resume.log" 2>&1
+[[ "$(cat "$case_root/worktree/.sergeant-result")" == 'validated Goose custom DB result' ]]
+grep -Fq -- 'run --output-format json -n sgt-goose-custom-db-resume-state -r -t' "$case_root/args"
 
 case_root="$TEST_ROOT/goose-missing-resume-evidence"
 mkdir -p "$case_root/worktree" "$case_root/state"
