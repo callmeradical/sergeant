@@ -2,8 +2,8 @@
 # sgt-watch — Monitor a dispatched fleet and report outcomes
 #
 # Watches the status files written by worker agents into the fleet directory.
-# Workers signal completion by writing .sergeant-status and .sergeant-result
-# in their worktrees; sgt-dispatch mirrors those back to fleet state on each poll.
+# Workers report status, escalation messages, and results in their worktrees;
+# sgt-watch mirrors those files back to fleet state on each poll.
 #
 # Usage:
 #   sgt-watch <task-id>              # watch a specific task
@@ -11,15 +11,18 @@
 #   sgt-watch --sync <task-id>       # one-shot sync worktree → fleet state, then exit
 #
 # Workers write:
-#   <worktree>/.sergeant-status    → "done" or "failed: <reason>"
-#   <worktree>/.sergeant-result    → PR URL or report path
+#   <worktree>/.sergeant-status    → in_progress, needs_input, blocked, orphaned, done, failed: <reason>
+#   <worktree>/.sergeant-message   → escalation context, evidence, and question
+#   <worktree>/.sergeant-result    → PR URL or report path; required with status=done
 #
 # Fleet state mirrors:
 #   ~/.local/share/sergeant/fleet/<task-id>/<repo>/status
+#   ~/.local/share/sergeant/fleet/<task-id>/<repo>/message
 #   ~/.local/share/sergeant/fleet/<task-id>/<repo>/result
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
 POLL_INTERVAL="${SERGEANT_WATCH_INTERVAL:-5}"  # seconds
 
@@ -40,7 +43,7 @@ if [[ "${1:-}" == "--list" ]]; then
     brief="$(grep '^Brief:' "$task_dir/brief.md" 2>/dev/null | sed 's/^Brief: *//' | cut -c1-60 || echo "")"
 
     # Count repo statuses
-    total=0; done_count=0; failed_count=0; in_progress=0
+    total=0; done_count=0; failed_count=0; in_progress=0; needs_input=0; blocked=0; orphaned=0
     for repo_dir in "$task_dir"/*/; do
       [[ -d "$repo_dir" ]] || continue
       total=$((total+1))
@@ -49,19 +52,417 @@ if [[ "${1:-}" == "--list" ]]; then
         done)        done_count=$((done_count+1)) ;;
         failed*)     failed_count=$((failed_count+1)) ;;
         in_progress) in_progress=$((in_progress+1)) ;;
+        needs_input) needs_input=$((needs_input+1)) ;;
+        blocked)     blocked=$((blocked+1)) ;;
+        orphaned)    orphaned=$((orphaned+1)) ;;
       esac
     done
 
     echo "  $task_id"
     echo "    brief:   $brief"
     echo "    started: $started"
-    echo "    repos:   $total total — $done_count done, $in_progress in-progress, $failed_count failed"
+    echo "    repos:   $total total — $done_count done, $in_progress in-progress, $needs_input needs-input, $blocked blocked, $orphaned orphaned, $failed_count failed"
     echo ""
   done
   exit 0
 fi
 
 # ── --sync mode ───────────────────────────────────────────────────────────────
+
+_pane_is_supervisor() {
+  local pane="$1"
+  local repo_dir="${2%/}"
+  local pane_info pane_dead pane_command
+  pane_info="$(tmux display-message -p -t "$pane" '#{pane_dead}|#{pane_start_command}' 2>/dev/null)" || return 1
+  pane_dead="${pane_info%%|*}"
+  pane_command="${pane_info#*|}"
+  [[ "$pane_dead" == "0" && "$pane_command" == *sgt-worker* && "$pane_command" == *"$repo_dir"* ]]
+}
+
+_remote_logs() {
+  local session="$1"
+  local task_identifier="$2"
+  if ! command -v babydriver >/dev/null 2>&1; then
+    return 0
+  fi
+  babydriver logs "$session" --window "$task_identifier" -n 40 2>/dev/null || true
+}
+
+_parse_babydriver_status() {
+  local requested_window="$1"
+  local task_identifier="$2"
+  local payload
+  payload="$(cat)"
+  python3 - "$requested_window" "$task_identifier" "$payload" <<'PY'
+import json
+import sys
+
+requested_window = sys.argv[1]
+task_identifier = sys.argv[2]
+payload = json.loads(sys.argv[3])
+
+def as_dict(value):
+    return value if isinstance(value, dict) else {}
+
+def as_list(value):
+    return value if isinstance(value, list) else []
+
+def as_string(value):
+    return value if isinstance(value, str) else ""
+
+def matches_task(requested, identifier, task):
+    window_value = as_string(task.get("window"))
+    name_value = as_string(task.get("name"))
+    slug_value = as_string(task.get("slug"))
+    if identifier and (window_value == identifier or name_value == identifier or slug_value == identifier):
+        return True
+    if window_value == requested or slug_value == requested:
+        return True
+    if name_value == requested:
+        return True
+    if requested and name_value.startswith(requested + ":"):
+        return True
+    return False
+
+session_value = payload.get("session")
+session = as_dict(session_value)
+tasks = as_list(payload.get("tasks"))
+if not tasks:
+    tasks = as_list(session.get("tasks"))
+
+task = {}
+matched = "0"
+for candidate in tasks:
+    candidate = as_dict(candidate)
+    if matches_task(requested_window, task_identifier, candidate):
+        task = candidate
+        matched = "1"
+        break
+
+tmux_alive = payload.get("tmux_alive")
+if tmux_alive is None:
+    tmux_alive = session.get("tmux_alive")
+if tmux_alive is None:
+    tmux_alive = True
+
+status = str(
+    task.get("sergeant_status")
+    or task.get("status")
+    or task.get("state")
+    or task.get("td_status")
+    or payload.get("status")
+    or ""
+)
+result = str(
+    task.get("result")
+    or task.get("result_url")
+    or task.get("pr_url")
+    or payload.get("result")
+    or payload.get("result_url")
+    or payload.get("pr_url")
+    or ""
+)
+message = str(
+    task.get("message")
+    or task.get("summary")
+    or payload.get("message")
+    or payload.get("summary")
+    or ""
+)
+diagnostic = str(
+    task.get("diagnostic")
+    or task.get("error")
+    or payload.get("diagnostic")
+    or payload.get("error")
+    or ""
+)
+task_id = str(task.get("task_id") or task.get("td_task_id") or task.get("id") or "")
+
+print("1" if tmux_alive else "0")
+print(status)
+print(result)
+print(message)
+print(diagnostic)
+print(task_id)
+print(matched)
+PY
+}
+
+_map_remote_status() {
+  local raw_status="$1"
+  case "${raw_status,,}" in
+    done|closed|complete|completed|success|succeeded) printf 'done\n' ;;
+    in_review) printf 'in_progress\n' ;;
+    failed|failure|error|errored|cancelled|canceled) printf 'failed: remote execution failed\n' ;;
+    needs_input|needs-input|awaiting_input|awaiting-input) printf 'needs_input\n' ;;
+    blocked|waiting|paused) printf 'blocked\n' ;;
+    orphaned) printf 'orphaned\n' ;;
+    ""|queued|open|started|running|in_progress|in-progress|active|dispatched) printf 'in_progress\n' ;;
+    *) printf '%s\n' "$raw_status" ;;
+  esac
+}
+
+_read_generation_file() {
+  local path="$1"
+  local value
+  if [[ -f "$path" ]]; then
+    value="$(tr -d '\n' < "$path" || true)"
+  else
+    value=""
+  fi
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$value"
+  else
+    printf '0\n'
+  fi
+}
+
+_sync_remote_repo() {
+  local repo_dir="$1"
+  local worktree session window task_identifier status_output remote_logs remote_project_dir remote_response_path
+  local current_status existing_diagnostic pending_response preserve_orphan_checkpoint remote_pending_id remote_pending_state remote_response_present
+  local remote_pending_checkpoint_generation
+  local remote_response_id_path remote_response_ack_path remote_gate_generation_path remote_response_ack_id remote_gate_generation remote_pending_acknowledged remote_generation_advanced
+  local remote_fields=() tmux_alive raw_status mapped_status result message diagnostic task_id matched
+  worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
+  session="$(cat "$repo_dir/remote_session" 2>/dev/null || true)"
+  window="$(cat "$repo_dir/remote_window" 2>/dev/null || true)"
+  remote_project_dir="$(cat "$repo_dir/remote_project_dir" 2>/dev/null || true)"
+  task_identifier="$(cat "$repo_dir/remote_task_name" 2>/dev/null || true)"
+  [[ -n "$task_identifier" ]] || task_identifier="$window"
+  current_status="$(cat "$repo_dir/status" 2>/dev/null || true)"
+  existing_diagnostic="$(cat "$repo_dir/diagnostic" 2>/dev/null || true)"
+  remote_pending_id="$(cat "$repo_dir/remote_response_pending_id" 2>/dev/null || true)"
+  remote_pending_state="$(cat "$repo_dir/remote_response_pending_state" 2>/dev/null || true)"
+  remote_pending_checkpoint_generation="$(cat "$repo_dir/remote_response_pending_checkpoint_generation" 2>/dev/null || true)"
+  pending_response=""
+  if [[ -f "$repo_dir/response" ]]; then
+    pending_response="$(cat "$repo_dir/response")"
+  elif [[ -n "$worktree" && -f "$worktree/.sergeant-response" ]]; then
+    pending_response="$(cat "$worktree/.sergeant-response")"
+  fi
+  remote_response_path=""
+  remote_response_present=0
+  if [[ -n "$remote_project_dir" ]]; then
+    remote_response_path="$remote_project_dir/.sergeant-response"
+    remote_response_id_path="$remote_project_dir/.sergeant-response-id"
+    remote_response_ack_path="$remote_project_dir/.sergeant-response-ack"
+    remote_gate_generation_path="$remote_project_dir/.sergeant-gate-generation"
+    [[ -f "$remote_response_path" ]] && remote_response_present=1
+    if [[ -f "$remote_response_ack_path" ]]; then
+      remote_response_ack_id="$(tr -d '\n' < "$remote_response_ack_path" || true)"
+    else
+      remote_response_ack_id=""
+    fi
+    remote_gate_generation="$(_read_generation_file "$remote_gate_generation_path")"
+  else
+    remote_response_id_path=""
+    remote_response_ack_path=""
+    remote_gate_generation_path=""
+    remote_response_ack_id=""
+    remote_gate_generation=0
+  fi
+
+  _clear_verified_remote_response_transport() {
+    rm -f "$repo_dir/response" "$repo_dir/remote_response_pending_id" "$repo_dir/remote_response_pending_state"
+    rm -f "$repo_dir/remote_response_pending_checkpoint_status" "$repo_dir/remote_response_pending_checkpoint_message"
+    rm -f "$repo_dir/remote_response_pending_checkpoint_generation"
+    [[ -n "$worktree" ]] && rm -f "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" "$worktree/.sergeant-response-ack"
+    [[ -n "$remote_response_id_path" ]] && rm -f "$remote_response_id_path" "$remote_response_ack_path"
+  }
+
+  if [[ -z "$session" || -z "$window" ]]; then
+    [[ -n "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
+    printf 'orphaned\n' > "$repo_dir/status"
+    printf 'remote dispatch metadata is incomplete\n' > "$repo_dir/diagnostic"
+    if [[ -n "$worktree" ]]; then
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+    fi
+    return
+  fi
+
+  if ! command -v babydriver >/dev/null 2>&1; then
+    [[ -n "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
+    printf 'orphaned\n' > "$repo_dir/status"
+    printf 'babydriver is unavailable for remote fleet sync\n' > "$repo_dir/diagnostic"
+    if [[ -n "$worktree" ]]; then
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+    fi
+    return
+  fi
+
+  if ! status_output="$(babydriver status "$session" 2>&1)"; then
+    remote_logs="$(_remote_logs "$session" "$task_identifier")"
+    {
+      printf 'babydriver status failed for %s\n' "$session"
+      printf '%s\n' "$status_output"
+      [[ -z "$remote_logs" ]] || {
+        printf 'logs:\n'
+        printf '%s\n' "$remote_logs"
+      }
+    } > "$repo_dir/diagnostic"
+    [[ -n "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
+    printf 'orphaned\n' > "$repo_dir/status"
+    if [[ -n "$worktree" ]]; then
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+    fi
+    return
+  fi
+
+  while IFS= read -r parsed_line; do
+    remote_fields+=("$parsed_line")
+  done < <(printf '%s' "$status_output" | _parse_babydriver_status "$window" "$task_identifier" 2>/dev/null || true)
+  if [[ "${#remote_fields[@]}" -lt 7 ]]; then
+    {
+      printf 'babydriver status returned invalid JSON for %s\n' "$session"
+      printf '%s\n' "$status_output"
+    } > "$repo_dir/diagnostic"
+    [[ -n "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
+    printf 'orphaned\n' > "$repo_dir/status"
+    if [[ -n "$worktree" ]]; then
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+    fi
+    return
+  fi
+
+  tmux_alive="${remote_fields[0]}"
+  raw_status="${remote_fields[1]}"
+  mapped_status="$(_map_remote_status "$raw_status")"
+  result="${remote_fields[2]}"
+  message="${remote_fields[3]}"
+  diagnostic="${remote_fields[4]}"
+  task_id="${remote_fields[5]}"
+  matched="${remote_fields[6]}"
+  [[ -n "$task_id" ]] && printf '%s\n' "$task_id" > "$repo_dir/remote_td_task"
+
+  if [[ "$matched" != "1" ]]; then
+    {
+      printf 'requested remote task identity %s (window %s) was not found in babydriver status\n' "$task_identifier" "$window"
+      printf '%s\n' "$status_output"
+    } > "$repo_dir/diagnostic"
+    [[ -n "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
+    printf 'orphaned\n' > "$repo_dir/status"
+    if [[ -n "$worktree" ]]; then
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+    fi
+    return
+  fi
+
+  case "$mapped_status" in
+    done|failed:*)
+      if [[ -n "$result" ]]; then
+        printf '%s\n' "$result" > "$repo_dir/result"
+      else
+        rm -f "$repo_dir/result"
+      fi
+      ;;
+    *) rm -f "$repo_dir/result" ;;
+  esac
+
+  remote_logs=""
+  if [[ "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" || "$mapped_status" == orphaned || "$mapped_status" == failed:* ]]; then
+    remote_logs="$(_remote_logs "$session" "$task_identifier")"
+  fi
+  if [[ "${raw_status,,}" == "in_review" && -z "$message" ]]; then
+    message="Remote worker is in_review; completion gates are still pending."
+  fi
+  preserve_orphan_checkpoint=0
+  remote_pending_acknowledged=0
+  if [[ -n "$remote_pending_id" && -n "$remote_response_ack_id" && "$remote_response_ack_id" == "$remote_pending_id" ]]; then
+    remote_pending_acknowledged=1
+  fi
+  if [[ ! "$remote_pending_checkpoint_generation" =~ ^[0-9]+$ ]]; then
+    remote_pending_checkpoint_generation=0
+  fi
+  remote_generation_advanced=0
+  if (( remote_gate_generation > remote_pending_checkpoint_generation )); then
+    remote_generation_advanced=1
+  fi
+  if [[ "$remote_pending_state" == "awaiting_consumption" && "$remote_response_present" == "0" ]]; then
+    printf 'awaiting_status_transition\n' > "$repo_dir/remote_response_pending_state"
+    remote_pending_state="awaiting_status_transition"
+  fi
+  if [[ "$remote_pending_state" == "awaiting_consumption" && "$remote_response_present" == "1" && ( "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" ) ]]; then
+    if [[ "$current_status" == "orphaned" ]]; then
+      mapped_status="orphaned"
+      [[ -n "$existing_diagnostic" ]] && diagnostic="$existing_diagnostic"
+    else
+      mapped_status="in_progress"
+      message=""
+      diagnostic=""
+    fi
+  fi
+  if [[ "$remote_pending_state" == "awaiting_status_transition" ]]; then
+    if [[ "$remote_pending_acknowledged" == "1" && ( "$mapped_status" == "in_progress" || "$mapped_status" == "orphaned" || "$mapped_status" == "done" || "$mapped_status" == failed:* ) ]]; then
+      _clear_verified_remote_response_transport
+      remote_pending_id=""
+      remote_pending_state=""
+      pending_response=""
+    elif [[ "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" ]]; then
+      if [[ "$remote_pending_acknowledged" == "1" && "$remote_generation_advanced" == "1" ]]; then
+        _clear_verified_remote_response_transport
+        remote_pending_id=""
+        remote_pending_state=""
+        pending_response=""
+      else
+        if [[ "$current_status" == "orphaned" ]]; then
+          mapped_status="orphaned"
+          [[ -n "$existing_diagnostic" ]] && diagnostic="$existing_diagnostic"
+        else
+          mapped_status="in_progress"
+          message=""
+          diagnostic=""
+        fi
+      fi
+    fi
+  fi
+  if [[ "$remote_pending_state" == "retryable" && ( "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" ) ]]; then
+    preserve_orphan_checkpoint=1
+  elif [[ "$current_status" == "orphaned" && ( "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" ) ]]; then
+    if [[ -n "$pending_response" || "$existing_diagnostic" == *"babydriver restart failed for "* || "$existing_diagnostic" == *"remote response delivery failed"* || "$existing_diagnostic" == *"remote response delivery path is unavailable"* || "$existing_diagnostic" == *"remote response delivery metadata is incomplete"* ]]; then
+      preserve_orphan_checkpoint=1
+    fi
+  fi
+
+  if [[ "$mapped_status" == "done" && -z "$result" ]]; then
+    diagnostic="${diagnostic:-remote terminal status requires a result}"
+    mapped_status="orphaned"
+  elif [[ "$tmux_alive" != "1" && "$mapped_status" != "done" && "$mapped_status" != failed:* ]]; then
+    diagnostic="${diagnostic:-remote worker session is not alive; resume with sgt-respond}"
+    mapped_status="orphaned"
+  elif [[ "$preserve_orphan_checkpoint" == "1" ]]; then
+    mapped_status="orphaned"
+    if [[ -n "$existing_diagnostic" ]]; then
+      diagnostic="$existing_diagnostic"
+    elif [[ -z "$diagnostic" ]]; then
+      diagnostic="remote worker is still waiting, but Sergeant preserved a local recovery checkpoint"
+    fi
+  fi
+
+  if [[ -n "$message" ]]; then
+    printf '%s\n' "$message" > "$repo_dir/message"
+  else
+    rm -f "$repo_dir/message"
+  fi
+
+  if [[ -n "$diagnostic" || -n "$remote_logs" ]]; then
+    {
+      [[ -z "$diagnostic" ]] || printf '%s\n' "$diagnostic"
+      [[ -z "$remote_logs" ]] || {
+        printf 'logs:\n'
+        printf '%s\n' "$remote_logs"
+      }
+    } > "$repo_dir/diagnostic"
+  else
+    rm -f "$repo_dir/diagnostic"
+  fi
+
+  [[ -n "$worktree" ]] && printf '%s\n' "$mapped_status" > "$worktree/.sergeant-status"
+  printf '%s\n' "$mapped_status" > "$repo_dir/status"
+  if [[ "$mapped_status" == "orphaned" && -n "$worktree" ]]; then
+    "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+  fi
+}
 
 _sync_task() {
   local task_id="$1"
@@ -70,23 +471,70 @@ _sync_task() {
 
   for repo_dir in "$task_dir"/*/; do
     [[ -d "$repo_dir" ]] || continue
+    local repo_name worktree wt_status fleet_status pane backend
     repo_name="$(basename "$repo_dir")"
+    backend="$(cat "$repo_dir/backend" 2>/dev/null || echo "local-tmux")"
+    if [[ "$backend" == "remote-babydriver" ]]; then
+      _sync_remote_repo "$repo_dir"
+      continue
+    fi
     worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
     [[ -n "$worktree" ]] || continue
 
     # Sync .sergeant-status from worktree → fleet
     if [[ -f "$worktree/.sergeant-status" ]]; then
-      wt_status="$(cat "$worktree/.sergeant-status" | tr -d '\n')"
+      wt_status="$(tr -d '\n' < "$worktree/.sergeant-status")"
       fleet_status="$(cat "$repo_dir/status" 2>/dev/null || echo "")"
       if [[ "$wt_status" != "$fleet_status" ]]; then
         echo "$wt_status" > "$repo_dir/status"
       fi
     fi
 
-    # Sync .sergeant-result from worktree → fleet
-    if [[ -f "$worktree/.sergeant-result" ]]; then
-      cp "$worktree/.sergeant-result" "$repo_dir/result" 2>/dev/null || true
+    if [[ -f "$worktree/.sergeant-status" ]]; then
+      wt_status="$(tr -d '\n' < "$worktree/.sergeant-status")"
+    else
+      wt_status="${fleet_status:-in_progress}"
     fi
+
+    # Results are valid only for terminal work; retries must not retain stale output.
+    case "$wt_status" in
+      done|failed:*)
+        if [[ -f "$worktree/.sergeant-result" ]]; then
+          cp "$worktree/.sergeant-result" "$repo_dir/result" 2>/dev/null || true
+        else
+          rm -f "$repo_dir/result"
+        fi
+        ;;
+      *) rm -f "$repo_dir/result" ;;
+    esac
+
+    # Sync escalation context independently so message-only updates are visible.
+    if [[ -f "$worktree/.sergeant-message" ]]; then
+      cp "$worktree/.sergeant-message" "$repo_dir/message" 2>/dev/null || true
+    else
+      rm -f "$repo_dir/message"
+    fi
+
+    if [[ "$wt_status" == "done" && ! -s "$worktree/.sergeant-result" ]]; then
+      printf 'orphaned\n' > "$worktree/.sergeant-status"
+      printf 'orphaned\n' > "$repo_dir/status"
+      printf 'terminal status done requires result\n' > "$repo_dir/diagnostic"
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+      continue
+    fi
+
+    case "$wt_status" in
+      in_progress|needs_input|blocked|dispatched)
+        pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
+        if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && \
+            ! _pane_is_supervisor "$pane" "$repo_dir"; then
+          printf 'orphaned\n' > "$worktree/.sergeant-status"
+          printf 'orphaned\n' > "$repo_dir/status"
+          printf 'recorded pane %s is dead or is not the expected worker supervisor; resume with sgt-respond\n' "$pane" > "$repo_dir/diagnostic"
+          "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+        fi
+        ;;
+    esac
   done
 }
 
@@ -113,7 +561,7 @@ echo ""
 
 _print_status() {
   local task_dir="$1"
-  local all_done=true
+  local all_terminal=true
   local any_failed=false
 
   for repo_dir in "$task_dir"/*/; do
@@ -121,7 +569,8 @@ _print_status() {
     repo_name="$(basename "$repo_dir")"
     status="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
     result="$(cat "$repo_dir/result" 2>/dev/null || echo "")"
-    worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
+    message="$(cat "$repo_dir/message" 2>/dev/null || echo "")"
+    diagnostic="$(cat "$repo_dir/diagnostic" 2>/dev/null || echo "")"
 
     case "$status" in
       done)
@@ -131,13 +580,25 @@ _print_status() {
         icon="✗"
         any_failed=true
         ;;
+      orphaned)
+        icon="✗"
+        any_failed=true
+        ;;
+      needs_input)
+        icon="?"
+        all_terminal=false
+        ;;
+      blocked)
+        icon="!"
+        all_terminal=false
+        ;;
       in_progress|dispatched)
         icon="…"
-        all_done=false
+        all_terminal=false
         ;;
       *)
-        icon="?"
-        all_done=false
+        icon="·"
+        all_terminal=false
         ;;
     esac
 
@@ -145,11 +606,25 @@ _print_status() {
     if [[ -n "$result" ]]; then
       printf "       %-20s  → %s\n" "" "$result"
     fi
+    if [[ -n "$message" ]]; then
+      while IFS= read -r message_line; do
+        printf "       %-20s  %s\n" "" "$message_line"
+      done <<< "$message"
+    fi
+    if [[ -n "$diagnostic" ]]; then
+      while IFS= read -r diagnostic_line; do
+        printf "       %-20s  %s\n" "" "$diagnostic_line"
+      done <<< "$diagnostic"
+    fi
   done
 
   echo ""
-  $all_done && return 0
-  $any_failed && return 2
+  if $any_failed; then
+    return 2
+  fi
+  if $all_terminal; then
+    return 0
+  fi
   return 1
 }
 
@@ -164,13 +639,14 @@ while true; do
     [[ -d "$repo_dir" ]] || continue
     repo_name="$(basename "$repo_dir")"
     status="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
-    current_snapshot+="$repo_name:$status "
+    message="$(cat "$repo_dir/message" 2>/dev/null || echo "")"
+    current_snapshot+="$repo_name:$status:$message "
   done
 
   if [[ "${LAST_STATUS[snapshot]+x}" == "" || "${LAST_STATUS[snapshot]}" != "$current_snapshot" ]]; then
     LAST_STATUS[snapshot]="$current_snapshot"
-    echo "$(date '+%H:%M:%S')"
-    _print_status "$TASK_DIR" && {
+    date '+%H:%M:%S'
+    if _print_status "$TASK_DIR"; then
       echo "All repos done."
       echo ""
       # Print final results
@@ -185,7 +661,13 @@ while true; do
       done
       $any_results && echo ""
       exit 0
-    } || true
+    else
+      print_status=$?
+      if [[ "$print_status" -eq 2 ]]; then
+        echo "Fleet finished with failures."
+        exit 1
+      fi
+    fi
   fi
 
   sleep "$POLL_INTERVAL"

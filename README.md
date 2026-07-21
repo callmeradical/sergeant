@@ -58,7 +58,7 @@ cp schema/project.yaml.example ~/.config/sergeant/myproject.yaml
 # Edit it — set your repo names and paths relative to dev_root
 
 # Launch your agent harness — AGENTS.md takes over from here
-opencode    # or: claude, goose, etc.
+opencode    # or: claude
 ```
 
 Then talk to it:
@@ -121,6 +121,7 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-graphify <project>` | Run graphify across all repos → knowledge graph |
 | `bin/sgt-dispatch <project> "<brief>" [options]` | Dispatch agents across repos |
 | `bin/sgt-watch <task-id>` | Monitor dispatched fleet |
+| `bin/sgt-respond <task-id> <repo> "<response>"` | Respond to and resume a waiting worker |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees and fleet state |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
 
@@ -142,7 +143,7 @@ Agent-loaded skills for structured workflows:
 - `treehouse` — pre-warmed worktree pools (optional but recommended for dispatch)
 - `graphify` — knowledge graph generation (optional, needed for `sgt-graphify`)
 - `babydriver` — remote dispatch to cleanthes (optional)
-- A supported agent harness: OpenCode, Claude Code, Goose, etc.
+- A supported agent harness: OpenCode or Claude Code
 
 ## License
 

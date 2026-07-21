@@ -66,11 +66,12 @@ These scripts in `bin/` are your hands. Use them before doing anything manually.
 | `bin/sgt-dispatch <project> --td <id>` | Dispatch from a td task (auto-detects repo) |
 | `bin/sgt-watch <task-id>` | Monitor fleet until all workers done |
 | `bin/sgt-watch --list` | List all active tasks |
+| `bin/sgt-respond <task-id> <repo> "<response>"` | Answer a worker escalation and resume its loop |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees + fleet state when done |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
 | `bin/sgt-td-list <project>` | Show td tasks across all repos in a project |
 | `bin/sgt-td-create <project> "<title>" --repos <list>` | Create td tasks in repos (called automatically by sgt-dispatch) |
-| `bin/sgt-notify <task-id> "<message>"` | Inject agent completion message into the primary session pane |
+| `bin/sgt-notify <task-id> "<message>"` | Inject a worker escalation or completion update into the primary session pane |
 | `wiki-daily-digest [--date YYYY-MM-DD] [--since DATE] [--dry-run]` | Synthesize opencode session history into `~/wiki/sessions/` |
 
 Always prefer these scripts over doing the equivalent manually with multiple shell calls. They understand the YAML schema.
@@ -118,9 +119,11 @@ When the user brings you a task:
 3. **Decompose** — identify which repos are affected, what each needs to do, and the dependency order.
 4. **Confirm the plan** — state the breakdown to the user before dispatching. Get confirmation.
 5. **Dispatch** — `sgt-dispatch <project> "<brief>" --repos <list>` or `sgt-dispatch <project> --td <id>`
-6. **Monitor** — `sgt-watch <task-id>`. Report status as workers complete.
+6. **Monitor** — `sgt-watch <task-id>`. Report status as workers progress. For `needs_input` or `blocked`, read the displayed `.sergeant-message`, get the user's decision, and send it with `sgt-respond <task-id> <repo> "<response>"`.
 7. **Reconcile** — surface PR links, merge order, and any cross-repo implications.
 8. **Clean up** — `sgt-cleanup <task-id>` once all PRs are merged.
+
+Workers use `in_progress`, `needs_input`, and `blocked` as nonterminal states. A waiting worker remains alive until `sgt-respond` writes `.sergeant-response`; do not treat an escalation as completion or clean up its worktree.
 
 Load the **dispatch** skill (`skills/dispatch/SKILL.md`) for the full protocol.
 
@@ -218,7 +221,7 @@ Load the **dispatch** skill (`skills/dispatch/SKILL.md`) for the full planning +
 
 ### Fleet state
 
-Each task creates a directory at `~/.local/share/sergeant/fleet/<task-id>/`. Workers signal completion by writing `.sergeant-status` and `.sergeant-result` in their worktree. `sgt-watch` syncs those into fleet state and reports.
+Each task creates a directory at `~/.local/share/sergeant/fleet/<task-id>/`. Workers report status, escalation messages, and results from their worktree; terminal completion requires both `.sergeant-status=done` and `.sergeant-result`. `sgt-watch` syncs those files into fleet state and reports.
 
 ---
 
@@ -247,11 +250,11 @@ If the user wants to register a new project or edit an existing one:
 
 ## Wiki integration
 
-Sergeant writes to `~/wiki/.captures/` automatically on dispatch, agent completion, and cleanup. The curated wiki at `~/wiki/` is maintained separately by `wiki-daily-digest`.
+Sergeant writes to `~/wiki/.captures/` automatically on dispatch, worker escalations/completions, and cleanup. The curated wiki at `~/wiki/` is maintained separately by `wiki-daily-digest`.
 
 ### Automatic captures (happen without any action)
 - `sgt-dispatch` — writes an activity entry when a fleet is launched (task, project, branch, repos, brief)
-- `sgt-notify` — writes an activity entry when an agent reports done or failed (includes PR URL)
+- `sgt-notify` — writes an activity entry when a worker reports an escalation or terminal outcome (includes PR URL when present)
 - `sgt-cleanup` — writes an activity entry when worktrees are removed (includes final status)
 
 ### Daily digest cron (runs at 6am via launchd)

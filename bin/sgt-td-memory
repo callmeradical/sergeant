@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# sgt-td-memory - Record non-secret worker recovery pointers in td.
+
+set -uo pipefail
+
+[[ $# -eq 3 ]] || {
+  echo "Usage: sgt-td-memory <handoff|response> <repo-state-dir> <worktree>" >&2
+  exit 2
+}
+
+ACTION="$1"
+REPO_STATE="$2"
+WORKTREE="$3"
+TD_TASK="$(cat "$REPO_STATE/td_task" 2>/dev/null || true)"
+if [[ -z "$TD_TASK" ]]; then
+  TD_TASK="$(cat "$REPO_STATE/remote_td_task" 2>/dev/null || true)"
+fi
+[[ -n "$TD_TASK" ]] || exit 0
+
+_diagnose() {
+  printf 'td-memory: %s\n' "$1" >> "$REPO_STATE/diagnostic"
+}
+
+if ! command -v td >/dev/null 2>&1; then
+  _diagnose "td unavailable for $ACTION on $TD_TASK"
+  exit 1
+fi
+
+case "$ACTION" in
+  handoff)
+    status="$(cat "$WORKTREE/.sergeant-status" 2>/dev/null || echo unknown)"
+    session_id="$(cat "$REPO_STATE/session_id" 2>/dev/null || echo unavailable)"
+    head="$(git -C "$WORKTREE" rev-parse --short HEAD 2>/dev/null || echo unavailable)"
+    branch="$(git -C "$WORKTREE" branch --show-current 2>/dev/null || echo unavailable)"
+    if ! td handoff "$TD_TASK" --work-dir "$WORKTREE" \
+      --done "Worker checkpoint: status=$status, session=$session_id, branch=$branch, head=$head" \
+      --remaining "Read fleet state at $REPO_STATE, including message, diagnostic, and worker.log; reconcile with current git state before resuming" \
+      --decision "Raw escalation and response text stay out of td; .sergeant-response is the atomic transport" \
+      >/dev/null 2>&1; then
+      _diagnose "td handoff failed for $TD_TASK"
+      exit 1
+    fi
+    ;;
+  response)
+    response_id="$(cat)"
+    if [[ ! "$response_id" =~ ^[a-f0-9]{32}$ ]]; then
+      _diagnose "invalid response ID for $TD_TASK"
+      exit 1
+    fi
+    decision="Human response received via Sergeant (response-id=$response_id). Exact text is intentionally excluded from td and delivered through atomic .sergeant-response; read the updated handoff and fleet/git state before resuming."
+    if ! td log "$TD_TASK" "$decision" --decision --work-dir "$WORKTREE" >/dev/null 2>&1; then
+      _diagnose "td decision log failed for $TD_TASK; response delivery must continue"
+      exit 1
+    fi
+    ;;
+  *)
+    _diagnose "unknown action: $ACTION"
+    exit 2
+    ;;
+esac
