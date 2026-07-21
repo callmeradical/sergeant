@@ -130,6 +130,8 @@ Shell scripts for the agent (and for you directly):
 
 Dispatched workers use `sgt-no-mistakes-finding` at no-mistakes gates. The required `--disposition` is explicit per finding: `gate` retains blocking work, `td` creates or updates actionable debt in the owning repo, `ignore` records that no card is needed, and `ask-user` preserves human escalation. Warning debt becomes P2, informational debt becomes P3, and repeated finding IDs update the same card while retaining the latest run ID, head SHA, location, description, and originating intent.
 
+On rerun, visible active cards stay in their current state, while explicitly hidden states are resurfaced: closed cards are reopened and deferred cards are undeferred before the finding body is refreshed.
+
 Correctness, security, data-integrity, and test findings cannot be deferred or ignored. Cosmetic and evidence-only findings never create cards.
 
 ## Skills
