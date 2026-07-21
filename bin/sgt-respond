@@ -76,16 +76,18 @@ trap - EXIT
 if [[ "$backend" == "remote-babydriver" ]]; then
   remote_session="$(cat "$REPO_DIR/remote_session" 2>/dev/null || true)"
   remote_window="$(cat "$REPO_DIR/remote_window" 2>/dev/null || true)"
-  if ! command -v babydriver >/dev/null 2>&1 || [[ -z "$remote_session" || -z "$remote_window" ]]; then
+  remote_task_name="$(cat "$REPO_DIR/remote_task_name" 2>/dev/null || true)"
+  restart_target="${remote_task_name:-$remote_window}"
+  if ! command -v babydriver >/dev/null 2>&1 || [[ -z "$remote_session" || -z "$restart_target" ]]; then
     [[ -n "$worktree" && -d "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
     printf 'orphaned\n' > "$REPO_DIR/status"
     printf 'remote response delivery metadata is incomplete\n' > "$REPO_DIR/diagnostic"
     [[ -n "$worktree" && -d "$worktree" ]] && "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_DIR" "$worktree" || true
     _die "Remote worker relaunch metadata is incomplete for $TASK_ID/$REPO"
   fi
-  if ! restart_output="$(babydriver restart "$remote_session" --window "$remote_window" 2>&1)"; then
+  if ! restart_output="$(babydriver restart "$remote_session" --window "$restart_target" 2>&1)"; then
     {
-      printf 'babydriver restart failed for %s/%s\n' "$remote_session" "$remote_window"
+      printf 'babydriver restart failed for %s/%s\n' "$remote_session" "$restart_target"
       printf '%s\n' "$restart_output"
     } > "$REPO_DIR/diagnostic"
     [[ -n "$worktree" && -d "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
@@ -99,7 +101,7 @@ if [[ "$backend" == "remote-babydriver" ]]; then
     printf 'in_progress\n' > "$worktree/.sergeant-status"
   }
   printf 'in_progress\n' > "$REPO_DIR/status"
-  echo "sgt-respond: requested remote restart for $remote_session/$remote_window."
+  echo "sgt-respond: requested remote restart for $remote_session/$restart_target."
   exit 0
 fi
 

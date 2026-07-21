@@ -81,23 +81,25 @@ _pane_is_supervisor() {
 
 _remote_logs() {
   local session="$1"
-  local window="$2"
+  local task_identifier="$2"
   if ! command -v babydriver >/dev/null 2>&1; then
     return 0
   fi
-  babydriver logs "$session" --window "$window" -n 40 2>/dev/null || true
+  babydriver logs "$session" --window "$task_identifier" -n 40 2>/dev/null || true
 }
 
 _parse_babydriver_status() {
-  local window="$1"
+  local requested_window="$1"
+  local task_identifier="$2"
   local payload
   payload="$(cat)"
-  python3 - "$window" "$payload" <<'PY'
+  python3 - "$requested_window" "$task_identifier" "$payload" <<'PY'
 import json
 import sys
 
-window = sys.argv[1]
-payload = json.loads(sys.argv[2])
+requested_window = sys.argv[1]
+task_identifier = sys.argv[2]
+payload = json.loads(sys.argv[3])
 
 def as_dict(value):
     return value if isinstance(value, dict) else {}
@@ -108,15 +110,17 @@ def as_list(value):
 def as_string(value):
     return value if isinstance(value, str) else ""
 
-def matches_requested_window(requested, task):
+def matches_task(requested, identifier, task):
     window_value = as_string(task.get("window"))
     name_value = as_string(task.get("name"))
     slug_value = as_string(task.get("slug"))
+    if identifier and (window_value == identifier or name_value == identifier or slug_value == identifier):
+        return True
     if window_value == requested or slug_value == requested:
         return True
     if name_value == requested:
         return True
-    if name_value.startswith(requested + ":"):
+    if requested and name_value.startswith(requested + ":"):
         return True
     return False
 
@@ -130,7 +134,7 @@ task = {}
 matched = "0"
 for candidate in tasks:
     candidate = as_dict(candidate)
-    if matches_requested_window(window, candidate):
+    if matches_task(requested_window, task_identifier, candidate):
         task = candidate
         matched = "1"
         break
@@ -200,11 +204,13 @@ _map_remote_status() {
 
 _sync_remote_repo() {
   local repo_dir="$1"
-  local worktree session window status_output remote_logs
+  local worktree session window task_identifier status_output remote_logs
   local remote_fields=() tmux_alive raw_status mapped_status result message diagnostic task_id matched
   worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
   session="$(cat "$repo_dir/remote_session" 2>/dev/null || true)"
   window="$(cat "$repo_dir/remote_window" 2>/dev/null || true)"
+  task_identifier="$(cat "$repo_dir/remote_task_name" 2>/dev/null || true)"
+  [[ -n "$task_identifier" ]] || task_identifier="$window"
 
   if [[ -z "$session" || -z "$window" ]]; then
     [[ -n "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
@@ -223,7 +229,7 @@ _sync_remote_repo() {
   fi
 
   if ! status_output="$(babydriver status "$session" 2>&1)"; then
-    remote_logs="$(_remote_logs "$session" "$window")"
+    remote_logs="$(_remote_logs "$session" "$task_identifier")"
     {
       printf 'babydriver status failed for %s\n' "$session"
       printf '%s\n' "$status_output"
@@ -240,7 +246,7 @@ _sync_remote_repo() {
 
   while IFS= read -r parsed_line; do
     remote_fields+=("$parsed_line")
-  done < <(printf '%s' "$status_output" | _parse_babydriver_status "$window" 2>/dev/null || true)
+  done < <(printf '%s' "$status_output" | _parse_babydriver_status "$window" "$task_identifier" 2>/dev/null || true)
   if [[ "${#remote_fields[@]}" -lt 7 ]]; then
     {
       printf 'babydriver status returned invalid JSON for %s\n' "$session"
@@ -264,7 +270,7 @@ _sync_remote_repo() {
 
   if [[ "$matched" != "1" ]]; then
     {
-      printf 'requested remote task window %s was not found in babydriver status\n' "$window"
+      printf 'requested remote task identity %s (window %s) was not found in babydriver status\n' "$task_identifier" "$window"
       printf '%s\n' "$status_output"
     } > "$repo_dir/diagnostic"
     [[ -n "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
@@ -292,7 +298,7 @@ _sync_remote_repo() {
 
   remote_logs=""
   if [[ "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" || "$mapped_status" == orphaned || "$mapped_status" == failed:* ]]; then
-    remote_logs="$(_remote_logs "$session" "$window")"
+    remote_logs="$(_remote_logs "$session" "$task_identifier")"
   fi
   if [[ "${raw_status,,}" == "in_review" && -z "$message" ]]; then
     message="Remote worker is in_review; completion gates are still pending."
