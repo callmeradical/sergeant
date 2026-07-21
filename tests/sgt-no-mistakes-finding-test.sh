@@ -31,6 +31,9 @@ case "$1" in
   create)
     printf '{"id":"td-created"}\n'
     ;;
+  defer)
+    printf '{"id":"%s","status":"open"}\n' "$2"
+    ;;
   reopen)
     printf '{"id":"%s","status":"open"}\n' "$2"
     ;;
@@ -116,8 +119,24 @@ if grep -Fq "create" "$TEST_ROOT/td.log"; then
   exit 1
 fi
 
-TD_LIST_RESULT='[{"id":"td-closed","status":"closed","description":"Deduplication key: no-mistakes-finding:app:review-7"}]' \
+TD_LIST_RESULT='[{"id":"td-review","status":"in_review","description":"Deduplication key: no-mistakes-finding:app:review-7"}]' \
   run_router --run-id run-44 --head-sha fed654 \
+    --description "Resurface review debt on rerun" \
+    --intent "Keep one visible debt card per finding" \
+    --disposition td
+[[ "$status" -eq 0 && "$output" == *"td-review"* ]] || {
+  printf 'in-review debt card was not updated: %s\n' "$output" >&2
+  exit 1
+}
+assert_log_contains "update td-review --status open"
+assert_log_contains "update td-review --priority P2"
+if grep -Fq "create" "$TEST_ROOT/td.log"; then
+  printf 'in-review deduplicated finding created a second card\n' >&2
+  exit 1
+fi
+
+TD_LIST_RESULT='[{"id":"td-closed","status":"closed","description":"Deduplication key: no-mistakes-finding:app:review-7"}]' \
+  run_router --run-id run-45 --head-sha cba321 \
     --description "Reopen closed debt on rerun" \
     --intent "Keep one visible debt card per finding" \
     --disposition td
@@ -132,13 +151,29 @@ if grep -Fq "create" "$TEST_ROOT/td.log"; then
   exit 1
 fi
 
+TD_LIST_RESULT='[{"id":"td-deferred","status":"open","defer_until":"2026-07-22","description":"Deduplication key: no-mistakes-finding:app:review-7"}]' \
+  run_router --run-id run-46 --head-sha abc999 \
+    --description "Resurface deferred debt on rerun" \
+    --intent "Keep deferred reruns actionable" \
+    --disposition td
+[[ "$status" -eq 0 && "$output" == *"td-deferred"* ]] || {
+  printf 'deferred debt card was not updated: %s\n' "$output" >&2
+  exit 1
+}
+assert_log_contains "defer td-deferred --clear"
+assert_log_contains "update td-deferred --priority P2"
+if grep -Fq "create" "$TEST_ROOT/td.log"; then
+  printf 'deferred deduplicated finding created a second card\n' >&2
+  exit 1
+fi
+
 TD_LIST_RESULT='{"oops":' run_router --disposition td
 [[ "$status" -ne 0 && "$output" == *"td list returned invalid JSON"* ]] || {
   printf 'invalid td list JSON did not fail closed: %s\n' "$output" >&2
   exit 1
 }
 assert_log_contains "list --all --search no-mistakes-finding:app:review-7 --json --work-dir $REPO"
-if grep -Fq "create" "$TEST_ROOT/td.log" || grep -Fq "update" "$TEST_ROOT/td.log" || grep -Fq "reopen" "$TEST_ROOT/td.log"; then
+if grep -Fq "create" "$TEST_ROOT/td.log" || grep -Fq "update" "$TEST_ROOT/td.log" || grep -Fq "reopen" "$TEST_ROOT/td.log" || grep -Fq "defer" "$TEST_ROOT/td.log"; then
   printf 'invalid td list JSON should not mutate td state\n' >&2
   exit 1
 fi

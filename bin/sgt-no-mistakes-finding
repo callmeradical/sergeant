@@ -147,7 +147,7 @@ matches = []
 
 for item in items:
     if needle in item.get("description", "").splitlines():
-        matches.append((item["id"], item.get("status", "")))
+        matches.append((item["id"], item.get("status", ""), item.get("defer_until", "")))
 
 if len(matches) > 1:
     ids = ", ".join(match[0] for match in matches)
@@ -159,13 +159,25 @@ if matches:
 
 existing_id=""
 existing_status=""
+existing_defer_until=""
 if [[ -n "$existing_match" ]]; then
-  IFS=$'\t' read -r existing_id existing_status <<< "$existing_match"
+  IFS=$'\t' read -r existing_id existing_status existing_defer_until <<< "$existing_match"
 fi
 
 if [[ -n "$existing_id" ]]; then
   if [[ "$existing_status" == "closed" ]]; then
     td reopen "$existing_id" --work-dir "$repo_path" --json >/dev/null
+  elif [[ -n "$existing_status" && "$existing_status" != "open" ]]; then
+    td update "$existing_id" \
+      --status open \
+      --work-dir "$repo_path" \
+      --json >/dev/null
+  fi
+  if [[ -n "$existing_defer_until" ]]; then
+    td defer "$existing_id" \
+      --clear \
+      --work-dir "$repo_path" \
+      --json >/dev/null
   fi
   td update "$existing_id" \
     --priority "$PRIORITY" \
