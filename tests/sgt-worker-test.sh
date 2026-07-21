@@ -25,6 +25,28 @@ turn="$(cat "$turn_file" 2>/dev/null || echo 0)"
 turn=$((turn + 1))
 printf '%s\n' "$turn" > "$turn_file"
 
+record_goose_session() {
+  local session_name="$1"
+  python3 - "$GOOSE_DB" "$session_name" <<'PY'
+import os
+import sqlite3
+import sys
+
+db_path, session_name = sys.argv[1], sys.argv[2]
+os.makedirs(os.path.dirname(db_path), exist_ok=True)
+conn = sqlite3.connect(db_path)
+conn.execute(
+    "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, name TEXT, working_dir TEXT, created_at TEXT, updated_at TEXT)"
+)
+conn.execute(
+    "INSERT OR REPLACE INTO sessions (id, name, working_dir, created_at, updated_at) VALUES (?, ?, ?, datetime('now'), datetime('now'))",
+    (session_name, session_name, os.getcwd()),
+)
+conn.commit()
+conn.close()
+PY
+}
+
 case "$FAKE_MODE:$turn" in
   needs_input:1)
     printf 'needs_input\n' > .sergeant-status
@@ -58,6 +80,7 @@ case "$FAKE_MODE:$turn" in
   goose_needs_input:1)
     [[ "$*" == *"run --output-format json -n sgt-goose-needs-input-state -t initial mission"* ]]
     [[ "$*" != *" -r "* ]]
+    record_goose_session "sgt-goose-needs-input-state"
     printf 'needs_input\n' > .sergeant-status
     printf 'Choose A or B.\n' > .sergeant-message
     printf '%s\n' '{"type":"message","content":"goose turn one"}'
@@ -67,6 +90,13 @@ case "$FAKE_MODE:$turn" in
     [[ "$*" == *"Use option A"* ]]
     printf 'done\n' > .sergeant-status
     printf 'validated Goose result\n' > .sergeant-result
+    ;;
+  goose_missing_resume_evidence:1)
+    [[ "$*" == *"run --output-format json -n sgt-goose-missing-resume-evidence-state -t initial mission"* ]]
+    [[ "$*" != *" -r "* ]]
+    printf 'needs_input\n' > .sergeant-status
+    printf 'Choose A or B.\n' > .sergeant-message
+    printf '%s\n' '{"type":"message","content":"goose turn without durable session"}'
     ;;
   needs_input:2|blocked:2|poisoned_session:2)
     [[ "$*" == *"--session ses-test-123"* ]]
@@ -222,7 +252,7 @@ grep -Fq -- '-p --output-format json' "$case_root/args"
 case_root="$TEST_ROOT/goose-needs-input"
 mkdir -p "$case_root/worktree" "$case_root/state"
 printf 'td-123\n' > "$case_root/state/td_task"
-PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" \
+PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" GOOSE_DB="$case_root/goose/sessions.db" \
   FAKE_MODE=goose_needs_input FAKE_STATE="$case_root" SGT_WORKER_POLL_INTERVAL=0.01 \
   "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_goose" "initial mission" \
   > "$case_root/output.log" 2>&1 &
@@ -238,6 +268,23 @@ wait "$worker_pid"
 grep -Fq -- 'run --output-format json -n sgt-goose-needs-input-state -t initial mission' "$case_root/args"
 grep -Fq -- 'run --output-format json -n sgt-goose-needs-input-state -r -t' "$case_root/args"
 if grep -Fq 'session_name: No such file or directory' "$case_root/output.log"; then
+  exit 1
+fi
+
+case_root="$TEST_ROOT/goose-missing-resume-evidence"
+mkdir -p "$case_root/worktree" "$case_root/state"
+set +e
+PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" GOOSE_DB="$case_root/goose/sessions.db" \
+  FAKE_MODE=goose_missing_resume_evidence FAKE_STATE="$case_root" SGT_WORKER_POLL_INTERVAL=0.01 \
+  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_goose" "initial mission" \
+  > "$case_root/output.log" 2>&1
+status=$?
+set -e
+[[ "$status" -eq 1 ]]
+[[ "$(cat "$case_root/worktree/.sergeant-status")" == 'orphaned' ]]
+[[ "$(cat "$case_root/state/status")" == 'orphaned' ]]
+grep -Fq 'Goose did not provide a resumable session' "$case_root/state/diagnostic"
+if [[ -e "$case_root/state/goose_resume_ready" || -e "$case_root/worktree/.sergeant-response-ack" ]]; then
   exit 1
 fi
 

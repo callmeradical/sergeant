@@ -51,6 +51,9 @@ Diagnostics cover:
   babydriver, and mise.
 - Availability of at least one supported OpenCode, Claude Code, or Goose
   agent harness.
+- When Goose is selected, dispatch and resume still depend on Goose persisting
+  a resumable session record for the current worktree; harness availability
+  alone is not sufficient for a waiting worker to resume.
 - GitHub authentication identity. Tokens are neither requested nor printed.
 - Global and project YAML syntax and required project/repository fields.
 - Repository paths, Git metadata, configured URLs, origin remotes, and td data.

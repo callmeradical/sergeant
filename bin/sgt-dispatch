@@ -690,7 +690,7 @@ For each non-trivial behavior, work red before green: one vertical slice, test, 
 
 ### 4. Escalate and resume
 
-Your non-interactive agent turns run under a persistent supervisor. Do not use sleep to keep the agent process alive. The supervisor waits outside the agent process, captures the OpenCode session ID, and resumes that session after a serialized response is delivered.
+Your non-interactive agent turns run under a persistent supervisor. Do not use sleep to keep the agent process alive. The supervisor waits outside the agent process, captures durable resume state from the active harness, and resumes that state after a serialized response is delivered. For Goose, resumability requires a persisted Goose session record for the current worktree rather than Sergeant's local session-name hint alone.
 
 If an agent exits before a terminal or waiting state, the supervisor records \`orphaned\` with durable diagnostics and td recovery pointers. Resume orphaned work through \`sgt-respond\`; do not overwrite or discard its recovery state.
 

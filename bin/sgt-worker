@@ -188,10 +188,46 @@ _goose_session_name() {
   printf '%s\n' "$derived"
 }
 
+_goose_sessions_db() {
+  printf '%s\n' "${GOOSE_DB:-$HOME/.local/share/goose/sessions/sessions.db}"
+}
+
+_goose_has_resume_state() {
+  local session_name goose_db
+  if [[ -f "$REPO_STATE/session_name" ]]; then
+    session_name="$(tr -d '\n' < "$REPO_STATE/session_name" || true)"
+  else
+    session_name=""
+  fi
+  [[ -n "$session_name" ]] || return 1
+  goose_db="$(_goose_sessions_db)"
+  [[ -f "$goose_db" ]] || return 1
+  python3 - "$goose_db" "$session_name" "$WORKTREE" <<'PY'
+import sqlite3
+import sys
+
+db_path, session_name, working_dir = sys.argv[1:4]
+
+try:
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sessions WHERE name = ? AND working_dir = ? LIMIT 1",
+            (session_name, working_dir),
+        ).fetchone()
+    finally:
+        conn.close()
+except sqlite3.Error:
+    sys.exit(1)
+
+sys.exit(0 if row else 1)
+PY
+}
+
 _agent_has_resume_state() {
   case "$(_agent_name)" in
     goose)
-      [[ -f "$REPO_STATE/session_name" && -f "$REPO_STATE/goose_resume_ready" ]]
+      _goose_has_resume_state
       ;;
     *)
       [[ -f "$REPO_STATE/session_id" ]]
@@ -229,7 +265,7 @@ _run_turn() {
   elif [[ "$agent_name" == "goose" ]]; then
     session_name="$(_goose_session_name)"
     command=("$AGENT" run --output-format json -n "$session_name")
-    if [[ -f "$REPO_STATE/goose_resume_ready" ]]; then
+    if _goose_has_resume_state; then
       command+=(-r)
     fi
     command+=(-t "$message")
@@ -338,9 +374,6 @@ while true; do
   case "$status" in
     needs_input|blocked)
       _record_gate_generation
-      if [[ "$(_agent_name)" == "goose" ]]; then
-        : > "$REPO_STATE/goose_resume_ready"
-      fi
       if ! _agent_has_resume_state; then
         [[ "$exit_code" -ne 0 ]] || exit_code=1
         _orphan "$exit_code" "$(_agent_missing_resume_reason)"
