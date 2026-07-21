@@ -24,7 +24,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=_sgt-lib.sh
+# shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
 
 # ── Parse args ───────────────────────────────────────────────────────────────

@@ -206,7 +206,7 @@ _read_generation_file() {
   local path="$1"
   local value
   if [[ -f "$path" ]]; then
-    value="$(cat "$path" | tr -d '\n' || true)"
+    value="$(tr -d '\n' < "$path" || true)"
   else
     value=""
   fi
@@ -221,7 +221,7 @@ _sync_remote_repo() {
   local repo_dir="$1"
   local worktree session window task_identifier status_output remote_logs remote_project_dir remote_response_path
   local current_status existing_diagnostic pending_response preserve_orphan_checkpoint remote_pending_id remote_pending_state remote_response_present
-  local remote_pending_checkpoint_status remote_pending_checkpoint_message remote_pending_checkpoint_generation
+  local remote_pending_checkpoint_generation
   local remote_response_id_path remote_response_ack_path remote_gate_generation_path remote_response_ack_id remote_gate_generation remote_pending_acknowledged remote_generation_advanced
   local remote_fields=() tmux_alive raw_status mapped_status result message diagnostic task_id matched
   worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
@@ -234,8 +234,6 @@ _sync_remote_repo() {
   existing_diagnostic="$(cat "$repo_dir/diagnostic" 2>/dev/null || true)"
   remote_pending_id="$(cat "$repo_dir/remote_response_pending_id" 2>/dev/null || true)"
   remote_pending_state="$(cat "$repo_dir/remote_response_pending_state" 2>/dev/null || true)"
-  remote_pending_checkpoint_status="$(cat "$repo_dir/remote_response_pending_checkpoint_status" 2>/dev/null || true)"
-  remote_pending_checkpoint_message="$(cat "$repo_dir/remote_response_pending_checkpoint_message" 2>/dev/null || true)"
   remote_pending_checkpoint_generation="$(cat "$repo_dir/remote_response_pending_checkpoint_generation" 2>/dev/null || true)"
   pending_response=""
   if [[ -f "$repo_dir/response" ]]; then
@@ -252,7 +250,7 @@ _sync_remote_repo() {
     remote_gate_generation_path="$remote_project_dir/.sergeant-gate-generation"
     [[ -f "$remote_response_path" ]] && remote_response_present=1
     if [[ -f "$remote_response_ack_path" ]]; then
-      remote_response_ack_id="$(cat "$remote_response_ack_path" | tr -d '\n' || true)"
+      remote_response_ack_id="$(tr -d '\n' < "$remote_response_ack_path" || true)"
     else
       remote_response_ack_id=""
     fi

@@ -16,7 +16,7 @@ POLL_INTERVAL="${SGT_WORKER_POLL_INTERVAL:-1}"
 LOG="$REPO_STATE/worker.log"
 DIAGNOSTIC="$REPO_STATE/diagnostic"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=_sgt-response-lock.sh
+# shellcheck source=bin/_sgt-response-lock.sh
 source "$SCRIPT_DIR/_sgt-response-lock.sh"
 
 mkdir -p "$REPO_STATE"
@@ -53,7 +53,7 @@ _sync_state() {
 _next_gate_generation() {
   local current
   if [[ -f "$WORKTREE/.sergeant-gate-generation" ]]; then
-    current="$(cat "$WORKTREE/.sergeant-gate-generation" | tr -d '\n' || true)"
+    current="$(tr -d '\n' < "$WORKTREE/.sergeant-gate-generation" || true)"
   else
     current=""
   fi
@@ -199,14 +199,14 @@ _wait_for_response() {
       _sgt_response_lock_acquire "$REPO_STATE"
       if [[ -f "$WORKTREE/.sergeant-response" ]]; then
         response="$(cat "$WORKTREE/.sergeant-response")"
-        response_id="$(cat "$WORKTREE/.sergeant-response-id" 2>/dev/null | tr -d '\n' || true)"
+        response_id="$(tr -d '\n' < "$WORKTREE/.sergeant-response-id" 2>/dev/null || true)"
         if [[ -z "$response_id" ]]; then
-          response_id="$(cat "$REPO_STATE/response_id" 2>/dev/null | tr -d '\n' || true)"
+          response_id="$(tr -d '\n' < "$REPO_STATE/response_id" 2>/dev/null || true)"
         fi
         printf 'in_progress\n' > "$WORKTREE/.sergeant-status"
         printf 'in_progress\n' > "$REPO_STATE/status"
         rm -f "$WORKTREE/.sergeant-message" "$REPO_STATE/message"
-        if [[ -n "$response_id" && -f "$WORKTREE/.sergeant-response-ack" ]] && [[ "$(cat "$WORKTREE/.sergeant-response-ack" 2>/dev/null | tr -d '\n')" == "$response_id" ]]; then
+        if [[ -n "$response_id" && -f "$WORKTREE/.sergeant-response-ack" ]] && [[ "$(tr -d '\n' < "$WORKTREE/.sergeant-response-ack" 2>/dev/null)" == "$response_id" ]]; then
           _cleanup_response_transport
           _sgt_response_lock_release
           if [[ -f "$REPO_STATE/session_id" ]]; then

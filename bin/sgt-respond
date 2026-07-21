@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
-# shellcheck source=_sgt-response-lock.sh
+# shellcheck source=bin/_sgt-response-lock.sh
 source "$SCRIPT_DIR/_sgt-response-lock.sh"
 
 _die() { echo "ERROR: $*" >&2; exit 1; }
@@ -53,7 +53,7 @@ _read_generation_file() {
   local path="$1"
   local value
   if [[ -f "$path" ]]; then
-    value="$(cat "$path" | tr -d '\n' || true)"
+    value="$(tr -d '\n' < "$path" || true)"
   else
     value=""
   fi
@@ -135,7 +135,7 @@ if [[ "$backend" == "remote-babydriver" && "$status" == "orphaned" ]]; then
   remote_project_dir_hint="$(cat "$REPO_DIR/remote_project_dir" 2>/dev/null || true)"
   remote_ack_id=""
   if [[ -n "$remote_project_dir_hint" && -f "$remote_project_dir_hint/.sergeant-response-ack" ]]; then
-    remote_ack_id="$(cat "$remote_project_dir_hint/.sergeant-response-ack" | tr -d '\n' || true)"
+    remote_ack_id="$(tr -d '\n' < "$remote_project_dir_hint/.sergeant-response-ack" || true)"
   fi
   acknowledged_response_id="${remote_pending_id:-$response_id}"
   if [[ -n "$acknowledged_response_id" && -n "$remote_ack_id" && "$remote_ack_id" == "$acknowledged_response_id" ]]; then
