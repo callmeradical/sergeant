@@ -71,6 +71,22 @@ _capture_session_id() {
 import json
 import sys
 
+def find_session_id(value):
+    if isinstance(value, dict):
+        candidate = value.get("sessionID") or value.get("session_id")
+        if candidate:
+            return str(candidate)
+        for nested in value.values():
+            candidate = find_session_id(nested)
+            if candidate:
+                return candidate
+    elif isinstance(value, list):
+        for nested in value:
+            candidate = find_session_id(nested)
+            if candidate:
+                return candidate
+    return ""
+
 session_id = ""
 with open(sys.argv[1], encoding="utf-8", errors="replace") as stream:
     for line in stream:
@@ -78,7 +94,7 @@ with open(sys.argv[1], encoding="utf-8", errors="replace") as stream:
             event = json.loads(line)
         except (json.JSONDecodeError, TypeError):
             continue
-        candidate = event.get("sessionID") or event.get("session_id")
+        candidate = find_session_id(event)
         if candidate:
             session_id = str(candidate)
 print(session_id)
@@ -96,9 +112,9 @@ _run_turn() {
 
   if [[ "$agent_name" == "claude" ]]; then
     if [[ -n "$session_id" ]]; then
-      command=("$AGENT" --dangerously-skip-permissions --resume "$session_id" "$message")
+      command=("$AGENT" -p --output-format json --dangerously-skip-permissions --resume "$session_id" "$message")
     else
-      command=("$AGENT" --dangerously-skip-permissions "$message")
+      command=("$AGENT" -p --output-format json --dangerously-skip-permissions "$message")
     fi
   else
     command=("$AGENT" run --auto --format json)

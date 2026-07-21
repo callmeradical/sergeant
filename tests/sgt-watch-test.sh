@@ -54,18 +54,20 @@ cmp "$TEST_ROOT/live-wt/.sergeant-message" "$task/live/message"
 
 list_output="$(PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-watch" --list)"
 [[ "$list_output" == *'1 needs-input'* ]]
+[[ "$list_output" == *'1 orphaned'* ]]
 [[ "$list_output" == *'1 blocked'* ]]
 
 watch_output="$TEST_ROOT/watch-output"
+set +e
 PATH="$fake_bin:$PATH" TASK_ROOT="$task" SERGEANT_FLEET="$fleet" SERGEANT_WATCH_INTERVAL=0.01 \
-  "$ROOT_DIR/bin/sgt-watch" task-1 > "$watch_output" 2>&1 &
-watch_pid=$!
-sleep 0.05
-kill -0 "$watch_pid"
-kill "$watch_pid"
-wait "$watch_pid" 2>/dev/null || true
+  "$ROOT_DIR/bin/sgt-watch" task-1 > "$watch_output" 2>&1
+watch_status=$?
+set -e
+[[ "$watch_status" -eq 1 ]]
 grep -Fq 'Question remains active.' "$watch_output"
 grep -Fq 'Remote blocker remains active.' "$watch_output"
+grep -Fq 'recorded pane %dead is dead or is not the expected worker supervisor' "$watch_output"
+grep -Fq 'Fleet finished with failures.' "$watch_output"
 
 printf 'done\n' > "$TEST_ROOT/live-wt/.sergeant-status"
 rm -f "$TEST_ROOT/live-wt/.sergeant-result"

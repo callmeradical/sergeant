@@ -43,7 +43,7 @@ if [[ "${1:-}" == "--list" ]]; then
     brief="$(grep '^Brief:' "$task_dir/brief.md" 2>/dev/null | sed 's/^Brief: *//' | cut -c1-60 || echo "")"
 
     # Count repo statuses
-    total=0; done_count=0; failed_count=0; in_progress=0; needs_input=0; blocked=0
+    total=0; done_count=0; failed_count=0; in_progress=0; needs_input=0; blocked=0; orphaned=0
     for repo_dir in "$task_dir"/*/; do
       [[ -d "$repo_dir" ]] || continue
       total=$((total+1))
@@ -54,13 +54,14 @@ if [[ "${1:-}" == "--list" ]]; then
         in_progress) in_progress=$((in_progress+1)) ;;
         needs_input) needs_input=$((needs_input+1)) ;;
         blocked)     blocked=$((blocked+1)) ;;
+        orphaned)    orphaned=$((orphaned+1)) ;;
       esac
     done
 
     echo "  $task_id"
     echo "    brief:   $brief"
     echo "    started: $started"
-    echo "    repos:   $total total — $done_count done, $in_progress in-progress, $needs_input needs-input, $blocked blocked, $failed_count failed"
+    echo "    repos:   $total total — $done_count done, $in_progress in-progress, $needs_input needs-input, $blocked blocked, $orphaned orphaned, $failed_count failed"
     echo ""
   done
   exit 0
@@ -179,12 +180,17 @@ _print_status() {
     status="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
     result="$(cat "$repo_dir/result" 2>/dev/null || echo "")"
     message="$(cat "$repo_dir/message" 2>/dev/null || echo "")"
+    diagnostic="$(cat "$repo_dir/diagnostic" 2>/dev/null || echo "")"
 
     case "$status" in
       done)
         icon="✓"
         ;;
       failed*)
+        icon="✗"
+        any_failed=true
+        ;;
+      orphaned)
         icon="✗"
         any_failed=true
         ;;
@@ -215,11 +221,18 @@ _print_status() {
         printf "       %-20s  %s\n" "" "$message_line"
       done <<< "$message"
     fi
+    if [[ -n "$diagnostic" ]]; then
+      while IFS= read -r diagnostic_line; do
+        printf "       %-20s  %s\n" "" "$diagnostic_line"
+      done <<< "$diagnostic"
+    fi
   done
 
   echo ""
+  if $any_failed; then
+    return 2
+  fi
   if $all_terminal; then
-    $any_failed && return 2
     return 0
   fi
   return 1

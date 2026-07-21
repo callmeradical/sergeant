@@ -36,14 +36,14 @@ case "$FAKE_MODE:$turn" in
     printf '%s\n' '{"type":"session","sessionID":"ses-test-123"}'
     ;;
   claude_needs_input:1)
-    [[ "$*" == *"--dangerously-skip-permissions"* ]]
+    [[ "$*" == *"-p --output-format json --dangerously-skip-permissions"* ]]
     [[ "$*" != *"run --auto"* ]]
     printf 'needs_input\n' > .sergeant-status
     printf 'Choose A or B.\n' > .sergeant-message
     printf '%s\n' '{"type":"session","sessionID":"ses-test-123"}'
     ;;
   claude_needs_input:2)
-    [[ "$*" == *"--dangerously-skip-permissions --resume ses-test-123"* ]]
+    [[ "$*" == *"-p --output-format json --dangerously-skip-permissions --resume ses-test-123"* ]]
     [[ "$*" == *"Use option A"* ]]
     printf 'done\n' > .sergeant-status
     printf 'validated Claude result\n' > .sergeant-result
@@ -72,6 +72,7 @@ case "$FAKE_MODE:$turn" in
     printf 'Need a response but no session was emitted.\n' > .sergeant-message
     ;;
   claude_missing_session:1)
+    [[ "$*" == *"-p --output-format json --dangerously-skip-permissions"* ]]
     printf 'needs_input\n' > .sergeant-status
     printf 'Need a response but no session was emitted.\n' > .sergeant-message
     ;;
@@ -162,6 +163,7 @@ printf 'Use option A\n' > "$case_root/worktree/.sergeant-response"
 wait "$worker_pid"
 [[ "$(cat "$case_root/worktree/.sergeant-result")" == 'validated Claude result' ]]
 grep -Fq -- '--dangerously-skip-permissions --resume ses-test-123' "$case_root/args"
+grep -Fq -- '-p --output-format json' "$case_root/args"
 
 case_root="$TEST_ROOT/resume-orphan"
 mkdir -p "$case_root/worktree" "$case_root/state"

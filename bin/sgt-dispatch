@@ -113,6 +113,7 @@ fi
 
 [[ -n "$BRIEF" ]]     || _die "Provide a brief or use --td <task-id>"
 [[ -n "$REPOS_ARG" ]] || _die "Must specify --repos. Run 'sgt-context $PROJECT' to see available repos."
+! $REMOTE || _die "Remote dispatch is not compatible with Sergeant worker supervision; use local tmux dispatch until babydriver can preserve Sergeant sessions and responses."
 
 _require_yq
 _require_git

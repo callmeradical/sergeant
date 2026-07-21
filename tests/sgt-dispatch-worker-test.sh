@@ -25,6 +25,11 @@ case "$1" in
 esac
 EOF
 chmod +x "$TEST_ROOT/fake-bin/tmux"
+cat > "$TEST_ROOT/fake-bin/babydriver" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$BABYDRIVER_LOG"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/babydriver"
 git -C "$TEST_ROOT/repo" init -q
 git -C "$TEST_ROOT/repo" config user.name Test
 git -C "$TEST_ROOT/repo" config user.email test@example.invalid
@@ -58,5 +63,16 @@ set -e
 failed_state="$(printf '%s\n' "$TEST_ROOT"/fleet/fail-worker-launch-*/app)"
 [[ "$(cat "$failed_state/status")" == "orphaned" ]]
 grep -Fq 'tmux failed to launch worker supervisor' "$failed_state/diagnostic"
+
+set +e
+PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/remote-tmux.log" BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
+SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Reject unsupervised remote worker' --repos app --remote \
+  >"$TEST_ROOT/remote.out" 2>&1
+status=$?
+set -e
+[[ "$status" -ne 0 ]]
+grep -Fq 'Remote dispatch is not compatible with Sergeant worker supervision' "$TEST_ROOT/remote.out"
+[[ ! -e "$TEST_ROOT/babydriver.log" ]]
 
 printf 'sgt-dispatch supervisor launch: ok\n'
