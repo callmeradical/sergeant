@@ -178,6 +178,59 @@ PY
   _die "$failure_message"
 }
 
+_build_repo_td_map_or_die() {
+  local td_results="$1"
+  local selected_repos_csv="$2"
+  : > "$TD_CREATE_STDERR"
+  if ! TD_RESULTS="$td_results" TARGET_REPOS_CSV="$selected_repos_csv" python3 - <<'PY' > "$REPO_TD_MAP" 2>"$TD_CREATE_STDERR"
+import json
+import os
+import sys
+
+selected = [repo for repo in os.environ["TARGET_REPOS_CSV"].split(",") if repo]
+seen = set()
+
+try:
+    results = json.loads(os.environ["TD_RESULTS"])
+except json.JSONDecodeError:
+    print("failed to inject td task results", file=sys.stderr)
+    raise SystemExit(1)
+
+if not isinstance(results, list):
+    print("failed to inject td task results", file=sys.stderr)
+    raise SystemExit(1)
+
+for item in results:
+    if not isinstance(item, dict):
+        print("failed to inject td task results", file=sys.stderr)
+        raise SystemExit(1)
+    repo = item.get("repo")
+    task_id = item.get("task_id")
+    if not isinstance(repo, str) or not isinstance(task_id, str):
+        print("failed to inject td task results", file=sys.stderr)
+        raise SystemExit(1)
+    if repo not in selected:
+        print(f"unexpected td task result for repo: {repo}", file=sys.stderr)
+        raise SystemExit(1)
+    if repo in seen:
+        print(f"duplicate td task result for repo: {repo}", file=sys.stderr)
+        raise SystemExit(1)
+    seen.add(repo)
+    print(f"{repo} {task_id}")
+
+for repo in selected:
+    if repo not in seen:
+        print(f"missing td task for selected repo: {repo}", file=sys.stderr)
+        raise SystemExit(1)
+PY
+  then
+    local validation_error
+    validation_error="$(cat "$TD_CREATE_STDERR")"
+    [[ -n "$validation_error" ]] || validation_error="failed to inject td task results"
+    _rollback_generated_td_tasks "$validation_error"
+  fi
+}
+
 if [[ -z "$TD_TASK_ID" ]] && ! $DRY_RUN; then
   command -v td &>/dev/null || _die "td is required for brief-only dispatch"
   echo "Creating td tasks ..."
@@ -193,19 +246,7 @@ if [[ -z "$TD_TASK_ID" ]] && ! $DRY_RUN; then
     _die "td task creation failed: $td_error"
   fi
 
-  if ! echo "$td_results" | python3 -c "
-import sys, json
-results = json.load(sys.stdin)
-for r in results:
-    print(r['repo'] + ' ' + r['task_id'])
-" 2>/dev/null > "$REPO_TD_MAP"; then
-    _rollback_generated_td_tasks "failed to inject td task results"
-  fi
-
-  for rname in "${TARGET_REPOS[@]}"; do
-    awk -v repo="$rname" '$1 == repo && NF == 2 { found = 1 } END { exit !found }' "$REPO_TD_MAP" || \
-      _rollback_generated_td_tasks "missing td task for selected repo: $rname"
-  done
+  _build_repo_td_map_or_die "$td_results" "$REPOS_ARG"
 
   if [[ -s "$REPO_TD_MAP" ]]; then
     while IFS=' ' read -r rname tid; do

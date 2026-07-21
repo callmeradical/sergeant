@@ -488,6 +488,103 @@ printf 'sgt-dispatch td injection rollback: ok\n'
 : > "$TEST_ROOT/td-delete.log"
 rm -f "$TEST_ROOT"/td-active/* "$TEST_ROOT"/td-counter/*
 
+cat > "$TEST_ROOT/bin/sgt-td-create" <<EOF
+#!/usr/bin/env bash
+results="\$("$ROOT_DIR/bin/sgt-td-create" "\$@")"
+status=\$?
+if [[ "\$status" -eq 0 ]]; then
+  RESULTS="\$results" python3 - <<'PY'
+import json
+import os
+
+items = json.loads(os.environ["RESULTS"])
+items[1]["repo"] = "app"
+print(json.dumps(items))
+PY
+fi
+exit "\$status"
+EOF
+chmod +x "$TEST_ROOT/bin/sgt-td-create"
+
+TD_MODE=success dispatch_capture test "Reject duplicate selected repo results" --repos app,api
+
+[[ "$status" -ne 0 ]] || {
+  printf 'dispatch succeeded after duplicate selected repo td results\n' >&2
+  exit 1
+}
+[[ "$output" == *"duplicate td task result for repo: app"* ]] || {
+  printf 'dispatch did not report duplicate selected repo td results:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$(wc -l < "$TEST_ROOT/td-delete.log")" -eq 2 ]] || {
+  printf 'dispatch did not roll back created tasks after duplicate selected repo results\n' >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/tmux.log" ]] || {
+  printf 'dispatch spawned tmux after duplicate selected repo td results\n' >&2
+  exit 1
+}
+[[ "$(find "$TEST_ROOT/td-active" -type f | wc -l)" -eq 0 ]] || {
+  printf 'duplicate selected repo td results left active cards behind\n' >&2
+  exit 1
+}
+
+printf 'sgt-dispatch duplicate td result rollback: ok\n'
+
+: > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+: > "$TEST_ROOT/td-delete.log"
+rm -f "$TEST_ROOT"/td-active/* "$TEST_ROOT"/td-counter/*
+
+cat > "$TEST_ROOT/bin/sgt-td-create" <<EOF
+#!/usr/bin/env bash
+results="\$("$ROOT_DIR/bin/sgt-td-create" "\$@")"
+status=\$?
+if [[ "\$status" -eq 0 ]]; then
+  RESULTS="\$results" python3 - <<'PY'
+import json
+import os
+
+items = json.loads(os.environ["RESULTS"])
+items[1]["repo"] = "web"
+print(json.dumps(items))
+PY
+fi
+exit "\$status"
+EOF
+chmod +x "$TEST_ROOT/bin/sgt-td-create"
+
+TD_MODE=success dispatch_capture test "Reject unexpected repo results" --repos app,api
+
+[[ "$status" -ne 0 ]] || {
+  printf 'dispatch succeeded after unexpected repo td results\n' >&2
+  exit 1
+}
+[[ "$output" == *"unexpected td task result for repo: web"* ]] || {
+  printf 'dispatch did not report unexpected repo td results:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$(wc -l < "$TEST_ROOT/td-delete.log")" -eq 2 ]] || {
+  printf 'dispatch did not roll back created tasks after unexpected repo td results\n' >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/tmux.log" ]] || {
+  printf 'dispatch spawned tmux after unexpected repo td results\n' >&2
+  exit 1
+}
+[[ "$(find "$TEST_ROOT/td-active" -type f | wc -l)" -eq 0 ]] || {
+  printf 'unexpected repo td results left active cards behind\n' >&2
+  exit 1
+}
+
+printf 'sgt-dispatch unexpected td result rollback: ok\n'
+
+: > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+: > "$TEST_ROOT/td-delete.log"
+rm -f "$TEST_ROOT"/td-active/* "$TEST_ROOT"/td-counter/*
+
+cp "$ROOT_DIR/bin/sgt-td-create" "$TEST_ROOT/bin/sgt-td-create"
 TD_MODE=existing_td dispatch_success test --td td-existing --repos app
 
 task_dir="$(task_dir_for existing-tracked-work)"
