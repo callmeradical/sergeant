@@ -91,6 +91,36 @@ _sgt_tmux_pane_is_supervisor() {
 _die()  { echo "ERROR: $*" >&2; exit 1; }
 _info() { echo "  $*"; }
 
+_sgt_redact() {
+  local value="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$value" <<'PY'
+import re
+import sys
+
+text = sys.argv[1]
+credential_key = r'[A-Z0-9_]*(?:token|password|secret|api(?:[_-]?key))[A-Z0-9_]*'
+assignment_pattern = re.compile(
+    rf'(?i)\b({credential_key})\b\s*[:=]\s*(.*?)\s*'
+    rf'(?=(?:\b{credential_key}\b\s*[:=])|(?:gh[pousr]_[A-Za-z0-9_]+)|(?:github_pat_[A-Za-z0-9_]+)|[;,\n]|$)'
+)
+
+text = re.sub(r'(https?://)[^/@\s]+@', r'\1[REDACTED]@', text, flags=re.I)
+text = assignment_pattern.sub(lambda m: f'{m.group(1)}=[REDACTED]', text)
+text = re.sub(r'\bgh[pousr]_[A-Za-z0-9_]+\b', '[REDACTED]', text)
+text = re.sub(r'\bgithub_pat_[A-Za-z0-9_]+\b', '[REDACTED]', text)
+sys.stdout.write(text)
+PY
+    return
+  fi
+
+  printf '%s' "$value" | sed -E \
+    -e 's#(https?://)[^/@[:space:]]+@#\1[REDACTED]@#g' \
+    -e 's#([A-Za-z0-9_]*(TOKEN|PASSWORD|SECRET|API[_-]?KEY)[A-Za-z0-9_]*)[[:space:]]*[:=][[:space:]]*([^;,[:space:]]+)#\1=[REDACTED]#gI' \
+    -e 's#gh[pousr]_[A-Za-z0-9_]+#[REDACTED]#g' \
+    -e 's#github_pat_[A-Za-z0-9_]+#[REDACTED]#g'
+}
+
 # ── Agent command builder ─────────────────────────────────────────────────────
 # _sgt_agent_run_cmd <agent> <message>
 #

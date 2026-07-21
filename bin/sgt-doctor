@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 set -u
 
+SOURCE_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE_PATH" ]]; do
+  SOURCE_LINK="$(readlink "$SOURCE_PATH")"
+  case "$SOURCE_LINK" in
+    /*) SOURCE_PATH="$SOURCE_LINK" ;;
+    *) SOURCE_PATH="$(dirname "$SOURCE_PATH")/$SOURCE_LINK" ;;
+  esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE_PATH")" && pwd)"
+# shellcheck source=_sgt-lib.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/_sgt-lib.sh"
+
 FORMAT=human
 PROJECT=""
-
-redact() {
-  printf '%s' "$1" | sed -E \
-    -e 's#(https?://)[^/@[:space:]]+@#\1[REDACTED]@#g' \
-    -e 's#([Tt][Oo][Kk][Ee][Nn]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy])[[:space:]]*[=:][[:space:]]*.*#\1=[REDACTED]#g' \
-    -e 's#gh[pousr]_[A-Za-z0-9_]+#[REDACTED]#g' \
-    -e 's#github_pat_[A-Za-z0-9_]+#[REDACTED]#g'
-}
 
 usage() {
   cat <<'EOF'
@@ -33,7 +38,7 @@ while (($# > 0)); do
       PROJECT="$1"
       ;;
     -h|--help) usage; exit 0 ;;
-    -*) printf 'ERROR: unknown option: %s\n' "$(redact "$1")" >&2; usage >&2; exit 64 ;;
+    -*) printf 'ERROR: unknown option: %s\n' "$(_sgt_redact "$1")" >&2; usage >&2; exit 64 ;;
     *)
       [[ -z "$PROJECT" ]] || { echo "ERROR: project specified more than once" >&2; exit 64; }
       PROJECT="$1"
@@ -41,19 +46,6 @@ while (($# > 0)); do
   esac
   shift
 done
-
-SOURCE_PATH="${BASH_SOURCE[0]}"
-while [[ -L "$SOURCE_PATH" ]]; do
-  SOURCE_LINK="$(readlink "$SOURCE_PATH")"
-  case "$SOURCE_LINK" in
-    /*) SOURCE_PATH="$SOURCE_LINK" ;;
-    *) SOURCE_PATH="$(dirname "$SOURCE_PATH")/$SOURCE_LINK" ;;
-  esac
-done
-SCRIPT_DIR="$(cd "$(dirname "$SOURCE_PATH")" && pwd)"
-# shellcheck source=_sgt-lib.sh
-# shellcheck disable=SC1091
-source "$SCRIPT_DIR/_sgt-lib.sh"
 
 SERGEANT_FLEET="${SERGEANT_FLEET:-$FLEET_DIR}"
 SGT_INSTALL_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
@@ -68,8 +60,8 @@ FAILURES=0
 
 add_check() {
   local level="$1" id="$2" message="$3"
-  id="$(redact "$id")"
-  message="$(redact "$message")"
+  id="$(_sgt_redact "$id")"
+  message="$(_sgt_redact "$message")"
   LEVELS+=("$level")
   IDS+=("$id")
   MESSAGES+=("$message")

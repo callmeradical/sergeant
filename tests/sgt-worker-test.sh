@@ -282,6 +282,8 @@ wait "$worker_pid"
 [[ "$(cat "$case_root/state/session_name")" == 'sgt-goose-needs-input-state' ]]
 grep -Fq -- 'run --output-format json -n sgt-goose-needs-input-state -t initial mission' "$case_root/args"
 grep -Fq -- 'run --output-format json -n sgt-goose-needs-input-state -r -t' "$case_root/args"
+grep -Fq -- 'session=goose:sgt-goose-needs-input-state@' "$case_root/td.log"
+grep -Fq -- "$case_root/goose/sessions.db" "$case_root/td.log"
 if grep -Fq 'session_name: No such file or directory' "$case_root/output.log"; then
   exit 1
 fi

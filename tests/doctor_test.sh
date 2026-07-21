@@ -275,6 +275,40 @@ EOF
   assert_not_contains "$output" "github_pat_supersecret"
 }
 
+test_human_and_json_output_redact_compound_credentials() {
+  local output status
+  setup_fixture
+  cat > "$TEST_TMP/bin/graphify" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+  echo 'graphify 1.0.0 AWS_SECRET_ACCESS_KEY=supersecret; ordinary-text'
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "$TEST_TMP/bin/graphify"
+
+  set +e
+  output="$("$DOCTOR" 2>&1)"
+  status=$?
+  set -e
+
+  assert_eq 0 "$status"
+  assert_contains "$output" "AWS_SECRET_ACCESS_KEY=[REDACTED]; ordinary-text"
+  assert_not_contains "$output" "supersecret"
+
+  set +e
+  output="$("$DOCTOR" --json 2>&1)"
+  status=$?
+  set -e
+
+  assert_eq 0 "$status"
+  assert_contains "$output" "AWS_SECRET_ACCESS_KEY=[REDACTED]; ordinary-text"
+  assert_not_contains "$output" "supersecret"
+  python3 -c 'import json,sys; json.loads(sys.stdin.read())' <<< "$output" \
+    || fail "JSON output is not parseable"
+}
+
 test_invalid_project_arguments_exit_64() {
   local output status
   setup_fixture
@@ -315,6 +349,20 @@ test_argument_errors_redact_github_tokens() {
   assert_not_contains "$output" "ghp_argumentsecret"
 }
 
+test_argument_errors_redact_compound_credentials() {
+  local output status
+  setup_fixture
+
+  set +e
+  output="$("$DOCTOR" --AWS_SECRET_ACCESS_KEY=supersecret 2>&1)"
+  status=$?
+  set -e
+
+  assert_eq 64 "$status"
+  assert_contains "$output" "AWS_SECRET_ACCESS_KEY=[REDACTED]"
+  assert_not_contains "$output" "supersecret"
+}
+
 test_check_ids_redact_github_tokens() {
   local output status
   setup_fixture
@@ -327,6 +375,20 @@ test_check_ids_redact_github_tokens() {
   assert_eq 2 "$status"
   assert_contains "$output" "[FAIL] config.project.[REDACTED]"
   assert_not_contains "$output" "github_pat_projectsecret"
+}
+
+test_check_ids_redact_compound_credentials() {
+  local output status
+  setup_fixture
+
+  set +e
+  output="$("$DOCTOR" AWS_SECRET_ACCESS_KEY=supersecret 2>&1)"
+  status=$?
+  set -e
+
+  assert_eq 2 "$status"
+  assert_contains "$output" "[FAIL] config.project.AWS_SECRET_ACCESS_KEY=[REDACTED]"
+  assert_not_contains "$output" "supersecret"
 }
 
 test_empty_agent_skill_directory_is_degraded() {
@@ -794,12 +856,18 @@ test_uninitialized_td_database_is_degraded
 echo "PASS: uninitialized td database"
 test_diagnostics_redact_secrets
 echo "PASS: secret redaction"
+test_human_and_json_output_redact_compound_credentials
+echo "PASS: compound credential output redaction"
 test_invalid_project_arguments_exit_64
 echo "PASS: invalid project arguments"
 test_check_ids_redact_github_tokens
 echo "PASS: check ID redaction"
+test_check_ids_redact_compound_credentials
+echo "PASS: compound credential check ID redaction"
 test_argument_errors_redact_github_tokens
 echo "PASS: argument error redaction"
+test_argument_errors_redact_compound_credentials
+echo "PASS: compound credential argument redaction"
 test_empty_agent_skill_directory_is_degraded
 echo "PASS: empty agent skill directory"
 test_failed_graphify_probe_is_degraded
