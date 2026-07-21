@@ -100,26 +100,37 @@ check_tool() {
   return 1
 }
 
-check_agent_harness() {
-  local selected_agent="${SERGEANT_AGENT:-}" agent agent_version agent_versions=""
-  if [[ -n "$selected_agent" ]]; then
-    case "$selected_agent" in
-      opencode|claude|goose) ;;
-      *)
-        add_check FAIL agents.harness "SERGEANT_AGENT selects unsupported agent: $selected_agent"
-        return
-        ;;
-    esac
-    if ! command -v "$selected_agent" >/dev/null 2>&1; then
-      add_check FAIL agents.harness "SERGEANT_AGENT selects $selected_agent, but it is not installed"
+check_selected_agent() {
+  local selected_agent="$1" selected_by="$2" agent_version
+  case "$selected_agent" in
+    opencode|claude|goose) ;;
+    *)
+      add_check FAIL agents.harness "$selected_by selects unsupported agent: $selected_agent"
       return
-    fi
-    if agent_version="$("$selected_agent" --version 2>&1)"; then
-      agent_version="${agent_version%%$'\n'*}"
-      add_check PASS agents.harness "SERGEANT_AGENT selects $selected_agent (${agent_version:-available})"
-    else
-      add_check FAIL agents.harness "SERGEANT_AGENT selects $selected_agent, but the installed command is not usable"
-    fi
+      ;;
+  esac
+  if ! command -v "$selected_agent" >/dev/null 2>&1; then
+    add_check FAIL agents.harness "$selected_by $selected_agent, but it is not installed"
+    return
+  fi
+  if agent_version="$("$selected_agent" --version 2>&1)"; then
+    agent_version="${agent_version%%$'\n'*}"
+    add_check PASS agents.harness "$selected_by $selected_agent (${agent_version:-available})"
+  else
+    add_check FAIL agents.harness "$selected_by $selected_agent, but the installed command is not usable"
+  fi
+}
+
+check_agent_harness() {
+  local selected_agent agent agent_version agent_versions=""
+  if [[ -n "${SERGEANT_AGENT:-}" ]]; then
+    selected_agent="$(_sgt_detect_agent)"
+    check_selected_agent "$selected_agent" "SERGEANT_AGENT selects"
+    return
+  fi
+  if [[ -n "${OPENCODE:-}" || -n "${OPENCODE_PID:-}" || -n "${CLAUDE_CODE_SESSION_ID:-}" || -n "${CLAUDE_CODE_SESSION_NAME:-}" ]]; then
+    selected_agent="$(_sgt_detect_agent)"
+    check_selected_agent "$selected_agent" "auto-detected"
     return
   fi
 

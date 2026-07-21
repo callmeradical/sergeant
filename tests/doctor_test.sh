@@ -514,6 +514,42 @@ test_explicit_agent_override_must_be_usable() {
   assert_contains "$output" "SERGEANT_AGENT selects goose, but it is not installed"
 }
 
+test_opencode_auto_selection_must_be_usable() {
+  local output status
+  setup_fixture
+  rm -f "$TEST_TMP/bin/opencode"
+  export OPENCODE=1
+
+  set +e
+  output="$("$DOCTOR" 2>&1)"
+  status=$?
+  set -e
+
+  unset OPENCODE
+
+  assert_eq 2 "$status"
+  assert_contains "$output" "[FAIL] agents.harness"
+  assert_contains "$output" "auto-detected opencode, but it is not installed"
+}
+
+test_claude_auto_selection_must_be_usable() {
+  local output status
+  setup_fixture
+  rm -f "$TEST_TMP/bin/claude"
+  export CLAUDE_CODE_SESSION_ID=session-123
+
+  set +e
+  output="$("$DOCTOR" 2>&1)"
+  status=$?
+  set -e
+
+  unset CLAUDE_CODE_SESSION_ID
+
+  assert_eq 2 "$status"
+  assert_contains "$output" "[FAIL] agents.harness"
+  assert_contains "$output" "auto-detected claude, but it is not installed"
+}
+
 test_missing_response_lock_install_link_is_degraded() {
   local output status
   setup_fixture
@@ -633,6 +669,10 @@ test_goose_only_harness_is_healthy
 echo "PASS: goose harness"
 test_explicit_agent_override_must_be_usable
 echo "PASS: explicit agent override"
+test_opencode_auto_selection_must_be_usable
+echo "PASS: opencode auto selection"
+test_claude_auto_selection_must_be_usable
+echo "PASS: claude auto selection"
 test_missing_response_lock_install_link_is_degraded
 echo "PASS: missing response lock install link"
 test_broken_response_lock_install_link_is_broken
