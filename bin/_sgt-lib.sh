@@ -68,6 +68,11 @@ _resolve_path() {
   fi
 }
 
+_sgt_is_git_repo() {
+  local path="$1"
+  git -C "$path" rev-parse --git-dir >/dev/null 2>&1
+}
+
 # ── Common helpers ────────────────────────────────────────────────────────────
 
 _die()  { echo "ERROR: $*" >&2; exit 1; }

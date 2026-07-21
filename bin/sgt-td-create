@@ -41,6 +41,7 @@ TITLE="$1";   shift
 CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
 [[ -f "$CONFIG_FILE" ]] || _die "Project not found: $PROJECT"
 _require_yq
+_require_git
 _require_td
 
 REPOS_ARG=""
@@ -135,6 +136,21 @@ PY
   fi
 }
 
+_parse_task_id() {
+  python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+if not isinstance(payload, dict):
+    raise SystemExit(1)
+task_id = payload.get("id")
+if not isinstance(task_id, str):
+    raise SystemExit(1)
+print(task_id)
+'
+}
+
 _rollback_or_die() {
   local message="$1"
   local cleanup_failed=false
@@ -186,7 +202,7 @@ for rname in "${TARGET_REPOS[@]}"; do
   raw_path="$(yq ".repos[$i].path" "$CONFIG_FILE")"
   repo_path="$(_resolve_path "$raw_path")"
 
-  [[ -d "$repo_path/.git" ]] || _rollback_or_die "repo '$rname' is not cloned at $repo_path"
+  _sgt_is_git_repo "$repo_path" || _rollback_or_die "repo '$rname' is not cloned at $repo_path"
 
   td list --json --work-dir "$repo_path" --limit 1 &>/dev/null || \
     _rollback_or_die "td is not initialized in repo '$rname' ($repo_path)"
@@ -220,7 +236,9 @@ Repo role: $repo_role"
     _rollback_or_die "$create_error"
   fi
 
-  task_id="$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null)"
+  if ! task_id="$(printf '%s' "$result" | _parse_task_id 2>/dev/null)"; then
+    _rollback_or_die "td create returned invalid JSON for $rname"
+  fi
   [[ -n "$task_id" ]] || _rollback_or_die "td create returned invalid JSON for $rname"
 
   _record_created "$rname" "$task_id" "$repo_path"

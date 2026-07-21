@@ -75,7 +75,7 @@ if [[ -n "$TD_TASK_ID" ]]; then
     rname="$(yq ".repos[$i].name" "$CONFIG_FILE")"
     raw_path="$(yq ".repos[$i].path" "$CONFIG_FILE")"
     repo_path="$(_resolve_path "$raw_path")"
-    [[ -d "$repo_path/.git" ]] || continue
+    _sgt_is_git_repo "$repo_path" || continue
 
     task_json="$(td list --json --work-dir "$repo_path" \
       --filter "id=$TD_TASK_ID" 2>/dev/null || echo "[]")"
@@ -424,7 +424,7 @@ for rname in "${TARGET_REPOS[@]}"; do
 
   echo "--- $rname ---"
 
-  if [[ ! -d "$repo_path/.git" ]]; then
+  if ! _sgt_is_git_repo "$repo_path"; then
     echo "  SKIP: not cloned at $repo_path (run bin/sgt-sync $PROJECT first)"
     echo ""
     continue

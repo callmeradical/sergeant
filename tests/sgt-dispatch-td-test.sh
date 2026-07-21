@@ -7,12 +7,13 @@ TEST_ROOT="$(mktemp -d)"
 YQ_BIN="$(command -v yq)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
+APP_MAIN_REPO="$TEST_ROOT/repo-main"
 APP_REPO="$TEST_ROOT/repo"
 API_REPO="$TEST_ROOT/api"
 WEB_REPO="$TEST_ROOT/web"
 
 mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/config" "$TEST_ROOT/fake-bin" \
-  "$TEST_ROOT/fleet" "$APP_REPO" "$API_REPO" "$WEB_REPO" \
+  "$TEST_ROOT/fleet" "$APP_MAIN_REPO" "$APP_REPO" "$API_REPO" "$WEB_REPO" \
   "$TEST_ROOT/td-active" "$TEST_ROOT/td-counter"
 cp "$ROOT_DIR/bin/sgt-dispatch" "$ROOT_DIR/bin/_sgt-lib.sh" \
   "$ROOT_DIR/bin/sgt-td-create" "$ROOT_DIR/bin/sgt-td-memory" "$TEST_ROOT/bin/"
@@ -99,6 +100,18 @@ case "$cmd" in
           exit 11
         }
         ;;
+      malformed_after_one)
+        [[ "$repo" == "app" ]] || {
+          printf '{not-json}\n'
+          exit 0
+        }
+        ;;
+      missing_id_after_one)
+        [[ "$repo" == "app" ]] || {
+          printf '{}\n'
+          exit 0
+        }
+        ;;
       fail_after_two|delete_failure_after_two)
         [[ "$repo" != "web" ]] || {
           printf 'create failed for %s\n' "$repo" >&2
@@ -175,9 +188,15 @@ task_dir_for() {
   printf '%s\n' "$TEST_ROOT"/fleet/"$prefix"-* | sed -n '1p'
 }
 
-make_repo "$APP_REPO"
+make_repo "$APP_MAIN_REPO"
+git -C "$APP_MAIN_REPO" branch -M main
+git -C "$APP_MAIN_REPO" worktree add -q -b linked-worktree "$APP_REPO" HEAD
 make_repo "$API_REPO"
 make_repo "$WEB_REPO"
+[[ -f "$APP_REPO/.git" ]] || {
+  printf 'app fixture is not a linked git worktree\n' >&2
+  exit 1
+}
 
 cat > "$TEST_ROOT/bin/sgt-td-create" <<'EOF'
 #!/usr/bin/env bash
@@ -238,6 +257,66 @@ done
 }
 
 printf 'sgt-dispatch generated td tracking: ok\n'
+
+: > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+: > "$TEST_ROOT/td-delete.log"
+rm -f "$TEST_ROOT"/td-active/* "$TEST_ROOT"/td-counter/*
+
+TD_MODE=malformed_after_one dispatch_capture test "Rollback malformed task output" --repos app,api
+
+[[ "$status" -ne 0 ]] || {
+  printf 'dispatch succeeded after malformed td create output\n' >&2
+  exit 1
+}
+[[ "$output" == *"td create returned invalid JSON for api"* ]] || {
+  printf 'dispatch did not report malformed td create output:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$(wc -l < "$TEST_ROOT/td-delete.log")" -eq 1 ]] || {
+  printf 'dispatch did not roll back the created td task after malformed output\n' >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/tmux.log" ]] || {
+  printf 'dispatch spawned tmux after malformed td create output\n' >&2
+  exit 1
+}
+[[ "$(find "$TEST_ROOT/td-active" -type f | wc -l)" -eq 0 ]] || {
+  printf 'malformed td create output left active cards behind\n' >&2
+  exit 1
+}
+
+printf 'sgt-dispatch malformed td rollback: ok\n'
+
+: > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+: > "$TEST_ROOT/td-delete.log"
+rm -f "$TEST_ROOT"/td-active/* "$TEST_ROOT"/td-counter/*
+
+TD_MODE=missing_id_after_one dispatch_capture test "Rollback missing task id" --repos app,api
+
+[[ "$status" -ne 0 ]] || {
+  printf 'dispatch succeeded after missing td create id\n' >&2
+  exit 1
+}
+[[ "$output" == *"td create returned invalid JSON for api"* ]] || {
+  printf 'dispatch did not report missing td create id:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$(wc -l < "$TEST_ROOT/td-delete.log")" -eq 1 ]] || {
+  printf 'dispatch did not roll back the created td task after missing id\n' >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/tmux.log" ]] || {
+  printf 'dispatch spawned tmux after missing td create id\n' >&2
+  exit 1
+}
+[[ "$(find "$TEST_ROOT/td-active" -type f | wc -l)" -eq 0 ]] || {
+  printf 'missing td create id left active cards behind\n' >&2
+  exit 1
+}
+
+printf 'sgt-dispatch missing-id td rollback: ok\n'
 
 : > "$TEST_ROOT/tmux.log"
 : > "$TEST_ROOT/td-create.log"
