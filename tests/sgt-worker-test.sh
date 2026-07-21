@@ -8,6 +8,7 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 
 fake_agent="$TEST_ROOT/fake-opencode"
 fake_claude="$TEST_ROOT/claude"
+fake_goose="$TEST_ROOT/goose"
 mkdir -p "$TEST_ROOT/fake-bin"
 cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
 #!/usr/bin/env bash
@@ -53,6 +54,19 @@ case "$FAKE_MODE:$turn" in
     [[ "$*" == *"Use option A"* ]]
     printf 'done\n' > .sergeant-status
     printf 'validated Claude result\n' > .sergeant-result
+    ;;
+  goose_needs_input:1)
+    [[ "$*" == *"run --output-format json -n sgt-goose-needs-input-state -t initial mission"* ]]
+    [[ "$*" != *" -r "* ]]
+    printf 'needs_input\n' > .sergeant-status
+    printf 'Choose A or B.\n' > .sergeant-message
+    printf '%s\n' '{"type":"message","content":"goose turn one"}'
+    ;;
+  goose_needs_input:2)
+    [[ "$*" == *"run --output-format json -n sgt-goose-needs-input-state -r -t"* ]]
+    [[ "$*" == *"Use option A"* ]]
+    printf 'done\n' > .sergeant-status
+    printf 'validated Goose result\n' > .sergeant-result
     ;;
   needs_input:2|blocked:2|poisoned_session:2)
     [[ "$*" == *"--session ses-test-123"* ]]
@@ -137,6 +151,7 @@ esac
 EOF
 chmod +x "$fake_agent"
 ln -s "$fake_agent" "$fake_claude"
+ln -s "$fake_agent" "$fake_goose"
 
 wait_for_file() {
   local file="$1"
@@ -203,6 +218,24 @@ wait "$worker_pid"
 [[ "$(cat "$case_root/worktree/.sergeant-result")" == 'validated Claude result' ]]
 grep -Fq -- '--dangerously-skip-permissions --resume ses-test-123' "$case_root/args"
 grep -Fq -- '-p --output-format json' "$case_root/args"
+
+case_root="$TEST_ROOT/goose-needs-input"
+mkdir -p "$case_root/worktree" "$case_root/state"
+printf 'td-123\n' > "$case_root/state/td_task"
+PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" \
+  FAKE_MODE=goose_needs_input FAKE_STATE="$case_root" SGT_WORKER_POLL_INTERVAL=0.01 \
+  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_goose" "initial mission" &
+worker_pid=$!
+wait_for_file "$case_root/worktree/.sergeant-message"
+kill -0 "$worker_pid"
+printf 'Use option A\n' > "$case_root/worktree/.sergeant-response"
+printf 'response-id-123\n' > "$case_root/worktree/.sergeant-response-id"
+printf 'response-id-123\n' > "$case_root/state/response_id"
+wait "$worker_pid"
+[[ "$(cat "$case_root/worktree/.sergeant-result")" == 'validated Goose result' ]]
+[[ "$(cat "$case_root/state/session_name")" == 'sgt-goose-needs-input-state' ]]
+grep -Fq -- 'run --output-format json -n sgt-goose-needs-input-state -t initial mission' "$case_root/args"
+grep -Fq -- 'run --output-format json -n sgt-goose-needs-input-state -r -t' "$case_root/args"
 
 case_root="$TEST_ROOT/resume-orphan"
 mkdir -p "$case_root/worktree" "$case_root/state"

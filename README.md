@@ -59,6 +59,7 @@ cp schema/project.yaml.example ~/.config/sergeant/myproject.yaml
 
 # Launch your agent harness — AGENTS.md takes over from here
 opencode    # or: claude
+SERGEANT_AGENT=goose goose
 ```
 
 Then talk to it:
@@ -170,7 +171,7 @@ Agent-loaded skills for structured workflows:
 - `graphify` — knowledge graph generation (optional, needed for `sgt-graphify`)
 - `babydriver` — remote dispatch to cleanthes (optional)
 - `no-mistakes` — validated delivery pipeline (optional)
-- A supported agent harness: OpenCode, Claude Code, Goose, etc.
+- A supported agent harness: OpenCode, Claude Code, or Goose
 
 ## License
 

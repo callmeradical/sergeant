@@ -85,7 +85,7 @@ _proof_allows_response_finalization() {
   local status="$1"
   case "$status" in
     needs_input|blocked)
-      [[ -f "$REPO_STATE/session_id" ]]
+      _agent_has_resume_state
       ;;
     done)
       [[ -s "$WORKTREE/.sergeant-result" ]]
@@ -161,11 +161,58 @@ PY
   [[ -z "$session_id" ]] || printf '%s\n' "$session_id" > "$REPO_STATE/session_id"
 }
 
+_agent_name() {
+  basename "$AGENT"
+}
+
+_goose_session_name() {
+  local existing task_name repo_name derived
+  existing="$(tr -d '\n' < "$REPO_STATE/session_name" 2>/dev/null || true)"
+  if [[ -n "$existing" ]]; then
+    printf '%s\n' "$existing"
+    return
+  fi
+  task_name="$(basename "$(dirname "$REPO_STATE")")"
+  repo_name="$(basename "$REPO_STATE")"
+  derived="sgt-${task_name}-${repo_name}"
+  derived="$(printf '%s' "$derived" | tr -cs '[:alnum:]._-' '-')"
+  derived="${derived#-}"
+  derived="${derived%-}"
+  [[ -n "$derived" ]] || derived="sgt-session"
+  printf '%s\n' "$derived" > "$REPO_STATE/session_name"
+  printf '%s\n' "$derived"
+}
+
+_agent_has_resume_state() {
+  case "$(_agent_name)" in
+    goose)
+      [[ -f "$REPO_STATE/session_name" && -f "$REPO_STATE/goose_resume_ready" ]]
+      ;;
+    *)
+      [[ -f "$REPO_STATE/session_id" ]]
+      ;;
+  esac
+}
+
+_agent_missing_resume_reason() {
+  case "$(_agent_name)" in
+    claude)
+      printf '%s\n' "Claude did not provide a resumable session ID"
+      ;;
+    goose)
+      printf '%s\n' "Goose did not provide a resumable session"
+      ;;
+    *)
+      printf '%s\n' "OpenCode turn did not provide a resumable session ID"
+      ;;
+  esac
+}
+
 _run_turn() {
   local message="$1"
   local -a command
-  local agent_name session_id exit_code
-  agent_name="$(basename "$AGENT")"
+  local agent_name session_id session_name exit_code
+  agent_name="$(_agent_name)"
   session_id="$(cat "$REPO_STATE/session_id" 2>/dev/null || true)"
 
   if [[ "$agent_name" == "claude" ]]; then
@@ -174,6 +221,13 @@ _run_turn() {
     else
       command=("$AGENT" -p --output-format json --dangerously-skip-permissions "$message")
     fi
+  elif [[ "$agent_name" == "goose" ]]; then
+    session_name="$(_goose_session_name)"
+    command=("$AGENT" run --output-format json -n "$session_name")
+    if [[ -f "$REPO_STATE/goose_resume_ready" ]]; then
+      command+=(-r)
+    fi
+    command+=(-t "$message")
   else
     command=("$AGENT" run --auto --format json)
     [[ -z "$session_id" ]] || command+=(--session "$session_id")
@@ -209,7 +263,7 @@ _wait_for_response() {
         if [[ -n "$response_id" && -f "$WORKTREE/.sergeant-response-ack" ]] && [[ "$(tr -d '\n' < "$WORKTREE/.sergeant-response-ack" 2>/dev/null)" == "$response_id" ]]; then
           _cleanup_response_transport
           _sgt_response_lock_release
-          if [[ -f "$REPO_STATE/session_id" ]]; then
+          if _agent_has_resume_state; then
             WAIT_RESPONSE_MESSAGE="Resume the mission from the durable worker state."
           else
             printf -v WAIT_RESPONSE_MESSAGE 'Resume the mission from fleet files at %s without replaying the previously submitted response.' "$REPO_STATE"
@@ -218,7 +272,7 @@ _wait_for_response() {
         fi
         _sgt_response_lock_release
         td_task="$(cat "$REPO_STATE/td_task" 2>/dev/null || true)"
-        if [[ -n "$td_task" && -f "$REPO_STATE/session_id" ]]; then
+        if [[ -n "$td_task" ]] && _agent_has_resume_state; then
           printf -v WAIT_RESPONSE_MESSAGE 'Sergeant response: %s\nResume task %s in the same session. Read the updated td handoff and reconcile it with fleet and git state before continuing.' "$response" "$td_task"
         elif [[ -n "$td_task" ]]; then
           printf -v WAIT_RESPONSE_MESSAGE 'Sergeant response: %s\nStart deterministic recovery for task %s. Read the updated td handoff and fleet files at %s, especially diagnostic and worker.log, then reconcile them with git state before continuing.' "$response" "$td_task" "$REPO_STATE"
@@ -242,7 +296,7 @@ next_message="$INITIAL_MESSAGE"
 if [[ -f "$WORKTREE/.sergeant-response" ]]; then
   _wait_for_response
   next_message="$WAIT_RESPONSE_MESSAGE"
-elif [[ -f "$REPO_STATE/session_id" ]]; then
+elif _agent_has_resume_state; then
   case "$(_status)" in
     needs_input|blocked)
       _wait_for_response
@@ -275,14 +329,12 @@ while true; do
   case "$status" in
     needs_input|blocked)
       _record_gate_generation
-      agent_name="$(basename "$AGENT")"
-      if [[ ! -f "$REPO_STATE/session_id" ]]; then
+      if [[ "$(_agent_name)" == "goose" ]]; then
+        : > "$REPO_STATE/goose_resume_ready"
+      fi
+      if ! _agent_has_resume_state; then
         [[ "$exit_code" -ne 0 ]] || exit_code=1
-        if [[ "$agent_name" == "claude" ]]; then
-          _orphan "$exit_code" "Claude did not provide a resumable session ID"
-        else
-          _orphan "$exit_code" "OpenCode turn did not provide a resumable session ID"
-        fi
+        _orphan "$exit_code" "$(_agent_missing_resume_reason)"
         exit $?
       fi
       "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
