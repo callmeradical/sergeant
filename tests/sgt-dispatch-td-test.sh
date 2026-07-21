@@ -7,182 +7,371 @@ TEST_ROOT="$(mktemp -d)"
 YQ_BIN="$(command -v yq)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
+APP_REPO="$TEST_ROOT/repo"
+API_REPO="$TEST_ROOT/api"
+WEB_REPO="$TEST_ROOT/web"
+
 mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/config" "$TEST_ROOT/fake-bin" \
-  "$TEST_ROOT/fleet" "$TEST_ROOT/repo"
-cp "$ROOT_DIR/bin/sgt-dispatch" "$ROOT_DIR/bin/_sgt-lib.sh" "$TEST_ROOT/bin/"
+  "$TEST_ROOT/fleet" "$APP_REPO" "$API_REPO" "$WEB_REPO" \
+  "$TEST_ROOT/td-active" "$TEST_ROOT/td-counter"
+cp "$ROOT_DIR/bin/sgt-dispatch" "$ROOT_DIR/bin/_sgt-lib.sh" \
+  "$ROOT_DIR/bin/sgt-td-create" "$ROOT_DIR/bin/sgt-td-memory" "$TEST_ROOT/bin/"
 
 cat > "$TEST_ROOT/config/test.yaml" <<EOF
 name: test
 repos:
   - name: app
-    path: $TEST_ROOT/repo
+    path: $APP_REPO
+  - name: api
+    path: $API_REPO
+  - name: web
+    path: $WEB_REPO
 EOF
-
-cat > "$TEST_ROOT/bin/sgt-td-create" <<'EOF'
-#!/usr/bin/env bash
-exit 12
-EOF
-chmod +x "$TEST_ROOT/bin/sgt-td-create"
-
-cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-chmod +x "$TEST_ROOT/fake-bin/td"
 
 cat > "$TEST_ROOT/fake-bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$TMUX_LOG"
+if [[ "${1:-}" == "new-window" ]]; then
+  printf '%%42\n'
+fi
 exit 0
 EOF
 chmod +x "$TEST_ROOT/fake-bin/tmux"
 
-git -C "$TEST_ROOT/repo" init -q
-git -C "$TEST_ROOT/repo" config user.name Test
-git -C "$TEST_ROOT/repo" config user.email test@example.invalid
-touch "$TEST_ROOT/repo/README.md"
-git -C "$TEST_ROOT/repo" add README.md
-git -C "$TEST_ROOT/repo" commit -qm fixture
-
-set +e
-output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
-  TMUX_LOG="$TEST_ROOT/tmux.log" \
-  SERGEANT_CONFIG="$TEST_ROOT/config" \
-  SERGEANT_FLEET="$TEST_ROOT/fleet" \
-  SGT_WIKI_DISABLED=1 \
-  "$TEST_ROOT/bin/sgt-dispatch" test "Track dispatch" --repos app 2>&1)"
-status=$?
-set -e
-
-[[ "$status" -ne 0 ]] || {
-  printf 'dispatch succeeded after td task creation failed\n' >&2
-  exit 1
-}
-[[ "$output" == *"td task creation failed"* ]] || {
-  printf 'dispatch did not report td task creation failure:\n%s\n' "$output" >&2
-  exit 1
-}
-[[ ! -s "$TEST_ROOT/tmux.log" ]] || {
-  printf 'dispatch spawned tmux after td task creation failed\n' >&2
-  exit 1
-}
-
-printf 'sgt-dispatch td failure gate: ok\n'
-
-mkdir -p "$TEST_ROOT/api"
-git -C "$TEST_ROOT/api" init -q
-git -C "$TEST_ROOT/api" config user.name Test
-git -C "$TEST_ROOT/api" config user.email test@example.invalid
-touch "$TEST_ROOT/api/README.md"
-git -C "$TEST_ROOT/api" add README.md
-git -C "$TEST_ROOT/api" commit -qm fixture
-
-cat > "$TEST_ROOT/config/test.yaml" <<EOF
-name: test
-repos:
-  - name: app
-    path: $TEST_ROOT/repo
-  - name: api
-    path: $TEST_ROOT/api
-EOF
-cp "$ROOT_DIR/bin/sgt-td-create" "$TEST_ROOT/bin/sgt-td-create"
-
 cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
 #!/usr/bin/env bash
+
+set -euo pipefail
+
+mode="${TD_MODE:-success}"
 work_dir=""
-for ((i=1; i<=$#; i++)); do
-  if [[ "${!i}" == "--work-dir" ]]; then
-    next=$((i + 1))
-    work_dir="${!next}"
-  fi
+args=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --work-dir|-w)
+      work_dir="$2"
+      shift 2
+      ;;
+    --json)
+      shift
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
 done
-case "$1" in
-  list) printf '[]\n' ;;
-  create)
-    repo="$(basename "$work_dir")"
-    [[ "$repo" == "repo" ]] && repo="app"
-    printf '%s %s\n' "$repo" "$work_dir" >> "$TD_CREATE_LOG"
-    printf '{"id":"td-%s-123"}\n' "$repo"
+
+set -- "${args[@]}"
+cmd="${1:-}"
+repo="$(basename "$work_dir")"
+[[ "$repo" == "repo" ]] && repo="app"
+
+next_task_id() {
+  local repo_name="$1"
+  local counter_file="$TD_COUNTER_DIR/$repo_name"
+  local count=0
+  [[ -f "$counter_file" ]] && count="$(cat "$counter_file")"
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$counter_file"
+  printf 'td-%s-%s\n' "$repo_name" "$count"
+}
+
+case "$cmd" in
+  list)
+    if [[ "$mode" == "existing_td" ]]; then
+      printf '[{"id":"td-existing","title":"Existing tracked work","description":"Keep existing behavior"}]\n'
+    else
+      printf '[]\n'
+    fi
     ;;
-  *) exit 1 ;;
+  context)
+    printf 'existing td lifecycle context\n'
+    ;;
+  create)
+    title="${2:-}"
+    printf '%s|%s|%s\n' "$mode" "$repo" "$title" >> "$TD_CREATE_LOG"
+    case "$mode" in
+      fail_after_one)
+        [[ "$repo" == "app" ]] || {
+          printf 'create failed for %s\n' "$repo" >&2
+          exit 11
+        }
+        ;;
+      fail_after_two|delete_failure_after_two)
+        [[ "$repo" != "web" ]] || {
+          printf 'create failed for %s\n' "$repo" >&2
+          exit 12
+        }
+        ;;
+      existing_td)
+        printf 'create should not run for existing td dispatch\n' >&2
+        exit 91
+        ;;
+    esac
+    task_id="$(next_task_id "$repo")"
+    : > "$TD_ACTIVE_DIR/$task_id"
+    printf '{"id":"%s"}\n' "$task_id"
+    ;;
+  delete)
+    task_id="${2:-}"
+    printf '%s|%s\n' "$mode" "$task_id" >> "$TD_DELETE_LOG"
+    if [[ "$mode" == "delete_failure_after_two" ]]; then
+      printf 'cleanup failed for %s\n' "$task_id" >&2
+      exit 31
+    fi
+    rm -f "$TD_ACTIVE_DIR/$task_id"
+    printf '{"id":"%s","deleted":true}\n' "$task_id"
+    ;;
+  *)
+    exit 1
+    ;;
 esac
 EOF
 chmod +x "$TEST_ROOT/fake-bin/td"
+
+make_repo() {
+  local repo_path="$1"
+  git -C "$repo_path" init -q
+  git -C "$repo_path" config user.name Test
+  git -C "$repo_path" config user.email test@example.invalid
+  touch "$repo_path/README.md"
+  git -C "$repo_path" add README.md
+  git -C "$repo_path" commit -qm fixture
+}
+
+dispatch_capture() {
+  set +e
+  output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+    TMUX_LOG="$TEST_ROOT/tmux.log" \
+    TD_CREATE_LOG="$TEST_ROOT/td-create.log" \
+    TD_DELETE_LOG="$TEST_ROOT/td-delete.log" \
+    TD_ACTIVE_DIR="$TEST_ROOT/td-active" \
+    TD_COUNTER_DIR="$TEST_ROOT/td-counter" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 \
+    "$TEST_ROOT/bin/sgt-dispatch" "$@" 2>&1)"
+  status=$?
+  set -e
+}
+
+dispatch_success() {
+  PATH="$TEST_ROOT/fake-bin:$PATH" \
+    TMUX_LOG="$TEST_ROOT/tmux.log" \
+    TD_CREATE_LOG="$TEST_ROOT/td-create.log" \
+    TD_DELETE_LOG="$TEST_ROOT/td-delete.log" \
+    TD_ACTIVE_DIR="$TEST_ROOT/td-active" \
+    TD_COUNTER_DIR="$TEST_ROOT/td-counter" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 \
+    "$TEST_ROOT/bin/sgt-dispatch" "$@" >/dev/null
+}
+
+task_dir_for() {
+  local prefix="$1"
+  printf '%s\n' "$TEST_ROOT"/fleet/"$prefix"-* | sed -n '1p'
+}
+
+make_repo "$APP_REPO"
+make_repo "$API_REPO"
+make_repo "$WEB_REPO"
+
+cat > "$TEST_ROOT/bin/sgt-td-create" <<'EOF'
+#!/usr/bin/env bash
+printf 'td warning on stderr\n' >&2
+printf '[{"repo":"app","task_id":"td-app-stderr"}]\n'
+EOF
+chmod +x "$TEST_ROOT/bin/sgt-td-create"
 : > "$TEST_ROOT/tmux.log"
 
-PATH="$TEST_ROOT/fake-bin:$PATH" \
-TMUX_LOG="$TEST_ROOT/tmux.log" \
-TD_CREATE_LOG="$TEST_ROOT/td-create.log" \
-SERGEANT_CONFIG="$TEST_ROOT/config" \
-SERGEANT_FLEET="$TEST_ROOT/fleet" \
-SGT_WIKI_DISABLED=1 \
-  "$TEST_ROOT/bin/sgt-dispatch" test "Create tracked work" --repos app,api >/dev/null
+dispatch_success test "Track stderr cleanly" --repos app
 
-[[ "$(wc -l < "$TEST_ROOT/td-create.log")" -eq 2 ]]
-task_dir="$(printf '%s\n' "$TEST_ROOT"/fleet/create-tracked-work-*)"
+task_dir="$(task_dir_for track-stderr-cleanly)"
+[[ -n "$task_dir" ]] || {
+  printf 'dispatch with harmless stderr did not create fleet state\n' >&2
+  exit 1
+}
+[[ "$(cat "$task_dir/app/td_task")" == "td-app-stderr" ]] || {
+  printf 'dispatch lost td task id when helper wrote stderr\n' >&2
+  exit 1
+}
+[[ "$(grep -c '^new-window ' "$TEST_ROOT/tmux.log")" -eq 1 ]] || {
+  printf 'dispatch did not spawn exactly one worker for stderr success\n' >&2
+  exit 1
+}
+
+printf 'sgt-dispatch stderr-safe td parsing: ok\n'
+
+cp "$ROOT_DIR/bin/sgt-td-create" "$TEST_ROOT/bin/sgt-td-create"
+: > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+: > "$TEST_ROOT/td-delete.log"
+rm -f "$TEST_ROOT"/td-active/* "$TEST_ROOT"/td-counter/*
+
+dispatch_success test "Create tracked work" --repos app,api
+
+[[ "$(wc -l < "$TEST_ROOT/td-create.log")" -eq 2 ]] || {
+  printf 'dispatch did not create one td task per selected repo\n' >&2
+  exit 1
+}
+task_dir="$(task_dir_for create-tracked-work)"
 for repo in app api; do
-  task_id="td-$repo-123"
   repo_state="$task_dir/$repo"
+  task_id="$(cat "$repo_state/td_task")"
   brief="$(cat "$repo_state/worktree")/.sergeant-brief.md"
-  [[ "$(cat "$repo_state/td_task")" == "$task_id" ]]
+  [[ "$task_id" == td-"$repo"-1 ]] || {
+    printf 'dispatch recorded the wrong td task for %s\n' "$repo" >&2
+    exit 1
+  }
   grep -Fq "**td task:** $task_id" "$brief"
   grep -Fq "td start $task_id --work-dir ." "$brief"
   grep -Fq 'td log "message" --work-dir .' "$brief"
   grep -Fq "td handoff $task_id --work-dir ." "$brief"
   grep -Fq "td review $task_id --work-dir ." "$brief"
 done
-[[ "$(grep -c '^new-window ' "$TEST_ROOT/tmux.log")" -eq 2 ]]
+[[ "$(grep -c '^new-window ' "$TEST_ROOT/tmux.log")" -eq 2 ]] || {
+  printf 'dispatch did not spawn one worker per selected repo\n' >&2
+  exit 1
+}
 
 printf 'sgt-dispatch generated td tracking: ok\n'
 
-cat > "$TEST_ROOT/bin/sgt-td-create" <<'EOF'
-#!/usr/bin/env bash
-printf '[{"repo":"app","task_id":"td-app-partial"}]\n'
-EOF
-chmod +x "$TEST_ROOT/bin/sgt-td-create"
 : > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+: > "$TEST_ROOT/td-delete.log"
+rm -f "$TEST_ROOT"/td-active/* "$TEST_ROOT"/td-counter/*
 
-set +e
-output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
-  TMUX_LOG="$TEST_ROOT/tmux.log" \
-  SERGEANT_CONFIG="$TEST_ROOT/config" \
-  SERGEANT_FLEET="$TEST_ROOT/fleet" \
-  SGT_WIKI_DISABLED=1 \
-  "$TEST_ROOT/bin/sgt-dispatch" test "Reject partial tracking" --repos app,api 2>&1)"
-status=$?
-set -e
+TD_MODE=fail_after_one dispatch_capture test "Rollback one created task" --repos app,api
 
 [[ "$status" -ne 0 ]] || {
-  printf 'dispatch succeeded with a missing repo td task\n' >&2
+  printf 'dispatch succeeded after one repo td creation failed\n' >&2
   exit 1
 }
-[[ "$output" == *"missing td task for selected repo: api"* ]] || {
-  printf 'dispatch did not identify the repo missing a td task:\n%s\n' "$output" >&2
+[[ "$output" == *"td task creation failed"* ]] || {
+  printf 'dispatch did not report td creation failure after one success:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$output" == *"create failed for api"* ]] || {
+  printf 'dispatch did not surface creator diagnostics for one-success rollback:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$(wc -l < "$TEST_ROOT/td-delete.log")" -eq 1 ]] || {
+  printf 'dispatch did not roll back the one created td task\n' >&2
   exit 1
 }
 [[ ! -s "$TEST_ROOT/tmux.log" ]] || {
-  printf 'dispatch spawned tmux with a missing repo td task\n' >&2
+  printf 'dispatch spawned tmux after one-success td rollback\n' >&2
+  exit 1
+}
+[[ "$(find "$TEST_ROOT/td-active" -type f | wc -l)" -eq 0 ]] || {
+  printf 'rollback after one td creation failure left active cards behind\n' >&2
   exit 1
 }
 
-printf 'sgt-dispatch partial td gate: ok\n'
+TD_MODE=success dispatch_success test "Rollback one created task retry" --repos app,api
 
-cat > "$TEST_ROOT/bin/sgt-td-create" <<'EOF'
+[[ "$(find "$TEST_ROOT/td-active" -type f | wc -l)" -eq 2 ]] || {
+  printf 'retry after one-success rollback left duplicate active cards\n' >&2
+  exit 1
+}
+[[ "$(grep -c '^fail_after_one|app|Rollback one created task$' "$TEST_ROOT/td-create.log")" -eq 1 ]] || {
+  printf 'first attempt did not create the expected app card\n' >&2
+  exit 1
+}
+[[ "$(grep -c '^success|app|Rollback one created task retry$' "$TEST_ROOT/td-create.log")" -eq 1 ]] || {
+  printf 'retry did not create a fresh app card\n' >&2
+  exit 1
+}
+[[ "$(grep -c '^success|api|Rollback one created task retry$' "$TEST_ROOT/td-create.log")" -eq 1 ]] || {
+  printf 'retry did not create the api card\n' >&2
+  exit 1
+}
+
+printf 'sgt-dispatch single-task rollback retry: ok\n'
+
+: > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+: > "$TEST_ROOT/td-delete.log"
+rm -f "$TEST_ROOT"/td-active/* "$TEST_ROOT"/td-counter/*
+
+TD_MODE=fail_after_two dispatch_capture test "Rollback multiple created tasks" --repos app,api,web
+
+[[ "$status" -ne 0 ]] || {
+  printf 'dispatch succeeded after multiple repo td creation failed\n' >&2
+  exit 1
+}
+[[ "$output" == *"td task creation failed"* ]] || {
+  printf 'dispatch did not report td creation failure after multiple successes:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$output" == *"create failed for web"* ]] || {
+  printf 'dispatch did not surface creator diagnostics for multi-success rollback:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$(wc -l < "$TEST_ROOT/td-delete.log")" -eq 2 ]] || {
+  printf 'dispatch did not roll back every created td task after multi-success failure\n' >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/tmux.log" ]] || {
+  printf 'dispatch spawned tmux after multi-success td rollback\n' >&2
+  exit 1
+}
+[[ "$(find "$TEST_ROOT/td-active" -type f | wc -l)" -eq 0 ]] || {
+  printf 'rollback after multiple td creation failures left active cards behind\n' >&2
+  exit 1
+}
+
+printf 'sgt-dispatch multi-task rollback: ok\n'
+
+: > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+: > "$TEST_ROOT/td-delete.log"
+rm -f "$TEST_ROOT"/td-active/* "$TEST_ROOT"/td-counter/*
+
+TD_MODE=delete_failure_after_two dispatch_capture test "Report cleanup failures" --repos app,api,web
+
+[[ "$status" -ne 0 ]] || {
+  printf 'dispatch succeeded after td rollback cleanup failures\n' >&2
+  exit 1
+}
+[[ "$output" == *"cleanup failed for td-app-1"* ]] || {
+  printf 'dispatch did not report the first cleanup failure:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$output" == *"cleanup failed for td-api-1"* ]] || {
+  printf 'dispatch did not report the second cleanup failure:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$(wc -l < "$TEST_ROOT/td-delete.log")" -eq 2 ]] || {
+  printf 'dispatch did not attempt every rollback delete when cleanup failed\n' >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/tmux.log" ]] || {
+  printf 'dispatch spawned tmux after cleanup failures\n' >&2
+  exit 1
+}
+
+printf 'sgt-dispatch cleanup failure reporting: ok\n'
+
+cat > "$TEST_ROOT/bin/sgt-td-create" <<EOF
 #!/usr/bin/env bash
-printf '{not-json}\n'
+"$ROOT_DIR/bin/sgt-td-create" "\$@"
+status=\$?
+if [[ "\$status" -eq 0 ]]; then
+  printf '{not-json}\n'
+fi
+exit "\$status"
 EOF
 chmod +x "$TEST_ROOT/bin/sgt-td-create"
 : > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+: > "$TEST_ROOT/td-delete.log"
+rm -f "$TEST_ROOT"/td-active/* "$TEST_ROOT"/td-counter/*
 
-set +e
-output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
-  TMUX_LOG="$TEST_ROOT/tmux.log" \
-  SERGEANT_CONFIG="$TEST_ROOT/config" \
-  SERGEANT_FLEET="$TEST_ROOT/fleet" \
-  SGT_WIKI_DISABLED=1 \
-  "$TEST_ROOT/bin/sgt-dispatch" test "Reject invalid tracking" --repos app,api 2>&1)"
-status=$?
-set -e
+TD_MODE=success dispatch_capture test "Reject invalid tracking" --repos app,api
 
 [[ "$status" -ne 0 ]] || {
   printf 'dispatch succeeded after td result injection failed\n' >&2
@@ -192,45 +381,47 @@ set -e
   printf 'dispatch did not report td result injection failure:\n%s\n' "$output" >&2
   exit 1
 }
+[[ "$(wc -l < "$TEST_ROOT/td-delete.log")" -eq 2 ]] || {
+  printf 'dispatch did not roll back created tasks after td result injection failure\n' >&2
+  exit 1
+}
 [[ ! -s "$TEST_ROOT/tmux.log" ]] || {
   printf 'dispatch spawned tmux after td result injection failed\n' >&2
   exit 1
 }
+[[ "$(find "$TEST_ROOT/td-active" -type f | wc -l)" -eq 0 ]] || {
+  printf 'dispatch left active td cards after result injection failure\n' >&2
+  exit 1
+}
 
-printf 'sgt-dispatch td injection gate: ok\n'
+cp "$ROOT_DIR/bin/sgt-td-create" "$TEST_ROOT/bin/sgt-td-create"
+TD_MODE=success dispatch_success test "Reject invalid tracking retry" --repos app,api
 
-cat > "$TEST_ROOT/bin/sgt-td-create" <<'EOF'
-#!/usr/bin/env bash
-printf 'sgt-td-create must not run for --td dispatch\n' >&2
-exit 99
-EOF
-chmod +x "$TEST_ROOT/bin/sgt-td-create"
-cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
-#!/usr/bin/env bash
-case "$1" in
-  list) printf '[{"id":"td-existing","title":"Existing tracked work","description":"Keep existing behavior"}]\n' ;;
-  context) printf 'existing td lifecycle context\n' ;;
-  *) exit 1 ;;
-esac
-EOF
-chmod +x "$TEST_ROOT/fake-bin/td"
+[[ "$(find "$TEST_ROOT/td-active" -type f | wc -l)" -eq 2 ]] || {
+  printf 'retry after td injection rollback left duplicate active cards\n' >&2
+  exit 1
+}
+
+printf 'sgt-dispatch td injection rollback: ok\n'
+
 : > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+: > "$TEST_ROOT/td-delete.log"
+rm -f "$TEST_ROOT"/td-active/* "$TEST_ROOT"/td-counter/*
 
-PATH="$TEST_ROOT/fake-bin:$PATH" \
-TMUX_LOG="$TEST_ROOT/tmux.log" \
-SERGEANT_CONFIG="$TEST_ROOT/config" \
-SERGEANT_FLEET="$TEST_ROOT/fleet" \
-SGT_WIKI_DISABLED=1 \
-  "$TEST_ROOT/bin/sgt-dispatch" test --td td-existing --repos app >/dev/null
+TD_MODE=existing_td dispatch_success test --td td-existing --repos app
 
-task_dir="$(printf '%s\n' "$TEST_ROOT"/fleet/existing-tracked-work-*)"
+task_dir="$(task_dir_for existing-tracked-work)"
 repo_state="$task_dir/app"
 brief="$(cat "$repo_state/worktree")/.sergeant-brief.md"
 [[ "$(cat "$task_dir/td_task")" == 'td-existing' ]]
 [[ "$(cat "$repo_state/td_task")" == 'td-existing' ]]
 grep -Fq '**td task:** td-existing' "$brief"
 grep -Fq 'existing td lifecycle context' "$brief"
-[[ "$(grep -c '^new-window ' "$TEST_ROOT/tmux.log")" -eq 1 ]]
+[[ "$(grep -c '^new-window ' "$TEST_ROOT/tmux.log")" -eq 1 ]] || {
+  printf 'existing td dispatch did not spawn exactly one worker\n' >&2
+  exit 1
+}
 
 printf 'sgt-dispatch existing td compatibility: ok\n'
 

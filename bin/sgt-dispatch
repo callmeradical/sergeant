@@ -129,32 +129,82 @@ $REMOTE || _require_tmux
 # can inject the right td task ID per repo.
 
 REPO_TD_MAP="$(mktemp)"
-trap 'rm -f "$REPO_TD_MAP" "${DEPS_TMP:-}"' EXIT
+TD_CREATE_STATE_FILE="$(mktemp)"
+TD_CREATE_STDERR="$(mktemp)"
+_cleanup_dispatch_tmps() {
+  rm -f "$REPO_TD_MAP" "$TD_CREATE_STATE_FILE" "$TD_CREATE_STDERR" "${DEPS_TMP:-}"
+}
+trap _cleanup_dispatch_tmps EXIT
+
+_rollback_generated_td_tasks() {
+  local failure_message="$1"
+  local cleanup_failed=false
+  local cleanup_output=""
+
+  while IFS=$'\t' read -r repo_name task_id work_dir; do
+    [[ -n "$task_id" ]] || continue
+    if ! delete_output="$(td delete "$task_id" --work-dir "$work_dir" --force --json 2>&1)"; then
+      cleanup_failed=true
+      if [[ -n "$cleanup_output" ]]; then
+        cleanup_output+=$'\n'
+      fi
+      if [[ -n "$delete_output" ]]; then
+        cleanup_output+="cleanup failed for $task_id in $repo_name: $delete_output"
+      else
+        cleanup_output+="cleanup failed for $task_id in $repo_name"
+      fi
+    fi
+  done < <(
+    python3 - "$TD_CREATE_STATE_FILE" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    for line in handle:
+        line = line.strip()
+        if not line:
+            continue
+        item = json.loads(line)
+        print("\t".join([item["repo"], item["task_id"], item["work_dir"]]))
+PY
+  )
+
+  if $cleanup_failed; then
+    _die "$failure_message"$'\n'"$cleanup_output"
+  fi
+
+  : > "$TD_CREATE_STATE_FILE"
+  _die "$failure_message"
+}
 
 if [[ -z "$TD_TASK_ID" ]] && ! $DRY_RUN; then
   command -v td &>/dev/null || _die "td is required for brief-only dispatch"
   echo "Creating td tasks ..."
-  if ! td_results="$("$SCRIPT_DIR/sgt-td-create" "$PROJECT" "$BRIEF" \
+  : > "$TD_CREATE_STATE_FILE"
+  : > "$TD_CREATE_STDERR"
+  if ! td_results="$(SGT_TD_STATE_FILE="$TD_CREATE_STATE_FILE" "$SCRIPT_DIR/sgt-td-create" "$PROJECT" "$BRIEF" \
     --repos "$REPOS_ARG" \
     --type task \
     --priority P1 \
-    --json 2>&1)"; then
-    _die "td task creation failed: $td_results"
+    --json 2>"$TD_CREATE_STDERR")"; then
+    td_error="$(cat "$TD_CREATE_STDERR")"
+    [[ -n "$td_error" ]] || td_error="$td_results"
+    _die "td task creation failed: $td_error"
   fi
 
-  # Write repo→task_id to temp map
   if ! echo "$td_results" | python3 -c "
 import sys, json
 results = json.load(sys.stdin)
 for r in results:
     print(r['repo'] + ' ' + r['task_id'])
 " 2>/dev/null > "$REPO_TD_MAP"; then
-    _die "failed to inject td task results"
+    _rollback_generated_td_tasks "failed to inject td task results"
   fi
 
   for rname in "${TARGET_REPOS[@]}"; do
     awk -v repo="$rname" '$1 == repo && NF == 2 { found = 1 } END { exit !found }' "$REPO_TD_MAP" || \
-      _die "missing td task for selected repo: $rname"
+      _rollback_generated_td_tasks "missing td task for selected repo: $rname"
   done
 
   if [[ -s "$REPO_TD_MAP" ]]; then
@@ -218,8 +268,7 @@ done
 # Store in a temp file: "<dependent> <prereq>" one per line
 
 DEPS_TMP="$(mktemp)"
-# Note: REPO_TD_MAP trap already set above; update it to also cover DEPS_TMP
-trap 'rm -f "$REPO_TD_MAP" "$DEPS_TMP"' EXIT
+trap _cleanup_dispatch_tmps EXIT
 
 if [[ -n "$DEPS_ARG" ]]; then
   IFS=',' read -ra dep_pairs <<< "$DEPS_ARG"

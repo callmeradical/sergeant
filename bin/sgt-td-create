@@ -25,7 +25,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
 
 _require_td() {
@@ -67,7 +66,6 @@ IFS=',' read -ra TARGET_REPOS <<< "$REPOS_ARG"
 
 repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
 
-# Validate all repos exist
 for rname in "${TARGET_REPOS[@]}"; do
   found=false
   for ((i=0; i<repo_count; i++)); do
@@ -77,12 +75,106 @@ for rname in "${TARGET_REPOS[@]}"; do
   $found || _die "Repo '$rname' not found in project $PROJECT"
 done
 
-# ── Create tasks ──────────────────────────────────────────────────────────────
+STATE_FILE="${SGT_TD_STATE_FILE:-$(mktemp)}"
+OWN_STATE_FILE=false
+[[ -z "${SGT_TD_STATE_FILE:-}" ]] && OWN_STATE_FILE=true
+: > "$STATE_FILE"
 
-results="[]"
+CREATE_STDERR_FILE="$(mktemp)"
+trap 'rm -f "$CREATE_STDERR_FILE"; $OWN_STATE_FILE && rm -f "$STATE_FILE"' EXIT
+
+_record_created() {
+  python3 - "$STATE_FILE" "$1" "$2" "$TITLE" "$3" <<'PY'
+import json
+import sys
+
+path, repo, task_id, title, work_dir = sys.argv[1:]
+with open(path, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps({
+        "repo": repo,
+        "task_id": task_id,
+        "title": title,
+        "work_dir": work_dir,
+    }))
+    handle.write("\n")
+PY
+}
+
+_emit_results() {
+  if $JSON_OUT; then
+    python3 - "$STATE_FILE" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+items = []
+with open(path, encoding="utf-8") as handle:
+    for line in handle:
+        line = line.strip()
+        if line:
+            items.append(json.loads(line))
+print(json.dumps(items))
+PY
+  else
+    python3 - "$STATE_FILE" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    for line in handle:
+        line = line.strip()
+        if not line:
+            continue
+        item = json.loads(line)
+        print(f"{item['repo']:<20}  {item['task_id']}  {item['title']}")
+PY
+  fi
+}
+
+_rollback_or_die() {
+  local message="$1"
+  local cleanup_failed=false
+  local cleanup_output=""
+
+  while IFS=$'\t' read -r repo_name task_id work_dir; do
+    [[ -n "$task_id" ]] || continue
+    if ! delete_output="$(td delete "$task_id" --work-dir "$work_dir" --force --json 2>&1)"; then
+      cleanup_failed=true
+      if [[ -n "$cleanup_output" ]]; then
+        cleanup_output+=$'\n'
+      fi
+      if [[ -n "$delete_output" ]]; then
+        cleanup_output+="cleanup failed for $task_id in $repo_name: $delete_output"
+      else
+        cleanup_output+="cleanup failed for $task_id in $repo_name"
+      fi
+    fi
+  done < <(
+    python3 - "$STATE_FILE" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    for line in handle:
+        line = line.strip()
+        if not line:
+            continue
+        item = json.loads(line)
+        print("\t".join([item["repo"], item["task_id"], item["work_dir"]]))
+PY
+  )
+
+  if $cleanup_failed; then
+    printf '%s\n%s\n' "$message" "$cleanup_output" >&2
+  else
+    printf '%s\n' "$message" >&2
+  fi
+  exit 1
+}
 
 for rname in "${TARGET_REPOS[@]}"; do
-  # Look up repo path
   for ((i=0; i<repo_count; i++)); do
     n="$(yq ".repos[$i].name" "$CONFIG_FILE")"
     [[ "$n" == "$rname" ]] && break
@@ -91,18 +183,11 @@ for rname in "${TARGET_REPOS[@]}"; do
   raw_path="$(yq ".repos[$i].path" "$CONFIG_FILE")"
   repo_path="$(_resolve_path "$raw_path")"
 
-  [[ -d "$repo_path/.git" ]] || {
-    $JSON_OUT || echo "SKIP  $rname  (not cloned)"
-    continue
-  }
+  [[ -d "$repo_path/.git" ]] || _rollback_or_die "repo '$rname' is not cloned at $repo_path"
 
-  # Check td is initialized in this repo
-  td list --json --work-dir "$repo_path" --limit 1 &>/dev/null || {
-    $JSON_OUT || echo "SKIP  $rname  (td not initialized — run: td init --work-dir $repo_path)"
-    continue
-  }
+  td list --json --work-dir "$repo_path" --limit 1 &>/dev/null || \
+    _rollback_or_die "td is not initialized in repo '$rname' ($repo_path)"
 
-  # Build description: shared text + repo-specific context
   repo_role="$(yq ".repos[$i].role // \"\"" "$CONFIG_FILE")"
   full_desc="${DESCRIPTION}"
   if [[ -n "$repo_role" && "$repo_role" != "null" ]]; then
@@ -115,7 +200,6 @@ Repo role: $repo_role"
     fi
   fi
 
-  # Build td create command
   td_args=(
     create "$TITLE"
     --type "$TASK_TYPE"
@@ -126,24 +210,17 @@ Repo role: $repo_role"
   [[ -n "$full_desc" ]] && td_args+=(--description "$full_desc")
   [[ -n "$PARENT"    ]] && td_args+=(--parent "$PARENT")
 
-  result="$(td "${td_args[@]}" 2>/dev/null)"
+  : > "$CREATE_STDERR_FILE"
+  if ! result="$(td "${td_args[@]}" 2>"$CREATE_STDERR_FILE")"; then
+    create_error="$(cat "$CREATE_STDERR_FILE")"
+    [[ -n "$create_error" ]] || create_error="td create failed for $rname"
+    _rollback_or_die "$create_error"
+  fi
+
   task_id="$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null)"
+  [[ -n "$task_id" ]] || _rollback_or_die "td create returned invalid JSON for $rname"
 
-  if [[ -z "$task_id" ]]; then
-    $JSON_OUT || echo "FAIL  $rname  (td create failed)"
-    continue
-  fi
-
-  if $JSON_OUT; then
-    results="$(python3 -c '
-import json, sys
-results = json.loads(sys.argv[1])
-results.append({"repo": sys.argv[2], "task_id": sys.argv[3], "title": sys.argv[4], "work_dir": sys.argv[5]})
-print(json.dumps(results))
-' "$results" "$rname" "$task_id" "$TITLE" "$repo_path")"
-  else
-    printf "%-20s  %s  %s\n" "$rname" "$task_id" "$TITLE"
-  fi
+  _record_created "$rname" "$task_id" "$repo_path"
 done
 
-$JSON_OUT && echo "$results"
+_emit_results
