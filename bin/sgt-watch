@@ -206,6 +206,7 @@ _sync_remote_repo() {
   local repo_dir="$1"
   local worktree session window task_identifier status_output remote_logs remote_project_dir remote_response_path
   local current_status existing_diagnostic pending_response preserve_orphan_checkpoint remote_pending_id remote_pending_state remote_response_present
+  local remote_pending_checkpoint_status remote_pending_checkpoint_message
   local remote_fields=() tmux_alive raw_status mapped_status result message diagnostic task_id matched
   worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
   session="$(cat "$repo_dir/remote_session" 2>/dev/null || true)"
@@ -217,6 +218,8 @@ _sync_remote_repo() {
   existing_diagnostic="$(cat "$repo_dir/diagnostic" 2>/dev/null || true)"
   remote_pending_id="$(cat "$repo_dir/remote_response_pending_id" 2>/dev/null || true)"
   remote_pending_state="$(cat "$repo_dir/remote_response_pending_state" 2>/dev/null || true)"
+  remote_pending_checkpoint_status="$(cat "$repo_dir/remote_response_pending_checkpoint_status" 2>/dev/null || true)"
+  remote_pending_checkpoint_message="$(cat "$repo_dir/remote_response_pending_checkpoint_message" 2>/dev/null || true)"
   pending_response=""
   if [[ -f "$repo_dir/response" ]]; then
     pending_response="$(cat "$repo_dir/response")"
@@ -232,6 +235,7 @@ _sync_remote_repo() {
 
   _clear_verified_remote_response_transport() {
     rm -f "$repo_dir/response" "$repo_dir/remote_response_pending_id" "$repo_dir/remote_response_pending_state"
+    rm -f "$repo_dir/remote_response_pending_checkpoint_status" "$repo_dir/remote_response_pending_checkpoint_message"
     [[ -n "$worktree" ]] && rm -f "$worktree/.sergeant-response"
   }
 
@@ -332,10 +336,8 @@ _sync_remote_repo() {
   fi
   preserve_orphan_checkpoint=0
   if [[ "$remote_pending_state" == "awaiting_consumption" && "$remote_response_present" == "0" ]]; then
-    _clear_verified_remote_response_transport
-    remote_pending_id=""
-    remote_pending_state=""
-    pending_response=""
+    printf 'awaiting_status_transition\n' > "$repo_dir/remote_response_pending_state"
+    remote_pending_state="awaiting_status_transition"
   fi
   if [[ "$remote_pending_state" == "awaiting_consumption" && "$remote_response_present" == "1" && ( "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" ) ]]; then
     if [[ "$current_status" == "orphaned" ]]; then
@@ -345,6 +347,30 @@ _sync_remote_repo() {
       mapped_status="in_progress"
       message=""
       diagnostic=""
+    fi
+  fi
+  if [[ "$remote_pending_state" == "awaiting_status_transition" ]]; then
+    if [[ "$mapped_status" == "in_progress" || "$mapped_status" == "done" || "$mapped_status" == failed:* ]]; then
+      _clear_verified_remote_response_transport
+      remote_pending_id=""
+      remote_pending_state=""
+      pending_response=""
+    elif [[ "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" ]]; then
+      if [[ "$mapped_status" == "$remote_pending_checkpoint_status" && "$message" == "$remote_pending_checkpoint_message" ]]; then
+        if [[ "$current_status" == "orphaned" ]]; then
+          mapped_status="orphaned"
+          [[ -n "$existing_diagnostic" ]] && diagnostic="$existing_diagnostic"
+        else
+          mapped_status="in_progress"
+          message=""
+          diagnostic=""
+        fi
+      else
+        _clear_verified_remote_response_transport
+        remote_pending_id=""
+        remote_pending_state=""
+        pending_response=""
+      fi
     fi
   fi
   if [[ "$remote_pending_state" == "retryable" && ( "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" ) ]]; then

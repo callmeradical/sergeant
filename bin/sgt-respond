@@ -81,8 +81,16 @@ _write_remote_pending_marker() {
   _atomic_write "$REPO_DIR/remote_response_pending_state" "$state"
 }
 
+_write_remote_pending_checkpoint() {
+  local checkpoint_status="$1"
+  local checkpoint_message="$2"
+  _atomic_write "$REPO_DIR/remote_response_pending_checkpoint_status" "$checkpoint_status"
+  _atomic_write "$REPO_DIR/remote_response_pending_checkpoint_message" "$checkpoint_message"
+}
+
 _clear_remote_pending_marker() {
-  rm -f "$REPO_DIR/remote_response_pending_id" "$REPO_DIR/remote_response_pending_state"
+  rm -f "$REPO_DIR/remote_response_pending_id" "$REPO_DIR/remote_response_pending_state" \
+    "$REPO_DIR/remote_response_pending_checkpoint_status" "$REPO_DIR/remote_response_pending_checkpoint_message"
 }
 
 pending_response=""
@@ -125,6 +133,13 @@ else
   _atomic_write "$REPO_DIR/response_id" "$response_id"
   if [[ "$backend" == "remote-babydriver" ]]; then
     _write_remote_pending_marker "$response_id" "retryable"
+    waiting_message=""
+    if [[ -n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-message" ]]; then
+      waiting_message="$(cat "$worktree/.sergeant-message")"
+    elif [[ -f "$REPO_DIR/message" ]]; then
+      waiting_message="$(cat "$REPO_DIR/message")"
+    fi
+    _write_remote_pending_checkpoint "$status" "$waiting_message"
   fi
 fi
 

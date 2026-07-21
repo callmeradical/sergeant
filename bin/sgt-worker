@@ -147,10 +147,10 @@ _wait_for_response() {
       _sgt_response_lock_acquire "$REPO_STATE"
       if [[ -f "$WORKTREE/.sergeant-response" ]]; then
         response="$(cat "$WORKTREE/.sergeant-response")"
-        rm -f "$WORKTREE/.sergeant-response" "$REPO_STATE/response" "$REPO_STATE/response_id"
-        rm -f "$WORKTREE/.sergeant-message" "$REPO_STATE/message"
         printf 'in_progress\n' > "$WORKTREE/.sergeant-status"
         printf 'in_progress\n' > "$REPO_STATE/status"
+        rm -f "$WORKTREE/.sergeant-response" "$REPO_STATE/response" "$REPO_STATE/response_id"
+        rm -f "$WORKTREE/.sergeant-message" "$REPO_STATE/message"
         _sgt_response_lock_release
         break
       fi

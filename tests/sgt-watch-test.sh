@@ -141,6 +141,8 @@ printf 'preserved remote answer\n' > "$TEST_ROOT/remote-wt/.sergeant-response"
 printf '0123456789abcdef0123456789abcdef\n' > "$task/remote/response_id"
 printf '0123456789abcdef0123456789abcdef\n' > "$task/remote/remote_response_pending_id"
 printf 'retryable\n' > "$task/remote/remote_response_pending_state"
+printf 'blocked\n' > "$task/remote/remote_response_pending_checkpoint_status"
+printf 'Remote blocker remains active after failed restart.\n' > "$task/remote/remote_response_pending_checkpoint_message"
 printf 'babydriver restart failed for remote-drive/remote-window:review follow-up [sgt:task-1]\nexit 23\n' > "$task/remote/diagnostic"
 cat > "$TEST_ROOT/remote-status.json" <<'EOF'
 {"tmux_alive":true,"tasks":[{"name":"remote-window:review follow-up [sgt:task-1]","status":"blocked","message":"Remote blocker remains active after failed restart.","task_id":"td-remote-1"}]}
@@ -201,6 +203,31 @@ if [[ -e "$TEST_ROOT/remote-stale-duplicate-td.log" ]]; then
 fi
 
 rm -f "$TEST_ROOT/remote-project/.sergeant-response"
+cat > "$TEST_ROOT/remote-status.json" <<'EOF'
+{"tmux_alive":true,"tasks":[{"name":"remote-window:review follow-up [sgt:task-1]","status":"blocked","message":"Remote blocker remains active after failed restart.","task_id":"td-remote-1"}]}
+EOF
+PATH="$fake_bin:$PATH" TASK_ROOT="$task" TD_LOG="$TEST_ROOT/td.log" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
+BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TEST_ROOT/remote-logs.txt" \
+  "$ROOT_DIR/bin/sgt-watch" --sync task-1
+[[ "$(cat "$task/remote/status")" == "in_progress" ]]
+[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == "in_progress" ]]
+[[ "$(cat "$task/remote/remote_response_pending_state")" == 'awaiting_status_transition' ]]
+[[ "$(cat "$task/remote/response")" == 'preserved remote answer' ]]
+[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-response")" == 'preserved remote answer' ]]
+
+set +e
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/remote-gap-duplicate.log" \
+TD_LOG="$TEST_ROOT/remote-gap-duplicate-td.log" REMOTE_RESPONSE_PATH="$TEST_ROOT/remote-project/.sergeant-response" \
+REMOTE_RESPONSE_TEXT='gap duplicate response' \
+  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'gap duplicate response' >/dev/null 2>&1
+gap_duplicate_status=$?
+set -e
+[[ "$gap_duplicate_status" -ne 0 ]]
+if [[ -e "$TEST_ROOT/remote-gap-duplicate-td.log" ]]; then
+  printf 'gap duplicate should not log a new td decision\n' >&2
+  exit 1
+fi
+
 cat > "$TEST_ROOT/remote-status.json" <<'EOF'
 {"tmux_alive":true,"tasks":[{"name":"remote-window:review follow-up [sgt:task-1]","status":"blocked","message":"New blocker after consumption.","task_id":"td-remote-1"}]}
 EOF
