@@ -204,21 +204,30 @@ _map_remote_status() {
 
 _sync_remote_repo() {
   local repo_dir="$1"
-  local worktree session window task_identifier status_output remote_logs
-  local current_status existing_diagnostic pending_response preserve_orphan_checkpoint
+  local worktree session window task_identifier status_output remote_logs remote_project_dir remote_response_path
+  local current_status existing_diagnostic pending_response preserve_orphan_checkpoint remote_pending_id remote_pending_state remote_response_present
   local remote_fields=() tmux_alive raw_status mapped_status result message diagnostic task_id matched
   worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
   session="$(cat "$repo_dir/remote_session" 2>/dev/null || true)"
   window="$(cat "$repo_dir/remote_window" 2>/dev/null || true)"
+  remote_project_dir="$(cat "$repo_dir/remote_project_dir" 2>/dev/null || true)"
   task_identifier="$(cat "$repo_dir/remote_task_name" 2>/dev/null || true)"
   [[ -n "$task_identifier" ]] || task_identifier="$window"
   current_status="$(cat "$repo_dir/status" 2>/dev/null || true)"
   existing_diagnostic="$(cat "$repo_dir/diagnostic" 2>/dev/null || true)"
+  remote_pending_id="$(cat "$repo_dir/remote_response_pending_id" 2>/dev/null || true)"
+  remote_pending_state="$(cat "$repo_dir/remote_response_pending_state" 2>/dev/null || true)"
   pending_response=""
   if [[ -f "$repo_dir/response" ]]; then
     pending_response="$(cat "$repo_dir/response")"
   elif [[ -n "$worktree" && -f "$worktree/.sergeant-response" ]]; then
     pending_response="$(cat "$worktree/.sergeant-response")"
+  fi
+  remote_response_path=""
+  remote_response_present=0
+  if [[ -n "$remote_project_dir" ]]; then
+    remote_response_path="$remote_project_dir/.sergeant-response"
+    [[ -f "$remote_response_path" ]] && remote_response_present=1
   fi
 
   if [[ -z "$session" || -z "$window" ]]; then
@@ -309,22 +318,32 @@ _sync_remote_repo() {
     *) rm -f "$repo_dir/result" ;;
   esac
 
-  if [[ -n "$message" ]]; then
-    printf '%s\n' "$message" > "$repo_dir/message"
-  else
-    rm -f "$repo_dir/message"
-  fi
-
   remote_logs=""
   if [[ "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" || "$mapped_status" == orphaned || "$mapped_status" == failed:* ]]; then
     remote_logs="$(_remote_logs "$session" "$task_identifier")"
   fi
   if [[ "${raw_status,,}" == "in_review" && -z "$message" ]]; then
     message="Remote worker is in_review; completion gates are still pending."
-    printf '%s\n' "$message" > "$repo_dir/message"
   fi
   preserve_orphan_checkpoint=0
-  if [[ "$current_status" == "orphaned" && ( "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" ) ]]; then
+  if [[ "$remote_pending_state" == "awaiting_consumption" && "$remote_response_present" == "0" ]]; then
+    rm -f "$repo_dir/remote_response_pending_id" "$repo_dir/remote_response_pending_state"
+    remote_pending_id=""
+    remote_pending_state=""
+  fi
+  if [[ "$remote_pending_state" == "awaiting_consumption" && "$remote_response_present" == "1" && ( "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" ) ]]; then
+    if [[ "$current_status" == "orphaned" ]]; then
+      mapped_status="orphaned"
+      [[ -n "$existing_diagnostic" ]] && diagnostic="$existing_diagnostic"
+    else
+      mapped_status="in_progress"
+      message=""
+      diagnostic=""
+    fi
+  fi
+  if [[ "$remote_pending_state" == "retryable" && ( "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" ) ]]; then
+    preserve_orphan_checkpoint=1
+  elif [[ "$current_status" == "orphaned" && ( "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" ) ]]; then
     if [[ -n "$pending_response" || "$existing_diagnostic" == *"babydriver restart failed for "* || "$existing_diagnostic" == *"remote response delivery failed"* || "$existing_diagnostic" == *"remote response delivery path is unavailable"* || "$existing_diagnostic" == *"remote response delivery metadata is incomplete"* ]]; then
       preserve_orphan_checkpoint=1
     fi
@@ -343,6 +362,12 @@ _sync_remote_repo() {
     elif [[ -z "$diagnostic" ]]; then
       diagnostic="remote worker is still waiting, but Sergeant preserved a local recovery checkpoint"
     fi
+  fi
+
+  if [[ -n "$message" ]]; then
+    printf '%s\n' "$message" > "$repo_dir/message"
+  else
+    rm -f "$repo_dir/message"
   fi
 
   if [[ -n "$diagnostic" || -n "$remote_logs" ]]; then

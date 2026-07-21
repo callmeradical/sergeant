@@ -214,6 +214,8 @@ REMOTE_RESPONSE_PATH="$remote_project_dir/.sergeant-response" REMOTE_RESPONSE_TE
 [[ "$(cat "$remote_worktree/.sergeant-status")" == 'in_progress' ]]
 remote_response_id="$(cat "$remote_repo_state/response_id")"
 [[ "$remote_response_id" =~ ^[a-f0-9]{32}$ ]]
+[[ "$(cat "$remote_repo_state/remote_response_pending_id")" == "$remote_response_id" ]]
+[[ "$(cat "$remote_repo_state/remote_response_pending_state")" == 'awaiting_consumption' ]]
 [[ ! -e "$remote_repo_state/response" && ! -e "$remote_worktree/.sergeant-response" ]]
 [[ "$(cat "$remote_project_dir/.sergeant-response")" == 'remote response' ]]
 grep -Fq 'restart remote-drive --window remote-window' "$TEST_ROOT/remote-babydriver.log"
@@ -241,24 +243,44 @@ REMOTE_RESPONSE_PATH="$remote_name_project_dir/.sergeant-response" REMOTE_RESPON
 [[ "$(cat "$remote_name_repo_state/status")" == 'in_progress' ]]
 [[ "$(cat "$remote_name_worktree/.sergeant-status")" == 'in_progress' ]]
 [[ ! -e "$remote_name_repo_state/response" && ! -e "$remote_name_worktree/.sergeant-response" ]]
+[[ "$(cat "$remote_name_repo_state/remote_response_pending_state")" == 'awaiting_consumption' ]]
 [[ "$(cat "$remote_name_project_dir/.sergeant-response")" == 'remote name response' ]]
 grep -Fq 'restart remote-drive --window remote-window:Need a remote answer. [sgt:task-1]' "$TEST_ROOT/remote-name-babydriver.log"
 [[ ! -e "$remote_name_repo_state/message" && ! -e "$remote_name_worktree/.sergeant-message" ]]
 printf 'needs_input\n' > "$remote_repo_state/status"
 printf 'needs_input\n' > "$remote_worktree/.sergeant-status"
 printf 'Need another remote answer.\n' > "$remote_worktree/.sergeant-message"
+set +e
 PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-duplicate.log" \
 TD_LOG="$TEST_ROOT/remote-duplicate-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
+REMOTE_RESPONSE_PATH="$remote_project_dir/.sergeant-response" REMOTE_RESPONSE_TEXT='remote response 2' \
+  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'remote response 2' >/dev/null 2>&1
+remote_duplicate_status=$?
+set -e
+[[ "$remote_duplicate_status" -ne 0 ]]
+[[ "$(cat "$remote_repo_state/status")" == 'needs_input' ]]
+[[ "$(cat "$remote_worktree/.sergeant-status")" == 'needs_input' ]]
+[[ "$(cat "$remote_repo_state/response_id")" == "$remote_response_id" ]]
+[[ "$(cat "$remote_project_dir/.sergeant-response")" == 'remote response' ]]
+if [[ -e "$TEST_ROOT/remote-duplicate-td.log" ]]; then
+  printf 'remote duplicate should not log a new td decision\n' >&2
+  exit 1
+fi
+rm -f "$remote_project_dir/.sergeant-response" "$remote_repo_state/remote_response_pending_id" "$remote_repo_state/remote_response_pending_state"
+PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-next-gate.log" \
+TD_LOG="$TEST_ROOT/remote-next-gate-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
 REMOTE_RESPONSE_PATH="$remote_project_dir/.sergeant-response" REMOTE_RESPONSE_TEXT='remote response 2' \
   "$ROOT_DIR/bin/sgt-respond" task-1 remote 'remote response 2' >/dev/null
 [[ "$(cat "$remote_repo_state/status")" == 'in_progress' ]]
 [[ "$(cat "$remote_worktree/.sergeant-status")" == 'in_progress' ]]
 [[ ! -e "$remote_repo_state/response" && ! -e "$remote_worktree/.sergeant-response" ]]
 [[ "$(cat "$remote_repo_state/response_id")" != "$remote_response_id" ]]
+[[ "$(cat "$remote_repo_state/remote_response_pending_state")" == 'awaiting_consumption' ]]
 [[ "$(cat "$remote_project_dir/.sergeant-response")" == 'remote response 2' ]]
-grep -Fq 'restart remote-drive --window remote-window' "$TEST_ROOT/remote-duplicate.log"
-grep -Fq 'log td-remote-789' "$TEST_ROOT/remote-duplicate-td.log"
+grep -Fq 'restart remote-drive --window remote-window' "$TEST_ROOT/remote-next-gate.log"
+grep -Fq 'log td-remote-789' "$TEST_ROOT/remote-next-gate-td.log"
 
+rm -f "$remote_project_dir/.sergeant-response" "$remote_repo_state/remote_response_pending_id" "$remote_repo_state/remote_response_pending_state"
 printf 'failed: remote execution failed\n' > "$remote_repo_state/status"
 printf 'needs_input\n' > "$remote_worktree/.sergeant-status"
 rm -f "$remote_worktree/.sergeant-response" "$remote_repo_state/response"
@@ -288,6 +310,8 @@ grep -Fq 'babydriver restart failed for remote-drive/remote-window' "$remote_rep
 [[ "$(cat "$remote_worktree/.sergeant-response")" == 'remote failure' ]]
 failed_remote_response_id="$(cat "$remote_repo_state/response_id")"
 [[ "$failed_remote_response_id" =~ ^[a-f0-9]{32}$ ]]
+[[ "$(cat "$remote_repo_state/remote_response_pending_id")" == "$failed_remote_response_id" ]]
+[[ "$(cat "$remote_repo_state/remote_response_pending_state")" == 'retryable' ]]
 [[ "$(cat "$remote_project_dir/.sergeant-response")" == 'remote failure' ]]
 
 printf 'orphaned\n' > "$remote_repo_state/status"
@@ -299,6 +323,7 @@ REMOTE_RESPONSE_PATH="$remote_project_dir/.sergeant-response" REMOTE_RESPONSE_TE
 [[ "$(cat "$remote_repo_state/status")" == 'in_progress' ]]
 [[ "$(cat "$remote_worktree/.sergeant-status")" == 'in_progress' ]]
 [[ "$(cat "$remote_repo_state/response_id")" == "$failed_remote_response_id" ]]
+[[ "$(cat "$remote_repo_state/remote_response_pending_state")" == 'awaiting_consumption' ]]
 [[ ! -e "$remote_repo_state/response" && ! -e "$remote_worktree/.sergeant-response" ]]
 grep -Fq 'reusing stored recovery response' "$TEST_ROOT/remote-retry.err"
 if [[ -e "$TEST_ROOT/remote-retry-td.log" ]]; then
@@ -308,7 +333,7 @@ fi
 
 printf 'needs_input\n' > "$remote_name_repo_state/status"
 printf 'needs_input\n' > "$remote_name_worktree/.sergeant-status"
-rm -f "$remote_name_worktree/.sergeant-response" "$remote_name_repo_state/response"
+rm -f "$remote_name_worktree/.sergeant-response" "$remote_name_repo_state/response" "$remote_name_project_dir/.sergeant-response" "$remote_name_repo_state/remote_response_pending_id" "$remote_name_repo_state/remote_response_pending_state"
 set +e
 PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-name-babydriver-fail.log" FAIL_RESTART=1 \
 TD_LOG="$TEST_ROOT/remote-name-fail-td.log" TD_RESPONSE_FILE="$remote_name_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \

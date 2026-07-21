@@ -74,6 +74,17 @@ _publish_remote_response_transport() {
   [[ -f "$remote_target" ]] || return 1
 }
 
+_write_remote_pending_marker() {
+  local response_id="$1"
+  local state="$2"
+  _atomic_write "$REPO_DIR/remote_response_pending_id" "$response_id"
+  _atomic_write "$REPO_DIR/remote_response_pending_state" "$state"
+}
+
+_clear_remote_pending_marker() {
+  rm -f "$REPO_DIR/remote_response_pending_id" "$REPO_DIR/remote_response_pending_state"
+}
+
 pending_response=""
 if [[ -f "$REPO_DIR/response" ]]; then
   pending_response="$(cat "$REPO_DIR/response")"
@@ -82,12 +93,22 @@ elif [[ -n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-response" ]]
 fi
 
 response_id="$(cat "$REPO_DIR/response_id" 2>/dev/null || true)"
+remote_pending_id="$(cat "$REPO_DIR/remote_response_pending_id" 2>/dev/null || true)"
+remote_pending_state="$(cat "$REPO_DIR/remote_response_pending_state" 2>/dev/null || true)"
 if [[ -n "$pending_response" ]]; then
+  if [[ "$backend" == "remote-babydriver" && -n "$remote_pending_id" && "$remote_pending_state" == "awaiting_consumption" ]]; then
+    _die "A remote Sergeant response is already pending consumption for $TASK_ID/$REPO"
+  fi
   [[ "$status" == "orphaned" ]] || _die "A Sergeant response is already pending consumption for $TASK_ID/$REPO"
   if [[ "$RESPONSE" != "$pending_response" ]]; then
     printf 'sgt-respond: reusing stored recovery response for orphaned worker %s/%s; supplied text was ignored.\n' "$TASK_ID" "$REPO" >&2
   fi
   RESPONSE="$pending_response"
+  if [[ -n "$remote_pending_id" ]]; then
+    response_id="$remote_pending_id"
+  fi
+elif [[ "$backend" == "remote-babydriver" && -n "$remote_pending_id" ]]; then
+  _die "A remote Sergeant response is already pending consumption for $TASK_ID/$REPO"
 else
   response_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
   if [[ -n "$worktree" && -d "$worktree" ]]; then
@@ -97,6 +118,9 @@ else
   fi
   _publish_local_response_transport "$RESPONSE"
   _atomic_write "$REPO_DIR/response_id" "$response_id"
+  if [[ "$backend" == "remote-babydriver" ]]; then
+    _write_remote_pending_marker "$response_id" "retryable"
+  fi
 fi
 
 if [[ "$backend" != "remote-babydriver" && ( -z "$worktree" || ! -d "$worktree" ) ]]; then
@@ -159,6 +183,7 @@ if [[ "$backend" == "remote-babydriver" ]]; then
     trap - EXIT
     _die "Remote worker relaunch failed for $TASK_ID/$REPO"
   fi
+  _write_remote_pending_marker "$response_id" "awaiting_consumption"
   _clear_local_response_transport
   rm -f "$REPO_DIR/diagnostic" "$REPO_DIR/message"
   [[ -n "$worktree" && -d "$worktree" ]] && {
