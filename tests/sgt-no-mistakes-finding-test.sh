@@ -106,6 +106,13 @@ run_router --severity info --finding-id doc-3 --kind document --disposition td
 [[ "$status" -eq 0 ]] || { printf 'informational debt failed: %s\n' "$output" >&2; exit 1; }
 assert_log_contains "--priority P3"
 
+run_router --severity info --finding-id doc-3 --kind document --disposition ignore
+[[ "$status" -ne 0 && "$output" == *"Only cosmetic or evidence findings may be ignored"* ]] || {
+  printf 'actionable informational debt was incorrectly ignored: %s\n' "$output" >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/td.log" ]] || { printf 'rejected ignore touched td\n' >&2; exit 1; }
+
 TD_LIST_RESULT='[{"id":"td-unrelated","description":"mentions review-7 only"},{"id":"td-existing","description":"Deduplication key: no-mistakes-finding:app:review-7"}]' \
   run_router --run-id run-43 --head-sha def456 \
     --file lib/revised.sh --line 27 \
@@ -262,6 +269,13 @@ run_router --kind cosmetic --disposition td
   exit 1
 }
 [[ ! -s "$TEST_ROOT/td.log" ]] || { printf 'cosmetic finding touched td\n' >&2; exit 1; }
+
+run_router --severity info --kind evidence --disposition ignore
+[[ "$status" -eq 0 && "$output" == *"ignore: evidence finding"* ]] || {
+  printf 'evidence noise was not ignored: %s\n' "$output" >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/td.log" ]] || { printf 'evidence finding touched td\n' >&2; exit 1; }
 
 run_router --disposition ask-user
 [[ "$status" -ne 0 && "$output" == *"ask-user"* ]] || {

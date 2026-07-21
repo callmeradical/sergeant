@@ -80,6 +80,10 @@ case "$KIND" in
     ;;
 esac
 
+if [[ "$DISPOSITION" == "ignore" ]]; then
+  _die "Only cosmetic or evidence findings may be ignored; actionable findings must gate, ask the user, or route to td"
+fi
+
 case "$DISPOSITION" in
   gate)
     printf 'gate: finding %s remains blocking\n' "$FINDING_ID" >&2
