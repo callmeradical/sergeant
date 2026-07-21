@@ -18,7 +18,8 @@ You have a project. It has four repos: an API, a frontend, an infra chart, and a
 
 Sergeant fixes that. It is an **agent distro**: a cloned directory with an `AGENTS.md`, shell toolbelt, and skills that turn a general-purpose agent into a project-aware first mate. Launch your agent harness inside it and Sergeant takes over — it knows your projects, their repos, how they group, and what instructions apply to each one.
 
-No install. The cloned repo is the distro.
+No package install. The cloned repo is the distro; `mise run install` just
+symlinks its commands into `~/.local/bin`.
 
 ## Mental model
 
@@ -46,6 +47,7 @@ Each project is a YAML file. That file defines which repos belong to it, how the
 ```bash
 git clone https://github.com/callmeradical/sergeant
 cd sergeant
+mise run install
 
 # Set your dev root and create the config directory
 mkdir -p ~/.config/sergeant
@@ -56,6 +58,9 @@ EOF
 # Register a project
 cp schema/project.yaml.example ~/.config/sergeant/myproject.yaml
 # Edit it — set your repo names and paths relative to dev_root
+
+# Optional: verify the install and config are healthy
+sgt-doctor
 
 # Launch your agent harness — AGENTS.md takes over from here
 opencode    # or: claude

@@ -17,6 +17,7 @@ LOG="$REPO_STATE/worker.log"
 DIAGNOSTIC="$REPO_STATE/diagnostic"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-response-lock.sh
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/_sgt-response-lock.sh"
 
 mkdir -p "$REPO_STATE"
