@@ -51,6 +51,45 @@ case "$1" in
 esac
 EOF
 chmod +x "$TEST_ROOT/fake-bin/babydriver"
+cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+args=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --work-dir|-w)
+      shift 2
+      ;;
+    --json)
+      shift
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+set -- "${args[@]}"
+case "${1:-}" in
+  list)
+    printf '[]\n'
+    ;;
+  create)
+    printf '{"id":"td-app-1"}\n'
+    ;;
+  delete)
+    printf '{"id":"td-app-1","deleted":true}\n'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/fake-bin/td"
 git -C "$TEST_ROOT/repo" init -q
 git -C "$TEST_ROOT/repo" config user.name Test
 git -C "$TEST_ROOT/repo" config user.email test@example.invalid
