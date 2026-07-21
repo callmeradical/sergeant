@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# sgt-no-mistakes-finding - Apply a disposition to one no-mistakes finding.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: sgt-no-mistakes-finding <project> <repo> [finding fields] --disposition <gate|td|ignore|ask-user>
+
+Required finding fields:
+  --run-id <id> --head-sha <sha> --finding-id <id>
+  --severity <error|warning|info> --kind <kind>
+  --description <text> --intent <text>
+
+Optional finding fields:
+  --file <path> --line <line>
+EOF
+  exit 1
+}
+
+[[ $# -ge 2 ]] || usage
+PROJECT="$1"; shift
+REPO="$1"; shift
+
+RUN_ID=""
+HEAD_SHA=""
+FINDING_ID=""
+SEVERITY=""
+KIND=""
+FILE=""
+LINE=""
+DESCRIPTION=""
+INTENT=""
+DISPOSITION=""
+
+while [[ $# -gt 0 ]]; do
+  [[ $# -ge 2 ]] || usage
+  case "$1" in
+    --run-id)      RUN_ID="$2";      shift 2 ;;
+    --head-sha)    HEAD_SHA="$2";    shift 2 ;;
+    --finding-id)  FINDING_ID="$2";  shift 2 ;;
+    --severity)    SEVERITY="$2";    shift 2 ;;
+    --kind)        KIND="$2";        shift 2 ;;
+    --file)        FILE="$2";        shift 2 ;;
+    --line)        LINE="$2";        shift 2 ;;
+    --description) DESCRIPTION="$2"; shift 2 ;;
+    --intent)      INTENT="$2";      shift 2 ;;
+    --disposition) DISPOSITION="$2"; shift 2 ;;
+    *) _die "Unknown option: $1" ;;
+  esac
+done
+
+for required in RUN_ID HEAD_SHA FINDING_ID SEVERITY KIND DESCRIPTION INTENT DISPOSITION; do
+  [[ -n "${!required}" ]] || _die "Missing required finding field: ${required,,}"
+done
+
+case "$DISPOSITION" in
+  gate|td|ignore|ask-user) ;;
+  *) _die "Invalid disposition: $DISPOSITION" ;;
+esac
+
+if [[ "$DISPOSITION" == "ask-user" ]]; then
+  printf 'ask-user: finding %s requires escalation\n' "$FINDING_ID" >&2
+  exit 2
+fi
+
+case "$KIND" in
+  correctness|security|data-integrity|test)
+    if [[ "$DISPOSITION" != "gate" ]]; then
+      _die "$KIND findings must gate or ask the user; they cannot be deferred to td or ignored"
+    fi
+    ;;
+  cosmetic|evidence)
+    printf 'ignore: %s finding %s creates no td card\n' "$KIND" "$FINDING_ID"
+    exit 0
+    ;;
+esac
+
+if [[ "$DISPOSITION" == "ignore" ]]; then
+  _die "Only cosmetic or evidence findings may be ignored; actionable findings must gate, ask the user, or route to td"
+fi
+
+case "$DISPOSITION" in
+  gate)
+    printf 'gate: finding %s remains blocking\n' "$FINDING_ID" >&2
+    exit 2
+    ;;
+  ignore)
+    printf 'ignore: finding %s creates no td card\n' "$FINDING_ID"
+    exit 0
+    ;;
+esac
+
+case "$SEVERITY" in
+  warning) PRIORITY="P2" ;;
+  info|informational) PRIORITY="P3" ;;
+  *) _die "$SEVERITY findings must gate; only warning or informational debt can be routed to td" ;;
+esac
+
+CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
+[[ -f "$CONFIG_FILE" ]] || _die "Project not found: $PROJECT"
+_require_yq
+_require_git
+command -v td &>/dev/null || _die "td is required"
+
+repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
+repo_path=""
+for ((i=0; i<repo_count; i++)); do
+  if [[ "$(yq ".repos[$i].name" "$CONFIG_FILE")" == "$REPO" ]]; then
+    repo_path="$(_resolve_path "$(yq ".repos[$i].path" "$CONFIG_FILE")")"
+    break
+  fi
+done
+[[ -n "$repo_path" ]] || _die "Repo '$REPO' not found in project $PROJECT"
+_sgt_is_git_repo "$repo_path" || _die "Repo '$REPO' is not cloned at $repo_path"
+
+marker="no-mistakes-finding:$REPO:$FINDING_ID"
+location="${FILE:-not provided}"
+[[ -n "$LINE" ]] && location="$location:$LINE"
+body="No-mistakes deferred finding.
+
+Run ID: $RUN_ID
+Head SHA: $HEAD_SHA
+Finding ID: $FINDING_ID
+Severity: $SEVERITY
+Kind: $KIND
+Location: $location
+Description: $DESCRIPTION
+Originating intent: $INTENT
+
+Deduplication key: $marker"
+title="no-mistakes: $DESCRIPTION"
+
+existing_json="$(td list --all --search "$marker" --json --work-dir "$repo_path")"
+existing_match="$(printf '%s' "$existing_json" | python3 -c '
+import json
+import sys
+
+try:
+    items = json.load(sys.stdin)
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"td list returned invalid JSON: {exc}")
+
+marker = sys.argv[1]
+needle = f"Deduplication key: {marker}"
+matches = []
+
+for item in items:
+    if needle in item.get("description", "").splitlines():
+        matches.append((
+            item["id"],
+            item.get("status") or "",
+            item.get("defer_until") or "",
+        ))
+
+if len(matches) > 1:
+    ids = ", ".join(match[0] for match in matches)
+    raise SystemExit(f"td list returned duplicate findings for {marker}: {ids}")
+
+if matches:
+    print("\t".join(matches[0]))
+' "$marker")"
+
+existing_id=""
+existing_status=""
+existing_defer_until=""
+if [[ -n "$existing_match" ]]; then
+  IFS=$'\t' read -r existing_id existing_status existing_defer_until <<< "$existing_match"
+fi
+
+if [[ -n "$existing_id" ]]; then
+  if [[ "$existing_status" == "closed" ]]; then
+    td reopen "$existing_id" --work-dir "$repo_path" --json >/dev/null
+  fi
+  if [[ -n "$existing_defer_until" ]]; then
+    td defer "$existing_id" \
+      --clear \
+      --work-dir "$repo_path" \
+      --json >/dev/null
+  fi
+  td update "$existing_id" \
+    --priority "$PRIORITY" \
+    --description "$body" \
+    --labels no-mistakes,finding \
+    --work-dir "$repo_path" \
+    --json >/dev/null
+  printf 'td %s updated for finding %s\n' "$existing_id" "$FINDING_ID"
+else
+  result="$(td create "$title" \
+    --type task \
+    --priority "$PRIORITY" \
+    --labels no-mistakes,finding \
+    --description "$body" \
+    --work-dir "$repo_path" \
+    --json)"
+  task_id="$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+  printf 'td %s created for finding %s\n' "$task_id" "$FINDING_ID"
+fi

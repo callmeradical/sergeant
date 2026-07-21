@@ -712,18 +712,24 @@ Maintain \`.sergeant-gate-generation\` as a monotonic integer for waiting gates.
 
 Run focused tests and typechecking/lint regularly. Run the repository's full required suite once at the end. Run no-mistakes when available or required by active instructions.
 
-### 6. Independent two-axis review
+### 6. Route no-mistakes findings
+
+At a no-mistakes gate, classify every finding before responding: correctness, security, data-integrity, and test findings cannot be deferred or ignored and must use disposition \`gate\`; ask-user findings still require user escalation and must use \`ask-user\`. warning-level actionable review or documentation debt may use \`td\` and creates P2 work; informational actionable debt may use \`td\` and creates P3 work. Cosmetic and evidence-only noise must use \`ignore\` and creates no card.
+
+Record each classification with \`sgt-no-mistakes-finding $PROJECT $rname\`. Pass the run ID, head SHA, finding ID, severity, kind, file/line, description, and originating intent with the chosen \`--disposition\`. The command creates or updates one deduplicated card in this owning repo. On rerun, keep visible active cards in their current state; only closed cards are reopened and deferred cards are undeferred before refreshing the finding body. A td disposition allows the gate to continue without mutating the delivery branch. Gate and ask-user dispositions return a blocking status and do not authorize approval; for ask-user, follow the \`needs_input\` escalation protocol above.
+
+### 7. Independent two-axis review
 
 Before completion, load and use the canonical \`code-review\` skill when available, then launch separate parallel subagents for these axes so their contexts cannot contaminate each other. Keep their output in separate sections. Do not blend or rerank the axes. If the skill cannot be loaded, use the embedded review rules below.
 
 - **Standards axis:** Review the diff versus the pinned merge-base against active repo instructions, AGENTS, CONTRIBUTING, and coding standards. Add a concise Fowler smell heuristic (duplication, long functions/modules, large parameter lists, feature envy, data clumps, primitive obsession, shotgun surgery, and inappropriate intimacy). Separate hard documented-standard violations from judgement-call smells, and skip findings enforced by tooling.
 - **Spec axis:** Review against the originating td issue/spec/mission. Report missing or partial requirements, scope creep, and incorrectly implemented requirements. If no spec exists, report this axis as skipped/no spec.
 
-### 7. Remediate and repeat
+### 8. Remediate and repeat
 
 Remediate every blocking finding, rerun affected tests, then rerun both independent review axes. Repeat until blocking findings are zero on each axis.
 
-### 8. Complete delivery and td lifecycle
+### 9. Complete delivery and td lifecycle
 
 Commit branch \`$BRANCH\` and open the PR via \`gh pr create\`. If this work has a td task, log decisions throughout, handoff before td review, and run td review only after implementation and review evidence is ready.
 
