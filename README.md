@@ -150,6 +150,7 @@ Agent-loaded skills for structured workflows:
 - `yq` — YAML parser: `brew install yq`
 - `git` and `gh` — for repo operations and PRs
 - `tmux` — for local agent dispatch
+- `lsof` — for verifying cleanup does not remove an in-use worktree
 - `treehouse` — pre-warmed worktree pools (optional but recommended for dispatch)
 - `graphify` — knowledge graph generation (optional, needed for `sgt-graphify`)
 - `babydriver` — remote dispatch to cleanthes (optional)
