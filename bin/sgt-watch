@@ -105,21 +105,24 @@ def as_dict(value):
 def as_list(value):
     return value if isinstance(value, list) else []
 
-session = as_dict(payload.get("session"))
+def as_string(value):
+    return value if isinstance(value, str) else ""
+
+session_value = payload.get("session")
+session = as_dict(session_value)
 tasks = as_list(payload.get("tasks"))
 if not tasks:
     tasks = as_list(session.get("tasks"))
 
 task = {}
+matched = "0"
 for candidate in tasks:
     candidate = as_dict(candidate)
     candidate_window = str(candidate.get("window") or candidate.get("name") or candidate.get("slug") or "")
     if candidate_window == window:
         task = candidate
+        matched = "1"
         break
-
-if not task and tasks:
-    task = as_dict(tasks[0])
 
 tmux_alive = payload.get("tmux_alive")
 if tmux_alive is None:
@@ -166,13 +169,15 @@ print(result)
 print(message)
 print(diagnostic)
 print(task_id)
+print(matched)
 PY
 }
 
 _map_remote_status() {
   local raw_status="$1"
   case "${raw_status,,}" in
-    done|closed|complete|completed|success|succeeded|in_review) printf 'done\n' ;;
+    done|closed|complete|completed|success|succeeded) printf 'done\n' ;;
+    in_review) printf 'in_progress\n' ;;
     failed|failure|error|errored|cancelled|canceled) printf 'failed: remote execution failed\n' ;;
     needs_input|needs-input|awaiting_input|awaiting-input) printf 'needs_input\n' ;;
     blocked|waiting|paused) printf 'blocked\n' ;;
@@ -185,7 +190,7 @@ _map_remote_status() {
 _sync_remote_repo() {
   local repo_dir="$1"
   local worktree session window status_output remote_logs
-  local remote_fields=() tmux_alive raw_status mapped_status result message diagnostic task_id
+  local remote_fields=() tmux_alive raw_status mapped_status result message diagnostic task_id matched
   worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
   session="$(cat "$repo_dir/remote_session" 2>/dev/null || true)"
   window="$(cat "$repo_dir/remote_window" 2>/dev/null || true)"
@@ -225,7 +230,7 @@ _sync_remote_repo() {
   while IFS= read -r parsed_line; do
     remote_fields+=("$parsed_line")
   done < <(printf '%s' "$status_output" | _parse_babydriver_status "$window" 2>/dev/null || true)
-  if [[ "${#remote_fields[@]}" -lt 6 ]]; then
+  if [[ "${#remote_fields[@]}" -lt 7 ]]; then
     {
       printf 'babydriver status returned invalid JSON for %s\n' "$session"
       printf '%s\n' "$status_output"
@@ -243,7 +248,19 @@ _sync_remote_repo() {
   message="${remote_fields[3]}"
   diagnostic="${remote_fields[4]}"
   task_id="${remote_fields[5]}"
+  matched="${remote_fields[6]}"
   [[ -n "$task_id" ]] && printf '%s\n' "$task_id" > "$repo_dir/remote_td_task"
+
+  if [[ "$matched" != "1" ]]; then
+    {
+      printf 'requested remote task window %s was not found in babydriver status\n' "$window"
+      printf '%s\n' "$status_output"
+    } > "$repo_dir/diagnostic"
+    [[ -n "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
+    printf 'orphaned\n' > "$repo_dir/status"
+    [[ -n "$worktree" ]] && "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+    return
+  fi
 
   case "$mapped_status" in
     done|failed:*)
@@ -266,6 +283,10 @@ _sync_remote_repo() {
   if [[ "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" || "$mapped_status" == orphaned || "$mapped_status" == failed:* ]]; then
     remote_logs="$(_remote_logs "$session" "$window")"
   fi
+  if [[ "${raw_status,,}" == "in_review" && -z "$message" ]]; then
+    message="Remote worker is in_review; completion gates are still pending."
+    printf '%s\n' "$message" > "$repo_dir/message"
+  fi
 
   if [[ "$mapped_status" == "done" && -z "$result" ]]; then
     diagnostic="${diagnostic:-remote terminal status requires a result}"
@@ -287,7 +308,7 @@ _sync_remote_repo() {
     rm -f "$repo_dir/diagnostic"
   fi
 
-  [[ -n "$worktree" && "$mapped_status" != failed:* ]] && printf '%s\n' "$mapped_status" > "$worktree/.sergeant-status"
+  [[ -n "$worktree" ]] && printf '%s\n' "$mapped_status" > "$worktree/.sergeant-status"
   printf '%s\n' "$mapped_status" > "$repo_dir/status"
   if [[ "$mapped_status" == "orphaned" && -n "$worktree" ]]; then
     "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true

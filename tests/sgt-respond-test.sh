@@ -195,6 +195,19 @@ TD_LOG="$TEST_ROOT/remote-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-r
 grep -Fq 'restart remote-drive --window remote-window' "$TEST_ROOT/remote-babydriver.log"
 [[ ! -e "$remote_repo_state/message" && ! -e "$remote_worktree/.sergeant-message" ]]
 
+printf 'failed: remote execution failed\n' > "$remote_repo_state/status"
+printf 'needs_input\n' > "$remote_worktree/.sergeant-status"
+rm -f "$remote_worktree/.sergeant-response" "$remote_repo_state/response"
+set +e
+PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-terminal.log" \
+TD_LOG="$TEST_ROOT/remote-terminal-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'too late' >/dev/null 2>&1
+status=$?
+set -e
+[[ "$status" -ne 0 ]]
+[[ ! -e "$remote_worktree/.sergeant-response" && ! -e "$remote_repo_state/response" ]]
+[[ ! -e "$TEST_ROOT/remote-terminal.log" ]]
+
 printf 'needs_input\n' > "$remote_repo_state/status"
 printf 'needs_input\n' > "$remote_worktree/.sergeant-status"
 set +e

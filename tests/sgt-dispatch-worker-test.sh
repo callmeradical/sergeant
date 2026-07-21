@@ -76,7 +76,7 @@ failed_state="$(printf '%s\n' "$TEST_ROOT"/fleet/fail-worker-launch-*/app)"
 grep -Fq 'tmux failed to launch worker supervisor' "$failed_state/diagnostic"
 
 PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/remote-tmux.log" BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
-BABYDRIVER_START_JSON='{"session":"test-drive","project_dir":"/remote/project","tasks":[{"window":"remote-window","task_id":"td-remote-123"}]}' \
+BABYDRIVER_START_JSON='{"session":{"name":"test-drive","tasks":[{"window":"remote-window","task_id":"td-remote-123"}]},"project_dir":"/remote/project"}' \
 SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-dispatch" test 'Supervise remote' --repos app --remote >/dev/null
 remote_state="$(printf '%s\n' "$TEST_ROOT"/fleet/supervise-remote-*/app)"
@@ -88,6 +88,18 @@ remote_state="$(printf '%s\n' "$TEST_ROOT"/fleet/supervise-remote-*/app)"
 [[ ! -e "$remote_state/pane" ]]
 grep -Fq 'start --repo org/test --task ' "$TEST_ROOT/babydriver.log"
 grep -Fq 'Supervise remote [sgt:' "$TEST_ROOT/babydriver.log"
+
+set +e
+PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/remote-mismatch-tmux.log" BABYDRIVER_LOG="$TEST_ROOT/babydriver-mismatch.log" \
+BABYDRIVER_START_JSON='{"session":{"name":"test-drive","tasks":[{"window":"other-window","task_id":"td-remote-999"}]},"project_dir":"/remote/project"}' \
+SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Mismatch remote worker' --repos app --remote >/dev/null 2>&1
+status=$?
+set -e
+[[ "$status" -ne 0 ]]
+mismatch_state="$(printf '%s\n' "$TEST_ROOT"/fleet/mismatch-remote-worker-*/app)"
+[[ "$(cat "$mismatch_state/status")" == "orphaned" ]]
+grep -Fq 'requested remote task window' "$mismatch_state/diagnostic"
 
 set +e
 PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/remote-failure-tmux.log" BABYDRIVER_LOG="$TEST_ROOT/babydriver-failure.log" \

@@ -24,10 +24,13 @@ REPO_DIR="$FLEET_DIR/$TASK_ID/$REPO"
 [[ -d "$REPO_DIR" ]] || _die "Repo not found in task $TASK_ID: $REPO"
 
 worktree="$(cat "$REPO_DIR/worktree" 2>/dev/null || true)"
+backend="$(cat "$REPO_DIR/backend" 2>/dev/null || echo "local-tmux")"
 _sgt_response_lock_acquire "$REPO_DIR"
 trap '_sgt_response_lock_release' EXIT
 
-if [[ -n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-status" ]]; then
+if [[ "$backend" == "remote-babydriver" ]]; then
+  status="$(cat "$REPO_DIR/status" 2>/dev/null || true)"
+elif [[ -n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-status" ]]; then
   status="$(tr -d '\n' < "$worktree/.sergeant-status")"
 else
   status="$(cat "$REPO_DIR/status" 2>/dev/null || true)"
@@ -67,7 +70,6 @@ fi
 _sgt_response_lock_release
 trap - EXIT
 
-backend="$(cat "$REPO_DIR/backend" 2>/dev/null || echo "local-tmux")"
 if [[ "$backend" == "remote-babydriver" ]]; then
   remote_session="$(cat "$REPO_DIR/remote_session" 2>/dev/null || true)"
   remote_window="$(cat "$REPO_DIR/remote_window" 2>/dev/null || true)"

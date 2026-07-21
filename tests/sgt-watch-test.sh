@@ -91,6 +91,17 @@ grep -Fq 'recorded pane %dead is dead or is not the expected worker supervisor' 
 grep -Fq 'Fleet finished with failures.' "$watch_output"
 
 cat > "$TEST_ROOT/remote-status.json" <<'EOF'
+{"tmux_alive":true,"tasks":[{"window":"remote-window","status":"in_review","task_id":"td-remote-1"}]}
+EOF
+PATH="$fake_bin:$PATH" TASK_ROOT="$task" TD_LOG="$TEST_ROOT/td.log" SERGEANT_FLEET="$fleet" \
+BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TEST_ROOT/remote-logs.txt" \
+  "$ROOT_DIR/bin/sgt-watch" --sync task-1
+[[ "$(cat "$task/remote/status")" == "in_progress" ]]
+[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == "in_progress" ]]
+grep -Fq 'in_review' "$task/remote/message"
+[[ ! -e "$task/remote/result" ]]
+
+cat > "$TEST_ROOT/remote-status.json" <<'EOF'
 {"tmux_alive":false,"tasks":[{"window":"remote-window","status":"blocked","task_id":"td-remote-1"}]}
 EOF
 PATH="$fake_bin:$PATH" TASK_ROOT="$task" TD_LOG="$TEST_ROOT/td.log" SERGEANT_FLEET="$fleet" \
@@ -126,5 +137,6 @@ terminal_status=$?
 set -e
 [[ "$terminal_status" -eq 1 ]]
 [[ "$terminal_output" == *'Fleet finished with failures.'* ]]
+[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == 'failed: remote execution failed' ]]
 
 printf 'sgt-watch detects dead workers: ok\n'
