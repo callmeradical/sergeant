@@ -49,7 +49,8 @@ Diagnostics cover:
 - Required tools and versions: `yq`, Git, GitHub CLI, tmux, and Python 3.
 - Optional integrations and versions: td, no-mistakes, graphify, treehouse,
   babydriver, and mise.
-- Availability of at least one supported OpenCode or Claude agent harness.
+- Availability of at least one supported OpenCode, Claude Code, or Goose
+  agent harness.
 - GitHub authentication identity. Tokens are neither requested nor printed.
 - Global and project YAML syntax and required project/repository fields.
 - Repository paths, Git metadata, configured URLs, origin remotes, and td data.

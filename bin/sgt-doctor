@@ -86,7 +86,12 @@ check_tool() {
     add_check "$severity" "tools.$id" "not installed; $hint"
     return 1
   fi
-  if version="$("$command_name" --version 2>&1)"; then
+  if version="$(
+    case "$command_name" in
+      tmux) "$command_name" -V 2>&1 ;;
+      *) "$command_name" --version 2>&1 ;;
+    esac
+  )"; then
     version="${version%%$'\n'*}"
     add_check PASS "tools.$id" "${version:-available}"
     return 0
@@ -202,7 +207,7 @@ check_tool WARN babydriver babydriver "install babydriver for remote dispatch" |
 check_tool WARN mise mise "install mise for Sergeant installation tasks" || true
 
 agent_versions=""
-for agent in opencode claude; do
+for agent in opencode claude goose; do
   if command -v "$agent" >/dev/null 2>&1 && agent_version="$("$agent" --version 2>&1)"; then
     agent_version="${agent_version%%$'\n'*}"
     if [[ -n "$agent_versions" ]]; then
@@ -214,7 +219,7 @@ done
 if [[ -n "$agent_versions" ]]; then
   add_check PASS agents.harness "$agent_versions"
 else
-  add_check FAIL agents.harness "install OpenCode or Claude Code"
+  add_check FAIL agents.harness "install OpenCode, Claude Code, or Goose"
 fi
 
 if ((GH_OK)); then
@@ -235,11 +240,11 @@ for source_script in "$SERGEANT_ROOT"/bin/sgt-* "$SERGEANT_ROOT"/bin/_sgt-lib.sh
   if [[ -L "$installed_script" && ! -e "$installed_script" ]]; then
     add_check FAIL "install.$script_name" "installed command is a broken symlink"
   elif [[ ! -L "$installed_script" ]]; then
-    add_check FAIL "install.$script_name" "installed command symlink is missing"
+    add_check WARN "install.$script_name" "installed command symlink is missing"
   elif [[ "$installed_script" -ef "$source_script" ]]; then
     add_check PASS "install.$script_name" "installed symlink targets this Sergeant checkout"
   else
-    add_check FAIL "install.$script_name" "installed symlink targets a different checkout"
+    add_check WARN "install.$script_name" "installed symlink targets a different checkout"
   fi
 done
 shopt -u nullglob

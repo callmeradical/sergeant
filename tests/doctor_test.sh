@@ -129,6 +129,39 @@ test_broken_installed_link_is_broken() {
   assert_contains "$output" "broken symlink"
 }
 
+test_missing_installed_link_is_degraded() {
+  local output status
+  setup_fixture
+  rm "$SGT_INSTALL_DIR/sgt-list"
+
+  set +e
+  output="$("$DOCTOR" 2>&1)"
+  status=$?
+  set -e
+
+  assert_eq 1 "$status"
+  assert_contains "$output" "[WARN] install.sgt-list"
+  assert_contains "$output" "symlink is missing"
+}
+
+test_mismatched_installed_link_is_degraded() {
+  local output status
+  setup_fixture
+  rm "$SGT_INSTALL_DIR/sgt-list"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$TEST_TMP/other-sgt-list"
+  chmod +x "$TEST_TMP/other-sgt-list"
+  ln -s "$TEST_TMP/other-sgt-list" "$SGT_INSTALL_DIR/sgt-list"
+
+  set +e
+  output="$("$DOCTOR" 2>&1)"
+  status=$?
+  set -e
+
+  assert_eq 1 "$status"
+  assert_contains "$output" "[WARN] install.sgt-list"
+  assert_contains "$output" "targets a different checkout"
+}
+
 test_orphaned_fleet_worker_is_broken() {
   local output status repo_state
   setup_fixture
@@ -322,7 +355,7 @@ test_dead_tmux_pane_is_broken() {
   printf '%s\n' %999 > "$repo_state/pane"
   cat > "$TEST_TMP/bin/tmux" <<'EOF'
 #!/usr/bin/env bash
-[[ "${1:-}" == "--version" ]] && { echo 'tmux 1.0.0'; exit 0; }
+[[ "${1:-}" == "-V" ]] && { echo 'tmux 1.0.0'; exit 0; }
 exit 1
 EOF
   chmod +x "$TEST_TMP/bin/tmux"
@@ -335,6 +368,25 @@ EOF
   assert_eq 2 "$status"
   assert_contains "$output" "[FAIL] fleet.task-123.app"
   assert_contains "$output" "dead tmux pane"
+}
+
+test_tmux_probe_uses_dash_v() {
+  local output status
+  setup_fixture
+  cat > "$TEST_TMP/bin/tmux" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == "-V" ]] && { echo 'tmux 3.4'; exit 0; }
+exit 1
+EOF
+  chmod +x "$TEST_TMP/bin/tmux"
+
+  set +e
+  output="$("$DOCTOR" 2>&1)"
+  status=$?
+  set -e
+
+  assert_eq 0 "$status"
+  assert_contains "$output" "[PASS] tools.tmux: tmux 3.4"
 }
 
 test_stale_nonterminal_worker_is_degraded() {
@@ -413,7 +465,7 @@ test_remote_worker_without_tmux_metadata_is_degraded() {
   printf '%s\n' "$HOME/dev/app" > "$repo_state/worktree"
   cat > "$TEST_TMP/bin/tmux" <<'EOF'
 #!/usr/bin/env bash
-[[ "${1:-}" == "--version" ]] && { echo 'tmux 1.0.0'; exit 0; }
+[[ "${1:-}" == "-V" ]] && { echo 'tmux 1.0.0'; exit 0; }
 exit 1
 EOF
   chmod +x "$TEST_TMP/bin/tmux"
@@ -426,6 +478,21 @@ EOF
   assert_eq 1 "$status"
   assert_contains "$output" "[WARN] fleet.task-123.app"
   assert_contains "$output" "cannot verify a local tmux pane"
+}
+
+test_goose_only_harness_is_healthy() {
+  local output status
+  setup_fixture
+  rm -f "$TEST_TMP/bin/opencode" "$TEST_TMP/bin/claude"
+  make_fake_command goose
+
+  set +e
+  output="$("$DOCTOR" 2>&1)"
+  status=$?
+  set -e
+
+  assert_eq 0 "$status"
+  assert_contains "$output" "[PASS] agents.harness: goose goose 1.0.0"
 }
 
 test_missing_fleet_metadata_is_reported_without_shell_errors() {
@@ -457,6 +524,10 @@ test_missing_repository_is_broken
 echo "PASS: missing repository"
 test_broken_installed_link_is_broken
 echo "PASS: broken installed link"
+test_missing_installed_link_is_degraded
+echo "PASS: missing installed link"
+test_mismatched_installed_link_is_degraded
+echo "PASS: mismatched installed link"
 test_orphaned_fleet_worker_is_broken
 echo "PASS: orphaned fleet worker"
 test_uninitialized_td_database_is_degraded
@@ -481,6 +552,8 @@ test_remote_drift_is_degraded
 echo "PASS: remote drift"
 test_dead_tmux_pane_is_broken
 echo "PASS: dead tmux pane"
+test_tmux_probe_uses_dash_v
+echo "PASS: tmux dash-V probe"
 test_stale_nonterminal_worker_is_degraded
 echo "PASS: stale fleet worker"
 test_doctor_does_not_mutate_runtime_state
@@ -491,5 +564,7 @@ test_live_worker_without_persisted_pane_metadata_is_healthy
 echo "PASS: inferred live fleet pane"
 test_remote_worker_without_tmux_metadata_is_degraded
 echo "PASS: remote fleet worker"
+test_goose_only_harness_is_healthy
+echo "PASS: goose harness"
 test_missing_fleet_metadata_is_reported_without_shell_errors
 echo "PASS: missing fleet metadata"

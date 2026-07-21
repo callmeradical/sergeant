@@ -54,7 +54,7 @@ make_fake_command() {
   cat > "$TEST_TMP/bin/$name" <<EOF
 #!/usr/bin/env bash
 case "\${1:-}" in
-  --version|-version|version) echo "$name 1.0.0" ;;
+  --version|-version|version|-V) echo "$name 1.0.0" ;;
   api) echo "fixture-user" ;;
   auth) echo "fixture-user" ;;
   list) echo '[]' ;;
