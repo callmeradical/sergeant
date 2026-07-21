@@ -137,6 +137,7 @@ Agent-loaded skills for structured workflows:
 
 ## Requirements
 
+- `td` — task CLI, required for brief-based `sgt-dispatch` runs and `sgt-td-*` commands
 - `yq` — YAML parser: `brew install yq`
 - `git` and `gh` — for repo operations and PRs
 - `tmux` — for local agent dispatch

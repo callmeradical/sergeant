@@ -25,6 +25,48 @@ exit 0
 EOF
 chmod +x "$TEST_ROOT/fake-bin/tmux"
 
+cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+work_dir=""
+args=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --work-dir|-w)
+      work_dir="$2"
+      shift 2
+      ;;
+    --json)
+      shift
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+set -- "${args[@]}"
+case "${1:-}" in
+  list)
+    printf '[]\n'
+    ;;
+  create)
+    printf '{"id":"td-app-1"}\n'
+    ;;
+  delete)
+    printf '{"id":"td-app-1","deleted":true}\n'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/fake-bin/td"
+
 git -C "$TEST_ROOT/repo" init -q
 git -C "$TEST_ROOT/repo" config user.name "Sergeant Test"
 git -C "$TEST_ROOT/repo" config user.email "sergeant@example.invalid"
@@ -66,6 +108,10 @@ assert_order() {
 }
 
 assert_contains "merge-base with the current origin/main"
+assert_contains "**td task:** td-app-1"
+assert_contains "td start td-app-1 --work-dir ."
+assert_contains "td handoff td-app-1 --work-dir ."
+assert_contains "td review td-app-1 --work-dir ."
 assert_contains "commit list and diff scope"
 assert_contains "If no originating spec exists, record that explicitly"
 assert_contains "failing focused test"

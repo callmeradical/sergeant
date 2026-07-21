@@ -3,6 +3,8 @@
 #
 # Creates one td task per specified repo, with a shared title and per-repo
 # description. Returns the created task IDs so sgt-dispatch can use them.
+# Task creation is all-or-nothing: if any target repo cannot produce a task,
+# previously created tasks are rolled back and the command fails.
 #
 # Usage:
 #   sgt-td-create <project> "<title>" --repos repo1,repo2 [options]
@@ -25,6 +27,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
 
 _require_td() {
