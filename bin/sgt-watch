@@ -108,6 +108,18 @@ def as_list(value):
 def as_string(value):
     return value if isinstance(value, str) else ""
 
+def matches_requested_window(requested, task):
+    window_value = as_string(task.get("window"))
+    name_value = as_string(task.get("name"))
+    slug_value = as_string(task.get("slug"))
+    if window_value == requested or slug_value == requested:
+        return True
+    if name_value == requested:
+        return True
+    if name_value.startswith(requested + ":"):
+        return True
+    return False
+
 session_value = payload.get("session")
 session = as_dict(session_value)
 tasks = as_list(payload.get("tasks"))
@@ -118,8 +130,7 @@ task = {}
 matched = "0"
 for candidate in tasks:
     candidate = as_dict(candidate)
-    candidate_window = str(candidate.get("window") or candidate.get("name") or candidate.get("slug") or "")
-    if candidate_window == window:
+    if matches_requested_window(window, candidate):
         task = candidate
         matched = "1"
         break

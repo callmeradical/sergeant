@@ -177,6 +177,7 @@ EOF
 chmod +x "$fake_bin/td"
 printf 'needs_input\n' > "$repo_state/status"
 printf 'needs_input\n' > "$worktree/.sergeant-status"
+rm -f "$worktree/.sergeant-response" "$repo_state/response" "$repo_state/response_id"
 set +e
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/empty-pane.log" TD_LOG="$TEST_ROOT/empty-pane-td.log" \
 PANE_ALIVE=0 EMPTY_WINDOW=1 SERGEANT_FLEET="$fleet" \

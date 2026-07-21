@@ -274,7 +274,9 @@ def matches_requested_window(requested, task):
 session = ""
 project_dir = ""
 task_id = ""
-resolved_window = window_name
+matched_window = ""
+matched_name = ""
+matched_slug = ""
 matched = "0"
 
 if isinstance(payload, dict):
@@ -301,15 +303,18 @@ if isinstance(payload, dict):
         if matches_requested_window(window_name, task):
             window, name, slug = candidate_window_fields(task)
             matched = "1"
-            resolved_window = window or name or slug or resolved_window
+            matched_window = window
+            matched_name = name
+            matched_slug = slug
             task_id = str(task.get("task_id") or task.get("td_task_id") or task.get("id") or "")
             break
 
 print(session)
-print(resolved_window)
+print(window_name)
 print(task_id)
 print(project_dir)
 print(matched)
+print(matched_window or matched_name or matched_slug)
 PY
 }
 
@@ -669,7 +674,7 @@ BRIEF_EOF
     while IFS= read -r parsed_line; do
       remote_launch_fields+=("$parsed_line")
     done < <(printf '%s' "$start_output" | _parse_babydriver_start "$WINDOW_NAME" 2>/dev/null || true)
-    if [[ "${#remote_launch_fields[@]}" -lt 5 ]] || [[ -z "${remote_launch_fields[0]:-}" ]]; then
+    if [[ "${#remote_launch_fields[@]}" -lt 6 ]] || [[ -z "${remote_launch_fields[0]:-}" ]]; then
       {
         printf 'babydriver start returned no remote session metadata\n'
         printf '%s\n' "$start_output"
@@ -694,6 +699,9 @@ BRIEF_EOF
     fi
     if [[ -n "${remote_launch_fields[3]}" ]]; then
       printf '%s\n' "${remote_launch_fields[3]}" > "$repo_task_dir/remote_project_dir"
+    fi
+    if [[ -n "${remote_launch_fields[5]}" ]]; then
+      printf '%s\n' "${remote_launch_fields[5]}" > "$repo_task_dir/remote_task_name"
     fi
   else
     # Window name: <short-task-id>/<repo> so multiple tasks don't collide

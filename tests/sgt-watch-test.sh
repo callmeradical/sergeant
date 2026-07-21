@@ -102,6 +102,17 @@ grep -Fq 'in_review' "$task/remote/message"
 [[ ! -e "$task/remote/result" ]]
 
 cat > "$TEST_ROOT/remote-status.json" <<'EOF'
+{"tmux_alive":true,"tasks":[{"name":"remote-window:review follow-up [sgt:task-1]","status":"blocked","message":"Composite remote name still matches.","task_id":"td-remote-2"}]}
+EOF
+PATH="$fake_bin:$PATH" TASK_ROOT="$task" TD_LOG="$TEST_ROOT/td.log" SERGEANT_FLEET="$fleet" \
+BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TEST_ROOT/remote-logs.txt" \
+  "$ROOT_DIR/bin/sgt-watch" --sync task-1
+[[ "$(cat "$task/remote/status")" == "blocked" ]]
+[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == "blocked" ]]
+grep -Fq 'Composite remote name still matches.' "$task/remote/message"
+[[ "$(cat "$task/remote/remote_td_task")" == "td-remote-2" ]]
+
+cat > "$TEST_ROOT/remote-status.json" <<'EOF'
 {"tmux_alive":false,"tasks":[{"window":"remote-window","status":"blocked","task_id":"td-remote-1"}]}
 EOF
 PATH="$fake_bin:$PATH" TASK_ROOT="$task" TD_LOG="$TEST_ROOT/td.log" SERGEANT_FLEET="$fleet" \

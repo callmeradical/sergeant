@@ -105,7 +105,8 @@ START_VARIANT=name SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROO
 name_state="$(printf '%s\n' "$TEST_ROOT"/fleet/name-remote-worker-*/app)"
 name_task="$(sed -n 's/^start --repo org\/test --task \(.*\) --worktree$/\1/p' "$TEST_ROOT/babydriver-name.log")"
 [[ "$(cat "$name_state/remote_session")" == "test-drive" ]]
-[[ "$(cat "$name_state/remote_window")" == "$name_task" ]]
+[[ "$(cat "$name_state/remote_window")" == "$(cat "$name_state/window_name")" ]]
+[[ "$(cat "$name_state/remote_task_name")" == "$name_task" ]]
 [[ "$(cat "$name_state/remote_td_task")" == "td-remote-123" ]]
 
 set +e
