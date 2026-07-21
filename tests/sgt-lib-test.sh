@@ -15,4 +15,10 @@ redacted="$(bash -lc 'source "$1"; _sgt_redact "graphify 1.0.0 AWS_SECRET_ACCESS
 [[ "$redacted" != *"ghp_secretvalue"* ]]
 [[ "$redacted" == *"ordinary-text"* ]]
 
+redacted="$(bash -lc 'source "$1"; _sgt_redact "AWS_SECRET_ACCESS_KEY=supersecret PATH=/usr/bin API_TOKEN=secondsecret"' _ "$ROOT_DIR/bin/_sgt-lib.sh")"
+[[ "$redacted" == "AWS_SECRET_ACCESS_KEY=[REDACTED] PATH=/usr/bin API_TOKEN=[REDACTED]" ]]
+[[ "$redacted" != *"supersecret"* ]]
+[[ "$redacted" != *"secondsecret"* ]]
+[[ "$redacted" == *"PATH=/usr/bin"* ]]
+
 printf 'sgt-lib agent command builder: ok\n'

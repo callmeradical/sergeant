@@ -100,13 +100,37 @@ import sys
 
 text = sys.argv[1]
 credential_key = r'[A-Z0-9_]*(?:token|password|secret|api(?:[_-]?key))[A-Z0-9_]*'
-assignment_pattern = re.compile(
-    rf'(?i)\b({credential_key})\b\s*[:=]\s*(.*?)\s*'
-    rf'(?=(?:\b{credential_key}\b\s*[:=])|(?:gh[pousr]_[A-Za-z0-9_]+)|(?:github_pat_[A-Za-z0-9_]+)|[;,\n]|$)'
-)
+assignment_start = re.compile(rf'(?i)\b({credential_key})\b\s*[:=]\s*')
+next_assignment = re.compile(r'[A-Za-z_][A-Za-z0-9_]*\s*[:=]')
+
+def redact_assignments(value: str) -> str:
+    chunks = []
+    pos = 0
+    for match in assignment_start.finditer(value):
+        if match.start() < pos:
+            continue
+        chunks.append(value[pos:match.start()])
+        chunks.append(f'{match.group(1)}=[REDACTED]')
+        i = match.end()
+        while i < len(value):
+            ch = value[i]
+            if ch in ';,\n':
+                break
+            if ch in ' \t':
+                j = i
+                while j < len(value) and value[j] in ' \t':
+                    j += 1
+                if next_assignment.match(value, j):
+                    chunks.append(value[i:j])
+                    i = j
+                    break
+            i += 1
+        pos = i
+    chunks.append(value[pos:])
+    return ''.join(chunks)
 
 text = re.sub(r'(https?://)[^/@\s]+@', r'\1[REDACTED]@', text, flags=re.I)
-text = assignment_pattern.sub(lambda m: f'{m.group(1)}=[REDACTED]', text)
+text = redact_assignments(text)
 text = re.sub(r'\bgh[pousr]_[A-Za-z0-9_]+\b', '[REDACTED]', text)
 text = re.sub(r'\bgithub_pat_[A-Za-z0-9_]+\b', '[REDACTED]', text)
 sys.stdout.write(text)
