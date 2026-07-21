@@ -100,8 +100,47 @@ check_tool() {
   return 1
 }
 
+check_agent_harness() {
+  local selected_agent="${SERGEANT_AGENT:-}" agent agent_version agent_versions=""
+  if [[ -n "$selected_agent" ]]; then
+    case "$selected_agent" in
+      opencode|claude|goose) ;;
+      *)
+        add_check FAIL agents.harness "SERGEANT_AGENT selects unsupported agent: $selected_agent"
+        return
+        ;;
+    esac
+    if ! command -v "$selected_agent" >/dev/null 2>&1; then
+      add_check FAIL agents.harness "SERGEANT_AGENT selects $selected_agent, but it is not installed"
+      return
+    fi
+    if agent_version="$("$selected_agent" --version 2>&1)"; then
+      agent_version="${agent_version%%$'\n'*}"
+      add_check PASS agents.harness "SERGEANT_AGENT selects $selected_agent (${agent_version:-available})"
+    else
+      add_check FAIL agents.harness "SERGEANT_AGENT selects $selected_agent, but the installed command is not usable"
+    fi
+    return
+  fi
+
+  for agent in opencode claude goose; do
+    if command -v "$agent" >/dev/null 2>&1 && agent_version="$("$agent" --version 2>&1)"; then
+      agent_version="${agent_version%%$'\n'*}"
+      if [[ -n "$agent_versions" ]]; then
+        agent_versions="$agent_versions, "
+      fi
+      agent_versions="$agent_versions$agent ${agent_version:-available}"
+    fi
+  done
+  if [[ -n "$agent_versions" ]]; then
+    add_check PASS agents.harness "$agent_versions"
+  else
+    add_check FAIL agents.harness "install OpenCode, Claude Code, or Goose"
+  fi
+}
+
 check_project_config() {
-  local project="$1" file="$SERGEANT_CONFIG/$1.yaml" configured_name repos_type
+  local project="$1" global_config_ok="$2" file="$SERGEANT_CONFIG/$1.yaml" configured_name repos_type
   local repo_count index repo_name repo_path resolved_path configured_url actual_url group
   local seen_repo_names="" duplicate_repo_names=false
   if [[ ! -f "$file" ]]; then
@@ -149,6 +188,9 @@ check_project_config() {
     fi
     if [[ -n "$group" && "$(yq eval ".groups.\"$group\" | type" "$file" 2>/dev/null)" != "!!map" ]]; then
       add_check FAIL "config.repo.$project.$repo_name" "referenced group is not defined"
+      continue
+    fi
+    if ((global_config_ok == 0)) && [[ "$repo_path" != /* && "$repo_path" != ~* ]]; then
       continue
     fi
     resolved_path="$(_resolve_path "$repo_path")"
@@ -206,21 +248,7 @@ check_tool WARN treehouse treehouse "install treehouse for pooled worktrees" || 
 check_tool WARN babydriver babydriver "install babydriver for remote dispatch" || true
 check_tool WARN mise mise "install mise for Sergeant installation tasks" || true
 
-agent_versions=""
-for agent in opencode claude goose; do
-  if command -v "$agent" >/dev/null 2>&1 && agent_version="$("$agent" --version 2>&1)"; then
-    agent_version="${agent_version%%$'\n'*}"
-    if [[ -n "$agent_versions" ]]; then
-      agent_versions="$agent_versions, "
-    fi
-    agent_versions="$agent_versions$agent ${agent_version:-available}"
-  fi
-done
-if [[ -n "$agent_versions" ]]; then
-  add_check PASS agents.harness "$agent_versions"
-else
-  add_check FAIL agents.harness "install OpenCode, Claude Code, or Goose"
-fi
+check_agent_harness
 
 if ((GH_OK)); then
   if github_identity="$(gh api user --jq .login 2>/dev/null)" && [[ -n "$github_identity" ]]; then
@@ -233,7 +261,8 @@ fi
 
 shopt -s nullglob
 for source_script in "$SERGEANT_ROOT"/bin/sgt-* "$SERGEANT_ROOT"/bin/_sgt-lib.sh \
-  "$SERGEANT_ROOT"/bin/oc-inject "$SERGEANT_ROOT"/bin/wiki-daily-digest; do
+  "$SERGEANT_ROOT"/bin/_sgt-response-lock.sh "$SERGEANT_ROOT"/bin/oc-inject \
+  "$SERGEANT_ROOT"/bin/wiki-daily-digest; do
   [[ -f "$source_script" ]] || continue
   script_name="$(basename "$source_script")"
   installed_script="$SGT_INSTALL_DIR/$script_name"
@@ -392,6 +421,7 @@ if ((fleet_repos == 0)); then
   add_check PASS fleet.state "no active fleet workers"
 fi
 
+GLOBAL_CONFIG_OK=1
 if ((YQ_OK)); then
   if [[ ! -d "$SERGEANT_CONFIG" ]]; then
     add_check FAIL config.directory "configuration directory does not exist: $SERGEANT_CONFIG"
@@ -399,6 +429,7 @@ if ((YQ_OK)); then
     if yq eval '.' "$SERGEANT_CONFIG/config.yaml" >/dev/null 2>&1; then
       add_check PASS config.global "global YAML is valid"
     else
+      GLOBAL_CONFIG_OK=0
       add_check FAIL config.global "global YAML cannot be parsed"
     fi
   else
@@ -418,12 +449,12 @@ else
 fi
 
 if ((YQ_OK)) && [[ -n "$PROJECT" ]]; then
-  check_project_config "$PROJECT"
+  check_project_config "$PROJECT" "$GLOBAL_CONFIG_OK"
 elif ((YQ_OK)) && [[ -d "$SERGEANT_CONFIG" ]]; then
   shopt -s nullglob
   for project_file in "$SERGEANT_CONFIG"/*.yaml; do
     [[ "$(basename "$project_file")" == "config.yaml" ]] && continue
-    check_project_config "$(basename "$project_file" .yaml)"
+    check_project_config "$(basename "$project_file" .yaml)" "$GLOBAL_CONFIG_OK"
   done
   shopt -u nullglob
 fi

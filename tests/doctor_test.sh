@@ -27,6 +27,7 @@ test_healthy_installation() {
   assert_contains "$output" "[PASS] td.app.app"
   assert_contains "$output" "[PASS] install.sgt-doctor"
   assert_contains "$output" "[PASS] install._sgt-lib.sh"
+  assert_contains "$output" "[PASS] install._sgt-response-lock.sh"
   assert_contains "$output" "[PASS] install.oc-inject"
   assert_contains "$output" "[PASS] install.wiki-daily-digest"
   assert_contains "$output" "[PASS] integrations.opencode-plugin"
@@ -495,6 +496,70 @@ test_goose_only_harness_is_healthy() {
   assert_contains "$output" "[PASS] agents.harness: goose goose 1.0.0"
 }
 
+test_explicit_agent_override_must_be_usable() {
+  local output status
+  setup_fixture
+  rm -f "$TEST_TMP/bin/goose"
+  export SERGEANT_AGENT=goose
+
+  set +e
+  output="$("$DOCTOR" 2>&1)"
+  status=$?
+  set -e
+
+  unset SERGEANT_AGENT
+
+  assert_eq 2 "$status"
+  assert_contains "$output" "[FAIL] agents.harness"
+  assert_contains "$output" "SERGEANT_AGENT selects goose, but it is not installed"
+}
+
+test_missing_response_lock_install_link_is_degraded() {
+  local output status
+  setup_fixture
+  rm "$SGT_INSTALL_DIR/_sgt-response-lock.sh"
+
+  set +e
+  output="$("$DOCTOR" 2>&1)"
+  status=$?
+  set -e
+
+  assert_eq 1 "$status"
+  assert_contains "$output" "[WARN] install._sgt-response-lock.sh"
+  assert_contains "$output" "symlink is missing"
+}
+
+test_broken_response_lock_install_link_is_broken() {
+  local output status
+  setup_fixture
+  rm "$SGT_INSTALL_DIR/_sgt-response-lock.sh"
+  ln -s "$TEST_TMP/missing-response-lock" "$SGT_INSTALL_DIR/_sgt-response-lock.sh"
+
+  set +e
+  output="$("$DOCTOR" 2>&1)"
+  status=$?
+  set -e
+
+  assert_eq 2 "$status"
+  assert_contains "$output" "[FAIL] install._sgt-response-lock.sh"
+  assert_contains "$output" "broken symlink"
+}
+
+test_invalid_global_config_does_not_cascade_repo_failures() {
+  local output status
+  setup_fixture
+  printf '%s\n' 'dev_root: [' > "$SERGEANT_CONFIG/config.yaml"
+
+  set +e
+  output="$("$DOCTOR" app 2>&1)"
+  status=$?
+  set -e
+
+  assert_eq 2 "$status"
+  assert_contains "$output" "[FAIL] config.global"
+  assert_not_contains "$output" "repository path does not exist"
+}
+
 test_missing_fleet_metadata_is_reported_without_shell_errors() {
   local output status
   setup_fixture
@@ -566,5 +631,13 @@ test_remote_worker_without_tmux_metadata_is_degraded
 echo "PASS: remote fleet worker"
 test_goose_only_harness_is_healthy
 echo "PASS: goose harness"
+test_explicit_agent_override_must_be_usable
+echo "PASS: explicit agent override"
+test_missing_response_lock_install_link_is_degraded
+echo "PASS: missing response lock install link"
+test_broken_response_lock_install_link_is_broken
+echo "PASS: broken response lock install link"
+test_invalid_global_config_does_not_cascade_repo_failures
+echo "PASS: invalid global config"
 test_missing_fleet_metadata_is_reported_without_shell_errors
 echo "PASS: missing fleet metadata"

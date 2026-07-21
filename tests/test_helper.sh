@@ -40,7 +40,7 @@ EOF
   done
   ln -s "$REAL_YQ" "$TEST_TMP/bin/yq"
 
-  for script in "$ROOT"/bin/sgt-* "$ROOT"/bin/_sgt-lib.sh \
+  for script in "$ROOT"/bin/sgt-* "$ROOT"/bin/_sgt-lib.sh "$ROOT"/bin/_sgt-response-lock.sh \
     "$ROOT"/bin/oc-inject "$ROOT"/bin/wiki-daily-digest; do
     [[ -f "$script" ]] || continue
     ln -s "$script" "$SGT_INSTALL_DIR/$(basename "$script")"
