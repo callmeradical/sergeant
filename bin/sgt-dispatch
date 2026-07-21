@@ -83,17 +83,10 @@ if [[ -n "$TD_TASK_ID" ]]; then
 
     if [[ "$count" -gt 0 ]]; then
       TD_REPO="$rname"
-      TD_REPO_PATH="$repo_path"
-
       # Pull title and description for brief
       td_title="$(echo "$task_json" | python3 -c "
 import sys,json; t=json.load(sys.stdin)[0]
 print(t.get('title',''))
-" 2>/dev/null)"
-
-      td_desc="$(echo "$task_json" | python3 -c "
-import sys,json; t=json.load(sys.stdin)[0]
-print(t.get('description',''))
 " 2>/dev/null)"
 
       # Get full context from td
@@ -397,11 +390,17 @@ for rname in "${TARGET_REPOS[@]}"; do
 
   # Build td section for brief
   td_section=""
+  td_task_line=""
   if [[ -n "$REPO_TD_TASK_ID" ]]; then
     # Fetch full context if this came from --td
     repo_td_context=""
     if [[ -n "$TD_CONTEXT" && "$rname" == "$TD_REPO" ]]; then
       repo_td_context="$TD_CONTEXT"
+    fi
+
+    td_context_block=""
+    if [[ -n "$repo_td_context" ]]; then
+      td_context_block="$(printf '\nFull task context:\n%s' "$repo_td_context")"
     fi
 
     td_section="## Task management
@@ -423,7 +422,8 @@ Before writing .sergeant-status=done, hand off:
 td handoff $REPO_TD_TASK_ID --work-dir .
 td review $REPO_TD_TASK_ID --work-dir .
 \`\`\`
-$([ -n "$repo_td_context" ] && printf '\nFull task context:\n%s' "$repo_td_context" || true)"
+$td_context_block"
+    td_task_line="**td task:** $REPO_TD_TASK_ID"
     # Store td task ID in fleet state
     echo "$REPO_TD_TASK_ID" > "$repo_task_dir/td_task"
   fi
@@ -437,7 +437,7 @@ $([ -n "$repo_td_context" ] && printf '\nFull task context:\n%s' "$repo_td_conte
 **Branch:** $BRANCH
 **Worktree:** $worktree_path
 **Fleet state:** $repo_task_dir/
-$([ -n "$REPO_TD_TASK_ID" ] && echo "**td task:** $REPO_TD_TASK_ID" || true)
+$td_task_line
 
 ---
 
@@ -459,19 +459,74 @@ $merged
 
 ## Deliver
 
-When your work is complete:
+Follow these gates in order. Preserve the evidence in the PR description or a linked review artifact.
 
-1. All tests pass and lint is clean.
-2. Changes are committed on branch \`$BRANCH\`.
-3. PR is open via \`gh pr create\`.
-4. Write the PR URL:
-   \`echo "https://github.com/..." > .sergeant-result\`
-5. Write your final status:
-   - Success: \`echo "done" > .sergeant-status\`
-   - Failure: \`echo "failed: <reason>" > .sergeant-status\`
-6. Notify the primary session (replace URL with actual PR URL):
-   - Success: \`sgt-notify $TASK_ID "done: PR https://github.com/..."\`
-   - Failure: \`sgt-notify $TASK_ID "failed: <reason>"\`
+### 1. Pin scope and source of truth
+
+Before implementation, fetch refs and pin the fixed point, normally the merge-base with the current origin/main. Record the base SHA, commit list and diff scope; if that base is unavailable, record the explicit alternative.
+
+Identify the originating spec from the full td task context, this Sergeant mission, and any referenced issue, PRD, spec, or ADR. If no originating spec exists, record that explicitly.
+
+### 2. Route the work
+
+Triage context and readiness before choosing an implementation loop: read the full td issue/spec/comments and linked material, check for redundant or prior work, identify the work category, and record whether it is ready.
+
+- **Huge or foggy:** Surface a wayfinding/spec/ticketing blocker with the missing decisions. Surface \`wayfinder\`, \`to-spec\`, and Sergeant's custom \`to-tickets\` as escalation or planning paths. Do not silently execute them as implementation or invent the route.
+- **Hard bug or performance regression:** When available, load and use the canonical \`diagnosing-bugs\` skill. First establish one fast deterministic red-capable command. Reproduce and minimise, rank falsifiable hypotheses, instrument one variable at a time, then turn the minimal reproduction into a regression test before fixing it.
+- **Uncertain state, design, or UI:** When available, load and use the canonical \`prototype\` skill. Create a clearly throwaway prototype, surface it for human-in-the-loop feedback, and never promote prototype code directly. Discard it and implement the approved direction through the normal TDD path.
+- **Approved feature or fix:** When available, load and use the canonical \`tdd\` skill before implementation. Implement tracer-bullet vertical slices with TDD.
+- **Merge or rebase conflict:** When available, load and use the canonical \`resolving-merge-conflicts\` skill. Trace both intents to their issues/specs, preserve both where possible, and never abort automatically. Escalate when intent cannot be reconciled.
+
+If a canonical skill cannot be loaded, follow the embedded rules in this brief for that phase.
+
+### 3. Implement approved work with TDD
+
+Establish public behavioral seams before writing tests. Use seams already specified by td/spec; if a consequential seam is genuinely undecided, surface needs_input rather than guessing.
+
+For each non-trivial behavior, work red before green: one vertical slice, test, and minimum implementation at a time. Run the failing focused test for the right reason, add only enough implementation to pass, then refactor after green. Reject tautological tests, internal mocking, and horizontal slicing such as writing all tests before all implementation. Scrutinize refactoring during review. Do not speculate ahead.
+
+### 4. Escalate and resume
+
+Your non-interactive agent turns run under a persistent supervisor. Do not use sleep to keep the agent process alive. The supervisor waits outside the agent process, captures the OpenCode session ID, and resumes that session after a serialized response is delivered.
+
+If an agent exits before a terminal or waiting state, the supervisor records \`orphaned\` with durable diagnostics and td recovery pointers. Resume orphaned work through \`sgt-respond\`; do not overwrite or discard its recovery state.
+
+Completion requires both .sergeant-status=done and a non-empty .sergeant-result; a PR or successful turn alone is not terminal completion.
+
+Supported nonterminal statuses are \`in_progress\`, \`needs_input\`, and \`blocked\`; terminal statuses are \`done\` and \`failed: <reason>\`.
+
+For \`needs_input\` or \`blocked\`, write \`.sergeant-message\` with concise context, evidence, the exact question or blocker, a recommendation, and 2-4 options when useful. Call \`sgt-notify $TASK_ID "needs_input [$rname]: <summary>"\` or the equivalent \`blocked\` message. The worker remains alive and waits for a response; do not exit or mark the task failed.
+
+When \`.sergeant-response\` appears, read it as data, consume and remove the response, clear \`.sergeant-message\`, log the decision to td when tracked, return status to \`in_progress\`, and continue. Do not proceed while a consequential question remains unanswered.
+
+### 5. Validate
+
+Run focused tests and typechecking/lint regularly. Run the repository's full required suite once at the end. Run no-mistakes when available or required by active instructions.
+
+### 6. Independent two-axis review
+
+Before completion, load and use the canonical \`code-review\` skill when available, then launch separate parallel subagents for these axes so their contexts cannot contaminate each other. Keep their output in separate sections. Do not blend or rerank the axes. If the skill cannot be loaded, use the embedded review rules below.
+
+- **Standards axis:** Review the diff versus the pinned merge-base against active repo instructions, AGENTS, CONTRIBUTING, and coding standards. Add a concise Fowler smell heuristic (duplication, long functions/modules, large parameter lists, feature envy, data clumps, primitive obsession, shotgun surgery, and inappropriate intimacy). Separate hard documented-standard violations from judgement-call smells, and skip findings enforced by tooling.
+- **Spec axis:** Review against the originating td issue/spec/mission. Report missing or partial requirements, scope creep, and incorrectly implemented requirements. If no spec exists, report this axis as skipped/no spec.
+
+### 7. Remediate and repeat
+
+Remediate every blocking finding, rerun affected tests, then rerun both independent review axes. Repeat until blocking findings are zero on each axis.
+
+### 8. Complete delivery and td lifecycle
+
+Commit branch \`$BRANCH\` and open the PR via \`gh pr create\`. If this work has a td task, log decisions throughout, handoff before td review, and run td review only after implementation and review evidence is ready.
+
+Do not write \`done\` merely because a PR exists. Success requires: the branch is committed; the PR is open; focused and full validation are complete; required CI is green; there are no unresolved non-outdated review threads; dependency order is satisfied; and independent review is complete with zero blocking findings.
+
+While waiting for CI, reviews, or dependencies, keep \`.sergeant-status\` as \`in_progress\`. Use \`needs_input\` or \`blocked\` and the escalation protocol for recoverable waits. Reserve \`failed: <exact reason>\` for an unrecoverable terminal failure. Only after every success gate passes:
+
+1. Write the PR URL: \`echo "https://github.com/..." > .sergeant-result\`
+2. Write \`echo "done" > .sergeant-status\`
+3. Notify: \`sgt-notify $TASK_ID "done: PR https://github.com/..."\`
+
+For failure, notify with \`sgt-notify $TASK_ID "failed: <exact blocker>"\`.
 
 The primary sergeant session is watching via \`sgt-watch $TASK_ID\`.
 BRIEF_EOF
@@ -505,10 +560,27 @@ BRIEF_EOF
     WINDOW_NAME="${SHORT_TASK}/${rname}"
     _info "spawning tmux window '$WINDOW_NAME' in session $TMUX_SESSION"
     AGENT_INIT_MSG="Read the .sergeant-brief.md file and execute the mission."
-    AGENT_RUN_CMD="$(_sgt_agent_run_cmd "$AGENT_CMD" "$AGENT_INIT_MSG")"
-    tmux new-window -t "$TMUX_SESSION:" -n "$WINDOW_NAME" -c "$worktree_path" \
-      "$AGENT_RUN_CMD" 2>/dev/null || \
-      _info "WARNING: tmux window failed — start manually: cd $worktree_path && $AGENT_RUN_CMD"
+    printf '%s\n' "$TMUX_SESSION" > "$repo_task_dir/tmux_session"
+    printf '%s\n' "$WINDOW_NAME" > "$repo_task_dir/window_name"
+    printf '%s\n' "$AGENT_CMD" > "$repo_task_dir/agent"
+    printf '%s\n' "$AGENT_INIT_MSG" > "$repo_task_dir/initial_message"
+    printf -v WORKER_RUN_CMD '%q %q %q %q %q' \
+      "$SCRIPT_DIR/sgt-worker" "$repo_task_dir" "$worktree_path" "$AGENT_CMD" "$AGENT_INIT_MSG"
+    if pane_target="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" \
+      -n "$WINDOW_NAME" -c "$worktree_path" "$WORKER_RUN_CMD")"; then
+      if [[ -z "$pane_target" ]]; then
+        printf 'orphaned\n' > "$repo_task_dir/status"
+        printf 'tmux launched no worker pane\n' > "$repo_task_dir/diagnostic"
+        "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
+        _die "tmux returned no pane for $rname"
+      fi
+      printf '%s\n' "$pane_target" > "$repo_task_dir/pane"
+    else
+      printf 'orphaned\n' > "$repo_task_dir/status"
+      printf 'tmux failed to launch worker supervisor\n' > "$repo_task_dir/diagnostic"
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
+      _die "tmux failed to launch worker supervisor for $rname"
+    fi
   fi
 
   echo ""

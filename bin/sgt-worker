@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# sgt-worker - Supervise resumable non-interactive agent turns.
+
+set -uo pipefail
+
+[[ $# -eq 4 ]] || {
+  echo "Usage: sgt-worker <repo-state-dir> <worktree> <agent> <initial-message>" >&2
+  exit 2
+}
+
+REPO_STATE="$1"
+WORKTREE="$2"
+AGENT="$3"
+INITIAL_MESSAGE="$4"
+POLL_INTERVAL="${SGT_WORKER_POLL_INTERVAL:-1}"
+LOG="$REPO_STATE/worker.log"
+DIAGNOSTIC="$REPO_STATE/diagnostic"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_sgt-response-lock.sh
+source "$SCRIPT_DIR/_sgt-response-lock.sh"
+
+mkdir -p "$REPO_STATE"
+[[ -d "$WORKTREE" ]] || {
+  echo "ERROR: worktree unavailable: $WORKTREE" >&2
+  exit 2
+}
+
+_status() {
+  tr -d '\n' < "$WORKTREE/.sergeant-status" 2>/dev/null || echo "in_progress"
+}
+
+_sync_state() {
+  local status
+  status="$(_status)"
+  printf '%s\n' "$status" > "$REPO_STATE/status"
+  case "$status" in
+    done|failed:*)
+      if [[ -f "$WORKTREE/.sergeant-result" ]]; then
+        cp "$WORKTREE/.sergeant-result" "$REPO_STATE/result"
+      else
+        rm -f "$REPO_STATE/result"
+      fi
+      ;;
+    *) rm -f "$REPO_STATE/result" ;;
+  esac
+  if [[ -f "$WORKTREE/.sergeant-message" ]]; then
+    cp "$WORKTREE/.sergeant-message" "$REPO_STATE/message"
+  else
+    rm -f "$REPO_STATE/message"
+  fi
+}
+
+_orphan() {
+  local exit_code="$1"
+  local reason="$2"
+  printf 'orphaned\n' > "$WORKTREE/.sergeant-status"
+  printf 'orphaned\n' > "$REPO_STATE/status"
+  rm -f "$REPO_STATE/result"
+  {
+    printf 'reason: %s\n' "$reason"
+    printf 'exit code: %s\n' "$exit_code"
+    printf 'log: %s\n' "$LOG"
+  } > "$DIAGNOSTIC"
+  "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
+  return "$exit_code"
+}
+
+_capture_session_id() {
+  local session_id
+  session_id="$(python3 - "$LOG" <<'PY'
+import json
+import sys
+
+session_id = ""
+with open(sys.argv[1], encoding="utf-8", errors="replace") as stream:
+    for line in stream:
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        candidate = event.get("sessionID") or event.get("session_id")
+        if candidate:
+            session_id = str(candidate)
+print(session_id)
+PY
+)"
+  [[ -z "$session_id" ]] || printf '%s\n' "$session_id" > "$REPO_STATE/session_id"
+}
+
+_run_turn() {
+  local message="$1"
+  local -a command
+  local agent_name session_id exit_code
+  agent_name="$(basename "$AGENT")"
+  session_id="$(cat "$REPO_STATE/session_id" 2>/dev/null || true)"
+
+  if [[ "$agent_name" == "claude" ]]; then
+    if [[ -n "$session_id" ]]; then
+      command=("$AGENT" --dangerously-skip-permissions --resume "$session_id" "$message")
+    else
+      command=("$AGENT" --dangerously-skip-permissions "$message")
+    fi
+  else
+    command=("$AGENT" run --auto --format json)
+    [[ -z "$session_id" ]] || command+=(--session "$session_id")
+    command+=("$message")
+  fi
+
+  (
+    cd "$WORKTREE" || exit 2
+    "${command[@]}"
+  ) 2>&1 | tee -a "$LOG"
+  exit_code=${PIPESTATUS[0]}
+  _capture_session_id
+  return "$exit_code"
+}
+
+_wait_for_response() {
+  local response
+  while true; do
+    if [[ -f "$WORKTREE/.sergeant-response" ]]; then
+      _sgt_response_lock_acquire "$REPO_STATE"
+      if [[ -f "$WORKTREE/.sergeant-response" ]]; then
+        response="$(cat "$WORKTREE/.sergeant-response")"
+        rm -f "$WORKTREE/.sergeant-response" "$REPO_STATE/response"
+        rm -f "$WORKTREE/.sergeant-message" "$REPO_STATE/message"
+        printf 'in_progress\n' > "$WORKTREE/.sergeant-status"
+        printf 'in_progress\n' > "$REPO_STATE/status"
+        _sgt_response_lock_release
+        break
+      fi
+      _sgt_response_lock_release
+    fi
+    sleep "$POLL_INTERVAL"
+  done
+
+  td_task="$(cat "$REPO_STATE/td_task" 2>/dev/null || true)"
+  if [[ -n "$td_task" && -f "$REPO_STATE/session_id" ]]; then
+    printf 'Sergeant response: %s\nResume task %s in the same session. Read the updated td handoff and reconcile it with fleet and git state before continuing.' "$response" "$td_task"
+  elif [[ -n "$td_task" ]]; then
+    printf 'Sergeant response: %s\nStart deterministic recovery for task %s. Read the updated td handoff and fleet files at %s, especially diagnostic and worker.log, then reconcile them with git state before continuing.' "$response" "$td_task" "$REPO_STATE"
+  else
+    printf 'Sergeant response: %s\nStart deterministic recovery from fleet files at %s, especially diagnostic and worker.log, and reconcile them with git state before continuing.' "$response" "$REPO_STATE"
+  fi
+}
+
+[[ -f "$WORKTREE/.sergeant-status" ]] || printf 'in_progress\n' > "$WORKTREE/.sergeant-status"
+_sync_state
+
+next_message="$INITIAL_MESSAGE"
+if [[ -f "$WORKTREE/.sergeant-response" ]]; then
+  next_message="$(_wait_for_response)"
+elif [[ -f "$REPO_STATE/session_id" ]]; then
+  case "$(_status)" in
+    needs_input|blocked) next_message="$(_wait_for_response)" ;;
+    orphaned)
+      if [[ -f "$WORKTREE/.sergeant-response" ]]; then
+        next_message="$(_wait_for_response)"
+      else
+        next_message="Resume the mission from the durable orphan diagnostic."
+      fi
+      ;;
+    *) next_message="Resume the mission from the durable worker state." ;;
+  esac
+fi
+
+while true; do
+  _run_turn "$next_message"
+  exit_code=$?
+  status="$(_status)"
+  _sync_state
+
+  case "$status" in
+    needs_input|blocked)
+      agent_name="$(basename "$AGENT")"
+      if [[ ! -f "$REPO_STATE/session_id" ]]; then
+        [[ "$exit_code" -ne 0 ]] || exit_code=1
+        if [[ "$agent_name" == "claude" ]]; then
+          _orphan "$exit_code" "Claude did not provide a resumable session ID"
+        else
+          _orphan "$exit_code" "OpenCode turn did not provide a resumable session ID"
+        fi
+        exit $?
+      fi
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
+      next_message="$(_wait_for_response)"
+      ;;
+    done)
+      if [[ ! -s "$WORKTREE/.sergeant-result" ]]; then
+        _orphan 1 "terminal status done requires .sergeant-result"
+        exit $?
+      fi
+      _sync_state
+      rm -f "$DIAGNOSTIC"
+      exit 0
+      ;;
+    failed:*)
+      exit 1
+      ;;
+    *)
+      if [[ "$exit_code" -eq 0 ]]; then
+        exit_code=1
+      fi
+      _orphan "$exit_code" "agent exited before a terminal or resumable waiting status"
+      exit $?
+      ;;
+  esac
+done

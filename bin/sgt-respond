@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# sgt-respond - Deliver a response and resume a dead waiting worker when needed.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
+# shellcheck source=_sgt-response-lock.sh
+source "$SCRIPT_DIR/_sgt-response-lock.sh"
+
+_die() { echo "ERROR: $*" >&2; exit 1; }
+
+[[ $# -eq 3 ]] || _die "Usage: sgt-respond <task-id> <repo> \"<response>\""
+
+TASK_ID="$1"
+REPO="$2"
+RESPONSE="$3"
+[[ "$TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid task ID: $TASK_ID"
+[[ "$REPO" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid repo: $REPO"
+[[ -n "$RESPONSE" ]] || _die "Response must not be empty"
+
+REPO_DIR="$FLEET_DIR/$TASK_ID/$REPO"
+[[ -d "$FLEET_DIR/$TASK_ID" ]] || _die "Task not found: $TASK_ID"
+[[ -d "$REPO_DIR" ]] || _die "Repo not found in task $TASK_ID: $REPO"
+
+worktree="$(cat "$REPO_DIR/worktree" 2>/dev/null || true)"
+_sgt_response_lock_acquire "$REPO_DIR"
+trap '_sgt_response_lock_release' EXIT
+
+if [[ -n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-status" ]]; then
+  status="$(tr -d '\n' < "$worktree/.sergeant-status")"
+else
+  status="$(cat "$REPO_DIR/status" 2>/dev/null || true)"
+fi
+case "$status" in
+  needs_input|blocked|orphaned) ;;
+  *) _die "Worker status '$status' is not waiting or resumable; response was not published" ;;
+esac
+
+response_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+if [[ -n "$worktree" && -d "$worktree" ]]; then
+  printf '%s' "$response_id" | "$SCRIPT_DIR/sgt-td-memory" response "$REPO_DIR" "$worktree" || true
+elif [[ -f "$REPO_DIR/td_task" ]]; then
+  printf 'td-memory: worktree unavailable; response decision receipt could not be logged before fleet-only delivery\n' >> "$REPO_DIR/diagnostic"
+fi
+
+_atomic_write() {
+  local target="$1"
+  local value="$2"
+  local temporary
+  temporary="$(mktemp "${target}.tmp.XXXXXX")"
+  printf '%s\n' "$value" > "$temporary"
+  mv "$temporary" "$target"
+}
+
+_atomic_write "$REPO_DIR/response" "$RESPONSE"
+_atomic_write "$REPO_DIR/response_id" "$response_id"
+if [[ -n "$worktree" && -d "$worktree" ]]; then
+  _atomic_write "$worktree/.sergeant-response" "$RESPONSE"
+  echo "sgt-respond: response written to fleet state and worktree."
+else
+  echo "sgt-respond: worktree unavailable; only fleet state was written."
+  _sgt_response_lock_release
+  trap - EXIT
+  exit 0
+fi
+_sgt_response_lock_release
+trap - EXIT
+
+pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
+_pane_is_supervisor() {
+  local target="$1"
+  local pane_info pane_dead pane_command
+  pane_info="$(tmux display-message -p -t "$target" '#{pane_dead}|#{pane_start_command}' 2>/dev/null)" || return 1
+  pane_dead="${pane_info%%|*}"
+  pane_command="${pane_info#*|}"
+  [[ "$pane_dead" == "0" && "$pane_command" == *sgt-worker* && "$pane_command" == *"$REPO_DIR"* ]]
+}
+
+if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && _pane_is_supervisor "$pane"; then
+  tmux send-keys -t "$pane" "Sergeant response available in .sergeant-response" Enter
+  echo "sgt-respond: notified local pane $pane."
+  exit 0
+fi
+
+tmux_session="$(cat "$REPO_DIR/tmux_session" 2>/dev/null || true)"
+window_name="$(cat "$REPO_DIR/window_name" 2>/dev/null || true)"
+agent="$(cat "$REPO_DIR/agent" 2>/dev/null || true)"
+initial_message="$(cat "$REPO_DIR/initial_message" 2>/dev/null || true)"
+if ! command -v tmux >/dev/null 2>&1 || [[ -z "$tmux_session" || -z "$window_name" || -z "$agent" || -z "$initial_message" ]]; then
+  echo "sgt-respond: no live local pane and relaunch metadata is incomplete; response file is ready."
+  exit 0
+fi
+
+printf -v worker_command '%q %q %q %q %q' \
+  "$SCRIPT_DIR/sgt-worker" "$REPO_DIR" "$worktree" "$agent" "$initial_message"
+
+_record_relaunch_orphan() {
+  local reason="$1"
+  printf 'orphaned\n' > "$worktree/.sergeant-status"
+  printf 'orphaned\n' > "$REPO_DIR/status"
+  printf '%s\n' "$reason" >> "$REPO_DIR/diagnostic"
+  "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_DIR" "$worktree" || true
+}
+
+if ! new_pane="$(tmux new-window -P -F '#{pane_id}' -t "$tmux_session:" -n "$window_name" \
+  -c "$worktree" "$worker_command")"; then
+  _record_relaunch_orphan "tmux failed to relaunch worker supervisor"
+  _die "Worker relaunch failed for $TASK_ID/$REPO"
+fi
+if [[ -z "$new_pane" ]]; then
+  _record_relaunch_orphan "tmux returned no pane for relaunched worker supervisor"
+  _die "Worker relaunch returned no pane for $TASK_ID/$REPO"
+fi
+printf '%s\n' "$new_pane" > "$REPO_DIR/pane"
+echo "sgt-respond: relaunched worker in pane $new_pane."

@@ -121,6 +121,7 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-graphify <project>` | Run graphify across all repos → knowledge graph |
 | `bin/sgt-dispatch <project> "<brief>" [options]` | Dispatch agents across repos |
 | `bin/sgt-watch <task-id>` | Monitor dispatched fleet |
+| `bin/sgt-respond <task-id> <repo> "<response>"` | Respond to and resume a waiting worker |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees and fleet state |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
 

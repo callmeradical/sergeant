@@ -18,7 +18,7 @@ TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
 mkdir -p "$TARGET_DIR"
 
 linked=0
-for f in "$BIN_DIR"/sgt-* "$BIN_DIR"/_sgt-lib.sh "$BIN_DIR/oc-inject" "$BIN_DIR/wiki-daily-digest"; do
+for f in "$BIN_DIR"/sgt-* "$BIN_DIR"/_sgt-lib.sh "$BIN_DIR"/_sgt-response-lock.sh "$BIN_DIR/oc-inject" "$BIN_DIR/wiki-daily-digest"; do
   [[ -f "$f" ]] || continue
   name="$(basename "$f")"
   ln -sf "$f" "$TARGET_DIR/$name"
@@ -57,7 +57,7 @@ set -euo pipefail
 TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
 removed=0
 
-for f in "$TARGET_DIR"/sgt-* "$TARGET_DIR"/_sgt-lib.sh "$TARGET_DIR/oc-inject" "$TARGET_DIR/wiki-daily-digest"; do
+for f in "$TARGET_DIR"/sgt-* "$TARGET_DIR"/_sgt-lib.sh "$TARGET_DIR"/_sgt-response-lock.sh "$TARGET_DIR/oc-inject" "$TARGET_DIR/wiki-daily-digest"; do
   [[ -L "$f" ]] || continue
   # Only remove if it points back into the sergeant repo
   target="$(readlink "$f")"

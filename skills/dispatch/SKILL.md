@@ -85,7 +85,14 @@ The script:
 bin/sgt-watch <task-id>
 ```
 
-This polls every 5 seconds, syncs `.sergeant-status` and `.sergeant-result` from worktrees into fleet state, and prints a live status table. It exits when all repos are `done`.
+This polls every 5 seconds, syncs `.sergeant-status`, `.sergeant-message`, and `.sergeant-result` from worktrees into fleet state, and prints a live status table. `needs_input` and `blocked` are distinct nonterminal states: the watcher prints message changes and keeps running. A worker waiting on CI, review threads, or dependencies remains `in_progress` unless it needs to escalate.
+
+When a worker escalates:
+
+1. Read its context, evidence, exact question/blocker, recommendation, and options in the watcher output.
+2. Get the human decision; do not infer consequential intent.
+3. Run `sgt-respond <task-id> <repo> "<response>"`. Sergeant writes the response to fleet state and `.sergeant-response`, then nudges the recorded local tmux pane when available.
+4. The worker consumes/removes the response, clears `.sergeant-message`, logs the decision to td, returns to `in_progress`, and continues. Remote workers receive the response file when their worktree is reachable; otherwise `sgt-respond` explicitly reports fleet-only delivery.
 
 You can also attach to the tmux session directly to observe or assist a worker:
 
@@ -97,9 +104,11 @@ tmux attach -t sgt-<task-id>
 ### Step 4 — Reconcile results
 
 When all workers are done, review the PRs:
-- Check dependency order: merge infra before API before app if there are runtime dependencies
+- Verify each repo's completion evidence: pinned-base scope, focused/full validation, separate standards/spec review artifacts with zero blocking findings, required CI, and resolved non-outdated review threads
+- Check dependency order: merge infra before API before app if there are runtime dependencies; a worker is not done until its dependency gate is satisfied
 - If any repo failed, read the failure reason from fleet state and decide: retry, fix manually, or reassign
 - Note any cross-repo implications in each PR description (e.g., "merge after smith-infra #42")
+- Do not reconcile or clean up a fleet merely because every worker has opened a PR; all completion gates must be met
 
 ```bash
 bin/sgt-watch --list      # see all tasks
@@ -150,12 +159,25 @@ The workers themselves are responsible for honoring this. The brief makes it exp
 Each dispatched agent is expected to:
 
 1. Read `.sergeant-brief.md` at session start
-2. Do the work in the worktree (already on the correct branch)
-3. Follow the `agent_instructions` from the brief
-4. Run tests and lint before committing
-5. Open a PR via `gh pr create`
-6. Write `echo "https://..." > .sergeant-result`
-7. Write `echo "done" > .sergeant-status` (or `"failed: <reason>"`)
+2. Pin the fixed point, normally the merge-base with current `origin/main`, and record the base SHA, commit list, and diff scope
+3. Triage the full td issue/spec/comments, linked material, prior or redundant work, category, and readiness. Identify the originating spec or explicitly record that none exists
+4. Route before implementation using the canonical engineering skill for that phase when available, in this order:
+   - Huge/foggy work: surface `wayfinder`, `to-spec`, and Sergeant's custom `to-tickets` as HITL escalation/planning paths; do not silently execute them as implementation
+   - Hard bug/performance: load `diagnosing-bugs`, then use a deterministic red command, minimal reproduction, falsifiable hypotheses, and one-variable instrumentation
+   - Uncertain logic/UI: load `prototype`, create throwaway evidence for HITL feedback, and never promote prototype code directly
+   - Approved implementation: load `tdd` before implementation and use tracer-bullet vertical slices
+   - Merge/rebase conflict: load `resolving-merge-conflicts`, trace both intents, preserve both where possible, and never abort automatically
+5. Establish public behavioral seams from td/spec before tests. If a consequential seam is undecided, escalate `needs_input` rather than guessing
+6. Implement one vertical slice at a time: focused red test, minimum green implementation, then refactor. Reject tautological tests, internal mocking, horizontal test/implementation phases, and speculative refactoring
+7. For `needs_input` or `blocked`, write `.sergeant-message`, notify Sergeant, remain alive, and wait. Consume/remove `.sergeant-response`, clear the message, log the decision to td, restore `in_progress`, and continue
+8. Run focused tests and typechecking/lint regularly, the full required suite at the end, and no-mistakes when available or required
+9. Load the canonical `code-review` skill when available, then launch separate parallel subagents for independent reviews: a standards axis over the pinned diff and documented standards plus concise Fowler smells, and a spec axis over requirements and scope. Keep evidence separate and skip the spec axis explicitly when no spec exists
+10. Remediate all blocking findings, rerun affected tests and both axes until each reports zero blocking findings
+11. Commit, open a PR, wait for required CI, resolve all non-outdated review threads, and satisfy dependency order
+12. For tracked work, log td decisions, handoff, then run `td review` only when implementation and review evidence are ready
+13. Write `.sergeant-result` and set `.sergeant-status=done` only after every gate passes. `failed: <exact reason>` is reserved for an unrecoverable terminal failure
+
+If a canonical skill cannot be loaded, the generated brief's embedded rules remain mandatory for that phase.
 
 `sgt-watch` polls for those files and surfaces them.
 

@@ -2,8 +2,8 @@
 # sgt-watch — Monitor a dispatched fleet and report outcomes
 #
 # Watches the status files written by worker agents into the fleet directory.
-# Workers signal completion by writing .sergeant-status and .sergeant-result
-# in their worktrees; sgt-dispatch mirrors those back to fleet state on each poll.
+# Workers report status, escalation messages, and results in their worktrees;
+# sgt-watch mirrors those files back to fleet state on each poll.
 #
 # Usage:
 #   sgt-watch <task-id>              # watch a specific task
@@ -11,15 +11,18 @@
 #   sgt-watch --sync <task-id>       # one-shot sync worktree → fleet state, then exit
 #
 # Workers write:
-#   <worktree>/.sergeant-status    → "done" or "failed: <reason>"
+#   <worktree>/.sergeant-status    → in_progress, needs_input, blocked, done, failed
+#   <worktree>/.sergeant-message   → escalation context, evidence, and question
 #   <worktree>/.sergeant-result    → PR URL or report path
 #
 # Fleet state mirrors:
 #   ~/.local/share/sergeant/fleet/<task-id>/<repo>/status
+#   ~/.local/share/sergeant/fleet/<task-id>/<repo>/message
 #   ~/.local/share/sergeant/fleet/<task-id>/<repo>/result
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
 POLL_INTERVAL="${SERGEANT_WATCH_INTERVAL:-5}"  # seconds
 
@@ -40,7 +43,7 @@ if [[ "${1:-}" == "--list" ]]; then
     brief="$(grep '^Brief:' "$task_dir/brief.md" 2>/dev/null | sed 's/^Brief: *//' | cut -c1-60 || echo "")"
 
     # Count repo statuses
-    total=0; done_count=0; failed_count=0; in_progress=0
+    total=0; done_count=0; failed_count=0; in_progress=0; needs_input=0; blocked=0
     for repo_dir in "$task_dir"/*/; do
       [[ -d "$repo_dir" ]] || continue
       total=$((total+1))
@@ -49,19 +52,31 @@ if [[ "${1:-}" == "--list" ]]; then
         done)        done_count=$((done_count+1)) ;;
         failed*)     failed_count=$((failed_count+1)) ;;
         in_progress) in_progress=$((in_progress+1)) ;;
+        needs_input) needs_input=$((needs_input+1)) ;;
+        blocked)     blocked=$((blocked+1)) ;;
       esac
     done
 
     echo "  $task_id"
     echo "    brief:   $brief"
     echo "    started: $started"
-    echo "    repos:   $total total — $done_count done, $in_progress in-progress, $failed_count failed"
+    echo "    repos:   $total total — $done_count done, $in_progress in-progress, $needs_input needs-input, $blocked blocked, $failed_count failed"
     echo ""
   done
   exit 0
 fi
 
 # ── --sync mode ───────────────────────────────────────────────────────────────
+
+_pane_is_supervisor() {
+  local pane="$1"
+  local repo_dir="${2%/}"
+  local pane_info pane_dead pane_command
+  pane_info="$(tmux display-message -p -t "$pane" '#{pane_dead}|#{pane_start_command}' 2>/dev/null)" || return 1
+  pane_dead="${pane_info%%|*}"
+  pane_command="${pane_info#*|}"
+  [[ "$pane_dead" == "0" && "$pane_command" == *sgt-worker* && "$pane_command" == *"$repo_dir"* ]]
+}
 
 _sync_task() {
   local task_id="$1"
@@ -70,23 +85,65 @@ _sync_task() {
 
   for repo_dir in "$task_dir"/*/; do
     [[ -d "$repo_dir" ]] || continue
+    local repo_name worktree wt_status fleet_status pane
     repo_name="$(basename "$repo_dir")"
     worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
     [[ -n "$worktree" ]] || continue
 
     # Sync .sergeant-status from worktree → fleet
     if [[ -f "$worktree/.sergeant-status" ]]; then
-      wt_status="$(cat "$worktree/.sergeant-status" | tr -d '\n')"
+      wt_status="$(tr -d '\n' < "$worktree/.sergeant-status")"
       fleet_status="$(cat "$repo_dir/status" 2>/dev/null || echo "")"
       if [[ "$wt_status" != "$fleet_status" ]]; then
         echo "$wt_status" > "$repo_dir/status"
       fi
     fi
 
-    # Sync .sergeant-result from worktree → fleet
-    if [[ -f "$worktree/.sergeant-result" ]]; then
-      cp "$worktree/.sergeant-result" "$repo_dir/result" 2>/dev/null || true
+    if [[ -f "$worktree/.sergeant-status" ]]; then
+      wt_status="$(tr -d '\n' < "$worktree/.sergeant-status")"
+    else
+      wt_status="${fleet_status:-in_progress}"
     fi
+
+    # Results are valid only for terminal work; retries must not retain stale output.
+    case "$wt_status" in
+      done|failed:*)
+        if [[ -f "$worktree/.sergeant-result" ]]; then
+          cp "$worktree/.sergeant-result" "$repo_dir/result" 2>/dev/null || true
+        else
+          rm -f "$repo_dir/result"
+        fi
+        ;;
+      *) rm -f "$repo_dir/result" ;;
+    esac
+
+    # Sync escalation context independently so message-only updates are visible.
+    if [[ -f "$worktree/.sergeant-message" ]]; then
+      cp "$worktree/.sergeant-message" "$repo_dir/message" 2>/dev/null || true
+    else
+      rm -f "$repo_dir/message"
+    fi
+
+    if [[ "$wt_status" == "done" && ! -s "$worktree/.sergeant-result" ]]; then
+      printf 'orphaned\n' > "$worktree/.sergeant-status"
+      printf 'orphaned\n' > "$repo_dir/status"
+      printf 'terminal status done requires result\n' > "$repo_dir/diagnostic"
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+      continue
+    fi
+
+    case "$wt_status" in
+      in_progress|needs_input|blocked|dispatched)
+        pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
+        if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && \
+            ! _pane_is_supervisor "$pane" "$repo_dir"; then
+          printf 'orphaned\n' > "$worktree/.sergeant-status"
+          printf 'orphaned\n' > "$repo_dir/status"
+          printf 'recorded pane %s is dead or is not the expected worker supervisor; resume with sgt-respond\n' "$pane" > "$repo_dir/diagnostic"
+          "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+        fi
+        ;;
+    esac
   done
 }
 
@@ -113,7 +170,7 @@ echo ""
 
 _print_status() {
   local task_dir="$1"
-  local all_done=true
+  local all_terminal=true
   local any_failed=false
 
   for repo_dir in "$task_dir"/*/; do
@@ -121,7 +178,7 @@ _print_status() {
     repo_name="$(basename "$repo_dir")"
     status="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
     result="$(cat "$repo_dir/result" 2>/dev/null || echo "")"
-    worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
+    message="$(cat "$repo_dir/message" 2>/dev/null || echo "")"
 
     case "$status" in
       done)
@@ -131,13 +188,21 @@ _print_status() {
         icon="✗"
         any_failed=true
         ;;
+      needs_input)
+        icon="?"
+        all_terminal=false
+        ;;
+      blocked)
+        icon="!"
+        all_terminal=false
+        ;;
       in_progress|dispatched)
         icon="…"
-        all_done=false
+        all_terminal=false
         ;;
       *)
-        icon="?"
-        all_done=false
+        icon="·"
+        all_terminal=false
         ;;
     esac
 
@@ -145,11 +210,18 @@ _print_status() {
     if [[ -n "$result" ]]; then
       printf "       %-20s  → %s\n" "" "$result"
     fi
+    if [[ -n "$message" ]]; then
+      while IFS= read -r message_line; do
+        printf "       %-20s  %s\n" "" "$message_line"
+      done <<< "$message"
+    fi
   done
 
   echo ""
-  $all_done && return 0
-  $any_failed && return 2
+  if $all_terminal; then
+    $any_failed && return 2
+    return 0
+  fi
   return 1
 }
 
@@ -164,13 +236,14 @@ while true; do
     [[ -d "$repo_dir" ]] || continue
     repo_name="$(basename "$repo_dir")"
     status="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
-    current_snapshot+="$repo_name:$status "
+    message="$(cat "$repo_dir/message" 2>/dev/null || echo "")"
+    current_snapshot+="$repo_name:$status:$message "
   done
 
   if [[ "${LAST_STATUS[snapshot]+x}" == "" || "${LAST_STATUS[snapshot]}" != "$current_snapshot" ]]; then
     LAST_STATUS[snapshot]="$current_snapshot"
-    echo "$(date '+%H:%M:%S')"
-    _print_status "$TASK_DIR" && {
+    date '+%H:%M:%S'
+    if _print_status "$TASK_DIR"; then
       echo "All repos done."
       echo ""
       # Print final results
@@ -185,7 +258,13 @@ while true; do
       done
       $any_results && echo ""
       exit 0
-    } || true
+    else
+      print_status=$?
+      if [[ "$print_status" -eq 2 ]]; then
+        echo "Fleet finished with failures."
+        exit 1
+      fi
+    fi
   fi
 
   sleep "$POLL_INTERVAL"
