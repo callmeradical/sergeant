@@ -205,12 +205,21 @@ _map_remote_status() {
 _sync_remote_repo() {
   local repo_dir="$1"
   local worktree session window task_identifier status_output remote_logs
+  local current_status existing_diagnostic pending_response preserve_orphan_checkpoint
   local remote_fields=() tmux_alive raw_status mapped_status result message diagnostic task_id matched
   worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
   session="$(cat "$repo_dir/remote_session" 2>/dev/null || true)"
   window="$(cat "$repo_dir/remote_window" 2>/dev/null || true)"
   task_identifier="$(cat "$repo_dir/remote_task_name" 2>/dev/null || true)"
   [[ -n "$task_identifier" ]] || task_identifier="$window"
+  current_status="$(cat "$repo_dir/status" 2>/dev/null || true)"
+  existing_diagnostic="$(cat "$repo_dir/diagnostic" 2>/dev/null || true)"
+  pending_response=""
+  if [[ -f "$repo_dir/response" ]]; then
+    pending_response="$(cat "$repo_dir/response")"
+  elif [[ -n "$worktree" && -f "$worktree/.sergeant-response" ]]; then
+    pending_response="$(cat "$worktree/.sergeant-response")"
+  fi
 
   if [[ -z "$session" || -z "$window" ]]; then
     [[ -n "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
@@ -314,6 +323,12 @@ _sync_remote_repo() {
     message="Remote worker is in_review; completion gates are still pending."
     printf '%s\n' "$message" > "$repo_dir/message"
   fi
+  preserve_orphan_checkpoint=0
+  if [[ "$current_status" == "orphaned" && ( "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" ) ]]; then
+    if [[ -n "$pending_response" || "$existing_diagnostic" == *"babydriver restart failed for "* || "$existing_diagnostic" == *"remote response delivery failed"* || "$existing_diagnostic" == *"remote response delivery path is unavailable"* || "$existing_diagnostic" == *"remote response delivery metadata is incomplete"* ]]; then
+      preserve_orphan_checkpoint=1
+    fi
+  fi
 
   if [[ "$mapped_status" == "done" && -z "$result" ]]; then
     diagnostic="${diagnostic:-remote terminal status requires a result}"
@@ -321,6 +336,13 @@ _sync_remote_repo() {
   elif [[ "$tmux_alive" != "1" && "$mapped_status" != "done" && "$mapped_status" != failed:* ]]; then
     diagnostic="${diagnostic:-remote worker session is not alive; resume with sgt-respond}"
     mapped_status="orphaned"
+  elif [[ "$preserve_orphan_checkpoint" == "1" ]]; then
+    mapped_status="orphaned"
+    if [[ -n "$existing_diagnostic" ]]; then
+      diagnostic="$existing_diagnostic"
+    elif [[ -z "$diagnostic" ]]; then
+      diagnostic="remote worker is still waiting, but Sergeant preserved a local recovery checkpoint"
+    fi
   fi
 
   if [[ -n "$diagnostic" || -n "$remote_logs" ]]; then
