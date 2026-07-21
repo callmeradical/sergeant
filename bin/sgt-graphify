@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # sgt-graphify — Run graphify across all repos in a project
 #
-# Reads graphify.output from the project YAML and runs graphify in each
-# configured repo (filtered by include_groups if set).
+# Reads graphify.output from the project YAML, extracts each configured repo,
+# and merges the results into one project graph.
 #
 # Usage: sgt-graphify <project>
 
@@ -28,6 +28,11 @@ if [[ -z "$graphify_output" || "$graphify_output" == "null" ]]; then
   _die "No graphify.output configured in $CONFIG_FILE"
 fi
 graphify_output="$(_resolve_path "$graphify_output")"
+configured_output="$graphify_output"
+if [[ -L "$graphify_output" ]]; then
+  [[ -d "$graphify_output" ]] || _die "graphify.output is a broken directory symlink: $graphify_output"
+  graphify_output="$(cd "$graphify_output" && pwd -P)"
+fi
 
 # Build include_groups list for filtering (bash 3 compatible)
 INCLUDE_GROUPS=""
@@ -46,7 +51,45 @@ echo "=== sgt-graphify: $PROJECT ==="
 echo "output: $graphify_output"
 echo ""
 
-mkdir -p "$graphify_output"
+output_parent="$(dirname "$graphify_output")"
+mkdir -p "$output_parent"
+run_root="$(mktemp -d "$output_parent/.sgt-graphify.XXXXXX")"
+previous_output=""
+published=0
+_cleanup() {
+  local status=$?
+  trap - EXIT
+  if [[ $published -eq 0 && -n "$previous_output" && -e "$previous_output" && ! -e "$graphify_output" ]]; then
+    mv "$previous_output" "$graphify_output" || true
+  fi
+  rm -rf "$run_root"
+  exit "$status"
+}
+trap _cleanup EXIT
+stage_root="$run_root/project"
+stage_output="$stage_root/graphify-out"
+mkdir -p "$stage_output" "$run_root/repos" "$run_root/manifests"
+
+EXCLUDE_ARGS=()
+while IFS= read -r pattern; do
+  [[ -n "$pattern" && "$pattern" != "null" ]] || continue
+  EXCLUDE_ARGS+=(--exclude "$pattern")
+done < <(yq '.graphify.exclude_patterns[]' "$CONFIG_FILE" 2>/dev/null || true)
+
+GRAPH_PATHS=()
+MANIFEST_PARTS=()
+INCLUDED_REPOS=()
+FAILED_REPOS=()
+
+_extract_repo() {
+  local path="$1"
+  local repo_root="$2"
+  if [[ ${#EXCLUDE_ARGS[@]} -gt 0 ]]; then
+    graphify extract "$path" --out "$repo_root" "${EXCLUDE_ARGS[@]}"
+  else
+    graphify extract "$path" --out "$repo_root"
+  fi
+}
 
 repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
 
@@ -61,22 +104,99 @@ for ((i=0; i<repo_count; i++)); do
     continue
   fi
 
+  INCLUDED_REPOS+=("$repo_name")
+
+  if [[ ! "$repo_name" =~ ^[A-Za-z0-9._-]+$ || "$repo_name" == "." || "$repo_name" == ".." ]]; then
+    echo "--- $repo_name ---"
+    echo "  ERROR: repository name may contain only letters, numbers, dots, underscores, and hyphens"
+    FAILED_REPOS+=("$repo_name")
+    continue
+  fi
+
   if [[ ! -d "$path" ]]; then
-    echo "--- $repo_name (skipped — not cloned at $path) ---"
+    echo "--- $repo_name ---"
+    echo "  ERROR: repository is not cloned at $path"
+    FAILED_REPOS+=("$repo_name")
     continue
   fi
 
   echo "--- $repo_name ---"
   echo "  path: $path"
-  graphify update "$path" --output "$graphify_output" 2>&1 | sed 's/^/  /' || {
-    echo "  WARNING: graphify failed for $repo_name"
-  }
+  repo_root="$run_root/repos/$repo_name"
+  if _extract_repo "$path" "$repo_root" 2>&1 | sed 's/^/  /'; then
+    repo_output="$repo_root/graphify-out"
+    if [[ ! -s "$repo_output/graph.json" || ! -s "$repo_output/manifest.json" ]]; then
+      echo "  ERROR: graphify did not produce graph.json and manifest.json for $repo_name"
+      FAILED_REPOS+=("$repo_name")
+    else
+      GRAPH_PATHS+=("$repo_output/graph.json")
+      manifest_part="$run_root/manifests/$repo_name.json"
+      REPO_NAME="$repo_name" yq -o=json \
+        'with_entries(.key = strenv(REPO_NAME) + "/" + .key)' \
+        "$repo_output/manifest.json" > "$manifest_part"
+      MANIFEST_PARTS+=("$manifest_part")
+    fi
+  else
+    echo "  ERROR: graphify extraction failed for $repo_name"
+    FAILED_REPOS+=("$repo_name")
+  fi
   echo ""
 done
 
+if [[ ${#INCLUDED_REPOS[@]} -eq 0 ]]; then
+  _die "No repositories matched graphify.include_groups"
+fi
+
+if [[ ${#FAILED_REPOS[@]} -gt 0 ]]; then
+  echo "ERROR: graphify failed for repositories: ${FAILED_REPOS[*]}" >&2
+  exit 1
+fi
+
+if [[ ${#GRAPH_PATHS[@]} -eq 1 ]]; then
+  cp "${GRAPH_PATHS[0]}" "$stage_output/graph.json"
+elif ! graphify merge-graphs "${GRAPH_PATHS[@]}" --out "$stage_output/graph.json" 2>&1 | sed 's/^/  /'; then
+  echo "ERROR: graph merge failed for repositories: ${INCLUDED_REPOS[*]}" >&2
+  exit 1
+fi
+
+if ! yq ea -o=json '. as $item ireduce ({}; . * $item)' \
+  "${MANIFEST_PARTS[@]}" > "$stage_output/manifest.json"; then
+  echo "ERROR: manifest merge failed for repositories: ${INCLUDED_REPOS[*]}" >&2
+  exit 1
+fi
+
+if ! graphify cluster-only "$stage_root" --graph "$stage_output/graph.json" \
+  --no-label --no-viz 2>&1 | sed 's/^/  /'; then
+  echo "ERROR: report generation failed for repositories: ${INCLUDED_REPOS[*]}" >&2
+  exit 1
+fi
+
+for artifact in graph.json manifest.json GRAPH_REPORT.md; do
+  if [[ ! -s "$stage_output/$artifact" ]]; then
+    echo "ERROR: project graph is missing $artifact after processing repositories: ${INCLUDED_REPOS[*]}" >&2
+    exit 1
+  fi
+done
+
+# Keep user-facing graph extensions that are not regenerated by this command.
+for preserved_dir in wiki memory; do
+  if [[ -d "$graphify_output/$preserved_dir" ]]; then
+    cp -R "$graphify_output/$preserved_dir" "$stage_output/$preserved_dir"
+  fi
+done
+
+previous_output="$run_root/previous-output"
+if [[ -e "$graphify_output" || -L "$graphify_output" ]]; then
+  mv "$graphify_output" "$previous_output"
+fi
+if ! mv "$stage_output" "$graphify_output"; then
+  if [[ -e "$previous_output" || -L "$previous_output" ]]; then
+    mv "$previous_output" "$graphify_output"
+  fi
+  _die "Could not publish project graph to $graphify_output"
+fi
+published=1
+
 echo "=== done ==="
 echo ""
-
-if [[ -f "$graphify_output/GRAPH_REPORT.md" ]]; then
-  echo "Graph report available at: $graphify_output/GRAPH_REPORT.md"
-fi
+echo "Graph report available at: $configured_output/GRAPH_REPORT.md"
