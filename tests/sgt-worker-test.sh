@@ -297,9 +297,8 @@ status=$?
 set -e
 [[ "$status" -ne 0 ]]
 [[ "$(cat "$case_root/worktree/.sergeant-status")" == 'failed: downstream rejection' ]]
-[[ "$(cat "$case_root/worktree/.sergeant-response")" == 'Use option A' ]]
-[[ "$(cat "$case_root/state/response")" == 'Use option A' ]]
-[[ ! -e "$case_root/worktree/.sergeant-response-ack" ]]
+[[ ! -e "$case_root/worktree/.sergeant-response" && ! -e "$case_root/state/response" ]]
+[[ "$(cat "$case_root/worktree/.sergeant-response-ack")" == 'response-id-123' ]]
 
 case_root="$TEST_ROOT/serialized-response"
 mkdir -p "$case_root/worktree" "$case_root/state/response.lock"

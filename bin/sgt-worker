@@ -91,7 +91,7 @@ _proof_allows_response_finalization() {
       [[ -s "$WORKTREE/.sergeant-result" ]]
       ;;
     failed:*)
-      return 1
+      return 0
       ;;
     *)
       return 1
