@@ -113,7 +113,6 @@ fi
 
 [[ -n "$BRIEF" ]]     || _die "Provide a brief or use --td <task-id>"
 [[ -n "$REPOS_ARG" ]] || _die "Must specify --repos. Run 'sgt-context $PROJECT' to see available repos."
-! $REMOTE || _die "Remote dispatch is not compatible with Sergeant worker supervision; use local tmux dispatch until babydriver can preserve Sergeant sessions and responses."
 
 _require_yq
 _require_git
@@ -223,6 +222,64 @@ fi
 # Look up comma-separated prereqs for a repo
 _wait_for() {
   grep "^$1 " "$DEPS_TMP" 2>/dev/null | awk '{print $2}' | paste -sd ',' - 2>/dev/null || true
+}
+
+_record_dispatch_orphan() {
+  local repo_task_dir="$1"
+  local worktree_path="$2"
+  local reason="$3"
+  printf 'orphaned\n' > "$repo_task_dir/status"
+  printf '%s\n' "$reason" > "$repo_task_dir/diagnostic"
+  "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
+}
+
+_parse_babydriver_start() {
+  local window_name="$1"
+  local payload
+  payload="$(cat)"
+  python3 - "$window_name" "$payload" <<'PY'
+import json
+import sys
+
+window_name = sys.argv[1]
+raw = sys.argv[2]
+payload = json.loads(raw)
+
+def as_dict(value):
+    return value if isinstance(value, dict) else {}
+
+def as_list(value):
+    return value if isinstance(value, list) else []
+
+session = ""
+project_dir = ""
+task_id = ""
+resolved_window = window_name
+
+if isinstance(payload, dict):
+    session = str(payload.get("session") or payload.get("session_name") or "")
+    project_dir = str(payload.get("project_dir") or payload.get("repo_dir") or "")
+    tasks = as_list(payload.get("tasks"))
+    if not tasks:
+      tasks = as_list(as_dict(payload.get("session")).get("tasks"))
+    for task in tasks:
+        task = as_dict(task)
+        candidate_window = str(task.get("window") or task.get("name") or task.get("slug") or "")
+        if candidate_window == window_name:
+            resolved_window = candidate_window
+            task_id = str(task.get("task_id") or task.get("td_task_id") or task.get("id") or "")
+            break
+    else:
+        if tasks:
+            first = as_dict(tasks[0])
+            resolved_window = str(first.get("window") or first.get("name") or first.get("slug") or resolved_window)
+            task_id = str(first.get("task_id") or first.get("td_task_id") or first.get("id") or "")
+
+print(session)
+print(resolved_window)
+print(task_id)
+print(project_dir)
+PY
 }
 
 # ── Capture primary pane (for sgt-notify callbacks) ──────────────────────────
@@ -538,21 +595,65 @@ BRIEF_EOF
   # ── Spawn agent ─────────────────────────────────────────────────────────────
 
   if $REMOTE; then
+    SHORT_TASK="${TASK_ID:0:12}"
+    WINDOW_NAME="${SHORT_TASK}-${rname}"
+    AGENT_INIT_MSG="Read the .sergeant-brief.md file and execute the mission."
+    printf '%s\n' "remote-babydriver" > "$repo_task_dir/backend"
+    printf '%s\n' "$WINDOW_NAME" > "$repo_task_dir/window_name"
+    printf '%s\n' "$AGENT_CMD" > "$repo_task_dir/agent"
+    printf '%s\n' "$AGENT_INIT_MSG" > "$repo_task_dir/initial_message"
     if ! command -v babydriver &>/dev/null; then
-      _info "WARNING: babydriver not found — start manually: cd $worktree_path && $AGENT_CMD"
-    else
-      remote_url="${repo_url:-$(git -C "$repo_path" remote get-url origin 2>/dev/null || echo "")}"
-      if [[ -z "$remote_url" ]]; then
-        _info "WARNING: no remote URL for $rname — cannot dispatch via babydriver"
-      else
-        gh_repo="$(echo "$remote_url" | sed 's|.*github\.com[:/]||;s|\.git$||')"
-        brief_oneline="$(echo "$BRIEF" | head -1)"
-        _info "dispatching via babydriver → $gh_repo"
-        babydriver start \
-          --repo "$gh_repo" \
-          --task "${rname}:${brief_oneline} [sgt:${TASK_ID}] — read .sergeant-brief.md" \
-          --worktree 2>&1 | sed 's/^/    /' || _info "WARNING: babydriver start failed"
-      fi
+      _record_dispatch_orphan "$repo_task_dir" "$worktree_path" "babydriver not found for remote dispatch"
+      _die "babydriver is required for --remote dispatch"
+    fi
+
+    remote_url="${repo_url:-$(git -C "$repo_path" remote get-url origin 2>/dev/null || echo "")}"
+    if [[ -z "$remote_url" ]]; then
+      _record_dispatch_orphan "$repo_task_dir" "$worktree_path" "no remote URL for $rname; cannot dispatch via babydriver"
+      _die "No remote URL for $rname — cannot dispatch via babydriver"
+    fi
+
+    gh_repo="$(echo "$remote_url" | sed 's|.*github\.com[:/]||;s|\.git$||')"
+    if [[ -z "$gh_repo" ]]; then
+      _record_dispatch_orphan "$repo_task_dir" "$worktree_path" "failed to derive GitHub repo from $remote_url"
+      _die "Could not derive GitHub repo from remote URL for $rname"
+    fi
+
+    brief_oneline="$(echo "$BRIEF" | head -1)"
+    _info "dispatching via babydriver → $gh_repo"
+    if ! start_output="$(babydriver start \
+      --repo "$gh_repo" \
+      --task "${WINDOW_NAME}:${brief_oneline} [sgt:${TASK_ID}] — read .sergeant-brief.md" \
+      --worktree 2>&1)"; then
+      {
+        printf 'babydriver start failed\n'
+        printf '%s\n' "$start_output"
+      } > "$repo_task_dir/diagnostic"
+      printf 'orphaned\n' > "$repo_task_dir/status"
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
+      _die "babydriver start failed for $rname"
+    fi
+    printf '%s\n' "$start_output" > "$repo_task_dir/remote-launch.json"
+    remote_launch_fields=()
+    while IFS= read -r parsed_line; do
+      remote_launch_fields+=("$parsed_line")
+    done < <(printf '%s' "$start_output" | _parse_babydriver_start "$WINDOW_NAME" 2>/dev/null || true)
+    if [[ "${#remote_launch_fields[@]}" -lt 4 ]] || [[ -z "${remote_launch_fields[0]:-}" ]]; then
+      {
+        printf 'babydriver start returned no remote session metadata\n'
+        printf '%s\n' "$start_output"
+      } > "$repo_task_dir/diagnostic"
+      printf 'orphaned\n' > "$repo_task_dir/status"
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
+      _die "babydriver start returned invalid metadata for $rname"
+    fi
+    printf '%s\n' "${remote_launch_fields[0]}" > "$repo_task_dir/remote_session"
+    printf '%s\n' "${remote_launch_fields[1]}" > "$repo_task_dir/remote_window"
+    if [[ -n "${remote_launch_fields[2]}" ]]; then
+      printf '%s\n' "${remote_launch_fields[2]}" > "$repo_task_dir/remote_td_task"
+    fi
+    if [[ -n "${remote_launch_fields[3]}" ]]; then
+      printf '%s\n' "${remote_launch_fields[3]}" > "$repo_task_dir/remote_project_dir"
     fi
   else
     # Window name: <short-task-id>/<repo> so multiple tasks don't collide
@@ -561,6 +662,7 @@ BRIEF_EOF
     WINDOW_NAME="${SHORT_TASK}/${rname}"
     _info "spawning tmux window '$WINDOW_NAME' in session $TMUX_SESSION"
     AGENT_INIT_MSG="Read the .sergeant-brief.md file and execute the mission."
+    printf '%s\n' "local-tmux" > "$repo_task_dir/backend"
     printf '%s\n' "$TMUX_SESSION" > "$repo_task_dir/tmux_session"
     printf '%s\n' "$WINDOW_NAME" > "$repo_task_dir/window_name"
     printf '%s\n' "$AGENT_CMD" > "$repo_task_dir/agent"

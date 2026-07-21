@@ -37,6 +37,16 @@ case "$1" in
 esac
 EOF
 chmod +x "$fake_bin/tmux"
+cat > "$fake_bin/babydriver" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$BABYDRIVER_LOG"
+case "$1" in
+  restart)
+    [[ "${FAIL_RESTART:-0}" == 0 ]] || exit 23
+    ;;
+esac
+EOF
+chmod +x "$fake_bin/babydriver"
 cat > "$fake_bin/td" <<'EOF'
 #!/usr/bin/env bash
 [[ ! -e "$TD_RESPONSE_FILE" ]] || {
@@ -164,5 +174,37 @@ set -e
 [[ "$(cat "$worktree/.sergeant-status")" == 'orphaned' ]]
 grep -Fq 'tmux returned no pane for relaunched worker supervisor' "$repo_state/diagnostic"
 grep -Fq 'handoff td-123' "$TEST_ROOT/empty-pane-td.log"
+
+remote_repo_state="$fleet/task-1/remote"
+remote_worktree="$TEST_ROOT/remote-worktree"
+mkdir -p "$remote_repo_state" "$remote_worktree"
+printf '%s\n' "$remote_worktree" > "$remote_repo_state/worktree"
+printf 'remote-babydriver\n' > "$remote_repo_state/backend"
+printf 'remote-drive\n' > "$remote_repo_state/remote_session"
+printf 'remote-window\n' > "$remote_repo_state/remote_window"
+printf 'needs_input\n' > "$remote_repo_state/status"
+printf 'needs_input\n' > "$remote_worktree/.sergeant-status"
+printf 'Need a remote answer.\n' > "$remote_worktree/.sergeant-message"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/remote-live.log" BABYDRIVER_LOG="$TEST_ROOT/remote-babydriver.log" \
+TD_LOG="$TEST_ROOT/remote-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'remote response' >/dev/null
+[[ "$(cat "$remote_repo_state/response")" == 'remote response' ]]
+[[ "$(cat "$remote_worktree/.sergeant-response")" == 'remote response' ]]
+[[ "$(cat "$remote_repo_state/status")" == 'in_progress' ]]
+[[ "$(cat "$remote_worktree/.sergeant-status")" == 'in_progress' ]]
+grep -Fq 'restart remote-drive --window remote-window' "$TEST_ROOT/remote-babydriver.log"
+[[ ! -e "$remote_repo_state/message" && ! -e "$remote_worktree/.sergeant-message" ]]
+
+printf 'needs_input\n' > "$remote_repo_state/status"
+printf 'needs_input\n' > "$remote_worktree/.sergeant-status"
+set +e
+PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-babydriver-fail.log" FAIL_RESTART=1 \
+TD_LOG="$TEST_ROOT/remote-fail-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'remote failure' >/dev/null 2>&1
+status=$?
+set -e
+[[ "$status" -ne 0 ]]
+[[ "$(cat "$remote_repo_state/status")" == 'orphaned' ]]
+grep -Fq 'babydriver restart failed for remote-drive/remote-window' "$remote_repo_state/diagnostic"
 
 printf 'sgt-respond resumes workers: ok\n'

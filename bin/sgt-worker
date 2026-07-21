@@ -71,20 +71,29 @@ _capture_session_id() {
 import json
 import sys
 
-def find_session_id(value):
-    if isinstance(value, dict):
-        candidate = value.get("sessionID") or value.get("session_id")
-        if candidate:
-            return str(candidate)
-        for nested in value.values():
-            candidate = find_session_id(nested)
-            if candidate:
-                return candidate
-    elif isinstance(value, list):
-        for nested in value:
-            candidate = find_session_id(nested)
-            if candidate:
-                return candidate
+KNOWN_EVENT_TYPES = {"session", "system", "init"}
+KNOWN_SUBTYPES = {"session", "init"}
+
+def top_level_session_id(event):
+    if not isinstance(event, dict):
+        return ""
+    event_type = str(event.get("type") or event.get("event_type") or event.get("kind") or "").lower()
+    subtype = str(event.get("subtype") or event.get("name") or "").lower()
+    phase = str(event.get("phase") or "").lower()
+    if event_type not in KNOWN_EVENT_TYPES and subtype not in KNOWN_SUBTYPES and phase != "init":
+        return ""
+    candidate = event.get("sessionID") or event.get("session_id")
+    if candidate in (None, ""):
+        return ""
+    return str(candidate)
+
+def extract_session_id(event):
+    candidate = top_level_session_id(event)
+    if candidate:
+        return candidate
+    nested = event.get("event") if isinstance(event, dict) else None
+    if isinstance(nested, dict):
+        return top_level_session_id(nested)
     return ""
 
 session_id = ""
@@ -94,7 +103,7 @@ with open(sys.argv[1], encoding="utf-8", errors="replace") as stream:
             event = json.loads(line)
         except (json.JSONDecodeError, TypeError):
             continue
-        candidate = find_session_id(event)
+        candidate = extract_session_id(event)
         if candidate:
             session_id = str(candidate)
 print(session_id)

@@ -35,6 +35,12 @@ case "$FAKE_MODE:$turn" in
     printf 'Fixture unavailable.\n' > .sergeant-message
     printf '%s\n' '{"type":"session","sessionID":"ses-test-123"}'
     ;;
+  poisoned_session:1)
+    printf 'needs_input\n' > .sergeant-status
+    printf 'Choose A or B.\n' > .sergeant-message
+    printf '%s\n' '{"type":"session","sessionID":"ses-test-123"}'
+    printf '%s\n' '{"type":"tool","payload":{"sessionID":"ses-evil-999"}}'
+    ;;
   claude_needs_input:1)
     [[ "$*" == *"-p --output-format json --dangerously-skip-permissions"* ]]
     [[ "$*" != *"run --auto"* ]]
@@ -48,8 +54,9 @@ case "$FAKE_MODE:$turn" in
     printf 'done\n' > .sergeant-status
     printf 'validated Claude result\n' > .sergeant-result
     ;;
-  needs_input:2|blocked:2)
+  needs_input:2|blocked:2|poisoned_session:2)
     [[ "$*" == *"--session ses-test-123"* ]]
+    [[ "$*" != *"ses-evil-999"* ]]
     [[ "$*" == *"Use option A"* ]]
     [[ "$*" == *"td-123"* ]]
     [[ "$*" == *"updated td handoff"* ]]
@@ -120,6 +127,7 @@ wait_for_file() {
 
 run_wait_resume_case() {
   local mode="$1"
+  local expected_status="${2:-$mode}"
   local case_root="$TEST_ROOT/$mode"
   local worktree="$case_root/worktree"
   local repo_state="$case_root/state"
@@ -135,7 +143,7 @@ run_wait_resume_case() {
   wait_for_file "$worktree/.sergeant-message"
   [[ ! -e "$repo_state/result" ]]
   kill -0 "$worker_pid"
-  [[ "$(cat "$worktree/.sergeant-status")" == "$mode" ]]
+  [[ "$(cat "$worktree/.sergeant-status")" == "$expected_status" ]]
   printf 'Use option A\n' > "$worktree/.sergeant-response"
   wait "$worker_pid"
 
@@ -151,6 +159,7 @@ run_wait_resume_case() {
 
 run_wait_resume_case needs_input
 run_wait_resume_case blocked
+run_wait_resume_case poisoned_session needs_input
 
 case_root="$TEST_ROOT/claude-needs-input"
 mkdir -p "$case_root/worktree" "$case_root/state"
