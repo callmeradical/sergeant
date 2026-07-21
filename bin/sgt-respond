@@ -129,6 +129,28 @@ fi
 response_id="$(cat "$REPO_DIR/response_id" 2>/dev/null || true)"
 remote_pending_id="$(cat "$REPO_DIR/remote_response_pending_id" 2>/dev/null || true)"
 remote_pending_state="$(cat "$REPO_DIR/remote_response_pending_state" 2>/dev/null || true)"
+remote_resume_without_response=0
+if [[ "$backend" == "remote-babydriver" && "$status" == "orphaned" ]]; then
+  remote_project_dir_hint="$(cat "$REPO_DIR/remote_project_dir" 2>/dev/null || true)"
+  remote_ack_id=""
+  if [[ -n "$remote_project_dir_hint" && -f "$remote_project_dir_hint/.sergeant-response-ack" ]]; then
+    remote_ack_id="$(cat "$remote_project_dir_hint/.sergeant-response-ack" | tr -d '\n' || true)"
+  fi
+  acknowledged_response_id="${remote_pending_id:-$response_id}"
+  if [[ -n "$acknowledged_response_id" && -n "$remote_ack_id" && "$remote_ack_id" == "$acknowledged_response_id" ]]; then
+    _clear_local_response_transport
+    _clear_remote_pending_marker
+    rm -f "$REPO_DIR/response_id"
+    if [[ -n "$remote_project_dir_hint" && -d "$remote_project_dir_hint" ]]; then
+      rm -f "$remote_project_dir_hint/.sergeant-response" "$remote_project_dir_hint/.sergeant-response-id" "$remote_project_dir_hint/.sergeant-response-ack"
+    fi
+    pending_response=""
+    response_id=""
+    remote_pending_id=""
+    remote_pending_state=""
+    remote_resume_without_response=1
+  fi
+fi
 if [[ -n "$pending_response" ]]; then
   if [[ "$backend" == "remote-babydriver" && -n "$remote_pending_id" ]]; then
     if [[ "$RESPONSE" != "$pending_response" ]]; then
@@ -146,6 +168,8 @@ if [[ -n "$pending_response" ]]; then
   if [[ -n "$remote_pending_id" ]]; then
     response_id="$remote_pending_id"
   fi
+elif [[ "$remote_resume_without_response" == "1" ]]; then
+  :
 elif [[ "$backend" == "remote-babydriver" && -n "$remote_pending_id" ]]; then
   _die "A remote Sergeant response is already pending consumption for $TASK_ID/$REPO"
 else
@@ -203,7 +227,7 @@ if [[ "$backend" == "remote-babydriver" ]]; then
     trap - EXIT
     _die "Remote worker response delivery is unavailable for $TASK_ID/$REPO"
   fi
-  if ! _publish_remote_response_transport "$remote_project_dir" "$RESPONSE" "$response_id"; then
+  if [[ "$remote_resume_without_response" != "1" ]] && ! _publish_remote_response_transport "$remote_project_dir" "$RESPONSE" "$response_id"; then
     [[ -n "$worktree" && -d "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
     printf 'orphaned\n' > "$REPO_DIR/status"
     printf 'remote response delivery failed for %s/.sergeant-response\n' "$remote_project_dir" > "$REPO_DIR/diagnostic"
@@ -239,7 +263,9 @@ if [[ "$backend" == "remote-babydriver" ]]; then
     trap - EXIT
     _die "Remote worker relaunch failed for $TASK_ID/$REPO"
   fi
-  _write_remote_pending_marker "$response_id" "awaiting_consumption"
+  if [[ "$remote_resume_without_response" != "1" ]]; then
+    _write_remote_pending_marker "$response_id" "awaiting_consumption"
+  fi
   rm -f "$REPO_DIR/diagnostic" "$REPO_DIR/message"
   [[ -n "$worktree" && -d "$worktree" ]] && {
     rm -f "$worktree/.sergeant-message"

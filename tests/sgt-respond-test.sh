@@ -287,8 +287,42 @@ if [[ -e "$TEST_ROOT/remote-orphan-retry-td.log" ]]; then
   printf 'remote orphan retry should not log a duplicate td decision\n' >&2
   exit 1
 fi
+
 printf 'orphaned\n' > "$remote_repo_state/status"
 printf 'orphaned\n' > "$remote_worktree/.sergeant-status"
+printf 'remote response\n' > "$remote_repo_state/response"
+printf 'remote response\n' > "$remote_worktree/.sergeant-response"
+printf '%s\n' "$remote_response_id" > "$remote_worktree/.sergeant-response-id"
+printf '%s\n' "$remote_response_id" > "$remote_repo_state/response_id"
+printf '%s\n' "$remote_response_id" > "$remote_repo_state/remote_response_pending_id"
+printf 'awaiting_consumption\n' > "$remote_repo_state/remote_response_pending_state"
+printf '%s\n' "$remote_response_id" > "$remote_project_dir/.sergeant-response-id"
+printf '%s\n' "$remote_response_id" > "$remote_project_dir/.sergeant-response-ack"
+printf 'stale remote transport after ack\n' > "$remote_project_dir/.sergeant-response"
+PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-acked-retry.log" \
+TD_LOG="$TEST_ROOT/remote-acked-retry-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'conflicting response after ack' >/dev/null 2>"$TEST_ROOT/remote-acked-retry.err"
+[[ "$(cat "$remote_repo_state/status")" == 'in_progress' ]]
+[[ "$(cat "$remote_worktree/.sergeant-status")" == 'in_progress' ]]
+[[ ! -e "$remote_repo_state/response" && ! -e "$remote_worktree/.sergeant-response" ]]
+[[ ! -e "$remote_repo_state/response_id" && ! -e "$remote_repo_state/remote_response_pending_id" && ! -e "$remote_repo_state/remote_response_pending_state" ]]
+[[ ! -e "$remote_project_dir/.sergeant-response" && ! -e "$remote_project_dir/.sergeant-response-id" && ! -e "$remote_project_dir/.sergeant-response-ack" ]]
+grep -Fq 'restart remote-drive --window remote-window' "$TEST_ROOT/remote-acked-retry.log"
+[[ ! -s "$TEST_ROOT/remote-acked-retry.err" ]]
+if [[ -e "$TEST_ROOT/remote-acked-retry-td.log" ]]; then
+  printf 'acknowledged remote retry should not log a duplicate td decision\n' >&2
+  exit 1
+fi
+
+printf 'orphaned\n' > "$remote_repo_state/status"
+printf 'orphaned\n' > "$remote_worktree/.sergeant-status"
+printf 'remote response\n' > "$remote_repo_state/response"
+printf 'remote response\n' > "$remote_worktree/.sergeant-response"
+printf '%s\n' "$remote_response_id" > "$remote_repo_state/response_id"
+printf '%s\n' "$remote_response_id" > "$remote_repo_state/remote_response_pending_id"
+printf 'awaiting_consumption\n' > "$remote_repo_state/remote_response_pending_state"
+printf 'remote response\n' > "$remote_project_dir/.sergeant-response"
+printf '%s\n' "$remote_response_id" > "$remote_project_dir/.sergeant-response-id"
 set +e
 PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-conflict.log" \
 TD_LOG="$TEST_ROOT/remote-conflict-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
