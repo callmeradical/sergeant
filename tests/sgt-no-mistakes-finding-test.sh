@@ -113,7 +113,7 @@ run_router --severity info --finding-id doc-3 --kind document --disposition igno
 }
 [[ ! -s "$TEST_ROOT/td.log" ]] || { printf 'rejected ignore touched td\n' >&2; exit 1; }
 
-TD_LIST_RESULT='[{"id":"td-unrelated","description":"mentions review-7 only"},{"id":"td-existing","description":"Deduplication key: no-mistakes-finding:app:review-7"}]' \
+TD_LIST_RESULT='[{"id":"td-unrelated","description":"mentions review-7 only"},{"id":"td-existing","labels":["repo-app","no-mistakes","manual","finding"],"description":"Deduplication key: no-mistakes-finding:app:review-7"}]' \
   run_router --run-id run-43 --head-sha def456 \
     --file lib/revised.sh --line 27 \
     --description "Keep the latest cleanup context" \
@@ -129,6 +129,7 @@ assert_log_contains "Head SHA: def456"
 assert_log_contains "Location: lib/revised.sh:27"
 assert_log_contains "Description: Keep the latest cleanup context"
 assert_log_contains "Originating intent: Retain rerun evidence without branch mutations"
+assert_log_contains "--labels repo-app,no-mistakes,manual,finding"
 if grep -Fq "create" "$TEST_ROOT/td.log"; then
   printf 'deduplicated finding created a second card\n' >&2
   exit 1
