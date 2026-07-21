@@ -224,7 +224,8 @@ mkdir -p "$case_root/worktree" "$case_root/state"
 printf 'td-123\n' > "$case_root/state/td_task"
 PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" \
   FAKE_MODE=goose_needs_input FAKE_STATE="$case_root" SGT_WORKER_POLL_INTERVAL=0.01 \
-  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_goose" "initial mission" &
+  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_goose" "initial mission" \
+  > "$case_root/output.log" 2>&1 &
 worker_pid=$!
 wait_for_file "$case_root/worktree/.sergeant-message"
 kill -0 "$worker_pid"
@@ -236,6 +237,7 @@ wait "$worker_pid"
 [[ "$(cat "$case_root/state/session_name")" == 'sgt-goose-needs-input-state' ]]
 grep -Fq -- 'run --output-format json -n sgt-goose-needs-input-state -t initial mission' "$case_root/args"
 grep -Fq -- 'run --output-format json -n sgt-goose-needs-input-state -r -t' "$case_root/args"
+! grep -Fq 'session_name: No such file or directory' "$case_root/output.log"
 
 case_root="$TEST_ROOT/resume-orphan"
 mkdir -p "$case_root/worktree" "$case_root/state"

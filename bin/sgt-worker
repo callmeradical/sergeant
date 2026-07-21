@@ -167,7 +167,11 @@ _agent_name() {
 
 _goose_session_name() {
   local existing task_name repo_name derived
-  existing="$(tr -d '\n' < "$REPO_STATE/session_name" 2>/dev/null || true)"
+  if [[ -f "$REPO_STATE/session_name" ]]; then
+    existing="$(tr -d '\n' < "$REPO_STATE/session_name" || true)"
+  else
+    existing=""
+  fi
   if [[ -n "$existing" ]]; then
     printf '%s\n' "$existing"
     return
@@ -253,9 +257,13 @@ _wait_for_response() {
       _sgt_response_lock_acquire "$REPO_STATE"
       if [[ -f "$WORKTREE/.sergeant-response" ]]; then
         response="$(cat "$WORKTREE/.sergeant-response")"
-        response_id="$(tr -d '\n' < "$WORKTREE/.sergeant-response-id" 2>/dev/null || true)"
-        if [[ -z "$response_id" ]]; then
-          response_id="$(tr -d '\n' < "$REPO_STATE/response_id" 2>/dev/null || true)"
+        if [[ -f "$WORKTREE/.sergeant-response-id" ]]; then
+          response_id="$(tr -d '\n' < "$WORKTREE/.sergeant-response-id" || true)"
+        else
+          response_id=""
+        fi
+        if [[ -z "$response_id" && -f "$REPO_STATE/response_id" ]]; then
+          response_id="$(tr -d '\n' < "$REPO_STATE/response_id" || true)"
         fi
         printf 'in_progress\n' > "$WORKTREE/.sergeant-status"
         printf 'in_progress\n' > "$REPO_STATE/status"
