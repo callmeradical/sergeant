@@ -170,6 +170,7 @@ Agent-loaded skills for structured workflows:
 
 - `td` — repository-local task lifecycle integration. Required for brief-based `sgt-dispatch` runs, `sgt-no-mistakes-finding`, and `sgt-td-*`; optional otherwise
 - `yq` — YAML parser: `brew install yq`
+- `python3` — required by Sergeant's JSON, fleet, and td helper scripts
 - `git` and `gh` — for repo operations and PRs
 - `tmux` — for local agent dispatch
 - `treehouse` — pre-warmed worktree pools (optional but recommended for dispatch)
