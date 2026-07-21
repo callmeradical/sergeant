@@ -143,10 +143,8 @@ sgt-doctor smith
 sgt-doctor --project smith --json
 ```
 
-The command exits `0` when healthy, `1` when only warnings exist, `2` when any
-check fails, and `64` for invalid arguments. Diagnostics are read-only, redact
-credential-like values, and never print GitHub tokens. See
-[`docs/doctor.md`](docs/doctor.md) for the check and JSON contracts.
+Diagnostics are read-only. See [`docs/doctor.md`](docs/doctor.md) for the full
+check list, exit-code contract, JSON output shape, and redaction guarantees.
 
 ### Deferred no-mistakes findings
 

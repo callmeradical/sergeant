@@ -16,7 +16,7 @@ FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
 # Detection order:
 #   1. SERGEANT_AGENT env var — explicit override always wins
 #   2. OPENCODE / OPENCODE_PID — set by opencode when running a session
-#   3. CLAUDE_CODE_SESSION_ID — set by Claude Code when running a session
+#   3. CLAUDE_CODE_SESSION_ID / CLAUDE_CODE_SESSION_NAME — set by Claude Code when running a session
 #   4. Fallback: opencode
 # Goose is supported through explicit SERGEANT_AGENT=goose selection.
 _sgt_detect_agent() {

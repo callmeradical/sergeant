@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_sgt-lib.sh"
 FLEET_DIR="${SERGEANT_FLEET:-$FLEET_DIR}"
 # shellcheck source=bin/_sgt-response-lock.sh
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/_sgt-response-lock.sh"
 
 _die() { echo "ERROR: $*" >&2; exit 1; }
