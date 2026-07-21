@@ -21,4 +21,9 @@ redacted="$(bash -lc 'source "$1"; _sgt_redact "AWS_SECRET_ACCESS_KEY=supersecre
 [[ "$redacted" != *"secondsecret"* ]]
 [[ "$redacted" == *"PATH=/usr/bin"* ]]
 
+redacted="$(bash -lc 'source "$1"; _sgt_redact "API_TOKEN=secret ordinary-text"' _ "$ROOT_DIR/bin/_sgt-lib.sh")"
+[[ "$redacted" == "API_TOKEN=[REDACTED] ordinary-text" ]]
+[[ "$redacted" != *"secret"* ]]
+[[ "$redacted" == *"ordinary-text"* ]]
+
 printf 'sgt-lib agent command builder: ok\n'

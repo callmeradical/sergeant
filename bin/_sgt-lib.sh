@@ -102,6 +102,7 @@ text = sys.argv[1]
 credential_key = r'[A-Z0-9_]*(?:token|password|secret|api(?:[_-]?key))[A-Z0-9_]*'
 assignment_start = re.compile(rf'(?i)\b({credential_key})\b\s*[:=]\s*')
 next_assignment = re.compile(r'[A-Za-z_][A-Za-z0-9_]*\s*[:=]')
+plain_word = re.compile(r'[A-Za-z0-9_]+$')
 
 def redact_assignments(value: str) -> str:
     chunks = []
@@ -121,6 +122,14 @@ def redact_assignments(value: str) -> str:
                 while j < len(value) and value[j] in ' \t':
                     j += 1
                 if next_assignment.match(value, j):
+                    chunks.append(value[i:j])
+                    i = j
+                    break
+                k = j
+                while k < len(value) and value[k] not in ' \t;,\n':
+                    k += 1
+                token = value[j:k]
+                if token and not plain_word.fullmatch(token):
                     chunks.append(value[i:j])
                     i = j
                     break

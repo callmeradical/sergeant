@@ -281,7 +281,7 @@ test_human_and_json_output_redact_compound_credentials() {
   cat > "$TEST_TMP/bin/graphify" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "--version" ]]; then
-  echo 'graphify 1.0.0 AWS_SECRET_ACCESS_KEY=supersecret PATH=/usr/bin API_TOKEN=secondsecret'
+  echo 'graphify 1.0.0 AWS_SECRET_ACCESS_KEY=supersecret PATH=/usr/bin API_TOKEN=secondsecret ordinary-text'
   exit 0
 fi
 exit 0
@@ -294,10 +294,11 @@ EOF
   set -e
 
   assert_eq 0 "$status"
-  assert_contains "$output" "AWS_SECRET_ACCESS_KEY=[REDACTED] PATH=/usr/bin API_TOKEN=[REDACTED]"
+  assert_contains "$output" "AWS_SECRET_ACCESS_KEY=[REDACTED] PATH=/usr/bin API_TOKEN=[REDACTED] ordinary-text"
   assert_not_contains "$output" "supersecret"
   assert_not_contains "$output" "secondsecret"
   assert_contains "$output" "PATH=/usr/bin"
+  assert_contains "$output" "ordinary-text"
 
   set +e
   output="$("$DOCTOR" --json 2>&1)"
@@ -305,10 +306,11 @@ EOF
   set -e
 
   assert_eq 0 "$status"
-  assert_contains "$output" "AWS_SECRET_ACCESS_KEY=[REDACTED] PATH=/usr/bin API_TOKEN=[REDACTED]"
+  assert_contains "$output" "AWS_SECRET_ACCESS_KEY=[REDACTED] PATH=/usr/bin API_TOKEN=[REDACTED] ordinary-text"
   assert_not_contains "$output" "supersecret"
   assert_not_contains "$output" "secondsecret"
   assert_contains "$output" "PATH=/usr/bin"
+  assert_contains "$output" "ordinary-text"
   python3 -c 'import json,sys; json.loads(sys.stdin.read())' <<< "$output" \
     || fail "JSON output is not parseable"
 }
