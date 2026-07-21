@@ -75,7 +75,7 @@ if [[ -n "$TD_TASK_ID" ]]; then
     rname="$(yq ".repos[$i].name" "$CONFIG_FILE")"
     raw_path="$(yq ".repos[$i].path" "$CONFIG_FILE")"
     repo_path="$(_resolve_path "$raw_path")"
-    [[ -d "$repo_path/.git" ]] || continue
+    _sgt_is_git_repo "$repo_path" || continue
 
     task_json="$(td list --json --work-dir "$repo_path" \
       --filter "id=$TD_TASK_ID" 2>/dev/null || echo "[]")"
@@ -114,35 +114,147 @@ fi
 [[ -n "$BRIEF" ]]     || _die "Provide a brief or use --td <task-id>"
 [[ -n "$REPOS_ARG" ]] || _die "Must specify --repos. Run 'sgt-context $PROJECT' to see available repos."
 
+TARGET_REPOS=()
+IFS=',' read -ra TARGET_REPOS <<< "$REPOS_ARG"
+
 _require_yq
 _require_git
 $REMOTE || _require_tmux
 
 # ── Auto-create td tasks when no --td given ───────────────────────────────────
-# If td is available and we weren't given a specific task ID, create td tasks
-# in each target repo now so the work is tracked end-to-end.
+# When we weren't given a specific task ID, create td tasks in each target repo
+# now so the work is tracked end-to-end.
 #
 # We store a map of repo→task_id in a temp file so the brief-writing loop
 # can inject the right td task ID per repo.
 
 REPO_TD_MAP="$(mktemp)"
-trap 'rm -f "$REPO_TD_MAP" "${DEPS_TMP:-}"' EXIT
+TD_CREATE_STATE_FILE="$(mktemp)"
+TD_CREATE_STDERR="$(mktemp)"
+_cleanup_dispatch_tmps() {
+  rm -f "$REPO_TD_MAP" "$TD_CREATE_STATE_FILE" "$TD_CREATE_STDERR" "${DEPS_TMP:-}"
+}
+trap _cleanup_dispatch_tmps EXIT
 
-if [[ -z "$TD_TASK_ID" ]] && command -v td &>/dev/null && ! $DRY_RUN; then
+_rollback_generated_td_tasks() {
+  local failure_message="$1"
+  local cleanup_failed=false
+  local cleanup_output=""
+
+  while IFS=$'\t' read -r repo_name task_id work_dir; do
+    [[ -n "$task_id" ]] || continue
+    if ! delete_output="$(td delete "$task_id" --work-dir "$work_dir" --force --json 2>&1)"; then
+      cleanup_failed=true
+      if [[ -n "$cleanup_output" ]]; then
+        cleanup_output+=$'\n'
+      fi
+      if [[ -n "$delete_output" ]]; then
+        cleanup_output+="cleanup failed for $task_id in $repo_name: $delete_output"
+      else
+        cleanup_output+="cleanup failed for $task_id in $repo_name"
+      fi
+    fi
+  done < <(
+    python3 - "$TD_CREATE_STATE_FILE" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    for line in handle:
+        line = line.strip()
+        if not line:
+            continue
+        item = json.loads(line)
+        print("\t".join([item["repo"], item["task_id"], item["work_dir"]]))
+PY
+  )
+
+  if $cleanup_failed; then
+    _die "$failure_message"$'\n'"$cleanup_output"
+  fi
+
+  : > "$TD_CREATE_STATE_FILE"
+  _die "$failure_message"
+}
+
+_build_repo_td_map_or_die() {
+  local td_results="$1"
+  local selected_repos_csv="$2"
+  : > "$TD_CREATE_STDERR"
+  if ! TD_RESULTS="$td_results" TARGET_REPOS_CSV="$selected_repos_csv" python3 - <<'PY' > "$REPO_TD_MAP" 2>"$TD_CREATE_STDERR"
+import json
+import os
+import sys
+
+selected = [repo for repo in os.environ["TARGET_REPOS_CSV"].split(",") if repo]
+seen = set()
+seen_task_ids = set()
+
+try:
+    results = json.loads(os.environ["TD_RESULTS"])
+except json.JSONDecodeError:
+    print("failed to inject td task results", file=sys.stderr)
+    raise SystemExit(1)
+
+if not isinstance(results, list):
+    print("failed to inject td task results", file=sys.stderr)
+    raise SystemExit(1)
+
+for item in results:
+    if not isinstance(item, dict):
+        print("failed to inject td task results", file=sys.stderr)
+        raise SystemExit(1)
+    repo = item.get("repo")
+    task_id = item.get("task_id")
+    if not isinstance(repo, str) or not isinstance(task_id, str):
+        print("failed to inject td task results", file=sys.stderr)
+        raise SystemExit(1)
+    if not task_id or any(ch.isspace() for ch in task_id):
+        print(f"invalid td task id for repo: {repo}", file=sys.stderr)
+        raise SystemExit(1)
+    if repo not in selected:
+        print(f"unexpected td task result for repo: {repo}", file=sys.stderr)
+        raise SystemExit(1)
+    if repo in seen:
+        print(f"duplicate td task result for repo: {repo}", file=sys.stderr)
+        raise SystemExit(1)
+    if task_id in seen_task_ids:
+        print(f"duplicate td task id: {task_id}", file=sys.stderr)
+        raise SystemExit(1)
+    seen.add(repo)
+    seen_task_ids.add(task_id)
+    print(f"{repo} {task_id}")
+
+for repo in selected:
+    if repo not in seen:
+        print(f"missing td task for selected repo: {repo}", file=sys.stderr)
+        raise SystemExit(1)
+PY
+  then
+    local validation_error
+    validation_error="$(cat "$TD_CREATE_STDERR")"
+    [[ -n "$validation_error" ]] || validation_error="failed to inject td task results"
+    _rollback_generated_td_tasks "$validation_error"
+  fi
+}
+
+if [[ -z "$TD_TASK_ID" ]] && ! $DRY_RUN; then
+  command -v td &>/dev/null || _die "td is required for brief-only dispatch"
   echo "Creating td tasks ..."
-  td_results="$("$SCRIPT_DIR/sgt-td-create" "$PROJECT" "$BRIEF" \
+  : > "$TD_CREATE_STATE_FILE"
+  : > "$TD_CREATE_STDERR"
+  if ! td_results="$(SGT_TD_STATE_FILE="$TD_CREATE_STATE_FILE" "$SCRIPT_DIR/sgt-td-create" "$PROJECT" "$BRIEF" \
     --repos "$REPOS_ARG" \
     --type task \
     --priority P1 \
-    --json 2>/dev/null || echo "[]")"
+    --json 2>"$TD_CREATE_STDERR")"; then
+    td_error="$(cat "$TD_CREATE_STDERR")"
+    [[ -n "$td_error" ]] || td_error="$td_results"
+    _die "td task creation failed: $td_error"
+  fi
 
-  # Write repo→task_id to temp map
-  echo "$td_results" | python3 -c "
-import sys, json
-results = json.load(sys.stdin)
-for r in results:
-    print(r['repo'] + ' ' + r['task_id'])
-" 2>/dev/null > "$REPO_TD_MAP" || true
+  _build_repo_td_map_or_die "$td_results" "$REPOS_ARG"
 
   if [[ -s "$REPO_TD_MAP" ]]; then
     while IFS=' ' read -r rname tid; do
@@ -190,8 +302,6 @@ echo ""
 # ── Validate repos ────────────────────────────────────────────────────────────
 
 repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
-TARGET_REPOS=()
-IFS=',' read -ra TARGET_REPOS <<< "$REPOS_ARG"
 
 for rname in "${TARGET_REPOS[@]}"; do
   found=false
@@ -207,8 +317,7 @@ done
 # Store in a temp file: "<dependent> <prereq>" one per line
 
 DEPS_TMP="$(mktemp)"
-# Note: REPO_TD_MAP trap already set above; update it to also cover DEPS_TMP
-trap 'rm -f "$REPO_TD_MAP" "$DEPS_TMP"' EXIT
+trap _cleanup_dispatch_tmps EXIT
 
 if [[ -n "$DEPS_ARG" ]]; then
   IFS=',' read -ra dep_pairs <<< "$DEPS_ARG"
@@ -364,7 +473,7 @@ for rname in "${TARGET_REPOS[@]}"; do
 
   echo "--- $rname ---"
 
-  if [[ ! -d "$repo_path/.git" ]]; then
+  if ! _sgt_is_git_repo "$repo_path"; then
     echo "  SKIP: not cloned at $repo_path (run bin/sgt-sync $PROJECT first)"
     echo ""
     continue

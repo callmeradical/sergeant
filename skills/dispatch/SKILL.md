@@ -185,9 +185,9 @@ If a canonical skill cannot be loaded, the generated brief's embedded rules rema
 
 ## td task creation
 
-`sgt-dispatch` automatically creates td tasks in each target repo before spawning workers — **whether or not you use `--td`**. Every piece of dispatched work is tracked in td from the start.
+When you dispatch from a freeform brief, `sgt-dispatch` creates exactly one td task in each target repo before spawning any worker. If td is unavailable, task creation fails, generated task metadata cannot be injected, or any selected repo does not get a generated task, dispatch aborts before spawning and rolls back the generated cards. `--td` dispatch keeps using the existing task instead of generating replacements.
 
-The created task IDs are injected into each worker's `.sergeant-brief.md` with the full `td start` / `td log` / `td handoff` / `td review` lifecycle.
+The generated task IDs are written into fleet state and injected into each worker's `.sergeant-brief.md` with the full `td start` / `td log` / `td handoff` / `td review` lifecycle.
 
 To create tasks manually without dispatching:
 ```bash

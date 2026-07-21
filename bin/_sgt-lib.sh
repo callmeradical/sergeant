@@ -10,6 +10,7 @@ SGT_LIB_LOADED=1
 # ── Configurable env vars ─────────────────────────────────────────────────────
 
 SERGEANT_CONFIG="${SERGEANT_CONFIG:-$HOME/.config/sergeant}"
+# shellcheck disable=SC2034  # Shared default consumed by sourced scripts.
 FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
 # Auto-detect the running agent from environment signals, then allow override.
 # Detection order:
@@ -29,6 +30,7 @@ _sgt_detect_agent() {
   fi
 }
 
+# shellcheck disable=SC2034  # Shared default consumed by sourced scripts.
 AGENT_CMD="${SERGEANT_AGENT:-$(_sgt_detect_agent)}"
 
 # ── Global config (dev_root) ──────────────────────────────────────────────────
@@ -66,6 +68,11 @@ _resolve_path() {
   else
     echo "$DEV_ROOT/$p"
   fi
+}
+
+_sgt_is_git_repo() {
+  local path="$1"
+  git -C "$path" rev-parse --git-dir >/dev/null 2>&1
 }
 
 # ── Common helpers ────────────────────────────────────────────────────────────
