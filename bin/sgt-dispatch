@@ -434,6 +434,22 @@ if [[ -n "${TMUX:-}" ]]; then
   PRIMARY_PANE="$(tmux display-message -p '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)"
 fi
 
+OC_PID="${OPENCODE_PID:-}"
+OC_SESSION=""
+if [[ "$OC_PID" =~ ^[0-9]+$ ]]; then
+  OC_ROOT="${OC_INJECT_ROOT:-$HOME/.local/share/opencode/inbox}"
+  OC_REGISTRY="$OC_ROOT/processes/$OC_PID/registry.json"
+  OC_PROCESS_START="$(ps -o lstart= -p "$OC_PID" 2>/dev/null | awk '{$1=$1; print}' || true)"
+  if kill -0 "$OC_PID" 2>/dev/null && [[ -f "$OC_REGISTRY" ]] && \
+    [[ "$(jq -r '.pid // empty' "$OC_REGISTRY" 2>/dev/null || true)" == "$OC_PID" ]] && \
+    [[ "$(jq -r '.processStart // empty' "$OC_REGISTRY" 2>/dev/null || true)" == "$OC_PROCESS_START" ]]; then
+    OC_SESSION_CANDIDATE="${OPENCODE_SESSION_ID:-}"
+    if jq -e --arg s "$OC_SESSION_CANDIDATE" '.sessions | has($s)' "$OC_REGISTRY" >/dev/null 2>&1; then
+      OC_SESSION="$OC_SESSION_CANDIDATE"
+    fi
+  fi
+fi
+
 # ── Create fleet task directory ───────────────────────────────────────────────
 
 if $DRY_RUN; then
@@ -445,6 +461,10 @@ else
   [[ -n "$TD_TASK_ID" ]] && echo "$TD_TASK_ID" > "$TASK_DIR/td_task"
   date -u +%Y-%m-%dT%H:%M:%SZ > "$TASK_DIR/started"
   [[ -n "$PRIMARY_PANE" ]] && echo "$PRIMARY_PANE" > "$TASK_DIR/primary_pane"
+  if [[ -n "$OC_SESSION" ]]; then
+    jq -nc --argjson pid "$OC_PID" --arg sessionId "$OC_SESSION" \
+      '{pid: $pid, sessionId: $sessionId}' > "$TASK_DIR/oc_target.json"
+  fi
 fi
 
 # ── Create tmux session (local only) ─────────────────────────────────────────
