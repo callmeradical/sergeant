@@ -32,6 +32,19 @@ EOF
   chmod +x "$TEST_TMP/bin/tmux"
 }
 
+make_goose_version_command() {
+  local version_output="$1"
+  cat > "$TEST_TMP/bin/goose" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "--version" ]]; then
+  echo "$version_output"
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "$TEST_TMP/bin/goose"
+}
+
 test_healthy_installation() {
   local output status
   setup_fixture
@@ -569,7 +582,7 @@ test_goose_override_is_healthy() {
   local output status
   setup_fixture
   rm -f "$TEST_TMP/bin/opencode" "$TEST_TMP/bin/claude"
-  make_fake_command goose
+  make_goose_version_command "goose 1.10.0"
   export SERGEANT_AGENT=goose
 
   set +e
@@ -580,7 +593,45 @@ test_goose_override_is_healthy() {
   unset SERGEANT_AGENT
 
   assert_eq 0 "$status"
-  assert_contains "$output" "[PASS] agents.harness: SERGEANT_AGENT selects goose (goose 1.0.0)"
+  assert_contains "$output" "[PASS] agents.harness: SERGEANT_AGENT selects goose (goose 1.10.0)"
+}
+
+test_goose_override_requires_compatible_version() {
+  local output status
+  setup_fixture
+  rm -f "$TEST_TMP/bin/opencode" "$TEST_TMP/bin/claude"
+  make_goose_version_command "goose 1.9.9"
+  export SERGEANT_AGENT=goose
+
+  set +e
+  output="$("$DOCTOR" 2>&1)"
+  status=$?
+  set -e
+
+  unset SERGEANT_AGENT
+
+  assert_eq 2 "$status"
+  assert_contains "$output" "[FAIL] agents.harness"
+  assert_contains "$output" "Goose 1.10+ is required for resumable sessions"
+}
+
+test_goose_override_with_unparseable_version_is_degraded() {
+  local output status
+  setup_fixture
+  rm -f "$TEST_TMP/bin/opencode" "$TEST_TMP/bin/claude"
+  make_goose_version_command "goose prerelease build"
+  export SERGEANT_AGENT=goose
+
+  set +e
+  output="$("$DOCTOR" 2>&1)"
+  status=$?
+  set -e
+
+  unset SERGEANT_AGENT
+
+  assert_eq 1 "$status"
+  assert_contains "$output" "[WARN] agents.harness"
+  assert_contains "$output" "version output is unparseable"
 }
 
 test_explicit_agent_override_must_be_usable() {
@@ -760,6 +811,10 @@ test_default_opencode_selection_must_be_usable
 echo "PASS: default opencode selection"
 test_goose_override_is_healthy
 echo "PASS: goose override"
+test_goose_override_requires_compatible_version
+echo "PASS: goose minimum version"
+test_goose_override_with_unparseable_version_is_degraded
+echo "PASS: goose unparseable version"
 test_explicit_agent_override_must_be_usable
 echo "PASS: explicit agent override"
 test_opencode_auto_selection_must_be_usable

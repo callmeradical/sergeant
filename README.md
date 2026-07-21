@@ -178,7 +178,7 @@ Agent-loaded skills for structured workflows:
 - `babydriver` — remote dispatch to cleanthes (optional)
 - `no-mistakes` — validated delivery pipeline (optional)
 - A usable selected agent harness; when no override or agent session is
-  present, Sergeant defaults to OpenCode
+  present, Sergeant defaults to OpenCode. Goose support requires 1.10+.
 
 ## License
 

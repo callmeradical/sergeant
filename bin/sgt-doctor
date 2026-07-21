@@ -100,6 +100,28 @@ check_tool() {
   return 1
 }
 
+parse_semver_triplet() {
+  local version_text="$1" match major minor patch
+  match="$(printf '%s\n' "$version_text" | grep -Eo '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || true)"
+  [[ -n "$match" ]] || return 1
+  IFS=. read -r major minor patch <<< "$match"
+  patch="${patch:-0}"
+  printf '%s %s %s\n' "$major" "$minor" "$patch"
+}
+
+goose_version_is_compatible() {
+  local version_text="$1"
+  local major minor patch
+  read -r major minor patch < <(parse_semver_triplet "$version_text") || return 2
+  if ((major > 1)); then
+    return 0
+  fi
+  if ((major == 1 && minor >= 10)); then
+    return 0
+  fi
+  return 1
+}
+
 check_selected_agent() {
   local selected_agent="$1" selected_by="$2" agent_version
   case "$selected_agent" in
@@ -115,6 +137,21 @@ check_selected_agent() {
   fi
   if agent_version="$("$selected_agent" --version 2>&1)"; then
     agent_version="${agent_version%%$'\n'*}"
+    if [[ "$selected_agent" == "goose" ]]; then
+      if goose_version_is_compatible "$agent_version"; then
+        :
+      else
+        case $? in
+          1)
+            add_check FAIL agents.harness "$selected_by goose (${agent_version:-available}), but Goose 1.10+ is required for resumable sessions"
+            ;;
+          2)
+            add_check WARN agents.harness "$selected_by goose, but its version output is unparseable; need Goose 1.10+ for resumable sessions"
+            ;;
+        esac
+        return
+      fi
+    fi
     add_check PASS agents.harness "$selected_by $selected_agent (${agent_version:-available})"
   else
     add_check FAIL agents.harness "$selected_by $selected_agent, but the installed command is not usable"

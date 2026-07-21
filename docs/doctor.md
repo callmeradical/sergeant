@@ -51,9 +51,9 @@ Diagnostics cover:
   babydriver, and mise.
 - The currently selected agent harness, including OpenCode as the default when
   no environment signal or explicit override is present.
-- When Goose is selected, dispatch and resume still depend on Goose persisting
-  a resumable session record for the current worktree; harness availability
-  alone is not sufficient for a waiting worker to resume.
+- When Goose is selected, Sergeant requires Goose 1.10+ so dispatch and resume
+  can rely on Goose persisting a resumable session record for the current
+  worktree.
 - GitHub authentication identity. Tokens are neither requested nor printed.
 - Global and project YAML syntax and required project/repository fields.
 - Repository paths, Git metadata, configured URLs, required `origin` remotes,
