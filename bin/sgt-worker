@@ -81,6 +81,24 @@ _finalize_submitted_response() {
   _sgt_response_lock_release
 }
 
+_proof_allows_response_finalization() {
+  local status="$1"
+  case "$status" in
+    needs_input|blocked)
+      [[ -f "$REPO_STATE/session_id" ]]
+      ;;
+    done)
+      [[ -s "$WORKTREE/.sergeant-result" ]]
+      ;;
+    failed:*)
+      return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 _orphan() {
   local exit_code="$1"
   local reason="$2"
@@ -247,6 +265,12 @@ while true; do
   exit_code=$?
   status="$(_status)"
   _sync_state
+  if [[ "${RESPONSE_SUBMISSION_PENDING:-0}" == "1" ]] && _proof_allows_response_finalization "$status"; then
+    _finalize_submitted_response "${RESPONSE_SUBMISSION_ID:-}"
+    RESPONSE_SUBMISSION_PENDING=0
+    RESPONSE_SUBMISSION_ID=""
+    _sync_state
+  fi
 
   case "$status" in
     needs_input|blocked)
@@ -261,11 +285,6 @@ while true; do
         fi
         exit $?
       fi
-      if [[ "${RESPONSE_SUBMISSION_PENDING:-0}" == "1" ]]; then
-        _finalize_submitted_response "${RESPONSE_SUBMISSION_ID:-}"
-        RESPONSE_SUBMISSION_PENDING=0
-        RESPONSE_SUBMISSION_ID=""
-      fi
       "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
       _wait_for_response
       next_message="$WAIT_RESPONSE_MESSAGE"
@@ -275,21 +294,11 @@ while true; do
         _orphan 1 "terminal status done requires .sergeant-result"
         exit $?
       fi
-      if [[ "${RESPONSE_SUBMISSION_PENDING:-0}" == "1" ]]; then
-        _finalize_submitted_response "${RESPONSE_SUBMISSION_ID:-}"
-        RESPONSE_SUBMISSION_PENDING=0
-        RESPONSE_SUBMISSION_ID=""
-      fi
       _sync_state
       rm -f "$DIAGNOSTIC"
       exit 0
       ;;
     failed:*)
-      if [[ "${RESPONSE_SUBMISSION_PENDING:-0}" == "1" ]]; then
-        _finalize_submitted_response "${RESPONSE_SUBMISSION_ID:-}"
-        RESPONSE_SUBMISSION_PENDING=0
-        RESPONSE_SUBMISSION_ID=""
-      fi
       exit 1
       ;;
     *)
