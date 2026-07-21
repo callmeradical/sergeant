@@ -146,7 +146,7 @@ Agent-loaded skills for structured workflows:
 
 ## Requirements
 
-- `td` — task CLI, required for brief-based `sgt-dispatch` runs, `sgt-no-mistakes-finding`, and `sgt-td-*` commands
+- [`github.com/marcus/td`](https://github.com/marcus/td) — task CLI, required for brief-based `sgt-dispatch` runs, `sgt-no-mistakes-finding`, and `sgt-td-*` commands; install with `brew install marcus/tap/td` or `go install github.com/marcus/td@latest`
 - `yq` — YAML parser: `brew install yq`
 - `git` and `gh` — for repo operations and PRs
 - `tmux` — for local agent dispatch

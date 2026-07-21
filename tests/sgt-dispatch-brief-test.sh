@@ -30,6 +30,15 @@ cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
 
 set -euo pipefail
 
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'td version v0.51.2\n'
+  exit 0
+fi
+if [[ "${1:-}" == "create" && "${2:-}" == "--help" ]]; then
+  printf '%s\n' 'Usage: td create TITLE --description TEXT --json --work-dir DIR'
+  exit 0
+fi
+
 work_dir=""
 args=()
 
