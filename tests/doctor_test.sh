@@ -313,7 +313,46 @@ EOF
   assert_not_contains "$output" "secret-value"
   assert_contains "$output" "PATH=/usr/bin"
   assert_contains "$output" "ordinary-text"
-  python3 -c 'import json,sys; json.loads(sys.stdin.read())' <<< "$output" \
+  "$REAL_PYTHON3" -c 'import json,sys; json.loads(sys.stdin.read())' <<< "$output" \
+    || fail "JSON output is not parseable"
+}
+
+test_human_and_json_output_redact_compound_credentials_without_python() {
+  local output status
+  setup_fixture
+  make_unavailable_command python3
+  cat > "$TEST_TMP/bin/graphify" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+  echo 'graphify 1.0.0 API_TOKEN="top secret-value" ordinary-text AWS_SECRET_ACCESS_KEY=supersecret PATH=/usr/bin'
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "$TEST_TMP/bin/graphify"
+
+  set +e
+  output="$("$DOCTOR" 2>&1)"
+  status=$?
+  set -e
+
+  assert_eq 2 "$status"
+  assert_contains "$output" "API_TOKEN=[REDACTED] ordinary-text AWS_SECRET_ACCESS_KEY=[REDACTED] PATH=/usr/bin"
+  assert_not_contains "$output" "top secret-value"
+  assert_not_contains "$output" "secret-value"
+  assert_not_contains "$output" "supersecret"
+
+  set +e
+  output="$("$DOCTOR" --json 2>&1)"
+  status=$?
+  set -e
+
+  assert_eq 2 "$status"
+  assert_contains "$output" "API_TOKEN=[REDACTED] ordinary-text AWS_SECRET_ACCESS_KEY=[REDACTED] PATH=/usr/bin"
+  assert_not_contains "$output" "top secret-value"
+  assert_not_contains "$output" "secret-value"
+  assert_not_contains "$output" "supersecret"
+  "$REAL_PYTHON3" -c 'import json,sys; json.loads(sys.stdin.read())' <<< "$output" \
     || fail "JSON output is not parseable"
 }
 
@@ -868,6 +907,8 @@ test_diagnostics_redact_secrets
 echo "PASS: secret redaction"
 test_human_and_json_output_redact_compound_credentials
 echo "PASS: compound credential output redaction"
+test_human_and_json_output_redact_compound_credentials_without_python
+echo "PASS: compound credential output redaction without python"
 test_invalid_project_arguments_exit_64
 echo "PASS: invalid project arguments"
 test_check_ids_redact_github_tokens

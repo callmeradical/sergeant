@@ -91,56 +91,63 @@ _sgt_tmux_pane_is_supervisor() {
 _die()  { echo "ERROR: $*" >&2; exit 1; }
 _info() { echo "  $*"; }
 
+_sgt_redact_assignments() {
+  local input="$1" output="" rest key_match separator quote
+  local i=0 length=${#input}
+  local nocasematch_was_on=0
+  shopt -q nocasematch && nocasematch_was_on=1
+  shopt -s nocasematch
+
+  while ((i < length)); do
+    rest="${input:i}"
+    if (((i == 0))) || [[ ! "${input:i-1:1}" =~ [[:alnum:]_] ]]; then
+      if [[ "$rest" =~ ^([A-Za-z0-9_]*(token|password|secret|api([_-]?key))[A-Za-z0-9_]*)([[:space:]]*[:=][[:space:]]*) ]]; then
+        key_match="${BASH_REMATCH[1]}"
+        separator="${BASH_REMATCH[4]}"
+        output+="${key_match}=[REDACTED]"
+        i=$((i + ${#key_match} + ${#separator}))
+        if ((i < length)); then
+          quote="${input:i:1}"
+          if [[ "$quote" == "'" || "$quote" == '"' ]]; then
+            i=$((i + 1))
+            while ((i < length)); do
+              if [[ "$quote" == '"' && "${input:i:1}" == '\' ]] && ((i + 1 < length)); then
+                i=$((i + 2))
+                continue
+              fi
+              if [[ "${input:i:1}" == "$quote" ]]; then
+                i=$((i + 1))
+                break
+              fi
+              i=$((i + 1))
+            done
+          else
+            while ((i < length)); do
+              case "${input:i:1}" in
+                ' '|$'\t'|';'|','|$'\n') break ;;
+              esac
+              i=$((i + 1))
+            done
+          fi
+        fi
+        continue
+      fi
+    fi
+    output+="${input:i:1}"
+    i=$((i + 1))
+  done
+
+  if ((nocasematch_was_on == 0)); then
+    shopt -u nocasematch
+  fi
+  printf '%s' "$output"
+}
+
 _sgt_redact() {
   local value="$1"
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$value" <<'PY'
-import re
-import sys
-
-text = sys.argv[1]
-credential_key = r'[A-Z0-9_]*(?:token|password|secret|api(?:[_-]?key))[A-Z0-9_]*'
-assignment_start = re.compile(rf'(?i)\b({credential_key})\b\s*[:=]\s*')
-
-def redact_assignments(value: str) -> str:
-    chunks = []
-    pos = 0
-    for match in assignment_start.finditer(value):
-        if match.start() < pos:
-            continue
-        chunks.append(value[pos:match.start()])
-        chunks.append(f'{match.group(1)}=[REDACTED]')
-        i = match.end()
-        if i < len(value) and value[i] in ("'", '"'):
-            quote = value[i]
-            i += 1
-            while i < len(value):
-                if quote == '"' and value[i] == '\\' and i + 1 < len(value):
-                    i += 2
-                    continue
-                if value[i] == quote:
-                    i += 1
-                    break
-                i += 1
-        else:
-            while i < len(value) and value[i] not in ' \t;,\n':
-                i += 1
-        pos = i
-    chunks.append(value[pos:])
-    return ''.join(chunks)
-
-text = re.sub(r'(https?://)[^/@\s]+@', r'\1[REDACTED]@', text, flags=re.I)
-text = redact_assignments(text)
-text = re.sub(r'\bgh[pousr]_[A-Za-z0-9_]+\b', '[REDACTED]', text)
-text = re.sub(r'\bgithub_pat_[A-Za-z0-9_]+\b', '[REDACTED]', text)
-sys.stdout.write(text)
-PY
-    return
-  fi
-
+  value="$(_sgt_redact_assignments "$value")"
   printf '%s' "$value" | sed -E \
     -e 's#(https?://)[^/@[:space:]]+@#\1[REDACTED]@#g' \
-    -e 's#([A-Za-z0-9_]*(TOKEN|PASSWORD|SECRET|API[_-]?KEY)[A-Za-z0-9_]*)[[:space:]]*[:=][[:space:]]*([^;,[:space:]]+)#\1=[REDACTED]#gI' \
     -e 's#gh[pousr]_[A-Za-z0-9_]+#[REDACTED]#g' \
     -e 's#github_pat_[A-Za-z0-9_]+#[REDACTED]#g'
 }

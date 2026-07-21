@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TEST_TMP="$(mktemp -d)"
+trap 'rm -rf "$TEST_TMP"' EXIT
 
 goose_cmd="$(bash -lc 'source "$1"; _sgt_agent_run_cmd goose "initial mission"' _ "$ROOT_DIR/bin/_sgt-lib.sh")"
 [[ "$goose_cmd" == *"goose run --output-format json -t"* ]]
@@ -42,5 +44,18 @@ redacted="$(bash -lc 'source "$1"; _sgt_redact "API_TOKEN='\''top secret-value'\
 [[ "$redacted" != *"top"* ]]
 [[ "$redacted" != *"secret-value"* ]]
 [[ "$redacted" == *"ordinary-text"* ]]
+
+cat > "$TEST_TMP/python3" <<'EOF'
+#!/usr/bin/env bash
+exit 127
+EOF
+chmod +x "$TEST_TMP/python3"
+
+redacted="$(PATH="$TEST_TMP:/bin" bash -lc 'source "$1"; _sgt_redact '\''API_TOKEN="top secret-value" ordinary-text AWS_SECRET_ACCESS_KEY=supersecret PATH=/usr/bin'\''' _ "$ROOT_DIR/bin/_sgt-lib.sh")"
+[[ "$redacted" == "API_TOKEN=[REDACTED] ordinary-text AWS_SECRET_ACCESS_KEY=[REDACTED] PATH=/usr/bin" ]]
+[[ "$redacted" != *"top secret-value"* ]]
+[[ "$redacted" != *"secret-value"* ]]
+[[ "$redacted" != *"supersecret"* ]]
+[[ "$redacted" == *"ordinary-text AWS_SECRET_ACCESS_KEY=[REDACTED] PATH=/usr/bin"* ]]
 
 printf 'sgt-lib agent command builder: ok\n'
