@@ -96,11 +96,16 @@ response_id="$(cat "$REPO_DIR/response_id" 2>/dev/null || true)"
 remote_pending_id="$(cat "$REPO_DIR/remote_response_pending_id" 2>/dev/null || true)"
 remote_pending_state="$(cat "$REPO_DIR/remote_response_pending_state" 2>/dev/null || true)"
 if [[ -n "$pending_response" ]]; then
-  if [[ "$backend" == "remote-babydriver" && -n "$remote_pending_id" && "$remote_pending_state" == "awaiting_consumption" ]]; then
-    _die "A remote Sergeant response is already pending consumption for $TASK_ID/$REPO"
+  if [[ "$backend" == "remote-babydriver" && -n "$remote_pending_id" ]]; then
+    if [[ "$RESPONSE" != "$pending_response" ]]; then
+      _die "A different remote Sergeant response is already pending for $TASK_ID/$REPO"
+    fi
+    if [[ "$remote_pending_state" == "awaiting_consumption" && "$status" != "orphaned" ]]; then
+      _die "A remote Sergeant response is already pending consumption for $TASK_ID/$REPO"
+    fi
   fi
   [[ "$status" == "orphaned" ]] || _die "A Sergeant response is already pending consumption for $TASK_ID/$REPO"
-  if [[ "$RESPONSE" != "$pending_response" ]]; then
+  if [[ "$backend" != "remote-babydriver" && "$RESPONSE" != "$pending_response" ]]; then
     printf 'sgt-respond: reusing stored recovery response for orphaned worker %s/%s; supplied text was ignored.\n' "$TASK_ID" "$REPO" >&2
   fi
   RESPONSE="$pending_response"
@@ -184,7 +189,6 @@ if [[ "$backend" == "remote-babydriver" ]]; then
     _die "Remote worker relaunch failed for $TASK_ID/$REPO"
   fi
   _write_remote_pending_marker "$response_id" "awaiting_consumption"
-  _clear_local_response_transport
   rm -f "$REPO_DIR/diagnostic" "$REPO_DIR/message"
   [[ -n "$worktree" && -d "$worktree" ]] && {
     rm -f "$worktree/.sergeant-message"

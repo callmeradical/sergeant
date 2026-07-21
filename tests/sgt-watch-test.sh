@@ -158,15 +158,16 @@ grep -Fq 'Remote blocker remains active after failed restart.' "$task/remote/mes
 PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/remote-retry.log" \
 TD_LOG="$TEST_ROOT/remote-retry-td.log" REMOTE_RESPONSE_PATH="$TEST_ROOT/remote-project/.sergeant-response" \
 REMOTE_RESPONSE_TEXT='preserved remote answer' \
-  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'ignored retry text' >/dev/null 2>"$TEST_ROOT/remote-retry.err"
+  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'preserved remote answer' >/dev/null 2>"$TEST_ROOT/remote-retry.err"
 [[ "$(cat "$task/remote/status")" == "in_progress" ]]
 [[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == "in_progress" ]]
 [[ "$(cat "$task/remote/response_id")" == '0123456789abcdef0123456789abcdef' ]]
 [[ "$(cat "$task/remote/remote_response_pending_id")" == '0123456789abcdef0123456789abcdef' ]]
 [[ "$(cat "$task/remote/remote_response_pending_state")" == 'awaiting_consumption' ]]
-[[ ! -e "$task/remote/response" && ! -e "$TEST_ROOT/remote-wt/.sergeant-response" ]]
+[[ "$(cat "$task/remote/response")" == 'preserved remote answer' ]]
+[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-response")" == 'preserved remote answer' ]]
 [[ "$(cat "$TEST_ROOT/remote-project/.sergeant-response")" == 'preserved remote answer' ]]
-grep -Fq 'reusing stored recovery response' "$TEST_ROOT/remote-retry.err"
+[[ ! -s "$TEST_ROOT/remote-retry.err" ]]
 if [[ -e "$TEST_ROOT/remote-retry-td.log" ]]; then
   printf 'watch-preserved retry should not log a duplicate td decision\n' >&2
   exit 1
@@ -208,6 +209,7 @@ BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TE
   "$ROOT_DIR/bin/sgt-watch" --sync task-1
 [[ "$(cat "$task/remote/status")" == "blocked" ]]
 [[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == "blocked" ]]
+[[ ! -e "$task/remote/response" && ! -e "$TEST_ROOT/remote-wt/.sergeant-response" ]]
 [[ ! -e "$task/remote/remote_response_pending_id" && ! -e "$task/remote/remote_response_pending_state" ]]
 grep -Fq 'New blocker after consumption.' "$task/remote/message"
 

@@ -216,7 +216,8 @@ remote_response_id="$(cat "$remote_repo_state/response_id")"
 [[ "$remote_response_id" =~ ^[a-f0-9]{32}$ ]]
 [[ "$(cat "$remote_repo_state/remote_response_pending_id")" == "$remote_response_id" ]]
 [[ "$(cat "$remote_repo_state/remote_response_pending_state")" == 'awaiting_consumption' ]]
-[[ ! -e "$remote_repo_state/response" && ! -e "$remote_worktree/.sergeant-response" ]]
+[[ "$(cat "$remote_repo_state/response")" == 'remote response' ]]
+[[ "$(cat "$remote_worktree/.sergeant-response")" == 'remote response' ]]
 [[ "$(cat "$remote_project_dir/.sergeant-response")" == 'remote response' ]]
 grep -Fq 'restart remote-drive --window remote-window' "$TEST_ROOT/remote-babydriver.log"
 [[ ! -e "$remote_repo_state/message" && ! -e "$remote_worktree/.sergeant-message" ]]
@@ -242,7 +243,8 @@ REMOTE_RESPONSE_PATH="$remote_name_project_dir/.sergeant-response" REMOTE_RESPON
   "$ROOT_DIR/bin/sgt-respond" task-1 remote-name 'remote name response' >/dev/null
 [[ "$(cat "$remote_name_repo_state/status")" == 'in_progress' ]]
 [[ "$(cat "$remote_name_worktree/.sergeant-status")" == 'in_progress' ]]
-[[ ! -e "$remote_name_repo_state/response" && ! -e "$remote_name_worktree/.sergeant-response" ]]
+[[ "$(cat "$remote_name_repo_state/response")" == 'remote name response' ]]
+[[ "$(cat "$remote_name_worktree/.sergeant-response")" == 'remote name response' ]]
 [[ "$(cat "$remote_name_repo_state/remote_response_pending_state")" == 'awaiting_consumption' ]]
 [[ "$(cat "$remote_name_project_dir/.sergeant-response")" == 'remote name response' ]]
 grep -Fq 'restart remote-drive --window remote-window:Need a remote answer. [sgt:task-1]' "$TEST_ROOT/remote-name-babydriver.log"
@@ -266,21 +268,51 @@ if [[ -e "$TEST_ROOT/remote-duplicate-td.log" ]]; then
   printf 'remote duplicate should not log a new td decision\n' >&2
   exit 1
 fi
-rm -f "$remote_project_dir/.sergeant-response" "$remote_repo_state/remote_response_pending_id" "$remote_repo_state/remote_response_pending_state"
+printf 'orphaned\n' > "$remote_repo_state/status"
+printf 'orphaned\n' > "$remote_worktree/.sergeant-status"
+PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-orphan-retry.log" \
+TD_LOG="$TEST_ROOT/remote-orphan-retry-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
+REMOTE_RESPONSE_PATH="$remote_project_dir/.sergeant-response" REMOTE_RESPONSE_TEXT='remote response' \
+  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'remote response' >/dev/null
+[[ "$(cat "$remote_repo_state/status")" == 'in_progress' ]]
+[[ "$(cat "$remote_worktree/.sergeant-status")" == 'in_progress' ]]
+[[ "$(cat "$remote_repo_state/response_id")" == "$remote_response_id" ]]
+[[ "$(cat "$remote_repo_state/remote_response_pending_state")" == 'awaiting_consumption' ]]
+grep -Fq 'restart remote-drive --window remote-window' "$TEST_ROOT/remote-orphan-retry.log"
+if [[ -e "$TEST_ROOT/remote-orphan-retry-td.log" ]]; then
+  printf 'remote orphan retry should not log a duplicate td decision\n' >&2
+  exit 1
+fi
+printf 'orphaned\n' > "$remote_repo_state/status"
+printf 'orphaned\n' > "$remote_worktree/.sergeant-status"
+set +e
+PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-conflict.log" \
+TD_LOG="$TEST_ROOT/remote-conflict-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
+REMOTE_RESPONSE_PATH="$remote_project_dir/.sergeant-response" REMOTE_RESPONSE_TEXT='conflicting response' \
+  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'conflicting response' >/dev/null 2>&1
+remote_conflict_status=$?
+set -e
+[[ "$remote_conflict_status" -ne 0 ]]
+if [[ -e "$TEST_ROOT/remote-conflict-td.log" ]]; then
+  printf 'remote conflicting retry should not log a td decision\n' >&2
+  exit 1
+fi
+rm -f "$remote_project_dir/.sergeant-response" "$remote_repo_state/response" "$remote_worktree/.sergeant-response" "$remote_repo_state/remote_response_pending_id" "$remote_repo_state/remote_response_pending_state"
 PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-next-gate.log" \
 TD_LOG="$TEST_ROOT/remote-next-gate-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
 REMOTE_RESPONSE_PATH="$remote_project_dir/.sergeant-response" REMOTE_RESPONSE_TEXT='remote response 2' \
   "$ROOT_DIR/bin/sgt-respond" task-1 remote 'remote response 2' >/dev/null
 [[ "$(cat "$remote_repo_state/status")" == 'in_progress' ]]
 [[ "$(cat "$remote_worktree/.sergeant-status")" == 'in_progress' ]]
-[[ ! -e "$remote_repo_state/response" && ! -e "$remote_worktree/.sergeant-response" ]]
+[[ "$(cat "$remote_repo_state/response")" == 'remote response 2' ]]
+[[ "$(cat "$remote_worktree/.sergeant-response")" == 'remote response 2' ]]
 [[ "$(cat "$remote_repo_state/response_id")" != "$remote_response_id" ]]
 [[ "$(cat "$remote_repo_state/remote_response_pending_state")" == 'awaiting_consumption' ]]
 [[ "$(cat "$remote_project_dir/.sergeant-response")" == 'remote response 2' ]]
 grep -Fq 'restart remote-drive --window remote-window' "$TEST_ROOT/remote-next-gate.log"
 grep -Fq 'log td-remote-789' "$TEST_ROOT/remote-next-gate-td.log"
 
-rm -f "$remote_project_dir/.sergeant-response" "$remote_repo_state/remote_response_pending_id" "$remote_repo_state/remote_response_pending_state"
+rm -f "$remote_project_dir/.sergeant-response" "$remote_repo_state/response" "$remote_worktree/.sergeant-response" "$remote_repo_state/remote_response_pending_id" "$remote_repo_state/remote_response_pending_state"
 printf 'failed: remote execution failed\n' > "$remote_repo_state/status"
 printf 'needs_input\n' > "$remote_worktree/.sergeant-status"
 rm -f "$remote_worktree/.sergeant-response" "$remote_repo_state/response"
@@ -319,13 +351,14 @@ printf 'needs_input\n' > "$remote_worktree/.sergeant-status"
 PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-babydriver-retry.log" \
 TD_LOG="$TEST_ROOT/remote-retry-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
 REMOTE_RESPONSE_PATH="$remote_project_dir/.sergeant-response" REMOTE_RESPONSE_TEXT='remote failure' \
-  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'ignored retry text' >/dev/null 2>"$TEST_ROOT/remote-retry.err"
+  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'remote failure' >/dev/null 2>"$TEST_ROOT/remote-retry.err"
 [[ "$(cat "$remote_repo_state/status")" == 'in_progress' ]]
 [[ "$(cat "$remote_worktree/.sergeant-status")" == 'in_progress' ]]
 [[ "$(cat "$remote_repo_state/response_id")" == "$failed_remote_response_id" ]]
 [[ "$(cat "$remote_repo_state/remote_response_pending_state")" == 'awaiting_consumption' ]]
-[[ ! -e "$remote_repo_state/response" && ! -e "$remote_worktree/.sergeant-response" ]]
-grep -Fq 'reusing stored recovery response' "$TEST_ROOT/remote-retry.err"
+[[ "$(cat "$remote_repo_state/response")" == 'remote failure' ]]
+[[ "$(cat "$remote_worktree/.sergeant-response")" == 'remote failure' ]]
+[[ ! -s "$TEST_ROOT/remote-retry.err" ]]
 if [[ -e "$TEST_ROOT/remote-retry-td.log" ]]; then
   printf 'remote retry should not log a duplicate td decision\n' >&2
   exit 1

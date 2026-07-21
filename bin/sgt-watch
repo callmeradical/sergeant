@@ -230,6 +230,11 @@ _sync_remote_repo() {
     [[ -f "$remote_response_path" ]] && remote_response_present=1
   fi
 
+  _clear_verified_remote_response_transport() {
+    rm -f "$repo_dir/response" "$repo_dir/remote_response_pending_id" "$repo_dir/remote_response_pending_state"
+    [[ -n "$worktree" ]] && rm -f "$worktree/.sergeant-response"
+  }
+
   if [[ -z "$session" || -z "$window" ]]; then
     [[ -n "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
     printf 'orphaned\n' > "$repo_dir/status"
@@ -327,9 +332,10 @@ _sync_remote_repo() {
   fi
   preserve_orphan_checkpoint=0
   if [[ "$remote_pending_state" == "awaiting_consumption" && "$remote_response_present" == "0" ]]; then
-    rm -f "$repo_dir/remote_response_pending_id" "$repo_dir/remote_response_pending_state"
+    _clear_verified_remote_response_transport
     remote_pending_id=""
     remote_pending_state=""
+    pending_response=""
   fi
   if [[ "$remote_pending_state" == "awaiting_consumption" && "$remote_response_present" == "1" && ( "$mapped_status" == "blocked" || "$mapped_status" == "needs_input" ) ]]; then
     if [[ "$current_status" == "orphaned" ]]; then
