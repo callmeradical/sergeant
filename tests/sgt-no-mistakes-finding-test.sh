@@ -77,6 +77,14 @@ assert_log_contains() {
   }
 }
 
+assert_log_lacks() {
+  if grep -Fq -- "$1" "$TEST_ROOT/td.log"; then
+    printf 'unexpected td invocation fragment: %s\nlog:\n' "$1" >&2
+    cat "$TEST_ROOT/td.log" >&2
+    exit 1
+  fi
+}
+
 run_router --disposition td
 [[ "$status" -eq 0 && "$output" == *"td-created"* ]] || {
   printf 'warning debt was not routed to td: %s\n' "$output" >&2
@@ -121,22 +129,66 @@ fi
 
 TD_LIST_RESULT='[{"id":"td-review","status":"in_review","description":"Deduplication key: no-mistakes-finding:app:review-7"}]' \
   run_router --run-id run-44 --head-sha fed654 \
-    --description "Resurface review debt on rerun" \
+    --description "Keep review debt state on rerun" \
     --intent "Keep one visible debt card per finding" \
     --disposition td
 [[ "$status" -eq 0 && "$output" == *"td-review"* ]] || {
   printf 'in-review debt card was not updated: %s\n' "$output" >&2
   exit 1
 }
-assert_log_contains "update td-review --status open"
 assert_log_contains "update td-review --priority P2"
-if grep -Fq "create" "$TEST_ROOT/td.log"; then
-  printf 'in-review deduplicated finding created a second card\n' >&2
+assert_log_lacks "update td-review --status open"
+assert_log_lacks "reopen td-review"
+assert_log_lacks "defer td-review --clear"
+assert_log_lacks "create"
+
+TD_LIST_RESULT='[{"id":"td-progress","status":"in_progress","description":"Deduplication key: no-mistakes-finding:app:review-7"}]' \
+  run_router --run-id run-45 --head-sha aaa111 \
+    --description "Keep active debt state on rerun" \
+    --intent "Do not steal active work" \
+    --disposition td
+[[ "$status" -eq 0 && "$output" == *"td-progress"* ]] || {
+  printf 'in-progress debt card was not updated: %s\n' "$output" >&2
   exit 1
-fi
+}
+assert_log_contains "update td-progress --priority P2"
+assert_log_lacks "update td-progress --status open"
+assert_log_lacks "reopen td-progress"
+assert_log_lacks "defer td-progress --clear"
+assert_log_lacks "create"
+
+TD_LIST_RESULT='[{"id":"td-blocked","status":"blocked","description":"Deduplication key: no-mistakes-finding:app:review-7"}]' \
+  run_router --run-id run-46 --head-sha bbb222 \
+    --description "Keep blocked debt state on rerun" \
+    --intent "Do not clear blockers" \
+    --disposition td
+[[ "$status" -eq 0 && "$output" == *"td-blocked"* ]] || {
+  printf 'blocked debt card was not updated: %s\n' "$output" >&2
+  exit 1
+}
+assert_log_contains "update td-blocked --priority P2"
+assert_log_lacks "update td-blocked --status open"
+assert_log_lacks "reopen td-blocked"
+assert_log_lacks "defer td-blocked --clear"
+assert_log_lacks "create"
+
+TD_LIST_RESULT='[{"id":"td-open","status":"open","description":"Deduplication key: no-mistakes-finding:app:review-7"}]' \
+  run_router --run-id run-47 --head-sha ccc333 \
+    --description "Keep open debt state on rerun" \
+    --intent "Leave actionable debt untouched" \
+    --disposition td
+[[ "$status" -eq 0 && "$output" == *"td-open"* ]] || {
+  printf 'open debt card was not updated: %s\n' "$output" >&2
+  exit 1
+}
+assert_log_contains "update td-open --priority P2"
+assert_log_lacks "update td-open --status open"
+assert_log_lacks "reopen td-open"
+assert_log_lacks "defer td-open --clear"
+assert_log_lacks "create"
 
 TD_LIST_RESULT='[{"id":"td-closed","status":"closed","description":"Deduplication key: no-mistakes-finding:app:review-7"}]' \
-  run_router --run-id run-45 --head-sha cba321 \
+  run_router --run-id run-48 --head-sha cba321 \
     --description "Reopen closed debt on rerun" \
     --intent "Keep one visible debt card per finding" \
     --disposition td
@@ -146,13 +198,12 @@ TD_LIST_RESULT='[{"id":"td-closed","status":"closed","description":"Deduplicatio
 }
 assert_log_contains "reopen td-closed"
 assert_log_contains "update td-closed"
-if grep -Fq "create" "$TEST_ROOT/td.log"; then
-  printf 'closed deduplicated finding created a second card\n' >&2
-  exit 1
-fi
+assert_log_lacks "update td-closed --status open"
+assert_log_lacks "defer td-closed --clear"
+assert_log_lacks "create"
 
 TD_LIST_RESULT='[{"id":"td-deferred","status":"open","defer_until":"2026-07-22","description":"Deduplication key: no-mistakes-finding:app:review-7"}]' \
-  run_router --run-id run-46 --head-sha abc999 \
+  run_router --run-id run-49 --head-sha abc999 \
     --description "Resurface deferred debt on rerun" \
     --intent "Keep deferred reruns actionable" \
     --disposition td
@@ -162,10 +213,23 @@ TD_LIST_RESULT='[{"id":"td-deferred","status":"open","defer_until":"2026-07-22",
 }
 assert_log_contains "defer td-deferred --clear"
 assert_log_contains "update td-deferred --priority P2"
-if grep -Fq "create" "$TEST_ROOT/td.log"; then
-  printf 'deferred deduplicated finding created a second card\n' >&2
+assert_log_lacks "update td-deferred --status open"
+assert_log_lacks "reopen td-deferred"
+assert_log_lacks "create"
+
+TD_LIST_RESULT='[{"id":"td-null-defer","status":"open","defer_until":null,"description":"Deduplication key: no-mistakes-finding:app:review-7"}]' \
+  run_router --run-id run-50 --head-sha def999 \
+    --description "Handle null deferred metadata" \
+    --intent "Keep reruns updating one card" \
+    --disposition td
+[[ "$status" -eq 0 && "$output" == *"td-null-defer"* ]] || {
+  printf 'null defer metadata broke rerun updates: %s\n' "$output" >&2
   exit 1
-fi
+}
+assert_log_contains "update td-null-defer --priority P2"
+assert_log_lacks "defer td-null-defer --clear"
+assert_log_lacks "reopen td-null-defer"
+assert_log_lacks "create"
 
 TD_LIST_RESULT='{"oops":' run_router --disposition td
 [[ "$status" -ne 0 && "$output" == *"td list returned invalid JSON"* ]] || {

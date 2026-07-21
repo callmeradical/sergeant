@@ -147,7 +147,11 @@ matches = []
 
 for item in items:
     if needle in item.get("description", "").splitlines():
-        matches.append((item["id"], item.get("status", ""), item.get("defer_until", "")))
+        matches.append((
+            item["id"],
+            item.get("status") or "",
+            item.get("defer_until") or "",
+        ))
 
 if len(matches) > 1:
     ids = ", ".join(match[0] for match in matches)
@@ -167,11 +171,6 @@ fi
 if [[ -n "$existing_id" ]]; then
   if [[ "$existing_status" == "closed" ]]; then
     td reopen "$existing_id" --work-dir "$repo_path" --json >/dev/null
-  elif [[ -n "$existing_status" && "$existing_status" != "open" ]]; then
-    td update "$existing_id" \
-      --status open \
-      --work-dir "$repo_path" \
-      --json >/dev/null
   fi
   if [[ -n "$existing_defer_until" ]]; then
     td defer "$existing_id" \
