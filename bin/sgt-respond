@@ -43,10 +43,17 @@ if [[ -f "$REPO_DIR/response" || (-n "$worktree" && -d "$worktree" && -f "$workt
   _die "A Sergeant response is already pending consumption for $TASK_ID/$REPO"
 fi
 
+_clear_published_response() {
+  rm -f "$REPO_DIR/response"
+  if [[ -n "$worktree" && -d "$worktree" ]]; then
+    rm -f "$worktree/.sergeant-response"
+  fi
+}
+
 response_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
 if [[ -n "$worktree" && -d "$worktree" ]]; then
   printf '%s' "$response_id" | "$SCRIPT_DIR/sgt-td-memory" response "$REPO_DIR" "$worktree" || true
-elif [[ -f "$REPO_DIR/td_task" ]]; then
+elif [[ -f "$REPO_DIR/td_task" || -f "$REPO_DIR/remote_td_task" ]]; then
   printf 'td-memory: worktree unavailable; response decision receipt could not be logged before fleet-only delivery\n' >> "$REPO_DIR/diagnostic"
 fi
 
@@ -63,15 +70,12 @@ _atomic_write "$REPO_DIR/response" "$RESPONSE"
 _atomic_write "$REPO_DIR/response_id" "$response_id"
 if [[ -n "$worktree" && -d "$worktree" ]]; then
   _atomic_write "$worktree/.sergeant-response" "$RESPONSE"
-  echo "sgt-respond: response written to fleet state and worktree."
-else
+elif [[ "$backend" != "remote-babydriver" ]]; then
   echo "sgt-respond: worktree unavailable; only fleet state was written."
   _sgt_response_lock_release
   trap - EXIT
   exit 0
 fi
-_sgt_response_lock_release
-trap - EXIT
 
 if [[ "$backend" == "remote-babydriver" ]]; then
   remote_session="$(cat "$REPO_DIR/remote_session" 2>/dev/null || true)"
@@ -79,15 +83,19 @@ if [[ "$backend" == "remote-babydriver" ]]; then
   remote_task_name="$(cat "$REPO_DIR/remote_task_name" 2>/dev/null || true)"
   restart_target="${remote_task_name:-$remote_window}"
   if ! command -v babydriver >/dev/null 2>&1 || [[ -z "$remote_session" || -z "$restart_target" ]]; then
+    _clear_published_response
     [[ -n "$worktree" && -d "$worktree" ]] && printf 'orphaned\n' > "$worktree/.sergeant-status"
     printf 'orphaned\n' > "$REPO_DIR/status"
     printf 'remote response delivery metadata is incomplete\n' > "$REPO_DIR/diagnostic"
     if [[ -n "$worktree" && -d "$worktree" ]]; then
       "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_DIR" "$worktree" || true
     fi
+    _sgt_response_lock_release
+    trap - EXIT
     _die "Remote worker relaunch metadata is incomplete for $TASK_ID/$REPO"
   fi
   if ! restart_output="$(babydriver restart "$remote_session" --window "$restart_target" 2>&1)"; then
+    _clear_published_response
     {
       printf 'babydriver restart failed for %s/%s\n' "$remote_session" "$restart_target"
       printf '%s\n' "$restart_output"
@@ -97,17 +105,25 @@ if [[ "$backend" == "remote-babydriver" ]]; then
     if [[ -n "$worktree" && -d "$worktree" ]]; then
       "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_DIR" "$worktree" || true
     fi
+    _sgt_response_lock_release
+    trap - EXIT
     _die "Remote worker relaunch failed for $TASK_ID/$REPO"
   fi
+  _clear_published_response
   rm -f "$REPO_DIR/diagnostic" "$REPO_DIR/message"
   [[ -n "$worktree" && -d "$worktree" ]] && {
     rm -f "$worktree/.sergeant-message"
     printf 'in_progress\n' > "$worktree/.sergeant-status"
   }
   printf 'in_progress\n' > "$REPO_DIR/status"
+  _sgt_response_lock_release
+  trap - EXIT
   echo "sgt-respond: requested remote restart for $remote_session/$restart_target."
   exit 0
 fi
+
+_sgt_response_lock_release
+trap - EXIT
 
 pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
 _pane_is_supervisor() {

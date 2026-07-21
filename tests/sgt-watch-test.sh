@@ -125,6 +125,7 @@ BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TE
 grep -Fq 'remote worker session is not alive' "$task/remote/diagnostic"
 grep -Fq 'remote blocker logs' "$task/remote/diagnostic"
 grep -Fq 'logs remote-drive --window remote-window:review follow-up [sgt:task-1] -n 40' "$TEST_ROOT/babydriver.log"
+grep -Fq 'handoff td-remote-1' "$TEST_ROOT/td.log"
 
 printf 'done\n' > "$TEST_ROOT/live-wt/.sergeant-status"
 rm -f "$TEST_ROOT/live-wt/.sergeant-result"
