@@ -39,6 +39,9 @@ case "$status" in
   needs_input|blocked|orphaned) ;;
   *) _die "Worker status '$status' is not waiting or resumable; response was not published" ;;
 esac
+if [[ -f "$REPO_DIR/response" || (-n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-response") ]]; then
+  _die "A Sergeant response is already pending consumption for $TASK_ID/$REPO"
+fi
 
 response_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
 if [[ -n "$worktree" && -d "$worktree" ]]; then

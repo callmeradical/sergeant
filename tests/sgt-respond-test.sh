@@ -81,6 +81,19 @@ if grep -Fq 'Use option A' "$TEST_ROOT/td.log"; then
   printf 'raw response leaked into td\n' >&2
   exit 1
 fi
+set +e
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/duplicate.log" TD_LOG="$TEST_ROOT/duplicate-td.log" \
+TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-respond" task-1 app 'Use option B' >/dev/null 2>&1
+duplicate_status=$?
+set -e
+[[ "$duplicate_status" -ne 0 ]]
+[[ "$(cat "$repo_state/response")" == "$response" ]]
+[[ "$(cat "$worktree/.sergeant-response")" == "$response" ]]
+if [[ -e "$TEST_ROOT/duplicate-td.log" ]]; then
+  printf 'duplicate response should not log a new td decision\n' >&2
+  exit 1
+fi
 
 rm -f "$worktree/.sergeant-response" "$repo_state/response"
 mkdir "$repo_state/response.lock"
@@ -130,7 +143,7 @@ TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 PANE_IDENTITY='bash
 grep -Fq 'new-window -P -F #{pane_id} -t sgt: -n task/app' "$TEST_ROOT/dead.log"
 grep -Fq "$ROOT_DIR/bin/sgt-worker" "$TEST_ROOT/dead.log"
 
-rm "$worktree/.sergeant-response"
+rm "$worktree/.sergeant-response" "$repo_state/response"
 cat > "$fake_bin/td" <<'EOF'
 #!/usr/bin/env bash
 exit 19
@@ -147,7 +160,7 @@ fi
 
 printf 'needs_input\n' > "$repo_state/status"
 printf 'needs_input\n' > "$worktree/.sergeant-status"
-rm -f "$worktree/.sergeant-response"
+rm -f "$worktree/.sergeant-response" "$repo_state/response"
 set +e
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/relaunch-fail.log" PANE_ALIVE=0 FAIL_WINDOW=1 \
 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-respond" task-1 app 'relaunch fails' >/dev/null 2>&1
@@ -194,6 +207,16 @@ TD_LOG="$TEST_ROOT/remote-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-r
 [[ "$(cat "$remote_worktree/.sergeant-status")" == 'in_progress' ]]
 grep -Fq 'restart remote-drive --window remote-window' "$TEST_ROOT/remote-babydriver.log"
 [[ ! -e "$remote_repo_state/message" && ! -e "$remote_worktree/.sergeant-message" ]]
+set +e
+PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-duplicate.log" \
+TD_LOG="$TEST_ROOT/remote-duplicate-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'remote response 2' >/dev/null 2>&1
+remote_duplicate_status=$?
+set -e
+[[ "$remote_duplicate_status" -ne 0 ]]
+[[ "$(cat "$remote_repo_state/response")" == 'remote response' ]]
+[[ "$(cat "$remote_worktree/.sergeant-response")" == 'remote response' ]]
+[[ ! -e "$TEST_ROOT/remote-duplicate.log" ]]
 
 printf 'failed: remote execution failed\n' > "$remote_repo_state/status"
 printf 'needs_input\n' > "$remote_worktree/.sergeant-status"

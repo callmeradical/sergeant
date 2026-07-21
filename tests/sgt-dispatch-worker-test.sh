@@ -31,10 +31,21 @@ printf '%s\n' "$*" >> "$BABYDRIVER_LOG"
 case "$1" in
   start)
     [[ "${FAIL_START:-0}" == 0 ]] || exit 17
+    task_name=""
+    while [[ $# -gt 0 ]]; do
+      if [[ "$1" == "--task" ]]; then
+        task_name="$2"
+        break
+      fi
+      shift
+    done
+    task_window="${task_name%%:*}"
     if [[ -n "${BABYDRIVER_START_JSON:-}" ]]; then
       printf '%s\n' "$BABYDRIVER_START_JSON"
+    elif [[ "${START_VARIANT:-window}" == "name" ]]; then
+      printf '{"session":{"name":"test-drive","tasks":[{"name":"%s","task_id":"td-remote-123"}]},"project_dir":"/remote/project"}\n' "$task_name"
     else
-      printf '%s\n' '{"session":"test-drive","tasks":[{"window":"unknown","task_id":"td-remote-123"}]}'
+      printf '{"session":{"name":"test-drive","tasks":[{"window":"%s","task_id":"td-remote-123"}]},"project_dir":"/remote/project"}\n' "$task_window"
     fi
     ;;
 esac
@@ -76,18 +87,26 @@ failed_state="$(printf '%s\n' "$TEST_ROOT"/fleet/fail-worker-launch-*/app)"
 grep -Fq 'tmux failed to launch worker supervisor' "$failed_state/diagnostic"
 
 PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/remote-tmux.log" BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
-BABYDRIVER_START_JSON='{"session":{"name":"test-drive","tasks":[{"window":"remote-window","task_id":"td-remote-123"}]},"project_dir":"/remote/project"}' \
 SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-dispatch" test 'Supervise remote' --repos app --remote >/dev/null
 remote_state="$(printf '%s\n' "$TEST_ROOT"/fleet/supervise-remote-*/app)"
 [[ "$(cat "$remote_state/backend")" == "remote-babydriver" ]]
 [[ "$(cat "$remote_state/remote_session")" == "test-drive" ]]
-[[ "$(cat "$remote_state/remote_window")" == "remote-window" ]]
+[[ "$(cat "$remote_state/remote_window")" == "$(cat "$remote_state/window_name")" ]]
 [[ "$(cat "$remote_state/remote_td_task")" == "td-remote-123" ]]
 [[ "$(cat "$remote_state/remote_project_dir")" == "/remote/project" ]]
 [[ ! -e "$remote_state/pane" ]]
 grep -Fq 'start --repo org/test --task ' "$TEST_ROOT/babydriver.log"
 grep -Fq 'Supervise remote [sgt:' "$TEST_ROOT/babydriver.log"
+
+PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/remote-name-tmux.log" BABYDRIVER_LOG="$TEST_ROOT/babydriver-name.log" \
+START_VARIANT=name SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Name remote worker' --repos app --remote >/dev/null
+name_state="$(printf '%s\n' "$TEST_ROOT"/fleet/name-remote-worker-*/app)"
+name_task="$(sed -n 's/^start --repo org\/test --task \(.*\) --worktree$/\1/p' "$TEST_ROOT/babydriver-name.log")"
+[[ "$(cat "$name_state/remote_session")" == "test-drive" ]]
+[[ "$(cat "$name_state/remote_window")" == "$name_task" ]]
+[[ "$(cat "$name_state/remote_td_task")" == "td-remote-123" ]]
 
 set +e
 PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/remote-mismatch-tmux.log" BABYDRIVER_LOG="$TEST_ROOT/babydriver-mismatch.log" \

@@ -254,6 +254,23 @@ def as_list(value):
 def as_string(value):
     return value if isinstance(value, str) else ""
 
+def candidate_window_fields(task):
+    return (
+        as_string(task.get("window")),
+        as_string(task.get("name")),
+        as_string(task.get("slug")),
+    )
+
+def matches_requested_window(requested, task):
+    window, name, slug = candidate_window_fields(task)
+    if window == requested or slug == requested:
+        return True
+    if name == requested:
+        return True
+    if name.startswith(requested + ":"):
+        return True
+    return False
+
 session = ""
 project_dir = ""
 task_id = ""
@@ -281,10 +298,10 @@ if isinstance(payload, dict):
         tasks = as_list(session_obj.get("tasks"))
     for task in tasks:
         task = as_dict(task)
-        candidate_window = str(task.get("window") or task.get("name") or task.get("slug") or "")
-        if candidate_window == window_name:
+        if matches_requested_window(window_name, task):
+            window, name, slug = candidate_window_fields(task)
             matched = "1"
-            resolved_window = candidate_window
+            resolved_window = window or name or slug or resolved_window
             task_id = str(task.get("task_id") or task.get("td_task_id") or task.get("id") or "")
             break
 
