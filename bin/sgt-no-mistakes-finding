@@ -132,19 +132,41 @@ Deduplication key: $marker"
 title="no-mistakes: $DESCRIPTION"
 
 existing_json="$(td list --all --search "$marker" --json --work-dir "$repo_path")"
-existing_id="$(printf '%s' "$existing_json" | python3 -c '
+existing_match="$(printf '%s' "$existing_json" | python3 -c '
 import json
 import sys
 
-items = json.load(sys.stdin)
+try:
+    items = json.load(sys.stdin)
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"td list returned invalid JSON: {exc}")
+
 marker = sys.argv[1]
+needle = f"Deduplication key: {marker}"
+matches = []
+
 for item in items:
-    if marker in item.get("description", ""):
-        print(item["id"])
-        break
-' "$marker" 2>/dev/null || true)"
+    if needle in item.get("description", "").splitlines():
+        matches.append((item["id"], item.get("status", "")))
+
+if len(matches) > 1:
+    ids = ", ".join(match[0] for match in matches)
+    raise SystemExit(f"td list returned duplicate findings for {marker}: {ids}")
+
+if matches:
+    print("\t".join(matches[0]))
+' "$marker")"
+
+existing_id=""
+existing_status=""
+if [[ -n "$existing_match" ]]; then
+  IFS=$'\t' read -r existing_id existing_status <<< "$existing_match"
+fi
 
 if [[ -n "$existing_id" ]]; then
+  if [[ "$existing_status" == "closed" ]]; then
+    td reopen "$existing_id" --work-dir "$repo_path" --json >/dev/null
+  fi
   td update "$existing_id" \
     --priority "$PRIORITY" \
     --description "$body" \

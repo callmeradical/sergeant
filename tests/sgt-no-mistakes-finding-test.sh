@@ -31,6 +31,9 @@ case "$1" in
   create)
     printf '{"id":"td-created"}\n'
     ;;
+  reopen)
+    printf '{"id":"%s","status":"open"}\n' "$2"
+    ;;
   update)
     printf '{"id":"%s"}\n' "$2"
     ;;
@@ -110,6 +113,33 @@ assert_log_contains "Description: Keep the latest cleanup context"
 assert_log_contains "Originating intent: Retain rerun evidence without branch mutations"
 if grep -Fq "create" "$TEST_ROOT/td.log"; then
   printf 'deduplicated finding created a second card\n' >&2
+  exit 1
+fi
+
+TD_LIST_RESULT='[{"id":"td-closed","status":"closed","description":"Deduplication key: no-mistakes-finding:app:review-7"}]' \
+  run_router --run-id run-44 --head-sha fed654 \
+    --description "Reopen closed debt on rerun" \
+    --intent "Keep one visible debt card per finding" \
+    --disposition td
+[[ "$status" -eq 0 && "$output" == *"td-closed"* ]] || {
+  printf 'closed debt card was not updated: %s\n' "$output" >&2
+  exit 1
+}
+assert_log_contains "reopen td-closed"
+assert_log_contains "update td-closed"
+if grep -Fq "create" "$TEST_ROOT/td.log"; then
+  printf 'closed deduplicated finding created a second card\n' >&2
+  exit 1
+fi
+
+TD_LIST_RESULT='{"oops":' run_router --disposition td
+[[ "$status" -ne 0 && "$output" == *"td list returned invalid JSON"* ]] || {
+  printf 'invalid td list JSON did not fail closed: %s\n' "$output" >&2
+  exit 1
+}
+assert_log_contains "list --all --search no-mistakes-finding:app:review-7 --json --work-dir $REPO"
+if grep -Fq "create" "$TEST_ROOT/td.log" || grep -Fq "update" "$TEST_ROOT/td.log" || grep -Fq "reopen" "$TEST_ROOT/td.log"; then
+  printf 'invalid td list JSON should not mutate td state\n' >&2
   exit 1
 fi
 
