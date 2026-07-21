@@ -67,6 +67,19 @@ _record_gate_generation() {
   printf '%s\n' "$(_next_gate_generation)" > "$WORKTREE/.sergeant-gate-generation"
 }
 
+_cleanup_response_transport() {
+  rm -f "$WORKTREE/.sergeant-response" "$WORKTREE/.sergeant-response-id" "$REPO_STATE/response" "$REPO_STATE/response_id"
+}
+
+_finalize_submitted_response() {
+  local response_id="$1"
+  [[ -n "$response_id" ]] || return 0
+  _sgt_response_lock_acquire "$REPO_STATE"
+  printf '%s\n' "$response_id" > "$WORKTREE/.sergeant-response-ack"
+  _cleanup_response_transport
+  _sgt_response_lock_release
+}
+
 _orphan() {
   local exit_code="$1"
   local reason="$2"
@@ -159,6 +172,8 @@ _run_turn() {
 
 _wait_for_response() {
   local response response_id
+  WAIT_RESPONSE_MESSAGE=""
+  RESPONSE_SUBMISSION_ID=""
   while true; do
     if [[ -f "$WORKTREE/.sergeant-response" ]]; then
       _sgt_response_lock_acquire "$REPO_STATE"
@@ -170,27 +185,33 @@ _wait_for_response() {
         fi
         printf 'in_progress\n' > "$WORKTREE/.sergeant-status"
         printf 'in_progress\n' > "$REPO_STATE/status"
-        if [[ -n "$response_id" ]]; then
-          printf '%s\n' "$response_id" > "$WORKTREE/.sergeant-response-ack"
-        fi
-        rm -f "$WORKTREE/.sergeant-response" "$WORKTREE/.sergeant-response-id" "$REPO_STATE/response" "$REPO_STATE/response_id"
         rm -f "$WORKTREE/.sergeant-message" "$REPO_STATE/message"
+        if [[ -n "$response_id" && -f "$WORKTREE/.sergeant-response-ack" ]] && [[ "$(cat "$WORKTREE/.sergeant-response-ack" 2>/dev/null | tr -d '\n')" == "$response_id" ]]; then
+          _cleanup_response_transport
+          _sgt_response_lock_release
+          if [[ -f "$REPO_STATE/session_id" ]]; then
+            WAIT_RESPONSE_MESSAGE="Resume the mission from the durable worker state."
+          else
+            printf -v WAIT_RESPONSE_MESSAGE 'Resume the mission from fleet files at %s without replaying the previously submitted response.' "$REPO_STATE"
+          fi
+          break
+        fi
         _sgt_response_lock_release
+        td_task="$(cat "$REPO_STATE/td_task" 2>/dev/null || true)"
+        if [[ -n "$td_task" && -f "$REPO_STATE/session_id" ]]; then
+          printf -v WAIT_RESPONSE_MESSAGE 'Sergeant response: %s\nResume task %s in the same session. Read the updated td handoff and reconcile it with fleet and git state before continuing.' "$response" "$td_task"
+        elif [[ -n "$td_task" ]]; then
+          printf -v WAIT_RESPONSE_MESSAGE 'Sergeant response: %s\nStart deterministic recovery for task %s. Read the updated td handoff and fleet files at %s, especially diagnostic and worker.log, then reconcile them with git state before continuing.' "$response" "$td_task" "$REPO_STATE"
+        else
+          printf -v WAIT_RESPONSE_MESSAGE 'Sergeant response: %s\nStart deterministic recovery from fleet files at %s, especially diagnostic and worker.log, and reconcile them with git state before continuing.' "$response" "$REPO_STATE"
+        fi
+        RESPONSE_SUBMISSION_ID="$response_id"
         break
       fi
       _sgt_response_lock_release
     fi
     sleep "$POLL_INTERVAL"
   done
-
-  td_task="$(cat "$REPO_STATE/td_task" 2>/dev/null || true)"
-  if [[ -n "$td_task" && -f "$REPO_STATE/session_id" ]]; then
-    printf 'Sergeant response: %s\nResume task %s in the same session. Read the updated td handoff and reconcile it with fleet and git state before continuing.' "$response" "$td_task"
-  elif [[ -n "$td_task" ]]; then
-    printf 'Sergeant response: %s\nStart deterministic recovery for task %s. Read the updated td handoff and fleet files at %s, especially diagnostic and worker.log, then reconcile them with git state before continuing.' "$response" "$td_task" "$REPO_STATE"
-  else
-    printf 'Sergeant response: %s\nStart deterministic recovery from fleet files at %s, especially diagnostic and worker.log, and reconcile them with git state before continuing.' "$response" "$REPO_STATE"
-  fi
 }
 
 [[ -f "$WORKTREE/.sergeant-status" ]] || printf 'in_progress\n' > "$WORKTREE/.sergeant-status"
@@ -198,13 +219,18 @@ _sync_state
 
 next_message="$INITIAL_MESSAGE"
 if [[ -f "$WORKTREE/.sergeant-response" ]]; then
-  next_message="$(_wait_for_response)"
+  _wait_for_response
+  next_message="$WAIT_RESPONSE_MESSAGE"
 elif [[ -f "$REPO_STATE/session_id" ]]; then
   case "$(_status)" in
-    needs_input|blocked) next_message="$(_wait_for_response)" ;;
+    needs_input|blocked)
+      _wait_for_response
+      next_message="$WAIT_RESPONSE_MESSAGE"
+      ;;
     orphaned)
       if [[ -f "$WORKTREE/.sergeant-response" ]]; then
-        next_message="$(_wait_for_response)"
+        _wait_for_response
+        next_message="$WAIT_RESPONSE_MESSAGE"
       else
         next_message="Resume the mission from the durable orphan diagnostic."
       fi
@@ -216,6 +242,8 @@ fi
 while true; do
   _run_turn "$next_message"
   exit_code=$?
+  _finalize_submitted_response "${RESPONSE_SUBMISSION_ID:-}"
+  RESPONSE_SUBMISSION_ID=""
   status="$(_status)"
   _sync_state
 
@@ -233,7 +261,8 @@ while true; do
         exit $?
       fi
       "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
-      next_message="$(_wait_for_response)"
+      _wait_for_response
+      next_message="$WAIT_RESPONSE_MESSAGE"
       ;;
     done)
       if [[ ! -s "$WORKTREE/.sergeant-result" ]]; then

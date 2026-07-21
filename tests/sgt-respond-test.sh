@@ -304,9 +304,14 @@ TD_LOG="$TEST_ROOT/remote-acked-retry-td.log" TD_RESPONSE_FILE="$remote_worktree
   "$ROOT_DIR/bin/sgt-respond" task-1 remote 'conflicting response after ack' >/dev/null 2>"$TEST_ROOT/remote-acked-retry.err"
 [[ "$(cat "$remote_repo_state/status")" == 'in_progress' ]]
 [[ "$(cat "$remote_worktree/.sergeant-status")" == 'in_progress' ]]
-[[ ! -e "$remote_repo_state/response" && ! -e "$remote_worktree/.sergeant-response" ]]
-[[ ! -e "$remote_repo_state/response_id" && ! -e "$remote_repo_state/remote_response_pending_id" && ! -e "$remote_repo_state/remote_response_pending_state" ]]
-[[ ! -e "$remote_project_dir/.sergeant-response" && ! -e "$remote_project_dir/.sergeant-response-id" && ! -e "$remote_project_dir/.sergeant-response-ack" ]]
+[[ "$(cat "$remote_repo_state/response")" == 'remote response' ]]
+[[ "$(cat "$remote_worktree/.sergeant-response")" == 'remote response' ]]
+[[ "$(cat "$remote_repo_state/response_id")" == "$remote_response_id" ]]
+[[ "$(cat "$remote_repo_state/remote_response_pending_id")" == "$remote_response_id" ]]
+[[ "$(cat "$remote_repo_state/remote_response_pending_state")" == 'awaiting_consumption' ]]
+[[ "$(cat "$remote_project_dir/.sergeant-response")" == 'stale remote transport after ack' ]]
+[[ "$(cat "$remote_project_dir/.sergeant-response-id")" == "$remote_response_id" ]]
+[[ "$(cat "$remote_project_dir/.sergeant-response-ack")" == "$remote_response_id" ]]
 grep -Fq 'restart remote-drive --window remote-window' "$TEST_ROOT/remote-acked-retry.log"
 [[ ! -s "$TEST_ROOT/remote-acked-retry.err" ]]
 if [[ -e "$TEST_ROOT/remote-acked-retry-td.log" ]]; then
@@ -323,6 +328,7 @@ printf '%s\n' "$remote_response_id" > "$remote_repo_state/remote_response_pendin
 printf 'awaiting_consumption\n' > "$remote_repo_state/remote_response_pending_state"
 printf 'remote response\n' > "$remote_project_dir/.sergeant-response"
 printf '%s\n' "$remote_response_id" > "$remote_project_dir/.sergeant-response-id"
+rm -f "$remote_project_dir/.sergeant-response-ack"
 set +e
 PATH="$fake_bin:$PATH" BABYDRIVER_LOG="$TEST_ROOT/remote-conflict.log" \
 TD_LOG="$TEST_ROOT/remote-conflict-td.log" TD_RESPONSE_FILE="$remote_worktree/.sergeant-response" SERGEANT_FLEET="$fleet" \

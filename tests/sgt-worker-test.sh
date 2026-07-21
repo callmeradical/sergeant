@@ -60,7 +60,6 @@ case "$FAKE_MODE:$turn" in
     [[ "$*" == *"Use option A"* ]]
     [[ "$*" == *"td-123"* ]]
     [[ "$*" == *"updated td handoff"* ]]
-    [[ ! -e .sergeant-response ]]
     [[ ! -e .sergeant-message ]]
     printf 'done\n' > .sergeant-status
     printf 'validated result\n' > .sergeant-result
@@ -86,7 +85,6 @@ case "$FAKE_MODE:$turn" in
   resume_orphan:1)
     [[ "$*" == *"--session ses-test-123"* ]]
     [[ "$*" == *"Use option A"* ]]
-    [[ ! -e .sergeant-response ]]
     printf 'done\n' > .sergeant-status
     printf 'resumed result\n' > .sergeant-result
     ;;
@@ -99,6 +97,14 @@ case "$FAKE_MODE:$turn" in
     [[ "$*" != *"same session"* ]]
     printf 'done\n' > .sergeant-status
     printf 'recovered result\n' > .sergeant-result
+    ;;
+  resume_after_submitted_response:1)
+    [[ "$*" == *"--session ses-test-123"* ]]
+    [[ "$*" != *"Use option A"* ]]
+    [[ "$*" == *"durable worker state"* ]]
+    [[ ! -e .sergeant-response ]]
+    printf 'done\n' > .sergeant-status
+    printf 'resumed without replay result\n' > .sergeant-result
     ;;
   serialized_response:1)
     [[ "$*" == *"new response"* ]]
@@ -147,10 +153,13 @@ run_wait_resume_case() {
   [[ "$(cat "$worktree/.sergeant-status")" == "$expected_status" ]]
   [[ "$(cat "$worktree/.sergeant-gate-generation")" == "1" ]]
   printf 'Use option A\n' > "$worktree/.sergeant-response"
+  printf 'response-id-123\n' > "$worktree/.sergeant-response-id"
+  printf 'response-id-123\n' > "$repo_state/response_id"
   wait "$worker_pid"
 
   [[ "$(cat "$worktree/.sergeant-status")" == "done" ]]
   [[ "$(cat "$worktree/.sergeant-result")" == "validated result" ]]
+  [[ ! -e "$worktree/.sergeant-response" ]]
   [[ "$(cat "$repo_state/session_id")" == "ses-test-123" ]]
   [[ "$(cat "$repo_state/status")" == "done" ]]
   [[ "$(cat "$repo_state/result")" == "validated result" ]]
@@ -171,6 +180,8 @@ worker_pid=$!
 wait_for_file "$case_root/worktree/.sergeant-message"
 kill -0 "$worker_pid"
 printf 'Use option A\n' > "$case_root/worktree/.sergeant-response"
+printf 'response-id-123\n' > "$case_root/worktree/.sergeant-response-id"
+printf 'response-id-123\n' > "$case_root/state/response_id"
 wait "$worker_pid"
 [[ "$(cat "$case_root/worktree/.sergeant-result")" == 'validated Claude result' ]]
 grep -Fq -- '--dangerously-skip-permissions --resume ses-test-123' "$case_root/args"
@@ -182,6 +193,8 @@ printf 'orphaned\n' > "$case_root/worktree/.sergeant-status"
 printf 'ses-test-123\n' > "$case_root/state/session_id"
 printf 'td-123\n' > "$case_root/state/td_task"
 printf 'Use option A\n' > "$case_root/worktree/.sergeant-response"
+printf 'response-id-123\n' > "$case_root/worktree/.sergeant-response-id"
+printf 'response-id-123\n' > "$case_root/state/response_id"
 PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" FAKE_MODE=resume_orphan FAKE_STATE="$case_root" \
   "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_agent" "initial mission"
 [[ ! -e "$case_root/worktree/.sergeant-response" ]]
@@ -193,10 +206,28 @@ printf 'orphaned\n' > "$case_root/worktree/.sergeant-status"
 printf 'td-123\n' > "$case_root/state/td_task"
 printf 'prior process exited\n' > "$case_root/state/diagnostic"
 printf 'Use option A\n' > "$case_root/worktree/.sergeant-response"
+printf 'response-id-123\n' > "$case_root/worktree/.sergeant-response-id"
+printf 'response-id-123\n' > "$case_root/state/response_id"
 PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" \
   FAKE_MODE=recover_without_session FAKE_STATE="$case_root" \
   "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_agent" "initial mission"
 [[ "$(cat "$case_root/worktree/.sergeant-result")" == 'recovered result' ]]
+
+case_root="$TEST_ROOT/resume-after-submitted-response"
+mkdir -p "$case_root/worktree" "$case_root/state"
+printf 'orphaned\n' > "$case_root/worktree/.sergeant-status"
+printf 'ses-test-123\n' > "$case_root/state/session_id"
+printf 'td-123\n' > "$case_root/state/td_task"
+printf 'Use option A\n' > "$case_root/worktree/.sergeant-response"
+printf 'response-id-123\n' > "$case_root/worktree/.sergeant-response-id"
+printf 'response-id-123\n' > "$case_root/worktree/.sergeant-response-ack"
+printf 'Use option A\n' > "$case_root/state/response"
+printf 'response-id-123\n' > "$case_root/state/response_id"
+PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" \
+  FAKE_MODE=resume_after_submitted_response FAKE_STATE="$case_root" \
+  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_agent" "initial mission"
+[[ "$(cat "$case_root/worktree/.sergeant-result")" == 'resumed without replay result' ]]
+[[ ! -e "$case_root/worktree/.sergeant-response" && ! -e "$case_root/state/response" ]]
 
 case_root="$TEST_ROOT/serialized-response"
 mkdir -p "$case_root/worktree" "$case_root/state/response.lock"
@@ -204,6 +235,8 @@ printf '%s\n' "$$" > "$case_root/state/response.lock/pid"
 printf 'orphaned\n' > "$case_root/worktree/.sergeant-status"
 printf 'ses-test-123\n' > "$case_root/state/session_id"
 printf 'old response\n' > "$case_root/worktree/.sergeant-response"
+printf 'response-id-old\n' > "$case_root/worktree/.sergeant-response-id"
+printf 'response-id-old\n' > "$case_root/state/response_id"
 FAKE_MODE=serialized_response FAKE_STATE="$case_root" SGT_WORKER_POLL_INTERVAL=0.01 \
   "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_agent" "initial mission" &
 worker_pid=$!
@@ -211,6 +244,8 @@ sleep 0.05
 kill -0 "$worker_pid"
 printf 'new response\n' > "$case_root/worktree/.sergeant-response.tmp"
 mv "$case_root/worktree/.sergeant-response.tmp" "$case_root/worktree/.sergeant-response"
+printf 'response-id-new\n' > "$case_root/worktree/.sergeant-response-id"
+printf 'response-id-new\n' > "$case_root/state/response_id"
 rm "$case_root/state/response.lock/pid"
 rmdir "$case_root/state/response.lock"
 wait "$worker_pid"
