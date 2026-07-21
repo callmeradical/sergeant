@@ -171,11 +171,12 @@ Each dispatched agent is expected to:
 6. Implement one vertical slice at a time: focused red test, minimum green implementation, then refactor. Reject tautological tests, internal mocking, horizontal test/implementation phases, and speculative refactoring
 7. For `needs_input` or `blocked`, write `.sergeant-message`, notify Sergeant, remain alive, and wait. Consume/remove `.sergeant-response`, clear the message, log the decision to td, restore `in_progress`, and continue
 8. Run focused tests and typechecking/lint regularly, the full required suite at the end, and no-mistakes when available or required
-9. Load the canonical `code-review` skill when available, then launch separate parallel subagents for independent reviews: a standards axis over the pinned diff and documented standards plus concise Fowler smells, and a spec axis over requirements and scope. Keep evidence separate and skip the spec axis explicitly when no spec exists
-10. Remediate all blocking findings, rerun affected tests and both axes until each reports zero blocking findings
-11. Commit, open a PR, wait for required CI, resolve all non-outdated review threads, and satisfy dependency order
-12. For tracked work, log td decisions, handoff, then run `td review` only when implementation and review evidence are ready
-13. Write `.sergeant-result` and set `.sergeant-status=done` only after every gate passes. `failed: <exact reason>` is reserved for an unrecoverable terminal failure
+9. Route each no-mistakes finding through `sgt-no-mistakes-finding`: blocking correctness/security/data-integrity/test work stays gated, actionable warning or informational debt may become a deduplicated owning-repo td card, cosmetic/evidence noise is ignored, and ask-user findings still escalate
+10. Load the canonical `code-review` skill when available, then launch separate parallel subagents for independent reviews: a standards axis over the pinned diff and documented standards plus concise Fowler smells, and a spec axis over requirements and scope. Keep evidence separate and skip the spec axis explicitly when no spec exists
+11. Remediate all blocking findings, rerun affected tests and both axes until each reports zero blocking findings
+12. Commit, open a PR, wait for required CI, resolve all non-outdated review threads, and satisfy dependency order
+13. For tracked work, log td decisions, handoff, then run `td review` only when implementation and review evidence are ready
+14. Write `.sergeant-result` and set `.sergeant-status=done` only after every gate passes. `failed: <exact reason>` is reserved for an unrecoverable terminal failure
 
 If a canonical skill cannot be loaded, the generated brief's embedded rules remain mandatory for that phase.
 

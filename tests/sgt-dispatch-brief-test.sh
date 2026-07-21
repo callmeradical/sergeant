@@ -118,6 +118,16 @@ assert_contains "failing focused test"
 assert_contains "minimum implementation"
 assert_contains "full required suite once at the end"
 assert_contains "Run no-mistakes when available or required"
+assert_contains "### 6. Route no-mistakes findings"
+assert_contains "sgt-no-mistakes-finding"
+assert_contains "warning-level actionable review or documentation debt"
+assert_contains "informational actionable debt"
+assert_contains "correctness, security, data-integrity, and test findings cannot be deferred or ignored"
+assert_contains "Cosmetic and evidence-only noise"
+assert_contains "ask-user findings still require user escalation"
+assert_contains "Gate and ask-user dispositions return a blocking status"
+assert_contains "follow the \`needs_input\` escalation protocol"
+assert_contains "run ID, head SHA, finding ID, severity, kind, file/line, description, and originating intent"
 assert_contains "separate parallel subagents"
 assert_contains "Standards axis"
 assert_contains "Fowler smell heuristic"
@@ -179,9 +189,10 @@ assert_order \
   "### 3. Implement approved work with TDD" \
   "### 4. Escalate and resume" \
   "### 5. Validate" \
-  "### 6. Independent two-axis review" \
-  "### 7. Remediate and repeat" \
-  "### 8. Complete delivery and td lifecycle"
+  "### 6. Route no-mistakes findings" \
+  "### 7. Independent two-axis review" \
+  "### 8. Remediate and repeat" \
+  "### 9. Complete delivery and td lifecycle"
 
 assert_order \
   "Surface \`wayfinder\`, \`to-spec\`, and Sergeant's custom \`to-tickets\`" \

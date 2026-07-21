@@ -63,6 +63,7 @@ These scripts in `bin/` are your hands. Use them before doing anything manually.
 | `bin/sgt-context <project>` | Emit full agent context block for a project |
 | `bin/sgt-graphify <project>` | Run graphify across all repos, write to configured output |
 | `bin/sgt-dispatch <project> "<brief>" [options]` | Create worktrees + spawn agent per repo |
+| `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Apply a finding disposition and create/update owning-repo td debt |
 | `bin/sgt-dispatch <project> --td <id>` | Dispatch from a td task (auto-detects repo) |
 | `bin/sgt-watch <task-id>` | Monitor fleet until all workers done |
 | `bin/sgt-watch --list` | List all active tasks |

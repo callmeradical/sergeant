@@ -120,10 +120,17 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-context <project>` | Emit full agent context block for a project |
 | `bin/sgt-graphify <project>` | Run graphify across all repos → knowledge graph |
 | `bin/sgt-dispatch <project> "<brief>" [options]` | Dispatch agents across repos |
+| `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Route a no-mistakes finding to a gate, td, ignore, or user escalation |
 | `bin/sgt-watch <task-id>` | Monitor dispatched fleet |
 | `bin/sgt-respond <task-id> <repo> "<response>"` | Respond to and resume a waiting worker |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees and fleet state |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
+
+### Deferred no-mistakes findings
+
+Dispatched workers use `sgt-no-mistakes-finding` at no-mistakes gates. The required `--disposition` is explicit per finding: `gate` retains blocking work, `td` creates or updates actionable debt in the owning repo, `ignore` records that no card is needed, and `ask-user` preserves human escalation. Warning debt becomes P2, informational debt becomes P3, and repeated finding IDs update the same card while retaining the latest run ID, head SHA, location, description, and originating intent.
+
+Correctness, security, data-integrity, and test findings cannot be deferred or ignored. Cosmetic and evidence-only findings never create cards.
 
 ## Skills
 
