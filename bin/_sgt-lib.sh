@@ -10,6 +10,7 @@ SGT_LIB_LOADED=1
 # ── Configurable env vars ─────────────────────────────────────────────────────
 
 SERGEANT_CONFIG="${SERGEANT_CONFIG:-$HOME/.config/sergeant}"
+# shellcheck disable=SC2034  # Shared default consumed by sourced scripts.
 FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
 # Auto-detect the running agent from environment signals, then allow override.
 # Detection order:
@@ -29,6 +30,7 @@ _sgt_detect_agent() {
   fi
 }
 
+# shellcheck disable=SC2034  # Shared default consumed by sourced scripts.
 AGENT_CMD="${SERGEANT_AGENT:-$(_sgt_detect_agent)}"
 
 # ── Global config (dev_root) ──────────────────────────────────────────────────

@@ -594,6 +594,53 @@ import json
 import os
 
 items = json.loads(os.environ["RESULTS"])
+print(json.dumps(items[:-1]))
+PY
+fi
+exit "\$status"
+EOF
+chmod +x "$TEST_ROOT/bin/sgt-td-create"
+
+TD_MODE=success dispatch_capture test "Reject missing selected repo results" --repos app,api
+
+[[ "$status" -ne 0 ]] || {
+  printf 'dispatch succeeded after missing selected repo td results\n' >&2
+  exit 1
+}
+[[ "$output" == *"missing td task for selected repo: api"* ]] || {
+  printf 'dispatch did not report missing selected repo td results:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$(wc -l < "$TEST_ROOT/td-delete.log")" -eq 2 ]] || {
+  printf 'dispatch did not roll back created tasks after missing selected repo td results\n' >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/tmux.log" ]] || {
+  printf 'dispatch spawned tmux after missing selected repo td results\n' >&2
+  exit 1
+}
+[[ "$(find "$TEST_ROOT/td-active" -type f | wc -l)" -eq 0 ]] || {
+  printf 'missing selected repo td results left active cards behind\n' >&2
+  exit 1
+}
+
+printf 'sgt-dispatch missing selected repo rollback: ok\n'
+
+: > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+: > "$TEST_ROOT/td-delete.log"
+rm -f "$TEST_ROOT"/td-active/* "$TEST_ROOT"/td-counter/*
+
+cat > "$TEST_ROOT/bin/sgt-td-create" <<EOF
+#!/usr/bin/env bash
+results="\$("$ROOT_DIR/bin/sgt-td-create" "\$@")"
+status=\$?
+if [[ "\$status" -eq 0 ]]; then
+  RESULTS="\$results" python3 - <<'PY'
+import json
+import os
+
+items = json.loads(os.environ["RESULTS"])
 items[1]["task_id"] = ""
 print(json.dumps(items))
 PY
