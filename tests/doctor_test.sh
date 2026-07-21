@@ -281,7 +281,7 @@ test_human_and_json_output_redact_compound_credentials() {
   cat > "$TEST_TMP/bin/graphify" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "--version" ]]; then
-  echo 'graphify 1.0.0 AWS_SECRET_ACCESS_KEY=supersecret PATH=/usr/bin API_TOKEN=secondsecret ordinary-text'
+  echo 'graphify 1.0.0 AWS_SECRET_ACCESS_KEY=supersecret PATH=/usr/bin API_TOKEN="top secret-value" ordinary-text'
   exit 0
 fi
 exit 0
@@ -296,7 +296,8 @@ EOF
   assert_eq 0 "$status"
   assert_contains "$output" "AWS_SECRET_ACCESS_KEY=[REDACTED] PATH=/usr/bin API_TOKEN=[REDACTED] ordinary-text"
   assert_not_contains "$output" "supersecret"
-  assert_not_contains "$output" "secondsecret"
+  assert_not_contains "$output" "top secret-value"
+  assert_not_contains "$output" "secret-value"
   assert_contains "$output" "PATH=/usr/bin"
   assert_contains "$output" "ordinary-text"
 
@@ -308,7 +309,8 @@ EOF
   assert_eq 0 "$status"
   assert_contains "$output" "AWS_SECRET_ACCESS_KEY=[REDACTED] PATH=/usr/bin API_TOKEN=[REDACTED] ordinary-text"
   assert_not_contains "$output" "supersecret"
-  assert_not_contains "$output" "secondsecret"
+  assert_not_contains "$output" "top secret-value"
+  assert_not_contains "$output" "secret-value"
   assert_contains "$output" "PATH=/usr/bin"
   assert_contains "$output" "ordinary-text"
   python3 -c 'import json,sys; json.loads(sys.stdin.read())' <<< "$output" \
@@ -360,13 +362,14 @@ test_argument_errors_redact_compound_credentials() {
   setup_fixture
 
   set +e
-  output="$("$DOCTOR" --AWS_SECRET_ACCESS_KEY=supersecret 2>&1)"
+  output="$("$DOCTOR" '--AWS_SECRET_ACCESS_KEY="top secret-value" PATH=/usr/bin' 2>&1)"
   status=$?
   set -e
 
   assert_eq 64 "$status"
-  assert_contains "$output" "AWS_SECRET_ACCESS_KEY=[REDACTED]"
-  assert_not_contains "$output" "supersecret"
+  assert_contains "$output" 'AWS_SECRET_ACCESS_KEY=[REDACTED] PATH=/usr/bin'
+  assert_not_contains "$output" "top secret-value"
+  assert_not_contains "$output" "secret-value"
 }
 
 test_check_ids_redact_github_tokens() {
@@ -388,13 +391,14 @@ test_check_ids_redact_compound_credentials() {
   setup_fixture
 
   set +e
-  output="$("$DOCTOR" AWS_SECRET_ACCESS_KEY=supersecret 2>&1)"
+  output="$("$DOCTOR" 'AWS_SECRET_ACCESS_KEY="top secret-value" PATH=/usr/bin' 2>&1)"
   status=$?
   set -e
 
   assert_eq 2 "$status"
-  assert_contains "$output" "[FAIL] config.project.AWS_SECRET_ACCESS_KEY=[REDACTED]"
-  assert_not_contains "$output" "supersecret"
+  assert_contains "$output" '[FAIL] config.project.AWS_SECRET_ACCESS_KEY=[REDACTED] PATH=/usr/bin'
+  assert_not_contains "$output" "top secret-value"
+  assert_not_contains "$output" "secret-value"
 }
 
 test_empty_agent_skill_directory_is_degraded() {

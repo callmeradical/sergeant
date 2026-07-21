@@ -26,4 +26,21 @@ redacted="$(bash -lc 'source "$1"; _sgt_redact "API_TOKEN=secret ordinary-text"'
 [[ "$redacted" != *"secret"* ]]
 [[ "$redacted" == *"ordinary-text"* ]]
 
+redacted="$(bash -lc 'source "$1"; _sgt_redact "API_TOKEN=top secret-value"' _ "$ROOT_DIR/bin/_sgt-lib.sh")"
+[[ "$redacted" == "API_TOKEN=[REDACTED] secret-value" ]]
+[[ "$redacted" != *"top"* ]]
+[[ "$redacted" == *"secret-value"* ]]
+
+redacted="$(bash -lc 'source "$1"; _sgt_redact '\''API_TOKEN="top secret-value" ordinary-text PATH=/usr/bin'\''' _ "$ROOT_DIR/bin/_sgt-lib.sh")"
+[[ "$redacted" == "API_TOKEN=[REDACTED] ordinary-text PATH=/usr/bin" ]]
+[[ "$redacted" != *"top"* ]]
+[[ "$redacted" != *"secret-value"* ]]
+[[ "$redacted" == *"ordinary-text PATH=/usr/bin"* ]]
+
+redacted="$(bash -lc 'source "$1"; _sgt_redact "API_TOKEN='\''top secret-value'\'' ordinary-text"' _ "$ROOT_DIR/bin/_sgt-lib.sh")"
+[[ "$redacted" == "API_TOKEN=[REDACTED] ordinary-text" ]]
+[[ "$redacted" != *"top"* ]]
+[[ "$redacted" != *"secret-value"* ]]
+[[ "$redacted" == *"ordinary-text"* ]]
+
 printf 'sgt-lib agent command builder: ok\n'

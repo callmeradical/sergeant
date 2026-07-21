@@ -101,8 +101,6 @@ import sys
 text = sys.argv[1]
 credential_key = r'[A-Z0-9_]*(?:token|password|secret|api(?:[_-]?key))[A-Z0-9_]*'
 assignment_start = re.compile(rf'(?i)\b({credential_key})\b\s*[:=]\s*')
-next_assignment = re.compile(r'[A-Za-z_][A-Za-z0-9_]*\s*[:=]')
-plain_word = re.compile(r'[A-Za-z0-9_]+$')
 
 def redact_assignments(value: str) -> str:
     chunks = []
@@ -113,27 +111,20 @@ def redact_assignments(value: str) -> str:
         chunks.append(value[pos:match.start()])
         chunks.append(f'{match.group(1)}=[REDACTED]')
         i = match.end()
-        while i < len(value):
-            ch = value[i]
-            if ch in ';,\n':
-                break
-            if ch in ' \t':
-                j = i
-                while j < len(value) and value[j] in ' \t':
-                    j += 1
-                if next_assignment.match(value, j):
-                    chunks.append(value[i:j])
-                    i = j
-                    break
-                k = j
-                while k < len(value) and value[k] not in ' \t;,\n':
-                    k += 1
-                token = value[j:k]
-                if token and not plain_word.fullmatch(token):
-                    chunks.append(value[i:j])
-                    i = j
-                    break
+        if i < len(value) and value[i] in ("'", '"'):
+            quote = value[i]
             i += 1
+            while i < len(value):
+                if quote == '"' and value[i] == '\\' and i + 1 < len(value):
+                    i += 2
+                    continue
+                if value[i] == quote:
+                    i += 1
+                    break
+                i += 1
+        else:
+            while i < len(value) and value[i] not in ' \t;,\n':
+                i += 1
         pos = i
     chunks.append(value[pos:])
     return ''.join(chunks)
