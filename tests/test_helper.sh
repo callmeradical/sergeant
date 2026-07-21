@@ -13,6 +13,7 @@ setup_fixture() {
   export SERGEANT_FLEET="$HOME/.local/share/sergeant/fleet"
   export SGT_INSTALL_DIR="$HOME/.local/bin"
   export PATH="$TEST_TMP/bin:$SGT_INSTALL_DIR:/usr/bin:/bin"
+  unset TMUX_REPO_DIR TMUX_PANE_INFO TMUX_TARGET_MISSING TMUX_PANE_ID
 
   mkdir -p "$TEST_TMP/bin" "$SERGEANT_CONFIG" "$SERGEANT_FLEET" \
     "$SGT_INSTALL_DIR" "$HOME/.config/opencode/skills/fixture" "$HOME/.config/opencode/plugins" \

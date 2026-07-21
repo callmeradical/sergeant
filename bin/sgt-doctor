@@ -122,7 +122,7 @@ check_selected_agent() {
 }
 
 check_agent_harness() {
-  local selected_agent agent agent_version agent_versions=""
+  local selected_agent
   if [[ -n "${SERGEANT_AGENT:-}" ]]; then
     selected_agent="$(_sgt_detect_agent)"
     check_selected_agent "$selected_agent" "SERGEANT_AGENT selects"
@@ -133,21 +133,8 @@ check_agent_harness() {
     check_selected_agent "$selected_agent" "auto-detected"
     return
   fi
-
-  for agent in opencode claude goose; do
-    if command -v "$agent" >/dev/null 2>&1 && agent_version="$("$agent" --version 2>&1)"; then
-      agent_version="${agent_version%%$'\n'*}"
-      if [[ -n "$agent_versions" ]]; then
-        agent_versions="$agent_versions, "
-      fi
-      agent_versions="$agent_versions$agent ${agent_version:-available}"
-    fi
-  done
-  if [[ -n "$agent_versions" ]]; then
-    add_check PASS agents.harness "$agent_versions"
-  else
-    add_check FAIL agents.harness "install OpenCode, Claude Code, or Goose"
-  fi
+  selected_agent="$(_sgt_detect_agent)"
+  check_selected_agent "$selected_agent" "default selects"
 }
 
 check_project_config() {
@@ -213,8 +200,10 @@ check_project_config() {
       add_check FAIL "config.repo.$project.$repo_name" "configured path is not a Git repository"
       continue
     fi
-    actual_url="$(git -C "$resolved_path" remote get-url origin 2>/dev/null || true)"
-    if [[ -n "$configured_url" && "$configured_url" != "$actual_url" ]]; then
+    actual_url="$(git -C "$resolved_path" remote get-url origin 2>/dev/null)" || actual_url=""
+    if [[ -z "$actual_url" ]]; then
+      add_check FAIL "config.repo.$project.$repo_name" "origin remote is missing"
+    elif [[ -n "$configured_url" && "$configured_url" != "$actual_url" ]]; then
       add_check WARN "config.repo.$project.$repo_name" "configured URL does not match the origin remote"
     else
       add_check PASS "config.repo.$project.$repo_name" "repository path and origin remote are valid"
@@ -409,11 +398,19 @@ if [[ -d "$SERGEANT_FLEET" ]]; then
             fleet_target="${SERGEANT_TMUX_SESSION:-sgt}:${fleet_task:0:12}/$fleet_repo"
             fleet_target_inferred=true
           fi
-          if ! tmux display-message -p -t "$fleet_target" '#{pane_id}' >/dev/null 2>&1 && $fleet_target_inferred; then
+          if _sgt_tmux_pane_is_supervisor "$fleet_target" "$fleet_repo_dir"; then
+            :
+          elif tmux display-message -p -t "$fleet_target" '#{pane_id}' >/dev/null 2>&1; then
+            add_check FAIL "$fleet_id" "nonterminal state references a stale or reused tmux pane"
+            continue
+          elif $fleet_target_inferred; then
             add_check WARN "$fleet_id" "nonterminal worker cannot verify a local tmux pane (it may be remote)"
-          elif ! tmux display-message -p -t "$fleet_target" '#{pane_id}' >/dev/null 2>&1; then
+            continue
+          else
             add_check FAIL "$fleet_id" "nonterminal state references a dead tmux pane"
-          elif [[ "$fleet_status" == "needs_input" || "$fleet_status" == "blocked" ]]; then
+            continue
+          fi
+          if [[ "$fleet_status" == "needs_input" || "$fleet_status" == "blocked" ]]; then
             add_check WARN "$fleet_id" "worker is waiting in $fleet_status state"
           elif [[ -n "$(find "$fleet_status_file" -mtime +7 -print 2>/dev/null)" ]]; then
             add_check WARN "$fleet_id" "nonterminal state has been unchanged for more than seven days"

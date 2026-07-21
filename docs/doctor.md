@@ -49,19 +49,21 @@ Diagnostics cover:
 - Required tools and versions: `yq`, Git, GitHub CLI, tmux, and Python 3.
 - Optional integrations and versions: td, no-mistakes, graphify, treehouse,
   babydriver, and mise.
-- Availability of at least one supported OpenCode, Claude Code, or Goose
-  agent harness.
+- The currently selected agent harness, including OpenCode as the default when
+  no environment signal or explicit override is present.
 - When Goose is selected, dispatch and resume still depend on Goose persisting
   a resumable session record for the current worktree; harness availability
   alone is not sufficient for a waiting worker to resume.
 - GitHub authentication identity. Tokens are neither requested nor printed.
 - Global and project YAML syntax and required project/repository fields.
-- Repository paths, Git metadata, configured URLs, origin remotes, and td data.
+- Repository paths, Git metadata, configured URLs, required `origin` remotes,
+  and td data.
 - Installed Sergeant command and OpenCode plugin symlink targets.
 - Bundled skills and broken links in OpenCode and Claude skill directories.
 - Writable configuration, installation, and fleet runtime directories.
-- Fleet terminal results, orphaned workers, missing worktrees, dead tmux panes,
-  unsynchronized state, and nonterminal state unchanged for over seven days.
+- Fleet terminal results, orphaned workers, missing worktrees, dead or reused
+  tmux panes, unsynchronized state, and nonterminal state unchanged for over
+  seven days.
 
 Messages redact URL credentials, token/password/secret/API-key assignments, and
 GitHub token patterns before human or JSON output is rendered.

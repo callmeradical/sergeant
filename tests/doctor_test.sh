@@ -6,6 +6,32 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/test_helper.sh"
 DOCTOR="$ROOT/bin/sgt-doctor"
 trap teardown_fixture EXIT
 
+make_doctor_tmux() {
+  cat > "$TEST_TMP/bin/tmux" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-V" ]]; then
+  echo 'tmux 1.0.0'
+  exit 0
+fi
+if [[ "${1:-}" == "display-message" ]]; then
+  case "${5:-}" in
+    '#{pane_id}')
+      [[ "${TMUX_TARGET_MISSING:-0}" == "1" ]] && exit 1
+      printf '%s\n' "${TMUX_PANE_ID:-%1}"
+      exit 0
+      ;;
+    '#{pane_dead}|#{pane_start_command}')
+      [[ "${TMUX_TARGET_MISSING:-0}" == "1" ]] && exit 1
+      printf '%s\n' "${TMUX_PANE_INFO:-0|sgt-worker ${TMUX_REPO_DIR:-}}"
+      exit 0
+      ;;
+  esac
+fi
+exit 0
+EOF
+  chmod +x "$TEST_TMP/bin/tmux"
+}
+
 test_healthy_installation() {
   local output status
   setup_fixture
@@ -346,6 +372,21 @@ test_remote_drift_is_degraded() {
   assert_contains "$output" "configured URL does not match"
 }
 
+test_missing_origin_remote_is_broken() {
+  local output status
+  setup_fixture
+  git -C "$HOME/dev/app" remote remove origin
+
+  set +e
+  output="$("$DOCTOR" app 2>&1)"
+  status=$?
+  set -e
+
+  assert_eq 2 "$status"
+  assert_contains "$output" "[FAIL] config.repo.app.app"
+  assert_contains "$output" "origin remote is missing"
+}
+
 test_dead_tmux_pane_is_broken() {
   local output status repo_state
   setup_fixture
@@ -399,6 +440,8 @@ test_stale_nonterminal_worker_is_degraded() {
   printf '%s\n' "$HOME/dev/app" > "$repo_state/worktree"
   printf '%s\n' %1 > "$repo_state/pane"
   touch -t 202001010000 "$repo_state/status"
+  make_doctor_tmux
+  export TMUX_REPO_DIR="$repo_state"
 
   set +e
   output="$("$DOCTOR" 2>&1)"
@@ -428,6 +471,8 @@ test_unsynchronized_fleet_status_is_degraded() {
   printf '%s\n' "$HOME/dev/app" > "$repo_state/worktree"
   printf '%s\n' %1 > "$repo_state/pane"
   printf '%s\n' 'done' > "$HOME/dev/app/.sergeant-status"
+  make_doctor_tmux
+  export TMUX_REPO_DIR="$repo_state"
 
   set +e
   output="$("$DOCTOR" 2>&1)"
@@ -446,6 +491,8 @@ test_live_worker_without_persisted_pane_metadata_is_healthy() {
   mkdir -p "$repo_state"
   printf '%s\n' in_progress > "$repo_state/status"
   printf '%s\n' "$HOME/dev/app" > "$repo_state/worktree"
+  make_doctor_tmux
+  export TMUX_REPO_DIR="$repo_state"
 
   set +e
   output="$("$DOCTOR" 2>&1)"
@@ -455,6 +502,27 @@ test_live_worker_without_persisted_pane_metadata_is_healthy() {
   assert_eq 0 "$status"
   assert_contains "$output" "[PASS] fleet.task-123.app"
   assert_contains "$output" "tmux pane are live"
+}
+
+test_reused_tmux_pane_is_broken() {
+  local output status repo_state
+  setup_fixture
+  repo_state="$SERGEANT_FLEET/task-123/app"
+  mkdir -p "$repo_state"
+  printf '%s\n' in_progress > "$repo_state/status"
+  printf '%s\n' "$HOME/dev/app" > "$repo_state/worktree"
+  printf '%s\n' %1 > "$repo_state/pane"
+  make_doctor_tmux
+  export TMUX_PANE_INFO='0|bash /tmp/other-worker'
+
+  set +e
+  output="$("$DOCTOR" 2>&1)"
+  status=$?
+  set -e
+
+  assert_eq 2 "$status"
+  assert_contains "$output" "[FAIL] fleet.task-123.app"
+  assert_contains "$output" "stale or reused tmux pane"
 }
 
 test_remote_worker_without_tmux_metadata_is_degraded() {
@@ -481,7 +549,7 @@ EOF
   assert_contains "$output" "cannot verify a local tmux pane"
 }
 
-test_goose_only_harness_is_healthy() {
+test_default_opencode_selection_must_be_usable() {
   local output status
   setup_fixture
   rm -f "$TEST_TMP/bin/opencode" "$TEST_TMP/bin/claude"
@@ -492,8 +560,27 @@ test_goose_only_harness_is_healthy() {
   status=$?
   set -e
 
+  assert_eq 2 "$status"
+  assert_contains "$output" "[FAIL] agents.harness"
+  assert_contains "$output" "default selects opencode, but it is not installed"
+}
+
+test_goose_override_is_healthy() {
+  local output status
+  setup_fixture
+  rm -f "$TEST_TMP/bin/opencode" "$TEST_TMP/bin/claude"
+  make_fake_command goose
+  export SERGEANT_AGENT=goose
+
+  set +e
+  output="$("$DOCTOR" 2>&1)"
+  status=$?
+  set -e
+
+  unset SERGEANT_AGENT
+
   assert_eq 0 "$status"
-  assert_contains "$output" "[PASS] agents.harness: goose goose 1.0.0"
+  assert_contains "$output" "[PASS] agents.harness: SERGEANT_AGENT selects goose (goose 1.0.0)"
 }
 
 test_explicit_agent_override_must_be_usable() {
@@ -651,6 +738,8 @@ test_malformed_project_yaml_is_broken
 echo "PASS: malformed project YAML"
 test_remote_drift_is_degraded
 echo "PASS: remote drift"
+test_missing_origin_remote_is_broken
+echo "PASS: missing origin remote"
 test_dead_tmux_pane_is_broken
 echo "PASS: dead tmux pane"
 test_tmux_probe_uses_dash_v
@@ -663,10 +752,14 @@ test_unsynchronized_fleet_status_is_degraded
 echo "PASS: stale fleet metadata"
 test_live_worker_without_persisted_pane_metadata_is_healthy
 echo "PASS: inferred live fleet pane"
+test_reused_tmux_pane_is_broken
+echo "PASS: reused tmux pane"
 test_remote_worker_without_tmux_metadata_is_degraded
 echo "PASS: remote fleet worker"
-test_goose_only_harness_is_healthy
-echo "PASS: goose harness"
+test_default_opencode_selection_must_be_usable
+echo "PASS: default opencode selection"
+test_goose_override_is_healthy
+echo "PASS: goose override"
 test_explicit_agent_override_must_be_usable
 echo "PASS: explicit agent override"
 test_opencode_auto_selection_must_be_usable

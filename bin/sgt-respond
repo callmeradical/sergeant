@@ -275,12 +275,7 @@ trap - EXIT
 
 pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
 _pane_is_supervisor() {
-  local target="$1"
-  local pane_info pane_dead pane_command
-  pane_info="$(tmux display-message -p -t "$target" '#{pane_dead}|#{pane_start_command}' 2>/dev/null)" || return 1
-  pane_dead="${pane_info%%|*}"
-  pane_command="${pane_info#*|}"
-  [[ "$pane_dead" == "0" && "$pane_command" == *sgt-worker* && "$pane_command" == *"$REPO_DIR"* ]]
+  _sgt_tmux_pane_is_supervisor "$1" "$REPO_DIR"
 }
 
 if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && _pane_is_supervisor "$pane"; then

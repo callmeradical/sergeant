@@ -70,13 +70,7 @@ fi
 # ── --sync mode ───────────────────────────────────────────────────────────────
 
 _pane_is_supervisor() {
-  local pane="$1"
-  local repo_dir="${2%/}"
-  local pane_info pane_dead pane_command
-  pane_info="$(tmux display-message -p -t "$pane" '#{pane_dead}|#{pane_start_command}' 2>/dev/null)" || return 1
-  pane_dead="${pane_info%%|*}"
-  pane_command="${pane_info#*|}"
-  [[ "$pane_dead" == "0" && "$pane_command" == *sgt-worker* && "$pane_command" == *"$repo_dir"* ]]
+  _sgt_tmux_pane_is_supervisor "$1" "$2"
 }
 
 _remote_logs() {

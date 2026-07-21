@@ -177,7 +177,8 @@ Agent-loaded skills for structured workflows:
 - `graphify` — knowledge graph generation (optional, needed for `sgt-graphify`)
 - `babydriver` — remote dispatch to cleanthes (optional)
 - `no-mistakes` — validated delivery pipeline (optional)
-- A supported agent harness: OpenCode, Claude Code, or Goose
+- A usable selected agent harness; when no override or agent session is
+  present, Sergeant defaults to OpenCode
 
 ## License
 

@@ -76,6 +76,16 @@ _sgt_is_git_repo() {
   git -C "$path" rev-parse --git-dir >/dev/null 2>&1
 }
 
+_sgt_tmux_pane_is_supervisor() {
+  local target="$1"
+  local repo_dir="${2%/}"
+  local pane_info pane_dead pane_command
+  pane_info="$(tmux display-message -p -t "$target" '#{pane_dead}|#{pane_start_command}' 2>/dev/null)" || return 1
+  pane_dead="${pane_info%%|*}"
+  pane_command="${pane_info#*|}"
+  [[ "$pane_dead" == "0" && "$pane_command" == *sgt-worker* && "$pane_command" == *"$repo_dir"* ]]
+}
+
 # ── Common helpers ────────────────────────────────────────────────────────────
 
 _die()  { echo "ERROR: $*" >&2; exit 1; }
