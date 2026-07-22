@@ -80,22 +80,39 @@ case "$command" in
       exit 65
     fi
     mkdir -p "$out/graphify-out"
-    printf '{"nodes": [], "links": []}\n' > "$out/graphify-out/graph.json"
+    cat > "$out/graphify-out/graph.json" <<JSON
+{"nodes":[{"id":"${repo_name}-node","label":"${repo_name} node","file_type":"code","source_file":"source.txt","source_files":["source.txt"]}],"links":[{"source":"${repo_name}-node","target":"${repo_name}-node","relation":"references","confidence":"EXTRACTED","source_file":"source.txt"}],"hyperedges":[{"id":"${repo_name}-hyperedge","label":"${repo_name} group","nodes":["${repo_name}-node"],"relation":"participate_in","confidence":"EXTRACTED","source_file":"source.txt","source_files":["source.txt"]}]}
+JSON
     printf '{"source.txt": {"mtime": 1, "ast_hash": "%s", "semantic_hash": "%s"}}\n' \
       "$repo_name" "$repo_name" > "$out/graphify-out/manifest.json"
     ;;
   merge-graphs)
+    inputs=()
     out=""
     while [[ $# -gt 0 ]]; do
       if [[ "$1" == "--out" ]]; then
         out="$2"
         shift 2
       else
+        inputs+=("$1")
         shift
       fi
     done
     mkdir -p "$(dirname "$out")"
-    printf '{"nodes": [], "links": []}\n' > "$out"
+    MERGE_OUT="$out" /usr/bin/python3 - "${inputs[@]}" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+merged = {"nodes": [], "links": [], "hyperedges": []}
+for raw in sys.argv[1:]:
+    data = json.loads(Path(raw).read_text(encoding="utf-8"))
+    for key in ("nodes", "links", "hyperedges"):
+        merged[key].extend(data.get(key, []))
+
+Path(os.environ["MERGE_OUT"]).write_text(json.dumps(merged) + "\n", encoding="utf-8")
+PY
     ;;
   cluster-only)
     project_root="$1"
@@ -134,9 +151,20 @@ fi
 [[ -f "$output/graph.json" ]]
 [[ -f "$output/manifest.json" ]]
 [[ -f "$output/GRAPH_REPORT.md" ]]
+[[ -f "$output/.graphify_root" ]]
 [[ -L "$output" ]]
 grep -Fq 'api/source.txt' "$output/manifest.json"
 grep -Fq 'app/source.txt' "$output/manifest.json"
+grep -Fq '"source_file": "api/source.txt"' "$output/graph.json"
+grep -Fq '"source_file": "app/source.txt"' "$output/graph.json"
+grep -Fq '"source_files": [' "$output/graph.json"
+grep -Fq '"api/source.txt"' "$output/graph.json"
+grep -Fq '"app/source.txt"' "$output/graph.json"
+grep -Fxq "$real_output/.graphify_sources" "$output/.graphify_root"
+[[ -L "$output/.graphify_sources/api" ]]
+[[ -L "$output/.graphify_sources/app" ]]
+grep -Fq 'api' "$output/.graphify_sources/api/source.txt"
+grep -Fq 'app' "$output/.graphify_sources/app/source.txt"
 grep -Fq 'wiki' "$output/wiki/index.md"
 grep -Fq 'memory' "$output/memory/query.md"
 [[ ! -e "$dev_root/api/graphify-out" ]]
@@ -146,6 +174,9 @@ grep -Fq "Graph report available at: $output/GRAPH_REPORT.md" <<< "$success_outp
 : > "$TEST_ROOT/graphify.log"
 run_graphify "" no-excludes >/dev/null
 [[ -f "$TEST_ROOT/no-excludes-graph/graph.json" ]]
+[[ -f "$TEST_ROOT/no-excludes-graph/.graphify_root" ]]
+grep -Fq '"source_file": "api/source.txt"' "$TEST_ROOT/no-excludes-graph/graph.json"
+grep -Fxq "$TEST_ROOT/no-excludes-graph/.graphify_sources" "$TEST_ROOT/no-excludes-graph/.graphify_root"
 if grep -Fq -- '--exclude' "$TEST_ROOT/graphify.log"; then
   printf 'sgt-graphify added an exclusion to an empty configuration\n' >&2
   exit 1
