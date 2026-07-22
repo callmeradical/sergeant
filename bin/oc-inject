@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# PROTOTYPE: oc-inject — inject a message into an OpenCode session out-of-band
+# oc-inject — inject a message into an OpenCode session out-of-band
 #
 # Usage:
-#   oc-inject "message text"                    # inject into primary session
-#   oc-inject "message text" <session-id>       # inject into specific session
-#   oc-inject --status                          # show registry state
+#   oc-inject --pid <pid> "message text" [session-id]
+#   OPENCODE_PID=<pid> oc-inject "message text" [session-id]
+#   oc-inject --pid <pid> --status
 #
 # The companion plugin (~/.config/opencode/plugins/oc-inject.js) watches
 # ~/.local/share/opencode/inbox/ and injects messages when the session is
@@ -14,21 +14,41 @@
 
 set -euo pipefail
 
-INBOX="$HOME/.local/share/opencode/inbox"
-REGISTRY="$INBOX/.registry.json"
+ROOT="${OC_INJECT_ROOT:-$HOME/.local/share/opencode/inbox}/processes"
 
 # ── helpers ────────────────────────────────────────────────────────────────
 die()    { echo "oc-inject: $*" >&2; exit 1; }
+uncertain() { echo "oc-inject: $*" >&2; exit 2; }
 require(){ command -v "$1" >/dev/null || die "requires $1"; }
 
 require jq
+require python3
+
+TARGET_PID="${OPENCODE_PID:-}"
+if [[ "${1:-}" == "--pid" ]]; then
+  [[ $# -ge 2 ]] || die "--pid requires a process ID"
+  TARGET_PID="$2"
+  shift 2
+fi
+
+[[ "$TARGET_PID" =~ ^[0-9]+$ ]] || die "target OpenCode PID is required (--pid or OPENCODE_PID)"
+PROCESS_DIR="$ROOT/$TARGET_PID"
+INBOX="$PROCESS_DIR/inbox"
+ACKS="$PROCESS_DIR/acks"
+REGISTRY="$PROCESS_DIR/registry.json"
+PROCESS_START="$(ps -o lstart= -p "$TARGET_PID" 2>/dev/null | awk '{$1=$1; print}' || true)"
+
+registry_is_live() {
+  kill -0 "$TARGET_PID" 2>/dev/null || return 1
+  [[ -f "$REGISTRY" ]] || return 1
+  [[ -n "$PROCESS_START" ]] || return 1
+  [[ "$(jq -r '.pid // empty' "$REGISTRY" 2>/dev/null || true)" == "$TARGET_PID" ]] || return 1
+  [[ "$(jq -r '.processStart // empty' "$REGISTRY" 2>/dev/null || true)" == "$PROCESS_START" ]]
+}
 
 # ── --status ───────────────────────────────────────────────────────────────
 if [[ "${1:-}" == "--status" ]]; then
-  if [[ ! -f "$REGISTRY" ]]; then
-    echo "no registry — is the oc-inject plugin loaded in opencode?"
-    exit 1
-  fi
+  registry_is_live || die "OpenCode process $TARGET_PID is not registered or no longer running"
   echo "=== oc-inject registry ==="
   jq . "$REGISTRY"
   exit 0
@@ -38,28 +58,47 @@ fi
 MESSAGE="${1:-}"
 SESSION_ID="${2:-}"
 
-[[ -z "$MESSAGE" ]] && die "usage: oc-inject \"message\" [session-id]"
+[[ -z "$MESSAGE" ]] && die "usage: oc-inject --pid <pid> \"message\" [session-id]"
 
-mkdir -p "$INBOX"
+registry_is_live || die "OpenCode process $TARGET_PID is not registered or no longer running"
 
 # If no session given, try registry
-if [[ -z "$SESSION_ID" && -f "$REGISTRY" ]]; then
+if [[ -z "$SESSION_ID" ]]; then
   SESSION_ID=$(jq -r '.primarySession // empty' "$REGISTRY" 2>/dev/null || true)
 fi
-
-# Build the .msg file (JSON so plugin can parse session target)
-TMPFILE=$(mktemp "$INBOX/XXXXXX.msg")
-if [[ -n "$SESSION_ID" ]]; then
-  printf '%s' "$(jq -nc --arg text "$MESSAGE" --arg sessionId "$SESSION_ID" \
-    '{text: $text, sessionId: $sessionId}')" > "$TMPFILE"
-else
-  # Plain text — plugin will use primarySession
-  printf '%s' "$MESSAGE" > "$TMPFILE"
+[[ -n "$SESSION_ID" ]] || die "OpenCode process $TARGET_PID has no primary session"
+if ! jq -e --arg s "$SESSION_ID" '.sessions | has($s)' "$REGISTRY" >/dev/null 2>&1; then
+  die "session $SESSION_ID is not registered to OpenCode process $TARGET_PID"
 fi
 
-echo "oc-inject: queued → $(basename "$TMPFILE")"
-if [[ -f "$REGISTRY" ]]; then
-  BUSY=$(jq -r --arg s "$SESSION_ID" '.sessions[$s].busy // "unknown"' "$REGISTRY" 2>/dev/null || echo "unknown")
-  QUEUED=$(jq -r --arg s "$SESSION_ID" '.sessions[$s].queued // 0' "$REGISTRY" 2>/dev/null || echo "0")
-  echo "oc-inject: session busy=$BUSY queued_before=$QUEUED"
-fi
+# A nanosecond timestamp orders messages without shared sequence state or locks.
+message_id="$(python3 -c 'import time; print(time.time_ns())')-$$-$RANDOM"
+fname="$message_id.msg"
+TMPFILE=$(mktemp "$INBOX/.pending.XXXXXX")
+printf '%s' "$(jq -nc --arg text "$MESSAGE" --arg sessionId "$SESSION_ID" --arg messageId "$message_id" \
+  '{text: $text, sessionId: $sessionId, messageId: $messageId}')" > "$TMPFILE"
+mv "$TMPFILE" "$INBOX/$fname"
+
+ack="$ACKS/$message_id.json"
+attempt=0
+ack_attempts="${OC_INJECT_ACK_ATTEMPTS:-300}"
+while [[ ! -f "$ack" ]]; do
+  registry_is_live || die "OpenCode process $TARGET_PID stopped before acknowledging delivery"
+  sleep 0.02
+  attempt=$((attempt + 1))
+  if [[ "$attempt" -ge "$ack_attempts" ]]; then
+    if [[ -f "$INBOX/$fname" ]]; then
+      rm -f "$INBOX/$fname"
+      die "OpenCode process $TARGET_PID did not claim delivery"
+    fi
+    uncertain "delivery was claimed by OpenCode process $TARGET_PID but not acknowledged"
+  fi
+done
+accepted="$(jq -r '.accepted // false' "$ack" 2>/dev/null || echo false)"
+rm -f "$ack"
+[[ "$accepted" == "true" ]] || die "OpenCode process $TARGET_PID rejected delivery to session $SESSION_ID"
+
+echo "oc-inject: accepted → $fname"
+BUSY=$(jq -r --arg s "$SESSION_ID" '.sessions[$s].busy // "unknown"' "$REGISTRY" 2>/dev/null || echo "unknown")
+QUEUED=$(jq -r --arg s "$SESSION_ID" '.sessions[$s].queued // 0' "$REGISTRY" 2>/dev/null || echo "0")
+echo "oc-inject: session busy=$BUSY queued_before=$QUEUED"

@@ -12,15 +12,26 @@ goes idle.
 ```
 sgt-notify / agent script
   └─ bin/oc-inject "message"
-       └─ writes ~/.local/share/opencode/inbox/<timestamp>.msg
+       └─ writes ~/.local/share/opencode/inbox/processes/<pid>/inbox/<message-id>.msg
             └─ opencode/plugins/oc-inject.js (2s poller)
                  ├─ session idle   → inject immediately via session.promptAsync
                  └─ session busy   → queue in-memory, drain on session.idle event
 ```
 
-The plugin is loaded globally by OpenCode at startup. It registers a session
-event handler that tracks which session is primary and whether it is busy. A
-2-second interval polls the inbox directory for new `.msg` files.
+The plugin is loaded globally by each OpenCode process at startup. Every process
+owns a registry and ordered inbox under its PID, so a worker plugin cannot claim
+or consume a coordinator's messages. Dispatch records the coordinator PID and
+session in the task's `oc_target.json`; `sgt-notify` uses that explicit target.
+A 2-second interval polls only the owning process's inbox. Registries include
+the operating-system process start identity so a stale directory cannot become
+valid after PID reuse. The CLI waits for the owning plugin to acknowledge each
+message before reporting success; otherwise `sgt-notify` falls back to tmux.
+If a plugin claims a message but its API call does not acknowledge within the
+bounded wait, the CLI returns status 2 and `sgt-notify` reports uncertainty
+without using tmux, avoiding duplicate delivery.
+The plugin's `shell.env` hook exports the invoking session ID to that shell
+invocation, so dispatch captures its own coordinator conversation rather than
+guessing from whichever session emitted the latest background event.
 
 ---
 
@@ -32,21 +43,17 @@ event handler that tracks which session is primary and whether it is busy. A
 | `~/.config/opencode/plugins/oc-inject.js` | Live copy loaded by OpenCode (symlinked or copied on install) |
 | `bin/oc-inject` | CLI — drop a message into the inbox |
 | `bin/sgt-notify` | Updated to prefer `oc-inject` over `tmux send-keys` |
-| `~/.local/share/opencode/inbox/` | Message drop directory (watched by plugin) |
-| `~/.local/share/opencode/inbox/.registry.json` | Session state written by plugin; read by CLI |
+| `~/.local/share/opencode/inbox/processes/<pid>/inbox/` | Process-owned ordered message queue |
+| `~/.local/share/opencode/inbox/processes/<pid>/registry.json` | Process/session state written by its plugin |
+| `~/.local/share/sergeant/fleet/<task>/oc_target.json` | Coordinator PID/session captured by dispatch |
 
 ---
 
 ## Message format
 
-Plain text (injected into primary session):
-```
-echo "my message" > ~/.local/share/opencode/inbox/$(date +%s).msg
-```
-
-JSON (target a specific session):
+Messages are JSON and target a session in the queue's owning process:
 ```json
-{ "text": "my message", "sessionId": "ses_abc123..." }
+{ "text": "my message", "sessionId": "ses_abc123...", "messageId": "..." }
 ```
 
 ---
@@ -54,9 +61,9 @@ JSON (target a specific session):
 ## CLI
 
 ```bash
-oc-inject "message"                  # inject into primary session
-oc-inject "message" <session-id>     # inject into specific session
-oc-inject --status                   # show registry (sessions, busy state, queue depth)
+oc-inject --pid 12345 "message"                  # inject into its primary session
+oc-inject --pid 12345 "message" ses_abc123       # inject into a specific session
+oc-inject --pid 12345 --status                    # show process registry state
 ```
 
 ---
@@ -113,6 +120,7 @@ OpenCode must be restarted to pick up the plugin.
 {
   "primarySession": "ses_abc123...",
   "pid": 12345,
+  "processStart": "Tue Jul 21 10:00:00 2026",
   "updated": "2026-07-18T02:59:20Z",
   "sessions": {
     "ses_abc123...": { "busy": false, "queued": 0 }
