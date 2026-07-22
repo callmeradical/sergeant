@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # sgt-graphify — Run graphify across all repos in a project
 #
-# Reads graphify.output from the project YAML and runs graphify in each
-# configured repo (filtered by include_groups if set).
+# Reads graphify.output from the project YAML, extracts each configured repo,
+# and merges the results into one project graph.
 #
 # Usage: sgt-graphify <project>
 
@@ -16,18 +16,126 @@ _require_graphify() {
   command -v graphify &>/dev/null || _die "graphify is required. See graphify documentation to install."
 }
 
+_python_is_supported() {
+  local candidate="$1"
+  [[ -n "$candidate" && -x "$candidate" ]] || return 1
+  "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info[0] == 3 else 1)' >/dev/null 2>&1
+}
+
+_require_python_runtime() {
+  local candidate=""
+  local graphify_bin=""
+  local shebang=""
+  local words=()
+  local idx
+
+  # Prefer Graphify's own interpreter so source rewriting follows the same
+  # runtime constraints even if a different `python` appears earlier on PATH.
+  graphify_bin="$(command -v graphify 2>/dev/null || true)"
+  if [[ -n "$graphify_bin" && -r "$graphify_bin" ]]; then
+    IFS= read -r shebang < "$graphify_bin" || true
+    if [[ "$shebang" == '#!'* ]]; then
+      read -r -a words <<< "${shebang#\#!}"
+      if [[ ${#words[@]} -gt 0 ]]; then
+        if [[ "${words[0]}" == */env ]]; then
+          for ((idx=1; idx<${#words[@]}; idx++)); do
+            [[ "${words[$idx]}" == -* ]] && continue
+            if candidate="$(command -v "${words[$idx]}" 2>/dev/null)"; then
+              if _python_is_supported "$candidate"; then
+                GRAPHIFY_PYTHON="$candidate"
+                return
+              fi
+            fi
+          done
+        elif _python_is_supported "${words[0]}"; then
+          GRAPHIFY_PYTHON="${words[0]}"
+          return
+        fi
+      fi
+    fi
+  fi
+
+  if candidate="$(command -v python3 2>/dev/null)"; then
+    if _python_is_supported "$candidate"; then
+      GRAPHIFY_PYTHON="$candidate"
+      return
+    fi
+  fi
+  if candidate="$(command -v python 2>/dev/null)"; then
+    if _python_is_supported "$candidate"; then
+      GRAPHIFY_PYTHON="$candidate"
+      return
+    fi
+  fi
+
+  _die "python3 or python is required to rewrite merged Graphify sources"
+}
+
+_trim_trailing_slashes() {
+  local path="$1"
+  while [[ "$path" != "/" && "$path" == */ ]]; do
+    path="${path%/}"
+  done
+  printf '%s\n' "$path"
+}
+
+_resolve_normalized_path() {
+  _trim_trailing_slashes "$(_resolve_path "$1")"
+}
+
+_path_is_within() {
+  local candidate="$1"
+  local root="$2"
+  [[ "$candidate" == "$root" || "$candidate" == "$root/"* ]]
+}
+
 [[ $# -ge 1 ]] || _die "Usage: sgt-graphify <project>"
 PROJECT="$1"
 CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
 [[ -f "$CONFIG_FILE" ]] || _die "Project not found: $PROJECT (looked for $CONFIG_FILE)"
 _require_yq
 _require_graphify
+_require_python_runtime
 
-graphify_output="$(yq '.graphify.output // ""' "$CONFIG_FILE")"
-if [[ -z "$graphify_output" || "$graphify_output" == "null" ]]; then
+configured_output="$(yq '.graphify.output // ""' "$CONFIG_FILE")"
+if [[ -z "$configured_output" || "$configured_output" == "null" ]]; then
   _die "No graphify.output configured in $CONFIG_FILE"
 fi
-graphify_output="$(_resolve_path "$graphify_output")"
+configured_output="$(_resolve_normalized_path "$configured_output")"
+graphify_output="$configured_output"
+if [[ -L "$configured_output" ]]; then
+  [[ -d "$configured_output" ]] || _die "graphify.output is a broken directory symlink: $configured_output"
+  graphify_output="$(cd "$configured_output" && pwd -P)"
+fi
+graphify_output="$(_trim_trailing_slashes "$graphify_output")"
+
+repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
+ALL_REPO_PATHS=()
+for ((i=0; i<repo_count; i++)); do
+  ALL_REPO_PATHS+=("$(_resolve_normalized_path "$(yq ".repos[$i].path" "$CONFIG_FILE")")")
+done
+
+_path_is_in_source_repo() {
+  local candidate="$1"
+  local repo_path=""
+  for repo_path in "${ALL_REPO_PATHS[@]}"; do
+    if _path_is_within "$candidate" "$repo_path"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+_publish_parent_for_output() {
+  local candidate="$1"
+  local parent=""
+  while _path_is_in_source_repo "$candidate"; do
+    parent="$(dirname "$candidate")"
+    [[ "$parent" != "$candidate" ]] || break
+    candidate="$parent"
+  done
+  printf '%s\n' "$candidate"
+}
 
 # Build include_groups list for filtering (bash 3 compatible)
 INCLUDE_GROUPS=""
@@ -43,17 +151,153 @@ _in_include_groups() {
 }
 
 echo "=== sgt-graphify: $PROJECT ==="
-echo "output: $graphify_output"
+echo "output: $configured_output"
 echo ""
 
-mkdir -p "$graphify_output"
+output_parent="$(dirname "$graphify_output")"
+mkdir -p "$output_parent"
+run_root="$(mktemp -d "${TMPDIR:-/tmp}/sgt-graphify.XXXXXX")"
+publish_root=""
+previous_output=""
+published=0
+_restore_previous_output() {
+  if [[ -z "$previous_output" ]]; then
+    return
+  fi
+  if [[ ! -e "$previous_output" && ! -L "$previous_output" ]]; then
+    return
+  fi
+  if [[ -e "$graphify_output" || -L "$graphify_output" ]]; then
+    rm -rf "$graphify_output"
+  fi
+  mv "$previous_output" "$graphify_output" || true
+}
+_cleanup() {
+  local status=$?
+  trap - EXIT
+  if [[ $published -eq 0 ]]; then
+    _restore_previous_output
+  fi
+  if [[ -n "$publish_root" ]]; then
+    rm -rf "$publish_root"
+  fi
+  rm -rf "$run_root"
+  exit "$status"
+}
+trap _cleanup EXIT
+stage_root="$run_root/project"
+stage_output="$stage_root/graphify-out"
+mkdir -p "$stage_output" "$run_root/repos" "$run_root/manifests" "$run_root/sources"
 
-repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
+TAR_EXCLUDE_ARGS=()
+while IFS= read -r pattern; do
+  [[ -n "$pattern" && "$pattern" != "null" ]] || continue
+  TAR_EXCLUDE_ARGS+=("--exclude=$pattern")
+done < <(yq '.graphify.exclude_patterns[]' "$CONFIG_FILE" 2>/dev/null || true)
+
+GRAPH_PATHS=()
+MANIFEST_PARTS=()
+INCLUDED_REPOS=()
+FAILED_REPOS=()
+SOURCE_ROOT_REPOS=()
+SOURCE_ROOT_PATHS=()
+
+_prefix_graph_sources() {
+  local repo_name="$1"
+  local input_graph="$2"
+  local output_graph="$3"
+  REPO_NAME="$repo_name" INPUT_GRAPH="$input_graph" OUTPUT_GRAPH="$output_graph" "$GRAPHIFY_PYTHON" - <<'PY'
+import json
+import os
+from pathlib import Path
+
+repo_name = os.environ["REPO_NAME"]
+input_graph = Path(os.environ["INPUT_GRAPH"])
+output_graph = Path(os.environ["OUTPUT_GRAPH"])
+
+def prefix_value(value):
+    if isinstance(value, str) and value and not Path(value).is_absolute():
+        return f"{repo_name}/{value}"
+    return value
+
+def rewrite(payload):
+    if isinstance(payload, dict):
+        updated = {}
+        for key, value in payload.items():
+            if key == "source_file":
+                updated[key] = prefix_value(value)
+            elif key == "source_files" and isinstance(value, list):
+                updated[key] = [prefix_value(item) for item in value]
+            else:
+                updated[key] = rewrite(value)
+        return updated
+    if isinstance(payload, list):
+        return [rewrite(item) for item in payload]
+    return payload
+
+with input_graph.open(encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+output_graph.write_text(json.dumps(rewrite(payload), indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+_write_graphify_root() {
+  local source_root="$stage_output/.graphify_sources"
+  local final_source_root="$graphify_output/.graphify_sources"
+  local idx
+  mkdir -p "$source_root"
+  for ((idx=0; idx<${#SOURCE_ROOT_REPOS[@]}; idx++)); do
+    ln -s "${SOURCE_ROOT_PATHS[$idx]}" "$source_root/${SOURCE_ROOT_REPOS[$idx]}"
+  done
+  printf '%s\n' "$final_source_root" > "$stage_output/.graphify_root"
+}
+
+_extract_repo() {
+  local path="$1"
+  local repo_root="$2"
+  local repo_name="$3"
+  local scan_root="$path"
+  local should_stage=0
+  local output_path=""
+  local output_relative=""
+  local output_paths=("$configured_output")
+  local tar_exclude_args=("${TAR_EXCLUDE_ARGS[@]}")
+  if [[ "$graphify_output" != "$configured_output" ]]; then
+    output_paths+=("$graphify_output")
+  fi
+  if [[ ${#tar_exclude_args[@]} -gt 0 ]]; then
+    should_stage=1
+  fi
+  for output_path in "${output_paths[@]}"; do
+    if [[ "$output_path" == "$path" ]]; then
+      echo "graphify.output must not replace source repository $path" >&2
+      return 1
+    elif [[ "$output_path" == "$path/"* ]]; then
+      output_relative="${output_path#"$path/"}"
+      tar_exclude_args+=(
+        "--exclude=$output_relative"
+        "--exclude=$output_relative/**"
+        "--exclude=./$output_relative"
+        "--exclude=./$output_relative/**"
+      )
+      should_stage=1
+    fi
+  done
+  if [[ $should_stage -eq 1 ]]; then
+    # Stage outside the repo whenever exclusions apply so current Graphify CLIs
+    # never re-ingest filtered paths or a published graph nested in source.
+    scan_root="$run_root/sources/$repo_name"
+    mkdir -p "$scan_root"
+    tar -C "$path" "${tar_exclude_args[@]}" -cf - . | tar -C "$scan_root" -xf -
+  fi
+  graphify extract "$scan_root" --out "$repo_root"
+}
 
 for ((i=0; i<repo_count; i++)); do
   repo_name="$(yq ".repos[$i].name" "$CONFIG_FILE")"
   raw_path="$(yq ".repos[$i].path" "$CONFIG_FILE")"
-  path="$(_resolve_path "$raw_path")"
+  path="$(_resolve_normalized_path "$raw_path")"
   group="$(yq ".repos[$i].group // \"\"" "$CONFIG_FILE")"
 
   if ! _in_include_groups "$group"; then
@@ -61,22 +305,109 @@ for ((i=0; i<repo_count; i++)); do
     continue
   fi
 
+  INCLUDED_REPOS+=("$repo_name")
+
+  if [[ ! "$repo_name" =~ ^[A-Za-z0-9._-]+$ || "$repo_name" == "." || "$repo_name" == ".." ]]; then
+    echo "--- $repo_name ---"
+    echo "  ERROR: repos[].name \"$repo_name\" must match [A-Za-z0-9._-]+; rename it in $CONFIG_FILE"
+    FAILED_REPOS+=("$repo_name")
+    continue
+  fi
+
   if [[ ! -d "$path" ]]; then
-    echo "--- $repo_name (skipped — not cloned at $path) ---"
+    echo "--- $repo_name ---"
+    echo "  ERROR: repository is not cloned at $path"
+    FAILED_REPOS+=("$repo_name")
     continue
   fi
 
   echo "--- $repo_name ---"
   echo "  path: $path"
-  graphify update "$path" --output "$graphify_output" 2>&1 | sed 's/^/  /' || {
-    echo "  WARNING: graphify failed for $repo_name"
-  }
+  repo_root="$run_root/repos/$repo_name"
+  if _extract_repo "$path" "$repo_root" "$repo_name" 2>&1 | sed 's/^/  /'; then
+    repo_output="$repo_root/graphify-out"
+    if [[ ! -s "$repo_output/graph.json" || ! -s "$repo_output/manifest.json" ]]; then
+      echo "  ERROR: graphify did not produce graph.json and manifest.json for $repo_name"
+      FAILED_REPOS+=("$repo_name")
+    else
+      prefixed_graph="$repo_root/graphify-out/prefixed-graph.json"
+      _prefix_graph_sources "$repo_name" "$repo_output/graph.json" "$prefixed_graph"
+      GRAPH_PATHS+=("$prefixed_graph")
+      manifest_part="$run_root/manifests/$repo_name.json"
+      REPO_NAME="$repo_name" yq -o=json \
+        'with_entries(.key = strenv(REPO_NAME) + "/" + .key)' \
+        "$repo_output/manifest.json" > "$manifest_part"
+      MANIFEST_PARTS+=("$manifest_part")
+      SOURCE_ROOT_REPOS+=("$repo_name")
+      SOURCE_ROOT_PATHS+=("$path")
+    fi
+  else
+    echo "  ERROR: graphify extraction failed for $repo_name"
+    FAILED_REPOS+=("$repo_name")
+  fi
   echo ""
 done
 
+if [[ ${#INCLUDED_REPOS[@]} -eq 0 ]]; then
+  _die "No repositories matched graphify.include_groups"
+fi
+
+if [[ ${#FAILED_REPOS[@]} -gt 0 ]]; then
+  echo "ERROR: graphify failed for repositories: ${FAILED_REPOS[*]}" >&2
+  exit 1
+fi
+
+if [[ ${#GRAPH_PATHS[@]} -eq 1 ]]; then
+  cp "${GRAPH_PATHS[0]}" "$stage_output/graph.json"
+elif ! graphify merge-graphs "${GRAPH_PATHS[@]}" --out "$stage_output/graph.json" 2>&1 | sed 's/^/  /'; then
+  echo "ERROR: graph merge failed for repositories: ${INCLUDED_REPOS[*]}" >&2
+  exit 1
+fi
+
+# yq, not the shell, expands $item.
+# shellcheck disable=SC2016
+if ! yq ea -o=json '. as $item ireduce ({}; . * $item)' \
+  "${MANIFEST_PARTS[@]}" > "$stage_output/manifest.json"; then
+  echo "ERROR: manifest merge failed for repositories: ${INCLUDED_REPOS[*]}" >&2
+  exit 1
+fi
+
+if ! graphify cluster-only "$stage_root" --graph "$stage_output/graph.json" \
+  --no-label --no-viz 2>&1 | sed 's/^/  /'; then
+  echo "ERROR: report generation failed for repositories: ${INCLUDED_REPOS[*]}" >&2
+  exit 1
+fi
+
+for artifact in graph.json manifest.json GRAPH_REPORT.md; do
+  if [[ ! -s "$stage_output/$artifact" ]]; then
+    echo "ERROR: project graph is missing $artifact after processing repositories: ${INCLUDED_REPOS[*]}" >&2
+    exit 1
+  fi
+done
+
+_write_graphify_root
+
+# Keep user-facing graph extensions that are not regenerated by this command.
+for preserved_dir in wiki memory; do
+  if [[ -d "$graphify_output/$preserved_dir" ]]; then
+    cp -R "$graphify_output/$preserved_dir" "$stage_output/$preserved_dir"
+  fi
+done
+
+publish_root="$(mktemp -d "$(_publish_parent_for_output "$output_parent")"/.sgt-graphify.publish.XXXXXX)"
+publish_stage="$publish_root/graphify-out"
+mkdir -p "$publish_stage"
+tar -C "$stage_output" -cf - . | tar -C "$publish_stage" -xf -
+previous_output="$publish_root/previous-output"
+if [[ -e "$graphify_output" || -L "$graphify_output" ]]; then
+  mv "$graphify_output" "$previous_output"
+fi
+if ! mv "$publish_stage" "$graphify_output"; then
+  _restore_previous_output
+  _die "Could not publish project graph to $graphify_output"
+fi
+published=1
+
 echo "=== done ==="
 echo ""
-
-if [[ -f "$graphify_output/GRAPH_REPORT.md" ]]; then
-  echo "Graph report available at: $graphify_output/GRAPH_REPORT.md"
-fi
+echo "Graph report available at: $configured_output/GRAPH_REPORT.md"

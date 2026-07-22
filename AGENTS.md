@@ -101,9 +101,9 @@ groups:                            # optional: logical groupings
     agent_instructions: <string>   # inherited by all repos in this group
 
 graphify:                          # optional: graphify configuration
-  output: <string>                 # path where graphify writes its output
+  output: <string>                 # published graph directory; see docs/schema.md for graphify details
   include_groups: [<string>, ...]  # only graph repos in these groups (default: all)
-  exclude_patterns: [<string>, ...] # glob patterns to exclude from graphify
+  exclude_patterns: [<string>, ...] # extraction excludes; see docs/schema.md for exact behavior
 
 defaults:                          # optional: defaults applied to all repos
   agent_instructions: <string>
