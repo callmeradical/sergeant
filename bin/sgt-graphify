@@ -82,6 +82,9 @@ if [[ -z "$graphify_output" || "$graphify_output" == "null" ]]; then
   _die "No graphify.output configured in $CONFIG_FILE"
 fi
 graphify_output="$(_resolve_path "$graphify_output")"
+while [[ "$graphify_output" != "/" && "$graphify_output" == */ ]]; do
+  graphify_output="${graphify_output%/}"
+done
 configured_output="$graphify_output"
 if [[ -L "$graphify_output" ]]; then
   [[ -d "$graphify_output" ]] || _die "graphify.output is a broken directory symlink: $graphify_output"
@@ -107,7 +110,7 @@ echo ""
 
 output_parent="$(dirname "$graphify_output")"
 mkdir -p "$output_parent"
-run_root="$(mktemp -d "$output_parent/.sgt-graphify.XXXXXX")"
+run_root="$(mktemp -d "${TMPDIR:-/tmp}/sgt-graphify.XXXXXX")"
 previous_output=""
 published=0
 _cleanup() {
@@ -193,10 +196,29 @@ _extract_repo() {
   local repo_root="$2"
   local repo_name="$3"
   local scan_root="$path"
-  if [[ ${#TAR_EXCLUDE_ARGS[@]} -gt 0 ]]; then
+  local should_stage=0
+  local output_relative=""
+  local tar_exclude_args=("${TAR_EXCLUDE_ARGS[@]}")
+  if [[ ${#tar_exclude_args[@]} -gt 0 ]]; then
+    should_stage=1
+  fi
+  if [[ "$graphify_output" == "$path" ]]; then
+    echo "graphify.output must not replace source repository $path" >&2
+    return 1
+  elif [[ "$graphify_output" == "$path/"* ]]; then
+    output_relative="${graphify_output#"$path/"}"
+    tar_exclude_args+=(
+      "--exclude=$output_relative"
+      "--exclude=$output_relative/**"
+      "--exclude=./$output_relative"
+      "--exclude=./$output_relative/**"
+    )
+    should_stage=1
+  fi
+  if [[ $should_stage -eq 1 ]]; then
     scan_root="$run_root/sources/$repo_name"
     mkdir -p "$scan_root"
-    tar -C "$path" "${TAR_EXCLUDE_ARGS[@]}" -cf - . | tar -C "$scan_root" -xf -
+    tar -C "$path" "${tar_exclude_args[@]}" -cf - . | tar -C "$scan_root" -xf -
   fi
   graphify extract "$scan_root" --out "$repo_root"
 }

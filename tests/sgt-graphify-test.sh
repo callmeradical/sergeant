@@ -45,6 +45,25 @@ repos:
 graphify:
   output: $TEST_ROOT/no-excludes-graph
 EOF
+cat > "$config/trailing-slash-output.yaml" <<EOF
+name: trailing-slash-output
+repos:
+  - name: api
+    path: api
+graphify:
+  output: $output/
+EOF
+cat > "$config/output-inside-source.yaml" <<EOF
+name: output-inside-source
+repos:
+  - name: api
+    path: api
+graphify:
+  output: $dev_root/api/graphify-out
+  exclude_patterns:
+    - "**/vendor/**"
+    - "**/*.generated.*"
+EOF
 cat > "$config/invalid-name.yaml" <<EOF
 name: invalid-name
 repos:
@@ -193,6 +212,10 @@ case "$command" in
       printf 'configured exclusions reached graphify extraction\n' >&2
       exit 65
     fi
+    if [[ "$repo_path" == */sources/* && -e "$repo_path/graphify-out/stale.txt" ]]; then
+      printf 'configured output reached graphify extraction\n' >&2
+      exit 66
+    fi
     mkdir -p "$out/graphify-out"
     cat > "$out/graphify-out/graph.json" <<JSON
 {"nodes":[{"id":"${repo_name}-node","label":"${repo_name} node","file_type":"code","source_file":"source.txt","source_files":["source.txt"]}],"links":[{"source":"${repo_name}-node","target":"${repo_name}-node","relation":"references","confidence":"EXTRACTED","source_file":"source.txt"}],"hyperedges":[{"id":"${repo_name}-hyperedge","label":"${repo_name} group","nodes":["${repo_name}-node"],"relation":"participate_in","confidence":"EXTRACTED","source_file":"source.txt","source_files":["source.txt"]}]}
@@ -304,6 +327,19 @@ if grep -Fq -- '--exclude' "$TEST_ROOT/graphify.log"; then
   printf 'sgt-graphify added an exclusion to an empty configuration\n' >&2
   exit 1
 fi
+
+: > "$TEST_ROOT/graphify.log"
+run_graphify "" trailing-slash-output >/dev/null
+[[ -L "$output" ]]
+[[ -f "$output/graph.json" ]]
+
+mkdir -p "$dev_root/api/graphify-out"
+printf 'stale\n' > "$dev_root/api/graphify-out/stale.txt"
+: > "$TEST_ROOT/graphify.log"
+run_graphify "" output-inside-source >/dev/null
+grep -Eq 'extract .*/sources/api --out' "$TEST_ROOT/graphify.log"
+[[ -f "$dev_root/api/graphify-out/graph.json" ]]
+[[ ! -e "$dev_root/api/graphify-out/stale.txt" ]]
 
 : > "$TEST_ROOT/graphify.log"
 : > "$TEST_ROOT/fallback-python.log"

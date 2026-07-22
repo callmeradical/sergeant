@@ -41,7 +41,7 @@ All scripts read `dev_root` at startup. Repo `path` values that are not absolute
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `name` | string | yes | Short identifier for this repo. Used in output and context blocks. For `sgt-graphify`, it must match `[A-Za-z0-9._-]+` so Sergeant can safely prefix merged source paths with it. |
+| `name` | string | yes | Short identifier for this repo. Used in output and context blocks. For `sgt-graphify`, it must match `[A-Za-z0-9._-]+` and cannot be `.` or `..`, so Sergeant can safely prefix merged source paths with it. |
 | `path` | string | yes | Path on disk. Absolute (`/...`) and home-relative (`~/...`) paths pass through. Relative paths are resolved from `dev_root` in `config.yaml`. |
 | `url` | string | no | Git remote URL. Used by `sgt-sync` to clone if path doesn't exist. |
 | `group` | string | no | Group name this repo belongs to. Must match a key in `groups`. |
