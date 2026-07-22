@@ -11,9 +11,10 @@ home="$TEST_ROOT/home"
 config="$TEST_ROOT/config"
 dev_root="$TEST_ROOT/dev"
 fake_bin="$TEST_ROOT/fake-bin"
+fallback_path="$TEST_ROOT/fallback-path"
 output="$TEST_ROOT/project-graph-link"
 real_output="$TEST_ROOT/project-graph"
-mkdir -p "$home" "$config" "$dev_root/api/vendor" "$dev_root/app" "$fake_bin" "$real_output"
+mkdir -p "$home" "$config" "$dev_root/api/vendor" "$dev_root/app" "$fake_bin" "$fallback_path" "$real_output"
 ln -s "$real_output" "$output"
 printf 'api\n' > "$dev_root/api/source.txt"
 printf 'ignored\n' > "$dev_root/api/vendor/ignored.py"
@@ -52,6 +53,14 @@ repos:
 graphify:
   output: $TEST_ROOT/invalid-name-graph
 EOF
+cat > "$config/fallback-runtime.yaml" <<EOF
+name: fallback-runtime
+repos:
+  - name: api
+    path: api
+graphify:
+  output: $TEST_ROOT/fallback-runtime-graph
+EOF
 
 cat > "$fake_bin/python3" <<EOF
 #!/usr/bin/env bash
@@ -60,6 +69,94 @@ printf 'python3 %q\n' "\$*" >> "$TEST_ROOT/python.log"
 exec "$REAL_PYTHON" "\$@"
 EOF
 chmod +x "$fake_bin/python3"
+
+for tool in bash cp dirname grep ln mkdir mktemp mv rm sed tar tr yq; do
+  ln -s "$(command -v "$tool")" "$fallback_path/$tool"
+done
+
+cat > "$fallback_path/python" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'python %q\n' "\$*" >> "$TEST_ROOT/fallback-python.log"
+exit 1
+EOF
+chmod +x "$fallback_path/python"
+
+cat > "$fallback_path/graphify" <<EOF
+#!$REAL_PYTHON
+import json
+import os
+import sys
+from pathlib import Path
+
+with open("$TEST_ROOT/fallback-graphify.log", "a", encoding="utf-8") as fh:
+    fh.write(" ".join(sys.argv[1:]) + "\\n")
+
+command = sys.argv[1]
+args = sys.argv[2:]
+
+if command == "extract":
+    repo_path = args[0]
+    repo_name = Path(repo_path).name
+    out = ""
+    idx = 1
+    while idx < len(args):
+        if args[idx] == "--out":
+            out = args[idx + 1]
+            idx += 2
+        elif args[idx] == "--exclude" or args[idx].startswith("--exclude="):
+            raise SystemExit(64)
+        else:
+            idx += 1
+    out_dir = Path(out) / "graphify-out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "graph.json").write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {
+                        "id": f"{repo_name}-node",
+                        "label": f"{repo_name} node",
+                        "file_type": "code",
+                        "source_file": "source.txt",
+                    }
+                ],
+                "links": [],
+            }
+        )
+        + "\\n",
+        encoding="utf-8",
+    )
+    (out_dir / "manifest.json").write_text(
+        json.dumps({"source.txt": {"mtime": 1, "ast_hash": repo_name, "semantic_hash": repo_name}}) + "\\n",
+        encoding="utf-8",
+    )
+elif command == "merge-graphs":
+    out = ""
+    inputs = []
+    idx = 0
+    while idx < len(args):
+        if args[idx] == "--out":
+            out = args[idx + 1]
+            idx += 2
+        else:
+            inputs.append(args[idx])
+            idx += 1
+    merged = {"nodes": [], "links": []}
+    for raw in inputs:
+        data = json.loads(Path(raw).read_text(encoding="utf-8"))
+        merged["nodes"].extend(data.get("nodes", []))
+        merged["links"].extend(data.get("links", []))
+    Path(out).write_text(json.dumps(merged) + "\\n", encoding="utf-8")
+elif command == "cluster-only":
+    project_root = Path(args[0])
+    out_dir = project_root / "graphify-out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "GRAPH_REPORT.md").write_text("fallback report\\n", encoding="utf-8")
+else:
+    raise SystemExit(64)
+EOF
+chmod +x "$fallback_path/graphify"
 
 cat > "$fake_bin/graphify" <<'EOF'
 #!/usr/bin/env bash
@@ -149,6 +246,14 @@ run_graphify() {
     GRAPHIFY_FAIL_REPOS="${1:-}" "$ROOT_DIR/bin/sgt-graphify" "${2:-example}"
 }
 
+run_graphify_with_path() {
+  local path_override="$1"
+  local fail_repos="${2:-}"
+  local project="${3:-example}"
+  HOME="$home" PATH="$path_override" SERGEANT_CONFIG="$config" GRAPHIFY_LOG="$TEST_ROOT/graphify.log" \
+    GRAPHIFY_FAIL_REPOS="$fail_repos" "$ROOT_DIR/bin/sgt-graphify" "$project"
+}
+
 mkdir -p "$output/wiki" "$output/memory"
 printf 'wiki\n' > "$output/wiki/index.md"
 printf 'memory\n' > "$output/memory/query.md"
@@ -199,6 +304,18 @@ if grep -Fq -- '--exclude' "$TEST_ROOT/graphify.log"; then
   printf 'sgt-graphify added an exclusion to an empty configuration\n' >&2
   exit 1
 fi
+
+: > "$TEST_ROOT/graphify.log"
+: > "$TEST_ROOT/fallback-python.log"
+: > "$TEST_ROOT/fallback-graphify.log"
+fallback_output="$(run_graphify_with_path "$fallback_path" "" fallback-runtime)"
+[[ -f "$TEST_ROOT/fallback-runtime-graph/graph.json" ]]
+grep -Fq 'extract' "$TEST_ROOT/fallback-graphify.log"
+if [[ -s "$TEST_ROOT/fallback-python.log" ]]; then
+  printf 'sgt-graphify preferred bare python over Graphify runtime\n' >&2
+  exit 1
+fi
+grep -Fq 'Graph report available at: ' <<< "$fallback_output"
 
 : > "$TEST_ROOT/graphify.log"
 set +e

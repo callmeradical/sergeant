@@ -16,21 +16,18 @@ _require_graphify() {
   command -v graphify &>/dev/null || _die "graphify is required. See graphify documentation to install."
 }
 
+_python_is_supported() {
+  local candidate="$1"
+  [[ -n "$candidate" && -x "$candidate" ]] || return 1
+  "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info[0] == 3 else 1)' >/dev/null 2>&1
+}
+
 _require_python_runtime() {
   local candidate=""
   local graphify_bin=""
   local shebang=""
   local words=()
   local idx
-
-  if candidate="$(command -v python3 2>/dev/null)"; then
-    GRAPHIFY_PYTHON="$candidate"
-    return
-  fi
-  if candidate="$(command -v python 2>/dev/null)"; then
-    GRAPHIFY_PYTHON="$candidate"
-    return
-  fi
 
   graphify_bin="$(command -v graphify 2>/dev/null || true)"
   if [[ -n "$graphify_bin" && -r "$graphify_bin" ]]; then
@@ -42,15 +39,30 @@ _require_python_runtime() {
           for ((idx=1; idx<${#words[@]}; idx++)); do
             [[ "${words[$idx]}" == -* ]] && continue
             if candidate="$(command -v "${words[$idx]}" 2>/dev/null)"; then
-              GRAPHIFY_PYTHON="$candidate"
-              return
+              if _python_is_supported "$candidate"; then
+                GRAPHIFY_PYTHON="$candidate"
+                return
+              fi
             fi
           done
-        elif [[ -x "${words[0]}" ]]; then
+        elif _python_is_supported "${words[0]}"; then
           GRAPHIFY_PYTHON="${words[0]}"
           return
         fi
       fi
+    fi
+  fi
+
+  if candidate="$(command -v python3 2>/dev/null)"; then
+    if _python_is_supported "$candidate"; then
+      GRAPHIFY_PYTHON="$candidate"
+      return
+    fi
+  fi
+  if candidate="$(command -v python 2>/dev/null)"; then
+    if _python_is_supported "$candidate"; then
+      GRAPHIFY_PYTHON="$candidate"
+      return
     fi
   fi
 
