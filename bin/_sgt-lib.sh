@@ -92,7 +92,7 @@ _die()  { echo "ERROR: $*" >&2; exit 1; }
 _info() { echo "  $*"; }
 
 _sgt_redact_assignments() {
-  local input="$1" output="" rest key_match separator quote
+  local input="$1" output="" rest key_match separator quote ch
   local i=0 length=${#input}
   local nocasematch_was_on=0
   shopt -q nocasematch && nocasematch_was_on=1
@@ -107,28 +107,42 @@ _sgt_redact_assignments() {
         output+="${key_match}=[REDACTED]"
         i=$((i + ${#key_match} + ${#separator}))
         if ((i < length)); then
-          quote="${input:i:1}"
-          if [[ "$quote" == "'" || "$quote" == '"' ]]; then
-            i=$((i + 1))
-            while ((i < length)); do
-              if [[ "$quote" == '"' && "${input:i:1}" == '\' ]] && ((i + 1 < length)); then
+          quote=""
+          while ((i < length)); do
+            ch="${input:i:1}"
+            if [[ -z "$quote" ]]; then
+              case "$ch" in
+                ' '|$'\t'|';'|','|$'\n') break ;;
+                "'")
+                  quote="'"
+                  i=$((i + 1))
+                  continue
+                  ;;
+                '"')
+                  quote='"'
+                  i=$((i + 1))
+                  continue
+                  ;;
+                '\')
+                  if ((i + 1 < length)); then
+                    i=$((i + 2))
+                    continue
+                  fi
+                  ;;
+              esac
+            else
+              if [[ "$quote" == '"' && "$ch" == '\' ]] && ((i + 1 < length)); then
                 i=$((i + 2))
                 continue
               fi
-              if [[ "${input:i:1}" == "$quote" ]]; then
+              if [[ "$ch" == "$quote" ]]; then
+                quote=""
                 i=$((i + 1))
-                break
+                continue
               fi
-              i=$((i + 1))
-            done
-          else
-            while ((i < length)); do
-              case "${input:i:1}" in
-                ' '|$'\t'|';'|','|$'\n') break ;;
-              esac
-              i=$((i + 1))
-            done
-          fi
+            fi
+            i=$((i + 1))
+          done
         fi
         continue
       fi

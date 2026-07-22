@@ -58,4 +58,15 @@ redacted="$(PATH="$TEST_TMP:/bin" bash -lc 'source "$1"; _sgt_redact '\''API_TOK
 [[ "$redacted" != *"supersecret"* ]]
 [[ "$redacted" == *"ordinary-text AWS_SECRET_ACCESS_KEY=[REDACTED] PATH=/usr/bin"* ]]
 
+redacted="$(PATH="$TEST_TMP:/bin" bash -lc 'source "$1"; _sgt_redact '\''API_TOKEN=foo"bar baz"qux PATH=/usr/bin'\''' _ "$ROOT_DIR/bin/_sgt-lib.sh")"
+[[ "$redacted" == "API_TOKEN=[REDACTED] PATH=/usr/bin" ]]
+[[ "$redacted" != *'foo"bar baz"qux'* ]]
+[[ "$redacted" != *'baz"qux'* ]]
+[[ "$redacted" == *"PATH=/usr/bin"* ]]
+
+redacted="$(PATH="$TEST_TMP:/bin" bash -lc 'source "$1"; _sgt_redact '\''API_TOKEN="unterminated secret value ordinary-text'\''' _ "$ROOT_DIR/bin/_sgt-lib.sh")"
+[[ "$redacted" == "API_TOKEN=[REDACTED]" ]]
+[[ "$redacted" != *"unterminated"* ]]
+[[ "$redacted" != *"ordinary-text"* ]]
+
 printf 'sgt-lib agent command builder: ok\n'

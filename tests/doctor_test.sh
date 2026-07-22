@@ -324,7 +324,7 @@ test_human_and_json_output_redact_compound_credentials_without_python() {
   cat > "$TEST_TMP/bin/graphify" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "--version" ]]; then
-  echo 'graphify 1.0.0 API_TOKEN="top secret-value" ordinary-text AWS_SECRET_ACCESS_KEY=supersecret PATH=/usr/bin'
+  echo 'graphify 1.0.0 API_TOKEN=foo"bar baz"qux PATH=/usr/bin AWS_SECRET_ACCESS_KEY=supersecret'
   exit 0
 fi
 exit 0
@@ -337,9 +337,9 @@ EOF
   set -e
 
   assert_eq 2 "$status"
-  assert_contains "$output" "API_TOKEN=[REDACTED] ordinary-text AWS_SECRET_ACCESS_KEY=[REDACTED] PATH=/usr/bin"
-  assert_not_contains "$output" "top secret-value"
-  assert_not_contains "$output" "secret-value"
+  assert_contains "$output" "API_TOKEN=[REDACTED] PATH=/usr/bin AWS_SECRET_ACCESS_KEY=[REDACTED]"
+  assert_not_contains "$output" 'foo"bar baz"qux'
+  assert_not_contains "$output" 'baz"qux'
   assert_not_contains "$output" "supersecret"
 
   set +e
@@ -348,9 +348,9 @@ EOF
   set -e
 
   assert_eq 2 "$status"
-  assert_contains "$output" "API_TOKEN=[REDACTED] ordinary-text AWS_SECRET_ACCESS_KEY=[REDACTED] PATH=/usr/bin"
-  assert_not_contains "$output" "top secret-value"
-  assert_not_contains "$output" "secret-value"
+  assert_contains "$output" "API_TOKEN=[REDACTED] PATH=/usr/bin AWS_SECRET_ACCESS_KEY=[REDACTED]"
+  assert_not_contains "$output" 'foo"bar baz"qux'
+  assert_not_contains "$output" 'baz"qux'
   assert_not_contains "$output" "supersecret"
   "$REAL_PYTHON3" -c 'import json,sys; json.loads(sys.stdin.read())' <<< "$output" \
     || fail "JSON output is not parseable"
