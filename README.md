@@ -41,8 +41,6 @@ sergeant/                     ← this distro (you are here)
 
 Each project is a YAML file. That file defines which repos belong to it, how they group, what graphify output to use, and what agent instructions apply — per group and per repo.
 
-When you use `sgt-graphify`, each `repos[].name` must match `[A-Za-z0-9._-]+`.
-
 ## Quick start
 
 ```bash

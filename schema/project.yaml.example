@@ -78,11 +78,12 @@ groups:
 
 # Optional. Cross-repo knowledge graph configuration.
 graphify:
-  # Required if graphify block is present. Output directory for the graph.
+  # Required if graphify block is present. Published output directory for the
+  # merged project graph; sgt-graphify only replaces it after a complete run.
   output: ~/Dev/myapp/graphify-out/
   # Optional. Only graph repos in these groups. Default: all repos.
   include_groups: [backend, frontend]
-  # Optional. Exclude paths matching these globs from graphify traversal.
+  # Optional. Exclude paths matching these globs before graphify extraction.
   exclude_patterns:
     - "**/node_modules/**"
     - "**/vendor/**"
