@@ -151,10 +151,16 @@ matches = []
 
 for item in items:
     if needle in item.get("description", "").splitlines():
+        labels = list(dict.fromkeys([
+            *(item.get("labels") or []),
+            "no-mistakes",
+            "finding",
+        ]))
         matches.append((
             item["id"],
             item.get("status") or "",
             item.get("defer_until") or "",
+            ",".join(labels),
         ))
 
 if len(matches) > 1:
@@ -162,14 +168,15 @@ if len(matches) > 1:
     raise SystemExit(f"td list returned duplicate findings for {marker}: {ids}")
 
 if matches:
-    print("\t".join(matches[0]))
+    print("\x1f".join(matches[0]))
 ' "$marker")"
 
 existing_id=""
 existing_status=""
 existing_defer_until=""
+existing_labels=""
 if [[ -n "$existing_match" ]]; then
-  IFS=$'\t' read -r existing_id existing_status existing_defer_until <<< "$existing_match"
+  IFS=$'\x1f' read -r existing_id existing_status existing_defer_until existing_labels <<< "$existing_match"
 fi
 
 if [[ -n "$existing_id" ]]; then
@@ -185,7 +192,7 @@ if [[ -n "$existing_id" ]]; then
   td update "$existing_id" \
     --priority "$PRIORITY" \
     --description "$body" \
-    --labels no-mistakes,finding \
+    --labels "$existing_labels" \
     --work-dir "$repo_path" \
     --json >/dev/null
   printf 'td %s updated for finding %s\n' "$existing_id" "$FINDING_ID"
