@@ -6,15 +6,20 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 REAL_PYTHON="$(command -v python3 || command -v python)"
+REAL_MV="$(command -v mv)"
 
 home="$TEST_ROOT/home"
 config="$TEST_ROOT/config"
 dev_root="$TEST_ROOT/dev"
 fake_bin="$TEST_ROOT/fake-bin"
 fallback_path="$TEST_ROOT/fallback-path"
+crossfs_path="$TEST_ROOT/crossfs-path"
 output="$TEST_ROOT/project-graph-link"
 real_output="$TEST_ROOT/project-graph"
-mkdir -p "$home" "$config" "$dev_root/api/vendor" "$dev_root/app" "$fake_bin" "$fallback_path" "$real_output"
+repo_symlink_target="$TEST_ROOT/repo-symlink-target"
+tmpdir="$TEST_ROOT/tmp"
+mkdir -p "$home" "$config" "$dev_root/api/vendor" "$dev_root/app" "$fake_bin" "$fallback_path" \
+  "$crossfs_path" "$real_output" "$repo_symlink_target" "$tmpdir"
 ln -s "$real_output" "$output"
 printf 'api\n' > "$dev_root/api/source.txt"
 printf 'ignored\n' > "$dev_root/api/vendor/ignored.py"
@@ -64,6 +69,17 @@ graphify:
     - "**/vendor/**"
     - "**/*.generated.*"
 EOF
+cat > "$config/repo-symlink-output.yaml" <<EOF
+name: repo-symlink-output
+repos:
+  - name: api
+    path: api
+graphify:
+  output: $dev_root/api/graphify-out/
+  exclude_patterns:
+    - "**/vendor/**"
+    - "**/*.generated.*"
+EOF
 cat > "$config/invalid-name.yaml" <<EOF
 name: invalid-name
 repos:
@@ -88,6 +104,19 @@ printf 'python3 %q\n' "\$*" >> "$TEST_ROOT/python.log"
 exec "$REAL_PYTHON" "\$@"
 EOF
 chmod +x "$fake_bin/python3"
+
+cat > "$crossfs_path/mv" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ \$# -eq 2 && "\$1" == "$tmpdir"/sgt-graphify.*"/project/graphify-out" && "\$2" == "$real_output" ]]; then
+  rm -rf "\$2"
+  mkdir -p "\$2"
+  printf 'partial publish\n' > "\$2/PARTIAL"
+  exit 1
+fi
+exec "$REAL_MV" "\$@"
+EOF
+chmod +x "$crossfs_path/mv"
 
 for tool in bash cp dirname grep ln mkdir mktemp mv rm sed tar tr yq; do
   ln -s "$(command -v "$tool")" "$fallback_path/$tool"
@@ -333,6 +362,12 @@ run_graphify "" trailing-slash-output >/dev/null
 [[ -L "$output" ]]
 [[ -f "$output/graph.json" ]]
 
+: > "$TEST_ROOT/graphify.log"
+crossfs_output="$(TMPDIR="$tmpdir" run_graphify_with_path "$crossfs_path:$fake_bin:$PATH" "" example)"
+[[ -f "$output/graph.json" ]]
+[[ ! -e "$real_output/PARTIAL" ]]
+grep -Fq "Graph report available at: $output/GRAPH_REPORT.md" <<< "$crossfs_output"
+
 mkdir -p "$dev_root/api/graphify-out"
 printf 'stale\n' > "$dev_root/api/graphify-out/stale.txt"
 : > "$TEST_ROOT/graphify.log"
@@ -340,6 +375,16 @@ run_graphify "" output-inside-source >/dev/null
 grep -Eq 'extract .*/sources/api --out' "$TEST_ROOT/graphify.log"
 [[ -f "$dev_root/api/graphify-out/graph.json" ]]
 [[ ! -e "$dev_root/api/graphify-out/stale.txt" ]]
+
+rm -rf "$dev_root/api/graphify-out"
+ln -s "$repo_symlink_target" "$dev_root/api/graphify-out"
+printf 'stale\n' > "$repo_symlink_target/stale.txt"
+: > "$TEST_ROOT/graphify.log"
+run_graphify "" repo-symlink-output >/dev/null
+grep -Eq 'extract .*/sources/api --out' "$TEST_ROOT/graphify.log"
+[[ -L "$dev_root/api/graphify-out" ]]
+[[ -f "$repo_symlink_target/graph.json" ]]
+[[ ! -e "$repo_symlink_target/stale.txt" ]]
 
 : > "$TEST_ROOT/graphify.log"
 : > "$TEST_ROOT/fallback-python.log"

@@ -69,6 +69,20 @@ _require_python_runtime() {
   _die "python3 or python is required to rewrite merged Graphify sources"
 }
 
+_trim_trailing_slashes() {
+  local path="$1"
+  while [[ "$path" != "/" && "$path" == */ ]]; do
+    path="${path%/}"
+  done
+  printf '%s\n' "$path"
+}
+
+_path_is_within() {
+  local candidate="$1"
+  local root="$2"
+  [[ "$candidate" == "$root" || "$candidate" == "$root/"* ]]
+}
+
 [[ $# -ge 1 ]] || _die "Usage: sgt-graphify <project>"
 PROJECT="$1"
 CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
@@ -77,19 +91,45 @@ _require_yq
 _require_graphify
 _require_python_runtime
 
-graphify_output="$(yq '.graphify.output // ""' "$CONFIG_FILE")"
-if [[ -z "$graphify_output" || "$graphify_output" == "null" ]]; then
+configured_output="$(yq '.graphify.output // ""' "$CONFIG_FILE")"
+if [[ -z "$configured_output" || "$configured_output" == "null" ]]; then
   _die "No graphify.output configured in $CONFIG_FILE"
 fi
-graphify_output="$(_resolve_path "$graphify_output")"
-while [[ "$graphify_output" != "/" && "$graphify_output" == */ ]]; do
-  graphify_output="${graphify_output%/}"
-done
-configured_output="$graphify_output"
-if [[ -L "$graphify_output" ]]; then
-  [[ -d "$graphify_output" ]] || _die "graphify.output is a broken directory symlink: $graphify_output"
-  graphify_output="$(cd "$graphify_output" && pwd -P)"
+configured_output="$(_trim_trailing_slashes "$(_resolve_path "$configured_output")")"
+graphify_output="$configured_output"
+if [[ -L "$configured_output" ]]; then
+  [[ -d "$configured_output" ]] || _die "graphify.output is a broken directory symlink: $configured_output"
+  graphify_output="$(cd "$configured_output" && pwd -P)"
 fi
+graphify_output="$(_trim_trailing_slashes "$graphify_output")"
+
+repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
+ALL_REPO_PATHS=()
+for ((i=0; i<repo_count; i++)); do
+  ALL_REPO_PATHS+=("$(_resolve_path "$(yq ".repos[$i].path" "$CONFIG_FILE")")")
+done
+
+_path_is_in_source_repo() {
+  local candidate="$1"
+  local repo_path=""
+  for repo_path in "${ALL_REPO_PATHS[@]}"; do
+    if _path_is_within "$candidate" "$repo_path"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+_publish_parent_for_output() {
+  local candidate="$1"
+  local parent=""
+  while _path_is_in_source_repo "$candidate"; do
+    parent="$(dirname "$candidate")"
+    [[ "$parent" != "$candidate" ]] || break
+    candidate="$parent"
+  done
+  printf '%s\n' "$candidate"
+}
 
 # Build include_groups list for filtering (bash 3 compatible)
 INCLUDE_GROUPS=""
@@ -105,19 +145,35 @@ _in_include_groups() {
 }
 
 echo "=== sgt-graphify: $PROJECT ==="
-echo "output: $graphify_output"
+echo "output: $configured_output"
 echo ""
 
 output_parent="$(dirname "$graphify_output")"
 mkdir -p "$output_parent"
 run_root="$(mktemp -d "${TMPDIR:-/tmp}/sgt-graphify.XXXXXX")"
+publish_root=""
 previous_output=""
 published=0
+_restore_previous_output() {
+  if [[ -z "$previous_output" ]]; then
+    return
+  fi
+  if [[ ! -e "$previous_output" && ! -L "$previous_output" ]]; then
+    return
+  fi
+  if [[ -e "$graphify_output" || -L "$graphify_output" ]]; then
+    rm -rf "$graphify_output"
+  fi
+  mv "$previous_output" "$graphify_output" || true
+}
 _cleanup() {
   local status=$?
   trap - EXIT
-  if [[ $published -eq 0 && -n "$previous_output" && -e "$previous_output" && ! -e "$graphify_output" ]]; then
-    mv "$previous_output" "$graphify_output" || true
+  if [[ $published -eq 0 ]]; then
+    _restore_previous_output
+  fi
+  if [[ -n "$publish_root" ]]; then
+    rm -rf "$publish_root"
   fi
   rm -rf "$run_root"
   exit "$status"
@@ -197,24 +253,31 @@ _extract_repo() {
   local repo_name="$3"
   local scan_root="$path"
   local should_stage=0
+  local output_path=""
   local output_relative=""
+  local output_paths=("$configured_output")
   local tar_exclude_args=("${TAR_EXCLUDE_ARGS[@]}")
+  if [[ "$graphify_output" != "$configured_output" ]]; then
+    output_paths+=("$graphify_output")
+  fi
   if [[ ${#tar_exclude_args[@]} -gt 0 ]]; then
     should_stage=1
   fi
-  if [[ "$graphify_output" == "$path" ]]; then
-    echo "graphify.output must not replace source repository $path" >&2
-    return 1
-  elif [[ "$graphify_output" == "$path/"* ]]; then
-    output_relative="${graphify_output#"$path/"}"
-    tar_exclude_args+=(
-      "--exclude=$output_relative"
-      "--exclude=$output_relative/**"
-      "--exclude=./$output_relative"
-      "--exclude=./$output_relative/**"
-    )
-    should_stage=1
-  fi
+  for output_path in "${output_paths[@]}"; do
+    if [[ "$output_path" == "$path" ]]; then
+      echo "graphify.output must not replace source repository $path" >&2
+      return 1
+    elif [[ "$output_path" == "$path/"* ]]; then
+      output_relative="${output_path#"$path/"}"
+      tar_exclude_args+=(
+        "--exclude=$output_relative"
+        "--exclude=$output_relative/**"
+        "--exclude=./$output_relative"
+        "--exclude=./$output_relative/**"
+      )
+      should_stage=1
+    fi
+  done
   if [[ $should_stage -eq 1 ]]; then
     scan_root="$run_root/sources/$repo_name"
     mkdir -p "$scan_root"
@@ -222,8 +285,6 @@ _extract_repo() {
   fi
   graphify extract "$scan_root" --out "$repo_root"
 }
-
-repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
 
 for ((i=0; i<repo_count; i++)); do
   repo_name="$(yq ".repos[$i].name" "$CONFIG_FILE")"
@@ -325,14 +386,16 @@ for preserved_dir in wiki memory; do
   fi
 done
 
-previous_output="$run_root/previous-output"
+publish_root="$(mktemp -d "$(_publish_parent_for_output "$output_parent")"/.sgt-graphify.publish.XXXXXX)"
+publish_stage="$publish_root/graphify-out"
+mkdir -p "$publish_stage"
+tar -C "$stage_output" -cf - . | tar -C "$publish_stage" -xf -
+previous_output="$publish_root/previous-output"
 if [[ -e "$graphify_output" || -L "$graphify_output" ]]; then
   mv "$graphify_output" "$previous_output"
 fi
-if ! mv "$stage_output" "$graphify_output"; then
-  if [[ -e "$previous_output" || -L "$previous_output" ]]; then
-    mv "$previous_output" "$graphify_output"
-  fi
+if ! mv "$publish_stage" "$graphify_output"; then
+  _restore_previous_output
   _die "Could not publish project graph to $graphify_output"
 fi
 published=1
