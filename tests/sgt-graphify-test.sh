@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
+REAL_PYTHON="$(command -v python3 || command -v python)"
 
 home="$TEST_ROOT/home"
 config="$TEST_ROOT/config"
@@ -43,6 +44,22 @@ repos:
 graphify:
   output: $TEST_ROOT/no-excludes-graph
 EOF
+cat > "$config/invalid-name.yaml" <<EOF
+name: invalid-name
+repos:
+  - name: "api server"
+    path: api
+graphify:
+  output: $TEST_ROOT/invalid-name-graph
+EOF
+
+cat > "$fake_bin/python3" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'python3 %q\n' "\$*" >> "$TEST_ROOT/python.log"
+exec "$REAL_PYTHON" "\$@"
+EOF
+chmod +x "$fake_bin/python3"
 
 cat > "$fake_bin/graphify" <<'EOF'
 #!/usr/bin/env bash
@@ -99,7 +116,7 @@ JSON
       fi
     done
     mkdir -p "$(dirname "$out")"
-    MERGE_OUT="$out" /usr/bin/python3 - "${inputs[@]}" <<'PY'
+    MERGE_OUT="$out" python3 - "${inputs[@]}" <<'PY'
 import json
 import os
 import sys
@@ -136,6 +153,7 @@ mkdir -p "$output/wiki" "$output/memory"
 printf 'wiki\n' > "$output/wiki/index.md"
 printf 'memory\n' > "$output/memory/query.md"
 success_output="$(run_graphify)"
+grep -Fq 'python3 -' "$TEST_ROOT/python.log"
 grep -Eq 'extract .*/sources/api --out' "$TEST_ROOT/graphify.log"
 grep -Eq 'extract .*/sources/app --out' "$TEST_ROOT/graphify.log"
 if grep -Fq -- '--exclude' "$TEST_ROOT/graphify.log"; then
@@ -179,6 +197,19 @@ grep -Fq '"source_file": "api/source.txt"' "$TEST_ROOT/no-excludes-graph/graph.j
 grep -Fxq "$TEST_ROOT/no-excludes-graph/.graphify_sources" "$TEST_ROOT/no-excludes-graph/.graphify_root"
 if grep -Fq -- '--exclude' "$TEST_ROOT/graphify.log"; then
   printf 'sgt-graphify added an exclusion to an empty configuration\n' >&2
+  exit 1
+fi
+
+: > "$TEST_ROOT/graphify.log"
+set +e
+invalid_output="$(run_graphify "" invalid-name 2>&1)"
+invalid_status=$?
+set -e
+[[ $invalid_status -ne 0 ]]
+grep -Fq 'repos[].name "api server" must match [A-Za-z0-9._-]+' <<< "$invalid_output"
+grep -Fq "rename it in $config/invalid-name.yaml" <<< "$invalid_output"
+if grep -Fq 'extract ' "$TEST_ROOT/graphify.log"; then
+  printf 'sgt-graphify attempted extraction for an invalid repo name\n' >&2
   exit 1
 fi
 

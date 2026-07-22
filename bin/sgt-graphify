@@ -16,12 +16,54 @@ _require_graphify() {
   command -v graphify &>/dev/null || _die "graphify is required. See graphify documentation to install."
 }
 
+_require_python_runtime() {
+  local candidate=""
+  local graphify_bin=""
+  local shebang=""
+  local words=()
+  local idx
+
+  if candidate="$(command -v python3 2>/dev/null)"; then
+    GRAPHIFY_PYTHON="$candidate"
+    return
+  fi
+  if candidate="$(command -v python 2>/dev/null)"; then
+    GRAPHIFY_PYTHON="$candidate"
+    return
+  fi
+
+  graphify_bin="$(command -v graphify 2>/dev/null || true)"
+  if [[ -n "$graphify_bin" && -r "$graphify_bin" ]]; then
+    IFS= read -r shebang < "$graphify_bin" || true
+    if [[ "$shebang" == '#!'* ]]; then
+      read -r -a words <<< "${shebang#\#!}"
+      if [[ ${#words[@]} -gt 0 ]]; then
+        if [[ "${words[0]}" == */env ]]; then
+          for ((idx=1; idx<${#words[@]}; idx++)); do
+            [[ "${words[$idx]}" == -* ]] && continue
+            if candidate="$(command -v "${words[$idx]}" 2>/dev/null)"; then
+              GRAPHIFY_PYTHON="$candidate"
+              return
+            fi
+          done
+        elif [[ -x "${words[0]}" ]]; then
+          GRAPHIFY_PYTHON="${words[0]}"
+          return
+        fi
+      fi
+    fi
+  fi
+
+  _die "python3 or python is required to rewrite merged Graphify sources"
+}
+
 [[ $# -ge 1 ]] || _die "Usage: sgt-graphify <project>"
 PROJECT="$1"
 CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
 [[ -f "$CONFIG_FILE" ]] || _die "Project not found: $PROJECT (looked for $CONFIG_FILE)"
 _require_yq
 _require_graphify
+_require_python_runtime
 
 graphify_output="$(yq '.graphify.output // ""' "$CONFIG_FILE")"
 if [[ -z "$graphify_output" || "$graphify_output" == "null" ]]; then
@@ -87,7 +129,7 @@ _prefix_graph_sources() {
   local repo_name="$1"
   local input_graph="$2"
   local output_graph="$3"
-  REPO_NAME="$repo_name" INPUT_GRAPH="$input_graph" OUTPUT_GRAPH="$output_graph" /usr/bin/python3 - <<'PY'
+  REPO_NAME="$repo_name" INPUT_GRAPH="$input_graph" OUTPUT_GRAPH="$output_graph" "$GRAPHIFY_PYTHON" - <<'PY'
 import json
 import os
 from pathlib import Path
@@ -164,7 +206,7 @@ for ((i=0; i<repo_count; i++)); do
 
   if [[ ! "$repo_name" =~ ^[A-Za-z0-9._-]+$ || "$repo_name" == "." || "$repo_name" == ".." ]]; then
     echo "--- $repo_name ---"
-    echo "  ERROR: repository name may contain only letters, numbers, dots, underscores, and hyphens"
+    echo "  ERROR: repos[].name \"$repo_name\" must match [A-Za-z0-9._-]+; rename it in $CONFIG_FILE"
     FAILED_REPOS+=("$repo_name")
     continue
   fi

@@ -12,6 +12,7 @@ description: >
 
 # Required. Ordered list of repositories in this project.
 repos:
+  # Repo names used by sgt-graphify must match [A-Za-z0-9._-]+.
   - name: myapp-api
     # Absolute path on disk. ~ is expanded to $HOME.
     path: ~/Dev/myapp/myapp-api
