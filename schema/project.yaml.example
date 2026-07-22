@@ -12,7 +12,8 @@ description: >
 
 # Required. Ordered list of repositories in this project.
 repos:
-  # Repo names used by sgt-graphify must match [A-Za-z0-9._-]+ and cannot be `.` or `..`.
+  # Repo names used by sgt-graphify must match [A-Za-z0-9._-]+, cannot contain spaces,
+  # and cannot be `.` or `..`.
   - name: myapp-api
     # Absolute path on disk. ~ is expanded to $HOME.
     path: ~/Dev/myapp/myapp-api
@@ -79,11 +80,14 @@ groups:
 # Optional. Cross-repo knowledge graph configuration.
 graphify:
   # Required if graphify block is present. Published output directory for the
-  # merged project graph; sgt-graphify only replaces it after a complete run.
+  # merged project graph; trailing / is fine, directory symlinks are preserved,
+  # and sgt-graphify only replaces it after a complete run.
   output: ~/Dev/myapp/graphify-out/
   # Optional. Only graph repos in these groups. Default: all repos.
   include_groups: [backend, frontend]
   # Optional. Exclude paths matching these globs before graphify extraction.
+  # If output points inside a source repo, Sergeant also stages outside the repo
+  # so published graph artifacts are not extracted back in as source.
   exclude_patterns:
     - "**/node_modules/**"
     - "**/vendor/**"

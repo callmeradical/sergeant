@@ -39,7 +39,7 @@ sergeant/                     ← this distro (you are here)
   skills/                     ← agent-loaded skills
 ```
 
-Each project is a YAML file. That file defines which repos belong to it, how they group, what graphify output to use, and what agent instructions apply — per group and per repo.
+Each project is a YAML file. That file defines which repos belong to it, how they group, where Sergeant publishes the merged graphify output, and what agent instructions apply — per group and per repo.
 
 ## Quick start
 
@@ -118,7 +118,7 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-status <project>` | Git status across every repo |
 | `bin/sgt-sync <project>` | Clone missing repos, pull existing ones |
 | `bin/sgt-context <project>` | Emit full agent context block for a project |
-| `bin/sgt-graphify <project>` | Run graphify across all repos → knowledge graph |
+| `bin/sgt-graphify <project>` | Build and publish the merged project graph |
 | `bin/sgt-dispatch <project> "<brief>" [options]` | Dispatch agents across repos |
 | `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Route a no-mistakes finding to a gate, td, ignore, or user escalation |
 | `bin/sgt-watch <task-id>` | Monitor dispatched fleet |

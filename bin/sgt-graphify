@@ -29,6 +29,8 @@ _require_python_runtime() {
   local words=()
   local idx
 
+  # Prefer Graphify's own interpreter so source rewriting follows the same
+  # runtime constraints even if a different `python` appears earlier on PATH.
   graphify_bin="$(command -v graphify 2>/dev/null || true)"
   if [[ -n "$graphify_bin" && -r "$graphify_bin" ]]; then
     IFS= read -r shebang < "$graphify_bin" || true
@@ -283,6 +285,8 @@ _extract_repo() {
     fi
   done
   if [[ $should_stage -eq 1 ]]; then
+    # Stage outside the repo whenever exclusions apply so current Graphify CLIs
+    # never re-ingest filtered paths or a published graph nested in source.
     scan_root="$run_root/sources/$repo_name"
     mkdir -p "$scan_root"
     tar -C "$path" "${tar_exclude_args[@]}" -cf - . | tar -C "$scan_root" -xf -
