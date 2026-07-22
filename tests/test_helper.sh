@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_TMP=""
 REAL_YQ="$(command -v yq)"
-REAL_PYTHON3="$(command -v python3)"
 
 setup_fixture() {
   teardown_fixture

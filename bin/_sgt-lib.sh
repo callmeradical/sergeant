@@ -100,7 +100,7 @@ _sgt_redact_assignments() {
 
   while ((i < length)); do
     rest="${input:i}"
-    if (((i == 0))) || [[ ! "${input:i-1:1}" =~ [[:alnum:]_] ]]; then
+    if ((i == 0)) || [[ ! "${input:i-1:1}" =~ [[:alnum:]_] ]]; then
       if [[ "$rest" =~ ^([A-Za-z0-9_]*(token|password|secret|api([_-]?key))[A-Za-z0-9_]*)([[:space:]]*[:=][[:space:]]*) ]]; then
         key_match="${BASH_REMATCH[1]}"
         separator="${BASH_REMATCH[4]}"
@@ -123,7 +123,7 @@ _sgt_redact_assignments() {
                   i=$((i + 1))
                   continue
                   ;;
-                '\')
+                \\)
                   if ((i + 1 < length)); then
                     i=$((i + 2))
                     continue
@@ -131,7 +131,7 @@ _sgt_redact_assignments() {
                   ;;
               esac
             else
-              if [[ "$quote" == '"' && "$ch" == '\' ]] && ((i + 1 < length)); then
+              if [[ "$quote" == '"' && "$ch" == $'\\' ]] && ((i + 1 < length)); then
                 i=$((i + 2))
                 continue
               fi

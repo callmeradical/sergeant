@@ -92,7 +92,7 @@ When a worker escalates:
 1. Read its context, evidence, exact question/blocker, recommendation, and options in the watcher output.
 2. Get the human decision; do not infer consequential intent.
 3. Run `sgt-respond <task-id> <repo> "<response>"`. Sergeant writes the response to fleet state and `.sergeant-response`, then nudges the recorded local tmux pane when available.
-4. The worker consumes/removes the response, clears `.sergeant-message`, logs the decision to td, returns to `in_progress`, and continues. Remote workers receive the response file when their worktree is reachable; otherwise `sgt-respond` explicitly reports fleet-only delivery.
+4. The worker keeps the response transport until the continued turn proves it was consumed safely: a new waiting state with durable resume evidence, a terminal `done` result, or an explicit unrecoverable `failed: ...`. Only then does it clear `.sergeant-message`, ack/remove the response, log the decision to td, return to `in_progress`, and continue. Remote workers receive the response file when their worktree is reachable; otherwise `sgt-respond` explicitly reports fleet-only delivery.
 
 You can also attach to the tmux session directly to observe or assist a worker:
 
@@ -169,7 +169,7 @@ Each dispatched agent is expected to:
    - Merge/rebase conflict: load `resolving-merge-conflicts`, trace both intents, preserve both where possible, and never abort automatically
 5. Establish public behavioral seams from td/spec before tests. If a consequential seam is undecided, escalate `needs_input` rather than guessing
 6. Implement one vertical slice at a time: focused red test, minimum green implementation, then refactor. Reject tautological tests, internal mocking, horizontal test/implementation phases, and speculative refactoring
-7. For `needs_input` or `blocked`, write `.sergeant-message`, notify Sergeant, remain alive, and wait. Consume/remove `.sergeant-response`, clear the message, log the decision to td, restore `in_progress`, and continue
+7. For `needs_input` or `blocked`, write `.sergeant-message`, notify Sergeant, remain alive, and wait. Resume only from durable harness state: OpenCode and Claude need a resumable session ID, while Goose needs a persisted Goose session record for the current worktree. Retain `.sergeant-response` until the continued turn proves that resume state or reaches a terminal result, then clear the message, log the decision to td, restore `in_progress`, and continue
 8. Run focused tests and typechecking/lint regularly, the full required suite at the end, and no-mistakes when available or required
 9. Route each no-mistakes finding through `sgt-no-mistakes-finding`: blocking correctness/security/data-integrity/test work stays gated, actionable warning or informational debt may become a deduplicated owning-repo td card, cosmetic/evidence noise is ignored, and ask-user findings still escalate
 10. Load the canonical `code-review` skill when available, then launch separate parallel subagents for independent reviews: a standards axis over the pinned diff and documented standards plus concise Fowler smells, and a spec axis over requirements and scope. Keep evidence separate and skip the spec axis explicitly when no spec exists
