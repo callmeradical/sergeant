@@ -200,11 +200,10 @@ for repo_dir in "$TASK_DIR"/*/; do
   worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
   status="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
   wt_type="$(cat "$repo_dir/wt_type" 2>/dev/null || echo "git")"
-  backend="$(cat "$repo_dir/backend" 2>/dev/null || echo "local-tmux")"
 
   echo "--- $repo_name (status: $status, type: $wt_type) ---"
 
-  [[ "$backend" != "local-tmux" ]] || _stop_local_worker "$repo_dir" "$worktree"
+  _stop_local_worker "$repo_dir" "$worktree"
 
   cwd_pids="$(_worktree_cwd_pids "$worktree")"
   [[ -z "$cwd_pids" ]] || \

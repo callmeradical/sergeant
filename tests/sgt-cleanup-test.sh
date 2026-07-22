@@ -25,7 +25,6 @@ repo_state="$TEST_ROOT/fleet/task-123/app"
 git -C "$TEST_ROOT/repo" worktree add -q -b test-cleanup "$worktree"
 printf '%s\n' "$worktree" > "$repo_state/worktree"
 printf 'git\n' > "$repo_state/wt_type"
-printf 'local-tmux\n' > "$repo_state/backend"
 printf '%s\n' "$TMUX_SESSION" > "$repo_state/tmux_session"
 
 cat > "$TEST_ROOT/fake-bin/fake-agent" <<'EOF'

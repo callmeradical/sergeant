@@ -45,7 +45,7 @@ Dependency order:
   (API reads the secret at startup; app talks to the API)
 
 Branch: feat/add-oauth
-Backend: local tmux (or --remote for cleanthes)
+Backend: local tmux
 ```
 
 Ask for confirmation before dispatching.
@@ -68,15 +68,14 @@ sgt-dispatch <project> --td <task-id> --repos smith,smith-app
 sgt-dispatch <project> "<brief>" \
   --repos <repo1>,<repo2>,<repo3> \
   --branch <branch-name> \
-  --deps "<prereq>><dependent>,..." \
-  [--remote]
+  --deps "<prereq>><dependent>,..."
 ```
 
 The script:
 1. Generates a task ID
 2. Creates a git worktree per repo at `<repo-path>/../<repo-name>-sgt-<task-id>/`
 3. Writes a `.sergeant-brief.md` into each worktree with: the mission, merged agent instructions, dependency notes, and delivery requirements
-4. Spawns an agent in each tmux window (local) or via babydriver (remote)
+4. Spawns an agent in each local tmux window
 5. Creates fleet state at `~/.local/share/sergeant/fleet/<task-id>/`
 
 ### Step 3 — Monitor
@@ -92,7 +91,7 @@ When a worker escalates:
 1. Read its context, evidence, exact question/blocker, recommendation, and options in the watcher output.
 2. Get the human decision; do not infer consequential intent.
 3. Run `sgt-respond <task-id> <repo> "<response>"`. Sergeant writes the response to fleet state and `.sergeant-response`, then nudges the recorded local tmux pane when available.
-4. The worker consumes/removes the response, clears `.sergeant-message`, logs the decision to td, returns to `in_progress`, and continues. Remote workers receive the response file when their worktree is reachable; otherwise `sgt-respond` explicitly reports fleet-only delivery.
+4. The worker consumes/removes the response, clears `.sergeant-message`, logs the decision to td, returns to `in_progress`, and continues.
 
 You can also attach to the tmux session directly to observe or assist a worker:
 
@@ -205,7 +204,6 @@ sgt-td-create <project> "<title>" --repos repo1,repo2 --priority P1
 | `--td <task-id>` | Dispatch from an existing td task; brief derived from task title |
 | `--branch <name>` | Branch name used in all worktrees (default: derived from brief) |
 | `--deps "a>b,a>c"` | `a` must complete before `b` and `c` can merge |
-| `--remote` | Dispatch via babydriver to cleanthes instead of local tmux |
 | `--dry-run` | Print what would happen, don't create worktrees or spawn agents |
 
 ---
@@ -216,7 +214,6 @@ sgt-td-create <project> "<title>" --repos repo1,repo2 --priority P1
 |---|---|
 | Worker stuck, no status update | `tmux attach -t sgt-<task-id>` and check the window |
 | Worktree creation fails | Check if branch already exists; use `--branch` with a unique name |
-| babydriver dispatch fails | Run `babydriver usage` to check env health; ensure `BABYDRIVER_SERVER` is set |
 | Fleet state is stale | Run `bin/sgt-watch --sync <task-id>` to force a one-shot sync |
 | Need to recover a waiting or orphaned worker | Use `bin/sgt-respond <task-id> <repo> "<response>"`; do not mark it done manually |
 | Need to retry a failed repo | Fix the underlying issue, then write both `.sergeant-result` and `.sergeant-status=done` only after every completion gate passes |

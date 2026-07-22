@@ -12,9 +12,6 @@ ACTION="$1"
 REPO_STATE="$2"
 WORKTREE="$3"
 TD_TASK="$(cat "$REPO_STATE/td_task" 2>/dev/null || true)"
-if [[ -z "$TD_TASK" ]]; then
-  TD_TASK="$(cat "$REPO_STATE/remote_td_task" 2>/dev/null || true)"
-fi
 [[ -n "$TD_TASK" ]] || exit 0
 
 _diagnose() {
