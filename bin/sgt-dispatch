@@ -66,7 +66,7 @@ TD_CONTEXT=""
 TD_REPO=""
 
 if [[ -n "$TD_TASK_ID" ]]; then
-  command -v td &>/dev/null || _die "--td requires td to be installed"
+  _require_marcus_td
   _require_yq
 
   # Find which repo owns this task by trying each repo's td db
@@ -240,12 +240,22 @@ PY
 }
 
 if [[ -z "$TD_TASK_ID" ]] && ! $DRY_RUN; then
-  command -v td &>/dev/null || _die "td is required for brief-only dispatch"
+  _require_marcus_td
+  TD_TITLE="$(python3 - "$BRIEF" <<'PY'
+import sys
+
+title = " ".join(sys.argv[1].split())
+if len(title) > 200:
+    title = title[:197].rstrip() + "..."
+print(title)
+PY
+)"
   echo "Creating td tasks ..."
   : > "$TD_CREATE_STATE_FILE"
   : > "$TD_CREATE_STDERR"
-  if ! td_results="$(SGT_TD_STATE_FILE="$TD_CREATE_STATE_FILE" "$SCRIPT_DIR/sgt-td-create" "$PROJECT" "$BRIEF" \
+  if ! td_results="$(SGT_TD_STATE_FILE="$TD_CREATE_STATE_FILE" "$SCRIPT_DIR/sgt-td-create" "$PROJECT" "$TD_TITLE" \
     --repos "$REPOS_ARG" \
+    --description "$BRIEF" \
     --type task \
     --priority P1 \
     --json 2>"$TD_CREATE_STDERR")"; then

@@ -51,6 +51,25 @@ case "$1" in
 esac
 EOF
 chmod +x "$TEST_ROOT/fake-bin/babydriver"
+cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'td version v0.51.2\n'
+elif [[ "${1:-}" == "create" && "${2:-}" == "--help" ]]; then
+  printf '%s\n' 'Usage: td create TITLE --description TEXT --json --work-dir DIR'
+elif [[ "${1:-}" == "list" ]]; then
+  printf '[]\n'
+elif [[ "${1:-}" == "create" ]]; then
+  printf '{"id":"td-app-1"}\n'
+elif [[ "${1:-}" == "delete" ]]; then
+  printf '{"id":"td-app-1","deleted":true}\n'
+else
+  exit 1
+fi
+EOF
+chmod +x "$TEST_ROOT/fake-bin/td"
 git -C "$TEST_ROOT/repo" init -q
 git -C "$TEST_ROOT/repo" config user.name Test
 git -C "$TEST_ROOT/repo" config user.email test@example.invalid

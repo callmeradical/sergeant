@@ -153,6 +153,23 @@ _require_tmux() {
 _require_git() {
   command -v git &>/dev/null || _die "git is required"
 }
+_require_marcus_td() {
+  local install_hint="Install it with 'brew install marcus/tap/td' or 'go install github.com/marcus/td@latest'."
+  if ! command -v td &>/dev/null; then
+    _die "td is missing. Required implementation: github.com/marcus/td. $install_hint"
+  fi
+
+  local td_path td_version create_help
+  td_path="$(command -v td)"
+  td_version="$(td --version 2>&1 || true)"
+  [[ -n "$td_version" ]] || td_version="version unknown"
+  create_help="$(td create --help 2>&1 || true)"
+
+  if [[ ! "$td_version" =~ ^td\ version\ v[0-9]+\.[0-9]+\.[0-9]+$ || \
+        "$create_help" != *"--description"* || "$create_help" != *"--json"* || "$create_help" != *"--work-dir"* ]]; then
+    _die "Unsupported td detected at $td_path: $td_version. Required implementation: github.com/marcus/td with create/json/work-dir support. $install_hint"
+  fi
+}
 _require_treehouse() {
   command -v treehouse &>/dev/null || _die "treehouse is required: install from https://github.com/kunchenguid/treehouse"
 }

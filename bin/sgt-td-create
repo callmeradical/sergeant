@@ -30,10 +30,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
 
-_require_td() {
-  command -v td &>/dev/null || _die "td is required."
-}
-
 [[ $# -ge 2 ]] || _die "Usage: sgt-td-create <project> \"<title>\" --repos <list> [options]"
 PROJECT="$1"; shift
 TITLE="$1";   shift
@@ -42,7 +38,7 @@ CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
 [[ -f "$CONFIG_FILE" ]] || _die "Project not found: $PROJECT"
 _require_yq
 _require_git
-_require_td
+_require_marcus_td
 
 REPOS_ARG=""
 DESCRIPTION=""
@@ -193,6 +189,8 @@ PY
   exit 1
 }
 
+# Validate every target before creating any task so prerequisite failures do
+# not require rollback.
 for rname in "${TARGET_REPOS[@]}"; do
   for ((i=0; i<repo_count; i++)); do
     n="$(yq ".repos[$i].name" "$CONFIG_FILE")"
@@ -203,9 +201,22 @@ for rname in "${TARGET_REPOS[@]}"; do
   repo_path="$(_resolve_path "$raw_path")"
 
   _sgt_is_git_repo "$repo_path" || _rollback_or_die "repo '$rname' is not cloned at $repo_path"
+  if ! td_check="$(td list --json --work-dir "$repo_path" --limit 1 2>&1)"; then
+    if [[ "$td_check" == *"database not found: run 'td init' first"* ]]; then
+      _rollback_or_die "td is not initialized in repo '$rname' ($repo_path). Run: td init --work-dir '$repo_path'"
+    fi
+    _rollback_or_die "td prerequisite check failed in repo '$rname' ($repo_path): $td_check"
+  fi
+done
 
-  td list --json --work-dir "$repo_path" --limit 1 &>/dev/null || \
-    _rollback_or_die "td is not initialized in repo '$rname' ($repo_path)"
+for rname in "${TARGET_REPOS[@]}"; do
+  for ((i=0; i<repo_count; i++)); do
+    n="$(yq ".repos[$i].name" "$CONFIG_FILE")"
+    [[ "$n" == "$rname" ]] && break
+  done
+
+  raw_path="$(yq ".repos[$i].path" "$CONFIG_FILE")"
+  repo_path="$(_resolve_path "$raw_path")"
 
   repo_role="$(yq ".repos[$i].role // \"\"" "$CONFIG_FILE")"
   full_desc="${DESCRIPTION}"
