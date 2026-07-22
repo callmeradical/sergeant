@@ -68,12 +68,12 @@ _cleanup() {
 trap _cleanup EXIT
 stage_root="$run_root/project"
 stage_output="$stage_root/graphify-out"
-mkdir -p "$stage_output" "$run_root/repos" "$run_root/manifests"
+mkdir -p "$stage_output" "$run_root/repos" "$run_root/manifests" "$run_root/sources"
 
-EXCLUDE_ARGS=()
+TAR_EXCLUDE_ARGS=()
 while IFS= read -r pattern; do
   [[ -n "$pattern" && "$pattern" != "null" ]] || continue
-  EXCLUDE_ARGS+=(--exclude "$pattern")
+  TAR_EXCLUDE_ARGS+=("--exclude=$pattern")
 done < <(yq '.graphify.exclude_patterns[]' "$CONFIG_FILE" 2>/dev/null || true)
 
 GRAPH_PATHS=()
@@ -84,11 +84,14 @@ FAILED_REPOS=()
 _extract_repo() {
   local path="$1"
   local repo_root="$2"
-  if [[ ${#EXCLUDE_ARGS[@]} -gt 0 ]]; then
-    graphify extract "$path" --out "$repo_root" "${EXCLUDE_ARGS[@]}"
-  else
-    graphify extract "$path" --out "$repo_root"
+  local repo_name="$3"
+  local scan_root="$path"
+  if [[ ${#TAR_EXCLUDE_ARGS[@]} -gt 0 ]]; then
+    scan_root="$run_root/sources/$repo_name"
+    mkdir -p "$scan_root"
+    tar -C "$path" "${TAR_EXCLUDE_ARGS[@]}" -cf - . | tar -C "$scan_root" -xf -
   fi
+  graphify extract "$scan_root" --out "$repo_root"
 }
 
 repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
@@ -123,7 +126,7 @@ for ((i=0; i<repo_count; i++)); do
   echo "--- $repo_name ---"
   echo "  path: $path"
   repo_root="$run_root/repos/$repo_name"
-  if _extract_repo "$path" "$repo_root" 2>&1 | sed 's/^/  /'; then
+  if _extract_repo "$path" "$repo_root" "$repo_name" 2>&1 | sed 's/^/  /'; then
     repo_output="$repo_root/graphify-out"
     if [[ ! -s "$repo_output/graph.json" || ! -s "$repo_output/manifest.json" ]]; then
       echo "  ERROR: graphify did not produce graph.json and manifest.json for $repo_name"
@@ -159,6 +162,8 @@ elif ! graphify merge-graphs "${GRAPH_PATHS[@]}" --out "$stage_output/graph.json
   exit 1
 fi
 
+# yq, not the shell, expands $item.
+# shellcheck disable=SC2016
 if ! yq ea -o=json '. as $item ireduce ({}; . * $item)' \
   "${MANIFEST_PARTS[@]}" > "$stage_output/manifest.json"; then
   echo "ERROR: manifest merge failed for repositories: ${INCLUDED_REPOS[*]}" >&2

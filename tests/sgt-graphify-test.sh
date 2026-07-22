@@ -12,9 +12,11 @@ dev_root="$TEST_ROOT/dev"
 fake_bin="$TEST_ROOT/fake-bin"
 output="$TEST_ROOT/project-graph-link"
 real_output="$TEST_ROOT/project-graph"
-mkdir -p "$home" "$config" "$dev_root/api" "$dev_root/app" "$fake_bin" "$real_output"
+mkdir -p "$home" "$config" "$dev_root/api/vendor" "$dev_root/app" "$fake_bin" "$real_output"
 ln -s "$real_output" "$output"
 printf 'api\n' > "$dev_root/api/source.txt"
+printf 'ignored\n' > "$dev_root/api/vendor/ignored.py"
+printf 'ignored\n' > "$dev_root/api/schema.generated.json"
 printf 'app\n' > "$dev_root/app/source.txt"
 
 cat > "$config/config.yaml" <<EOF
@@ -65,10 +67,18 @@ case "$command" in
       if [[ "$1" == "--out" ]]; then
         out="$2"
         shift 2
+      elif [[ "$1" == "--exclude" || "$1" == --exclude=* ]]; then
+        printf 'graphify 0.8.39 does not support --exclude\n' >&2
+        exit 64
       else
         shift
       fi
     done
+    if [[ "$repo_path" == */sources/* ]] && \
+       [[ -e "$repo_path/vendor/ignored.py" || -e "$repo_path/schema.generated.json" ]]; then
+      printf 'configured exclusions reached graphify extraction\n' >&2
+      exit 65
+    fi
     mkdir -p "$out/graphify-out"
     printf '{"nodes": [], "links": []}\n' > "$out/graphify-out/graph.json"
     printf '{"source.txt": {"mtime": 1, "ast_hash": "%s", "semantic_hash": "%s"}}\n' \
@@ -109,10 +119,12 @@ mkdir -p "$output/wiki" "$output/memory"
 printf 'wiki\n' > "$output/wiki/index.md"
 printf 'memory\n' > "$output/memory/query.md"
 success_output="$(run_graphify)"
-grep -Fq "extract $dev_root/api --out" "$TEST_ROOT/graphify.log"
-grep -Fq "extract $dev_root/app --out" "$TEST_ROOT/graphify.log"
-grep -Fq -- '--exclude \*\*/vendor/\*\*' "$TEST_ROOT/graphify.log"
-grep -Fq -- '--exclude \*\*/\*.generated.\*' "$TEST_ROOT/graphify.log"
+grep -Eq 'extract .*/sources/api --out' "$TEST_ROOT/graphify.log"
+grep -Eq 'extract .*/sources/app --out' "$TEST_ROOT/graphify.log"
+if grep -Fq -- '--exclude' "$TEST_ROOT/graphify.log"; then
+  printf 'sgt-graphify passed exclusions unsupported by Graphify 0.8.39\n' >&2
+  exit 1
+fi
 grep -Fq 'merge-graphs ' "$TEST_ROOT/graphify.log"
 grep -Fq 'cluster-only ' "$TEST_ROOT/graphify.log"
 if grep -Eq '(^| )update( |$)|--output' "$TEST_ROOT/graphify.log"; then
