@@ -101,6 +101,7 @@ _check "yq"         yq         required  "brew install yq"
 _check "git"        git        required  "install Xcode command line tools"
 _check "gh"         gh         required  "brew install gh"
 _check "tmux"       tmux       required  "brew install tmux"
+_check "lsof"       lsof       required  "install lsof with your system package manager"
 
 echo ""
 echo "Optional:"
