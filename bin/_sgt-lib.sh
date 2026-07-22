@@ -4,6 +4,11 @@
 #
 # Provides: _die, _info, _require_*, _resolve_path, and the SGT_* env vars.
 
+_SGT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-bash-version.sh
+source "$_SGT_LIB_DIR/_sgt-bash-version.sh"
+_sgt_require_running_bash || return 1
+
 [[ "${SGT_LIB_LOADED:-}" == "1" ]] && return 0
 SGT_LIB_LOADED=1
 

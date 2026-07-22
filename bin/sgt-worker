@@ -17,7 +17,7 @@ LOG="$REPO_STATE/worker.log"
 DIAGNOSTIC="$REPO_STATE/diagnostic"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-response-lock.sh
-source "$SCRIPT_DIR/_sgt-response-lock.sh"
+source "$SCRIPT_DIR/_sgt-response-lock.sh" || exit 1
 
 mkdir -p "$REPO_STATE"
 [[ -d "$WORKTREE" ]] || {
@@ -73,7 +73,7 @@ _cleanup_response_transport() {
 
 _finalize_submitted_response() {
   local response_id="$1"
-  _sgt_response_lock_acquire "$REPO_STATE"
+  _sgt_response_lock_acquire "$REPO_STATE" || return 1
   if [[ -n "$response_id" ]]; then
     printf '%s\n' "$response_id" > "$WORKTREE/.sergeant-response-ack"
   fi
@@ -196,7 +196,10 @@ _wait_for_response() {
   RESPONSE_SUBMISSION_PENDING=0
   while true; do
     if [[ -f "$WORKTREE/.sergeant-response" ]]; then
-      _sgt_response_lock_acquire "$REPO_STATE"
+      if ! _sgt_response_lock_acquire "$REPO_STATE"; then
+        _orphan 1 "response lock acquisition failed"
+        return 1
+      fi
       if [[ -f "$WORKTREE/.sergeant-response" ]]; then
         response="$(cat "$WORKTREE/.sergeant-response")"
         response_id="$(tr -d '\n' < "$WORKTREE/.sergeant-response-id" 2>/dev/null || true)"
@@ -240,17 +243,17 @@ _sync_state
 
 next_message="$INITIAL_MESSAGE"
 if [[ -f "$WORKTREE/.sergeant-response" ]]; then
-  _wait_for_response
+  _wait_for_response || exit $?
   next_message="$WAIT_RESPONSE_MESSAGE"
 elif [[ -f "$REPO_STATE/session_id" ]]; then
   case "$(_status)" in
     needs_input|blocked)
-      _wait_for_response
+      _wait_for_response || exit $?
       next_message="$WAIT_RESPONSE_MESSAGE"
       ;;
     orphaned)
       if [[ -f "$WORKTREE/.sergeant-response" ]]; then
-        _wait_for_response
+        _wait_for_response || exit $?
         next_message="$WAIT_RESPONSE_MESSAGE"
       else
         next_message="Resume the mission from the durable orphan diagnostic."
@@ -266,7 +269,10 @@ while true; do
   status="$(_status)"
   _sync_state
   if [[ "${RESPONSE_SUBMISSION_PENDING:-0}" == "1" ]] && _proof_allows_response_finalization "$status"; then
-    _finalize_submitted_response "${RESPONSE_SUBMISSION_ID:-}"
+    if ! _finalize_submitted_response "${RESPONSE_SUBMISSION_ID:-}"; then
+      _orphan 1 "response lock acquisition failed during finalization"
+      exit $?
+    fi
     RESPONSE_SUBMISSION_PENDING=0
     RESPONSE_SUBMISSION_ID=""
     _sync_state
@@ -286,7 +292,7 @@ while true; do
         exit $?
       fi
       "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
-      _wait_for_response
+      _wait_for_response || exit $?
       next_message="$WAIT_RESPONSE_MESSAGE"
       ;;
     done)

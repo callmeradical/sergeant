@@ -18,7 +18,7 @@ You have a project. It has four repos: an API, a frontend, an infra chart, and a
 
 Sergeant fixes that. It is an **agent distro**: a cloned directory with an `AGENTS.md`, shell toolbelt, and skills that turn a general-purpose agent into a project-aware first mate. Launch your agent harness inside it and Sergeant takes over — it knows your projects, their repos, how they group, and what instructions apply to each one.
 
-No install. The cloned repo is the distro.
+No install. The cloned repo is the distro. Sergeant supports Bash 3.2 and newer, including the system Bash shipped with macOS.
 
 ## Mental model
 

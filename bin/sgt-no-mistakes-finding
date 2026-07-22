@@ -55,7 +55,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 for required in RUN_ID HEAD_SHA FINDING_ID SEVERITY KIND DESCRIPTION INTENT DISPOSITION; do
-  [[ -n "${!required}" ]] || _die "Missing required finding field: ${required,,}"
+  required_name="$(printf '%s' "$required" | tr '[:upper:]' '[:lower:]')"
+  [[ -n "${!required}" ]] || _die "Missing required finding field: $required_name"
 done
 
 case "$DISPOSITION" in

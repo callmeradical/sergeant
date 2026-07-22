@@ -15,7 +15,7 @@ WEB_REPO="$TEST_ROOT/web"
 mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/config" "$TEST_ROOT/fake-bin" \
   "$TEST_ROOT/fleet" "$APP_MAIN_REPO" "$APP_REPO" "$API_REPO" "$WEB_REPO" \
   "$TEST_ROOT/td-active" "$TEST_ROOT/td-counter"
-cp "$ROOT_DIR/bin/sgt-dispatch" "$ROOT_DIR/bin/_sgt-lib.sh" \
+cp "$ROOT_DIR/bin/sgt-dispatch" "$ROOT_DIR/bin/_sgt-lib.sh" "$ROOT_DIR/bin/_sgt-bash-version.sh" \
   "$ROOT_DIR/bin/sgt-td-create" "$ROOT_DIR/bin/sgt-td-memory" "$TEST_ROOT/bin/"
 
 cat > "$TEST_ROOT/config/test.yaml" <<EOF
