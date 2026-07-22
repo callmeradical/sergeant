@@ -69,6 +69,17 @@ graphify:
     - "**/vendor/**"
     - "**/*.generated.*"
 EOF
+cat > "$config/output-inside-source-trailing-repo-path.yaml" <<EOF
+name: output-inside-source-trailing-repo-path
+repos:
+  - name: api
+    path: api/
+graphify:
+  output: $dev_root/api/graphify-out
+  exclude_patterns:
+    - "**/vendor/**"
+    - "**/*.generated.*"
+EOF
 cat > "$config/repo-symlink-output.yaml" <<EOF
 name: repo-symlink-output
 repos:
@@ -108,7 +119,8 @@ chmod +x "$fake_bin/python3"
 cat > "$crossfs_path/mv" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ \$# -eq 2 && "\$1" == "$tmpdir"/sgt-graphify.*"/project/graphify-out" && "\$2" == "$real_output" ]]; then
+if [[ \$# -eq 2 && "\$1" == "$TEST_ROOT"/.sgt-graphify.publish.*/graphify-out && "\$2" == "$real_output" ]]; then
+  printf 'intercepted\n' > "$TEST_ROOT/crossfs-intercepted"
   rm -rf "\$2"
   mkdir -p "\$2"
   printf 'partial publish\n' > "\$2/PARTIAL"
@@ -363,15 +375,35 @@ run_graphify "" trailing-slash-output >/dev/null
 [[ -f "$output/graph.json" ]]
 
 : > "$TEST_ROOT/graphify.log"
-crossfs_output="$(TMPDIR="$tmpdir" run_graphify_with_path "$crossfs_path:$fake_bin:$PATH" "" example)"
-[[ -f "$output/graph.json" ]]
+rm -f "$TEST_ROOT/crossfs-intercepted"
+printf 'preexisting graph\n' > "$real_output/graph.json"
+printf 'preexisting manifest\n' > "$real_output/manifest.json"
+printf 'preexisting report\n' > "$real_output/GRAPH_REPORT.md"
+set +e
+crossfs_output="$(TMPDIR="$tmpdir" run_graphify_with_path "$crossfs_path:$fake_bin:$PATH" "" example 2>&1)"
+crossfs_status=$?
+set -e
+[[ $crossfs_status -ne 0 ]]
+[[ -f "$TEST_ROOT/crossfs-intercepted" ]]
+grep -Fq 'Could not publish project graph' <<< "$crossfs_output"
+grep -Fq 'preexisting graph' "$real_output/graph.json"
+grep -Fq 'preexisting manifest' "$real_output/manifest.json"
+grep -Fq 'preexisting report' "$real_output/GRAPH_REPORT.md"
 [[ ! -e "$real_output/PARTIAL" ]]
-grep -Fq "Graph report available at: $output/GRAPH_REPORT.md" <<< "$crossfs_output"
 
 mkdir -p "$dev_root/api/graphify-out"
 printf 'stale\n' > "$dev_root/api/graphify-out/stale.txt"
 : > "$TEST_ROOT/graphify.log"
 run_graphify "" output-inside-source >/dev/null
+grep -Eq 'extract .*/sources/api --out' "$TEST_ROOT/graphify.log"
+[[ -f "$dev_root/api/graphify-out/graph.json" ]]
+[[ ! -e "$dev_root/api/graphify-out/stale.txt" ]]
+
+rm -rf "$dev_root/api/graphify-out"
+mkdir -p "$dev_root/api/graphify-out"
+printf 'stale\n' > "$dev_root/api/graphify-out/stale.txt"
+: > "$TEST_ROOT/graphify.log"
+run_graphify "" output-inside-source-trailing-repo-path >/dev/null
 grep -Eq 'extract .*/sources/api --out' "$TEST_ROOT/graphify.log"
 [[ -f "$dev_root/api/graphify-out/graph.json" ]]
 [[ ! -e "$dev_root/api/graphify-out/stale.txt" ]]

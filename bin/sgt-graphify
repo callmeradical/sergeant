@@ -77,6 +77,10 @@ _trim_trailing_slashes() {
   printf '%s\n' "$path"
 }
 
+_resolve_normalized_path() {
+  _trim_trailing_slashes "$(_resolve_path "$1")"
+}
+
 _path_is_within() {
   local candidate="$1"
   local root="$2"
@@ -95,7 +99,7 @@ configured_output="$(yq '.graphify.output // ""' "$CONFIG_FILE")"
 if [[ -z "$configured_output" || "$configured_output" == "null" ]]; then
   _die "No graphify.output configured in $CONFIG_FILE"
 fi
-configured_output="$(_trim_trailing_slashes "$(_resolve_path "$configured_output")")"
+configured_output="$(_resolve_normalized_path "$configured_output")"
 graphify_output="$configured_output"
 if [[ -L "$configured_output" ]]; then
   [[ -d "$configured_output" ]] || _die "graphify.output is a broken directory symlink: $configured_output"
@@ -106,7 +110,7 @@ graphify_output="$(_trim_trailing_slashes "$graphify_output")"
 repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
 ALL_REPO_PATHS=()
 for ((i=0; i<repo_count; i++)); do
-  ALL_REPO_PATHS+=("$(_resolve_path "$(yq ".repos[$i].path" "$CONFIG_FILE")")")
+  ALL_REPO_PATHS+=("$(_resolve_normalized_path "$(yq ".repos[$i].path" "$CONFIG_FILE")")")
 done
 
 _path_is_in_source_repo() {
@@ -289,7 +293,7 @@ _extract_repo() {
 for ((i=0; i<repo_count; i++)); do
   repo_name="$(yq ".repos[$i].name" "$CONFIG_FILE")"
   raw_path="$(yq ".repos[$i].path" "$CONFIG_FILE")"
-  path="$(_resolve_path "$raw_path")"
+  path="$(_resolve_normalized_path "$raw_path")"
   group="$(yq ".repos[$i].group // \"\"" "$CONFIG_FILE")"
 
   if ! _in_include_groups "$group"; then
