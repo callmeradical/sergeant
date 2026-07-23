@@ -12,7 +12,20 @@ cleanup_fixture() {
 }
 trap cleanup_fixture EXIT
 
-mkdir -p "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin"
+mkdir -p "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin" "$TEST_ROOT/config"
+export SERGEANT_CONFIG="$TEST_ROOT/config"
+
+record_retry_owner() {
+  local task_id="$1" repo_name="$2" repo_root="$3"
+
+  cat > "$TEST_ROOT/config/$task_id.yaml" <<EOF
+name: $task_id
+repos:
+  - name: $repo_name
+    path: $repo_root
+EOF
+  printf 'Project: %s\n' "$task_id" > "$TEST_ROOT/fleet/$task_id/brief.md"
+}
 
 assert_cleanup_rejected() {
   local task_id="$1"
@@ -188,7 +201,16 @@ SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
 [[ ! -e "$TEST_ROOT/fleet/failed-task" ]]
 
 mkdir -p "$TEST_ROOT/fleet/removal-failure/aaa" "$TEST_ROOT/fleet/removal-failure/app" \
-  "$TEST_ROOT/fake-bin"
+  "$TEST_ROOT/fake-bin" "$TEST_ROOT/config"
+cat > "$TEST_ROOT/config/removal-failure.yaml" <<EOF
+name: removal-failure
+repos:
+  - name: aaa
+    path: $TEST_ROOT/removal-success
+  - name: app
+    path: $TEST_ROOT/removal-failure
+EOF
+printf 'Project: removal-failure\n' > "$TEST_ROOT/fleet/removal-failure/brief.md"
 mkdir -p "$TEST_ROOT/removal-success/.git" "$TEST_ROOT/removal-success-sgt-removal-failure"
 printf '%s\n' "$TEST_ROOT/removal-success-sgt-removal-failure" > \
   "$TEST_ROOT/fleet/removal-failure/aaa/worktree"
@@ -231,6 +253,7 @@ EOF
 chmod +x "$TEST_ROOT/fake-bin/git"
 if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
   FAKE_GIT_LOG="$TEST_ROOT/git-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" removal-failure >/dev/null 2>&1; then
   printf 'cleanup succeeded after worktree removal failed\n' >&2
@@ -252,6 +275,7 @@ printf '%s\n' "$TEST_ROOT/different-worktree" > \
   "$TEST_ROOT/fleet/removal-failure/app/worktree"
 if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
   FAKE_GIT_LOG="$TEST_ROOT/git-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" removal-failure >/dev/null 2>&1; then
   printf 'cleanup reconciled partial removal against a different worktree\n' >&2
@@ -264,8 +288,87 @@ fi
 [[ "$(wc -l < "$TEST_ROOT/git-removals")" -eq 2 ]]
 printf '%s\n' "$TEST_ROOT/removal-failure-sgt-removal-failure" > \
   "$TEST_ROOT/fleet/removal-failure/app/worktree"
+
+assert_retry_owner_rejected() {
+  local evidence_before label="$1" phase_before
+
+  phase_before="$(cat "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase")"
+  evidence_before="$(cksum "$TEST_ROOT/fleet/removal-failure/app/terminal-evidence"/.sergeant-*)"
+  if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
+    FAKE_GIT_LOG="$TEST_ROOT/git-removals" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" removal-failure >/dev/null 2>&1; then
+    printf 'cleanup accepted unsafe retry owner: %s\n' "$label" >&2
+    exit 1
+  fi
+  [[ "$(wc -l < "$TEST_ROOT/git-removals")" -eq 2 ]]
+  [[ "$(cat "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase")" == "$phase_before" ]]
+  [[ "$(cksum "$TEST_ROOT/fleet/removal-failure/app/terminal-evidence"/.sergeant-*)" == \
+    "$evidence_before" ]]
+}
+
+printf 'Project: missing-project\n' > "$TEST_ROOT/fleet/removal-failure/brief.md"
+assert_retry_owner_rejected 'missing project config'
+printf 'Project: removal-failure\n' > "$TEST_ROOT/fleet/removal-failure/brief.md"
+
+ln -s "$TEST_ROOT/removal-failure" "$TEST_ROOT/removal-failure-alias"
+printf 'partial-removal\n%s\ngit\n%s\n' \
+  "$TEST_ROOT/removal-failure-sgt-removal-failure" \
+  "$TEST_ROOT/removal-failure-alias" > \
+  "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase"
+assert_retry_owner_rejected 'symlink-aliased repository'
+ln -s "$TEST_ROOT" "$TEST_ROOT/owner-parent-alias"
+cat > "$TEST_ROOT/config/removal-failure.yaml" <<EOF
+name: removal-failure
+repos:
+  - name: aaa
+    path: $TEST_ROOT/removal-success
+  - name: app
+    path: $TEST_ROOT/owner-parent-alias/removal-failure
+EOF
+printf 'partial-removal\n%s\ngit\n%s\n' \
+  "$TEST_ROOT/removal-failure-sgt-removal-failure" \
+  "$TEST_ROOT/removal-failure" > \
+  "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase"
+assert_retry_owner_rejected 'symlink-aliased configured owner'
+cat > "$TEST_ROOT/config/removal-failure.yaml" <<EOF
+name: removal-failure
+repos:
+  - name: aaa
+    path: $TEST_ROOT/removal-success
+  - name: app
+    path: $TEST_ROOT/removal-failure
+EOF
+
+mv "$TEST_ROOT/removal-failure" "$TEST_ROOT/removal-failure-moved"
+printf 'partial-removal\n%s\ngit\n%s\n' \
+  "$TEST_ROOT/removal-failure-sgt-removal-failure" \
+  "$TEST_ROOT/removal-failure" > \
+  "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase"
+assert_retry_owner_rejected 'moved repository'
+mv "$TEST_ROOT/removal-failure-moved" "$TEST_ROOT/removal-failure"
+
+mkdir -p "$TEST_ROOT/removal-failure-other/.git"
+cat > "$TEST_ROOT/config/cross-project.yaml" <<EOF
+name: cross-project
+repos:
+  - name: app
+    path: $TEST_ROOT/removal-failure-other
+EOF
+printf 'Project: cross-project\n' > "$TEST_ROOT/fleet/removal-failure/brief.md"
+printf 'partial-removal\n%s\ngit\n%s\n' \
+  "$TEST_ROOT/removal-failure-sgt-removal-failure" \
+  "$TEST_ROOT/removal-failure-other" > \
+  "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase"
+assert_retry_owner_rejected 'cross-project prefix-colliding repository'
+printf 'Project: removal-failure\n' > "$TEST_ROOT/fleet/removal-failure/brief.md"
+printf 'partial-removal\n%s\ngit\n%s\n' \
+  "$TEST_ROOT/removal-failure-sgt-removal-failure" \
+  "$TEST_ROOT/removal-failure" > \
+  "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase"
 PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
   FAKE_GIT_LOG="$TEST_ROOT/git-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" removal-failure >/dev/null
 [[ "$(wc -l < "$TEST_ROOT/git-removals")" -eq 3 ]]
@@ -275,6 +378,7 @@ rm "$TEST_ROOT/fake-bin/git"
 mkdir -p "$TEST_ROOT/fleet/partial-publication/app" \
   "$TEST_ROOT/partial-publication/.git" \
   "$TEST_ROOT/partial-publication-sgt-partial-publication"
+record_retry_owner partial-publication app "$TEST_ROOT/partial-publication"
 printf '%s\n' "$TEST_ROOT/partial-publication-sgt-partial-publication" > \
   "$TEST_ROOT/fleet/partial-publication/app/worktree"
 printf 'done\n' > "$TEST_ROOT/fleet/partial-publication/app/status"
@@ -334,11 +438,14 @@ rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/mv"
 
 mkdir -p "$TEST_ROOT/fleet/treehouse-partial/app" "$TEST_ROOT/treehouse-main/.git" \
   "$TEST_ROOT/treehouse-worktree"
+record_retry_owner treehouse-partial app "$TEST_ROOT/treehouse-main"
 printf 'gitdir: %s\n' "$TEST_ROOT/treehouse-main/.git/worktrees/lease" > \
   "$TEST_ROOT/treehouse-worktree/.git"
 printf '%s\n' "$TEST_ROOT/treehouse-worktree" > \
   "$TEST_ROOT/fleet/treehouse-partial/app/worktree"
 printf 'treehouse\n' > "$TEST_ROOT/fleet/treehouse-partial/app/wt_type"
+printf 'sgt-treehouse-partial-app\n' > \
+  "$TEST_ROOT/fleet/treehouse-partial/app/wt_holder"
 printf 'done\n' > "$TEST_ROOT/fleet/treehouse-partial/app/status"
 printf 'result\n' > "$TEST_ROOT/fleet/treehouse-partial/app/result"
 printf 'done\n' > "$TEST_ROOT/treehouse-worktree/.sergeant-status"
@@ -365,6 +472,7 @@ chmod +x "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/treehouse"
 if PATH="$TEST_ROOT/fake-bin:$PATH" \
   FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-removals" \
   FAKE_TREEHOUSE_STATE="$TEST_ROOT/treehouse-failed-once" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" treehouse-partial >/dev/null 2>&1; then
   printf 'cleanup succeeded after treehouse removed the worktree and failed\n' >&2
@@ -374,9 +482,25 @@ fi
 [[ "$(cat "$TEST_ROOT/fleet/treehouse-partial/app/cleanup-phase")" == \
   $'partial-removal\n'"$TEST_ROOT/treehouse-worktree"$'\ntreehouse\n'"$TEST_ROOT/treehouse-main" ]]
 [[ -f "$TEST_ROOT/fleet/treehouse-partial/app/terminal-evidence/.sergeant-status" ]]
+printf 'sgt-another-task-app\n' > \
+  "$TEST_ROOT/fleet/treehouse-partial/app/wt_holder"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-removals" \
+  FAKE_TREEHOUSE_STATE="$TEST_ROOT/treehouse-failed-once" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" treehouse-partial >/dev/null 2>&1; then
+  printf 'cleanup retried a treehouse lease owned by another holder\n' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$TEST_ROOT/treehouse-removals")" -eq 1 ]]
+[[ -f "$TEST_ROOT/fleet/treehouse-partial/app/terminal-evidence/.sergeant-status" ]]
+printf 'sgt-treehouse-partial-app\n' > \
+  "$TEST_ROOT/fleet/treehouse-partial/app/wt_holder"
 PATH="$TEST_ROOT/fake-bin:$PATH" \
   FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-removals" \
   FAKE_TREEHOUSE_STATE="$TEST_ROOT/treehouse-failed-once" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" treehouse-partial >/dev/null
 [[ "$(wc -l < "$TEST_ROOT/treehouse-removals")" -eq 2 ]]
@@ -387,6 +511,7 @@ rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/treehouse"
 
 mkdir -p "$TEST_ROOT/fleet/marker-publication/app" "$TEST_ROOT/marker/.git" \
   "$TEST_ROOT/marker-sgt-marker-publication"
+record_retry_owner marker-publication app "$TEST_ROOT/marker"
 printf '%s\n' "$TEST_ROOT/marker-sgt-marker-publication" > \
   "$TEST_ROOT/fleet/marker-publication/app/worktree"
 printf 'done\n' > "$TEST_ROOT/fleet/marker-publication/app/status"

@@ -347,6 +347,50 @@ _record_cleanup_phase() {
     mv "$repo_dir/cleanup-phase.tmp" "$repo_dir/cleanup-phase"
 }
 
+_validate_retry_owner() {
+  local config_file configured_root expected_holder expected_root expected_worktree holder i project raw_path repo_count \
+    repo_dir="$1" repo_name="$2" worktree="$3" retry_type="$4" retry_root="$5"
+
+  project="$(sed -n 's/^Project:[[:space:]]*//p' "$TASK_DIR/brief.md" 2>/dev/null || true)"
+  [[ -n "$project" && "$project" != *$'\n'* && "$project" != */* ]] || \
+    _die "Cannot resolve retry owner project: $repo_name"
+  config_file="$SERGEANT_CONFIG/$project.yaml"
+  [[ -f "$config_file" && ! -L "$config_file" ]] || \
+    _die "Cannot resolve retry owner project config: $project"
+
+  _require_yq
+  repo_count="$(yq '.repos | length' "$config_file")"
+  raw_path=""
+  for ((i=0; i<repo_count; i++)); do
+    if [[ "$(yq ".repos[$i].name" "$config_file")" == "$repo_name" ]]; then
+      [[ -z "$raw_path" ]] || _die "Retry owner repo is ambiguous: $repo_name"
+      raw_path="$(yq ".repos[$i].path" "$config_file")"
+    fi
+  done
+  [[ -n "$raw_path" && "$raw_path" != "null" ]] || \
+    _die "Cannot resolve retry owner repo: $repo_name"
+
+  configured_root="$(_resolve_path "$raw_path")"
+  [[ -d "$configured_root" && ! -L "$configured_root" ]] || \
+    _die "Retry owner repo is missing or aliased: $configured_root"
+  expected_root="$(cd "$configured_root" && pwd -P)"
+  [[ "$configured_root" == "$expected_root" ]] || \
+    _die "Retry owner repo is symlink-aliased: $configured_root"
+  [[ "$retry_root" == "$expected_root" && ! -L "$retry_root" ]] || \
+    _die "Retry owner repo does not match persisted cleanup root: $repo_name"
+
+  if [[ "$retry_type" == "git" ]]; then
+    expected_worktree="$(dirname "$expected_root")/$(basename "$expected_root")-sgt-${TASK_ID}"
+    [[ "$worktree" == "$expected_worktree" ]] || \
+      _die "Retry worktree does not match its owning repo: $repo_name"
+  else
+    expected_holder="sgt-${TASK_ID}-${repo_name}"
+    holder="$(tr -d '\n' < "$repo_dir/wt_holder" 2>/dev/null || true)"
+    [[ "$holder" == "$expected_holder" ]] || \
+      _die "Retry treehouse lease does not match its owner: $repo_name"
+  fi
+}
+
 _require_terminal_repos
 _require_clean_worktrees
 
@@ -384,6 +428,8 @@ for repo_dir in "$TASK_DIR"/*/; do
     retry_type="$(sed -n '3p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     if [[ -n "$retry_root" ]]; then
+      _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+        "$retry_type" "$retry_root"
       echo "  retrying interrupted $retry_type removal: $worktree"
       if [[ "$retry_type" == "treehouse" ]]; then
         if ! (cd "$retry_root" && treehouse return "$worktree" 2>&1 | sed 's/^/  /'); then
