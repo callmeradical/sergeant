@@ -659,6 +659,145 @@ _validate_retry_owner() {
   VALIDATED_RETRY_ROOT="$owner_root"
 }
 
+_canonical_registry_path() {
+  local canonical_parent leaf parent path="$1"
+
+  [[ "$path" == /* && "$path" != */ ]] || return 1
+  parent="$(dirname "$path")"
+  leaf="$(basename "$path")"
+  [[ "$leaf" != "." && "$leaf" != ".." && -d "$parent" ]] || return 1
+  canonical_parent="$(cd "$parent" && pwd -P)" || return 1
+  if [[ "$canonical_parent" == "/" ]]; then
+    printf '/%s\n' "$leaf"
+  else
+    printf '%s/%s\n' "$canonical_parent" "$leaf"
+  fi
+}
+
+_git_worktree_removal_proven() {
+  local canonical field has_bare has_head has_kind has_locked has_prunable \
+    head in_record path probe_file record_count target="$2" target_count=0 \
+    valid validated_root="$1"
+  local -a registered_paths=()
+
+  canonical="$(_canonical_registry_path "$target")" || return 1
+  [[ "$canonical" == "$target" ]] || return 1
+  probe_file="$(mktemp)" || return 1
+  if ! git -C "$validated_root" worktree list --porcelain -z > "$probe_file"; then
+    rm -f "$probe_file"
+    return 1
+  fi
+
+  field=""
+  in_record=false
+  record_count=0
+  valid=true
+  has_bare=false
+  has_head=false
+  has_kind=false
+  has_locked=false
+  has_prunable=false
+  while IFS= read -r -d '' field; do
+    if [[ -z "$field" ]]; then
+      if [[ "$in_record" != true ]] || \
+        ! { { [[ "$has_bare" == true && "$has_head" == false && \
+          "$has_kind" == false ]]; } || \
+          { [[ "$has_bare" == false && "$has_head" == true && \
+            "$has_kind" == true ]]; }; }; then
+        valid=false
+        break
+      fi
+      in_record=false
+      continue
+    fi
+    if [[ "$in_record" != true ]]; then
+      if [[ "$field" != worktree\ * ]]; then
+        valid=false
+        break
+      fi
+      path="${field#worktree }"
+      if ! canonical="$(_canonical_registry_path "$path")" || \
+        [[ "$canonical" != "$path" ]]; then
+        valid=false
+        break
+      fi
+      for canonical in "${registered_paths[@]}"; do
+        if [[ "$canonical" == "$path" ]]; then
+          valid=false
+          break
+        fi
+      done
+      [[ "$valid" == true ]] || break
+      registered_paths[${#registered_paths[@]}]="$path"
+      ((record_count += 1))
+      [[ "$path" != "$target" ]] || ((target_count += 1))
+      has_bare=false
+      has_head=false
+      has_kind=false
+      has_locked=false
+      has_prunable=false
+      in_record=true
+    else
+      case "$field" in
+        HEAD\ *)
+          head="${field#HEAD }"
+          if [[ "$has_head" == true || "$has_bare" == true || \
+            "$head" == *[!0-9a-f]* || \
+            ( ${#head} -ne 40 && ${#head} -ne 64 ) ]]; then
+            valid=false
+            break
+          fi
+          has_head=true
+          ;;
+        branch\ refs/*)
+          if [[ "$has_kind" == true || "$has_bare" == true ]]; then
+            valid=false
+            break
+          fi
+          has_kind=true
+          ;;
+        detached)
+          if [[ "$has_kind" == true || "$has_bare" == true ]]; then
+            valid=false
+            break
+          fi
+          has_kind=true
+          ;;
+        bare)
+          if [[ "$has_bare" == true || "$has_head" == true || \
+            "$has_kind" == true ]]; then
+            valid=false
+            break
+          fi
+          has_bare=true
+          ;;
+        locked|locked\ *)
+          if [[ "$has_locked" == true ]]; then
+            valid=false
+            break
+          fi
+          has_locked=true
+          ;;
+        prunable|prunable\ *)
+          if [[ "$has_prunable" == true ]]; then
+            valid=false
+            break
+          fi
+          has_prunable=true
+          ;;
+        *)
+          valid=false
+          break
+          ;;
+      esac
+    fi
+  done < "$probe_file"
+  rm -f "$probe_file"
+
+  [[ "$valid" == true && -z "$field" && "$in_record" == false && \
+    "$record_count" -gt 0 && "$target_count" -eq 0 ]]
+}
+
 _require_terminal_repos
 _require_clean_worktrees
 
@@ -707,18 +846,14 @@ for repo_dir in "$TASK_DIR"/*/; do
         echo ""
         continue
       fi
-      echo "  retrying interrupted $retry_type removal: $worktree"
       if [[ "$retry_type" == "treehouse" ]]; then
-        if ! (cd "$retry_root" && treehouse return "$worktree" 2>&1 | sed 's/^/  /'); then
-          _die "Failed to reconcile interrupted treehouse removal: $worktree"
-        fi
-      elif ! git -C "$retry_root" worktree remove "$worktree" 2>&1 | sed 's/^/  /'; then
-        _die "Failed to reconcile interrupted git worktree removal: $worktree"
+        _die "Cannot prove interrupted treehouse removal completed: $worktree"
       fi
-      [[ ! -d "$worktree" ]] || \
-        _die "Interrupted removal retry left the worktree directory present: $worktree"
+      _git_worktree_removal_proven "$retry_root" "$worktree" || \
+        _die "Cannot prove interrupted git worktree removal completed: $worktree"
       _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
         _die "Failed to publish reconciled cleanup phase: $repo_name"
+      echo "  worktree removal already completed: $worktree"
       echo ""
       continue
     fi
