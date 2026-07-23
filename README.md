@@ -168,6 +168,8 @@ The required `--disposition` is explicit per finding: `gate` creates or updates 
 
 On rerun, visible active cards stay in their current state, while explicitly hidden states are resurfaced: closed cards are reopened and deferred cards are undeferred before the finding body is refreshed.
 
+`sgt-no-mistakes-finding` accepts only JSON arrays from `td list --json`. Malformed JSON and every non-array JSON type fail closed before any td create, update, reopen, or defer operation.
+
 Correctness, security, data-integrity, and test findings cannot be deferred or ignored. Cosmetic and evidence-only findings never create cards.
 
 ### Independent review routing
