@@ -401,7 +401,7 @@ _require_response_cleanup_safe() {
 }
 
 _require_terminal_repos() {
-  local cleanup_phase evidence_dir partial_phase removing_phase repo_dir repo_name \
+  local cleanup_phase evidence_dir partial_phase removed_phase removing_phase repo_dir repo_name \
     retry_root retry_type status worktree worktree_status wt_type
 
   for repo_dir in "$TASK_DIR"/*/; do
@@ -431,6 +431,8 @@ _require_terminal_repos() {
     partial_phase="$(printf 'partial-removal\n%s\n%s\n%s\n' \
       "$worktree" "$retry_type" "$retry_root")"
     removing_phase="$(printf 'removing\n%s\n%s\n%s\n' \
+      "$worktree" "$retry_type" "$retry_root")"
+    removed_phase="$(printf 'removed\n%s\n%s\n%s\n' \
       "$worktree" "$retry_type" "$retry_root")"
     if [[ -n "$worktree" && -d "$worktree" ]]; then
       if [[ "$cleanup_phase" == $'removing\n'"$worktree" || \
@@ -476,6 +478,7 @@ _require_terminal_repos() {
       [[ -n "$worktree" && ( \
         "$cleanup_phase" == $'removing\n'"$worktree" || \
         ( ( "$cleanup_phase" == "$partial_phase" || \
+            "$cleanup_phase" == "$removed_phase" || \
             "$cleanup_phase" == "$removing_phase" ) && \
           "$retry_type" == "$wt_type" && \
           ( "$retry_type" == git || "$retry_type" == treehouse ) && \
@@ -496,8 +499,9 @@ _require_terminal_repos() {
         cmp -s "$repo_dir/result" "$evidence_dir/.sergeant-result" ||
           _die "$repo_name cleanup evidence differs from reconciled fleet result"
       fi
-      if [[ "$cleanup_phase" == $'removing\n'"$worktree" ]]; then
-        _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" ||
+      if [[ "$cleanup_phase" == $'removing\n'"$worktree" || \
+        "$cleanup_phase" == "$removed_phase" ]]; then
+        _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
           _die "Failed to reconcile completed worktree removal: $repo_name"
       fi
     fi
@@ -984,6 +988,8 @@ for repo_dir in "$TASK_DIR"/*/; do
     _restore_worker_evidence "$repo_dir" "$worktree" || true
     _die "Worktree removal reported success but the directory remains: $worktree"
   }
+  _record_cleanup_phase "$repo_dir" removed "$worktree" "$wt_type" "$retry_root" || \
+    _die "Failed to publish completed worktree removal: $repo_name"
   _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
     _die "Failed to publish reconciled cleanup phase: $repo_name"
 
