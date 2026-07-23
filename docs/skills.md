@@ -128,4 +128,4 @@ npx skills@latest add mattpocock/skills
 
 For Claude plugins, use the Claude plugin manager. For Sergeant-owned skills,
 update this repository through a reviewed PR and run
-`tests/instruction-policy-test.sh` plus the full Sergeant test suite.
+`bash tests/instruction-policy-test.sh` plus the full Sergeant test suite.

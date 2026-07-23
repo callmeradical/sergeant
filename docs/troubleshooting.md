@@ -126,7 +126,7 @@ docker run --rm \
   -v "$PWD":/workspace:ro \
   -w /workspace \
   docker.io/library/bash:3.2@sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 \
-  /bin/bash tests/runtime-bash-test.sh
+  /usr/local/bin/bash tests/runtime-bash-test.sh
 ```
 
 This mounts the repository read-only and runs the repository-owned runtime
