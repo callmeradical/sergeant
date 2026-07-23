@@ -587,7 +587,7 @@ printf 'removal diagnostic\n' > \
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*|*" check-ref-format "*) "$REAL_GIT" "$@" ;;
   *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
   *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
@@ -795,6 +795,26 @@ printf 'removed\n%s\ngit\n%s\n' \
   "$TEST_ROOT/removal-failure-sgt-removal-failure" \
   "$TEST_ROOT/removal-failure" > \
   "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase"
+removed_owner_before="$(cksum \
+  "$TEST_ROOT/fleet/removal-failure/app/cleanup-owner")"
+removed_phase_before="$(cksum \
+  "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase")"
+removed_evidence_before="$(cksum \
+  "$TEST_ROOT/fleet/removal-failure/app/terminal-evidence"/.sergeant-*)"
+if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" removal-failure >/dev/null 2>&1; then
+  printf 'cleanup trusted a removed marker for a registered git worktree\n' >&2
+  exit 1
+fi
+[[ "$(cksum "$TEST_ROOT/fleet/removal-failure/app/cleanup-owner")" == \
+  "$removed_owner_before" ]]
+[[ "$(cksum "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase")" == \
+  "$removed_phase_before" ]]
+[[ "$(cksum \
+  "$TEST_ROOT/fleet/removal-failure/app/terminal-evidence"/.sergeant-*)" == \
+  "$removed_evidence_before" ]]
+"$REAL_GIT" -C "$TEST_ROOT/removal-failure" worktree prune --expire now
 PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
   FAKE_GIT_LOG="$TEST_ROOT/git-removals" \
   SERGEANT_CONFIG="$TEST_ROOT/config" \
@@ -1605,14 +1625,25 @@ fi
 printf 'removed\n%s\ntreehouse\n%s\n' \
   "$TEST_ROOT/treehouse-worktree" "$TEST_ROOT/treehouse-main" > \
   "$TEST_ROOT/fleet/treehouse-partial/app/cleanup-phase"
-PATH="$TEST_ROOT/fake-bin:$PATH" \
+treehouse_removed_phase_before="$(cksum \
+  "$TEST_ROOT/fleet/treehouse-partial/app/cleanup-phase")"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
   FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-removals" \
   FAKE_TREEHOUSE_STATE="$TEST_ROOT/treehouse-failed-once" \
   SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" treehouse-partial >/dev/null
+  "$ROOT_DIR/bin/sgt-cleanup" treehouse-partial >/dev/null 2>&1; then
+  printf 'cleanup trusted a removed treehouse marker without lease proof\n' >&2
+  exit 1
+fi
 [[ "$(wc -l < "$TEST_ROOT/treehouse-removals")" -eq 1 ]]
-[[ ! -e "$TEST_ROOT/fleet/treehouse-partial" ]]
+[[ "$(cksum "$TEST_ROOT/fleet/treehouse-partial/app/cleanup-owner")" == \
+  "$treehouse_owner_before" ]]
+[[ "$(cksum "$TEST_ROOT/fleet/treehouse-partial/app/cleanup-phase")" == \
+  "$treehouse_removed_phase_before" ]]
+[[ "$(cksum \
+  "$TEST_ROOT/fleet/treehouse-partial/app/terminal-evidence"/.sergeant-*)" == \
+  "$treehouse_evidence_before" ]]
 rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/treehouse"
 
 mkdir -p "$TEST_ROOT/fleet/marker-publication/app"
