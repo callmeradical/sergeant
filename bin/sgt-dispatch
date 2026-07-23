@@ -571,6 +571,14 @@ $td_context_block"
     echo "$REPO_TD_TASK_ID" > "$repo_task_dir/td_task"
   fi
 
+  review_axis_label="two"
+  accessibility_axis_markdown=""
+  review_context="$BRIEF $repo_role $repo_group"
+  if [[ "$review_context" =~ (^|[^[:alnum:]])([Uu][Ii]|[Ff]rontend|[Ff]ront-[Ee]nd|[Vv]isual|[Ii]nteraction|[Aa]ccessibility|[Uu]ser-facing[[:space:]]+output)([^[:alnum:]]|$) ]]; then
+    review_axis_label="three"
+    accessibility_axis_markdown=$'\n- **Accessibility axis:** Because this is UI-facing work, launch a separate independent accessibility review covering keyboard access, semantics, focus behavior, contrast, responsive behavior, and assistive-technology compatibility as applicable.'
+  fi
+
   cat > "$worktree_path/.sergeant-brief.md" << BRIEF_EOF
 # Sergeant Brief
 
@@ -662,16 +670,16 @@ At a no-mistakes gate, classify every finding before responding. Every actionabl
 
 Record each classification with \`sgt-no-mistakes-finding $PROJECT $rname\`. Pass the run ID, head SHA, finding ID, severity, kind, file/line, description, and originating intent with the chosen \`--disposition\`. The command creates or updates one deduplicated card in this owning repo. On rerun, keep visible active cards in their current state; only closed cards are reopened and deferred cards are undeferred before refreshing the finding body. Preserve any existing repo-specific or manually added td labels, and ensure the required \`no-mistakes\` and \`finding\` labels are present once each. A td disposition allows the gate to continue without mutating the delivery branch. Gate and ask-user dispositions create or update the card, then return a blocking status and do not authorize approval; for ask-user, follow the \`needs_input\` escalation protocol above.
 
-### 7. Independent two-axis review
+### 7. Independent $review_axis_label-axis review
 
 Before completion, load and use the canonical \`code-review\` skill when available, then launch separate parallel subagents for these axes so their contexts cannot contaminate each other. Keep their output in separate sections. Do not blend or rerank the axes. If the skill cannot be loaded, use the embedded review rules below.
 
 - **Standards axis:** Review the diff versus the pinned merge-base against active repo instructions, AGENTS, CONTRIBUTING, and coding standards. Add a concise Fowler smell heuristic (duplication, long functions/modules, large parameter lists, feature envy, data clumps, primitive obsession, shotgun surgery, and inappropriate intimacy). Separate hard documented-standard violations from judgement-call smells, and skip findings enforced by tooling.
-- **Spec axis:** Review against the originating td issue/spec/mission. Report missing or partial requirements, scope creep, and incorrectly implemented requirements. If no spec exists, report this axis as skipped/no spec.
+- **Spec axis:** Review against the originating td issue/spec/mission. Report missing or partial requirements, scope creep, and incorrectly implemented requirements. If no spec exists, report this axis as skipped/no spec.$accessibility_axis_markdown
 
 ### 8. Remediate and repeat
 
-Remediate every blocking repository-native test or independent-review finding, rerun affected tests, then rerun both independent review axes. Repeat until blocking findings are zero on each axis. Do not remediate no-mistakes findings in this validation run; their owning td work requires a separate dispatch.
+Remediate every blocking repository-native test or independent-review finding, rerun affected tests, then rerun all required independent review axes. Repeat until blocking findings are zero on each axis. Do not remediate no-mistakes findings in this validation run; their owning td work requires a separate dispatch.
 
 ### 9. Complete delivery and td lifecycle
 

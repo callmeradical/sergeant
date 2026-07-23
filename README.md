@@ -144,6 +144,10 @@ On rerun, visible active cards stay in their current state, while explicitly hid
 
 Correctness, security, data-integrity, and test findings cannot be deferred or ignored. Cosmetic and evidence-only findings never create cards.
 
+### Independent review routing
+
+Generated worker briefs always require separate Standards and Spec reviews. Frontend, UI, visual, interaction, accessibility, or user-facing output language in the mission, repo role, or repo group also requires a separate independent accessibility review. Non-UI work retains the two-axis review, while `sgt-no-mistakes-finding` continues to route structured accessibility findings whenever a review supplies them.
+
 ## Skills
 
 Agent-loaded skills for structured workflows:

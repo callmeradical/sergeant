@@ -161,6 +161,7 @@ assert_contains "skip findings enforced by tooling"
 assert_contains "Spec axis"
 assert_contains "If no spec exists, report this axis as skipped"
 assert_contains "Do not blend or rerank the axes"
+assert_not_contains "Accessibility axis"
 assert_contains "blocking findings are zero"
 assert_contains "required CI is green"
 assert_contains "no unresolved non-outdated review threads"
@@ -248,5 +249,22 @@ SGT_WIKI_DISABLED=1 \
 
 brief="$(printf '%s\n' "$TEST_ROOT"/app-sgt-* | grep -v "$(dirname "$brief")" | sed -n '1p')/.sergeant-brief.md"
 assert_contains "User override: run no-mistakes for this worker before completion."
+
+for ui_mission in \
+  "Improve Frontend layout" \
+  "Adjust visual design" \
+  "Refine interaction flow" \
+  "Clarify user-facing output"; do
+  PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-dispatch" test "$ui_mission" --repos app >/dev/null
+
+  brief="$(grep -rl "^${ui_mission}$" "$TEST_ROOT"/app-sgt-*/.sergeant-brief.md)"
+  [[ -f "$brief" ]] || { printf 'UI-facing brief was not generated\n' >&2; exit 1; }
+  assert_contains "Accessibility axis"
+  assert_contains "independent accessibility review"
+done
 
 printf 'sgt-dispatch brief contract: ok\n'

@@ -103,7 +103,7 @@ tmux attach -t sgt-<task-id>
 ### Step 4 — Reconcile results
 
 When all workers are done, review the PRs:
-- Verify each repo's completion evidence: pinned-base scope, focused/full validation, separate standards/spec review artifacts with zero blocking findings, required CI, and resolved non-outdated review threads
+- Verify each repo's completion evidence: pinned-base scope, focused/full validation, separate standards/spec review artifacts, an accessibility review artifact for UI-facing work, zero blocking findings, required CI, and resolved non-outdated review threads
 - Check dependency order: merge infra before API before app if there are runtime dependencies; a worker is not done until its dependency gate is satisfied
 - If any repo failed, read the failure reason from fleet state and decide: retry, fix manually, or reassign
 - Note any cross-repo implications in each PR description (e.g., "merge after smith-infra #42")
@@ -172,8 +172,8 @@ Each dispatched agent is expected to:
 8. Run focused tests and typechecking/lint regularly and the full required suite at the end. Do not run no-mistakes for routine worker completion, prototypes, investigations, documentation drafts, intermediate commits, or remediation loops; an explicit user instruction overrides this default
 9. At an explicit final shipping boundary only, after implementation and repository-native validation, run `no-mistakes axi run --intent "<objective and approved tradeoffs>"`, skip only proven-irrelevant gates, treat findings as validation-only, and stop at `checks-passed`
 10. Route each no-mistakes finding through `sgt-no-mistakes-finding`: every actionable finding creates or updates separate deduplicated owning-repo td work; correctness/security/data-integrity/test and ask-user work is P1 and remains gated, warning debt is P2, informational debt is P3, and cosmetic/evidence noise is ignored. Never remediate findings in the validation run
-11. Load the canonical `code-review` skill when available, then launch separate parallel subagents for independent reviews: a standards axis over the pinned diff and documented standards plus concise Fowler smells, and a spec axis over requirements and scope. Keep evidence separate and skip the spec axis explicitly when no spec exists
-12. Remediate all blocking repository-native test and independent-review findings, rerun affected tests and both axes until each reports zero blocking findings. No-mistakes findings require a separate td dispatch
+11. Load the canonical `code-review` skill when available, then launch separate parallel subagents for independent reviews: a standards axis over the pinned diff and documented standards plus concise Fowler smells, and a spec axis over requirements and scope. For UI-facing work identified by frontend, UI, visual, interaction, accessibility, or user-facing output language in the mission, repo role, or repo group, also launch a separate accessibility axis. Keep evidence separate and skip the spec axis explicitly when no spec exists
+12. Remediate all blocking repository-native test and independent-review findings, rerun affected tests and all required axes until each reports zero blocking findings. No-mistakes findings require a separate td dispatch
 13. Commit, open a PR, wait for required CI, resolve all non-outdated review threads, and satisfy dependency order
 14. For tracked work, log td decisions, handoff, then run `td review` only when implementation and review evidence are ready
 15. Write `.sergeant-result` and set `.sergeant-status=done` only after every gate passes. `failed: <exact reason>` is reserved for an unrecoverable terminal failure
