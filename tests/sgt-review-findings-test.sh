@@ -71,20 +71,38 @@ chmod +x "$INSTALLED_BIN/sgt-notify"
 
 cat > "$TEST_ROOT/fake-bin/cat" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${BLOCK_GATE_READ:-0}" == "1" && "${1:-}" == */standards-code-review ]]; then
+exec /usr/bin/cat "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/cat"
+
+cat > "$TEST_ROOT/fake-bin/tail" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${BLOCK_GATE_READ:-0}" == "1" && "${*: -1}" == */standards-code-review ]]; then
   touch "$GATE_READ_STARTED"
   while [[ ! -e "$GATE_READ_RELEASE" ]]; do
     sleep 0.01
   done
 fi
-exec /usr/bin/cat "$@"
+exec /usr/bin/tail "$@"
 EOF
-chmod +x "$TEST_ROOT/fake-bin/cat"
+chmod +x "$TEST_ROOT/fake-bin/tail"
 
 mkdir -p "$TEST_ROOT/fake-bin-no-notify"
 for _f in "$TEST_ROOT/fake-bin"/*; do
   ln -s "$_f" "$TEST_ROOT/fake-bin-no-notify/$(basename "$_f")"
 done
+
+cat > "$TEST_ROOT/fake-bin/python3" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${BLOCK_REVIEW_PARSE:-0}" == "1" ]]; then
+  touch "$REVIEW_PARSE_STARTED"
+  while [[ ! -e "$REVIEW_PARSE_RELEASE" ]]; do
+    sleep 0.01
+  done
+fi
+exec /usr/bin/python3 "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/python3"
 
 run_router() {
   : > "$TEST_ROOT/td.log"
@@ -295,6 +313,28 @@ wait "$clean_router_pid"
 [[ "$(cat "$WORKTREE/.sergeant-status")" == 'in_progress' ]]
 [[ ! -e "$WORKTREE/.sergeant-message" ]]
 
+rm -rf "$WORKTREE/.sergeant-review-gates"
+rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation,review-gates.lock}
+rm -f "$TEST_ROOT/review-parse-started" "$TEST_ROOT/review-parse-release"
+run_router "$TEST_ROOT/findings.json"
+[[ "$(cat "$WORKTREE/.sergeant-gate-generation")" == '1' ]]
+BLOCK_REVIEW_PARSE=1 REVIEW_PARSE_STARTED="$TEST_ROOT/review-parse-started" \
+  REVIEW_PARSE_RELEASE="$TEST_ROOT/review-parse-release" PRESERVE_FLEET=1 \
+  run_router "$TEST_ROOT/clean.json" &
+stale_clean_router_pid=$!
+for _ in {1..200}; do
+  [[ -e "$TEST_ROOT/review-parse-started" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/review-parse-started" ]]
+PRESERVE_FLEET=1 run_router "$TEST_ROOT/findings.json"
+[[ "$(cat "$WORKTREE/.sergeant-gate-generation")" == '2' ]]
+touch "$TEST_ROOT/review-parse-release"
+wait "$stale_clean_router_pid"
+[[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
+grep -Fq 'Review axis: standards' "$WORKTREE/.sergeant-message"
+[[ "$(sed -n '1p' "$WORKTREE/.sergeant-review-gates/standards-code-review")" == '2' ]]
+
 run_router "$TEST_ROOT/clean.json"
 set +e
 output="$(PATH="$TEST_ROOT/fake-bin:$PATH" REPO_PATH="$REPO" TD_LOG="$TEST_ROOT/td.log" MV_LOG="$TEST_ROOT/mv.log" \
@@ -306,6 +346,9 @@ status=$?
 set -e
 [[ "$status" -eq 2 && "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
 grep -Fq 'blocked [app]' "$TEST_ROOT/notify.log"
+PRESERVE_FLEET=1 run_router "$TEST_ROOT/clean.json"
+[[ "$(cat "$WORKTREE/.sergeant-status")" == 'in_progress' ]]
+[[ ! -e "$WORKTREE/.sergeant-message" ]]
 
 rm -f "$WORKTREE/.sergeant-status" "$WORKTREE/.sergeant-message"
 : > "$TEST_ROOT/notify.log"
