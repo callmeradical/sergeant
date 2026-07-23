@@ -79,7 +79,7 @@ run_router() {
     "$ROOT_DIR/bin/sgt-review-findings" test app \
       --input "$1" --axis standards --source code-review \
       --branch fix/review --head-sha abc1234 --parent-task td-parent \
-      --task-id fleet-1 --worktree "$WORKTREE" 2>&1)"
+      --task-id "${ROUTER_TASK_ID:-fleet-1}" --worktree "$WORKTREE" 2>&1)"
   status=$?
   set -e
 }
@@ -105,6 +105,7 @@ grep -Fq 'Acceptance criteria: Match exact pane identity' "$TEST_ROOT/td.log"
 grep -Fq 'Branch: fix/review' "$TEST_ROOT/td.log"
 grep -Fq 'Head SHA: abc1234' "$TEST_ROOT/td.log"
 grep -Fq 'Parent mission: td-parent' "$TEST_ROOT/td.log"
+grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log"
 grep -Fq 'independent-review-finding:app:standards:code-review:std-1' "$TEST_ROOT/td.log"
 [[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
 [[ "$(cat "$WORKTREE/.sergeant-gate-generation")" == '1' ]]
@@ -145,8 +146,16 @@ fi
 TD_LIST_RESULT='[{"id":"td-existing","status":"in_progress","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1"}]' \
   run_router "$TEST_ROOT/findings.json"
 grep -Fq 'update td-existing' "$TEST_ROOT/td.log"
+grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log"
 if grep -Fq 'reopen td-existing' "$TEST_ROOT/td.log"; then
   printf 'rerun changed active finding state\n' >&2
+  exit 1
+fi
+
+ROUTER_TASK_ID='fleet/invalid' run_router "$TEST_ROOT/findings.json"
+[[ "$status" -eq 2 && "$output" == *'invalid fleet task'* ]]
+if grep -Eq '^(create|update) ' "$TEST_ROOT/td.log"; then
+  printf 'malformed fleet task entered td metadata\n' >&2
   exit 1
 fi
 
