@@ -1308,6 +1308,7 @@ case " $* " in
   *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
   *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
+  *" check-ref-format "*|*" worktree list --porcelain -z "*) "$REAL_GIT" "$@" ;;
   *" worktree remove "*)
     printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
     [[ ! -e "$FAKE_GIT_STATE" ]] || exit 1
@@ -1359,6 +1360,7 @@ marker_evidence_before="$(cksum \
 set +e
 marker_rollback_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
   SGT_CLEANUP_FAIL_POINT='phase-publish-reconciled-absent,phase-rollback-reconciled-absent' \
+  FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
   FAKE_GIT_STATE="$TEST_ROOT/marker-git-removed" \
   FAKE_GIT_LOG="$TEST_ROOT/marker-removals" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
@@ -1376,6 +1378,7 @@ marker_phase_temp="$(compgen -G \
   "$TEST_ROOT/fleet/marker-publication/app/cleanup-phase.tmp.*")"
 [[ -f "$marker_phase_temp" ]]
 rm "$marker_phase_temp"
+touch "$TEST_ROOT/mv-failed-once"
 PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
   FAKE_GIT_STATE="$TEST_ROOT/marker-git-removed" \
   FAKE_GIT_LOG="$TEST_ROOT/marker-removals" \
@@ -1404,7 +1407,12 @@ case " $* " in
   *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
   *" check-ref-format "*|*" worktree list --porcelain -z "*) "$REAL_GIT" "$@" ;;
-  *" worktree remove "*) "$REAL_GIT" "$@" ;;
+  *" worktree remove "*)
+    "$REAL_GIT" "$@"
+    if [[ -n "${FAKE_GIT_MUTATE_PATH:-}" ]]; then
+      printf 'changed during removal\n' > "$FAKE_GIT_MUTATE_PATH"
+    fi
+    ;;
   *) exit 1 ;;
 esac
 EOF
@@ -1452,6 +1460,17 @@ fi
 [[ ! -e "$TEST_ROOT/fleet/staging-failure/app/cleanup-owner" ]]
 [[ ! -e "$TEST_ROOT/fleet/staging-failure/app/cleanup-phase" ]]
 printf 'done\n' > "$TEST_ROOT/staging-sgt-staging-failure/.sergeant-status"
+if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_CP_STATE="$TEST_ROOT/cp-failed-once" \
+  FAKE_GIT_MUTATE_PATH="$TEST_ROOT/fleet/staging-failure/app/terminal-evidence/.sergeant-result" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" staging-failure >/dev/null 2>&1; then
+  printf 'cleanup accepted persisted evidence changed during removal\n' >&2
+  exit 1
+fi
+[[ "$(sed -n '1p' "$TEST_ROOT/fleet/staging-failure/app/cleanup-phase")" == \
+  removed ]]
+printf 'result\n' > \
+  "$TEST_ROOT/fleet/staging-failure/app/terminal-evidence/.sergeant-result"
 PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_CP_STATE="$TEST_ROOT/cp-failed-once" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" staging-failure >/dev/null
