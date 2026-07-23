@@ -293,6 +293,48 @@ PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
 [[ ! -e "$TEST_ROOT/fleet/marker-publication" ]]
 rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/mv"
 
+mkdir -p "$TEST_ROOT/fleet/staging-failure/app" "$TEST_ROOT/staging/.git" \
+  "$TEST_ROOT/staging-sgt-staging-failure"
+printf '%s\n' "$TEST_ROOT/staging-sgt-staging-failure" > \
+  "$TEST_ROOT/fleet/staging-failure/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/staging-failure/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/staging-failure/app/result"
+printf 'done\n' > "$TEST_ROOT/staging-sgt-staging-failure/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/staging-sgt-staging-failure/.sergeant-result"
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" rev-parse "*) printf 'true\n' ;;
+  *" status "*) ;;
+  *" worktree remove "*) rm -rf "${!#}" ;;
+  *) exit 1 ;;
+esac
+EOF
+REAL_CP="$(command -v cp)"
+export REAL_CP
+cat > "$TEST_ROOT/fake-bin/cp" <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *".sergeant-status"* && ! -e "$FAKE_CP_STATE" ]]; then
+  touch "$FAKE_CP_STATE"
+  exit 1
+fi
+"$REAL_CP" "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/cp"
+if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_CP_STATE="$TEST_ROOT/cp-failed-once" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" staging-failure >/dev/null 2>&1; then
+  printf 'cleanup succeeded after terminal evidence staging failed\n' >&2
+  exit 1
+fi
+[[ -f "$TEST_ROOT/staging-sgt-staging-failure/.sergeant-status" ]]
+[[ -f "$TEST_ROOT/staging-sgt-staging-failure/.sergeant-result" ]]
+PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_CP_STATE="$TEST_ROOT/cp-failed-once" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" staging-failure >/dev/null
+[[ ! -e "$TEST_ROOT/fleet/staging-failure" ]]
+rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/cp"
+
 mkdir -p "$TEST_ROOT/fleet/task-123/app" "$TEST_ROOT/repo"
 git -C "$TEST_ROOT/repo" init -q
 git -C "$TEST_ROOT/repo" config user.name Test

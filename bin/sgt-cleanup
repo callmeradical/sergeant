@@ -223,7 +223,11 @@ _require_terminal_repos() {
     esac
 
     worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+    cleanup_phase="$(cat "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     if [[ -n "$worktree" && -d "$worktree" ]]; then
+      if [[ "$cleanup_phase" == $'removing\n'"$worktree" ]]; then
+        _restore_worker_evidence "$repo_dir" "$worktree"
+      fi
       [[ -f "$worktree/.sergeant-status" ]] || \
         _die "$repo_name worktree terminal proof is missing"
       worktree_status="$(tr -d '\n' < "$worktree/.sergeant-status")"
@@ -236,7 +240,6 @@ _require_terminal_repos() {
           _die "$repo_name worktree result differs from reconciled fleet result"
       fi
     else
-      cleanup_phase="$(cat "$repo_dir/cleanup-phase" 2>/dev/null || true)"
       [[ -n "$worktree" && ( \
         "$cleanup_phase" == $'removing\n'"$worktree" || \
         "$cleanup_phase" == $'reconciled-absent\n'"$worktree" \
@@ -295,8 +298,16 @@ _stage_worker_evidence() {
     mkdir -p "$evidence_dir"
     cp -p "$evidence" "$evidence_dir/" || \
       _die "Failed to preserve worker evidence before cleanup: $evidence"
+  done
+}
+
+_remove_worker_evidence() {
+  local evidence worktree="$1"
+
+  for evidence in "$worktree"/.sergeant-*; do
+    [[ -f "$evidence" ]] || continue
     rm -f "$evidence" || \
-      _die "Failed to stage worker evidence before cleanup: $evidence"
+      _die "Failed to remove staged worker evidence before cleanup: $evidence"
   done
 }
 
@@ -362,6 +373,7 @@ for repo_dir in "$TASK_DIR"/*/; do
     _restore_worker_evidence "$repo_dir" "$worktree"
     _die "Failed to record cleanup phase before worktree removal: $repo_name"
   fi
+  _remove_worker_evidence "$worktree"
 
   if [[ "$wt_type" == "treehouse" ]]; then
     # Find the main repo path to run treehouse return from
