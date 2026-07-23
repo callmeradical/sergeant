@@ -543,9 +543,12 @@ _require_terminal_repos() {
           "$expected_evidence_identity" || \
           _die "$repo_name: evidence restore failed during removing-state replay; replay aborted"
       fi
-      [[ "$restore_after_validation" != true ]] || \
-        _restore_worker_evidence "$repo_dir" "$worktree" || \
-        _die "Failed to restore worker evidence during retry preflight: $repo_name"
+      if [[ "$restore_after_validation" == true ]]; then
+        expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
+        _restore_worker_evidence "$repo_dir" "$worktree" \
+          "$expected_evidence_identity" || \
+          _die "Failed to restore worker evidence during retry preflight: $repo_name"
+      fi
     else
       [[ "$cleanup_phase" != $'removing\n'"$worktree" ]] || \
         _die "Retry owner identity is missing: $repo_name"
@@ -640,7 +643,8 @@ _stage_worker_evidence() {
   for evidence in "$worktree"/.sergeant-*; do
     [[ -f "$evidence" ]] || continue
     if ! cp -p "$evidence" "$staging_dir/"; then
-      rm -rf "$staging_dir"
+      _rollback_remove_path "$staging_dir" "terminal evidence staging" \
+        evidence-stage-rollback-cleanup
       return 1
     fi
   done
@@ -648,7 +652,8 @@ _stage_worker_evidence() {
   staged_identity="$(_worker_evidence_identity "$staging_dir")" || staged_identity=""
   if [[ -z "$worker_identity" || "$worker_identity" != "$expected_identity" || \
     "$staged_identity" != "$expected_identity" ]]; then
-    rm -rf "$staging_dir"
+    _rollback_remove_path "$staging_dir" "changed terminal evidence staging" \
+      evidence-stage-rollback-cleanup
     return 1
   fi
 }
@@ -905,14 +910,17 @@ _repo_instance_id() {
       git hash-object --stdin)" || return 1
     tmp="$(mktemp "$git_common_dir/.sergeant-instance.XXXXXX")" || return 1
     if ! printf '%s\n' "$token" > "$tmp"; then
-      rm -f "$tmp"
+      _rollback_remove_path "$tmp" "repository instance marker staging" \
+        instance-rollback-cleanup
       return 1
     fi
     if ! ln "$tmp" "$marker" 2>/dev/null && [[ ! -f "$marker" ]]; then
-      rm -f "$tmp"
+      _rollback_remove_path "$tmp" "repository instance marker staging" \
+        instance-rollback-cleanup
       return 1
     fi
-    rm -f "$tmp"
+    _rollback_remove_path "$tmp" "repository instance marker staging" \
+      instance-cleanup
   fi
   [[ -f "$marker" && ! -L "$marker" ]] || return 1
   token="$(cat "$marker")" || return 1
