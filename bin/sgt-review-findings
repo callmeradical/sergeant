@@ -58,7 +58,7 @@ _review_gate_messages() {
   local gate
   for gate in "$WORKTREE/.sergeant-review-gates"/*; do
     [[ -f "$gate" ]] || continue
-    cat "$gate"
+    tail -n +2 "$gate"
   done
 }
 
@@ -71,7 +71,7 @@ _publish_blocked() {
   if _valid_review_context; then
     mkdir -p "$WORKTREE/.sergeant-review-gates"
     gate_path="$(_review_gate_path)"
-    printf '%s\n' "$message" > "$gate_path.tmp"
+    printf '%s\n%s\n' "$generation" "$message" > "$gate_path.tmp"
     mv "$gate_path.tmp" "$gate_path"
     message="$(_review_gate_messages)"
   fi
@@ -109,11 +109,23 @@ _routing_failure() {
 }
 
 for required in INPUT AXIS SOURCE BRANCH HEAD_SHA PARENT_TASK; do
-  [[ -n "${!required}" ]] || _routing_failure "missing required review field: ${required,,}"
+  field_name="$(printf '%s' "$required" | tr '[:upper:]_' '[:lower:]-')"
+  [[ -n "${!required}" ]] || _routing_failure "missing required review field: $field_name"
 done
 [[ "$TASK_ID" != "unknown" ]] || _routing_failure "missing required review field: task_id"
 [[ "$AXIS" =~ ^(standards|spec|accessibility)$ ]] || _routing_failure "invalid review axis"
 [[ "$SOURCE" =~ ^[A-Za-z0-9._-]+$ ]] || _routing_failure "invalid review source"
+
+invocation_generation=""
+invocation_gate_generation=""
+_sgt_response_lock_acquire "$WORKTREE" ".sergeant-review-gates.lock" || _routing_failure "could not lock review gate state"
+invocation_generation="$( { tr -d '\n' < "$WORKTREE/.sergeant-gate-generation"; } 2>/dev/null || true)"
+gate_path="$(_review_gate_path)"
+if [[ -f "$gate_path" ]]; then
+  IFS= read -r invocation_gate_generation < "$gate_path" || true
+fi
+_sgt_response_lock_release || _routing_failure "could not unlock review gate state"
+
 [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || _routing_failure "invalid branch"
 [[ "$HEAD_SHA" =~ ^[A-Fa-f0-9]{7,64}$ ]] || _routing_failure "invalid head SHA"
 [[ "$PARENT_TASK" =~ ^[A-Za-z0-9._-]+$ ]] || _routing_failure "invalid parent task"
@@ -214,7 +226,10 @@ then
   _routing_failure "invalid review output"
 fi
 
-mapfile -d '' -t fields < "$parsed"
+fields=()
+while IFS= read -r -d '' field; do
+  fields[${#fields[@]}]="$field"
+done < "$parsed"
 (( ${#fields[@]} % 8 == 0 )) || _routing_failure "invalid review output"
 
 declare -a blocking_tasks=() blocking_recommendations=()
@@ -317,20 +332,31 @@ fi
 _sgt_response_lock_acquire "$WORKTREE" ".sergeant-review-gates.lock" || _routing_failure "could not lock review gate state"
 current_status="$( { tr -d '\n' < "$WORKTREE/.sergeant-status"; } 2>/dev/null || true)"
 current_message="$(cat "$WORKTREE/.sergeant-message" 2>/dev/null || true)"
+current_generation="$( { tr -d '\n' < "$WORKTREE/.sergeant-gate-generation"; } 2>/dev/null || true)"
 gate_path="$(_review_gate_path)"
+current_gate_generation=""
 if [[ -f "$gate_path" ]]; then
+  IFS= read -r current_gate_generation < "$gate_path" || true
+fi
+if [[ -n "$invocation_gate_generation" && "$current_gate_generation" == "$invocation_gate_generation" ]]; then
   rm -f "$gate_path"
   remaining_message="$(_review_gate_messages)"
   if [[ -n "$remaining_message" ]]; then
     printf '%s\n' "$remaining_message" > "$WORKTREE/.sergeant-message.tmp"
     mv "$WORKTREE/.sergeant-message.tmp" "$WORKTREE/.sergeant-message"
-  elif [[ "$current_status" == "blocked" ]] &&
+  elif [[ "$current_generation" == "$invocation_generation" && "$current_status" == "blocked" ]] &&
        [[ "$current_message" == "Independent review requires remediation."* || "$current_message" == "Review finding routing failed."* ]]; then
     printf 'in_progress\n' > "$WORKTREE/.sergeant-status.tmp"
     mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
     rm -f "$WORKTREE/.sergeant-message"
     rmdir "$WORKTREE/.sergeant-review-gates" 2>/dev/null || true
   fi
+elif [[ -z "$invocation_gate_generation" && -z "$current_gate_generation" &&
+        "$current_generation" == "$invocation_generation" && "$current_status" == "blocked" &&
+        "$current_message" == "Review finding routing failed."* ]]; then
+  printf 'in_progress\n' > "$WORKTREE/.sergeant-status.tmp"
+  mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
+  rm -f "$WORKTREE/.sergeant-message"
 fi
 _sgt_response_lock_release || _routing_failure "could not unlock review gate state"
 
