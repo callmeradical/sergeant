@@ -551,8 +551,11 @@ _require_terminal_repos() {
           "$expected_evidence_identity" || \
           _die "Failed to restore worker evidence during retry preflight: $repo_name"
       fi
-      [[ "$restore_after_validation" != true ]] || \
-        _restore_worker_evidence "$repo_dir" "$worktree"
+      if [[ "$restore_after_validation" == true ]]; then
+        expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
+        _restore_worker_evidence "$repo_dir" "$worktree" \
+          "$expected_evidence_identity"
+      fi
     else
       if [[ -z "$worktree" ]]; then
         continue
@@ -1575,14 +1578,17 @@ _repo_instance_id() {
       git hash-object --stdin)" || return 1
     tmp="$(mktemp "$git_common_dir/.sergeant-instance.XXXXXX")" || return 1
     if ! printf '%s\n' "$token" > "$tmp"; then
-      rm -f "$tmp"
+      _rollback_remove_path "$tmp" "repository instance marker staging" \
+        instance-rollback-cleanup
       return 1
     fi
     if ! ln "$tmp" "$marker" 2>/dev/null && [[ ! -f "$marker" ]]; then
-      rm -f "$tmp"
+      _rollback_remove_path "$tmp" "repository instance marker staging" \
+        instance-rollback-cleanup
       return 1
     fi
-    rm -f "$tmp"
+    _rollback_remove_path "$tmp" "repository instance marker staging" \
+      instance-cleanup
   fi
   [[ -f "$marker" && ! -L "$marker" ]] || return 1
   token="$(cat "$marker")" || return 1
@@ -1763,6 +1769,23 @@ _record_cleanup_owner() {
     > "$output"
 }
 
+_rollback_initial_cleanup() {
+  local marker="$3" marker_preexisting="$4" repo_dir="$1" transaction="$2"
+
+  _rollback_remove_path "$repo_dir/terminal-evidence" \
+    "initial terminal evidence publication" initial-rollback-cleanup
+  _rollback_remove_path "$repo_dir/cleanup-owner" \
+    "initial cleanup owner publication" initial-rollback-cleanup
+  _rollback_remove_path "$repo_dir/cleanup-phase" \
+    "initial cleanup phase publication" initial-rollback-cleanup
+  _rollback_remove_path "$transaction" "initial cleanup transaction" \
+    initial-rollback-cleanup
+  if [[ "$marker_preexisting" != true ]]; then
+    _rollback_remove_path "$marker" "initial repository instance marker" \
+      initial-marker-rollback-cleanup
+  fi
+}
+
 _publish_initial_cleanup() {
   local evidence_identity="$5" marker marker_preexisting=false repo_dir="$1" \
     repo_root="$2" transaction worktree="$3" wt_type="$4"
@@ -1784,8 +1807,8 @@ _publish_initial_cleanup() {
     ! _cleanup_fail_point record-phase || \
     ! printf 'removing\n%s\n%s\n%s\n' "$worktree" "$wt_type" "$repo_root" \
       > "$transaction/cleanup-phase"; then
-    rm -rf "$transaction"
-    [[ "$marker_preexisting" == true ]] || rm -f "$marker"
+    _rollback_initial_cleanup "$repo_dir" "$transaction" "$marker" \
+      "$marker_preexisting"
     return 1
   fi
 
@@ -1795,12 +1818,12 @@ _publish_initial_cleanup() {
     ! mv "$transaction/cleanup-owner" "$repo_dir/cleanup-owner" || \
     ! _cleanup_fail_point publish-phase || \
     ! mv "$transaction/cleanup-phase" "$repo_dir/cleanup-phase"; then
-    rm -rf "$repo_dir/terminal-evidence" "$repo_dir/cleanup-owner" \
-      "$repo_dir/cleanup-phase" "$transaction"
-    [[ "$marker_preexisting" == true ]] || rm -f "$marker"
+    _rollback_initial_cleanup "$repo_dir" "$transaction" "$marker" \
+      "$marker_preexisting"
     return 1
   fi
-  rmdir "$transaction" || return 1
+  rmdir "$transaction" || \
+    _die "CRITICAL: failed to remove completed initial cleanup transaction: $transaction"
 }
 
 _validate_retry_owner() {
