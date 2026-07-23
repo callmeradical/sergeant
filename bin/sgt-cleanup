@@ -446,13 +446,26 @@ _repo_metadata_identity() {
 }
 
 _repo_per_worktree_metadata_identity() {
-  local git_dir="$1" index repo_root="$2"
+  local git_dir="$1" index_path mode="${3:-}" raw_index repo_root="$2" semantic_index
 
-  index="$(git -C "$repo_root" ls-files --stage -z | git hash-object --stdin)" || return 1
+  index_path="$git_dir/index"
+  if [[ "$mode" == "exclude-evidence" ]]; then
+    [[ ! -L "$index_path" ]] || return 1
+    if [[ -e "$index_path" ]]; then
+      [[ -f "$index_path" && -r "$index_path" ]] || return 1
+      raw_index="$(git hash-object "$index_path")" || return 1
+    else
+      raw_index="absent"
+    fi
+  else
+    raw_index="not-bound"
+  fi
+  semantic_index="$(git -C "$repo_root" ls-files --stage -z | \
+    git hash-object --stdin)" || return 1
 
   (
     cd "$git_dir" || exit 1
-    printf 'index\n%s\n' "$index"
+    printf 'raw-index\n%s\nsemantic-index\n%s\n' "$raw_index" "$semantic_index"
     find . -path ./index -prune -o -path ./logs -prune -o -path ./objects -prune -o \
       -path ./refs -prune -o -path ./worktrees -prune -o \
       \( -type f -o -type l \) -print | LC_ALL=C sort | \
@@ -527,8 +540,8 @@ _repo_identity() {
   remote="$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null || true)"
   state="$(_repo_worktree_identity "$repo_root" "${2:-}")" || return 1
   metadata="$(_repo_metadata_identity "$git_common_dir")" || return 1
-  per_worktree_metadata="$(_repo_per_worktree_metadata_identity "$git_dir" "$repo_root")" || \
-    return 1
+  per_worktree_metadata="$(_repo_per_worktree_metadata_identity \
+    "$git_dir" "$repo_root" "${2:-}")" || return 1
   printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
     "$instance" "$metadata" "$per_worktree_metadata" "$config" "$head" "$remote" \
     "$roots" "$refs" "$state" | \

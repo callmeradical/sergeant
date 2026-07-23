@@ -913,6 +913,24 @@ printf '[fixture]\n\tworkerMetadata = changed\n' > \
 assert_present_worker_identity_rejected 'linked-worktree metadata drift'
 rm "$present_worker_git_dir/config.worktree"
 
+present_worker_stage_before="$(git -C \
+  "$TEST_ROOT/present-retry-sgt-present-retry" ls-files --stage -- README.md)"
+present_worker_content_before="$(cksum \
+  "$TEST_ROOT/present-retry-sgt-present-retry/README.md")"
+cp -p "$present_worker_git_dir/index" "$TEST_ROOT/present-worker-index"
+git -C "$TEST_ROOT/present-retry-sgt-present-retry" update-index \
+  --assume-unchanged README.md
+if cmp -s "$TEST_ROOT/present-worker-index" "$present_worker_git_dir/index"; then
+  printf 'assume-unchanged did not change the raw worker index\n' >&2
+  exit 1
+fi
+[[ "$(git -C "$TEST_ROOT/present-retry-sgt-present-retry" \
+  ls-files --stage -- README.md)" == "$present_worker_stage_before" ]]
+[[ "$(cksum "$TEST_ROOT/present-retry-sgt-present-retry/README.md")" == \
+  "$present_worker_content_before" ]]
+assert_present_worker_identity_rejected 'linked-worktree raw index flag drift'
+cp -p "$TEST_ROOT/present-worker-index" "$present_worker_git_dir/index"
+
 git -C "$TEST_ROOT/present-retry-sgt-present-retry" checkout -q --detach HEAD^
 assert_present_worker_identity_rejected 'HEAD drift'
 git -C "$TEST_ROOT/present-retry-sgt-present-retry" checkout -q present-retry-worker
