@@ -255,13 +255,18 @@ write_routing_config() {
   local group="$2"
   local group_description="$3"
   local group_instructions="$4"
+  local default_instructions="${5:-Maintain fleet automation}"
+  local repo_instructions="${6:-Maintain repository automation}"
   cat > "$TEST_ROOT/config/test.yaml" <<EOF
 name: test
+defaults:
+  agent_instructions: $default_instructions
 repos:
   - name: app
     path: $TEST_ROOT/repo
     role: $role
     group: $group
+    agent_instructions: $repo_instructions
 groups:
   $group:
     description: $group_description
@@ -275,8 +280,10 @@ dispatch_and_assert_accessibility() {
   local group="$3"
   local group_description="$4"
   local group_instructions="$5"
+  local default_instructions="${6:-Maintain fleet automation}"
+  local repo_instructions="${7:-Maintain repository automation}"
 
-  write_routing_config "$role" "$group" "$group_description" "$group_instructions"
+  write_routing_config "$role" "$group" "$group_description" "$group_instructions" "$default_instructions" "$repo_instructions"
   PATH="$TEST_ROOT/fake-bin:$PATH" \
   SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" \
@@ -307,6 +314,8 @@ done
 
 dispatch_and_assert_accessibility "Maintain backend behavior group-name" "Backend service" "FRONTEND" "Internal services" "Maintain deployment automation"
 dispatch_and_assert_accessibility "Maintain backend behavior group-description" "Backend service" "apps" "SvelteKit frontend applications" "Maintain deployment automation"
+dispatch_and_assert_accessibility "Maintain backend behavior default-instructions" "Backend service" "product" "Internal services" "Maintain deployment automation" "Review frontend behavior"
+dispatch_and_assert_accessibility "Maintain backend behavior repo-instructions" "Backend service" "product" "Internal services" "Maintain deployment automation" "Maintain fleet automation" "Review frontend behavior"
 
 write_routing_config "Frontendish visualizer" "product" "Internal service repositories" "Maintain interactional accessibilitytree user-facing outputs"
 PATH="$TEST_ROOT/fake-bin:$PATH" \
