@@ -127,7 +127,7 @@ import json
 import sys
 
 try:
-    items = json.load(sys.stdin)
+    items = json.load(sys.stdin) or []
 except json.JSONDecodeError as exc:
     raise SystemExit(f"td list returned invalid JSON: {exc}")
 
