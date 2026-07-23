@@ -78,34 +78,19 @@ grep -Fq 'Other processes still have' "$TEST_ROOT/blocked-cleanup.log" || {
 }
 tmux display-message -p -t "$holder_pane" '#{pane_id}' >/dev/null
 [[ -d "$worktree" && -d "$TEST_ROOT/fleet/task-123" ]]
-if kill -0 "$worker_pid" 2>/dev/null; then
-  printf 'worker supervisor still running after blocked cleanup\n' >&2
-  exit 1
-fi
-if kill -0 "$agent_pid" 2>/dev/null; then
-  printf 'worker agent still running after blocked cleanup\n' >&2
-  exit 1
-fi
+! kill -0 "$worker_pid" 2>/dev/null
+! kill -0 "$agent_pid" 2>/dev/null
 
 tmux kill-pane -t "$holder_pane"
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" task-123 >/dev/null
 
-if tmux display-message -p -t "$worker_pane" '#{pane_id}' >/dev/null 2>&1; then
-  printf 'worker pane still exists after cleanup\n' >&2
-  exit 1
-fi
+! tmux display-message -p -t "$worker_pane" '#{pane_id}' >/dev/null 2>&1
 tmux has-session -t "$TMUX_SESSION"
 tmux display-message -p -t "$TMUX_SESSION:unrelated" '#{pane_id}' >/dev/null
 kill -0 "$unrelated_pid"
-if kill -0 "$worker_pid" 2>/dev/null; then
-  printf 'worker supervisor still running after cleanup\n' >&2
-  exit 1
-fi
-if kill -0 "$agent_pid" 2>/dev/null; then
-  printf 'worker agent still running after cleanup\n' >&2
-  exit 1
-fi
+! kill -0 "$worker_pid" 2>/dev/null
+! kill -0 "$agent_pid" 2>/dev/null
 [[ ! -e "$worktree" ]]
 [[ ! -e "$TEST_ROOT/fleet/task-123" ]]
 
