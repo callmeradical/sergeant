@@ -994,6 +994,7 @@ case " $* " in
   *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
   *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
+  *" check-ref-format "*) "$REAL_GIT" "$@" ;;
   *" worktree list --porcelain -z "*)
     case "${FAKE_GIT_LIST_MODE:-real}" in
       real) "$REAL_GIT" "$@" ;;
@@ -1011,8 +1012,28 @@ case " $* " in
         printf 'worktree %s/../%s\0HEAD 0000000000000000000000000000000000000000\0detached\0\0' \
           "$FAKE_GIT_WORKTREE" "$(basename "$FAKE_GIT_WORKTREE")"
         ;;
+      existing-alias)
+        printf 'worktree %s\0HEAD 0000000000000000000000000000000000000000\0detached\0\0' \
+          "$FAKE_GIT_ALIAS_WORKTREE"
+        ;;
       malformed)
         printf 'worktree %s-malformed\0unexpected field\0\0' \
+          "$FAKE_GIT_WORKTREE"
+        ;;
+      branch-refs-root)
+        printf 'worktree %s-malformed\0HEAD 0000000000000000000000000000000000000000\0branch refs/\0\0' \
+          "$FAKE_GIT_WORKTREE"
+        ;;
+      branch-double-slash)
+        printf 'worktree %s-malformed\0HEAD 0000000000000000000000000000000000000000\0branch refs//bad\0\0' \
+          "$FAKE_GIT_WORKTREE"
+        ;;
+      branch-trailing-slash)
+        printf 'worktree %s-malformed\0HEAD 0000000000000000000000000000000000000000\0branch refs/heads/bad/\0\0' \
+          "$FAKE_GIT_WORKTREE"
+        ;;
+      branch-invalid)
+        printf 'worktree %s-malformed\0HEAD 0000000000000000000000000000000000000000\0branch refs/heads/bad..name\0\0' \
           "$FAKE_GIT_WORKTREE"
         ;;
       probe-failure) exit 1 ;;
@@ -1056,10 +1077,15 @@ partial_owner_before="$(cksum "$TEST_ROOT/fleet/partial-publication/app/cleanup-
 partial_phase_before="$(cksum "$TEST_ROOT/fleet/partial-publication/app/cleanup-phase")"
 partial_evidence_before="$(cksum \
   "$TEST_ROOT/fleet/partial-publication/app/terminal-evidence"/.sergeant-*)"
-for list_mode in registered duplicate alias malformed probe-failure; do
+ln -s "$TEST_ROOT/partial-publication-sgt-partial-publication-prefix-collision" \
+  "$TEST_ROOT/partial-publication-registered-alias"
+for list_mode in registered duplicate alias existing-alias malformed \
+  branch-refs-root branch-double-slash branch-trailing-slash branch-invalid \
+  probe-failure; do
   if PATH="$TEST_ROOT/fake-bin:$PATH" \
     FAKE_GIT_LIST_MODE="$list_mode" \
     FAKE_GIT_WORKTREE="$TEST_ROOT/partial-publication-sgt-partial-publication" \
+    FAKE_GIT_ALIAS_WORKTREE="$TEST_ROOT/partial-publication-registered-alias" \
     FAKE_GIT_LOG="$TEST_ROOT/partial-publication-removals" \
     FAKE_GIT_STATE="$TEST_ROOT/partial-publication-git-failed" \
     FAKE_MV_STATE="$TEST_ROOT/partial-publication-mv-failed" \
