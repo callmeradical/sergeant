@@ -351,12 +351,6 @@ if [[ -n "$invocation_gate_generation" && "$current_gate_generation" == "$invoca
     rm -f "$WORKTREE/.sergeant-message"
     rmdir "$WORKTREE/.sergeant-review-gates" 2>/dev/null || true
   fi
-elif [[ -z "$invocation_gate_generation" && -z "$current_gate_generation" &&
-        "$current_generation" == "$invocation_generation" && "$current_status" == "blocked" &&
-        "$current_message" == "Review finding routing failed."* ]]; then
-  printf 'in_progress\n' > "$WORKTREE/.sergeant-status.tmp"
-  mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
-  rm -f "$WORKTREE/.sergeant-message"
 fi
 _sgt_response_lock_release || _routing_failure "could not unlock review gate state"
 
