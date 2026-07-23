@@ -61,7 +61,7 @@ Planning artifacts are executable authority, not advisory context. Each downstre
 - **Phase:** a bounded kind of work with its own permitted outputs and workers.
 - **Gate:** a durable waiting point that prevents entry into a downstream phase.
 - **Phase state:** the coordinator-level lifecycle state. It is distinct from a worker's `in_progress`, `needs_input`, `blocked`, `orphaned`, `done`, or `failed` execution status.
-- **Artifact revision:** a manifest of one or more repository-qualified paths, one canonical Git commit per represented repository, and SHA-256 content digests.
+- **Artifact revision:** a manifest of one or more repository-qualified paths, one canonical Git commit per represented repository, and SHA-256 content digests. Its revision digest is the sole entry's digest for a single-entry manifest or the aggregate manifest digest for a multi-entry manifest.
 - **Approval:** a decision recorded by a human's personal invocation of an approval command, authorizing one exact artifact revision to cross one gate. Sergeant enforces an interactive ceremony and records the local operating-system identity, but does not claim to prove that the actor is biologically human.
 - **Skip:** a human-approved declaration that a normally required artifact is unnecessary under the eligibility rules below. A skip crosses a gate but does not fabricate an artifact.
 - **Superseding revision:** a new artifact revision created after an earlier revision was approved. It requires a new approval and invalidates dependent downstream authority.
@@ -287,7 +287,7 @@ Fleet events are the machine-operational record; the lifecycle index is the dura
 20. PRD and specification phase records remain awaiting approval at their gates, advance only through matching approval evidence, and return to active work when a superseding revision invalidates that evidence.
 21. Every artifact approval display uses repository identity, repository-relative path, commit SHA, and content digest as its only source-request references. It may also show privacy-safe downstream effect, skip category and reason, and local operating-system actor evidence. Fixtures containing source request and dispatch brief bodies produce no body text in command output or retained metadata, including redacted body text.
 22. Given a multi-repository artifact revision, every manifest entry names its repository, all entries for one repository use one canonical commit, and the aggregate digest binds the ordered repository-qualified entries.
-23. Every artifact approval creates `refs/sergeant/artifacts/<lifecycle>/<phase>/<digest>` independently in each represented repository at its canonical commit before advancing. Superseding, completing, and cleaning a lifecycle leave every ref unchanged; deletion requires audited interactive human confirmation and is rejected while any lifecycle or downstream work depends on the artifact.
+23. Every artifact approval creates `refs/sergeant/artifacts/<lifecycle>/<phase>/<digest>` independently in each represented repository at its canonical commit before advancing, where `<digest>` is the artifact revision digest. Superseding, completing, and cleaning a lifecycle leave every ref unchanged; deletion requires audited interactive human confirmation and is rejected while any lifecycle uses the artifact as active authority or downstream work still depends on it.
 
 ## Delivery Boundary
 
