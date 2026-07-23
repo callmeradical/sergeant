@@ -212,12 +212,6 @@ sgt-dispatch smith "Add OAuth via Google" \
 sgt-watch <task-id>
 ```
 
-### Remote dispatch (cleanthes)
-
-```bash
-sgt-dispatch smith "Add OAuth" --repos smith,smith-app --remote
-```
-
 ### Full dispatch protocol
 
 Load the **dispatch** skill (`skills/dispatch/SKILL.md`) for the full planning + execution protocol. It covers: decomposing the brief per repo, setting dependency order, monitoring, and reconciling results.

@@ -2,7 +2,7 @@
 # sgt-dispatch — Dispatch subagents across repos in a project
 #
 # Creates an isolated git worktree per repo, writes a mission brief into each,
-# and spawns an agent (tmux window locally, or babydriver remotely).
+# and spawns an agent in a local tmux window.
 #
 # Usage:
 #   sgt-dispatch <project> "<brief>" [options]
@@ -12,7 +12,6 @@
 #   --repos repo1,repo2,...   Repos to dispatch (required unless --td auto-detects)
 #   --td <task-id>            Pull brief and context from a td task
 #   --branch <name>           Branch name for all worktrees (default: derived from brief)
-#   --remote                  Dispatch to cleanthes via babydriver (default: local tmux)
 #   --deps "repo1>repo2,..."  Dependency ordering: repo1 must finish before repo2 starts
 #   --dry-run                 Print what would happen, don't execute
 #
@@ -40,7 +39,6 @@ REPOS_ARG=""
 BRANCH_ARG=""
 DEPS_ARG=""
 TD_TASK_ID=""
-REMOTE=false
 DRY_RUN=false
 
 # Brief is optional positional arg (not present when --td is used)
@@ -54,7 +52,6 @@ while [[ $# -gt 0 ]]; do
     --td)      TD_TASK_ID="$2";  shift 2 ;;
     --branch)  BRANCH_ARG="$2";  shift 2 ;;
     --deps)    DEPS_ARG="$2";    shift 2 ;;
-    --remote)  REMOTE=true;      shift   ;;
     --dry-run) DRY_RUN=true;     shift   ;;
     *) _die "Unknown option: $1" ;;
   esac
@@ -119,7 +116,7 @@ IFS=',' read -ra TARGET_REPOS <<< "$REPOS_ARG"
 
 _require_yq
 _require_git
-$REMOTE || _require_tmux
+_require_tmux
 
 # ── Auto-create td tasks when no --td given ───────────────────────────────────
 # When we weren't given a specific task ID, create td tasks in each target repo
@@ -306,7 +303,6 @@ echo "=== sgt-dispatch: $PROJECT ==="
 echo "brief:   $BRIEF"
 echo "task-id: $TASK_ID"
 echo "branch:  $BRANCH"
-echo "backend: $($REMOTE && echo "babydriver (remote)" || echo "tmux (local)")"
 echo ""
 
 # ── Validate repos ────────────────────────────────────────────────────────────
@@ -352,91 +348,6 @@ _record_dispatch_orphan() {
   "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
 }
 
-_parse_babydriver_start() {
-  local window_name="$1"
-  local payload
-  payload="$(cat)"
-  python3 - "$window_name" "$payload" <<'PY'
-import json
-import sys
-
-window_name = sys.argv[1]
-raw = sys.argv[2]
-payload = json.loads(raw)
-
-def as_dict(value):
-    return value if isinstance(value, dict) else {}
-
-def as_list(value):
-    return value if isinstance(value, list) else []
-
-def as_string(value):
-    return value if isinstance(value, str) else ""
-
-def candidate_window_fields(task):
-    return (
-        as_string(task.get("window")),
-        as_string(task.get("name")),
-        as_string(task.get("slug")),
-    )
-
-def matches_requested_window(requested, task):
-    window, name, slug = candidate_window_fields(task)
-    if window == requested or slug == requested:
-        return True
-    if name == requested:
-        return True
-    if name.startswith(requested + ":"):
-        return True
-    return False
-
-session = ""
-project_dir = ""
-task_id = ""
-matched_window = ""
-matched_name = ""
-matched_slug = ""
-matched = "0"
-
-if isinstance(payload, dict):
-    session_value = payload.get("session")
-    session_obj = as_dict(session_value)
-    session = (
-        as_string(session_value)
-        or as_string(payload.get("session_name"))
-        or as_string(session_obj.get("name"))
-        or as_string(session_obj.get("session"))
-        or as_string(session_obj.get("id"))
-    )
-    project_dir = (
-        as_string(payload.get("project_dir"))
-        or as_string(payload.get("repo_dir"))
-        or as_string(session_obj.get("project_dir"))
-        or as_string(session_obj.get("repo_dir"))
-    )
-    tasks = as_list(payload.get("tasks"))
-    if not tasks:
-        tasks = as_list(session_obj.get("tasks"))
-    for task in tasks:
-        task = as_dict(task)
-        if matches_requested_window(window_name, task):
-            window, name, slug = candidate_window_fields(task)
-            matched = "1"
-            matched_window = window
-            matched_name = name
-            matched_slug = slug
-            task_id = str(task.get("task_id") or task.get("td_task_id") or task.get("id") or "")
-            break
-
-print(session)
-print(window_name)
-print(task_id)
-print(project_dir)
-print(matched)
-print(matched_window or matched_name or matched_slug)
-PY
-}
-
 # ── Capture primary pane (for sgt-notify callbacks) ──────────────────────────
 
 PRIMARY_PANE=""
@@ -479,7 +390,7 @@ fi
 
 # ── Create tmux session (local only) ─────────────────────────────────────────
 
-if ! $REMOTE && ! $DRY_RUN; then
+if ! $DRY_RUN; then
   # Create the shared session if it doesn't exist yet; no-op if already running.
   tmux new-session -d -s "$TMUX_SESSION" -n "sergeant" 2>/dev/null || true
   echo "tmux session: $TMUX_SESSION"
@@ -497,7 +408,6 @@ for rname in "${TARGET_REPOS[@]}"; do
 
   raw_path="$(yq ".repos[$i].path" "$CONFIG_FILE")"
   repo_path="$(_resolve_path "$raw_path")"
-  repo_url="$(yq ".repos[$i].url // \"\"" "$CONFIG_FILE")"
   repo_role="$(yq ".repos[$i].role // \"\"" "$CONFIG_FILE")"
   repo_group="$(yq ".repos[$i].group // \"\"" "$CONFIG_FILE")"
 
@@ -785,108 +695,32 @@ BRIEF_EOF
 
   # ── Spawn agent ─────────────────────────────────────────────────────────────
 
-  if $REMOTE; then
-    SHORT_TASK="${TASK_ID:0:12}"
-    WINDOW_NAME="${SHORT_TASK}-${rname}"
-    AGENT_INIT_MSG="Read the .sergeant-brief.md file and execute the mission."
-    printf '%s\n' "remote-babydriver" > "$repo_task_dir/backend"
-    printf '%s\n' "$WINDOW_NAME" > "$repo_task_dir/window_name"
-    printf '%s\n' "$AGENT_CMD" > "$repo_task_dir/agent"
-    printf '%s\n' "$AGENT_INIT_MSG" > "$repo_task_dir/initial_message"
-    if ! command -v babydriver &>/dev/null; then
-      _record_dispatch_orphan "$repo_task_dir" "$worktree_path" "babydriver not found for remote dispatch"
-      _die "babydriver is required for --remote dispatch"
-    fi
-
-    remote_url="${repo_url:-$(git -C "$repo_path" remote get-url origin 2>/dev/null || echo "")}"
-    if [[ -z "$remote_url" ]]; then
-      _record_dispatch_orphan "$repo_task_dir" "$worktree_path" "no remote URL for $rname; cannot dispatch via babydriver"
-      _die "No remote URL for $rname — cannot dispatch via babydriver"
-    fi
-
-    gh_repo="$(echo "$remote_url" | sed 's|.*github\.com[:/]||;s|\.git$||')"
-    if [[ -z "$gh_repo" ]]; then
-      _record_dispatch_orphan "$repo_task_dir" "$worktree_path" "failed to derive GitHub repo from $remote_url"
-      _die "Could not derive GitHub repo from remote URL for $rname"
-    fi
-
-    brief_oneline="$(echo "$BRIEF" | head -1)"
-    _info "dispatching via babydriver → $gh_repo"
-    if ! start_output="$(babydriver start \
-      --repo "$gh_repo" \
-      --task "${WINDOW_NAME}:${brief_oneline} [sgt:${TASK_ID}] — read .sergeant-brief.md" \
-      --worktree 2>&1)"; then
-      {
-        printf 'babydriver start failed\n'
-        printf '%s\n' "$start_output"
-      } > "$repo_task_dir/diagnostic"
+  # Window name: <short-task-id>/<repo> so multiple tasks don't collide
+  # in the shared "sgt" session. E.g. "feat-abc123/smith-app"
+  SHORT_TASK="${TASK_ID:0:12}"
+  WINDOW_NAME="${SHORT_TASK}/${rname}"
+  _info "spawning tmux window '$WINDOW_NAME' in session $TMUX_SESSION"
+  AGENT_INIT_MSG="Read the .sergeant-brief.md file and execute the mission."
+  printf '%s\n' "$TMUX_SESSION" > "$repo_task_dir/tmux_session"
+  printf '%s\n' "$WINDOW_NAME" > "$repo_task_dir/window_name"
+  printf '%s\n' "$AGENT_CMD" > "$repo_task_dir/agent"
+  printf '%s\n' "$AGENT_INIT_MSG" > "$repo_task_dir/initial_message"
+  printf -v WORKER_RUN_CMD '%q %q %q %q %q' \
+    "$SCRIPT_DIR/sgt-worker" "$repo_task_dir" "$worktree_path" "$AGENT_CMD" "$AGENT_INIT_MSG"
+  if pane_target="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" \
+    -n "$WINDOW_NAME" -c "$worktree_path" "$WORKER_RUN_CMD")"; then
+    if [[ -z "$pane_target" ]]; then
       printf 'orphaned\n' > "$repo_task_dir/status"
+      printf 'tmux launched no worker pane\n' > "$repo_task_dir/diagnostic"
       "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
-      _die "babydriver start failed for $rname"
+      _die "tmux returned no pane for $rname"
     fi
-    printf '%s\n' "$start_output" > "$repo_task_dir/remote-launch.json"
-    remote_launch_fields=()
-    while IFS= read -r parsed_line; do
-      remote_launch_fields+=("$parsed_line")
-    done < <(printf '%s' "$start_output" | _parse_babydriver_start "$WINDOW_NAME" 2>/dev/null || true)
-    if [[ "${#remote_launch_fields[@]}" -lt 6 ]] || [[ -z "${remote_launch_fields[0]:-}" ]]; then
-      {
-        printf 'babydriver start returned no remote session metadata\n'
-        printf '%s\n' "$start_output"
-      } > "$repo_task_dir/diagnostic"
-      printf 'orphaned\n' > "$repo_task_dir/status"
-      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
-      _die "babydriver start returned invalid metadata for $rname"
-    fi
-    if [[ "${remote_launch_fields[4]}" != "1" ]]; then
-      {
-        printf 'requested remote task window %s was not returned by babydriver\n' "$WINDOW_NAME"
-        printf '%s\n' "$start_output"
-      } > "$repo_task_dir/diagnostic"
-      printf 'orphaned\n' > "$repo_task_dir/status"
-      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
-      _die "babydriver start did not return a matching task window for $rname"
-    fi
-    printf '%s\n' "${remote_launch_fields[0]}" > "$repo_task_dir/remote_session"
-    printf '%s\n' "${remote_launch_fields[1]}" > "$repo_task_dir/remote_window"
-    if [[ -n "${remote_launch_fields[2]}" ]]; then
-      printf '%s\n' "${remote_launch_fields[2]}" > "$repo_task_dir/remote_td_task"
-    fi
-    if [[ -n "${remote_launch_fields[3]}" ]]; then
-      printf '%s\n' "${remote_launch_fields[3]}" > "$repo_task_dir/remote_project_dir"
-    fi
-    if [[ -n "${remote_launch_fields[5]}" ]]; then
-      printf '%s\n' "${remote_launch_fields[5]}" > "$repo_task_dir/remote_task_name"
-    fi
+    printf '%s\n' "$pane_target" > "$repo_task_dir/pane"
   else
-    # Window name: <short-task-id>/<repo> so multiple tasks don't collide
-    # in the shared "sgt" session. E.g. "feat-abc123/smith-app"
-    SHORT_TASK="${TASK_ID:0:12}"
-    WINDOW_NAME="${SHORT_TASK}/${rname}"
-    _info "spawning tmux window '$WINDOW_NAME' in session $TMUX_SESSION"
-    AGENT_INIT_MSG="Read the .sergeant-brief.md file and execute the mission."
-    printf '%s\n' "local-tmux" > "$repo_task_dir/backend"
-    printf '%s\n' "$TMUX_SESSION" > "$repo_task_dir/tmux_session"
-    printf '%s\n' "$WINDOW_NAME" > "$repo_task_dir/window_name"
-    printf '%s\n' "$AGENT_CMD" > "$repo_task_dir/agent"
-    printf '%s\n' "$AGENT_INIT_MSG" > "$repo_task_dir/initial_message"
-    printf -v WORKER_RUN_CMD '%q %q %q %q %q' \
-      "$SCRIPT_DIR/sgt-worker" "$repo_task_dir" "$worktree_path" "$AGENT_CMD" "$AGENT_INIT_MSG"
-    if pane_target="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" \
-      -n "$WINDOW_NAME" -c "$worktree_path" "$WORKER_RUN_CMD")"; then
-      if [[ -z "$pane_target" ]]; then
-        printf 'orphaned\n' > "$repo_task_dir/status"
-        printf 'tmux launched no worker pane\n' > "$repo_task_dir/diagnostic"
-        "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
-        _die "tmux returned no pane for $rname"
-      fi
-      printf '%s\n' "$pane_target" > "$repo_task_dir/pane"
-    else
-      printf 'orphaned\n' > "$repo_task_dir/status"
-      printf 'tmux failed to launch worker supervisor\n' > "$repo_task_dir/diagnostic"
-      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
-      _die "tmux failed to launch worker supervisor for $rname"
-    fi
+    printf 'orphaned\n' > "$repo_task_dir/status"
+    printf 'tmux failed to launch worker supervisor\n' > "$repo_task_dir/diagnostic"
+    "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
+    _die "tmux failed to launch worker supervisor for $rname"
   fi
 
   echo ""
@@ -899,9 +733,7 @@ if ! $DRY_RUN; then
   echo ""
   echo "Task ID: $TASK_ID"
   echo "Fleet:   $TASK_DIR"
-  if ! $REMOTE; then
-    echo "Observe: tmux attach -t $TMUX_SESSION  (windows: ${SHORT_TASK:-$TASK_ID}/<repo>)"
-  fi
+  echo "Observe: tmux attach -t $TMUX_SESSION  (windows: ${SHORT_TASK:-$TASK_ID}/<repo>)"
   echo "Watch:   bin/sgt-watch $TASK_ID"
   echo ""
 
@@ -912,7 +744,6 @@ if ! $DRY_RUN; then
 - **Project:** $PROJECT
 - **Branch:** \`$BRANCH\`
 - **Repos:** ${REPOS_ARG:-auto}
-- **Backend:** ${REMOTE:+remote (babydriver)}${REMOTE:-local (tmux)}
 - **td task:** ${TD_TASK_ID:+\`$TD_TASK_ID\`}${TD_TASK_ID:-none}
 - **Brief:** $BRIEF"
 

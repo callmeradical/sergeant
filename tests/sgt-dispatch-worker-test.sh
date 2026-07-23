@@ -25,49 +25,52 @@ case "$1" in
 esac
 EOF
 chmod +x "$TEST_ROOT/fake-bin/tmux"
-cat > "$TEST_ROOT/fake-bin/babydriver" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$BABYDRIVER_LOG"
-case "$1" in
-  start)
-    [[ "${FAIL_START:-0}" == 0 ]] || exit 17
-    task_name=""
-    while [[ $# -gt 0 ]]; do
-      if [[ "$1" == "--task" ]]; then
-        task_name="$2"
-        break
-      fi
-      shift
-    done
-    task_window="${task_name%%:*}"
-    if [[ -n "${BABYDRIVER_START_JSON:-}" ]]; then
-      printf '%s\n' "$BABYDRIVER_START_JSON"
-    elif [[ "${START_VARIANT:-window}" == "name" ]]; then
-      printf '{"session":{"name":"test-drive","tasks":[{"name":"%s","task_id":"td-remote-123"}]},"project_dir":"/remote/project"}\n' "$task_name"
-    else
-      printf '{"session":{"name":"test-drive","tasks":[{"window":"%s","task_id":"td-remote-123"}]},"project_dir":"/remote/project"}\n' "$task_window"
-    fi
-    ;;
-esac
-EOF
-chmod +x "$TEST_ROOT/fake-bin/babydriver"
 cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
 #!/usr/bin/env bash
+
 set -euo pipefail
 
 if [[ "${1:-}" == "--version" ]]; then
-  printf 'td version v0.51.2\n'
-elif [[ "${1:-}" == "create" && "${2:-}" == "--help" ]]; then
-  printf '%s\n' 'Usage: td create TITLE --description TEXT --json --work-dir DIR'
-elif [[ "${1:-}" == "list" ]]; then
-  printf '[]\n'
-elif [[ "${1:-}" == "create" ]]; then
-  printf '{"id":"td-app-1"}\n'
-elif [[ "${1:-}" == "delete" ]]; then
-  printf '{"id":"td-app-1","deleted":true}\n'
-else
-  exit 1
+  printf 'td version v0.1.0\n'
+  exit 0
 fi
+if [[ "${1:-}" == "create" && "${2:-}" == "--help" ]]; then
+  printf '%s\n' '--description --json --work-dir'
+  exit 0
+fi
+
+args=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --work-dir|-w)
+      shift 2
+      ;;
+    --json)
+      shift
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+set -- "${args[@]}"
+case "${1:-}" in
+  list)
+    printf '[]\n'
+    ;;
+  create)
+    printf '{"id":"td-app-1"}\n'
+    ;;
+  delete)
+    printf '{"id":"td-app-1","deleted":true}\n'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
 EOF
 chmod +x "$TEST_ROOT/fake-bin/td"
 git -C "$TEST_ROOT/repo" init -q
@@ -105,50 +108,19 @@ failed_state="$(printf '%s\n' "$TEST_ROOT"/fleet/fail-worker-launch-*/app)"
 [[ "$(cat "$failed_state/status")" == "orphaned" ]]
 grep -Fq 'tmux failed to launch worker supervisor' "$failed_state/diagnostic"
 
-PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/remote-tmux.log" BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
-SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-dispatch" test 'Supervise remote' --repos app --remote >/dev/null
-remote_state="$(printf '%s\n' "$TEST_ROOT"/fleet/supervise-remote-*/app)"
-[[ "$(cat "$remote_state/backend")" == "remote-babydriver" ]]
-[[ "$(cat "$remote_state/remote_session")" == "test-drive" ]]
-[[ "$(cat "$remote_state/remote_window")" == "$(cat "$remote_state/window_name")" ]]
-[[ "$(cat "$remote_state/remote_td_task")" == "td-remote-123" ]]
-[[ "$(cat "$remote_state/remote_project_dir")" == "/remote/project" ]]
-[[ ! -e "$remote_state/pane" ]]
-grep -Fq 'start --repo org/test --task ' "$TEST_ROOT/babydriver.log"
-grep -Fq 'Supervise remote [sgt:' "$TEST_ROOT/babydriver.log"
-
-PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/remote-name-tmux.log" BABYDRIVER_LOG="$TEST_ROOT/babydriver-name.log" \
-START_VARIANT=name SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-dispatch" test 'Name remote worker' --repos app --remote >/dev/null
-name_state="$(printf '%s\n' "$TEST_ROOT"/fleet/name-remote-worker-*/app)"
-name_task="$(sed -n 's/^start --repo org\/test --task \(.*\) --worktree$/\1/p' "$TEST_ROOT/babydriver-name.log")"
-[[ "$(cat "$name_state/remote_session")" == "test-drive" ]]
-[[ "$(cat "$name_state/remote_window")" == "$(cat "$name_state/window_name")" ]]
-[[ "$(cat "$name_state/remote_task_name")" == "$name_task" ]]
-[[ "$(cat "$name_state/remote_td_task")" == "td-remote-123" ]]
-
+removed_flag="--""remote"
+before_count="$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+rm -f "$TEST_ROOT/removed-option-tmux.log"
 set +e
-PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/remote-mismatch-tmux.log" BABYDRIVER_LOG="$TEST_ROOT/babydriver-mismatch.log" \
-BABYDRIVER_START_JSON='{"session":{"name":"test-drive","tasks":[{"window":"other-window","task_id":"td-remote-999"}]},"project_dir":"/remote/project"}' \
-SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-dispatch" test 'Mismatch remote worker' --repos app --remote >/dev/null 2>&1
+output="$(PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/removed-option-tmux.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Removed option' --repos app "$removed_flag" 2>&1)"
 status=$?
 set -e
+after_count="$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
 [[ "$status" -ne 0 ]]
-mismatch_state="$(printf '%s\n' "$TEST_ROOT"/fleet/mismatch-remote-worker-*/app)"
-[[ "$(cat "$mismatch_state/status")" == "orphaned" ]]
-grep -Fq 'requested remote task window' "$mismatch_state/diagnostic"
-
-set +e
-PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/remote-failure-tmux.log" BABYDRIVER_LOG="$TEST_ROOT/babydriver-failure.log" \
-FAIL_START=1 SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-dispatch" test 'Fail remote worker' --repos app --remote >/dev/null 2>&1
-status=$?
-set -e
-[[ "$status" -ne 0 ]]
-remote_failed_state="$(printf '%s\n' "$TEST_ROOT"/fleet/fail-remote-worker-*/app)"
-[[ "$(cat "$remote_failed_state/status")" == "orphaned" ]]
-grep -Fq 'babydriver start failed' "$remote_failed_state/diagnostic"
+[[ "$output" == *"Unknown option"* ]]
+[[ "$before_count" == "$after_count" ]]
+[[ ! -e "$TEST_ROOT/removed-option-tmux.log" ]]
 
 printf 'sgt-dispatch supervisor launch: ok\n'

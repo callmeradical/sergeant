@@ -1,297 +1,57 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
-
 fleet="$TEST_ROOT/fleet"
 task="$fleet/task-1"
-fake_bin="$TEST_ROOT/fake-bin"
-mkdir -p "$task/live" "$task/dead" "$task/remote" "$TEST_ROOT/live-wt" "$TEST_ROOT/dead-wt" "$TEST_ROOT/remote-wt" "$TEST_ROOT/remote-project" "$fake_bin"
-printf 'Brief: watcher lifecycle test\n' > "$task/brief.md"
-printf '%s\n' "$TEST_ROOT/live-wt" > "$task/live/worktree"
-printf '%s\n' "$TEST_ROOT/dead-wt" > "$task/dead/worktree"
-printf '%s\n' "$TEST_ROOT/remote-wt" > "$task/remote/worktree"
-printf 'local-tmux\n' > "$task/live/backend"
-printf 'local-tmux\n' > "$task/dead/backend"
-printf 'remote-babydriver\n' > "$task/remote/backend"
-printf 'remote-drive\n' > "$task/remote/remote_session"
-printf 'remote-window\n' > "$task/remote/remote_window"
-printf '%s\n' "$TEST_ROOT/remote-project" > "$task/remote/remote_project_dir"
-printf '%%live\n' > "$task/live/pane"
-printf '%%dead\n' > "$task/dead/pane"
-printf 'needs_input\n' > "$TEST_ROOT/live-wt/.sergeant-status"
-printf 'blocked\n' > "$TEST_ROOT/dead-wt/.sergeant-status"
-printf 'Question remains active.\n' > "$TEST_ROOT/live-wt/.sergeant-message"
-printf 'Blocker remains active.\n' > "$TEST_ROOT/dead-wt/.sergeant-message"
+worktree="$TEST_ROOT/worktree"
+repo="$task/app"
+fake_bin="$TEST_ROOT/bin"
+mkdir -p "$repo" "$worktree" "$fake_bin"
+printf '%s\n' "$worktree" > "$repo/worktree"
+printf '%%42\n' > "$repo/pane"
+printf 'in_progress\n' > "$repo/status"
 
 cat > "$fake_bin/tmux" <<'EOF'
 #!/usr/bin/env bash
-case "$*" in
-  *%live*) printf '0|sgt-worker:%s/live\n' "$TASK_ROOT" ;;
-  *%dead*) printf '1|sgt-worker:%s/dead\n' "$TASK_ROOT" ;;
-  *) exit 1 ;;
-esac
-EOF
-chmod +x "$fake_bin/tmux"
-cat > "$fake_bin/babydriver" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$BABYDRIVER_LOG"
 case "$1" in
-  status) cat "$BABYDRIVER_STATUS_FILE" ;;
-  logs) cat "$BABYDRIVER_LOGS_FILE" ;;
-  restart)
-    if [[ -n "${REMOTE_RESPONSE_PATH:-}" ]]; then
-      [[ -f "$REMOTE_RESPONSE_PATH" ]] || exit 29
-      [[ "$(cat "$REMOTE_RESPONSE_PATH")" == "${REMOTE_RESPONSE_TEXT:-}" ]] || exit 31
-    fi
+  display-message)
+    [[ "${PANE_DEAD:-0}" == "0" ]] || exit 1
+    printf '0|sgt-worker %s\n' "$EXPECTED_WORKER"
     ;;
 esac
 EOF
-chmod +x "$fake_bin/babydriver"
-cat > "$fake_bin/td" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$TD_LOG"
-EOF
-chmod +x "$fake_bin/td"
-printf 'td-123\n' > "$task/dead/td_task"
-printf 'td-456\n' > "$task/live/td_task"
-printf 'stale live\n' > "$task/live/result"
-printf 'stale dead\n' > "$task/dead/result"
-printf 'stale remote\n' > "$task/remote/result"
-cat > "$TEST_ROOT/remote-status.json" <<'EOF'
-{"tmux_alive":true,"tasks":[{"window":"remote-window","status":"blocked","message":"Remote blocker remains active.","task_id":"td-remote-1"}]}
-EOF
-printf 'remote blocker logs\n' > "$TEST_ROOT/remote-logs.txt"
+chmod +x "$fake_bin/tmux"
 
-PATH="$fake_bin:$PATH" TASK_ROOT="$task" TD_LOG="$TEST_ROOT/td.log" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
-BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TEST_ROOT/remote-logs.txt" \
-  "$ROOT_DIR/bin/sgt-watch" --sync task-1
-[[ "$(cat "$task/live/status")" == "needs_input" ]]
-[[ "$(cat "$task/dead/status")" == "orphaned" ]]
-[[ "$(cat "$TEST_ROOT/dead-wt/.sergeant-status")" == "orphaned" ]]
-[[ "$(cat "$task/remote/status")" == "blocked" ]]
-grep -Fq 'recorded pane %dead is dead or is not the expected worker supervisor' "$task/dead/diagnostic"
-grep -Fq 'handoff td-123' "$TEST_ROOT/td.log"
-cmp "$TEST_ROOT/live-wt/.sergeant-message" "$task/live/message"
-grep -Fq 'Remote blocker remains active.' "$task/remote/message"
-[[ "$(cat "$task/remote/remote_td_task")" == "td-remote-1" ]]
-[[ ! -e "$task/live/result" && ! -e "$task/dead/result" && ! -e "$task/remote/result" ]]
+printf 'needs_input\n' > "$worktree/.sergeant-status"
+printf 'Choose a safe option.\n' > "$worktree/.sergeant-message"
+EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
+[[ "$(cat "$repo/status")" == "needs_input" ]]
+[[ "$(cat "$repo/message")" == "Choose a safe option." ]]
 
-list_output="$(PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-watch" --list)"
-[[ "$list_output" == *'1 needs-input'* ]]
-[[ "$list_output" == *'1 orphaned'* ]]
-[[ "$list_output" == *'1 blocked'* ]]
+printf 'done\n' > "$worktree/.sergeant-status"
+rm -f "$worktree/.sergeant-result"
+EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
+[[ "$(cat "$repo/status")" == "orphaned" ]]
+grep -Fq 'done requires result' "$repo/diagnostic"
 
-watch_output="$TEST_ROOT/watch-output"
-set +e
-PATH="$fake_bin:$PATH" TASK_ROOT="$task" SERGEANT_FLEET="$fleet" SERGEANT_WATCH_INTERVAL=0.01 BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
-BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TEST_ROOT/remote-logs.txt" \
-  "$ROOT_DIR/bin/sgt-watch" task-1 > "$watch_output" 2>&1
-watch_status=$?
-set -e
-[[ "$watch_status" -eq 1 ]]
-grep -Fq 'Question remains active.' "$watch_output"
-grep -Fq 'Remote blocker remains active.' "$watch_output"
-grep -Fq 'recorded pane %dead is dead or is not the expected worker supervisor' "$watch_output"
-grep -Fq 'Fleet finished with failures.' "$watch_output"
+printf 'in_progress\n' > "$worktree/.sergeant-status"
+printf 'in_progress\n' > "$repo/status"
+PANE_DEAD=1 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
+[[ "$(cat "$repo/status")" == "orphaned" ]]
+grep -Fq 'dead or is not the expected worker supervisor' "$repo/diagnostic"
 
-cat > "$TEST_ROOT/remote-status.json" <<'EOF'
-{"tmux_alive":true,"tasks":[{"window":"remote-window","status":"in_review","task_id":"td-remote-1"}]}
-EOF
-PATH="$fake_bin:$PATH" TASK_ROOT="$task" TD_LOG="$TEST_ROOT/td.log" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
-BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TEST_ROOT/remote-logs.txt" \
-  "$ROOT_DIR/bin/sgt-watch" --sync task-1
-[[ "$(cat "$task/remote/status")" == "in_progress" ]]
-[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == "in_progress" ]]
-grep -Fq 'in_review' "$task/remote/message"
-[[ ! -e "$task/remote/result" ]]
+printf 'done\n' > "$worktree/.sergeant-status"
+printf 'https://example.invalid/pr/1\n' > "$worktree/.sergeant-result"
+EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
+[[ "$(cat "$repo/status")" == "done" ]]
+[[ "$(cat "$repo/result")" == "https://example.invalid/pr/1" ]]
+list_output="$(SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --list)"
+grep -Fq '1 done' <<< "$list_output"
+watch_output="$(SERGEANT_WATCH_INTERVAL=0 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT/bin/sgt-watch" task-1)"
+grep -Fq 'All repos done.' <<< "$watch_output"
 
-cat > "$TEST_ROOT/remote-status.json" <<'EOF'
-{"tmux_alive":true,"tasks":[{"name":"remote-window:review follow-up [sgt:task-1]","status":"blocked","message":"Composite remote name still matches.","task_id":"td-remote-2"}]}
-EOF
-printf 'remote-window:review follow-up [sgt:task-1]\n' > "$task/remote/remote_task_name"
-PATH="$fake_bin:$PATH" TASK_ROOT="$task" TD_LOG="$TEST_ROOT/td.log" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
-BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TEST_ROOT/remote-logs.txt" \
-  "$ROOT_DIR/bin/sgt-watch" --sync task-1
-[[ "$(cat "$task/remote/status")" == "blocked" ]]
-[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == "blocked" ]]
-grep -Fq 'Composite remote name still matches.' "$task/remote/message"
-[[ "$(cat "$task/remote/remote_td_task")" == "td-remote-2" ]]
-grep -Fq 'logs remote-drive --window remote-window:review follow-up [sgt:task-1] -n 40' "$TEST_ROOT/babydriver.log"
-
-cat > "$TEST_ROOT/remote-status.json" <<'EOF'
-{"tmux_alive":false,"tasks":[{"name":"remote-window:review follow-up [sgt:task-1]","status":"blocked","task_id":"td-remote-1"}]}
-EOF
-PATH="$fake_bin:$PATH" TASK_ROOT="$task" TD_LOG="$TEST_ROOT/td.log" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
-BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TEST_ROOT/remote-logs.txt" \
-  "$ROOT_DIR/bin/sgt-watch" --sync task-1
-[[ "$(cat "$task/remote/status")" == "orphaned" ]]
-grep -Fq 'remote worker session is not alive' "$task/remote/diagnostic"
-grep -Fq 'remote blocker logs' "$task/remote/diagnostic"
-grep -Fq 'logs remote-drive --window remote-window:review follow-up [sgt:task-1] -n 40' "$TEST_ROOT/babydriver.log"
-grep -Fq 'handoff td-remote-1' "$TEST_ROOT/td.log"
-
-printf 'orphaned\n' > "$task/remote/status"
-printf 'orphaned\n' > "$TEST_ROOT/remote-wt/.sergeant-status"
-printf 'preserved remote answer\n' > "$task/remote/response"
-printf 'preserved remote answer\n' > "$TEST_ROOT/remote-wt/.sergeant-response"
-printf '0123456789abcdef0123456789abcdef\n' > "$TEST_ROOT/remote-wt/.sergeant-response-id"
-printf '0123456789abcdef0123456789abcdef\n' > "$task/remote/response_id"
-printf '0123456789abcdef0123456789abcdef\n' > "$task/remote/remote_response_pending_id"
-printf 'retryable\n' > "$task/remote/remote_response_pending_state"
-printf 'blocked\n' > "$task/remote/remote_response_pending_checkpoint_status"
-printf 'Remote blocker remains active after failed restart.\n' > "$task/remote/remote_response_pending_checkpoint_message"
-printf '1\n' > "$task/remote/remote_response_pending_checkpoint_generation"
-printf '1\n' > "$TEST_ROOT/remote-project/.sergeant-gate-generation"
-printf 'babydriver restart failed for remote-drive/remote-window:review follow-up [sgt:task-1]\nexit 23\n' > "$task/remote/diagnostic"
-cat > "$TEST_ROOT/remote-status.json" <<'EOF'
-{"tmux_alive":true,"tasks":[{"name":"remote-window:review follow-up [sgt:task-1]","status":"blocked","message":"Remote blocker remains active after failed restart.","task_id":"td-remote-1"}]}
-EOF
-PATH="$fake_bin:$PATH" TASK_ROOT="$task" TD_LOG="$TEST_ROOT/td.log" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
-BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TEST_ROOT/remote-logs.txt" \
-  "$ROOT_DIR/bin/sgt-watch" --sync task-1
-[[ "$(cat "$task/remote/status")" == "orphaned" ]]
-[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == "orphaned" ]]
-[[ "$(cat "$task/remote/response")" == 'preserved remote answer' ]]
-[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-response")" == 'preserved remote answer' ]]
-grep -Fq 'babydriver restart failed for remote-drive/remote-window:review follow-up [sgt:task-1]' "$task/remote/diagnostic"
-grep -Fq 'Remote blocker remains active after failed restart.' "$task/remote/message"
-
-PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/remote-retry.log" \
-TD_LOG="$TEST_ROOT/remote-retry-td.log" REMOTE_RESPONSE_PATH="$TEST_ROOT/remote-project/.sergeant-response" \
-REMOTE_RESPONSE_TEXT='preserved remote answer' \
-  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'preserved remote answer' >/dev/null 2>"$TEST_ROOT/remote-retry.err"
-[[ "$(cat "$task/remote/status")" == "in_progress" ]]
-[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == "in_progress" ]]
-[[ "$(cat "$task/remote/response_id")" == '0123456789abcdef0123456789abcdef' ]]
-[[ "$(cat "$task/remote/remote_response_pending_id")" == '0123456789abcdef0123456789abcdef' ]]
-[[ "$(cat "$task/remote/remote_response_pending_state")" == 'awaiting_consumption' ]]
-[[ "$(cat "$task/remote/response")" == 'preserved remote answer' ]]
-[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-response")" == 'preserved remote answer' ]]
-[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-response-id")" == '0123456789abcdef0123456789abcdef' ]]
-[[ "$(cat "$TEST_ROOT/remote-project/.sergeant-response")" == 'preserved remote answer' ]]
-[[ "$(cat "$TEST_ROOT/remote-project/.sergeant-response-id")" == '0123456789abcdef0123456789abcdef' ]]
-[[ ! -s "$TEST_ROOT/remote-retry.err" ]]
-if [[ -e "$TEST_ROOT/remote-retry-td.log" ]]; then
-  printf 'watch-preserved retry should not log a duplicate td decision\n' >&2
-  exit 1
-fi
-
-printf 'blocked\n' > "$task/remote/status"
-printf 'blocked\n' > "$TEST_ROOT/remote-wt/.sergeant-status"
-cat > "$TEST_ROOT/remote-status.json" <<'EOF'
-{"tmux_alive":true,"tasks":[{"name":"remote-window:review follow-up [sgt:task-1]","status":"blocked","message":"Stale blocker after restart.","task_id":"td-remote-1"}]}
-EOF
-PATH="$fake_bin:$PATH" TASK_ROOT="$task" TD_LOG="$TEST_ROOT/td.log" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
-BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TEST_ROOT/remote-logs.txt" \
-  "$ROOT_DIR/bin/sgt-watch" --sync task-1
-[[ "$(cat "$task/remote/status")" == "in_progress" ]]
-[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == "in_progress" ]]
-[[ ! -e "$task/remote/message" && ! -e "$TEST_ROOT/remote-wt/.sergeant-message" ]]
-[[ "$(cat "$task/remote/remote_response_pending_state")" == 'awaiting_consumption' ]]
-
-set +e
-PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/remote-stale-duplicate.log" \
-TD_LOG="$TEST_ROOT/remote-stale-duplicate-td.log" REMOTE_RESPONSE_PATH="$TEST_ROOT/remote-project/.sergeant-response" \
-REMOTE_RESPONSE_TEXT='should not replace pending answer' \
-  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'should not replace pending answer' >/dev/null 2>&1
-stale_duplicate_status=$?
-set -e
-[[ "$stale_duplicate_status" -ne 0 ]]
-[[ "$(cat "$TEST_ROOT/remote-project/.sergeant-response")" == 'preserved remote answer' ]]
-if [[ -e "$TEST_ROOT/remote-stale-duplicate-td.log" ]]; then
-  printf 'stale duplicate should not log a new td decision\n' >&2
-  exit 1
-fi
-
-rm -f "$TEST_ROOT/remote-project/.sergeant-response" "$TEST_ROOT/remote-project/.sergeant-response-id"
-cat > "$TEST_ROOT/remote-status.json" <<'EOF'
-{"tmux_alive":true,"tasks":[{"name":"remote-window:review follow-up [sgt:task-1]","status":"blocked","message":"Remote blocker remains active after failed restart.","task_id":"td-remote-1"}]}
-EOF
-PATH="$fake_bin:$PATH" TASK_ROOT="$task" TD_LOG="$TEST_ROOT/td.log" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
-BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TEST_ROOT/remote-logs.txt" \
-  "$ROOT_DIR/bin/sgt-watch" --sync task-1
-[[ "$(cat "$task/remote/status")" == "in_progress" ]]
-[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == "in_progress" ]]
-[[ "$(cat "$task/remote/remote_response_pending_state")" == 'awaiting_status_transition' ]]
-[[ "$(cat "$task/remote/response")" == 'preserved remote answer' ]]
-[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-response")" == 'preserved remote answer' ]]
-
-set +e
-PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/remote-gap-duplicate.log" \
-TD_LOG="$TEST_ROOT/remote-gap-duplicate-td.log" REMOTE_RESPONSE_PATH="$TEST_ROOT/remote-project/.sergeant-response" \
-REMOTE_RESPONSE_TEXT='gap duplicate response' \
-  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'gap duplicate response' >/dev/null 2>&1
-gap_duplicate_status=$?
-set -e
-[[ "$gap_duplicate_status" -ne 0 ]]
-if [[ -e "$TEST_ROOT/remote-gap-duplicate-td.log" ]]; then
-  printf 'gap duplicate should not log a new td decision\n' >&2
-  exit 1
-fi
-
-printf '0123456789abcdef0123456789abcdef\n' > "$TEST_ROOT/remote-project/.sergeant-response-ack"
-cat > "$TEST_ROOT/remote-status.json" <<'EOF'
-{"tmux_alive":true,"tasks":[{"name":"remote-window:review follow-up [sgt:task-1]","status":"blocked","message":"Remote blocker remains active after failed restart.","task_id":"td-remote-1"}]}
-EOF
-PATH="$fake_bin:$PATH" TASK_ROOT="$task" TD_LOG="$TEST_ROOT/td.log" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
-BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TEST_ROOT/remote-logs.txt" \
-  "$ROOT_DIR/bin/sgt-watch" --sync task-1
-[[ "$(cat "$task/remote/status")" == "in_progress" ]]
-[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == "in_progress" ]]
-[[ "$(cat "$task/remote/remote_response_pending_state")" == 'awaiting_status_transition' ]]
-
-printf '2\n' > "$TEST_ROOT/remote-project/.sergeant-gate-generation"
-PATH="$fake_bin:$PATH" TASK_ROOT="$task" TD_LOG="$TEST_ROOT/td.log" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
-BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TEST_ROOT/remote-logs.txt" \
-  "$ROOT_DIR/bin/sgt-watch" --sync task-1
-[[ "$(cat "$task/remote/status")" == "blocked" ]]
-[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == "blocked" ]]
-[[ ! -e "$task/remote/response" && ! -e "$TEST_ROOT/remote-wt/.sergeant-response" ]]
-[[ ! -e "$task/remote/remote_response_pending_id" && ! -e "$task/remote/remote_response_pending_state" ]]
-[[ ! -e "$TEST_ROOT/remote-project/.sergeant-response-ack" && ! -e "$TEST_ROOT/remote-project/.sergeant-response-id" ]]
-grep -Fq 'Remote blocker remains active after failed restart.' "$task/remote/message"
-
-PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/remote-next-gate.log" \
-TD_LOG="$TEST_ROOT/remote-next-gate-td.log" REMOTE_RESPONSE_PATH="$TEST_ROOT/remote-project/.sergeant-response" \
-REMOTE_RESPONSE_TEXT='answer after consumption' \
-  "$ROOT_DIR/bin/sgt-respond" task-1 remote 'answer after consumption' >/dev/null
-[[ "$(cat "$task/remote/status")" == "in_progress" ]]
-[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == "in_progress" ]]
-[[ "$(cat "$TEST_ROOT/remote-project/.sergeant-response")" == 'answer after consumption' ]]
-[[ "$(cat "$task/remote/remote_response_pending_state")" == 'awaiting_consumption' ]]
-grep -Fq 'log td-remote-1' "$TEST_ROOT/remote-next-gate-td.log"
-
-printf 'done\n' > "$TEST_ROOT/live-wt/.sergeant-status"
-rm -f "$TEST_ROOT/live-wt/.sergeant-result"
-printf 'stale terminal result\n' > "$task/live/result"
-PATH="$fake_bin:$PATH" TASK_ROOT="$task" TD_LOG="$TEST_ROOT/td.log" SERGEANT_FLEET="$fleet" BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
-BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TEST_ROOT/remote-logs.txt" \
-  "$ROOT_DIR/bin/sgt-watch" --sync task-1
-[[ "$(cat "$task/live/status")" == "orphaned" ]]
-grep -Fq 'terminal status done requires result' "$task/live/diagnostic"
-grep -Fq 'handoff td-456' "$TEST_ROOT/td.log"
-[[ ! -e "$task/live/result" ]]
-
-printf 'done\n' > "$TEST_ROOT/live-wt/.sergeant-status"
-printf 'live result\n' > "$TEST_ROOT/live-wt/.sergeant-result"
-printf 'done\n' > "$TEST_ROOT/dead-wt/.sergeant-status"
-printf 'dead result\n' > "$TEST_ROOT/dead-wt/.sergeant-result"
-cat > "$TEST_ROOT/remote-status.json" <<'EOF'
-{"tmux_alive":true,"tasks":[{"window":"remote-window","status":"failed","error":"fixture failure"}]}
-EOF
-set +e
-terminal_output="$(PATH="$fake_bin:$PATH" TASK_ROOT="$task" SERGEANT_FLEET="$fleet" SERGEANT_WATCH_INTERVAL=0.01 \
-  BABYDRIVER_LOG="$TEST_ROOT/babydriver.log" \
-  BABYDRIVER_STATUS_FILE="$TEST_ROOT/remote-status.json" BABYDRIVER_LOGS_FILE="$TEST_ROOT/remote-logs.txt" \
-  "$ROOT_DIR/bin/sgt-watch" task-1 2>&1)"
-terminal_status=$?
-set -e
-[[ "$terminal_status" -eq 1 ]]
-[[ "$terminal_output" == *'Fleet finished with failures.'* ]]
-[[ "$(cat "$TEST_ROOT/remote-wt/.sergeant-status")" == 'failed: remote execution failed' ]]
-
-printf 'sgt-watch detects dead workers: ok\n'
+printf 'sgt-watch local fleet sync: ok\n'

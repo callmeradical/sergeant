@@ -111,7 +111,6 @@ echo ""
 echo "Optional:"
 _check "treehouse"  treehouse  optional  "https://github.com/kunchenguid/treehouse"
 _check "graphify"   graphify   optional  "https://github.com/kunchenguid/graphify"
-_check "babydriver" babydriver optional  "remote dispatch to cleanthes"
 _check "mise"       mise       optional  "brew install mise"
 
 echo ""
