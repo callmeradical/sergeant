@@ -217,7 +217,6 @@ wait "$first_router_pid"
 wait "$second_router_pid"
 grep -Fq 'Review axis: standards' "$WORKTREE/.sergeant-message"
 grep -Fq 'Review axis: spec' "$WORKTREE/.sergeant-message"
-
 PRESERVE_FLEET=1 ROUTER_AXIS=spec run_router "$TEST_ROOT/clean.json"
 [[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
 grep -Fq 'Review axis: standards' "$WORKTREE/.sergeant-message"
@@ -225,6 +224,31 @@ PRESERVE_FLEET=1 run_router "$TEST_ROOT/clean.json"
 [[ "$status" -eq 0 && "$output" == *'no actionable findings; continue remediation workflow'* ]]
 [[ "$(cat "$WORKTREE/.sergeant-status")" == 'in_progress' && ! -e "$WORKTREE/.sergeant-message" ]]
 [[ ! -s "$TEST_ROOT/td.log" && ! -s "$TEST_ROOT/notify.log" ]]
+
+rm -rf "$WORKTREE/.sergeant-review-gates"
+rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation,review-gates.lock}
+rm -f "$TEST_ROOT/gate-read-started" "$TEST_ROOT/gate-read-release"
+GATE_READ_STARTED="$TEST_ROOT/gate-read-started" GATE_READ_RELEASE="$TEST_ROOT/gate-read-release" \
+  PRESERVE_FLEET=1 BLOCK_GATE_READ=1 run_router "$TEST_ROOT/findings.json" &
+blocking_router_pid=$!
+for _ in {1..200}; do
+  [[ -e "$TEST_ROOT/gate-read-started" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/gate-read-started" ]]
+PRESERVE_FLEET=1 run_router "$TEST_ROOT/clean.json" &
+clean_router_pid=$!
+for _ in {1..200}; do
+  lock_waiters=("$WORKTREE"/..sergeant-review-gates.lock.*)
+  [[ -e "${lock_waiters[0]}" ]] && break
+  sleep 0.01
+done
+[[ -e "${lock_waiters[0]}" ]]
+touch "$TEST_ROOT/gate-read-release"
+wait "$blocking_router_pid"
+wait "$clean_router_pid"
+[[ "$(cat "$WORKTREE/.sergeant-status")" == 'in_progress' ]]
+[[ ! -e "$WORKTREE/.sergeant-message" ]]
 
 run_router "$TEST_ROOT/clean.json"
 set +e
