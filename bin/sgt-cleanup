@@ -437,6 +437,12 @@ _require_terminal_repos() {
     if [[ -n "$worktree" && -d "$worktree" ]]; then
       if [[ "$cleanup_phase" == $'removing\n'"$worktree" || \
         "$cleanup_phase" == "$removing_phase" ]]; then
+        [[ "$cleanup_phase" == "$removing_phase" ]] || \
+          _die "Retry owner identity is missing: $repo_name"
+        [[ "$retry_type" == "$wt_type" ]] || \
+          _die "Retry worktree type changed: $repo_name"
+        _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+          "$retry_type" "$retry_root"
         _restore_worker_evidence "$repo_dir" "$worktree" || \
           _die "$repo_name: evidence restore failed during removing-state replay; replay aborted"
       fi
@@ -949,6 +955,8 @@ for repo_dir in "$TASK_DIR"/*/; do
   if [[ "$retry_phase" == "removing" ]]; then
     retry_type="$(sed -n '3p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+    [[ "$retry_type" == "$wt_type" ]] || \
+      _die "Retry worktree type changed: $repo_name"
     _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
       "$retry_type" "$retry_root"
     retry_root="$VALIDATED_RETRY_ROOT"

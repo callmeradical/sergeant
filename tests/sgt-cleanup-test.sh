@@ -701,6 +701,10 @@ present_owner_before="$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-owner"
 present_phase_before="$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase")"
 present_evidence_before="$(cksum \
   "$TEST_ROOT/fleet/present-retry/app/terminal-evidence"/.sergeant-*)"
+printf 'current worktree result\n' > \
+  "$TEST_ROOT/present-retry-sgt-present-retry/.sergeant-result"
+present_worktree_evidence_before="$(cksum \
+  "$TEST_ROOT/present-retry-sgt-present-retry"/.sergeant-*)"
 git -C "$TEST_ROOT/present-retry" config sergeant.fixture changed
 if PATH="$TEST_ROOT/fake-bin:$PATH" \
   FAKE_GIT_LOG="$TEST_ROOT/present-retry-removals" \
@@ -717,6 +721,8 @@ fi
   "$present_phase_before" ]]
 [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/terminal-evidence"/.sergeant-*)" == \
   "$present_evidence_before" ]]
+[[ "$(cksum "$TEST_ROOT/present-retry-sgt-present-retry"/.sergeant-*)" == \
+  "$present_worktree_evidence_before" ]]
 git -C "$TEST_ROOT/present-retry" config --unset sergeant.fixture
 init_test_repo "$TEST_ROOT/present-retry-other"
 cat > "$TEST_ROOT/config/present-retry.yaml" <<EOF
@@ -740,7 +746,28 @@ fi
   "$present_phase_before" ]]
 [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/terminal-evidence"/.sergeant-*)" == \
   "$present_evidence_before" ]]
+[[ "$(cksum "$TEST_ROOT/present-retry-sgt-present-retry"/.sergeant-*)" == \
+  "$present_worktree_evidence_before" ]]
 record_retry_owner present-retry app "$TEST_ROOT/present-retry"
+printf 'other\n' > "$TEST_ROOT/fleet/present-retry/app/wt_type"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/present-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" present-retry >/dev/null 2>&1; then
+  printf 'cleanup accepted removal-type drift on present-worktree retry\n' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 1 ]]
+[[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-owner")" == \
+  "$present_owner_before" ]]
+[[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase")" == \
+  "$present_phase_before" ]]
+[[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/terminal-evidence"/.sergeant-*)" == \
+  "$present_evidence_before" ]]
+[[ "$(cksum "$TEST_ROOT/present-retry-sgt-present-retry"/.sergeant-*)" == \
+  "$present_worktree_evidence_before" ]]
+printf 'git\n' > "$TEST_ROOT/fleet/present-retry/app/wt_type"
 touch "$TEST_ROOT/present-retry-remove-allowed"
 PATH="$TEST_ROOT/fake-bin:$PATH" \
   FAKE_GIT_ALLOW="$TEST_ROOT/present-retry-remove-allowed" \
