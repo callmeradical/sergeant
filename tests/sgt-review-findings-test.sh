@@ -88,7 +88,7 @@ run_router() {
     NOTIFY_LOG="$TEST_ROOT/notify.log" MV_LOG="$TEST_ROOT/mv.log" ROUTER_WORKTREE="$WORKTREE" SERGEANT_CONFIG="$TEST_ROOT/config" \
     TD_LIST_RESULT="${TD_LIST_RESULT:-[]}" TD_FAIL_CREATE="${TD_FAIL_CREATE:-0}" \
     "$INSTALLED_BIN/sgt-review-findings" test app \
-      --input "$1" --axis standards --source code-review \
+      --input "$1" --axis "${ROUTER_AXIS:-standards}" --source code-review \
       --branch fix/review --head-sha abc1234 --parent-task td-parent \
       --task-id "${ROUTER_TASK_ID:-fleet-1}" --worktree "$WORKTREE" 2>&1)"
   status=$?
@@ -199,6 +199,7 @@ update_line="$(grep -nF 'update td-deferred' "$TEST_ROOT/td.log" | cut -d: -f1)"
 
 ROUTER_TASK_ID='fleet/invalid' run_router "$TEST_ROOT/findings.json"
 [[ "$status" -eq 2 && "$output" == *'invalid fleet task'* ]]
+[[ ! -s "$TEST_ROOT/notify.log" ]]
 if grep -Eq '^(create|update) ' "$TEST_ROOT/td.log"; then
   printf 'malformed fleet task entered td metadata\n' >&2
   exit 1
@@ -219,8 +220,11 @@ grep -Fq 'Review finding routing failed' "$WORKTREE/.sergeant-message"
 
 printf '{"findings":[]}\n' > "$TEST_ROOT/clean.json"
 printf 'blocked\n' > "$WORKTREE/.sergeant-status"
-printf 'Independent review requires remediation. TD tasks: td-old.\n' > "$WORKTREE/.sergeant-message"
+printf 'Independent review requires remediation. Review axis: standards. Review source: code-review. TD tasks: td-old.\n' > "$WORKTREE/.sergeant-message"
 printf '4\n' > "$WORKTREE/.sergeant-gate-generation"
+PRESERVE_FLEET=1 ROUTER_AXIS=spec run_router "$TEST_ROOT/clean.json"
+[[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
+grep -Fq 'Review axis: standards' "$WORKTREE/.sergeant-message"
 PRESERVE_FLEET=1 run_router "$TEST_ROOT/clean.json"
 [[ "$status" -eq 0 && "$output" == *'no actionable findings; continue remediation workflow'* ]]
 [[ "$(cat "$WORKTREE/.sergeant-status")" == 'in_progress' && ! -e "$WORKTREE/.sergeant-message" ]]

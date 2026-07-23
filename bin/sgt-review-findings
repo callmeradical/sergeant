@@ -40,6 +40,10 @@ WORKTREE="${WORKTREE:-$PWD}"
 TASK_ID="${TASK_ID:-unknown}"
 [[ -d "$WORKTREE" ]] || _die "Worktree unavailable: $WORKTREE"
 
+_valid_fleet_task_id() {
+  [[ ${#1} -le 31 && "$1" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]
+}
+
 _publish_blocked() {
   local message="$1" notice="$2" generation current notify_status
   current="$( { tr -d '\n' < "$WORKTREE/.sergeant-gate-generation"; } 2>/dev/null || true)"
@@ -51,7 +55,9 @@ _publish_blocked() {
   mv "$WORKTREE/.sergeant-gate-generation.tmp" "$WORKTREE/.sergeant-gate-generation"
   mv "$WORKTREE/.sergeant-message.tmp" "$WORKTREE/.sergeant-message"
   notify_status=0
-  "$SCRIPT_DIR/sgt-notify" "$TASK_ID" "blocked [$REPO]: $notice" >/dev/null 2>&1 || notify_status=$?
+  if _valid_fleet_task_id "$TASK_ID"; then
+    "$SCRIPT_DIR/sgt-notify" "$TASK_ID" "blocked [$REPO]: $notice" >/dev/null 2>&1 || notify_status=$?
+  fi
   mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
   if (( notify_status != 0 )); then
     printf 'ERROR: sgt-notify failed while publishing blocked review findings\n' >&2
@@ -85,7 +91,7 @@ _axis_re='^(standards|spec|accessibility)$'
 [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || _routing_failure "invalid branch"
 [[ "$HEAD_SHA" =~ ^[A-Fa-f0-9]{7,64}$ ]] || _routing_failure "invalid head SHA"
 [[ "$PARENT_TASK" =~ ^[A-Za-z0-9._-]+$ ]] || _routing_failure "invalid parent task"
-[[ "$TASK_ID" =~ ^[A-Za-z0-9._-]+$ ]] || _routing_failure "invalid fleet task"
+_valid_fleet_task_id "$TASK_ID" || _routing_failure "invalid fleet task"
 
 CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
 [[ -f "$CONFIG_FILE" ]] || _routing_failure "project not found"
@@ -277,14 +283,16 @@ if (( ${#blocking_tasks[@]} > 0 )); then
   task_list="$(IFS=', '; printf '%s' "${blocking_tasks[*]}")"
   remediation_list="$(IFS='; '; printf '%s' "${blocking_recommendations[*]}")"
   _publish_blocked \
-    "Independent review requires remediation. TD tasks: $task_list. Recommended remediation: $remediation_list" \
+    "Independent review requires remediation. Review axis: $AXIS. Review source: $SOURCE. TD tasks: $task_list. Recommended remediation: $remediation_list" \
     "independent review requires remediation; td tasks: $task_list"
   exit 2
 fi
 
 current_status="$( { tr -d '\n' < "$WORKTREE/.sergeant-status"; } 2>/dev/null || true)"
 current_message="$(cat "$WORKTREE/.sergeant-message" 2>/dev/null || true)"
-if [[ "$current_status" == "blocked" ]] && [[ "$current_message" == "Independent review requires remediation."* || "$current_message" == "Review finding routing failed."* ]]; then
+if [[ "$current_status" == "blocked" ]] &&
+   [[ "$current_message" == "Independent review requires remediation."* ]] &&
+   [[ "$current_message" == *"Review axis: $AXIS. Review source: $SOURCE."* ]]; then
   printf 'in_progress\n' > "$WORKTREE/.sergeant-status.tmp"
   mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
   rm -f "$WORKTREE/.sergeant-message"
