@@ -595,7 +595,7 @@ case " $* " in
     worktree="${!#}"
     printf '%s\n' "$worktree" >> "$FAKE_GIT_LOG"
     if [[ "$worktree" == *removal-success* ]]; then
-      rm -rf "$worktree"
+      "$REAL_GIT" "$@"
     elif [[ -e "$FAKE_GIT_STATE" ]]; then
       rm -rf "$worktree"
     else
@@ -884,11 +884,12 @@ case " $* " in
   *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
   *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
+  *" check-ref-format "*|*" worktree list --porcelain -z "*) "$REAL_GIT" "$@" ;;
   *" worktree remove "*)
     printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
     if [[ -e "${FAKE_GIT_ALLOW:-}" ]]; then
-      rm -rf "${!#}"
-      exit 0
+      "$REAL_GIT" "$@"
+      exit $?
     fi
     exit 1
     ;;
@@ -1684,14 +1685,21 @@ fi
 "$REAL_MV" "$@"
 EOF
 chmod +x "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/mv"
-if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
+set +e
+marker_initial_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
   FAKE_GIT_STATE="$TEST_ROOT/marker-git-removed" \
   FAKE_GIT_LOG="$TEST_ROOT/marker-removals" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" marker-publication >/dev/null 2>&1; then
+  "$ROOT_DIR/bin/sgt-cleanup" marker-publication 2>&1)"
+marker_initial_status=$?
+set -e
+if [[ "$marker_initial_status" -eq 0 ]]; then
   printf 'cleanup succeeded after reconciled phase publication failed\n' >&2
   exit 1
 fi
+[[ "$marker_initial_output" == \
+  *'Cannot prove completed git worktree removal:'* ]]
 [[ ! -e "$TEST_ROOT/marker-sgt-marker-publication" ]]
 [[ "$(sed -n '1p' "$TEST_ROOT/fleet/marker-publication/app/cleanup-phase")" == \
   'removed' ]]
@@ -1721,6 +1729,7 @@ marker_phase_before="$(cksum \
   "$TEST_ROOT/fleet/marker-publication/app/cleanup-phase")"
 marker_evidence_before="$(cksum \
   "$TEST_ROOT/fleet/marker-publication/app/terminal-evidence"/.sergeant-*)"
+"$REAL_GIT" -C "$TEST_ROOT/marker" worktree prune --expire now
 set +e
 marker_rollback_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
   SGT_CLEANUP_FAIL_POINT='phase-publish-reconciled-absent,phase-rollback-reconciled-absent' \
@@ -1769,7 +1778,8 @@ case " $* " in
   *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
   *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
-  *" worktree remove "*) rm -rf "${!#}" ;;
+  *" check-ref-format "*|*" worktree list --porcelain -z "*) "$REAL_GIT" "$@" ;;
+  *" worktree remove "*) "$REAL_GIT" "$@" ;;
   *) exit 1 ;;
 esac
 EOF

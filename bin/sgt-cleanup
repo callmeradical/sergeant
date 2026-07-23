@@ -1442,6 +1442,15 @@ _git_worktree_removal_proven() {
     "$record_count" -gt 0 && "$target_count" -eq 0 ]]
 }
 
+_require_completed_removal_proof() {
+  local retry_root="$2" retry_type="$1" worktree="$3"
+
+  [[ "$retry_type" != "treehouse" ]] || \
+    _die "Cannot prove completed treehouse removal: $worktree"
+  _git_worktree_removal_proven "$retry_root" "$worktree" || \
+    _die "Cannot prove completed git worktree removal: $worktree"
+}
+
 _require_terminal_repos
 _require_clean_worktrees
 
@@ -1576,10 +1585,7 @@ for repo_dir in "$TASK_DIR"/*/; do
         "$retry_type" "$retry_root"
       retry_root="$VALIDATED_RETRY_ROOT"
       if [[ "$retry_phase" == "removed" ]]; then
-        [[ "$retry_type" != "treehouse" ]] || \
-          _die "Cannot prove completed treehouse removal: $worktree"
-        _git_worktree_removal_proven "$retry_root" "$worktree" || \
-          _die "Cannot prove completed git worktree removal: $worktree"
+        _require_completed_removal_proof "$retry_type" "$retry_root" "$worktree"
         _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
           _die "Failed to reconcile completed worktree removal: $repo_name"
         echo "  worktree removal already completed: $worktree"
@@ -1713,6 +1719,7 @@ for repo_dir in "$TASK_DIR"/*/; do
     "completed live evidence backup" live-backup-cleanup
   _record_cleanup_phase "$repo_dir" removed "$worktree" "$wt_type" "$retry_root" || \
     _die "Failed to publish completed worktree removal: $repo_name"
+  _require_completed_removal_proof "$wt_type" "$retry_root" "$worktree"
   _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
     _die "Failed to publish reconciled cleanup phase: $repo_name"
 
