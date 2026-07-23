@@ -441,6 +441,47 @@ EOF
     "$first_pass_worktree_before" ]]
   [[ -d "$TEST_ROOT/first-pass-policy-sgt-first-pass-policy" ]]
 done
+
+mkdir -p "$TEST_ROOT/fleet/first-pass-order/aaa" \
+  "$TEST_ROOT/fleet/first-pass-order/zzz"
+printf 'Project: first-pass-order\n' > "$TEST_ROOT/fleet/first-pass-order/brief.md"
+cat > "$TEST_ROOT/config/first-pass-order.yaml" <<EOF
+name: first-pass-order
+repos:
+  - name: aaa
+    path: $TEST_ROOT/first-pass-order-aaa
+  - name: renamed-zzz
+    path: $TEST_ROOT/first-pass-order-zzz
+EOF
+for ordered_repo in aaa zzz; do
+  init_test_repo "$TEST_ROOT/first-pass-order-$ordered_repo"
+  git -C "$TEST_ROOT/first-pass-order-$ordered_repo" worktree add -q \
+    -b "first-pass-order-$ordered_repo-worker" \
+    "$TEST_ROOT/first-pass-order-$ordered_repo-sgt-first-pass-order"
+  printf '%s\n' \
+    "$TEST_ROOT/first-pass-order-$ordered_repo-sgt-first-pass-order" > \
+    "$TEST_ROOT/fleet/first-pass-order/$ordered_repo/worktree"
+  printf 'done\n' > "$TEST_ROOT/fleet/first-pass-order/$ordered_repo/status"
+  printf 'result\n' > "$TEST_ROOT/fleet/first-pass-order/$ordered_repo/result"
+  printf 'done\n' > \
+    "$TEST_ROOT/first-pass-order-$ordered_repo-sgt-first-pass-order/.sergeant-status"
+  printf 'result\n' > \
+    "$TEST_ROOT/first-pass-order-$ordered_repo-sgt-first-pass-order/.sergeant-result"
+done
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/first-pass-order-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" first-pass-order >/dev/null 2>&1; then
+  printf 'multi-repo first-pass cleanup accepted a renamed later repo\n' >&2
+  exit 1
+fi
+[[ ! -e "$TEST_ROOT/first-pass-order-removals" ]]
+for ordered_repo in aaa zzz; do
+  [[ -d "$TEST_ROOT/first-pass-order-$ordered_repo-sgt-first-pass-order" ]]
+  [[ ! -e "$TEST_ROOT/fleet/first-pass-order/$ordered_repo/cleanup-owner" ]]
+  [[ ! -e "$TEST_ROOT/fleet/first-pass-order/$ordered_repo/cleanup-phase" ]]
+  [[ ! -e "$TEST_ROOT/fleet/first-pass-order/$ordered_repo/terminal-evidence" ]]
+done
 rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/config/first-pass-policy.yaml"
 
 mkdir -p "$TEST_ROOT/fleet/removal-failure/aaa" "$TEST_ROOT/fleet/removal-failure/app" \
@@ -781,10 +822,16 @@ present_phase_before="$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase"
 present_evidence_before="$(cksum \
   "$TEST_ROOT/fleet/present-retry/app/terminal-evidence"/.sergeant-*)"
 init_test_repo "$TEST_ROOT/present-retry-other"
-for reappeared_phase in partial-removal removed; do
-  printf '%s\n%s\ngit\n%s\n' "$reappeared_phase" \
-    "$TEST_ROOT/present-retry-sgt-present-retry" "$TEST_ROOT/present-retry" > \
-    "$TEST_ROOT/fleet/present-retry/app/cleanup-phase"
+for reappeared_phase in partial-removal removed reconciled-absent; do
+  if [[ "$reappeared_phase" == "reconciled-absent" ]]; then
+    printf '%s\n%s\n' "$reappeared_phase" \
+      "$TEST_ROOT/present-retry-sgt-present-retry" > \
+      "$TEST_ROOT/fleet/present-retry/app/cleanup-phase"
+  else
+    printf '%s\n%s\ngit\n%s\n' "$reappeared_phase" \
+      "$TEST_ROOT/present-retry-sgt-present-retry" "$TEST_ROOT/present-retry" > \
+      "$TEST_ROOT/fleet/present-retry/app/cleanup-phase"
+  fi
   printf '%s diagnostic\n' "$reappeared_phase" > \
     "$TEST_ROOT/present-retry-sgt-present-retry/.sergeant-diagnostic"
   reappeared_owner_before="$(cksum \
@@ -814,6 +861,23 @@ EOF
   grep -Fq 'Configured retry owner changed: app' \
     "$TEST_ROOT/reappeared-$reappeared_phase-owner.log"
   record_retry_owner present-retry app "$TEST_ROOT/present-retry"
+  if [[ "$reappeared_phase" == "reconciled-absent" ]]; then
+    printf 'other\n' > "$TEST_ROOT/fleet/present-retry/app/wt_type"
+    if PATH="$TEST_ROOT/fake-bin:$PATH" \
+      FAKE_GIT_LOG="$TEST_ROOT/present-retry-removals" \
+      SERGEANT_CONFIG="$TEST_ROOT/config" \
+      SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+      "$ROOT_DIR/bin/sgt-cleanup" present-retry \
+        > "$TEST_ROOT/reappeared-$reappeared_phase-type.log" 2>&1; then
+      printf 'cleanup accepted type drift during %s replay\n' \
+        "$reappeared_phase" >&2
+      exit 1
+    fi
+    grep -Fq 'Retry worktree type changed: app' \
+      "$TEST_ROOT/reappeared-$reappeared_phase-type.log"
+    [[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 1 ]]
+    printf 'git\n' > "$TEST_ROOT/fleet/present-retry/app/wt_type"
+  fi
   if PATH="$TEST_ROOT/fake-bin:$PATH" \
     FAKE_GIT_LOG="$TEST_ROOT/present-retry-removals" \
     SERGEANT_CONFIG="$TEST_ROOT/config" \
