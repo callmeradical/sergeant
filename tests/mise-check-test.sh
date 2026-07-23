@@ -36,6 +36,7 @@ run_check() {
   write_required_stubs
 
   if [[ "$td_mode" == "supported" ]]; then
+    # shellcheck disable=SC2016
     make_stub td '#!/usr/bin/env bash
 case "$1" in
   --version)
@@ -53,6 +54,7 @@ case "$1" in
     ;;
 esac'
   elif [[ "$td_mode" == "unsupported" ]]; then
+    # shellcheck disable=SC2016
     make_stub td '#!/usr/bin/env bash
 case "$1" in
   --version)

@@ -59,7 +59,9 @@ sgt-watch <fleet-task-id>
 ```
 
 For OpenCode, run long watches as managed background processes so the coordinator
-remains available. Until native `--background` support ships, a Linux example is:
+remains available. If managed background execution is unavailable, use
+`sgt-watch --sync <fleet-task-id>` for bounded inspection or run `sgt-watch` in
+a separate terminal or tmux pane. One Linux example is:
 
 ```bash
 systemd-run --user --unit="sgt-watch-<fleet-task-id>" --collect \

@@ -18,12 +18,14 @@ lock, plugin metadata, or the source repository.
 
 ## Primary engineering skill source
 
-Most engineering skills used in this installation come from Matt Pocock's
-[Skills for Real Engineers](https://github.com/mattpocock/skills). The local
-`~/.agents/.skill-lock.json` records `mattpocock/skills` as the source for
-code-review, codebase-design, diagnosing-bugs, domain-modeling, grilling,
-grill-with-docs, implement, prototype, research, resolving-merge-conflicts, TDD,
-to-spec, triage, and wayfinder.
+Most engineering skills Sergeant expects you to review or install come from Matt
+Pocock's [Skills for Real Engineers](https://github.com/mattpocock/skills).
+After installing, inspect `~/.agents/.skill-lock.json` to confirm that any
+selected shared skills record `mattpocock/skills` as their source. Common
+Sergeant-adjacent examples from that source include code-review,
+codebase-design, diagnosing-bugs, domain-modeling, grilling,
+grill-with-docs, implement, prototype, research, resolving-merge-conflicts,
+tdd, to-spec, triage, and wayfinder.
 
 Official skills.sh installation:
 
@@ -67,10 +69,11 @@ These ship with this repository and are governed by its tests and review:
 
 ## Other local skills
 
-This installation also contains local or tool-owned skills, including Graphify,
-no-mistakes, swamp, and Sergeant's custom `to-tickets`. Their source and update
-mechanism may differ from Matt Pocock's bundle. Inspect their package metadata,
-repository, or skill file before distributing them to another user.
+Your installation may also contain local or tool-owned skills, including
+Graphify, no-mistakes, swamp, and Sergeant's custom `to-tickets`. Their source
+and update mechanism may differ from Matt Pocock's bundle. Inspect their
+package metadata, repository, or skill file before distributing them to another
+user.
 
 ## Choosing a skill
 

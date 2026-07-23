@@ -59,9 +59,9 @@ not reproduce the conversation as a transcript.
 
 ## Scheduled execution
 
-The current personal installation runs `wiki-daily-digest --date yesterday` at
-06:00 through launchd. Treat scheduler installation or platform expansion as a
-separate task: verify the job definition, executable path, environment, last exit
+Treat scheduler installation or platform expansion as a separate task. One local
+macOS example is `wiki-daily-digest --date yesterday` at 06:00 through
+launchd. Verify the job definition, executable path, environment, last exit
 status, and generated page before reporting scheduling complete.
 
 ## Failure behavior

@@ -44,6 +44,7 @@ require_text "docs/getting-started.md" "Install OpenCode or Claude Code before u
 
 require_text "AGENTS.md" "## Procedural skills"
 require_text "AGENTS.md" "direct executor when requested"
+# shellcheck disable=SC2016
 require_text "AGENTS.md" '`sergeant-help`'
 require_text "AGENTS.md" "Never edit a default branch in direct mode"
 require_text "AGENTS.md" "Open a PR for every direct-mode implementation"
@@ -69,6 +70,7 @@ require_text "docs/troubleshooting.md" "Do not authorize an in-run fix"
 require_text "docs/troubleshooting.md" 'sgt-watch --sync <task-id>'
 require_text "docs/troubleshooting.md" "tests/runtime-bash-test.sh"
 require_text "docs/troubleshooting.md" "docker.io/library/bash:3.2@sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89"
+# shellcheck disable=SC2016
 reject_text "docs/troubleshooting.md" 'Use `sgt-watch <task>`'
 require_text "docs/skills.md" "User-invoked orchestrators"
 require_text "docs/skills.md" "Model-invoked disciplines"
