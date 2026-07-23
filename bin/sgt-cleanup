@@ -237,7 +237,10 @@ _require_terminal_repos() {
       fi
     else
       cleanup_phase="$(cat "$repo_dir/cleanup-phase" 2>/dev/null || true)"
-      [[ -n "$worktree" && "$cleanup_phase" == $'reconciled-absent\n'"$worktree" ]] || \
+      [[ -n "$worktree" && ( \
+        "$cleanup_phase" == $'removing\n'"$worktree" || \
+        "$cleanup_phase" == $'reconciled-absent\n'"$worktree" \
+      ) ]] || \
         _die "$repo_name has no reconciled cleanup phase for its absent worktree"
 
       evidence_dir="$repo_dir/terminal-evidence"
@@ -251,6 +254,10 @@ _require_terminal_repos() {
           _die "$repo_name reconciled cleanup evidence requires a result"
         cmp -s "$repo_dir/result" "$evidence_dir/.sergeant-result" || \
           _die "$repo_name cleanup evidence differs from reconciled fleet result"
+      fi
+      if [[ "$cleanup_phase" == $'removing\n'"$worktree" ]]; then
+        _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
+          _die "Failed to reconcile completed worktree removal: $repo_name"
       fi
     fi
   done
@@ -304,6 +311,13 @@ _restore_worker_evidence() {
   done
 }
 
+_record_cleanup_phase() {
+  local repo_dir="$1" phase="$2" worktree="$3"
+
+  printf '%s\n%s\n' "$phase" "$worktree" > "$repo_dir/cleanup-phase.tmp" &&
+    mv "$repo_dir/cleanup-phase.tmp" "$repo_dir/cleanup-phase"
+}
+
 _require_terminal_repos
 _require_clean_worktrees
 
@@ -344,6 +358,10 @@ for repo_dir in "$TASK_DIR"/*/; do
   fi
 
   _stage_worker_evidence "$repo_dir" "$worktree"
+  if ! _record_cleanup_phase "$repo_dir" removing "$worktree"; then
+    _restore_worker_evidence "$repo_dir" "$worktree"
+    _die "Failed to record cleanup phase before worktree removal: $repo_name"
+  fi
 
   if [[ "$wt_type" == "treehouse" ]]; then
     # Find the main repo path to run treehouse return from
@@ -389,9 +407,7 @@ for repo_dir in "$TASK_DIR"/*/; do
     _restore_worker_evidence "$repo_dir" "$worktree"
     _die "Worktree removal reported success but the directory remains: $worktree"
   }
-  printf 'reconciled-absent\n%s\n' "$worktree" > "$repo_dir/cleanup-phase.tmp" || \
-    _die "Failed to record reconciled cleanup phase: $repo_name"
-  mv "$repo_dir/cleanup-phase.tmp" "$repo_dir/cleanup-phase" || \
+  _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
     _die "Failed to publish reconciled cleanup phase: $repo_name"
 
   echo ""

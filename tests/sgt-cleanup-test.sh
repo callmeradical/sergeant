@@ -250,6 +250,49 @@ PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
 [[ ! -e "$TEST_ROOT/fleet/removal-failure" ]]
 rm "$TEST_ROOT/fake-bin/git"
 
+mkdir -p "$TEST_ROOT/fleet/marker-publication/app" "$TEST_ROOT/marker/.git" \
+  "$TEST_ROOT/marker-sgt-marker-publication"
+printf '%s\n' "$TEST_ROOT/marker-sgt-marker-publication" > \
+  "$TEST_ROOT/fleet/marker-publication/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/marker-publication/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/marker-publication/app/result"
+printf 'done\n' > "$TEST_ROOT/marker-sgt-marker-publication/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/marker-sgt-marker-publication/.sergeant-result"
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" rev-parse "*) printf 'true\n' ;;
+  *" status "*) ;;
+  *" worktree remove "*) rm -rf "${!#}" ;;
+  *) exit 1 ;;
+esac
+EOF
+REAL_MV="$(command -v mv)"
+export REAL_MV
+cat > "$TEST_ROOT/fake-bin/mv" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$(sed -n '1p' "$1")" == "reconciled-absent" && ! -e "$FAKE_MV_STATE" ]]; then
+  touch "$FAKE_MV_STATE"
+  exit 1
+fi
+"$REAL_MV" "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/mv"
+if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" marker-publication >/dev/null 2>&1; then
+  printf 'cleanup succeeded after reconciled phase publication failed\n' >&2
+  exit 1
+fi
+[[ ! -e "$TEST_ROOT/marker-sgt-marker-publication" ]]
+[[ "$(sed -n '1p' "$TEST_ROOT/fleet/marker-publication/app/cleanup-phase")" == \
+  'removing' ]]
+PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" marker-publication >/dev/null
+[[ ! -e "$TEST_ROOT/fleet/marker-publication" ]]
+rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/mv"
+
 mkdir -p "$TEST_ROOT/fleet/task-123/app" "$TEST_ROOT/repo"
 git -C "$TEST_ROOT/repo" init -q
 git -C "$TEST_ROOT/repo" config user.name Test
