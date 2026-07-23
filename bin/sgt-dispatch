@@ -740,13 +740,17 @@ Maintain \`.sergeant-gate-generation\` as a monotonic integer for waiting gates.
 
 ### 5. Validate
 
-Run focused tests and typechecking/lint regularly. Run the repository's full required suite once at the end. Run no-mistakes when available or required by active instructions.
+Run focused tests and typechecking/lint regularly. Run the repository's full required suite once at the end.
+
+Do not run no-mistakes for routine worker completion, prototypes, investigations, documentation drafts, intermediate commits, or remediation loops. Run no-mistakes once only at an explicit final shipping boundary, after implementation and repository-native validation are complete. An explicit user instruction to run no-mistakes overrides this default.
+
+At that boundary, invoke \`no-mistakes axi run --intent "<the user's objective and approved tradeoffs>"\`, using \`--skip=<steps>\` only for gates already proven irrelevant. Treat no-mistakes as validation-only: never let it fix or remediate findings. Stop driving the pipeline at \`checks-passed\`; do not wait for merge monitoring.
 
 ### 6. Route no-mistakes findings
 
-At a no-mistakes gate, classify every finding before responding: correctness, security, data-integrity, and test findings cannot be deferred or ignored and must use disposition \`gate\`; ask-user findings still require user escalation and must use \`ask-user\`. warning-level actionable review or documentation debt may use \`td\` and creates P2 work; informational actionable debt may use \`td\` and creates P3 work. Cosmetic and evidence-only noise must use \`ignore\` and creates no card.
+At a no-mistakes gate, classify every finding before responding. Every actionable finding creates or updates separate deduplicated owning-repo td work: correctness, security, data-integrity, and test findings cannot be deferred or ignored, must use disposition \`gate\`, and create P1 work; ask-user findings must use \`ask-user\`, create P1 work, and still require user escalation. Warning-level actionable review or documentation debt may use \`td\` and creates P2 work; informational actionable debt may use \`td\` and creates P3 work. Cosmetic and evidence-only noise must use \`ignore\` and creates no card.
 
-Record each classification with \`sgt-no-mistakes-finding $PROJECT $rname\`. Pass the run ID, head SHA, finding ID, severity, kind, file/line, description, and originating intent with the chosen \`--disposition\`. The command creates or updates one deduplicated card in this owning repo. On rerun, keep visible active cards in their current state; only closed cards are reopened and deferred cards are undeferred before refreshing the finding body. Preserve any existing repo-specific or manually added td labels, and ensure the required \`no-mistakes\` and \`finding\` labels are present once each. A td disposition allows the gate to continue without mutating the delivery branch. Gate and ask-user dispositions return a blocking status and do not authorize approval; for ask-user, follow the \`needs_input\` escalation protocol above.
+Record each classification with \`sgt-no-mistakes-finding $PROJECT $rname\`. Pass the run ID, head SHA, finding ID, severity, kind, file/line, description, and originating intent with the chosen \`--disposition\`. The command creates or updates one deduplicated card in this owning repo. On rerun, keep visible active cards in their current state; only closed cards are reopened and deferred cards are undeferred before refreshing the finding body. Preserve any existing repo-specific or manually added td labels, and ensure the required \`no-mistakes\` and \`finding\` labels are present once each. A td disposition allows the gate to continue without mutating the delivery branch. Gate and ask-user dispositions create or update the card, then return a blocking status and do not authorize approval; for ask-user, follow the \`needs_input\` escalation protocol above.
 
 ### 7. Independent two-axis review
 
@@ -757,7 +761,7 @@ Before completion, load and use the canonical \`code-review\` skill when availab
 
 ### 8. Remediate and repeat
 
-Remediate every blocking finding, rerun affected tests, then rerun both independent review axes. Repeat until blocking findings are zero on each axis.
+Remediate every blocking repository-native test or independent-review finding, rerun affected tests, then rerun both independent review axes. Repeat until blocking findings are zero on each axis. Do not remediate no-mistakes findings in this validation run; their owning td work requires a separate dispatch.
 
 ### 9. Complete delivery and td lifecycle
 

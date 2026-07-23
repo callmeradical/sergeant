@@ -126,6 +126,8 @@ When the user brings you a task:
 
 Workers use `in_progress`, `needs_input`, and `blocked` as nonterminal states. A waiting worker remains alive until `sgt-respond` writes `.sergeant-response`; do not treat an escalation as completion or clean up its worktree.
 
+Routine workers complete repository-native tests, lint/typechecking, and independent Standards/Spec reviews without running no-mistakes. Reserve `no-mistakes axi run --intent "<the user's objective and approved tradeoffs>"` for one explicit final shipping boundary after implementation and native validation, unless the user explicitly requests an override. Skip only proven-irrelevant gates, stop at `checks-passed`, and treat the run as validation-only. Route every actionable finding to separate deduplicated owning-repo td work with `sgt-no-mistakes-finding`; never remediate it in the validation run.
+
 Load the **dispatch** skill (`skills/dispatch/SKILL.md`) for the full protocol.
 
 ---

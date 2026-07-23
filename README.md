@@ -126,9 +126,19 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-cleanup <task-id>` | Remove worktrees and fleet state |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
 
-### Deferred no-mistakes findings
+### No-mistakes findings
 
-Dispatched workers use `sgt-no-mistakes-finding` at no-mistakes gates. The required `--disposition` is explicit per finding: `gate` retains blocking work, `td` creates or updates actionable debt in the owning repo, `ignore` records that no card is needed, and `ask-user` preserves human escalation. Warning debt becomes P2, informational debt becomes P3, and repeated finding IDs update the same card while retaining the latest run ID, head SHA, location, description, and originating intent. Reruns also preserve any existing repo-specific or manually added td labels while ensuring the required `no-mistakes` and `finding` labels remain present without duplication.
+Routine dispatched workers use repository-native tests, lint/typechecking, and independent Standards/Spec reviews. They do not run no-mistakes for ordinary completion, prototypes, investigations, documentation drafts, intermediate commits, or remediation loops unless the user explicitly overrides that default.
+
+At an explicit final shipping boundary, after implementation and native validation are complete, run:
+
+```bash
+no-mistakes axi run --intent "<the user's objective and approved tradeoffs>"
+```
+
+Use `--skip=<steps>` only for gates already proven irrelevant and stop at `checks-passed`. The run is validation-only: it must not fix findings. Route actionable findings into separate, deduplicated owning-repo td tasks with `sgt-no-mistakes-finding`.
+
+The required `--disposition` is explicit per finding: `gate` creates or updates P1 work and retains the gate, `ask-user` creates or updates P1 work and preserves human escalation, `td` creates or updates nonblocking actionable debt, and `ignore` records that no card is needed. Warning debt becomes P2, informational debt becomes P3, and repeated finding IDs update the same card while retaining the latest run ID, head SHA, location, description, and originating intent. Reruns also preserve any existing repo-specific or manually added td labels while ensuring the required `no-mistakes` and `finding` labels remain present without duplication.
 
 On rerun, visible active cards stay in their current state, while explicitly hidden states are resurfaced: closed cards are reopened and deferred cards are undeferred before the finding body is refreshed.
 

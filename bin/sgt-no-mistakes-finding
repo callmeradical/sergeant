@@ -64,14 +64,9 @@ case "$DISPOSITION" in
   *) _die "Invalid disposition: $DISPOSITION" ;;
 esac
 
-if [[ "$DISPOSITION" == "ask-user" ]]; then
-  printf 'ask-user: finding %s requires escalation\n' "$FINDING_ID" >&2
-  exit 2
-fi
-
 case "$KIND" in
   correctness|security|data-integrity|test)
-    if [[ "$DISPOSITION" != "gate" ]]; then
+    if [[ "$DISPOSITION" != "gate" && "$DISPOSITION" != "ask-user" ]]; then
       _die "$KIND findings must gate or ask the user; they cannot be deferred to td or ignored"
     fi
     ;;
@@ -85,20 +80,10 @@ if [[ "$DISPOSITION" == "ignore" ]]; then
   _die "Only cosmetic or evidence findings may be ignored; actionable findings must gate, ask the user, or route to td"
 fi
 
-case "$DISPOSITION" in
-  gate)
-    printf 'gate: finding %s remains blocking\n' "$FINDING_ID" >&2
-    exit 2
-    ;;
-  ignore)
-    printf 'ignore: finding %s creates no td card\n' "$FINDING_ID"
-    exit 0
-    ;;
-esac
-
-case "$SEVERITY" in
-  warning) PRIORITY="P2" ;;
-  info|informational) PRIORITY="P3" ;;
+case "$DISPOSITION:$SEVERITY" in
+  gate:*|ask-user:*) PRIORITY="P1" ;;
+  td:warning) PRIORITY="P2" ;;
+  td:info|td:informational) PRIORITY="P3" ;;
   *) _die "$SEVERITY findings must gate; only warning or informational debt can be routed to td" ;;
 esac
 
@@ -122,7 +107,7 @@ _sgt_is_git_repo "$repo_path" || _die "Repo '$REPO' is not cloned at $repo_path"
 marker="no-mistakes-finding:$REPO:$FINDING_ID"
 location="${FILE:-not provided}"
 [[ -n "$LINE" ]] && location="$location:$LINE"
-body="No-mistakes deferred finding.
+body="No-mistakes finding.
 
 Run ID: $RUN_ID
 Head SHA: $HEAD_SHA
@@ -208,3 +193,14 @@ else
   task_id="$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
   printf 'td %s created for finding %s\n' "$task_id" "$FINDING_ID"
 fi
+
+case "$DISPOSITION" in
+  gate)
+    printf 'gate: finding %s remains blocking\n' "$FINDING_ID" >&2
+    exit 2
+    ;;
+  ask-user)
+    printf 'ask-user: finding %s requires escalation\n' "$FINDING_ID" >&2
+    exit 2
+    ;;
+esac
