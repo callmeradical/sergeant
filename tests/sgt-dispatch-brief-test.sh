@@ -6,7 +6,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
-mkdir -p "$TEST_ROOT/config" "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin" "$TEST_ROOT/repo"
+mkdir -p \
+  "$TEST_ROOT/config" \
+  "$TEST_ROOT/fleet" \
+  "$TEST_ROOT/fake-bin" \
+  "$TEST_ROOT/repo" \
+  "$TEST_ROOT/role-repo" \
+  "$TEST_ROOT/group-repo"
 
 cat > "$TEST_ROOT/config/test.yaml" <<EOF
 name: test
@@ -14,6 +20,15 @@ repos:
   - name: app
     path: $TEST_ROOT/repo
     role: Test fixture
+  - name: role-ui
+    path: $TEST_ROOT/role-repo
+    role: User-Facing Output
+  - name: group-ui
+    path: $TEST_ROOT/group-repo
+    group: FRONTEND
+groups:
+  FRONTEND:
+    description: UI fixture group
 EOF
 
 cat > "$TEST_ROOT/fake-bin/tmux" <<'EOF'
@@ -82,6 +97,15 @@ git -C "$TEST_ROOT/repo" config user.email "sergeant@example.invalid"
 touch "$TEST_ROOT/repo/README.md"
 git -C "$TEST_ROOT/repo" add README.md
 git -C "$TEST_ROOT/repo" commit -qm "test fixture"
+
+for repo_dir in "$TEST_ROOT/role-repo" "$TEST_ROOT/group-repo"; do
+  git -C "$repo_dir" init -q
+  git -C "$repo_dir" config user.name "Sergeant Test"
+  git -C "$repo_dir" config user.email "sergeant@example.invalid"
+  touch "$repo_dir/README.md"
+  git -C "$repo_dir" add README.md
+  git -C "$repo_dir" commit -qm "test fixture"
+done
 
 PATH="$TEST_ROOT/fake-bin:$PATH" \
 SERGEANT_CONFIG="$TEST_ROOT/config" \
@@ -308,4 +332,17 @@ SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-dispatch" test "Maintain nonvisual backend mission" --repos app >/dev/null
 brief="$(grep -rl "^Maintain nonvisual backend mission$" "$TEST_ROOT"/app-sgt-*/.sergeant-brief.md)"
 assert_not_contains "Accessibility axis"
+
+for repo_name in role-ui group-ui; do
+  PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-dispatch" test "Ship worker loop" --repos "$repo_name" >/dev/null
+
+  brief="$(printf '%s\n' "$TEST_ROOT"/"$repo_name"-sgt-*/.sergeant-brief.md)"
+  [[ -f "$brief" ]] || { printf 'UI-triggered brief was not generated for %s\n' "$repo_name" >&2; exit 1; }
+  assert_contains "Accessibility axis"
+  assert_contains "independent accessibility review"
+done
 printf 'sgt-dispatch brief contract: ok\n'

@@ -573,7 +573,7 @@ $td_context_block"
 
   review_axis_label="two"
   accessibility_axis_markdown=""
-  review_context="$(printf '%s %s %s' "$BRIEF" "$repo_role" "$group_inst" | tr '[:upper:]' '[:lower:]')"
+  review_context="$(printf '%s %s %s %s' "$BRIEF" "$repo_role" "$repo_group" "$group_inst" | tr '[:upper:]' '[:lower:]')"
   if [[ "$review_context" =~ (^|[^[:alnum:]])(ui|frontend|front-end|visual|interaction|accessibility|user-facing[[:space:]]+output)([^[:alnum:]]|$) ]]; then
     review_axis_label="three"
     accessibility_axis_markdown=$'\n- **Accessibility axis:** Because this is UI-facing work, launch a separate independent accessibility review covering keyboard access, semantics, focus behavior, contrast, responsive behavior, and assistive-technology compatibility as applicable.'
