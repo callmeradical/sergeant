@@ -334,15 +334,37 @@ _require_clean_worktrees() {
 }
 
 _stage_worker_evidence() {
-  local evidence evidence_dir repo_dir="$1" worktree="$2"
+  local evidence evidence_dir expected_identity="$3" repo_dir="$1" \
+    staged_identity staging_dir worktree="$2" worker_identity
 
   evidence_dir="$repo_dir/terminal-evidence"
+  staging_dir="$repo_dir/terminal-evidence.tmp.$$"
+  [[ ! -e "$evidence_dir" && ! -L "$evidence_dir" && \
+    ! -e "$staging_dir" && ! -L "$staging_dir" ]] || \
+    _die "Terminal evidence staging path already exists: $repo_dir"
+  mkdir "$staging_dir" || \
+    _die "Failed to create terminal evidence staging directory: $repo_dir"
   for evidence in "$worktree"/.sergeant-*; do
     [[ -f "$evidence" ]] || continue
-    mkdir -p "$evidence_dir"
-    cp -p "$evidence" "$evidence_dir/" || \
+    if ! cp -p "$evidence" "$staging_dir/"; then
+      rm -rf "$staging_dir" || \
+        _die "Failed to remove rejected terminal evidence staging directory: $repo_dir"
       _die "Failed to preserve worker evidence before cleanup: $evidence"
+    fi
   done
+  worker_identity="$(_worker_evidence_identity "$worktree")" || worker_identity=""
+  staged_identity="$(_worker_evidence_identity "$staging_dir")" || staged_identity=""
+  if [[ -z "$worker_identity" || "$worker_identity" != "$expected_identity" || \
+    "$staged_identity" != "$expected_identity" ]]; then
+    rm -rf "$staging_dir" || \
+      _die "Failed to remove changed terminal evidence staging directory: $repo_dir"
+    _die "Worker lifecycle evidence changed during staging: $repo_dir"
+  fi
+  mv "$staging_dir" "$evidence_dir" || {
+    rm -rf "$staging_dir" || \
+      _die "Failed to remove unpublished terminal evidence staging directory: $repo_dir"
+    _die "Failed to publish terminal evidence before cleanup: $repo_dir"
+  }
 }
 
 _remove_worker_evidence() {
@@ -899,8 +921,10 @@ for repo_dir in "$TASK_DIR"/*/; do
       _die "Treehouse lease does not match configured cleanup owner: $repo_name"
   fi
 
-  _stage_worker_evidence "$repo_dir" "$worktree"
   if [[ "$retrying_removal" != true ]]; then
+    worker_evidence_identity="$(_worker_evidence_identity "$worktree")" || \
+      _die "Cannot bind worker lifecycle evidence before cleanup: $repo_name"
+    _stage_worker_evidence "$repo_dir" "$worktree" "$worker_evidence_identity"
     if ! _record_cleanup_owner "$repo_dir" "$retry_root" "$worktree" "$wt_type"; then
       _restore_worker_evidence "$repo_dir" "$worktree"
       _die "Failed to record cleanup owner before worktree removal: $TASK_ID/$repo_name"
