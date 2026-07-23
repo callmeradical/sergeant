@@ -31,7 +31,7 @@ All scripts read `dev_root` at startup. Repo `path` values that are not absolute
 | `name` | string | yes | Project identifier. Must match the filename. |
 | `description` | string | no | Human-readable description of the project. |
 | `repos` | list | yes | Ordered list of repositories in this project. |
-| `groups` | map | no | Logical groupings of repos, with shared instructions. |
+| `groups` | map | no | Logical groupings of repos, with shared instructions and optional descriptions that Sergeant can use for review routing. |
 | `graphify` | map | no | Configuration for cross-repo knowledge graph generation. |
 | `defaults` | map | no | Default values applied to every repo. |
 
@@ -45,8 +45,8 @@ All scripts read `dev_root` at startup. Repo `path` values that are not absolute
 | `path` | string | yes | Path on disk. Absolute (`/...`) and home-relative (`~/...`) paths pass through. Relative paths are resolved from `dev_root` in `config.yaml`. |
 | `url` | string | no | Git remote URL. Used by `sgt-sync` to clone if path doesn't exist. |
 | `group` | string | no | Group name this repo belongs to. Must match a key in `groups`. |
-| `role` | string | no | Human description of this repo's role in the project. |
-| `agent_instructions` | string | no | Instructions appended after default and group instructions for this repository. |
+| `role` | string | no | Human description of this repo's role in the project. Sergeant includes it in worker context and review routing. |
+| `agent_instructions` | string | no | Instructions injected into agent context when working in this repo. Overrides group-level instructions for the same repo and participates in merged review-routing context. |
 
 ---
 
@@ -56,8 +56,8 @@ Each key under `groups` is a group name. Value is a map with:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `description` | string | no | Human-readable description of this group. |
-| `agent_instructions` | string | no | Instructions appended after defaults for every repository in this group. |
+| `description` | string | no | Human-readable description of this group. Sergeant also includes it when classifying UI-facing work for accessibility review routing. |
+| `agent_instructions` | string | no | Instructions inherited by all repos in this group. Repo-level `agent_instructions` override this, and the merged instructions participate in review routing. |
 
 ---
 
@@ -75,7 +75,7 @@ Each key under `groups` is a group name. Value is a map with:
 
 | Field | Type | Description |
 |---|---|---|
-| `agent_instructions` | string | Baseline instructions for every repo. Emitted before group and repository instructions. |
+| `agent_instructions` | string | Baseline instructions for every repo. Applied first; group and repo levels override, and the merged instructions participate in review routing. |
 
 ---
 
@@ -90,7 +90,10 @@ Agent instruction prose is concatenated in this order:
 `sgt-context` emits every nonempty layer in one block. Later layers appear later
 in the block; when directives conflict, the later repository-specific directive
 is the intended authority. Sergeant does not structurally merge or deduplicate
-free-form instruction prose.
+free-form instruction prose, but `sgt-dispatch` still classifies review routing
+from a single normalized in-memory context built from the mission, repo role,
+repo group name, repo group description, and merged default/group/repository
+instructions.
 
 ---
 

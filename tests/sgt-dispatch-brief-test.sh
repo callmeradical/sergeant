@@ -6,7 +6,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
-mkdir -p "$TEST_ROOT/config" "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin" "$TEST_ROOT/repo"
+mkdir -p \
+  "$TEST_ROOT/config" \
+  "$TEST_ROOT/fleet" \
+  "$TEST_ROOT/fake-bin" \
+  "$TEST_ROOT/repo" \
+  "$TEST_ROOT/role-repo" \
+  "$TEST_ROOT/group-repo"
 
 cat > "$TEST_ROOT/config/test.yaml" <<EOF
 name: test
@@ -14,6 +20,15 @@ repos:
   - name: app
     path: $TEST_ROOT/repo
     role: Test fixture
+  - name: role-ui
+    path: $TEST_ROOT/role-repo
+    role: User-Facing Output
+  - name: group-ui
+    path: $TEST_ROOT/group-repo
+    group: FRONTEND
+groups:
+  FRONTEND:
+    description: UI fixture group
 EOF
 
 cat > "$TEST_ROOT/fake-bin/tmux" <<'EOF'
@@ -82,6 +97,15 @@ git -C "$TEST_ROOT/repo" config user.email "sergeant@example.invalid"
 touch "$TEST_ROOT/repo/README.md"
 git -C "$TEST_ROOT/repo" add README.md
 git -C "$TEST_ROOT/repo" commit -qm "test fixture"
+
+for repo_dir in "$TEST_ROOT/role-repo" "$TEST_ROOT/group-repo"; do
+  git -C "$repo_dir" init -q
+  git -C "$repo_dir" config user.name "Sergeant Test"
+  git -C "$repo_dir" config user.email "sergeant@example.invalid"
+  touch "$repo_dir/README.md"
+  git -C "$repo_dir" add README.md
+  git -C "$repo_dir" commit -qm "test fixture"
+done
 
 PATH="$TEST_ROOT/fake-bin:$PATH" \
 SERGEANT_CONFIG="$TEST_ROOT/config" \
@@ -252,16 +276,57 @@ assert_contains "User override: run no-mistakes for this worker before completio
 
 write_routing_config() {
   local role="$1"
-  local group_instructions="$2"
-  cat > "$TEST_ROOT/config/test.yaml" <<EOF
+  local group="$2"
+  local group_description="$3"
+  local group_instructions="$4"
+  local default_instructions="${5:-Maintain fleet automation}"
+  local repo_instructions="${6:-Maintain repository automation}"
+  if [[ "$group" != "FRONTEND" ]]; then
+    cat > "$TEST_ROOT/config/test.yaml" <<EOF
 name: test
+defaults:
+  agent_instructions: $default_instructions
 repos:
   - name: app
     path: $TEST_ROOT/repo
     role: $role
-    group: product
+    group: $group
+    agent_instructions: $repo_instructions
+  - name: role-ui
+    path: $TEST_ROOT/role-repo
+    role: User-Facing Output
+  - name: group-ui
+    path: $TEST_ROOT/group-repo
+    group: FRONTEND
 groups:
-  product:
+  FRONTEND:
+    description: UI fixture group
+  $group:
+    description: $group_description
+    agent_instructions: $group_instructions
+EOF
+    return
+  fi
+
+  cat > "$TEST_ROOT/config/test.yaml" <<EOF
+name: test
+defaults:
+  agent_instructions: $default_instructions
+repos:
+  - name: app
+    path: $TEST_ROOT/repo
+    role: $role
+    group: $group
+    agent_instructions: $repo_instructions
+  - name: role-ui
+    path: $TEST_ROOT/role-repo
+    role: User-Facing Output
+  - name: group-ui
+    path: $TEST_ROOT/group-repo
+    group: FRONTEND
+groups:
+  FRONTEND:
+    description: $group_description
     agent_instructions: $group_instructions
 EOF
 }
@@ -269,9 +334,13 @@ EOF
 dispatch_and_assert_accessibility() {
   local mission="$1"
   local role="$2"
-  local group_instructions="$3"
+  local group="$3"
+  local group_description="$4"
+  local group_instructions="$5"
+  local default_instructions="${6:-Maintain fleet automation}"
+  local repo_instructions="${7:-Maintain repository automation}"
 
-  write_routing_config "$role" "$group_instructions"
+  write_routing_config "$role" "$group" "$group_description" "$group_instructions" "$default_instructions" "$repo_instructions"
   PATH="$TEST_ROOT/fake-bin:$PATH" \
   SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" \
@@ -295,12 +364,17 @@ ui_triggers=(
 
 for i in "${!ui_triggers[@]}"; do
   trigger="${ui_triggers[$i]}"
-  dispatch_and_assert_accessibility "Improve $trigger behavior mission-$i" "Backend service" "Maintain deployment automation"
-  dispatch_and_assert_accessibility "Maintain backend behavior role-$i" "$trigger application" "Maintain deployment automation"
-  dispatch_and_assert_accessibility "Maintain backend behavior group-$i" "Backend service" "Review $trigger behavior"
+  dispatch_and_assert_accessibility "Improve $trigger behavior mission-$i" "Backend service" "product" "Internal services" "Maintain deployment automation"
+  dispatch_and_assert_accessibility "Maintain backend behavior role-$i" "$trigger application" "product" "Internal services" "Maintain deployment automation"
+  dispatch_and_assert_accessibility "Maintain backend behavior instructions-$i" "Backend service" "product" "Internal services" "Review $trigger behavior"
 done
 
-write_routing_config "Frontendish visualizer" "Maintain interactional accessibilitytree user-facing outputs"
+dispatch_and_assert_accessibility "Maintain backend behavior group-name" "Backend service" "FRONTEND" "Internal services" "Maintain deployment automation"
+dispatch_and_assert_accessibility "Maintain backend behavior group-description" "Backend service" "apps" "SvelteKit frontend applications" "Maintain deployment automation"
+dispatch_and_assert_accessibility "Maintain backend behavior default-instructions" "Backend service" "product" "Internal services" "Maintain deployment automation" "Review frontend behavior"
+dispatch_and_assert_accessibility "Maintain backend behavior repo-instructions" "Backend service" "product" "Internal services" "Maintain deployment automation" "Maintain fleet automation" "Review frontend behavior"
+
+write_routing_config "Frontendish visualizer" "product" "Internal service repositories" "Maintain interactional accessibilitytree user-facing outputs"
 PATH="$TEST_ROOT/fake-bin:$PATH" \
 SERGEANT_CONFIG="$TEST_ROOT/config" \
 SERGEANT_FLEET="$TEST_ROOT/fleet" \
@@ -309,4 +383,16 @@ SGT_WIKI_DISABLED=1 \
 brief="$(grep -rl "^Maintain nonvisual backend mission$" "$TEST_ROOT"/app-sgt-*/.sergeant-brief.md)"
 assert_not_contains "Accessibility axis"
 
+for repo_name in role-ui group-ui; do
+  PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-dispatch" test "Ship worker loop" --repos "$repo_name" >/dev/null
+
+  brief="$(printf '%s\n' "$TEST_ROOT"/"$repo_name"-sgt-*/.sergeant-brief.md)"
+  [[ -f "$brief" ]] || { printf 'UI-triggered brief was not generated for %s\n' "$repo_name" >&2; exit 1; }
+  assert_contains "Accessibility axis"
+  assert_contains "independent accessibility review"
+done
 printf 'sgt-dispatch brief contract: ok\n'

@@ -422,8 +422,10 @@ for rname in "${TARGET_REPOS[@]}"; do
   # ── Resolve merged instructions (defaults → group → repo) ──────────────────
 
   default_inst="$(yq '.defaults.agent_instructions // ""' "$CONFIG_FILE")"
+  group_description=""
   group_inst=""
   if [[ -n "$repo_group" && "$repo_group" != "null" ]]; then
+    group_description="$(yq ".groups.\"$repo_group\".description // \"\"" "$CONFIG_FILE")"
     group_inst="$(yq ".groups.\"$repo_group\".agent_instructions // \"\"" "$CONFIG_FILE")"
   fi
   repo_inst="$(yq ".repos[$i].agent_instructions // \"\"" "$CONFIG_FILE")"
@@ -573,7 +575,7 @@ $td_context_block"
 
   review_axis_label="two"
   accessibility_axis_markdown=""
-  review_context="$(printf '%s %s %s' "$BRIEF" "$repo_role" "$group_inst" | tr '[:upper:]' '[:lower:]')"
+  review_context="$(printf '%s %s %s %s %s' "$BRIEF" "$repo_role" "$repo_group" "$group_description" "$merged" | tr '[:upper:]' '[:lower:]')"
   if [[ "$review_context" =~ (^|[^[:alnum:]])(ui|frontend|front-end|visual|interaction|accessibility|user-facing[[:space:]]+output)([^[:alnum:]]|$) ]]; then
     review_axis_label="three"
     accessibility_axis_markdown=$'\n- **Accessibility axis:** Because this is UI-facing work, launch a separate independent accessibility review covering keyboard access, semantics, focus behavior, contrast, responsive behavior, and assistive-technology compatibility as applicable.'

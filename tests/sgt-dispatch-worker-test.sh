@@ -13,28 +13,6 @@ repos:
   - name: app
     path: $TEST_ROOT/repo
 EOF
-cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
-#!/usr/bin/env bash
-
-set -euo pipefail
-
-args=()
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --work-dir|-w) shift 2 ;;
-    --json|--force) shift ;;
-    *) args+=("$1"); shift ;;
-  esac
-done
-
-case "${args[0]:-}" in
-  list) printf '[]\n' ;;
-  create) printf '{"id":"td-app-1"}\n' ;;
-  delete) printf '{"id":"td-app-1","deleted":true}\n' ;;
-  *) exit 1 ;;
-esac
-EOF
-chmod +x "$TEST_ROOT/fake-bin/td"
 cat > "$TEST_ROOT/fake-bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$TMUX_LOG"
