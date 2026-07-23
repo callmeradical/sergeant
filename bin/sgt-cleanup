@@ -1752,6 +1752,10 @@ _validate_retry_owner() {
     owner_root owner_type owner_worker_identity owner_worktree project repo_dir="$1" \
     repo_name="$2" worker_identity worktree="$3" retry_type="$4" retry_root="$5"
 
+  case "$retry_type" in
+    git|treehouse) ;;
+    *) _die "Unsupported retry removal type: $repo_name: $retry_type" ;;
+  esac
   [[ "$(sed -n '1p' "$repo_dir/cleanup-owner" 2>/dev/null || true)" == "4" ]] || \
     _die "Retry owner identity is missing: $repo_name"
   owner_project="$(sed -n '2p' "$repo_dir/cleanup-owner")"
