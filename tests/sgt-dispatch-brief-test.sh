@@ -252,16 +252,19 @@ assert_contains "User override: run no-mistakes for this worker before completio
 
 write_routing_config() {
   local role="$1"
-  local group_instructions="$2"
+  local group="$2"
+  local group_description="$3"
+  local group_instructions="$4"
   cat > "$TEST_ROOT/config/test.yaml" <<EOF
 name: test
 repos:
   - name: app
     path: $TEST_ROOT/repo
     role: $role
-    group: product
+    group: $group
 groups:
-  product:
+  $group:
+    description: $group_description
     agent_instructions: $group_instructions
 EOF
 }
@@ -269,9 +272,11 @@ EOF
 dispatch_and_assert_accessibility() {
   local mission="$1"
   local role="$2"
-  local group_instructions="$3"
+  local group="$3"
+  local group_description="$4"
+  local group_instructions="$5"
 
-  write_routing_config "$role" "$group_instructions"
+  write_routing_config "$role" "$group" "$group_description" "$group_instructions"
   PATH="$TEST_ROOT/fake-bin:$PATH" \
   SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" \
@@ -295,12 +300,15 @@ ui_triggers=(
 
 for i in "${!ui_triggers[@]}"; do
   trigger="${ui_triggers[$i]}"
-  dispatch_and_assert_accessibility "Improve $trigger behavior mission-$i" "Backend service" "Maintain deployment automation"
-  dispatch_and_assert_accessibility "Maintain backend behavior role-$i" "$trigger application" "Maintain deployment automation"
-  dispatch_and_assert_accessibility "Maintain backend behavior group-$i" "Backend service" "Review $trigger behavior"
+  dispatch_and_assert_accessibility "Improve $trigger behavior mission-$i" "Backend service" "product" "Internal services" "Maintain deployment automation"
+  dispatch_and_assert_accessibility "Maintain backend behavior role-$i" "$trigger application" "product" "Internal services" "Maintain deployment automation"
+  dispatch_and_assert_accessibility "Maintain backend behavior instructions-$i" "Backend service" "product" "Internal services" "Review $trigger behavior"
 done
 
-write_routing_config "Frontendish visualizer" "Maintain interactional accessibilitytree user-facing outputs"
+dispatch_and_assert_accessibility "Maintain backend behavior group-name" "Backend service" "FRONTEND" "Internal services" "Maintain deployment automation"
+dispatch_and_assert_accessibility "Maintain backend behavior group-description" "Backend service" "apps" "SvelteKit frontend applications" "Maintain deployment automation"
+
+write_routing_config "Frontendish visualizer" "product" "Internal service repositories" "Maintain interactional accessibilitytree user-facing outputs"
 PATH="$TEST_ROOT/fake-bin:$PATH" \
 SERGEANT_CONFIG="$TEST_ROOT/config" \
 SERGEANT_FLEET="$TEST_ROOT/fleet" \
