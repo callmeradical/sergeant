@@ -17,12 +17,25 @@ source "$SCRIPT_DIR/_sgt-lib.sh"
 [[ $# -ge 1 ]] || _die "Usage: sgt-cleanup <task-id> [repo]"
 TASK_ID="$1"
 FILTER_REPO="${2:-}"
+
+case "$TASK_ID" in
+  ""|"."|".."|/*|*/*)
+    _die "Invalid task ID: $TASK_ID"
+    ;;
+esac
+
 TASK_DIR="$FLEET_DIR/$TASK_ID"
+
+[[ ! -L "$TASK_DIR" ]] || _die "Invalid task ID: $TASK_ID"
 
 if [[ ! -d "$TASK_DIR" ]]; then
   echo "Task already cleaned up: $TASK_ID"
   exit 0
 fi
+
+FLEET_ROOT="$(cd "$FLEET_DIR" && pwd -P)"
+TASK_ROOT="$(cd "$TASK_DIR" && pwd -P)"
+[[ "$TASK_ROOT" == "$FLEET_ROOT/$TASK_ID" ]] || _die "Invalid task ID: $TASK_ID"
 
 _worktree_cwd_pids() {
   local worktree="$1"
