@@ -830,7 +830,12 @@ case " $* " in
   *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
-  *" worktree remove "*) rm -rf "${!#}" ;;
+  *" worktree remove "*)
+    printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
+    [[ ! -e "$FAKE_GIT_STATE" ]] || exit 1
+    touch "$FAKE_GIT_STATE"
+    rm -rf "${!#}"
+    ;;
   *) exit 1 ;;
 esac
 EOF
@@ -846,6 +851,8 @@ fi
 EOF
 chmod +x "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/mv"
 if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
+  FAKE_GIT_STATE="$TEST_ROOT/marker-git-removed" \
+  FAKE_GIT_LOG="$TEST_ROOT/marker-removals" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" marker-publication >/dev/null 2>&1; then
   printf 'cleanup succeeded after reconciled phase publication failed\n' >&2
@@ -853,10 +860,13 @@ if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
 fi
 [[ ! -e "$TEST_ROOT/marker-sgt-marker-publication" ]]
 [[ "$(sed -n '1p' "$TEST_ROOT/fleet/marker-publication/app/cleanup-phase")" == \
-  'removing' ]]
+  'removed' ]]
 PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
+  FAKE_GIT_STATE="$TEST_ROOT/marker-git-removed" \
+  FAKE_GIT_LOG="$TEST_ROOT/marker-removals" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" marker-publication >/dev/null
+[[ "$(wc -l < "$TEST_ROOT/marker-removals")" -eq 1 ]]
 [[ ! -e "$TEST_ROOT/fleet/marker-publication" ]]
 rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/mv"
 
