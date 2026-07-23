@@ -7,7 +7,6 @@ TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 minimum_bash="${SGT_MINIMUM_BASH:-/bin/bash}"
-# shellcheck disable=SC2016 # Single quotes intentionally preserve the nested Bash snippet.
 version="$($minimum_bash -c 'printf "%s.%s\n" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"')"
 if [[ "$version" != "3.2" ]]; then
   printf 'runtime Bash regression requires Bash 3.2, found %s at %s\n' "$version" "$minimum_bash" >&2
@@ -15,7 +14,6 @@ if [[ "$version" != "3.2" ]]; then
 fi
 
 set +e
-# shellcheck disable=SC2016 # Single quotes intentionally preserve the nested Bash snippet.
 unsupported_output="$($minimum_bash -c \
   'source "$1/bin/_sgt-bash-version.sh"; _sgt_require_bash_version 3 1' _ "$ROOT_DIR" 2>&1)"
 unsupported_status=$?
@@ -51,7 +49,6 @@ printf 'needs_input\n' > "$failed_repo_state/status"
 printf 'needs_input\n' > "$failed_worktree/.sergeant-status"
 
 set +e
-# shellcheck disable=SC2016 # Single quotes intentionally preserve the nested Bash snippet.
 SERGEANT_FLEET="$fleet" "$minimum_bash" -c '
   mktemp() { return 1; }
   script="$1"
