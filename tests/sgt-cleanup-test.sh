@@ -714,11 +714,38 @@ if PATH="$TEST_ROOT/fake-bin:$PATH" \
   exit 1
 fi
 [[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 1 ]]
-[[ "$(sed -n '1p' "$TEST_ROOT/fleet/present-retry/app/cleanup-owner")" == "3" ]]
 present_owner_before="$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-owner")"
 present_phase_before="$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase")"
 present_evidence_before="$(cksum \
   "$TEST_ROOT/fleet/present-retry/app/terminal-evidence"/.sergeant-*)"
+
+rm "$TEST_ROOT/present-retry-sgt-present-retry"/.sergeant-*
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/present-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" present-retry >/dev/null 2>&1; then
+  printf 'cleanup unexpectedly succeeded during crash-window retry\n' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 2 ]] || {
+  printf 'cleanup did not reach the remover after absent evidence replay\n' >&2
+  exit 1
+}
+for evidence in .sergeant-status .sergeant-result; do
+  cmp -s "$TEST_ROOT/fleet/present-retry/app/terminal-evidence/$evidence" \
+    "$TEST_ROOT/present-retry-sgt-present-retry/$evidence" || {
+    printf 'cleanup did not restore validated absent evidence: %s\n' "$evidence" >&2
+    exit 1
+  }
+done
+[[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-owner")" == \
+  "$present_owner_before" ]]
+[[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase")" == \
+  "$present_phase_before" ]]
+[[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/terminal-evidence"/.sergeant-*)" == \
+  "$present_evidence_before" ]]
+[[ "$(sed -n '1p' "$TEST_ROOT/fleet/present-retry/app/cleanup-owner")" == "4" ]]
 
 assert_present_worker_identity_rejected() {
   local label="$1" output status worktree_evidence_before
@@ -737,12 +764,12 @@ assert_present_worker_identity_rejected() {
     printf 'cleanup accepted changed worker worktree identity: %s\n' "$label" >&2
     exit 1
   }
-  [[ "$output" == *"Retry worker worktree identity"* ]] || {
+  [[ "$output" == *"Retry worker"* ]] || {
     printf 'cleanup returned an unexpected worker identity error for %s: %s\n' \
       "$label" "$output" >&2
     exit 1
   }
-  [[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 1 ]]
+  [[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 2 ]]
   [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-owner")" == \
     "$present_owner_before" ]]
   [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase")" == \
@@ -752,6 +779,52 @@ assert_present_worker_identity_rejected() {
   [[ "$(cksum "$TEST_ROOT/present-retry-sgt-present-retry"/.sergeant-*)" == \
     "$worktree_evidence_before" ]]
 }
+
+assert_present_persisted_evidence_rejected() {
+  local evidence_before label="$1" output status worktree_evidence_before
+
+  evidence_before="$(cksum \
+    "$TEST_ROOT/fleet/present-retry/app/terminal-evidence"/.sergeant-*)"
+  worktree_evidence_before="$(cksum \
+    "$TEST_ROOT/present-retry-sgt-present-retry"/.sergeant-*)"
+  set +e
+  output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+    FAKE_GIT_LOG="$TEST_ROOT/present-retry-removals" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" present-retry 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -ne 0 && "$output" == *"persisted terminal evidence"* ]] || {
+    printf 'cleanup accepted invalid persisted evidence for %s: %s\n' \
+      "$label" "$output" >&2
+    exit 1
+  }
+  [[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 2 ]]
+  [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-owner")" == \
+    "$present_owner_before" ]]
+  [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase")" == \
+    "$present_phase_before" ]]
+  [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/terminal-evidence"/.sergeant-*)" == \
+    "$evidence_before" ]]
+  [[ "$(cksum "$TEST_ROOT/present-retry-sgt-present-retry"/.sergeant-*)" == \
+    "$worktree_evidence_before" ]]
+}
+
+printf 'tampered persisted result\n' > \
+  "$TEST_ROOT/fleet/present-retry/app/terminal-evidence/.sergeant-result"
+assert_present_persisted_evidence_rejected 'tampered manifest member'
+cp -p "$TEST_ROOT/present-retry-sgt-present-retry/.sergeant-result" \
+  "$TEST_ROOT/fleet/present-retry/app/terminal-evidence/.sergeant-result"
+rm "$TEST_ROOT/fleet/present-retry/app/terminal-evidence/.sergeant-result"
+assert_present_persisted_evidence_rejected 'partial manifest'
+cp -p "$TEST_ROOT/present-retry-sgt-present-retry/.sergeant-result" \
+  "$TEST_ROOT/fleet/present-retry/app/terminal-evidence/.sergeant-result"
+
+rm "$TEST_ROOT/present-retry-sgt-present-retry/.sergeant-result"
+assert_present_worker_identity_rejected 'partial live evidence'
+cp -p "$TEST_ROOT/fleet/present-retry/app/terminal-evidence/.sergeant-result" \
+  "$TEST_ROOT/present-retry-sgt-present-retry/.sergeant-result"
 
 init_test_repo "$TEST_ROOT/present-retry-other"
 for reappeared_phase in partial-removal removed reconciled-absent; do
@@ -805,7 +878,7 @@ EOF
     fi
     grep -Fq 'Retry worktree type changed: app' \
       "$TEST_ROOT/reappeared-$reappeared_phase-type.log"
-    [[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 1 ]]
+    [[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 2 ]]
     printf 'git\n' > "$TEST_ROOT/fleet/present-retry/app/wt_type"
   fi
   if PATH="$TEST_ROOT/fake-bin:$PATH" \
@@ -820,7 +893,7 @@ EOF
   fi
   grep -Fq 'Previously removed worktree reappeared: app' \
     "$TEST_ROOT/reappeared-$reappeared_phase.log"
-  [[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 1 ]]
+  [[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 2 ]]
   [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-owner")" == \
     "$reappeared_owner_before" ]]
   [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase")" == \
@@ -833,6 +906,13 @@ done
 printf 'removing\n%s\ngit\n%s\n' \
   "$TEST_ROOT/present-retry-sgt-present-retry" "$TEST_ROOT/present-retry" > \
   "$TEST_ROOT/fleet/present-retry/app/cleanup-phase"
+present_worker_git_dir="$(git -C \
+  "$TEST_ROOT/present-retry-sgt-present-retry" rev-parse --path-format=absolute --git-dir)"
+printf '[fixture]\n\tworkerMetadata = changed\n' > \
+  "$present_worker_git_dir/config.worktree"
+assert_present_worker_identity_rejected 'linked-worktree metadata drift'
+rm "$present_worker_git_dir/config.worktree"
+
 git -C "$TEST_ROOT/present-retry-sgt-present-retry" checkout -q --detach HEAD^
 assert_present_worker_identity_rejected 'HEAD drift'
 git -C "$TEST_ROOT/present-retry-sgt-present-retry" checkout -q present-retry-worker
@@ -840,10 +920,6 @@ git -C "$TEST_ROOT/present-retry-sgt-present-retry" checkout -q present-retry-wo
 git -C "$TEST_ROOT/present-retry-sgt-present-retry" tag worker-ref-drift
 assert_present_worker_identity_rejected 'ref drift'
 git -C "$TEST_ROOT/present-retry-sgt-present-retry" tag -d worker-ref-drift >/dev/null
-
-printf '#!/bin/sh\n' > "$TEST_ROOT/present-retry/.git/hooks/worker-metadata-drift"
-assert_present_worker_identity_rejected 'metadata drift'
-rm "$TEST_ROOT/present-retry/.git/hooks/worker-metadata-drift"
 
 printf 'changed worker contents\n' >> \
   "$TEST_ROOT/present-retry-sgt-present-retry/README.md"
@@ -876,7 +952,7 @@ if PATH="$TEST_ROOT/fake-bin:$PATH" \
   printf 'cleanup accepted changed owner on present-worktree retry\n' >&2
   exit 1
 fi
-[[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 1 ]]
+[[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 2 ]]
 [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-owner")" == \
   "$present_owner_before" ]]
 [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase")" == \
@@ -900,7 +976,7 @@ if PATH="$TEST_ROOT/fake-bin:$PATH" \
   printf 'cleanup accepted configured root drift on present-worktree retry\n' >&2
   exit 1
 fi
-[[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 1 ]]
+[[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 2 ]]
 [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-owner")" == \
   "$present_owner_before" ]]
 [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase")" == \
@@ -919,7 +995,7 @@ if PATH="$TEST_ROOT/fake-bin:$PATH" \
   printf 'cleanup accepted removal-type drift on present-worktree retry\n' >&2
   exit 1
 fi
-[[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 1 ]]
+[[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 2 ]]
 [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-owner")" == \
   "$present_owner_before" ]]
 [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase")" == \

@@ -445,20 +445,73 @@ _repo_metadata_identity() {
   ) | git hash-object --stdin
 }
 
-_repo_worktree_identity() {
-  local path repo_root="$1"
+_repo_per_worktree_metadata_identity() {
+  local git_dir="$1" index repo_root="$2"
+
+  index="$(git -C "$repo_root" ls-files --stage -z | git hash-object --stdin)" || return 1
 
   (
-    git -C "$repo_root" diff --no-ext-diff --binary HEAD -- || exit 1
+    cd "$git_dir" || exit 1
+    printf 'index\n%s\n' "$index"
+    find . -path ./index -prune -o -path ./logs -prune -o -path ./objects -prune -o \
+      -path ./refs -prune -o -path ./worktrees -prune -o \
+      \( -type f -o -type l \) -print | LC_ALL=C sort | \
+      while IFS= read -r path; do
+        if [[ -L "$path" ]]; then
+          printf 'link\n%s\n%s\n' "$path" "$(readlink "$path")"
+        else
+          printf 'file\n%s\n' "$path"
+          git hash-object "$path" || exit 1
+        fi
+      done
+  ) | git hash-object --stdin
+}
+
+_repo_worktree_identity() {
+  local mode="${2:-}" path repo_root="$1"
+
+  (
+    if [[ "$mode" == "exclude-evidence" ]]; then
+      git -C "$repo_root" diff --no-ext-diff --binary HEAD -- \
+        . ':(exclude).sergeant-*' || exit 1
+    else
+      git -C "$repo_root" diff --no-ext-diff --binary HEAD -- || exit 1
+    fi
     while IFS= read -r -d '' path; do
+      [[ "$mode" != "exclude-evidence" || "$path" != .sergeant-* ]] || continue
       printf 'untracked\n%s\n' "$path"
       git -C "$repo_root" hash-object "$path" || exit 1
     done < <(git -C "$repo_root" ls-files --others --exclude-standard -z)
   ) | git hash-object --stdin
 }
 
+_worker_evidence_identity() {
+  local evidence evidence_dir="$1"
+
+  (
+    cd "$evidence_dir" || exit 1
+    export LC_ALL=C
+    for evidence in .sergeant-*; do
+      [[ -e "$evidence" || -L "$evidence" ]] || continue
+      [[ -f "$evidence" && ! -L "$evidence" ]] || exit 1
+      printf 'file\n%s\n' "$evidence"
+      git hash-object "$evidence" || exit 1
+    done
+  ) | git hash-object --stdin
+}
+
+_worker_evidence_present() {
+  local evidence
+
+  for evidence in "$1"/.sergeant-*; do
+    [[ -e "$evidence" || -L "$evidence" ]] && return 0
+  done
+  return 1
+}
+
 _repo_identity() {
-  local config git_common_dir git_dir head instance metadata refs remote roots state repo_root="$1"
+  local config git_common_dir git_dir head instance metadata per_worktree_metadata refs remote \
+    roots state repo_root="$1"
 
   git_dir="$(_repo_git_dir "$repo_root" worktree)" || return 1
   git_common_dir="$(_repo_git_dir "$repo_root" common)" || return 1
@@ -472,10 +525,13 @@ _repo_identity() {
   roots="$(git -C "$repo_root" rev-list --max-parents=0 --all 2>/dev/null | sort)"
   [[ -n "$roots" ]] || return 1
   remote="$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null || true)"
-  state="$(_repo_worktree_identity "$repo_root")" || return 1
+  state="$(_repo_worktree_identity "$repo_root" "${2:-}")" || return 1
   metadata="$(_repo_metadata_identity "$git_common_dir")" || return 1
-  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
-    "$instance" "$metadata" "$config" "$head" "$remote" "$roots" "$refs" "$state" | \
+  per_worktree_metadata="$(_repo_per_worktree_metadata_identity "$git_dir" "$repo_root")" || \
+    return 1
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$instance" "$metadata" "$per_worktree_metadata" "$config" "$head" "$remote" \
+    "$roots" "$refs" "$state" | \
     git hash-object --stdin
 }
 
@@ -511,28 +567,30 @@ _configured_repo_root() {
 }
 
 _record_cleanup_owner() {
-  local holder identity project repo_dir="$1" repo_root="$2" worker_identity \
-    worktree="$3" wt_type="$4"
+  local evidence_identity holder identity project repo_dir="$1" repo_root="$2" \
+    worker_identity worktree="$3" wt_type="$4"
 
   identity="$(_repo_identity "$repo_root" create)" || return 1
-  worker_identity="$(_repo_identity "$worktree")" || return 1
+  worker_identity="$(_repo_identity "$worktree" exclude-evidence)" || return 1
+  evidence_identity="$(_worker_evidence_identity "$repo_dir/terminal-evidence")" || return 1
   project="$(_task_project)" || return 1
   holder=""
   [[ "$wt_type" != "treehouse" ]] || \
     holder="$(tr -d '\n' < "$repo_dir/wt_holder" 2>/dev/null || true)"
-  printf '3\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+  printf '4\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
     "$project" "$repo_root" "$worktree" "$wt_type" "$identity" \
-    "$worker_identity" "$holder" \
+    "$worker_identity" "$evidence_identity" "$holder" \
     > "$repo_dir/cleanup-owner.tmp" &&
     mv "$repo_dir/cleanup-owner.tmp" "$repo_dir/cleanup-owner"
 }
 
 _validate_retry_owner() {
-  local configured_root expected_holder expected_root holder identity owner_holder owner_identity \
-    owner_project owner_root owner_type owner_worker_identity owner_worktree project repo_dir="$1" \
+  local configured_root evidence_identity expected_holder expected_root holder identity \
+    live_evidence_identity owner_evidence_identity owner_holder owner_identity owner_project \
+    owner_root owner_type owner_worker_identity owner_worktree project repo_dir="$1" \
     repo_name="$2" worker_identity worktree="$3" retry_type="$4" retry_root="$5"
 
-  [[ "$(sed -n '1p' "$repo_dir/cleanup-owner" 2>/dev/null || true)" == "3" ]] || \
+  [[ "$(sed -n '1p' "$repo_dir/cleanup-owner" 2>/dev/null || true)" == "4" ]] || \
     _die "Retry owner identity is missing: $repo_name"
   owner_project="$(sed -n '2p' "$repo_dir/cleanup-owner")"
   owner_root="$(sed -n '3p' "$repo_dir/cleanup-owner")"
@@ -540,7 +598,8 @@ _validate_retry_owner() {
   owner_type="$(sed -n '5p' "$repo_dir/cleanup-owner")"
   owner_identity="$(sed -n '6p' "$repo_dir/cleanup-owner")"
   owner_worker_identity="$(sed -n '7p' "$repo_dir/cleanup-owner")"
-  owner_holder="$(sed -n '8p' "$repo_dir/cleanup-owner")"
+  owner_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
+  owner_holder="$(sed -n '9p' "$repo_dir/cleanup-owner")"
   [[ "$retry_root" == "$owner_root" && "$worktree" == "$owner_worktree" && \
     "$retry_type" == "$owner_type" ]] || \
     _die "Retry cleanup state does not match its recorded owner: $repo_name"
@@ -558,10 +617,20 @@ _validate_retry_owner() {
   [[ "$owner_root" == "$expected_root" ]] || \
     _die "Retry owner repo is symlink-aliased: $owner_root"
   if [[ -d "$worktree" ]]; then
-    worker_identity="$(_repo_identity "$worktree")" || \
+    worker_identity="$(_repo_identity "$worktree" exclude-evidence)" || \
       _die "Retry worker worktree identity is unavailable: $repo_name"
     [[ "$worker_identity" == "$owner_worker_identity" ]] || \
       _die "Retry worker worktree identity changed: $repo_name"
+  fi
+  evidence_identity="$(_worker_evidence_identity "$repo_dir/terminal-evidence")" || \
+    _die "Retry persisted terminal evidence is unavailable: $repo_name"
+  [[ "$evidence_identity" == "$owner_evidence_identity" ]] || \
+    _die "Retry persisted terminal evidence changed: $repo_name"
+  if [[ -d "$worktree" ]] && _worker_evidence_present "$worktree"; then
+    live_evidence_identity="$(_worker_evidence_identity "$worktree")" || \
+      _die "Retry worker lifecycle evidence is unavailable: $repo_name"
+    [[ "$live_evidence_identity" == "$owner_evidence_identity" ]] || \
+      _die "Retry worker lifecycle evidence changed: $repo_name"
   fi
   identity="$(_repo_identity "$expected_root")" || \
     _die "Cannot identify retry owner repo: $repo_name"
