@@ -754,9 +754,9 @@ _record_cleanup_owner() {
 }
 
 _validate_retry_owner() {
-  local expected_holder expected_root holder identity owner_holder owner_identity owner_project \
-    owner_root owner_type owner_worktree project repo_dir="$1" repo_name="$2" worktree="$3" \
-    retry_type="$4" retry_root="$5"
+  local configured_root expected_holder expected_root holder identity owner_holder owner_identity \
+    owner_project owner_root owner_type owner_worktree project repo_dir="$1" repo_name="$2" \
+    worktree="$3" retry_type="$4" retry_root="$5"
 
   [[ "$(sed -n '1p' "$repo_dir/cleanup-owner" 2>/dev/null || true)" == "2" ]] || \
     _die "Retry owner identity is missing: $repo_name"
@@ -773,6 +773,10 @@ _validate_retry_owner() {
   project="$(_task_project)" || _die "Cannot resolve retry owner project: $repo_name"
   [[ "$project" == "$owner_project" ]] || \
     _die "Retry owner project changed: $repo_name"
+  configured_root="$(_configured_repo_root "$repo_name")" || \
+    _die "Cannot resolve configured retry owner: $repo_name"
+  [[ "$configured_root" == "$owner_root" ]] || \
+    _die "Configured retry owner changed: $repo_name"
   [[ -d "$owner_root" && ! -L "$owner_root" ]] || \
     _die "Retry owner repo is missing or aliased: $owner_root"
   expected_root="$(cd "$owner_root" && pwd -P)"

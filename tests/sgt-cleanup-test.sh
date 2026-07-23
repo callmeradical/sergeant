@@ -599,7 +599,11 @@ EOF
 printf 'Project: cross-project\n' > "$TEST_ROOT/fleet/removal-failure/brief.md"
 assert_retry_owner_rejected 'cross-project repository at the same path'
 printf 'Project: removal-failure\n' > "$TEST_ROOT/fleet/removal-failure/brief.md"
-rm "$TEST_ROOT/config/removal-failure.yaml"
+mv "$TEST_ROOT/config/removal-failure.yaml" \
+  "$TEST_ROOT/config/removal-failure.yaml.saved"
+assert_retry_owner_rejected 'missing current project config'
+mv "$TEST_ROOT/config/removal-failure.yaml.saved" \
+  "$TEST_ROOT/config/removal-failure.yaml"
 PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
   FAKE_GIT_LOG="$TEST_ROOT/git-removals" \
   SERGEANT_CONFIG="$TEST_ROOT/config" \
