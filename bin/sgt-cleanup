@@ -202,7 +202,8 @@ _stop_local_worker() {
 }
 
 _require_terminal_repos() {
-  local cleanup_phase evidence_dir repo_dir repo_name status worktree worktree_status
+  local cleanup_phase evidence_dir partial_phase removing_phase repo_dir repo_name \
+    retry_root retry_type status worktree worktree_status wt_type
 
   for repo_dir in "$TASK_DIR"/*/; do
     [[ -d "$repo_dir" ]] || continue
@@ -223,9 +224,17 @@ _require_terminal_repos() {
     esac
 
     worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+    wt_type="$(cat "$repo_dir/wt_type" 2>/dev/null || echo git)"
     cleanup_phase="$(cat "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+    retry_type="$(sed -n '3p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+    retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+    partial_phase="$(printf 'partial-removal\n%s\n%s\n%s\n' \
+      "$worktree" "$retry_type" "$retry_root")"
+    removing_phase="$(printf 'removing\n%s\n%s\n%s\n' \
+      "$worktree" "$retry_type" "$retry_root")"
     if [[ -n "$worktree" && -d "$worktree" ]]; then
-      if [[ "$cleanup_phase" == $'removing\n'"$worktree" ]]; then
+      if [[ "$cleanup_phase" == $'removing\n'"$worktree" || \
+        "$cleanup_phase" == "$removing_phase" ]]; then
         _restore_worker_evidence "$repo_dir" "$worktree"
       fi
       [[ -f "$worktree/.sergeant-status" ]] || \
@@ -242,6 +251,11 @@ _require_terminal_repos() {
     else
       [[ -n "$worktree" && ( \
         "$cleanup_phase" == $'removing\n'"$worktree" || \
+        ( ( "$cleanup_phase" == "$partial_phase" || \
+            "$cleanup_phase" == "$removing_phase" ) && \
+          "$retry_type" == "$wt_type" && \
+          ( "$retry_type" == git || "$retry_type" == treehouse ) && \
+          -n "$retry_root" ) || \
         "$cleanup_phase" == $'reconciled-absent\n'"$worktree" \
       ) ]] || \
         _die "$repo_name has no reconciled cleanup phase for its absent worktree"
@@ -324,8 +338,12 @@ _restore_worker_evidence() {
 
 _record_cleanup_phase() {
   local repo_dir="$1" phase="$2" worktree="$3"
+  shift 3
 
-  printf '%s\n%s\n' "$phase" "$worktree" > "$repo_dir/cleanup-phase.tmp" &&
+  {
+    printf '%s\n%s\n' "$phase" "$worktree"
+    [[ $# -eq 0 ]] || printf '%s\n' "$@"
+  } > "$repo_dir/cleanup-phase.tmp" &&
     mv "$repo_dir/cleanup-phase.tmp" "$repo_dir/cleanup-phase"
 }
 
@@ -363,55 +381,75 @@ for repo_dir in "$TASK_DIR"/*/; do
   fi
 
   if [[ ! -d "$worktree" ]]; then
+    retry_type="$(sed -n '3p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+    retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+    if [[ -n "$retry_root" ]]; then
+      echo "  retrying interrupted $retry_type removal: $worktree"
+      if [[ "$retry_type" == "treehouse" ]]; then
+        if ! (cd "$retry_root" && treehouse return "$worktree" 2>&1 | sed 's/^/  /'); then
+          _die "Failed to reconcile interrupted treehouse removal: $worktree"
+        fi
+      elif ! git -C "$retry_root" worktree remove "$worktree" 2>&1 | sed 's/^/  /'; then
+        _die "Failed to reconcile interrupted git worktree removal: $worktree"
+      fi
+      [[ ! -d "$worktree" ]] || \
+        _die "Interrupted removal retry left the worktree directory present: $worktree"
+      _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
+        _die "Failed to publish reconciled cleanup phase: $repo_name"
+      echo ""
+      continue
+    fi
     echo "  worktree not found or already removed: $worktree"
     echo ""
     continue
   fi
 
+  if [[ "$wt_type" == "treehouse" ]]; then
+    git_file="$worktree/.git"
+    [[ -f "$git_file" ]] || \
+      _die "Cannot identify treehouse lease; fleet state preserved: $worktree"
+    git_dir_line="$(cat "$git_file")"
+    git_dir="${git_dir_line#gitdir: }"
+    main_git="$(dirname "$(dirname "$git_dir")")"
+    retry_root="$(dirname "$main_git")"
+  else
+    repo_base_name="$(basename "$worktree" | sed "s/-sgt-${TASK_ID}$//")"
+    retry_root="$(dirname "$worktree")/$repo_base_name"
+    [[ -d "$retry_root/.git" ]] || \
+      _die "Main repo not found; fleet state preserved: $retry_root"
+  fi
+
   _stage_worker_evidence "$repo_dir" "$worktree"
-  if ! _record_cleanup_phase "$repo_dir" removing "$worktree"; then
+  if ! _record_cleanup_phase "$repo_dir" removing "$worktree" \
+    "$wt_type" "$retry_root"; then
     _restore_worker_evidence "$repo_dir" "$worktree"
     _die "Failed to record cleanup phase before worktree removal: $repo_name"
   fi
   _remove_worker_evidence "$worktree"
 
   if [[ "$wt_type" == "treehouse" ]]; then
-    # Find the main repo path to run treehouse return from
-    # Worktree is inside ~/.treehouse/<slug>/<n>/<repo-name>
-    # We need to run treehouse return from the main repo that owns the pool
-    #
-    # Strategy: find the main repo by looking at the .git file inside the worktree
-    git_file="$worktree/.git"
-    if [[ -f "$git_file" ]]; then
-      # .git file contains: gitdir: /path/to/main/.git/worktrees/<name>
-      git_dir_line="$(cat "$git_file")"
-      git_dir="${git_dir_line#gitdir: }"
-      # main repo .git is two levels up from .git/worktrees/<name>
-      main_git="$(dirname "$(dirname "$git_dir")")"
-      main_repo="$(dirname "$main_git")"
-      echo "  returning treehouse lease: $worktree"
-      if ! (cd "$main_repo" && treehouse return "$worktree" 2>&1 | sed 's/^/  /'); then
-        _restore_worker_evidence "$repo_dir" "$worktree"
-        _die "Failed to return treehouse lease; fleet state preserved: $worktree"
+    echo "  returning treehouse lease: $worktree"
+    if ! (cd "$retry_root" && treehouse return "$worktree" 2>&1 | sed 's/^/  /'); then
+      if [[ ! -d "$worktree" ]]; then
+        _record_cleanup_phase "$repo_dir" partial-removal "$worktree" \
+          "$wt_type" "$retry_root" || \
+          _die "Failed to record partial treehouse removal: $repo_name"
+        _die "Treehouse return failed after worktree removal; retry required: $worktree"
       fi
-    else
       _restore_worker_evidence "$repo_dir" "$worktree"
-      _die "Cannot identify treehouse lease; fleet state preserved: $worktree"
+      _die "Failed to return treehouse lease; fleet state preserved: $worktree"
     fi
   else
-    # Plain git worktree — find main repo as sibling (name before -sgt- suffix)
-    repo_base_name="$(basename "$worktree" | sed "s/-sgt-${TASK_ID}$//")"
-    repo_base="$(dirname "$worktree")/$repo_base_name"
-
-    if [[ -d "$repo_base/.git" ]]; then
-      echo "  removing git worktree: $worktree"
-      if ! git -C "$repo_base" worktree remove "$worktree" 2>&1 | sed 's/^/  /'; then
-        _restore_worker_evidence "$repo_dir" "$worktree"
-        _die "Failed to remove git worktree; fleet state preserved: $worktree"
+    echo "  removing git worktree: $worktree"
+    if ! git -C "$retry_root" worktree remove "$worktree" 2>&1 | sed 's/^/  /'; then
+      if [[ ! -d "$worktree" ]]; then
+        _record_cleanup_phase "$repo_dir" partial-removal "$worktree" \
+          "$wt_type" "$retry_root" || \
+          _die "Failed to record partial git worktree removal: $repo_name"
+        _die "Git worktree removal failed after removing the directory; retry required: $worktree"
       fi
-    else
       _restore_worker_evidence "$repo_dir" "$worktree"
-      _die "Main repo not found; fleet state preserved: $repo_base"
+      _die "Failed to remove git worktree; fleet state preserved: $worktree"
     fi
   fi
 

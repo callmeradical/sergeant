@@ -214,11 +214,13 @@ case " $* " in
   *" status "*) ;;
   *" worktree remove "*)
     worktree="${!#}"
+    printf '%s\n' "$worktree" >> "$FAKE_GIT_LOG"
     if [[ "$worktree" == *removal-success* ]]; then
       rm -rf "$worktree"
     elif [[ -e "$FAKE_GIT_STATE" ]]; then
       rm -rf "$worktree"
     else
+      rm -rf "$worktree"
       touch "$FAKE_GIT_STATE"
       exit 1
     fi
@@ -228,27 +230,160 @@ esac
 EOF
 chmod +x "$TEST_ROOT/fake-bin/git"
 if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
+  FAKE_GIT_LOG="$TEST_ROOT/git-removals" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" removal-failure >/dev/null 2>&1; then
   printf 'cleanup succeeded after worktree removal failed\n' >&2
   exit 1
 fi
-[[ -d "$TEST_ROOT/removal-failure-sgt-removal-failure" ]]
+[[ ! -e "$TEST_ROOT/removal-failure-sgt-removal-failure" ]]
 [[ ! -e "$TEST_ROOT/removal-success-sgt-removal-failure" ]]
 [[ -d "$TEST_ROOT/fleet/removal-failure" ]]
 [[ "$(cat "$TEST_ROOT/fleet/removal-failure/aaa/cleanup-phase")" == \
   $'reconciled-absent\n'"$TEST_ROOT/removal-success-sgt-removal-failure" ]]
+[[ "$(cat "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase")" == \
+  $'partial-removal\n'"$TEST_ROOT/removal-failure-sgt-removal-failure"$'\ngit\n'"$TEST_ROOT/removal-failure" ]]
+[[ "$(wc -l < "$TEST_ROOT/git-removals")" -eq 2 ]]
 [[ "$(cat "$TEST_ROOT/fleet/removal-failure/aaa/terminal-evidence/.sergeant-diagnostic")" == \
   'earlier diagnostic' ]]
 [[ "$(cat "$TEST_ROOT/fleet/removal-failure/app/terminal-evidence/.sergeant-diagnostic")" == \
   'removal diagnostic' ]]
-[[ "$(cat "$TEST_ROOT/removal-failure-sgt-removal-failure/.sergeant-status")" == 'done' ]]
-[[ "$(cat "$TEST_ROOT/removal-failure-sgt-removal-failure/.sergeant-result")" == 'result' ]]
+printf '%s\n' "$TEST_ROOT/different-worktree" > \
+  "$TEST_ROOT/fleet/removal-failure/app/worktree"
+if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
+  FAKE_GIT_LOG="$TEST_ROOT/git-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" removal-failure >/dev/null 2>&1; then
+  printf 'cleanup reconciled partial removal against a different worktree\n' >&2
+  exit 1
+fi
+[[ -d "$TEST_ROOT/fleet/removal-failure" ]]
+[[ -f "$TEST_ROOT/fleet/removal-failure/app/terminal-evidence/.sergeant-status" ]]
+[[ "$(cat "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase")" == \
+  $'partial-removal\n'"$TEST_ROOT/removal-failure-sgt-removal-failure"$'\ngit\n'"$TEST_ROOT/removal-failure" ]]
+[[ "$(wc -l < "$TEST_ROOT/git-removals")" -eq 2 ]]
+printf '%s\n' "$TEST_ROOT/removal-failure-sgt-removal-failure" > \
+  "$TEST_ROOT/fleet/removal-failure/app/worktree"
 PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
+  FAKE_GIT_LOG="$TEST_ROOT/git-removals" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" removal-failure >/dev/null
+[[ "$(wc -l < "$TEST_ROOT/git-removals")" -eq 3 ]]
 [[ ! -e "$TEST_ROOT/fleet/removal-failure" ]]
 rm "$TEST_ROOT/fake-bin/git"
+
+mkdir -p "$TEST_ROOT/fleet/partial-publication/app" \
+  "$TEST_ROOT/partial-publication/.git" \
+  "$TEST_ROOT/partial-publication-sgt-partial-publication"
+printf '%s\n' "$TEST_ROOT/partial-publication-sgt-partial-publication" > \
+  "$TEST_ROOT/fleet/partial-publication/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/partial-publication/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/partial-publication/app/result"
+printf 'done\n' > \
+  "$TEST_ROOT/partial-publication-sgt-partial-publication/.sergeant-status"
+printf 'result\n' > \
+  "$TEST_ROOT/partial-publication-sgt-partial-publication/.sergeant-result"
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" rev-parse "*) printf 'true\n' ;;
+  *" status "*) ;;
+  *" worktree remove "*)
+    printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
+    rm -rf "${!#}"
+    if [[ ! -e "$FAKE_GIT_STATE" ]]; then
+      touch "$FAKE_GIT_STATE"
+      exit 1
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+REAL_MV="$(command -v mv)"
+export REAL_MV
+cat > "$TEST_ROOT/fake-bin/mv" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$(sed -n '1p' "$1")" == "partial-removal" && ! -e "$FAKE_MV_STATE" ]]; then
+  touch "$FAKE_MV_STATE"
+  exit 1
+fi
+"$REAL_MV" "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/mv"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/partial-publication-removals" \
+  FAKE_GIT_STATE="$TEST_ROOT/partial-publication-git-failed" \
+  FAKE_MV_STATE="$TEST_ROOT/partial-publication-mv-failed" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" partial-publication >/dev/null 2>&1; then
+  printf 'cleanup succeeded after partial-removal publication failed\n' >&2
+  exit 1
+fi
+[[ "$(cat "$TEST_ROOT/fleet/partial-publication/app/cleanup-phase")" == \
+  $'removing\n'"$TEST_ROOT/partial-publication-sgt-partial-publication"$'\ngit\n'"$TEST_ROOT/partial-publication" ]]
+[[ -f "$TEST_ROOT/fleet/partial-publication/app/terminal-evidence/.sergeant-status" ]]
+PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/partial-publication-removals" \
+  FAKE_GIT_STATE="$TEST_ROOT/partial-publication-git-failed" \
+  FAKE_MV_STATE="$TEST_ROOT/partial-publication-mv-failed" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" partial-publication >/dev/null
+[[ "$(wc -l < "$TEST_ROOT/partial-publication-removals")" -eq 2 ]]
+[[ ! -e "$TEST_ROOT/fleet/partial-publication" ]]
+rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/mv"
+
+mkdir -p "$TEST_ROOT/fleet/treehouse-partial/app" "$TEST_ROOT/treehouse-main/.git" \
+  "$TEST_ROOT/treehouse-worktree"
+printf 'gitdir: %s\n' "$TEST_ROOT/treehouse-main/.git/worktrees/lease" > \
+  "$TEST_ROOT/treehouse-worktree/.git"
+printf '%s\n' "$TEST_ROOT/treehouse-worktree" > \
+  "$TEST_ROOT/fleet/treehouse-partial/app/worktree"
+printf 'treehouse\n' > "$TEST_ROOT/fleet/treehouse-partial/app/wt_type"
+printf 'done\n' > "$TEST_ROOT/fleet/treehouse-partial/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/treehouse-partial/app/result"
+printf 'done\n' > "$TEST_ROOT/treehouse-worktree/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/treehouse-worktree/.sergeant-result"
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" rev-parse "*) printf 'true\n' ;;
+  *" status "*) ;;
+  *) exit 1 ;;
+esac
+EOF
+cat > "$TEST_ROOT/fake-bin/treehouse" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1" == "return" ]]
+printf '%s|%s\n' "$PWD" "$2" >> "$FAKE_TREEHOUSE_LOG"
+if [[ ! -e "$FAKE_TREEHOUSE_STATE" ]]; then
+  rm -rf "$2"
+  touch "$FAKE_TREEHOUSE_STATE"
+  exit 1
+fi
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/treehouse"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-removals" \
+  FAKE_TREEHOUSE_STATE="$TEST_ROOT/treehouse-failed-once" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" treehouse-partial >/dev/null 2>&1; then
+  printf 'cleanup succeeded after treehouse removed the worktree and failed\n' >&2
+  exit 1
+fi
+[[ ! -e "$TEST_ROOT/treehouse-worktree" ]]
+[[ "$(cat "$TEST_ROOT/fleet/treehouse-partial/app/cleanup-phase")" == \
+  $'partial-removal\n'"$TEST_ROOT/treehouse-worktree"$'\ntreehouse\n'"$TEST_ROOT/treehouse-main" ]]
+[[ -f "$TEST_ROOT/fleet/treehouse-partial/app/terminal-evidence/.sergeant-status" ]]
+PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-removals" \
+  FAKE_TREEHOUSE_STATE="$TEST_ROOT/treehouse-failed-once" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" treehouse-partial >/dev/null
+[[ "$(wc -l < "$TEST_ROOT/treehouse-removals")" -eq 2 ]]
+[[ "$(sort -u "$TEST_ROOT/treehouse-removals")" == \
+  "$TEST_ROOT/treehouse-main|$TEST_ROOT/treehouse-worktree" ]]
+[[ ! -e "$TEST_ROOT/fleet/treehouse-partial" ]]
+rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/treehouse"
 
 mkdir -p "$TEST_ROOT/fleet/marker-publication/app" "$TEST_ROOT/marker/.git" \
   "$TEST_ROOT/marker-sgt-marker-publication"
