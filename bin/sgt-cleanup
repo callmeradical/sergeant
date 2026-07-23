@@ -447,21 +447,25 @@ _remove_worker_evidence() {
 }
 
 _restore_worker_evidence() {
-  local backup_dir count=0 evidence evidence_dir="$1/terminal-evidence" name \
-    expected_identity="$3" persisted_identity publish_count=0 repo_dir="$1" \
-    staged_identity staging_dir transaction worktree="$2"
+  local backup_count=0 backup_dir count=0 evidence \
+    evidence_dir="$1/terminal-evidence" name expected_identity="$3" \
+    persisted_identity publish_count=0 repo_dir="$1" staged_identity \
+    staging_dir transaction worktree="$2"
   local -a backed_up=() published=()
 
   [[ -d "$worktree" && -d "$evidence_dir" ]] || return 0
   _cleanup_mutation_hook before-retry-restore \
     "${SGT_CLEANUP_MUTATE_PATH:-$evidence_dir/.sergeant-status}" || return 1
+  _cleanup_fail_point restore-persisted-identity || return 1
   persisted_identity="$(_worker_evidence_identity "$evidence_dir")" || return 1
   [[ -n "$expected_identity" && "$persisted_identity" == "$expected_identity" ]] || return 1
   transaction="$repo_dir/restore-evidence.tmp.$$"
   staging_dir="$transaction/staged"
   backup_dir="$transaction/original"
+  _cleanup_fail_point restore-transaction-available || return 1
   [[ ! -e "$transaction" && ! -L "$transaction" ]] || return 1
-  if ! mkdir -p "$staging_dir" "$backup_dir"; then
+  if ! _cleanup_fail_point restore-setup || \
+    ! mkdir -p "$staging_dir" "$backup_dir"; then
     _rollback_remove_path "$transaction" "worker evidence restore setup" \
       restore-rollback-cleanup
     return 1
@@ -482,8 +486,13 @@ _restore_worker_evidence() {
       restore-rollback-cleanup
     return 1
   }
-  persisted_identity="$(_worker_evidence_identity "$evidence_dir")" || persisted_identity=""
-  staged_identity="$(_worker_evidence_identity "$staging_dir")" || staged_identity=""
+  if _cleanup_fail_point restore-staged-identity; then
+    persisted_identity="$(_worker_evidence_identity "$evidence_dir")" || persisted_identity=""
+    staged_identity="$(_worker_evidence_identity "$staging_dir")" || staged_identity=""
+  else
+    persisted_identity=""
+    staged_identity=""
+  fi
   if [[ -z "$expected_identity" || "$persisted_identity" != "$expected_identity" || \
     "$staged_identity" != "$expected_identity" ]]; then
     _rollback_remove_path "$transaction" "worker evidence restore validation" \
@@ -493,7 +502,9 @@ _restore_worker_evidence() {
   for evidence in "$worktree"/.sergeant-*; do
     [[ -f "$evidence" ]] || continue
     name="$(basename "$evidence")"
-    if ! mv "$evidence" "$backup_dir/$name"; then
+    ((backup_count += 1))
+    if ! _cleanup_fail_point "restore-backup-$backup_count" || \
+      ! mv "$evidence" "$backup_dir/$name"; then
       for name in "${backed_up[@]}"; do
         mv "$backup_dir/$name" "$worktree/$name" || \
           _die "Failed to roll back worker evidence restore: $worktree/$name"
