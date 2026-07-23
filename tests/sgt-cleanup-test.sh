@@ -12,6 +12,22 @@ cleanup_fixture() {
 }
 trap cleanup_fixture EXIT
 
+assert_not_running() {
+  local pid="$1"
+  if kill -0 "$pid" 2>/dev/null; then
+    printf 'process %s is still running\n' "$pid" >&2
+    exit 1
+  fi
+}
+
+assert_tmux_pane_missing() {
+  local pane="$1"
+  if tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+    printf 'tmux pane still exists: %s\n' "$pane" >&2
+    exit 1
+  fi
+}
+
 mkdir -p "$TEST_ROOT/fleet/task-123/app" "$TEST_ROOT/fake-bin" "$TEST_ROOT/repo"
 git -C "$TEST_ROOT/repo" init -q
 git -C "$TEST_ROOT/repo" config user.name Test
@@ -78,19 +94,19 @@ grep -Fq 'Other processes still have' "$TEST_ROOT/blocked-cleanup.log" || {
 }
 tmux display-message -p -t "$holder_pane" '#{pane_id}' >/dev/null
 [[ -d "$worktree" && -d "$TEST_ROOT/fleet/task-123" ]]
-! kill -0 "$worker_pid" 2>/dev/null
-! kill -0 "$agent_pid" 2>/dev/null
+assert_not_running "$worker_pid"
+assert_not_running "$agent_pid"
 
 tmux kill-pane -t "$holder_pane"
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" task-123 >/dev/null
 
-! tmux display-message -p -t "$worker_pane" '#{pane_id}' >/dev/null 2>&1
+assert_tmux_pane_missing "$worker_pane"
 tmux has-session -t "$TMUX_SESSION"
 tmux display-message -p -t "$TMUX_SESSION:unrelated" '#{pane_id}' >/dev/null
 kill -0 "$unrelated_pid"
-! kill -0 "$worker_pid" 2>/dev/null
-! kill -0 "$agent_pid" 2>/dev/null
+assert_not_running "$worker_pid"
+assert_not_running "$agent_pid"
 [[ ! -e "$worktree" ]]
 [[ ! -e "$TEST_ROOT/fleet/task-123" ]]
 
