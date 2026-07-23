@@ -4,6 +4,11 @@
 #
 # Provides: _die, _info, _require_*, _resolve_path, and the SGT_* env vars.
 
+_SGT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-bash-version.sh
+source "$_SGT_LIB_DIR/_sgt-bash-version.sh"
+_sgt_require_running_bash || return 1
+
 [[ "${SGT_LIB_LOADED:-}" == "1" ]] && return 0
 SGT_LIB_LOADED=1
 
@@ -16,9 +21,8 @@ FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
 # Detection order:
 #   1. SERGEANT_AGENT env var — explicit override always wins
 #   2. OPENCODE / OPENCODE_PID — set by opencode when running a session
-#   3. CLAUDE_CODE_SESSION_ID / CLAUDE_CODE_SESSION_NAME — set by Claude Code when running a session
+#   3. CLAUDE_CODE_SESSION_ID — set by Claude Code when running a session
 #   4. Fallback: opencode
-# Goose is supported through explicit SERGEANT_AGENT=goose selection.
 _sgt_detect_agent() {
   if [[ -n "${SERGEANT_AGENT:-}" ]]; then
     echo "$SERGEANT_AGENT"
@@ -76,95 +80,10 @@ _sgt_is_git_repo() {
   git -C "$path" rev-parse --git-dir >/dev/null 2>&1
 }
 
-_sgt_tmux_pane_is_supervisor() {
-  local target="$1"
-  local repo_dir="${2%/}"
-  local pane_info pane_dead pane_command
-  pane_info="$(tmux display-message -p -t "$target" '#{pane_dead}|#{pane_start_command}' 2>/dev/null)" || return 1
-  pane_dead="${pane_info%%|*}"
-  pane_command="${pane_info#*|}"
-  [[ "$pane_dead" == "0" && "$pane_command" == *sgt-worker* && "$pane_command" == *"$repo_dir"* ]]
-}
-
 # ── Common helpers ────────────────────────────────────────────────────────────
 
 _die()  { echo "ERROR: $*" >&2; exit 1; }
 _info() { echo "  $*"; }
-
-_sgt_redact_assignments() {
-  local input="$1" output="" rest key_match separator quote ch
-  local i=0 length=${#input}
-  local nocasematch_was_on=0
-  shopt -q nocasematch && nocasematch_was_on=1
-  shopt -s nocasematch
-
-  while ((i < length)); do
-    rest="${input:i}"
-    if ((i == 0)) || [[ ! "${input:i-1:1}" =~ [[:alnum:]_] ]]; then
-      if [[ "$rest" =~ ^([A-Za-z0-9_]*(token|password|secret|api([_-]?key))[A-Za-z0-9_]*)([[:space:]]*[:=][[:space:]]*) ]]; then
-        key_match="${BASH_REMATCH[1]}"
-        separator="${BASH_REMATCH[4]}"
-        output+="${key_match}=[REDACTED]"
-        i=$((i + ${#key_match} + ${#separator}))
-        if ((i < length)); then
-          quote=""
-          while ((i < length)); do
-            ch="${input:i:1}"
-            if [[ -z "$quote" ]]; then
-              case "$ch" in
-                ' '|$'\t'|';'|','|$'\n') break ;;
-                "'")
-                  quote="'"
-                  i=$((i + 1))
-                  continue
-                  ;;
-                '"')
-                  quote='"'
-                  i=$((i + 1))
-                  continue
-                  ;;
-                \\)
-                  if ((i + 1 < length)); then
-                    i=$((i + 2))
-                    continue
-                  fi
-                  ;;
-              esac
-            else
-              if [[ "$quote" == '"' && "$ch" == $'\\' ]] && ((i + 1 < length)); then
-                i=$((i + 2))
-                continue
-              fi
-              if [[ "$ch" == "$quote" ]]; then
-                quote=""
-                i=$((i + 1))
-                continue
-              fi
-            fi
-            i=$((i + 1))
-          done
-        fi
-        continue
-      fi
-    fi
-    output+="${input:i:1}"
-    i=$((i + 1))
-  done
-
-  if ((nocasematch_was_on == 0)); then
-    shopt -u nocasematch
-  fi
-  printf '%s' "$output"
-}
-
-_sgt_redact() {
-  local value="$1"
-  value="$(_sgt_redact_assignments "$value")"
-  printf '%s' "$value" | sed -E \
-    -e 's#(https?://)[^/@[:space:]]+@#\1[REDACTED]@#g' \
-    -e 's#gh[pousr]_[A-Za-z0-9_]+#[REDACTED]#g' \
-    -e 's#github_pat_[A-Za-z0-9_]+#[REDACTED]#g'
-}
 
 # ── Agent command builder ─────────────────────────────────────────────────────
 # _sgt_agent_run_cmd <agent> <message>
@@ -175,7 +94,6 @@ _sgt_redact() {
 # Supported agents:
 #   opencode   → opencode run --auto "<message>"
 #   claude     → claude --dangerously-skip-permissions "<message>"
-#   goose      → goose run --output-format json -t "<message>"
 #   (default)  → <agent> run --auto "<message>"   (opencode-style fallback)
 
 _sgt_agent_run_cmd() {
@@ -189,9 +107,6 @@ _sgt_agent_run_cmd() {
       # claude: pass message as positional arg with dangerously-skip-permissions
       # to bypass all permission dialogs in autonomous mode.
       printf '%s --dangerously-skip-permissions %q' "$agent" "$message"
-      ;;
-    goose)
-      printf '%s run --output-format json -t %q' "$agent" "$message"
       ;;
     opencode|oc|*)
       # opencode (and unknown agents): use `run --auto` for non-interactive mode.
@@ -237,6 +152,23 @@ _require_tmux() {
 }
 _require_git() {
   command -v git &>/dev/null || _die "git is required"
+}
+_require_marcus_td() {
+  local install_hint="Install it with 'brew install marcus/tap/td' or 'go install github.com/marcus/td@latest'."
+  if ! command -v td &>/dev/null; then
+    _die "td is missing. Required implementation: github.com/marcus/td. $install_hint"
+  fi
+
+  local td_path td_version create_help
+  td_path="$(command -v td)"
+  td_version="$(td --version 2>&1 || true)"
+  [[ -n "$td_version" ]] || td_version="version unknown"
+  create_help="$(td create --help 2>&1 || true)"
+
+  if [[ ! "$td_version" =~ ^td\ version\ v[0-9]+\.[0-9]+\.[0-9]+$ || \
+        "$create_help" != *"--description"* || "$create_help" != *"--json"* || "$create_help" != *"--work-dir"* ]]; then
+    _die "Unsupported td detected at $td_path: $td_version. Required implementation: github.com/marcus/td with create/json/work-dir support. $install_hint"
+  fi
 }
 _require_treehouse() {
   command -v treehouse &>/dev/null || _die "treehouse is required: install from https://github.com/kunchenguid/treehouse"

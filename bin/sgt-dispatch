@@ -2,7 +2,7 @@
 # sgt-dispatch — Dispatch subagents across repos in a project
 #
 # Creates an isolated git worktree per repo, writes a mission brief into each,
-# and spawns an agent (tmux window locally, or babydriver remotely).
+# and spawns an agent in a local tmux window.
 #
 # Usage:
 #   sgt-dispatch <project> "<brief>" [options]
@@ -12,7 +12,6 @@
 #   --repos repo1,repo2,...   Repos to dispatch (required unless --td auto-detects)
 #   --td <task-id>            Pull brief and context from a td task
 #   --branch <name>           Branch name for all worktrees (default: derived from brief)
-#   --remote                  Dispatch to cleanthes via babydriver (default: local tmux)
 #   --deps "repo1>repo2,..."  Dependency ordering: repo1 must finish before repo2 starts
 #   --dry-run                 Print what would happen, don't execute
 #
@@ -40,7 +39,6 @@ REPOS_ARG=""
 BRANCH_ARG=""
 DEPS_ARG=""
 TD_TASK_ID=""
-REMOTE=false
 DRY_RUN=false
 
 # Brief is optional positional arg (not present when --td is used)
@@ -54,7 +52,6 @@ while [[ $# -gt 0 ]]; do
     --td)      TD_TASK_ID="$2";  shift 2 ;;
     --branch)  BRANCH_ARG="$2";  shift 2 ;;
     --deps)    DEPS_ARG="$2";    shift 2 ;;
-    --remote)  REMOTE=true;      shift   ;;
     --dry-run) DRY_RUN=true;     shift   ;;
     *) _die "Unknown option: $1" ;;
   esac
@@ -66,7 +63,7 @@ TD_CONTEXT=""
 TD_REPO=""
 
 if [[ -n "$TD_TASK_ID" ]]; then
-  command -v td &>/dev/null || _die "--td requires td to be installed"
+  _require_marcus_td
   _require_yq
 
   # Find which repo owns this task by trying each repo's td db
@@ -119,7 +116,7 @@ IFS=',' read -ra TARGET_REPOS <<< "$REPOS_ARG"
 
 _require_yq
 _require_git
-$REMOTE || _require_tmux
+_require_tmux
 
 # ── Auto-create td tasks when no --td given ───────────────────────────────────
 # When we weren't given a specific task ID, create td tasks in each target repo
@@ -240,12 +237,22 @@ PY
 }
 
 if [[ -z "$TD_TASK_ID" ]] && ! $DRY_RUN; then
-  command -v td &>/dev/null || _die "td is required for brief-only dispatch"
+  _require_marcus_td
+  TD_TITLE="$(python3 - "$BRIEF" <<'PY'
+import sys
+
+title = " ".join(sys.argv[1].split())
+if len(title) > 200:
+    title = title[:197].rstrip() + "..."
+print(title)
+PY
+)"
   echo "Creating td tasks ..."
   : > "$TD_CREATE_STATE_FILE"
   : > "$TD_CREATE_STDERR"
-  if ! td_results="$(SGT_TD_STATE_FILE="$TD_CREATE_STATE_FILE" "$SCRIPT_DIR/sgt-td-create" "$PROJECT" "$BRIEF" \
+  if ! td_results="$(SGT_TD_STATE_FILE="$TD_CREATE_STATE_FILE" "$SCRIPT_DIR/sgt-td-create" "$PROJECT" "$TD_TITLE" \
     --repos "$REPOS_ARG" \
+    --description "$BRIEF" \
     --type task \
     --priority P1 \
     --json 2>"$TD_CREATE_STDERR")"; then
@@ -296,7 +303,6 @@ echo "=== sgt-dispatch: $PROJECT ==="
 echo "brief:   $BRIEF"
 echo "task-id: $TASK_ID"
 echo "branch:  $BRANCH"
-echo "backend: $($REMOTE && echo "babydriver (remote)" || echo "tmux (local)")"
 echo ""
 
 # ── Validate repos ────────────────────────────────────────────────────────────
@@ -342,96 +348,27 @@ _record_dispatch_orphan() {
   "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
 }
 
-_parse_babydriver_start() {
-  local window_name="$1"
-  local payload
-  payload="$(cat)"
-  python3 - "$window_name" "$payload" <<'PY'
-import json
-import sys
-
-window_name = sys.argv[1]
-raw = sys.argv[2]
-payload = json.loads(raw)
-
-def as_dict(value):
-    return value if isinstance(value, dict) else {}
-
-def as_list(value):
-    return value if isinstance(value, list) else []
-
-def as_string(value):
-    return value if isinstance(value, str) else ""
-
-def candidate_window_fields(task):
-    return (
-        as_string(task.get("window")),
-        as_string(task.get("name")),
-        as_string(task.get("slug")),
-    )
-
-def matches_requested_window(requested, task):
-    window, name, slug = candidate_window_fields(task)
-    if window == requested or slug == requested:
-        return True
-    if name == requested:
-        return True
-    if name.startswith(requested + ":"):
-        return True
-    return False
-
-session = ""
-project_dir = ""
-task_id = ""
-matched_window = ""
-matched_name = ""
-matched_slug = ""
-matched = "0"
-
-if isinstance(payload, dict):
-    session_value = payload.get("session")
-    session_obj = as_dict(session_value)
-    session = (
-        as_string(session_value)
-        or as_string(payload.get("session_name"))
-        or as_string(session_obj.get("name"))
-        or as_string(session_obj.get("session"))
-        or as_string(session_obj.get("id"))
-    )
-    project_dir = (
-        as_string(payload.get("project_dir"))
-        or as_string(payload.get("repo_dir"))
-        or as_string(session_obj.get("project_dir"))
-        or as_string(session_obj.get("repo_dir"))
-    )
-    tasks = as_list(payload.get("tasks"))
-    if not tasks:
-        tasks = as_list(session_obj.get("tasks"))
-    for task in tasks:
-        task = as_dict(task)
-        if matches_requested_window(window_name, task):
-            window, name, slug = candidate_window_fields(task)
-            matched = "1"
-            matched_window = window
-            matched_name = name
-            matched_slug = slug
-            task_id = str(task.get("task_id") or task.get("td_task_id") or task.get("id") or "")
-            break
-
-print(session)
-print(window_name)
-print(task_id)
-print(project_dir)
-print(matched)
-print(matched_window or matched_name or matched_slug)
-PY
-}
-
 # ── Capture primary pane (for sgt-notify callbacks) ──────────────────────────
 
 PRIMARY_PANE=""
 if [[ -n "${TMUX:-}" ]]; then
   PRIMARY_PANE="$(tmux display-message -p '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)"
+fi
+
+OC_PID="${OPENCODE_PID:-}"
+OC_SESSION=""
+if [[ "$OC_PID" =~ ^[0-9]+$ ]]; then
+  OC_ROOT="${OC_INJECT_ROOT:-$HOME/.local/share/opencode/inbox}"
+  OC_REGISTRY="$OC_ROOT/processes/$OC_PID/registry.json"
+  OC_PROCESS_START="$(ps -o lstart= -p "$OC_PID" 2>/dev/null | awk '{$1=$1; print}' || true)"
+  if kill -0 "$OC_PID" 2>/dev/null && [[ -f "$OC_REGISTRY" ]] && \
+    [[ "$(jq -r '.pid // empty' "$OC_REGISTRY" 2>/dev/null || true)" == "$OC_PID" ]] && \
+    [[ "$(jq -r '.processStart // empty' "$OC_REGISTRY" 2>/dev/null || true)" == "$OC_PROCESS_START" ]]; then
+    OC_SESSION_CANDIDATE="${OPENCODE_SESSION_ID:-}"
+    if jq -e --arg s "$OC_SESSION_CANDIDATE" '.sessions | has($s)' "$OC_REGISTRY" >/dev/null 2>&1; then
+      OC_SESSION="$OC_SESSION_CANDIDATE"
+    fi
+  fi
 fi
 
 # ── Create fleet task directory ───────────────────────────────────────────────
@@ -445,11 +382,15 @@ else
   [[ -n "$TD_TASK_ID" ]] && echo "$TD_TASK_ID" > "$TASK_DIR/td_task"
   date -u +%Y-%m-%dT%H:%M:%SZ > "$TASK_DIR/started"
   [[ -n "$PRIMARY_PANE" ]] && echo "$PRIMARY_PANE" > "$TASK_DIR/primary_pane"
+  if [[ -n "$OC_SESSION" ]]; then
+    jq -nc --argjson pid "$OC_PID" --arg sessionId "$OC_SESSION" \
+      '{pid: $pid, sessionId: $sessionId}' > "$TASK_DIR/oc_target.json"
+  fi
 fi
 
 # ── Create tmux session (local only) ─────────────────────────────────────────
 
-if ! $REMOTE && ! $DRY_RUN; then
+if ! $DRY_RUN; then
   # Create the shared session if it doesn't exist yet; no-op if already running.
   tmux new-session -d -s "$TMUX_SESSION" -n "sergeant" 2>/dev/null || true
   echo "tmux session: $TMUX_SESSION"
@@ -467,7 +408,6 @@ for rname in "${TARGET_REPOS[@]}"; do
 
   raw_path="$(yq ".repos[$i].path" "$CONFIG_FILE")"
   repo_path="$(_resolve_path "$raw_path")"
-  repo_url="$(yq ".repos[$i].url // \"\"" "$CONFIG_FILE")"
   repo_role="$(yq ".repos[$i].role // \"\"" "$CONFIG_FILE")"
   repo_group="$(yq ".repos[$i].group // \"\"" "$CONFIG_FILE")"
 
@@ -690,7 +630,7 @@ For each non-trivial behavior, work red before green: one vertical slice, test, 
 
 ### 4. Escalate and resume
 
-Your non-interactive agent turns run under a persistent supervisor. Do not use sleep to keep the agent process alive. The supervisor waits outside the agent process, captures durable resume state from the active harness, and resumes that state after a serialized response is delivered. For Goose, resumability requires a persisted Goose session record for the current worktree rather than Sergeant's local session-name hint alone.
+Your non-interactive agent turns run under a persistent supervisor. Do not use sleep to keep the agent process alive. The supervisor waits outside the agent process, captures the OpenCode session ID, and resumes that session after a serialized response is delivered.
 
 If an agent exits before a terminal or waiting state, the supervisor records \`orphaned\` with durable diagnostics and td recovery pointers. Resume orphaned work through \`sgt-respond\`; do not overwrite or discard its recovery state.
 
@@ -701,7 +641,7 @@ Supported nonterminal statuses are \`in_progress\`, \`needs_input\`, and \`block
 For \`needs_input\` or \`blocked\`, write \`.sergeant-message\` with concise context, evidence, the exact question or blocker, a recommendation, and 2-4 options when useful. Call \`sgt-notify $TASK_ID "needs_input [$rname]: <summary>"\` or the equivalent \`blocked\` message. The worker remains alive and waits for a response; do not exit or mark the task failed.
 
 When \`.sergeant-response\` appears, read it as data and return status to \`in_progress\`. If \`.sergeant-response-id\` exists, preserve that opaque ID but do not write \`.sergeant-response-ack\` or remove the response transport yet. Finalize that response only after one of these proof conditions:
-1. the turn publishes \`needs_input\` or \`blocked\` and resumable session evidence was captured for the continued session;
+1. the turn publishes \`needs_input\` or \`blocked\` and a resumable session ID was captured for the continued session;
 2. the turn publishes \`done\` with a non-empty \`.sergeant-result\`.
 3. the turn publishes explicit terminal \`failed: <reason>\`, which is unrecoverable and must clean response plaintext rather than leave a stranded retry state.
 If \`.sergeant-response-id\` exists and one of those proof conditions is met, write the consumed ID to \`.sergeant-response-ack\` and consume/remove the response transport atomically. If no response ID exists, still consume/remove the response transport exactly once through the legacy path without writing an ack file. For unexpected exit, invalid status, or missing resumable session, retain the response transport for retry and keep diagnostics. Never write response text into the ack file. Clear \`.sergeant-message\`, log the decision to td when tracked, and continue only when a consequential question is answered.
@@ -716,7 +656,7 @@ Run focused tests and typechecking/lint regularly. Run the repository's full req
 
 At a no-mistakes gate, classify every finding before responding: correctness, security, data-integrity, and test findings cannot be deferred or ignored and must use disposition \`gate\`; ask-user findings still require user escalation and must use \`ask-user\`. warning-level actionable review or documentation debt may use \`td\` and creates P2 work; informational actionable debt may use \`td\` and creates P3 work. Cosmetic and evidence-only noise must use \`ignore\` and creates no card.
 
-Record each classification with \`sgt-no-mistakes-finding $PROJECT $rname\`. Pass the run ID, head SHA, finding ID, severity, kind, file/line, description, and originating intent with the chosen \`--disposition\`. The command creates or updates one deduplicated card in this owning repo. On rerun, keep visible active cards in their current state; only closed cards are reopened and deferred cards are undeferred before refreshing the finding body. A td disposition allows the gate to continue without mutating the delivery branch. Gate and ask-user dispositions return a blocking status and do not authorize approval; for ask-user, follow the \`needs_input\` escalation protocol above.
+Record each classification with \`sgt-no-mistakes-finding $PROJECT $rname\`. Pass the run ID, head SHA, finding ID, severity, kind, file/line, description, and originating intent with the chosen \`--disposition\`. The command creates or updates one deduplicated card in this owning repo. On rerun, keep visible active cards in their current state; only closed cards are reopened and deferred cards are undeferred before refreshing the finding body. Preserve any existing repo-specific or manually added td labels, and ensure the required \`no-mistakes\` and \`finding\` labels are present once each. A td disposition allows the gate to continue without mutating the delivery branch. Gate and ask-user dispositions return a blocking status and do not authorize approval; for ask-user, follow the \`needs_input\` escalation protocol above.
 
 ### 7. Independent two-axis review
 
@@ -751,108 +691,32 @@ BRIEF_EOF
 
   # ── Spawn agent ─────────────────────────────────────────────────────────────
 
-  if $REMOTE; then
-    SHORT_TASK="${TASK_ID:0:12}"
-    WINDOW_NAME="${SHORT_TASK}-${rname}"
-    AGENT_INIT_MSG="Read the .sergeant-brief.md file and execute the mission."
-    printf '%s\n' "remote-babydriver" > "$repo_task_dir/backend"
-    printf '%s\n' "$WINDOW_NAME" > "$repo_task_dir/window_name"
-    printf '%s\n' "$AGENT_CMD" > "$repo_task_dir/agent"
-    printf '%s\n' "$AGENT_INIT_MSG" > "$repo_task_dir/initial_message"
-    if ! command -v babydriver &>/dev/null; then
-      _record_dispatch_orphan "$repo_task_dir" "$worktree_path" "babydriver not found for remote dispatch"
-      _die "babydriver is required for --remote dispatch"
-    fi
-
-    remote_url="${repo_url:-$(git -C "$repo_path" remote get-url origin 2>/dev/null || echo "")}"
-    if [[ -z "$remote_url" ]]; then
-      _record_dispatch_orphan "$repo_task_dir" "$worktree_path" "no remote URL for $rname; cannot dispatch via babydriver"
-      _die "No remote URL for $rname — cannot dispatch via babydriver"
-    fi
-
-    gh_repo="$(echo "$remote_url" | sed 's|.*github\.com[:/]||;s|\.git$||')"
-    if [[ -z "$gh_repo" ]]; then
-      _record_dispatch_orphan "$repo_task_dir" "$worktree_path" "failed to derive GitHub repo from $remote_url"
-      _die "Could not derive GitHub repo from remote URL for $rname"
-    fi
-
-    brief_oneline="$(echo "$BRIEF" | head -1)"
-    _info "dispatching via babydriver → $gh_repo"
-    if ! start_output="$(babydriver start \
-      --repo "$gh_repo" \
-      --task "${WINDOW_NAME}:${brief_oneline} [sgt:${TASK_ID}] — read .sergeant-brief.md" \
-      --worktree 2>&1)"; then
-      {
-        printf 'babydriver start failed\n'
-        printf '%s\n' "$start_output"
-      } > "$repo_task_dir/diagnostic"
+  # Window name: <short-task-id>/<repo> so multiple tasks don't collide
+  # in the shared "sgt" session. E.g. "feat-abc123/smith-app"
+  SHORT_TASK="${TASK_ID:0:12}"
+  WINDOW_NAME="${SHORT_TASK}/${rname}"
+  _info "spawning tmux window '$WINDOW_NAME' in session $TMUX_SESSION"
+  AGENT_INIT_MSG="Read the .sergeant-brief.md file and execute the mission."
+  printf '%s\n' "$TMUX_SESSION" > "$repo_task_dir/tmux_session"
+  printf '%s\n' "$WINDOW_NAME" > "$repo_task_dir/window_name"
+  printf '%s\n' "$AGENT_CMD" > "$repo_task_dir/agent"
+  printf '%s\n' "$AGENT_INIT_MSG" > "$repo_task_dir/initial_message"
+  printf -v WORKER_RUN_CMD '%q %q %q %q %q' \
+    "$SCRIPT_DIR/sgt-worker" "$repo_task_dir" "$worktree_path" "$AGENT_CMD" "$AGENT_INIT_MSG"
+  if pane_target="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" \
+    -n "$WINDOW_NAME" -c "$worktree_path" "$WORKER_RUN_CMD")"; then
+    if [[ -z "$pane_target" ]]; then
       printf 'orphaned\n' > "$repo_task_dir/status"
+      printf 'tmux launched no worker pane\n' > "$repo_task_dir/diagnostic"
       "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
-      _die "babydriver start failed for $rname"
+      _die "tmux returned no pane for $rname"
     fi
-    printf '%s\n' "$start_output" > "$repo_task_dir/remote-launch.json"
-    remote_launch_fields=()
-    while IFS= read -r parsed_line; do
-      remote_launch_fields+=("$parsed_line")
-    done < <(printf '%s' "$start_output" | _parse_babydriver_start "$WINDOW_NAME" 2>/dev/null || true)
-    if [[ "${#remote_launch_fields[@]}" -lt 6 ]] || [[ -z "${remote_launch_fields[0]:-}" ]]; then
-      {
-        printf 'babydriver start returned no remote session metadata\n'
-        printf '%s\n' "$start_output"
-      } > "$repo_task_dir/diagnostic"
-      printf 'orphaned\n' > "$repo_task_dir/status"
-      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
-      _die "babydriver start returned invalid metadata for $rname"
-    fi
-    if [[ "${remote_launch_fields[4]}" != "1" ]]; then
-      {
-        printf 'requested remote task window %s was not returned by babydriver\n' "$WINDOW_NAME"
-        printf '%s\n' "$start_output"
-      } > "$repo_task_dir/diagnostic"
-      printf 'orphaned\n' > "$repo_task_dir/status"
-      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
-      _die "babydriver start did not return a matching task window for $rname"
-    fi
-    printf '%s\n' "${remote_launch_fields[0]}" > "$repo_task_dir/remote_session"
-    printf '%s\n' "${remote_launch_fields[1]}" > "$repo_task_dir/remote_window"
-    if [[ -n "${remote_launch_fields[2]}" ]]; then
-      printf '%s\n' "${remote_launch_fields[2]}" > "$repo_task_dir/remote_td_task"
-    fi
-    if [[ -n "${remote_launch_fields[3]}" ]]; then
-      printf '%s\n' "${remote_launch_fields[3]}" > "$repo_task_dir/remote_project_dir"
-    fi
-    if [[ -n "${remote_launch_fields[5]}" ]]; then
-      printf '%s\n' "${remote_launch_fields[5]}" > "$repo_task_dir/remote_task_name"
-    fi
+    printf '%s\n' "$pane_target" > "$repo_task_dir/pane"
   else
-    # Window name: <short-task-id>/<repo> so multiple tasks don't collide
-    # in the shared "sgt" session. E.g. "feat-abc123/smith-app"
-    SHORT_TASK="${TASK_ID:0:12}"
-    WINDOW_NAME="${SHORT_TASK}/${rname}"
-    _info "spawning tmux window '$WINDOW_NAME' in session $TMUX_SESSION"
-    AGENT_INIT_MSG="Read the .sergeant-brief.md file and execute the mission."
-    printf '%s\n' "local-tmux" > "$repo_task_dir/backend"
-    printf '%s\n' "$TMUX_SESSION" > "$repo_task_dir/tmux_session"
-    printf '%s\n' "$WINDOW_NAME" > "$repo_task_dir/window_name"
-    printf '%s\n' "$AGENT_CMD" > "$repo_task_dir/agent"
-    printf '%s\n' "$AGENT_INIT_MSG" > "$repo_task_dir/initial_message"
-    printf -v WORKER_RUN_CMD '%q %q %q %q %q' \
-      "$SCRIPT_DIR/sgt-worker" "$repo_task_dir" "$worktree_path" "$AGENT_CMD" "$AGENT_INIT_MSG"
-    if pane_target="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" \
-      -n "$WINDOW_NAME" -c "$worktree_path" "$WORKER_RUN_CMD")"; then
-      if [[ -z "$pane_target" ]]; then
-        printf 'orphaned\n' > "$repo_task_dir/status"
-        printf 'tmux launched no worker pane\n' > "$repo_task_dir/diagnostic"
-        "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
-        _die "tmux returned no pane for $rname"
-      fi
-      printf '%s\n' "$pane_target" > "$repo_task_dir/pane"
-    else
-      printf 'orphaned\n' > "$repo_task_dir/status"
-      printf 'tmux failed to launch worker supervisor\n' > "$repo_task_dir/diagnostic"
-      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
-      _die "tmux failed to launch worker supervisor for $rname"
-    fi
+    printf 'orphaned\n' > "$repo_task_dir/status"
+    printf 'tmux failed to launch worker supervisor\n' > "$repo_task_dir/diagnostic"
+    "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
+    _die "tmux failed to launch worker supervisor for $rname"
   fi
 
   echo ""
@@ -865,9 +729,7 @@ if ! $DRY_RUN; then
   echo ""
   echo "Task ID: $TASK_ID"
   echo "Fleet:   $TASK_DIR"
-  if ! $REMOTE; then
-    echo "Observe: tmux attach -t $TMUX_SESSION  (windows: ${SHORT_TASK:-$TASK_ID}/<repo>)"
-  fi
+  echo "Observe: tmux attach -t $TMUX_SESSION  (windows: ${SHORT_TASK:-$TASK_ID}/<repo>)"
   echo "Watch:   bin/sgt-watch $TASK_ID"
   echo ""
 
@@ -878,7 +740,6 @@ if ! $DRY_RUN; then
 - **Project:** $PROJECT
 - **Branch:** \`$BRANCH\`
 - **Repos:** ${REPOS_ARG:-auto}
-- **Backend:** ${REMOTE:+remote (babydriver)}${REMOTE:-local (tmux)}
 - **td task:** ${TD_TASK_ID:+\`$TD_TASK_ID\`}${TD_TASK_ID:-none}
 - **Brief:** $BRIEF"
 

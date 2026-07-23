@@ -12,9 +12,6 @@ ACTION="$1"
 REPO_STATE="$2"
 WORKTREE="$3"
 TD_TASK="$(cat "$REPO_STATE/td_task" 2>/dev/null || true)"
-if [[ -z "$TD_TASK" ]]; then
-  TD_TASK="$(cat "$REPO_STATE/remote_td_task" 2>/dev/null || true)"
-fi
 [[ -n "$TD_TASK" ]] || exit 0
 
 _diagnose() {
@@ -26,50 +23,10 @@ if ! command -v td >/dev/null 2>&1; then
   exit 1
 fi
 
-_goose_resume_pointer() {
-  local session_name goose_db
-  session_name="$(cat "$REPO_STATE/session_name" 2>/dev/null || true)"
-  goose_db="$(cat "$REPO_STATE/goose_sessions_db" 2>/dev/null || true)"
-  [[ -n "$session_name" && -n "$goose_db" && -f "$goose_db" ]] || return 1
-  python3 - "$goose_db" "$session_name" "$WORKTREE" <<'PY'
-import sqlite3
-import sys
-
-db_path, session_name, working_dir = sys.argv[1:4]
-
-try:
-    conn = sqlite3.connect(db_path)
-    try:
-        row = conn.execute(
-            "SELECT 1 FROM sessions WHERE name = ? AND working_dir = ? LIMIT 1",
-            (session_name, working_dir),
-        ).fetchone()
-    finally:
-        conn.close()
-except sqlite3.Error:
-    sys.exit(1)
-
-if not row:
-    sys.exit(1)
-
-print(f"goose:{session_name}@{db_path}")
-PY
-}
-
-_resume_pointer() {
-  local session_id
-  session_id="$(cat "$REPO_STATE/session_id" 2>/dev/null || true)"
-  if [[ -n "$session_id" ]]; then
-    printf '%s\n' "$session_id"
-    return
-  fi
-  _goose_resume_pointer 2>/dev/null || printf '%s\n' unavailable
-}
-
 case "$ACTION" in
   handoff)
     status="$(cat "$WORKTREE/.sergeant-status" 2>/dev/null || echo unknown)"
-    session_id="$(_resume_pointer)"
+    session_id="$(cat "$REPO_STATE/session_id" 2>/dev/null || echo unavailable)"
     head="$(git -C "$WORKTREE" rev-parse --short HEAD 2>/dev/null || echo unavailable)"
     branch="$(git -C "$WORKTREE" branch --show-current 2>/dev/null || echo unavailable)"
     if ! td handoff "$TD_TASK" --work-dir "$WORKTREE" \

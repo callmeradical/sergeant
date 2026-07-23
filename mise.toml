@@ -1,5 +1,5 @@
 [tools]
-# No runtime tools required — sergeant is pure bash.
+# No runtime tools required — sergeant supports the macOS system Bash 3.2+.
 
 # ── Tasks ─────────────────────────────────────────────────────────────────────
 
@@ -18,7 +18,7 @@ TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
 mkdir -p "$TARGET_DIR"
 
 linked=0
-for f in "$BIN_DIR"/sgt-* "$BIN_DIR"/_sgt-lib.sh "$BIN_DIR"/_sgt-response-lock.sh "$BIN_DIR/oc-inject" "$BIN_DIR/wiki-daily-digest"; do
+for f in "$BIN_DIR"/sgt-* "$BIN_DIR"/_sgt-lib.sh "$BIN_DIR"/_sgt-bash-version.sh "$BIN_DIR"/_sgt-response-lock.sh "$BIN_DIR/oc-inject" "$BIN_DIR/wiki-daily-digest"; do
   [[ -f "$f" ]] || continue
   name="$(basename "$f")"
   ln -sf "$f" "$TARGET_DIR/$name"
@@ -57,7 +57,7 @@ set -euo pipefail
 TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
 removed=0
 
-for f in "$TARGET_DIR"/sgt-* "$TARGET_DIR"/_sgt-lib.sh "$TARGET_DIR"/_sgt-response-lock.sh "$TARGET_DIR/oc-inject" "$TARGET_DIR/wiki-daily-digest"; do
+for f in "$TARGET_DIR"/sgt-* "$TARGET_DIR"/_sgt-lib.sh "$TARGET_DIR"/_sgt-bash-version.sh "$TARGET_DIR"/_sgt-response-lock.sh "$TARGET_DIR/oc-inject" "$TARGET_DIR/wiki-daily-digest"; do
   [[ -L "$f" ]] || continue
   # Only remove if it points back into the sergeant repo
   target="$(readlink "$f")"
@@ -76,6 +76,9 @@ echo "Removed $removed symlinks from $TARGET_DIR"
 description = "Verify required and optional dependencies are installed"
 run = """
 #!/usr/bin/env bash
+
+source "${MISE_PROJECT_ROOT:-.}/bin/_sgt-bash-version.sh"
+_sgt_require_running_bash || exit 1
 
 ok=true
 
@@ -97,16 +100,17 @@ _check() {
 echo "=== sergeant dependency check ==="
 echo ""
 echo "Required:"
+printf "  %-14s  ✓  %s\\n" "Bash" "${BASH_VERSION} (minimum 3.2)"
 _check "yq"         yq         required  "brew install yq"
 _check "git"        git        required  "install Xcode command line tools"
 _check "gh"         gh         required  "brew install gh"
 _check "tmux"       tmux       required  "brew install tmux"
+_check "lsof"       lsof       required  "install lsof with your system package manager"
 
 echo ""
 echo "Optional:"
 _check "treehouse"  treehouse  optional  "https://github.com/kunchenguid/treehouse"
 _check "graphify"   graphify   optional  "https://github.com/kunchenguid/graphify"
-_check "babydriver" babydriver optional  "remote dispatch to cleanthes"
 _check "mise"       mise       optional  "brew install mise"
 
 echo ""
@@ -117,14 +121,6 @@ else
   exit 1
 fi
 """
-
-[tasks.test]
-description = "Run Sergeant shell regression tests"
-run = "bash tests/run.sh"
-
-[tasks.lint]
-description = "Run ShellCheck for sgt-doctor and its regression tests"
-run = "shellcheck bin/sgt-doctor tests/*.sh"
 
 [tasks.update]
 description = "Pull latest changes from origin and reinstall symlinks"

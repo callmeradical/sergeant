@@ -62,7 +62,6 @@ These scripts in `bin/` are your hands. Use them before doing anything manually.
 | `bin/sgt-sync <project>` | Clone missing repos, pull existing ones |
 | `bin/sgt-context <project>` | Emit full agent context block for a project |
 | `bin/sgt-graphify <project>` | Run graphify across all repos, write to configured output |
-| `bin/sgt-doctor [project] [--json]` | Read-only installation, project, integration, and fleet diagnostics |
 | `bin/sgt-dispatch <project> "<brief>" [options]` | Create worktrees + spawn agent per repo |
 | `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Apply a finding disposition and create/update owning-repo td debt |
 | `bin/sgt-dispatch <project> --td <id>` | Dispatch from a td task (auto-detects repo) |
@@ -102,9 +101,9 @@ groups:                            # optional: logical groupings
     agent_instructions: <string>   # inherited by all repos in this group
 
 graphify:                          # optional: graphify configuration
-  output: <string>                 # path where graphify writes its output
+  output: <string>                 # published graph directory; see docs/schema.md for graphify details
   include_groups: [<string>, ...]  # only graph repos in these groups (default: all)
-  exclude_patterns: [<string>, ...] # glob patterns to exclude from graphify
+  exclude_patterns: [<string>, ...] # extraction excludes; see docs/schema.md for exact behavior
 
 defaults:                          # optional: defaults applied to all repos
   agent_instructions: <string>
@@ -211,12 +210,6 @@ sgt-dispatch smith "Add OAuth via Google" \
 sgt-watch <task-id>
 ```
 
-### Remote dispatch (cleanthes)
-
-```bash
-sgt-dispatch smith "Add OAuth" --repos smith,smith-app --remote
-```
-
 ### Full dispatch protocol
 
 Load the **dispatch** skill (`skills/dispatch/SKILL.md`) for the full planning + execution protocol. It covers: decomposing the brief per repo, setting dependency order, monitoring, and reconciling results.
@@ -282,4 +275,4 @@ The digest reads the full assistant conversation from `opencode.db`, enriches wi
 - Never modify repos in `~/.config/sergeant/` — that is config, not code.
 - Never commit secrets. Project YAMLs may contain paths but should not contain credentials.
 - The `sgt-*` scripts are on PATH (symlinked via `mise run install`). Use the bare command names.
-- `SERGEANT_AGENT` — override the agent binary used for dispatch. Supported values: `opencode`, `claude`, `goose`. If not set, sergeant auto-detects from the environment (`OPENCODE`/`OPENCODE_PID` → opencode; `CLAUDE_CODE_SESSION_ID`/`CLAUDE_CODE_SESSION_NAME` → claude). Goose is selected explicitly, for example `SERGEANT_AGENT=goose goose`. Each agent gets the right non-interactive flags automatically (`opencode run --auto` / `claude --dangerously-skip-permissions` / `goose run --output-format json -t`).
+- `SERGEANT_AGENT` — override the agent binary used for dispatch. Supported values: `opencode`, `claude`. If not set, sergeant auto-detects from the environment (`OPENCODE`/`OPENCODE_PID` → opencode; `CLAUDE_CODE_SESSION_ID` → claude). Each agent gets the right non-interactive flags automatically (`opencode run --auto` / `claude --dangerously-skip-permissions`).

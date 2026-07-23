@@ -28,24 +28,41 @@ INJECT="Agent task $TASK_ID update: $MESSAGE"
 
 TASK_DIR="$FLEET_DIR/$TASK_ID"
 OC_INJECT_BIN="$SCRIPT_DIR/oc-inject"
-OC_REGISTRY="$HOME/.local/share/opencode/inbox/.registry.json"
+OC_TARGET_FILE="$TASK_DIR/oc_target.json"
 
 # ── Prefer oc-inject ─────────────────────────────────────────────────────────
 # oc-inject writes to the OpenCode session directly via the plugin API:
 #  - If session is idle → injects immediately as a new conversation turn
 #  - If session is busy → queues the message, drains on next idle
 #  - Never takes over the prompt bar
-if [[ -f "$OC_INJECT_BIN" && -f "$OC_REGISTRY" ]]; then
-  "$OC_INJECT_BIN" "$INJECT"
-  echo "sgt-notify: sent via oc-inject." >&2
-  # Skip tmux fallback entirely when oc-inject is available
-  _notify_done=1
-elif command -v oc-inject >/dev/null 2>&1 && [[ -f "$OC_REGISTRY" ]]; then
-  oc-inject "$INJECT"
-  echo "sgt-notify: sent via oc-inject (PATH)." >&2
-  _notify_done=1
-else
-  _notify_done=0
+_notify_done=0
+_notify_uncertain=0
+if [[ -f "$OC_TARGET_FILE" ]]; then
+  OC_PID=$(jq -r '.pid // empty' "$OC_TARGET_FILE" 2>/dev/null || true)
+  OC_SESSION=$(jq -r '.sessionId // empty' "$OC_TARGET_FILE" 2>/dev/null || true)
+  if [[ -n "$OC_PID" && -n "$OC_SESSION" ]]; then
+    OC_COMMAND=""
+    [[ ! -f "$OC_INJECT_BIN" ]] || OC_COMMAND="$OC_INJECT_BIN"
+    if [[ -z "$OC_COMMAND" ]] && command -v oc-inject >/dev/null 2>&1; then
+      OC_COMMAND="$(command -v oc-inject)"
+    fi
+    if [[ -n "$OC_COMMAND" ]]; then
+      set +e
+      "$OC_COMMAND" --pid "$OC_PID" "$INJECT" "$OC_SESSION"
+      _inject_status=$?
+      set -e
+      if [[ "$_inject_status" -eq 0 ]]; then
+        echo "sgt-notify: sent via oc-inject." >&2
+        _notify_done=1
+      elif [[ "$_inject_status" -eq 2 ]]; then
+        echo "sgt-notify: oc-inject claimed delivery but acknowledgement is pending; not falling back." >&2
+        _notify_done=1
+        _notify_uncertain=1
+      else
+        echo "sgt-notify: coordinator OpenCode target unavailable — trying tmux." >&2
+      fi
+    fi
+  fi
 fi
 
 # ── Fallback: tmux send-keys ─────────────────────────────────────────────────
@@ -53,20 +70,20 @@ if [[ "$_notify_done" -eq 0 ]]; then
   PRIMARY_PANE_FILE="$TASK_DIR/primary_pane"
 
   if [[ ! -f "$PRIMARY_PANE_FILE" ]]; then
-    echo "sgt-notify: no primary_pane and no oc-inject registry — cannot notify" >&2
-    exit 0
+    echo "sgt-notify: no primary_pane and no live oc-inject target — cannot notify" >&2
+    exit 1
   fi
 
   PRIMARY_PANE="$(cat "$PRIMARY_PANE_FILE")"
 
   if [[ -z "$PRIMARY_PANE" ]]; then
-    echo "sgt-notify: primary_pane file empty — skipping" >&2
-    exit 0
+    echo "sgt-notify: primary_pane file empty — cannot notify" >&2
+    exit 1
   fi
 
   if ! tmux has-session -t "${PRIMARY_PANE%%.*}" 2>/dev/null; then
-    echo "sgt-notify: tmux session gone — skipping" >&2
-    exit 0
+    echo "sgt-notify: tmux session gone — cannot notify" >&2
+    exit 1
   fi
 
   echo "sgt-notify: injecting via tmux into pane $PRIMARY_PANE" >&2
@@ -103,3 +120,5 @@ _sgt_wiki_write \
   "Agent $TASK_ID: $MESSAGE" \
   "sergeant,notify,$TASK_ID" \
   "$_wiki_body"
+
+[[ "$_notify_uncertain" -eq 0 ]] || exit 2

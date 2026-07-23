@@ -18,13 +18,179 @@ source "$SCRIPT_DIR/_sgt-lib.sh"
 TASK_ID="$1"
 FILTER_REPO="${2:-}"
 TASK_DIR="$FLEET_DIR/$TASK_ID"
-[[ -d "$TASK_DIR" ]] || _die "Task not found: $TASK_ID"
+
+if [[ ! -d "$TASK_DIR" ]]; then
+  echo "Task already cleaned up: $TASK_ID"
+  exit 0
+fi
+
+_worktree_cwd_pids() {
+  local worktree="$1"
+  local canonical_worktree current_pid error error_file line output path process_pids
+
+  [[ -d "$worktree" ]] || return 0
+  canonical_worktree="$(cd "$worktree" && pwd -P)"
+  command -v lsof >/dev/null 2>&1 || _die "lsof is required to verify worktree process cleanup"
+  process_pids="$(ps -axo pid= | tr -d ' ' || true)"
+  [[ -n "$process_pids" ]] || return 0
+  error_file="$(mktemp)"
+  output="$(lsof -w -S2 -a -d cwd -Fn \
+    -p "$(tr '\n' ',' <<< "$process_pids" | sed 's/,$//')" 2> "$error_file" || true)"
+  if [[ -s "$error_file" ]]; then
+    error="$(cat "$error_file")"
+    rm -f "$error_file"
+    _die "Failed to inspect process working directories: $error"
+  fi
+  rm -f "$error_file"
+  current_pid=""
+
+  while IFS= read -r line; do
+    case "$line" in
+      p*)
+        current_pid="${line#p}"
+        ;;
+      n*)
+        path="${line#n}"
+        if [[ "$path" == "$canonical_worktree" || "$path" == "$canonical_worktree/"* ]]; then
+          printf '%s\n' "$current_pid"
+        fi
+        ;;
+    esac
+  done <<< "$output"
+}
+
+_process_tree_records() {
+  local root_pid="$1"
+  local child_pid identity
+
+  for child_pid in $(pgrep -P "$root_pid" 2>/dev/null || true); do
+    _process_tree_records "$child_pid"
+  done
+  identity="$(ps -o lstart= -p "$root_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+  [[ -n "$identity" ]] && printf '%s|%s\n' "$root_pid" "$identity"
+}
+
+_recorded_tree_pids() {
+  local records="$1"
+  local identity pid
+
+  while IFS='|' read -r pid identity; do
+    [[ -n "$pid" ]] && printf '%s\n' "$pid"
+  done <<< "$records"
+}
+
+_live_recorded_tree_pids() {
+  local records="$1"
+  local current_identity identity pid
+
+  while IFS='|' read -r pid identity; do
+    [[ -n "$pid" && -n "$identity" ]] || continue
+    current_identity="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+    [[ "$current_identity" == "$identity" ]] && printf '%s\n' "$pid"
+  done <<< "$records"
+}
+
+_terminate_pids() {
+  local pids="$1"
+  local signal="${2:-TERM}"
+  local pid
+
+  [[ -n "$pids" ]] || return 0
+  while IFS= read -r pid; do
+    [[ -n "$pid" && "$pid" != "$$" ]] || continue
+    kill -"$signal" "$pid" 2>/dev/null || true
+  done <<< "$pids"
+}
+
+_process_group_pids() {
+  local process_group="$1"
+
+  [[ -n "$process_group" ]] || return 0
+  pgrep -g "$process_group" 2>/dev/null || true
+}
+
+_terminate_process_group() {
+  local process_group="$1"
+  local signal="${2:-TERM}"
+
+  [[ -n "$process_group" ]] || return 0
+  kill -"$signal" -- -"$process_group" 2>/dev/null || true
+}
+
+_stop_local_worker() {
+  local repo_dir="$1"
+  local worktree="$2"
+  local pane pane_info pane_dead pane_pid pane_pgid pane_command tree_records tree_pids live_tree_pids cwd_pids
+
+  pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
+  tree_records=""
+  tree_pids=""
+
+  if [[ -n "$pane" ]]; then
+    command -v tmux >/dev/null 2>&1 || _die "tmux is required to terminate recorded worker pane $pane"
+    pane_info="$(tmux display-message -p -t "$pane" \
+      '#{pane_dead}|#{pane_pid}|#{pane_start_command}' 2>/dev/null || true)"
+
+    if [[ -n "$pane_info" ]]; then
+      pane_dead="${pane_info%%|*}"
+      pane_info="${pane_info#*|}"
+      pane_pid="${pane_info%%|*}"
+      pane_command="${pane_info#*|}"
+
+      if [[ "$pane_dead" != "0" ]]; then
+        echo "  worker pane already stopped: $pane"
+      elif [[ "$pane_command" != *sgt-worker* || "$pane_command" != *"$repo_dir"* ]]; then
+        echo "  recorded pane no longer belongs to this worker: $pane"
+      else
+        tree_records="$(_process_tree_records "$pane_pid")"
+        tree_pids="$(_recorded_tree_pids "$tree_records")"
+        pane_pgid="$(ps -o pgid= -p "$pane_pid" 2>/dev/null | tr -d ' ' || true)"
+        echo "  terminating worker pane: $pane"
+        tmux kill-pane -t "$pane" 2>/dev/null || \
+          ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 || \
+          _die "Failed to terminate worker pane $pane"
+      fi
+    else
+      echo "  worker pane already gone: $pane"
+    fi
+  fi
+
+  _terminate_pids "$tree_pids"
+  _terminate_process_group "${pane_pgid:-}"
+
+  for _ in $(seq 1 50); do
+    live_tree_pids="$(printf '%s\n%s\n' \
+      "$(_process_group_pids "${pane_pgid:-}")" \
+      "$(_live_recorded_tree_pids "$tree_records")" | sed '/^$/d' | sort -u)"
+    [[ -z "$live_tree_pids" ]] && break
+    sleep 0.1
+  done
+
+  if [[ -n "$live_tree_pids" ]]; then
+    _terminate_process_group "${pane_pgid:-}" KILL
+    _terminate_pids "$(_live_recorded_tree_pids "$tree_records")" KILL
+    for _ in $(seq 1 20); do
+      live_tree_pids="$(printf '%s\n%s\n' \
+        "$(_process_group_pids "${pane_pgid:-}")" \
+        "$(_live_recorded_tree_pids "$tree_records")" | sed '/^$/d' | sort -u)"
+      [[ -z "$live_tree_pids" ]] && break
+      sleep 0.1
+    done
+  fi
+
+  [[ -z "$live_tree_pids" ]] || \
+    _die "Worker processes did not terminate: $(tr '\n' ' ' <<< "$live_tree_pids")"
+  cwd_pids="$(_worktree_cwd_pids "$worktree")"
+  [[ -z "$cwd_pids" ]] || \
+    _die "Other processes still have $worktree as their current directory: $(tr '\n' ' ' <<< "$cwd_pids")"
+}
 
 echo "=== sgt-cleanup: $TASK_ID ==="
 echo ""
 
 for repo_dir in "$TASK_DIR"/*/; do
   [[ -d "$repo_dir" ]] || continue
+  repo_dir="${repo_dir%/}"
   repo_name="$(basename "$repo_dir")"
 
   if [[ -n "$FILTER_REPO" && "$repo_name" != "$FILTER_REPO" ]]; then
@@ -36,6 +202,12 @@ for repo_dir in "$TASK_DIR"/*/; do
   wt_type="$(cat "$repo_dir/wt_type" 2>/dev/null || echo "git")"
 
   echo "--- $repo_name (status: $status, type: $wt_type) ---"
+
+  _stop_local_worker "$repo_dir" "$worktree"
+
+  cwd_pids="$(_worktree_cwd_pids "$worktree")"
+  [[ -z "$cwd_pids" ]] || \
+    _die "Processes still have $worktree as their current directory: $(tr '\n' ' ' <<< "$cwd_pids")"
 
   if [[ -z "$worktree" ]]; then
     echo "  no worktree recorded — skipping"

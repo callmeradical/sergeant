@@ -17,8 +17,7 @@ LOG="$REPO_STATE/worker.log"
 DIAGNOSTIC="$REPO_STATE/diagnostic"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-response-lock.sh
-# shellcheck disable=SC1091
-source "$SCRIPT_DIR/_sgt-response-lock.sh"
+source "$SCRIPT_DIR/_sgt-response-lock.sh" || exit 1
 
 mkdir -p "$REPO_STATE"
 [[ -d "$WORKTREE" ]] || {
@@ -74,7 +73,7 @@ _cleanup_response_transport() {
 
 _finalize_submitted_response() {
   local response_id="$1"
-  _sgt_response_lock_acquire "$REPO_STATE"
+  _sgt_response_lock_acquire "$REPO_STATE" || return 1
   if [[ -n "$response_id" ]]; then
     printf '%s\n' "$response_id" > "$WORKTREE/.sergeant-response-ack"
   fi
@@ -86,7 +85,7 @@ _proof_allows_response_finalization() {
   local status="$1"
   case "$status" in
     needs_input|blocked)
-      _agent_has_resume_state
+      [[ -f "$REPO_STATE/session_id" ]]
       ;;
     done)
       [[ -s "$WORKTREE/.sergeant-result" ]]
@@ -162,110 +161,11 @@ PY
   [[ -z "$session_id" ]] || printf '%s\n' "$session_id" > "$REPO_STATE/session_id"
 }
 
-_agent_name() {
-  basename "$AGENT"
-}
-
-_goose_session_name() {
-  local existing task_name repo_name derived
-  if [[ -f "$REPO_STATE/session_name" ]]; then
-    existing="$(tr -d '\n' < "$REPO_STATE/session_name" || true)"
-  else
-    existing=""
-  fi
-  if [[ -n "$existing" ]]; then
-    printf '%s\n' "$existing"
-    return
-  fi
-  task_name="$(basename "$(dirname "$REPO_STATE")")"
-  repo_name="$(basename "$REPO_STATE")"
-  derived="sgt-${task_name}-${repo_name}"
-  derived="$(printf '%s' "$derived" | tr -cs '[:alnum:]._-' '-')"
-  derived="${derived#-}"
-  derived="${derived%-}"
-  [[ -n "$derived" ]] || derived="sgt-session"
-  printf '%s\n' "$derived" > "$REPO_STATE/session_name"
-  printf '%s\n' "$derived"
-}
-
-_goose_sessions_db() {
-  local existing resolved
-  if [[ -f "$REPO_STATE/goose_sessions_db" ]]; then
-    existing="$(tr -d '\n' < "$REPO_STATE/goose_sessions_db" || true)"
-  else
-    existing=""
-  fi
-  if [[ -n "$existing" ]]; then
-    printf '%s\n' "$existing"
-    return
-  fi
-  resolved="${GOOSE_DB:-$HOME/.local/share/goose/sessions/sessions.db}"
-  printf '%s\n' "$resolved" > "$REPO_STATE/goose_sessions_db"
-  printf '%s\n' "$resolved"
-}
-
-_goose_has_resume_state() {
-  local session_name goose_db
-  if [[ -f "$REPO_STATE/session_name" ]]; then
-    session_name="$(tr -d '\n' < "$REPO_STATE/session_name" || true)"
-  else
-    session_name=""
-  fi
-  [[ -n "$session_name" ]] || return 1
-  goose_db="$(_goose_sessions_db)"
-  [[ -f "$goose_db" ]] || return 1
-  python3 - "$goose_db" "$session_name" "$WORKTREE" <<'PY'
-import sqlite3
-import sys
-
-db_path, session_name, working_dir = sys.argv[1:4]
-
-try:
-    conn = sqlite3.connect(db_path)
-    try:
-        row = conn.execute(
-            "SELECT 1 FROM sessions WHERE name = ? AND working_dir = ? LIMIT 1",
-            (session_name, working_dir),
-        ).fetchone()
-    finally:
-        conn.close()
-except sqlite3.Error:
-    sys.exit(1)
-
-sys.exit(0 if row else 1)
-PY
-}
-
-_agent_has_resume_state() {
-  case "$(_agent_name)" in
-    goose)
-      _goose_has_resume_state
-      ;;
-    *)
-      [[ -f "$REPO_STATE/session_id" ]]
-      ;;
-  esac
-}
-
-_agent_missing_resume_reason() {
-  case "$(_agent_name)" in
-    claude)
-      printf '%s\n' "Claude did not provide a resumable session ID"
-      ;;
-    goose)
-      printf '%s\n' "Goose did not provide a resumable session"
-      ;;
-    *)
-      printf '%s\n' "OpenCode turn did not provide a resumable session ID"
-      ;;
-  esac
-}
-
 _run_turn() {
   local message="$1"
   local -a command
-  local agent_name session_id session_name exit_code
-  agent_name="$(_agent_name)"
+  local agent_name session_id exit_code
+  agent_name="$(basename "$AGENT")"
   session_id="$(cat "$REPO_STATE/session_id" 2>/dev/null || true)"
 
   if [[ "$agent_name" == "claude" ]]; then
@@ -274,13 +174,6 @@ _run_turn() {
     else
       command=("$AGENT" -p --output-format json --dangerously-skip-permissions "$message")
     fi
-  elif [[ "$agent_name" == "goose" ]]; then
-    session_name="$(_goose_session_name)"
-    command=("$AGENT" run --output-format json -n "$session_name")
-    if _goose_has_resume_state; then
-      command+=(-r)
-    fi
-    command+=(-t "$message")
   else
     command=("$AGENT" run --auto --format json)
     [[ -z "$session_id" ]] || command+=(--session "$session_id")
@@ -303,16 +196,15 @@ _wait_for_response() {
   RESPONSE_SUBMISSION_PENDING=0
   while true; do
     if [[ -f "$WORKTREE/.sergeant-response" ]]; then
-      _sgt_response_lock_acquire "$REPO_STATE"
+      if ! _sgt_response_lock_acquire "$REPO_STATE"; then
+        _orphan 1 "response lock acquisition failed"
+        return 1
+      fi
       if [[ -f "$WORKTREE/.sergeant-response" ]]; then
         response="$(cat "$WORKTREE/.sergeant-response")"
-        if [[ -f "$WORKTREE/.sergeant-response-id" ]]; then
-          response_id="$(tr -d '\n' < "$WORKTREE/.sergeant-response-id" || true)"
-        else
-          response_id=""
-        fi
-        if [[ -z "$response_id" && -f "$REPO_STATE/response_id" ]]; then
-          response_id="$(tr -d '\n' < "$REPO_STATE/response_id" || true)"
+        response_id="$(tr -d '\n' < "$WORKTREE/.sergeant-response-id" 2>/dev/null || true)"
+        if [[ -z "$response_id" ]]; then
+          response_id="$(tr -d '\n' < "$REPO_STATE/response_id" 2>/dev/null || true)"
         fi
         printf 'in_progress\n' > "$WORKTREE/.sergeant-status"
         printf 'in_progress\n' > "$REPO_STATE/status"
@@ -320,7 +212,7 @@ _wait_for_response() {
         if [[ -n "$response_id" && -f "$WORKTREE/.sergeant-response-ack" ]] && [[ "$(tr -d '\n' < "$WORKTREE/.sergeant-response-ack" 2>/dev/null)" == "$response_id" ]]; then
           _cleanup_response_transport
           _sgt_response_lock_release
-          if _agent_has_resume_state; then
+          if [[ -f "$REPO_STATE/session_id" ]]; then
             WAIT_RESPONSE_MESSAGE="Resume the mission from the durable worker state."
           else
             printf -v WAIT_RESPONSE_MESSAGE 'Resume the mission from fleet files at %s without replaying the previously submitted response.' "$REPO_STATE"
@@ -329,7 +221,7 @@ _wait_for_response() {
         fi
         _sgt_response_lock_release
         td_task="$(cat "$REPO_STATE/td_task" 2>/dev/null || true)"
-        if [[ -n "$td_task" ]] && _agent_has_resume_state; then
+        if [[ -n "$td_task" && -f "$REPO_STATE/session_id" ]]; then
           printf -v WAIT_RESPONSE_MESSAGE 'Sergeant response: %s\nResume task %s in the same session. Read the updated td handoff and reconcile it with fleet and git state before continuing.' "$response" "$td_task"
         elif [[ -n "$td_task" ]]; then
           printf -v WAIT_RESPONSE_MESSAGE 'Sergeant response: %s\nStart deterministic recovery for task %s. Read the updated td handoff and fleet files at %s, especially diagnostic and worker.log, then reconcile them with git state before continuing.' "$response" "$td_task" "$REPO_STATE"
@@ -351,17 +243,17 @@ _sync_state
 
 next_message="$INITIAL_MESSAGE"
 if [[ -f "$WORKTREE/.sergeant-response" ]]; then
-  _wait_for_response
+  _wait_for_response || exit $?
   next_message="$WAIT_RESPONSE_MESSAGE"
-elif _agent_has_resume_state; then
+elif [[ -f "$REPO_STATE/session_id" ]]; then
   case "$(_status)" in
     needs_input|blocked)
-      _wait_for_response
+      _wait_for_response || exit $?
       next_message="$WAIT_RESPONSE_MESSAGE"
       ;;
     orphaned)
       if [[ -f "$WORKTREE/.sergeant-response" ]]; then
-        _wait_for_response
+        _wait_for_response || exit $?
         next_message="$WAIT_RESPONSE_MESSAGE"
       else
         next_message="Resume the mission from the durable orphan diagnostic."
@@ -377,7 +269,10 @@ while true; do
   status="$(_status)"
   _sync_state
   if [[ "${RESPONSE_SUBMISSION_PENDING:-0}" == "1" ]] && _proof_allows_response_finalization "$status"; then
-    _finalize_submitted_response "${RESPONSE_SUBMISSION_ID:-}"
+    if ! _finalize_submitted_response "${RESPONSE_SUBMISSION_ID:-}"; then
+      _orphan 1 "response lock acquisition failed during finalization"
+      exit $?
+    fi
     RESPONSE_SUBMISSION_PENDING=0
     RESPONSE_SUBMISSION_ID=""
     _sync_state
@@ -386,13 +281,18 @@ while true; do
   case "$status" in
     needs_input|blocked)
       _record_gate_generation
-      if ! _agent_has_resume_state; then
+      agent_name="$(basename "$AGENT")"
+      if [[ ! -f "$REPO_STATE/session_id" ]]; then
         [[ "$exit_code" -ne 0 ]] || exit_code=1
-        _orphan "$exit_code" "$(_agent_missing_resume_reason)"
+        if [[ "$agent_name" == "claude" ]]; then
+          _orphan "$exit_code" "Claude did not provide a resumable session ID"
+        else
+          _orphan "$exit_code" "OpenCode turn did not provide a resumable session ID"
+        fi
         exit $?
       fi
       "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
-      _wait_for_response
+      _wait_for_response || exit $?
       next_message="$WAIT_RESPONSE_MESSAGE"
       ;;
     done)

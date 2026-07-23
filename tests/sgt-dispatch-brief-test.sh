@@ -30,6 +30,15 @@ cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
 
 set -euo pipefail
 
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'td version v0.51.2\n'
+  exit 0
+fi
+if [[ "${1:-}" == "create" && "${2:-}" == "--help" ]]; then
+  printf '%s\n' 'Usage: td create TITLE --description TEXT --json --work-dir DIR'
+  exit 0
+fi
+
 work_dir=""
 args=()
 
@@ -168,7 +177,7 @@ assert_contains ".sergeant-response-ack"
 assert_contains "consume/remove the response transport atomically"
 assert_contains "return status to \`in_progress\`"
 assert_contains "proof conditions"
-assert_contains "the turn publishes \`needs_input\` or \`blocked\` and resumable session evidence was captured"
+assert_contains "the turn publishes \`needs_input\` or \`blocked\` and a resumable session ID was captured"
 assert_contains "the turn publishes \`done\` with a non-empty \`.sergeant-result\`"
 assert_contains "the turn publishes explicit terminal \`failed: <reason>\`, which is unrecoverable and must clean response plaintext"
 assert_contains "For unexpected exit, invalid status, or missing resumable session, retain the response transport for retry"

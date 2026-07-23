@@ -18,8 +18,7 @@ You have a project. It has four repos: an API, a frontend, an infra chart, and a
 
 Sergeant fixes that. It is an **agent distro**: a cloned directory with an `AGENTS.md`, shell toolbelt, and skills that turn a general-purpose agent into a project-aware first mate. Launch your agent harness inside it and Sergeant takes over — it knows your projects, their repos, how they group, and what instructions apply to each one.
 
-No package install. The cloned repo is the distro; `mise run install` just
-symlinks its commands into `~/.local/bin`.
+No install. The cloned repo is the distro. Sergeant supports Bash 3.2 and newer, including the system Bash shipped with macOS.
 
 ## Mental model
 
@@ -40,14 +39,13 @@ sergeant/                     ← this distro (you are here)
   skills/                     ← agent-loaded skills
 ```
 
-Each project is a YAML file. That file defines which repos belong to it, how they group, what graphify output to use, and what agent instructions apply — per group and per repo.
+Each project is a YAML file. That file defines which repos belong to it, how they group, where Sergeant publishes the merged graphify output, and what agent instructions apply — per group and per repo.
 
 ## Quick start
 
 ```bash
 git clone https://github.com/callmeradical/sergeant
 cd sergeant
-mise run install
 
 # Set your dev root and create the config directory
 mkdir -p ~/.config/sergeant
@@ -59,12 +57,8 @@ EOF
 cp schema/project.yaml.example ~/.config/sergeant/myproject.yaml
 # Edit it — set your repo names and paths relative to dev_root
 
-# Optional: verify the install and config are healthy
-sgt-doctor
-
 # Launch your agent harness — AGENTS.md takes over from here
 opencode    # or: claude
-SERGEANT_AGENT=goose goose
 ```
 
 Then talk to it:
@@ -124,8 +118,7 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-status <project>` | Git status across every repo |
 | `bin/sgt-sync <project>` | Clone missing repos, pull existing ones |
 | `bin/sgt-context <project>` | Emit full agent context block for a project |
-| `bin/sgt-graphify <project>` | Run graphify across all repos → knowledge graph |
-| `bin/sgt-doctor [project] [--json]` | Diagnose a Sergeant installation without changing it |
+| `bin/sgt-graphify <project>` | Build and publish the merged project graph |
 | `bin/sgt-dispatch <project> "<brief>" [options]` | Dispatch agents across repos |
 | `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Route a no-mistakes finding to a gate, td, ignore, or user escalation |
 | `bin/sgt-watch <task-id>` | Monitor dispatched fleet |
@@ -133,22 +126,9 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-cleanup <task-id>` | Remove worktrees and fleet state |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
 
-### Diagnose an installation
-
-Run all checks, or limit project-specific checks to one project:
-
-```bash
-sgt-doctor
-sgt-doctor smith
-sgt-doctor --project smith --json
-```
-
-Diagnostics are read-only. See [`docs/doctor.md`](docs/doctor.md) for the full
-check list, exit-code contract, JSON output shape, and redaction guarantees.
-
 ### Deferred no-mistakes findings
 
-Dispatched workers use `sgt-no-mistakes-finding` at no-mistakes gates. The required `--disposition` is explicit per finding: `gate` retains blocking work, `td` creates or updates actionable debt in the owning repo, `ignore` records that no card is needed, and `ask-user` preserves human escalation. Warning debt becomes P2, informational debt becomes P3, and repeated finding IDs update the same card while retaining the latest run ID, head SHA, location, description, and originating intent.
+Dispatched workers use `sgt-no-mistakes-finding` at no-mistakes gates. The required `--disposition` is explicit per finding: `gate` retains blocking work, `td` creates or updates actionable debt in the owning repo, `ignore` records that no card is needed, and `ask-user` preserves human escalation. Warning debt becomes P2, informational debt becomes P3, and repeated finding IDs update the same card while retaining the latest run ID, head SHA, location, description, and originating intent. Reruns also preserve any existing repo-specific or manually added td labels while ensuring the required `no-mistakes` and `finding` labels remain present without duplication.
 
 On rerun, visible active cards stay in their current state, while explicitly hidden states are resurfaced: closed cards are reopened and deferred cards are undeferred before the finding body is refreshed.
 
@@ -166,17 +146,14 @@ Agent-loaded skills for structured workflows:
 
 ## Requirements
 
-- `td` — repository-local task lifecycle integration. Required for brief-based `sgt-dispatch` runs, `sgt-no-mistakes-finding`, and `sgt-td-*`; optional otherwise
+- [`github.com/marcus/td`](https://github.com/marcus/td) — task CLI, required for brief-based `sgt-dispatch` runs, `sgt-no-mistakes-finding`, and `sgt-td-*` commands; install with `brew install marcus/tap/td` or `go install github.com/marcus/td@latest`
 - `yq` — YAML parser: `brew install yq`
-- `python3` — required by Sergeant's JSON, fleet, and td helper scripts
 - `git` and `gh` — for repo operations and PRs
 - `tmux` — for local agent dispatch
+- `lsof` — for verifying cleanup does not remove an in-use worktree
 - `treehouse` — pre-warmed worktree pools (optional but recommended for dispatch)
 - `graphify` — knowledge graph generation (optional, needed for `sgt-graphify`)
-- `babydriver` — remote dispatch to cleanthes (optional)
-- `no-mistakes` — validated delivery pipeline (optional)
-- A usable selected agent harness; when no override or agent session is
-  present, Sergeant defaults to OpenCode. Goose support requires 1.10+.
+- A supported agent harness: OpenCode or Claude Code
 
 ## License
 

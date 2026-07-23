@@ -45,7 +45,7 @@ Dependency order:
   (API reads the secret at startup; app talks to the API)
 
 Branch: feat/add-oauth
-Backend: local tmux (or --remote for cleanthes)
+Backend: local tmux
 ```
 
 Ask for confirmation before dispatching.
@@ -68,15 +68,14 @@ sgt-dispatch <project> --td <task-id> --repos smith,smith-app
 sgt-dispatch <project> "<brief>" \
   --repos <repo1>,<repo2>,<repo3> \
   --branch <branch-name> \
-  --deps "<prereq>><dependent>,..." \
-  [--remote]
+  --deps "<prereq>><dependent>,..."
 ```
 
 The script:
 1. Generates a task ID
 2. Creates a git worktree per repo at `<repo-path>/../<repo-name>-sgt-<task-id>/`
 3. Writes a `.sergeant-brief.md` into each worktree with: the mission, merged agent instructions, dependency notes, and delivery requirements
-4. Spawns an agent in each tmux window (local) or via babydriver (remote)
+4. Spawns an agent in each local tmux window
 5. Creates fleet state at `~/.local/share/sergeant/fleet/<task-id>/`
 
 ### Step 3 — Monitor
@@ -92,7 +91,7 @@ When a worker escalates:
 1. Read its context, evidence, exact question/blocker, recommendation, and options in the watcher output.
 2. Get the human decision; do not infer consequential intent.
 3. Run `sgt-respond <task-id> <repo> "<response>"`. Sergeant writes the response to fleet state and `.sergeant-response`, then nudges the recorded local tmux pane when available.
-4. The worker keeps the response transport until the continued turn proves it was consumed safely: a new waiting state with durable resume evidence, a terminal `done` result, or an explicit unrecoverable `failed: ...`. Only then does it clear `.sergeant-message`, ack/remove the response, log the decision to td, return to `in_progress`, and continue. Remote workers receive the response file when their worktree is reachable; otherwise `sgt-respond` explicitly reports fleet-only delivery.
+4. The worker consumes/removes the response, clears `.sergeant-message`, logs the decision to td, returns to `in_progress`, and continues.
 
 You can also attach to the tmux session directly to observe or assist a worker:
 
@@ -169,7 +168,7 @@ Each dispatched agent is expected to:
    - Merge/rebase conflict: load `resolving-merge-conflicts`, trace both intents, preserve both where possible, and never abort automatically
 5. Establish public behavioral seams from td/spec before tests. If a consequential seam is undecided, escalate `needs_input` rather than guessing
 6. Implement one vertical slice at a time: focused red test, minimum green implementation, then refactor. Reject tautological tests, internal mocking, horizontal test/implementation phases, and speculative refactoring
-7. For `needs_input` or `blocked`, write `.sergeant-message`, notify Sergeant, remain alive, and wait. Resume only from durable harness state: OpenCode and Claude need a resumable session ID, while Goose needs a persisted Goose session record for the current worktree. Retain `.sergeant-response` until the continued turn proves that resume state or reaches a terminal result, then clear the message, log the decision to td, restore `in_progress`, and continue
+7. For `needs_input` or `blocked`, write `.sergeant-message`, notify Sergeant, remain alive, and wait. Consume/remove `.sergeant-response`, clear the message, log the decision to td, restore `in_progress`, and continue
 8. Run focused tests and typechecking/lint regularly, the full required suite at the end, and no-mistakes when available or required
 9. Route each no-mistakes finding through `sgt-no-mistakes-finding`: blocking correctness/security/data-integrity/test work stays gated, actionable warning or informational debt may become a deduplicated owning-repo td card, cosmetic/evidence noise is ignored, and ask-user findings still escalate
 10. Load the canonical `code-review` skill when available, then launch separate parallel subagents for independent reviews: a standards axis over the pinned diff and documented standards plus concise Fowler smells, and a spec axis over requirements and scope. Keep evidence separate and skip the spec axis explicitly when no spec exists
@@ -205,7 +204,6 @@ sgt-td-create <project> "<title>" --repos repo1,repo2 --priority P1
 | `--td <task-id>` | Dispatch from an existing td task; brief derived from task title |
 | `--branch <name>` | Branch name used in all worktrees (default: derived from brief) |
 | `--deps "a>b,a>c"` | `a` must complete before `b` and `c` can merge |
-| `--remote` | Dispatch via babydriver to cleanthes instead of local tmux |
 | `--dry-run` | Print what would happen, don't create worktrees or spawn agents |
 
 ---
@@ -216,7 +214,6 @@ sgt-td-create <project> "<title>" --repos repo1,repo2 --priority P1
 |---|---|
 | Worker stuck, no status update | `tmux attach -t sgt-<task-id>` and check the window |
 | Worktree creation fails | Check if branch already exists; use `--branch` with a unique name |
-| babydriver dispatch fails | Run `babydriver usage` to check env health; ensure `BABYDRIVER_SERVER` is set |
 | Fleet state is stale | Run `bin/sgt-watch --sync <task-id>` to force a one-shot sync |
 | Need to recover a waiting or orphaned worker | Use `bin/sgt-respond <task-id> <repo> "<response>"`; do not mark it done manually |
 | Need to retry a failed repo | Fix the underlying issue, then write both `.sergeant-result` and `.sergeant-status=done` only after every completion gate passes |

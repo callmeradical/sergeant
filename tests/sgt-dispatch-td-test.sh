@@ -15,7 +15,7 @@ WEB_REPO="$TEST_ROOT/web"
 mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/config" "$TEST_ROOT/fake-bin" \
   "$TEST_ROOT/fleet" "$APP_MAIN_REPO" "$APP_REPO" "$API_REPO" "$WEB_REPO" \
   "$TEST_ROOT/td-active" "$TEST_ROOT/td-counter"
-cp "$ROOT_DIR/bin/sgt-dispatch" "$ROOT_DIR/bin/_sgt-lib.sh" \
+cp "$ROOT_DIR/bin/sgt-dispatch" "$ROOT_DIR/bin/_sgt-lib.sh" "$ROOT_DIR/bin/_sgt-bash-version.sh" \
   "$ROOT_DIR/bin/sgt-td-create" "$ROOT_DIR/bin/sgt-td-memory" "$TEST_ROOT/bin/"
 
 cat > "$TEST_ROOT/config/test.yaml" <<EOF
@@ -45,6 +45,25 @@ cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
 set -euo pipefail
 
 mode="${TD_MODE:-success}"
+
+if [[ "${1:-}" == "--version" ]]; then
+  if [[ "$mode" == "wrong_td" || "$mode" == "wrong_version" ]]; then
+    printf 'td version 1.4.2 (github.com/Swatto/td)\n'
+  else
+    printf 'td version v0.51.2\n'
+  fi
+  exit 0
+fi
+
+if [[ "${1:-}" == "create" && "${2:-}" == "--help" ]]; then
+  if [[ "$mode" == "wrong_td" ]]; then
+    printf 'No help topic for create\n' >&2
+    exit 1
+  fi
+  printf '%s\n' 'Usage: td create TITLE --description TEXT --priority P1 --json --work-dir DIR'
+  exit 0
+fi
+
 work_dir=""
 args=()
 
@@ -81,7 +100,13 @@ next_task_id() {
 
 case "$cmd" in
   list)
-    if [[ "$mode" == "existing_td" ]]; then
+    if [[ "$mode" == "uninitialized" ]]; then
+      printf "database not found: run 'td init' first\n" >&2
+      exit 1
+    elif [[ "$mode" == "list_failure" ]]; then
+      printf 'permission denied while opening database\n' >&2
+      exit 1
+    elif [[ "$mode" == "existing_td" ]]; then
       printf '[{"id":"td-existing","title":"Existing tracked work","description":"Keep existing behavior"}]\n'
     else
       printf '[]\n'
@@ -92,7 +117,14 @@ case "$cmd" in
     ;;
   create)
     title="${2:-}"
+    description=""
+    for ((i=1; i<${#args[@]}; i++)); do
+      if [[ "${args[$i]}" == "--description" ]]; then
+        description="${args[$((i + 1))]:-}"
+      fi
+    done
     printf '%s|%s|%s\n' "$mode" "$repo" "$title" >> "$TD_CREATE_LOG"
+    printf '%s' "$description" > "$TD_DESCRIPTION_LOG"
     case "$mode" in
       fail_after_one)
         [[ "$repo" == "app" ]] || {
@@ -159,6 +191,7 @@ dispatch_capture() {
   output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
     TMUX_LOG="$TEST_ROOT/tmux.log" \
     TD_CREATE_LOG="$TEST_ROOT/td-create.log" \
+    TD_DESCRIPTION_LOG="$TEST_ROOT/td-description.log" \
     TD_DELETE_LOG="$TEST_ROOT/td-delete.log" \
     TD_ACTIVE_DIR="$TEST_ROOT/td-active" \
     TD_COUNTER_DIR="$TEST_ROOT/td-counter" \
@@ -174,6 +207,7 @@ dispatch_success() {
   PATH="$TEST_ROOT/fake-bin:$PATH" \
     TMUX_LOG="$TEST_ROOT/tmux.log" \
     TD_CREATE_LOG="$TEST_ROOT/td-create.log" \
+    TD_DESCRIPTION_LOG="$TEST_ROOT/td-description.log" \
     TD_DELETE_LOG="$TEST_ROOT/td-delete.log" \
     TD_ACTIVE_DIR="$TEST_ROOT/td-active" \
     TD_COUNTER_DIR="$TEST_ROOT/td-counter" \
@@ -197,6 +231,118 @@ make_repo "$WEB_REPO"
   printf 'app fixture is not a linked git worktree\n' >&2
   exit 1
 }
+
+: > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+
+TD_MODE=wrong_td dispatch_capture test "Reject unrelated td" --repos app
+
+[[ "$status" -ne 0 ]] || {
+  printf 'dispatch succeeded with the unrelated td implementation\n' >&2
+  exit 1
+}
+[[ "$output" == *"td version 1.4.2 (github.com/Swatto/td)"* ]] || {
+  printf 'dispatch did not report the detected td implementation:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$output" == *"github.com/marcus/td"* ]] || {
+  printf 'dispatch did not report the required td implementation:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$output" == *"brew install marcus/tap/td"* && "$output" == *"go install github.com/marcus/td@latest"* ]] || {
+  printf 'dispatch did not report actionable Marcus td install commands:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/td-create.log" && ! -s "$TEST_ROOT/tmux.log" ]] || {
+  printf 'dispatch mutated state with the unrelated td implementation\n' >&2
+  exit 1
+}
+
+printf 'sgt-dispatch wrong td gate: ok\n'
+
+: > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+
+TD_MODE=wrong_version dispatch_capture test "Reject wrong td version" --repos app
+
+[[ "$status" -ne 0 && "$output" == *"td version 1.4.2 (github.com/Swatto/td)"* ]] || {
+  printf 'dispatch accepted a non-Marcus version despite compatible-looking help:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/td-create.log" && ! -s "$TEST_ROOT/tmux.log" ]] || {
+  printf 'dispatch mutated state with an invalid td version\n' >&2
+  exit 1
+}
+
+printf 'sgt-dispatch wrong td version gate: ok\n'
+
+: > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+
+TD_MODE=uninitialized dispatch_capture test "Require initialized storage" --repos app
+
+[[ "$status" -ne 0 ]] || {
+  printf 'dispatch succeeded with uninitialized td storage\n' >&2
+  exit 1
+}
+[[ "$output" == *"td is not initialized in repo 'app' ($APP_REPO)"* ]] || {
+  printf 'dispatch did not identify uninitialized td storage:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$output" == *"td init --work-dir '$APP_REPO'"* ]] || {
+  printf 'dispatch did not report the exact td initialization remedy:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/td-create.log" && ! -s "$TEST_ROOT/tmux.log" ]] || {
+  printf 'dispatch mutated state with uninitialized td storage\n' >&2
+  exit 1
+}
+
+printf 'sgt-dispatch uninitialized td gate: ok\n'
+
+: > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+
+TD_MODE=list_failure dispatch_capture test "Report td storage failure" --repos app
+
+[[ "$status" -ne 0 && "$output" == *"td prerequisite check failed"* && "$output" == *"permission denied while opening database"* ]] || {
+  printf 'dispatch misreported a non-initialization td failure:\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$output" != *"td init --work-dir"* ]] || {
+  printf 'dispatch prescribed td init for a non-initialization failure:\n%s\n' "$output" >&2
+  exit 1
+}
+
+printf 'sgt-dispatch td storage error classification: ok\n'
+
+long_brief="$(printf 'Detailed mission %.0s' {1..20})"
+: > "$TEST_ROOT/tmux.log"
+: > "$TEST_ROOT/td-create.log"
+: > "$TEST_ROOT/td-description.log"
+
+dispatch_success test "$long_brief" --repos app
+
+created_title="$(cut -d'|' -f3- "$TEST_ROOT/td-create.log")"
+[[ "${#created_title}" -le 200 ]] || {
+  printf 'dispatch generated a td title longer than 200 characters: %s\n' "${#created_title}" >&2
+  exit 1
+}
+[[ "$created_title" == *"..." ]] || {
+  printf 'dispatch did not mark the generated title as truncated: %s\n' "$created_title" >&2
+  exit 1
+}
+[[ "$(cat "$TEST_ROOT/td-description.log")" == "$long_brief" ]] || {
+  printf 'dispatch did not preserve the full brief as the td description\n' >&2
+  exit 1
+}
+task_dir="$(task_dir_for detailed-mission)"
+grep -Fq "$long_brief" "$(cat "$task_dir/app/worktree")/.sergeant-brief.md" || {
+  printf 'dispatch did not preserve the full Sergeant brief\n' >&2
+  exit 1
+}
+
+printf 'sgt-dispatch bounded generated title: ok\n'
 
 cat > "$TEST_ROOT/bin/sgt-td-create" <<'EOF'
 #!/usr/bin/env bash
@@ -810,7 +956,7 @@ set -e
   printf 'brief-only dispatch succeeded without td\n' >&2
   exit 1
 }
-[[ "$output" == *"td is required for brief-only dispatch"* ]] || {
+[[ "$output" == *"td is missing"* && "$output" == *"github.com/marcus/td"* ]] || {
   printf 'dispatch did not report missing td requirement:\n%s\n' "$output" >&2
   exit 1
 }
