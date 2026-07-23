@@ -153,6 +153,61 @@ _require_tmux() {
 _require_git() {
   command -v git &>/dev/null || _die "git is required"
 }
+_sgt_td_normalize_version() {
+  printf '%s\n' "${1#v}"
+}
+_sgt_td_supported_semver() {
+  [[ "$1" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[[:alnum:]]+([.-][[:alnum:]]+)*)?$ ]]
+}
+_sgt_td_supported_version_output() {
+  # Accept Marcus td's plain version line or its exact three-line update notice.
+  # Any unrelated or mixed output still fails before dispatch creates side effects.
+  local td_version="$1"
+  local line
+  local -a lines=()
+  local start end current_version update_current_version available_version install_version install_target
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    lines+=("$line")
+  done <<< "$td_version"
+
+  start=0
+  end=$((${#lines[@]} - 1))
+  while (( start <= end )) && [[ "${lines[$start]}" =~ ^[[:blank:]]*$ ]]; do
+    start=$((start + 1))
+  done
+  while (( end >= start )) && [[ "${lines[$end]}" =~ ^[[:blank:]]*$ ]]; do
+    end=$((end - 1))
+  done
+
+  (( start <= end )) || return 1
+
+  if (( start == end )); then
+    [[ "${lines[$start]}" =~ ^[[:blank:]]*td[[:blank:]]+version[[:blank:]]+([^[:blank:]]+)[[:blank:]]*$ ]] || return 1
+    _sgt_td_supported_semver "${BASH_REMATCH[1]}"
+    return
+  fi
+
+  (( end - start == 3 )) || return 1
+  [[ "${lines[$((start + 1))]}" =~ ^[[:blank:]]*$ ]] || return 1
+  [[ "${lines[$start]}" =~ ^[[:blank:]]*td[[:blank:]]+version[[:blank:]]+([^[:blank:]]+)[[:blank:]]*$ ]] || return 1
+  current_version="${BASH_REMATCH[1]}"
+  _sgt_td_supported_semver "$current_version" || return 1
+  [[ "${lines[$((start + 2))]}" =~ ^[[:blank:]]*Update[[:blank:]]+available:[[:blank:]]+([^[:blank:]]+)[[:blank:]]+→[[:blank:]]+([^[:blank:]]+)[[:blank:]]*$ ]] || return 1
+  update_current_version="${BASH_REMATCH[1]}"
+  available_version="${BASH_REMATCH[2]}"
+  _sgt_td_supported_semver "$update_current_version" || return 1
+  _sgt_td_supported_semver "$available_version" || return 1
+  [[ "${lines[$((start + 3))]}" =~ ^[[:blank:]]*Run:[[:blank:]]+go[[:blank:]]+install[[:blank:]]+-ldflags[[:blank:]]+\"-X[[:blank:]]+main\.Version=([^[:blank:]\"]+)\"[[:blank:]]+github\.com/marcus/td@([^[:blank:]]+)[[:blank:]]*$ ]] || return 1
+  install_version="${BASH_REMATCH[1]}"
+  install_target="${BASH_REMATCH[2]}"
+  _sgt_td_supported_semver "$install_version" || return 1
+  _sgt_td_supported_semver "$install_target" || return 1
+
+  [[ "$(_sgt_td_normalize_version "$current_version")" == "$(_sgt_td_normalize_version "$update_current_version")" ]] || return 1
+  [[ "$(_sgt_td_normalize_version "$available_version")" == "$(_sgt_td_normalize_version "$install_version")" ]] || return 1
+  [[ "$(_sgt_td_normalize_version "$available_version")" == "$(_sgt_td_normalize_version "$install_target")" ]]
+}
 _require_marcus_td() {
   local install_hint="Install it with 'brew install marcus/tap/td' or 'go install github.com/marcus/td@latest'."
   if ! command -v td &>/dev/null; then
@@ -165,8 +220,8 @@ _require_marcus_td() {
   [[ -n "$td_version" ]] || td_version="version unknown"
   create_help="$(td create --help 2>&1 || true)"
 
-  if [[ ! "$td_version" =~ ^td\ version\ v[0-9]+\.[0-9]+\.[0-9]+$ || \
-        "$create_help" != *"--description"* || "$create_help" != *"--json"* || "$create_help" != *"--work-dir"* ]]; then
+  if ! _sgt_td_supported_version_output "$td_version" || \
+     [[ "$create_help" != *"--description"* || "$create_help" != *"--json"* || "$create_help" != *"--work-dir"* ]]; then
     _die "Unsupported td detected at $td_path: $td_version. Required implementation: github.com/marcus/td with create/json/work-dir support. $install_hint"
   fi
 }

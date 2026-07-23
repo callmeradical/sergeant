@@ -47,7 +47,9 @@ set -euo pipefail
 mode="${TD_MODE:-success}"
 
 if [[ "${1:-}" == "--version" ]]; then
-  if [[ "$mode" == "wrong_td" || "$mode" == "wrong_version" ]]; then
+  if [[ "${TD_VERSION_OUTPUT_SET:-0}" == "1" ]]; then
+    printf '%s\n' "${TD_VERSION_OUTPUT:-}"
+  elif [[ "$mode" == "wrong_td" || "$mode" == "wrong_version" ]]; then
     printf 'td version 1.4.2 (github.com/Swatto/td)\n'
   else
     printf 'td version v0.51.2\n'
@@ -193,6 +195,8 @@ dispatch_capture() {
     TD_CREATE_LOG="$TEST_ROOT/td-create.log" \
     TD_DESCRIPTION_LOG="$TEST_ROOT/td-description.log" \
     TD_DELETE_LOG="$TEST_ROOT/td-delete.log" \
+    TD_VERSION_OUTPUT_SET="${TD_VERSION_OUTPUT_SET:-0}" \
+    TD_VERSION_OUTPUT="${TD_VERSION_OUTPUT:-}" \
     TD_ACTIVE_DIR="$TEST_ROOT/td-active" \
     TD_COUNTER_DIR="$TEST_ROOT/td-counter" \
     SERGEANT_CONFIG="$TEST_ROOT/config" \
@@ -209,6 +213,8 @@ dispatch_success() {
     TD_CREATE_LOG="$TEST_ROOT/td-create.log" \
     TD_DESCRIPTION_LOG="$TEST_ROOT/td-description.log" \
     TD_DELETE_LOG="$TEST_ROOT/td-delete.log" \
+    TD_VERSION_OUTPUT_SET="${TD_VERSION_OUTPUT_SET:-0}" \
+    TD_VERSION_OUTPUT="${TD_VERSION_OUTPUT:-}" \
     TD_ACTIVE_DIR="$TEST_ROOT/td-active" \
     TD_COUNTER_DIR="$TEST_ROOT/td-counter" \
     SERGEANT_CONFIG="$TEST_ROOT/config" \
@@ -231,6 +237,61 @@ make_repo "$WEB_REPO"
   printf 'app fixture is not a linked git worktree\n' >&2
   exit 1
 }
+
+valid_td_versions=(
+  'td version 0.51.0'
+  'td version v0.51.2'
+  '  td version 0.51.0  '
+  'td version v0.52.0-rc.1'
+  $'td version 0.51.0\n\nUpdate available: 0.51.0 → v0.51.2\nRun: go install -ldflags "-X main.Version=v0.51.2" github.com/marcus/td@v0.51.2'
+)
+
+valid_version_index=0
+for version_output in "${valid_td_versions[@]}"; do
+  valid_version_index=$((valid_version_index + 1))
+  : > "$TEST_ROOT/tmux.log"
+  : > "$TEST_ROOT/td-create.log"
+  TD_VERSION_OUTPUT_SET=1 TD_VERSION_OUTPUT="$version_output" \
+    dispatch_capture test "Accept Marcus td version $valid_version_index" --repos app
+  [[ "$status" -eq 0 ]] || {
+    printf 'dispatch rejected supported Marcus td version output %q:\n%s\n' "$version_output" "$output" >&2
+    exit 1
+  }
+done
+
+invalid_td_versions=(
+  ''
+  'td version 0.51'
+  'td version 0.51.0--rc1'
+  'td version latest'
+  'version 0.51.0'
+  $'td version 0.51.0\n\nUpdate available: 9.9.9 → v0.51.2\nRun: go install -ldflags "-X main.Version=v0.51.2" github.com/marcus/td@v0.51.2'
+  $'BROKEN\ntd version 0.51.0'
+  $'td version 0.51.0\nBROKEN'
+)
+
+for version_output in "${invalid_td_versions[@]}"; do
+  : > "$TEST_ROOT/tmux.log"
+  : > "$TEST_ROOT/td-create.log"
+  TD_VERSION_OUTPUT_SET=1 TD_VERSION_OUTPUT="$version_output" \
+    dispatch_capture test "Reject malformed td version" --repos app
+  [[ "$status" -ne 0 ]] || {
+    printf 'dispatch accepted malformed td version output %q\n' "$version_output" >&2
+    exit 1
+  }
+  [[ "$output" == *"Unsupported td detected"* && "$output" == *"github.com/marcus/td"* ]] || {
+    printf 'dispatch did not report an actionable malformed-version error for %q:\n%s\n' "$version_output" "$output" >&2
+    exit 1
+  }
+  [[ ! -s "$TEST_ROOT/td-create.log" && ! -s "$TEST_ROOT/tmux.log" ]] || {
+    printf 'dispatch mutated state with malformed td version output %q\n' "$version_output" >&2
+    exit 1
+  }
+done
+
+unset TD_VERSION_OUTPUT_SET TD_VERSION_OUTPUT
+
+printf 'sgt-dispatch Marcus td version formats: ok\n'
 
 : > "$TEST_ROOT/tmux.log"
 : > "$TEST_ROOT/td-create.log"
