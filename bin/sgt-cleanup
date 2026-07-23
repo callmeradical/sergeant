@@ -281,8 +281,9 @@ _require_terminal_repos() {
           _die "Cannot resolve configured cleanup owner: $repo_name"
       fi
     else
+      [[ "$cleanup_phase" != $'removing\n'"$worktree" ]] || \
+        _die "Retry owner identity is missing: $repo_name"
       [[ -n "$worktree" && ( \
-        "$cleanup_phase" == $'removing\n'"$worktree" || \
         ( ( "$cleanup_phase" == "$partial_phase" || \
             "$cleanup_phase" == "$removed_phase" || \
             "$cleanup_phase" == "$removing_phase" ) && \
@@ -304,10 +305,6 @@ _require_terminal_repos() {
           _die "$repo_name reconciled cleanup evidence requires a result"
         cmp -s "$repo_dir/result" "$evidence_dir/.sergeant-result" || \
           _die "$repo_name cleanup evidence differs from reconciled fleet result"
-      fi
-      if [[ "$cleanup_phase" == $'removing\n'"$worktree" ]]; then
-        _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
-          _die "Failed to reconcile completed worktree removal: $repo_name"
       fi
     fi
   done
@@ -514,32 +511,36 @@ _configured_repo_root() {
 }
 
 _record_cleanup_owner() {
-  local holder identity project repo_dir="$1" repo_root="$2" worktree="$3" wt_type="$4"
+  local holder identity project repo_dir="$1" repo_root="$2" worker_identity \
+    worktree="$3" wt_type="$4"
 
   identity="$(_repo_identity "$repo_root" create)" || return 1
+  worker_identity="$(_repo_identity "$worktree")" || return 1
   project="$(_task_project)" || return 1
   holder=""
   [[ "$wt_type" != "treehouse" ]] || \
     holder="$(tr -d '\n' < "$repo_dir/wt_holder" 2>/dev/null || true)"
-  printf '2\n%s\n%s\n%s\n%s\n%s\n%s\n' \
-    "$project" "$repo_root" "$worktree" "$wt_type" "$identity" "$holder" \
+  printf '3\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$project" "$repo_root" "$worktree" "$wt_type" "$identity" \
+    "$worker_identity" "$holder" \
     > "$repo_dir/cleanup-owner.tmp" &&
     mv "$repo_dir/cleanup-owner.tmp" "$repo_dir/cleanup-owner"
 }
 
 _validate_retry_owner() {
   local configured_root expected_holder expected_root holder identity owner_holder owner_identity \
-    owner_project owner_root owner_type owner_worktree project repo_dir="$1" repo_name="$2" \
-    worktree="$3" retry_type="$4" retry_root="$5"
+    owner_project owner_root owner_type owner_worker_identity owner_worktree project repo_dir="$1" \
+    repo_name="$2" worker_identity worktree="$3" retry_type="$4" retry_root="$5"
 
-  [[ "$(sed -n '1p' "$repo_dir/cleanup-owner" 2>/dev/null || true)" == "2" ]] || \
+  [[ "$(sed -n '1p' "$repo_dir/cleanup-owner" 2>/dev/null || true)" == "3" ]] || \
     _die "Retry owner identity is missing: $repo_name"
   owner_project="$(sed -n '2p' "$repo_dir/cleanup-owner")"
   owner_root="$(sed -n '3p' "$repo_dir/cleanup-owner")"
   owner_worktree="$(sed -n '4p' "$repo_dir/cleanup-owner")"
   owner_type="$(sed -n '5p' "$repo_dir/cleanup-owner")"
   owner_identity="$(sed -n '6p' "$repo_dir/cleanup-owner")"
-  owner_holder="$(sed -n '7p' "$repo_dir/cleanup-owner")"
+  owner_worker_identity="$(sed -n '7p' "$repo_dir/cleanup-owner")"
+  owner_holder="$(sed -n '8p' "$repo_dir/cleanup-owner")"
   [[ "$retry_root" == "$owner_root" && "$worktree" == "$owner_worktree" && \
     "$retry_type" == "$owner_type" ]] || \
     _die "Retry cleanup state does not match its recorded owner: $repo_name"
@@ -556,6 +557,12 @@ _validate_retry_owner() {
   expected_root="$(cd "$owner_root" && pwd -P)"
   [[ "$owner_root" == "$expected_root" ]] || \
     _die "Retry owner repo is symlink-aliased: $owner_root"
+  if [[ -d "$worktree" ]]; then
+    worker_identity="$(_repo_identity "$worktree")" || \
+      _die "Retry worker worktree identity is unavailable: $repo_name"
+    [[ "$worker_identity" == "$owner_worker_identity" ]] || \
+      _die "Retry worker worktree identity changed: $repo_name"
+  fi
   identity="$(_repo_identity "$expected_root")" || \
     _die "Cannot identify retry owner repo: $repo_name"
   [[ "$identity" == "$owner_identity" ]] || \
