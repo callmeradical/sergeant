@@ -817,6 +817,19 @@ present_phase_before="$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase"
 present_evidence_before="$(cksum \
   "$TEST_ROOT/fleet/present-retry/app/terminal-evidence"/.sergeant-*)"
 rm "$TEST_ROOT/present-retry-sgt-present-retry"/.sergeant-*
+printf 'changed fleet result\n' > "$TEST_ROOT/fleet/present-retry/app/result"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/present-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" present-retry >/dev/null 2>&1; then
+  printf 'cleanup accepted changed fleet result during retry preflight\n' >&2
+  exit 1
+fi
+[[ ! -e "$TEST_ROOT/present-retry-sgt-present-retry/.sergeant-status" ]]
+[[ ! -e "$TEST_ROOT/present-retry-sgt-present-retry/.sergeant-result" ]]
+[[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 1 ]]
+printf 'result\n' > "$TEST_ROOT/fleet/present-retry/app/result"
 if PATH="$TEST_ROOT/fake-bin:$PATH" \
   FAKE_GIT_LOG="$TEST_ROOT/present-retry-removals" \
   SERGEANT_CONFIG="$TEST_ROOT/config" \
