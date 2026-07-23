@@ -1549,6 +1549,23 @@ _repo_git_dir() {
   printf '%s\n' "$dir"
 }
 
+_repo_common_instance() {
+  local common_dir identity repo_root="$1"
+
+  common_dir="$(_repo_git_dir "$repo_root" common)" || return 1
+  identity="$(stat -c '%d:%i' "$common_dir" 2>/dev/null || \
+    stat -f '%d:%i' "$common_dir" 2>/dev/null)" || return 1
+  printf '%s\n%s\n' "$common_dir" "$identity"
+}
+
+_require_worktree_owner() {
+  local configured_instance worktree_instance
+
+  configured_instance="$(_repo_common_instance "$1")" || return 1
+  worktree_instance="$(_repo_common_instance "$2")" || return 1
+  [[ "$configured_instance" == "$worktree_instance" ]]
+}
+
 _repo_instance_id() {
   local git_common_dir="$1" marker token tmp
 
@@ -1729,12 +1746,13 @@ _configured_repo_root() {
 }
 
 _record_cleanup_owner() {
-  local evidence_identity holder identity project repo_dir="$1" repo_root="$2" \
+  local evidence_dir="${6:-$1/terminal-evidence}" evidence_identity holder identity \
+    output="${5:-$1/cleanup-owner}" project repo_dir="$1" repo_root="$2" \
     worker_identity worktree="$3" wt_type="$4"
 
   identity="$(_repo_identity "$repo_root" create)" || return 1
   worker_identity="$(_repo_identity "$worktree" exclude-evidence)" || return 1
-  evidence_identity="$(_worker_evidence_identity "$repo_dir/terminal-evidence")" || return 1
+  evidence_identity="$(_worker_evidence_identity "$evidence_dir")" || return 1
   project="$(_task_project)" || return 1
   holder=""
   [[ "$wt_type" != "treehouse" ]] || \
@@ -1742,8 +1760,47 @@ _record_cleanup_owner() {
   printf '4\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
     "$project" "$repo_root" "$worktree" "$wt_type" "$identity" \
     "$worker_identity" "$evidence_identity" "$holder" \
-    > "$repo_dir/cleanup-owner.tmp" &&
-    mv "$repo_dir/cleanup-owner.tmp" "$repo_dir/cleanup-owner"
+    > "$output"
+}
+
+_publish_initial_cleanup() {
+  local evidence_identity="$5" marker marker_preexisting=false repo_dir="$1" \
+    repo_root="$2" transaction worktree="$3" wt_type="$4"
+
+  transaction="$repo_dir/cleanup-transaction.tmp.$$"
+  marker="$(_repo_git_dir "$repo_root" common)/sergeant-instance" || return 1
+  [[ -e "$marker" || -L "$marker" ]] && marker_preexisting=true
+  [[ ! -e "$repo_dir/terminal-evidence" && ! -L "$repo_dir/terminal-evidence" && \
+    ! -e "$repo_dir/cleanup-owner" && ! -L "$repo_dir/cleanup-owner" && \
+    ! -e "$repo_dir/cleanup-phase" && ! -L "$repo_dir/cleanup-phase" && \
+    ! -e "$transaction" && ! -L "$transaction" ]] || return 1
+  mkdir "$transaction" || return 1
+
+  if ! _stage_worker_evidence "$repo_dir" "$worktree" "$evidence_identity" \
+    "$transaction/terminal-evidence" || ! _cleanup_fail_point stage-evidence || \
+    ! _cleanup_fail_point record-owner || \
+    ! _record_cleanup_owner "$repo_dir" "$repo_root" "$worktree" "$wt_type" \
+      "$transaction/cleanup-owner" "$transaction/terminal-evidence" || \
+    ! _cleanup_fail_point record-phase || \
+    ! printf 'removing\n%s\n%s\n%s\n' "$worktree" "$wt_type" "$repo_root" \
+      > "$transaction/cleanup-phase"; then
+    rm -rf "$transaction"
+    [[ "$marker_preexisting" == true ]] || rm -f "$marker"
+    return 1
+  fi
+
+  if ! _cleanup_fail_point publish-evidence || \
+    ! mv "$transaction/terminal-evidence" "$repo_dir/terminal-evidence" || \
+    ! _cleanup_fail_point publish-owner || \
+    ! mv "$transaction/cleanup-owner" "$repo_dir/cleanup-owner" || \
+    ! _cleanup_fail_point publish-phase || \
+    ! mv "$transaction/cleanup-phase" "$repo_dir/cleanup-phase"; then
+    rm -rf "$repo_dir/terminal-evidence" "$repo_dir/cleanup-owner" \
+      "$repo_dir/cleanup-phase" "$transaction"
+    [[ "$marker_preexisting" == true ]] || rm -f "$marker"
+    return 1
+  fi
+  rmdir "$transaction" || return 1
 }
 
 _validate_retry_owner() {
