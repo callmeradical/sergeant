@@ -174,7 +174,7 @@ Correctness, security, data-integrity, and test findings cannot be deferred or i
 
 ### Independent review routing
 
-Generated worker briefs always require separate Standards and Spec reviews. Frontend, UI, visual, interaction, accessibility, or user-facing output language in the mission, repo role, or repo group also requires a separate independent accessibility review. Non-UI work retains the two-axis review, while `sgt-no-mistakes-finding` continues to route structured accessibility findings whenever a review supplies them.
+Generated worker briefs always require separate Standards and Spec reviews. For the authoritative UI-routing triggers and the added accessibility-review contract, see `skills/dispatch/SKILL.md`.
 
 ## Skills
 
