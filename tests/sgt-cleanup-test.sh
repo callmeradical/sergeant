@@ -314,38 +314,24 @@ fi
 [[ -d "$TEST_ROOT/done-without-result-worktree" ]]
 [[ -d "$TEST_ROOT/fleet/done-without-result" ]]
 
-# missing-record: no worktree file — cleanup should skip worktree steps and succeed.
-mkdir -p "$TEST_ROOT/fleet/absent-missing-record/app"
-printf 'done\n' > "$TEST_ROOT/fleet/absent-missing-record/app/status"
-printf 'result\n' > "$TEST_ROOT/fleet/absent-missing-record/app/result"
-SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" absent-missing-record \
-  > "$TEST_ROOT/absent-missing-record.log" 2>&1 || {
-  printf 'cleanup rejected absent-missing-record (no worktree): %s\n' \
-    "$(cat "$TEST_ROOT/absent-missing-record.log")" >&2
-  exit 1
-}
-[[ ! -d "$TEST_ROOT/fleet/absent-missing-record" ]] || {
-  printf 'fleet state not removed for absent-missing-record\n' >&2; exit 1
-}
+for absent_case in missing-record pre-existing; do
+  absent_state="$TEST_ROOT/fleet/absent-$absent_case/app"
+  mkdir -p "$absent_state"
+  printf 'done\n' > "$absent_state/status"
+  printf 'result\n' > "$absent_state/result"
+  if [[ "$absent_case" == "pre-existing" ]]; then
+    printf '%s\n' "$TEST_ROOT/absent-worktree" > "$absent_state/worktree"
+  fi
 
-# pre-existing: worktree recorded but externally removed — cleanup should synthesize
-# evidence from fleet state and complete successfully (idempotent replay).
-mkdir -p "$TEST_ROOT/fleet/absent-pre-existing/app"
-printf 'done\n' > "$TEST_ROOT/fleet/absent-pre-existing/app/status"
-printf 'result\n' > "$TEST_ROOT/fleet/absent-pre-existing/app/result"
-printf '%s\n' "$TEST_ROOT/absent-worktree-gone" \
-  > "$TEST_ROOT/fleet/absent-pre-existing/app/worktree"
-SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" absent-pre-existing \
-  > "$TEST_ROOT/absent-pre-existing.log" 2>&1 || {
-  printf 'cleanup rejected absent-pre-existing (external removal): %s\n' \
-    "$(cat "$TEST_ROOT/absent-pre-existing.log")" >&2
-  exit 1
-}
-[[ ! -d "$TEST_ROOT/fleet/absent-pre-existing" ]] || {
-  printf 'fleet state not removed for absent-pre-existing\n' >&2; exit 1
-}
+  if SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" "absent-$absent_case" \
+      > "$TEST_ROOT/absent-$absent_case.log" 2>&1; then
+    printf 'cleanup accepted %s worktree without cleanup proof\n' "$absent_case" >&2
+    exit 1
+  fi
+  grep -Fq 'has no reconciled cleanup phase' "$TEST_ROOT/absent-$absent_case.log"
+  [[ -d "$TEST_ROOT/fleet/absent-$absent_case" ]]
+done
 
 mkdir -p "$TEST_ROOT/fleet/failed-task/app" "$TEST_ROOT/failed-task"
 git -C "$TEST_ROOT/failed-task" init -q
@@ -567,6 +553,9 @@ fi
 [[ "$(wc -l < "$TEST_ROOT/git-removals")" -eq 2 ]]
 [[ "$(cat "$TEST_ROOT/fleet/removal-failure/aaa/terminal-evidence/.sergeant-diagnostic")" == \
   'earlier diagnostic' ]]
+[[ "$(cat "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase")" == \
+  $'partial-removal\n'"$TEST_ROOT/removal-failure-sgt-removal-failure"$'\ngit\n'"$TEST_ROOT/removal-failure" ]]
+[[ "$(wc -l < "$TEST_ROOT/git-removals")" -eq 2 ]]
 [[ "$(cat "$TEST_ROOT/fleet/removal-failure/app/terminal-evidence/.sergeant-diagnostic")" == \
   'removal diagnostic' ]]
 printf '%s\n' "$TEST_ROOT/different-worktree" > \
@@ -1584,9 +1573,10 @@ PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
 [[ ! -e "$TEST_ROOT/fleet/marker-publication" ]]
 rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/mv"
 
-mkdir -p "$TEST_ROOT/fleet/staging-failure/app"
+mkdir -p "$TEST_ROOT/fleet/staging-failure/app" \
+  "$TEST_ROOT/fake-bin"
 init_test_repo "$TEST_ROOT/staging"
-git -C "$TEST_ROOT/staging" worktree add -q -b staging-worker \
+git -C "$TEST_ROOT/staging" worktree add -q -b staging-failure-worker \
   "$TEST_ROOT/staging-sgt-staging-failure"
 record_retry_owner staging-failure app "$TEST_ROOT/staging"
 printf '%s\n' "$TEST_ROOT/staging-sgt-staging-failure" > \
@@ -1614,6 +1604,14 @@ if [[ " $* " == *".sergeant-status"* && ! -e "$FAKE_CP_STATE" ]]; then
   touch "$FAKE_CP_STATE"
   exit 1
 fi
+if [[ -n "${FAKE_CP_MUTATE_STATE:-}" && " $* " == *".sergeant-result"* && \
+  ! -e "$FAKE_CP_MUTATE_STATE" ]]; then
+  "$REAL_CP" "$@"
+  printf 'failed: changed during staging\n' > \
+    "$FAKE_CP_MUTATE_SOURCE/.sergeant-status"
+  touch "$FAKE_CP_MUTATE_STATE"
+  exit 0
+fi
 "$REAL_CP" "$@"
 EOF
 chmod +x "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/cp"
@@ -1625,6 +1623,23 @@ if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_CP_STATE="$TEST_ROOT/cp-failed-once" \
 fi
 [[ -f "$TEST_ROOT/staging-sgt-staging-failure/.sergeant-status" ]]
 [[ -f "$TEST_ROOT/staging-sgt-staging-failure/.sergeant-result" ]]
+[[ ! -e "$TEST_ROOT/fleet/staging-failure/app/terminal-evidence" ]]
+[[ ! -e "$TEST_ROOT/fleet/staging-failure/app/cleanup-owner" ]]
+[[ ! -e "$TEST_ROOT/fleet/staging-failure/app/cleanup-phase" ]]
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_CP_STATE="$TEST_ROOT/cp-failed-once" \
+  FAKE_CP_MUTATE_STATE="$TEST_ROOT/cp-mutated-once" \
+  FAKE_CP_MUTATE_SOURCE="$TEST_ROOT/staging-sgt-staging-failure" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" staging-failure >/dev/null 2>&1; then
+  printf 'cleanup accepted lifecycle evidence changed during staging\n' >&2
+  exit 1
+fi
+[[ -d "$TEST_ROOT/staging-sgt-staging-failure" ]]
+[[ ! -e "$TEST_ROOT/fleet/staging-failure/app/terminal-evidence" ]]
+[[ ! -e "$TEST_ROOT/fleet/staging-failure/app/cleanup-owner" ]]
+[[ ! -e "$TEST_ROOT/fleet/staging-failure/app/cleanup-phase" ]]
+printf 'done\n' > "$TEST_ROOT/staging-sgt-staging-failure/.sergeant-status"
 PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_CP_STATE="$TEST_ROOT/cp-failed-once" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" staging-failure >/dev/null
