@@ -150,24 +150,38 @@ fi
 [[ -d "$TEST_ROOT/done-without-result-worktree" ]]
 [[ -d "$TEST_ROOT/fleet/done-without-result" ]]
 
-for absent_case in missing-record pre-existing; do
-  absent_state="$TEST_ROOT/fleet/absent-$absent_case/app"
-  mkdir -p "$absent_state"
-  printf 'done\n' > "$absent_state/status"
-  printf 'result\n' > "$absent_state/result"
-  if [[ "$absent_case" == "pre-existing" ]]; then
-    printf '%s\n' "$TEST_ROOT/absent-worktree" > "$absent_state/worktree"
-  fi
+# missing-record: no worktree file — cleanup should skip worktree steps and succeed.
+mkdir -p "$TEST_ROOT/fleet/absent-missing-record/app"
+printf 'done\n' > "$TEST_ROOT/fleet/absent-missing-record/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/absent-missing-record/app/result"
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" absent-missing-record \
+  > "$TEST_ROOT/absent-missing-record.log" 2>&1 || {
+  printf 'cleanup rejected absent-missing-record (no worktree): %s\n' \
+    "$(cat "$TEST_ROOT/absent-missing-record.log")" >&2
+  exit 1
+}
+[[ ! -d "$TEST_ROOT/fleet/absent-missing-record" ]] || {
+  printf 'fleet state not removed for absent-missing-record\n' >&2; exit 1
+}
 
-  if SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-    "$ROOT_DIR/bin/sgt-cleanup" "absent-$absent_case" \
-      > "$TEST_ROOT/absent-$absent_case.log" 2>&1; then
-    printf 'cleanup accepted %s worktree without cleanup proof\n' "$absent_case" >&2
-    exit 1
-  fi
-  grep -Fq 'has no reconciled cleanup phase' "$TEST_ROOT/absent-$absent_case.log"
-  [[ -d "$TEST_ROOT/fleet/absent-$absent_case" ]]
-done
+# pre-existing: worktree recorded but externally removed — cleanup should synthesize
+# evidence from fleet state and complete successfully (idempotent replay).
+mkdir -p "$TEST_ROOT/fleet/absent-pre-existing/app"
+printf 'done\n' > "$TEST_ROOT/fleet/absent-pre-existing/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/absent-pre-existing/app/result"
+printf '%s\n' "$TEST_ROOT/absent-worktree-gone" \
+  > "$TEST_ROOT/fleet/absent-pre-existing/app/worktree"
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" absent-pre-existing \
+  > "$TEST_ROOT/absent-pre-existing.log" 2>&1 || {
+  printf 'cleanup rejected absent-pre-existing (external removal): %s\n' \
+    "$(cat "$TEST_ROOT/absent-pre-existing.log")" >&2
+  exit 1
+}
+[[ ! -d "$TEST_ROOT/fleet/absent-pre-existing" ]] || {
+  printf 'fleet state not removed for absent-pre-existing\n' >&2; exit 1
+}
 
 mkdir -p "$TEST_ROOT/fleet/failed-task/app" "$TEST_ROOT/failed-task"
 git -C "$TEST_ROOT/failed-task" init -q
