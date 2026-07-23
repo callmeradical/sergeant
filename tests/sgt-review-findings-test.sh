@@ -56,6 +56,18 @@ printf '%s\n' "$*" >> "$NOTIFY_LOG"
 EOF
 chmod +x "$TEST_ROOT/fake-bin/sgt-notify"
 
+cat > "$TEST_ROOT/fake-bin/cat" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${BLOCK_GATE_READ:-0}" == "1" && "${1:-}" == */standards-code-review ]]; then
+  touch "$GATE_READ_STARTED"
+  while [[ ! -e "$GATE_READ_RELEASE" ]]; do
+    sleep 0.01
+  done
+fi
+exec /usr/bin/cat "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/cat"
+
 cat > "$TEST_ROOT/fake-bin/mv" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$(basename "$2")" >> "$MV_LOG"
@@ -182,6 +194,30 @@ run_router "$TEST_ROOT/findings.json"
 PRESERVE_FLEET=1 ROUTER_AXIS=spec run_router "$TEST_ROOT/findings.json"
 grep -Fq 'Review axis: standards' "$WORKTREE/.sergeant-message"
 grep -Fq 'Review axis: spec' "$WORKTREE/.sergeant-message"
+
+rm -rf "$WORKTREE/.sergeant-review-gates"
+rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation}
+GATE_READ_STARTED="$TEST_ROOT/gate-read-started" GATE_READ_RELEASE="$TEST_ROOT/gate-read-release" \
+  PRESERVE_FLEET=1 BLOCK_GATE_READ=1 run_router "$TEST_ROOT/findings.json" &
+first_router_pid=$!
+for _ in {1..200}; do
+  [[ -e "$TEST_ROOT/gate-read-started" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/gate-read-started" ]]
+GATE_READ_STARTED="$TEST_ROOT/unused" GATE_READ_RELEASE="$TEST_ROOT/unused" \
+  PRESERVE_FLEET=1 ROUTER_AXIS=spec run_router "$TEST_ROOT/findings.json" &
+second_router_pid=$!
+for _ in {1..200}; do
+  [[ -s "$TEST_ROOT/notify.log" ]] && break
+  sleep 0.01
+done
+touch "$TEST_ROOT/gate-read-release"
+wait "$first_router_pid"
+wait "$second_router_pid"
+grep -Fq 'Review axis: standards' "$WORKTREE/.sergeant-message"
+grep -Fq 'Review axis: spec' "$WORKTREE/.sergeant-message"
+
 PRESERVE_FLEET=1 ROUTER_AXIS=spec run_router "$TEST_ROOT/clean.json"
 [[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
 grep -Fq 'Review axis: standards' "$WORKTREE/.sergeant-message"

@@ -8,8 +8,9 @@ _sgt_require_running_bash || return 1
 
 _sgt_response_lock_acquire() {
   local repo_state="$1"
-  local lock_path="$repo_state/response.lock"
-  local candidate="$repo_state/.response.lock.$$.$RANDOM.$RANDOM"
+  local lock_name="${2:-response.lock}"
+  local lock_path="$repo_state/$lock_name"
+  local candidate="$repo_state/.$lock_name.$$.$RANDOM.$RANDOM"
   local candidate_name="${candidate##*/}"
   local owner current_owner interval
   interval="${SGT_RESPONSE_LOCK_INTERVAL:-0.01}"

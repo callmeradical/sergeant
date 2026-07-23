@@ -6,6 +6,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-response-lock.sh
+source "$SCRIPT_DIR/_sgt-response-lock.sh"
 
 usage() {
   cat >&2 <<'EOF'
@@ -62,6 +64,7 @@ _review_gate_messages() {
 
 _publish_blocked() {
   local message="$1" notice="$2" generation current notify_status gate_path
+  _sgt_response_lock_acquire "$WORKTREE" ".sergeant-review-gates.lock" || return 1
   current="$( { tr -d '\n' < "$WORKTREE/.sergeant-gate-generation"; } 2>/dev/null || true)"
   [[ "$current" =~ ^[0-9]+$ ]] || current=0
   generation=$((current + 1))
@@ -82,6 +85,7 @@ _publish_blocked() {
     sgt-notify "$TASK_ID" "blocked [$REPO]: $notice" >/dev/null 2>&1 || notify_status=$?
   fi
   mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
+  _sgt_response_lock_release || return 1
   if (( notify_status != 0 )); then
     printf 'ERROR: sgt-notify failed while publishing blocked review findings\n' >&2
     return "$notify_status"
@@ -312,6 +316,7 @@ fi
 
 current_status="$( { tr -d '\n' < "$WORKTREE/.sergeant-status"; } 2>/dev/null || true)"
 current_message="$(cat "$WORKTREE/.sergeant-message" 2>/dev/null || true)"
+_sgt_response_lock_acquire "$WORKTREE" ".sergeant-review-gates.lock" || _routing_failure "could not lock review gate state"
 gate_path="$(_review_gate_path)"
 if [[ -f "$gate_path" ]]; then
   rm -f "$gate_path"
@@ -327,6 +332,7 @@ if [[ -f "$gate_path" ]]; then
     rmdir "$WORKTREE/.sergeant-review-gates" 2>/dev/null || true
   fi
 fi
+_sgt_response_lock_release || _routing_failure "could not unlock review gate state"
 
 if (( actionable_count == 0 )); then
   printf 'no actionable findings; continue remediation workflow\n'
