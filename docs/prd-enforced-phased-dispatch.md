@@ -212,6 +212,7 @@ The fleet state is the operational source of truth while a lifecycle is active. 
 - lifecycle ID and schema version;
 - project, owning repository, affected repositories, and permitted source-request references;
 - current phase state and monotonic generation;
+- phase transition events, including phase, generation, transition timestamp, and approved artifact digest or skip when applicable;
 - artifact manifests and aggregate digests;
 - approval and skip events, including actor, timestamp, and reason when applicable;
 - phase worker IDs, worktree references, execution statuses, dependency order, and terminal results;
@@ -223,7 +224,7 @@ Lifecycle events are append-only. Current-state summaries may be regenerated fro
 ### Lifecycle index
 
 - The owning repository retains one durable, human-readable canonical structured-field index for the lifecycle.
-- The index may format only these enumerated fields: lifecycle ID and schema version; project; owning and affected repositories; current phase and generation; permitted source-request references; artifact manifests and digests; approval or skip actor, timestamp, category, and reason; privacy-safe downstream effect; phase worker IDs, execution statuses, dependency order, and terminal results; structured recovery, invalidation, cancellation, and failure state; and final PR and commit references.
+- The index may format only these enumerated fields: lifecycle ID and schema version; project; owning and affected repositories; current phase; phase transition entries containing phase, generation, transition timestamp, and approved artifact digest or skip when applicable; permitted source-request references; artifact manifests and digests; approval or skip actor, timestamp, category, and reason; privacy-safe downstream effect; phase worker IDs, execution statuses, dependency order, and terminal results; structured recovery, invalidation, cancellation, and failure state; and final PR and commit references.
 - The index correlates PRD authoring, specification authoring, and each repository's implementation assignments without replacing their phase records.
 - The index must not contain free-form or request-derived narrative, paraphrases, intent summaries, source request bodies, or dispatch brief bodies, including redacted bodies. Any source authority is represented only by the permitted source-request references.
 - PRD and specification phase records remain awaiting approval at their gates; an artifact commit alone cannot close a gate. The matching approval command records the human gate evidence before advancing. A rejected or interrupted gate remains awaiting approval, while a superseding revision returns the phase to active work and requires renewed review.
