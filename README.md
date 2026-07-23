@@ -121,6 +121,7 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-graphify <project>` | Build and publish the merged project graph |
 | `bin/sgt-dispatch <project> "<brief>" [options]` | Dispatch agents across repos |
 | `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Classify a no-mistakes finding and create/update owning-repo td work |
+| `bin/sgt-review-findings <project> <repo> [options]` | Route structured independent-review findings to td and fleet supervision |
 | `bin/sgt-watch <task-id>` | Monitor dispatched fleet |
 | `bin/sgt-respond <task-id> <repo> "<response>"` | Respond to and resume a waiting worker |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees and fleet state |
@@ -148,6 +149,10 @@ Correctness, security, data-integrity, and test findings cannot be deferred or i
 
 Generated worker briefs always require separate Standards and Spec reviews. Frontend, UI, visual, interaction, accessibility, or user-facing output language in the mission, repo role, or repo group also requires a separate independent accessibility review. Non-UI work retains the two-axis review, while `sgt-no-mistakes-finding` continues to route structured accessibility findings whenever a review supplies them.
 
+### Independent review findings
+
+Dispatched workers pass each Standards, Spec, or accessibility review's strict JSON finding artifact to `sgt-review-findings`. The router creates or updates one owning-repository td task per actionable finding, preserves active task state on reruns, and publishes blocking task IDs and remediation guidance through `.sergeant-message`, `.sergeant-status`, and `sgt-notify`. Cosmetic and false-positive dispositions create no cards. The schema rejects free-form review bodies, and credential-shaped values in accepted fields are redacted before durable storage.
+
 ## Skills
 
 Agent-loaded skills for structured workflows:
@@ -160,7 +165,7 @@ Agent-loaded skills for structured workflows:
 
 ## Requirements
 
-- [`github.com/marcus/td`](https://github.com/marcus/td) — task CLI, required for brief-based `sgt-dispatch` runs, `sgt-no-mistakes-finding`, and `sgt-td-*` commands; install with `brew install marcus/tap/td` or `go install github.com/marcus/td@latest`
+- [`github.com/marcus/td`](https://github.com/marcus/td) — task CLI, required for brief-based `sgt-dispatch` runs, finding routers, and `sgt-td-*` commands; install with `brew install marcus/tap/td` or `go install github.com/marcus/td@latest`
 - `yq` — YAML parser: `brew install yq`
 - `git` and `gh` — for repo operations and PRs
 - `tmux` — for local agent dispatch
