@@ -120,7 +120,7 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-context <project>` | Emit full agent context block for a project |
 | `bin/sgt-graphify <project>` | Build and publish the merged project graph |
 | `bin/sgt-dispatch <project> "<brief>" [options]` | Dispatch agents across repos |
-| `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Route a no-mistakes finding to a gate, td, ignore, or user escalation |
+| `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Classify a no-mistakes finding and create/update owning-repo td work |
 | `bin/sgt-watch <task-id>` | Monitor dispatched fleet |
 | `bin/sgt-respond <task-id> <repo> "<response>"` | Respond to and resume a waiting worker |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees and fleet state |
