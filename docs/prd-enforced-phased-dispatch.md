@@ -53,7 +53,7 @@ Planning artifacts are executable authority, not advisory context. Each downstre
 - Automatically deciding product questions or evaluating whether a human made a good decision.
 - Providing cryptographic human identity, organizational authorization, or non-repudiation beyond the local actor evidence available to Sergeant.
 - Migrating or retroactively gating fleets created before this lifecycle is introduced.
-- Implementing the lifecycle as part of the task that authors this PRD.
+- Implementing the lifecycle as part of the work that authors this PRD.
 
 ## Terminology
 
@@ -77,7 +77,7 @@ Planning artifacts are executable authority, not advisory context. Each downstre
 
 | State | Permitted activity | Exit condition |
 |---|---|---|
-| `request_captured` | Record intent, owning repository, affected repositories, and permitted source-request references. | PRD authoring is dispatched, an eligible PRD skip proposal is published directly to `awaiting_prd_approval`, or the lifecycle is cancelled. |
+| `request_captured` | Record lifecycle ID, owning repository, affected repositories, and permitted source-request references. | PRD authoring is dispatched, an eligible PRD skip proposal is published directly to `awaiting_prd_approval`, or the lifecycle is cancelled. |
 | `prd_authoring` | A PRD worker may create or revise only the PRD and supporting review evidence, or may publish an eligible skip proposal instead of an artifact. | A complete PRD revision or eligible skip proposal is published to `awaiting_prd_approval`. |
 | `awaiting_prd_approval` | Humans may review the published PRD revision or skip proposal; workers may answer questions or publish a superseding proposal. | `sgt-approve-prd` records approval of the displayed revision or skip; cancellation is also allowed. |
 | `spec_authoring` | OpenSpec workers may create or revise only OpenSpec artifacts authorized by the approved PRD, or may publish an eligible skip proposal instead of artifacts. | A complete OpenSpec revision or eligible skip proposal is published to `awaiting_spec_approval`. |
@@ -184,7 +184,7 @@ A PRD may be skipped only when the request is exactly one of:
 - urgent containment that disables or rolls back identified behavior without designing replacement behavior; or
 - mechanical maintenance limited to formatting, spelling, comments, generated-file refresh, or dependency metadata with no runtime, interface, security, privacy, data, operational, or user-experience effect.
 
-A linked issue, finding, bug report, or implementation plan is not by itself an approved PRD and does not qualify a product change for a skip. A pre-existing approved PRD is reused as an immutable artifact revision rather than skipped.
+Unapproved supporting material is not by itself an approved PRD and does not qualify a product change for a skip. A pre-existing approved PRD is reused as an immutable artifact revision rather than skipped.
 
 ### Specification skip eligibility
 
@@ -227,7 +227,7 @@ Lifecycle events are append-only. Current-state summaries may be regenerated fro
 - Significant transitions, approvals, skips, invalidations, and recovery decisions are recorded without request or brief bodies. Any source authority is represented only by the permitted source-request references.
 - PRD and specification phase records remain awaiting approval at their gates; an artifact commit alone cannot close a gate. The matching approval command records the human gate evidence before advancing. A rejected or interrupted gate remains awaiting approval, while a superseding revision returns the phase to active work and requires renewed review.
 - Implementation assignments must not start before `ready_for_implementation`.
-- Fleet cleanup preserves the complete privacy-safe lifecycle event ledger and terminal summary through the existing Sergeant capture mechanism before ephemeral worktrees or live fleet state are removed. Sergeant retains this capture indefinitely and never deletes it automatically; a user may delete it manually under their own retention policy.
+- Fleet cleanup preserves the complete privacy-safe lifecycle event ledger and terminal downstream effect through the existing Sergeant capture mechanism before ephemeral worktrees or live fleet state are removed. Sergeant retains this capture indefinitely and never deletes it automatically; a user may delete it manually under their own retention policy.
 
 Fleet events are the machine-operational record; the lifecycle index is the durable human-readable narrative. A mismatch blocks phase advancement and requires recovery rather than silently choosing one record.
 
@@ -250,7 +250,7 @@ Fleet events are the machine-operational record; the lifecycle index is the dura
 - Skip and cancellation reasons must be concise and must not quote sensitive request content.
 - Artifact content remains in its repository under that repository's access controls. Sergeant records references and digests only.
 - Temporary confirmation and response plaintext is removed after durable consumption according to existing response transport guarantees.
-- Notifications contain lifecycle ID, repository, phase, state, and a short privacy-safe summary only.
+- Notifications contain only lifecycle ID, repository identity, phase, and state.
 - Files containing lifecycle metadata use least-privilege local permissions consistent with existing fleet state.
 - Command output must redact credential-bearing URLs and known secret-like values before display or persistence.
 
@@ -281,7 +281,7 @@ Fleet events are the machine-operational record; the lifecycle index is the dura
 13. Artifact loss, digest mismatch, contradictory records, and unknown lifecycle versions fail closed with actionable recovery evidence.
 14. Legacy fleet fixtures continue to pass existing watch, respond, notify, and cleanup regression suites without lifecycle migration.
 15. Existing supported `sgt-dispatch` invocation forms remain parse-compatible and create a visible phased lifecycle for change-producing work.
-16. Cleanup rejects every nonterminal lifecycle state and preserves the complete privacy-safe event ledger plus a terminal lifecycle summary before deleting ephemeral state.
+16. Cleanup rejects every nonterminal lifecycle state and preserves the complete privacy-safe event ledger plus the terminal downstream effect before deleting ephemeral state.
 17. Repository-native focused and full test suites, independent standards review, independent spec review, and required shipping checks pass before the lifecycle implementation is delivered.
 18. Given any nonterminal phase, `sgt-cancel` requires exact interactive confirmation, prevents new dispatch, and records one idempotent lifecycle cancellation event. It remains in nonterminal `cancelling` while any worker is live or unaccounted for and permits cleanup only after reaching `cancelled`.
 19. Every `sgt-dispatch` defaults to a phased lifecycle. `--read-only` rejects mutation, and an ambiguous brief cannot use read-only mode to bypass gates.
@@ -292,4 +292,4 @@ Fleet events are the machine-operational record; the lifecycle index is the dura
 
 ## Delivery Boundary
 
-Approval of this PRD authorizes only the OpenSpec phase for the lifecycle implementation. It does not authorize runtime implementation. OpenSpec work must use the approved commit and SHA-256 digest of this document, resolve implementation design and task decomposition without changing these product decisions, and then await a separate `sgt-approve-spec` decision.
+Approval of this PRD authorizes only the OpenSpec phase for the lifecycle implementation. It does not authorize runtime implementation. OpenSpec work must use the approved commit and SHA-256 digest of this document, resolve implementation design, repository decomposition, and dependency order without changing these product decisions, and then await a separate `sgt-approve-spec` decision.
