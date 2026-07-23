@@ -30,7 +30,8 @@ printf '%s version 1.0\\n' \"$cmd\""
 
 run_check() {
   local td_mode="$1"
-  stubs="$test_root/$td_mode/bin"
+  local agent_mode="$2"
+  stubs="$test_root/${td_mode}-${agent_mode}/bin"
   mkdir -p "$stubs"
   write_required_stubs
 
@@ -70,13 +71,26 @@ case "$1" in
 esac'
   fi
 
+  if [[ "$agent_mode" == "opencode" ]]; then
+    make_stub opencode '#!/usr/bin/env bash
+printf "%s\n" "OpenCode 1.0"'
+  elif [[ "$agent_mode" == "claude" ]]; then
+    make_stub claude '#!/usr/bin/env bash
+printf "%s\n" "Claude Code 1.0"'
+  elif [[ "$agent_mode" == "both" ]]; then
+    make_stub opencode '#!/usr/bin/env bash
+printf "%s\n" "OpenCode 1.0"'
+    make_stub claude '#!/usr/bin/env bash
+printf "%s\n" "Claude Code 1.0"'
+  fi
+
   PATH="$stubs:/usr/bin:/bin:/usr/sbin:/sbin" \
     MISE_PROJECT_ROOT="$repo_root" \
     "$check_script"
 }
 
 set +e
-missing_output="$(run_check missing 2>&1)"
+missing_output="$(run_check missing none 2>&1)"
 missing_status=$?
 set -e
 if [[ "$missing_status" -eq 0 ]] || [[ "$missing_output" != *"td"* ]] || [[ "$missing_output" != *"MISSING"* ]]; then
@@ -85,7 +99,7 @@ if [[ "$missing_status" -eq 0 ]] || [[ "$missing_output" != *"td"* ]] || [[ "$mi
 fi
 
 set +e
-unsupported_output="$(run_check unsupported 2>&1)"
+unsupported_output="$(run_check unsupported none 2>&1)"
 unsupported_status=$?
 set -e
 if [[ "$unsupported_status" -eq 0 ]] || [[ "$unsupported_output" != *"Unsupported"* ]] || [[ "$unsupported_output" != *"Marcus td"* ]]; then
@@ -93,10 +107,25 @@ if [[ "$unsupported_status" -eq 0 ]] || [[ "$unsupported_output" != *"Unsupporte
   exit 1
 fi
 
-supported_output="$(run_check supported 2>&1)"
-if [[ "$supported_output" != *"All required dependencies present."* ]]; then
+set +e
+missing_agent_output="$(run_check supported none 2>&1)"
+missing_agent_status=$?
+set -e
+if [[ "$missing_agent_status" -eq 0 ]] || [[ "$missing_agent_output" != *"install OpenCode or Claude Code"* ]]; then
+  printf 'dependency check did not fail when no supported agent harness was present:\n%s\n' "$missing_agent_output" >&2
+  exit 1
+fi
+
+supported_output="$(run_check supported opencode 2>&1)"
+if [[ "$supported_output" != *"agent"* ]] || [[ "$supported_output" != *"opencode: OpenCode 1.0"* ]] || [[ "$supported_output" != *"All required dependencies present."* ]]; then
   printf 'dependency check did not pass with supported td:\n%s\n' "$supported_output" >&2
   exit 1
 fi
 
-printf 'mise dependency check validates Marcus td support: ok\n'
+alternate_agent_output="$(run_check supported claude 2>&1)"
+if [[ "$alternate_agent_output" != *"agent"* ]] || [[ "$alternate_agent_output" != *"claude: Claude Code 1.0"* ]] || [[ "$alternate_agent_output" != *"All required dependencies present."* ]]; then
+  printf 'dependency check did not accept Claude Code as the supported harness:\n%s\n' "$alternate_agent_output" >&2
+  exit 1
+fi
+
+printf 'mise dependency check validates td and agent prerequisites: ok\n'

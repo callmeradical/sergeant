@@ -86,7 +86,7 @@ ok=true
 _check() {
   local name="$1" cmd="$2" required="$3" hint="$4"
   if command -v "$cmd" &>/dev/null; then
-    version="$($cmd --version 2>&1 | head -1 | tr -d '\\n')"
+    version="$($cmd --version 2>&1 | head -1 | tr -d '\n')"
     printf "  %-14s  ✓  %s\\n" "$name" "$version"
   else
     if [[ "$required" == "required" ]]; then
@@ -114,9 +114,34 @@ _check_td() {
      [[ "$create_help" == *"--description"* ]] && \
      [[ "$create_help" == *"--json"* ]] && \
      [[ "$create_help" == *"--work-dir"* ]]; then
-    printf "  %-14s  ✓  %s\\n" "td" "$(printf '%s' "$td_version" | head -1 | tr -d '\\n')"
+    printf "  %-14s  ✓  %s\\n" "td" "$(printf '%s' "$td_version" | head -1 | tr -d '\n')"
   else
     printf "  %-14s  ✗  Unsupported — require Marcus td with create/json/work-dir support\\n" "td"
+    ok=false
+  fi
+}
+
+_check_agent_harness() {
+  local harness harness_path version detected_names detected_details
+
+  for harness in opencode claude; do
+    if harness_path="$(command -v "$harness" 2>/dev/null)"; then
+      version="$("$harness" --version 2>&1 | head -1 | tr -d '\n')"
+      [[ -n "$version" ]] || version="$harness_path"
+      if [[ -n "$detected_names" ]]; then
+        detected_names="$detected_names, $harness"
+        detected_details="$detected_details; $harness: $version"
+      else
+        detected_names="$harness"
+        detected_details="$harness: $version"
+      fi
+    fi
+  done
+
+  if [[ -n "${detected_names:-}" ]]; then
+    printf "  %-14s  ✓  %s\\n" "agent" "$detected_details"
+  else
+    printf "  %-14s  ✗  MISSING — install OpenCode or Claude Code\\n" "agent"
     ok=false
   fi
 }
@@ -131,6 +156,7 @@ _check "gh"         gh         required  "brew install gh"
 _check "tmux"       tmux       required  "brew install tmux"
 _check "lsof"       lsof       required  "install lsof with your system package manager"
 _check_td
+_check_agent_harness
 
 echo ""
 echo "Optional:"
