@@ -401,8 +401,8 @@ _require_response_cleanup_safe() {
 }
 
 _require_terminal_repos() {
-  local cleanup_phase evidence_dir partial_phase removed_phase removing_phase repo_dir repo_name \
-    retry_root retry_type status worktree worktree_status wt_type
+  local cleanup_phase evidence_dir owner_root owner_type partial_phase removed_phase removing_phase \
+    repo_dir repo_name retry_root retry_type status worktree worktree_status wt_type
 
   for repo_dir in "$TASK_DIR"/*/; do
     [[ -d "$repo_dir" ]] || continue
@@ -435,17 +435,36 @@ _require_terminal_repos() {
     removed_phase="$(printf 'removed\n%s\n%s\n%s\n' \
       "$worktree" "$retry_type" "$retry_root")"
     if [[ -n "$worktree" && -d "$worktree" ]]; then
-      if [[ "$cleanup_phase" == $'removing\n'"$worktree" || \
-        "$cleanup_phase" == "$removing_phase" ]]; then
-        [[ "$cleanup_phase" == "$removing_phase" ]] || \
+      case "$cleanup_phase" in
+        "$removing_phase")
+          [[ "$retry_type" == "$wt_type" ]] || \
+            _die "Retry worktree type changed: $repo_name"
+          _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+            "$retry_type" "$retry_root"
+          _restore_worker_evidence "$repo_dir" "$worktree"
+          ;;
+        "$partial_phase"|"$removed_phase")
+          [[ "$retry_type" == "$wt_type" ]] || \
+            _die "Retry worktree type changed: $repo_name"
+          _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+            "$retry_type" "$retry_root"
+          _die "Previously removed worktree reappeared: $repo_name"
+          ;;
+        $'reconciled-absent\n'"$worktree")
+          owner_root="$(sed -n '3p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
+          owner_type="$(sed -n '5p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
+          [[ "$owner_type" == "$wt_type" ]] || \
+            _die "Retry worktree type changed: $repo_name"
+          _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+            "$owner_type" "$owner_root"
+          _die "Previously removed worktree reappeared: $repo_name"
+          ;;
+        $'removing\n'"$worktree")
           _die "Retry owner identity is missing: $repo_name"
-        [[ "$retry_type" == "$wt_type" ]] || \
-          _die "Retry worktree type changed: $repo_name"
-        _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
-          "$retry_type" "$retry_root"
-        _restore_worker_evidence "$repo_dir" "$worktree" || \
-          _die "$repo_name: evidence restore failed during removing-state replay; replay aborted"
-      fi
+          ;;
+        "") ;;
+        *) _die "Persisted cleanup phase is malformed: $repo_name" ;;
+      esac
       [[ -f "$worktree/.sergeant-status" ]] || \
         _die "$repo_name worktree terminal proof is missing"
       worktree_status="$(tr -d '\n' < "$worktree/.sergeant-status")"
@@ -636,14 +655,37 @@ _validation_legacy_checkout_matches() {
     "$expected_head" ]]
 }
 
-_repo_instance_id() {
-  local marker repo_root="$1" token tmp
+_repo_git_dir() {
+  local dir kind="$2" repo_root="$1" top
 
-  marker="$repo_root/.git/sergeant-instance"
+  [[ -d "$repo_root" && ! -L "$repo_root" && ! -L "$repo_root/.git" ]] || return 1
+  top="$(git -C "$repo_root" rev-parse --path-format=absolute --show-toplevel 2>/dev/null)" || \
+    return 1
+  [[ -n "$top" && "$top" != *$'\n'* && "$top" == "$repo_root" ]] || return 1
+  case "$kind" in
+    worktree)
+      dir="$(git -C "$repo_root" rev-parse --path-format=absolute --git-dir 2>/dev/null)" || \
+        return 1
+      ;;
+    common)
+      dir="$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || \
+        return 1
+      ;;
+    *) return 1 ;;
+  esac
+  [[ -n "$dir" && "$dir" != *$'\n'* && -d "$dir" && ! -L "$dir" ]] || return 1
+  [[ "$dir" == "$(cd "$dir" && pwd -P)" ]] || return 1
+  printf '%s\n' "$dir"
+}
+
+_repo_instance_id() {
+  local git_common_dir="$1" marker token tmp
+
+  marker="$git_common_dir/sergeant-instance"
   if [[ ! -e "$marker" && "${2:-}" == "create" ]]; then
-    token="$(printf '%s\n%s\n%s\n%s\n' "$repo_root" "$$" "$RANDOM" "$(date +%s)" | \
+    token="$(printf '%s\n%s\n%s\n%s\n' "$git_common_dir" "$$" "$RANDOM" "$(date +%s)" | \
       git hash-object --stdin)" || return 1
-    tmp="$(mktemp "$repo_root/.git/.sergeant-instance.XXXXXX")" || return 1
+    tmp="$(mktemp "$git_common_dir/.sergeant-instance.XXXXXX")" || return 1
     if ! printf '%s\n' "$token" > "$tmp"; then
       rm -f "$tmp"
       return 1
@@ -661,10 +703,10 @@ _repo_instance_id() {
 }
 
 _repo_metadata_identity() {
-  local repo_root="$1"
+  local git_common_dir="$1"
 
   (
-    cd "$repo_root/.git" || exit 1
+    cd "$git_common_dir" || exit 1
     {
       find . -path ./worktrees -prune -o -path ./objects -prune -o \
         -path ./logs -prune -o -path ./index -prune -o \
@@ -694,20 +736,22 @@ _repo_worktree_identity() {
 }
 
 _repo_identity() {
-  local config head instance metadata refs remote roots state repo_root="$1"
+  local config git_common_dir git_dir head instance metadata refs remote roots state repo_root="$1"
 
-  instance="$(stat -c '%d:%i' "$repo_root/.git" 2>/dev/null || \
-    stat -f '%d:%i' "$repo_root/.git" 2>/dev/null)" || return 1
-  instance="$instance:$(_repo_instance_id "$repo_root" "${2:-}")" || return 1
-  config="$(git hash-object "$repo_root/.git/config" 2>/dev/null)" || return 1
-  head="$(cat "$repo_root/.git/HEAD" 2>/dev/null)" || return 1
+  git_dir="$(_repo_git_dir "$repo_root" worktree)" || return 1
+  git_common_dir="$(_repo_git_dir "$repo_root" common)" || return 1
+  instance="$(stat -c '%d:%i' "$git_dir" 2>/dev/null || \
+    stat -f '%d:%i' "$git_dir" 2>/dev/null)" || return 1
+  instance="$instance:$(_repo_instance_id "$git_common_dir" "${2:-}")" || return 1
+  config="$(git hash-object "$git_common_dir/config" 2>/dev/null)" || return 1
+  head="$(cat "$git_dir/HEAD" 2>/dev/null)" || return 1
   refs="$(git -C "$repo_root" for-each-ref \
     --format='%(refname) %(objectname) %(symref)' 2>/dev/null | sort)" || return 1
   roots="$(git -C "$repo_root" rev-list --max-parents=0 --all 2>/dev/null | sort)"
   [[ -n "$roots" ]] || return 1
   remote="$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null || true)"
   state="$(_repo_worktree_identity "$repo_root")" || return 1
-  metadata="$(_repo_metadata_identity "$repo_root")" || return 1
+  metadata="$(_repo_metadata_identity "$git_common_dir")" || return 1
   printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
     "$instance" "$metadata" "$config" "$head" "$remote" "$roots" "$refs" "$state" | \
     git hash-object --stdin

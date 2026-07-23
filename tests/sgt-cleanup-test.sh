@@ -366,6 +366,83 @@ SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" failed-task >/dev/null
 [[ ! -e "$TEST_ROOT/fleet/failed-task" ]]
 
+mkdir -p "$TEST_ROOT/fleet/linked-owner/app"
+init_test_repo "$TEST_ROOT/linked-owner-main"
+git -C "$TEST_ROOT/linked-owner-main" worktree add -q -b linked-owner-configured \
+  "$TEST_ROOT/linked-owner"
+git -C "$TEST_ROOT/linked-owner" worktree add -q -b linked-owner-worker \
+  "$TEST_ROOT/linked-owner-sgt-linked-owner"
+record_retry_owner linked-owner app "$TEST_ROOT/linked-owner"
+printf '%s\n' "$TEST_ROOT/linked-owner-sgt-linked-owner" > \
+  "$TEST_ROOT/fleet/linked-owner/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/linked-owner/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/linked-owner/app/result"
+printf 'done\n' > "$TEST_ROOT/linked-owner-sgt-linked-owner/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/linked-owner-sgt-linked-owner/.sergeant-result"
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" linked-owner >/dev/null
+[[ ! -e "$TEST_ROOT/linked-owner-sgt-linked-owner" ]]
+[[ ! -e "$TEST_ROOT/fleet/linked-owner" ]]
+
+mkdir -p "$TEST_ROOT/fleet/first-pass-policy/app"
+init_test_repo "$TEST_ROOT/first-pass-policy"
+git -C "$TEST_ROOT/first-pass-policy" worktree add -q -b first-pass-policy-worker \
+  "$TEST_ROOT/first-pass-policy-sgt-first-pass-policy"
+printf 'Project: first-pass-policy\n' > "$TEST_ROOT/fleet/first-pass-policy/brief.md"
+printf '%s\n' "$TEST_ROOT/first-pass-policy-sgt-first-pass-policy" > \
+  "$TEST_ROOT/fleet/first-pass-policy/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/first-pass-policy/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/first-pass-policy/app/result"
+printf 'done\n' > \
+  "$TEST_ROOT/first-pass-policy-sgt-first-pass-policy/.sergeant-status"
+printf 'result\n' > \
+  "$TEST_ROOT/first-pass-policy-sgt-first-pass-policy/.sergeant-result"
+printf 'current evidence\n' > \
+  "$TEST_ROOT/first-pass-policy-sgt-first-pass-policy/.sergeant-diagnostic"
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *" worktree remove "* ]]; then
+  printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
+  exit 1
+fi
+"$REAL_GIT" "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git"
+first_pass_fleet_before="$(cksum "$TEST_ROOT/fleet/first-pass-policy/app"/*)"
+first_pass_worktree_before="$(cksum \
+  "$TEST_ROOT/first-pass-policy-sgt-first-pass-policy"/.sergeant-*)"
+for first_pass_case in missing-config renamed-repo; do
+  rm -f "$TEST_ROOT/config/first-pass-policy.yaml"
+  if [[ "$first_pass_case" == "renamed-repo" ]]; then
+    cat > "$TEST_ROOT/config/first-pass-policy.yaml" <<EOF
+name: first-pass-policy
+repos:
+  - name: renamed-app
+    path: $TEST_ROOT/first-pass-policy
+EOF
+  fi
+  if PATH="$TEST_ROOT/fake-bin:$PATH" \
+    FAKE_GIT_LOG="$TEST_ROOT/first-pass-policy-removals" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" first-pass-policy \
+      > "$TEST_ROOT/first-pass-$first_pass_case.log" 2>&1; then
+    printf 'first-pass cleanup accepted %s\n' "$first_pass_case" >&2
+    exit 1
+  fi
+  grep -Fq 'Cannot resolve configured cleanup owner: app' \
+    "$TEST_ROOT/first-pass-$first_pass_case.log"
+  [[ ! -e "$TEST_ROOT/first-pass-policy-removals" ]]
+  [[ ! -e "$TEST_ROOT/fleet/first-pass-policy/app/cleanup-owner" ]]
+  [[ ! -e "$TEST_ROOT/fleet/first-pass-policy/app/cleanup-phase" ]]
+  [[ ! -e "$TEST_ROOT/fleet/first-pass-policy/app/terminal-evidence" ]]
+  [[ "$(cksum "$TEST_ROOT/fleet/first-pass-policy/app"/*)" == \
+    "$first_pass_fleet_before" ]]
+  [[ "$(cksum "$TEST_ROOT/first-pass-policy-sgt-first-pass-policy"/.sergeant-*)" == \
+    "$first_pass_worktree_before" ]]
+  [[ -d "$TEST_ROOT/first-pass-policy-sgt-first-pass-policy" ]]
+done
+rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/config/first-pass-policy.yaml"
+
 mkdir -p "$TEST_ROOT/fleet/removal-failure/aaa" "$TEST_ROOT/fleet/removal-failure/app" \
   "$TEST_ROOT/fake-bin" "$TEST_ROOT/config"
 cat > "$TEST_ROOT/config/removal-failure.yaml" <<EOF
@@ -409,7 +486,8 @@ cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
   *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
-  *" rev-parse "*) printf 'true\n' ;;
+  *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
+  *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
   *" worktree remove "*)
     worktree="${!#}"
@@ -674,7 +752,8 @@ cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
   *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
-  *" rev-parse "*) printf 'true\n' ;;
+  *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
+  *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
   *" worktree remove "*)
     printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
@@ -701,6 +780,66 @@ present_owner_before="$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-owner"
 present_phase_before="$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase")"
 present_evidence_before="$(cksum \
   "$TEST_ROOT/fleet/present-retry/app/terminal-evidence"/.sergeant-*)"
+init_test_repo "$TEST_ROOT/present-retry-other"
+for reappeared_phase in partial-removal removed; do
+  printf '%s\n%s\ngit\n%s\n' "$reappeared_phase" \
+    "$TEST_ROOT/present-retry-sgt-present-retry" "$TEST_ROOT/present-retry" > \
+    "$TEST_ROOT/fleet/present-retry/app/cleanup-phase"
+  printf '%s diagnostic\n' "$reappeared_phase" > \
+    "$TEST_ROOT/present-retry-sgt-present-retry/.sergeant-diagnostic"
+  reappeared_owner_before="$(cksum \
+    "$TEST_ROOT/fleet/present-retry/app/cleanup-owner")"
+  reappeared_phase_before="$(cksum \
+    "$TEST_ROOT/fleet/present-retry/app/cleanup-phase")"
+  reappeared_terminal_before="$(cksum \
+    "$TEST_ROOT/fleet/present-retry/app/terminal-evidence"/.sergeant-*)"
+  reappeared_current_before="$(cksum \
+    "$TEST_ROOT/present-retry-sgt-present-retry"/.sergeant-*)"
+  cat > "$TEST_ROOT/config/present-retry.yaml" <<EOF
+name: present-retry
+repos:
+  - name: app
+    path: $TEST_ROOT/present-retry-other
+EOF
+  if PATH="$TEST_ROOT/fake-bin:$PATH" \
+    FAKE_GIT_LOG="$TEST_ROOT/present-retry-removals" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" present-retry \
+      > "$TEST_ROOT/reappeared-$reappeared_phase-owner.log" 2>&1; then
+    printf 'cleanup skipped owner validation during %s replay\n' \
+      "$reappeared_phase" >&2
+    exit 1
+  fi
+  grep -Fq 'Configured retry owner changed: app' \
+    "$TEST_ROOT/reappeared-$reappeared_phase-owner.log"
+  record_retry_owner present-retry app "$TEST_ROOT/present-retry"
+  if PATH="$TEST_ROOT/fake-bin:$PATH" \
+    FAKE_GIT_LOG="$TEST_ROOT/present-retry-removals" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" present-retry \
+      > "$TEST_ROOT/reappeared-$reappeared_phase.log" 2>&1; then
+    printf 'cleanup accepted a worktree reappearing during %s\n' \
+      "$reappeared_phase" >&2
+    exit 1
+  fi
+  grep -Fq 'Previously removed worktree reappeared: app' \
+    "$TEST_ROOT/reappeared-$reappeared_phase.log"
+  [[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 1 ]]
+  [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-owner")" == \
+    "$reappeared_owner_before" ]]
+  [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase")" == \
+    "$reappeared_phase_before" ]]
+  [[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/terminal-evidence"/.sergeant-*)" == \
+    "$reappeared_terminal_before" ]]
+  [[ "$(cksum "$TEST_ROOT/present-retry-sgt-present-retry"/.sergeant-*)" == \
+    "$reappeared_current_before" ]]
+done
+rm "$TEST_ROOT/present-retry-sgt-present-retry/.sergeant-diagnostic"
+printf 'removing\n%s\ngit\n%s\n' \
+  "$TEST_ROOT/present-retry-sgt-present-retry" "$TEST_ROOT/present-retry" > \
+  "$TEST_ROOT/fleet/present-retry/app/cleanup-phase"
 printf 'current worktree result\n' > \
   "$TEST_ROOT/present-retry-sgt-present-retry/.sergeant-result"
 present_worktree_evidence_before="$(cksum \
@@ -724,7 +863,6 @@ fi
 [[ "$(cksum "$TEST_ROOT/present-retry-sgt-present-retry"/.sergeant-*)" == \
   "$present_worktree_evidence_before" ]]
 git -C "$TEST_ROOT/present-retry" config --unset sergeant.fixture
-init_test_repo "$TEST_ROOT/present-retry-other"
 cat > "$TEST_ROOT/config/present-retry.yaml" <<EOF
 name: present-retry
 repos:
@@ -795,7 +933,8 @@ cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
   *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
-  *" rev-parse "*) printf 'true\n' ;;
+  *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
+  *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
   *" worktree remove "*)
     printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
@@ -860,7 +999,8 @@ cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
   *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
-  *" rev-parse "*) printf 'true\n' ;;
+  *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
+  *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
   *) exit 1 ;;
 esac
@@ -951,7 +1091,8 @@ cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
   *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
-  *" rev-parse "*) printf 'true\n' ;;
+  *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
+  *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
   *" worktree remove "*)
     printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
@@ -1023,7 +1164,8 @@ cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
   *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
-  *" rev-parse "*) printf 'true\n' ;;
+  *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
+  *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
   *" worktree remove "*) rm -rf "${!#}" ;;
   *) exit 1 ;;
