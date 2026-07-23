@@ -22,6 +22,14 @@ EOF
 
 cat > "$fake_bin/td" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'td version v0.51.2\n'
+  exit 0
+fi
+if [[ "${1:-}" == "create" && "${2:-}" == "--help" ]]; then
+  printf '%s\n' 'Usage: td create TITLE --description TEXT --json --work-dir DIR'
+  exit 0
+fi
 case "$1" in
   list) printf '[{"id":"td-route","title":"Route coordinator notifications"}]\n' ;;
   context) printf 'Coordinator routing task\n' ;;
