@@ -226,6 +226,10 @@ _require_terminal_repos() {
 
     worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
     wt_type="$(cat "$repo_dir/wt_type" 2>/dev/null || echo git)"
+    case "$wt_type" in
+      git|treehouse) ;;
+      *) _die "Unsupported worktree removal type: $repo_name: $wt_type" ;;
+    esac
     cleanup_phase="$(cat "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     retry_type="$(sed -n '3p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
@@ -290,6 +294,14 @@ _require_terminal_repos() {
     else
       [[ "$cleanup_phase" != $'removing\n'"$worktree" ]] || \
         _die "Retry owner identity is missing: $repo_name"
+      if [[ "$cleanup_phase" == $'reconciled-absent\n'"$worktree" ]]; then
+        owner_root="$(sed -n '3p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
+        owner_type="$(sed -n '5p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
+        [[ "$owner_type" == "$wt_type" ]] || \
+          _die "Retry worktree type changed: $repo_name"
+        _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+          "$owner_type" "$owner_root"
+      fi
       [[ -n "$worktree" && ( \
         ( ( "$cleanup_phase" == "$partial_phase" || \
             "$cleanup_phase" == "$removed_phase" || \
@@ -632,6 +644,10 @@ _validate_retry_owner() {
     owner_root owner_type owner_worker_identity owner_worktree project repo_dir="$1" \
     repo_name="$2" worker_identity worktree="$3" retry_type="$4" retry_root="$5"
 
+  case "$retry_type" in
+    git|treehouse) ;;
+    *) _die "Unsupported retry removal type: $repo_name: $retry_type" ;;
+  esac
   [[ "$(sed -n '1p' "$repo_dir/cleanup-owner" 2>/dev/null || true)" == "4" ]] || \
     _die "Retry owner identity is missing: $repo_name"
   owner_project="$(sed -n '2p' "$repo_dir/cleanup-owner")"
