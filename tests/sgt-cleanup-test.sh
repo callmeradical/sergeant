@@ -408,7 +408,7 @@ printf 'removal diagnostic\n' > \
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *" worktree remove "*)
@@ -508,20 +508,6 @@ printf 'partial-removal\n%s\ngit\n%s\n' \
   "$TEST_ROOT/removal-failure-alias" > \
   "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase"
 assert_retry_owner_rejected 'symlink-aliased repository'
-ln -s "$TEST_ROOT" "$TEST_ROOT/owner-parent-alias"
-cat > "$TEST_ROOT/config/removal-failure.yaml" <<EOF
-name: removal-failure
-repos:
-  - name: aaa
-    path: $TEST_ROOT/removal-success
-  - name: app
-    path: $TEST_ROOT/owner-parent-alias/removal-failure
-EOF
-printf 'partial-removal\n%s\ngit\n%s\n' \
-  "$TEST_ROOT/removal-failure-sgt-removal-failure" \
-  "$TEST_ROOT/removal-failure" > \
-  "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase"
-assert_retry_owner_rejected 'symlink-aliased configured owner'
 cat > "$TEST_ROOT/config/removal-failure.yaml" <<EOF
 name: removal-failure
 repos:
@@ -613,6 +599,7 @@ EOF
 printf 'Project: cross-project\n' > "$TEST_ROOT/fleet/removal-failure/brief.md"
 assert_retry_owner_rejected 'cross-project repository at the same path'
 printf 'Project: removal-failure\n' > "$TEST_ROOT/fleet/removal-failure/brief.md"
+rm "$TEST_ROOT/config/removal-failure.yaml"
 PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
   FAKE_GIT_LOG="$TEST_ROOT/git-removals" \
   SERGEANT_CONFIG="$TEST_ROOT/config" \
@@ -620,6 +607,53 @@ PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
   "$ROOT_DIR/bin/sgt-cleanup" removal-failure >/dev/null
 [[ "$(wc -l < "$TEST_ROOT/git-removals")" -eq 3 ]]
 [[ ! -e "$TEST_ROOT/fleet/removal-failure" ]]
+
+mkdir -p "$TEST_ROOT/fleet/dirty-retry/app" \
+  "$TEST_ROOT/dirty-retry-sgt-dirty-retry"
+init_test_repo "$TEST_ROOT/dirty-retry"
+record_retry_owner dirty-retry app "$TEST_ROOT/dirty-retry"
+printf 'dirty before cleanup\n' >> "$TEST_ROOT/dirty-retry/README.md"
+printf 'untracked before cleanup\n' > "$TEST_ROOT/dirty-retry/untracked.txt"
+printf '%s\n' "$TEST_ROOT/dirty-retry-sgt-dirty-retry" > \
+  "$TEST_ROOT/fleet/dirty-retry/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/dirty-retry/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/dirty-retry/app/result"
+printf 'done\n' > "$TEST_ROOT/dirty-retry-sgt-dirty-retry/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/dirty-retry-sgt-dirty-retry/.sergeant-result"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_STATE="$TEST_ROOT/dirty-retry-failed-once" \
+  FAKE_GIT_LOG="$TEST_ROOT/dirty-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" dirty-retry >/dev/null 2>&1; then
+  printf 'cleanup succeeded after dirty retry removal failed\n' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$TEST_ROOT/dirty-retry-removals")" -eq 1 ]]
+printf 'different dirty contents\n' > "$TEST_ROOT/dirty-retry/README.md"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_STATE="$TEST_ROOT/dirty-retry-failed-once" \
+  FAKE_GIT_LOG="$TEST_ROOT/dirty-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" dirty-retry >/dev/null 2>&1; then
+  printf 'cleanup accepted changed contents with unchanged dirty status\n' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$TEST_ROOT/dirty-retry-removals")" -eq 1 ]]
+[[ -f "$TEST_ROOT/fleet/dirty-retry/app/terminal-evidence/.sergeant-status" ]]
+printf 'fixture\ndirty before cleanup\n' > "$TEST_ROOT/dirty-retry/README.md"
+printf 'different untracked contents\n' > "$TEST_ROOT/dirty-retry/untracked.txt"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_STATE="$TEST_ROOT/dirty-retry-failed-once" \
+  FAKE_GIT_LOG="$TEST_ROOT/dirty-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" dirty-retry >/dev/null 2>&1; then
+  printf 'cleanup accepted changed untracked contents with unchanged status\n' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$TEST_ROOT/dirty-retry-removals")" -eq 1 ]]
 rm "$TEST_ROOT/fake-bin/git"
 
 mkdir -p "$TEST_ROOT/fleet/partial-publication/app" \
@@ -637,7 +671,7 @@ printf 'result\n' > \
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *" worktree remove "*)
@@ -702,7 +736,7 @@ printf 'result\n' > "$TEST_ROOT/treehouse-worktree/.sergeant-result"
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *) exit 1 ;;
@@ -793,7 +827,7 @@ printf 'result\n' > "$TEST_ROOT/marker-sgt-marker-publication/.sergeant-result"
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *" worktree remove "*) rm -rf "${!#}" ;;
@@ -839,7 +873,7 @@ printf 'result\n' > "$TEST_ROOT/staging-sgt-staging-failure/.sergeant-result"
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *" worktree remove "*) rm -rf "${!#}" ;;

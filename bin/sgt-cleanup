@@ -672,6 +672,18 @@ _repo_metadata_identity() {
   ) | git hash-object --stdin
 }
 
+_repo_worktree_identity() {
+  local path repo_root="$1"
+
+  (
+    git -C "$repo_root" diff --no-ext-diff --binary HEAD -- || exit 1
+    while IFS= read -r -d '' path; do
+      printf 'untracked\n%s\n' "$path"
+      git -C "$repo_root" hash-object "$path" || exit 1
+    done < <(git -C "$repo_root" ls-files --others --exclude-standard -z)
+  ) | git hash-object --stdin
+}
+
 _repo_identity() {
   local config head instance metadata refs remote roots state repo_root="$1"
 
@@ -685,8 +697,7 @@ _repo_identity() {
   roots="$(git -C "$repo_root" rev-list --max-parents=0 --all 2>/dev/null | sort)"
   [[ -n "$roots" ]] || return 1
   remote="$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null || true)"
-  state="$(git -C "$repo_root" status --porcelain=v1 --untracked-files=all 2>/dev/null | \
-    git hash-object --stdin)" || return 1
+  state="$(_repo_worktree_identity "$repo_root")" || return 1
   metadata="$(_repo_metadata_identity "$repo_root")" || return 1
   printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
     "$instance" "$metadata" "$config" "$head" "$remote" "$roots" "$refs" "$state" | \
@@ -700,6 +711,28 @@ _task_project() {
     return 1
   [[ -n "$project" && "$project" != *$'\n'* && "$project" != */* ]] || return 1
   printf '%s\n' "$project"
+}
+
+_configured_repo_root() {
+  local config_file configured_root i project raw_path repo_count repo_name="$1"
+
+  project="$(_task_project)" || return 1
+  config_file="$SERGEANT_CONFIG/$project.yaml"
+  [[ -f "$config_file" && ! -L "$config_file" ]] || return 1
+  _require_yq
+  repo_count="$(yq '.repos | length' "$config_file")" || return 1
+  raw_path=""
+  for ((i=0; i<repo_count; i++)); do
+    if [[ "$(yq ".repos[$i].name" "$config_file")" == "$repo_name" ]]; then
+      [[ -z "$raw_path" ]] || return 1
+      raw_path="$(yq ".repos[$i].path" "$config_file")"
+    fi
+  done
+  [[ -n "$raw_path" && "$raw_path" != "null" ]] || return 1
+  configured_root="$(_resolve_path "$raw_path")"
+  [[ -d "$configured_root" && ! -L "$configured_root" ]] || return 1
+  [[ "$configured_root" == "$(cd "$configured_root" && pwd -P)" ]] || return 1
+  printf '%s\n' "$configured_root"
 }
 
 _record_cleanup_owner() {
@@ -717,9 +750,9 @@ _record_cleanup_owner() {
 }
 
 _validate_retry_owner() {
-  local config_file configured_root expected_holder expected_root holder i identity \
-    owner_holder owner_identity owner_project owner_root owner_type owner_worktree project raw_path \
-    repo_count repo_dir="$1" repo_name="$2" worktree="$3" retry_type="$4" retry_root="$5"
+  local expected_holder expected_root holder identity owner_holder owner_identity owner_project \
+    owner_root owner_type owner_worktree project repo_dir="$1" repo_name="$2" worktree="$3" \
+    retry_type="$4" retry_root="$5"
 
   [[ "$(sed -n '1p' "$repo_dir/cleanup-owner" 2>/dev/null || true)" == "2" ]] || \
     _die "Retry owner identity is missing: $repo_name"
@@ -736,30 +769,11 @@ _validate_retry_owner() {
   project="$(_task_project)" || _die "Cannot resolve retry owner project: $repo_name"
   [[ "$project" == "$owner_project" ]] || \
     _die "Retry owner project changed: $repo_name"
-  config_file="$SERGEANT_CONFIG/$project.yaml"
-  [[ -f "$config_file" && ! -L "$config_file" ]] || \
-    _die "Cannot resolve retry owner project config: $project"
-
-  _require_yq
-  repo_count="$(yq '.repos | length' "$config_file")"
-  raw_path=""
-  for ((i=0; i<repo_count; i++)); do
-    if [[ "$(yq ".repos[$i].name" "$config_file")" == "$repo_name" ]]; then
-      [[ -z "$raw_path" ]] || _die "Retry owner repo is ambiguous: $repo_name"
-      raw_path="$(yq ".repos[$i].path" "$config_file")"
-    fi
-  done
-  [[ -n "$raw_path" && "$raw_path" != "null" ]] || \
-    _die "Cannot resolve retry owner repo: $repo_name"
-
-  configured_root="$(_resolve_path "$raw_path")"
-  [[ -d "$configured_root" && ! -L "$configured_root" ]] || \
-    _die "Retry owner repo is missing or aliased: $configured_root"
-  expected_root="$(cd "$configured_root" && pwd -P)"
-  [[ "$configured_root" == "$expected_root" ]] || \
-    _die "Retry owner repo is symlink-aliased: $configured_root"
-  [[ "$retry_root" == "$expected_root" && ! -L "$retry_root" ]] || \
-    _die "Retry owner repo does not match persisted cleanup root: $repo_name"
+  [[ -d "$owner_root" && ! -L "$owner_root" ]] || \
+    _die "Retry owner repo is missing or aliased: $owner_root"
+  expected_root="$(cd "$owner_root" && pwd -P)"
+  [[ "$owner_root" == "$expected_root" ]] || \
+    _die "Retry owner repo is symlink-aliased: $owner_root"
   identity="$(_repo_identity "$expected_root")" || \
     _die "Cannot identify retry owner repo: $repo_name"
   [[ "$identity" == "$owner_identity" ]] || \
@@ -771,6 +785,7 @@ _validate_retry_owner() {
     [[ "$holder" == "$expected_holder" && "$owner_holder" == "$expected_holder" ]] || \
       _die "Retry treehouse lease does not match its owner: $repo_name"
   fi
+  VALIDATED_RETRY_ROOT="$owner_root"
 }
 
 _require_terminal_repos
@@ -889,6 +904,7 @@ for repo_dir in "$TASK_DIR"/*/; do
     if [[ -n "$retry_root" ]]; then
       _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
         "$retry_type" "$retry_root"
+      retry_root="$VALIDATED_RETRY_ROOT"
       echo "  retrying interrupted $retry_type removal: $worktree"
       if [[ "$retry_type" == "treehouse" ]]; then
         if ! (cd "$retry_root" && treehouse return "$worktree" 2>&1 | sed 's/^/  /'); then
@@ -913,6 +929,8 @@ for repo_dir in "$TASK_DIR"/*/; do
     continue
   fi
 
+  retry_root="$(_configured_repo_root "$repo_name")" || \
+    _die "Cannot resolve configured cleanup owner: $repo_name"
   if [[ "$wt_type" == "treehouse" ]]; then
     git_file="$worktree/.git"
     [[ -f "$git_file" ]] || \
@@ -920,12 +938,8 @@ for repo_dir in "$TASK_DIR"/*/; do
     git_dir_line="$(cat "$git_file")"
     git_dir="${git_dir_line#gitdir: }"
     main_git="$(dirname "$(dirname "$git_dir")")"
-    retry_root="$(dirname "$main_git")"
-  else
-    repo_base_name="$(basename "$worktree" | sed "s/-sgt-${TASK_ID}$//")"
-    retry_root="$(dirname "$worktree")/$repo_base_name"
-    [[ -d "$retry_root/.git" ]] || \
-      _die "Main repo not found; fleet state preserved: $retry_root"
+    [[ "$(dirname "$main_git")" == "$retry_root" ]] || \
+      _die "Treehouse lease does not match configured cleanup owner: $repo_name"
   fi
 
   _stage_worker_evidence "$repo_dir" "$worktree"
