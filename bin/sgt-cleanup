@@ -202,9 +202,9 @@ _stop_local_worker() {
 }
 
 _require_terminal_repos() {
-  local cleanup_phase configured_root evidence_dir owner_root owner_type partial_phase removed_phase \
-    removing_phase proof_dir repo_dir repo_name restore_after_validation retry_root retry_type status \
-    worktree worktree_status wt_type
+  local cleanup_phase configured_root evidence_dir expected_evidence_identity owner_root owner_type \
+    partial_phase removed_phase removing_phase proof_dir repo_dir repo_name \
+    restore_after_validation retry_root retry_type status worktree worktree_status wt_type
 
   for repo_dir in "$TASK_DIR"/*/; do
     [[ -d "$repo_dir" ]] || continue
@@ -290,8 +290,11 @@ _require_terminal_repos() {
         _require_worktree_owner "$configured_root" "$worktree" || \
           _die "Worktree does not belong to configured cleanup owner: $repo_name"
       fi
-      [[ "$restore_after_validation" != true ]] || \
-        _restore_worker_evidence "$repo_dir" "$worktree"
+      if [[ "$restore_after_validation" == true ]]; then
+        expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
+        _restore_worker_evidence "$repo_dir" "$worktree" \
+          "$expected_evidence_identity"
+      fi
     else
       [[ "$cleanup_phase" != $'removing\n'"$worktree" ]] || \
         _die "Retry owner identity is missing: $repo_name"
@@ -362,7 +365,8 @@ _stage_worker_evidence() {
   for evidence in "$worktree"/.sergeant-*; do
     [[ -f "$evidence" ]] || continue
     if ! cp -p "$evidence" "$staging_dir/"; then
-      rm -rf "$staging_dir"
+      _rollback_remove_path "$staging_dir" "terminal evidence staging" \
+        evidence-stage-rollback-cleanup
       return 1
     fi
   done
@@ -370,22 +374,58 @@ _stage_worker_evidence() {
   staged_identity="$(_worker_evidence_identity "$staging_dir")" || staged_identity=""
   if [[ -z "$worker_identity" || "$worker_identity" != "$expected_identity" || \
     "$staged_identity" != "$expected_identity" ]]; then
-    rm -rf "$staging_dir"
+    _rollback_remove_path "$staging_dir" "changed terminal evidence staging" \
+      evidence-stage-rollback-cleanup
     return 1
   fi
 }
 
 _cleanup_fail_point() {
-  [[ "${SGT_CLEANUP_FAIL_POINT:-}" != "$1" ]]
+  case ",${SGT_CLEANUP_FAIL_POINT:-}," in
+    *,"$1",*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+_cleanup_mutation_hook() {
+  local path="$2" point="$1"
+
+  [[ "${SGT_CLEANUP_MUTATE_POINT:-}" == "$point" ]] || return 0
+  [[ -n "$path" ]] || return 1
+  printf 'injected lifecycle evidence mutation\n' > "$path"
+}
+
+_rollback_remove_path() {
+  local context="$2" fail_point="$3" path="$1"
+
+  [[ -e "$path" || -L "$path" ]] || return 0
+  _cleanup_fail_point "$fail_point" || \
+    _die "CRITICAL: rollback cleanup failed for $context; inspect preserved artifact: $path"
+  rm -rf "$path" || \
+    _die "CRITICAL: rollback cleanup failed for $context; inspect preserved artifact: $path"
+  [[ ! -e "$path" && ! -L "$path" ]] || \
+    _die "CRITICAL: rollback cleanup left an artifact for $context: $path"
 }
 
 _remove_worker_evidence() {
-  local backup_dir="$1/live-evidence.tmp.$$" count=0 evidence name repo_dir="$1" \
-    worktree="$2"
+  local backup_dir="$1/live-evidence.tmp.$$" count=0 current_identity evidence \
+    expected_identity="$3" name repo_dir="$1" worktree="$2"
   local -a moved=()
 
   [[ ! -e "$backup_dir" && ! -L "$backup_dir" ]] || return 1
   mkdir "$backup_dir" || return 1
+  if ! _cleanup_mutation_hook before-live-removal \
+    "${SGT_CLEANUP_MUTATE_PATH:-$worktree/.sergeant-status}"; then
+    _rollback_remove_path "$backup_dir" "live evidence removal validation" \
+      live-removal-rollback-cleanup
+    return 1
+  fi
+  current_identity="$(_worker_evidence_identity "$worktree")" || current_identity=""
+  if [[ -z "$expected_identity" || "$current_identity" != "$expected_identity" ]]; then
+    _rollback_remove_path "$backup_dir" "live evidence removal validation" \
+      live-removal-rollback-cleanup
+    return 1
+  fi
   for evidence in "$worktree"/.sergeant-*; do
     [[ -f "$evidence" ]] || continue
     ((count += 1))
@@ -406,24 +446,48 @@ _remove_worker_evidence() {
 
 _restore_worker_evidence() {
   local backup_dir count=0 evidence evidence_dir="$1/terminal-evidence" name \
-    publish_count=0 repo_dir="$1" staging_dir transaction worktree="$2"
+    expected_identity="$3" persisted_identity publish_count=0 repo_dir="$1" \
+    staged_identity staging_dir transaction worktree="$2"
   local -a backed_up=() published=()
 
   [[ -d "$worktree" && -d "$evidence_dir" ]] || return 0
+  _cleanup_mutation_hook before-retry-restore \
+    "${SGT_CLEANUP_MUTATE_PATH:-$evidence_dir/.sergeant-status}" || return 1
+  persisted_identity="$(_worker_evidence_identity "$evidence_dir")" || return 1
+  [[ -n "$expected_identity" && "$persisted_identity" == "$expected_identity" ]] || return 1
   transaction="$repo_dir/restore-evidence.tmp.$$"
   staging_dir="$transaction/staged"
   backup_dir="$transaction/original"
   [[ ! -e "$transaction" && ! -L "$transaction" ]] || return 1
-  mkdir -p "$staging_dir" "$backup_dir" || return 1
+  if ! mkdir -p "$staging_dir" "$backup_dir"; then
+    _rollback_remove_path "$transaction" "worker evidence restore setup" \
+      restore-rollback-cleanup
+    return 1
+  fi
   for evidence in "$evidence_dir"/.sergeant-*; do
     [[ -f "$evidence" ]] || continue
     ((count += 1))
     if ! _cleanup_fail_point "restore-copy-$count" || \
       ! cp -p "$evidence" "$staging_dir/"; then
-      rm -rf "$transaction"
+      _rollback_remove_path "$transaction" "worker evidence restore staging" \
+        restore-rollback-cleanup
       return 1
     fi
   done
+  _cleanup_mutation_hook after-restore-copy \
+    "${SGT_CLEANUP_MUTATE_PATH:-$staging_dir/.sergeant-diagnostic}" || {
+    _rollback_remove_path "$transaction" "worker evidence restore staging" \
+      restore-rollback-cleanup
+    return 1
+  }
+  persisted_identity="$(_worker_evidence_identity "$evidence_dir")" || persisted_identity=""
+  staged_identity="$(_worker_evidence_identity "$staging_dir")" || staged_identity=""
+  if [[ -z "$expected_identity" || "$persisted_identity" != "$expected_identity" || \
+    "$staged_identity" != "$expected_identity" ]]; then
+    _rollback_remove_path "$transaction" "worker evidence restore validation" \
+      restore-rollback-cleanup
+    return 1
+  fi
   for evidence in "$worktree"/.sergeant-*; do
     [[ -f "$evidence" ]] || continue
     name="$(basename "$evidence")"
@@ -432,7 +496,8 @@ _restore_worker_evidence() {
         mv "$backup_dir/$name" "$worktree/$name" || \
           _die "Failed to roll back worker evidence restore: $worktree/$name"
       done
-      rm -rf "$transaction"
+      _rollback_remove_path "$transaction" "worker evidence restore backup" \
+        restore-rollback-cleanup
       return 1
     fi
     backed_up[${#backed_up[@]}]="$name"
@@ -444,18 +509,21 @@ _restore_worker_evidence() {
     if ! _cleanup_fail_point "restore-publish-$publish_count" || \
       ! mv "$evidence" "$worktree/$name"; then
       for name in "${published[@]}"; do
-        rm -f "$worktree/$name"
+        _rollback_remove_path "$worktree/$name" \
+          "published worker evidence restore" restore-rollback-cleanup
       done
       for name in "${backed_up[@]}"; do
         mv "$backup_dir/$name" "$worktree/$name" || \
           _die "Failed to roll back worker evidence restore: $worktree/$name"
       done
-      rm -rf "$transaction"
+      _rollback_remove_path "$transaction" "worker evidence restore publication" \
+        restore-rollback-cleanup
       return 1
     fi
     published[${#published[@]}]="$name"
   done
-  rm -rf "$transaction"
+  _rollback_remove_path "$transaction" "completed worker evidence restore" \
+    restore-cleanup
 }
 
 _restore_removed_worker_evidence() {
@@ -479,14 +547,40 @@ _restore_removed_worker_evidence() {
 }
 
 _record_cleanup_phase() {
-  local repo_dir="$1" phase="$2" worktree="$3"
+  local actual expected phase="$2" repo_dir="$1" temp worktree="$3"
   shift 3
 
-  {
+  temp="$repo_dir/cleanup-phase.tmp.$$"
+  [[ ! -e "$temp" && ! -L "$temp" ]] || return 1
+  expected="$({
     printf '%s\n%s\n' "$phase" "$worktree"
     [[ $# -eq 0 ]] || printf '%s\n' "$@"
-  } > "$repo_dir/cleanup-phase.tmp" &&
-    mv "$repo_dir/cleanup-phase.tmp" "$repo_dir/cleanup-phase"
+  } | git hash-object --stdin)" || return 1
+  if ! _cleanup_fail_point "phase-write-$phase" || ! {
+    printf '%s\n%s\n' "$phase" "$worktree"
+    [[ $# -eq 0 ]] || printf '%s\n' "$@"
+  } > "$temp"; then
+    _rollback_remove_path "$temp" "$phase cleanup-phase write" \
+      "phase-rollback-$phase"
+    return 1
+  fi
+  [[ -f "$temp" && ! -L "$temp" ]] || {
+    _rollback_remove_path "$temp" "$phase cleanup-phase validation" \
+      "phase-rollback-$phase"
+    return 1
+  }
+  actual="$(git hash-object "$temp")" || {
+    _rollback_remove_path "$temp" "$phase cleanup-phase validation" \
+      "phase-rollback-$phase"
+    return 1
+  }
+  if [[ "$actual" != "$expected" ]] || \
+    ! _cleanup_fail_point "phase-publish-$phase" || \
+    ! mv "$temp" "$repo_dir/cleanup-phase"; then
+    _rollback_remove_path "$temp" "$phase cleanup-phase publication" \
+      "phase-rollback-$phase"
+    return 1
+  fi
 }
 
 _repo_git_dir() {
@@ -538,14 +632,17 @@ _repo_instance_id() {
       git hash-object --stdin)" || return 1
     tmp="$(mktemp "$git_common_dir/.sergeant-instance.XXXXXX")" || return 1
     if ! printf '%s\n' "$token" > "$tmp"; then
-      rm -f "$tmp"
+      _rollback_remove_path "$tmp" "repository instance marker staging" \
+        instance-rollback-cleanup
       return 1
     fi
     if ! ln "$tmp" "$marker" 2>/dev/null && [[ ! -f "$marker" ]]; then
-      rm -f "$tmp"
+      _rollback_remove_path "$tmp" "repository instance marker staging" \
+        instance-rollback-cleanup
       return 1
     fi
-    rm -f "$tmp"
+    _rollback_remove_path "$tmp" "repository instance marker staging" \
+      instance-cleanup
   fi
   [[ -f "$marker" && ! -L "$marker" ]] || return 1
   token="$(cat "$marker")" || return 1
@@ -726,6 +823,23 @@ _record_cleanup_owner() {
     > "$output"
 }
 
+_rollback_initial_cleanup() {
+  local marker="$3" marker_preexisting="$4" repo_dir="$1" transaction="$2"
+
+  _rollback_remove_path "$repo_dir/terminal-evidence" \
+    "initial terminal evidence publication" initial-rollback-cleanup
+  _rollback_remove_path "$repo_dir/cleanup-owner" \
+    "initial cleanup owner publication" initial-rollback-cleanup
+  _rollback_remove_path "$repo_dir/cleanup-phase" \
+    "initial cleanup phase publication" initial-rollback-cleanup
+  _rollback_remove_path "$transaction" "initial cleanup transaction" \
+    initial-rollback-cleanup
+  if [[ "$marker_preexisting" != true ]]; then
+    _rollback_remove_path "$marker" "initial repository instance marker" \
+      initial-marker-rollback-cleanup
+  fi
+}
+
 _publish_initial_cleanup() {
   local evidence_identity="$5" marker marker_preexisting=false repo_dir="$1" \
     repo_root="$2" transaction worktree="$3" wt_type="$4"
@@ -747,8 +861,8 @@ _publish_initial_cleanup() {
     ! _cleanup_fail_point record-phase || \
     ! printf 'removing\n%s\n%s\n%s\n' "$worktree" "$wt_type" "$repo_root" \
       > "$transaction/cleanup-phase"; then
-    rm -rf "$transaction"
-    [[ "$marker_preexisting" == true ]] || rm -f "$marker"
+    _rollback_initial_cleanup "$repo_dir" "$transaction" "$marker" \
+      "$marker_preexisting"
     return 1
   fi
 
@@ -758,12 +872,12 @@ _publish_initial_cleanup() {
     ! mv "$transaction/cleanup-owner" "$repo_dir/cleanup-owner" || \
     ! _cleanup_fail_point publish-phase || \
     ! mv "$transaction/cleanup-phase" "$repo_dir/cleanup-phase"; then
-    rm -rf "$repo_dir/terminal-evidence" "$repo_dir/cleanup-owner" \
-      "$repo_dir/cleanup-phase" "$transaction"
-    [[ "$marker_preexisting" == true ]] || rm -f "$marker"
+    _rollback_initial_cleanup "$repo_dir" "$transaction" "$marker" \
+      "$marker_preexisting"
     return 1
   fi
-  rmdir "$transaction" || return 1
+  rmdir "$transaction" || \
+    _die "CRITICAL: failed to remove completed initial cleanup transaction: $transaction"
 }
 
 _validate_retry_owner() {
@@ -1056,6 +1170,7 @@ for repo_dir in "$TASK_DIR"/*/; do
     _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
       "$retry_type" "$retry_root"
     retry_root="$VALIDATED_RETRY_ROOT"
+    expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
     retrying_removal=true
   else
     retry_root="$(_configured_repo_root "$repo_name")" || \
@@ -1078,16 +1193,18 @@ for repo_dir in "$TASK_DIR"/*/; do
     _publish_initial_cleanup "$repo_dir" "$retry_root" "$worktree" "$wt_type" \
       "$worker_evidence_identity" || \
       _die "Failed to publish cleanup state before worktree removal: $TASK_ID/$repo_name"
+    expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
   fi
   LIVE_EVIDENCE_BACKUP=""
-  _remove_worker_evidence "$repo_dir" "$worktree" || \
+  _remove_worker_evidence "$repo_dir" "$worktree" "$expected_evidence_identity" || \
     _die "Failed to remove staged worker evidence before cleanup: $repo_name"
 
   if [[ "$wt_type" == "treehouse" ]]; then
     echo "  returning treehouse lease: $worktree"
     if ! (cd "$retry_root" && treehouse return "$worktree" 2>&1 | sed 's/^/  /'); then
       if [[ ! -d "$worktree" ]]; then
-        rm -rf "$LIVE_EVIDENCE_BACKUP"
+        _rollback_remove_path "$LIVE_EVIDENCE_BACKUP" \
+          "removed treehouse live evidence backup" live-backup-cleanup
         _record_cleanup_phase "$repo_dir" partial-removal "$worktree" \
           "$wt_type" "$retry_root" || \
           _die "Failed to record partial treehouse removal: $repo_name"
@@ -1101,7 +1218,8 @@ for repo_dir in "$TASK_DIR"/*/; do
     echo "  removing git worktree: $worktree"
     if ! git -C "$retry_root" worktree remove "$worktree" 2>&1 | sed 's/^/  /'; then
       if [[ ! -d "$worktree" ]]; then
-        rm -rf "$LIVE_EVIDENCE_BACKUP"
+        _rollback_remove_path "$LIVE_EVIDENCE_BACKUP" \
+          "removed git live evidence backup" live-backup-cleanup
         _record_cleanup_phase "$repo_dir" partial-removal "$worktree" \
           "$wt_type" "$retry_root" || \
           _die "Failed to record partial git worktree removal: $repo_name"
@@ -1118,7 +1236,8 @@ for repo_dir in "$TASK_DIR"/*/; do
       _die "Failed to restore worker evidence after incomplete removal: $repo_name"
     _die "Worktree removal reported success but the directory remains: $worktree"
   }
-  rm -rf "$LIVE_EVIDENCE_BACKUP"
+  _rollback_remove_path "$LIVE_EVIDENCE_BACKUP" \
+    "completed live evidence backup" live-backup-cleanup
   _record_cleanup_phase "$repo_dir" removed "$worktree" "$wt_type" "$retry_root" || \
     _die "Failed to publish completed worktree removal: $repo_name"
   _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \

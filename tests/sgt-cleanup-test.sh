@@ -1089,6 +1089,11 @@ fi
 [[ "$(cat "$TEST_ROOT/fleet/partial-publication/app/cleanup-phase")" == \
   $'removing\n'"$TEST_ROOT/partial-publication-sgt-partial-publication"$'\ngit\n'"$TEST_ROOT/partial-publication" ]]
 [[ -f "$TEST_ROOT/fleet/partial-publication/app/terminal-evidence/.sergeant-status" ]]
+if compgen -G "$TEST_ROOT/fleet/partial-publication/app/cleanup-phase.tmp*" \
+  >/dev/null; then
+  printf 'partial-removal publication left a phase temporary\n' >&2
+  exit 1
+fi
 partial_owner_before="$(cksum "$TEST_ROOT/fleet/partial-publication/app/cleanup-owner")"
 partial_phase_before="$(cksum "$TEST_ROOT/fleet/partial-publication/app/cleanup-phase")"
 partial_evidence_before="$(cksum \
@@ -1302,6 +1307,35 @@ fi
 [[ ! -e "$TEST_ROOT/marker-sgt-marker-publication" ]]
 [[ "$(sed -n '1p' "$TEST_ROOT/fleet/marker-publication/app/cleanup-phase")" == \
   'removed' ]]
+if compgen -G "$TEST_ROOT/fleet/marker-publication/app/cleanup-phase.tmp*" \
+  >/dev/null; then
+  printf 'reconciled-absent publication left a phase temporary\n' >&2
+  exit 1
+fi
+marker_phase_before="$(cksum \
+  "$TEST_ROOT/fleet/marker-publication/app/cleanup-phase")"
+marker_evidence_before="$(cksum \
+  "$TEST_ROOT/fleet/marker-publication/app/terminal-evidence"/.sergeant-*)"
+set +e
+marker_rollback_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SGT_CLEANUP_FAIL_POINT='phase-publish-reconciled-absent,phase-rollback-reconciled-absent' \
+  FAKE_GIT_STATE="$TEST_ROOT/marker-git-removed" \
+  FAKE_GIT_LOG="$TEST_ROOT/marker-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" marker-publication 2>&1)"
+marker_rollback_status=$?
+set -e
+[[ "$marker_rollback_status" -ne 0 ]]
+[[ "$marker_rollback_output" == *'CRITICAL: rollback cleanup failed'* ]]
+[[ "$(cksum "$TEST_ROOT/fleet/marker-publication/app/cleanup-phase")" == \
+  "$marker_phase_before" ]]
+[[ "$(cksum \
+  "$TEST_ROOT/fleet/marker-publication/app/terminal-evidence"/.sergeant-*)" == \
+  "$marker_evidence_before" ]]
+marker_phase_temp="$(compgen -G \
+  "$TEST_ROOT/fleet/marker-publication/app/cleanup-phase.tmp.*")"
+[[ -f "$marker_phase_temp" ]]
+rm "$marker_phase_temp"
 PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
   FAKE_GIT_STATE="$TEST_ROOT/marker-git-removed" \
   FAKE_GIT_LOG="$TEST_ROOT/marker-removals" \
@@ -1406,6 +1440,10 @@ publication_fleet_before="$(cksum \
   "$TEST_ROOT/fleet/publication-transaction/app/worktree")"
 publication_live_before="$(cksum \
   "$TEST_ROOT/publication-transaction-worker"/.sergeant-*)"
+publication_live_hashes="$(for evidence in \
+  "$TEST_ROOT/publication-transaction-worker"/.sergeant-*; do
+  git hash-object "$evidence"
+done)"
 for failure_point in stage-evidence record-owner record-phase \
   publish-evidence publish-owner publish-phase; do
   if SGT_CLEANUP_FAIL_POINT="$failure_point" \
@@ -1440,6 +1478,28 @@ for failure_point in stage-evidence record-owner record-phase \
     exit 1
   fi
 done
+set +e
+publication_rollback_output="$(SGT_CLEANUP_FAIL_POINT='publish-owner,initial-rollback-cleanup' \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" publication-transaction app 2>&1)"
+publication_rollback_status=$?
+set -e
+[[ "$publication_rollback_status" -ne 0 ]]
+[[ "$publication_rollback_output" == *'CRITICAL: rollback cleanup failed'* ]]
+[[ -d "$TEST_ROOT/fleet/publication-transaction/app/terminal-evidence" ]]
+if ! compgen -G \
+  "$TEST_ROOT/fleet/publication-transaction/app/cleanup-transaction.tmp.*" \
+  >/dev/null; then
+  printf 'initial rollback cleanup failure did not preserve its transaction\n' >&2
+  exit 1
+fi
+[[ ! -e "$TEST_ROOT/fleet/publication-transaction/app/cleanup-owner" ]]
+[[ ! -e "$TEST_ROOT/fleet/publication-transaction/app/cleanup-phase" ]]
+[[ "$(cksum "$TEST_ROOT/publication-transaction-worker"/.sergeant-*)" == \
+  "$publication_live_before" ]]
+rm -rf "$TEST_ROOT/fleet/publication-transaction/app/terminal-evidence" \
+  "$TEST_ROOT/fleet/publication-transaction/app"/cleanup-transaction.tmp.*
+rm -f "$TEST_ROOT/publication-transaction/.git/sergeant-instance"
 printf 'preexisting-instance-token\n' > \
   "$TEST_ROOT/publication-transaction/.git/sergeant-instance"
 publication_marker_before="$(cksum \
@@ -1457,9 +1517,27 @@ fi
 [[ ! -e "$TEST_ROOT/fleet/publication-transaction/app/terminal-evidence" ]]
 [[ ! -e "$TEST_ROOT/fleet/publication-transaction/app/cleanup-owner" ]]
 [[ ! -e "$TEST_ROOT/fleet/publication-transaction/app/cleanup-phase" ]]
+if SGT_CLEANUP_FAIL_POINT=phase-publish-removed \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" publication-transaction app >/dev/null 2>&1; then
+  printf 'cleanup accepted injected removed-phase publication failure\n' >&2
+  exit 1
+fi
+[[ ! -e "$TEST_ROOT/publication-transaction-worker" ]]
+[[ "$(sed -n '1p' \
+  "$TEST_ROOT/fleet/publication-transaction/app/cleanup-phase")" == removing ]]
+publication_persisted_hashes="$(for evidence in \
+  "$TEST_ROOT/fleet/publication-transaction/app/terminal-evidence"/.sergeant-*; do
+  git hash-object "$evidence"
+done)"
+[[ "$publication_persisted_hashes" == "$publication_live_hashes" ]]
+if compgen -G "$TEST_ROOT/fleet/publication-transaction/app/cleanup-phase.tmp*" \
+  >/dev/null; then
+  printf 'removed publication left a phase temporary\n' >&2
+  exit 1
+fi
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" publication-transaction app >/dev/null
-[[ ! -e "$TEST_ROOT/publication-transaction-worker" ]]
 
 mkdir -p "$TEST_ROOT/fleet/evidence-transaction/app" "$TEST_ROOT/fake-bin"
 init_test_repo "$TEST_ROOT/evidence-transaction"
@@ -1500,6 +1578,32 @@ evidence_owner_before="$(cksum \
   "$TEST_ROOT/fleet/evidence-transaction/app/cleanup-owner")"
 evidence_phase_before="$(cksum \
   "$TEST_ROOT/fleet/evidence-transaction/app/cleanup-phase")"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SGT_CLEANUP_MUTATE_POINT=before-live-removal \
+  SGT_CLEANUP_MUTATE_PATH="$TEST_ROOT/evidence-transaction-worker/.sergeant-diagnostic" \
+  FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app >/dev/null 2>&1; then
+  printf 'cleanup accepted live evidence changed at the removal boundary\n' >&2
+  exit 1
+fi
+[[ "$(cat "$TEST_ROOT/evidence-transaction-worker/.sergeant-diagnostic")" == \
+  'injected lifecycle evidence mutation' ]]
+[[ "$(cksum \
+  "$TEST_ROOT/fleet/evidence-transaction/app/terminal-evidence"/.sergeant-*)" == \
+  "$evidence_persisted_before" ]]
+[[ "$(cksum "$TEST_ROOT/fleet/evidence-transaction/app/cleanup-owner")" == \
+  "$evidence_owner_before" ]]
+[[ "$(cksum "$TEST_ROOT/fleet/evidence-transaction/app/cleanup-phase")" == \
+  "$evidence_phase_before" ]]
+[[ "$(wc -l < "$TEST_ROOT/evidence-removals")" -eq 1 ]]
+if compgen -G "$TEST_ROOT/fleet/evidence-transaction/app/live-evidence.tmp.*" \
+  >/dev/null; then
+  printf 'live evidence race left a removal temporary\n' >&2
+  exit 1
+fi
+printf 'diagnostic\n' > \
+  "$TEST_ROOT/evidence-transaction-worker/.sergeant-diagnostic"
 if PATH="$TEST_ROOT/fake-bin:$PATH" SGT_CLEANUP_FAIL_POINT=remove-live-2 \
   FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
@@ -1524,6 +1628,69 @@ if compgen -G "$TEST_ROOT/fleet/evidence-transaction/app/live-evidence.tmp.*" \
 fi
 
 rm "$TEST_ROOT/evidence-transaction-worker"/.sergeant-*
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SGT_CLEANUP_MUTATE_POINT=before-retry-restore \
+  SGT_CLEANUP_MUTATE_PATH="$TEST_ROOT/fleet/evidence-transaction/app/terminal-evidence/.sergeant-diagnostic" \
+  FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app >/dev/null 2>&1; then
+  printf 'cleanup accepted persisted evidence changed at restore boundary\n' >&2
+  exit 1
+fi
+[[ "$(cat \
+  "$TEST_ROOT/fleet/evidence-transaction/app/terminal-evidence/.sergeant-diagnostic")" == \
+  'injected lifecycle evidence mutation' ]]
+if compgen -G "$TEST_ROOT/evidence-transaction-worker/.sergeant-*" >/dev/null; then
+  printf 'persisted restore race changed live evidence\n' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$TEST_ROOT/evidence-removals")" -eq 1 ]]
+printf 'diagnostic\n' > \
+  "$TEST_ROOT/fleet/evidence-transaction/app/terminal-evidence/.sergeant-diagnostic"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SGT_CLEANUP_MUTATE_POINT=after-restore-copy \
+  FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app >/dev/null 2>&1; then
+  printf 'cleanup accepted staged evidence changed at restore boundary\n' >&2
+  exit 1
+fi
+if compgen -G "$TEST_ROOT/evidence-transaction-worker/.sergeant-*" >/dev/null; then
+  printf 'staged restore race changed live evidence\n' >&2
+  exit 1
+fi
+[[ "$(cksum \
+  "$TEST_ROOT/fleet/evidence-transaction/app/terminal-evidence"/.sergeant-*)" == \
+  "$evidence_persisted_before" ]]
+[[ "$(wc -l < "$TEST_ROOT/evidence-removals")" -eq 1 ]]
+if compgen -G "$TEST_ROOT/fleet/evidence-transaction/app/restore-evidence.tmp.*" \
+  >/dev/null; then
+  printf 'staged restore race left a transaction temporary\n' >&2
+  exit 1
+fi
+set +e
+restore_rollback_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SGT_CLEANUP_FAIL_POINT='restore-publish-2,restore-rollback-cleanup' \
+  FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app 2>&1)"
+restore_rollback_status=$?
+set -e
+[[ "$restore_rollback_status" -ne 0 ]]
+[[ "$restore_rollback_output" == *'CRITICAL: rollback cleanup failed'* ]]
+[[ -f "$TEST_ROOT/evidence-transaction-worker/.sergeant-diagnostic" ]]
+if ! compgen -G \
+  "$TEST_ROOT/fleet/evidence-transaction/app/restore-evidence.tmp.*" \
+  >/dev/null; then
+  printf 'restore rollback cleanup failure did not preserve its transaction\n' >&2
+  exit 1
+fi
+[[ "$(cksum \
+  "$TEST_ROOT/fleet/evidence-transaction/app/terminal-evidence"/.sergeant-*)" == \
+  "$evidence_persisted_before" ]]
+[[ "$(wc -l < "$TEST_ROOT/evidence-removals")" -eq 1 ]]
+rm -f "$TEST_ROOT/evidence-transaction-worker"/.sergeant-*
+rm -rf "$TEST_ROOT/fleet/evidence-transaction/app"/restore-evidence.tmp.*
 if PATH="$TEST_ROOT/fake-bin:$PATH" SGT_CLEANUP_FAIL_POINT=restore-copy-2 \
   FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
