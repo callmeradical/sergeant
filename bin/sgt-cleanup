@@ -628,12 +628,22 @@ _validation_legacy_checkout_matches() {
 }
 
 _repo_identity() {
-  local remote roots repo_root="$1"
+  local config head instance refs remote roots state repo_root="$1"
 
+  instance="$(stat -c '%d:%i' "$repo_root/.git" 2>/dev/null || \
+    stat -f '%d:%i' "$repo_root/.git" 2>/dev/null)" || return 1
+  config="$(git hash-object "$repo_root/.git/config" 2>/dev/null)" || return 1
+  head="$(cat "$repo_root/.git/HEAD" 2>/dev/null)" || return 1
+  refs="$(git -C "$repo_root" for-each-ref \
+    --format='%(refname) %(objectname) %(symref)' 2>/dev/null | sort)" || return 1
   roots="$(git -C "$repo_root" rev-list --max-parents=0 --all 2>/dev/null | sort)"
   [[ -n "$roots" ]] || return 1
   remote="$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null || true)"
-  printf '%s\n%s\n' "$remote" "$roots" | git hash-object --stdin
+  state="$(git -C "$repo_root" status --porcelain=v1 --untracked-files=all 2>/dev/null | \
+    git hash-object --stdin)" || return 1
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$instance" "$config" "$head" "$remote" "$roots" "$refs" "$state" | \
+    git hash-object --stdin
 }
 
 _record_cleanup_owner() {
