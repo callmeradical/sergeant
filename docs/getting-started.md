@@ -37,10 +37,15 @@ package manager, then verify the required commands directly:
 command -v git gh tmux yq lsof
 td version
 td create --help
+if ! command -v opencode >/dev/null && ! command -v claude >/dev/null; then
+  printf 'Install OpenCode or Claude Code before using Sergeant.\n' >&2
+  exit 1
+fi
 ```
 
 Continue only when `td create --help` shows Marcus `td` support for
-`--description`, `--json`, and `--work-dir`.
+`--description`, `--json`, and `--work-dir`, and either `opencode` or `claude`
+resolves on `PATH`.
 
 ## 2. Clone and install command links
 
