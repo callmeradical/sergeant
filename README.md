@@ -45,8 +45,10 @@ commands and OpenCode plugin into user-local locations. Sergeant supports Bash
 
 sergeant/                     ← this distro (you are here)
   AGENTS.md
+  .agents/skills/              ← canonical worker workflow skills
+  .claude/skills/              ← links to canonical worker skills
   bin/                        ← cross-repo shell toolbelt
-  skills/                     ← agent-loaded skills
+  skills/                     ← Sergeant coordination skills
 ```
 
 Each project is a YAML file. That file defines which repos belong to it, how they
@@ -205,6 +207,11 @@ Agent-loaded skills for structured workflows:
 | `skills/dispatch` | Operate td, worktrees, workers, fleets, escalation, review, and cleanup |
 | `skills/wiki` | Validate automatic captures and generate curated daily wiki digests |
 | `skills/sergeant-help` | Query repository docs for installation, usage, skills, and troubleshooting help |
+
+Worker briefs also depend on eight vendored workflow skills. Codex discovers
+their canonical `.agents/skills` tree directly, OpenCode uses `opencode.json`,
+and Claude uses repository-local `.claude/skills` links. See
+`docs/repo-scoped-skills.md` for the inventory and provenance.
 
 ## Requirements
 
