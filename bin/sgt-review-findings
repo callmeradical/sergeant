@@ -44,11 +44,34 @@ _valid_fleet_task_id() {
   [[ ${#1} -le 31 && "$1" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]
 }
 
+_valid_review_context() {
+  [[ "$AXIS" =~ ^(standards|spec|accessibility)$ ]] && [[ "$SOURCE" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+_review_gate_path() {
+  printf '%s/%s-%s\n' "$WORKTREE/.sergeant-review-gates" "$AXIS" "$SOURCE"
+}
+
+_review_gate_messages() {
+  local gate
+  for gate in "$WORKTREE/.sergeant-review-gates"/*; do
+    [[ -f "$gate" ]] || continue
+    cat "$gate"
+  done
+}
+
 _publish_blocked() {
-  local message="$1" notice="$2" generation current notify_status
+  local message="$1" notice="$2" generation current notify_status gate_path
   current="$( { tr -d '\n' < "$WORKTREE/.sergeant-gate-generation"; } 2>/dev/null || true)"
   [[ "$current" =~ ^[0-9]+$ ]] || current=0
   generation=$((current + 1))
+  if _valid_review_context; then
+    mkdir -p "$WORKTREE/.sergeant-review-gates"
+    gate_path="$(_review_gate_path)"
+    printf '%s\n' "$message" > "$gate_path.tmp"
+    mv "$gate_path.tmp" "$gate_path"
+    message="$(_review_gate_messages)"
+  fi
   printf '%s\n' "$message" > "$WORKTREE/.sergeant-message.tmp"
   printf '%s\n' "$generation" > "$WORKTREE/.sergeant-gate-generation.tmp"
   printf 'blocked\n' > "$WORKTREE/.sergeant-status.tmp"
@@ -290,12 +313,20 @@ fi
 
 current_status="$( { tr -d '\n' < "$WORKTREE/.sergeant-status"; } 2>/dev/null || true)"
 current_message="$(cat "$WORKTREE/.sergeant-message" 2>/dev/null || true)"
-if [[ "$current_status" == "blocked" ]] &&
-   [[ "$current_message" == "Independent review requires remediation."* ]] &&
-   [[ "$current_message" == *"Review axis: $AXIS. Review source: $SOURCE."* ]]; then
-  printf 'in_progress\n' > "$WORKTREE/.sergeant-status.tmp"
-  mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
-  rm -f "$WORKTREE/.sergeant-message"
+gate_path="$(_review_gate_path)"
+if [[ -f "$gate_path" ]]; then
+  rm -f "$gate_path"
+  remaining_message="$(_review_gate_messages)"
+  if [[ -n "$remaining_message" ]]; then
+    printf '%s\n' "$remaining_message" > "$WORKTREE/.sergeant-message.tmp"
+    mv "$WORKTREE/.sergeant-message.tmp" "$WORKTREE/.sergeant-message"
+  elif [[ "$current_status" == "blocked" ]] &&
+       [[ "$current_message" == "Independent review requires remediation."* || "$current_message" == "Review finding routing failed."* ]]; then
+    printf 'in_progress\n' > "$WORKTREE/.sergeant-status.tmp"
+    mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
+    rm -f "$WORKTREE/.sergeant-message"
+    rmdir "$WORKTREE/.sergeant-review-gates" 2>/dev/null || true
+  fi
 fi
 
 if (( actionable_count == 0 )); then

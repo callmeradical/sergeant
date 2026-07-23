@@ -81,6 +81,7 @@ run_router() {
   : > "$TEST_ROOT/mv.log"
   if [[ "${PRESERVE_FLEET:-0}" != "1" ]]; then
     rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation}
+    rm -rf "$WORKTREE/.sergeant-review-gates"
   fi
   set +e
   output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
@@ -219,16 +220,19 @@ TD_FAIL_CREATE=1 run_router "$TEST_ROOT/findings.json"
 grep -Fq 'Review finding routing failed' "$WORKTREE/.sergeant-message"
 
 printf '{"findings":[]}\n' > "$TEST_ROOT/clean.json"
-printf 'blocked\n' > "$WORKTREE/.sergeant-status"
-printf 'Independent review requires remediation. Review axis: standards. Review source: code-review. TD tasks: td-old.\n' > "$WORKTREE/.sergeant-message"
-printf '4\n' > "$WORKTREE/.sergeant-gate-generation"
+PRESERVE_FLEET=1 run_router "$TEST_ROOT/clean.json"
+[[ "$(cat "$WORKTREE/.sergeant-status")" == 'in_progress' && ! -e "$WORKTREE/.sergeant-message" ]]
+
+run_router "$TEST_ROOT/findings.json"
+PRESERVE_FLEET=1 ROUTER_AXIS=spec run_router "$TEST_ROOT/findings.json"
+grep -Fq 'Review axis: standards' "$WORKTREE/.sergeant-message"
+grep -Fq 'Review axis: spec' "$WORKTREE/.sergeant-message"
 PRESERVE_FLEET=1 ROUTER_AXIS=spec run_router "$TEST_ROOT/clean.json"
 [[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
 grep -Fq 'Review axis: standards' "$WORKTREE/.sergeant-message"
 PRESERVE_FLEET=1 run_router "$TEST_ROOT/clean.json"
 [[ "$status" -eq 0 && "$output" == *'no actionable findings; continue remediation workflow'* ]]
 [[ "$(cat "$WORKTREE/.sergeant-status")" == 'in_progress' && ! -e "$WORKTREE/.sergeant-message" ]]
-[[ "$(cat "$WORKTREE/.sergeant-gate-generation")" == '4' ]]
 [[ ! -s "$TEST_ROOT/td.log" && ! -s "$TEST_ROOT/notify.log" ]]
 
 run_router "$TEST_ROOT/clean.json"
