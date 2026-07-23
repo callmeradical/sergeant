@@ -202,7 +202,7 @@ _stop_local_worker() {
 }
 
 _require_terminal_repos() {
-  local repo_dir repo_name status worktree worktree_status
+  local cleanup_phase evidence_dir repo_dir repo_name status worktree worktree_status
 
   for repo_dir in "$TASK_DIR"/*/; do
     [[ -d "$repo_dir" ]] || continue
@@ -234,6 +234,23 @@ _require_terminal_repos() {
           _die "$repo_name worktree is not safely terminal: done requires a result"
         cmp -s "$repo_dir/result" "$worktree/.sergeant-result" || \
           _die "$repo_name worktree result differs from reconciled fleet result"
+      fi
+    else
+      cleanup_phase="$(cat "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+      [[ -n "$worktree" && "$cleanup_phase" == $'reconciled-absent\n'"$worktree" ]] || \
+        _die "$repo_name has no reconciled cleanup phase for its absent worktree"
+
+      evidence_dir="$repo_dir/terminal-evidence"
+      [[ -f "$evidence_dir/.sergeant-status" ]] || \
+        _die "$repo_name reconciled cleanup evidence is missing"
+      worktree_status="$(tr -d '\n' < "$evidence_dir/.sergeant-status")"
+      [[ "$worktree_status" == "$status" ]] || \
+        _die "$repo_name cleanup evidence differs from reconciled fleet status"
+      if [[ "$status" == "done" ]]; then
+        [[ -s "$evidence_dir/.sergeant-result" ]] || \
+          _die "$repo_name reconciled cleanup evidence requires a result"
+        cmp -s "$repo_dir/result" "$evidence_dir/.sergeant-result" || \
+          _die "$repo_name cleanup evidence differs from reconciled fleet result"
       fi
     fi
   done
@@ -368,18 +385,16 @@ for repo_dir in "$TASK_DIR"/*/; do
     fi
   fi
 
-  echo ""
-done
+  [[ ! -d "$worktree" ]] || {
+    _restore_worker_evidence "$repo_dir" "$worktree"
+    _die "Worktree removal reported success but the directory remains: $worktree"
+  }
+  printf 'reconciled-absent\n%s\n' "$worktree" > "$repo_dir/cleanup-phase.tmp" || \
+    _die "Failed to record reconciled cleanup phase: $repo_name"
+  mv "$repo_dir/cleanup-phase.tmp" "$repo_dir/cleanup-phase" || \
+    _die "Failed to publish reconciled cleanup phase: $repo_name"
 
-# Evidence remains in fleet state until every selected worktree operation succeeds.
-for repo_dir in "$TASK_DIR"/*/; do
-  [[ -d "$repo_dir" ]] || continue
-  repo_dir="${repo_dir%/}"
-  repo_name="$(basename "$repo_dir")"
-  if [[ -n "$FILTER_REPO" && "$repo_name" != "$FILTER_REPO" ]]; then
-    continue
-  fi
-  rm -rf "$repo_dir/terminal-evidence"
+  echo ""
 done
 
 # Only remove fleet state if cleaning all repos (no FILTER_REPO)

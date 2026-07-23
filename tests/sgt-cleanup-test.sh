@@ -150,8 +150,39 @@ fi
 [[ -d "$TEST_ROOT/done-without-result-worktree" ]]
 [[ -d "$TEST_ROOT/fleet/done-without-result" ]]
 
-mkdir -p "$TEST_ROOT/fleet/failed-task/app"
+for absent_case in missing-record pre-existing; do
+  absent_state="$TEST_ROOT/fleet/absent-$absent_case/app"
+  mkdir -p "$absent_state"
+  printf 'done\n' > "$absent_state/status"
+  printf 'result\n' > "$absent_state/result"
+  if [[ "$absent_case" == "pre-existing" ]]; then
+    printf '%s\n' "$TEST_ROOT/absent-worktree" > "$absent_state/worktree"
+  fi
+
+  if SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" "absent-$absent_case" \
+      > "$TEST_ROOT/absent-$absent_case.log" 2>&1; then
+    printf 'cleanup accepted %s worktree without cleanup proof\n' "$absent_case" >&2
+    exit 1
+  fi
+  grep -Fq 'has no reconciled cleanup phase' "$TEST_ROOT/absent-$absent_case.log"
+  [[ -d "$TEST_ROOT/fleet/absent-$absent_case" ]]
+done
+
+mkdir -p "$TEST_ROOT/fleet/failed-task/app" "$TEST_ROOT/failed-task"
+git -C "$TEST_ROOT/failed-task" init -q
+git -C "$TEST_ROOT/failed-task" config user.name Test
+git -C "$TEST_ROOT/failed-task" config user.email test@example.invalid
+touch "$TEST_ROOT/failed-task/README.md"
+git -C "$TEST_ROOT/failed-task" add README.md
+git -C "$TEST_ROOT/failed-task" commit -qm fixture
+git -C "$TEST_ROOT/failed-task" worktree add -q -b test-failed-cleanup \
+  "$TEST_ROOT/failed-task-sgt-failed-task"
 printf 'failed: terminal worker failure\n' > "$TEST_ROOT/fleet/failed-task/app/status"
+printf '%s\n' "$TEST_ROOT/failed-task-sgt-failed-task" > \
+  "$TEST_ROOT/fleet/failed-task/app/worktree"
+printf 'failed: terminal worker failure\n' > \
+  "$TEST_ROOT/failed-task-sgt-failed-task/.sergeant-status"
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" failed-task >/dev/null
 [[ ! -e "$TEST_ROOT/fleet/failed-task" ]]
@@ -205,6 +236,8 @@ fi
 [[ -d "$TEST_ROOT/removal-failure-sgt-removal-failure" ]]
 [[ ! -e "$TEST_ROOT/removal-success-sgt-removal-failure" ]]
 [[ -d "$TEST_ROOT/fleet/removal-failure" ]]
+[[ "$(cat "$TEST_ROOT/fleet/removal-failure/aaa/cleanup-phase")" == \
+  $'reconciled-absent\n'"$TEST_ROOT/removal-success-sgt-removal-failure" ]]
 [[ "$(cat "$TEST_ROOT/fleet/removal-failure/aaa/terminal-evidence/.sergeant-diagnostic")" == \
   'earlier diagnostic' ]]
 [[ "$(cat "$TEST_ROOT/fleet/removal-failure/app/terminal-evidence/.sergeant-diagnostic")" == \
