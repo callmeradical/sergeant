@@ -354,6 +354,7 @@ git -C "$TEST_ROOT/failed-task" config user.email test@example.invalid
 touch "$TEST_ROOT/failed-task/README.md"
 git -C "$TEST_ROOT/failed-task" add README.md
 git -C "$TEST_ROOT/failed-task" commit -qm fixture
+record_retry_owner failed-task app "$TEST_ROOT/failed-task"
 git -C "$TEST_ROOT/failed-task" worktree add -q -b test-failed-cleanup \
   "$TEST_ROOT/failed-task-sgt-failed-task"
 printf 'failed: terminal worker failure\n' > "$TEST_ROOT/fleet/failed-task/app/status"
@@ -390,7 +391,6 @@ init_test_repo "$TEST_ROOT/removal-failure"
 printf 'second fixture\n' >> "$TEST_ROOT/removal-failure/README.md"
 git -C "$TEST_ROOT/removal-failure" add README.md
 git -C "$TEST_ROOT/removal-failure" commit -qm 'second fixture'
-REMOVAL_FAILURE_HEAD="$(git -C "$TEST_ROOT/removal-failure" rev-parse HEAD)"
 git init -q --bare "$TEST_ROOT/removal-failure-origin.git"
 git -C "$TEST_ROOT/removal-failure" remote add origin \
   "$TEST_ROOT/removal-failure-origin.git"
@@ -465,6 +465,20 @@ fi
 [[ "$(wc -l < "$TEST_ROOT/git-removals")" -eq 2 ]]
 printf '%s\n' "$TEST_ROOT/removal-failure-sgt-removal-failure" > \
   "$TEST_ROOT/fleet/removal-failure/app/worktree"
+cp -a "$TEST_ROOT/removal-failure/.git" "$TEST_ROOT/removal-failure-git-state"
+cp -p "$TEST_ROOT/removal-failure/README.md" "$TEST_ROOT/removal-failure-readme"
+
+restore_removal_failure_repo() {
+  local path
+
+  for path in "$TEST_ROOT/removal-failure/.git"/* \
+    "$TEST_ROOT/removal-failure/.git"/.[!.]* \
+    "$TEST_ROOT/removal-failure/.git"/..?*; do
+    [[ -e "$path" || -L "$path" ]] && rm -rf "$path"
+  done
+  cp -a "$TEST_ROOT/removal-failure-git-state/." "$TEST_ROOT/removal-failure/.git/"
+  cp -p "$TEST_ROOT/removal-failure-readme" "$TEST_ROOT/removal-failure/README.md"
+}
 
 assert_retry_owner_rejected() {
   local evidence_before label="$1" phase_before
@@ -519,21 +533,40 @@ EOF
 
 mv "$TEST_ROOT/removal-failure" "$TEST_ROOT/removal-failure-original"
 git clone -q "$TEST_ROOT/removal-failure-origin.git" "$TEST_ROOT/removal-failure"
+[[ "$(git -C "$TEST_ROOT/removal-failure" rev-parse HEAD)" == \
+  "$(git -C "$TEST_ROOT/removal-failure-original" rev-parse HEAD)" ]]
+[[ "$(git -C "$TEST_ROOT/removal-failure" config --get remote.origin.url)" == \
+  "$(git -C "$TEST_ROOT/removal-failure-original" config --get remote.origin.url)" ]]
+[[ "$(git -C "$TEST_ROOT/removal-failure" rev-list --max-parents=0 --all | sort)" == \
+  "$(git -C "$TEST_ROOT/removal-failure-original" rev-list --max-parents=0 --all | sort)" ]]
+[[ ! -e "$TEST_ROOT/removal-failure/.git/sergeant-instance" ]]
 assert_retry_owner_rejected 'same-origin clone replacement'
 rm -rf "$TEST_ROOT/removal-failure"
 mv "$TEST_ROOT/removal-failure-original" "$TEST_ROOT/removal-failure"
 
 git -C "$TEST_ROOT/removal-failure" reset -q --hard HEAD^
 assert_retry_owner_rejected 'repository reset changed HEAD and refs'
-git -C "$TEST_ROOT/removal-failure" reset -q --hard "$REMOVAL_FAILURE_HEAD"
+restore_removal_failure_repo
+
+git -C "$TEST_ROOT/removal-failure" checkout -q --detach HEAD^
+assert_retry_owner_rejected 'repository HEAD changed independently'
+restore_removal_failure_repo
+
+git -C "$TEST_ROOT/removal-failure" tag retry-ref-drift
+assert_retry_owner_rejected 'repository ref changed independently'
+restore_removal_failure_repo
 
 git -C "$TEST_ROOT/removal-failure" config sergeant.fixture changed
 assert_retry_owner_rejected 'in-place repository metadata change'
-git -C "$TEST_ROOT/removal-failure" config --unset sergeant.fixture
+restore_removal_failure_repo
+
+printf '#!/bin/sh\n' > "$TEST_ROOT/removal-failure/.git/hooks/cleanup-review"
+assert_retry_owner_rejected 'in-place hook metadata change'
+restore_removal_failure_repo
 
 printf 'edited fixture\n' >> "$TEST_ROOT/removal-failure/README.md"
 assert_retry_owner_rejected 'configured repository worktree edit'
-git -C "$TEST_ROOT/removal-failure" checkout -q -- README.md
+restore_removal_failure_repo
 
 mv "$TEST_ROOT/removal-failure" "$TEST_ROOT/removal-failure-original"
 mkdir -p "$TEST_ROOT/removal-failure/.git"
@@ -571,6 +604,15 @@ printf 'partial-removal\n%s\ngit\n%s\n' \
   "$TEST_ROOT/removal-failure-sgt-removal-failure" \
   "$TEST_ROOT/removal-failure" > \
   "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase"
+cat > "$TEST_ROOT/config/cross-project.yaml" <<EOF
+name: cross-project
+repos:
+  - name: app
+    path: $TEST_ROOT/removal-failure
+EOF
+printf 'Project: cross-project\n' > "$TEST_ROOT/fleet/removal-failure/brief.md"
+assert_retry_owner_rejected 'cross-project repository at the same path'
+printf 'Project: removal-failure\n' > "$TEST_ROOT/fleet/removal-failure/brief.md"
 PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
   FAKE_GIT_LOG="$TEST_ROOT/git-removals" \
   SERGEANT_CONFIG="$TEST_ROOT/config" \
@@ -787,6 +829,7 @@ rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/mv"
 mkdir -p "$TEST_ROOT/fleet/staging-failure/app" \
   "$TEST_ROOT/staging-sgt-staging-failure"
 init_test_repo "$TEST_ROOT/staging"
+record_retry_owner staging-failure app "$TEST_ROOT/staging"
 printf '%s\n' "$TEST_ROOT/staging-sgt-staging-failure" > \
   "$TEST_ROOT/fleet/staging-failure/app/worktree"
 printf 'done\n' > "$TEST_ROOT/fleet/staging-failure/app/status"
@@ -863,6 +906,7 @@ git -C "$TEST_ROOT/repo" config user.email test@example.invalid
 touch "$TEST_ROOT/repo/README.md"
 git -C "$TEST_ROOT/repo" add README.md
 git -C "$TEST_ROOT/repo" commit -qm fixture
+record_retry_owner task-123 app "$TEST_ROOT/repo"
 
 worktree="$TEST_ROOT/repo-sgt-task-123"
 repo_state="$TEST_ROOT/fleet/task-123/app"
