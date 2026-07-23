@@ -629,27 +629,37 @@ _require_clean_worktrees() {
 }
 
 _stage_worker_evidence() {
-  local evidence expected_identity="$3" staged_identity staging_dir="$4" \
-    worktree="$2" worker_identity
+  local evidence evidence_dir expected_identity="$3" repo_dir="$1" \
+    staged_identity staging_dir worktree="$2" worker_identity
 
-  [[ ! -e "$staging_dir" && ! -L "$staging_dir" ]] || return 1
-  mkdir "$staging_dir" || return 1
+  evidence_dir="$repo_dir/terminal-evidence"
+  staging_dir="$repo_dir/terminal-evidence.tmp.$$"
+  [[ ! -e "$evidence_dir" && ! -L "$evidence_dir" && \
+    ! -e "$staging_dir" && ! -L "$staging_dir" ]] || \
+    _die "Terminal evidence staging path already exists: $repo_dir"
+  mkdir "$staging_dir" || \
+    _die "Failed to create terminal evidence staging directory: $repo_dir"
   for evidence in "$worktree"/.sergeant-*; do
     [[ -f "$evidence" ]] || continue
     if ! cp -p "$evidence" "$staging_dir/"; then
-      _rollback_remove_path "$staging_dir" "terminal evidence staging" \
-        evidence-stage-rollback-cleanup
-      return 1
+      rm -rf "$staging_dir" || \
+        _die "Failed to remove rejected terminal evidence staging directory: $repo_dir"
+      _die "Failed to preserve worker evidence before cleanup: $evidence"
     fi
   done
   worker_identity="$(_worker_evidence_identity "$worktree")" || worker_identity=""
   staged_identity="$(_worker_evidence_identity "$staging_dir")" || staged_identity=""
   if [[ -z "$worker_identity" || "$worker_identity" != "$expected_identity" || \
     "$staged_identity" != "$expected_identity" ]]; then
-    _rollback_remove_path "$staging_dir" "changed terminal evidence staging" \
-      evidence-stage-rollback-cleanup
-    return 1
+    rm -rf "$staging_dir" || \
+      _die "Failed to remove changed terminal evidence staging directory: $repo_dir"
+    _die "Worker lifecycle evidence changed during staging: $repo_dir"
   fi
+  mv "$staging_dir" "$evidence_dir" || {
+    rm -rf "$staging_dir" || \
+      _die "Failed to remove unpublished terminal evidence staging directory: $repo_dir"
+    _die "Failed to publish terminal evidence before cleanup: $repo_dir"
+  }
 }
 
 _cleanup_fail_point() {
@@ -1581,23 +1591,17 @@ for repo_dir in "$TASK_DIR"/*/; do
   if [[ "$retrying_removal" != true ]]; then
     worker_evidence_identity="$(_worker_evidence_identity "$worktree")" || \
       _die "Cannot bind worker lifecycle evidence before cleanup: $repo_name"
-    if [[ "${has_configured_root:-false}" == true ]]; then
-      _publish_initial_cleanup "$repo_dir" "$retry_root" "$worktree" "$wt_type" \
-        "$worker_evidence_identity" || \
-        _die "Failed to publish cleanup state before worktree removal: $TASK_ID/$repo_name"
-      expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
-    else
-      _stage_worker_evidence "$repo_dir" "$worktree" "$worker_evidence_identity" \
-        "$repo_dir/terminal-evidence" || \
-        _die "Failed to preserve worker evidence before cleanup: $repo_name"
-      if ! _record_cleanup_phase "$repo_dir" removing "$worktree" \
-        "$wt_type" "$retry_root"; then
-        _restore_worker_evidence "$repo_dir" "$worktree" \
-          "$worker_evidence_identity"
-        _die "Failed to record cleanup phase before worktree removal: $repo_name"
-      fi
-      expected_evidence_identity="$worker_evidence_identity"
+    _stage_worker_evidence "$repo_dir" "$worktree" "$worker_evidence_identity"
+    if ! _record_cleanup_owner "$repo_dir" "$retry_root" "$worktree" "$wt_type"; then
+      _restore_worker_evidence "$repo_dir" "$worktree"
+      _die "Failed to record cleanup owner before worktree removal: $TASK_ID/$repo_name"
     fi
+    if ! _record_cleanup_phase "$repo_dir" removing "$worktree" \
+      "$wt_type" "$retry_root"; then
+      _restore_worker_evidence "$repo_dir" "$worktree"
+      _die "Failed to record cleanup phase before worktree removal: $repo_name"
+    fi
+    expected_evidence_identity="$worker_evidence_identity"
   fi
   LIVE_EVIDENCE_BACKUP=""
   _remove_worker_evidence "$repo_dir" "$worktree" "$expected_evidence_identity" || \
