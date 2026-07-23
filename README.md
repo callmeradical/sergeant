@@ -185,6 +185,10 @@ Generated worker briefs always require separate Standards and Spec reviews. Fron
 
 Dispatched workers pass each Standards, Spec, or accessibility review's strict JSON finding artifact to `sgt-review-findings`. The router creates or updates one owning-repository td task per actionable finding, preserves active task state on reruns, and publishes blocking task IDs and remediation guidance through `.sergeant-message`, `.sergeant-status`, and `sgt-notify`. Cosmetic and false-positive dispositions create no cards. The schema rejects free-form review bodies, and credential-shaped values in accepted fields are redacted before durable storage.
 
+### Independent review findings
+
+Dispatched workers pass each Standards, Spec, or accessibility review's strict JSON finding artifact to `sgt-review-findings`. The router creates or updates one owning-repository td task per actionable finding, preserves active task state on reruns, and publishes blocking task IDs and remediation guidance through `.sergeant-message`, `.sergeant-status`, and `sgt-notify`. Cosmetic and false-positive dispositions create no cards. The schema rejects free-form review bodies, and credential-shaped values in accepted fields are redacted before durable storage.
+
 ## Skills
 
 Agent-loaded skills for structured workflows:
