@@ -14,6 +14,20 @@ trap cleanup_fixture EXIT
 
 mkdir -p "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin" "$TEST_ROOT/config"
 export SERGEANT_CONFIG="$TEST_ROOT/config"
+REAL_GIT="$(command -v git)"
+export REAL_GIT
+
+init_test_repo() {
+  local repo_root="$1"
+
+  mkdir -p "$repo_root"
+  git -C "$repo_root" init -q
+  git -C "$repo_root" config user.name Test
+  git -C "$repo_root" config user.email test@example.invalid
+  printf 'fixture\n' > "$repo_root/README.md"
+  git -C "$repo_root" add README.md
+  git -C "$repo_root" commit -qm fixture
+}
 
 record_retry_owner() {
   local task_id="$1" repo_name="$2" repo_root="$3"
@@ -211,7 +225,8 @@ repos:
     path: $TEST_ROOT/removal-failure
 EOF
 printf 'Project: removal-failure\n' > "$TEST_ROOT/fleet/removal-failure/brief.md"
-mkdir -p "$TEST_ROOT/removal-success/.git" "$TEST_ROOT/removal-success-sgt-removal-failure"
+init_test_repo "$TEST_ROOT/removal-success"
+mkdir -p "$TEST_ROOT/removal-success-sgt-removal-failure"
 printf '%s\n' "$TEST_ROOT/removal-success-sgt-removal-failure" > \
   "$TEST_ROOT/fleet/removal-failure/aaa/worktree"
 printf 'done\n' > "$TEST_ROOT/fleet/removal-failure/aaa/status"
@@ -220,7 +235,8 @@ printf 'done\n' > "$TEST_ROOT/removal-success-sgt-removal-failure/.sergeant-stat
 printf 'success result\n' > "$TEST_ROOT/removal-success-sgt-removal-failure/.sergeant-result"
 printf 'earlier diagnostic\n' > \
   "$TEST_ROOT/removal-success-sgt-removal-failure/.sergeant-diagnostic"
-mkdir -p "$TEST_ROOT/removal-failure/.git" "$TEST_ROOT/removal-failure-sgt-removal-failure"
+init_test_repo "$TEST_ROOT/removal-failure"
+mkdir -p "$TEST_ROOT/removal-failure-sgt-removal-failure"
 printf '%s\n' "$TEST_ROOT/removal-failure-sgt-removal-failure" > \
   "$TEST_ROOT/fleet/removal-failure/app/worktree"
 printf 'done\n' > "$TEST_ROOT/fleet/removal-failure/app/status"
@@ -232,6 +248,7 @@ printf 'removal diagnostic\n' > \
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
+  *" rev-list "*|*" config --get remote.origin.url "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *" worktree remove "*)
@@ -340,6 +357,16 @@ repos:
     path: $TEST_ROOT/removal-failure
 EOF
 
+mv "$TEST_ROOT/removal-failure" "$TEST_ROOT/removal-failure-original"
+mkdir -p "$TEST_ROOT/removal-failure/.git"
+printf 'partial-removal\n%s\ngit\n%s\n' \
+  "$TEST_ROOT/removal-failure-sgt-removal-failure" \
+  "$TEST_ROOT/removal-failure" > \
+  "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase"
+assert_retry_owner_rejected 'repository replaced at the same path'
+rm -rf "$TEST_ROOT/removal-failure"
+mv "$TEST_ROOT/removal-failure-original" "$TEST_ROOT/removal-failure"
+
 mv "$TEST_ROOT/removal-failure" "$TEST_ROOT/removal-failure-moved"
 printf 'partial-removal\n%s\ngit\n%s\n' \
   "$TEST_ROOT/removal-failure-sgt-removal-failure" \
@@ -376,8 +403,8 @@ PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
 rm "$TEST_ROOT/fake-bin/git"
 
 mkdir -p "$TEST_ROOT/fleet/partial-publication/app" \
-  "$TEST_ROOT/partial-publication/.git" \
   "$TEST_ROOT/partial-publication-sgt-partial-publication"
+init_test_repo "$TEST_ROOT/partial-publication"
 record_retry_owner partial-publication app "$TEST_ROOT/partial-publication"
 printf '%s\n' "$TEST_ROOT/partial-publication-sgt-partial-publication" > \
   "$TEST_ROOT/fleet/partial-publication/app/worktree"
@@ -390,6 +417,7 @@ printf 'result\n' > \
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
+  *" rev-list "*|*" config --get remote.origin.url "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *" worktree remove "*)
@@ -436,8 +464,9 @@ PATH="$TEST_ROOT/fake-bin:$PATH" \
 [[ ! -e "$TEST_ROOT/fleet/partial-publication" ]]
 rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/mv"
 
-mkdir -p "$TEST_ROOT/fleet/treehouse-partial/app" "$TEST_ROOT/treehouse-main/.git" \
+mkdir -p "$TEST_ROOT/fleet/treehouse-partial/app" \
   "$TEST_ROOT/treehouse-worktree"
+init_test_repo "$TEST_ROOT/treehouse-main"
 record_retry_owner treehouse-partial app "$TEST_ROOT/treehouse-main"
 printf 'gitdir: %s\n' "$TEST_ROOT/treehouse-main/.git/worktrees/lease" > \
   "$TEST_ROOT/treehouse-worktree/.git"
@@ -453,6 +482,7 @@ printf 'result\n' > "$TEST_ROOT/treehouse-worktree/.sergeant-result"
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
+  *" rev-list "*|*" config --get remote.origin.url "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *) exit 1 ;;
@@ -497,6 +527,27 @@ fi
 [[ -f "$TEST_ROOT/fleet/treehouse-partial/app/terminal-evidence/.sergeant-status" ]]
 printf 'sgt-treehouse-partial-app\n' > \
   "$TEST_ROOT/fleet/treehouse-partial/app/wt_holder"
+printf '%s\n' "$TEST_ROOT/another-treehouse-worktree" > \
+  "$TEST_ROOT/fleet/treehouse-partial/app/worktree"
+printf 'partial-removal\n%s\ntreehouse\n%s\n' \
+  "$TEST_ROOT/another-treehouse-worktree" "$TEST_ROOT/treehouse-main" > \
+  "$TEST_ROOT/fleet/treehouse-partial/app/cleanup-phase"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-removals" \
+  FAKE_TREEHOUSE_STATE="$TEST_ROOT/treehouse-failed-once" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" treehouse-partial >/dev/null 2>&1; then
+  printf 'cleanup retried a treehouse path not bound to its lease\n' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$TEST_ROOT/treehouse-removals")" -eq 1 ]]
+[[ -f "$TEST_ROOT/fleet/treehouse-partial/app/terminal-evidence/.sergeant-status" ]]
+printf '%s\n' "$TEST_ROOT/treehouse-worktree" > \
+  "$TEST_ROOT/fleet/treehouse-partial/app/worktree"
+printf 'partial-removal\n%s\ntreehouse\n%s\n' \
+  "$TEST_ROOT/treehouse-worktree" "$TEST_ROOT/treehouse-main" > \
+  "$TEST_ROOT/fleet/treehouse-partial/app/cleanup-phase"
 PATH="$TEST_ROOT/fake-bin:$PATH" \
   FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-removals" \
   FAKE_TREEHOUSE_STATE="$TEST_ROOT/treehouse-failed-once" \
@@ -509,8 +560,9 @@ PATH="$TEST_ROOT/fake-bin:$PATH" \
 [[ ! -e "$TEST_ROOT/fleet/treehouse-partial" ]]
 rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/treehouse"
 
-mkdir -p "$TEST_ROOT/fleet/marker-publication/app" "$TEST_ROOT/marker/.git" \
+mkdir -p "$TEST_ROOT/fleet/marker-publication/app" \
   "$TEST_ROOT/marker-sgt-marker-publication"
+init_test_repo "$TEST_ROOT/marker"
 record_retry_owner marker-publication app "$TEST_ROOT/marker"
 printf '%s\n' "$TEST_ROOT/marker-sgt-marker-publication" > \
   "$TEST_ROOT/fleet/marker-publication/app/worktree"
@@ -521,6 +573,7 @@ printf 'result\n' > "$TEST_ROOT/marker-sgt-marker-publication/.sergeant-result"
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
+  *" rev-list "*|*" config --get remote.origin.url "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *" worktree remove "*) rm -rf "${!#}" ;;
@@ -553,8 +606,9 @@ PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
 [[ ! -e "$TEST_ROOT/fleet/marker-publication" ]]
 rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/mv"
 
-mkdir -p "$TEST_ROOT/fleet/staging-failure/app" "$TEST_ROOT/staging/.git" \
+mkdir -p "$TEST_ROOT/fleet/staging-failure/app" \
   "$TEST_ROOT/staging-sgt-staging-failure"
+init_test_repo "$TEST_ROOT/staging"
 printf '%s\n' "$TEST_ROOT/staging-sgt-staging-failure" > \
   "$TEST_ROOT/fleet/staging-failure/app/worktree"
 printf 'done\n' > "$TEST_ROOT/fleet/staging-failure/app/status"
@@ -564,6 +618,7 @@ printf 'result\n' > "$TEST_ROOT/staging-sgt-staging-failure/.sergeant-result"
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
+  *" rev-list "*|*" config --get remote.origin.url "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *" worktree remove "*) rm -rf "${!#}" ;;

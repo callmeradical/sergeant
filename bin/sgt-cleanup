@@ -347,9 +347,43 @@ _record_cleanup_phase() {
     mv "$repo_dir/cleanup-phase.tmp" "$repo_dir/cleanup-phase"
 }
 
+_repo_identity() {
+  local remote roots repo_root="$1"
+
+  roots="$(git -C "$repo_root" rev-list --max-parents=0 --all 2>/dev/null | sort)"
+  [[ -n "$roots" ]] || return 1
+  remote="$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null || true)"
+  printf '%s\n%s\n' "$remote" "$roots" | git hash-object --stdin
+}
+
+_record_cleanup_owner() {
+  local holder identity repo_dir="$1" repo_root="$2" worktree="$3" wt_type="$4"
+
+  identity="$(_repo_identity "$repo_root")" || return 1
+  holder=""
+  [[ "$wt_type" != "treehouse" ]] || \
+    holder="$(tr -d '\n' < "$repo_dir/wt_holder" 2>/dev/null || true)"
+  printf '1\n%s\n%s\n%s\n%s\n%s\n' \
+    "$repo_root" "$worktree" "$wt_type" "$identity" "$holder" \
+    > "$repo_dir/cleanup-owner.tmp" &&
+    mv "$repo_dir/cleanup-owner.tmp" "$repo_dir/cleanup-owner"
+}
+
 _validate_retry_owner() {
-  local config_file configured_root expected_holder expected_root expected_worktree holder i project raw_path repo_count \
+  local config_file configured_root expected_holder expected_root holder i identity \
+    owner_holder owner_identity owner_root owner_type owner_worktree project raw_path repo_count \
     repo_dir="$1" repo_name="$2" worktree="$3" retry_type="$4" retry_root="$5"
+
+  [[ "$(sed -n '1p' "$repo_dir/cleanup-owner" 2>/dev/null || true)" == "1" ]] || \
+    _die "Retry owner identity is missing: $repo_name"
+  owner_root="$(sed -n '2p' "$repo_dir/cleanup-owner")"
+  owner_worktree="$(sed -n '3p' "$repo_dir/cleanup-owner")"
+  owner_type="$(sed -n '4p' "$repo_dir/cleanup-owner")"
+  owner_identity="$(sed -n '5p' "$repo_dir/cleanup-owner")"
+  owner_holder="$(sed -n '6p' "$repo_dir/cleanup-owner")"
+  [[ "$retry_root" == "$owner_root" && "$worktree" == "$owner_worktree" && \
+    "$retry_type" == "$owner_type" ]] || \
+    _die "Retry cleanup state does not match its recorded owner: $repo_name"
 
   project="$(sed -n 's/^Project:[[:space:]]*//p' "$TASK_DIR/brief.md" 2>/dev/null || true)"
   [[ -n "$project" && "$project" != *$'\n'* && "$project" != */* ]] || \
@@ -378,15 +412,15 @@ _validate_retry_owner() {
     _die "Retry owner repo is symlink-aliased: $configured_root"
   [[ "$retry_root" == "$expected_root" && ! -L "$retry_root" ]] || \
     _die "Retry owner repo does not match persisted cleanup root: $repo_name"
+  identity="$(_repo_identity "$expected_root")" || \
+    _die "Cannot identify retry owner repo: $repo_name"
+  [[ "$identity" == "$owner_identity" ]] || \
+    _die "Retry owner repo identity changed: $repo_name"
 
-  if [[ "$retry_type" == "git" ]]; then
-    expected_worktree="$(dirname "$expected_root")/$(basename "$expected_root")-sgt-${TASK_ID}"
-    [[ "$worktree" == "$expected_worktree" ]] || \
-      _die "Retry worktree does not match its owning repo: $repo_name"
-  else
+  if [[ "$retry_type" == "treehouse" ]]; then
     expected_holder="sgt-${TASK_ID}-${repo_name}"
     holder="$(tr -d '\n' < "$repo_dir/wt_holder" 2>/dev/null || true)"
-    [[ "$holder" == "$expected_holder" ]] || \
+    [[ "$holder" == "$expected_holder" && "$owner_holder" == "$expected_holder" ]] || \
       _die "Retry treehouse lease does not match its owner: $repo_name"
   fi
 }
@@ -466,6 +500,10 @@ for repo_dir in "$TASK_DIR"/*/; do
   fi
 
   _stage_worker_evidence "$repo_dir" "$worktree"
+  if ! _record_cleanup_owner "$repo_dir" "$retry_root" "$worktree" "$wt_type"; then
+    _restore_worker_evidence "$repo_dir" "$worktree"
+    _die "Failed to record cleanup owner before worktree removal: $TASK_ID/$repo_name"
+  fi
   if ! _record_cleanup_phase "$repo_dir" removing "$worktree" \
     "$wt_type" "$retry_root"; then
     _restore_worker_evidence "$repo_dir" "$worktree"
