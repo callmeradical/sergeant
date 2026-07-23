@@ -12,7 +12,34 @@ cleanup_fixture() {
 }
 trap cleanup_fixture EXIT
 
-mkdir -p "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin"
+mkdir -p "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin" "$TEST_ROOT/config"
+export SERGEANT_CONFIG="$TEST_ROOT/config"
+REAL_GIT="$(command -v git)"
+export REAL_GIT
+
+init_test_repo() {
+  local repo_root="$1"
+
+  mkdir -p "$repo_root"
+  git -C "$repo_root" init -q
+  git -C "$repo_root" config user.name Test
+  git -C "$repo_root" config user.email test@example.invalid
+  printf 'fixture\n' > "$repo_root/README.md"
+  git -C "$repo_root" add README.md
+  git -C "$repo_root" commit -qm fixture
+}
+
+record_retry_owner() {
+  local task_id="$1" repo_name="$2" repo_root="$3"
+
+  cat > "$TEST_ROOT/config/$task_id.yaml" <<EOF
+name: $task_id
+repos:
+  - name: $repo_name
+    path: $repo_root
+EOF
+  printf 'Project: %s\n' "$task_id" > "$TEST_ROOT/fleet/$task_id/brief.md"
+}
 
 assert_cleanup_rejected() {
   local task_id="$1"
@@ -287,38 +314,24 @@ fi
 [[ -d "$TEST_ROOT/done-without-result-worktree" ]]
 [[ -d "$TEST_ROOT/fleet/done-without-result" ]]
 
-# missing-record: no worktree file — cleanup should skip worktree steps and succeed.
-mkdir -p "$TEST_ROOT/fleet/absent-missing-record/app"
-printf 'done\n' > "$TEST_ROOT/fleet/absent-missing-record/app/status"
-printf 'result\n' > "$TEST_ROOT/fleet/absent-missing-record/app/result"
-SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" absent-missing-record \
-  > "$TEST_ROOT/absent-missing-record.log" 2>&1 || {
-  printf 'cleanup rejected absent-missing-record (no worktree): %s\n' \
-    "$(cat "$TEST_ROOT/absent-missing-record.log")" >&2
-  exit 1
-}
-[[ ! -d "$TEST_ROOT/fleet/absent-missing-record" ]] || {
-  printf 'fleet state not removed for absent-missing-record\n' >&2; exit 1
-}
+for absent_case in missing-record pre-existing; do
+  absent_state="$TEST_ROOT/fleet/absent-$absent_case/app"
+  mkdir -p "$absent_state"
+  printf 'done\n' > "$absent_state/status"
+  printf 'result\n' > "$absent_state/result"
+  if [[ "$absent_case" == "pre-existing" ]]; then
+    printf '%s\n' "$TEST_ROOT/absent-worktree" > "$absent_state/worktree"
+  fi
 
-# pre-existing: worktree recorded but externally removed — cleanup should synthesize
-# evidence from fleet state and complete successfully (idempotent replay).
-mkdir -p "$TEST_ROOT/fleet/absent-pre-existing/app"
-printf 'done\n' > "$TEST_ROOT/fleet/absent-pre-existing/app/status"
-printf 'result\n' > "$TEST_ROOT/fleet/absent-pre-existing/app/result"
-printf '%s\n' "$TEST_ROOT/absent-worktree-gone" \
-  > "$TEST_ROOT/fleet/absent-pre-existing/app/worktree"
-SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" absent-pre-existing \
-  > "$TEST_ROOT/absent-pre-existing.log" 2>&1 || {
-  printf 'cleanup rejected absent-pre-existing (external removal): %s\n' \
-    "$(cat "$TEST_ROOT/absent-pre-existing.log")" >&2
-  exit 1
-}
-[[ ! -d "$TEST_ROOT/fleet/absent-pre-existing" ]] || {
-  printf 'fleet state not removed for absent-pre-existing\n' >&2; exit 1
-}
+  if SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" "absent-$absent_case" \
+      > "$TEST_ROOT/absent-$absent_case.log" 2>&1; then
+    printf 'cleanup accepted %s worktree without cleanup proof\n' "$absent_case" >&2
+    exit 1
+  fi
+  grep -Fq 'has no reconciled cleanup phase' "$TEST_ROOT/absent-$absent_case.log"
+  [[ -d "$TEST_ROOT/fleet/absent-$absent_case" ]]
+done
 
 mkdir -p "$TEST_ROOT/fleet/failed-task/app" "$TEST_ROOT/failed-task"
 git -C "$TEST_ROOT/failed-task" init -q
@@ -327,6 +340,7 @@ git -C "$TEST_ROOT/failed-task" config user.email test@example.invalid
 touch "$TEST_ROOT/failed-task/README.md"
 git -C "$TEST_ROOT/failed-task" add README.md
 git -C "$TEST_ROOT/failed-task" commit -qm fixture
+record_retry_owner failed-task app "$TEST_ROOT/failed-task"
 git -C "$TEST_ROOT/failed-task" worktree add -q -b test-failed-cleanup \
   "$TEST_ROOT/failed-task-sgt-failed-task"
 printf 'failed: terminal worker failure\n' > "$TEST_ROOT/fleet/failed-task/app/status"
@@ -339,8 +353,19 @@ SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
 [[ ! -e "$TEST_ROOT/fleet/failed-task" ]]
 
 mkdir -p "$TEST_ROOT/fleet/removal-failure/aaa" "$TEST_ROOT/fleet/removal-failure/app" \
-  "$TEST_ROOT/fake-bin"
-mkdir -p "$TEST_ROOT/removal-success/.git" "$TEST_ROOT/removal-success-sgt-removal-failure"
+  "$TEST_ROOT/fake-bin" "$TEST_ROOT/config"
+cat > "$TEST_ROOT/config/removal-failure.yaml" <<EOF
+name: removal-failure
+repos:
+  - name: aaa
+    path: $TEST_ROOT/removal-success
+  - name: app
+    path: $TEST_ROOT/removal-failure
+EOF
+printf 'Project: removal-failure\n' > "$TEST_ROOT/fleet/removal-failure/brief.md"
+init_test_repo "$TEST_ROOT/removal-success"
+git -C "$TEST_ROOT/removal-success" worktree add -q -b removal-success-worker \
+  "$TEST_ROOT/removal-success-sgt-removal-failure"
 printf '%s\n' "$TEST_ROOT/removal-success-sgt-removal-failure" > \
   "$TEST_ROOT/fleet/removal-failure/aaa/worktree"
 printf 'done\n' > "$TEST_ROOT/fleet/removal-failure/aaa/status"
@@ -349,7 +374,17 @@ printf 'done\n' > "$TEST_ROOT/removal-success-sgt-removal-failure/.sergeant-stat
 printf 'success result\n' > "$TEST_ROOT/removal-success-sgt-removal-failure/.sergeant-result"
 printf 'earlier diagnostic\n' > \
   "$TEST_ROOT/removal-success-sgt-removal-failure/.sergeant-diagnostic"
-mkdir -p "$TEST_ROOT/removal-failure/.git" "$TEST_ROOT/removal-failure-sgt-removal-failure"
+init_test_repo "$TEST_ROOT/removal-failure"
+printf 'second fixture\n' >> "$TEST_ROOT/removal-failure/README.md"
+git -C "$TEST_ROOT/removal-failure" add README.md
+git -C "$TEST_ROOT/removal-failure" commit -qm 'second fixture'
+git init -q --bare "$TEST_ROOT/removal-failure-origin.git"
+git -C "$TEST_ROOT/removal-failure" remote add origin \
+  "$TEST_ROOT/removal-failure-origin.git"
+git -C "$TEST_ROOT/removal-failure" push -q -u origin HEAD:main
+git -C "$TEST_ROOT/removal-failure-origin.git" symbolic-ref HEAD refs/heads/main
+git -C "$TEST_ROOT/removal-failure" worktree add -q -b removal-failure-worker \
+  "$TEST_ROOT/removal-failure-sgt-removal-failure"
 printf '%s\n' "$TEST_ROOT/removal-failure-sgt-removal-failure" > \
   "$TEST_ROOT/fleet/removal-failure/app/worktree"
 printf 'done\n' > "$TEST_ROOT/fleet/removal-failure/app/status"
@@ -361,16 +396,20 @@ printf 'removal diagnostic\n' > \
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-parse "*) printf 'true\n' ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
+  *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
   *" worktree list --porcelain -z "*) "$REAL_GIT" "$@" ;;
   *" worktree remove "*)
     worktree="${!#}"
+    printf '%s\n' "$worktree" >> "$FAKE_GIT_LOG"
     if [[ "$worktree" == *removal-success* ]]; then
       rm -rf "$worktree"
     elif [[ -e "$FAKE_GIT_STATE" ]]; then
       rm -rf "$worktree"
     else
+      rm -rf "$worktree"
       touch "$FAKE_GIT_STATE"
       exit 1
     fi
@@ -380,22 +419,25 @@ esac
 EOF
 chmod +x "$TEST_ROOT/fake-bin/git"
 if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
+  FAKE_GIT_LOG="$TEST_ROOT/git-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" removal-failure >/dev/null 2>&1; then
   printf 'cleanup succeeded after worktree removal failed\n' >&2
   exit 1
 fi
-[[ -d "$TEST_ROOT/removal-failure-sgt-removal-failure" ]]
+[[ ! -e "$TEST_ROOT/removal-failure-sgt-removal-failure" ]]
 [[ ! -e "$TEST_ROOT/removal-success-sgt-removal-failure" ]]
 [[ -d "$TEST_ROOT/fleet/removal-failure" ]]
 [[ "$(cat "$TEST_ROOT/fleet/removal-failure/aaa/cleanup-phase")" == \
   $'reconciled-absent\n'"$TEST_ROOT/removal-success-sgt-removal-failure" ]]
 [[ "$(cat "$TEST_ROOT/fleet/removal-failure/aaa/terminal-evidence/.sergeant-diagnostic")" == \
   'earlier diagnostic' ]]
+[[ "$(cat "$TEST_ROOT/fleet/removal-failure/app/cleanup-phase")" == \
+  $'partial-removal\n'"$TEST_ROOT/removal-failure-sgt-removal-failure"$'\ngit\n'"$TEST_ROOT/removal-failure" ]]
+[[ "$(wc -l < "$TEST_ROOT/git-removals")" -eq 2 ]]
 [[ "$(cat "$TEST_ROOT/fleet/removal-failure/app/terminal-evidence/.sergeant-diagnostic")" == \
   'removal diagnostic' ]]
-[[ "$(cat "$TEST_ROOT/removal-failure-sgt-removal-failure/.sergeant-status")" == 'done' ]]
-[[ "$(cat "$TEST_ROOT/removal-failure-sgt-removal-failure/.sergeant-result")" == 'result' ]]
 printf '%s\n' "$TEST_ROOT/different-worktree" > \
   "$TEST_ROOT/fleet/removal-failure/app/worktree"
 if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
@@ -1241,6 +1283,7 @@ mkdir -p "$TEST_ROOT/fleet/marker-publication/app" \
 init_test_repo "$TEST_ROOT/marker"
 git -C "$TEST_ROOT/marker" worktree add -q -b marker-worker \
   "$TEST_ROOT/marker-sgt-marker-publication"
+record_retry_owner marker-publication app "$TEST_ROOT/marker"
 printf '%s\n' "$TEST_ROOT/marker-sgt-marker-publication" > \
   "$TEST_ROOT/fleet/marker-publication/app/worktree"
 printf 'done\n' > "$TEST_ROOT/fleet/marker-publication/app/status"
@@ -1250,9 +1293,16 @@ printf 'result\n' > "$TEST_ROOT/marker-sgt-marker-publication/.sergeant-result"
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-parse "*) printf 'true\n' ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
+  *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
-  *" worktree remove "*) rm -rf "${!#}" ;;
+  *" worktree remove "*)
+    printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
+    [[ ! -e "$FAKE_GIT_STATE" ]] || exit 1
+    touch "$FAKE_GIT_STATE"
+    rm -rf "${!#}"
+    ;;
   *) exit 1 ;;
 esac
 EOF
@@ -1268,6 +1318,8 @@ fi
 EOF
 chmod +x "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/mv"
 if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
+  FAKE_GIT_STATE="$TEST_ROOT/marker-git-removed" \
+  FAKE_GIT_LOG="$TEST_ROOT/marker-removals" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" marker-publication >/dev/null 2>&1; then
   printf 'cleanup succeeded after reconciled phase publication failed\n' >&2
@@ -1275,15 +1327,21 @@ if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
 fi
 [[ ! -e "$TEST_ROOT/marker-sgt-marker-publication" ]]
 [[ "$(sed -n '1p' "$TEST_ROOT/fleet/marker-publication/app/cleanup-phase")" == \
-  'removing' ]]
+  'removed' ]]
 PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
+  FAKE_GIT_STATE="$TEST_ROOT/marker-git-removed" \
+  FAKE_GIT_LOG="$TEST_ROOT/marker-removals" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" marker-publication >/dev/null
 [[ ! -e "$TEST_ROOT/fleet/marker-publication" ]]
 rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/mv"
 
-mkdir -p "$TEST_ROOT/fleet/staging-failure/app" "$TEST_ROOT/staging/.git" \
+mkdir -p "$TEST_ROOT/fleet/staging-failure/app" \
+  "$TEST_ROOT/fake-bin"
+init_test_repo "$TEST_ROOT/staging"
+git -C "$TEST_ROOT/staging" worktree add -q -b staging-failure-worker \
   "$TEST_ROOT/staging-sgt-staging-failure"
+record_retry_owner staging-failure app "$TEST_ROOT/staging"
 printf '%s\n' "$TEST_ROOT/staging-sgt-staging-failure" > \
   "$TEST_ROOT/fleet/staging-failure/app/worktree"
 printf 'done\n' > "$TEST_ROOT/fleet/staging-failure/app/status"
@@ -1293,7 +1351,9 @@ printf 'result\n' > "$TEST_ROOT/staging-sgt-staging-failure/.sergeant-result"
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-parse "*) printf 'true\n' ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
+  *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
   *" worktree remove "*) rm -rf "${!#}" ;;
   *) exit 1 ;;
@@ -1307,6 +1367,14 @@ if [[ " $* " == *".sergeant-status"* && ! -e "$FAKE_CP_STATE" ]]; then
   touch "$FAKE_CP_STATE"
   exit 1
 fi
+if [[ -n "${FAKE_CP_MUTATE_STATE:-}" && " $* " == *".sergeant-result"* && \
+  ! -e "$FAKE_CP_MUTATE_STATE" ]]; then
+  "$REAL_CP" "$@"
+  printf 'failed: changed during staging\n' > \
+    "$FAKE_CP_MUTATE_SOURCE/.sergeant-status"
+  touch "$FAKE_CP_MUTATE_STATE"
+  exit 0
+fi
 "$REAL_CP" "$@"
 EOF
 chmod +x "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/cp"
@@ -1318,6 +1386,23 @@ if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_CP_STATE="$TEST_ROOT/cp-failed-once" \
 fi
 [[ -f "$TEST_ROOT/staging-sgt-staging-failure/.sergeant-status" ]]
 [[ -f "$TEST_ROOT/staging-sgt-staging-failure/.sergeant-result" ]]
+[[ ! -e "$TEST_ROOT/fleet/staging-failure/app/terminal-evidence" ]]
+[[ ! -e "$TEST_ROOT/fleet/staging-failure/app/cleanup-owner" ]]
+[[ ! -e "$TEST_ROOT/fleet/staging-failure/app/cleanup-phase" ]]
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_CP_STATE="$TEST_ROOT/cp-failed-once" \
+  FAKE_CP_MUTATE_STATE="$TEST_ROOT/cp-mutated-once" \
+  FAKE_CP_MUTATE_SOURCE="$TEST_ROOT/staging-sgt-staging-failure" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" staging-failure >/dev/null 2>&1; then
+  printf 'cleanup accepted lifecycle evidence changed during staging\n' >&2
+  exit 1
+fi
+[[ -d "$TEST_ROOT/staging-sgt-staging-failure" ]]
+[[ ! -e "$TEST_ROOT/fleet/staging-failure/app/terminal-evidence" ]]
+[[ ! -e "$TEST_ROOT/fleet/staging-failure/app/cleanup-owner" ]]
+[[ ! -e "$TEST_ROOT/fleet/staging-failure/app/cleanup-phase" ]]
+printf 'done\n' > "$TEST_ROOT/staging-sgt-staging-failure/.sergeant-status"
 PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_CP_STATE="$TEST_ROOT/cp-failed-once" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" staging-failure >/dev/null
@@ -1359,6 +1444,7 @@ git -C "$TEST_ROOT/repo" config user.email test@example.invalid
 touch "$TEST_ROOT/repo/README.md"
 git -C "$TEST_ROOT/repo" add README.md
 git -C "$TEST_ROOT/repo" commit -qm fixture
+record_retry_owner task-123 app "$TEST_ROOT/repo"
 
 worktree="$TEST_ROOT/repo-sgt-task-123"
 repo_state="$TEST_ROOT/fleet/task-123/app"
