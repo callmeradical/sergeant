@@ -210,7 +210,7 @@ An existing approved OpenSpec revision is reused rather than skipped.
 The fleet state is the operational source of truth while a lifecycle is active. It must durably retain:
 
 - lifecycle ID and schema version;
-- project, owning repository, affected repositories, branch, and permitted source-request references;
+- project, owning repository, affected repositories, and permitted source-request references;
 - current phase state and monotonic generation;
 - artifact manifests and aggregate digests;
 - approval and skip events, including actor, timestamp, and reason when applicable;
@@ -222,14 +222,15 @@ Lifecycle events are append-only. Current-state summaries may be regenerated fro
 
 ### Lifecycle index
 
-- The owning repository retains one durable, human-readable canonical index for the lifecycle.
+- The owning repository retains one durable, human-readable canonical structured-field index for the lifecycle.
+- The index may format only these enumerated fields: lifecycle ID and schema version; project; owning and affected repositories; current phase and generation; permitted source-request references; artifact manifests and digests; approval or skip actor, timestamp, category, and reason; privacy-safe downstream effect; phase worker IDs, execution statuses, dependency order, and terminal results; structured recovery, invalidation, cancellation, and failure state; and final PR and commit references.
 - The index correlates PRD authoring, specification authoring, and each repository's implementation assignments without replacing their phase records.
-- Significant transitions, approvals, skips, invalidations, and recovery decisions are recorded without request or brief bodies. Any source authority is represented only by the permitted source-request references.
+- The index must not contain free-form or request-derived narrative, paraphrases, intent summaries, source request bodies, or dispatch brief bodies, including redacted bodies. Any source authority is represented only by the permitted source-request references.
 - PRD and specification phase records remain awaiting approval at their gates; an artifact commit alone cannot close a gate. The matching approval command records the human gate evidence before advancing. A rejected or interrupted gate remains awaiting approval, while a superseding revision returns the phase to active work and requires renewed review.
 - Implementation assignments must not start before `ready_for_implementation`.
 - Fleet cleanup preserves the complete privacy-safe lifecycle event ledger and terminal downstream effect through the existing Sergeant capture mechanism before ephemeral worktrees or live fleet state are removed. Sergeant retains this capture indefinitely and never deletes it automatically; a user may delete it manually under their own retention policy.
 
-Fleet events are the machine-operational record; the lifecycle index is the durable human-readable narrative. A mismatch blocks phase advancement and requires recovery rather than silently choosing one record.
+Fleet events are the machine-operational record; the lifecycle index is their durable human-readable structured-field view. A mismatch blocks phase advancement and requires recovery rather than silently choosing one record.
 
 ## Recovery Semantics
 
@@ -247,6 +248,7 @@ Fleet events are the machine-operational record; the lifecycle index is the dura
 
 - Fleet lifecycle metadata, lifecycle events, notifications, and terminal captures must never store PRD or OpenSpec bodies, dispatch brief bodies, prompts, model responses, `.sergeant-response` plaintext, credentials, tokens, environment dumps, or secrets.
 - Across command output, fleet metadata, lifecycle events, notifications, terminal captures, and the lifecycle index, source authority is represented only by repository identity, repository-relative artifact path, Git commit SHA, and content digest. Downstream effect, skip category and reason, and local operating-system actor evidence are permitted non-source evidence.
+- Project is permitted as privacy-safe operational grouping metadata. Mutable branch names are not retained in lifecycle records or the lifecycle index and are not source-request references.
 - Skip and cancellation reasons must be concise and must not quote sensitive request content.
 - Artifact content remains in its repository under that repository's access controls. Sergeant records references and digests only.
 - Temporary confirmation and response plaintext is removed after durable consumption according to existing response transport guarantees.
@@ -286,9 +288,10 @@ Fleet events are the machine-operational record; the lifecycle index is the dura
 18. Given any nonterminal phase, `sgt-cancel` requires exact interactive confirmation, prevents new dispatch, and records one idempotent lifecycle cancellation event. It remains in nonterminal `cancelling` while any worker is live or unaccounted for and permits cleanup only after reaching `cancelled`.
 19. Every `sgt-dispatch` defaults to a phased lifecycle. `--read-only` rejects mutation, and an ambiguous brief cannot use read-only mode to bypass gates.
 20. PRD and specification phase records remain awaiting approval at their gates, advance only through matching approval evidence, and return to active work when a superseding revision invalidates that evidence.
-21. Every command output and retained lifecycle record uses repository identity, repository-relative path, commit SHA, and content digest as its only source-request references. It may also contain privacy-safe downstream effect, skip category and reason, and local operating-system actor evidence. Fixtures containing other source identifiers, source request bodies, and dispatch brief bodies produce none of that data in output or retained metadata, including redacted body text.
+21. Every command output and retained lifecycle record uses repository identity, repository-relative path, commit SHA, and content digest as its only source-request references. It may also contain project as privacy-safe operational grouping metadata, privacy-safe downstream effect, skip category and reason, and local operating-system actor evidence. Fixtures containing branch names, other source identifiers, source request bodies, and dispatch brief bodies produce none of that data in output or retained metadata, including redacted body text.
 22. Given a multi-repository artifact revision, every manifest entry names its repository, all entries for one repository use one canonical commit, and the aggregate digest binds the ordered repository-qualified entries.
 23. Every artifact approval creates `refs/sergeant/artifacts/<lifecycle>/<phase>/<digest>` independently in each represented repository at its canonical commit before advancing, where `<digest>` is the artifact revision digest. Superseding, completing, and cleaning a lifecycle leave every ref unchanged; deletion requires audited interactive human confirmation and is rejected while any lifecycle uses the artifact as active authority or downstream work still depends on it.
+24. Every lifecycle index renders only its enumerated structured fields. Fixtures containing request-derived narrative, paraphrases, intent summaries, source request bodies, and dispatch brief bodies produce none of that content in the index, including redacted body text.
 
 ## Delivery Boundary
 
