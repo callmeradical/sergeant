@@ -387,6 +387,15 @@ printf 'success result\n' > "$TEST_ROOT/removal-success-sgt-removal-failure/.ser
 printf 'earlier diagnostic\n' > \
   "$TEST_ROOT/removal-success-sgt-removal-failure/.sergeant-diagnostic"
 init_test_repo "$TEST_ROOT/removal-failure"
+printf 'second fixture\n' >> "$TEST_ROOT/removal-failure/README.md"
+git -C "$TEST_ROOT/removal-failure" add README.md
+git -C "$TEST_ROOT/removal-failure" commit -qm 'second fixture'
+REMOVAL_FAILURE_HEAD="$(git -C "$TEST_ROOT/removal-failure" rev-parse HEAD)"
+git init -q --bare "$TEST_ROOT/removal-failure-origin.git"
+git -C "$TEST_ROOT/removal-failure" remote add origin \
+  "$TEST_ROOT/removal-failure-origin.git"
+git -C "$TEST_ROOT/removal-failure" push -q -u origin HEAD:main
+git -C "$TEST_ROOT/removal-failure-origin.git" symbolic-ref HEAD refs/heads/main
 mkdir -p "$TEST_ROOT/removal-failure-sgt-removal-failure"
 printf '%s\n' "$TEST_ROOT/removal-failure-sgt-removal-failure" > \
   "$TEST_ROOT/fleet/removal-failure/app/worktree"
@@ -399,7 +408,7 @@ printf 'removal diagnostic\n' > \
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" config --get remote.origin.url "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *" worktree remove "*)
@@ -509,6 +518,24 @@ repos:
 EOF
 
 mv "$TEST_ROOT/removal-failure" "$TEST_ROOT/removal-failure-original"
+git clone -q "$TEST_ROOT/removal-failure-origin.git" "$TEST_ROOT/removal-failure"
+assert_retry_owner_rejected 'same-origin clone replacement'
+rm -rf "$TEST_ROOT/removal-failure"
+mv "$TEST_ROOT/removal-failure-original" "$TEST_ROOT/removal-failure"
+
+git -C "$TEST_ROOT/removal-failure" reset -q --hard HEAD^
+assert_retry_owner_rejected 'repository reset changed HEAD and refs'
+git -C "$TEST_ROOT/removal-failure" reset -q --hard "$REMOVAL_FAILURE_HEAD"
+
+git -C "$TEST_ROOT/removal-failure" config sergeant.fixture changed
+assert_retry_owner_rejected 'in-place repository metadata change'
+git -C "$TEST_ROOT/removal-failure" config --unset sergeant.fixture
+
+printf 'edited fixture\n' >> "$TEST_ROOT/removal-failure/README.md"
+assert_retry_owner_rejected 'configured repository worktree edit'
+git -C "$TEST_ROOT/removal-failure" checkout -q -- README.md
+
+mv "$TEST_ROOT/removal-failure" "$TEST_ROOT/removal-failure-original"
 mkdir -p "$TEST_ROOT/removal-failure/.git"
 printf 'partial-removal\n%s\ngit\n%s\n' \
   "$TEST_ROOT/removal-failure-sgt-removal-failure" \
@@ -568,7 +595,7 @@ printf 'result\n' > \
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" config --get remote.origin.url "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *" worktree remove "*)
@@ -633,7 +660,7 @@ printf 'result\n' > "$TEST_ROOT/treehouse-worktree/.sergeant-result"
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" config --get remote.origin.url "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *) exit 1 ;;
@@ -724,7 +751,7 @@ printf 'result\n' > "$TEST_ROOT/marker-sgt-marker-publication/.sergeant-result"
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" config --get remote.origin.url "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *" worktree remove "*) rm -rf "${!#}" ;;
@@ -769,7 +796,7 @@ printf 'result\n' > "$TEST_ROOT/staging-sgt-staging-failure/.sergeant-result"
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" config --get remote.origin.url "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *" worktree remove "*) rm -rf "${!#}" ;;
