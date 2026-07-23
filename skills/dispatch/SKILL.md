@@ -96,7 +96,7 @@ When a worker escalates:
 You can also attach to the tmux session directly to observe or assist a worker:
 
 ```bash
-tmux attach -t sgt-<task-id>
+tmux attach -t "${SERGEANT_TMUX_SESSION:-sgt}"
 # Switch windows with: Ctrl-b <window-number>
 ```
 
@@ -212,7 +212,7 @@ sgt-td-create <project> "<title>" --repos repo1,repo2 --priority P1
 
 | Symptom | Fix |
 |---|---|
-| Worker stuck, no status update | `tmux attach -t sgt-<task-id>` and check the window |
+| Worker stuck, no status update | `tmux attach -t "${SERGEANT_TMUX_SESSION:-sgt}"` and check the window |
 | Worktree creation fails | Check if branch already exists; use `--branch` with a unique name |
 | Fleet state is stale | Run `bin/sgt-watch --sync <task-id>` to force a one-shot sync |
 | Need to recover a waiting or orphaned worker | Use `bin/sgt-respond <task-id> <repo> "<response>"`; do not mark it done manually |
