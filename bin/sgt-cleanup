@@ -553,8 +553,10 @@ _require_terminal_repos() {
       fi
       if [[ "$restore_after_validation" == true ]]; then
         expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
-        _restore_worker_evidence "$repo_dir" "$worktree" \
-          "$expected_evidence_identity"
+        if ! _restore_worker_evidence "$repo_dir" "$worktree" \
+          "$expected_evidence_identity"; then
+          _die "Failed to restore persisted worker evidence: $repo_name; inspect preserved evidence: $repo_dir/terminal-evidence; worktree: $worktree"
+        fi
       fi
     else
       if [[ -z "$worktree" ]]; then
