@@ -159,14 +159,17 @@ _require_marcus_td() {
     _die "td is missing. Required implementation: github.com/marcus/td. $install_hint"
   fi
 
-  local td_path td_version create_help
+  local td_path td_version semver_pattern td_version_pattern td_version_update_pattern create_help
   td_path="$(command -v td)"
   td_version="$(td --version 2>&1 || true)"
   [[ -n "$td_version" ]] || td_version="version unknown"
+  semver_pattern='v?[0-9]+\.[0-9]+\.[0-9]+(-[[:alnum:]]+([.-][[:alnum:]]+)*)?'
+  td_version_pattern="^[[:space:]]*td[[:blank:]]+version[[:blank:]]+${semver_pattern}[[:space:]]*$"
+  td_version_update_pattern="^[[:space:]]*td[[:blank:]]+version[[:blank:]]+${semver_pattern}[[:blank:]]*"$'\n'"[[:blank:]]*"$'\n'"[[:blank:]]*Update available:[[:blank:]]+${semver_pattern}[[:blank:]]+→[[:blank:]]+${semver_pattern}[[:blank:]]*"$'\n'"[[:blank:]]*Run:[[:blank:]]+go install[[:blank:]]+-ldflags[[:blank:]]+\"-X main\\.Version=${semver_pattern}\"[[:blank:]]+github\\.com/marcus/td@${semver_pattern}[[:space:]]*$"
   create_help="$(td create --help 2>&1 || true)"
 
-  if [[ ! "$td_version" =~ ^td\ version\ v[0-9]+\.[0-9]+\.[0-9]+$ || \
-        "$create_help" != *"--description"* || "$create_help" != *"--json"* || "$create_help" != *"--work-dir"* ]]; then
+  if { [[ ! "$td_version" =~ $td_version_pattern ]] && [[ ! "$td_version" =~ $td_version_update_pattern ]]; } || \
+     [[ "$create_help" != *"--description"* || "$create_help" != *"--json"* || "$create_help" != *"--work-dir"* ]]; then
     _die "Unsupported td detected at $td_path: $td_version. Required implementation: github.com/marcus/td with create/json/work-dir support. $install_hint"
   fi
 }
