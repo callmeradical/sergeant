@@ -627,11 +627,57 @@ _validation_legacy_checkout_matches() {
     "$expected_head" ]]
 }
 
+_repo_instance_id() {
+  local marker repo_root="$1" token tmp
+
+  marker="$repo_root/.git/sergeant-instance"
+  if [[ ! -e "$marker" && "${2:-}" == "create" ]]; then
+    token="$(printf '%s\n%s\n%s\n%s\n' "$repo_root" "$$" "$RANDOM" "$(date +%s)" | \
+      git hash-object --stdin)" || return 1
+    tmp="$(mktemp "$repo_root/.git/.sergeant-instance.XXXXXX")" || return 1
+    if ! printf '%s\n' "$token" > "$tmp"; then
+      rm -f "$tmp"
+      return 1
+    fi
+    if ! ln "$tmp" "$marker" 2>/dev/null && [[ ! -f "$marker" ]]; then
+      rm -f "$tmp"
+      return 1
+    fi
+    rm -f "$tmp"
+  fi
+  [[ -f "$marker" && ! -L "$marker" ]] || return 1
+  token="$(cat "$marker")" || return 1
+  [[ -n "$token" && "$token" != *$'\n'* ]] || return 1
+  printf '%s\n' "$token"
+}
+
+_repo_metadata_identity() {
+  local repo_root="$1"
+
+  (
+    cd "$repo_root/.git" || exit 1
+    {
+      find . -path ./worktrees -prune -o -path ./objects -prune -o \
+        -path ./logs -prune -o -path ./index -prune -o \
+        \( -type f -o -type l \) -print
+      [[ ! -d objects/info ]] || find objects/info \( -type f -o -type l \) -print
+    } | LC_ALL=C sort | while IFS= read -r path; do
+      if [[ -L "$path" ]]; then
+        printf 'link\n%s\n%s\n' "$path" "$(readlink "$path")"
+      else
+        printf 'file\n%s\n' "$path"
+        git hash-object "$path" || exit 1
+      fi
+    done
+  ) | git hash-object --stdin
+}
+
 _repo_identity() {
-  local config head instance refs remote roots state repo_root="$1"
+  local config head instance metadata refs remote roots state repo_root="$1"
 
   instance="$(stat -c '%d:%i' "$repo_root/.git" 2>/dev/null || \
     stat -f '%d:%i' "$repo_root/.git" 2>/dev/null)" || return 1
+  instance="$instance:$(_repo_instance_id "$repo_root" "${2:-}")" || return 1
   config="$(git hash-object "$repo_root/.git/config" 2>/dev/null)" || return 1
   head="$(cat "$repo_root/.git/HEAD" 2>/dev/null)" || return 1
   refs="$(git -C "$repo_root" for-each-ref \
@@ -641,43 +687,55 @@ _repo_identity() {
   remote="$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null || true)"
   state="$(git -C "$repo_root" status --porcelain=v1 --untracked-files=all 2>/dev/null | \
     git hash-object --stdin)" || return 1
-  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
-    "$instance" "$config" "$head" "$remote" "$roots" "$refs" "$state" | \
+  metadata="$(_repo_metadata_identity "$repo_root")" || return 1
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$instance" "$metadata" "$config" "$head" "$remote" "$roots" "$refs" "$state" | \
     git hash-object --stdin
 }
 
-_record_cleanup_owner() {
-  local holder identity repo_dir="$1" repo_root="$2" worktree="$3" wt_type="$4"
+_task_project() {
+  local project
 
-  identity="$(_repo_identity "$repo_root")" || return 1
+  project="$(sed -n 's/^Project:[[:space:]]*//p' "$TASK_DIR/brief.md" 2>/dev/null)" || \
+    return 1
+  [[ -n "$project" && "$project" != *$'\n'* && "$project" != */* ]] || return 1
+  printf '%s\n' "$project"
+}
+
+_record_cleanup_owner() {
+  local holder identity project repo_dir="$1" repo_root="$2" worktree="$3" wt_type="$4"
+
+  identity="$(_repo_identity "$repo_root" create)" || return 1
+  project="$(_task_project)" || return 1
   holder=""
   [[ "$wt_type" != "treehouse" ]] || \
     holder="$(tr -d '\n' < "$repo_dir/wt_holder" 2>/dev/null || true)"
-  printf '1\n%s\n%s\n%s\n%s\n%s\n' \
-    "$repo_root" "$worktree" "$wt_type" "$identity" "$holder" \
+  printf '2\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$project" "$repo_root" "$worktree" "$wt_type" "$identity" "$holder" \
     > "$repo_dir/cleanup-owner.tmp" &&
     mv "$repo_dir/cleanup-owner.tmp" "$repo_dir/cleanup-owner"
 }
 
 _validate_retry_owner() {
   local config_file configured_root expected_holder expected_root holder i identity \
-    owner_holder owner_identity owner_root owner_type owner_worktree project raw_path repo_count \
-    repo_dir="$1" repo_name="$2" worktree="$3" retry_type="$4" retry_root="$5"
+    owner_holder owner_identity owner_project owner_root owner_type owner_worktree project raw_path \
+    repo_count repo_dir="$1" repo_name="$2" worktree="$3" retry_type="$4" retry_root="$5"
 
-  [[ "$(sed -n '1p' "$repo_dir/cleanup-owner" 2>/dev/null || true)" == "1" ]] || \
+  [[ "$(sed -n '1p' "$repo_dir/cleanup-owner" 2>/dev/null || true)" == "2" ]] || \
     _die "Retry owner identity is missing: $repo_name"
-  owner_root="$(sed -n '2p' "$repo_dir/cleanup-owner")"
-  owner_worktree="$(sed -n '3p' "$repo_dir/cleanup-owner")"
-  owner_type="$(sed -n '4p' "$repo_dir/cleanup-owner")"
-  owner_identity="$(sed -n '5p' "$repo_dir/cleanup-owner")"
-  owner_holder="$(sed -n '6p' "$repo_dir/cleanup-owner")"
+  owner_project="$(sed -n '2p' "$repo_dir/cleanup-owner")"
+  owner_root="$(sed -n '3p' "$repo_dir/cleanup-owner")"
+  owner_worktree="$(sed -n '4p' "$repo_dir/cleanup-owner")"
+  owner_type="$(sed -n '5p' "$repo_dir/cleanup-owner")"
+  owner_identity="$(sed -n '6p' "$repo_dir/cleanup-owner")"
+  owner_holder="$(sed -n '7p' "$repo_dir/cleanup-owner")"
   [[ "$retry_root" == "$owner_root" && "$worktree" == "$owner_worktree" && \
     "$retry_type" == "$owner_type" ]] || \
     _die "Retry cleanup state does not match its recorded owner: $repo_name"
 
-  project="$(sed -n 's/^Project:[[:space:]]*//p' "$TASK_DIR/brief.md" 2>/dev/null || true)"
-  [[ -n "$project" && "$project" != *$'\n'* && "$project" != */* ]] || \
-    _die "Cannot resolve retry owner project: $repo_name"
+  project="$(_task_project)" || _die "Cannot resolve retry owner project: $repo_name"
+  [[ "$project" == "$owner_project" ]] || \
+    _die "Retry owner project changed: $repo_name"
   config_file="$SERGEANT_CONFIG/$project.yaml"
   [[ -f "$config_file" && ! -L "$config_file" ]] || \
     _die "Cannot resolve retry owner project config: $project"
