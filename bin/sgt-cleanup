@@ -551,6 +551,8 @@ _require_terminal_repos() {
           "$expected_evidence_identity" || \
           _die "Failed to restore worker evidence during retry preflight: $repo_name"
       fi
+      [[ "$restore_after_validation" != true ]] || \
+        _restore_worker_evidence "$repo_dir" "$worktree"
     else
       if [[ -z "$worktree" ]]; then
         continue
