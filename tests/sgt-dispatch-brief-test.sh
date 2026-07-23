@@ -308,5 +308,4 @@ SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-dispatch" test "Maintain nonvisual backend mission" --repos app >/dev/null
 brief="$(grep -rl "^Maintain nonvisual backend mission$" "$TEST_ROOT"/app-sgt-*/.sergeant-brief.md)"
 assert_not_contains "Accessibility axis"
-
 printf 'sgt-dispatch brief contract: ok\n'
