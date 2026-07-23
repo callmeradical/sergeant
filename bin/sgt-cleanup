@@ -1077,6 +1077,225 @@ _configured_repo_root() {
   printf '%s\n' "$configured_root"
 }
 
+_record_cleanup_owner() {
+  local evidence_identity holder identity project repo_dir="$1" repo_root="$2" \
+    worker_identity worktree="$3" wt_type="$4"
+
+  identity="$(_repo_identity "$repo_root" create)" || return 1
+  worker_identity="$(_repo_identity "$worktree" exclude-evidence)" || return 1
+  evidence_identity="$(_worker_evidence_identity "$repo_dir/terminal-evidence")" || return 1
+  project="$(_task_project)" || return 1
+  holder=""
+  [[ "$wt_type" != "treehouse" ]] || \
+    holder="$(tr -d '\n' < "$repo_dir/wt_holder" 2>/dev/null || true)"
+  printf '4\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$project" "$repo_root" "$worktree" "$wt_type" "$identity" \
+    "$worker_identity" "$evidence_identity" "$holder" \
+    > "$repo_dir/cleanup-owner.tmp" &&
+    mv "$repo_dir/cleanup-owner.tmp" "$repo_dir/cleanup-owner"
+}
+
+_validate_retry_owner() {
+  local configured_root evidence_identity expected_holder expected_root holder identity \
+    live_evidence_identity owner_evidence_identity owner_holder owner_identity owner_project \
+    owner_root owner_type owner_worker_identity owner_worktree project repo_dir="$1" \
+    repo_name="$2" worker_identity worktree="$3" retry_type="$4" retry_root="$5"
+
+  [[ "$(sed -n '1p' "$repo_dir/cleanup-owner" 2>/dev/null || true)" == "4" ]] || \
+    _die "Retry owner identity is missing: $repo_name"
+  owner_project="$(sed -n '2p' "$repo_dir/cleanup-owner")"
+  owner_root="$(sed -n '3p' "$repo_dir/cleanup-owner")"
+  owner_worktree="$(sed -n '4p' "$repo_dir/cleanup-owner")"
+  owner_type="$(sed -n '5p' "$repo_dir/cleanup-owner")"
+  owner_identity="$(sed -n '6p' "$repo_dir/cleanup-owner")"
+  owner_worker_identity="$(sed -n '7p' "$repo_dir/cleanup-owner")"
+  owner_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
+  owner_holder="$(sed -n '9p' "$repo_dir/cleanup-owner")"
+  [[ "$retry_root" == "$owner_root" && "$worktree" == "$owner_worktree" && \
+    "$retry_type" == "$owner_type" ]] || \
+    _die "Retry cleanup state does not match its recorded owner: $repo_name"
+
+  project="$(_task_project)" || _die "Cannot resolve retry owner project: $repo_name"
+  [[ "$project" == "$owner_project" ]] || \
+    _die "Retry owner project changed: $repo_name"
+  configured_root="$(_configured_repo_root "$repo_name")" || \
+    _die "Cannot resolve configured retry owner: $repo_name"
+  [[ "$configured_root" == "$owner_root" ]] || \
+    _die "Configured retry owner changed: $repo_name"
+  [[ -d "$owner_root" && ! -L "$owner_root" ]] || \
+    _die "Retry owner repo is missing or aliased: $owner_root"
+  expected_root="$(cd "$owner_root" && pwd -P)"
+  [[ "$owner_root" == "$expected_root" ]] || \
+    _die "Retry owner repo is symlink-aliased: $owner_root"
+  if [[ -d "$worktree" ]]; then
+    worker_identity="$(_repo_identity "$worktree" exclude-evidence)" || \
+      _die "Retry worker worktree identity is unavailable: $repo_name"
+    [[ "$worker_identity" == "$owner_worker_identity" ]] || \
+      _die "Retry worker worktree identity changed: $repo_name"
+  fi
+  evidence_identity="$(_worker_evidence_identity "$repo_dir/terminal-evidence")" || \
+    _die "Retry persisted terminal evidence is unavailable: $repo_name"
+  [[ "$evidence_identity" == "$owner_evidence_identity" ]] || \
+    _die "Retry persisted terminal evidence changed: $repo_name"
+  if [[ -d "$worktree" ]] && _worker_evidence_present "$worktree"; then
+    live_evidence_identity="$(_worker_evidence_identity "$worktree")" || \
+      _die "Retry worker lifecycle evidence is unavailable: $repo_name"
+    [[ "$live_evidence_identity" == "$owner_evidence_identity" ]] || \
+      _die "Retry worker lifecycle evidence changed: $repo_name"
+  fi
+  identity="$(_repo_identity "$expected_root")" || \
+    _die "Cannot identify retry owner repo: $repo_name"
+  [[ "$identity" == "$owner_identity" ]] || \
+    _die "Retry owner repo identity changed: $repo_name"
+
+  if [[ "$retry_type" == "treehouse" ]]; then
+    expected_holder="sgt-${TASK_ID}-${repo_name}"
+    holder="$(tr -d '\n' < "$repo_dir/wt_holder" 2>/dev/null || true)"
+    [[ "$holder" == "$expected_holder" && "$owner_holder" == "$expected_holder" ]] || \
+      _die "Retry treehouse lease does not match its owner: $repo_name"
+  fi
+  VALIDATED_RETRY_ROOT="$owner_root"
+}
+
+_canonical_registry_path() {
+  local canonical_parent leaf parent path="$1"
+
+  [[ "$path" == /* && "$path" != */ ]] || return 1
+  parent="$(dirname "$path")"
+  leaf="$(basename "$path")"
+  [[ "$leaf" != "." && "$leaf" != ".." && -d "$parent" ]] || return 1
+  canonical_parent="$(cd "$parent" && pwd -P)" || return 1
+  if [[ "$canonical_parent" == "/" ]]; then
+    printf '/%s\n' "$leaf"
+  else
+    printf '%s/%s\n' "$canonical_parent" "$leaf"
+  fi
+}
+
+_git_worktree_removal_proven() {
+  local canonical field has_bare has_head has_kind has_locked has_prunable \
+    head in_record path probe_file record_count target="$2" target_count=0 \
+    valid validated_root="$1"
+  local -a registered_paths=()
+
+  canonical="$(_canonical_registry_path "$target")" || return 1
+  [[ "$canonical" == "$target" ]] || return 1
+  probe_file="$(mktemp)" || return 1
+  if ! git -C "$validated_root" worktree list --porcelain -z > "$probe_file"; then
+    rm -f "$probe_file"
+    return 1
+  fi
+
+  field=""
+  in_record=false
+  record_count=0
+  valid=true
+  has_bare=false
+  has_head=false
+  has_kind=false
+  has_locked=false
+  has_prunable=false
+  while IFS= read -r -d '' field; do
+    if [[ -z "$field" ]]; then
+      if [[ "$in_record" != true ]] || \
+        ! { { [[ "$has_bare" == true && "$has_head" == false && \
+          "$has_kind" == false ]]; } || \
+          { [[ "$has_bare" == false && "$has_head" == true && \
+            "$has_kind" == true ]]; }; }; then
+        valid=false
+        break
+      fi
+      in_record=false
+      continue
+    fi
+    if [[ "$in_record" != true ]]; then
+      if [[ "$field" != worktree\ * ]]; then
+        valid=false
+        break
+      fi
+      path="${field#worktree }"
+      if ! canonical="$(_canonical_registry_path "$path")" || \
+        [[ "$canonical" != "$path" ]]; then
+        valid=false
+        break
+      fi
+      for canonical in "${registered_paths[@]}"; do
+        if [[ "$canonical" == "$path" ]]; then
+          valid=false
+          break
+        fi
+      done
+      [[ "$valid" == true ]] || break
+      registered_paths[${#registered_paths[@]}]="$path"
+      ((record_count += 1))
+      [[ "$path" != "$target" ]] || ((target_count += 1))
+      has_bare=false
+      has_head=false
+      has_kind=false
+      has_locked=false
+      has_prunable=false
+      in_record=true
+    else
+      case "$field" in
+        HEAD\ *)
+          head="${field#HEAD }"
+          if [[ "$has_head" == true || "$has_bare" == true || \
+            "$head" == *[!0-9a-f]* || \
+            ( ${#head} -ne 40 && ${#head} -ne 64 ) ]]; then
+            valid=false
+            break
+          fi
+          has_head=true
+          ;;
+        branch\ refs/*)
+          if [[ "$has_kind" == true || "$has_bare" == true ]]; then
+            valid=false
+            break
+          fi
+          has_kind=true
+          ;;
+        detached)
+          if [[ "$has_kind" == true || "$has_bare" == true ]]; then
+            valid=false
+            break
+          fi
+          has_kind=true
+          ;;
+        bare)
+          if [[ "$has_bare" == true || "$has_head" == true || \
+            "$has_kind" == true ]]; then
+            valid=false
+            break
+          fi
+          has_bare=true
+          ;;
+        locked|locked\ *)
+          if [[ "$has_locked" == true ]]; then
+            valid=false
+            break
+          fi
+          has_locked=true
+          ;;
+        prunable|prunable\ *)
+          if [[ "$has_prunable" == true ]]; then
+            valid=false
+            break
+          fi
+          has_prunable=true
+          ;;
+        *)
+          valid=false
+          break
+          ;;
+      esac
+    fi
+  done < "$probe_file"
+  rm -f "$probe_file"
+
+  [[ "$valid" == true && -z "$field" && "$in_record" == false && \
+    "$record_count" -gt 0 && "$target_count" -eq 0 ]]
+}
+
 _validation_object_identity() {
   [[ -e "$1" && ! -L "$1" ]] || return 1
   stat -c '%d:%i:%w' -- "$1" 2>/dev/null || stat -f '%d:%i:%B' "$1" 2>/dev/null
