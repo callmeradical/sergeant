@@ -2042,6 +2042,15 @@ _git_worktree_removal_proven() {
     "$record_count" -gt 0 && "$target_count" -eq 0 ]]
 }
 
+_require_completed_removal_proof() {
+  local retry_root="$2" retry_type="$1" worktree="$3"
+
+  [[ "$retry_type" != "treehouse" ]] || \
+    _die "Cannot prove completed treehouse removal: $worktree"
+  _git_worktree_removal_proven "$retry_root" "$worktree" || \
+    _die "Cannot prove completed git worktree removal: $worktree"
+}
+
 _require_terminal_repos
 _require_clean_worktrees
 
