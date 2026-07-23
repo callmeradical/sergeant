@@ -314,9 +314,9 @@ if (( ${#blocking_tasks[@]} > 0 )); then
   exit 2
 fi
 
+_sgt_response_lock_acquire "$WORKTREE" ".sergeant-review-gates.lock" || _routing_failure "could not lock review gate state"
 current_status="$( { tr -d '\n' < "$WORKTREE/.sergeant-status"; } 2>/dev/null || true)"
 current_message="$(cat "$WORKTREE/.sergeant-message" 2>/dev/null || true)"
-_sgt_response_lock_acquire "$WORKTREE" ".sergeant-review-gates.lock" || _routing_failure "could not lock review gate state"
 gate_path="$(_review_gate_path)"
 if [[ -f "$gate_path" ]]; then
   rm -f "$gate_path"
