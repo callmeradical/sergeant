@@ -201,6 +201,137 @@ _stop_local_worker() {
     _die "Other processes still have $worktree as their current directory: $(tr '\n' ' ' <<< "$cwd_pids")"
 }
 
+_require_terminal_repos() {
+  local cleanup_phase evidence_dir repo_dir repo_name status worktree worktree_status
+
+  for repo_dir in "$TASK_DIR"/*/; do
+    [[ -d "$repo_dir" ]] || continue
+    repo_dir="${repo_dir%/}"
+    repo_name="$(basename "$repo_dir")"
+    if [[ -n "$FILTER_REPO" && "$repo_name" != "$FILTER_REPO" ]]; then
+      continue
+    fi
+
+    status="$(tr -d '\n' < "$repo_dir/status" 2>/dev/null || echo unknown)"
+    case "$status" in
+      done)
+        [[ -s "$repo_dir/result" ]] || \
+          _die "$repo_name is not safely terminal: done requires a reconciled result"
+        ;;
+      failed:\ *[![:space:]]) ;;
+      *) _die "$repo_name is not terminal: $status" ;;
+    esac
+
+    worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+    cleanup_phase="$(cat "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+    if [[ -n "$worktree" && -d "$worktree" ]]; then
+      if [[ "$cleanup_phase" == $'removing\n'"$worktree" ]]; then
+        _restore_worker_evidence "$repo_dir" "$worktree"
+      fi
+      [[ -f "$worktree/.sergeant-status" ]] || \
+        _die "$repo_name worktree terminal proof is missing"
+      worktree_status="$(tr -d '\n' < "$worktree/.sergeant-status")"
+      [[ "$worktree_status" == "$status" ]] || \
+        _die "$repo_name is not reconciled: fleet status $status differs from worktree status $worktree_status"
+      if [[ "$status" == "done" ]]; then
+        [[ -s "$worktree/.sergeant-result" ]] || \
+          _die "$repo_name worktree is not safely terminal: done requires a result"
+        cmp -s "$repo_dir/result" "$worktree/.sergeant-result" || \
+          _die "$repo_name worktree result differs from reconciled fleet result"
+      fi
+    else
+      [[ -n "$worktree" && ( \
+        "$cleanup_phase" == $'removing\n'"$worktree" || \
+        "$cleanup_phase" == $'reconciled-absent\n'"$worktree" \
+      ) ]] || \
+        _die "$repo_name has no reconciled cleanup phase for its absent worktree"
+
+      evidence_dir="$repo_dir/terminal-evidence"
+      [[ -f "$evidence_dir/.sergeant-status" ]] || \
+        _die "$repo_name reconciled cleanup evidence is missing"
+      worktree_status="$(tr -d '\n' < "$evidence_dir/.sergeant-status")"
+      [[ "$worktree_status" == "$status" ]] || \
+        _die "$repo_name cleanup evidence differs from reconciled fleet status"
+      if [[ "$status" == "done" ]]; then
+        [[ -s "$evidence_dir/.sergeant-result" ]] || \
+          _die "$repo_name reconciled cleanup evidence requires a result"
+        cmp -s "$repo_dir/result" "$evidence_dir/.sergeant-result" || \
+          _die "$repo_name cleanup evidence differs from reconciled fleet result"
+      fi
+      if [[ "$cleanup_phase" == $'removing\n'"$worktree" ]]; then
+        _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
+          _die "Failed to reconcile completed worktree removal: $repo_name"
+      fi
+    fi
+  done
+}
+
+_require_clean_worktrees() {
+  local changes repo_dir repo_name worktree
+
+  for repo_dir in "$TASK_DIR"/*/; do
+    [[ -d "$repo_dir" ]] || continue
+    repo_dir="${repo_dir%/}"
+    repo_name="$(basename "$repo_dir")"
+    if [[ -n "$FILTER_REPO" && "$repo_name" != "$FILTER_REPO" ]]; then
+      continue
+    fi
+
+    worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+    [[ -n "$worktree" && -d "$worktree" ]] || continue
+    git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
+      _die "Cannot verify $repo_name worktree before cleanup: $worktree"
+    changes="$(git -C "$worktree" status --porcelain --untracked-files=all -- \
+      . ':(exclude).sergeant-*')" || \
+      _die "Cannot inspect $repo_name worktree before cleanup: $worktree"
+    [[ -z "$changes" ]] || \
+      _die "$repo_name worktree has uncommitted changes; cleanup refused"
+  done
+}
+
+_stage_worker_evidence() {
+  local evidence evidence_dir repo_dir="$1" worktree="$2"
+
+  evidence_dir="$repo_dir/terminal-evidence"
+  for evidence in "$worktree"/.sergeant-*; do
+    [[ -f "$evidence" ]] || continue
+    mkdir -p "$evidence_dir"
+    cp -p "$evidence" "$evidence_dir/" || \
+      _die "Failed to preserve worker evidence before cleanup: $evidence"
+  done
+}
+
+_remove_worker_evidence() {
+  local evidence worktree="$1"
+
+  for evidence in "$worktree"/.sergeant-*; do
+    [[ -f "$evidence" ]] || continue
+    rm -f "$evidence" || \
+      _die "Failed to remove staged worker evidence before cleanup: $evidence"
+  done
+}
+
+_restore_worker_evidence() {
+  local evidence evidence_dir="$1/terminal-evidence" worktree="$2"
+
+  [[ -d "$worktree" && -d "$evidence_dir" ]] || return 0
+  for evidence in "$evidence_dir"/.sergeant-*; do
+    [[ -f "$evidence" ]] || continue
+    cp -p "$evidence" "$worktree/" || \
+      _die "Failed to restore worker evidence after cleanup failure: $evidence"
+  done
+}
+
+_record_cleanup_phase() {
+  local repo_dir="$1" phase="$2" worktree="$3"
+
+  printf '%s\n%s\n' "$phase" "$worktree" > "$repo_dir/cleanup-phase.tmp" &&
+    mv "$repo_dir/cleanup-phase.tmp" "$repo_dir/cleanup-phase"
+}
+
+_require_terminal_repos
+_require_clean_worktrees
+
 echo "=== sgt-cleanup: $TASK_ID ==="
 echo ""
 
@@ -237,6 +368,13 @@ for repo_dir in "$TASK_DIR"/*/; do
     continue
   fi
 
+  _stage_worker_evidence "$repo_dir" "$worktree"
+  if ! _record_cleanup_phase "$repo_dir" removing "$worktree"; then
+    _restore_worker_evidence "$repo_dir" "$worktree"
+    _die "Failed to record cleanup phase before worktree removal: $repo_name"
+  fi
+  _remove_worker_evidence "$worktree"
+
   if [[ "$wt_type" == "treehouse" ]]; then
     # Find the main repo path to run treehouse return from
     # Worktree is inside ~/.treehouse/<slug>/<n>/<repo-name>
@@ -252,13 +390,13 @@ for repo_dir in "$TASK_DIR"/*/; do
       main_git="$(dirname "$(dirname "$git_dir")")"
       main_repo="$(dirname "$main_git")"
       echo "  returning treehouse lease: $worktree"
-      (cd "$main_repo" && treehouse return "$worktree" --force 2>&1 | sed 's/^/  /') || {
-        echo "  WARNING: treehouse return failed — removing directory directly"
-        rm -rf "$worktree"
-      }
+      if ! (cd "$main_repo" && treehouse return "$worktree" 2>&1 | sed 's/^/  /'); then
+        _restore_worker_evidence "$repo_dir" "$worktree"
+        _die "Failed to return treehouse lease; fleet state preserved: $worktree"
+      fi
     else
-      echo "  WARNING: no .git file in worktree — removing directly"
-      rm -rf "$worktree"
+      _restore_worker_evidence "$repo_dir" "$worktree"
+      _die "Cannot identify treehouse lease; fleet state preserved: $worktree"
     fi
   else
     # Plain git worktree — find main repo as sibling (name before -sgt- suffix)
@@ -267,15 +405,22 @@ for repo_dir in "$TASK_DIR"/*/; do
 
     if [[ -d "$repo_base/.git" ]]; then
       echo "  removing git worktree: $worktree"
-      git -C "$repo_base" worktree remove "$worktree" --force 2>&1 | sed 's/^/  /' || {
-        echo "  WARNING: git worktree remove failed — removing directory directly"
-        rm -rf "$worktree"
-      }
+      if ! git -C "$repo_base" worktree remove "$worktree" 2>&1 | sed 's/^/  /'; then
+        _restore_worker_evidence "$repo_dir" "$worktree"
+        _die "Failed to remove git worktree; fleet state preserved: $worktree"
+      fi
     else
-      echo "  WARNING: main repo not found at $repo_base — removing directory directly"
-      rm -rf "$worktree"
+      _restore_worker_evidence "$repo_dir" "$worktree"
+      _die "Main repo not found; fleet state preserved: $repo_base"
     fi
   fi
+
+  [[ ! -d "$worktree" ]] || {
+    _restore_worker_evidence "$repo_dir" "$worktree"
+    _die "Worktree removal reported success but the directory remains: $worktree"
+  }
+  _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
+    _die "Failed to publish reconciled cleanup phase: $repo_name"
 
   echo ""
 done
