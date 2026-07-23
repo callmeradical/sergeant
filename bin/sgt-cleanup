@@ -476,6 +476,10 @@ _require_terminal_repos() {
         cmp -s "$repo_dir/result" "$worktree/.sergeant-result" || \
           _die "$repo_name worktree result differs from reconciled fleet result"
       fi
+      if [[ -z "$cleanup_phase" ]]; then
+        _configured_repo_root "$repo_name" >/dev/null || \
+          _die "Cannot resolve configured cleanup owner: $repo_name"
+      fi
     else
       # Worktree is absent or was never recorded.
       if [[ -z "$worktree" ]]; then
