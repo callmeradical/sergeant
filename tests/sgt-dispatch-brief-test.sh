@@ -284,7 +284,15 @@ repos:
     path: $TEST_ROOT/repo
     role: $role
     group: product
+  - name: role-ui
+    path: $TEST_ROOT/role-repo
+    role: User-Facing Output
+  - name: group-ui
+    path: $TEST_ROOT/group-repo
+    group: FRONTEND
 groups:
+  FRONTEND:
+    description: UI fixture group
   product:
     agent_instructions: $group_instructions
 EOF
