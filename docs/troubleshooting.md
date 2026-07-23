@@ -42,12 +42,12 @@ creation, and `--work-dir` support.
 
 ```bash
 td version
-td status --json
 td create --help
 ```
 
 If another executable named `td` is first on PATH, correct PATH rather than
-wrapping unsupported output indefinitely.
+wrapping unsupported output indefinitely. `td create --help` must show
+`--description`, `--json`, and `--work-dir`.
 
 ## Worker says `in_progress` but is not moving
 
@@ -117,10 +117,21 @@ not switch the global account while other workers may invoke GitHub operations.
 
 ## Bash 3.2 validation
 
-The host may run a newer Bash. Use the repository's pinned/approved Bash 3.2
-container evidence when runtime compatibility is required; record the image digest
-and mount source read-only. Parsing proof does not replace runtime proof unless the
-task acceptance explicitly permits parsing only.
+The host may run a newer Bash. Use this repository-owned Bash 3.2 runtime test
+when compatibility proof is required:
+
+```bash
+docker run --rm \
+  -e SGT_MINIMUM_BASH=/usr/local/bin/bash \
+  -v "$PWD":/workspace:ro \
+  -w /workspace \
+  docker.io/library/bash:3.2@sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 \
+  /bin/bash tests/runtime-bash-test.sh
+```
+
+This mounts the repository read-only and runs the repository-owned runtime
+regression. Parsing proof does not replace runtime proof unless the task
+acceptance explicitly permits parsing only.
 
 ## Graphify output is wrong or recursive
 
@@ -142,7 +153,7 @@ owning remediation or supported retry path.
 | Project registry | `~/.config/sergeant/` |
 | Fleet record | `~/.local/share/sergeant/fleet/<task>/<repo>/` |
 | Worker status/message/result | Worktree `.sergeant-*` files and mirrored fleet state |
-| Task state | `td context <id>` |
+| Task state | `td context <id> --work-dir <repo-path>` |
 | Git state | `git status`, worktree list, branch and PR heads |
 | no-mistakes run | `no-mistakes axi status --run <id>` |
 | OpenCode message queue | See [oc-inject.md](oc-inject.md) |

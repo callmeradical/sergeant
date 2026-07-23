@@ -79,6 +79,7 @@ run = """
 
 source "${MISE_PROJECT_ROOT:-.}/bin/_sgt-bash-version.sh"
 _sgt_require_running_bash || exit 1
+source "${MISE_PROJECT_ROOT:-.}/bin/_sgt-lib.sh"
 
 ok=true
 
@@ -97,6 +98,29 @@ _check() {
   fi
 }
 
+_check_td() {
+  local td_path td_version create_help
+  if ! td_path="$(command -v td 2>/dev/null)"; then
+    printf "  %-14s  ✗  MISSING — install Marcus td from github.com/marcus/td\\n" "td"
+    ok=false
+    return
+  fi
+
+  td_version="$(td --version 2>&1 || true)"
+  [[ -n "$td_version" ]] || td_version="version unknown"
+  create_help="$(td create --help 2>&1 || true)"
+
+  if _sgt_td_supported_version_output "$td_version" && \
+     [[ "$create_help" == *"--description"* ]] && \
+     [[ "$create_help" == *"--json"* ]] && \
+     [[ "$create_help" == *"--work-dir"* ]]; then
+    printf "  %-14s  ✓  %s\\n" "td" "$(printf '%s' "$td_version" | head -1 | tr -d '\\n')"
+  else
+    printf "  %-14s  ✗  Unsupported — require Marcus td with create/json/work-dir support\\n" "td"
+    ok=false
+  fi
+}
+
 echo "=== sergeant dependency check ==="
 echo ""
 echo "Required:"
@@ -106,6 +130,7 @@ _check "git"        git        required  "install Xcode command line tools"
 _check "gh"         gh         required  "brew install gh"
 _check "tmux"       tmux       required  "brew install tmux"
 _check "lsof"       lsof       required  "install lsof with your system package manager"
+_check_td
 
 echo ""
 echo "Optional:"

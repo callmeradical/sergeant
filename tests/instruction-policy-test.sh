@@ -44,6 +44,7 @@ require_text "AGENTS.md" "direct executor when requested"
 require_text "AGENTS.md" '`sergeant-help`'
 require_text "AGENTS.md" "Never edit a default branch in direct mode"
 require_text "AGENTS.md" "Open a PR for every direct-mode implementation"
+require_text "AGENTS.md" "td context <id> --work-dir <owning-repo-path>"
 require_text "AGENTS.md" "ingest, backfill, regenerate, inspect, update, or change the wiki"
 require_text "README.md" "docs/README.md"
 reject_text "AGENTS.md" "gives one repository as the complete scope"
@@ -63,6 +64,8 @@ require_text "skills/cross-repo-work/SKILL.md" "If the user requested planning o
 reject_text "docs/troubleshooting.md" "follow no-mistakes policy"
 require_text "docs/troubleshooting.md" "Do not authorize an in-run fix"
 require_text "docs/troubleshooting.md" 'sgt-watch --sync <task-id>'
+require_text "docs/troubleshooting.md" "tests/runtime-bash-test.sh"
+require_text "docs/troubleshooting.md" "docker.io/library/bash:3.2@sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89"
 reject_text "docs/troubleshooting.md" 'Use `sgt-watch <task>`'
 require_text "docs/skills.md" "User-invoked orchestrators"
 require_text "docs/skills.md" "Model-invoked disciplines"

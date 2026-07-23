@@ -31,7 +31,16 @@ mise run check
 ```
 
 If `mise` is unavailable, install the required commands with your platform's
-package manager, then verify each with `command -v`.
+package manager, then verify the required commands directly:
+
+```bash
+command -v git gh tmux yq lsof
+td version
+td create --help
+```
+
+Continue only when `td create --help` shows Marcus `td` support for
+`--description`, `--json`, and `--work-dir`.
 
 ## 2. Clone and install command links
 
@@ -115,7 +124,9 @@ documentation:
 
 ```bash
 td version
-td status --json
+td create --help
+td init --work-dir /path/to/repo
+td status --json --work-dir /path/to/repo
 ```
 
 Sergeant requires the Marcus implementation with JSON, task creation, and
@@ -171,7 +182,7 @@ explain which repository owns <feature>
 - [ ] `sgt-list` shows the project exactly once
 - [ ] `sgt-context` resolves every owning repository and instruction layer
 - [ ] Required repositories are cloned
-- [ ] Marcus td is initialized and returns JSON
+- [ ] Marcus td is installed with create/json/work-dir support and initialized
 - [ ] GitHub CLI can access required repositories
 - [ ] Optional Treehouse/Graphify features pass their verification commands
 - [ ] Engineering skills are installed from reviewed sources

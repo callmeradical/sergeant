@@ -18,7 +18,7 @@ Do not infer ownership from the current working directory.
 Use when the user explicitly requests work in the current session and one
 repository owns the complete outcome.
 
-1. Run `sgt-context <project>` and `td context <id>`.
+1. Run `sgt-context <project>` and `td context <id> --work-dir <owning-repo-path>`.
 2. Reconcile existing worktrees/workers before editing.
 3. Create or reuse a feature branch; never implement on the default branch.
 4. Start the task and implement TDD-first.

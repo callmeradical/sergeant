@@ -21,8 +21,8 @@ or the user asks for workers:
 
 Use **direct mode** when the user explicitly requests it and the work has one
 clear owning repository:
-- Run `sgt-context <project>` and `td context <id>` for the owning task before
-  editing.
+- Run `sgt-context <project>` and `td context <id> --work-dir <owning-repo-path>`
+  for the owning task before editing.
 - Reconcile existing workers and preserved worktrees before editing; never
   duplicate or race work already in progress.
 - Claim or create the owning td task, then implement TDD-first in the requested
