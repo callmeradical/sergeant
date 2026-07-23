@@ -4,6 +4,9 @@
 # Handles both treehouse-leased worktrees (treehouse return) and
 # plain git worktrees (git worktree remove).
 #
+# task-id must be the fleet-owned task directory basename. Cleanup rejects
+# paths, traversal tokens, and symlink aliases before touching fleet state.
+#
 # Usage:
 #   sgt-cleanup <task-id>           # remove all worktrees + fleet state
 #   sgt-cleanup <task-id> <repo>    # remove one repo's worktree only
