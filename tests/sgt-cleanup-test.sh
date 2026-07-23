@@ -865,6 +865,22 @@ fi
 [[ ! -e "$TEST_ROOT/marker-sgt-marker-publication" ]]
 [[ "$(sed -n '1p' "$TEST_ROOT/fleet/marker-publication/app/cleanup-phase")" == \
   'removed' ]]
+mv "$TEST_ROOT/config/marker-publication.yaml" \
+  "$TEST_ROOT/config/marker-publication.yaml.saved"
+if PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
+  FAKE_GIT_STATE="$TEST_ROOT/marker-git-removed" \
+  FAKE_GIT_LOG="$TEST_ROOT/marker-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" marker-publication >/dev/null 2>&1; then
+  printf 'removed phase reconciled without its configured owner\n' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$TEST_ROOT/marker-removals")" -eq 1 ]]
+[[ "$(sed -n '1p' "$TEST_ROOT/fleet/marker-publication/app/cleanup-phase")" == \
+  'removed' ]]
+[[ -f "$TEST_ROOT/fleet/marker-publication/app/terminal-evidence/.sergeant-status" ]]
+mv "$TEST_ROOT/config/marker-publication.yaml.saved" \
+  "$TEST_ROOT/config/marker-publication.yaml"
 PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_MV_STATE="$TEST_ROOT/mv-failed-once" \
   FAKE_GIT_STATE="$TEST_ROOT/marker-git-removed" \
   FAKE_GIT_LOG="$TEST_ROOT/marker-removals" \
