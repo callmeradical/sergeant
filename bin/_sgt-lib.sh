@@ -160,6 +160,8 @@ _sgt_td_supported_semver() {
   [[ "$1" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[[:alnum:]]+([.-][[:alnum:]]+)*)?$ ]]
 }
 _sgt_td_supported_version_output() {
+  # Accept Marcus td's plain version line or its exact three-line update notice.
+  # Any unrelated or mixed output still fails before dispatch creates side effects.
   local td_version="$1"
   local line
   local -a lines=()
