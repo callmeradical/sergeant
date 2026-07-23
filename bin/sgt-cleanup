@@ -543,6 +543,9 @@ _require_terminal_repos() {
           "$expected_evidence_identity" || \
           _die "$repo_name: evidence restore failed during removing-state replay; replay aborted"
       fi
+      [[ "$restore_after_validation" != true ]] || \
+        _restore_worker_evidence "$repo_dir" "$worktree" || \
+        _die "Failed to restore worker evidence during retry preflight: $repo_name"
     else
       [[ "$cleanup_phase" != $'removing\n'"$worktree" ]] || \
         _die "Retry owner identity is missing: $repo_name"
