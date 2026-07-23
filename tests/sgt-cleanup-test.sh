@@ -236,7 +236,7 @@ printf 'success result\n' > "$TEST_ROOT/removal-success-sgt-removal-failure/.ser
 printf 'earlier diagnostic\n' > \
   "$TEST_ROOT/removal-success-sgt-removal-failure/.sergeant-diagnostic"
 init_test_repo "$TEST_ROOT/removal-failure"
-mkdir -p "$TEST_ROOT/removal-failure-sgt-removal-failure"
+git -C "$TEST_ROOT/removal-failure" worktree add -q -b test-task "$TEST_ROOT/removal-failure-sgt-removal-failure"
 printf '%s\n' "$TEST_ROOT/removal-failure-sgt-removal-failure" > \
   "$TEST_ROOT/fleet/removal-failure/app/worktree"
 printf 'done\n' > "$TEST_ROOT/fleet/removal-failure/app/status"
@@ -248,7 +248,7 @@ printf 'removal diagnostic\n' > \
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" config --get remote.origin.url "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" config --get remote.origin.url "*|*" hash-object "*|*" worktree list "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *" worktree remove "*)
@@ -402,9 +402,9 @@ PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
 [[ ! -e "$TEST_ROOT/fleet/removal-failure" ]]
 rm "$TEST_ROOT/fake-bin/git"
 
-mkdir -p "$TEST_ROOT/fleet/partial-publication/app" \
-  "$TEST_ROOT/partial-publication-sgt-partial-publication"
+mkdir -p "$TEST_ROOT/fleet/partial-publication/app"
 init_test_repo "$TEST_ROOT/partial-publication"
+git -C "$TEST_ROOT/partial-publication" worktree add -q -b task-pp "$TEST_ROOT/partial-publication-sgt-partial-publication"
 record_retry_owner partial-publication app "$TEST_ROOT/partial-publication"
 printf '%s\n' "$TEST_ROOT/partial-publication-sgt-partial-publication" > \
   "$TEST_ROOT/fleet/partial-publication/app/worktree"
@@ -417,7 +417,7 @@ printf 'result\n' > \
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" config --get remote.origin.url "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" config --get remote.origin.url "*|*" hash-object "*|*" worktree list "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *" worktree remove "*)
@@ -560,9 +560,9 @@ PATH="$TEST_ROOT/fake-bin:$PATH" \
 [[ ! -e "$TEST_ROOT/fleet/treehouse-partial" ]]
 rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/treehouse"
 
-mkdir -p "$TEST_ROOT/fleet/marker-publication/app" \
-  "$TEST_ROOT/marker-sgt-marker-publication"
+mkdir -p "$TEST_ROOT/fleet/marker-publication/app"
 init_test_repo "$TEST_ROOT/marker"
+git -C "$TEST_ROOT/marker" worktree add -q -b task-mk "$TEST_ROOT/marker-sgt-marker-publication"
 record_retry_owner marker-publication app "$TEST_ROOT/marker"
 printf '%s\n' "$TEST_ROOT/marker-sgt-marker-publication" > \
   "$TEST_ROOT/fleet/marker-publication/app/worktree"
@@ -573,7 +573,7 @@ printf 'result\n' > "$TEST_ROOT/marker-sgt-marker-publication/.sergeant-result"
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" config --get remote.origin.url "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" config --get remote.origin.url "*|*" hash-object "*|*" worktree list "*) "$REAL_GIT" "$@" ;;
   *" rev-parse "*) printf 'true\n' ;;
   *" status "*) ;;
   *" worktree remove "*) rm -rf "${!#}" ;;

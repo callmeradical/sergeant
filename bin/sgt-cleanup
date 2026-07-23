@@ -348,12 +348,18 @@ _record_cleanup_phase() {
 }
 
 _repo_identity() {
-  local remote roots repo_root="$1"
+  local git_dir_path inode_dev remote roots repo_root="$1"
 
   roots="$(git -C "$repo_root" rev-list --max-parents=0 --all 2>/dev/null | sort)"
   [[ -n "$roots" ]] || return 1
   remote="$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null || true)"
-  printf '%s\n%s\n' "$remote" "$roots" | git hash-object --stdin
+  # Include inode+device of .git dir to detect directory replacement
+  # (a different clone at the same path will have a different inode)
+  git_dir_path="$(git -C "$repo_root" rev-parse --absolute-git-dir 2>/dev/null || true)"
+  if [[ -n "$git_dir_path" && -d "$git_dir_path" ]]; then
+    inode_dev="$(stat -c '%i:%d' "$git_dir_path" 2>/dev/null ||                  stat -f '%i:%d' "$git_dir_path" 2>/dev/null || true)"
+  fi
+  printf '%s\n%s\n%s\n' "$remote" "$roots" "${inode_dev:-}" | git hash-object --stdin
 }
 
 _record_cleanup_owner() {
@@ -422,6 +428,16 @@ _validate_retry_owner() {
     holder="$(tr -d '\n' < "$repo_dir/wt_holder" 2>/dev/null || true)"
     [[ "$holder" == "$expected_holder" && "$owner_holder" == "$expected_holder" ]] || \
       _die "Retry treehouse lease does not match its owner: $repo_name"
+  fi
+
+  # Independent proof: verify the worktree is actually registered in the git
+  # repo at expected_root — not solely derived from mutable fleet state files.
+  # This prevents editing cleanup-owner + worktree together to redirect cleanup
+  # to a different linked worktree within the same repo.
+  if [[ "$retry_type" != "treehouse" ]]; then
+    git -C "$expected_root" worktree list --porcelain 2>/dev/null \
+      | grep -qxF "worktree $worktree" || \
+      _die "Retry worktree is not a registered linked worktree of the owner repo: $repo_name"
   fi
 }
 
