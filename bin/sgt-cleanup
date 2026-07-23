@@ -203,7 +203,8 @@ _stop_local_worker() {
 
 _require_terminal_repos() {
   local cleanup_phase evidence_dir owner_root owner_type partial_phase removed_phase removing_phase \
-    repo_dir repo_name retry_root retry_type status worktree worktree_status wt_type
+    proof_dir repo_dir repo_name restore_after_validation retry_root retry_type status worktree \
+    worktree_status wt_type
 
   for repo_dir in "$TASK_DIR"/*/; do
     [[ -d "$repo_dir" ]] || continue
@@ -235,13 +236,16 @@ _require_terminal_repos() {
     removed_phase="$(printf 'removed\n%s\n%s\n%s\n' \
       "$worktree" "$retry_type" "$retry_root")"
     if [[ -n "$worktree" && -d "$worktree" ]]; then
+      proof_dir="$worktree"
+      restore_after_validation=false
       case "$cleanup_phase" in
         "$removing_phase")
           [[ "$retry_type" == "$wt_type" ]] || \
             _die "Retry worktree type changed: $repo_name"
           _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
             "$retry_type" "$retry_root"
-          _restore_worker_evidence "$repo_dir" "$worktree"
+          proof_dir="$repo_dir/terminal-evidence"
+          restore_after_validation=true
           ;;
         "$partial_phase"|"$removed_phase")
           [[ "$retry_type" == "$wt_type" ]] || \
@@ -265,21 +269,23 @@ _require_terminal_repos() {
         "") ;;
         *) _die "Persisted cleanup phase is malformed: $repo_name" ;;
       esac
-      [[ -f "$worktree/.sergeant-status" ]] || \
+      [[ -f "$proof_dir/.sergeant-status" ]] || \
         _die "$repo_name worktree terminal proof is missing"
-      worktree_status="$(tr -d '\n' < "$worktree/.sergeant-status")"
+      worktree_status="$(tr -d '\n' < "$proof_dir/.sergeant-status")"
       [[ "$worktree_status" == "$status" ]] || \
         _die "$repo_name is not reconciled: fleet status $status differs from worktree status $worktree_status"
       if [[ "$status" == "done" ]]; then
-        [[ -s "$worktree/.sergeant-result" ]] || \
+        [[ -s "$proof_dir/.sergeant-result" ]] || \
           _die "$repo_name worktree is not safely terminal: done requires a result"
-        cmp -s "$repo_dir/result" "$worktree/.sergeant-result" || \
+        cmp -s "$repo_dir/result" "$proof_dir/.sergeant-result" || \
           _die "$repo_name worktree result differs from reconciled fleet result"
       fi
       if [[ -z "$cleanup_phase" ]]; then
         _configured_repo_root "$repo_name" >/dev/null || \
           _die "Cannot resolve configured cleanup owner: $repo_name"
       fi
+      [[ "$restore_after_validation" != true ]] || \
+        _restore_worker_evidence "$repo_dir" "$worktree"
     else
       [[ "$cleanup_phase" != $'removing\n'"$worktree" ]] || \
         _die "Retry owner identity is missing: $repo_name"
