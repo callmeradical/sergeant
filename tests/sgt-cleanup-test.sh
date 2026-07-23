@@ -660,6 +660,98 @@ fi
 [[ "$(wc -l < "$TEST_ROOT/dirty-retry-removals")" -eq 1 ]]
 rm "$TEST_ROOT/fake-bin/git"
 
+mkdir -p "$TEST_ROOT/fleet/present-retry/app" \
+  "$TEST_ROOT/present-retry-sgt-present-retry"
+init_test_repo "$TEST_ROOT/present-retry"
+record_retry_owner present-retry app "$TEST_ROOT/present-retry"
+printf '%s\n' "$TEST_ROOT/present-retry-sgt-present-retry" > \
+  "$TEST_ROOT/fleet/present-retry/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/present-retry/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/present-retry/app/result"
+printf 'done\n' > "$TEST_ROOT/present-retry-sgt-present-retry/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/present-retry-sgt-present-retry/.sergeant-result"
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-parse "*) printf 'true\n' ;;
+  *" status "*) ;;
+  *" worktree remove "*)
+    printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
+    if [[ -e "${FAKE_GIT_ALLOW:-}" ]]; then
+      rm -rf "${!#}"
+      exit 0
+    fi
+    exit 1
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/present-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" present-retry >/dev/null 2>&1; then
+  printf 'cleanup succeeded after present-worktree removal failed\n' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 1 ]]
+present_owner_before="$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-owner")"
+present_phase_before="$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase")"
+present_evidence_before="$(cksum \
+  "$TEST_ROOT/fleet/present-retry/app/terminal-evidence"/.sergeant-*)"
+git -C "$TEST_ROOT/present-retry" config sergeant.fixture changed
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/present-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" present-retry >/dev/null 2>&1; then
+  printf 'cleanup accepted changed owner on present-worktree retry\n' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 1 ]]
+[[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-owner")" == \
+  "$present_owner_before" ]]
+[[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase")" == \
+  "$present_phase_before" ]]
+[[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/terminal-evidence"/.sergeant-*)" == \
+  "$present_evidence_before" ]]
+git -C "$TEST_ROOT/present-retry" config --unset sergeant.fixture
+init_test_repo "$TEST_ROOT/present-retry-other"
+cat > "$TEST_ROOT/config/present-retry.yaml" <<EOF
+name: present-retry
+repos:
+  - name: app
+    path: $TEST_ROOT/present-retry-other
+EOF
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/present-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" present-retry >/dev/null 2>&1; then
+  printf 'cleanup accepted configured root drift on present-worktree retry\n' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 1 ]]
+[[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-owner")" == \
+  "$present_owner_before" ]]
+[[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase")" == \
+  "$present_phase_before" ]]
+[[ "$(cksum "$TEST_ROOT/fleet/present-retry/app/terminal-evidence"/.sergeant-*)" == \
+  "$present_evidence_before" ]]
+record_retry_owner present-retry app "$TEST_ROOT/present-retry"
+touch "$TEST_ROOT/present-retry-remove-allowed"
+PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_ALLOW="$TEST_ROOT/present-retry-remove-allowed" \
+  FAKE_GIT_LOG="$TEST_ROOT/present-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" present-retry >/dev/null
+[[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 2 ]]
+[[ ! -e "$TEST_ROOT/fleet/present-retry" ]]
+rm "$TEST_ROOT/fake-bin/git"
+
 mkdir -p "$TEST_ROOT/fleet/partial-publication/app" \
   "$TEST_ROOT/partial-publication-sgt-partial-publication"
 init_test_repo "$TEST_ROOT/partial-publication"
