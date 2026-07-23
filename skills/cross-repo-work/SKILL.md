@@ -1,136 +1,91 @@
 # Skill: cross-repo-work
 
-Plan and execute a task that spans multiple repositories in a project.
-
----
+Decompose a requested outcome across owning repositories and define dependency and
+merge order before dispatch.
 
 ## When to use
 
-Load this skill when:
-- A feature, fix, or change requires touching more than one repo
-- The user asks for something that sounds cross-cutting ("add OAuth", "update the API contract", "deploy this change")
-- You've loaded project context and determined multiple repos are affected
+Load this skill when `sgt-context` shows that more than one repository owns the
+requested outcome. Do not use it merely because a project contains multiple repos.
 
-Prerequisite: **load-project** skill must already be complete.
+Prerequisite: `load-project` has resolved repository paths, roles, groups, and
+instructions.
 
----
+## Decomposition procedure
 
-## Protocol
+### 1. Assign repository ownership
 
-### Step 1 — Identify affected repos
+For each required behavior, name exactly one repository that owns its
+implementation. Include a repository only when it must change or produce delivery
+evidence.
 
-From the project context, determine which repos the change touches. Use the knowledge graph if available:
+Record:
 
-```bash
-graphify query "<the task description>" --output <graphify_output>
+```text
+repo: <name>
+role: <resolved role>
+delivers: <observable behavior or artifact>
+acceptance: <repo-native command/evidence proving completion>
 ```
 
-Or reason from the context block: which repos own the code paths involved?
+If ownership is ambiguous, use the project graph and existing contracts. Ask the
+user only when two repositories could legitimately own a user-visible or durable
+contract.
 
-State your conclusion:
+### 2. Define dependency order
 
-```
-Affected repos:
-- smith-api (add OAuth endpoints)
-- smith-app (add login UI)
-- smith-infra (add OAuth secret to values)
-```
+Create edges only when one repository's merged or deployed result is required by
+another. Use `prerequisite>dependent` notation accepted by `sgt-dispatch`.
 
-### Step 2 — Identify dependency order
+Common evidence:
 
-Determine which repos must change first. Common patterns:
+- contract/schema producer before consumers;
+- infrastructure/config before runtime that requires it;
+- independent implementations in parallel when an approved contract already
+  exists;
+- deployment dependency recorded separately from code merge dependency.
 
-- **Contract-first**: the API or schema repo changes first; consumers follow
-- **Infrastructure-first**: credentials/config land in infra before app code that reads them
-- **Parallel**: UI and backend can be developed concurrently if the contract is agreed upfront
+Reject cycles before dispatch. If a cycle reflects a coupled contract, define the
+contract artifact or compatibility phase that breaks the cycle.
 
-State the order explicitly:
+### 3. Inspect repository state
 
-```
-Order:
-1. smith-infra (secret first — needed by API at runtime)
-2. smith-api (endpoints — depends on secret)
-3. smith-app (UI — depends on API endpoints being defined)
-```
+Run `sgt-status <project>` and record non-main branches, uncommitted changes,
+behind/ahead state, active worktrees, and preserved workers for owning repos.
 
-Ask the user to confirm the order if non-obvious or if it has deployment implications.
+Do not stash, reset, switch, or clean repository state during planning. Route an
+existing canonical branch/worktree to the worker brief, or stop for a decision when
+state conflicts with the requested outcome.
 
-### Step 3 — Check branch hygiene
+### 4. Define per-repository delivery gates
 
-For each affected repo, confirm current state:
+Each repository brief must include:
 
-```bash
-bin/sgt-status <project>
-```
+- owning td task or creation requirement;
+- fixed point and preserved source state;
+- repository-specific tests, lint, typecheck, and build commands;
+- Standards and Spec review sources;
+- PR dependency and deployment order;
+- data/security/destructive decisions already approved or still missing.
 
-Flag anything unusual:
-- Repos on non-main branches (ask: is that intentional?)
-- Uncommitted changes (ask: should those be stashed?)
-- Behind upstream (offer: pull first?)
+The plan is complete when every owning repository has one implementation brief,
+acceptance evidence, and an acyclic dependency position.
 
-Per the mandatory AGENTS.md convention: **never work directly on main**. Plan a branch for each affected repo.
+### 5. Hand off to dispatch
 
-Proposed branch name convention: `<type>/<short-description>`
-- e.g., `feat/add-oauth` across all three repos (same name keeps cross-repo PRs easy to correlate)
+If the user requested planning only, stop after returning the repository briefs,
+acceptance evidence, and dependency graph. Do not dispatch or edit repositories.
 
-### Step 4 — Plan the work
+When the user requested implementation, load `dispatch` and execute through
+`sgt-dispatch`; the primary session must not edit several repositories directly.
 
-Write a per-repo task breakdown before touching any file:
+After workers finish, reconcile:
 
-```
-smith-infra / feat/add-oauth:
-  - Add google_client_secret to values/production.yaml (sealed)
-  - Update Helm chart to mount secret as env var GOOGLE_CLIENT_SECRET
+1. PR URLs and final heads;
+2. required CI and unresolved review threads;
+3. merge order from dependency edges;
+4. deployment order and cross-repo release notes;
+5. terminal td/fleet state and cleanup eligibility.
 
-smith-api / feat/add-oauth:
-  - Add POST /auth/google endpoint in pkg/handlers/auth.go
-  - Wire OAuth2 exchange using GOOGLE_CLIENT_SECRET env var
-  - Add integration test in pkg/handlers/auth_test.go
-
-smith-app / feat/add-oauth:
-  - Add "Continue with Google" button to src/routes/login/+page.svelte
-  - Wire to POST /auth/google
-  - Add E2E test
-```
-
-Show this plan to the user and get confirmation before writing code.
-
-### Step 5 — Execute in dependency order
-
-Work through each repo in the order established in Step 2. For each:
-
-1. Create the branch: `git -C <path> checkout -b <branch>`
-2. Do the work, following that repo's `agent_instructions`
-3. Run the repo's tests/lint (from its agent_instructions)
-4. Commit: `git -C <path> add -A && git -C <path> commit -m "<message>"`
-5. Push: `git -C <path> push -u origin <branch>`
-6. Open a PR (use `gh pr create` from that repo's directory)
-
-Do not move to the next repo until the current one has a clean commit.
-
-### Step 6 — Report outcomes
-
-When all repos are done, emit a summary:
-
-```
-Cross-repo work complete: feat/add-oauth
-
-PRs:
-- smith-infra: https://github.com/myorg/smith-infra/pull/42
-- smith-api:   https://github.com/myorg/smith-api/pull/88
-- smith-app:   https://github.com/myorg/smith-app/pull/31
-
-Merge order: smith-infra → smith-api → smith-app
-Note: merge smith-infra and deploy to staging before merging smith-api
-      (API reads GOOGLE_CLIENT_SECRET at startup).
-```
-
----
-
-## Rules
-
-- **Never commit to main.** One feature branch per repo per cross-repo task.
-- **Follow repo agent_instructions** at every step. Those constraints exist for a reason.
-- **Surface cross-repo implications.** If smith-api's response shape changed, flag it to smith-app. If infra added a required env var, flag it to every service that needs it.
-- **Confirm destructive or risky changes.** Infra changes especially — ask before touching production values.
-- **Don't skip repos.** If a repo in the dependency chain isn't cloned, stop and sort that out before continuing.
+Do not report the cross-repo outcome complete until every owning repository has a
+terminal result or an explicit preserved blocker.

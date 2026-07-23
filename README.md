@@ -1,14 +1,20 @@
 # Sergeant
 
-A project-aware first mate for working across multi-repo projects.
+A single-user, local-first project orchestrator for developers working across
+one or more related repositories.
 
 ## Genesis
 
 Sergeant was directly inspired by [firstmate](https://github.com/kunchenguid/firstmate) — an agent distro for running a crew of autonomous agents. Firstmate showed that the right unit of distribution is not a CLI tool or an MCP server, but a cloned directory of instructions, skills, and conventions that turns a general-purpose agent into a specialist.
 
-Sergeant takes that idea and narrows the focus: instead of orchestrating a crew of agents across arbitrary tasks, it starts with the project topology. A project is a named collection of repositories. Everything — context, instructions, dispatch, graphify output — flows from that definition. Where firstmate asks "how do I run a crew?", Sergeant asks "what does this project look like, and how do I work across all of it?"
+Sergeant takes that idea and narrows the focus: instead of orchestrating a crew
+across arbitrary tasks, it starts with project topology. A project is a named
+collection of repositories. Context, instructions, dispatch, and Graphify output
+flow from that definition.
 
-If you want a general-purpose multi-agent crew orchestrator, use firstmate. If you want your agent to deeply understand your specific projects, their repos, and how they relate — use Sergeant.
+If you want a shared or general-purpose multi-agent service, use a tool designed
+for that deployment model. Sergeant is installed independently by each developer
+and keeps registry, credentials, worktrees, workers, and fleet state local.
 
 ---
 
@@ -16,9 +22,13 @@ If you want a general-purpose multi-agent crew orchestrator, use firstmate. If y
 
 You have a project. It has four repos: an API, a frontend, an infra chart, and a shared library. You open your agent and start working — but the agent has no idea these repos are related, what tooling each uses, or which one needs to change first when you add a new feature.
 
-Sergeant fixes that. It is an **agent distro**: a cloned directory with an `AGENTS.md`, shell toolbelt, and skills that turn a general-purpose agent into a project-aware first mate. Launch your agent harness inside it and Sergeant takes over — it knows your projects, their repos, how they group, and what instructions apply to each one.
+Sergeant fixes that. It is an **agent distro**: a cloned directory with an
+`AGENTS.md`, shell toolbelt, documentation, and trigger-loaded skills. Launch an
+agent harness inside the checkout so its repository instructions are loaded.
 
-No install. The cloned repo is the distro. Sergeant supports Bash 3.2 and newer, including the system Bash shipped with macOS.
+The checkout is the source of truth. `mise run install` optionally symlinks the
+commands and OpenCode plugin into user-local locations. Sergeant supports Bash
+3.2 and newer, including the system Bash shipped with macOS.
 
 ## Mental model
 
@@ -39,13 +49,18 @@ sergeant/                     ← this distro (you are here)
   skills/                     ← agent-loaded skills
 ```
 
-Each project is a YAML file. That file defines which repos belong to it, how they group, where Sergeant publishes the merged graphify output, and what agent instructions apply — per group and per repo.
+Each project is a YAML file. That file defines which repos belong to it, how they
+group, where Sergeant publishes the merged Graphify output, and which default,
+group, and repository instruction layers are emitted for each repo.
 
 ## Quick start
 
 ```bash
 git clone https://github.com/callmeradical/sergeant
 cd sergeant
+
+mise run check
+mise run install
 
 # Set your dev root and create the config directory
 mkdir -p ~/.config/sergeant
@@ -69,6 +84,17 @@ Then talk to it:
 > go work on smith-api
 > add feature X across all repos
 ```
+
+## Documentation
+
+Start with the [documentation index](docs/README.md):
+
+- [What Sergeant is and is not](docs/what-is-sergeant.md)
+- [Getting started checklist](docs/getting-started.md)
+- [Skills and their upstream sources](docs/skills.md)
+- [Using Sergeant](docs/using-sergeant.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Project YAML schema](docs/schema.md)
 
 ## Project YAML
 
@@ -154,11 +180,16 @@ Agent-loaded skills for structured workflows:
 
 | Skill | What it does |
 |---|---|
-| `skills/load-project` | Load and internalize full project context |
-| `skills/cross-repo-work` | Plan and execute changes across multiple repos |
-| `skills/dispatch` | Dispatch subagents per repo with worktrees + briefs |
+| `skills/load-project` | Resolve project registry, paths, instructions, schema, sync, and Graphify procedures |
+| `skills/cross-repo-work` | Assign repository ownership and dependency/merge order |
+| `skills/dispatch` | Operate td, worktrees, workers, fleets, escalation, review, and cleanup |
+| `skills/wiki` | Validate automatic captures and generate curated daily wiki digests |
+| `skills/sergeant-help` | Query repository docs for installation, usage, skills, and troubleshooting help |
 
 ## Requirements
+
+See the complete [getting started checklist](docs/getting-started.md) for
+installation and verification.
 
 - [`github.com/marcus/td`](https://github.com/marcus/td) — task CLI, required for brief-based `sgt-dispatch` runs, `sgt-no-mistakes-finding`, and `sgt-td-*` commands; install with `brew install marcus/tap/td` or `go install github.com/marcus/td@latest`
 - `yq` — YAML parser: `brew install yq`
