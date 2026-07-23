@@ -265,6 +265,7 @@ invalid_td_versions=(
   'td version 0.51.0--rc1'
   'td version latest'
   'version 0.51.0'
+  $'td version 0.51.0\n\nUpdate available: 9.9.9 → v0.51.2\nRun: go install -ldflags "-X main.Version=v0.51.2" github.com/marcus/td@v0.51.2'
   $'BROKEN\ntd version 0.51.0'
   $'td version 0.51.0\nBROKEN'
 )
