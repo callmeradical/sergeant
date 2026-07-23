@@ -301,9 +301,12 @@ status=$?
 set -e
 [[ "$status" -eq 2 && "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
 grep -Fq 'blocked [app]' "$TEST_ROOT/notify.log"
-PRESERVE_FLEET=1 run_router "$TEST_ROOT/clean.json"
-[[ "$(cat "$WORKTREE/.sergeant-status")" == 'in_progress' ]]
-[[ ! -e "$WORKTREE/.sergeant-message" ]]
+PRESERVE_FLEET=1 ROUTER_AXIS=spec run_router "$TEST_ROOT/clean.json"
+[[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]] || {
+  printf 'clean rerun for a different axis cleared an unscoped routing failure\n' >&2
+  exit 1
+}
+grep -Fq 'Review finding routing failed' "$WORKTREE/.sergeant-message"
 
 rm -f "$WORKTREE/.sergeant-status" "$WORKTREE/.sergeant-message"
 : > "$TEST_ROOT/notify.log"
