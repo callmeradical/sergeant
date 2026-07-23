@@ -1,94 +1,71 @@
 # Skill: load-project
 
-Load and internalize the full context for a sergeant project before doing any work.
-
----
+Resolve Sergeant project ownership, configuration, and paths before work begins.
 
 ## When to use
 
-Load this skill whenever:
-- The user names a project ("work on smith", "let's look at myapp")
-- You need to understand which repos are involved in a task
-- You're about to do cross-repo work
-- A new sergeant session starts and no project is loaded yet
+Load this skill when a project is named, registered, edited, synced, or graphed,
+or when repository ownership is not already established by `sgt-context` output.
 
----
+## Load project context
 
-## Protocol
+1. If the project name is unknown, run `sgt-list` or `bin/sgt-list` and require
+   an exact registered name.
+2. Run `sgt-context <project>` or `bin/sgt-context <project>`.
+3. From the output, record:
+   - owning repository or repositories for the requested outcome;
+   - resolved absolute paths and clone state;
+   - group membership and repository roles;
+   - inherited instructions in defaults, group, repository order;
+   - configured Graphify output and included groups.
+4. Read a raw project YAML only when a required field is absent from the context
+   output.
+5. If a required repository is missing, run `sgt-sync <project>` only after the
+   requested work requires that repository. Stop if cloning or pull fails.
 
-### Step 1 — Confirm the project exists
+Completion evidence is the `sgt-context` block showing every owning repository as
+cloned plus the instructions and paths that will govern execution.
 
-```bash
-bin/sgt-list
-```
+## Project registration and edits
 
-If the project name doesn't appear, tell the user. Offer to create a new project config.
+Use this procedure when the user asks to add or change a project:
 
-### Step 2 — Load context
+1. Read `docs/schema.md` and the existing YAML when editing.
+2. Write `~/.config/sergeant/<project>.yaml`; do not put credentials, tokens, or
+   secret values in project YAML.
+3. Use absolute repository paths or paths relative to the global `dev_root`.
+4. Configure one project-level `graphify.output` outside source repositories when
+   project Graphify is required.
+5. Run `sgt-list` and require the project to appear exactly once.
+6. Run `sgt-context <project>` and require every edited field needed by agents to
+   appear in resolved output.
+7. Run `sgt-sync <project>` only when repositories must be cloned or refreshed.
+8. If validation fails, restore the prior YAML or leave the new file uncommitted
+   and report the exact command error.
 
-```bash
-bin/sgt-context <project>
-```
+The schema source of truth remains `docs/schema.md`; do not duplicate its field
+reference in agent instructions.
 
-Read the entire output. It contains:
-- All repos, their paths, and clone status
-- Groups and which repos belong to them
-- Resolved agent instructions per repo (defaults → group → repo)
-- Knowledge graph status and output path
+## Project Graphify
 
-### Step 3 — Internalize and surface constraints
+Use this procedure for project architecture questions or explicit graph updates:
 
-From the context block, extract and hold in mind:
-- Which repos are cloned vs. missing
-- Which repos belong to which groups
-- Any active `agent_instructions` for repos you'll touch
-- Whether a knowledge graph exists at `graphify.output`
+1. Read the Graphify path from `sgt-context <project>`.
+2. If no `graphify.output` is configured, stop and request or add the project-level
+   path before running Graphify.
+3. Run `sgt-graphify <project>` or `bin/sgt-graphify <project>`.
+4. Require `<graphify.output>/graph.json` and `GRAPH_REPORT.md` to exist after a
+   successful run.
+5. Use `graphify query` for focused questions; read `GRAPH_REPORT.md` for broad
+   architecture, community, and god-node context.
+6. Do not publish generated graph output inside an owning source repository.
 
-If any repos are NOT CLONED that are relevant to the task, ask the user whether to run `bin/sgt-sync <project>` first.
+## Failure behavior
 
-### Step 4 — Check the knowledge graph (if available)
-
-If `graphify.output/GRAPH_REPORT.md` exists:
-
-```bash
-cat <graphify_output>/GRAPH_REPORT.md
-```
-
-Read the god nodes and community structure. This gives you cross-repo architecture context before you start writing code.
-
-If the graph is stale (user says things have changed significantly), offer:
-
-```bash
-bin/sgt-graphify <project>
-```
-
-### Step 5 — Confirm orientation
-
-Tell the user:
-- Which project is loaded
-- How many repos, which are cloned
-- Any constraints from agent_instructions that will affect the work
-- Whether the knowledge graph is available
-
-Example:
-
-```
-Project: smith (4 repos — 4 cloned)
-Groups: backend (smith-api, smith-core), infra (smith-infra), frontend (smith-app)
-Knowledge graph: available at ~/Dev/smith/graphify-out/
-
-Active constraints:
-- All Go services: run `go test ./...` before committing
-- smith-infra: never delete PVCs without confirmation
-```
-
----
-
-## Error cases
-
-| Situation | Action |
+| Condition | Required action |
 |---|---|
-| Project YAML not found | Tell user. Offer to create one using schema/project.yaml.example as a template. |
-| `yq` not installed | Tell user: `brew install yq` |
-| All repos missing | Confirm URLs are configured, then offer `bin/sgt-sync <project>` |
-| No graphify output | Note it, offer to run `bin/sgt-graphify <project>` if needed |
+| Project is unregistered | Stop and ask whether to register it. |
+| Required repo has no URL | Stop with the repo name and missing field. |
+| Required executable is missing | Report the executable and platform-neutral installation requirement; do not invent a fallback parser. |
+| Context and YAML disagree | Treat `sgt-context` failure as blocking and preserve the YAML for diagnosis. |
+| Graph output is stale | Run `sgt-graphify` only when architecture work requires a refresh or the user requests one. |

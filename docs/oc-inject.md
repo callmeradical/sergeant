@@ -70,17 +70,21 @@ oc-inject --pid 12345 --status                    # show process registry state
 
 ## Install
 
-`mise run install` symlinks `bin/oc-inject` to `~/.local/bin/oc-inject`.
+`mise run install` symlinks `bin/oc-inject` to `~/.local/bin/oc-inject` and
+symlinks the tracked plugin to
+`~/.config/opencode/plugins/oc-inject.js`.
 
-The plugin must be present at `~/.config/opencode/plugins/oc-inject.js`.
-Copy it on first install:
+Verify both links:
 
 ```bash
-cp opencode/plugins/oc-inject.js ~/.config/opencode/plugins/
+command -v oc-inject
+readlink ~/.config/opencode/plugins/oc-inject.js
 ```
 
-Or add a symlink:
+If `mise` is unavailable, create the links manually:
 ```bash
+mkdir -p ~/.local/bin ~/.config/opencode/plugins
+ln -sf "$(pwd)/bin/oc-inject" ~/.local/bin/oc-inject
 ln -sf "$(pwd)/opencode/plugins/oc-inject.js" ~/.config/opencode/plugins/oc-inject.js
 ```
 
