@@ -13,6 +13,47 @@ cleanup_fixture() {
 trap cleanup_fixture EXIT
 
 mkdir -p "$TEST_ROOT/fleet/task-123/app" "$TEST_ROOT/fake-bin" "$TEST_ROOT/repo"
+
+assert_cleanup_rejected() {
+  local task_id="$1"
+  local label="$2"
+  local output status
+
+  set +e
+  output="$(HOME="$TEST_ROOT/home" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" "$task_id" 2>&1)"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || {
+    printf 'cleanup accepted unsafe %s task ID: %q\n' "$label" "$task_id" >&2
+    exit 1
+  }
+  [[ "$output" == *"Invalid task ID"* ]] || {
+    printf 'cleanup returned an unexpected error for %s task ID: %s\n' "$label" "$output" >&2
+    exit 1
+  }
+}
+
+mkdir -p "$TEST_ROOT/protected/app" "$TEST_ROOT/home"
+touch "$TEST_ROOT/protected/canary" "$TEST_ROOT/home/canary"
+ln -s "$TEST_ROOT/home" "$TEST_ROOT/fleet/alias"
+ln -s "$TEST_ROOT/missing" "$TEST_ROOT/fleet/dangling-alias"
+
+assert_cleanup_rejected "" "empty"
+assert_cleanup_rejected "$TEST_ROOT/protected" "absolute"
+assert_cleanup_rejected "nested/task" "separator-containing"
+assert_cleanup_rejected "." "dot"
+assert_cleanup_rejected ".." "dot-dot"
+assert_cleanup_rejected "../protected" "traversing"
+assert_cleanup_rejected "alias" "symlink-alias"
+assert_cleanup_rejected "dangling-alias" "dangling-symlink-alias"
+
+[[ -f "$TEST_ROOT/protected/canary" ]]
+[[ -f "$TEST_ROOT/home/canary" ]]
+[[ -L "$TEST_ROOT/fleet/alias" ]]
+[[ -L "$TEST_ROOT/fleet/dangling-alias" ]]
+
 git -C "$TEST_ROOT/repo" init -q
 git -C "$TEST_ROOT/repo" config user.name Test
 git -C "$TEST_ROOT/repo" config user.email test@example.invalid
@@ -78,19 +119,40 @@ grep -Fq 'Other processes still have' "$TEST_ROOT/blocked-cleanup.log" || {
 }
 tmux display-message -p -t "$holder_pane" '#{pane_id}' >/dev/null
 [[ -d "$worktree" && -d "$TEST_ROOT/fleet/task-123" ]]
-! kill -0 "$worker_pid" 2>/dev/null
-! kill -0 "$agent_pid" 2>/dev/null
+if kill -0 "$worker_pid" 2>/dev/null; then
+  printf 'worker process still running after blocked cleanup: %s\n' "$worker_pid" >&2
+  exit 1
+fi
+if kill -0 "$agent_pid" 2>/dev/null; then
+  printf 'agent process still running after blocked cleanup: %s\n' "$agent_pid" >&2
+  exit 1
+fi
 
 tmux kill-pane -t "$holder_pane"
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" task-123 >/dev/null
 
-! tmux display-message -p -t "$worker_pane" '#{pane_id}' >/dev/null 2>&1
+for _ in $(seq 1 100); do
+  if ! tmux list-panes -a -F '#{pane_id}' | grep -Fxq "$worker_pane"; then
+    break
+  fi
+  sleep 0.01
+done
+if tmux list-panes -a -F '#{pane_id}' | grep -Fxq "$worker_pane"; then
+  printf 'worker pane still exists after cleanup: %s\n' "$worker_pane" >&2
+  exit 1
+fi
 tmux has-session -t "$TMUX_SESSION"
 tmux display-message -p -t "$TMUX_SESSION:unrelated" '#{pane_id}' >/dev/null
 kill -0 "$unrelated_pid"
-! kill -0 "$worker_pid" 2>/dev/null
-! kill -0 "$agent_pid" 2>/dev/null
+if kill -0 "$worker_pid" 2>/dev/null; then
+  printf 'worker process still running after cleanup: %s\n' "$worker_pid" >&2
+  exit 1
+fi
+if kill -0 "$agent_pid" 2>/dev/null; then
+  printf 'agent process still running after cleanup: %s\n' "$agent_pid" >&2
+  exit 1
+fi
 [[ ! -e "$worktree" ]]
 [[ ! -e "$TEST_ROOT/fleet/task-123" ]]
 
