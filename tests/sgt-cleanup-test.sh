@@ -1688,15 +1688,20 @@ if compgen -G "$TEST_ROOT/fleet/evidence-transaction/app/live-evidence.tmp.*" \
 fi
 
 rm "$TEST_ROOT/evidence-transaction-worker"/.sergeant-*
-if PATH="$TEST_ROOT/fake-bin:$PATH" \
+set +e
+restore_drift_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
   SGT_CLEANUP_MUTATE_POINT=before-retry-restore \
   SGT_CLEANUP_MUTATE_PATH="$TEST_ROOT/fleet/evidence-transaction/app/terminal-evidence/.sergeant-diagnostic" \
   FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app >/dev/null 2>&1; then
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app 2>&1)"
+restore_drift_status=$?
+set -e
+if [[ "$restore_drift_status" -eq 0 ]]; then
   printf 'cleanup accepted persisted evidence changed at restore boundary\n' >&2
   exit 1
 fi
+[[ "$restore_drift_output" == *'Failed to restore persisted worker evidence: app; inspect preserved evidence:'* ]]
 [[ "$(cat \
   "$TEST_ROOT/fleet/evidence-transaction/app/terminal-evidence/.sergeant-diagnostic")" == \
   'injected lifecycle evidence mutation' ]]
@@ -1707,14 +1712,19 @@ fi
 [[ "$(wc -l < "$TEST_ROOT/evidence-removals")" -eq 1 ]]
 printf 'diagnostic\n' > \
   "$TEST_ROOT/fleet/evidence-transaction/app/terminal-evidence/.sergeant-diagnostic"
-if PATH="$TEST_ROOT/fake-bin:$PATH" \
+set +e
+restore_staged_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
   SGT_CLEANUP_MUTATE_POINT=after-restore-copy \
   FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app >/dev/null 2>&1; then
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app 2>&1)"
+restore_staged_status=$?
+set -e
+if [[ "$restore_staged_status" -eq 0 ]]; then
   printf 'cleanup accepted staged evidence changed at restore boundary\n' >&2
   exit 1
 fi
+[[ "$restore_staged_output" == *'Failed to restore persisted worker evidence: app; inspect preserved evidence:'* ]]
 if compgen -G "$TEST_ROOT/evidence-transaction-worker/.sergeant-*" >/dev/null; then
   printf 'staged restore race changed live evidence\n' >&2
   exit 1
@@ -1737,7 +1747,8 @@ restore_rollback_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
 restore_rollback_status=$?
 set -e
 [[ "$restore_rollback_status" -ne 0 ]]
-[[ "$restore_rollback_output" == *'CRITICAL: rollback cleanup failed'* ]]
+[[ "$restore_rollback_output" == \
+  *'CRITICAL: rollback cleanup failed for published worker evidence restore; inspect preserved artifact:'* ]]
 [[ -f "$TEST_ROOT/evidence-transaction-worker/.sergeant-diagnostic" ]]
 if ! compgen -G \
   "$TEST_ROOT/fleet/evidence-transaction/app/restore-evidence.tmp.*" \
@@ -1751,13 +1762,19 @@ fi
 [[ "$(wc -l < "$TEST_ROOT/evidence-removals")" -eq 1 ]]
 rm -f "$TEST_ROOT/evidence-transaction-worker"/.sergeant-*
 rm -rf "$TEST_ROOT/fleet/evidence-transaction/app"/restore-evidence.tmp.*
-if PATH="$TEST_ROOT/fake-bin:$PATH" SGT_CLEANUP_FAIL_POINT=restore-copy-2 \
+set +e
+restore_copy_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SGT_CLEANUP_FAIL_POINT=restore-copy-2 \
   FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app >/dev/null 2>&1; then
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app 2>&1)"
+restore_copy_status=$?
+set -e
+if [[ "$restore_copy_status" -eq 0 ]]; then
   printf 'cleanup accepted injected second retry restore-copy failure\n' >&2
   exit 1
 fi
+[[ "$restore_copy_output" == *'Failed to restore persisted worker evidence: app; inspect preserved evidence:'* ]]
 if compgen -G "$TEST_ROOT/evidence-transaction-worker/.sergeant-*" >/dev/null; then
   printf 'failed retry restore left partial live evidence\n' >&2
   exit 1
@@ -1771,13 +1788,19 @@ if compgen -G "$TEST_ROOT/evidence-transaction-worker/.sergeant-*.tmp.*" \
   printf 'failed retry restore left a copy temporary\n' >&2
   exit 1
 fi
-if PATH="$TEST_ROOT/fake-bin:$PATH" SGT_CLEANUP_FAIL_POINT=restore-publish-2 \
+set +e
+restore_publish_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SGT_CLEANUP_FAIL_POINT=restore-publish-2 \
   FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app >/dev/null 2>&1; then
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app 2>&1)"
+restore_publish_status=$?
+set -e
+if [[ "$restore_publish_status" -eq 0 ]]; then
   printf 'cleanup accepted injected second retry restore-publication failure\n' >&2
   exit 1
 fi
+[[ "$restore_publish_output" == *'Failed to restore persisted worker evidence: app; inspect preserved evidence:'* ]]
 if compgen -G "$TEST_ROOT/evidence-transaction-worker/.sergeant-*" >/dev/null; then
   printf 'failed retry restore publication left partial live evidence\n' >&2
   exit 1
