@@ -155,6 +155,31 @@ for unsafe_status in dispatched in_progress needs_input blocked waiting orphaned
   [[ -d "$status_worktree" && -d "$TEST_ROOT/fleet/$task_id" ]]
 done
 
+legacy_reconciled_state="$TEST_ROOT/fleet/legacy-reconciled-absent/app"
+legacy_reconciled_worktree="$TEST_ROOT/legacy-reconciled-absent-worktree"
+mkdir -p "$legacy_reconciled_state/terminal-evidence"
+printf '%s\n' "$legacy_reconciled_worktree" > "$legacy_reconciled_state/worktree"
+printf 'done\n' > "$legacy_reconciled_state/status"
+printf 'result\n' > "$legacy_reconciled_state/result"
+printf 'done\n' > "$legacy_reconciled_state/terminal-evidence/.sergeant-status"
+printf 'result\n' > "$legacy_reconciled_state/terminal-evidence/.sergeant-result"
+printf 'reconciled-absent\n%s\n' "$legacy_reconciled_worktree" > \
+  "$legacy_reconciled_state/cleanup-phase"
+legacy_reconciled_before="$(cksum "$legacy_reconciled_state/status" \
+  "$legacy_reconciled_state/result" "$legacy_reconciled_state/worktree" \
+  "$legacy_reconciled_state/cleanup-phase" \
+  "$legacy_reconciled_state/terminal-evidence"/.sergeant-*)"
+if SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" legacy-reconciled-absent >/dev/null 2>&1; then
+  printf 'cleanup accepted ownerless reconciled-absent state\n' >&2
+  exit 1
+fi
+[[ "$(cksum "$legacy_reconciled_state/status" \
+  "$legacy_reconciled_state/result" "$legacy_reconciled_state/worktree" \
+  "$legacy_reconciled_state/cleanup-phase" \
+  "$legacy_reconciled_state/terminal-evidence"/.sergeant-*)" == \
+  "$legacy_reconciled_before" ]]
+
 setup_response_cleanup_fixture() {
   local state_name="$1"
   response_state="$TEST_ROOT/fleet/response-$state_name/app"
@@ -985,7 +1010,7 @@ EOF
         "$reappeared_phase" >&2
       exit 1
     fi
-    grep -Fq 'Retry worktree type changed: app' \
+    grep -Fq 'Unsupported worktree removal type: app: other' \
       "$TEST_ROOT/reappeared-$reappeared_phase-type.log"
     [[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 2 ]]
     printf 'git\n' > "$TEST_ROOT/fleet/present-retry/app/wt_type"
@@ -1131,6 +1156,31 @@ fi
   "$present_evidence_before" ]]
 [[ "$(cksum "$TEST_ROOT/present-retry-sgt-present-retry"/.sergeant-*)" == \
   "$present_worktree_evidence_before" ]]
+cp -p "$TEST_ROOT/fleet/present-retry/app/cleanup-owner" \
+  "$TEST_ROOT/present-retry-cleanup-owner"
+cp -p "$TEST_ROOT/fleet/present-retry/app/cleanup-phase" \
+  "$TEST_ROOT/present-retry-cleanup-phase"
+{
+  sed -n '1,4p' "$TEST_ROOT/present-retry-cleanup-owner"
+  printf 'other\n'
+  sed -n '6,9p' "$TEST_ROOT/present-retry-cleanup-owner"
+} > "$TEST_ROOT/fleet/present-retry/app/cleanup-owner"
+printf 'removing\n%s\nother\n%s\n' \
+  "$TEST_ROOT/present-retry-sgt-present-retry" "$TEST_ROOT/present-retry" > \
+  "$TEST_ROOT/fleet/present-retry/app/cleanup-phase"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/present-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" present-retry >/dev/null 2>&1; then
+  printf 'cleanup accepted matching unknown removal type\n' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 2 ]]
+mv "$TEST_ROOT/present-retry-cleanup-owner" \
+  "$TEST_ROOT/fleet/present-retry/app/cleanup-owner"
+mv "$TEST_ROOT/present-retry-cleanup-phase" \
+  "$TEST_ROOT/fleet/present-retry/app/cleanup-phase"
 printf 'git\n' > "$TEST_ROOT/fleet/present-retry/app/wt_type"
 rm "$TEST_ROOT/fake-bin/git"
 
