@@ -495,6 +495,54 @@ for ordered_repo in aaa zzz; do
 done
 rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/config/first-pass-policy.yaml"
 
+mkdir -p "$TEST_ROOT/fleet/unowned-worktree/app" "$TEST_ROOT/fake-bin"
+init_test_repo "$TEST_ROOT/unowned-configured"
+init_test_repo "$TEST_ROOT/unowned-other"
+git -C "$TEST_ROOT/unowned-other" worktree add -q -b unowned-worker \
+  "$TEST_ROOT/unowned-worker"
+record_retry_owner unowned-worktree app "$TEST_ROOT/unowned-configured"
+printf '%s\n' "$TEST_ROOT/unowned-worker" > \
+  "$TEST_ROOT/fleet/unowned-worktree/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/unowned-worktree/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/unowned-worktree/app/result"
+printf 'done\n' > "$TEST_ROOT/unowned-worker/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/unowned-worker/.sergeant-result"
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" worktree remove "*) printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG" ;;
+esac
+"$REAL_GIT" "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/unowned-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" unowned-worktree app >/dev/null 2>&1; then
+  printf 'cleanup accepted a worktree owned by an unrelated repository\n' >&2
+  exit 1
+fi
+[[ -d "$TEST_ROOT/unowned-worker" ]]
+[[ ! -e "$TEST_ROOT/unowned-removals" ]]
+[[ ! -e "$TEST_ROOT/fleet/unowned-worktree/app/terminal-evidence" ]]
+[[ ! -e "$TEST_ROOT/fleet/unowned-worktree/app/cleanup-owner" ]]
+[[ ! -e "$TEST_ROOT/fleet/unowned-worktree/app/cleanup-phase" ]]
+[[ ! -e "$TEST_ROOT/unowned-configured/.git/sergeant-instance" ]]
+
+git -C "$TEST_ROOT/unowned-configured" worktree add -q -b owned-worker \
+  "$TEST_ROOT/owned-worker"
+printf '%s\n' "$TEST_ROOT/owned-worker" > \
+  "$TEST_ROOT/fleet/unowned-worktree/app/worktree"
+printf 'done\n' > "$TEST_ROOT/owned-worker/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/owned-worker/.sergeant-result"
+PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/owned-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" unowned-worktree app >/dev/null
+[[ ! -e "$TEST_ROOT/owned-worker" ]]
+[[ "$(cat "$TEST_ROOT/owned-removals")" == "$TEST_ROOT/owned-worker" ]]
+rm "$TEST_ROOT/fake-bin/git"
+
 mkdir -p "$TEST_ROOT/fleet/removal-failure/aaa" "$TEST_ROOT/fleet/removal-failure/app" \
   "$TEST_ROOT/fake-bin" "$TEST_ROOT/config"
 cat > "$TEST_ROOT/config/removal-failure.yaml" <<EOF
@@ -1736,6 +1784,184 @@ SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" legacy-task >/dev/null
 [[ ! -e "$legacy_validation_worktree" && ! -e "$legacy_worktree" && \
   ! -e "$TEST_ROOT/fleet/legacy-task" ]]
+
+mkdir -p "$TEST_ROOT/fleet/publication-transaction/app"
+init_test_repo "$TEST_ROOT/publication-transaction"
+git -C "$TEST_ROOT/publication-transaction" worktree add -q \
+  -b publication-transaction-worker \
+  "$TEST_ROOT/publication-transaction-worker"
+record_retry_owner publication-transaction app \
+  "$TEST_ROOT/publication-transaction"
+printf '%s\n' "$TEST_ROOT/publication-transaction-worker" > \
+  "$TEST_ROOT/fleet/publication-transaction/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/publication-transaction/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/publication-transaction/app/result"
+printf 'done\n' > \
+  "$TEST_ROOT/publication-transaction-worker/.sergeant-status"
+printf 'result\n' > \
+  "$TEST_ROOT/publication-transaction-worker/.sergeant-result"
+printf 'diagnostic bytes\n' > \
+  "$TEST_ROOT/publication-transaction-worker/.sergeant-diagnostic"
+publication_fleet_before="$(cksum \
+  "$TEST_ROOT/fleet/publication-transaction/app/status" \
+  "$TEST_ROOT/fleet/publication-transaction/app/result" \
+  "$TEST_ROOT/fleet/publication-transaction/app/worktree")"
+publication_live_before="$(cksum \
+  "$TEST_ROOT/publication-transaction-worker"/.sergeant-*)"
+for failure_point in stage-evidence record-owner record-phase \
+  publish-evidence publish-owner publish-phase; do
+  if SGT_CLEANUP_FAIL_POINT="$failure_point" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" publication-transaction app \
+      > "$TEST_ROOT/publication-$failure_point.log" 2>&1; then
+    printf 'cleanup accepted injected publication failure: %s\n' \
+      "$failure_point" >&2
+    exit 1
+  fi
+  [[ "$(cksum \
+    "$TEST_ROOT/fleet/publication-transaction/app/status" \
+    "$TEST_ROOT/fleet/publication-transaction/app/result" \
+    "$TEST_ROOT/fleet/publication-transaction/app/worktree")" == \
+    "$publication_fleet_before" ]]
+  [[ "$(cksum "$TEST_ROOT/publication-transaction-worker"/.sergeant-*)" == \
+    "$publication_live_before" ]]
+  [[ ! -e "$TEST_ROOT/fleet/publication-transaction/app/terminal-evidence" ]]
+  [[ ! -e "$TEST_ROOT/fleet/publication-transaction/app/cleanup-owner" ]]
+  [[ ! -e "$TEST_ROOT/fleet/publication-transaction/app/cleanup-phase" ]]
+  [[ ! -e "$TEST_ROOT/publication-transaction/.git/sergeant-instance" ]]
+  if compgen -G "$TEST_ROOT/fleet/publication-transaction/app/*.tmp*" \
+    >/dev/null; then
+    printf 'publication failure left a temporary artifact: %s\n' \
+      "$failure_point" >&2
+    exit 1
+  fi
+  if compgen -G "$TEST_ROOT/publication-transaction/.git/.sergeant-instance.*" \
+    >/dev/null; then
+    printf 'publication failure left an instance-marker temporary: %s\n' \
+      "$failure_point" >&2
+    exit 1
+  fi
+done
+printf 'preexisting-instance-token\n' > \
+  "$TEST_ROOT/publication-transaction/.git/sergeant-instance"
+publication_marker_before="$(cksum \
+  "$TEST_ROOT/publication-transaction/.git/sergeant-instance")"
+if SGT_CLEANUP_FAIL_POINT=publish-owner \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" publication-transaction app >/dev/null 2>&1; then
+  printf 'cleanup accepted publication failure with an existing instance marker\n' >&2
+  exit 1
+fi
+[[ "$(cksum "$TEST_ROOT/publication-transaction/.git/sergeant-instance")" == \
+  "$publication_marker_before" ]]
+[[ "$(cksum "$TEST_ROOT/publication-transaction-worker"/.sergeant-*)" == \
+  "$publication_live_before" ]]
+[[ ! -e "$TEST_ROOT/fleet/publication-transaction/app/terminal-evidence" ]]
+[[ ! -e "$TEST_ROOT/fleet/publication-transaction/app/cleanup-owner" ]]
+[[ ! -e "$TEST_ROOT/fleet/publication-transaction/app/cleanup-phase" ]]
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" publication-transaction app >/dev/null
+[[ ! -e "$TEST_ROOT/publication-transaction-worker" ]]
+
+mkdir -p "$TEST_ROOT/fleet/evidence-transaction/app" "$TEST_ROOT/fake-bin"
+init_test_repo "$TEST_ROOT/evidence-transaction"
+git -C "$TEST_ROOT/evidence-transaction" worktree add -q \
+  -b evidence-transaction-worker "$TEST_ROOT/evidence-transaction-worker"
+record_retry_owner evidence-transaction app "$TEST_ROOT/evidence-transaction"
+printf '%s\n' "$TEST_ROOT/evidence-transaction-worker" > \
+  "$TEST_ROOT/fleet/evidence-transaction/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/evidence-transaction/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/evidence-transaction/app/result"
+printf 'done\n' > "$TEST_ROOT/evidence-transaction-worker/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/evidence-transaction-worker/.sergeant-result"
+printf 'diagnostic\n' > \
+  "$TEST_ROOT/evidence-transaction-worker/.sergeant-diagnostic"
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" worktree remove "*)
+    printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
+    exit 1
+    ;;
+esac
+"$REAL_GIT" "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app >/dev/null 2>&1; then
+  printf 'evidence transaction setup removal unexpectedly succeeded\n' >&2
+  exit 1
+fi
+evidence_live_before="$(cksum \
+  "$TEST_ROOT/evidence-transaction-worker"/.sergeant-*)"
+evidence_persisted_before="$(cksum \
+  "$TEST_ROOT/fleet/evidence-transaction/app/terminal-evidence"/.sergeant-*)"
+evidence_owner_before="$(cksum \
+  "$TEST_ROOT/fleet/evidence-transaction/app/cleanup-owner")"
+evidence_phase_before="$(cksum \
+  "$TEST_ROOT/fleet/evidence-transaction/app/cleanup-phase")"
+if PATH="$TEST_ROOT/fake-bin:$PATH" SGT_CLEANUP_FAIL_POINT=remove-live-2 \
+  FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app >/dev/null 2>&1; then
+  printf 'cleanup accepted injected second live-evidence removal failure\n' >&2
+  exit 1
+fi
+[[ "$(cksum "$TEST_ROOT/evidence-transaction-worker"/.sergeant-*)" == \
+  "$evidence_live_before" ]]
+[[ "$(cksum \
+  "$TEST_ROOT/fleet/evidence-transaction/app/terminal-evidence"/.sergeant-*)" == \
+  "$evidence_persisted_before" ]]
+[[ "$(cksum "$TEST_ROOT/fleet/evidence-transaction/app/cleanup-owner")" == \
+  "$evidence_owner_before" ]]
+[[ "$(cksum "$TEST_ROOT/fleet/evidence-transaction/app/cleanup-phase")" == \
+  "$evidence_phase_before" ]]
+[[ "$(wc -l < "$TEST_ROOT/evidence-removals")" -eq 1 ]]
+if compgen -G "$TEST_ROOT/fleet/evidence-transaction/app/live-evidence.tmp.*" \
+  >/dev/null; then
+  printf 'failed live-evidence removal left a backup artifact\n' >&2
+  exit 1
+fi
+
+rm "$TEST_ROOT/evidence-transaction-worker"/.sergeant-*
+if PATH="$TEST_ROOT/fake-bin:$PATH" SGT_CLEANUP_FAIL_POINT=restore-copy-2 \
+  FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app >/dev/null 2>&1; then
+  printf 'cleanup accepted injected second retry restore-copy failure\n' >&2
+  exit 1
+fi
+if compgen -G "$TEST_ROOT/evidence-transaction-worker/.sergeant-*" >/dev/null; then
+  printf 'failed retry restore left partial live evidence\n' >&2
+  exit 1
+fi
+[[ "$(cksum \
+  "$TEST_ROOT/fleet/evidence-transaction/app/terminal-evidence"/.sergeant-*)" == \
+  "$evidence_persisted_before" ]]
+[[ "$(wc -l < "$TEST_ROOT/evidence-removals")" -eq 1 ]]
+if compgen -G "$TEST_ROOT/evidence-transaction-worker/.sergeant-*.tmp.*" \
+  >/dev/null; then
+  printf 'failed retry restore left a copy temporary\n' >&2
+  exit 1
+fi
+if PATH="$TEST_ROOT/fake-bin:$PATH" SGT_CLEANUP_FAIL_POINT=restore-publish-2 \
+  FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app >/dev/null 2>&1; then
+  printf 'cleanup accepted injected second retry restore-publication failure\n' >&2
+  exit 1
+fi
+if compgen -G "$TEST_ROOT/evidence-transaction-worker/.sergeant-*" >/dev/null; then
+  printf 'failed retry restore publication left partial live evidence\n' >&2
+  exit 1
+fi
+[[ "$(cksum \
+  "$TEST_ROOT/fleet/evidence-transaction/app/terminal-evidence"/.sergeant-*)" == \
+  "$evidence_persisted_before" ]]
+[[ "$(wc -l < "$TEST_ROOT/evidence-removals")" -eq 1 ]]
+rm "$TEST_ROOT/fake-bin/git"
 
 mkdir -p "$TEST_ROOT/fleet/task-123/app" "$TEST_ROOT/repo"
 git -C "$TEST_ROOT/repo" init -q
