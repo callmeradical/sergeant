@@ -170,13 +170,14 @@ Each dispatched agent is expected to:
 5. Establish public behavioral seams from td/spec before tests. If a consequential seam is undecided, escalate `needs_input` rather than guessing
 6. Implement one vertical slice at a time: focused red test, minimum green implementation, then refactor. Reject tautological tests, internal mocking, horizontal test/implementation phases, and speculative refactoring
 7. For `needs_input` or `blocked`, write `.sergeant-message`, notify Sergeant, remain alive, and wait. Consume/remove `.sergeant-response`, clear the message, log the decision to td, restore `in_progress`, and continue
-8. Run focused tests and typechecking/lint regularly, the full required suite at the end, and no-mistakes when available or required
-9. Route each no-mistakes finding through `sgt-no-mistakes-finding`: blocking correctness/security/data-integrity/test work stays gated, actionable warning or informational debt may become a deduplicated owning-repo td card, cosmetic/evidence noise is ignored, and ask-user findings still escalate
-10. Load the canonical `code-review` skill when available, then launch separate parallel subagents for independent reviews: a standards axis over the pinned diff and documented standards plus concise Fowler smells, and a spec axis over requirements and scope. Keep evidence separate and skip the spec axis explicitly when no spec exists
-11. Remediate all blocking findings, rerun affected tests and both axes until each reports zero blocking findings
-12. Commit, open a PR, wait for required CI, resolve all non-outdated review threads, and satisfy dependency order
-13. For tracked work, log td decisions, handoff, then run `td review` only when implementation and review evidence are ready
-14. Write `.sergeant-result` and set `.sergeant-status=done` only after every gate passes. `failed: <exact reason>` is reserved for an unrecoverable terminal failure
+8. Run focused tests and typechecking/lint regularly and the full required suite at the end. Do not run no-mistakes for routine worker completion, prototypes, investigations, documentation drafts, intermediate commits, or remediation loops; an explicit user instruction overrides this default
+9. At an explicit final shipping boundary only, after implementation and repository-native validation, run `no-mistakes axi run --intent "<objective and approved tradeoffs>"`, skip only proven-irrelevant gates, treat findings as validation-only, and stop at `checks-passed`
+10. Route each no-mistakes finding through `sgt-no-mistakes-finding`: every actionable finding creates or updates separate deduplicated owning-repo td work; correctness/security/data-integrity/test and ask-user work is P1 and remains gated, warning debt is P2, informational debt is P3, and cosmetic/evidence noise is ignored. Never remediate findings in the validation run
+11. Load the canonical `code-review` skill when available, then launch separate parallel subagents for independent reviews: a standards axis over the pinned diff and documented standards plus concise Fowler smells, and a spec axis over requirements and scope. Keep evidence separate and skip the spec axis explicitly when no spec exists
+12. Remediate all blocking repository-native test and independent-review findings, rerun affected tests and both axes until each reports zero blocking findings. No-mistakes findings require a separate td dispatch
+13. Commit, open a PR, wait for required CI, resolve all non-outdated review threads, and satisfy dependency order
+14. For tracked work, log td decisions, handoff, then run `td review` only when implementation and review evidence are ready
+15. Write `.sergeant-result` and set `.sergeant-status=done` only after every gate passes. `failed: <exact reason>` is reserved for an unrecoverable terminal failure
 
 If a canonical skill cannot be loaded, the generated brief's embedded rules remain mandatory for that phase.
 

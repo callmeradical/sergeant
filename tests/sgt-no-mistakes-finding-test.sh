@@ -258,11 +258,12 @@ run_router --severity error --kind security --disposition td
 [[ ! -s "$TEST_ROOT/td.log" ]] || { printf 'blocking finding touched td\n' >&2; exit 1; }
 
 run_router --kind correctness --disposition gate
-[[ "$status" -ne 0 && "$output" == *"gate"* ]] || {
-  printf 'gate disposition did not stop the caller: %s\n' "$output" >&2
+[[ "$status" -eq 2 && "$output" == *"td-created"* && "$output" == *"gate"* ]] || {
+  printf 'gate disposition did not create blocking td work and stop the caller: %s\n' "$output" >&2
   exit 1
 }
-[[ ! -s "$TEST_ROOT/td.log" ]] || { printf 'gate disposition touched td\n' >&2; exit 1; }
+assert_log_contains "create"
+assert_log_contains "--priority P1"
 
 run_router --kind cosmetic --disposition td
 [[ "$status" -eq 0 && "$output" == *"ignore"* ]] || {
@@ -279,10 +280,11 @@ run_router --severity info --kind evidence --disposition ignore
 [[ ! -s "$TEST_ROOT/td.log" ]] || { printf 'evidence finding touched td\n' >&2; exit 1; }
 
 run_router --disposition ask-user
-[[ "$status" -ne 0 && "$output" == *"ask-user"* ]] || {
-  printf 'ask-user finding did not escalate: %s\n' "$output" >&2
+[[ "$status" -eq 2 && "$output" == *"td-created"* && "$output" == *"ask-user"* ]] || {
+  printf 'ask-user finding did not create td work and escalate: %s\n' "$output" >&2
   exit 1
 }
-[[ ! -s "$TEST_ROOT/td.log" ]] || { printf 'ask-user finding touched td\n' >&2; exit 1; }
+assert_log_contains "create"
+assert_log_contains "--priority P1"
 
 printf 'sgt-no-mistakes-finding: ok\n'

@@ -100,6 +100,14 @@ assert_contains() {
   }
 }
 
+assert_not_contains() {
+  local unexpected="$1"
+  if grep -Fq "$unexpected" "$brief"; then
+    printf 'unexpected brief contract: %s\n' "$unexpected" >&2
+    exit 1
+  fi
+}
+
 line_of() {
   grep -nF "$1" "$brief" | cut -d: -f1 | sed -n '1p'
 }
@@ -126,15 +134,24 @@ assert_contains "If no originating spec exists, record that explicitly"
 assert_contains "failing focused test"
 assert_contains "minimum implementation"
 assert_contains "full required suite once at the end"
-assert_contains "Run no-mistakes when available or required"
+assert_contains "Do not run no-mistakes for routine worker completion"
+assert_contains "Run no-mistakes once only at an explicit final shipping boundary"
+assert_contains "An explicit user instruction to run no-mistakes overrides this default"
+assert_contains 'no-mistakes axi run --intent'
+assert_contains "Stop driving the pipeline at \`checks-passed\`"
+assert_contains "validation-only"
+assert_not_contains "Run no-mistakes when available or required"
 assert_contains "### 6. Route no-mistakes findings"
 assert_contains "sgt-no-mistakes-finding"
-assert_contains "warning-level actionable review or documentation debt"
+assert_contains "Every actionable finding creates or updates separate deduplicated owning-repo td work"
+assert_contains "create P1 work"
+assert_contains "Warning-level actionable review or documentation debt"
 assert_contains "informational actionable debt"
 assert_contains "correctness, security, data-integrity, and test findings cannot be deferred or ignored"
 assert_contains "Cosmetic and evidence-only noise"
-assert_contains "ask-user findings still require user escalation"
-assert_contains "Gate and ask-user dispositions return a blocking status"
+assert_contains "ask-user findings must use \`ask-user\`, create P1 work, and still require user escalation"
+assert_contains "Gate and ask-user dispositions create or update the card, then return a blocking status"
+assert_contains "Do not remediate no-mistakes findings in this validation run"
 assert_contains "follow the \`needs_input\` escalation protocol"
 assert_contains "run ID, head SHA, finding ID, severity, kind, file/line, description, and originating intent"
 assert_contains "separate parallel subagents"
@@ -216,5 +233,20 @@ task_dir="$(printf '%s\n' "$TEST_ROOT"/fleet/*)"
   printf 'dispatch did not record the spawned pane target\n' >&2
   exit 1
 }
+
+cat >> "$TEST_ROOT/config/test.yaml" <<'EOF'
+defaults:
+  agent_instructions: |
+    User override: run no-mistakes for this worker before completion.
+EOF
+
+PATH="$TEST_ROOT/fake-bin:$PATH" \
+SERGEANT_CONFIG="$TEST_ROOT/config" \
+SERGEANT_FLEET="$TEST_ROOT/fleet" \
+SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test "Ship worker loop" --repos app >/dev/null
+
+brief="$(printf '%s\n' "$TEST_ROOT"/app-sgt-* | grep -v "$(dirname "$brief")" | sed -n '1p')/.sergeant-brief.md"
+assert_contains "User override: run no-mistakes for this worker before completion."
 
 printf 'sgt-dispatch brief contract: ok\n'
