@@ -1394,6 +1394,15 @@ _git_worktree_removal_proven() {
     "$record_count" -gt 0 && "$target_count" -eq 0 ]]
 }
 
+_require_completed_removal_proof() {
+  local retry_root="$2" retry_type="$1" worktree="$3"
+
+  [[ "$retry_type" != "treehouse" ]] || \
+    _die "Cannot prove completed treehouse removal: $worktree"
+  _git_worktree_removal_proven "$retry_root" "$worktree" || \
+    _die "Cannot prove completed git worktree removal: $worktree"
+}
+
 _validation_object_identity() {
   [[ -e "$1" && ! -L "$1" ]] || return 1
   stat -c '%d:%i:%w' -- "$1" 2>/dev/null || stat -f '%d:%i:%B' "$1" 2>/dev/null
