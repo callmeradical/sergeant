@@ -84,6 +84,9 @@ for _ in $(seq 1 100); do
   sleep 0.02
 done
 [[ -s "$state/validation-success-ack" ]]
+sleep 0.1
+[[ ! -e "$TEST_ROOT/no-mistakes.log" ]]
+: > "$TEST_ROOT/coordinator-return-initiated"
 rm "$state/validation-launch.lock"
 
 for _ in $(seq 1 100); do
@@ -92,6 +95,7 @@ for _ in $(seq 1 100); do
 done
 grep -Fq 'axi run --intent' "$TEST_ROOT/no-mistakes.log"
 grep -Fq 'Validate only after release.' "$TEST_ROOT/no-mistakes.log"
+[[ -e "$TEST_ROOT/coordinator-return-initiated" ]]
 if grep -Fq -- '--yes' "$TEST_ROOT/no-mistakes.log"; then
   printf 'validation worker enabled automatic gates\n' >&2
   exit 1

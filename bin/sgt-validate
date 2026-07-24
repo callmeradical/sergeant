@@ -350,7 +350,17 @@ _rollback_validation_launch() {
   fi
   _release_validation_lock || true
 }
-trap _rollback_validation_launch EXIT
+_finish_validation_launch() {
+  local status=$?
+  trap - EXIT
+  if $VALIDATION_COMMITTED; then
+    _release_validation_lock || status=1
+  else
+    _rollback_validation_launch
+  fi
+  exit "$status"
+}
+trap _finish_validation_launch EXIT
 
 LOCK_COORDINATOR="$PRIMARY_PANE_ID|$(cat "$TASK_STATE/primary_pane_identity")"
 LOCK_PURPOSE="$TASK_ID/$REPO/validation-launch"
@@ -491,8 +501,6 @@ _wait_validation_handshake "$VALIDATION_SUCCESS_ACK" "$VALIDATION_HANDSHAKE" || 
   _die "Validation child did not acknowledge success"
 [[ "$(_validation_current_pane_identity "$VALIDATION_PANE" || true)" == \
   "$VALIDATION_IDENTITY" ]] || _die "Validation child exited before success publication"
+rm -f "$WINDOW_BACKUP" "$STAGE_BACKUP"
 VALIDATION_COMMITTED=true
 printf 'Validation launched in pane %s beside worker %s.\n' "$VALIDATION_PANE" "$PANE"
-_release_validation_lock || _die "Failed to release validation launch reservation"
-rm -f "$WINDOW_BACKUP" "$STAGE_BACKUP"
-trap - EXIT
