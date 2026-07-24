@@ -13,6 +13,7 @@ mkdir -p "$repo" "$worktree" "$fake_bin"
 printf '%s\n' "$worktree" > "$repo/worktree"
 printf '%%42\n' > "$repo/pane"
 printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo" > "$repo/pane_identity"
+printf 'opencode\n' > "$repo/agent"
 printf 'in_progress\n' > "$repo/status"
 
 cat > "$fake_bin/tmux" <<'EOF'
@@ -33,6 +34,25 @@ EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" "$ROOT/bi
 [[ "$(cat "$repo/message")" == "Choose a safe option." ]]
 PANE_DEAD=1 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
 [[ "$(cat "$repo/status")" == "needs_input" ]]
+
+printf 'in_progress\n' > "$worktree/.sergeant-status"
+printf 'in_progress\n' > "$repo/status"
+rm -f "$repo/pane_identity"
+legacy_identity="0|%42|4242|123457|$ROOT/bin/sgt-interactive-worker $repo $worktree opencode"
+PANE_IDENTITY="$legacy_identity" EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
+[[ "$(cat "$repo/status")" == "in_progress" ]]
+[[ "$(cat "$repo/pane_identity")" == "$legacy_identity" ]]
+[[ "$(cat "$repo/pane_identity_migration")" == "$legacy_identity" ]]
+
+rm -f "$repo/pane_identity"
+PANE_IDENTITY="0|%42|9999|999999|bash sgt-interactive-worker:$repo" \
+  EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT/bin/sgt-watch" --sync task-1
+[[ "$(cat "$repo/status")" == "orphaned" ]]
+[[ ! -e "$repo/pane_identity" ]]
+
+printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo" > "$repo/pane_identity"
 
 printf 'done\n' > "$worktree/.sergeant-status"
 rm -f "$worktree/.sergeant-result"

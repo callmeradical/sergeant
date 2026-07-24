@@ -48,7 +48,34 @@ fi
 _pane_is_supervisor() {
   local pane="$1"
   local repo_dir="${2%/}"
-  _sgt_pane_identity_matches "$pane" "$repo_dir"
+  local actual agent command created pane_id pane_pid remainder worktree
+
+  if [[ -s "$repo_dir/pane_identity" ]]; then
+    _sgt_pane_identity_matches "$pane" "$repo_dir"
+    return
+  fi
+
+  actual="$(_sgt_pane_identity "$pane")" || return 1
+  remainder="${actual#*|}"
+  pane_id="${remainder%%|*}"
+  remainder="${remainder#*|}"
+  pane_pid="${remainder%%|*}"
+  remainder="${remainder#*|}"
+  created="${remainder%%|*}"
+  command="${remainder#*|}"
+  worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+  agent="$(cat "$repo_dir/agent" 2>/dev/null || true)"
+  [[ "${actual%%|*}" == 0 && "$pane_id" == "$pane" &&
+     "$pane_pid" =~ ^[1-9][0-9]*$ && "$created" =~ ^[1-9][0-9]*$ &&
+     -n "$worktree" && -n "$agent" &&
+     "$command" == *sgt-interactive-worker* &&
+     "$command" == *"$repo_dir"* && "$command" == *"$worktree"* &&
+     "$command" == *"$agent"* ]] || return 1
+
+  printf '%s\n' "$actual" > "$repo_dir/pane_identity_migration.tmp.$$" || return 1
+  mv "$repo_dir/pane_identity_migration.tmp.$$" "$repo_dir/pane_identity_migration" || return 1
+  printf '%s\n' "$actual" > "$repo_dir/pane_identity.tmp.$$" || return 1
+  mv "$repo_dir/pane_identity.tmp.$$" "$repo_dir/pane_identity" || return 1
 }
 
 _sync_task() {

@@ -95,6 +95,7 @@ done
 [[ "$(cat "$TEST_ROOT/done/state/status")" == "done" ]]
 [[ "$(cat "$TEST_ROOT/done/state/worker_mode")" == "interactive" ]]
 [[ "$(cat "$TEST_ROOT/done/state/notification_delivered")" == "initial-notification-1" ]]
+[[ -s "$TEST_ROOT/done/state/notification_delivered_pane_identity" ]]
 [[ -s "$TEST_ROOT/done/state/result" ]]
 
 printf 'recovered-notification-1\n' > "$TEST_ROOT/recovery/state/notification_id"
@@ -114,6 +115,7 @@ for _ in $(seq 1 100); do
   sleep 0.02
 done
 [[ "$(cat "$TEST_ROOT/recovery/state/notification_delivered")" == "recovered-notification-1" ]]
+[[ -s "$TEST_ROOT/recovery/state/notification_delivered_pane_identity" ]]
 [[ "$(cat "$TEST_ROOT/recovery/state/status")" == "done" ]]
 
 real_mv="$(command -v mv)"

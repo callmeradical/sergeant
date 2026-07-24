@@ -145,7 +145,7 @@ _sgt_pane_identity_matches() {
 _sgt_publish_worker_notification() {
   local repo_dir="$1" worktree="$2" notification_id="$3" kind="$4" instruction="$5"
   local state_dir notification_state notification_tmp current_id current_ack current_delivered
-  local proof_dir proof_tmp repo_tmp active_id
+  local proof_dir proof_tmp repo_tmp active_id current_delivered_identity
 
   [[ "$notification_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
   state_dir="$repo_dir/notifications/$notification_id"
@@ -169,6 +169,7 @@ _sgt_publish_worker_notification() {
   current_id="$(cat "$repo_dir/notification_id" 2>/dev/null || true)"
   current_ack="$(cat "$worktree/.sergeant-notification-ack" 2>/dev/null || true)"
   current_delivered="$(cat "$repo_dir/notification_delivered" 2>/dev/null || true)"
+  current_delivered_identity="$(cat "$repo_dir/notification_delivered_pane_identity" 2>/dev/null || true)"
   if [[ -n "$current_id" ]]; then
     proof_dir="$repo_dir/notifications/$current_id"
     mkdir -p "$proof_dir" || return 1
@@ -184,6 +185,15 @@ _sgt_publish_worker_notification() {
       proof_tmp="$proof_dir/delivered.tmp.$$"
       printf '%s\n' "$current_id" > "$proof_tmp"
       mv "$proof_tmp" "$proof_dir/delivered" || {
+        rm -f "$proof_tmp"
+        return 1
+      }
+    fi
+    if [[ "$current_delivered" == "$current_id" && -n "$current_delivered_identity" &&
+          ! -f "$proof_dir/delivered_pane_identity" ]]; then
+      proof_tmp="$proof_dir/delivered_pane_identity.tmp.$$"
+      printf '%s\n' "$current_delivered_identity" > "$proof_tmp"
+      mv "$proof_tmp" "$proof_dir/delivered_pane_identity" || {
         rm -f "$proof_tmp"
         return 1
       }
@@ -210,14 +220,18 @@ _sgt_publish_worker_notification() {
 }
 _sgt_wait_worker_notification() {
   local pane="$1" repo_dir="$2" notification_id="$3"
-  local timeout="${SGT_NOTIFICATION_ACK_TIMEOUT:-60}" attempt delivered
+  local timeout="${SGT_NOTIFICATION_ACK_TIMEOUT:-60}" attempt delivered delivered_identity expected_identity pane_identity
   [[ "$timeout" =~ ^[0-9]+$ ]] || return 1
 
   attempt=0
   while :; do
-    _sgt_pane_identity_matches "$pane" "$repo_dir" || return 1
+    expected_identity="$(cat "$repo_dir/pane_identity" 2>/dev/null || true)"
+    pane_identity="$(_sgt_pane_identity "$pane")" || return 1
+    [[ -n "$expected_identity" && "$pane_identity" == "$expected_identity" &&
+       "${pane_identity%%|*}" == 0 ]] || return 1
     delivered="$(cat "$repo_dir/notification_delivered" 2>/dev/null || true)"
-    [[ "$delivered" == "$notification_id" ]] && return 0
+    delivered_identity="$(cat "$repo_dir/notification_delivered_pane_identity" 2>/dev/null || true)"
+    [[ "$delivered" == "$notification_id" && "$delivered_identity" == "$pane_identity" ]] && return 0
     (( attempt >= timeout * 10 )) && return 1
     attempt=$((attempt + 1))
     sleep 0.1

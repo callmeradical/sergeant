@@ -12,6 +12,8 @@ REPO_STATE="$1"
 WORKTREE="$2"
 AGENT="$3"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
 
 [[ -d "$WORKTREE" ]] || {
   echo "ERROR: worktree unavailable: $WORKTREE" >&2
@@ -84,13 +86,21 @@ _finish() {
 
 _deliver_notifications() {
   local notification_file="$WORKTREE/.sergeant-notification"
-  local notification_id expected_id acknowledged delivered state_dir pending
+  local notification_id expected_id acknowledged delivered delivered_identity pane_identity state_dir pending
   while :; do
     notification_id="$(sed -n 's/^notification_id=//p' "$notification_file" 2>/dev/null || true)"
     expected_id="$(cat "$REPO_STATE/notification_id" 2>/dev/null || true)"
     acknowledged="$(cat "$WORKTREE/.sergeant-notification-ack" 2>/dev/null || true)"
     delivered="$(cat "$REPO_STATE/notification_delivered" 2>/dev/null || true)"
-    if [[ -n "$notification_id" && "$notification_id" == "$expected_id" && "$delivered" != "$notification_id" ]]; then
+    delivered_identity="$(cat "$REPO_STATE/notification_delivered_pane_identity" 2>/dev/null || true)"
+    pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
+    if [[ -n "$notification_id" && "$notification_id" == "$expected_id" &&
+          ( "$delivered" != "$notification_id" || "$delivered_identity" != "$pane_identity" ) ]]; then
+      if [[ "$acknowledged" == "$notification_id" && "$delivered" == "$notification_id" &&
+            "$delivered_identity" != "$pane_identity" ]]; then
+        rm -f "$WORKTREE/.sergeant-notification-ack"
+        acknowledged=""
+      fi
       if [[ "$acknowledged" == "$notification_id" ]]; then
         state_dir="$REPO_STATE/notifications/$notification_id"
         mkdir -p "$state_dir" || {
@@ -107,6 +117,13 @@ _deliver_notifications() {
         pending="$state_dir/delivered.tmp.$$"
         printf '%s\n' "$notification_id" > "$pending"
         if ! mv "$pending" "$state_dir/delivered"; then
+          rm -f "$pending"
+          sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
+          continue
+        fi
+        pending="$REPO_STATE/notification_delivered_pane_identity.tmp.$$"
+        printf '%s\n' "$pane_identity" > "$pending"
+        if ! mv "$pending" "$REPO_STATE/notification_delivered_pane_identity"; then
           rm -f "$pending"
           sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
           continue

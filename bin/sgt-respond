@@ -40,6 +40,96 @@ REPO_DIR="$FLEET_DIR/$TASK_ID/$REPO"
 
 worktree="$(cat "$REPO_DIR/worktree" 2>/dev/null || true)"
 
+_sgt_response_lock_acquire "$REPO_DIR"
+_cleanup_respond() {
+  local status=$?
+  _sgt_response_lock_release || status=1
+  _cleanup_response_input || status=1
+  return "$status"
+}
+trap '_cleanup_respond' EXIT
+
+_install_legacy_file() {
+  local source_file="$1" target="$2" temporary
+  temporary="${target}.tmp.$$"
+  if ! cp "$source_file" "$temporary" || ! mv "$temporary" "$target"; then
+    rm -f "$temporary"
+    return 1
+  fi
+}
+
+_migrate_legacy_response_state() {
+  local actual_branch actual_git_dir actual_pointer branch canonical common_dir
+  local evidence revision task_dir="$FLEET_DIR/$TASK_ID"
+  local brief="$worktree/.sergeant-brief.md"
+
+  [[ -n "$worktree" && "$worktree" == /* && -d "$worktree" ]] || return 1
+  ! _sgt_intent_path_has_symlink "$worktree" || return 1
+  canonical="$(cd "$worktree" 2>/dev/null && pwd -P)" || return 1
+  [[ "$canonical" == "${worktree%/}" && -f "$canonical/.git" && ! -L "$canonical/.git" ]] || return 1
+  actual_pointer="$(cat "$canonical/.git")"
+  [[ "$actual_pointer" == "gitdir: "* ]] || return 1
+  actual_git_dir="${actual_pointer#gitdir: }"
+  [[ "$actual_git_dir" == /* ]] || actual_git_dir="$canonical/$actual_git_dir"
+  actual_git_dir="$(cd "$actual_git_dir" 2>/dev/null && pwd -P)" || return 1
+  common_dir="$(git -C "$canonical" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  [[ "$common_dir" == /* ]] || common_dir="$canonical/$common_dir"
+  common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || return 1
+  [[ "$actual_git_dir" == "$common_dir/worktrees/"* ]] || return 1
+  branch="$(cat "$REPO_DIR/branch" 2>/dev/null || true)"
+  [[ "$branch" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || return 1
+  actual_branch="$(git -C "$canonical" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  [[ "$actual_branch" == "$branch" ]] || return 1
+  [[ -f "$brief" && ! -L "$brief" ]] || return 1
+  grep -Fxq "**Task ID:** $TASK_ID" "$brief" &&
+    grep -Fxq "**Repo:** $REPO" "$brief" &&
+    grep -Fxq "**Branch:** $branch" "$brief" &&
+    grep -Fxq "**Worktree:** $worktree" "$brief" &&
+    grep -Fxq "**Fleet state:** $REPO_DIR/" "$brief" || return 1
+
+  [[ -f "$task_dir/.sergeant-intent.md" && ! -L "$task_dir/.sergeant-intent.md" &&
+     -f "$task_dir/intent_revision" && ! -L "$task_dir/intent_revision" ]] || return 1
+  revision="$(cat "$task_dir/intent_revision")"
+  [[ -n "$revision" && "$revision" == "$(_sgt_intent_revision "$task_dir/.sergeant-intent.md")" ]] || return 1
+  [[ ! -e "$REPO_DIR/worktree_git_pointer" ||
+     "$(cat "$REPO_DIR/worktree_git_pointer" 2>/dev/null || true)" == "$actual_pointer" ]] || return 1
+  [[ ! -e "$REPO_DIR/worktree_git_dir" ||
+     "$(cat "$REPO_DIR/worktree_git_dir" 2>/dev/null || true)" == "$actual_git_dir" ]] || return 1
+  if [[ -e "$REPO_DIR/.sergeant-intent.md" ]]; then
+    cmp -s "$task_dir/.sergeant-intent.md" "$REPO_DIR/.sergeant-intent.md" || return 1
+  fi
+  if [[ -e "$worktree/.sergeant-intent.md" ]]; then
+    cmp -s "$task_dir/.sergeant-intent.md" "$worktree/.sergeant-intent.md" || return 1
+  fi
+  [[ ! -e "$REPO_DIR/intent_revision" ||
+     "$(cat "$REPO_DIR/intent_revision" 2>/dev/null || true)" == "$revision" ]] || return 1
+
+  evidence="$REPO_DIR/legacy-response-migration.tmp.$$"
+  {
+    printf 'worktree=%s\n' "$canonical"
+    printf 'branch=%s\n' "$branch"
+    printf 'git_pointer=%s\n' "$actual_pointer"
+    printf 'git_dir=%s\n' "$actual_git_dir"
+    printf 'intent_revision=%s\n' "$revision"
+  } > "$evidence" || return 1
+  if [[ -e "$REPO_DIR/legacy-response-migration" ]]; then
+    cmp -s "$evidence" "$REPO_DIR/legacy-response-migration" || {
+      rm -f "$evidence"
+      return 1
+    }
+    rm -f "$evidence"
+  else
+    mv "$evidence" "$REPO_DIR/legacy-response-migration" || return 1
+  fi
+  [[ -e "$REPO_DIR/worktree_git_pointer" ]] || printf '%s\n' "$actual_pointer" > "$REPO_DIR/worktree_git_pointer"
+  [[ -e "$REPO_DIR/worktree_git_dir" ]] || printf '%s\n' "$actual_git_dir" > "$REPO_DIR/worktree_git_dir"
+  [[ -e "$REPO_DIR/.sergeant-intent.md" ]] ||
+    _install_legacy_file "$task_dir/.sergeant-intent.md" "$REPO_DIR/.sergeant-intent.md"
+  [[ -e "$worktree/.sergeant-intent.md" ]] ||
+    _install_legacy_file "$task_dir/.sergeant-intent.md" "$worktree/.sergeant-intent.md"
+  [[ -e "$REPO_DIR/intent_revision" ]] || printf '%s\n' "$revision" > "$REPO_DIR/intent_revision"
+}
+
 _worktree_is_owned_checkout() {
   local canonical expected_pointer actual_pointer expected_git_dir actual_git_dir
   [[ -n "$worktree" && "$worktree" == /* && -d "$worktree" ]] || return 1
@@ -60,20 +150,18 @@ _worktree_is_owned_checkout() {
   [[ -n "$expected_git_dir" && "$actual_git_dir" == "$expected_git_dir" ]]
 }
 
-_worktree_is_owned_checkout || \
-  _die "Recorded worktree is missing, stale, or not an owned checkout; response was not published"
+if ! _worktree_is_owned_checkout; then
+  if ! _migrate_legacy_response_state || ! _worktree_is_owned_checkout; then
+    _die "Recorded worktree is missing, stale, or not an owned checkout; response was not published"
+  fi
+fi
 
-_sgt_intent_revision_matches "$FLEET_DIR/$TASK_ID" "$REPO_DIR" "$worktree" || \
-  _die "canonical intent revision mismatch; audited human decision/new revision required"
-
-_sgt_response_lock_acquire "$REPO_DIR"
-_cleanup_respond() {
-  local status=$?
-  _sgt_response_lock_release || status=1
-  _cleanup_response_input || status=1
-  return "$status"
-}
-trap '_cleanup_respond' EXIT
+if ! _sgt_intent_revision_matches "$FLEET_DIR/$TASK_ID" "$REPO_DIR" "$worktree"; then
+  if ! _migrate_legacy_response_state || \
+     ! _sgt_intent_revision_matches "$FLEET_DIR/$TASK_ID" "$REPO_DIR" "$worktree"; then
+    _die "canonical intent revision mismatch; audited human decision/new revision required"
+  fi
+fi
 
 if [[ -n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-status" ]]; then
   status="$(tr -d '\n' < "$worktree/.sergeant-status")"
@@ -160,12 +248,8 @@ else
   _publish_local_response_transport "$RESPONSE_INPUT" "$response_id" "$gate_generation"
 fi
 
-active_notification_id="$(sed -n 's/^notification_id=//p' \
-  "$worktree/.sergeant-notification" 2>/dev/null || true)"
-if [[ "$active_notification_id" != "$response_id" ]]; then
-  _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$response_id" response \
-    "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
-fi
+_sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$response_id" response \
+  "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
 
 pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
 _pane_is_supervisor() {
@@ -190,6 +274,9 @@ if ! command -v tmux >/dev/null 2>&1 || [[ -z "$tmux_session" || -z "$window_nam
   echo "sgt-respond: no live local pane and relaunch metadata is incomplete; response file is ready."
   exit 0
 fi
+
+rm -f "$worktree/.sergeant-notification-ack" "$REPO_DIR/notification_delivered" \
+  "$REPO_DIR/notification_delivered_pane_identity"
 
 printf -v worker_command '%q %q %q %q' \
   "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent"

@@ -29,11 +29,15 @@ _sgt_pane_identity_matches "$TMUX_PANE" "$REPO_STATE" || \
 
 _sgt_response_lock_acquire "$REPO_STATE"
 ARCHIVE_STAGING=""
+FLEET_ACK_STAGING=""
+WORKTREE_ACK_STAGING=""
 _cleanup_ack_response() {
   local status=$?
   if [[ -n "$ARCHIVE_STAGING" && -e "$ARCHIVE_STAGING" ]]; then
     rm -rf "$ARCHIVE_STAGING" || status=1
   fi
+  [[ -z "$FLEET_ACK_STAGING" ]] || rm -f "$FLEET_ACK_STAGING" || status=1
+  [[ -z "$WORKTREE_ACK_STAGING" ]] || rm -f "$WORKTREE_ACK_STAGING" || status=1
   _sgt_response_lock_release || status=1
   return "$status"
 }
@@ -122,10 +126,14 @@ else
   mv "$ARCHIVE_STAGING" "$ARCHIVE_ENTRY"
   ARCHIVE_STAGING=""
 fi
-printf '%s\n' "$RESPONSE_ID" > "$REPO_STATE/response_ack.tmp.$$"
-printf '%s\n' "$RESPONSE_ID" > "$WORKTREE/.sergeant-response-ack.tmp.$$"
-mv "$REPO_STATE/response_ack.tmp.$$" "$REPO_STATE/response_ack"
-mv "$WORKTREE/.sergeant-response-ack.tmp.$$" "$WORKTREE/.sergeant-response-ack"
+FLEET_ACK_STAGING="$REPO_STATE/response_ack.tmp.$$"
+WORKTREE_ACK_STAGING="$WORKTREE/.sergeant-response-ack.tmp.$$"
+printf '%s\n' "$RESPONSE_ID" > "$FLEET_ACK_STAGING"
+printf '%s\n' "$RESPONSE_ID" > "$WORKTREE_ACK_STAGING"
+mv "$FLEET_ACK_STAGING" "$REPO_STATE/response_ack"
+FLEET_ACK_STAGING=""
+mv "$WORKTREE_ACK_STAGING" "$WORKTREE/.sergeant-response-ack"
+WORKTREE_ACK_STAGING=""
 rm -f "$REPO_STATE/response" "$WORKTREE/.sergeant-response" \
   "$WORKTREE/.sergeant-response-id" "$WORKTREE/.sergeant-response-generation" \
   "$WORKTREE/.sergeant-response-applied"

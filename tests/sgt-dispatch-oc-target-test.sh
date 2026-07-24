@@ -48,6 +48,8 @@ case "$1" in
       notification_id="$(cat "$repo_state/notification_id")"
       worktree="$(cat "$repo_state/worktree")"
       printf '%s\n' "$notification_id" > "$worktree/.sergeant-notification-ack"
+      printf '0|%%42|4242|123456|fixture-worker-command\n' \
+        > "$repo_state/notification_delivered_pane_identity"
       printf '%s\n' "$notification_id" > "$repo_state/notification_delivered"
     done
     printf '%%42\n'

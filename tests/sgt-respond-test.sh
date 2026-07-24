@@ -43,6 +43,13 @@ bash -c 'source "$1"; _sgt_intent_revision "$2"' _ \
   "$ROOT_DIR/bin/_sgt-intent.sh" "$fleet/task-1/.sergeant-intent.md" \
   > "$fleet/task-1/intent_revision"
 cp "$fleet/task-1/intent_revision" "$repo_state/intent_revision"
+cat > "$worktree/.sergeant-brief.md" <<EOF
+**Task ID:** task-1
+**Repo:** app
+**Branch:** response-test
+**Worktree:** $worktree
+**Fleet state:** $repo_state/
+EOF
 
 cat > "$fake_bin/tmux" <<'EOF'
 #!/usr/bin/env bash
@@ -50,18 +57,42 @@ printf '%s\n' "$*" >> "$TMUX_LOG"
 case "$1" in
   display-message)
     [[ "${PANE_ALIVE:-0}" == 1 ]] || exit 1
-    if [[ "${AUTO_DELIVER:-1}" == 1 && -s "$EXPECTED_WORKER/notification_id" ]]; then
+    target=""
+    previous=""
+    for argument in "$@"; do
+      [[ "$previous" == -t ]] && target="$argument"
+      previous="$argument"
+    done
+    pane_identity="${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
+    if [[ "$target" == "${NEW_PANE:-%99}" ]]; then
+      pane_identity="0|$target|9999|654321|sgt-interactive-worker:$EXPECTED_WORKER"
+      if [[ "${REQUIRE_FRESH_ACK:-0}" == 1 &&
+            -e "$(cat "$EXPECTED_WORKER/worktree")/.sergeant-notification-ack" &&
+            ! -e "$EXPECTED_WORKER/notification_delivered_pane_identity" ]]; then
+        exit 31
+      fi
+    fi
+    deliver=true
+    if [[ -n "${DELIVER_COUNT_FILE:-}" ]]; then
+      count=0
+      [[ ! -f "$DELIVER_COUNT_FILE" ]] || count="$(cat "$DELIVER_COUNT_FILE")"
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$DELIVER_COUNT_FILE"
+      [[ "$count" -ge "${DELIVER_AFTER:-1}" ]] || deliver=false
+    fi
+    if [[ "${AUTO_DELIVER:-1}" == 1 && "$deliver" == true && -s "$EXPECTED_WORKER/notification_id" ]]; then
       notification_id="$(cat "$EXPECTED_WORKER/notification_id")"
       notification_worktree="$(cat "$EXPECTED_WORKER/worktree")"
       printf '%s\n' "$notification_id" > "$notification_worktree/.sergeant-notification-ack"
+      printf '%s\n' "$pane_identity" > "$EXPECTED_WORKER/notification_delivered_pane_identity"
       printf '%s\n' "$notification_id" > "$EXPECTED_WORKER/notification_delivered"
     fi
-    printf '%s\n' "${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
+    printf '%s\n' "$pane_identity"
     ;;
   new-window)
     [[ "${FAIL_WINDOW:-0}" == 0 ]] || exit 7
     [[ "${EMPTY_WINDOW:-0}" == 0 ]] || exit 0
-    printf '%%99\n'
+    printf '%s\n' "${NEW_PANE:-%99}"
     ;;
   send-keys) exit 0 ;;
 esac
@@ -143,6 +174,60 @@ status=$?
 set -e
 [[ "$status" -ne 0 && "$output" == *'reads the response from standard input'* ]]
 [[ ! -e "$repo_state/response" && ! -e "$worktree/.sergeant-response" ]]
+
+rm -f "$repo_state/worktree_git_pointer" "$repo_state/worktree_git_dir" \
+  "$repo_state/.sergeant-intent.md" "$repo_state/intent_revision" \
+  "$worktree/.sergeant-intent.md"
+printf 'response-test\n' > "$repo_state/branch"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/legacy.log" TD_LOG="$TEST_ROOT/legacy-td.log" \
+  TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 EXPECTED_WORKER="$repo_state" \
+  SERGEANT_FLEET="$fleet" respond 'legacy response' >/dev/null
+[[ -s "$repo_state/worktree_git_pointer" && -s "$repo_state/worktree_git_dir" ]]
+cmp -s "$fleet/task-1/.sergeant-intent.md" "$repo_state/.sergeant-intent.md"
+cmp -s "$fleet/task-1/.sergeant-intent.md" "$worktree/.sergeant-intent.md"
+cmp -s "$fleet/task-1/intent_revision" "$repo_state/intent_revision"
+grep -Fq 'branch=response-test' "$repo_state/legacy-response-migration"
+grep -Fq "worktree=$worktree" "$repo_state/legacy-response-migration"
+rm -f "$repo_state/response" "$repo_state/response_id" "$repo_state/response_generation" \
+  "$repo_state/notification_id" "$repo_state/notification_delivered" \
+  "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" \
+  "$worktree/.sergeant-response-generation" "$worktree/.sergeant-notification"
+
+replacement_source="$TEST_ROOT/replacement-source"
+replacement_worktree="$TEST_ROOT/replacement-worktree"
+replacement_state="$fleet/task-1/replacement"
+mkdir -p "$replacement_source" "$replacement_state"
+git -C "$replacement_source" init -q
+git -C "$replacement_source" config user.name Test
+git -C "$replacement_source" config user.email test@example.invalid
+touch "$replacement_source/README.md"
+git -C "$replacement_source" add README.md
+git -C "$replacement_source" commit -qm fixture
+git -C "$replacement_source" worktree add -q -b unrelated "$replacement_worktree"
+printf '%s\n' "$replacement_worktree" > "$replacement_state/worktree"
+printf 'response-test\n' > "$replacement_state/branch"
+printf 'needs_input\n' > "$replacement_state/status"
+printf 'needs_input\n' > "$replacement_worktree/.sergeant-status"
+printf '1\n' > "$replacement_worktree/.sergeant-gate-generation"
+cat > "$replacement_worktree/.sergeant-brief.md" <<EOF
+**Task ID:** task-1
+**Repo:** replacement
+**Branch:** response-test
+**Worktree:** $replacement_worktree
+**Fleet state:** $replacement_state/
+EOF
+set +e
+replacement_output="$(printf 'replacement response' | PATH="$fake_bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/replacement.log" TD_LOG="$TEST_ROOT/replacement-td.log" \
+  TD_RESPONSE_FILE="$replacement_worktree/.sergeant-response" PANE_ALIVE=0 \
+  EXPECTED_WORKER="$replacement_state" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-respond" task-1 replacement 2>&1)"
+replacement_status=$?
+set -e
+[[ "$replacement_status" -ne 0 && "$replacement_output" == *'owned checkout'* ]]
+[[ ! -e "$replacement_state/worktree_git_pointer" && \
+   ! -e "$replacement_state/.sergeant-intent.md" && \
+   ! -e "$replacement_worktree/.sergeant-response" ]]
 
 for newline_case in zero one multiple; do
   expected_response="$TEST_ROOT/response-$newline_case"
@@ -327,6 +412,31 @@ TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 \
 grep -Fq 'new-window -P -F #{pane_id} -t sgt: -n task/app' "$TEST_ROOT/dead.log"
 grep -Fq "$ROOT_DIR/bin/sgt-interactive-worker" "$TEST_ROOT/dead.log"
 [[ "$(cat "$repo_state/notification_delivered")" == "$(cat "$repo_state/response_id")" ]]
+[[ "$(cat "$repo_state/notification_delivered_pane_identity")" == 0\|%99\|9999\|654321\|* ]]
+
+relaunch_response_id="$(cat "$repo_state/response_id")"
+printf 'orphaned\n' > "$repo_state/status"
+printf 'orphaned\n' > "$worktree/.sergeant-status"
+printf '%s\n' "$relaunch_response_id" > "$repo_state/notification_delivered"
+printf '0|%%99|9999|654321|stale-pane\n' > "$repo_state/notification_delivered_pane_identity"
+printf '%s\n' "$relaunch_response_id" > "$worktree/.sergeant-notification-ack"
+rm -f "$worktree/.sergeant-response"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/crash-relaunch.log" \
+  TD_LOG="$TEST_ROOT/crash-relaunch-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 NEW_PANE=%100 REQUIRE_FRESH_ACK=1 \
+  DELIVER_COUNT_FILE="$TEST_ROOT/crash-relaunch-delivery-count" DELIVER_AFTER=3 \
+  PANE_IDENTITY="1|%99|9999|654321|dead-pane" EXPECTED_WORKER="$repo_state" \
+  SERGEANT_FLEET="$fleet" respond 'resume dead worker' >/dev/null
+[[ "$(cat "$repo_state/response_id")" == "$relaunch_response_id" ]]
+[[ "$(cat "$repo_state/pane")" == %100 ]]
+[[ "$(cat "$repo_state/notification_delivered")" == "$relaunch_response_id" ]]
+[[ "$(cat "$repo_state/notification_delivered_pane_identity")" == 0\|%100\|9999\|654321\|* ]]
+[[ "$(cat "$TEST_ROOT/crash-relaunch-delivery-count")" -ge 3 ]]
+[[ ! -e "$TEST_ROOT/crash-relaunch-td.log" ]]
+[[ "$(cat "$worktree/.sergeant-response")" == 'resume dead worker' ]]
+[[ -f "$repo_state/notifications/$relaunch_response_id/acknowledged" ]]
+[[ -f "$repo_state/notifications/$relaunch_response_id/delivered" ]]
+grep -Fq '%99' "$repo_state/notifications/$relaunch_response_id/delivered_pane_identity"
 
 rm "$worktree/.sergeant-response" "$repo_state/response"
 cat > "$fake_bin/td" <<'EOF'

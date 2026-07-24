@@ -516,6 +516,47 @@ fi
 [[ -d "$worktree" && -d "$TEST_ROOT/fleet/task-123" ]]
 rm "$worktree/uncommitted.txt"
 
+bash -c '
+  set -euo pipefail
+  source "$1"
+  repo_state="$2"
+  acquired="$3"
+  _sgt_response_lock_acquire "$repo_state"
+  touch "$acquired"
+  for _ in $(seq 1 500); do
+    compgen -G "$repo_state/.response.lock.*" >/dev/null && break
+    sleep 0.01
+  done
+  compgen -G "$repo_state/.response.lock.*" >/dev/null
+  archive="$repo_state/response-archive/response-123"
+  mkdir -p "$archive"
+  printf "response-123\n" > "$repo_state/response_id"
+  printf "1\n" > "$repo_state/response_generation"
+  printf "response body\n" > "$archive/body"
+  printf "1\n" > "$archive/gate_generation"
+  printf "done\n" > "$archive/applied_status"
+  printf "response_id=response-123\ngate_generation=1\nstatus=done\n" > "$archive/proof"
+  _sgt_response_lock_release
+' _ "$ROOT_DIR/bin/_sgt-response-lock.sh" "$repo_state" "$TEST_ROOT/contention-acquired" &
+lock_holder_pid=$!
+for _ in $(seq 1 500); do
+  [[ -e "$TEST_ROOT/contention-acquired" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/contention-acquired" ]]
+set +e
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" task-123 > "$TEST_ROOT/response-contention.log" 2>&1
+contention_status=$?
+set -e
+wait "$lock_holder_pid"
+[[ "$contention_status" -ne 0 ]]
+grep -Fq 'pending or incomplete response acknowledgement' "$TEST_ROOT/response-contention.log"
+[[ -d "$worktree" && -d "$repo_state" ]]
+[[ -f "$repo_state/response-archive/response-123/body" ]]
+rm -rf "$repo_state/response-archive"
+rm -f "$repo_state/response_id" "$repo_state/response_generation"
+
 cat > "$TEST_ROOT/fake-bin/fake-agent" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$AGENT_PID_FILE"

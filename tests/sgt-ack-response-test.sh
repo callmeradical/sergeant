@@ -225,6 +225,17 @@ for fail_at in 2 3; do
   set -e
   [[ "$status" -ne 0 ]]
   [[ -d "$repo_state/response-archive/response-123" ]]
+  if [[ "$fail_at" == 2 ]]; then
+    [[ ! -e "$repo_state/response_ack" && ! -e "$worktree/.sergeant-response-ack" ]]
+  else
+    [[ "$(cat "$repo_state/response_ack")" == response-123 ]]
+    [[ ! -e "$worktree/.sergeant-response-ack" ]]
+  fi
+  if compgen -G "$repo_state/response_ack.tmp.*" >/dev/null ||
+     compgen -G "$worktree/.sergeant-response-ack.tmp.*" >/dev/null; then
+    printf 'ack marker failure retained temporary publication state: %s\n' "$fail_at" >&2
+    exit 1
+  fi
   assert_retry_converges "task-$name"
 done
 
@@ -297,5 +308,12 @@ for newline_case in zero multiple; do
   assert_retry_converges "task-$name" "$expected"
   cmp -s "$expected" "$repo_state/response-archive/response-123/body"
 done
+
+PATH="$fake_bin:$PATH" REAL_MV="$real_mv" REAL_RM="$real_rm" \
+  FAIL_COUNTER="$TEST_ROOT/second-replay-count" TMUX_PANE=%42 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-ack-response" "task-$name" app response-123 >/dev/null
+cmp -s "$expected" "$repo_state/response-archive/response-123/body"
+[[ "$(cat "$repo_state/response_ack")" == response-123 ]]
+[[ "$(cat "$worktree/.sergeant-response-ack")" == response-123 ]]
 
 printf 'sgt-ack-response consumption: ok\n'
