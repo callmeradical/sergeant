@@ -10,6 +10,10 @@ A sergeant project lives at `~/.config/sergeant/<name>.yaml`. The filename (with
 
 ```yaml
 dev_root: ~/Dev   # root of your development directory
+
+# Optional. Default GitHub CLI identity for all dispatches.
+# Overridden by project-level or repo-level identity fields.
+# default_identity: callmeradical
 ```
 
 All scripts read `dev_root` at startup. Repo `path` values that are not absolute (`/...`) or home-relative (`~/...`) are resolved relative to `dev_root`. This makes project YAMLs portable across machines — change `dev_root` in one place instead of every path in every YAML.
@@ -34,6 +38,7 @@ All scripts read `dev_root` at startup. Repo `path` values that are not absolute
 | `groups` | map | no | Logical groupings of repos, with shared instructions and optional descriptions that Sergeant can use for review routing. |
 | `graphify` | map | no | Configuration for cross-repo knowledge graph generation. |
 | `defaults` | map | no | Default values applied to every repo. |
+| `identity` | string | no | GitHub CLI user for `gh auth switch` before dispatching. Overrides `config.default_identity`. Per-repo `identity` overrides this. |
 
 ---
 
@@ -47,6 +52,7 @@ All scripts read `dev_root` at startup. Repo `path` values that are not absolute
 | `group` | string | no | Group name this repo belongs to. Must match a key in `groups`. |
 | `role` | string | no | Human description of this repo's role in the project. Sergeant includes it in worker context and review routing. |
 | `agent_instructions` | string | no | Instructions injected into agent context when working in this repo. Overrides group-level instructions for the same repo and participates in merged review-routing context. |
+| `identity` | string | no | GitHub CLI user for `gh auth switch` before dispatching this repo. Overrides project-level `identity` and `config.default_identity`. Resolution order: `repo.identity` → `project.identity` → `config.default_identity` → no-op. |
 
 ---
 
