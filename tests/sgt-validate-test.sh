@@ -357,6 +357,20 @@ validation_worktree="$(cat "$repo_state/validation_worktree")"
 [[ "$(cat "$repo_state/validation_status")" == launched && \
   ! -e "$validation_worktree/stale-finished" ]]
 
+printf 'legacy-finished-clone\n' > "$validation_worktree/legacy-finished"
+rm -f "$repo_state/validation_worktree_identity" "$repo_state/validation_worktree_git_dir" \
+  "$repo_state/validation_worktree_git_identity" "$repo_state/validation_worktree_owner"
+printf 'exited:0\n' > "$repo_state/validation_status"
+rm -f "$concurrent_dir/pane-live"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+validation_worktree="$(cat "$repo_state/validation_worktree")"
+[[ "$(cat "$repo_state/validation_status")" == launched && \
+  ! -e "$validation_worktree/legacy-finished" ]]
+[[ -s "$repo_state/validation_worktree_identity" && -s "$repo_state/validation_worktree_git_dir" && \
+  -s "$repo_state/validation_worktree_git_identity" && -s "$repo_state/validation_worktree_owner" ]]
+
 rm "$repo_state/validation_pane" "$repo_state/validation_pane_identity" \
   "$repo_state/validation_pane_pid" "$repo_state/validation_process_group" \
   "$repo_state/validation_process_start" \
@@ -716,7 +730,13 @@ for identity_path in "$fleet/task-1/primary_pane_identity" "$repo_state/pane_ide
   [[ "$status" -ne 0 ]]
   rm "$identity_path"
   mv "$saved_identity" "$identity_path"
-  for unsafe_mode in 644 444 700 400 666; do
+  chmod 644 "$identity_path"
+  PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+    TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+    "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+  [[ "$(stat -c '%a' "$identity_path" 2>/dev/null || stat -f '%Lp' "$identity_path")" == "600" ]]
+  cleanup_validation_state
+  for unsafe_mode in 444 700 400 666; do
     chmod "$unsafe_mode" "$identity_path"
     set +e
     output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
