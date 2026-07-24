@@ -14,8 +14,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=_sgt-lib.sh
+# shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-response-lock.sh
+source "$SCRIPT_DIR/_sgt-response-lock.sh"
 
 [[ $# -ge 1 ]] || _die "Usage: sgt-cleanup <task-id> [repo]"
 TASK_ID="$1"
@@ -302,6 +304,59 @@ _stop_validation_pane() {
   fi
 }
 
+_response_archive_field() {
+  local key="$1" proof_file="$2"
+  awk -F= -v key="$key" '
+    $1 == key { count++; value = substr($0, length(key) + 2) }
+    END { if (count == 1 && value != "") print value; else exit 1 }
+  ' "$proof_file"
+}
+
+_require_response_cleanup_safe() {
+  local repo_dir="$1" worktree="$2"
+  local applied_status archive response_generation response_id response_proof_root
+
+  response_proof_root="$worktree"
+  [[ -n "$response_proof_root" && -d "$response_proof_root" ]] || \
+    response_proof_root="$repo_dir/terminal-evidence"
+
+  if [[ -e "$repo_dir/response" || -L "$repo_dir/response" ||
+        -e "$response_proof_root/.sergeant-response" || -L "$response_proof_root/.sergeant-response" ||
+        -e "$response_proof_root/.sergeant-response-id" || -L "$response_proof_root/.sergeant-response-id" ||
+        -e "$response_proof_root/.sergeant-response-generation" || -L "$response_proof_root/.sergeant-response-generation" ||
+        -e "$response_proof_root/.sergeant-response-applied" || -L "$response_proof_root/.sergeant-response-applied" ]]; then
+    _die "$(basename "$repo_dir") has pending or incomplete response acknowledgement"
+  fi
+
+  if [[ ! -e "$repo_dir/response_id" && ! -L "$repo_dir/response_id" &&
+        ! -e "$repo_dir/response_generation" && ! -L "$repo_dir/response_generation" &&
+        ! -e "$repo_dir/response_ack" && ! -L "$repo_dir/response_ack" &&
+        ! -e "$repo_dir/response-archive" && ! -L "$repo_dir/response-archive" &&
+        ! -e "$response_proof_root/.sergeant-response-ack" && ! -L "$response_proof_root/.sergeant-response-ack" ]]; then
+    return 0
+  fi
+
+  response_id="$(cat "$repo_dir/response_id" 2>/dev/null || true)"
+  response_generation="$(cat "$repo_dir/response_generation" 2>/dev/null || true)"
+  archive="$repo_dir/response-archive/$response_id"
+  [[ "$response_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ &&
+     "$response_generation" =~ ^[1-9][0-9]*$ &&
+     "$(cat "$repo_dir/response_ack" 2>/dev/null || true)" == "$response_id" &&
+     "$(cat "$response_proof_root/.sergeant-response-ack" 2>/dev/null || true)" == "$response_id" &&
+     -d "$archive" && ! -L "$archive" ]] || \
+    _die "$(basename "$repo_dir") has pending or incomplete response acknowledgement"
+  for archive_file in body gate_generation applied_status proof; do
+    [[ -f "$archive/$archive_file" && ! -L "$archive/$archive_file" ]] || \
+      _die "$(basename "$repo_dir") has pending or incomplete response acknowledgement"
+  done
+  applied_status="$(cat "$archive/applied_status")"
+  [[ "$(cat "$archive/gate_generation")" == "$response_generation" &&
+     "$(_response_archive_field response_id "$archive/proof" 2>/dev/null || true)" == "$response_id" &&
+     "$(_response_archive_field gate_generation "$archive/proof" 2>/dev/null || true)" == "$response_generation" &&
+     "$(_response_archive_field status "$archive/proof" 2>/dev/null || true)" == "$applied_status" ]] || \
+    _die "$(basename "$repo_dir") has pending or incomplete response acknowledgement"
+}
+
 _require_terminal_repos() {
   local cleanup_phase evidence_dir repo_dir repo_name status worktree worktree_status
 
@@ -324,6 +379,7 @@ _require_terminal_repos() {
     esac
 
     worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+    _require_response_cleanup_safe "$repo_dir" "$worktree"
     cleanup_phase="$(cat "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     if [[ -n "$worktree" && -d "$worktree" ]]; then
       if [[ "$cleanup_phase" == $'removing\n'"$worktree" ]]; then
@@ -471,6 +527,10 @@ for repo_dir in "$TASK_DIR"/*/; do
   status="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
   wt_type="$(cat "$repo_dir/wt_type" 2>/dev/null || echo "git")"
 
+  _sgt_response_lock_acquire "$repo_dir"
+  trap '_sgt_response_lock_release' EXIT
+  _require_response_cleanup_safe "$repo_dir" "$worktree"
+
   echo "--- $repo_name (status: $status, type: $wt_type) ---"
 
   _stop_validation_pane "$repo_dir"
@@ -495,6 +555,8 @@ for repo_dir in "$TASK_DIR"/*/; do
   if [[ -z "$worktree" ]]; then
     echo "  no worktree recorded — skipping"
     echo ""
+    _sgt_response_lock_release
+    trap - EXIT
     continue
   fi
 
@@ -503,6 +565,8 @@ for repo_dir in "$TASK_DIR"/*/; do
     # Record reconciled-absent so future replays are idempotent.
     _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" 2>/dev/null || true
     echo ""
+    _sgt_response_lock_release
+    trap - EXIT
     continue
   fi
 
@@ -561,6 +625,8 @@ for repo_dir in "$TASK_DIR"/*/; do
     _die "Failed to publish reconciled cleanup phase: $repo_name"
 
   echo ""
+  _sgt_response_lock_release
+  trap - EXIT
 done
 
 # Only remove fleet state if cleaning all repos (no FILTER_REPO)

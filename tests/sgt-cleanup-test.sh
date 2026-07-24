@@ -127,6 +127,104 @@ for unsafe_status in dispatched in_progress needs_input blocked orphaned unknown
   [[ -d "$status_worktree" && -d "$TEST_ROOT/fleet/$task_id" ]]
 done
 
+setup_response_cleanup_fixture() {
+  local state_name="$1"
+  response_state="$TEST_ROOT/fleet/response-$state_name/app"
+  response_worktree="$TEST_ROOT/response-$state_name-worktree"
+  response_archive="$response_state/response-archive/response-123"
+  mkdir -p "$response_archive" "$response_worktree"
+  printf '%s\n' "$response_worktree" > "$response_state/worktree"
+  printf 'done\n' > "$response_state/status"
+  printf 'result\n' > "$response_state/result"
+  printf 'done\n' > "$response_worktree/.sergeant-status"
+  printf 'result\n' > "$response_worktree/.sergeant-result"
+  printf 'response-123\n' > "$response_state/response_id"
+  printf '1\n' > "$response_state/response_generation"
+  printf 'response body\n' > "$response_archive/body"
+  printf '1\n' > "$response_archive/gate_generation"
+  printf 'done\n' > "$response_archive/applied_status"
+  cat > "$response_archive/proof" <<'EOF'
+response_id=response-123
+gate_generation=1
+status=done
+EOF
+}
+
+for response_case in pending-transport archive-only fleet-ack both-acks-with-transport partial-transport \
+  archive-proof-mismatch; do
+  setup_response_cleanup_fixture "$response_case"
+  case "$response_case" in
+    pending-transport)
+      rm -rf "$response_state/response-archive"
+      printf 'response body\n' > "$response_state/response"
+      printf 'response body\n' > "$response_worktree/.sergeant-response"
+      ;;
+    archive-only) ;;
+    fleet-ack)
+      printf 'response-123\n' > "$response_state/response_ack"
+      ;;
+    both-acks-with-transport)
+      printf 'response-123\n' > "$response_state/response_ack"
+      printf 'response-123\n' > "$response_worktree/.sergeant-response-ack"
+      printf 'response body\n' > "$response_state/response"
+      printf 'response body\n' > "$response_worktree/.sergeant-response"
+      ;;
+    partial-transport)
+      printf 'response-123\n' > "$response_state/response_ack"
+      printf 'response-123\n' > "$response_worktree/.sergeant-response-ack"
+      printf 'response body\n' > "$response_worktree/.sergeant-response"
+      ;;
+    archive-proof-mismatch)
+      printf 'response-123\n' > "$response_state/response_ack"
+      printf 'response-123\n' > "$response_worktree/.sergeant-response-ack"
+      printf 'response_id=response-123\ngate_generation=2\nstatus=done\n' \
+        > "$response_archive/proof"
+      ;;
+  esac
+
+  set +e
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" "response-$response_case" \
+    > "$TEST_ROOT/response-$response_case.log" 2>&1
+  response_status=$?
+  set -e
+  [[ "$response_status" -ne 0 ]]
+  grep -Fq 'pending or incomplete response acknowledgement' \
+    "$TEST_ROOT/response-$response_case.log"
+  [[ -d "$response_worktree" && -d "$response_state" ]]
+done
+
+setup_response_cleanup_fixture complete
+mkdir -p "$response_state/terminal-evidence"
+printf 'response-123\n' > "$response_worktree/.sergeant-response-ack"
+cp "$response_worktree/.sergeant-status" "$response_state/terminal-evidence/.sergeant-status"
+cp "$response_worktree/.sergeant-result" "$response_state/terminal-evidence/.sergeant-result"
+cp "$response_worktree/.sergeant-response-ack" \
+  "$response_state/terminal-evidence/.sergeant-response-ack"
+printf 'response-123\n' > "$response_state/response_ack"
+rm -rf "$response_worktree"
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" response-complete >/dev/null
+[[ ! -e "$TEST_ROOT/fleet/response-complete" ]]
+
+lock_state="$TEST_ROOT/fleet/response-lock/app"
+lock_worktree="$TEST_ROOT/response-lock-missing-worktree"
+mkdir -p "$lock_state/terminal-evidence"
+printf '%s\n' "$lock_worktree" > "$lock_state/worktree"
+printf 'done\n' > "$lock_state/status"
+printf 'result\n' > "$lock_state/result"
+printf 'done\n' > "$lock_state/terminal-evidence/.sergeant-status"
+printf 'result\n' > "$lock_state/terminal-evidence/.sergeant-result"
+printf 'invalid-owner\n' > "$lock_state/response.lock"
+set +e
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" response-lock > "$TEST_ROOT/response-lock.log" 2>&1
+lock_status=$?
+set -e
+[[ "$lock_status" -ne 0 ]]
+grep -Fq 'Response lock has an invalid owner' "$TEST_ROOT/response-lock.log"
+[[ -d "$lock_state" ]]
+
 for proof_case in missing mismatched; do
   proof_state="$TEST_ROOT/fleet/proof-$proof_case/app"
   proof_worktree="$TEST_ROOT/proof-$proof_case-worktree"
