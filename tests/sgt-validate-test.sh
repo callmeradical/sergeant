@@ -311,6 +311,8 @@ rm "$repo_state/validation_pane" "$repo_state/validation_pane_identity" \
   "$repo_state/validation-child-committed" \
   "$repo_state/validation-success" "$repo_state/validation-success-ack" \
   "$repo_state/validation_status" "$repo_state/validation_worktree" \
+  "$repo_state/validation_worktree_identity" "$repo_state/validation_worktree_git_dir" \
+  "$repo_state/validation_worktree_git_identity" "$repo_state/validation_worktree_owner" \
   "$repo_state/validation_head"
 rm -rf "$validation_worktree"
 printf 'implementation-app-task-1\n' > "$repo_state/window_name"
@@ -327,7 +329,9 @@ cleanup_validation_state() {
     "$repo_state/validation-child-committed" \
     "$repo_state/validation-success" "$repo_state/validation-success-ack" \
     "$repo_state/validation_status" \
-    "$repo_state/validation_worktree" "$repo_state/validation_head"
+    "$repo_state/validation_worktree" "$repo_state/validation_worktree_identity" \
+    "$repo_state/validation_worktree_git_dir" "$repo_state/validation_worktree_git_identity" \
+    "$repo_state/validation_worktree_owner" "$repo_state/validation_head"
   [[ -z "$launched_worktree" ]] || rm -rf "$launched_worktree"
   printf 'implementation-app-task-1\n' > "$repo_state/window_name"
   printf 'implementation\n' > "$repo_state/stage"
@@ -384,7 +388,9 @@ assert_failed_launch_rolls_back_and_retries() {
     validation-child-commit \
     validation-child-committed \
     validation-success validation-success-ack \
-    validation_status validation_worktree validation_head \
+    validation_status validation_worktree validation_worktree_identity \
+    validation_worktree_git_dir validation_worktree_git_identity validation_worktree_owner \
+    validation_head \
     validation-launch.lock; do
     [[ ! -e "$repo_state/$path" ]] || {
       printf 'injected %s failure stranded %s: %s\n' "$transition" "$path" "$output" >&2

@@ -78,6 +78,10 @@ SOURCE_BRANCH="$(git -C "$WORKTREE" branch --show-current)"
 [[ -n "$SOURCE_BRANCH" ]] || _die "Validation requires a named source branch"
 VALIDATION_WORKTREE="${WORKTREE}-validation-${TASK_ID}"
 VALIDATION_WORKTREE_RECORD="$REPO_STATE/validation_worktree"
+VALIDATION_WORKTREE_IDENTITY_RECORD="$REPO_STATE/validation_worktree_identity"
+VALIDATION_WORKTREE_GIT_DIR_RECORD="$REPO_STATE/validation_worktree_git_dir"
+VALIDATION_WORKTREE_GIT_IDENTITY_RECORD="$REPO_STATE/validation_worktree_git_identity"
+VALIDATION_WORKTREE_OWNER_RECORD="$REPO_STATE/validation_worktree_owner"
 VALIDATION_WORKTREE_RECORD_TEMP="${VALIDATION_WORKTREE_RECORD}.tmp.$$"
 VALIDATION_INTENT="$REPO_STATE/validation-intent.md"
 VALIDATION_INTENT_TEMP="${VALIDATION_INTENT}.tmp.$$"
@@ -375,6 +379,8 @@ OLD_STAGE_IDENTITY="$(_validation_path_identity "$REPO_STATE/stage")" || \
 _validation_path_exists "$VALIDATION_WORKTREE" && \
   _die "Validation code snapshot already exists: $VALIDATION_WORKTREE"
 for path in "$VALIDATION_WORKTREE_RECORD" "$VALIDATION_WORKTREE_RECORD_TEMP" \
+  "$VALIDATION_WORKTREE_IDENTITY_RECORD" "$VALIDATION_WORKTREE_GIT_DIR_RECORD" \
+  "$VALIDATION_WORKTREE_GIT_IDENTITY_RECORD" "$VALIDATION_WORKTREE_OWNER_RECORD" \
   "$VALIDATION_INTENT" "$VALIDATION_INTENT_TEMP" "$REPO_STATE/validation_pane" \
   "$REPO_STATE/validation-release" "$REPO_STATE/validation_head" \
   "$REPO_STATE/validation_pane_identity" "$REPO_STATE/validation_pane_pid" \
@@ -402,8 +408,26 @@ if [[ "$(git -C "$VALIDATION_WORKTREE" rev-parse HEAD)" != "$CURRENT_HEAD" ]] ||
    ! _sgt_worktree_is_validation_clean "$VALIDATION_WORKTREE"; then
   _die "Isolated validation code snapshot did not preserve reviewed HEAD"
 fi
+VALIDATION_GIT_DIR="$(git -C "$VALIDATION_WORKTREE" rev-parse --path-format=absolute \
+  --git-common-dir)" || _die "Failed to capture validation Git directory"
+VALIDATION_GIT_IDENTITY="$(_validation_path_identity "$VALIDATION_GIT_DIR")" || \
+  _die "Failed to capture validation Git directory identity"
+VALIDATION_OWNER="$LOCK_PURPOSE|$VALIDATION_LOCK_IDENTITY|$CURRENT_HEAD"
+(umask 077; set -C; printf '%s\n' "$VALIDATION_OWNER" > \
+  "$VALIDATION_GIT_DIR/sergeant-validation-owner") 2>/dev/null || \
+  _die "Failed to persist validation checkout owner"
 _validation_write_owned "$VALIDATION_WORKTREE_RECORD" "$VALIDATION_WORKTREE" marker || \
   _die "Failed to publish validation code snapshot marker"
+_validation_write_owned "$VALIDATION_WORKTREE_IDENTITY_RECORD" \
+  "$VALIDATION_WORKTREE_IDENTITY" worktree-identity || \
+  _die "Failed to publish validation checkout identity"
+_validation_write_owned "$VALIDATION_WORKTREE_GIT_DIR_RECORD" "$VALIDATION_GIT_DIR" \
+  worktree-git-dir || _die "Failed to publish validation Git directory"
+_validation_write_owned "$VALIDATION_WORKTREE_GIT_IDENTITY_RECORD" \
+  "$VALIDATION_GIT_IDENTITY" worktree-git-identity || \
+  _die "Failed to publish validation Git identity"
+_validation_write_owned "$VALIDATION_WORKTREE_OWNER_RECORD" "$VALIDATION_OWNER" \
+  worktree-owner || _die "Failed to publish validation checkout owner"
 _validation_transition intent-copy || _die "Failed to snapshot canonical validation intent"
 _validation_copy_owned "$WORKTREE/.sergeant-intent.md" "$VALIDATION_INTENT" intent || \
   _die "Failed to snapshot canonical validation intent"

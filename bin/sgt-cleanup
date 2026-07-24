@@ -508,6 +508,40 @@ _record_cleanup_phase() {
     mv "$repo_dir/cleanup-phase.tmp" "$repo_dir/cleanup-phase"
 }
 
+_validation_object_identity() {
+  [[ -e "$1" && ! -L "$1" ]] || return 1
+  stat -c '%d:%i:%w' -- "$1" 2>/dev/null || stat -f '%d:%i:%B' "$1" 2>/dev/null
+}
+
+_validation_path_identity() {
+  local identity
+  identity="$(_validation_object_identity "$1")" || return 1
+  if [[ -f "$1" ]]; then
+    printf '%s:%s\n' "$identity" "$(cksum < "$1")"
+  else
+    printf '%s\n' "$identity"
+  fi
+}
+
+_validation_checkout_matches() {
+  local checkout="$1" expected_path="$2" expected_identity="$3" expected_git_dir="$4"
+  local expected_git_identity="$5" expected_head="$6" expected_owner="$7"
+  local git_dir owner_file
+  [[ -d "$checkout" && ! -L "$checkout" ]] || return 1
+  [[ "$(_validation_path_identity "$checkout" || true)" == "$expected_identity" ]] || return 1
+  git_dir="$(git -C "$checkout" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || \
+    return 1
+  if [[ -n "$expected_path" ]]; then
+    [[ "$git_dir" == "$expected_git_dir" ]] || return 1
+  fi
+  [[ "$(_validation_path_identity "$git_dir" || true)" == "$expected_git_identity" ]] || return 1
+  [[ "$(git -C "$checkout" rev-parse HEAD 2>/dev/null || true)" == "$expected_head" ]] || \
+    return 1
+  owner_file="$git_dir/sergeant-validation-owner"
+  [[ -f "$owner_file" && ! -L "$owner_file" && "$(cat "$owner_file")" == \
+    "$expected_owner" ]] || return 1
+}
+
 _require_terminal_repos
 _require_clean_worktrees
 
@@ -537,15 +571,39 @@ for repo_dir in "$TASK_DIR"/*/; do
   _stop_local_worker "$repo_dir" "$worktree"
 
   validation_worktree="$(cat "$repo_dir/validation_worktree" 2>/dev/null || true)"
-  if [[ -n "$validation_worktree" && -e "$validation_worktree" ]]; then
+  if [[ -n "$validation_worktree" && ( -e "$validation_worktree" || -L "$validation_worktree" ) ]]; then
     [[ "$validation_worktree" == "${worktree}-validation-${TASK_ID}" ]] || \
       _die "Validation worktree path is outside the recorded ownership boundary: $validation_worktree"
-    git -C "$validation_worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
-      _die "Validation worktree is not a git checkout: $validation_worktree"
+    validation_identity="$(cat "$repo_dir/validation_worktree_identity" 2>/dev/null || true)"
+    validation_git_dir="$(cat "$repo_dir/validation_worktree_git_dir" 2>/dev/null || true)"
+    validation_git_identity="$(cat "$repo_dir/validation_worktree_git_identity" 2>/dev/null || true)"
+    validation_head="$(cat "$repo_dir/validation_head" 2>/dev/null || true)"
+    validation_owner="$(cat "$repo_dir/validation_worktree_owner" 2>/dev/null || true)"
+    [[ -n "$validation_identity" && -n "$validation_git_dir" && \
+      -n "$validation_git_identity" && -n "$validation_head" && -n "$validation_owner" ]] || \
+      _die "Validation checkout ownership provenance is incomplete: $validation_worktree"
+    [[ "$validation_owner" == "$TASK_ID/$repo_name/validation-launch|"*"|$validation_head" ]] || \
+      _die "Validation checkout owner provenance does not match: $validation_worktree"
+    _validation_checkout_matches "$validation_worktree" "$validation_worktree" \
+      "$validation_identity" "$validation_git_dir" "$validation_git_identity" \
+      "$validation_head" "$validation_owner" || \
+      _die "Validation checkout identity does not match recorded ownership: $validation_worktree"
     validation_cwd_pids="$(_worktree_cwd_pids "$validation_worktree")"
     [[ -z "$validation_cwd_pids" ]] || \
       _die "Processes still have $validation_worktree as their current directory: $(tr '\n' ' ' <<< "$validation_cwd_pids")"
-    rm -rf "$validation_worktree"
+    validation_quarantine="${validation_worktree}.cleanup.$$.$RANDOM"
+    [[ ! -e "$validation_quarantine" && ! -L "$validation_quarantine" ]] || \
+      _die "Validation cleanup quarantine already exists: $validation_quarantine"
+    mv "$validation_worktree" "$validation_quarantine" || \
+      _die "Failed to stage validation checkout cleanup: $validation_worktree"
+    if ! _validation_checkout_matches "$validation_quarantine" "" "$validation_identity" \
+      "$validation_git_dir" "$validation_git_identity" "$validation_head" "$validation_owner"; then
+      if [[ ! -e "$validation_worktree" && ! -L "$validation_worktree" ]]; then
+        mv "$validation_quarantine" "$validation_worktree" 2>/dev/null || true
+      fi
+      _die "Validation checkout changed during cleanup and was preserved: $validation_worktree"
+    fi
+    rm -rf "$validation_quarantine"
   fi
 
   cwd_pids="$(_worktree_cwd_pids "$worktree")"
