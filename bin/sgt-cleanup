@@ -202,7 +202,13 @@ _stop_local_worker() {
 }
 
 _path_device() {
-  local device path="$1"
+  local device parent path="$1"
+
+  while [[ ! -e "$path" && ! -L "$path" ]]; do
+    parent="$(dirname "$path")"
+    [[ "$parent" != "$path" ]] || return 1
+    path="$parent"
+  done
 
   device="$(stat -c '%d' "$path" 2>/dev/null || \
     stat -f '%d' "$path" 2>/dev/null)" || return 1
@@ -210,8 +216,19 @@ _path_device() {
   printf '%s\n' "$device"
 }
 
+_require_same_filesystem_pair() {
+  local fleet_device repo_dir="$1" repo_name="$2" worktree="$3" worktree_device
+
+  fleet_device="$(_path_device "$repo_dir")" || \
+    _die "Cannot verify cleanup filesystem layout: $repo_name fleet state"
+  worktree_device="$(_path_device "$worktree")" || \
+    _die "Cannot verify cleanup filesystem layout: $repo_name worktree"
+  [[ "$fleet_device" == "$worktree_device" ]] || \
+    _die "Unsupported cleanup layout: fleet state and worktree must be on the same filesystem; move SERGEANT_FLEET or the worktree before retrying: $repo_name"
+}
+
 _require_same_filesystem_layout() {
-  local fleet_device repo_dir repo_name worktree worktree_device
+  local repo_dir repo_name worktree
 
   for repo_dir in "$TASK_DIR"/*/; do
     [[ -d "$repo_dir" ]] || continue
@@ -222,13 +239,8 @@ _require_same_filesystem_layout() {
     fi
 
     worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
-    [[ -n "$worktree" && -d "$worktree" ]] || continue
-    fleet_device="$(_path_device "$repo_dir")" || \
-      _die "Cannot verify cleanup filesystem layout: $repo_name fleet state"
-    worktree_device="$(_path_device "$worktree")" || \
-      _die "Cannot verify cleanup filesystem layout: $repo_name worktree"
-    [[ "$fleet_device" == "$worktree_device" ]] || \
-      _die "Unsupported cleanup layout: fleet state and worktree must be on the same filesystem; move SERGEANT_FLEET or the worktree before retrying: $repo_name"
+    [[ -n "$worktree" ]] || continue
+    _require_same_filesystem_pair "$repo_dir" "$repo_name" "$worktree"
   done
 }
 
@@ -391,8 +403,9 @@ _require_clean_worktrees() {
 
 _stage_worker_evidence() {
   local evidence expected_identity="$3" staged_identity staging_dir="$4" \
-    worktree="$2" worker_identity
+    worktree="$2" worker_identity repo_dir="$1"
 
+  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
   [[ ! -e "$staging_dir" && ! -L "$staging_dir" ]] || return 1
   mkdir "$staging_dir" || return 1
   for evidence in "$worktree"/.sergeant-*; do
@@ -445,6 +458,7 @@ _remove_worker_evidence() {
     expected_identity="$3" name repo_dir="$1" worktree="$2"
   local -a moved=()
 
+  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
   [[ ! -e "$backup_dir" && ! -L "$backup_dir" ]] || return 1
   mkdir "$backup_dir" || return 1
   if ! _cleanup_mutation_hook before-live-removal \
@@ -484,6 +498,7 @@ _restore_worker_evidence() {
   local -a backed_up=() published=()
 
   [[ -d "$worktree" && -d "$evidence_dir" ]] || return 0
+  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
   _cleanup_mutation_hook before-retry-restore \
     "${SGT_CLEANUP_MUTATE_PATH:-$evidence_dir/.sergeant-status}" || return 1
   persisted_identity="$(_worker_evidence_identity "$evidence_dir")" || return 1
@@ -521,6 +536,7 @@ _restore_worker_evidence() {
       restore-rollback-cleanup
     return 1
   fi
+  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
   for evidence in "$worktree"/.sergeant-*; do
     [[ -f "$evidence" ]] || continue
     name="$(basename "$evidence")"
@@ -535,6 +551,7 @@ _restore_worker_evidence() {
     fi
     backed_up[${#backed_up[@]}]="$name"
   done
+  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
   for evidence in "$staging_dir"/.sergeant-*; do
     [[ -f "$evidence" ]] || continue
     name="$(basename "$evidence")"
@@ -560,10 +577,12 @@ _restore_worker_evidence() {
 }
 
 _restore_removed_worker_evidence() {
-  local backup_dir="$2" evidence name worktree="$1"
+  local backup_dir="$2" evidence name repo_dir worktree="$1"
   local -a restored=()
 
   [[ -d "$worktree" && -d "$backup_dir" ]] || return 0
+  repo_dir="$(dirname "$backup_dir")"
+  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
   for evidence in "$backup_dir"/.sergeant-*; do
     [[ -f "$evidence" ]] || continue
     name="$(basename "$evidence")"
@@ -583,6 +602,7 @@ _record_cleanup_phase() {
   local actual expected phase="$2" repo_dir="$1" temp worktree="$3"
   shift 3
 
+  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
   temp="$repo_dir/cleanup-phase.tmp.$$"
   [[ ! -e "$temp" && ! -L "$temp" ]] || return 1
   expected="$({
@@ -877,6 +897,7 @@ _publish_initial_cleanup() {
   local evidence_identity="$5" marker marker_preexisting=false repo_dir="$1" \
     repo_root="$2" transaction worktree="$3" wt_type="$4"
 
+  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
   transaction="$repo_dir/cleanup-transaction.tmp.$$"
   marker="$(_repo_git_dir "$repo_root" common)/sergeant-instance" || return 1
   [[ -e "$marker" || -L "$marker" ]] && marker_preexisting=true
@@ -899,6 +920,7 @@ _publish_initial_cleanup() {
     return 1
   fi
 
+  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
   if ! _cleanup_fail_point publish-evidence || \
     ! mv "$transaction/terminal-evidence" "$repo_dir/terminal-evidence" || \
     ! _cleanup_fail_point publish-owner || \
@@ -1245,6 +1267,7 @@ for repo_dir in "$TASK_DIR"/*/; do
 
   if [[ "$wt_type" == "treehouse" ]]; then
     echo "  returning treehouse lease: $worktree"
+    _require_same_filesystem_pair "$repo_dir" "$repo_name" "$worktree"
     if ! (cd "$retry_root" && treehouse return "$worktree" 2>&1 | sed 's/^/  /'); then
       if [[ ! -d "$worktree" ]]; then
         _rollback_remove_path "$LIVE_EVIDENCE_BACKUP" \
@@ -1260,6 +1283,7 @@ for repo_dir in "$TASK_DIR"/*/; do
     fi
   else
     echo "  removing git worktree: $worktree"
+    _require_same_filesystem_pair "$repo_dir" "$repo_name" "$worktree"
     if ! git -C "$retry_root" worktree remove "$worktree" 2>&1 | sed 's/^/  /'; then
       if [[ ! -d "$worktree" ]]; then
         _rollback_remove_path "$LIVE_EVIDENCE_BACKUP" \

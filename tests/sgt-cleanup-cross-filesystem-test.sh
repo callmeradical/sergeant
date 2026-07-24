@@ -29,8 +29,21 @@ EOF
 
 cat > "$TEST_ROOT/fake-bin/stat" <<'EOF'
 #!/usr/bin/env bash
+if [[ -n "${FAKE_STAT_COUNT_FILE:-}" ]]; then
+  count=0
+  [[ ! -f "$FAKE_STAT_COUNT_FILE" ]] || count="$(cat "$FAKE_STAT_COUNT_FILE")"
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FAKE_STAT_COUNT_FILE"
+fi
 case "${!#}" in
-  "$FAKE_CROSS_DEVICE_PATH") printf '200\n' ;;
+  "$FAKE_CROSS_DEVICE_PATH")
+    if [[ -z "${FAKE_CROSS_DEVICE_AFTER:-}" || \
+      "${count:-0}" -gt "$FAKE_CROSS_DEVICE_AFTER" ]]; then
+      printf '200\n'
+    else
+      printf '100\n'
+    fi
+    ;;
   *) printf '100\n' ;;
 esac
 EOF
@@ -71,7 +84,11 @@ EOF
 }
 
 snapshot_state() {
-  find "$1" "$2" -type f -exec cksum {} + | LC_ALL=C sort
+  local root
+
+  for root in "$@"; do
+    [[ ! -e "$root" ]] || find "$root" -type f -exec cksum {} +
+  done | LC_ALL=C sort
 }
 
 assert_cross_filesystem_rejected() {
@@ -132,5 +149,57 @@ assert_cross_filesystem_rejected git initial
 assert_cross_filesystem_rejected treehouse initial
 assert_cross_filesystem_rejected git retry
 assert_cross_filesystem_rejected treehouse retry
+
+init_case git crossfs-device-change
+: > "$TEST_ROOT/crossfs-device-change-removals"
+device_change_state="$TEST_ROOT/fleet/crossfs-device-change/app"
+device_change_worktree="$TEST_ROOT/crossfs-device-change-linked-worktree"
+device_change_before="$(snapshot_state "$device_change_state" \
+  "$device_change_worktree")"
+set +e
+device_change_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_CROSS_DEVICE_PATH="$device_change_worktree" \
+  FAKE_CROSS_DEVICE_AFTER=2 \
+  FAKE_STAT_COUNT_FILE="$TEST_ROOT/crossfs-device-change-stat-count" \
+  FAKE_REMOVER_LOG="$TEST_ROOT/crossfs-device-change-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" crossfs-device-change 2>&1)"
+device_change_status=$?
+set -e
+[[ "$device_change_status" -ne 0 ]]
+[[ "$device_change_output" == *"Unsupported cleanup layout: fleet state and worktree must be on the same filesystem; move SERGEANT_FLEET or the worktree before retrying: app"* ]]
+[[ "$(snapshot_state "$device_change_state" "$device_change_worktree")" == \
+  "$device_change_before" ]]
+[[ ! -s "$TEST_ROOT/crossfs-device-change-removals" ]]
+[[ ! -e "$device_change_state/cleanup-owner" ]]
+
+init_case git crossfs-absent-retry
+: > "$TEST_ROOT/crossfs-absent-retry-removals"
+PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_REMOVER_LOG="$TEST_ROOT/crossfs-absent-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" crossfs-absent-retry >/dev/null 2>&1 || true
+absent_repo="$TEST_ROOT/crossfs-absent-retry-main"
+absent_state="$TEST_ROOT/fleet/crossfs-absent-retry/app"
+absent_worktree="$TEST_ROOT/crossfs-absent-retry-linked-worktree"
+"$REAL_GIT" -C "$absent_repo" worktree remove --force "$absent_worktree"
+absent_before="$(snapshot_state "$absent_state")"
+absent_removals_before="$(wc -l < "$TEST_ROOT/crossfs-absent-retry-removals")"
+set +e
+absent_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_CROSS_DEVICE_PATH="$TEST_ROOT" \
+  FAKE_REMOVER_LOG="$TEST_ROOT/crossfs-absent-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" crossfs-absent-retry 2>&1)"
+absent_status=$?
+set -e
+[[ "$absent_status" -ne 0 ]]
+[[ "$absent_output" == *"Unsupported cleanup layout: fleet state and worktree must be on the same filesystem; move SERGEANT_FLEET or the worktree before retrying: app"* ]]
+[[ "$(snapshot_state "$absent_state")" == "$absent_before" ]]
+[[ "$(wc -l < "$TEST_ROOT/crossfs-absent-retry-removals")" == \
+  "$absent_removals_before" ]]
 
 printf 'sgt-cleanup cross-filesystem preflight: ok\n'
