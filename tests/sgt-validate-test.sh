@@ -71,7 +71,6 @@ case "$1" in
           printf '0|%%77|8888|345678|unrelated-command\n'
         elif [[ "${FAIL_TRANSITION:-}" == "pane-dead" && \
           -e "$CONCURRENT_DIR/pane-identity-captured" ]]; then
-          rm -f "$CONCURRENT_DIR/pane-live"
           printf '1|%%77|7777|234567|%s\n' "$(cat "$CONCURRENT_DIR/validation-command")"
         else
           printf '0|%%77|7777|234567|%s\n' "$(cat "$CONCURRENT_DIR/validation-command")"
@@ -298,11 +297,18 @@ assert_failed_launch_rolls_back_and_retries() {
       exit 1
     }
   done
+  transaction_paths=("$repo_state"/*.candidate.* "$repo_state"/*.validation-backup.*)
+  for path in "${transaction_paths[@]}"; do
+    [[ ! -e "$path" && ! -L "$path" ]] || {
+      printf 'injected %s failure stranded transaction path %s\n' "$transition" "$path" >&2
+      exit 1
+    }
+  done
   [[ "$(cat "$repo_state/window_name")" == "implementation-app-task-1" ]]
   [[ "$(cat "$repo_state/stage")" == "implementation" ]]
   after_transition_kills="$(grep -c '^kill-pane -t %77$' "$TEST_ROOT/tmux.log" || true)"
   case "$transition" in
-    split|split-empty|pane-identity)
+    split|split-empty|pane-identity|pane-dead)
       [[ "$after_transition_kills" -eq $((before_transition_kills + 1)) ]] || {
         printf 'injected %s failure did not clean its exact pane\n' "$transition" >&2
         exit 1
