@@ -5,7 +5,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 REAL_GIT="$(command -v git)"
-export REAL_GIT
+REAL_CP="$(command -v cp)"
+export REAL_CP REAL_GIT
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 mkdir -p "$TEST_ROOT/config" "$TEST_ROOT/fake-bin" "$TEST_ROOT/fleet"
@@ -15,6 +16,7 @@ cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 case " $* " in
   *" worktree remove "*)
     printf 'git|%s\n' "${!#}" >> "$FAKE_REMOVER_LOG"
+    [[ "${FAKE_REMOVER_SUCCESS:-}" != true ]] || exec "$REAL_GIT" "$@"
     exit 1
     ;;
 esac
@@ -24,12 +26,17 @@ EOF
 cat > "$TEST_ROOT/fake-bin/treehouse" <<'EOF'
 #!/usr/bin/env bash
 printf 'treehouse|%s\n' "$2" >> "$FAKE_REMOVER_LOG"
+if [[ "${FAKE_REMOVER_SUCCESS:-}" == true ]]; then
+  rm -rf "$2"
+  exit 0
+fi
 exit 1
 EOF
 
 cat > "$TEST_ROOT/fake-bin/stat" <<'EOF'
 #!/usr/bin/env bash
-if [[ -n "${FAKE_STAT_COUNT_FILE:-}" ]]; then
+if [[ -n "${FAKE_STAT_COUNT_FILE:-}" && \
+  "${!#}" == "$FAKE_CROSS_DEVICE_PATH" ]]; then
   count=0
   [[ ! -f "$FAKE_STAT_COUNT_FILE" ]] || count="$(cat "$FAKE_STAT_COUNT_FILE")"
   count=$((count + 1))
@@ -47,7 +54,14 @@ case "${!#}" in
   *) printf '100\n' ;;
 esac
 EOF
-chmod +x "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/stat" \
+cat > "$TEST_ROOT/fake-bin/cp" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${FAKE_RESTORE_FAILURE:-}" == true && "${!#}" == *.restore.* ]]; then
+  exit 1
+fi
+"$REAL_CP" "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/cp" "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/stat" \
   "$TEST_ROOT/fake-bin/treehouse"
 
 init_case() {
@@ -201,5 +215,123 @@ set -e
 [[ "$(snapshot_state "$absent_state")" == "$absent_before" ]]
 [[ "$(wc -l < "$TEST_ROOT/crossfs-absent-retry-removals")" == \
   "$absent_removals_before" ]]
+
+assert_boundary_change_rejected() {
+  local boundary="$3" mode="$1" phase="$2" task_id
+  local before calls_before marker output state status worktree
+
+  task_id="crossfs-boundary-$mode-$phase-$boundary"
+  init_case "$mode" "$task_id"
+  state="$TEST_ROOT/fleet/$task_id/app"
+  worktree="$TEST_ROOT/$task_id-linked-worktree"
+  marker="$TEST_ROOT/$task_id-main/.git/sergeant-instance"
+  : > "$TEST_ROOT/$task_id-removals"
+  if [[ "$phase" == retry ]]; then
+    PATH="$TEST_ROOT/fake-bin:$PATH" \
+      FAKE_REMOVER_LOG="$TEST_ROOT/$task_id-removals" \
+      SERGEANT_CONFIG="$TEST_ROOT/config" \
+      SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+      "$ROOT_DIR/bin/sgt-cleanup" "$task_id" >/dev/null 2>&1 || true
+  fi
+  before="$(snapshot_state "$state" "$worktree")"
+  calls_before="$(wc -l < "$TEST_ROOT/$task_id-removals")"
+  set +e
+  output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+    FAKE_CROSS_DEVICE_PATH="$worktree" \
+    FAKE_CROSS_DEVICE_AFTER="$boundary" \
+    FAKE_STAT_COUNT_FILE="$TEST_ROOT/$task_id-stat-count" \
+    FAKE_REMOVER_LOG="$TEST_ROOT/$task_id-removals" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" "$task_id" 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -ne 0 ]]
+  [[ "$output" == *"Unsupported cleanup layout: fleet state and worktree must be on the same filesystem; move SERGEANT_FLEET or the worktree before retrying: app"* ]]
+  [[ "$(snapshot_state "$state" "$worktree")" == "$before" ]]
+  [[ "$(wc -l < "$TEST_ROOT/$task_id-removals")" == "$calls_before" ]]
+  if compgen -G "$state/*.tmp.*" >/dev/null; then
+    printf 'boundary rollback left an artifact: %s %s %s\n' \
+      "$mode" "$phase" "$boundary" >&2
+    exit 1
+  fi
+  if [[ "$phase" == initial ]]; then
+    [[ ! -e "$marker" ]]
+    [[ ! -e "$state/cleanup-owner" ]]
+    [[ ! -e "$state/cleanup-phase" ]]
+    [[ ! -e "$state/terminal-evidence" ]]
+  fi
+}
+
+for boundary_mode in git treehouse; do
+  for boundary_phase in initial retry; do
+    for boundary_number in 1 2 3 4 5; do
+      assert_boundary_change_rejected "$boundary_mode" "$boundary_phase" \
+        "$boundary_number"
+    done
+  done
+done
+
+for phase_mode in git treehouse; do
+  for phase_retry in initial retry; do
+    phase_task="crossfs-phase-$phase_mode-$phase_retry"
+    init_case "$phase_mode" "$phase_task"
+    phase_state="$TEST_ROOT/fleet/$phase_task/app"
+    phase_worktree="$TEST_ROOT/$phase_task-linked-worktree"
+    : > "$TEST_ROOT/$phase_task-removals"
+    if [[ "$phase_retry" == retry ]]; then
+      PATH="$TEST_ROOT/fake-bin:$PATH" \
+        FAKE_REMOVER_LOG="$TEST_ROOT/$phase_task-removals" \
+        SERGEANT_CONFIG="$TEST_ROOT/config" \
+        SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+        "$ROOT_DIR/bin/sgt-cleanup" "$phase_task" >/dev/null 2>&1 || true
+    fi
+    phase_calls_before="$(wc -l < "$TEST_ROOT/$phase_task-removals")"
+    set +e
+    phase_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+      FAKE_CROSS_DEVICE_PATH="$TEST_ROOT" \
+      FAKE_REMOVER_SUCCESS=true \
+      FAKE_REMOVER_LOG="$TEST_ROOT/$phase_task-removals" \
+      SERGEANT_CONFIG="$TEST_ROOT/config" \
+      SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+      "$ROOT_DIR/bin/sgt-cleanup" "$phase_task" 2>&1)"
+    phase_status=$?
+    set -e
+    [[ "$phase_status" -ne 0 ]]
+    [[ "$phase_output" == *"Unsupported cleanup layout: fleet state and worktree must be on the same filesystem; move SERGEANT_FLEET or the worktree before retrying: app"* ]]
+    [[ ! -e "$phase_worktree" ]]
+    [[ "$(sed -n '1p' "$phase_state/cleanup-phase")" == removing ]]
+    [[ -f "$phase_state/cleanup-owner" ]]
+    [[ -f "$phase_state/terminal-evidence/.sergeant-status" ]]
+    [[ "$(wc -l < "$TEST_ROOT/$phase_task-removals")" -eq \
+      $((phase_calls_before + 1)) ]]
+    if compgen -G "$phase_state/*.tmp.*" >/dev/null; then
+      printf 'phase-boundary failure left an artifact: %s %s\n' \
+        "$phase_mode" "$phase_retry" >&2
+      exit 1
+    fi
+  done
+done
+
+init_case git crossfs-rollback-failure
+: > "$TEST_ROOT/crossfs-rollback-failure-removals"
+set +e
+rollback_failure_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_CROSS_DEVICE_PATH="$TEST_ROOT/crossfs-rollback-failure-linked-worktree" \
+  FAKE_CROSS_DEVICE_AFTER=5 \
+  FAKE_STAT_COUNT_FILE="$TEST_ROOT/crossfs-rollback-failure-stat-count" \
+  FAKE_RESTORE_FAILURE=true \
+  FAKE_REMOVER_LOG="$TEST_ROOT/crossfs-rollback-failure-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" crossfs-rollback-failure 2>&1)"
+rollback_failure_status=$?
+set -e
+[[ "$rollback_failure_status" -ne 0 ]]
+[[ "$rollback_failure_output" == *"CRITICAL: cross-filesystem cleanup rollback failed; inspect preserved backup:"* ]]
+[[ "$rollback_failure_output" != *"ERROR: Unsupported cleanup layout:"* ]]
+compgen -G "$TEST_ROOT/fleet/crossfs-rollback-failure/app/live-evidence.tmp.*" \
+  >/dev/null
+[[ ! -s "$TEST_ROOT/crossfs-rollback-failure-removals" ]]
 
 printf 'sgt-cleanup cross-filesystem preflight: ok\n'
