@@ -10,6 +10,11 @@ description: >
   My SaaS application — Go API backend, SvelteKit frontend,
   and Kubernetes infra managed with Helm/ArgoCD.
 
+# Optional. GitHub CLI user identity to switch to before dispatching workers
+# (uses `gh auth switch --user <identity>`). Resolved in priority order:
+#   repo.identity → project.identity → config.default_identity → no-op
+# identity: callmeradical
+
 # Required. Ordered list of repositories in this project.
 repos:
   # Repo names used by sgt-graphify must match [A-Za-z0-9._-]+, cannot contain spaces,
@@ -30,6 +35,9 @@ repos:
       Run `go test ./...` before committing.
       Run `golangci-lint run` for linting.
       Never modify generated protobuf files in pkg/proto/.
+    # Optional. GitHub CLI identity for this repo's dispatches.
+    # Overrides project-level identity and global default_identity.
+    # identity: callmeradical
 
   - name: myapp-app
     path: ~/Dev/myapp/myapp-app

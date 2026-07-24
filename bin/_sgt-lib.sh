@@ -36,6 +36,7 @@ AGENT_CMD="${SERGEANT_AGENT:-$(_sgt_detect_agent)}"
 # ── Global config (dev_root) ──────────────────────────────────────────────────
 
 DEV_ROOT="$HOME/Dev"  # sensible default
+SGT_DEFAULT_IDENTITY=""  # set from config.yaml default_identity
 
 _sgt_load_global_config() {
   local cfg="$SERGEANT_CONFIG/config.yaml"
@@ -44,6 +45,11 @@ _sgt_load_global_config() {
     dr="$(yq '.dev_root // ""' "$cfg" 2>/dev/null | tr -d '\n')"
     if [[ -n "$dr" && "$dr" != "null" ]]; then
       DEV_ROOT="${dr/#\~/$HOME}"
+    fi
+    local di
+    di="$(yq '.default_identity // ""' "$cfg" 2>/dev/null | tr -d '\n')"
+    if [[ -n "$di" && "$di" != "null" ]]; then
+      SGT_DEFAULT_IDENTITY="$di"
     fi
   fi
 }

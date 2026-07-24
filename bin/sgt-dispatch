@@ -454,6 +454,18 @@ for rname in "${TARGET_REPOS[@]}"; do
   repo_role="$(yq ".repos[$i].role // \"\"" "$CONFIG_FILE")"
   repo_group="$(yq ".repos[$i].group // \"\"" "$CONFIG_FILE")"
 
+  # ── Resolve gh auth identity (repo → project → global default → no-op) ───
+  repo_identity="$(yq ".repos[$i].identity // \"\"" "$CONFIG_FILE")"
+  project_identity="$(yq '.identity // ""' "$CONFIG_FILE")"
+  resolved_identity=""
+  if [[ -n "$repo_identity" && "$repo_identity" != "null" ]]; then
+    resolved_identity="$repo_identity"
+  elif [[ -n "$project_identity" && "$project_identity" != "null" ]]; then
+    resolved_identity="$project_identity"
+  elif [[ -n "${SGT_DEFAULT_IDENTITY:-}" ]]; then
+    resolved_identity="$SGT_DEFAULT_IDENTITY"
+  fi
+
   echo "--- $rname ---"
 
   if ! _sgt_is_git_repo "$repo_path"; then
@@ -504,6 +516,7 @@ for rname in "${TARGET_REPOS[@]}"; do
   fi
 
   if $DRY_RUN; then
+    [[ -n "$resolved_identity" ]] && echo "  identity: $resolved_identity"
     if $use_treehouse; then
       echo "  worktree: treehouse lease (pool: ~/.treehouse/)"
     else
@@ -513,6 +526,19 @@ for rname in "${TARGET_REPOS[@]}"; do
     [[ -n "$wait_for" ]] && echo "  waits for: $wait_for"
     echo ""
     continue
+  fi
+
+  # ── Switch gh auth identity (if configured) ──────────────────────────────────
+  if [[ -n "$resolved_identity" ]]; then
+    _info "switching gh auth to: $resolved_identity"
+    if ! auth_switch_output="$(gh auth switch --user "$resolved_identity" 2>&1)"; then
+      mkdir -p "$repo_task_dir"
+      printf 'failed: gh auth switch --user %s\n' "$resolved_identity" \
+        > "$repo_task_dir/status"
+      printf 'gh auth switch --user %s failed: %s\n' \
+        "$resolved_identity" "$auth_switch_output" > "$repo_task_dir/diagnostic"
+      _die "gh auth switch --user $resolved_identity failed: $auth_switch_output"
+    fi
   fi
 
   # ── Acquire worktree ─────────────────────────────────────────────────────────
@@ -560,6 +586,7 @@ for rname in "${TARGET_REPOS[@]}"; do
   fi
 
   echo "$worktree_path" > "$repo_task_dir/worktree"
+  printf '%s\n' "${resolved_identity:-}" > "$repo_task_dir/identity"
   [[ -f "$worktree_path/.git" && ! -L "$worktree_path/.git" ]] || \
     _die "worktree has no immutable Git pointer: $worktree_path"
   worktree_git_pointer="$(cat "$worktree_path/.git")"
