@@ -145,7 +145,7 @@ done
 
 printf 'running\n' > "$REPO_STATE/validation_status"
 cd "$WORKTREE" || exit 2
-args=(axi run --intent "$(cat "$VALIDATION_INTENT")")
+args=(axi run --intent-file "$VALIDATION_INTENT")
 [[ -z "$SKIP" ]] || args+=(--skip "$SKIP")
 no-mistakes "${args[@]}"
 status=$?

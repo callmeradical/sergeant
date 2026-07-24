@@ -92,12 +92,21 @@ sleep 0.1
 : > "$TEST_ROOT/coordinator-return-initiated"
 rm "$state/validation-launch.lock"
 
+VALIDATION_INTENT="$state/validation-intent.md"
 for _ in $(seq 1 100); do
   [[ -f "$TEST_ROOT/no-mistakes.log" ]] && break
   sleep 0.02
 done
-grep -Fq 'axi run --intent' "$TEST_ROOT/no-mistakes.log"
-grep -Fq 'Validate only after release.' "$TEST_ROOT/no-mistakes.log"
+grep -Fq 'axi run --intent-file' "$TEST_ROOT/no-mistakes.log"
+grep -Fq 'validation-intent-sealed.' "$TEST_ROOT/no-mistakes.log"
+if grep -Fq "$VALIDATION_INTENT" "$TEST_ROOT/no-mistakes.log"; then
+  printf 'validation worker passed original intent path to no-mistakes\n' >&2
+  exit 1
+fi
+if grep -Fq 'Validate only after release.' "$TEST_ROOT/no-mistakes.log"; then
+  printf 'validation worker leaked intent content into argv\n' >&2
+  exit 1
+fi
 [[ -e "$TEST_ROOT/coordinator-return-initiated" ]]
 if grep -Fq -- '--yes' "$TEST_ROOT/no-mistakes.log"; then
   printf 'validation worker enabled automatic gates\n' >&2
