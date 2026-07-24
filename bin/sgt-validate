@@ -67,7 +67,7 @@ if [[ -z "$PANE" ]] || ! _sgt_pane_identity_matches "$PANE" "$REPO_STATE"; then
 fi
 _worktree_cwd_pids() {
   local worktree="$1"
-  local canonical_worktree current_pid error error_file line output path process_pids
+  local canonical_worktree current_pid error_file line output path process_pids
 
   [[ -d "$worktree" ]] || return 0
   canonical_worktree="$(cd "$worktree" && pwd -P)"

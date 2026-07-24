@@ -140,8 +140,12 @@ The notified worker reads `.sergeant-response`, its ID, and gate generation,
 applies the decision once, restores truthful status, and writes
 `.sergeant-response-applied` with the matching ID, generation, and status. It then
 runs `sgt-ack-response <task> <repo> <response-id>` from its exact recorded pane.
-This validates post-application proof, archives replay evidence with mode `0600`,
-records acknowledgement, and clears active plaintext transport.
+This validates post-application proof, stages replay evidence in a private
+archive entry (`0700` directory, `0600` files), records acknowledgement, and
+only then clears active plaintext transport. If a later archive-marker or
+transport-cleanup step fails, rerun the same `sgt-ack-response` command with the
+same response ID; it must converge the existing archive, acknowledgement
+markers, and active transport without reapplying the decision.
 
 ## Reconcile results
 
@@ -182,8 +186,9 @@ sgt-cleanup <fleet-task-id>
 ```
 
 Cleanup requires terminal/reconciled state, owner and lease identity, preserved
-evidence, and no uncommitted or in-use worktree state. Never use cleanup to resolve
-a waiting, blocked, or orphaned worker.
+evidence, no pending or partially acknowledged response transport, and no
+uncommitted or in-use worktree state. Never use cleanup to resolve a waiting,
+blocked, or orphaned worker.
 
 ## Common project operations
 
