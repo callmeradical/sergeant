@@ -135,9 +135,24 @@ _sgt_pane_identity() {
   tmux display-message -p -t "$pane" \
     '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' 2>/dev/null
 }
+_sgt_read_owned_file() {
+  local path="$1" before after mode value
+  [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
+  mode="$(stat -c '%a' -- "$path" 2>/dev/null || stat -f '%Lp' "$path" 2>/dev/null)" || \
+    return 1
+  [[ "$mode" =~ ^[0-7]+$ && "$mode" != *[2367][0-7] && "$mode" != *[0-7][2367] ]] || \
+    return 1
+  before="$(stat -c '%d:%i:%w:%s' -- "$path" 2>/dev/null || \
+    stat -f '%d:%i:%B:%z' "$path" 2>/dev/null)" || return 1
+  value="$(cat "$path")" || return 1
+  after="$(stat -c '%d:%i:%w:%s' -- "$path" 2>/dev/null || \
+    stat -f '%d:%i:%B:%z' "$path" 2>/dev/null)" || return 1
+  [[ "$before" == "$after" ]] || return 1
+  printf '%s\n' "$value"
+}
 _sgt_pane_identity_matches() {
   local pane="$1" repo_dir="$2" identity_name="${3:-pane_identity}" expected actual
-  expected="$(cat "$repo_dir/$identity_name" 2>/dev/null || true)"
+  expected="$(_sgt_read_owned_file "$repo_dir/$identity_name" 2>/dev/null || true)"
   [[ -n "$expected" ]] || return 1
   actual="$(_sgt_pane_identity "$pane")" || return 1
   [[ "$actual" == "$expected" && "${actual%%|*}" == "0" ]]

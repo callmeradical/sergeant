@@ -424,6 +424,7 @@ else
   if [[ -n "$PRIMARY_PANE_ID" && -n "$PRIMARY_PANE_IDENTITY" ]]; then
     printf '%s\n' "$PRIMARY_PANE_ID" > "$TASK_DIR/primary_pane_id"
     printf '%s\n' "$PRIMARY_PANE_IDENTITY" > "$TASK_DIR/primary_pane_identity"
+    chmod 600 "$TASK_DIR/primary_pane_identity"
   fi
   if [[ -n "$OC_SESSION" ]]; then
     jq -nc --argjson pid "$OC_PID" --arg sessionId "$OC_SESSION" \
@@ -792,6 +793,7 @@ BRIEF_EOF
     printf '%s\n' "$pane_target" > "$repo_task_dir/pane"
     if pane_identity="$(_sgt_pane_identity "$pane_target")" && [[ -n "$pane_identity" ]]; then
       printf '%s\n' "$pane_identity" > "$repo_task_dir/pane_identity"
+      chmod 600 "$repo_task_dir/pane_identity"
       _sgt_notification_target_create "$repo_task_dir" "$initial_notification_id" \
         "$pane_identity" >/dev/null
     else

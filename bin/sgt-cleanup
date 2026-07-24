@@ -251,7 +251,8 @@ _stop_validation_pane() {
   fi
   if tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
     pane_identity="$(_sgt_pane_identity "$pane")"
-    expected_identity="$(cat "$repo_dir/validation_pane_identity" 2>/dev/null || true)"
+    expected_identity="$(_sgt_read_owned_file "$repo_dir/validation_pane_identity" \
+      2>/dev/null || true)"
     if [[ "${pane_identity%%|*}" != "0" ]]; then
       if [[ "$pane_identity" == "||||" ]]; then
         _stop_recorded_validation_group "$recorded_pid" "$recorded_pgid" "$recorded_start"

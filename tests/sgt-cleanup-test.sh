@@ -61,6 +61,7 @@ printf 'result\n' > "$stale_state/result"
 printf '%s\n' "$TEST_ROOT/missing-stale-worktree" > "$stale_state/worktree"
 printf '%%77\n' > "$stale_state/validation_pane"
 printf '0|%%77|7777|123456|validation-command\n' > "$stale_state/validation_pane_identity"
+chmod 600 "$stale_state/validation_pane_identity"
 printf '7777\n' > "$stale_state/validation_pane_pid"
 printf '7777\n' > "$stale_state/validation_process_group"
 printf 'Mon Jan  1 00:00:00 2024\n' > "$stale_state/validation_process_start"
@@ -606,6 +607,7 @@ printf '%s\n' "$worker_pane" > "$repo_state/pane"
 tmux display-message -p -t "$worker_pane" \
   '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
   > "$repo_state/pane_identity"
+chmod 600 "$repo_state/pane_identity"
 validation_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n validation \
   "env VALIDATION_PID_FILE='$TEST_ROOT/validation.pid' \
   VALIDATION_CHILD_PID_FILE='$TEST_ROOT/validation-child.pid' \
@@ -615,6 +617,7 @@ printf '%s\n' "$validation_pane" > "$repo_state/validation_pane"
 tmux display-message -p -t "$validation_pane" \
   '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
   > "$repo_state/validation_pane_identity"
+chmod 600 "$repo_state/validation_pane_identity"
 
 for pid_file in "$TEST_ROOT/worker.pid" "$TEST_ROOT/agent.pid" "$TEST_ROOT/validation.pid" \
   "$TEST_ROOT/validation-child.pid"; do

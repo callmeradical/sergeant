@@ -14,6 +14,7 @@ printf '%s\n' "$worktree" > "$repo/worktree"
 printf '%%42\n' > "$repo/pane"
 printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo" > "$repo/pane_identity"
 printf 'opencode\n' > "$repo/agent"
+chmod 600 "$repo/pane_identity"
 printf 'in_progress\n' > "$repo/status"
 
 cat > "$fake_bin/tmux" <<'EOF'

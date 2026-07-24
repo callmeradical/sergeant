@@ -63,9 +63,12 @@ printf '%s\n' "$pane" > "$state/validation_pane"
 tmux display-message -p -t "$pane" \
   '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
   > "$state/validation_pane_identity"
-printf '%s\n' "$revision" > "$state/validation-release.tmp"
+chmod 600 "$state/validation_pane_identity"
+cp "$state/validation-child-ready" "$state/validation-release.tmp"
 sleep 0.3
 mv "$state/validation-release.tmp" "$state/validation-release"
+chmod 600 "$state/validation-release"
+ln "$state/validation-release" "$state/validation-release-owner"
 
 for _ in $(seq 1 100); do
   [[ -f "$state/validation-child-accepted" ]] && break
@@ -143,5 +146,28 @@ for _ in $(seq 1 100); do
 done
 tmux kill-pane -t "$exit_pane"
 [[ ! -e "$TEST_ROOT/exit-no-mistakes.log" && ! -e "$exit_state/validation-child-accepted" ]]
+
+rm -f "$exit_state/validation-child-ready"
+symlink_pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION" -n release-symlink \
+  -c "$worktree" \
+  "env PATH='$fake_bin:$PATH' NO_MISTAKES_LOG='$TEST_ROOT/symlink-no-mistakes.log' \
+  '$ROOT_DIR/bin/sgt-validation-worker' '$exit_state' '$worktree' '$revision'")"
+for _ in $(seq 1 100); do
+  [[ -f "$exit_state/validation-child-ready" ]] && break
+  sleep 0.02
+done
+printf '%s\n' "$symlink_pane" > "$exit_state/validation_pane"
+tmux display-message -p -t "$symlink_pane" \
+  '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+  > "$exit_state/validation_pane_identity"
+chmod 600 "$exit_state/validation_pane_identity"
+chmod 600 "$exit_state/validation_pane_identity"
+cp "$exit_state/validation-child-ready" "$exit_state/release-target"
+chmod 600 "$exit_state/release-target"
+ln -s "$exit_state/release-target" "$exit_state/validation-release"
+ln "$exit_state/release-target" "$exit_state/validation-release-owner"
+sleep 0.1
+[[ ! -e "$TEST_ROOT/symlink-no-mistakes.log" && \
+  ! -e "$exit_state/validation-child-accepted" ]]
 
 printf 'sgt-validation-worker release handshake: ok\n'
