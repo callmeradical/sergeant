@@ -321,7 +321,8 @@ if [[ -n "$current_notification_id" && -n "$current_target_identity" ]]; then
     mv "$superseded_tmp" "$superseded_dir/superseded_target_pane_identity"
   fi
 fi
-rm -f "$worktree/.sergeant-notification-ack" "$REPO_DIR/notification_delivered" \
+rm -f "$worktree/.sergeant-notification-ack" "$worktree/.sergeant-notification-accept" \
+  "$REPO_DIR/notification_delivered" \
   "$REPO_DIR/notification_delivered_pane_identity" \
   "$REPO_DIR/notification_target_pane_identity"
 delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"

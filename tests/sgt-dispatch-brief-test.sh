@@ -42,6 +42,8 @@ case "${1:-}" in
       worktree="$(cat "$repo_state/worktree")"
       printf '%s|0|%%42|4242|123456|fixture-worker-command\n' "$notification_id" \
         > "$worktree/.sergeant-notification-ack"
+      printf '%s|0|%%42|4242|123456|fixture-worker-command\n' "$notification_id" \
+        > "$worktree/.sergeant-notification-accept"
       printf '0|%%42|4242|123456|fixture-worker-command\n' \
         > "$repo_state/notification_delivered_pane_identity"
       printf '%s\n' "$notification_id" > "$repo_state/notification_delivered"
@@ -348,6 +350,9 @@ assert_contains "missing negative tests"
 assert_contains "zero blockers"
 assert_contains "failing focused test"
 assert_contains "minimum implementation"
+assert_contains "notification_id|pane_identity"
+assert_contains ".sergeant-notification-accept"
+assert_contains "Do not act until that supervisor sends acceptance"
 assert_contains "full required suite once at the end"
 assert_contains "Never run no-mistakes from this agent process"
 assert_contains '.sergeant-validation-ready'

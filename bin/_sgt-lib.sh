@@ -222,6 +222,9 @@ _sgt_publish_worker_notification() {
       return 1
     }
   fi
+  if [[ "$current_id" != "$notification_id" ]]; then
+    rm -f "$worktree/.sergeant-notification-accept"
+  fi
   active_id="$(sed -n 's/^notification_id=//p' "$worktree/.sergeant-notification" 2>/dev/null || true)"
   if [[ "$active_id" != "$notification_id" ]]; then
     notification_tmp="$worktree/.sergeant-notification.tmp.$$"
@@ -234,7 +237,7 @@ _sgt_publish_worker_notification() {
 }
 _sgt_wait_worker_notification() {
   local pane="$1" repo_dir="$2" notification_id="$3"
-  local timeout="${SGT_NOTIFICATION_ACK_TIMEOUT:-60}" attempt delivered delivered_identity expected_identity pane_identity
+  local timeout="${SGT_NOTIFICATION_ACK_TIMEOUT:-60}" accepted attempt delivered delivered_identity expected_identity pane_identity
   [[ "$timeout" =~ ^[0-9]+$ ]] || return 1
 
   attempt=0
@@ -245,7 +248,9 @@ _sgt_wait_worker_notification() {
        "${pane_identity%%|*}" == 0 ]] || return 1
     delivered="$(cat "$repo_dir/notification_delivered" 2>/dev/null || true)"
     delivered_identity="$(cat "$repo_dir/notification_delivered_pane_identity" 2>/dev/null || true)"
-    [[ "$delivered" == "$notification_id" && "$delivered_identity" == "$pane_identity" ]] && return 0
+    accepted="$(cat "$(cat "$repo_dir/worktree")/.sergeant-notification-accept" 2>/dev/null || true)"
+    [[ "$delivered" == "$notification_id" && "$delivered_identity" == "$pane_identity" &&
+       "$accepted" == "$notification_id|$pane_identity" ]] && return 0
     (( attempt >= timeout * 10 )) && return 1
     attempt=$((attempt + 1))
     sleep 0.1

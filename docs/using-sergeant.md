@@ -128,6 +128,12 @@ Before responding:
 4. Verify no unconsumed response generation already exists.
 5. After sending, require the matching worker to acknowledge/consume it.
 
+The supervisor nudge includes a pane-bound acknowledgement token in the form
+`notification_id|pane_identity`. The agent writes that exact token to
+`.sergeant-notification-ack` but does not act yet. Only the targeted supervisor
+may accept it. The agent proceeds after that supervisor sends acceptance and
+`.sergeant-notification-accept` contains the same token.
+
 The notified worker reads `.sergeant-response`, its ID, and gate generation,
 applies the decision once, restores truthful status, and writes
 `.sergeant-response-applied` with the matching ID, generation, and status. It then

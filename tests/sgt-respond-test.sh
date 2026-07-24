@@ -111,6 +111,8 @@ case "$1" in
       notification_worktree="$(cat "$EXPECTED_WORKER/worktree")"
       printf '%s|%s\n' "$notification_id" "$pane_identity" \
         > "$notification_worktree/.sergeant-notification-ack"
+      printf '%s|%s\n' "$notification_id" "$pane_identity" \
+        > "$notification_worktree/.sergeant-notification-accept"
       printf '%s\n' "$pane_identity" > "$EXPECTED_WORKER/notification_delivered_pane_identity"
       printf '%s\n' "$notification_id" > "$EXPECTED_WORKER/notification_delivered"
     fi

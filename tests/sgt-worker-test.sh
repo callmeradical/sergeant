@@ -29,6 +29,15 @@ if [[ -n "${RACE_ROLE:-}" ]]; then
   while [[ ! -e "$RACE_ACK_RELEASE" ]]; do sleep 0.01; done
   cat "$RACE_ACK_TOKEN_FILE" > .sergeant-notification-ack
   touch "$RACE_ACK_FILE"
+  IFS= read -r acceptance
+  ack_token="$(cat "$RACE_ACK_TOKEN_FILE")"
+  [[ "$acceptance" == *"$ack_token"* ]] || exit 42
+  for _ in $(seq 1 200); do
+    [[ "$(cat .sergeant-notification-accept 2>/dev/null || true)" == "$ack_token" ]] && break
+    sleep 0.01
+  done
+  [[ "$(cat .sergeant-notification-accept 2>/dev/null || true)" == "$ack_token" ]] || exit 43
+  printf '%s:%s\n' "$RACE_ROLE" "$RACE_NOTIFICATION_ID" >> "$RACE_ACTION_LOG"
   while [[ ! -e "$RACE_EXIT_FILE" ]]; do sleep 0.01; done
   printf 'needs_input\n' > .sergeant-status
   exit 0
@@ -40,9 +49,15 @@ for notification_number in $(seq 1 "$notification_count"); do
   notification_id="$(cat "$NOTIFICATION_STATE/notification_id")"
   [[ "$notification" == *"$notification_id"* ]] || exit 18
   printf '%s\n' "$notification_id" >> "${RECEIVED_LOG:-/dev/null}"
-  printf '%s|%s\n' "$notification_id" \
-    "$(cat "$NOTIFICATION_STATE/notification_target_pane_identity")" \
-    > .sergeant-notification-ack
+  ack_token="$notification_id|$(cat "$NOTIFICATION_STATE/notification_target_pane_identity")"
+  printf '%s\n' "$ack_token" > .sergeant-notification-ack
+  IFS= read -r acceptance
+  [[ "$acceptance" == *"$ack_token"* ]] || exit 21
+  for _ in $(seq 1 100); do
+    [[ "$(cat .sergeant-notification-accept 2>/dev/null || true)" == "$ack_token" ]] && break
+    sleep 0.01
+  done
+  [[ "$(cat .sergeant-notification-accept 2>/dev/null || true)" == "$ack_token" ]] || exit 22
   for _ in $(seq 1 100); do
     [[ "$(cat "$NOTIFICATION_STATE/notification_delivered" 2>/dev/null || true)" == "$notification_id" ]] && break
     sleep 0.01
@@ -115,6 +130,7 @@ tmux new-window -d -t "$TMUX_SESSION:" -n race-old \
   RACE_RECEIVED_LOG='$TEST_ROOT/race-received.log' RACE_PROMPT_FILE='$TEST_ROOT/race-old-prompt' \
   RACE_ACK_RELEASE='$TEST_ROOT/race-old-release' RACE_ACK_FILE='$TEST_ROOT/race-old-ack' \
   RACE_ACK_TOKEN_FILE='$TEST_ROOT/race-old-token' \
+  RACE_ACTION_LOG='$TEST_ROOT/race-action.log' \
   RACE_EXIT_FILE='$TEST_ROOT/race-old-exit' \
   '$ROOT_DIR/bin/sgt-interactive-worker' '$race_state' '$race_worktree' '$TEST_ROOT/fake-bin/opencode'"
 target_worker_pane "$race_state" race-old
@@ -137,6 +153,7 @@ tmux new-window -d -t "$TMUX_SESSION:" -n race-new \
   RACE_RECEIVED_LOG='$TEST_ROOT/race-received.log' RACE_PROMPT_FILE='$TEST_ROOT/race-new-prompt' \
   RACE_ACK_RELEASE='$TEST_ROOT/race-new-release' RACE_ACK_FILE='$TEST_ROOT/race-new-ack' \
   RACE_ACK_TOKEN_FILE='$TEST_ROOT/race-new-token' \
+  RACE_ACTION_LOG='$TEST_ROOT/race-action.log' \
   RACE_EXIT_FILE='$TEST_ROOT/race-new-exit' \
   '$ROOT_DIR/bin/sgt-interactive-worker' '$race_state' '$race_worktree' '$TEST_ROOT/fake-bin/opencode'"
 target_worker_pane "$race_state" race-new
@@ -171,6 +188,14 @@ done
    "$(cat "$race_state/notification_target_pane_identity")" ]]
 [[ "$(grep -Fc old:fresh-notification "$TEST_ROOT/race-received.log")" == 1 ]]
 [[ "$(grep -Fc new:fresh-notification "$TEST_ROOT/race-received.log")" == 1 ]]
+[[ ! -e "$TEST_ROOT/race-action.log" || \
+   "$(grep -Fc old:fresh-notification "$TEST_ROOT/race-action.log")" == 0 ]]
+[[ "$(grep -Fc new:fresh-notification "$TEST_ROOT/race-action.log")" == 1 ]]
+cat "$TEST_ROOT/race-old-token" > "$race_worktree/.sergeant-notification-ack"
+cmp -s "$TEST_ROOT/race-new-token" \
+  "$race_state/notifications/fresh-notification/acknowledged"
+cmp -s "$TEST_ROOT/race-new-token" \
+  "$race_state/notifications/fresh-notification/accepted"
 touch "$TEST_ROOT/race-old-exit" "$TEST_ROOT/race-new-exit"
 
 printf 'initial-notification-1\n' > "$TEST_ROOT/done/state/notification_id"

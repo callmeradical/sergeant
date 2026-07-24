@@ -105,6 +105,12 @@ _deliver_notifications() {
         acknowledged=""
       fi
       if [[ "$acknowledged" == "$ack_token" ]]; then
+        pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
+        target_identity="$(cat "$REPO_STATE/notification_target_pane_identity" 2>/dev/null || true)"
+        [[ -n "$pane_identity" && "$target_identity" == "$pane_identity" ]] || {
+          sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
+          continue
+        }
         state_dir="$REPO_STATE/notifications/$notification_id"
         mkdir -p "$state_dir" || {
           sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
@@ -115,6 +121,31 @@ _deliver_notifications() {
         if ! mv "$pending" "$state_dir/acknowledged"; then
           rm -f "$pending"
           sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
+          continue
+        fi
+        pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
+        target_identity="$(cat "$REPO_STATE/notification_target_pane_identity" 2>/dev/null || true)"
+        [[ -n "$pane_identity" && "$target_identity" == "$pane_identity" ]] || continue
+        tmux send-keys -t "$TMUX_PANE" -l -- \
+          "Sergeant accepted notification $notification_id for this supervisor. Wait for $ack_token in .sergeant-notification-accept, then follow the notification exactly once." 2>/dev/null || continue
+        pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
+        target_identity="$(cat "$REPO_STATE/notification_target_pane_identity" 2>/dev/null || true)"
+        [[ -n "$pane_identity" && "$target_identity" == "$pane_identity" ]] || continue
+        tmux send-keys -t "$TMUX_PANE" Enter 2>/dev/null || continue
+        pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
+        target_identity="$(cat "$REPO_STATE/notification_target_pane_identity" 2>/dev/null || true)"
+        [[ -n "$pane_identity" && "$target_identity" == "$pane_identity" ]] || continue
+        pending="$WORKTREE/.sergeant-notification-accept.tmp.$$"
+        printf '%s\n' "$ack_token" > "$pending"
+        if ! mv "$pending" "$WORKTREE/.sergeant-notification-accept"; then
+          rm -f "$pending"
+          continue
+        fi
+        pending="$state_dir/accepted.tmp.$$"
+        printf '%s\n' "$ack_token" > "$pending"
+        if ! mv "$pending" "$state_dir/accepted"; then
+          rm -f "$pending"
+          rm -f "$WORKTREE/.sergeant-notification-accept"
           continue
         fi
         pending="$state_dir/delivered.tmp.$$"
@@ -138,7 +169,7 @@ _deliver_notifications() {
         fi
       elif [[ -n "${TMUX_PANE:-}" ]]; then
         tmux send-keys -t "$TMUX_PANE" -l -- \
-          "Sergeant notification $notification_id is available in .sergeant-notification. Read it, write $ack_token to .sergeant-notification-ack before acting, then follow it once." 2>/dev/null || true
+          "Sergeant notification $notification_id is available in .sergeant-notification. Read it, write $ack_token to .sergeant-notification-ack, and do not act until this supervisor sends acceptance and .sergeant-notification-accept contains that exact token." 2>/dev/null || true
         tmux send-keys -t "$TMUX_PANE" Enter 2>/dev/null || true
       fi
     fi
