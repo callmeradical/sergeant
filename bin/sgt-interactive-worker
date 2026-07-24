@@ -109,7 +109,10 @@ _deliver_notifications() {
         "$(dirname "$complete_path")"
       if [[ "$(cat "$complete_path" 2>/dev/null || true)" == "$ack_token" &&
             ! -f "$target_dir/completed" ]]; then
-        _sgt_response_lock_acquire "$REPO_STATE"
+        if ! _sgt_response_lock_acquire "$REPO_STATE"; then
+          sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
+          continue
+        fi
         if [[ "$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)" == "$nonce" &&
               "$(cat "$REPO_STATE/notifications/$notification_id/action_lease" 2>/dev/null || true)" == "$nonce" ]]; then
           printf '%s\n' "$ack_token" > "$target_dir/completed.tmp.$$" &&
@@ -118,7 +121,10 @@ _deliver_notifications() {
         _sgt_response_lock_release
       fi
       if [[ "$delivered" != "$ack_token" && "$(cat "$ack_path" 2>/dev/null || true)" == "$ack_token" ]]; then
-        _sgt_response_lock_acquire "$REPO_STATE"
+        if ! _sgt_response_lock_acquire "$REPO_STATE"; then
+          sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
+          continue
+        fi
         pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
         if [[ "$(cat "$REPO_STATE/notification_id" 2>/dev/null || true)" != "$notification_id" ||
               "$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)" != "$nonce" ||
@@ -134,10 +140,21 @@ _deliver_notifications() {
           continue
         fi
         if [[ -z "$lease" ]]; then
-          printf '%s\n' "$nonce" > "$REPO_STATE/notifications/$notification_id/action_lease.tmp.$$" &&
-            mv "$REPO_STATE/notifications/$notification_id/action_lease.tmp.$$" \
-              "$REPO_STATE/notifications/$notification_id/action_lease"
+          pending="$(mktemp "$REPO_STATE/notifications/$notification_id/action_lease.tmp.XXXXXX")" || {
+            _sgt_response_lock_release
+            continue
+          }
+          if ! printf '%s\n' "$nonce" > "$pending" ||
+             ! mv "$pending" "$REPO_STATE/notifications/$notification_id/action_lease"; then
+            rm -f "$pending"
+            _sgt_response_lock_release
+            continue
+          fi
         fi
+        [[ "$(cat "$REPO_STATE/notifications/$notification_id/action_lease" 2>/dev/null || true)" == "$nonce" ]] || {
+          _sgt_response_lock_release
+          continue
+        }
         pending="$target_dir/acknowledged.tmp.$$"
         printf '%s\n' "$ack_token" > "$pending"
         if ! mv "$pending" "$target_dir/acknowledged"; then

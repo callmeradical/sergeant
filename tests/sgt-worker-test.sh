@@ -32,8 +32,12 @@ if [[ -n "${RACE_ROLE:-}" ]]; then
   mkdir -p .sergeant-notification-acks .sergeant-notification-complete
   printf '%s\n' "$ack_token" > ".sergeant-notification-acks/$nonce"
   touch "$RACE_ACK_FILE"
-  for _ in $(seq 1 200); do
+  for _ in $(seq 1 500); do
     [[ "$(cat ".sergeant-notification-accepts/$nonce" 2>/dev/null || true)" == "$ack_token" ]] && break
+    if [[ -n "${RACE_STOP_FILE:-}" && -e "$RACE_STOP_FILE" ]]; then
+      touch "$RACE_STOPPED_FILE"
+      exit 0
+    fi
     sleep 0.01
   done
   [[ "$(cat ".sergeant-notification-accepts/$nonce" 2>/dev/null || true)" == "$ack_token" ]] || exit 43
@@ -94,6 +98,32 @@ EOF
 chmod +x "$TEST_ROOT/fake-bin/opencode"
 ln -s opencode "$TEST_ROOT/fake-bin/goose"
 ln -s opencode "$TEST_ROOT/fake-bin/claude"
+cat > "$TEST_ROOT/fake-bin/ln" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${FAIL_LOCK_FILE:-}" && -e "$FAIL_LOCK_FILE" && "$*" == *response.lock* ]]; then
+  touch "$FAIL_LOCK_MARKER"
+  exit 75
+fi
+exec /usr/bin/ln "$@"
+EOF
+cat > "$TEST_ROOT/fake-bin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${FAIL_LEASE_WRITE_FILE:-}" && -e "$FAIL_LEASE_WRITE_FILE" && "$*" == *action_lease.tmp* ]]; then
+  touch "$FAIL_LEASE_WRITE_MARKER"
+  exit 75
+fi
+exec /usr/bin/mktemp "$@"
+EOF
+cat > "$TEST_ROOT/fake-bin/mv" <<'EOF'
+#!/usr/bin/env bash
+target="${!#}"
+if [[ -n "${FAIL_LEASE_RENAME_FILE:-}" && -e "$FAIL_LEASE_RENAME_FILE" && "$target" == */action_lease ]]; then
+  touch "$FAIL_LEASE_RENAME_MARKER"
+  exit 75
+fi
+exec /usr/bin/mv "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/ln" "$TEST_ROOT/fake-bin/mktemp" "$TEST_ROOT/fake-bin/mv"
 
 if ARG_LOG="$TEST_ROOT/non-tty.args" \
   "$ROOT_DIR/bin/sgt-interactive-worker" "$TEST_ROOT/done/state" \
@@ -144,7 +174,9 @@ tmux new-window -d -t "$TMUX_SESSION:" -n race-old \
   RACE_ACK_RELEASE='$TEST_ROOT/race-old-release' RACE_ACK_FILE='$TEST_ROOT/race-old-ack' \
   RACE_ACK_TOKEN_FILE='$TEST_ROOT/race-old-token' \
   RACE_ACTION_LOG='$TEST_ROOT/race-action.log' \
+  RACE_STOP_FILE='$TEST_ROOT/race-old-stop' RACE_STOPPED_FILE='$TEST_ROOT/race-old-stopped' \
   RACE_EXIT_FILE='$TEST_ROOT/race-old-exit' \
+  PATH='$TEST_ROOT/fake-bin:$PATH' \
   '$ROOT_DIR/bin/sgt-interactive-worker' '$race_state' '$race_worktree' '$TEST_ROOT/fake-bin/opencode'"
 target_worker_pane "$race_state" race-old
 old_race_nonce="$(cat "$race_state/notification_target")"
@@ -170,7 +202,11 @@ tmux new-window -d -t "$TMUX_SESSION:" -n race-new \
   RACE_ACTION_LOG='$TEST_ROOT/race-action.log' \
   RACE_ACCEPT_OBSERVED='$TEST_ROOT/race-new-accepted' \
   RACE_ACTION_RELEASE='$TEST_ROOT/race-new-action-release' \
+  FAIL_LOCK_FILE='$TEST_ROOT/fail-lock' FAIL_LOCK_MARKER='$TEST_ROOT/fail-lock-marker' \
+  FAIL_LEASE_WRITE_FILE='$TEST_ROOT/fail-lease-write' FAIL_LEASE_WRITE_MARKER='$TEST_ROOT/fail-lease-write-marker' \
+  FAIL_LEASE_RENAME_FILE='$TEST_ROOT/fail-lease-rename' FAIL_LEASE_RENAME_MARKER='$TEST_ROOT/fail-lease-rename-marker' \
   RACE_EXIT_FILE='$TEST_ROOT/race-new-exit' \
+  PATH='$TEST_ROOT/fake-bin:$PATH' \
   '$ROOT_DIR/bin/sgt-interactive-worker' '$race_state' '$race_worktree' '$TEST_ROOT/fake-bin/opencode'"
 target_worker_pane "$race_state" race-new
 new_race_nonce="$(cat "$race_state/notification_target")"
@@ -192,10 +228,41 @@ for _ in $(seq 1 200); do
   sleep 0.01
 done
 [[ -e "$TEST_ROOT/race-old-ack" ]]
-sleep 0.05
+touch "$TEST_ROOT/race-old-stop"
+for _ in $(seq 1 200); do
+  [[ -e "$TEST_ROOT/race-old-stopped" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/race-old-stopped" ]]
 [[ ! -e "$race_state/notifications/fresh-notification/targets/$new_race_nonce/delivered" ]]
 
+touch "$TEST_ROOT/fail-lock"
 touch "$TEST_ROOT/race-new-release"
+for _ in $(seq 1 200); do
+  [[ -e "$TEST_ROOT/fail-lock-marker" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/fail-lock-marker" ]]
+[[ ! -e "$race_state/notifications/fresh-notification/action_lease" ]]
+[[ ! -e "$race_state/notifications/fresh-notification/targets/$new_race_nonce/accepted" ]]
+rm "$TEST_ROOT/fail-lock"
+touch "$TEST_ROOT/fail-lease-write"
+for _ in $(seq 1 200); do
+  [[ -e "$TEST_ROOT/fail-lease-write-marker" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/fail-lease-write-marker" ]]
+[[ ! -e "$race_state/notifications/fresh-notification/action_lease" ]]
+rm "$TEST_ROOT/fail-lease-write"
+touch "$TEST_ROOT/fail-lease-rename"
+for _ in $(seq 1 200); do
+  [[ -e "$TEST_ROOT/fail-lease-rename-marker" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/fail-lease-rename-marker" ]]
+[[ ! -e "$race_state/notifications/fresh-notification/action_lease" ]]
+[[ ! -e "$race_state/notifications/fresh-notification/targets/$new_race_nonce/acknowledged" ]]
+rm "$TEST_ROOT/fail-lease-rename"
 for _ in $(seq 1 200); do
   [[ -f "$race_state/notifications/fresh-notification/targets/$new_race_nonce/delivered" ]] && break
   sleep 0.01
@@ -212,11 +279,20 @@ cmp -s "$TEST_ROOT/race-new-token" \
   "$race_state/notifications/fresh-notification/targets/$new_race_nonce/accepted"
 [[ ! -e "$TEST_ROOT/race-action.log" || \
    "$(grep -Fc old:fresh-notification "$TEST_ROOT/race-action.log")" == 0 ]]
+rm -f "$TEST_ROOT/fail-lock-marker"
+touch "$TEST_ROOT/fail-lock"
 touch "$TEST_ROOT/race-new-action-release"
 for _ in $(seq 1 200); do
   [[ -f "$TEST_ROOT/race-action.log" ]] && break
   sleep 0.01
 done
+for _ in $(seq 1 200); do
+  [[ -e "$TEST_ROOT/fail-lock-marker" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/fail-lock-marker" ]]
+[[ ! -e "$race_state/notifications/fresh-notification/targets/$new_race_nonce/completed" ]]
+rm "$TEST_ROOT/fail-lock"
 [[ "$(grep -Fc old:fresh-notification "$TEST_ROOT/race-received.log")" == 1 ]]
 [[ "$(grep -Fc new:fresh-notification "$TEST_ROOT/race-received.log")" == 1 ]]
 [[ ! -e "$TEST_ROOT/race-action.log" || \
