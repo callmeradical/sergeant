@@ -147,6 +147,7 @@ chmod +x "$fake_bin/ps"
 
 real_git="$(command -v git)"
 real_cp="$(command -v cp)"
+real_chmod="$(command -v chmod)"
 real_mv="$(command -v mv)"
 real_ln="$(command -v ln)"
 real_rm="$(command -v rm)"
@@ -157,6 +158,7 @@ concurrent_dir="$TEST_ROOT/concurrent"
 mkdir -p "$concurrent_dir"
 export REAL_GIT="$real_git" REAL_CP="$real_cp" REAL_MV="$real_mv" REAL_LN="$real_ln"
 export REAL_RM="$real_rm"
+export REAL_CHMOD="$real_chmod"
 export REAL_STAT="$real_stat"
 export REAL_SHASUM="$real_shasum" VALIDATION_PATH="$validation_path"
 export CONCURRENT_DIR="$concurrent_dir" TEST_REPO_STATE="$repo_state"
@@ -287,6 +289,17 @@ fi
 exec "$REAL_RM" "$@"
 EOF
 chmod +x "$fake_bin/rm"
+
+cat > "$fake_bin/chmod" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${FAIL_TRANSITION:-}" == "legacy-identity-content-race" && "$1" == "600" && \
+  "$2" == */primary_pane_identity ]]; then
+  printf 'tampered-pane\n' > "$2"
+  : > "${IDENTITY_RACE_MARKER:?}"
+fi
+exec "$REAL_CHMOD" "$@"
+EOF
+chmod +x "$fake_bin/chmod"
 
 cat > "$fake_bin/stat" <<'EOF'
 #!/usr/bin/env bash
@@ -751,6 +764,18 @@ for identity_path in "$fleet/task-1/primary_pane_identity" "$repo_state/pane_ide
   done
   chmod 600 "$identity_path"
 done
+
+legacy_race_marker="$TEST_ROOT/legacy-pane-race"
+chmod 664 "$fleet/task-1/primary_pane_identity"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  FAIL_TRANSITION=legacy-identity-content-race IDENTITY_RACE_MARKER="$legacy_race_marker" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+[[ "$(cat "$fleet/task-1/primary_pane_identity")" == '0|%11|1111|111111|coordinator-command' ]]
+[[ "$(stat -c '%a' "$fleet/task-1/primary_pane_identity" 2>/dev/null || \
+  stat -f '%Lp' "$fleet/task-1/primary_pane_identity")" == "600" ]]
+[[ ! -e "$legacy_race_marker" ]]
+cleanup_validation_state
 
 saved_identity="$repo_state/pane_identity.saved"
 mv "$repo_state/pane_identity" "$saved_identity"

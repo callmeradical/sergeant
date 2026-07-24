@@ -176,7 +176,7 @@ _sgt_read_owned_file() {
   printf '%s\n' "$value"
 }
 _sgt_read_matching_legacy_pane_identity() {
-  local path="$1" actual="$2" mode fd_mode value
+  local path="$1" actual="$2" mode fd_mode value migrated
   [[ -n "$actual" ]] || return 1
   [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
   mode="$(_sgt_path_mode "$path")" || return 1
@@ -193,18 +193,11 @@ _sgt_read_matching_legacy_pane_identity() {
   fi
   value="$(cat <&9)" || { exec 9<&-; return 1; }
   [[ "$value" == "$actual" ]] || { exec 9<&-; return 1; }
-  chmod 600 "$path" 2>/dev/null || { exec 9<&-; return 1; }
-  fd_mode="$(_sgt_fd_mode /dev/fd/9)" || {
-    exec 9<&-
-    return 1
-  }
-  if [[ "$fd_mode" != "600" || ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
-    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
-    exec 9<&-
-    return 1
-  fi
   exec 9<&-
-  printf '%s\n' "$value"
+  _sgt_replace_owned_file "$path" "$value" || return 1
+  migrated="$(_sgt_read_owned_file "$path" 2>/dev/null || true)"
+  [[ "$migrated" == "$actual" ]] || return 1
+  printf '%s\n' "$migrated"
 }
 _sgt_read_same_owned_files() {
   local first="$1" second="$2" first_mode second_mode first_fd_mode second_fd_mode
