@@ -141,12 +141,155 @@ _sgt_pane_identity() {
   tmux display-message -p -t "$pane" \
     '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' 2>/dev/null
 }
+_sgt_path_mode() {
+  stat -c '%a' -- "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
+}
+_sgt_fd_mode() {
+  stat -L -c '%a' -- "$1" 2>/dev/null || stat -L -f '%Lp' "$1" 2>/dev/null
+}
+_sgt_legacy_identity_mode() {
+  case "$1" in
+    640|644|660|664) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+_sgt_read_owned_file() {
+  local path="$1" mode fd_mode value
+  [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
+  mode="$(_sgt_path_mode "$path")" || return 1
+  [[ "$mode" == "600" ]] || return 1
+  exec 9< "$path" || return 1
+  fd_mode="$(_sgt_fd_mode /dev/fd/9)" || {
+    exec 9<&-
+    return 1
+  }
+  if [[ "$fd_mode" != "600" || ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
+    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
+    exec 9<&-
+    return 1
+  fi
+  value="$(cat <&9)" || { exec 9<&-; return 1; }
+  fd_mode="$(_sgt_fd_mode /dev/fd/9)" || {
+    exec 9<&-
+    return 1
+  }
+  if [[ "$fd_mode" != "600" || ! -O /dev/fd/9 || -L "$path" || \
+    ! "$path" -ef /dev/fd/9 ]]; then
+    exec 9<&-
+    return 1
+  fi
+  exec 9<&-
+  printf '%s\n' "$value"
+}
+_sgt_read_matching_legacy_pane_identity() {
+  local path="$1" actual="$2" mode fd_mode value migrated candidate current_mode
+  [[ -n "$actual" ]] || return 1
+  [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
+  mode="$(_sgt_path_mode "$path")" || return 1
+  _sgt_legacy_identity_mode "$mode" || return 1
+  exec 9< "$path" || return 1
+  fd_mode="$(_sgt_fd_mode /dev/fd/9)" || {
+    exec 9<&-
+    return 1
+  }
+  if [[ "$fd_mode" != "$mode" || ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
+    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
+    exec 9<&-
+    return 1
+  fi
+  value="$(cat <&9)" || { exec 9<&-; return 1; }
+  [[ "$value" == "$actual" ]] || { exec 9<&-; return 1; }
+  candidate="${path}.tmp.$$.$RANDOM.$RANDOM"
+  (umask 077; set -C; printf '%s\n' "$value" > "$candidate") 2>/dev/null || {
+    exec 9<&-
+    return 1
+  }
+  chmod 600 "$candidate" || {
+    rm -f "$candidate"
+    exec 9<&-
+    return 1
+  }
+  current_mode="$(_sgt_path_mode "$path")" || {
+    rm -f "$candidate"
+    exec 9<&-
+    return 1
+  }
+  fd_mode="$(_sgt_fd_mode /dev/fd/9)" || {
+    rm -f "$candidate"
+    exec 9<&-
+    return 1
+  }
+  if [[ "$current_mode" != "$mode" || "$fd_mode" != "$mode" || \
+    ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
+    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
+    rm -f "$candidate"
+    exec 9<&-
+    return 1
+  fi
+  mv "$candidate" "$path" || {
+    rm -f "$candidate"
+    exec 9<&-
+    return 1
+  }
+  exec 9<&-
+  migrated="$(_sgt_read_owned_file "$path" 2>/dev/null || true)"
+  [[ "$migrated" == "$actual" ]] || return 1
+  printf '%s\n' "$migrated"
+}
+_sgt_read_same_owned_files() {
+  local first="$1" second="$2" first_mode second_mode first_fd_mode second_fd_mode
+  local first_value second_value
+  [[ -f "$first" && ! -L "$first" && -O "$first" && \
+    -f "$second" && ! -L "$second" && -O "$second" ]] || return 1
+  first_mode="$(_sgt_path_mode "$first")" || return 1
+  second_mode="$(_sgt_path_mode "$second")" || return 1
+  [[ "$first_mode" == "600" && "$second_mode" == "600" ]] || return 1
+  exec 8< "$first" || return 1
+  exec 9< "$second" || { exec 8<&-; return 1; }
+  first_fd_mode="$(_sgt_fd_mode /dev/fd/8)"
+  second_fd_mode="$(_sgt_fd_mode /dev/fd/9)"
+  if [[ "$first_fd_mode" != "600" || "$second_fd_mode" != "600" || \
+    ! -f /dev/fd/8 || ! -f /dev/fd/9 || ! -O /dev/fd/8 || ! -O /dev/fd/9 || \
+    ! "$first" -ef /dev/fd/8 || ! "$second" -ef /dev/fd/9 || \
+    ! /dev/fd/8 -ef /dev/fd/9 || -L "$first" || -L "$second" ]]; then
+    exec 8<&- 9<&-
+    return 1
+  fi
+  first_value="$(cat <&8)" || { exec 8<&- 9<&-; return 1; }
+  second_value="$(cat <&9)" || { exec 8<&- 9<&-; return 1; }
+  first_fd_mode="$(_sgt_fd_mode /dev/fd/8)"
+  second_fd_mode="$(_sgt_fd_mode /dev/fd/9)"
+  if [[ "$first_fd_mode" != "600" || "$second_fd_mode" != "600" || \
+    ! -f /dev/fd/8 || ! -f /dev/fd/9 || ! -O /dev/fd/8 || ! -O /dev/fd/9 || \
+    -L "$first" || -L "$second" || \
+    ! "$first" -ef /dev/fd/8 || ! "$second" -ef /dev/fd/9 || \
+    ! /dev/fd/8 -ef /dev/fd/9 ]]; then
+    exec 8<&- 9<&-
+    return 1
+  fi
+  exec 8<&- 9<&-
+  [[ "$first_value" == "$second_value" ]] || return 1
+  printf '%s\n' "$first_value"
+}
+_sgt_replace_owned_file() {
+  local path="$1" value="$2" candidate
+  candidate="${path}.tmp.$$.$RANDOM.$RANDOM"
+  (umask 077; set -C; printf '%s\n' "$value" > "$candidate") 2>/dev/null || return 1
+  chmod 600 "$candidate" || { rm -f "$candidate"; return 1; }
+  mv "$candidate" "$path" || { rm -f "$candidate"; return 1; }
+}
 _sgt_pane_identity_matches() {
-  local pane="$1" repo_dir="$2" identity_name="${3:-pane_identity}" expected actual
-  expected="$(cat "$repo_dir/$identity_name" 2>/dev/null || true)"
-  [[ -n "$expected" ]] || return 1
+  local pane="$1" repo_dir="$2" identity_name="${3:-pane_identity}" expected actual current
   actual="$(_sgt_pane_identity "$pane")" || return 1
-  [[ "$actual" == "$expected" && "${actual%%|*}" == "0" ]]
+  [[ "${actual%%|*}" == "0" ]] || return 1
+  expected="$(_sgt_read_owned_file "$repo_dir/$identity_name" 2>/dev/null || true)"
+  if [[ -z "$expected" ]]; then
+    expected="$(_sgt_read_matching_legacy_pane_identity "$repo_dir/$identity_name" "$actual" \
+      2>/dev/null || true)"
+  fi
+  [[ -n "$expected" ]] || return 1
+  current="$(_sgt_pane_identity "$pane")" || return 1
+  [[ "$actual" == "$expected" && "$current" == "$actual" ]]
 }
 _sgt_worker_command() {
   printf '%q %q %q %q' "$1" "$2" "$3" "$4"

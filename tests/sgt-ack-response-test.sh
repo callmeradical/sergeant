@@ -14,6 +14,7 @@ mkdir -p "$repo_state" "$worktree" "$fake_bin"
 printf '%s\n' "$worktree" > "$repo_state/worktree"
 printf '%%42\n' > "$repo_state/pane"
 printf '0|%%42|4242|123456|worker-command\n' > "$repo_state/pane_identity"
+chmod 600 "$repo_state/pane_identity"
 
 cat > "$fake_bin/tmux" <<'EOF'
 #!/usr/bin/env bash
@@ -184,6 +185,7 @@ setup_retry_fixture() {
   printf '%s\n' "$worktree" > "$repo_state/worktree"
   printf '%%42\n' > "$repo_state/pane"
   printf '0|%%42|4242|123456|worker-command\n' > "$repo_state/pane_identity"
+  chmod 600 "$repo_state/pane_identity"
   publish_fixture
   printf 'in_progress\n' > "$worktree/.sergeant-status"
   cat > "$worktree/.sergeant-response-applied" <<'EOF'

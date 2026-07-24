@@ -40,16 +40,55 @@ command -v no-mistakes >/dev/null 2>&1 || {
   exit 2
 }
 
-attempt=0
-while [[ ! -f "$REPO_STATE/validation-release" && "$attempt" -lt 200 ]]; do
-  sleep 0.05
-  attempt=$((attempt + 1))
-done
-[[ -f "$REPO_STATE/validation-release" ]] || {
-  echo "ERROR: validation launch was not released by the coordinator" >&2
+_lock_field() {
+  local key="$1"
+  awk -F= -v key="$key" '
+    $1 == key { count++; value = substr($0, length(key) + 2) }
+    END { if (count == 1 && value != "") print value; else exit 1 }
+  ' "$REPO_STATE/validation-launch.lock"
+}
+_coordinator_is_alive() {
+  local pid start current
+  [[ -f "$REPO_STATE/validation-launch.lock" && \
+    ! -L "$REPO_STATE/validation-launch.lock" ]] || return 1
+  pid="$(_lock_field pid)" || return 1
+  start="$(_lock_field start)" || return 1
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
+  current="$(ps -o lstart= -p "$pid" 2>/dev/null | awk '{$1=$1; print}')"
+  [[ -n "$current" && "$current" == "$start" ]]
+}
+_publish_handshake() {
+  local path="$1" value="$2" temporary
+  temporary="${path}.tmp.$$"
+  (umask 077; set -C; printf '%s\n' "$value" > "$temporary") 2>/dev/null || return 1
+  ln "$temporary" "$path" 2>/dev/null || return 1
+  rm -f "$temporary"
+}
+
+[[ -n "${TMUX_PANE:-}" ]] || {
+  echo "ERROR: validation pane identity unavailable" >&2
   exit 2
 }
-[[ "$(cat "$REPO_STATE/validation-release")" == "$EXPECTED_REVISION" ]] || {
+CHILD_PID="$$"
+CHILD_START="$(ps -o lstart= -p "$CHILD_PID" 2>/dev/null | awk '{$1=$1; print}')"
+[[ -n "$CHILD_START" ]] || exit 2
+HANDSHAKE="$EXPECTED_REVISION|$TMUX_PANE|$CHILD_PID|$CHILD_START"
+_coordinator_is_alive || {
+  echo "ERROR: validation coordinator unavailable" >&2
+  exit 2
+}
+_publish_handshake "$REPO_STATE/validation-child-ready" "$HANDSHAKE" || exit 2
+
+while [[ ! -f "$REPO_STATE/validation-release" ]]; do
+  _coordinator_is_alive || {
+    echo "ERROR: validation coordinator exited before release" >&2
+    exit 2
+  }
+  sleep 0.05
+done
+_coordinator_is_alive || exit 2
+[[ "$(_sgt_read_same_owned_files "$REPO_STATE/validation-release" \
+  "$REPO_STATE/validation-release-owner" 2>/dev/null || true)" == "$HANDSHAKE" ]] || {
   echo "ERROR: validation release revision mismatch" >&2
   exit 2
 }
@@ -65,6 +104,44 @@ if [[ -z "$EXPECTED_HEAD" || \
     echo "ERROR: isolated validation code snapshot no longer matches reviewed HEAD" >&2
     exit 2
 fi
+
+_publish_handshake "$REPO_STATE/validation-child-accepted" "$HANDSHAKE" || exit 2
+while [[ ! -f "$REPO_STATE/validation-child-commit" ]]; do
+  _coordinator_is_alive || {
+    echo "ERROR: validation coordinator exited before commit" >&2
+    exit 2
+  }
+  sleep 0.05
+done
+[[ ! -L "$REPO_STATE/validation-child-commit" && \
+  "$(cat "$REPO_STATE/validation-child-commit")" == "$HANDSHAKE" ]] || exit 2
+_coordinator_is_alive || exit 2
+[[ -z "${SGT_VALIDATION_COMMIT_ACK_DELAY:-}" ]] || \
+  sleep "$SGT_VALIDATION_COMMIT_ACK_DELAY"
+_coordinator_is_alive || exit 2
+_publish_handshake "$REPO_STATE/validation-child-committed" "$HANDSHAKE" || exit 2
+while [[ ! -f "$REPO_STATE/validation-success" ]]; do
+  _coordinator_is_alive || {
+    echo "ERROR: validation coordinator exited before success" >&2
+    exit 2
+  }
+  sleep 0.05
+done
+[[ ! -L "$REPO_STATE/validation-success" && \
+  "$(cat "$REPO_STATE/validation-success")" == "$HANDSHAKE" ]] || exit 2
+[[ -z "${SGT_VALIDATION_SUCCESS_ACK_DELAY:-}" ]] || \
+  sleep "$SGT_VALIDATION_SUCCESS_ACK_DELAY"
+_coordinator_is_alive || exit 2
+_publish_handshake "$REPO_STATE/validation-success-ack" "$HANDSHAKE" || exit 2
+while [[ -e "$REPO_STATE/validation-launch.lock" || \
+  -L "$REPO_STATE/validation-launch.lock" ]]; do
+  if ! _coordinator_is_alive; then
+    [[ ! -e "$REPO_STATE/validation-launch.lock" && \
+      ! -L "$REPO_STATE/validation-launch.lock" ]] && break
+    exit 2
+  fi
+  sleep 0.05
+done
 
 printf 'running\n' > "$REPO_STATE/validation_status"
 cd "$WORKTREE" || exit 2

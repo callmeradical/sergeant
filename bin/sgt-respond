@@ -356,7 +356,8 @@ if [[ -z "$new_pane" ]]; then
 fi
 printf '%s\n' "$new_pane" > "$REPO_DIR/pane"
 if pane_identity="$(_sgt_pane_identity "$new_pane")" && [[ -n "$pane_identity" ]]; then
-  printf '%s\n' "$pane_identity" > "$REPO_DIR/pane_identity"
+  _sgt_replace_owned_file "$REPO_DIR/pane_identity" "$pane_identity" || \
+    _die "Could not publish worker pane identity"
   _sgt_notification_target_create "$REPO_DIR" "$delivery_notification_id" \
     "$pane_identity" >/dev/null
 else

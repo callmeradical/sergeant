@@ -61,6 +61,7 @@ printf 'result\n' > "$stale_state/result"
 printf '%s\n' "$TEST_ROOT/missing-stale-worktree" > "$stale_state/worktree"
 printf '%%77\n' > "$stale_state/validation_pane"
 printf '0|%%77|7777|123456|validation-command\n' > "$stale_state/validation_pane_identity"
+chmod 600 "$stale_state/validation_pane_identity"
 printf '7777\n' > "$stale_state/validation_pane_pid"
 printf '7777\n' > "$stale_state/validation_process_group"
 printf 'Mon Jan  1 00:00:00 2024\n' > "$stale_state/validation_process_start"
@@ -485,6 +486,34 @@ PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_CP_STATE="$TEST_ROOT/cp-failed-once" \
 [[ ! -e "$TEST_ROOT/fleet/staging-failure" ]]
 rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/cp"
 
+mkdir -p "$TEST_ROOT/fleet/legacy-task/app" "$TEST_ROOT/legacy-repo"
+git -C "$TEST_ROOT/legacy-repo" init -q
+git -C "$TEST_ROOT/legacy-repo" config user.name Test
+git -C "$TEST_ROOT/legacy-repo" config user.email test@example.invalid
+touch "$TEST_ROOT/legacy-repo/README.md"
+git -C "$TEST_ROOT/legacy-repo" add README.md
+git -C "$TEST_ROOT/legacy-repo" commit -qm fixture
+
+legacy_worktree="$TEST_ROOT/legacy-repo-sgt-legacy-task"
+legacy_repo_state="$TEST_ROOT/fleet/legacy-task/app"
+git -C "$TEST_ROOT/legacy-repo" worktree add -q -b test-cleanup-legacy "$legacy_worktree"
+legacy_validation_worktree="${legacy_worktree}-validation-legacy-task"
+git clone -q "$legacy_worktree" "$legacy_validation_worktree"
+printf '%s\n' "$legacy_validation_worktree" > "$legacy_repo_state/validation_worktree"
+printf '%s\n' "$(git -C "$legacy_validation_worktree" rev-parse HEAD)" > \
+  "$legacy_repo_state/validation_head"
+printf '%s\n' "$legacy_worktree" > "$legacy_repo_state/worktree"
+printf 'git\n' > "$legacy_repo_state/wt_type"
+printf 'done\n' > "$legacy_repo_state/status"
+printf 'result\n' > "$legacy_repo_state/result"
+printf 'done\n' > "$legacy_worktree/.sergeant-status"
+printf 'result\n' > "$legacy_worktree/.sergeant-result"
+
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" legacy-task >/dev/null
+[[ ! -e "$legacy_validation_worktree" && ! -e "$legacy_worktree" && \
+  ! -e "$TEST_ROOT/fleet/legacy-task" ]]
+
 mkdir -p "$TEST_ROOT/fleet/task-123/app" "$TEST_ROOT/repo"
 git -C "$TEST_ROOT/repo" init -q
 git -C "$TEST_ROOT/repo" config user.name Test
@@ -499,6 +528,20 @@ git -C "$TEST_ROOT/repo" worktree add -q -b test-cleanup "$worktree"
 validation_worktree="${worktree}-validation-task-123"
 git clone -q "$worktree" "$validation_worktree"
 printf '%s\n' "$validation_worktree" > "$repo_state/validation_worktree"
+path_identity() {
+  stat -c '%d:%i:%w' "$1" 2>/dev/null || stat -f '%d:%i:%B' "$1"
+}
+validation_identity="$(path_identity "$validation_worktree")"
+validation_git_dir="$(git -C "$validation_worktree" rev-parse --path-format=absolute --git-common-dir)"
+validation_git_identity="$(path_identity "$validation_git_dir")"
+validation_head="$(git -C "$validation_worktree" rev-parse HEAD)"
+validation_owner="task-123/app/validation-launch|test-owner|$validation_head"
+printf '%s\n' "$validation_identity" > "$repo_state/validation_worktree_identity"
+printf '%s\n' "$validation_git_dir" > "$repo_state/validation_worktree_git_dir"
+printf '%s\n' "$validation_git_identity" > "$repo_state/validation_worktree_git_identity"
+printf '%s\n' "$validation_head" > "$repo_state/validation_head"
+printf '%s\n' "$validation_owner" > "$repo_state/validation_worktree_owner"
+printf '%s\n' "$validation_owner" > "$validation_git_dir/sergeant-validation-owner"
 printf '%s\n' "$worktree" > "$repo_state/worktree"
 printf 'git\n' > "$repo_state/wt_type"
 printf 'done\n' > "$repo_state/status"
@@ -592,6 +635,7 @@ printf '%s\n' "$worker_pane" > "$repo_state/pane"
 tmux display-message -p -t "$worker_pane" \
   '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
   > "$repo_state/pane_identity"
+chmod 600 "$repo_state/pane_identity"
 validation_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n validation \
   "env VALIDATION_PID_FILE='$TEST_ROOT/validation.pid' \
   VALIDATION_CHILD_PID_FILE='$TEST_ROOT/validation-child.pid' \
@@ -601,6 +645,7 @@ printf '%s\n' "$validation_pane" > "$repo_state/validation_pane"
 tmux display-message -p -t "$validation_pane" \
   '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
   > "$repo_state/validation_pane_identity"
+chmod 600 "$repo_state/validation_pane_identity"
 
 for pid_file in "$TEST_ROOT/worker.pid" "$TEST_ROOT/agent.pid" "$TEST_ROOT/validation.pid" \
   "$TEST_ROOT/validation-child.pid"; do
@@ -685,6 +730,69 @@ set -e
 grep -Fq 'Validation pane ownership provenance is incomplete' \
   "$TEST_ROOT/missing-validation-provenance.log"
 printf '%s\n' "$saved_validation_start" > "$repo_state/validation_process_start"
+
+assert_validation_checkout_rejected() {
+  local label="$1" output status
+  set +e
+  output="$(SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" task-123 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -ne 0 && "$output" == *'Validation checkout'* ]]
+  [[ -e "$validation_worktree" || -L "$validation_worktree" ]] || {
+    printf '%s replacement validation checkout was removed\n' "$label" >&2
+    exit 1
+  }
+}
+
+printf 'wrong-owner\n' > "$validation_git_dir/sergeant-validation-owner"
+assert_validation_checkout_rejected owner
+printf '%s\n' "$validation_owner" > "$validation_git_dir/sergeant-validation-owner"
+
+mv "$validation_git_dir" "$TEST_ROOT/original-validation-git"
+git -C "$validation_worktree" init -q
+assert_validation_checkout_rejected reinitialized
+rm -rf "$validation_worktree/.git"
+mv "$TEST_ROOT/original-validation-git" "$validation_git_dir"
+
+mv "$validation_worktree" "$TEST_ROOT/original-validation-worktree"
+git clone -q "$worktree" "$validation_worktree"
+assert_validation_checkout_rejected replacement
+rm -rf "$validation_worktree"
+mv "$TEST_ROOT/original-validation-worktree" "$validation_worktree"
+
+mv "$validation_worktree" "$TEST_ROOT/original-validation-worktree"
+ln -s "$TEST_ROOT/missing-validation-worktree" "$validation_worktree"
+assert_validation_checkout_rejected dangling
+rm "$validation_worktree"
+mv "$TEST_ROOT/original-validation-worktree" "$validation_worktree"
+
+real_mv="$(command -v mv)"
+real_git="$(command -v git)"
+cat > "$TEST_ROOT/fake-bin/mv" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${VALIDATION_REPLACE_ON_MOVE:-}" && "$1" == "$VALIDATION_PATH" && \
+  "${2:-}" == "$VALIDATION_PATH".cleanup.* ]]; then
+  "$REAL_MV" "$1" "$RACE_ORIGINAL"
+  "$REAL_GIT" clone -q "$SOURCE_WORKTREE" "$VALIDATION_PATH"
+  printf 'race-replacement\n' > "$VALIDATION_PATH/race-sentinel"
+fi
+exec "$REAL_MV" "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/mv"
+set +e
+race_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" REAL_MV="$real_mv" REAL_GIT="$real_git" \
+  VALIDATION_REPLACE_ON_MOVE=1 VALIDATION_PATH="$validation_worktree" \
+  RACE_ORIGINAL="$TEST_ROOT/race-original-validation" SOURCE_WORKTREE="$worktree" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" task-123 2>&1)"
+race_status=$?
+set -e
+[[ "$race_status" -ne 0 && "$race_output" == *'changed during cleanup and was preserved'* ]]
+[[ "$(cat "$validation_worktree/race-sentinel")" == race-replacement ]]
+rm -rf "$validation_worktree"
+mv "$TEST_ROOT/race-original-validation" "$validation_worktree"
+
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" task-123 >/dev/null
 

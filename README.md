@@ -172,7 +172,9 @@ The command creates a split pane in the worker window, renames the window to
 and never uses `--yes`. Use `--skip <steps>` only for gates already proven
 irrelevant and stop at `checks-passed`. The run is validation-only: it must not
 fix findings. Route actionable findings into separate, deduplicated owning-repo
-td tasks with `sgt-no-mistakes-finding`.
+td tasks with `sgt-no-mistakes-finding`. For launch reservation, rollback
+ownership, and retry semantics, see
+[`docs/using-sergeant.md`](docs/using-sergeant.md#final-no-mistakes-boundary).
 
 Safety-sensitive/stateful objectives require `sgt-dispatch --intent-file`; other
 objectives use the generated `standard-isolated` lighter path. See
