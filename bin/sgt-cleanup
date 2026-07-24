@@ -201,6 +201,37 @@ _stop_local_worker() {
     _die "Other processes still have $worktree as their current directory: $(tr '\n' ' ' <<< "$cwd_pids")"
 }
 
+_path_device() {
+  local device path="$1"
+
+  device="$(stat -c '%d' "$path" 2>/dev/null || \
+    stat -f '%d' "$path" 2>/dev/null)" || return 1
+  [[ -n "$device" && "$device" != *$'\n'* ]] || return 1
+  printf '%s\n' "$device"
+}
+
+_require_same_filesystem_layout() {
+  local fleet_device repo_dir repo_name worktree worktree_device
+
+  for repo_dir in "$TASK_DIR"/*/; do
+    [[ -d "$repo_dir" ]] || continue
+    repo_dir="${repo_dir%/}"
+    repo_name="$(basename "$repo_dir")"
+    if [[ -n "$FILTER_REPO" && "$repo_name" != "$FILTER_REPO" ]]; then
+      continue
+    fi
+
+    worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+    [[ -n "$worktree" && -d "$worktree" ]] || continue
+    fleet_device="$(_path_device "$repo_dir")" || \
+      _die "Cannot verify cleanup filesystem layout: $repo_name fleet state"
+    worktree_device="$(_path_device "$worktree")" || \
+      _die "Cannot verify cleanup filesystem layout: $repo_name worktree"
+    [[ "$fleet_device" == "$worktree_device" ]] || \
+      _die "Unsupported cleanup layout: fleet state and worktree must be on the same filesystem; move SERGEANT_FLEET or the worktree before retrying: $repo_name"
+  done
+}
+
 _require_terminal_repos() {
   local cleanup_phase configured_root evidence_dir expected_evidence_identity owner_root owner_type \
     partial_phase removed_phase removing_phase proof_dir repo_dir repo_name \
@@ -1107,6 +1138,7 @@ _require_completed_removal_proof() {
     _die "Cannot prove completed git worktree removal: $worktree"
 }
 
+_require_same_filesystem_layout
 _require_terminal_repos
 _require_clean_worktrees
 
