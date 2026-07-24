@@ -1614,6 +1614,29 @@ printf 'diagnostic\n' > \
   "$TEST_ROOT/evidence-transaction-worker/.sergeant-diagnostic"
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
+if [[ -n "${FAKE_GIT_HASH_TRIGGER_PATH:-}" && \
+  " $* " == *"$FAKE_GIT_HASH_TRIGGER_PATH"* ]]; then
+  trigger_count=0
+  [[ ! -f "$FAKE_GIT_HASH_STATE" ]] || \
+    trigger_count="$(cat "$FAKE_GIT_HASH_STATE")"
+  trigger_count=$((trigger_count + 1))
+  printf '%s\n' "$trigger_count" > "$FAKE_GIT_HASH_STATE"
+  if [[ "$trigger_count" -eq "${FAKE_GIT_HASH_TRIGGER_AT:-1}" ]]; then
+    case "${FAKE_GIT_HASH_ACTION:-fail}" in
+      fail) exit 1 ;;
+      precreate)
+        ancestor_pid="$PPID"
+        ancestor_count=0
+        while [[ -n "$ancestor_pid" && "$ancestor_pid" != 1 && \
+          "$ancestor_count" -lt 5 ]]; do
+          mkdir -p "$FAKE_GIT_TRANSACTION_ROOT/restore-evidence.tmp.$ancestor_pid"
+          ancestor_pid="$(ps -o ppid= -p "$ancestor_pid" | tr -d ' ')"
+          ancestor_count=$((ancestor_count + 1))
+        done
+        ;;
+    esac
+  fi
+fi
 case " $* " in
   *" worktree remove "*)
     printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
@@ -1690,7 +1713,9 @@ fi
 rm "$TEST_ROOT/evidence-transaction-worker"/.sergeant-*
 set +e
 restore_identity_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
-  SGT_CLEANUP_FAIL_POINT=restore-persisted-identity \
+  FAKE_GIT_HASH_TRIGGER_PATH='.sergeant-diagnostic' \
+  FAKE_GIT_HASH_TRIGGER_AT=2 FAKE_GIT_HASH_ACTION=fail \
+  FAKE_GIT_HASH_STATE="$TEST_ROOT/restore-identity-hashes" \
   FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app 2>&1)"
@@ -1702,30 +1727,59 @@ if compgen -G "$TEST_ROOT/evidence-transaction-worker/.sergeant-*" >/dev/null; t
   printf 'persisted identity failure changed live evidence\n' >&2
   exit 1
 fi
-for failure_point in restore-transaction-available restore-setup \
-  restore-staged-identity; do
-  set +e
-  restore_internal_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
-    SGT_CLEANUP_FAIL_POINT="$failure_point" \
-    FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
-    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-    "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app 2>&1)"
-  restore_internal_status=$?
-  set -e
-  [[ "$restore_internal_status" -ne 0 ]]
-  [[ "$restore_internal_output" == *'Failed to restore persisted worker evidence: app; inspect preserved evidence:'* ]]
-  if compgen -G "$TEST_ROOT/evidence-transaction-worker/.sergeant-*" \
-    >/dev/null; then
-    printf 'restore failure changed live evidence: %s\n' "$failure_point" >&2
-    exit 1
-  fi
-  if compgen -G \
-    "$TEST_ROOT/fleet/evidence-transaction/app/restore-evidence.tmp.*" \
-    >/dev/null; then
-    printf 'restore failure left a transaction: %s\n' "$failure_point" >&2
-    exit 1
-  fi
-done
+set +e
+restore_existing_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_HASH_TRIGGER_PATH='.sergeant-diagnostic' \
+  FAKE_GIT_HASH_TRIGGER_AT=2 FAKE_GIT_HASH_ACTION=precreate \
+  FAKE_GIT_HASH_STATE="$TEST_ROOT/restore-existing-hashes" \
+  FAKE_GIT_TRANSACTION_ROOT="$TEST_ROOT/fleet/evidence-transaction/app" \
+  FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app 2>&1)"
+restore_existing_status=$?
+set -e
+[[ "$restore_existing_status" -ne 0 ]]
+[[ "$restore_existing_output" == *'restore artifacts:'* ]]
+compgen -G "$TEST_ROOT/fleet/evidence-transaction/app/restore-evidence.tmp.*" \
+  >/dev/null
+rm -rf "$TEST_ROOT/fleet/evidence-transaction/app"/restore-evidence.tmp.*
+
+REAL_MKDIR="$(command -v mkdir)"
+export REAL_MKDIR
+cat > "$TEST_ROOT/fake-bin/mkdir" <<'EOF'
+#!/usr/bin/env bash
+[[ " $* " != *'/restore-evidence.tmp.'* ]] || exit 1
+"$REAL_MKDIR" "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/mkdir"
+set +e
+restore_setup_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app 2>&1)"
+restore_setup_status=$?
+set -e
+[[ "$restore_setup_status" -ne 0 ]]
+[[ "$restore_setup_output" == *'Failed to restore persisted worker evidence:'* ]]
+rm "$TEST_ROOT/fake-bin/mkdir"
+
+set +e
+restore_staged_identity_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_HASH_TRIGGER_PATH='.sergeant-diagnostic' \
+  FAKE_GIT_HASH_TRIGGER_AT=4 FAKE_GIT_HASH_ACTION=fail \
+  FAKE_GIT_HASH_STATE="$TEST_ROOT/restore-staged-identity-hashes" \
+  FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app 2>&1)"
+restore_staged_identity_status=$?
+set -e
+[[ "$restore_staged_identity_status" -ne 0 ]]
+[[ "$restore_staged_identity_output" == *'Failed to restore persisted worker evidence:'* ]]
+if compgen -G "$TEST_ROOT/fleet/evidence-transaction/app/restore-evidence.tmp.*" \
+  >/dev/null; then
+  printf 'staged identity failure left a restore transaction\n' >&2
+  exit 1
+fi
 set +e
 restore_drift_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
   SGT_CLEANUP_MUTATE_POINT=before-retry-restore \
@@ -1780,9 +1834,19 @@ cp -p "$TEST_ROOT/fleet/evidence-transaction/app/terminal-evidence"/.sergeant-* 
   "$TEST_ROOT/evidence-transaction-worker/"
 restore_backup_before="$(cksum \
   "$TEST_ROOT/evidence-transaction-worker"/.sergeant-*)"
+REAL_MV="$(command -v mv)"
+export REAL_MV
+cat > "$TEST_ROOT/fake-bin/mv" <<'EOF'
+#!/usr/bin/env bash
+[[ -z "${FAKE_MV_FAIL_SOURCE:-}" || "$1" != "$FAKE_MV_FAIL_SOURCE" ]] || exit 1
+[[ -z "${FAKE_MV_FAIL_SOURCE_SUFFIX:-}" || \
+  "$1" != *"$FAKE_MV_FAIL_SOURCE_SUFFIX" ]] || exit 1
+"$REAL_MV" "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/mv"
 set +e
 restore_backup_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
-  SGT_CLEANUP_FAIL_POINT=restore-backup-1 \
+  FAKE_MV_FAIL_SOURCE="$TEST_ROOT/evidence-transaction-worker/.sergeant-result" \
   FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app 2>&1)"
@@ -1798,7 +1862,27 @@ if compgen -G "$TEST_ROOT/fleet/evidence-transaction/app/restore-evidence.tmp.*"
   printf 'failed live-evidence backup left a restore transaction\n' >&2
   exit 1
 fi
+set +e
+restore_backup_rollback_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_MV_FAIL_SOURCE="$TEST_ROOT/evidence-transaction-worker/.sergeant-result" \
+  FAKE_MV_FAIL_SOURCE_SUFFIX='/original/.sergeant-diagnostic' \
+  FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app 2>&1)"
+restore_backup_rollback_status=$?
+set -e
+[[ "$restore_backup_rollback_status" -ne 0 ]]
+[[ "$restore_backup_rollback_output" == \
+  *'CRITICAL: worker evidence restore backup failed and rollback failed:'* ]]
+[[ "$restore_backup_rollback_output" == *'inspect preserved transaction:'* ]]
+restore_backup_transaction="$(compgen -G \
+  "$TEST_ROOT/fleet/evidence-transaction/app/restore-evidence.tmp.*")"
+[[ -d "$restore_backup_transaction" ]]
+"$REAL_MV" "$restore_backup_transaction/original/.sergeant-diagnostic" \
+  "$TEST_ROOT/evidence-transaction-worker/.sergeant-diagnostic"
+rm -rf "$restore_backup_transaction"
 rm "$TEST_ROOT/evidence-transaction-worker"/.sergeant-*
+rm "$TEST_ROOT/fake-bin/mv"
 set +e
 restore_rollback_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
   SGT_CLEANUP_FAIL_POINT='restore-publish-2,restore-rollback-cleanup' \
@@ -1870,7 +1954,57 @@ fi
   "$TEST_ROOT/fleet/evidence-transaction/app/terminal-evidence"/.sergeant-*)" == \
   "$evidence_persisted_before" ]]
 [[ "$(wc -l < "$TEST_ROOT/evidence-removals")" -eq 1 ]]
-rm "$TEST_ROOT/fake-bin/git"
+
+cp -p "$TEST_ROOT/fleet/evidence-transaction/app/terminal-evidence"/.sergeant-* \
+  "$TEST_ROOT/evidence-transaction-worker/"
+cat > "$TEST_ROOT/fake-bin/mv" <<'EOF'
+#!/usr/bin/env bash
+[[ -z "${FAKE_MV_FAIL_SOURCE_SUFFIX:-}" || \
+  "$1" != *"$FAKE_MV_FAIL_SOURCE_SUFFIX" ]] || exit 1
+"$REAL_MV" "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/mv"
+set +e
+restore_publish_rollback_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SGT_CLEANUP_FAIL_POINT=restore-publish-2 \
+  FAKE_MV_FAIL_SOURCE_SUFFIX='/original/.sergeant-diagnostic' \
+  FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app 2>&1)"
+restore_publish_rollback_status=$?
+set -e
+[[ "$restore_publish_rollback_status" -ne 0 ]]
+[[ "$restore_publish_rollback_output" == \
+  *'CRITICAL: worker evidence restore publication failed and rollback failed:'* ]]
+[[ "$restore_publish_rollback_output" == *'inspect preserved transaction:'* ]]
+restore_publish_transaction="$(compgen -G \
+  "$TEST_ROOT/fleet/evidence-transaction/app/restore-evidence.tmp.*")"
+[[ -d "$restore_publish_transaction" ]]
+for evidence in "$restore_publish_transaction/original"/.sergeant-*; do
+  "$REAL_MV" "$evidence" "$TEST_ROOT/evidence-transaction-worker/"
+done
+rm -rf "$restore_publish_transaction"
+rm "$TEST_ROOT/evidence-transaction-worker"/.sergeant-* \
+  "$TEST_ROOT/fake-bin/mv"
+
+set +e
+restore_cleanup_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SGT_CLEANUP_FAIL_POINT=restore-cleanup \
+  FAKE_GIT_LOG="$TEST_ROOT/evidence-removals" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" evidence-transaction app 2>&1)"
+restore_cleanup_status=$?
+set -e
+[[ "$restore_cleanup_status" -ne 0 ]]
+[[ "$restore_cleanup_output" == \
+  *'CRITICAL: rollback cleanup failed for completed worker evidence restore; inspect preserved artifact:'* ]]
+compgen -G "$TEST_ROOT/fleet/evidence-transaction/app/restore-evidence.tmp.*" \
+  >/dev/null
+[[ "$(cksum "$TEST_ROOT/evidence-transaction-worker"/.sergeant-*)" == \
+  "$evidence_live_before" ]]
+rm -rf "$TEST_ROOT/fleet/evidence-transaction/app"/restore-evidence.tmp.*
+rm "$TEST_ROOT/evidence-transaction-worker"/.sergeant-* \
+  "$TEST_ROOT/fake-bin/git"
 
 mkdir -p "$TEST_ROOT/fleet/task-123/app" "$TEST_ROOT/repo"
 git -C "$TEST_ROOT/repo" init -q
