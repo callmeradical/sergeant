@@ -17,12 +17,7 @@ SGT_LIB_LOADED=1
 SERGEANT_CONFIG="${SERGEANT_CONFIG:-$HOME/.config/sergeant}"
 # shellcheck disable=SC2034  # Shared default consumed by sourced scripts.
 FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
-# Auto-detect the running agent from environment signals, then allow override.
-# Detection order:
-#   1. SERGEANT_AGENT env var — explicit override always wins
-#   2. OPENCODE / OPENCODE_PID — set by opencode when running a session
-#   3. CLAUDE_CODE_SESSION_ID — set by Claude Code when running a session
-#   4. Fallback: opencode
+# Interactive worker dispatch supports persistent OpenCode, Goose, and Claude sessions.
 _sgt_detect_agent() {
   if [[ -n "${SERGEANT_AGENT:-}" ]]; then
     echo "$SERGEANT_AGENT"
@@ -85,36 +80,6 @@ _sgt_is_git_repo() {
 _die()  { echo "ERROR: $*" >&2; exit 1; }
 _info() { echo "  $*"; }
 
-# ── Agent command builder ─────────────────────────────────────────────────────
-# _sgt_agent_run_cmd <agent> <message>
-#
-# Returns the shell command string to launch a non-interactive agent session
-# with <message> as the first prompt, using the correct flags for each agent.
-#
-# Supported agents:
-#   opencode   → opencode run --auto "<message>"
-#   claude     → claude --dangerously-skip-permissions "<message>"
-#   (default)  → <agent> run --auto "<message>"   (opencode-style fallback)
-
-_sgt_agent_run_cmd() {
-  local agent="$1"
-  local message="$2"
-  local bin
-  bin="$(basename "$agent")"
-
-  case "$bin" in
-    claude)
-      # claude: pass message as positional arg with dangerously-skip-permissions
-      # to bypass all permission dialogs in autonomous mode.
-      printf '%s --dangerously-skip-permissions %q' "$agent" "$message"
-      ;;
-    opencode|oc|*)
-      # opencode (and unknown agents): use `run --auto` for non-interactive mode.
-      printf '%s run --auto %q' "$agent" "$message"
-      ;;
-  esac
-}
-
 # ── Wiki integration ──────────────────────────────────────────────────────────
 # _sgt_wiki_write <title> <type> <description> <tags> <body>
 #
@@ -152,6 +117,43 @@ _require_tmux() {
 }
 _require_git() {
   command -v git &>/dev/null || _die "git is required"
+}
+_require_interactive_agent() {
+  local agent_name
+  agent_name="$(basename "$AGENT_CMD")"
+  case "$agent_name" in
+    opencode|oc|goose|claude) ;;
+    *) _die "unsupported interactive agent: $AGENT_CMD (expected opencode, goose, or claude)" ;;
+  esac
+  command -v "$AGENT_CMD" &>/dev/null || _die "interactive agent not found: $AGENT_CMD"
+  if [[ "$agent_name" == "goose" ]] && ! "$AGENT_CMD" session --help >/dev/null 2>&1; then
+    _die "Goose does not support interactive sessions: expected 'goose session --help' to succeed"
+  fi
+}
+_sgt_pane_identity() {
+  local pane="$1"
+  tmux display-message -p -t "$pane" \
+    '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' 2>/dev/null
+}
+_sgt_pane_identity_matches() {
+  local pane="$1" repo_dir="$2" identity_name="${3:-pane_identity}" expected actual
+  expected="$(cat "$repo_dir/$identity_name" 2>/dev/null || true)"
+  [[ -n "$expected" ]] || return 1
+  actual="$(_sgt_pane_identity "$pane")" || return 1
+  [[ "$actual" == "$expected" && "${actual%%|*}" == "0" ]]
+}
+_sgt_worktree_is_validation_clean() {
+  local worktree="$1" untracked
+  git -C "$worktree" diff --quiet --ignore-submodules -- && \
+    git -C "$worktree" diff --cached --quiet --ignore-submodules -- || return 1
+  untracked="$(git -C "$worktree" ls-files --others --exclude-standard | \
+    while IFS= read -r path; do
+      case "$path" in
+        .sergeant-*) ;;
+        *) printf '%s\n' "$path" ;;
+      esac
+    done)"
+  [[ -z "$untracked" ]]
 }
 _sgt_td_normalize_version() {
   printf '%s\n' "${1#v}"

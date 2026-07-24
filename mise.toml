@@ -18,7 +18,7 @@ TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
 mkdir -p "$TARGET_DIR"
 
 linked=0
-for f in "$BIN_DIR"/sgt-* "$BIN_DIR"/_sgt-lib.sh "$BIN_DIR"/_sgt-bash-version.sh "$BIN_DIR"/_sgt-response-lock.sh "$BIN_DIR/oc-inject" "$BIN_DIR/wiki-daily-digest"; do
+for f in "$BIN_DIR"/sgt-* "$BIN_DIR"/_sgt-lib.sh "$BIN_DIR"/_sgt-bash-version.sh "$BIN_DIR"/_sgt-intent.sh "$BIN_DIR"/_sgt-response-lock.sh "$BIN_DIR/oc-inject" "$BIN_DIR/wiki-daily-digest"; do
   [[ -f "$f" ]] || continue
   name="$(basename "$f")"
   ln -sf "$f" "$TARGET_DIR/$name"
@@ -57,7 +57,7 @@ set -euo pipefail
 TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
 removed=0
 
-for f in "$TARGET_DIR"/sgt-* "$TARGET_DIR"/_sgt-lib.sh "$TARGET_DIR"/_sgt-bash-version.sh "$TARGET_DIR"/_sgt-response-lock.sh "$TARGET_DIR/oc-inject" "$TARGET_DIR/wiki-daily-digest"; do
+for f in "$TARGET_DIR"/sgt-* "$TARGET_DIR"/_sgt-lib.sh "$TARGET_DIR"/_sgt-bash-version.sh "$TARGET_DIR"/_sgt-intent.sh "$TARGET_DIR"/_sgt-response-lock.sh "$TARGET_DIR/oc-inject" "$TARGET_DIR/wiki-daily-digest"; do
   [[ -L "$f" ]] || continue
   # Only remove if it points back into the sergeant repo
   target="$(readlink "$f")"
@@ -122,28 +122,19 @@ _check_td() {
 }
 
 _check_agent_harness() {
-  local harness harness_path version detected_names detected_details
+  local harness harness_path version
 
-  for harness in opencode claude; do
+  for harness in opencode goose claude; do
     if harness_path="$(command -v "$harness" 2>/dev/null)"; then
       version="$("$harness" --version 2>&1 | head -1 | tr -d '\n')"
       [[ -n "$version" ]] || version="$harness_path"
-      if [[ -n "$detected_names" ]]; then
-        detected_names="$detected_names, $harness"
-        detected_details="$detected_details; $harness: $version"
-      else
-        detected_names="$harness"
-        detected_details="$harness: $version"
-      fi
+      printf "  %-14s  ✓  %s\\n" "agent" "$harness: $version"
+      return
     fi
   done
 
-  if [[ -n "${detected_names:-}" ]]; then
-    printf "  %-14s  ✓  %s\\n" "agent" "$detected_details"
-  else
-    printf "  %-14s  ✗  MISSING — install OpenCode or Claude Code\\n" "agent"
-    ok=false
-  fi
+  printf "  %-14s  ✗  MISSING — install OpenCode, Goose, or Claude for interactive worker dispatch\\n" "agent"
+  ok=false
 }
 
 echo "=== sergeant dependency check ==="
@@ -162,6 +153,7 @@ echo ""
 echo "Optional:"
 _check "treehouse"  treehouse  optional  "https://github.com/kunchenguid/treehouse"
 _check "graphify"   graphify   optional  "https://github.com/kunchenguid/graphify"
+_check "no-mistakes" no-mistakes optional "install no-mistakes for final shipping validation"
 _check "mise"       mise       optional  "brew install mise"
 
 echo ""

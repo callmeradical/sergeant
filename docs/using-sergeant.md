@@ -43,12 +43,35 @@ From a free-form brief when no task exists:
 ```bash
 sgt-dispatch <project> "<objective and constraints>" \
   --repos repo-a,repo-b \
+  --agent opencode \
+  --stage implementation \
   --branch feat/example \
-  --deps 'repo-a>repo-b'
+  --deps 'repo-a>repo-b' \
+  --intent-file intent.md
 ```
 
 Sergeant creates or reuses td work, creates isolated worktrees, writes worker
-briefs, starts agent panes, and records fleet state.
+briefs, starts agent panes, and records fleet state. It writes the same
+`.sergeant-intent.md` revision to fleet state and every selected worktree. This
+artifact is canonical for implementation decisions, reviews, PR text,
+successor/recovery work, and final validation.
+
+`--agent` selects `opencode`, `goose`, or `claude`; `SERGEANT_AGENT` provides the
+same override and OpenCode is the default. `--stage` is a lowercase slug used in
+the `<stage>-<repo>-<task>` tmux window name and defaults to `implementation`.
+Workers always run as persistent
+interactive TTY sessions. Sergeant never starts one-shot run, prompt, print, or
+automatic modes. It launches OpenCode with `--dangerously-skip-permissions`,
+Goose with `goose session`, and Claude without prompt arguments. Initial briefs
+and later responses are delivered
+as fixed terminal input, so their bodies do not appear in process arguments.
+
+`--intent-file` is required when the objective names auth/OAuth, security,
+secrets or credentials, payments, databases or migrations, stateful/production
+work, destructive work, persistent state, or state transitions. The file must
+contain the eight sections shown by `sgt-dispatch`; malformed, missing,
+traversing, symlinked, or oversized input fails before dispatch mutation. Other
+objectives use the named `standard-isolated` lighter path.
 
 ## Monitor work
 
@@ -91,7 +114,7 @@ plus recent meaningful log activity or an active child operation.
 ## Respond to a worker
 
 ```bash
-sgt-respond <fleet-task-id> <repo> "<approved response>"
+sgt-respond <fleet-task-id> <repo> < protected-response.txt
 ```
 
 Before responding:
@@ -102,6 +125,13 @@ Before responding:
 3. Record the decision in the owning td task.
 4. Verify no unconsumed response generation already exists.
 5. After sending, require the matching worker to acknowledge/consume it.
+
+The notified worker reads `.sergeant-response`, its ID, and gate generation,
+applies the decision once, restores truthful status, and writes
+`.sergeant-response-applied` with the matching ID, generation, and status. It then
+runs `sgt-ack-response <task> <repo> <response-id>` from its exact recorded pane.
+This validates post-application proof, archives replay evidence with mode `0600`,
+records acknowledgement, and clears active plaintext transport.
 
 ## Reconcile results
 
@@ -117,15 +147,23 @@ For each repository require:
 
 ## Final no-mistakes boundary
 
-Run no-mistakes once after implementation and native validation:
+After native validation and independent reviews report zero blockers, the worker
+writes `.sergeant-validation-ready` with the recorded `intent_revision`, current
+`head_sha`, and `passed` values for `standards_review`, `spec_review`, and
+`readiness_review`, then notifies the coordinator. The worker must
+not run no-mistakes. The coordinator starts the one final validation boundary:
 
 ```bash
-no-mistakes axi run --intent "<objective and approved tradeoffs>"
+sgt-validate <fleet-task-id> <repo> [--skip <steps>]
 ```
 
-Treat it as validation-only. Route each actionable finding into separate,
+`sgt-validate` splits the worker's existing tmux window, renames that shared
+window to `validation-<repo>-<task>`, and runs no-mistakes interactively in the
+new coordinator-owned pane with the canonical intent. It never uses `--yes`.
+Treat the run as validation-only. Route each actionable finding into separate,
 deduplicated owning-repository td work. Do not modify source inside the retained
-validation run. Stop at `checks-passed`; merge only under recorded authorization.
+validation run. Approve low/medium-risk gates and merge passing PRs under recorded
+authorization; escalate high-risk findings.
 
 ## Clean completed fleet state
 

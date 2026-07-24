@@ -72,7 +72,9 @@ the operation with ad hoc shell commands.
 | `bin/sgt-dispatch <project> --td <id>` | Dispatch from a td task (auto-detects repo) |
 | `bin/sgt-watch <task-id>` | Monitor fleet until all workers done |
 | `bin/sgt-watch --list` | List all active tasks |
-| `bin/sgt-respond <task-id> <repo> "<response>"` | Answer a worker escalation and resume its loop |
+| `bin/sgt-respond <task-id> <repo>` | Read a worker response from stdin and resume its loop |
+| `bin/sgt-ack-response <task-id> <repo> <response-id>` | Acknowledge one consumed response from the exact worker pane |
+| `bin/sgt-validate <task-id> <repo> [--skip <steps>]` | Launch coordinator-owned no-mistakes in a split worker-window pane |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees + fleet state when done |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
 | `bin/sgt-td-list <project>` | Show td tasks across all repos in a project |
@@ -123,7 +125,11 @@ When the user brings you a task:
 
 Workers use `in_progress`, `needs_input`, and `blocked` as nonterminal states. A waiting worker may remain alive or may exit after a durable handoff. Do not infer progress from liveness, do not rewrite an expected blocked exit as orphaned, and do not clean a waiting worktree. Use `sgt-respond` or supported recovery only after reconciling status, response generation, pane identity, and handoff evidence.
 
-Routine workers complete repository-native tests, lint/typechecking, and independent Standards/Spec reviews without running no-mistakes. Reserve `no-mistakes axi run --intent "<the user's objective and approved tradeoffs>"` for one explicit final shipping boundary after implementation and native validation, unless the user explicitly requests an override. Skip only proven-irrelevant gates, stop at `checks-passed`, and treat the run as validation-only. Route every actionable finding to separate deduplicated owning-repo td work with `sgt-no-mistakes-finding`; never remediate it in the validation run.
+Every dispatched implementation, independent review, PR description, successor,
+recovery, and final shipping gate must use the same canonical intent revision from
+`.sergeant-intent.md`. Workers and remediation loops never run no-mistakes. After
+readiness, the coordinator uses `sgt-validate` to launch the single validation-only
+boundary in a split pane of the worker's tmux window.
 
 ### Avoid no-op outcomes
 
@@ -152,4 +158,4 @@ Routine workers complete repository-native tests, lint/typechecking, and indepen
 - Never commit secrets. Project YAMLs may contain paths but should not contain credentials.
 - Use a bare `sgt-*` command when `command -v <name>` succeeds; otherwise run
   `bin/<name>` from this repository.
-- `SERGEANT_AGENT` — override the agent binary used for dispatch. Supported values: `opencode`, `claude`. If not set, sergeant auto-detects from the environment (`OPENCODE`/`OPENCODE_PID` → opencode; `CLAUDE_CODE_SESSION_ID` → claude). Each agent gets the right non-interactive flags automatically (`opencode run --auto` / `claude --dangerously-skip-permissions`).
+- `SERGEANT_AGENT` or `sgt-dispatch --agent` may select `opencode`, `oc`, `goose`, `claude`, or an equivalent path whose basename is one of those names. Dispatch uses only persistent interactive sessions and rejects every other agent and all non-interactive launch modes before creating worker state.

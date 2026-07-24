@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# sgt-ack-response - Acknowledge and clear one consumed worker response.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-response-lock.sh
+source "$SCRIPT_DIR/_sgt-response-lock.sh"
+
+[[ $# -eq 3 ]] || _die "Usage: sgt-ack-response <task-id> <repo> <response-id>"
+TASK_ID="$1"
+REPO="$2"
+RESPONSE_ID="$3"
+[[ "$TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid task ID: $TASK_ID"
+[[ "$REPO" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid repo: $REPO"
+[[ "$RESPONSE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid response ID"
+
+REPO_STATE="$FLEET_DIR/$TASK_ID/$REPO"
+[[ -d "$REPO_STATE" ]] || _die "Repo not found in task $TASK_ID: $REPO"
+WORKTREE="$(cat "$REPO_STATE/worktree" 2>/dev/null || true)"
+PANE="$(cat "$REPO_STATE/pane" 2>/dev/null || true)"
+[[ -d "$WORKTREE" ]] || _die "Worker worktree unavailable"
+[[ -n "${TMUX_PANE:-}" && "$TMUX_PANE" == "$PANE" ]] || \
+  _die "Current worker pane identity does not match dispatch ownership"
+_sgt_pane_identity_matches "$TMUX_PANE" "$REPO_STATE" || \
+  _die "Current worker pane identity does not match dispatch ownership"
+
+_sgt_response_lock_acquire "$REPO_STATE"
+trap '_sgt_response_lock_release' EXIT
+[[ "$(cat "$REPO_STATE/response_id" 2>/dev/null || true)" == "$RESPONSE_ID" && \
+   "$(cat "$WORKTREE/.sergeant-response-id" 2>/dev/null || true)" == "$RESPONSE_ID" ]] || \
+  _die "Pending response ID does not match acknowledgement"
+[[ -f "$REPO_STATE/response" && -f "$WORKTREE/.sergeant-response" ]] || \
+  _die "Pending response transport is incomplete"
+RESPONSE_GENERATION="$(cat "$REPO_STATE/response_generation" 2>/dev/null || true)"
+[[ "$RESPONSE_GENERATION" =~ ^[1-9][0-9]*$ && \
+   "$(cat "$WORKTREE/.sergeant-response-generation" 2>/dev/null || true)" == "$RESPONSE_GENERATION" ]] || \
+  _die "Pending response generation is invalid"
+PROOF_FILE="$WORKTREE/.sergeant-response-applied"
+[[ -f "$PROOF_FILE" ]] || _die "Response post-application proof is required before acknowledgement"
+_proof_field() {
+  local key="$1"
+  awk -F= -v key="$key" '
+    $1 == key { count++; value = substr($0, length(key) + 2) }
+    END { if (count == 1 && value != "") print value; else exit 1 }
+  ' "$PROOF_FILE"
+}
+PROOF_ID="$(_proof_field response_id)" || _die "Response post-application proof is malformed"
+PROOF_GENERATION="$(_proof_field gate_generation)" || _die "Response post-application proof is malformed"
+PROOF_STATUS="$(_proof_field status)" || _die "Response post-application proof is malformed"
+CURRENT_STATUS="$(cat "$WORKTREE/.sergeant-status" 2>/dev/null || true)"
+[[ "$PROOF_ID" == "$RESPONSE_ID" && "$PROOF_GENERATION" == "$RESPONSE_GENERATION" && \
+   "$PROOF_STATUS" == "$CURRENT_STATUS" ]] || _die "Response post-application proof does not match current state"
+case "$CURRENT_STATUS" in
+  in_progress) ;;
+  done)
+    [[ -s "$WORKTREE/.sergeant-result" ]] || _die "Response acknowledgement requires done with a non-empty result"
+    ;;
+  failed:\ *[![:space:]]) ;;
+  failed:*) _die "Response acknowledgement requires failed with a nonblank reason" ;;
+  needs_input|blocked)
+    CURRENT_GENERATION="$(cat "$WORKTREE/.sergeant-gate-generation" 2>/dev/null || true)"
+    [[ "$CURRENT_GENERATION" =~ ^[1-9][0-9]*$ && "$CURRENT_GENERATION" -gt "$RESPONSE_GENERATION" ]] || \
+      _die "Response acknowledgement requires a subsequent gate or terminal proof"
+    ;;
+  *) _die "Response post-application proof has unsupported status: $CURRENT_STATUS" ;;
+esac
+
+ARCHIVE_DIR="$REPO_STATE/response-archive"
+mkdir -p "$ARCHIVE_DIR"
+chmod 700 "$ARCHIVE_DIR"
+ARCHIVE_ENTRY="$ARCHIVE_DIR/$RESPONSE_ID"
+[[ ! -e "$ARCHIVE_ENTRY" ]] || _die "Response archive entry already exists: $RESPONSE_ID"
+mkdir "$ARCHIVE_ENTRY.tmp.$$"
+chmod 700 "$ARCHIVE_ENTRY.tmp.$$"
+printf '%s\n' "$(cat "$REPO_STATE/response")" > "$ARCHIVE_ENTRY.tmp.$$/body"
+printf '%s\n' "$RESPONSE_GENERATION" > "$ARCHIVE_ENTRY.tmp.$$/gate_generation"
+printf '%s\n' "$CURRENT_STATUS" > "$ARCHIVE_ENTRY.tmp.$$/applied_status"
+cp "$PROOF_FILE" "$ARCHIVE_ENTRY.tmp.$$/proof"
+chmod 600 "$ARCHIVE_ENTRY.tmp.$$"/*
+printf '%s\n' "$RESPONSE_ID" > "$REPO_STATE/response_ack.tmp.$$"
+printf '%s\n' "$RESPONSE_ID" > "$WORKTREE/.sergeant-response-ack.tmp.$$"
+mv "$ARCHIVE_ENTRY.tmp.$$" "$ARCHIVE_ENTRY"
+mv "$REPO_STATE/response_ack.tmp.$$" "$REPO_STATE/response_ack"
+mv "$WORKTREE/.sergeant-response-ack.tmp.$$" "$WORKTREE/.sergeant-response-ack"
+rm -f "$REPO_STATE/response" "$WORKTREE/.sergeant-response" \
+  "$WORKTREE/.sergeant-response-id" "$WORKTREE/.sergeant-response-generation" \
+  "$WORKTREE/.sergeant-response-applied"
+_sgt_response_lock_release
+trap - EXIT
+printf 'Acknowledged response %s for %s/%s.\n' "$RESPONSE_ID" "$TASK_ID" "$REPO"

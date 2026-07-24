@@ -136,7 +136,7 @@ _terminate_process_group() {
 _stop_local_worker() {
   local repo_dir="$1"
   local worktree="$2"
-  local pane pane_info pane_dead pane_pid pane_pgid pane_command tree_records tree_pids live_tree_pids cwd_pids
+  local pane pane_info pane_dead pane_pid pane_pgid tree_records tree_pids live_tree_pids cwd_pids
 
   pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
   tree_records=""
@@ -144,18 +144,17 @@ _stop_local_worker() {
 
   if [[ -n "$pane" ]]; then
     command -v tmux >/dev/null 2>&1 || _die "tmux is required to terminate recorded worker pane $pane"
-    pane_info="$(tmux display-message -p -t "$pane" \
-      '#{pane_dead}|#{pane_pid}|#{pane_start_command}' 2>/dev/null || true)"
+    pane_info="$(_sgt_pane_identity "$pane" || true)"
 
     if [[ -n "$pane_info" ]]; then
       pane_dead="${pane_info%%|*}"
       pane_info="${pane_info#*|}"
+      pane_info="${pane_info#*|}"
       pane_pid="${pane_info%%|*}"
-      pane_command="${pane_info#*|}"
 
       if [[ "$pane_dead" != "0" ]]; then
         echo "  worker pane already stopped: $pane"
-      elif [[ "$pane_command" != *sgt-worker* || "$pane_command" != *"$repo_dir"* ]]; then
+      elif ! _sgt_pane_identity_matches "$pane" "$repo_dir"; then
         echo "  recorded pane no longer belongs to this worker: $pane"
       else
         tree_records="$(_process_tree_records "$pane_pid")"
@@ -201,6 +200,77 @@ _stop_local_worker() {
     _die "Other processes still have $worktree as their current directory: $(tr '\n' ' ' <<< "$cwd_pids")"
 }
 
+_stop_validation_pane() {
+  local repo_dir="$1" pane pane_identity pane_info pane_pid pane_pgid
+  local tree_records tree_pids live_tree_pids recorded_pid recorded_pgid recorded_start actual_start
+  pane="$(cat "$repo_dir/validation_pane" 2>/dev/null || true)"
+  [[ -n "$pane" ]] || return 0
+  recorded_pid="$(cat "$repo_dir/validation_pane_pid" 2>/dev/null || true)"
+  recorded_pgid="$(cat "$repo_dir/validation_process_group" 2>/dev/null || true)"
+  recorded_start="$(cat "$repo_dir/validation_process_start" 2>/dev/null || true)"
+  [[ -n "$recorded_pid" && -n "$recorded_pgid" && -n "$recorded_start" ]] || \
+    _die "Validation pane ownership provenance is incomplete: $pane"
+  if ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+    if [[ -n "$recorded_pid" ]] && kill -0 "$recorded_pid" 2>/dev/null; then
+      actual_start="$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | awk '{$1=$1; print}' || true)"
+      [[ -n "$recorded_start" && "$actual_start" == "$recorded_start" ]] || \
+        _die "Validation owner PID was reused; refusing process termination: $recorded_pid"
+      [[ "$(ps -o pgid= -p "$recorded_pid" 2>/dev/null | tr -d ' ' || true)" == "$recorded_pgid" ]] || \
+        _die "Validation owner process group changed; refusing process termination: $recorded_pid"
+      _terminate_process_group "$recorded_pgid"
+    elif [[ -n "$recorded_pgid" && -n "$(_process_group_pids "$recorded_pgid")" ]]; then
+      _die "Validation pane disappeared with unverified detached descendants in process group $recorded_pgid"
+    else
+      return 0
+    fi
+    for _ in $(seq 1 50); do
+      live_tree_pids="$(_process_group_pids "$recorded_pgid")"
+      [[ -z "$live_tree_pids" ]] && break
+      sleep 0.1
+    done
+    [[ -z "$live_tree_pids" ]] || _die "Validation processes did not terminate: $(tr '\n' ' ' <<< "$live_tree_pids")"
+    return 0
+  fi
+  if tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+    pane_identity="$(_sgt_pane_identity "$pane")"
+    if [[ "${pane_identity%%|*}" != "0" ]]; then
+      tmux kill-pane -t "$pane" 2>/dev/null || true
+      return 0
+    fi
+    _sgt_pane_identity_matches "$pane" "$repo_dir" validation_pane_identity || \
+      _die "Recorded validation pane identity does not match: $pane"
+    pane_info="${pane_identity#*|}"
+    pane_info="${pane_info#*|}"
+    pane_pid="${pane_info%%|*}"
+    tree_records="$(_process_tree_records "$pane_pid")"
+    tree_pids="$(_recorded_tree_pids "$tree_records")"
+    pane_pgid="$(ps -o pgid= -p "$pane_pid" 2>/dev/null | tr -d ' ' || true)"
+    tmux kill-pane -t "$pane" || _die "Failed to terminate validation pane $pane"
+    _terminate_pids "$tree_pids"
+    _terminate_process_group "$pane_pgid"
+    for _ in $(seq 1 50); do
+      live_tree_pids="$(printf '%s\n%s\n' \
+        "$(_process_group_pids "$pane_pgid")" \
+        "$(_live_recorded_tree_pids "$tree_records")" | sed '/^$/d' | sort -u)"
+      [[ -z "$live_tree_pids" ]] && break
+      sleep 0.1
+    done
+    if [[ -n "$live_tree_pids" ]]; then
+      _terminate_process_group "$pane_pgid" KILL
+      _terminate_pids "$(_live_recorded_tree_pids "$tree_records")" KILL
+    fi
+    for _ in $(seq 1 20); do
+      live_tree_pids="$(printf '%s\n%s\n' \
+        "$(_process_group_pids "$pane_pgid")" \
+        "$(_live_recorded_tree_pids "$tree_records")" | sed '/^$/d' | sort -u)"
+      [[ -z "$live_tree_pids" ]] && break
+      sleep 0.1
+    done
+    [[ -z "$live_tree_pids" ]] || \
+      _die "Validation processes did not terminate: $(tr '\n' ' ' <<< "$live_tree_pids")"
+  fi
+}
+
 _require_terminal_repos() {
   local cleanup_phase evidence_dir repo_dir repo_name status worktree worktree_status
 
@@ -226,7 +296,8 @@ _require_terminal_repos() {
     cleanup_phase="$(cat "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     if [[ -n "$worktree" && -d "$worktree" ]]; then
       if [[ "$cleanup_phase" == $'removing\n'"$worktree" ]]; then
-        _restore_worker_evidence "$repo_dir" "$worktree" || \n          _die "$repo_name: evidence restore failed during removing-state replay; replay aborted"
+        _restore_worker_evidence "$repo_dir" "$worktree" || \
+          _die "$repo_name: evidence restore failed during removing-state replay; replay aborted"
       fi
       [[ -f "$worktree/.sergeant-status" ]] || \
         _die "$repo_name worktree terminal proof is missing"
@@ -371,7 +442,20 @@ for repo_dir in "$TASK_DIR"/*/; do
 
   echo "--- $repo_name (status: $status, type: $wt_type) ---"
 
+  _stop_validation_pane "$repo_dir"
   _stop_local_worker "$repo_dir" "$worktree"
+
+  validation_worktree="$(cat "$repo_dir/validation_worktree" 2>/dev/null || true)"
+  if [[ -n "$validation_worktree" && -e "$validation_worktree" ]]; then
+    [[ "$validation_worktree" == "${worktree}-validation-${TASK_ID}" ]] || \
+      _die "Validation worktree path is outside the recorded ownership boundary: $validation_worktree"
+    git -C "$validation_worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
+      _die "Validation worktree is not a git checkout: $validation_worktree"
+    validation_cwd_pids="$(_worktree_cwd_pids "$validation_worktree")"
+    [[ -z "$validation_cwd_pids" ]] || \
+      _die "Processes still have $validation_worktree as their current directory: $(tr '\n' ' ' <<< "$validation_cwd_pids")"
+    rm -rf "$validation_worktree"
+  fi
 
   cwd_pids="$(_worktree_cwd_pids "$worktree")"
   [[ -z "$cwd_pids" ]] || \

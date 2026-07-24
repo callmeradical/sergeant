@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# sgt-validate - Launch coordinator-owned no-mistakes beside an interactive worker.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-intent.sh
+source "$SCRIPT_DIR/_sgt-intent.sh"
+
+[[ $# -eq 2 || ( $# -eq 4 && "$3" == "--skip" ) ]] || \
+  _die "Usage: sgt-validate <task-id> <repo> [--skip <steps>]"
+
+TASK_ID="$1"
+REPO="$2"
+SKIP="${4:-}"
+[[ "$TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid task ID: $TASK_ID"
+[[ "$REPO" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid repo: $REPO"
+[[ -z "$SKIP" || "$SKIP" =~ ^[a-z]+(,[a-z]+)*$ ]] || _die "Invalid --skip list: $SKIP"
+
+REPO_STATE="$FLEET_DIR/$TASK_ID/$REPO"
+TASK_STATE="$FLEET_DIR/$TASK_ID"
+[[ -d "$REPO_STATE" ]] || _die "Repo not found in task $TASK_ID: $REPO"
+WORKTREE="$(cat "$REPO_STATE/worktree" 2>/dev/null || true)"
+PANE="$(cat "$REPO_STATE/pane" 2>/dev/null || true)"
+[[ -d "$WORKTREE" ]] || _die "Worker worktree unavailable"
+_sgt_intent_revision_matches "$TASK_STATE" "$REPO_STATE" "$WORKTREE" || \
+  _die "canonical intent revision mismatch; audited human decision/new revision required"
+EXPECTED_REVISION="$(cat "$TASK_STATE/intent_revision")"
+[[ -f "$WORKTREE/.sergeant-validation-ready" ]] || \
+  _die "Worker validation-ready marker is required before no-mistakes"
+_ready_field() {
+  local key="$1" file="$2"
+  awk -F= -v key="$key" '
+    $1 == key { count++; value = substr($0, length(key) + 2) }
+    END { if (count == 1 && value != "") print value; else exit 1 }
+  ' "$file"
+}
+READY_INTENT="$(_ready_field intent_revision "$WORKTREE/.sergeant-validation-ready")" || \
+  _die "validation-ready marker has incomplete HEAD or review evidence"
+READY_HEAD="$(_ready_field head_sha "$WORKTREE/.sergeant-validation-ready")" || \
+  _die "validation-ready marker has incomplete HEAD or review evidence"
+STANDARDS_REVIEW="$(_ready_field standards_review "$WORKTREE/.sergeant-validation-ready")" || \
+  _die "validation-ready marker has incomplete HEAD or review evidence"
+SPEC_REVIEW="$(_ready_field spec_review "$WORKTREE/.sergeant-validation-ready")" || \
+  _die "validation-ready marker has incomplete HEAD or review evidence"
+READINESS_REVIEW="$(_ready_field readiness_review "$WORKTREE/.sergeant-validation-ready")" || \
+  _die "validation-ready marker has incomplete HEAD or review evidence"
+CURRENT_HEAD="$(git -C "$WORKTREE" rev-parse HEAD 2>/dev/null || true)"
+[[ "$READY_INTENT" == "$EXPECTED_REVISION" ]] || \
+  _die "validation-ready marker does not match the canonical intent revision"
+[[ "$READY_HEAD" == "$CURRENT_HEAD" && "$STANDARDS_REVIEW" == "passed" && \
+   "$SPEC_REVIEW" == "passed" && "$READINESS_REVIEW" == "passed" ]] || \
+  _die "validation-ready marker has stale HEAD or review evidence"
+_sgt_worktree_is_validation_clean "$WORKTREE" || \
+  _die "Worker code tree must be clean before validation snapshot"
+[[ ! -e "$REPO_STATE/validation_pane" ]] || _die "Validation pane is already recorded"
+[[ ! -e "$REPO_STATE/validation-release" ]] || _die "Validation release is already recorded"
+_require_tmux
+command -v no-mistakes >/dev/null 2>&1 || _die "no-mistakes is required"
+PRIMARY_PANE_ID="$(cat "$TASK_STATE/primary_pane_id" 2>/dev/null || true)"
+[[ -n "${TMUX_PANE:-}" && "$TMUX_PANE" == "$PRIMARY_PANE_ID" ]] || \
+  _die "Current coordinator pane identity does not match dispatch ownership"
+_sgt_pane_identity_matches "$TMUX_PANE" "$TASK_STATE" primary_pane_identity || \
+  _die "Current coordinator pane identity does not match dispatch ownership"
+if [[ -z "$PANE" ]] || ! _sgt_pane_identity_matches "$PANE" "$REPO_STATE"; then
+  _die "Recorded worker pane identity does not match"
+fi
+
+WINDOW_NAME="validation-${REPO}-${TASK_ID}"
+OLD_WINDOW_NAME="$(cat "$REPO_STATE/window_name" 2>/dev/null || true)"
+SOURCE_ROOT="$(git -C "$WORKTREE" rev-parse --show-toplevel)"
+SOURCE_BRANCH="$(git -C "$WORKTREE" branch --show-current)"
+[[ -n "$SOURCE_BRANCH" ]] || _die "Validation requires a named source branch"
+VALIDATION_WORKTREE="${WORKTREE}-validation-${TASK_ID}"
+[[ ! -e "$VALIDATION_WORKTREE" ]] || _die "Validation code snapshot already exists: $VALIDATION_WORKTREE"
+if ! git clone --shared --no-checkout "$SOURCE_ROOT" "$VALIDATION_WORKTREE" >/dev/null 2>&1 || \
+   ! git -C "$VALIDATION_WORKTREE" checkout -q -B "$SOURCE_BRANCH" "$CURRENT_HEAD"; then
+  rm -rf "$VALIDATION_WORKTREE"
+  _die "Failed to create isolated validation code snapshot"
+fi
+SOURCE_REMOTE="$(git -C "$SOURCE_ROOT" remote get-url origin 2>/dev/null || true)"
+[[ -z "$SOURCE_REMOTE" ]] || git -C "$VALIDATION_WORKTREE" remote set-url origin "$SOURCE_REMOTE"
+if [[ "$(git -C "$VALIDATION_WORKTREE" rev-parse HEAD)" != "$CURRENT_HEAD" ]] || \
+   ! _sgt_worktree_is_validation_clean "$VALIDATION_WORKTREE"; then
+    rm -rf "$VALIDATION_WORKTREE"
+    _die "Isolated validation code snapshot did not preserve reviewed HEAD"
+fi
+printf '%s\n' "$VALIDATION_WORKTREE" > "$REPO_STATE/validation_worktree"
+VALIDATION_INTENT="$REPO_STATE/validation-intent.md"
+_sgt_intent_install "$WORKTREE/.sergeant-intent.md" "$VALIDATION_INTENT" || \
+  _die "Failed to snapshot canonical validation intent"
+[[ "$(_sgt_intent_revision "$VALIDATION_INTENT")" == "$EXPECTED_REVISION" ]] || {
+  rm -f "$VALIDATION_INTENT"
+  _die "Validation intent snapshot revision mismatch"
+}
+printf -v VALIDATION_COMMAND '%q %q %q %q %q' \
+  "$SCRIPT_DIR/sgt-validation-worker" "$REPO_STATE" "$VALIDATION_WORKTREE" "$EXPECTED_REVISION" "$SKIP"
+VALIDATION_PANE="$(tmux split-window -P -F '#{pane_id}' -t "$PANE" \
+  -c "$VALIDATION_WORKTREE" "$VALIDATION_COMMAND")" || {
+  rm -f "$VALIDATION_INTENT"
+  rm -f "$REPO_STATE/validation_worktree"
+  rm -rf "$VALIDATION_WORKTREE"
+  _die "Failed to launch validation pane"
+}
+[[ -n "$VALIDATION_PANE" ]] || {
+  rm -f "$VALIDATION_INTENT"
+  rm -f "$REPO_STATE/validation_worktree"
+  rm -rf "$VALIDATION_WORKTREE"
+  _die "tmux returned no validation pane"
+}
+
+VALIDATION_COMMITTED=false
+_rollback_validation_launch() {
+  $VALIDATION_COMMITTED && return 0
+  tmux kill-pane -t "$VALIDATION_PANE" 2>/dev/null || true
+  [[ -z "$OLD_WINDOW_NAME" ]] || tmux rename-window -t "$PANE" "$OLD_WINDOW_NAME" 2>/dev/null || true
+  rm -f "$REPO_STATE/validation_pane" "$REPO_STATE/validation_pane_identity" \
+    "$REPO_STATE/validation_pane_pid" "$REPO_STATE/validation_process_group" \
+    "$REPO_STATE/validation_process_start" "$REPO_STATE/validation-release" \
+    "$REPO_STATE/validation_status" "$VALIDATION_INTENT"
+  rm -f "$REPO_STATE/validation_worktree" "$REPO_STATE/validation_head"
+  rm -rf "$VALIDATION_WORKTREE"
+}
+trap _rollback_validation_launch EXIT
+
+if ! VALIDATION_IDENTITY="$(_sgt_pane_identity "$VALIDATION_PANE")" || \
+   [[ -z "$VALIDATION_IDENTITY" ]]; then
+  _die "Failed to capture validation pane identity"
+fi
+VALIDATION_INFO="${VALIDATION_IDENTITY#*|}"
+VALIDATION_INFO="${VALIDATION_INFO#*|}"
+VALIDATION_PID="${VALIDATION_INFO%%|*}"
+VALIDATION_PGID="$(ps -o pgid= -p "$VALIDATION_PID" 2>/dev/null | tr -d ' ' || true)"
+VALIDATION_START="$(ps -o lstart= -p "$VALIDATION_PID" 2>/dev/null | awk '{$1=$1; print}' || true)"
+[[ -n "$VALIDATION_PID" && -n "$VALIDATION_PGID" && -n "$VALIDATION_START" ]] || \
+  _die "Failed to capture validation process ownership"
+if ! tmux rename-window -t "$PANE" "$WINDOW_NAME"; then
+  _die "Failed to rename validation window"
+fi
+
+printf '%s\n' "$VALIDATION_PANE" > "$REPO_STATE/validation_pane"
+printf '%s\n' "$VALIDATION_IDENTITY" > "$REPO_STATE/validation_pane_identity"
+printf '%s\n' "$VALIDATION_PID" > "$REPO_STATE/validation_pane_pid"
+printf '%s\n' "$VALIDATION_PGID" > "$REPO_STATE/validation_process_group"
+printf '%s\n' "$VALIDATION_START" > "$REPO_STATE/validation_process_start"
+printf '%s\n' "$WINDOW_NAME" > "$REPO_STATE/window_name"
+printf '%s\n' "$CURRENT_HEAD" > "$REPO_STATE/validation_head"
+printf 'validation\n' > "$REPO_STATE/stage"
+printf 'launched\n' > "$REPO_STATE/validation_status"
+printf '%s\n' "$EXPECTED_REVISION" > "$REPO_STATE/validation-release.tmp"
+mv "$REPO_STATE/validation-release.tmp" "$REPO_STATE/validation-release"
+VALIDATION_COMMITTED=true
+trap - EXIT
+printf 'Validation launched in pane %s beside worker %s.\n' "$VALIDATION_PANE" "$PANE"

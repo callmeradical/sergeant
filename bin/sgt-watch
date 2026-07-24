@@ -48,11 +48,7 @@ fi
 _pane_is_supervisor() {
   local pane="$1"
   local repo_dir="${2%/}"
-  local pane_info pane_dead pane_command
-  pane_info="$(tmux display-message -p -t "$pane" '#{pane_dead}|#{pane_start_command}' 2>/dev/null)" || return 1
-  pane_dead="${pane_info%%|*}"
-  pane_command="${pane_info#*|}"
-  [[ "$pane_dead" == "0" && "$pane_command" == *sgt-worker* && "$pane_command" == *"$repo_dir"* ]]
+  _sgt_pane_identity_matches "$pane" "$repo_dir"
 }
 
 _sync_task() {
@@ -102,7 +98,7 @@ _sync_task() {
     fi
 
     case "$wt_status" in
-      in_progress|needs_input|blocked|dispatched)
+      in_progress|dispatched)
         pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
         if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && \
             ! _pane_is_supervisor "$pane" "$repo_dir"; then
@@ -146,6 +142,8 @@ _print_status() {
     result="$(cat "$repo_dir/result" 2>/dev/null || echo "")"
     message="$(cat "$repo_dir/message" 2>/dev/null || echo "")"
     diagnostic="$(cat "$repo_dir/diagnostic" 2>/dev/null || echo "")"
+    stage="$(cat "$repo_dir/stage" 2>/dev/null || echo "implementation")"
+    validation_status="$(cat "$repo_dir/validation_status" 2>/dev/null || echo "")"
 
     case "$status" in
       done) icon="✓" ;;
@@ -156,7 +154,9 @@ _print_status() {
       *) icon="·"; all_terminal=false ;;
     esac
 
-    printf "  %s  %-20s  %s\n" "$icon" "$repo_name" "$status"
+    printf "  %s  %-20s  %s  [stage=%s" "$icon" "$repo_name" "$status" "$stage"
+    [[ -z "$validation_status" ]] || printf " validation=%s" "$validation_status"
+    printf "]\n"
     [[ -z "$result" ]] || printf "       %-20s  → %s\n" "" "$result"
     if [[ -n "$message" ]]; then
       while IFS= read -r line; do printf "       %-20s  %s\n" "" "$line"; done <<< "$message"
@@ -182,7 +182,9 @@ while true; do
     repo_name="$(basename "$repo_dir")"
     status="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
     message="$(cat "$repo_dir/message" 2>/dev/null || echo "")"
-    current_snapshot+="$repo_name:$status:$message "
+    stage="$(cat "$repo_dir/stage" 2>/dev/null || echo "implementation")"
+    validation_status="$(cat "$repo_dir/validation_status" 2>/dev/null || echo "")"
+    current_snapshot+="$repo_name:$status:$stage:$validation_status:$message "
   done
 
   if ! $HAVE_SNAPSHOT || [[ "$LAST_SNAPSHOT" != "$current_snapshot" ]]; then

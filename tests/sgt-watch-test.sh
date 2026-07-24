@@ -12,6 +12,7 @@ fake_bin="$TEST_ROOT/bin"
 mkdir -p "$repo" "$worktree" "$fake_bin"
 printf '%s\n' "$worktree" > "$repo/worktree"
 printf '%%42\n' > "$repo/pane"
+printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo" > "$repo/pane_identity"
 printf 'in_progress\n' > "$repo/status"
 
 cat > "$fake_bin/tmux" <<'EOF'
@@ -19,7 +20,7 @@ cat > "$fake_bin/tmux" <<'EOF'
 case "$1" in
   display-message)
     [[ "${PANE_DEAD:-0}" == "0" ]] || exit 1
-    printf '0|sgt-worker %s\n' "$EXPECTED_WORKER"
+    printf '%s\n' "${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
     ;;
 esac
 EOF
@@ -30,6 +31,8 @@ printf 'Choose a safe option.\n' > "$worktree/.sergeant-message"
 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
 [[ "$(cat "$repo/status")" == "needs_input" ]]
 [[ "$(cat "$repo/message")" == "Choose a safe option." ]]
+PANE_DEAD=1 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
+[[ "$(cat "$repo/status")" == "needs_input" ]]
 
 printf 'done\n' > "$worktree/.sergeant-status"
 rm -f "$worktree/.sergeant-result"
@@ -43,8 +46,17 @@ PANE_DEAD=1 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$flee
 [[ "$(cat "$repo/status")" == "orphaned" ]]
 grep -Fq 'dead or is not the expected worker supervisor' "$repo/diagnostic"
 
+printf 'in_progress\n' > "$worktree/.sergeant-status"
+printf 'in_progress\n' > "$repo/status"
+PANE_IDENTITY="0|%42|4242|123456|bash sgt-interactive-worker:$repo" \
+  EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT/bin/sgt-watch" --sync task-1
+[[ "$(cat "$repo/status")" == "orphaned" ]]
+
 printf 'done\n' > "$worktree/.sergeant-status"
 printf 'https://example.invalid/pr/1\n' > "$worktree/.sergeant-result"
+printf 'validation\n' > "$repo/stage"
+printf 'checks-passed\n' > "$repo/validation_status"
 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
 [[ "$(cat "$repo/status")" == "done" ]]
 [[ "$(cat "$repo/result")" == "https://example.invalid/pr/1" ]]
@@ -53,5 +65,6 @@ grep -Fq '1 done' <<< "$list_output"
 watch_output="$(SERGEANT_WATCH_INTERVAL=0 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
   "$ROOT/bin/sgt-watch" task-1)"
 grep -Fq 'All repos done.' <<< "$watch_output"
+grep -Fq '[stage=validation validation=checks-passed]' <<< "$watch_output"
 
 printf 'sgt-watch local fleet sync: ok\n'

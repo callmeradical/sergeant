@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+export TMUX=fixture TMUX_PANE=%11
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
@@ -33,9 +34,13 @@ EOF
 
 cat > "$TEST_ROOT/fake-bin/tmux" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${1:-}" == "new-window" ]]; then
-  printf '%%42\n'
-fi
+case "${1:-}" in
+  new-window) printf '%%42\n' ;;
+  display-message)
+    [[ "$*" == *'-t %11'* ]] && printf '0|%%11|1111|111111|coordinator-command\n' || \
+      printf '0|%%42|4242|123456|fixture-worker-command\n'
+    ;;
+esac
 exit 0
 EOF
 chmod +x "$TEST_ROOT/fake-bin/tmux"
@@ -116,6 +121,165 @@ SGT_WIKI_DISABLED=1 \
 brief="$(printf '%s\n' "$TEST_ROOT"/app-sgt-*/.sergeant-brief.md)"
 [[ -f "$brief" ]] || { printf 'brief was not generated\n' >&2; exit 1; }
 
+task_dir="$(printf '%s\n' "$TEST_ROOT"/fleet/*)"
+fleet_intent="$task_dir/.sergeant-intent.md"
+worktree_intent="$(dirname "$brief")/.sergeant-intent.md"
+[[ -f "$fleet_intent" && -f "$worktree_intent" ]] || {
+  printf 'canonical intent was not generated in fleet state and worktree\n' >&2
+  exit 1
+}
+cmp -s "$fleet_intent" "$worktree_intent" || {
+  printf 'fleet and worktree intent revisions differ\n' >&2
+  exit 1
+}
+[[ "$(grep -c '^## ' "$fleet_intent")" -eq 8 ]] || {
+  printf 'canonical intent does not contain exactly eight sections\n' >&2
+  exit 1
+}
+for section in \
+  'Objective' \
+  'Required Invariants' \
+  'Approved Tradeoffs' \
+  'Out Of Scope' \
+  'State Transitions' \
+  'Failure Windows' \
+  'Negative Test Matrix' \
+  'Validation Evidence'; do
+  grep -Fxq "## $section" "$fleet_intent" || {
+    printf 'canonical intent is missing section: %s\n' "$section" >&2
+    exit 1
+  }
+done
+grep -Fq 'Intent path: standard-isolated' "$fleet_intent" || {
+  printf 'normal dispatch did not use the named lighter intent path\n' >&2
+  exit 1
+}
+grep -Fxq 'Harden worker loop' "$fleet_intent" || {
+  printf 'canonical intent did not preserve the dispatch objective\n' >&2
+  exit 1
+}
+
+cat > "$TEST_ROOT/approved-intent.md" <<'EOF'
+# Sergeant Intent
+
+## Objective
+
+Apply the approved database migration.
+
+## Required Invariants
+
+Existing records remain readable.
+
+## Approved Tradeoffs
+
+A bounded maintenance window is approved.
+
+## Out Of Scope
+
+No schema cleanup.
+
+## State Transitions
+
+Validate, migrate, verify, then publish.
+
+## Failure Windows
+
+Rollback before publication if verification fails.
+
+## Negative Test Matrix
+
+Cover invalid legacy rows and interrupted migration recovery.
+
+## Validation Evidence
+
+Record migration dry-run, rollback, and native test evidence.
+EOF
+
+PATH="$TEST_ROOT/fake-bin:$PATH" \
+SERGEANT_CONFIG="$TEST_ROOT/config" \
+SERGEANT_FLEET="$TEST_ROOT/fleet" \
+SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test "Deploy database migration" --repos app \
+    --intent-file "$TEST_ROOT/approved-intent.md" >/dev/null
+
+safety_intent="$(grep -rlFx 'Apply the approved database migration.' "$TEST_ROOT"/fleet/*/.sergeant-intent.md)"
+[[ -f "$safety_intent" ]] || {
+  printf 'explicit safety intent was not persisted\n' >&2
+  exit 1
+}
+safety_task_dir="$(dirname "$safety_intent")"
+cmp -s "$TEST_ROOT/approved-intent.md" "$safety_intent"
+actual_revision="$(bash -c 'source "$1/bin/_sgt-intent.sh"; _sgt_intent_revision "$2"' \
+  _ "$ROOT_DIR" "$safety_intent")"
+[[ "$actual_revision" =~ ^[a-f0-9]{64}$ ]]
+cmp -s "$safety_intent" "$(cat "$safety_task_dir/app/worktree")/.sergeant-intent.md"
+if grep -Fq "$TEST_ROOT/approved-intent.md" "$(cat "$safety_task_dir/app/worktree")/.sergeant-brief.md"; then
+  printf 'worker brief leaked the private intent source path\n' >&2
+  exit 1
+fi
+
+assert_intent_rejected_without_mutation() {
+  local expected="$1"
+  shift
+  local before_fleet before_worktrees output status
+  before_fleet="$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+  before_worktrees="$(find "$TEST_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'app-sgt-*' | wc -l)"
+  set +e
+  output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 \
+      "$ROOT_DIR/bin/sgt-dispatch" test "$@" 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -ne 0 && "$output" == *"$expected"* ]] || {
+    printf 'intent input was not rejected as expected (%s): %s\n' "$expected" "$output" >&2
+    exit 1
+  }
+  [[ "$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 -type d | wc -l)" == "$before_fleet" ]]
+  [[ "$(find "$TEST_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'app-sgt-*' | wc -l)" == "$before_worktrees" ]]
+}
+
+assert_intent_rejected_without_mutation \
+  'requires --intent-file' 'Deploy database migration' --repos app
+for plural_objective in \
+  'Rotate credentials' \
+  'Reconcile payments' \
+  'Back up databases' \
+  'Deploy migrations' \
+  'Audit state transitions'; do
+  assert_intent_rejected_without_mutation \
+    'requires --intent-file' "$plural_objective" --repos app
+done
+assert_intent_rejected_without_mutation \
+  'intent file not found' 'Deploy database migration' --repos app --intent-file "$TEST_ROOT/missing.md"
+assert_intent_rejected_without_mutation \
+  'intent path traversal is not allowed' 'Deploy database migration' --repos app --intent-file '../approved-intent.md'
+mkdir "$TEST_ROOT/traversal-component"
+assert_intent_rejected_without_mutation \
+  'intent path traversal is not allowed' 'Deploy database migration' --repos app --intent-file "$TEST_ROOT/traversal-component/../approved-intent.md"
+assert_intent_rejected_without_mutation \
+  '--intent-file requires a path' 'Deploy database migration' --repos app --intent-file
+ln -s "$TEST_ROOT/approved-intent.md" "$TEST_ROOT/symlink-intent.md"
+assert_intent_rejected_without_mutation \
+  'intent file must not traverse a symlink' 'Deploy database migration' --repos app --intent-file "$TEST_ROOT/symlink-intent.md"
+mkdir "$TEST_ROOT/intent-source"
+cp "$TEST_ROOT/approved-intent.md" "$TEST_ROOT/intent-source/intent.md"
+ln -s "$TEST_ROOT/intent-source" "$TEST_ROOT/intent-parent-link"
+assert_intent_rejected_without_mutation \
+  'intent file must not traverse a symlink' 'Deploy database migration' --repos app --intent-file "$TEST_ROOT/intent-parent-link/intent.md"
+cp "$TEST_ROOT/approved-intent.md" "$TEST_ROOT/malformed-intent.md"
+printf '\n## Objective\nDuplicate objective.\n' >> "$TEST_ROOT/malformed-intent.md"
+assert_intent_rejected_without_mutation \
+  'intent sections must appear exactly once' 'Deploy database migration' --repos app --intent-file "$TEST_ROOT/malformed-intent.md"
+cp "$TEST_ROOT/approved-intent.md" "$TEST_ROOT/control-intent.md"
+printf '\001' >> "$TEST_ROOT/control-intent.md"
+assert_intent_rejected_without_mutation \
+  'intent file contains unsupported control characters' 'Deploy database migration' --repos app --intent-file "$TEST_ROOT/control-intent.md"
+dd if=/dev/zero of="$TEST_ROOT/oversized-intent.md" bs=65537 count=1 2>/dev/null
+assert_intent_rejected_without_mutation \
+  'intent file exceeds 65536 bytes' 'Deploy database migration' --repos app --intent-file "$TEST_ROOT/oversized-intent.md"
+
 assert_contains() {
   local expected="$1"
   grep -Fq "$expected" "$brief" || {
@@ -155,29 +319,35 @@ assert_contains "td handoff td-app-1 --work-dir ."
 assert_contains "td review td-app-1 --work-dir ."
 assert_contains "commit list and diff scope"
 assert_contains "If no originating spec exists, record that explicitly"
+assert_contains ".sergeant-intent.md is the canonical source"
+assert_contains "implementation decisions, independent reviews, PR description, and the one final no-mistakes"
+assert_contains "Intent revision: $([[ -f "$task_dir/intent_revision" ]] && cat "$task_dir/intent_revision")"
+assert_contains "Successor and recovery work must inherit this exact revision"
+assert_contains "audited human decision creates a new intent revision"
+assert_contains "safety-sensitive or stateful"
+assert_contains "State Transitions, Failure Windows, and Negative Test Matrix"
+assert_contains "mutation before validation"
+assert_contains "partial publication and rollback"
+assert_contains "identity and provenance"
+assert_contains "stale and legacy states"
+assert_contains "suppressed failures"
+assert_contains "race windows"
+assert_contains "missing negative tests"
+assert_contains "zero blockers"
 assert_contains "failing focused test"
 assert_contains "minimum implementation"
 assert_contains "full required suite once at the end"
-assert_contains "Do not run no-mistakes for routine worker completion"
-assert_contains "Run no-mistakes once only at an explicit final shipping boundary"
-assert_contains "An explicit user instruction to run no-mistakes overrides this default"
-assert_contains 'no-mistakes axi run --intent'
-assert_contains "Stop driving the pipeline at \`checks-passed\`"
-assert_contains "validation-only"
+assert_contains "Never run no-mistakes from this agent process"
+assert_contains '.sergeant-validation-ready'
+assert_contains 'sgt-validate'
+assert_contains "without \`--yes\`"
+assert_not_contains "An explicit user instruction to run no-mistakes overrides this default"
+assert_not_contains 'no-mistakes axi run --intent'
 assert_not_contains "Run no-mistakes when available or required"
 assert_contains "### 6. Route no-mistakes findings"
-assert_contains "sgt-no-mistakes-finding"
-assert_contains "Every actionable finding creates or updates separate deduplicated owning-repo td work"
-assert_contains "create P1 work"
-assert_contains "Warning-level actionable review or documentation debt"
-assert_contains "informational actionable debt"
-assert_contains "correctness, security, data-integrity, and test findings cannot be deferred or ignored"
-assert_contains "Cosmetic and evidence-only noise"
-assert_contains "ask-user findings must use \`ask-user\`, create P1 work, and still require user escalation"
-assert_contains "Gate and ask-user dispositions create or update the card, then return a blocking status"
-assert_contains "Do not remediate no-mistakes findings in this validation run"
-assert_contains "follow the \`needs_input\` escalation protocol"
-assert_contains "run ID, head SHA, finding ID, severity, kind, file/line, description, and originating intent"
+assert_contains "coordinator owns every no-mistakes gate and finding"
+assert_contains "Do not approve a validation gate"
+assert_contains "separate deduplicated td work"
 assert_contains "separate parallel subagents"
 assert_contains "Standards axis"
 assert_contains "Fowler smell heuristic"
@@ -215,14 +385,13 @@ assert_contains "2-4 options when useful"
 assert_contains "remains alive and waits for a response"
 assert_contains ".sergeant-response"
 assert_contains ".sergeant-response-id"
-assert_contains ".sergeant-response-ack"
-assert_contains "consume/remove the response transport atomically"
-assert_contains "return status to \`in_progress\`"
-assert_contains "proof conditions"
-assert_contains "the turn publishes \`needs_input\` or \`blocked\` and a resumable session ID was captured"
-assert_contains "the turn publishes \`done\` with a non-empty \`.sergeant-result\`"
-assert_contains "the turn publishes explicit terminal \`failed: <reason>\`, which is unrecoverable and must clean response plaintext"
-assert_contains "For unexpected exit, invalid status, or missing resumable session, retain the response transport for retry"
+assert_contains "sgt-ack-response"
+assert_contains ".sergeant-response-applied"
+assert_contains "archives replay evidence"
+assert_contains "\`done\` with a non-empty result"
+assert_contains "\`failed: <nonblank reason>\`"
+assert_contains "later \`needs_input\`/\`blocked\` gate generation"
+assert_contains "Unexpected exit or invalid proof retains active transport"
 assert_contains ".sergeant-gate-generation"
 assert_contains "A repeated blocker message is still a new gate only when the generation advances"
 assert_contains "Surface \`wayfinder\`, \`to-spec\`, and Sergeant's custom \`to-tickets\` as escalation or planning paths"
@@ -253,7 +422,6 @@ assert_order \
   "canonical \`resolving-merge-conflicts\` skill" \
   "canonical \`code-review\` skill"
 
-task_dir="$(printf '%s\n' "$TEST_ROOT"/fleet/*)"
 [[ "$(cat "$task_dir/app/pane")" == "%42" ]] || {
   printf 'dispatch did not record the spawned pane target\n' >&2
   exit 1
@@ -271,7 +439,7 @@ SERGEANT_FLEET="$TEST_ROOT/fleet" \
 SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-dispatch" test "Ship worker loop" --repos app >/dev/null
 
-brief="$(printf '%s\n' "$TEST_ROOT"/app-sgt-* | grep -v "$(dirname "$brief")" | sed -n '1p')/.sergeant-brief.md"
+brief="$(grep -rl '^Ship worker loop$' "$TEST_ROOT"/app-sgt-*/.sergeant-brief.md | sed -n '1p')"
 assert_contains "User override: run no-mistakes for this worker before completion."
 
 write_routing_config() {

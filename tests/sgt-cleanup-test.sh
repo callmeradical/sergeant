@@ -360,6 +360,9 @@ git -C "$TEST_ROOT/repo" commit -qm fixture
 worktree="$TEST_ROOT/repo-sgt-task-123"
 repo_state="$TEST_ROOT/fleet/task-123/app"
 git -C "$TEST_ROOT/repo" worktree add -q -b test-cleanup "$worktree"
+validation_worktree="${worktree}-validation-task-123"
+git clone -q "$worktree" "$validation_worktree"
+printf '%s\n' "$validation_worktree" > "$repo_state/validation_worktree"
 printf '%s\n' "$worktree" > "$repo_state/worktree"
 printf 'git\n' > "$repo_state/wt_type"
 printf 'done\n' > "$repo_state/status"
@@ -386,13 +389,20 @@ while :; do sleep 1; done
 EOF
 chmod +x "$TEST_ROOT/fake-bin/fake-agent"
 
-cat > "$TEST_ROOT/fake-bin/sgt-worker" <<'EOF'
+cat > "$TEST_ROOT/fake-bin/sgt-interactive-worker" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$WORKER_PID_FILE"
 "$FAKE_AGENT" &
 wait "$!"
 EOF
-chmod +x "$TEST_ROOT/fake-bin/sgt-worker"
+chmod +x "$TEST_ROOT/fake-bin/sgt-interactive-worker"
+cat > "$TEST_ROOT/fake-bin/sgt-validation-worker" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$VALIDATION_PID_FILE"
+trap '' TERM HUP
+while :; do sleep 1; done
+EOF
+chmod +x "$TEST_ROOT/fake-bin/sgt-validation-worker"
 
 tmux new-session -d -s "$TMUX_SESSION" -n unrelated \
   "while :; do sleep 1; done"
@@ -400,10 +410,20 @@ unrelated_pid="$(tmux display-message -p -t "$TMUX_SESSION:unrelated" '#{pane_pi
 worker_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n worker \
   "env WORKER_PID_FILE='$TEST_ROOT/worker.pid' AGENT_PID_FILE='$TEST_ROOT/agent.pid' \
   FAKE_AGENT='$TEST_ROOT/fake-bin/fake-agent' \
-  '$TEST_ROOT/fake-bin/sgt-worker' '$repo_state' '$worktree'")"
+  '$TEST_ROOT/fake-bin/sgt-interactive-worker' '$repo_state' '$worktree'")"
 printf '%s\n' "$worker_pane" > "$repo_state/pane"
+tmux display-message -p -t "$worker_pane" \
+  '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+  > "$repo_state/pane_identity"
+validation_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n validation \
+  "env VALIDATION_PID_FILE='$TEST_ROOT/validation.pid' \
+  '$TEST_ROOT/fake-bin/sgt-validation-worker' '$repo_state' '$worktree'")"
+printf '%s\n' "$validation_pane" > "$repo_state/validation_pane"
+tmux display-message -p -t "$validation_pane" \
+  '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+  > "$repo_state/validation_pane_identity"
 
-for pid_file in "$TEST_ROOT/worker.pid" "$TEST_ROOT/agent.pid"; do
+for pid_file in "$TEST_ROOT/worker.pid" "$TEST_ROOT/agent.pid" "$TEST_ROOT/validation.pid"; do
   for _ in $(seq 1 100); do
     [[ -s "$pid_file" ]] && break
     sleep 0.01
@@ -412,6 +432,10 @@ for pid_file in "$TEST_ROOT/worker.pid" "$TEST_ROOT/agent.pid"; do
 done
 worker_pid="$(cat "$TEST_ROOT/worker.pid")"
 agent_pid="$(cat "$TEST_ROOT/agent.pid")"
+validation_pid="$(cat "$TEST_ROOT/validation.pid")"
+printf '%s\n' "$validation_pid" > "$repo_state/validation_pane_pid"
+ps -o pgid= -p "$validation_pid" | tr -d ' ' > "$repo_state/validation_process_group"
+ps -o lstart= -p "$validation_pid" | awk '{$1=$1; print}' > "$repo_state/validation_process_start"
 
 mkdir "$worktree/held-subdirectory"
 holder_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n holder \
@@ -436,8 +460,23 @@ if kill -0 "$agent_pid" 2>/dev/null; then
   printf 'agent process still running after blocked cleanup: %s\n' "$agent_pid" >&2
   exit 1
 fi
+if kill -0 "$validation_pid" 2>/dev/null; then
+  printf 'validation process still running after blocked cleanup: %s\n' "$validation_pid" >&2
+  exit 1
+fi
 
 tmux kill-pane -t "$holder_pane"
+saved_validation_start="$(cat "$repo_state/validation_process_start")"
+rm "$repo_state/validation_process_start"
+set +e
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" task-123 > "$TEST_ROOT/missing-validation-provenance.log" 2>&1
+cleanup_status=$?
+set -e
+[[ "$cleanup_status" -ne 0 ]]
+grep -Fq 'Validation pane ownership provenance is incomplete' \
+  "$TEST_ROOT/missing-validation-provenance.log"
+printf '%s\n' "$saved_validation_start" > "$repo_state/validation_process_start"
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" task-123 >/dev/null
 
@@ -463,6 +502,7 @@ if kill -0 "$agent_pid" 2>/dev/null; then
   exit 1
 fi
 [[ ! -e "$worktree" ]]
+[[ ! -e "$validation_worktree" ]]
 [[ ! -e "$TEST_ROOT/fleet/task-123" ]]
 
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \

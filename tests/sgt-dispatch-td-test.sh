@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+export TMUX=fixture TMUX_PANE=%11
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
@@ -16,7 +17,8 @@ mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/config" "$TEST_ROOT/fake-bin" \
   "$TEST_ROOT/fleet" "$APP_MAIN_REPO" "$APP_REPO" "$API_REPO" "$WEB_REPO" \
   "$TEST_ROOT/td-active" "$TEST_ROOT/td-counter"
 cp "$ROOT_DIR/bin/sgt-dispatch" "$ROOT_DIR/bin/_sgt-lib.sh" "$ROOT_DIR/bin/_sgt-bash-version.sh" \
-  "$ROOT_DIR/bin/sgt-td-create" "$ROOT_DIR/bin/sgt-td-memory" "$TEST_ROOT/bin/"
+  "$ROOT_DIR/bin/_sgt-intent.sh" "$ROOT_DIR/bin/sgt-td-create" \
+  "$ROOT_DIR/bin/sgt-td-memory" "$TEST_ROOT/bin/"
 
 cat > "$TEST_ROOT/config/test.yaml" <<EOF
 name: test
@@ -31,13 +33,23 @@ EOF
 
 cat > "$TEST_ROOT/fake-bin/tmux" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$TMUX_LOG"
-if [[ "${1:-}" == "new-window" ]]; then
-  printf '%%42\n'
-fi
+[[ "${1:-}" == "display-message" ]] || printf '%s\n' "$*" >> "$TMUX_LOG"
+case "${1:-}" in
+  new-window) printf '%%42\n' ;;
+  display-message)
+    [[ "$*" == *'-t %11'* ]] && printf '0|%%11|1111|111111|coordinator-command\n' || \
+      printf '0|%%42|4242|123456|fixture-worker-command\n'
+    ;;
+esac
 exit 0
 EOF
 chmod +x "$TEST_ROOT/fake-bin/tmux"
+
+cat > "$TEST_ROOT/fake-bin/opencode" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$TEST_ROOT/fake-bin/opencode"
 
 cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
 #!/usr/bin/env bash
@@ -457,6 +469,14 @@ for repo in app api; do
   grep -Fq 'td log "message" --work-dir .' "$brief"
   grep -Fq "td handoff $task_id --work-dir ." "$brief"
   grep -Fq "td review $task_id --work-dir ." "$brief"
+  cmp -s "$task_dir/.sergeant-intent.md" "$(cat "$repo_state/worktree")/.sergeant-intent.md" || {
+    printf 'multi-repo dispatch did not propagate one canonical intent to %s\n' "$repo" >&2
+    exit 1
+  }
+  cmp -s "$task_dir/.sergeant-intent.md" "$repo_state/.sergeant-intent.md" || {
+    printf 'multi-repo fleet state did not preserve canonical intent for %s\n' "$repo" >&2
+    exit 1
+  }
 done
 [[ "$(grep -c '^new-window ' "$TEST_ROOT/tmux.log")" -eq 2 ]] || {
   printf 'dispatch did not spawn one worker per selected repo\n' >&2
@@ -992,6 +1012,19 @@ brief="$(cat "$repo_state/worktree")/.sergeant-brief.md"
 [[ "$(cat "$repo_state/td_task")" == 'td-existing' ]]
 grep -Fq '**td task:** td-existing' "$brief"
 grep -Fq 'existing td lifecycle context' "$brief"
+intent="$(cat "$repo_state/worktree")/.sergeant-intent.md"
+grep -Fxq 'Existing tracked work' "$intent" || {
+  printf 'td dispatch intent did not use the task title as its objective\n' >&2
+  exit 1
+}
+if grep -Fq 'existing td lifecycle context' "$intent"; then
+  printf 'td dispatch leaked task body/context into canonical intent\n' >&2
+  exit 1
+fi
+cmp -s "$task_dir/.sergeant-intent.md" "$intent" || {
+  printf 'td dispatch did not preserve one canonical intent revision\n' >&2
+  exit 1
+}
 [[ "$(grep -c '^new-window ' "$TEST_ROOT/tmux.log")" -eq 1 ]] || {
   printf 'existing td dispatch did not spawn exactly one worker\n' >&2
   exit 1

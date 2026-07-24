@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+export TMUX=fixture TMUX_PANE=%11
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
@@ -42,6 +43,10 @@ cat > "$fake_bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
   new-window) printf '%%42\n' ;;
+  display-message)
+    [[ "$*" == *'-t %11'* ]] && printf '0|%%11|1111|111111|coordinator-command\n' || \
+      printf '0|%%42|4242|123456|fixture-worker-command\n'
+    ;;
 esac
 exit 0
 EOF

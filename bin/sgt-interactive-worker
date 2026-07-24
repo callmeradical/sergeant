@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# sgt-interactive-worker - Own one persistent interactive agent pane.
+
+set -uo pipefail
+
+[[ $# -eq 3 ]] || {
+  echo "Usage: sgt-interactive-worker <repo-state-dir> <worktree> <agent>" >&2
+  exit 2
+}
+
+REPO_STATE="$1"
+WORKTREE="$2"
+AGENT="$3"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+[[ -d "$WORKTREE" ]] || {
+  echo "ERROR: worktree unavailable: $WORKTREE" >&2
+  exit 2
+}
+[[ -t 0 && -t 1 ]] || {
+  echo "ERROR: interactive worker requires a terminal" >&2
+  exit 2
+}
+harness="$(basename "$AGENT")"
+case "$harness" in
+  opencode|oc|goose|claude) ;;
+  *)
+    echo "ERROR: unsupported interactive agent: $AGENT" >&2
+    exit 2
+    ;;
+esac
+
+mkdir -p "$REPO_STATE"
+
+_status() {
+  tr -d '\n' < "$WORKTREE/.sergeant-status" 2>/dev/null || echo "in_progress"
+}
+
+_sync_state() {
+  local status
+  status="$(_status)"
+  printf '%s\n' "$status" > "$REPO_STATE/status"
+  if [[ "$status" == "done" && -s "$WORKTREE/.sergeant-result" ]]; then
+    cp "$WORKTREE/.sergeant-result" "$REPO_STATE/result"
+  else
+    rm -f "$REPO_STATE/result"
+  fi
+}
+
+_finish() {
+  local exit_code="$1" status
+  trap - EXIT
+  status="$(_status)"
+  case "$status" in
+    done)
+      if [[ ! -s "$WORKTREE/.sergeant-result" ]]; then
+        status="orphaned"
+      fi
+      ;;
+    needs_input|blocked)
+      _sync_state
+      rm -f "$REPO_STATE/diagnostic"
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
+      exit "$exit_code"
+      ;;
+    failed:*) ;;
+    *) status="orphaned" ;;
+  esac
+  if [[ "$status" == "orphaned" ]]; then
+    printf 'orphaned\n' > "$WORKTREE/.sergeant-status"
+    printf 'orphaned\n' > "$REPO_STATE/status"
+    {
+      printf 'reason: interactive %s session exited before terminal completion\n' "$harness"
+      printf 'exit code: %s\n' "$exit_code"
+    } > "$REPO_STATE/diagnostic"
+    "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
+  else
+    _sync_state
+    rm -f "$REPO_STATE/diagnostic"
+  fi
+  exit "$exit_code"
+}
+
+[[ -f "$WORKTREE/.sergeant-status" ]] || printf 'in_progress\n' > "$WORKTREE/.sergeant-status"
+_sync_state
+printf 'interactive\n' > "$REPO_STATE/worker_mode"
+trap '_finish $?' EXIT
+
+cd "$WORKTREE" || exit 2
+case "$harness" in
+  goose) "$AGENT" session ;;
+  opencode|oc) "$AGENT" --dangerously-skip-permissions ;;
+  *) "$AGENT" ;;
+esac

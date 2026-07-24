@@ -4,17 +4,25 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
+# shellcheck source=bin/_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-intent.sh
+source "$SCRIPT_DIR/_sgt-intent.sh"
 # shellcheck source=bin/_sgt-response-lock.sh
 source "$SCRIPT_DIR/_sgt-response-lock.sh"
 
 _die() { echo "ERROR: $*" >&2; exit 1; }
 
-[[ $# -eq 3 ]] || _die "Usage: sgt-respond <task-id> <repo> \"<response>\""
+[[ $# -eq 2 ]] || _die "Usage: sgt-respond <task-id> <repo>; reads the response from standard input"
 
 TASK_ID="$1"
 REPO="$2"
-RESPONSE="$3"
+if [[ -t 0 ]]; then
+  printf 'Response: ' >&2
+  IFS= read -r RESPONSE || _die "Response must not be empty"
+else
+  RESPONSE="$(cat)"
+fi
 [[ "$TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid task ID: $TASK_ID"
 [[ "$REPO" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid repo: $REPO"
 [[ -n "$RESPONSE" ]] || _die "Response must not be empty"
@@ -24,6 +32,10 @@ REPO_DIR="$FLEET_DIR/$TASK_ID/$REPO"
 [[ -d "$REPO_DIR" ]] || _die "Repo not found in task $TASK_ID: $REPO"
 
 worktree="$(cat "$REPO_DIR/worktree" 2>/dev/null || true)"
+
+_sgt_intent_revision_matches "$FLEET_DIR/$TASK_ID" "$REPO_DIR" "$worktree" || \
+  _die "canonical intent revision mismatch; audited human decision/new revision required"
+
 _sgt_response_lock_acquire "$REPO_DIR"
 trap '_sgt_response_lock_release' EXIT
 
@@ -49,15 +61,25 @@ _atomic_write() {
 _publish_local_response_transport() {
   local response="$1"
   local response_id="$2"
+  local gate_generation="$3"
+  _atomic_write "$REPO_DIR/response_generation" "$gate_generation"
   _atomic_write "$REPO_DIR/response" "$response"
   if [[ -n "$worktree" && -d "$worktree" ]]; then
     rm -f "$worktree/.sergeant-response-ack"
+    _atomic_write "$worktree/.sergeant-response-generation" "$gate_generation"
     _atomic_write "$worktree/.sergeant-response" "$response"
     _atomic_write "$worktree/.sergeant-response-id" "$response_id"
   fi
 }
 
 pending_response=""
+gate_generation="$(cat "$worktree/.sergeant-gate-generation" 2>/dev/null || true)"
+if [[ "$status" == "orphaned" && ! "$gate_generation" =~ ^[1-9][0-9]*$ ]]; then
+  gate_generation=1
+  _atomic_write "$worktree/.sergeant-gate-generation" "$gate_generation"
+fi
+[[ "$gate_generation" =~ ^[1-9][0-9]*$ ]] || \
+  _die "Worker gate generation is missing or invalid; response was not published"
 if [[ -f "$REPO_DIR/response" ]]; then
   pending_response="$(cat "$REPO_DIR/response")"
 elif [[ -n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-response" ]]; then
@@ -66,6 +88,9 @@ fi
 
 response_id="$(cat "$REPO_DIR/response_id" 2>/dev/null || true)"
 if [[ -n "$pending_response" ]]; then
+  [[ "$(cat "$REPO_DIR/response_generation" 2>/dev/null || true)" == "$gate_generation" && \
+     "$(cat "$worktree/.sergeant-response-generation" 2>/dev/null || true)" == "$gate_generation" ]] || \
+    _die "Pending response generation does not match the worker gate"
   [[ "$status" == "orphaned" ]] || _die "A Sergeant response is already pending consumption for $TASK_ID/$REPO"
   if [[ "$RESPONSE" != "$pending_response" ]]; then
     printf 'sgt-respond: reusing stored recovery response for orphaned worker %s/%s; supplied text was ignored.\n' "$TASK_ID" "$REPO" >&2
@@ -74,9 +99,10 @@ if [[ -n "$pending_response" ]]; then
 else
   response_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
   if [[ -n "$worktree" && -d "$worktree" ]]; then
-    printf '%s' "$response_id" | "$SCRIPT_DIR/sgt-td-memory" response "$REPO_DIR" "$worktree" || true
+    printf '%s' "$response_id" | "$SCRIPT_DIR/sgt-td-memory" response "$REPO_DIR" "$worktree" || \
+      _die "Failed to record response provenance in td; response was not published"
   fi
-  _publish_local_response_transport "$RESPONSE" "$response_id"
+  _publish_local_response_transport "$RESPONSE" "$response_id" "$gate_generation"
   _atomic_write "$REPO_DIR/response_id" "$response_id"
 fi
 
@@ -90,15 +116,12 @@ fi
 pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
 _pane_is_supervisor() {
   local target="$1"
-  local pane_info pane_dead pane_command
-  pane_info="$(tmux display-message -p -t "$target" '#{pane_dead}|#{pane_start_command}' 2>/dev/null)" || return 1
-  pane_dead="${pane_info%%|*}"
-  pane_command="${pane_info#*|}"
-  [[ "$pane_dead" == "0" && "$pane_command" == *sgt-worker* && "$pane_command" == *"$REPO_DIR"* ]]
+  _sgt_pane_identity_matches "$target" "$REPO_DIR"
 }
 
 if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && _pane_is_supervisor "$pane"; then
-  tmux send-keys -t "$pane" "Sergeant response available in .sergeant-response" Enter
+  tmux send-keys -t "$pane" -l -- "Sergeant response available in .sergeant-response"
+  tmux send-keys -t "$pane" Enter
   _sgt_response_lock_release
   trap - EXIT
   echo "sgt-respond: notified local pane $pane."
@@ -108,14 +131,13 @@ fi
 tmux_session="$(cat "$REPO_DIR/tmux_session" 2>/dev/null || true)"
 window_name="$(cat "$REPO_DIR/window_name" 2>/dev/null || true)"
 agent="$(cat "$REPO_DIR/agent" 2>/dev/null || true)"
-initial_message="$(cat "$REPO_DIR/initial_message" 2>/dev/null || true)"
-if ! command -v tmux >/dev/null 2>&1 || [[ -z "$tmux_session" || -z "$window_name" || -z "$agent" || -z "$initial_message" ]]; then
+if ! command -v tmux >/dev/null 2>&1 || [[ -z "$tmux_session" || -z "$window_name" || -z "$agent" ]]; then
   echo "sgt-respond: no live local pane and relaunch metadata is incomplete; response file is ready."
   exit 0
 fi
 
-printf -v worker_command '%q %q %q %q %q' \
-  "$SCRIPT_DIR/sgt-worker" "$REPO_DIR" "$worktree" "$agent" "$initial_message"
+printf -v worker_command '%q %q %q %q' \
+  "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent"
 
 _record_relaunch_orphan() {
   local reason="$1"
@@ -135,6 +157,19 @@ if [[ -z "$new_pane" ]]; then
   _die "Worker relaunch returned no pane for $TASK_ID/$REPO"
 fi
 printf '%s\n' "$new_pane" > "$REPO_DIR/pane"
+if pane_identity="$(_sgt_pane_identity "$new_pane")" && [[ -n "$pane_identity" ]]; then
+  printf '%s\n' "$pane_identity" > "$REPO_DIR/pane_identity"
+else
+  tmux kill-pane -t "$new_pane" 2>/dev/null || true
+  _record_relaunch_orphan "tmux failed to capture exact relaunched worker pane identity"
+  _die "Worker relaunch identity capture failed for $TASK_ID/$REPO"
+fi
+if ! tmux send-keys -t "$new_pane" -l -- "Sergeant response available in .sergeant-response" || \
+  ! tmux send-keys -t "$new_pane" Enter; then
+  tmux kill-pane -t "$new_pane" 2>/dev/null || true
+  _record_relaunch_orphan "tmux failed to deliver response to relaunched interactive worker"
+  _die "Worker response delivery failed for $TASK_ID/$REPO"
+fi
 _sgt_response_lock_release
 trap - EXIT
 echo "sgt-respond: relaunched worker in pane $new_pane."
