@@ -276,6 +276,10 @@ cat > "$fake_bin/rm" <<'EOF'
 if [[ "${FAIL_TRANSITION:-}" == "rollback-rm-failure" && "$*" == *validation_worktree* ]]; then
   exit 7
 fi
+if [[ "${FAIL_TRANSITION:-}" == "checkout-delete-failure" && \
+  "$*" == *worktree-validation-task-1* ]]; then
+  exit 7
+fi
 exec "$REAL_RM" "$@"
 EOF
 chmod +x "$fake_bin/rm"
@@ -473,6 +477,24 @@ cleanup_validation_state
 
 set +e
 output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  FAIL_TRANSITION=checkout-delete-failure \
+  SGT_VALIDATE_FAIL_TRANSITION=state-validation_pane \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'could not remove owned validation checkout'* && \
+  "$output" == *'rollback cleanup also failed'* ]]
+for recovery_path in validation_worktree validation_worktree_identity \
+  validation_worktree_git_dir validation_worktree_git_identity validation_worktree_owner \
+  validation_head; do
+  [[ -s "$repo_state/$recovery_path" ]]
+done
+[[ -d "$validation_path" ]]
+cleanup_validation_state
+
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
   FAIL_TRANSITION=wrong-final-token SGT_VALIDATION_HANDSHAKE_ATTEMPTS=2 \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
   "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
@@ -659,14 +681,16 @@ for identity_path in "$fleet/task-1/primary_pane_identity" "$repo_state/pane_ide
   [[ "$status" -ne 0 ]]
   rm "$identity_path"
   mv "$saved_identity" "$identity_path"
-  chmod 666 "$identity_path"
-  set +e
-  output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
-    TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
-    "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
-  status=$?
-  set -e
-  [[ "$status" -ne 0 ]]
+  for unsafe_mode in 644 444 700 400 666; do
+    chmod "$unsafe_mode" "$identity_path"
+    set +e
+    output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+      TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+      "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]]
+  done
   chmod 600 "$identity_path"
 done
 
