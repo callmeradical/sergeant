@@ -84,6 +84,9 @@ VALIDATION_INTENT="$REPO_STATE/validation-intent.md"
 VALIDATION_INTENT_TEMP="${VALIDATION_INTENT}.tmp.$$"
 VALIDATION_RELEASE_TEMP="$REPO_STATE/validation-release.tmp"
 VALIDATION_LAUNCH_LOCK="$REPO_STATE/validation-launch.lock"
+VALIDATION_CHILD_READY="$REPO_STATE/validation-child-ready"
+VALIDATION_CHILD_ACCEPTED="$REPO_STATE/validation-child-accepted"
+VALIDATION_CHILD_COMMIT="$REPO_STATE/validation-child-commit"
 WINDOW_BACKUP="$REPO_STATE/window_name.validation-backup.$$"
 STAGE_BACKUP="$REPO_STATE/stage.validation-backup.$$"
 
@@ -144,6 +147,23 @@ _validation_adopt_pane() {
   VALIDATION_PANE="$pane"
   VALIDATION_IDENTITY="$identity"
   VALIDATION_PANE_OWNED=true
+}
+_wait_validation_handshake() {
+  local path="$1" expected="$2" attempt=0
+  local attempts="${SGT_VALIDATION_HANDSHAKE_ATTEMPTS:-200}"
+  while [[ "$attempt" -lt "$attempts" ]]; do
+    if [[ -f "$path" && ! -L "$path" && "$(cat "$path")" == "$expected" && \
+      "$(_validation_current_pane_identity "$VALIDATION_PANE" || true)" == \
+      "$VALIDATION_IDENTITY" ]]; then
+      _validation_record_owned_path "$path" || return 1
+      return 0
+    fi
+    [[ "$(_validation_current_pane_identity "$VALIDATION_PANE" || true)" == \
+      "$VALIDATION_IDENTITY" ]] || return 1
+    sleep 0.05
+    attempt=$((attempt + 1))
+  done
+  return 1
 }
 _validation_record_owned_path() {
   local path="$1" identity
@@ -294,8 +314,17 @@ _release_validation_lock() {
   VALIDATION_LOCK_OWNED=false
 }
 _rollback_validation_launch() {
-  local current_identity
+  local current_identity handshake_path
   $VALIDATION_COMMITTED && return 0
+  if [[ -n "${VALIDATION_HANDSHAKE:-}" ]]; then
+    for handshake_path in "$VALIDATION_CHILD_READY" "$VALIDATION_CHILD_ACCEPTED" \
+      "$VALIDATION_CHILD_COMMIT"; do
+      if [[ -f "$handshake_path" && ! -L "$handshake_path" && \
+        "$(cat "$handshake_path")" == "$VALIDATION_HANDSHAKE" ]]; then
+        _validation_record_owned_path "$handshake_path" || true
+      fi
+    done
+  fi
   if $VALIDATION_PANE_OWNED && [[ -n "$VALIDATION_PANE" ]]; then
     current_identity="$(_validation_current_pane_identity "$VALIDATION_PANE" || true)"
     if [[ "$current_identity" == "$VALIDATION_IDENTITY" || \
@@ -304,7 +333,9 @@ _rollback_validation_launch() {
     fi
   fi
   if $WINDOW_RENAMED && [[ -n "$OLD_WINDOW_NAME" ]] && \
-    _sgt_pane_identity_matches "$PANE" "$REPO_STATE"; then
+    _sgt_pane_identity_matches "$PANE" "$REPO_STATE" && \
+    [[ "$(tmux display-message -p -t "$PANE" '#W' 2>/dev/null || true)" == \
+      "$WINDOW_NAME" ]]; then
     tmux rename-window -t "$PANE" "$OLD_WINDOW_NAME" 2>/dev/null || true
   fi
   _validation_remove_owned_paths
@@ -343,6 +374,7 @@ for path in "$VALIDATION_WORKTREE_RECORD" "$VALIDATION_WORKTREE_RECORD_TEMP" \
   "$REPO_STATE/validation_pane_identity" "$REPO_STATE/validation_pane_pid" \
   "$REPO_STATE/validation_process_group" "$REPO_STATE/validation_process_start" \
   "$REPO_STATE/validation_status" "$VALIDATION_RELEASE_TEMP" \
+  "$VALIDATION_CHILD_READY" "$VALIDATION_CHILD_ACCEPTED" "$VALIDATION_CHILD_COMMIT" \
   "$WINDOW_BACKUP" "$STAGE_BACKUP"; do
   ! _validation_path_exists "$path" || _die "Validation launch state already exists: $path"
 done
@@ -393,8 +425,11 @@ else
     _die "Failed to reconcile created validation pane identity"
   fi
 fi
-_validation_transition pane-identity || _die "Failed to capture validation pane identity"
-[[ "$SPLIT_STATUS" -eq 0 ]] || _die "Failed to launch validation pane"
+if [[ -f "$VALIDATION_CHILD_READY" && ! -L "$VALIDATION_CHILD_READY" && \
+  "$(cat "$VALIDATION_CHILD_READY")" == "$EXPECTED_REVISION|$VALIDATION_PANE|"* ]]; then
+  _validation_record_owned_path "$VALIDATION_CHILD_READY" || \
+    _die "Failed to capture validation child readiness"
+fi
 VALIDATION_INFO="${VALIDATION_IDENTITY#*|}"
 VALIDATION_INFO="${VALIDATION_INFO#*|}"
 VALIDATION_PID="${VALIDATION_INFO%%|*}"
@@ -402,6 +437,11 @@ VALIDATION_PGID="$(ps -o pgid= -p "$VALIDATION_PID" 2>/dev/null | tr -d ' ' || t
 VALIDATION_START="$(ps -o lstart= -p "$VALIDATION_PID" 2>/dev/null | awk '{$1=$1; print}' || true)"
 [[ -n "$VALIDATION_PID" && -n "$VALIDATION_PGID" && -n "$VALIDATION_START" ]] || \
   _die "Failed to capture validation process ownership"
+VALIDATION_HANDSHAKE="$EXPECTED_REVISION|$VALIDATION_PANE|$VALIDATION_PID|$VALIDATION_START"
+_wait_validation_handshake "$VALIDATION_CHILD_READY" "$VALIDATION_HANDSHAKE" || \
+  _die "Validation child did not become ready"
+_validation_transition pane-identity || _die "Failed to capture validation pane identity"
+[[ "$SPLIT_STATUS" -eq 0 ]] || _die "Failed to launch validation pane"
 [[ "$(_validation_current_pane_identity "$VALIDATION_PANE" || true)" == \
   "$VALIDATION_IDENTITY" && "${VALIDATION_IDENTITY%%|*}" == "0" ]] || \
   _die "Validation pane exited before launch publication"
@@ -441,8 +481,12 @@ _validation_write_owned "$REPO_STATE/validation_status" "launched" \
   _die "Failed to publish validation status"
 _validation_write_owned "$REPO_STATE/validation-release" "$EXPECTED_REVISION" release || \
   _die "Failed to publish validation release"
-_release_validation_lock || _die "Failed to release validation launch reservation"
+_wait_validation_handshake "$VALIDATION_CHILD_ACCEPTED" "$VALIDATION_HANDSHAKE" || \
+  _die "Validation child did not accept release"
+_validation_write_owned "$VALIDATION_CHILD_COMMIT" "$VALIDATION_HANDSHAKE" child-commit || \
+  _die "Failed to commit validation child release"
 VALIDATION_COMMITTED=true
+_release_validation_lock || _die "Failed to release validation launch reservation"
 rm -f "$WINDOW_BACKUP" "$STAGE_BACKUP"
 trap - EXIT
 printf 'Validation launched in pane %s beside worker %s.\n' "$VALIDATION_PANE" "$PANE"
