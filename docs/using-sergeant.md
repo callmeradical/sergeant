@@ -174,10 +174,23 @@ sgt-validate <fleet-task-id> <repo> [--skip <steps>]
 `sgt-validate` splits the worker's existing tmux window, renames that shared
 window to `validation-<repo>-<task>`, and runs no-mistakes interactively in the
 new coordinator-owned pane with the canonical intent. It never uses `--yes`.
+Before cloning the validation checkout or publishing launch state, the
+coordinator acquires an identity-checked validation-launch reservation for that
+task/repository pair. Concurrent launches fail closed until the recorded owner
+exits or stale-ownership recovery proves the reservation is abandoned.
+
+If launch fails before the validation child commits the release, Sergeant rolls
+back only the checkout, pane, temp files, and fleet-state markers that the
+current invocation both created and can still prove it owns. Preexisting state,
+reused panes, dangling paths, and concurrent replacements are preserved. After
+the recorded validation pane and process group have fully exited, rerunning
+`sgt-validate` safely resets only identity-matched finished state and retries
+the launch.
+
 Treat the run as validation-only. Route each actionable finding into separate,
 deduplicated owning-repository td work. Do not modify source inside the retained
-validation run. Approve low/medium-risk gates and merge passing PRs under recorded
-authorization; escalate high-risk findings.
+validation run. Approve low/medium-risk gates and merge passing PRs under
+recorded authorization; escalate high-risk findings.
 
 ## Clean completed fleet state
 
