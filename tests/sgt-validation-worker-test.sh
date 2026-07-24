@@ -44,6 +44,7 @@ tmux new-session -d -s "$TMUX_SESSION" -n anchor "sleep 60"
 pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION" -n validation \
   -c "$worktree" \
   "env PATH='$fake_bin:$PATH' NO_MISTAKES_LOG='$TEST_ROOT/no-mistakes.log' \
+  SGT_VALIDATION_COMMIT_ACK_DELAY=0.3 \
   '$ROOT_DIR/bin/sgt-validation-worker' '$state' '$worktree' '$revision' \
   2>'$TEST_ROOT/worker.err'")"
 sleep 0.1
@@ -70,6 +71,12 @@ for _ in $(seq 1 100); do
   sleep 0.02
 done
 cp "$state/validation-child-accepted" "$state/validation-child-commit"
+
+for _ in $(seq 1 100); do
+  [[ -f "$state/validation-child-committed" ]] && break
+  sleep 0.02
+done
+[[ -s "$state/validation-child-committed" ]]
 
 for _ in $(seq 1 100); do
   [[ -f "$TEST_ROOT/no-mistakes.log" ]] && break

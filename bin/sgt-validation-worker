@@ -114,6 +114,11 @@ while [[ ! -f "$REPO_STATE/validation-child-commit" ]]; do
 done
 [[ ! -L "$REPO_STATE/validation-child-commit" && \
   "$(cat "$REPO_STATE/validation-child-commit")" == "$HANDSHAKE" ]] || exit 2
+_coordinator_is_alive || exit 2
+[[ -z "${SGT_VALIDATION_COMMIT_ACK_DELAY:-}" ]] || \
+  sleep "$SGT_VALIDATION_COMMIT_ACK_DELAY"
+_coordinator_is_alive || exit 2
+_publish_handshake "$REPO_STATE/validation-child-committed" "$HANDSHAKE" || exit 2
 
 printf 'running\n' > "$REPO_STATE/validation_status"
 cd "$WORKTREE" || exit 2

@@ -66,7 +66,9 @@ case "$1" in
       fi
     else case "$*" in
       *'%77'*)
-        if [[ "${FAIL_TRANSITION:-}" == "pane-identity" ]]; then
+        if [[ "${FAIL_TRANSITION:-}" == "pane-identity" || \
+          ( "${FAIL_TRANSITION:-}" == "commit-child-exit" && \
+            ! -e "$CONCURRENT_DIR/pane-live" ) ]]; then
           exit 7
         elif [[ "${FAIL_TRANSITION:-}" == "pane-acquire-reuse" ]]; then
           printf '0|%%77|8888|345678|unrelated-command\n'
@@ -228,7 +230,17 @@ fi
 if [[ "$destination" == */validation-release && \
   "${FAIL_TRANSITION:-}" != "handshake-timeout" ]]; then
   printf '%s|%%77|7777|Thu Jul 23 00:00:00 2026\n' \
-    "$(cat "$CONCURRENT_DIR/revision")" > "$TEST_REPO_STATE/validation-child-accepted"
+      "$(cat "$CONCURRENT_DIR/revision")" > "$TEST_REPO_STATE/validation-child-accepted"
+fi
+if [[ "$destination" == */validation-child-commit ]]; then
+  if [[ "${FAIL_TRANSITION:-}" == "commit-child-exit" ]]; then
+    rm -f "$CONCURRENT_DIR/pane-live"
+  elif [[ "${FAIL_TRANSITION:-}" == "wrong-commit-ack" ]]; then
+    printf 'wrong-ack\n' > "$TEST_REPO_STATE/validation-child-committed"
+  elif [[ "${FAIL_TRANSITION:-}" != "commit-ack-timeout" ]]; then
+    printf '%s|%%77|7777|Thu Jul 23 00:00:00 2026\n' \
+      "$(cat "$CONCURRENT_DIR/revision")" > "$TEST_REPO_STATE/validation-child-committed"
+  fi
 fi
 EOF
 chmod +x "$fake_bin/ln"
@@ -272,6 +284,7 @@ rm "$repo_state/validation_pane" "$repo_state/validation_pane_identity" \
   "$repo_state/validation-intent.md" "$repo_state/validation-release" \
   "$repo_state/validation-child-ready" "$repo_state/validation-child-accepted" \
   "$repo_state/validation-child-commit" \
+  "$repo_state/validation-child-committed" \
   "$repo_state/validation_status" "$repo_state/validation_worktree" \
   "$repo_state/validation_head"
 rm -rf "$validation_worktree"
@@ -286,6 +299,7 @@ cleanup_validation_state() {
     "$repo_state/validation_process_start" "$repo_state/validation-intent.md" \
     "$repo_state/validation-release" "$repo_state/validation-child-ready" \
     "$repo_state/validation-child-accepted" "$repo_state/validation-child-commit" \
+    "$repo_state/validation-child-committed" \
     "$repo_state/validation_status" \
     "$repo_state/validation_worktree" "$repo_state/validation_head"
   [[ -z "$launched_worktree" ]] || rm -rf "$launched_worktree"
@@ -318,7 +332,9 @@ assert_lock_blocks_and_is_preserved() {
 
 assert_failed_launch_rolls_back_and_retries() {
   local transition="$1" output status path before_transition_kills after_transition_kills attempts=200
-  [[ "$transition" != handshake-timeout ]] || attempts=2
+  case "$transition" in
+    handshake-timeout|commit-ack-timeout|commit-child-exit) attempts=2 ;;
+  esac
   before_transition_kills="$(grep -c '^kill-pane -t %77$' "$TEST_ROOT/tmux.log" || true)"
   set +e
   output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
@@ -340,6 +356,7 @@ assert_failed_launch_rolls_back_and_retries() {
     validation_process_group validation_process_start validation-intent.md \
     validation-release validation-child-ready validation-child-accepted \
     validation-child-commit \
+    validation-child-committed \
     validation_status validation_worktree validation_head \
     validation-launch.lock; do
     [[ ! -e "$repo_state/$path" ]] || {
@@ -381,6 +398,22 @@ for transition in clone checkout remote verify marker-temp marker-write marker i
   assert_failed_launch_rolls_back_and_retries "$transition"
 done
 assert_failed_launch_rolls_back_and_retries handshake-timeout
+assert_failed_launch_rolls_back_and_retries commit-ack-timeout
+assert_failed_launch_rolls_back_and_retries commit-child-exit
+
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  FAIL_TRANSITION=wrong-commit-ack SGT_VALIDATION_HANDSHAKE_ATTEMPTS=2 \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$(cat "$repo_state/validation-child-committed")" == wrong-ack ]]
+rm -f "$repo_state/validation-child-committed"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+cleanup_validation_state
 
 before_old_window_restores="$(grep -c '^rename-window -t %42 implementation-app-task-1$' \
   "$TEST_ROOT/tmux.log" || true)"
