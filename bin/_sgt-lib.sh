@@ -296,21 +296,41 @@ _sgt_worker_command() {
 }
 _sgt_notification_target_create() {
   local repo_dir="$1" notification_id="$2" pane_identity="$3"
-  local nonce target_dir temporary
+  local nonce target_dir temporary published_nonce
   nonce="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
   target_dir="$repo_dir/notifications/$notification_id/targets/$nonce"
+  # pane_identity is stored exclusively inside target_dir so it is bound to the
+  # nonce atomically; there is no separate top-level notification_target_pane_identity
+  # file.  Callers that need the identity read it from
+  # notifications/$id/targets/$(cat notification_target)/pane_identity.
   mkdir -p "$target_dir" || return 1
   printf '%s\n' "$pane_identity" > "$target_dir/pane_identity" || return 1
   temporary="$repo_dir/notification_target.tmp.$$"
   printf '%s\n' "$nonce" > "$temporary" || return 1
+  # Atomic rename publishes our nonce.  Any concurrent publisher that writes to
+  # notification_target after our mv is detected via the post-mv verification.
   mv "$temporary" "$repo_dir/notification_target" || return 1
-  printf '%s\n' "$pane_identity" > "$repo_dir/notification_target_pane_identity" || return 1
+  # Test seam: inject a concurrent replacement after the mv to exercise the
+  # post-mv verification path.  Active only when SGT_TEST_HOOKS=1; never set
+  # in production.  See sgt-lib-notification-target-test.sh.
+  if [[ "${SGT_TEST_HOOKS:-}" == "1" && -n "${_SGT_POST_MV_HOOK:-}" ]]; then
+    eval "${_SGT_POST_MV_HOOK}"
+  fi
+  # Post-mv verification: if notification_target no longer holds our nonce, a
+  # concurrent publisher replaced it after our mv.  Remove the orphaned target
+  # directory and return failure.
+  published_nonce="$(cat "$repo_dir/notification_target" 2>/dev/null || true)"
+  if [[ "$published_nonce" != "$nonce" ]]; then
+    rm -rf "$target_dir"
+    return 1
+  fi
   printf '%s\n' "$nonce"
 }
 _sgt_publish_worker_notification() {
   local repo_dir="$1" worktree="$2" notification_id="$3" kind="$4" instruction="$5"
   local state_dir notification_state notification_tmp current_id current_ack current_delivered
-  local proof_dir proof_tmp repo_tmp active_id current_ack_token current_delivered_identity current_target_identity
+  local proof_dir proof_tmp repo_tmp active_id current_ack_token current_delivered_identity
+  local current_target_identity current_target_nonce
 
   [[ "$notification_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
   state_dir="$repo_dir/notifications/$notification_id"
@@ -335,7 +355,15 @@ _sgt_publish_worker_notification() {
   current_ack="$(cat "$worktree/.sergeant-notification-ack" 2>/dev/null || true)"
   current_delivered="$(cat "$repo_dir/notification_delivered" 2>/dev/null || true)"
   current_delivered_identity="$(cat "$repo_dir/notification_delivered_pane_identity" 2>/dev/null || true)"
-  current_target_identity="$(cat "$repo_dir/notification_target_pane_identity" 2>/dev/null || true)"
+  # Derive the current target's pane_identity from the nonce-addressed target_dir
+  # rather than a top-level notification_target_pane_identity file.  This is
+  # race-free because pane_identity was written into target_dir before the nonce
+  # was published atomically via mv.
+  current_target_nonce="$(cat "$repo_dir/notification_target" 2>/dev/null || true)"
+  current_target_identity=""
+  if [[ -n "$current_id" && "$current_target_nonce" =~ ^[a-f0-9]{32}$ ]]; then
+    current_target_identity="$(cat "$repo_dir/notifications/$current_id/targets/$current_target_nonce/pane_identity" 2>/dev/null || true)"
+  fi
   current_ack_token="$current_id|$current_target_identity"
   if [[ -n "$current_id" ]]; then
     proof_dir="$repo_dir/notifications/$current_id"

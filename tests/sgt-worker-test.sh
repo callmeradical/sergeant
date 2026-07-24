@@ -171,7 +171,6 @@ target_worker_pane() {
   mkdir -p "$target_dir"
   printf '%s\n' "$identity" > "$target_dir/pane_identity"
   printf '%s\n' "$nonce" > "$state/notification_target"
-  printf '%s\n' "$identity" > "$state/notification_target_pane_identity"
 }
 
 race_state="$TEST_ROOT/race/state"

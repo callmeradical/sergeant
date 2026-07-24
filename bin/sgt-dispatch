@@ -806,8 +806,14 @@ BRIEF_EOF
     if pane_identity="$(_sgt_pane_identity "$pane_target")" && [[ -n "$pane_identity" ]]; then
       _sgt_replace_owned_file "$repo_task_dir/pane_identity" "$pane_identity" || \
         _die "Could not publish worker pane identity"
-      _sgt_notification_target_create "$repo_task_dir" "$initial_notification_id" \
-        "$pane_identity" >/dev/null
+      if ! _sgt_notification_target_create "$repo_task_dir" "$initial_notification_id" \
+          "$pane_identity" >/dev/null; then
+        tmux kill-pane -t "$pane_target" 2>/dev/null || true
+        printf 'orphaned\n' > "$repo_task_dir/status"
+        printf 'notification target creation race: concurrent dispatch detected\n' > "$repo_task_dir/diagnostic"
+        "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
+        _die "notification target race detected for $rname; worker orphaned"
+      fi
     else
       tmux kill-pane -t "$pane_target" 2>/dev/null || true
       printf 'orphaned\n' > "$repo_task_dir/status"
