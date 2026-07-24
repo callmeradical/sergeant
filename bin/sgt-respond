@@ -33,6 +33,29 @@ REPO_DIR="$FLEET_DIR/$TASK_ID/$REPO"
 
 worktree="$(cat "$REPO_DIR/worktree" 2>/dev/null || true)"
 
+_worktree_is_owned_checkout() {
+  local canonical expected_pointer actual_pointer expected_git_dir actual_git_dir
+  [[ -n "$worktree" && "$worktree" == /* && -d "$worktree" ]] || return 1
+  ! _sgt_intent_path_has_symlink "$worktree" || return 1
+  canonical="$(cd "$worktree" 2>/dev/null && pwd -P)" || return 1
+  [[ "$canonical" == "${worktree%/}" ]] || return 1
+  [[ -f "$canonical/.git" && ! -L "$canonical/.git" ]] || return 1
+  expected_pointer="$(cat "$REPO_DIR/worktree_git_pointer" 2>/dev/null || true)"
+  expected_git_dir="$(cat "$REPO_DIR/worktree_git_dir" 2>/dev/null || true)"
+  actual_pointer="$(cat "$canonical/.git")"
+  [[ -n "$expected_pointer" && "$actual_pointer" == "$expected_pointer" ]] || return 1
+  [[ "$actual_pointer" == "gitdir: "* ]] || return 1
+  actual_git_dir="${actual_pointer#gitdir: }"
+  if [[ "$actual_git_dir" != /* ]]; then
+    actual_git_dir="$canonical/$actual_git_dir"
+  fi
+  actual_git_dir="$(cd "$actual_git_dir" 2>/dev/null && pwd -P)" || return 1
+  [[ -n "$expected_git_dir" && "$actual_git_dir" == "$expected_git_dir" ]]
+}
+
+_worktree_is_owned_checkout || \
+  _die "Recorded worktree is missing, stale, or not an owned checkout; response was not published"
+
 _sgt_intent_revision_matches "$FLEET_DIR/$TASK_ID" "$REPO_DIR" "$worktree" || \
   _die "canonical intent revision mismatch; audited human decision/new revision required"
 
@@ -55,7 +78,10 @@ _atomic_write() {
   local temporary
   temporary="$(mktemp "${target}.tmp.XXXXXX")"
   printf '%s\n' "$value" > "$temporary"
-  mv "$temporary" "$target"
+  if ! mv "$temporary" "$target"; then
+    rm -f "$temporary"
+    return 1
+  fi
 }
 
 _publish_local_response_transport() {
@@ -63,13 +89,12 @@ _publish_local_response_transport() {
   local response_id="$2"
   local gate_generation="$3"
   _atomic_write "$REPO_DIR/response_generation" "$gate_generation"
+  _atomic_write "$REPO_DIR/response_id" "$response_id"
+  rm -f "$worktree/.sergeant-response-ack"
+  _atomic_write "$worktree/.sergeant-response-generation" "$gate_generation"
+  _atomic_write "$worktree/.sergeant-response-id" "$response_id"
   _atomic_write "$REPO_DIR/response" "$response"
-  if [[ -n "$worktree" && -d "$worktree" ]]; then
-    rm -f "$worktree/.sergeant-response-ack"
-    _atomic_write "$worktree/.sergeant-response-generation" "$gate_generation"
-    _atomic_write "$worktree/.sergeant-response" "$response"
-    _atomic_write "$worktree/.sergeant-response-id" "$response_id"
-  fi
+  _atomic_write "$worktree/.sergeant-response" "$response"
 }
 
 pending_response=""
@@ -89,13 +114,20 @@ fi
 response_id="$(cat "$REPO_DIR/response_id" 2>/dev/null || true)"
 if [[ -n "$pending_response" ]]; then
   [[ "$(cat "$REPO_DIR/response_generation" 2>/dev/null || true)" == "$gate_generation" && \
-     "$(cat "$worktree/.sergeant-response-generation" 2>/dev/null || true)" == "$gate_generation" ]] || \
+     "$(cat "$worktree/.sergeant-response-generation" 2>/dev/null || true)" == "$gate_generation" && \
+     -n "$response_id" && \
+     "$(cat "$worktree/.sergeant-response-id" 2>/dev/null || true)" == "$response_id" ]] || \
     _die "Pending response generation does not match the worker gate"
-  [[ "$status" == "orphaned" ]] || _die "A Sergeant response is already pending consumption for $TASK_ID/$REPO"
+  if [[ -f "$worktree/.sergeant-response" && "$status" != "orphaned" ]]; then
+    _die "A Sergeant response is already pending consumption for $TASK_ID/$REPO"
+  fi
   if [[ "$RESPONSE" != "$pending_response" ]]; then
     printf 'sgt-respond: reusing stored recovery response for orphaned worker %s/%s; supplied text was ignored.\n' "$TASK_ID" "$REPO" >&2
   fi
   RESPONSE="$pending_response"
+  if [[ ! -f "$worktree/.sergeant-response" ]]; then
+    _atomic_write "$worktree/.sergeant-response" "$RESPONSE"
+  fi
 else
   response_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
   if [[ -n "$worktree" && -d "$worktree" ]]; then
@@ -103,14 +135,13 @@ else
       _die "Failed to record response provenance in td; response was not published"
   fi
   _publish_local_response_transport "$RESPONSE" "$response_id" "$gate_generation"
-  _atomic_write "$REPO_DIR/response_id" "$response_id"
 fi
 
-if [[ -z "$worktree" || ! -d "$worktree" ]]; then
-  echo "sgt-respond: worktree unavailable; only fleet state was written."
-  _sgt_response_lock_release
-  trap - EXIT
-  exit 0
+active_notification_id="$(sed -n 's/^notification_id=//p' \
+  "$worktree/.sergeant-notification" 2>/dev/null || true)"
+if [[ "$active_notification_id" != "$response_id" ]]; then
+  _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$response_id" response \
+    "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
 fi
 
 pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
@@ -120,8 +151,8 @@ _pane_is_supervisor() {
 }
 
 if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && _pane_is_supervisor "$pane"; then
-  tmux send-keys -t "$pane" -l -- "Sergeant response available in .sergeant-response"
-  tmux send-keys -t "$pane" Enter
+  _sgt_wait_worker_notification "$pane" "$REPO_DIR" "$response_id" || \
+    _die "Worker did not acknowledge its durable response notification; response remains pending"
   _sgt_response_lock_release
   trap - EXIT
   echo "sgt-respond: notified local pane $pane."
@@ -164,11 +195,10 @@ else
   _record_relaunch_orphan "tmux failed to capture exact relaunched worker pane identity"
   _die "Worker relaunch identity capture failed for $TASK_ID/$REPO"
 fi
-if ! tmux send-keys -t "$new_pane" -l -- "Sergeant response available in .sergeant-response" || \
-  ! tmux send-keys -t "$new_pane" Enter; then
+if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" "$response_id"; then
   tmux kill-pane -t "$new_pane" 2>/dev/null || true
-  _record_relaunch_orphan "tmux failed to deliver response to relaunched interactive worker"
-  _die "Worker response delivery failed for $TASK_ID/$REPO"
+  _record_relaunch_orphan "relaunched interactive worker did not acknowledge its durable response notification"
+  _die "Worker relaunch notification acknowledgement timed out for $TASK_ID/$REPO"
 fi
 _sgt_response_lock_release
 trap - EXIT

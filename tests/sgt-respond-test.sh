@@ -9,9 +9,20 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 fleet="$TEST_ROOT/fleet"
 repo_state="$fleet/task-1/app"
 worktree="$TEST_ROOT/worktree"
+source_repo="$TEST_ROOT/source"
 fake_bin="$TEST_ROOT/fake-bin"
-mkdir -p "$repo_state" "$worktree" "$fake_bin"
+mkdir -p "$repo_state" "$source_repo" "$fake_bin"
+git -C "$source_repo" init -q
+git -C "$source_repo" config user.name Test
+git -C "$source_repo" config user.email test@example.invalid
+touch "$source_repo/README.md"
+git -C "$source_repo" add README.md
+git -C "$source_repo" commit -qm fixture
+git -C "$source_repo" worktree add -q -b response-test "$worktree"
 printf '%s\n' "$worktree" > "$repo_state/worktree"
+cat "$worktree/.git" > "$repo_state/worktree_git_pointer"
+worktree_git_dir="$(sed 's/^gitdir: //' "$worktree/.git")"
+printf '%s\n' "$(cd "$worktree_git_dir" && pwd -P)" > "$repo_state/worktree_git_dir"
 printf '%%42\n' > "$repo_state/pane"
 printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo_state" > "$repo_state/pane_identity"
 printf 'sgt\n' > "$repo_state/tmux_session"
@@ -39,6 +50,12 @@ printf '%s\n' "$*" >> "$TMUX_LOG"
 case "$1" in
   display-message)
     [[ "${PANE_ALIVE:-0}" == 1 ]] || exit 1
+    if [[ "${AUTO_DELIVER:-1}" == 1 && -s "$EXPECTED_WORKER/notification_id" ]]; then
+      notification_id="$(cat "$EXPECTED_WORKER/notification_id")"
+      notification_worktree="$(cat "$EXPECTED_WORKER/worktree")"
+      printf '%s\n' "$notification_id" > "$notification_worktree/.sergeant-notification-ack"
+      printf '%s\n' "$notification_id" > "$EXPECTED_WORKER/notification_delivered"
+    fi
     printf '%s\n' "${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
     ;;
   new-window)
@@ -61,10 +78,64 @@ EOF
 chmod +x "$fake_bin/td"
 printf 'td-123\n' > "$repo_state/td_task"
 
+real_mv="$(command -v mv)"
+cat > "$fake_bin/mv" <<'EOF'
+#!/usr/bin/env bash
+target=""
+for argument in "$@"; do
+  target="$argument"
+done
+if [[ -n "${FAIL_PUBLISH_TARGET:-}" && "$target" == "$FAIL_PUBLISH_TARGET" ]]; then
+  exit 23
+fi
+exec "${REAL_MV:-/bin/mv}" "$@"
+EOF
+chmod +x "$fake_bin/mv"
+
 respond() {
   local response_body="$1"
   printf '%s' "$response_body" | "$ROOT_DIR/bin/sgt-respond" task-1 app
 }
+
+assert_publication_failure() {
+  local target="$1"
+  local label="$2"
+  local status
+
+  rm -f "$repo_state/response" "$repo_state/response_generation" "$repo_state/response_id" \
+    "$worktree/.sergeant-response" "$worktree/.sergeant-response-generation" \
+    "$worktree/.sergeant-response-id"
+  set +e
+  PATH="$fake_bin:$PATH" REAL_MV="$real_mv" FAIL_PUBLISH_TARGET="$target" \
+    TMUX_LOG="$TEST_ROOT/publication-$label.log" TD_LOG="$TEST_ROOT/publication-$label-td.log" \
+    TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 EXPECTED_WORKER="$repo_state" \
+    SERGEANT_FLEET="$fleet" respond "publication failure $label" >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ "$status" -ne 0 ]] || {
+    printf 'response publication unexpectedly succeeded at %s\n' "$label" >&2
+    exit 1
+  }
+  if [[ -e "$worktree/.sergeant-response" ]]; then
+    [[ -s "$repo_state/response_generation" && -s "$repo_state/response_id" && \
+       -s "$worktree/.sergeant-response-generation" && -s "$worktree/.sergeant-response-id" ]]
+    [[ "$(cat "$repo_state/response_id")" == "$(cat "$worktree/.sergeant-response-id")" ]]
+    [[ "$(cat "$repo_state/response_generation")" == \
+       "$(cat "$worktree/.sergeant-response-generation")" ]]
+  fi
+  [[ ! -e "$TEST_ROOT/publication-$label.log" ]] || \
+    ! grep -Fq 'send-keys' "$TEST_ROOT/publication-$label.log"
+}
+
+assert_publication_failure "$repo_state/response_generation" fleet-generation
+assert_publication_failure "$repo_state/response_id" fleet-id
+assert_publication_failure "$worktree/.sergeant-response-generation" worktree-generation
+assert_publication_failure "$worktree/.sergeant-response-id" worktree-id
+assert_publication_failure "$repo_state/response" fleet-response
+assert_publication_failure "$worktree/.sergeant-response" worktree-response
+rm -f "$repo_state/response" "$repo_state/response_generation" "$repo_state/response_id" \
+  "$worktree/.sergeant-response" "$worktree/.sergeant-response-generation" \
+  "$worktree/.sergeant-response-id"
 
 set +e
 output="$(SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-respond" task-1 app 'argv body rejected' 2>&1)"
@@ -82,8 +153,8 @@ TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 EXPECTED_WORKER="$r
 [[ "$(cat "$repo_state/response")" == "$response" ]]
 [[ "$(cat "$worktree/.sergeant-response")" == "$response" ]]
 [[ "$(cat "$repo_state/pane")" == "%42" ]]
-grep -Fq 'send-keys -t %42 -l -- Sergeant response available in .sergeant-response' \
-  "$TEST_ROOT/live.log"
+[[ "$(cat "$repo_state/notification_delivered")" == "$(cat "$repo_state/response_id")" ]]
+grep -Fq 'kind=response' "$worktree/.sergeant-notification"
 if grep -Fq "$response" "$TEST_ROOT/live.log"; then
   printf 'response body leaked into tmux process arguments\n' >&2
   exit 1
@@ -167,8 +238,7 @@ TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 \
 [[ "$(cat "$repo_state/pane")" == "%99" ]]
 grep -Fq 'new-window -P -F #{pane_id} -t sgt: -n task/app' "$TEST_ROOT/dead.log"
 grep -Fq "$ROOT_DIR/bin/sgt-interactive-worker" "$TEST_ROOT/dead.log"
-grep -Fq 'send-keys -t %99 -l -- Sergeant response available in .sergeant-response' \
-  "$TEST_ROOT/dead.log"
+[[ "$(cat "$repo_state/notification_delivered")" == "$(cat "$repo_state/response_id")" ]]
 
 rm "$worktree/.sergeant-response" "$repo_state/response"
 cat > "$fake_bin/td" <<'EOF'
@@ -239,6 +309,31 @@ set -e
 [[ "$(cat "$worktree/.sergeant-gate-generation")" == '1' ]]
 [[ "$(cat "$repo_state/response_generation")" == '1' ]]
 
+original_worktree="$worktree"
+for invalid_path in '' "$TEST_ROOT/missing-worktree"; do
+  printf '%s\n' "$invalid_path" > "$repo_state/worktree"
+  rm -f "$original_worktree/.sergeant-gate-generation"
+  set +e
+  PATH="$fake_bin:$PATH" REAL_MV="$real_mv" TMUX_LOG="$TEST_ROOT/invalid-worktree.log" \
+    TD_LOG="$TEST_ROOT/invalid-worktree-td.log" PANE_ALIVE=0 SERGEANT_FLEET="$fleet" \
+    respond 'must reject invalid worktree' >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ "$status" -ne 0 && ! -e "$original_worktree/.sergeant-gate-generation" ]]
+done
+ln -s "$original_worktree" "$TEST_ROOT/stale-worktree-link"
+printf '%s\n' "$TEST_ROOT/stale-worktree-link" > "$repo_state/worktree"
+rm -f "$original_worktree/.sergeant-gate-generation"
+set +e
+PATH="$fake_bin:$PATH" REAL_MV="$real_mv" TMUX_LOG="$TEST_ROOT/stale-worktree.log" \
+  TD_LOG="$TEST_ROOT/stale-worktree-td.log" PANE_ALIVE=0 SERGEANT_FLEET="$fleet" \
+  respond 'must reject stale worktree ownership' >/dev/null 2>&1
+status=$?
+set -e
+[[ "$status" -ne 0 && ! -e "$original_worktree/.sergeant-gate-generation" ]]
+printf '%s\n' "$original_worktree" > "$repo_state/worktree"
+printf '1\n' > "$original_worktree/.sergeant-gate-generation"
+
 printf 'needs_input\n' > "$repo_state/status"
 printf 'needs_input\n' > "$worktree/.sergeant-status"
 rm -f "$worktree/.sergeant-response" "$worktree/.sergeant-response-generation" \
@@ -258,5 +353,18 @@ set -e
   printf 'recovery published a response after intent drift\n' >&2
   exit 1
 }
+
+printf 'orphaned\n' > "$repo_state/status"
+printf 'orphaned\n' > "$worktree/.sergeant-status"
+cp "$fleet/task-1/.sergeant-intent.md" "$worktree/.sergeant-intent.md"
+rm -f "$worktree/.sergeant-gate-generation" "$worktree/.git"
+git -C "$worktree" init -q
+set +e
+PATH="$fake_bin:$PATH" REAL_MV="$real_mv" TMUX_LOG="$TEST_ROOT/replaced-worktree.log" \
+  TD_LOG="$TEST_ROOT/replaced-worktree-td.log" PANE_ALIVE=0 SERGEANT_FLEET="$fleet" \
+  respond 'must reject replaced checkout' >/dev/null 2>&1
+status=$?
+set -e
+[[ "$status" -ne 0 && ! -e "$worktree/.sergeant-gate-generation" ]]
 
 printf 'sgt-respond resumes workers: ok\n'

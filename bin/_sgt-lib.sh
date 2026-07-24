@@ -142,6 +142,87 @@ _sgt_pane_identity_matches() {
   actual="$(_sgt_pane_identity "$pane")" || return 1
   [[ "$actual" == "$expected" && "${actual%%|*}" == "0" ]]
 }
+_sgt_publish_worker_notification() {
+  local repo_dir="$1" worktree="$2" notification_id="$3" kind="$4" instruction="$5"
+  local state_dir notification_state notification_tmp current_id current_ack current_delivered
+  local proof_dir proof_tmp repo_tmp active_id
+
+  [[ "$notification_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+  state_dir="$repo_dir/notifications/$notification_id"
+  notification_state="$state_dir/notification"
+  mkdir -p "$state_dir" || return 1
+  notification_tmp="$state_dir/notification.tmp.$$"
+  {
+    printf 'notification_id=%s\n' "$notification_id"
+    printf 'kind=%s\n' "$kind"
+    printf 'instruction=%s\n' "$instruction"
+  } > "$notification_tmp"
+  if [[ -f "$notification_state" ]] && cmp -s "$notification_tmp" "$notification_state"; then
+    rm -f "$notification_tmp"
+  else
+    mv "$notification_tmp" "$notification_state" || {
+      rm -f "$notification_tmp"
+      return 1
+    }
+  fi
+
+  current_id="$(cat "$repo_dir/notification_id" 2>/dev/null || true)"
+  current_ack="$(cat "$worktree/.sergeant-notification-ack" 2>/dev/null || true)"
+  current_delivered="$(cat "$repo_dir/notification_delivered" 2>/dev/null || true)"
+  if [[ -n "$current_id" ]]; then
+    proof_dir="$repo_dir/notifications/$current_id"
+    mkdir -p "$proof_dir" || return 1
+    if [[ "$current_ack" == "$current_id" && ! -f "$proof_dir/acknowledged" ]]; then
+      proof_tmp="$proof_dir/acknowledged.tmp.$$"
+      printf '%s\n' "$current_id" > "$proof_tmp"
+      mv "$proof_tmp" "$proof_dir/acknowledged" || {
+        rm -f "$proof_tmp"
+        return 1
+      }
+    fi
+    if [[ "$current_delivered" == "$current_id" && ! -f "$proof_dir/delivered" ]]; then
+      proof_tmp="$proof_dir/delivered.tmp.$$"
+      printf '%s\n' "$current_id" > "$proof_tmp"
+      mv "$proof_tmp" "$proof_dir/delivered" || {
+        rm -f "$proof_tmp"
+        return 1
+      }
+    fi
+  fi
+
+  if [[ "$current_id" != "$notification_id" ]]; then
+    repo_tmp="$repo_dir/notification_id.tmp.$$"
+    printf '%s\n' "$notification_id" > "$repo_tmp"
+    mv "$repo_tmp" "$repo_dir/notification_id" || {
+      rm -f "$repo_tmp"
+      return 1
+    }
+  fi
+  active_id="$(sed -n 's/^notification_id=//p' "$worktree/.sergeant-notification" 2>/dev/null || true)"
+  if [[ "$active_id" != "$notification_id" ]]; then
+    notification_tmp="$worktree/.sergeant-notification.tmp.$$"
+    cp "$notification_state" "$notification_tmp" || return 1
+    mv "$notification_tmp" "$worktree/.sergeant-notification" || {
+      rm -f "$notification_tmp"
+      return 1
+    }
+  fi
+}
+_sgt_wait_worker_notification() {
+  local pane="$1" repo_dir="$2" notification_id="$3"
+  local timeout="${SGT_NOTIFICATION_ACK_TIMEOUT:-60}" attempt delivered
+  [[ "$timeout" =~ ^[0-9]+$ ]] || return 1
+
+  attempt=0
+  while :; do
+    _sgt_pane_identity_matches "$pane" "$repo_dir" || return 1
+    delivered="$(cat "$repo_dir/notification_delivered" 2>/dev/null || true)"
+    [[ "$delivered" == "$notification_id" ]] && return 0
+    (( attempt >= timeout * 10 )) && return 1
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+}
 _sgt_worktree_is_validation_clean() {
   local worktree="$1" untracked
   git -C "$worktree" diff --quiet --ignore-submodules -- && \

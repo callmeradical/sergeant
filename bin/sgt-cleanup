@@ -200,8 +200,41 @@ _stop_local_worker() {
     _die "Other processes still have $worktree as their current directory: $(tr '\n' ' ' <<< "$cwd_pids")"
 }
 
+_stop_recorded_validation_group() {
+  local recorded_pid="$1" recorded_pgid="$2" recorded_start="$3"
+  local actual_start actual_pgid live_pids
+
+  if kill -0 "$recorded_pid" 2>/dev/null; then
+    actual_start="$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | awk '{$1=$1; print}' || true)"
+    [[ "$actual_start" == "$recorded_start" ]] || \
+      _die "Validation owner PID was reused; refusing process termination: $recorded_pid"
+    actual_pgid="$(ps -o pgid= -p "$recorded_pid" 2>/dev/null | tr -d ' ' || true)"
+    [[ "$actual_pgid" == "$recorded_pgid" ]] || \
+      _die "Validation owner process group changed; refusing process termination: $recorded_pid"
+  else
+    live_pids="$(_process_group_pids "$recorded_pgid")"
+    [[ -n "$live_pids" ]] || return 0
+    [[ "$recorded_pid" == "$recorded_pgid" ]] || \
+      _die "Validation pane disappeared with unverified detached descendants in process group $recorded_pgid"
+  fi
+
+  _terminate_process_group "$recorded_pgid"
+  for _ in $(seq 1 50); do
+    live_pids="$(_process_group_pids "$recorded_pgid")"
+    [[ -z "$live_pids" ]] && return 0
+    sleep 0.1
+  done
+  _terminate_process_group "$recorded_pgid" KILL
+  for _ in $(seq 1 20); do
+    live_pids="$(_process_group_pids "$recorded_pgid")"
+    [[ -z "$live_pids" ]] && return 0
+    sleep 0.1
+  done
+  _die "Validation processes did not terminate: $(tr '\n' ' ' <<< "$live_pids")"
+}
+
 _stop_validation_pane() {
-  local repo_dir="$1" pane pane_identity pane_info pane_pid pane_pgid
+  local repo_dir="$1" pane pane_identity expected_identity pane_info pane_pid pane_pgid
   local tree_records tree_pids live_tree_pids recorded_pid recorded_pgid recorded_start actual_start
   pane="$(cat "$repo_dir/validation_pane" 2>/dev/null || true)"
   [[ -n "$pane" ]] || return 0
@@ -211,29 +244,20 @@ _stop_validation_pane() {
   [[ -n "$recorded_pid" && -n "$recorded_pgid" && -n "$recorded_start" ]] || \
     _die "Validation pane ownership provenance is incomplete: $pane"
   if ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
-    if [[ -n "$recorded_pid" ]] && kill -0 "$recorded_pid" 2>/dev/null; then
-      actual_start="$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | awk '{$1=$1; print}' || true)"
-      [[ -n "$recorded_start" && "$actual_start" == "$recorded_start" ]] || \
-        _die "Validation owner PID was reused; refusing process termination: $recorded_pid"
-      [[ "$(ps -o pgid= -p "$recorded_pid" 2>/dev/null | tr -d ' ' || true)" == "$recorded_pgid" ]] || \
-        _die "Validation owner process group changed; refusing process termination: $recorded_pid"
-      _terminate_process_group "$recorded_pgid"
-    elif [[ -n "$recorded_pgid" && -n "$(_process_group_pids "$recorded_pgid")" ]]; then
-      _die "Validation pane disappeared with unverified detached descendants in process group $recorded_pgid"
-    else
-      return 0
-    fi
-    for _ in $(seq 1 50); do
-      live_tree_pids="$(_process_group_pids "$recorded_pgid")"
-      [[ -z "$live_tree_pids" ]] && break
-      sleep 0.1
-    done
-    [[ -z "$live_tree_pids" ]] || _die "Validation processes did not terminate: $(tr '\n' ' ' <<< "$live_tree_pids")"
+    _stop_recorded_validation_group "$recorded_pid" "$recorded_pgid" "$recorded_start"
     return 0
   fi
   if tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
     pane_identity="$(_sgt_pane_identity "$pane")"
+    expected_identity="$(cat "$repo_dir/validation_pane_identity" 2>/dev/null || true)"
     if [[ "${pane_identity%%|*}" != "0" ]]; then
+      if [[ "$pane_identity" == "||||" ]]; then
+        _stop_recorded_validation_group "$recorded_pid" "$recorded_pgid" "$recorded_start"
+        return 0
+      fi
+      [[ -n "$expected_identity" && "$pane_identity" == "1|${expected_identity#*|}" ]] || \
+        _die "Recorded validation pane identity does not match: $pane (expected $expected_identity, actual $pane_identity)"
+      _stop_recorded_validation_group "$recorded_pid" "$recorded_pgid" "$recorded_start"
       tmux kill-pane -t "$pane" 2>/dev/null || true
       return 0
     fi
@@ -242,9 +266,16 @@ _stop_validation_pane() {
     pane_info="${pane_identity#*|}"
     pane_info="${pane_info#*|}"
     pane_pid="${pane_info%%|*}"
+    [[ "$pane_pid" == "$recorded_pid" ]] || \
+      _die "Validation pane PID does not match recorded ownership: $pane_pid"
+    actual_start="$(ps -o lstart= -p "$pane_pid" 2>/dev/null | awk '{$1=$1; print}' || true)"
+    [[ "$actual_start" == "$recorded_start" ]] || \
+      _die "Validation owner PID was reused; refusing process termination: $recorded_pid"
     tree_records="$(_process_tree_records "$pane_pid")"
     tree_pids="$(_recorded_tree_pids "$tree_records")"
     pane_pgid="$(ps -o pgid= -p "$pane_pid" 2>/dev/null | tr -d ' ' || true)"
+    [[ "$pane_pgid" == "$recorded_pgid" ]] || \
+      _die "Validation owner process group changed; refusing process termination: $recorded_pid"
     tmux kill-pane -t "$pane" || _die "Failed to terminate validation pane $pane"
     _terminate_pids "$tree_pids"
     _terminate_process_group "$pane_pgid"

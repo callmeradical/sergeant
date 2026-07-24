@@ -28,6 +28,15 @@ case "$1" in
     ;;
   new-window)
     [[ "${FAIL_WINDOW:-0}" == 0 ]] || exit 7
+    if [[ "${AUTO_DELIVER:-1}" == 1 ]]; then
+      for repo_state in "$SERGEANT_FLEET"/*/*; do
+        [[ -d "$repo_state" ]] || continue
+        notification_id="$(cat "$repo_state/notification_id")"
+        worktree="$(cat "$repo_state/worktree")"
+        printf '%s\n' "$notification_id" > "$worktree/.sergeant-notification-ack"
+        printf '%s\n' "$notification_id" > "$repo_state/notification_delivered"
+      done
+    fi
     printf '%%42\n'
     ;;
   send-keys)
@@ -115,6 +124,9 @@ task_id="$(basename "$(dirname "$repo_state")")"
 [[ "$(cat "$repo_state/window_name")" == "implementation-app-$task_id" ]]
 [[ ! -e "$repo_state/initial_message" ]]
 [[ -s "$repo_state/tmux_session" && -s "$repo_state/window_name" ]]
+[[ -s "$repo_state/worktree_git_pointer" && -s "$repo_state/worktree_git_dir" ]]
+[[ -s "$repo_state/notification_id" ]]
+[[ "$(cat "$repo_state/notification_delivered")" == "$(cat "$repo_state/notification_id")" ]]
 grep -Fq "$ROOT_DIR/bin/sgt-interactive-worker" "$TEST_ROOT/success.log"
 if grep -Fq "$ROOT_DIR/bin/sgt-worker " "$TEST_ROOT/success.log" || \
   grep -Fq 'run --auto' "$TEST_ROOT/success.log" || \
@@ -124,10 +136,10 @@ if grep -Fq "$ROOT_DIR/bin/sgt-worker " "$TEST_ROOT/success.log" || \
 fi
 new_window_line="$(grep '^new-window ' "$TEST_ROOT/success.log")"
 [[ "$new_window_line" != *'Read the .sergeant-brief.md file and execute the mission.'* ]]
-grep -Fq 'send-keys -t %42 -l -- Read the .sergeant-brief.md file and execute the mission.' \
-  "$TEST_ROOT/success.log"
-grep -Fq 'send-keys -t %42 Enter' "$TEST_ROOT/success.log"
 brief="$(cat "$repo_state/worktree")/.sergeant-brief.md"
+notification="$(cat "$repo_state/worktree")/.sergeant-notification"
+grep -Fq 'kind=initial' "$notification"
+grep -Fq 'instruction=Read the .sergeant-brief.md file and execute the mission.' "$notification"
 grep -Fq 'persistent interactive agent session' "$brief"
 grep -Fq 'Non-interactive agent modes are prohibited' "$brief"
 grep -Fq 'orphaned' "$brief"
@@ -206,16 +218,21 @@ failed_state="$(printf '%s\n' "$TEST_ROOT"/fleet/fail-worker-launch-*/app)"
 grep -Fq 'tmux failed to launch worker supervisor' "$failed_state/diagnostic"
 
 set +e
-PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/send-failure.log" FAIL_SEND=1 \
-SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-dispatch" test 'Fail brief delivery' --repos app >/dev/null 2>&1
+PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/readiness-timeout.log" AUTO_DELIVER=0 \
+SGT_NOTIFICATION_ACK_TIMEOUT=0 SERGEANT_CONFIG="$TEST_ROOT/config" \
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Timeout waiting for readiness' --repos app >/dev/null 2>&1
 status=$?
 set -e
 [[ "$status" -ne 0 ]]
-send_failed_state="$(printf '%s\n' "$TEST_ROOT"/fleet/fail-brief-delivery-*/app)"
-[[ "$(cat "$send_failed_state/status")" == "orphaned" ]]
-grep -Fq 'tmux failed to deliver interactive worker brief' "$send_failed_state/diagnostic"
-grep -Fq 'kill-pane -t %42' "$TEST_ROOT/send-failure.log"
+timeout_state="$(printf '%s\n' "$TEST_ROOT"/fleet/timeout-waiting-for-*/app)"
+[[ "$(cat "$timeout_state/status")" == "orphaned" ]]
+grep -Fq 'interactive worker did not acknowledge its durable notification' "$timeout_state/diagnostic"
+grep -Fq 'kill-pane -t %42' "$TEST_ROOT/readiness-timeout.log"
+if grep -Fq 'send-keys' "$TEST_ROOT/readiness-timeout.log"; then
+  printf 'dispatch sent input before worker readiness\n' >&2
+  exit 1
+fi
 
 before_count="$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
 set +e

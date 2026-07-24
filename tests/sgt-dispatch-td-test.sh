@@ -35,7 +35,16 @@ cat > "$TEST_ROOT/fake-bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 [[ "${1:-}" == "display-message" ]] || printf '%s\n' "$*" >> "$TMUX_LOG"
 case "${1:-}" in
-  new-window) printf '%%42\n' ;;
+  new-window)
+    for repo_state in "$SERGEANT_FLEET"/*/*; do
+      [[ -d "$repo_state" ]] || continue
+      notification_id="$(cat "$repo_state/notification_id")"
+      worktree="$(cat "$repo_state/worktree")"
+      printf '%s\n' "$notification_id" > "$worktree/.sergeant-notification-ack"
+      printf '%s\n' "$notification_id" > "$repo_state/notification_delivered"
+    done
+    printf '%%42\n'
+    ;;
   display-message)
     [[ "$*" == *'-t %11'* ]] && printf '0|%%11|1111|111111|coordinator-command\n' || \
       printf '0|%%42|4242|123456|fixture-worker-command\n'

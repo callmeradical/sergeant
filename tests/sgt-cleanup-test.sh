@@ -54,6 +54,44 @@ assert_cleanup_rejected "dangling-alias" "dangling-symlink-alias"
 [[ -L "$TEST_ROOT/fleet/alias" ]]
 [[ -L "$TEST_ROOT/fleet/dangling-alias" ]]
 
+stale_state="$TEST_ROOT/fleet/stale-dead-pane/app"
+mkdir -p "$stale_state" "$TEST_ROOT/stale-bin"
+printf 'done\n' > "$stale_state/status"
+printf 'result\n' > "$stale_state/result"
+printf '%s\n' "$TEST_ROOT/missing-stale-worktree" > "$stale_state/worktree"
+printf '%%77\n' > "$stale_state/validation_pane"
+printf '0|%%77|7777|123456|validation-command\n' > "$stale_state/validation_pane_identity"
+printf '7777\n' > "$stale_state/validation_pane_pid"
+printf '7777\n' > "$stale_state/validation_process_group"
+printf 'Mon Jan  1 00:00:00 2024\n' > "$stale_state/validation_process_start"
+cat > "$TEST_ROOT/stale-bin/tmux" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  display-message)
+    format=""
+    for argument in "$@"; do format="$argument"; done
+    if [[ "$format" == '#{pane_id}' ]]; then
+      printf '%%77\n'
+    else
+      printf '1|%%77|8888|654321|unrelated-command\n'
+    fi
+    ;;
+  kill-pane) printf '%s\n' "$*" >> "$STALE_TMUX_LOG" ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/stale-bin/tmux"
+set +e
+PATH="$TEST_ROOT/stale-bin:$PATH" STALE_TMUX_LOG="$TEST_ROOT/stale-tmux.log" \
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" stale-dead-pane > "$TEST_ROOT/stale-dead-pane.log" 2>&1
+stale_status=$?
+set -e
+[[ "$stale_status" -ne 0 ]]
+grep -Fq 'Recorded validation pane identity does not match' "$TEST_ROOT/stale-dead-pane.log"
+[[ ! -e "$TEST_ROOT/stale-tmux.log" ]]
+[[ -d "$TEST_ROOT/fleet/stale-dead-pane" ]]
+rm -rf "$TEST_ROOT/fleet/stale-dead-pane"
+
 mkdir -p "$TEST_ROOT/fleet/preflight-task/app" "$TEST_ROOT/fleet/preflight-task/api"
 mkdir -p "$TEST_ROOT/preflight-app" "$TEST_ROOT/preflight-api"
 printf '%s\n' "$TEST_ROOT/preflight-app" > "$TEST_ROOT/fleet/preflight-task/app/worktree"
@@ -399,8 +437,8 @@ chmod +x "$TEST_ROOT/fake-bin/sgt-interactive-worker"
 cat > "$TEST_ROOT/fake-bin/sgt-validation-worker" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$VALIDATION_PID_FILE"
-trap '' TERM HUP
-while :; do sleep 1; done
+sh -c 'printf "%s\n" "$$" > "$VALIDATION_CHILD_PID_FILE"; trap "" HUP; while :; do sleep 1; done' &
+while [[ ! -e "$VALIDATION_EXIT_FILE" ]]; do sleep 0.01; done
 EOF
 chmod +x "$TEST_ROOT/fake-bin/sgt-validation-worker"
 
@@ -417,13 +455,16 @@ tmux display-message -p -t "$worker_pane" \
   > "$repo_state/pane_identity"
 validation_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n validation \
   "env VALIDATION_PID_FILE='$TEST_ROOT/validation.pid' \
+  VALIDATION_CHILD_PID_FILE='$TEST_ROOT/validation-child.pid' \
+  VALIDATION_EXIT_FILE='$TEST_ROOT/validation-exit' \
   '$TEST_ROOT/fake-bin/sgt-validation-worker' '$repo_state' '$worktree'")"
 printf '%s\n' "$validation_pane" > "$repo_state/validation_pane"
 tmux display-message -p -t "$validation_pane" \
   '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
   > "$repo_state/validation_pane_identity"
 
-for pid_file in "$TEST_ROOT/worker.pid" "$TEST_ROOT/agent.pid" "$TEST_ROOT/validation.pid"; do
+for pid_file in "$TEST_ROOT/worker.pid" "$TEST_ROOT/agent.pid" "$TEST_ROOT/validation.pid" \
+  "$TEST_ROOT/validation-child.pid"; do
   for _ in $(seq 1 100); do
     [[ -s "$pid_file" ]] && break
     sleep 0.01
@@ -433,9 +474,32 @@ done
 worker_pid="$(cat "$TEST_ROOT/worker.pid")"
 agent_pid="$(cat "$TEST_ROOT/agent.pid")"
 validation_pid="$(cat "$TEST_ROOT/validation.pid")"
+validation_child_pid="$(cat "$TEST_ROOT/validation-child.pid")"
 printf '%s\n' "$validation_pid" > "$repo_state/validation_pane_pid"
 ps -o pgid= -p "$validation_pid" | tr -d ' ' > "$repo_state/validation_process_group"
 ps -o lstart= -p "$validation_pid" | awk '{$1=$1; print}' > "$repo_state/validation_process_start"
+validation_start="$(cat "$repo_state/validation_process_start")"
+printf 'stale process start\n' > "$repo_state/validation_process_start"
+set +e
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" task-123 > "$TEST_ROOT/reused-validation-owner.log" 2>&1
+cleanup_status=$?
+set -e
+[[ "$cleanup_status" -ne 0 ]]
+grep -Fq 'Validation owner PID was reused' "$TEST_ROOT/reused-validation-owner.log"
+kill -0 "$validation_pid"
+kill -0 "$validation_child_pid"
+[[ -d "$worktree" && -d "$validation_worktree" ]]
+printf '%s\n' "$validation_start" > "$repo_state/validation_process_start"
+touch "$TEST_ROOT/validation-exit"
+for _ in $(seq 1 100); do
+  kill -0 "$validation_pid" 2>/dev/null || break
+  sleep 0.01
+done
+if kill -0 "$validation_pid" 2>/dev/null || ! kill -0 "$validation_child_pid" 2>/dev/null; then
+  printf 'validation detached-child fixture did not reach the required state\n' >&2
+  exit 1
+fi
 
 mkdir "$worktree/held-subdirectory"
 holder_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n holder \
@@ -462,6 +526,11 @@ if kill -0 "$agent_pid" 2>/dev/null; then
 fi
 if kill -0 "$validation_pid" 2>/dev/null; then
   printf 'validation process still running after blocked cleanup: %s\n' "$validation_pid" >&2
+  exit 1
+fi
+if kill -0 "$validation_child_pid" 2>/dev/null; then
+  printf 'detached validation child still running after blocked cleanup: %s\n' \
+    "$validation_child_pid" >&2
   exit 1
 fi
 

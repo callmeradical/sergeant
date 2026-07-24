@@ -50,6 +50,7 @@ _sync_state() {
 _finish() {
   local exit_code="$1" status
   trap - EXIT
+  [[ -z "${notification_pid:-}" ]] || kill "$notification_pid" 2>/dev/null || true
   status="$(_status)"
   case "$status" in
     done)
@@ -81,12 +82,58 @@ _finish() {
   exit "$exit_code"
 }
 
+_deliver_notifications() {
+  local notification_file="$WORKTREE/.sergeant-notification"
+  local notification_id expected_id acknowledged delivered state_dir pending
+  while :; do
+    notification_id="$(sed -n 's/^notification_id=//p' "$notification_file" 2>/dev/null || true)"
+    expected_id="$(cat "$REPO_STATE/notification_id" 2>/dev/null || true)"
+    acknowledged="$(cat "$WORKTREE/.sergeant-notification-ack" 2>/dev/null || true)"
+    delivered="$(cat "$REPO_STATE/notification_delivered" 2>/dev/null || true)"
+    if [[ -n "$notification_id" && "$notification_id" == "$expected_id" && "$delivered" != "$notification_id" ]]; then
+      if [[ "$acknowledged" == "$notification_id" ]]; then
+        state_dir="$REPO_STATE/notifications/$notification_id"
+        mkdir -p "$state_dir" || {
+          sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
+          continue
+        }
+        pending="$state_dir/acknowledged.tmp.$$"
+        printf '%s\n' "$notification_id" > "$pending"
+        if ! mv "$pending" "$state_dir/acknowledged"; then
+          rm -f "$pending"
+          sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
+          continue
+        fi
+        pending="$state_dir/delivered.tmp.$$"
+        printf '%s\n' "$notification_id" > "$pending"
+        if ! mv "$pending" "$state_dir/delivered"; then
+          rm -f "$pending"
+          sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
+          continue
+        fi
+        pending="$REPO_STATE/notification_delivered.tmp.$$"
+        printf '%s\n' "$notification_id" > "$pending"
+        if ! mv "$pending" "$REPO_STATE/notification_delivered"; then
+          rm -f "$pending"
+        fi
+      elif [[ -n "${TMUX_PANE:-}" ]]; then
+        tmux send-keys -t "$TMUX_PANE" -l -- \
+          "Sergeant notification $notification_id is available in .sergeant-notification. Read it, write $notification_id to .sergeant-notification-ack before acting, then follow it once." 2>/dev/null || true
+        tmux send-keys -t "$TMUX_PANE" Enter 2>/dev/null || true
+      fi
+    fi
+    sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
+  done
+}
+
 [[ -f "$WORKTREE/.sergeant-status" ]] || printf 'in_progress\n' > "$WORKTREE/.sergeant-status"
 _sync_state
 printf 'interactive\n' > "$REPO_STATE/worker_mode"
 trap '_finish $?' EXIT
 
 cd "$WORKTREE" || exit 2
+_deliver_notifications &
+notification_pid=$!
 case "$harness" in
   goose) "$AGENT" session ;;
   opencode|oc) "$AGENT" --dangerously-skip-permissions ;;

@@ -45,6 +45,11 @@ revision="$("$minimum_bash" -c 'source "$1"; _sgt_intent_revision "$2"' _ \
 printf '%s\n' "$revision" > "$fleet/task-1/intent_revision"
 install_intent_fixture() {
   local state="$1" tree="$2"
+  local git_dir="${tree}-git-dir"
+  mkdir -p "$git_dir"
+  printf 'gitdir: %s\n' "$git_dir" > "$tree/.git"
+  cat "$tree/.git" > "$state/worktree_git_pointer"
+  printf '%s\n' "$git_dir" > "$state/worktree_git_dir"
   cp "$fleet/task-1/.sergeant-intent.md" "$state/.sergeant-intent.md"
   cp "$fleet/task-1/.sergeant-intent.md" "$tree/.sergeant-intent.md"
   printf '%s\n' "$revision" > "$state/intent_revision"

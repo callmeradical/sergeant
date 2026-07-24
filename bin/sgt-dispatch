@@ -560,6 +560,19 @@ for rname in "${TARGET_REPOS[@]}"; do
   fi
 
   echo "$worktree_path" > "$repo_task_dir/worktree"
+  [[ -f "$worktree_path/.git" && ! -L "$worktree_path/.git" ]] || \
+    _die "worktree has no immutable Git pointer: $worktree_path"
+  worktree_git_pointer="$(cat "$worktree_path/.git")"
+  [[ "$worktree_git_pointer" == "gitdir: "* ]] || \
+    _die "worktree Git pointer is malformed: $worktree_path/.git"
+  worktree_git_dir="${worktree_git_pointer#gitdir: }"
+  if [[ "$worktree_git_dir" != /* ]]; then
+    worktree_git_dir="$worktree_path/$worktree_git_dir"
+  fi
+  worktree_git_dir="$(cd "$worktree_git_dir" 2>/dev/null && pwd -P)" || \
+    _die "worktree Git directory is unavailable: $worktree_git_dir"
+  printf '%s\n' "$worktree_git_pointer" > "$repo_task_dir/worktree_git_pointer"
+  printf '%s\n' "$worktree_git_dir" > "$repo_task_dir/worktree_git_dir"
   _sgt_intent_install "$INTENT_TMP" "$worktree_path/.sergeant-intent.md"
 
   # ── Write brief ─────────────────────────────────────────────────────────────
@@ -690,7 +703,9 @@ For each non-trivial behavior, work red before green: one vertical slice, test, 
 
 ### 4. Escalate and resume
 
-Your worker runs as a persistent interactive agent session in its recorded tmux pane. Non-interactive agent modes are prohibited: do not launch \`opencode run\`, \`goose run\`, Claude print mode, \`--auto\`, \`--prompt\`, or an equivalent one-shot agent. Sergeant delivers only a fixed brief notification through interactive terminal input; prompt, response, and secret bodies never appear in process arguments.
+Your worker runs as a persistent interactive agent session in its recorded tmux pane. Non-interactive agent modes are prohibited: do not launch \`opencode run\`, \`goose run\`, Claude print mode, \`--auto\`, \`--prompt\`, or an equivalent one-shot agent. Sergeant delivers only a fixed ID-bearing notification through interactive terminal input; prompt, response, and secret bodies remain in durable files and never appear in process arguments.
+
+For every Sergeant notification, read \`.sergeant-notification\`, write its exact \`notification_id\` to \`.sergeant-notification-ack\` before acting, and follow its instruction exactly once. Repeated terminal nudges with an already acknowledged ID are retries, not new work.
 
 If an agent exits before a terminal or waiting state, the supervisor records \`orphaned\` with durable diagnostics and td recovery pointers. Resume orphaned work through \`sgt-respond\`; do not overwrite or discard its recovery state.
 
@@ -757,11 +772,13 @@ BRIEF_EOF
 
   WINDOW_NAME="${STAGE}-${rname}-${TASK_ID}"
   _info "spawning tmux window '$WINDOW_NAME' in session $TMUX_SESSION"
-  AGENT_INIT_MSG="Read the .sergeant-brief.md file and execute the mission."
   printf '%s\n' "$TMUX_SESSION" > "$repo_task_dir/tmux_session"
   printf '%s\n' "$WINDOW_NAME" > "$repo_task_dir/window_name"
   printf '%s\n' "$STAGE" > "$repo_task_dir/stage"
   printf '%s\n' "$AGENT_CMD" > "$repo_task_dir/agent"
+  initial_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  _sgt_publish_worker_notification "$repo_task_dir" "$worktree_path" \
+    "$initial_notification_id" initial "Read the .sergeant-brief.md file and execute the mission."
   printf -v WORKER_RUN_CMD '%q %q %q %q' \
     "$SCRIPT_DIR/sgt-interactive-worker" "$repo_task_dir" "$worktree_path" "$AGENT_CMD"
   if pane_target="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" \
@@ -782,13 +799,12 @@ BRIEF_EOF
       "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
       _die "tmux failed to capture exact worker pane identity for $rname"
     fi
-    if ! tmux send-keys -t "$pane_target" -l -- "$AGENT_INIT_MSG" || \
-      ! tmux send-keys -t "$pane_target" Enter; then
+    if ! _sgt_wait_worker_notification "$pane_target" "$repo_task_dir" "$initial_notification_id"; then
       tmux kill-pane -t "$pane_target" 2>/dev/null || true
       printf 'orphaned\n' > "$repo_task_dir/status"
-      printf 'tmux failed to deliver interactive worker brief\n' > "$repo_task_dir/diagnostic"
+      printf 'interactive worker did not acknowledge its durable notification\n' > "$repo_task_dir/diagnostic"
       "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
-      _die "tmux failed to deliver interactive worker brief for $rname"
+      _die "interactive worker notification acknowledgement timed out for $rname"
     fi
   else
     printf 'orphaned\n' > "$repo_task_dir/status"

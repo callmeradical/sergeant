@@ -12,11 +12,36 @@ mkdir -p "$TEST_ROOT/fake-bin" "$TEST_ROOT/done/state" "$TEST_ROOT/done/worktree
   "$TEST_ROOT/claude/state" "$TEST_ROOT/claude/worktree" \
   "$TEST_ROOT/needs-input/state" "$TEST_ROOT/needs-input/worktree" \
   "$TEST_ROOT/blocked/state" "$TEST_ROOT/blocked/worktree" \
+  "$TEST_ROOT/recovery/state" "$TEST_ROOT/recovery/worktree" \
+  "$TEST_ROOT/replacement/state" "$TEST_ROOT/replacement/worktree" \
+  "$TEST_ROOT/failure-bin" \
   "$TEST_ROOT/rejected" \
   "$TEST_ROOT/orphan/state" "$TEST_ROOT/orphan/worktree"
 
 cat > "$TEST_ROOT/fake-bin/opencode" <<'EOF'
 #!/usr/bin/env bash
+notification_count="${EXPECT_NOTIFICATION_COUNT:-0}"
+for notification_number in $(seq 1 "$notification_count"); do
+  [[ "$notification_number" != 1 ]] || sleep "${FAKE_STARTUP_DELAY:-0}"
+  IFS= read -r notification
+  notification_id="$(cat "$NOTIFICATION_STATE/notification_id")"
+  [[ "$notification" == *"$notification_id"* ]] || exit 18
+  printf '%s\n' "$notification_id" >> "${RECEIVED_LOG:-/dev/null}"
+  printf '%s\n' "$notification_id" > .sergeant-notification-ack
+  for _ in $(seq 1 100); do
+    [[ "$(cat "$NOTIFICATION_STATE/notification_delivered" 2>/dev/null || true)" == "$notification_id" ]] && break
+    sleep 0.01
+  done
+  [[ "$(cat "$NOTIFICATION_STATE/notification_delivered" 2>/dev/null || true)" == "$notification_id" ]] || exit 19
+done
+if [[ "${EXPECT_RECOVERY:-0}" == 1 ]]; then
+  notification_id="$(cat "$NOTIFICATION_STATE/notification_id")"
+  for _ in $(seq 1 100); do
+    [[ "$(cat "$NOTIFICATION_STATE/notification_delivered" 2>/dev/null || true)" == "$notification_id" ]] && break
+    sleep 0.01
+  done
+  [[ "$(cat "$NOTIFICATION_STATE/notification_delivered" 2>/dev/null || true)" == "$notification_id" ]] || exit 20
+fi
 printf '%s|%s\n' "$#" "$*" > "$ARG_LOG"
 if [[ "${FAKE_MODE:-}" == "done" ]]; then
   printf 'done\n' > .sergeant-status
@@ -51,8 +76,15 @@ fi
 
 tmux new-session -d -s "$TMUX_SESSION" -n keepalive \
   "while :; do sleep 1; done"
+printf 'initial-notification-1\n' > "$TEST_ROOT/done/state/notification_id"
+cat > "$TEST_ROOT/done/worktree/.sergeant-notification" <<'EOF'
+notification_id=initial-notification-1
+kind=initial
+instruction=Read the .sergeant-brief.md file and execute the mission.
+EOF
 tmux new-window -d -t "$TMUX_SESSION:" -n "done" \
-  "env ARG_LOG='$TEST_ROOT/done.args' FAKE_MODE=done \
+  "env ARG_LOG='$TEST_ROOT/done.args' EXPECT_NOTIFICATION_COUNT=1 FAKE_STARTUP_DELAY=0.2 \
+  NOTIFICATION_STATE='$TEST_ROOT/done/state' SGT_NOTIFICATION_RETRY_INTERVAL=0.01 FAKE_MODE=done \
   '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/done/state' \
   '$TEST_ROOT/done/worktree' '$TEST_ROOT/fake-bin/opencode'"
 for _ in $(seq 1 100); do
@@ -62,7 +94,101 @@ done
 [[ "$(cat "$TEST_ROOT/done.args")" == "1|--dangerously-skip-permissions" ]]
 [[ "$(cat "$TEST_ROOT/done/state/status")" == "done" ]]
 [[ "$(cat "$TEST_ROOT/done/state/worker_mode")" == "interactive" ]]
+[[ "$(cat "$TEST_ROOT/done/state/notification_delivered")" == "initial-notification-1" ]]
 [[ -s "$TEST_ROOT/done/state/result" ]]
+
+printf 'recovered-notification-1\n' > "$TEST_ROOT/recovery/state/notification_id"
+printf 'recovered-notification-1\n' > "$TEST_ROOT/recovery/worktree/.sergeant-notification-ack"
+cat > "$TEST_ROOT/recovery/worktree/.sergeant-notification" <<'EOF'
+notification_id=recovered-notification-1
+kind=initial
+instruction=Read the .sergeant-brief.md file and execute the mission.
+EOF
+tmux new-window -d -t "$TMUX_SESSION:" -n recovery \
+  "env ARG_LOG='$TEST_ROOT/recovery.args' EXPECT_RECOVERY=1 \
+  NOTIFICATION_STATE='$TEST_ROOT/recovery/state' SGT_NOTIFICATION_RETRY_INTERVAL=0.01 FAKE_MODE=done \
+  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/recovery/state' \
+  '$TEST_ROOT/recovery/worktree' '$TEST_ROOT/fake-bin/opencode'"
+for _ in $(seq 1 100); do
+  [[ -f "$TEST_ROOT/recovery/state/result" ]] && break
+  sleep 0.02
+done
+[[ "$(cat "$TEST_ROOT/recovery/state/notification_delivered")" == "recovered-notification-1" ]]
+[[ "$(cat "$TEST_ROOT/recovery/state/status")" == "done" ]]
+
+real_mv="$(command -v mv)"
+cat > "$TEST_ROOT/failure-bin/mv" <<'EOF'
+#!/usr/bin/env bash
+target=""
+for argument in "$@"; do target="$argument"; done
+case "${FAIL_NOTIFICATION_MUTATION:-}" in
+  state) [[ "$target" == */notifications/*/notification ]] && exit 31 ;;
+  acknowledged) [[ "$target" == */acknowledged ]] && exit 32 ;;
+  delivered) [[ "$target" == */notifications/*/delivered ]] && exit 33 ;;
+  id) [[ "$target" == */notification_id ]] && exit 34 ;;
+  active) [[ "$target" == */.sergeant-notification ]] && exit 35 ;;
+esac
+exec "$REAL_MV" "$@"
+EOF
+chmod +x "$TEST_ROOT/failure-bin/mv"
+
+publish_replacement_notification() {
+  local notification_id="$1"
+  PATH="${PUBLISH_PATH:-$PATH}" REAL_MV="$real_mv" \
+    bash -c 'source "$1"; _sgt_publish_worker_notification "$2" "$3" "$4" test "Apply once."' _ \
+      "$ROOT_DIR/bin/_sgt-lib.sh" "$TEST_ROOT/replacement/state" \
+      "$TEST_ROOT/replacement/worktree" "$notification_id"
+}
+
+publish_replacement_notification replace-0
+tmux new-window -d -t "$TMUX_SESSION:" -n replacement \
+  "env ARG_LOG='$TEST_ROOT/replacement.args' EXPECT_NOTIFICATION_COUNT=6 \
+  RECEIVED_LOG='$TEST_ROOT/replacement-received.log' NOTIFICATION_STATE='$TEST_ROOT/replacement/state' \
+  SGT_NOTIFICATION_RETRY_INTERVAL=0.01 FAKE_MODE=done \
+  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/replacement/state' \
+  '$TEST_ROOT/replacement/worktree' '$TEST_ROOT/fake-bin/opencode'"
+for _ in $(seq 1 100); do
+  [[ "$(cat "$TEST_ROOT/replacement/state/notification_delivered" 2>/dev/null || true)" == replace-0 ]] && break
+  sleep 0.02
+done
+previous_id=replace-0
+replacement_number=1
+for failure_mode in state acknowledged delivered id active; do
+  next_id="replace-$replacement_number"
+  [[ "$failure_mode" != acknowledged ]] || \
+    rm -f "$TEST_ROOT/replacement/state/notifications/$previous_id/acknowledged"
+  [[ "$failure_mode" != delivered ]] || \
+    rm -f "$TEST_ROOT/replacement/state/notifications/$previous_id/delivered"
+  set +e
+  PUBLISH_PATH="$TEST_ROOT/failure-bin:$PATH" FAIL_NOTIFICATION_MUTATION="$failure_mode" \
+    publish_replacement_notification "$next_id" >/dev/null 2>&1
+  publish_status=$?
+  set -e
+  [[ "$publish_status" -ne 0 ]]
+  [[ "$(cat "$TEST_ROOT/replacement/worktree/.sergeant-notification-ack")" == "$previous_id" ]]
+  [[ "$(cat "$TEST_ROOT/replacement/state/notification_delivered")" == "$previous_id" ]]
+  if [[ "$failure_mode" == active ]]; then
+    [[ "$(cat "$TEST_ROOT/replacement/state/notification_id")" == "$next_id" ]]
+  else
+    [[ "$(cat "$TEST_ROOT/replacement/state/notification_id")" == "$previous_id" ]]
+  fi
+  publish_replacement_notification "$next_id"
+  for _ in $(seq 1 100); do
+    [[ "$(cat "$TEST_ROOT/replacement/state/notification_delivered" 2>/dev/null || true)" == "$next_id" ]] && break
+    sleep 0.02
+  done
+  [[ "$(cat "$TEST_ROOT/replacement/state/notification_delivered")" == "$next_id" ]]
+  [[ -f "$TEST_ROOT/replacement/state/notifications/$previous_id/acknowledged" ]]
+  [[ -f "$TEST_ROOT/replacement/state/notifications/$previous_id/delivered" ]]
+  previous_id="$next_id"
+  replacement_number=$((replacement_number + 1))
+done
+for _ in $(seq 1 100); do
+  [[ -f "$TEST_ROOT/replacement/state/result" ]] && break
+  sleep 0.02
+done
+[[ "$(wc -l < "$TEST_ROOT/replacement-received.log" | tr -d ' ')" == 6 ]]
+[[ "$(cat "$TEST_ROOT/replacement/state/status")" == "done" ]]
 
 tmux new-window -d -t "$TMUX_SESSION:" -n goose \
   "env ARG_LOG='$TEST_ROOT/goose.args' FAKE_MODE=done \

@@ -63,8 +63,10 @@ Workers always run as persistent
 interactive TTY sessions. Sergeant never starts one-shot run, prompt, print, or
 automatic modes. It launches OpenCode with `--dangerously-skip-permissions`,
 Goose with `goose session`, and Claude without prompt arguments. Initial briefs
-and later responses are delivered
-as fixed terminal input, so their bodies do not appear in process arguments.
+and later responses remain in durable files. A worker-owned loop retries only a
+fixed ID-bearing terminal nudge until the agent acknowledges that ID before
+acting, so delayed TUI startup and coordinator crashes do not lose or duplicate
+the mission, and no body appears in process arguments.
 
 `--intent-file` is required when the objective names auth/OAuth, security,
 secrets or credentials, payments, databases or migrations, stateful/production
