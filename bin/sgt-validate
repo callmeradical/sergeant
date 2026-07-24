@@ -74,7 +74,6 @@ WINDOW_NAME="validation-${REPO}-${TASK_ID}"
 [[ ! -L "$REPO_STATE/window_name" && ! -L "$REPO_STATE/stage" ]] || \
   _die "Validation prior state must not be a symlink"
 OLD_WINDOW_NAME="$(cat "$REPO_STATE/window_name" 2>/dev/null || true)"
-OLD_STAGE="$(cat "$REPO_STATE/stage" 2>/dev/null || true)"
 SOURCE_ROOT="$(git -C "$WORKTREE" rev-parse --show-toplevel)"
 SOURCE_BRANCH="$(git -C "$WORKTREE" branch --show-current)"
 [[ -n "$SOURCE_BRANCH" ]] || _die "Validation requires a named source branch"
@@ -85,13 +84,24 @@ VALIDATION_INTENT="$REPO_STATE/validation-intent.md"
 VALIDATION_INTENT_TEMP="${VALIDATION_INTENT}.tmp.$$"
 VALIDATION_RELEASE_TEMP="$REPO_STATE/validation-release.tmp"
 VALIDATION_LAUNCH_LOCK="$REPO_STATE/validation-launch.lock"
+WINDOW_BACKUP="$REPO_STATE/window_name.validation-backup.$$"
+STAGE_BACKUP="$REPO_STATE/stage.validation-backup.$$"
 
 _validation_path_exists() {
   [[ -e "$1" || -L "$1" ]]
 }
-_validation_path_identity() {
+_validation_object_identity() {
   [[ -e "$1" && ! -L "$1" ]] || return 1
   stat -c '%d:%i' -- "$1" 2>/dev/null || stat -f '%d:%i' "$1" 2>/dev/null
+}
+_validation_path_identity() {
+  local identity
+  identity="$(_validation_object_identity "$1")" || return 1
+  if [[ -f "$1" ]]; then
+    printf '%s:%s\n' "$identity" "$(cksum < "$1")"
+  else
+    printf '%s\n' "$identity"
+  fi
 }
 _validation_transition() {
   [[ "${SGT_VALIDATE_FAIL_TRANSITION:-}" != "$1" ]]
@@ -108,8 +118,33 @@ VALIDATION_PANE_OWNED=false
 WINDOW_RENAMED=false
 WINDOW_STATE_OWNED=false
 STAGE_STATE_OWNED=false
+VALIDATION_CANDIDATE=""
 VALIDATION_OWNED_PATHS=()
 VALIDATION_OWNED_IDENTITIES=()
+_validation_current_pane_identity() {
+  local pane="$1" identity
+  identity="$(_sgt_pane_identity "$pane" || true)"
+  if [[ -n "$identity" ]]; then
+    printf '%s\n' "$identity"
+    return 0
+  fi
+  tmux list-panes -t "$PANE" -F \
+    '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' 2>/dev/null | \
+    awk -F'|' -v pane="$pane" '$2 == pane { print; found = 1 } END { exit !found }'
+}
+_validation_adopt_pane() {
+  local identity="$1" info pane command current
+  [[ "${identity%%|*}" == "0" ]] || return 1
+  info="${identity#*|}"
+  pane="${info%%|*}"
+  command="${identity##*|}"
+  [[ -n "$pane" && "$command" == "$VALIDATION_COMMAND" ]] || return 1
+  current="$(_validation_current_pane_identity "$pane" || true)"
+  [[ "$current" == "$identity" ]] || return 1
+  VALIDATION_PANE="$pane"
+  VALIDATION_IDENTITY="$identity"
+  VALIDATION_PANE_OWNED=true
+}
 _validation_record_owned_path() {
   local path="$1" identity
   identity="$(_validation_path_identity "$path")" || return 1
@@ -126,25 +161,65 @@ _validation_remove_owned_paths() {
   done
 }
 _validation_write_owned() {
-  local path="$1" value="$2" transition="${3:-}"
-  ! _validation_path_exists "$path" || return 1
-  if ! printf '%s\n' "$value" > "$path"; then
-    if _validation_path_exists "$path"; then
-      _validation_record_owned_path "$path" || true
+  local path="$1" value="$2" transition="${3:-state}" keep="${4:-false}"
+  local candidate identity
+  candidate="${path}.candidate.$$.$RANDOM.$RANDOM"
+  (umask 077; set -C; : > "$candidate") 2>/dev/null || return 1
+  _validation_record_owned_path "$candidate" || return 1
+  _validation_transition "${transition}-temp" || return 1
+  identity="$(_validation_object_identity "$candidate")" || return 1
+  printf '%s\n' "$value" > "$candidate" || return 1
+  [[ "$(_validation_object_identity "$candidate" || true)" == "$identity" ]] || return 1
+  _validation_transition "${transition}-write" || return 1
+  ln "$candidate" "$path" 2>/dev/null || return 1
+  _validation_record_owned_path "$path" || return 1
+  _validation_transition "${transition}-rename" || return 1
+  _validation_transition "$transition" || return 1
+  VALIDATION_CANDIDATE="$candidate"
+  if ! $keep; then
+    [[ "$(_validation_object_identity "$candidate" || true)" == "$identity" ]] || return 1
+    rm -f "$candidate" || return 1
+  fi
+}
+_validation_copy_owned() {
+  local source="$1" path="$2" transition="$3" candidate identity
+  candidate="${path}.candidate.$$.$RANDOM.$RANDOM"
+  (umask 077; set -C; : > "$candidate") 2>/dev/null || return 1
+  _validation_record_owned_path "$candidate" || return 1
+  _validation_transition "${transition}-temp" || return 1
+  identity="$(_validation_object_identity "$candidate")" || return 1
+  cp "$source" "$candidate" || return 1
+  [[ "$(_validation_object_identity "$candidate" || true)" == "$identity" ]] || return 1
+  _validation_record_owned_path "$candidate" || return 1
+  _validation_transition "${transition}-write" || return 1
+  ln "$candidate" "$path" 2>/dev/null || return 1
+  _validation_record_owned_path "$path" || return 1
+  _validation_transition "${transition}-rename" || return 1
+  _validation_transition "$transition" || return 1
+  rm -f "$candidate"
+}
+_validation_replace_owned() {
+  local path="$1" value="$2" transition="$3" expected="$4" backup="$5"
+  local displaced candidate candidate_identity
+  _validation_write_owned "$backup.candidate" "$value" "$transition" true || return 1
+  candidate="$backup.candidate"
+  candidate_identity="$(_validation_path_identity "$candidate")" || return 1
+  mv "$path" "$backup" || return 1
+  displaced="$(_validation_path_identity "$backup" || true)"
+  if [[ "$displaced" != "$expected" ]]; then
+    if ! _validation_path_exists "$path" && [[ -n "$displaced" ]]; then
+      ln "$backup" "$path" 2>/dev/null && rm -f "$backup"
     fi
     return 1
   fi
+  ln "$candidate" "$path" 2>/dev/null || return 1
   _validation_record_owned_path "$path" || return 1
-  [[ -z "$transition" ]] || _validation_transition "$transition"
-}
-_validation_replace_owned() {
-  local path="$1" value="$2" transition="$3" temporary
-  temporary="${path}.tmp.$$"
-  ! _validation_path_exists "$temporary" || return 1
-  _validation_write_owned "$temporary" "$value" || return 1
-  mv "$temporary" "$path" || return 1
-  _validation_record_owned_path "$path" || return 1
-  _validation_transition "$transition"
+  _validation_transition "${transition}-publish" || return 1
+  rm -f "$candidate" || return 1
+  if [[ "$(_validation_path_identity "$VALIDATION_CANDIDATE" || true)" == \
+    "$candidate_identity" ]]; then
+    rm -f "$VALIDATION_CANDIDATE" || return 1
+  fi
 }
 _release_validation_lock() {
   $VALIDATION_LOCK_OWNED || return 0
@@ -157,7 +232,7 @@ _rollback_validation_launch() {
   local current_identity
   $VALIDATION_COMMITTED && return 0
   if $VALIDATION_PANE_OWNED && [[ -n "$VALIDATION_PANE" ]]; then
-    current_identity="$(_sgt_pane_identity "$VALIDATION_PANE" || true)"
+    current_identity="$(_validation_current_pane_identity "$VALIDATION_PANE" || true)"
     if [[ "$current_identity" == "$VALIDATION_IDENTITY" && \
       "${current_identity%%|*}" == "0" ]]; then
       tmux kill-pane -t "$VALIDATION_PANE" 2>/dev/null || true
@@ -168,11 +243,13 @@ _rollback_validation_launch() {
     tmux rename-window -t "$PANE" "$OLD_WINDOW_NAME" 2>/dev/null || true
   fi
   _validation_remove_owned_paths
-  if $WINDOW_STATE_OWNED && ! _validation_path_exists "$REPO_STATE/window_name"; then
-    printf '%s\n' "$OLD_WINDOW_NAME" > "$REPO_STATE/window_name" 2>/dev/null || true
+  if $WINDOW_STATE_OWNED && ! _validation_path_exists "$REPO_STATE/window_name" && \
+    [[ "$(_validation_path_identity "$WINDOW_BACKUP" || true)" == "$OLD_WINDOW_IDENTITY" ]]; then
+    ln "$WINDOW_BACKUP" "$REPO_STATE/window_name" 2>/dev/null && rm -f "$WINDOW_BACKUP"
   fi
-  if $STAGE_STATE_OWNED && ! _validation_path_exists "$REPO_STATE/stage"; then
-    printf '%s\n' "$OLD_STAGE" > "$REPO_STATE/stage" 2>/dev/null || true
+  if $STAGE_STATE_OWNED && ! _validation_path_exists "$REPO_STATE/stage" && \
+    [[ "$(_validation_path_identity "$STAGE_BACKUP" || true)" == "$OLD_STAGE_IDENTITY" ]]; then
+    ln "$STAGE_BACKUP" "$REPO_STATE/stage" 2>/dev/null && rm -f "$STAGE_BACKUP"
   fi
   if $VALIDATION_WORKTREE_OWNED && \
      [[ "$(_validation_path_identity "$VALIDATION_WORKTREE" || true)" == \
@@ -189,6 +266,10 @@ fi
 VALIDATION_LOCK_OWNED=true
 VALIDATION_LOCK_IDENTITY="$(_validation_path_identity "$VALIDATION_LAUNCH_LOCK")" || \
   _die "Failed to capture validation launch reservation identity"
+OLD_WINDOW_IDENTITY="$(_validation_path_identity "$REPO_STATE/window_name")" || \
+  _die "Failed to capture prior window state identity"
+OLD_STAGE_IDENTITY="$(_validation_path_identity "$REPO_STATE/stage")" || \
+  _die "Failed to capture prior stage identity"
 
 _validation_path_exists "$VALIDATION_WORKTREE" && \
   _die "Validation code snapshot already exists: $VALIDATION_WORKTREE"
@@ -198,7 +279,7 @@ for path in "$VALIDATION_WORKTREE_RECORD" "$VALIDATION_WORKTREE_RECORD_TEMP" \
   "$REPO_STATE/validation_pane_identity" "$REPO_STATE/validation_pane_pid" \
   "$REPO_STATE/validation_process_group" "$REPO_STATE/validation_process_start" \
   "$REPO_STATE/validation_status" "$VALIDATION_RELEASE_TEMP" \
-  "$REPO_STATE/window_name.tmp.$$" "$REPO_STATE/stage.tmp.$$"; do
+  "$WINDOW_BACKUP" "$STAGE_BACKUP"; do
   ! _validation_path_exists "$path" || _die "Validation launch state already exists: $path"
 done
 mkdir "$VALIDATION_WORKTREE" || _die "Failed to reserve isolated validation code snapshot"
@@ -218,42 +299,38 @@ if [[ "$(git -C "$VALIDATION_WORKTREE" rev-parse HEAD)" != "$CURRENT_HEAD" ]] ||
    ! _sgt_worktree_is_validation_clean "$VALIDATION_WORKTREE"; then
   _die "Isolated validation code snapshot did not preserve reviewed HEAD"
 fi
-_validation_transition marker-temp || _die "Failed to reserve validation code snapshot marker"
-_validation_write_owned "$VALIDATION_WORKTREE_RECORD_TEMP" "$VALIDATION_WORKTREE" \
-  marker-write || _die "Failed to write validation code snapshot marker"
-mv "$VALIDATION_WORKTREE_RECORD_TEMP" "$VALIDATION_WORKTREE_RECORD" || \
-  _die "Failed to publish validation code snapshot"
-_validation_record_owned_path "$VALIDATION_WORKTREE_RECORD" || \
-  _die "Failed to capture validation code snapshot marker identity"
-if ! cp "$WORKTREE/.sergeant-intent.md" "$VALIDATION_INTENT_TEMP"; then
-  if _validation_path_exists "$VALIDATION_INTENT_TEMP"; then
-    _validation_record_owned_path "$VALIDATION_INTENT_TEMP" || true
-  fi
+_validation_write_owned "$VALIDATION_WORKTREE_RECORD" "$VALIDATION_WORKTREE" marker || \
+  _die "Failed to publish validation code snapshot marker"
+_validation_transition intent-copy || _die "Failed to snapshot canonical validation intent"
+_validation_copy_owned "$WORKTREE/.sergeant-intent.md" "$VALIDATION_INTENT" intent || \
   _die "Failed to snapshot canonical validation intent"
-fi
-_validation_record_owned_path "$VALIDATION_INTENT_TEMP" || \
-  _die "Failed to capture validation intent temporary identity"
-mv "$VALIDATION_INTENT_TEMP" "$VALIDATION_INTENT" || \
-  _die "Failed to snapshot canonical validation intent"
-_validation_record_owned_path "$VALIDATION_INTENT" || \
-  _die "Failed to capture validation intent identity"
-_validation_transition intent-rename || _die "Failed to publish validation intent"
 [[ "$(_sgt_intent_revision "$VALIDATION_INTENT")" == "$EXPECTED_REVISION" ]] || {
   _die "Validation intent snapshot revision mismatch"
 }
 printf -v VALIDATION_COMMAND '%q %q %q %q %q' \
   "$SCRIPT_DIR/sgt-validation-worker" "$REPO_STATE" "$VALIDATION_WORKTREE" "$EXPECTED_REVISION" "$SKIP"
-if ! VALIDATION_PANE="$(tmux split-window -P -F '#{pane_id}' -t "$PANE" \
-  -c "$VALIDATION_WORKTREE" "$VALIDATION_COMMAND")"; then
-  _die "Failed to launch validation pane"
+PANE_FORMAT='#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}'
+PANE_SNAPSHOT="$(tmux list-panes -t "$PANE" -F "$PANE_FORMAT" 2>/dev/null || true)"
+set +e
+SPLIT_IDENTITY="$(tmux split-window -P -F "$PANE_FORMAT" -t "$PANE" \
+  -c "$VALIDATION_WORKTREE" "$VALIDATION_COMMAND")"
+SPLIT_STATUS=$?
+set -e
+if [[ -n "$SPLIT_IDENTITY" ]]; then
+  _validation_adopt_pane "$SPLIT_IDENTITY" || \
+    _die "Failed to verify created validation pane identity"
+else
+  NEW_PANE_IDENTITIES="$(tmux list-panes -t "$PANE" -F "$PANE_FORMAT" 2>/dev/null | \
+    while IFS= read -r identity; do
+      printf '%s\n' "$PANE_SNAPSHOT" | grep -Fqx -- "$identity" || printf '%s\n' "$identity"
+    done)"
+  if [[ -z "$NEW_PANE_IDENTITIES" || "$NEW_PANE_IDENTITIES" == *$'\n'* ]] || \
+    ! _validation_adopt_pane "$NEW_PANE_IDENTITIES"; then
+    _die "Failed to reconcile created validation pane identity"
+  fi
 fi
-[[ -n "$VALIDATION_PANE" ]] || _die "tmux returned no validation pane"
-
-if ! VALIDATION_IDENTITY="$(_sgt_pane_identity "$VALIDATION_PANE")" || \
-   [[ -z "$VALIDATION_IDENTITY" ]]; then
-  _die "Failed to capture validation pane identity"
-fi
-VALIDATION_PANE_OWNED=true
+_validation_transition pane-identity || _die "Failed to capture validation pane identity"
+[[ "$SPLIT_STATUS" -eq 0 ]] || _die "Failed to launch validation pane"
 VALIDATION_INFO="${VALIDATION_IDENTITY#*|}"
 VALIDATION_INFO="${VALIDATION_INFO#*|}"
 VALIDATION_PID="${VALIDATION_INFO%%|*}"
@@ -261,6 +338,9 @@ VALIDATION_PGID="$(ps -o pgid= -p "$VALIDATION_PID" 2>/dev/null | tr -d ' ' || t
 VALIDATION_START="$(ps -o lstart= -p "$VALIDATION_PID" 2>/dev/null | awk '{$1=$1; print}' || true)"
 [[ -n "$VALIDATION_PID" && -n "$VALIDATION_PGID" && -n "$VALIDATION_START" ]] || \
   _die "Failed to capture validation process ownership"
+[[ "$(_validation_current_pane_identity "$VALIDATION_PANE" || true)" == \
+  "$VALIDATION_IDENTITY" && "${VALIDATION_IDENTITY%%|*}" == "0" ]] || \
+  _die "Validation pane exited before launch publication"
 if ! tmux rename-window -t "$PANE" "$WINDOW_NAME"; then
   _die "Failed to rename validation window"
 fi
@@ -282,25 +362,23 @@ _validation_write_owned "$REPO_STATE/validation_process_start" "$VALIDATION_STAR
   state-validation_process_start || \
   _die "Failed to publish validation process start"
 WINDOW_STATE_OWNED=true
-_validation_replace_owned "$REPO_STATE/window_name" "$WINDOW_NAME" state-window_name || \
+_validation_replace_owned "$REPO_STATE/window_name" "$WINDOW_NAME" state-window_name \
+  "$OLD_WINDOW_IDENTITY" "$WINDOW_BACKUP" || \
   _die "Failed to publish validation window name"
 _validation_write_owned "$REPO_STATE/validation_head" "$CURRENT_HEAD" \
   state-validation_head || \
   _die "Failed to publish validation HEAD"
 STAGE_STATE_OWNED=true
-_validation_replace_owned "$REPO_STATE/stage" "validation" state-stage || \
+_validation_replace_owned "$REPO_STATE/stage" "validation" state-stage \
+  "$OLD_STAGE_IDENTITY" "$STAGE_BACKUP" || \
   _die "Failed to publish validation stage"
 _validation_write_owned "$REPO_STATE/validation_status" "launched" \
   state-validation_status || \
   _die "Failed to publish validation status"
-_validation_write_owned "$VALIDATION_RELEASE_TEMP" "$EXPECTED_REVISION" release-write || \
-  _die "Failed to write validation release"
-mv "$VALIDATION_RELEASE_TEMP" "$REPO_STATE/validation-release" || \
+_validation_write_owned "$REPO_STATE/validation-release" "$EXPECTED_REVISION" release || \
   _die "Failed to publish validation release"
-_validation_record_owned_path "$REPO_STATE/validation-release" || \
-  _die "Failed to capture validation release identity"
-_validation_transition release-rename || _die "Failed to publish validation release"
 _release_validation_lock || _die "Failed to release validation launch reservation"
 VALIDATION_COMMITTED=true
+rm -f "$WINDOW_BACKUP" "$STAGE_BACKUP"
 trap - EXIT
 printf 'Validation launched in pane %s beside worker %s.\n' "$VALIDATION_PANE" "$PANE"
