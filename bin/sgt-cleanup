@@ -226,7 +226,7 @@ _require_terminal_repos() {
     cleanup_phase="$(cat "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     if [[ -n "$worktree" && -d "$worktree" ]]; then
       if [[ "$cleanup_phase" == $'removing\n'"$worktree" ]]; then
-        _restore_worker_evidence "$repo_dir" "$worktree"
+        _restore_worker_evidence "$repo_dir" "$worktree" || \n          _die "$repo_name: evidence restore failed during removing-state replay; replay aborted"
       fi
       [[ -f "$worktree/.sergeant-status" ]] || \
         _die "$repo_name worktree terminal proof is missing"
@@ -393,7 +393,7 @@ for repo_dir in "$TASK_DIR"/*/; do
 
   _stage_worker_evidence "$repo_dir" "$worktree"
   if ! _record_cleanup_phase "$repo_dir" removing "$worktree"; then
-    _restore_worker_evidence "$repo_dir" "$worktree"
+    _restore_worker_evidence "$repo_dir" "$worktree" || true
     _die "Failed to record cleanup phase before worktree removal: $repo_name"
   fi
   _remove_worker_evidence "$worktree"
@@ -414,11 +414,11 @@ for repo_dir in "$TASK_DIR"/*/; do
       main_repo="$(dirname "$main_git")"
       echo "  returning treehouse lease: $worktree"
       if ! (cd "$main_repo" && treehouse return "$worktree" 2>&1 | sed 's/^/  /'); then
-        _restore_worker_evidence "$repo_dir" "$worktree"
+        _restore_worker_evidence "$repo_dir" "$worktree" || true
         _die "Failed to return treehouse lease; fleet state preserved: $worktree"
       fi
     else
-      _restore_worker_evidence "$repo_dir" "$worktree"
+      _restore_worker_evidence "$repo_dir" "$worktree" || true
       _die "Cannot identify treehouse lease; fleet state preserved: $worktree"
     fi
   else
@@ -429,17 +429,17 @@ for repo_dir in "$TASK_DIR"/*/; do
     if [[ -d "$repo_base/.git" ]]; then
       echo "  removing git worktree: $worktree"
       if ! git -C "$repo_base" worktree remove "$worktree" 2>&1 | sed 's/^/  /'; then
-        _restore_worker_evidence "$repo_dir" "$worktree"
+        _restore_worker_evidence "$repo_dir" "$worktree" || true
         _die "Failed to remove git worktree; fleet state preserved: $worktree"
       fi
     else
-      _restore_worker_evidence "$repo_dir" "$worktree"
+      _restore_worker_evidence "$repo_dir" "$worktree" || true
       _die "Main repo not found; fleet state preserved: $repo_base"
     fi
   fi
 
   [[ ! -d "$worktree" ]] || {
-    _restore_worker_evidence "$repo_dir" "$worktree"
+    _restore_worker_evidence "$repo_dir" "$worktree" || true
     _die "Worktree removal reported success but the directory remains: $worktree"
   }
   _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
