@@ -86,6 +86,7 @@ VALIDATION_WORKTREE_RECORD_TEMP="${VALIDATION_WORKTREE_RECORD}.tmp.$$"
 VALIDATION_INTENT="$REPO_STATE/validation-intent.md"
 VALIDATION_INTENT_TEMP="${VALIDATION_INTENT}.tmp.$$"
 VALIDATION_RELEASE_TEMP="$REPO_STATE/validation-release.tmp"
+VALIDATION_RELEASE_OWNER="$REPO_STATE/validation-release-owner"
 VALIDATION_LAUNCH_LOCK="$REPO_STATE/validation-launch.lock"
 VALIDATION_CHILD_READY="$REPO_STATE/validation-child-ready"
 VALIDATION_CHILD_ACCEPTED="$REPO_STATE/validation-child-accepted"
@@ -177,13 +178,17 @@ _validation_record_owned_path() {
   VALIDATION_OWNED_IDENTITIES[${#VALIDATION_OWNED_IDENTITIES[@]}]="$identity"
 }
 _validation_remove_owned_paths() {
-  local index path identity
+  local index path identity failed=false
   for ((index=${#VALIDATION_OWNED_PATHS[@]} - 1; index >= 0; index--)); do
     path="${VALIDATION_OWNED_PATHS[$index]}"
     identity="${VALIDATION_OWNED_IDENTITIES[$index]}"
     [[ "$(_validation_path_identity "$path" || true)" == "$identity" ]] || continue
-    rm -rf -- "$path" 2>/dev/null || true
+    if ! rm -rf -- "$path" 2>/dev/null; then
+      printf 'ERROR: rollback could not remove owned validation path: %s\n' "$path" >&2
+      failed=true
+    fi
   done
+  ! $failed
 }
 _validation_write_owned() {
   local path="$1" value="$2" transition="${3:-state}" keep="${4:-false}"
@@ -319,7 +324,7 @@ _release_validation_lock() {
   VALIDATION_LOCK_OWNED=false
 }
 _rollback_validation_launch() {
-  local current_identity handshake_path
+  local current_identity handshake_path cleanup_failed=false
   $VALIDATION_COMMITTED && return 0
   if [[ -n "${VALIDATION_HANDSHAKE:-}" ]]; then
     for handshake_path in "$VALIDATION_CHILD_READY" "$VALIDATION_CHILD_ACCEPTED" \
@@ -327,7 +332,11 @@ _rollback_validation_launch() {
       "$VALIDATION_SUCCESS" "$VALIDATION_SUCCESS_ACK"; do
       if [[ -f "$handshake_path" && ! -L "$handshake_path" && \
         "$(cat "$handshake_path")" == "$VALIDATION_HANDSHAKE" ]]; then
-        _validation_record_owned_path "$handshake_path" || true
+        if ! _validation_record_owned_path "$handshake_path"; then
+          printf 'ERROR: rollback could not record owned handshake path: %s\n' \
+            "$handshake_path" >&2
+          cleanup_failed=true
+        fi
       fi
     done
   fi
@@ -335,38 +344,69 @@ _rollback_validation_launch() {
     current_identity="$(_validation_current_pane_identity "$VALIDATION_PANE" || true)"
     if [[ "$current_identity" == "$VALIDATION_IDENTITY" || \
       "$current_identity" == "1|${VALIDATION_IDENTITY#*|}" ]]; then
-      tmux kill-pane -t "$VALIDATION_PANE" 2>/dev/null || true
+      if ! tmux kill-pane -t "$VALIDATION_PANE" 2>/dev/null; then
+        printf 'ERROR: rollback could not stop owned validation pane: %s\n' \
+          "$VALIDATION_PANE" >&2
+        cleanup_failed=true
+      fi
     fi
   fi
-  _validation_remove_owned_paths
+  _validation_remove_owned_paths || cleanup_failed=true
   if $WINDOW_STATE_OWNED && ! _validation_path_exists "$REPO_STATE/window_name" && \
     [[ "$(_validation_path_identity "$WINDOW_BACKUP" || true)" == "$OLD_WINDOW_IDENTITY" ]]; then
-    ln "$WINDOW_BACKUP" "$REPO_STATE/window_name" 2>/dev/null && rm -f "$WINDOW_BACKUP"
+    if ! ln "$WINDOW_BACKUP" "$REPO_STATE/window_name" 2>/dev/null || \
+      ! rm -f "$WINDOW_BACKUP"; then
+      printf 'ERROR: rollback could not restore prior window state\n' >&2
+      cleanup_failed=true
+    fi
   fi
   if $STAGE_STATE_OWNED && ! _validation_path_exists "$REPO_STATE/stage" && \
     [[ "$(_validation_path_identity "$STAGE_BACKUP" || true)" == "$OLD_STAGE_IDENTITY" ]]; then
-    ln "$STAGE_BACKUP" "$REPO_STATE/stage" 2>/dev/null && rm -f "$STAGE_BACKUP"
+    if ! ln "$STAGE_BACKUP" "$REPO_STATE/stage" 2>/dev/null || \
+      ! rm -f "$STAGE_BACKUP"; then
+      printf 'ERROR: rollback could not restore prior stage state\n' >&2
+      cleanup_failed=true
+    fi
   fi
   if $VALIDATION_WORKTREE_OWNED && \
      [[ "$(_validation_path_identity "$VALIDATION_WORKTREE" || true)" == \
        "$VALIDATION_WORKTREE_IDENTITY" ]]; then
-    rm -rf "$VALIDATION_WORKTREE"
+    if ! rm -rf "$VALIDATION_WORKTREE"; then
+      printf 'ERROR: rollback could not remove owned validation checkout: %s\n' \
+        "$VALIDATION_WORKTREE" >&2
+      cleanup_failed=true
+    fi
   fi
-  _release_validation_lock || true
+  if ! _release_validation_lock; then
+    printf 'ERROR: rollback could not release validation launch lock: %s\n' \
+      "$VALIDATION_LAUNCH_LOCK" >&2
+    cleanup_failed=true
+  fi
+  ! $cleanup_failed
 }
 _finish_validation_launch() {
-  local status=$?
+  local status=$? original_status
+  original_status="$status"
   trap - EXIT
   if $VALIDATION_COMMITTED; then
-    _release_validation_lock || status=1
+    if ! _release_validation_lock; then
+      printf 'ERROR: committed validation launch could not release lock: %s\n' \
+        "$VALIDATION_LAUNCH_LOCK" >&2
+      status=1
+    fi
   else
-    _rollback_validation_launch
+    if ! _rollback_validation_launch; then
+      printf 'ERROR: validation launch failed with status %s and rollback cleanup also failed\n' \
+        "$original_status" >&2
+      status=1
+    fi
   fi
   exit "$status"
 }
 trap _finish_validation_launch EXIT
 
-LOCK_COORDINATOR="$PRIMARY_PANE_ID|$(cat "$TASK_STATE/primary_pane_identity")"
+LOCK_COORDINATOR="$PRIMARY_PANE_ID|$(_sgt_read_owned_file \
+  "$TASK_STATE/primary_pane_identity")" || _die "Coordinator identity record is unsafe"
 LOCK_PURPOSE="$TASK_ID/$REPO/validation-launch"
 if ! _acquire_validation_lock; then
   _die "Validation launch is already reserved or unsafe: $VALIDATION_LAUNCH_LOCK"
@@ -382,7 +422,8 @@ for path in "$VALIDATION_WORKTREE_RECORD" "$VALIDATION_WORKTREE_RECORD_TEMP" \
   "$VALIDATION_WORKTREE_IDENTITY_RECORD" "$VALIDATION_WORKTREE_GIT_DIR_RECORD" \
   "$VALIDATION_WORKTREE_GIT_IDENTITY_RECORD" "$VALIDATION_WORKTREE_OWNER_RECORD" \
   "$VALIDATION_INTENT" "$VALIDATION_INTENT_TEMP" "$REPO_STATE/validation_pane" \
-  "$REPO_STATE/validation-release" "$REPO_STATE/validation_head" \
+  "$REPO_STATE/validation-release" "$VALIDATION_RELEASE_OWNER" \
+  "$REPO_STATE/validation_head" \
   "$REPO_STATE/validation_pane_identity" "$REPO_STATE/validation_pane_pid" \
   "$REPO_STATE/validation_process_group" "$REPO_STATE/validation_process_start" \
   "$REPO_STATE/validation_status" "$VALIDATION_RELEASE_TEMP" \
@@ -509,8 +550,12 @@ _validation_replace_owned "$REPO_STATE/stage" "validation" state-stage \
 _validation_write_owned "$REPO_STATE/validation_status" "launched" \
   state-validation_status || \
   _die "Failed to publish validation status"
-_validation_write_owned "$REPO_STATE/validation-release" "$EXPECTED_REVISION" release || \
+_validation_write_owned "$REPO_STATE/validation-release" "$VALIDATION_HANDSHAKE" release || \
   _die "Failed to publish validation release"
+ln "$REPO_STATE/validation-release" "$VALIDATION_RELEASE_OWNER" 2>/dev/null || \
+  _die "Failed to publish validation release owner"
+_validation_record_owned_path "$VALIDATION_RELEASE_OWNER" || \
+  _die "Failed to capture validation release owner"
 _wait_validation_handshake "$VALIDATION_CHILD_ACCEPTED" "$VALIDATION_HANDSHAKE" || \
   _die "Validation child did not accept release"
 _validation_write_owned "$VALIDATION_CHILD_COMMIT" "$VALIDATION_HANDSHAKE" child-commit || \

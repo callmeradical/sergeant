@@ -357,6 +357,7 @@ fi
 printf '%s\n' "$new_pane" > "$REPO_DIR/pane"
 if pane_identity="$(_sgt_pane_identity "$new_pane")" && [[ -n "$pane_identity" ]]; then
   printf '%s\n' "$pane_identity" > "$REPO_DIR/pane_identity"
+  chmod 600 "$REPO_DIR/pane_identity"
   _sgt_notification_target_create "$REPO_DIR" "$delivery_notification_id" \
     "$pane_identity" >/dev/null
 else

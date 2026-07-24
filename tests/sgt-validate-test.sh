@@ -24,6 +24,7 @@ printf '%%42\n' > "$repo_state/pane"
 printf '0|%%42|4242|123456|worker-command\n' > "$repo_state/pane_identity"
 printf '%%11\n' > "$fleet/task-1/primary_pane_id"
 printf '0|%%11|1111|111111|coordinator-command\n' > "$fleet/task-1/primary_pane_identity"
+chmod 600 "$repo_state/pane_identity" "$fleet/task-1/primary_pane_identity"
 printf 'implementation-app-task-1\n' > "$repo_state/window_name"
 printf 'implementation\n' > "$repo_state/stage"
 printf 'in_progress\n' > "$repo_state/status"
@@ -146,11 +147,13 @@ real_git="$(command -v git)"
 real_cp="$(command -v cp)"
 real_mv="$(command -v mv)"
 real_ln="$(command -v ln)"
+real_rm="$(command -v rm)"
 real_shasum="$(command -v shasum || command -v sha256sum)"
 validation_path="${worktree}-validation-task-1"
 concurrent_dir="$TEST_ROOT/concurrent"
 mkdir -p "$concurrent_dir"
 export REAL_GIT="$real_git" REAL_CP="$real_cp" REAL_MV="$real_mv" REAL_LN="$real_ln"
+export REAL_RM="$real_rm"
 export REAL_SHASUM="$real_shasum" VALIDATION_PATH="$validation_path"
 export CONCURRENT_DIR="$concurrent_dir" TEST_REPO_STATE="$repo_state"
 printf '%s\n' "$revision" > "$concurrent_dir/revision"
@@ -208,6 +211,10 @@ if [[ "${FAIL_TRANSITION:-}" == "lock-recovery-race" && \
   rm -f "$1"
   printf 'replacement-owner\n' > "$1"
 fi
+if [[ "${FAIL_TRANSITION:-}" == "lock-release-failure" && \
+  "$1" == */validation-launch.lock && "${2:-}" == */.validation-launch.lock.recovery.* ]]; then
+  exit 7
+fi
 if [[ -n "${EXIT_RELEASE_OUTPUT:-}" && "$1" == */validation-launch.lock && \
   "${2:-}" == */.validation-launch.lock.recovery.* ]]; then
   grep -Fq 'Validation launched in pane %77 beside worker %42.' "$EXIT_RELEASE_OUTPUT" || exit 7
@@ -264,6 +271,15 @@ fi
 EOF
 chmod +x "$fake_bin/ln"
 
+cat > "$fake_bin/rm" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${FAIL_TRANSITION:-}" == "rollback-rm-failure" && "$*" == *validation_worktree* ]]; then
+  exit 7
+fi
+exec "$REAL_RM" "$@"
+EOF
+chmod +x "$fake_bin/rm"
+
 cat > "$fake_bin/shasum" <<'EOF'
 #!/usr/bin/env bash
 last="${!#}"
@@ -306,6 +322,7 @@ rm "$repo_state/validation_pane" "$repo_state/validation_pane_identity" \
   "$repo_state/validation_pane_pid" "$repo_state/validation_process_group" \
   "$repo_state/validation_process_start" \
   "$repo_state/validation-intent.md" "$repo_state/validation-release" \
+  "$repo_state/validation-release-owner" \
   "$repo_state/validation-child-ready" "$repo_state/validation-child-accepted" \
   "$repo_state/validation-child-commit" \
   "$repo_state/validation-child-committed" \
@@ -325,6 +342,7 @@ cleanup_validation_state() {
     "$repo_state/validation_pane_pid" "$repo_state/validation_process_group" \
     "$repo_state/validation_process_start" "$repo_state/validation-intent.md" \
     "$repo_state/validation-release" "$repo_state/validation-child-ready" \
+    "$repo_state/validation-release-owner" \
     "$repo_state/validation-child-accepted" "$repo_state/validation-child-commit" \
     "$repo_state/validation-child-committed" \
     "$repo_state/validation-success" "$repo_state/validation-success-ack" \
@@ -336,6 +354,7 @@ cleanup_validation_state() {
   printf 'implementation-app-task-1\n' > "$repo_state/window_name"
   printf 'implementation\n' > "$repo_state/stage"
   rm -f "$concurrent_dir/pane-live" "$concurrent_dir/pane-identity-captured"
+  rm -f "$repo_state"/*.candidate.* "$repo_state"/*.validation-backup.*
 }
 
 write_validation_lock() {
@@ -384,7 +403,7 @@ assert_failed_launch_rolls_back_and_retries() {
   }
   for path in validation_pane validation_pane_identity validation_pane_pid \
     validation_process_group validation_process_start validation-intent.md \
-    validation-release validation-child-ready validation-child-accepted \
+    validation-release validation-release-owner validation-child-ready validation-child-accepted \
     validation-child-commit \
     validation-child-committed \
     validation-success validation-success-ack \
@@ -626,6 +645,60 @@ for prior_state in window_name stage; do
   rm "$repo_state/$prior_state"
   printf '%s\n' "$prior_value" > "$repo_state/$prior_state"
 done
+
+for identity_path in "$fleet/task-1/primary_pane_identity" "$repo_state/pane_identity"; do
+  saved_identity="${identity_path}.saved"
+  mv "$identity_path" "$saved_identity"
+  ln -s "$saved_identity" "$identity_path"
+  set +e
+  output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+    TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+    "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -ne 0 ]]
+  rm "$identity_path"
+  mv "$saved_identity" "$identity_path"
+  chmod 666 "$identity_path"
+  set +e
+  output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+    TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+    "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -ne 0 ]]
+  chmod 600 "$identity_path"
+done
+
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  FAIL_TRANSITION=rollback-rm-failure \
+  SGT_VALIDATE_FAIL_TRANSITION=state-validation_pane \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'Failed to publish validation code snapshot marker'* && \
+  "$output" == *'rollback cleanup also failed'* ]]
+[[ -e "$repo_state/validation_worktree" ]]
+cleanup_validation_state
+
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  FAIL_TRANSITION=lock-release-failure \
+  SGT_VALIDATE_FAIL_TRANSITION=state-validation_pane \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'Failed to publish validation pane'* && \
+  "$output" == *'could not release validation launch lock'* && \
+  "$output" == *'rollback cleanup also failed'* ]]
+[[ -f "$repo_state/validation-launch.lock" ]]
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+cleanup_validation_state
 
 rm -f "$concurrent_dir/pane-identity-captured"
 before_kills="$(grep -c '^kill-pane -t %77$' "$TEST_ROOT/tmux.log" || true)"

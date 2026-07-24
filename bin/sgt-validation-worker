@@ -87,7 +87,13 @@ while [[ ! -f "$REPO_STATE/validation-release" ]]; do
   sleep 0.05
 done
 _coordinator_is_alive || exit 2
-[[ "$(cat "$REPO_STATE/validation-release")" == "$EXPECTED_REVISION" ]] || {
+[[ -f "$REPO_STATE/validation-release-owner" && \
+  ! -L "$REPO_STATE/validation-release-owner" && \
+  "$REPO_STATE/validation-release" -ef "$REPO_STATE/validation-release-owner" && \
+  "$(_sgt_read_owned_file "$REPO_STATE/validation-release" 2>/dev/null || true)" == \
+  "$HANDSHAKE" && \
+  "$(_sgt_read_owned_file "$REPO_STATE/validation-release-owner" 2>/dev/null || true)" == \
+  "$HANDSHAKE" ]] || {
   echo "ERROR: validation release revision mismatch" >&2
   exit 2
 }
