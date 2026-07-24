@@ -145,6 +145,10 @@ done
 
 printf 'running\n' > "$REPO_STATE/validation_status"
 cd "$WORKTREE" || exit 2
+[[ "$(_sgt_intent_revision "$VALIDATION_INTENT")" == "$EXPECTED_REVISION" ]] || {
+  echo "ERROR: canonical validation intent was modified after initial verification" >&2
+  exit 2
+}
 args=(axi run --intent-file "$VALIDATION_INTENT")
 [[ -z "$SKIP" ]] || args+=(--skip "$SKIP")
 no-mistakes "${args[@]}"

@@ -179,4 +179,50 @@ sleep 0.1
 [[ ! -e "$TEST_ROOT/symlink-no-mistakes.log" && \
   ! -e "$exit_state/validation-child-accepted" ]]
 
+# Prove that a mutation to the intent file between start and exec is caught.
+state2="$TEST_ROOT/state2"
+worktree2="$TEST_ROOT/worktree2"
+mkdir -p "$state2" "$worktree2"
+git -C "$worktree2" init -q
+git -C "$worktree2" config user.name Test
+git -C "$worktree2" config user.email test@example.invalid
+printf 'fixture\n' > "$worktree2/README.md"
+git -C "$worktree2" add README.md
+git -C "$worktree2" commit -qm fixture
+head_sha2="$(git -C "$worktree2" rev-parse HEAD)"
+printf '%s\n' "$head_sha2" > "$state2/validation_head"
+cat > "$state2/validation-intent.md" <<'EOF'
+## Objective
+
+Validate only after release.
+EOF
+revision2="$(bash -c 'source "$1"; _sgt_intent_revision "$2"' _ \
+  "$ROOT_DIR/bin/_sgt-intent.sh" "$state2/validation-intent.md")"
+mutated_log="$TEST_ROOT/mutated-no-mistakes.log"
+TMUX_SESSION2="sgt-validation-worker-mutated-test-$$"
+trap 'tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true; tmux kill-session -t "$TMUX_SESSION2" 2>/dev/null || true; rm -rf "$TEST_ROOT"' EXIT
+pane2="$(tmux new-session -d -P -F '#{pane_id}' -s "$TMUX_SESSION2" -n validation \
+  -c "$worktree2" \
+  "env PATH='$fake_bin:$PATH' NO_MISTAKES_LOG='$mutated_log' \
+  '$ROOT_DIR/bin/sgt-validation-worker' '$state2' '$worktree2' '$revision2'")"
+sleep 0.05
+printf '%s\n' "$pane2" > "$state2/validation_pane"
+tmux display-message -p -t "$pane2" \
+  '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+  > "$state2/validation_pane_identity"
+# Mutate the intent file while the worker is waiting for the release signal
+printf '\nMutation.\n' >> "$state2/validation-intent.md"
+# Now release — the pre-exec check should reject the mutated file
+printf '%s\n' "$revision2" > "$state2/validation-release.tmp"
+mv "$state2/validation-release.tmp" "$state2/validation-release"
+for _ in $(seq 1 100); do
+  [[ "$(cat "$state2/validation_status" 2>/dev/null || true)" =~ ^exited: ]] && break
+  sleep 0.02
+done
+[[ ! -e "$mutated_log" ]] || {
+  printf 'validation worker ran no-mistakes despite mutated intent file\n' >&2
+  exit 1
+}
+[[ "$(cat "$state2/validation_status")" != 'exited:0' ]]
+
 printf 'sgt-validation-worker release handshake: ok\n'
