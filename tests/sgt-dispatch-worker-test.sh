@@ -20,6 +20,18 @@ cat > "$TEST_ROOT/fake-bin/tmux" <<'EOF'
 case "$1" in
   has-session) exit 0 ;;
   display-message)
+    if [[ "${AUTO_DELIVER:-1}" == 1 ]]; then
+    for repo_state in "$SERGEANT_FLEET"/*/*; do
+      [[ -d "$repo_state" ]] || continue
+      nonce="$(cat "$repo_state/notification_target" 2>/dev/null || true)"
+      notification_id="$(cat "$repo_state/notification_id" 2>/dev/null || true)"
+      [[ "$nonce" =~ ^[a-f0-9]{32}$ && -n "$notification_id" ]] || continue
+      target_dir="$repo_state/notifications/$notification_id/targets/$nonce"
+      token="$notification_id|$nonce"
+      printf '%s\n' "$token" > "$target_dir/accepted"
+      printf '%s\n' "$token" > "$target_dir/delivered"
+    done
+    fi
     if [[ "$*" == *'-t %11'* ]]; then
       printf '0|%%11|1111|111111|coordinator-command\n'
     else

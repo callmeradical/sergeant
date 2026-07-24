@@ -285,8 +285,8 @@ _pane_is_supervisor() {
 if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && _pane_is_supervisor "$pane"; then
   _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$response_id" response \
     "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
-  _atomic_write "$REPO_DIR/notification_target_pane_identity" \
-    "$(cat "$REPO_DIR/pane_identity")"
+  _sgt_notification_target_create "$REPO_DIR" "$response_id" \
+    "$(cat "$REPO_DIR/pane_identity")" >/dev/null
   _sgt_wait_worker_notification "$pane" "$REPO_DIR" "$response_id" || \
     _die "Worker did not acknowledge its durable response notification; response remains pending"
   _sgt_response_lock_release
@@ -308,6 +308,11 @@ fi
 
 current_notification_id="$(cat "$REPO_DIR/notification_id" 2>/dev/null || true)"
 current_target_identity="$(cat "$REPO_DIR/notification_target_pane_identity" 2>/dev/null || true)"
+current_action_lease="$(cat "$REPO_DIR/notifications/$current_notification_id/action_lease" 2>/dev/null || true)"
+if [[ -n "$current_action_lease" &&
+      ! -f "$REPO_DIR/notifications/$current_notification_id/targets/$current_action_lease/completed" ]]; then
+  _die "Pending notification action lease belongs to the prior supervisor; relaunch refused"
+fi
 if [[ -n "$current_notification_id" && -n "$current_target_identity" ]]; then
   superseded_dir="$REPO_DIR/notifications/$current_notification_id"
   mkdir -p "$superseded_dir"
@@ -324,7 +329,7 @@ fi
 rm -f "$worktree/.sergeant-notification-ack" "$worktree/.sergeant-notification-accept" \
   "$REPO_DIR/notification_delivered" \
   "$REPO_DIR/notification_delivered_pane_identity" \
-  "$REPO_DIR/notification_target_pane_identity"
+  "$REPO_DIR/notification_target_pane_identity" "$REPO_DIR/notification_target"
 delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
 _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$delivery_notification_id" response \
   "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
@@ -352,7 +357,8 @@ fi
 printf '%s\n' "$new_pane" > "$REPO_DIR/pane"
 if pane_identity="$(_sgt_pane_identity "$new_pane")" && [[ -n "$pane_identity" ]]; then
   printf '%s\n' "$pane_identity" > "$REPO_DIR/pane_identity"
-  _atomic_write "$REPO_DIR/notification_target_pane_identity" "$pane_identity"
+  _sgt_notification_target_create "$REPO_DIR" "$delivery_notification_id" \
+    "$pane_identity" >/dev/null
 else
   tmux kill-pane -t "$new_pane" 2>/dev/null || true
   _record_relaunch_orphan "tmux failed to capture exact relaunched worker pane identity"

@@ -128,11 +128,13 @@ Before responding:
 4. Verify no unconsumed response generation already exists.
 5. After sending, require the matching worker to acknowledge/consume it.
 
-The supervisor nudge includes a pane-bound acknowledgement token in the form
-`notification_id|pane_identity`. The agent writes that exact token to
-`.sergeant-notification-ack` but does not act yet. Only the targeted supervisor
-may accept it. The agent proceeds after that supervisor sends acceptance and
-`.sergeant-notification-accept` contains the same token.
+The supervisor nudge includes a scoped token in the form
+`notification_id|target_nonce` and names files under
+`.sergeant-notification-acks/`, `.sergeant-notification-accepts/`, and
+`.sergeant-notification-complete/`. The agent writes the acknowledgement but
+does not act yet. It proceeds only after the targeted supervisor sends
+acceptance and the scoped acceptance file contains the same token, then records
+completion in the named completion file.
 
 The notified worker reads `.sergeant-response`, its ID, and gate generation,
 applies the decision once, restores truthful status, and writes

@@ -145,6 +145,19 @@ _sgt_pane_identity_matches() {
 _sgt_worker_command() {
   printf '%q %q %q %q' "$1" "$2" "$3" "$4"
 }
+_sgt_notification_target_create() {
+  local repo_dir="$1" notification_id="$2" pane_identity="$3"
+  local nonce target_dir temporary
+  nonce="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  target_dir="$repo_dir/notifications/$notification_id/targets/$nonce"
+  mkdir -p "$target_dir" || return 1
+  printf '%s\n' "$pane_identity" > "$target_dir/pane_identity" || return 1
+  temporary="$repo_dir/notification_target.tmp.$$"
+  printf '%s\n' "$nonce" > "$temporary" || return 1
+  mv "$temporary" "$repo_dir/notification_target" || return 1
+  printf '%s\n' "$pane_identity" > "$repo_dir/notification_target_pane_identity" || return 1
+  printf '%s\n' "$nonce"
+}
 _sgt_publish_worker_notification() {
   local repo_dir="$1" worktree="$2" notification_id="$3" kind="$4" instruction="$5"
   local state_dir notification_state notification_tmp current_id current_ack current_delivered
@@ -237,7 +250,7 @@ _sgt_publish_worker_notification() {
 }
 _sgt_wait_worker_notification() {
   local pane="$1" repo_dir="$2" notification_id="$3"
-  local timeout="${SGT_NOTIFICATION_ACK_TIMEOUT:-60}" accepted attempt delivered delivered_identity expected_identity pane_identity
+  local timeout="${SGT_NOTIFICATION_ACK_TIMEOUT:-60}" accepted attempt delivered expected_identity nonce pane_identity target_dir
   [[ "$timeout" =~ ^[0-9]+$ ]] || return 1
 
   attempt=0
@@ -246,11 +259,13 @@ _sgt_wait_worker_notification() {
     pane_identity="$(_sgt_pane_identity "$pane")" || return 1
     [[ -n "$expected_identity" && "$pane_identity" == "$expected_identity" &&
        "${pane_identity%%|*}" == 0 ]] || return 1
-    delivered="$(cat "$repo_dir/notification_delivered" 2>/dev/null || true)"
-    delivered_identity="$(cat "$repo_dir/notification_delivered_pane_identity" 2>/dev/null || true)"
-    accepted="$(cat "$(cat "$repo_dir/worktree")/.sergeant-notification-accept" 2>/dev/null || true)"
-    [[ "$delivered" == "$notification_id" && "$delivered_identity" == "$pane_identity" &&
-       "$accepted" == "$notification_id|$pane_identity" ]] && return 0
+    nonce="$(cat "$repo_dir/notification_target" 2>/dev/null || true)"
+    [[ "$nonce" =~ ^[a-f0-9]{32}$ ]] || return 1
+    target_dir="$repo_dir/notifications/$notification_id/targets/$nonce"
+    [[ "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$pane_identity" ]] || return 1
+    delivered="$(cat "$target_dir/delivered" 2>/dev/null || true)"
+    accepted="$(cat "$target_dir/accepted" 2>/dev/null || true)"
+    [[ "$delivered" == "$notification_id|$nonce" && "$accepted" == "$notification_id|$nonce" ]] && return 0
     (( attempt >= timeout * 10 )) && return 1
     attempt=$((attempt + 1))
     sleep 0.1

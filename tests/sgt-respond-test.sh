@@ -109,12 +109,19 @@ case "$1" in
       fi
       notification_id="$(cat "$EXPECTED_WORKER/notification_id")"
       notification_worktree="$(cat "$EXPECTED_WORKER/worktree")"
-      printf '%s|%s\n' "$notification_id" "$pane_identity" \
-        > "$notification_worktree/.sergeant-notification-ack"
-      printf '%s|%s\n' "$notification_id" "$pane_identity" \
-        > "$notification_worktree/.sergeant-notification-accept"
-      printf '%s\n' "$pane_identity" > "$EXPECTED_WORKER/notification_delivered_pane_identity"
-      printf '%s\n' "$notification_id" > "$EXPECTED_WORKER/notification_delivered"
+      nonce="$(cat "$EXPECTED_WORKER/notification_target" 2>/dev/null || true)"
+      if [[ "$nonce" =~ ^[a-f0-9]{32}$ ]]; then
+        token="$notification_id|$nonce"
+        target_dir="$EXPECTED_WORKER/notifications/$notification_id/targets/$nonce"
+        mkdir -p "$notification_worktree/.sergeant-notification-acks" \
+          "$notification_worktree/.sergeant-notification-accepts"
+        printf '%s\n' "$token" > "$notification_worktree/.sergeant-notification-acks/$nonce"
+        printf '%s\n' "$token" > "$notification_worktree/.sergeant-notification-accepts/$nonce"
+        printf '%s\n' "$token" > "$target_dir/accepted"
+        printf '%s\n' "$token" > "$target_dir/delivered"
+        printf '%s\n' "$pane_identity" > "$EXPECTED_WORKER/notification_delivered_pane_identity"
+        printf '%s\n' "$notification_id" > "$EXPECTED_WORKER/notification_delivered"
+      fi
     fi
     printf '%s\n' "$pane_identity"
     ;;
@@ -458,8 +465,23 @@ grep -Fq "$ROOT_DIR/bin/sgt-interactive-worker" "$TEST_ROOT/dead.log"
 
 relaunch_response_id="$(cat "$repo_state/response_id")"
 stale_notification_id="$(cat "$repo_state/notification_id")"
+stale_nonce="$(cat "$repo_state/notification_target")"
 printf 'orphaned\n' > "$repo_state/status"
 printf 'orphaned\n' > "$worktree/.sergeant-status"
+printf '%s\n' "$stale_nonce" \
+  > "$repo_state/notifications/$stale_notification_id/action_lease"
+rm -f "$worktree/.sergeant-response"
+set +e
+lease_output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/lease-block.log" \
+  TD_LOG="$TEST_ROOT/lease-block-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=0 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  respond 'resume dead worker' 2>&1)"
+lease_status=$?
+set -e
+[[ "$lease_status" -ne 0 && "$lease_output" == *'action lease belongs to the prior supervisor'* ]]
+[[ "$(cat "$repo_state/notification_id")" == "$stale_notification_id" ]]
+printf '%s\n' "$stale_notification_id|$stale_nonce" \
+  > "$repo_state/notifications/$stale_notification_id/targets/$stale_nonce/completed"
 printf '%s\n' "$stale_notification_id" > "$repo_state/notification_delivered"
 printf '0|%%99|9999|654321|stale-pane\n' > "$repo_state/notification_delivered_pane_identity"
 printf '%s|%s\n' "$stale_notification_id" \

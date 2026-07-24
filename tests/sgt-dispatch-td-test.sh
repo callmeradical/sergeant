@@ -51,6 +51,18 @@ case "${1:-}" in
     printf '%%42\n'
     ;;
   display-message)
+    if [[ "${AUTO_DELIVER:-1}" == 1 ]]; then
+    for repo_state in "$SERGEANT_FLEET"/*/*; do
+      [[ -d "$repo_state" ]] || continue
+      nonce="$(cat "$repo_state/notification_target" 2>/dev/null || true)"
+      notification_id="$(cat "$repo_state/notification_id" 2>/dev/null || true)"
+      [[ "$nonce" =~ ^[a-f0-9]{32}$ && -n "$notification_id" ]] || continue
+      target_dir="$repo_state/notifications/$notification_id/targets/$nonce"
+      token="$notification_id|$nonce"
+      printf '%s\n' "$token" > "$target_dir/accepted"
+      printf '%s\n' "$token" > "$target_dir/delivered"
+    done
+    fi
     [[ "$*" == *'-t %11'* ]] && printf '0|%%11|1111|111111|coordinator-command\n' || \
       printf '0|%%42|4242|123456|fixture-worker-command\n'
     ;;

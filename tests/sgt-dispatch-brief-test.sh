@@ -51,6 +51,18 @@ case "${1:-}" in
     printf '%%42\n'
     ;;
   display-message)
+    if [[ "${AUTO_DELIVER:-1}" == 1 ]]; then
+    for repo_state in "$SERGEANT_FLEET"/*/*; do
+      [[ -d "$repo_state" ]] || continue
+      nonce="$(cat "$repo_state/notification_target" 2>/dev/null || true)"
+      notification_id="$(cat "$repo_state/notification_id" 2>/dev/null || true)"
+      [[ "$nonce" =~ ^[a-f0-9]{32}$ && -n "$notification_id" ]] || continue
+      target_dir="$repo_state/notifications/$notification_id/targets/$nonce"
+      token="$notification_id|$nonce"
+      printf '%s\n' "$token" > "$target_dir/accepted"
+      printf '%s\n' "$token" > "$target_dir/delivered"
+    done
+    fi
     [[ "$*" == *'-t %11'* ]] && printf '0|%%11|1111|111111|coordinator-command\n' || \
       printf '0|%%42|4242|123456|fixture-worker-command\n'
     ;;
@@ -350,8 +362,9 @@ assert_contains "missing negative tests"
 assert_contains "zero blockers"
 assert_contains "failing focused test"
 assert_contains "minimum implementation"
-assert_contains "notification_id|pane_identity"
-assert_contains ".sergeant-notification-accept"
+assert_contains "notification_id|target_nonce"
+assert_contains ".sergeant-notification-accepts/"
+assert_contains ".sergeant-notification-complete/"
 assert_contains "Do not act until that supervisor sends acceptance"
 assert_contains "full required suite once at the end"
 assert_contains "Never run no-mistakes from this agent process"

@@ -705,7 +705,7 @@ For each non-trivial behavior, work red before green: one vertical slice, test, 
 
 Your worker runs as a persistent interactive agent session in its recorded tmux pane. Non-interactive agent modes are prohibited: do not launch \`opencode run\`, \`goose run\`, Claude print mode, \`--auto\`, \`--prompt\`, or an equivalent one-shot agent. Sergeant delivers only a fixed ID-bearing notification through interactive terminal input; prompt, response, and secret bodies remain in durable files and never appear in process arguments.
 
-For every Sergeant notification, read \`.sergeant-notification\` and copy the exact pane-bound acknowledgement token from the supervisor nudge (\`notification_id|pane_identity\`) to \`.sergeant-notification-ack\`. Do not act until that supervisor sends acceptance and \`.sergeant-notification-accept\` contains the same token. Then follow the instruction exactly once. Repeated nudges with the same token are retries, not new work.
+For every Sergeant notification, read \`.sergeant-notification\` and copy the exact supervisor-scoped token from the nudge (\`notification_id|target_nonce\`) to the named file under \`.sergeant-notification-acks/\`. Do not act until that supervisor sends acceptance and the named file under \`.sergeant-notification-accepts/\` contains the same token. Then follow the instruction exactly once and write the token to the named file under \`.sergeant-notification-complete/\`. Repeated nudges with the same token are retries, not new work.
 
 If an agent exits before a terminal or waiting state, the supervisor records \`orphaned\` with durable diagnostics and td recovery pointers. Resume orphaned work through \`sgt-respond\`; do not overwrite or discard its recovery state.
 
@@ -792,7 +792,8 @@ BRIEF_EOF
     printf '%s\n' "$pane_target" > "$repo_task_dir/pane"
     if pane_identity="$(_sgt_pane_identity "$pane_target")" && [[ -n "$pane_identity" ]]; then
       printf '%s\n' "$pane_identity" > "$repo_task_dir/pane_identity"
-      printf '%s\n' "$pane_identity" > "$repo_task_dir/notification_target_pane_identity"
+      _sgt_notification_target_create "$repo_task_dir" "$initial_notification_id" \
+        "$pane_identity" >/dev/null
     else
       tmux kill-pane -t "$pane_target" 2>/dev/null || true
       printf 'orphaned\n' > "$repo_task_dir/status"

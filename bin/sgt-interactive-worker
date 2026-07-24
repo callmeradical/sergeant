@@ -14,6 +14,8 @@ AGENT="$3"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-response-lock.sh
+source "$SCRIPT_DIR/_sgt-response-lock.sh"
 
 [[ -d "$WORKTREE" ]] || {
   echo "ERROR: worktree unavailable: $WORKTREE" >&2
@@ -86,90 +88,124 @@ _finish() {
 
 _deliver_notifications() {
   local notification_file="$WORKTREE/.sergeant-notification"
-  local ack_token notification_id expected_id acknowledged delivered delivered_identity pane_identity state_dir pending target_identity
+  local accept_path ack_path ack_token complete_path delivered expected_id lease notification_id
+  local nonce pane_identity pending target_dir target_identity
   while :; do
     notification_id="$(sed -n 's/^notification_id=//p' "$notification_file" 2>/dev/null || true)"
     expected_id="$(cat "$REPO_STATE/notification_id" 2>/dev/null || true)"
-    acknowledged="$(cat "$WORKTREE/.sergeant-notification-ack" 2>/dev/null || true)"
-    delivered="$(cat "$REPO_STATE/notification_delivered" 2>/dev/null || true)"
-    delivered_identity="$(cat "$REPO_STATE/notification_delivered_pane_identity" 2>/dev/null || true)"
     pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
-    target_identity="$(cat "$REPO_STATE/notification_target_pane_identity" 2>/dev/null || true)"
-    ack_token="$notification_id|$pane_identity"
+    nonce="$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)"
+    target_dir="$REPO_STATE/notifications/$notification_id/targets/$nonce"
+    target_identity="$(cat "$target_dir/pane_identity" 2>/dev/null || true)"
+    ack_token="$notification_id|$nonce"
+    ack_path="$WORKTREE/.sergeant-notification-acks/$nonce"
+    accept_path="$WORKTREE/.sergeant-notification-accepts/$nonce"
+    complete_path="$WORKTREE/.sergeant-notification-complete/$nonce"
+    delivered="$(cat "$target_dir/delivered" 2>/dev/null || true)"
     if [[ -n "$notification_id" && "$notification_id" == "$expected_id" &&
-          -n "$pane_identity" && "$target_identity" == "$pane_identity" &&
-          ( "$delivered" != "$notification_id" || "$delivered_identity" != "$pane_identity" ) ]]; then
-      if [[ "$acknowledged" == "$ack_token" && "$delivered" == "$notification_id" &&
-            "$delivered_identity" != "$pane_identity" ]]; then
-        rm -f "$WORKTREE/.sergeant-notification-ack"
-        acknowledged=""
+          "$nonce" =~ ^[a-f0-9]{32}$ && -n "$pane_identity" &&
+          "$target_identity" == "$pane_identity" ]]; then
+      mkdir -p "$(dirname "$ack_path")" "$(dirname "$accept_path")" \
+        "$(dirname "$complete_path")"
+      if [[ "$(cat "$complete_path" 2>/dev/null || true)" == "$ack_token" &&
+            ! -f "$target_dir/completed" ]]; then
+        _sgt_response_lock_acquire "$REPO_STATE"
+        if [[ "$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)" == "$nonce" &&
+              "$(cat "$REPO_STATE/notifications/$notification_id/action_lease" 2>/dev/null || true)" == "$nonce" ]]; then
+          printf '%s\n' "$ack_token" > "$target_dir/completed.tmp.$$" &&
+            mv "$target_dir/completed.tmp.$$" "$target_dir/completed"
+        fi
+        _sgt_response_lock_release
       fi
-      if [[ "$acknowledged" == "$ack_token" ]]; then
+      if [[ "$delivered" != "$ack_token" && "$(cat "$ack_path" 2>/dev/null || true)" == "$ack_token" ]]; then
+        _sgt_response_lock_acquire "$REPO_STATE"
         pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
-        target_identity="$(cat "$REPO_STATE/notification_target_pane_identity" 2>/dev/null || true)"
-        [[ -n "$pane_identity" && "$target_identity" == "$pane_identity" ]] || {
+        if [[ "$(cat "$REPO_STATE/notification_id" 2>/dev/null || true)" != "$notification_id" ||
+              "$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)" != "$nonce" ||
+              "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" != "$pane_identity" ]]; then
+          _sgt_response_lock_release
           sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
           continue
-        }
-        state_dir="$REPO_STATE/notifications/$notification_id"
-        mkdir -p "$state_dir" || {
+        fi
+        lease="$(cat "$REPO_STATE/notifications/$notification_id/action_lease" 2>/dev/null || true)"
+        if [[ -n "$lease" && "$lease" != "$nonce" ]]; then
+          _sgt_response_lock_release
           sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
           continue
-        }
-        pending="$state_dir/acknowledged.tmp.$$"
+        fi
+        if [[ -z "$lease" ]]; then
+          printf '%s\n' "$nonce" > "$REPO_STATE/notifications/$notification_id/action_lease.tmp.$$" &&
+            mv "$REPO_STATE/notifications/$notification_id/action_lease.tmp.$$" \
+              "$REPO_STATE/notifications/$notification_id/action_lease"
+        fi
+        pending="$target_dir/acknowledged.tmp.$$"
         printf '%s\n' "$ack_token" > "$pending"
-        if ! mv "$pending" "$state_dir/acknowledged"; then
+        if ! mv "$pending" "$target_dir/acknowledged"; then
           rm -f "$pending"
+          _sgt_response_lock_release
           sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
           continue
         fi
         pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
-        target_identity="$(cat "$REPO_STATE/notification_target_pane_identity" 2>/dev/null || true)"
-        [[ -n "$pane_identity" && "$target_identity" == "$pane_identity" ]] || continue
+        [[ "$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)" == "$nonce" &&
+           "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$pane_identity" ]] || {
+          _sgt_response_lock_release
+          continue
+        }
         tmux send-keys -t "$TMUX_PANE" -l -- \
-          "Sergeant accepted notification $notification_id for this supervisor. Wait for $ack_token in .sergeant-notification-accept, then follow the notification exactly once." 2>/dev/null || continue
+          "Sergeant accepted $ack_token. Wait for it in $accept_path, follow the notification exactly once, then write it to $complete_path." 2>/dev/null || {
+          _sgt_response_lock_release
+          continue
+        }
         pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
-        target_identity="$(cat "$REPO_STATE/notification_target_pane_identity" 2>/dev/null || true)"
-        [[ -n "$pane_identity" && "$target_identity" == "$pane_identity" ]] || continue
-        tmux send-keys -t "$TMUX_PANE" Enter 2>/dev/null || continue
+        [[ "$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)" == "$nonce" &&
+           "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$pane_identity" ]] || {
+          _sgt_response_lock_release
+          continue
+        }
+        tmux send-keys -t "$TMUX_PANE" Enter 2>/dev/null || {
+          _sgt_response_lock_release
+          continue
+        }
         pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
-        target_identity="$(cat "$REPO_STATE/notification_target_pane_identity" 2>/dev/null || true)"
-        [[ -n "$pane_identity" && "$target_identity" == "$pane_identity" ]] || continue
-        pending="$WORKTREE/.sergeant-notification-accept.tmp.$$"
+        [[ "$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)" == "$nonce" &&
+           "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$pane_identity" ]] || {
+          _sgt_response_lock_release
+          continue
+        }
+        pending="$accept_path.tmp.$$"
         printf '%s\n' "$ack_token" > "$pending"
-        if ! mv "$pending" "$WORKTREE/.sergeant-notification-accept"; then
+        if ! mv "$pending" "$accept_path"; then
           rm -f "$pending"
+          _sgt_response_lock_release
           continue
         fi
-        pending="$state_dir/accepted.tmp.$$"
+        pending="$target_dir/accepted.tmp.$$"
         printf '%s\n' "$ack_token" > "$pending"
-        if ! mv "$pending" "$state_dir/accepted"; then
+        if ! mv "$pending" "$target_dir/accepted"; then
           rm -f "$pending"
-          rm -f "$WORKTREE/.sergeant-notification-accept"
+          rm -f "$accept_path"
+          _sgt_response_lock_release
           continue
         fi
-        pending="$state_dir/delivered.tmp.$$"
-        printf '%s\n' "$notification_id" > "$pending"
-        if ! mv "$pending" "$state_dir/delivered"; then
+        pending="$target_dir/delivered.tmp.$$"
+        printf '%s\n' "$ack_token" > "$pending"
+        if ! mv "$pending" "$target_dir/delivered"; then
           rm -f "$pending"
+          _sgt_response_lock_release
           sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
           continue
         fi
-        pending="$REPO_STATE/notification_delivered_pane_identity.tmp.$$"
-        printf '%s\n' "$pane_identity" > "$pending"
-        if ! mv "$pending" "$REPO_STATE/notification_delivered_pane_identity"; then
-          rm -f "$pending"
-          sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
-          continue
-        fi
-        pending="$REPO_STATE/notification_delivered.tmp.$$"
-        printf '%s\n' "$notification_id" > "$pending"
-        if ! mv "$pending" "$REPO_STATE/notification_delivered"; then
-          rm -f "$pending"
-        fi
+        _sgt_response_lock_release
       elif [[ -n "${TMUX_PANE:-}" ]]; then
+        pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
+        [[ "$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)" == "$nonce" &&
+           "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$pane_identity" ]] || continue
         tmux send-keys -t "$TMUX_PANE" -l -- \
-          "Sergeant notification $notification_id is available in .sergeant-notification. Read it, write $ack_token to .sergeant-notification-ack, and do not act until this supervisor sends acceptance and .sergeant-notification-accept contains that exact token." 2>/dev/null || true
+          "Sergeant notification $notification_id is available in .sergeant-notification. Read it, write $ack_token to $ack_path, and do not act until this supervisor sends acceptance and $accept_path contains that token." 2>/dev/null || continue
+        pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
+        [[ "$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)" == "$nonce" &&
+           "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$pane_identity" ]] || continue
         tmux send-keys -t "$TMUX_PANE" Enter 2>/dev/null || true
       fi
     fi
