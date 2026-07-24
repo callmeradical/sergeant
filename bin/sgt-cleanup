@@ -650,7 +650,8 @@ _stage_worker_evidence() {
   local evidence expected_identity="$3" staged_identity staging_dir="$4" \
     worktree="$2" worker_identity repo_dir="$1"
 
-  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
+  _same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree" || \
+    return 1
   [[ ! -e "$staging_dir" && ! -L "$staging_dir" ]] || return 1
   mkdir "$staging_dir" || return 1
   for evidence in "$worktree"/.sergeant-*; do
@@ -703,7 +704,6 @@ _remove_worker_evidence() {
     expected_identity="$3" name repo_dir="$1" worktree="$2"
   local -a moved=()
 
-  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
   [[ ! -e "$backup_dir" && ! -L "$backup_dir" ]] || return 1
   mkdir "$backup_dir" || return 1
   if ! _cleanup_mutation_hook before-live-removal \
@@ -738,7 +738,7 @@ _remove_worker_evidence() {
 
 _restore_worker_evidence() {
   local backup_dir count=0 evidence evidence_dir="$1/terminal-evidence" name \
-    expected_identity="$3" persisted_identity publish_count=0 repo_dir="$1" \
+    expected_identity="$3" layout_error persisted_identity publish_count=0 repo_dir="$1" \
     staged_identity staging_dir transaction worktree="$2"
   local -a backed_up=() published=()
 
@@ -781,7 +781,12 @@ _restore_worker_evidence() {
       restore-rollback-cleanup
     return 1
   fi
-  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
+  if ! _same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"; then
+    layout_error="$CLEANUP_LAYOUT_ERROR"
+    _rollback_remove_path "$transaction" "cross-filesystem worker evidence restore" \
+      cross-filesystem-rollback-cleanup
+    _die "$layout_error"
+  fi
   for evidence in "$worktree"/.sergeant-*; do
     [[ -f "$evidence" ]] || continue
     name="$(basename "$evidence")"
@@ -796,7 +801,14 @@ _restore_worker_evidence() {
     fi
     backed_up[${#backed_up[@]}]="$name"
   done
-  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
+  if ! _same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"; then
+    layout_error="$CLEANUP_LAYOUT_ERROR"
+    _restore_cross_filesystem_backup "$worktree" "$backup_dir" || \
+      _die "CRITICAL: cross-filesystem restore rollback failed; inspect preserved transaction: $transaction"
+    _rollback_remove_path "$transaction" "cross-filesystem worker evidence restore" \
+      cross-filesystem-rollback-cleanup
+    _die "$layout_error"
+  fi
   for evidence in "$staging_dir"/.sergeant-*; do
     [[ -f "$evidence" ]] || continue
     name="$(basename "$evidence")"
@@ -822,12 +834,17 @@ _restore_worker_evidence() {
 }
 
 _restore_removed_worker_evidence() {
-  local backup_dir="$2" evidence name repo_dir worktree="$1"
+  local backup_dir="$2" evidence layout_error name repo_dir worktree="$1"
   local -a restored=()
 
   [[ -d "$worktree" && -d "$backup_dir" ]] || return 0
   repo_dir="$(dirname "$backup_dir")"
-  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
+  if ! _same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"; then
+    layout_error="$CLEANUP_LAYOUT_ERROR"
+    _restore_cross_filesystem_backup "$worktree" "$backup_dir" || \
+      _die "CRITICAL: cross-filesystem cleanup rollback failed; inspect preserved backup: $backup_dir"
+    _die "$layout_error"
+  fi
   for evidence in "$backup_dir"/.sergeant-*; do
     [[ -f "$evidence" ]] || continue
     name="$(basename "$evidence")"
@@ -841,6 +858,62 @@ _restore_removed_worker_evidence() {
     restored[${#restored[@]}]="$name"
   done
   rmdir "$backup_dir"
+}
+
+_restore_cross_filesystem_backup() {
+  local backup_dir="$2" evidence name published_path temp worktree="$1"
+  local -a published=() temps=()
+
+  [[ -d "$worktree" && -d "$backup_dir" ]] || return 1
+  for evidence in "$backup_dir"/.sergeant-*; do
+    [[ -f "$evidence" ]] || continue
+    name="$(basename "$evidence")"
+    published_path="$worktree/$name"
+    temp="$worktree/$name.restore.$$"
+    [[ ! -e "$published_path" && ! -L "$published_path" && \
+      ! -e "$temp" && ! -L "$temp" ]] || return 1
+    temps[${#temps[@]}]="$temp"
+    if ! cp -p "$evidence" "$temp" || ! mv "$temp" "$published_path"; then
+      for temp in "${temps[@]}"; do
+        rm -f "$temp" || return 1
+      done
+      for published_path in "${published[@]}"; do
+        rm -f "$published_path" || return 1
+      done
+      return 1
+    fi
+    published[${#published[@]}]="$published_path"
+  done
+  rm -rf "$backup_dir" || return 1
+  [[ ! -e "$backup_dir" && ! -L "$backup_dir" ]]
+}
+
+_rollback_cross_filesystem_initial() {
+  local marker="$2" marker_preexisting="$3" repo_dir="$1"
+
+  _rollback_remove_path "$repo_dir/terminal-evidence" \
+    "cross-filesystem terminal evidence" cross-filesystem-rollback-cleanup
+  _rollback_remove_path "$repo_dir/cleanup-owner" \
+    "cross-filesystem cleanup owner" cross-filesystem-rollback-cleanup
+  _rollback_remove_path "$repo_dir/cleanup-phase" \
+    "cross-filesystem cleanup phase" cross-filesystem-rollback-cleanup
+  if [[ "$marker_preexisting" != true ]]; then
+    _rollback_remove_path "$marker" \
+      "cross-filesystem repository marker" cross-filesystem-rollback-cleanup
+  fi
+}
+
+_require_remover_same_filesystem() {
+  local backup="$4" layout_error marker="$6" marker_preexisting="$7" \
+    repo_dir="$1" repo_name="$2" retrying="$5" worktree="$3"
+
+  _same_filesystem_pair "$repo_dir" "$repo_name" "$worktree" && return 0
+  layout_error="$CLEANUP_LAYOUT_ERROR"
+  _restore_cross_filesystem_backup "$worktree" "$backup" || \
+    _die "CRITICAL: cross-filesystem cleanup rollback failed; inspect preserved backup: $backup"
+  [[ "$retrying" == true ]] || \
+    _rollback_cross_filesystem_initial "$repo_dir" "$marker" "$marker_preexisting"
+  _die "$layout_error"
 }
 
 _record_cleanup_phase() {
@@ -1797,7 +1870,7 @@ _rollback_initial_cleanup() {
 }
 
 _publish_initial_cleanup() {
-  local evidence_identity="$5" marker marker_preexisting=false repo_dir="$1" \
+  local evidence_identity="$5" layout_error marker marker_preexisting=false repo_dir="$1" \
     repo_root="$2" transaction worktree="$3" wt_type="$4"
 
   _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
@@ -1811,7 +1884,14 @@ _publish_initial_cleanup() {
   mkdir "$transaction" || return 1
 
   if ! _stage_worker_evidence "$repo_dir" "$worktree" "$evidence_identity" \
-    "$transaction/terminal-evidence" || ! _cleanup_fail_point stage-evidence || \
+    "$transaction/terminal-evidence"; then
+    layout_error="$CLEANUP_LAYOUT_ERROR"
+    _rollback_initial_cleanup "$repo_dir" "$transaction" "$marker" \
+      "$marker_preexisting"
+    [[ -z "$layout_error" ]] || _die "$layout_error"
+    return 1
+  fi
+  if ! _cleanup_fail_point stage-evidence || \
     ! _cleanup_fail_point record-owner || \
     ! _record_cleanup_owner "$repo_dir" "$repo_root" "$worktree" "$wt_type" \
       "$transaction/cleanup-owner" "$transaction/terminal-evidence" || \
@@ -1823,7 +1903,12 @@ _publish_initial_cleanup() {
     return 1
   fi
 
-  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
+  if ! _same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"; then
+    layout_error="$CLEANUP_LAYOUT_ERROR"
+    _rollback_initial_cleanup "$repo_dir" "$transaction" "$marker" \
+      "$marker_preexisting"
+    _die "$layout_error"
+  fi
   if ! _cleanup_fail_point publish-evidence || \
     ! mv "$transaction/terminal-evidence" "$repo_dir/terminal-evidence" || \
     ! _cleanup_fail_point publish-owner || \
@@ -2227,6 +2312,8 @@ for repo_dir in "$TASK_DIR"/*/; do
 
   retry_phase="$(sed -n '1p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
   retrying_removal=false
+  initial_marker=""
+  initial_marker_preexisting=false
   if [[ "$retry_phase" == "removing" ]]; then
     retry_type="$(sed -n '3p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
@@ -2270,6 +2357,10 @@ for repo_dir in "$TASK_DIR"/*/; do
   fi
 
   if [[ "$retrying_removal" != true ]]; then
+    initial_marker="$(_repo_git_dir "$retry_root" common)/sergeant-instance" || \
+      _die "Cannot identify cleanup owner marker: $repo_name"
+    [[ ! -e "$initial_marker" && ! -L "$initial_marker" ]] || \
+      initial_marker_preexisting=true
     worker_evidence_identity="$(_worker_evidence_identity "$worktree")" || \
       _die "Cannot bind worker lifecycle evidence before cleanup: $repo_name"
     if ! _publish_initial_cleanup "$repo_dir" "$retry_root" "$worktree" "$wt_type" \
@@ -2279,12 +2370,21 @@ for repo_dir in "$TASK_DIR"/*/; do
     expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
   fi
   LIVE_EVIDENCE_BACKUP=""
+  if ! _same_filesystem_pair "$repo_dir" "$repo_name" "$worktree"; then
+    layout_error="$CLEANUP_LAYOUT_ERROR"
+    [[ "$retrying_removal" == true ]] || \
+      _rollback_cross_filesystem_initial "$repo_dir" "$initial_marker" \
+        "$initial_marker_preexisting"
+    _die "$layout_error"
+  fi
   _remove_worker_evidence "$repo_dir" "$worktree" "$expected_evidence_identity" || \
     _die "Failed to remove staged worker evidence before cleanup: $repo_name"
 
   if [[ "$wt_type" == "treehouse" ]]; then
     echo "  returning treehouse lease: $worktree"
-    _require_same_filesystem_pair "$repo_dir" "$repo_name" "$worktree"
+    _require_remover_same_filesystem "$repo_dir" "$repo_name" "$worktree" \
+      "$LIVE_EVIDENCE_BACKUP" "$retrying_removal" "$initial_marker" \
+      "$initial_marker_preexisting"
     if ! (cd "$retry_root" && treehouse return "$worktree" 2>&1 | sed 's/^/  /'); then
       if [[ ! -d "$worktree" ]]; then
         _rollback_remove_path "$LIVE_EVIDENCE_BACKUP" \
@@ -2300,7 +2400,9 @@ for repo_dir in "$TASK_DIR"/*/; do
     fi
   else
     echo "  removing git worktree: $worktree"
-    _require_same_filesystem_pair "$repo_dir" "$repo_name" "$worktree"
+    _require_remover_same_filesystem "$repo_dir" "$repo_name" "$worktree" \
+      "$LIVE_EVIDENCE_BACKUP" "$retrying_removal" "$initial_marker" \
+      "$initial_marker_preexisting"
     if ! git -C "$retry_root" worktree remove "$worktree" 2>&1 | sed 's/^/  /'; then
       if [[ ! -d "$worktree" ]]; then
         _rollback_remove_path "$LIVE_EVIDENCE_BACKUP" \
