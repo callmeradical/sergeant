@@ -191,6 +191,11 @@ if [[ "${FAIL_TRANSITION:-}" == "stage-race" && "$1" == */stage ]]; then
   rm -f "$1"
   printf 'concurrent-stage\n' > "$1"
 fi
+if [[ "${FAIL_TRANSITION:-}" == "lock-recovery-race" && \
+  "$1" == */validation-launch.lock && "${2:-}" == */.validation-launch.lock.recovery.* ]]; then
+  rm -f "$1"
+  printf 'replacement-owner\n' > "$1"
+fi
 if [[ "${FAIL_TRANSITION:-}" == "marker" && "${2:-}" == */validation_worktree ]]; then
   exit 7
 fi
@@ -270,6 +275,28 @@ cleanup_validation_state() {
   rm -f "$concurrent_dir/pane-live" "$concurrent_dir/pane-identity-captured"
 }
 
+write_validation_lock() {
+  local pid="$1" start="$2" coordinator="$3" purpose="$4"
+  cat > "$repo_state/validation-launch.lock" <<EOF
+pid=$pid
+start=$start
+coordinator=$coordinator
+purpose=$purpose
+EOF
+}
+
+assert_lock_blocks_and_is_preserved() {
+  local expected="$1" output status
+  set +e
+  output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+    TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+    "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -ne 0 && "$output" == *'already reserved or unsafe'* ]]
+  [[ "$(cat "$repo_state/validation-launch.lock")" == "$expected" ]]
+}
+
 assert_failed_launch_rolls_back_and_retries() {
   local transition="$1" output status path before_transition_kills after_transition_kills
   before_transition_kills="$(grep -c '^kill-pane -t %77$' "$TEST_ROOT/tmux.log" || true)"
@@ -330,6 +357,56 @@ for transition in clone checkout remote verify marker-temp marker-write marker i
   state-stage state-validation_status release-write release-rename; do
   assert_failed_launch_rolls_back_and_retries "$transition"
 done
+
+lock_coordinator='%11|0|%11|1111|111111|coordinator-command'
+lock_purpose='task-1/app/validation-launch'
+
+write_validation_lock "$$" 'Thu Jul 23 00:00:00 2026' "$lock_coordinator" "$lock_purpose"
+live_lock="$(cat "$repo_state/validation-launch.lock")"
+assert_lock_blocks_and_is_preserved "$live_lock"
+rm "$repo_state/validation-launch.lock"
+
+write_validation_lock 99999999 'Thu Jul 23 00:00:00 2026' "$lock_coordinator" "$lock_purpose"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+cleanup_validation_state
+
+write_validation_lock 99999999 'Thu Jul 23 00:00:00 2026' "$lock_coordinator" "$lock_purpose"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  FAIL_TRANSITION=lock-recovery-race TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$(cat "$repo_state/validation-launch.lock")" == 'replacement-owner' ]]
+rm "$repo_state/validation-launch.lock"
+
+write_validation_lock "$$" 'Thu Jul 23 00:00:01 2026' "$lock_coordinator" "$lock_purpose"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+cleanup_validation_state
+
+printf 'pid=99999999\n' > "$repo_state/validation-launch.lock"
+partial_lock="$(cat "$repo_state/validation-launch.lock")"
+assert_lock_blocks_and_is_preserved "$partial_lock"
+rm "$repo_state/validation-launch.lock"
+
+write_validation_lock 99999999 'Thu Jul 23 00:00:00 2026' \
+  '%99|0|%99|9999|999999|other-coordinator' "$lock_purpose"
+foreign_lock="$(cat "$repo_state/validation-launch.lock")"
+assert_lock_blocks_and_is_preserved "$foreign_lock"
+rm "$repo_state/validation-launch.lock"
+
+crash_candidate="$repo_state/.validation-launch.lock.99999999.1.1"
+printf 'partial owner publication\n' > "$crash_candidate"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+[[ "$(cat "$crash_candidate")" == 'partial owner publication' ]]
+cleanup_validation_state
+rm "$crash_candidate"
 
 for race in marker-race state-race; do
   set +e
