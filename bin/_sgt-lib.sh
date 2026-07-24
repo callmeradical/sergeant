@@ -148,7 +148,7 @@ _sgt_worker_command() {
 _sgt_publish_worker_notification() {
   local repo_dir="$1" worktree="$2" notification_id="$3" kind="$4" instruction="$5"
   local state_dir notification_state notification_tmp current_id current_ack current_delivered
-  local proof_dir proof_tmp repo_tmp active_id current_delivered_identity current_target_identity
+  local proof_dir proof_tmp repo_tmp active_id current_ack_token current_delivered_identity current_target_identity
 
   [[ "$notification_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
   state_dir="$repo_dir/notifications/$notification_id"
@@ -174,12 +174,13 @@ _sgt_publish_worker_notification() {
   current_delivered="$(cat "$repo_dir/notification_delivered" 2>/dev/null || true)"
   current_delivered_identity="$(cat "$repo_dir/notification_delivered_pane_identity" 2>/dev/null || true)"
   current_target_identity="$(cat "$repo_dir/notification_target_pane_identity" 2>/dev/null || true)"
+  current_ack_token="$current_id|$current_target_identity"
   if [[ -n "$current_id" ]]; then
     proof_dir="$repo_dir/notifications/$current_id"
     mkdir -p "$proof_dir" || return 1
-    if [[ "$current_ack" == "$current_id" && ! -f "$proof_dir/acknowledged" ]]; then
+    if [[ "$current_ack" == "$current_ack_token" && ! -f "$proof_dir/acknowledged" ]]; then
       proof_tmp="$proof_dir/acknowledged.tmp.$$"
-      printf '%s\n' "$current_id" > "$proof_tmp"
+      printf '%s\n' "$current_ack_token" > "$proof_tmp"
       mv "$proof_tmp" "$proof_dir/acknowledged" || {
         rm -f "$proof_tmp"
         return 1

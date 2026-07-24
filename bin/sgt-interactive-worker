@@ -86,7 +86,7 @@ _finish() {
 
 _deliver_notifications() {
   local notification_file="$WORKTREE/.sergeant-notification"
-  local notification_id expected_id acknowledged delivered delivered_identity pane_identity state_dir pending target_identity
+  local ack_token notification_id expected_id acknowledged delivered delivered_identity pane_identity state_dir pending target_identity
   while :; do
     notification_id="$(sed -n 's/^notification_id=//p' "$notification_file" 2>/dev/null || true)"
     expected_id="$(cat "$REPO_STATE/notification_id" 2>/dev/null || true)"
@@ -95,22 +95,23 @@ _deliver_notifications() {
     delivered_identity="$(cat "$REPO_STATE/notification_delivered_pane_identity" 2>/dev/null || true)"
     pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
     target_identity="$(cat "$REPO_STATE/notification_target_pane_identity" 2>/dev/null || true)"
+    ack_token="$notification_id|$pane_identity"
     if [[ -n "$notification_id" && "$notification_id" == "$expected_id" &&
           -n "$pane_identity" && "$target_identity" == "$pane_identity" &&
           ( "$delivered" != "$notification_id" || "$delivered_identity" != "$pane_identity" ) ]]; then
-      if [[ "$acknowledged" == "$notification_id" && "$delivered" == "$notification_id" &&
+      if [[ "$acknowledged" == "$ack_token" && "$delivered" == "$notification_id" &&
             "$delivered_identity" != "$pane_identity" ]]; then
         rm -f "$WORKTREE/.sergeant-notification-ack"
         acknowledged=""
       fi
-      if [[ "$acknowledged" == "$notification_id" ]]; then
+      if [[ "$acknowledged" == "$ack_token" ]]; then
         state_dir="$REPO_STATE/notifications/$notification_id"
         mkdir -p "$state_dir" || {
           sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
           continue
         }
         pending="$state_dir/acknowledged.tmp.$$"
-        printf '%s\n' "$notification_id" > "$pending"
+        printf '%s\n' "$ack_token" > "$pending"
         if ! mv "$pending" "$state_dir/acknowledged"; then
           rm -f "$pending"
           sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
@@ -137,7 +138,7 @@ _deliver_notifications() {
         fi
       elif [[ -n "${TMUX_PANE:-}" ]]; then
         tmux send-keys -t "$TMUX_PANE" -l -- \
-          "Sergeant notification $notification_id is available in .sergeant-notification. Read it, write $notification_id to .sergeant-notification-ack before acting, then follow it once." 2>/dev/null || true
+          "Sergeant notification $notification_id is available in .sergeant-notification. Read it, write $ack_token to .sergeant-notification-ack before acting, then follow it once." 2>/dev/null || true
         tmux send-keys -t "$TMUX_PANE" Enter 2>/dev/null || true
       fi
     fi

@@ -61,7 +61,7 @@ _install_legacy_file() {
 _migrate_legacy_response_state() {
   local actual_branch actual_git_dir actual_pointer branch canonical common_dir
   local config_file configured_common configured_path evidence project raw_path repo_count revision
-  local task_dir="$FLEET_DIR/$TASK_ID" repo_index
+  local task_dir="$FLEET_DIR/$TASK_ID" repo_index task_brief
   local brief="$worktree/.sergeant-brief.md"
 
   [[ -n "$worktree" && "$worktree" == /* && -d "$worktree" ]] || return 1
@@ -82,7 +82,9 @@ _migrate_legacy_response_state() {
   actual_branch="$(git -C "$canonical" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
   [[ "$actual_branch" == "$branch" ]] || return 1
   [[ -f "$brief" && ! -L "$brief" ]] || return 1
-  project="$(sed -n 's/^\*\*Project:\*\* //p' "$brief")"
+  task_brief="$task_dir/brief.md"
+  [[ -f "$task_brief" && ! -L "$task_brief" ]] || return 1
+  project="$(sed -n 's/^Project:[[:space:]]*//p' "$task_brief")"
   [[ "$project" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
   grep -Fxq "**Task ID:** $TASK_ID" "$brief" &&
     grep -Fxq "**Project:** $project" "$brief" &&
@@ -274,10 +276,6 @@ else
   _publish_local_response_transport "$RESPONSE_INPUT" "$response_id" "$gate_generation"
 fi
 
-_sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$response_id" response \
-  "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
-delivery_notification_id="$response_id"
-
 pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
 _pane_is_supervisor() {
   local target="$1"
@@ -285,6 +283,8 @@ _pane_is_supervisor() {
 }
 
 if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && _pane_is_supervisor "$pane"; then
+  _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$response_id" response \
+    "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
   _atomic_write "$REPO_DIR/notification_target_pane_identity" \
     "$(cat "$REPO_DIR/pane_identity")"
   _sgt_wait_worker_notification "$pane" "$REPO_DIR" "$response_id" || \
@@ -300,16 +300,33 @@ tmux_session="$(cat "$REPO_DIR/tmux_session" 2>/dev/null || true)"
 window_name="$(cat "$REPO_DIR/window_name" 2>/dev/null || true)"
 agent="$(cat "$REPO_DIR/agent" 2>/dev/null || true)"
 if ! command -v tmux >/dev/null 2>&1 || [[ -z "$tmux_session" || -z "$window_name" || -z "$agent" ]]; then
+  _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$response_id" response \
+    "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
   echo "sgt-respond: no live local pane and relaunch metadata is incomplete; response file is ready."
   exit 0
 fi
 
-delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-_sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$delivery_notification_id" response \
-  "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
+current_notification_id="$(cat "$REPO_DIR/notification_id" 2>/dev/null || true)"
+current_target_identity="$(cat "$REPO_DIR/notification_target_pane_identity" 2>/dev/null || true)"
+if [[ -n "$current_notification_id" && -n "$current_target_identity" ]]; then
+  superseded_dir="$REPO_DIR/notifications/$current_notification_id"
+  mkdir -p "$superseded_dir"
+  superseded_tmp="$superseded_dir/superseded_target_pane_identity.tmp.$$"
+  printf '%s\n' "$current_target_identity" > "$superseded_tmp"
+  if [[ -e "$superseded_dir/superseded_target_pane_identity" ]]; then
+    cmp -s "$superseded_tmp" "$superseded_dir/superseded_target_pane_identity" || \
+      _die "Pending notification target evidence conflicts with relaunch"
+    rm -f "$superseded_tmp"
+  else
+    mv "$superseded_tmp" "$superseded_dir/superseded_target_pane_identity"
+  fi
+fi
 rm -f "$worktree/.sergeant-notification-ack" "$REPO_DIR/notification_delivered" \
   "$REPO_DIR/notification_delivered_pane_identity" \
   "$REPO_DIR/notification_target_pane_identity"
+delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+_sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$delivery_notification_id" response \
+  "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
 
 worker_command="$(_sgt_worker_command \
   "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")"

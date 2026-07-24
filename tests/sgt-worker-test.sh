@@ -24,10 +24,10 @@ cat > "$TEST_ROOT/fake-bin/opencode" <<'EOF'
 if [[ -n "${RACE_ROLE:-}" ]]; then
   IFS= read -r notification
   [[ "$notification" == *"$RACE_NOTIFICATION_ID"* ]] || exit 41
-  printf '%s\n' "$RACE_NOTIFICATION_ID" >> "$RACE_RECEIVED_LOG"
+  printf '%s:%s\n' "$RACE_ROLE" "$RACE_NOTIFICATION_ID" >> "$RACE_RECEIVED_LOG"
   touch "$RACE_PROMPT_FILE"
   while [[ ! -e "$RACE_ACK_RELEASE" ]]; do sleep 0.01; done
-  printf '%s\n' "$RACE_NOTIFICATION_ID" > .sergeant-notification-ack
+  cat "$RACE_ACK_TOKEN_FILE" > .sergeant-notification-ack
   touch "$RACE_ACK_FILE"
   while [[ ! -e "$RACE_EXIT_FILE" ]]; do sleep 0.01; done
   printf 'needs_input\n' > .sergeant-status
@@ -40,7 +40,9 @@ for notification_number in $(seq 1 "$notification_count"); do
   notification_id="$(cat "$NOTIFICATION_STATE/notification_id")"
   [[ "$notification" == *"$notification_id"* ]] || exit 18
   printf '%s\n' "$notification_id" >> "${RECEIVED_LOG:-/dev/null}"
-  printf '%s\n' "$notification_id" > .sergeant-notification-ack
+  printf '%s|%s\n' "$notification_id" \
+    "$(cat "$NOTIFICATION_STATE/notification_target_pane_identity")" \
+    > .sergeant-notification-ack
   for _ in $(seq 1 100); do
     [[ "$(cat "$NOTIFICATION_STATE/notification_delivered" 2>/dev/null || true)" == "$notification_id" ]] && break
     sleep 0.01
@@ -102,38 +104,44 @@ target_worker_pane() {
 race_state="$TEST_ROOT/race/state"
 race_worktree="$TEST_ROOT/race/worktree"
 printf 'in_progress\n' > "$race_worktree/.sergeant-status"
-printf 'old-notification\n' > "$race_state/notification_id"
+printf 'fresh-notification\n' > "$race_state/notification_id"
 cat > "$race_worktree/.sergeant-notification" <<'EOF'
-notification_id=old-notification
+notification_id=fresh-notification
 kind=response
 instruction=Apply the pending response.
 EOF
 tmux new-window -d -t "$TMUX_SESSION:" -n race-old \
-  "env RACE_ROLE=old RACE_NOTIFICATION_ID=old-notification \
+  "env RACE_ROLE=old RACE_NOTIFICATION_ID=fresh-notification \
   RACE_RECEIVED_LOG='$TEST_ROOT/race-received.log' RACE_PROMPT_FILE='$TEST_ROOT/race-old-prompt' \
   RACE_ACK_RELEASE='$TEST_ROOT/race-old-release' RACE_ACK_FILE='$TEST_ROOT/race-old-ack' \
+  RACE_ACK_TOKEN_FILE='$TEST_ROOT/race-old-token' \
   RACE_EXIT_FILE='$TEST_ROOT/race-old-exit' \
   '$ROOT_DIR/bin/sgt-interactive-worker' '$race_state' '$race_worktree' '$TEST_ROOT/fake-bin/opencode'"
 target_worker_pane "$race_state" race-old
+printf 'fresh-notification|%s\n' "$(cat "$race_state/notification_target_pane_identity")" \
+  > "$TEST_ROOT/race-old-token"
 for _ in $(seq 1 200); do
   [[ -e "$TEST_ROOT/race-old-prompt" ]] && break
   sleep 0.01
 done
 [[ -e "$TEST_ROOT/race-old-prompt" ]]
 
-printf 'new-notification\n' > "$race_state/notification_id"
+printf 'fresh-notification\n' > "$race_state/notification_id"
 cat > "$race_worktree/.sergeant-notification" <<'EOF'
-notification_id=new-notification
+notification_id=fresh-notification
 kind=response
 instruction=Apply the pending response.
 EOF
 tmux new-window -d -t "$TMUX_SESSION:" -n race-new \
-  "env RACE_ROLE=new RACE_NOTIFICATION_ID=new-notification \
+  "env RACE_ROLE=new RACE_NOTIFICATION_ID=fresh-notification \
   RACE_RECEIVED_LOG='$TEST_ROOT/race-received.log' RACE_PROMPT_FILE='$TEST_ROOT/race-new-prompt' \
   RACE_ACK_RELEASE='$TEST_ROOT/race-new-release' RACE_ACK_FILE='$TEST_ROOT/race-new-ack' \
+  RACE_ACK_TOKEN_FILE='$TEST_ROOT/race-new-token' \
   RACE_EXIT_FILE='$TEST_ROOT/race-new-exit' \
   '$ROOT_DIR/bin/sgt-interactive-worker' '$race_state' '$race_worktree' '$TEST_ROOT/fake-bin/opencode'"
 target_worker_pane "$race_state" race-new
+printf 'fresh-notification|%s\n' "$(cat "$race_state/notification_target_pane_identity")" \
+  > "$TEST_ROOT/race-new-token"
 old_race_pane="$(tmux display-message -p -t "$TMUX_SESSION:race-old" '#{pane_id}')"
 new_race_pane="$(tmux display-message -p -t "$TMUX_SESSION:race-new" '#{pane_id}')"
 tmux display-message -p -t "$old_race_pane" '#{pane_id}' >/dev/null
@@ -151,18 +159,18 @@ for _ in $(seq 1 200); do
 done
 [[ -e "$TEST_ROOT/race-old-ack" ]]
 sleep 0.05
-[[ "$(cat "$race_state/notification_delivered" 2>/dev/null || true)" != new-notification ]]
+[[ "$(cat "$race_state/notification_delivered" 2>/dev/null || true)" != fresh-notification ]]
 
 touch "$TEST_ROOT/race-new-release"
 for _ in $(seq 1 200); do
-  [[ "$(cat "$race_state/notification_delivered" 2>/dev/null || true)" == new-notification ]] && break
+  [[ "$(cat "$race_state/notification_delivered" 2>/dev/null || true)" == fresh-notification ]] && break
   sleep 0.01
 done
-[[ "$(cat "$race_state/notification_delivered")" == new-notification ]]
+[[ "$(cat "$race_state/notification_delivered")" == fresh-notification ]]
 [[ "$(cat "$race_state/notification_delivered_pane_identity")" == \
    "$(cat "$race_state/notification_target_pane_identity")" ]]
-[[ "$(grep -Fc old-notification "$TEST_ROOT/race-received.log")" == 1 ]]
-[[ "$(grep -Fc new-notification "$TEST_ROOT/race-received.log")" == 1 ]]
+[[ "$(grep -Fc old:fresh-notification "$TEST_ROOT/race-received.log")" == 1 ]]
+[[ "$(grep -Fc new:fresh-notification "$TEST_ROOT/race-received.log")" == 1 ]]
 touch "$TEST_ROOT/race-old-exit" "$TEST_ROOT/race-new-exit"
 
 printf 'initial-notification-1\n' > "$TEST_ROOT/done/state/notification_id"
@@ -189,14 +197,13 @@ done
 [[ -s "$TEST_ROOT/done/state/result" ]]
 
 printf 'recovered-notification-1\n' > "$TEST_ROOT/recovery/state/notification_id"
-printf 'recovered-notification-1\n' > "$TEST_ROOT/recovery/worktree/.sergeant-notification-ack"
 cat > "$TEST_ROOT/recovery/worktree/.sergeant-notification" <<'EOF'
 notification_id=recovered-notification-1
 kind=initial
 instruction=Read the .sergeant-brief.md file and execute the mission.
 EOF
 tmux new-window -d -t "$TMUX_SESSION:" -n recovery \
-  "env ARG_LOG='$TEST_ROOT/recovery.args' EXPECT_RECOVERY=1 \
+  "env ARG_LOG='$TEST_ROOT/recovery.args' EXPECT_NOTIFICATION_COUNT=1 \
   NOTIFICATION_STATE='$TEST_ROOT/recovery/state' SGT_NOTIFICATION_RETRY_INTERVAL=0.01 FAKE_MODE=done \
   '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/recovery/state' \
   '$TEST_ROOT/recovery/worktree' '$TEST_ROOT/fake-bin/opencode'"
@@ -259,7 +266,7 @@ for failure_mode in state acknowledged delivered id active; do
   publish_status=$?
   set -e
   [[ "$publish_status" -ne 0 ]]
-  [[ "$(cat "$TEST_ROOT/replacement/worktree/.sergeant-notification-ack")" == "$previous_id" ]]
+  [[ "$(cat "$TEST_ROOT/replacement/worktree/.sergeant-notification-ack")" == "$previous_id|"* ]]
   [[ "$(cat "$TEST_ROOT/replacement/state/notification_delivered")" == "$previous_id" ]]
   if [[ "$failure_mode" == active ]]; then
     [[ "$(cat "$TEST_ROOT/replacement/state/notification_id")" == "$next_id" ]]
