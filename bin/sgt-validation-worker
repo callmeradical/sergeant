@@ -119,6 +119,28 @@ _coordinator_is_alive || exit 2
   sleep "$SGT_VALIDATION_COMMIT_ACK_DELAY"
 _coordinator_is_alive || exit 2
 _publish_handshake "$REPO_STATE/validation-child-committed" "$HANDSHAKE" || exit 2
+while [[ ! -f "$REPO_STATE/validation-success" ]]; do
+  _coordinator_is_alive || {
+    echo "ERROR: validation coordinator exited before success" >&2
+    exit 2
+  }
+  sleep 0.05
+done
+[[ ! -L "$REPO_STATE/validation-success" && \
+  "$(cat "$REPO_STATE/validation-success")" == "$HANDSHAKE" ]] || exit 2
+[[ -z "${SGT_VALIDATION_SUCCESS_ACK_DELAY:-}" ]] || \
+  sleep "$SGT_VALIDATION_SUCCESS_ACK_DELAY"
+_coordinator_is_alive || exit 2
+_publish_handshake "$REPO_STATE/validation-success-ack" "$HANDSHAKE" || exit 2
+while [[ -e "$REPO_STATE/validation-launch.lock" || \
+  -L "$REPO_STATE/validation-launch.lock" ]]; do
+  if ! _coordinator_is_alive; then
+    [[ ! -e "$REPO_STATE/validation-launch.lock" && \
+      ! -L "$REPO_STATE/validation-launch.lock" ]] && break
+    exit 2
+  fi
+  sleep 0.05
+done
 
 printf 'running\n' > "$REPO_STATE/validation_status"
 cd "$WORKTREE" || exit 2
