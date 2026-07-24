@@ -87,6 +87,8 @@ VALIDATION_CHILD_READY="$REPO_STATE/validation-child-ready"
 VALIDATION_CHILD_ACCEPTED="$REPO_STATE/validation-child-accepted"
 VALIDATION_CHILD_COMMIT="$REPO_STATE/validation-child-commit"
 VALIDATION_CHILD_COMMITTED="$REPO_STATE/validation-child-committed"
+VALIDATION_SUCCESS="$REPO_STATE/validation-success"
+VALIDATION_SUCCESS_ACK="$REPO_STATE/validation-success-ack"
 WINDOW_BACKUP="$REPO_STATE/window_name.validation-backup.$$"
 STAGE_BACKUP="$REPO_STATE/stage.validation-backup.$$"
 
@@ -317,7 +319,8 @@ _rollback_validation_launch() {
   $VALIDATION_COMMITTED && return 0
   if [[ -n "${VALIDATION_HANDSHAKE:-}" ]]; then
     for handshake_path in "$VALIDATION_CHILD_READY" "$VALIDATION_CHILD_ACCEPTED" \
-      "$VALIDATION_CHILD_COMMIT" "$VALIDATION_CHILD_COMMITTED"; do
+      "$VALIDATION_CHILD_COMMIT" "$VALIDATION_CHILD_COMMITTED" \
+      "$VALIDATION_SUCCESS" "$VALIDATION_SUCCESS_ACK"; do
       if [[ -f "$handshake_path" && ! -L "$handshake_path" && \
         "$(cat "$handshake_path")" == "$VALIDATION_HANDSHAKE" ]]; then
         _validation_record_owned_path "$handshake_path" || true
@@ -368,7 +371,7 @@ for path in "$VALIDATION_WORKTREE_RECORD" "$VALIDATION_WORKTREE_RECORD_TEMP" \
   "$REPO_STATE/validation_process_group" "$REPO_STATE/validation_process_start" \
   "$REPO_STATE/validation_status" "$VALIDATION_RELEASE_TEMP" \
   "$VALIDATION_CHILD_READY" "$VALIDATION_CHILD_ACCEPTED" "$VALIDATION_CHILD_COMMIT" \
-  "$VALIDATION_CHILD_COMMITTED" \
+  "$VALIDATION_CHILD_COMMITTED" "$VALIDATION_SUCCESS" "$VALIDATION_SUCCESS_ACK" \
   "$WINDOW_BACKUP" "$STAGE_BACKUP"; do
   ! _validation_path_exists "$path" || _die "Validation launch state already exists: $path"
 done
@@ -482,8 +485,14 @@ _wait_validation_handshake "$VALIDATION_CHILD_COMMITTED" "$VALIDATION_HANDSHAKE"
   _die "Validation child did not acknowledge committed state"
 [[ "$(_validation_current_pane_identity "$VALIDATION_PANE" || true)" == \
   "$VALIDATION_IDENTITY" ]] || _die "Validation child exited before commit"
+_validation_write_owned "$VALIDATION_SUCCESS" "$VALIDATION_HANDSHAKE" success || \
+  _die "Failed to publish validation success"
+_wait_validation_handshake "$VALIDATION_SUCCESS_ACK" "$VALIDATION_HANDSHAKE" || \
+  _die "Validation child did not acknowledge success"
+[[ "$(_validation_current_pane_identity "$VALIDATION_PANE" || true)" == \
+  "$VALIDATION_IDENTITY" ]] || _die "Validation child exited before success publication"
 VALIDATION_COMMITTED=true
+printf 'Validation launched in pane %s beside worker %s.\n' "$VALIDATION_PANE" "$PANE"
 _release_validation_lock || _die "Failed to release validation launch reservation"
 rm -f "$WINDOW_BACKUP" "$STAGE_BACKUP"
 trap - EXIT
-printf 'Validation launched in pane %s beside worker %s.\n' "$VALIDATION_PANE" "$PANE"
