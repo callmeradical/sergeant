@@ -170,6 +170,7 @@ _validation_write_owned() {
   identity="$(_validation_object_identity "$candidate")" || return 1
   printf '%s\n' "$value" > "$candidate" || return 1
   [[ "$(_validation_object_identity "$candidate" || true)" == "$identity" ]] || return 1
+  _validation_record_owned_path "$candidate" || return 1
   _validation_transition "${transition}-write" || return 1
   ln "$candidate" "$path" 2>/dev/null || return 1
   _validation_record_owned_path "$path" || return 1
@@ -233,8 +234,8 @@ _rollback_validation_launch() {
   $VALIDATION_COMMITTED && return 0
   if $VALIDATION_PANE_OWNED && [[ -n "$VALIDATION_PANE" ]]; then
     current_identity="$(_validation_current_pane_identity "$VALIDATION_PANE" || true)"
-    if [[ "$current_identity" == "$VALIDATION_IDENTITY" && \
-      "${current_identity%%|*}" == "0" ]]; then
+    if [[ "$current_identity" == "$VALIDATION_IDENTITY" || \
+      "$current_identity" == "1|${VALIDATION_IDENTITY#*|}" ]]; then
       tmux kill-pane -t "$VALIDATION_PANE" 2>/dev/null || true
     fi
   fi
