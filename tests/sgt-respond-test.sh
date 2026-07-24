@@ -176,6 +176,55 @@ for newline_case in zero one multiple; do
   cmp -s "$expected_response" "$repo_state/response"
   cmp -s "$expected_response" "$worktree/.sergeant-response"
 done
+
+response_tmp="$TEST_ROOT/response-tmp"
+mkdir -p "$response_tmp"
+for newline_case in zero one multiple; do
+  expected_response="$TEST_ROOT/response-$newline_case"
+  tty_input="$TEST_ROOT/tty-input-$newline_case"
+  cp "$expected_response" "$tty_input"
+  printf '\004\004' >> "$tty_input"
+  rm -f "$repo_state/response" "$repo_state/response_id" "$repo_state/response_generation" \
+    "$repo_state/notification_id" "$repo_state/notification_delivered" \
+    "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" \
+    "$worktree/.sergeant-response-generation" "$worktree/.sergeant-notification"
+  printf 'needs_input\n' > "$repo_state/status"
+  printf 'needs_input\n' > "$worktree/.sergeant-status"
+  PATH="$fake_bin:$PATH" TMPDIR="$response_tmp" \
+    TMUX_LOG="$TEST_ROOT/tty-$newline_case.log" \
+    TD_LOG="$TEST_ROOT/tty-$newline_case-td.log" \
+    TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 \
+    EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+    script -qec "\"$ROOT_DIR/bin/sgt-respond\" task-1 app" /dev/null \
+    < "$tty_input" >/dev/null
+  cmp -s "$expected_response" "$repo_state/response"
+  cmp -s "$expected_response" "$worktree/.sergeant-response"
+  if compgen -G "$response_tmp/sgt-response.*" >/dev/null; then
+    printf 'TTY response input temporary file was retained: %s\n' "$newline_case" >&2
+    exit 1
+  fi
+done
+
+empty_response="$TEST_ROOT/empty-response"
+printf '\004\004' > "$empty_response"
+rm -f "$repo_state/response" "$repo_state/response_id" "$repo_state/response_generation" \
+  "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" \
+  "$worktree/.sergeant-response-generation"
+set +e
+PATH="$fake_bin:$PATH" TMPDIR="$response_tmp" TMUX_LOG="$TEST_ROOT/tty-empty.log" \
+  TD_LOG="$TEST_ROOT/tty-empty-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  script -qec "\"$ROOT_DIR/bin/sgt-respond\" task-1 app" /dev/null \
+  < "$empty_response" >/dev/null
+tty_empty_status=$?
+set -e
+[[ "$tty_empty_status" -ne 0 ]]
+[[ ! -e "$repo_state/response" && ! -e "$worktree/.sergeant-response" ]]
+if compgen -G "$response_tmp/sgt-response.*" >/dev/null; then
+  printf 'empty TTY response retained a temporary file\n' >&2
+  exit 1
+fi
+
 rm -f "$repo_state/response" "$repo_state/response_id" "$repo_state/response_generation" \
   "$repo_state/notification_id" "$repo_state/notification_delivered" \
   "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" \

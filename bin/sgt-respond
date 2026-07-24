@@ -29,12 +29,9 @@ RESPONSE_INPUT="$(mktemp "${TMPDIR:-/tmp}/sgt-response.XXXXXX")" || \
   _die "Could not create private response input"
 chmod 600 "$RESPONSE_INPUT"
 if [[ -t 0 ]]; then
-  printf 'Response: ' >&2
-  IFS= read -r response_line || _die "Response must not be empty"
-  printf '%s\n' "$response_line" > "$RESPONSE_INPUT"
-else
-  cat > "$RESPONSE_INPUT"
+  printf 'Response (Ctrl-D to submit): ' >&2
 fi
+cat > "$RESPONSE_INPUT"
 [[ -s "$RESPONSE_INPUT" ]] || _die "Response must not be empty"
 
 REPO_DIR="$FLEET_DIR/$TASK_ID/$REPO"
