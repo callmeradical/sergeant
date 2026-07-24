@@ -48,6 +48,19 @@ PANE_IDENTITY="$legacy_identity" EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" 
 [[ "$(cat "$repo/pane_identity")" == "$legacy_identity" ]]
 [[ "$(cat "$repo/pane_identity_migration")" == "$legacy_identity" ]]
 
+for legacy_mode in 664 640; do
+  printf '%s\n' "$legacy_identity" > "$repo/pane_identity"
+  chmod "$legacy_mode" "$repo/pane_identity"
+  printf 'in_progress\n' > "$worktree/.sergeant-status"
+  printf 'in_progress\n' > "$repo/status"
+  PANE_IDENTITY="$legacy_identity" EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" \
+    SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
+  [[ "$(cat "$repo/status")" == "in_progress" ]]
+  [[ "$(cat "$repo/pane_identity")" == "$legacy_identity" ]]
+  [[ "$(stat -c '%a' "$repo/pane_identity" 2>/dev/null || stat -f '%Lp' "$repo/pane_identity")" == \
+    "600" ]]
+done
+
 for forged_command in "wrapper $legacy_command extra" "${legacy_command}-prefix-collision"; do
   rm -f "$repo/pane_identity"
   printf 'in_progress\n' > "$worktree/.sergeant-status"

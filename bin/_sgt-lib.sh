@@ -141,32 +141,27 @@ _sgt_path_mode() {
 _sgt_fd_mode() {
   stat -L -c '%a' -- "$1" 2>/dev/null || stat -L -f '%Lp' "$1" 2>/dev/null
 }
-_sgt_prepare_owned_fd() {
-  local path="$1" fd="$2" mode="$3" fd_path fd_mode
-  fd_path="/dev/fd/$fd"
-  fd_mode="$(_sgt_fd_mode "$fd_path")" || return 1
-  if [[ "$mode" == "644" ]]; then
-    if [[ "$fd_mode" != "644" || ! -f "$fd_path" || ! -O "$fd_path" || \
-      ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef "$fd_path" ]]; then
-      return 1
-    fi
-    chmod 600 "$path" 2>/dev/null || return 1
-    mode="600"
-  fi
-  fd_mode="$(_sgt_fd_mode "$fd_path")" || return 1
-  [[ "$mode" == "600" && "$fd_mode" == "600" && -f "$fd_path" && -O "$fd_path" && \
-    -f "$path" && ! -L "$path" && -O "$path" && "$path" -ef "$fd_path" ]]
+_sgt_legacy_identity_mode() {
+  case "$1" in
+    640|644|660|664) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 _sgt_read_owned_file() {
   local path="$1" mode fd_mode value
   [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
   mode="$(_sgt_path_mode "$path")" || return 1
-  [[ "$mode" == "600" || "$mode" == "644" ]] || return 1
+  [[ "$mode" == "600" ]] || return 1
   exec 9< "$path" || return 1
-  _sgt_prepare_owned_fd "$path" 9 "$mode" || {
+  fd_mode="$(_sgt_fd_mode /dev/fd/9)" || {
     exec 9<&-
     return 1
   }
+  if [[ "$fd_mode" != "600" || ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
+    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
+    exec 9<&-
+    return 1
+  fi
   value="$(cat <&9)" || { exec 9<&-; return 1; }
   fd_mode="$(_sgt_fd_mode /dev/fd/9)" || {
     exec 9<&-
@@ -174,6 +169,37 @@ _sgt_read_owned_file() {
   }
   if [[ "$fd_mode" != "600" || ! -O /dev/fd/9 || -L "$path" || \
     ! "$path" -ef /dev/fd/9 ]]; then
+    exec 9<&-
+    return 1
+  fi
+  exec 9<&-
+  printf '%s\n' "$value"
+}
+_sgt_read_matching_legacy_pane_identity() {
+  local path="$1" actual="$2" mode fd_mode value
+  [[ -n "$actual" ]] || return 1
+  [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
+  mode="$(_sgt_path_mode "$path")" || return 1
+  _sgt_legacy_identity_mode "$mode" || return 1
+  exec 9< "$path" || return 1
+  fd_mode="$(_sgt_fd_mode /dev/fd/9)" || {
+    exec 9<&-
+    return 1
+  }
+  if [[ "$fd_mode" != "$mode" || ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
+    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
+    exec 9<&-
+    return 1
+  fi
+  value="$(cat <&9)" || { exec 9<&-; return 1; }
+  [[ "$value" == "$actual" ]] || { exec 9<&-; return 1; }
+  chmod 600 "$path" 2>/dev/null || { exec 9<&-; return 1; }
+  fd_mode="$(_sgt_fd_mode /dev/fd/9)" || {
+    exec 9<&-
+    return 1
+  }
+  if [[ "$fd_mode" != "600" || ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
+    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
     exec 9<&-
     return 1
   fi
@@ -223,11 +249,17 @@ _sgt_replace_owned_file() {
   mv "$candidate" "$path" || { rm -f "$candidate"; return 1; }
 }
 _sgt_pane_identity_matches() {
-  local pane="$1" repo_dir="$2" identity_name="${3:-pane_identity}" expected actual
-  expected="$(_sgt_read_owned_file "$repo_dir/$identity_name" 2>/dev/null || true)"
-  [[ -n "$expected" ]] || return 1
+  local pane="$1" repo_dir="$2" identity_name="${3:-pane_identity}" expected actual current
   actual="$(_sgt_pane_identity "$pane")" || return 1
-  [[ "$actual" == "$expected" && "${actual%%|*}" == "0" ]]
+  [[ "${actual%%|*}" == "0" ]] || return 1
+  expected="$(_sgt_read_owned_file "$repo_dir/$identity_name" 2>/dev/null || true)"
+  if [[ -z "$expected" ]]; then
+    expected="$(_sgt_read_matching_legacy_pane_identity "$repo_dir/$identity_name" "$actual" \
+      2>/dev/null || true)"
+  fi
+  [[ -n "$expected" ]] || return 1
+  current="$(_sgt_pane_identity "$pane")" || return 1
+  [[ "$actual" == "$expected" && "$current" == "$actual" ]]
 }
 _sgt_worker_command() {
   printf '%q %q %q %q' "$1" "$2" "$3" "$4"

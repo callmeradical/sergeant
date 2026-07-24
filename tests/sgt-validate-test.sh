@@ -730,13 +730,16 @@ for identity_path in "$fleet/task-1/primary_pane_identity" "$repo_state/pane_ide
   [[ "$status" -ne 0 ]]
   rm "$identity_path"
   mv "$saved_identity" "$identity_path"
-  chmod 644 "$identity_path"
-  PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
-    TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
-    "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
-  [[ "$(stat -c '%a' "$identity_path" 2>/dev/null || stat -f '%Lp' "$identity_path")" == "600" ]]
-  cleanup_validation_state
-  for unsafe_mode in 444 700 400 666; do
+  for legacy_mode in 644 664 640; do
+    chmod "$legacy_mode" "$identity_path"
+    PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+      TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+      "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+    [[ "$(stat -c '%a' "$identity_path" 2>/dev/null || stat -f '%Lp' "$identity_path")" == \
+      "600" ]]
+    cleanup_validation_state
+  done
+  for unsafe_mode in 444 700 400 666 755; do
     chmod "$unsafe_mode" "$identity_path"
     set +e
     output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
@@ -748,6 +751,19 @@ for identity_path in "$fleet/task-1/primary_pane_identity" "$repo_state/pane_ide
   done
   chmod 600 "$identity_path"
 done
+
+saved_identity="$repo_state/pane_identity.saved"
+mv "$repo_state/pane_identity" "$saved_identity"
+mkfifo "$repo_state/pane_identity"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]]
+rm "$repo_state/pane_identity"
+mv "$saved_identity" "$repo_state/pane_identity"
 
 set +e
 output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
