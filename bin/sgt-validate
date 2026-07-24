@@ -324,7 +324,7 @@ _release_validation_lock() {
   VALIDATION_LOCK_OWNED=false
 }
 _rollback_validation_launch() {
-  local current_identity handshake_path cleanup_failed=false
+  local current_identity handshake_path cleanup_failed=false checkout_delete_failed=false
   $VALIDATION_COMMITTED && return 0
   if [[ -n "${VALIDATION_HANDSHAKE:-}" ]]; then
     for handshake_path in "$VALIDATION_CHILD_READY" "$VALIDATION_CHILD_ACCEPTED" \
@@ -351,7 +351,19 @@ _rollback_validation_launch() {
       fi
     fi
   fi
-  _validation_remove_owned_paths || cleanup_failed=true
+  if $VALIDATION_WORKTREE_OWNED && \
+     [[ "$(_validation_path_identity "$VALIDATION_WORKTREE" || true)" == \
+       "$VALIDATION_WORKTREE_IDENTITY" ]]; then
+    if ! rm -rf "$VALIDATION_WORKTREE"; then
+      printf 'ERROR: rollback could not remove owned validation checkout: %s\n' \
+        "$VALIDATION_WORKTREE" >&2
+      cleanup_failed=true
+      checkout_delete_failed=true
+    fi
+  fi
+  if ! $checkout_delete_failed; then
+    _validation_remove_owned_paths || cleanup_failed=true
+  fi
   if $WINDOW_STATE_OWNED && ! _validation_path_exists "$REPO_STATE/window_name" && \
     [[ "$(_validation_path_identity "$WINDOW_BACKUP" || true)" == "$OLD_WINDOW_IDENTITY" ]]; then
     if ! ln "$WINDOW_BACKUP" "$REPO_STATE/window_name" 2>/dev/null || \
@@ -365,15 +377,6 @@ _rollback_validation_launch() {
     if ! ln "$STAGE_BACKUP" "$REPO_STATE/stage" 2>/dev/null || \
       ! rm -f "$STAGE_BACKUP"; then
       printf 'ERROR: rollback could not restore prior stage state\n' >&2
-      cleanup_failed=true
-    fi
-  fi
-  if $VALIDATION_WORKTREE_OWNED && \
-     [[ "$(_validation_path_identity "$VALIDATION_WORKTREE" || true)" == \
-       "$VALIDATION_WORKTREE_IDENTITY" ]]; then
-    if ! rm -rf "$VALIDATION_WORKTREE"; then
-      printf 'ERROR: rollback could not remove owned validation checkout: %s\n' \
-        "$VALIDATION_WORKTREE" >&2
       cleanup_failed=true
     fi
   fi
@@ -469,6 +472,8 @@ _validation_write_owned "$VALIDATION_WORKTREE_GIT_IDENTITY_RECORD" \
   _die "Failed to publish validation Git identity"
 _validation_write_owned "$VALIDATION_WORKTREE_OWNER_RECORD" "$VALIDATION_OWNER" \
   worktree-owner || _die "Failed to publish validation checkout owner"
+_validation_write_owned "$REPO_STATE/validation_head" "$CURRENT_HEAD" \
+  state-validation_head || _die "Failed to publish validation HEAD"
 _validation_transition intent-copy || _die "Failed to snapshot canonical validation intent"
 _validation_copy_owned "$WORKTREE/.sergeant-intent.md" "$VALIDATION_INTENT" intent || \
   _die "Failed to snapshot canonical validation intent"
@@ -540,9 +545,6 @@ WINDOW_STATE_OWNED=true
 _validation_replace_owned "$REPO_STATE/window_name" "$WINDOW_NAME" state-window_name \
   "$OLD_WINDOW_IDENTITY" "$WINDOW_BACKUP" || \
   _die "Failed to publish validation window name"
-_validation_write_owned "$REPO_STATE/validation_head" "$CURRENT_HEAD" \
-  state-validation_head || \
-  _die "Failed to publish validation HEAD"
 STAGE_STATE_OWNED=true
 _validation_replace_owned "$REPO_STATE/stage" "validation" state-stage \
   "$OLD_STAGE_IDENTITY" "$STAGE_BACKUP" || \
