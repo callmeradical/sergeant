@@ -179,7 +179,7 @@ _sgt_read_same_owned_files() {
   first_fd_mode="$(stat -L -c '%a' -- /dev/fd/8 2>/dev/null || stat -L -f '%Lp' /dev/fd/8 2>/dev/null)"
   second_fd_mode="$(stat -L -c '%a' -- /dev/fd/9 2>/dev/null || stat -L -f '%Lp' /dev/fd/9 2>/dev/null)"
   if [[ "$first_fd_mode" != "600" || "$second_fd_mode" != "600" || \
-    ! -O /dev/fd/8 || ! -O /dev/fd/9 || \
+    ! -f /dev/fd/8 || ! -f /dev/fd/9 || ! -O /dev/fd/8 || ! -O /dev/fd/9 || \
     ! "$first" -ef /dev/fd/8 || ! "$second" -ef /dev/fd/9 || \
     ! /dev/fd/8 -ef /dev/fd/9 || -L "$first" || -L "$second" ]]; then
     exec 8<&- 9<&-
@@ -190,7 +190,8 @@ _sgt_read_same_owned_files() {
   first_fd_mode="$(stat -L -c '%a' -- /dev/fd/8 2>/dev/null || stat -L -f '%Lp' /dev/fd/8 2>/dev/null)"
   second_fd_mode="$(stat -L -c '%a' -- /dev/fd/9 2>/dev/null || stat -L -f '%Lp' /dev/fd/9 2>/dev/null)"
   if [[ "$first_fd_mode" != "600" || "$second_fd_mode" != "600" || \
-    ! -O /dev/fd/8 || ! -O /dev/fd/9 || -L "$first" || -L "$second" || \
+    ! -f /dev/fd/8 || ! -f /dev/fd/9 || ! -O /dev/fd/8 || ! -O /dev/fd/9 || \
+    -L "$first" || -L "$second" || \
     ! "$first" -ef /dev/fd/8 || ! "$second" -ef /dev/fd/9 || \
     ! /dev/fd/8 -ef /dev/fd/9 ]]; then
     exec 8<&- 9<&-

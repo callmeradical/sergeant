@@ -295,6 +295,14 @@ if [[ "${FAIL_TRANSITION:-}" == "identity-chmod-race" && \
   chmod 644 "$last"
   exit 0
 fi
+if [[ "${FAIL_TRANSITION:-}" == "release-fifo-race" && "$last" == "$FIFO_PATH" ]]; then
+  "$REAL_STAT" "$@"
+  rm -f "$last"
+  mkfifo "$last"
+  chmod 600 "$last"
+  (printf '%s\n' "$FIFO_CONTENT" > "$last") </dev/null >/dev/null 2>&1 &
+  exit 0
+fi
 exec "$REAL_STAT" "$@"
 EOF
 chmod +x "$fake_bin/stat"
@@ -717,6 +725,20 @@ status=$?
 set -e
 [[ "$status" -ne 0 ]]
 chmod 600 "$fleet/task-1/primary_pane_identity"
+
+printf 'paired-release\n' > "$TEST_ROOT/fd-release"
+chmod 600 "$TEST_ROOT/fd-release"
+ln "$TEST_ROOT/fd-release" "$TEST_ROOT/fd-release-owner"
+set +e
+PATH="$fake_bin:$PATH" FAIL_TRANSITION=release-fifo-race \
+  FIFO_PATH="$TEST_ROOT/fd-release-owner" FIFO_CONTENT=paired-release \
+  bash -c 'source "$1"; _sgt_read_same_owned_files "$2" "$3"' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$TEST_ROOT/fd-release" "$TEST_ROOT/fd-release-owner" \
+  >/dev/null 2>&1
+status=$?
+set -e
+[[ "$status" -ne 0 && -p "$TEST_ROOT/fd-release-owner" ]]
+rm -f "$TEST_ROOT/fd-release" "$TEST_ROOT/fd-release-owner"
 
 set +e
 output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
