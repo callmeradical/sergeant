@@ -28,6 +28,19 @@ esac
 EOF
 chmod +x "$fake_bin/tmux"
 
+real_chmod="$(command -v chmod)"
+cat > "$fake_bin/chmod" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${LEGACY_IDENTITY_RACE:-}" == "replace-content" && "$1" == "600" && \
+  "$2" == */pane_identity ]]; then
+  printf 'tampered-pane\n' > "$2"
+  : > "${LEGACY_IDENTITY_RACE_MARKER:?}"
+fi
+exec "$REAL_CHMOD" "$@"
+EOF
+chmod +x "$fake_bin/chmod"
+export REAL_CHMOD="$real_chmod"
+
 printf 'needs_input\n' > "$worktree/.sergeant-status"
 printf 'Choose a safe option.\n' > "$worktree/.sergeant-message"
 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
@@ -60,6 +73,19 @@ for legacy_mode in 664 640; do
   [[ "$(stat -c '%a' "$repo/pane_identity" 2>/dev/null || stat -f '%Lp' "$repo/pane_identity")" == \
     "600" ]]
 done
+
+printf '%s\n' "$legacy_identity" > "$repo/pane_identity"
+chmod 664 "$repo/pane_identity"
+legacy_race_marker="$TEST_ROOT/legacy-pane-race"
+printf 'in_progress\n' > "$worktree/.sergeant-status"
+printf 'in_progress\n' > "$repo/status"
+LEGACY_IDENTITY_RACE=replace-content LEGACY_IDENTITY_RACE_MARKER="$legacy_race_marker" \
+  PANE_IDENTITY="$legacy_identity" EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
+[[ "$(cat "$repo/pane_identity")" == "$legacy_identity" ]]
+[[ "$(stat -c '%a' "$repo/pane_identity" 2>/dev/null || stat -f '%Lp' "$repo/pane_identity")" == \
+  "600" ]]
+[[ ! -e "$legacy_race_marker" ]]
 
 for forged_command in "wrapper $legacy_command extra" "${legacy_command}-prefix-collision"; do
   rm -f "$repo/pane_identity"
