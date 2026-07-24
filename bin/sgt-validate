@@ -222,11 +222,75 @@ _validation_replace_owned() {
     rm -f "$VALIDATION_CANDIDATE" || return 1
   fi
 }
+_validation_process_start() {
+  ps -o lstart= -p "$1" 2>/dev/null | awk '{$1=$1; print}'
+}
+_validation_lock_field() {
+  local key="$1" file="$2"
+  awk -F= -v key="$key" '
+    $1 == key { count++; value = substr($0, length(key) + 2) }
+    END { if (count == 1 && value != "") print value; else exit 1 }
+  ' "$file"
+}
+_remove_validation_lock_identity() {
+  local expected="$1" displaced identity
+  displaced="$REPO_STATE/.validation-launch.lock.recovery.$$.$RANDOM.$RANDOM"
+  ! _validation_path_exists "$displaced" || return 1
+  mv "$VALIDATION_LAUNCH_LOCK" "$displaced" || return 1
+  identity="$(_validation_path_identity "$displaced" || true)"
+  if [[ "$identity" != "$expected" ]]; then
+    if ! _validation_path_exists "$VALIDATION_LAUNCH_LOCK" && [[ -n "$identity" ]]; then
+      ln "$displaced" "$VALIDATION_LAUNCH_LOCK" 2>/dev/null && rm -f "$displaced"
+    fi
+    return 1
+  fi
+  rm -f "$displaced"
+}
+_recover_validation_lock() {
+  local identity owner_pid owner_start owner_coordinator owner_purpose current_start
+  [[ -f "$VALIDATION_LAUNCH_LOCK" && ! -L "$VALIDATION_LAUNCH_LOCK" ]] || return 1
+  [[ "$(wc -l < "$VALIDATION_LAUNCH_LOCK")" -eq 4 ]] || return 1
+  owner_pid="$(_validation_lock_field pid "$VALIDATION_LAUNCH_LOCK")" || return 1
+  owner_start="$(_validation_lock_field start "$VALIDATION_LAUNCH_LOCK")" || return 1
+  owner_coordinator="$(_validation_lock_field coordinator "$VALIDATION_LAUNCH_LOCK")" || return 1
+  owner_purpose="$(_validation_lock_field purpose "$VALIDATION_LAUNCH_LOCK")" || return 1
+  [[ "$owner_pid" =~ ^[0-9]+$ && "$owner_coordinator" == "$LOCK_COORDINATOR" && \
+    "$owner_purpose" == "$LOCK_PURPOSE" ]] || return 1
+  identity="$(_validation_path_identity "$VALIDATION_LAUNCH_LOCK")" || return 1
+  if kill -0 "$owner_pid" 2>/dev/null; then
+    current_start="$(_validation_process_start "$owner_pid" || true)"
+    [[ -n "$current_start" && "$current_start" != "$owner_start" ]] || return 1
+  fi
+  _remove_validation_lock_identity "$identity"
+}
+_acquire_validation_lock() {
+  local candidate identity owner_start attempt
+  candidate="$REPO_STATE/.validation-launch.lock.$$.$RANDOM.$RANDOM"
+  owner_start="$(_validation_process_start "$$")" || return 1
+  (umask 077; set -C; {
+    printf 'pid=%s\n' "$$"
+    printf 'start=%s\n' "$owner_start"
+    printf 'coordinator=%s\n' "$LOCK_COORDINATOR"
+    printf 'purpose=%s\n' "$LOCK_PURPOSE"
+  } > "$candidate") 2>/dev/null || return 1
+  _validation_record_owned_path "$candidate" || return 1
+  identity="$(_validation_path_identity "$candidate")" || return 1
+  for attempt in 1 2; do
+    if ln "$candidate" "$VALIDATION_LAUNCH_LOCK" 2>/dev/null; then
+      VALIDATION_LOCK_IDENTITY="$(_validation_path_identity "$VALIDATION_LAUNCH_LOCK")" || \
+        return 1
+      [[ "$VALIDATION_LOCK_IDENTITY" == "$identity" ]] || return 1
+      VALIDATION_LOCK_OWNED=true
+      rm -f "$candidate" || return 1
+      return 0
+    fi
+    [[ "$attempt" -eq 1 ]] && _recover_validation_lock || return 1
+  done
+  return 1
+}
 _release_validation_lock() {
   $VALIDATION_LOCK_OWNED || return 0
-  [[ "$(_validation_path_identity "$VALIDATION_LAUNCH_LOCK" || true)" == \
-    "$VALIDATION_LOCK_IDENTITY" ]] || return 1
-  rmdir "$VALIDATION_LAUNCH_LOCK" || return 1
+  _remove_validation_lock_identity "$VALIDATION_LOCK_IDENTITY" || return 1
   VALIDATION_LOCK_OWNED=false
 }
 _rollback_validation_launch() {
@@ -261,12 +325,11 @@ _rollback_validation_launch() {
 }
 trap _rollback_validation_launch EXIT
 
-if ! mkdir "$VALIDATION_LAUNCH_LOCK" 2>/dev/null; then
+LOCK_COORDINATOR="$PRIMARY_PANE_ID|$(cat "$TASK_STATE/primary_pane_identity")"
+LOCK_PURPOSE="$TASK_ID/$REPO/validation-launch"
+if ! _acquire_validation_lock; then
   _die "Validation launch is already reserved or unsafe: $VALIDATION_LAUNCH_LOCK"
 fi
-VALIDATION_LOCK_OWNED=true
-VALIDATION_LOCK_IDENTITY="$(_validation_path_identity "$VALIDATION_LAUNCH_LOCK")" || \
-  _die "Failed to capture validation launch reservation identity"
 OLD_WINDOW_IDENTITY="$(_validation_path_identity "$REPO_STATE/window_name")" || \
   _die "Failed to capture prior window state identity"
 OLD_STAGE_IDENTITY="$(_validation_path_identity "$REPO_STATE/stage")" || \
