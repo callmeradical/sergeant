@@ -67,7 +67,9 @@ case "$1" in
       fi
     else case "$*" in
       *'%77'*)
-        if [[ "${FAIL_TRANSITION:-}" == "pane-identity" || \
+        if [[ ! -e "$CONCURRENT_DIR/pane-live" && -z "${FAIL_TRANSITION:-}" ]]; then
+          exit 7
+        elif [[ "${FAIL_TRANSITION:-}" == "pane-identity" || \
           ( "${FAIL_TRANSITION:-}" == @(commit-child-exit|exit-after-committed|exit-during-success|exit-after-final-ack) && \
             ! -e "$CONCURRENT_DIR/pane-live" ) ]]; then
           exit 7
@@ -345,6 +347,16 @@ if grep -Fq 'Validate the interactive worker safely' "$TEST_ROOT/tmux.log" || \
 fi
 
 validation_worktree="$(cat "$repo_state/validation_worktree")"
+printf 'stale-finished-clone\n' > "$validation_worktree/stale-finished"
+printf 'exited:0\n' > "$repo_state/validation_status"
+rm -f "$concurrent_dir/pane-live"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+validation_worktree="$(cat "$repo_state/validation_worktree")"
+[[ "$(cat "$repo_state/validation_status")" == launched && \
+  ! -e "$validation_worktree/stale-finished" ]]
+
 rm "$repo_state/validation_pane" "$repo_state/validation_pane_identity" \
   "$repo_state/validation_pane_pid" "$repo_state/validation_process_group" \
   "$repo_state/validation_process_start" \
