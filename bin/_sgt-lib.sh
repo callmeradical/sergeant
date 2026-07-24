@@ -17,12 +17,7 @@ SGT_LIB_LOADED=1
 SERGEANT_CONFIG="${SERGEANT_CONFIG:-$HOME/.config/sergeant}"
 # shellcheck disable=SC2034  # Shared default consumed by sourced scripts.
 FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
-# Auto-detect the running agent from environment signals, then allow override.
-# Detection order:
-#   1. SERGEANT_AGENT env var — explicit override always wins
-#   2. OPENCODE / OPENCODE_PID — set by opencode when running a session
-#   3. CLAUDE_CODE_SESSION_ID — set by Claude Code when running a session
-#   4. Fallback: opencode
+# Interactive worker dispatch supports persistent OpenCode, Goose, and Claude sessions.
 _sgt_detect_agent() {
   if [[ -n "${SERGEANT_AGENT:-}" ]]; then
     echo "$SERGEANT_AGENT"
@@ -85,36 +80,6 @@ _sgt_is_git_repo() {
 _die()  { echo "ERROR: $*" >&2; exit 1; }
 _info() { echo "  $*"; }
 
-# ── Agent command builder ─────────────────────────────────────────────────────
-# _sgt_agent_run_cmd <agent> <message>
-#
-# Returns the shell command string to launch a non-interactive agent session
-# with <message> as the first prompt, using the correct flags for each agent.
-#
-# Supported agents:
-#   opencode   → opencode run --auto "<message>"
-#   claude     → claude --dangerously-skip-permissions "<message>"
-#   (default)  → <agent> run --auto "<message>"   (opencode-style fallback)
-
-_sgt_agent_run_cmd() {
-  local agent="$1"
-  local message="$2"
-  local bin
-  bin="$(basename "$agent")"
-
-  case "$bin" in
-    claude)
-      # claude: pass message as positional arg with dangerously-skip-permissions
-      # to bypass all permission dialogs in autonomous mode.
-      printf '%s --dangerously-skip-permissions %q' "$agent" "$message"
-      ;;
-    opencode|oc|*)
-      # opencode (and unknown agents): use `run --auto` for non-interactive mode.
-      printf '%s run --auto %q' "$agent" "$message"
-      ;;
-  esac
-}
-
 # ── Wiki integration ──────────────────────────────────────────────────────────
 # _sgt_wiki_write <title> <type> <description> <tags> <body>
 #
@@ -152,6 +117,172 @@ _require_tmux() {
 }
 _require_git() {
   command -v git &>/dev/null || _die "git is required"
+}
+_require_interactive_agent() {
+  local agent_name
+  agent_name="$(basename "$AGENT_CMD")"
+  case "$agent_name" in
+    opencode|oc|goose|claude) ;;
+    *) _die "unsupported interactive agent: $AGENT_CMD (expected opencode, goose, or claude)" ;;
+  esac
+  command -v "$AGENT_CMD" &>/dev/null || _die "interactive agent not found: $AGENT_CMD"
+  if [[ "$agent_name" == "goose" ]] && ! "$AGENT_CMD" session --help >/dev/null 2>&1; then
+    _die "Goose does not support interactive sessions: expected 'goose session --help' to succeed"
+  fi
+}
+_sgt_pane_identity() {
+  local pane="$1"
+  tmux display-message -p -t "$pane" \
+    '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' 2>/dev/null
+}
+_sgt_pane_identity_matches() {
+  local pane="$1" repo_dir="$2" identity_name="${3:-pane_identity}" expected actual
+  expected="$(cat "$repo_dir/$identity_name" 2>/dev/null || true)"
+  [[ -n "$expected" ]] || return 1
+  actual="$(_sgt_pane_identity "$pane")" || return 1
+  [[ "$actual" == "$expected" && "${actual%%|*}" == "0" ]]
+}
+_sgt_worker_command() {
+  printf '%q %q %q %q' "$1" "$2" "$3" "$4"
+}
+_sgt_notification_target_create() {
+  local repo_dir="$1" notification_id="$2" pane_identity="$3"
+  local nonce target_dir temporary
+  nonce="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  target_dir="$repo_dir/notifications/$notification_id/targets/$nonce"
+  mkdir -p "$target_dir" || return 1
+  printf '%s\n' "$pane_identity" > "$target_dir/pane_identity" || return 1
+  temporary="$repo_dir/notification_target.tmp.$$"
+  printf '%s\n' "$nonce" > "$temporary" || return 1
+  mv "$temporary" "$repo_dir/notification_target" || return 1
+  printf '%s\n' "$pane_identity" > "$repo_dir/notification_target_pane_identity" || return 1
+  printf '%s\n' "$nonce"
+}
+_sgt_publish_worker_notification() {
+  local repo_dir="$1" worktree="$2" notification_id="$3" kind="$4" instruction="$5"
+  local state_dir notification_state notification_tmp current_id current_ack current_delivered
+  local proof_dir proof_tmp repo_tmp active_id current_ack_token current_delivered_identity current_target_identity
+
+  [[ "$notification_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+  state_dir="$repo_dir/notifications/$notification_id"
+  notification_state="$state_dir/notification"
+  mkdir -p "$state_dir" || return 1
+  notification_tmp="$state_dir/notification.tmp.$$"
+  {
+    printf 'notification_id=%s\n' "$notification_id"
+    printf 'kind=%s\n' "$kind"
+    printf 'instruction=%s\n' "$instruction"
+  } > "$notification_tmp"
+  if [[ -f "$notification_state" ]] && cmp -s "$notification_tmp" "$notification_state"; then
+    rm -f "$notification_tmp"
+  else
+    mv "$notification_tmp" "$notification_state" || {
+      rm -f "$notification_tmp"
+      return 1
+    }
+  fi
+
+  current_id="$(cat "$repo_dir/notification_id" 2>/dev/null || true)"
+  current_ack="$(cat "$worktree/.sergeant-notification-ack" 2>/dev/null || true)"
+  current_delivered="$(cat "$repo_dir/notification_delivered" 2>/dev/null || true)"
+  current_delivered_identity="$(cat "$repo_dir/notification_delivered_pane_identity" 2>/dev/null || true)"
+  current_target_identity="$(cat "$repo_dir/notification_target_pane_identity" 2>/dev/null || true)"
+  current_ack_token="$current_id|$current_target_identity"
+  if [[ -n "$current_id" ]]; then
+    proof_dir="$repo_dir/notifications/$current_id"
+    mkdir -p "$proof_dir" || return 1
+    if [[ "$current_ack" == "$current_ack_token" && ! -f "$proof_dir/acknowledged" ]]; then
+      proof_tmp="$proof_dir/acknowledged.tmp.$$"
+      printf '%s\n' "$current_ack_token" > "$proof_tmp"
+      mv "$proof_tmp" "$proof_dir/acknowledged" || {
+        rm -f "$proof_tmp"
+        return 1
+      }
+    fi
+    if [[ "$current_delivered" == "$current_id" && ! -f "$proof_dir/delivered" ]]; then
+      proof_tmp="$proof_dir/delivered.tmp.$$"
+      printf '%s\n' "$current_id" > "$proof_tmp"
+      mv "$proof_tmp" "$proof_dir/delivered" || {
+        rm -f "$proof_tmp"
+        return 1
+      }
+    fi
+    if [[ "$current_delivered" == "$current_id" && -n "$current_delivered_identity" &&
+          ! -f "$proof_dir/delivered_pane_identity" ]]; then
+      proof_tmp="$proof_dir/delivered_pane_identity.tmp.$$"
+      printf '%s\n' "$current_delivered_identity" > "$proof_tmp"
+      mv "$proof_tmp" "$proof_dir/delivered_pane_identity" || {
+        rm -f "$proof_tmp"
+        return 1
+      }
+    fi
+    if [[ "$current_delivered" == "$current_id" && -n "$current_target_identity" &&
+          ! -f "$proof_dir/target_pane_identity" ]]; then
+      proof_tmp="$proof_dir/target_pane_identity.tmp.$$"
+      printf '%s\n' "$current_target_identity" > "$proof_tmp"
+      mv "$proof_tmp" "$proof_dir/target_pane_identity" || {
+        rm -f "$proof_tmp"
+        return 1
+      }
+    fi
+  fi
+
+  if [[ "$current_id" != "$notification_id" ]]; then
+    repo_tmp="$repo_dir/notification_id.tmp.$$"
+    printf '%s\n' "$notification_id" > "$repo_tmp"
+    mv "$repo_tmp" "$repo_dir/notification_id" || {
+      rm -f "$repo_tmp"
+      return 1
+    }
+  fi
+  if [[ "$current_id" != "$notification_id" ]]; then
+    rm -f "$worktree/.sergeant-notification-accept"
+  fi
+  active_id="$(sed -n 's/^notification_id=//p' "$worktree/.sergeant-notification" 2>/dev/null || true)"
+  if [[ "$active_id" != "$notification_id" ]]; then
+    notification_tmp="$worktree/.sergeant-notification.tmp.$$"
+    cp "$notification_state" "$notification_tmp" || return 1
+    mv "$notification_tmp" "$worktree/.sergeant-notification" || {
+      rm -f "$notification_tmp"
+      return 1
+    }
+  fi
+}
+_sgt_wait_worker_notification() {
+  local pane="$1" repo_dir="$2" notification_id="$3"
+  local timeout="${SGT_NOTIFICATION_ACK_TIMEOUT:-60}" accepted attempt delivered expected_identity nonce pane_identity target_dir
+  [[ "$timeout" =~ ^[0-9]+$ ]] || return 1
+
+  attempt=0
+  while :; do
+    expected_identity="$(cat "$repo_dir/pane_identity" 2>/dev/null || true)"
+    pane_identity="$(_sgt_pane_identity "$pane")" || return 1
+    [[ -n "$expected_identity" && "$pane_identity" == "$expected_identity" &&
+       "${pane_identity%%|*}" == 0 ]] || return 1
+    nonce="$(cat "$repo_dir/notification_target" 2>/dev/null || true)"
+    [[ "$nonce" =~ ^[a-f0-9]{32}$ ]] || return 1
+    target_dir="$repo_dir/notifications/$notification_id/targets/$nonce"
+    [[ "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$pane_identity" ]] || return 1
+    delivered="$(cat "$target_dir/delivered" 2>/dev/null || true)"
+    accepted="$(cat "$target_dir/accepted" 2>/dev/null || true)"
+    [[ "$delivered" == "$notification_id|$nonce" && "$accepted" == "$notification_id|$nonce" ]] && return 0
+    (( attempt >= timeout * 10 )) && return 1
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+}
+_sgt_worktree_is_validation_clean() {
+  local worktree="$1" untracked
+  git -C "$worktree" diff --quiet --ignore-submodules -- && \
+    git -C "$worktree" diff --cached --quiet --ignore-submodules -- || return 1
+  untracked="$(git -C "$worktree" ls-files --others --exclude-standard | \
+    while IFS= read -r path; do
+      case "$path" in
+        .sergeant-*) ;;
+        *) printf '%s\n' "$path" ;;
+      esac
+    done)"
+  [[ -z "$untracked" ]]
 }
 _sgt_td_normalize_version() {
   printf '%s\n' "${1#v}"

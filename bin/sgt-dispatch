@@ -13,6 +13,9 @@
 #   --td <task-id>            Pull brief and context from a td task
 #   --branch <name>           Branch name for all worktrees (default: derived from brief)
 #   --deps "repo1>repo2,..."  Dependency ordering: repo1 must finish before repo2 starts
+#   --agent <harness>         Interactive harness: opencode, goose, or claude
+#   --stage <name>            Window stage slug (default: implementation)
+#   --intent-file <path>       Canonical structured intent for safety/stateful work
 #   --dry-run                 Print what would happen, don't execute
 #
 # Examples:
@@ -25,6 +28,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-intent.sh
+source "$SCRIPT_DIR/_sgt-intent.sh"
 
 # ── Parse args ───────────────────────────────────────────────────────────────
 
@@ -39,6 +44,9 @@ REPOS_ARG=""
 BRANCH_ARG=""
 DEPS_ARG=""
 TD_TASK_ID=""
+INTENT_FILE=""
+AGENT_OVERRIDE=""
+STAGE="implementation"
 DRY_RUN=false
 
 # Brief is optional positional arg (not present when --td is used)
@@ -52,10 +60,28 @@ while [[ $# -gt 0 ]]; do
     --td)      TD_TASK_ID="$2";  shift 2 ;;
     --branch)  BRANCH_ARG="$2";  shift 2 ;;
     --deps)    DEPS_ARG="$2";    shift 2 ;;
+    --agent)
+      [[ -n "${2:-}" ]] || _die "--agent requires opencode, goose, or claude"
+      AGENT_OVERRIDE="$2"
+      shift 2
+      ;;
+    --stage)
+      [[ -n "${2:-}" ]] || _die "--stage requires a lowercase slug"
+      STAGE="$2"
+      shift 2
+      ;;
+    --intent-file)
+      [[ -n "${2:-}" ]] || _die "--intent-file requires a path"
+      INTENT_FILE="$2"
+      shift 2
+      ;;
     --dry-run) DRY_RUN=true;     shift   ;;
     *) _die "Unknown option: $1" ;;
   esac
 done
+
+[[ -z "$AGENT_OVERRIDE" ]] || AGENT_CMD="$AGENT_OVERRIDE"
+[[ "$STAGE" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || _die "stage must be a lowercase slug: $STAGE"
 
 # ── Resolve td task (if --td provided) ───────────────────────────────────────
 
@@ -117,6 +143,16 @@ IFS=',' read -ra TARGET_REPOS <<< "$REPOS_ARG"
 _require_yq
 _require_git
 _require_tmux
+[[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" ]] || \
+  _die "sgt-dispatch requires an interactive coordinator tmux pane"
+PRIMARY_PANE_ID="$TMUX_PANE"
+PRIMARY_PANE_IDENTITY="$(_sgt_pane_identity "$PRIMARY_PANE_ID" || true)"
+[[ -n "$PRIMARY_PANE_IDENTITY" && "${PRIMARY_PANE_IDENTITY%%|*}" == "0" && \
+   "${PRIMARY_PANE_IDENTITY#*|}" == "$PRIMARY_PANE_ID|"* ]] || \
+  _die "sgt-dispatch could not bind exact coordinator pane identity"
+_require_interactive_agent
+
+INTENT_TMP="$(mktemp)"
 
 # ── Auto-create td tasks when no --td given ───────────────────────────────────
 # When we weren't given a specific task ID, create td tasks in each target repo
@@ -129,9 +165,12 @@ REPO_TD_MAP="$(mktemp)"
 TD_CREATE_STATE_FILE="$(mktemp)"
 TD_CREATE_STDERR="$(mktemp)"
 _cleanup_dispatch_tmps() {
-  rm -f "$REPO_TD_MAP" "$TD_CREATE_STATE_FILE" "$TD_CREATE_STDERR" "${DEPS_TMP:-}"
+  rm -f "$REPO_TD_MAP" "$TD_CREATE_STATE_FILE" "$TD_CREATE_STDERR" "$INTENT_TMP" "${DEPS_TMP:-}"
 }
 trap _cleanup_dispatch_tmps EXIT
+
+_sgt_intent_prepare "$INTENT_FILE" "$BRIEF" "$INTENT_TMP"
+INTENT_REVISION="$(_sgt_intent_revision "$INTENT_TMP")"
 
 _rollback_generated_td_tasks() {
   local failure_message="$1"
@@ -351,9 +390,7 @@ _record_dispatch_orphan() {
 # ── Capture primary pane (for sgt-notify callbacks) ──────────────────────────
 
 PRIMARY_PANE=""
-if [[ -n "${TMUX:-}" ]]; then
-  PRIMARY_PANE="$(tmux display-message -p '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)"
-fi
+PRIMARY_PANE="$(tmux display-message -p '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)"
 
 OC_PID="${OPENCODE_PID:-}"
 OC_SESSION=""
@@ -377,11 +414,17 @@ if $DRY_RUN; then
   echo "[dry-run] fleet dir: $TASK_DIR"
 else
   mkdir -p "$TASK_DIR"
+  _sgt_intent_install "$INTENT_TMP" "$TASK_DIR/.sergeant-intent.md"
+  printf '%s\n' "$INTENT_REVISION" > "$TASK_DIR/intent_revision"
   printf "Project: %s\nBrief:   %s\nBranch:  %s\nRepos:   %s\n" \
     "$PROJECT" "$BRIEF" "$BRANCH" "${TARGET_REPOS[*]}" > "$TASK_DIR/brief.md"
   [[ -n "$TD_TASK_ID" ]] && echo "$TD_TASK_ID" > "$TASK_DIR/td_task"
   date -u +%Y-%m-%dT%H:%M:%SZ > "$TASK_DIR/started"
   [[ -n "$PRIMARY_PANE" ]] && echo "$PRIMARY_PANE" > "$TASK_DIR/primary_pane"
+  if [[ -n "$PRIMARY_PANE_ID" && -n "$PRIMARY_PANE_IDENTITY" ]]; then
+    printf '%s\n' "$PRIMARY_PANE_ID" > "$TASK_DIR/primary_pane_id"
+    printf '%s\n' "$PRIMARY_PANE_IDENTITY" > "$TASK_DIR/primary_pane_identity"
+  fi
   if [[ -n "$OC_SESSION" ]]; then
     jq -nc --argjson pid "$OC_PID" --arg sessionId "$OC_SESSION" \
       '{pid: $pid, sessionId: $sessionId}' > "$TASK_DIR/oc_target.json"
@@ -475,6 +518,8 @@ for rname in "${TARGET_REPOS[@]}"; do
   # ── Acquire worktree ─────────────────────────────────────────────────────────
 
   mkdir -p "$repo_task_dir"
+  _sgt_intent_install "$INTENT_TMP" "$repo_task_dir/.sergeant-intent.md"
+  printf '%s\n' "$INTENT_REVISION" > "$repo_task_dir/intent_revision"
   echo "$BRANCH"    > "$repo_task_dir/branch"
   echo "dispatched" > "$repo_task_dir/status"
   [[ -n "$wait_for" ]] && echo "$wait_for" > "$repo_task_dir/wait_for"
@@ -515,6 +560,20 @@ for rname in "${TARGET_REPOS[@]}"; do
   fi
 
   echo "$worktree_path" > "$repo_task_dir/worktree"
+  [[ -f "$worktree_path/.git" && ! -L "$worktree_path/.git" ]] || \
+    _die "worktree has no immutable Git pointer: $worktree_path"
+  worktree_git_pointer="$(cat "$worktree_path/.git")"
+  [[ "$worktree_git_pointer" == "gitdir: "* ]] || \
+    _die "worktree Git pointer is malformed: $worktree_path/.git"
+  worktree_git_dir="${worktree_git_pointer#gitdir: }"
+  if [[ "$worktree_git_dir" != /* ]]; then
+    worktree_git_dir="$worktree_path/$worktree_git_dir"
+  fi
+  worktree_git_dir="$(cd "$worktree_git_dir" 2>/dev/null && pwd -P)" || \
+    _die "worktree Git directory is unavailable: $worktree_git_dir"
+  printf '%s\n' "$worktree_git_pointer" > "$repo_task_dir/worktree_git_pointer"
+  printf '%s\n' "$worktree_git_dir" > "$repo_task_dir/worktree_git_dir"
+  _sgt_intent_install "$INTENT_TMP" "$worktree_path/.sergeant-intent.md"
 
   # ── Write brief ─────────────────────────────────────────────────────────────
 
@@ -620,6 +679,8 @@ Before implementation, fetch refs and pin the fixed point, normally the merge-ba
 
 Identify the originating spec from the full td task context, this Sergeant mission, and any referenced issue, PRD, spec, or ADR. If no originating spec exists, record that explicitly.
 
+.sergeant-intent.md is the canonical source for implementation decisions, independent reviews, PR description, and the one final no-mistakes --intent. Intent revision: $INTENT_REVISION. Successor and recovery work must inherit this exact revision. Do not silently regenerate it; only an audited human decision creates a new intent revision.
+
 ### 2. Route the work
 
 Triage context and readiness before choosing an implementation loop: read the full td issue/spec/comments and linked material, check for redundant or prior work, identify the work category, and record whether it is ready.
@@ -636,13 +697,19 @@ If a canonical skill cannot be loaded, follow the embedded rules in this brief f
 
 Establish public behavioral seams before writing tests. Use seams already specified by td/spec; if a consequential seam is genuinely undecided, surface needs_input rather than guessing.
 
+For safety-sensitive or stateful work, implementation is blocked unless the canonical intent has concrete State Transitions, Failure Windows, and Negative Test Matrix sections supplied through the explicit readiness path. Publish needs_input when any is missing. The named standard-isolated lighter path applies only when the objective does not trigger Sergeant's safety/stateful classifier.
+
 For each non-trivial behavior, work red before green: one vertical slice, test, and minimum implementation at a time. Run the failing focused test for the right reason, add only enough implementation to pass, then refactor after green. Reject tautological tests, internal mocking, and horizontal slicing such as writing all tests before all implementation. Scrutinize refactoring during review. Do not speculate ahead.
 
 ### 4. Escalate and resume
 
-Your non-interactive agent turns run under a persistent supervisor. Do not use sleep to keep the agent process alive. The supervisor waits outside the agent process, captures the OpenCode session ID, and resumes that session after a serialized response is delivered.
+Your worker runs as a persistent interactive agent session in its recorded tmux pane. Non-interactive agent modes are prohibited: do not launch \`opencode run\`, \`goose run\`, Claude print mode, \`--auto\`, \`--prompt\`, or an equivalent one-shot agent. Sergeant delivers only a fixed ID-bearing notification through interactive terminal input; prompt, response, and secret bodies remain in durable files and never appear in process arguments.
+
+For every Sergeant notification, read \`.sergeant-notification\` and copy the exact supervisor-scoped token from the nudge (\`notification_id|target_nonce\`) to the named file under \`.sergeant-notification-acks/\`. Do not act until that supervisor sends acceptance and the named file under \`.sergeant-notification-accepts/\` contains the same token. Then follow the instruction exactly once and write the token to the named file under \`.sergeant-notification-complete/\`. Repeated nudges with the same token are retries, not new work.
 
 If an agent exits before a terminal or waiting state, the supervisor records \`orphaned\` with durable diagnostics and td recovery pointers. Resume orphaned work through \`sgt-respond\`; do not overwrite or discard its recovery state.
+
+When Sergeant notifies you of a response, read \`.sergeant-response\`, \`.sergeant-response-id\`, and \`.sergeant-response-generation\`; apply the approved decision once and restore \`.sergeant-status\` to \`in_progress\`, a terminal state, or a later gate generation. Write \`.sergeant-response-applied\` with exactly one \`response_id\`, \`gate_generation\`, and matching \`status\`, then run \`sgt-ack-response $TASK_ID $rname "\$(cat .sergeant-response-id)"\` from this exact worker pane. Do not clear, replay, or acknowledge a response by hand; the command validates pane ownership and proof, publishes retryable archive and acknowledgement state, and clears plaintext transport only after that state converges.
 
 Completion requires both .sergeant-status=done and a non-empty .sergeant-result; a PR or successful turn alone is not terminal completion.
 
@@ -650,11 +717,7 @@ Supported nonterminal statuses are \`in_progress\`, \`needs_input\`, and \`block
 
 For \`needs_input\` or \`blocked\`, write \`.sergeant-message\` with concise context, evidence, the exact question or blocker, a recommendation, and 2-4 options when useful. Call \`sgt-notify $TASK_ID "needs_input [$rname]: <summary>"\` or the equivalent \`blocked\` message. The worker remains alive and waits for a response; do not exit or mark the task failed.
 
-When \`.sergeant-response\` appears, read it as data and return status to \`in_progress\`. If \`.sergeant-response-id\` exists, preserve that opaque ID but do not write \`.sergeant-response-ack\` or remove the response transport yet. Finalize that response only after one of these proof conditions:
-1. the turn publishes \`needs_input\` or \`blocked\` and a resumable session ID was captured for the continued session;
-2. the turn publishes \`done\` with a non-empty \`.sergeant-result\`.
-3. the turn publishes explicit terminal \`failed: <reason>\`, which is unrecoverable and must clean response plaintext rather than leave a stranded retry state.
-If \`.sergeant-response-id\` exists and one of those proof conditions is met, write the consumed ID to \`.sergeant-response-ack\` and consume/remove the response transport atomically. If no response ID exists, still consume/remove the response transport exactly once through the legacy path without writing an ack file. For unexpected exit, invalid status, or missing resumable session, retain the response transport for retry and keep diagnostics. Never write response text into the ack file. Clear \`.sergeant-message\`, log the decision to td when tracked, and continue only when a consequential question is answered.
+When \`.sergeant-response\` appears, follow the post-application proof and \`sgt-ack-response\` protocol above. Valid proof is \`in_progress\` after applying the decision, \`done\` with a non-empty result, \`failed: <nonblank reason>\`, or a later \`needs_input\`/\`blocked\` gate generation. Unexpected exit or invalid proof retains active transport, while successful acknowledgement archives replay evidence before clearing it. Clear \`.sergeant-message\`, log the decision to td when tracked, and continue only when a consequential question is answered.
 
 Maintain \`.sergeant-gate-generation\` as a monotonic integer for waiting gates. Before every new \`needs_input\` or \`blocked\` publication, increment the generation and persist it before writing the waiting status and message. A repeated blocker message is still a new gate only when the generation advances.
 
@@ -662,15 +725,17 @@ Maintain \`.sergeant-gate-generation\` as a monotonic integer for waiting gates.
 
 Run focused tests and typechecking/lint regularly. Run the repository's full required suite once at the end.
 
-Do not run no-mistakes for routine worker completion, prototypes, investigations, documentation drafts, intermediate commits, or remediation loops. Run no-mistakes once only at an explicit final shipping boundary, after implementation and repository-native validation are complete. An explicit user instruction to run no-mistakes overrides this default.
+Before the final shipping boundary, launch an independent readiness review over mutation before validation, partial publication and rollback, identity and provenance, stale and legacy states, suppressed failures, race windows, and missing negative tests. Record evidence against the canonical intent.
 
-At that boundary, invoke \`no-mistakes axi run --intent "<the user's objective and approved tradeoffs>"\`, using \`--skip=<steps>\` only for gates already proven irrelevant. Treat no-mistakes as validation-only: never let it fix or remediate findings. Stop driving the pipeline at \`checks-passed\`; do not wait for merge monitoring.
+Commit the reviewed branch before publishing readiness. Validation requires a clean worktree at that committed HEAD; do not create readiness evidence from an uncommitted diff.
+
+Never run no-mistakes from this agent process. After implementation, repository-native validation, and independent reviews complete with zero blockers, write \`.sergeant-validation-ready\` with exactly one \`intent_revision=$INTENT_REVISION\`, the current \`head_sha=\$(git rev-parse HEAD)\`, and \`standards_review=passed\`, \`spec_review=passed\`, and \`readiness_review=passed\`. Then notify Sergeant that coordinator-owned validation may begin.
+
+The coordinator invokes \`sgt-validate $TASK_ID $rname\`, which runs no-mistakes interactively in a split pane of this window with the canonical intent and without \`--yes\`. The validation run is read-only; actionable findings become separate td work.
 
 ### 6. Route no-mistakes findings
 
-At a no-mistakes gate, classify every finding before responding. Every actionable finding creates or updates separate deduplicated owning-repo td work: correctness, security, data-integrity, and test findings cannot be deferred or ignored, must use disposition \`gate\`, and create P1 work; ask-user findings must use \`ask-user\`, create P1 work, and still require user escalation. Warning-level actionable review or documentation debt may use \`td\` and creates P2 work; informational actionable debt may use \`td\` and creates P3 work. Cosmetic and evidence-only noise must use \`ignore\` and creates no card.
-
-Record each classification with \`sgt-no-mistakes-finding $PROJECT $rname\`. Pass the run ID, head SHA, finding ID, severity, kind, file/line, description, and originating intent with the chosen \`--disposition\`. The command creates or updates one deduplicated card in this owning repo. On rerun, keep visible active cards in their current state; only closed cards are reopened and deferred cards are undeferred before refreshing the finding body. Preserve any existing repo-specific or manually added td labels, and ensure the required \`no-mistakes\` and \`finding\` labels are present once each. A td disposition allows the gate to continue without mutating the delivery branch. Gate and ask-user dispositions create or update the card, then return a blocking status and do not authorize approval; for ask-user, follow the \`needs_input\` escalation protocol above.
+The Sergeant coordinator owns every no-mistakes gate and finding. Do not approve a validation gate, route a finding, or remediate validation output from this worker pane. Actionable findings become separate deduplicated td work and remediation never runs no-mistakes. Resume this worker only through an explicit Sergeant response tied to that owning work.
 
 ### 7. Independent $review_axis_label-axis review
 
@@ -685,7 +750,7 @@ Remediate every blocking repository-native test or independent-review finding, r
 
 ### 9. Complete delivery and td lifecycle
 
-Commit branch \`$BRANCH\` and open the PR via \`gh pr create\`. If this work has a td task, log decisions throughout, handoff before td review, and run td review only after implementation and review evidence is ready.
+The branch was committed before readiness. Open the PR via \`gh pr create\`. If this work has a td task, log decisions throughout, handoff before td review, and run td review only after implementation and review evidence is ready.
 
 Do not write \`done\` merely because a PR exists. Success requires: the branch is committed; the PR is open; focused and full validation are complete; required CI is green; there are no unresolved non-outdated review threads; dependency order is satisfied; and independent review is complete with zero blocking findings.
 
@@ -705,18 +770,17 @@ BRIEF_EOF
 
   # ── Spawn agent ─────────────────────────────────────────────────────────────
 
-  # Window name: <short-task-id>/<repo> so multiple tasks don't collide
-  # in the shared "sgt" session. E.g. "feat-abc123/smith-app"
-  SHORT_TASK="${TASK_ID:0:12}"
-  WINDOW_NAME="${SHORT_TASK}/${rname}"
+  WINDOW_NAME="${STAGE}-${rname}-${TASK_ID}"
   _info "spawning tmux window '$WINDOW_NAME' in session $TMUX_SESSION"
-  AGENT_INIT_MSG="Read the .sergeant-brief.md file and execute the mission."
   printf '%s\n' "$TMUX_SESSION" > "$repo_task_dir/tmux_session"
   printf '%s\n' "$WINDOW_NAME" > "$repo_task_dir/window_name"
+  printf '%s\n' "$STAGE" > "$repo_task_dir/stage"
   printf '%s\n' "$AGENT_CMD" > "$repo_task_dir/agent"
-  printf '%s\n' "$AGENT_INIT_MSG" > "$repo_task_dir/initial_message"
-  printf -v WORKER_RUN_CMD '%q %q %q %q %q' \
-    "$SCRIPT_DIR/sgt-worker" "$repo_task_dir" "$worktree_path" "$AGENT_CMD" "$AGENT_INIT_MSG"
+  initial_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  _sgt_publish_worker_notification "$repo_task_dir" "$worktree_path" \
+    "$initial_notification_id" initial "Read the .sergeant-brief.md file and execute the mission."
+  WORKER_RUN_CMD="$(_sgt_worker_command \
+    "$SCRIPT_DIR/sgt-interactive-worker" "$repo_task_dir" "$worktree_path" "$AGENT_CMD")"
   if pane_target="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" \
     -n "$WINDOW_NAME" -c "$worktree_path" "$WORKER_RUN_CMD")"; then
     if [[ -z "$pane_target" ]]; then
@@ -726,6 +790,24 @@ BRIEF_EOF
       _die "tmux returned no pane for $rname"
     fi
     printf '%s\n' "$pane_target" > "$repo_task_dir/pane"
+    if pane_identity="$(_sgt_pane_identity "$pane_target")" && [[ -n "$pane_identity" ]]; then
+      printf '%s\n' "$pane_identity" > "$repo_task_dir/pane_identity"
+      _sgt_notification_target_create "$repo_task_dir" "$initial_notification_id" \
+        "$pane_identity" >/dev/null
+    else
+      tmux kill-pane -t "$pane_target" 2>/dev/null || true
+      printf 'orphaned\n' > "$repo_task_dir/status"
+      printf 'tmux failed to capture exact worker pane identity\n' > "$repo_task_dir/diagnostic"
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
+      _die "tmux failed to capture exact worker pane identity for $rname"
+    fi
+    if ! _sgt_wait_worker_notification "$pane_target" "$repo_task_dir" "$initial_notification_id"; then
+      tmux kill-pane -t "$pane_target" 2>/dev/null || true
+      printf 'orphaned\n' > "$repo_task_dir/status"
+      printf 'interactive worker did not acknowledge its durable notification\n' > "$repo_task_dir/diagnostic"
+      "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
+      _die "interactive worker notification acknowledgement timed out for $rname"
+    fi
   else
     printf 'orphaned\n' > "$repo_task_dir/status"
     printf 'tmux failed to launch worker supervisor\n' > "$repo_task_dir/diagnostic"
@@ -743,7 +825,7 @@ if ! $DRY_RUN; then
   echo ""
   echo "Task ID: $TASK_ID"
   echo "Fleet:   $TASK_DIR"
-  echo "Observe: tmux attach -t $TMUX_SESSION  (windows: ${SHORT_TASK:-$TASK_ID}/<repo>)"
+  echo "Observe: tmux attach -t $TMUX_SESSION  (windows: <stage>-<repo>-$TASK_ID)"
   echo "Watch:   bin/sgt-watch $TASK_ID"
   echo ""
 

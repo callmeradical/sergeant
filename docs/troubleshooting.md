@@ -72,7 +72,10 @@ record, and do not clean its worktree.
 
 Do not overwrite it. Inspect fleet response generation and worker acknowledgement.
 Resume/recover the exact worker so it consumes the pending response, or wait for
-the current generation to reach a terminal outcome.
+the current generation to reach a terminal outcome. If the worker already applied
+the response and the archive entry exists, rerun the same
+`sgt-ack-response <task> <repo> <response-id>` command from the recorded worker
+pane to finish acknowledgement and plaintext cleanup.
 
 ## Pane is missing
 
@@ -143,8 +146,11 @@ existing graph without confirming the desired global-per-project path.
 
 Do not force or delete fleet files manually. Cleanup safety depends on terminal
 proof, staged evidence, explicit cleanup phases, exact configured repository
-identity, and original worktree/lease identity. Preserve the worktree and run the
-owning remediation or supported retry path.
+identity, original worktree/lease identity, and fully converged response
+acknowledgement. Preserve the worktree and run the owning remediation or
+supported retry path; cleanup intentionally refuses while response archive,
+acknowledgement markers, or active plaintext transport are only partially
+published.
 
 ## Where to inspect state
 

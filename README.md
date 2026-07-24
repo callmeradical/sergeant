@@ -72,8 +72,8 @@ EOF
 cp schema/project.yaml.example ~/.config/sergeant/myproject.yaml
 # Edit it — set your repo names and paths relative to dev_root
 
-# Launch your agent harness — AGENTS.md takes over from here
-opencode    # or: claude
+# Launch the coordinator in tmux so dispatch can bind exact ownership
+tmux new-session -s sergeant-coordinator 'opencode --dangerously-skip-permissions'
 ```
 
 Then talk to it:
@@ -145,24 +145,39 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-sync <project>` | Clone missing repos, pull existing ones |
 | `bin/sgt-context <project>` | Emit full agent context block for a project |
 | `bin/sgt-graphify <project>` | Build and publish the merged project graph |
-| `bin/sgt-dispatch <project> "<brief>" [options]` | Dispatch agents across repos |
+| `bin/sgt-dispatch <project> "<brief>" [--intent-file <path>] [options]` | Dispatch agents with one canonical `.sergeant-intent.md` revision across repos |
 | `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Classify a no-mistakes finding and create/update owning-repo td work |
 | `bin/sgt-watch <task-id>` | Monitor dispatched fleet |
-| `bin/sgt-respond <task-id> <repo> "<response>"` | Respond to and resume a waiting worker |
+| `bin/sgt-respond <task-id> <repo>` | Read a response from stdin and resume a waiting worker |
+| `bin/sgt-ack-response <task-id> <repo> <response-id>` | Acknowledge consumed response transport from the exact worker pane |
+| `bin/sgt-validate <task-id> <repo> [--skip <steps>]` | Run coordinator-owned no-mistakes in a split worker-window pane |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees and fleet state |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
 
 ### No-mistakes findings
 
-Routine dispatched workers use repository-native tests, lint/typechecking, and independent Standards/Spec reviews. They do not run no-mistakes for ordinary completion, prototypes, investigations, documentation drafts, intermediate commits, or remediation loops unless the user explicitly overrides that default.
+Routine dispatched workers use repository-native tests, lint/typechecking, and independent Standards/Spec/readiness reviews. They do not run no-mistakes for ordinary completion, prototypes, investigations, documentation drafts, intermediate commits, or remediation loops.
 
-At an explicit final shipping boundary, after implementation and native validation are complete, run:
+At an explicit final shipping boundary, the worker writes the recorded intent
+revision, current HEAD, and passed review-axis evidence to
+`.sergeant-validation-ready` after native validation and independent reviews
+report zero blockers. The coordinator, not the worker, launches validation:
 
 ```bash
-no-mistakes axi run --intent "<the user's objective and approved tradeoffs>"
+sgt-validate <task-id> <repo>
 ```
 
-Use `--skip=<steps>` only for gates already proven irrelevant and stop at `checks-passed`. The run is validation-only: it must not fix findings. Route actionable findings into separate, deduplicated owning-repo td tasks with `sgt-no-mistakes-finding`.
+The command creates a split pane in the worker window, renames the window to
+`validation-<repo>-<task>`, passes the unchanged canonical intent to no-mistakes,
+and never uses `--yes`. Use `--skip <steps>` only for gates already proven
+irrelevant and stop at `checks-passed`. The run is validation-only: it must not
+fix findings. Route actionable findings into separate, deduplicated owning-repo
+td tasks with `sgt-no-mistakes-finding`.
+
+Safety-sensitive/stateful objectives require `sgt-dispatch --intent-file`; other
+objectives use the generated `standard-isolated` lighter path. See
+[`docs/using-sergeant.md`](docs/using-sergeant.md) for required sections and the
+observable classifier.
 
 The required `--disposition` is explicit per finding: `gate` creates or updates P1 work and retains the gate, `ask-user` creates or updates P1 work and preserves human escalation, `td` creates or updates nonblocking actionable debt, and `ignore` records that no card is needed. Warning debt becomes P2, informational debt becomes P3, and repeated finding IDs update the same card while retaining the latest run ID, head SHA, location, description, and originating intent. Reruns also preserve any existing repo-specific or manually added td labels while ensuring the required `no-mistakes` and `finding` labels remain present without duplication.
 
@@ -200,7 +215,7 @@ installation and verification.
 - `lsof` — for verifying cleanup does not remove an in-use worktree
 - `treehouse` — pre-warmed worktree pools (optional but recommended for dispatch)
 - `graphify` — knowledge graph generation (optional, needed for `sgt-graphify`)
-- A supported agent harness: OpenCode or Claude Code
+- OpenCode, Goose, or Claude Code for persistent interactive worker dispatch
 
 ## License
 

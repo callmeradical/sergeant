@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# sgt-ack-response - Acknowledge and clear one consumed worker response.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-response-lock.sh
+source "$SCRIPT_DIR/_sgt-response-lock.sh"
+
+[[ $# -eq 3 ]] || _die "Usage: sgt-ack-response <task-id> <repo> <response-id>"
+TASK_ID="$1"
+REPO="$2"
+RESPONSE_ID="$3"
+[[ "$TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid task ID: $TASK_ID"
+[[ "$REPO" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid repo: $REPO"
+[[ "$RESPONSE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid response ID"
+
+REPO_STATE="$FLEET_DIR/$TASK_ID/$REPO"
+[[ -d "$REPO_STATE" ]] || _die "Repo not found in task $TASK_ID: $REPO"
+WORKTREE="$(cat "$REPO_STATE/worktree" 2>/dev/null || true)"
+PANE="$(cat "$REPO_STATE/pane" 2>/dev/null || true)"
+[[ -d "$WORKTREE" ]] || _die "Worker worktree unavailable"
+[[ -n "${TMUX_PANE:-}" && "$TMUX_PANE" == "$PANE" ]] || \
+  _die "Current worker pane identity does not match dispatch ownership"
+_sgt_pane_identity_matches "$TMUX_PANE" "$REPO_STATE" || \
+  _die "Current worker pane identity does not match dispatch ownership"
+
+_sgt_response_lock_acquire "$REPO_STATE"
+ARCHIVE_STAGING=""
+FLEET_ACK_STAGING=""
+WORKTREE_ACK_STAGING=""
+_cleanup_ack_response() {
+  local status=$?
+  if [[ -n "$ARCHIVE_STAGING" && -e "$ARCHIVE_STAGING" ]]; then
+    rm -rf "$ARCHIVE_STAGING" || status=1
+  fi
+  [[ -z "$FLEET_ACK_STAGING" ]] || rm -f "$FLEET_ACK_STAGING" || status=1
+  [[ -z "$WORKTREE_ACK_STAGING" ]] || rm -f "$WORKTREE_ACK_STAGING" || status=1
+  _sgt_response_lock_release || status=1
+  return "$status"
+}
+trap '_cleanup_ack_response' EXIT
+[[ "$(cat "$REPO_STATE/response_id" 2>/dev/null || true)" == "$RESPONSE_ID" ]] || \
+  _die "Pending response ID does not match acknowledgement"
+RESPONSE_GENERATION="$(cat "$REPO_STATE/response_generation" 2>/dev/null || true)"
+[[ "$RESPONSE_GENERATION" =~ ^[1-9][0-9]*$ ]] || \
+  _die "Pending response generation is invalid"
+_proof_field() {
+  local key="$1"
+  local proof_file="$2"
+  awk -F= -v key="$key" '
+    $1 == key { count++; value = substr($0, length(key) + 2) }
+    END { if (count == 1 && value != "") print value; else exit 1 }
+  ' "$proof_file"
+}
+
+ARCHIVE_DIR="$REPO_STATE/response-archive"
+umask 077
+mkdir -p "$ARCHIVE_DIR"
+chmod 700 "$ARCHIVE_DIR"
+ARCHIVE_ENTRY="$ARCHIVE_DIR/$RESPONSE_ID"
+if [[ -e "$ARCHIVE_ENTRY" || -L "$ARCHIVE_ENTRY" ]]; then
+  [[ -d "$ARCHIVE_ENTRY" && ! -L "$ARCHIVE_ENTRY" ]] || \
+    _die "Response archive entry is invalid: $RESPONSE_ID"
+  for archive_file in body gate_generation applied_status proof; do
+    [[ -f "$ARCHIVE_ENTRY/$archive_file" && ! -L "$ARCHIVE_ENTRY/$archive_file" ]] || \
+      _die "Response archive entry is incomplete: $RESPONSE_ID"
+  done
+  ARCHIVE_STATUS="$(cat "$ARCHIVE_ENTRY/applied_status")"
+  [[ "$(cat "$ARCHIVE_ENTRY/gate_generation")" == "$RESPONSE_GENERATION" && \
+     "$(_proof_field response_id "$ARCHIVE_ENTRY/proof" 2>/dev/null || true)" == "$RESPONSE_ID" && \
+     "$(_proof_field gate_generation "$ARCHIVE_ENTRY/proof" 2>/dev/null || true)" == "$RESPONSE_GENERATION" && \
+     "$(_proof_field status "$ARCHIVE_ENTRY/proof" 2>/dev/null || true)" == "$ARCHIVE_STATUS" ]] || \
+    _die "Response archive entry does not match pending response: $RESPONSE_ID"
+  for response_file in "$REPO_STATE/response" "$WORKTREE/.sergeant-response"; do
+    [[ ! -e "$response_file" && ! -L "$response_file" ]] || \
+      cmp -s "$response_file" "$ARCHIVE_ENTRY/body" || \
+      _die "Pending response transport does not match archive"
+  done
+  [[ ! -e "$WORKTREE/.sergeant-response-id" || \
+     "$(cat "$WORKTREE/.sergeant-response-id" 2>/dev/null || true)" == "$RESPONSE_ID" ]] || \
+    _die "Pending response ID does not match acknowledgement"
+  [[ ! -e "$WORKTREE/.sergeant-response-generation" || \
+     "$(cat "$WORKTREE/.sergeant-response-generation" 2>/dev/null || true)" == "$RESPONSE_GENERATION" ]] || \
+    _die "Pending response generation is invalid"
+else
+  [[ "$(cat "$WORKTREE/.sergeant-response-id" 2>/dev/null || true)" == "$RESPONSE_ID" ]] || \
+    _die "Pending response ID does not match acknowledgement"
+  [[ -f "$REPO_STATE/response" && -f "$WORKTREE/.sergeant-response" ]] || \
+    _die "Pending response transport is incomplete"
+  [[ "$(cat "$WORKTREE/.sergeant-response-generation" 2>/dev/null || true)" == "$RESPONSE_GENERATION" ]] || \
+    _die "Pending response generation is invalid"
+  PROOF_FILE="$WORKTREE/.sergeant-response-applied"
+  [[ -f "$PROOF_FILE" ]] || _die "Response post-application proof is required before acknowledgement"
+  PROOF_ID="$(_proof_field response_id "$PROOF_FILE")" || _die "Response post-application proof is malformed"
+  PROOF_GENERATION="$(_proof_field gate_generation "$PROOF_FILE")" || _die "Response post-application proof is malformed"
+  PROOF_STATUS="$(_proof_field status "$PROOF_FILE")" || _die "Response post-application proof is malformed"
+  CURRENT_STATUS="$(cat "$WORKTREE/.sergeant-status" 2>/dev/null || true)"
+  [[ "$PROOF_ID" == "$RESPONSE_ID" && "$PROOF_GENERATION" == "$RESPONSE_GENERATION" && \
+     "$PROOF_STATUS" == "$CURRENT_STATUS" ]] || _die "Response post-application proof does not match current state"
+  case "$CURRENT_STATUS" in
+    in_progress) ;;
+    done)
+      [[ -s "$WORKTREE/.sergeant-result" ]] || _die "Response acknowledgement requires done with a non-empty result"
+      ;;
+    failed:\ *[![:space:]]) ;;
+    failed:*) _die "Response acknowledgement requires failed with a nonblank reason" ;;
+    needs_input|blocked)
+      CURRENT_GENERATION="$(cat "$WORKTREE/.sergeant-gate-generation" 2>/dev/null || true)"
+      [[ "$CURRENT_GENERATION" =~ ^[1-9][0-9]*$ && "$CURRENT_GENERATION" -gt "$RESPONSE_GENERATION" ]] || \
+        _die "Response acknowledgement requires a subsequent gate or terminal proof"
+      ;;
+    *) _die "Response post-application proof has unsupported status: $CURRENT_STATUS" ;;
+  esac
+
+  ARCHIVE_STAGING="$ARCHIVE_ENTRY.tmp.$$"
+  mkdir "$ARCHIVE_STAGING"
+  chmod 700 "$ARCHIVE_STAGING"
+  cp "$REPO_STATE/response" "$ARCHIVE_STAGING/body"
+  printf '%s\n' "$RESPONSE_GENERATION" > "$ARCHIVE_STAGING/gate_generation"
+  printf '%s\n' "$CURRENT_STATUS" > "$ARCHIVE_STAGING/applied_status"
+  cp "$PROOF_FILE" "$ARCHIVE_STAGING/proof"
+  chmod 600 "$ARCHIVE_STAGING"/*
+  mv "$ARCHIVE_STAGING" "$ARCHIVE_ENTRY"
+  ARCHIVE_STAGING=""
+fi
+FLEET_ACK_STAGING="$REPO_STATE/response_ack.tmp.$$"
+WORKTREE_ACK_STAGING="$WORKTREE/.sergeant-response-ack.tmp.$$"
+printf '%s\n' "$RESPONSE_ID" > "$FLEET_ACK_STAGING"
+printf '%s\n' "$RESPONSE_ID" > "$WORKTREE_ACK_STAGING"
+mv "$FLEET_ACK_STAGING" "$REPO_STATE/response_ack"
+FLEET_ACK_STAGING=""
+mv "$WORKTREE_ACK_STAGING" "$WORKTREE/.sergeant-response-ack"
+WORKTREE_ACK_STAGING=""
+rm -f "$REPO_STATE/response" "$WORKTREE/.sergeant-response" \
+  "$WORKTREE/.sergeant-response-id" "$WORKTREE/.sergeant-response-generation" \
+  "$WORKTREE/.sergeant-response-applied"
+_sgt_response_lock_release
+trap - EXIT
+printf 'Acknowledged response %s for %s/%s.\n' "$RESPONSE_ID" "$TASK_ID" "$REPO"

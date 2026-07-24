@@ -14,8 +14,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=_sgt-lib.sh
+# shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-response-lock.sh
+source "$SCRIPT_DIR/_sgt-response-lock.sh"
 
 [[ $# -ge 1 ]] || _die "Usage: sgt-cleanup <task-id> [repo]"
 TASK_ID="$1"
@@ -136,7 +138,7 @@ _terminate_process_group() {
 _stop_local_worker() {
   local repo_dir="$1"
   local worktree="$2"
-  local pane pane_info pane_dead pane_pid pane_pgid pane_command tree_records tree_pids live_tree_pids cwd_pids
+  local pane pane_info pane_dead pane_pid pane_pgid tree_records tree_pids live_tree_pids cwd_pids
 
   pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
   tree_records=""
@@ -144,18 +146,17 @@ _stop_local_worker() {
 
   if [[ -n "$pane" ]]; then
     command -v tmux >/dev/null 2>&1 || _die "tmux is required to terminate recorded worker pane $pane"
-    pane_info="$(tmux display-message -p -t "$pane" \
-      '#{pane_dead}|#{pane_pid}|#{pane_start_command}' 2>/dev/null || true)"
+    pane_info="$(_sgt_pane_identity "$pane" || true)"
 
     if [[ -n "$pane_info" ]]; then
       pane_dead="${pane_info%%|*}"
       pane_info="${pane_info#*|}"
+      pane_info="${pane_info#*|}"
       pane_pid="${pane_info%%|*}"
-      pane_command="${pane_info#*|}"
 
       if [[ "$pane_dead" != "0" ]]; then
         echo "  worker pane already stopped: $pane"
-      elif [[ "$pane_command" != *sgt-worker* || "$pane_command" != *"$repo_dir"* ]]; then
+      elif ! _sgt_pane_identity_matches "$pane" "$repo_dir"; then
         echo "  recorded pane no longer belongs to this worker: $pane"
       else
         tree_records="$(_process_tree_records "$pane_pid")"
@@ -201,6 +202,161 @@ _stop_local_worker() {
     _die "Other processes still have $worktree as their current directory: $(tr '\n' ' ' <<< "$cwd_pids")"
 }
 
+_stop_recorded_validation_group() {
+  local recorded_pid="$1" recorded_pgid="$2" recorded_start="$3"
+  local actual_start actual_pgid live_pids
+
+  if kill -0 "$recorded_pid" 2>/dev/null; then
+    actual_start="$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | awk '{$1=$1; print}' || true)"
+    [[ "$actual_start" == "$recorded_start" ]] || \
+      _die "Validation owner PID was reused; refusing process termination: $recorded_pid"
+    actual_pgid="$(ps -o pgid= -p "$recorded_pid" 2>/dev/null | tr -d ' ' || true)"
+    [[ "$actual_pgid" == "$recorded_pgid" ]] || \
+      _die "Validation owner process group changed; refusing process termination: $recorded_pid"
+  else
+    live_pids="$(_process_group_pids "$recorded_pgid")"
+    [[ -n "$live_pids" ]] || return 0
+    [[ "$recorded_pid" == "$recorded_pgid" ]] || \
+      _die "Validation pane disappeared with unverified detached descendants in process group $recorded_pgid"
+  fi
+
+  _terminate_process_group "$recorded_pgid"
+  for _ in $(seq 1 50); do
+    live_pids="$(_process_group_pids "$recorded_pgid")"
+    [[ -z "$live_pids" ]] && return 0
+    sleep 0.1
+  done
+  _terminate_process_group "$recorded_pgid" KILL
+  for _ in $(seq 1 20); do
+    live_pids="$(_process_group_pids "$recorded_pgid")"
+    [[ -z "$live_pids" ]] && return 0
+    sleep 0.1
+  done
+  _die "Validation processes did not terminate: $(tr '\n' ' ' <<< "$live_pids")"
+}
+
+_stop_validation_pane() {
+  local repo_dir="$1" pane pane_identity expected_identity pane_info pane_pid pane_pgid
+  local tree_records tree_pids live_tree_pids recorded_pid recorded_pgid recorded_start actual_start
+  pane="$(cat "$repo_dir/validation_pane" 2>/dev/null || true)"
+  [[ -n "$pane" ]] || return 0
+  recorded_pid="$(cat "$repo_dir/validation_pane_pid" 2>/dev/null || true)"
+  recorded_pgid="$(cat "$repo_dir/validation_process_group" 2>/dev/null || true)"
+  recorded_start="$(cat "$repo_dir/validation_process_start" 2>/dev/null || true)"
+  [[ -n "$recorded_pid" && -n "$recorded_pgid" && -n "$recorded_start" ]] || \
+    _die "Validation pane ownership provenance is incomplete: $pane"
+  if ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+    _stop_recorded_validation_group "$recorded_pid" "$recorded_pgid" "$recorded_start"
+    return 0
+  fi
+  if tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+    pane_identity="$(_sgt_pane_identity "$pane")"
+    expected_identity="$(cat "$repo_dir/validation_pane_identity" 2>/dev/null || true)"
+    if [[ "${pane_identity%%|*}" != "0" ]]; then
+      if [[ "$pane_identity" == "||||" ]]; then
+        _stop_recorded_validation_group "$recorded_pid" "$recorded_pgid" "$recorded_start"
+        return 0
+      fi
+      [[ -n "$expected_identity" && "$pane_identity" == "1|${expected_identity#*|}" ]] || \
+        _die "Recorded validation pane identity does not match: $pane (expected $expected_identity, actual $pane_identity)"
+      _stop_recorded_validation_group "$recorded_pid" "$recorded_pgid" "$recorded_start"
+      tmux kill-pane -t "$pane" 2>/dev/null || true
+      return 0
+    fi
+    _sgt_pane_identity_matches "$pane" "$repo_dir" validation_pane_identity || \
+      _die "Recorded validation pane identity does not match: $pane"
+    pane_info="${pane_identity#*|}"
+    pane_info="${pane_info#*|}"
+    pane_pid="${pane_info%%|*}"
+    [[ "$pane_pid" == "$recorded_pid" ]] || \
+      _die "Validation pane PID does not match recorded ownership: $pane_pid"
+    actual_start="$(ps -o lstart= -p "$pane_pid" 2>/dev/null | awk '{$1=$1; print}' || true)"
+    [[ "$actual_start" == "$recorded_start" ]] || \
+      _die "Validation owner PID was reused; refusing process termination: $recorded_pid"
+    tree_records="$(_process_tree_records "$pane_pid")"
+    tree_pids="$(_recorded_tree_pids "$tree_records")"
+    pane_pgid="$(ps -o pgid= -p "$pane_pid" 2>/dev/null | tr -d ' ' || true)"
+    [[ "$pane_pgid" == "$recorded_pgid" ]] || \
+      _die "Validation owner process group changed; refusing process termination: $recorded_pid"
+    tmux kill-pane -t "$pane" || _die "Failed to terminate validation pane $pane"
+    _terminate_pids "$tree_pids"
+    _terminate_process_group "$pane_pgid"
+    for _ in $(seq 1 50); do
+      live_tree_pids="$(printf '%s\n%s\n' \
+        "$(_process_group_pids "$pane_pgid")" \
+        "$(_live_recorded_tree_pids "$tree_records")" | sed '/^$/d' | sort -u)"
+      [[ -z "$live_tree_pids" ]] && break
+      sleep 0.1
+    done
+    if [[ -n "$live_tree_pids" ]]; then
+      _terminate_process_group "$pane_pgid" KILL
+      _terminate_pids "$(_live_recorded_tree_pids "$tree_records")" KILL
+    fi
+    for _ in $(seq 1 20); do
+      live_tree_pids="$(printf '%s\n%s\n' \
+        "$(_process_group_pids "$pane_pgid")" \
+        "$(_live_recorded_tree_pids "$tree_records")" | sed '/^$/d' | sort -u)"
+      [[ -z "$live_tree_pids" ]] && break
+      sleep 0.1
+    done
+    [[ -z "$live_tree_pids" ]] || \
+      _die "Validation processes did not terminate: $(tr '\n' ' ' <<< "$live_tree_pids")"
+  fi
+}
+
+_response_archive_field() {
+  local key="$1" proof_file="$2"
+  awk -F= -v key="$key" '
+    $1 == key { count++; value = substr($0, length(key) + 2) }
+    END { if (count == 1 && value != "") print value; else exit 1 }
+  ' "$proof_file"
+}
+
+_require_response_cleanup_safe() {
+  local repo_dir="$1" worktree="$2"
+  local applied_status archive response_generation response_id response_proof_root
+
+  response_proof_root="$worktree"
+  [[ -n "$response_proof_root" && -d "$response_proof_root" ]] || \
+    response_proof_root="$repo_dir/terminal-evidence"
+
+  if [[ -e "$repo_dir/response" || -L "$repo_dir/response" ||
+        -e "$response_proof_root/.sergeant-response" || -L "$response_proof_root/.sergeant-response" ||
+        -e "$response_proof_root/.sergeant-response-id" || -L "$response_proof_root/.sergeant-response-id" ||
+        -e "$response_proof_root/.sergeant-response-generation" || -L "$response_proof_root/.sergeant-response-generation" ||
+        -e "$response_proof_root/.sergeant-response-applied" || -L "$response_proof_root/.sergeant-response-applied" ]]; then
+    _die "$(basename "$repo_dir") has pending or incomplete response acknowledgement"
+  fi
+
+  if [[ ! -e "$repo_dir/response_id" && ! -L "$repo_dir/response_id" &&
+        ! -e "$repo_dir/response_generation" && ! -L "$repo_dir/response_generation" &&
+        ! -e "$repo_dir/response_ack" && ! -L "$repo_dir/response_ack" &&
+        ! -e "$repo_dir/response-archive" && ! -L "$repo_dir/response-archive" &&
+        ! -e "$response_proof_root/.sergeant-response-ack" && ! -L "$response_proof_root/.sergeant-response-ack" ]]; then
+    return 0
+  fi
+
+  response_id="$(cat "$repo_dir/response_id" 2>/dev/null || true)"
+  response_generation="$(cat "$repo_dir/response_generation" 2>/dev/null || true)"
+  archive="$repo_dir/response-archive/$response_id"
+  [[ "$response_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ &&
+     "$response_generation" =~ ^[1-9][0-9]*$ &&
+     "$(cat "$repo_dir/response_ack" 2>/dev/null || true)" == "$response_id" &&
+     "$(cat "$response_proof_root/.sergeant-response-ack" 2>/dev/null || true)" == "$response_id" &&
+     -d "$archive" && ! -L "$archive" ]] || \
+    _die "$(basename "$repo_dir") has pending or incomplete response acknowledgement"
+  for archive_file in body gate_generation applied_status proof; do
+    [[ -f "$archive/$archive_file" && ! -L "$archive/$archive_file" ]] || \
+      _die "$(basename "$repo_dir") has pending or incomplete response acknowledgement"
+  done
+  applied_status="$(cat "$archive/applied_status")"
+  [[ "$(cat "$archive/gate_generation")" == "$response_generation" &&
+     "$(_response_archive_field response_id "$archive/proof" 2>/dev/null || true)" == "$response_id" &&
+     "$(_response_archive_field gate_generation "$archive/proof" 2>/dev/null || true)" == "$response_generation" &&
+     "$(_response_archive_field status "$archive/proof" 2>/dev/null || true)" == "$applied_status" ]] || \
+    _die "$(basename "$repo_dir") has pending or incomplete response acknowledgement"
+}
+
 _require_terminal_repos() {
   local cleanup_phase evidence_dir repo_dir repo_name status worktree worktree_status
 
@@ -223,10 +379,12 @@ _require_terminal_repos() {
     esac
 
     worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+    _require_response_cleanup_safe "$repo_dir" "$worktree"
     cleanup_phase="$(cat "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     if [[ -n "$worktree" && -d "$worktree" ]]; then
       if [[ "$cleanup_phase" == $'removing\n'"$worktree" ]]; then
-        _restore_worker_evidence "$repo_dir" "$worktree"
+        _restore_worker_evidence "$repo_dir" "$worktree" || \
+          _die "$repo_name: evidence restore failed during removing-state replay; replay aborted"
       fi
       [[ -f "$worktree/.sergeant-status" ]] || \
         _die "$repo_name worktree terminal proof is missing"
@@ -369,9 +527,26 @@ for repo_dir in "$TASK_DIR"/*/; do
   status="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
   wt_type="$(cat "$repo_dir/wt_type" 2>/dev/null || echo "git")"
 
+  _sgt_response_lock_acquire "$repo_dir"
+  trap '_sgt_response_lock_release' EXIT
+  _require_response_cleanup_safe "$repo_dir" "$worktree"
+
   echo "--- $repo_name (status: $status, type: $wt_type) ---"
 
+  _stop_validation_pane "$repo_dir"
   _stop_local_worker "$repo_dir" "$worktree"
+
+  validation_worktree="$(cat "$repo_dir/validation_worktree" 2>/dev/null || true)"
+  if [[ -n "$validation_worktree" && -e "$validation_worktree" ]]; then
+    [[ "$validation_worktree" == "${worktree}-validation-${TASK_ID}" ]] || \
+      _die "Validation worktree path is outside the recorded ownership boundary: $validation_worktree"
+    git -C "$validation_worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
+      _die "Validation worktree is not a git checkout: $validation_worktree"
+    validation_cwd_pids="$(_worktree_cwd_pids "$validation_worktree")"
+    [[ -z "$validation_cwd_pids" ]] || \
+      _die "Processes still have $validation_worktree as their current directory: $(tr '\n' ' ' <<< "$validation_cwd_pids")"
+    rm -rf "$validation_worktree"
+  fi
 
   cwd_pids="$(_worktree_cwd_pids "$worktree")"
   [[ -z "$cwd_pids" ]] || \
@@ -380,6 +555,8 @@ for repo_dir in "$TASK_DIR"/*/; do
   if [[ -z "$worktree" ]]; then
     echo "  no worktree recorded — skipping"
     echo ""
+    _sgt_response_lock_release
+    trap - EXIT
     continue
   fi
 
@@ -388,12 +565,14 @@ for repo_dir in "$TASK_DIR"/*/; do
     # Record reconciled-absent so future replays are idempotent.
     _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" 2>/dev/null || true
     echo ""
+    _sgt_response_lock_release
+    trap - EXIT
     continue
   fi
 
   _stage_worker_evidence "$repo_dir" "$worktree"
   if ! _record_cleanup_phase "$repo_dir" removing "$worktree"; then
-    _restore_worker_evidence "$repo_dir" "$worktree"
+    _restore_worker_evidence "$repo_dir" "$worktree" || true
     _die "Failed to record cleanup phase before worktree removal: $repo_name"
   fi
   _remove_worker_evidence "$worktree"
@@ -414,11 +593,11 @@ for repo_dir in "$TASK_DIR"/*/; do
       main_repo="$(dirname "$main_git")"
       echo "  returning treehouse lease: $worktree"
       if ! (cd "$main_repo" && treehouse return "$worktree" 2>&1 | sed 's/^/  /'); then
-        _restore_worker_evidence "$repo_dir" "$worktree"
+        _restore_worker_evidence "$repo_dir" "$worktree" || true
         _die "Failed to return treehouse lease; fleet state preserved: $worktree"
       fi
     else
-      _restore_worker_evidence "$repo_dir" "$worktree"
+      _restore_worker_evidence "$repo_dir" "$worktree" || true
       _die "Cannot identify treehouse lease; fleet state preserved: $worktree"
     fi
   else
@@ -429,23 +608,25 @@ for repo_dir in "$TASK_DIR"/*/; do
     if [[ -d "$repo_base/.git" ]]; then
       echo "  removing git worktree: $worktree"
       if ! git -C "$repo_base" worktree remove "$worktree" 2>&1 | sed 's/^/  /'; then
-        _restore_worker_evidence "$repo_dir" "$worktree"
+        _restore_worker_evidence "$repo_dir" "$worktree" || true
         _die "Failed to remove git worktree; fleet state preserved: $worktree"
       fi
     else
-      _restore_worker_evidence "$repo_dir" "$worktree"
+      _restore_worker_evidence "$repo_dir" "$worktree" || true
       _die "Main repo not found; fleet state preserved: $repo_base"
     fi
   fi
 
   [[ ! -d "$worktree" ]] || {
-    _restore_worker_evidence "$repo_dir" "$worktree"
+    _restore_worker_evidence "$repo_dir" "$worktree" || true
     _die "Worktree removal reported success but the directory remains: $worktree"
   }
   _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
     _die "Failed to publish reconciled cleanup phase: $repo_name"
 
   echo ""
+  _sgt_response_lock_release
+  trap - EXIT
 done
 
 # Only remove fleet state if cleaning all repos (no FILTER_REPO)

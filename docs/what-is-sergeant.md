@@ -89,4 +89,4 @@ worktrees, injects repository instructions, and records fleet state.
 - **Treehouse** optionally supplies leased worktrees.
 - **Graphify** optionally builds one knowledge graph per Sergeant project.
 - **no-mistakes** validates one explicit final shipping boundary.
-- **OpenCode or Claude Code** runs the coordinator and workers.
+- **OpenCode, Goose, or Claude Code** runs coordinators and persistent interactive workers.

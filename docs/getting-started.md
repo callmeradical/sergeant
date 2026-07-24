@@ -14,7 +14,7 @@ Required:
 - `yq`
 - `lsof`
 - [Marcus td](https://github.com/marcus/td)
-- OpenCode or Claude Code
+- OpenCode, Goose, or Claude Code, used as a persistent interactive worker terminal
 
 Optional:
 
@@ -37,14 +37,18 @@ package manager, then verify the required commands directly:
 command -v git gh tmux yq lsof
 td version
 td create --help
-if ! command -v opencode >/dev/null && ! command -v claude >/dev/null; then
-  printf 'Install OpenCode or Claude Code before using Sergeant.\n' >&2
+agent_found=false
+for agent in opencode goose claude; do
+  command -v "$agent" >/dev/null && agent_found=true
+done
+if ! $agent_found; then
+  printf 'Install OpenCode, Goose, or Claude before using Sergeant interactive dispatch.\n' >&2
   exit 1
 fi
 ```
 
 Continue only when `td create --help` shows Marcus `td` support for
-`--description`, `--json`, and `--work-dir`, and either `opencode` or `claude`
+`--description`, `--json`, and `--work-dir`, and at least one supported agent
 resolves on `PATH`.
 
 ## 2. Clone and install command links
@@ -164,12 +168,13 @@ ship in this repository.
 
 ## 9. Launch Sergeant
 
-Start the agent from the Sergeant checkout so `AGENTS.md` is loaded:
+Start the coordinator from the Sergeant checkout in tmux so `AGENTS.md` is loaded
+and dispatch can bind the exact coordinator identity:
 
 ```bash
-opencode
-# or
-claude
+tmux new-session -s sergeant-coordinator 'opencode --dangerously-skip-permissions'
+# or: tmux new-session -s sergeant-coordinator 'goose session'
+# or: tmux new-session -s sergeant-coordinator claude
 ```
 
 First checks:
@@ -183,7 +188,8 @@ explain which repository owns <feature>
 ## Completion checklist
 
 - [ ] Required commands resolve on `PATH` or through `bin/`
-- [ ] OpenCode was restarted after plugin installation
+- [ ] The coordinator runs in a tmux pane
+- [ ] When using OpenCode, it was restarted after plugin installation
 - [ ] `sgt-list` shows the project exactly once
 - [ ] `sgt-context` resolves every owning repository and instruction layer
 - [ ] Required repositories are cloned

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+export TMUX=fixture TMUX_PANE=%11
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
@@ -41,7 +42,37 @@ chmod +x "$fake_bin/td"
 cat > "$fake_bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
-  new-window) printf '%%42\n' ;;
+  new-window)
+    for repo_state in "$SERGEANT_FLEET"/*/*; do
+      [[ -d "$repo_state" ]] || continue
+      notification_id="$(cat "$repo_state/notification_id")"
+      worktree="$(cat "$repo_state/worktree")"
+      printf '%s|0|%%42|4242|123456|fixture-worker-command\n' "$notification_id" \
+        > "$worktree/.sergeant-notification-ack"
+      printf '%s|0|%%42|4242|123456|fixture-worker-command\n' "$notification_id" \
+        > "$worktree/.sergeant-notification-accept"
+      printf '0|%%42|4242|123456|fixture-worker-command\n' \
+        > "$repo_state/notification_delivered_pane_identity"
+      printf '%s\n' "$notification_id" > "$repo_state/notification_delivered"
+    done
+    printf '%%42\n'
+    ;;
+  display-message)
+    if [[ "${AUTO_DELIVER:-1}" == 1 ]]; then
+    for repo_state in "$SERGEANT_FLEET"/*/*; do
+      [[ -d "$repo_state" ]] || continue
+      nonce="$(cat "$repo_state/notification_target" 2>/dev/null || true)"
+      notification_id="$(cat "$repo_state/notification_id" 2>/dev/null || true)"
+      [[ "$nonce" =~ ^[a-f0-9]{32}$ && -n "$notification_id" ]] || continue
+      target_dir="$repo_state/notifications/$notification_id/targets/$nonce"
+      token="$notification_id|$nonce"
+      printf '%s\n' "$token" > "$target_dir/accepted"
+      printf '%s\n' "$token" > "$target_dir/delivered"
+    done
+    fi
+    [[ "$*" == *'-t %11'* ]] && printf '0|%%11|1111|111111|coordinator-command\n' || \
+      printf '0|%%42|4242|123456|fixture-worker-command\n'
+    ;;
 esac
 exit 0
 EOF

@@ -4,381 +4,467 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TEST_ROOT"' EXIT
+TMUX_SESSION="sgt-interactive-worker-test-$$"
+trap 'tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true; rm -rf "$TEST_ROOT"' EXIT
 
-fake_agent="$TEST_ROOT/fake-opencode"
-fake_claude="$TEST_ROOT/claude"
-mkdir -p "$TEST_ROOT/fake-bin"
-cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
+mkdir -p "$TEST_ROOT/fake-bin" "$TEST_ROOT/done/state" "$TEST_ROOT/done/worktree" \
+  "$TEST_ROOT/goose/state" "$TEST_ROOT/goose/worktree" \
+  "$TEST_ROOT/claude/state" "$TEST_ROOT/claude/worktree" \
+  "$TEST_ROOT/needs-input/state" "$TEST_ROOT/needs-input/worktree" \
+  "$TEST_ROOT/blocked/state" "$TEST_ROOT/blocked/worktree" \
+  "$TEST_ROOT/recovery/state" "$TEST_ROOT/recovery/worktree" \
+  "$TEST_ROOT/replacement/state" "$TEST_ROOT/replacement/worktree" \
+  "$TEST_ROOT/race/state" "$TEST_ROOT/race/worktree" \
+  "$TEST_ROOT/failure-bin" \
+  "$TEST_ROOT/rejected" \
+  "$TEST_ROOT/orphan/state" "$TEST_ROOT/orphan/worktree"
+
+cat > "$TEST_ROOT/fake-bin/opencode" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$TD_LOG"
-EOF
-chmod +x "$TEST_ROOT/fake-bin/td"
-cat > "$fake_agent" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-printf '%s\n' "$*" >> "$FAKE_STATE/args"
-turn_file="$FAKE_STATE/turn"
-turn="$(cat "$turn_file" 2>/dev/null || echo 0)"
-turn=$((turn + 1))
-printf '%s\n' "$turn" > "$turn_file"
-
-case "$FAKE_MODE:$turn" in
-  needs_input:1)
-    printf 'needs_input\n' > .sergeant-status
-    printf 'Choose A or B.\n' > .sergeant-message
-    printf '%s\n' '{"type":"session","sessionID":"ses-test-123"}'
-    ;;
-  blocked:1)
-    printf 'blocked\n' > .sergeant-status
-    printf 'Fixture unavailable.\n' > .sergeant-message
-    printf '%s\n' '{"type":"session","sessionID":"ses-test-123"}'
-    ;;
-  poisoned_session:1)
-    printf 'needs_input\n' > .sergeant-status
-    printf 'Choose A or B.\n' > .sergeant-message
-    printf '%s\n' '{"type":"session","sessionID":"ses-test-123"}'
-    printf '%s\n' '{"type":"tool","payload":{"sessionID":"ses-evil-999"}}'
-    ;;
-  claude_needs_input:1)
-    [[ "$*" == *"-p --output-format json --dangerously-skip-permissions"* ]]
-    [[ "$*" != *"run --auto"* ]]
-    printf 'needs_input\n' > .sergeant-status
-    printf 'Choose A or B.\n' > .sergeant-message
-    printf '%s\n' '{"type":"session","sessionID":"ses-test-123"}'
-    ;;
-  claude_needs_input:2)
-    [[ "$*" == *"-p --output-format json --dangerously-skip-permissions --resume ses-test-123"* ]]
-    [[ "$*" == *"Use option A"* ]]
-    printf 'done\n' > .sergeant-status
-    printf 'validated Claude result\n' > .sergeant-result
-    ;;
-  needs_input:2|blocked:2|poisoned_session:2)
-    [[ "$*" == *"--session ses-test-123"* ]]
-    [[ "$*" != *"ses-evil-999"* ]]
-    [[ "$*" == *"Use option A"* ]]
-    [[ "$*" == *"td-123"* ]]
-    [[ "$*" == *"updated td handoff"* ]]
-    [[ ! -e .sergeant-message ]]
-    printf 'done\n' > .sergeant-status
-    printf 'validated result\n' > .sergeant-result
-    ;;
-  done_without_result:1)
-    printf 'done\n' > .sergeant-status
-    printf '%s\n' '{"type":"session","sessionID":"ses-test-123"}'
-    ;;
-  unexpected_exit:1)
-    printf 'in_progress\n' > .sergeant-status
-    printf 'agent diagnostic output\n'
-    exit 23
-    ;;
-  missing_session:1)
-    printf 'needs_input\n' > .sergeant-status
-    printf 'Need a response but no session was emitted.\n' > .sergeant-message
-    ;;
-  claude_missing_session:1)
-    [[ "$*" == *"-p --output-format json --dangerously-skip-permissions"* ]]
-    printf 'needs_input\n' > .sergeant-status
-    printf 'Need a response but no session was emitted.\n' > .sergeant-message
-    ;;
-  resume_orphan:1)
-    [[ "$*" == *"--session ses-test-123"* ]]
-    [[ "$*" == *"Use option A"* ]]
-    printf 'done\n' > .sergeant-status
-    printf 'resumed result\n' > .sergeant-result
-    ;;
-  recover_without_session:1)
-    [[ "$*" != *"--session"* ]]
-    [[ "$*" == *"td-123"* ]]
-    [[ "$*" == *"diagnostic"* ]]
-    [[ "$*" == *"worker.log"* ]]
-    [[ "$*" == *"git state"* ]]
-    [[ "$*" != *"same session"* ]]
-    printf 'done\n' > .sergeant-status
-    printf 'recovered result\n' > .sergeant-result
-    ;;
-  submitted_response_missing_session:1)
-    [[ "$*" == *"Use option A"* ]]
-    printf 'needs_input\n' > .sergeant-status
-    printf 'Need a response but no session was emitted.\n' > .sergeant-message
-    ;;
-  resume_after_submitted_response:1)
-    [[ "$*" == *"--session ses-test-123"* ]]
-    [[ "$*" != *"Use option A"* ]]
-    [[ "$*" == *"durable worker state"* ]]
-    [[ ! -e .sergeant-response ]]
-    printf 'done\n' > .sergeant-status
-    printf 'resumed without replay result\n' > .sergeant-result
-    ;;
-  legacy_response_cleanup:1)
-    [[ "$*" == *"--session ses-test-123"* ]]
-    [[ "$*" == *"Use option A"* ]]
-    printf 'done\n' > .sergeant-status
-    printf 'legacy cleanup result\n' > .sergeant-result
-    ;;
-  failed_after_response:1)
-    [[ "$*" == *"--session ses-test-123"* ]]
-    [[ "$*" == *"Use option A"* ]]
-    printf 'failed: downstream rejection\n' > .sergeant-status
-    exit 1
-    ;;
-  serialized_response:1)
-    [[ "$*" == *"new response"* ]]
-    [[ "$*" != *"old response"* ]]
-    printf 'done\n' > .sergeant-status
-    printf 'serialized result\n' > .sergeant-result
-    ;;
-  *)
-    printf 'unexpected fake invocation: %s:%s\n' "$FAKE_MODE" "$turn" >&2
-    exit 91
-    ;;
-esac
-EOF
-chmod +x "$fake_agent"
-ln -s "$fake_agent" "$fake_claude"
-
-wait_for_file() {
-  local file="$1"
-  for _ in $(seq 1 100); do
-    [[ -e "$file" ]] && return 0
+if [[ -n "${RACE_ROLE:-}" ]]; then
+  IFS= read -r notification
+  [[ "$notification" == *"$RACE_NOTIFICATION_ID"* ]] || exit 41
+  printf '%s:%s\n' "$RACE_ROLE" "$RACE_NOTIFICATION_ID" >> "$RACE_RECEIVED_LOG"
+  touch "$RACE_PROMPT_FILE"
+  while [[ ! -e "$RACE_ACK_RELEASE" ]]; do sleep 0.01; done
+  ack_token="$(cat "$RACE_ACK_TOKEN_FILE")"
+  nonce="${ack_token#*|}"
+  mkdir -p .sergeant-notification-acks .sergeant-notification-complete
+  printf '%s\n' "$ack_token" > ".sergeant-notification-acks/$nonce"
+  touch "$RACE_ACK_FILE"
+  for _ in $(seq 1 500); do
+    [[ "$(cat ".sergeant-notification-accepts/$nonce" 2>/dev/null || true)" == "$ack_token" ]] && break
+    if [[ -n "${RACE_STOP_FILE:-}" && -e "$RACE_STOP_FILE" ]]; then
+      touch "$RACE_STOPPED_FILE"
+      exit 0
+    fi
     sleep 0.01
   done
-  printf 'timed out waiting for %s\n' "$file" >&2
-  return 1
+  [[ "$(cat ".sergeant-notification-accepts/$nonce" 2>/dev/null || true)" == "$ack_token" ]] || exit 43
+  if [[ -n "${RACE_ACCEPT_OBSERVED:-}" ]]; then
+    touch "$RACE_ACCEPT_OBSERVED"
+    while [[ ! -e "$RACE_ACTION_RELEASE" ]]; do sleep 0.01; done
+  fi
+  printf '%s:%s\n' "$RACE_ROLE" "$RACE_NOTIFICATION_ID" >> "$RACE_ACTION_LOG"
+  printf '%s\n' "$ack_token" > ".sergeant-notification-complete/$nonce"
+  while [[ ! -e "$RACE_EXIT_FILE" ]]; do sleep 0.01; done
+  printf 'needs_input\n' > .sergeant-status
+  exit 0
+fi
+notification_count="${EXPECT_NOTIFICATION_COUNT:-0}"
+for notification_number in $(seq 1 "$notification_count"); do
+  [[ "$notification_number" != 1 ]] || sleep "${FAKE_STARTUP_DELAY:-0}"
+  IFS= read -r notification
+  notification_id="$(cat "$NOTIFICATION_STATE/notification_id")"
+  [[ "$notification" == *"$notification_id"* ]] || exit 18
+  printf '%s\n' "$notification_id" >> "${RECEIVED_LOG:-/dev/null}"
+  nonce="$(cat "$NOTIFICATION_STATE/notification_target")"
+  ack_token="$notification_id|$nonce"
+  mkdir -p .sergeant-notification-acks .sergeant-notification-complete
+  printf '%s\n' "$ack_token" > ".sergeant-notification-acks/$nonce"
+  for _ in $(seq 1 100); do
+    [[ "$(cat ".sergeant-notification-accepts/$nonce" 2>/dev/null || true)" == "$ack_token" ]] && break
+    sleep 0.01
+  done
+  [[ "$(cat ".sergeant-notification-accepts/$nonce" 2>/dev/null || true)" == "$ack_token" ]] || exit 22
+  printf '%s\n' "$ack_token" > ".sergeant-notification-complete/$nonce"
+  target_dir="$NOTIFICATION_STATE/notifications/$notification_id/targets/$nonce"
+  for _ in $(seq 1 100); do
+    [[ "$(cat "$target_dir/delivered" 2>/dev/null || true)" == "$ack_token" ]] && break
+    sleep 0.01
+  done
+  [[ "$(cat "$target_dir/delivered" 2>/dev/null || true)" == "$ack_token" ]] || exit 19
+done
+if [[ "${EXPECT_RECOVERY:-0}" == 1 ]]; then
+  notification_id="$(cat "$NOTIFICATION_STATE/notification_id")"
+  for _ in $(seq 1 100); do
+    [[ "$(cat "$NOTIFICATION_STATE/notification_delivered" 2>/dev/null || true)" == "$notification_id" ]] && break
+    sleep 0.01
+  done
+  [[ "$(cat "$NOTIFICATION_STATE/notification_delivered" 2>/dev/null || true)" == "$notification_id" ]] || exit 20
+fi
+printf '%s|%s\n' "$#" "$*" > "$ARG_LOG"
+if [[ "${FAKE_MODE:-}" == "done" ]]; then
+  printf 'done\n' > .sergeant-status
+  printf 'https://example.invalid/pr/1\n' > .sergeant-result
+elif [[ "${FAKE_MODE:-}" == "needs_input" ]]; then
+  printf 'needs_input\n' > .sergeant-status
+  printf 'Choose safely.\n' > .sergeant-message
+elif [[ "${FAKE_MODE:-}" == "blocked" ]]; then
+  printf 'blocked\n' > .sergeant-status
+  printf 'Waiting for dependency.\n' > .sergeant-message
+fi
+EOF
+chmod +x "$TEST_ROOT/fake-bin/opencode"
+ln -s opencode "$TEST_ROOT/fake-bin/goose"
+ln -s opencode "$TEST_ROOT/fake-bin/claude"
+cat > "$TEST_ROOT/fake-bin/ln" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${FAIL_LOCK_FILE:-}" && -e "$FAIL_LOCK_FILE" && "$*" == *response.lock* ]]; then
+  touch "$FAIL_LOCK_MARKER"
+  exit 75
+fi
+exec /usr/bin/ln "$@"
+EOF
+cat > "$TEST_ROOT/fake-bin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${FAIL_LEASE_WRITE_FILE:-}" && -e "$FAIL_LEASE_WRITE_FILE" && "$*" == *action_lease.tmp* ]]; then
+  touch "$FAIL_LEASE_WRITE_MARKER"
+  exit 75
+fi
+exec /usr/bin/mktemp "$@"
+EOF
+cat > "$TEST_ROOT/fake-bin/mv" <<'EOF'
+#!/usr/bin/env bash
+target="${!#}"
+if [[ -n "${FAIL_LEASE_RENAME_FILE:-}" && -e "$FAIL_LEASE_RENAME_FILE" && "$target" == */action_lease ]]; then
+  touch "$FAIL_LEASE_RENAME_MARKER"
+  exit 75
+fi
+exec /usr/bin/mv "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/ln" "$TEST_ROOT/fake-bin/mktemp" "$TEST_ROOT/fake-bin/mv"
+
+if ARG_LOG="$TEST_ROOT/non-tty.args" \
+  "$ROOT_DIR/bin/sgt-interactive-worker" "$TEST_ROOT/done/state" \
+    "$TEST_ROOT/done/worktree" "$TEST_ROOT/fake-bin/opencode" >/dev/null 2>&1; then
+  printf 'interactive worker accepted a non-terminal launch\n' >&2
+  exit 1
+fi
+[[ ! -e "$TEST_ROOT/non-tty.args" ]]
+
+if ARG_LOG="$TEST_ROOT/rejected.args" \
+  "$ROOT_DIR/bin/sgt-interactive-worker" "$TEST_ROOT/rejected/state" \
+    "$TEST_ROOT/done/worktree" "$TEST_ROOT/fake-bin/opencode" >/dev/null 2>&1; then
+  printf 'interactive worker accepted another non-terminal launch\n' >&2
+  exit 1
+fi
+[[ ! -e "$TEST_ROOT/rejected/state" && ! -e "$TEST_ROOT/rejected.args" ]]
+
+tmux new-session -d -s "$TMUX_SESSION" -n keepalive \
+  "while :; do sleep 1; done"
+target_worker_pane() {
+  local state="$1" window="$2" pane identity nonce notification_id target_dir
+  pane="$(tmux display-message -p -t "$TMUX_SESSION:$window" '#{pane_id}')"
+  identity="$(tmux display-message -p -t "$pane" \
+    '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}')"
+  printf '%s\n' "$pane" > "$state/pane"
+  printf '%s\n' "$identity" > "$state/pane_identity"
+  notification_id="$(cat "$state/notification_id")"
+  nonce="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  target_dir="$state/notifications/$notification_id/targets/$nonce"
+  mkdir -p "$target_dir"
+  printf '%s\n' "$identity" > "$target_dir/pane_identity"
+  printf '%s\n' "$nonce" > "$state/notification_target"
+  printf '%s\n' "$identity" > "$state/notification_target_pane_identity"
 }
 
-run_wait_resume_case() {
-  local mode="$1"
-  local expected_status="${2:-$mode}"
-  local case_root="$TEST_ROOT/$mode"
-  local worktree="$case_root/worktree"
-  local repo_state="$case_root/state"
-  mkdir -p "$worktree" "$repo_state"
-  printf 'td-123\n' > "$repo_state/td_task"
-  printf 'stale result\n' > "$repo_state/result"
+race_state="$TEST_ROOT/race/state"
+race_worktree="$TEST_ROOT/race/worktree"
+printf 'in_progress\n' > "$race_worktree/.sergeant-status"
+printf 'fresh-notification\n' > "$race_state/notification_id"
+cat > "$race_worktree/.sergeant-notification" <<'EOF'
+notification_id=fresh-notification
+kind=response
+instruction=Apply the pending response.
+EOF
+tmux new-window -d -t "$TMUX_SESSION:" -n race-old \
+  "env RACE_ROLE=old RACE_NOTIFICATION_ID=fresh-notification \
+  RACE_RECEIVED_LOG='$TEST_ROOT/race-received.log' RACE_PROMPT_FILE='$TEST_ROOT/race-old-prompt' \
+  RACE_ACK_RELEASE='$TEST_ROOT/race-old-release' RACE_ACK_FILE='$TEST_ROOT/race-old-ack' \
+  RACE_ACK_TOKEN_FILE='$TEST_ROOT/race-old-token' \
+  RACE_ACTION_LOG='$TEST_ROOT/race-action.log' \
+  RACE_STOP_FILE='$TEST_ROOT/race-old-stop' RACE_STOPPED_FILE='$TEST_ROOT/race-old-stopped' \
+  RACE_EXIT_FILE='$TEST_ROOT/race-old-exit' \
+  PATH='$TEST_ROOT/fake-bin:$PATH' \
+  '$ROOT_DIR/bin/sgt-interactive-worker' '$race_state' '$race_worktree' '$TEST_ROOT/fake-bin/opencode'"
+target_worker_pane "$race_state" race-old
+old_race_nonce="$(cat "$race_state/notification_target")"
+printf 'fresh-notification|%s\n' "$(cat "$race_state/notification_target")" \
+  > "$TEST_ROOT/race-old-token"
+for _ in $(seq 1 200); do
+  [[ -e "$TEST_ROOT/race-old-prompt" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/race-old-prompt" ]]
 
-  PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" \
-    FAKE_MODE="$mode" FAKE_STATE="$case_root" SGT_WORKER_POLL_INTERVAL=0.01 \
-    "$ROOT_DIR/bin/sgt-worker" "$repo_state" "$worktree" "$fake_agent" "initial mission" &
-  local worker_pid=$!
+printf 'fresh-notification\n' > "$race_state/notification_id"
+cat > "$race_worktree/.sergeant-notification" <<'EOF'
+notification_id=fresh-notification
+kind=response
+instruction=Apply the pending response.
+EOF
+tmux new-window -d -t "$TMUX_SESSION:" -n race-new \
+  "env RACE_ROLE=new RACE_NOTIFICATION_ID=fresh-notification \
+  RACE_RECEIVED_LOG='$TEST_ROOT/race-received.log' RACE_PROMPT_FILE='$TEST_ROOT/race-new-prompt' \
+  RACE_ACK_RELEASE='$TEST_ROOT/race-new-release' RACE_ACK_FILE='$TEST_ROOT/race-new-ack' \
+  RACE_ACK_TOKEN_FILE='$TEST_ROOT/race-new-token' \
+  RACE_ACTION_LOG='$TEST_ROOT/race-action.log' \
+  RACE_ACCEPT_OBSERVED='$TEST_ROOT/race-new-accepted' \
+  RACE_ACTION_RELEASE='$TEST_ROOT/race-new-action-release' \
+  FAIL_LOCK_FILE='$TEST_ROOT/fail-lock' FAIL_LOCK_MARKER='$TEST_ROOT/fail-lock-marker' \
+  FAIL_LEASE_WRITE_FILE='$TEST_ROOT/fail-lease-write' FAIL_LEASE_WRITE_MARKER='$TEST_ROOT/fail-lease-write-marker' \
+  FAIL_LEASE_RENAME_FILE='$TEST_ROOT/fail-lease-rename' FAIL_LEASE_RENAME_MARKER='$TEST_ROOT/fail-lease-rename-marker' \
+  RACE_EXIT_FILE='$TEST_ROOT/race-new-exit' \
+  PATH='$TEST_ROOT/fake-bin:$PATH' \
+  '$ROOT_DIR/bin/sgt-interactive-worker' '$race_state' '$race_worktree' '$TEST_ROOT/fake-bin/opencode'"
+target_worker_pane "$race_state" race-new
+new_race_nonce="$(cat "$race_state/notification_target")"
+printf 'fresh-notification|%s\n' "$(cat "$race_state/notification_target")" \
+  > "$TEST_ROOT/race-new-token"
+old_race_pane="$(tmux display-message -p -t "$TMUX_SESSION:race-old" '#{pane_id}')"
+new_race_pane="$(tmux display-message -p -t "$TMUX_SESSION:race-new" '#{pane_id}')"
+old_race_pid="$(tmux display-message -p -t "$old_race_pane" '#{pane_pid}')"
+tmux display-message -p -t "$old_race_pane" '#{pane_id}' >/dev/null
+tmux display-message -p -t "$new_race_pane" '#{pane_id}' >/dev/null
+for _ in $(seq 1 200); do
+  [[ -e "$TEST_ROOT/race-new-prompt" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/race-new-prompt" ]]
 
-  wait_for_file "$worktree/.sergeant-message"
-  wait_for_file "$worktree/.sergeant-gate-generation"
-  [[ ! -e "$repo_state/result" ]]
-  kill -0 "$worker_pid"
-  [[ "$(cat "$worktree/.sergeant-status")" == "$expected_status" ]]
-  [[ "$(cat "$worktree/.sergeant-gate-generation")" == "1" ]]
-  printf 'Use option A\n' > "$worktree/.sergeant-response"
-  printf 'response-id-123\n' > "$worktree/.sergeant-response-id"
-  printf 'response-id-123\n' > "$repo_state/response_id"
-  wait "$worker_pid"
+touch "$TEST_ROOT/race-old-release"
+for _ in $(seq 1 200); do
+  [[ -e "$TEST_ROOT/race-old-ack" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/race-old-ack" ]]
+kill -0 "$old_race_pid"
+[[ ! -e "$race_state/notifications/fresh-notification/targets/$new_race_nonce/delivered" ]]
 
-  [[ "$(cat "$worktree/.sergeant-status")" == "done" ]]
-  [[ "$(cat "$worktree/.sergeant-result")" == "validated result" ]]
-  [[ ! -e "$worktree/.sergeant-response" ]]
-  [[ "$(cat "$repo_state/session_id")" == "ses-test-123" ]]
-  [[ "$(cat "$repo_state/status")" == "done" ]]
-  [[ "$(cat "$repo_state/result")" == "validated result" ]]
-  [[ ! -e "$repo_state/response" ]]
-  grep -Fq 'handoff td-123' "$case_root/td.log"
-  grep -Fq -- "--work-dir $worktree" "$case_root/td.log"
+touch "$TEST_ROOT/fail-lock"
+touch "$TEST_ROOT/race-new-release"
+for _ in $(seq 1 200); do
+  [[ -e "$TEST_ROOT/fail-lock-marker" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/fail-lock-marker" ]]
+[[ ! -e "$race_state/notifications/fresh-notification/action_lease" ]]
+[[ ! -e "$race_state/notifications/fresh-notification/targets/$new_race_nonce/accepted" ]]
+rm "$TEST_ROOT/fail-lock"
+touch "$TEST_ROOT/fail-lease-write"
+for _ in $(seq 1 200); do
+  [[ -e "$TEST_ROOT/fail-lease-write-marker" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/fail-lease-write-marker" ]]
+[[ ! -e "$race_state/notifications/fresh-notification/action_lease" ]]
+rm "$TEST_ROOT/fail-lease-write"
+touch "$TEST_ROOT/fail-lease-rename"
+for _ in $(seq 1 200); do
+  [[ -e "$TEST_ROOT/fail-lease-rename-marker" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/fail-lease-rename-marker" ]]
+[[ ! -e "$race_state/notifications/fresh-notification/action_lease" ]]
+[[ ! -e "$race_state/notifications/fresh-notification/targets/$new_race_nonce/acknowledged" ]]
+rm "$TEST_ROOT/fail-lease-rename"
+for _ in $(seq 1 200); do
+  [[ -f "$race_state/notifications/fresh-notification/targets/$new_race_nonce/delivered" ]] && break
+  sleep 0.01
+done
+cmp -s "$TEST_ROOT/race-new-token" \
+  "$race_state/notifications/fresh-notification/targets/$new_race_nonce/delivered"
+for _ in $(seq 1 200); do
+  [[ -f "$TEST_ROOT/race-new-accepted" ]] && break
+  sleep 0.01
+done
+[[ -f "$TEST_ROOT/race-new-accepted" ]]
+cat "$TEST_ROOT/race-old-token" > "$race_worktree/.sergeant-notification-acks/$old_race_nonce"
+cmp -s "$TEST_ROOT/race-new-token" \
+  "$race_state/notifications/fresh-notification/targets/$new_race_nonce/accepted"
+[[ ! -e "$TEST_ROOT/race-action.log" || \
+   "$(grep -Fc old:fresh-notification "$TEST_ROOT/race-action.log")" == 0 ]]
+rm -f "$TEST_ROOT/fail-lock-marker"
+touch "$TEST_ROOT/fail-lock"
+touch "$TEST_ROOT/race-new-action-release"
+for _ in $(seq 1 200); do
+  [[ -f "$TEST_ROOT/race-action.log" ]] && break
+  sleep 0.01
+done
+for _ in $(seq 1 200); do
+  [[ -e "$TEST_ROOT/fail-lock-marker" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/fail-lock-marker" ]]
+[[ ! -e "$race_state/notifications/fresh-notification/targets/$new_race_nonce/completed" ]]
+rm "$TEST_ROOT/fail-lock"
+[[ "$(grep -Fc old:fresh-notification "$TEST_ROOT/race-received.log")" == 1 ]]
+[[ "$(grep -Fc new:fresh-notification "$TEST_ROOT/race-received.log")" == 1 ]]
+[[ ! -e "$TEST_ROOT/race-action.log" || \
+   "$(grep -Fc old:fresh-notification "$TEST_ROOT/race-action.log")" == 0 ]]
+[[ "$(grep -Fc new:fresh-notification "$TEST_ROOT/race-action.log")" == 1 ]]
+cat "$TEST_ROOT/race-old-token" > "$race_worktree/.sergeant-notification-acks/$old_race_nonce"
+cmp -s "$TEST_ROOT/race-new-token" \
+  "$race_state/notifications/fresh-notification/targets/$new_race_nonce/acknowledged"
+cmp -s "$TEST_ROOT/race-new-token" \
+  "$race_state/notifications/fresh-notification/targets/$new_race_nonce/accepted"
+for _ in $(seq 1 200); do
+  [[ -f "$race_state/notifications/fresh-notification/targets/$new_race_nonce/completed" ]] && break
+  sleep 0.01
+done
+[[ -f "$race_state/notifications/fresh-notification/targets/$new_race_nonce/completed" ]]
+[[ "$(cat "$race_state/notifications/fresh-notification/action_lease")" == "$new_race_nonce" ]]
+cmp -s "$TEST_ROOT/race-new-token" \
+  "$race_state/notifications/fresh-notification/targets/$new_race_nonce/completed"
+[[ "$(find "$race_state/notifications/fresh-notification" -name action_lease -type f | wc -l | tr -d ' ')" == 1 ]]
+kill -0 "$old_race_pid"
+touch "$TEST_ROOT/race-old-stop"
+for _ in $(seq 1 200); do
+  [[ -e "$TEST_ROOT/race-old-stopped" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/race-old-stopped" ]]
+for _ in $(seq 1 200); do
+  kill -0 "$old_race_pid" 2>/dev/null || break
+  sleep 0.01
+done
+if kill -0 "$old_race_pid" 2>/dev/null; then
+  printf 'stale supervisor remained live after terminal barrier: %s\n' "$old_race_pid" >&2
+  exit 1
+fi
+[[ "$(grep -Fc new:fresh-notification "$TEST_ROOT/race-received.log")" == 1 ]]
+[[ "$(grep -Fc new:fresh-notification "$TEST_ROOT/race-action.log")" == 1 ]]
+[[ "$(grep -Fc old:fresh-notification "$TEST_ROOT/race-action.log" 2>/dev/null || true)" == 0 ]]
+touch "$TEST_ROOT/race-new-exit"
+for _ in $(seq 1 200); do
+  [[ ! -e "$race_state/response.lock" ]] && break
+  sleep 0.01
+done
+
+printf 'initial-notification-1\n' > "$TEST_ROOT/done/state/notification_id"
+cat > "$TEST_ROOT/done/worktree/.sergeant-notification" <<'EOF'
+notification_id=initial-notification-1
+kind=initial
+instruction=Read the .sergeant-brief.md file and execute the mission.
+EOF
+tmux new-window -d -t "$TMUX_SESSION:" -n "done" \
+  "env ARG_LOG='$TEST_ROOT/done.args' EXPECT_NOTIFICATION_COUNT=1 FAKE_STARTUP_DELAY=0.2 \
+  NOTIFICATION_STATE='$TEST_ROOT/done/state' SGT_NOTIFICATION_RETRY_INTERVAL=0.01 FAKE_MODE=done \
+  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/done/state' \
+  '$TEST_ROOT/done/worktree' '$TEST_ROOT/fake-bin/opencode'"
+target_worker_pane "$TEST_ROOT/done/state" "done"
+for _ in $(seq 1 100); do
+  [[ -f "$TEST_ROOT/done/state/result" ]] && break
+  sleep 0.02
+done
+[[ "$(cat "$TEST_ROOT/done.args")" == "1|--dangerously-skip-permissions" ]]
+[[ "$(cat "$TEST_ROOT/done/state/status")" == "done" ]]
+[[ "$(cat "$TEST_ROOT/done/state/worker_mode")" == "interactive" ]]
+done_nonce="$(cat "$TEST_ROOT/done/state/notification_target")"
+[[ "$(cat "$TEST_ROOT/done/state/notifications/initial-notification-1/targets/$done_nonce/delivered")" == \
+   "initial-notification-1|$done_nonce" ]]
+[[ -s "$TEST_ROOT/done/state/result" ]]
+
+printf 'recovered-notification-1\n' > "$TEST_ROOT/recovery/state/notification_id"
+cat > "$TEST_ROOT/recovery/worktree/.sergeant-notification" <<'EOF'
+notification_id=recovered-notification-1
+kind=initial
+instruction=Read the .sergeant-brief.md file and execute the mission.
+EOF
+tmux new-window -d -t "$TMUX_SESSION:" -n recovery \
+  "env ARG_LOG='$TEST_ROOT/recovery.args' EXPECT_NOTIFICATION_COUNT=1 \
+  NOTIFICATION_STATE='$TEST_ROOT/recovery/state' SGT_NOTIFICATION_RETRY_INTERVAL=0.01 FAKE_MODE=done \
+  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/recovery/state' \
+  '$TEST_ROOT/recovery/worktree' '$TEST_ROOT/fake-bin/opencode'"
+target_worker_pane "$TEST_ROOT/recovery/state" recovery
+for _ in $(seq 1 100); do
+  [[ -f "$TEST_ROOT/recovery/state/result" ]] && break
+  sleep 0.02
+done
+recovery_nonce="$(cat "$TEST_ROOT/recovery/state/notification_target")"
+[[ "$(cat "$TEST_ROOT/recovery/state/notifications/recovered-notification-1/targets/$recovery_nonce/delivered")" == \
+   "recovered-notification-1|$recovery_nonce" ]]
+[[ "$(cat "$TEST_ROOT/recovery/state/status")" == "done" ]]
+
+real_mv="$(command -v mv)"
+cat > "$TEST_ROOT/failure-bin/mv" <<'EOF'
+#!/usr/bin/env bash
+target=""
+for argument in "$@"; do target="$argument"; done
+case "${FAIL_NOTIFICATION_MUTATION:-}" in
+  state) [[ "$target" == */notifications/*/notification ]] && exit 31 ;;
+  acknowledged) [[ "$target" == */acknowledged ]] && exit 32 ;;
+  delivered) [[ "$target" == */notifications/*/delivered ]] && exit 33 ;;
+  id) [[ "$target" == */notification_id ]] && exit 34 ;;
+  active) [[ "$target" == */.sergeant-notification ]] && exit 35 ;;
+esac
+exec "$REAL_MV" "$@"
+EOF
+chmod +x "$TEST_ROOT/failure-bin/mv"
+
+publish_replacement_notification() {
+  local notification_id="$1"
+  PATH="${PUBLISH_PATH:-$PATH}" REAL_MV="$real_mv" \
+    bash -c 'source "$1"; _sgt_publish_worker_notification "$2" "$3" "$4" test "Apply once." || exit; identity="$(cat "$2/pane_identity" 2>/dev/null || true)"; [[ -z "$identity" ]] || _sgt_notification_target_create "$2" "$4" "$identity" >/dev/null' _ \
+      "$ROOT_DIR/bin/_sgt-lib.sh" "$TEST_ROOT/replacement/state" \
+      "$TEST_ROOT/replacement/worktree" "$notification_id"
 }
 
-run_wait_resume_case needs_input
-run_wait_resume_case blocked
-run_wait_resume_case poisoned_session needs_input
+publish_replacement_notification replace-0
+tmux new-window -d -t "$TMUX_SESSION:" -n replacement \
+  "env ARG_LOG='$TEST_ROOT/replacement.args' EXPECT_NOTIFICATION_COUNT=1 \
+  RECEIVED_LOG='$TEST_ROOT/replacement-received.log' NOTIFICATION_STATE='$TEST_ROOT/replacement/state' \
+  SGT_NOTIFICATION_RETRY_INTERVAL=0.01 FAKE_MODE=done \
+  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/replacement/state' \
+  '$TEST_ROOT/replacement/worktree' '$TEST_ROOT/fake-bin/opencode'"
+target_worker_pane "$TEST_ROOT/replacement/state" replacement
+for _ in $(seq 1 100); do
+  replacement_nonce="$(cat "$TEST_ROOT/replacement/state/notification_target" 2>/dev/null || true)"
+  [[ -f "$TEST_ROOT/replacement/state/notifications/replace-0/targets/$replacement_nonce/delivered" ]] && break
+  sleep 0.02
+done
+for _ in $(seq 1 100); do
+  [[ -f "$TEST_ROOT/replacement/state/result" ]] && break
+  sleep 0.02
+done
+[[ "$(wc -l < "$TEST_ROOT/replacement-received.log" | tr -d ' ')" == 1 ]]
+[[ "$(cat "$TEST_ROOT/replacement/state/status")" == "done" ]]
 
-case_root="$TEST_ROOT/claude-needs-input"
-mkdir -p "$case_root/worktree" "$case_root/state"
-FAKE_MODE=claude_needs_input FAKE_STATE="$case_root" SGT_WORKER_POLL_INTERVAL=0.01 \
-  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_claude" "initial mission" &
-worker_pid=$!
-wait_for_file "$case_root/worktree/.sergeant-message"
-kill -0 "$worker_pid"
-printf 'Use option A\n' > "$case_root/worktree/.sergeant-response"
-printf 'response-id-123\n' > "$case_root/worktree/.sergeant-response-id"
-printf 'response-id-123\n' > "$case_root/state/response_id"
-wait "$worker_pid"
-[[ "$(cat "$case_root/worktree/.sergeant-result")" == 'validated Claude result' ]]
-grep -Fq -- '--dangerously-skip-permissions --resume ses-test-123' "$case_root/args"
-grep -Fq -- '-p --output-format json' "$case_root/args"
+tmux new-window -d -t "$TMUX_SESSION:" -n goose \
+  "env ARG_LOG='$TEST_ROOT/goose.args' FAKE_MODE=done \
+  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/goose/state' \
+  '$TEST_ROOT/goose/worktree' '$TEST_ROOT/fake-bin/goose'"
+tmux new-window -d -t "$TMUX_SESSION:" -n claude \
+  "env ARG_LOG='$TEST_ROOT/claude.args' FAKE_MODE=done \
+  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/claude/state' \
+  '$TEST_ROOT/claude/worktree' '$TEST_ROOT/fake-bin/claude'"
+for _ in $(seq 1 100); do
+  [[ -f "$TEST_ROOT/goose/state/result" && -f "$TEST_ROOT/claude/state/result" ]] && break
+  sleep 0.02
+done
+[[ "$(cat "$TEST_ROOT/goose.args")" == "1|session" ]]
+[[ "$(cat "$TEST_ROOT/claude.args")" == "0|" ]]
+[[ "$(cat "$TEST_ROOT/goose/state/status")" == "done" ]]
+[[ "$(cat "$TEST_ROOT/claude/state/status")" == "done" ]]
 
-case_root="$TEST_ROOT/resume-orphan"
-mkdir -p "$case_root/worktree" "$case_root/state"
-printf 'orphaned\n' > "$case_root/worktree/.sergeant-status"
-printf 'ses-test-123\n' > "$case_root/state/session_id"
-printf 'td-123\n' > "$case_root/state/td_task"
-printf 'Use option A\n' > "$case_root/worktree/.sergeant-response"
-printf 'response-id-123\n' > "$case_root/worktree/.sergeant-response-id"
-printf 'response-id-123\n' > "$case_root/state/response_id"
-PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" FAKE_MODE=resume_orphan FAKE_STATE="$case_root" \
-  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_agent" "initial mission"
-[[ ! -e "$case_root/worktree/.sergeant-response" ]]
-[[ "$(cat "$case_root/worktree/.sergeant-result")" == 'resumed result' ]]
+for waiting_status in needs_input blocked; do
+  state_dir="$TEST_ROOT/${waiting_status//_/-}/state"
+  worktree_dir="$TEST_ROOT/${waiting_status//_/-}/worktree"
+  tmux new-window -d -t "$TMUX_SESSION:" -n "$waiting_status" \
+    "env ARG_LOG='$TEST_ROOT/$waiting_status.args' FAKE_MODE='$waiting_status' \
+    '$ROOT_DIR/bin/sgt-interactive-worker' '$state_dir' \
+    '$worktree_dir' '$TEST_ROOT/fake-bin/claude'"
+  for _ in $(seq 1 100); do
+    [[ -f "$state_dir/status" ]] && [[ "$(cat "$state_dir/status")" == "$waiting_status" ]] && break
+    sleep 0.02
+  done
+  [[ "$(cat "$state_dir/status")" == "$waiting_status" ]]
+  [[ "$(cat "$worktree_dir/.sergeant-status")" == "$waiting_status" ]]
+  [[ ! -e "$state_dir/diagnostic" ]]
+done
 
-case_root="$TEST_ROOT/recover-without-session"
-mkdir -p "$case_root/worktree" "$case_root/state"
-printf 'orphaned\n' > "$case_root/worktree/.sergeant-status"
-printf 'td-123\n' > "$case_root/state/td_task"
-printf 'prior process exited\n' > "$case_root/state/diagnostic"
-printf 'Use option A\n' > "$case_root/worktree/.sergeant-response"
-printf 'response-id-123\n' > "$case_root/worktree/.sergeant-response-id"
-printf 'response-id-123\n' > "$case_root/state/response_id"
-PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" \
-  FAKE_MODE=recover_without_session FAKE_STATE="$case_root" \
-  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_agent" "initial mission"
-[[ "$(cat "$case_root/worktree/.sergeant-result")" == 'recovered result' ]]
-[[ ! -e "$case_root/worktree/.sergeant-response" && ! -e "$case_root/state/response" ]]
+tmux new-window -d -t "$TMUX_SESSION:" -n orphan \
+  "env ARG_LOG='$TEST_ROOT/orphan.args' \
+  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/orphan/state' \
+  '$TEST_ROOT/orphan/worktree' '$TEST_ROOT/fake-bin/opencode'"
+for _ in $(seq 1 100); do
+  [[ -f "$TEST_ROOT/orphan/state/diagnostic" ]] && break
+  sleep 0.02
+done
+[[ "$(cat "$TEST_ROOT/orphan.args")" == "1|--dangerously-skip-permissions" ]]
+[[ "$(cat "$TEST_ROOT/orphan/state/status")" == "orphaned" ]]
+grep -Fq 'interactive opencode session exited before terminal completion' \
+  "$TEST_ROOT/orphan/state/diagnostic"
 
-case_root="$TEST_ROOT/resume-after-submitted-response"
-mkdir -p "$case_root/worktree" "$case_root/state"
-printf 'orphaned\n' > "$case_root/worktree/.sergeant-status"
-printf 'ses-test-123\n' > "$case_root/state/session_id"
-printf 'td-123\n' > "$case_root/state/td_task"
-printf 'Use option A\n' > "$case_root/worktree/.sergeant-response"
-printf 'response-id-123\n' > "$case_root/worktree/.sergeant-response-id"
-printf 'response-id-123\n' > "$case_root/worktree/.sergeant-response-ack"
-printf 'Use option A\n' > "$case_root/state/response"
-printf 'response-id-123\n' > "$case_root/state/response_id"
-PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" \
-  FAKE_MODE=resume_after_submitted_response FAKE_STATE="$case_root" \
-  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_agent" "initial mission"
-[[ "$(cat "$case_root/worktree/.sergeant-result")" == 'resumed without replay result' ]]
-[[ ! -e "$case_root/worktree/.sergeant-response" && ! -e "$case_root/state/response" ]]
-
-case_root="$TEST_ROOT/submitted-response-missing-session"
-mkdir -p "$case_root/worktree" "$case_root/state"
-printf 'orphaned\n' > "$case_root/worktree/.sergeant-status"
-printf 'td-123\n' > "$case_root/state/td_task"
-printf 'Use option A\n' > "$case_root/worktree/.sergeant-response"
-printf 'response-id-123\n' > "$case_root/worktree/.sergeant-response-id"
-printf 'Use option A\n' > "$case_root/state/response"
-printf 'response-id-123\n' > "$case_root/state/response_id"
-set +e
-PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" \
-  FAKE_MODE=submitted_response_missing_session FAKE_STATE="$case_root" \
-  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_agent" "initial mission"
-status=$?
-set -e
-[[ "$status" -ne 0 ]]
-[[ "$(cat "$case_root/worktree/.sergeant-status")" == 'orphaned' ]]
-[[ "$(cat "$case_root/worktree/.sergeant-response")" == 'Use option A' ]]
-[[ "$(cat "$case_root/state/response")" == 'Use option A' ]]
-[[ ! -e "$case_root/worktree/.sergeant-response-ack" ]]
-grep -Fq 'OpenCode turn did not provide a resumable session ID' "$case_root/state/diagnostic"
-
-case_root="$TEST_ROOT/legacy-response-cleanup"
-mkdir -p "$case_root/worktree" "$case_root/state"
-printf 'orphaned\n' > "$case_root/worktree/.sergeant-status"
-printf 'ses-test-123\n' > "$case_root/state/session_id"
-printf 'Use option A\n' > "$case_root/worktree/.sergeant-response"
-printf 'Use option A\n' > "$case_root/state/response"
-PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" \
-  FAKE_MODE=legacy_response_cleanup FAKE_STATE="$case_root" \
-  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_agent" "initial mission"
-[[ "$(cat "$case_root/worktree/.sergeant-result")" == 'legacy cleanup result' ]]
-[[ ! -e "$case_root/worktree/.sergeant-response" && ! -e "$case_root/state/response" ]]
-[[ ! -e "$case_root/worktree/.sergeant-response-ack" ]]
-
-case_root="$TEST_ROOT/failed-after-response"
-mkdir -p "$case_root/worktree" "$case_root/state"
-printf 'orphaned\n' > "$case_root/worktree/.sergeant-status"
-printf 'ses-test-123\n' > "$case_root/state/session_id"
-printf 'Use option A\n' > "$case_root/worktree/.sergeant-response"
-printf 'response-id-123\n' > "$case_root/worktree/.sergeant-response-id"
-printf 'Use option A\n' > "$case_root/state/response"
-printf 'response-id-123\n' > "$case_root/state/response_id"
-set +e
-PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" \
-  FAKE_MODE=failed_after_response FAKE_STATE="$case_root" \
-  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_agent" "initial mission"
-status=$?
-set -e
-[[ "$status" -ne 0 ]]
-[[ "$(cat "$case_root/worktree/.sergeant-status")" == 'failed: downstream rejection' ]]
-[[ ! -e "$case_root/worktree/.sergeant-response" && ! -e "$case_root/state/response" ]]
-[[ "$(cat "$case_root/worktree/.sergeant-response-ack")" == 'response-id-123' ]]
-
-case_root="$TEST_ROOT/serialized-response"
-mkdir -p "$case_root/worktree" "$case_root/state/response.lock"
-printf '%s\n' "$$" > "$case_root/state/response.lock/pid"
-printf 'orphaned\n' > "$case_root/worktree/.sergeant-status"
-printf 'ses-test-123\n' > "$case_root/state/session_id"
-printf 'old response\n' > "$case_root/worktree/.sergeant-response"
-printf 'response-id-old\n' > "$case_root/worktree/.sergeant-response-id"
-printf 'response-id-old\n' > "$case_root/state/response_id"
-FAKE_MODE=serialized_response FAKE_STATE="$case_root" SGT_WORKER_POLL_INTERVAL=0.01 \
-  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_agent" "initial mission" &
-worker_pid=$!
-sleep 0.05
-kill -0 "$worker_pid"
-printf 'new response\n' > "$case_root/worktree/.sergeant-response.tmp"
-mv "$case_root/worktree/.sergeant-response.tmp" "$case_root/worktree/.sergeant-response"
-printf 'response-id-new\n' > "$case_root/worktree/.sergeant-response-id"
-printf 'response-id-new\n' > "$case_root/state/response_id"
-rm "$case_root/state/response.lock/pid"
-rmdir "$case_root/state/response.lock"
-wait "$worker_pid"
-[[ "$(cat "$case_root/worktree/.sergeant-result")" == 'serialized result' ]]
-
-case_root="$TEST_ROOT/missing-session"
-mkdir -p "$case_root/worktree" "$case_root/state"
-set +e
-FAKE_MODE=missing_session FAKE_STATE="$case_root" \
-  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_agent" "initial mission"
-status=$?
-set -e
-[[ "$status" -ne 0 ]]
-[[ "$(cat "$case_root/worktree/.sergeant-status")" == 'orphaned' ]]
-grep -Fq 'OpenCode turn did not provide a resumable session ID' "$case_root/state/diagnostic"
-
-case_root="$TEST_ROOT/claude-missing-session"
-mkdir -p "$case_root/worktree" "$case_root/state"
-set +e
-FAKE_MODE=claude_missing_session FAKE_STATE="$case_root" \
-  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_claude" "initial mission"
-status=$?
-set -e
-[[ "$status" -ne 0 ]]
-[[ "$(cat "$case_root/worktree/.sergeant-status")" == 'orphaned' ]]
-grep -Fq 'Claude did not provide a resumable session ID' "$case_root/state/diagnostic"
-
-case_root="$TEST_ROOT/done-without-result"
-mkdir -p "$case_root/worktree" "$case_root/state"
-set +e
-FAKE_MODE=done_without_result FAKE_STATE="$case_root" \
-  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_agent" "initial mission"
-status=$?
-set -e
-[[ "$status" -ne 0 ]]
-[[ "$(cat "$case_root/worktree/.sergeant-status")" == "orphaned" ]]
-grep -Fq 'terminal status done requires .sergeant-result' "$case_root/state/diagnostic"
-
-case_root="$TEST_ROOT/unexpected-exit"
-mkdir -p "$case_root/worktree" "$case_root/state"
-printf 'td-123\n' > "$case_root/state/td_task"
-set +e
-PATH="$TEST_ROOT/fake-bin:$PATH" TD_LOG="$case_root/td.log" FAKE_MODE=unexpected_exit FAKE_STATE="$case_root" \
-  "$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$fake_agent" "initial mission"
-status=$?
-set -e
-[[ "$status" -eq 23 ]]
-[[ "$(cat "$case_root/worktree/.sergeant-status")" == "orphaned" ]]
-grep -Fq 'exit code: 23' "$case_root/state/diagnostic"
-grep -Fq 'agent diagnostic output' "$case_root/state/worker.log"
-grep -Fq 'handoff td-123' "$case_root/td.log"
-grep -Fq 'Read fleet state at' "$case_root/td.log"
-grep -Fq 'reconcile with current git state' "$case_root/td.log"
-
-case_root="$TEST_ROOT/launch-failure"
-mkdir -p "$case_root/worktree" "$case_root/state"
-set +e
-"$ROOT_DIR/bin/sgt-worker" "$case_root/state" "$case_root/worktree" "$case_root/missing-agent" "initial mission"
-status=$?
-set -e
-[[ "$status" -eq 127 ]]
-[[ "$(cat "$case_root/worktree/.sergeant-status")" == "orphaned" ]]
-grep -Fq 'exit code: 127' "$case_root/state/diagnostic"
-
-printf 'sgt-worker lifecycle: ok\n'
+printf 'sgt-interactive-worker lifecycle: ok\n'

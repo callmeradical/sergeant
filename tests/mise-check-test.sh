@@ -79,6 +79,9 @@ printf "%s\n" "OpenCode 1.0"'
   elif [[ "$agent_mode" == "claude" ]]; then
     make_stub claude '#!/usr/bin/env bash
 printf "%s\n" "Claude Code 1.0"'
+  elif [[ "$agent_mode" == "goose" ]]; then
+    make_stub goose '#!/usr/bin/env bash
+printf "%s\n" "goose 1.0"'
   elif [[ "$agent_mode" == "both" ]]; then
     make_stub opencode '#!/usr/bin/env bash
 printf "%s\n" "OpenCode 1.0"'
@@ -113,7 +116,7 @@ set +e
 missing_agent_output="$(run_check supported none 2>&1)"
 missing_agent_status=$?
 set -e
-if [[ "$missing_agent_status" -eq 0 ]] || [[ "$missing_agent_output" != *"install OpenCode or Claude Code"* ]]; then
+if [[ "$missing_agent_status" -eq 0 ]] || [[ "$missing_agent_output" != *"install OpenCode, Goose, or Claude"* ]]; then
   printf 'dependency check did not fail when no supported agent harness was present:\n%s\n' "$missing_agent_output" >&2
   exit 1
 fi
@@ -125,8 +128,14 @@ if [[ "$supported_output" != *"agent"* ]] || [[ "$supported_output" != *"opencod
 fi
 
 alternate_agent_output="$(run_check supported claude 2>&1)"
-if [[ "$alternate_agent_output" != *"agent"* ]] || [[ "$alternate_agent_output" != *"claude: Claude Code 1.0"* ]] || [[ "$alternate_agent_output" != *"All required dependencies present."* ]]; then
-  printf 'dependency check did not accept Claude Code as the supported harness:\n%s\n' "$alternate_agent_output" >&2
+if [[ "$alternate_agent_output" != *"claude: Claude Code 1.0"* ]] || [[ "$alternate_agent_output" != *"All required dependencies present."* ]]; then
+  printf 'dependency check did not accept Claude:\n%s\n' "$alternate_agent_output" >&2
+  exit 1
+fi
+
+goose_output="$(run_check supported goose 2>&1)"
+if [[ "$goose_output" != *"goose: goose 1.0"* ]] || [[ "$goose_output" != *"All required dependencies present."* ]]; then
+  printf 'dependency check did not accept Goose:\n%s\n' "$goose_output" >&2
   exit 1
 fi
 

@@ -38,9 +38,8 @@ require_file "docs/getting-started.md"
 require_file "docs/skills.md"
 require_file "docs/using-sergeant.md"
 require_file "docs/troubleshooting.md"
-require_text "docs/getting-started.md" "command -v opencode >/dev/null"
-require_text "docs/getting-started.md" "command -v claude >/dev/null"
-require_text "docs/getting-started.md" "Install OpenCode or Claude Code before using Sergeant."
+require_text "docs/getting-started.md" "for agent in opencode goose claude"
+require_text "docs/getting-started.md" "Install OpenCode, Goose, or Claude before using Sergeant interactive dispatch."
 
 require_text "AGENTS.md" "## Procedural skills"
 require_text "AGENTS.md" "direct executor when requested"
@@ -48,9 +47,13 @@ require_text "AGENTS.md" "direct executor when requested"
 require_text "AGENTS.md" '`sergeant-help`'
 require_text "AGENTS.md" "Never edit a default branch in direct mode"
 require_text "AGENTS.md" "Open a PR for every direct-mode implementation"
+require_text "AGENTS.md" ".sergeant-intent.md"
+require_text "AGENTS.md" "same canonical intent revision"
 require_text "AGENTS.md" "td context <id> --work-dir <owning-repo-path>"
 require_text "AGENTS.md" "ingest, backfill, regenerate, inspect, update, or change the wiki"
 require_text "README.md" "docs/README.md"
+require_text "README.md" ".sergeant-intent.md"
+require_text "README.md" '--intent-file'
 reject_text "AGENTS.md" "gives one repository as the complete scope"
 reject_text "AGENTS.md" "## Project YAML schema (summary)"
 reject_text "AGENTS.md" "## td task management integration"
@@ -64,6 +67,14 @@ reject_text "skills/dispatch/SKILL.md" "Ask for confirmation before dispatching.
 reject_text "skills/dispatch/SKILL.md" "remain alive, and wait"
 reject_text "skills/dispatch/SKILL.md" 'treehouse return <path> --force'
 require_text "skills/dispatch/SKILL.md" 'sgt-watch --sync <task-id>'
+require_text "skills/dispatch/SKILL.md" '--intent-file <path>'
+require_text "skills/dispatch/SKILL.md" "standard-isolated"
+require_text "skills/dispatch/SKILL.md" "auth, OAuth, security, secret, credential, payment, database, migration, stateful, production, destructive"
+require_text "skills/dispatch/SKILL.md" "mutation before validation"
+require_text "skills/dispatch/SKILL.md" "After two remediation cycles"
+require_text "docs/using-sergeant.md" '--intent-file intent.md'
+require_text "docs/using-sergeant.md" ".sergeant-intent.md"
+reject_text "AGENTS.md" 'no-mistakes axi run --intent "<the user'
 require_text "skills/cross-repo-work/SKILL.md" "If the user requested planning only"
 reject_text "docs/troubleshooting.md" "follow no-mistakes policy"
 require_text "docs/troubleshooting.md" "Do not authorize an in-run fix"

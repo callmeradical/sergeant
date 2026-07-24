@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# sgt-validation-worker - Run coordinator-owned no-mistakes in an interactive pane.
+
+set -uo pipefail
+
+[[ $# -ge 3 && $# -le 4 ]] || {
+  echo "Usage: sgt-validation-worker <repo-state-dir> <worktree> <intent-revision> [skip]" >&2
+  exit 2
+}
+
+REPO_STATE="$1"
+WORKTREE="$2"
+EXPECTED_REVISION="$3"
+SKIP="${4:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-intent.sh
+source "$SCRIPT_DIR/_sgt-intent.sh"
+# shellcheck source=bin/_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+
+[[ -d "$REPO_STATE" && -d "$WORKTREE" ]] || {
+  echo "ERROR: validation state or worktree unavailable" >&2
+  exit 2
+}
+[[ -t 0 && -t 1 ]] || {
+  echo "ERROR: validation worker requires a terminal" >&2
+  exit 2
+}
+VALIDATION_INTENT="$REPO_STATE/validation-intent.md"
+[[ -f "$VALIDATION_INTENT" ]] || {
+  echo "ERROR: canonical validation intent unavailable" >&2
+  exit 2
+}
+[[ "$(_sgt_intent_revision "$VALIDATION_INTENT")" == "$EXPECTED_REVISION" ]] || {
+  echo "ERROR: canonical validation intent revision mismatch" >&2
+  exit 2
+}
+command -v no-mistakes >/dev/null 2>&1 || {
+  echo "ERROR: no-mistakes is required" >&2
+  exit 2
+}
+
+attempt=0
+while [[ ! -f "$REPO_STATE/validation-release" && "$attempt" -lt 200 ]]; do
+  sleep 0.05
+  attempt=$((attempt + 1))
+done
+[[ -f "$REPO_STATE/validation-release" ]] || {
+  echo "ERROR: validation launch was not released by the coordinator" >&2
+  exit 2
+}
+[[ "$(cat "$REPO_STATE/validation-release")" == "$EXPECTED_REVISION" ]] || {
+  echo "ERROR: validation release revision mismatch" >&2
+  exit 2
+}
+if [[ -z "${TMUX_PANE:-}" ]] || \
+   ! _sgt_pane_identity_matches "$TMUX_PANE" "$REPO_STATE" validation_pane_identity; then
+    echo "ERROR: validation pane identity does not match coordinator state" >&2
+    exit 2
+fi
+EXPECTED_HEAD="$(cat "$REPO_STATE/validation_head" 2>/dev/null || true)"
+if [[ -z "$EXPECTED_HEAD" || \
+      "$(git -C "$WORKTREE" rev-parse HEAD 2>/dev/null || true)" != "$EXPECTED_HEAD" ]] || \
+   ! _sgt_worktree_is_validation_clean "$WORKTREE"; then
+    echo "ERROR: isolated validation code snapshot no longer matches reviewed HEAD" >&2
+    exit 2
+fi
+
+printf 'running\n' > "$REPO_STATE/validation_status"
+cd "$WORKTREE" || exit 2
+args=(axi run --intent "$(cat "$VALIDATION_INTENT")")
+[[ -z "$SKIP" ]] || args+=(--skip "$SKIP")
+no-mistakes "${args[@]}"
+status=$?
+printf 'exited:%s\n' "$status" > "$REPO_STATE/validation_status"
+exit "$status"

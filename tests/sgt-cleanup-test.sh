@@ -54,6 +54,44 @@ assert_cleanup_rejected "dangling-alias" "dangling-symlink-alias"
 [[ -L "$TEST_ROOT/fleet/alias" ]]
 [[ -L "$TEST_ROOT/fleet/dangling-alias" ]]
 
+stale_state="$TEST_ROOT/fleet/stale-dead-pane/app"
+mkdir -p "$stale_state" "$TEST_ROOT/stale-bin"
+printf 'done\n' > "$stale_state/status"
+printf 'result\n' > "$stale_state/result"
+printf '%s\n' "$TEST_ROOT/missing-stale-worktree" > "$stale_state/worktree"
+printf '%%77\n' > "$stale_state/validation_pane"
+printf '0|%%77|7777|123456|validation-command\n' > "$stale_state/validation_pane_identity"
+printf '7777\n' > "$stale_state/validation_pane_pid"
+printf '7777\n' > "$stale_state/validation_process_group"
+printf 'Mon Jan  1 00:00:00 2024\n' > "$stale_state/validation_process_start"
+cat > "$TEST_ROOT/stale-bin/tmux" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  display-message)
+    format=""
+    for argument in "$@"; do format="$argument"; done
+    if [[ "$format" == '#{pane_id}' ]]; then
+      printf '%%77\n'
+    else
+      printf '1|%%77|8888|654321|unrelated-command\n'
+    fi
+    ;;
+  kill-pane) printf '%s\n' "$*" >> "$STALE_TMUX_LOG" ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/stale-bin/tmux"
+set +e
+PATH="$TEST_ROOT/stale-bin:$PATH" STALE_TMUX_LOG="$TEST_ROOT/stale-tmux.log" \
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" stale-dead-pane > "$TEST_ROOT/stale-dead-pane.log" 2>&1
+stale_status=$?
+set -e
+[[ "$stale_status" -ne 0 ]]
+grep -Fq 'Recorded validation pane identity does not match' "$TEST_ROOT/stale-dead-pane.log"
+[[ ! -e "$TEST_ROOT/stale-tmux.log" ]]
+[[ -d "$TEST_ROOT/fleet/stale-dead-pane" ]]
+rm -rf "$TEST_ROOT/fleet/stale-dead-pane"
+
 mkdir -p "$TEST_ROOT/fleet/preflight-task/app" "$TEST_ROOT/fleet/preflight-task/api"
 mkdir -p "$TEST_ROOT/preflight-app" "$TEST_ROOT/preflight-api"
 printf '%s\n' "$TEST_ROOT/preflight-app" > "$TEST_ROOT/fleet/preflight-task/app/worktree"
@@ -88,6 +126,104 @@ for unsafe_status in dispatched in_progress needs_input blocked orphaned unknown
   fi
   [[ -d "$status_worktree" && -d "$TEST_ROOT/fleet/$task_id" ]]
 done
+
+setup_response_cleanup_fixture() {
+  local state_name="$1"
+  response_state="$TEST_ROOT/fleet/response-$state_name/app"
+  response_worktree="$TEST_ROOT/response-$state_name-worktree"
+  response_archive="$response_state/response-archive/response-123"
+  mkdir -p "$response_archive" "$response_worktree"
+  printf '%s\n' "$response_worktree" > "$response_state/worktree"
+  printf 'done\n' > "$response_state/status"
+  printf 'result\n' > "$response_state/result"
+  printf 'done\n' > "$response_worktree/.sergeant-status"
+  printf 'result\n' > "$response_worktree/.sergeant-result"
+  printf 'response-123\n' > "$response_state/response_id"
+  printf '1\n' > "$response_state/response_generation"
+  printf 'response body\n' > "$response_archive/body"
+  printf '1\n' > "$response_archive/gate_generation"
+  printf 'done\n' > "$response_archive/applied_status"
+  cat > "$response_archive/proof" <<'EOF'
+response_id=response-123
+gate_generation=1
+status=done
+EOF
+}
+
+for response_case in pending-transport archive-only fleet-ack both-acks-with-transport partial-transport \
+  archive-proof-mismatch; do
+  setup_response_cleanup_fixture "$response_case"
+  case "$response_case" in
+    pending-transport)
+      rm -rf "$response_state/response-archive"
+      printf 'response body\n' > "$response_state/response"
+      printf 'response body\n' > "$response_worktree/.sergeant-response"
+      ;;
+    archive-only) ;;
+    fleet-ack)
+      printf 'response-123\n' > "$response_state/response_ack"
+      ;;
+    both-acks-with-transport)
+      printf 'response-123\n' > "$response_state/response_ack"
+      printf 'response-123\n' > "$response_worktree/.sergeant-response-ack"
+      printf 'response body\n' > "$response_state/response"
+      printf 'response body\n' > "$response_worktree/.sergeant-response"
+      ;;
+    partial-transport)
+      printf 'response-123\n' > "$response_state/response_ack"
+      printf 'response-123\n' > "$response_worktree/.sergeant-response-ack"
+      printf 'response body\n' > "$response_worktree/.sergeant-response"
+      ;;
+    archive-proof-mismatch)
+      printf 'response-123\n' > "$response_state/response_ack"
+      printf 'response-123\n' > "$response_worktree/.sergeant-response-ack"
+      printf 'response_id=response-123\ngate_generation=2\nstatus=done\n' \
+        > "$response_archive/proof"
+      ;;
+  esac
+
+  set +e
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" "response-$response_case" \
+    > "$TEST_ROOT/response-$response_case.log" 2>&1
+  response_status=$?
+  set -e
+  [[ "$response_status" -ne 0 ]]
+  grep -Fq 'pending or incomplete response acknowledgement' \
+    "$TEST_ROOT/response-$response_case.log"
+  [[ -d "$response_worktree" && -d "$response_state" ]]
+done
+
+setup_response_cleanup_fixture complete
+mkdir -p "$response_state/terminal-evidence"
+printf 'response-123\n' > "$response_worktree/.sergeant-response-ack"
+cp "$response_worktree/.sergeant-status" "$response_state/terminal-evidence/.sergeant-status"
+cp "$response_worktree/.sergeant-result" "$response_state/terminal-evidence/.sergeant-result"
+cp "$response_worktree/.sergeant-response-ack" \
+  "$response_state/terminal-evidence/.sergeant-response-ack"
+printf 'response-123\n' > "$response_state/response_ack"
+rm -rf "$response_worktree"
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" response-complete >/dev/null
+[[ ! -e "$TEST_ROOT/fleet/response-complete" ]]
+
+lock_state="$TEST_ROOT/fleet/response-lock/app"
+lock_worktree="$TEST_ROOT/response-lock-missing-worktree"
+mkdir -p "$lock_state/terminal-evidence"
+printf '%s\n' "$lock_worktree" > "$lock_state/worktree"
+printf 'done\n' > "$lock_state/status"
+printf 'result\n' > "$lock_state/result"
+printf 'done\n' > "$lock_state/terminal-evidence/.sergeant-status"
+printf 'result\n' > "$lock_state/terminal-evidence/.sergeant-result"
+printf 'invalid-owner\n' > "$lock_state/response.lock"
+set +e
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" response-lock > "$TEST_ROOT/response-lock.log" 2>&1
+lock_status=$?
+set -e
+[[ "$lock_status" -ne 0 ]]
+grep -Fq 'Response lock has an invalid owner' "$TEST_ROOT/response-lock.log"
+[[ -d "$lock_state" ]]
 
 for proof_case in missing mismatched; do
   proof_state="$TEST_ROOT/fleet/proof-$proof_case/app"
@@ -360,6 +496,9 @@ git -C "$TEST_ROOT/repo" commit -qm fixture
 worktree="$TEST_ROOT/repo-sgt-task-123"
 repo_state="$TEST_ROOT/fleet/task-123/app"
 git -C "$TEST_ROOT/repo" worktree add -q -b test-cleanup "$worktree"
+validation_worktree="${worktree}-validation-task-123"
+git clone -q "$worktree" "$validation_worktree"
+printf '%s\n' "$validation_worktree" > "$repo_state/validation_worktree"
 printf '%s\n' "$worktree" > "$repo_state/worktree"
 printf 'git\n' > "$repo_state/wt_type"
 printf 'done\n' > "$repo_state/status"
@@ -377,6 +516,47 @@ fi
 [[ -d "$worktree" && -d "$TEST_ROOT/fleet/task-123" ]]
 rm "$worktree/uncommitted.txt"
 
+bash -c '
+  set -euo pipefail
+  source "$1"
+  repo_state="$2"
+  acquired="$3"
+  _sgt_response_lock_acquire "$repo_state"
+  touch "$acquired"
+  for _ in $(seq 1 500); do
+    compgen -G "$repo_state/.response.lock.*" >/dev/null && break
+    sleep 0.01
+  done
+  compgen -G "$repo_state/.response.lock.*" >/dev/null
+  archive="$repo_state/response-archive/response-123"
+  mkdir -p "$archive"
+  printf "response-123\n" > "$repo_state/response_id"
+  printf "1\n" > "$repo_state/response_generation"
+  printf "response body\n" > "$archive/body"
+  printf "1\n" > "$archive/gate_generation"
+  printf "done\n" > "$archive/applied_status"
+  printf "response_id=response-123\ngate_generation=1\nstatus=done\n" > "$archive/proof"
+  _sgt_response_lock_release
+' _ "$ROOT_DIR/bin/_sgt-response-lock.sh" "$repo_state" "$TEST_ROOT/contention-acquired" &
+lock_holder_pid=$!
+for _ in $(seq 1 500); do
+  [[ -e "$TEST_ROOT/contention-acquired" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/contention-acquired" ]]
+set +e
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" task-123 > "$TEST_ROOT/response-contention.log" 2>&1
+contention_status=$?
+set -e
+wait "$lock_holder_pid"
+[[ "$contention_status" -ne 0 ]]
+grep -Fq 'pending or incomplete response acknowledgement' "$TEST_ROOT/response-contention.log"
+[[ -d "$worktree" && -d "$repo_state" ]]
+[[ -f "$repo_state/response-archive/response-123/body" ]]
+rm -rf "$repo_state/response-archive"
+rm -f "$repo_state/response_id" "$repo_state/response_generation"
+
 cat > "$TEST_ROOT/fake-bin/fake-agent" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$AGENT_PID_FILE"
@@ -386,13 +566,20 @@ while :; do sleep 1; done
 EOF
 chmod +x "$TEST_ROOT/fake-bin/fake-agent"
 
-cat > "$TEST_ROOT/fake-bin/sgt-worker" <<'EOF'
+cat > "$TEST_ROOT/fake-bin/sgt-interactive-worker" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$WORKER_PID_FILE"
 "$FAKE_AGENT" &
 wait "$!"
 EOF
-chmod +x "$TEST_ROOT/fake-bin/sgt-worker"
+chmod +x "$TEST_ROOT/fake-bin/sgt-interactive-worker"
+cat > "$TEST_ROOT/fake-bin/sgt-validation-worker" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$VALIDATION_PID_FILE"
+sh -c 'printf "%s\n" "$$" > "$VALIDATION_CHILD_PID_FILE"; trap "" HUP; while :; do sleep 1; done' &
+while [[ ! -e "$VALIDATION_EXIT_FILE" ]]; do sleep 0.01; done
+EOF
+chmod +x "$TEST_ROOT/fake-bin/sgt-validation-worker"
 
 tmux new-session -d -s "$TMUX_SESSION" -n unrelated \
   "while :; do sleep 1; done"
@@ -400,10 +587,23 @@ unrelated_pid="$(tmux display-message -p -t "$TMUX_SESSION:unrelated" '#{pane_pi
 worker_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n worker \
   "env WORKER_PID_FILE='$TEST_ROOT/worker.pid' AGENT_PID_FILE='$TEST_ROOT/agent.pid' \
   FAKE_AGENT='$TEST_ROOT/fake-bin/fake-agent' \
-  '$TEST_ROOT/fake-bin/sgt-worker' '$repo_state' '$worktree'")"
+  '$TEST_ROOT/fake-bin/sgt-interactive-worker' '$repo_state' '$worktree'")"
 printf '%s\n' "$worker_pane" > "$repo_state/pane"
+tmux display-message -p -t "$worker_pane" \
+  '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+  > "$repo_state/pane_identity"
+validation_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n validation \
+  "env VALIDATION_PID_FILE='$TEST_ROOT/validation.pid' \
+  VALIDATION_CHILD_PID_FILE='$TEST_ROOT/validation-child.pid' \
+  VALIDATION_EXIT_FILE='$TEST_ROOT/validation-exit' \
+  '$TEST_ROOT/fake-bin/sgt-validation-worker' '$repo_state' '$worktree'")"
+printf '%s\n' "$validation_pane" > "$repo_state/validation_pane"
+tmux display-message -p -t "$validation_pane" \
+  '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+  > "$repo_state/validation_pane_identity"
 
-for pid_file in "$TEST_ROOT/worker.pid" "$TEST_ROOT/agent.pid"; do
+for pid_file in "$TEST_ROOT/worker.pid" "$TEST_ROOT/agent.pid" "$TEST_ROOT/validation.pid" \
+  "$TEST_ROOT/validation-child.pid"; do
   for _ in $(seq 1 100); do
     [[ -s "$pid_file" ]] && break
     sleep 0.01
@@ -412,6 +612,33 @@ for pid_file in "$TEST_ROOT/worker.pid" "$TEST_ROOT/agent.pid"; do
 done
 worker_pid="$(cat "$TEST_ROOT/worker.pid")"
 agent_pid="$(cat "$TEST_ROOT/agent.pid")"
+validation_pid="$(cat "$TEST_ROOT/validation.pid")"
+validation_child_pid="$(cat "$TEST_ROOT/validation-child.pid")"
+printf '%s\n' "$validation_pid" > "$repo_state/validation_pane_pid"
+ps -o pgid= -p "$validation_pid" | tr -d ' ' > "$repo_state/validation_process_group"
+ps -o lstart= -p "$validation_pid" | awk '{$1=$1; print}' > "$repo_state/validation_process_start"
+validation_start="$(cat "$repo_state/validation_process_start")"
+printf 'stale process start\n' > "$repo_state/validation_process_start"
+set +e
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" task-123 > "$TEST_ROOT/reused-validation-owner.log" 2>&1
+cleanup_status=$?
+set -e
+[[ "$cleanup_status" -ne 0 ]]
+grep -Fq 'Validation owner PID was reused' "$TEST_ROOT/reused-validation-owner.log"
+kill -0 "$validation_pid"
+kill -0 "$validation_child_pid"
+[[ -d "$worktree" && -d "$validation_worktree" ]]
+printf '%s\n' "$validation_start" > "$repo_state/validation_process_start"
+touch "$TEST_ROOT/validation-exit"
+for _ in $(seq 1 100); do
+  kill -0 "$validation_pid" 2>/dev/null || break
+  sleep 0.01
+done
+if kill -0 "$validation_pid" 2>/dev/null || ! kill -0 "$validation_child_pid" 2>/dev/null; then
+  printf 'validation detached-child fixture did not reach the required state\n' >&2
+  exit 1
+fi
 
 mkdir "$worktree/held-subdirectory"
 holder_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n holder \
@@ -436,8 +663,28 @@ if kill -0 "$agent_pid" 2>/dev/null; then
   printf 'agent process still running after blocked cleanup: %s\n' "$agent_pid" >&2
   exit 1
 fi
+if kill -0 "$validation_pid" 2>/dev/null; then
+  printf 'validation process still running after blocked cleanup: %s\n' "$validation_pid" >&2
+  exit 1
+fi
+if kill -0 "$validation_child_pid" 2>/dev/null; then
+  printf 'detached validation child still running after blocked cleanup: %s\n' \
+    "$validation_child_pid" >&2
+  exit 1
+fi
 
 tmux kill-pane -t "$holder_pane"
+saved_validation_start="$(cat "$repo_state/validation_process_start")"
+rm "$repo_state/validation_process_start"
+set +e
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" task-123 > "$TEST_ROOT/missing-validation-provenance.log" 2>&1
+cleanup_status=$?
+set -e
+[[ "$cleanup_status" -ne 0 ]]
+grep -Fq 'Validation pane ownership provenance is incomplete' \
+  "$TEST_ROOT/missing-validation-provenance.log"
+printf '%s\n' "$saved_validation_start" > "$repo_state/validation_process_start"
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" task-123 >/dev/null
 
@@ -463,6 +710,7 @@ if kill -0 "$agent_pid" 2>/dev/null; then
   exit 1
 fi
 [[ ! -e "$worktree" ]]
+[[ ! -e "$validation_worktree" ]]
 [[ ! -e "$TEST_ROOT/fleet/task-123" ]]
 
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \

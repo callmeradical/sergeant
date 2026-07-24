@@ -7,6 +7,7 @@ TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 minimum_bash="${SGT_MINIMUM_BASH:-/bin/bash}"
+# shellcheck disable=SC2016
 version="$($minimum_bash -c 'printf "%s.%s\n" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"')"
 if [[ "$version" != "3.2" ]]; then
   printf 'runtime Bash regression requires Bash 3.2, found %s at %s\n' "$version" "$minimum_bash" >&2
@@ -14,6 +15,7 @@ if [[ "$version" != "3.2" ]]; then
 fi
 
 set +e
+# shellcheck disable=SC2016
 unsupported_output="$($minimum_bash -c \
   'source "$1/bin/_sgt-bash-version.sh"; _sgt_require_bash_version 3 1' _ "$ROOT_DIR" 2>&1)"
 unsupported_status=$?
@@ -32,11 +34,34 @@ fleet="$TEST_ROOT/fleet"
 repo_state="$fleet/task-1/app"
 worktree="$TEST_ROOT/worktree"
 mkdir -p "$repo_state" "$worktree"
+cat > "$fleet/task-1/.sergeant-intent.md" <<'EOF'
+## Objective
+
+Exercise Bash 3.2 response recovery.
+EOF
+# shellcheck disable=SC2016
+revision="$("$minimum_bash" -c 'source "$1"; _sgt_intent_revision "$2"' _ \
+  "$ROOT_DIR/bin/_sgt-intent.sh" "$fleet/task-1/.sergeant-intent.md")"
+printf '%s\n' "$revision" > "$fleet/task-1/intent_revision"
+install_intent_fixture() {
+  local state="$1" tree="$2"
+  local git_dir="${tree}-git-dir"
+  mkdir -p "$git_dir"
+  printf 'gitdir: %s\n' "$git_dir" > "$tree/.git"
+  cat "$tree/.git" > "$state/worktree_git_pointer"
+  printf '%s\n' "$git_dir" > "$state/worktree_git_dir"
+  cp "$fleet/task-1/.sergeant-intent.md" "$state/.sergeant-intent.md"
+  cp "$fleet/task-1/.sergeant-intent.md" "$tree/.sergeant-intent.md"
+  printf '%s\n' "$revision" > "$state/intent_revision"
+  printf '1\n' > "$tree/.sergeant-gate-generation"
+}
+install_intent_fixture "$repo_state" "$worktree"
 printf '%s\n' "$worktree" > "$repo_state/worktree"
 printf 'needs_input\n' > "$repo_state/status"
 printf 'needs_input\n' > "$worktree/.sergeant-status"
 
-SERGEANT_FLEET="$fleet" "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" task-1 app 'Bash 3.2 response' >/dev/null
+printf 'Bash 3.2 response' | SERGEANT_FLEET="$fleet" \
+  "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" task-1 app >/dev/null
 [[ "$(cat "$repo_state/response")" == 'Bash 3.2 response' ]]
 [[ "$(cat "$worktree/.sergeant-response")" == 'Bash 3.2 response' ]]
 [[ ! -e "$repo_state/response.lock" && ! -L "$repo_state/response.lock" ]]
@@ -44,17 +69,19 @@ SERGEANT_FLEET="$fleet" "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" task-1 app '
 failed_repo_state="$fleet/task-1/failed"
 failed_worktree="$TEST_ROOT/failed-worktree"
 mkdir -p "$failed_repo_state" "$failed_worktree"
+install_intent_fixture "$failed_repo_state" "$failed_worktree"
 printf '%s\n' "$failed_worktree" > "$failed_repo_state/worktree"
 printf 'needs_input\n' > "$failed_repo_state/status"
 printf 'needs_input\n' > "$failed_worktree/.sergeant-status"
 
 set +e
-SERGEANT_FLEET="$fleet" "$minimum_bash" -c '
+# shellcheck disable=SC2016
+printf 'failed response' | SERGEANT_FLEET="$fleet" "$minimum_bash" -c '
   mktemp() { return 1; }
   script="$1"
   shift
   source "$script"
-' _ "$ROOT_DIR/bin/sgt-respond" task-1 failed 'failed response' >/dev/null 2>&1
+' _ "$ROOT_DIR/bin/sgt-respond" task-1 failed >/dev/null 2>&1
 failed_status=$?
 set -e
 if [[ "$failed_status" -eq 0 ]]; then
@@ -67,49 +94,53 @@ fi
 empty_repo_state="$fleet/task-1/empty-lock"
 empty_worktree="$TEST_ROOT/empty-lock-worktree"
 mkdir -p "$empty_repo_state/response.lock" "$empty_worktree"
+install_intent_fixture "$empty_repo_state" "$empty_worktree"
 touch -t 200001010000 "$empty_repo_state/response.lock"
 printf '%s\n' "$empty_worktree" > "$empty_repo_state/worktree"
 printf 'needs_input\n' > "$empty_repo_state/status"
 printf 'needs_input\n' > "$empty_worktree/.sergeant-status"
-SERGEANT_FLEET="$fleet" "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" \
-  task-1 empty-lock 'recover empty lock' >/dev/null
+printf 'recover empty lock' | SERGEANT_FLEET="$fleet" \
+  "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" task-1 empty-lock >/dev/null
 [[ "$(cat "$empty_repo_state/response")" == 'recover empty lock' ]]
 [[ ! -e "$empty_repo_state/response.lock" && ! -L "$empty_repo_state/response.lock" ]]
 
 dead_repo_state="$fleet/task-1/dead-lock"
 dead_worktree="$TEST_ROOT/dead-lock-worktree"
 mkdir -p "$dead_repo_state/response.lock" "$dead_worktree"
+install_intent_fixture "$dead_repo_state" "$dead_worktree"
 printf '99999999\n' > "$dead_repo_state/response.lock/pid"
 printf '%s\n' "$dead_worktree" > "$dead_repo_state/worktree"
 printf 'needs_input\n' > "$dead_repo_state/status"
 printf 'needs_input\n' > "$dead_worktree/.sergeant-status"
-SERGEANT_FLEET="$fleet" "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" \
-  task-1 dead-lock 'recover dead lock' >/dev/null
+printf 'recover dead lock' | SERGEANT_FLEET="$fleet" \
+  "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" task-1 dead-lock >/dev/null
 [[ "$(cat "$dead_repo_state/response")" == 'recover dead lock' ]]
 [[ ! -e "$dead_repo_state/response.lock" && ! -L "$dead_repo_state/response.lock" ]]
 
 stale_repo_state="$fleet/task-1/stale-lock"
 stale_worktree="$TEST_ROOT/stale-lock-worktree"
 mkdir -p "$stale_repo_state" "$stale_worktree"
+install_intent_fixture "$stale_repo_state" "$stale_worktree"
 ln -s 99999999 "$stale_repo_state/response.lock"
 printf '%s\n' "$stale_worktree" > "$stale_repo_state/worktree"
 printf 'needs_input\n' > "$stale_repo_state/status"
 printf 'needs_input\n' > "$stale_worktree/.sergeant-status"
-SERGEANT_FLEET="$fleet" "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" \
-  task-1 stale-lock 'recover stale lock' >/dev/null
+printf 'recover stale lock' | SERGEANT_FLEET="$fleet" \
+  "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" task-1 stale-lock >/dev/null
 [[ "$(cat "$stale_repo_state/response")" == 'recover stale lock' ]]
 [[ ! -e "$stale_repo_state/response.lock" && ! -L "$stale_repo_state/response.lock" ]]
 
 invalid_repo_state="$fleet/task-1/invalid-lock"
 invalid_worktree="$TEST_ROOT/invalid-lock-worktree"
 mkdir -p "$invalid_repo_state" "$invalid_worktree"
+install_intent_fixture "$invalid_repo_state" "$invalid_worktree"
 printf 'not a lock\n' > "$invalid_repo_state/response.lock"
 printf '%s\n' "$invalid_worktree" > "$invalid_repo_state/worktree"
 printf 'needs_input\n' > "$invalid_repo_state/status"
 printf 'needs_input\n' > "$invalid_worktree/.sergeant-status"
 set +e
-invalid_output="$(SERGEANT_FLEET="$fleet" "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" \
-  task-1 invalid-lock 'invalid lock' 2>&1)"
+invalid_output="$(printf 'invalid lock' | SERGEANT_FLEET="$fleet" \
+  "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" task-1 invalid-lock 2>&1)"
 invalid_status=$?
 set -e
 if [[ "$invalid_status" -eq 0 ]] || [[ "$invalid_output" != *'Response lock has an invalid owner'* ]]; then
