@@ -486,6 +486,34 @@ PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_CP_STATE="$TEST_ROOT/cp-failed-once" \
 [[ ! -e "$TEST_ROOT/fleet/staging-failure" ]]
 rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/cp"
 
+mkdir -p "$TEST_ROOT/fleet/legacy-task/app" "$TEST_ROOT/legacy-repo"
+git -C "$TEST_ROOT/legacy-repo" init -q
+git -C "$TEST_ROOT/legacy-repo" config user.name Test
+git -C "$TEST_ROOT/legacy-repo" config user.email test@example.invalid
+touch "$TEST_ROOT/legacy-repo/README.md"
+git -C "$TEST_ROOT/legacy-repo" add README.md
+git -C "$TEST_ROOT/legacy-repo" commit -qm fixture
+
+legacy_worktree="$TEST_ROOT/legacy-repo-sgt-legacy-task"
+legacy_repo_state="$TEST_ROOT/fleet/legacy-task/app"
+git -C "$TEST_ROOT/legacy-repo" worktree add -q -b test-cleanup-legacy "$legacy_worktree"
+legacy_validation_worktree="${legacy_worktree}-validation-legacy-task"
+git clone -q "$legacy_worktree" "$legacy_validation_worktree"
+printf '%s\n' "$legacy_validation_worktree" > "$legacy_repo_state/validation_worktree"
+printf '%s\n' "$(git -C "$legacy_validation_worktree" rev-parse HEAD)" > \
+  "$legacy_repo_state/validation_head"
+printf '%s\n' "$legacy_worktree" > "$legacy_repo_state/worktree"
+printf 'git\n' > "$legacy_repo_state/wt_type"
+printf 'done\n' > "$legacy_repo_state/status"
+printf 'result\n' > "$legacy_repo_state/result"
+printf 'done\n' > "$legacy_worktree/.sergeant-status"
+printf 'result\n' > "$legacy_worktree/.sergeant-result"
+
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" legacy-task >/dev/null
+[[ ! -e "$legacy_validation_worktree" && ! -e "$legacy_worktree" && \
+  ! -e "$TEST_ROOT/fleet/legacy-task" ]]
+
 mkdir -p "$TEST_ROOT/fleet/task-123/app" "$TEST_ROOT/repo"
 git -C "$TEST_ROOT/repo" init -q
 git -C "$TEST_ROOT/repo" config user.name Test
