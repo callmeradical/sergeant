@@ -2053,6 +2053,7 @@ _require_completed_removal_proof() {
     _die "Cannot prove completed git worktree removal: $worktree"
 }
 
+_require_same_filesystem_layout
 _require_terminal_repos
 _require_clean_worktrees
 
