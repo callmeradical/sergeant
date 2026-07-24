@@ -55,10 +55,6 @@ CURRENT_HEAD="$(git -C "$WORKTREE" rev-parse HEAD 2>/dev/null || true)"
   _die "validation-ready marker has stale HEAD or review evidence"
 _sgt_worktree_is_validation_clean "$WORKTREE" || \
   _die "Worker code tree must be clean before validation snapshot"
-[[ ! -e "$REPO_STATE/validation_pane" && ! -L "$REPO_STATE/validation_pane" ]] || \
-  _die "Validation pane is already recorded"
-[[ ! -e "$REPO_STATE/validation-release" && ! -L "$REPO_STATE/validation-release" ]] || \
-  _die "Validation release is already recorded"
 _require_tmux
 command -v no-mistakes >/dev/null 2>&1 || _die "no-mistakes is required"
 PRIMARY_PANE_ID="$(cat "$TASK_STATE/primary_pane_id" 2>/dev/null || true)"
@@ -323,6 +319,81 @@ _release_validation_lock() {
   _remove_validation_lock_identity "$VALIDATION_LOCK_IDENTITY" || return 1
   VALIDATION_LOCK_OWNED=false
 }
+_reset_retryable_validation_state() {
+  local status pane recorded_identity recorded_pid recorded_pgid recorded_start current_identity
+  local current_start current_pgid live_pids checkout checkout_identity git_dir git_identity head owner
+  local owner_file quarantine cwd_pids
+  status="$(cat "$REPO_STATE/validation_status" 2>/dev/null || true)"
+  [[ "$status" =~ ^exited:[0-9]+$ ]] || return 0
+
+  pane="$(cat "$REPO_STATE/validation_pane" 2>/dev/null || true)"
+  recorded_identity="$(_sgt_read_owned_file "$REPO_STATE/validation_pane_identity" \
+    2>/dev/null || true)"
+  recorded_pid="$(cat "$REPO_STATE/validation_pane_pid" 2>/dev/null || true)"
+  recorded_pgid="$(cat "$REPO_STATE/validation_process_group" 2>/dev/null || true)"
+  recorded_start="$(cat "$REPO_STATE/validation_process_start" 2>/dev/null || true)"
+  [[ -n "$pane" && -n "$recorded_identity" && "$recorded_pid" =~ ^[0-9]+$ && \
+    "$recorded_pgid" =~ ^[0-9]+$ && -n "$recorded_start" ]] || \
+    _die "Validation pane ownership provenance is incomplete: ${pane:-unknown}"
+  current_identity="$(_validation_current_pane_identity "$pane" || true)"
+  if [[ -n "$current_identity" && "$current_identity" != "1|${recorded_identity#*|}" ]]; then
+    [[ "$current_identity" != "$recorded_identity" ]] || _die "Validation pane is already recorded"
+    _die "Recorded validation pane identity does not match: $pane"
+  fi
+  if kill -0 "$recorded_pid" 2>/dev/null; then
+    current_start="$(_validation_process_start "$recorded_pid" || true)"
+    [[ "$current_start" == "$recorded_start" ]] || \
+      _die "Validation owner PID was reused; refusing retry reset: $recorded_pid"
+    current_pgid="$(ps -o pgid= -p "$recorded_pid" 2>/dev/null | tr -d ' ' || true)"
+    [[ "$current_pgid" == "$recorded_pgid" ]] || \
+      _die "Validation owner process group changed; refusing retry reset: $recorded_pid"
+    _die "Validation processes are still running in process group $recorded_pgid"
+  fi
+  live_pids="$(pgrep -g "$recorded_pgid" 2>/dev/null || true)"
+  [[ -z "$live_pids" ]] || \
+    _die "Validation pane disappeared with unverified detached descendants in process group $recorded_pgid"
+
+  checkout="$(cat "$VALIDATION_WORKTREE_RECORD" 2>/dev/null || true)"
+  checkout_identity="$(cat "$VALIDATION_WORKTREE_IDENTITY_RECORD" 2>/dev/null || true)"
+  git_dir="$(cat "$VALIDATION_WORKTREE_GIT_DIR_RECORD" 2>/dev/null || true)"
+  git_identity="$(cat "$VALIDATION_WORKTREE_GIT_IDENTITY_RECORD" 2>/dev/null || true)"
+  head="$(cat "$REPO_STATE/validation_head" 2>/dev/null || true)"
+  owner="$(cat "$VALIDATION_WORKTREE_OWNER_RECORD" 2>/dev/null || true)"
+  [[ "$checkout" == "$VALIDATION_WORKTREE" && -d "$checkout" && ! -L "$checkout" && \
+    "$(_validation_path_identity "$checkout" || true)" == "$checkout_identity" ]] || \
+    _die "Validation code snapshot identity does not match recorded ownership: $checkout"
+  [[ "$(git -C "$checkout" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)" == \
+    "$git_dir" && "$(_validation_path_identity "$git_dir" || true)" == "$git_identity" && \
+    "$(git -C "$checkout" rev-parse HEAD 2>/dev/null || true)" == "$head" ]] || \
+    _die "Validation code snapshot Git provenance does not match: $checkout"
+  owner_file="$git_dir/sergeant-validation-owner"
+  [[ -f "$owner_file" && ! -L "$owner_file" && "$(cat "$owner_file")" == "$owner" ]] || \
+    _die "Validation code snapshot owner does not match: $checkout"
+  command -v lsof >/dev/null 2>&1 || _die "lsof is required to verify validation snapshot cleanup"
+  cwd_pids="$(lsof -t +D "$checkout" 2>/dev/null || true)"
+  [[ -z "$cwd_pids" ]] || \
+    _die "Processes still have $checkout open during retry reset: $(tr '\n' ' ' <<< "$cwd_pids")"
+  quarantine="${checkout}.retry.$$.$RANDOM"
+  mv "$checkout" "$quarantine" || _die "Failed to stage validation retry cleanup: $checkout"
+  if [[ "$(_validation_path_identity "$quarantine" || true)" != "$checkout_identity" || \
+    "$(_validation_path_identity "$quarantine/.git" || true)" != "$git_identity" || \
+    "$(git -C "$quarantine" rev-parse HEAD 2>/dev/null || true)" != "$head" || \
+    "$(cat "$quarantine/.git/sergeant-validation-owner" 2>/dev/null || true)" != "$owner" ]]; then
+    [[ -e "$checkout" || -L "$checkout" ]] || mv "$quarantine" "$checkout" 2>/dev/null || true
+    _die "Validation code snapshot changed during retry cleanup and was preserved: $checkout"
+  fi
+  rm -rf "$quarantine" || _die "Failed to remove finished validation snapshot: $checkout"
+  rm -f "$REPO_STATE/validation_pane" "$REPO_STATE/validation_pane_identity" \
+    "$REPO_STATE/validation_pane_pid" "$REPO_STATE/validation_process_group" \
+    "$REPO_STATE/validation_process_start" "$REPO_STATE/validation-release" \
+    "$VALIDATION_RELEASE_OWNER" "$REPO_STATE/validation_status" "$VALIDATION_INTENT" \
+    "$VALIDATION_WORKTREE_RECORD" "$VALIDATION_WORKTREE_IDENTITY_RECORD" \
+    "$VALIDATION_WORKTREE_GIT_DIR_RECORD" "$VALIDATION_WORKTREE_GIT_IDENTITY_RECORD" \
+    "$VALIDATION_WORKTREE_OWNER_RECORD" "$REPO_STATE/validation_head" \
+    "$VALIDATION_CHILD_READY" "$VALIDATION_CHILD_ACCEPTED" "$VALIDATION_CHILD_COMMIT" \
+    "$VALIDATION_CHILD_COMMITTED" "$VALIDATION_SUCCESS" "$VALIDATION_SUCCESS_ACK" || \
+    _die "Failed to clear finished validation state for retry"
+}
 _rollback_validation_launch() {
   local current_identity handshake_path cleanup_failed=false checkout_delete_failed=false
   $VALIDATION_COMMITTED && return 0
@@ -414,6 +485,11 @@ LOCK_PURPOSE="$TASK_ID/$REPO/validation-launch"
 if ! _acquire_validation_lock; then
   _die "Validation launch is already reserved or unsafe: $VALIDATION_LAUNCH_LOCK"
 fi
+_reset_retryable_validation_state
+[[ ! -e "$REPO_STATE/validation_pane" && ! -L "$REPO_STATE/validation_pane" ]] || \
+  _die "Validation pane is already recorded"
+[[ ! -e "$REPO_STATE/validation-release" && ! -L "$REPO_STATE/validation-release" ]] || \
+  _die "Validation release is already recorded"
 OLD_WINDOW_IDENTITY="$(_validation_path_identity "$REPO_STATE/window_name")" || \
   _die "Failed to capture prior window state identity"
 OLD_STAGE_IDENTITY="$(_validation_path_identity "$REPO_STATE/stage")" || \
