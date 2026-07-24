@@ -292,11 +292,6 @@ chmod +x "$fake_bin/rm"
 
 cat > "$fake_bin/chmod" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${FAIL_TRANSITION:-}" == "legacy-identity-content-race" && "$1" == "600" && \
-  "$2" == */primary_pane_identity ]]; then
-  printf 'tampered-pane\n' > "$2"
-  : > "${IDENTITY_RACE_MARKER:?}"
-fi
 exec "$REAL_CHMOD" "$@"
 EOF
 chmod +x "$fake_bin/chmod"
@@ -309,6 +304,28 @@ if [[ "${FAIL_TRANSITION:-}" == "identity-chmod-race" && \
   "$REAL_STAT" "$@"
   chmod 644 "$last"
   exit 0
+fi
+if [[ "$last" == */primary_pane_identity && -n "${IDENTITY_RACE_MARKER:-}" && \
+  "${FAIL_TRANSITION:-}" == @(legacy-identity-content-race|legacy-identity-publish-replaced) ]]; then
+  count_file="${IDENTITY_RACE_MARKER}.count"
+  count=0
+  [[ ! -f "$count_file" ]] || count="$(cat "$count_file")"
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$count_file"
+  if [[ "$count" -eq 3 ]]; then
+    case "${FAIL_TRANSITION:-}" in
+      legacy-identity-content-race)
+        printf 'tampered-pane\n' > "$last"
+        chmod 664 "$last"
+        ;;
+      legacy-identity-publish-replaced)
+        rm -f "$last"
+        printf 'tampered-pane\n' > "$last"
+        chmod 664 "$last"
+        ;;
+    esac
+    : > "${IDENTITY_RACE_MARKER:?}"
+  fi
 fi
 if [[ "${FAIL_TRANSITION:-}" == "release-fifo-race" && "$last" == "$FIFO_PATH" ]]; then
   "$REAL_STAT" "$@"
@@ -774,8 +791,26 @@ PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
 [[ "$(cat "$fleet/task-1/primary_pane_identity")" == '0|%11|1111|111111|coordinator-command' ]]
 [[ "$(stat -c '%a' "$fleet/task-1/primary_pane_identity" 2>/dev/null || \
   stat -f '%Lp' "$fleet/task-1/primary_pane_identity")" == "600" ]]
-[[ ! -e "$legacy_race_marker" ]]
+[[ -e "$legacy_race_marker" ]]
 cleanup_validation_state
+
+legacy_replace_marker="$TEST_ROOT/legacy-pane-replaced"
+chmod 664 "$fleet/task-1/primary_pane_identity"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  FAIL_TRANSITION=legacy-identity-publish-replaced \
+  IDENTITY_RACE_MARKER="$legacy_replace_marker" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]]
+[[ "$(cat "$fleet/task-1/primary_pane_identity")" == "tampered-pane" ]]
+[[ "$(stat -c '%a' "$fleet/task-1/primary_pane_identity" 2>/dev/null || \
+  stat -f '%Lp' "$fleet/task-1/primary_pane_identity")" == "664" ]]
+[[ -e "$legacy_replace_marker" ]]
+printf '0|%%11|1111|111111|coordinator-command\n' > "$fleet/task-1/primary_pane_identity"
+chmod 600 "$fleet/task-1/primary_pane_identity"
 
 saved_identity="$repo_state/pane_identity.saved"
 mv "$repo_state/pane_identity" "$saved_identity"

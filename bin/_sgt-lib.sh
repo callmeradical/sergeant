@@ -176,7 +176,7 @@ _sgt_read_owned_file() {
   printf '%s\n' "$value"
 }
 _sgt_read_matching_legacy_pane_identity() {
-  local path="$1" actual="$2" mode fd_mode value migrated
+  local path="$1" actual="$2" mode fd_mode value migrated candidate current_mode
   [[ -n "$actual" ]] || return 1
   [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
   mode="$(_sgt_path_mode "$path")" || return 1
@@ -193,8 +193,39 @@ _sgt_read_matching_legacy_pane_identity() {
   fi
   value="$(cat <&9)" || { exec 9<&-; return 1; }
   [[ "$value" == "$actual" ]] || { exec 9<&-; return 1; }
+  candidate="${path}.tmp.$$.$RANDOM.$RANDOM"
+  (umask 077; set -C; printf '%s\n' "$value" > "$candidate") 2>/dev/null || {
+    exec 9<&-
+    return 1
+  }
+  chmod 600 "$candidate" || {
+    rm -f "$candidate"
+    exec 9<&-
+    return 1
+  }
+  current_mode="$(_sgt_path_mode "$path")" || {
+    rm -f "$candidate"
+    exec 9<&-
+    return 1
+  }
+  fd_mode="$(_sgt_fd_mode /dev/fd/9)" || {
+    rm -f "$candidate"
+    exec 9<&-
+    return 1
+  }
+  if [[ "$current_mode" != "$mode" || "$fd_mode" != "$mode" || \
+    ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
+    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
+    rm -f "$candidate"
+    exec 9<&-
+    return 1
+  fi
+  mv "$candidate" "$path" || {
+    rm -f "$candidate"
+    exec 9<&-
+    return 1
+  }
   exec 9<&-
-  _sgt_replace_owned_file "$path" "$value" || return 1
   migrated="$(_sgt_read_owned_file "$path" 2>/dev/null || true)"
   [[ "$migrated" == "$actual" ]] || return 1
   printf '%s\n' "$migrated"
