@@ -214,6 +214,7 @@ printf 'fresh-notification|%s\n' "$(cat "$race_state/notification_target")" \
   > "$TEST_ROOT/race-new-token"
 old_race_pane="$(tmux display-message -p -t "$TMUX_SESSION:race-old" '#{pane_id}')"
 new_race_pane="$(tmux display-message -p -t "$TMUX_SESSION:race-new" '#{pane_id}')"
+old_race_pid="$(tmux display-message -p -t "$old_race_pane" '#{pane_pid}')"
 tmux display-message -p -t "$old_race_pane" '#{pane_id}' >/dev/null
 tmux display-message -p -t "$new_race_pane" '#{pane_id}' >/dev/null
 for _ in $(seq 1 200); do
@@ -228,12 +229,7 @@ for _ in $(seq 1 200); do
   sleep 0.01
 done
 [[ -e "$TEST_ROOT/race-old-ack" ]]
-touch "$TEST_ROOT/race-old-stop"
-for _ in $(seq 1 200); do
-  [[ -e "$TEST_ROOT/race-old-stopped" ]] && break
-  sleep 0.01
-done
-[[ -e "$TEST_ROOT/race-old-stopped" ]]
+kill -0 "$old_race_pid"
 [[ ! -e "$race_state/notifications/fresh-notification/targets/$new_race_nonce/delivered" ]]
 
 touch "$TEST_ROOT/fail-lock"
@@ -308,7 +304,29 @@ for _ in $(seq 1 200); do
   sleep 0.01
 done
 [[ -f "$race_state/notifications/fresh-notification/targets/$new_race_nonce/completed" ]]
-touch "$TEST_ROOT/race-old-exit" "$TEST_ROOT/race-new-exit"
+[[ "$(cat "$race_state/notifications/fresh-notification/action_lease")" == "$new_race_nonce" ]]
+cmp -s "$TEST_ROOT/race-new-token" \
+  "$race_state/notifications/fresh-notification/targets/$new_race_nonce/completed"
+[[ "$(find "$race_state/notifications/fresh-notification" -name action_lease -type f | wc -l | tr -d ' ')" == 1 ]]
+kill -0 "$old_race_pid"
+touch "$TEST_ROOT/race-old-stop"
+for _ in $(seq 1 200); do
+  [[ -e "$TEST_ROOT/race-old-stopped" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/race-old-stopped" ]]
+for _ in $(seq 1 200); do
+  kill -0 "$old_race_pid" 2>/dev/null || break
+  sleep 0.01
+done
+if kill -0 "$old_race_pid" 2>/dev/null; then
+  printf 'stale supervisor remained live after terminal barrier: %s\n' "$old_race_pid" >&2
+  exit 1
+fi
+[[ "$(grep -Fc new:fresh-notification "$TEST_ROOT/race-received.log")" == 1 ]]
+[[ "$(grep -Fc new:fresh-notification "$TEST_ROOT/race-action.log")" == 1 ]]
+[[ "$(grep -Fc old:fresh-notification "$TEST_ROOT/race-action.log" 2>/dev/null || true)" == 0 ]]
+touch "$TEST_ROOT/race-new-exit"
 for _ in $(seq 1 200); do
   [[ ! -e "$race_state/response.lock" ]] && break
   sleep 0.01
