@@ -11,7 +11,9 @@ repo_state="$fleet/task-1/app"
 worktree="$TEST_ROOT/worktree"
 source_repo="$TEST_ROOT/source"
 fake_bin="$TEST_ROOT/fake-bin"
-mkdir -p "$repo_state" "$source_repo" "$fake_bin"
+config_dir="$TEST_ROOT/config"
+mkdir -p "$repo_state" "$source_repo" "$fake_bin" "$config_dir"
+export SERGEANT_CONFIG="$config_dir"
 git -C "$source_repo" init -q
 git -C "$source_repo" config user.name Test
 git -C "$source_repo" config user.email test@example.invalid
@@ -19,6 +21,13 @@ touch "$source_repo/README.md"
 git -C "$source_repo" add README.md
 git -C "$source_repo" commit -qm fixture
 git -C "$source_repo" worktree add -q -b response-test "$worktree"
+cat > "$config_dir/test.yaml" <<EOF
+repos:
+  - name: app
+    path: $source_repo
+  - name: replacement
+    path: $source_repo
+EOF
 printf '%s\n' "$worktree" > "$repo_state/worktree"
 cat "$worktree/.git" > "$repo_state/worktree_git_pointer"
 worktree_git_dir="$(sed 's/^gitdir: //' "$worktree/.git")"
@@ -45,6 +54,7 @@ bash -c 'source "$1"; _sgt_intent_revision "$2"' _ \
 cp "$fleet/task-1/intent_revision" "$repo_state/intent_revision"
 cat > "$worktree/.sergeant-brief.md" <<EOF
 **Task ID:** task-1
+**Project:** test
 **Repo:** app
 **Branch:** response-test
 **Worktree:** $worktree
@@ -80,7 +90,20 @@ case "$1" in
       printf '%s\n' "$count" > "$DELIVER_COUNT_FILE"
       [[ "$count" -ge "${DELIVER_AFTER:-1}" ]] || deliver=false
     fi
+    if [[ "$target" == "${NEW_PANE:-%99}" && "${STALE_SUPERVISOR_ACK:-0}" == 1 &&
+          "${count:-0}" == 2 && -s "$EXPECTED_WORKER/notification_id" ]]; then
+      notification_id="${STALE_NOTIFICATION_ID:-$(cat "$EXPECTED_WORKER/notification_id")}"
+      notification_worktree="$(cat "$EXPECTED_WORKER/worktree")"
+      printf '%s\n' "$notification_id" > "$notification_worktree/.sergeant-notification-ack"
+      printf '0|%%99|9999|654321|stale-supervisor\n' \
+        > "$EXPECTED_WORKER/notification_delivered_pane_identity"
+      printf '%s\n' "$notification_id" > "$EXPECTED_WORKER/notification_delivered"
+    fi
     if [[ "${AUTO_DELIVER:-1}" == 1 && "$deliver" == true && -s "$EXPECTED_WORKER/notification_id" ]]; then
+      if [[ "${REQUIRE_TARGET:-0}" == 1 &&
+            "$(cat "$EXPECTED_WORKER/notification_target_pane_identity" 2>/dev/null || true)" != "$pane_identity" ]]; then
+        exit 32
+      fi
       notification_id="$(cat "$EXPECTED_WORKER/notification_id")"
       notification_worktree="$(cat "$EXPECTED_WORKER/worktree")"
       printf '%s\n' "$notification_id" > "$notification_worktree/.sergeant-notification-ack"
@@ -203,7 +226,7 @@ git -C "$replacement_source" config user.email test@example.invalid
 touch "$replacement_source/README.md"
 git -C "$replacement_source" add README.md
 git -C "$replacement_source" commit -qm fixture
-git -C "$replacement_source" worktree add -q -b unrelated "$replacement_worktree"
+git -C "$replacement_source" worktree add -q -b response-test "$replacement_worktree"
 printf '%s\n' "$replacement_worktree" > "$replacement_state/worktree"
 printf 'response-test\n' > "$replacement_state/branch"
 printf 'needs_input\n' > "$replacement_state/status"
@@ -211,6 +234,7 @@ printf 'needs_input\n' > "$replacement_worktree/.sergeant-status"
 printf '1\n' > "$replacement_worktree/.sergeant-gate-generation"
 cat > "$replacement_worktree/.sergeant-brief.md" <<EOF
 **Task ID:** task-1
+**Project:** test
 **Repo:** replacement
 **Branch:** response-test
 **Worktree:** $replacement_worktree
@@ -326,7 +350,8 @@ TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 EXPECTED_WORKER="$r
 [[ "$(cat "$repo_state/response")" == "$response" ]]
 [[ "$(cat "$worktree/.sergeant-response")" == "$response" ]]
 [[ "$(cat "$repo_state/pane")" == "%42" ]]
-[[ "$(cat "$repo_state/notification_delivered")" == "$(cat "$repo_state/response_id")" ]]
+[[ "$(cat "$repo_state/notification_delivered")" == "$(cat "$repo_state/notification_id")" ]]
+[[ "$(cat "$repo_state/notification_id")" == "$(cat "$repo_state/response_id")" ]]
 grep -Fq 'kind=response' "$worktree/.sergeant-notification"
 if grep -Fq "$response" "$TEST_ROOT/live.log"; then
   printf 'response body leaked into tmux process arguments\n' >&2
@@ -411,32 +436,37 @@ TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 \
 [[ "$(cat "$repo_state/pane")" == "%99" ]]
 grep -Fq 'new-window -P -F #{pane_id} -t sgt: -n task/app' "$TEST_ROOT/dead.log"
 grep -Fq "$ROOT_DIR/bin/sgt-interactive-worker" "$TEST_ROOT/dead.log"
-[[ "$(cat "$repo_state/notification_delivered")" == "$(cat "$repo_state/response_id")" ]]
+[[ "$(cat "$repo_state/notification_delivered")" == "$(cat "$repo_state/notification_id")" ]]
+[[ "$(cat "$repo_state/notification_id")" != "$(cat "$repo_state/response_id")" ]]
 [[ "$(cat "$repo_state/notification_delivered_pane_identity")" == 0\|%99\|9999\|654321\|* ]]
 
 relaunch_response_id="$(cat "$repo_state/response_id")"
+stale_notification_id="$(cat "$repo_state/notification_id")"
 printf 'orphaned\n' > "$repo_state/status"
 printf 'orphaned\n' > "$worktree/.sergeant-status"
-printf '%s\n' "$relaunch_response_id" > "$repo_state/notification_delivered"
+printf '%s\n' "$stale_notification_id" > "$repo_state/notification_delivered"
 printf '0|%%99|9999|654321|stale-pane\n' > "$repo_state/notification_delivered_pane_identity"
-printf '%s\n' "$relaunch_response_id" > "$worktree/.sergeant-notification-ack"
+printf '%s\n' "$stale_notification_id" > "$worktree/.sergeant-notification-ack"
 rm -f "$worktree/.sergeant-response"
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/crash-relaunch.log" \
   TD_LOG="$TEST_ROOT/crash-relaunch-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
-  PANE_ALIVE=1 NEW_PANE=%100 REQUIRE_FRESH_ACK=1 \
+  PANE_ALIVE=1 NEW_PANE=%100 REQUIRE_FRESH_ACK=1 REQUIRE_TARGET=1 STALE_SUPERVISOR_ACK=1 \
+  STALE_NOTIFICATION_ID="$stale_notification_id" \
   DELIVER_COUNT_FILE="$TEST_ROOT/crash-relaunch-delivery-count" DELIVER_AFTER=3 \
   PANE_IDENTITY="1|%99|9999|654321|dead-pane" EXPECTED_WORKER="$repo_state" \
   SERGEANT_FLEET="$fleet" respond 'resume dead worker' >/dev/null
 [[ "$(cat "$repo_state/response_id")" == "$relaunch_response_id" ]]
+[[ "$(cat "$repo_state/notification_id")" != "$stale_notification_id" ]]
 [[ "$(cat "$repo_state/pane")" == %100 ]]
-[[ "$(cat "$repo_state/notification_delivered")" == "$relaunch_response_id" ]]
+[[ "$(cat "$repo_state/notification_delivered")" == "$(cat "$repo_state/notification_id")" ]]
 [[ "$(cat "$repo_state/notification_delivered_pane_identity")" == 0\|%100\|9999\|654321\|* ]]
+[[ "$(cat "$repo_state/notification_target_pane_identity")" == 0\|%100\|9999\|654321\|* ]]
 [[ "$(cat "$TEST_ROOT/crash-relaunch-delivery-count")" -ge 3 ]]
 [[ ! -e "$TEST_ROOT/crash-relaunch-td.log" ]]
 [[ "$(cat "$worktree/.sergeant-response")" == 'resume dead worker' ]]
-[[ -f "$repo_state/notifications/$relaunch_response_id/acknowledged" ]]
-[[ -f "$repo_state/notifications/$relaunch_response_id/delivered" ]]
-grep -Fq '%99' "$repo_state/notifications/$relaunch_response_id/delivered_pane_identity"
+[[ -f "$repo_state/notifications/$stale_notification_id/acknowledged" ]]
+[[ -f "$repo_state/notifications/$stale_notification_id/delivered" ]]
+grep -Fq '%99' "$repo_state/notifications/$stale_notification_id/delivered_pane_identity"
 
 rm "$worktree/.sergeant-response" "$repo_state/response"
 cat > "$fake_bin/td" <<'EOF'

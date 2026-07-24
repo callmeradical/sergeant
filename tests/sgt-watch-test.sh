@@ -38,19 +38,25 @@ PANE_DEAD=1 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$flee
 printf 'in_progress\n' > "$worktree/.sergeant-status"
 printf 'in_progress\n' > "$repo/status"
 rm -f "$repo/pane_identity"
-legacy_identity="0|%42|4242|123457|$ROOT/bin/sgt-interactive-worker $repo $worktree opencode"
+printf -v legacy_command '%q %q %q %q' \
+  "$ROOT/bin/sgt-interactive-worker" "$repo" "$worktree" opencode
+legacy_identity="0|%42|4242|123457|$legacy_command"
 PANE_IDENTITY="$legacy_identity" EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" \
   SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
 [[ "$(cat "$repo/status")" == "in_progress" ]]
 [[ "$(cat "$repo/pane_identity")" == "$legacy_identity" ]]
 [[ "$(cat "$repo/pane_identity_migration")" == "$legacy_identity" ]]
 
-rm -f "$repo/pane_identity"
-PANE_IDENTITY="0|%42|9999|999999|bash sgt-interactive-worker:$repo" \
-  EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
-  "$ROOT/bin/sgt-watch" --sync task-1
-[[ "$(cat "$repo/status")" == "orphaned" ]]
-[[ ! -e "$repo/pane_identity" ]]
+for forged_command in "wrapper $legacy_command extra" "${legacy_command}-prefix-collision"; do
+  rm -f "$repo/pane_identity"
+  printf 'in_progress\n' > "$worktree/.sergeant-status"
+  printf 'in_progress\n' > "$repo/status"
+  PANE_IDENTITY="0|%42|9999|999999|$forged_command" \
+    EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+    "$ROOT/bin/sgt-watch" --sync task-1
+  [[ "$(cat "$repo/status")" == "orphaned" ]]
+  [[ ! -e "$repo/pane_identity" ]]
+done
 
 printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo" > "$repo/pane_identity"
 

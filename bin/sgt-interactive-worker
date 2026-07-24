@@ -86,7 +86,7 @@ _finish() {
 
 _deliver_notifications() {
   local notification_file="$WORKTREE/.sergeant-notification"
-  local notification_id expected_id acknowledged delivered delivered_identity pane_identity state_dir pending
+  local notification_id expected_id acknowledged delivered delivered_identity pane_identity state_dir pending target_identity
   while :; do
     notification_id="$(sed -n 's/^notification_id=//p' "$notification_file" 2>/dev/null || true)"
     expected_id="$(cat "$REPO_STATE/notification_id" 2>/dev/null || true)"
@@ -94,7 +94,9 @@ _deliver_notifications() {
     delivered="$(cat "$REPO_STATE/notification_delivered" 2>/dev/null || true)"
     delivered_identity="$(cat "$REPO_STATE/notification_delivered_pane_identity" 2>/dev/null || true)"
     pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
+    target_identity="$(cat "$REPO_STATE/notification_target_pane_identity" 2>/dev/null || true)"
     if [[ -n "$notification_id" && "$notification_id" == "$expected_id" &&
+          -n "$pane_identity" && "$target_identity" == "$pane_identity" &&
           ( "$delivered" != "$notification_id" || "$delivered_identity" != "$pane_identity" ) ]]; then
       if [[ "$acknowledged" == "$notification_id" && "$delivered" == "$notification_id" &&
             "$delivered_identity" != "$pane_identity" ]]; then

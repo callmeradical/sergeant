@@ -779,8 +779,8 @@ BRIEF_EOF
   initial_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
   _sgt_publish_worker_notification "$repo_task_dir" "$worktree_path" \
     "$initial_notification_id" initial "Read the .sergeant-brief.md file and execute the mission."
-  printf -v WORKER_RUN_CMD '%q %q %q %q' \
-    "$SCRIPT_DIR/sgt-interactive-worker" "$repo_task_dir" "$worktree_path" "$AGENT_CMD"
+  WORKER_RUN_CMD="$(_sgt_worker_command \
+    "$SCRIPT_DIR/sgt-interactive-worker" "$repo_task_dir" "$worktree_path" "$AGENT_CMD")"
   if pane_target="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" \
     -n "$WINDOW_NAME" -c "$worktree_path" "$WORKER_RUN_CMD")"; then
     if [[ -z "$pane_target" ]]; then
@@ -792,6 +792,7 @@ BRIEF_EOF
     printf '%s\n' "$pane_target" > "$repo_task_dir/pane"
     if pane_identity="$(_sgt_pane_identity "$pane_target")" && [[ -n "$pane_identity" ]]; then
       printf '%s\n' "$pane_identity" > "$repo_task_dir/pane_identity"
+      printf '%s\n' "$pane_identity" > "$repo_task_dir/notification_target_pane_identity"
     else
       tmux kill-pane -t "$pane_target" 2>/dev/null || true
       printf 'orphaned\n' > "$repo_task_dir/status"

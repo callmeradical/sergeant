@@ -60,7 +60,8 @@ _install_legacy_file() {
 
 _migrate_legacy_response_state() {
   local actual_branch actual_git_dir actual_pointer branch canonical common_dir
-  local evidence revision task_dir="$FLEET_DIR/$TASK_ID"
+  local config_file configured_common configured_path evidence project raw_path repo_count revision
+  local task_dir="$FLEET_DIR/$TASK_ID" repo_index
   local brief="$worktree/.sergeant-brief.md"
 
   [[ -n "$worktree" && "$worktree" == /* && -d "$worktree" ]] || return 1
@@ -81,11 +82,34 @@ _migrate_legacy_response_state() {
   actual_branch="$(git -C "$canonical" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
   [[ "$actual_branch" == "$branch" ]] || return 1
   [[ -f "$brief" && ! -L "$brief" ]] || return 1
+  project="$(sed -n 's/^\*\*Project:\*\* //p' "$brief")"
+  [[ "$project" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
   grep -Fxq "**Task ID:** $TASK_ID" "$brief" &&
+    grep -Fxq "**Project:** $project" "$brief" &&
     grep -Fxq "**Repo:** $REPO" "$brief" &&
     grep -Fxq "**Branch:** $branch" "$brief" &&
     grep -Fxq "**Worktree:** $worktree" "$brief" &&
     grep -Fxq "**Fleet state:** $REPO_DIR/" "$brief" || return 1
+
+  config_file="$SERGEANT_CONFIG/$project.yaml"
+  [[ -f "$config_file" && ! -L "$config_file" ]] || return 1
+  command -v yq >/dev/null 2>&1 || return 1
+  repo_count="$(yq '.repos | length' "$config_file" 2>/dev/null || true)"
+  [[ "$repo_count" =~ ^[1-9][0-9]*$ ]] || return 1
+  configured_path=""
+  for repo_index in $(seq 0 $((repo_count - 1))); do
+    if [[ "$(yq ".repos[$repo_index].name" "$config_file" 2>/dev/null || true)" == "$REPO" ]]; then
+      raw_path="$(yq ".repos[$repo_index].path" "$config_file" 2>/dev/null || true)"
+      configured_path="$(_resolve_path "$raw_path")"
+      break
+    fi
+  done
+  [[ -n "$configured_path" && -d "$configured_path" ]] || return 1
+  configured_path="$(cd "$configured_path" 2>/dev/null && pwd -P)" || return 1
+  configured_common="$(git -C "$configured_path" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  [[ "$configured_common" == /* ]] || configured_common="$configured_path/$configured_common"
+  configured_common="$(cd "$configured_common" 2>/dev/null && pwd -P)" || return 1
+  [[ "$common_dir" == "$configured_common" ]] || return 1
 
   [[ -f "$task_dir/.sergeant-intent.md" && ! -L "$task_dir/.sergeant-intent.md" &&
      -f "$task_dir/intent_revision" && ! -L "$task_dir/intent_revision" ]] || return 1
@@ -110,6 +134,8 @@ _migrate_legacy_response_state() {
     printf 'branch=%s\n' "$branch"
     printf 'git_pointer=%s\n' "$actual_pointer"
     printf 'git_dir=%s\n' "$actual_git_dir"
+    printf 'configured_repo=%s\n' "$configured_path"
+    printf 'configured_common_dir=%s\n' "$configured_common"
     printf 'intent_revision=%s\n' "$revision"
   } > "$evidence" || return 1
   if [[ -e "$REPO_DIR/legacy-response-migration" ]]; then
@@ -250,6 +276,7 @@ fi
 
 _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$response_id" response \
   "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
+delivery_notification_id="$response_id"
 
 pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
 _pane_is_supervisor() {
@@ -258,6 +285,8 @@ _pane_is_supervisor() {
 }
 
 if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && _pane_is_supervisor "$pane"; then
+  _atomic_write "$REPO_DIR/notification_target_pane_identity" \
+    "$(cat "$REPO_DIR/pane_identity")"
   _sgt_wait_worker_notification "$pane" "$REPO_DIR" "$response_id" || \
     _die "Worker did not acknowledge its durable response notification; response remains pending"
   _sgt_response_lock_release
@@ -275,11 +304,15 @@ if ! command -v tmux >/dev/null 2>&1 || [[ -z "$tmux_session" || -z "$window_nam
   exit 0
 fi
 
+delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+_sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$delivery_notification_id" response \
+  "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
 rm -f "$worktree/.sergeant-notification-ack" "$REPO_DIR/notification_delivered" \
-  "$REPO_DIR/notification_delivered_pane_identity"
+  "$REPO_DIR/notification_delivered_pane_identity" \
+  "$REPO_DIR/notification_target_pane_identity"
 
-printf -v worker_command '%q %q %q %q' \
-  "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent"
+worker_command="$(_sgt_worker_command \
+  "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")"
 
 _record_relaunch_orphan() {
   local reason="$1"
@@ -301,12 +334,13 @@ fi
 printf '%s\n' "$new_pane" > "$REPO_DIR/pane"
 if pane_identity="$(_sgt_pane_identity "$new_pane")" && [[ -n "$pane_identity" ]]; then
   printf '%s\n' "$pane_identity" > "$REPO_DIR/pane_identity"
+  _atomic_write "$REPO_DIR/notification_target_pane_identity" "$pane_identity"
 else
   tmux kill-pane -t "$new_pane" 2>/dev/null || true
   _record_relaunch_orphan "tmux failed to capture exact relaunched worker pane identity"
   _die "Worker relaunch identity capture failed for $TASK_ID/$REPO"
 fi
-if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" "$response_id"; then
+if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" "$delivery_notification_id"; then
   tmux kill-pane -t "$new_pane" 2>/dev/null || true
   _record_relaunch_orphan "relaunched interactive worker did not acknowledge its durable response notification"
   _die "Worker relaunch notification acknowledgement timed out for $TASK_ID/$REPO"
