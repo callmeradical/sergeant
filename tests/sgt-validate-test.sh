@@ -55,15 +55,38 @@ chmod +x "$fake_bin/no-mistakes"
 cat > "$fake_bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$TMUX_LOG"
-case "$1" in
+command_name="$1"
+target=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "-t" ]]; then
+    target="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+case "$command_name" in
   display-message)
-    case "$*" in
-      *'%77'*) printf '0|%%77|7777|234567|validation-command\n' ;;
-      *'%11'*) printf '0|%%11|1111|111111|coordinator-command\n' ;;
+    case "$target" in
+      %77)
+        pane_state="$(cat "$TMUX_STATE_DIR/77.state" 2>/dev/null || printf 'live\n')"
+        case "$pane_state" in
+          live) printf '0|%%77|7777|234567|validation-command\n' ;;
+          dead) printf '1|%%77|7777|234567|validation-command\n' ;;
+          missing) exit 1 ;;
+        esac
+        ;;
+      %11) printf '0|%%11|1111|111111|coordinator-command\n' ;;
       *) printf '0|%%42|4242|123456|worker-command\n' ;;
     esac
     ;;
-  split-window) printf '%%77\n' ;;
+  split-window)
+    printf 'live\n' > "$TMUX_STATE_DIR/77.state"
+    printf '%%77\n'
+    ;;
+  kill-pane)
+    [[ "$target" != "%77" ]] || printf 'missing\n' > "$TMUX_STATE_DIR/77.state"
+    ;;
 esac
 EOF
 chmod +x "$fake_bin/tmux"
@@ -71,13 +94,18 @@ cat > "$fake_bin/ps" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
   *'pgid='*) printf '7777\n' ;;
-  *'lstart='*) printf 'Thu Jul 23 00:00:00 2026\n' ;;
+  *'lstart='*)
+    pane_state="$(cat "$TMUX_STATE_DIR/77.state" 2>/dev/null || printf 'live\n')"
+    [[ "$pane_state" == "live" ]] || exit 1
+    printf 'Thu Jul 23 00:00:00 2026\n'
+    ;;
   *) exit 1 ;;
 esac
 EOF
 chmod +x "$fake_bin/ps"
 
-PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+mkdir -p "$TEST_ROOT/tmux-state"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
 
 [[ "$(cat "$repo_state/validation_pane")" == "%77" ]]
@@ -97,6 +125,40 @@ if grep -Fq 'Validate the interactive worker safely' "$TEST_ROOT/tmux.log" || \
 fi
 
 validation_worktree="$(cat "$repo_state/validation_worktree")"
+printf 'stale\n' > "$validation_worktree/stale-marker"
+printf 'dead\n' > "$TEST_ROOT/tmux-state/77.state"
+printf 'exited:0\n' > "$repo_state/validation_status"
+before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+[[ "$(cat "$repo_state/validation_pane")" == "%77" ]]
+[[ "$(cat "$repo_state/validation_status")" == "launched" ]]
+[[ ! -e "$validation_worktree/stale-marker" ]]
+[[ "$(wc -l < "$TEST_ROOT/tmux.log")" -gt "$before_lines" ]]
+
+validation_worktree="$(cat "$repo_state/validation_worktree")"
+printf 'stale\n' > "$validation_worktree/stale-marker"
+printf 'dead\n' > "$TEST_ROOT/tmux-state/77.state"
+printf 'exited:1\n' > "$repo_state/validation_status"
+before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+[[ "$(cat "$repo_state/validation_pane")" == "%77" ]]
+[[ "$(cat "$repo_state/validation_status")" == "launched" ]]
+[[ ! -e "$validation_worktree/stale-marker" ]]
+[[ "$(wc -l < "$TEST_ROOT/tmux.log")" -gt "$before_lines" ]]
+
+printf 'live\n' > "$TEST_ROOT/tmux-state/77.state"
+printf 'running\n' > "$repo_state/validation_status"
+before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'Validation pane is already recorded'* ]]
+[[ "$(wc -l < "$TEST_ROOT/tmux.log")" == "$before_lines" ]]
+
 rm "$repo_state/validation_pane" "$repo_state/validation_pane_identity" \
   "$repo_state/validation_pane_pid" "$repo_state/validation_process_group" \
   "$repo_state/validation_process_start" \
@@ -106,7 +168,7 @@ rm "$repo_state/validation_pane" "$repo_state/validation_pane_identity" \
 rm -rf "$validation_worktree"
 before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
 set +e
-output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
 status=$?
 set -e
@@ -122,7 +184,7 @@ readiness_review=passed
 EOF
 before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
 set +e
-output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
   TMUX_PANE=%12 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
 status=$?
 set -e
@@ -138,7 +200,7 @@ readiness_review=passed
 EOF
 before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
 set +e
-output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
 status=$?
 set -e
@@ -155,7 +217,7 @@ EOF
 printf '\nDrift.\n' >> "$worktree/.sergeant-intent.md"
 before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
 set +e
-output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
 status=$?
 set -e
