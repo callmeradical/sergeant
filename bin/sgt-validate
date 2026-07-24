@@ -56,57 +56,6 @@ CURRENT_HEAD="$(git -C "$WORKTREE" rev-parse HEAD 2>/dev/null || true)"
 _sgt_worktree_is_validation_clean "$WORKTREE" || \
   _die "Worker code tree must be clean before validation snapshot"
 _require_tmux
-_reset_retryable_validation_state() {
-  local validation_status validation_pane recorded_identity recorded_pid recorded_start
-  local current_identity current_start validation_worktree expected_validation_worktree
-
-  validation_status="$(cat "$REPO_STATE/validation_status" 2>/dev/null || true)"
-  [[ "$validation_status" =~ ^exited:[0-9]+$ ]] || return 0
-
-  validation_pane="$(cat "$REPO_STATE/validation_pane" 2>/dev/null || true)"
-  recorded_identity="$(cat "$REPO_STATE/validation_pane_identity" 2>/dev/null || true)"
-  recorded_pid="$(cat "$REPO_STATE/validation_pane_pid" 2>/dev/null || true)"
-  recorded_start="$(cat "$REPO_STATE/validation_process_start" 2>/dev/null || true)"
-
-  if [[ -n "$validation_pane" ]]; then
-    [[ -n "$recorded_identity" && -n "$recorded_pid" && -n "$recorded_start" ]] || return 0
-    if tmux display-message -p -t "$validation_pane" '#{pane_id}' >/dev/null 2>&1; then
-      current_identity="$(_sgt_pane_identity "$validation_pane" 2>/dev/null || true)"
-      [[ -n "$current_identity" ]] || return 0
-      if [[ "$current_identity" == "$recorded_identity" ]]; then
-        return 0
-      fi
-      [[ "$current_identity" == "1|${recorded_identity#*|}" || "$current_identity" == "||||" ]] || return 0
-      tmux kill-pane -t "$validation_pane" 2>/dev/null || true
-    fi
-  fi
-
-  if [[ -n "$recorded_pid" && -n "$recorded_start" ]]; then
-    current_start="$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | awk '{$1=$1; print}' || true)"
-    [[ -z "$current_start" ]] || return 0
-  fi
-
-  expected_validation_worktree="${WORKTREE}-validation-${TASK_ID}"
-  validation_worktree="$(cat "$REPO_STATE/validation_worktree" 2>/dev/null || true)"
-  if [[ -n "$validation_worktree" ]]; then
-    [[ "$validation_worktree" == "$expected_validation_worktree" ]] || return 0
-  else
-    validation_worktree="$expected_validation_worktree"
-  fi
-  if [[ -e "$validation_worktree" ]]; then
-    git -C "$validation_worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
-    rm -rf "$validation_worktree"
-  fi
-
-  rm -f "$REPO_STATE/validation_pane" "$REPO_STATE/validation_pane_identity" \
-    "$REPO_STATE/validation_pane_pid" "$REPO_STATE/validation_process_group" \
-    "$REPO_STATE/validation_process_start" "$REPO_STATE/validation-release" \
-    "$REPO_STATE/validation_status" "$REPO_STATE/validation-intent.md" \
-    "$REPO_STATE/validation_worktree" "$REPO_STATE/validation_head"
-}
-_reset_retryable_validation_state
-[[ ! -e "$REPO_STATE/validation_pane" ]] || _die "Validation pane is already recorded"
-[[ ! -e "$REPO_STATE/validation-release" ]] || _die "Validation release is already recorded"
 command -v no-mistakes >/dev/null 2>&1 || _die "no-mistakes is required"
 PRIMARY_PANE_ID="$(cat "$TASK_STATE/primary_pane_id" 2>/dev/null || true)"
 [[ -n "${TMUX_PANE:-}" && "$TMUX_PANE" == "$PRIMARY_PANE_ID" ]] || \
@@ -116,6 +65,113 @@ _sgt_pane_identity_matches "$TMUX_PANE" "$TASK_STATE" primary_pane_identity || \
 if [[ -z "$PANE" ]] || ! _sgt_pane_identity_matches "$PANE" "$REPO_STATE"; then
   _die "Recorded worker pane identity does not match"
 fi
+_worktree_cwd_pids() {
+  local worktree="$1"
+  local canonical_worktree current_pid error error_file line output path process_pids
+
+  [[ -d "$worktree" ]] || return 0
+  canonical_worktree="$(cd "$worktree" && pwd -P)"
+  command -v lsof >/dev/null 2>&1 || _die "lsof is required to verify validation snapshot cleanup"
+  process_pids="$(ps -axo pid= | tr -d ' ' || true)"
+  [[ -n "$process_pids" ]] || return 0
+  error_file="$(mktemp)"
+  output="$(lsof -w -S2 -a -d cwd -Fn \
+    -p "$(tr '\n' ',' <<< "$process_pids" | sed 's/,$//')" 2> "$error_file" || true)"
+  if [[ -s "$error_file" ]]; then
+    rm -f "$error_file"
+    _die "Failed to inspect validation snapshot working directories"
+  fi
+  rm -f "$error_file"
+  current_pid=""
+
+  while IFS= read -r line; do
+    case "$line" in
+      p*)
+        current_pid="${line#p}"
+        ;;
+      n*)
+        path="${line#n}"
+        if [[ "$path" == "$canonical_worktree" || "$path" == "$canonical_worktree/"* ]]; then
+          printf '%s\n' "$current_pid"
+        fi
+        ;;
+    esac
+  done <<< "$output"
+}
+_process_group_pids() {
+  local process_group="$1"
+
+  [[ -n "$process_group" ]] || return 0
+  pgrep -g "$process_group" 2>/dev/null || true
+}
+_reset_retryable_validation_state() {
+  local validation_status validation_pane recorded_identity recorded_pid recorded_pgid recorded_start
+  local current_identity current_start current_pgid validation_worktree expected_validation_worktree
+  local live_pids cwd_pids
+
+  validation_status="$(cat "$REPO_STATE/validation_status" 2>/dev/null || true)"
+  [[ "$validation_status" =~ ^exited:[0-9]+$ ]] || return 0
+
+  validation_pane="$(cat "$REPO_STATE/validation_pane" 2>/dev/null || true)"
+  recorded_identity="$(cat "$REPO_STATE/validation_pane_identity" 2>/dev/null || true)"
+  recorded_pid="$(cat "$REPO_STATE/validation_pane_pid" 2>/dev/null || true)"
+  recorded_pgid="$(cat "$REPO_STATE/validation_process_group" 2>/dev/null || true)"
+  recorded_start="$(cat "$REPO_STATE/validation_process_start" 2>/dev/null || true)"
+  [[ -n "$recorded_identity" && -n "$recorded_pid" && -n "$recorded_pgid" && -n "$recorded_start" ]] || \
+    _die "Validation pane ownership provenance is incomplete: ${validation_pane:-unknown}"
+
+  if [[ -n "$validation_pane" ]]; then
+    if tmux display-message -p -t "$validation_pane" '#{pane_id}' >/dev/null 2>&1; then
+      current_identity="$(_sgt_pane_identity "$validation_pane" 2>/dev/null || true)"
+      [[ -n "$current_identity" ]] || _die "Failed to capture recorded validation pane identity"
+      if [[ "$current_identity" == "$recorded_identity" ]]; then
+        _die "Validation pane is already recorded"
+      fi
+      [[ "$current_identity" == "1|${recorded_identity#*|}" || "$current_identity" == "||||" ]] || \
+        _die "Recorded validation pane identity does not match: $validation_pane"
+    fi
+  fi
+
+  if kill -0 "$recorded_pid" 2>/dev/null; then
+    current_start="$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | awk '{$1=$1; print}' || true)"
+    [[ "$current_start" == "$recorded_start" ]] || \
+      _die "Validation owner PID was reused; refusing retry reset: $recorded_pid"
+    current_pgid="$(ps -o pgid= -p "$recorded_pid" 2>/dev/null | tr -d ' ' || true)"
+    [[ "$current_pgid" == "$recorded_pgid" ]] || \
+      _die "Validation owner process group changed; refusing retry reset: $recorded_pid"
+    _die "Validation processes are still running in process group $recorded_pgid"
+  fi
+
+  live_pids="$(_process_group_pids "$recorded_pgid")"
+  [[ -z "$live_pids" ]] || \
+    _die "Validation pane disappeared with unverified detached descendants in process group $recorded_pgid"
+  expected_validation_worktree="${WORKTREE}-validation-${TASK_ID}"
+  validation_worktree="$(cat "$REPO_STATE/validation_worktree" 2>/dev/null || true)"
+  if [[ -n "$validation_worktree" ]]; then
+    [[ "$validation_worktree" == "$expected_validation_worktree" ]] || \
+      _die "Validation code snapshot is outside the recorded ownership boundary: $validation_worktree"
+  else
+    validation_worktree="$expected_validation_worktree"
+  fi
+  if [[ -e "$validation_worktree" ]]; then
+    git -C "$validation_worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
+      _die "Validation code snapshot is not a git checkout: $validation_worktree"
+    cwd_pids="$(_worktree_cwd_pids "$validation_worktree")"
+    [[ -z "$cwd_pids" ]] || \
+      _die "Processes still have $validation_worktree as their current directory: $(tr '\n' ' ' <<< "$cwd_pids")"
+    rm -rf "$validation_worktree"
+  fi
+
+  [[ -z "$validation_pane" ]] || tmux kill-pane -t "$validation_pane" 2>/dev/null || true
+  rm -f "$REPO_STATE/validation_pane" "$REPO_STATE/validation_pane_identity" \
+    "$REPO_STATE/validation_pane_pid" "$REPO_STATE/validation_process_group" \
+    "$REPO_STATE/validation_process_start" "$REPO_STATE/validation-release" \
+    "$REPO_STATE/validation_status" "$REPO_STATE/validation-intent.md" \
+    "$REPO_STATE/validation_worktree" "$REPO_STATE/validation_head"
+}
+_reset_retryable_validation_state
+[[ ! -e "$REPO_STATE/validation_pane" ]] || _die "Validation pane is already recorded"
+[[ ! -e "$REPO_STATE/validation-release" ]] || _die "Validation release is already recorded"
 
 WINDOW_NAME="validation-${REPO}-${TASK_ID}"
 OLD_WINDOW_NAME="$(cat "$REPO_STATE/window_name" 2>/dev/null || true)"

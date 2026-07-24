@@ -93,6 +93,7 @@ chmod +x "$fake_bin/tmux"
 cat > "$fake_bin/ps" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
+  *'-axo pid='*) printf '1111\n4242\n7777\n8888\n' ;;
   *'pgid='*) printf '7777\n' ;;
   *'lstart='*)
     pane_state="$(cat "$TMUX_STATE_DIR/77.state" 2>/dev/null || printf 'live\n')"
@@ -103,9 +104,32 @@ case "$*" in
 esac
 EOF
 chmod +x "$fake_bin/ps"
+cat > "$fake_bin/pgrep" <<'EOF'
+#!/usr/bin/env bash
+state="$(cat "$PGREP_STATE" 2>/dev/null || printf 'clear\n')"
+case "$*" in
+  *'-g 7777'*)
+    [[ "$state" == "detached" ]] || exit 1
+    printf '8888\n'
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$fake_bin/pgrep"
+cat > "$fake_bin/lsof" <<'EOF'
+#!/usr/bin/env bash
+state="$(cat "$LSOF_STATE" 2>/dev/null || printf 'clear\n')"
+[[ "$state" == "held" ]] || exit 0
+printf 'p8888\nn%s\n' "$VALIDATION_CWD"
+EOF
+chmod +x "$fake_bin/lsof"
 
 mkdir -p "$TEST_ROOT/tmux-state"
+printf 'clear\n' > "$TEST_ROOT/pgrep.state"
+printf 'clear\n' > "$TEST_ROOT/lsof.state"
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
+  PGREP_STATE="$TEST_ROOT/pgrep.state" LSOF_STATE="$TEST_ROOT/lsof.state" \
+  VALIDATION_CWD="$TEST_ROOT/unused-validation-worktree" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
 
 [[ "$(cat "$repo_state/validation_pane")" == "%77" ]]
@@ -129,7 +153,21 @@ printf 'stale\n' > "$validation_worktree/stale-marker"
 printf 'dead\n' > "$TEST_ROOT/tmux-state/77.state"
 printf 'exited:0\n' > "$repo_state/validation_status"
 before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
+  PGREP_STATE="$TEST_ROOT/pgrep.state" LSOF_STATE="$TEST_ROOT/lsof.state" \
+  VALIDATION_CWD="$validation_worktree" \
+  TMUX_PANE=%12 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'coordinator pane identity'* ]]
+[[ -e "$validation_worktree/stale-marker" ]]
+[[ "$(cat "$repo_state/validation_status")" == "exited:0" ]]
+[[ "$(wc -l < "$TEST_ROOT/tmux.log")" == "$before_lines" ]]
+
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
+  PGREP_STATE="$TEST_ROOT/pgrep.state" LSOF_STATE="$TEST_ROOT/lsof.state" \
+  VALIDATION_CWD="$validation_worktree" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
 [[ "$(cat "$repo_state/validation_pane")" == "%77" ]]
 [[ "$(cat "$repo_state/validation_status")" == "launched" ]]
@@ -140,8 +178,23 @@ validation_worktree="$(cat "$repo_state/validation_worktree")"
 printf 'stale\n' > "$validation_worktree/stale-marker"
 printf 'dead\n' > "$TEST_ROOT/tmux-state/77.state"
 printf 'exited:1\n' > "$repo_state/validation_status"
+printf 'detached\n' > "$TEST_ROOT/pgrep.state"
 before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
+  PGREP_STATE="$TEST_ROOT/pgrep.state" LSOF_STATE="$TEST_ROOT/lsof.state" \
+  VALIDATION_CWD="$validation_worktree" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'unverified detached descendants'* ]]
+[[ -e "$validation_worktree/stale-marker" ]]
+[[ "$(cat "$repo_state/validation_status")" == "exited:1" ]]
+printf 'clear\n' > "$TEST_ROOT/pgrep.state"
+
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
+  PGREP_STATE="$TEST_ROOT/pgrep.state" LSOF_STATE="$TEST_ROOT/lsof.state" \
+  VALIDATION_CWD="$validation_worktree" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
 [[ "$(cat "$repo_state/validation_pane")" == "%77" ]]
 [[ "$(cat "$repo_state/validation_status")" == "launched" ]]
@@ -153,11 +206,13 @@ printf 'running\n' > "$repo_state/validation_status"
 before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
 set +e
 output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
+  PGREP_STATE="$TEST_ROOT/pgrep.state" LSOF_STATE="$TEST_ROOT/lsof.state" \
+  VALIDATION_CWD="$validation_worktree" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
 status=$?
 set -e
 [[ "$status" -ne 0 && "$output" == *'Validation pane is already recorded'* ]]
-[[ "$(wc -l < "$TEST_ROOT/tmux.log")" == "$before_lines" ]]
+[[ "$(wc -l < "$TEST_ROOT/tmux.log")" -gt "$before_lines" ]]
 
 rm "$repo_state/validation_pane" "$repo_state/validation_pane_identity" \
   "$repo_state/validation_pane_pid" "$repo_state/validation_process_group" \
@@ -169,6 +224,8 @@ rm -rf "$validation_worktree"
 before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
 set +e
 output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
+  PGREP_STATE="$TEST_ROOT/pgrep.state" LSOF_STATE="$TEST_ROOT/lsof.state" \
+  VALIDATION_CWD="$validation_worktree" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
 status=$?
 set -e
@@ -185,6 +242,8 @@ EOF
 before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
 set +e
 output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
+  PGREP_STATE="$TEST_ROOT/pgrep.state" LSOF_STATE="$TEST_ROOT/lsof.state" \
+  VALIDATION_CWD="$validation_worktree" \
   TMUX_PANE=%12 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
 status=$?
 set -e
@@ -201,6 +260,8 @@ EOF
 before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
 set +e
 output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
+  PGREP_STATE="$TEST_ROOT/pgrep.state" LSOF_STATE="$TEST_ROOT/lsof.state" \
+  VALIDATION_CWD="$validation_worktree" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
 status=$?
 set -e
@@ -218,6 +279,8 @@ printf '\nDrift.\n' >> "$worktree/.sergeant-intent.md"
 before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
 set +e
 output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" TMUX_STATE_DIR="$TEST_ROOT/tmux-state" \
+  PGREP_STATE="$TEST_ROOT/pgrep.state" LSOF_STATE="$TEST_ROOT/lsof.state" \
+  VALIDATION_CWD="$validation_worktree" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
 status=$?
 set -e
