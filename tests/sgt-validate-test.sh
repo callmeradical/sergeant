@@ -67,7 +67,7 @@ case "$1" in
     else case "$*" in
       *'%77'*)
         if [[ "${FAIL_TRANSITION:-}" == "pane-identity" || \
-          ( "${FAIL_TRANSITION:-}" == @(commit-child-exit|exit-after-committed|exit-during-success) && \
+          ( "${FAIL_TRANSITION:-}" == @(commit-child-exit|exit-after-committed|exit-during-success|exit-after-final-ack) && \
             ! -e "$CONCURRENT_DIR/pane-live" ) ]]; then
           exit 7
         elif [[ "${FAIL_TRANSITION:-}" == "pane-acquire-reuse" ]]; then
@@ -208,6 +208,11 @@ if [[ "${FAIL_TRANSITION:-}" == "lock-recovery-race" && \
   rm -f "$1"
   printf 'replacement-owner\n' > "$1"
 fi
+if [[ -n "${EXIT_RELEASE_OUTPUT:-}" && "$1" == */validation-launch.lock && \
+  "${2:-}" == */.validation-launch.lock.recovery.* ]]; then
+  grep -Fq 'Validation launched in pane %77 beside worker %42.' "$EXIT_RELEASE_OUTPUT" || exit 7
+  : > "$CONCURRENT_DIR/exit-release-after-success"
+fi
 if [[ "${FAIL_TRANSITION:-}" == "marker" && "${2:-}" == */validation_worktree ]]; then
   exit 7
 fi
@@ -252,6 +257,8 @@ if [[ "$destination" == */validation-success ]]; then
   elif [[ "${FAIL_TRANSITION:-}" != "final-ack-timeout" ]]; then
     printf '%s|%%77|7777|Thu Jul 23 00:00:00 2026\n' \
       "$(cat "$CONCURRENT_DIR/revision")" > "$TEST_REPO_STATE/validation-success-ack"
+    [[ "${FAIL_TRANSITION:-}" != "exit-after-final-ack" ]] || \
+      rm -f "$CONCURRENT_DIR/pane-live"
   fi
 fi
 EOF
@@ -268,8 +275,13 @@ exec "$REAL_SHASUM" "$@"
 EOF
 chmod +x "$fake_bin/shasum"
 
+# The release wrapper reads this output during the coordinator's EXIT trap.
+# shellcheck disable=SC2094
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
-  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+  EXIT_RELEASE_OUTPUT="$TEST_ROOT/initial-validation.out" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app \
+  > "$TEST_ROOT/initial-validation.out"
+[[ -e "$concurrent_dir/exit-release-after-success" ]]
 
 [[ "$(cat "$repo_state/validation_pane")" == "%77" ]]
 [[ "$(cat "$repo_state/validation_pane_identity")" == \
@@ -347,7 +359,7 @@ assert_lock_blocks_and_is_preserved() {
 assert_failed_launch_rolls_back_and_retries() {
   local transition="$1" output status path before_transition_kills after_transition_kills attempts=200
   case "$transition" in
-    handshake-timeout|commit-ack-timeout|commit-child-exit|exit-after-committed|exit-during-success|final-ack-timeout) attempts=2 ;;
+    handshake-timeout|commit-ack-timeout|commit-child-exit|exit-after-committed|exit-during-success|exit-after-final-ack|final-ack-timeout) attempts=2 ;;
   esac
   before_transition_kills="$(grep -c '^kill-pane -t %77$' "$TEST_ROOT/tmux.log" || true)"
   set +e
@@ -417,6 +429,7 @@ assert_failed_launch_rolls_back_and_retries commit-ack-timeout
 assert_failed_launch_rolls_back_and_retries commit-child-exit
 assert_failed_launch_rolls_back_and_retries exit-after-committed
 assert_failed_launch_rolls_back_and_retries exit-during-success
+assert_failed_launch_rolls_back_and_retries exit-after-final-ack
 assert_failed_launch_rolls_back_and_retries final-ack-timeout
 
 set +e
