@@ -144,6 +144,45 @@ set -e
 [[ "$status" -ne 0 && "$output" == *'reads the response from standard input'* ]]
 [[ ! -e "$repo_state/response" && ! -e "$worktree/.sergeant-response" ]]
 
+for newline_case in zero one multiple; do
+  expected_response="$TEST_ROOT/response-$newline_case"
+  case "$newline_case" in
+    zero) printf 'multiline approval\ncode block end' > "$expected_response" ;;
+    one) printf 'multiline approval\ncode block end\n' > "$expected_response" ;;
+    multiple) printf 'multiline approval\ncode block end\n\n\n' > "$expected_response" ;;
+  esac
+  rm -f "$repo_state/response" "$repo_state/response_id" "$repo_state/response_generation" \
+    "$repo_state/notification_id" "$repo_state/notification_delivered" \
+    "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" \
+    "$worktree/.sergeant-response-generation" "$worktree/.sergeant-notification"
+  printf 'needs_input\n' > "$repo_state/status"
+  printf 'needs_input\n' > "$worktree/.sergeant-status"
+  PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/newline-$newline_case.log" \
+    TD_LOG="$TEST_ROOT/newline-$newline_case-td.log" \
+    TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 \
+    EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+    "$ROOT_DIR/bin/sgt-respond" task-1 app < "$expected_response" >/dev/null
+  cmp -s "$expected_response" "$repo_state/response"
+  cmp -s "$expected_response" "$worktree/.sergeant-response"
+
+  rm -f "$worktree/.sergeant-response"
+  printf 'orphaned\n' > "$repo_state/status"
+  printf 'orphaned\n' > "$worktree/.sergeant-status"
+  PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/replay-$newline_case.log" \
+    TD_LOG="$TEST_ROOT/replay-$newline_case-td.log" \
+    TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 \
+    EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+    "$ROOT_DIR/bin/sgt-respond" task-1 app < "$expected_response" >/dev/null
+  cmp -s "$expected_response" "$repo_state/response"
+  cmp -s "$expected_response" "$worktree/.sergeant-response"
+done
+rm -f "$repo_state/response" "$repo_state/response_id" "$repo_state/response_generation" \
+  "$repo_state/notification_id" "$repo_state/notification_delivered" \
+  "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" \
+  "$worktree/.sergeant-response-generation" "$worktree/.sergeant-notification"
+printf 'needs_input\n' > "$repo_state/status"
+printf 'needs_input\n' > "$worktree/.sergeant-status"
+
 # shellcheck disable=SC2016
 # Literal metacharacters verify response data is never evaluated.
 response='Use option A; $(touch should-not-exist)'

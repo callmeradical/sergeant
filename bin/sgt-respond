@@ -17,15 +17,25 @@ _die() { echo "ERROR: $*" >&2; exit 1; }
 
 TASK_ID="$1"
 REPO="$2"
-if [[ -t 0 ]]; then
-  printf 'Response: ' >&2
-  IFS= read -r RESPONSE || _die "Response must not be empty"
-else
-  RESPONSE="$(cat)"
-fi
 [[ "$TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid task ID: $TASK_ID"
 [[ "$REPO" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid repo: $REPO"
-[[ -n "$RESPONSE" ]] || _die "Response must not be empty"
+RESPONSE_INPUT=""
+_cleanup_response_input() {
+  [[ -z "$RESPONSE_INPUT" ]] || rm -f "$RESPONSE_INPUT"
+}
+trap '_cleanup_response_input' EXIT
+umask 077
+RESPONSE_INPUT="$(mktemp "${TMPDIR:-/tmp}/sgt-response.XXXXXX")" || \
+  _die "Could not create private response input"
+chmod 600 "$RESPONSE_INPUT"
+if [[ -t 0 ]]; then
+  printf 'Response: ' >&2
+  IFS= read -r response_line || _die "Response must not be empty"
+  printf '%s\n' "$response_line" > "$RESPONSE_INPUT"
+else
+  cat > "$RESPONSE_INPUT"
+fi
+[[ -s "$RESPONSE_INPUT" ]] || _die "Response must not be empty"
 
 REPO_DIR="$FLEET_DIR/$TASK_ID/$REPO"
 [[ -d "$FLEET_DIR/$TASK_ID" ]] || _die "Task not found: $TASK_ID"
@@ -60,7 +70,13 @@ _sgt_intent_revision_matches "$FLEET_DIR/$TASK_ID" "$REPO_DIR" "$worktree" || \
   _die "canonical intent revision mismatch; audited human decision/new revision required"
 
 _sgt_response_lock_acquire "$REPO_DIR"
-trap '_sgt_response_lock_release' EXIT
+_cleanup_respond() {
+  local status=$?
+  _sgt_response_lock_release || status=1
+  _cleanup_response_input || status=1
+  return "$status"
+}
+trap '_cleanup_respond' EXIT
 
 if [[ -n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-status" ]]; then
   status="$(tr -d '\n' < "$worktree/.sergeant-status")"
@@ -84,8 +100,19 @@ _atomic_write() {
   fi
 }
 
+_atomic_write_file() {
+  local target="$1"
+  local source_file="$2"
+  local temporary
+  temporary="$(mktemp "${target}.tmp.XXXXXX")"
+  if ! cat "$source_file" > "$temporary" || ! mv "$temporary" "$target"; then
+    rm -f "$temporary"
+    return 1
+  fi
+}
+
 _publish_local_response_transport() {
-  local response="$1"
+  local response_file="$1"
   local response_id="$2"
   local gate_generation="$3"
   _atomic_write "$REPO_DIR/response_generation" "$gate_generation"
@@ -93,11 +120,11 @@ _publish_local_response_transport() {
   rm -f "$worktree/.sergeant-response-ack"
   _atomic_write "$worktree/.sergeant-response-generation" "$gate_generation"
   _atomic_write "$worktree/.sergeant-response-id" "$response_id"
-  _atomic_write "$REPO_DIR/response" "$response"
-  _atomic_write "$worktree/.sergeant-response" "$response"
+  _atomic_write_file "$REPO_DIR/response" "$response_file"
+  _atomic_write_file "$worktree/.sergeant-response" "$response_file"
 }
 
-pending_response=""
+pending_response_file=""
 gate_generation="$(cat "$worktree/.sergeant-gate-generation" 2>/dev/null || true)"
 if [[ "$status" == "orphaned" && ! "$gate_generation" =~ ^[1-9][0-9]*$ ]]; then
   gate_generation=1
@@ -106,13 +133,13 @@ fi
 [[ "$gate_generation" =~ ^[1-9][0-9]*$ ]] || \
   _die "Worker gate generation is missing or invalid; response was not published"
 if [[ -f "$REPO_DIR/response" ]]; then
-  pending_response="$(cat "$REPO_DIR/response")"
+  pending_response_file="$REPO_DIR/response"
 elif [[ -n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-response" ]]; then
-  pending_response="$(cat "$worktree/.sergeant-response")"
+  pending_response_file="$worktree/.sergeant-response"
 fi
 
 response_id="$(cat "$REPO_DIR/response_id" 2>/dev/null || true)"
-if [[ -n "$pending_response" ]]; then
+if [[ -n "$pending_response_file" ]]; then
   [[ "$(cat "$REPO_DIR/response_generation" 2>/dev/null || true)" == "$gate_generation" && \
      "$(cat "$worktree/.sergeant-response-generation" 2>/dev/null || true)" == "$gate_generation" && \
      -n "$response_id" && \
@@ -121,12 +148,11 @@ if [[ -n "$pending_response" ]]; then
   if [[ -f "$worktree/.sergeant-response" && "$status" != "orphaned" ]]; then
     _die "A Sergeant response is already pending consumption for $TASK_ID/$REPO"
   fi
-  if [[ "$RESPONSE" != "$pending_response" ]]; then
+  if ! cmp -s "$RESPONSE_INPUT" "$pending_response_file"; then
     printf 'sgt-respond: reusing stored recovery response for orphaned worker %s/%s; supplied text was ignored.\n' "$TASK_ID" "$REPO" >&2
   fi
-  RESPONSE="$pending_response"
   if [[ ! -f "$worktree/.sergeant-response" ]]; then
-    _atomic_write "$worktree/.sergeant-response" "$RESPONSE"
+    _atomic_write_file "$worktree/.sergeant-response" "$pending_response_file"
   fi
 else
   response_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
@@ -134,7 +160,7 @@ else
     printf '%s' "$response_id" | "$SCRIPT_DIR/sgt-td-memory" response "$REPO_DIR" "$worktree" || \
       _die "Failed to record response provenance in td; response was not published"
   fi
-  _publish_local_response_transport "$RESPONSE" "$response_id" "$gate_generation"
+  _publish_local_response_transport "$RESPONSE_INPUT" "$response_id" "$gate_generation"
 fi
 
 active_notification_id="$(sed -n 's/^notification_id=//p' \
@@ -154,6 +180,7 @@ if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && _pane_is_supervisor "$
   _sgt_wait_worker_notification "$pane" "$REPO_DIR" "$response_id" || \
     _die "Worker did not acknowledge its durable response notification; response remains pending"
   _sgt_response_lock_release
+  _cleanup_response_input
   trap - EXIT
   echo "sgt-respond: notified local pane $pane."
   exit 0
@@ -201,5 +228,6 @@ if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" "$response_id"; then
   _die "Worker relaunch notification acknowledgement timed out for $TASK_ID/$REPO"
 fi
 _sgt_response_lock_release
+_cleanup_response_input
 trap - EXIT
 echo "sgt-respond: relaunched worker in pane $new_pane."
