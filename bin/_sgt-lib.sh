@@ -136,22 +136,37 @@ _sgt_pane_identity() {
     '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' 2>/dev/null
 }
 _sgt_read_owned_file() {
-  local path="$1" mode value
+  local path="$1" mode fd_mode value
   [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
   mode="$(stat -c '%a' -- "$path" 2>/dev/null || stat -f '%Lp' "$path" 2>/dev/null)" || \
     return 1
   [[ "$mode" == "600" ]] || return 1
   exec 9< "$path" || return 1
-  if [[ ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
+  fd_mode="$(stat -L -c '%a' -- /dev/fd/9 2>/dev/null || stat -L -f '%Lp' /dev/fd/9 2>/dev/null)" || {
+    exec 9<&-
+    return 1
+  }
+  if [[ "$fd_mode" != "600" || ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
+    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
     exec 9<&-
     return 1
   fi
   value="$(cat <&9)" || { exec 9<&-; return 1; }
+  fd_mode="$(stat -L -c '%a' -- /dev/fd/9 2>/dev/null || stat -L -f '%Lp' /dev/fd/9 2>/dev/null)" || {
+    exec 9<&-
+    return 1
+  }
+  if [[ "$fd_mode" != "600" || ! -O /dev/fd/9 || -L "$path" || \
+    ! "$path" -ef /dev/fd/9 ]]; then
+    exec 9<&-
+    return 1
+  fi
   exec 9<&-
   printf '%s\n' "$value"
 }
 _sgt_read_same_owned_files() {
-  local first="$1" second="$2" first_mode second_mode first_value second_value
+  local first="$1" second="$2" first_mode second_mode first_fd_mode second_fd_mode
+  local first_value second_value
   [[ -f "$first" && ! -L "$first" && -O "$first" && \
     -f "$second" && ! -L "$second" && -O "$second" ]] || return 1
   first_mode="$(stat -c '%a' -- "$first" 2>/dev/null || stat -f '%Lp' "$first" 2>/dev/null)" || \
@@ -161,13 +176,26 @@ _sgt_read_same_owned_files() {
   [[ "$first_mode" == "600" && "$second_mode" == "600" ]] || return 1
   exec 8< "$first" || return 1
   exec 9< "$second" || { exec 8<&-; return 1; }
-  if [[ ! "$first" -ef /dev/fd/8 || ! "$second" -ef /dev/fd/9 || \
+  first_fd_mode="$(stat -L -c '%a' -- /dev/fd/8 2>/dev/null || stat -L -f '%Lp' /dev/fd/8 2>/dev/null)"
+  second_fd_mode="$(stat -L -c '%a' -- /dev/fd/9 2>/dev/null || stat -L -f '%Lp' /dev/fd/9 2>/dev/null)"
+  if [[ "$first_fd_mode" != "600" || "$second_fd_mode" != "600" || \
+    ! -O /dev/fd/8 || ! -O /dev/fd/9 || \
+    ! "$first" -ef /dev/fd/8 || ! "$second" -ef /dev/fd/9 || \
     ! /dev/fd/8 -ef /dev/fd/9 || -L "$first" || -L "$second" ]]; then
     exec 8<&- 9<&-
     return 1
   fi
   first_value="$(cat <&8)" || { exec 8<&- 9<&-; return 1; }
   second_value="$(cat <&9)" || { exec 8<&- 9<&-; return 1; }
+  first_fd_mode="$(stat -L -c '%a' -- /dev/fd/8 2>/dev/null || stat -L -f '%Lp' /dev/fd/8 2>/dev/null)"
+  second_fd_mode="$(stat -L -c '%a' -- /dev/fd/9 2>/dev/null || stat -L -f '%Lp' /dev/fd/9 2>/dev/null)"
+  if [[ "$first_fd_mode" != "600" || "$second_fd_mode" != "600" || \
+    ! -O /dev/fd/8 || ! -O /dev/fd/9 || -L "$first" || -L "$second" || \
+    ! "$first" -ef /dev/fd/8 || ! "$second" -ef /dev/fd/9 || \
+    ! /dev/fd/8 -ef /dev/fd/9 ]]; then
+    exec 8<&- 9<&-
+    return 1
+  fi
   exec 8<&- 9<&-
   [[ "$first_value" == "$second_value" ]] || return 1
   printf '%s\n' "$first_value"
