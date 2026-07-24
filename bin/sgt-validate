@@ -73,7 +73,6 @@ fi
 WINDOW_NAME="validation-${REPO}-${TASK_ID}"
 [[ ! -L "$REPO_STATE/window_name" && ! -L "$REPO_STATE/stage" ]] || \
   _die "Validation prior state must not be a symlink"
-OLD_WINDOW_NAME="$(cat "$REPO_STATE/window_name" 2>/dev/null || true)"
 SOURCE_ROOT="$(git -C "$WORKTREE" rev-parse --show-toplevel)"
 SOURCE_BRANCH="$(git -C "$WORKTREE" branch --show-current)"
 [[ -n "$SOURCE_BRANCH" ]] || _die "Validation requires a named source branch"
@@ -87,6 +86,7 @@ VALIDATION_LAUNCH_LOCK="$REPO_STATE/validation-launch.lock"
 VALIDATION_CHILD_READY="$REPO_STATE/validation-child-ready"
 VALIDATION_CHILD_ACCEPTED="$REPO_STATE/validation-child-accepted"
 VALIDATION_CHILD_COMMIT="$REPO_STATE/validation-child-commit"
+VALIDATION_CHILD_COMMITTED="$REPO_STATE/validation-child-committed"
 WINDOW_BACKUP="$REPO_STATE/window_name.validation-backup.$$"
 STAGE_BACKUP="$REPO_STATE/stage.validation-backup.$$"
 
@@ -95,7 +95,7 @@ _validation_path_exists() {
 }
 _validation_object_identity() {
   [[ -e "$1" && ! -L "$1" ]] || return 1
-  stat -c '%d:%i' -- "$1" 2>/dev/null || stat -f '%d:%i' "$1" 2>/dev/null
+  stat -c '%d:%i:%w' -- "$1" 2>/dev/null || stat -f '%d:%i:%B' "$1" 2>/dev/null
 }
 _validation_path_identity() {
   local identity
@@ -118,7 +118,6 @@ VALIDATION_WORKTREE_IDENTITY=""
 VALIDATION_PANE=""
 VALIDATION_IDENTITY=""
 VALIDATION_PANE_OWNED=false
-WINDOW_RENAMED=false
 WINDOW_STATE_OWNED=false
 STAGE_STATE_OWNED=false
 VALIDATION_CANDIDATE=""
@@ -318,7 +317,7 @@ _rollback_validation_launch() {
   $VALIDATION_COMMITTED && return 0
   if [[ -n "${VALIDATION_HANDSHAKE:-}" ]]; then
     for handshake_path in "$VALIDATION_CHILD_READY" "$VALIDATION_CHILD_ACCEPTED" \
-      "$VALIDATION_CHILD_COMMIT"; do
+      "$VALIDATION_CHILD_COMMIT" "$VALIDATION_CHILD_COMMITTED"; do
       if [[ -f "$handshake_path" && ! -L "$handshake_path" && \
         "$(cat "$handshake_path")" == "$VALIDATION_HANDSHAKE" ]]; then
         _validation_record_owned_path "$handshake_path" || true
@@ -331,12 +330,6 @@ _rollback_validation_launch() {
       "$current_identity" == "1|${VALIDATION_IDENTITY#*|}" ]]; then
       tmux kill-pane -t "$VALIDATION_PANE" 2>/dev/null || true
     fi
-  fi
-  if $WINDOW_RENAMED && [[ -n "$OLD_WINDOW_NAME" ]] && \
-    _sgt_pane_identity_matches "$PANE" "$REPO_STATE" && \
-    [[ "$(tmux display-message -p -t "$PANE" '#W' 2>/dev/null || true)" == \
-      "$WINDOW_NAME" ]]; then
-    tmux rename-window -t "$PANE" "$OLD_WINDOW_NAME" 2>/dev/null || true
   fi
   _validation_remove_owned_paths
   if $WINDOW_STATE_OWNED && ! _validation_path_exists "$REPO_STATE/window_name" && \
@@ -375,6 +368,7 @@ for path in "$VALIDATION_WORKTREE_RECORD" "$VALIDATION_WORKTREE_RECORD_TEMP" \
   "$REPO_STATE/validation_process_group" "$REPO_STATE/validation_process_start" \
   "$REPO_STATE/validation_status" "$VALIDATION_RELEASE_TEMP" \
   "$VALIDATION_CHILD_READY" "$VALIDATION_CHILD_ACCEPTED" "$VALIDATION_CHILD_COMMIT" \
+  "$VALIDATION_CHILD_COMMITTED" \
   "$WINDOW_BACKUP" "$STAGE_BACKUP"; do
   ! _validation_path_exists "$path" || _die "Validation launch state already exists: $path"
 done
@@ -448,7 +442,6 @@ _validation_transition pane-identity || _die "Failed to capture validation pane 
 if ! tmux rename-window -t "$PANE" "$WINDOW_NAME"; then
   _die "Failed to rename validation window"
 fi
-WINDOW_RENAMED=true
 
 _validation_write_owned "$REPO_STATE/validation_pane" "$VALIDATION_PANE" \
   state-validation_pane || \
@@ -485,6 +478,10 @@ _wait_validation_handshake "$VALIDATION_CHILD_ACCEPTED" "$VALIDATION_HANDSHAKE" 
   _die "Validation child did not accept release"
 _validation_write_owned "$VALIDATION_CHILD_COMMIT" "$VALIDATION_HANDSHAKE" child-commit || \
   _die "Failed to commit validation child release"
+_wait_validation_handshake "$VALIDATION_CHILD_COMMITTED" "$VALIDATION_HANDSHAKE" || \
+  _die "Validation child did not acknowledge committed state"
+[[ "$(_validation_current_pane_identity "$VALIDATION_PANE" || true)" == \
+  "$VALIDATION_IDENTITY" ]] || _die "Validation child exited before commit"
 VALIDATION_COMMITTED=true
 _release_validation_lock || _die "Failed to release validation launch reservation"
 rm -f "$WINDOW_BACKUP" "$STAGE_BACKUP"
