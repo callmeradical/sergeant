@@ -148,12 +148,14 @@ real_cp="$(command -v cp)"
 real_mv="$(command -v mv)"
 real_ln="$(command -v ln)"
 real_rm="$(command -v rm)"
+real_stat="$(command -v stat)"
 real_shasum="$(command -v shasum || command -v sha256sum)"
 validation_path="${worktree}-validation-task-1"
 concurrent_dir="$TEST_ROOT/concurrent"
 mkdir -p "$concurrent_dir"
 export REAL_GIT="$real_git" REAL_CP="$real_cp" REAL_MV="$real_mv" REAL_LN="$real_ln"
 export REAL_RM="$real_rm"
+export REAL_STAT="$real_stat"
 export REAL_SHASUM="$real_shasum" VALIDATION_PATH="$validation_path"
 export CONCURRENT_DIR="$concurrent_dir" TEST_REPO_STATE="$repo_state"
 printf '%s\n' "$revision" > "$concurrent_dir/revision"
@@ -283,6 +285,19 @@ fi
 exec "$REAL_RM" "$@"
 EOF
 chmod +x "$fake_bin/rm"
+
+cat > "$fake_bin/stat" <<'EOF'
+#!/usr/bin/env bash
+last="${!#}"
+if [[ "${FAIL_TRANSITION:-}" == "identity-chmod-race" && \
+  "$last" == */primary_pane_identity ]]; then
+  "$REAL_STAT" "$@"
+  chmod 644 "$last"
+  exit 0
+fi
+exec "$REAL_STAT" "$@"
+EOF
+chmod +x "$fake_bin/stat"
 
 cat > "$fake_bin/shasum" <<'EOF'
 #!/usr/bin/env bash
@@ -693,6 +708,15 @@ for identity_path in "$fleet/task-1/primary_pane_identity" "$repo_state/pane_ide
   done
   chmod 600 "$identity_path"
 done
+
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  FAIL_TRANSITION=identity-chmod-race TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]]
+chmod 600 "$fleet/task-1/primary_pane_identity"
 
 set +e
 output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
