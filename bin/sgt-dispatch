@@ -552,6 +552,7 @@ for rname in "${TARGET_REPOS[@]}"; do
   _sgt_intent_install "$INTENT_TMP" "$repo_task_dir/.sergeant-intent.md"
   printf '%s\n' "$INTENT_REVISION" > "$repo_task_dir/intent_revision"
   echo "$BRANCH"    > "$repo_task_dir/branch"
+  date +%s          > "$repo_task_dir/dispatch_started"
   echo "dispatched" > "$repo_task_dir/status"
   [[ -n "$wait_for" ]] && echo "$wait_for" > "$repo_task_dir/wait_for"
 

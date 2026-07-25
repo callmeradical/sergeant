@@ -182,6 +182,11 @@ grep -Fq 'kill-pane -t %42' "$TMUX_LOG"
 incomplete_repo="$fleet/task-incomplete/app"
 mkdir -p "$incomplete_repo"
 printf 'dispatched\n' > "$incomplete_repo/status"
+printf '1\n' > "$incomplete_repo/dispatch_started"
+fresh_dispatch_repo="$fleet/task-fresh-dispatch/app"
+mkdir -p "$fresh_dispatch_repo"
+printf 'dispatched\n' > "$fresh_dispatch_repo/status"
+date +%s > "$fresh_dispatch_repo/dispatch_started"
 orphan_repo="$fleet/task-orphan/app"
 mkdir -p "$orphan_repo"
 printf 'orphaned\n' > "$orphan_repo/status"
@@ -206,6 +211,7 @@ EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
 [[ "$(cat "$incomplete_repo/status")" == \
   'failed: dispatch incomplete: no worktree or owned live pane' ]]
 grep -Fq 'dispatch never acquired a worktree or owned live pane' "$incomplete_repo/diagnostic"
+[[ "$(cat "$fresh_dispatch_repo/status")" == "dispatched" ]]
 [[ "$(cat "$orphan_repo/status")" == "orphaned" ]]
 [[ "$(cat "$blocked_repo/status")" == "blocked" ]]
 [[ "$(cat "$needs_input_repo/status")" == "needs_input" ]]

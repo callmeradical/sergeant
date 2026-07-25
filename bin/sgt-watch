@@ -106,6 +106,21 @@ _recycle_terminal_worker() {
   return 0
 }
 
+_dispatch_is_expired() {
+  local repo_dir="$1"
+  local grace now started
+
+  grace="${SERGEANT_DISPATCH_GRACE_SECONDS:-300}"
+  [[ "$grace" =~ ^[0-9]+$ ]] || _die "SERGEANT_DISPATCH_GRACE_SECONDS must be a non-negative integer"
+  started="$(cat "$repo_dir/dispatch_started" 2>/dev/null || true)"
+  if [[ ! "$started" =~ ^[0-9]+$ ]]; then
+    started="$(stat -c %Y "$repo_dir/status" 2>/dev/null || stat -f %m "$repo_dir/status" 2>/dev/null || true)"
+  fi
+  [[ "$started" =~ ^[0-9]+$ ]] || return 1
+  now="$(date +%s)"
+  (( now >= started && now - started >= grace ))
+}
+
 _sync_task() {
   local task_id="$1"
   local task_dir="$FLEET_DIR/$task_id"
@@ -119,10 +134,12 @@ _sync_task() {
     if [[ -z "$worktree" || ! -d "$worktree" ]]; then
       if [[ "$fleet_status" == "dispatched" ]]; then
         pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
-        if [[ -z "$pane" ]] || { command -v tmux >/dev/null 2>&1 &&
-             ! _pane_is_supervisor "$pane" "$repo_dir"; }; then
-          printf 'failed: dispatch incomplete: no worktree or owned live pane\n' > "$repo_dir/status"
-          printf 'dispatch never acquired a worktree or owned live pane\n' > "$repo_dir/diagnostic"
+        if _dispatch_is_expired "$repo_dir"; then
+          if [[ -z "$pane" ]] || { command -v tmux >/dev/null 2>&1 &&
+               ! _pane_is_supervisor "$pane" "$repo_dir"; }; then
+            printf 'failed: dispatch incomplete: no worktree or owned live pane\n' > "$repo_dir/status"
+            printf 'dispatch never acquired a worktree or owned live pane\n' > "$repo_dir/diagnostic"
+          fi
         fi
       elif [[ "$fleet_status" == "in_progress" ]]; then
         printf 'orphaned\n' > "$repo_dir/status"
@@ -174,7 +191,7 @@ _sync_task() {
     esac
 
     case "$wt_status" in
-      in_progress|dispatched)
+      in_progress)
         pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
         if [[ -z "$pane" ]]; then
           printf 'orphaned\n' > "$worktree/.sergeant-status"
