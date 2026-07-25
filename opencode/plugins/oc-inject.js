@@ -1,9 +1,9 @@
 /**
  * DEPRECATED: oc-inject — out-of-band message injection into OpenCode sessions
  *
- * Allows external processes (agents, scripts, sgt-notify) to inject messages
- * into any OpenCode session without taking over the prompt bar. Messages are
- * queued when the session is busy and drained automatically on session.idle.
+ * Allows an external process to inject messages into any OpenCode session
+ * without taking over the prompt bar. Messages are queued when the session is
+ * busy and drained automatically on session.idle.
  *
  * Protocol:
  *   Write a .msg file to the target process's ordered inbox.

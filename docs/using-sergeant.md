@@ -108,8 +108,14 @@ sgt-watch --sync-all
 Bulk reconciliation syncs worktree status into fleet state, stops only
 identity-verified `done` or `failed` worker panes, and marks interrupted
 `dispatched` records failed when they have neither a worktree nor an owned live
-pane. It preserves `needs_input`, `blocked`, and `orphaned` worktrees. Dispatch
-runs this reconciliation automatically before creating new tasks.
+pane after a 300-second grace period by default. Set
+`SERGEANT_DISPATCH_GRACE_SECONDS` to change that window. It preserves
+`needs_input`, `blocked`, and `orphaned` worktrees. Dispatch runs this
+reconciliation automatically before creating new tasks.
+
+Workers wake the coordinator by updating one shared per-task notify marker in
+fleet state. `sgt-watch` polls that marker, so simultaneous repo updates can at
+worst collapse into a delayed wakeup rather than duplicate delivery.
 
 Do not equate `in_progress` with health. Require exact live pane/process identity
 plus recent meaningful log activity or an active child operation.

@@ -161,8 +161,12 @@ Require both `graph.json` and `GRAPH_REPORT.md` at the configured project output
 
 ## 8. Install engineering skills
 
-Follow [Skills and their sources](skills.md). Most engineering skills referenced
-by Sergeant come from `mattpocock/skills`; Sergeant's project orchestration skills
+Sergeant-generated worker briefs already discover their required workflow skills
+from this repository's vendored `.agents/skills/` tree. See
+[Repo-scoped worker skills](repo-scoped-skills.md) for the canonical inventory.
+
+Additional engineering skills you choose to install locally should still follow
+[Skills and their sources](skills.md). Sergeant's project orchestration skills
 ship in this repository.
 
 ## 9. Launch Sergeant
@@ -188,11 +192,10 @@ explain which repository owns <feature>
 
 - [ ] Required commands resolve on `PATH` or through `bin/`
 - [ ] The coordinator runs in a tmux pane
-- [ ] When using OpenCode, it was restarted after plugin installation
 - [ ] `sgt-list` shows the project exactly once
 - [ ] `sgt-context` resolves every owning repository and instruction layer
 - [ ] Required repositories are cloned
 - [ ] Marcus td is installed with create/json/work-dir support and initialized
 - [ ] GitHub CLI can access required repositories
 - [ ] Optional Treehouse/Graphify features pass their verification commands
-- [ ] Engineering skills are installed from reviewed sources
+- [ ] Required repo-scoped worker skills are present and any extra installed skills come from reviewed sources
