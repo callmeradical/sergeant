@@ -187,6 +187,18 @@ fresh_dispatch_repo="$fleet/task-fresh-dispatch/app"
 mkdir -p "$fresh_dispatch_repo"
 printf 'dispatched\n' > "$fresh_dispatch_repo/status"
 date +%s > "$fresh_dispatch_repo/dispatch_started"
+pending_worktree_repo="$fleet/task-pending-worktree/app"
+pending_worktree="$TEST_ROOT/pending-worktree"
+mkdir -p "$pending_worktree_repo" "$pending_worktree"
+printf 'dispatched\n' > "$pending_worktree_repo/status"
+printf '%s\n' "$pending_worktree" > "$pending_worktree_repo/worktree"
+printf '1\n' > "$pending_worktree_repo/dispatch_started"
+fresh_pending_repo="$fleet/task-fresh-pending-worktree/app"
+fresh_pending_worktree="$TEST_ROOT/fresh-pending-worktree"
+mkdir -p "$fresh_pending_repo" "$fresh_pending_worktree"
+printf 'dispatched\n' > "$fresh_pending_repo/status"
+printf '%s\n' "$fresh_pending_worktree" > "$fresh_pending_repo/worktree"
+date +%s > "$fresh_pending_repo/dispatch_started"
 orphan_repo="$fleet/task-orphan/app"
 mkdir -p "$orphan_repo"
 printf 'orphaned\n' > "$orphan_repo/status"
@@ -212,6 +224,10 @@ EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
   'failed: dispatch incomplete: no worktree or owned live pane' ]]
 grep -Fq 'dispatch never acquired a worktree or owned live pane' "$incomplete_repo/diagnostic"
 [[ "$(cat "$fresh_dispatch_repo/status")" == "dispatched" ]]
+[[ "$(cat "$pending_worktree_repo/status")" == \
+  'failed: dispatch incomplete: no worktree or owned live pane' ]]
+grep -Fq 'dispatch never acquired a worktree or owned live pane' "$pending_worktree_repo/diagnostic"
+[[ "$(cat "$fresh_pending_repo/status")" == "dispatched" ]]
 [[ "$(cat "$orphan_repo/status")" == "orphaned" ]]
 [[ "$(cat "$blocked_repo/status")" == "blocked" ]]
 [[ "$(cat "$needs_input_repo/status")" == "needs_input" ]]
