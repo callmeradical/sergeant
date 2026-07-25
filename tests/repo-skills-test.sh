@@ -50,6 +50,13 @@ for skill in "${expected[@]}"; do
   [[ "$(realpath "$link")" == "$CANONICAL_DIR/$skill" ]] || fail "Claude skill link escapes canonical tree: $skill"
 done
 
+for skill in load-project cross-repo-work dispatch; do
+  skill_file="$ROOT_DIR/skills/$skill/SKILL.md"
+  [[ -f "$skill_file" ]] || fail "missing Sergeant procedural skill: $skill"
+  [[ "$(sed -n '1p' "$skill_file")" == '---' ]] || fail "invalid procedural frontmatter: $skill"
+  [[ "$(sed -n '2p' "$skill_file")" == "name: $skill" ]] || fail "invalid procedural skill name: $skill"
+done
+
 python3 - "$ROOT_DIR/opencode.json" <<'PY'
 import json
 import sys
@@ -59,7 +66,7 @@ with open(sys.argv[1], encoding="utf-8") as config_file:
 
 assert config == {
     "$schema": "https://opencode.ai/config.json",
-    "skills": {"paths": [".agents/skills"]},
+    "skills": {"paths": [".agents/skills", "skills"]},
 }
 PY
 

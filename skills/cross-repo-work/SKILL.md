@@ -1,3 +1,8 @@
+---
+name: cross-repo-work
+description: Use when more than one repository owns a requested Sergeant outcome; decomposes ownership, dependencies, merge order, and acceptance before dispatch.
+---
+
 # Skill: cross-repo-work
 
 Decompose a requested outcome across owning repositories and define dependency and
