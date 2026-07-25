@@ -299,6 +299,21 @@ _deliver_notifications() {
           _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
           continue
         }
+        pending="$accept_path.tmp.$$"
+        printf '%s\n' "$ack_token" > "$pending"
+        if ! mv "$pending" "$accept_path"; then
+          rm -f "$pending"
+          _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
+          continue
+        fi
+        pending="$target_dir/accepted.tmp.$$"
+        printf '%s\n' "$ack_token" > "$pending"
+        if ! mv "$pending" "$target_dir/accepted"; then
+          rm -f "$pending"
+          rm -f "$accept_path"
+          _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
+          continue
+        fi
         tmux send-keys -t "$TMUX_PANE" -l -- \
           "Sergeant accepted $ack_token. Wait for it in $accept_path, follow the notification exactly once, then write it to $complete_path." 2>/dev/null || {
           _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
@@ -320,21 +335,6 @@ _deliver_notifications() {
           _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
           continue
         }
-        pending="$accept_path.tmp.$$"
-        printf '%s\n' "$ack_token" > "$pending"
-        if ! mv "$pending" "$accept_path"; then
-          rm -f "$pending"
-          _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
-          continue
-        fi
-        pending="$target_dir/accepted.tmp.$$"
-        printf '%s\n' "$ack_token" > "$pending"
-        if ! mv "$pending" "$target_dir/accepted"; then
-          rm -f "$pending"
-          rm -f "$accept_path"
-          _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
-          continue
-        fi
         pending="$target_dir/delivered.tmp.$$"
         printf '%s\n' "$ack_token" > "$pending"
         if ! mv "$pending" "$target_dir/delivered"; then
