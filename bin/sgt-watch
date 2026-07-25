@@ -79,15 +79,17 @@ _pane_is_supervisor() {
 
 _recycle_terminal_worker() {
   local repo_dir="$1"
-  local pane
+  local pane pane_id
 
+  [[ ! -s "$repo_dir/worker_recycled" ]] || return 0
   pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
   [[ -n "$pane" ]] || return 0
   if ! command -v tmux >/dev/null 2>&1; then
     printf 'terminal worker could not be recycled because tmux is unavailable\n' > "$repo_dir/diagnostic"
     return 1
   fi
-  if ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+  pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
+  if [[ "$pane_id" != "$pane" ]]; then
     date -u +%Y-%m-%dT%H:%M:%SZ > "$repo_dir/worker_recycled"
     return 0
   fi
