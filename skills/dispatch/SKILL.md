@@ -1,3 +1,8 @@
+---
+name: dispatch
+description: Use when Sergeant dispatch mode is selected or an existing fleet must be operated; owns worker launch, monitoring, responses, validation coordination, and cleanup.
+---
+
 # Skill: dispatch
 
 Plan and execute a cross-repo task by dispatching autonomous subagents — one per repo — each in an isolated git worktree.
