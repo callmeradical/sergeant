@@ -67,6 +67,18 @@ for notification_number in $(seq 1 "$notification_count"); do
     sleep 0.01
   done
   [[ "$(cat ".sergeant-notification-accepts/$nonce" 2>/dev/null || true)" == "$ack_token" ]] || exit 22
+  accepted=""
+  for _ in $(seq 1 100); do
+    IFS= read -r -t 1 candidate || break
+    if [[ "$candidate" == *"Sergeant accepted $ack_token"* ]]; then
+      accepted="$candidate"
+      break
+    fi
+  done
+  [[ -n "$accepted" ]] || exit 23
+  if [[ -n "${PRE_COMPLETION_REPLAY_LOG:-}" ]] && IFS= read -r -t 1 replay; then
+    printf '%s\n' "$replay" > "$PRE_COMPLETION_REPLAY_LOG"
+  fi
   printf '%s\n' "$ack_token" > ".sergeant-notification-complete/$nonce"
   target_dir="$NOTIFICATION_STATE/notifications/$notification_id/targets/$nonce"
   for _ in $(seq 1 100); do
@@ -75,6 +87,9 @@ for notification_number in $(seq 1 "$notification_count"); do
   done
   [[ "$(cat "$target_dir/delivered" 2>/dev/null || true)" == "$ack_token" ]] || exit 19
 done
+if [[ -n "${REPLAY_LOG:-}" ]] && IFS= read -r -t 1 replay; then
+  printf '%s\n' "$replay" > "$REPLAY_LOG"
+fi
 if [[ "${EXPECT_RECOVERY:-0}" == 1 ]]; then
   notification_id="$(cat "$NOTIFICATION_STATE/notification_id")"
   for _ in $(seq 1 100); do
@@ -340,17 +355,22 @@ instruction=Read the .sergeant-brief.md file and execute the mission.
 EOF
 tmux new-window -d -t "$TMUX_SESSION:" -n "done" \
   "env ARG_LOG='$TEST_ROOT/done.args' EXPECT_NOTIFICATION_COUNT=1 FAKE_STARTUP_DELAY=0.2 \
+  PRE_COMPLETION_REPLAY_LOG='$TEST_ROOT/done-pre-completion-replay.log' \
+  REPLAY_LOG='$TEST_ROOT/done-replay.log' \
   NOTIFICATION_STATE='$TEST_ROOT/done/state' SGT_NOTIFICATION_RETRY_INTERVAL=0.01 FAKE_MODE=done \
   '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/done/state' \
   '$TEST_ROOT/done/worktree' '$TEST_ROOT/fake-bin/opencode'"
 target_worker_pane "$TEST_ROOT/done/state" "done"
-for _ in $(seq 1 100); do
+# The two negative replay probes each hold stdin for up to one second.
+for _ in $(seq 1 250); do
   [[ -f "$TEST_ROOT/done/state/result" ]] && break
   sleep 0.02
 done
 [[ "$(cat "$TEST_ROOT/done.args")" == "1|--dangerously-skip-permissions" ]]
 [[ "$(cat "$TEST_ROOT/done/state/status")" == "done" ]]
 [[ "$(cat "$TEST_ROOT/done/state/worker_mode")" == "interactive" ]]
+[[ ! -e "$TEST_ROOT/done-pre-completion-replay.log" ]]
+[[ ! -e "$TEST_ROOT/done-replay.log" ]]
 done_nonce="$(cat "$TEST_ROOT/done/state/notification_target")"
 [[ "$(cat "$TEST_ROOT/done/state/notifications/initial-notification-1/targets/$done_nonce/delivered")" == \
    "initial-notification-1|$done_nonce" ]]

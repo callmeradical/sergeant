@@ -120,6 +120,12 @@ _deliver_notifications() {
         fi
         _sgt_response_lock_release
       fi
+      # Once acceptance delivery is durable, execution belongs to the agent.
+      # Keep publishing completion evidence silently without replaying the nudge.
+      if [[ "$delivered" == "$ack_token" ]]; then
+        sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
+        continue
+      fi
       if [[ "$delivered" != "$ack_token" && "$(cat "$ack_path" 2>/dev/null || true)" == "$ack_token" ]]; then
         if ! _sgt_response_lock_acquire "$REPO_STATE"; then
           sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
