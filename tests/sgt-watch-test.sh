@@ -219,8 +219,13 @@ grep -Fq 'dispatch never acquired a worktree or owned live pane' "$incomplete_re
 grep -Fq 'has no recorded worker pane' "$unowned_repo/diagnostic"
 [[ "$(cat "$missing_worktree_repo/status")" == "orphaned" ]]
 grep -Fq 'recorded worktree is unavailable' "$missing_worktree_repo/diagnostic"
+cat > "$task/notify" <<'EOF'
+event=escalation
+updated=2026-07-25T00:00:00Z
+EOF
 list_output="$(SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --list)"
 grep -Fq '1 done' <<< "$list_output"
+grep -Fq 'notify:  escalation' <<< "$list_output"
 watch_output="$(SERGEANT_WATCH_INTERVAL=0 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
   "$ROOT/bin/sgt-watch" task-1)"
 grep -Fq 'All repos done.' <<< "$watch_output"

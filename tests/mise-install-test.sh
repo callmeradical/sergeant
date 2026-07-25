@@ -14,12 +14,19 @@ awk '
 ' "$ROOT_DIR/mise.toml" > "$TEST_ROOT/install.sh"
 chmod +x "$TEST_ROOT/install.sh"
 
+mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/home/.config/opencode/plugins"
+ln -s "$ROOT_DIR/bin/oc-inject" "$TEST_ROOT/bin/oc-inject"
+ln -s "$ROOT_DIR/opencode/plugins/oc-inject.js" \
+  "$TEST_ROOT/home/.config/opencode/plugins/oc-inject.js"
+
 HOME="$TEST_ROOT/home" MISE_PROJECT_ROOT="$ROOT_DIR" \
   MISE_ORIGINAL_CWD="$ROOT_DIR" SGT_INSTALL_DIR="$TEST_ROOT/bin" \
   bash "$TEST_ROOT/install.sh" >/dev/null
 
 [[ -L "$TEST_ROOT/bin/sgt-dispatch" ]]
 [[ -L "$TEST_ROOT/bin/_sgt-intent.sh" ]]
+[[ ! -e "$TEST_ROOT/bin/oc-inject" ]]
+[[ ! -e "$TEST_ROOT/home/.config/opencode/plugins/oc-inject.js" ]]
 
 set +e
 output="$(HOME="$TEST_ROOT/home" "$TEST_ROOT/bin/sgt-dispatch" 2>&1)"

@@ -1,5 +1,5 @@
 /**
- * oc-inject — out-of-band message injection into OpenCode sessions
+ * DEPRECATED: oc-inject — out-of-band message injection into OpenCode sessions
  *
  * Allows external processes (agents, scripts, sgt-notify) to inject messages
  * into any OpenCode session without taking over the prompt bar. Messages are

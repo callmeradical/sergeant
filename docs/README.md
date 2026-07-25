@@ -18,7 +18,7 @@ state.
 ## Reference
 
 - [Project YAML schema](schema.md)
-- [OpenCode message injection](oc-inject.md)
+- [Deprecated OpenCode message injection](oc-inject.md)
 - [Annotated project example](../schema/project.yaml.example)
 - [Repository agent policy](../AGENTS.md)
 - [Sergeant command skills](../skills/)

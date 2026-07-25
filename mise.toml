@@ -18,7 +18,7 @@ TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
 mkdir -p "$TARGET_DIR"
 
 linked=0
-for f in "$BIN_DIR"/sgt-* "$BIN_DIR"/_sgt-lib.sh "$BIN_DIR"/_sgt-bash-version.sh "$BIN_DIR"/_sgt-intent.sh "$BIN_DIR"/_sgt-response-lock.sh "$BIN_DIR/oc-inject" "$BIN_DIR/wiki-daily-digest"; do
+for f in "$BIN_DIR"/sgt-* "$BIN_DIR"/_sgt-lib.sh "$BIN_DIR"/_sgt-bash-version.sh "$BIN_DIR"/_sgt-intent.sh "$BIN_DIR"/_sgt-response-lock.sh "$BIN_DIR/wiki-daily-digest"; do
   [[ -f "$f" ]] || continue
   name="$(basename "$f")"
   ln -sf "$f" "$TARGET_DIR/$name"
@@ -26,15 +26,19 @@ for f in "$BIN_DIR"/sgt-* "$BIN_DIR"/_sgt-lib.sh "$BIN_DIR"/_sgt-bash-version.sh
   linked=$((linked+1))
 done
 
-# Symlink the OpenCode plugin
-OC_PLUGIN_DIR="$HOME/.config/opencode/plugins"
-OC_PLUGIN_SRC="$REPO_DIR/opencode/plugins/oc-inject.js"
-if [[ -f "$OC_PLUGIN_SRC" ]]; then
-  mkdir -p "$OC_PLUGIN_DIR"
-  ln -sf "$OC_PLUGIN_SRC" "$OC_PLUGIN_DIR/oc-inject.js"
-  echo "  linked: $OC_PLUGIN_DIR/oc-inject.js -> $OC_PLUGIN_SRC"
-  echo "  NOTE: restart OpenCode to activate the oc-inject plugin"
-fi
+# Remove only legacy links owned by this Sergeant checkout. Source remains for
+# one compatibility window, but oc-inject is no longer installed or activated.
+for deprecated_link in "$TARGET_DIR/oc-inject" "$HOME/.config/opencode/plugins/oc-inject.js"; do
+  [[ -L "$deprecated_link" ]] || continue
+  deprecated_target="$(readlink "$deprecated_link")"
+  case "$deprecated_link:$deprecated_target" in
+    "$TARGET_DIR/oc-inject:$BIN_DIR/oc-inject"|\
+    "$HOME/.config/opencode/plugins/oc-inject.js:$REPO_DIR/opencode/plugins/oc-inject.js")
+      rm "$deprecated_link"
+      echo "  removed deprecated Sergeant link: $deprecated_link"
+      ;;
+  esac
+done
 
 echo ""
 echo "Installed $linked scripts to $TARGET_DIR"

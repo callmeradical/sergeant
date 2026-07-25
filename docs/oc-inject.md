@@ -1,4 +1,10 @@
-# oc-inject — Out-of-Band Message Injection
+# oc-inject — Deprecated OpenCode Transport
+
+> **Deprecated:** Sergeant no longer installs, captures targets for, or routes
+> notifications through `oc-inject`. Harness-specific conversation injection
+> was disruptive and coupled fleet supervision to OpenCode internals. Use
+> durable fleet state and `sgt-watch`; raw tmux injection is available only via
+> the explicit `SERGEANT_NOTIFY_TRANSPORT=tmux` compatibility setting.
 
 Allows external processes (dispatched agents, scripts, `sgt-notify`) to inject
 messages into any active OpenCode session without taking over the prompt bar.
@@ -68,20 +74,13 @@ oc-inject --pid 12345 --status                    # show process registry state
 
 ---
 
-## Install
+## Legacy direct use
 
-`mise run install` symlinks `bin/oc-inject` to `~/.local/bin/oc-inject` and
-symlinks the tracked plugin to
-`~/.config/opencode/plugins/oc-inject.js`.
+`mise run install` removes Sergeant-owned legacy symlinks and does not install
+this transport. The retained source exists for one compatibility window only.
 
-Verify both links:
+Direct use requires an explicit manual installation and is unsupported:
 
-```bash
-command -v oc-inject
-readlink ~/.config/opencode/plugins/oc-inject.js
-```
-
-If `mise` is unavailable, create the links manually:
 ```bash
 mkdir -p ~/.local/bin ~/.config/opencode/plugins
 ln -sf "$(pwd)/bin/oc-inject" ~/.local/bin/oc-inject
