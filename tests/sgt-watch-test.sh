@@ -25,7 +25,11 @@ case "$1" in
   display-message)
     [[ ! -e "$TMUX_STATE" ]] || exit 1
     [[ "${PANE_DEAD:-0}" == "0" ]] || exit 1
-    printf '%s\n' "${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
+    if [[ "${!#}" == '#{pane_id}' ]]; then
+      printf '%%42\n'
+    else
+      printf '%s\n' "${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
+    fi
     ;;
   kill-pane)
     printf '%s\n' "$*" >> "$TMUX_LOG"
