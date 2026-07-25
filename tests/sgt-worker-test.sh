@@ -22,6 +22,7 @@ mkdir -p "$TEST_ROOT/fake-bin" "$TEST_ROOT/done/state" "$TEST_ROOT/done/worktree
 cat > "$TEST_ROOT/fake-bin/opencode" <<'EOF'
 #!/usr/bin/env bash
 if [[ -n "${RACE_ROLE:-}" ]]; then
+  printf 'Ask anything...\n'
   IFS= read -r notification
   [[ "$notification" == *"$RACE_NOTIFICATION_ID"* ]] || exit 41
   printf '%s:%s\n' "$RACE_ROLE" "$RACE_NOTIFICATION_ID" >> "$RACE_RECEIVED_LOG"
@@ -52,9 +53,10 @@ if [[ -n "${RACE_ROLE:-}" ]]; then
   exit 0
 fi
 notification_count="${EXPECT_NOTIFICATION_COUNT:-0}"
-for notification_number in $(seq 1 "$notification_count"); do
-  [[ "$notification_number" != 1 ]] || sleep "${FAKE_STARTUP_DELAY:-0}"
-  IFS= read -r notification
+  for notification_number in $(seq 1 "$notification_count"); do
+    [[ "$notification_number" != 1 ]] || sleep "${FAKE_STARTUP_DELAY:-0}"
+    printf 'Ask anything...\n'
+    IFS= read -r notification
   notification_id="$(cat "$NOTIFICATION_STATE/notification_id")"
   [[ "$notification" == *"$notification_id"* ]] || exit 18
   printf '%s\n' "$notification_id" >> "${RECEIVED_LOG:-/dev/null}"
