@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+printf 'WARNING: oc-inject is deprecated; use durable Sergeant fleet state and sgt-watch\n' >&2
 # oc-inject — inject a message into an OpenCode session out-of-band
 #
 # Usage:

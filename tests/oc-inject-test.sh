@@ -154,8 +154,8 @@ printf 'session:1.0\n' > "$fleet/task-1/primary_pane"
 
 printf 'busy\n' >> "$TEST_ROOT/coordinator.commands"
 wait_for "busy coordinator state" registry_is_busy "$coordinator_registry" ses_coordinator
-HOME="$home" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-notify" task-1 "worker complete" >/dev/null
+HOME="$home" "$ROOT_DIR/bin/oc-inject" --pid "$coordinator_pid" \
+  "worker complete" ses_coordinator >/dev/null
 [[ ! -s "$TEST_ROOT/worker.log" ]] || {
   printf 'worker plugin consumed the coordinator notification\n' >&2
   exit 1
@@ -174,7 +174,7 @@ wait_for "third ordered notification" has_lines 3 "$TEST_ROOT/coordinator.log"
 
 jq -s -e '
   map(.text) == [
-    "Agent task task-1 update: worker complete",
+    "worker complete",
     "second",
     "third"
   ] and all(.[]; .sessionId == "ses_coordinator")
@@ -226,7 +226,7 @@ esac
 EOF
 chmod +x "$TEST_ROOT/fake-bin/tmux"
 HOME="$home" PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
-SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 SERGEANT_NOTIFY_TRANSPORT=tmux \
   "$ROOT_DIR/bin/sgt-notify" task-1 "fallback" >/dev/null 2>&1
 grep -Fq 'Agent task task-1 update: fallback' "$TEST_ROOT/tmux.log"
 

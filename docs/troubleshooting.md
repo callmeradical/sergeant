@@ -162,7 +162,7 @@ published.
 | Task state | `td context <id> --work-dir <repo-path>` |
 | Git state | `git status`, worktree list, branch and PR heads |
 | no-mistakes run | `no-mistakes axi status --run <id>` |
-| OpenCode message queue | See [oc-inject.md](oc-inject.md) |
+| Deprecated OpenCode injection state | See [oc-inject.md](oc-inject.md) |
 
 If documentation does not cover the observed failure, use the `sergeant-help`
 skill to search the docs, then create a td task containing the exact reproduction,

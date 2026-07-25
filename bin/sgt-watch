@@ -22,6 +22,7 @@ if [[ "${1:-}" == "--list" ]]; then
     task_id="$(basename "$task_dir")"
     started="$(cat "$task_dir/started" 2>/dev/null || echo "unknown")"
     brief="$(grep '^Brief:' "$task_dir/brief.md" 2>/dev/null | sed 's/^Brief: *//' | cut -c1-60 || echo "")"
+    notify_event="$(sed -n 's/^event=//p' "$task_dir/notify" 2>/dev/null || true)"
     total=0; done_count=0; failed_count=0; in_progress=0; needs_input=0; blocked=0; orphaned=0
     for repo_dir in "$task_dir"/*/; do
       [[ -d "$repo_dir" ]] || continue
@@ -39,6 +40,7 @@ if [[ "${1:-}" == "--list" ]]; then
     echo "  $task_id"
     echo "    brief:   $brief"
     echo "    started: $started"
+    [[ -z "$notify_event" ]] || echo "    notify:  $notify_event"
     echo "    repos:   $total total - $done_count done, $in_progress in-progress, $needs_input needs-input, $blocked blocked, $orphaned orphaned, $failed_count failed"
     echo ""
   done
@@ -287,6 +289,8 @@ HAVE_SNAPSHOT=false
 while true; do
   _sync_task "$TASK_ID"
   current_snapshot=""
+  notify_marker="$(cat "$TASK_DIR/notify" 2>/dev/null || true)"
+  current_snapshot+="notify:$notify_marker "
   for repo_dir in "$TASK_DIR"/*/; do
     [[ -d "$repo_dir" ]] || continue
     repo_name="$(basename "$repo_dir")"

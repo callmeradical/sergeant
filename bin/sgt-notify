@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # sgt-notify — Inject a worker update into the primary sergeant session.
 #
-# Called by workers for escalations and terminal outcomes. Prefers oc-inject
-# which queues messages when the session is busy and injects without taking over
-# the prompt bar. Falls back to raw tmux send-keys when not running inside OpenCode.
+# Called by workers for escalations and terminal outcomes. The default transport
+# records a metadata-only wake marker for the durable fleet watcher. Raw tmux
+# injection remains an explicit compatibility option.
 #
 # Usage:
 #   sgt-notify <task-id> "<message>"
@@ -24,53 +24,40 @@ source "$SCRIPT_DIR/_sgt-lib.sh"
 
 TASK_ID="$1"
 MESSAGE="$2"
-INJECT="Agent task $TASK_ID update: $MESSAGE"
 
 TASK_DIR="$FLEET_DIR/$TASK_ID"
-OC_INJECT_BIN="$SCRIPT_DIR/oc-inject"
-OC_TARGET_FILE="$TASK_DIR/oc_target.json"
+[[ -d "$TASK_DIR" ]] || _die "Task not found: $TASK_ID"
 
-# ── Prefer oc-inject ─────────────────────────────────────────────────────────
-# oc-inject writes to the OpenCode session directly via the plugin API:
-#  - If session is idle → injects immediately as a new conversation turn
-#  - If session is busy → queues the message, drains on next idle
-#  - Never takes over the prompt bar
-_notify_done=0
-_notify_uncertain=0
-if [[ -f "$OC_TARGET_FILE" ]]; then
-  OC_PID=$(jq -r '.pid // empty' "$OC_TARGET_FILE" 2>/dev/null || true)
-  OC_SESSION=$(jq -r '.sessionId // empty' "$OC_TARGET_FILE" 2>/dev/null || true)
-  if [[ -n "$OC_PID" && -n "$OC_SESSION" ]]; then
-    OC_COMMAND=""
-    [[ ! -f "$OC_INJECT_BIN" ]] || OC_COMMAND="$OC_INJECT_BIN"
-    if [[ -z "$OC_COMMAND" ]] && command -v oc-inject >/dev/null 2>&1; then
-      OC_COMMAND="$(command -v oc-inject)"
-    fi
-    if [[ -n "$OC_COMMAND" ]]; then
-      set +e
-      "$OC_COMMAND" --pid "$OC_PID" "$INJECT" "$OC_SESSION"
-      _inject_status=$?
-      set -e
-      if [[ "$_inject_status" -eq 0 ]]; then
-        echo "sgt-notify: sent via oc-inject." >&2
-        _notify_done=1
-      elif [[ "$_inject_status" -eq 2 ]]; then
-        echo "sgt-notify: oc-inject claimed delivery but acknowledgement is pending; not falling back." >&2
-        _notify_done=1
-        _notify_uncertain=1
-      else
-        echo "sgt-notify: coordinator OpenCode target unavailable — trying tmux." >&2
-      fi
-    fi
-  fi
-fi
+# ── Classify durable event ────────────────────────────────────────────────────
+case "$MESSAGE" in
+  done*|failed*) _event="completion"; _heading="Agent Completion" ;;
+  needs_input*|blocked*) _event="escalation"; _heading="Agent Escalation" ;;
+  *) _event="update"; _heading="Agent Update" ;;
+esac
 
-# ── Fallback: tmux send-keys ─────────────────────────────────────────────────
-if [[ "$_notify_done" -eq 0 ]]; then
+(
+  umask 077
+  notify_tmp="$(mktemp "$TASK_DIR/notify.tmp.XXXXXX")"
+  {
+    printf 'event=%s\n' "$_event"
+    printf 'updated=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$notify_tmp"
+  chmod 600 "$notify_tmp"
+  mv "$notify_tmp" "$TASK_DIR/notify"
+)
+
+# ── Optional compatibility transport ─────────────────────────────────────────
+NOTIFY_TRANSPORT="${SERGEANT_NOTIFY_TRANSPORT:-durable}"
+case "$NOTIFY_TRANSPORT" in
+  durable)
+    echo "sgt-notify: recorded durable $_event update." >&2
+    ;;
+  tmux)
+  INJECT="Agent task $TASK_ID update: $MESSAGE"
   PRIMARY_PANE_FILE="$TASK_DIR/primary_pane"
 
   if [[ ! -f "$PRIMARY_PANE_FILE" ]]; then
-    echo "sgt-notify: no primary_pane and no live oc-inject target — cannot notify" >&2
+    echo "sgt-notify: no primary_pane recorded — cannot notify" >&2
     exit 1
   fi
 
@@ -89,23 +76,11 @@ if [[ "$_notify_done" -eq 0 ]]; then
   echo "sgt-notify: injecting via tmux into pane $PRIMARY_PANE" >&2
   tmux send-keys -t "$PRIMARY_PANE" "$INJECT" Enter
   echo "sgt-notify: sent via tmux." >&2
-fi
+    ;;
+  *) _die "unsupported SERGEANT_NOTIFY_TRANSPORT: $NOTIFY_TRANSPORT" ;;
+esac
 
 # ── Wiki: classify terminal outcomes separately from escalations ─────────────
-case "$MESSAGE" in
-  done*|failed*)
-    _event="completion"
-    _heading="Agent Completion"
-    ;;
-  needs_input*|blocked*)
-    _event="escalation"
-    _heading="Agent Escalation"
-    ;;
-  *)
-    _event="update"
-    _heading="Agent Update"
-    ;;
-esac
 _pr_url=$(echo "$MESSAGE" | grep -oE 'https://github\.com/[^ ]+' | head -1 || true)
 _wiki_body="## $_heading
 
@@ -120,5 +95,3 @@ _sgt_wiki_write \
   "Agent $TASK_ID: $MESSAGE" \
   "sergeant,notify,$TASK_ID" \
   "$_wiki_body"
-
-[[ "$_notify_uncertain" -eq 0 ]] || exit 2

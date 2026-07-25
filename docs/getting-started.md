@@ -78,9 +78,8 @@ command -v sgt-watch
 When commands are not installed on `PATH`, run them from this checkout as
 `bin/<command>`.
 
-`mise run install` also links the OpenCode `oc-inject` plugin. Restart the entire
-OpenCode process after first installation; creating a new conversation inside an
-existing process does not reload plugins.
+Sergeant does not install harness-specific conversation-injection plugins.
+Worker updates are surfaced from durable fleet state through `sgt-watch`.
 
 ## 3. Create global configuration
 
