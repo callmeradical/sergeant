@@ -122,6 +122,9 @@ _sync_task() {
           printf 'failed: dispatch incomplete: no worktree or owned live pane\n' > "$repo_dir/status"
           printf 'dispatch never acquired a worktree or owned live pane\n' > "$repo_dir/diagnostic"
         fi
+      elif [[ "$fleet_status" == "in_progress" ]]; then
+        printf 'orphaned\n' > "$repo_dir/status"
+        printf 'in-progress worker recorded worktree is unavailable; reconcile preserved branch and handoff before recovery\n' > "$repo_dir/diagnostic"
       fi
       continue
     fi
