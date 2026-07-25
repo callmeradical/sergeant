@@ -43,6 +43,9 @@ if [[ -n "${RACE_ROLE:-}" ]]; then
   done
   [[ "$(cat ".sergeant-notification-accepts/$nonce" 2>/dev/null || true)" == "$ack_token" ]] || exit 43
   if [[ -n "${RACE_ACCEPT_OBSERVED:-}" ]]; then
+    IFS= read -r acceptance_message
+    [[ "$acceptance_message" == *'Sergeant accepted'* ]] || exit 44
+    [[ "$(cat ".sergeant-notification-accepts/$nonce" 2>/dev/null || true)" == "$ack_token" ]] || exit 45
     touch "$RACE_ACCEPT_OBSERVED"
     while [[ ! -e "$RACE_ACTION_RELEASE" ]]; do sleep 0.01; done
   fi
