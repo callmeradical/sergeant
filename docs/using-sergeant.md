@@ -99,6 +99,18 @@ Inspect all records:
 sgt-watch --list
 ```
 
+Reconcile every durable record before starting new work:
+
+```bash
+sgt-watch --sync-all
+```
+
+Bulk reconciliation syncs worktree status into fleet state, stops only
+identity-verified `done` or `failed` worker panes, and marks interrupted
+`dispatched` records failed when they have neither a worktree nor an owned live
+pane. It preserves `needs_input`, `blocked`, and `orphaned` worktrees. Dispatch
+runs this reconciliation automatically before creating new tasks.
+
 Do not equate `in_progress` with health. Require exact live pane/process identity
 plus recent meaningful log activity or an active child operation.
 

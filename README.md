@@ -148,6 +148,7 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-dispatch <project> "<brief>" [--intent-file <path>] [options]` | Dispatch agents with one canonical `.sergeant-intent.md` revision across repos |
 | `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Classify a no-mistakes finding and create/update owning-repo td work |
 | `bin/sgt-watch <task-id>` | Monitor dispatched fleet |
+| `bin/sgt-watch --sync-all` | Reconcile all fleet records and stop verified terminal worker panes |
 | `bin/sgt-respond <task-id> <repo>` | Read a response from stdin and resume a waiting worker |
 | `bin/sgt-ack-response <task-id> <repo> <response-id>` | Acknowledge consumed response transport from the exact worker pane |
 | `bin/sgt-validate <task-id> <repo> [--skip <steps>]` | Run coordinator-owned no-mistakes in a split worker-window pane |

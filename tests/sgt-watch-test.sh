@@ -10,6 +10,8 @@ worktree="$TEST_ROOT/worktree"
 repo="$task/app"
 fake_bin="$TEST_ROOT/bin"
 mkdir -p "$repo" "$worktree" "$fake_bin"
+export TMUX_LOG="$TEST_ROOT/tmux.log"
+export TMUX_STATE="$TEST_ROOT/tmux.state"
 printf '%s\n' "$worktree" > "$repo/worktree"
 printf '%%42\n' > "$repo/pane"
 printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo" > "$repo/pane_identity"
@@ -21,8 +23,13 @@ cat > "$fake_bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
   display-message)
+    [[ ! -e "$TMUX_STATE" ]] || exit 1
     [[ "${PANE_DEAD:-0}" == "0" ]] || exit 1
     printf '%s\n' "${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
+    ;;
+  kill-pane)
+    printf '%s\n' "$*" >> "$TMUX_LOG"
+    : > "$TMUX_STATE"
     ;;
 esac
 EOF
@@ -165,6 +172,37 @@ printf 'checks-passed\n' > "$repo/validation_status"
 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
 [[ "$(cat "$repo/status")" == "done" ]]
 [[ "$(cat "$repo/result")" == "https://example.invalid/pr/1" ]]
+grep -Fq 'kill-pane -t %42' "$TMUX_LOG"
+[[ -s "$repo/worker_recycled" ]]
+
+incomplete_repo="$fleet/task-incomplete/app"
+mkdir -p "$incomplete_repo"
+printf 'dispatched\n' > "$incomplete_repo/status"
+orphan_repo="$fleet/task-orphan/app"
+mkdir -p "$orphan_repo"
+printf 'orphaned\n' > "$orphan_repo/status"
+blocked_repo="$fleet/task-blocked/app"
+mkdir -p "$blocked_repo"
+printf 'blocked\n' > "$blocked_repo/status"
+needs_input_repo="$fleet/task-needs-input/app"
+mkdir -p "$needs_input_repo"
+printf 'needs_input\n' > "$needs_input_repo/status"
+unowned_repo="$fleet/task-unowned/app"
+unowned_worktree="$TEST_ROOT/unowned-worktree"
+mkdir -p "$unowned_repo" "$unowned_worktree"
+printf '%s\n' "$unowned_worktree" > "$unowned_repo/worktree"
+printf 'in_progress\n' > "$unowned_repo/status"
+printf 'in_progress\n' > "$unowned_worktree/.sergeant-status"
+EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT/bin/sgt-watch" --sync-all
+[[ "$(cat "$incomplete_repo/status")" == \
+  'failed: dispatch incomplete: no worktree or owned live pane' ]]
+grep -Fq 'dispatch never acquired a worktree or owned live pane' "$incomplete_repo/diagnostic"
+[[ "$(cat "$orphan_repo/status")" == "orphaned" ]]
+[[ "$(cat "$blocked_repo/status")" == "blocked" ]]
+[[ "$(cat "$needs_input_repo/status")" == "needs_input" ]]
+[[ "$(cat "$unowned_repo/status")" == "orphaned" ]]
+grep -Fq 'has no recorded worker pane' "$unowned_repo/diagnostic"
 list_output="$(SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --list)"
 grep -Fq '1 done' <<< "$list_output"
 watch_output="$(SERGEANT_WATCH_INTERVAL=0 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
