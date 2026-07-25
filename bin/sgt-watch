@@ -123,6 +123,20 @@ _dispatch_is_expired() {
   (( now >= started && now - started >= grace ))
 }
 
+_reconcile_incomplete_dispatch() {
+  local repo_dir="$1"
+  local pane
+
+  pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
+  if _dispatch_is_expired "$repo_dir"; then
+    if [[ -z "$pane" ]] || { command -v tmux >/dev/null 2>&1 &&
+         ! _pane_is_supervisor "$pane" "$repo_dir"; }; then
+      printf 'failed: dispatch incomplete: no worktree or owned live pane\n' > "$repo_dir/status"
+      printf 'dispatch never acquired a worktree or owned live pane\n' > "$repo_dir/diagnostic"
+    fi
+  fi
+}
+
 _sync_task() {
   local task_id="$1"
   local task_dir="$FLEET_DIR/$task_id"
@@ -130,19 +144,12 @@ _sync_task() {
 
   for repo_dir in "$task_dir"/*/; do
     [[ -d "$repo_dir" ]] || continue
-    local worktree wt_status fleet_status pane
+    local worktree wt_status fleet_status
     fleet_status="$(cat "$repo_dir/status" 2>/dev/null || echo "")"
     worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
     if [[ -z "$worktree" || ! -d "$worktree" ]]; then
       if [[ "$fleet_status" == "dispatched" ]]; then
-        pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
-        if _dispatch_is_expired "$repo_dir"; then
-          if [[ -z "$pane" ]] || { command -v tmux >/dev/null 2>&1 &&
-               ! _pane_is_supervisor "$pane" "$repo_dir"; }; then
-            printf 'failed: dispatch incomplete: no worktree or owned live pane\n' > "$repo_dir/status"
-            printf 'dispatch never acquired a worktree or owned live pane\n' > "$repo_dir/diagnostic"
-          fi
-        fi
+        _reconcile_incomplete_dispatch "$repo_dir"
       elif [[ "$fleet_status" == "in_progress" ]]; then
         printf 'orphaned\n' > "$repo_dir/status"
         printf 'in-progress worker recorded worktree is unavailable; reconcile preserved branch and handoff before recovery\n' > "$repo_dir/diagnostic"
@@ -157,6 +164,10 @@ _sync_task() {
       fi
     else
       wt_status="${fleet_status:-in_progress}"
+      if [[ "$wt_status" == "dispatched" ]]; then
+        _reconcile_incomplete_dispatch "$repo_dir"
+        wt_status="$(cat "$repo_dir/status" 2>/dev/null || echo "$wt_status")"
+      fi
     fi
 
     case "$wt_status" in
