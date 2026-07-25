@@ -103,7 +103,10 @@ case "$1" in
         > "$EXPECTED_WORKER/notification_delivered_pane_identity"
       printf '%s\n' "$notification_id" > "$EXPECTED_WORKER/notification_delivered"
     fi
-    if [[ "${AUTO_DELIVER:-1}" == 1 && "$deliver" == true && -s "$EXPECTED_WORKER/notification_id" ]]; then
+    if [[ "${REQUIRE_LOCK_RELEASE:-0}" == 1 &&
+          -e "$EXPECTED_WORKER/response.lock" ]]; then
+      touch "$LOCK_HELD_MARKER"
+    elif [[ "${AUTO_DELIVER:-1}" == 1 && "$deliver" == true && -s "$EXPECTED_WORKER/notification_id" ]]; then
       if [[ "${REQUIRE_TARGET:-0}" == 1 ]]; then
         _rt_nonce="$(cat "$EXPECTED_WORKER/notification_target" 2>/dev/null || true)"
         _rt_id="$(cat "$EXPECTED_WORKER/notification_id" 2>/dev/null || true)"
@@ -376,7 +379,8 @@ printf 'needs_input\n' > "$worktree/.sergeant-status"
 # Literal metacharacters verify response data is never evaluated.
 response='Use option A; $(touch should-not-exist)'
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/live.log" TD_LOG="$TEST_ROOT/td.log" \
-TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  REQUIRE_LOCK_RELEASE=1 LOCK_HELD_MARKER="$TEST_ROOT/lock-held" \
+  TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
   respond "$response" >/dev/null
 [[ "$(cat "$repo_state/response")" == "$response" ]]
 [[ "$(cat "$worktree/.sergeant-response")" == "$response" ]]
@@ -396,6 +400,7 @@ grep -Eq 'response-id=[a-f0-9]{32}' "$TEST_ROOT/td.log"
 [[ "$(cat "$worktree/.sergeant-response-id")" == "$(cat "$repo_state/response_id")" ]]
 [[ "$(cat "$repo_state/response_generation")" == "1" ]]
 [[ "$(cat "$worktree/.sergeant-response-generation")" == "1" ]]
+[[ -e "$TEST_ROOT/lock-held" ]]
 if grep -Fq 'sha256=' "$TEST_ROOT/td.log"; then
   printf 'response-derived digest leaked into td\n' >&2
   exit 1

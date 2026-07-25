@@ -136,6 +136,24 @@ _sync_state() {
   fi
 }
 
+_harness_ready() {
+  local pane_command pane_output ready_text
+  [[ -n "${TMUX_PANE:-}" ]] || return 1
+
+  pane_command="$(tmux display-message -p -t "$TMUX_PANE" '#{pane_current_command}' 2>/dev/null || true)"
+  case "$harness" in
+    opencode|oc)
+      ready_text="${SGT_OPENCODE_READY_TEXT-Ask anything...}"
+      [[ -n "$ready_text" ]] || return 0
+      pane_output="$(tmux capture-pane -p -t "$TMUX_PANE" -S -80 2>/dev/null || true)"
+      [[ "$pane_output" == *"$ready_text"* ]]
+      ;;
+    *)
+      [[ "$pane_command" == "$harness" ]]
+      ;;
+  esac
+}
+
 _finish() {
   local exit_code="$1" status
   trap - EXIT
@@ -204,6 +222,13 @@ _deliver_notifications() {
     if [[ -n "$notification_id" && "$notification_id" == "$expected_id" &&
           "$nonce" =~ ^[a-f0-9]{32}$ && -n "$pane_identity" &&
           "$target_identity" == "$pane_identity" ]]; then
+      if [[ "$(cat "$ack_path" 2>/dev/null || true)" != "$ack_token" &&
+            "$(cat "$complete_path" 2>/dev/null || true)" != "$ack_token" ]]; then
+        _harness_ready || {
+          sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
+          continue
+        }
+      fi
       mkdir -p "$(dirname "$ack_path")" "$(dirname "$accept_path")" \
         "$(dirname "$complete_path")"
       if [[ "$(cat "$complete_path" 2>/dev/null || true)" == "$ack_token" &&

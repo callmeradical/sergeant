@@ -299,9 +299,9 @@ if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && _pane_is_supervisor "$
   _sgt_notification_target_create "$REPO_DIR" "$response_id" \
     "$(cat "$REPO_DIR/pane_identity")" >/dev/null || \
     _die "notification target race detected; response not delivered to local pane"
+  _sgt_response_lock_release
   _sgt_wait_worker_notification "$pane" "$REPO_DIR" "$response_id" || \
     _die "Worker did not acknowledge its durable response notification; response remains pending"
-  _sgt_response_lock_release
   _cleanup_response_input
   trap - EXIT
   echo "sgt-respond: notified local pane $pane."
@@ -432,13 +432,13 @@ else
   _record_relaunch_orphan "tmux failed to capture exact relaunched worker pane identity"
   _die "Worker relaunch identity capture failed for $TASK_ID/$REPO"
 fi
+_sgt_response_lock_release
 if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" "$delivery_notification_id"; then
   tmux kill-pane -t "$new_pane" 2>/dev/null || true
   _record_relaunch_orphan "relaunched interactive worker did not acknowledge its durable response notification"
   _die "Worker relaunch notification acknowledgement timed out for $TASK_ID/$REPO"
 fi
 rm -f "$REPO_DIR/drain_held"
-_sgt_response_lock_release
 _cleanup_response_input
 trap - EXIT
 echo "sgt-respond: relaunched worker in pane $new_pane."
