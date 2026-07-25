@@ -27,8 +27,8 @@ Sergeant fixes that. It is an **agent distro**: a cloned directory with an
 agent harness inside the checkout so its repository instructions are loaded.
 
 The checkout is the source of truth. `mise run install` optionally symlinks the
-commands and OpenCode plugin into user-local locations. Sergeant supports Bash
-3.2 and newer, including the system Bash shipped with macOS.
+commands into user-local locations and leaves worker-skill discovery repo-scoped.
+Sergeant supports Bash 3.2 and newer, including the system Bash shipped with macOS.
 
 ## Mental model
 
@@ -94,6 +94,7 @@ Start with the [documentation index](docs/README.md):
 - [What Sergeant is and is not](docs/what-is-sergeant.md)
 - [Getting started checklist](docs/getting-started.md)
 - [Skills and their upstream sources](docs/skills.md)
+- [Repo-scoped worker skills](docs/repo-scoped-skills.md)
 - [Using Sergeant](docs/using-sergeant.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Project YAML schema](docs/schema.md)

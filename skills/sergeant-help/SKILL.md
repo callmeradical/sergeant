@@ -22,7 +22,7 @@ or `wiki` after the user has requested execution of those procedures.
 | Direct/dispatch workflows and commands | `docs/using-sergeant.md` |
 | Errors, stale workers, auth, gates, cleanup | `docs/troubleshooting.md` |
 | Project YAML fields | `docs/schema.md` |
-| OpenCode message injection | `docs/oc-inject.md` |
+| Deprecated OpenCode message injection | `docs/oc-inject.md` |
 | Agent execution policy | `AGENTS.md` |
 
 ## Query procedure
