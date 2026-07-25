@@ -193,6 +193,10 @@ mkdir -p "$unowned_repo" "$unowned_worktree"
 printf '%s\n' "$unowned_worktree" > "$unowned_repo/worktree"
 printf 'in_progress\n' > "$unowned_repo/status"
 printf 'in_progress\n' > "$unowned_worktree/.sergeant-status"
+missing_worktree_repo="$fleet/task-missing-worktree/app"
+mkdir -p "$missing_worktree_repo"
+printf '%s\n' "$TEST_ROOT/missing-worktree" > "$missing_worktree_repo/worktree"
+printf 'in_progress\n' > "$missing_worktree_repo/status"
 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
   "$ROOT/bin/sgt-watch" --sync-all
 [[ "$(cat "$incomplete_repo/status")" == \
@@ -203,6 +207,8 @@ grep -Fq 'dispatch never acquired a worktree or owned live pane' "$incomplete_re
 [[ "$(cat "$needs_input_repo/status")" == "needs_input" ]]
 [[ "$(cat "$unowned_repo/status")" == "orphaned" ]]
 grep -Fq 'has no recorded worker pane' "$unowned_repo/diagnostic"
+[[ "$(cat "$missing_worktree_repo/status")" == "orphaned" ]]
+grep -Fq 'recorded worktree is unavailable' "$missing_worktree_repo/diagnostic"
 list_output="$(SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --list)"
 grep -Fq '1 done' <<< "$list_output"
 watch_output="$(SERGEANT_WATCH_INTERVAL=0 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
