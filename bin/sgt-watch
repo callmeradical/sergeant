@@ -77,6 +77,33 @@ _pane_is_supervisor() {
   mv "$repo_dir/pane_identity.tmp.$$" "$repo_dir/pane_identity" || return 1
 }
 
+_recycle_terminal_worker() {
+  local repo_dir="$1"
+  local pane
+
+  pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
+  [[ -n "$pane" ]] || return 0
+  if ! command -v tmux >/dev/null 2>&1; then
+    printf 'terminal worker could not be recycled because tmux is unavailable\n' > "$repo_dir/diagnostic"
+    return 1
+  fi
+  if ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+    date -u +%Y-%m-%dT%H:%M:%SZ > "$repo_dir/worker_recycled"
+    return 0
+  fi
+  if ! _pane_is_supervisor "$pane" "$repo_dir"; then
+    printf 'terminal worker pane identity does not match; refusing recycle: %s\n' "$pane" > "$repo_dir/diagnostic"
+    return 1
+  fi
+  if ! tmux kill-pane -t "$pane" 2>/dev/null ||
+     tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+    printf 'failed to recycle terminal worker pane: %s\n' "$pane" > "$repo_dir/diagnostic"
+    return 1
+  fi
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$repo_dir/worker_recycled"
+  return 0
+}
+
 _sync_task() {
   local task_id="$1"
   local task_dir="$FLEET_DIR/$task_id"
@@ -85,10 +112,20 @@ _sync_task() {
   for repo_dir in "$task_dir"/*/; do
     [[ -d "$repo_dir" ]] || continue
     local worktree wt_status fleet_status pane
-    worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
-    [[ -n "$worktree" ]] || continue
-
     fleet_status="$(cat "$repo_dir/status" 2>/dev/null || echo "")"
+    worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
+    if [[ -z "$worktree" || ! -d "$worktree" ]]; then
+      if [[ "$fleet_status" == "dispatched" ]]; then
+        pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
+        if [[ -z "$pane" ]] || { command -v tmux >/dev/null 2>&1 &&
+             ! _pane_is_supervisor "$pane" "$repo_dir"; }; then
+          printf 'failed: dispatch incomplete: no worktree or owned live pane\n' > "$repo_dir/status"
+          printf 'dispatch never acquired a worktree or owned live pane\n' > "$repo_dir/diagnostic"
+        fi
+      fi
+      continue
+    fi
+
     if [[ -f "$worktree/.sergeant-status" ]]; then
       wt_status="$(tr -d '\n' < "$worktree/.sergeant-status")"
       if [[ "$wt_status" != "$fleet_status" ]]; then
@@ -124,10 +161,22 @@ _sync_task() {
     fi
 
     case "$wt_status" in
+      done|failed:*)
+        if ! _recycle_terminal_worker "$repo_dir"; then
+          printf 'WARNING: terminal worker was not recycled: %s\n' "$repo_dir" >&2
+        fi
+        ;;
+    esac
+
+    case "$wt_status" in
       in_progress|dispatched)
         pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
-        if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && \
-            ! _pane_is_supervisor "$pane" "$repo_dir"; then
+        if [[ -z "$pane" ]]; then
+          printf 'orphaned\n' > "$worktree/.sergeant-status"
+          printf 'orphaned\n' > "$repo_dir/status"
+          printf 'in-progress worker has no recorded worker pane; resume with sgt-respond\n' > "$repo_dir/diagnostic"
+          "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+        elif command -v tmux >/dev/null 2>&1 && ! _pane_is_supervisor "$pane" "$repo_dir"; then
           printf 'orphaned\n' > "$worktree/.sergeant-status"
           printf 'orphaned\n' > "$repo_dir/status"
           printf 'recorded pane %s is dead or is not the expected worker supervisor; resume with sgt-respond\n' "$pane" > "$repo_dir/diagnostic"
@@ -138,13 +187,26 @@ _sync_task() {
   done
 }
 
+if [[ "${1:-}" == "--sync-all" ]]; then
+  task_count=0
+  if [[ -d "$FLEET_DIR" ]]; then
+    for task_dir in "$FLEET_DIR"/*/; do
+      [[ -d "$task_dir" ]] || continue
+      _sync_task "$(basename "$task_dir")"
+      task_count=$((task_count + 1))
+    done
+  fi
+  printf 'Reconciled %s fleet tasks.\n' "$task_count"
+  exit 0
+fi
+
 if [[ "${1:-}" == "--sync" ]]; then
   [[ $# -ge 2 ]] || _die "Usage: sgt-watch --sync <task-id>"
   _sync_task "$2"
   exit 0
 fi
 
-[[ $# -ge 1 ]] || _die "Usage: sgt-watch <task-id>"
+[[ $# -ge 1 ]] || _die "Usage: sgt-watch <task-id> | --list | --sync <task-id> | --sync-all"
 TASK_ID="$1"
 TASK_DIR="$FLEET_DIR/$TASK_ID"
 [[ -d "$TASK_DIR" ]] || _die "Task not found: $TASK_ID (looked in $FLEET_DIR)"

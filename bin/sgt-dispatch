@@ -275,6 +275,11 @@ PY
   fi
 }
 
+if ! $DRY_RUN; then
+  [[ -x "$SCRIPT_DIR/sgt-watch" ]] || _die "sgt-watch is required for fleet reconciliation"
+  "$SCRIPT_DIR/sgt-watch" --sync-all >/dev/null
+fi
+
 if [[ -z "$TD_TASK_ID" ]] && ! $DRY_RUN; then
   _require_marcus_td
   TD_TITLE="$(python3 - "$BRIEF" <<'PY'
