@@ -134,6 +134,7 @@ git -C "$TEST_ROOT/repo" remote add origin git@github.com:org/test.git
 interrupted_state="$TEST_ROOT/fleet/interrupted-task/app"
 mkdir -p "$interrupted_state"
 printf 'dispatched\n' > "$interrupted_state/status"
+printf '1\n' > "$interrupted_state/dispatch_started"
 
 PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/success.log" \
 SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
@@ -146,6 +147,7 @@ task_id="$(basename "$(dirname "$repo_state")")"
 [[ "$(cat "$repo_state/pane_identity")" == '0|%42|4242|123456|fixture-worker-command' ]]
 [[ "$(cat "$repo_state/agent")" == "${SERGEANT_AGENT:-opencode}" ]]
 [[ "$(cat "$repo_state/stage")" == "implementation" ]]
+[[ "$(cat "$repo_state/dispatch_started")" =~ ^[0-9]+$ ]]
 [[ "$(cat "$repo_state/window_name")" == "implementation-app-$task_id" ]]
 [[ ! -e "$repo_state/initial_message" ]]
 [[ -s "$repo_state/tmux_session" && -s "$repo_state/window_name" ]]
