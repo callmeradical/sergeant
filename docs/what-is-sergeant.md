@@ -49,8 +49,7 @@ operational evidence, not a replacement for Git, task, PR, or validation state.
 ### Worker
 
 An agent running in an isolated worktree and tmux pane. A live process is not
-proof of progress; recent meaningful output or an active child operation is
-required.
+proof of progress; recent meaningful progress evidence is required.
 
 ### Decision request
 
