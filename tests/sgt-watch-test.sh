@@ -25,11 +25,17 @@ case "$1" in
   display-message)
     [[ ! -e "$TMUX_STATE" ]] || exit 1
     [[ "${PANE_DEAD:-0}" == "0" ]] || exit 1
-    if [[ "${!#}" == '#{pane_id}' ]]; then
-      printf '%%42\n'
-    else
-      printf '%s\n' "${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
-    fi
+    case "${!#}" in
+      '#{pane_id}')
+        printf '%%42\n'
+        ;;
+      '#{pane_activity}')
+        printf '%s\n' "${PANE_ACTIVITY:-0}"
+        ;;
+      *)
+        printf '%s\n' "${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
+        ;;
+    esac
     ;;
   kill-pane)
     printf '%s\n' "$*" >> "$TMUX_LOG"
@@ -247,4 +253,137 @@ watch_output="$(SERGEANT_WATCH_INTERVAL=0 EXPECTED_WORKER="$repo" PATH="$fake_bi
 grep -Fq 'All repos done.' <<< "$watch_output"
 grep -Fq '[stage=validation validation=checks-passed]' <<< "$watch_output"
 
+# === Stall detection tests ===
+# Isolated task/worktree so stall tests don't disturb earlier state.
+# Reset fake tmux state so the stall tests see a live pane.
+rm -f "$TMUX_STATE"
+stall_task="$fleet/task-stall"
+stall_repo="$stall_task/app"
+stall_worktree="$TEST_ROOT/stall-worktree"
+mkdir -p "$stall_repo" "$stall_worktree"
+printf '%s\n' "$stall_worktree" > "$stall_repo/worktree"
+printf '%%42\n' > "$stall_repo/pane"
+printf 'opencode\n' > "$stall_repo/agent"
+# pane_identity: pane_dead=0, pane_id=%42, pane_pid=4242, created=123456, command=...
+printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$stall_repo" > "$stall_repo/pane_identity"
+chmod 600 "$stall_repo/pane_identity"
+printf 'in_progress\n' > "$stall_repo/status"
+printf 'in_progress\n' > "$stall_worktree/.sergeant-status"
+# PANE_ACTIVITY is injected via fake tmux #{pane_activity} (default 0 = stale/unavailable)
+
+# --- Test 1: stale progress_ts + stale pane_activity → stall diagnostic ---
+# Status stays in_progress; diagnostic is nonterminal.
+printf '1000\n' > "$stall_repo/progress_ts"
+rm -f "$stall_repo/diagnostic"
+SERGEANT_STALL_GRACE_SECONDS=300 SERGEANT_STALL_NOW=1401 \
+  EXPECTED_WORKER="$stall_repo" PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-stall
+[[ "$(cat "$stall_repo/status")" == "in_progress" ]]
+grep -Fq 'live worker stalled' "$stall_repo/diagnostic"
+grep -Fq '401' "$stall_repo/diagnostic"
+grep -Fq 'epoch 1000' "$stall_repo/diagnostic"
+# Privacy: diagnostic must not contain message bodies, prompts, or tokens
+if grep -qiE 'message|prompt|token|secret' "$stall_repo/diagnostic" 2>/dev/null; then
+  printf 'privacy violation: stall diagnostic contains sensitive terms\n' >&2; exit 1
+fi
+
+# --- Test 2: recent progress_ts — no stall diagnostic ---
+# pane_activity default 0 (stale); progress_ts alone is recent enough
+rm -f "$stall_repo/diagnostic"
+printf '1090\n' > "$stall_repo/progress_ts"
+SERGEANT_STALL_GRACE_SECONDS=300 SERGEANT_STALL_NOW=1100 \
+  EXPECTED_WORKER="$stall_repo" PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-stall
+[[ "$(cat "$stall_repo/status")" == "in_progress" ]]
+[[ ! -f "$stall_repo/diagnostic" ]]
+
+# --- Test 3: recent pane_activity → not stalled even with stale progress_ts ---
+# Covers tool calls, long-running commands, and streamed continuations: any terminal
+# output from the agent keeps pane_activity fresh regardless of progress_ts.
+printf '1000\n' > "$stall_repo/progress_ts"
+rm -f "$stall_repo/diagnostic"
+PANE_ACTIVITY=1390 SERGEANT_STALL_GRACE_SECONDS=300 SERGEANT_STALL_NOW=1401 \
+  EXPECTED_WORKER="$stall_repo" PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-stall
+[[ "$(cat "$stall_repo/status")" == "in_progress" ]]
+[[ ! -f "$stall_repo/diagnostic" ]]
+
+# --- Test 4: same elapsed bucket — diagnostic not rewritten (idempotent display) ---
+printf '1000\n' > "$stall_repo/progress_ts"
+rm -f "$stall_repo/diagnostic"
+SERGEANT_STALL_GRACE_SECONDS=300 SERGEANT_STALL_NOW=1401 \
+  EXPECTED_WORKER="$stall_repo" PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-stall
+first_stall_diag="$(cat "$stall_repo/diagnostic")"
+# Second sync same STALL_NOW=1401: elapsed=401, bucket unchanged → no rewrite
+SERGEANT_STALL_GRACE_SECONDS=300 SERGEANT_STALL_NOW=1401 \
+  EXPECTED_WORKER="$stall_repo" PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-stall
+[[ "$(cat "$stall_repo/diagnostic")" == "$first_stall_diag" ]]
+[[ "$(cat "$stall_repo/status")" == "in_progress" ]]
+# Advance STALL_NOW within same bucket (bucket=60: elapsed 401→455, both 401/60=455/60=7)
+# Use bucket=100 to make the boundary clear: 401/100=4, 499/100=4 same; 500/100=5 different
+SERGEANT_STALL_GRACE_SECONDS=300 SERGEANT_STALL_NOW=1499 SERGEANT_STALL_DIAG_BUCKET=100 \
+  EXPECTED_WORKER="$stall_repo" PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-stall
+# Still same bucket (499/100=4): diagnostic not rewritten, still shows "for 401s"
+grep -Fq 'for 401s' "$stall_repo/diagnostic"
+# Now advance into next bucket (500/100=5): diagnostic rewritten with new elapsed
+SERGEANT_STALL_GRACE_SECONDS=300 SERGEANT_STALL_NOW=1500 SERGEANT_STALL_DIAG_BUCKET=100 \
+  EXPECTED_WORKER="$stall_repo" PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-stall
+grep -Fq 'for 500s' "$stall_repo/diagnostic"
+[[ "$(cat "$stall_repo/status")" == "in_progress" ]]
+
+# --- Test 5: stall diagnostic clears on needs_input transition ---
+printf 'live worker stalled: no progress for 401s (grace=300s); last event at epoch 1000\n' \
+  > "$stall_repo/diagnostic"
+printf 'needs_input\n' > "$stall_worktree/.sergeant-status"
+SERGEANT_STALL_GRACE_SECONDS=300 SERGEANT_STALL_NOW=1401 \
+  EXPECTED_WORKER="$stall_repo" PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-stall
+[[ "$(cat "$stall_repo/status")" == "needs_input" ]]
+[[ ! -f "$stall_repo/diagnostic" ]]
+
+# --- Test 6: stall diagnostic clears on blocked transition ---
+printf 'live worker stalled: no progress for 401s (grace=300s); last event at epoch 1000\n' \
+  > "$stall_repo/diagnostic"
+printf 'blocked\n' > "$stall_worktree/.sergeant-status"
+SERGEANT_STALL_GRACE_SECONDS=300 SERGEANT_STALL_NOW=1401 \
+  EXPECTED_WORKER="$stall_repo" PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-stall
+[[ "$(cat "$stall_repo/status")" == "blocked" ]]
+[[ ! -f "$stall_repo/diagnostic" ]]
+
+# --- Test 7: stall clears when progress_ts updated (pane_activity stays stale) ---
+printf 'in_progress\n' > "$stall_worktree/.sergeant-status"
+printf 'in_progress\n' > "$stall_repo/status"
+printf '1000\n' > "$stall_repo/progress_ts"
+rm -f "$stall_repo/diagnostic"
+# First sync: stall detected
+SERGEANT_STALL_GRACE_SECONDS=300 SERGEANT_STALL_NOW=1401 \
+  EXPECTED_WORKER="$stall_repo" PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-stall
+grep -Fq 'live worker stalled' "$stall_repo/diagnostic"
+# Update progress_ts: stall clears on next sync
+printf '1350\n' > "$stall_repo/progress_ts"
+SERGEANT_STALL_GRACE_SECONDS=300 SERGEANT_STALL_NOW=1401 \
+  EXPECTED_WORKER="$stall_repo" PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-stall
+[[ ! -f "$stall_repo/diagnostic" ]]
+[[ "$(cat "$stall_repo/status")" == "in_progress" ]]
+
+# --- Test 8: long-running command with recent terminal output stays in_progress ---
+# Recent pane_activity (command producing output) overrides stale progress_ts.
+printf 'in_progress\n' > "$stall_worktree/.sergeant-status"
+printf 'in_progress\n' > "$stall_repo/status"
+printf '1000\n' > "$stall_repo/progress_ts"
+rm -f "$stall_repo/diagnostic"
+PANE_ACTIVITY=9900 SERGEANT_STALL_GRACE_SECONDS=300 SERGEANT_STALL_NOW=9999 \
+  EXPECTED_WORKER="$stall_repo" PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-stall
+[[ "$(cat "$stall_repo/status")" == "in_progress" ]]
+[[ ! -f "$stall_repo/diagnostic" ]]
+
+printf 'sgt-watch stall detection: ok\n'
 printf 'sgt-watch local fleet sync: ok\n'

@@ -123,6 +123,84 @@ _dispatch_is_expired() {
   (( now >= started && now - started >= grace ))
 }
 
+# _clear_stall_diagnostic: remove the stall diagnostic if and only if the
+# current diagnostic is an owned stall diagnostic. Never removes other
+# diagnostics (orphan, dispatch failure, etc.).
+_clear_stall_diagnostic() {
+  local repo_dir="$1" existing
+  existing="$(cat "$repo_dir/diagnostic" 2>/dev/null || true)"
+  if [[ "$existing" == "live worker stalled:"* ]]; then
+    rm -f "$repo_dir/diagnostic"
+  fi
+}
+
+# _classify_stalled_worker: detect a live-but-idle in_progress worker.
+# Progress evidence: tmux pane_activity timestamp (any terminal output from the agent,
+# including tool calls and long-running commands) takes precedence over progress_ts.
+# progress_ts (written by sgt-interactive-worker at startup and on sentinel-file changes)
+# acts as a secondary fallback when pane_activity is unavailable or stale.
+# Sets a nonterminal stall diagnostic; never changes status.
+# Rewrites diagnostic only when stall state changes or elapsed bucket advances
+# (SERGEANT_STALL_DIAG_BUCKET, default 60s) to prevent noisy watch redraws every sync.
+_classify_stalled_worker() {
+  local repo_dir="$1" worktree="$2"
+  local grace now last_event elapsed pane_for_activity pane_activity
+  local was_stalled existing_elapsed existing bucket
+
+  grace="${SERGEANT_STALL_GRACE_SECONDS:-300}"
+  [[ "$grace" =~ ^[0-9]+$ ]] || return 0
+
+  now="${SERGEANT_STALL_NOW:-$(date +%s)}"
+
+  # Primary evidence: progress_ts written by sgt-interactive-worker.
+  last_event="$(cat "$repo_dir/progress_ts" 2>/dev/null || true)"
+  [[ "$last_event" =~ ^[0-9]+$ ]] || last_event=0
+
+  # Supplement with tmux pane activity timestamp: tracks any agent output to the
+  # terminal (tool calls, streamed continuations, long-running commands). This is
+  # the authoritative liveness signal — pgrep-based child checks would incorrectly
+  # treat sgt-interactive-worker's own delivery loop as meaningful activity.
+  pane_for_activity="$(cat "$repo_dir/pane" 2>/dev/null || true)"
+  if [[ -n "$pane_for_activity" ]] && command -v tmux >/dev/null 2>&1; then
+    pane_activity="$(tmux display-message -p -t "$pane_for_activity" '#{pane_activity}' 2>/dev/null || true)"
+    if [[ "$pane_activity" =~ ^[0-9]+$ ]] && (( pane_activity > last_event )); then
+      last_event="$pane_activity"
+    fi
+  fi
+
+  # Final fallback: mtime of .sergeant-status when no timestamped evidence exists.
+  if (( last_event == 0 )) && [[ -f "$worktree/.sergeant-status" ]]; then
+    last_event="$(stat -c %Y "$worktree/.sergeant-status" 2>/dev/null || \
+                  stat -f %m "$worktree/.sergeant-status" 2>/dev/null || true)"
+  fi
+  [[ "$last_event" =~ ^[1-9][0-9]*$ ]] || return 0
+
+  if (( now >= last_event && now - last_event >= grace )); then
+    elapsed=$(( now - last_event ))
+
+    # Only rewrite the diagnostic when the stall is newly detected or the elapsed
+    # bucket changes — avoids a full watch redraw on every sync-interval tick.
+    was_stalled=false
+    existing_elapsed=0
+    existing="$(cat "$repo_dir/diagnostic" 2>/dev/null || true)"
+    if [[ "$existing" == "live worker stalled:"* ]]; then
+      was_stalled=true
+      existing_elapsed="$(printf '%s' "$existing" | grep -oE 'for [0-9]+s' | grep -oE '[0-9]+' | head -1 || true)"
+      [[ "$existing_elapsed" =~ ^[0-9]+$ ]] || existing_elapsed=0
+    fi
+
+    bucket="${SERGEANT_STALL_DIAG_BUCKET:-60}"
+    [[ "$bucket" =~ ^[1-9][0-9]*$ ]] || bucket=60
+
+    if ! $was_stalled || (( elapsed / bucket != existing_elapsed / bucket )); then
+      printf 'live worker stalled: no progress for %ds (grace=%ds); last event at epoch %s\n' \
+        "$elapsed" "$grace" "$last_event" > "$repo_dir/diagnostic"
+    fi
+  else
+    _clear_stall_diagnostic "$repo_dir"
+  fi
+}
+
 _reconcile_incomplete_dispatch() {
   local repo_dir="$1"
   local pane
@@ -144,7 +222,7 @@ _sync_task() {
 
   for repo_dir in "$task_dir"/*/; do
     [[ -d "$repo_dir" ]] || continue
-    local worktree wt_status fleet_status
+    local worktree wt_status fleet_status pane
     fleet_status="$(cat "$repo_dir/status" 2>/dev/null || echo "")"
     worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
     if [[ -z "$worktree" || ! -d "$worktree" ]]; then
@@ -216,7 +294,14 @@ _sync_task() {
           printf 'orphaned\n' > "$repo_dir/status"
           printf 'recorded pane %s is dead or is not the expected worker supervisor; resume with sgt-respond\n' "$pane" > "$repo_dir/diagnostic"
           "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+        else
+          # Pane is live — classify for stall based on progress evidence
+          _classify_stalled_worker "$repo_dir" "$worktree"
         fi
+        ;;
+      *)
+        # Clear owned stall diagnostics when status transitions out of in_progress
+        _clear_stall_diagnostic "$repo_dir"
         ;;
     esac
   done
@@ -307,9 +392,10 @@ while true; do
     repo_name="$(basename "$repo_dir")"
     status="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
     message="$(cat "$repo_dir/message" 2>/dev/null || echo "")"
+    diagnostic="$(cat "$repo_dir/diagnostic" 2>/dev/null || echo "")"
     stage="$(cat "$repo_dir/stage" 2>/dev/null || echo "implementation")"
     validation_status="$(cat "$repo_dir/validation_status" 2>/dev/null || echo "")"
-    current_snapshot+="$repo_name:$status:$stage:$validation_status:$message "
+    current_snapshot+="$repo_name:$status:$stage:$validation_status:$message:$diagnostic "
   done
 
   if ! $HAVE_SNAPSHOT || [[ "$LAST_SNAPSHOT" != "$current_snapshot" ]]; then
