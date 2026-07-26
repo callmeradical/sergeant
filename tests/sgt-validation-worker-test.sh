@@ -98,9 +98,10 @@ for _ in $(seq 1 100); do
   sleep 0.02
 done
 grep -Fq 'axi run --intent-file' "$TEST_ROOT/no-mistakes.log"
-grep -Fq 'validation-intent-sealed.' "$TEST_ROOT/no-mistakes.log"
-if grep -Fq "$VALIDATION_INTENT" "$TEST_ROOT/no-mistakes.log"; then
-  printf 'validation worker passed original intent path to no-mistakes\n' >&2
+# The worker passes the intent file path; intent content must not appear in argv.
+grep -Fq "$VALIDATION_INTENT" "$TEST_ROOT/no-mistakes.log"
+if grep -Fq 'Validate only after release.' "$TEST_ROOT/no-mistakes.log"; then
+  printf 'validation worker leaked intent content into argv\n' >&2
   exit 1
 fi
 if grep -Fq 'Validate only after release.' "$TEST_ROOT/no-mistakes.log"; then
@@ -179,7 +180,9 @@ sleep 0.1
 [[ ! -e "$TEST_ROOT/symlink-no-mistakes.log" && \
   ! -e "$exit_state/validation-child-accepted" ]]
 
-# Prove that a mutation to the intent file between start and exec is caught.
+# Prove that a mutation to the intent file between release and sealing is caught.
+# The worker must write exited:2 to validation_status and must not run no-mistakes.
+# Drives the full coordinator handshake so the sealed-intent check is reached.
 state2="$TEST_ROOT/state2"
 worktree2="$TEST_ROOT/worktree2"
 mkdir -p "$state2" "$worktree2"
@@ -198,24 +201,63 @@ Validate only after release.
 EOF
 revision2="$(bash -c 'source "$1"; _sgt_intent_revision "$2"' _ \
   "$ROOT_DIR/bin/_sgt-intent.sh" "$state2/validation-intent.md")"
+cat > "$state2/validation-launch.lock" <<EOF
+pid=$$
+start=$coordinator_start
+coordinator=test-coordinator
+purpose=test/validation-mutation
+EOF
 mutated_log="$TEST_ROOT/mutated-no-mistakes.log"
-TMUX_SESSION2="sgt-validation-worker-mutated-test-$$"
+TMUX_SESSION2="sgt-vw-mutation-test-$$"
 trap 'tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true; tmux kill-session -t "$TMUX_SESSION2" 2>/dev/null || true; rm -rf "$TEST_ROOT"' EXIT
 pane2="$(tmux new-session -d -P -F '#{pane_id}' -s "$TMUX_SESSION2" -n validation \
   -c "$worktree2" \
   "env PATH='$fake_bin:$PATH' NO_MISTAKES_LOG='$mutated_log' \
+  SGT_VALIDATION_COMMIT_ACK_DELAY=0 SGT_VALIDATION_SUCCESS_ACK_DELAY=0 \
   '$ROOT_DIR/bin/sgt-validation-worker' '$state2' '$worktree2' '$revision2'")"
-sleep 0.05
+# Wait for validation-child-ready to get the HANDSHAKE token.
+# The mutation must happen AFTER the worker's initial revision check passes.
+for _ in $(seq 1 200); do
+  [[ -f "$state2/validation-child-ready" ]] && break
+  sleep 0.02
+done
+[[ -s "$state2/validation-child-ready" ]] || {
+  printf 'mutation test: worker did not publish child-ready\n' >&2
+  exit 1
+}
+handshake2="$(cat "$state2/validation-child-ready")"
 printf '%s\n' "$pane2" > "$state2/validation_pane"
 tmux display-message -p -t "$pane2" \
   '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
   > "$state2/validation_pane_identity"
-# Mutate the intent file while the worker is waiting for the release signal
+chmod 600 "$state2/validation_pane_identity"
+# Mutate AFTER child-ready: the worker already passed its initial revision check.
+# The sealed copy will hash the mutated file and detect the mismatch.
 printf '\nMutation.\n' >> "$state2/validation-intent.md"
-# Now release — the pre-exec check should reject the mutated file
-printf '%s\n' "$revision2" > "$state2/validation-release.tmp"
+# Write release as a mode-600 hardlink pair so _sgt_read_same_owned_files passes.
+cp "$state2/validation-child-ready" "$state2/validation-release.tmp"
 mv "$state2/validation-release.tmp" "$state2/validation-release"
-for _ in $(seq 1 100); do
+chmod 600 "$state2/validation-release"
+ln "$state2/validation-release" "$state2/validation-release-owner"
+# Drive remaining handshake steps so the worker reaches the sealed-intent phase.
+for _ in $(seq 1 200); do
+  [[ -f "$state2/validation-child-accepted" ]] && break
+  sleep 0.02
+done
+cp "$state2/validation-child-accepted" "$state2/validation-child-commit"
+for _ in $(seq 1 200); do
+  [[ -f "$state2/validation-child-committed" ]] && break
+  sleep 0.02
+done
+cp "$state2/validation-child-committed" "$state2/validation-success"
+for _ in $(seq 1 200); do
+  [[ -f "$state2/validation-success-ack" ]] && break
+  sleep 0.02
+done
+# Remove coordinator lock so the worker exits the lock-wait loop and reaches
+# the sealing phase, where it detects the mutation and writes exited:2.
+rm -f "$state2/validation-launch.lock"
+for _ in $(seq 1 200); do
   [[ "$(cat "$state2/validation_status" 2>/dev/null || true)" =~ ^exited: ]] && break
   sleep 0.02
 done
@@ -223,6 +265,10 @@ done
   printf 'validation worker ran no-mistakes despite mutated intent file\n' >&2
   exit 1
 }
-[[ "$(cat "$state2/validation_status")" != 'exited:0' ]]
+[[ "$(cat "$state2/validation_status" 2>/dev/null)" == 'exited:2' ]] || {
+  printf 'mutation test: expected exited:2, got: %s\n' \
+    "$(cat "$state2/validation_status" 2>/dev/null || echo 'empty')" >&2
+  exit 1
+}
 
 printf 'sgt-validation-worker release handshake: ok\n'

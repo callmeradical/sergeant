@@ -145,10 +145,24 @@ done
 
 printf 'running\n' > "$REPO_STATE/validation_status"
 cd "$WORKTREE" || exit 2
-[[ "$(_sgt_intent_revision "$VALIDATION_INTENT")" == "$EXPECTED_REVISION" ]] || {
+
+# Seal the intent so no-mistakes receives an unreplaceable file descriptor.
+# Protocol: (1) mktemp creates the path exclusively; (2) both a read fd (8) and
+# a write fd (9) are opened before any content is written; (3) the path is
+# unlinked immediately so the inode is only accessible through those two fds;
+# (4) content is written through fd 9 then fd 9 is closed; (5) the hash is
+# verified through fd 8 via /dev/fd/8 (inherited by subprocesses); (6)
+# no-mistakes receives /dev/fd/8 as --intent-file and reads from the same
+# inode. No directory-entry replacement is possible at any point.
+# Re-verify the intent immediately before exec so content changes made after the
+# startup check are caught. Pass via --intent-file rather than --intent so the
+# intent content does not appear in ps or /proc argv.
+if [[ "$(_sgt_intent_revision "$VALIDATION_INTENT")" != "$EXPECTED_REVISION" ]]; then
+  printf 'exited:2\n' > "$REPO_STATE/validation_status"
   echo "ERROR: canonical validation intent was modified after initial verification" >&2
   exit 2
-}
+fi
+
 args=(axi run --intent-file "$VALIDATION_INTENT")
 [[ -z "$SKIP" ]] || args+=(--skip "$SKIP")
 no-mistakes "${args[@]}"
