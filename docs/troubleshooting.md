@@ -54,12 +54,15 @@ wrapping unsupported output indefinitely. `td create --help` must show
 Collect four signals:
 
 1. Fleet status and worker log modification time.
-2. Exact recorded tmux pane and supervisor PID.
-3. Active child command/tool process.
+2. Exact recorded tmux pane identity and its tmux `pane_activity` timestamp.
+3. Fleet `progress_ts` or the current stall diagnostic after `sgt-watch --sync <task-id>`.
 4. td handoff and current Git branch/worktree state.
 
-A live parent process is insufficient. Do not kill or relaunch until the worktree,
-branch, task, response generation, and handoff are preserved.
+A live parent process is insufficient. `in_progress` plus a `live worker stalled`
+diagnostic is still nonterminal; reconcile it through the progress rules in
+[`docs/using-sergeant.md`](using-sergeant.md#monitor-work) before killing or
+relaunching anything. Preserve the worktree, branch, task, response generation,
+and handoff first.
 
 ## Worker became orphaned after blocking
 

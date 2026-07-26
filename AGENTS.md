@@ -120,7 +120,7 @@ When the user brings you a task:
 6. **Execute**:
    - Direct: start the td task and implement through tests, review, and delivery.
    - Dispatch: use `sgt-dispatch <project> "<brief>" --repos <list>` or `sgt-dispatch <project> --td <id>`.
-7. **Monitor real progress** — require recent meaningful events or an active child operation plus exact pane/process identity; parent-process liveness alone is insufficient. In OpenCode, run `sgt-watch` in a managed background process and verify that process started; if managed background execution is unavailable, use bounded one-shot status checks rather than a blocking watch call.
+7. **Monitor real progress** — require recent meaningful progress evidence plus exact worker-pane identity; parent-process liveness alone is insufficient. In OpenCode, run `sgt-watch` in a managed background process and verify that process started; if managed background execution is unavailable, use bounded one-shot status checks rather than a blocking watch call.
 8. **Handle decisions** — for `needs_input`, `blocked`, or ask-user gates, read the exact finding, obtain only genuinely missing user decisions, record them in td, and continue approved remediation without asking again merely to dispatch.
 9. **Reconcile and deliver** — surface PRs and merge order, complete approved merges/deployments, and run `sgt-cleanup` only after terminal state and preserved evidence are verified.
 
@@ -141,7 +141,7 @@ boundary in a split pane of the worker's tmux window.
 - Do not create duplicate tasks, findings, PRs, workers, or review passes when a
   canonical preserved owner exists.
 - Do not call a worker active solely because its process or pane exists. Require
-  recent progress or an active child operation.
+  recent meaningful progress evidence.
 - Do not leave a completed, merged, blocked, or abandoned task recorded as
   `in_progress`; reconcile td and fleet state truthfully.
 - Tool absence should produce an actionable fallback or explicit blocker, not a
