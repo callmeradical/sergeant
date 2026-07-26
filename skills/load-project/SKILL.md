@@ -1,3 +1,8 @@
+---
+name: load-project
+description: Use when a Sergeant project is named, registered, edited, synced, or graphed; resolves repository ownership, configuration, paths, and inherited instructions.
+---
+
 # Skill: load-project
 
 Resolve Sergeant project ownership, configuration, and paths before work begins.

@@ -78,9 +78,8 @@ command -v sgt-watch
 When commands are not installed on `PATH`, run them from this checkout as
 `bin/<command>`.
 
-`mise run install` also links the OpenCode `oc-inject` plugin. Restart the entire
-OpenCode process after first installation; creating a new conversation inside an
-existing process does not reload plugins.
+Sergeant does not install harness-specific conversation-injection plugins.
+Worker updates are surfaced from durable fleet state through `sgt-watch`.
 
 ## 3. Create global configuration
 
@@ -162,8 +161,12 @@ Require both `graph.json` and `GRAPH_REPORT.md` at the configured project output
 
 ## 8. Install engineering skills
 
-Follow [Skills and their sources](skills.md). Most engineering skills referenced
-by Sergeant come from `mattpocock/skills`; Sergeant's project orchestration skills
+Sergeant-generated worker briefs already discover their required workflow skills
+from this repository's vendored `.agents/skills/` tree. See
+[Repo-scoped worker skills](repo-scoped-skills.md) for the canonical inventory.
+
+Additional engineering skills you choose to install locally should still follow
+[Skills and their sources](skills.md). Sergeant's project orchestration skills
 ship in this repository.
 
 ## 9. Launch Sergeant
@@ -189,11 +192,10 @@ explain which repository owns <feature>
 
 - [ ] Required commands resolve on `PATH` or through `bin/`
 - [ ] The coordinator runs in a tmux pane
-- [ ] When using OpenCode, it was restarted after plugin installation
 - [ ] `sgt-list` shows the project exactly once
 - [ ] `sgt-context` resolves every owning repository and instruction layer
 - [ ] Required repositories are cloned
 - [ ] Marcus td is installed with create/json/work-dir support and initialized
 - [ ] GitHub CLI can access required repositories
 - [ ] Optional Treehouse/Graphify features pass their verification commands
-- [ ] Engineering skills are installed from reviewed sources
+- [ ] Required repo-scoped worker skills are present and any extra installed skills come from reviewed sources

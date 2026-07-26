@@ -22,6 +22,7 @@ if [[ "${1:-}" == "--list" ]]; then
     task_id="$(basename "$task_dir")"
     started="$(cat "$task_dir/started" 2>/dev/null || echo "unknown")"
     brief="$(grep '^Brief:' "$task_dir/brief.md" 2>/dev/null | sed 's/^Brief: *//' | cut -c1-60 || echo "")"
+    notify_event="$(sed -n 's/^event=//p' "$task_dir/notify" 2>/dev/null || true)"
     total=0; done_count=0; failed_count=0; in_progress=0; needs_input=0; blocked=0; orphaned=0
     for repo_dir in "$task_dir"/*/; do
       [[ -d "$repo_dir" ]] || continue
@@ -39,6 +40,7 @@ if [[ "${1:-}" == "--list" ]]; then
     echo "  $task_id"
     echo "    brief:   $brief"
     echo "    started: $started"
+    [[ -z "$notify_event" ]] || echo "    notify:  $notify_event"
     echo "    repos:   $total total - $done_count done, $in_progress in-progress, $needs_input needs-input, $blocked blocked, $orphaned orphaned, $failed_count failed"
     echo ""
   done
@@ -77,6 +79,64 @@ _pane_is_supervisor() {
   mv "$repo_dir/pane_identity.tmp.$$" "$repo_dir/pane_identity" || return 1
 }
 
+_recycle_terminal_worker() {
+  local repo_dir="$1"
+  local pane pane_id
+
+  [[ ! -s "$repo_dir/worker_recycled" ]] || return 0
+  pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
+  [[ -n "$pane" ]] || return 0
+  if ! command -v tmux >/dev/null 2>&1; then
+    printf 'terminal worker could not be recycled because tmux is unavailable\n' > "$repo_dir/diagnostic"
+    return 1
+  fi
+  pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
+  if [[ "$pane_id" != "$pane" ]]; then
+    date -u +%Y-%m-%dT%H:%M:%SZ > "$repo_dir/worker_recycled"
+    return 0
+  fi
+  if ! _pane_is_supervisor "$pane" "$repo_dir"; then
+    printf 'terminal worker pane identity does not match; refusing recycle: %s\n' "$pane" > "$repo_dir/diagnostic"
+    return 1
+  fi
+  if ! tmux kill-pane -t "$pane" 2>/dev/null ||
+     tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+    printf 'failed to recycle terminal worker pane: %s\n' "$pane" > "$repo_dir/diagnostic"
+    return 1
+  fi
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$repo_dir/worker_recycled"
+  return 0
+}
+
+_dispatch_is_expired() {
+  local repo_dir="$1"
+  local grace now started
+
+  grace="${SERGEANT_DISPATCH_GRACE_SECONDS:-300}"
+  [[ "$grace" =~ ^[0-9]+$ ]] || _die "SERGEANT_DISPATCH_GRACE_SECONDS must be a non-negative integer"
+  started="$(cat "$repo_dir/dispatch_started" 2>/dev/null || true)"
+  if [[ ! "$started" =~ ^[0-9]+$ ]]; then
+    started="$(stat -c %Y "$repo_dir/status" 2>/dev/null || stat -f %m "$repo_dir/status" 2>/dev/null || true)"
+  fi
+  [[ "$started" =~ ^[0-9]+$ ]] || return 1
+  now="$(date +%s)"
+  (( now >= started && now - started >= grace ))
+}
+
+_reconcile_incomplete_dispatch() {
+  local repo_dir="$1"
+  local pane
+
+  pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
+  if _dispatch_is_expired "$repo_dir"; then
+    if [[ -z "$pane" ]] || { command -v tmux >/dev/null 2>&1 &&
+         ! _pane_is_supervisor "$pane" "$repo_dir"; }; then
+      printf 'failed: dispatch incomplete: no worktree or owned live pane\n' > "$repo_dir/status"
+      printf 'dispatch never acquired a worktree or owned live pane\n' > "$repo_dir/diagnostic"
+    fi
+  fi
+}
+
 _sync_task() {
   local task_id="$1"
   local task_dir="$FLEET_DIR/$task_id"
@@ -84,11 +144,19 @@ _sync_task() {
 
   for repo_dir in "$task_dir"/*/; do
     [[ -d "$repo_dir" ]] || continue
-    local worktree wt_status fleet_status pane
-    worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
-    [[ -n "$worktree" ]] || continue
-
+    local worktree wt_status fleet_status
     fleet_status="$(cat "$repo_dir/status" 2>/dev/null || echo "")"
+    worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
+    if [[ -z "$worktree" || ! -d "$worktree" ]]; then
+      if [[ "$fleet_status" == "dispatched" ]]; then
+        _reconcile_incomplete_dispatch "$repo_dir"
+      elif [[ "$fleet_status" == "in_progress" ]]; then
+        printf 'orphaned\n' > "$repo_dir/status"
+        printf 'in-progress worker recorded worktree is unavailable; reconcile preserved branch and handoff before recovery\n' > "$repo_dir/diagnostic"
+      fi
+      continue
+    fi
+
     if [[ -f "$worktree/.sergeant-status" ]]; then
       wt_status="$(tr -d '\n' < "$worktree/.sergeant-status")"
       if [[ "$wt_status" != "$fleet_status" ]]; then
@@ -96,6 +164,10 @@ _sync_task() {
       fi
     else
       wt_status="${fleet_status:-in_progress}"
+      if [[ "$wt_status" == "dispatched" ]]; then
+        _reconcile_incomplete_dispatch "$repo_dir"
+        wt_status="$(cat "$repo_dir/status" 2>/dev/null || echo "$wt_status")"
+      fi
     fi
 
     case "$wt_status" in
@@ -124,10 +196,22 @@ _sync_task() {
     fi
 
     case "$wt_status" in
-      in_progress|dispatched)
+      done|failed:*)
+        if ! _recycle_terminal_worker "$repo_dir"; then
+          printf 'WARNING: terminal worker was not recycled: %s\n' "$repo_dir" >&2
+        fi
+        ;;
+    esac
+
+    case "$wt_status" in
+      in_progress)
         pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
-        if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && \
-            ! _pane_is_supervisor "$pane" "$repo_dir"; then
+        if [[ -z "$pane" ]]; then
+          printf 'orphaned\n' > "$worktree/.sergeant-status"
+          printf 'orphaned\n' > "$repo_dir/status"
+          printf 'in-progress worker has no recorded worker pane; resume with sgt-respond\n' > "$repo_dir/diagnostic"
+          "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
+        elif command -v tmux >/dev/null 2>&1 && ! _pane_is_supervisor "$pane" "$repo_dir"; then
           printf 'orphaned\n' > "$worktree/.sergeant-status"
           printf 'orphaned\n' > "$repo_dir/status"
           printf 'recorded pane %s is dead or is not the expected worker supervisor; resume with sgt-respond\n' "$pane" > "$repo_dir/diagnostic"
@@ -138,13 +222,26 @@ _sync_task() {
   done
 }
 
+if [[ "${1:-}" == "--sync-all" ]]; then
+  task_count=0
+  if [[ -d "$FLEET_DIR" ]]; then
+    for task_dir in "$FLEET_DIR"/*/; do
+      [[ -d "$task_dir" ]] || continue
+      _sync_task "$(basename "$task_dir")"
+      task_count=$((task_count + 1))
+    done
+  fi
+  printf 'Reconciled %s fleet tasks.\n' "$task_count"
+  exit 0
+fi
+
 if [[ "${1:-}" == "--sync" ]]; then
   [[ $# -ge 2 ]] || _die "Usage: sgt-watch --sync <task-id>"
   _sync_task "$2"
   exit 0
 fi
 
-[[ $# -ge 1 ]] || _die "Usage: sgt-watch <task-id>"
+[[ $# -ge 1 ]] || _die "Usage: sgt-watch <task-id> | --list | --sync <task-id> | --sync-all"
 TASK_ID="$1"
 TASK_DIR="$FLEET_DIR/$TASK_ID"
 [[ -d "$TASK_DIR" ]] || _die "Task not found: $TASK_ID (looked in $FLEET_DIR)"
@@ -203,6 +300,8 @@ HAVE_SNAPSHOT=false
 while true; do
   _sync_task "$TASK_ID"
   current_snapshot=""
+  notify_marker="$(cat "$TASK_DIR/notify" 2>/dev/null || true)"
+  current_snapshot+="notify:$notify_marker "
   for repo_dir in "$TASK_DIR"/*/; do
     [[ -d "$repo_dir" ]] || continue
     repo_name="$(basename "$repo_dir")"

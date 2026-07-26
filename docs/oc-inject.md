@@ -1,16 +1,21 @@
-# oc-inject — Out-of-Band Message Injection
+# oc-inject — Deprecated OpenCode Transport
 
-Allows external processes (dispatched agents, scripts, `sgt-notify`) to inject
-messages into any active OpenCode session without taking over the prompt bar.
-Messages are queued when the session is busy and drained automatically when it
-goes idle.
+> **Deprecated:** Sergeant no longer installs, captures targets for, or routes
+> notifications through `oc-inject`. Harness-specific conversation injection
+> was disruptive and coupled fleet supervision to OpenCode internals. Use
+> durable fleet state and `sgt-watch`; raw tmux injection is available only via
+> the explicit `SERGEANT_NOTIFY_TRANSPORT=tmux` compatibility setting.
+
+This retained prototype lets an external process inject a message into an
+OpenCode session without taking over the prompt bar. Sergeant itself no longer
+uses this transport.
 
 ---
 
 ## How it works
 
 ```
-sgt-notify / agent script
+manual caller
   └─ bin/oc-inject "message"
        └─ writes ~/.local/share/opencode/inbox/processes/<pid>/inbox/<message-id>.msg
             └─ opencode/plugins/oc-inject.js (2s poller)
@@ -20,18 +25,15 @@ sgt-notify / agent script
 
 The plugin is loaded globally by each OpenCode process at startup. Every process
 owns a registry and ordered inbox under its PID, so a worker plugin cannot claim
-or consume a coordinator's messages. Dispatch records the coordinator PID and
-session in the task's `oc_target.json`; `sgt-notify` uses that explicit target.
-A 2-second interval polls only the owning process's inbox. Registries include
+or consume another process's messages. A 2-second interval polls only the owning
+process's inbox. Registries include
 the operating-system process start identity so a stale directory cannot become
 valid after PID reuse. The CLI waits for the owning plugin to acknowledge each
-message before reporting success; otherwise `sgt-notify` falls back to tmux.
-If a plugin claims a message but its API call does not acknowledge within the
-bounded wait, the CLI returns status 2 and `sgt-notify` reports uncertainty
-without using tmux, avoiding duplicate delivery.
-The plugin's `shell.env` hook exports the invoking session ID to that shell
-invocation, so dispatch captures its own coordinator conversation rather than
-guessing from whichever session emitted the latest background event.
+message before reporting success. If a plugin claims a message but its API call
+does not acknowledge within the bounded wait, the CLI returns status 2 so the
+caller can decide whether to retry. The plugin's `shell.env` hook exports the
+invoking session ID to that shell invocation so a caller can explicitly target
+that active conversation.
 
 ---
 
@@ -39,13 +41,11 @@ guessing from whichever session emitted the latest background event.
 
 | File | Purpose |
 |---|---|
-| `opencode/plugins/oc-inject.js` | OpenCode plugin — source of truth, tracked in this repo |
-| `~/.config/opencode/plugins/oc-inject.js` | Live copy loaded by OpenCode (symlinked or copied on install) |
+| `opencode/plugins/oc-inject.js` | Deprecated plugin source, retained in this repo for one compatibility window |
+| `~/.config/opencode/plugins/oc-inject.js` | Optional manual install path loaded by OpenCode at process startup |
 | `bin/oc-inject` | CLI — drop a message into the inbox |
-| `bin/sgt-notify` | Updated to prefer `oc-inject` over `tmux send-keys` |
 | `~/.local/share/opencode/inbox/processes/<pid>/inbox/` | Process-owned ordered message queue |
 | `~/.local/share/opencode/inbox/processes/<pid>/registry.json` | Process/session state written by its plugin |
-| `~/.local/share/sergeant/fleet/<task>/oc_target.json` | Coordinator PID/session captured by dispatch |
 
 ---
 
@@ -68,20 +68,13 @@ oc-inject --pid 12345 --status                    # show process registry state
 
 ---
 
-## Install
+## Legacy direct use
 
-`mise run install` symlinks `bin/oc-inject` to `~/.local/bin/oc-inject` and
-symlinks the tracked plugin to
-`~/.config/opencode/plugins/oc-inject.js`.
+`mise run install` removes Sergeant-owned legacy symlinks and does not install
+this transport. The retained source exists for one compatibility window only.
 
-Verify both links:
+Direct use requires an explicit manual installation and is unsupported:
 
-```bash
-command -v oc-inject
-readlink ~/.config/opencode/plugins/oc-inject.js
-```
-
-If `mise` is unavailable, create the links manually:
 ```bash
 mkdir -p ~/.local/bin ~/.config/opencode/plugins
 ln -sf "$(pwd)/bin/oc-inject" ~/.local/bin/oc-inject

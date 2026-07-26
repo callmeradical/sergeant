@@ -23,6 +23,7 @@ case "$1" in
     if [[ "${AUTO_DELIVER:-1}" == 1 ]]; then
     for repo_state in "$SERGEANT_FLEET"/*/*; do
       [[ -d "$repo_state" ]] || continue
+      [[ -f "$repo_state/notification_id" && -f "$repo_state/worktree" ]] || continue
       nonce="$(cat "$repo_state/notification_target" 2>/dev/null || true)"
       notification_id="$(cat "$repo_state/notification_id" 2>/dev/null || true)"
       [[ "$nonce" =~ ^[a-f0-9]{32}$ && -n "$notification_id" ]] || continue
@@ -43,6 +44,7 @@ case "$1" in
     if [[ "${AUTO_DELIVER:-1}" == 1 ]]; then
       for repo_state in "$SERGEANT_FLEET"/*/*; do
         [[ -d "$repo_state" ]] || continue
+        [[ -f "$repo_state/notification_id" && -f "$repo_state/worktree" ]] || continue
         notification_id="$(cat "$repo_state/notification_id")"
         worktree="$(cat "$repo_state/worktree")"
         printf '%s|0|%%42|4242|123456|fixture-worker-command\n' "$notification_id" \
@@ -129,15 +131,23 @@ git -C "$TEST_ROOT/repo" add README.md
 git -C "$TEST_ROOT/repo" commit -qm fixture
 git -C "$TEST_ROOT/repo" remote add origin git@github.com:org/test.git
 
+interrupted_state="$TEST_ROOT/fleet/interrupted-task/app"
+mkdir -p "$interrupted_state"
+printf 'dispatched\n' > "$interrupted_state/status"
+printf '1\n' > "$interrupted_state/dispatch_started"
+
 PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/success.log" \
 SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-dispatch" test 'Supervise worker' --repos app >/dev/null
-repo_state="$(printf '%s\n' "$TEST_ROOT"/fleet/*/app)"
+[[ "$(cat "$interrupted_state/status")" == \
+  'failed: dispatch incomplete: no worktree or owned live pane' ]]
+repo_state="$(printf '%s\n' "$TEST_ROOT"/fleet/supervise-worker-*/app)"
 task_id="$(basename "$(dirname "$repo_state")")"
 [[ "$(cat "$repo_state/pane")" == "%42" ]]
 [[ "$(cat "$repo_state/pane_identity")" == '0|%42|4242|123456|fixture-worker-command' ]]
 [[ "$(cat "$repo_state/agent")" == "${SERGEANT_AGENT:-opencode}" ]]
 [[ "$(cat "$repo_state/stage")" == "implementation" ]]
+[[ "$(cat "$repo_state/dispatch_started")" =~ ^[0-9]+$ ]]
 [[ "$(cat "$repo_state/window_name")" == "implementation-app-$task_id" ]]
 [[ ! -e "$repo_state/initial_message" ]]
 [[ -s "$repo_state/tmux_session" && -s "$repo_state/window_name" ]]

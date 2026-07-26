@@ -95,7 +95,6 @@ SERGEANT_CONFIG="$config" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-dispatch" test --td td-route --repos app >/dev/null
 
 task_state="$(printf '%s\n' "$fleet"/*)"
-jq -e --argjson pid "$$" \
-  '.pid == $pid and .sessionId == "ses_coordinator"' "$task_state/oc_target.json" >/dev/null
+[[ ! -e "$task_state/oc_target.json" ]]
 
-printf 'sgt-dispatch coordinator target capture: ok\n'
+printf 'sgt-dispatch avoids harness-specific coordinator targets: ok\n'

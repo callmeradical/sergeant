@@ -71,6 +71,7 @@ the operation with ad hoc shell commands.
 | `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Apply a finding disposition and create/update owning-repo td work |
 | `bin/sgt-dispatch <project> --td <id>` | Dispatch from a td task (auto-detects repo) |
 | `bin/sgt-watch <task-id>` | Monitor fleet until all workers done |
+| `bin/sgt-watch --sync-all` | Reconcile every durable fleet record and recycle verified terminal panes |
 | `bin/sgt-watch --list` | List all active tasks |
 | `bin/sgt-respond <task-id> <repo>` | Read a worker response from stdin and resume its loop |
 | `bin/sgt-ack-response <task-id> <repo> <response-id>` | Acknowledge one consumed response from the exact worker pane |
@@ -79,7 +80,7 @@ the operation with ad hoc shell commands.
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
 | `bin/sgt-td-list <project>` | Show td tasks across all repos in a project |
 | `bin/sgt-td-create <project> "<title>" --repos <list>` | Create td tasks in repos (called automatically by sgt-dispatch) |
-| `bin/sgt-notify <task-id> "<message>"` | Inject a worker escalation or completion update into the primary session pane |
+| `bin/sgt-notify <task-id> "<message>"` | Record a durable wake marker and optionally inject into the primary session pane |
 | `wiki-daily-digest [--date YYYY-MM-DD] [--since DATE] [--dry-run]` | Synthesize opencode session history into `~/wiki/sessions/` |
 
 Use the bare command when it resolves on `PATH`; otherwise run the matching
@@ -114,7 +115,7 @@ When the user brings you a task:
 1. **Load context** — run `sgt-context <project>` and identify the owning repository or repositories, inherited instructions, configured paths, and cross-repository dependencies before selecting an execution mode.
 2. **Check the queue** — run `sgt-td-list <project>` and reuse a matching task in direct or dispatch mode; create a task only when no canonical task exists.
 3. **Choose execution mode** — direct for explicit single-repo work in this session; dispatch for cross-repo, parallel, or explicitly delegated work.
-4. **Reconcile existing state** — inspect active workers, branches, worktrees, retained gates, and handoffs before starting. Resume or take over preserved work rather than creating duplicates.
+4. **Reconcile existing state** — run `sgt-watch --sync-all`, then inspect active workers, branches, worktrees, retained gates, and handoffs before starting. Resume or take over preserved work rather than creating duplicates.
 5. **Confirm only unresolved decisions that change scope or risk** — ask when repository ownership, user-visible behavior, security/privacy policy, data retention, destructive action, or an irreversible tradeoff is unknown. Do not ask the user to reconfirm an execution mode, plan, or tradeoff already recorded in the conversation or td.
 6. **Execute**:
    - Direct: start the td task and implement through tests, review, and delivery.

@@ -8,6 +8,9 @@ instructions; review their source before installing or updating them.
 | Location | Purpose |
 |---|---|
 | `skills/` in this repository | Sergeant-owned project, cross-repo, dispatch, wiki, and help procedures |
+| `.agents/skills/` in this repository | Canonical vendored worker skills required by Sergeant-generated briefs |
+| `.claude/skills/` in this repository | Repository-local Claude links to the canonical vendored worker skills |
+| `opencode.json` in this repository | Repository-local OpenCode skill-path discovery for `.agents/skills` and `skills` |
 | `~/.agents/skills/` | Agent Skills standard installation shared by compatible harnesses |
 | `~/.agents/.skill-lock.json` | Installed skill provenance, source URL, path, hashes, and timestamps |
 | `~/.claude/skills/` | Claude Code skills or links to shared Agent Skills |
@@ -18,8 +21,13 @@ lock, plugin metadata, or the source repository.
 
 ## Primary engineering skill source
 
-Most engineering skills Sergeant expects you to review or install come from Matt
-Pocock's [Skills for Real Engineers](https://github.com/mattpocock/skills).
+Sergeant-generated worker briefs do not require a global skill installation for
+their core workflow. The required worker bundle is vendored in this repository;
+see [Repo-scoped worker skills](repo-scoped-skills.md) for inventory and
+provenance.
+
+Most additional engineering skills you may choose to review or install come
+from Matt Pocock's [Skills for Real Engineers](https://github.com/mattpocock/skills).
 After installing, inspect `~/.agents/.skill-lock.json` to confirm that any
 selected shared skills record `mattpocock/skills` as their source. Common
 Sergeant-adjacent examples from that source include code-review,

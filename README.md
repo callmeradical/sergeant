@@ -27,8 +27,8 @@ Sergeant fixes that. It is an **agent distro**: a cloned directory with an
 agent harness inside the checkout so its repository instructions are loaded.
 
 The checkout is the source of truth. `mise run install` optionally symlinks the
-commands and OpenCode plugin into user-local locations. Sergeant supports Bash
-3.2 and newer, including the system Bash shipped with macOS.
+commands into user-local locations and leaves worker-skill discovery repo-scoped.
+Sergeant supports Bash 3.2 and newer, including the system Bash shipped with macOS.
 
 ## Mental model
 
@@ -45,8 +45,10 @@ commands and OpenCode plugin into user-local locations. Sergeant supports Bash
 
 sergeant/                     ← this distro (you are here)
   AGENTS.md
+  .agents/skills/              ← canonical worker workflow skills
+  .claude/skills/              ← links to canonical worker skills
   bin/                        ← cross-repo shell toolbelt
-  skills/                     ← agent-loaded skills
+  skills/                     ← Sergeant coordination skills
 ```
 
 Each project is a YAML file. That file defines which repos belong to it, how they
@@ -92,6 +94,7 @@ Start with the [documentation index](docs/README.md):
 - [What Sergeant is and is not](docs/what-is-sergeant.md)
 - [Getting started checklist](docs/getting-started.md)
 - [Skills and their upstream sources](docs/skills.md)
+- [Repo-scoped worker skills](docs/repo-scoped-skills.md)
 - [Using Sergeant](docs/using-sergeant.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Project YAML schema](docs/schema.md)
@@ -148,6 +151,7 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-dispatch <project> "<brief>" [--intent-file <path>] [options]` | Dispatch agents with one canonical `.sergeant-intent.md` revision across repos |
 | `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Classify a no-mistakes finding and create/update owning-repo td work |
 | `bin/sgt-watch <task-id>` | Monitor dispatched fleet |
+| `bin/sgt-watch --sync-all` | Reconcile all fleet records and stop verified terminal worker panes |
 | `bin/sgt-respond <task-id> <repo>` | Read a response from stdin and resume a waiting worker |
 | `bin/sgt-ack-response <task-id> <repo> <response-id>` | Acknowledge consumed response transport from the exact worker pane |
 | `bin/sgt-validate <task-id> <repo> [--skip <steps>]` | Run coordinator-owned no-mistakes in a split worker-window pane |
@@ -204,6 +208,11 @@ Agent-loaded skills for structured workflows:
 | `skills/dispatch` | Operate td, worktrees, workers, fleets, escalation, review, and cleanup |
 | `skills/wiki` | Validate automatic captures and generate curated daily wiki digests |
 | `skills/sergeant-help` | Query repository docs for installation, usage, skills, and troubleshooting help |
+
+Worker briefs also depend on eight vendored workflow skills. Codex discovers
+their canonical `.agents/skills` tree directly, OpenCode uses `opencode.json`,
+and Claude uses repository-local `.claude/skills` links. See
+`docs/repo-scoped-skills.md` for the inventory and provenance.
 
 ## Requirements
 
