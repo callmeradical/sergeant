@@ -199,6 +199,9 @@ sgt-validate <fleet-task-id> <repo> [--skip <steps>]
 `sgt-validate` splits the worker's existing tmux window, renames that shared
 window to `validation-<repo>-<task>`, and runs no-mistakes interactively in the
 new coordinator-owned pane with the canonical intent. It never uses `--yes`.
+The default medium profile skips `review` and `document`, which were already
+covered by the required independent reviews and readiness evidence. Passing an
+explicit `--skip <steps>` replaces the default skip list.
 Before cloning the validation checkout or publishing launch state, the
 coordinator acquires an identity-checked validation-launch reservation for that
 task/repository pair. Concurrent launches fail closed until the recorded owner
