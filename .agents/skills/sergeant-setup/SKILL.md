@@ -193,21 +193,21 @@ a backup at `~/.config/sergeant/<name>.yaml.bak.<timestamp>` before writing.
 
 ## Phase 5: Repair existing YAML
 
-When a project YAML already exists and the user wants to modify it, before any
-write:
+When a project YAML already exists and the user wants to modify it:
 
 1. Validate the existing file with `yq e '.' ~/.config/sergeant/<name>.yaml`.
-   If it fails, report the parse error and stop.
+   If it fails, report the parse error and stop; do not proceed.
 2. Compute and display a minimal diff between the current content and the
    proposed changes.
-3. Create a timestamped backup: `~/.config/sergeant/<name>.yaml.bak.<timestamp>`.
-4. Ask for confirmation before writing:
+3. Ask for confirmation before any write or backup:
    ```
    Apply these changes? [y/N]
    ```
+4. Only after the user confirms: create a timestamped backup at
+   `~/.config/sergeant/<name>.yaml.bak.<timestamp>`, then write the new content.
 
-Do not apply changes if the user declines. Do not skip the backup even if the
-user says to.
+Do not create the backup before confirmation. Do not apply changes if the user
+declines. The backup is mandatory when writing; do not skip it even if asked.
 
 ## Phase 6: Sync and verification
 

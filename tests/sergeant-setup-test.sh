@@ -109,6 +109,13 @@ require_text "$SKILL" 'backup'
 # Phase 3: config.yaml write must be gated behind explicit confirmation.
 require_text "$SKILL" 'Write ~/.config/sergeant/config.yaml? [y/N]'
 
+# Phase 5: backup must be created AFTER confirmation, not before.
+require_text "$SKILL" 'Apply these changes? [y/N]'
+# The key phrase that encodes confirm-then-backup ordering.
+require_text "$SKILL" 'Only after the user confirms: create a timestamped backup'
+# Skill must not instruct pre-confirmation backup creation.
+reject_text "$SKILL" 'Do not skip the backup even if the user says to'
+
 # Phase 2: clone and install must each have their own consent gate.
 require_text "$SKILL" 'Clone to'
 require_text "$SKILL" 'mise run install'
