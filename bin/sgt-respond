@@ -40,6 +40,17 @@ REPO_DIR="$FLEET_DIR/$TASK_ID/$REPO"
 [[ -d "$FLEET_DIR/$TASK_ID" ]] || _die "Task not found: $TASK_ID"
 [[ -d "$REPO_DIR" ]] || _die "Repo not found in task $TASK_ID: $REPO"
 
+# Read project name from brief.md for drain admission checks.
+SGT_PROJECT=""
+_sgt_read_brief_project() {
+  local brief="$FLEET_DIR/$TASK_ID/brief.md" project
+  [[ -f "$brief" ]] || return 0
+  project="$(sed -n 's/^Project:[[:space:]]*//p' "$brief")"
+  [[ "$project" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 0
+  SGT_PROJECT="$project"
+}
+_sgt_read_brief_project
+
 worktree="$(cat "$REPO_DIR/worktree" 2>/dev/null || true)"
 
 _sgt_response_lock_acquire "$REPO_DIR"
@@ -261,7 +272,13 @@ if [[ -n "$pending_response_file" ]]; then
      "$(cat "$worktree/.sergeant-response-id" 2>/dev/null || true)" == "$response_id" ]] || \
     _die "Pending response generation does not match the worker gate"
   if [[ -f "$worktree/.sergeant-response" && "$status" != "orphaned" ]]; then
-    _die "A Sergeant response is already pending consumption for $TASK_ID/$REPO"
+    # A drain_held marker matching the current gate generation means the prior
+    # delivery was held by drain admission.  Allow relaunch now that drain may
+    # have been lifted; the marker is cleared on successful relaunch below.
+    _sgt_drain_held_gen="$(cat "$REPO_DIR/drain_held" 2>/dev/null || true)"
+    if [[ "$_sgt_drain_held_gen" != "$gate_generation" ]]; then
+      _die "A Sergeant response is already pending consumption for $TASK_ID/$REPO"
+    fi
   fi
   if ! cmp -s "$RESPONSE_INPUT" "$pending_response_file"; then
     printf 'sgt-respond: reusing stored recovery response for orphaned worker %s/%s; supplied text was ignored.\n' "$TASK_ID" "$REPO" >&2
@@ -370,6 +387,21 @@ delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -A
 _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$delivery_notification_id" response \
   "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
 
+# ── Drain admission check ──────────────────────────────────────────────────
+# Drain prevents new pane starts for matching projects.  The response has
+# already been stored generation-safely; write a drain_held marker so that
+# an explicit undrain can reevaluate this waiting worker exactly once.
+
+if _sgt_is_drained "$SGT_PROJECT"; then
+  _atomic_write "$REPO_DIR/drain_held" "$gate_generation"
+  _sgt_response_lock_release
+  _cleanup_response_input
+  trap - EXIT
+  echo "sgt-respond: response stored; worker relaunch held by drain [project: ${SGT_PROJECT:-global}]."
+  exit 0
+fi
+rm -f "$REPO_DIR/drain_held"
+
 worker_command="$(_sgt_worker_command \
   "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")"
 
@@ -414,6 +446,7 @@ if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" "$delivery_notificati
   _record_relaunch_orphan "relaunched interactive worker did not acknowledge its durable response notification"
   _die "Worker relaunch notification acknowledgement timed out for $TASK_ID/$REPO"
 fi
+rm -f "$REPO_DIR/drain_held"
 _sgt_response_lock_release
 _cleanup_response_input
 trap - EXIT
