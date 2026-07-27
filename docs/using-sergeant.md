@@ -125,7 +125,10 @@ evidence stays older than the default 300-second grace window,
 `sgt-watch --sync` keeps the repo `in_progress` and records a nonterminal
 `live worker stalled` diagnostic instead. Set `SERGEANT_STALL_GRACE_SECONDS` to
 change the grace window and `SERGEANT_STALL_DIAG_BUCKET` to control how often
-the elapsed-seconds text is rewritten during repeated syncs.
+the elapsed-seconds text is rewritten during repeated syncs. After reconciling
+the exact pane identity, worktree, td handoff, and response/notification state,
+use `sgt-recover <fleet-task-id> <repo>` only for that exact `live worker
+stalled` case.
 
 ## Worker states
 
@@ -171,6 +174,21 @@ only then clears active plaintext transport. If a later archive-marker or
 transport-cleanup step fails, rerun the same `sgt-ack-response` command with the
 same response ID; it must converge the existing archive, acknowledgement
 markers, and active transport without reapplying the decision.
+
+## Recover one stalled worker
+
+```bash
+sgt-recover <fleet-task-id> <repo>
+```
+
+Use this only when `sgt-watch --sync <fleet-task-id>` or `sgt-watch --sync-all`
+left the repo `in_progress` with a `live worker stalled` diagnostic and you
+already reconciled the exact pane identity, worktree, td handoff, and active
+response/notification state. Recovery is one-shot per repo attempt: Sergeant
+records `stall_recovery_attempted`, relaunches only after replacement metadata
+is validated, and escalates to `needs_input` instead of retrying when the prior
+notification delivery still holds an unfinished action lease, the recorded pane
+identity no longer matches, or any later relaunch step fails.
 
 ## Reconcile results
 

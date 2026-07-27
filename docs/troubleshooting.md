@@ -62,7 +62,10 @@ A live parent process is insufficient. `in_progress` plus a `live worker stalled
 diagnostic is still nonterminal; reconcile it through the progress rules in
 [`docs/using-sergeant.md`](using-sergeant.md#monitor-work) before killing or
 relaunching anything. Preserve the worktree, branch, task, response generation,
-and handoff first.
+and handoff first, then use `sgt-recover <task-id> <repo>` only for that exact
+stall classification. If Sergeant refuses because pane identity or unfinished
+notification delivery evidence no longer matches, keep the preserved state and
+follow the resulting `needs_input` handoff instead of forcing another retry.
 
 ## Worker became orphaned after blocking
 
@@ -74,9 +77,11 @@ record, and do not clean its worktree.
 ## Response already pending
 
 Do not overwrite it. Inspect fleet response generation and worker acknowledgement.
-Resume/recover the exact worker so it consumes the pending response, or wait for
-the current generation to reach a terminal outcome. If the worker already applied
-the response and the archive entry exists, rerun the same
+Resume the exact waiting worker with `sgt-respond`, or wait for the current
+generation to reach a terminal outcome. Do not use `sgt-recover` for an active
+response generation; it is only for an `in_progress` worker that still carries
+the exact `live worker stalled` diagnostic. If the worker already applied the
+response and the archive entry exists, rerun the same
 `sgt-ack-response <task> <repo> <response-id>` command from the recorded worker
 pane to finish acknowledgement and plaintext cleanup.
 
