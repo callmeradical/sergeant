@@ -609,7 +609,7 @@ _sgt_print_monitor_identity() {
 # task's fleet directory for ownership binding at cleanup time.
 _sgt_background_watch() {
   local task_id="$1" task_dir="$2"
-  local unit existing_unit existing_inv current_inv invocation_id
+  local unit live_inv invocation_id
   local env_args=()
 
   _sgt_validate_monitor_task_id "$task_id"
@@ -622,20 +622,25 @@ _sgt_background_watch() {
 
   unit="$(_sgt_monitor_unit_name "$task_id")"
 
-  # Idempotency: if the fleet already owns an active monitor with the same
-  # invocation ID, return it without starting a new one.
-  # shellcheck disable=SC2002  # cat used intentionally: suppresses bash's own redirect error for absent files
-  existing_unit="$(cat "$task_dir/monitor_unit" 2>/dev/null | tr -d '\n' || true)"
-  # shellcheck disable=SC2002
-  existing_inv="$(cat "$task_dir/monitor_invocation_id" 2>/dev/null | tr -d '\n' || true)"
-  if [[ -n "$existing_unit" && "$existing_unit" == "$unit" && -n "$existing_inv" ]]; then
-    current_inv="$(_sgt_monitor_invocation_id "$unit")"
-    if [[ -n "$current_inv" && "$current_inv" == "$existing_inv" ]]; then
-      _sgt_print_monitor_identity "$unit" "$existing_inv"
-      return 0
-    fi
+  # Check if the unit is already active regardless of the state of the ownership
+  # files.  This handles three cases without calling systemd-run (which would
+  # fail with 'unit already exists' for an active unit):
+  #   1. Files present and IDs match   — normal idempotent return.
+  #   2. Files missing or stale        — adopt the live unit and update files.
+  #   3. Unit externally restarted     — adopt the new instance.
+  live_inv="$(_sgt_monitor_invocation_id "$unit")"
+  if [[ -n "$live_inv" ]]; then
+    # Unit is active.  Write ownership files (invocation_id first; if monitor_unit
+    # write is lost, cleanup silently skips rather than dying on a missing ID).
+    printf '%s\n' "$live_inv" > "$task_dir/monitor_invocation_id.tmp.$$"
+    mv "$task_dir/monitor_invocation_id.tmp.$$" "$task_dir/monitor_invocation_id"
+    printf '%s\n' "$unit"     > "$task_dir/monitor_unit.tmp.$$"
+    mv "$task_dir/monitor_unit.tmp.$$" "$task_dir/monitor_unit"
+    _sgt_print_monitor_identity "$unit" "$live_inv"
+    return 0
   fi
 
+  # Unit is not active — start a new transient monitor.
   # Propagate the fleet directory when it differs from the compiled-in default
   # so the monitor finds the task in the same location.
   if [[ -n "${SERGEANT_FLEET:-}" ]]; then
