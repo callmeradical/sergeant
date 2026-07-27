@@ -324,6 +324,18 @@ if grep -qiE 'prompt|token|secret' "$worktree/.sergeant-message" 2>/dev/null; th
   exit 1
 fi
 
+# Fleet diagnostic must be the escalation reason, NOT the old stall diagnostic
+# (verifies that _escalate overwrites the stall diagnostic with the failure reason)
+diag_after="$(cat "$repo_state/diagnostic" 2>/dev/null || true)"
+[[ "$diag_after" != "live worker stalled:"* ]] || {
+  printf 'second attempt: stall diagnostic should be replaced by escalation reason\n' >&2
+  exit 1
+}
+[[ -n "$diag_after" ]] || {
+  printf 'second attempt: fleet diagnostic should be non-empty after escalation\n' >&2
+  exit 1
+}
+
 printf 'sgt-recover second attempt escalates: ok\n'
 
 # ── Slice 4: tmux new-window failure → needs_input escalation ─────────────────
@@ -379,6 +391,13 @@ if grep -qiE 'prompt|token|secret' "$repo_state/diagnostic" 2>/dev/null; then
   printf 'privacy violation: window-fail diagnostic contains sensitive terms\n' >&2
   exit 1
 fi
+
+# Stall diagnostic must be replaced by the failure reason (not the old stall text)
+fail_diag="$(cat "$repo_state/diagnostic" 2>/dev/null || true)"
+[[ "$fail_diag" != "live worker stalled:"* ]] || {
+  printf 'window-fail: stall diagnostic should be replaced by failure reason\n' >&2
+  exit 1
+}
 
 printf 'sgt-recover tmux failure escalates: ok\n'
 
