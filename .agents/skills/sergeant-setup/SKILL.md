@@ -140,15 +140,20 @@ has followed the install instructions; the next run will re-check Phase 2.
 
 Check whether `~/.config/sergeant/config.yaml` exists.
 
-- **Missing**: ask the user for a `dev_root` path and write the file after
-  showing a preview:
+- **Missing**: ask the user for a `dev_root` path, then show a preview and ask
+  for confirmation before writing anything:
   ```yaml
   dev_root: <path>
   ```
+  ```
+  Write ~/.config/sergeant/config.yaml? [y/N]
+  ```
+  Write the file only after the user confirms. Leave the filesystem unchanged on
+  any other response.
 - **Present and valid**: verify `dev_root` is set and report `[ok]`.
 - **Present and invalid YAML**: validate with `yq e '.' ~/.config/sergeant/config.yaml`
   before showing the file. Report the parse error and stop; do not overwrite
-  without a backup and explicit confirmation.
+  without a timestamped backup, a diff preview, and explicit confirmation.
 
 ## Phase 4: Project YAML interview
 
