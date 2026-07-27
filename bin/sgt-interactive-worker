@@ -14,6 +14,9 @@ AGENT="$3"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-drain.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/_sgt-drain.sh"
 # shellcheck source=bin/_sgt-response-lock.sh
 source "$SCRIPT_DIR/_sgt-response-lock.sh"
 
@@ -35,6 +38,48 @@ case "$harness" in
 esac
 
 mkdir -p "$REPO_STATE"
+
+# ── Cooperative drain ─────────────────────────────────────────────────────────
+# Discover the project name from the fleet task brief.md (parent of REPO_STATE).
+# Used to scope project-level drain checks.
+
+_TASK_DIR="$(dirname "$REPO_STATE")"
+_PROJECT_NAME=""
+if [[ -f "$_TASK_DIR/brief.md" ]]; then
+  _PROJECT_NAME="$(awk '/^Project:/{print $2; exit}' "$_TASK_DIR/brief.md" || true)"
+fi
+
+# _drain_is_active: returns 0 when an active global or project drain exists.
+_drain_is_active() {
+  _sgt_drain_is_drained "$(_sgt_drain_global_file)" && return 0
+  [[ -n "$_PROJECT_NAME" ]] && \
+    _sgt_drain_is_drained "$(_sgt_drain_project_file "$_PROJECT_NAME")" && return 0
+  return 1
+}
+
+# _do_drain: write drained state and exit cleanly. Never returns.
+_do_drain() {
+  "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
+  printf 'drained\n' > "$WORKTREE/.sergeant-drained"
+  printf 'drained\n' > "$WORKTREE/.sergeant-status"
+  printf 'drained\n' > "$REPO_STATE/status"
+  rm -f "$REPO_STATE/result"
+  # Kill the agent session so the EXIT trap fires with the drained status already written.
+  kill -TERM "$BASHPID" 2>/dev/null || exit 0
+}
+
+# _watch_drain: background loop — calls _do_drain when an active drain is detected.
+# Runs parallel to _watch_progress and _deliver_notifications.
+_watch_drain() {
+  local _drain_triggered=false
+  while :; do
+    sleep "${SGT_DRAIN_CHECK_INTERVAL:-2}"
+    if ! $_drain_triggered && [[ ! -f "$WORKTREE/.sergeant-drained" ]] && _drain_is_active; then
+      _drain_triggered=true
+      _do_drain
+    fi
+  done
+}
 
 # Record worker identity in fleet state so sgt-cleanup can terminate escaped
 # descendants even after this pane has exited.  Writes are atomic (tmp+mv) to
@@ -96,12 +141,20 @@ _finish() {
   trap - EXIT
   [[ -z "${notification_pid:-}" ]] || kill "$notification_pid" 2>/dev/null || true
   [[ -z "${watch_progress_pid:-}" ]] || kill "$watch_progress_pid" 2>/dev/null || true
+  [[ -z "${watch_drain_pid:-}" ]] || kill "$watch_drain_pid" 2>/dev/null || true
   status="$(_status)"
   case "$status" in
     done)
       if [[ ! -s "$WORKTREE/.sergeant-result" ]]; then
         status="orphaned"
       fi
+      ;;
+    drained)
+      # Worker checkpointed cooperatively in response to a drain signal.
+      # .sergeant-drained and td handoff were already written by _do_drain.
+      _sync_state
+      rm -f "$REPO_STATE/diagnostic"
+      exit 0
       ;;
     needs_input|blocked|waiting)
       _sync_state
@@ -292,6 +345,8 @@ _deliver_notifications &
 notification_pid=$!
 _watch_progress &
 watch_progress_pid=$!
+_watch_drain &
+watch_drain_pid=$!
 case "$harness" in
   goose) "$AGENT" session ;;
   opencode|oc) "$AGENT" --dangerously-skip-permissions ;;

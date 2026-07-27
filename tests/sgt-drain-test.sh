@@ -507,3 +507,175 @@ fi
 printf 'test15 status output is privacy-safe: ok\n'
 
 printf '\nsgt-drain: all tests passed\n'
+
+# ── Test 16–21: sgt-drain --wait fleet monitoring ─────────────────────────────
+#  16.  --wait exits immediately when all workers are terminal (done)
+#  17.  --wait exits immediately when all workers are drained
+#  18.  --wait exits immediately when all workers are unreachable (orphaned)
+#  19.  --wait returns when in-progress workers update to drained
+#  20.  --wait times out without killing workers
+#  21.  --wait with project scope only waits for matching workers
+
+printf '\n# sgt-drain --wait tests\n'
+
+_mk_fleet_task() {
+  local task_id="$1" project="$2"
+  local task_dir="$fleet_dir/$task_id"
+  mkdir -p "$task_dir"
+  printf 'Project: %s\nBrief:   test\n' "$project" > "$task_dir/brief.md"
+  printf '%s\n' "$task_dir"
+}
+
+_mk_fleet_repo() {
+  local task_dir="$1" repo_name="$2" status="$3"
+  local repo_dir="$task_dir/$repo_name"
+  local worktree_path
+  worktree_path="$TEST_ROOT/wt-$(basename "$task_dir")-$repo_name"
+  mkdir -p "$repo_dir" "$worktree_path"
+  printf '%s\n' "$status" > "$repo_dir/status"
+  printf '%s\n' "$status" > "$worktree_path/.sergeant-status"
+  printf '%s\n' "$worktree_path" > "$repo_dir/worktree"
+  printf '%s\n' "$repo_dir"
+}
+
+_run_drain_wait() {
+  SERGEANT_DRAIN_DIR="$drain_dir" SERGEANT_FLEET="$fleet_dir" \
+    "$ROOT_DIR/bin/sgt-drain" "$@"
+}
+
+# Reset fleet between wait tests
+fleet_dir_wait="$TEST_ROOT/fleet-wait"
+mkdir -p "$fleet_dir_wait"
+
+# ── Test 16: --wait exits immediately when all workers terminal ───────────────
+td16="$fleet_dir_wait/task-t16"
+mkdir -p "$td16"
+printf 'Project: waitproject\nBrief: test\n' > "$td16/brief.md"
+repo16="$td16/myrepo"; mkdir -p "$repo16"
+printf 'done\n' > "$repo16/status"
+
+reset_state
+
+SERGEANT_DRAIN_DIR="$drain_dir" SERGEANT_FLEET="$fleet_dir_wait" \
+  "$ROOT_DIR/bin/sgt-drain" --global --wait --timeout 5 \
+  || { printf 'FAIL test16: expected exit 0 with terminal workers\n' >&2; exit 1; }
+
+printf 'test16 --wait exits with terminal workers: ok\n'
+reset_state
+
+# ── Test 17: --wait exits immediately when all workers drained ────────────────
+td17="$fleet_dir_wait/task-t17"
+mkdir -p "$td17"
+printf 'Project: waitproject\nBrief: test\n' > "$td17/brief.md"
+repo17="$td17/myrepo"; mkdir -p "$repo17"
+printf 'drained\n' > "$repo17/status"
+
+SERGEANT_DRAIN_DIR="$drain_dir" SERGEANT_FLEET="$fleet_dir_wait" \
+  "$ROOT_DIR/bin/sgt-drain" --global --wait --timeout 5 \
+  || { printf 'FAIL test17: expected exit 0 with pre-drained workers\n' >&2; exit 1; }
+
+printf 'test17 --wait exits with pre-drained workers: ok\n'
+reset_state
+
+# ── Test 18: --wait exits immediately for orphaned (unreachable) workers ──────
+td18="$fleet_dir_wait/task-t18"
+mkdir -p "$td18"
+printf 'Project: waitproject\nBrief: test\n' > "$td18/brief.md"
+repo18="$td18/myrepo"; mkdir -p "$repo18"
+printf 'orphaned\n' > "$repo18/status"
+
+SERGEANT_DRAIN_DIR="$drain_dir" SERGEANT_FLEET="$fleet_dir_wait" \
+  "$ROOT_DIR/bin/sgt-drain" --global --wait --timeout 5 \
+  || { printf 'FAIL test18: expected exit 0 with unreachable workers\n' >&2; exit 1; }
+
+printf 'test18 --wait exits with unreachable workers: ok\n'
+reset_state
+
+# ── Test 19: --wait returns when in-progress worker updates to drained ────────
+td19="$fleet_dir_wait/task-t19"
+mkdir -p "$td19"
+printf 'Project: waitproject\nBrief: test\n' > "$td19/brief.md"
+repo19="$td19/myrepo"
+wt19="$TEST_ROOT/wt-t19"
+mkdir -p "$repo19" "$wt19"
+printf 'in_progress\n' > "$repo19/status"
+printf 'in_progress\n' > "$wt19/.sergeant-status"
+printf '%s\n' "$wt19" > "$repo19/worktree"
+
+SERGEANT_DRAIN_DIR="$drain_dir" SERGEANT_FLEET="$fleet_dir_wait" \
+  SERGEANT_DRAIN_POLL_INTERVAL=0.1 \
+  "$ROOT_DIR/bin/sgt-drain" --global --wait --timeout 10 &
+drain_wait_pid=$!
+sleep 0.2
+
+# Simulate worker draining
+printf 'drained\n' > "$wt19/.sergeant-status"
+printf 'drained\n' > "$repo19/status"
+
+wait "$drain_wait_pid"
+wait_rc=$?
+[[ "$wait_rc" -eq 0 ]] || { printf 'FAIL test19: expected exit 0, got %d\n' "$wait_rc" >&2; exit 1; }
+
+printf 'test19 --wait returns when worker drains: ok\n'
+reset_state
+
+# ── Test 20: --wait times out without killing workers ─────────────────────────
+td20="$fleet_dir_wait/task-t20"
+mkdir -p "$td20"
+printf 'Project: waitproject\nBrief: test\n' > "$td20/brief.md"
+repo20="$td20/myrepo"; mkdir -p "$repo20"
+printf 'in_progress\n' > "$repo20/status"
+
+start_ts="$(date +%s)"
+set +e
+SERGEANT_DRAIN_DIR="$drain_dir" SERGEANT_FLEET="$fleet_dir_wait" \
+  "$ROOT_DIR/bin/sgt-drain" --global --wait --timeout 2
+wait_rc=$?
+set -e
+end_ts="$(date +%s)"
+elapsed=$(( end_ts - start_ts ))
+
+[[ "$wait_rc" -ne 0 ]] || { printf 'FAIL test20: expected non-zero exit on timeout\n' >&2; exit 1; }
+[[ "$elapsed" -ge 1 ]] || { printf 'FAIL test20: exited too quickly (%ds)\n' "$elapsed" >&2; exit 1; }
+# Worker status unchanged
+[[ "$(cat "$repo20/status")" == "in_progress" ]] || { printf 'FAIL test20: worker status changed\n' >&2; exit 1; }
+
+printf 'test20 --wait times out without killing workers: ok\n'
+reset_state
+
+# ── Test 21: --wait project scope only waits for matching workers ─────────────
+fleet_dir_scope="$TEST_ROOT/fleet-scope"
+mkdir -p "$fleet_dir_scope"
+
+td21a="$fleet_dir_scope/task-projA"
+mkdir -p "$td21a"
+printf 'Project: projA\nBrief: test\n' > "$td21a/brief.md"
+repo21a="$td21a/myrepo"; mkdir -p "$repo21a"
+printf 'in_progress\n' > "$repo21a/status"
+
+td21b="$fleet_dir_scope/task-projB"
+mkdir -p "$td21b"
+printf 'Project: projB\nBrief: test\n' > "$td21b/brief.md"
+repo21b="$td21b/myrepo"; mkdir -p "$repo21b"
+printf 'in_progress\n' > "$repo21b/status"
+
+# Drain projA only
+SERGEANT_DRAIN_DIR="$drain_dir" SERGEANT_FLEET="$fleet_dir_scope" \
+  SERGEANT_DRAIN_POLL_INTERVAL=0.1 \
+  "$ROOT_DIR/bin/sgt-drain" projA --wait --timeout 10 &
+scope_pid=$!
+sleep 0.2
+
+# Mark projA worker as drained
+printf 'drained\n' > "$repo21a/status"
+
+wait "$scope_pid"
+scope_rc=$?
+[[ "$scope_rc" -eq 0 ]] || { printf 'FAIL test21: expected exit 0, got %d\n' "$scope_rc" >&2; exit 1; }
+
+# projB worker should be untouched
+[[ "$(cat "$repo21b/status")" == "in_progress" ]] || { printf 'FAIL test21: projB worker affected\n' >&2; exit 1; }
+
+printf 'test21 --wait project scope only: ok\n'
+
+printf '\nsgt-drain --wait: all tests passed\n'

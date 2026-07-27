@@ -83,6 +83,9 @@ the operation with ad hoc shell commands.
 | `bin/sgt-td-list <project>` | Show td tasks across all repos in a project |
 | `bin/sgt-td-create <project> "<title>" --repos <list>` | Create td tasks in repos (called automatically by sgt-dispatch) |
 | `bin/sgt-notify <task-id> "<message>"` | Record a durable wake marker and optionally inject into the primary session pane |
+| `bin/sgt-drain --global\|<project> [--wait [--timeout <s>]]` | Issue a cooperative drain signal; workers finish current turn and exit cleanly |
+| `bin/sgt-undrain --global\|<project>` | Deactivate a drain signal |
+| `bin/sgt-drain --status [--global\|<project>]` | Show active drain state |
 | `wiki-daily-digest [--date YYYY-MM-DD] [--since DATE] [--dry-run]` | Synthesize opencode session history into `~/wiki/sessions/` |
 
 Use the bare command when it resolves on `PATH`; otherwise run the matching

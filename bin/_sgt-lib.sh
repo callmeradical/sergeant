@@ -116,6 +116,7 @@ _sgt_wiki_write() {
     "$body" 2>/dev/null || true
 }
 
+
 _require_yq() {
   command -v yq &>/dev/null || _die "yq is required: brew install yq"
 }
