@@ -1698,6 +1698,8 @@ for repo_dir in "$TASK_DIR"/*/; do
       if [[ "$wt_type" == "git" ]]; then
         _fallback_repo_base="$(basename "$worktree" | sed "s/-sgt-${TASK_ID}$//")"
         retry_root="$(dirname "$worktree")/$_fallback_repo_base"
+        [[ -d "$retry_root" && ( -d "$retry_root/.git" || -f "$retry_root/.git" ) ]] || \
+          _die "Cannot resolve configured cleanup owner: $repo_name"
       elif [[ "$wt_type" == "treehouse" && -f "$worktree/.git" ]]; then
         git_dir_line_th="$(cat "$worktree/.git")"
         git_dir_th="${git_dir_line_th#gitdir: }"
