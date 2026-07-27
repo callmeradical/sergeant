@@ -649,3 +649,43 @@ done
 }
 
 printf 'symlink_failure_no_dangling_symlink: ok\n'
+
+# ── Slice: --code-only fallback when no LLM API key is set (issue #86) ─────────
+# When no supported LLM API key env var is set, sgt-graphify must pass --code-only
+# to graphify extract so the code graph is still built even when doc/paper files
+# are present. Without --code-only graphify aborts the entire run.
+
+# Run sgt-graphify in a subshell so we can unset all LLM key env vars cleanly.
+graphify_log_no_key="$TEST_ROOT/graphify-no-key.log"
+no_key_status=0
+(
+  unset ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY
+  unset KIMI_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY
+  HOME="$home" PATH="$fake_bin:$PATH" SERGEANT_CONFIG="$config" \
+    GRAPHIFY_LOG="$graphify_log_no_key" \
+    "$ROOT_DIR/bin/sgt-graphify" example >/dev/null 2>&1
+) || no_key_status=$?
+
+[[ "$no_key_status" -eq 0 ]] || {
+  printf 'FAIL no_llm_key_code_only: sgt-graphify should exit 0 even with no LLM key, got %d\n' \
+    "$no_key_status" >&2; exit 1
+}
+grep -qF -- '--code-only' "$graphify_log_no_key" || {
+  printf 'FAIL no_llm_key_code_only: --code-only must be passed to graphify extract when no API key is set\n' >&2
+  printf 'actual extract call: %s\n' "$(grep 'extract' "$graphify_log_no_key" | head -1)" >&2
+  exit 1
+}
+printf 'no_llm_key_code_only_fallback: ok\n'
+
+# With an API key set, --code-only must NOT be added (full semantic extraction intended).
+graphify_log_with_key="$TEST_ROOT/graphify-with-key.log"
+(
+  export ANTHROPIC_API_KEY="sk-ant-test-key-placeholder"
+  HOME="$home" PATH="$fake_bin:$PATH" SERGEANT_CONFIG="$config" \
+    GRAPHIFY_LOG="$graphify_log_with_key" \
+    "$ROOT_DIR/bin/sgt-graphify" example >/dev/null 2>&1
+)
+! grep -qF -- '--code-only' "$graphify_log_with_key" || {
+  printf 'FAIL no_llm_key_code_only: --code-only must NOT be passed when an API key is available\n' >&2; exit 1
+}
+printf 'llm_key_present_no_code_only_flag: ok\n'
