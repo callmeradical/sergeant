@@ -824,4 +824,232 @@ fi
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" task-123 >/dev/null
 
+# --- PR14-F1 regression: prefix/suffix-colliding task and worktree names ---
+#
+# Proves that cleanup identifies owned panes by exact recorded identity rather
+# than by substring-matching the pane start command.  Three tasks share their
+# name components in both prefix and suffix directions:
+#
+#   col-a   — task being cleaned up
+#   col-ab  — PREFIX collision: "col-a" is a leading substring of "col-ab"
+#   xcol-a  — SUFFIX collision: "col-a" is a trailing substring of "xcol-a"
+#
+# Corresponding worktree names also collide:
+#   col-base-sgt-col-a   (the one being removed)
+#   col-base-sgt-col-ab  (prefix: col-a is a prefix of col-ab)
+#   col-base-sgt-xcol-a  (suffix: col-a is a suffix of xcol-a)
+#
+# The old code checked:
+#   pane_command contains *sgt-worker*  AND  pane_command contains *"$repo_dir"*
+#
+# The new code stores the full tmux pane identity at dispatch time and compares
+# with _sgt_pane_identity_matches for an exact match.  This ensures that neither
+# col-ab's nor xcol-a's pane is touched when cleaning up col-a.
+
+mkdir -p "$TEST_ROOT/fleet/col-a/app" "$TEST_ROOT/fleet/col-ab/app" \
+  "$TEST_ROOT/fleet/xcol-a/app" "$TEST_ROOT/col-base"
+git -C "$TEST_ROOT/col-base" init -q
+git -C "$TEST_ROOT/col-base" config user.name Test
+git -C "$TEST_ROOT/col-base" config user.email test@example.invalid
+touch "$TEST_ROOT/col-base/README.md"
+git -C "$TEST_ROOT/col-base" add README.md
+git -C "$TEST_ROOT/col-base" commit -qm fixture
+
+col_a_worktree="$TEST_ROOT/col-base-sgt-col-a"
+col_ab_worktree="$TEST_ROOT/col-base-sgt-col-ab"
+xcol_a_worktree="$TEST_ROOT/col-base-sgt-xcol-a"
+git -C "$TEST_ROOT/col-base" worktree add -q -b col-a-branch "$col_a_worktree"
+git -C "$TEST_ROOT/col-base" worktree add -q -b col-ab-branch "$col_ab_worktree"
+git -C "$TEST_ROOT/col-base" worktree add -q -b xcol-a-branch "$xcol_a_worktree"
+
+col_a_state="$TEST_ROOT/fleet/col-a/app"
+col_ab_state="$TEST_ROOT/fleet/col-ab/app"
+xcol_a_state="$TEST_ROOT/fleet/xcol-a/app"
+
+printf 'done\n'      > "$col_a_state/status"
+printf 'col-a\n'     > "$col_a_state/result"
+printf '%s\n' "$col_a_worktree" > "$col_a_state/worktree"
+printf 'git\n'       > "$col_a_state/wt_type"
+printf 'done\n'      > "$col_a_worktree/.sergeant-status"
+printf 'col-a\n'     > "$col_a_worktree/.sergeant-result"
+
+printf 'done\n'      > "$col_ab_state/status"
+printf 'col-ab\n'    > "$col_ab_state/result"
+printf '%s\n' "$col_ab_worktree" > "$col_ab_state/worktree"
+printf 'git\n'       > "$col_ab_state/wt_type"
+printf 'done\n'      > "$col_ab_worktree/.sergeant-status"
+printf 'col-ab\n'    > "$col_ab_worktree/.sergeant-result"
+
+printf 'done\n'      > "$xcol_a_state/status"
+printf 'xcol-a\n'    > "$xcol_a_state/result"
+printf '%s\n' "$xcol_a_worktree" > "$xcol_a_state/worktree"
+printf 'git\n'       > "$xcol_a_state/wt_type"
+printf 'done\n'      > "$xcol_a_worktree/.sergeant-status"
+printf 'xcol-a\n'    > "$xcol_a_worktree/.sergeant-result"
+
+# col-ab's pane command deliberately contains col-a's fleet path as a substring
+# (prefix collision: "col-a" is a leading substring of "col-ab").
+# xcol-a's pane command contains col-a's fleet path as a trailing substring
+# (suffix collision: "col-a" is a trailing substring of "xcol-a").
+# The old code's *"$col_a_state"* pattern would incorrectly match these panes.
+col_a_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n col-a-worker \
+  "while :; do sleep 1; done")"
+col_ab_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n col-ab-worker \
+  "env 'COL_A_STATE=$col_a_state' bash -c 'while :; do sleep 1; done'")"
+xcol_a_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n xcol-a-worker \
+  "env 'XCOL_A_PARENT=$col_a_state' bash -c 'while :; do sleep 1; done'")"
+
+printf '%s\n' "$col_a_pane" > "$col_a_state/pane"
+tmux display-message -p -t "$col_a_pane" \
+  '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+  > "$col_a_state/pane_identity"
+chmod 600 "$col_a_state/pane_identity"
+
+printf '%s\n' "$col_ab_pane" > "$col_ab_state/pane"
+tmux display-message -p -t "$col_ab_pane" \
+  '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+  > "$col_ab_state/pane_identity"
+chmod 600 "$col_ab_state/pane_identity"
+
+printf '%s\n' "$xcol_a_pane" > "$xcol_a_state/pane"
+tmux display-message -p -t "$xcol_a_pane" \
+  '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+  > "$xcol_a_state/pane_identity"
+chmod 600 "$xcol_a_state/pane_identity"
+
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" col-a >/dev/null
+
+# col-a's pane must be dead (exact identity matched → terminated)
+for _ in $(seq 1 100); do
+  tmux list-panes -a -F '#{pane_id}' | grep -Fxq "$col_a_pane" || break
+  sleep 0.01
+done
+if tmux list-panes -a -F '#{pane_id}' | grep -Fxq "$col_a_pane"; then
+  printf 'col-a worker pane still alive after cleanup\n' >&2
+  exit 1
+fi
+
+# col-ab's pane must survive (PREFIX collision must not kill sibling)
+if ! tmux display-message -p -t "$col_ab_pane" '#{pane_id}' >/dev/null 2>&1; then
+  printf 'col-ab worker pane was incorrectly killed (prefix collision bug)\n' >&2
+  exit 1
+fi
+
+# xcol-a's pane must survive (SUFFIX collision must not kill sibling)
+if ! tmux display-message -p -t "$xcol_a_pane" '#{pane_id}' >/dev/null 2>&1; then
+  printf 'xcol-a worker pane was incorrectly killed (suffix collision bug)\n' >&2
+  exit 1
+fi
+
+# col-a's worktree and fleet state must be removed
+[[ ! -d "$col_a_worktree" ]] || {
+  printf 'col-a worktree not removed after cleanup\n' >&2; exit 1
+}
+[[ ! -d "$TEST_ROOT/fleet/col-a" ]] || {
+  printf 'col-a fleet state not removed after cleanup\n' >&2; exit 1
+}
+
+# col-ab's worktree and fleet state must survive (prefix collision)
+[[ -d "$col_ab_worktree" ]] || {
+  printf 'col-ab worktree was incorrectly removed (prefix collision bug)\n' >&2; exit 1
+}
+[[ -d "$TEST_ROOT/fleet/col-ab" ]] || {
+  printf 'col-ab fleet state was incorrectly removed (prefix collision bug)\n' >&2; exit 1
+}
+
+# xcol-a's worktree and fleet state must survive (suffix collision)
+[[ -d "$xcol_a_worktree" ]] || {
+  printf 'xcol-a worktree was incorrectly removed (suffix collision bug)\n' >&2; exit 1
+}
+[[ -d "$TEST_ROOT/fleet/xcol-a" ]] || {
+  printf 'xcol-a fleet state was incorrectly removed (suffix collision bug)\n' >&2; exit 1
+}
+
+# Idempotent cleanup of siblings to leave session in known state
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" col-ab >/dev/null
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" xcol-a >/dev/null
+
+# --- PR14-F1 regression: pane recycling with substring-matching command ---
+#
+# If a recorded pane ID is recycled and the replacement pane runs a command
+# that would have matched the old *sgt-worker* + *"$repo_dir"* substring check,
+# the new code must reject it because the stored pane_identity will not match
+# the live pane's exact identity.
+#
+# Simulation: stub tmux returns a live pane whose identity differs from the
+# stored pane_identity file.  The pane start command deliberately contains the
+# task's repo_dir path so that the old substring check *would* have matched.
+# The new code's _sgt_pane_identity_matches must return false and leave the
+# pane untouched.
+
+recycled_state="$TEST_ROOT/fleet/recycled-pane/app"
+mkdir -p "$recycled_state" "$TEST_ROOT/recycled-bin"
+printf 'done\n'   > "$recycled_state/status"
+printf 'result\n' > "$recycled_state/result"
+printf '%s\n' "$TEST_ROOT/missing-recycled-worktree" > "$recycled_state/worktree"
+
+# Stored identity: pane %88, pid 8800, created at a specific past timestamp.
+# This is what was recorded when the original worker was dispatched.
+stored_pane_id='%88'
+stored_identity="0|${stored_pane_id}|8800|Mon Jan  1 00:00:00 2000|original-sgt-worker ${recycled_state}"
+printf '%s\n' "$stored_pane_id" > "$recycled_state/pane"
+printf '%s\n' "$stored_identity" > "$recycled_state/pane_identity"
+chmod 600 "$recycled_state/pane_identity"
+
+# Stub tmux simulates pane recycling: %88 is now alive but with a NEW identity
+# (different pid and creation time — a different process than the one we owned).
+# The start command still contains recycled_state so the old substring check
+# (*"$recycled_state"*) *would* have fired.
+cat > "$TEST_ROOT/recycled-bin/tmux" <<EOF
+#!/usr/bin/env bash
+# Stub covers only the tmux commands reachable in the identity-mismatch path
+# of _stop_local_worker: _sgt_pane_identity (full format) and, if the pane
+# were killed, the #{pane_id} existence probe.  Because identity mismatches
+# cause _stop_local_worker to skip to "recorded pane no longer belongs", the
+# kill-pane path is never reached, so the catch-all returns exit 0 silently,
+# which is safe — no actual tmux side-effects are exercised beyond these two.
+case "\${*}" in
+  *'display-message'*'-t'*'%88'*'#{pane_dead}'*)
+    # Full identity query (#{pane_dead}|#{pane_id}|...) — return a DIFFERENT
+    # identity than the stored one: same pane_id but different pid and time.
+    # This simulates pane recycling: %88 is live but belongs to a new process.
+    printf '0|%%88|9900|Tue Feb  2 11:11:11 2025|recycled-sgt-worker ${recycled_state}\n'
+    ;;
+  *'display-message'*'-t'*'%88'*)
+    # Existence probe (#{pane_id} only) — pane %88 is present
+    printf '%%88\n'
+    ;;
+  *'kill-pane'*)
+    printf '%s\n' "\$*" >> "$TEST_ROOT/recycled-kills.log"
+    ;;
+  *) ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/recycled-bin/tmux"
+
+set +e
+PATH="$TEST_ROOT/recycled-bin:$PATH" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" recycled-pane > "$TEST_ROOT/recycled-pane.log" 2>&1
+recycled_status=$?
+set -e
+
+# Cleanup must succeed (absent worktree → reconciled-absent → fleet state cleared)
+[[ "$recycled_status" -eq 0 ]] || {
+  printf 'recycled-pane cleanup failed unexpectedly: %s\n' \
+    "$(cat "$TEST_ROOT/recycled-pane.log")" >&2
+  exit 1
+}
+# The recycled pane must NOT have been killed: identity mismatch must have
+# caused the new code to skip it with "recorded pane no longer belongs to this
+# worker", not to invoke kill-pane.
+[[ ! -e "$TEST_ROOT/recycled-kills.log" ]] || {
+  printf 'recycled pane was incorrectly killed (pane identity not checked exactly):\n%s\n' \
+    "$(cat "$TEST_ROOT/recycled-kills.log")" >&2
+  exit 1
+}
+grep -Fq 'recorded pane no longer belongs to this worker' "$TEST_ROOT/recycled-pane.log"
+
 printf 'sgt-cleanup worker termination: ok\n'
