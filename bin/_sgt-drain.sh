@@ -1,155 +1,171 @@
 #!/usr/bin/env bash
-# _sgt-drain.sh — Drain admission helpers sourced by sgt-dispatch, sgt-respond, and sgt-worker.
+# _sgt-drain.sh — Durable drain-state module and atomic dispatch admission seam.
 # Source this file; do not execute it directly.
+#
+# Provides:
+#   _sgt_drain_dir           — canonical drain state root
+#   _sgt_drain_lock_file     — admission lock path
+#   _sgt_drain_global_file   — global drain record path
+#   _sgt_drain_project_file  — project drain record path
+#   _sgt_drain_write         — write drain record atomically
+#   _sgt_drain_read_field    — extract a named field from a drain file
+#   _sgt_drain_is_drained    — test drain state (fails closed on malformed)
+#   _sgt_drain_with_lock     — run a callback while holding the admission lock
+#   _sgt_drain_check_admission  — acquire lock, check drain, return 0 if admitted
+#   _sgt_drain_clear         — remove a drain record
 
 [[ "${SGT_DRAIN_LIB_LOADED:-}" == "1" ]] && return 0
 SGT_DRAIN_LIB_LOADED=1
 
-_SGT_DRAIN_LIB_DIR="${_SGT_DRAIN_LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+# ── Paths ─────────────────────────────────────────────────────────────────────
 
-_SGT_DRAIN_DIR="${SERGEANT_DRAIN_DIR:-$HOME/.local/share/sergeant/drain}"
-
-# ── State helpers ─────────────────────────────────────────────────────────────
-
-_sgt_drain_global_dir() {
-  echo "$_SGT_DRAIN_DIR/global"
+_sgt_drain_dir() {
+  echo "${SERGEANT_DRAIN_DIR:-${HOME}/.local/share/sergeant/drains}"
 }
 
-_sgt_drain_project_dir() {
+_sgt_drain_lock_file() {
+  echo "$(_sgt_drain_dir)/admission.lock"
+}
+
+_sgt_drain_global_file() {
+  echo "$(_sgt_drain_dir)/global/drain"
+}
+
+_sgt_drain_project_file() {
   local project="$1"
-  echo "$_SGT_DRAIN_DIR/projects/$project"
+  echo "$(_sgt_drain_dir)/projects/$project/drain"
 }
 
-_sgt_drain_generation_file() {
-  echo "$_SGT_DRAIN_DIR/generation"
-}
-
-# Atomically increment drain generation.
-_sgt_drain_bump_generation() {
-  local gen_file
-  gen_file="$(_sgt_drain_generation_file)"
-  mkdir -p "$(dirname "$gen_file")"
-  local current=0
-  if [[ -f "$gen_file" ]]; then
-    current="$(tr -d '\n' < "$gen_file" 2>/dev/null || echo 0)"
-    [[ "$current" =~ ^[0-9]+$ ]] || current=0
-  fi
-  local tmp
-  tmp="$(mktemp "${gen_file}.tmp.XXXXXX")"
-  printf '%s\n' "$((current + 1))" > "$tmp"
-  mv "$tmp" "$gen_file"
-}
-
-# Return 0 if global drain is active (reason file exists and is readable).
-_sgt_drain_global_active() {
-  [[ -f "$_SGT_DRAIN_DIR/global/reason" ]]
-}
-
-# Return 0 if project drain is active.
-_sgt_drain_project_active() {
-  local project="$1"
-  [[ -n "$project" ]] && [[ -f "$_SGT_DRAIN_DIR/projects/$project/reason" ]]
-}
-
-# ── Admission lock ─────────────────────────────────────────────────────────────
-# Admission lock serialises drain-set writes against dispatch/relaunch checks.
-# Both drain creation and the admission check must acquire this lock.
+# ── Write ─────────────────────────────────────────────────────────────────────
+# _sgt_drain_write <file> <reason> <actor> [<deadline>]
 #
-# Usage: _sgt_drain_lock_acquire; ...; _sgt_drain_lock_release
-# The lock is held on fd 9 in the calling process.
+# Atomically writes a drain record to <file>.
+# Fields: reason, actor, created_at, deadline (optional metadata — stored but
+# not used to auto-expire; drains persist until explicit undrain).
 
-_SGT_DRAIN_LOCK_FD=9
-_SGT_DRAIN_LOCK_FILE=""
-
-_sgt_drain_lock_acquire() {
-  _SGT_DRAIN_LOCK_FILE="$_SGT_DRAIN_DIR/admission.lock"
-  mkdir -p "$_SGT_DRAIN_DIR"
-  # Open fd 9 for writing to the lock file.
-  eval "exec ${_SGT_DRAIN_LOCK_FD}>\"\$_SGT_DRAIN_LOCK_FILE\""
-  if ! flock -w 10 "$_SGT_DRAIN_LOCK_FD"; then
-    eval "exec ${_SGT_DRAIN_LOCK_FD}>&-"
-    return 1
-  fi
-  return 0
+_sgt_drain_write() {
+  local file="$1" reason="$2" actor="$3" deadline="${4:-}"
+  local dir tmp
+  dir="$(dirname "$file")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "${file}.tmp.XXXXXX")"
+  {
+    printf 'reason=%s\n' "$reason"
+    printf 'actor=%s\n' "$actor"
+    printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if [[ -n "$deadline" ]]; then
+      printf 'deadline=%s\n' "$deadline"
+    fi
+  } > "$tmp"
+  mv "$tmp" "$file"
 }
 
-_sgt_drain_lock_release() {
-  eval "exec ${_SGT_DRAIN_LOCK_FD}>&-" 2>/dev/null || true
-}
-
-# ── Admission check ────────────────────────────────────────────────────────────
-# Check whether dispatch or relaunch for <project> is admitted.
-# Returns 0 if admitted; returns 1 (with error on stderr) if drained.
+# ── Read field ────────────────────────────────────────────────────────────────
+# _sgt_drain_read_field <file> <field>
 #
-# Must be called while holding the admission lock.
+# Extracts the value of a named field (key=value) from a drain record.
+# Returns empty string if the field is absent.
+
+_sgt_drain_read_field() {
+  local file="$1" field="$2"
+  grep -m1 "^${field}=" "$file" 2>/dev/null | cut -d= -f2- || true
+}
+
+# ── Test ──────────────────────────────────────────────────────────────────────
+# _sgt_drain_is_drained <file>
+#
+# Returns 0 (drained / fail-closed) when the file exists, regardless of content.
+# Returns 1 (not drained) only when the file does not exist.
+#
+# Drain records persist until explicit undrain — they do not auto-expire.
+# The deadline field is stored metadata for operator reference only.
+# Malformed files (any content) also fail closed.
+
+_sgt_drain_is_drained() {
+  local file="$1"
+  [[ -f "$file" ]]
+}
+
+# ── Lock helper ───────────────────────────────────────────────────────────────
+# _sgt_drain_with_lock <callback_body>
+#
+# Acquires the exclusive admission lock and executes <callback_body> as a
+# command string inside the lock subshell, printing its stdout.
+# Exits 1 with an error message if the lock cannot be acquired.
+
+_sgt_drain_with_lock() {
+  local body="$1"
+  local lock_file
+  lock_file="$(_sgt_drain_lock_file)"
+  mkdir -p "$(dirname "$lock_file")"
+  (
+    flock -x -w "${SERGEANT_DRAIN_LOCK_TIMEOUT_SECS:-10}" 200 || {
+      printf 'ERROR: could not acquire drain admission lock\n' >&2
+      exit 1
+    }
+    eval "$body"
+  ) 200>"$lock_file"
+}
+
+# ── Clear ─────────────────────────────────────────────────────────────────────
+# _sgt_drain_clear <file>
+#
+# Removes the drain record if it exists.  No-op if not present.
+
+_sgt_drain_clear() {
+  local file="$1"
+  rm -f "$file"
+}
+
+# ── Admission check ───────────────────────────────────────────────────────────
+# _sgt_drain_check_admission <project>
+#
+# Acquires the exclusive admission lock, checks both the global and
+# project-specific drain records, and returns:
+#   0 — admitted (dispatch may proceed)
+#   1 — rejected (global or project drain is active)
+#
+# Rejection message is printed to stderr.
+# Fails closed on lock acquisition failure.
 
 _sgt_drain_check_admission() {
-  local project="${1:-}"
-  if _sgt_drain_global_active; then
-    local reason
-    reason="$(tr -d '\n' < "$_SGT_DRAIN_DIR/global/reason" 2>/dev/null || echo "")"
-    local actor=""
-    [[ -f "$_SGT_DRAIN_DIR/global/actor" ]] && actor="$(tr -d '\n' < "$_SGT_DRAIN_DIR/global/actor" 2>/dev/null || true)"
-    if [[ -n "$actor" ]]; then
-      printf 'ERROR: dispatch rejected: global drain is active (reason: %s, actor: %s)\n' \
-        "${reason:-unspecified}" "$actor" >&2
+  local project="$1"
+  local global_file project_file result
+  global_file="$(_sgt_drain_global_file)"
+  project_file="$(_sgt_drain_project_file "$project")"
+
+  result="$(_sgt_drain_with_lock "
+    if _sgt_drain_is_drained \"$global_file\"; then
+      printf 'global\n'
+    elif _sgt_drain_is_drained \"$project_file\"; then
+      printf 'project\n'
     else
-      printf 'ERROR: dispatch rejected: global drain is active (reason: %s)\n' \
-        "${reason:-unspecified}" >&2
+      printf 'admitted\n'
     fi
-    return 1
-  fi
-  if [[ -n "$project" ]] && _sgt_drain_project_active "$project"; then
-    local reason
-    reason="$(tr -d '\n' < "$_SGT_DRAIN_DIR/projects/$project/reason" 2>/dev/null || echo "")"
-    local actor=""
-    [[ -f "$_SGT_DRAIN_DIR/projects/$project/actor" ]] && \
-      actor="$(tr -d '\n' < "$_SGT_DRAIN_DIR/projects/$project/actor" 2>/dev/null || true)"
-    if [[ -n "$actor" ]]; then
-      printf 'ERROR: dispatch rejected: project drain is active for %s (reason: %s, actor: %s)\n' \
-        "$project" "${reason:-unspecified}" "$actor" >&2
-    else
-      printf 'ERROR: dispatch rejected: project drain is active for %s (reason: %s)\n' \
-        "$project" "${reason:-unspecified}" >&2
-    fi
-    return 1
-  fi
-  return 0
-}
+  ")"
 
-# ── Convenience: lock + check + unlock in one call ─────────────────────────────
-# Exits the calling script with an error message if drain is active.
-# Intended for use at dispatch/relaunch admission boundaries.
-
-_sgt_drain_admit_or_die() {
-  local project="${1:-}"
-  if ! _sgt_drain_lock_acquire; then
-    printf 'ERROR: cannot acquire drain admission lock\n' >&2
-    return 1
-  fi
-  if ! _sgt_drain_check_admission "$project"; then
-    _sgt_drain_lock_release
-    return 1
-  fi
-  _sgt_drain_lock_release
-  return 0
-}
-
-# ── Read current drain generation ─────────────────────────────────────────────
-
-_sgt_drain_current_generation() {
-  local gen_file
-  gen_file="$(_sgt_drain_generation_file)"
-  if [[ -f "$gen_file" ]]; then
-    tr -d '\n' < "$gen_file" 2>/dev/null || echo "0"
-  else
-    echo "0"
-  fi
+  case "$result" in
+    global)
+      printf 'ERROR: dispatch rejected: global drain is active\n' >&2
+      return 1
+      ;;
+    project)
+      printf 'ERROR: dispatch rejected: project drain is active for %s\n' "$project" >&2
+      return 1
+      ;;
+    admitted)
+      return 0
+      ;;
+    *)
+      printf 'ERROR: dispatch rejected: drain admission check failed\n' >&2
+      return 1
+      ;;
+  esac
 }
 
 # ── Fast-path drain check (no lock) ───────────────────────────────────────────
 # For use inside worker polling loops where acquiring the full admission lock
-# on every iteration would be too expensive.  These functions do a plain file-
+# on every iteration would be too expensive. These functions do a plain file-
 # existence check; they fail-open (return 1 = not drained) rather than fail-
 # closed because they are not used for admission gates.
 
