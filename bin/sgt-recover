@@ -138,13 +138,9 @@ fi
 # Global or project drain prevents new pane starts.  Escalate without stamping
 # stall_recovery_attempted so that recovery can be retried after undrain.
 
-_sgt_recover_project=""
-if [[ -f "$FLEET_DIR/$TASK_ID/brief.md" ]]; then
-  _sgt_recover_project="$(sed -n 's/^Project:[[:space:]]*//p' "$FLEET_DIR/$TASK_ID/brief.md")"
-  [[ "$_sgt_recover_project" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _sgt_recover_project=""
-fi
-if _sgt_is_drained "$_sgt_recover_project"; then
-  _escalate "stall recovery held by drain [project: ${_sgt_recover_project:-global}]; retry after undrain"
+_sgt_drain_read_project_from_brief "$FLEET_DIR/$TASK_ID"
+if _sgt_is_drained "$SGT_PROJECT"; then
+  _escalate "stall recovery held by drain [project: ${SGT_PROJECT:-global}]; retry after undrain"
   _recover_die "Stall recovery refused by drain for $TASK_ID/$REPO"
 fi
 

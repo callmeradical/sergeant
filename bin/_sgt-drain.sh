@@ -19,6 +19,22 @@ _sgt_drain_state_dir() {
   printf '%s\n' "${SERGEANT_CONFIG:-$HOME/.config/sergeant}/drain"
 }
 
+# _sgt_drain_read_project_from_brief <task_dir>
+#
+# Extracts and validates the project name from the fleet brief.md file
+# ($task_dir/brief.md).  Sets the global SGT_PROJECT variable.
+# If the file is absent or the name is invalid, SGT_PROJECT is left empty.
+_sgt_drain_read_project_from_brief() {
+  local task_dir="$1" project
+  # shellcheck disable=SC2034  # SGT_PROJECT is consumed by sourcing scripts.
+  SGT_PROJECT=""
+  [[ -f "$task_dir/brief.md" ]] || return 0
+  project="$(sed -n 's/^Project:[[:space:]]*//p' "$task_dir/brief.md")"
+  [[ "$project" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 0
+  # shellcheck disable=SC2034  # SGT_PROJECT is consumed by sourcing scripts.
+  SGT_PROJECT="$project"
+}
+
 # _sgt_is_drained <project>
 #
 # Returns 0 (true) if a global drain or a matching project drain is active.

@@ -97,7 +97,7 @@ _setup_stalled_worker() {
   printf 'task/app\n' > "$repo_state/window_name"
   printf 'opencode\n' > "$repo_state/agent"
   printf 'td-123\n' > "$repo_state/td_task"
-  rm -f "$repo_state/stall_recovery_attempted" "$repo_state/drain_recovery_held"
+  rm -f "$repo_state/stall_recovery_attempted"
   rm -rf "$config_dir/drain"
 }
 
