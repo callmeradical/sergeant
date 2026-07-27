@@ -1290,7 +1290,8 @@ _git_worktree_removal_proven() {
   local branch_ref canonical field has_bare has_head has_kind has_locked \
     has_prunable head in_record path probe_file record_count target="$2" \
     target_count=0 valid validated_root="$1"
-  local -a registered_paths=()
+  local -a registered_paths
+  registered_paths=()
 
   canonical="$(_canonical_registry_path "$target")" || return 1
   [[ "$canonical" == "$target" ]] || return 1
@@ -1341,8 +1342,8 @@ _git_worktree_removal_proven() {
       done
       [[ "$valid" == true ]] || break
       registered_paths[${#registered_paths[@]}]="$path"
-      ((record_count += 1))
-      [[ "$path" != "$target" ]] || ((target_count += 1))
+      record_count=$((record_count + 1))
+      [[ "$path" != "$target" ]] || target_count=$((target_count + 1))
       has_bare=false
       has_head=false
       has_kind=false
