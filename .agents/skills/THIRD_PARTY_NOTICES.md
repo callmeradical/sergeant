@@ -33,3 +33,6 @@ SOFTWARE.
 
 `to-tickets` is Sergeant project-authored material. It is distributed under
 Sergeant's project MIT License: Copyright (c) 2026 Lars Cromley.
+
+`sergeant-setup` is Sergeant project-authored material. It is distributed under
+Sergeant's project MIT License: Copyright (c) 2026 Lars Cromley.

@@ -27,7 +27,7 @@ state.
 ## Documentation authority
 
 - `AGENTS.md` owns always-on agent execution and safety policy.
-- `skills/*/SKILL.md` own trigger-specific procedures.
+- `skills/*/SKILL.md` and `.agents/skills/*/SKILL.md` own trigger-specific procedures.
 - `docs/schema.md` owns project configuration fields and path resolution.
 - This documentation set owns user installation and operating instructions.
 - Command `--help` output wins when the command implements it. Otherwise use the

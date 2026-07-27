@@ -67,21 +67,23 @@ jq '.skills | to_entries[] | {name: .key, source: .value.source, path: .value.sk
 
 These ship with this repository and are governed by its tests and review:
 
-| Skill | Trigger |
-|---|---|
-| `load-project` | A project is named, registered, edited, synced, or graphed |
-| `cross-repo-work` | More than one repository owns the requested outcome |
-| `dispatch` | Workers/fleets must be dispatched, monitored, answered, reconciled, or cleaned |
-| `wiki` | Wiki ingestion, backfill, digest, or capture behavior is requested |
-| `sergeant-help` | Installation, setup, usage, skills, or troubleshooting help is requested |
+| Skill | Location | Trigger |
+|---|---|---|
+| `load-project` | `skills/` | A project is named, registered, edited, synced, or graphed |
+| `cross-repo-work` | `skills/` | More than one repository owns the requested outcome |
+| `dispatch` | `skills/` | Workers/fleets must be dispatched, monitored, answered, reconciled, or cleaned |
+| `wiki` | `skills/` | Wiki ingestion, backfill, digest, or capture behavior is requested |
+| `sergeant-help` | `skills/` | Read-only installation, setup, usage, skills, or troubleshooting help is requested |
+| `sergeant-setup` | `.agents/skills/` | User wants to interactively bootstrap, configure, or repair a Sergeant installation |
+| `to-tickets` | `.agents/skills/` | User says "to tickets", "create issues", or asks to break work into td tasks |
 
 ## Other local skills
 
 Your installation may also contain local or tool-owned skills, including
-Graphify, no-mistakes, swamp, and Sergeant's custom `to-tickets`. Their source
-and update mechanism may differ from Matt Pocock's bundle. Inspect their
-package metadata, repository, or skill file before distributing them to another
-user.
+Graphify, no-mistakes, swamp, and Sergeant's custom `to-tickets` and
+`sergeant-setup`. Their source and update mechanism may differ from Matt
+Pocock's bundle. Inspect their package metadata, repository, or skill file
+before distributing them to another user.
 
 ## Choosing a skill
 

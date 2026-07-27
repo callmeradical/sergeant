@@ -202,7 +202,7 @@ Generated worker briefs always require separate Standards and Spec reviews. For 
 
 ## Skills
 
-Agent-loaded skills for structured workflows:
+Core agent-loaded skills for structured workflows:
 
 | Skill | What it does |
 |---|---|
@@ -210,11 +210,12 @@ Agent-loaded skills for structured workflows:
 | `skills/cross-repo-work` | Assign repository ownership and dependency/merge order |
 | `skills/dispatch` | Operate td, worktrees, workers, fleets, escalation, review, and cleanup |
 | `skills/wiki` | Validate automatic captures and generate curated daily wiki digests |
-| `skills/sergeant-help` | Query repository docs for installation, usage, skills, and troubleshooting help |
+| `skills/sergeant-help` | Query repository docs for read-only installation, usage, skills, and troubleshooting help |
+| `.agents/skills/sergeant-setup` | Interactively bootstrap, configure, or repair a Sergeant installation |
 
-Worker briefs also depend on eight vendored workflow skills. Codex discovers
-their canonical `.agents/skills` tree directly, OpenCode uses `opencode.json`,
-and Claude uses repository-local `.claude/skills` links. See
+Repo-scoped worker skills live in the canonical `.agents/skills` tree. Codex
+discovers that tree directly, OpenCode uses `opencode.json`, and Claude uses
+repository-local `.claude/skills` links. See
 `docs/repo-scoped-skills.md` for the inventory and provenance.
 
 ## Requirements
