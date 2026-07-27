@@ -1403,6 +1403,7 @@ SERGEANT_CONFIG="$TEST_ROOT/config" \
   printf 'fleet state not removed after partial-removal reconcile\n' >&2; exit 1
 }
 mv "$TEST_ROOT/fake-bin/git.saved" "$TEST_ROOT/fake-bin/git"
+
 mkdir -p "$TEST_ROOT/fleet/unchanged-retry/app"
 init_test_repo "$TEST_ROOT/unchanged-retry"
 git -C "$TEST_ROOT/unchanged-retry" worktree add -q -b unchanged-retry-worker \
