@@ -142,6 +142,11 @@ if grep -Eq 'super-secret|raw-token|hidden-value|hunter2|dXNlcjpwYXNz|ghp_|AKIA|
   exit 1
 fi
 
+# 40-char hex SHA (git SHA) must not be redacted by the high-entropy filter
+printf '{"findings":[{"id":"std-sha","severity":"warning","disposition":"actionable","summary":"SHA in evidence","evidence":"commit a6af6854056c77a7a1ed73e61b74cd7fead52e30 removed file","paths":[],"acceptance_criteria":"SHA preserved","recommendation":"none"}]}\n' > "$TEST_ROOT/sha.json"
+run_router "$TEST_ROOT/sha.json"
+grep -Fq 'a6af6854056c77a7a1ed73e61b74cd7fead52e30' "$TEST_ROOT/td.log"
+
 TD_LIST_RESULT=null run_router "$TEST_ROOT/secrets.json"
 [[ "$status" -eq 0 && "$output" == *'td-created-1'* ]]
 grep -q '^create ' "$TEST_ROOT/td.log"
@@ -162,6 +167,35 @@ if grep -Fq 'reopen td-existing' "$TEST_ROOT/td.log"; then
   printf 'rerun changed active finding state\n' >&2
   exit 1
 fi
+
+# dedup update with a different fleet task ID must write the new ID into the body
+TD_LIST_RESULT='[{"id":"td-existing","status":"in_progress","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1"}]' \
+  ROUTER_TASK_ID='fleet-new' run_router "$TEST_ROOT/findings.json"
+grep -Fq 'update td-existing' "$TEST_ROOT/td.log"
+grep -Fq 'Originating fleet task: fleet-new' "$TEST_ROOT/td.log"
+if grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log"; then
+  printf 'stale fleet task ID retained in updated body\n' >&2
+  exit 1
+fi
+
+# closed existing task must be reopened before update
+TD_LIST_RESULT='[{"id":"td-closed","status":"closed","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1"}]' \
+  run_router "$TEST_ROOT/findings.json"
+grep -Fq 'reopen td-closed' "$TEST_ROOT/td.log"
+grep -Fq 'update td-closed' "$TEST_ROOT/td.log"
+grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log"
+reopen_line="$(grep -nF 'reopen td-closed' "$TEST_ROOT/td.log" | cut -d: -f1)"
+update_line="$(grep -nF 'update td-closed' "$TEST_ROOT/td.log" | cut -d: -f1)"
+[[ "$reopen_line" -lt "$update_line" ]]
+
+# deferred existing task must have deferral cleared before update
+TD_LIST_RESULT='[{"id":"td-deferred","status":"in_progress","defer_until":"2099-01-01","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1"}]' \
+  run_router "$TEST_ROOT/findings.json"
+grep -Fq 'defer td-deferred --clear' "$TEST_ROOT/td.log"
+grep -Fq 'update td-deferred' "$TEST_ROOT/td.log"
+defer_line="$(grep -nF 'defer td-deferred' "$TEST_ROOT/td.log" | cut -d: -f1)"
+update_line="$(grep -nF 'update td-deferred' "$TEST_ROOT/td.log" | cut -d: -f1)"
+[[ "$defer_line" -lt "$update_line" ]]
 
 ROUTER_TASK_ID='fleet/invalid' run_router "$TEST_ROOT/findings.json"
 [[ "$status" -eq 2 && "$output" == *'invalid fleet task'* ]]
