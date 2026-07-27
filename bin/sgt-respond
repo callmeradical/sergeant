@@ -10,6 +10,8 @@ source "$SCRIPT_DIR/_sgt-lib.sh"
 source "$SCRIPT_DIR/_sgt-intent.sh"
 # shellcheck source=bin/_sgt-response-lock.sh
 source "$SCRIPT_DIR/_sgt-response-lock.sh"
+# shellcheck source=bin/_sgt-drain.sh
+source "$SCRIPT_DIR/_sgt-drain.sh"
 
 _die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -305,6 +307,21 @@ if ! command -v tmux >/dev/null 2>&1 || [[ -z "$tmux_session" || -z "$window_nam
     "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
   echo "sgt-respond: no live local pane and relaunch metadata is incomplete; response file is ready."
   exit 0
+fi
+
+# ── Drain admission check for worker relaunch ─────────────────────────────────
+# Drain blocks relaunch (new pane/process) but never blocks response storage or
+# delivery to an already-live pane (handled above). The response was already
+# stored above; on drain, exit non-zero so the caller knows relaunch was
+# deferred while the stored response is preserved for later consumption.
+_sgt_respond_drain_project=""
+[[ -f "$REPO_DIR/project" ]] && \
+  _sgt_respond_drain_project="$(tr -d '\n' < "$REPO_DIR/project" 2>/dev/null || true)"
+if ! _sgt_drain_check_admission "${_sgt_respond_drain_project:-}" 2>/dev/null; then
+  _sgt_response_lock_release 2>/dev/null || true
+  trap - EXIT
+  echo "sgt-respond: drain is active; response stored for consumption after drain is cleared."
+  exit 1
 fi
 
 current_notification_id="$(cat "$REPO_DIR/notification_id" 2>/dev/null || true)"

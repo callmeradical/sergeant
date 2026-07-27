@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# sgt-drain-force — Force-stop workers that failed cooperative drain (td-fa4fed).
+#
+# Requires an active drain. Displays exact project/task/repo/pane/process
+# identity before stopping. Never runs automatically; requires --yes or
+# --dry-run.
+#
+# Usage:
+#   sgt-drain-force --global [--dry-run] [--yes]
+#   sgt-drain-force --project <project> [--dry-run] [--yes]
+#
+# Environment:
+#   SERGEANT_DRAIN_DIR   Override drain state directory
+#   SERGEANT_FLEET       Override fleet state directory
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-drain.sh
+source "$SCRIPT_DIR/_sgt-drain.sh"
+
+_die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+_info() { printf '  %s\n' "$*"; }
+
+# ── Parse args ────────────────────────────────────────────────────────────────
+
+GLOBAL=false
+PROJECT=""
+DRY_RUN=false
+CONFIRMED=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --global)   GLOBAL=true;              shift ;;
+    --project)
+      [[ -n "${2:-}" ]] || _die "--project requires a value"
+      PROJECT="$2"; shift 2
+      ;;
+    --dry-run)  DRY_RUN=true;             shift ;;
+    --yes)      CONFIRMED=true;           shift ;;
+    *) _die "Unknown option: $1" ;;
+  esac
+done
+
+$GLOBAL || [[ -n "$PROJECT" ]] || \
+  _die "sgt-drain-force requires --global or --project <name>"
+
+# ── Verify a matching drain is active ─────────────────────────────────────────
+
+if $GLOBAL; then
+  _sgt_drain_is_drained "$(_sgt_drain_global_file)" || \
+    _die "no drain is active globally; force requires an active drain"
+else
+  _sgt_drain_is_drained "$(_sgt_drain_project_file "$PROJECT")" || \
+    _die "no drain is active for project '$PROJECT'; force requires an active drain"
+fi
+
+# ── Require confirmation ───────────────────────────────────────────────────────
+
+if ! $DRY_RUN && ! $CONFIRMED; then
+  _die "force requires --yes to confirm or --dry-run to preview targets"
+fi
+
+# ── Collect eligible workers ──────────────────────────────────────────────────
+
+fleet_dir="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
+declare -a eligible_tasks=()
+declare -a eligible_repos=()
+declare -a eligible_worktrees=()
+declare -a eligible_pids=()
+
+if [[ -d "$fleet_dir" ]]; then
+  for task_dir in "$fleet_dir"/*/; do
+    [[ -d "$task_dir" ]] || continue
+    task_id="$(basename "$task_dir")"
+    for repo_dir in "$task_dir"*/; do
+      [[ -d "$repo_dir" ]] || continue
+      repo_name="$(basename "$repo_dir")"
+      status="$(tr -d '\n' < "$repo_dir/status" 2>/dev/null || echo "")"
+      case "$status" in
+        done|"failed:"*|drained|force-stopped|orphaned) continue ;;
+      esac
+      if [[ -n "$PROJECT" ]]; then
+        worker_project=""
+        [[ -f "$repo_dir/project" ]] && \
+          worker_project="$(tr -d '\n' < "$repo_dir/project" 2>/dev/null || true)"
+        [[ "$worker_project" == "$PROJECT" ]] || continue
+      fi
+      worktree_path="$(tr -d '\n' < "$repo_dir/worktree" 2>/dev/null || echo "")"
+      worker_pid=""
+      [[ -f "$repo_dir/worker_pid" ]] && \
+        worker_pid="$(tr -d '\n' < "$repo_dir/worker_pid" 2>/dev/null || true)"
+      eligible_tasks+=("$task_id")
+      eligible_repos+=("$repo_name")
+      eligible_worktrees+=("$worktree_path")
+      eligible_pids+=("$worker_pid")
+    done
+  done
+fi
+
+count="${#eligible_tasks[@]}"
+if [[ "$count" -eq 0 ]]; then
+  _info "no eligible workers to force-stop"
+  exit 0
+fi
+
+# ── Display targets ───────────────────────────────────────────────────────────
+
+printf 'Eligible workers for force-stop (%s):\n' "$count"
+for ((i=0; i<count; i++)); do
+  printf '  task: %s  repo: %s  worktree: %s' \
+    "${eligible_tasks[$i]}" "${eligible_repos[$i]}" "${eligible_worktrees[$i]:-unknown}"
+  [[ -n "${eligible_pids[$i]:-}" ]] && printf '  pid: %s' "${eligible_pids[$i]}"
+  printf '\n'
+done
+
+if $DRY_RUN; then
+  _info "dry-run: no workers terminated"
+  exit 0
+fi
+
+# ── Execute force-stop ────────────────────────────────────────────────────────
+
+any_failed=false
+for ((i=0; i<count; i++)); do
+  task_id="${eligible_tasks[$i]}"
+  repo_name="${eligible_repos[$i]}"
+  wt="${eligible_worktrees[$i]}"
+  pid="${eligible_pids[$i]:-}"
+  repo_dir="$fleet_dir/$task_id/$repo_name"
+
+  if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]]; then
+    if kill -0 "$pid" 2>/dev/null; then
+      if ! kill -TERM "$pid" 2>/dev/null; then
+        printf '  WARN: SIGTERM failed for pid %s (%s/%s)\n' "$pid" "$task_id" "$repo_name" >&2
+        any_failed=true
+        continue
+      fi
+      waited=0
+      while [[ "$waited" -lt 50 ]]; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+        waited=$((waited + 1))
+      done
+      kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+    fi
+  fi
+
+  if [[ -n "$wt" && -d "$wt" ]]; then
+    printf 'force-stopped\n' > "$wt/.sergeant-status" || true
+  fi
+  printf 'force-stopped\n' > "$repo_dir/status" || true
+  _info "force-stopped: $task_id/$repo_name"
+done
+
+if $any_failed; then
+  _die "some workers could not be terminated; state preserved for manual recovery"
+fi
