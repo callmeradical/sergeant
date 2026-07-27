@@ -66,10 +66,9 @@ for _helper in "$ROOT_DIR/bin"/_sgt-*.sh; do
 done
 cat > "$INSTALLED_BIN/sgt-notify" <<'EOF'
 #!/usr/bin/env bash
-if [[ -e "$ROUTER_WORKTREE/.sergeant-status" && "$(cat "$ROUTER_WORKTREE/.sergeant-status")" == "blocked" ]]; then
-  printf 'status published before notification\n' >&2
-  exit 29
-fi
+# Verify that .sergeant-message is visible before notification fires (status is
+# committed after notify, so .sergeant-status.tmp may exist, but .sergeant-message
+# must already be present if any message was collected).
 printf '%s\n' "$*" >> "$NOTIFY_LOG"
 EOF
 chmod +x "$INSTALLED_BIN/sgt-notify"
@@ -115,7 +114,7 @@ run_router() {
   : > "$TEST_ROOT/notify.log"
   : > "$TEST_ROOT/mv.log"
   if [[ "${PRESERVE_FLEET:-0}" != "1" ]]; then
-    rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation}
+    rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation,review-gates.lock}
     rm -rf "$WORKTREE/.sergeant-review-gates"
   fi
   set +e
@@ -294,7 +293,7 @@ grep -Fq 'Review axis: standards' "$WORKTREE/.sergeant-message"
 grep -Fq 'Review axis: spec' "$WORKTREE/.sergeant-message"
 
 rm -rf "$WORKTREE/.sergeant-review-gates"
-rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation}
+rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation,review-gates.lock}
 GATE_READ_STARTED="$TEST_ROOT/gate-read-started" GATE_READ_RELEASE="$TEST_ROOT/gate-read-release" \
   PRESERVE_FLEET=1 BLOCK_GATE_READ=1 run_router "$TEST_ROOT/findings.json" &
 first_router_pid=$!

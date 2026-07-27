@@ -64,6 +64,11 @@ _sgt_response_lock_acquire() {
 
     if [[ -e "$lock_path" || -L "$lock_path" ]]; then
       owner="$(cat "$lock_path" 2>/dev/null || readlink "$lock_path" 2>/dev/null || true)"
+      if [[ -z "$owner" ]]; then
+        # Lock file disappeared between the -e check and the read (TOCTOU: just released).
+        # Retry; the next iteration will find the file gone and attempt ln.
+        continue
+      fi
       if [[ ! "$owner" =~ ^[0-9]+$ ]]; then
         rm -f "$candidate"
         printf 'ERROR: Response lock has an invalid owner: %s\n' "$lock_path" >&2
