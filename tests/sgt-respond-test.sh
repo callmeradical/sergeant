@@ -104,9 +104,16 @@ case "$1" in
       printf '%s\n' "$notification_id" > "$EXPECTED_WORKER/notification_delivered"
     fi
     if [[ "${AUTO_DELIVER:-1}" == 1 && "$deliver" == true && -s "$EXPECTED_WORKER/notification_id" ]]; then
-      if [[ "${REQUIRE_TARGET:-0}" == 1 &&
-            "$(cat "$EXPECTED_WORKER/notification_target_pane_identity" 2>/dev/null || true)" != "$pane_identity" ]]; then
-        exit 32
+      if [[ "${REQUIRE_TARGET:-0}" == 1 ]]; then
+        _rt_nonce="$(cat "$EXPECTED_WORKER/notification_target" 2>/dev/null || true)"
+        _rt_id="$(cat "$EXPECTED_WORKER/notification_id" 2>/dev/null || true)"
+        _rt_identity=""
+        if [[ -n "$_rt_id" && "$_rt_nonce" =~ ^[a-f0-9]{32}$ ]]; then
+          _rt_identity="$(cat "$EXPECTED_WORKER/notifications/$_rt_id/targets/$_rt_nonce/pane_identity" 2>/dev/null || true)"
+        fi
+        if [[ "$_rt_identity" != "$pane_identity" ]]; then
+          exit 32
+        fi
       fi
       notification_id="$(cat "$EXPECTED_WORKER/notification_id")"
       notification_worktree="$(cat "$EXPECTED_WORKER/worktree")"
@@ -158,7 +165,7 @@ if [[ -n "${FAIL_PUBLISH_TARGET:-}" && "$target" == "$FAIL_PUBLISH_TARGET" ]]; t
 fi
 if [[ "${REQUIRE_REVOKED_BEFORE_NOTIFICATION:-0}" == 1 &&
       "$target" == "$EXPECTED_WORKER/notification_id" &&
-      -e "$EXPECTED_WORKER/notification_target_pane_identity" ]]; then
+      -e "$EXPECTED_WORKER/notification_target" ]]; then
   exit 24
 fi
 exec "${REAL_MV:-/bin/mv}" "$@"
@@ -486,7 +493,7 @@ printf '%s\n' "$stale_notification_id|$stale_nonce" \
 printf '%s\n' "$stale_notification_id" > "$repo_state/notification_delivered"
 printf '0|%%99|9999|654321|stale-pane\n' > "$repo_state/notification_delivered_pane_identity"
 printf '%s|%s\n' "$stale_notification_id" \
-  "$(cat "$repo_state/notification_target_pane_identity")" \
+  "$(cat "$repo_state/notifications/$stale_notification_id/targets/$stale_nonce/pane_identity")" \
   > "$worktree/.sergeant-notification-ack"
 rm -f "$worktree/.sergeant-response"
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/crash-relaunch.log" \
@@ -501,12 +508,44 @@ PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/crash-relaunch.log" \
 [[ "$(cat "$repo_state/pane")" == %100 ]]
 [[ "$(cat "$repo_state/notification_delivered")" == "$(cat "$repo_state/notification_id")" ]]
 [[ "$(cat "$repo_state/notification_delivered_pane_identity")" == 0\|%100\|9999\|654321\|* ]]
-[[ "$(cat "$repo_state/notification_target_pane_identity")" == 0\|%100\|9999\|654321\|* ]]
+new_notif_id="$(cat "$repo_state/notification_id")"
+new_nonce="$(cat "$repo_state/notification_target")"
+[[ "$(cat "$repo_state/notifications/$new_notif_id/targets/$new_nonce/pane_identity")" == 0\|%100\|9999\|654321\|* ]]
 [[ "$(cat "$TEST_ROOT/crash-relaunch-delivery-count")" -ge 3 ]]
 [[ ! -e "$TEST_ROOT/crash-relaunch-td.log" ]]
 [[ "$(cat "$worktree/.sergeant-response")" == 'resume dead worker' ]]
 grep -Fq '%99' \
   "$repo_state/notifications/$stale_notification_id/superseded_target_pane_identity"
+
+printf 'needs_input\n' > "$repo_state/status"
+printf 'needs_input\n' > "$worktree/.sergeant-status"
+rm -f "$worktree/.sergeant-response" "$repo_state/response" \
+  "$repo_state/response_id" "$repo_state/response_generation"
+replacement_nonce="dddddddddddddddddddddddddddddddd"
+target_race_hook="printf '%s\\n' '$replacement_nonce' > \"\$repo_dir/notification_target\""
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/relaunch-target-race.log" \
+  TD_LOG="$TEST_ROOT/relaunch-target-race-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 PANE_IDENTITY="1|%42|4242|123456|dead-pane" NEW_PANE=%101 \
+  SGT_TEST_HOOKS=1 _SGT_POST_MV_HOOK="$target_race_hook" \
+  EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  respond 'relaunch target race' 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]]
+[[ "$output" == *'notification target race detected for task-1/app; relaunched worker orphaned'* ]]
+[[ "$(cat "$repo_state/status")" == 'orphaned' ]]
+[[ "$(cat "$worktree/.sergeant-status")" == 'orphaned' ]]
+grep -Fq 'notification target race detected during relaunch' "$repo_state/diagnostic"
+grep -Fq 'kill-pane -t %101' "$TEST_ROOT/relaunch-target-race.log"
+[[ "$(cat "$repo_state/notification_target")" == "$replacement_nonce" ]]
+[[ ! -e "$repo_state/notification_target_pane_identity" ]]
+race_notification_id="$(cat "$repo_state/notification_id")"
+race_target_count="$(find "$repo_state/notifications/$race_notification_id/targets" -mindepth 1 \
+  -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+[[ "$race_target_count" == "0" ]]
+[[ "$(cat "$worktree/.sergeant-response")" == 'relaunch target race' ]]
+[[ ! -d "$repo_state/response.lock" ]]
 
 rm "$worktree/.sergeant-response" "$repo_state/response"
 cat > "$fake_bin/td" <<'EOF'
