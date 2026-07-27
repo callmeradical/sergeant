@@ -339,11 +339,16 @@ if ! _sgt_drain_lock_acquire_fd "$_SGT_RESPOND_DRAIN_FD" 2>/dev/null; then
   _die "cannot acquire drain admission lock"
 fi
 if ! _sgt_drain_check_admission_locked "${_sgt_respond_drain_project:-}"; then
+  # Drain is active: response has been stored generation-safely above.
+  # Write drain_held so that an explicit undrain can reevaluate this waiting
+  # worker exactly once (consistent with the direct _sgt_is_drained path below).
+  _atomic_write "$REPO_DIR/drain_held" "$gate_generation" 2>/dev/null || true
   _sgt_drain_lock_release_fd "$_SGT_RESPOND_DRAIN_FD"
   _sgt_response_lock_release 2>/dev/null || true
+  _cleanup_response_input
   trap - EXIT
   echo "sgt-respond: drain is active; response stored for consumption after drain is cleared."
-  exit 1
+  exit 0
 fi
 # Drain admission lock remains held until after new-window (see release below).
 
