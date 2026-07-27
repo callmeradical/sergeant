@@ -308,8 +308,10 @@ _sgt_notification_target_create() {
   printf '%s\n' "$pane_identity" > "$target_dir/pane_identity" || return 1
   temporary="$repo_dir/notification_target.tmp.$$"
   printf '%s\n' "$nonce" > "$temporary" || return 1
-  # Atomic rename publishes our nonce.  Any concurrent publisher that writes to
-  # notification_target after our mv is detected via the post-mv verification.
+  # Atomic rename publishes our nonce.  A competing write that lands before our
+  # mv is harmless because rename(2) overwrites the destination atomically.  A
+  # write that lands after our mv is the failure window and is detected by the
+  # post-mv verification below.
   mv "$temporary" "$repo_dir/notification_target" || return 1
   # Test seam: inject a concurrent replacement after the mv to exercise the
   # post-mv verification path.  Active only when SGT_TEST_HOOKS=1; never set
