@@ -353,7 +353,20 @@ _extract_repo() {
     mkdir -p "$scan_root"
     tar -C "$path" "${tar_exclude_args[@]}" -cf - . | tar -C "$scan_root" -xf -
   fi
-  graphify extract "$scan_root" --out "$repo_root"
+  # When no supported LLM API key is available, pass --code-only so graphify
+  # indexes code via local AST without attempting semantic (LLM) extraction.
+  # Without this flag, graphify aborts the entire run when it encounters
+  # doc/paper/image files and no key is set (issue #86).
+  local extract_extra_args=()
+  if [[ -z "${ANTHROPIC_API_KEY:-}" && \
+        -z "${OPENAI_API_KEY:-}" && \
+        -z "${GEMINI_API_KEY:-}" && \
+        -z "${KIMI_API_KEY:-}" && \
+        -z "${DEEPSEEK_API_KEY:-}" && \
+        -z "${OPENROUTER_API_KEY:-}" ]]; then
+    extract_extra_args+=("--code-only")
+  fi
+  graphify extract "$scan_root" --out "$repo_root" "${extract_extra_args[@]}"
 }
 
 for ((i=0; i<repo_count; i++)); do
