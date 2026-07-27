@@ -387,3 +387,37 @@ PANE_ACTIVITY=9900 SERGEANT_STALL_GRACE_SECONDS=300 SERGEANT_STALL_NOW=9999 \
 
 printf 'sgt-watch stall detection: ok\n'
 printf 'sgt-watch local fleet sync: ok\n'
+
+# ── drained worker: sync, list, and watch exit behavior ──────────────────────
+
+drained_fleet="$TEST_ROOT/fleet-drained"
+drained_task="$drained_fleet/task-drained"
+drained_wt="$TEST_ROOT/drained-wt"
+mkdir -p "$drained_task/drainedrepo" "$drained_wt"
+printf 'Brief: drained lifecycle test\n' > "$drained_task/brief.md"
+printf '%s\n' "$drained_wt" > "$drained_task/drainedrepo/worktree"
+printf 'local-tmux\n' > "$drained_task/drainedrepo/backend"
+printf 'drained\n' > "$drained_wt/.sergeant-status"
+# Note: no pane file — drained worker's supervisor has exited
+
+# --sync: drained status propagated to fleet without triggering orphan detector
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$drained_fleet" \
+  "$ROOT/bin/sgt-watch" --sync task-drained
+[[ "$(cat "$drained_task/drainedrepo/status")" == "drained" ]] || {
+  printf 'FAIL sgt-watch drained sync: expected drained status\n' >&2; exit 1; }
+[[ ! -f "$drained_task/drainedrepo/diagnostic" ]] || {
+  printf 'FAIL sgt-watch drained sync: unexpected diagnostic\n' >&2; exit 1; }
+
+# --list: shows drained count
+list_drained_output="$(PATH="$fake_bin:$PATH" SERGEANT_FLEET="$drained_fleet" \
+  "$ROOT/bin/sgt-watch" --list)"
+[[ "$list_drained_output" == *'1 drained'* ]] || {
+  printf 'FAIL sgt-watch --list: expected drained count\n' >&2; exit 1; }
+
+# sgt-watch <task>: all workers drained → exits 0 (not looping forever)
+SERGEANT_WATCH_INTERVAL=0.01 PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$drained_fleet" \
+  "$ROOT/bin/sgt-watch" task-drained || {
+  printf 'FAIL sgt-watch task-drained: expected exit 0 when all drained\n' >&2; exit 1; }
+
+printf 'sgt-watch drained status: ok\n'

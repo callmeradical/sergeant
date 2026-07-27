@@ -7,13 +7,22 @@
 #   sgt-drain --status
 #   sgt-drain --status --global
 #   sgt-drain --status <project>
+#   sgt-drain --wait [--global|<project>] [--timeout <seconds>]
 #
-# A global drain blocks dispatch for every project.
-# A project drain blocks dispatch only for the named project.
+# A global drain blocks dispatch for every project and signals all active
+# workers to finish their current operation and exit cleanly.
+# A project drain blocks dispatch only for the named project and signals
+# only that project's active workers.
 # Drain records are durable and survive process/session restart.
 # Malformed drain files fail closed (dispatch stays blocked).
 # The optional --deadline field is stored metadata for operator reference;
 # drains persist until explicit undrain regardless of deadline.
+#
+# --wait polls the active fleet until all matching workers have reached
+# a quiescent state (drained, terminal, or unreachable), or until the
+# optional timeout expires. Reports acknowledged/draining/drained/terminal/
+# unreachable per worker. Times out without killing workers.
+# Use sgt-undrain to deactivate a drain signal.
 
 set -euo pipefail
 
@@ -25,10 +34,12 @@ source "$SCRIPT_DIR/_sgt-drain.sh"
 
 GLOBAL=false
 STATUS=false
+WAIT=false
 TARGET=""
 REASON=""
 ACTOR=""
 DEADLINE=""
+TIMEOUT_SECS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -38,6 +49,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --status)
       STATUS=true
+      shift
+      ;;
+    --wait)
+      WAIT=true
       shift
       ;;
     --reason)
@@ -53,6 +68,11 @@ while [[ $# -gt 0 ]]; do
     --deadline)
       [[ -n "${2:-}" ]] || { printf 'ERROR: --deadline requires a value\n' >&2; exit 1; }
       DEADLINE="$2"
+      shift 2
+      ;;
+    --timeout)
+      [[ -n "${2:-}" ]] || { printf 'ERROR: --timeout requires a value\n' >&2; exit 1; }
+      TIMEOUT_SECS="$2"
       shift 2
       ;;
     -*)
@@ -75,8 +95,9 @@ done
 # Reads drain state under the admission lock for consistency.
 # Output is privacy-safe: shows drained/not-drained and creation date only.
 
+# shellcheck disable=SC2317  # invoked indirectly via _sgt_drain_with_lock
 _print_drain_status() {
-  local label="$1" drain_file="$2"
+  local label="$1" drain_file="$2" created_at
   if _sgt_drain_is_drained "$drain_file"; then
     created_at="$(_sgt_drain_read_field "$drain_file" created_at)"
     if [[ -n "$created_at" ]]; then
@@ -117,6 +138,113 @@ if $STATUS; then
   fi
 
   exit 0
+fi
+
+# ── --wait mode ───────────────────────────────────────────────────────────────
+# Poll the active fleet until all matching workers are quiescent.
+# Must be used after a drain is already set; does not set the drain itself.
+
+if $WAIT; then
+  FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
+  POLL_INTERVAL="${SERGEANT_DRAIN_POLL_INTERVAL:-1}"
+  scope="${TARGET:-global}"
+  [[ "$GLOBAL" == "true" ]] && scope="global"
+  start_time="$(date +%s)"
+
+  # _wait_worker_state <repo_dir>: emits acknowledged|draining|drained|terminal|unreachable
+  _wait_worker_state() {
+    local repo_dir="$1"
+    local status worktree wt_status
+    status="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
+    worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
+
+    case "$status" in
+      drained)       printf 'drained\n';    return ;;
+      done|failed:*) printf 'terminal\n';   return ;;
+      orphaned)      printf 'unreachable\n'; return ;;
+    esac
+
+    if [[ -n "$worktree" && -f "$worktree/.sergeant-status" ]]; then
+      wt_status="$(tr -d '\n' < "$worktree/.sergeant-status" 2>/dev/null || echo "")"
+      case "$wt_status" in
+        drained)       printf 'drained\n';    return ;;
+        done|failed:*) printf 'terminal\n';   return ;;
+        orphaned)      printf 'unreachable\n'; return ;;
+      esac
+    fi
+
+    # Check for drain ack (worker has noticed the drain signal)
+    local drain_ack_present=false
+    if [[ -n "$worktree" && -f "$worktree/.sergeant-drained" ]]; then
+      drain_ack_present=true
+    fi
+
+    if $drain_ack_present; then
+      printf 'draining\n'
+    else
+      printf 'acknowledged\n'
+    fi
+  }
+
+  _find_matching_repos() {
+    [[ -d "$FLEET_DIR" ]] || return 0
+    for task_dir in "$FLEET_DIR"/*/; do
+      [[ -d "$task_dir" ]] || continue
+      if [[ "$scope" != "global" ]]; then
+        local task_project
+        task_project="$(awk '/^Project:/{print $2; exit}' "$task_dir/brief.md" 2>/dev/null || true)"
+        [[ "$task_project" == "$scope" ]] || continue
+      fi
+      for repo_dir in "$task_dir"*/; do
+        [[ -d "$repo_dir" && -f "$repo_dir/status" ]] || continue
+        printf '%s\n' "${repo_dir%/}"
+      done
+    done
+  }
+
+  _is_quiescent() {
+    case "$1" in
+      drained|terminal|unreachable) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+
+  printf 'waiting for workers to drain (scope: %s) ...\n' "$scope"
+
+  while true; do
+    all_quiescent=true
+    any_workers=false
+    declare -A worker_states=()
+
+    while IFS= read -r repo_dir; do
+      [[ -n "$repo_dir" ]] || continue
+      any_workers=true
+      state="$(_wait_worker_state "$repo_dir")"
+      worker_states["$repo_dir"]="$state"
+      _is_quiescent "$state" || all_quiescent=false
+    done < <(_find_matching_repos)
+
+    for repo_dir in "${!worker_states[@]}"; do
+      task_id="$(basename "$(dirname "$repo_dir")")"
+      repo_name="$(basename "$repo_dir")"
+      printf '  %s/%s: %s\n' "$task_id" "$repo_name" "${worker_states[$repo_dir]}"
+    done
+
+    if ! $any_workers || $all_quiescent; then
+      printf 'all workers quiescent (scope: %s)\n' "$scope"
+      exit 0
+    fi
+
+    if [[ "$TIMEOUT_SECS" -gt 0 ]]; then
+      elapsed=$(( $(date +%s) - start_time ))
+      if (( elapsed >= TIMEOUT_SECS )); then
+        printf 'timeout: not all workers drained within %ds\n' "$TIMEOUT_SECS" >&2
+        exit 1
+      fi
+    fi
+
+    sleep "$POLL_INTERVAL"
+  done
 fi
 
 # ── Set drain ─────────────────────────────────────────────────────────────────
