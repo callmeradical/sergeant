@@ -124,6 +124,7 @@ printf 'td-123\n' > "$repo_state/td_task"
 printf 'sgt\n' > "$repo_state/tmux_session"
 printf 'task/app\n' > "$repo_state/window_name"
 printf 'fake-opencode\n' > "$repo_state/agent"
+printf 'drain-test\n' > "$repo_state/branch"
 
 # Stored pane identity (for live pane matching check)
 printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo_state" \
@@ -132,7 +133,15 @@ chmod 600 "$repo_state/pane_identity"
 
 respond() {
   local response_body="$1"
-  printf '%s' "$response_body" | "$ROOT_DIR/bin/sgt-respond" task-1 app
+  # env vars on the LEFT of a pipeline apply only to the left-side command.
+  # Use a subshell so PATH and other vars are in scope for sgt-respond (right side).
+  (
+    export PATH="$fake_bin:$PATH"
+    export EXPECTED_WORKER="$repo_state"
+    export TD_LOG="${TD_LOG:-$TEST_ROOT/td.log}"
+    export TMUX_LOG="${TMUX_LOG:-$TEST_ROOT/tmux.log}"
+    printf '%s' "$response_body" | "$ROOT_DIR/bin/sgt-respond" task-1 app
+  )
 }
 
 _reset_worker() {
