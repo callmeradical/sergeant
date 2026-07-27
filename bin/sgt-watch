@@ -11,6 +11,15 @@ POLL_INTERVAL="${SERGEANT_WATCH_INTERVAL:-5}"
 
 _die() { echo "ERROR: $*" >&2; exit 1; }
 
+if [[ "${1:-}" == "--background" ]]; then
+  [[ $# -ge 2 ]] || _die "Usage: sgt-watch --background <task-id>"
+  TASK_ID="$2"
+  TASK_DIR="$FLEET_DIR/$TASK_ID"
+  [[ -d "$TASK_DIR" ]] || _die "Task not found: $TASK_ID (looked in $FLEET_DIR)"
+  _sgt_background_watch "$TASK_ID" "$TASK_DIR"
+  exit 0
+fi
+
 if [[ "${1:-}" == "--list" ]]; then
   if [[ ! -d "$FLEET_DIR" ]] || [[ -z "$(ls -A "$FLEET_DIR" 2>/dev/null)" ]]; then
     echo "No tasks found in $FLEET_DIR"

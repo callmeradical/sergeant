@@ -70,7 +70,8 @@ the operation with ad hoc shell commands.
 | `bin/sgt-dispatch <project> "<brief>" [options]` | Create worktrees + spawn agent per repo |
 | `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Apply a finding disposition and create/update owning-repo td work |
 | `bin/sgt-dispatch <project> --td <id>` | Dispatch from a td task (auto-detects repo) |
-| `bin/sgt-watch <task-id>` | Monitor fleet until all workers done |
+| `bin/sgt-watch <task-id> --background` | Start a managed background monitor (default for OpenCode); returns promptly with monitor identity and control commands |
+| `bin/sgt-watch <task-id>` | Monitor fleet in foreground until all workers done (for humans and debugging) |
 | `bin/sgt-watch --sync-all` | Reconcile every durable fleet record and recycle verified terminal panes |
 | `bin/sgt-watch --list` | List all active tasks |
 | `bin/sgt-respond <task-id> <repo>` | Read a worker response from stdin and resume its loop |
@@ -133,7 +134,7 @@ When the user brings you a task:
 6. **Execute**:
    - Direct: start the td task and implement through tests, review, and delivery.
    - Dispatch: use `sgt-dispatch <project> "<brief>" --repos <list>` or `sgt-dispatch <project> --td <id>`.
-7. **Monitor real progress** — require recent meaningful progress evidence plus exact worker-pane identity; parent-process liveness alone is insufficient. In OpenCode, run `sgt-watch` in a managed background process and verify that process started; if managed background execution is unavailable, use bounded one-shot status checks rather than a blocking watch call.
+7. **Monitor real progress** — require recent meaningful events or an active child operation plus exact pane/process identity; parent-process liveness alone is insufficient. In OpenCode, run `sgt-watch <task-id> --background` and verify that the monitor started (unit identity printed); if managed background execution is unavailable, use bounded one-shot status checks rather than a blocking watch call.
 8. **Handle decisions** — for `needs_input`, `blocked`, or ask-user gates, read the exact finding, obtain only genuinely missing user decisions, record them in td, and continue approved remediation without asking again merely to dispatch.
 9. **Reconcile and deliver** — surface PRs and merge order, complete approved merges/deployments, and run `sgt-cleanup` only after terminal state and preserved evidence are verified.
 

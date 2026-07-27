@@ -540,3 +540,167 @@ _require_marcus_td() {
 _require_treehouse() {
   command -v treehouse &>/dev/null || _die "treehouse is required: install from https://github.com/kunchenguid/treehouse"
 }
+
+# ── Managed background monitor helpers ───────────────────────────────────────
+#
+# Background monitor: run sgt-watch as a transient systemd user unit so
+# OpenCode does not need to hold a Bash call open.  The unit is named
+# sgt-watch-<task-id>.service, is started with --collect so systemd removes
+# it automatically on exit, and its per-run InvocationID is stored in the
+# fleet to bind stop authorization to the exact instance (TOCTOU protection).
+#
+# The indirection variables SERGEANT_SYSTEMCTL and SERGEANT_SYSTEMD_RUN allow
+# tests to substitute a fake service manager without touching PATH.
+
+_sgt_systemctl() {
+  "${SERGEANT_SYSTEMCTL:-systemctl}" "$@"
+}
+
+_sgt_systemd_run() {
+  "${SERGEANT_SYSTEMD_RUN:-systemd-run}" "$@"
+}
+
+# Validate that a task ID is safe for use in a systemd unit name.
+# Accepts only alphanumeric characters, hyphens, dots, and underscores;
+# rejects anything else to prevent argument injection and name collisions.
+_sgt_validate_monitor_task_id() {
+  local task_id="$1"
+  case "$task_id" in
+    ""|"."|".."|/*|*/*)
+      _die "Invalid task ID: $task_id"
+      ;;
+  esac
+  [[ "$task_id" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || \
+    _die "Task ID contains characters not allowed in managed monitor unit name (only alphanumeric, hyphen, dot, underscore permitted): $task_id"
+}
+
+# Return the full systemd service unit name for a task's background monitor.
+_sgt_monitor_unit_name() {
+  local task_id="$1"
+  printf 'sgt-watch-%s.service\n' "$task_id"
+}
+
+# Return the current InvocationID of a unit (empty string if not active).
+_sgt_monitor_invocation_id() {
+  local unit="$1"
+  local id
+  id="$(_sgt_systemctl --user show --property=InvocationID --value "$unit" 2>/dev/null | tr -d '\n')" || true
+  # An inactive/absent unit returns an empty string or the zero GUID from systemd.
+  # Treat the zero GUID as absent.
+  case "${id:-}" in
+    ""|"00000000000000000000000000000000") printf '' ;;
+    *) printf '%s\n' "$id" ;;
+  esac
+}
+
+# Print the stable monitor identity block shown after a successful start or
+# idempotent return.
+_sgt_print_monitor_identity() {
+  local unit="$1" invocation_id="$2"
+  printf 'monitor: %s (invocation: %s)\n' "$unit" "$invocation_id"
+  printf '\n'
+  printf '  status:  systemctl --user status %s\n' "$unit"
+  printf '  log:     journalctl --user -u %s -f\n' "$unit"
+  printf '  stop:    systemctl --user stop %s\n' "$unit"
+}
+
+# Start a background monitor for <task-id>, or return the existing one
+# idempotently.  Writes monitor_unit and monitor_invocation_id into the
+# task's fleet directory for ownership binding at cleanup time.
+_sgt_background_watch() {
+  local task_id="$1" task_dir="$2"
+  local unit existing_unit existing_inv current_inv invocation_id
+  local env_args=()
+
+  _sgt_validate_monitor_task_id "$task_id"
+
+  # Fail fast on unsupported platforms before touching any state.
+  command -v "${SERGEANT_SYSTEMD_RUN:-systemd-run}" >/dev/null 2>&1 || \
+    _die "Managed background monitor requires systemd user services (systemd-run not found). Use 'sgt-watch $task_id' for foreground monitoring instead."
+  command -v "${SERGEANT_SYSTEMCTL:-systemctl}" >/dev/null 2>&1 || \
+    _die "Managed background monitor requires systemd user services (systemctl not found). Use 'sgt-watch $task_id' for foreground monitoring instead."
+
+  unit="$(_sgt_monitor_unit_name "$task_id")"
+
+  # Idempotency: if the fleet already owns an active monitor with the same
+  # invocation ID, return it without starting a new one.
+  existing_unit="$(tr -d '\n' < "$task_dir/monitor_unit" 2>/dev/null || true)"
+  existing_inv="$(tr -d '\n' < "$task_dir/monitor_invocation_id" 2>/dev/null || true)"
+  if [[ -n "$existing_unit" && "$existing_unit" == "$unit" && -n "$existing_inv" ]]; then
+    current_inv="$(_sgt_monitor_invocation_id "$unit")"
+    if [[ -n "$current_inv" && "$current_inv" == "$existing_inv" ]]; then
+      _sgt_print_monitor_identity "$unit" "$existing_inv"
+      return 0
+    fi
+  fi
+
+  # Propagate the fleet directory when it differs from the compiled-in default
+  # so the monitor finds the task in the same location.
+  if [[ -n "${SERGEANT_FLEET:-}" ]]; then
+    env_args+=(--setenv="SERGEANT_FLEET=$SERGEANT_FLEET")
+  fi
+  # Propagate test-only service-manager overrides if set (no-op in production).
+  if [[ -n "${SERGEANT_SYSTEMCTL:-}" ]]; then
+    env_args+=(--setenv="SERGEANT_SYSTEMCTL=$SERGEANT_SYSTEMCTL")
+  fi
+  if [[ -n "${SERGEANT_SYSTEMD_RUN:-}" ]]; then
+    env_args+=(--setenv="SERGEANT_SYSTEMD_RUN=$SERGEANT_SYSTEMD_RUN")
+  fi
+  if [[ -n "${SGT_FAKE_SYSTEMD_STATE:-}" ]]; then
+    env_args+=(--setenv="SGT_FAKE_SYSTEMD_STATE=$SGT_FAKE_SYSTEMD_STATE")
+  fi
+
+  _sgt_systemd_run --user \
+    --unit="$unit" \
+    --collect \
+    --description="Sergeant fleet monitor for $task_id" \
+    "${env_args[@]}" \
+    "$_SGT_LIB_DIR/sgt-watch" "$task_id" || \
+    _die "Failed to start managed background monitor for $task_id"
+
+  # Capture the InvocationID that systemd assigned to this exact run.
+  invocation_id="$(_sgt_monitor_invocation_id "$unit")"
+  [[ -n "$invocation_id" ]] || \
+    _die "Failed to read InvocationID after starting monitor for $task_id (unit: $unit)"
+
+  # Persist ownership atomically.
+  printf '%s\n' "$unit"          > "$task_dir/monitor_unit.tmp.$$"
+  mv "$task_dir/monitor_unit.tmp.$$" "$task_dir/monitor_unit"
+  printf '%s\n' "$invocation_id" > "$task_dir/monitor_invocation_id.tmp.$$"
+  mv "$task_dir/monitor_invocation_id.tmp.$$" "$task_dir/monitor_invocation_id"
+
+  _sgt_print_monitor_identity "$unit" "$invocation_id"
+}
+
+# Stop the background monitor registered for a task fleet directory, binding
+# the stop to the exact stored InvocationID to prevent TOCTOU replacement.
+# Silently succeeds when no monitor is registered or the unit is already gone.
+_sgt_stop_background_monitor() {
+  local task_dir="$1"
+  local unit stored_inv current_inv
+
+  unit="$(tr -d '\n' < "$task_dir/monitor_unit" 2>/dev/null || true)"
+  [[ -n "$unit" ]] || return 0  # No monitor registered for this task.
+
+  stored_inv="$(tr -d '\n' < "$task_dir/monitor_invocation_id" 2>/dev/null || true)"
+  [[ -n "$stored_inv" ]] || \
+    _die "Background monitor unit registered ($unit) but invocation ID is missing; cannot safely stop"
+
+  current_inv="$(_sgt_monitor_invocation_id "$unit")"
+
+  if [[ -z "$current_inv" ]]; then
+    # Unit is inactive or already collected — nothing to stop.
+    echo "  background monitor already stopped: $unit"
+    return 0
+  fi
+
+  if [[ "$current_inv" != "$stored_inv" ]]; then
+    # A different process instance holds this unit name (TOCTOU replacement).
+    # Refuse to stop the foreign unit.
+    _die "Background monitor unit has unexpected invocation ID (stored: $stored_inv, actual: $current_inv); refusing to stop foreign unit: $unit"
+  fi
+
+  echo "  stopping background monitor: $unit"
+  _sgt_systemctl --user stop "$unit" || \
+    _die "Failed to stop background monitor: $unit"
+}

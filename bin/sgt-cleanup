@@ -613,6 +613,14 @@ _require_clean_worktrees
 echo "=== sgt-cleanup: $TASK_ID ==="
 echo ""
 
+# Stop any registered background monitor before removing worktrees.
+# _sgt_stop_background_monitor binds the stop to the stored InvocationID so
+# cleanup cannot terminate a foreign unit that has assumed the same name.
+# Skip when cleaning a single repo (monitor is task-scoped, not repo-scoped).
+if [[ -z "$FILTER_REPO" ]]; then
+  _sgt_stop_background_monitor "$TASK_DIR"
+fi
+
 for repo_dir in "$TASK_DIR"/*/; do
   [[ -d "$repo_dir" ]] || continue
   repo_dir="${repo_dir%/}"
