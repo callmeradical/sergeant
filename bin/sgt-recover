@@ -134,7 +134,17 @@ if [[ -n "$current_notification_id" ]]; then
   fi
 fi
 
-# ── 6. Pre-flight: verify relaunch metadata ──────────────────────────────────
+# ── 6. Drain admission check ─────────────────────────────────────────────────
+# Global or project drain prevents new pane starts.  Escalate without stamping
+# stall_recovery_attempted so that recovery can be retried after undrain.
+
+_sgt_drain_read_project_from_brief "$FLEET_DIR/$TASK_ID"
+if _sgt_is_drained "$SGT_PROJECT"; then
+  _escalate "stall recovery held by drain [project: ${SGT_PROJECT:-global}]; retry after undrain"
+  _recover_die "Stall recovery refused by drain for $TASK_ID/$REPO"
+fi
+
+# ── 7. Pre-flight: verify relaunch metadata ──────────────────────────────────
 # All prerequisites are validated BEFORE stamping the recovery attempt and
 # BEFORE killing anything, so that a validation failure leaves the stalled
 # worker alive and untouched.
@@ -149,7 +159,7 @@ if ! command -v tmux >/dev/null 2>&1 || \
   _recover_die "Stall recovery failed: relaunch metadata is incomplete for $TASK_ID/$REPO"
 fi
 
-# ── 7. Pre-flight: verify old pane identity ──────────────────────────────────
+# ── 8. Pre-flight: verify old pane identity ──────────────────────────────────
 # Save the old pane reference for the deferred kill and for potential restore
 # on failure.  The identity check is done here (under lock, before any state
 # mutation) so a mismatch refuses recovery without killing anything.
@@ -165,13 +175,13 @@ if [[ -n "$old_pane" ]] && command -v tmux >/dev/null 2>&1; then
   fi
 fi
 
-# ── 8. Stamp recovery attempt ────────────────────────────────────────────────
+# ── 9. Stamp recovery attempt ────────────────────────────────────────────────
 # All pre-flight checks passed.  Stamp now so that any subsequent failure
 # prevents a second recovery attempt.
 
 date -u +%Y-%m-%dT%H:%M:%SZ > "$REPO_DIR/stall_recovery_attempted"
 
-# ── 9. Preserve superseded notification target evidence ──────────────────────
+# ── 10. Preserve superseded notification target evidence ──────────────────────
 # Mirror sgt-respond's evidence preservation before clearing notification state.
 
 current_target_nonce="$(cat "$REPO_DIR/notification_target" 2>/dev/null || true)"
@@ -203,7 +213,7 @@ if [[ -n "$current_notification_id" && -n "$current_target_identity" ]]; then
 fi
 rm -f "$REPO_DIR/notification_target"
 
-# ── 10. Publish recovery notification ────────────────────────────────────────
+# ── 11. Publish recovery notification ────────────────────────────────────────
 
 delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
   od -An -tx1 | tr -d ' \n')"
@@ -211,7 +221,7 @@ _sgt_publish_worker_notification "$REPO_DIR" "$worktree" \
   "$delivery_notification_id" recovery \
   "Resume the mission after stall recovery. Read the current worktree and td state, check the latest td handoff, and continue from where you left off."
 
-# ── 11. Launch new worker pane ───────────────────────────────────────────────
+# ── 12. Launch new worker pane ───────────────────────────────────────────────
 # Launch the new pane BEFORE killing the old one.  If the launch fails, the
 # original stalled pane remains alive and the worker is escalated to
 # needs_input for investigation.
@@ -231,7 +241,7 @@ if [[ -z "$new_pane" ]]; then
   _recover_die "Stall recovery failed: worker relaunch returned no pane for $TASK_ID/$REPO"
 fi
 
-# ── 12. Atomically install new pane/identity metadata ───────────────────────
+# ── 13. Atomically install new pane/identity metadata ───────────────────────
 # On any failure here: kill the new pane, restore the pane file to the old
 # pane so fleet state stays consistent, and escalate.
 
@@ -258,7 +268,7 @@ else
   _abort_replacement "tmux failed to capture relaunched worker pane identity"
 fi
 
-# ── 13. Kill old pane (AFTER new pane is fully validated) ────────────────────
+# ── 14. Kill old pane (AFTER new pane is fully validated) ────────────────────
 # Only reached when the replacement pane is alive, identity-confirmed, and has
 # an active notification target.  Prefix-safe: identity was verified in step 7.
 
@@ -266,7 +276,7 @@ if $old_pane_live && [[ -n "$old_pane" ]]; then
   tmux kill-pane -t "$old_pane" 2>/dev/null || true
 fi
 
-# ── 14. Wait for recovery notification acknowledgement ──────────────────────
+# ── 15. Wait for recovery notification acknowledgement ──────────────────────
 
 if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" \
     "$delivery_notification_id"; then
@@ -275,7 +285,7 @@ if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" \
   _recover_die "Stall recovery failed: notification timed out for $TASK_ID/$REPO"
 fi
 
-# ── 15. Clear stall evidence now that recovery succeeded ────────────────────
+# ── 16. Clear stall evidence now that recovery succeeded ────────────────────
 # Preserve evidence through all failure paths above so _escalate can write an
 # accurate failure diagnostic instead of an empty file.
 

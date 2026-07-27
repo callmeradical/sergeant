@@ -12,6 +12,9 @@ _sgt_require_running_bash || return 1
 [[ "${SGT_LIB_LOADED:-}" == "1" ]] && return 0
 SGT_LIB_LOADED=1
 
+# shellcheck source=bin/_sgt-drain.sh
+source "$_SGT_LIB_DIR/_sgt-drain.sh"
+
 # ── Configurable env vars ─────────────────────────────────────────────────────
 
 SERGEANT_CONFIG="${SERGEANT_CONFIG:-$HOME/.config/sergeant}"
