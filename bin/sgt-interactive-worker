@@ -114,11 +114,8 @@ _deliver_notifications() {
   local accept_path ack_path ack_token complete_path delivered expected_id lease notification_id
   local nonce pane_identity pending target_dir target_identity
   while :; do
-    # Retry a failed lock release before re-entering notification logic.
-    # When _sgt_response_lock_release fails it preserves _SGT_RESPONSE_LOCK_DIR
-    # so we know we still hold the lock.  Re-entering the loop and calling
-    # _sgt_response_lock_acquire while still holding it causes an indefinite
-    # spin against our own live PID, so we retry here first.
+    # Retry a previously failed release before reacquiring; see the shared
+    # _sgt_response_lock_release contract in bin/_sgt-response-lock.sh.
     if [[ -n "${_SGT_RESPONSE_LOCK_DIR:-}" ]]; then
       _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
     fi
