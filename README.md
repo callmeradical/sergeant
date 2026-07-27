@@ -173,11 +173,13 @@ sgt-validate <task-id> <repo>
 
 The command creates a split pane in the worker window, renames the window to
 `validation-<repo>-<task>`, passes the unchanged canonical intent to no-mistakes,
-and never uses `--yes`. Use `--skip <steps>` only for gates already proven
-irrelevant and stop at `checks-passed`. The run is validation-only: it must not
-fix findings. Route actionable findings into separate, deduplicated owning-repo
-td tasks with `sgt-no-mistakes-finding`. For launch reservation, rollback
-ownership, and retry semantics, see
+and never uses `--yes`. Its default medium profile skips the redundant `review`
+and `document` stages because the readiness marker already requires passed
+independent reviews and native validation. An explicit `--skip <steps>` replaces
+that default for gates already proven irrelevant. Stop at `checks-passed`; the
+run is validation-only and must not fix findings. Route actionable findings into
+separate, deduplicated owning-repo td tasks with
+`sgt-no-mistakes-finding`. For launch reservation, rollback ownership, and retry semantics, see
 [`docs/using-sergeant.md`](docs/using-sergeant.md#final-no-mistakes-boundary).
 
 Safety-sensitive/stateful objectives require `sgt-dispatch --intent-file`; other

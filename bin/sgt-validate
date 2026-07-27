@@ -14,7 +14,9 @@ source "$SCRIPT_DIR/_sgt-intent.sh"
 
 TASK_ID="$1"
 REPO="$2"
-SKIP="${4:-}"
+# Native checks and independent review evidence are required before this boundary,
+# so the default medium profile avoids repeating review and documentation work.
+SKIP="${4-review,document}"
 [[ "$TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid task ID: $TASK_ID"
 [[ "$REPO" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid repo: $REPO"
 [[ -z "$SKIP" || "$SKIP" =~ ^[a-z]+(,[a-z]+)*$ ]] || _die "Invalid --skip list: $SKIP"

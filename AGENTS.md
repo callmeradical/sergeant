@@ -130,7 +130,10 @@ Every dispatched implementation, independent review, PR description, successor,
 recovery, and final shipping gate must use the same canonical intent revision from
 `.sergeant-intent.md`. Workers and remediation loops never run no-mistakes. After
 readiness, the coordinator uses `sgt-validate` to launch the single validation-only
-boundary in a split pane of the worker's tmux window.
+boundary in a split pane of the worker's tmux window. Its default medium profile
+skips the redundant no-mistakes `review` and `document` stages. Remediation that
+changes HEAD still requires independent rereview before updating the readiness
+marker, but must not trigger repeated no-mistakes review cycles.
 
 ### Avoid no-op outcomes
 

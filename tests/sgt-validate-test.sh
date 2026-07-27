@@ -370,6 +370,7 @@ grep -Fq 'split-window -P -F #{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}
   "$TEST_ROOT/tmux.log"
 grep -Fq "$ROOT_DIR/bin/sgt-validation-worker" "$TEST_ROOT/tmux.log"
 grep -Fq "$revision" "$TEST_ROOT/tmux.log"
+grep -Fq "review,document" "$concurrent_dir/validation-command"
 if grep -Fq 'Validate the interactive worker safely' "$TEST_ROOT/tmux.log" || \
   grep -Fq -- '--yes' "$TEST_ROOT/tmux.log"; then
   printf 'validation launch leaked intent or enabled automatic gates\n' >&2
@@ -382,10 +383,15 @@ printf 'exited:0\n' > "$repo_state/validation_status"
 rm -f "$concurrent_dir/pane-live"
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
-  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --skip lint >/dev/null
 validation_worktree="$(cat "$repo_state/validation_worktree")"
 [[ "$(cat "$repo_state/validation_status")" == launched && \
   ! -e "$validation_worktree/stale-finished" ]]
+grep -Fq "lint" "$concurrent_dir/validation-command"
+if grep -Fq "review,document" "$concurrent_dir/validation-command"; then
+  printf 'explicit skip did not replace the medium default\n' >&2
+  exit 1
+fi
 
 printf 'legacy-finished-clone\n' > "$validation_worktree/legacy-finished"
 rm -f "$repo_state/validation_worktree_identity" "$repo_state/validation_worktree_git_dir" \
@@ -394,10 +400,14 @@ printf 'exited:0\n' > "$repo_state/validation_status"
 rm -f "$concurrent_dir/pane-live"
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
-  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --skip '' >/dev/null
 validation_worktree="$(cat "$repo_state/validation_worktree")"
 [[ "$(cat "$repo_state/validation_status")" == launched && \
   ! -e "$validation_worktree/legacy-finished" ]]
+if grep -Fq "review,document" "$concurrent_dir/validation-command"; then
+  printf 'explicit empty skip did not request full validation\n' >&2
+  exit 1
+fi
 [[ -s "$repo_state/validation_worktree_identity" && -s "$repo_state/validation_worktree_git_dir" && \
   -s "$repo_state/validation_worktree_git_identity" && -s "$repo_state/validation_worktree_owner" ]]
 
