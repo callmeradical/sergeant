@@ -65,18 +65,27 @@ done
 # ── Execute ───────────────────────────────────────────────────────────────────
 
 drain_dir="$(_sgt_drain_state_dir)"
-drain_file="$drain_dir/$SCOPE"
-
-if [[ "$MODE" == "undrain" ]]; then
-  rm -f "$drain_file"
-  echo "sgt-drain: undrained ${SCOPE}."
+if [[ "$SCOPE" == "global" ]]; then
+  drain_file="$(_sgt_drain_global_file)"
 else
-  mkdir -p "$drain_dir"
-  temporary="${drain_file}.tmp.$$"
+  drain_file="$(_sgt_drain_project_file "$SCOPE")"
+fi
+
+_write_drain_record() {
+  local target="$1" temporary
+  mkdir -p "$(dirname "$target")"
+  temporary="${target}.tmp.$$"
   {
     [[ -n "$REASON" ]] && printf 'reason=%s\n' "$REASON"
     printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "$temporary"
-  mv "$temporary" "$drain_file"
+  mv "$temporary" "$target"
+}
+
+if [[ "$MODE" == "undrain" ]]; then
+  _sgt_drain_with_lock "_sgt_drain_clear \"$drain_file\""
+  echo "sgt-drain: undrained ${SCOPE}."
+else
+  _sgt_drain_with_lock "_write_drain_record \"$drain_file\""
   echo "sgt-drain: drained ${SCOPE}."
 fi
