@@ -479,6 +479,45 @@ SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" no-worktree-failed >/dev/null
 [[ ! -e "$TEST_ROOT/fleet/no-worktree-failed" ]]
 
+legacy_state="$TEST_ROOT/fleet/legacy-absent-removing/app"
+legacy_worktree="$TEST_ROOT/legacy-absent-removing-worktree"
+mkdir -p "$legacy_state/terminal-evidence"
+printf '%s\n' "$legacy_worktree" > "$legacy_state/worktree"
+printf 'done\n' > "$legacy_state/status"
+printf 'result\n' > "$legacy_state/result"
+printf 'done\n' > "$legacy_state/terminal-evidence/.sergeant-status"
+printf 'result\n' > "$legacy_state/terminal-evidence/.sergeant-result"
+printf 'removing\n%s\n' "$legacy_worktree" > "$legacy_state/cleanup-phase"
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *" worktree remove "* ]]; then
+  printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
+fi
+"$REAL_GIT" "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git"
+legacy_phase_before="$(cksum "$legacy_state/cleanup-phase")"
+legacy_evidence_before="$(cksum "$legacy_state/terminal-evidence"/.sergeant-*)"
+legacy_evidence_count_before="$(printf '%s\n' \
+  "$legacy_state/terminal-evidence"/.sergeant-* | wc -l)"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/legacy-absent-removers" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" legacy-absent-removing app \
+    > "$TEST_ROOT/legacy-absent-removing.log" 2>&1; then
+  printf 'cleanup reconciled legacy absent removing state without exact identity\n' >&2
+  exit 1
+fi
+grep -Fq 'Retry owner identity is missing: app' \
+  "$TEST_ROOT/legacy-absent-removing.log"
+[[ ! -e "$TEST_ROOT/legacy-absent-removers" ]]
+[[ "$(cksum "$legacy_state/cleanup-phase")" == "$legacy_phase_before" ]]
+[[ "$(cksum "$legacy_state/terminal-evidence"/.sergeant-*)" == \
+  "$legacy_evidence_before" ]]
+[[ "$(printf '%s\n' "$legacy_state/terminal-evidence"/.sergeant-* | wc -l)" == \
+  "$legacy_evidence_count_before" ]]
+rm "$TEST_ROOT/fake-bin/git"
+
 mkdir -p "$TEST_ROOT/fleet/failed-task/app" "$TEST_ROOT/failed-task"
 git -C "$TEST_ROOT/failed-task" init -q
 git -C "$TEST_ROOT/failed-task" config user.name Test
@@ -844,6 +883,55 @@ PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
   "$ROOT_DIR/bin/sgt-cleanup" removal-failure >/dev/null
 [[ "$(wc -l < "$TEST_ROOT/git-removals")" -eq 2 ]]
 [[ ! -e "$TEST_ROOT/fleet/removal-failure" ]]
+
+mkdir -p "$TEST_ROOT/fleet/dirty-retry/app" \
+  "$TEST_ROOT/fake-bin"
+init_test_repo "$TEST_ROOT/dirty-retry"
+git -C "$TEST_ROOT/dirty-retry" worktree add -q -b dirty-retry-worker \
+  "$TEST_ROOT/dirty-retry-sgt-dirty-retry"
+record_retry_owner dirty-retry app "$TEST_ROOT/dirty-retry"
+printf 'dirty before cleanup\n' >> "$TEST_ROOT/dirty-retry/README.md"
+printf 'untracked before cleanup\n' > "$TEST_ROOT/dirty-retry/untracked.txt"
+printf '%s\n' "$TEST_ROOT/dirty-retry-sgt-dirty-retry" > \
+  "$TEST_ROOT/fleet/dirty-retry/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/dirty-retry/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/dirty-retry/app/result"
+printf 'done\n' > "$TEST_ROOT/dirty-retry-sgt-dirty-retry/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/dirty-retry-sgt-dirty-retry/.sergeant-result"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_STATE="$TEST_ROOT/dirty-retry-failed-once" \
+  FAKE_GIT_LOG="$TEST_ROOT/dirty-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" dirty-retry >/dev/null 2>&1; then
+  printf 'cleanup succeeded after dirty retry removal failed\n' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$TEST_ROOT/dirty-retry-removals")" -eq 1 ]]
+printf 'different dirty contents\n' > "$TEST_ROOT/dirty-retry/README.md"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_STATE="$TEST_ROOT/dirty-retry-failed-once" \
+  FAKE_GIT_LOG="$TEST_ROOT/dirty-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" dirty-retry >/dev/null 2>&1; then
+  printf 'cleanup accepted changed contents with unchanged dirty status\n' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$TEST_ROOT/dirty-retry-removals")" -eq 1 ]]
+[[ -f "$TEST_ROOT/fleet/dirty-retry/app/terminal-evidence/.sergeant-status" ]]
+printf 'fixture\ndirty before cleanup\n' > "$TEST_ROOT/dirty-retry/README.md"
+printf 'different untracked contents\n' > "$TEST_ROOT/dirty-retry/untracked.txt"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_STATE="$TEST_ROOT/dirty-retry-failed-once" \
+  FAKE_GIT_LOG="$TEST_ROOT/dirty-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" dirty-retry >/dev/null 2>&1; then
+  printf 'cleanup accepted changed untracked contents with unchanged status\n' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$TEST_ROOT/dirty-retry-removals")" -eq 1 ]]
 
 rm "$TEST_ROOT/fake-bin/git"
 

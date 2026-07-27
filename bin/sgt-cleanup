@@ -1414,6 +1414,8 @@ _git_worktree_removal_proven() {
     "$record_count" -gt 0 && "$target_count" -eq 0 ]]
 }
 
+VALIDATED_RETRY_ROOT=""
+
 _require_completed_removal_proof() {
   local retry_root="$2" retry_type="$1" worktree="$3"
 
@@ -1423,10 +1425,11 @@ _require_completed_removal_proof() {
     _die "Cannot prove completed git worktree removal: $worktree"
 }
 
-# _validate_retry_owner — pre-flight ownership check for the validation checkout.
+# _validate_validation_checkout_owner — pre-flight ownership check for the
+# validation checkout.
 # Must be called BEFORE any destructive step (pane kills, worktree removal) so
 # that a rejected retry leaves the fleet state completely unchanged.
-_validate_retry_owner() {
+_validate_validation_checkout_owner() {
   local repo_dir="$1" worktree="$2" task_id="$3"
   local repo_name validation_worktree validation_head validation_mode
   local validation_identity validation_git_dir validation_git_identity validation_owner
