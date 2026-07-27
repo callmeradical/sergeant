@@ -167,6 +167,12 @@ _validation_adopt_pane() {
   info="${identity#*|}"
   pane="${info%%|*}"
   command="${identity##*|}"
+  # tmux 3.4+ wraps pane_start_command in outer double quotes and doubles internal backslashes;
+  # strip outer quotes and unescape doubled backslashes before comparing to VALIDATION_COMMAND
+  command="${command#\"}"
+  command="${command%\"}"
+  command="${command//\\\\/\\}"
+  # Use quoted right-hand side to prevent glob interpretation of printf %q escapes (e.g. \,)
   [[ -n "$pane" && "$command" == "$VALIDATION_COMMAND" ]] || return 1
   current="$(_validation_current_pane_identity "$pane" || true)"
   [[ "$current" == "$identity" ]] || return 1
