@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+# sgt-review-findings - Route structured independent-review findings to td.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: sgt-review-findings <project> <repo> --input <json> --axis <axis> --source <source>
+  --branch <branch> --head-sha <sha> --parent-task <id> --task-id <fleet-id>
+  --worktree <path>
+EOF
+  exit 1
+}
+
+[[ $# -ge 2 ]] || usage
+PROJECT="$1"; shift
+REPO="$1"; shift
+INPUT="" AXIS="" SOURCE="" BRANCH="" HEAD_SHA="" PARENT_TASK="" TASK_ID="" WORKTREE=""
+
+while [[ $# -gt 0 ]]; do
+  [[ $# -ge 2 ]] || usage
+  case "$1" in
+    --input) INPUT="$2"; shift 2 ;;
+    --axis) AXIS="$2"; shift 2 ;;
+    --source) SOURCE="$2"; shift 2 ;;
+    --branch) BRANCH="$2"; shift 2 ;;
+    --head-sha) HEAD_SHA="$2"; shift 2 ;;
+    --parent-task) PARENT_TASK="$2"; shift 2 ;;
+    --task-id) TASK_ID="$2"; shift 2 ;;
+    --worktree) WORKTREE="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+
+WORKTREE="${WORKTREE:-$PWD}"
+TASK_ID="${TASK_ID:-unknown}"
+[[ -d "$WORKTREE" ]] || _die "Worktree unavailable: $WORKTREE"
+
+_publish_blocked() {
+  local message="$1" notice="$2" generation current notify_status
+  current="$( { tr -d '\n' < "$WORKTREE/.sergeant-gate-generation"; } 2>/dev/null || true)"
+  [[ "$current" =~ ^[0-9]+$ ]] || current=0
+  generation=$((current + 1))
+  printf '%s\n' "$message" > "$WORKTREE/.sergeant-message.tmp"
+  printf '%s\n' "$generation" > "$WORKTREE/.sergeant-gate-generation.tmp"
+  printf 'blocked\n' > "$WORKTREE/.sergeant-status.tmp"
+  mv "$WORKTREE/.sergeant-gate-generation.tmp" "$WORKTREE/.sergeant-gate-generation"
+  mv "$WORKTREE/.sergeant-message.tmp" "$WORKTREE/.sergeant-message"
+  notify_status=0
+  sgt-notify "$TASK_ID" "blocked [$REPO]: $notice" >/dev/null 2>&1 || notify_status=$?
+  mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
+  if (( notify_status != 0 )); then
+    printf 'ERROR: sgt-notify failed while publishing blocked review findings\n' >&2
+    return "$notify_status"
+  fi
+}
+
+routed_task_ids=()
+routed_recommendations=()
+
+_routing_failure() {
+  local reason="$1" routed="none" remediation="retry the router"
+  if (( ${#routed_task_ids[@]} > 0 )); then
+    routed="$(IFS=', '; printf '%s' "${routed_task_ids[*]}")"
+    remediation="$(IFS='; '; printf '%s' "${routed_recommendations[*]}")"
+  fi
+  _publish_blocked \
+    "Review finding routing failed. Routed TD tasks: $routed. Recommended remediation: $remediation. No review body was retained. Retry sgt-review-findings after correcting the structured artifact or td failure." \
+    "review finding routing failed; routed td tasks: $routed"
+  printf 'ERROR: %s\n' "$reason" >&2
+  exit 2
+}
+
+for required in INPUT AXIS SOURCE BRANCH HEAD_SHA PARENT_TASK; do
+  [[ -n "${!required}" ]] || _routing_failure "missing required review field: ${required,,}"
+done
+[[ "$TASK_ID" != "unknown" ]] || _routing_failure "missing required review field: task_id"
+[[ "$AXIS" =~ ^(standards|spec|accessibility)$ ]] || _routing_failure "invalid review axis"
+[[ "$SOURCE" =~ ^[A-Za-z0-9._-]+$ ]] || _routing_failure "invalid review source"
+[[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || _routing_failure "invalid branch"
+[[ "$HEAD_SHA" =~ ^[A-Fa-f0-9]{7,64}$ ]] || _routing_failure "invalid head SHA"
+[[ "$PARENT_TASK" =~ ^[A-Za-z0-9._-]+$ ]] || _routing_failure "invalid parent task"
+[[ "$TASK_ID" =~ ^[A-Za-z0-9._-]+$ ]] || _routing_failure "invalid fleet task"
+
+CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
+[[ -f "$CONFIG_FILE" ]] || _routing_failure "project not found"
+command -v yq >/dev/null 2>&1 || _routing_failure "yq is required"
+command -v git >/dev/null 2>&1 || _routing_failure "git is required"
+command -v td >/dev/null 2>&1 || _routing_failure "td is required"
+[[ -f "$INPUT" ]] || _routing_failure "review input is unavailable"
+
+repo_count="$(yq '.repos | length' "$CONFIG_FILE" 2>/dev/null)" || _routing_failure "project configuration is invalid"
+repo_path=""
+for ((i=0; i<repo_count; i++)); do
+  if [[ "$(yq ".repos[$i].name" "$CONFIG_FILE")" == "$REPO" ]]; then
+    repo_path="$(_resolve_path "$(yq ".repos[$i].path" "$CONFIG_FILE")")"
+    break
+  fi
+done
+[[ -n "$repo_path" && -d "$repo_path" ]] || _routing_failure "owning repository is unavailable"
+_sgt_is_git_repo "$repo_path" || _routing_failure "owning repository is not a git repository"
+
+parsed="$(mktemp)" || _routing_failure "could not allocate parser output"
+trap 'rm -f "$parsed"' EXIT
+if ! python3 - "$INPUT" > "$parsed" <<'PY'
+import json
+import re
+import sys
+
+ALLOWED = {"id", "severity", "disposition", "summary", "evidence", "paths", "acceptance_criteria", "recommendation"}
+SECRET_VALUE = re.compile(r"(?i)((?:password|token|secret|credential|api[_-]?key)\s*[:=]\s*)([^\s,;]+)")
+BEARER = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
+BASIC = re.compile(r"(?i)\bbasic\s+[^\s,;]+")
+GITHUB_TOKEN = re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b")
+AWS_KEY = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
+AUTHENTICATED_URL = re.compile(r"(?i)(https?://)[^\s/@:]+:[^\s/@]+@")
+PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+HIGH_ENTROPY = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9+/=_-]{32,}(?![A-Za-z0-9])")
+
+def clean(value, limit):
+    if not isinstance(value, str):
+        raise ValueError("field is not text")
+    value = " ".join(value.split())
+    value = SECRET_VALUE.sub(r"\1[REDACTED]", value)
+    value = BEARER.sub("Bearer [REDACTED]", value)
+    value = BASIC.sub("Basic [REDACTED]", value)
+    value = GITHUB_TOKEN.sub("[REDACTED]", value)
+    value = AWS_KEY.sub("[REDACTED]", value)
+    value = AUTHENTICATED_URL.sub(r"\1[REDACTED]@", value)
+    value = PRIVATE_KEY.sub("[REDACTED PRIVATE KEY MARKER]", value)
+    value = HIGH_ENTROPY.sub("[REDACTED]", value)
+    return value[:limit]
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        document = json.load(stream)
+    if not isinstance(document, dict) or set(document) != {"findings"}:
+        raise ValueError("top-level schema")
+    findings = document["findings"]
+    if not isinstance(findings, list):
+        raise ValueError("findings is not a list")
+    for finding in findings:
+        if not isinstance(finding, dict) or not set(finding).issubset(ALLOWED):
+            raise ValueError("finding schema")
+        required = ALLOWED
+        if not required.issubset(finding):
+            raise ValueError("missing finding field")
+        finding_id = clean(finding["id"], 120)
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", finding_id):
+            raise ValueError("finding id")
+        severity = finding["severity"]
+        disposition = finding["disposition"]
+        if severity not in {"error", "warning", "info", "informational"}:
+            raise ValueError("severity")
+        if disposition not in {"actionable", "cosmetic", "false-positive"}:
+            raise ValueError("disposition")
+        paths = finding["paths"]
+        if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+            raise ValueError("paths")
+        fields = (
+            finding_id,
+            severity,
+            disposition,
+            clean(finding["summary"], 240),
+            clean(finding["evidence"], 1000),
+            ", ".join(clean(path, 240) for path in paths) or "not provided",
+            clean(finding["acceptance_criteria"], 1000),
+            clean(finding["recommendation"], 500),
+        )
+        for field in fields:
+            sys.stdout.buffer.write(field.encode("utf-8") + b"\0")
+except (OSError, json.JSONDecodeError, UnicodeError, ValueError, TypeError):
+    print("invalid review output", file=sys.stderr)
+    raise SystemExit(1)
+PY
+then
+  _routing_failure "invalid review output"
+fi
+
+mapfile -d '' -t fields < "$parsed"
+(( ${#fields[@]} % 8 == 0 )) || _routing_failure "invalid review output"
+
+declare -a blocking_tasks=() blocking_recommendations=()
+actionable_count=0
+for ((offset=0; offset<${#fields[@]}; offset+=8)); do
+  finding_id="${fields[offset]}"
+  severity="${fields[offset+1]}"
+  disposition="${fields[offset+2]}"
+  summary="${fields[offset+3]}"
+  evidence="${fields[offset+4]}"
+  paths="${fields[offset+5]}"
+  acceptance="${fields[offset+6]}"
+  recommendation="${fields[offset+7]}"
+
+  if [[ "$disposition" != "actionable" ]]; then
+    printf '%s: ignored %s finding\n' "$finding_id" "$disposition"
+    continue
+  fi
+  actionable_count=$((actionable_count + 1))
+  case "$severity" in
+    error) priority="P1" ;;
+    warning) priority="P2" ;;
+    info|informational) priority="P3" ;;
+  esac
+
+  marker="independent-review-finding:$REPO:$AXIS:$SOURCE:$finding_id"
+  body="Independent review finding.
+
+Review axis: $AXIS
+Review source: $SOURCE
+Severity: $severity
+Evidence: $evidence
+Affected paths: $paths
+Acceptance criteria: $acceptance
+Recommended remediation: $recommendation
+Branch: $BRANCH
+Head SHA: $HEAD_SHA
+Parent mission: $PARENT_TASK
+
+Deduplication key: $marker"
+  existing_json="$(td list --all --search "$marker" --json --work-dir "$repo_path" 2>/dev/null)" || _routing_failure "failed to query td tasks"
+  existing_match="$(printf '%s' "$existing_json" | python3 -c '
+import json, sys
+try:
+    items = json.load(sys.stdin)
+except (json.JSONDecodeError, TypeError):
+    raise SystemExit(1)
+if items is None:
+    items = []
+if not isinstance(items, list):
+    raise SystemExit(1)
+needle = "Deduplication key: " + sys.argv[1]
+matches = [(item["id"], item.get("status") or "", item.get("defer_until") or "") for item in items if needle in item.get("description", "").splitlines()]
+if len(matches) > 1:
+    raise SystemExit(1)
+if matches:
+    print("\t".join(matches[0]))
+' "$marker")" || _routing_failure "td returned invalid or duplicate finding data"
+
+  task_id="" existing_status="" defer_until=""
+  if [[ -n "$existing_match" ]]; then
+    IFS=$'\t' read -r task_id existing_status defer_until <<< "$existing_match"
+    if [[ "$existing_status" == "closed" ]]; then
+      td reopen "$task_id" --work-dir "$repo_path" --json >/dev/null 2>&1 || _routing_failure "failed to reopen td task"
+    fi
+    if [[ -n "$defer_until" ]]; then
+      td defer "$task_id" --clear --work-dir "$repo_path" --json >/dev/null 2>&1 || _routing_failure "failed to undefer td task"
+    fi
+    td update "$task_id" --priority "$priority" --description "$body" \
+      --labels independent-review,finding,"$AXIS" --work-dir "$repo_path" --json >/dev/null 2>&1 \
+      || _routing_failure "failed to update td task"
+    printf '%s: td %s updated; remediation: %s\n' "$finding_id" "$task_id" "$recommendation"
+  else
+    result="$(td create "review: $summary" --type task --priority "$priority" \
+      --labels independent-review,finding,"$AXIS" --description "$body" \
+      --work-dir "$repo_path" --json 2>/dev/null)" || _routing_failure "failed to create td task"
+    task_id="$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' 2>/dev/null)" \
+      || _routing_failure "td create returned invalid JSON"
+    printf '%s: td %s created; remediation: %s\n' "$finding_id" "$task_id" "$recommendation"
+  fi
+
+  if [[ "$severity" == "error" ]]; then
+    blocking_tasks+=("$task_id")
+    blocking_recommendations+=("$recommendation")
+  fi
+  routed_task_ids+=("$task_id")
+  routed_recommendations+=("$recommendation")
+done
+
+if (( ${#blocking_tasks[@]} > 0 )); then
+  task_list="$(IFS=', '; printf '%s' "${blocking_tasks[*]}")"
+  remediation_list="$(IFS='; '; printf '%s' "${blocking_recommendations[*]}")"
+  _publish_blocked \
+    "Independent review requires remediation. TD tasks: $task_list. Recommended remediation: $remediation_list" \
+    "independent review requires remediation; td tasks: $task_list"
+  exit 2
+fi
+
+current_status="$( { tr -d '\n' < "$WORKTREE/.sergeant-status"; } 2>/dev/null || true)"
+current_message="$(cat "$WORKTREE/.sergeant-message" 2>/dev/null || true)"
+if [[ "$current_status" == "blocked" ]] && [[ "$current_message" == "Independent review requires remediation."* || "$current_message" == "Review finding routing failed."* ]]; then
+  printf 'in_progress\n' > "$WORKTREE/.sergeant-status.tmp"
+  mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
+  rm -f "$WORKTREE/.sergeant-message"
+fi
+
+if (( actionable_count == 0 )); then
+  printf 'no actionable findings; continue remediation workflow\n'
+else
+  printf 'nonblocking review debt routed to td; continue remediation workflow\n'
+fi
