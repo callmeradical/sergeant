@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# sgt-graphify — Run graphify across all repos in a project
+# sgt-graphify — Run graphify across all repos in a project, publishing atomically
 #
 # Reads graphify.output from the project YAML, extracts each configured repo,
 # and merges the results into one project graph.
+#
+# Publication is atomic: concurrent readers observe either the complete old
+# output or the complete new output throughout the run — never a partial or
+# missing state.  The publish directory is placed via _publish_parent_for_output
+# so the final rename never crosses filesystem boundaries.
 #
 # Usage: sgt-graphify <project>
 
@@ -187,31 +192,47 @@ echo ""
 output_parent="$(dirname "$graphify_output")"
 mkdir -p "$output_parent"
 run_root="$(mktemp -d "${TMPDIR:-/tmp}/sgt-graphify.XXXXXX")"
+
+# ── Publication state ─────────────────────────────────────────────────────────
+# publish_root: temp dir for the staged publish copy (set after build).
+# old_backup:   path of the old output moved aside; restored on failure.
+# tmp_sym:      temp symlink created during atomic symlink swap; removed on failure.
+# new_backing_dir: new backing dir for symlink swap; removed on failure.
 publish_root=""
-previous_output=""
 published=0
-_restore_previous_output() {
-  if [[ -z "$previous_output" ]]; then
-    return
+old_backup=""
+tmp_sym=""
+new_backing_dir=""
+
+_restore_old_output() {
+  # Called on failure before exit: if we moved the old output away and
+  # haven't yet published the new one, put the old output back.
+  [[ $published -eq 1 ]] && return 0
+  [[ -z "$old_backup" ]] && return 0
+  [[ -e "$old_backup" || -L "$old_backup" ]] || return 0
+  if [[ ! -e "$configured_output" && ! -L "$configured_output" ]]; then
+    mv "$old_backup" "$configured_output" || true
   fi
-  if [[ ! -e "$previous_output" && ! -L "$previous_output" ]]; then
-    return
-  fi
-  if [[ -e "$graphify_output" || -L "$graphify_output" ]]; then
-    rm -rf "$graphify_output"
-  fi
-  mv "$previous_output" "$graphify_output" || true
 }
+
 _cleanup() {
   local status=$?
   trap - EXIT
-  if [[ $published -eq 0 ]]; then
-    _restore_previous_output
+  _restore_old_output
+  # Clean up leftover temp symlink if atomic rename didn't happen.
+  if [[ -n "$tmp_sym" && -e "$tmp_sym" ]]; then rm -f "$tmp_sym"; fi
+  # Clean up new backing dir if symlink swap failed or was never attempted.
+  if [[ $published -eq 0 && -n "$new_backing_dir" && -e "$new_backing_dir" ]]; then
+    rm -rf "$new_backing_dir"
   fi
   if [[ -n "$publish_root" ]]; then
     rm -rf "$publish_root"
   fi
   rm -rf "$run_root"
+  # Only remove old_backup on success.  On failure it may still be the live
+  # backing directory for a symlink-configured output (removing it would leave
+  # a dangling symlink at configured_output).
+  if [[ $published -eq 1 && -n "$old_backup" ]]; then rm -rf "$old_backup" 2>/dev/null; fi
   exit "$status"
 }
 trap _cleanup EXIT
@@ -274,7 +295,9 @@ PY
 
 _write_graphify_root() {
   local source_root="$stage_output/.graphify_sources"
-  local final_source_root="$graphify_output/.graphify_sources"
+  # Use configured_output (the user-facing path) so .graphify_root stays valid
+  # even after a symlink-based atomic publication replaces the backing directory.
+  local final_source_root="$configured_output/.graphify_sources"
   local idx
   mkdir -p "$source_root"
   for ((idx=0; idx<${#SOURCE_ROOT_REPOS[@]}; idx++)); do
@@ -433,20 +456,76 @@ for preserved_dir in wiki memory; do
   fi
 done
 
+# ── Atomic publication ────────────────────────────────────────────────────────
+#
+# Copy the staged output into a publish directory that lives outside any source
+# repo (via _publish_parent_for_output) so the final rename never crosses a
+# filesystem boundary.
 publish_root="$(mktemp -d "$(_publish_parent_for_output "$output_parent")"/.sgt-graphify.publish.XXXXXX)"
-publish_stage="$publish_root/graphify-out"
-mkdir -p "$publish_stage"
-tar -C "$stage_output" -cf - . | tar -C "$publish_stage" -xf -
-previous_output="$publish_root/previous-output"
-if [[ -e "$graphify_output" || -L "$graphify_output" ]]; then
-  mv "$graphify_output" "$previous_output"
-fi
-if ! mv "$publish_stage" "$graphify_output"; then
-  _restore_previous_output
-  _die "Could not publish project graph to $graphify_output"
-fi
-published=1
+publish_dir="$publish_root/graphify-out"
+mkdir -p "$publish_dir"
+tar -C "$stage_output" -cf - . | tar -C "$publish_dir" -xf -
 
-echo "=== done ==="
+publish_parent="$(dirname "$configured_output")"
+
+echo "=== done: publishing ==="
 echo ""
+
+# No prior output: simple rename into place.
+if [[ ! -e "$configured_output" && ! -L "$configured_output" ]]; then
+  mv "$publish_dir" "$configured_output"
+  published=1
+
+# Symlink: atomically replace the symlink via a temporary symlink rename.
+# mv -T (GNU coreutils) calls rename(2) directly so it replaces the symlink
+# in one atomic operation rather than following it to the backing directory.
+elif [[ -L "$configured_output" ]]; then
+  old_link_target="$(readlink "$configured_output")"
+  # Resolve to absolute path so cleanup can remove it unambiguously.
+  if [[ "$old_link_target" == /* ]]; then
+    old_backup="$old_link_target"
+  else
+    old_backup="$publish_parent/$old_link_target"
+  fi
+
+  # Move the publish dir to a stable location in the same parent directory as
+  # configured_output so the relative symlink target remains valid after rename.
+  new_backing_dir="$publish_parent/.sgt-graphify-live.$$"
+  mv "$publish_dir" "$new_backing_dir"
+
+  # Create a temp symlink pointing at the basename of the new backing dir.
+  tmp_sym="$publish_parent/.sgt-graphify-nextsym.$$"
+  ln -sfn "$(basename "$new_backing_dir")" "$tmp_sym"
+  # Atomically replace the old symlink.
+  if ! mv -T "$tmp_sym" "$configured_output"; then
+    rm -f "$tmp_sym"
+    tmp_sym=""
+    _die "Could not publish graph output to $configured_output"
+  fi
+  tmp_sym=""       # moved into place; _cleanup must not delete it
+  published=1
+  new_backing_dir=""  # now the live backing dir; _cleanup must not delete it
+
+  # Remove the old backing directory now that the symlink is live.
+  rm -rf "$old_backup" 2>/dev/null || true
+  old_backup=""    # already removed; prevent double-removal in _cleanup
+
+# Regular directory: brief double rename.
+# The window between the two renames is one rename(2) syscall long.
+else
+  old_backup="$(mktemp -u "$output_parent/.sgt-graphify-old.XXXXXX")"
+  mv "$configured_output" "$old_backup"
+  if ! mv "$publish_dir" "$configured_output"; then
+    # Restore the old output and let _cleanup clean the publish_root.
+    mv "$old_backup" "$configured_output" || true
+    old_backup=""
+    _die "Could not publish graph output to $configured_output"
+  fi
+  published=1
+
+  # Remove the old output now that the new one is live.
+  rm -rf "$old_backup"
+  old_backup=""
+fi
+
 echo "Graph report available at: $configured_output/GRAPH_REPORT.md"

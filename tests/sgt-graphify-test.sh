@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Tests for sgt-graphify: CLI, failure handling, symlink alias resolution (F2),
+# and atomic publication guarantees.
 
 set -euo pipefail
 
@@ -152,14 +154,14 @@ exec "$REAL_PYTHON" "\$@"
 EOF
 chmod +x "$fake_bin/python3"
 
+# Intercept the atomic symlink rename (mv -T) to simulate publication failure.
+# The example project uses a symlink configured output, so the publication path
+# does mv -T to atomically replace the symlink.
 cat > "$crossfs_path/mv" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ \$# -eq 2 && "\$1" == "$TEST_ROOT"/.sgt-graphify.publish.*/graphify-out && "\$2" == "$real_output" ]]; then
+if [[ "\${1:-}" == "-T" ]]; then
   printf 'intercepted\n' > "$TEST_ROOT/crossfs-intercepted"
-  rm -rf "\$2"
-  mkdir -p "\$2"
-  printf 'partial publish\n' > "\$2/PARTIAL"
   exit 1
 fi
 exec "$REAL_MV" "\$@"
@@ -383,7 +385,8 @@ grep -Fq '"source_file": "app/source.txt"' "$output/graph.json"
 grep -Fq '"source_files": [' "$output/graph.json"
 grep -Fq '"api/source.txt"' "$output/graph.json"
 grep -Fq '"app/source.txt"' "$output/graph.json"
-grep -Fxq "$real_output/.graphify_sources" "$output/.graphify_root"
+# After atomic symlink swap, .graphify_root contains the configured (symlink) path.
+grep -Fxq "$output/.graphify_sources" "$output/.graphify_root"
 [[ -L "$output/.graphify_sources/api" ]]
 [[ -L "$output/.graphify_sources/app" ]]
 grep -Fq 'api' "$output/.graphify_sources/api/source.txt"
@@ -412,9 +415,9 @@ run_graphify "" trailing-slash-output >/dev/null
 
 : > "$TEST_ROOT/graphify.log"
 rm -f "$TEST_ROOT/crossfs-intercepted"
-printf 'preexisting graph\n' > "$real_output/graph.json"
-printf 'preexisting manifest\n' > "$real_output/manifest.json"
-printf 'preexisting report\n' > "$real_output/GRAPH_REPORT.md"
+printf 'preexisting graph\n' > "$output/graph.json"
+printf 'preexisting manifest\n' > "$output/manifest.json"
+printf 'preexisting report\n' > "$output/GRAPH_REPORT.md"
 set +e
 crossfs_output="$(TMPDIR="$tmpdir" run_graphify_with_path "$crossfs_path:$fake_bin:$PATH" "" example 2>&1)"
 crossfs_status=$?
@@ -422,10 +425,11 @@ set -e
 [[ $crossfs_status -ne 0 ]]
 [[ -f "$TEST_ROOT/crossfs-intercepted" ]]
 grep -Fq 'Could not publish project graph' <<< "$crossfs_output"
-grep -Fq 'preexisting graph' "$real_output/graph.json"
-grep -Fq 'preexisting manifest' "$real_output/manifest.json"
-grep -Fq 'preexisting report' "$real_output/GRAPH_REPORT.md"
-[[ ! -e "$real_output/PARTIAL" ]]
+# Configured output must still be accessible and retain preexisting content.
+[[ -d "$output" ]]
+grep -Fq 'preexisting graph' "$output/graph.json"
+grep -Fq 'preexisting manifest' "$output/manifest.json"
+grep -Fq 'preexisting report' "$output/GRAPH_REPORT.md"
 
 mkdir -p "$dev_root/api/graphify-out"
 printf 'stale\n' > "$dev_root/api/graphify-out/stale.txt"
@@ -543,3 +547,105 @@ grep -Eq 'extract .*/sources/api --out' "$TEST_ROOT/graphify.log"
 rm -rf "$dev_root/api/new-graphify-out"
 
 printf 'sgt-graphify current CLI and failure handling: ok\n'
+
+# ── Atomic publication: symlink failure leaves no dangling symlink ────────────
+# When mv -T fails during the symlink atomic swap, the old symlink must remain
+# valid — the old backing directory must not be removed.
+#
+# We simulate mv -T failure via a dedicated fake mv that exits 1 for -T.
+
+at_bin="$TEST_ROOT/atomic-test-bin"
+at_config="$TEST_ROOT/atomic-test-config"
+at_repo="$TEST_ROOT/atomic-test-repo"
+at_live="$TEST_ROOT/atomic-test-live"
+at_output="$TEST_ROOT/atomic-test-link"
+mkdir -p "$at_bin" "$at_config" "$at_repo" "$at_live"
+printf 'content\n' > "$at_live/old.txt"
+ln -sfn "$at_live" "$at_output"
+
+cat > "$at_config/atproject.yaml" <<EOF
+name: atproject
+repos:
+  - name: repo1
+    path: $at_repo
+graphify:
+  output: $at_output
+EOF
+
+# A fake graphify that supports extract/merge-graphs/cluster-only (minimal).
+cat > "$at_bin/graphify" <<'ATEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  extract)
+    out=""
+    shift
+    while [[ $# -gt 0 ]]; do
+      [[ "$1" == "--out" ]] && { out="$2"; shift 2; continue; }
+      shift
+    done
+    mkdir -p "$out/graphify-out"
+    printf '{"nodes":[],"links":[]}\n' > "$out/graphify-out/graph.json"
+    printf '{"f":{"mtime":1}}\n' > "$out/graphify-out/manifest.json"
+    ;;
+  merge-graphs)
+    out=""
+    while [[ $# -gt 0 ]]; do
+      [[ "$1" == "--out" ]] && { out="$2"; shift 2; continue; }
+      shift
+    done
+    mkdir -p "$(dirname "$out")"
+    printf '{"nodes":[],"links":[]}\n' > "$out"
+    ;;
+  cluster-only)
+    project_root="$1"
+    mkdir -p "$project_root/graphify-out"
+    printf '# report\n' > "$project_root/graphify-out/GRAPH_REPORT.md"
+    ;;
+esac
+ATEOF
+chmod +x "$at_bin/graphify"
+
+# Fake mv that fails on -T (atomic symlink rename step).
+REAL_MV_PATH="$(command -v mv)"
+cat > "$at_bin/mv" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "-T" ]]; then exit 1; fi
+exec "$REAL_MV_PATH" "\$@"
+EOF
+chmod +x "$at_bin/mv"
+
+# Also need python3 for the graph-source-prefix step.
+ln -s "$(command -v python3)" "$at_bin/python3"
+
+set +e
+SERGEANT_CONFIG="$at_config" PATH="$at_bin:$PATH" \
+  "$ROOT_DIR/bin/sgt-graphify" atproject >/dev/null 2>&1
+at_status=$?
+set -e
+
+# Configured symlink must not be dangling after the failed publication.
+[[ -L "$at_output" ]] || {
+  printf 'FAIL: symlink_failure_no_dangling: configured path is no longer a symlink\n' >&2
+  exit 1
+}
+[[ -d "$at_output" ]] || {
+  printf 'FAIL: symlink_failure_no_dangling: configured symlink is dangling after failed publication\n' >&2
+  exit 1
+}
+[[ -f "$at_output/old.txt" ]] || {
+  printf 'FAIL: symlink_failure_no_dangling: old backing dir content is gone after failed publication\n' >&2
+  exit 1
+}
+# No leftover temp dirs should remain in the output parent.
+leftover=0
+for d in "$TEST_ROOT"/.sgt-graphify-live.* "$TEST_ROOT"/.sgt-graphify-nextsym.*; do
+  [[ -e "$d" ]] && leftover=$((leftover + 1))
+done
+[[ "$leftover" -eq 0 ]] || {
+  printf 'FAIL: symlink_failure_no_dangling: leftover temp files after failed publication\n' >&2
+  exit 1
+}
+
+printf 'symlink_failure_no_dangling_symlink: ok\n'
