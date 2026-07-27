@@ -163,6 +163,53 @@ _sgt_drain_check_admission() {
   esac
 }
 
+# ── External (non-subshell) lock helpers ──────────────────────────────────────
+# These allow a caller to hold the drain admission lock across multiple
+# operations in the same process (e.g. check then create td tasks atomically).
+# The caller must open the given file descriptor before calling acquire and
+# close it after calling release.
+#
+# Usage pattern:
+#   _sgt_drain_lock_acquire_fd 9 || _die "..."
+#   _sgt_drain_check_admission_locked "$project" || { _sgt_drain_lock_release_fd 9; exit 1; }
+#   ... first side effect (e.g. td task creation) ...
+#   _sgt_drain_lock_release_fd 9
+
+_sgt_drain_lock_acquire_fd() {
+  local fd="$1"
+  local lock_file
+  lock_file="$(_sgt_drain_lock_file)"
+  mkdir -p "$(dirname "$lock_file")"
+  # Open fd in the calling process (not a subshell) so the lock persists.
+  eval "exec ${fd}>\"\$lock_file\""
+  flock -w "${SERGEANT_DRAIN_LOCK_TIMEOUT_SECS:-10}" "$fd"
+}
+
+_sgt_drain_lock_release_fd() {
+  local fd="$1"
+  eval "exec ${fd}>&-" 2>/dev/null || true
+}
+
+# _sgt_drain_check_admission_locked <project>
+#
+# Check drain state without acquiring the lock.  MUST be called while the
+# caller holds the drain admission lock (via _sgt_drain_lock_acquire_fd).
+# Returns 0 if admitted, 1 (with stderr message) if drained.
+# Fails closed: any unreadable or malformed state counts as drained.
+
+_sgt_drain_check_admission_locked() {
+  local project="${1:-}"
+  if _sgt_drain_is_drained "$(_sgt_drain_global_file)"; then
+    printf 'ERROR: dispatch rejected: global drain is active\n' >&2
+    return 1
+  fi
+  if [[ -n "$project" ]] && _sgt_drain_is_drained "$(_sgt_drain_project_file "$project")"; then
+    printf 'ERROR: dispatch rejected: project drain is active for %s\n' "$project" >&2
+    return 1
+  fi
+  return 0
+}
+
 # ── Fast-path drain check (no lock) ───────────────────────────────────────────
 # For use inside worker polling loops where acquiring the full admission lock
 # on every iteration would be too expensive. These functions do a plain file-
