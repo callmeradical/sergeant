@@ -910,6 +910,33 @@ present_owner_before="$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-owner"
 present_phase_before="$(cksum "$TEST_ROOT/fleet/present-retry/app/cleanup-phase")"
 present_evidence_before="$(cksum \
   "$TEST_ROOT/fleet/present-retry/app/terminal-evidence"/.sergeant-*)"
+
+# Removing-state _restore_worker_evidence failure must produce a stable diagnostic.
+present_restore_fail_status_before="$(cat \
+  "$TEST_ROOT/fleet/present-retry/app/terminal-evidence/.sergeant-status")"
+set +e
+present_restore_fail_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/present-retry-removals" \
+  SGT_CLEANUP_MUTATE_POINT=before-retry-restore \
+  SGT_CLEANUP_MUTATE_PATH="$TEST_ROOT/fleet/present-retry/app/terminal-evidence/.sergeant-status" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" present-retry 2>&1)"
+present_restore_fail_exit=$?
+set -e
+[[ "$present_restore_fail_exit" -ne 0 ]] || {
+  printf 'cleanup accepted evidence restore failure during removing-state replay\n' >&2
+  exit 1
+}
+[[ "$present_restore_fail_output" == \
+  *"evidence restore failed during removing-state replay"* ]] || {
+  printf 'no diagnostic for removing-state restore failure: %s\n' \
+    "$present_restore_fail_output" >&2
+  exit 1
+}
+[[ "$(wc -l < "$TEST_ROOT/present-retry-removals")" -eq 1 ]]
+printf '%s\n' "$present_restore_fail_status_before" > \
+  "$TEST_ROOT/fleet/present-retry/app/terminal-evidence/.sergeant-status"
 rm "$TEST_ROOT/present-retry-sgt-present-retry"/.sergeant-*
 printf 'changed fleet result\n' > "$TEST_ROOT/fleet/present-retry/app/result"
 if PATH="$TEST_ROOT/fake-bin:$PATH" \

@@ -507,7 +507,8 @@ _require_terminal_repos() {
       if [[ "$restore_after_validation" == true ]]; then
         expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
         _restore_worker_evidence "$repo_dir" "$worktree" \
-          "$expected_evidence_identity"
+          "$expected_evidence_identity" || \
+          _die "$repo_name: evidence restore failed during removing-state replay; replay aborted"
       fi
     else
       # Worktree is absent or was never recorded.
