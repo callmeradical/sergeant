@@ -41,15 +41,7 @@ REPO_DIR="$FLEET_DIR/$TASK_ID/$REPO"
 [[ -d "$REPO_DIR" ]] || _die "Repo not found in task $TASK_ID: $REPO"
 
 # Read project name from brief.md for drain admission checks.
-SGT_PROJECT=""
-_sgt_read_brief_project() {
-  local brief="$FLEET_DIR/$TASK_ID/brief.md" project
-  [[ -f "$brief" ]] || return 0
-  project="$(sed -n 's/^Project:[[:space:]]*//p' "$brief")"
-  [[ "$project" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 0
-  SGT_PROJECT="$project"
-}
-_sgt_read_brief_project
+_sgt_drain_read_project_from_brief "$FLEET_DIR/$TASK_ID"
 
 worktree="$(cat "$REPO_DIR/worktree" 2>/dev/null || true)"
 
@@ -400,7 +392,6 @@ if _sgt_is_drained "$SGT_PROJECT"; then
   echo "sgt-respond: response stored; worker relaunch held by drain [project: ${SGT_PROJECT:-global}]."
   exit 0
 fi
-rm -f "$REPO_DIR/drain_held"
 
 worker_command="$(_sgt_worker_command \
   "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")"
