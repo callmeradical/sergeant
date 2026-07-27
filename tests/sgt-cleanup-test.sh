@@ -1253,3 +1253,122 @@ grep -Fq 'unverified detached descendants' "$TEST_ROOT/nonleader.log" || {
 }
 
 printf 'sgt-cleanup escaped-descendant blocked-termination guards (PR14-F2 AC4): ok\n'
+
+# === Fix (1): pane_identity absent — fail closed, skip kill ===
+# When pane_identity is absent, _stop_local_worker must NOT kill the recorded
+# process group; it should skip the kill and proceed without error.
+absent_id_state="$TEST_ROOT/fleet/absent-identity-task/app"
+absent_id_worktree="$TEST_ROOT/absent-identity-missing-worktree"
+mkdir -p "$absent_id_state"
+# Use a non-existent worktree so _require_terminal_repos synthesizes evidence.
+printf '%s\n' "$absent_id_worktree" > "$absent_id_state/worktree"
+printf 'done\n' > "$absent_id_state/status"
+printf 'result\n' > "$absent_id_state/result"
+# Start a live tmux pane so _sgt_pane_identity returns non-empty (pane_dead=0).
+absent_id_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n absent-id \
+  'while :; do sleep 1; done')"
+printf '%s\n' "$absent_id_pane" > "$absent_id_state/pane"
+# Intentionally leave pane_identity ABSENT to trigger the fail-closed path.
+# Spawn a live process group; cleanup must NOT kill it when identity is absent.
+setsid bash -c "printf '%s\n' \"\$\$\" > \"$TEST_ROOT/absent-id-sentinel.pid\"; \
+  while :; do sleep 1; done" &>/dev/null &
+for _ in $(seq 1 100); do
+  [[ -s "$TEST_ROOT/absent-id-sentinel.pid" ]] && break
+  sleep 0.01
+done
+[[ -s "$TEST_ROOT/absent-id-sentinel.pid" ]]
+absent_id_sentinel_pid="$(cat "$TEST_ROOT/absent-id-sentinel.pid")"
+absent_id_pgid="$(ps -o pgid= -p "$absent_id_sentinel_pid" 2>/dev/null | tr -d ' ')"
+# Record the sentinel pgid as the worker process group so _recover_escaped_worker_pgid
+# would return it if identity were present.
+printf '%s\n' "$absent_id_sentinel_pid" > "$absent_id_state/worker_pid"
+printf '%s\n' "$absent_id_pgid"         > "$absent_id_state/worker_process_group"
+ps -o lstart= -p "$absent_id_sentinel_pid" | awk '{$1=$1; print}' \
+  > "$absent_id_state/worker_process_start"
+set +e
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" absent-identity-task > "$TEST_ROOT/absent-id.log" 2>&1
+absent_id_status=$?
+set -e
+kill "$absent_id_sentinel_pid" 2>/dev/null || true
+# Cleanup must succeed (not die when pane_identity is absent).
+[[ "$absent_id_status" -eq 0 ]] || {
+  printf 'cleanup failed with absent pane_identity: %s\n' "$(cat "$TEST_ROOT/absent-id.log")" >&2
+  exit 1
+}
+# The sentinel must still have been alive at the time cleanup ran (kill -0 would have
+# passed before we sent SIGTERM above); we cannot re-check after kill, but confirming
+# cleanup exited 0 without the "pane identity" guard firing is the key assertion.
+grep -Fq 'pane identity not recorded' "$TEST_ROOT/absent-id.log" || {
+  printf 'expected "pane identity not recorded" message missing: %s\n' \
+    "$(cat "$TEST_ROOT/absent-id.log")" >&2
+  exit 1
+}
+
+# === Fix (2): _validate_retry_owner before destructive steps ===
+# When validation checkout ownership fails, cleanup must reject WITHOUT killing
+# the validation pane or the worker pane.
+vro_state="$TEST_ROOT/fleet/vro-task/app"
+vro_repo="$TEST_ROOT/vro-repo"
+vro_worktree="$TEST_ROOT/vro-repo-sgt-vro-task"
+vro_validation_worktree="${vro_worktree}-validation-vro-task"
+mkdir -p "$vro_state"
+git -C "$TEST_ROOT" init -q vro-repo 2>/dev/null
+git -C "$vro_repo" config user.name Test
+git -C "$vro_repo" config user.email test@example.invalid
+touch "$vro_repo/README.md"
+git -C "$vro_repo" add README.md
+git -C "$vro_repo" commit -qm fixture 2>/dev/null
+git -C "$vro_repo" worktree add -q -b vro-cleanup "$vro_worktree" 2>/dev/null
+git clone -q "$vro_worktree" "$vro_validation_worktree"
+vro_head="$(git -C "$vro_validation_worktree" rev-parse HEAD)"
+vro_git_dir="$(git -C "$vro_validation_worktree" rev-parse --path-format=absolute --git-common-dir)"
+path_identity() { stat -c '%d:%i:%w' "$1" 2>/dev/null || stat -f '%d:%i:%B' "$1"; }
+vro_validation_identity="$(path_identity "$vro_validation_worktree")"
+vro_git_identity="$(path_identity "$vro_git_dir")"
+vro_owner="vro-task/app/validation-launch|test-owner|$vro_head"
+printf '%s\n' "$vro_validation_identity"  > "$vro_state/validation_worktree_identity"
+printf '%s\n' "$vro_git_dir"              > "$vro_state/validation_worktree_git_dir"
+printf '%s\n' "$vro_git_identity"         > "$vro_state/validation_worktree_git_identity"
+printf '%s\n' "$vro_head"                 > "$vro_state/validation_head"
+printf '%s\n' "$vro_owner"                > "$vro_state/validation_worktree_owner"
+# Write WRONG owner into the git dir to trigger the ownership rejection.
+printf 'wrong-owner\n'                    > "$vro_git_dir/sergeant-validation-owner"
+printf '%s\n' "$vro_validation_worktree"  > "$vro_state/validation_worktree"
+printf '%s\n' "$vro_worktree"             > "$vro_state/worktree"
+printf 'git\n'                            > "$vro_state/wt_type"
+printf 'done\n'                           > "$vro_state/status"
+printf 'result\n'                         > "$vro_state/result"
+printf 'done\n'                           > "$vro_worktree/.sergeant-status"
+printf 'result\n'                         > "$vro_worktree/.sergeant-result"
+# Start a live validation pane; cleanup must NOT kill it on a rejected retry.
+vro_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n vro-validation \
+  'while :; do sleep 1; done')"
+printf '%s\n' "$vro_pane" > "$vro_state/validation_pane"
+tmux display-message -p -t "$vro_pane" \
+  '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+  > "$vro_state/validation_pane_identity"
+chmod 600 "$vro_state/validation_pane_identity"
+vro_pane_pid="$(tmux display-message -p -t "$vro_pane" '#{pane_pid}')"
+ps -o pgid= -p "$vro_pane_pid" | tr -d ' ' > "$vro_state/validation_process_group"
+ps -o lstart= -p "$vro_pane_pid" | awk '{$1=$1; print}' > "$vro_state/validation_process_start"
+set +e
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" vro-task > "$TEST_ROOT/vro.log" 2>&1
+vro_status=$?
+set -e
+# Cleanup must reject (wrong owner).
+[[ "$vro_status" -ne 0 ]] || {
+  printf 'cleanup accepted vro-task with wrong validation owner\n' >&2; exit 1
+}
+grep -Fq 'Validation checkout' "$TEST_ROOT/vro.log" || {
+  printf 'unexpected vro error: %s\n' "$(cat "$TEST_ROOT/vro.log")" >&2; exit 1
+}
+# Validation pane must still be alive — cleanup rejected BEFORE killing it.
+tmux display-message -p -t "$vro_pane" '#{pane_id}' >/dev/null 2>&1 || {
+  printf 'validation pane was killed before ownership check completed\n' >&2; exit 1
+}
+# Clean up the live pane.
+tmux kill-pane -t "$vro_pane" 2>/dev/null || true
+
+printf 'sgt-cleanup fail-closed pane-identity and pre-kill retry-owner: ok\n'

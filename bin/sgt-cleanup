@@ -196,6 +196,9 @@ _stop_local_worker() {
       if [[ "$pane_dead" != "0" ]]; then
         echo "  worker pane already stopped: $pane"
         pane_pgid="$(_recover_escaped_worker_pgid "$repo_dir")"
+      elif [[ -z "$(_sgt_read_owned_file "$repo_dir/pane_identity" 2>/dev/null || true)" ]]; then
+        echo "  pane identity not recorded; skipping kill of unverified pane: $pane"
+        # Fail closed — no ownership proof available; do not kill.
       elif ! _sgt_pane_identity_matches "$pane" "$repo_dir"; then
         echo "  recorded pane no longer belongs to this worker: $pane"
         pane_pgid="$(_recover_escaped_worker_pgid "$repo_dir")"
@@ -551,6 +554,51 @@ _record_cleanup_phase() {
     mv "$repo_dir/cleanup-phase.tmp" "$repo_dir/cleanup-phase"
 }
 
+# _validate_retry_owner — pre-flight ownership check for the validation checkout.
+# Must be called BEFORE any destructive step (pane kills, worktree removal) so
+# that a rejected retry leaves the fleet state completely unchanged.
+_validate_retry_owner() {
+  local repo_dir="$1" worktree="$2" task_id="$3"
+  local repo_name validation_worktree validation_head validation_mode
+  local validation_identity validation_git_dir validation_git_identity validation_owner
+
+  repo_name="$(basename "$repo_dir")"
+  validation_worktree="$(cat "$repo_dir/validation_worktree" 2>/dev/null || true)"
+  [[ -n "$validation_worktree" && ( -e "$validation_worktree" || -L "$validation_worktree" ) ]] || \
+    return 0
+
+  [[ "$validation_worktree" == "${worktree}-validation-${task_id}" ]] || \
+    _die "Validation worktree path is outside the recorded ownership boundary: $validation_worktree"
+
+  validation_head="$(cat "$repo_dir/validation_head" 2>/dev/null || true)"
+  validation_mode="$(_validation_checkout_provenance_mode "$repo_dir" "$validation_head")"
+  case "$validation_mode" in
+    exact)
+      validation_identity="$(cat "$repo_dir/validation_worktree_identity" 2>/dev/null || true)"
+      validation_git_dir="$(cat "$repo_dir/validation_worktree_git_dir" 2>/dev/null || true)"
+      validation_git_identity="$(cat "$repo_dir/validation_worktree_git_identity" 2>/dev/null || true)"
+      validation_owner="$(cat "$repo_dir/validation_worktree_owner" 2>/dev/null || true)"
+      [[ -n "$validation_identity" && -n "$validation_git_dir" && \
+        -n "$validation_git_identity" && -n "$validation_head" && -n "$validation_owner" ]] || \
+        _die "Validation checkout ownership provenance is incomplete: $validation_worktree"
+      [[ "$validation_owner" == "$task_id/$repo_name/validation-launch|"*"|$validation_head" ]] || \
+        _die "Validation checkout owner provenance does not match: $validation_worktree"
+      _validation_checkout_matches "$validation_worktree" "$validation_worktree" \
+        "$validation_identity" "$validation_git_dir" "$validation_git_identity" \
+        "$validation_head" "$validation_owner" || \
+        _die "Validation checkout identity does not match recorded ownership: $validation_worktree"
+      ;;
+    legacy)
+      _validation_legacy_checkout_matches "$validation_worktree" "$validation_worktree" \
+        "$validation_head" || \
+        _die "Validation checkout does not match retry-safe legacy state: $validation_worktree"
+      ;;
+    *)
+      _die "Validation checkout ownership provenance is incomplete: $validation_worktree"
+      ;;
+  esac
+}
+
 _validation_object_identity() {
   [[ -e "$1" && ! -L "$1" ]] || return 1
   stat -c '%d:%i:%w' -- "$1" 2>/dev/null || stat -f '%d:%i:%B' "$1" 2>/dev/null
@@ -640,13 +688,15 @@ for repo_dir in "$TASK_DIR"/*/; do
 
   echo "--- $repo_name (status: $status, type: $wt_type) ---"
 
+  # Validate retry ownership before any destructive step so a rejected retry
+  # leaves panes, worktrees, and fleet state completely unchanged.
+  _validate_retry_owner "$repo_dir" "$worktree" "$TASK_ID"
+
   _stop_validation_pane "$repo_dir"
   _stop_local_worker "$repo_dir" "$worktree"
 
   validation_worktree="$(cat "$repo_dir/validation_worktree" 2>/dev/null || true)"
   if [[ -n "$validation_worktree" && ( -e "$validation_worktree" || -L "$validation_worktree" ) ]]; then
-    [[ "$validation_worktree" == "${worktree}-validation-${TASK_ID}" ]] || \
-      _die "Validation worktree path is outside the recorded ownership boundary: $validation_worktree"
     validation_head="$(cat "$repo_dir/validation_head" 2>/dev/null || true)"
     validation_mode="$(_validation_checkout_provenance_mode "$repo_dir" "$validation_head")"
     case "$validation_mode" in
@@ -655,20 +705,8 @@ for repo_dir in "$TASK_DIR"/*/; do
         validation_git_dir="$(cat "$repo_dir/validation_worktree_git_dir" 2>/dev/null || true)"
         validation_git_identity="$(cat "$repo_dir/validation_worktree_git_identity" 2>/dev/null || true)"
         validation_owner="$(cat "$repo_dir/validation_worktree_owner" 2>/dev/null || true)"
-        [[ -n "$validation_identity" && -n "$validation_git_dir" && \
-          -n "$validation_git_identity" && -n "$validation_head" && -n "$validation_owner" ]] || \
-          _die "Validation checkout ownership provenance is incomplete: $validation_worktree"
-        [[ "$validation_owner" == "$TASK_ID/$repo_name/validation-launch|"*"|$validation_head" ]] || \
-          _die "Validation checkout owner provenance does not match: $validation_worktree"
-        _validation_checkout_matches "$validation_worktree" "$validation_worktree" \
-          "$validation_identity" "$validation_git_dir" "$validation_git_identity" \
-          "$validation_head" "$validation_owner" || \
-          _die "Validation checkout identity does not match recorded ownership: $validation_worktree"
         ;;
       legacy)
-        _validation_legacy_checkout_matches "$validation_worktree" "$validation_worktree" \
-          "$validation_head" || \
-          _die "Validation checkout does not match retry-safe legacy state: $validation_worktree"
         ;;
       *)
         _die "Validation checkout ownership provenance is incomplete: $validation_worktree"
