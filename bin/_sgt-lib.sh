@@ -49,6 +49,7 @@ _sgt_load_global_config() {
     local di
     di="$(yq '.default_identity // ""' "$cfg" 2>/dev/null | tr -d '\n')"
     if [[ -n "$di" && "$di" != "null" ]]; then
+      # shellcheck disable=SC2034  # sourced by dispatch, which consumes this global.
       SGT_DEFAULT_IDENTITY="$di"
     fi
   fi

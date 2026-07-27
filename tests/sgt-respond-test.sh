@@ -517,6 +517,36 @@ new_nonce="$(cat "$repo_state/notification_target")"
 grep -Fq '%99' \
   "$repo_state/notifications/$stale_notification_id/superseded_target_pane_identity"
 
+printf 'needs_input\n' > "$repo_state/status"
+printf 'needs_input\n' > "$worktree/.sergeant-status"
+rm -f "$worktree/.sergeant-response" "$repo_state/response" \
+  "$repo_state/response_id" "$repo_state/response_generation"
+replacement_nonce="dddddddddddddddddddddddddddddddd"
+target_race_hook="printf '%s\\n' '$replacement_nonce' > \"\$repo_dir/notification_target\""
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/relaunch-target-race.log" \
+  TD_LOG="$TEST_ROOT/relaunch-target-race-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 PANE_IDENTITY="1|%42|4242|123456|dead-pane" NEW_PANE=%101 \
+  SGT_TEST_HOOKS=1 _SGT_POST_MV_HOOK="$target_race_hook" \
+  EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  respond 'relaunch target race' 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]]
+[[ "$output" == *'notification target race detected for task-1/app; relaunched worker orphaned'* ]]
+[[ "$(cat "$repo_state/status")" == 'orphaned' ]]
+[[ "$(cat "$worktree/.sergeant-status")" == 'orphaned' ]]
+grep -Fq 'notification target race detected during relaunch' "$repo_state/diagnostic"
+grep -Fq 'kill-pane -t %101' "$TEST_ROOT/relaunch-target-race.log"
+[[ "$(cat "$repo_state/notification_target")" == "$replacement_nonce" ]]
+[[ ! -e "$repo_state/notification_target_pane_identity" ]]
+race_notification_id="$(cat "$repo_state/notification_id")"
+race_target_count="$(find "$repo_state/notifications/$race_notification_id/targets" -mindepth 1 \
+  -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+[[ "$race_target_count" == "0" ]]
+[[ "$(cat "$worktree/.sergeant-response")" == 'relaunch target race' ]]
+[[ ! -d "$repo_state/response.lock" ]]
+
 rm "$worktree/.sergeant-response" "$repo_state/response"
 cat > "$fake_bin/td" <<'EOF'
 #!/usr/bin/env bash

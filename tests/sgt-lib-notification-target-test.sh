@@ -101,7 +101,7 @@ fi
 
 [[ -n "$nonce_out" ]] || { printf 'FAIL case2: no nonce returned\n' >&2; exit 1; }
 
-published2="$(cat "$repo_dir2/notification_target" 2>/dev/null | tr -d '\n' || printf '')"
+published2="$(tr -d '\n' < "$repo_dir2/notification_target" 2>/dev/null || printf '')"
 if [[ "$published2" != "$nonce_out" ]]; then
   printf 'FAIL case2: returned nonce "%s" != published "%s"\n' "$nonce_out" "$published2" >&2
   exit 1

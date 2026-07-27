@@ -261,6 +261,29 @@ if grep -Fq 'send-keys' "$TEST_ROOT/readiness-timeout.log"; then
   exit 1
 fi
 
+replacement_nonce="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+target_race_hook="printf '%s\\n' '$replacement_nonce' > \"\$repo_dir/notification_target\""
+set +e
+output="$(PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/target-race.log" \
+  SGT_TEST_HOOKS=1 _SGT_POST_MV_HOOK="$target_race_hook" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 "$ROOT_DIR/bin/sgt-dispatch" test 'Dispatch target race' \
+  --repos app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]]
+[[ "$output" == *'notification target race detected for app; worker orphaned'* ]]
+target_race_state="$(printf '%s\n' "$TEST_ROOT"/fleet/dispatch-target-race-*/app)"
+[[ "$(cat "$target_race_state/status")" == "orphaned" ]]
+grep -Fq 'notification target creation race: concurrent dispatch detected' \
+  "$target_race_state/diagnostic"
+[[ "$(cat "$target_race_state/notification_target")" == "$replacement_nonce" ]]
+[[ ! -e "$target_race_state/notification_target_pane_identity" ]]
+target_race_target_count="$(find "$target_race_state/notifications" -mindepth 3 -maxdepth 3 \
+  -type d 2>/dev/null | wc -l | tr -d ' ')"
+[[ "$target_race_target_count" == "0" ]]
+grep -Fq 'kill-pane -t %42' "$TEST_ROOT/target-race.log"
+
 before_count="$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
 set +e
 output="$(PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/unsupported.log" \
