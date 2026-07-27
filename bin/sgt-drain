@@ -1,268 +1,82 @@
 #!/usr/bin/env bash
-# sgt-drain — Set or query drain state for a project or globally.
+# sgt-drain — Set or remove a persistent drain on a Sergeant project or globally.
+#
+# When drained, new pane starts from response-driven relaunches and stall
+# recovery are refused for matching projects.  Responses are stored
+# generation-safely for later delivery.
 #
 # Usage:
-#   sgt-drain --global [--reason <reason>] [--actor <actor>] [--deadline <ISO>]
-#   sgt-drain <project> [--reason <reason>] [--actor <actor>] [--deadline <ISO>]
-#   sgt-drain --status
-#   sgt-drain --status --global
-#   sgt-drain --status <project>
-#   sgt-drain --wait [--global|<project>] [--timeout <seconds>]
+#   sgt-drain [<project>] [--reason <text>]    # drain a project
+#   sgt-drain --global    [--reason <text>]    # drain all projects
+#   sgt-drain --undrain   <project>            # undrain a project
+#   sgt-drain --undrain   --global             # undrain globally
 #
-# A global drain blocks dispatch for every project and signals all active
-# workers to finish their current operation and exit cleanly.
-# A project drain blocks dispatch only for the named project and signals
-# only that project's active workers.
-# Drain records are durable and survive process/session restart.
-# Malformed drain files fail closed (dispatch stays blocked).
-# The optional --deadline field is stored metadata for operator reference;
-# drains persist until explicit undrain regardless of deadline.
-#
-# --wait polls the active fleet until all matching workers have reached
-# a quiescent state (drained, terminal, or unreachable), or until the
-# optional timeout expires. Reports acknowledged/draining/drained/terminal/
-# unreachable per worker. Times out without killing workers.
-# Use sgt-undrain to deactivate a drain signal.
+# Options:
+#   --reason <text>   Human-readable explanation recorded with the drain state.
+#   --undrain         Remove an active drain (undrain-only; does not reevaluate).
+#   --global          Target the global drain that covers all projects.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
 # shellcheck source=bin/_sgt-drain.sh
 source "$SCRIPT_DIR/_sgt-drain.sh"
 
-# ── Parse args ────────────────────────────────────────────────────────────────
+_die() { echo "ERROR: $*" >&2; exit 1; }
 
-GLOBAL=false
-STATUS=false
-WAIT=false
-TARGET=""
+# ── Parse arguments ───────────────────────────────────────────────────────────
+
+MODE="drain"          # drain | undrain
+SCOPE=""              # "global" | <project-name>
 REASON=""
-ACTOR=""
-DEADLINE=""
-TIMEOUT_SECS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --undrain)
+      MODE="undrain"
+      shift
+      ;;
     --global)
-      GLOBAL=true
-      shift
-      ;;
-    --status)
-      STATUS=true
-      shift
-      ;;
-    --wait)
-      WAIT=true
+      SCOPE="global"
       shift
       ;;
     --reason)
-      [[ -n "${2:-}" ]] || { printf 'ERROR: --reason requires a value\n' >&2; exit 1; }
+      [[ $# -ge 2 ]] || _die "--reason requires a value"
       REASON="$2"
       shift 2
       ;;
-    --actor)
-      [[ -n "${2:-}" ]] || { printf 'ERROR: --actor requires a value\n' >&2; exit 1; }
-      ACTOR="$2"
-      shift 2
-      ;;
-    --deadline)
-      [[ -n "${2:-}" ]] || { printf 'ERROR: --deadline requires a value\n' >&2; exit 1; }
-      DEADLINE="$2"
-      shift 2
-      ;;
-    --timeout)
-      [[ -n "${2:-}" ]] || { printf 'ERROR: --timeout requires a value\n' >&2; exit 1; }
-      TIMEOUT_SECS="$2"
-      shift 2
-      ;;
-    -*)
-      printf 'ERROR: unknown option: %s\n' "$1" >&2
-      exit 1
+    --*)
+      _die "Unknown option: $1"
       ;;
     *)
-      if [[ -z "$TARGET" ]]; then
-        TARGET="$1"
-        shift
-      else
-        printf 'ERROR: unexpected argument: %s\n' "$1" >&2
-        exit 1
-      fi
+      [[ -z "$SCOPE" ]] || _die "Unexpected argument: $1 (scope already set to '$SCOPE')"
+      [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || \
+        _die "Invalid project name: $1 (must match [A-Za-z0-9][A-Za-z0-9._-]*)"
+      SCOPE="$1"
+      shift
       ;;
   esac
 done
 
-# ── Status mode ───────────────────────────────────────────────────────────────
-# Reads drain state under the admission lock for consistency.
-# Output is privacy-safe: shows drained/not-drained and creation date only.
+[[ -n "$SCOPE" ]] || _die "Must specify a project name or --global"
 
-# shellcheck disable=SC2317  # invoked indirectly via _sgt_drain_with_lock
-_print_drain_status() {
-  local label="$1" drain_file="$2" created_at
-  if _sgt_drain_is_drained "$drain_file"; then
-    created_at="$(_sgt_drain_read_field "$drain_file" created_at)"
-    if [[ -n "$created_at" ]]; then
-      printf '%s: drained (since %s)\n' "$label" "$created_at"
-    else
-      printf '%s: drained\n' "$label"
-    fi
-  else
-    printf '%s: not drained\n' "$label"
-  fi
-}
+# ── Execute ───────────────────────────────────────────────────────────────────
 
-if $STATUS; then
-  if $GLOBAL || [[ -z "$TARGET" ]]; then
-    _sgt_drain_with_lock "
-      _print_drain_status global \"$(_sgt_drain_global_file)\"
-    " || true
-  fi
+drain_dir="$(_sgt_drain_state_dir)"
+drain_file="$drain_dir/$SCOPE"
 
-  if [[ -n "$TARGET" ]] && ! $GLOBAL; then
-    _sgt_drain_with_lock "
-      _print_drain_status \"$TARGET\" \"$(_sgt_drain_project_file "$TARGET")\"
-    " || true
-  fi
-
-  if ! $GLOBAL && [[ -z "$TARGET" ]]; then
-    # Show all drained projects
-    projects_dir="$(_sgt_drain_dir)/projects"
-    if [[ -d "$projects_dir" ]]; then
-      for proj_drain in "$projects_dir"/*/drain; do
-        [[ -f "$proj_drain" ]] || continue
-        proj="$(basename "$(dirname "$proj_drain")")"
-        _sgt_drain_with_lock "
-          _print_drain_status \"$proj\" \"$proj_drain\"
-        " || true
-      done
-    fi
-  fi
-
-  exit 0
+if [[ "$MODE" == "undrain" ]]; then
+  rm -f "$drain_file"
+  echo "sgt-drain: undrained ${SCOPE}."
+else
+  mkdir -p "$drain_dir"
+  temporary="${drain_file}.tmp.$$"
+  {
+    [[ -n "$REASON" ]] && printf 'reason=%s\n' "$REASON"
+    printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$temporary"
+  mv "$temporary" "$drain_file"
+  echo "sgt-drain: drained ${SCOPE}."
 fi
-
-# ── --wait mode ───────────────────────────────────────────────────────────────
-# Poll the active fleet until all matching workers are quiescent.
-# Must be used after a drain is already set; does not set the drain itself.
-
-if $WAIT; then
-  FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
-  POLL_INTERVAL="${SERGEANT_DRAIN_POLL_INTERVAL:-1}"
-  scope="${TARGET:-global}"
-  [[ "$GLOBAL" == "true" ]] && scope="global"
-  start_time="$(date +%s)"
-
-  # _wait_worker_state <repo_dir>: emits acknowledged|draining|drained|terminal|unreachable
-  _wait_worker_state() {
-    local repo_dir="$1"
-    local status worktree wt_status
-    status="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
-    worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
-
-    case "$status" in
-      drained)       printf 'drained\n';    return ;;
-      done|failed:*) printf 'terminal\n';   return ;;
-      orphaned)      printf 'unreachable\n'; return ;;
-    esac
-
-    if [[ -n "$worktree" && -f "$worktree/.sergeant-status" ]]; then
-      wt_status="$(tr -d '\n' < "$worktree/.sergeant-status" 2>/dev/null || echo "")"
-      case "$wt_status" in
-        drained)       printf 'drained\n';    return ;;
-        done|failed:*) printf 'terminal\n';   return ;;
-        orphaned)      printf 'unreachable\n'; return ;;
-      esac
-    fi
-
-    # Check for drain ack (worker has noticed the drain signal)
-    local drain_ack_present=false
-    if [[ -n "$worktree" && -f "$worktree/.sergeant-drained" ]]; then
-      drain_ack_present=true
-    fi
-
-    if $drain_ack_present; then
-      printf 'draining\n'
-    else
-      printf 'acknowledged\n'
-    fi
-  }
-
-  _find_matching_repos() {
-    [[ -d "$FLEET_DIR" ]] || return 0
-    for task_dir in "$FLEET_DIR"/*/; do
-      [[ -d "$task_dir" ]] || continue
-      if [[ "$scope" != "global" ]]; then
-        local task_project
-        task_project="$(awk '/^Project:/{print $2; exit}' "$task_dir/brief.md" 2>/dev/null || true)"
-        [[ "$task_project" == "$scope" ]] || continue
-      fi
-      for repo_dir in "$task_dir"*/; do
-        [[ -d "$repo_dir" && -f "$repo_dir/status" ]] || continue
-        printf '%s\n' "${repo_dir%/}"
-      done
-    done
-  }
-
-  _is_quiescent() {
-    case "$1" in
-      drained|terminal|unreachable) return 0 ;;
-      *) return 1 ;;
-    esac
-  }
-
-  printf 'waiting for workers to drain (scope: %s) ...\n' "$scope"
-
-  while true; do
-    all_quiescent=true
-    any_workers=false
-    declare -A worker_states=()
-
-    while IFS= read -r repo_dir; do
-      [[ -n "$repo_dir" ]] || continue
-      any_workers=true
-      state="$(_wait_worker_state "$repo_dir")"
-      worker_states["$repo_dir"]="$state"
-      _is_quiescent "$state" || all_quiescent=false
-    done < <(_find_matching_repos)
-
-    for repo_dir in "${!worker_states[@]}"; do
-      task_id="$(basename "$(dirname "$repo_dir")")"
-      repo_name="$(basename "$repo_dir")"
-      printf '  %s/%s: %s\n' "$task_id" "$repo_name" "${worker_states[$repo_dir]}"
-    done
-
-    if ! $any_workers || $all_quiescent; then
-      printf 'all workers quiescent (scope: %s)\n' "$scope"
-      exit 0
-    fi
-
-    if [[ "$TIMEOUT_SECS" -gt 0 ]]; then
-      elapsed=$(( $(date +%s) - start_time ))
-      if (( elapsed >= TIMEOUT_SECS )); then
-        printf 'timeout: not all workers drained within %ds\n' "$TIMEOUT_SECS" >&2
-        exit 1
-      fi
-    fi
-
-    sleep "$POLL_INTERVAL"
-  done
-fi
-
-# ── Set drain ─────────────────────────────────────────────────────────────────
-
-if $GLOBAL; then
-  [[ -z "$TARGET" ]] || { printf 'ERROR: --global and <project> are mutually exclusive\n' >&2; exit 1; }
-  drain_file="$(_sgt_drain_global_file)"
-  _sgt_drain_with_lock "_sgt_drain_write \"$drain_file\" \"${REASON:-}\" \"${ACTOR:-}\" \"${DEADLINE:-}\""
-  printf 'global drain set\n'
-  exit 0
-fi
-
-if [[ -n "$TARGET" ]]; then
-  drain_file="$(_sgt_drain_project_file "$TARGET")"
-  _sgt_drain_with_lock "_sgt_drain_write \"$drain_file\" \"${REASON:-}\" \"${ACTOR:-}\" \"${DEADLINE:-}\""
-  printf '%s drain set\n' "$TARGET"
-  exit 0
-fi
-
-printf 'ERROR: specify --global or a project name\n' >&2
-exit 1
