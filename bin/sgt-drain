@@ -10,11 +10,13 @@
 #   sgt-drain --global    [--reason <text>]    # drain all projects
 #   sgt-drain --undrain   <project>            # undrain a project
 #   sgt-drain --undrain   --global             # undrain globally
+#   sgt-drain --status    [<project>|--global] # show active drain state
 #
 # Options:
 #   --reason <text>   Human-readable explanation recorded with the drain state.
 #   --undrain         Remove an active drain (undrain-only; does not reevaluate).
 #   --global          Target the global drain that covers all projects.
+#   --status          Print active drain state for the given scope (or all scopes).
 
 set -euo pipefail
 
@@ -28,8 +30,8 @@ _die() { echo "ERROR: $*" >&2; exit 1; }
 
 # ── Parse arguments ───────────────────────────────────────────────────────────
 
-MODE="drain"          # drain | undrain
-SCOPE=""              # "global" | <project-name>
+MODE="drain"          # drain | undrain | status
+SCOPE=""              # "global" | <project-name> | "" (all, for status)
 REASON=""
 
 while [[ $# -gt 0 ]]; do
@@ -40,6 +42,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --global)
       SCOPE="global"
+      shift
+      ;;
+    --status)
+      MODE="status"
       shift
       ;;
     --reason)
@@ -60,11 +66,48 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$SCOPE" ]] || _die "Must specify a project name or --global"
-
 # ── Execute ───────────────────────────────────────────────────────────────────
 
 drain_dir="$(_sgt_drain_state_dir)"
+
+if [[ "$MODE" == "status" ]]; then
+  # Show active drain state.  With no scope, report global and all project drains.
+  found=0
+  if [[ -z "$SCOPE" || "$SCOPE" == "global" ]]; then
+    if [[ -f "$drain_dir/global" ]]; then
+      echo "global drain: active"
+      grep -E "^reason=|^created=" "$drain_dir/global" 2>/dev/null | sed 's/^/  /' || true
+      found=1
+    elif [[ "$SCOPE" == "global" ]]; then
+      echo "global drain: none"
+    fi
+  fi
+  if [[ -n "$SCOPE" && "$SCOPE" != "global" ]]; then
+    if [[ -f "$drain_dir/$SCOPE" ]]; then
+      echo "${SCOPE} drain: active"
+      grep -E "^reason=|^created=" "$drain_dir/$SCOPE" 2>/dev/null | sed 's/^/  /' || true
+      found=1
+    else
+      echo "${SCOPE} drain: none"
+    fi
+  elif [[ -z "$SCOPE" ]]; then
+    # Scan all project drains
+    if [[ -d "$drain_dir" ]]; then
+      while IFS= read -r -d '' drain_file; do
+        name="$(basename "$drain_file")"
+        [[ "$name" == "global" ]] && continue
+        echo "${name} drain: active"
+        grep -E "^reason=|^created=" "$drain_file" 2>/dev/null | sed 's/^/  /' || true
+        found=1
+      done < <(find "$drain_dir" -maxdepth 1 -type f -print0 2>/dev/null)
+    fi
+    [[ $found -eq 1 ]] || echo "no active drain"
+  fi
+  exit 0
+fi
+
+[[ -n "$SCOPE" ]] || _die "Must specify a project name or --global"
+
 drain_file="$drain_dir/$SCOPE"
 
 if [[ "$MODE" == "undrain" ]]; then

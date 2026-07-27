@@ -2,7 +2,9 @@
 # _sgt-drain.sh — Drain state helpers sourced by sgt-* scripts.
 # Source this file; do not execute it directly.
 #
-# Provides: _sgt_is_drained, _sgt_drain_state_dir
+# Provides: _sgt_is_drained, _sgt_drain_state_dir,
+#           _sgt_drain_lock_acquire_fd, _sgt_drain_lock_release_fd,
+#           _sgt_drain_check_admission_locked
 #
 # Drain state location: $SERGEANT_CONFIG/drain/
 #   Global drain:  $SERGEANT_CONFIG/drain/global
@@ -50,4 +52,69 @@ _sgt_is_drained() {
     [[ -f "$drain_dir/$project" ]] && return 0
   fi
   return 1
+}
+
+# ── Drain admission lock helpers ──────────────────────────────────────────────
+#
+# These three functions implement the advisory drain-admission lock used by
+# sgt-respond (and other relaunchers) to serialize the "read drain state →
+# start new pane" window so a concurrent sgt-drain cannot slip in between.
+#
+# The lock is a flock(2) held on the drain-state directory itself.  sgt-drain
+# does not need to acquire the lock because it only appends/removes files; the
+# concern is purely the read-then-relaunch race in sgt-respond.
+#
+# Usage pattern (mirroring sgt-respond):
+#   exec <N>>/dev/null            # open the fd; real users point it at the dir
+#   _sgt_drain_lock_acquire_fd N  # flock; returns 0 on success
+#   _sgt_drain_check_admission_locked [project]   # 0 = admit, 1 = draining
+#   ... spawn new pane ...
+#   _sgt_drain_lock_release_fd N  # release by closing the fd
+
+# _sgt_drain_lock_acquire_fd <fd>
+#
+# Acquires an exclusive advisory lock on the drain state directory, attaching
+# it to file descriptor <fd>.  The caller must have opened <fd> before calling
+# (e.g. exec N>/path/to/lockfile).  Returns 0 on success.
+#
+# Falls back gracefully if flock(1) is unavailable (non-Linux or minimal
+# installs): the function still returns 0 so that sgt-respond is not blocked
+# merely because flock is absent — the drain-state file check in
+# _sgt_drain_check_admission_locked remains the authoritative gate.
+_sgt_drain_lock_acquire_fd() {
+  local fd="${1:?_sgt_drain_lock_acquire_fd requires an fd}"
+  local drain_dir
+  drain_dir="$(_sgt_drain_state_dir)"
+  mkdir -p "$drain_dir" 2>/dev/null || true
+  if command -v flock >/dev/null 2>&1; then
+    # Re-open the fd pointed at the drain dir so flock targets the right inode.
+    # shellcheck disable=SC1083
+    eval "exec ${fd}>>\"${drain_dir}\"" 2>/dev/null || true
+    flock --exclusive "$fd" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# _sgt_drain_lock_release_fd <fd>
+#
+# Releases the advisory lock by closing <fd>.  Safe to call even if
+# _sgt_drain_lock_acquire_fd was a no-op (flock unavailable).
+_sgt_drain_lock_release_fd() {
+  local fd="${1:?_sgt_drain_lock_release_fd requires an fd}"
+  # shellcheck disable=SC1083
+  eval "exec ${fd}>&-" 2>/dev/null || true
+  return 0
+}
+
+# _sgt_drain_check_admission_locked [project]
+#
+# Must be called while the drain admission lock is held (after a successful
+# _sgt_drain_lock_acquire_fd).  Returns 0 if admission is allowed (no active
+# drain), 1 if a drain is active.
+#
+# Equivalent to _sgt_is_drained but intended for use inside the lock window.
+_sgt_drain_check_admission_locked() {
+  local project="${1:-}"
+  _sgt_is_drained "$project" && return 1
+  return 0
 }
