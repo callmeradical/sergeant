@@ -45,7 +45,11 @@ leave state unchanged and report what was skipped.
 Maintain a visible, numbered checklist in the terminal output. Before each step,
 verify whether it is already complete and skip it without prompting if it is.
 After each step completes or is skipped, write a `[ok]` or `[skipped]` status
-line. This lets the user resume a partial run without repeating completed steps.
+line. When a phase fails, stop the current run with actionable output identifying
+the last completed phase. On the next invocation the checklist starts over from
+Phase 1 but skips every phase that already passes verification; this is how
+resumability works — not by persisting state between runs, but by re-checking
+each phase before acting on it.
 
 ## Phase 1: Detect prerequisites
 
@@ -118,7 +122,10 @@ Check whether `~/.config/sergeant/config.yaml` exists.
 
 ## Phase 4: Project YAML interview
 
-Run the interview for one project at a time. Ask these questions in order; stop
+If the project YAML file already exists and the user wants to modify it, skip
+this phase and go directly to Phase 5 (Repair existing YAML) instead.
+
+Run the interview for new projects only. Ask these questions in order; stop
 and wait for each answer before proceeding:
 
 1. **Project name** — becomes the YAML filename stem (e.g., `myproject` →
@@ -237,5 +244,5 @@ existing working configuration to reach the same end state.
 | Consent declined for any write | Leave state unchanged; report what was skipped |
 | YAML parse error on existing file | Report the error and stop; do not overwrite |
 | Unsupported setup capability needed | File or suggest a td issue; do not invent a workaround |
-| `sgt-sync` or `sgt-context` fails | Report full output and stop; do not continue to Phase 7 |
+| `sgt-sync` or `sgt-context` fails | Report full output and stop the current run; the next run re-checks Phase 6 |
 | Partial setup on exit | Report last completed step; next run resumes from that point |

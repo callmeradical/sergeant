@@ -102,7 +102,8 @@ Load procedures only when their trigger applies:
 | More than one repository owns the requested outcome | `cross-repo-work` | Repository decomposition, dependency and merge order, and per-repo acceptance |
 | Dispatch mode is selected or an existing fleet must be operated | `dispatch` | td integration, worktrees, worker contracts, monitoring, escalation, reconciliation, and cleanup |
 | The user asks to ingest, backfill, regenerate, inspect, update, or change the wiki | `wiki` | Capture behavior, digest generation, schema ownership, and index updates |
-| The user asks how to install, configure, use, or troubleshoot Sergeant | `sergeant-help` | Documentation lookup, command verification, prerequisites, and help responses |
+| The user asks how to install, configure, use, or troubleshoot Sergeant (read-only) | `sergeant-help` | Documentation lookup, command verification, prerequisites, and help responses |
+| The user wants to interactively install, configure, or repair a Sergeant installation | `sergeant-setup` | Interactive setup wizard, prerequisite detection, consent-gated install, project YAML interview, sync verification, and optional treehouse prompt |
 
 Sergeant-owned procedural skills live at `skills/<name>/SKILL.md` in this
 repository. For every listed trigger, read that repository-local file directly;
@@ -111,6 +112,10 @@ harness registry may assist loading but its omission does not make the skill
 unavailable. Do not ask the owner or stop solely because the registry omits the
 skill. Only stop and report the exact repository-local path when that file is
 absent or unreadable; do not reconstruct a partial protocol from memory.
+
+`sergeant-setup` is a Sergeant-authored worker skill at
+`.agents/skills/sergeant-setup/SKILL.md`; it is discovered by Codex, OpenCode,
+and Claude from the canonical `.agents/skills/` tree, not from `skills/`.
 
 ---
 
