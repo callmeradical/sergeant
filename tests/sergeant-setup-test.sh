@@ -73,8 +73,8 @@ require_text "$SKILL" 'explicit confirmation'
 require_text "$SKILL" 'sgt-treehouse-init'
 require_text "$SKILL" 'sgt-graphify'
 
-# The skill must not instruct td auto-init without consent.
-reject_text "$SKILL" 'td init --work-dir'
+# td init is allowed but must be consent-gated; check the gate phrase exists.
+require_text "$SKILL" 'Initialize td in'
 
 # ── Required checklist phases ─────────────────────────────────────────────────
 
@@ -86,6 +86,10 @@ require_text "$SKILL" 'Repair existing YAML'
 require_text "$SKILL" 'Sync and verification'
 require_text "$SKILL" 'treehouse'
 require_text "$SKILL" 'Idempotency'
+
+# ── td init must be part of the verified checklist ───────────────────────────
+require_text "$SKILL" 'td init'
+require_text "$SKILL" 'td status'
 
 # ── Failure-mode coverage ────────────────────────────────────────────────────
 # Verify each required failure mode has a stop condition in the failure table.
