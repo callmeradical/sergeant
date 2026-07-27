@@ -837,43 +837,6 @@ PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
 [[ "$(wc -l < "$TEST_ROOT/git-removals")" -eq 2 ]]
 [[ ! -e "$TEST_ROOT/fleet/removal-failure" ]]
 
-mkdir -p "$TEST_ROOT/fleet/dirty-retry/app"
-init_test_repo "$TEST_ROOT/dirty-retry"
-git -C "$TEST_ROOT/dirty-retry" worktree add -q -b dirty-retry-worker \
-  "$TEST_ROOT/dirty-retry-sgt-dirty-retry"
-record_retry_owner dirty-retry app "$TEST_ROOT/dirty-retry"
-printf 'dirty before cleanup\n' >> "$TEST_ROOT/dirty-retry/README.md"
-printf 'untracked before cleanup\n' > "$TEST_ROOT/dirty-retry/untracked.txt"
-printf '%s\n' "$TEST_ROOT/dirty-retry-sgt-dirty-retry" > \
-  "$TEST_ROOT/fleet/dirty-retry/app/worktree"
-printf 'done\n' > "$TEST_ROOT/fleet/dirty-retry/app/status"
-printf 'result\n' > "$TEST_ROOT/fleet/dirty-retry/app/result"
-printf 'done\n' > "$TEST_ROOT/dirty-retry-sgt-dirty-retry/.sergeant-status"
-printf 'result\n' > "$TEST_ROOT/dirty-retry-sgt-dirty-retry/.sergeant-result"
-if PATH="$TEST_ROOT/fake-bin:$PATH" \
-  FAKE_GIT_STATE="$TEST_ROOT/dirty-retry-failed-once" \
-  FAKE_GIT_LOG="$TEST_ROOT/dirty-retry-removals" \
-  SERGEANT_CONFIG="$TEST_ROOT/config" \
-  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" dirty-retry >/dev/null 2>&1; then
-  printf 'cleanup succeeded after dirty retry removal failed\n' >&2
-  exit 1
-fi
-[[ "$(wc -l < "$TEST_ROOT/dirty-retry-removals")" -eq 1 ]]
-# Owner identity still allows the content change, but cleanup must not reconcile
-# an absent partial-removal until git proves the worktree is unregistered.
-printf 'different dirty contents\n' > "$TEST_ROOT/dirty-retry/README.md"
-if PATH="$TEST_ROOT/fake-bin:$PATH" \
-  FAKE_GIT_STATE="$TEST_ROOT/dirty-retry-failed-once" \
-  FAKE_GIT_LOG="$TEST_ROOT/dirty-retry-removals" \
-  SERGEANT_CONFIG="$TEST_ROOT/config" \
-  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" dirty-retry >/dev/null 2>&1; then
-  printf 'cleanup accepted an unproven absent dirty retry\n' >&2
-  exit 1
-fi
-[[ "$(wc -l < "$TEST_ROOT/dirty-retry-removals")" -eq 1 ]]
-[[ -e "$TEST_ROOT/fleet/dirty-retry" ]]
 rm "$TEST_ROOT/fake-bin/git"
 
 mkdir -p "$TEST_ROOT/fleet/present-retry/app" \
@@ -1374,6 +1337,63 @@ set -e
 [[ "$(cksum "$TEST_ROOT/fleet/restore-diag/app/cleanup-phase")" == \
   "$restore_diag_phase" ]]
 
+# Positive-path partial-removal retry: a worktree directory was removed but the
+# git command failed after that (partial removal).  After pruning the git registry,
+# cleanup must reconcile the absence and remove fleet state.
+mkdir -p "$TEST_ROOT/fleet/partial-retry-complete/app"
+init_test_repo "$TEST_ROOT/partial-retry-complete"
+git -C "$TEST_ROOT/partial-retry-complete" worktree add -q -b partial-retry-worker \
+  "$TEST_ROOT/partial-retry-complete-sgt-partial-retry-complete"
+record_retry_owner partial-retry-complete app "$TEST_ROOT/partial-retry-complete"
+printf '%s\n' "$TEST_ROOT/partial-retry-complete-sgt-partial-retry-complete" > \
+  "$TEST_ROOT/fleet/partial-retry-complete/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/partial-retry-complete/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/partial-retry-complete/app/result"
+printf 'done\n' > \
+  "$TEST_ROOT/partial-retry-complete-sgt-partial-retry-complete/.sergeant-status"
+printf 'result\n' > \
+  "$TEST_ROOT/partial-retry-complete-sgt-partial-retry-complete/.sergeant-result"
+# Save the current fake-bin/git and create a partial-removal variant
+cp -p "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/git.saved"
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
+  *" rev-parse "*) "$REAL_GIT" "$@" ;;
+  *" status "*) ;;
+  *" check-ref-format "*|*" worktree list --porcelain -z "*) "$REAL_GIT" "$@" ;;
+  *" worktree remove "*)
+    rm -rf "${!#}"
+    exit 1
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" partial-retry-complete >/dev/null 2>&1; then
+  printf 'partial-retry-complete initial cleanup unexpectedly succeeded\n' >&2; exit 1
+fi
+[[ ! -e "$TEST_ROOT/partial-retry-complete-sgt-partial-retry-complete" ]]
+[[ "$(sed -n '1p' "$TEST_ROOT/fleet/partial-retry-complete/app/cleanup-phase")" == \
+  "partial-removal" ]] || {
+  printf 'partial-removal phase not recorded after failed worktree removal\n' >&2; exit 1
+}
+# Prune git registry to prove removal completed, then retry → must reconcile
+"$REAL_GIT" -C "$TEST_ROOT/partial-retry-complete" worktree prune --expire now
+SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" partial-retry-complete >/dev/null || {
+  printf 'partial-retry-complete reconcile failed\n' >&2; exit 1
+}
+[[ ! -e "$TEST_ROOT/fleet/partial-retry-complete" ]] || {
+  printf 'fleet state not removed after partial-removal reconcile\n' >&2; exit 1
+}
+mv "$TEST_ROOT/fake-bin/git.saved" "$TEST_ROOT/fake-bin/git"
+
 mkdir -p "$TEST_ROOT/fleet/unchanged-retry/app"
 init_test_repo "$TEST_ROOT/unchanged-retry"
 git -C "$TEST_ROOT/unchanged-retry" worktree add -q -b unchanged-retry-worker \
@@ -1404,6 +1424,61 @@ PATH="$TEST_ROOT/fake-bin:$PATH" \
 [[ "$(wc -l < "$TEST_ROOT/unchanged-retry-removals")" -eq 2 ]]
 [[ ! -e "$TEST_ROOT/fleet/unchanged-retry" ]]
 rm "$TEST_ROOT/fake-bin/git"
+
+# dirty-owner-retry: verify that unstaged changes to the configured owner repo
+# invalidate a retry. The new _repo_identity includes worktree state
+# (_repo_worktree_identity runs git diff HEAD), so content changes change the
+# stored identity hash. A retry must be rejected when the owner's state differs.
+mkdir -p "$TEST_ROOT/fleet/dirty-owner-retry/app" \
+  "$TEST_ROOT/fake-bin"
+init_test_repo "$TEST_ROOT/dirty-owner-retry"
+git -C "$TEST_ROOT/dirty-owner-retry" worktree add -q -b dirty-owner-retry-worker \
+  "$TEST_ROOT/dirty-owner-retry-sgt-dirty-owner-retry"
+record_retry_owner dirty-owner-retry app "$TEST_ROOT/dirty-owner-retry"
+printf '%s\n' "$TEST_ROOT/dirty-owner-retry-sgt-dirty-owner-retry" > \
+  "$TEST_ROOT/fleet/dirty-owner-retry/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/dirty-owner-retry/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/dirty-owner-retry/app/result"
+printf 'done\n' > "$TEST_ROOT/dirty-owner-retry-sgt-dirty-owner-retry/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/dirty-owner-retry-sgt-dirty-owner-retry/.sergeant-result"
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" worktree remove "*) printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"; exit 1 ;;
+esac
+"$REAL_GIT" "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git"
+# First cleanup: fake git fails — records cleanup-phase=removing + cleanup-owner
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/dirty-owner-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" dirty-owner-retry >/dev/null 2>&1; then
+  printf 'cleanup succeeded on fake-git failure (unexpected)\n' >&2
+  exit 1
+fi
+[[ -f "$TEST_ROOT/fleet/dirty-owner-retry/app/cleanup-owner" ]] || {
+  printf 'cleanup-owner not recorded after first failed attempt\n' >&2
+  exit 1
+}
+# Modify the owner repo's working tree — identity must now differ
+printf 'dirty content added after owner record\n' >> "$TEST_ROOT/dirty-owner-retry/README.md"
+# Retry: must be rejected because identity changed
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/dirty-owner-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" dirty-owner-retry >/dev/null 2>&1; then
+  printf 'cleanup accepted dirty-owner retry with changed identity (unexpected)\n' >&2
+  exit 1
+fi
+[[ -e "$TEST_ROOT/fleet/dirty-owner-retry" ]] || {
+  printf 'fleet state unexpectedly removed after rejected retry\n' >&2
+  exit 1
+}
+rm "$TEST_ROOT/fake-bin/git"
+printf 'sgt-cleanup dirty-owner-retry: changed identity correctly rejected\n'
 
 mkdir -p "$TEST_ROOT/fleet/partial-publication/app" \
   "$TEST_ROOT/fake-bin"
@@ -3385,6 +3460,118 @@ SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
 [[ ! -e "$TEST_ROOT/fleet/stable-linked" ]]
 
 printf 'sgt-cleanup stable identity: linked-worktree configured repo ok\n'
+
+# Positive-path partial-removal retry: a worktree directory was removed but the
+# git command failed after that (partial removal).  After pruning the git registry,
+# cleanup must reconcile the absence and remove fleet state.
+mkdir -p "$TEST_ROOT/fleet/partial-retry-complete/app"
+init_test_repo "$TEST_ROOT/partial-retry-complete"
+git -C "$TEST_ROOT/partial-retry-complete" worktree add -q -b partial-retry-worker \
+  "$TEST_ROOT/partial-retry-complete-sgt-partial-retry-complete"
+record_retry_owner partial-retry-complete app "$TEST_ROOT/partial-retry-complete"
+printf '%s\n' "$TEST_ROOT/partial-retry-complete-sgt-partial-retry-complete" > \
+  "$TEST_ROOT/fleet/partial-retry-complete/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/partial-retry-complete/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/partial-retry-complete/app/result"
+printf 'done\n' > \
+  "$TEST_ROOT/partial-retry-complete-sgt-partial-retry-complete/.sergeant-status"
+printf 'result\n' > \
+  "$TEST_ROOT/partial-retry-complete-sgt-partial-retry-complete/.sergeant-result"
+# Save the current fake-bin/git and create a partial-removal variant
+cp -p "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/git.saved"
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
+  *" rev-parse "*) "$REAL_GIT" "$@" ;;
+  *" status "*) ;;
+  *" check-ref-format "*|*" worktree list --porcelain -z "*) "$REAL_GIT" "$@" ;;
+  *" worktree remove "*)
+    rm -rf "${!#}"
+    exit 1
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" partial-retry-complete >/dev/null 2>&1; then
+  printf 'partial-retry-complete initial cleanup unexpectedly succeeded\n' >&2; exit 1
+fi
+[[ ! -e "$TEST_ROOT/partial-retry-complete-sgt-partial-retry-complete" ]]
+[[ "$(sed -n '1p' "$TEST_ROOT/fleet/partial-retry-complete/app/cleanup-phase")" == \
+  "partial-removal" ]] || {
+  printf 'partial-removal phase not recorded after failed worktree removal\n' >&2; exit 1
+}
+# Prune git registry to prove removal completed, then retry → must reconcile
+"$REAL_GIT" -C "$TEST_ROOT/partial-retry-complete" worktree prune --expire now
+SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" partial-retry-complete >/dev/null || {
+  printf 'partial-retry-complete reconcile failed\n' >&2; exit 1
+}
+[[ ! -e "$TEST_ROOT/fleet/partial-retry-complete" ]] || {
+  printf 'fleet state not removed after partial-removal reconcile\n' >&2; exit 1
+}
+mv "$TEST_ROOT/fake-bin/git.saved" "$TEST_ROOT/fake-bin/git"
+
+# dirty-owner-retry: verify that unstaged changes to the configured owner repo
+# invalidate a retry. The new _repo_identity includes worktree state
+# (_repo_worktree_identity runs git diff HEAD), so content changes change the
+# stored identity hash. A retry must be rejected when the owner's state differs.
+mkdir -p "$TEST_ROOT/fleet/dirty-owner-retry/app" \
+  "$TEST_ROOT/fake-bin"
+init_test_repo "$TEST_ROOT/dirty-owner-retry"
+git -C "$TEST_ROOT/dirty-owner-retry" worktree add -q -b dirty-owner-retry-worker \
+  "$TEST_ROOT/dirty-owner-retry-sgt-dirty-owner-retry"
+record_retry_owner dirty-owner-retry app "$TEST_ROOT/dirty-owner-retry"
+printf '%s\n' "$TEST_ROOT/dirty-owner-retry-sgt-dirty-owner-retry" > \
+  "$TEST_ROOT/fleet/dirty-owner-retry/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/dirty-owner-retry/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/dirty-owner-retry/app/result"
+printf 'done\n' > "$TEST_ROOT/dirty-owner-retry-sgt-dirty-owner-retry/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/dirty-owner-retry-sgt-dirty-owner-retry/.sergeant-result"
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" worktree remove "*) printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"; exit 1 ;;
+esac
+"$REAL_GIT" "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git"
+# First cleanup: fake git fails — records cleanup-phase=removing + cleanup-owner
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/dirty-owner-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" dirty-owner-retry >/dev/null 2>&1; then
+  printf 'cleanup succeeded on fake-git failure (unexpected)\n' >&2
+  exit 1
+fi
+[[ -f "$TEST_ROOT/fleet/dirty-owner-retry/app/cleanup-owner" ]] || {
+  printf 'cleanup-owner not recorded after first failed attempt\n' >&2
+  exit 1
+}
+# Modify the owner repo's working tree — identity must now differ
+printf 'dirty content added after owner record\n' >> "$TEST_ROOT/dirty-owner-retry/README.md"
+# Retry: must be rejected because identity changed
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/dirty-owner-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" dirty-owner-retry >/dev/null 2>&1; then
+  printf 'cleanup accepted dirty-owner retry with changed identity (unexpected)\n' >&2
+  exit 1
+fi
+[[ -e "$TEST_ROOT/fleet/dirty-owner-retry" ]] || {
+  printf 'fleet state unexpectedly removed after rejected retry\n' >&2
+  exit 1
+}
+rm "$TEST_ROOT/fake-bin/git"
+printf 'sgt-cleanup dirty-owner-retry: changed identity correctly rejected\n'
 
 # ── Issue #21: remove dead remain-on-exit worker panes ───────────────────────
 # When a worker pane has pane_dead=1 (tmux remain-on-exit), cleanup must call
