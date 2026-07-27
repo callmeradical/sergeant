@@ -167,8 +167,16 @@ _validation_adopt_pane() {
   info="${identity#*|}"
   pane="${info%%|*}"
   command="${identity##*|}"
+  # normalize tmux 3.4+ pane_start_command encoding:
+  # tmux 3.4+ wraps pane_start_command in outer double quotes and doubles internal backslashes;
+  # safe no-op on pre-3.4 output: a legitimate command never starts/ends with a literal double-quote
+  command="${command#\"}"
+  command="${command%\"}"
+  command="${command//\\\\/\\}"
+  # Quote RHS of == in [[ ]] to suppress pattern/glob expansion of special characters in VALIDATION_COMMAND
   [[ -n "$pane" && "$command" == "$VALIDATION_COMMAND" ]] || return 1
   current="$(_validation_current_pane_identity "$pane" || true)"
+  # $identity and current both retain raw tmux output; comparison is intentionally symmetric
   [[ "$current" == "$identity" ]] || return 1
   VALIDATION_PANE="$pane"
   VALIDATION_IDENTITY="$identity"
