@@ -125,7 +125,7 @@ gate_path="$(_review_gate_path)"
 if [[ -f "$gate_path" ]]; then
   IFS= read -r invocation_gate_generation < "$gate_path" || true
 fi
-_sgt_response_lock_release || _routing_failure "could not unlock review gate state"
+_sgt_response_lock_release || { printf 'ERROR: could not unlock review gate state\n' >&2; exit 2; }
 
 [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || _routing_failure "invalid branch"
 [[ "$HEAD_SHA" =~ ^[A-Fa-f0-9]{7,64}$ ]] || _routing_failure "invalid head SHA"
@@ -134,8 +134,8 @@ _valid_fleet_task_id "$TASK_ID" || _routing_failure "invalid fleet task"
 
 CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
 [[ -f "$CONFIG_FILE" ]] || _routing_failure "project not found"
-_require_yq || _routing_failure "yq is required"
-_require_git || _routing_failure "git is required"
+( _require_yq ) 2>/dev/null || _routing_failure "yq is required"
+( _require_git ) 2>/dev/null || _routing_failure "git is required"
 ( _require_marcus_td ) 2>/dev/null || _routing_failure "td is required (github.com/marcus/td)"
 [[ -f "$INPUT" ]] || _routing_failure "review input is unavailable"
 
@@ -359,7 +359,7 @@ elif [[ -z "$invocation_gate_generation" && -z "$current_gate_generation" &&
   mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
   rm -f "$WORKTREE/.sergeant-message"
 fi
-_sgt_response_lock_release || _routing_failure "could not unlock review gate state"
+_sgt_response_lock_release || { printf 'ERROR: could not unlock review gate state\n' >&2; exit 2; }
 
 if (( actionable_count == 0 )); then
   printf 'no actionable findings; continue remediation workflow\n'

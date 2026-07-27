@@ -263,6 +263,27 @@ TD_FAIL_CREATE=1 run_router "$TEST_ROOT/findings.json"
 [[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
 grep -Fq 'Review finding routing failed' "$WORKTREE/.sergeant-message"
 
+# Missing prerequisite tool (yq absent) must publish blocked state
+mkdir -p "$TEST_ROOT/no-yq-bin"
+printf '#!/usr/bin/env bash\necho "yq: not found" >&2\nexit 127\n' > "$TEST_ROOT/no-yq-bin/yq"
+chmod +x "$TEST_ROOT/no-yq-bin/yq"
+rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation}
+rm -rf "$WORKTREE/.sergeant-review-gates"
+set +e
+output="$(PATH="$TEST_ROOT/no-yq-bin:$TEST_ROOT/fake-bin:$PATH" \
+  REPO_PATH="$REPO" TD_LOG="$TEST_ROOT/td.log" TD_IDS="$TEST_ROOT/td-ids" \
+  NOTIFY_LOG="$TEST_ROOT/notify.log" MV_LOG="$TEST_ROOT/mv.log" \
+  ROUTER_WORKTREE="$WORKTREE" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  TD_LIST_RESULT="[]" TD_FAIL_CREATE="0" \
+  "$ROOT_DIR/bin/sgt-review-findings" test app \
+    --input "$TEST_ROOT/findings.json" --axis standards --source code-review \
+    --branch fix/review --head-sha abc1234 --parent-task td-parent \
+    --task-id fleet-1 --worktree "$WORKTREE" 2>&1)"
+status=$?
+set -e
+[[ "$status" -eq 2 && "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
+grep -Fq 'Review finding routing failed' "$WORKTREE/.sergeant-message"
+
 printf '{"findings":[]}\n' > "$TEST_ROOT/clean.json"
 PRESERVE_FLEET=1 run_router "$TEST_ROOT/clean.json"
 [[ "$(cat "$WORKTREE/.sergeant-status")" == 'in_progress' && ! -e "$WORKTREE/.sergeant-message" ]]
