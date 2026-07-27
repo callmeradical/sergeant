@@ -265,7 +265,7 @@ assert_boundary_change_rejected() {
 
 for boundary_mode in git treehouse; do
   for boundary_phase in initial retry; do
-    for boundary_number in 1 2 3 4 5; do
+    for boundary_number in 1 2 3 4 5 6; do
       assert_boundary_change_rejected "$boundary_mode" "$boundary_phase" \
         "$boundary_number"
     done
@@ -318,7 +318,7 @@ init_case git crossfs-rollback-failure
 set +e
 rollback_failure_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
   FAKE_CROSS_DEVICE_PATH="$TEST_ROOT/crossfs-rollback-failure-linked-worktree" \
-  FAKE_CROSS_DEVICE_AFTER=5 \
+  FAKE_CROSS_DEVICE_AFTER=6 \
   FAKE_STAT_COUNT_FILE="$TEST_ROOT/crossfs-rollback-failure-stat-count" \
   FAKE_RESTORE_FAILURE=true \
   FAKE_REMOVER_LOG="$TEST_ROOT/crossfs-rollback-failure-removals" \
