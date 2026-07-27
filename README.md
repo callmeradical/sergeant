@@ -1,20 +1,14 @@
 # Sergeant
 
-A single-user, local-first project orchestrator for developers working across
-one or more related repositories.
+A project-aware first mate for working across multi-repo projects.
 
 ## Genesis
 
 Sergeant was directly inspired by [firstmate](https://github.com/kunchenguid/firstmate) — an agent distro for running a crew of autonomous agents. Firstmate showed that the right unit of distribution is not a CLI tool or an MCP server, but a cloned directory of instructions, skills, and conventions that turns a general-purpose agent into a specialist.
 
-Sergeant takes that idea and narrows the focus: instead of orchestrating a crew
-across arbitrary tasks, it starts with project topology. A project is a named
-collection of repositories. Context, instructions, dispatch, and Graphify output
-flow from that definition.
+Sergeant takes that idea and narrows the focus: instead of orchestrating a crew of agents across arbitrary tasks, it starts with the project topology. A project is a named collection of repositories. Everything — context, instructions, dispatch, graphify output — flows from that definition. Where firstmate asks "how do I run a crew?", Sergeant asks "what does this project look like, and how do I work across all of it?"
 
-If you want a shared or general-purpose multi-agent service, use a tool designed
-for that deployment model. Sergeant is installed independently by each developer
-and keeps registry, credentials, worktrees, workers, and fleet state local.
+If you want a general-purpose multi-agent crew orchestrator, use firstmate. If you want your agent to deeply understand your specific projects, their repos, and how they relate — use Sergeant.
 
 ---
 
@@ -22,13 +16,9 @@ and keeps registry, credentials, worktrees, workers, and fleet state local.
 
 You have a project. It has four repos: an API, a frontend, an infra chart, and a shared library. You open your agent and start working — but the agent has no idea these repos are related, what tooling each uses, or which one needs to change first when you add a new feature.
 
-Sergeant fixes that. It is an **agent distro**: a cloned directory with an
-`AGENTS.md`, shell toolbelt, documentation, and trigger-loaded skills. Launch an
-agent harness inside the checkout so its repository instructions are loaded.
+Sergeant fixes that. It is an **agent distro**: a cloned directory with an `AGENTS.md`, shell toolbelt, and skills that turn a general-purpose agent into a project-aware first mate. Launch your agent harness inside it and Sergeant takes over — it knows your projects, their repos, how they group, and what instructions apply to each one.
 
-The checkout is the source of truth. `mise run install` optionally symlinks the
-commands into user-local locations and leaves worker-skill discovery repo-scoped.
-Sergeant supports Bash 3.2 and newer, including the system Bash shipped with macOS.
+No install. The cloned repo is the distro. Sergeant supports Bash 3.2 and newer, including the system Bash shipped with macOS.
 
 ## Mental model
 
@@ -45,24 +35,17 @@ Sergeant supports Bash 3.2 and newer, including the system Bash shipped with mac
 
 sergeant/                     ← this distro (you are here)
   AGENTS.md
-  .agents/skills/              ← canonical worker workflow skills
-  .claude/skills/              ← links to canonical worker skills
   bin/                        ← cross-repo shell toolbelt
-  skills/                     ← Sergeant coordination skills
+  skills/                     ← agent-loaded skills
 ```
 
-Each project is a YAML file. That file defines which repos belong to it, how they
-group, where Sergeant publishes the merged Graphify output, and which default,
-group, and repository instruction layers are emitted for each repo.
+Each project is a YAML file. That file defines which repos belong to it, how they group, where Sergeant publishes the merged graphify output, and what agent instructions apply — per group and per repo.
 
 ## Quick start
 
 ```bash
 git clone https://github.com/callmeradical/sergeant
 cd sergeant
-
-mise run check
-mise run install
 
 # Set your dev root and create the config directory
 mkdir -p ~/.config/sergeant
@@ -74,8 +57,8 @@ EOF
 cp schema/project.yaml.example ~/.config/sergeant/myproject.yaml
 # Edit it — set your repo names and paths relative to dev_root
 
-# Launch the coordinator in tmux so dispatch can bind exact ownership
-tmux new-session -s sergeant-coordinator 'opencode --dangerously-skip-permissions'
+# Launch your agent harness — AGENTS.md takes over from here
+opencode    # or: claude
 ```
 
 Then talk to it:
@@ -86,18 +69,6 @@ Then talk to it:
 > go work on smith-api
 > add feature X across all repos
 ```
-
-## Documentation
-
-Start with the [documentation index](docs/README.md):
-
-- [What Sergeant is and is not](docs/what-is-sergeant.md)
-- [Getting started checklist](docs/getting-started.md)
-- [Skills and their upstream sources](docs/skills.md)
-- [Repo-scoped worker skills](docs/repo-scoped-skills.md)
-- [Using Sergeant](docs/using-sergeant.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Project YAML schema](docs/schema.md)
 
 ## Project YAML
 
@@ -148,90 +119,60 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-sync <project>` | Clone missing repos, pull existing ones |
 | `bin/sgt-context <project>` | Emit full agent context block for a project |
 | `bin/sgt-graphify <project>` | Build and publish the merged project graph |
-| `bin/sgt-dispatch <project> "<brief>" [--intent-file <path>] [options]` | Dispatch agents with one canonical `.sergeant-intent.md` revision across repos |
+| `bin/sgt-dispatch <project> "<brief>" [options]` | Dispatch agents across repos |
 | `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Classify a no-mistakes finding and create/update owning-repo td work |
+| `bin/sgt-review-findings <project> <repo> [options]` | Route structured independent-review findings to td and fleet supervision |
 | `bin/sgt-watch <task-id>` | Monitor dispatched fleet |
-| `bin/sgt-watch --sync-all` | Reconcile all fleet records and stop verified terminal worker panes |
-| `bin/sgt-respond <task-id> <repo>` | Read a response from stdin and resume a waiting worker |
-| `bin/sgt-wake <task-id> <repo>` | Evaluate a waiting worker's durable wake condition and resume it when met |
-| `bin/sgt-recover <task-id> <repo>` | Attempt one bounded stall recovery for a live-but-stalled in-progress worker |
-| `bin/sgt-ack-response <task-id> <repo> <response-id>` | Acknowledge consumed response transport from the exact worker pane |
-| `bin/sgt-validate <task-id> <repo> [--skip <steps>]` | Run coordinator-owned no-mistakes in a split worker-window pane |
+| `bin/sgt-respond <task-id> <repo> "<response>"` | Respond to and resume a waiting worker |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees and fleet state |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
 
 ### No-mistakes findings
 
-Routine dispatched workers use repository-native tests, lint/typechecking, and independent Standards/Spec/readiness reviews. They do not run no-mistakes for ordinary completion, prototypes, investigations, documentation drafts, intermediate commits, or remediation loops.
+Routine dispatched workers use repository-native tests, lint/typechecking, and independent Standards/Spec reviews. They do not run no-mistakes for ordinary completion, prototypes, investigations, documentation drafts, intermediate commits, or remediation loops unless the user explicitly overrides that default.
 
-At an explicit final shipping boundary, the worker writes the recorded intent
-revision, current HEAD, and passed review-axis evidence to
-`.sergeant-validation-ready` after native validation and independent reviews
-report zero blockers. The coordinator, not the worker, launches validation:
+At an explicit final shipping boundary, after implementation and native validation are complete, run:
 
 ```bash
-sgt-validate <task-id> <repo>
+no-mistakes axi run --intent "<the user's objective and approved tradeoffs>"
 ```
 
-The command creates a split pane in the worker window, renames the window to
-`validation-<repo>-<task>`, passes the unchanged canonical intent to no-mistakes,
-and never uses `--yes`. Its default medium profile skips the redundant `review`
-and `document` stages because the readiness marker already requires passed
-independent reviews and native validation. An explicit `--skip <steps>` replaces
-that default for gates already proven irrelevant. Stop at `checks-passed`; the
-run is validation-only and must not fix findings. Route actionable findings into
-separate, deduplicated owning-repo td tasks with
-`sgt-no-mistakes-finding`. For launch reservation, rollback ownership, and retry semantics, see
-[`docs/using-sergeant.md`](docs/using-sergeant.md#final-no-mistakes-boundary).
-
-Safety-sensitive/stateful objectives require `sgt-dispatch --intent-file`; other
-objectives use the generated `standard-isolated` lighter path. See
-[`docs/using-sergeant.md`](docs/using-sergeant.md) for required sections and the
-observable classifier.
+Use `--skip=<steps>` only for gates already proven irrelevant and stop at `checks-passed`. The run is validation-only: it must not fix findings. Route actionable findings into separate, deduplicated owning-repo td tasks with `sgt-no-mistakes-finding`.
 
 The required `--disposition` is explicit per finding: `gate` creates or updates P1 work and retains the gate, `ask-user` creates or updates P1 work and preserves human escalation, `td` creates or updates nonblocking actionable debt, and `ignore` records that no card is needed. Warning debt becomes P2, informational debt becomes P3, and repeated finding IDs update the same card while retaining the latest run ID, head SHA, location, description, and originating intent. Reruns also preserve any existing repo-specific or manually added td labels while ensuring the required `no-mistakes` and `finding` labels remain present without duplication.
 
 On rerun, visible active cards stay in their current state, while explicitly hidden states are resurfaced: closed cards are reopened and deferred cards are undeferred before the finding body is refreshed.
 
-`sgt-no-mistakes-finding` accepts only JSON arrays from `td list --json`. Malformed JSON and every non-array JSON type fail closed before any td create, update, reopen, or defer operation.
-
 Correctness, security, data-integrity, and test findings cannot be deferred or ignored. Cosmetic and evidence-only findings never create cards.
 
 ### Independent review routing
 
-Generated worker briefs always require separate Standards and Spec reviews. For the authoritative UI-routing triggers and the added accessibility-review contract, see `skills/dispatch/SKILL.md`.
+Generated worker briefs always require separate Standards and Spec reviews. Frontend, UI, visual, interaction, accessibility, or user-facing output language in the mission, repo role, or repo group also requires a separate independent accessibility review. Non-UI work retains the two-axis review, while `sgt-no-mistakes-finding` continues to route structured accessibility findings whenever a review supplies them.
+
+### Independent review findings
+
+Dispatched workers pass each Standards, Spec, or accessibility review's strict JSON finding artifact to `sgt-review-findings`. The router creates or updates one owning-repository td task per actionable finding, preserves active task state on reruns, and publishes blocking task IDs and remediation guidance through `.sergeant-message`, `.sergeant-status`, and `sgt-notify`. Cosmetic and false-positive dispositions create no cards. The schema rejects free-form review bodies, and credential-shaped values in accepted fields are redacted before durable storage.
 
 ## Skills
 
-Core agent-loaded skills for structured workflows:
+Agent-loaded skills for structured workflows:
 
 | Skill | What it does |
 |---|---|
-| `skills/load-project` | Resolve project registry, paths, instructions, schema, sync, and Graphify procedures |
-| `skills/cross-repo-work` | Assign repository ownership and dependency/merge order |
-| `skills/dispatch` | Operate td, worktrees, workers, fleets, escalation, review, and cleanup |
-| `skills/wiki` | Validate automatic captures and generate curated daily wiki digests |
-| `skills/sergeant-help` | Query repository docs for read-only installation, usage, skills, and troubleshooting help |
-| `.agents/skills/sergeant-setup` | Interactively bootstrap, configure, or repair a Sergeant installation |
-
-Repo-scoped worker skills live in the canonical `.agents/skills` tree. Codex
-discovers that tree directly, OpenCode uses `opencode.json`, and Claude uses
-repository-local `.claude/skills` links. See
-`docs/repo-scoped-skills.md` for the inventory and provenance.
+| `skills/load-project` | Load and internalize full project context |
+| `skills/cross-repo-work` | Plan and execute changes across multiple repos |
+| `skills/dispatch` | Dispatch subagents per repo with worktrees + briefs |
 
 ## Requirements
 
-See the complete [getting started checklist](docs/getting-started.md) for
-installation and verification.
-
-- [`github.com/marcus/td`](https://github.com/marcus/td) — task CLI, required for brief-based `sgt-dispatch` runs, `sgt-no-mistakes-finding`, and `sgt-td-*` commands; install with `brew install marcus/tap/td` or `go install github.com/marcus/td@latest`
+- [`github.com/marcus/td`](https://github.com/marcus/td) — task CLI, required for brief-based `sgt-dispatch` runs, finding routers, and `sgt-td-*` commands; install with `brew install marcus/tap/td` or `go install github.com/marcus/td@latest`
 - `yq` — YAML parser: `brew install yq`
 - `git` and `gh` — for repo operations and PRs
 - `tmux` — for local agent dispatch
 - `lsof` — for verifying cleanup does not remove an in-use worktree
 - `treehouse` — pre-warmed worktree pools (optional but recommended for dispatch)
 - `graphify` — knowledge graph generation (optional, needed for `sgt-graphify`)
-- OpenCode, Goose, or Claude Code for persistent interactive worker dispatch
+- A supported agent harness: OpenCode or Claude Code
 
 ## License
 
