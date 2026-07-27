@@ -328,7 +328,10 @@ if [[ -n "$BRANCH_ARG" ]]; then
   BRANCH="$BRANCH_ARG"
 else
   bslug="$(echo "$BRIEF" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//' | cut -c1-40 | sed 's/-$//')"
-  if [[ "$bslug" =~ ^(feat|fix|chore|refactor|docs|test)- ]]; then
+  # Store regex in variable: Apple Bash 3.2.57 (macOS) cannot parse inline
+  # alternation groups in =~ (e.g. ^(feat|fix)-); use a variable instead.
+  bslug_re='^(feat|fix|chore|refactor|docs|test)-'
+  if [[ "$bslug" =~ $bslug_re ]]; then
     BRANCH="${bslug/-//}"
   else
     BRANCH="feat/$bslug"
@@ -648,7 +651,10 @@ $td_context_block"
   review_axis_label="two"
   accessibility_axis_markdown=""
   review_context="$(printf '%s %s %s %s %s' "$BRIEF" "$repo_role" "$repo_group" "$group_description" "$merged" | tr '[:upper:]' '[:lower:]')"
-  if [[ "$review_context" =~ (^|[^[:alnum:]])(ui|frontend|front-end|visual|interaction|accessibility|user-facing[[:space:]]+output)([^[:alnum:]]|$) ]]; then
+  # Store regex in variable: Apple Bash 3.2.57 (macOS) cannot parse inline
+  # alternation groups in =~ (e.g. (a|b)); use a variable instead.
+  review_context_re='(^|[^[:alnum:]])(ui|frontend|front-end|visual|interaction|accessibility|user-facing[[:space:]]+output)([^[:alnum:]]|$)'
+  if [[ "$review_context" =~ $review_context_re ]]; then
     review_axis_label="three"
     accessibility_axis_markdown=$'\n- **Accessibility axis:** Because this is UI-facing work, launch a separate independent accessibility review covering keyboard access, semantics, focus behavior, contrast, responsive behavior, and assistive-technology compatibility as applicable.'
   fi

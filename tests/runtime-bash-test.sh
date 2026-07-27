@@ -163,3 +163,6 @@ watch_output="$(SERGEANT_FLEET="$fleet" SERGEANT_WATCH_INTERVAL=0.01 \
 [[ "$watch_output" == *'All repos done.'* ]]
 
 printf 'runtime paths support Bash 3.2: ok\n'
+
+# Run dispatch-specific Bash 3.2 regression (parse, alternation, branch-name).
+SGT_MINIMUM_BASH="$minimum_bash" bash "$ROOT_DIR/tests/sgt-dispatch-bash32-test.sh"
