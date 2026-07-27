@@ -358,6 +358,15 @@ for absent_case in missing-record pre-existing; do
   [[ -d "$TEST_ROOT/fleet/absent-$absent_case" ]]
 done
 
+mkdir -p "$TEST_ROOT/fleet/no-worktree-failed/app"
+printf 'failed: dispatch incomplete: no worktree or owned live pane\n' > \
+  "$TEST_ROOT/fleet/no-worktree-failed/app/status"
+printf 'dispatch never acquired a worktree or owned live pane\n' > \
+  "$TEST_ROOT/fleet/no-worktree-failed/app/diagnostic"
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" no-worktree-failed >/dev/null
+[[ ! -e "$TEST_ROOT/fleet/no-worktree-failed" ]]
+
 mkdir -p "$TEST_ROOT/fleet/failed-task/app" "$TEST_ROOT/failed-task"
 git -C "$TEST_ROOT/failed-task" init -q
 git -C "$TEST_ROOT/failed-task" config user.name Test
