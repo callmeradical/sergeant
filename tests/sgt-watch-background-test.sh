@@ -148,14 +148,18 @@ grep -Fq 'sgt-watch-task-bg-1.service' <<< "$output2"
 [[ "$(cat "$task/monitor_invocation_id")" == "inv-0001" ]]
 printf 'sgt-watch --background idempotent repeated start: ok\n'
 
-# ── Test 3: stale unit (active with different invocation ID = someone restarted
-#    the unit externally) — should start a fresh monitor and update ownership ──
+# ── Test 3: unit active with different (stale) stored invocation ID ───────────
+# When the unit is running but ownership files are stale (e.g., externally
+# restarted), --background must adopt the live instance rather than calling
+# systemd-run (which would fail with 'unit already exists').
 printf 'active\n' > "$fake_systemd_state/$unit.status"
-printf 'inv-STALE\n' > "$fake_systemd_state/$unit.invocation_id"
-output3="$(SGT_FAKE_INVOCATION_ID="inv-0002" _sgt_watch_bg --background "$task_id")"
+printf 'inv-live-new\n' > "$fake_systemd_state/$unit.invocation_id"
+# Ownership files still have the old ID from Test 2
+output3="$(SGT_FAKE_SYSTEMD_MODE=fail _sgt_watch_bg --background "$task_id")"
 grep -Fq 'sgt-watch-task-bg-1.service' <<< "$output3"
-[[ "$(cat "$task/monitor_invocation_id")" == "inv-0002" ]]
-printf 'sgt-watch --background stale-unit restart: ok\n'
+# Must adopt the live invocation ID, not the stale stored one
+[[ "$(cat "$task/monitor_invocation_id")" == "inv-live-new" ]]
+printf 'sgt-watch --background stale-invocation-ID adopt: ok\n'
 
 # ── Test 4: terminal monitor (unit inactive = previously finished) ────────────
 # Remove unit from fake state (simulating terminal/collected unit)
@@ -344,5 +348,62 @@ zeroguid_error="$(SGT_FAKE_SYSTEMD_STATE="$fake_systemd_state" \
   "$ROOT/bin/sgt-watch" "task-zeroguid-12" --background 2>&1 || true)"
 grep -Eq 'ERROR.*[Ii]nvocation|ERROR.*[Ff]ailed' <<< "$zeroguid_error"
 printf 'sgt-watch --background zero-GUID InvocationID rejected: ok\n'
+
+# ── Test 13: adopt running unit when ownership files are missing ──────────────
+# If monitor_unit and/or monitor_invocation_id are absent but the unit is
+# already running (e.g. files deleted, or crash before monitor_unit was written),
+# --background must adopt the live unit rather than calling systemd-run and
+# failing with 'unit already exists'.
+task_c13="$fleet/task-adopt-13"
+repo_c13="$task_c13/app"
+worktree_c13="$TEST_ROOT/worktree13"
+unit_c13="sgt-watch-task-adopt-13.service"
+mkdir -p "$repo_c13" "$worktree_c13"
+printf '%s\n' "$worktree_c13" > "$repo_c13/worktree"
+printf 'in_progress\n' > "$repo_c13/status"
+printf 'in_progress\n' > "$worktree_c13/.sergeant-status"
+# Fake systemd: unit is already active with a known invocation ID, but NO
+# ownership files exist yet in the fleet directory.
+printf 'active\n' > "$fake_systemd_state/$unit_c13.status"
+printf 'inv-live-adopt\n' > "$fake_systemd_state/$unit_c13.invocation_id"
+# Configure the fake systemd-run to FAIL if called (prove it is not called)
+adopt_output="$(SGT_FAKE_SYSTEMD_MODE=fail \
+  SGT_FAKE_SYSTEMD_STATE="$fake_systemd_state" \
+  SERGEANT_FLEET="$fleet" \
+  SERGEANT_SYSTEMCTL="$fake_bin/systemctl" \
+  SERGEANT_SYSTEMD_RUN="$fake_bin/systemd-run" \
+  "$ROOT/bin/sgt-watch" "task-adopt-13" --background 2>&1)"
+grep -Fq 'sgt-watch-task-adopt-13.service' <<< "$adopt_output"
+[[ "$(cat "$task_c13/monitor_unit")" == "$unit_c13" ]]
+[[ "$(cat "$task_c13/monitor_invocation_id")" == "inv-live-adopt" ]]
+printf 'sgt-watch --background adopts running unit (files missing): ok\n'
+
+# ── Test 14: adopt running unit when stored invocation ID is stale ────────────
+# Unit is running with a new InvocationID (externally restarted), but
+# ownership files still have the old ID.  --background must adopt the new
+# live instance rather than calling systemd-run and failing.
+task_c14="$fleet/task-adopt-14"
+repo_c14="$task_c14/app"
+worktree_c14="$TEST_ROOT/worktree14"
+unit_c14="sgt-watch-task-adopt-14.service"
+mkdir -p "$repo_c14" "$worktree_c14"
+printf '%s\n' "$worktree_c14" > "$repo_c14/worktree"
+printf 'in_progress\n' > "$repo_c14/status"
+printf 'in_progress\n' > "$worktree_c14/.sergeant-status"
+# Stale ownership files
+printf '%s\n' "$unit_c14" > "$task_c14/monitor_unit"
+printf 'inv-stale-old\n' > "$task_c14/monitor_invocation_id"
+# Fake systemd: unit active with NEW invocation ID
+printf 'active\n' > "$fake_systemd_state/$unit_c14.status"
+printf 'inv-new-live\n' > "$fake_systemd_state/$unit_c14.invocation_id"
+adopt14_output="$(SGT_FAKE_SYSTEMD_MODE=fail \
+  SGT_FAKE_SYSTEMD_STATE="$fake_systemd_state" \
+  SERGEANT_FLEET="$fleet" \
+  SERGEANT_SYSTEMCTL="$fake_bin/systemctl" \
+  SERGEANT_SYSTEMD_RUN="$fake_bin/systemd-run" \
+  "$ROOT/bin/sgt-watch" "task-adopt-14" --background 2>&1)"
+grep -Fq 'sgt-watch-task-adopt-14.service' <<< "$adopt14_output"
+[[ "$(cat "$task_c14/monitor_invocation_id")" == "inv-new-live" ]]
+printf 'sgt-watch --background adopts running unit (stale invocation ID): ok\n'
 
 printf '\nsgt-watch background mode: all tests passed\n'

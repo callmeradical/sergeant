@@ -806,7 +806,7 @@ While waiting for CI, reviews, or dependencies that fit a supported wake conditi
 
 For failure, notify with \`sgt-notify $TASK_ID "failed: <exact blocker>"\`.
 
-The primary sergeant session is watching via \`sgt-watch $TASK_ID\`.
+The primary sergeant session is watching via \`sgt-watch $TASK_ID --background\`.
 BRIEF_EOF
 
   echo "in_progress" > "$repo_task_dir/status"
@@ -877,7 +877,7 @@ if ! $DRY_RUN; then
   echo "Task ID: $TASK_ID"
   echo "Fleet:   $TASK_DIR"
   echo "Observe: tmux attach -t $TMUX_SESSION  (windows: <stage>-<repo>-$TASK_ID)"
-  echo "Watch:   bin/sgt-watch $TASK_ID"
+  echo "Watch:   bin/sgt-watch $TASK_ID --background"
   echo ""
 
   # ── Wiki: log the dispatch event ─────────────────────────────────────────
