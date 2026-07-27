@@ -106,6 +106,9 @@ reject_text "$SKILL" 'continue past Phase 7'
 require_text "$SKILL" '[y/N]'
 require_text "$SKILL" 'backup'
 
+# Phase 3: config.yaml write must be gated behind explicit confirmation.
+require_text "$SKILL" 'Write ~/.config/sergeant/config.yaml? [y/N]'
+
 # Phase 2: clone and install must each have their own consent gate.
 require_text "$SKILL" 'Clone to'
 require_text "$SKILL" 'mise run install'
