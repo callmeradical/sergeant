@@ -134,9 +134,9 @@ _valid_fleet_task_id "$TASK_ID" || _routing_failure "invalid fleet task"
 
 CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
 [[ -f "$CONFIG_FILE" ]] || _routing_failure "project not found"
-command -v yq >/dev/null 2>&1 || _routing_failure "yq is required"
-command -v git >/dev/null 2>&1 || _routing_failure "git is required"
-command -v td >/dev/null 2>&1 || _routing_failure "td is required"
+_require_yq || _routing_failure "yq is required"
+_require_git || _routing_failure "git is required"
+( _require_marcus_td ) 2>/dev/null || _routing_failure "td is required (github.com/marcus/td)"
 [[ -f "$INPUT" ]] || _routing_failure "review input is unavailable"
 
 repo_count="$(yq '.repos | length' "$CONFIG_FILE" 2>/dev/null)" || _routing_failure "project configuration is invalid"
@@ -288,12 +288,12 @@ matches = [(item["id"], item.get("status") or "", item.get("defer_until") or "")
 if len(matches) > 1:
     raise SystemExit(1)
 if matches:
-    print("\t".join(matches[0]))
+    print("\x1f".join(matches[0]))
 ' "$marker")" || _routing_failure "td returned invalid or duplicate finding data"
 
   task_id="" existing_status="" defer_until=""
   if [[ -n "$existing_match" ]]; then
-    IFS=$'\t' read -r task_id existing_status defer_until <<< "$existing_match"
+    IFS=$'\x1f' read -r task_id existing_status defer_until <<< "$existing_match"
     if [[ "$existing_status" == "closed" ]]; then
       td reopen "$task_id" --work-dir "$repo_path" --json >/dev/null 2>&1 || _routing_failure "failed to reopen td task"
     fi

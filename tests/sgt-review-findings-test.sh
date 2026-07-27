@@ -20,6 +20,11 @@ EOF
 cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+# Prerequisite-check calls: respond without logging to TD_LOG
+case "$1" in
+  --version) printf 'td version 1.0.0\n'; exit 0 ;;
+  create) [[ "${2:-}" != "--help" ]] || { printf 'Usage: td create ... --description <text> --json --work-dir <path>\n'; exit 0; } ;;
+esac
 printf '%s\n' "$*" >> "$TD_LOG"
 case "$1" in
   list) printf '%s\n' "${TD_LIST_RESULT:-[]}" ;;
@@ -181,6 +186,15 @@ grep -Fq 'a6af6854056c77a7a1ed73e61b74cd7fead52e30' "$TEST_ROOT/td.log"
 TD_LIST_RESULT=null run_router "$TEST_ROOT/secrets.json"
 [[ "$status" -eq 0 && "$output" == *'td-created-1'* ]]
 grep -q '^create ' "$TEST_ROOT/td.log"
+
+# Long file paths must not be redacted by the high-entropy heuristic
+printf '{"findings":[{"id":"std-paths","severity":"warning","disposition":"actionable","summary":"Long path","evidence":"lib/internal/coordinator/fleet_manager.go:42 unsafe","paths":["lib/internal/coordinator/fleet_manager.go"],"acceptance_criteria":"None","recommendation":"Fix it"}]}\n' > "$TEST_ROOT/long-path.json"
+run_router "$TEST_ROOT/long-path.json"
+grep -Fq 'lib/internal/coordinator/fleet_manager.go' "$TEST_ROOT/td.log"
+if grep -Fq '[REDACTED]' "$TEST_ROOT/td.log"; then
+  printf 'long file path was incorrectly redacted\n' >&2
+  exit 1
+fi
 
 printf '{"findings":[{"id":"std-body","severity":"warning","disposition":"actionable","summary":"Valid summary","evidence":"safe evidence","paths":[],"acceptance_criteria":"safe criterion","recommendation":"safe recommendation","review_body":"private prompt contents"}]}\n' > "$TEST_ROOT/body.json"
 run_router "$TEST_ROOT/body.json"
