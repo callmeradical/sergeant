@@ -11,6 +11,7 @@ expected=(
   diagnosing-bugs
   prototype
   resolving-merge-conflicts
+  sergeant-setup
   tdd
   to-spec
   to-tickets

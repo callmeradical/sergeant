@@ -21,5 +21,9 @@ The custom `to-tickets` skill is Sergeant project-authored material owned by
 Lars Cromley and explicitly authorized for MIT redistribution:
 `Copyright (c) 2026 Lars Cromley`.
 
+The custom `sergeant-setup` skill is Sergeant project-authored material owned by
+Lars Cromley and explicitly authorized for MIT redistribution:
+`Copyright (c) 2026 Lars Cromley`.
+
 `no-mistakes` remains an external CLI/integration and is intentionally not
 vendored.

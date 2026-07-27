@@ -9,7 +9,7 @@ through the repository-local links in `.claude/skills/`. Those links resolve
 only to `.agents/skills/`; no install step writes to a user's global agent
 configuration.
 
-The required inventory is:
+The required worker-brief inventory is:
 
 - `code-review`
 - `diagnosing-bugs`
@@ -19,6 +19,13 @@ The required inventory is:
 - `to-spec`
 - `to-tickets`
 - `wayfinder`
+
+One additional Sergeant-authored skill is also vendored here:
+
+- `sergeant-setup` — interactive, idempotent Sergeant bootstrap and repair
+
+(`to-tickets` above is also Sergeant-authored; `sergeant-setup` is not required
+by generated worker briefs.)
 
 `no-mistakes` remains an optional external integration and is not vendored.
 See `.agents/skills/PROVENANCE.md` and
