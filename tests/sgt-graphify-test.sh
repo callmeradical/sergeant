@@ -21,6 +21,9 @@ tmpdir="$TEST_ROOT/tmp"
 mkdir -p "$home" "$config" "$dev_root/api/vendor" "$dev_root/app" "$fake_bin" "$fallback_path" \
   "$crossfs_path" "$real_output" "$repo_symlink_target" "$tmpdir"
 ln -s "$real_output" "$output"
+# Symlink fixtures for alias tests (F2: resolve symlink aliases before in-source output checks)
+ln -s "$dev_root/api" "$dev_root/api-alias"
+ln -s "$dev_root/api" "$dev_root/api-parent-alias"
 printf 'api\n' > "$dev_root/api/source.txt"
 printf 'ignored\n' > "$dev_root/api/vendor/ignored.py"
 printf 'ignored\n' > "$dev_root/api/schema.generated.json"
@@ -87,6 +90,39 @@ repos:
     path: api
 graphify:
   output: $dev_root/api/graphify-out/
+  exclude_patterns:
+    - "**/vendor/**"
+    - "**/*.generated.*"
+EOF
+cat > "$config/symlink-repo-root.yaml" <<EOF
+name: symlink-repo-root
+repos:
+  - name: api
+    path: api-alias
+graphify:
+  output: $dev_root/api/graphify-out
+  exclude_patterns:
+    - "**/vendor/**"
+    - "**/*.generated.*"
+EOF
+cat > "$config/symlink-output-parent.yaml" <<EOF
+name: symlink-output-parent
+repos:
+  - name: api
+    path: api
+graphify:
+  output: $dev_root/api-parent-alias/graphify-out
+  exclude_patterns:
+    - "**/vendor/**"
+    - "**/*.generated.*"
+EOF
+cat > "$config/symlink-output-nonexistent.yaml" <<EOF
+name: symlink-output-nonexistent
+repos:
+  - name: api
+    path: api
+graphify:
+  output: $dev_root/api-parent-alias/new-graphify-out
   exclude_patterns:
     - "**/vendor/**"
     - "**/*.generated.*"
@@ -470,5 +506,40 @@ if grep -Eq '=== done ===|Graph report available at:' <<< "$total_output"; then
   exit 1
 fi
 grep -Fq 'stale report' "$output/GRAPH_REPORT.md"
+
+# F2: aliased repo root — repo path is a symlink; output is inside the real path.
+# Without canonicalization the containment check is lexical and misses the alias,
+# so the output would not be excluded from the scan.
+rm -rf "$dev_root/api/graphify-out"
+mkdir -p "$dev_root/api/graphify-out"
+printf 'stale\n' > "$dev_root/api/graphify-out/stale.txt"
+: > "$TEST_ROOT/graphify.log"
+run_graphify "" symlink-repo-root >/dev/null
+grep -Eq 'extract .*/sources/api --out' "$TEST_ROOT/graphify.log"
+[[ -f "$dev_root/api/graphify-out/graph.json" ]]
+[[ ! -e "$dev_root/api/graphify-out/stale.txt" ]]
+
+# F2: aliased output parent — output path has a symlinked parent component.
+# Without canonicalization graphify_output keeps the alias form, so the
+# containment check against the real repo path misses it.
+rm -rf "$dev_root/api/graphify-out"
+mkdir -p "$dev_root/api/graphify-out"
+printf 'stale\n' > "$dev_root/api/graphify-out/stale.txt"
+: > "$TEST_ROOT/graphify.log"
+run_graphify "" symlink-output-parent >/dev/null
+grep -Eq 'extract .*/sources/api --out' "$TEST_ROOT/graphify.log"
+[[ -f "$dev_root/api/graphify-out/graph.json" ]]
+[[ ! -e "$dev_root/api/graphify-out/stale.txt" ]]
+
+# F2: non-existent publication target — output path under a symlinked parent
+# does not exist yet.  _canonicalize_path must resolve the parent through the
+# symlink and _publish_parent_for_output must walk outside the repo before
+# calling mktemp -d, even when the leaf directory hasn't been created yet.
+rm -rf "$dev_root/api/new-graphify-out"
+: > "$TEST_ROOT/graphify.log"
+run_graphify "" symlink-output-nonexistent >/dev/null
+grep -Eq 'extract .*/sources/api --out' "$TEST_ROOT/graphify.log"
+[[ -f "$dev_root/api/new-graphify-out/graph.json" ]]
+rm -rf "$dev_root/api/new-graphify-out"
 
 printf 'sgt-graphify current CLI and failure handling: ok\n'

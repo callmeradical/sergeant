@@ -83,6 +83,38 @@ _resolve_normalized_path() {
   _trim_trailing_slashes "$(_resolve_path "$1")"
 }
 
+# Resolve all symlink components in a path, including parent directories.
+# Works even when the leaf component does not yet exist: resolves the deepest
+# existing directory prefix with cd + pwd -P, then appends remaining path
+# components unchanged.  Requires no external tools beyond bash.
+_canonicalize_path() {
+  local p="$1"
+  local parent leaf resolved_parent
+  if [[ -d "$p" ]]; then
+    (cd "$p" && pwd -P)
+    return
+  fi
+  parent="$(dirname "$p")"
+  leaf="${p##*/}"
+  if [[ "$parent" == "$p" ]]; then
+    # Reached the filesystem root; cannot recurse further.
+    printf '%s\n' "$p"
+    return
+  fi
+  resolved_parent="$(_canonicalize_path "$parent")"
+  printf '%s/%s\n' "$resolved_parent" "$leaf"
+}
+
+# Return the canonical location of a path entry: resolve all symlinks in the
+# parent directory chain but do NOT follow the final component.  This gives the
+# real directory that contains the entry, so a symlink that lives inside a repo
+# (e.g. api/graphify-out -> external) is still detected as being inside the repo
+# even though its canonical target is elsewhere.
+_location_canonical() {
+  local p="$1"
+  printf '%s/%s\n' "$(_canonicalize_path "$(dirname "$p")")" "${p##*/}"
+}
+
 _path_is_within() {
   local candidate="$1"
   local root="$2"
@@ -102,17 +134,15 @@ if [[ -z "$configured_output" || "$configured_output" == "null" ]]; then
   _die "No graphify.output configured in $CONFIG_FILE"
 fi
 configured_output="$(_resolve_normalized_path "$configured_output")"
-graphify_output="$configured_output"
-if [[ -L "$configured_output" ]]; then
-  [[ -d "$configured_output" ]] || _die "graphify.output is a broken directory symlink: $configured_output"
-  graphify_output="$(cd "$configured_output" && pwd -P)"
+if [[ -L "$configured_output" && ! -d "$configured_output" ]]; then
+  _die "graphify.output is a broken directory symlink: $configured_output"
 fi
-graphify_output="$(_trim_trailing_slashes "$graphify_output")"
+graphify_output="$(_canonicalize_path "$configured_output")"
 
 repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
 ALL_REPO_PATHS=()
 for ((i=0; i<repo_count; i++)); do
-  ALL_REPO_PATHS+=("$(_resolve_normalized_path "$(yq ".repos[$i].path" "$CONFIG_FILE")")")
+  ALL_REPO_PATHS+=("$(_canonicalize_path "$(_resolve_normalized_path "$(yq ".repos[$i].path" "$CONFIG_FILE")")")")
 done
 
 _path_is_in_source_repo() {
@@ -261,9 +291,18 @@ _extract_repo() {
   local should_stage=0
   local output_path=""
   local output_relative=""
-  local output_paths=("$configured_output")
+  # Build the set of output paths to check for containment within this repo.
+  # Use the location-canonical form (parent resolved, final component kept as-is)
+  # so that a symlink entry inside the repo (e.g. api/graphify-out -> external)
+  # is still detected, and so that symlinked parent directories of the output
+  # also canonicalize to the real repo path for correct matching.
+  local _output_loc
+  _output_loc="$(_location_canonical "$configured_output")"
+  local output_paths=("$_output_loc")
   local tar_exclude_args=("${TAR_EXCLUDE_ARGS[@]}")
-  if [[ "$graphify_output" != "$configured_output" ]]; then
+  # Also include the fully canonical form (follows all symlinks) in case the
+  # canonical target itself falls inside a repo.
+  if [[ "$graphify_output" != "$_output_loc" ]]; then
     output_paths+=("$graphify_output")
   fi
   if [[ ${#tar_exclude_args[@]} -gt 0 ]]; then
@@ -297,7 +336,7 @@ _extract_repo() {
 for ((i=0; i<repo_count; i++)); do
   repo_name="$(yq ".repos[$i].name" "$CONFIG_FILE")"
   raw_path="$(yq ".repos[$i].path" "$CONFIG_FILE")"
-  path="$(_resolve_normalized_path "$raw_path")"
+  path="$(_canonicalize_path "$(_resolve_normalized_path "$raw_path")")"
   group="$(yq ".repos[$i].group // \"\"" "$CONFIG_FILE")"
 
   if ! _in_include_groups "$group"; then
