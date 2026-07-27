@@ -74,6 +74,7 @@ the operation with ad hoc shell commands.
 | `bin/sgt-watch --sync-all` | Reconcile every durable fleet record and recycle verified terminal panes |
 | `bin/sgt-watch --list` | List all active tasks |
 | `bin/sgt-respond <task-id> <repo>` | Read a worker response from stdin and resume its loop |
+| `bin/sgt-recover <task-id> <repo>` | Attempt one bounded stall recovery for a live-but-stalled in-progress worker |
 | `bin/sgt-ack-response <task-id> <repo> <response-id>` | Acknowledge one consumed response from the exact worker pane |
 | `bin/sgt-validate <task-id> <repo> [--skip <steps>]` | Launch coordinator-owned no-mistakes in a split worker-window pane |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees + fleet state when done |
