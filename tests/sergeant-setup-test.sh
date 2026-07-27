@@ -87,6 +87,20 @@ require_text "$SKILL" 'Sync and verification'
 require_text "$SKILL" 'treehouse'
 require_text "$SKILL" 'Idempotency'
 
+# ── Failure-mode coverage ────────────────────────────────────────────────────
+# Verify each required failure mode has a stop condition in the failure table.
+
+require_text "$SKILL" '## Failure behavior'
+require_text "$SKILL" 'Required prerequisite missing and not installable'
+require_text "$SKILL" 'Consent declined for any write'
+require_text "$SKILL" 'YAML parse error on existing file'
+require_text "$SKILL" 'Unsupported setup capability needed'
+require_text "$SKILL" 'sgt-sync'
+require_text "$SKILL" 'Partial setup on exit'
+
+# The failure table must not indicate auto-continue after a failed sync.
+reject_text "$SKILL" 'continue past Phase 7'
+
 # ── Consent gate on every mutation ───────────────────────────────────────────
 
 require_text "$SKILL" '[y/N]'
