@@ -339,16 +339,18 @@ diag_after="$(cat "$repo_state/diagnostic" 2>/dev/null || true)"
 printf 'sgt-recover second attempt escalates: ok\n'
 
 # ── Slice 4: tmux new-window failure → needs_input escalation ─────────────────
+# Bug 2 regression: if the relaunch fails, the original stalled pane must NOT
+# be killed — the worker must remain alive (stalled) rather than dead.
 
 _setup_stalled_worker "$repo_state" "$worktree"
 rm -f "$worktree/.sergeant-message" "$repo_state/message"
-rm -f "$repo_state/stall_recovery_attempted"
+rm -f "$repo_state/stall_recovery_attempted" "$TEST_ROOT/kill4.log"
 printf 'in_progress\n' > "$worktree/.sergeant-status"
 printf 'in_progress\n' > "$repo_state/status"
 
 set +e
-EXPECTED_WORKER="$repo_state" FAIL_WINDOW=1 PANE_ALIVE=1 PATH="$fake_bin:$PATH" \
-  SERGEANT_FLEET="$fleet" \
+EXPECTED_WORKER="$repo_state" FAIL_WINDOW=1 PANE_ALIVE=1 KILL_LOG="$TEST_ROOT/kill4.log" \
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
   "$ROOT_DIR/bin/sgt-recover" task-1 app >/dev/null 2>&1
 fail_status=$?
 set -e
@@ -396,6 +398,14 @@ fi
 fail_diag="$(cat "$repo_state/diagnostic" 2>/dev/null || true)"
 [[ "$fail_diag" != "live worker stalled:"* ]] || {
   printf 'window-fail: stall diagnostic should be replaced by failure reason\n' >&2
+  exit 1
+}
+
+# Bug 2 regression: old pane (%42) must NOT be killed when new-window fails
+kill4_content="$(cat "$TEST_ROOT/kill4.log" 2>/dev/null || true)"
+[[ -z "$kill4_content" ]] || {
+  printf 'window-fail: old pane must not be killed when new-window fails, killed: %s\n' \
+    "$kill4_content" >&2
   exit 1
 }
 
@@ -479,5 +489,92 @@ if [[ -f "$TEST_ROOT/mismatch-killed.log" ]]; then
 fi
 
 printf 'sgt-recover identity mismatch — wrong pane untouched: ok\n'
+
+# ── Slice 7: Unfinished action_lease blocks recovery ──────────────────────────
+# Bug 1 regression: if the stalled worker holds an unfinished notification
+# action_lease (accepted a notification but died before writing 'completed'),
+# recovery must refuse rather than destroy the exact-once evidence.
+
+_setup_stalled_worker "$repo_state" "$worktree"
+rm -f "$repo_state/stall_recovery_attempted" "$TEST_ROOT/kill7.log"
+printf 'in_progress\n' > "$worktree/.sergeant-status"
+printf 'in_progress\n' > "$repo_state/status"
+printf 'live worker stalled: no progress for 401s (grace=300s); last event at epoch 1000\n' \
+  > "$repo_state/diagnostic"
+
+# Write an in-flight action_lease (no 'completed' → delivery not finished)
+lease_nonce="aabbccddeeff00112233445566778899"
+notif_id="deadbeef00112233445566778899aabb"
+mkdir -p "$repo_state/notifications/$notif_id/targets/$lease_nonce"
+printf '%s\n' "$notif_id" > "$repo_state/notification_id"
+printf '%s\n' "$lease_nonce" > "$repo_state/notifications/$notif_id/action_lease"
+# No targets/$lease_nonce/completed file → lease is unfinished
+
+set +e
+EXPECTED_WORKER="$repo_state" KILL_LOG="$TEST_ROOT/kill7.log" \
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-recover" task-1 app >/dev/null 2>&1
+lease_status=$?
+set -e
+
+[[ "$lease_status" -ne 0 ]] || {
+  printf 'action_lease: recovery should be refused when lease is unfinished\n' >&2
+  exit 1
+}
+
+# Old pane must NOT be killed
+lease_kill="$(cat "$TEST_ROOT/kill7.log" 2>/dev/null || true)"
+[[ -z "$lease_kill" ]] || {
+  printf 'action_lease: old pane should not be killed when lease is active, killed: %s\n' \
+    "$lease_kill" >&2
+  exit 1
+}
+
+# Worker must be escalated (needs_input) or at least remain non-in_progress terminal
+lease_wt_status="$(cat "$worktree/.sergeant-status")"
+lease_fleet_status="$(cat "$repo_state/status")"
+[[ "$lease_wt_status" == "needs_input" || "$lease_wt_status" == "blocked" || \
+   "$lease_fleet_status" == "needs_input" || "$lease_fleet_status" == "blocked" ]] || {
+  printf 'action_lease: worker should be escalated after refused recovery, wt=%s fleet=%s\n' \
+    "$lease_wt_status" "$lease_fleet_status" >&2
+  exit 1
+}
+
+printf 'sgt-recover action_lease blocks recovery: ok\n'
+
+# ── Slice 8: Completed action_lease does not block recovery ───────────────────
+# A completed action_lease (completed file present) must not block recovery.
+
+_setup_stalled_worker "$repo_state" "$worktree"
+rm -f "$repo_state/stall_recovery_attempted"
+printf 'in_progress\n' > "$worktree/.sergeant-status"
+printf 'in_progress\n' > "$repo_state/status"
+printf 'live worker stalled: no progress for 401s (grace=300s); last event at epoch 1000\n' \
+  > "$repo_state/diagnostic"
+
+completed_nonce="1122334455667788990011223344aabb"
+completed_notif_id="ffaabb0011223344556677889900aabb"
+mkdir -p "$repo_state/notifications/$completed_notif_id/targets/$completed_nonce"
+printf '%s\n' "$completed_notif_id" > "$repo_state/notification_id"
+printf '%s\n' "$completed_nonce" > "$repo_state/notifications/$completed_notif_id/action_lease"
+# completed file IS present → lease is finished
+printf '%s|%s\n' "$completed_notif_id" "$completed_nonce" \
+  > "$repo_state/notifications/$completed_notif_id/targets/$completed_nonce/completed"
+
+EXPECTED_WORKER="$repo_state" KILL_LOG="$TEST_ROOT/kill8.log" \
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-recover" task-1 app >/dev/null 2>&1
+
+[[ "$(cat "$repo_state/status")" == "in_progress" ]] || {
+  printf 'completed_lease: recovery should succeed when lease is completed, got: %s\n' \
+    "$(cat "$repo_state/status")" >&2
+  exit 1
+}
+[[ "$(cat "$repo_state/pane")" == "%99" ]] || {
+  printf 'completed_lease: recovery should update pane\n' >&2
+  exit 1
+}
+
+printf 'sgt-recover completed action_lease allows recovery: ok\n'
 
 printf 'sgt-recover: all tests passed\n'

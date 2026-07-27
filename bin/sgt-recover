@@ -9,6 +9,11 @@
 # classification).  A second invocation escalates to needs_input instead of
 # retrying — guaranteeing exactly one bounded relaunch attempt.
 #
+# Kill ordering: the stalled pane is only killed AFTER the replacement pane is
+# successfully launched and its identity validated.  If any part of the relaunch
+# sequence fails, the original stalled pane is preserved so the failure can be
+# investigated without losing the supervisor entirely.
+#
 # Note: sgt-respond refuses in_progress workers, so there is no pending
 # response generation to consume for a stalled worker.  AC2 "consumes the
 # intended response generation" is not applicable to this path.
@@ -95,8 +100,6 @@ _escalate() {
 }
 
 # _recover_die: release lock, clear trap, and exit with an error message.
-# Used in every early-exit failure path to avoid repeating the three-step
-# teardown inline.
 _recover_die() {
   _sgt_response_lock_release
   trap - EXIT
@@ -115,23 +118,26 @@ fi
 [[ "$diagnostic" == "live worker stalled:"* ]] || \
   _recover_die "Recovery is unavailable: stall diagnostic no longer present"
 
-# ── 5. Stamp recovery attempt before any irreversible action ────────────────
+# ── 5. Pre-flight: check for an unfinished notification action_lease ─────────
+# An in-flight action_lease means the prior supervisor accepted a notification
+# but died before writing 'completed'.  Replacing notification state now would
+# destroy the exact-once delivery evidence.  Refuse and escalate.
 
-date -u +%Y-%m-%dT%H:%M:%SZ > "$REPO_DIR/stall_recovery_attempted"
-
-# ── 6. Kill the stalled pane (identity-verified; prefix-safe) ───────────────
-
-pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
-if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1; then
-  if _sgt_pane_identity_matches "$pane" "$REPO_DIR"; then
-    tmux kill-pane -t "$pane" 2>/dev/null || true
-  else
-    _escalate "pane identity mismatch for pane $pane; refusing to kill"
-    _recover_die "Stall recovery refused: pane identity mismatch for $TASK_ID/$REPO"
+current_notification_id="$(cat "$REPO_DIR/notification_id" 2>/dev/null || true)"
+if [[ -n "$current_notification_id" ]]; then
+  current_action_lease="$(cat \
+    "$REPO_DIR/notifications/$current_notification_id/action_lease" 2>/dev/null || true)"
+  if [[ -n "$current_action_lease" &&
+        ! -f "$REPO_DIR/notifications/$current_notification_id/targets/$current_action_lease/completed" ]]; then
+    _escalate "pending notification action lease blocks recovery; prior delivery evidence must be preserved"
+    _recover_die "Stall recovery refused: unfinished notification action lease for $TASK_ID/$REPO"
   fi
 fi
 
-# ── 7. Verify relaunch metadata ─────────────────────────────────────────────
+# ── 6. Pre-flight: verify relaunch metadata ──────────────────────────────────
+# All prerequisites are validated BEFORE stamping the recovery attempt and
+# BEFORE killing anything, so that a validation failure leaves the stalled
+# worker alive and untouched.
 
 tmux_session="$(cat "$REPO_DIR/tmux_session" 2>/dev/null || true)"
 window_name="$(cat "$REPO_DIR/window_name" 2>/dev/null || true)"
@@ -143,7 +149,61 @@ if ! command -v tmux >/dev/null 2>&1 || \
   _recover_die "Stall recovery failed: relaunch metadata is incomplete for $TASK_ID/$REPO"
 fi
 
-# ── 8. Publish recovery notification ────────────────────────────────────────
+# ── 7. Pre-flight: verify old pane identity ──────────────────────────────────
+# Save the old pane reference for the deferred kill and for potential restore
+# on failure.  The identity check is done here (under lock, before any state
+# mutation) so a mismatch refuses recovery without killing anything.
+
+old_pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
+old_pane_live=false
+if [[ -n "$old_pane" ]] && command -v tmux >/dev/null 2>&1; then
+  if _sgt_pane_identity_matches "$old_pane" "$REPO_DIR"; then
+    old_pane_live=true
+  else
+    _escalate "pane identity mismatch for pane $old_pane; refusing to kill"
+    _recover_die "Stall recovery refused: pane identity mismatch for $TASK_ID/$REPO"
+  fi
+fi
+
+# ── 8. Stamp recovery attempt ────────────────────────────────────────────────
+# All pre-flight checks passed.  Stamp now so that any subsequent failure
+# prevents a second recovery attempt.
+
+date -u +%Y-%m-%dT%H:%M:%SZ > "$REPO_DIR/stall_recovery_attempted"
+
+# ── 9. Preserve superseded notification target evidence ──────────────────────
+# Mirror sgt-respond's evidence preservation before clearing notification state.
+
+current_target_nonce="$(cat "$REPO_DIR/notification_target" 2>/dev/null || true)"
+current_target_identity=""
+if [[ -n "$current_notification_id" && "$current_target_nonce" =~ ^[a-f0-9]{32}$ ]]; then
+  current_target_identity="$(cat \
+    "$REPO_DIR/notifications/$current_notification_id/targets/$current_target_nonce/pane_identity" \
+    2>/dev/null || true)"
+fi
+if [[ -n "$current_notification_id" && -n "$current_target_identity" ]]; then
+  superseded_dir="$REPO_DIR/notifications/$current_notification_id"
+  mkdir -p "$superseded_dir"
+  superseded_tmp="$superseded_dir/superseded_target_pane_identity.tmp.$$"
+  printf '%s\n' "$current_target_identity" > "$superseded_tmp"
+  if [[ -e "$superseded_dir/superseded_target_pane_identity" ]]; then
+    cmp -s "$superseded_tmp" "$superseded_dir/superseded_target_pane_identity" || {
+      rm -f "$superseded_tmp"
+      _escalate "pending notification target evidence conflicts with recovery relaunch"
+      _recover_die "Stall recovery refused: notification target evidence conflict for $TASK_ID/$REPO"
+    }
+    rm -f "$superseded_tmp"
+  else
+    mv "$superseded_tmp" "$superseded_dir/superseded_target_pane_identity" || {
+      rm -f "$superseded_tmp"
+      _escalate "could not preserve superseded notification target evidence"
+      _recover_die "Stall recovery failed: evidence preservation failed for $TASK_ID/$REPO"
+    }
+  fi
+fi
+rm -f "$REPO_DIR/notification_target"
+
+# ── 10. Publish recovery notification ────────────────────────────────────────
 
 delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
   od -An -tx1 | tr -d ' \n')"
@@ -151,7 +211,10 @@ _sgt_publish_worker_notification "$REPO_DIR" "$worktree" \
   "$delivery_notification_id" recovery \
   "Resume the mission after stall recovery. Read the current worktree and td state, check the latest td handoff, and continue from where you left off."
 
-# ── 9. Launch new worker pane ────────────────────────────────────────────────
+# ── 11. Launch new worker pane ───────────────────────────────────────────────
+# Launch the new pane BEFORE killing the old one.  If the launch fails, the
+# original stalled pane remains alive and the worker is escalated to
+# needs_input for investigation.
 
 worker_command="$(_sgt_worker_command \
   "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")"
@@ -168,30 +231,42 @@ if [[ -z "$new_pane" ]]; then
   _recover_die "Stall recovery failed: worker relaunch returned no pane for $TASK_ID/$REPO"
 fi
 
-# ── 10. Atomically install new pane/identity metadata ───────────────────────
+# ── 12. Atomically install new pane/identity metadata ───────────────────────
+# On any failure here: kill the new pane, restore the pane file to the old
+# pane so fleet state stays consistent, and escalate.
 
 printf '%s\n' "$new_pane" > "$REPO_DIR/pane"
 
+_abort_replacement() {
+  local reason="$1"
+  tmux kill-pane -t "$new_pane" 2>/dev/null || true
+  if [[ -n "$old_pane" ]]; then
+    printf '%s\n' "$old_pane" > "$REPO_DIR/pane" || true
+  fi
+  _escalate "$reason"
+  _recover_die "Stall recovery failed: $reason for $TASK_ID/$REPO"
+}
+
 pane_identity=""
 if pane_identity="$(_sgt_pane_identity "$new_pane")" && [[ -n "$pane_identity" ]]; then
-  if ! _sgt_replace_owned_file "$REPO_DIR/pane_identity" "$pane_identity"; then
-    tmux kill-pane -t "$new_pane" 2>/dev/null || true
-    _escalate "could not publish new worker pane identity"
-    _recover_die "Stall recovery failed: pane identity update failed for $TASK_ID/$REPO"
-  fi
-  if ! _sgt_notification_target_create "$REPO_DIR" "$delivery_notification_id" \
-      "$pane_identity" >/dev/null; then
-    tmux kill-pane -t "$new_pane" 2>/dev/null || true
-    _escalate "notification target race detected during stall recovery relaunch"
-    _recover_die "Stall recovery failed: notification target race for $TASK_ID/$REPO"
-  fi
+  _sgt_replace_owned_file "$REPO_DIR/pane_identity" "$pane_identity" || \
+    _abort_replacement "could not publish new worker pane identity"
+  _sgt_notification_target_create "$REPO_DIR" "$delivery_notification_id" \
+      "$pane_identity" >/dev/null || \
+    _abort_replacement "notification target race detected during stall recovery relaunch"
 else
-  tmux kill-pane -t "$new_pane" 2>/dev/null || true
-  _escalate "tmux failed to capture relaunched worker pane identity"
-  _recover_die "Stall recovery failed: pane identity capture failed for $TASK_ID/$REPO"
+  _abort_replacement "tmux failed to capture relaunched worker pane identity"
 fi
 
-# ── 11. Wait for recovery notification acknowledgement ──────────────────────
+# ── 13. Kill old pane (AFTER new pane is fully validated) ────────────────────
+# Only reached when the replacement pane is alive, identity-confirmed, and has
+# an active notification target.  Prefix-safe: identity was verified in step 7.
+
+if $old_pane_live && [[ -n "$old_pane" ]]; then
+  tmux kill-pane -t "$old_pane" 2>/dev/null || true
+fi
+
+# ── 14. Wait for recovery notification acknowledgement ──────────────────────
 
 if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" \
     "$delivery_notification_id"; then
@@ -200,9 +275,9 @@ if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" \
   _recover_die "Stall recovery failed: notification timed out for $TASK_ID/$REPO"
 fi
 
-# ── 12. Clear stall evidence now that recovery succeeded ────────────────────
-# Preserve evidence through all failure paths above so _escalate can write
-# an accurate failure diagnostic instead of an empty file.
+# ── 15. Clear stall evidence now that recovery succeeded ────────────────────
+# Preserve evidence through all failure paths above so _escalate can write an
+# accurate failure diagnostic instead of an empty file.
 
 rm -f "$REPO_DIR/diagnostic" "$REPO_DIR/message" "$worktree/.sergeant-message"
 
