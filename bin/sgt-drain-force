@@ -131,6 +131,26 @@ for ((i=0; i<count; i++)); do
 
   if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]]; then
     if kill -0 "$pid" 2>/dev/null; then
+      # Verify identity: recorded start time must match actual process start time
+      # to prevent killing a PID-reusing unrelated process.
+      recorded_start=""
+      [[ -f "$repo_dir/worker_process_start" ]] && \
+        recorded_start="$(tr -d '\n' < "$repo_dir/worker_process_start" 2>/dev/null || true)"
+      if [[ -n "$recorded_start" ]]; then
+        actual_start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+        if [[ "$actual_start" != "$recorded_start" ]]; then
+          printf '  INFO: pid %s start-time mismatch for %s/%s (pid reused by another process; worker already gone)\n' \
+            "$pid" "$task_id" "$repo_name" >&2
+          # Original worker is gone — mark stopped without sending any signal.
+          if [[ -n "$wt" && -d "$wt" ]]; then
+            printf 'force-stopped\n' > "$wt/.sergeant-status" || true
+          fi
+          printf 'force-stopped\n' > "$repo_dir/status" || true
+          _info "force-stopped (pid-reuse detected, no signal sent): $task_id/$repo_name"
+          continue
+        fi
+      fi
+
       if ! kill -TERM "$pid" 2>/dev/null; then
         printf '  WARN: SIGTERM failed for pid %s (%s/%s)\n' "$pid" "$task_id" "$repo_name" >&2
         any_failed=true
