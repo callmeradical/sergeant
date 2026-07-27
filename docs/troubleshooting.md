@@ -136,8 +136,9 @@ docker run --rm \
 ```
 
 This mounts the repository read-only and runs the repository-owned runtime
-regression. Parsing proof does not replace runtime proof unless the task
-acceptance explicitly permits parsing only.
+regression, including the `sgt-dispatch` Bash 3.2 parse and branch-name
+regression for shipped scripts. Parsing proof does not replace runtime proof
+unless the task acceptance explicitly permits parsing only.
 
 ## Graphify output is wrong or recursive
 
