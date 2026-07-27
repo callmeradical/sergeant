@@ -106,6 +106,15 @@ reject_text "$SKILL" 'continue past Phase 7'
 require_text "$SKILL" '[y/N]'
 require_text "$SKILL" 'backup'
 
+# Phase 2: clone and install must each have their own consent gate.
+require_text "$SKILL" 'Clone to'
+require_text "$SKILL" 'mise run install'
+
+# Phase 1: td issue creation must be consent-gated (suggest first, then ask).
+require_text "$SKILL" 'Create this td issue? [y/N]'
+# Must not auto-create td issues without asking.
+reject_text "$SKILL" 'create or suggest a td issue'
+
 # ── Vague quality language check ─────────────────────────────────────────────
 
 if grep -Eiq '(be thorough|write clean code|high[- ]quality|make it readable|best practices|be careful|do it properly|internalize)' "$SKILL"; then

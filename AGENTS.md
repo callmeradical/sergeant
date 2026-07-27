@@ -105,16 +105,14 @@ Load procedures only when their trigger applies:
 | The user wants to interactively install, configure, or repair a Sergeant installation | `sergeant-setup` | Interactive setup wizard, prerequisite detection, consent-gated install, project YAML interview, sync verification, and optional treehouse prompt |
 
 Sergeant-owned procedural skills live at `skills/<name>/SKILL.md` in this
-repository. For every listed trigger, read that repository-local file directly;
-it is canonical and takes precedence over any same-named registry skill. A
-harness registry may assist loading but its omission does not make the skill
-unavailable. Do not ask the owner or stop solely because the registry omits the
-skill. Only stop and report the exact repository-local path when that file is
-absent or unreadable; do not reconstruct a partial protocol from memory.
-
-`sergeant-setup` is a Sergeant-authored worker skill at
-`.agents/skills/sergeant-setup/SKILL.md`; it is discovered by Codex, OpenCode,
-and Claude from the canonical `.agents/skills/` tree, not from `skills/`.
+repository. Sergeant-authored worker skills (such as `sergeant-setup`) live at
+`.agents/skills/<name>/SKILL.md` and are discovered from the canonical
+`.agents/skills/` tree by Codex, OpenCode, and Claude. For every listed trigger,
+read that repository-local file directly; it is canonical and takes precedence over any same-named registry skill.
+A harness registry may assist loading but its omission does not make the skill
+unavailable. Do not ask the owner or stop solely because the registry omits the skill.
+Only stop and report the exact repository-local path when that file is absent or unreadable; do not reconstruct a partial
+protocol from memory.
 
 ---
 
