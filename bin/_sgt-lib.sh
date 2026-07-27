@@ -624,8 +624,10 @@ _sgt_background_watch() {
 
   # Idempotency: if the fleet already owns an active monitor with the same
   # invocation ID, return it without starting a new one.
-  existing_unit="$(tr -d '\n' < "$task_dir/monitor_unit" 2>/dev/null || true)"
-  existing_inv="$(tr -d '\n' < "$task_dir/monitor_invocation_id" 2>/dev/null || true)"
+  # shellcheck disable=SC2002  # cat used intentionally: suppresses bash's own redirect error for absent files
+  existing_unit="$(cat "$task_dir/monitor_unit" 2>/dev/null | tr -d '\n' || true)"
+  # shellcheck disable=SC2002
+  existing_inv="$(cat "$task_dir/monitor_invocation_id" 2>/dev/null | tr -d '\n' || true)"
   if [[ -n "$existing_unit" && "$existing_unit" == "$unit" && -n "$existing_inv" ]]; then
     current_inv="$(_sgt_monitor_invocation_id "$unit")"
     if [[ -n "$current_inv" && "$current_inv" == "$existing_inv" ]]; then
@@ -679,10 +681,12 @@ _sgt_stop_background_monitor() {
   local task_dir="$1"
   local unit stored_inv current_inv
 
-  unit="$(tr -d '\n' < "$task_dir/monitor_unit" 2>/dev/null || true)"
+  # shellcheck disable=SC2002  # cat used intentionally: suppresses bash's own redirect error for absent files
+  unit="$(cat "$task_dir/monitor_unit" 2>/dev/null | tr -d '\n' || true)"
   [[ -n "$unit" ]] || return 0  # No monitor registered for this task.
 
-  stored_inv="$(tr -d '\n' < "$task_dir/monitor_invocation_id" 2>/dev/null || true)"
+  # shellcheck disable=SC2002
+  stored_inv="$(cat "$task_dir/monitor_invocation_id" 2>/dev/null | tr -d '\n' || true)"
   [[ -n "$stored_inv" ]] || \
     _die "Background monitor unit registered ($unit) but invocation ID is missing; cannot safely stop"
 
