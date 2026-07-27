@@ -1408,6 +1408,74 @@ PATH="$TEST_ROOT/fake-bin:$PATH" \
 [[ ! -e "$TEST_ROOT/fleet/treehouse-success" ]]
 rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/treehouse"
 
+mkdir -p "$TEST_ROOT/fleet/treehouse-removed-retry/app" \
+  "$TEST_ROOT/fake-bin"
+init_test_repo "$TEST_ROOT/treehouse-removed-main"
+git -C "$TEST_ROOT/treehouse-removed-main" worktree add -q -b treehouse-removed-worker \
+  "$TEST_ROOT/treehouse-removed-worktree"
+record_retry_owner treehouse-removed-retry app "$TEST_ROOT/treehouse-removed-main"
+printf '%s\n' "$TEST_ROOT/treehouse-removed-worktree" > \
+  "$TEST_ROOT/fleet/treehouse-removed-retry/app/worktree"
+printf 'treehouse\n' > "$TEST_ROOT/fleet/treehouse-removed-retry/app/wt_type"
+printf 'sgt-treehouse-removed-retry-app\n' > \
+  "$TEST_ROOT/fleet/treehouse-removed-retry/app/wt_holder"
+printf 'done\n' > "$TEST_ROOT/fleet/treehouse-removed-retry/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/treehouse-removed-retry/app/result"
+printf 'done\n' > "$TEST_ROOT/treehouse-removed-worktree/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/treehouse-removed-worktree/.sergeant-result"
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
+  *" rev-parse "*) "$REAL_GIT" "$@" ;;
+  *" status "*) ;;
+  *) exit 1 ;;
+esac
+EOF
+cat > "$TEST_ROOT/fake-bin/treehouse" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1" == "return" ]]
+printf '%s|%s\n' "$PWD" "$2" >> "$FAKE_TREEHOUSE_LOG"
+rm -rf "$2"
+EOF
+REAL_MV="$(command -v mv)"
+export REAL_MV
+cat > "$TEST_ROOT/fake-bin/mv" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$(sed -n '1p' "$1" 2>/dev/null || true)" == "reconciled-absent" && \
+  ! -e "$FAKE_MV_STATE" ]]; then
+  touch "$FAKE_MV_STATE"
+  exit 1
+fi
+"$REAL_MV" "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/treehouse" \
+  "$TEST_ROOT/fake-bin/mv"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-removed-retry-removals" \
+  FAKE_MV_STATE="$TEST_ROOT/treehouse-removed-retry-mv-failed" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" treehouse-removed-retry >/dev/null 2>&1; then
+  printf 'cleanup succeeded after treehouse reconciled-absent publication failed\n' >&2
+  exit 1
+fi
+[[ ! -e "$TEST_ROOT/treehouse-removed-worktree" ]]
+[[ "$(cat "$TEST_ROOT/fleet/treehouse-removed-retry/app/cleanup-phase")" == \
+  $'removed\n'"$TEST_ROOT/treehouse-removed-worktree"$'\ntreehouse\n'"$TEST_ROOT/treehouse-removed-main"$'\nreturned' ]]
+touch "$TEST_ROOT/treehouse-removed-retry-mv-failed"
+PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-removed-retry-removals" \
+  FAKE_MV_STATE="$TEST_ROOT/treehouse-removed-retry-mv-failed" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" treehouse-removed-retry >/dev/null
+[[ "$(wc -l < "$TEST_ROOT/treehouse-removed-retry-removals")" -eq 1 ]]
+[[ ! -e "$TEST_ROOT/fleet/treehouse-removed-retry" ]]
+rm "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/treehouse" \
+  "$TEST_ROOT/fake-bin/mv"
+
 mkdir -p "$TEST_ROOT/fleet/treehouse-partial/app" \
   "$TEST_ROOT/fake-bin"
 init_test_repo "$TEST_ROOT/treehouse-main"

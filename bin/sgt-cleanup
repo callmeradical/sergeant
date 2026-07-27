@@ -446,6 +446,8 @@ _require_terminal_repos() {
       "$worktree" "$retry_type" "$retry_root")"
     removed_phase="$(printf 'removed\n%s\n%s\n%s\n' \
       "$worktree" "$retry_type" "$retry_root")"
+    [[ "$retry_type" != treehouse ]] || \
+      removed_phase="$(_treehouse_removed_phase "$worktree" "$retry_root")"
     if [[ -n "$worktree" && -d "$worktree" ]]; then
       proof_dir="$worktree"
       restore_after_validation=false
@@ -798,6 +800,15 @@ _record_cleanup_phase() {
   fi
 }
 
+_treehouse_removed_phase() {
+  printf 'removed\n%s\ntreehouse\n%s\nreturned\n' "$1" "$2"
+}
+
+_treehouse_removed_phase_proven() {
+  [[ "$(sed -n '5p' "$1/cleanup-phase" 2>/dev/null || true)" == "returned" && \
+    -z "$(sed -n '6p' "$1/cleanup-phase" 2>/dev/null || true)" ]]
+}
+
 _validation_object_identity() {
   [[ -e "$1" && ! -L "$1" ]] || return 1
   stat -c '%d:%i:%w' -- "$1" 2>/dev/null || stat -f '%d:%i:%B' "$1" 2>/dev/null
@@ -967,62 +978,6 @@ _repo_instance_id() {
   printf '%s\n' "$token"
 }
 
-_repo_metadata_identity() {
-  local git_common_dir="$1"
-
-  (
-    cd "$git_common_dir" || exit 1
-    {
-      find . -path ./worktrees -prune -o -path ./objects -prune -o \
-        -path ./logs -prune -o -path ./index -prune -o \
-        \( -type f -o -type l \) -print
-      [[ ! -d objects/info ]] || find objects/info \( -type f -o -type l \) -print
-    } | LC_ALL=C sort | while IFS= read -r path; do
-      if [[ -L "$path" ]]; then
-        printf 'link\n%s\n%s\n' "$path" "$(readlink "$path")"
-      else
-        printf 'file\n%s\n' "$path"
-        git hash-object "$path" || exit 1
-      fi
-    done
-  ) | git hash-object --stdin
-}
-
-_repo_per_worktree_metadata_identity() {
-  local git_dir="$1" index_path mode="${3:-}" raw_index repo_root="$2" semantic_index
-
-  index_path="$git_dir/index"
-  if [[ "$mode" == "exclude-evidence" ]]; then
-    [[ ! -L "$index_path" ]] || return 1
-    if [[ -e "$index_path" ]]; then
-      [[ -f "$index_path" && -r "$index_path" ]] || return 1
-      raw_index="$(git hash-object "$index_path")" || return 1
-    else
-      raw_index="absent"
-    fi
-  else
-    raw_index="not-bound"
-  fi
-  semantic_index="$(git -C "$repo_root" ls-files --stage -z | \
-    git hash-object --stdin)" || return 1
-
-  (
-    cd "$git_dir" || exit 1
-    printf 'raw-index\n%s\nsemantic-index\n%s\n' "$raw_index" "$semantic_index"
-    find . -path ./index -prune -o -path ./logs -prune -o -path ./objects -prune -o \
-      -path ./refs -prune -o -path ./worktrees -prune -o \
-      \( -type f -o -type l \) -print | LC_ALL=C sort | \
-      while IFS= read -r path; do
-        if [[ -L "$path" ]]; then
-          printf 'link\n%s\n%s\n' "$path" "$(readlink "$path")"
-        else
-          printf 'file\n%s\n' "$path"
-          git hash-object "$path" || exit 1
-        fi
-      done
-  ) | git hash-object --stdin
-}
-
 _repo_worktree_identity() {
   local mode="${2:-}" path repo_root="$1"
 
@@ -1063,32 +1018,6 @@ _worker_evidence_present() {
     [[ -e "$evidence" || -L "$evidence" ]] && return 0
   done
   return 1
-}
-
-_repo_identity() {
-  local config git_common_dir git_dir head instance metadata per_worktree_metadata refs remote \
-    roots state repo_root="$1"
-
-  git_dir="$(_repo_git_dir "$repo_root" worktree)" || return 1
-  git_common_dir="$(_repo_git_dir "$repo_root" common)" || return 1
-  instance="$(stat -c '%d:%i' "$git_dir" 2>/dev/null || \
-    stat -f '%d:%i' "$git_dir" 2>/dev/null)" || return 1
-  instance="$instance:$(_repo_instance_id "$git_common_dir" "${2:-}")" || return 1
-  config="$(git hash-object "$git_common_dir/config" 2>/dev/null)" || return 1
-  head="$(cat "$git_dir/HEAD" 2>/dev/null)" || return 1
-  refs="$(git -C "$repo_root" for-each-ref \
-    --format='%(refname) %(objectname) %(symref)' 2>/dev/null | sort)" || return 1
-  roots="$(git -C "$repo_root" rev-list --max-parents=0 --all 2>/dev/null | sort)"
-  [[ -n "$roots" ]] || return 1
-  remote="$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null || true)"
-  state="$(_repo_worktree_identity "$repo_root" "${2:-}")" || return 1
-  metadata="$(_repo_metadata_identity "$git_common_dir")" || return 1
-  per_worktree_metadata="$(_repo_per_worktree_metadata_identity \
-    "$git_dir" "$repo_root" "${2:-}")" || return 1
-  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
-    "$instance" "$metadata" "$per_worktree_metadata" "$config" "$head" "$remote" \
-    "$roots" "$refs" "$state" | \
-    git hash-object --stdin
 }
 
 _task_project() {
@@ -1553,7 +1482,12 @@ for repo_dir in "$TASK_DIR"/*/; do
         "$retry_type" "$retry_root"
       retry_root="$VALIDATED_RETRY_ROOT"
       if [[ "$retry_phase" == "removed" ]]; then
-        _require_completed_removal_proof "$retry_type" "$retry_root" "$worktree"
+        if [[ "$retry_type" == treehouse ]]; then
+          _treehouse_removed_phase_proven "$repo_dir" || \
+            _die "Cannot prove completed treehouse removal: $worktree"
+        fi
+        [[ "$retry_type" == treehouse ]] || \
+          _require_completed_removal_proof "$retry_type" "$retry_root" "$worktree"
         _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
           _die "Failed to reconcile completed worktree removal: $repo_name"
         echo "  worktree removal already completed: $worktree"
@@ -1670,8 +1604,13 @@ for repo_dir in "$TASK_DIR"/*/; do
   }
   _rollback_remove_path "$LIVE_EVIDENCE_BACKUP" \
     "completed live evidence backup" live-backup-cleanup
-  _record_cleanup_phase "$repo_dir" removed "$worktree" "$wt_type" "$retry_root" || \
-    _die "Failed to publish completed worktree removal: $repo_name"
+  if [[ "$wt_type" == "treehouse" ]]; then
+    _record_cleanup_phase "$repo_dir" removed "$worktree" "$wt_type" "$retry_root" \
+      returned || _die "Failed to publish completed worktree removal: $repo_name"
+  else
+    _record_cleanup_phase "$repo_dir" removed "$worktree" "$wt_type" "$retry_root" || \
+      _die "Failed to publish completed worktree removal: $repo_name"
+  fi
   _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" "$wt_type" "$retry_root"
   [[ "$wt_type" != git ]] || \
     _require_completed_removal_proof "$wt_type" "$retry_root" "$worktree"
