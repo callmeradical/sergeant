@@ -121,10 +121,16 @@ If the Sergeant repository is not already cloned:
    Run the command only after the user types `y` or `yes`. Leave the filesystem
    unchanged on any other response.
 
-If `mise` is available, show the command and ask for consent before running it:
+If `mise` is available, first determine the actual install directory:
+
+```bash
+install_dir="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
+```
+
+Show the resolved target and ask for consent before running anything:
 
 ```
-Run `mise run install` to symlink commands into ~/.local/bin? [y/N]
+Run `mise run install` to symlink commands into <install_dir>? [y/N]
 ```
 
 Run `mise run install` only after the user confirms. If `mise` is unavailable or

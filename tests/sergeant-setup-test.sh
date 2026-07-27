@@ -119,6 +119,9 @@ reject_text "$SKILL" 'Do not skip the backup even if the user says to'
 # Phase 2: clone and install must each have their own consent gate.
 require_text "$SKILL" 'Clone to'
 require_text "$SKILL" 'mise run install'
+# Phase 2: install prompt must show the actual target via SGT_INSTALL_DIR,
+# not a hardcoded path.
+require_text "$SKILL" 'SGT_INSTALL_DIR'
 
 # Phase 1: td issue creation must be consent-gated (suggest first, then ask).
 require_text "$SKILL" 'Create this td issue? [y/N]'
