@@ -50,6 +50,61 @@ if ! echo "$PATH" | tr ':' '\\n' | grep -qxF "$TARGET_DIR"; then
   echo "Add this to your shell config (~/.zshrc or ~/.bashrc):"
   echo "  export PATH=\"$TARGET_DIR:\\$PATH\""
 fi
+
+# Install git hooks from scripts/hooks/ into .git/hooks/
+hooks_src="$REPO_DIR/scripts/hooks"
+hooks_dst="$(git -C "$REPO_DIR" rev-parse --git-dir 2>/dev/null)/hooks"
+if [[ -d "$hooks_src" && -d "$hooks_dst" ]]; then
+  for hook in "$hooks_src"/*; do
+    [[ -f "$hook" ]] || continue
+    name="$(basename "$hook")"
+    ln -sf "$hook" "$hooks_dst/$name"
+    echo "  linked hook: $hooks_dst/$name -> $hook"
+  done
+fi
+"""
+
+[tasks."install:hooks"]
+description = "Symlink scripts/hooks/* into .git/hooks/ (runs automatically via mise run install)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+REPO_DIR="$(git -C "${MISE_PROJECT_ROOT:-.}" rev-parse --show-toplevel 2>/dev/null || echo "${MISE_PROJECT_ROOT:-.}")"
+hooks_src="$REPO_DIR/scripts/hooks"
+hooks_dst="$(git -C "$REPO_DIR" rev-parse --git-dir 2>/dev/null)/hooks"
+[[ -d "$hooks_src" && -d "$hooks_dst" ]] || { echo "hooks dirs not found"; exit 1; }
+linked=0
+for hook in "$hooks_src"/*; do
+  [[ -f "$hook" ]] || continue
+  name="$(basename "$hook")"
+  ln -sf "$hook" "$hooks_dst/$name"
+  echo "  linked: $hooks_dst/$name -> $hook"
+  linked=$((linked+1))
+done
+echo "Installed $linked git hooks."
+"""
+
+[tasks."uninstall:hooks"]
+description = "Remove git hooks installed from scripts/hooks/"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+REPO_DIR="$(git -C "${MISE_PROJECT_ROOT:-.}" rev-parse --show-toplevel 2>/dev/null || echo "${MISE_PROJECT_ROOT:-.}")"
+hooks_dst="$(git -C "$REPO_DIR" rev-parse --git-dir 2>/dev/null)/hooks"
+hooks_src="$REPO_DIR/scripts/hooks"
+removed=0
+for hook in "$hooks_src"/*; do
+  [[ -f "$hook" ]] || continue
+  name="$(basename "$hook")"
+  link="$hooks_dst/$name"
+  [[ -L "$link" ]] || continue
+  target="$(readlink "$link")"
+  [[ "$target" == "$hook" ]] || continue
+  rm "$link"
+  echo "  removed: $link"
+  removed=$((removed+1))
+done
+echo "Removed $removed git hooks."
 """
 
 [tasks.uninstall]
