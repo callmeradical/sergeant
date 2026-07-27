@@ -550,6 +550,9 @@ _require_terminal_repos() {
           _die "Failed to restore worker evidence during retry preflight: $repo_name"
       fi
     else
+      if [[ -z "$worktree" ]]; then
+        continue
+      fi
       [[ "$cleanup_phase" != $'removing\n'"$worktree" ]] || \
         _die "Retry owner identity is missing: $repo_name"
       if [[ "$cleanup_phase" == $'reconciled-absent\n'"$worktree" ]]; then
