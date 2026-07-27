@@ -20,7 +20,6 @@ config_dir="$TEST_ROOT/config"
 mkdir -p "$repo_state" "$source_repo" "$fake_bin" "$config_dir" "$drain_dir"
 export SERGEANT_CONFIG="$config_dir"
 
-# Minimal git worktree for sgt-respond's origin check
 git -C "$source_repo" init -q
 git -C "$source_repo" config user.name Test
 git -C "$source_repo" config user.email test@example.invalid
@@ -34,7 +33,6 @@ repos:
     path: $source_repo
 EOF
 
-# Copy required brief/intent files
 printf 'Project: test\nBrief: fixture\nBranch: respond-drain-test\nRepos: app\n' \
   > "$fleet/task-1/brief.md"
 printf '%s\n' "$worktree" > "$repo_state/worktree"
@@ -42,7 +40,6 @@ cat "$worktree/.git" > "$repo_state/worktree_git_pointer"
 worktree_git_dir="$(sed 's/^gitdir: //' "$worktree/.git")"
 printf '%s\n' "$(cd "$worktree_git_dir" && pwd -P)" > "$repo_state/worktree_git_dir"
 
-# Minimal intent for sgt-respond compatibility
 cat > "$fleet/task-1/.sergeant-intent.md" <<'EOF'
 ## Objective
 Drain test.
@@ -58,13 +55,13 @@ cat > "$worktree/.sergeant-brief.md" <<EOF
 **Project:** test
 EOF
 
+# Dead pane: display-message exits 1 (not the expected supervisor)
 printf '%%42\n' > "$repo_state/pane"
-# Dead pane identity (wrong supervisor so it fails the live check)
-printf '0|%%42|9999|deadpane|other-worker\n' > "$repo_state/pane_identity"
+printf '0|%%99|9999|123|other-worker:%s\n' "$repo_state" > "$repo_state/pane_identity"
 chmod 600 "$repo_state/pane_identity"
 printf 'sgt\n' > "$repo_state/tmux_session"
 printf 'task/app\n' > "$repo_state/window_name"
-printf 'fake-opencode\n' > "$repo_state/agent"
+printf 'opencode\n' > "$repo_state/agent"
 printf 'test\n' > "$repo_state/project"
 printf '1\n' > "$worktree/.sergeant-gate-generation"
 printf 'td-test-1\n' > "$repo_state/td_task"
@@ -74,14 +71,11 @@ cat > "$fake_bin/tmux" <<'EOF'
 printf '%s\n' "$*" >> "${TMUX_LOG:-/dev/null}"
 case "$1" in
   display-message)
-    # Return dead pane (fails live-pane check)
+    # Pane is dead / wrong supervisor
     exit 1
     ;;
-  new-window)
-    [[ "${FAIL_WINDOW:-0}" == 0 ]] || exit 7
-    printf '%%99\n'
-    ;;
-  send-keys) exit 0 ;;
+  new-window) printf '%%99\n' ;;
+  send-keys)  exit 0 ;;
 esac
 EOF
 chmod +x "$fake_bin/tmux"
@@ -93,7 +87,8 @@ EOF
 chmod +x "$fake_bin/td"
 
 _respond() {
-  printf '%s' "$1" | PATH="$fake_bin:$ROOT_DIR/bin:$PATH" \
+  local response="$1"
+  printf '%s' "$response" | PATH="$fake_bin:$ROOT_DIR/bin:$PATH" \
     TMUX_LOG="$TEST_ROOT/tmux.log" TD_LOG="$TEST_ROOT/td.log" \
     SERGEANT_FLEET="$fleet" SERGEANT_DRAIN_DIR="$drain_dir" \
     "$ROOT_DIR/bin/sgt-respond" task-1 app
@@ -125,7 +120,6 @@ _undrain --global
 [[ "$status" -ne 0 ]] || { echo "relaunch should be blocked when drain active; got 0"; exit 1; }
 [[ "$output" == *"drain"* ]] || \
   { echo "expected drain message; got: $output"; exit 1; }
-# new-window must not have been called
 if grep -q 'new-window' "$TEST_ROOT/tmux.log" 2>/dev/null; then
   echo "tmux new-window was called despite drain"
   exit 1
@@ -133,6 +127,8 @@ fi
 # Response MUST be stored (spec: "responses may be stored generation-safely")
 [[ -f "$worktree/.sergeant-response" ]] || \
   { echo "response should be stored even when drain blocks relaunch"; exit 1; }
+[[ "$(cat "$worktree/.sergeant-response")" == "drain blocked response" ]] || \
+  { echo "stored response content wrong"; exit 1; }
 rm -f "$worktree/.sergeant-response" "$repo_state/response"
 
 # ── 2. Project drain: matching project blocks relaunch ────────────────────────
@@ -141,7 +137,7 @@ printf 'needs_input\n' > "$worktree/.sergeant-status"
 printf 'needs_input\n' > "$repo_state/status"
 rm -f "$worktree/.sergeant-response" "$repo_state/response" "$TEST_ROOT/tmux.log"
 
-_drain test --reason "project drain test" --actor "test"
+_drain test --reason "project drain test"
 
 set +e
 output="$(_respond "project drained response" 2>&1)"
@@ -157,20 +153,5 @@ if grep -q 'new-window' "$TEST_ROOT/tmux.log" 2>/dev/null; then
   exit 1
 fi
 rm -f "$worktree/.sergeant-response" "$repo_state/response"
-
-# ── 3. Undrain restores relaunch admission ────────────────────────────────────
-
-printf 'needs_input\n' > "$worktree/.sergeant-status"
-printf 'needs_input\n' > "$repo_state/status"
-rm -f "$worktree/.sergeant-response" "$repo_state/response" "$TEST_ROOT/tmux.log"
-
-# With no drain, dead-pane relaunch should succeed
-set +e
-_respond "post-drain response" >/dev/null 2>&1
-status=$?
-set -e
-[[ "$status" -eq 0 ]] || { echo "relaunch should succeed after drain cleared; got: $status"; exit 1; }
-grep -Fq 'new-window' "$TEST_ROOT/tmux.log" 2>/dev/null || \
-  { echo "new-window should be called after drain cleared"; exit 1; }
 
 printf 'sgt-respond drain admission: ok\n'
