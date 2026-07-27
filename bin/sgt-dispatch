@@ -547,6 +547,7 @@ for rname in "${TARGET_REPOS[@]}"; do
   echo "$BRANCH"    > "$repo_task_dir/branch"
   date +%s          > "$repo_task_dir/dispatch_started"
   echo "dispatched" > "$repo_task_dir/status"
+  echo "$PROJECT"   > "$repo_task_dir/project"
   [[ -n "$wait_for" ]] && echo "$wait_for" > "$repo_task_dir/wait_for"
 
   if $use_treehouse; then
