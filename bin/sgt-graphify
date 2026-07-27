@@ -500,7 +500,7 @@ elif [[ -L "$configured_output" ]]; then
   if ! mv -T "$tmp_sym" "$configured_output"; then
     rm -f "$tmp_sym"
     tmp_sym=""
-    _die "Could not publish graph output to $configured_output"
+    _die "Could not publish project graph to $configured_output"
   fi
   tmp_sym=""       # moved into place; _cleanup must not delete it
   published=1
@@ -519,7 +519,7 @@ else
     # Restore the old output and let _cleanup clean the publish_root.
     mv "$old_backup" "$configured_output" || true
     old_backup=""
-    _die "Could not publish graph output to $configured_output"
+    _die "Could not publish project graph to $configured_output"
   fi
   published=1
 
