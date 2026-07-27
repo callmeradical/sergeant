@@ -110,10 +110,12 @@ and verify the process started. Use bounded one-shot inspection when managed
 background execution is unavailable; do not hold the coordinator in a blocking
 watch call.
 
-`needs_input` and `blocked` are distinct nonterminal states. A waiting worker may
-remain alive or may exit after atomically recording a durable handoff and status.
-Do not infer progress from pane/process liveness, and do not rewrite an expected
-blocked exit as orphaned.
+`needs_input`, `blocked`, and `waiting` are distinct nonterminal states. A
+waiting worker may remain alive or may exit after atomically recording a durable
+handoff and status. Deferred waits must use `.sergeant-wake-condition` and
+`sgt-wake`, not sleep or polling loops inside the worker session. Do not infer
+progress from pane/process liveness, and do not rewrite an expected blocked exit
+as orphaned.
 
 For a bounded one-shot worktree-to-fleet synchronization, run:
 
@@ -129,6 +131,12 @@ When a worker escalates:
 2. Get the human decision; do not infer consequential intent.
 3. Write the approved response to a protected file, then run `sgt-respond <task-id> <repo> < protected-response.txt`. Sergeant writes a generation-bound response to fleet state and `.sergeant-response`, then nudges or relaunches the exact recorded local worker when supported.
 4. Require the worker to apply the response once, restore truthful status, write `.sergeant-response-applied` with the matching response ID, gate generation, and status, then run `sgt-ack-response <task-id> <repo> <response-id>` from its exact recorded pane. Only that command validates proof, archives replay evidence, records acknowledgement, and clears active plaintext transport.
+
+When a worker is `waiting` on a durable wake condition:
+
+1. Inspect `.sergeant-wake-condition` and the worker's last message or handoff evidence.
+2. Use `sgt-wake <task-id> <repo>` for supported `not_before`, `github_check`, `fleet_dependency`, `td_dependency`, `deployment`, or `human_response` conditions instead of telling the worker to sleep.
+3. Expect `human_response` to convert `waiting` into `needs_input`, and expect `deployment` to do the same until the local deployment adapter exists; use `sgt-respond` only after that escalation or when a human decision is already pending.
 
 You can also attach to the tmux session directly to observe or assist a worker:
 
@@ -207,11 +215,12 @@ Each dispatched agent must:
    - Merge/rebase conflict: load `resolving-merge-conflicts`, trace both intents, preserve both where possible, and never abort automatically
 5. Establish public behavioral seams from td/spec before tests. If a consequential seam is undecided, escalate `needs_input` rather than guessing
 6. Implement one vertical slice at a time: focused red test, minimum green implementation, then refactor. Reject tautological tests, internal mocking, horizontal test/implementation phases, and speculative refactoring
-7. For `needs_input` or `blocked`, atomically write the status and
-   `.sergeant-message`, notify Sergeant once per generation, and record a td
-   handoff. The worker may wait alive or exit cleanly; after a matching
-   `.sergeant-response` is consumed, clear/archive the message, log the decision,
-   restore truthful status, and continue
+7. For `needs_input`, `blocked`, or `waiting`, atomically write the status and
+   required durable files, notify Sergeant once per generation, and record a td
+   handoff. Deferred waits must publish `.sergeant-wake-condition` and exit
+   cleanly rather than sleeping in-process; after a matching `.sergeant-response`
+   or `sgt-wake` resume is consumed, clear/archive the message, log the
+   decision, restore truthful status, and continue
 8. Run focused tests and typechecking/lint regularly and the full required suite at the end. Before shipping, require an independent readiness review over mutation before validation, partial publication/rollback, identity/provenance, stale/legacy states, suppressed failures, race windows, and missing negative tests. Do not run no-mistakes for routine worker completion, prototypes, investigations, documentation drafts, intermediate commits, or remediation loops
 9. After native validation and zero readiness blockers, write `.sergeant-validation-ready` with the recorded intent revision, current HEAD, and passed Standards, Spec, and readiness evidence, then notify the coordinator; never run no-mistakes from the worker process. The coordinator invokes `sgt-validate`, which launches the one interactive validation-only boundary in a split pane of the same window, passes the canonical intent, never uses `--yes`, skips only proven-irrelevant gates, and stops at `checks-passed`
 10. Route each no-mistakes finding through `sgt-no-mistakes-finding`: every actionable finding creates or updates separate deduplicated owning-repo td work; correctness/security/data-integrity/test and ask-user work is P1 and remains gated, warning debt is P2, informational debt is P3, and cosmetic/evidence noise is ignored. Never remediate findings in the validation run
@@ -262,5 +271,6 @@ sgt-td-create <project> "<title>" --repos repo1,repo2 --priority P1
 | Worker stuck, no status update | Reconcile recent log events, active child process, exact pane identity, and td handoff; attach with `tmux attach -t sgt` only for evidence. |
 | Worktree creation fails | Check if branch already exists; use `--branch` with a unique name |
 | Fleet state is stale | Run `sgt-watch --sync <task-id>`, then reconcile fleet/worktree files and pane identity. |
-| Need to recover a waiting or orphaned worker | Use `bin/sgt-respond <task-id> <repo> < protected-response.txt`; do not mark it done manually |
+| Need to resume a waiting worker | Use `bin/sgt-wake <task-id> <repo>` for durable wake conditions, or `bin/sgt-respond <task-id> <repo> < protected-response.txt>` for a human-response gate |
+| Need to recover an orphaned worker | Use `bin/sgt-respond <task-id> <repo> < protected-response.txt`; do not mark it done manually |
 | Need to retry a failed repo | Fix the underlying issue, then write both `.sergeant-result` and `.sergeant-status=done` only after every completion gate passes |

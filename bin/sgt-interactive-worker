@@ -103,7 +103,7 @@ _finish() {
         status="orphaned"
       fi
       ;;
-    needs_input|blocked)
+    needs_input|blocked|waiting)
       _sync_state
       rm -f "$REPO_STATE/diagnostic"
       "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
