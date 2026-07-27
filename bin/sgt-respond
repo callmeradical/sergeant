@@ -321,8 +321,8 @@ fi
 # ── Drain admission check for worker relaunch ─────────────────────────────────
 # Drain blocks relaunch (new pane/process) but never blocks response storage or
 # delivery to an already-live pane (handled above). The response was already
-# stored above; on drain, exit non-zero so the caller knows relaunch was
-# deferred while the stored response is preserved for later consumption.
+# stored above; on drain, retain a generation-bound drain_held marker so an
+# explicit undrain can reevaluate this waiting worker exactly once.
 #
 # The drain admission lock is held from the check through the new-window call so
 # a concurrent drain set either waits until the pane is spawned (and the new
@@ -330,7 +330,7 @@ fi
 # and blocks this relaunch.  The response lock is already held; nested locking
 # is safe because drain set never acquires the response lock.
 _SGT_RESPOND_DRAIN_FD=9
-_sgt_respond_drain_project=""
+_sgt_respond_drain_project="${SGT_PROJECT:-}"
 [[ -f "$REPO_DIR/project" ]] && \
   _sgt_respond_drain_project="$(tr -d '\n' < "$REPO_DIR/project" 2>/dev/null || true)"
 if ! _sgt_drain_lock_acquire_fd "$_SGT_RESPOND_DRAIN_FD" 2>/dev/null; then
@@ -347,7 +347,7 @@ if ! _sgt_drain_check_admission_locked "${_sgt_respond_drain_project:-}"; then
   _sgt_response_lock_release 2>/dev/null || true
   _cleanup_response_input
   trap - EXIT
-  echo "sgt-respond: drain is active; response stored for consumption after drain is cleared."
+  echo "sgt-respond: response stored; worker relaunch held by drain [project: ${_sgt_respond_drain_project:-global}]."
   exit 0
 fi
 # Drain admission lock remains held until after new-window (see release below).
@@ -383,20 +383,6 @@ rm -f "$worktree/.sergeant-notification-ack" "$worktree/.sergeant-notification-a
 delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
 _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$delivery_notification_id" response \
   "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
-
-# ── Drain admission check ──────────────────────────────────────────────────
-# Drain prevents new pane starts for matching projects.  The response has
-# already been stored generation-safely; write a drain_held marker so that
-# an explicit undrain can reevaluate this waiting worker exactly once.
-
-if _sgt_is_drained "$SGT_PROJECT"; then
-  _atomic_write "$REPO_DIR/drain_held" "$gate_generation"
-  _sgt_response_lock_release
-  _cleanup_response_input
-  trap - EXIT
-  echo "sgt-respond: response stored; worker relaunch held by drain [project: ${SGT_PROJECT:-global}]."
-  exit 0
-fi
 
 worker_command="$(_sgt_worker_command \
   "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")"
