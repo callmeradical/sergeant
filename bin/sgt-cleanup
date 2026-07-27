@@ -135,6 +135,45 @@ _terminate_process_group() {
   kill -"$signal" -- -"$process_group" 2>/dev/null || true
 }
 
+# _recover_escaped_worker_pgid — return the PGID stored in fleet state by
+# sgt-interactive-worker at startup, after verifying it is safe to use.
+# When the pane has already exited, cleanup has no live process to query for the
+# PGID; this function provides it so the caller's TERM/KILL cycle can reach any
+# escaped descendants that are still running in that process group.
+#
+# Safety guards (mirrors _stop_recorded_validation_group):
+#   • If the recorded worker PID is still alive, verify its start time matches to
+#     rule out PID reuse, then check its PGID matches the recorded value.
+#   • If the recorded worker PID is gone but live processes remain in the group,
+#     only proceed when the worker was its own process-group leader (the standard
+#     configuration for tmux-spawned workers); otherwise refuse with _die so that
+#     destructive cleanup is blocked and diagnostics are preserved.
+_recover_escaped_worker_pgid() {
+  local repo_dir="$1"
+  local recorded_pid recorded_pgid recorded_start actual_start actual_pgid live_pids
+
+  recorded_pid="$(cat "$repo_dir/worker_pid" 2>/dev/null || true)"
+  recorded_pgid="$(cat "$repo_dir/worker_process_group" 2>/dev/null || true)"
+  recorded_start="$(cat "$repo_dir/worker_process_start" 2>/dev/null || true)"
+  [[ -n "$recorded_pgid" ]] || return 0
+
+  if kill -0 "$recorded_pid" 2>/dev/null; then
+    actual_start="$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+    [[ "$actual_start" == "$recorded_start" ]] || \
+      _die "Worker PID was reused; refusing termination of escaped descendants: $recorded_pid"
+    actual_pgid="$(ps -o pgid= -p "$recorded_pid" 2>/dev/null | tr -d ' ' || true)"
+    [[ "$actual_pgid" == "$recorded_pgid" ]] || \
+      _die "Worker process group changed; refusing termination of escaped descendants: $recorded_pid"
+  else
+    live_pids="$(_process_group_pids "$recorded_pgid")"
+    if [[ -n "$live_pids" ]]; then
+      [[ "$recorded_pid" == "$recorded_pgid" ]] || \
+        _die "Worker pane disappeared with unverified detached descendants in process group $recorded_pgid"
+    fi
+  fi
+  printf '%s\n' "$recorded_pgid"
+}
+
 _stop_local_worker() {
   local repo_dir="$1"
   local worktree="$2"
@@ -156,8 +195,10 @@ _stop_local_worker() {
 
       if [[ "$pane_dead" != "0" ]]; then
         echo "  worker pane already stopped: $pane"
+        pane_pgid="$(_recover_escaped_worker_pgid "$repo_dir")"
       elif ! _sgt_pane_identity_matches "$pane" "$repo_dir"; then
         echo "  recorded pane no longer belongs to this worker: $pane"
+        pane_pgid="$(_recover_escaped_worker_pgid "$repo_dir")"
       else
         tree_records="$(_process_tree_records "$pane_pid")"
         tree_pids="$(_recorded_tree_pids "$tree_records")"
@@ -169,6 +210,7 @@ _stop_local_worker() {
       fi
     else
       echo "  worker pane already gone: $pane"
+      pane_pgid="$(_recover_escaped_worker_pgid "$repo_dir")"
     fi
   fi
 
