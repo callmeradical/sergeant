@@ -2218,6 +2218,84 @@ fi
 [[ "$(wc -l < "$TEST_ROOT/evidence-removals")" -eq 1 ]]
 rm "$TEST_ROOT/fake-bin/git"
 
+# Fix 1: first-time cleanup must not bypass ownership even if _configured_repo_root
+# returns a root that does not own the worktree.
+mkdir -p "$TEST_ROOT/fleet/wrong-owner/app"
+init_test_repo "$TEST_ROOT/wrong-owner-repo"
+init_test_repo "$TEST_ROOT/wrong-owner-other"
+git -C "$TEST_ROOT/wrong-owner-repo" worktree add -q -b wrong-owner-worker \
+  "$TEST_ROOT/wrong-owner-sgt-wrong-owner"
+cat > "$TEST_ROOT/config/wrong-owner.yaml" <<EOF
+name: wrong-owner
+repos:
+  - name: app
+    path: $TEST_ROOT/wrong-owner-other
+EOF
+printf 'Project: wrong-owner\n' > "$TEST_ROOT/fleet/wrong-owner/brief.md"
+printf '%s\n' "$TEST_ROOT/wrong-owner-sgt-wrong-owner" > \
+  "$TEST_ROOT/fleet/wrong-owner/app/worktree"
+printf 'git\n' > "$TEST_ROOT/fleet/wrong-owner/app/wt_type"
+printf 'done\n' > "$TEST_ROOT/fleet/wrong-owner/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/wrong-owner/app/result"
+printf 'done\n' > "$TEST_ROOT/wrong-owner-sgt-wrong-owner/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/wrong-owner-sgt-wrong-owner/.sergeant-result"
+set +e
+wrong_owner_output="$(SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" wrong-owner 2>&1)"
+wrong_owner_exit=$?
+set -e
+[[ "$wrong_owner_exit" -ne 0 ]] || {
+  printf 'cleanup accepted mismatched configured owner for first-time cleanup\n' >&2
+  exit 1
+}
+[[ "$wrong_owner_output" == *"configured cleanup owner"* || \
+   "$wrong_owner_output" == *"does not belong"* ]] || {
+  printf 'no ownership diagnostic for wrong-root first-time cleanup: %s\n' \
+    "$wrong_owner_output" >&2
+  exit 1
+}
+
+# Fix 2: absent-worktree cleanup must fail closed when pane/validation_pane
+# metadata is present in fleet state, rather than silently proceeding.
+# State: partial cleanup reached "removed" phase, worktree absent, validation_pane present.
+mkdir -p "$TEST_ROOT/fleet/vp-absent/app"
+init_test_repo "$TEST_ROOT/vp-absent-repo"
+git -C "$TEST_ROOT/vp-absent-repo" worktree add -q -b vp-absent-worker \
+  "$TEST_ROOT/vp-absent-sgt-vp-absent"
+record_retry_owner vp-absent app "$TEST_ROOT/vp-absent-repo"
+printf '%s\n' "$TEST_ROOT/vp-absent-sgt-vp-absent" > \
+  "$TEST_ROOT/fleet/vp-absent/app/worktree"
+printf 'git\n' > "$TEST_ROOT/fleet/vp-absent/app/wt_type"
+printf 'done\n' > "$TEST_ROOT/fleet/vp-absent/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/vp-absent/app/result"
+printf 'done\n' > "$TEST_ROOT/vp-absent-sgt-vp-absent/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/vp-absent-sgt-vp-absent/.sergeant-result"
+# Run partial cleanup to get "removed" phase with absent worktree
+SGT_CLEANUP_FAIL_POINT=phase-publish-reconciled-absent \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" vp-absent >/dev/null 2>&1 || true
+[[ "$(sed -n '1p' "$TEST_ROOT/fleet/vp-absent/app/cleanup-phase")" == "removed" ]]
+[[ ! -d "$TEST_ROOT/vp-absent-sgt-vp-absent" ]]
+# Now add validation_pane metadata and retry — cleanup should fail closed
+printf 'fake-pane-id\n' > "$TEST_ROOT/fleet/vp-absent/app/validation_pane"
+set +e
+vp_absent_output="$(SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" vp-absent 2>&1)"
+vp_absent_exit=$?
+set -e
+[[ "$vp_absent_exit" -ne 0 ]] || {
+  printf 'cleanup succeeded without stopping validation pane when worktree absent\n' >&2
+  exit 1
+}
+[[ "$vp_absent_output" == *"validation"* || "$vp_absent_output" == *"pane"* ]] || {
+  printf 'no pane diagnostic for absent-worktree validation_pane case: %s\n' \
+    "$vp_absent_output" >&2
+  exit 1
+}
+
 mkdir -p "$TEST_ROOT/fleet/task-123/app" "$TEST_ROOT/repo"
 git -C "$TEST_ROOT/repo" init -q
 git -C "$TEST_ROOT/repo" config user.name Test

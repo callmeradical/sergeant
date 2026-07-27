@@ -1578,6 +1578,8 @@ for repo_dir in "$TASK_DIR"/*/; do
   fi
 
   if [[ ! -d "$worktree" ]]; then
+    [[ ! -f "$repo_dir/validation_pane" && ! -L "$repo_dir/validation_pane" ]] || \
+      _die "Validation pane must be stopped before absent-worktree cleanup: $repo_name"
     retry_phase="$(sed -n '1p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     retry_type="$(sed -n '3p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
@@ -1642,6 +1644,8 @@ for repo_dir in "$TASK_DIR"/*/; do
     else
       _die "Cannot resolve configured cleanup owner: $repo_name"
     fi
+    _require_worktree_owner "$retry_root" "$worktree" || \
+      _die "Worktree does not belong to configured cleanup owner: $repo_name"
   fi
   if [[ "$wt_type" == "treehouse" ]]; then
     git_file="$worktree/.git"
