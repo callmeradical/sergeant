@@ -528,7 +528,6 @@ _require_terminal_repos() {
         cmp -s "$repo_dir/result" "$proof_dir/.sergeant-result" || \
           _die "$repo_name worktree result differs from reconciled fleet result"
       fi
-
       if [[ -z "$cleanup_phase" ]]; then
         # Verify the configured owner exists when a project config is available;
         # skip for legacy fleets that predate project-config ownership tracking.
