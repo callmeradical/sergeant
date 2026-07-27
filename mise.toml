@@ -169,6 +169,65 @@ else
 fi
 """
 
+[tasks."test:docker:drain"]
+description = "Run the drain test suite in Docker (system Bash + Bash 3.2 passes)"
+run = """
+#!/usr/bin/env bash
+# Runs the drain test suite in two Docker passes:
+#
+#   Pass 1 — Debian bookworm-slim (system Bash 5.x)
+#     Tests drain state helpers, sgt-drain --status (bug #82), drain lock
+#     functions (bug #81), and sgt-recover drain gating.
+#
+#   Pass 2 — bash:3.2 Alpine image
+#     Re-runs the same tests under Bash 3.2 to confirm Bash 3.2 compatibility.
+#
+# Prerequisites: Docker must be available.  The test image is built locally and
+# not pushed; the bash:3.2 image is pulled from Docker Hub on first use.
+
+set -euo pipefail
+REPO_DIR="$(git -C "${MISE_PROJECT_ROOT:-.}" rev-parse --show-toplevel)"
+
+SGT_BASH32_IMAGE="docker.io/library/bash:3.2@sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89"
+
+pass=0
+fail=0
+
+_docker_pass() {
+  local label="$1" image="$2" cmd="$3"
+  printf '\\n══ %s ══\\n' "$label"
+  if docker run --rm -v "${REPO_DIR}:/repo:ro" "$image" sh -c "$cmd"; then
+    printf '\\n✓  %s passed\\n' "$label"
+    pass=$((pass + 1))
+  else
+    printf '\\n✗  %s FAILED\\n' "$label" >&2
+    fail=$((fail + 1))
+  fi
+}
+
+# Build the Debian test image (cached after first build).
+printf 'Building sergeant-test image...\\n'
+docker build -q -f "${REPO_DIR}/Dockerfile.test" -t sergeant-test "${REPO_DIR}"
+printf 'Built.\\n'
+
+# Pass 1: system Bash (Debian bookworm-slim).
+_docker_pass "System Bash (Debian bookworm-slim)" \
+  sergeant-test \
+  "BASH32='' bash /repo/tests/run-drain-tests.sh"
+
+# Pass 2: Bash 3.2 (official Alpine image).
+# Sets BASH32 to the Alpine Bash binary path and SGT_MINIMUM_BASH for the
+# runtime-bash-test compatibility check.
+_docker_pass "Bash 3.2 (Alpine)" \
+  "$SGT_BASH32_IMAGE" \
+  "BASH32=/usr/local/bin/bash SGT_MINIMUM_BASH=/usr/local/bin/bash bash /repo/tests/run-drain-tests.sh"
+
+printf '\\n═══════════════════════════════════════════════════════════\\n'
+printf ' Docker drain suite: %d passed, %d failed\\n' "$pass" "$fail"
+printf '═══════════════════════════════════════════════════════════\\n'
+[[ $fail -eq 0 ]]
+"""
+
 [tasks.update]
 description = "Pull latest changes from origin and reinstall symlinks"
 run = """
