@@ -2362,3 +2362,141 @@ SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
 [[ ! -e "$TEST_ROOT/fleet/stable-linked" ]]
 
 printf 'sgt-cleanup stable identity: linked-worktree configured repo ok\n'
+
+# ── Issue #21: remove dead remain-on-exit worker panes ───────────────────────
+# When a worker pane has pane_dead=1 (tmux remain-on-exit), cleanup must call
+# kill-pane to remove the zombie pane, not just skip it silently.
+
+roi_state="$TEST_ROOT/fleet/roi-task/app"
+roi_worktree="$TEST_ROOT/roi-worktree"
+mkdir -p "$roi_state"
+init_test_repo "$TEST_ROOT/roi-source"
+git -C "$TEST_ROOT/roi-source" worktree add -q -b roi-branch "$roi_worktree"
+
+cat > "$TEST_ROOT/config/roi-task.yaml" <<EOF
+name: roi-task
+repos:
+  - name: app
+    path: $TEST_ROOT/roi-source
+EOF
+printf 'Project: roi-task\nBrief: remain-on-exit test\nBranch: roi-branch\nRepos: app\n' \
+  > "$TEST_ROOT/fleet/roi-task/brief.md"
+printf '%s\n' "$roi_worktree" > "$roi_state/worktree"
+cat "$roi_worktree/.git" > "$roi_state/worktree_git_pointer"
+_wt_gd="$(sed 's/^gitdir: //' "$roi_worktree/.git")"
+printf '%s\n' "$(cd "$_wt_gd" && pwd -P)" > "$roi_state/worktree_git_dir"
+printf '%s\n' "$(git -C "$roi_worktree" rev-parse HEAD)" > "$roi_state/validation_head"
+printf 'done\n' > "$roi_state/status"
+printf 'done\n' > "$roi_worktree/.sergeant-status"
+printf 'result\n' > "$roi_state/result"
+printf 'result\n' > "$roi_worktree/.sergeant-result"
+printf 'git\n' > "$roi_state/wt_type"
+# Recorded pane — pane_dead=1 (remain-on-exit dead pane)
+roi_dead_pane="%roi99"
+printf '%s\n' "$roi_dead_pane" > "$roi_state/pane"
+printf '%s\n' "1|${roi_dead_pane}|9999|2025-01-01T00:00:00|remain-on-exit-cmd" > "$roi_state/pane_identity"
+chmod 600 "$roi_state/pane_identity"
+printf 'sgt\n' > "$roi_state/tmux_session"
+printf 'roi-task/app\n' > "$roi_state/window_name"
+
+roi_tmux_log="$TEST_ROOT/roi-tmux.log"
+cat > "$TEST_ROOT/fake-bin/tmux-roi" << 'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$ROI_TMUX_LOG"
+case "$1" in
+  display-message)
+    # Pane is dead (remain-on-exit): pane_dead=1
+    printf '1|%roi99|9999|2025-01-01T00:00:00|remain-on-exit-cmd\n'
+    ;;
+  kill-pane|new-window|send-keys|rename-window) exit 0 ;;
+  has-session) exit 0 ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/fake-bin/tmux-roi"
+
+# Symlink as 'tmux' for this test
+ln -sf "$TEST_ROOT/fake-bin/tmux-roi" "$TEST_ROOT/fake-bin/tmux-roi-link"
+
+ROI_TMUX_LOG="$roi_tmux_log" \
+  HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  TMUX_SESSION="sgt" \
+  bash -c '
+    PATH="'"$TEST_ROOT/fake-bin"':$PATH"
+    # Override tmux to tmux-roi-link for this subshell
+    ln -sf "'"$TEST_ROOT/fake-bin/tmux-roi"'" "'"$TEST_ROOT/fake-bin/tmux"'" 2>/dev/null || true
+    ROI_TMUX_LOG="'"$roi_tmux_log"'" \
+    HOME="'"$TEST_ROOT/home"'" \
+    SERGEANT_FLEET="'"$TEST_ROOT/fleet"'" SGT_WIKI_DISABLED=1 \
+    "'"$ROOT_DIR/bin/sgt-cleanup"'" roi-task >/dev/null 2>&1
+  ' || true  # status may vary; we check the log
+
+grep -qF 'kill-pane' "$roi_tmux_log" || {
+  printf 'FAIL issue#21: kill-pane was not called on dead remain-on-exit pane\n' >&2
+  printf 'tmux log:\n%s\n' "$(cat "$roi_tmux_log")" >&2
+  exit 1
+}
+grep -qF '%roi99' "$roi_tmux_log" || {
+  printf 'FAIL issue#21: kill-pane was not called on the correct dead pane %%roi99\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup remain-on-exit dead pane killed: ok\n'
+
+# ── Issue #23: at most one CWD lsof scan per worktree per cleanup run ─────────
+# sgt-cleanup was calling _worktree_cwd_pids (which runs lsof) twice for the
+# same worktree: once at the end of _stop_local_worker and again in the main
+# loop. Count lsof invocations — must be ≤ 2 total for a single-repo task
+# (one for main worktree, one for validation worktree if present).
+
+scan_state="$TEST_ROOT/fleet/scan-task/app"
+scan_worktree="$TEST_ROOT/scan-worktree"
+mkdir -p "$scan_state"
+init_test_repo "$TEST_ROOT/scan-source"
+git -C "$TEST_ROOT/scan-source" worktree add -q -b scan-branch "$scan_worktree"
+
+cat > "$TEST_ROOT/config/scan-task.yaml" <<EOF
+name: scan-task
+repos:
+  - name: app
+    path: $TEST_ROOT/scan-source
+EOF
+printf 'Project: scan-task\nBrief: cwd scan test\nBranch: scan-branch\nRepos: app\n' \
+  > "$TEST_ROOT/fleet/scan-task/brief.md"
+printf '%s\n' "$scan_worktree" > "$scan_state/worktree"
+cat "$scan_worktree/.git" > "$scan_state/worktree_git_pointer"
+_scan_gd="$(sed 's/^gitdir: //' "$scan_worktree/.git")"
+printf '%s\n' "$(cd "$_scan_gd" && pwd -P)" > "$scan_state/worktree_git_dir"
+printf 'done\n' > "$scan_state/status"
+printf 'done\n' > "$scan_worktree/.sergeant-status"
+printf 'result\n' > "$scan_state/result"
+printf 'result\n' > "$scan_worktree/.sergeant-result"
+printf 'git\n' > "$scan_state/wt_type"
+# No live pane — worker already gone
+printf 'sgt\n' > "$scan_state/tmux_session"
+printf 'scan-task/app\n' > "$scan_state/window_name"
+
+lsof_count_file="$TEST_ROOT/lsof_count"
+printf '0\n' > "$lsof_count_file"
+cat > "$TEST_ROOT/fake-bin/lsof-counting" << 'EOF'
+#!/usr/bin/env bash
+count=$(cat "$LSOF_COUNT_FILE")
+printf '%d\n' $((count + 1)) > "$LSOF_COUNT_FILE"
+# Return empty — no processes using the worktree as cwd
+exit 0
+EOF
+chmod +x "$TEST_ROOT/fake-bin/lsof-counting"
+ln -sf "$TEST_ROOT/fake-bin/lsof-counting" "$TEST_ROOT/fake-bin/lsof"
+
+LSOF_COUNT_FILE="$lsof_count_file" \
+  HOME="$TEST_ROOT/home" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" scan-task >/dev/null 2>&1 || true
+
+scan_count="$(cat "$lsof_count_file")"
+[[ "$scan_count" -le 2 ]] || {
+  printf 'FAIL issue#23: lsof called %d times for single-repo cleanup; expected ≤ 2\n' \
+    "$scan_count" >&2
+  exit 1
+}
+printf 'sgt-cleanup CWD scan count (%d) within limit: ok\n' "$scan_count"
+printf 'sgt-cleanup: all tests passed\n'

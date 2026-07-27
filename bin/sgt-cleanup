@@ -202,6 +202,8 @@ _stop_local_worker() {
 
         if [[ "$pane_dead" != "0" ]]; then
           echo "  worker pane already stopped: $pane"
+          # Remove the dead pane so it does not linger with remain-on-exit.
+          tmux kill-pane -t "$pane" 2>/dev/null || true
           pane_pgid="$(_recover_escaped_worker_pgid "$repo_dir")"
         elif ! _sgt_pane_identity_matches "$pane" "$repo_dir"; then
           echo "  recorded pane no longer belongs to this worker: $pane"
@@ -937,9 +939,11 @@ for repo_dir in "$TASK_DIR"/*/; do
     rm -rf "$validation_quarantine"
   fi
 
-  cwd_pids="$(_worktree_cwd_pids "$worktree")"
-  [[ -z "$cwd_pids" ]] || \
-    _die "Processes still have $worktree as their current directory: $(tr '\n' ' ' <<< "$cwd_pids")"
+  # _stop_local_worker already verified no process has $worktree as cwd at the
+  # end of its termination sequence; re-scanning here would be a duplicate lsof
+  # call on the same path (issue #23).  The validation worktree cleanup above
+  # only touches $validation_worktree, so no new process can have acquired
+  # $worktree as its cwd between _stop_local_worker's check and this point.
 
   if [[ -z "$worktree" ]]; then
     echo "  no worktree recorded — skipping"
