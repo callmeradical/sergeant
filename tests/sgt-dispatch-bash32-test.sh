@@ -57,11 +57,11 @@ for f in \
     "$ROOT_DIR"/bin/wiki-daily-digest \
     "$ROOT_DIR"/bin/_sgt-*.sh; do
   [[ -f "$f" ]] || continue
-  if grep -vE '^\s*#' "$f" 2>/dev/null | \
+  if grep -vE '^[[:space:]]*#' "$f" 2>/dev/null | \
      grep -qE '=~[^#$]*([(][^)$]*\|)'; then
     printf 'FAIL: %s contains inline complex alternation in =~ (not portable to macOS Bash 3.2):\n' \
       "$(basename "$f")" >&2
-    grep -vE '^\s*#' "$f" | grep -nE '=~[^#$]*([(][^)$]*\|)' >&2 || true
+    grep -vE '^[[:space:]]*#' "$f" | grep -nE '=~[^#$]*([(][^)$]*\|)' >&2 || true
     inline_fail=1
   fi
 done
