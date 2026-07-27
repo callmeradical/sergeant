@@ -248,6 +248,20 @@ if grep -Eq '^(create|update) ' "$TEST_ROOT/td.log"; then
   printf 'malformed fleet task entered td metadata\n' >&2
   exit 1
 fi
+# Fleet state must be published even for invalid TASK_ID (notify is skipped, state is still written)
+[[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
+grep -Fq 'Review finding routing failed' "$WORKTREE/.sergeant-message"
+
+# _valid_fleet_task_id boundary tests
+ROUTER_TASK_ID="$(printf 'a%.0s' {1..32})" run_router "$TEST_ROOT/findings.json"  # 32 chars: too long
+[[ "$status" -eq 2 && "$output" == *'invalid fleet task'* ]]
+ROUTER_TASK_ID="$(printf 'a%.0s' {1..31})" run_router "$TEST_ROOT/findings.json"  # 31 chars: at limit
+[[ "$status" -eq 2 ]]  # exits 2 due to blocking findings (invalid fleet task NOT the reason)
+[[ "$output" != *'invalid fleet task'* ]]
+ROUTER_TASK_ID='Fleet-1' run_router "$TEST_ROOT/findings.json"  # uppercase: invalid
+[[ "$status" -eq 2 && "$output" == *'invalid fleet task'* ]]
+ROUTER_TASK_ID='fleet--1' run_router "$TEST_ROOT/findings.json"  # double-dash: invalid
+[[ "$status" -eq 2 && "$output" == *'invalid fleet task'* ]]
 
 printf '{"findings":[' > "$TEST_ROOT/malformed.json"
 run_router "$TEST_ROOT/malformed.json"
@@ -301,7 +315,7 @@ for _ in {1..200}; do
   [[ -e "$TEST_ROOT/gate-read-started" ]] && break
   sleep 0.01
 done
-[[ -e "$TEST_ROOT/gate-read-started" ]]
+[[ -e "$TEST_ROOT/gate-read-started" ]] || { printf 'TIMEOUT: gate-read-started not seen\n' >&2; exit 1; }
 GATE_READ_STARTED="$TEST_ROOT/unused" GATE_READ_RELEASE="$TEST_ROOT/unused" \
   PRESERVE_FLEET=1 ROUTER_AXIS=spec run_router "$TEST_ROOT/findings.json" &
 second_router_pid=$!
@@ -332,7 +346,7 @@ for _ in {1..200}; do
   [[ -e "$TEST_ROOT/gate-read-started" ]] && break
   sleep 0.01
 done
-[[ -e "$TEST_ROOT/gate-read-started" ]]
+[[ -e "$TEST_ROOT/gate-read-started" ]] || { printf 'TIMEOUT: gate-read-started not seen (blocking router)\n' >&2; exit 1; }
 PRESERVE_FLEET=1 run_router "$TEST_ROOT/clean.json" &
 clean_router_pid=$!
 for _ in {1..200}; do
@@ -340,7 +354,7 @@ for _ in {1..200}; do
   [[ -e "${lock_waiters[0]}" ]] && break
   sleep 0.01
 done
-[[ -e "${lock_waiters[0]}" ]]
+[[ -e "${lock_waiters[0]}" ]] || { printf 'TIMEOUT: clean router lock-waiter not seen\n' >&2; exit 1; }
 touch "$TEST_ROOT/gate-read-release"
 wait "$blocking_router_pid"
 wait "$clean_router_pid"
@@ -360,7 +374,7 @@ for _ in {1..200}; do
   [[ -e "$TEST_ROOT/review-parse-started" ]] && break
   sleep 0.01
 done
-[[ -e "$TEST_ROOT/review-parse-started" ]]
+[[ -e "$TEST_ROOT/review-parse-started" ]] || { printf 'TIMEOUT: review-parse-started not seen\n' >&2; exit 1; }
 PRESERVE_FLEET=1 run_router "$TEST_ROOT/findings.json"
 [[ "$(cat "$WORKTREE/.sergeant-gate-generation")" == '2' ]]
 touch "$TEST_ROOT/review-parse-release"

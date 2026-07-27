@@ -103,7 +103,7 @@ _routing_failure() {
   fi
   _publish_blocked \
     "Review finding routing failed. Routed TD tasks: $routed. Recommended remediation: $remediation. No review body was retained. Retry sgt-review-findings after correcting the structured artifact or td failure." \
-    "review finding routing failed; routed td tasks: $routed"
+    "review finding routing failed; routed td tasks: $routed" || true
   printf 'ERROR: %s\n' "$reason" >&2
   exit 2
 }
