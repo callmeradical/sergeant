@@ -103,8 +103,13 @@ Load procedures only when their trigger applies:
 | The user asks to ingest, backfill, regenerate, inspect, update, or change the wiki | `wiki` | Capture behavior, digest generation, schema ownership, and index updates |
 | The user asks how to install, configure, use, or troubleshoot Sergeant | `sergeant-help` | Documentation lookup, command verification, prerequisites, and help responses |
 
-If a required skill cannot be loaded, stop before the procedure and report the
-missing skill path; do not reconstruct a partial protocol from memory.
+Sergeant-owned procedural skills live at `skills/<name>/SKILL.md` in this
+repository. For every listed trigger, read that repository-local file directly;
+it is canonical and takes precedence over any same-named registry skill. A
+harness registry may assist loading but its omission does not make the skill
+unavailable. Do not ask the owner or stop solely because the registry omits the
+skill. Only stop and report the exact repository-local path when that file is
+absent or unreadable; do not reconstruct a partial protocol from memory.
 
 ---
 
