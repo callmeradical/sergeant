@@ -153,6 +153,7 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-watch <task-id>` | Monitor dispatched fleet |
 | `bin/sgt-watch --sync-all` | Reconcile all fleet records and stop verified terminal worker panes |
 | `bin/sgt-respond <task-id> <repo>` | Read a response from stdin and resume a waiting worker |
+| `bin/sgt-wake <task-id> <repo>` | Evaluate a waiting worker's durable wake condition and resume it when met |
 | `bin/sgt-recover <task-id> <repo>` | Attempt one bounded stall recovery for a live-but-stalled in-progress worker |
 | `bin/sgt-ack-response <task-id> <repo> <response-id>` | Acknowledge consumed response transport from the exact worker pane |
 | `bin/sgt-validate <task-id> <repo> [--skip <steps>]` | Run coordinator-owned no-mistakes in a split worker-window pane |

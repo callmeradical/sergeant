@@ -7,6 +7,10 @@
 #   sgt-respond with waiting    waiting status is resumable
 #   sgt-interactive-worker      waiting status exits cleanly (not orphaned)
 #   sgt-dispatch brief          prohibits sleep loops; documents waiting/wake
+#
+# shellcheck disable=SC2030,SC2031,SC2034
+# Test cases run in subshells for isolation, and assertions intentionally
+# reference variables through eval strings.
 
 set -euo pipefail
 
