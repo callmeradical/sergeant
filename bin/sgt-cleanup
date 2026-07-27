@@ -729,14 +729,22 @@ _repo_metadata_identity() {
 
 _repo_worktree_identity() {
   local path repo_root="$1"
+  local _wt_tmpfile _wt_ret
+  _wt_tmpfile="$(mktemp)" || return 1
+  git -C "$repo_root" ls-files --others --exclude-standard -z > "$_wt_tmpfile" || {
+    rm -f "$_wt_tmpfile"; return 1
+  }
 
   (
     git -C "$repo_root" diff --no-ext-diff --binary HEAD -- || exit 1
     while IFS= read -r -d '' path; do
       printf 'untracked\n%s\n' "$path"
       git -C "$repo_root" hash-object "$path" || exit 1
-    done < <(git -C "$repo_root" ls-files --others --exclude-standard -z)
+    done < "$_wt_tmpfile"
   ) | git hash-object --stdin
+  _wt_ret=$?
+  rm -f "$_wt_tmpfile"
+  return "$_wt_ret"
 }
 
 _repo_identity() {

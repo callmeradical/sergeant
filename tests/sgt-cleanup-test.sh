@@ -981,6 +981,69 @@ PATH="$TEST_ROOT/fake-bin:$PATH" \
 [[ ! -e "$TEST_ROOT/fleet/present-retry" ]]
 rm "$TEST_ROOT/fake-bin/git"
 
+# Regression for td-777c21: configured repo whose .git is a file (linked worktree)
+# must be accepted by cleanup-owner identity validation during retry.
+# Prior to the fix, _repo_git_dir required .git to be a directory and rejected linked
+# worktrees at cleanup-owner recording and validation time.
+mkdir -p "$TEST_ROOT/fleet/linked-retry/app" \
+  "$TEST_ROOT/linked-retry-sgt-linked-retry"
+init_test_repo "$TEST_ROOT/linked-retry-main"
+git -C "$TEST_ROOT/linked-retry-main" worktree add -q -b linked-retry-configured \
+  "$TEST_ROOT/linked-retry"
+# Guard: .git must be a file (the linked-worktree pointer), not a directory.
+[[ -f "$TEST_ROOT/linked-retry/.git" ]]
+[[ ! -d "$TEST_ROOT/linked-retry/.git" ]]
+record_retry_owner linked-retry app "$TEST_ROOT/linked-retry"
+printf '%s\n' "$TEST_ROOT/linked-retry-sgt-linked-retry" > \
+  "$TEST_ROOT/fleet/linked-retry/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/linked-retry/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/linked-retry/app/result"
+printf 'done\n' > "$TEST_ROOT/linked-retry-sgt-linked-retry/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/linked-retry-sgt-linked-retry/.sergeant-result"
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
+  *" rev-parse "*) "$REAL_GIT" "$@" ;;
+  *" status "*) ;;
+  *" worktree remove "*)
+    printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
+    if [[ -e "${FAKE_GIT_ALLOW:-}" ]]; then
+      rm -rf "${!#}"
+      exit 0
+    fi
+    exit 1
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git"
+# First attempt: worktree removal fails, puts fixture in removing phase.
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/linked-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" linked-retry >/dev/null 2>&1; then
+  printf 'linked-worktree first cleanup should have failed at worktree removal\n' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$TEST_ROOT/linked-retry-removals")" -eq 1 ]]
+[[ -f "$TEST_ROOT/fleet/linked-retry/app/cleanup-owner" ]]
+grep -Fq "$TEST_ROOT/linked-retry" \
+  "$TEST_ROOT/fleet/linked-retry/app/cleanup-owner"
+# Retry: configured linked-worktree owner must be accepted by identity validation.
+touch "$TEST_ROOT/linked-retry-remove-allowed"
+PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_ALLOW="$TEST_ROOT/linked-retry-remove-allowed" \
+  FAKE_GIT_LOG="$TEST_ROOT/linked-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" linked-retry >/dev/null
+[[ "$(wc -l < "$TEST_ROOT/linked-retry-removals")" -eq 2 ]]
+[[ ! -e "$TEST_ROOT/fleet/linked-retry" ]]
+rm "$TEST_ROOT/fake-bin/git"
+
 mkdir -p "$TEST_ROOT/fleet/partial-publication/app" \
   "$TEST_ROOT/partial-publication-sgt-partial-publication"
 init_test_repo "$TEST_ROOT/partial-publication"
