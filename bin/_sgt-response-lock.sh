@@ -98,6 +98,11 @@ _sgt_response_lock_acquire() {
   done
 }
 
+# Release the caller-owned response lock.
+# Success, or discovering that another PID owns the lock, clears
+# _SGT_RESPONSE_LOCK_DIR. If removing our own lock fails, preserve
+# _SGT_RESPONSE_LOCK_DIR and return non-zero so callers can retry without
+# spinning on their own live PID.
 _sgt_response_lock_release() {
   [[ -n "${_SGT_RESPONSE_LOCK_DIR:-}" ]] || return 0
   local owner
@@ -105,7 +110,6 @@ _sgt_response_lock_release() {
   if [[ "$owner" == "$$" ]]; then
     if ! rm -f "$_SGT_RESPONSE_LOCK_DIR"; then
       printf 'ERROR: Could not release response lock: %s\n' "$_SGT_RESPONSE_LOCK_DIR" >&2
-      _SGT_RESPONSE_LOCK_DIR=""
       return 1
     fi
   fi

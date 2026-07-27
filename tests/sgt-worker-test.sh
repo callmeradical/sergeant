@@ -99,6 +99,14 @@ if [[ "${EXPECT_RECOVERY:-0}" == 1 ]]; then
   [[ "$(cat "$NOTIFICATION_STATE/notification_delivered" 2>/dev/null || true)" == "$notification_id" ]] || exit 20
 fi
 printf '%s|%s\n' "$#" "$*" > "$ARG_LOG"
+# Wait for post-notification gate if requested (allows tests to assert on lock state
+# before the agent writes its final status).
+if [[ -n "${POST_NOTIFICATION_WAIT_FILE:-}" ]]; then
+  for _ in $(seq 1 2000); do
+    [[ ! -e "$POST_NOTIFICATION_WAIT_FILE" ]] && break
+    sleep 0.01
+  done
+fi
 if [[ "${FAKE_MODE:-}" == "done" ]]; then
   printf 'done\n' > .sergeant-status
   printf 'https://example.invalid/pr/1\n' > .sergeant-result
@@ -138,7 +146,21 @@ if [[ -n "${FAIL_LEASE_RENAME_FILE:-}" && -e "$FAIL_LEASE_RENAME_FILE" && "$targ
 fi
 exec /usr/bin/mv "$@"
 EOF
-chmod +x "$TEST_ROOT/fake-bin/ln" "$TEST_ROOT/fake-bin/mktemp" "$TEST_ROOT/fake-bin/mv"
+cat > "$TEST_ROOT/fake-bin/rm" <<'EOF'
+#!/usr/bin/env bash
+# Intercept rm -f response.lock during lock-release-failure injection tests.
+for arg in "$@"; do
+  [[ "$arg" == -* ]] && continue  # skip flags
+  if [[ -n "${FAIL_LOCK_RELEASE_FILE:-}" && -e "${FAIL_LOCK_RELEASE_FILE}" && \
+        "$arg" == */response.lock && -f "$arg" ]]; then
+    touch "${FAIL_LOCK_RELEASE_MARKER:-/dev/null}"
+    exit 1
+  fi
+done
+exec /usr/bin/rm "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/ln" "$TEST_ROOT/fake-bin/mktemp" \
+  "$TEST_ROOT/fake-bin/mv" "$TEST_ROOT/fake-bin/rm"
 
 if ARG_LOG="$TEST_ROOT/non-tty.args" \
   "$ROOT_DIR/bin/sgt-interactive-worker" "$TEST_ROOT/done/state" \
@@ -485,5 +507,67 @@ done
 [[ "$(cat "$TEST_ROOT/orphan/state/status")" == "orphaned" ]]
 grep -Fq 'interactive opencode session exited before terminal completion' \
   "$TEST_ROOT/orphan/state/diagnostic"
+
+# ── lock-release-failure scenario ─────────────────────────────────────────────
+# Regression: when rm -f response.lock fails, _SGT_RESPONSE_LOCK_DIR must remain
+# set so the delivery loop retries the release rather than continuing with a
+# live-PID leftover lock.  The worker must eventually release the lock and
+# complete after the failure is cleared.
+
+lr_state="$TEST_ROOT/lr/state"
+lr_worktree="$TEST_ROOT/lr/worktree"
+mkdir -p "$lr_state" "$lr_worktree"
+
+printf 'lr-notification-1\n' > "$lr_state/notification_id"
+printf 'in_progress\n' > "$lr_worktree/.sergeant-status"
+cat > "$lr_worktree/.sergeant-notification" <<'EOF'
+notification_id=lr-notification-1
+kind=initial
+instruction=Read the .sergeant-brief.md file and execute the mission.
+EOF
+
+# Activate the release failure before launching the worker so the first
+# lock-release attempt fails.
+touch "$TEST_ROOT/fail-lock-release"
+# Keep the agent alive after notification delivery so we can assert on the
+# lock state before it writes its final status.
+touch "$TEST_ROOT/lr-agent-gate"
+
+tmux new-window -d -t "$TMUX_SESSION:" -n lr \
+  "env ARG_LOG='$TEST_ROOT/lr.args' EXPECT_NOTIFICATION_COUNT=1 \
+  NOTIFICATION_STATE='$lr_state' SGT_NOTIFICATION_RETRY_INTERVAL=0.01 FAKE_MODE=done \
+  FAIL_LOCK_RELEASE_FILE='$TEST_ROOT/fail-lock-release' \
+  FAIL_LOCK_RELEASE_MARKER='$TEST_ROOT/fail-lock-release-marker' \
+  POST_NOTIFICATION_WAIT_FILE='$TEST_ROOT/lr-agent-gate' \
+  PATH='$TEST_ROOT/fake-bin:$PATH' \
+  '$ROOT_DIR/bin/sgt-interactive-worker' '$lr_state' \
+  '$lr_worktree' '$TEST_ROOT/fake-bin/opencode'"
+target_worker_pane "$lr_state" lr
+
+# Wait for the release failure marker — proves the injection fired.
+for _ in $(seq 1 200); do
+  [[ -e "$TEST_ROOT/fail-lock-release-marker" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/fail-lock-release-marker" ]]
+
+# Lock file MUST still be present: truthful ownership preserved after failed release.
+[[ -f "$lr_state/response.lock" ]]
+
+# Clear the failure.  The worker must now retry and release the lock.
+rm "$TEST_ROOT/fail-lock-release"
+for _ in $(seq 1 200); do
+  [[ ! -f "$lr_state/response.lock" ]] && break
+  sleep 0.01
+done
+[[ ! -f "$lr_state/response.lock" ]]
+
+# Ungate the agent and wait for terminal completion.
+rm "$TEST_ROOT/lr-agent-gate"
+for _ in $(seq 1 200); do
+  [[ -f "$lr_state/result" ]] && break
+  sleep 0.02
+done
+[[ "$(cat "$lr_state/status")" == "done" ]]
 
 printf 'sgt-interactive-worker lifecycle: ok\n'
