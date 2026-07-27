@@ -6,7 +6,13 @@ export TMUX=fixture TMUX_PANE=%11
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
-mkdir -p "$TEST_ROOT/config" "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin" "$TEST_ROOT/repo"
+mkdir -p "$TEST_ROOT/config/callbacks" "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin" "$TEST_ROOT/repo"
+chmod 700 "$TEST_ROOT/config/callbacks" "$TEST_ROOT/fleet"
+cat > "$TEST_ROOT/config/callbacks/hermes-discord" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod 700 "$TEST_ROOT/config/callbacks/hermes-discord"
 
 cat > "$TEST_ROOT/config/test.yaml" <<EOF
 name: test
@@ -131,9 +137,21 @@ git -C "$TEST_ROOT/repo" remote add origin git@github.com:org/test.git
 
 PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/success.log" \
 SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-dispatch" test 'Supervise worker' --repos app >/dev/null
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Supervise worker' --repos app \
+  --origin-profile hermes-discord --correlation-id req-worker-001 >/dev/null
 repo_state="$(printf '%s\n' "$TEST_ROOT"/fleet/*/app)"
 task_id="$(basename "$(dirname "$repo_state")")"
+python3 - "$TEST_ROOT/fleet/$task_id/.callbacks/origin.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+assert json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")) == {
+    "version": "sergeant.callback-origin/v1",
+    "profile": "hermes-discord",
+    "correlation_id": "req-worker-001",
+}
+PY
 [[ "$(cat "$repo_state/pane")" == "%42" ]]
 [[ "$(cat "$repo_state/pane_identity")" == '0|%42|4242|123456|fixture-worker-command' ]]
 [[ "$(cat "$repo_state/agent")" == "${SERGEANT_AGENT:-opencode}" ]]

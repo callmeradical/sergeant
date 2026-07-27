@@ -30,6 +30,19 @@ TASK_DIR="$FLEET_DIR/$TASK_ID"
 OC_INJECT_BIN="$SCRIPT_DIR/oc-inject"
 OC_TARGET_FILE="$TASK_DIR/oc_target.json"
 
+# Durable callbacks are derived from authoritative task state, never this
+# conversational summary. Delivery failure remains queued for a later drain.
+_callback_origin=0
+_callback_error=0
+if [[ -e "$TASK_DIR/.callbacks/origin.json" || -L "$TASK_DIR/.callbacks/origin.json" ]]; then
+  if "$SCRIPT_DIR/sgt-callback" sync "$TASK_ID"; then
+    _callback_origin=1
+  else
+    echo "sgt-notify: durable callback sync failed" >&2
+    _callback_error=1
+  fi
+fi
+
 # ── Prefer oc-inject ─────────────────────────────────────────────────────────
 # oc-inject writes to the OpenCode session directly via the plugin API:
 #  - If session is idle → injects immediately as a new conversation turn
@@ -70,25 +83,38 @@ if [[ "$_notify_done" -eq 0 ]]; then
   PRIMARY_PANE_FILE="$TASK_DIR/primary_pane"
 
   if [[ ! -f "$PRIMARY_PANE_FILE" ]]; then
-    echo "sgt-notify: no primary_pane and no live oc-inject target — cannot notify" >&2
-    exit 1
+    if [[ "$_callback_origin" -eq 1 ]]; then
+      echo "sgt-notify: no coordinator target; durable callback is queued." >&2
+      _notify_done=1
+    else
+      echo "sgt-notify: no primary_pane and no live oc-inject target — cannot notify" >&2
+      exit 1
+    fi
   fi
 
-  PRIMARY_PANE="$(cat "$PRIMARY_PANE_FILE")"
+  PRIMARY_PANE=""
+  [[ ! -f "$PRIMARY_PANE_FILE" ]] || PRIMARY_PANE="$(cat "$PRIMARY_PANE_FILE")"
 
-  if [[ -z "$PRIMARY_PANE" ]]; then
+  if [[ "$_notify_done" -eq 0 && -z "$PRIMARY_PANE" ]]; then
     echo "sgt-notify: primary_pane file empty — cannot notify" >&2
     exit 1
   fi
 
-  if ! tmux has-session -t "${PRIMARY_PANE%%.*}" 2>/dev/null; then
-    echo "sgt-notify: tmux session gone — cannot notify" >&2
-    exit 1
+  if [[ "$_notify_done" -eq 0 ]] && ! tmux has-session -t "${PRIMARY_PANE%%.*}" 2>/dev/null; then
+    if [[ "$_callback_origin" -eq 1 ]]; then
+      echo "sgt-notify: coordinator session gone; durable callback is queued." >&2
+      _notify_done=1
+    else
+      echo "sgt-notify: tmux session gone — cannot notify" >&2
+      exit 1
+    fi
   fi
 
-  echo "sgt-notify: injecting via tmux into pane $PRIMARY_PANE" >&2
-  tmux send-keys -t "$PRIMARY_PANE" "$INJECT" Enter
-  echo "sgt-notify: sent via tmux." >&2
+  if [[ "$_notify_done" -eq 0 ]]; then
+    echo "sgt-notify: injecting via tmux into pane $PRIMARY_PANE" >&2
+    tmux send-keys -t "$PRIMARY_PANE" "$INJECT" Enter
+    echo "sgt-notify: sent via tmux." >&2
+  fi
 fi
 
 # ── Wiki: classify terminal outcomes separately from escalations ─────────────
@@ -122,3 +148,4 @@ _sgt_wiki_write \
   "$_wiki_body"
 
 [[ "$_notify_uncertain" -eq 0 ]] || exit 2
+[[ "$_callback_error" -eq 0 ]] || exit 1

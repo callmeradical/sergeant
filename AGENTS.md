@@ -79,7 +79,8 @@ the operation with ad hoc shell commands.
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
 | `bin/sgt-td-list <project>` | Show td tasks across all repos in a project |
 | `bin/sgt-td-create <project> "<title>" --repos <list>` | Create td tasks in repos (called automatically by sgt-dispatch) |
-| `bin/sgt-notify <task-id> "<message>"` | Inject a worker escalation or completion update into the primary session pane |
+| `bin/sgt-notify <task-id> "<message>"` | Publish worker status to the coordinator and any registered durable callback origin |
+| `bin/sgt-callback <command>` | Register, enqueue, drain, and verify durable profile-bound callback events |
 | `wiki-daily-digest [--date YYYY-MM-DD] [--since DATE] [--dry-run]` | Synthesize opencode session history into `~/wiki/sessions/` |
 
 Use the bare command when it resolves on `PATH`; otherwise run the matching

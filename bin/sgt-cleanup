@@ -42,6 +42,13 @@ FLEET_ROOT="$(cd "$FLEET_DIR" && pwd -P)"
 TASK_ROOT="$(cd "$TASK_DIR" && pwd -P)"
 [[ "$TASK_ROOT" == "$FLEET_ROOT/$TASK_ID" ]] || _die "Invalid task ID: $TASK_ID"
 
+if [[ -e "$TASK_DIR/.callbacks/origin.json" || -L "$TASK_DIR/.callbacks/origin.json" ]]; then
+  "$SCRIPT_DIR/sgt-callback" sync "$TASK_ID"
+  if [[ -z "$FILTER_REPO" ]]; then
+    "$SCRIPT_DIR/sgt-callback" check-acked "$TASK_ID"
+  fi
+fi
+
 _worktree_cwd_pids() {
   local worktree="$1"
   local canonical_worktree current_pid error error_file line output path process_pids
@@ -739,6 +746,10 @@ done
 # Only remove fleet state if cleaning all repos (no FILTER_REPO)
 if [[ -z "$FILTER_REPO" ]]; then
   echo "Removing fleet state: $TASK_DIR"
+
+  if [[ -e "$TASK_DIR/.callbacks/origin.json" || -L "$TASK_DIR/.callbacks/origin.json" ]]; then
+    "$SCRIPT_DIR/sgt-callback" seal "$TASK_ID"
+  fi
 
   # ── Wiki: log the cleanup event ─────────────────────────────────────────
   _result="$(cat "$TASK_DIR/"*"/.sergeant-result" 2>/dev/null | head -1 || true)"

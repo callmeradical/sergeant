@@ -18,6 +18,11 @@ dev_root: ~/Dev   # root of your development directory
 
 All scripts read `dev_root` at startup. Repo `path` values that are not absolute (`/...`) or home-relative (`~/...`) are resolved relative to `dev_root`. This makes project YAMLs portable across machines — change `dev_root` in one place instead of every path in every YAML.
 
+Durable callback implementations are executable profiles under
+`~/.config/sergeant/callbacks/`; they are not project YAML fields and fleet
+requests cannot supply paths. See [Durable Callback Protocol](callbacks.md) for
+the profile ownership/mode rules and versioned consumer schema.
+
 **Path resolution examples** (with `dev_root: ~/Dev`):
 
 | YAML path | Resolved to |

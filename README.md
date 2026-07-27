@@ -95,6 +95,7 @@ Start with the [documentation index](docs/README.md):
 - [Using Sergeant](docs/using-sergeant.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Project YAML schema](docs/schema.md)
+- [Durable callback protocol](docs/callbacks.md)
 
 ## Project YAML
 
@@ -153,6 +154,7 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-validate <task-id> <repo> [--skip <steps>]` | Run coordinator-owned no-mistakes in a split worker-window pane |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees and fleet state |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
+| `bin/sgt-callback <command>` | Operate durable profile-bound callback events |
 
 ### No-mistakes findings
 
@@ -212,6 +214,7 @@ installation and verification.
 
 - [`github.com/marcus/td`](https://github.com/marcus/td) — task CLI, required for brief-based `sgt-dispatch` runs, `sgt-no-mistakes-finding`, and `sgt-td-*` commands; install with `brew install marcus/tap/td` or `go install github.com/marcus/td@latest`
 - `yq` — YAML parser: `brew install yq`
+- `python3` — callback state/protocol runtime and dispatch JSON processing
 - `git` and `gh` — for repo operations and PRs
 - `tmux` — for local agent dispatch
 - `lsof` — for verifying cleanup does not remove an in-use worktree
