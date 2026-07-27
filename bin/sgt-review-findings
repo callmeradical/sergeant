@@ -221,6 +221,7 @@ Recommended remediation: $recommendation
 Branch: $BRANCH
 Head SHA: $HEAD_SHA
 Parent mission: $PARENT_TASK
+Originating fleet task: $TASK_ID
 
 Deduplication key: $marker"
   existing_json="$(td list --all --search "$marker" --json --work-dir "$repo_path" 2>/dev/null)" || _routing_failure "failed to query td tasks"
