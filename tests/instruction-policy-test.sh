@@ -51,6 +51,13 @@ require_text "AGENTS.md" ".sergeant-intent.md"
 require_text "AGENTS.md" "same canonical intent revision"
 require_text "AGENTS.md" "td context <id> --work-dir <owning-repo-path>"
 require_text "AGENTS.md" "ingest, backfill, regenerate, inspect, update, or change the wiki"
+require_text "AGENTS.md" 'Sergeant-owned procedural skills live at `skills/<name>/SKILL.md`'
+require_text "AGENTS.md" "read that repository-local file directly"
+require_text "AGENTS.md" "takes precedence over any same-named registry skill"
+require_text "AGENTS.md" "Do not ask the owner or stop solely because the registry omits"
+require_text "AGENTS.md" "Only stop and report the exact repository-local path"
+require_text "AGENTS.md" "absent or unreadable; do not reconstruct a partial"
+reject_text "AGENTS.md" "If a required skill cannot be loaded, stop before the procedure"
 require_text "README.md" "docs/README.md"
 require_text "README.md" ".sergeant-intent.md"
 require_text "README.md" '--intent-file'
