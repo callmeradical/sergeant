@@ -77,21 +77,21 @@ objectives use the named `standard-isolated` lighter path.
 
 ## Monitor work
 
-Foreground:
+Background (default for OpenCode — returns promptly with monitor identity and control commands):
+
+```bash
+sgt-watch <fleet-task-id> --background
+```
+
+Foreground (for humans and debugging — blocks until the fleet reaches terminal state):
 
 ```bash
 sgt-watch <fleet-task-id>
 ```
 
-For OpenCode, run long watches as managed background processes so the coordinator
-remains available. If managed background execution is unavailable, use
-`sgt-watch --sync <fleet-task-id>` for bounded inspection or run `sgt-watch` in
-a separate terminal or tmux pane. One Linux example is:
-
-```bash
-systemd-run --user --unit="sgt-watch-<fleet-task-id>" --collect \
-  sgt-watch <fleet-task-id>
-```
+If managed background execution is unavailable (no systemd user services), use
+`sgt-watch --sync <fleet-task-id>` for bounded one-shot inspection or run
+`sgt-watch <fleet-task-id>` in a separate terminal or tmux pane.
 
 Inspect all records:
 

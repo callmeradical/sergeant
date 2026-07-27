@@ -119,7 +119,8 @@ _sgt_cleanup_bg() {
 }
 
 # ── Test 1: basic background start ───────────────────────────────────────────
-output="$(SGT_FAKE_INVOCATION_ID="inv-0001" _sgt_watch_bg --background "$task_id")"
+# Spec-canonical form: sgt-watch <task-id> --background
+output="$(SGT_FAKE_INVOCATION_ID="inv-0001" _sgt_watch_bg "$task_id" --background)"
 grep -Fq 'sgt-watch-' <<< "$output"
 grep -Fq 'status:' <<< "$output"
 grep -Fq 'log:' <<< "$output"
@@ -129,7 +130,15 @@ grep -Fq 'stop:' <<< "$output"
 unit="$(cat "$task/monitor_unit")"
 [[ "$unit" == sgt-watch-task-bg-1.service ]]
 [[ "$(cat "$task/monitor_invocation_id")" == "inv-0001" ]]
-printf 'sgt-watch --background basic start: ok\n'
+printf 'sgt-watch <task-id> --background basic start: ok\n'
+
+# Also verify flag-first form works (backward compat)
+rm -f "$task/monitor_unit" "$task/monitor_invocation_id"
+rm -f "$fake_systemd_state/$unit.status" "$fake_systemd_state/$unit.invocation_id"
+output_ff="$(SGT_FAKE_INVOCATION_ID="inv-0001" _sgt_watch_bg --background "$task_id")"
+grep -Fq 'sgt-watch-task-bg-1.service' <<< "$output_ff"
+[[ "$(cat "$task/monitor_invocation_id")" == "inv-0001" ]]
+printf 'sgt-watch --background <task-id> (flag-first) basic start: ok\n'
 
 # ── Test 2: idempotent repeated start (active, same invocation ID) ────────────
 # Unit is still active with same invocation ID — should return promptly, no new start
