@@ -283,11 +283,18 @@ if ! $DRY_RUN; then
 fi
 
 # ── Drain admission check ─────────────────────────────────────────────────────
-# Acquire the same lock as drain creation and reject before td creation,
-# fleet writes, worktree leases, branches, panes, or agent processes.
+# Acquire the drain admission lock and hold it through the first side effect
+# (td task creation), so that a concurrent drain set either waits until
+# admission is committed or wins the lock first and blocks this dispatch.
 # Fails closed: malformed, empty, or expired drain records block dispatch.
+_SGT_DRAIN_ADMISSION_FD=9
 if ! $DRY_RUN; then
-  _sgt_drain_check_admission "$PROJECT"
+  _sgt_drain_lock_acquire_fd "$_SGT_DRAIN_ADMISSION_FD" || \
+    _die "cannot acquire drain admission lock"
+  if ! _sgt_drain_check_admission_locked "$PROJECT"; then
+    _sgt_drain_lock_release_fd "$_SGT_DRAIN_ADMISSION_FD"
+    exit 1
+  fi
 fi
 
 if [[ -z "$TD_TASK_ID" ]] && ! $DRY_RUN; then
@@ -312,6 +319,7 @@ PY
     --json 2>"$TD_CREATE_STDERR")"; then
     td_error="$(cat "$TD_CREATE_STDERR")"
     [[ -n "$td_error" ]] || td_error="$td_results"
+    _sgt_drain_lock_release_fd "$_SGT_DRAIN_ADMISSION_FD"
     _die "td task creation failed: $td_error"
   fi
 
@@ -323,6 +331,13 @@ PY
     done < "$REPO_TD_MAP"
     echo ""
   fi
+fi
+
+# Drain admission lock covers through td task creation.  Release it now that
+# the dispatch has committed its first side effect (or no td creation was
+# needed because --td was supplied).
+if ! $DRY_RUN; then
+  _sgt_drain_lock_release_fd "$_SGT_DRAIN_ADMISSION_FD"
 fi
 
 # ── Generate task ID ──────────────────────────────────────────────────────────
@@ -547,6 +562,7 @@ for rname in "${TARGET_REPOS[@]}"; do
   echo "$BRANCH"    > "$repo_task_dir/branch"
   date +%s          > "$repo_task_dir/dispatch_started"
   echo "dispatched" > "$repo_task_dir/status"
+  echo "$PROJECT"   > "$repo_task_dir/project"
   [[ -n "$wait_for" ]] && echo "$wait_for" > "$repo_task_dir/wait_for"
 
   if $use_treehouse; then
