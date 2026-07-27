@@ -1084,10 +1084,14 @@ _task_project() {
   printf '%s\n' "$project"
 }
 
+_task_project_or_task_id() {
+  _task_project 2>/dev/null || printf '%s\n' "$TASK_ID"
+}
+
 _configured_repo_root() {
   local config_file configured_root i project raw_path repo_count repo_name="$1"
 
-  project="$(_task_project)" || return 1
+  project="$(_task_project_or_task_id)" || return 1
   config_file="$SERGEANT_CONFIG/$project.yaml"
   [[ -f "$config_file" && ! -L "$config_file" ]] || return 1
   _require_yq
@@ -1106,6 +1110,16 @@ _configured_repo_root() {
   printf '%s\n' "$configured_root"
 }
 
+_inferred_repo_root() {
+  local common_dir repo_root="$1"
+
+  common_dir="$(_repo_git_dir "$repo_root" common)" || return 1
+  repo_root="$(dirname "$common_dir")"
+  [[ -d "$repo_root" && ! -L "$repo_root" ]] || return 1
+  [[ "$repo_root" == "$(cd "$repo_root" && pwd -P)" ]] || return 1
+  printf '%s\n' "$repo_root"
+}
+
 _record_cleanup_owner() {
   local evidence_dir="${6:-$1/terminal-evidence}" evidence_identity holder identity \
     output="${5:-$1/cleanup-owner}" project repo_dir="$1" repo_root="$2" \
@@ -1114,7 +1128,7 @@ _record_cleanup_owner() {
   identity="$(_repo_identity "$repo_root" create)" || return 1
   worker_identity="$(_repo_identity "$worktree" exclude-evidence)" || return 1
   evidence_identity="$(_worker_evidence_identity "$evidence_dir")" || return 1
-  project="$(_task_project)" || return 1
+  project="$(_task_project_or_task_id)" || return 1
   holder=""
   [[ "$wt_type" != "treehouse" ]] || \
     holder="$(tr -d '\n' < "$repo_dir/wt_holder" 2>/dev/null || true)"
