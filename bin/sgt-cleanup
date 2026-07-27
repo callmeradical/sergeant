@@ -525,6 +525,7 @@ _require_terminal_repos() {
         cmp -s "$repo_dir/result" "$proof_dir/.sergeant-result" || \
           _die "$repo_name worktree result differs from reconciled fleet result"
       fi
+
       if [[ -z "$cleanup_phase" ]]; then
         # Verify the configured owner exists when a project config is available;
         # skip for legacy fleets that predate project-config ownership tracking.
@@ -542,29 +543,6 @@ _require_terminal_repos() {
           _die "$repo_name: evidence restore failed during removing-state replay; replay aborted"
       fi
     else
-      # Worktree is absent or was never recorded.
-      if [[ -z "$worktree" ]]; then
-        # No worktree was ever assigned -- skip terminal-evidence checks.
-        continue
-      fi
-
-      # Worktree recorded but now absent. If no cleanup-phase exists the worktree
-      # was externally removed before sgt-cleanup ran. Synthesize terminal evidence
-      # from fleet state so absent-worktree replay is idempotent.
-      if [[ -z "$cleanup_phase" ]]; then
-        evidence_dir="$repo_dir/terminal-evidence"
-        if [[ ! -f "$evidence_dir/.sergeant-status" ]]; then
-          mkdir -p "$evidence_dir"
-          cp -p "$repo_dir/status" "$evidence_dir/.sergeant-status" ||\
-            _die "$repo_name cannot synthesize terminal evidence: fleet status missing"
-          [[ ! -f "$repo_dir/result" ]] ||
-            cp -p "$repo_dir/result" "$evidence_dir/.sergeant-result" 2>/dev/null || true
-        fi
-        _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" ||\
-          _die "$repo_name failed to record reconciled-absent for externally removed worktree"
-        cleanup_phase=$'reconciled-absent\n'"$worktree"
-      fi
-
       [[ "$cleanup_phase" != $'removing\n'"$worktree" ]] || \
         _die "Retry owner identity is missing: $repo_name"
       if [[ "$cleanup_phase" == $'reconciled-absent\n'"$worktree" ]]; then
@@ -575,28 +553,48 @@ _require_terminal_repos() {
         _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
           "$owner_type" "$owner_root"
       fi
-      [[ -n "$worktree" && ( \
-        ( ( "$cleanup_phase" == "$partial_phase" || \
-            "$cleanup_phase" == "$removed_phase" || \
-            "$cleanup_phase" == "$removing_phase" ) && \
-          "$retry_type" == "$wt_type" && \
-          ( "$retry_type" == git || "$retry_type" == treehouse ) && \
-          -n "$retry_root" ) || \
-        "$cleanup_phase" == $'reconciled-absent\n'"$worktree" \
-      ) ]] || \
-        _die "$repo_name has no reconciled cleanup phase for its absent worktree"
+      if [[ -z "$cleanup_phase" ]]; then
+        # No cleanup-phase: either terminal-evidence exists (pre-reconciled from a
+        # prior cleanup run or external preservation) or the worktree was externally
+        # removed before any cleanup state was recorded — both allow cleanup to proceed.
+        evidence_dir="$repo_dir/terminal-evidence"
+        if [[ -f "$evidence_dir/.sergeant-status" ]]; then
+          worktree_status="$(tr -d '\n' < "$evidence_dir/.sergeant-status")"
+          [[ "$worktree_status" == "$status" ]] ||
+            _die "$repo_name cleanup evidence differs from reconciled fleet status"
+          if [[ "$status" == "done" ]]; then
+            [[ -s "$evidence_dir/.sergeant-result" ]] ||
+              _die "$repo_name reconciled cleanup evidence requires a result"
+            cmp -s "$repo_dir/result" "$evidence_dir/.sergeant-result" ||
+              _die "$repo_name cleanup evidence differs from reconciled fleet result"
+          fi
+        fi
+        # else: no terminal evidence — externally removed worktree with terminal
+        # fleet state; allow cleanup to proceed (main loop will skip the absent worktree)
+      else
+        [[ -n "$worktree" && ( \
+          ( ( "$cleanup_phase" == "$partial_phase" || \
+              "$cleanup_phase" == "$removed_phase" || \
+              "$cleanup_phase" == "$removing_phase" ) && \
+            "$retry_type" == "$wt_type" && \
+            ( "$retry_type" == git || "$retry_type" == treehouse ) && \
+            -n "$retry_root" ) || \
+          "$cleanup_phase" == $'reconciled-absent\n'"$worktree" \
+        ) ]] || \
+          _die "$repo_name has no reconciled cleanup phase for its absent worktree"
 
-      evidence_dir="$repo_dir/terminal-evidence"
-      [[ -f "$evidence_dir/.sergeant-status" ]] ||
-        _die "$repo_name reconciled cleanup evidence is missing"
-      worktree_status="$(tr -d '\n' < "$evidence_dir/.sergeant-status")"
-      [[ "$worktree_status" == "$status" ]] ||
-        _die "$repo_name cleanup evidence differs from reconciled fleet status"
-      if [[ "$status" == "done" ]]; then
-        [[ -s "$evidence_dir/.sergeant-result" ]] ||
-          _die "$repo_name reconciled cleanup evidence requires a result"
-        cmp -s "$repo_dir/result" "$evidence_dir/.sergeant-result" ||
-          _die "$repo_name cleanup evidence differs from reconciled fleet result"
+        evidence_dir="$repo_dir/terminal-evidence"
+        [[ -f "$evidence_dir/.sergeant-status" ]] ||
+          _die "$repo_name reconciled cleanup evidence is missing"
+        worktree_status="$(tr -d '\n' < "$evidence_dir/.sergeant-status")"
+        [[ "$worktree_status" == "$status" ]] ||
+          _die "$repo_name cleanup evidence differs from reconciled fleet status"
+        if [[ "$status" == "done" ]]; then
+          [[ -s "$evidence_dir/.sergeant-result" ]] ||
+            _die "$repo_name reconciled cleanup evidence requires a result"
+          cmp -s "$repo_dir/result" "$evidence_dir/.sergeant-result" ||
+            _die "$repo_name cleanup evidence differs from reconciled fleet result"
+        fi
       fi
     fi
   done
