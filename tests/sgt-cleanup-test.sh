@@ -1052,4 +1052,204 @@ set -e
 }
 grep -Fq 'recorded pane no longer belongs to this worker' "$TEST_ROOT/recycled-pane.log"
 
+# === PR14-F2 regression: escaped descendant terminated after pane exits ===
+# Scenario: the worker pane exits BEFORE cleanup runs.  The escaped descendant
+# ignores SIGTERM/SIGHUP and has changed CWD away from the worktree, so neither
+# the tree-records (empty — pane dead) nor the CWD guard catch it.
+# sgt-interactive-worker records its PGID in fleet state at startup; cleanup
+# uses that stored PGID to terminate any surviving process-group members.
+
+escaped_state="$TEST_ROOT/fleet/escaped-task/app"
+escaped_worktree="$TEST_ROOT/escaped-repo-sgt-escaped-task"
+mkdir -p "$escaped_state" "$TEST_ROOT/escaped-repo"
+git -C "$TEST_ROOT/escaped-repo" init -q
+git -C "$TEST_ROOT/escaped-repo" config user.name Test
+git -C "$TEST_ROOT/escaped-repo" config user.email test@example.invalid
+touch "$TEST_ROOT/escaped-repo/README.md"
+git -C "$TEST_ROOT/escaped-repo" add README.md
+git -C "$TEST_ROOT/escaped-repo" commit -qm fixture
+git -C "$TEST_ROOT/escaped-repo" worktree add -q -b test-escaped "$escaped_worktree"
+printf '%s\n' "$escaped_worktree" > "$escaped_state/worktree"
+printf 'git\n' > "$escaped_state/wt_type"
+printf 'local-tmux\n' > "$escaped_state/backend"
+printf 'done\n' > "$escaped_state/status"
+printf 'result\n' > "$escaped_state/result"
+printf 'done\n' > "$escaped_worktree/.sergeant-status"
+printf 'result\n' > "$escaped_worktree/.sergeant-result"
+
+# fake-escaped-descendant: ignores SIGTERM+SIGHUP, changes CWD, loops forever.
+cat > "$TEST_ROOT/fake-bin/fake-escaped-descendant" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$ESCAPED_PID_FILE"
+trap '' TERM HUP
+cd /tmp
+while :; do sleep 1; done
+EOF
+chmod +x "$TEST_ROOT/fake-bin/fake-escaped-descendant"
+
+# fake-worker-for-escape: records its own PID/PGID/start to simulate what
+# sgt-interactive-worker does at startup, spawns the escaped descendant, then
+# exits — leaving the descendant running after the pane becomes dead.
+cat > "$TEST_ROOT/fake-bin/fake-worker-for-escape" <<'EOF'
+#!/usr/bin/env bash
+pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')"
+start="$(ps -o lstart= -p "$$" 2>/dev/null | sed 's/^ *//;s/ *$//')"
+printf '%s\n' "$$"    > "$WORKER_STATE_DIR/worker_pid"
+printf '%s\n' "$pgid" > "$WORKER_STATE_DIR/worker_process_group"
+printf '%s\n' "$start" > "$WORKER_STATE_DIR/worker_process_start"
+"$FAKE_ESCAPED_BIN" &
+for _ in $(seq 1 100); do
+  [[ -s "$ESCAPED_PID_FILE" ]] && break
+  sleep 0.01
+done
+exit 0
+EOF
+chmod +x "$TEST_ROOT/fake-bin/fake-worker-for-escape"
+
+escaped_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n escaped \
+  "env WORKER_STATE_DIR='$escaped_state' \
+  FAKE_ESCAPED_BIN='$TEST_ROOT/fake-bin/fake-escaped-descendant' \
+  ESCAPED_PID_FILE='$TEST_ROOT/escaped.pid' \
+  '$TEST_ROOT/fake-bin/fake-worker-for-escape'")"
+printf '%s\n' "$escaped_pane" > "$escaped_state/pane"
+tmux display-message -p -t "$escaped_pane" \
+  '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+  > "$escaped_state/pane_identity"
+chmod 600 "$escaped_state/pane_identity"
+
+# Wait for the escaped descendant's PID file to appear.
+for _ in $(seq 1 200); do
+  [[ -s "$TEST_ROOT/escaped.pid" ]] && break
+  sleep 0.01
+done
+[[ -s "$TEST_ROOT/escaped.pid" ]]
+escaped_pid="$(cat "$TEST_ROOT/escaped.pid")"
+
+# Wait for the worker pane to exit (pane_dead=1) before running cleanup,
+# so cleanup sees a dead pane — exactly the PR14-F2 scenario.
+for _ in $(seq 1 200); do
+  pane_dead_val="$(tmux display-message -p -t "$escaped_pane" '#{pane_dead}' 2>/dev/null || echo 1)"
+  [[ "$pane_dead_val" != "0" ]] && break
+  sleep 0.05
+done
+pane_dead_check="$(tmux display-message -p -t "$escaped_pane" '#{pane_dead}' 2>/dev/null || echo 1)"
+if [[ "$pane_dead_check" == "0" ]]; then
+  printf 'worker pane did not exit before cleanup — PR14-F2 scenario not reproduced\n' >&2
+  exit 1
+fi
+
+# Verify escaped descendant is still alive before cleanup (reproduces the bug).
+if ! kill -0 "$escaped_pid" 2>/dev/null; then
+  printf 'escaped descendant exited before cleanup — PR14-F2 scenario not reproduced\n' >&2
+  exit 1
+fi
+
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" escaped-task >/dev/null
+
+# Escaped descendant must be terminated by cleanup.
+if kill -0 "$escaped_pid" 2>/dev/null; then
+  printf 'escaped descendant still running after cleanup: %s\n' "$escaped_pid" >&2
+  exit 1
+fi
+# Unrelated session must survive.
+tmux has-session -t "$TMUX_SESSION"
+kill -0 "$unrelated_pid"
+[[ ! -e "$escaped_worktree" ]]
+[[ ! -e "$TEST_ROOT/fleet/escaped-task" ]]
+
 printf 'sgt-cleanup worker termination: ok\n'
+printf 'sgt-cleanup escaped-descendant termination (PR14-F2): ok\n'
+
+# === _recover_escaped_worker_pgid safety guards ===
+# AC4: blocked termination must preserve diagnostics and refuse destructive cleanup.
+
+# --- Guard 1: PID reuse (start time mismatch) must block cleanup ---
+# Use the test script's own PID as the "live" recorded worker PID, but
+# write a deliberately wrong start time so the reuse check fires.
+# Use a non-existent worktree path: _require_terminal_repos synthesizes
+# terminal evidence from fleet state so the preflights pass, and the main
+# loop still calls _stop_local_worker where the guard fires.
+pid_reuse_state="$TEST_ROOT/fleet/pid-reuse-task/app"
+pid_reuse_worktree="$TEST_ROOT/pid-reuse-missing-worktree"
+mkdir -p "$pid_reuse_state"
+# worktree path must NOT exist so _require_terminal_repos synthesizes evidence.
+printf '%s\n' "$pid_reuse_worktree" > "$pid_reuse_state/worktree"
+printf 'done\n' > "$pid_reuse_state/status"
+printf 'result\n' > "$pid_reuse_state/result"
+# pane that doesn't exist → hits "pane already gone" → calls _recover_escaped_worker_pgid
+printf '%%99999\n' > "$pid_reuse_state/pane"
+printf '%s\n' "$$" > "$pid_reuse_state/worker_pid"
+printf '%s\n' "$$" > "$pid_reuse_state/worker_process_group"
+printf 'stale start time mismatch\n' > "$pid_reuse_state/worker_process_start"
+
+set +e
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" pid-reuse-task > "$TEST_ROOT/pid-reuse.log" 2>&1
+pid_reuse_status=$?
+set -e
+[[ "$pid_reuse_status" -ne 0 ]] || {
+  printf 'cleanup accepted pid-reuse-task with stale start time\n' >&2; exit 1
+}
+grep -Fq 'Worker PID was reused' "$TEST_ROOT/pid-reuse.log" || {
+  printf 'unexpected pid-reuse error: %s\n' "$(cat "$TEST_ROOT/pid-reuse.log")" >&2; exit 1
+}
+[[ -d "$pid_reuse_state" ]] || {
+  printf 'fleet state was removed despite pid-reuse guard\n' >&2; exit 1
+}
+
+# --- Guard 2: non-group-leader with live group members must block cleanup ---
+# Spawn a process in a new process group (setsid), giving us a live PGID.
+# Record a different dead PID as worker_pid (not the group leader) so the
+# non-group-leader guard fires.
+nonleader_state="$TEST_ROOT/fleet/nonleader-task/app"
+nonleader_worktree="$TEST_ROOT/nonleader-missing-worktree"
+mkdir -p "$nonleader_state"
+# worktree path must NOT exist — same synthesis approach as guard-1.
+printf '%s\n' "$nonleader_worktree" > "$nonleader_state/worktree"
+printf 'done\n' > "$nonleader_state/status"
+printf 'result\n' > "$nonleader_state/result"
+printf '%%99999\n' > "$nonleader_state/pane"
+# Spawn a setsid group in the background; its PID == its PGID (it is the leader).
+setsid bash -c "printf '%s\n' \"\$\$\" > \"$TEST_ROOT/setsid.pid\"; while :; do sleep 1; done" \
+  &>/dev/null &
+for _ in $(seq 1 100); do
+  [[ -s "$TEST_ROOT/setsid.pid" ]] && break
+  sleep 0.01
+done
+[[ -s "$TEST_ROOT/setsid.pid" ]]
+setsid_pid="$(cat "$TEST_ROOT/setsid.pid")"
+setsid_pgid="$(ps -o pgid= -p "$setsid_pid" 2>/dev/null | tr -d ' ')"
+# Obtain a dead PID: spawn a short-lived subshell and capture its PID.
+bash -c 'printf "%s\n" "$$"' > "$TEST_ROOT/dead.pid"
+dead_pid="$(cat "$TEST_ROOT/dead.pid")"
+# Ensure it's dead (it should be, but wait briefly).
+for _ in $(seq 1 20); do
+  kill -0 "$dead_pid" 2>/dev/null || break
+  sleep 0.01
+done
+# worker_pid is the dead PID (not the setsid group leader), worker_process_group
+# is the setsid group (has live members).  Since dead_pid != setsid_pgid, the
+# non-group-leader guard must fire.
+printf '%s\n' "$dead_pid"    > "$nonleader_state/worker_pid"
+printf '%s\n' "$setsid_pgid" > "$nonleader_state/worker_process_group"
+printf 'irrelevant\n'        > "$nonleader_state/worker_process_start"
+
+set +e
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" nonleader-task > "$TEST_ROOT/nonleader.log" 2>&1
+nonleader_status=$?
+set -e
+# Clean up the setsid process regardless of outcome.
+kill "$setsid_pid" 2>/dev/null || true
+[[ "$nonleader_status" -ne 0 ]] || {
+  printf 'cleanup accepted nonleader-task with unverified group descendants\n' >&2; exit 1
+}
+grep -Fq 'unverified detached descendants' "$TEST_ROOT/nonleader.log" || {
+  printf 'unexpected nonleader error: %s\n' "$(cat "$TEST_ROOT/nonleader.log")" >&2; exit 1
+}
+[[ -d "$nonleader_state" ]] || {
+  printf 'fleet state was removed despite non-group-leader guard\n' >&2; exit 1
+}
+
+printf 'sgt-cleanup escaped-descendant blocked-termination guards (PR14-F2 AC4): ok\n'
