@@ -510,10 +510,6 @@ _require_terminal_repos() {
             "dispatch never acquired a worktree or owned live pane" ]] && continue
         _die "$repo_name has no reconciled cleanup phase for its absent worktree"
       fi
-      [[ "$cleanup_phase" != $'removing\n'"$worktree" ]] || \
-        _die "Retry owner identity is missing: $repo_name"
-      pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
-      validation_pane="$(cat "$repo_dir/validation_pane" 2>/dev/null || true)"
       evidence_dir="$repo_dir/terminal-evidence"
       if [[ "$cleanup_phase" == $'reconciled-absent\n'"$worktree" ]]; then
         owner_root="$(sed -n '3p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
@@ -522,24 +518,18 @@ _require_terminal_repos() {
           _die "Retry worktree type changed: $repo_name"
         _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
           "$owner_type" "$owner_root"
-      fi
-      if [[ -n "$worktree" && ( \
-        ( ( "$cleanup_phase" == "$partial_phase" || \
-            "$cleanup_phase" == "$removed_phase" || \
-            "$cleanup_phase" == "$removing_phase" ) && \
-          "$retry_type" == "$wt_type" && \
-          ( "$retry_type" == git || "$retry_type" == treehouse ) && \
-          -n "$retry_root" ) || \
-        "$cleanup_phase" == $'reconciled-absent\n'"$worktree" \
-      ) ]]; then
-        :
+      elif [[ "$cleanup_phase" == "$partial_phase" || \
+              "$cleanup_phase" == "$removed_phase" || \
+              "$cleanup_phase" == "$removing_phase" ]]; then
+        [[ "$retry_type" == "$wt_type" ]] || \
+          _die "Retry worktree type changed: $repo_name"
+        [[ "$retry_type" == git || "$retry_type" == treehouse ]] || \
+          _die "Unsupported retry removal type: $repo_name: $retry_type"
+        [[ -n "$retry_root" ]] || \
+          _die "Retry owner identity is missing: $repo_name"
+        _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+          "$retry_type" "$retry_root"
       else
-        [[ -n "$pane" || -n "$validation_pane" ]] && continue
-        [[ -f "$evidence_dir/.sergeant-status" ]] || \
-          _die "$repo_name has no reconciled cleanup phase for its absent worktree"
-      fi
-
-      if [[ -z "$cleanup_phase" && ! -f "$evidence_dir/.sergeant-status" ]]; then
         _die "$repo_name has no reconciled cleanup phase for its absent worktree"
       fi
 
@@ -906,6 +896,50 @@ _require_worktree_owner() {
   [[ "$configured_instance" == "$worktree_instance" ]]
 }
 
+_repo_owner_identity() {
+  local common_dir common_instance repo_root="$1"
+
+  common_instance="$(_repo_common_instance "$repo_root")" || return 1
+  common_dir="${common_instance%%$'\n'*}"
+  printf '%s\n%s\n' "$common_instance" \
+    "$(_repo_instance_id "$common_dir" "${2:-}")" | \
+    git hash-object --stdin
+}
+
+_worker_checkout_identity() {
+  local config_worktree git_dir git_dir_instance head head_commit index_path raw_index \
+    repo_root="$1" semantic_index worktree_state
+
+  git_dir="$(_repo_git_dir "$repo_root" worktree)" || return 1
+  git_dir_instance="$(stat -c '%d:%i' "$git_dir" 2>/dev/null || \
+    stat -f '%d:%i' "$git_dir" 2>/dev/null)" || return 1
+  head="$(cat "$git_dir/HEAD" 2>/dev/null)" || return 1
+  head_commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)" || return 1
+  index_path="$git_dir/index"
+  [[ ! -L "$index_path" ]] || return 1
+  if [[ -e "$index_path" ]]; then
+    [[ -f "$index_path" && -r "$index_path" ]] || return 1
+    raw_index="$(git hash-object "$index_path")" || return 1
+  else
+    raw_index="absent"
+  fi
+  semantic_index="$(git -C "$repo_root" ls-files --stage -z | \
+    git hash-object --stdin)" || return 1
+  index_path="$git_dir/config.worktree"
+  [[ ! -L "$index_path" ]] || return 1
+  if [[ -e "$index_path" ]]; then
+    [[ -f "$index_path" && -r "$index_path" ]] || return 1
+    config_worktree="$(git hash-object "$index_path")" || return 1
+  else
+    config_worktree="absent"
+  fi
+  worktree_state="$(_repo_worktree_identity "$repo_root" exclude-evidence)" || return 1
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$git_dir" "$git_dir_instance" "$raw_index" "$semantic_index" \
+    "$config_worktree" "$head" "$head_commit" "$worktree_state" | \
+    git hash-object --stdin
+}
+
 _repo_instance_id() {
   local git_common_dir="$1" marker token tmp
 
@@ -1107,8 +1141,8 @@ _record_cleanup_owner() {
     output="${5:-$1/cleanup-owner}" project repo_dir="$1" repo_root="$2" \
     worker_identity worktree="$3" wt_type="$4"
 
-  identity="$(_repo_identity "$repo_root" create)" || return 1
-  worker_identity="$(_repo_identity "$worktree" exclude-evidence)" || return 1
+  identity="$(_repo_owner_identity "$repo_root" create)" || return 1
+  worker_identity="$(_worker_checkout_identity "$worktree")" || return 1
   evidence_identity="$(_worker_evidence_identity "$evidence_dir")" || return 1
   project="$(_task_project_or_task_id)" || return 1
   holder=""
@@ -1216,7 +1250,7 @@ _validate_retry_owner() {
   [[ "$owner_root" == "$expected_root" ]] || \
     _die "Retry owner repo is symlink-aliased: $owner_root"
   if [[ -d "$worktree" ]]; then
-    worker_identity="$(_repo_identity "$worktree" exclude-evidence)" || \
+    worker_identity="$(_worker_checkout_identity "$worktree")" || \
       _die "Retry worker worktree identity is unavailable: $repo_name"
     [[ "$worker_identity" == "$owner_worker_identity" ]] || \
       _die "Retry worker worktree identity changed: $repo_name"
@@ -1231,7 +1265,7 @@ _validate_retry_owner() {
     [[ "$live_evidence_identity" == "$owner_evidence_identity" ]] || \
       _die "Retry worker lifecycle evidence changed: $repo_name"
   fi
-  identity="$(_repo_identity "$expected_root")" || \
+  identity="$(_repo_owner_identity "$expected_root")" || \
     _die "Cannot identify retry owner repo: $repo_name"
   [[ "$identity" == "$owner_identity" ]] || \
     _die "Retry owner repo identity changed: $repo_name"
@@ -1514,12 +1548,6 @@ for repo_dir in "$TASK_DIR"/*/; do
     retry_phase="$(sed -n '1p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     retry_type="$(sed -n '3p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
-    if [[ -z "$retry_root" && "$retry_phase" != "reconciled-absent" ]]; then
-      [[ -f "$repo_dir/terminal-evidence/.sergeant-status" || \
-        -n "$(cat "$repo_dir/pane" 2>/dev/null || true)" || \
-        -n "$(cat "$repo_dir/validation_pane" 2>/dev/null || true)" ]] || \
-        _die "$repo_name has no reconciled cleanup phase for its absent worktree"
-    fi
     if [[ -n "$retry_root" ]]; then
       _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
         "$retry_type" "$retry_root"
@@ -1547,11 +1575,20 @@ for repo_dir in "$TASK_DIR"/*/; do
       trap - EXIT
       continue
     fi
-    echo "  worktree not found or already removed: $worktree"
-    echo ""
-    _sgt_response_lock_release
-    trap - EXIT
-    continue
+    if [[ "$retry_phase" == "reconciled-absent" ]]; then
+      owner_root="$(sed -n '3p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
+      owner_type="$(sed -n '5p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
+      [[ "$owner_type" == "$wt_type" ]] || \
+        _die "Retry worktree type changed: $repo_name"
+      _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+        "$owner_type" "$owner_root"
+      echo "  worktree removal already completed: $worktree"
+      echo ""
+      _sgt_response_lock_release
+      trap - EXIT
+      continue
+    fi
+    _die "$repo_name has no reconciled cleanup phase for its absent worktree"
   fi
 
   retry_phase="$(sed -n '1p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
@@ -1636,7 +1673,8 @@ for repo_dir in "$TASK_DIR"/*/; do
   _record_cleanup_phase "$repo_dir" removed "$worktree" "$wt_type" "$retry_root" || \
     _die "Failed to publish completed worktree removal: $repo_name"
   _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" "$wt_type" "$retry_root"
-  _require_completed_removal_proof "$wt_type" "$retry_root" "$worktree"
+  [[ "$wt_type" != git ]] || \
+    _require_completed_removal_proof "$wt_type" "$retry_root" "$worktree"
   _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
     _die "Failed to publish reconciled cleanup phase: $repo_name"
 
