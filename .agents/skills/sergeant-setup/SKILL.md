@@ -230,7 +230,27 @@ sgt-sync <project>
 Stop and report the first failure with its full output. Do not continue to the
 next command until the previous one succeeds.
 
-## Phase 7: Optional treehouse initialization
+## Phase 7: Task tracking initialization
+
+For each repository in the project, check whether td is initialized:
+
+```bash
+td status --json --work-dir <repo-path>
+```
+
+- **Initialized**: report `[ok]` and continue.
+- **Not initialized**: show the command and ask for consent before running it:
+  ```
+  Initialize td in <repo>? [y/N]
+  td init --work-dir <repo-path>
+  ```
+  Run `td init` only after the user confirms. If consent is declined, report
+  the gap in the Phase 9 summary as `[skipped]` and continue.
+
+Do not initialize td in any repository that was not registered in the current
+project YAML.
+
+## Phase 8: Optional Treehouse initialization
 
 If `treehouse` is present on `PATH`, offer the option:
 
@@ -242,7 +262,7 @@ Run `sgt-treehouse-init <project>` only if the user confirms. Skip silently if
 the user declines or if `treehouse` is not installed. Do not mark setup
 incomplete because Treehouse was skipped.
 
-## Phase 8: Optional Graphify
+## Phase 9: Optional Graphify
 
 If `graphify` is present on `PATH` and the project YAML contains a
 `graphify.output` field, offer:
@@ -254,7 +274,7 @@ Run sgt-graphify <project> now? [y/N]
 Run it only on confirmation. Skip silently on decline. Require both `graph.json`
 and `GRAPH_REPORT.md` at the configured output path after a successful run.
 
-## Phase 9: Verify completion checklist
+## Phase 10: Verify completion checklist
 
 After all phases complete, print a completion summary showing each item as
 `[ok]`, `[skipped]`, or `[issue: <td-id>]`:
@@ -266,6 +286,7 @@ Sergeant setup complete for <project>:
   [ok]      Global config
   [ok]      Project YAML: <project>
   [ok]      Sync and context verification
+  [ok]      Task tracking (td initialized in all repos)
   [skipped] Treehouse (not installed)
   [issue: td-xxx] Graphify (no-mistakes prerequisite missing; see td-xxx)
 ```
