@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# sgt-drain — Set or query drain state for a project or globally.
+#
+# Usage:
+#   sgt-drain --global [--reason <reason>] [--actor <actor>] [--deadline <ISO>]
+#   sgt-drain <project> [--reason <reason>] [--actor <actor>] [--deadline <ISO>]
+#   sgt-drain --status
+#   sgt-drain --status --global
+#   sgt-drain --status <project>
+#
+# A global drain blocks dispatch for every project.
+# A project drain blocks dispatch only for the named project.
+# Drain records are durable and survive process/session restart.
+# Malformed or expired drain records fail closed (no auto-undrain).
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-drain.sh
+source "$SCRIPT_DIR/_sgt-drain.sh"
+
+# ── Parse args ────────────────────────────────────────────────────────────────
+
+GLOBAL=false
+STATUS=false
+TARGET=""
+REASON=""
+ACTOR=""
+DEADLINE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --global)
+      GLOBAL=true
+      shift
+      ;;
+    --status)
+      STATUS=true
+      shift
+      ;;
+    --reason)
+      [[ -n "${2:-}" ]] || { printf 'ERROR: --reason requires a value\n' >&2; exit 1; }
+      REASON="$2"
+      shift 2
+      ;;
+    --actor)
+      [[ -n "${2:-}" ]] || { printf 'ERROR: --actor requires a value\n' >&2; exit 1; }
+      ACTOR="$2"
+      shift 2
+      ;;
+    --deadline)
+      [[ -n "${2:-}" ]] || { printf 'ERROR: --deadline requires a value\n' >&2; exit 1; }
+      DEADLINE="$2"
+      shift 2
+      ;;
+    -*)
+      printf 'ERROR: unknown option: %s\n' "$1" >&2
+      exit 1
+      ;;
+    *)
+      if [[ -z "$TARGET" ]]; then
+        TARGET="$1"
+        shift
+      else
+        printf 'ERROR: unexpected argument: %s\n' "$1" >&2
+        exit 1
+      fi
+      ;;
+  esac
+done
+
+# ── Status mode ───────────────────────────────────────────────────────────────
+
+if $STATUS; then
+  lock_file="$(_sgt_drain_lock_file)"
+  mkdir -p "$(dirname "$lock_file")"
+
+  if $GLOBAL || [[ -z "$TARGET" ]]; then
+    global_file="$(_sgt_drain_global_file)"
+    if _sgt_drain_is_drained "$global_file"; then
+      # Show created_at if available, but never reason or actor (privacy-safe)
+      created_at="$(grep -m1 '^created_at=' "$global_file" 2>/dev/null | cut -d= -f2- || true)"
+      if [[ -n "$created_at" ]]; then
+        printf 'global: drained (since %s)\n' "$created_at"
+      else
+        printf 'global: drained\n'
+      fi
+    else
+      printf 'global: not drained\n'
+    fi
+  fi
+
+  if [[ -n "$TARGET" ]] && ! $GLOBAL; then
+    project_file="$(_sgt_drain_project_file "$TARGET")"
+    if _sgt_drain_is_drained "$project_file"; then
+      created_at="$(grep -m1 '^created_at=' "$project_file" 2>/dev/null | cut -d= -f2- || true)"
+      if [[ -n "$created_at" ]]; then
+        printf '%s: drained (since %s)\n' "$TARGET" "$created_at"
+      else
+        printf '%s: drained\n' "$TARGET"
+      fi
+    else
+      printf '%s: not drained\n' "$TARGET"
+    fi
+  fi
+
+  if ! $GLOBAL && [[ -z "$TARGET" ]]; then
+    # Show all drained projects
+    projects_dir="$(_sgt_drain_dir)/projects"
+    if [[ -d "$projects_dir" ]]; then
+      for proj_drain in "$projects_dir"/*/drain; do
+        [[ -f "$proj_drain" ]] || continue
+        proj="$(basename "$(dirname "$proj_drain")")"
+        if _sgt_drain_is_drained "$proj_drain"; then
+          created_at="$(grep -m1 '^created_at=' "$proj_drain" 2>/dev/null | cut -d= -f2- || true)"
+          if [[ -n "$created_at" ]]; then
+            printf '%s: drained (since %s)\n' "$proj" "$created_at"
+          else
+            printf '%s: drained\n' "$proj"
+          fi
+        fi
+      done
+    fi
+  fi
+
+  exit 0
+fi
+
+# ── Set drain ─────────────────────────────────────────────────────────────────
+
+if $GLOBAL; then
+  [[ -z "$TARGET" ]] || { printf 'ERROR: --global and <project> are mutually exclusive\n' >&2; exit 1; }
+  drain_file="$(_sgt_drain_global_file)"
+  lock_file="$(_sgt_drain_lock_file)"
+  mkdir -p "$(dirname "$lock_file")"
+  (
+    flock -x -w 10 200 || { printf 'ERROR: could not acquire admission lock\n' >&2; exit 1; }
+    _sgt_drain_write "$drain_file" "${REASON:-}" "${ACTOR:-}" "${DEADLINE:-}"
+  ) 200>"$lock_file"
+  printf 'global drain set\n'
+  exit 0
+fi
+
+if [[ -n "$TARGET" ]]; then
+  drain_file="$(_sgt_drain_project_file "$TARGET")"
+  lock_file="$(_sgt_drain_lock_file)"
+  mkdir -p "$(dirname "$lock_file")"
+  (
+    flock -x -w 10 200 || { printf 'ERROR: could not acquire admission lock\n' >&2; exit 1; }
+    _sgt_drain_write "$drain_file" "${REASON:-}" "${ACTOR:-}" "${DEADLINE:-}"
+  ) 200>"$lock_file"
+  printf '%s drain set\n' "$TARGET"
+  exit 0
+fi
+
+printf 'ERROR: specify --global or a project name\n' >&2
+exit 1

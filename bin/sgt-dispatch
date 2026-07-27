@@ -30,6 +30,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_sgt-lib.sh"
 # shellcheck source=bin/_sgt-intent.sh
 source "$SCRIPT_DIR/_sgt-intent.sh"
+# shellcheck source=bin/_sgt-drain.sh
+source "$SCRIPT_DIR/_sgt-drain.sh"
 
 # ── Parse args ───────────────────────────────────────────────────────────────
 
@@ -278,6 +280,14 @@ PY
 if ! $DRY_RUN; then
   [[ -x "$SCRIPT_DIR/sgt-watch" ]] || _die "sgt-watch is required for fleet reconciliation"
   "$SCRIPT_DIR/sgt-watch" --sync-all >/dev/null
+fi
+
+# ── Drain admission check ─────────────────────────────────────────────────────
+# Acquire the same lock as drain creation and reject before td creation,
+# fleet writes, worktree leases, branches, panes, or agent processes.
+# Fails closed: malformed, empty, or expired drain records block dispatch.
+if ! $DRY_RUN; then
+  _sgt_drain_check_admission "$PROJECT"
 fi
 
 if [[ -z "$TD_TASK_ID" ]] && ! $DRY_RUN; then

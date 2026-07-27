@@ -25,6 +25,7 @@ HOME="$TEST_ROOT/home" MISE_PROJECT_ROOT="$ROOT_DIR" \
 
 [[ -L "$TEST_ROOT/bin/sgt-dispatch" ]]
 [[ -L "$TEST_ROOT/bin/_sgt-intent.sh" ]]
+[[ -L "$TEST_ROOT/bin/_sgt-drain.sh" ]]
 [[ ! -e "$TEST_ROOT/bin/oc-inject" ]]
 [[ ! -e "$TEST_ROOT/home/.config/opencode/plugins/oc-inject.js" ]]
 
@@ -34,5 +35,6 @@ status=$?
 set -e
 [[ "$status" -ne 0 && "$output" == *'Usage: sgt-dispatch'* ]]
 [[ "$output" != *'_sgt-intent.sh: No such file'* ]]
+[[ "$output" != *'_sgt-drain.sh: No such file'* ]]
 
 printf 'mise install links runtime helpers: ok\n'
