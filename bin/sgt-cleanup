@@ -545,12 +545,6 @@ _require_terminal_repos() {
           "$expected_evidence_identity" || \
           _die "$repo_name: evidence restore failed during removing-state replay; replay aborted"
       fi
-      if [[ "$restore_after_validation" == true ]]; then
-        expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
-        _restore_worker_evidence "$repo_dir" "$worktree" \
-          "$expected_evidence_identity" || \
-          _die "Failed to restore worker evidence during retry preflight: $repo_name"
-      fi
     else
       if [[ -z "$worktree" ]]; then
         continue
