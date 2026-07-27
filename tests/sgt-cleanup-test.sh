@@ -3527,6 +3527,143 @@ kill -0 "$unrelated_pid"
 [[ ! -e "$escaped_worktree" ]]
 [[ ! -e "$TEST_ROOT/fleet/escaped-task" ]]
 
+# Regression for finding 1: _stop_local_worker must skip the pane kill when
+# pane_identity is absent (fail closed — no kill without independent identity proof).
+# _sgt_pane_identity_matches returns 1 when $repo_dir/pane_identity is missing,
+# so no kill is issued and the worker process must still be alive after cleanup.
+mkdir -p "$TEST_ROOT/fleet/no-pane-id-task/app" \
+  "$TEST_ROOT/no-pane-id-worktree"
+init_test_repo "$TEST_ROOT/no-pane-id-repo"
+record_retry_owner no-pane-id-task app "$TEST_ROOT/no-pane-id-repo"
+git -C "$TEST_ROOT/no-pane-id-repo" worktree add -q -b no-pane-id-wt \
+  "$TEST_ROOT/no-pane-id-worktree"
+printf '%s\n' "$TEST_ROOT/no-pane-id-worktree" > \
+  "$TEST_ROOT/fleet/no-pane-id-task/app/worktree"
+printf 'git\n' > "$TEST_ROOT/fleet/no-pane-id-task/app/wt_type"
+printf 'done\n' > "$TEST_ROOT/fleet/no-pane-id-task/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/no-pane-id-task/app/result"
+printf 'done\n' > "$TEST_ROOT/no-pane-id-worktree/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/no-pane-id-worktree/.sergeant-result"
+no_id_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n no-pane-id \
+  "env WORKER_PID_FILE='$TEST_ROOT/no-pane-id-worker.pid' \
+  AGENT_PID_FILE='$TEST_ROOT/no-pane-id-agent.pid' \
+  FAKE_AGENT='$TEST_ROOT/fake-bin/fake-agent' \
+  '$TEST_ROOT/fake-bin/sgt-interactive-worker' '$TEST_ROOT/fleet/no-pane-id-task/app' \
+  '$TEST_ROOT/no-pane-id-worktree'")"
+# Write pane but intentionally omit pane_identity — _sgt_pane_identity_matches
+# fails when the file is absent, so the kill must be skipped (fail closed).
+printf '%s\n' "$no_id_pane" > "$TEST_ROOT/fleet/no-pane-id-task/app/pane"
+for pid_file in "$TEST_ROOT/no-pane-id-worker.pid" "$TEST_ROOT/no-pane-id-agent.pid"; do
+  for _ in $(seq 1 100); do
+    [[ -s "$pid_file" ]] && break
+    sleep 0.01
+  done
+  [[ -s "$pid_file" ]]
+done
+no_id_worker_pid="$(cat "$TEST_ROOT/no-pane-id-worker.pid")"
+no_id_agent_pid="$(cat "$TEST_ROOT/no-pane-id-agent.pid")"
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" no-pane-id-task >/dev/null
+if ! kill -0 "$no_id_worker_pid" 2>/dev/null; then
+  printf 'pane was killed without pane_identity: kill must be skipped when identity absent\n' >&2
+  exit 1
+fi
+kill "$no_id_worker_pid" "$no_id_agent_pid" 2>/dev/null || true
+tmux kill-pane -t "$no_id_pane" 2>/dev/null || true
+
+# Regression for finding 2: _validate_retry_owner must run BEFORE _stop_local_worker
+# so a rejected removing-phase retry does not kill the pane as a side effect.
+# We set up a real removing phase (with a cleanup-owner recorded by a first run that
+# fails at worktree removal), then change the configured owner so validation rejects it,
+# and assert the worker pane is still alive after cleanup fails.
+mkdir -p "$TEST_ROOT/fleet/removing-val-task/app" \
+  "$TEST_ROOT/removing-val-worktree"
+init_test_repo "$TEST_ROOT/removing-val-repo"
+record_retry_owner removing-val-task app "$TEST_ROOT/removing-val-repo"
+git -C "$TEST_ROOT/removing-val-repo" worktree add -q -b removing-val-wt \
+  "$TEST_ROOT/removing-val-worktree"
+printf '%s\n' "$TEST_ROOT/removing-val-worktree" > \
+  "$TEST_ROOT/fleet/removing-val-task/app/worktree"
+printf 'git\n' > "$TEST_ROOT/fleet/removing-val-task/app/wt_type"
+printf 'done\n' > "$TEST_ROOT/fleet/removing-val-task/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/removing-val-task/app/result"
+printf 'done\n' > "$TEST_ROOT/removing-val-worktree/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/removing-val-worktree/.sergeant-result"
+# First run: fake git fails at worktree removal → sets removing phase + cleanup-owner.
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
+  *" rev-parse "*) "$REAL_GIT" "$@" ;;
+  *" status "*) ;;
+  *" worktree remove "*) exit 1 ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" removing-val-task >/dev/null 2>&1; then
+  printf 'removing-val first run should have failed\n' >&2
+  exit 1
+fi
+[[ -f "$TEST_ROOT/fleet/removing-val-task/app/cleanup-owner" ]]
+[[ "$(sed -n '1p' "$TEST_ROOT/fleet/removing-val-task/app/cleanup-phase")" == "removing" ]]
+rm "$TEST_ROOT/fake-bin/git"
+# Change configured owner to a different repo so validation rejects on the retry.
+init_test_repo "$TEST_ROOT/removing-val-repo-other"
+cat > "$TEST_ROOT/config/removing-val-task.yaml" <<EOF
+name: removing-val-task
+repos:
+  - name: app
+    path: $TEST_ROOT/removing-val-repo-other
+EOF
+removing_val_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n removing-val \
+  "env WORKER_PID_FILE='$TEST_ROOT/removing-val-worker.pid' \
+  AGENT_PID_FILE='$TEST_ROOT/removing-val-agent.pid' \
+  FAKE_AGENT='$TEST_ROOT/fake-bin/fake-agent' \
+  '$TEST_ROOT/fake-bin/sgt-interactive-worker' '$TEST_ROOT/fleet/removing-val-task/app' \
+  '$TEST_ROOT/removing-val-worktree'")"
+printf '%s\n' "$removing_val_pane" > "$TEST_ROOT/fleet/removing-val-task/app/pane"
+# Wait for the pane to be live (pane_dead==0) before capturing pane_identity so
+# that _sgt_pane_identity_matches sees a valid live snapshot and cannot skip the
+# kill due to a dead-pane mismatch instead of _validate_retry_owner rejecting.
+for _ in $(seq 1 100); do
+  [[ "$(tmux display-message -p -t "$removing_val_pane" '#{pane_dead}')" == "0" ]] && break
+  sleep 0.01
+done
+[[ "$(tmux display-message -p -t "$removing_val_pane" '#{pane_dead}')" == "0" ]]
+tmux display-message -p -t "$removing_val_pane" \
+  '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+  > "$TEST_ROOT/fleet/removing-val-task/app/pane_identity"
+chmod 600 "$TEST_ROOT/fleet/removing-val-task/app/pane_identity"
+for pid_file in "$TEST_ROOT/removing-val-worker.pid" "$TEST_ROOT/removing-val-agent.pid"; do
+  for _ in $(seq 1 100); do
+    [[ -s "$pid_file" ]] && break
+    sleep 0.01
+  done
+  [[ -s "$pid_file" ]]
+done
+removing_val_worker_pid="$(cat "$TEST_ROOT/removing-val-worker.pid")"
+removing_val_agent_pid="$(cat "$TEST_ROOT/removing-val-agent.pid")"
+set +e
+SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" removing-val-task \
+  > "$TEST_ROOT/removing-val-cleanup.log" 2>&1
+removing_val_exit=$?
+set -e
+[[ "$removing_val_exit" -ne 0 ]]
+# Validation fails before any destructive step: pane must still be alive.
+if ! kill -0 "$removing_val_worker_pid" 2>/dev/null; then
+  printf 'pane was killed before validation rejected the retry: ordering bug\n' >&2
+  exit 1
+fi
+kill "$removing_val_worker_pid" "$removing_val_agent_pid" 2>/dev/null || true
+tmux kill-pane -t "$removing_val_pane" 2>/dev/null || true
+
 printf 'sgt-cleanup worker termination: ok\n'
 printf 'sgt-cleanup escaped-descendant termination (PR14-F2): ok\n'
 
