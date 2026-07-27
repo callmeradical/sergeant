@@ -455,12 +455,12 @@ EOF
 )
 
 # ── Test 15: atomic attempt recording with backoff fields ───────────────────
-# Expect: wake_attempts file is written atomically and contains attempt count.
+# Expect: wake_attempts, last_attempt_ts, backoff_jitter, next_not_before written.
 
 (
   task="t15"; repo="app"; wt="$TEST_ROOT/t15-wt"
   _setup_waiting_worker "$task" "$repo" "$wt" "not_before" \
-    "not_before=$(( $(date +%s) + 3600 ))"
+    "not_before=$(( $(date +%s) + 3600 ))"$'\n'"backoff_base=60"
 
   fake_bin="$TEST_ROOT/t15-fakebin"
   _setup_fake_respond "$fake_bin"
@@ -470,12 +470,21 @@ EOF
   PATH="$fake_bin:$PATH" \
     "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || exit_code=$?
   _assert "atomic attempt: exits nonzero" "[[ $exit_code -ne 0 ]]"
-  _assert "atomic attempt: wake_attempts file written" \
+  _assert "atomic attempt: wake_attempts written" \
     "[[ -f '$FLEET_DIR/$task/$repo/wake_attempts' ]]"
   attempts="$(cat "$FLEET_DIR/$task/$repo/wake_attempts" 2>/dev/null || echo 0)"
   _assert "atomic attempt: count is 1" "[[ \"\$attempts\" == '1' ]]"
   _assert "atomic attempt: last_attempt_ts written" \
     "[[ -s '$FLEET_DIR/$task/$repo/wake_last_attempt_ts' ]]"
+  _assert "atomic attempt: backoff_jitter written" \
+    "[[ -s '$FLEET_DIR/$task/$repo/wake_backoff_jitter' ]]"
+  _assert "atomic attempt: next_not_before written" \
+    "[[ -s '$FLEET_DIR/$task/$repo/wake_next_not_before' ]]"
+  # next_not_before must be >= last_attempt_ts + backoff_base.
+  last_ts="$(cat "$FLEET_DIR/$task/$repo/wake_last_attempt_ts")"
+  next="$(cat "$FLEET_DIR/$task/$repo/wake_next_not_before")"
+  _assert "atomic attempt: next_not_before includes backoff" \
+    "(( next >= last_ts + 60 ))"
 )
 
 # ── Test 16: sgt-wake requires waiting status ────────────────────────────────
@@ -554,7 +563,32 @@ EOF
     "[[ -s '$FLEET_DIR/$task/$repo/diagnostic' ]]"
 )
 
-# ── Test 19: sgt-interactive-worker exits cleanly with 'waiting' status ──────
+# ── Test 19: deployment condition — sets needs_input (adapter not yet wired) ─
+# Expect: deployment kind is known but auto-evaluation is unsupported → needs_input.
+
+(
+  task="t19a"; repo="app"; wt="$TEST_ROOT/t19a-wt"
+  _setup_waiting_worker "$task" "$repo" "$wt" "deployment" \
+    "app=myapp"$'\n'"env=production"
+
+  fake_bin="$TEST_ROOT/t19a-fakebin"
+  _setup_fake_respond "$fake_bin"
+  export FAKE_RESPOND_CALLS="$TEST_ROOT/t19a-respond-calls"
+
+  exit_code=0
+  PATH="$fake_bin:$PATH" \
+    "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || exit_code=$?
+  _assert "deployment: exits nonzero" "[[ $exit_code -ne 0 ]]"
+  _assert "deployment: sgt-respond not called" \
+    "[[ ! -s '$TEST_ROOT/t19a-respond-calls' ]]"
+  status="$(cat "$FLEET_DIR/$task/$repo/status" 2>/dev/null || true)"
+  _assert "deployment: status set to needs_input" \
+    "[[ \"\$status\" == 'needs_input' ]]"
+  _assert "deployment: message written" \
+    "[[ -s '$wt/.sergeant-message' ]]"
+)
+
+# ── Test 21: sgt-interactive-worker exits cleanly with 'waiting' status ──────
 # Expect: worker exits with 'waiting' (not orphaned), fleet status = waiting.
 
 (
@@ -589,7 +623,7 @@ AGENT
     "[[ ! -s '$repo_state/diagnostic' ]]"
 )
 
-# ── Test 20: sgt-dispatch brief template prohibits sleep and documents waiting
+# ── Test 22: sgt-dispatch brief template prohibits sleep and documents waiting
 # Expect: sgt-dispatch source contains the required wake guidance strings.
 # The brief template is embedded in sgt-dispatch; verify its content directly.
 
