@@ -197,7 +197,7 @@ else
   status="$(cat "$REPO_DIR/status" 2>/dev/null || true)"
 fi
 case "$status" in
-  needs_input|blocked|orphaned) ;;
+  needs_input|blocked|waiting|orphaned) ;;
   *) _die "Worker status '$status' is not waiting or resumable; response was not published" ;;
 esac
 

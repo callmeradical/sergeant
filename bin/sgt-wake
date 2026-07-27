@@ -1,0 +1,394 @@
+#!/usr/bin/env bash
+# sgt-wake — Evaluate a durable wake condition and resume a waiting worker.
+#
+# Usage: sgt-wake <task-id> <repo>
+#
+# Reads .sergeant-wake-condition from the worktree, evaluates the condition
+# using read-only adapters, and either resumes the worker via sgt-respond or
+# records an attempt with backoff information and exits non-zero.
+#
+# Supported condition kinds:
+#   not_before     not_before=<unix_timestamp>
+#   github_check   run_id=<id> check_name=<name>
+#   fleet_dependency  task_id=<id> repo=<repo>
+#   td_dependency  td_task_id=<id>
+#   human_response (sets needs_input immediately; cannot be auto-evaluated)
+#
+# Optional fields (any kind):
+#   deadline=<unix_timestamp>   fails with terminal "failed: deadline exceeded"
+#   max_attempts=<int>          becomes needs_input when exceeded
+#
+# Allowlisted field names (strict; unknown fields cause rejection):
+#   kind, generation, not_before, deadline, max_attempts,
+#   run_id, check_name, task_id, repo, td_task_id
+#
+# Allowlisted field value pattern: [A-Za-z0-9._/:-]*
+# No spaces, no shell metacharacters, no secrets permitted.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
+
+_die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+[[ $# -eq 2 ]] || _die "Usage: sgt-wake <task-id> <repo>"
+
+TASK_ID="$1"
+REPO="$2"
+[[ "$TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid task ID: $TASK_ID"
+[[ "$REPO"    =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid repo: $REPO"
+
+REPO_DIR="$FLEET_DIR/$TASK_ID/$REPO"
+[[ -d "$REPO_DIR" ]] || _die "Repo not found in task $TASK_ID: $REPO"
+
+worktree="$(cat "$REPO_DIR/worktree" 2>/dev/null || true)"
+[[ -n "$worktree" && -d "$worktree" ]] || _die "Worktree unavailable for $TASK_ID/$REPO"
+
+# ── Verify waiting status ────────────────────────────────────────────────────
+
+current_status="$(tr -d '\n' < "$worktree/.sergeant-status" 2>/dev/null || \
+                  cat "$REPO_DIR/status" 2>/dev/null || true)"
+[[ "$current_status" == "waiting" ]] || \
+  _die "Worker $TASK_ID/$REPO is not in waiting state (status: $current_status)"
+
+condition_file="$worktree/.sergeant-wake-condition"
+[[ -f "$condition_file" ]] || \
+  _die "No wake condition file at $condition_file"
+
+# ── Parse and validate wake condition ───────────────────────────────────────
+# Allowlisted field names only; allowlisted value characters only.
+# Secrets (token, password, key, secret, auth, credential) are rejected.
+
+_ALLOWED_FIELDS="kind generation not_before deadline max_attempts run_id check_name task_id repo td_task_id"
+_SECRET_PATTERN='(token|password|key|secret|auth|credential|passwd|apikey|api_key)'
+
+declare -A _COND=()
+
+while IFS='=' read -r field value; do
+  # Strip whitespace.
+  field="${field#"${field%%[![:space:]]*}"}"
+  field="${field%"${field##*[![:space:]]}"}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  [[ -n "$field" ]] || continue
+  # Skip comment lines.
+  [[ "$field" != \#* ]] || continue
+
+  # Reject unknown fields.
+  found=0
+  for allowed in $_ALLOWED_FIELDS; do
+    [[ "$field" == "$allowed" ]] && found=1 && break
+  done
+  [[ "$found" == 1 ]] || {
+    printf 'ERROR: unknown wake-condition field: %s\n' "$field" >&2
+    exit 1
+  }
+
+  # Reject secret-like field names (double-check; belt-and-suspenders).
+  if printf '%s\n' "$field" | grep -qiE "$_SECRET_PATTERN"; then
+    printf 'ERROR: secret-like field rejected: %s\n' "$field" >&2
+    exit 1
+  fi
+
+  # Allowlist value characters: alphanumeric, dot, dash, underscore, slash, colon.
+  if ! [[ "$value" =~ ^[A-Za-z0-9._/:-]*$ ]]; then
+    printf 'ERROR: invalid characters in field value for %s\n' "$field" >&2
+    exit 1
+  fi
+
+  _COND["$field"]="$value"
+done < "$condition_file"
+
+kind="${_COND[kind]:-}"
+generation="${_COND[generation]:-}"
+deadline="${_COND[deadline]:-}"
+max_attempts="${_COND[max_attempts]:-}"
+
+[[ -n "$kind" ]]       || _die "Wake condition is missing required field: kind"
+[[ -n "$generation" ]] || _die "Wake condition is missing required field: generation"
+
+# ── Deduplication lock ───────────────────────────────────────────────────────
+# One sgt-wake evaluation per (repo, generation) at a time.
+
+lock_dir="$REPO_DIR/wake.lock"
+_acquire_lock() {
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    # Lock dir exists — check if owner is still alive.
+    local pid
+    pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      printf 'sgt-wake: another scheduler is active for %s/%s\n' \
+        "$TASK_ID" "$REPO" >&2
+      exit 1
+    fi
+    # Stale lock — reclaim.
+    rm -rf "$lock_dir"
+    mkdir "$lock_dir" 2>/dev/null || {
+      printf 'sgt-wake: lock contention for %s/%s\n' "$TASK_ID" "$REPO" >&2
+      exit 1
+    }
+  fi
+  printf '%s\n' "$$" > "$lock_dir/pid"
+}
+_release_lock() {
+  rm -rf "$lock_dir" 2>/dev/null || true
+}
+trap '_release_lock' EXIT
+
+_acquire_lock
+
+# ── Check deadline ───────────────────────────────────────────────────────────
+
+now="$(date +%s)"
+if [[ -n "$deadline" && "$deadline" =~ ^[0-9]+$ ]]; then
+  if (( now > deadline )); then
+    _set_terminal_failure() {
+      local reason="$1"
+      local tmp
+      tmp="$(mktemp "$REPO_DIR/status.XXXXXX")"
+      printf 'failed: %s\n' "$reason" > "$tmp"
+      mv "$tmp" "$REPO_DIR/status"
+      tmp="$(mktemp "$worktree/.sergeant-status.XXXXXX")"
+      printf 'failed: %s\n' "$reason" > "$tmp"
+      mv "$tmp" "$worktree/.sergeant-status"
+      tmp="$(mktemp "$worktree/.sergeant-message.XXXXXX")"
+      printf 'Wake condition deadline exceeded at %s (kind=%s, generation=%s)\n' \
+        "$deadline" "$kind" "$generation" > "$tmp"
+      mv "$tmp" "$worktree/.sergeant-message"
+    }
+    _set_terminal_failure "deadline exceeded"
+    printf 'sgt-wake: deadline exceeded for %s/%s\n' "$TASK_ID" "$REPO" >&2
+    exit 1
+  fi
+fi
+
+# ── Check max_attempts ───────────────────────────────────────────────────────
+
+attempts_file="$REPO_DIR/wake_attempts"
+current_attempts=0
+if [[ -f "$attempts_file" ]]; then
+  current_attempts="$(cat "$attempts_file" 2>/dev/null || echo 0)"
+  [[ "$current_attempts" =~ ^[0-9]+$ ]] || current_attempts=0
+fi
+
+if [[ -n "$max_attempts" && "$max_attempts" =~ ^[0-9]+$ ]]; then
+  if (( current_attempts >= max_attempts )); then
+    _set_needs_input() {
+      local reason="$1"
+      local tmp
+      tmp="$(mktemp "$REPO_DIR/status.XXXXXX")"
+      printf 'needs_input\n' > "$tmp"
+      mv "$tmp" "$REPO_DIR/status"
+      tmp="$(mktemp "$worktree/.sergeant-status.XXXXXX")"
+      printf 'needs_input\n' > "$tmp"
+      mv "$tmp" "$worktree/.sergeant-status"
+      tmp="$(mktemp "$worktree/.sergeant-message.XXXXXX")"
+      printf '%s\n' "$reason" > "$tmp"
+      mv "$tmp" "$worktree/.sergeant-message"
+    }
+    _set_needs_input "Wake condition max_attempts ($max_attempts) reached for kind=$kind generation=$generation; manual intervention required"
+    printf 'sgt-wake: max_attempts exceeded for %s/%s\n' "$TASK_ID" "$REPO" >&2
+    exit 1
+  fi
+fi
+
+# ── Evaluate condition ───────────────────────────────────────────────────────
+# Returns: 0 = met, 1 = not yet met, 2 = error, 3 = unsupported/needs_input
+
+condition_met=0
+evidence=""
+
+_condition_met() {
+  condition_met=0
+  evidence="$1"
+}
+_condition_not_met() {
+  condition_met=1
+}
+_condition_error() {
+  condition_met=2
+  evidence="$1"
+}
+_condition_unsupported() {
+  condition_met=3
+}
+
+case "$kind" in
+
+  not_before)
+    not_before="${_COND[not_before]:-}"
+    [[ -n "$not_before" && "$not_before" =~ ^[0-9]+$ ]] || \
+      { _condition_error "not_before field missing or invalid"; }
+    if [[ $condition_met -eq 0 ]]; then
+      if (( now >= not_before )); then
+        _condition_met "not_before condition met: now=$now >= not_before=$not_before"
+      else
+        _condition_not_met
+      fi
+    fi
+    ;;
+
+  fleet_dependency)
+    dep_task="${_COND[task_id]:-}"
+    dep_repo="${_COND[repo]:-}"
+    [[ -n "$dep_task" && -n "$dep_repo" ]] || \
+      { _condition_error "fleet_dependency requires task_id and repo fields"; condition_met=2; }
+    if [[ $condition_met -ne 2 ]]; then
+      dep_status="$(cat "$FLEET_DIR/$dep_task/$dep_repo/status" 2>/dev/null || true)"
+      if [[ "$dep_status" == "done" ]]; then
+        _condition_met "fleet_dependency met: $dep_task/$dep_repo is done"
+      else
+        _condition_not_met
+      fi
+    fi
+    ;;
+
+  td_dependency)
+    td_task="${_COND[td_task_id]:-}"
+    [[ -n "$td_task" ]] || \
+      { _condition_error "td_dependency requires td_task_id field"; condition_met=2; }
+    if [[ $condition_met -ne 2 ]]; then
+      if ! command -v td >/dev/null 2>&1; then
+        _condition_error "td command not available for td_dependency adapter"
+        condition_met=2
+      else
+        td_status="$(td status "$td_task" 2>/dev/null || true)"
+        case "${td_status:-}" in
+          done|closed|complete|completed)
+            _condition_met "td_dependency met: $td_task status=$td_status"
+            ;;
+          "")
+            _condition_error "td status returned empty for $td_task"
+            condition_met=2
+            ;;
+          *)
+            _condition_not_met
+            ;;
+        esac
+      fi
+    fi
+    ;;
+
+  github_check)
+    run_id="${_COND[run_id]:-}"
+    check_name="${_COND[check_name]:-}"
+    [[ -n "$run_id" ]] || \
+      { _condition_error "github_check requires run_id field"; condition_met=2; }
+    if [[ $condition_met -ne 2 ]]; then
+      if ! command -v gh >/dev/null 2>&1; then
+        _condition_error "gh CLI not available for github_check adapter"
+        condition_met=2
+      else
+        gh_output="$(gh run view "$run_id" --json conclusion,status 2>/dev/null || true)"
+        if [[ -z "$gh_output" ]]; then
+          _condition_error "gh run view returned empty output for run_id=$run_id"
+          condition_met=2
+        else
+          gh_status="$(printf '%s\n' "$gh_output" | \
+            python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status',''))" \
+            2>/dev/null || true)"
+          gh_conclusion="$(printf '%s\n' "$gh_output" | \
+            python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('conclusion',''))" \
+            2>/dev/null || true)"
+          case "${gh_status:-}" in
+            completed)
+              _condition_met "github_check completed: run_id=$run_id conclusion=$gh_conclusion"
+              ;;
+            "")
+              _condition_error "could not parse gh run status for run_id=$run_id"
+              condition_met=2
+              ;;
+            *)
+              _condition_not_met
+              ;;
+          esac
+        fi
+      fi
+    fi
+    ;;
+
+  human_response)
+    # Human response conditions cannot be auto-evaluated; escalate immediately.
+    _condition_unsupported
+    ;;
+
+  *)
+    _condition_unsupported
+    ;;
+
+esac
+
+# ── Handle unsupported/needs-human ──────────────────────────────────────────
+
+if [[ $condition_met -eq 3 ]]; then
+  _set_needs_input_for_unsupported() {
+    local tmp
+    tmp="$(mktemp "$REPO_DIR/status.XXXXXX")"
+    printf 'needs_input\n' > "$tmp"
+    mv "$tmp" "$REPO_DIR/status"
+    tmp="$(mktemp "$worktree/.sergeant-status.XXXXXX")"
+    printf 'needs_input\n' > "$tmp"
+    mv "$tmp" "$worktree/.sergeant-status"
+    tmp="$(mktemp "$worktree/.sergeant-message.XXXXXX")"
+    printf 'Wake condition kind=%s (generation=%s) cannot be auto-evaluated; manual response required\n' \
+      "$kind" "$generation" > "$tmp"
+    mv "$tmp" "$worktree/.sergeant-message"
+  }
+  _set_needs_input_for_unsupported
+  printf 'sgt-wake: unsupported condition kind=%s for %s/%s\n' \
+    "$kind" "$TASK_ID" "$REPO" >&2
+  exit 1
+fi
+
+# ── Handle adapter error ─────────────────────────────────────────────────────
+
+if [[ $condition_met -eq 2 ]]; then
+  local_diagnostic="$REPO_DIR/diagnostic"
+  tmp_diag="$(mktemp "$REPO_DIR/diagnostic.XXXXXX")"
+  printf 'sgt-wake adapter error: %s (kind=%s generation=%s)\n' \
+    "${evidence:-unknown}" "$kind" "$generation" > "$tmp_diag"
+  mv "$tmp_diag" "$local_diagnostic"
+  # Record attempt before exiting.
+  new_attempts=$(( current_attempts + 1 ))
+  tmp_att="$(mktemp "$REPO_DIR/wake_attempts.XXXXXX")"
+  printf '%s\n' "$new_attempts" > "$tmp_att"
+  mv "$tmp_att" "$attempts_file"
+  tmp_ts="$(mktemp "$REPO_DIR/wake_last_attempt_ts.XXXXXX")"
+  printf '%s\n' "$now" > "$tmp_ts"
+  mv "$tmp_ts" "$REPO_DIR/wake_last_attempt_ts"
+  printf 'sgt-wake: adapter error for %s/%s: %s\n' \
+    "$TASK_ID" "$REPO" "${evidence:-unknown}" >&2
+  exit 1
+fi
+
+# ── Condition not yet met — record attempt and exit ─────────────────────────
+
+if [[ $condition_met -eq 1 ]]; then
+  new_attempts=$(( current_attempts + 1 ))
+  tmp_att="$(mktemp "$REPO_DIR/wake_attempts.XXXXXX")"
+  printf '%s\n' "$new_attempts" > "$tmp_att"
+  mv "$tmp_att" "$attempts_file"
+  tmp_ts="$(mktemp "$REPO_DIR/wake_last_attempt_ts.XXXXXX")"
+  printf '%s\n' "$now" > "$tmp_ts"
+  mv "$tmp_ts" "$REPO_DIR/wake_last_attempt_ts"
+  printf 'sgt-wake: condition not yet met for %s/%s (kind=%s attempt=%s)\n' \
+    "$TASK_ID" "$REPO" "$kind" "$new_attempts" >&2
+  exit 1
+fi
+
+# ── Condition met — resume via sgt-respond ───────────────────────────────────
+
+resume_msg="Wake condition met (kind=$kind generation=$generation): $evidence. Resume the mission from the durable worker state and apply the wake evidence."
+
+if ! command -v sgt-respond >/dev/null 2>&1; then
+  sgt_respond="$SCRIPT_DIR/sgt-respond"
+else
+  sgt_respond="sgt-respond"
+fi
+
+printf '%s\n' "$resume_msg" | \
+  SERGEANT_FLEET="$FLEET_DIR" "$sgt_respond" "$TASK_ID" "$REPO"
+
+printf 'sgt-wake: resumed %s/%s (kind=%s generation=%s)\n' \
+  "$TASK_ID" "$REPO" "$kind" "$generation"
