@@ -46,24 +46,14 @@ done
 if $GLOBAL; then
   [[ -z "$TARGET" ]] || { printf 'ERROR: --global and <project> are mutually exclusive\n' >&2; exit 1; }
   drain_file="$(_sgt_drain_global_file)"
-  lock_file="$(_sgt_drain_lock_file)"
-  mkdir -p "$(dirname "$lock_file")"
-  (
-    flock -x -w 10 200 || { printf 'ERROR: could not acquire admission lock\n' >&2; exit 1; }
-    _sgt_drain_clear "$drain_file"
-  ) 200>"$lock_file"
+  _sgt_drain_with_lock "_sgt_drain_clear \"$drain_file\""
   printf 'global drain cleared\n'
   exit 0
 fi
 
 if [[ -n "$TARGET" ]]; then
   drain_file="$(_sgt_drain_project_file "$TARGET")"
-  lock_file="$(_sgt_drain_lock_file)"
-  mkdir -p "$(dirname "$lock_file")"
-  (
-    flock -x -w 10 200 || { printf 'ERROR: could not acquire admission lock\n' >&2; exit 1; }
-    _sgt_drain_clear "$drain_file"
-  ) 200>"$lock_file"
+  _sgt_drain_with_lock "_sgt_drain_clear \"$drain_file\""
   printf '%s drain cleared\n' "$TARGET"
   exit 0
 fi

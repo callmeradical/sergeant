@@ -11,7 +11,9 @@
 # A global drain blocks dispatch for every project.
 # A project drain blocks dispatch only for the named project.
 # Drain records are durable and survive process/session restart.
-# Malformed or expired drain records fail closed (no auto-undrain).
+# Malformed drain files fail closed (dispatch stays blocked).
+# The optional --deadline field is stored metadata for operator reference;
+# drains persist until explicit undrain regardless of deadline.
 
 set -euo pipefail
 
@@ -70,38 +72,34 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── Status mode ───────────────────────────────────────────────────────────────
+# Reads drain state under the admission lock for consistency.
+# Output is privacy-safe: shows drained/not-drained and creation date only.
+
+_print_drain_status() {
+  local label="$1" drain_file="$2"
+  if _sgt_drain_is_drained "$drain_file"; then
+    created_at="$(_sgt_drain_read_field "$drain_file" created_at)"
+    if [[ -n "$created_at" ]]; then
+      printf '%s: drained (since %s)\n' "$label" "$created_at"
+    else
+      printf '%s: drained\n' "$label"
+    fi
+  else
+    printf '%s: not drained\n' "$label"
+  fi
+}
 
 if $STATUS; then
-  lock_file="$(_sgt_drain_lock_file)"
-  mkdir -p "$(dirname "$lock_file")"
-
   if $GLOBAL || [[ -z "$TARGET" ]]; then
-    global_file="$(_sgt_drain_global_file)"
-    if _sgt_drain_is_drained "$global_file"; then
-      # Show created_at if available, but never reason or actor (privacy-safe)
-      created_at="$(grep -m1 '^created_at=' "$global_file" 2>/dev/null | cut -d= -f2- || true)"
-      if [[ -n "$created_at" ]]; then
-        printf 'global: drained (since %s)\n' "$created_at"
-      else
-        printf 'global: drained\n'
-      fi
-    else
-      printf 'global: not drained\n'
-    fi
+    _sgt_drain_with_lock "
+      _print_drain_status global \"$(_sgt_drain_global_file)\"
+    " || true
   fi
 
   if [[ -n "$TARGET" ]] && ! $GLOBAL; then
-    project_file="$(_sgt_drain_project_file "$TARGET")"
-    if _sgt_drain_is_drained "$project_file"; then
-      created_at="$(grep -m1 '^created_at=' "$project_file" 2>/dev/null | cut -d= -f2- || true)"
-      if [[ -n "$created_at" ]]; then
-        printf '%s: drained (since %s)\n' "$TARGET" "$created_at"
-      else
-        printf '%s: drained\n' "$TARGET"
-      fi
-    else
-      printf '%s: not drained\n' "$TARGET"
-    fi
+    _sgt_drain_with_lock "
+      _print_drain_status \"$TARGET\" \"$(_sgt_drain_project_file "$TARGET")\"
+    " || true
   fi
 
   if ! $GLOBAL && [[ -z "$TARGET" ]]; then
@@ -111,14 +109,9 @@ if $STATUS; then
       for proj_drain in "$projects_dir"/*/drain; do
         [[ -f "$proj_drain" ]] || continue
         proj="$(basename "$(dirname "$proj_drain")")"
-        if _sgt_drain_is_drained "$proj_drain"; then
-          created_at="$(grep -m1 '^created_at=' "$proj_drain" 2>/dev/null | cut -d= -f2- || true)"
-          if [[ -n "$created_at" ]]; then
-            printf '%s: drained (since %s)\n' "$proj" "$created_at"
-          else
-            printf '%s: drained\n' "$proj"
-          fi
-        fi
+        _sgt_drain_with_lock "
+          _print_drain_status \"$proj\" \"$proj_drain\"
+        " || true
       done
     fi
   fi
@@ -131,24 +124,14 @@ fi
 if $GLOBAL; then
   [[ -z "$TARGET" ]] || { printf 'ERROR: --global and <project> are mutually exclusive\n' >&2; exit 1; }
   drain_file="$(_sgt_drain_global_file)"
-  lock_file="$(_sgt_drain_lock_file)"
-  mkdir -p "$(dirname "$lock_file")"
-  (
-    flock -x -w 10 200 || { printf 'ERROR: could not acquire admission lock\n' >&2; exit 1; }
-    _sgt_drain_write "$drain_file" "${REASON:-}" "${ACTOR:-}" "${DEADLINE:-}"
-  ) 200>"$lock_file"
+  _sgt_drain_with_lock "_sgt_drain_write \"$drain_file\" \"${REASON:-}\" \"${ACTOR:-}\" \"${DEADLINE:-}\""
   printf 'global drain set\n'
   exit 0
 fi
 
 if [[ -n "$TARGET" ]]; then
   drain_file="$(_sgt_drain_project_file "$TARGET")"
-  lock_file="$(_sgt_drain_lock_file)"
-  mkdir -p "$(dirname "$lock_file")"
-  (
-    flock -x -w 10 200 || { printf 'ERROR: could not acquire admission lock\n' >&2; exit 1; }
-    _sgt_drain_write "$drain_file" "${REASON:-}" "${ACTOR:-}" "${DEADLINE:-}"
-  ) 200>"$lock_file"
+  _sgt_drain_with_lock "_sgt_drain_write \"$drain_file\" \"${REASON:-}\" \"${ACTOR:-}\" \"${DEADLINE:-}\""
   printf '%s drain set\n' "$TARGET"
   exit 0
 fi

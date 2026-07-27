@@ -369,13 +369,16 @@ set -e
 
 printf 'test12 expired deadline fails closed: ok\n'
 
-# ── Test 13: race — drain wins, zero side effects (td rollback correct) ────────
+# ── Test 13: sequential ordering — drain wins: dispatch has zero side effects ──
+# Proves: when drain is active before dispatch, dispatch is rejected and
+# produces zero side effects (no td tasks, no fleet dirs, no worktrees).
+# This covers the AC7 "drain wins" ordering deterministically.
 
 reset_state
-run_drain test --reason "race test" --actor "test"
+run_drain test --reason "ordering test drain wins" --actor "test"
 
 set +e
-run_dispatch test "Race test" --repos app 2>/dev/null
+run_dispatch test "Should be blocked" --repos app 2>/dev/null
 dispatch_exit=$?
 set -e
 
@@ -392,21 +395,24 @@ fleet_dirs="$(find "$fleet_dir" -mindepth 2 -name status 2>/dev/null | wc -l | t
 [[ "$fleet_dirs" -eq 0 ]] || \
   { printf 'FAIL test13: fleet dirs created despite drain (count=%s)\n' "$fleet_dirs" >&2; exit 1; }
 
-printf 'test13 race drain wins zero side effects: ok\n'
+printf 'test13 ordering drain-wins zero side effects: ok\n'
 
-# ── Test 14: dispatch wins — drain set afterward blocks only next dispatch ─────
+# ── Test 14: sequential ordering — dispatch wins: drain set afterward ──────────
+# Proves: when dispatch commits admission before drain is set, the dispatch
+# completes successfully. Drain set afterward blocks only subsequent dispatches.
+# This covers the AC7 "dispatch commits before drain" ordering deterministically.
 
 reset_state
 
-# First dispatch succeeds (no drain active)
-run_dispatch test "Dispatch wins" --repos app > /dev/null
+# Dispatch succeeds (no drain active at admission time)
+run_dispatch test "Dispatch commits first" --repos app > /dev/null
 
-# Now set drain
-run_drain test --reason "after-dispatch" --actor "test"
+# Set drain after dispatch committed admission
+run_drain test --reason "set after dispatch" --actor "test"
 
-# Second dispatch is blocked
+# Subsequent dispatch is now blocked
 set +e
-run_dispatch test "Should be blocked" --repos app 2>/dev/null
+run_dispatch test "This one should be blocked" --repos app 2>/dev/null
 second_exit=$?
 set -e
 
@@ -418,7 +424,65 @@ first_fleet_dirs="$(find "$fleet_dir" -mindepth 2 -name status 2>/dev/null | wc 
 [[ "$first_fleet_dirs" -gt 0 ]] || \
   { printf 'FAIL test14: first dispatch should have created fleet state\n' >&2; exit 1; }
 
-printf 'test14 dispatch wins drain set afterward blocks next only: ok\n'
+printf 'test14 ordering dispatch-wins drain blocks next only: ok\n'
+
+# ── Test 16: concurrent admission lock race ───────────────────────────────────
+# Proves: the flock-based lock ensures that a concurrent drain and dispatch
+# produce exactly one of the two legal outcomes (both run simultaneously,
+# exactly one wins the lock first).
+#
+# Strategy: spawn drain and dispatch concurrently; wait for both to finish;
+# then assert exactly one of the two legal outcomes:
+#   a) dispatch committed: fleet dir exists, no drain record (or drain is set
+#      but dispatch already completed)
+#   b) drain won: drain record exists, fleet dir absent
+#
+# Note: because the admission check fires before td creation, if drain wins,
+# zero td tasks or fleet dirs are created. If dispatch wins, it completes
+# before drain takes effect.
+
+reset_state
+
+dispatch_result_file="$TEST_ROOT/dispatch.exit"
+
+# Run drain concurrently with dispatch
+(
+  # Small delay makes the race window real — either process may win the lock
+  sleep 0.05
+  run_drain test --reason "concurrent race" --actor "race-test" 2>/dev/null
+) &
+drain_pid=$!
+
+(
+  run_dispatch test "Concurrent dispatch" --repos app 2>/dev/null
+  printf '%s\n' "$?" > "$dispatch_result_file"
+) &
+dispatch_pid=$!
+
+wait "$drain_pid" || true
+wait "$dispatch_pid" || true
+
+dispatch_result=1
+[[ -f "$dispatch_result_file" ]] && dispatch_result="$(cat "$dispatch_result_file")"
+
+drain_exists=false
+[[ -f "$drain_dir/projects/test/drain" ]] && drain_exists=true
+
+fleet_count="$(find "$fleet_dir" -mindepth 2 -name status 2>/dev/null | wc -l | tr -d ' ')"
+
+if [[ "$dispatch_result" -eq 0 ]]; then
+  # Dispatch won the lock first — fleet dir must exist
+  [[ "$fleet_count" -gt 0 ]] || \
+    { printf 'FAIL test16: dispatch reported success but no fleet dir exists\n' >&2; exit 1; }
+  printf 'test16 concurrent race dispatch-won outcome verified: ok\n'
+else
+  # Drain won the lock first — fleet dir must be absent
+  $drain_exists || \
+    { printf 'FAIL test16: drain reported win but no drain file exists\n' >&2; exit 1; }
+  [[ "$fleet_count" -eq 0 ]] || \
+    { printf 'FAIL test16: drain won but fleet dirs exist (count=%s)\n' "$fleet_count" >&2; exit 1; }
+  printf 'test16 concurrent race drain-won outcome verified: ok\n'
+fi
 
 # ── Test 15: status output is privacy-safe ────────────────────────────────────
 
