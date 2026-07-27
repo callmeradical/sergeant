@@ -74,17 +74,14 @@ _run "drain state, --status, lock helpers" \
   bash "$ROOT_DIR/tests/sgt-drain-test.sh"
 
 # sgt-respond drain admission gating (bug #81 — orphaned worker resume).
-# NOTE: sgt-respond-drain-test.sh has a pre-existing worktree-setup gap that
-# causes it to fail on origin/main before our fix; the assertion it exercises
-# (drain_held marker written when drain active) requires full worktree ownership
-# state that the test does not configure.  Tracked separately; skip here.
-_skip "sgt-respond drain admission (sgt-respond-drain-test.sh)" \
-  "pre-existing test setup gap (tracked, not a regression from #81/#82 fix)"
-
-# Validate bug #81 fix directly: the three lock helper functions must be
-# callable and behave correctly.  This is covered by slice 12 of sgt-drain-test.sh
-# (already run above) which exercises _sgt_drain_lock_acquire_fd,
-# _sgt_drain_check_admission_locked, and _sgt_drain_lock_release_fd explicitly.
+# This test validates the full flow: drain active → response stored → drain_held
+# written → no new-window call.  Requires git for worktree ownership setup.
+if command -v git >/dev/null 2>&1; then
+  _run "sgt-respond drain admission" \
+    bash "$ROOT_DIR/tests/sgt-respond-drain-test.sh"
+else
+  _skip "sgt-respond drain admission" "git not available in this environment"
+fi
 
 # sgt-recover drain gating (adjacent behaviour; requires git for fixture setup)
 if command -v git >/dev/null 2>&1; then
