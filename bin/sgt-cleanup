@@ -1213,26 +1213,9 @@ for repo_dir in "$TASK_DIR"/*/; do
 
   echo "--- $repo_name (status: $status, type: $wt_type) ---"
 
-  _stop_validation_pane "$repo_dir"
-  _stop_local_worker "$repo_dir" "$worktree"
-
-  validation_worktree="$(cat "$repo_dir/validation_worktree" 2>/dev/null || true)"
-  if [[ -n "$validation_worktree" && -e "$validation_worktree" ]]; then
-    [[ "$validation_worktree" == "${worktree}-validation-${TASK_ID}" ]] || \
-      _die "Validation worktree path is outside the recorded ownership boundary: $validation_worktree"
-    git -C "$validation_worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
-      _die "Validation worktree is not a git checkout: $validation_worktree"
-    validation_cwd_pids="$(_worktree_cwd_pids "$validation_worktree")"
-    [[ -z "$validation_cwd_pids" ]] || \
-      _die "Processes still have $validation_worktree as their current directory: $(tr '\n' ' ' <<< "$validation_cwd_pids")"
-    rm -rf "$validation_worktree"
-  fi
-
-  cwd_pids="$(_worktree_cwd_pids "$worktree")"
-  [[ -z "$cwd_pids" ]] || \
-    _die "Processes still have $worktree as their current directory: $(tr '\n' ' ' <<< "$cwd_pids")"
-
   if [[ -z "$worktree" ]]; then
+    _stop_validation_pane "$repo_dir"
+    _stop_local_worker "$repo_dir" "$worktree"
     echo "  no worktree recorded — skipping"
     echo ""
     _sgt_response_lock_release
@@ -1250,6 +1233,22 @@ for repo_dir in "$TASK_DIR"/*/; do
       _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
         "$retry_type" "$retry_root"
       retry_root="$VALIDATED_RETRY_ROOT"
+    fi
+    # Owner validated (or no retry — read-only path); safe to stop processes.
+    _stop_validation_pane "$repo_dir"
+    _stop_local_worker "$repo_dir" "$worktree"
+    validation_worktree="$(cat "$repo_dir/validation_worktree" 2>/dev/null || true)"
+    if [[ -n "$validation_worktree" && -e "$validation_worktree" ]]; then
+      [[ "$validation_worktree" == "${worktree}-validation-${TASK_ID}" ]] || \
+        _die "Validation worktree path is outside the recorded ownership boundary: $validation_worktree"
+      git -C "$validation_worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
+        _die "Validation worktree is not a git checkout: $validation_worktree"
+      validation_cwd_pids="$(_worktree_cwd_pids "$validation_worktree")"
+      [[ -z "$validation_cwd_pids" ]] || \
+        _die "Processes still have $validation_worktree as their current directory: $(tr '\n' ' ' <<< "$validation_cwd_pids")"
+      rm -rf "$validation_worktree"
+    fi
+    if [[ -n "$retry_root" ]]; then
       if [[ "$retry_phase" == "removed" ]]; then
         _require_completed_removal_proof "$retry_type" "$retry_root" "$worktree"
         _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
@@ -1280,6 +1279,8 @@ for repo_dir in "$TASK_DIR"/*/; do
     continue
   fi
 
+  # Present worktree: validate/configure ownership BEFORE any destructive
+  # operations so a rejected retry has no side effects on pane or validation state.
   retry_phase="$(sed -n '1p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
   retrying_removal=false
   if [[ "$retry_phase" == "removing" ]]; then
@@ -1324,6 +1325,7 @@ for repo_dir in "$TASK_DIR"/*/; do
     [[ "$(dirname "$main_git")" == "$retry_root" ]] || \
       _die "Treehouse lease does not match configured cleanup owner: $repo_name"
   fi
+
 
   if [[ "$retrying_removal" != true ]]; then
     worker_evidence_identity="$(_worker_evidence_identity "$worktree")" || \

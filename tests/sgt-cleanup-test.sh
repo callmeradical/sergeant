@@ -2420,6 +2420,9 @@ worker_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n worker 
   FAKE_AGENT='$TEST_ROOT/fake-bin/fake-agent' \
   '$TEST_ROOT/fake-bin/sgt-worker' '$repo_state' '$worktree'")"
 printf '%s\n' "$worker_pane" > "$repo_state/pane"
+tmux display-message -p -t "$worker_pane" \
+  '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+  > "$repo_state/pane_identity"
 
 for pid_file in "$TEST_ROOT/worker.pid" "$TEST_ROOT/agent.pid"; do
   for _ in $(seq 1 100); do
