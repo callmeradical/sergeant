@@ -1,0 +1,960 @@
+#!/usr/bin/env python3
+"""Durable, profile-bound callback events for Sergeant fleet tasks."""
+
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+from typing import Any, Iterator
+
+
+ORIGIN_VERSION = "sergeant.callback-origin/v1"
+EVENT_VERSION = "sergeant.callback-event/v1"
+STATE_VERSION = "sergeant.callback-state/v1"
+ACK_VERSION = "sergeant.callback-ack/v1"
+EVENT_TYPES = {"needs_input", "blocked", "failed", "done"}
+TASK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+PROFILE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+CORRELATION_RE = re.compile(r"^[a-z][a-z0-9._-]{7,127}$")
+SOURCE_RE = re.compile(r"^[a-z][a-z0-9._:-]{0,127}$")
+SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+LONG_NUMBER_RE = re.compile(r"(?<![0-9])[0-9]{17,20}(?![0-9])")
+SECRET_RE = re.compile(
+    r"(?i)(authorization|api[_-]?key|password|secret|token)\s*[:=]"
+)
+DANGEROUS_PAYLOAD_RE = re.compile(r"[;&|`$<>\\]")
+COMMAND_LINE_RE = re.compile(
+    r"(?im)^[ \t]*(?:#!|bash\b|sh\b|zsh\b|curl\b|wget\b|ssh\b|sudo\b|env\b|"
+    r"rm\b|mv\b|cp\b|chmod\b|chown\b|python[0-9.]*\b|node\b)"
+)
+MAX_PAYLOAD_BYTES = 4096
+MAX_ACK_BYTES = 1024
+
+
+class CallbackError(Exception):
+    pass
+
+
+def fail(message: str) -> None:
+    raise CallbackError(message)
+
+
+def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name, str(default))
+    if not raw.isdigit():
+        fail(f"{name} must be an integer")
+    value = int(raw)
+    if value < minimum or value > maximum:
+        fail(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def utc_timestamp(epoch: int | None = None) -> str:
+    value = time.time() if epoch is None else epoch
+    return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def fleet_root() -> Path:
+    return Path(
+        os.environ.get(
+            "SERGEANT_FLEET", str(Path.home() / ".local/share/sergeant/fleet")
+        )
+    )
+
+
+def callbacks_root() -> Path:
+    configured = os.environ.get("SERGEANT_CALLBACKS")
+    if configured:
+        return Path(configured)
+    config = Path(os.environ.get("SERGEANT_CONFIG", str(Path.home() / ".config/sergeant")))
+    return config / "callbacks"
+
+
+def validate_name(value: str, pattern: re.Pattern[str], label: str) -> None:
+    if not pattern.fullmatch(value):
+        fail(f"invalid {label}")
+
+
+def validate_correlation(value: str) -> None:
+    validate_name(value, CORRELATION_RE, "correlation ID")
+    if LONG_NUMBER_RE.search(value):
+        fail("correlation ID must not contain a platform identifier")
+
+
+def validate_owned_directory(
+    path: Path, label: str, *, writable_ok: bool = False
+) -> None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        fail(f"{label} does not exist")
+    if not stat.S_ISDIR(metadata.st_mode) or path.is_symlink():
+        fail(f"{label} must be a real directory")
+    if metadata.st_uid != os.getuid():
+        fail(f"{label} must be owned by the current user")
+    if not writable_ok and metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        fail(f"{label} must not be group/world writable")
+
+
+def ensure_private_directory(path: Path) -> None:
+    if path.exists() or path.is_symlink():
+        validate_owned_directory(path, str(path))
+        os.chmod(path, 0o700)
+        return
+    path.mkdir(mode=0o700)
+    validate_owned_directory(path, str(path))
+
+
+def task_path(task_id: str) -> Path:
+    validate_name(task_id, TASK_RE, "task ID")
+    root = fleet_root()
+    validate_owned_directory(root, "fleet directory")
+    task = root / task_id
+    validate_owned_directory(task, "task directory", writable_ok=True)
+    return task
+
+
+def callback_path(profile: str) -> Path:
+    validate_name(profile, PROFILE_RE, "callback profile")
+    root = callbacks_root()
+    validate_owned_directory(root, "callbacks directory")
+    path = root / profile
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        fail("callback profile is not installed")
+    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
+        fail("callback profile must be a regular file")
+    if metadata.st_uid != os.getuid():
+        fail("callback profile must be owned by the current user")
+    if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        fail("callback profile must not be group/world writable")
+    if not metadata.st_mode & stat.S_IXUSR:
+        fail("callback profile must be executable by its owner")
+    return path
+
+
+def fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        fsync_directory(path.parent)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def write_json(path: Path, value: dict[str, Any]) -> None:
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    atomic_write(path, (encoded + "\n").encode("utf-8"))
+
+
+def read_regular(
+    path: Path, maximum: int, label: str, required_mode: int | None = None
+) -> bytes:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        fail(f"{label} does not exist")
+    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
+        fail(f"{label} must be a regular file")
+    if metadata.st_uid != os.getuid():
+        fail(f"{label} must be owned by the current user")
+    if required_mode is not None and stat.S_IMODE(metadata.st_mode) != required_mode:
+        fail(f"{label} must have mode {required_mode:o}")
+    if metadata.st_size > maximum:
+        fail(f"{label} is too large")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        current = os.fstat(descriptor)
+        if not stat.S_ISREG(current.st_mode) or current.st_uid != os.getuid():
+            fail(f"unsafe {label}")
+        if required_mode is not None and stat.S_IMODE(current.st_mode) != required_mode:
+            fail(f"{label} must have mode {required_mode:o}")
+        data = os.read(descriptor, maximum + 1)
+        if len(data) > maximum or os.read(descriptor, 1):
+            fail(f"{label} is too large")
+        return data
+    finally:
+        os.close(descriptor)
+
+
+def read_text(
+    path: Path, maximum: int, label: str, required_mode: int | None = None
+) -> str:
+    try:
+        return read_regular(path, maximum, label, required_mode).decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        fail(f"{label} is not valid UTF-8")
+
+
+def read_json(path: Path, label: str, maximum: int = 16384) -> dict[str, Any]:
+    try:
+        value = json.loads(read_text(path, maximum, label, 0o600))
+    except json.JSONDecodeError:
+        fail(f"{label} is not valid JSON")
+    if not isinstance(value, dict):
+        fail(f"{label} must be a JSON object")
+    return value
+
+
+def callback_directory(task: Path, create: bool = False) -> Path:
+    path = task / ".callbacks"
+    if create:
+        ensure_private_directory(path)
+    else:
+        validate_owned_directory(path, "task callback directory")
+    return path
+
+
+def load_origin(task: Path, absent_ok: bool = False) -> dict[str, str] | None:
+    path = task / ".callbacks/origin.json"
+    if not path.exists() and not path.is_symlink() and absent_ok:
+        return None
+    origin = read_json(path, "callback origin")
+    expected = {"version", "profile", "correlation_id"}
+    if set(origin) != expected or origin.get("version") != ORIGIN_VERSION:
+        fail("unsupported callback origin schema")
+    profile = origin.get("profile")
+    correlation = origin.get("correlation_id")
+    if not isinstance(profile, str) or not isinstance(correlation, str):
+        fail("invalid callback origin schema")
+    validate_name(profile, PROFILE_RE, "callback profile")
+    validate_correlation(correlation)
+    return {
+        "version": ORIGIN_VERSION,
+        "profile": profile,
+        "correlation_id": correlation,
+    }
+
+
+class TaskLock:
+    def __init__(self, callback_dir: Path):
+        self.path = callback_dir / "lock"
+        self.handle: Any = None
+
+    def __enter__(self) -> "TaskLock":
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(self.path, flags, 0o600)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+            os.close(descriptor)
+            fail("unsafe callback lock")
+        os.fchmod(descriptor, 0o600)
+        self.handle = os.fdopen(descriptor, "r+")
+        fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        self.handle.close()
+
+
+def validate_payload_bytes(data: bytes) -> str:
+    if len(data) > MAX_PAYLOAD_BYTES:
+        fail(f"payload exceeds {MAX_PAYLOAD_BYTES} bytes")
+    try:
+        payload = data.decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        fail("payload is not valid UTF-8")
+    payload = payload.rstrip("\n")
+    if not payload:
+        fail("payload must not be empty")
+    if len(payload.splitlines()) > 16:
+        fail("payload has too many lines")
+    if any(ord(character) < 32 and character not in "\n\t" for character in payload):
+        fail("payload contains control characters")
+    if DANGEROUS_PAYLOAD_RE.search(payload):
+        fail("payload contains prohibited command metacharacters")
+    if COMMAND_LINE_RE.search(payload):
+        fail("payload contains a command-like line")
+    if SECRET_RE.search(payload):
+        fail("payload contains secret-shaped data")
+    if LONG_NUMBER_RE.search(payload):
+        fail("payload contains a platform identifier")
+    return payload
+
+
+def events_directory(callback_dir: Path) -> Path:
+    path = callback_dir / "events"
+    ensure_private_directory(path)
+    return path
+
+
+def existing_event_for_source(events: Path, source_hash: str) -> dict[str, Any] | None:
+    for directory in sorted(events.iterdir()):
+        if not directory.is_dir() or directory.is_symlink():
+            continue
+        event_path = directory / "event.json"
+        if not event_path.exists():
+            continue
+        event = read_json(event_path, "callback event")
+        if event.get("source_hash") == source_hash:
+            return event
+    return None
+
+
+def validate_event(
+    event: dict[str, Any], origin: dict[str, str], directory: Path
+) -> None:
+    expected = {
+        "version",
+        "idempotency_key",
+        "correlation_id",
+        "profile",
+        "generation",
+        "type",
+        "payload",
+        "source_hash",
+        "created_at",
+    }
+    if set(event) != expected or event.get("version") != EVENT_VERSION:
+        fail("unsupported callback event schema")
+    generation = event.get("generation")
+    if not isinstance(generation, int) or generation < 1 or generation > 99999999:
+        fail("invalid callback event generation")
+    if directory.name != f"{generation:08d}":
+        fail("callback event directory does not match generation")
+    if event.get("correlation_id") != origin["correlation_id"]:
+        fail("callback event correlation does not match origin")
+    if event.get("profile") != origin["profile"]:
+        fail("callback event profile does not match origin")
+    expected_key = f"sgt-callback-v1:{origin['correlation_id']}:{generation}"
+    if event.get("idempotency_key") != expected_key:
+        fail("invalid callback idempotency key")
+    if event.get("type") not in EVENT_TYPES:
+        fail("invalid callback event type")
+    payload = event.get("payload")
+    if not isinstance(payload, str):
+        fail("invalid callback payload")
+    validate_payload_bytes(payload.encode("utf-8"))
+    source_hash = event.get("source_hash")
+    if not isinstance(source_hash, str) or not SHA256_RE.fullmatch(source_hash):
+        fail("invalid callback source hash")
+    created_at = event.get("created_at")
+    if not isinstance(created_at, str) or len(created_at) > 40 or not created_at.endswith("Z"):
+        fail("invalid callback creation timestamp")
+
+
+def validate_state(state: dict[str, Any]) -> None:
+    expected = {
+        "version",
+        "status",
+        "attempts",
+        "next_attempt_at",
+        "claimed_at",
+        "acknowledged_at",
+        "last_result",
+    }
+    if set(state) != expected or state.get("version") != STATE_VERSION:
+        fail("unsupported callback state schema")
+    if state.get("status") not in {
+        "pending",
+        "delivering",
+        "acknowledged",
+        "rejected",
+    }:
+        fail("invalid callback state")
+    attempts = state.get("attempts")
+    next_attempt = state.get("next_attempt_at")
+    if not isinstance(attempts, int) or attempts < 0:
+        fail("invalid callback attempt count")
+    if not isinstance(next_attempt, int) or next_attempt < 0:
+        fail("invalid callback next-attempt time")
+    if state.get("claimed_at") is not None and not isinstance(state["claimed_at"], int):
+        fail("invalid callback claim time")
+    if state.get("acknowledged_at") is not None and not isinstance(
+        state["acknowledged_at"], str
+    ):
+        fail("invalid callback acknowledgement time")
+    if state.get("last_result") not in {
+        None,
+        "ack",
+        "retry",
+        "reject",
+        "callback_error",
+        "timeout",
+        "invalid_ack",
+    }:
+        fail("invalid callback result class")
+
+
+def next_generation(callback_dir: Path, events: Path) -> int:
+    highest = 0
+    sequence = callback_dir / "sequence"
+    if sequence.exists() and not sequence.is_symlink():
+        raw = read_text(sequence, 32, "callback sequence").strip()
+        if not raw.isdigit():
+            fail("invalid callback sequence")
+        highest = int(raw)
+    for directory in events.iterdir():
+        if directory.is_dir() and directory.name.isdigit():
+            highest = max(highest, int(directory.name))
+    generation = highest + 1
+    if generation > 99999999:
+        fail("callback event generation exhausted")
+    atomic_write(sequence, f"{generation}\n".encode("ascii"))
+    return generation
+
+
+def enqueue_event(
+    task: Path, event_type: str, source_id: str, payload: str
+) -> dict[str, Any]:
+    if event_type not in EVENT_TYPES:
+        fail("unsupported callback event type")
+    validate_name(source_id, SOURCE_RE, "event source ID")
+    callback_dir = callback_directory(task)
+    origin = load_origin(task)
+    assert origin is not None
+    source_hash = hashlib.sha256(
+        f"{event_type}\0{source_id}".encode("utf-8")
+    ).hexdigest()
+    events = events_directory(callback_dir)
+    with TaskLock(callback_dir):
+        existing = existing_event_for_source(events, source_hash)
+        if existing is not None:
+            return existing
+        seal = callback_dir / "sealed"
+        if seal.exists() or seal.is_symlink():
+            fail("callback task is sealed for cleanup")
+        generation = next_generation(callback_dir, events)
+        idempotency_key = (
+            f"sgt-callback-v1:{origin['correlation_id']}:{generation}"
+        )
+        event = {
+            "version": EVENT_VERSION,
+            "idempotency_key": idempotency_key,
+            "correlation_id": origin["correlation_id"],
+            "profile": origin["profile"],
+            "generation": generation,
+            "type": event_type,
+            "payload": payload,
+            "source_hash": source_hash,
+            "created_at": utc_timestamp(),
+        }
+        state = {
+            "version": STATE_VERSION,
+            "status": "pending",
+            "attempts": 0,
+            "next_attempt_at": 0,
+            "claimed_at": None,
+            "acknowledged_at": None,
+            "last_result": None,
+        }
+        final_directory = events / f"{generation:08d}"
+        temporary = Path(tempfile.mkdtemp(prefix=".event-", dir=events))
+        os.chmod(temporary, 0o700)
+        try:
+            write_json(temporary / "event.json", event)
+            write_json(temporary / "state.json", state)
+            os.replace(temporary, final_directory)
+            fsync_directory(events)
+        except BaseException:
+            for child in temporary.iterdir() if temporary.exists() else []:
+                child.unlink(missing_ok=True)
+            temporary.rmdir() if temporary.exists() else None
+            raise
+        return event
+
+
+def register(task_id: str, profile: str, correlation: str) -> None:
+    validate_origin(profile, correlation)
+    task = task_path(task_id)
+    callback_dir = callback_directory(task, create=True)
+    origin_path = callback_dir / "origin.json"
+    origin = {
+        "version": ORIGIN_VERSION,
+        "profile": profile,
+        "correlation_id": correlation,
+    }
+    with TaskLock(callback_dir):
+        if origin_path.exists() or origin_path.is_symlink():
+            if load_origin(task) != origin:
+                fail("callback origin is already registered")
+            return
+        write_json(origin_path, origin)
+        events_directory(callback_dir)
+
+
+def validate_origin(profile: str, correlation: str) -> None:
+    validate_name(profile, PROFILE_RE, "callback profile")
+    validate_correlation(correlation)
+    callback_path(profile)
+
+
+def safe_optional_text(path: Path, maximum: int, label: str) -> str | None:
+    if not path.exists() and not path.is_symlink():
+        return None
+    return read_text(path, maximum, label).strip()
+
+
+def authoritative_repo_state(repo: Path) -> tuple[str, Path] | None:
+    worktree_value = safe_optional_text(repo / "worktree", 4096, "worktree pointer")
+    if worktree_value:
+        worktree = Path(worktree_value)
+        if not worktree.is_absolute():
+            fail("worktree pointer must be absolute")
+        validate_owned_directory(worktree, "worktree", writable_ok=True)
+        status = safe_optional_text(
+            worktree / ".sergeant-status", 1024, "worktree status"
+        )
+        if status:
+            return status, worktree
+    status = safe_optional_text(repo / "status", 1024, "fleet status")
+    if status:
+        return status, repo
+    return None
+
+
+def sync_task(task_id: str) -> None:
+    task = task_path(task_id)
+    if load_origin(task, absent_ok=True) is None:
+        return
+    failures: list[str] = []
+    for repo in sorted(task.iterdir()):
+        if not repo.is_dir() or repo.is_symlink():
+            continue
+        if not TASK_RE.fullmatch(repo.name):
+            continue
+        try:
+            current = authoritative_repo_state(repo)
+            if current is None:
+                continue
+            status, source_root = current
+            event_type: str | None = None
+            source_id: str | None = None
+            payload: str | None = None
+            if status in {"needs_input", "blocked"}:
+                event_type = status
+                generation = safe_optional_text(
+                    source_root / ".sergeant-gate-generation",
+                    32,
+                    "gate generation",
+                )
+                if generation is None and source_root == repo:
+                    generation = safe_optional_text(
+                        repo / "gate_generation", 32, "fleet gate generation"
+                    )
+                generation = generation or "0"
+                if not generation.isdigit():
+                    fail("gate generation must be an integer")
+                raw_source = f"{repo.name}.{event_type}.gate-{generation}"
+                source_id = "auto-" + hashlib.sha256(raw_source.encode()).hexdigest()
+                message_name = ".sergeant-message" if source_root != repo else "message"
+                raw_payload = safe_optional_text(
+                    source_root / message_name, MAX_PAYLOAD_BYTES + 1, "status message"
+                )
+                if raw_payload is None:
+                    continue
+                payload = validate_payload_bytes(raw_payload.encode("utf-8"))
+            elif status.startswith("failed:"):
+                event_type = "failed"
+                raw_source = f"{repo.name}.failed.terminal"
+                source_id = "auto-" + hashlib.sha256(raw_source.encode()).hexdigest()
+                payload = validate_payload_bytes(status.split(":", 1)[1].strip().encode())
+            elif status == "done":
+                event_type = "done"
+                raw_source = f"{repo.name}.done.terminal"
+                source_id = "auto-" + hashlib.sha256(raw_source.encode()).hexdigest()
+                result_name = ".sergeant-result" if source_root != repo else "result"
+                raw_payload = safe_optional_text(
+                    source_root / result_name, MAX_PAYLOAD_BYTES + 1, "task result"
+                )
+                if raw_payload is None:
+                    continue
+                payload = validate_payload_bytes(raw_payload.encode("utf-8"))
+            if event_type and source_id and payload:
+                enqueue_event(task, event_type, source_id, payload)
+        except CallbackError as error:
+            failures.append(f"{repo.name}: {error}")
+    drain_task(task, limit=1)
+    if failures:
+        fail("; ".join(failures))
+
+
+def event_directories(events: Path) -> Iterator[Path]:
+    for path in sorted(events.iterdir()):
+        if path.is_dir() and not path.is_symlink() and path.name.isdigit():
+            yield path
+
+
+def callback_environment() -> dict[str, str]:
+    allowed = ("HOME", "PATH", "LANG", "LC_ALL", "TMPDIR")
+    return {name: os.environ[name] for name in allowed if name in os.environ}
+
+
+def invoke_callback(executable: Path, event: dict[str, Any]) -> tuple[str, int | None]:
+    payload = (
+        json.dumps(event, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    ).encode("utf-8")
+    timeout = env_int("SGT_CALLBACK_TIMEOUT_SECONDS", 15, 1, 120)
+    try:
+        completed = subprocess.run(
+            [str(executable)],
+            input=payload,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=callback_environment(),
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return "timeout", None
+    if completed.returncode != 0:
+        return "callback_error", None
+    if len(completed.stdout) > MAX_ACK_BYTES:
+        return "invalid_ack", None
+    try:
+        response = json.loads(completed.stdout.decode("utf-8", "strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return "invalid_ack", None
+    if not isinstance(response, dict):
+        return "invalid_ack", None
+    allowed = {"version", "idempotency_key", "status", "retry_after_seconds"}
+    if set(response) - allowed:
+        return "invalid_ack", None
+    if (
+        response.get("version") != ACK_VERSION
+        or response.get("idempotency_key") != event["idempotency_key"]
+        or response.get("status") not in {"ack", "retry", "reject"}
+    ):
+        return "invalid_ack", None
+    status = response["status"]
+    if status == "retry":
+        retry_after = response.get("retry_after_seconds")
+        if retry_after is not None and (
+            not isinstance(retry_after, int) or retry_after < 0 or retry_after > 3600
+        ):
+            return "invalid_ack", None
+        return "retry", retry_after
+    if "retry_after_seconds" in response:
+        return "invalid_ack", None
+    return status, None
+
+
+def backoff_seconds(attempts: int, requested: int | None = None) -> int:
+    if requested is not None:
+        return requested
+    base = env_int("SGT_CALLBACK_RETRY_BASE_SECONDS", 5, 0, 300)
+    cap = env_int("SGT_CALLBACK_RETRY_MAX_SECONDS", 300, 0, 3600)
+    return min(cap, base * (2 ** min(max(attempts - 1, 0), 10)))
+
+
+def drain_task(task: Path, limit: int | None = None) -> tuple[int, int, int]:
+    callback_dir = callback_directory(task)
+    origin = load_origin(task)
+    assert origin is not None
+    executable = callback_path(origin["profile"])
+    events = events_directory(callback_dir)
+    claim_timeout = env_int("SGT_CALLBACK_CLAIM_TIMEOUT_SECONDS", 60, 0, 3600)
+    maximum = limit or env_int("SGT_CALLBACK_MAX_EVENTS", 16, 1, 100)
+    attempted = acknowledged = pending = 0
+    attempted_directories: set[Path] = set()
+    for _ in range(maximum):
+        selected: tuple[Path, dict[str, Any], dict[str, Any]] | None = None
+        now = int(time.time())
+        with TaskLock(callback_dir):
+            for directory in event_directories(events):
+                if directory in attempted_directories:
+                    continue
+                event = read_json(directory / "event.json", "callback event")
+                validate_event(event, origin, directory)
+                state_path = directory / "state.json"
+                state = read_json(state_path, "callback state")
+                validate_state(state)
+                status = state.get("status")
+                if status == "acknowledged" or status == "rejected":
+                    continue
+                if status == "delivering":
+                    claimed_at = state.get("claimed_at")
+                    if not isinstance(claimed_at, int) or now - claimed_at < claim_timeout:
+                        continue
+                elif status != "pending":
+                    fail("invalid callback state")
+                next_attempt = state.get("next_attempt_at")
+                if not isinstance(next_attempt, int) or next_attempt > now:
+                    continue
+                attempts = state.get("attempts")
+                if not isinstance(attempts, int) or attempts < 0:
+                    fail("invalid callback attempt count")
+                state.update(
+                    {
+                        "status": "delivering",
+                        "attempts": attempts + 1,
+                        "claimed_at": now,
+                        "last_result": None,
+                    }
+                )
+                write_json(state_path, state)
+                selected = directory, event, state
+                break
+        if selected is None:
+            break
+        attempted += 1
+        directory, event, claimed_state = selected
+        attempted_directories.add(directory)
+        outcome, retry_after = invoke_callback(executable, event)
+        now = int(time.time())
+        with TaskLock(callback_dir):
+            state_path = directory / "state.json"
+            state = read_json(state_path, "callback state")
+            validate_state(state)
+            if (
+                state.get("status") != "delivering"
+                or state.get("attempts") != claimed_state["attempts"]
+                or state.get("claimed_at") != claimed_state["claimed_at"]
+            ):
+                continue
+            if outcome == "ack":
+                state.update(
+                    {
+                        "status": "acknowledged",
+                        "next_attempt_at": 0,
+                        "claimed_at": None,
+                        "acknowledged_at": utc_timestamp(now),
+                        "last_result": "ack",
+                    }
+                )
+                acknowledged += 1
+            elif outcome == "reject":
+                state.update(
+                    {
+                        "status": "rejected",
+                        "next_attempt_at": 0,
+                        "claimed_at": None,
+                        "last_result": "reject",
+                    }
+                )
+            else:
+                state.update(
+                    {
+                        "status": "pending",
+                        "next_attempt_at": now
+                        + backoff_seconds(state["attempts"], retry_after),
+                        "claimed_at": None,
+                        "last_result": outcome,
+                    }
+                )
+                pending += 1
+            write_json(state_path, state)
+    return attempted, acknowledged, pending
+
+
+def drain(task_id: str) -> None:
+    task = task_path(task_id)
+    attempted, acknowledged, pending = drain_task(task)
+    print(
+        json.dumps(
+            {
+                "attempted": attempted,
+                "acknowledged": acknowledged,
+                "pending": pending,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+
+
+def drain_all() -> None:
+    root = fleet_root()
+    validate_owned_directory(root, "fleet directory")
+    failures: list[str] = []
+    for task in sorted(root.iterdir()):
+        if not task.is_dir() or task.is_symlink() or not TASK_RE.fullmatch(task.name):
+            continue
+        if not (task / ".callbacks/origin.json").exists():
+            continue
+        try:
+            drain(task.name)
+        except CallbackError as error:
+            failures.append(f"{task.name}: {error}")
+    if failures:
+        fail("; ".join(failures))
+
+
+def check_acknowledged(task_id: str) -> None:
+    task = task_path(task_id)
+    if load_origin(task, absent_ok=True) is None:
+        return
+    callback_dir = callback_directory(task)
+    events = events_directory(callback_dir)
+    pending: list[str] = []
+    with TaskLock(callback_dir):
+        for directory in event_directories(events):
+            event = read_json(directory / "event.json", "callback event")
+            origin = load_origin(task)
+            assert origin is not None
+            validate_event(event, origin, directory)
+            state = read_json(directory / "state.json", "callback state")
+            validate_state(state)
+            if state.get("status") != "acknowledged":
+                key = event.get("idempotency_key")
+                pending.append(key if isinstance(key, str) else directory.name)
+    if pending:
+        fail(f"unacknowledged callback events remain: {len(pending)}")
+
+
+def retry_event(task_id: str, idempotency_key: str) -> None:
+    if len(idempotency_key) > 256 or any(
+        ord(character) < 33 or ord(character) > 126 for character in idempotency_key
+    ):
+        fail("invalid idempotency key")
+    task = task_path(task_id)
+    callback_dir = callback_directory(task)
+    origin = load_origin(task)
+    assert origin is not None
+    events = events_directory(callback_dir)
+    with TaskLock(callback_dir):
+        seal = callback_dir / "sealed"
+        if seal.exists() or seal.is_symlink():
+            fail("callback task is sealed for cleanup")
+        for directory in event_directories(events):
+            event = read_json(directory / "event.json", "callback event")
+            validate_event(event, origin, directory)
+            if event["idempotency_key"] != idempotency_key:
+                continue
+            state_path = directory / "state.json"
+            state = read_json(state_path, "callback state")
+            validate_state(state)
+            if state["status"] == "acknowledged":
+                fail("acknowledged callback events cannot be retried")
+            state.update(
+                {
+                    "status": "pending",
+                    "next_attempt_at": 0,
+                    "claimed_at": None,
+                    "last_result": "retry",
+                }
+            )
+            write_json(state_path, state)
+            return
+    fail("callback event not found")
+
+
+def seal_task(task_id: str) -> None:
+    task = task_path(task_id)
+    callback_dir = callback_directory(task)
+    origin = load_origin(task)
+    assert origin is not None
+    events = events_directory(callback_dir)
+    seal = callback_dir / "sealed"
+    with TaskLock(callback_dir):
+        for directory in event_directories(events):
+            event = read_json(directory / "event.json", "callback event")
+            validate_event(event, origin, directory)
+            state = read_json(directory / "state.json", "callback state")
+            validate_state(state)
+            if state["status"] != "acknowledged":
+                fail("unacknowledged callback events prevent cleanup seal")
+        if seal.exists() or seal.is_symlink():
+            value = read_text(seal, 64, "callback cleanup seal", 0o600).strip()
+            if value != "sergeant.callback-seal/v1":
+                fail("invalid callback cleanup seal")
+            return
+        atomic_write(seal, b"sergeant.callback-seal/v1\n")
+
+
+def unseal_task(task_id: str) -> None:
+    task = task_path(task_id)
+    callback_dir = callback_directory(task)
+    seal = callback_dir / "sealed"
+    with TaskLock(callback_dir):
+        if not seal.exists() and not seal.is_symlink():
+            return
+        value = read_text(seal, 64, "callback cleanup seal", 0o600).strip()
+        if value != "sergeant.callback-seal/v1":
+            fail("invalid callback cleanup seal")
+        seal.unlink()
+        fsync_directory(callback_dir)
+
+
+def enqueue(task_id: str, event_type: str, source_id: str) -> None:
+    task = task_path(task_id)
+    if load_origin(task, absent_ok=True) is None:
+        fail("task has no callback origin")
+    data = sys.stdin.buffer.read(MAX_PAYLOAD_BYTES + 1)
+    payload = validate_payload_bytes(data)
+    event = enqueue_event(task, event_type, source_id, payload)
+    print(event["idempotency_key"])
+
+
+def usage() -> None:
+    print(
+        "Usage:\n"
+        "  sgt-callback validate-origin <profile> <correlation-id>\n"
+        "  sgt-callback register <task-id> <profile> <correlation-id>\n"
+        "  sgt-callback enqueue <task-id> <needs_input|blocked|failed|done> <source-id> < payload\n"
+        "  sgt-callback sync <task-id>\n"
+        "  sgt-callback drain <task-id|--all>\n"
+        "  sgt-callback retry <task-id> <idempotency-key>\n"
+        "  sgt-callback seal <task-id>\n"
+        "  sgt-callback unseal <task-id>\n"
+        "  sgt-callback check-acked <task-id>",
+        file=sys.stderr,
+    )
+
+
+def main(argv: list[str]) -> None:
+    if not argv:
+        usage()
+        raise SystemExit(1)
+    command = argv[0]
+    if command == "validate-origin" and len(argv) == 3:
+        validate_origin(argv[1], argv[2])
+    elif command == "register" and len(argv) == 4:
+        register(argv[1], argv[2], argv[3])
+    elif command == "enqueue" and len(argv) == 4:
+        enqueue(argv[1], argv[2], argv[3])
+    elif command == "sync" and len(argv) == 2:
+        sync_task(argv[1])
+    elif command == "drain" and len(argv) == 2:
+        if argv[1] == "--all":
+            drain_all()
+        else:
+            drain(argv[1])
+    elif command == "check-acked" and len(argv) == 2:
+        check_acknowledged(argv[1])
+    elif command == "retry" and len(argv) == 3:
+        retry_event(argv[1], argv[2])
+    elif command == "seal" and len(argv) == 2:
+        seal_task(argv[1])
+    elif command == "unseal" and len(argv) == 2:
+        unseal_task(argv[1])
+    else:
+        usage()
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except CallbackError as error:
+        print(f"sgt-callback: {error}", file=sys.stderr)
+        raise SystemExit(1)

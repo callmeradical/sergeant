@@ -16,6 +16,8 @@
 #   --agent <harness>         Interactive harness: opencode, goose, or claude
 #   --stage <name>            Window stage slug (default: implementation)
 #   --intent-file <path>       Canonical structured intent for safety/stateful work
+#   --origin-profile <name>    Fixed local callback profile (requires --correlation-id)
+#   --correlation-id <id>      Opaque callback request ID (requires --origin-profile)
 #   --dry-run                 Print what would happen, don't execute
 #
 # Examples:
@@ -48,6 +50,8 @@ DEPS_ARG=""
 TD_TASK_ID=""
 INTENT_FILE=""
 AGENT_OVERRIDE=""
+ORIGIN_PROFILE=""
+CORRELATION_ID=""
 STAGE="implementation"
 DRY_RUN=false
 
@@ -77,6 +81,16 @@ while [[ $# -gt 0 ]]; do
       INTENT_FILE="$2"
       shift 2
       ;;
+    --origin-profile)
+      [[ -n "${2:-}" ]] || _die "--origin-profile requires a profile name"
+      ORIGIN_PROFILE="$2"
+      shift 2
+      ;;
+    --correlation-id)
+      [[ -n "${2:-}" ]] || _die "--correlation-id requires an opaque request ID"
+      CORRELATION_ID="$2"
+      shift 2
+      ;;
     --dry-run) DRY_RUN=true;     shift   ;;
     *) _die "Unknown option: $1" ;;
   esac
@@ -84,6 +98,11 @@ done
 
 [[ -z "$AGENT_OVERRIDE" ]] || AGENT_CMD="$AGENT_OVERRIDE"
 [[ "$STAGE" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || _die "stage must be a lowercase slug: $STAGE"
+if [[ -n "$ORIGIN_PROFILE" || -n "$CORRELATION_ID" ]]; then
+  [[ -n "$ORIGIN_PROFILE" && -n "$CORRELATION_ID" ]] || \
+    _die "--origin-profile and --correlation-id must be provided together"
+  "$SCRIPT_DIR/sgt-callback" validate-origin "$ORIGIN_PROFILE" "$CORRELATION_ID"
+fi
 
 # ── Resolve td task (if --td provided) ───────────────────────────────────────
 
@@ -441,6 +460,9 @@ else
   if [[ -n "$PRIMARY_PANE_ID" && -n "$PRIMARY_PANE_IDENTITY" ]]; then
     printf '%s\n' "$PRIMARY_PANE_ID" > "$TASK_DIR/primary_pane_id"
     _sgt_replace_owned_file "$TASK_DIR/primary_pane_identity" "$PRIMARY_PANE_IDENTITY"
+  fi
+  if [[ -n "$ORIGIN_PROFILE" ]]; then
+    "$SCRIPT_DIR/sgt-callback" register "$TASK_ID" "$ORIGIN_PROFILE" "$CORRELATION_ID"
   fi
 fi
 

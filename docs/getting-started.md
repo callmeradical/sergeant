@@ -12,6 +12,7 @@ Required:
 - GitHub CLI (`gh`), authenticated for repositories you use
 - tmux
 - `yq`
+- Python 3
 - `lsof`
 - [Marcus td](https://github.com/marcus/td)
 - OpenCode, Goose, or Claude Code, used as a persistent interactive worker terminal
@@ -34,7 +35,7 @@ If `mise` is unavailable, install the required commands with your platform's
 package manager, then verify the required commands directly:
 
 ```bash
-command -v git gh tmux yq lsof
+command -v git gh tmux yq python3 lsof
 td version
 td create --help
 agent_found=false

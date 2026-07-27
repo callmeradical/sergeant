@@ -70,6 +70,19 @@ Then talk to it:
 > add feature X across all repos
 ```
 
+## Documentation
+
+Start with the [documentation index](docs/README.md):
+
+- [What Sergeant is and is not](docs/what-is-sergeant.md)
+- [Getting started checklist](docs/getting-started.md)
+- [Skills and their upstream sources](docs/skills.md)
+- [Repo-scoped worker skills](docs/repo-scoped-skills.md)
+- [Using Sergeant](docs/using-sergeant.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Project YAML schema](docs/schema.md)
+- [Durable callback protocol](docs/callbacks.md)
+
 ## Project YAML
 
 Projects live at `~/.config/sergeant/<name>.yaml`. Paths are relative to `dev_root`.
@@ -126,6 +139,7 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-respond <task-id> <repo> "<response>"` | Respond to and resume a waiting worker |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees and fleet state |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
+| `bin/sgt-callback <command>` | Operate durable profile-bound callback events |
 
 ### No-mistakes
 
@@ -206,6 +220,7 @@ installation and verification.
 
 - [`github.com/marcus/td`](https://github.com/marcus/td) — task CLI, required for brief-based `sgt-dispatch` runs, `sgt-no-mistakes-finding`, `sgt-review-findings`, and `sgt-td-*` commands; install with `brew install marcus/tap/td` or `go install github.com/marcus/td@latest`
 - `yq` — YAML parser: `brew install yq`
+- `python3` — callback state/protocol runtime and dispatch JSON processing
 - `git` and `gh` — for repo operations and PRs
 - `tmux` — for local agent dispatch
 - `lsof` — for verifying cleanup does not remove an in-use worktree
