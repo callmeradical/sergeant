@@ -185,32 +185,40 @@ _stop_local_worker() {
 
   if [[ -n "$pane" ]]; then
     command -v tmux >/dev/null 2>&1 || _die "tmux is required to terminate recorded worker pane $pane"
-    pane_info="$(_sgt_pane_identity "$pane" || true)"
 
-    if [[ -n "$pane_info" ]]; then
-      pane_dead="${pane_info%%|*}"
-      pane_info="${pane_info#*|}"
-      pane_info="${pane_info#*|}"
-      pane_pid="${pane_info%%|*}"
-
-      if [[ "$pane_dead" != "0" ]]; then
-        echo "  worker pane already stopped: $pane"
-        pane_pgid="$(_recover_escaped_worker_pgid "$repo_dir")"
-      elif ! _sgt_pane_identity_matches "$pane" "$repo_dir"; then
-        echo "  recorded pane no longer belongs to this worker: $pane"
-        pane_pgid="$(_recover_escaped_worker_pgid "$repo_dir")"
-      else
-        tree_records="$(_process_tree_records "$pane_pid")"
-        tree_pids="$(_recorded_tree_pids "$tree_records")"
-        pane_pgid="$(ps -o pgid= -p "$pane_pid" 2>/dev/null | tr -d ' ' || true)"
-        echo "  terminating worker pane: $pane"
-        tmux kill-pane -t "$pane" 2>/dev/null || \
-          ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 || \
-          _die "Failed to terminate worker pane $pane"
-      fi
-    else
-      echo "  worker pane already gone: $pane"
+    # Require stored pane identity before attempting to kill — fail closed when
+    # pane_identity is absent since ownership cannot be verified without it.
+    if [[ ! -f "$repo_dir/pane_identity" ]]; then
+      echo "  worker pane identity absent; skipping kill: $pane"
       pane_pgid="$(_recover_escaped_worker_pgid "$repo_dir")"
+    else
+      pane_info="$(_sgt_pane_identity "$pane" || true)"
+
+      if [[ -n "$pane_info" ]]; then
+        pane_dead="${pane_info%%|*}"
+        pane_info="${pane_info#*|}"
+        pane_info="${pane_info#*|}"
+        pane_pid="${pane_info%%|*}"
+
+        if [[ "$pane_dead" != "0" ]]; then
+          echo "  worker pane already stopped: $pane"
+          pane_pgid="$(_recover_escaped_worker_pgid "$repo_dir")"
+        elif ! _sgt_pane_identity_matches "$pane" "$repo_dir"; then
+          echo "  recorded pane no longer belongs to this worker: $pane"
+          pane_pgid="$(_recover_escaped_worker_pgid "$repo_dir")"
+        else
+          tree_records="$(_process_tree_records "$pane_pid")"
+          tree_pids="$(_recorded_tree_pids "$tree_records")"
+          pane_pgid="$(ps -o pgid= -p "$pane_pid" 2>/dev/null | tr -d ' ' || true)"
+          echo "  terminating worker pane: $pane"
+          tmux kill-pane -t "$pane" 2>/dev/null || \
+            ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 || \
+            _die "Failed to terminate worker pane $pane"
+        fi
+      else
+        echo "  worker pane already gone: $pane"
+        pane_pgid="$(_recover_escaped_worker_pgid "$repo_dir")"
+      fi
     fi
   fi
 
@@ -477,8 +485,12 @@ _require_terminal_repos() {
           _die "$repo_name worktree result differs from reconciled fleet result"
       fi
       if [[ -z "$cleanup_phase" ]]; then
-        _configured_repo_root "$repo_name" >/dev/null || \
-          _die "Cannot resolve configured cleanup owner: $repo_name"
+        # Verify the configured owner exists when a project config is available;
+        # skip for legacy fleets that predate project-config ownership tracking.
+        if _task_project >/dev/null 2>&1; then
+          _configured_repo_root "$repo_name" >/dev/null || \
+            _die "Cannot resolve configured cleanup owner: $repo_name"
+        fi
       fi
     else
       # Worktree is absent or was never recorded.
@@ -659,35 +671,31 @@ _validation_legacy_checkout_matches() {
     "$expected_head" ]]
 }
 
-_repo_git_dir() {
-  local dir kind="$2" repo_root="$1" top
+# _repo_git_common_dir — resolve the common git directory for a repository root;
+# handles both plain repos (.git is a dir) and configured linked worktrees
+# (.git is a file pointing to a worktrees/ entry).
+_repo_git_common_dir() {
+  local git_common_dir repo_root="$1"
 
-  [[ -d "$repo_root" && ! -L "$repo_root" && ! -L "$repo_root/.git" ]] || return 1
-  top="$(git -C "$repo_root" rev-parse --path-format=absolute --show-toplevel 2>/dev/null)" || \
-    return 1
-  [[ -n "$top" && "$top" != *$'\n'* && "$top" == "$repo_root" ]] || return 1
-  case "$kind" in
-    worktree)
-      dir="$(git -C "$repo_root" rev-parse --path-format=absolute --git-dir 2>/dev/null)" || \
-        return 1
-      ;;
-    common)
-      dir="$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || \
-        return 1
-      ;;
-    *) return 1 ;;
-  esac
-  [[ -n "$dir" && "$dir" != *$'\n'* && -d "$dir" && ! -L "$dir" ]] || return 1
-  [[ "$dir" == "$(cd "$dir" && pwd -P)" ]] || return 1
-  printf '%s\n' "$dir"
+  [[ -d "$repo_root" && ! -L "$repo_root" ]] || return 1
+  git_common_dir="$(git -C "$repo_root" rev-parse \
+    --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+  [[ -n "$git_common_dir" && -d "$git_common_dir" && ! -L "$git_common_dir" ]] || return 1
+  printf '%s\n' "$git_common_dir"
 }
 
-_repo_instance_id() {
-  local git_common_dir="$1" marker token tmp
+# _repo_instance_sentinel — return the stable instance token from
+# .git-common-dir/sergeant-instance.  Pass "create" to create it on first use.
+# The token persists across moves but is absent in freshly-created repos,
+# reliably detecting "replaced at the same path" attacks.
+_repo_instance_sentinel() {
+  local git_common_dir="$1" marker tmp token
 
   marker="$git_common_dir/sergeant-instance"
-  if [[ ! -e "$marker" && "${2:-}" == "create" ]]; then
-    token="$(printf '%s\n%s\n%s\n%s\n' "$git_common_dir" "$$" "$RANDOM" "$(date +%s)" | \
+  if [[ ! -f "$marker" ]]; then
+    [[ "${2:-}" == "create" ]] || return 1
+    token="$(printf '%s\n%s\n%s\n%s\n' \
+      "$git_common_dir" "$$" "$RANDOM" "$(date +%s)" | \
       git hash-object --stdin)" || return 1
     tmp="$(mktemp "$git_common_dir/.sergeant-instance.XXXXXX")" || return 1
     if ! printf '%s\n' "$token" > "$tmp"; then
@@ -706,66 +714,25 @@ _repo_instance_id() {
   printf '%s\n' "$token"
 }
 
-_repo_metadata_identity() {
-  local git_common_dir="$1"
-
-  (
-    cd "$git_common_dir" || exit 1
-    {
-      find . -path ./worktrees -prune -o -path ./objects -prune -o \
-        -path ./logs -prune -o -path ./index -prune -o \
-        \( -type f -o -type l \) -print
-      [[ ! -d objects/info ]] || find objects/info \( -type f -o -type l \) -print
-    } | LC_ALL=C sort | while IFS= read -r path; do
-      if [[ -L "$path" ]]; then
-        printf 'link\n%s\n%s\n' "$path" "$(readlink "$path")"
-      else
-        printf 'file\n%s\n' "$path"
-        git hash-object "$path" || exit 1
-      fi
-    done
-  ) | git hash-object --stdin
-}
-
-_repo_worktree_identity() {
-  local path repo_root="$1"
-  local _wt_tmpfile _wt_ret
-  _wt_tmpfile="$(mktemp)" || return 1
-  git -C "$repo_root" ls-files --others --exclude-standard -z > "$_wt_tmpfile" || {
-    rm -f "$_wt_tmpfile"; return 1
-  }
-
-  (
-    git -C "$repo_root" diff --no-ext-diff --binary HEAD -- || exit 1
-    while IFS= read -r -d '' path; do
-      printf 'untracked\n%s\n' "$path"
-      git -C "$repo_root" hash-object "$path" || exit 1
-    done < "$_wt_tmpfile"
-  ) | git hash-object --stdin
-  _wt_ret=$?
-  rm -f "$_wt_tmpfile"
-  return "$_wt_ret"
-}
-
+# _repo_identity — stable identity token: sentinel + inode/device + remote + roots.
+# Volatile state (HEAD, refs, staged/unstaged changes, fetch activity, config) is
+# excluded per the superseding identity contract so that legitimate retries after
+# new commits are not rejected.  Pass "create" as the second argument when
+# recording an owner to ensure the sentinel is created.
 _repo_identity() {
-  local config git_common_dir git_dir head instance metadata refs remote roots state repo_root="$1"
+  local git_dir git_common_dir inode_dev remote roots sentinel repo_root="$1"
 
-  git_dir="$(_repo_git_dir "$repo_root" worktree)" || return 1
-  git_common_dir="$(_repo_git_dir "$repo_root" common)" || return 1
-  instance="$(stat -c '%d:%i' "$git_dir" 2>/dev/null || \
+  git_dir="$(git -C "$repo_root" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  [[ -n "$git_dir" && -d "$git_dir" && ! -L "$git_dir" ]] || return 1
+  inode_dev="$(stat -c '%d:%i' "$git_dir" 2>/dev/null || \
     stat -f '%d:%i' "$git_dir" 2>/dev/null)" || return 1
-  instance="$instance:$(_repo_instance_id "$git_common_dir" "${2:-}")" || return 1
-  config="$(git hash-object "$git_common_dir/config" 2>/dev/null)" || return 1
-  head="$(cat "$git_dir/HEAD" 2>/dev/null)" || return 1
-  refs="$(git -C "$repo_root" for-each-ref \
-    --format='%(refname) %(objectname) %(symref)' 2>/dev/null | sort)" || return 1
-  roots="$(git -C "$repo_root" rev-list --max-parents=0 --all 2>/dev/null | sort)"
+  [[ -n "$inode_dev" ]] || return 1
+  git_common_dir="$(_repo_git_common_dir "$repo_root")" || return 1
+  sentinel="$(_repo_instance_sentinel "$git_common_dir" "${2:-}")" || return 1
+  roots="$(git -C "$repo_root" rev-list --max-parents=0 --all 2>/dev/null | LC_ALL=C sort)"
   [[ -n "$roots" ]] || return 1
   remote="$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null || true)"
-  state="$(_repo_worktree_identity "$repo_root")" || return 1
-  metadata="$(_repo_metadata_identity "$git_common_dir")" || return 1
-  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
-    "$instance" "$metadata" "$config" "$head" "$remote" "$roots" "$refs" "$state" | \
+  printf '%s\n%s\n%s\n%s\n' "$sentinel" "$inode_dev" "$remote" "$roots" | \
     git hash-object --stdin
 }
 
@@ -787,11 +754,13 @@ _configured_repo_root() {
   _require_yq
   repo_count="$(yq '.repos | length' "$config_file")" || return 1
   raw_path=""
-  for ((i=0; i<repo_count; i++)); do
+  i=0
+  while [ "$i" -lt "$repo_count" ]; do
     if [[ "$(yq ".repos[$i].name" "$config_file")" == "$repo_name" ]]; then
       [[ -z "$raw_path" ]] || return 1
       raw_path="$(yq ".repos[$i].path" "$config_file")"
     fi
+    i=$((i + 1))
   done
   [[ -n "$raw_path" && "$raw_path" != "null" ]] || return 1
   configured_root="$(_resolve_path "$raw_path")"
@@ -889,6 +858,19 @@ for repo_dir in "$TASK_DIR"/*/; do
   _require_response_cleanup_safe "$repo_dir" "$worktree"
 
   echo "--- $repo_name (status: $status, type: $wt_type) ---"
+
+  # Detect an interrupted-removal retry and validate the persisted owner BEFORE
+  # any destructive step (pane kill, validation-worktree removal).  A rejected
+  # retry has zero side effects on the live pane or fleet evidence.
+  _preflight_retry_phase="$(sed -n '1p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+  _preflight_retry_type="$(sed -n '3p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+  _preflight_retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+  if [[ -n "$worktree" && -d "$worktree" && \
+    "$_preflight_retry_phase" == "removing" && "$_preflight_retry_type" == "$wt_type" && \
+    -n "$_preflight_retry_root" ]]; then
+    _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+      "$_preflight_retry_type" "$_preflight_retry_root"
+  fi
 
   _stop_validation_pane "$repo_dir"
   _stop_local_worker "$repo_dir" "$worktree"
@@ -1013,13 +995,27 @@ for repo_dir in "$TASK_DIR"/*/; do
     retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     [[ "$retry_type" == "$wt_type" ]] || \
       _die "Retry worktree type changed: $repo_name"
-    _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
-      "$retry_type" "$retry_root"
-    retry_root="$VALIDATED_RETRY_ROOT"
+    # Owner was already validated in the early preflight block above.
+    # Use VALIDATED_RETRY_ROOT if set (validation ran); else use the persisted root.
+    retry_root="${VALIDATED_RETRY_ROOT:-$retry_root}"
     retrying_removal=true
   else
-    retry_root="$(_configured_repo_root "$repo_name")" || \
+    # Resolve retry_root from project config; fall back to path inference for
+    # git worktrees and .git-file-based treehouse without project config.
+    has_configured_root=false
+    if retry_root="$(_configured_repo_root "$repo_name" 2>/dev/null)"; then
+      has_configured_root=true
+    elif [[ "$wt_type" == "git" ]]; then
+      repo_base_name="$(basename "$worktree" | sed "s/-sgt-${TASK_ID}$//")"
+      retry_root="$(dirname "$worktree")/$repo_base_name"
+    elif [[ "$wt_type" == "treehouse" && -f "$worktree/.git" ]]; then
+      git_dir_line_th="$(cat "$worktree/.git")"
+      git_dir_th="${git_dir_line_th#gitdir: }"
+      main_git_th="$(dirname "$(dirname "$git_dir_th")")"
+      retry_root="$(dirname "$main_git_th")"
+    else
       _die "Cannot resolve configured cleanup owner: $repo_name"
+    fi
   fi
   if [[ "$wt_type" == "treehouse" ]]; then
     git_file="$worktree/.git"
@@ -1034,9 +1030,13 @@ for repo_dir in "$TASK_DIR"/*/; do
 
   _stage_worker_evidence "$repo_dir" "$worktree"
   if [[ "$retrying_removal" != true ]]; then
-    if ! _record_cleanup_owner "$repo_dir" "$retry_root" "$worktree" "$wt_type"; then
-      _restore_worker_evidence "$repo_dir" "$worktree"
-      _die "Failed to record cleanup owner before worktree removal: $TASK_ID/$repo_name"
+    if [[ "${has_configured_root:-false}" == true ]]; then
+      # Project config is available: record the owner so the next retry can
+      # independently verify the repository has not changed.
+      if ! _record_cleanup_owner "$repo_dir" "$retry_root" "$worktree" "$wt_type"; then
+        _restore_worker_evidence "$repo_dir" "$worktree"
+        _die "Failed to record cleanup owner before worktree removal: $TASK_ID/$repo_name"
+      fi
     fi
     if ! _record_cleanup_phase "$repo_dir" removing "$worktree" \
       "$wt_type" "$retry_root"; then
