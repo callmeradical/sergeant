@@ -408,8 +408,9 @@ _require_response_cleanup_safe() {
 
 _require_terminal_repos() {
   local cleanup_phase configured_root evidence_dir expected_evidence_identity owner_root owner_type \
-    partial_phase removed_phase removing_phase proof_dir repo_dir repo_name \
-    restore_after_validation retry_root retry_type status worktree worktree_status wt_type
+    pane partial_phase removed_phase removing_phase proof_dir repo_dir repo_name \
+    restore_after_validation retry_root retry_type status validation_pane worktree \
+    worktree_status wt_type
 
   for repo_dir in "$TASK_DIR"/*/; do
     [[ -d "$repo_dir" ]] || continue
@@ -491,10 +492,10 @@ _require_terminal_repos() {
           _die "$repo_name worktree result differs from reconciled fleet result"
       fi
       if [[ -z "$cleanup_phase" ]]; then
-        configured_root="$(_configured_repo_root "$repo_name")" || \
-          _die "Cannot resolve configured cleanup owner: $repo_name"
-        _require_worktree_owner "$configured_root" "$worktree" || \
-          _die "Worktree does not belong to configured cleanup owner: $repo_name"
+        if configured_root="$(_configured_repo_root "$repo_name" 2>/dev/null)"; then
+          _require_worktree_owner "$configured_root" "$worktree" || \
+            _die "Worktree does not belong to configured cleanup owner: $repo_name"
+        fi
       fi
       if [[ "$restore_after_validation" == true ]]; then
         expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
@@ -504,10 +505,16 @@ _require_terminal_repos() {
       fi
     else
       if [[ -z "$worktree" ]]; then
-        continue
+        [[ "$status" == "failed: dispatch incomplete: no worktree or owned live pane" && \
+          "$(cat "$repo_dir/diagnostic" 2>/dev/null || true)" == \
+            "dispatch never acquired a worktree or owned live pane" ]] && continue
+        _die "$repo_name has no reconciled cleanup phase for its absent worktree"
       fi
       [[ "$cleanup_phase" != $'removing\n'"$worktree" ]] || \
         _die "Retry owner identity is missing: $repo_name"
+      pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
+      validation_pane="$(cat "$repo_dir/validation_pane" 2>/dev/null || true)"
+      evidence_dir="$repo_dir/terminal-evidence"
       if [[ "$cleanup_phase" == $'reconciled-absent\n'"$worktree" ]]; then
         owner_root="$(sed -n '3p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
         owner_type="$(sed -n '5p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
@@ -516,7 +523,7 @@ _require_terminal_repos() {
         _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
           "$owner_type" "$owner_root"
       fi
-      [[ -n "$worktree" && ( \
+      if [[ -n "$worktree" && ( \
         ( ( "$cleanup_phase" == "$partial_phase" || \
             "$cleanup_phase" == "$removed_phase" || \
             "$cleanup_phase" == "$removing_phase" ) && \
@@ -524,10 +531,18 @@ _require_terminal_repos() {
           ( "$retry_type" == git || "$retry_type" == treehouse ) && \
           -n "$retry_root" ) || \
         "$cleanup_phase" == $'reconciled-absent\n'"$worktree" \
-      ) ]] || \
-        _die "$repo_name has no reconciled cleanup phase for its absent worktree"
+      ) ]]; then
+        :
+      else
+        [[ -n "$pane" || -n "$validation_pane" ]] && continue
+        [[ -f "$evidence_dir/.sergeant-status" ]] || \
+          _die "$repo_name has no reconciled cleanup phase for its absent worktree"
+      fi
 
-      evidence_dir="$repo_dir/terminal-evidence"
+      if [[ -z "$cleanup_phase" && ! -f "$evidence_dir/.sergeant-status" ]]; then
+        _die "$repo_name has no reconciled cleanup phase for its absent worktree"
+      fi
+
       [[ -f "$evidence_dir/.sergeant-status" ]] ||
         _die "$repo_name reconciled cleanup evidence is missing"
       worktree_status="$(tr -d '\n' < "$evidence_dir/.sergeant-status")"
@@ -1051,10 +1066,14 @@ _task_project() {
   printf '%s\n' "$project"
 }
 
+_task_project_or_task_id() {
+  _task_project 2>/dev/null || printf '%s\n' "$TASK_ID"
+}
+
 _configured_repo_root() {
   local config_file configured_root i project raw_path repo_count repo_name="$1"
 
-  project="$(_task_project)" || return 1
+  project="$(_task_project_or_task_id)" || return 1
   config_file="$SERGEANT_CONFIG/$project.yaml"
   [[ -f "$config_file" && ! -L "$config_file" ]] || return 1
   _require_yq
@@ -1073,6 +1092,16 @@ _configured_repo_root() {
   printf '%s\n' "$configured_root"
 }
 
+_inferred_repo_root() {
+  local common_dir repo_root="$1"
+
+  common_dir="$(_repo_git_dir "$repo_root" common)" || return 1
+  repo_root="$(dirname "$common_dir")"
+  [[ -d "$repo_root" && ! -L "$repo_root" ]] || return 1
+  [[ "$repo_root" == "$(cd "$repo_root" && pwd -P)" ]] || return 1
+  printf '%s\n' "$repo_root"
+}
+
 _record_cleanup_owner() {
   local evidence_dir="${6:-$1/terminal-evidence}" evidence_identity holder identity \
     output="${5:-$1/cleanup-owner}" project repo_dir="$1" repo_root="$2" \
@@ -1081,7 +1110,7 @@ _record_cleanup_owner() {
   identity="$(_repo_identity "$repo_root" create)" || return 1
   worker_identity="$(_repo_identity "$worktree" exclude-evidence)" || return 1
   evidence_identity="$(_worker_evidence_identity "$evidence_dir")" || return 1
-  project="$(_task_project)" || return 1
+  project="$(_task_project_or_task_id)" || return 1
   holder=""
   [[ "$wt_type" != "treehouse" ]] || \
     holder="$(tr -d '\n' < "$repo_dir/wt_holder" 2>/dev/null || true)"
@@ -1172,13 +1201,15 @@ _validate_retry_owner() {
     "$retry_type" == "$owner_type" ]] || \
     _die "Retry cleanup state does not match its recorded owner: $repo_name"
 
-  project="$(_task_project)" || _die "Cannot resolve retry owner project: $repo_name"
+  project="$(_task_project_or_task_id)" || _die "Cannot resolve retry owner project: $repo_name"
   [[ "$project" == "$owner_project" ]] || \
     _die "Retry owner project changed: $repo_name"
-  configured_root="$(_configured_repo_root "$repo_name")" || \
+  if configured_root="$(_configured_repo_root "$repo_name" 2>/dev/null)"; then
+    [[ "$configured_root" == "$owner_root" ]] || \
+      _die "Configured retry owner changed: $repo_name"
+  elif _task_project >/dev/null 2>&1; then
     _die "Cannot resolve configured retry owner: $repo_name"
-  [[ "$configured_root" == "$owner_root" ]] || \
-    _die "Configured retry owner changed: $repo_name"
+  fi
   [[ -d "$owner_root" && ! -L "$owner_root" ]] || \
     _die "Retry owner repo is missing or aliased: $owner_root"
   expected_root="$(cd "$owner_root" && pwd -P)"
@@ -1483,6 +1514,12 @@ for repo_dir in "$TASK_DIR"/*/; do
     retry_phase="$(sed -n '1p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     retry_type="$(sed -n '3p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+    if [[ -z "$retry_root" && "$retry_phase" != "reconciled-absent" ]]; then
+      [[ -f "$repo_dir/terminal-evidence/.sergeant-status" || \
+        -n "$(cat "$repo_dir/pane" 2>/dev/null || true)" || \
+        -n "$(cat "$repo_dir/validation_pane" 2>/dev/null || true)" ]] || \
+        _die "$repo_name has no reconciled cleanup phase for its absent worktree"
+    fi
     if [[ -n "$retry_root" ]]; then
       _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
         "$retry_type" "$retry_root"
@@ -1530,7 +1567,8 @@ for repo_dir in "$TASK_DIR"/*/; do
     expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
     retrying_removal=true
   else
-    retry_root="$(_configured_repo_root "$repo_name")" || \
+    retry_root="$(_configured_repo_root "$repo_name" 2>/dev/null || \
+      _inferred_repo_root "$worktree")" || \
       _die "Cannot resolve configured cleanup owner: $repo_name"
   fi
   if [[ "$wt_type" == "treehouse" ]]; then
