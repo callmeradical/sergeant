@@ -741,43 +741,6 @@ PATH="$TEST_ROOT/fake-bin:$PATH" FAKE_GIT_STATE="$TEST_ROOT/git-failed-once" \
 [[ "$(wc -l < "$TEST_ROOT/git-removals")" -eq 2 ]]
 [[ ! -e "$TEST_ROOT/fleet/removal-failure" ]]
 
-mkdir -p "$TEST_ROOT/fleet/dirty-retry/app" \
-  "$TEST_ROOT/dirty-retry-sgt-dirty-retry"
-init_test_repo "$TEST_ROOT/dirty-retry"
-record_retry_owner dirty-retry app "$TEST_ROOT/dirty-retry"
-printf 'dirty before cleanup\n' >> "$TEST_ROOT/dirty-retry/README.md"
-printf 'untracked before cleanup\n' > "$TEST_ROOT/dirty-retry/untracked.txt"
-printf '%s\n' "$TEST_ROOT/dirty-retry-sgt-dirty-retry" > \
-  "$TEST_ROOT/fleet/dirty-retry/app/worktree"
-printf 'done\n' > "$TEST_ROOT/fleet/dirty-retry/app/status"
-printf 'result\n' > "$TEST_ROOT/fleet/dirty-retry/app/result"
-printf 'done\n' > "$TEST_ROOT/dirty-retry-sgt-dirty-retry/.sergeant-status"
-printf 'result\n' > "$TEST_ROOT/dirty-retry-sgt-dirty-retry/.sergeant-result"
-if PATH="$TEST_ROOT/fake-bin:$PATH" \
-  FAKE_GIT_STATE="$TEST_ROOT/dirty-retry-failed-once" \
-  FAKE_GIT_LOG="$TEST_ROOT/dirty-retry-removals" \
-  SERGEANT_CONFIG="$TEST_ROOT/config" \
-  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" dirty-retry >/dev/null 2>&1; then
-  printf 'cleanup succeeded after dirty retry removal failed\n' >&2
-  exit 1
-fi
-[[ "$(wc -l < "$TEST_ROOT/dirty-retry-removals")" -eq 1 ]]
-# With stable identity (sentinel + inode/device + remote + roots), in-place
-# content changes do NOT invalidate a retry — only directory replacement, remote
-# URL change, or root-commit change does.  Verify both: retry succeeds after
-# content change, and fleet is cleaned up cleanly.
-printf 'different dirty contents\n' > "$TEST_ROOT/dirty-retry/README.md"
-if ! PATH="$TEST_ROOT/fake-bin:$PATH" \
-  FAKE_GIT_STATE="$TEST_ROOT/dirty-retry-failed-once" \
-  FAKE_GIT_LOG="$TEST_ROOT/dirty-retry-removals" \
-  SERGEANT_CONFIG="$TEST_ROOT/config" \
-  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" dirty-retry >/dev/null 2>&1; then
-  printf 'cleanup rejected content-changed retry with stable identity (unexpected)\n' >&2
-  exit 1
-fi
-[[ ! -e "$TEST_ROOT/fleet/dirty-retry" ]]
 rm "$TEST_ROOT/fake-bin/git"
 
 mkdir -p "$TEST_ROOT/fleet/present-retry/app" \
@@ -1227,6 +1190,63 @@ set -e
 [[ "$(cksum "$TEST_ROOT/fleet/restore-diag/app/cleanup-phase")" == \
   "$restore_diag_phase" ]]
 
+# Positive-path partial-removal retry: a worktree directory was removed but the
+# git command failed after that (partial removal).  After pruning the git registry,
+# cleanup must reconcile the absence and remove fleet state.
+mkdir -p "$TEST_ROOT/fleet/partial-retry-complete/app"
+init_test_repo "$TEST_ROOT/partial-retry-complete"
+git -C "$TEST_ROOT/partial-retry-complete" worktree add -q -b partial-retry-worker \
+  "$TEST_ROOT/partial-retry-complete-sgt-partial-retry-complete"
+record_retry_owner partial-retry-complete app "$TEST_ROOT/partial-retry-complete"
+printf '%s\n' "$TEST_ROOT/partial-retry-complete-sgt-partial-retry-complete" > \
+  "$TEST_ROOT/fleet/partial-retry-complete/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/partial-retry-complete/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/partial-retry-complete/app/result"
+printf 'done\n' > \
+  "$TEST_ROOT/partial-retry-complete-sgt-partial-retry-complete/.sergeant-status"
+printf 'result\n' > \
+  "$TEST_ROOT/partial-retry-complete-sgt-partial-retry-complete/.sergeant-result"
+# Save the current fake-bin/git and create a partial-removal variant
+cp -p "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/git.saved"
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
+  *" rev-parse "*) "$REAL_GIT" "$@" ;;
+  *" status "*) ;;
+  *" check-ref-format "*|*" worktree list --porcelain -z "*) "$REAL_GIT" "$@" ;;
+  *" worktree remove "*)
+    rm -rf "${!#}"
+    exit 1
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git"
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" partial-retry-complete >/dev/null 2>&1; then
+  printf 'partial-retry-complete initial cleanup unexpectedly succeeded\n' >&2; exit 1
+fi
+[[ ! -e "$TEST_ROOT/partial-retry-complete-sgt-partial-retry-complete" ]]
+[[ "$(sed -n '1p' "$TEST_ROOT/fleet/partial-retry-complete/app/cleanup-phase")" == \
+  "partial-removal" ]] || {
+  printf 'partial-removal phase not recorded after failed worktree removal\n' >&2; exit 1
+}
+# Prune git registry to prove removal completed, then retry → must reconcile
+"$REAL_GIT" -C "$TEST_ROOT/partial-retry-complete" worktree prune --expire now
+SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" partial-retry-complete >/dev/null || {
+  printf 'partial-retry-complete reconcile failed\n' >&2; exit 1
+}
+[[ ! -e "$TEST_ROOT/fleet/partial-retry-complete" ]] || {
+  printf 'fleet state not removed after partial-removal reconcile\n' >&2; exit 1
+}
+mv "$TEST_ROOT/fake-bin/git.saved" "$TEST_ROOT/fake-bin/git"
+
 mkdir -p "$TEST_ROOT/fleet/unchanged-retry/app"
 init_test_repo "$TEST_ROOT/unchanged-retry"
 git -C "$TEST_ROOT/unchanged-retry" worktree add -q -b unchanged-retry-worker \
@@ -1257,6 +1277,61 @@ PATH="$TEST_ROOT/fake-bin:$PATH" \
 [[ "$(wc -l < "$TEST_ROOT/unchanged-retry-removals")" -eq 2 ]]
 [[ ! -e "$TEST_ROOT/fleet/unchanged-retry" ]]
 rm "$TEST_ROOT/fake-bin/git"
+
+# dirty-owner-retry: verify that unstaged changes to the configured owner repo
+# invalidate a retry. The new _repo_identity includes worktree state
+# (_repo_worktree_identity runs git diff HEAD), so content changes change the
+# stored identity hash. A retry must be rejected when the owner's state differs.
+mkdir -p "$TEST_ROOT/fleet/dirty-owner-retry/app" \
+  "$TEST_ROOT/fake-bin"
+init_test_repo "$TEST_ROOT/dirty-owner-retry"
+git -C "$TEST_ROOT/dirty-owner-retry" worktree add -q -b dirty-owner-retry-worker \
+  "$TEST_ROOT/dirty-owner-retry-sgt-dirty-owner-retry"
+record_retry_owner dirty-owner-retry app "$TEST_ROOT/dirty-owner-retry"
+printf '%s\n' "$TEST_ROOT/dirty-owner-retry-sgt-dirty-owner-retry" > \
+  "$TEST_ROOT/fleet/dirty-owner-retry/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/dirty-owner-retry/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/dirty-owner-retry/app/result"
+printf 'done\n' > "$TEST_ROOT/dirty-owner-retry-sgt-dirty-owner-retry/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/dirty-owner-retry-sgt-dirty-owner-retry/.sergeant-result"
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" worktree remove "*) printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"; exit 1 ;;
+esac
+"$REAL_GIT" "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git"
+# First cleanup: fake git fails — records cleanup-phase=removing + cleanup-owner
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/dirty-owner-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" dirty-owner-retry >/dev/null 2>&1; then
+  printf 'cleanup succeeded on fake-git failure (unexpected)\n' >&2
+  exit 1
+fi
+[[ -f "$TEST_ROOT/fleet/dirty-owner-retry/app/cleanup-owner" ]] || {
+  printf 'cleanup-owner not recorded after first failed attempt\n' >&2
+  exit 1
+}
+# Modify the owner repo's working tree — identity must now differ
+printf 'dirty content added after owner record\n' >> "$TEST_ROOT/dirty-owner-retry/README.md"
+# Retry: must be rejected because identity changed
+if PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/dirty-owner-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" dirty-owner-retry >/dev/null 2>&1; then
+  printf 'cleanup accepted dirty-owner retry with changed identity (unexpected)\n' >&2
+  exit 1
+fi
+[[ -e "$TEST_ROOT/fleet/dirty-owner-retry" ]] || {
+  printf 'fleet state unexpectedly removed after rejected retry\n' >&2
+  exit 1
+}
+rm "$TEST_ROOT/fake-bin/git"
+printf 'sgt-cleanup dirty-owner-retry: changed identity correctly rejected\n'
 
 mkdir -p "$TEST_ROOT/fleet/partial-publication/app" \
   "$TEST_ROOT/fake-bin"
@@ -2797,322 +2872,6 @@ grep -Fq 'unverified detached descendants' "$TEST_ROOT/nonleader.log" || {
 }
 
 printf 'sgt-cleanup escaped-descendant blocked-termination guards (PR14-F2 AC4): ok\n'
-
-# ── Stable identity validation ────────────────────────────────────────────────
-# The stable identity token (sentinel + inode/device + remote + root commits)
-# excludes volatile state (HEAD, refs, staged/unstaged changes, config) so that
-# legitimate retries after new commits are not rejected.
-
-init_retry_repo() {
-  local repo_root="$1"
-  mkdir -p "$repo_root"
-  git -C "$repo_root" init -q
-  git -C "$repo_root" config user.name Test
-  git -C "$repo_root" config user.email test@example.invalid
-  printf 'fixture\n' > "$repo_root/README.md"
-  git -C "$repo_root" add README.md
-  git -C "$repo_root" commit -qm fixture
-}
-
-make_retry_config() {
-  local task_id="$1" repo_name="$2" repo_root="$3"
-  cat > "$TEST_ROOT/config/$task_id.yaml" <<EOF
-name: $task_id
-repos:
-  - name: $repo_name
-    path: $repo_root
-EOF
-  printf 'Project: %s\n' "$task_id" > "$TEST_ROOT/fleet/$task_id/brief.md"
-}
-
-# _capture_identity matches _record_cleanup_owner: creates the sentinel token.
-_capture_identity() {
-  local repo_root="$1"
-  local git_dir git_common_dir inode_dev roots remote sentinel sentinel_file tmp_token
-  git_dir="$(git -C "$repo_root" rev-parse --absolute-git-dir 2>/dev/null)"
-  git_common_dir="$(git -C "$repo_root" \
-    rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
-  sentinel_file="$git_common_dir/sergeant-instance"
-  if [[ ! -f "$sentinel_file" ]]; then
-    tmp_token="$(printf '%s\n%s\n%s\n%s\n' \
-      "$git_common_dir" "$$" "$RANDOM" "$(date +%s)" | git hash-object --stdin)"
-    printf '%s\n' "$tmp_token" > "$sentinel_file"
-  fi
-  sentinel="$(cat "$sentinel_file")"
-  inode_dev="$(stat -c '%d:%i' "$git_dir" 2>/dev/null || \
-    stat -f '%d:%i' "$git_dir" 2>/dev/null)"
-  roots="$(git -C "$repo_root" rev-list --max-parents=0 --all 2>/dev/null | LC_ALL=C sort)"
-  remote="$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null || true)"
-  printf '%s\n%s\n%s\n%s\n' "$sentinel" "$inode_dev" "$remote" "$roots" | \
-    git hash-object --stdin
-}
-
-# Slice 1: tampered cleanup-owner identity is rejected before any destructive step.
-
-tamper_state="$TEST_ROOT/fleet/tamper-retry/app"
-mkdir -p "$tamper_state"
-init_retry_repo "$TEST_ROOT/tamper-retry"
-git -C "$TEST_ROOT/tamper-retry" worktree add -q -b tamper-branch \
-  "$TEST_ROOT/tamper-retry-sgt-tamper-retry"
-make_retry_config tamper-retry app "$TEST_ROOT/tamper-retry"
-printf '%s\n' "$TEST_ROOT/tamper-retry-sgt-tamper-retry" > "$tamper_state/worktree"
-printf 'git\n' > "$tamper_state/wt_type"
-printf 'done\n' > "$tamper_state/status"
-printf 'result\n' > "$tamper_state/result"
-printf 'done\n' > "$TEST_ROOT/tamper-retry-sgt-tamper-retry/.sergeant-status"
-printf 'result\n' > "$TEST_ROOT/tamper-retry-sgt-tamper-retry/.sergeant-result"
-printf 'removing\n%s\ngit\n%s\n' \
-  "$TEST_ROOT/tamper-retry-sgt-tamper-retry" \
-  "$TEST_ROOT/tamper-retry" \
-  > "$tamper_state/cleanup-phase"
-printf '2\ntamper-retry\n%s\n%s\ngit\nwrong-identity-hash\n\n' \
-  "$TEST_ROOT/tamper-retry" \
-  "$TEST_ROOT/tamper-retry-sgt-tamper-retry" \
-  > "$tamper_state/cleanup-owner"
-set +e
-SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" tamper-retry \
-  > "$TEST_ROOT/tamper-retry.log" 2>&1
-tamper_status=$?
-set -e
-[[ "$tamper_status" -ne 0 ]] || {
-  printf 'cleanup accepted tampered owner identity\n' >&2; exit 1
-}
-grep -E 'Retry owner repo identity changed|Cannot identify retry owner repo' \
-  "$TEST_ROOT/tamper-retry.log" >/dev/null || {
-  printf 'unexpected tamper error: %s\n' "$(cat "$TEST_ROOT/tamper-retry.log")" >&2; exit 1
-}
-[[ -d "$TEST_ROOT/tamper-retry-sgt-tamper-retry" ]]
-[[ -d "$TEST_ROOT/fleet/tamper-retry" ]]
-
-printf 'sgt-cleanup stable identity: tampered retry rejected\n'
-
-# Slice 2: valid first-pass cleanup with real repo succeeds.
-
-mkdir -p "$TEST_ROOT/fleet/valid-retry"
-init_retry_repo "$TEST_ROOT/valid-retry"
-git -C "$TEST_ROOT/valid-retry" worktree add -q -b valid-branch \
-  "$TEST_ROOT/valid-retry-sgt-valid-retry"
-make_retry_config valid-retry app "$TEST_ROOT/valid-retry"
-mkdir -p "$TEST_ROOT/fleet/valid-retry/app"
-printf '%s\n' "$TEST_ROOT/valid-retry-sgt-valid-retry" \
-  > "$TEST_ROOT/fleet/valid-retry/app/worktree"
-printf 'git\n' > "$TEST_ROOT/fleet/valid-retry/app/wt_type"
-printf 'done\n' > "$TEST_ROOT/fleet/valid-retry/app/status"
-printf 'result\n' > "$TEST_ROOT/fleet/valid-retry/app/result"
-printf 'done\n' > "$TEST_ROOT/valid-retry-sgt-valid-retry/.sergeant-status"
-printf 'result\n' > "$TEST_ROOT/valid-retry-sgt-valid-retry/.sergeant-result"
-SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" valid-retry >/dev/null
-[[ ! -e "$TEST_ROOT/valid-retry-sgt-valid-retry" ]]
-[[ ! -e "$TEST_ROOT/fleet/valid-retry" ]]
-
-printf 'sgt-cleanup stable identity: valid first-pass cleanup ok\n'
-
-# Slice 3: same-origin clone replacement (absent-worktree path) is rejected.
-# The new clone has no sentinel file → identity differs → rejected.
-
-clone_state="$TEST_ROOT/fleet/clone-retry/app"
-mkdir -p "$TEST_ROOT/fleet/clone-retry"
-init_retry_repo "$TEST_ROOT/clone-retry"
-make_retry_config clone-retry app "$TEST_ROOT/clone-retry"
-mkdir -p "$clone_state"
-printf '%s\n' "$TEST_ROOT/clone-retry-sgt-clone-retry" > "$clone_state/worktree"
-printf 'git\n' > "$clone_state/wt_type"
-printf 'done\n' > "$clone_state/status"
-printf 'result\n' > "$clone_state/result"
-mkdir -p "$clone_state/terminal-evidence"
-printf 'done\n' > "$clone_state/terminal-evidence/.sergeant-status"
-printf 'result\n' > "$clone_state/terminal-evidence/.sergeant-result"
-original_identity="$(_capture_identity "$TEST_ROOT/clone-retry")"
-printf '2\nclone-retry\n%s\n%s\ngit\n%s\n\n' \
-  "$TEST_ROOT/clone-retry" \
-  "$TEST_ROOT/clone-retry-sgt-clone-retry" \
-  "$original_identity" \
-  > "$clone_state/cleanup-owner"
-printf 'removing\n%s\ngit\n%s\n' \
-  "$TEST_ROOT/clone-retry-sgt-clone-retry" \
-  "$TEST_ROOT/clone-retry" \
-  > "$clone_state/cleanup-phase"
-rm -rf "$TEST_ROOT/clone-retry"
-init_retry_repo "$TEST_ROOT/clone-retry"
-set +e
-SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" clone-retry \
-  > "$TEST_ROOT/clone-retry.log" 2>&1
-clone_status=$?
-set -e
-[[ "$clone_status" -ne 0 ]] || {
-  printf 'cleanup accepted same-origin clone replacement\n' >&2; exit 1
-}
-grep -E 'Retry owner repo identity changed|Cannot identify retry owner repo' \
-  "$TEST_ROOT/clone-retry.log" >/dev/null || {
-  printf 'unexpected clone error: %s\n' "$(cat "$TEST_ROOT/clone-retry.log")" >&2; exit 1
-}
-[[ -d "$TEST_ROOT/fleet/clone-retry" ]]
-
-printf 'sgt-cleanup stable identity: same-origin clone replacement rejected\n'
-
-# Slice 4: HEAD/ref changes do NOT invalidate a valid retry (stable identity).
-
-head_change_state="$TEST_ROOT/fleet/head-change/app"
-mkdir -p "$TEST_ROOT/fleet/head-change"
-init_retry_repo "$TEST_ROOT/head-change"
-git -C "$TEST_ROOT/head-change" worktree add -q -b head-branch \
-  "$TEST_ROOT/head-change-sgt-head-change"
-make_retry_config head-change app "$TEST_ROOT/head-change"
-mkdir -p "$head_change_state"
-printf '%s\n' "$TEST_ROOT/head-change-sgt-head-change" > "$head_change_state/worktree"
-printf 'git\n' > "$head_change_state/wt_type"
-printf 'done\n' > "$head_change_state/status"
-printf 'result\n' > "$head_change_state/result"
-mkdir -p "$head_change_state/terminal-evidence"
-printf 'done\n' > "$head_change_state/terminal-evidence/.sergeant-status"
-printf 'result\n' > "$head_change_state/terminal-evidence/.sergeant-result"
-original_head_identity="$(_capture_identity "$TEST_ROOT/head-change")"
-printf '2\nhead-change\n%s\n%s\ngit\n%s\n\n' \
-  "$TEST_ROOT/head-change" \
-  "$TEST_ROOT/head-change-sgt-head-change" \
-  "$original_head_identity" \
-  > "$head_change_state/cleanup-owner"
-printf 'removing\n%s\ngit\n%s\n' \
-  "$TEST_ROOT/head-change-sgt-head-change" \
-  "$TEST_ROOT/head-change" \
-  > "$head_change_state/cleanup-phase"
-printf 'new content\n' >> "$TEST_ROOT/head-change/README.md"
-git -C "$TEST_ROOT/head-change" add README.md
-git -C "$TEST_ROOT/head-change" commit -qm 'new commit'
-git -C "$TEST_ROOT/head-change" tag new-ref HEAD
-SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" head-change >/dev/null || {
-  printf 'cleanup rejected valid retry after HEAD/ref change\n' >&2; exit 1
-}
-[[ ! -e "$TEST_ROOT/fleet/head-change" ]]
-
-printf 'sgt-cleanup stable identity: HEAD/ref change does not invalidate retry\n'
-
-# Slice 5: in-place remote URL change IS rejected (remote is part of stable identity).
-
-remote_change_state="$TEST_ROOT/fleet/remote-change/app"
-mkdir -p "$TEST_ROOT/fleet/remote-change"
-init_retry_repo "$TEST_ROOT/remote-change"
-git -C "$TEST_ROOT/remote-change" remote add origin https://example.com/original.git
-git -C "$TEST_ROOT/remote-change" worktree add -q -b remote-branch \
-  "$TEST_ROOT/remote-change-sgt-remote-change"
-make_retry_config remote-change app "$TEST_ROOT/remote-change"
-mkdir -p "$remote_change_state"
-printf '%s\n' "$TEST_ROOT/remote-change-sgt-remote-change" \
-  > "$remote_change_state/worktree"
-printf 'git\n' > "$remote_change_state/wt_type"
-printf 'done\n' > "$remote_change_state/status"
-printf 'result\n' > "$remote_change_state/result"
-mkdir -p "$remote_change_state/terminal-evidence"
-printf 'done\n' > "$remote_change_state/terminal-evidence/.sergeant-status"
-printf 'result\n' > "$remote_change_state/terminal-evidence/.sergeant-result"
-original_remote_identity="$(_capture_identity "$TEST_ROOT/remote-change")"
-printf '2\nremote-change\n%s\n%s\ngit\n%s\n\n' \
-  "$TEST_ROOT/remote-change" \
-  "$TEST_ROOT/remote-change-sgt-remote-change" \
-  "$original_remote_identity" \
-  > "$remote_change_state/cleanup-owner"
-printf 'removing\n%s\ngit\n%s\n' \
-  "$TEST_ROOT/remote-change-sgt-remote-change" \
-  "$TEST_ROOT/remote-change" \
-  > "$remote_change_state/cleanup-phase"
-git -C "$TEST_ROOT/remote-change" remote set-url origin https://example.com/replaced.git
-set +e
-SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" remote-change \
-  > "$TEST_ROOT/remote-change.log" 2>&1
-remote_status=$?
-set -e
-[[ "$remote_status" -ne 0 ]] || {
-  printf 'cleanup accepted in-place remote URL change\n' >&2; exit 1
-}
-grep -E 'Retry owner repo identity changed|Cannot identify retry owner repo' \
-  "$TEST_ROOT/remote-change.log" >/dev/null || {
-  printf 'unexpected remote error: %s\n' "$(cat "$TEST_ROOT/remote-change.log")" >&2; exit 1
-}
-[[ -d "$TEST_ROOT/fleet/remote-change" ]]
-
-printf 'sgt-cleanup stable identity: in-place remote URL change rejected\n'
-
-# Slice 6: root-commit-changing reset (orphan branch) is rejected.
-
-root_change_state="$TEST_ROOT/fleet/root-change/app"
-mkdir -p "$TEST_ROOT/fleet/root-change"
-init_retry_repo "$TEST_ROOT/root-change"
-git -C "$TEST_ROOT/root-change" worktree add -q -b root-branch \
-  "$TEST_ROOT/root-change-sgt-root-change"
-make_retry_config root-change app "$TEST_ROOT/root-change"
-mkdir -p "$root_change_state"
-printf '%s\n' "$TEST_ROOT/root-change-sgt-root-change" > "$root_change_state/worktree"
-printf 'git\n' > "$root_change_state/wt_type"
-printf 'done\n' > "$root_change_state/status"
-printf 'result\n' > "$root_change_state/result"
-mkdir -p "$root_change_state/terminal-evidence"
-printf 'done\n' > "$root_change_state/terminal-evidence/.sergeant-status"
-printf 'result\n' > "$root_change_state/terminal-evidence/.sergeant-result"
-original_root_identity="$(_capture_identity "$TEST_ROOT/root-change")"
-printf '2\nroot-change\n%s\n%s\ngit\n%s\n\n' \
-  "$TEST_ROOT/root-change" \
-  "$TEST_ROOT/root-change-sgt-root-change" \
-  "$original_root_identity" \
-  > "$root_change_state/cleanup-owner"
-printf 'removing\n%s\ngit\n%s\n' \
-  "$TEST_ROOT/root-change-sgt-root-change" \
-  "$TEST_ROOT/root-change" \
-  > "$root_change_state/cleanup-phase"
-git -C "$TEST_ROOT/root-change" checkout --orphan orphan-root -q
-git -C "$TEST_ROOT/root-change" rm -rf . -q
-printf 'orphan root\n' > "$TEST_ROOT/root-change/orphan.md"
-git -C "$TEST_ROOT/root-change" add orphan.md
-git -C "$TEST_ROOT/root-change" commit -qm 'orphan root'
-set +e
-SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" root-change \
-  > "$TEST_ROOT/root-change.log" 2>&1
-root_status=$?
-set -e
-[[ "$root_status" -ne 0 ]] || {
-  printf 'cleanup accepted root-commit-changing reset\n' >&2; exit 1
-}
-grep -E 'Retry owner repo identity changed|Cannot identify retry owner repo' \
-  "$TEST_ROOT/root-change.log" >/dev/null || {
-  printf 'unexpected root-change error: %s\n' "$(cat "$TEST_ROOT/root-change.log")" >&2; exit 1
-}
-[[ -d "$TEST_ROOT/fleet/root-change" ]]
-
-printf 'sgt-cleanup stable identity: root-commit-changing reset rejected\n'
-
-# Slice 7: configured linked worktree (repo has .git as a file) succeeds.
-
-mkdir -p "$TEST_ROOT/fleet/stable-linked/app"
-init_retry_repo "$TEST_ROOT/stable-linked-main"
-git -C "$TEST_ROOT/stable-linked-main" worktree add -q -b stable-linked-configured \
-  "$TEST_ROOT/stable-linked"
-[[ -f "$TEST_ROOT/stable-linked/.git" ]] || {
-  printf 'Fixture error: stable-linked .git is not a file\n' >&2; exit 1
-}
-git -C "$TEST_ROOT/stable-linked" worktree add -q -b stable-linked-worker \
-  "$TEST_ROOT/stable-linked-sgt-stable-linked"
-make_retry_config stable-linked app "$TEST_ROOT/stable-linked"
-printf '%s\n' "$TEST_ROOT/stable-linked-sgt-stable-linked" \
-  > "$TEST_ROOT/fleet/stable-linked/app/worktree"
-printf 'git\n' > "$TEST_ROOT/fleet/stable-linked/app/wt_type"
-printf 'done\n' > "$TEST_ROOT/fleet/stable-linked/app/status"
-printf 'result\n' > "$TEST_ROOT/fleet/stable-linked/app/result"
-printf 'done\n' > "$TEST_ROOT/stable-linked-sgt-stable-linked/.sergeant-status"
-printf 'result\n' > "$TEST_ROOT/stable-linked-sgt-stable-linked/.sergeant-result"
-SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" stable-linked >/dev/null || {
-  printf 'cleanup failed for linked-worktree configured repo\n' >&2; exit 1
-}
-[[ ! -e "$TEST_ROOT/stable-linked-sgt-stable-linked" ]]
-[[ ! -e "$TEST_ROOT/fleet/stable-linked" ]]
-
-printf 'sgt-cleanup stable identity: linked-worktree configured repo ok\n'
-
 # ── Issue #21: remove dead remain-on-exit worker panes ───────────────────────
 # When a worker pane has pane_dead=1 (tmux remain-on-exit), cleanup must call
 # kill-pane to remove the zombie pane, not just skip it silently.
