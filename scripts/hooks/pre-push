@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# pre-push — Run the drain test suite in Docker before every push.
+#
+# Installed by: mise run install
+# Source:       scripts/hooks/pre-push
+#
+# Runs `mise run test:docker:drain`, which executes the drain test suite
+# in two isolated Docker containers (Debian system Bash + Alpine Bash 3.2).
+#
+# To skip in an emergency:
+#   git push --no-verify
+#
+# To reinstall after cloning:
+#   mise run install
+
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+
+# Resolve mise — try PATH first, then common install locations.
+MISE=""
+for candidate in mise "$HOME/.local/bin/mise" "$HOME/.cargo/bin/mise"; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    MISE="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$MISE" ]]; then
+  printf 'pre-push: mise not found — cannot run drain test suite.\n' >&2
+  printf 'Install mise (https://mise.jdx.dev) or run git push --no-verify to skip.\n' >&2
+  exit 1
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  printf 'pre-push: docker not found — cannot run drain test suite.\n' >&2
+  printf 'Install Docker or run git push --no-verify to skip.\n' >&2
+  exit 1
+fi
+
+printf 'pre-push: running drain test suite (git push --no-verify to skip)...\n'
+"$MISE" run --cd "$REPO_DIR" test:docker:drain
