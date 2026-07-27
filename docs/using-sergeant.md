@@ -117,14 +117,21 @@ Workers wake the coordinator by updating one shared per-task notify marker in
 fleet state. `sgt-watch` polls that marker, so simultaneous repo updates can at
 worst collapse into a delayed wakeup rather than duplicate delivery.
 
-Do not equate `in_progress` with health. Require exact live pane/process identity
-plus recent meaningful log activity or an active child operation.
+Do not equate `in_progress` with health. Require exact live worker-pane identity
+plus recent meaningful progress evidence. `sgt-watch` prefers tmux
+`pane_activity`, falls back to the worker's recorded `progress_ts`, and uses the
+`.sergeant-status` mtime only when no better timestamp exists. When that
+evidence stays older than the default 300-second grace window,
+`sgt-watch --sync` keeps the repo `in_progress` and records a nonterminal
+`live worker stalled` diagnostic instead. Set `SERGEANT_STALL_GRACE_SECONDS` to
+change the grace window and `SERGEANT_STALL_DIAG_BUCKET` to control how often
+the elapsed-seconds text is rewritten during repeated syncs.
 
 ## Worker states
 
 | State | Meaning | Operator action |
 |---|---|---|
-| `in_progress` | Worker reports active work | Verify progress evidence before calling it healthy |
+| `in_progress` | Worker reports active work and may carry a nonterminal stall diagnostic | Verify progress evidence before calling it healthy |
 | `needs_input` | Human decision required | Read exact message and respond once per generation |
 | `blocked` | Durable dependency or external blocker | Preserve worktree/handoff; resume after dependency resolution |
 | `orphaned` | Expected supervisor identity disappeared without a durable waiting state | Reconcile process, pane, worktree, branch, task, and handoff before recovery |

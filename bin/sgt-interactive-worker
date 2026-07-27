@@ -40,10 +40,32 @@ _status() {
   tr -d '\n' < "$WORKTREE/.sergeant-status" 2>/dev/null || echo "in_progress"
 }
 
+_record_progress() {
+  date +%s > "$REPO_STATE/progress_ts" 2>/dev/null || true
+}
+
+# _watch_progress: background loop that updates progress_ts whenever the agent
+# changes observable sentinel files (.sergeant-status, .sergeant-message).
+# This gives the stall classifier evidence of real agent activity rather than
+# only the startup timestamp.
+_watch_progress() {
+  local prev_sentinel curr_sentinel
+  prev_sentinel="$(cat "$WORKTREE/.sergeant-status" "$WORKTREE/.sergeant-message" 2>/dev/null || true)"
+  while :; do
+    sleep "${SGT_PROGRESS_INTERVAL:-30}"
+    curr_sentinel="$(cat "$WORKTREE/.sergeant-status" "$WORKTREE/.sergeant-message" 2>/dev/null || true)"
+    if [[ "$curr_sentinel" != "$prev_sentinel" ]]; then
+      _record_progress
+      prev_sentinel="$curr_sentinel"
+    fi
+  done
+}
+
 _sync_state() {
   local status
   status="$(_status)"
   printf '%s\n' "$status" > "$REPO_STATE/status"
+  _record_progress
   if [[ "$status" == "done" && -s "$WORKTREE/.sergeant-result" ]]; then
     cp "$WORKTREE/.sergeant-result" "$REPO_STATE/result"
   else
@@ -55,6 +77,7 @@ _finish() {
   local exit_code="$1" status
   trap - EXIT
   [[ -z "${notification_pid:-}" ]] || kill "$notification_pid" 2>/dev/null || true
+  [[ -z "${watch_progress_pid:-}" ]] || kill "$watch_progress_pid" 2>/dev/null || true
   status="$(_status)"
   case "$status" in
     done)
@@ -244,6 +267,8 @@ trap '_finish $?' EXIT
 cd "$WORKTREE" || exit 2
 _deliver_notifications &
 notification_pid=$!
+_watch_progress &
+watch_progress_pid=$!
 case "$harness" in
   goose) "$AGENT" session ;;
   opencode|oc) "$AGENT" --dangerously-skip-permissions ;;
