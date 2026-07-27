@@ -137,9 +137,30 @@ stalled` case.
 | `in_progress` | Worker reports active work and may carry a nonterminal stall diagnostic | Verify progress evidence before calling it healthy |
 | `needs_input` | Human decision required | Read exact message and respond once per generation |
 | `blocked` | Durable dependency or external blocker | Preserve worktree/handoff; resume after dependency resolution |
+| `waiting` | Deferred work published a durable wake condition and may have exited cleanly | Let `sgt-wake` resume it automatically, or use `sgt-respond` only for a human-response gate |
 | `orphaned` | Expected supervisor identity disappeared without a durable waiting state | Reconcile process, pane, worktree, branch, task, and handoff before recovery |
 | `done` | Completion evidence recorded | Verify PR/CI/review/dependencies before cleanup |
 | `failed` | Unrecoverable terminal failure recorded | Preserve evidence and decide retry/reassignment |
+
+## Resume deferred work
+
+Use `waiting` instead of sleep loops for CI checks, dependency completion, and
+time-based delays. The worker writes `.sergeant-wake-condition`, sets
+`.sergeant-status=waiting`, and may exit cleanly after its durable handoff.
+
+```bash
+sgt-wake <fleet-task-id> <repo>
+```
+
+`sgt-wake` evaluates the condition and resumes the exact waiting worker through
+`sgt-respond` when the condition is met. Supported kinds are `not_before`,
+`github_check`, `fleet_dependency`, `td_dependency`, `deployment`, and
+`human_response`. Every condition requires `generation=<int>`. Optional fields
+are `deadline=<unix_timestamp>`, `max_attempts=<int>`, and
+`backoff_base=<seconds>`. `human_response` does not auto-resume; it converts the
+worker to `needs_input` so a human can reply with `sgt-respond`. `deployment`
+remains a declared condition kind, but today it also escalates to
+`needs_input` until an installation-specific deployment adapter is wired.
 
 ## Respond to a worker
 

@@ -74,6 +74,7 @@ the operation with ad hoc shell commands.
 | `bin/sgt-watch --sync-all` | Reconcile every durable fleet record and recycle verified terminal panes |
 | `bin/sgt-watch --list` | List all active tasks |
 | `bin/sgt-respond <task-id> <repo>` | Read a worker response from stdin and resume its loop |
+| `bin/sgt-wake <task-id> <repo>` | Evaluate a waiting worker's durable wake condition and resume it when met |
 | `bin/sgt-recover <task-id> <repo>` | Attempt one bounded stall recovery for a live-but-stalled in-progress worker |
 | `bin/sgt-ack-response <task-id> <repo> <response-id>` | Acknowledge one consumed response from the exact worker pane |
 | `bin/sgt-validate <task-id> <repo> [--skip <steps>]` | Launch coordinator-owned no-mistakes in a split worker-window pane |
@@ -133,7 +134,7 @@ When the user brings you a task:
 8. **Handle decisions** — for `needs_input`, `blocked`, or ask-user gates, read the exact finding, obtain only genuinely missing user decisions, record them in td, and continue approved remediation without asking again merely to dispatch.
 9. **Reconcile and deliver** — surface PRs and merge order, complete approved merges/deployments, and run `sgt-cleanup` only after terminal state and preserved evidence are verified.
 
-Workers use `in_progress`, `needs_input`, and `blocked` as nonterminal states. A waiting worker may remain alive or may exit after a durable handoff. Do not infer progress from liveness, do not rewrite an expected blocked exit as orphaned, and do not clean a waiting worktree. Use `sgt-respond` or supported recovery only after reconciling status, response generation, pane identity, and handoff evidence.
+Workers use `in_progress`, `needs_input`, `blocked`, and `waiting` as nonterminal states. A waiting worker may remain alive or may exit after a durable handoff. Deferred waits should publish `.sergeant-wake-condition` and resume through `sgt-wake`; human decisions still resume through `sgt-respond`. Do not infer progress from liveness, do not rewrite an expected blocked exit as orphaned, and do not clean a waiting worktree. Use `sgt-respond`, `sgt-wake`, or supported recovery only after reconciling status, response generation, pane identity, and handoff evidence.
 
 Every dispatched implementation, independent review, PR description, successor,
 recovery, and final shipping gate must use the same canonical intent revision from
