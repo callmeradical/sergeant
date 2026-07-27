@@ -661,15 +661,27 @@ _sgt_background_watch() {
     _die "Failed to start managed background monitor for $task_id"
 
   # Capture the InvocationID that systemd assigned to this exact run.
-  invocation_id="$(_sgt_monitor_invocation_id "$unit")"
+  # systemd assigns the InvocationID asynchronously after the unit transitions
+  # to active; retry briefly so a slow host does not fail the read.
+  invocation_id=""
+  local _inv_attempt=0
+  while [[ -z "$invocation_id" && "$_inv_attempt" -lt 20 ]]; do
+    invocation_id="$(_sgt_monitor_invocation_id "$unit")"
+    if [[ -z "$invocation_id" ]]; then
+      sleep 0.1
+      _inv_attempt=$((_inv_attempt + 1))
+    fi
+  done
   [[ -n "$invocation_id" ]] || \
     _die "Failed to read InvocationID after starting monitor for $task_id (unit: $unit)"
 
-  # Persist ownership atomically.
-  printf '%s\n' "$unit"          > "$task_dir/monitor_unit.tmp.$$"
-  mv "$task_dir/monitor_unit.tmp.$$" "$task_dir/monitor_unit"
+  # Persist ownership with invocation_id written first so a crash between the
+  # two writes leaves monitor_unit absent; cleanup then silently skips rather
+  # than dying on a missing invocation ID.
   printf '%s\n' "$invocation_id" > "$task_dir/monitor_invocation_id.tmp.$$"
   mv "$task_dir/monitor_invocation_id.tmp.$$" "$task_dir/monitor_invocation_id"
+  printf '%s\n' "$unit"          > "$task_dir/monitor_unit.tmp.$$"
+  mv "$task_dir/monitor_unit.tmp.$$" "$task_dir/monitor_unit"
 
   _sgt_print_monitor_identity "$unit" "$invocation_id"
 }

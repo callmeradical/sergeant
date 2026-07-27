@@ -296,4 +296,53 @@ fg_output="$(SERGEANT_WATCH_INTERVAL=0 EXPECTED_WORKER="$repo3" PATH="$fake_bin3
 grep -Fq 'All repos done.' <<< "$fg_output"
 printf 'sgt-watch foreground unaffected: ok\n'
 
+# ── Test 11: split-write crash window recovery ────────────────────────────────
+# If monitor_unit was written but monitor_invocation_id was not (crash between
+# the two old writes), sgt-cleanup must not die hard; it should either skip or
+# surface an actionable error.  With the new write order (invocation_id first),
+# this state (unit present, invocation absent) is the old crash state and
+# must be handled gracefully: cleanup should report an error rather than
+# proceeding with an unverified stop.
+task_c11="$fleet/task-crash-11"
+repo_c11="$task_c11/app"
+unit_c11="sgt-watch-task-crash-11.service"
+mkdir -p "$repo_c11"
+printf '%s\n' "$unit_c11" > "$task_c11/monitor_unit"
+# intentionally omit monitor_invocation_id to simulate crash-window state
+# sgt-cleanup requires terminal repos; create minimal passing state
+printf 'done\n' > "$repo_c11/status"
+printf 'https://example.invalid/pr/11\n' > "$repo_c11/result"
+crash_error="$(SGT_FAKE_SYSTEMD_STATE="$fake_systemd_state" \
+  SERGEANT_FLEET="$fleet" \
+  SERGEANT_SYSTEMCTL="$fake_bin/systemctl" \
+  SERGEANT_SYSTEMD_RUN="$fake_bin/systemd-run" \
+  "$ROOT/bin/sgt-cleanup" "task-crash-11" 2>&1 || true)"
+# Cleanup must produce an error (invocation ID missing = cannot safely stop)
+grep -Eq 'ERROR.*[Ii]nvocation|ERROR.*missing|ERROR.*safely' <<< "$crash_error"
+printf 'sgt-cleanup split-write crash window: ok\n'
+
+# ── Test 12: zero-GUID InvocationID treated as absent ────────────────────────
+# The zero GUID (32 zeros) returned by systemd for an inactive unit must not
+# be treated as a valid invocation ID.
+task_c12="$fleet/task-zeroguid-12"
+repo_c12="$task_c12/app"
+worktree_c12="$TEST_ROOT/worktree12"
+unit_c12="sgt-watch-task-zeroguid-12.service"
+mkdir -p "$repo_c12" "$worktree_c12"
+printf '%s\n' "$worktree_c12" > "$repo_c12/worktree"
+printf 'in_progress\n' > "$repo_c12/status"
+printf 'in_progress\n' > "$worktree_c12/.sergeant-status"
+# Set fake systemd to return the zero GUID
+printf 'active\n' > "$fake_systemd_state/$unit_c12.status"
+printf '00000000000000000000000000000000\n' > "$fake_systemd_state/$unit_c12.invocation_id"
+# Background start must fail because the zero GUID is treated as absent
+zeroguid_error="$(SGT_FAKE_SYSTEMD_STATE="$fake_systemd_state" \
+  SERGEANT_FLEET="$fleet" \
+  SERGEANT_SYSTEMCTL="$fake_bin/systemctl" \
+  SERGEANT_SYSTEMD_RUN="$fake_bin/systemd-run" \
+  SGT_FAKE_INVOCATION_ID="00000000000000000000000000000000" \
+  "$ROOT/bin/sgt-watch" "task-zeroguid-12" --background 2>&1 || true)"
+grep -Eq 'ERROR.*[Ii]nvocation|ERROR.*[Ff]ailed' <<< "$zeroguid_error"
+printf 'sgt-watch --background zero-GUID InvocationID rejected: ok\n'
+
 printf '\nsgt-watch background mode: all tests passed\n'
