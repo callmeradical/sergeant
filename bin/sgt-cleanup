@@ -1376,6 +1376,10 @@ _require_clean_worktrees
 echo "=== sgt-cleanup: $TASK_ID ==="
 echo ""
 
+if [[ -z "$FILTER_REPO" ]]; then
+  _sgt_stop_background_monitor "$TASK_DIR"
+fi
+
 for repo_dir in "$TASK_DIR"/*/; do
   [[ -d "$repo_dir" ]] || continue
   repo_dir="${repo_dir%/}"
