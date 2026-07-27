@@ -112,7 +112,7 @@ grep -Fq 'api is not terminal: in_progress' "$TEST_ROOT/preflight-cleanup.log"
 [[ -d "$TEST_ROOT/preflight-api" ]]
 [[ -d "$TEST_ROOT/fleet/preflight-task" ]]
 
-for unsafe_status in dispatched in_progress needs_input blocked orphaned unknown failed 'failed:' 'failed: '; do
+for unsafe_status in dispatched in_progress needs_input blocked waiting orphaned unknown failed 'failed:' 'failed: '; do
   task_id="status-${unsafe_status}"
   status_state="$TEST_ROOT/fleet/$task_id/app"
   status_worktree="$TEST_ROOT/$task_id-worktree"
