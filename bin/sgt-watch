@@ -23,7 +23,7 @@ if [[ "${1:-}" == "--list" ]]; then
     started="$(cat "$task_dir/started" 2>/dev/null || echo "unknown")"
     brief="$(grep '^Brief:' "$task_dir/brief.md" 2>/dev/null | sed 's/^Brief: *//' | cut -c1-60 || echo "")"
     notify_event="$(sed -n 's/^event=//p' "$task_dir/notify" 2>/dev/null || true)"
-    total=0; done_count=0; failed_count=0; in_progress=0; needs_input=0; blocked=0; orphaned=0
+    total=0; done_count=0; failed_count=0; in_progress=0; needs_input=0; blocked=0; orphaned=0; waiting=0
     for repo_dir in "$task_dir"/*/; do
       [[ -d "$repo_dir" ]] || continue
       total=$((total + 1))
@@ -34,6 +34,7 @@ if [[ "${1:-}" == "--list" ]]; then
         in_progress) in_progress=$((in_progress + 1)) ;;
         needs_input) needs_input=$((needs_input + 1)) ;;
         blocked) blocked=$((blocked + 1)) ;;
+        waiting) waiting=$((waiting + 1)) ;;
         orphaned) orphaned=$((orphaned + 1)) ;;
       esac
     done
@@ -41,7 +42,7 @@ if [[ "${1:-}" == "--list" ]]; then
     echo "    brief:   $brief"
     echo "    started: $started"
     [[ -z "$notify_event" ]] || echo "    notify:  $notify_event"
-    echo "    repos:   $total total - $done_count done, $in_progress in-progress, $needs_input needs-input, $blocked blocked, $orphaned orphaned, $failed_count failed"
+    echo "    repos:   $total total - $done_count done, $in_progress in-progress, $needs_input needs-input, $blocked blocked, $waiting waiting, $orphaned orphaned, $failed_count failed"
     echo ""
   done
   exit 0
@@ -358,6 +359,7 @@ _print_status() {
       failed*|orphaned) icon="✗"; any_failed=true ;;
       needs_input) icon="?"; all_terminal=false ;;
       blocked) icon="!"; all_terminal=false ;;
+      waiting) icon="⏸"; all_terminal=false ;;
       in_progress|dispatched) icon="…"; all_terminal=false ;;
       *) icon="·"; all_terminal=false ;;
     esac

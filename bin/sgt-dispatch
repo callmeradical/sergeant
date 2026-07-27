@@ -742,7 +742,21 @@ When Sergeant notifies you of a response, read \`.sergeant-response\`, \`.sergea
 
 Completion requires both .sergeant-status=done and a non-empty .sergeant-result; a PR or successful turn alone is not terminal completion.
 
-Supported nonterminal statuses are \`in_progress\`, \`needs_input\`, and \`blocked\`; terminal statuses are \`done\` and \`failed: <reason>\`.
+Supported nonterminal statuses are \`in_progress\`, \`needs_input\`, \`blocked\`, and \`waiting\`; terminal statuses are \`done\` and \`failed: <reason>\`.
+
+Do not use sleep or polling loops for deferred work such as CI checks, dependency completion, or time-based delays. Use the \`waiting\` status with a structured wake condition instead: write \`.sergeant-wake-condition\` with a supported \`kind\` and the required fields, set \`.sergeant-status=waiting\`, then exit the session cleanly. The Sergeant scheduler (\`sgt-wake\`) evaluates the condition and resumes the session automatically when it is met.
+
+Supported wake condition kinds and their required fields:
+
+\`\`\`
+kind=not_before        not_before=<unix_timestamp>
+kind=github_check      run_id=<id> check_name=<name>
+kind=fleet_dependency  task_id=<id> repo=<repo>
+kind=td_dependency     td_task_id=<id>
+kind=human_response    (sets needs_input; requires manual sgt-respond)
+\`\`\`
+
+Optional fields on any kind: \`deadline=<unix_timestamp>\` (terminal failure if exceeded), \`max_attempts=<int>\` (becomes needs_input if exceeded). Required field on all conditions: \`generation=<int>\`. Do not persist arbitrary shell commands, prompt bodies, response text, tokens, or secrets in \`.sergeant-wake-condition\`; only the above allowlisted field names and alphanumeric-safe values are accepted.
 
 For \`needs_input\` or \`blocked\`, write \`.sergeant-message\` with concise context, evidence, the exact question or blocker, a recommendation, and 2-4 options when useful. Call \`sgt-notify $TASK_ID "needs_input [$rname]: <summary>"\` or the equivalent \`blocked\` message. The worker remains alive and waits for a response; do not exit or mark the task failed.
 
