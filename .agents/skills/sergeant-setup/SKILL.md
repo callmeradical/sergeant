@@ -74,10 +74,22 @@ Optional (skip, do not fail, if absent):
 - `no-mistakes` (for shipping validation)
 - `node`/`npm` (for external skill installation)
 
-For each `unsupported` prerequisite, create or suggest a td issue capturing the
-missing tool, its required version, and the acceptance criteria. Do not continue
-past Phase 1 until all required prerequisites are either present or the user
-accepts the risk of proceeding without them.
+For each `unsupported` prerequisite, show a draft td issue (title, description,
+and acceptance criteria) and ask for explicit approval before creating it:
+
+```
+td issue for '<tool>':
+  Title: Install <tool> <version> as a Sergeant prerequisite
+  Description: <tool> is required but has no supported install command.
+  Acceptance: <tool> resolves on PATH with version >= <required>.
+Create this td issue? [y/N]
+```
+
+Create the issue only after the user types `y` or `yes`. If declined, report
+the gap in the summary and continue without creating any tracking work.
+
+Do not continue past Phase 1 until all required prerequisites are either present
+or the user explicitly accepts the risk of proceeding without them.
 
 For each `installable` prerequisite, show the installation command and ask for
 explicit consent before running it:
@@ -92,19 +104,37 @@ other response.
 
 ## Phase 2: Clone and install command links
 
-If the Sergeant repository is not already cloned, show the clone command and ask
-for consent before running it:
+If the Sergeant repository is not already cloned:
 
-```bash
-git clone https://github.com/callmeradical/sergeant.git
+1. Ask where to place the clone:
+   ```
+   Where should Sergeant be cloned? [e.g. ~/Dev/sergeant]
+   ```
+   Wait for the user's answer. Do not proceed to step 2 until a destination is
+   provided.
+
+2. Show the exact command that will run and ask for consent:
+   ```
+   git clone https://github.com/callmeradical/sergeant.git <destination>
+   Clone to <destination>? [y/N]
+   ```
+   Run the command only after the user types `y` or `yes`. Leave the filesystem
+   unchanged on any other response.
+
+If `mise` is available, show the command and ask for consent before running it:
+
+```
+Run `mise run install` to symlink commands into ~/.local/bin? [y/N]
 ```
 
-After cloning, run `mise run install` when `mise` is available. Otherwise
-instruct the user to symlink commands from `bin/` into a directory on `PATH`.
+Run `mise run install` only after the user confirms. If `mise` is unavailable or
+consent is declined, instruct the user to symlink commands from `bin/` into a
+directory on `PATH` manually and verify the result before continuing.
 
 Verify that at least `sgt-list`, `sgt-context`, `sgt-dispatch`, and `sgt-watch`
 resolve on `PATH` before proceeding. Report any missing commands and their
-expected source path.
+expected source path. Stop the current run if verification fails after the user
+has followed the install instructions; the next run will re-check Phase 2.
 
 ## Phase 3: Global config
 
