@@ -324,6 +324,10 @@ _sync_task() {
         ;;
     esac
   done
+
+  if [[ -e "$task_dir/.callbacks/origin.json" || -L "$task_dir/.callbacks/origin.json" ]]; then
+    "$SCRIPT_DIR/sgt-callback" sync "$task_id"
+  fi
 }
 
 if [[ "${1:-}" == "--sync-all" ]]; then

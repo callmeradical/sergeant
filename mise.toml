@@ -1,5 +1,5 @@
 [tools]
-# No runtime tools required — sergeant supports the macOS system Bash 3.2+.
+# Sergeant supports Bash 3.2+ and uses Python 3 for bounded JSON/state handling.
 
 # ── Tasks ─────────────────────────────────────────────────────────────────────
 
@@ -146,6 +146,7 @@ echo ""
 echo "Required:"
 printf "  %-14s  ✓  %s\\n" "Bash" "${BASH_VERSION} (minimum 3.2)"
 _check "yq"         yq         required  "brew install yq"
+_check "Python"     python3     required  "install Python 3"
 _check "git"        git        required  "install Xcode command line tools"
 _check "gh"         gh         required  "brew install gh"
 _check "tmux"       tmux       required  "brew install tmux"

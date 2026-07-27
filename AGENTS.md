@@ -84,7 +84,8 @@ the operation with ad hoc shell commands.
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
 | `bin/sgt-td-list <project>` | Show td tasks across all repos in a project |
 | `bin/sgt-td-create <project> "<title>" --repos <list>` | Create td tasks in repos (called automatically by sgt-dispatch) |
-| `bin/sgt-notify <task-id> "<message>"` | Record a durable wake marker and optionally inject into the primary session pane |
+| `bin/sgt-notify <task-id> "<message>"` | Record a durable wake marker, sync any registered callback origin, and optionally inject into the primary session pane |
+| `bin/sgt-callback <command>` | Register, enqueue, drain, and verify durable profile-bound callback events |
 | `bin/sgt-drain --global\|<project> [--wait [--timeout <s>]]` | Issue a cooperative drain signal; workers finish current turn and exit cleanly |
 | `bin/sgt-undrain --global\|<project>` | Deactivate a drain signal |
 | `bin/sgt-drain --status [--global\|<project>]` | Show active drain state |
