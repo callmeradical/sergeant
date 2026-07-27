@@ -49,13 +49,24 @@ done
 # Use grep (not bash =~) to avoid the same portability issue in this test.
 # Exclude comment lines (those starting with optional whitespace then #).
 # Pattern: find =~ followed by content containing ( then non-)$ chars then |
-if grep -vE '^\s*#' "$ROOT_DIR/bin/sgt-dispatch" 2>/dev/null | \
-   grep -qE '=~[^#$]*([(][^)$]*\|)'; then
-  printf 'FAIL: sgt-dispatch contains inline complex alternation in =~ construct.\n' >&2
-  printf '  This is not portable to Apple Bash 3.2.57 (macOS system default).\n' >&2
-  printf '  Store the pattern in a variable: re='"'"'^(a|b)-'"'"'; [[ str =~ $re ]]\n' >&2
-  grep -vE '^\s*#' "$ROOT_DIR/bin/sgt-dispatch" 2>/dev/null | \
-    grep -nE '=~[^#$]*([(][^)$]*\|)' >&2 || true
+# Check every shipped script — the spec requires "every shipped bin script".
+inline_fail=0
+for f in \
+    "$ROOT_DIR"/bin/sgt-* \
+    "$ROOT_DIR"/bin/oc-inject \
+    "$ROOT_DIR"/bin/wiki-daily-digest \
+    "$ROOT_DIR"/bin/_sgt-*.sh; do
+  [[ -f "$f" ]] || continue
+  if grep -vE '^\s*#' "$f" 2>/dev/null | \
+     grep -qE '=~[^#$]*([(][^)$]*\|)'; then
+    printf 'FAIL: %s contains inline complex alternation in =~ (not portable to macOS Bash 3.2):\n' \
+      "$(basename "$f")" >&2
+    grep -vE '^\s*#' "$f" | grep -nE '=~[^#$]*([(][^)$]*\|)' >&2 || true
+    inline_fail=1
+  fi
+done
+if [[ "$inline_fail" -ne 0 ]]; then
+  printf '  Fix: store complex regex in a variable before using =~\n' >&2
   exit 1
 fi
 
@@ -95,7 +106,7 @@ check "add-new-feature"       "feat/add-new-feature"
 check "update-deps"           "feat/update-deps"
 check "my-custom-slug"        "feat/my-custom-slug"
 
-if [ "$fail" -eq 0 ]; then
+if [[ "$fail" -eq 0 ]]; then
   printf 'branch-name generation: %d cases ok\n' "$pass"
 else
   exit 1
