@@ -1,0 +1,41 @@
+# Dockerfile.test — Minimal image for running the Sergeant drain test suite.
+#
+# Provides a clean, reproducible environment with system Bash (5.x on Debian
+# bookworm-slim).  The Bash 3.2 regression pass runs in a separate Alpine-based
+# image (bash:3.2); see run-drain-tests.sh and the mise task test:docker:drain
+# for the two-stage orchestration.
+#
+# Build:
+#   docker build -f Dockerfile.test -t sergeant-test .
+#
+# Run drain suite (system-Bash pass only):
+#   docker run --rm -v "$PWD:/repo:ro" sergeant-test
+#
+# Run a single test file:
+#   docker run --rm -v "$PWD:/repo:ro" sergeant-test bash /repo/tests/sgt-drain-test.sh
+
+FROM debian:bookworm-slim
+
+# Install runtime dependencies required by the drain test suite.
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+      bash \
+      git \
+      tmux \
+      lsof \
+      procps \
+      util-linux \
+      sqlite3 \
+      curl \
+      ca-certificates \
+      && rm -rf /var/lib/apt/lists/*
+
+# Verify Bash is present.
+RUN bash --version | head -1
+
+WORKDIR /repo
+
+# Default: run the drain suite with BASH32="" to skip the Bash 3.2 pass.
+# The mise task test:docker:drain runs the Bash 3.2 pass separately in the
+# bash:3.2 Alpine image.
+CMD ["bash", "-c", "BASH32='' bash /repo/tests/run-drain-tests.sh"]
