@@ -704,6 +704,7 @@ _remove_worker_evidence() {
     expected_identity="$3" name repo_dir="$1" worktree="$2"
   local -a moved=()
 
+  _same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree" || return 1
   [[ ! -e "$backup_dir" && ! -L "$backup_dir" ]] || return 1
   mkdir "$backup_dir" || return 1
   if ! _cleanup_mutation_hook before-live-removal \
@@ -2377,8 +2378,17 @@ for repo_dir in "$TASK_DIR"/*/; do
         "$initial_marker_preexisting"
     _die "$layout_error"
   fi
-  _remove_worker_evidence "$repo_dir" "$worktree" "$expected_evidence_identity" || \
+  if ! _remove_worker_evidence "$repo_dir" "$worktree" \
+    "$expected_evidence_identity"; then
+    if [[ -n "$CLEANUP_LAYOUT_ERROR" ]]; then
+      layout_error="$CLEANUP_LAYOUT_ERROR"
+      [[ "$retrying_removal" == true ]] || \
+        _rollback_cross_filesystem_initial "$repo_dir" "$initial_marker" \
+          "$initial_marker_preexisting"
+      _die "$layout_error"
+    fi
     _die "Failed to remove staged worker evidence before cleanup: $repo_name"
+  fi
 
   if [[ "$wt_type" == "treehouse" ]]; then
     echo "  returning treehouse lease: $worktree"
