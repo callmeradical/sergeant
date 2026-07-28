@@ -2499,4 +2499,127 @@ scan_count="$(cat "$lsof_count_file")"
   exit 1
 }
 printf 'sgt-cleanup CWD scan count (%d) within limit: ok\n' "$scan_count"
+rm -f "$TEST_ROOT/fake-bin/lsof"
+
+# ── Issue #95: orphaned workers with a closed td task ─────────────────────────
+# Fake td binary: returns {"status":"<TD_FAKE_STATUS>"} for show --format json.
+cat > "$TEST_ROOT/fake-bin/td" << 'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "show" && "$2" == "--format" && "$3" == "json" ]]; then
+  printf '{"status":"%s","id":"%s"}\n' "${TD_FAKE_STATUS:-closed}" "$4"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$TEST_ROOT/fake-bin/td"
+
+# Test A: orphaned + absent worktree + closed td → cleanup must succeed
+mkdir -p "$TEST_ROOT/fleet/orphaned-absent-closed/app"
+printf 'orphaned\n' > "$TEST_ROOT/fleet/orphaned-absent-closed/app/status"
+printf '%s\n' "$TEST_ROOT/orphaned-absent-gone" \
+  > "$TEST_ROOT/fleet/orphaned-absent-closed/app/worktree"
+printf 'td-orphaned-fake\n' \
+  > "$TEST_ROOT/fleet/orphaned-absent-closed/app/td_task"
+set +e
+_oac_out="$(PATH="$TEST_ROOT/fake-bin:$PATH" TD_FAKE_STATUS=closed \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" orphaned-absent-closed 2>&1)"
+_oac_status=$?
+set -e
+[[ "$_oac_status" -eq 0 ]] || {
+  printf 'FAIL issue#95 test-A: orphaned+absent+closed-td was rejected:\n%s\n' \
+    "$_oac_out" >&2
+  exit 1
+}
+[[ ! -d "$TEST_ROOT/fleet/orphaned-absent-closed" ]] || {
+  printf 'FAIL issue#95 test-A: fleet state not removed after orphaned+absent+closed-td cleanup\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup orphaned+absent+closed-td accepted: ok\n'
+
+# Test B: orphaned + present worktree + closed td → cleanup must succeed
+init_test_repo "$TEST_ROOT/orphaned-present-main"
+git -C "$TEST_ROOT/orphaned-present-main" worktree add -q -b orphaned-closed-worker \
+  "$TEST_ROOT/orphaned-present-main-sgt-orphaned-present-closed"
+mkdir -p "$TEST_ROOT/fleet/orphaned-present-closed/app"
+record_retry_owner orphaned-present-closed app "$TEST_ROOT/orphaned-present-main"
+printf 'orphaned\n' > "$TEST_ROOT/fleet/orphaned-present-closed/app/status"
+printf '%s\n' "$TEST_ROOT/orphaned-present-main-sgt-orphaned-present-closed" \
+  > "$TEST_ROOT/fleet/orphaned-present-closed/app/worktree"
+printf 'td-orphaned-fake\n' \
+  > "$TEST_ROOT/fleet/orphaned-present-closed/app/td_task"
+printf 'git\n' > "$TEST_ROOT/fleet/orphaned-present-closed/app/wt_type"
+printf 'orphaned\n' \
+  > "$TEST_ROOT/orphaned-present-main-sgt-orphaned-present-closed/.sergeant-status"
+set +e
+_opc_out="$(PATH="$TEST_ROOT/fake-bin:$PATH" TD_FAKE_STATUS=closed \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" orphaned-present-closed 2>&1)"
+_opc_status=$?
+set -e
+[[ "$_opc_status" -eq 0 ]] || {
+  printf 'FAIL issue#95 test-B: orphaned+present+closed-td was rejected:\n%s\n' \
+    "$_opc_out" >&2
+  exit 1
+}
+[[ ! -e "$TEST_ROOT/orphaned-present-main-sgt-orphaned-present-closed" ]] || {
+  printf 'FAIL issue#95 test-B: worktree not removed after orphaned+present+closed-td cleanup\n' >&2
+  exit 1
+}
+[[ ! -d "$TEST_ROOT/fleet/orphaned-present-closed" ]] || {
+  printf 'FAIL issue#95 test-B: fleet state not removed after orphaned+present+closed-td cleanup\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup orphaned+present+closed-td accepted: ok\n'
+
+# Test C: orphaned + absent worktree + open td → must still be rejected
+mkdir -p "$TEST_ROOT/fleet/orphaned-absent-open/app"
+printf 'orphaned\n' > "$TEST_ROOT/fleet/orphaned-absent-open/app/status"
+printf '%s\n' "$TEST_ROOT/orphaned-open-gone" \
+  > "$TEST_ROOT/fleet/orphaned-absent-open/app/worktree"
+printf 'td-open-fake\n' \
+  > "$TEST_ROOT/fleet/orphaned-absent-open/app/td_task"
+set +e
+_oao_out="$(PATH="$TEST_ROOT/fake-bin:$PATH" TD_FAKE_STATUS=in_progress \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" orphaned-absent-open 2>&1)"
+_oao_status=$?
+set -e
+[[ "$_oao_status" -ne 0 ]] || {
+  printf 'FAIL issue#95 test-C: cleanup accepted orphaned with open td (should reject)\n' >&2
+  exit 1
+}
+[[ "$_oao_out" == *"not terminal: orphaned"* ]] || {
+  printf 'FAIL issue#95 test-C: unexpected rejection message: %s\n' "$_oao_out" >&2
+  exit 1
+}
+[[ -d "$TEST_ROOT/fleet/orphaned-absent-open" ]] || {
+  printf 'FAIL issue#95 test-C: fleet state removed despite rejection\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup orphaned+absent+open-td rejected: ok\n'
+
+# Test D: orphaned + absent worktree + no td_task → must still be rejected
+mkdir -p "$TEST_ROOT/fleet/orphaned-no-td/app"
+printf 'orphaned\n' > "$TEST_ROOT/fleet/orphaned-no-td/app/status"
+printf '%s\n' "$TEST_ROOT/orphaned-no-td-gone" \
+  > "$TEST_ROOT/fleet/orphaned-no-td/app/worktree"
+# intentionally no td_task file
+set +e
+_ont_out="$(PATH="$TEST_ROOT/fake-bin:$PATH" TD_FAKE_STATUS=closed \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" orphaned-no-td 2>&1)"
+_ont_status=$?
+set -e
+[[ "$_ont_status" -ne 0 ]] || {
+  printf 'FAIL issue#95 test-D: cleanup accepted orphaned with no td_task (should reject)\n' >&2
+  exit 1
+}
+[[ "$_ont_out" == *"not terminal: orphaned"* ]] || {
+  printf 'FAIL issue#95 test-D: unexpected rejection message: %s\n' "$_ont_out" >&2
+  exit 1
+}
+printf 'sgt-cleanup orphaned+absent+no-td rejected: ok\n'
+
+rm -f "$TEST_ROOT/fake-bin/td"
 printf 'sgt-cleanup: all tests passed\n'

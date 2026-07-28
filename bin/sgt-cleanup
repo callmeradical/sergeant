@@ -410,6 +410,27 @@ _require_response_cleanup_safe() {
     _die "$(basename "$repo_dir") has pending or incomplete response acknowledgement"
 }
 
+# _orphaned_td_task_closed — return 0 when the td task recorded for a repo's
+# fleet state is in the closed state, allowing sgt-cleanup to treat an orphaned
+# worker as terminal after the owning work has been completed and merged.
+#
+# Returns 1 (not closed) when:
+#   • no td_task file is recorded in the fleet state
+#   • the td or jq command is unavailable
+#   • the td call fails or returns a non-closed status
+_orphaned_td_task_closed() {
+  local repo_dir="$1"
+  local td_task td_status
+
+  td_task="$(tr -d '\n' < "$repo_dir/td_task" 2>/dev/null || true)"
+  [[ -n "$td_task" ]] || return 1
+  command -v td >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  td_status="$(td show --format json "$td_task" 2>/dev/null | \
+    jq -r '.status // empty' 2>/dev/null || true)"
+  [[ "$td_status" == "closed" ]]
+}
+
 _require_terminal_repos() {
   local cleanup_phase evidence_dir owner_root owner_type partial_phase removed_phase removing_phase \
     repo_dir repo_name retry_root retry_type status worktree worktree_status wt_type
@@ -429,6 +450,13 @@ _require_terminal_repos() {
           _die "$repo_name is not safely terminal: done requires a reconciled result"
         ;;
       failed:\ *[![:space:]]) ;;
+      orphaned)
+        # Accept orphaned workers whose owning td task is already closed — this
+        # covers the post-merge state where the pane exited after the PR merged
+        # but before sgt-cleanup ran.  All other orphaned states are rejected.
+        _orphaned_td_task_closed "$repo_dir" || \
+          _die "$repo_name is not terminal: $status"
+        ;;
       *) _die "$repo_name is not terminal: $status" ;;
     esac
 
