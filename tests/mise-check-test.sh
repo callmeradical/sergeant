@@ -209,6 +209,10 @@ if [[ "$linux_flags_output" != *"tmux 3.4"* ]]; then
   printf 'tmux version not shown correctly with -V flag:\n%s\n' "$linux_flags_output" >&2
   exit 1
 fi
+if [[ "$linux_flags_output" != *"lsof version information:"* ]]; then
+  printf 'lsof version not shown correctly with -v flag:\n%s\n' "$linux_flags_output" >&2
+  exit 1
+fi
 
 printf 'mise dependency check validates td and agent prerequisites: ok\n'
 printf 'mise check uses correct version flags for tmux (-V) and lsof (-v) on Linux: ok\n'
