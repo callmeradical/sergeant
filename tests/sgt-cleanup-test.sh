@@ -4559,4 +4559,96 @@ SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_D
 printf 'sgt-cleanup: absent-removed-retry VALIDATED_RETRY_ROOT regression: ok\n'
 
 rm -f "$TEST_ROOT/fake-bin/td"
+
+# ── Regression: validation-checkout pre-flight during removing-state replay ──
+# sgt-cleanup must call _validate_retry_validation_checkout BEFORE any pane
+# kill or evidence mutation when replaying a removing-phase retry.  A validation
+# worktree whose path falls outside the ownership boundary must be rejected at
+# the pre-flight gate; the worker's live evidence must remain intact.
+#
+# Prior to this fix, the second _validate_retry_owner() definition shadowed the
+# first (worker-identity) definition.  The checkout check was never actually
+# called in the main loop; the caller received VALIDATED_RETRY_ROOT unbound.
+mkdir -p "$TEST_ROOT/fleet/removing-replay-vcheckout/app" \
+  "$TEST_ROOT/fake-bin"
+init_test_repo "$TEST_ROOT/removing-replay-vcheckout-repo"
+git -C "$TEST_ROOT/removing-replay-vcheckout-repo" worktree add -q -b rrvchk-worker \
+  "$TEST_ROOT/removing-replay-vcheckout-worktree"
+record_retry_owner removing-replay-vcheckout app \
+  "$TEST_ROOT/removing-replay-vcheckout-repo"
+printf '%s\n' "$TEST_ROOT/removing-replay-vcheckout-worktree" \
+  > "$TEST_ROOT/fleet/removing-replay-vcheckout/app/worktree"
+printf 'done\n' > "$TEST_ROOT/fleet/removing-replay-vcheckout/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/removing-replay-vcheckout/app/result"
+printf 'done\n' > "$TEST_ROOT/removing-replay-vcheckout-worktree/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/removing-replay-vcheckout-worktree/.sergeant-result"
+
+# Fake git: let every call through EXCEPT worktree remove (always fail).
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" worktree remove "*)
+    printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
+    exit 1 ;;
+  *) exec "$REAL_GIT" "$@" ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git"
+
+# First run: worktree removal fails → cleanup writes removing phase + cleanup-owner v4.
+set +e
+PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/removing-replay-vcheckout-removals" \
+  REAL_GIT="$REAL_GIT" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" removing-replay-vcheckout >/dev/null 2>&1
+rrvchk_first_status=$?
+set -e
+[[ "$rrvchk_first_status" -ne 0 ]] || {
+  printf 'FAIL removing-replay-vcheckout: first cleanup should have failed at worktree removal\n' >&2
+  exit 1
+}
+[[ "$(sed -n '1p' "$TEST_ROOT/fleet/removing-replay-vcheckout/app/cleanup-phase")" \
+  == "removing" ]] || {
+  printf 'FAIL removing-replay-vcheckout: cleanup-phase not set to removing after first run\n' >&2
+  exit 1
+}
+
+# Inject a validation_worktree whose path is outside the ownership boundary
+# (does not match ${worktree}-validation-removing-replay-vcheckout).
+rrvchk_wrong_vw="$TEST_ROOT/wrong-path-validation-checkout"
+mkdir -p "$rrvchk_wrong_vw"
+printf '%s\n' "$rrvchk_wrong_vw" \
+  > "$TEST_ROOT/fleet/removing-replay-vcheckout/app/validation_worktree"
+rrvchk_evidence_before="$(cksum \
+  "$TEST_ROOT/removing-replay-vcheckout-worktree"/.sergeant-*)"
+
+# Second run (retry): must be rejected at the pre-flight validation-checkout gate.
+set +e
+rrvchk_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_GIT_LOG="$TEST_ROOT/removing-replay-vcheckout-removals" \
+  REAL_GIT="$REAL_GIT" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" removing-replay-vcheckout 2>&1)"
+rrvchk_retry_status=$?
+set -e
+[[ "$rrvchk_retry_status" -ne 0 ]] || {
+  printf 'FAIL removing-replay-vcheckout: cleanup accepted wrong validation worktree path\n' >&2
+  exit 1
+}
+[[ "$rrvchk_output" == *"outside the recorded ownership boundary"* ]] || {
+  printf 'FAIL removing-replay-vcheckout: unexpected error: %s\n' "$rrvchk_output" >&2
+  exit 1
+}
+# Live worker evidence must NOT be mutated by the pre-flight rejection.
+[[ "$(cksum "$TEST_ROOT/removing-replay-vcheckout-worktree"/.sergeant-*)" \
+  == "$rrvchk_evidence_before" ]] || {
+  printf 'FAIL removing-replay-vcheckout: pre-flight rejection mutated live evidence\n' >&2
+  exit 1
+}
+rm "$TEST_ROOT/fake-bin/git"
+printf 'sgt-cleanup removing-replay-vcheckout: pre-flight validation-checkout rejection ok\n'
+
 printf 'sgt-cleanup: all tests passed\n'
