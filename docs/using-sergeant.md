@@ -265,12 +265,15 @@ recorded authorization; escalate high-risk findings.
 sgt-cleanup <fleet-task-id>
 ```
 
-Cleanup requires terminal/reconciled state, configured cleanup-owner proof for
-the repository/worktree or treehouse lease, preserved evidence, explicit
-cleanup-phase proof when replaying an interrupted removal or reconciling an
-already-absent worktree, fully acknowledged response transport, and no
-uncommitted or in-use worktree state. Never use cleanup to resolve a waiting,
-blocked, or orphaned worker.
+Cleanup requires terminal/reconciled state, preserved evidence, fully
+acknowledged response transport, and no uncommitted or in-use worktree state.
+Before it stops a worker pane, removes a validation checkout, or retries an
+absent worktree cleanup, Sergeant re-verifies the exact recorded owner for the
+worker worktree, validation checkout, and any treehouse lease. Interrupted or
+already-absent git worktree removals also need explicit `cleanup-phase` state
+plus proof that the recorded removal really completed; a retry without matching
+owner provenance is rejected before any destructive step. Never use cleanup to
+resolve a waiting, blocked, or orphaned worker.
 
 ## Common project operations
 

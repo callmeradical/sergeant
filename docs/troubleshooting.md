@@ -153,14 +153,11 @@ existing graph without confirming the desired global-per-project path.
 
 ## Cleanup refuses or state is partial
 
-Do not force or delete fleet files manually. Cleanup safety depends on terminal
-proof, staged evidence, exact configured repository identity, original
-worktree/lease identity, explicit cleanup phases for replayed removals or
-already-absent worktrees, proof that a recorded removal actually completed, and
-fully converged response acknowledgement. Preserve the worktree and run the
-owning remediation or supported retry path; cleanup intentionally refuses while
-response archive, acknowledgement markers, or active plaintext transport are
-only partially published.
+Do not force or delete fleet files manually. Preserve the worktree and follow
+the cleanup contract in [Using Sergeant](using-sergeant.md#clean-completed-fleet-state):
+cleanup re-verifies exact owner provenance before any destructive step and
+rejects retries while response archive, acknowledgement markers, or active
+plaintext transport are only partially published.
 
 ## Where to inspect state
 
