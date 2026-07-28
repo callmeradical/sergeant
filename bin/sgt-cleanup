@@ -444,12 +444,12 @@ _require_terminal_repos() {
     [[ -d "$repo_dir" ]] || continue
     repo_dir="${repo_dir%/}"
     repo_name="$(basename "$repo_dir")"
+    td_closed_orphan=false
     if [[ -n "$FILTER_REPO" && "$repo_name" != "$FILTER_REPO" ]]; then
       continue
     fi
 
     status="$(tr -d '\n' < "$repo_dir/status" 2>/dev/null || echo unknown)"
-    td_closed_orphan=false
     case "$status" in
       done)
         [[ -s "$repo_dir/result" ]] || \
@@ -587,6 +587,11 @@ _require_terminal_repos() {
         # prior cleanup run or external preservation) or the worktree was externally
         # removed before any cleanup state was recorded — both allow cleanup to proceed.
         evidence_dir="$repo_dir/terminal-evidence"
+        # When td_closed_orphan is true, the terminal-evidence .sergeant-status (if
+        # it exists from a prior partial cleanup) contains the worker's last
+        # nonterminal write, not 'orphaned', so reconciliation is intentionally
+        # skipped.  The absent-worktree case has no uncommitted changes to protect,
+        # and _require_clean_worktrees enforces that guard unconditionally.
         if [[ -f "$evidence_dir/.sergeant-status" && "$td_closed_orphan" != true ]]; then
           worktree_status="$(tr -d '\n' < "$evidence_dir/.sergeant-status")"
           [[ "$worktree_status" == "$status" ]] ||
@@ -614,9 +619,11 @@ _require_terminal_repos() {
           _die "$repo_name has no reconciled cleanup phase for its absent worktree"
 
         evidence_dir="$repo_dir/terminal-evidence"
-        # For orphaned workers with a closed td task, terminal evidence may
-        # contain a nonterminal status.  Require evidence to exist (when a prior
-        # cleanup pass staged it) but skip the status/result reconciliation.
+        # For orphaned workers with a closed td task, a prior cleanup pass may
+        # have staged terminal evidence whose .sergeant-status is the worker's
+        # last nonterminal write (not 'orphaned').  When td_closed_orphan is true
+        # the evidence file is not required and status/result reconciliation is
+        # skipped; the reconciled cleanup phase is sufficient proof.
         [[ -f "$evidence_dir/.sergeant-status" || "$td_closed_orphan" == true ]] ||
           _die "$repo_name reconciled cleanup evidence is missing"
         if [[ "$td_closed_orphan" != true ]]; then
