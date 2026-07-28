@@ -125,13 +125,10 @@ _watch_progress() {
     # Drain signal: write .sergeant-drain-signal so the agent can react
     # cooperatively to an active global or project drain without requiring a
     # SIGTERM.  Idempotent: skip when the file already exists.
-    if [[ ! -f "$WORKTREE/.sergeant-drain-signal" ]]; then
-      if _sgt_drain_global_active || \
-         { [[ -n "$_PROJECT_NAME" ]] && _sgt_drain_project_active "$_PROJECT_NAME"; }; then
-        drain_tmp="$WORKTREE/.sergeant-drain-signal.tmp.$$"
-        printf 'scope=%s\n' "${_PROJECT_NAME:-global}" > "$drain_tmp" && \
-          mv "$drain_tmp" "$WORKTREE/.sergeant-drain-signal" || rm -f "$drain_tmp" 2>/dev/null || true
-      fi
+    if [[ ! -f "$WORKTREE/.sergeant-drain-signal" ]] && _drain_is_active; then
+      drain_tmp="$WORKTREE/.sergeant-drain-signal.tmp.$$"
+      printf 'scope=%s\n' "${_PROJECT_NAME:-global}" > "$drain_tmp" && \
+        mv "$drain_tmp" "$WORKTREE/.sergeant-drain-signal" || rm -f "$drain_tmp" 2>/dev/null || true
     fi
   done
 }

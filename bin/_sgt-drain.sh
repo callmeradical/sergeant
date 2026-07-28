@@ -7,7 +7,7 @@
 #           _sgt_drain_is_drained (file-path variant),
 #           _sgt_drain_write, _sgt_drain_global_active,
 #           _sgt_drain_project_active,
-#           _sgt_drain_clear, _sgt_drain_with_lock,
+#           _sgt_drain_clear,
 #           _sgt_drain_lock_acquire_fd, _sgt_drain_lock_release_fd,
 #           _sgt_drain_check_admission_locked
 #
@@ -15,9 +15,10 @@
 #   Global drain:  $SERGEANT_CONFIG/drain/global
 #   Project drain: $SERGEANT_CONFIG/drain/<project>
 #
-# Drain file format (plain text, two lines):
-#   reason=<text>
-#   created=<ISO-8601 timestamp>
+# Drain file format (plain text, key=value lines):
+#   reason=<text>     optional
+#   actor=<text>      optional
+#   created=<ISO-8601 timestamp>  always present
 
 [[ "${SGT_DRAIN_LIB_LOADED:-}" == "1" ]] && return 0
 SGT_DRAIN_LIB_LOADED=1
