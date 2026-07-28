@@ -3,6 +3,9 @@
 # Source this file; do not execute it directly.
 #
 # Provides: _sgt_is_drained, _sgt_drain_state_dir,
+#           _sgt_drain_global_file, _sgt_drain_project_file,
+#           _sgt_drain_is_drained (file-path variant),
+#           _sgt_drain_clear, _sgt_drain_with_lock,
 #           _sgt_drain_lock_acquire_fd, _sgt_drain_lock_release_fd,
 #           _sgt_drain_check_admission_locked
 #
@@ -117,4 +120,57 @@ _sgt_drain_check_admission_locked() {
   local project="${1:-}"
   _sgt_is_drained "$project" && return 1
   return 0
+}
+
+# ── File-path helpers used by sgt-undrain and sgt-interactive-worker ──────────
+
+# _sgt_drain_global_file
+#
+# Prints the path to the global drain file.
+_sgt_drain_global_file() {
+  printf '%s/global\n' "$(_sgt_drain_state_dir)"
+}
+
+# _sgt_drain_project_file <project>
+#
+# Prints the path to the per-project drain file.
+_sgt_drain_project_file() {
+  printf '%s/%s\n' "$(_sgt_drain_state_dir)" "${1:?_sgt_drain_project_file requires a project name}"
+}
+
+# _sgt_drain_is_drained <drain_file>
+#
+# File-path variant: returns 0 if the given drain file exists, 1 otherwise.
+# Used by sgt-interactive-worker which already resolved the file path.
+_sgt_drain_is_drained() {
+  [[ -f "${1:?_sgt_drain_is_drained requires a drain file path}" ]]
+}
+
+# _sgt_drain_clear <drain_file>
+#
+# Removes the drain file if it exists.  Idempotent.
+_sgt_drain_clear() {
+  rm -f "${1:?_sgt_drain_clear requires a drain file path}"
+}
+
+# _sgt_drain_with_lock <shell_command_string>
+#
+# Runs <shell_command_string> (eval'd) while holding an exclusive flock on the
+# drain state directory.  Used by sgt-undrain so that drain removal is
+# serialised against concurrent sgt-respond relaunch windows.
+_sgt_drain_with_lock() {
+  local cmd="${1:?_sgt_drain_with_lock requires a command}"
+  local drain_dir lockfile
+  drain_dir="$(_sgt_drain_state_dir)"
+  mkdir -p "$drain_dir" 2>/dev/null || true
+  lockfile="${drain_dir}/.lock"
+  if command -v flock >/dev/null 2>&1; then
+    (
+      exec 9>>"$lockfile"
+      flock --exclusive 9 2>/dev/null || true
+      eval "$cmd"
+    )
+  else
+    eval "$cmd"
+  fi
 }
