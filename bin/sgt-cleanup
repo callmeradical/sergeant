@@ -558,15 +558,21 @@ _require_terminal_repos() {
       [[ "$cleanup_phase" != $'removing\n'"$worktree" ]] || \
         _die "Retry owner identity is missing: $repo_name"
       if [[ "$cleanup_phase" == $'reconciled-absent\n'"$worktree" ]]; then
-        owner_root="$(sed -n '3p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
-        owner_type="$(sed -n '5p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
-        # Orphaned workers do not record cleanup ownership; skip validation for
-        # orphaned status when no cleanup-owner exists (post-merge cleanup case).
-        if [[ "$status" != "orphaned" || -f "$repo_dir/cleanup-owner" ]]; then
+        if [[ -f "$repo_dir/cleanup-owner" ]]; then
+          owner_root="$(sed -n '3p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
+          owner_type="$(sed -n '5p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
           [[ "$owner_type" == "$wt_type" ]] || \
             _die "Retry worktree type changed: $repo_name"
           _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
             "$owner_type" "$owner_root"
+        # Orphaned workers do not record cleanup ownership; allow ownerless
+        # reconciled-absent cleanup only when the task still resolves a
+        # configured repo owner (post-merge or idempotent replay path).
+        elif [[ "$status" != "orphaned" ]]; then
+          _task_project >/dev/null 2>&1 || \
+            _die "Retry owner identity is missing: $repo_name"
+          _configured_repo_root "$repo_name" >/dev/null 2>&1 || \
+            _die "Cannot resolve configured cleanup owner: $repo_name"
         fi
       fi
       if [[ -z "$cleanup_phase" ]]; then
