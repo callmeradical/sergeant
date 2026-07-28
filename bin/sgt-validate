@@ -64,8 +64,13 @@ PRIMARY_PANE_ID="$(cat "$TASK_STATE/primary_pane_id" 2>/dev/null || true)"
   _die "Current coordinator pane identity does not match dispatch ownership"
 _sgt_pane_identity_matches "$TMUX_PANE" "$TASK_STATE" primary_pane_identity || \
   _die "Current coordinator pane identity does not match dispatch ownership"
-if [[ -z "$PANE" ]] || ! _sgt_pane_identity_matches "$PANE" "$REPO_STATE"; then
-  _die "Recorded worker pane identity does not match"
+_WORKER_STATUS="$(cat "$REPO_STATE/status" 2>/dev/null || true)"
+# A done or needs_input worker has exited cleanly; its pane will be dead.
+# Allow validation to proceed without requiring a live pane for terminal workers.
+if [[ "$_WORKER_STATUS" != "done" && "$_WORKER_STATUS" != "needs_input" ]]; then
+  if [[ -z "$PANE" ]] || ! _sgt_pane_identity_matches "$PANE" "$REPO_STATE"; then
+    _die "Recorded worker pane identity does not match"
+  fi
 fi
 
 WINDOW_NAME="validation-${REPO}-${TASK_ID}"
@@ -167,6 +172,15 @@ _validation_adopt_pane() {
   info="${identity#*|}"
   pane="${info%%|*}"
   command="${identity##*|}"
+  # tmux 3.4+ wraps pane_start_command in outer double quotes and doubles internal backslashes.
+  # Gate both transformations on the outer-quote being present so that pre-3.4 tmux (which does
+  # not add quotes) passes through unchanged — a literal backslash in a path would be incorrectly
+  # rewritten if the unescape ran unconditionally on an already-unquoted value.
+  if [[ "${command:0:1}" == '"' && "${command: -1}" == '"' ]]; then
+    command="${command:1:${#command}-2}"   # strip outer quotes
+    command="${command//\\\\/\\}"          # unescape doubled backslashes
+  fi
+  # Use quoted right-hand side to prevent glob interpretation of printf %q escapes (e.g. \,)
   [[ -n "$pane" && "$command" == "$VALIDATION_COMMAND" ]] || return 1
   current="$(_validation_current_pane_identity "$pane" || true)"
   [[ "$current" == "$identity" ]] || return 1
@@ -360,7 +374,13 @@ _reset_retryable_validation_state() {
     "$recorded_pgid" =~ ^[0-9]+$ && -n "$recorded_start" ]] || \
     _die "Validation pane ownership provenance is incomplete: ${pane:-unknown}"
   current_identity="$(_validation_current_pane_identity "$pane" || true)"
-  if [[ -n "$current_identity" && "$current_identity" != "1|${recorded_identity#*|}" ]]; then
+  # tmux returns empty fields ("||||...") for a non-existent pane ID; treat that as
+  # pane-gone (same as pane_dead=1) so a retry is allowed after the pane exited and
+  # was recycled by tmux.
+  local _ci_pane_field="${current_identity#*|}"
+  _ci_pane_field="${_ci_pane_field%%|*}"
+  if [[ -n "$current_identity" && -n "$_ci_pane_field" && \
+        "$current_identity" != "1|${recorded_identity#*|}" ]]; then
     [[ "$current_identity" != "$recorded_identity" ]] || _die "Validation pane is already recorded"
     _die "Recorded validation pane identity does not match: $pane"
   fi
@@ -574,6 +594,11 @@ if [[ "$(git -C "$VALIDATION_WORKTREE" rev-parse HEAD)" != "$CURRENT_HEAD" ]] ||
    ! _sgt_worktree_is_validation_clean "$VALIDATION_WORKTREE"; then
   _die "Isolated validation code snapshot did not preserve reviewed HEAD"
 fi
+# Ensure no-mistakes is initialised in the validation clone so that
+# sgt-validation-worker can invoke `no-mistakes axi run` without error.
+if command -v no-mistakes >/dev/null 2>&1; then
+  (cd "$VALIDATION_WORKTREE" && no-mistakes init >/dev/null 2>&1) || true
+fi
 VALIDATION_GIT_DIR="$(git -C "$VALIDATION_WORKTREE" rev-parse --path-format=absolute \
   --git-common-dir)" || _die "Failed to capture validation Git directory"
 VALIDATION_GIT_IDENTITY="$(_validation_path_identity "$VALIDATION_GIT_DIR")" || \
@@ -610,6 +635,13 @@ set +e
 SPLIT_IDENTITY="$(tmux split-window -P -F "$PANE_FORMAT" -t "$PANE" \
   -c "$VALIDATION_WORKTREE" "$VALIDATION_COMMAND")"
 SPLIT_STATUS=$?
+# If the worker pane is dead (done workers exit cleanly), fall back to a new window.
+if [[ "$SPLIT_STATUS" -ne 0 && "$_WORKER_STATUS" == "done" ]]; then
+  SPLIT_IDENTITY="$(tmux new-window -P -F "$PANE_FORMAT" \
+    -n "validation-${REPO}-${TASK_ID}" \
+    -c "$VALIDATION_WORKTREE" "$VALIDATION_COMMAND" 2>/dev/null)"
+  SPLIT_STATUS=$?
+fi
 set -e
 if [[ -n "$SPLIT_IDENTITY" ]]; then
   _validation_adopt_pane "$SPLIT_IDENTITY" || \
@@ -644,7 +676,13 @@ _validation_transition pane-identity || _die "Failed to capture validation pane 
 [[ "$(_validation_current_pane_identity "$VALIDATION_PANE" || true)" == \
   "$VALIDATION_IDENTITY" && "${VALIDATION_IDENTITY%%|*}" == "0" ]] || \
   _die "Validation pane exited before launch publication"
-if ! tmux rename-window -t "$PANE" "$WINDOW_NAME"; then
+# When validating a done worker (whose pane may be in a different window or dead),
+# rename the validation pane's own window rather than the dead worker pane's window.
+_RENAME_TARGET="$PANE"
+if [[ "$_WORKER_STATUS" == "done" ]]; then
+  _RENAME_TARGET="$VALIDATION_PANE"
+fi
+if ! tmux rename-window -t "$_RENAME_TARGET" "$WINDOW_NAME"; then
   _die "Failed to rename validation window"
 fi
 

@@ -45,15 +45,15 @@ done
 
 if $GLOBAL; then
   [[ -z "$TARGET" ]] || { printf 'ERROR: --global and <project> are mutually exclusive\n' >&2; exit 1; }
-  drain_file="$(_sgt_drain_global_file)"
-  _sgt_drain_with_lock "_sgt_drain_clear \"$drain_file\""
+  _sgt_drain_remove_global
   printf 'global drain cleared\n'
   exit 0
 fi
 
 if [[ -n "$TARGET" ]]; then
-  drain_file="$(_sgt_drain_project_file "$TARGET")"
-  _sgt_drain_with_lock "_sgt_drain_clear \"$drain_file\""
+  [[ "$TARGET" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || \
+    { printf 'ERROR: invalid project name: %s\n' "$TARGET" >&2; exit 1; }
+  _sgt_drain_remove_project "$TARGET"
   printf '%s drain cleared\n' "$TARGET"
   exit 0
 fi
