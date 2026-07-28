@@ -1126,8 +1126,8 @@ _record_cleanup_owner() {
     output="${5:-$1/cleanup-owner}" project repo_dir="$1" repo_root="$2" \
     worker_identity worktree="$3" wt_type="$4"
 
-  identity="$(_repo_identity "$repo_root" create)" || return 1
-  worker_identity="$(_repo_identity "$worktree" exclude-evidence)" || return 1
+  identity="$(_repo_owner_identity "$repo_root" create)" || return 1
+  worker_identity="$(_worker_checkout_identity "$worktree")" || return 1
   evidence_identity="$(_worker_evidence_identity "$evidence_dir")" || return 1
   project="$(_task_project_or_task_id)" || return 1
   holder=""
@@ -1220,20 +1220,22 @@ _validate_retry_owner() {
     "$retry_type" == "$owner_type" ]] || \
     _die "Retry cleanup state does not match its recorded owner: $repo_name"
 
-  project="$(_task_project)" || _die "Cannot resolve retry owner project: $repo_name"
+  project="$(_task_project_or_task_id)" || _die "Cannot resolve retry owner project: $repo_name"
   [[ "$project" == "$owner_project" ]] || \
     _die "Retry owner project changed: $repo_name"
-  configured_root="$(_configured_repo_root "$repo_name")" || \
+  if configured_root="$(_configured_repo_root "$repo_name" 2>/dev/null)"; then
+    [[ "$configured_root" == "$owner_root" ]] || \
+      _die "Configured retry owner changed: $repo_name"
+  elif _task_project >/dev/null 2>&1; then
     _die "Cannot resolve configured retry owner: $repo_name"
-  [[ "$configured_root" == "$owner_root" ]] || \
-    _die "Configured retry owner changed: $repo_name"
+  fi
   [[ -d "$owner_root" && ! -L "$owner_root" ]] || \
     _die "Retry owner repo is missing or aliased: $owner_root"
   expected_root="$(cd "$owner_root" && pwd -P)"
   [[ "$owner_root" == "$expected_root" ]] || \
     _die "Retry owner repo is symlink-aliased: $owner_root"
   if [[ -d "$worktree" ]]; then
-    worker_identity="$(_repo_identity "$worktree" exclude-evidence)" || \
+    worker_identity="$(_worker_checkout_identity "$worktree")" || \
       _die "Retry worker worktree identity is unavailable: $repo_name"
     [[ "$worker_identity" == "$owner_worker_identity" ]] || \
       _die "Retry worker worktree identity changed: $repo_name"
@@ -1248,7 +1250,7 @@ _validate_retry_owner() {
     [[ "$live_evidence_identity" == "$owner_evidence_identity" ]] || \
       _die "Retry worker lifecycle evidence changed: $repo_name"
   fi
-  identity="$(_repo_identity "$expected_root")" || \
+  identity="$(_repo_owner_identity "$expected_root")" || \
     _die "Cannot identify retry owner repo: $repo_name"
   [[ "$identity" == "$owner_identity" ]] || \
     _die "Retry owner repo identity changed: $repo_name"
@@ -1665,9 +1667,8 @@ for repo_dir in "$TASK_DIR"/*/; do
     expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
     retrying_removal=true
   else
-    has_configured_root=false
     if retry_root="$(_configured_repo_root "$repo_name" 2>/dev/null)"; then
-      has_configured_root=true
+      : # owner root resolved from project config
     elif ! _task_project >/dev/null 2>&1; then
       if [[ "$wt_type" == "git" ]]; then
         _fallback_repo_base="$(basename "$worktree" | sed "s/-sgt-${TASK_ID}$//")"
