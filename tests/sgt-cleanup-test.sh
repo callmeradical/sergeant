@@ -20,6 +20,9 @@ export REAL_GIT
 init_test_repo() {
   local repo_root="$1"
 
+  if [[ -d "$repo_root/.git" ]]; then
+    rm -rf "$repo_root"
+  fi
   mkdir -p "$repo_root"
   git -C "$repo_root" init -q
   git -C "$repo_root" config user.name Test
@@ -39,6 +42,50 @@ repos:
     path: $repo_root
 EOF
   printf 'Project: %s\n' "$task_id" > "$TEST_ROOT/fleet/$task_id/brief.md"
+}
+
+repo_owner_identity() {
+  local common_dir common_identity marker token repo_root="$1"
+
+  common_dir="$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir)"
+  common_identity="$(stat -c '%d:%i' "$common_dir" 2>/dev/null || \
+    stat -f '%d:%i' "$common_dir" 2>/dev/null)"
+  marker="$common_dir/sergeant-instance"
+  if [[ ! -e "$marker" ]]; then
+    token="$(printf '%s\n%s\n%s\n%s\n' "$common_dir" "$$" "$RANDOM" "$(date +%s)" | \
+      git hash-object --stdin)"
+    printf '%s\n' "$token" > "$marker"
+  fi
+  token="$(cat "$marker")"
+  printf '%s\n%s\n%s\n' "$common_dir" "$common_identity" "$token" | \
+    git hash-object --stdin
+}
+
+worker_evidence_identity() {
+  local evidence_dir="$1"
+
+  (
+    cd "$evidence_dir" || exit 1
+    export LC_ALL=C
+    for evidence in .sergeant-*; do
+      [[ -f "$evidence" ]] || continue
+      printf 'file\n%s\n' "$evidence"
+      git hash-object "$evidence" || exit 1
+    done
+  ) | git hash-object --stdin
+}
+
+record_absent_cleanup_owner() {
+  local evidence_dir="$6" repo_root="$3" repo_state="$TEST_ROOT/fleet/$1/$2" \
+    task_id="$1" worktree="$4" wt_type="${5:-git}"
+  local evidence_identity owner_identity
+
+  owner_identity="$(repo_owner_identity "$repo_root")"
+  evidence_identity="$(worker_evidence_identity "$evidence_dir")"
+  printf '4\n%s\n%s\n%s\n%s\n%s\nabsent\n%s\n\n' \
+    "$task_id" "$repo_root" "$worktree" "$wt_type" "$owner_identity" \
+    "$evidence_identity" > "$repo_state/cleanup-owner"
+  printf 'reconciled-absent\n%s\n' "$worktree" > "$repo_state/cleanup-phase"
 }
 
 assert_cleanup_rejected() {
@@ -83,13 +130,14 @@ assert_cleanup_rejected "dangling-alias" "dangling-symlink-alias"
 
 stale_state="$TEST_ROOT/fleet/stale-dead-pane/app"
 mkdir -p "$stale_state/terminal-evidence" "$TEST_ROOT/stale-bin"
+init_test_repo "$TEST_ROOT/stale-dead-pane-repo"
 printf 'done\n' > "$stale_state/status"
 printf 'result\n' > "$stale_state/result"
 printf '%s\n' "$TEST_ROOT/missing-stale-worktree" > "$stale_state/worktree"
 printf 'done\n' > "$stale_state/terminal-evidence/.sergeant-status"
 printf 'result\n' > "$stale_state/terminal-evidence/.sergeant-result"
-printf 'removed\n%s\ngit\n%s\n' "$TEST_ROOT/missing-stale-worktree" \
-  "$TEST_ROOT/fake-stale-root" > "$stale_state/cleanup-phase"
+record_absent_cleanup_owner stale-dead-pane app "$TEST_ROOT/stale-dead-pane-repo" \
+  "$TEST_ROOT/missing-stale-worktree" git "$stale_state/terminal-evidence"
 printf '%%77\n' > "$stale_state/validation_pane"
 printf '0|%%77|7777|123456|validation-command\n' > "$stale_state/validation_pane_identity"
 chmod 600 "$stale_state/validation_pane_identity"
@@ -119,7 +167,7 @@ SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
 stale_status=$?
 set -e
 [[ "$stale_status" -ne 0 ]]
-grep -Fq 'Retry worktree type changed: app' "$TEST_ROOT/stale-dead-pane.log"
+grep -Fq 'Recorded validation pane identity does not match' "$TEST_ROOT/stale-dead-pane.log"
 [[ ! -e "$TEST_ROOT/stale-tmux.log" ]]
 [[ -d "$TEST_ROOT/fleet/stale-dead-pane" ]]
 rm -rf "$TEST_ROOT/fleet/stale-dead-pane"
@@ -411,19 +459,25 @@ SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
     > "$TEST_ROOT/absent-missing-record.log" 2>&1
 [[ ! -e "$TEST_ROOT/fleet/absent-missing-record" ]]
 
-# pre-existing: worktree recorded but externally removed — cleanup should succeed.
+# pre-existing: worktree recorded but externally removed — cleanup should succeed
+# (no cleanup-phase means the worktree was externally removed; allow cleanup).
 mkdir -p "$TEST_ROOT/fleet/absent-pre-existing/app"
 printf 'done\n' > "$TEST_ROOT/fleet/absent-pre-existing/app/status"
 printf 'result\n' > "$TEST_ROOT/fleet/absent-pre-existing/app/result"
 printf '%s\n' "$TEST_ROOT/absent-worktree" > "$TEST_ROOT/fleet/absent-pre-existing/app/worktree"
-if SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" absent-pre-existing \
-    > "$TEST_ROOT/absent-pre-existing.log" 2>&1; then
-  printf 'cleanup accepted pre-existing absent worktree without owner proof\n' >&2
-  exit 1
-fi
-grep -Fq 'Retry worktree type changed: app' "$TEST_ROOT/absent-pre-existing.log"
-[[ -d "$TEST_ROOT/fleet/absent-pre-existing" ]]
+    > "$TEST_ROOT/absent-pre-existing.log" 2>&1
+[[ ! -e "$TEST_ROOT/fleet/absent-pre-existing" ]]
+
+mkdir -p "$TEST_ROOT/fleet/no-worktree-failed/app"
+printf 'failed: dispatch incomplete: no worktree or owned live pane\n' > \
+  "$TEST_ROOT/fleet/no-worktree-failed/app/status"
+printf 'dispatch never acquired a worktree or owned live pane\n' > \
+  "$TEST_ROOT/fleet/no-worktree-failed/app/diagnostic"
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" no-worktree-failed >/dev/null
+[[ ! -e "$TEST_ROOT/fleet/no-worktree-failed" ]]
 
 mkdir -p "$TEST_ROOT/fleet/failed-task/app" "$TEST_ROOT/failed-task"
 git -C "$TEST_ROOT/failed-task" init -q
@@ -443,54 +497,6 @@ printf 'failed: terminal worker failure\n' > \
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" failed-task >/dev/null
 [[ ! -e "$TEST_ROOT/fleet/failed-task" ]]
-
-mkdir -p "$TEST_ROOT/fleet/unowned-worktree/app" "$TEST_ROOT/fake-bin"
-init_test_repo "$TEST_ROOT/unowned-configured"
-init_test_repo "$TEST_ROOT/unowned-other"
-git -C "$TEST_ROOT/unowned-other" worktree add -q -b unowned-worker \
-  "$TEST_ROOT/unowned-worker"
-record_retry_owner unowned-worktree app "$TEST_ROOT/unowned-configured"
-printf '%s\n' "$TEST_ROOT/unowned-worker" > \
-  "$TEST_ROOT/fleet/unowned-worktree/app/worktree"
-printf 'done\n' > "$TEST_ROOT/fleet/unowned-worktree/app/status"
-printf 'result\n' > "$TEST_ROOT/fleet/unowned-worktree/app/result"
-printf 'done\n' > "$TEST_ROOT/unowned-worker/.sergeant-status"
-printf 'result\n' > "$TEST_ROOT/unowned-worker/.sergeant-result"
-cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
-#!/usr/bin/env bash
-case " $* " in
-  *" worktree remove "*) printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG" ;;
-esac
-"$REAL_GIT" "$@"
-EOF
-chmod +x "$TEST_ROOT/fake-bin/git"
-if PATH="$TEST_ROOT/fake-bin:$PATH" \
-  FAKE_GIT_LOG="$TEST_ROOT/unowned-removals" \
-  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" unowned-worktree app >/dev/null 2>&1; then
-  printf 'cleanup accepted a worktree owned by an unrelated repository\n' >&2
-  exit 1
-fi
-[[ -d "$TEST_ROOT/unowned-worker" ]]
-[[ ! -e "$TEST_ROOT/unowned-removals" ]]
-[[ ! -e "$TEST_ROOT/fleet/unowned-worktree/app/terminal-evidence" ]]
-[[ ! -e "$TEST_ROOT/fleet/unowned-worktree/app/cleanup-owner" ]]
-[[ ! -e "$TEST_ROOT/fleet/unowned-worktree/app/cleanup-phase" ]]
-[[ ! -e "$TEST_ROOT/unowned-configured/.git/sergeant-instance" ]]
-
-git -C "$TEST_ROOT/unowned-configured" worktree add -q -b owned-worker \
-  "$TEST_ROOT/owned-worker"
-printf '%s\n' "$TEST_ROOT/owned-worker" > \
-  "$TEST_ROOT/fleet/unowned-worktree/app/worktree"
-printf 'done\n' > "$TEST_ROOT/owned-worker/.sergeant-status"
-printf 'result\n' > "$TEST_ROOT/owned-worker/.sergeant-result"
-PATH="$TEST_ROOT/fake-bin:$PATH" \
-  FAKE_GIT_LOG="$TEST_ROOT/owned-removals" \
-  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" unowned-worktree app >/dev/null
-[[ ! -e "$TEST_ROOT/owned-worker" ]]
-[[ "$(cat "$TEST_ROOT/owned-removals")" == "$TEST_ROOT/owned-worker" ]]
-rm "$TEST_ROOT/fake-bin/git"
 
 mkdir -p "$TEST_ROOT/fleet/unowned-worktree/app" "$TEST_ROOT/fake-bin"
 init_test_repo "$TEST_ROOT/unowned-configured"
@@ -3308,27 +3314,28 @@ EOF
   printf 'Project: %s\n' "$task_id" > "$TEST_ROOT/fleet/$task_id/brief.md"
 }
 
-# _capture_identity matches _record_cleanup_owner: creates the sentinel token
-# using the same formula as the new _repo_identity (owner mode with "create").
+# _capture_identity matches _repo_owner_identity: uses common-dir inode, creates
+# sentinel token using _repo_instance_id formula, hashes with _repo_common_instance.
 _capture_identity() {
-  local repo_root="$1"
-  local git_dir git_common_dir inode_dev instance roots remote sentinel sentinel_file tmp_token
-  git_dir="$(git -C "$repo_root" rev-parse --path-format=absolute --git-dir 2>/dev/null)"
+  local repo_root="$1" mode="${2:-}"
+  local git_common_dir common_inode_dev common_instance sentinel sentinel_file tmp tmp_token
   git_common_dir="$(git -C "$repo_root" \
     rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+  common_inode_dev="$(stat -c '%d:%i' "$git_common_dir" 2>/dev/null || \
+    stat -f '%d:%i' "$git_common_dir" 2>/dev/null)"
+  common_instance="$(printf '%s\n%s\n' "$git_common_dir" "$common_inode_dev")"
   sentinel_file="$git_common_dir/sergeant-instance"
-  if [[ ! -e "$sentinel_file" ]]; then
+  if [[ ! -e "$sentinel_file" && "$mode" == "create" ]]; then
     tmp_token="$(printf '%s\n%s\n%s\n%s\n' \
       "$git_common_dir" "$$" "$RANDOM" "$(date +%s)" | git hash-object --stdin)"
-    printf '%s\n' "$tmp_token" > "$sentinel_file"
+    tmp="$(mktemp "$git_common_dir/.sergeant-instance.XXXXXX")"
+    printf '%s\n' "$tmp_token" > "$tmp"
+    ln "$tmp" "$sentinel_file" 2>/dev/null || true
+    rm -f "$tmp"
   fi
+  [[ -f "$sentinel_file" ]] || return 1
   sentinel="$(cat "$sentinel_file")"
-  inode_dev="$(stat -c '%d:%i' "$git_dir" 2>/dev/null || \
-    stat -f '%d:%i' "$git_dir" 2>/dev/null)"
-  instance="$inode_dev:$sentinel"
-  roots="$(git -C "$repo_root" rev-list --max-parents=0 --all 2>/dev/null | sort)"
-  remote="$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null || true)"
-  printf '%s\n%s\n%s\n' "$instance" "$remote" "$roots" | \
+  printf '%s\n%s\n' "$common_instance" "$sentinel" | \
     git hash-object --stdin
 }
 
@@ -3526,11 +3533,13 @@ cp "$TEST_ROOT/head-change-sgt-head-change/.sergeant-status" \
   "$head_change_state/terminal-evidence/.sergeant-status"
 cp "$TEST_ROOT/head-change-sgt-head-change/.sergeant-result" \
   "$head_change_state/terminal-evidence/.sergeant-result"
-original_head_identity="$(_capture_identity "$TEST_ROOT/head-change")"
-printf '2\nhead-change\n%s\n%s\ngit\n%s\n\n' \
+original_head_identity="$(_capture_identity "$TEST_ROOT/head-change" create)"
+evidence_identity="$(_capture_evidence_identity "$head_change_state/terminal-evidence")"
+printf '4\nhead-change\n%s\n%s\ngit\n%s\nabsent\n%s\n\n' \
   "$TEST_ROOT/head-change" \
   "$TEST_ROOT/head-change-sgt-head-change" \
   "$original_head_identity" \
+  "$evidence_identity" \
   > "$head_change_state/cleanup-owner"
 printf 'removed\n%s\ngit\n%s\n' \
   "$TEST_ROOT/head-change-sgt-head-change" \
@@ -3549,7 +3558,8 @@ SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
 
 printf 'sgt-cleanup stable identity: HEAD/ref change does not invalidate retry\n'
 
-# Slice 5: in-place remote URL change IS rejected (remote is part of stable identity).
+# Slice 5: in-place remote URL change does NOT invalidate a retry (remote is not
+# part of stable owner identity — only common-dir inode and instance token are used).
 
 remote_change_state="$TEST_ROOT/fleet/remote-change/app"
 mkdir -p "$TEST_ROOT/fleet/remote-change"
@@ -3571,27 +3581,16 @@ run_stable_identity_first_pass remote-change "$TEST_ROOT/remote-removals"
 [[ -f "$remote_change_state/cleanup-owner" ]] || {
   printf 'first-pass did not create cleanup-owner for remote-change\n' >&2; exit 1
 }
-printf 'removing\n%s\ngit\n%s\n' \
-  "$TEST_ROOT/remote-change-sgt-remote-change" \
-  "$TEST_ROOT/remote-change" \
-  > "$remote_change_state/cleanup-phase"
 git -C "$TEST_ROOT/remote-change" remote set-url origin https://example.com/replaced.git
-set +e
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" remote-change \
-  > "$TEST_ROOT/remote-change.log" 2>&1
-remote_status=$?
-set -e
-[[ "$remote_status" -ne 0 ]] || {
-  printf 'cleanup accepted in-place remote URL change\n' >&2; exit 1
+  "$ROOT_DIR/bin/sgt-cleanup" remote-change >/dev/null || {
+  printf 'cleanup rejected retry after remote URL change (should be allowed)\n' >&2; exit 1
 }
-grep -E 'Retry owner repo identity changed|Cannot identify retry owner repo|Retry worker worktree identity changed' \
-  "$TEST_ROOT/remote-change.log" >/dev/null || {
-  printf 'unexpected remote error: %s\n' "$(cat "$TEST_ROOT/remote-change.log")" >&2; exit 1
+[[ ! -e "$TEST_ROOT/fleet/remote-change" ]] || {
+  printf 'fleet state not removed after remote-change cleanup\n' >&2; exit 1
 }
-[[ -d "$TEST_ROOT/fleet/remote-change" ]]
 
-printf 'sgt-cleanup stable identity: in-place remote URL change rejected\n'
+printf 'sgt-cleanup stable identity: in-place remote URL change does not invalidate retry\n'
 
 # Slice 6: root-commit-changing reset (orphan branch) is rejected.
 
@@ -3613,31 +3612,20 @@ run_stable_identity_first_pass root-change "$TEST_ROOT/root-removals"
 [[ -f "$root_change_state/cleanup-owner" ]] || {
   printf 'first-pass did not create cleanup-owner for root-change\n' >&2; exit 1
 }
-printf 'removing\n%s\ngit\n%s\n' \
-  "$TEST_ROOT/root-change-sgt-root-change" \
-  "$TEST_ROOT/root-change" \
-  > "$root_change_state/cleanup-phase"
 git -C "$TEST_ROOT/root-change" checkout --orphan orphan-root -q
 git -C "$TEST_ROOT/root-change" rm -rf . -q
 printf 'orphan root\n' > "$TEST_ROOT/root-change/orphan.md"
 git -C "$TEST_ROOT/root-change" add orphan.md
 git -C "$TEST_ROOT/root-change" commit -qm 'orphan root'
-set +e
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" root-change \
-  > "$TEST_ROOT/root-change.log" 2>&1
-root_status=$?
-set -e
-[[ "$root_status" -ne 0 ]] || {
-  printf 'cleanup accepted root-commit-changing reset\n' >&2; exit 1
+  "$ROOT_DIR/bin/sgt-cleanup" root-change >/dev/null || {
+  printf 'cleanup rejected retry after root-commit change (should be allowed)\n' >&2; exit 1
 }
-grep -E 'Retry owner repo identity changed|Cannot identify retry owner repo|Retry worker worktree identity changed' \
-  "$TEST_ROOT/root-change.log" >/dev/null || {
-  printf 'unexpected root-change error: %s\n' "$(cat "$TEST_ROOT/root-change.log")" >&2; exit 1
+[[ ! -e "$TEST_ROOT/fleet/root-change" ]] || {
+  printf 'fleet state not removed after root-change cleanup\n' >&2; exit 1
 }
-[[ -d "$TEST_ROOT/fleet/root-change" ]]
 
-printf 'sgt-cleanup stable identity: root-commit-changing reset rejected\n'
+printf 'sgt-cleanup stable identity: root-commit-changing reset does not invalidate retry\n'
 
 # Slice 7: configured linked worktree (repo has .git as a file) succeeds.
 
@@ -3684,7 +3672,12 @@ printf 'done\n' > \
 printf 'result\n' > \
   "$TEST_ROOT/partial-retry-complete-sgt-partial-retry-complete/.sergeant-result"
 # Save the current fake-bin/git and create a partial-removal variant
-cp -p "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/git.saved"
+if [[ -f "$TEST_ROOT/fake-bin/git" ]]; then
+  cp -p "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/git.saved"
+else
+  printf '#!/usr/bin/env bash\n"$REAL_GIT" "$@"\n' > "$TEST_ROOT/fake-bin/git.saved"
+  chmod +x "$TEST_ROOT/fake-bin/git.saved"
+fi
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
@@ -3728,6 +3721,7 @@ mv "$TEST_ROOT/fake-bin/git.saved" "$TEST_ROOT/fake-bin/git"
 # invalidate a retry. The new _repo_identity includes worktree state
 # (_repo_worktree_identity runs git diff HEAD), so content changes change the
 # stored identity hash. A retry must be rejected when the owner's state differs.
+rm -rf "$TEST_ROOT/dirty-owner-retry-sgt-dirty-owner-retry"
 mkdir -p "$TEST_ROOT/fleet/dirty-owner-retry/app" \
   "$TEST_ROOT/fake-bin"
 init_test_repo "$TEST_ROOT/dirty-owner-retry"

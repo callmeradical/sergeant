@@ -265,8 +265,10 @@ recorded authorization; escalate high-risk findings.
 sgt-cleanup <fleet-task-id>
 ```
 
-Cleanup requires terminal/reconciled state, owner and lease identity, preserved
-evidence, no pending or partially acknowledged response transport, and no
+Cleanup requires terminal/reconciled state, configured cleanup-owner proof for
+the repository/worktree or treehouse lease, preserved evidence, explicit
+cleanup-phase proof when replaying an interrupted removal or reconciling an
+already-absent worktree, fully acknowledged response transport, and no
 uncommitted or in-use worktree state. Never use cleanup to resolve a waiting,
 blocked, or orphaned worker.
 
