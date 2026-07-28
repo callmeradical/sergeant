@@ -437,7 +437,8 @@ _orphaned_td_task_closed() {
 _require_terminal_repos() {
   local cleanup_phase configured_root evidence_dir expected_evidence_identity owner_root owner_type \
     partial_phase removed_phase removing_phase proof_dir repo_dir repo_name \
-    restore_after_validation retry_root retry_type status worktree worktree_status wt_type
+    restore_after_validation retry_root retry_type status td_closed_orphan worktree \
+    worktree_status wt_type
 
   for repo_dir in "$TASK_DIR"/*/; do
     [[ -d "$repo_dir" ]] || continue
@@ -448,6 +449,7 @@ _require_terminal_repos() {
     fi
 
     status="$(tr -d '\n' < "$repo_dir/status" 2>/dev/null || echo unknown)"
+    td_closed_orphan=false
     case "$status" in
       done)
         [[ -s "$repo_dir/result" ]] || \
@@ -461,8 +463,16 @@ _require_terminal_repos() {
         # Uncommitted-change safety is enforced by _require_clean_worktrees
         # (called unconditionally below), which satisfies the "no uncommitted
         # worktree commits" guard regardless of worktree presence.
-        _orphaned_td_task_closed "$repo_dir" || \
+        #
+        # When the td task is closed, the worktree .sergeant-status contains the
+        # worker's last nonterminal write (e.g. in_progress) — the supervisor set
+        # fleet status=orphaned externally.  Skip the worktree/evidence status
+        # reconciliation checks below for this case (td_closed_orphan=true).
+        if _orphaned_td_task_closed "$repo_dir"; then
+          td_closed_orphan=true
+        else
           _die "$repo_name is not terminal: $status"
+        fi
         ;;
       *) _die "$repo_name is not terminal: $status" ;;
     esac
@@ -519,16 +529,22 @@ _require_terminal_repos() {
         "") ;;
         *) _die "Persisted cleanup phase is malformed: $repo_name" ;;
       esac
-      [[ -f "$proof_dir/.sergeant-status" ]] || \
-        _die "$repo_name worktree terminal proof is missing"
-      worktree_status="$(tr -d '\n' < "$proof_dir/.sergeant-status")"
-      [[ "$worktree_status" == "$status" ]] || \
-        _die "$repo_name is not reconciled: fleet status $status differs from worktree status $worktree_status"
-      if [[ "$status" == "done" ]]; then
-        [[ -s "$proof_dir/.sergeant-result" ]] || \
-          _die "$repo_name worktree is not safely terminal: done requires a result"
-        cmp -s "$repo_dir/result" "$proof_dir/.sergeant-result" || \
-          _die "$repo_name worktree result differs from reconciled fleet result"
+      # For orphaned workers whose td task is closed, the worker's last
+      # .sergeant-status is a nonterminal value (the supervisor sets fleet
+      # status=orphaned externally).  Skip the status reconciliation check so
+      # that a post-merge orphaned pane can be cleaned up.
+      if [[ "$td_closed_orphan" != true ]]; then
+        [[ -f "$proof_dir/.sergeant-status" ]] || \
+          _die "$repo_name worktree terminal proof is missing"
+        worktree_status="$(tr -d '\n' < "$proof_dir/.sergeant-status")"
+        [[ "$worktree_status" == "$status" ]] || \
+          _die "$repo_name is not reconciled: fleet status $status differs from worktree status $worktree_status"
+        if [[ "$status" == "done" ]]; then
+          [[ -s "$proof_dir/.sergeant-result" ]] || \
+            _die "$repo_name worktree is not safely terminal: done requires a result"
+          cmp -s "$repo_dir/result" "$proof_dir/.sergeant-result" || \
+            _die "$repo_name worktree result differs from reconciled fleet result"
+        fi
       fi
 
       if [[ -z "$cleanup_phase" ]]; then
@@ -571,7 +587,7 @@ _require_terminal_repos() {
         # prior cleanup run or external preservation) or the worktree was externally
         # removed before any cleanup state was recorded — both allow cleanup to proceed.
         evidence_dir="$repo_dir/terminal-evidence"
-        if [[ -f "$evidence_dir/.sergeant-status" ]]; then
+        if [[ -f "$evidence_dir/.sergeant-status" && "$td_closed_orphan" != true ]]; then
           worktree_status="$(tr -d '\n' < "$evidence_dir/.sergeant-status")"
           [[ "$worktree_status" == "$status" ]] ||
             _die "$repo_name cleanup evidence differs from reconciled fleet status"
@@ -582,8 +598,9 @@ _require_terminal_repos() {
               _die "$repo_name cleanup evidence differs from reconciled fleet result"
           fi
         fi
-        # else: no terminal evidence — externally removed worktree with terminal
-        # fleet state; allow cleanup to proceed (main loop will skip the absent worktree)
+        # else: no terminal evidence (or orphaned with closed td) — externally removed
+        # worktree with terminal fleet state; allow cleanup to proceed (main loop will
+        # skip the absent worktree).
       else
         [[ -n "$worktree" && ( \
           ( ( "$cleanup_phase" == "$partial_phase" || \
@@ -597,16 +614,21 @@ _require_terminal_repos() {
           _die "$repo_name has no reconciled cleanup phase for its absent worktree"
 
         evidence_dir="$repo_dir/terminal-evidence"
-        [[ -f "$evidence_dir/.sergeant-status" ]] ||
+        # For orphaned workers with a closed td task, terminal evidence may
+        # contain a nonterminal status.  Require evidence to exist (when a prior
+        # cleanup pass staged it) but skip the status/result reconciliation.
+        [[ -f "$evidence_dir/.sergeant-status" || "$td_closed_orphan" == true ]] ||
           _die "$repo_name reconciled cleanup evidence is missing"
-        worktree_status="$(tr -d '\n' < "$evidence_dir/.sergeant-status")"
-        [[ "$worktree_status" == "$status" ]] ||
-          _die "$repo_name cleanup evidence differs from reconciled fleet status"
-        if [[ "$status" == "done" ]]; then
-          [[ -s "$evidence_dir/.sergeant-result" ]] ||
-            _die "$repo_name reconciled cleanup evidence requires a result"
-          cmp -s "$repo_dir/result" "$evidence_dir/.sergeant-result" ||
-            _die "$repo_name cleanup evidence differs from reconciled fleet result"
+        if [[ "$td_closed_orphan" != true ]]; then
+          worktree_status="$(tr -d '\n' < "$evidence_dir/.sergeant-status")"
+          [[ "$worktree_status" == "$status" ]] ||
+            _die "$repo_name cleanup evidence differs from reconciled fleet status"
+          if [[ "$status" == "done" ]]; then
+            [[ -s "$evidence_dir/.sergeant-result" ]] ||
+              _die "$repo_name reconciled cleanup evidence requires a result"
+            cmp -s "$repo_dir/result" "$evidence_dir/.sergeant-result" ||
+              _die "$repo_name cleanup evidence differs from reconciled fleet result"
+          fi
         fi
       fi
     fi
@@ -1770,6 +1792,7 @@ for repo_dir in "$TASK_DIR"/*/; do
   # Validate the validation checkout ownership before any destructive step.
   _preflight_validation_checkout "$repo_dir" "$worktree" "$TASK_ID"
 
+  _preflight_validation_checkout "$repo_dir" "$worktree" "$TASK_ID"
   _stop_validation_pane "$repo_dir"
   _stop_local_worker "$repo_dir" "$worktree"
 
