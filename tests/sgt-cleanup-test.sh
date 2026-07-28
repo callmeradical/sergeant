@@ -3948,6 +3948,7 @@ set -e
 printf 'sgt-cleanup orphaned+absent+closed-td accepted: ok\n'
 
 # Test B: orphaned + present worktree + closed td → cleanup must succeed
+# Worker .sergeant-status = orphaned (matching fleet).
 init_test_repo "$TEST_ROOT/orphaned-present-main"
 git -C "$TEST_ROOT/orphaned-present-main" worktree add -q -b orphaned-closed-worker \
   "$TEST_ROOT/orphaned-present-main-sgt-orphaned-present-closed"
@@ -3981,6 +3982,48 @@ set -e
   exit 1
 }
 printf 'sgt-cleanup orphaned+present+closed-td accepted: ok\n'
+
+# Test B': orphaned + present worktree + closed td + nonterminal .sergeant-status
+# (the realistic case: supervisor sets fleet=orphaned, but the worker's last write
+# was in_progress — the reconciliation must not block cleanup).
+init_test_repo "$TEST_ROOT/orphaned-present-nonterminal-main"
+git -C "$TEST_ROOT/orphaned-present-nonterminal-main" worktree add -q \
+  -b orphaned-closed-nonterminal-worker \
+  "$TEST_ROOT/orphaned-present-nonterminal-main-sgt-orphaned-nonterminal-closed"
+mkdir -p "$TEST_ROOT/fleet/orphaned-nonterminal-closed/app"
+record_retry_owner orphaned-nonterminal-closed app \
+  "$TEST_ROOT/orphaned-present-nonterminal-main"
+printf 'orphaned\n' > "$TEST_ROOT/fleet/orphaned-nonterminal-closed/app/status"
+printf '%s\n' \
+  "$TEST_ROOT/orphaned-present-nonterminal-main-sgt-orphaned-nonterminal-closed" \
+  > "$TEST_ROOT/fleet/orphaned-nonterminal-closed/app/worktree"
+printf 'td-orphaned-nonterminal\n' \
+  > "$TEST_ROOT/fleet/orphaned-nonterminal-closed/app/td_task"
+printf 'git\n' > "$TEST_ROOT/fleet/orphaned-nonterminal-closed/app/wt_type"
+# Worker's last status is in_progress — the supervisor marked fleet=orphaned externally.
+printf 'in_progress\n' \
+  > "$TEST_ROOT/orphaned-present-nonterminal-main-sgt-orphaned-nonterminal-closed/.sergeant-status"
+set +e
+_opn_out="$(PATH="$TEST_ROOT/fake-bin:$PATH" TD_FAKE_STATUS=closed \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" orphaned-nonterminal-closed 2>&1)"
+_opn_status=$?
+set -e
+[[ "$_opn_status" -eq 0 ]] || {
+  printf 'FAIL issue#95 test-B'"'"': orphaned+nonterminal-status+closed-td rejected:\n%s\n' \
+    "$_opn_out" >&2
+  exit 1
+}
+[[ ! -e \
+  "$TEST_ROOT/orphaned-present-nonterminal-main-sgt-orphaned-nonterminal-closed" ]] || {
+  printf 'FAIL issue#95 test-B'"'"': worktree not removed after nonterminal-status cleanup\n' >&2
+  exit 1
+}
+[[ ! -d "$TEST_ROOT/fleet/orphaned-nonterminal-closed" ]] || {
+  printf 'FAIL issue#95 test-B'"'"': fleet state not removed after nonterminal-status cleanup\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup orphaned+present+nonterminal-status+closed-td accepted: ok\n'
 
 # Test B2: orphaned + present worktree + closed td + uncommitted changes →
 # must be rejected by _require_clean_worktrees (the "no uncommitted changes"
