@@ -402,6 +402,7 @@ fi
 [[ -d "$TEST_ROOT/done-without-result-worktree" ]]
 [[ -d "$TEST_ROOT/fleet/done-without-result" ]]
 
+
 mkdir -p "$TEST_ROOT/fleet/absent-missing-record/app"
 printf 'done\n' > "$TEST_ROOT/fleet/absent-missing-record/app/status"
 printf 'result\n' > "$TEST_ROOT/fleet/absent-missing-record/app/result"
@@ -587,6 +588,7 @@ case " $* " in
   *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
   *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
+  *" worktree list --porcelain -z "*) "$REAL_GIT" "$@" ;;
   *" worktree remove "*)
     worktree="${!#}"
     printf '%s\n' "$worktree" >> "$FAKE_GIT_LOG"
@@ -1117,8 +1119,10 @@ git -C "$TEST_ROOT/present-retry-sgt-present-retry" checkout -q --detach HEAD^
 assert_present_worker_identity_rejected 'HEAD drift'
 git -C "$TEST_ROOT/present-retry-sgt-present-retry" checkout -q present-retry-worker
 
+# Tag additions change refs in the common git dir, not the per-worktree git
+# dir.  Stable identity intentionally excludes all-refs (which changes on
+# every git fetch), so local tag drift no longer invalidates a retry.
 git -C "$TEST_ROOT/present-retry-sgt-present-retry" tag worker-ref-drift
-assert_present_worker_identity_rejected 'ref drift'
 git -C "$TEST_ROOT/present-retry-sgt-present-retry" tag -d worker-ref-drift >/dev/null
 
 printf 'changed worker contents\n' >> \
@@ -2377,6 +2381,139 @@ record_retry_owner task-123 app "$TEST_ROOT/repo"
 worktree="$TEST_ROOT/repo-sgt-task-123"
 repo_state="$TEST_ROOT/fleet/task-123/app"
 git -C "$TEST_ROOT/repo" worktree add -q -b test-cleanup "$worktree"
+printf '%s\n' "$worktree" > "$repo_state/worktree"
+printf 'git\n' > "$repo_state/wt_type"
+printf 'done\n' > "$repo_state/status"
+printf 'result\n' > "$repo_state/result"
+printf 'done\n' > "$worktree/.sergeant-status"
+printf 'result\n' > "$worktree/.sergeant-result"
+printf '%s\n' "$TMUX_SESSION" > "$repo_state/tmux_session"
+
+printf 'uncommitted\n' > "$worktree/uncommitted.txt"
+if SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" task-123 >/dev/null 2>&1; then
+  printf 'cleanup accepted an uncommitted worktree\n' >&2
+  exit 1
+fi
+[[ -d "$worktree" && -d "$TEST_ROOT/fleet/task-123" ]]
+rm "$worktree/uncommitted.txt"
+
+cat > "$TEST_ROOT/fake-bin/fake-agent" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$AGENT_PID_FILE"
+trap '' TERM HUP
+trap 'exit 0' INT
+while :; do sleep 1; done
+EOF
+chmod +x "$TEST_ROOT/fake-bin/fake-agent"
+
+cat > "$TEST_ROOT/fake-bin/sgt-worker" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$WORKER_PID_FILE"
+"$FAKE_AGENT" &
+wait "$!"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/sgt-worker"
+
+tmux new-session -d -s "$TMUX_SESSION" -n unrelated \
+  "while :; do sleep 1; done"
+unrelated_pid="$(tmux display-message -p -t "$TMUX_SESSION:unrelated" '#{pane_pid}')"
+worker_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n worker \
+  "env WORKER_PID_FILE='$TEST_ROOT/worker.pid' AGENT_PID_FILE='$TEST_ROOT/agent.pid' \
+  FAKE_AGENT='$TEST_ROOT/fake-bin/fake-agent' \
+  '$TEST_ROOT/fake-bin/sgt-worker' '$repo_state' '$worktree'")"
+printf '%s\n' "$worker_pane" > "$repo_state/pane"
+tmux display-message -p -t "$worker_pane" \
+  '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+  > "$repo_state/pane_identity"
+
+for pid_file in "$TEST_ROOT/worker.pid" "$TEST_ROOT/agent.pid"; do
+  for _ in $(seq 1 100); do
+    [[ -s "$pid_file" ]] && break
+    sleep 0.01
+  done
+  [[ -s "$pid_file" ]]
+done
+worker_pid="$(cat "$TEST_ROOT/worker.pid")"
+agent_pid="$(cat "$TEST_ROOT/agent.pid")"
+
+mkdir "$worktree/held-subdirectory"
+holder_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n holder \
+  -c "$worktree/held-subdirectory" "while :; do sleep 1; done")"
+set +e
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" task-123 > "$TEST_ROOT/blocked-cleanup.log" 2>&1
+cleanup_status=$?
+set -e
+[[ "$cleanup_status" -ne 0 ]]
+grep -Fq 'Other processes still have' "$TEST_ROOT/blocked-cleanup.log" || {
+  printf 'unexpected cleanup failure:\n%s\n' "$(cat "$TEST_ROOT/blocked-cleanup.log")" >&2
+  exit 1
+}
+tmux display-message -p -t "$holder_pane" '#{pane_id}' >/dev/null
+[[ -d "$worktree" && -d "$TEST_ROOT/fleet/task-123" ]]
+if kill -0 "$worker_pid" 2>/dev/null; then
+  printf 'worker process still running after blocked cleanup: %s\n' "$worker_pid" >&2
+  exit 1
+fi
+if kill -0 "$agent_pid" 2>/dev/null; then
+  printf 'agent process still running after blocked cleanup: %s\n' "$agent_pid" >&2
+  exit 1
+fi
+
+tmux kill-pane -t "$holder_pane"
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" task-123 >/dev/null
+
+for _ in $(seq 1 100); do
+  if ! tmux list-panes -a -F '#{pane_id}' | grep -Fxq "$worker_pane"; then
+    break
+  fi
+  sleep 0.01
+done
+if tmux list-panes -a -F '#{pane_id}' | grep -Fxq "$worker_pane"; then
+  printf 'worker pane still exists after cleanup: %s\n' "$worker_pane" >&2
+  exit 1
+fi
+tmux has-session -t "$TMUX_SESSION"
+tmux display-message -p -t "$TMUX_SESSION:unrelated" '#{pane_id}' >/dev/null
+kill -0 "$unrelated_pid"
+if kill -0 "$worker_pid" 2>/dev/null; then
+  printf 'worker process still running after cleanup: %s\n' "$worker_pid" >&2
+  exit 1
+fi
+if kill -0 "$agent_pid" 2>/dev/null; then
+  printf 'agent process still running after cleanup: %s\n' "$agent_pid" >&2
+  exit 1
+fi
+[[ ! -e "$worktree" ]]
+[[ ! -e "$TEST_ROOT/fleet/task-123" ]]
+
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" task-123 >/dev/null
+
+# Clean up any leftover repo state from the previous task-123 tmux section
+rm -rf "$TEST_ROOT/repo" "$TEST_ROOT/repo-sgt-task-123"
+tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+
+mkdir -p "$TEST_ROOT/fleet/task-123/app" "$TEST_ROOT/repo"
+cat > "$TEST_ROOT/config/task-123.yaml" <<EOF
+name: task-123
+repos:
+  - name: app
+    path: $TEST_ROOT/repo
+EOF
+printf 'Project: task-123\n' > "$TEST_ROOT/fleet/task-123/brief.md"
+git -C "$TEST_ROOT/repo" init -q
+git -C "$TEST_ROOT/repo" config user.name Test
+git -C "$TEST_ROOT/repo" config user.email test@example.invalid
+touch "$TEST_ROOT/repo/README.md"
+git -C "$TEST_ROOT/repo" add README.md
+git -C "$TEST_ROOT/repo" commit -qm fixture
+
+worktree="$TEST_ROOT/repo-sgt-task-123"
+repo_state="$TEST_ROOT/fleet/task-123/app"
+git -C "$TEST_ROOT/repo" worktree add -q -b test-cleanup "$worktree"
 validation_worktree="${worktree}-validation-task-123"
 git clone -q "$worktree" "$validation_worktree"
 printf '%s\n' "$validation_worktree" > "$repo_state/validation_worktree"
@@ -2902,21 +3039,24 @@ PATH="$TEST_ROOT/recycled-bin:$PATH" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_
 recycled_status=$?
 set -e
 
-# Cleanup must succeed (absent worktree → reconciled-absent → fleet state cleared)
-[[ "$recycled_status" -eq 0 ]] || {
-  printf 'recycled-pane cleanup failed unexpectedly: %s\n' \
-    "$(cat "$TEST_ROOT/recycled-pane.log")" >&2
+# Cleanup must FAIL: Finding 1 requires cleanup to die if the worker pane is
+# still active after _stop_local_worker (identity mismatch causes kill to be
+# skipped, leaving an active pane that has not been verified as owned).
+[[ "$recycled_status" -ne 0 ]] || {
+  printf 'recycled-pane cleanup succeeded unexpectedly (pane still active after stop)\n' >&2
   exit 1
 }
 # The recycled pane must NOT have been killed: identity mismatch must have
-# caused the new code to skip it with "recorded pane no longer belongs to this
-# worker", not to invoke kill-pane.
+# caused _stop_local_worker to skip with "recorded pane no longer belongs", not
+# invoke kill-pane.
 [[ ! -e "$TEST_ROOT/recycled-kills.log" ]] || {
   printf 'recycled pane was incorrectly killed (pane identity not checked exactly):\n%s\n' \
     "$(cat "$TEST_ROOT/recycled-kills.log")" >&2
   exit 1
 }
 grep -Fq 'recorded pane no longer belongs to this worker' "$TEST_ROOT/recycled-pane.log"
+grep -Fq 'Worker pane still active after stop' "$TEST_ROOT/recycled-pane.log"
+[[ -d "$TEST_ROOT/fleet/recycled-pane" ]]
 
 # === PR14-F2 regression: escaped descendant terminated after pane exits ===
 # Scenario: the worker pane exits BEFORE cleanup runs.  The escaped descendant
@@ -3168,15 +3308,16 @@ EOF
   printf 'Project: %s\n' "$task_id" > "$TEST_ROOT/fleet/$task_id/brief.md"
 }
 
-# _capture_identity matches _record_cleanup_owner: creates the sentinel token.
+# _capture_identity matches _record_cleanup_owner: creates the sentinel token
+# using the same formula as the new _repo_identity (owner mode with "create").
 _capture_identity() {
   local repo_root="$1"
-  local git_dir git_common_dir inode_dev roots remote sentinel sentinel_file tmp_token
-  git_dir="$(git -C "$repo_root" rev-parse --absolute-git-dir 2>/dev/null)"
+  local git_dir git_common_dir inode_dev instance roots remote sentinel sentinel_file tmp_token
+  git_dir="$(git -C "$repo_root" rev-parse --path-format=absolute --git-dir 2>/dev/null)"
   git_common_dir="$(git -C "$repo_root" \
     rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
   sentinel_file="$git_common_dir/sergeant-instance"
-  if [[ ! -f "$sentinel_file" ]]; then
+  if [[ ! -e "$sentinel_file" ]]; then
     tmp_token="$(printf '%s\n%s\n%s\n%s\n' \
       "$git_common_dir" "$$" "$RANDOM" "$(date +%s)" | git hash-object --stdin)"
     printf '%s\n' "$tmp_token" > "$sentinel_file"
@@ -3184,10 +3325,80 @@ _capture_identity() {
   sentinel="$(cat "$sentinel_file")"
   inode_dev="$(stat -c '%d:%i' "$git_dir" 2>/dev/null || \
     stat -f '%d:%i' "$git_dir" 2>/dev/null)"
-  roots="$(git -C "$repo_root" rev-list --max-parents=0 --all 2>/dev/null | LC_ALL=C sort)"
+  instance="$inode_dev:$sentinel"
+  roots="$(git -C "$repo_root" rev-list --max-parents=0 --all 2>/dev/null | sort)"
   remote="$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null || true)"
-  printf '%s\n%s\n%s\n%s\n' "$sentinel" "$inode_dev" "$remote" "$roots" | \
+  printf '%s\n%s\n%s\n' "$instance" "$remote" "$roots" | \
     git hash-object --stdin
+}
+
+# _capture_evidence_identity computes the same hash as _worker_evidence_identity.
+_capture_evidence_identity() {
+  local evidence_dir="$1"
+  (
+    cd "$evidence_dir" || exit 1
+    export LC_ALL=C
+    for evidence in .sergeant-*; do
+      [[ -e "$evidence" || -L "$evidence" ]] || continue
+      [[ -f "$evidence" && ! -L "$evidence" ]] || exit 1
+      printf 'file\n%s\n' "$evidence"
+      git hash-object "$evidence" || exit 1
+    done
+  ) | git hash-object --stdin
+}
+
+# write_cleanup_owner_v4 writes a version-4 cleanup-owner with all required fields.
+# Args: state_dir task_id repo_root worktree wt_type repo_identity worker_identity evidence_identity [holder]
+write_cleanup_owner_v4() {
+  local state_dir="$1" task_id="$2" repo_root="$3" worktree="$4" wt_type="$5"
+  local repo_identity="$6" worker_identity="$7" evidence_identity="$8" holder="${9:-}"
+  printf '4\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$task_id" "$repo_root" "$worktree" "$wt_type" \
+    "$repo_identity" "$worker_identity" "$evidence_identity" "$holder" \
+    > "$state_dir/cleanup-owner"
+}
+
+# run_stable_identity_first_pass runs a first-pass cleanup using a fake git that
+# fails at 'worktree remove', causing cleanup to write the cleanup-owner and
+# cleanup-phase but exit non-zero. The resulting cleanup-owner contains the
+# correct v4 worker and evidence identity hashes for use in retry tests.
+# Args: task_id fake_git_log [env vars]
+run_stable_identity_first_pass() {
+  local task_id="$1" fake_git_log="$2" task_dir config_file
+  task_dir="$TEST_ROOT/fleet/$task_id"
+  config_file="$TEST_ROOT/config/$task_id.yaml"
+
+  cat > "$TEST_ROOT/fake-bin/git-stable-id" <<'GITEOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" worktree remove "*) printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"; exit 1 ;;
+  *) "$REAL_GIT" "$@" ;;
+esac
+GITEOF
+  chmod +x "$TEST_ROOT/fake-bin/git-stable-id"
+  cp "$TEST_ROOT/fake-bin/git-stable-id" "$TEST_ROOT/fake-bin/git"
+
+  PATH="$TEST_ROOT/fake-bin:$PATH" \
+    FAKE_GIT_LOG="$fake_git_log" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" "$task_id" >/dev/null 2>&1 || true
+
+  rm -f "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/git-stable-id"
+}
+
+# tamper_repo_identity replaces the repo identity field (line 6) in a v4 cleanup-owner.
+tamper_repo_identity() {
+  local state_dir="$1" new_identity="${2:-wrong-identity-hash}"
+  local before line6
+  before="$(cat "$state_dir/cleanup-owner")"
+  # Lines: 1=4, 2=project, 3=root, 4=worktree, 5=wt_type, 6=repo_identity, 7=worker, 8=evidence, 9=holder
+  {
+    printf '%s\n' "$before" | sed -n '1,5p'
+    printf '%s\n' "$new_identity"
+    printf '%s\n' "$before" | sed -n '7,$p'
+  } > "$state_dir/cleanup-owner"
 }
 
 # Slice 1: tampered cleanup-owner identity is rejected before any destructive step.
@@ -3204,14 +3415,12 @@ printf 'done\n' > "$tamper_state/status"
 printf 'result\n' > "$tamper_state/result"
 printf 'done\n' > "$TEST_ROOT/tamper-retry-sgt-tamper-retry/.sergeant-status"
 printf 'result\n' > "$TEST_ROOT/tamper-retry-sgt-tamper-retry/.sergeant-result"
-printf 'removing\n%s\ngit\n%s\n' \
-  "$TEST_ROOT/tamper-retry-sgt-tamper-retry" \
-  "$TEST_ROOT/tamper-retry" \
-  > "$tamper_state/cleanup-phase"
-printf '2\ntamper-retry\n%s\n%s\ngit\nwrong-identity-hash\n\n' \
-  "$TEST_ROOT/tamper-retry" \
-  "$TEST_ROOT/tamper-retry-sgt-tamper-retry" \
-  > "$tamper_state/cleanup-owner"
+# Run first-pass cleanup to create correct v4 cleanup-owner, then tamper repo identity.
+run_stable_identity_first_pass tamper-retry "$TEST_ROOT/tamper-removals"
+[[ -f "$tamper_state/cleanup-owner" && -f "$tamper_state/cleanup-phase" ]] || {
+  printf 'first-pass cleanup did not create cleanup-owner/cleanup-phase\n' >&2; exit 1
+}
+tamper_repo_identity "$tamper_state" wrong-identity-hash
 set +e
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" tamper-retry \
@@ -3221,7 +3430,7 @@ set -e
 [[ "$tamper_status" -ne 0 ]] || {
   printf 'cleanup accepted tampered owner identity\n' >&2; exit 1
 }
-grep -E 'Retry owner repo identity changed|Cannot identify retry owner repo' \
+grep -E 'Retry owner repo identity changed|Cannot identify retry owner repo|Retry worker worktree identity changed|Retry persisted terminal evidence' \
   "$TEST_ROOT/tamper-retry.log" >/dev/null || {
   printf 'unexpected tamper error: %s\n' "$(cat "$TEST_ROOT/tamper-retry.log")" >&2; exit 1
 }
@@ -3260,23 +3469,24 @@ mkdir -p "$TEST_ROOT/fleet/clone-retry"
 init_retry_repo "$TEST_ROOT/clone-retry"
 make_retry_config clone-retry app "$TEST_ROOT/clone-retry"
 mkdir -p "$clone_state"
+# Create a git worktree as the "worker" (just for the sentinel to be created).
+git -C "$TEST_ROOT/clone-retry" worktree add -q -b clone-worker \
+  "$TEST_ROOT/clone-retry-sgt-clone-retry"
 printf '%s\n' "$TEST_ROOT/clone-retry-sgt-clone-retry" > "$clone_state/worktree"
 printf 'git\n' > "$clone_state/wt_type"
 printf 'done\n' > "$clone_state/status"
 printf 'result\n' > "$clone_state/result"
-mkdir -p "$clone_state/terminal-evidence"
-printf 'done\n' > "$clone_state/terminal-evidence/.sergeant-status"
-printf 'result\n' > "$clone_state/terminal-evidence/.sergeant-result"
-original_identity="$(_capture_identity "$TEST_ROOT/clone-retry")"
-printf '2\nclone-retry\n%s\n%s\ngit\n%s\n\n' \
-  "$TEST_ROOT/clone-retry" \
-  "$TEST_ROOT/clone-retry-sgt-clone-retry" \
-  "$original_identity" \
-  > "$clone_state/cleanup-owner"
-printf 'removing\n%s\ngit\n%s\n' \
-  "$TEST_ROOT/clone-retry-sgt-clone-retry" \
-  "$TEST_ROOT/clone-retry" \
-  > "$clone_state/cleanup-phase"
+printf 'done\n' > "$TEST_ROOT/clone-retry-sgt-clone-retry/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/clone-retry-sgt-clone-retry/.sergeant-result"
+# First-pass: creates correct v4 cleanup-owner, fails at worktree remove.
+run_stable_identity_first_pass clone-retry "$TEST_ROOT/clone-removals"
+[[ -f "$clone_state/cleanup-owner" ]] || {
+  printf 'first-pass did not create cleanup-owner for clone-retry\n' >&2; exit 1
+}
+# Simulate "absent worktree" retry by removing the worktree directory.
+git -C "$TEST_ROOT/clone-retry" worktree remove "$TEST_ROOT/clone-retry-sgt-clone-retry" 2>/dev/null || \
+  rm -rf "$TEST_ROOT/clone-retry-sgt-clone-retry"
+# Now replace the repo with a fresh clone (no sentinel file).
 rm -rf "$TEST_ROOT/clone-retry"
 init_retry_repo "$TEST_ROOT/clone-retry"
 set +e
@@ -3354,15 +3564,13 @@ printf '%s\n' "$TEST_ROOT/remote-change-sgt-remote-change" \
 printf 'git\n' > "$remote_change_state/wt_type"
 printf 'done\n' > "$remote_change_state/status"
 printf 'result\n' > "$remote_change_state/result"
-mkdir -p "$remote_change_state/terminal-evidence"
-printf 'done\n' > "$remote_change_state/terminal-evidence/.sergeant-status"
-printf 'result\n' > "$remote_change_state/terminal-evidence/.sergeant-result"
-original_remote_identity="$(_capture_identity "$TEST_ROOT/remote-change")"
-printf '2\nremote-change\n%s\n%s\ngit\n%s\n\n' \
-  "$TEST_ROOT/remote-change" \
-  "$TEST_ROOT/remote-change-sgt-remote-change" \
-  "$original_remote_identity" \
-  > "$remote_change_state/cleanup-owner"
+printf 'done\n' > "$TEST_ROOT/remote-change-sgt-remote-change/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/remote-change-sgt-remote-change/.sergeant-result"
+# First-pass: creates correct v4 cleanup-owner, fails at worktree remove.
+run_stable_identity_first_pass remote-change "$TEST_ROOT/remote-removals"
+[[ -f "$remote_change_state/cleanup-owner" ]] || {
+  printf 'first-pass did not create cleanup-owner for remote-change\n' >&2; exit 1
+}
 printf 'removing\n%s\ngit\n%s\n' \
   "$TEST_ROOT/remote-change-sgt-remote-change" \
   "$TEST_ROOT/remote-change" \
@@ -3377,7 +3585,7 @@ set -e
 [[ "$remote_status" -ne 0 ]] || {
   printf 'cleanup accepted in-place remote URL change\n' >&2; exit 1
 }
-grep -E 'Retry owner repo identity changed|Cannot identify retry owner repo' \
+grep -E 'Retry owner repo identity changed|Cannot identify retry owner repo|Retry worker worktree identity changed' \
   "$TEST_ROOT/remote-change.log" >/dev/null || {
   printf 'unexpected remote error: %s\n' "$(cat "$TEST_ROOT/remote-change.log")" >&2; exit 1
 }
@@ -3398,15 +3606,13 @@ printf '%s\n' "$TEST_ROOT/root-change-sgt-root-change" > "$root_change_state/wor
 printf 'git\n' > "$root_change_state/wt_type"
 printf 'done\n' > "$root_change_state/status"
 printf 'result\n' > "$root_change_state/result"
-mkdir -p "$root_change_state/terminal-evidence"
-printf 'done\n' > "$root_change_state/terminal-evidence/.sergeant-status"
-printf 'result\n' > "$root_change_state/terminal-evidence/.sergeant-result"
-original_root_identity="$(_capture_identity "$TEST_ROOT/root-change")"
-printf '2\nroot-change\n%s\n%s\ngit\n%s\n\n' \
-  "$TEST_ROOT/root-change" \
-  "$TEST_ROOT/root-change-sgt-root-change" \
-  "$original_root_identity" \
-  > "$root_change_state/cleanup-owner"
+printf 'done\n' > "$TEST_ROOT/root-change-sgt-root-change/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/root-change-sgt-root-change/.sergeant-result"
+# First-pass: creates correct v4 cleanup-owner, fails at worktree remove.
+run_stable_identity_first_pass root-change "$TEST_ROOT/root-removals"
+[[ -f "$root_change_state/cleanup-owner" ]] || {
+  printf 'first-pass did not create cleanup-owner for root-change\n' >&2; exit 1
+}
 printf 'removing\n%s\ngit\n%s\n' \
   "$TEST_ROOT/root-change-sgt-root-change" \
   "$TEST_ROOT/root-change" \
@@ -3425,7 +3631,7 @@ set -e
 [[ "$root_status" -ne 0 ]] || {
   printf 'cleanup accepted root-commit-changing reset\n' >&2; exit 1
 }
-grep -E 'Retry owner repo identity changed|Cannot identify retry owner repo' \
+grep -E 'Retry owner repo identity changed|Cannot identify retry owner repo|Retry worker worktree identity changed' \
   "$TEST_ROOT/root-change.log" >/dev/null || {
   printf 'unexpected root-change error: %s\n' "$(cat "$TEST_ROOT/root-change.log")" >&2; exit 1
 }
