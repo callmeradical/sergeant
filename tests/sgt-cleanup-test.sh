@@ -2566,7 +2566,7 @@ set -e
   exit 1
 }
 
-# Finding missing-project-config-cleanup-policy/no-yaml:
+# Finding missing-project-config-cleanup-policy:
 # First-pass cleanup must fail closed when project config is missing (no brief.md
 # Project: line and no task-id-named YAML). No path-derived ownership fallback.
 mkdir -p "$TEST_ROOT/fleet/fp-no-project/app"
@@ -2606,7 +2606,7 @@ set -e
 }
 printf 'sgt-cleanup first-pass: missing project config rejected: ok\n'
 
-# Finding missing-project-config-cleanup-policy/renamed-repo (git):
+# Finding missing-project-config-cleanup-policy:
 # First-pass cleanup must fail closed when the configured repo was renamed in the
 # project YAML (Project: is set in brief.md but repo name does not appear in YAML).
 mkdir -p "$TEST_ROOT/fleet/fp-renamed-repo/app"
@@ -2694,7 +2694,6 @@ set -e
   exit 1
 }
 printf 'sgt-cleanup first-pass (treehouse): missing project config rejected: ok\n'
-
 # Fix 2: absent-worktree cleanup must fail closed when pane/validation_pane
 # metadata is present in fleet state, rather than silently proceeding.
 # State: partial cleanup reached "removed" phase, worktree absent, validation_pane present.
