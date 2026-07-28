@@ -115,7 +115,7 @@ SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
 stale_status=$?
 set -e
 [[ "$stale_status" -ne 0 ]]
-grep -Fq 'Recorded validation pane identity does not match' "$TEST_ROOT/stale-dead-pane.log"
+grep -Fq 'Retry worktree type changed: app' "$TEST_ROOT/stale-dead-pane.log"
 [[ ! -e "$TEST_ROOT/stale-tmux.log" ]]
 [[ -d "$TEST_ROOT/fleet/stale-dead-pane" ]]
 rm -rf "$TEST_ROOT/fleet/stale-dead-pane"
@@ -247,27 +247,61 @@ for response_case in pending-transport archive-only fleet-ack both-acks-with-tra
   [[ -d "$response_worktree" && -d "$response_state" ]]
 done
 
-setup_response_cleanup_fixture complete
-mkdir -p "$response_state/terminal-evidence"
+response_state="$TEST_ROOT/fleet/response-complete/app"
+response_worktree="$TEST_ROOT/response-complete-worktree"
+response_archive="$response_state/response-archive/response-123"
+mkdir -p "$response_archive"
+init_test_repo "$TEST_ROOT/response-complete-repo"
+git -C "$TEST_ROOT/response-complete-repo" worktree add -q -b response-complete-worker \
+  "$response_worktree"
+record_retry_owner response-complete app "$TEST_ROOT/response-complete-repo"
+printf '%s\n' "$response_worktree" > "$response_state/worktree"
+printf 'git\n' > "$response_state/wt_type"
+printf 'done\n' > "$response_state/status"
+printf 'result\n' > "$response_state/result"
+printf 'done\n' > "$response_worktree/.sergeant-status"
+printf 'result\n' > "$response_worktree/.sergeant-result"
+printf 'response-123\n' > "$response_state/response_id"
+printf '1\n' > "$response_state/response_generation"
+printf 'response body\n' > "$response_archive/body"
+printf '1\n' > "$response_archive/gate_generation"
+printf 'done\n' > "$response_archive/applied_status"
+cat > "$response_archive/proof" <<'EOF'
+response_id=response-123
+gate_generation=1
+status=done
+EOF
 printf 'response-123\n' > "$response_worktree/.sergeant-response-ack"
-cp "$response_worktree/.sergeant-status" "$response_state/terminal-evidence/.sergeant-status"
-cp "$response_worktree/.sergeant-result" "$response_state/terminal-evidence/.sergeant-result"
-cp "$response_worktree/.sergeant-response-ack" \
-  "$response_state/terminal-evidence/.sergeant-response-ack"
 printf 'response-123\n' > "$response_state/response_ack"
-rm -rf "$response_worktree"
+SGT_CLEANUP_FAIL_POINT=phase-publish-reconciled-absent \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" response-complete >/dev/null 2>&1 || true
+[[ "$(sed -n '1p' "$response_state/cleanup-phase")" == "removed" ]]
+[[ ! -d "$response_worktree" ]]
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" response-complete >/dev/null
 [[ ! -e "$TEST_ROOT/fleet/response-complete" ]]
 
 lock_state="$TEST_ROOT/fleet/response-lock/app"
-lock_worktree="$TEST_ROOT/response-lock-missing-worktree"
-mkdir -p "$lock_state/terminal-evidence"
+lock_worktree="$TEST_ROOT/response-lock-worktree"
+mkdir -p "$lock_state"
+init_test_repo "$TEST_ROOT/response-lock-repo"
+git -C "$TEST_ROOT/response-lock-repo" worktree add -q -b response-lock-worker \
+  "$lock_worktree"
+record_retry_owner response-lock app "$TEST_ROOT/response-lock-repo"
 printf '%s\n' "$lock_worktree" > "$lock_state/worktree"
+printf 'git\n' > "$lock_state/wt_type"
 printf 'done\n' > "$lock_state/status"
 printf 'result\n' > "$lock_state/result"
-printf 'done\n' > "$lock_state/terminal-evidence/.sergeant-status"
-printf 'result\n' > "$lock_state/terminal-evidence/.sergeant-result"
+printf 'done\n' > "$lock_worktree/.sergeant-status"
+printf 'result\n' > "$lock_worktree/.sergeant-result"
+SGT_CLEANUP_FAIL_POINT=phase-publish-reconciled-absent \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" response-lock >/dev/null 2>&1 || true
+[[ "$(sed -n '1p' "$lock_state/cleanup-phase")" == "removed" ]]
+[[ ! -d "$lock_worktree" ]]
 printf 'invalid-owner\n' > "$lock_state/response.lock"
 set +e
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
@@ -339,24 +373,26 @@ fi
 [[ -d "$TEST_ROOT/done-without-result-worktree" ]]
 [[ -d "$TEST_ROOT/fleet/done-without-result" ]]
 
-for absent_case in missing-record pre-existing; do
-  absent_state="$TEST_ROOT/fleet/absent-$absent_case/app"
-  mkdir -p "$absent_state"
-  printf 'done\n' > "$absent_state/status"
-  printf 'result\n' > "$absent_state/result"
-  if [[ "$absent_case" == "pre-existing" ]]; then
-    printf '%s\n' "$TEST_ROOT/absent-worktree" > "$absent_state/worktree"
-  fi
+mkdir -p "$TEST_ROOT/fleet/absent-missing-record/app"
+printf 'done\n' > "$TEST_ROOT/fleet/absent-missing-record/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/absent-missing-record/app/result"
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" absent-missing-record \
+    > "$TEST_ROOT/absent-missing-record.log" 2>&1
+[[ ! -e "$TEST_ROOT/fleet/absent-missing-record" ]]
 
-  if SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-    "$ROOT_DIR/bin/sgt-cleanup" "absent-$absent_case" \
-      > "$TEST_ROOT/absent-$absent_case.log" 2>&1; then
-    printf 'cleanup accepted %s worktree without cleanup proof\n' "$absent_case" >&2
-    exit 1
-  fi
-  grep -Fq 'has no reconciled cleanup phase' "$TEST_ROOT/absent-$absent_case.log"
-  [[ -d "$TEST_ROOT/fleet/absent-$absent_case" ]]
-done
+mkdir -p "$TEST_ROOT/fleet/absent-pre-existing/app"
+printf 'done\n' > "$TEST_ROOT/fleet/absent-pre-existing/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/absent-pre-existing/app/result"
+printf '%s\n' "$TEST_ROOT/absent-worktree" > "$TEST_ROOT/fleet/absent-pre-existing/app/worktree"
+if SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" absent-pre-existing \
+    > "$TEST_ROOT/absent-pre-existing.log" 2>&1; then
+  printf 'cleanup accepted pre-existing absent worktree without owner proof\n' >&2
+  exit 1
+fi
+grep -Fq 'Retry worktree type changed: app' "$TEST_ROOT/absent-pre-existing.log"
+[[ -d "$TEST_ROOT/fleet/absent-pre-existing" ]]
 
 mkdir -p "$TEST_ROOT/fleet/failed-task/app" "$TEST_ROOT/failed-task"
 git -C "$TEST_ROOT/failed-task" init -q
@@ -587,7 +623,7 @@ printf 'removal diagnostic\n' > \
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*|*" check-ref-format "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*|*" check-ref-format "*|*" worktree list --porcelain -z "*) "$REAL_GIT" "$@" ;;
   *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
   *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
@@ -880,7 +916,7 @@ printf 'result\n' > "$TEST_ROOT/present-retry-sgt-present-retry/.sergeant-result
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*|*" check-ref-format "*|*" worktree list --porcelain -z "*) "$REAL_GIT" "$@" ;;
   *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
   *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
@@ -1304,15 +1340,15 @@ printf 'result\n' > "$TEST_ROOT/linked-retry-sgt-linked-retry/.sergeant-result"
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*|*" check-ref-format "*|*" worktree list --porcelain -z "*) "$REAL_GIT" "$@" ;;
   *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
   *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
   *" worktree remove "*)
     printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
     if [[ -e "${FAKE_GIT_ALLOW:-}" ]]; then
-      rm -rf "${!#}"
-      exit 0
+      "$REAL_GIT" "$@"
+      exit $?
     fi
     exit 1
     ;;
@@ -1361,15 +1397,15 @@ printf 'result\n' > "$TEST_ROOT/unchanged-retry-sgt-unchanged-retry/.sergeant-re
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*|*" check-ref-format "*|*" worktree list --porcelain -z "*) "$REAL_GIT" "$@" ;;
   *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
   *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
   *" worktree remove "*)
     printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
     if [[ -e "${FAKE_GIT_ALLOW:-}" ]]; then
-      rm -rf "${!#}"
-      exit 0
+      "$REAL_GIT" "$@"
+      exit $?
     fi
     exit 1
     ;;
@@ -1413,7 +1449,7 @@ printf 'result\n' > \
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*|*" check-ref-format "*) "$REAL_GIT" "$@" ;;
   *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
   *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
@@ -1560,7 +1596,7 @@ printf 'result\n' > "$TEST_ROOT/treehouse-worktree/.sergeant-result"
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*|*" check-ref-format "*|*" worktree list --porcelain -z "*) "$REAL_GIT" "$@" ;;
   *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
   *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
@@ -1688,7 +1724,7 @@ printf 'result\n' > "$TEST_ROOT/marker-sgt-marker-publication/.sergeant-result"
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*|*" check-ref-format "*|*" worktree list --porcelain -z "*) "$REAL_GIT" "$@" ;;
   *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
   *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
@@ -1804,7 +1840,7 @@ printf 'result\n' > "$TEST_ROOT/staging-sgt-staging-failure/.sergeant-result"
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*) "$REAL_GIT" "$@" ;;
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*|*" check-ref-format "*|*" worktree list --porcelain -z "*) "$REAL_GIT" "$@" ;;
   *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
   *" rev-parse "*) "$REAL_GIT" "$@" ;;
   *" status "*) ;;
@@ -1890,6 +1926,7 @@ git -C "$TEST_ROOT/legacy-repo" commit -qm fixture
 legacy_worktree="$TEST_ROOT/legacy-repo-sgt-legacy-task"
 legacy_repo_state="$TEST_ROOT/fleet/legacy-task/app"
 git -C "$TEST_ROOT/legacy-repo" worktree add -q -b test-cleanup-legacy "$legacy_worktree"
+record_retry_owner legacy-task app "$TEST_ROOT/legacy-repo"
 legacy_validation_worktree="${legacy_worktree}-validation-legacy-task"
 git clone -q "$legacy_worktree" "$legacy_validation_worktree"
 printf '%s\n' "$legacy_validation_worktree" > "$legacy_repo_state/validation_worktree"
@@ -2644,6 +2681,9 @@ xcol_a_worktree="$TEST_ROOT/col-base-sgt-xcol-a"
 git -C "$TEST_ROOT/col-base" worktree add -q -b col-a-branch "$col_a_worktree"
 git -C "$TEST_ROOT/col-base" worktree add -q -b col-ab-branch "$col_ab_worktree"
 git -C "$TEST_ROOT/col-base" worktree add -q -b xcol-a-branch "$xcol_a_worktree"
+record_retry_owner col-a app "$TEST_ROOT/col-base"
+record_retry_owner col-ab app "$TEST_ROOT/col-base"
+record_retry_owner xcol-a app "$TEST_ROOT/col-base"
 
 col_a_state="$TEST_ROOT/fleet/col-a/app"
 col_ab_state="$TEST_ROOT/fleet/col-ab/app"
@@ -2769,10 +2809,24 @@ SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
 # pane untouched.
 
 recycled_state="$TEST_ROOT/fleet/recycled-pane/app"
+recycled_worktree="$TEST_ROOT/recycled-pane-sgt-recycled-pane"
 mkdir -p "$recycled_state" "$TEST_ROOT/recycled-bin"
+init_test_repo "$TEST_ROOT/recycled-pane-repo"
+git -C "$TEST_ROOT/recycled-pane-repo" worktree add -q -b recycled-pane-worker \
+  "$recycled_worktree"
+record_retry_owner recycled-pane app "$TEST_ROOT/recycled-pane-repo"
 printf 'done\n'   > "$recycled_state/status"
 printf 'result\n' > "$recycled_state/result"
-printf '%s\n' "$TEST_ROOT/missing-recycled-worktree" > "$recycled_state/worktree"
+printf '%s\n' "$recycled_worktree" > "$recycled_state/worktree"
+printf 'git\n' > "$recycled_state/wt_type"
+printf 'done\n' > "$recycled_worktree/.sergeant-status"
+printf 'result\n' > "$recycled_worktree/.sergeant-result"
+SGT_CLEANUP_FAIL_POINT=phase-publish-reconciled-absent \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" recycled-pane >/dev/null 2>&1 || true
+[[ "$(sed -n '1p' "$recycled_state/cleanup-phase")" == "removed" ]]
+[[ ! -d "$recycled_worktree" ]]
 
 # Stored identity: pane %88, pid 8800, created at a specific past timestamp.
 # This is what was recorded when the original worker was dispatched.
@@ -2852,6 +2906,7 @@ touch "$TEST_ROOT/escaped-repo/README.md"
 git -C "$TEST_ROOT/escaped-repo" add README.md
 git -C "$TEST_ROOT/escaped-repo" commit -qm fixture
 git -C "$TEST_ROOT/escaped-repo" worktree add -q -b test-escaped "$escaped_worktree"
+record_retry_owner escaped-task app "$TEST_ROOT/escaped-repo"
 printf '%s\n' "$escaped_worktree" > "$escaped_state/worktree"
 printf 'git\n' > "$escaped_state/wt_type"
 printf 'local-tmux\n' > "$escaped_state/backend"
@@ -2956,10 +3011,22 @@ printf 'sgt-cleanup escaped-descendant termination (PR14-F2): ok\n'
 pid_reuse_state="$TEST_ROOT/fleet/pid-reuse-task/app"
 pid_reuse_worktree="$TEST_ROOT/pid-reuse-missing-worktree"
 mkdir -p "$pid_reuse_state"
-# worktree path must NOT exist so _require_terminal_repos synthesizes evidence.
+init_test_repo "$TEST_ROOT/pid-reuse-repo"
+git -C "$TEST_ROOT/pid-reuse-repo" worktree add -q -b pid-reuse-worker \
+  "$pid_reuse_worktree"
+record_retry_owner pid-reuse-task app "$TEST_ROOT/pid-reuse-repo"
 printf '%s\n' "$pid_reuse_worktree" > "$pid_reuse_state/worktree"
+printf 'git\n' > "$pid_reuse_state/wt_type"
 printf 'done\n' > "$pid_reuse_state/status"
 printf 'result\n' > "$pid_reuse_state/result"
+printf 'done\n' > "$pid_reuse_worktree/.sergeant-status"
+printf 'result\n' > "$pid_reuse_worktree/.sergeant-result"
+SGT_CLEANUP_FAIL_POINT=phase-publish-reconciled-absent \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" pid-reuse-task >/dev/null 2>&1 || true
+[[ "$(sed -n '1p' "$pid_reuse_state/cleanup-phase")" == "removed" ]]
+[[ ! -d "$pid_reuse_worktree" ]]
 # pane that doesn't exist → hits "pane already gone" → calls _recover_escaped_worker_pgid
 printf '%%99999\n' > "$pid_reuse_state/pane"
 printf '%s\n' "$$" > "$pid_reuse_state/worker_pid"
@@ -2988,10 +3055,22 @@ grep -Fq 'Worker PID was reused' "$TEST_ROOT/pid-reuse.log" || {
 nonleader_state="$TEST_ROOT/fleet/nonleader-task/app"
 nonleader_worktree="$TEST_ROOT/nonleader-missing-worktree"
 mkdir -p "$nonleader_state"
-# worktree path must NOT exist — same synthesis approach as guard-1.
+init_test_repo "$TEST_ROOT/nonleader-repo"
+git -C "$TEST_ROOT/nonleader-repo" worktree add -q -b nonleader-worker \
+  "$nonleader_worktree"
+record_retry_owner nonleader-task app "$TEST_ROOT/nonleader-repo"
 printf '%s\n' "$nonleader_worktree" > "$nonleader_state/worktree"
+printf 'git\n' > "$nonleader_state/wt_type"
 printf 'done\n' > "$nonleader_state/status"
 printf 'result\n' > "$nonleader_state/result"
+printf 'done\n' > "$nonleader_worktree/.sergeant-status"
+printf 'result\n' > "$nonleader_worktree/.sergeant-result"
+SGT_CLEANUP_FAIL_POINT=phase-publish-reconciled-absent \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" nonleader-task >/dev/null 2>&1 || true
+[[ "$(sed -n '1p' "$nonleader_state/cleanup-phase")" == "removed" ]]
+[[ ! -d "$nonleader_worktree" ]]
 printf '%%99999\n' > "$nonleader_state/pane"
 # Spawn a setsid group in the background; its PID == its PGID (it is the leader).
 setsid bash -c "printf '%s\n' \"\$\$\" > \"$TEST_ROOT/setsid.pid\"; while :; do sleep 1; done" \
@@ -3205,19 +3284,24 @@ printf '%s\n' "$TEST_ROOT/head-change-sgt-head-change" > "$head_change_state/wor
 printf 'git\n' > "$head_change_state/wt_type"
 printf 'done\n' > "$head_change_state/status"
 printf 'result\n' > "$head_change_state/result"
+printf 'done\n' > "$TEST_ROOT/head-change-sgt-head-change/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/head-change-sgt-head-change/.sergeant-result"
 mkdir -p "$head_change_state/terminal-evidence"
-printf 'done\n' > "$head_change_state/terminal-evidence/.sergeant-status"
-printf 'result\n' > "$head_change_state/terminal-evidence/.sergeant-result"
+cp "$TEST_ROOT/head-change-sgt-head-change/.sergeant-status" \
+  "$head_change_state/terminal-evidence/.sergeant-status"
+cp "$TEST_ROOT/head-change-sgt-head-change/.sergeant-result" \
+  "$head_change_state/terminal-evidence/.sergeant-result"
 original_head_identity="$(_capture_identity "$TEST_ROOT/head-change")"
 printf '2\nhead-change\n%s\n%s\ngit\n%s\n\n' \
   "$TEST_ROOT/head-change" \
   "$TEST_ROOT/head-change-sgt-head-change" \
   "$original_head_identity" \
   > "$head_change_state/cleanup-owner"
-printf 'removing\n%s\ngit\n%s\n' \
+printf 'removed\n%s\ngit\n%s\n' \
   "$TEST_ROOT/head-change-sgt-head-change" \
   "$TEST_ROOT/head-change" \
   > "$head_change_state/cleanup-phase"
+git -C "$TEST_ROOT/head-change" worktree remove --force "$TEST_ROOT/head-change-sgt-head-change"
 printf 'new content\n' >> "$TEST_ROOT/head-change/README.md"
 git -C "$TEST_ROOT/head-change" add README.md
 git -C "$TEST_ROOT/head-change" commit -qm 'new commit'
