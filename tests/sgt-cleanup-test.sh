@@ -2907,4 +2907,34 @@ scan_count="$(cat "$lsof_count_file")"
   exit 1
 }
 printf 'sgt-cleanup CWD scan count (%d) within limit: ok\n' "$scan_count"
+
+# ── Finding 2 regression: reconciled-absent state allows idempotent replay ────
+# The Finding 2 guard fires when a worktree is absent in the main loop without a
+# validated removal record (not reconciled-absent). Testing TOCTOU concurrency
+# directly requires process-level injection; instead we verify the complementary
+# case: reconciled-absent state allows cleanup to proceed idempotently (retry of
+# a completed removal continues without error).
+
+reconciled_state="$TEST_ROOT/fleet/reconciled-replay/app"
+mkdir -p "$reconciled_state"
+init_test_repo "$TEST_ROOT/reconciled-repo"
+record_retry_owner reconciled-replay app "$TEST_ROOT/reconciled-repo"
+printf '%s\n' "$TEST_ROOT/reconciled-repo-sgt-reconciled-replay" > "$reconciled_state/worktree"
+printf 'git\n' > "$reconciled_state/wt_type"
+printf 'done\n' > "$reconciled_state/status"
+printf 'result\n' > "$reconciled_state/result"
+mkdir -p "$reconciled_state/terminal-evidence"
+printf 'done\n' > "$reconciled_state/terminal-evidence/.sergeant-status"
+printf 'result\n' > "$reconciled_state/terminal-evidence/.sergeant-result"
+printf 'reconciled-absent\n%s\n' "$TEST_ROOT/reconciled-repo-sgt-reconciled-replay" \
+  > "$reconciled_state/cleanup-phase"
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" reconciled-replay >/dev/null || {
+  printf 'cleanup rejected reconciled-absent idempotent replay\n' >&2; exit 1
+}
+[[ ! -e "$TEST_ROOT/fleet/reconciled-replay" ]] || {
+  printf 'fleet state not removed after reconciled-absent replay\n' >&2; exit 1
+}
+printf 'sgt-cleanup Finding 2 regression (reconciled-absent idempotent replay): ok\n'
+
 printf 'sgt-cleanup: all tests passed\n'
