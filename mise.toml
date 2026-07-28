@@ -143,9 +143,9 @@ source "${MISE_PROJECT_ROOT:-.}/bin/_sgt-lib.sh"
 ok=true
 
 _check() {
-  local name="$1" cmd="$2" required="$3" hint="$4"
+  local name="$1" cmd="$2" required="$3" hint="$4" ver_flag="${5:---version}"
   if command -v "$cmd" &>/dev/null; then
-    version="$($cmd --version 2>&1 | head -1 | tr -d '\n')"
+    version="$($cmd $ver_flag 2>&1 | head -1 | tr -d '\n')"
     printf "  %-14s  ✓  %s\\n" "$name" "$version"
   else
     if [[ "$required" == "required" ]]; then
@@ -203,8 +203,8 @@ printf "  %-14s  ✓  %s\\n" "Bash" "${BASH_VERSION} (minimum 3.2)"
 _check "yq"         yq         required  "brew install yq"
 _check "git"        git        required  "install Xcode command line tools"
 _check "gh"         gh         required  "brew install gh"
-_check "tmux"       tmux       required  "brew install tmux"
-_check "lsof"       lsof       required  "install lsof with your system package manager"
+_check "tmux"       tmux       required  "brew install tmux"                              "-V"
+_check "lsof"       lsof       required  "install lsof with your system package manager" "-v"
 _check_td
 _check_agent_harness
 
