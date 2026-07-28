@@ -4010,20 +4010,56 @@ _opn_out="$(PATH="$TEST_ROOT/fake-bin:$PATH" TD_FAKE_STATUS=closed \
 _opn_status=$?
 set -e
 [[ "$_opn_status" -eq 0 ]] || {
-  printf 'FAIL issue#95 test-B'"'"': orphaned+nonterminal-status+closed-td rejected:\n%s\n' \
+  printf 'FAIL issue#111 test-B'"'"': orphaned+nonterminal-status+closed-td rejected:\n%s\n' \
     "$_opn_out" >&2
   exit 1
 }
 [[ ! -e \
   "$TEST_ROOT/orphaned-present-nonterminal-main-sgt-orphaned-nonterminal-closed" ]] || {
-  printf 'FAIL issue#95 test-B'"'"': worktree not removed after nonterminal-status cleanup\n' >&2
+  printf 'FAIL issue#111 test-B'"'"': worktree not removed after nonterminal-status cleanup\n' >&2
   exit 1
 }
 [[ ! -d "$TEST_ROOT/fleet/orphaned-nonterminal-closed" ]] || {
-  printf 'FAIL issue#95 test-B'"'"': fleet state not removed after nonterminal-status cleanup\n' >&2
+  printf 'FAIL issue#111 test-B'"'"': fleet state not removed after nonterminal-status cleanup\n' >&2
   exit 1
 }
 printf 'sgt-cleanup orphaned+present+nonterminal-status+closed-td accepted: ok\n'
+
+# Test B'-neg: orphaned + present worktree + nonterminal .sergeant-status +
+# NO td_task file → must be rejected even though worker status is nonterminal.
+# Confirms that _orphaned_td_task_closed returning 1 still blocks cleanup.
+init_test_repo "$TEST_ROOT/orphaned-nonterminal-notd-main"
+git -C "$TEST_ROOT/orphaned-nonterminal-notd-main" worktree add -q \
+  -b orphaned-notd-worker \
+  "$TEST_ROOT/orphaned-nonterminal-notd-main-sgt-orphaned-nonterminal-notd"
+mkdir -p "$TEST_ROOT/fleet/orphaned-nonterminal-notd/app"
+printf 'orphaned\n' > "$TEST_ROOT/fleet/orphaned-nonterminal-notd/app/status"
+printf '%s\n' \
+  "$TEST_ROOT/orphaned-nonterminal-notd-main-sgt-orphaned-nonterminal-notd" \
+  > "$TEST_ROOT/fleet/orphaned-nonterminal-notd/app/worktree"
+printf 'git\n' > "$TEST_ROOT/fleet/orphaned-nonterminal-notd/app/wt_type"
+# No td_task file — intentionally absent
+printf 'in_progress\n' \
+  > "$TEST_ROOT/orphaned-nonterminal-notd-main-sgt-orphaned-nonterminal-notd/.sergeant-status"
+set +e
+_opnneg_out="$(PATH="$TEST_ROOT/fake-bin:$PATH" TD_FAKE_STATUS=closed \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" orphaned-nonterminal-notd 2>&1)"
+_opnneg_status=$?
+set -e
+[[ "$_opnneg_status" -ne 0 ]] || {
+  printf 'FAIL issue#111 test-B'"'"'-neg: cleanup accepted nonterminal orphaned with no td_task\n' >&2
+  exit 1
+}
+[[ "$_opnneg_out" == *"not terminal: orphaned"* ]] || {
+  printf 'FAIL issue#111 test-B'"'"'-neg: unexpected rejection message: %s\n' "$_opnneg_out" >&2
+  exit 1
+}
+[[ -d "$TEST_ROOT/fleet/orphaned-nonterminal-notd" ]] || {
+  printf 'FAIL issue#111 test-B'"'"'-neg: fleet state removed despite rejection\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup orphaned+present+nonterminal-status+no-td rejected: ok\n'
 
 # Test B2: orphaned + present worktree + closed td + uncommitted changes →
 # must be rejected by _require_clean_worktrees (the "no uncommitted changes"
