@@ -620,6 +620,9 @@ _require_terminal_repos() {
         # Every persisted removal phase is replay state: validate the persisted
         # owner before proceeding so a reappeared or misidentified worktree is
         # rejected fail-closed before evidence is inspected or a remover runs.
+        # removing_phase (without type/root) is rejected earlier at line 558-559
+        # so it never reaches this block; removing_phase (with type/root) requires
+        # an absent worktree and is handled by the main loop's own owner check.
         if [[ "$cleanup_phase" == "$partial_phase" || \
               "$cleanup_phase" == "$removed_phase" ]]; then
           [[ "$retry_type" == "$wt_type" ]] || \
@@ -1664,11 +1667,12 @@ _validate_retry_validation_checkout() {
   local validation_identity validation_git_dir validation_git_identity validation_owner
 
   repo_name="$(basename "$repo_dir")"
+  task_id="$TASK_ID"
   validation_worktree="$(cat "$repo_dir/validation_worktree" 2>/dev/null || true)"
   [[ -n "$validation_worktree" && ( -e "$validation_worktree" || -L "$validation_worktree" ) ]] || \
     return 0
 
-  [[ "$validation_worktree" == "${worktree}-validation-${TASK_ID}" ]] || \
+  [[ "$validation_worktree" == "${worktree}-validation-${task_id}" ]] || \
     _die "Validation worktree path is outside the recorded ownership boundary: $validation_worktree"
 
   validation_head="$(cat "$repo_dir/validation_head" 2>/dev/null || true)"
@@ -1682,7 +1686,7 @@ _validate_retry_validation_checkout() {
       [[ -n "$validation_identity" && -n "$validation_git_dir" && \
         -n "$validation_git_identity" && -n "$validation_head" && -n "$validation_owner" ]] || \
         _die "Validation checkout ownership provenance is incomplete: $validation_worktree"
-      [[ "$validation_owner" == "$TASK_ID/$repo_name/validation-launch|"*"|$validation_head" ]] || \
+      [[ "$validation_owner" == "$task_id/$repo_name/validation-launch|"*"|$validation_head" ]] || \
         _die "Validation checkout owner provenance does not match: $validation_worktree"
       _validation_checkout_matches "$validation_worktree" "$validation_worktree" \
         "$validation_identity" "$validation_git_dir" "$validation_git_identity" \
