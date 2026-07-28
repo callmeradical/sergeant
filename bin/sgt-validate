@@ -589,6 +589,11 @@ if [[ "$(git -C "$VALIDATION_WORKTREE" rev-parse HEAD)" != "$CURRENT_HEAD" ]] ||
    ! _sgt_worktree_is_validation_clean "$VALIDATION_WORKTREE"; then
   _die "Isolated validation code snapshot did not preserve reviewed HEAD"
 fi
+# Ensure no-mistakes is initialised in the validation clone so that
+# sgt-validation-worker can invoke `no-mistakes axi run` without error.
+if command -v no-mistakes >/dev/null 2>&1; then
+  (cd "$VALIDATION_WORKTREE" && no-mistakes init >/dev/null 2>&1) || true
+fi
 VALIDATION_GIT_DIR="$(git -C "$VALIDATION_WORKTREE" rev-parse --path-format=absolute \
   --git-common-dir)" || _die "Failed to capture validation Git directory"
 VALIDATION_GIT_IDENTITY="$(_validation_path_identity "$VALIDATION_GIT_DIR")" || \
