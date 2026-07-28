@@ -599,6 +599,17 @@ _require_terminal_repos() {
         ) ]] || \
           _die "$repo_name has no reconciled cleanup phase for its absent worktree"
 
+        # Every persisted removal phase is replay state: validate the persisted
+        # owner before proceeding so a reappeared or misidentified worktree is
+        # rejected fail-closed before evidence is inspected or a remover runs.
+        if [[ "$cleanup_phase" == "$partial_phase" || \
+              "$cleanup_phase" == "$removed_phase" ]]; then
+          [[ "$retry_type" == "$wt_type" ]] || \
+            _die "Retry worktree type changed: $repo_name"
+          _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+            "$retry_type" "$retry_root"
+        fi
+
         evidence_dir="$repo_dir/terminal-evidence"
         [[ -f "$evidence_dir/.sergeant-status" ]] ||
           _die "$repo_name reconciled cleanup evidence is missing"
@@ -1423,11 +1434,13 @@ _require_completed_removal_proof() {
     _die "Cannot prove completed git worktree removal: $worktree"
 }
 
-# _validate_retry_owner — pre-flight ownership check for the validation checkout.
-# Must be called BEFORE any destructive step (pane kills, worktree removal) so
-# that a rejected retry leaves the fleet state completely unchanged.
-_validate_retry_owner() {
-  local repo_dir="$1" worktree="$2" task_id="$3"
+# _preflight_validate_validation_checkout — pre-flight ownership check for the
+# validation checkout.  Must be called BEFORE any destructive step (pane kills,
+# worktree removal) so that a rejected retry leaves the fleet state completely
+# unchanged.  Uses the global TASK_ID (set at script entry) to verify the
+# recorded validation_worktree belongs to this task and repo.
+_preflight_validate_validation_checkout() {
+  local repo_dir="$1" worktree="$2"
   local repo_name validation_worktree validation_head validation_mode
   local validation_identity validation_git_dir validation_git_identity validation_owner
 
@@ -1436,7 +1449,7 @@ _validate_retry_owner() {
   [[ -n "$validation_worktree" && ( -e "$validation_worktree" || -L "$validation_worktree" ) ]] || \
     return 0
 
-  [[ "$validation_worktree" == "${worktree}-validation-${task_id}" ]] || \
+  [[ "$validation_worktree" == "${worktree}-validation-${TASK_ID}" ]] || \
     _die "Validation worktree path is outside the recorded ownership boundary: $validation_worktree"
 
   validation_head="$(cat "$repo_dir/validation_head" 2>/dev/null || true)"
@@ -1450,7 +1463,7 @@ _validate_retry_owner() {
       [[ -n "$validation_identity" && -n "$validation_git_dir" && \
         -n "$validation_git_identity" && -n "$validation_head" && -n "$validation_owner" ]] || \
         _die "Validation checkout ownership provenance is incomplete: $validation_worktree"
-      [[ "$validation_owner" == "$task_id/$repo_name/validation-launch|"*"|$validation_head" ]] || \
+      [[ "$validation_owner" == "$TASK_ID/$repo_name/validation-launch|"*"|$validation_head" ]] || \
         _die "Validation checkout owner provenance does not match: $validation_worktree"
       _validation_checkout_matches "$validation_worktree" "$validation_worktree" \
         "$validation_identity" "$validation_git_dir" "$validation_git_identity" \
@@ -1556,6 +1569,11 @@ for repo_dir in "$TASK_DIR"/*/; do
   _require_response_cleanup_safe "$repo_dir" "$worktree"
 
   echo "--- $repo_name (status: $status, type: $wt_type) ---"
+
+  # Validate the validation checkout ownership BEFORE any destructive step (pane
+  # kill, worktree removal) so a rejected checkout leaves the fleet completely
+  # unchanged.
+  _preflight_validate_validation_checkout "$repo_dir" "$worktree"
 
   # Detect an interrupted-removal retry and validate the persisted owner BEFORE
   # any destructive step (pane kill, validation-worktree removal).  A rejected
