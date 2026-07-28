@@ -168,9 +168,28 @@ _finish() {
   if [[ "$status" == "orphaned" ]]; then
     printf 'orphaned\n' > "$WORKTREE/.sergeant-status"
     printf 'orphaned\n' > "$REPO_STATE/status"
+    # Check for committed work above the dispatch base so the coordinator can
+    # distinguish a clean orphan (nothing committed) from an interrupted fallback
+    # that has real work.  Uses initial_sha written by sgt-dispatch at dispatch
+    # time; falls back to checking for commits not on any remote.
+    local _initial_sha _committed_log
+    _initial_sha="$(cat "$REPO_STATE/initial_sha" 2>/dev/null || true)"
+    _committed_log=""
+    if command -v git >/dev/null 2>&1 && [[ -d "$WORKTREE" ]]; then
+      if [[ -n "$_initial_sha" ]]; then
+        _committed_log="$(git -C "$WORKTREE" log --oneline "${_initial_sha}..HEAD" 2>/dev/null || true)"
+      else
+        _committed_log="$(git -C "$WORKTREE" log --oneline HEAD --not --remotes 2>/dev/null || true)"
+      fi
+    fi
     {
       printf 'reason: interactive %s session exited before terminal completion\n' "$harness"
       printf 'exit code: %s\n' "$exit_code"
+      if [[ -n "$_committed_log" ]]; then
+        printf 'committed-work-present: %d commit(s) above base; reconcile before re-dispatch\n' \
+          "$(printf '%s\n' "$_committed_log" | wc -l | tr -d ' ')"
+        printf '%s\n' "$_committed_log"
+      fi
     } > "$REPO_STATE/diagnostic"
     "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
   else
