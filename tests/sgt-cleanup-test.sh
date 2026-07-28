@@ -2335,7 +2335,7 @@ set -e
   exit 1
 }
 
-# Finding missing-project-config-cleanup-policy:
+# Finding missing-project-config-cleanup-policy/no-yaml:
 # First-pass cleanup must fail closed when project config is missing (no brief.md
 # Project: line and no task-id-named YAML). No path-derived ownership fallback.
 mkdir -p "$TEST_ROOT/fleet/fp-no-project/app"
@@ -2375,7 +2375,7 @@ set -e
 }
 printf 'sgt-cleanup first-pass: missing project config rejected: ok\n'
 
-# Finding missing-project-config-cleanup-policy:
+# Finding missing-project-config-cleanup-policy/renamed-repo (git):
 # First-pass cleanup must fail closed when the configured repo was renamed in the
 # project YAML (Project: is set in brief.md but repo name does not appear in YAML).
 mkdir -p "$TEST_ROOT/fleet/fp-renamed-repo/app"
@@ -2420,6 +2420,49 @@ set -e
   exit 1
 }
 printf 'sgt-cleanup first-pass: renamed repo in project YAML rejected: ok\n'
+
+# Finding missing-project-config-cleanup-policy/no-yaml (treehouse):
+# First-pass cleanup with wt_type=treehouse must also fail closed when project
+# config is missing. The removed path-derived fallback had a treehouse branch;
+# verify the fail-closed policy applies regardless of wt_type.
+mkdir -p "$TEST_ROOT/fleet/fp-no-project-th/app"
+init_test_repo "$TEST_ROOT/fp-no-project-th-repo"
+git -C "$TEST_ROOT/fp-no-project-th-repo" worktree add -q -b fp-th-worker \
+  "$TEST_ROOT/fp-no-project-th-sgt-fp-no-project-th"
+# No brief.md and no config YAML
+printf '%s\n' "$TEST_ROOT/fp-no-project-th-sgt-fp-no-project-th" > \
+  "$TEST_ROOT/fleet/fp-no-project-th/app/worktree"
+printf 'treehouse\n' > "$TEST_ROOT/fleet/fp-no-project-th/app/wt_type"
+printf 'sgt-fp-no-project-th-app\n' > \
+  "$TEST_ROOT/fleet/fp-no-project-th/app/wt_holder"
+printf 'done\n' > "$TEST_ROOT/fleet/fp-no-project-th/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/fp-no-project-th/app/result"
+printf 'done\n' > "$TEST_ROOT/fp-no-project-th-sgt-fp-no-project-th/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/fp-no-project-th-sgt-fp-no-project-th/.sergeant-result"
+set +e
+fp_th_output="$(SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" fp-no-project-th 2>&1)"
+fp_th_exit=$?
+set -e
+[[ "$fp_th_exit" -ne 0 ]] || {
+  printf 'FAIL: treehouse first-pass cleanup accepted missing project config (should fail closed)\n' >&2
+  exit 1
+}
+[[ "$fp_th_output" == *"configured cleanup owner"* ]] || {
+  printf 'FAIL: no ownership diagnostic for treehouse missing-project first-pass: %s\n' \
+    "$fp_th_output" >&2
+  exit 1
+}
+[[ -d "$TEST_ROOT/fp-no-project-th-sgt-fp-no-project-th" ]] || {
+  printf 'FAIL: treehouse worktree removed despite missing project config\n' >&2
+  exit 1
+}
+[[ -d "$TEST_ROOT/fleet/fp-no-project-th" ]] || {
+  printf 'FAIL: fleet state removed despite treehouse missing project config\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup first-pass (treehouse): missing project config rejected: ok\n'
 
 # Fix 2: absent-worktree cleanup must fail closed when pane/validation_pane
 # metadata is present in fleet state, rather than silently proceeding.
