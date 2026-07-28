@@ -4071,14 +4071,15 @@ set -e
 }
 printf 'sgt-cleanup orphaned+absent+no-td rejected: ok\n'
 
-# Regression: duplicate _validate_retry_owner definition shadowed the real one,
-# leaving VALIDATED_RETRY_ROOT unbound when an absent-worktree removal was
-# retried in the "removed" phase (4-line cleanup-phase format).
+# Regression: commit d48a17a introduced a second _validate_retry_owner()
+# definition (pre-flight validation-checkout check) that shadowed the original
+# _validate_retry_owner() (cleanup retry owner validator that sets
+# VALIDATED_RETRY_ROOT). The shadow was resolved by renaming the second
+# definition to _preflight_validation_checkout in this fix.
 #
-# The second definition (pre-flight validation-checkout check, introduced in
-# d48a17a) overrode the first (cleanup retry owner validator), so the real
-# validator was never called and VALIDATED_RETRY_ROOT was never set. Any
-# absent-worktree retry with a "removed" cleanup-phase crashed with
+# With the shadow in place, VALIDATED_RETRY_ROOT was never set, leaving it
+# unbound on the retry path. Any absent-worktree retry in the "removed" phase
+# (4-line cleanup-phase format) crashed with
 # "VALIDATED_RETRY_ROOT: unbound variable".
 #
 # Fixture: use the fail-point to leave cleanup-phase = "removed" after the

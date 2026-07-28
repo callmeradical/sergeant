@@ -1571,6 +1571,8 @@ for repo_dir in "$TASK_DIR"/*/; do
     _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
       "$_preflight_retry_type" "$_preflight_retry_root"
   fi
+  # _preflight_validation_checkout returns 0 early when validation_worktree is
+  # absent or does not exist on disk; unconditional call is safe.
   _preflight_validation_checkout "$repo_dir" "$worktree" "$TASK_ID"
 
   _stop_validation_pane "$repo_dir"
