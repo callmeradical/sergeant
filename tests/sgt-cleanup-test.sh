@@ -4302,5 +4302,52 @@ set -e
 }
 printf 'sgt-cleanup orphaned+absent+no-td rejected: ok\n'
 
+# Regression: duplicate _validate_retry_owner definition shadowed the real one,
+# leaving VALIDATED_RETRY_ROOT unbound when an absent-worktree removal was
+# retried in the "removed" phase (4-line cleanup-phase format).
+#
+# The second definition (pre-flight validation-checkout check, introduced in
+# d48a17a) overrode the first (cleanup retry owner validator), so the real
+# validator was never called and VALIDATED_RETRY_ROOT was never set. Any
+# absent-worktree retry with a "removed" cleanup-phase crashed with
+# "VALIDATED_RETRY_ROOT: unbound variable".
+#
+# Fixture: use the fail-point to leave cleanup-phase = "removed" after the
+# first pass (worktree removed, reconciled-absent publication failed), then
+# run cleanup again; the retry must succeed and remove fleet state.
+mkdir -p "$TEST_ROOT/fleet/absent-removed-retry/app"
+init_retry_repo "$TEST_ROOT/absent-removed-retry-repo"
+make_retry_config absent-removed-retry app "$TEST_ROOT/absent-removed-retry-repo"
+absent_removed_worktree="$TEST_ROOT/absent-removed-retry-sgt-absent-removed-retry"
+git -C "$TEST_ROOT/absent-removed-retry-repo" worktree add -q -b absent-removed-branch \
+  "$absent_removed_worktree"
+arr_state="$TEST_ROOT/fleet/absent-removed-retry/app"
+printf '%s\n' "$absent_removed_worktree" > "$arr_state/worktree"
+printf 'git\n' > "$arr_state/wt_type"
+printf 'done\n' > "$arr_state/status"
+printf 'result\n' > "$arr_state/result"
+printf 'done\n' > "$absent_removed_worktree/.sergeant-status"
+printf 'result\n' > "$absent_removed_worktree/.sergeant-result"
+# First pass: removes the worktree; fails before publishing reconciled-absent.
+# cleanup-phase is left as "removed" with correct 4-line format.
+SGT_CLEANUP_FAIL_POINT=phase-publish-reconciled-absent \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" absent-removed-retry >/dev/null 2>&1 || true
+[[ "$(sed -n '1p' "$arr_state/cleanup-phase")" == "removed" ]] || {
+  printf 'FAIL VALIDATED_RETRY_ROOT regression: first pass did not leave removed phase\n' >&2
+  exit 1
+}
+[[ ! -d "$absent_removed_worktree" ]] || {
+  printf 'FAIL VALIDATED_RETRY_ROOT regression: worktree still present after first pass\n' >&2
+  exit 1
+}
+# Second pass: absent worktree, "removed" cleanup-phase, valid cleanup-owner.
+# Before the fix, this crashed: "VALIDATED_RETRY_ROOT: unbound variable".
+SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" absent-removed-retry >/dev/null
+[[ ! -e "$TEST_ROOT/fleet/absent-removed-retry" ]]
+printf 'sgt-cleanup: absent-removed-retry VALIDATED_RETRY_ROOT regression: ok\n'
+
 rm -f "$TEST_ROOT/fake-bin/td"
 printf 'sgt-cleanup: all tests passed\n'
