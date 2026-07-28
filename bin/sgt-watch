@@ -220,6 +220,28 @@ _classify_stalled_worker() {
   fi
 }
 
+# _committed_work_log: emit a one-line-per-commit log of work committed above
+# the dispatch base in the recorded worktree.  Uses initial_sha when present
+# (written by sgt-dispatch); falls back to --not --remotes for pre-existing
+# fleet states.  Returns empty string when no committed work is detected or
+# when git is unavailable.
+_committed_work_log() {
+  local repo_dir="$1"
+  local worktree_path initial_sha log_output
+  worktree_path="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+  [[ -n "$worktree_path" && -d "$worktree_path" ]] || return 0
+  command -v git >/dev/null 2>&1 || return 0
+  initial_sha="$(cat "$repo_dir/initial_sha" 2>/dev/null || true)"
+  if [[ -n "$initial_sha" ]]; then
+    log_output="$(git -C "$worktree_path" log --oneline "${initial_sha}..HEAD" 2>/dev/null || true)"
+  else
+    # Fallback for fleet states predating initial_sha: show commits not on any
+    # remote tracking branch.  Requires explicit HEAD to work with git log.
+    log_output="$(git -C "$worktree_path" log --oneline HEAD --not --remotes 2>/dev/null || true)"
+  fi
+  printf '%s' "$log_output"
+}
+
 _reconcile_incomplete_dispatch() {
   local repo_dir="$1"
   local pane
@@ -228,8 +250,21 @@ _reconcile_incomplete_dispatch() {
   if _dispatch_is_expired "$repo_dir"; then
     if [[ -z "$pane" ]] || { command -v tmux >/dev/null 2>&1 &&
          ! _pane_is_supervisor "$pane" "$repo_dir"; }; then
-      printf 'failed: dispatch incomplete: no worktree or owned live pane\n' > "$repo_dir/status"
-      printf 'dispatch never acquired a worktree or owned live pane\n' > "$repo_dir/diagnostic"
+      local committed_log
+      committed_log="$(_committed_work_log "$repo_dir")"
+      if [[ -n "$committed_log" ]]; then
+        # The dispatch was interrupted after committing work.  Surface the
+        # commits so the coordinator can reconcile before re-dispatching.
+        printf 'failed: dispatch incomplete: committed work present; reconcile before re-dispatch\n' \
+          > "$repo_dir/status"
+        {
+          printf 'dispatch interrupted after committed work in worktree; reconcile branch before recovery\n'
+          printf '%s\n' "$committed_log"
+        } > "$repo_dir/diagnostic"
+      else
+        printf 'failed: dispatch incomplete: no worktree or owned live pane\n' > "$repo_dir/status"
+        printf 'dispatch never acquired a worktree or owned live pane\n' > "$repo_dir/diagnostic"
+      fi
     fi
   fi
 }
