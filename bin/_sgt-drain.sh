@@ -153,13 +153,11 @@ _sgt_drain_clear() {
   rm -f "${1:?_sgt_drain_clear requires a drain file path}"
 }
 
-# _sgt_drain_with_lock <shell_command_string>
+# _sgt_drain_remove_global
 #
-# Runs <shell_command_string> (eval'd) while holding an exclusive flock on the
-# drain state directory.  Used by sgt-undrain so that drain removal is
-# serialised against concurrent sgt-respond relaunch windows.
-_sgt_drain_with_lock() {
-  local cmd="${1:?_sgt_drain_with_lock requires a command}"
+# Removes the global drain file under an advisory flock.  Safe to call when
+# no drain is active (idempotent).
+_sgt_drain_remove_global() {
   local drain_dir lockfile
   drain_dir="$(_sgt_drain_state_dir)"
   mkdir -p "$drain_dir" 2>/dev/null || true
@@ -168,9 +166,30 @@ _sgt_drain_with_lock() {
     (
       exec 9>>"$lockfile"
       flock --exclusive 9 2>/dev/null || true
-      eval "$cmd"
+      rm -f "${drain_dir}/global"
     )
   else
-    eval "$cmd"
+    rm -f "${drain_dir}/global"
+  fi
+}
+
+# _sgt_drain_remove_project <project>
+#
+# Removes the per-project drain file under an advisory flock.  The project
+# name must already be validated by the caller.
+_sgt_drain_remove_project() {
+  local project="${1:?_sgt_drain_remove_project requires a project name}"
+  local drain_dir lockfile
+  drain_dir="$(_sgt_drain_state_dir)"
+  mkdir -p "$drain_dir" 2>/dev/null || true
+  lockfile="${drain_dir}/.lock"
+  if command -v flock >/dev/null 2>&1; then
+    (
+      exec 9>>"$lockfile"
+      flock --exclusive 9 2>/dev/null || true
+      rm -f "${drain_dir}/${project}"
+    )
+  else
+    rm -f "${drain_dir}/${project}"
   fi
 }
