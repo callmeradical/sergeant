@@ -2572,6 +2572,46 @@ set -e
 }
 printf 'sgt-cleanup orphaned+present+closed-td accepted: ok\n'
 
+# Test B2: orphaned + present worktree + closed td + uncommitted changes →
+# must be rejected by _require_clean_worktrees (the "no uncommitted changes"
+# guard required by the spec is enforced by this existing check regardless
+# of whether the status is orphaned or done).
+init_test_repo "$TEST_ROOT/orphaned-dirty-main"
+git -C "$TEST_ROOT/orphaned-dirty-main" worktree add -q -b orphaned-dirty-worker \
+  "$TEST_ROOT/orphaned-dirty-main-sgt-orphaned-dirty-closed"
+mkdir -p "$TEST_ROOT/fleet/orphaned-dirty-closed/app"
+record_retry_owner orphaned-dirty-closed app "$TEST_ROOT/orphaned-dirty-main"
+printf 'orphaned\n' > "$TEST_ROOT/fleet/orphaned-dirty-closed/app/status"
+printf '%s\n' "$TEST_ROOT/orphaned-dirty-main-sgt-orphaned-dirty-closed" \
+  > "$TEST_ROOT/fleet/orphaned-dirty-closed/app/worktree"
+printf 'td-orphaned-fake\n' \
+  > "$TEST_ROOT/fleet/orphaned-dirty-closed/app/td_task"
+printf 'git\n' > "$TEST_ROOT/fleet/orphaned-dirty-closed/app/wt_type"
+printf 'orphaned\n' \
+  > "$TEST_ROOT/orphaned-dirty-main-sgt-orphaned-dirty-closed/.sergeant-status"
+# Add an uncommitted tracked change to the worktree
+printf 'dirty\n' \
+  > "$TEST_ROOT/orphaned-dirty-main-sgt-orphaned-dirty-closed/dirty-file.txt"
+set +e
+_ob2_out="$(PATH="$TEST_ROOT/fake-bin:$PATH" TD_FAKE_STATUS=closed \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" orphaned-dirty-closed 2>&1)"
+_ob2_status=$?
+set -e
+[[ "$_ob2_status" -ne 0 ]] || {
+  printf 'FAIL issue#95 test-B2: cleanup accepted orphaned with uncommitted changes (should reject)\n' >&2
+  exit 1
+}
+[[ "$_ob2_out" == *"uncommitted changes"* ]] || {
+  printf 'FAIL issue#95 test-B2: unexpected rejection message: %s\n' "$_ob2_out" >&2
+  exit 1
+}
+[[ -d "$TEST_ROOT/orphaned-dirty-main-sgt-orphaned-dirty-closed" ]] || {
+  printf 'FAIL issue#95 test-B2: worktree removed despite uncommitted changes\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup orphaned+present+uncommitted-changes rejected: ok\n'
+
 # Test C: orphaned + absent worktree + open td → must still be rejected
 mkdir -p "$TEST_ROOT/fleet/orphaned-absent-open/app"
 printf 'orphaned\n' > "$TEST_ROOT/fleet/orphaned-absent-open/app/status"

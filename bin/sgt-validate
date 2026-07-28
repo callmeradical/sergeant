@@ -172,7 +172,6 @@ _validation_adopt_pane() {
   command="${command#\"}"
   command="${command%\"}"
   command="${command//\\\\/\\}"
-  # Use quoted right-hand side to prevent glob interpretation of printf %q escapes (e.g. \,)
   [[ -n "$pane" && "$command" == "$VALIDATION_COMMAND" ]] || return 1
   current="$(_validation_current_pane_identity "$pane" || true)"
   [[ "$current" == "$identity" ]] || return 1
