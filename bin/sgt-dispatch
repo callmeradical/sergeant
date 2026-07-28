@@ -596,11 +596,11 @@ for rname in "${TARGET_REPOS[@]}"; do
         # Guard: if the existing branch has committed work not on any remote, a
         # prior interrupted dispatch may have done real work.  Block re-dispatch
         # until the coordinator reconciles, to prevent duplicate or lost effort.
-        _prior_commits="$(git -C "$repo_path" log --oneline \
+        prior_commits="$(git -C "$repo_path" log --oneline \
           "refs/heads/$BRANCH" --not --remotes 2>/dev/null || true)"
-        if [[ -n "$_prior_commits" ]]; then
+        if [[ -n "$prior_commits" ]]; then
           _die "Branch $BRANCH already has committed work not in any remote; reconcile or delete the branch before re-dispatching. Commits found:
-$_prior_commits"
+$prior_commits"
         fi
         git -C "$repo_path" worktree add "$worktree_path" "$BRANCH" 2>&1 | sed 's/^/    /'
       else
@@ -626,8 +626,8 @@ $_prior_commits"
   printf '%s\n' "$worktree_git_dir" > "$repo_task_dir/worktree_git_dir"
   # Record the HEAD at dispatch time so workers and the reconcile path can
   # detect committed work added above this base (interrupted fallback guard).
-  _initial_sha="$(git -C "$worktree_path" rev-parse HEAD 2>/dev/null || true)"
-  [[ -n "$_initial_sha" ]] && printf '%s\n' "$_initial_sha" > "$repo_task_dir/initial_sha"
+  worktree_initial_sha="$(git -C "$worktree_path" rev-parse HEAD 2>/dev/null || true)"
+  [[ -n "$worktree_initial_sha" ]] && printf '%s\n' "$worktree_initial_sha" > "$repo_task_dir/initial_sha"
   _sgt_intent_install "$INTENT_TMP" "$worktree_path/.sergeant-intent.md"
 
   # ── Write brief ─────────────────────────────────────────────────────────────
