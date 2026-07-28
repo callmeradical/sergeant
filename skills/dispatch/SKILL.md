@@ -178,9 +178,9 @@ This runs `treehouse init` in each repo and creates a `treehouse.toml`. Commit t
 - If `treehouse.toml` exists in a repo → `treehouse get --lease --lease-holder "sgt-<task-id>-<repo>"`
 - Branch is checked out in the leased worktree: `git checkout -b <branch>`
 - Pool is in `~/.treehouse/<repo-slug>/<n>/<repo-name>/`
-- Cleanup is performed through `sgt-cleanup`, which validates task paths, terminal
-  state, owner identity, lease identity, and preserved evidence before returning
-  a Treehouse lease.
+- Cleanup is performed through `sgt-cleanup`. Before invoking it, require the
+  cleanup preconditions in [docs/using-sergeant.md](../../docs/using-sergeant.md#clean-completed-fleet-state)
+  rather than copying a second checklist here.
 
 **If treehouse is not initialized** in a repo, dispatch falls back to plain `git worktree add` (sibling path: `<repo-parent>/<repo-name>-sgt-<task-id>/`).
 
