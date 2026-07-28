@@ -1281,13 +1281,10 @@ for absent_phase in partial-removal removed; do
   # Reset fleet state for each iteration.
   rm -rf "$TEST_ROOT/fleet/absent-replay"
   mkdir -p "$TEST_ROOT/fleet/absent-replay/app"
-  # Rebuild worktree if removed by a previous iteration.
-  if [[ ! -d "$TEST_ROOT/absent-replay-sgt-absent-replay" ]]; then
-    git -C "$TEST_ROOT/absent-replay" worktree add -q -b absent-replay-worker-2 \
-      "$TEST_ROOT/absent-replay-sgt-absent-replay" 2>/dev/null || \
-      git -C "$TEST_ROOT/absent-replay" worktree add -q \
-      "$TEST_ROOT/absent-replay-sgt-absent-replay" 2>/dev/null || true
-  fi
+  # Rebuild the git worktree if the previous iteration's fake-git or
+  # SGT_CLEANUP_FAIL_POINT removed the directory.  git worktree remove
+  # deregisters the worktree from the git registry; prune cleans stale refs
+  # before re-adding at the same path.
   if [[ ! -d "$TEST_ROOT/absent-replay-sgt-absent-replay" ]]; then
     git -C "$TEST_ROOT/absent-replay" worktree prune --expire now 2>/dev/null || true
     git -C "$TEST_ROOT/absent-replay" worktree add -q -B absent-replay-worker \
