@@ -1767,6 +1767,9 @@ for repo_dir in "$TASK_DIR"/*/; do
   # rejected checkout leaves the live pane and fleet evidence untouched.
   _preflight_validation_checkout "$repo_dir" "$worktree" "$TASK_ID"
 
+  # Validate the validation checkout ownership before any destructive step.
+  _preflight_validation_checkout "$repo_dir" "$worktree" "$TASK_ID"
+
   _stop_validation_pane "$repo_dir"
   _stop_local_worker "$repo_dir" "$worktree"
 
@@ -1897,23 +1900,10 @@ for repo_dir in "$TASK_DIR"/*/; do
     expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
     retrying_removal=true
   else
-    if retry_root="$(_configured_repo_root "$repo_name" 2>/dev/null)"; then
-      : # owner root resolved from project config
-    elif ! _task_project >/dev/null 2>&1; then
-      if [[ "$wt_type" == "git" ]]; then
-        _fallback_repo_base="$(basename "$worktree" | sed "s/-sgt-${TASK_ID}$//")"
-        retry_root="$(dirname "$worktree")/$_fallback_repo_base"
-      elif [[ "$wt_type" == "treehouse" && -f "$worktree/.git" ]]; then
-        git_dir_line_th="$(cat "$worktree/.git")"
-        git_dir_th="${git_dir_line_th#gitdir: }"
-        main_git_th="$(dirname "$(dirname "$git_dir_th")")"
-        retry_root="$(dirname "$main_git_th")"
-      else
-        _die "Cannot resolve configured cleanup owner: $repo_name"
-      fi
-    else
+    # First-pass cleanup requires the current project YAML; no path-derived fallback.
+    # Fail closed when project config is missing or the configured repo was renamed.
+    retry_root="$(_configured_repo_root "$repo_name" 2>/dev/null)" || \
       _die "Cannot resolve configured cleanup owner: $repo_name"
-    fi
     _require_worktree_owner "$retry_root" "$worktree" || \
       _die "Worktree does not belong to configured cleanup owner: $repo_name"
   fi

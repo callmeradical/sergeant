@@ -2566,6 +2566,92 @@ set -e
   exit 1
 }
 
+# Finding missing-project-config-cleanup-policy:
+# First-pass cleanup must fail closed when project config is missing (no brief.md
+# Project: line and no task-id-named YAML). No path-derived ownership fallback.
+mkdir -p "$TEST_ROOT/fleet/fp-no-project/app"
+init_test_repo "$TEST_ROOT/fp-no-project-repo"
+git -C "$TEST_ROOT/fp-no-project-repo" worktree add -q -b fp-no-project-worker \
+  "$TEST_ROOT/fp-no-project-sgt-fp-no-project"
+# No brief.md and no config YAML — must fail closed, not fall back to path-derived root
+printf '%s\n' "$TEST_ROOT/fp-no-project-sgt-fp-no-project" > \
+  "$TEST_ROOT/fleet/fp-no-project/app/worktree"
+printf 'git\n' > "$TEST_ROOT/fleet/fp-no-project/app/wt_type"
+printf 'done\n' > "$TEST_ROOT/fleet/fp-no-project/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/fp-no-project/app/result"
+printf 'done\n' > "$TEST_ROOT/fp-no-project-sgt-fp-no-project/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/fp-no-project-sgt-fp-no-project/.sergeant-result"
+set +e
+fp_no_project_output="$(SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" fp-no-project 2>&1)"
+fp_no_project_exit=$?
+set -e
+[[ "$fp_no_project_exit" -ne 0 ]] || {
+  printf 'FAIL: first-pass cleanup accepted missing project config (should fail closed)\n' >&2
+  exit 1
+}
+[[ "$fp_no_project_output" == *"configured cleanup owner"* ]] || {
+  printf 'FAIL: no ownership diagnostic for missing-project first-pass: %s\n' \
+    "$fp_no_project_output" >&2
+  exit 1
+}
+[[ -d "$TEST_ROOT/fp-no-project-sgt-fp-no-project" ]] || {
+  printf 'FAIL: worktree removed despite missing project config\n' >&2
+  exit 1
+}
+[[ -d "$TEST_ROOT/fleet/fp-no-project" ]] || {
+  printf 'FAIL: fleet state removed despite missing project config\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup first-pass: missing project config rejected: ok\n'
+
+# Finding missing-project-config-cleanup-policy:
+# First-pass cleanup must fail closed when the configured repo was renamed in the
+# project YAML (Project: is set in brief.md but repo name does not appear in YAML).
+mkdir -p "$TEST_ROOT/fleet/fp-renamed-repo/app"
+init_test_repo "$TEST_ROOT/fp-renamed-repo-repo"
+git -C "$TEST_ROOT/fp-renamed-repo-repo" worktree add -q -b fp-renamed-worker \
+  "$TEST_ROOT/fp-renamed-repo-sgt-fp-renamed-repo"
+cat > "$TEST_ROOT/config/fp-renamed-repo.yaml" <<EOF
+name: fp-renamed-repo
+repos:
+  - name: old-app-name
+    path: $TEST_ROOT/fp-renamed-repo-repo
+EOF
+printf 'Project: fp-renamed-repo\n' > "$TEST_ROOT/fleet/fp-renamed-repo/brief.md"
+printf '%s\n' "$TEST_ROOT/fp-renamed-repo-sgt-fp-renamed-repo" > \
+  "$TEST_ROOT/fleet/fp-renamed-repo/app/worktree"
+printf 'git\n' > "$TEST_ROOT/fleet/fp-renamed-repo/app/wt_type"
+printf 'done\n' > "$TEST_ROOT/fleet/fp-renamed-repo/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/fp-renamed-repo/app/result"
+printf 'done\n' > "$TEST_ROOT/fp-renamed-repo-sgt-fp-renamed-repo/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/fp-renamed-repo-sgt-fp-renamed-repo/.sergeant-result"
+set +e
+fp_renamed_output="$(SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" fp-renamed-repo 2>&1)"
+fp_renamed_exit=$?
+set -e
+[[ "$fp_renamed_exit" -ne 0 ]] || {
+  printf 'FAIL: first-pass cleanup accepted renamed repo in project YAML (should fail closed)\n' >&2
+  exit 1
+}
+[[ "$fp_renamed_output" == *"configured cleanup owner"* ]] || {
+  printf 'FAIL: no ownership diagnostic for renamed-repo first-pass: %s\n' \
+    "$fp_renamed_output" >&2
+  exit 1
+}
+[[ -d "$TEST_ROOT/fp-renamed-repo-sgt-fp-renamed-repo" ]] || {
+  printf 'FAIL: worktree removed despite renamed repo in project YAML\n' >&2
+  exit 1
+}
+[[ -d "$TEST_ROOT/fleet/fp-renamed-repo" ]] || {
+  printf 'FAIL: fleet state removed despite renamed repo in project YAML\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup first-pass: renamed repo in project YAML rejected: ok\n'
+
 # Fix 2: absent-worktree cleanup must fail closed when pane/validation_pane
 # metadata is present in fleet state, rather than silently proceeding.
 # State: partial cleanup reached "removed" phase, worktree absent, validation_pane present.
