@@ -46,7 +46,24 @@ esac
 EOF
 chmod +x "$TEST_ROOT/fake-bin/yq"
 
-cat > "$TEST_ROOT/fake-bin/sgt-notify" <<'EOF'
+cat > "$TEST_ROOT/fake-bin/mv" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$(basename "$2")" >> "$MV_LOG"
+exec /usr/bin/mv "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/mv"
+
+# ── INSTALLED_BIN: simulates an installed bin/ directory where sgt-review-findings
+# and its sibling scripts live.  sgt-review-findings resolves sgt-notify via
+# $SCRIPT_DIR (the fix for #96), so the fake sgt-notify must live alongside it
+# rather than on PATH.  The shared notify body is written once and installed here.
+INSTALLED_BIN="$TEST_ROOT/installed-bin"
+mkdir -p "$INSTALLED_BIN"
+ln -s "$ROOT_DIR/bin/sgt-review-findings" "$INSTALLED_BIN/sgt-review-findings"
+for _helper in "$ROOT_DIR/bin"/_sgt-*.sh; do
+  ln -s "$_helper" "$INSTALLED_BIN/$(basename "$_helper")"
+done
+cat > "$INSTALLED_BIN/sgt-notify" <<'EOF'
 #!/usr/bin/env bash
 if [[ -e "$ROUTER_WORKTREE/.sergeant-status" && "$(cat "$ROUTER_WORKTREE/.sergeant-status")" == "blocked" ]]; then
   printf 'status published before notification\n' >&2
@@ -54,14 +71,14 @@ if [[ -e "$ROUTER_WORKTREE/.sergeant-status" && "$(cat "$ROUTER_WORKTREE/.sergea
 fi
 printf '%s\n' "$*" >> "$NOTIFY_LOG"
 EOF
-chmod +x "$TEST_ROOT/fake-bin/sgt-notify"
+chmod +x "$INSTALLED_BIN/sgt-notify"
 
-cat > "$TEST_ROOT/fake-bin/mv" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "$(basename "$2")" >> "$MV_LOG"
-exec /usr/bin/mv "$@"
-EOF
-chmod +x "$TEST_ROOT/fake-bin/mv"
+# fake-bin-no-notify: td, yq, mv stubs without sgt-notify; used by the #96 test
+# to confirm the script works when sgt-notify is absent from PATH entirely.
+mkdir -p "$TEST_ROOT/fake-bin-no-notify"
+for _f in "$TEST_ROOT/fake-bin"/*; do
+  ln -s "$_f" "$TEST_ROOT/fake-bin-no-notify/$(basename "$_f")"
+done
 
 run_router() {
   : > "$TEST_ROOT/td.log"
@@ -76,7 +93,7 @@ run_router() {
     REPO_PATH="$REPO" TD_LOG="$TEST_ROOT/td.log" TD_IDS="$TEST_ROOT/td-ids" \
     NOTIFY_LOG="$TEST_ROOT/notify.log" MV_LOG="$TEST_ROOT/mv.log" ROUTER_WORKTREE="$WORKTREE" SERGEANT_CONFIG="$TEST_ROOT/config" \
     TD_LIST_RESULT="${TD_LIST_RESULT:-[]}" TD_FAIL_CREATE="${TD_FAIL_CREATE:-0}" \
-    "$ROOT_DIR/bin/sgt-review-findings" test app \
+    "$INSTALLED_BIN/sgt-review-findings" test app \
       --input "$1" --axis standards --source code-review \
       --branch fix/review --head-sha abc1234 --parent-task td-parent \
       --task-id fleet-1 --worktree "$WORKTREE" 2>&1)"
@@ -177,7 +194,7 @@ run_router "$TEST_ROOT/clean.json"
 set +e
 output="$(PATH="$TEST_ROOT/fake-bin:$PATH" REPO_PATH="$REPO" TD_LOG="$TEST_ROOT/td.log" MV_LOG="$TEST_ROOT/mv.log" \
   TD_IDS="$TEST_ROOT/td-ids" NOTIFY_LOG="$TEST_ROOT/notify.log" ROUTER_WORKTREE="$WORKTREE" \
-  SERGEANT_CONFIG="$TEST_ROOT/config" "$ROOT_DIR/bin/sgt-review-findings" test app \
+  SERGEANT_CONFIG="$TEST_ROOT/config" "$INSTALLED_BIN/sgt-review-findings" test app \
   --input "$TEST_ROOT/clean.json" --axis invalid --source code-review --branch fix/review \
   --head-sha abc1234 --parent-task td-parent --task-id fleet-1 --worktree "$WORKTREE" 2>&1)"
 status=$?
@@ -190,12 +207,43 @@ rm -f "$WORKTREE/.sergeant-status" "$WORKTREE/.sergeant-message"
 set +e
 output="$(PATH="$TEST_ROOT/fake-bin:$PATH" REPO_PATH="$REPO" TD_LOG="$TEST_ROOT/td.log" MV_LOG="$TEST_ROOT/mv.log" \
   TD_IDS="$TEST_ROOT/td-ids" NOTIFY_LOG="$TEST_ROOT/notify.log" ROUTER_WORKTREE="$WORKTREE" \
-  SERGEANT_CONFIG="$TEST_ROOT/config" "$ROOT_DIR/bin/sgt-review-findings" test app \
+  SERGEANT_CONFIG="$TEST_ROOT/config" "$INSTALLED_BIN/sgt-review-findings" test app \
   --input "$TEST_ROOT/clean.json" --source code-review --branch fix/review \
   --head-sha abc1234 --parent-task td-parent --task-id fleet-1 --worktree "$WORKTREE" 2>&1)"
 status=$?
 set -e
 [[ "$status" -eq 2 && "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
 grep -Fq 'blocked [app]' "$TEST_ROOT/notify.log"
+
+# ─── Issue #96: sgt-notify reachable via $SCRIPT_DIR when bin/ not on PATH ────
+#
+# The PATH used here omits both $ROOT_DIR/bin and any installed Sergeant location,
+# so bare sgt-notify invocations cannot resolve.  Only the $SCRIPT_DIR-relative
+# invocation introduced by the fix (using $SCRIPT_DIR_TEST/sgt-notify) succeeds.
+rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation}
+: > "$TEST_ROOT/notify.log"
+: > "$TEST_ROOT/td.log"
+: > "$TEST_ROOT/td-ids"
+: > "$TEST_ROOT/mv.log"
+set +e
+output="$(PATH="$TEST_ROOT/fake-bin-no-notify:/usr/bin:/bin" \
+  REPO_PATH="$REPO" TD_LOG="$TEST_ROOT/td.log" TD_IDS="$TEST_ROOT/td-ids" \
+  NOTIFY_LOG="$TEST_ROOT/notify.log" MV_LOG="$TEST_ROOT/mv.log" ROUTER_WORKTREE="$WORKTREE" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" TD_LIST_RESULT="[]" TD_FAIL_CREATE="0" \
+  "$INSTALLED_BIN/sgt-review-findings" test app \
+    --input "$TEST_ROOT/findings.json" --axis standards --source code-review \
+    --branch fix/review --head-sha abc1234 --parent-task td-parent \
+    --task-id fleet-1 --worktree "$WORKTREE" 2>&1)"
+status=$?
+set -e
+[[ "$output" != *'ERROR: sgt-notify failed'* ]] || {
+  printf 'sgt-notify must be reachable via $SCRIPT_DIR when bin/ not on PATH\n' >&2
+  exit 1
+}
+[[ "$status" -eq 2 ]] || { printf 'blocking findings did not gate (installed-bin): %s\n' "$output" >&2; exit 1; }
+grep -Fq 'blocked [app]' "$TEST_ROOT/notify.log" || {
+  printf 'sgt-notify was not called via $SCRIPT_DIR-relative path\n' >&2
+  exit 1
+}
 
 printf 'sgt-review-findings: ok\n'

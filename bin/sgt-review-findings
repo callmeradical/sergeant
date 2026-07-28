@@ -51,7 +51,7 @@ _publish_blocked() {
   mv "$WORKTREE/.sergeant-gate-generation.tmp" "$WORKTREE/.sergeant-gate-generation"
   mv "$WORKTREE/.sergeant-message.tmp" "$WORKTREE/.sergeant-message"
   notify_status=0
-  sgt-notify "$TASK_ID" "blocked [$REPO]: $notice" >/dev/null 2>&1 || notify_status=$?
+  "$SCRIPT_DIR/sgt-notify" "$TASK_ID" "blocked [$REPO]: $notice" >/dev/null 2>&1 || notify_status=$?
   mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
   if (( notify_status != 0 )); then
     printf 'ERROR: sgt-notify failed while publishing blocked review findings\n' >&2

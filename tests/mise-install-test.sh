@@ -24,6 +24,19 @@ HOME="$TEST_ROOT/home" MISE_PROJECT_ROOT="$ROOT_DIR" \
   bash "$TEST_ROOT/install.sh" >/dev/null
 
 [[ -L "$TEST_ROOT/bin/sgt-dispatch" ]]
+[[ -L "$TEST_ROOT/bin/sgt-review-findings" ]] || {
+  printf 'sgt-review-findings was not installed by mise run install (#97)\n' >&2
+  exit 1
+}
+set +e
+rf_output="$(HOME="$TEST_ROOT/home" "$TEST_ROOT/bin/sgt-review-findings" 2>&1)"
+rf_status=$?
+set -e
+[[ "$rf_status" -ne 0 && "$rf_output" == *'Usage: sgt-review-findings'* ]] || {
+  printf 'sgt-review-findings from installed path did not print usage (#97): status=%s output=%s\n' \
+    "$rf_status" "$rf_output" >&2
+  exit 1
+}
 [[ -L "$TEST_ROOT/bin/_sgt-intent.sh" ]]
 [[ -L "$TEST_ROOT/bin/_sgt-drain.sh" ]]
 [[ ! -e "$TEST_ROOT/bin/oc-inject" ]]
