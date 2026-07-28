@@ -110,9 +110,10 @@ _record_progress() {
 # _watch_progress: background loop that updates progress_ts whenever the agent
 # changes observable sentinel files (.sergeant-status, .sergeant-message).
 # This gives the stall classifier evidence of real agent activity rather than
-# only the startup timestamp.
+# only the startup timestamp.  Also writes .sergeant-drain-signal when a drain
+# becomes active so the agent can checkpoint cooperatively before exit.
 _watch_progress() {
-  local prev_sentinel curr_sentinel
+  local prev_sentinel curr_sentinel drain_tmp
   prev_sentinel="$(cat "$WORKTREE/.sergeant-status" "$WORKTREE/.sergeant-message" 2>/dev/null || true)"
   while :; do
     sleep "${SGT_PROGRESS_INTERVAL:-30}"
@@ -120,6 +121,17 @@ _watch_progress() {
     if [[ "$curr_sentinel" != "$prev_sentinel" ]]; then
       _record_progress
       prev_sentinel="$curr_sentinel"
+    fi
+    # Drain signal: write .sergeant-drain-signal so the agent can react
+    # cooperatively to an active global or project drain without requiring a
+    # SIGTERM.  Idempotent: skip when the file already exists.
+    if [[ ! -f "$WORKTREE/.sergeant-drain-signal" ]]; then
+      if _sgt_drain_global_active || \
+         { [[ -n "$_PROJECT_NAME" ]] && _sgt_drain_project_active "$_PROJECT_NAME"; }; then
+        drain_tmp="$WORKTREE/.sergeant-drain-signal.tmp.$$"
+        printf 'scope=%s\n' "${_PROJECT_NAME:-global}" > "$drain_tmp" && \
+          mv "$drain_tmp" "$WORKTREE/.sergeant-drain-signal" || rm -f "$drain_tmp" 2>/dev/null || true
+      fi
     fi
   done
 }
