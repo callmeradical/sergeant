@@ -369,7 +369,13 @@ _reset_retryable_validation_state() {
     "$recorded_pgid" =~ ^[0-9]+$ && -n "$recorded_start" ]] || \
     _die "Validation pane ownership provenance is incomplete: ${pane:-unknown}"
   current_identity="$(_validation_current_pane_identity "$pane" || true)"
-  if [[ -n "$current_identity" && "$current_identity" != "1|${recorded_identity#*|}" ]]; then
+  # tmux returns empty fields ("||||...") for a non-existent pane ID; treat that as
+  # pane-gone (same as pane_dead=1) so a retry is allowed after the pane exited and
+  # was recycled by tmux.
+  local _ci_pane_field="${current_identity#*|}"
+  _ci_pane_field="${_ci_pane_field%%|*}"
+  if [[ -n "$current_identity" && -n "$_ci_pane_field" && \
+        "$current_identity" != "1|${recorded_identity#*|}" ]]; then
     [[ "$current_identity" != "$recorded_identity" ]] || _die "Validation pane is already recorded"
     _die "Recorded validation pane identity does not match: $pane"
   fi
