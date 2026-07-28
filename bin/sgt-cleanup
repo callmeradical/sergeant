@@ -466,6 +466,7 @@ _require_terminal_repos() {
     esac
 
     worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+    _require_response_cleanup_safe "$repo_dir" "$worktree"
     wt_type="$(cat "$repo_dir/wt_type" 2>/dev/null || echo git)"
     case "$wt_type" in
       git|treehouse) ;;
@@ -548,10 +549,14 @@ _require_terminal_repos() {
       if [[ "$cleanup_phase" == $'reconciled-absent\n'"$worktree" ]]; then
         owner_root="$(sed -n '3p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
         owner_type="$(sed -n '5p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
-        [[ "$owner_type" == "$wt_type" ]] || \
-          _die "Retry worktree type changed: $repo_name"
-        _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
-          "$owner_type" "$owner_root"
+        # Orphaned workers do not record cleanup ownership; skip validation for
+        # orphaned status when no cleanup-owner exists (post-merge cleanup case).
+        if [[ "$status" != "orphaned" || -f "$repo_dir/cleanup-owner" ]]; then
+          [[ "$owner_type" == "$wt_type" ]] || \
+            _die "Retry worktree type changed: $repo_name"
+          _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+            "$owner_type" "$owner_root"
+        fi
       fi
       if [[ -z "$cleanup_phase" ]]; then
         # No cleanup-phase: either terminal-evidence exists (pre-reconciled from a
@@ -1134,6 +1139,14 @@ _require_clean_worktrees
 echo "=== sgt-cleanup: $TASK_ID ==="
 echo ""
 
+# Stop any registered background monitor before removing worktrees.
+# _sgt_stop_background_monitor binds the stop to the stored InvocationID so
+# cleanup cannot terminate a foreign unit that has assumed the same name.
+# Skip when cleaning a single repo (monitor is task-scoped, not repo-scoped).
+if [[ -z "$FILTER_REPO" ]]; then
+  _sgt_stop_background_monitor "$TASK_DIR"
+fi
+
 for repo_dir in "$TASK_DIR"/*/; do
   [[ -d "$repo_dir" ]] || continue
   repo_dir="${repo_dir%/}"
@@ -1153,9 +1166,91 @@ for repo_dir in "$TASK_DIR"/*/; do
 
   echo "--- $repo_name (status: $status, type: $wt_type) ---"
 
+  # Detect an interrupted-removal retry and validate the persisted owner BEFORE
+  # any destructive step (pane kill, validation-worktree removal).  A rejected
+  # retry has zero side effects on the live pane or fleet evidence.
+  _preflight_retry_phase="$(sed -n '1p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+  _preflight_retry_type="$(sed -n '3p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+  _preflight_retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+  if [[ -n "$worktree" && -d "$worktree" && \
+    "$_preflight_retry_phase" == "removing" && "$_preflight_retry_type" == "$wt_type" && \
+    -n "$_preflight_retry_root" ]]; then
+    _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+      "$_preflight_retry_type" "$_preflight_retry_root"
+  fi
+
+  _stop_validation_pane "$repo_dir"
+  _stop_local_worker "$repo_dir" "$worktree"
+
+  validation_worktree="$(cat "$repo_dir/validation_worktree" 2>/dev/null || true)"
+  if [[ -n "$validation_worktree" && ( -e "$validation_worktree" || -L "$validation_worktree" ) ]]; then
+    [[ "$validation_worktree" == "${worktree}-validation-${TASK_ID}" ]] || \
+      _die "Validation worktree path is outside the recorded ownership boundary: $validation_worktree"
+    validation_head="$(cat "$repo_dir/validation_head" 2>/dev/null || true)"
+    validation_mode="$(_validation_checkout_provenance_mode "$repo_dir" "$validation_head")"
+    case "$validation_mode" in
+      exact)
+        validation_identity="$(cat "$repo_dir/validation_worktree_identity" 2>/dev/null || true)"
+        validation_git_dir="$(cat "$repo_dir/validation_worktree_git_dir" 2>/dev/null || true)"
+        validation_git_identity="$(cat "$repo_dir/validation_worktree_git_identity" 2>/dev/null || true)"
+        validation_owner="$(cat "$repo_dir/validation_worktree_owner" 2>/dev/null || true)"
+        [[ -n "$validation_identity" && -n "$validation_git_dir" && \
+          -n "$validation_git_identity" && -n "$validation_head" && -n "$validation_owner" ]] || \
+          _die "Validation checkout ownership provenance is incomplete: $validation_worktree"
+        [[ "$validation_owner" == "$TASK_ID/$repo_name/validation-launch|"*"|$validation_head" ]] || \
+          _die "Validation checkout owner provenance does not match: $validation_worktree"
+        _validation_checkout_matches "$validation_worktree" "$validation_worktree" \
+          "$validation_identity" "$validation_git_dir" "$validation_git_identity" \
+          "$validation_head" "$validation_owner" || \
+          _die "Validation checkout identity does not match recorded ownership: $validation_worktree"
+        ;;
+      legacy)
+        _validation_legacy_checkout_matches "$validation_worktree" "$validation_worktree" \
+          "$validation_head" || \
+          _die "Validation checkout does not match retry-safe legacy state: $validation_worktree"
+        ;;
+      *)
+        _die "Validation checkout ownership provenance is incomplete: $validation_worktree"
+        ;;
+    esac
+    validation_cwd_pids="$(_worktree_cwd_pids "$validation_worktree")"
+    [[ -z "$validation_cwd_pids" ]] || \
+      _die "Processes still have $validation_worktree as their current directory: $(tr '\n' ' ' <<< "$validation_cwd_pids")"
+    validation_quarantine="${validation_worktree}.cleanup.$$.$RANDOM"
+    [[ ! -e "$validation_quarantine" && ! -L "$validation_quarantine" ]] || \
+      _die "Validation cleanup quarantine already exists: $validation_quarantine"
+    mv "$validation_worktree" "$validation_quarantine" || \
+      _die "Failed to stage validation checkout cleanup: $validation_worktree"
+    case "$validation_mode" in
+      exact)
+        if ! _validation_checkout_matches "$validation_quarantine" "" "$validation_identity" \
+          "$validation_git_dir" "$validation_git_identity" "$validation_head" "$validation_owner"; then
+          if [[ ! -e "$validation_worktree" && ! -L "$validation_worktree" ]]; then
+            mv "$validation_quarantine" "$validation_worktree" 2>/dev/null || true
+          fi
+          _die "Validation checkout changed during cleanup and was preserved: $validation_worktree"
+        fi
+        ;;
+      legacy)
+        if ! _validation_legacy_checkout_matches "$validation_quarantine" "" \
+          "$validation_head"; then
+          if [[ ! -e "$validation_worktree" && ! -L "$validation_worktree" ]]; then
+            mv "$validation_quarantine" "$validation_worktree" 2>/dev/null || true
+          fi
+          _die "Validation checkout changed during cleanup and was preserved: $validation_worktree"
+        fi
+        ;;
+    esac
+    rm -rf "$validation_quarantine"
+  fi
+
+  # _stop_local_worker already verified no process has $worktree as cwd at the
+  # end of its termination sequence; re-scanning here would be a duplicate lsof
+  # call on the same path (issue #23).  The validation worktree cleanup above
+  # only touches $validation_worktree, so no new process can have acquired
+  # $worktree as its cwd between _stop_local_worker's check and this point.
+
   if [[ -z "$worktree" ]]; then
-    _stop_validation_pane "$repo_dir"
-    _stop_local_worker "$repo_dir" "$worktree"
     echo "  no worktree recorded — skipping"
     echo ""
     _sgt_response_lock_release
@@ -1166,17 +1261,6 @@ for repo_dir in "$TASK_DIR"/*/; do
   if [[ ! -d "$worktree" ]]; then
     [[ ! -f "$repo_dir/validation_pane" && ! -L "$repo_dir/validation_pane" ]] || \
       _die "Validation pane must be stopped before absent-worktree cleanup: $repo_name"
-    retry_phase="$(sed -n '1p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
-    retry_type="$(sed -n '3p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
-    retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
-    if [[ -n "$retry_root" ]]; then
-      _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
-        "$retry_type" "$retry_root"
-      retry_root="$VALIDATED_RETRY_ROOT"
-    fi
-    # Owner validated (or no retry — read-only path); safe to stop processes.
-    _stop_validation_pane "$repo_dir"
-    _stop_local_worker "$repo_dir" "$worktree"
     # Finding 1: a live pane after _stop_local_worker means the kill was skipped
     # (missing or mismatched pane_identity).  Fail closed rather than proceeding
     # with an unverified active worker.
@@ -1186,76 +1270,19 @@ for repo_dir in "$TASK_DIR"/*/; do
       [[ -z "$_abs_pane_info" || "${_abs_pane_info%%|*}" != "0" ]] || \
         _die "Worker pane still active after stop; cannot proceed without verified ownership: $repo_name"
     fi
-    validation_worktree="$(cat "$repo_dir/validation_worktree" 2>/dev/null || true)"
-    if [[ -n "$validation_worktree" && ( -e "$validation_worktree" || -L "$validation_worktree" ) ]]; then
-      [[ "$validation_worktree" == "${worktree}-validation-${TASK_ID}" ]] || \
-        _die "Validation worktree path is outside the recorded ownership boundary: $validation_worktree"
-      validation_head="$(cat "$repo_dir/validation_head" 2>/dev/null || true)"
-      validation_mode="$(_validation_checkout_provenance_mode "$repo_dir" "$validation_head")"
-      case "$validation_mode" in
-        exact)
-          validation_identity="$(cat "$repo_dir/validation_worktree_identity" 2>/dev/null || true)"
-          validation_git_dir="$(cat "$repo_dir/validation_worktree_git_dir" 2>/dev/null || true)"
-          validation_git_identity="$(cat "$repo_dir/validation_worktree_git_identity" 2>/dev/null || true)"
-          validation_owner="$(cat "$repo_dir/validation_worktree_owner" 2>/dev/null || true)"
-          [[ -n "$validation_identity" && -n "$validation_git_dir" && \
-            -n "$validation_git_identity" && -n "$validation_head" && -n "$validation_owner" ]] || \
-            _die "Validation checkout ownership provenance is incomplete: $validation_worktree"
-          [[ "$validation_owner" == "$TASK_ID/$repo_name/validation-launch|"*"|$validation_head" ]] || \
-            _die "Validation checkout owner provenance does not match: $validation_worktree"
-          _validation_checkout_matches "$validation_worktree" "$validation_worktree" \
-            "$validation_identity" "$validation_git_dir" "$validation_git_identity" \
-            "$validation_head" "$validation_owner" || \
-            _die "Validation checkout identity does not match recorded ownership: $validation_worktree"
-          ;;
-        legacy)
-          _validation_legacy_checkout_matches "$validation_worktree" "$validation_worktree" \
-            "$validation_head" || \
-            _die "Validation checkout does not match retry-safe legacy state: $validation_worktree"
-          ;;
-        *)
-          _die "Validation checkout ownership provenance is incomplete: $validation_worktree"
-          ;;
-      esac
-      validation_cwd_pids="$(_worktree_cwd_pids "$validation_worktree")"
-      [[ -z "$validation_cwd_pids" ]] || \
-        _die "Processes still have $validation_worktree as their current directory: $(tr '\n' ' ' <<< "$validation_cwd_pids")"
-      validation_quarantine="${validation_worktree}.cleanup.$$.$RANDOM"
-      [[ ! -e "$validation_quarantine" && ! -L "$validation_quarantine" ]] || \
-        _die "Validation cleanup quarantine already exists: $validation_quarantine"
-      mv "$validation_worktree" "$validation_quarantine" || \
-        _die "Failed to stage validation checkout cleanup: $validation_worktree"
-      case "$validation_mode" in
-        exact)
-          if ! _validation_checkout_matches "$validation_quarantine" "" "$validation_identity" \
-            "$validation_git_dir" "$validation_git_identity" "$validation_head" "$validation_owner"; then
-            if [[ ! -e "$validation_worktree" && ! -L "$validation_worktree" ]]; then
-              mv "$validation_quarantine" "$validation_worktree" 2>/dev/null || true
-            fi
-            _die "Validation checkout changed during cleanup and was preserved: $validation_worktree"
-          fi
-          ;;
-        legacy)
-          if ! _validation_legacy_checkout_matches "$validation_quarantine" "" \
-            "$validation_head"; then
-            if [[ ! -e "$validation_worktree" && ! -L "$validation_worktree" ]]; then
-              mv "$validation_quarantine" "$validation_worktree" 2>/dev/null || true
-            fi
-            _die "Validation checkout changed during cleanup and was preserved: $validation_worktree"
-          fi
-          ;;
-      esac
-      rm -rf "$validation_quarantine"
-    fi
+    retry_phase="$(sed -n '1p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+    retry_type="$(sed -n '3p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+    retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     if [[ -n "$retry_root" ]]; then
+      _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+        "$retry_type" "$retry_root"
+      retry_root="$VALIDATED_RETRY_ROOT"
       if [[ "$retry_phase" == "removed" ]]; then
         _require_completed_removal_proof "$retry_type" "$retry_root" "$worktree"
         _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
           _die "Failed to reconcile completed worktree removal: $repo_name"
         echo "  worktree removal already completed: $worktree"
         echo ""
-        _sgt_response_lock_release
-        trap - EXIT
         continue
       fi
       if [[ "$retry_type" == "treehouse" ]]; then
@@ -1267,27 +1294,15 @@ for repo_dir in "$TASK_DIR"/*/; do
         _die "Failed to publish reconciled cleanup phase: $repo_name"
       echo "  worktree removal already completed: $worktree"
       echo ""
-      _sgt_response_lock_release
-      trap - EXIT
       continue
     fi
-    # Finding 2: absent worktree with no retry_root — acceptable only when the
-    # phase was already recorded as reconciled-absent (idempotent replay).
-    # Any other state (including empty cleanup-phase) means the worktree
-    # disappeared without a validated removal record; fail closed.
-    if [[ "$(cat "$repo_dir/cleanup-phase" 2>/dev/null || true)" == \
-          $'reconciled-absent\n'"$worktree" ]]; then
-      echo "  worktree already removed and reconciled: $worktree"
-      echo ""
-      _sgt_response_lock_release
-      trap - EXIT
-      continue
-    fi
-    _die "Worktree absent without validated removal record: $repo_name"
+    echo "  worktree not found or already removed: $worktree"
+    echo ""
+    _sgt_response_lock_release
+    trap - EXIT
+    continue
   fi
 
-  # Present worktree: validate/configure ownership BEFORE any destructive
-  # operations so a rejected retry has no side effects on pane or validation state.
   retry_phase="$(sed -n '1p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
   retrying_removal=false
   if [[ "$retry_phase" == "removing" ]]; then
@@ -1332,7 +1347,6 @@ for repo_dir in "$TASK_DIR"/*/; do
     [[ "$(dirname "$main_git")" == "$retry_root" ]] || \
       _die "Treehouse lease does not match configured cleanup owner: $repo_name"
   fi
-
 
   if [[ "$retrying_removal" != true ]]; then
     worker_evidence_identity="$(_worker_evidence_identity "$worktree")" || \
