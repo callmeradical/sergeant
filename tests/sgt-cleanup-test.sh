@@ -4160,4 +4160,31 @@ set -e
 printf 'sgt-cleanup orphaned+absent+no-td rejected: ok\n'
 
 rm -f "$TEST_ROOT/fake-bin/td"
+
+# Finding 2 regression: reconciled-absent state allows idempotent replay.
+reconciled_state="$TEST_ROOT/fleet/reconciled-replay/app"
+mkdir -p "$reconciled_state"
+init_test_repo "$TEST_ROOT/reconciled-repo"
+record_retry_owner reconciled-replay app "$TEST_ROOT/reconciled-repo"
+printf '%s\n' "$TEST_ROOT/reconciled-repo-sgt-reconciled-replay" > \
+  "$reconciled_state/worktree"
+printf 'git\n' > "$reconciled_state/wt_type"
+printf 'done\n' > "$reconciled_state/status"
+printf 'result\n' > "$reconciled_state/result"
+mkdir -p "$reconciled_state/terminal-evidence"
+printf 'done\n' > "$reconciled_state/terminal-evidence/.sergeant-status"
+printf 'result\n' > "$reconciled_state/terminal-evidence/.sergeant-result"
+printf 'reconciled-absent\n%s\n' "$TEST_ROOT/reconciled-repo-sgt-reconciled-replay" > \
+  "$reconciled_state/cleanup-phase"
+SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" reconciled-replay >/dev/null || {
+  printf 'cleanup rejected reconciled-absent idempotent replay\n' >&2
+  exit 1
+}
+[[ ! -e "$TEST_ROOT/fleet/reconciled-replay" ]] || {
+  printf 'fleet state not removed after reconciled-absent replay\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup Finding 2 regression (reconciled-absent idempotent replay): ok\n'
+
 printf 'sgt-cleanup: all tests passed\n'
