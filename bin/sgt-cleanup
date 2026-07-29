@@ -3,6 +3,8 @@
 #
 # Handles both treehouse-leased worktrees (treehouse return) and
 # plain git worktrees (git worktree remove).
+# Fleet state and the recorded worktree must be on the same filesystem so
+# cleanup can preserve and replay terminal evidence atomically.
 #
 # task-id must be the fleet-owned task directory basename. Cleanup rejects
 # paths, traversal tokens, and symlink aliases before touching fleet state.
@@ -541,15 +543,10 @@ _require_terminal_repos() {
       fi
       if [[ "$restore_after_validation" == true ]]; then
         expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
-        _restore_worker_evidence "$repo_dir" "$worktree" \
-          "$expected_evidence_identity" || \
-          _die "$repo_name: evidence restore failed during removing-state replay; replay aborted"
-      fi
-      if [[ "$restore_after_validation" == true ]]; then
-        expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
-        _restore_worker_evidence "$repo_dir" "$worktree" \
-          "$expected_evidence_identity" || \
-          _die "Failed to restore worker evidence during retry preflight: $repo_name"
+        if ! _restore_worker_evidence "$repo_dir" "$worktree" \
+          "$expected_evidence_identity"; then
+          _die "Failed to restore persisted worker evidence: $repo_name; inspect preserved evidence: $repo_dir/terminal-evidence; restore artifacts: $repo_dir/restore-evidence.tmp.*; worktree: $worktree"
+        fi
       fi
     else
       if [[ -z "$worktree" ]]; then
@@ -639,10 +636,66 @@ _require_clean_worktrees() {
   done
 }
 
+_path_device() {
+  local device parent path="$1"
+
+  while [[ ! -e "$path" && ! -L "$path" ]]; do
+    parent="$(dirname "$path")"
+    [[ "$parent" != "$path" ]] || return 1
+    path="$parent"
+  done
+
+  device="$(stat -c '%d' "$path" 2>/dev/null || \
+    stat -f '%d' "$path" 2>/dev/null)" || return 1
+  [[ -n "$device" && "$device" != *$'\n'* ]] || return 1
+  printf '%s\n' "$device"
+}
+
+_same_filesystem_pair() {
+  local fleet_device repo_dir="$1" repo_name="$2" worktree="$3" worktree_device
+
+  if ! fleet_device="$(_path_device "$repo_dir")"; then
+    CLEANUP_LAYOUT_ERROR="Cannot verify cleanup filesystem layout: $repo_name fleet state"
+    return 1
+  fi
+  if ! worktree_device="$(_path_device "$worktree")"; then
+    CLEANUP_LAYOUT_ERROR="Cannot verify cleanup filesystem layout: $repo_name worktree"
+    return 1
+  fi
+  if [[ "$fleet_device" != "$worktree_device" ]]; then
+    CLEANUP_LAYOUT_ERROR="Unsupported cleanup layout: fleet state and worktree must be on the same filesystem; move SERGEANT_FLEET or the worktree before retrying: $repo_name"
+    return 1
+  fi
+  CLEANUP_LAYOUT_ERROR=""
+}
+
+_require_same_filesystem_pair() {
+  _same_filesystem_pair "$@" || _die "$CLEANUP_LAYOUT_ERROR"
+}
+
+_require_same_filesystem_layout() {
+  local repo_dir repo_name worktree
+
+  for repo_dir in "$TASK_DIR"/*/; do
+    [[ -d "$repo_dir" ]] || continue
+    repo_dir="${repo_dir%/}"
+    repo_name="$(basename "$repo_dir")"
+    if [[ -n "$FILTER_REPO" && "$repo_name" != "$FILTER_REPO" ]]; then
+      continue
+    fi
+
+    worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+    [[ -n "$worktree" ]] || continue
+    _require_same_filesystem_pair "$repo_dir" "$repo_name" "$worktree"
+  done
+}
+
 _stage_worker_evidence() {
   local evidence expected_identity="$3" staged_identity staging_dir="$4" \
-    worktree="$2" worker_identity
+    worktree="$2" worker_identity repo_dir="$1"
 
+  _same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree" || \
+    return 1
   [[ ! -e "$staging_dir" && ! -L "$staging_dir" ]] || return 1
   mkdir "$staging_dir" || return 1
   for evidence in "$worktree"/.sergeant-*; do
@@ -695,6 +748,7 @@ _remove_worker_evidence() {
     expected_identity="$3" name repo_dir="$1" worktree="$2"
   local -a moved=()
 
+  _same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree" || return 1
   [[ ! -e "$backup_dir" && ! -L "$backup_dir" ]] || return 1
   mkdir "$backup_dir" || return 1
   if ! _cleanup_mutation_hook before-live-removal \
@@ -729,11 +783,12 @@ _remove_worker_evidence() {
 
 _restore_worker_evidence() {
   local backup_dir count=0 evidence evidence_dir="$1/terminal-evidence" name \
-    expected_identity="$3" persisted_identity publish_count=0 repo_dir="$1" \
+    expected_identity="$3" layout_error persisted_identity publish_count=0 repo_dir="$1" \
     staged_identity staging_dir transaction worktree="$2"
   local -a backed_up=() published=()
 
   [[ -d "$worktree" && -d "$evidence_dir" ]] || return 0
+  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
   _cleanup_mutation_hook before-retry-restore \
     "${SGT_CLEANUP_MUTATE_PATH:-$evidence_dir/.sergeant-status}" || return 1
   persisted_identity="$(_worker_evidence_identity "$evidence_dir")" || return 1
@@ -771,13 +826,19 @@ _restore_worker_evidence() {
       restore-rollback-cleanup
     return 1
   fi
+  if ! _same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"; then
+    layout_error="$CLEANUP_LAYOUT_ERROR"
+    _rollback_remove_path "$transaction" "cross-filesystem worker evidence restore" \
+      cross-filesystem-rollback-cleanup
+    _die "$layout_error"
+  fi
   for evidence in "$worktree"/.sergeant-*; do
     [[ -f "$evidence" ]] || continue
     name="$(basename "$evidence")"
     if ! mv "$evidence" "$backup_dir/$name"; then
       for name in "${backed_up[@]}"; do
         mv "$backup_dir/$name" "$worktree/$name" || \
-          _die "Failed to roll back worker evidence restore: $worktree/$name"
+          _die "CRITICAL: worker evidence restore backup failed and rollback failed: $worktree/$name; inspect preserved transaction: $transaction"
       done
       _rollback_remove_path "$transaction" "worker evidence restore backup" \
         restore-rollback-cleanup
@@ -785,6 +846,14 @@ _restore_worker_evidence() {
     fi
     backed_up[${#backed_up[@]}]="$name"
   done
+  if ! _same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"; then
+    layout_error="$CLEANUP_LAYOUT_ERROR"
+    _restore_cross_filesystem_backup "$worktree" "$backup_dir" || \
+      _die "CRITICAL: cross-filesystem restore rollback failed; inspect preserved transaction: $transaction"
+    _rollback_remove_path "$transaction" "cross-filesystem worker evidence restore" \
+      cross-filesystem-rollback-cleanup
+    _die "$layout_error"
+  fi
   for evidence in "$staging_dir"/.sergeant-*; do
     [[ -f "$evidence" ]] || continue
     name="$(basename "$evidence")"
@@ -797,7 +866,7 @@ _restore_worker_evidence() {
       done
       for name in "${backed_up[@]}"; do
         mv "$backup_dir/$name" "$worktree/$name" || \
-          _die "Failed to roll back worker evidence restore: $worktree/$name"
+          _die "CRITICAL: worker evidence restore publication failed and rollback failed: $worktree/$name; inspect preserved transaction: $transaction"
       done
       _rollback_remove_path "$transaction" "worker evidence restore publication" \
         restore-rollback-cleanup
@@ -810,10 +879,17 @@ _restore_worker_evidence() {
 }
 
 _restore_removed_worker_evidence() {
-  local backup_dir="$2" evidence name worktree="$1"
+  local backup_dir="$2" evidence layout_error name repo_dir worktree="$1"
   local -a restored=()
 
   [[ -d "$worktree" && -d "$backup_dir" ]] || return 0
+  repo_dir="$(dirname "$backup_dir")"
+  if ! _same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"; then
+    layout_error="$CLEANUP_LAYOUT_ERROR"
+    _restore_cross_filesystem_backup "$worktree" "$backup_dir" || \
+      _die "CRITICAL: cross-filesystem cleanup rollback failed; inspect preserved backup: $backup_dir"
+    _die "$layout_error"
+  fi
   for evidence in "$backup_dir"/.sergeant-*; do
     [[ -f "$evidence" ]] || continue
     name="$(basename "$evidence")"
@@ -829,10 +905,67 @@ _restore_removed_worker_evidence() {
   rmdir "$backup_dir"
 }
 
+_restore_cross_filesystem_backup() {
+  local backup_dir="$2" evidence name published_path temp worktree="$1"
+  local -a published=() temps=()
+
+  [[ -d "$worktree" && -d "$backup_dir" ]] || return 1
+  for evidence in "$backup_dir"/.sergeant-*; do
+    [[ -f "$evidence" ]] || continue
+    name="$(basename "$evidence")"
+    published_path="$worktree/$name"
+    temp="$worktree/$name.restore.$$"
+    [[ ! -e "$published_path" && ! -L "$published_path" && \
+      ! -e "$temp" && ! -L "$temp" ]] || return 1
+    temps[${#temps[@]}]="$temp"
+    if ! cp -p "$evidence" "$temp" || ! mv "$temp" "$published_path"; then
+      for temp in "${temps[@]}"; do
+        rm -f "$temp" || return 1
+      done
+      for published_path in "${published[@]}"; do
+        rm -f "$published_path" || return 1
+      done
+      return 1
+    fi
+    published[${#published[@]}]="$published_path"
+  done
+  rm -rf "$backup_dir" || return 1
+  [[ ! -e "$backup_dir" && ! -L "$backup_dir" ]]
+}
+
+_rollback_cross_filesystem_initial() {
+  local marker="$2" marker_preexisting="$3" repo_dir="$1"
+
+  _rollback_remove_path "$repo_dir/terminal-evidence" \
+    "cross-filesystem terminal evidence" cross-filesystem-rollback-cleanup
+  _rollback_remove_path "$repo_dir/cleanup-owner" \
+    "cross-filesystem cleanup owner" cross-filesystem-rollback-cleanup
+  _rollback_remove_path "$repo_dir/cleanup-phase" \
+    "cross-filesystem cleanup phase" cross-filesystem-rollback-cleanup
+  if [[ "$marker_preexisting" != true ]]; then
+    _rollback_remove_path "$marker" \
+      "cross-filesystem repository marker" cross-filesystem-rollback-cleanup
+  fi
+}
+
+_require_remover_same_filesystem() {
+  local backup="$4" layout_error marker="$6" marker_preexisting="$7" \
+    repo_dir="$1" repo_name="$2" retrying="$5" worktree="$3"
+
+  _same_filesystem_pair "$repo_dir" "$repo_name" "$worktree" && return 0
+  layout_error="$CLEANUP_LAYOUT_ERROR"
+  _restore_cross_filesystem_backup "$worktree" "$backup" || \
+    _die "CRITICAL: cross-filesystem cleanup rollback failed; inspect preserved backup: $backup"
+  [[ "$retrying" == true ]] || \
+    _rollback_cross_filesystem_initial "$repo_dir" "$marker" "$marker_preexisting"
+  _die "$layout_error"
+}
+
 _record_cleanup_phase() {
   local actual expected phase="$2" repo_dir="$1" temp worktree="$3"
   shift 3
 
+  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
   temp="$repo_dir/cleanup-phase.tmp.$$"
   [[ ! -e "$temp" && ! -L "$temp" ]] || return 1
   expected="$({
@@ -875,7 +1008,6 @@ _treehouse_removed_phase_proven() {
     -z "$(sed -n '6p' "$1/cleanup-phase" 2>/dev/null || true)" ]]
 }
 
-
 _repo_git_dir() {
   local dir kind="$2" repo_root="$1" top
 
@@ -916,50 +1048,6 @@ _require_worktree_owner() {
   [[ "$configured_instance" == "$worktree_instance" ]]
 }
 
-_repo_owner_identity() {
-  local common_dir common_instance repo_root="$1"
-
-  common_instance="$(_repo_common_instance "$repo_root")" || return 1
-  common_dir="${common_instance%%$'\n'*}"
-  printf '%s\n%s\n' "$common_instance" \
-    "$(_repo_instance_id "$common_dir" "${2:-}")" | \
-    git hash-object --stdin
-}
-
-_worker_checkout_identity() {
-  local config_worktree git_dir git_dir_instance head head_commit index_path raw_index \
-    repo_root="$1" semantic_index worktree_state
-
-  git_dir="$(_repo_git_dir "$repo_root" worktree)" || return 1
-  git_dir_instance="$(stat -c '%d:%i' "$git_dir" 2>/dev/null || \
-    stat -f '%d:%i' "$git_dir" 2>/dev/null)" || return 1
-  head="$(cat "$git_dir/HEAD" 2>/dev/null)" || return 1
-  head_commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)" || return 1
-  index_path="$git_dir/index"
-  [[ ! -L "$index_path" ]] || return 1
-  if [[ -e "$index_path" ]]; then
-    [[ -f "$index_path" && -r "$index_path" ]] || return 1
-    raw_index="$(git hash-object "$index_path")" || return 1
-  else
-    raw_index="absent"
-  fi
-  semantic_index="$(git -C "$repo_root" ls-files --stage -z | \
-    git hash-object --stdin)" || return 1
-  index_path="$git_dir/config.worktree"
-  [[ ! -L "$index_path" ]] || return 1
-  if [[ -e "$index_path" ]]; then
-    [[ -f "$index_path" && -r "$index_path" ]] || return 1
-    config_worktree="$(git hash-object "$index_path")" || return 1
-  else
-    config_worktree="absent"
-  fi
-  worktree_state="$(_repo_worktree_identity "$repo_root" exclude-evidence)" || return 1
-  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
-    "$git_dir" "$git_dir_instance" "$raw_index" "$semantic_index" \
-    "$config_worktree" "$head" "$head_commit" "$worktree_state" | \
-    git hash-object --stdin
-}
-
 _repo_instance_id() {
   local git_common_dir="$1" marker token tmp
 
@@ -985,6 +1073,62 @@ _repo_instance_id() {
   token="$(cat "$marker")" || return 1
   [[ -n "$token" && "$token" != *$'\n'* ]] || return 1
   printf '%s\n' "$token"
+}
+
+_repo_metadata_identity() {
+  local git_common_dir="$1"
+
+  (
+    cd "$git_common_dir" || exit 1
+    {
+      find . -path ./worktrees -prune -o -path ./objects -prune -o \
+        -path ./logs -prune -o -path ./index -prune -o \
+        \( -type f -o -type l \) -print
+      [[ ! -d objects/info ]] || find objects/info \( -type f -o -type l \) -print
+    } | LC_ALL=C sort | while IFS= read -r path; do
+      if [[ -L "$path" ]]; then
+        printf 'link\n%s\n%s\n' "$path" "$(readlink "$path")"
+      else
+        printf 'file\n%s\n' "$path"
+        git hash-object "$path" || exit 1
+      fi
+    done
+  ) | git hash-object --stdin
+}
+
+_repo_per_worktree_metadata_identity() {
+  local git_dir="$1" index_path mode="${3:-}" raw_index repo_root="$2" semantic_index
+
+  index_path="$git_dir/index"
+  if [[ "$mode" == "exclude-evidence" ]]; then
+    [[ ! -L "$index_path" ]] || return 1
+    if [[ -e "$index_path" ]]; then
+      [[ -f "$index_path" && -r "$index_path" ]] || return 1
+      raw_index="$(git hash-object "$index_path")" || return 1
+    else
+      raw_index="absent"
+    fi
+  else
+    raw_index="not-bound"
+  fi
+  semantic_index="$(git -C "$repo_root" ls-files --stage -z | \
+    git hash-object --stdin)" || return 1
+
+  (
+    cd "$git_dir" || exit 1
+    printf 'raw-index\n%s\nsemantic-index\n%s\n' "$raw_index" "$semantic_index"
+    find . -path ./index -prune -o -path ./logs -prune -o -path ./objects -prune -o \
+      -path ./refs -prune -o -path ./worktrees -prune -o \
+      \( -type f -o -type l \) -print | LC_ALL=C sort | \
+      while IFS= read -r path; do
+        if [[ -L "$path" ]]; then
+          printf 'link\n%s\n%s\n' "$path" "$(readlink "$path")"
+        else
+          printf 'file\n%s\n' "$path"
+          git hash-object "$path" || exit 1
+        fi
+      done
+  ) | git hash-object --stdin
 }
 
 _repo_worktree_identity() {
@@ -1075,6 +1219,49 @@ _repo_identity() {
   fi
 }
 
+_repo_owner_identity() {
+  local common_dir common_instance repo_root="$1"
+
+  common_instance="$(_repo_common_instance "$repo_root")" || return 1
+  common_dir="${common_instance%%$'\n'*}"
+  printf '%s\n%s\n' "$common_instance" \
+    "$(_repo_instance_id "$common_dir" "${2:-}")" | \
+    git hash-object --stdin
+}
+
+_worker_checkout_identity() {
+  local config_worktree git_dir git_dir_instance head head_commit index_path raw_index \
+    repo_root="$1" semantic_index worktree_state
+
+  git_dir="$(_repo_git_dir "$repo_root" worktree)" || return 1
+  git_dir_instance="$(stat -c '%d:%i' "$git_dir" 2>/dev/null || \
+    stat -f '%d:%i' "$git_dir" 2>/dev/null)" || return 1
+  head="$(cat "$git_dir/HEAD" 2>/dev/null)" || return 1
+  head_commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)" || return 1
+  index_path="$git_dir/index"
+  [[ ! -L "$index_path" ]] || return 1
+  if [[ -e "$index_path" ]]; then
+    [[ -f "$index_path" && -r "$index_path" ]] || return 1
+    raw_index="$(git hash-object "$index_path")" || return 1
+  else
+    raw_index="absent"
+  fi
+  semantic_index="$(git -C "$repo_root" ls-files --stage -z | \
+    git hash-object --stdin)" || return 1
+  index_path="$git_dir/config.worktree"
+  [[ ! -L "$index_path" ]] || return 1
+  if [[ -e "$index_path" ]]; then
+    [[ -f "$index_path" && -r "$index_path" ]] || return 1
+    config_worktree="$(git hash-object "$index_path")" || return 1
+  else
+    config_worktree="absent"
+  fi
+  worktree_state="$(_repo_worktree_identity "$repo_root" exclude-evidence)" || return 1
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$git_dir" "$git_dir_instance" "$raw_index" "$semantic_index" \
+    "$config_worktree" "$head" "$head_commit" "$worktree_state" | \
+    git hash-object --stdin
+}
 
 _task_project() {
   local project
@@ -1109,16 +1296,6 @@ _configured_repo_root() {
   [[ -d "$configured_root" && ! -L "$configured_root" ]] || return 1
   [[ "$configured_root" == "$(cd "$configured_root" && pwd -P)" ]] || return 1
   printf '%s\n' "$configured_root"
-}
-
-_inferred_repo_root() {
-  local common_dir repo_root="$1"
-
-  common_dir="$(_repo_git_dir "$repo_root" common)" || return 1
-  repo_root="$(dirname "$common_dir")"
-  [[ -d "$repo_root" && ! -L "$repo_root" ]] || return 1
-  [[ "$repo_root" == "$(cd "$repo_root" && pwd -P)" ]] || return 1
-  printf '%s\n' "$repo_root"
 }
 
 _record_cleanup_owner() {
@@ -1157,9 +1334,10 @@ _rollback_initial_cleanup() {
 }
 
 _publish_initial_cleanup() {
-  local evidence_identity="$5" marker marker_preexisting=false repo_dir="$1" \
+  local evidence_identity="$5" layout_error marker marker_preexisting=false repo_dir="$1" \
     repo_root="$2" transaction worktree="$3" wt_type="$4"
 
+  _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
   transaction="$repo_dir/cleanup-transaction.tmp.$$"
   marker="$(_repo_git_dir "$repo_root" common)/sergeant-instance" || return 1
   [[ -e "$marker" || -L "$marker" ]] && marker_preexisting=true
@@ -1170,7 +1348,14 @@ _publish_initial_cleanup() {
   mkdir "$transaction" || return 1
 
   if ! _stage_worker_evidence "$repo_dir" "$worktree" "$evidence_identity" \
-    "$transaction/terminal-evidence" || ! _cleanup_fail_point stage-evidence || \
+    "$transaction/terminal-evidence"; then
+    layout_error="$CLEANUP_LAYOUT_ERROR"
+    _rollback_initial_cleanup "$repo_dir" "$transaction" "$marker" \
+      "$marker_preexisting"
+    [[ -z "$layout_error" ]] || _die "$layout_error"
+    return 1
+  fi
+  if ! _cleanup_fail_point stage-evidence || \
     ! _cleanup_fail_point record-owner || \
     ! _record_cleanup_owner "$repo_dir" "$repo_root" "$worktree" "$wt_type" \
       "$transaction/cleanup-owner" "$transaction/terminal-evidence" || \
@@ -1182,6 +1367,12 @@ _publish_initial_cleanup() {
     return 1
   fi
 
+  if ! _same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"; then
+    layout_error="$CLEANUP_LAYOUT_ERROR"
+    _rollback_initial_cleanup "$repo_dir" "$transaction" "$marker" \
+      "$marker_preexisting"
+    _die "$layout_error"
+  fi
   if ! _cleanup_fail_point publish-evidence || \
     ! mv "$transaction/terminal-evidence" "$repo_dir/terminal-evidence" || \
     ! _cleanup_fail_point publish-owner || \
@@ -1423,51 +1614,6 @@ _require_completed_removal_proof() {
     _die "Cannot prove completed git worktree removal: $worktree"
 }
 
-# _validate_retry_owner — pre-flight ownership check for the validation checkout.
-# Must be called BEFORE any destructive step (pane kills, worktree removal) so
-# that a rejected retry leaves the fleet state completely unchanged.
-_validate_retry_owner() {
-  local repo_dir="$1" worktree="$2" task_id="$3"
-  local repo_name validation_worktree validation_head validation_mode
-  local validation_identity validation_git_dir validation_git_identity validation_owner
-
-  repo_name="$(basename "$repo_dir")"
-  validation_worktree="$(cat "$repo_dir/validation_worktree" 2>/dev/null || true)"
-  [[ -n "$validation_worktree" && ( -e "$validation_worktree" || -L "$validation_worktree" ) ]] || \
-    return 0
-
-  [[ "$validation_worktree" == "${worktree}-validation-${task_id}" ]] || \
-    _die "Validation worktree path is outside the recorded ownership boundary: $validation_worktree"
-
-  validation_head="$(cat "$repo_dir/validation_head" 2>/dev/null || true)"
-  validation_mode="$(_validation_checkout_provenance_mode "$repo_dir" "$validation_head")"
-  case "$validation_mode" in
-    exact)
-      validation_identity="$(cat "$repo_dir/validation_worktree_identity" 2>/dev/null || true)"
-      validation_git_dir="$(cat "$repo_dir/validation_worktree_git_dir" 2>/dev/null || true)"
-      validation_git_identity="$(cat "$repo_dir/validation_worktree_git_identity" 2>/dev/null || true)"
-      validation_owner="$(cat "$repo_dir/validation_worktree_owner" 2>/dev/null || true)"
-      [[ -n "$validation_identity" && -n "$validation_git_dir" && \
-        -n "$validation_git_identity" && -n "$validation_head" && -n "$validation_owner" ]] || \
-        _die "Validation checkout ownership provenance is incomplete: $validation_worktree"
-      [[ "$validation_owner" == "$task_id/$repo_name/validation-launch|"*"|$validation_head" ]] || \
-        _die "Validation checkout owner provenance does not match: $validation_worktree"
-      _validation_checkout_matches "$validation_worktree" "$validation_worktree" \
-        "$validation_identity" "$validation_git_dir" "$validation_git_identity" \
-        "$validation_head" "$validation_owner" || \
-        _die "Validation checkout identity does not match recorded ownership: $validation_worktree"
-      ;;
-    legacy)
-      _validation_legacy_checkout_matches "$validation_worktree" "$validation_worktree" \
-        "$validation_head" || \
-        _die "Validation checkout does not match retry-safe legacy state: $validation_worktree"
-      ;;
-    *)
-      _die "Validation checkout ownership provenance is incomplete: $validation_worktree"
-      ;;
-  esac
-}
-
 _validation_object_identity() {
   [[ -e "$1" && ! -L "$1" ]] || return 1
   stat -c '%d:%i:%w' -- "$1" 2>/dev/null || stat -f '%d:%i:%B' "$1" 2>/dev/null
@@ -1501,6 +1647,7 @@ _validation_checkout_matches() {
   [[ -f "$owner_file" && ! -L "$owner_file" && "$(cat "$owner_file")" == \
     "$expected_owner" ]] || return 1
 }
+
 _validation_checkout_provenance_mode() {
   local repo_dir="$1" head="$2" present=0 path
   for path in "$repo_dir/validation_worktree_identity" "$repo_dir/validation_worktree_git_dir" \
@@ -1515,6 +1662,7 @@ _validation_checkout_provenance_mode() {
     printf 'invalid\n'
   fi
 }
+
 _validation_legacy_checkout_matches() {
   local checkout="$1" expected_path="$2" expected_head="$3"
   [[ -d "$checkout" && ! -L "$checkout" ]] || return 1
@@ -1524,6 +1672,7 @@ _validation_legacy_checkout_matches() {
     "$expected_head" ]]
 }
 
+_require_same_filesystem_layout
 _require_terminal_repos
 _require_clean_worktrees
 
@@ -1687,6 +1836,8 @@ for repo_dir in "$TASK_DIR"/*/; do
 
   retry_phase="$(sed -n '1p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
   retrying_removal=false
+  initial_marker=""
+  initial_marker_preexisting=false
   if [[ "$retry_phase" == "removing" ]]; then
     retry_type="$(sed -n '3p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
@@ -1730,6 +1881,10 @@ for repo_dir in "$TASK_DIR"/*/; do
   fi
 
   if [[ "$retrying_removal" != true ]]; then
+    initial_marker="$(_repo_git_dir "$retry_root" common)/sergeant-instance" || \
+      _die "Cannot identify cleanup owner marker: $repo_name"
+    [[ ! -e "$initial_marker" && ! -L "$initial_marker" ]] || \
+      initial_marker_preexisting=true
     worker_evidence_identity="$(_worker_evidence_identity "$worktree")" || \
       _die "Cannot bind worker lifecycle evidence before cleanup: $repo_name"
     if ! _publish_initial_cleanup "$repo_dir" "$retry_root" "$worktree" "$wt_type" \
@@ -1739,11 +1894,30 @@ for repo_dir in "$TASK_DIR"/*/; do
     expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
   fi
   LIVE_EVIDENCE_BACKUP=""
-  _remove_worker_evidence "$repo_dir" "$worktree" "$expected_evidence_identity" || \
+  if ! _same_filesystem_pair "$repo_dir" "$repo_name" "$worktree"; then
+    layout_error="$CLEANUP_LAYOUT_ERROR"
+    [[ "$retrying_removal" == true ]] || \
+      _rollback_cross_filesystem_initial "$repo_dir" "$initial_marker" \
+        "$initial_marker_preexisting"
+    _die "$layout_error"
+  fi
+  if ! _remove_worker_evidence "$repo_dir" "$worktree" \
+    "$expected_evidence_identity"; then
+    if [[ -n "$CLEANUP_LAYOUT_ERROR" ]]; then
+      layout_error="$CLEANUP_LAYOUT_ERROR"
+      [[ "$retrying_removal" == true ]] || \
+        _rollback_cross_filesystem_initial "$repo_dir" "$initial_marker" \
+          "$initial_marker_preexisting"
+      _die "$layout_error"
+    fi
     _die "Failed to remove staged worker evidence before cleanup: $repo_name"
+  fi
 
   if [[ "$wt_type" == "treehouse" ]]; then
     echo "  returning treehouse lease: $worktree"
+    _require_remover_same_filesystem "$repo_dir" "$repo_name" "$worktree" \
+      "$LIVE_EVIDENCE_BACKUP" "$retrying_removal" "$initial_marker" \
+      "$initial_marker_preexisting"
     if ! (cd "$retry_root" && treehouse return "$worktree" 2>&1 | sed 's/^/  /'); then
       if [[ ! -d "$worktree" ]]; then
         _rollback_remove_path "$LIVE_EVIDENCE_BACKUP" \
@@ -1759,6 +1933,9 @@ for repo_dir in "$TASK_DIR"/*/; do
     fi
   else
     echo "  removing git worktree: $worktree"
+    _require_remover_same_filesystem "$repo_dir" "$repo_name" "$worktree" \
+      "$LIVE_EVIDENCE_BACKUP" "$retrying_removal" "$initial_marker" \
+      "$initial_marker_preexisting"
     if ! git -C "$retry_root" worktree remove "$worktree" 2>&1 | sed 's/^/  /'; then
       if [[ ! -d "$worktree" ]]; then
         _rollback_remove_path "$LIVE_EVIDENCE_BACKUP" \
