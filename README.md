@@ -127,18 +127,49 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-cleanup <task-id>` | Remove worktrees and fleet state |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
 
-### No-mistakes findings
+### No-mistakes
 
-Routine dispatched workers use repository-native tests, lint/typechecking, and independent Standards/Spec reviews. They do not run no-mistakes for ordinary completion, prototypes, investigations, documentation drafts, intermediate commits, or remediation loops unless the user explicitly overrides that default.
+**Use no-mistakes as a final shipping gate, not an implementation loop.** Implementation, focused repository-native tests, lint, and independent review must be complete before starting it. A clean run takes several minutes; invoking it during development or repeatedly restarting it multiplies that cost.
 
-At an explicit final shipping boundary, after implementation and native validation are complete, run:
+#### Starting a run
+
+Before starting: finish and commit on a feature branch, ensure `no-mistakes doctor` is healthy, and check `no-mistakes axi` for an already-active matching run — reattach rather than create a duplicate.
 
 ```bash
 no-mistakes axi run --intent-file .sergeant-intent.md
 # or: no-mistakes axi run --intent "<the user's objective and approved tradeoffs>"
 ```
 
-Use `--skip=<steps>` only for gates already proven irrelevant and stop at `checks-passed`. The run is validation-only: it must not fix findings. Route actionable findings into separate, deduplicated owning-repo td tasks with `sgt-no-mistakes-finding`.
+Do not use `--yes`. Use `--skip=<steps>` only for stages already proven irrelevant (e.g. `--skip=document` for changes that cannot affect docs). Skipping is not a substitute for checks that have not been performed.
+
+Routine dispatched workers do not invoke no-mistakes for ordinary completion, prototypes, investigations, documentation drafts, intermediate commits, or remediation loops. The coordinator starts a single run only after the implementation branch is committed and native validation is complete.
+
+#### Driving gates
+
+`axi run` and `axi respond` block while work is active — a quiet step is not a stall. Check progress with `no-mistakes axi status` without issuing duplicate run commands.
+
+At each gate, inspect every finding:
+
+- **`auto-fix`** — authorize selectively: `no-mistakes axi respond --action fix --findings <ids>`. Review the exact finding first.
+- **`ask-user`** — relay to the user and wait for their decision. Never approve, fix, or skip autonomously.
+- **`no-op`** — informational; approve the gate.
+
+While a run is active: do not edit the pipeline-owned worktree, do not abort or rerun to escape a gate, and preserve all pipeline-created commits. Abort only when intentionally discarding the entire run.
+
+#### Finishing
+
+Stop driving at `checks-passed`. The PR is ready; no-mistakes monitors it in the background. Do not poll or wait for merge.
+
+If the outcome is `failed` or `cancelled`, inspect `branch_sync` state first:
+- `sync` → run `no-mistakes axi sync`
+- `continue_active_run` → keep driving the reported run
+- `recover_custody` → use `no-mistakes axi sync --recover`
+
+Never improvise a reset, stash, force-push, or branch replacement around a blocked sync state.
+
+#### Findings routing
+
+The run is validation-only: it must not fix findings. Route actionable findings into separate, deduplicated owning-repo td tasks with `sgt-no-mistakes-finding`.
 
 The required `--disposition` is explicit per finding: `gate` creates or updates P1 work and retains the gate, `ask-user` creates or updates P1 work and preserves human escalation, `td` creates or updates nonblocking actionable debt, and `ignore` records that no card is needed. Warning debt becomes P2, informational debt becomes P3, and repeated finding IDs update the same card while retaining the latest run ID, head SHA, location, description, and originating intent. Reruns also preserve any existing repo-specific or manually added td labels while ensuring the required `no-mistakes` and `finding` labels remain present without duplication.
 

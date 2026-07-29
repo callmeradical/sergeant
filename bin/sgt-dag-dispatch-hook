@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# sgt-dag-dispatch-hook — Stage hook called by dagr when a stage becomes ready.
+#
+# Calls sgt-dispatch with the given args, captures the fleet task ID,
+# and writes dagr tracking files (dagr_run_id, dagr_stage_id) into every
+# dispatched repo's fleet state directory so sgt-watch can auto-advance
+# the DAG when the task completes.
+#
+# Called by dagr with env vars:
+#   DAGR_RUN_ID    — the dagr run ID
+#   DAGR_STAGE_ID  — the dagr stage ID
+#   DAGR_STAGE_NAME
+#   DAGR_DAG_ID
+#
+# sgt-dispatch args are passed directly after the script name.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+[[ -n "${DAGR_RUN_ID:-}" ]]   || { printf 'ERROR: DAGR_RUN_ID not set\n' >&2; exit 1; }
+[[ -n "${DAGR_STAGE_ID:-}" ]]  || { printf 'ERROR: DAGR_STAGE_ID not set\n' >&2; exit 1; }
+
+# Run sgt-dispatch and capture output to extract fleet task ID
+DISPATCH_OUTPUT="$("$SCRIPT_DIR/sgt-dispatch" "$@" 2>&1)"
+printf '%s\n' "$DISPATCH_OUTPUT" >&2
+
+# Extract task ID from dispatch output (format: "Task ID: <id>")
+FLEET_TASK_ID="$(printf '%s\n' "$DISPATCH_OUTPUT" | grep "^Task ID:" | awk '{print $3}' | head -1)"
+
+if [[ -z "$FLEET_TASK_ID" ]]; then
+  printf 'sgt-dag-dispatch-hook: WARNING: could not extract fleet task ID from dispatch output\n' >&2
+  exit 0
+fi
+
+# Write dagr tracking files into each dispatched repo's fleet state
+FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
+TASK_DIR="$FLEET_DIR/$FLEET_TASK_ID"
+
+if [[ -d "$TASK_DIR" ]]; then
+  for repo_dir in "$TASK_DIR"/*/; do
+    [[ -d "$repo_dir" ]] || continue
+    printf '%s\n' "$DAGR_RUN_ID"   > "$repo_dir/dagr_run_id"
+    printf '%s\n' "$DAGR_STAGE_ID" > "$repo_dir/dagr_stage_id"
+  done
+  printf 'sgt-dag-dispatch-hook: wrote dagr tracking to %s\n' "$TASK_DIR" >&2
+fi
+
+# Output fleet task ID as dispatch_id for dagr to record
+printf '%s\n' "$FLEET_TASK_ID"
