@@ -3,6 +3,8 @@
 #
 # Handles both treehouse-leased worktrees (treehouse return) and
 # plain git worktrees (git worktree remove).
+# Fleet state and the recorded worktree must be on the same filesystem so
+# cleanup can preserve and replay terminal evidence atomically.
 #
 # task-id must be the fleet-owned task directory basename. Cleanup rejects
 # paths, traversal tokens, and symlink aliases before touching fleet state.
