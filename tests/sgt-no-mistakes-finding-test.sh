@@ -250,7 +250,17 @@ if grep -Fq "create" "$TEST_ROOT/td.log" || grep -Fq "update" "$TEST_ROOT/td.log
   exit 1
 fi
 
-for non_list_json in 'null' 'false' 'true' '0' '1' '""' '"unexpected"' '{}' '{"id":"td-existing"}'; do
+# null from td list means no results (real td CLI behaviour); router must treat it as an
+# empty list and create a new task rather than failing with non-list JSON.
+TD_LIST_RESULT='null' run_router --disposition td
+[[ "$status" -eq 0 && "$output" == *"td-created"* ]] || {
+  printf 'null td list result (real td CLI no-results shape) did not create a new task: %s\n' "$output" >&2
+  exit 1
+}
+assert_log_contains "create"
+assert_log_contains "list --all --search no-mistakes-finding:app:review-7 --json --work-dir $REPO"
+
+for non_list_json in 'false' 'true' '0' '1' '""' '"unexpected"' '{}' '{"id":"td-existing"}'; do
   TD_LIST_RESULT="$non_list_json" run_router --disposition td
   [[ "$status" -ne 0 && "$output" == *"td list returned non-list JSON; expected a list"* ]] || {
     printf 'non-list td JSON %s did not fail closed: %s\n' "$non_list_json" "$output" >&2

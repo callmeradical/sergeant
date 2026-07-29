@@ -131,6 +131,11 @@ try:
 except json.JSONDecodeError as exc:
     raise SystemExit(f"td list returned invalid JSON: {exc}")
 
+# The real td CLI returns JSON null (Python None) when there are no results.
+# Treat null as an empty list so the router creates a new task.
+if items is None:
+    items = []
+
 if not isinstance(items, list):
     raise SystemExit("td list returned non-list JSON; expected a list")
 
