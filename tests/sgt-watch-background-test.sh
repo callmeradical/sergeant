@@ -16,11 +16,29 @@ repo="$task/app"
 fake_bin="$TEST_ROOT/bin"
 fake_systemd_state="$TEST_ROOT/systemd-state"
 no_systemd_bin="$TEST_ROOT/no-systemd-bin"
+config_dir="$TEST_ROOT/config"
 
-mkdir -p "$repo" "$worktree" "$fake_bin" "$fake_systemd_state" "$no_systemd_bin"
+mkdir -p "$repo" "$worktree" "$fake_bin" "$fake_systemd_state" "$no_systemd_bin" "$config_dir"
 printf '%s\n' "$worktree" > "$repo/worktree"
 printf 'in_progress\n' > "$repo/status"
 printf 'in_progress\n' > "$worktree/.sergeant-status"
+
+write_test_task_brief() {
+  cat > "$1/brief.md" <<'EOF'
+Brief: test cleanup task
+Project: test
+EOF
+}
+
+write_test_project_config() {
+  cat > "$config_dir/test.yaml" <<EOF
+name: test
+repos:
+  - name: app
+    path: $1
+    role: Test fixture
+EOF
+}
 
 # ── Fake service manager ──────────────────────────────────────────────────────
 # SGT_FAKE_SYSTEMD_STATE: directory holding per-unit state files
@@ -103,6 +121,7 @@ chmod +x "$fake_bin/systemctl"
 
 # Shared env for fake systemd
 _sgt_watch_bg() {
+  SERGEANT_CONFIG="$config_dir" \
   SGT_FAKE_SYSTEMD_STATE="$fake_systemd_state" \
   SERGEANT_FLEET="$fleet" \
   SERGEANT_SYSTEMCTL="$fake_bin/systemctl" \
@@ -111,6 +130,7 @@ _sgt_watch_bg() {
 }
 
 _sgt_cleanup_bg() {
+  SERGEANT_CONFIG="$config_dir" \
   SGT_FAKE_SYSTEMD_STATE="$fake_systemd_state" \
   SERGEANT_FLEET="$fleet" \
   SERGEANT_SYSTEMCTL="$fake_bin/systemctl" \
@@ -209,6 +229,7 @@ git -C "$cleanup_repo_root" config user.name "Test"
 printf 'init\n' > "$cleanup_repo_root/README"
 git -C "$cleanup_repo_root" add .
 git -C "$cleanup_repo_root" commit -q -m "init"
+write_test_project_config "$cleanup_repo_root"
 
 task_c8="$fleet/task-cleanup-8"
 repo_c8="$task_c8/app"
@@ -216,6 +237,7 @@ wt_c8="$cleanup_repo_root-sgt-task-cleanup-8"
 unit_c8="sgt-watch-task-cleanup-8.service"
 git -C "$cleanup_repo_root" worktree add -q "$wt_c8"
 mkdir -p "$repo_c8"
+write_test_task_brief "$task_c8"
 printf '%s\n' "$wt_c8" > "$repo_c8/worktree"
 printf 'done\n' > "$repo_c8/status"
 printf 'https://example.invalid/pr/1\n' > "$repo_c8/result"
@@ -228,11 +250,7 @@ printf 'inv-cleanup-0001\n' > "$task_c8/monitor_invocation_id"
 printf 'active\n' > "$fake_systemd_state/$unit_c8.status"
 printf 'inv-cleanup-0001\n' > "$fake_systemd_state/$unit_c8.invocation_id"
 # Run cleanup
-SGT_FAKE_SYSTEMD_STATE="$fake_systemd_state" \
-  SERGEANT_FLEET="$fleet" \
-  SERGEANT_SYSTEMCTL="$fake_bin/systemctl" \
-  SERGEANT_SYSTEMD_RUN="$fake_bin/systemd-run" \
-  "$ROOT/bin/sgt-cleanup" "task-cleanup-8"
+_sgt_cleanup_bg "task-cleanup-8"
 # Unit should be stopped
 unit_status="$(cat "$fake_systemd_state/$unit_c8.status" 2>/dev/null || printf 'inactive')"
 [[ "$unit_status" == "inactive" ]]
@@ -249,6 +267,7 @@ unit2="sgt-watch-task-bg-2.service"
 git -C "$cleanup_repo_root" worktree add -q "$wt_c9"
 worktree2="$wt_c9"
 mkdir -p "$repo2"
+write_test_task_brief "$task2"
 printf '%s\n' "$worktree2" > "$repo2/worktree"
 printf 'done\n' > "$repo2/status"
 printf 'https://example.invalid/pr/2\n' > "$repo2/result"
@@ -262,11 +281,7 @@ mkdir -p "$fake_systemd_state"
 printf 'active\n' > "$fake_systemd_state/$unit2.status"
 printf 'inv-FOREIGN\n' > "$fake_systemd_state/$unit2.invocation_id"
 # Cleanup should refuse to stop the unit (TOCTOU: invocation IDs differ)
-toctou_error="$(SGT_FAKE_SYSTEMD_STATE="$fake_systemd_state" \
-  SERGEANT_FLEET="$fleet" \
-  SERGEANT_SYSTEMCTL="$fake_bin/systemctl" \
-  SERGEANT_SYSTEMD_RUN="$fake_bin/systemd-run" \
-  "$ROOT/bin/sgt-cleanup" "task-bg-2" 2>&1 || true)"
+toctou_error="$(_sgt_cleanup_bg "task-bg-2" 2>&1 || true)"
 grep -Eq 'ERROR.*[Ii]nvocation|ERROR.*[Tt][Oo][Cc][Tt][Oo][Uu]|ERROR.*unexpected|ERROR.*unexpected.*invocation|ERROR.*[Ff]oreign|ERROR.*[Mm]ismatch' <<< "$toctou_error"
 # Unit should NOT have been stopped
 unit2_status="$(cat "$fake_systemd_state/$unit2.status" 2>/dev/null || printf 'inactive')"
@@ -311,16 +326,13 @@ task_c11="$fleet/task-crash-11"
 repo_c11="$task_c11/app"
 unit_c11="sgt-watch-task-crash-11.service"
 mkdir -p "$repo_c11"
+write_test_task_brief "$task_c11"
 printf '%s\n' "$unit_c11" > "$task_c11/monitor_unit"
 # intentionally omit monitor_invocation_id to simulate crash-window state
 # sgt-cleanup requires terminal repos; create minimal passing state
 printf 'done\n' > "$repo_c11/status"
 printf 'https://example.invalid/pr/11\n' > "$repo_c11/result"
-crash_error="$(SGT_FAKE_SYSTEMD_STATE="$fake_systemd_state" \
-  SERGEANT_FLEET="$fleet" \
-  SERGEANT_SYSTEMCTL="$fake_bin/systemctl" \
-  SERGEANT_SYSTEMD_RUN="$fake_bin/systemd-run" \
-  "$ROOT/bin/sgt-cleanup" "task-crash-11" 2>&1 || true)"
+crash_error="$(_sgt_cleanup_bg "task-crash-11" 2>&1 || true)"
 # Cleanup must produce an error (invocation ID missing = cannot safely stop)
 grep -Eq 'ERROR.*[Ii]nvocation|ERROR.*missing|ERROR.*safely' <<< "$crash_error"
 printf 'sgt-cleanup split-write crash window: ok\n'
