@@ -41,6 +41,7 @@ fi
 FLEET_ROOT="$(cd "$FLEET_DIR" && pwd -P)"
 TASK_ROOT="$(cd "$TASK_DIR" && pwd -P)"
 [[ "$TASK_ROOT" == "$FLEET_ROOT/$TASK_ID" ]] || _die "Invalid task ID: $TASK_ID"
+VALIDATED_RETRY_ROOT=""
 
 _worktree_cwd_pids() {
   local worktree="$1"
@@ -1254,7 +1255,7 @@ _validate_retry_owner() {
     [[ "$holder" == "$expected_holder" && "$owner_holder" == "$expected_holder" ]] || \
       _die "Retry treehouse lease does not match its owner: $repo_name"
   fi
-  VALIDATED_RETRY_ROOT="$owner_root"
+  declare -g VALIDATED_RETRY_ROOT="$owner_root"
 }
 
 _canonical_registry_path() {
@@ -1416,10 +1417,11 @@ _require_completed_removal_proof() {
     _die "Cannot prove completed git worktree removal: $worktree"
 }
 
-# _validate_retry_owner — pre-flight ownership check for the validation checkout.
+# _validate_retry_validation_checkout — pre-flight ownership check for the
+# validation checkout.
 # Must be called BEFORE any destructive step (pane kills, worktree removal) so
 # that a rejected retry leaves the fleet state completely unchanged.
-_validate_retry_owner() {
+_validate_retry_validation_checkout() {
   local repo_dir="$1" worktree="$2" task_id="$3"
   local repo_name validation_worktree validation_head validation_mode
   local validation_identity validation_git_dir validation_git_identity validation_owner
@@ -1644,8 +1646,11 @@ for repo_dir in "$TASK_DIR"/*/; do
     retry_type="$(sed -n '3p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     if [[ -n "$retry_root" ]]; then
+      VALIDATED_RETRY_ROOT=""
       _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
         "$retry_type" "$retry_root"
+      [[ -n "$VALIDATED_RETRY_ROOT" ]] || \
+        _die "Retry owner validation did not resolve owner root: $repo_name"
       retry_root="$VALIDATED_RETRY_ROOT"
       if [[ "$retry_phase" == "removed" ]]; then
         if [[ "$retry_type" == treehouse ]]; then
@@ -1685,8 +1690,11 @@ for repo_dir in "$TASK_DIR"/*/; do
     retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     [[ "$retry_type" == "$wt_type" ]] || \
       _die "Retry worktree type changed: $repo_name"
+    VALIDATED_RETRY_ROOT=""
     _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
       "$retry_type" "$retry_root"
+    [[ -n "$VALIDATED_RETRY_ROOT" ]] || \
+      _die "Retry owner validation did not resolve owner root: $repo_name"
     retry_root="$VALIDATED_RETRY_ROOT"
     expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
     retrying_removal=true
@@ -1783,7 +1791,11 @@ for repo_dir in "$TASK_DIR"/*/; do
     _record_cleanup_phase "$repo_dir" removed "$worktree" "$wt_type" "$retry_root" || \
       _die "Failed to publish completed worktree removal: $repo_name"
   fi
+  VALIDATED_RETRY_ROOT=""
   _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" "$wt_type" "$retry_root"
+  [[ -n "$VALIDATED_RETRY_ROOT" ]] || \
+    _die "Retry owner validation did not resolve owner root: $repo_name"
+  retry_root="$VALIDATED_RETRY_ROOT"
   _require_completed_removal_proof "$wt_type" "$retry_root" "$worktree"
   _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
     _die "Failed to publish reconciled cleanup phase: $repo_name"
