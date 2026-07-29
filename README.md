@@ -106,7 +106,7 @@ graphify:
   include_groups: [backend, frontend]
 ```
 
-Full schema reference: `docs/schema.md`. Annotated example: `schema/project.yaml.example`.
+Full schema reference: `docs/schema.md`. Annotated example: `schema/project.yaml.example`. Detailed documentation: `docs/README.md`.
 
 ## Toolbelt
 
@@ -134,7 +134,8 @@ Routine dispatched workers use repository-native tests, lint/typechecking, and i
 At an explicit final shipping boundary, after implementation and native validation are complete, run:
 
 ```bash
-no-mistakes axi run --intent "<the user's objective and approved tradeoffs>"
+no-mistakes axi run --intent-file .sergeant-intent.md
+# or: no-mistakes axi run --intent "<the user's objective and approved tradeoffs>"
 ```
 
 Use `--skip=<steps>` only for gates already proven irrelevant and stop at `checks-passed`. The run is validation-only: it must not fix findings. Route actionable findings into separate, deduplicated owning-repo td tasks with `sgt-no-mistakes-finding`.

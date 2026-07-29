@@ -179,7 +179,9 @@ _finish() {
       if [[ -n "$_initial_sha" ]]; then
         _committed_log="$(git -C "$WORKTREE" log --oneline "${_initial_sha}..HEAD" 2>/dev/null || true)"
       else
-        _committed_log="$(git -C "$WORKTREE" log --oneline HEAD --not --remotes 2>/dev/null || true)"
+        # Fallback for fleet states predating initial_sha: show commits not in
+        # the upstream tracking branch (if configured).
+        _committed_log="$(git -C "$WORKTREE" log --oneline HEAD --not "@{u}" 2>/dev/null || true)"
       fi
     fi
     {

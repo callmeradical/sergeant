@@ -557,9 +557,13 @@ printf 'sgt-graphify current CLI and failure handling: ok\n'
 at_bin="$TEST_ROOT/atomic-test-bin"
 at_config="$TEST_ROOT/atomic-test-config"
 at_repo="$TEST_ROOT/atomic-test-repo"
-at_live="$TEST_ROOT/atomic-test-live"
-at_output="$TEST_ROOT/atomic-test-link"
-mkdir -p "$at_bin" "$at_config" "$at_repo" "$at_live"
+# Use a dedicated subdirectory for the atomic-test output so the leftover
+# check does not see the .sgt-graphify-live.* backing dir from the
+# project-graph-link symlink (which also lives in $TEST_ROOT).
+at_pub_dir="$TEST_ROOT/atomic-test-pub"
+at_live="$at_pub_dir/atomic-test-live"
+at_output="$at_pub_dir/atomic-test-link"
+mkdir -p "$at_bin" "$at_config" "$at_repo" "$at_pub_dir" "$at_live"
 printf 'content\n' > "$at_live/old.txt"
 ln -sfn "$at_live" "$at_output"
 
@@ -576,10 +580,11 @@ EOF
 cat > "$at_bin/graphify" <<'ATEOF'
 #!/usr/bin/env bash
 set -euo pipefail
-case "${1:-}" in
+command="${1:-}"
+shift
+case "$command" in
   extract)
     out=""
-    shift
     while [[ $# -gt 0 ]]; do
       [[ "$1" == "--out" ]] && { out="$2"; shift 2; continue; }
       shift
@@ -638,9 +643,11 @@ set -e
   printf 'FAIL: symlink_failure_no_dangling: old backing dir content is gone after failed publication\n' >&2
   exit 1
 }
-# No leftover temp dirs should remain in the output parent.
+# No leftover temp dirs should remain in the output parent (the dedicated
+# at_pub_dir, which is separate from $TEST_ROOT so the project-graph-link
+# backing dir in $TEST_ROOT does not produce a false positive).
 leftover=0
-for d in "$TEST_ROOT"/.sgt-graphify-live.* "$TEST_ROOT"/.sgt-graphify-nextsym.*; do
+for d in "$at_pub_dir"/.sgt-graphify-live.* "$at_pub_dir"/.sgt-graphify-nextsym.*; do
   [[ -e "$d" ]] && leftover=$((leftover + 1))
 done
 [[ "$leftover" -eq 0 ]] || {

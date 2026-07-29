@@ -79,7 +79,8 @@ for required in INPUT AXIS SOURCE BRANCH HEAD_SHA PARENT_TASK; do
   [[ -n "${!required}" ]] || _routing_failure "missing required review field: ${required,,}"
 done
 [[ "$TASK_ID" != "unknown" ]] || _routing_failure "missing required review field: task_id"
-[[ "$AXIS" =~ ^(standards|spec|accessibility)$ ]] || _routing_failure "invalid review axis"
+_axis_re='^(standards|spec|accessibility)$'
+[[ "$AXIS" =~ $_axis_re ]] || _routing_failure "invalid review axis"
 [[ "$SOURCE" =~ ^[A-Za-z0-9._-]+$ ]] || _routing_failure "invalid review source"
 [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || _routing_failure "invalid branch"
 [[ "$HEAD_SHA" =~ ^[A-Fa-f0-9]{7,64}$ ]] || _routing_failure "invalid head SHA"

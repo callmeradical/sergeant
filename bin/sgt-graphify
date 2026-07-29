@@ -489,9 +489,27 @@ if [[ ! -e "$configured_output" && ! -L "$configured_output" ]]; then
   mv "$publish_dir" "$configured_output"
   published=1
 
-# Symlink: atomically replace the symlink via a temporary symlink rename.
-# mv -T (GNU coreutils) calls rename(2) directly so it replaces the symlink
-# in one atomic operation rather than following it to the backing directory.
+# Symlink whose entry is inside a source repo: write into the symlink target
+# (following the symlink) via directory replacement, leaving the symlink itself
+# unchanged.  The target may be outside all source repos (the typical case for
+# an in-repo graphify-out symlink pointing to an external store).
+elif [[ -L "$configured_output" ]] && _path_is_in_source_repo "$(_location_canonical "$configured_output")"; then
+  # graphify_output is already the canonical target path.
+  old_backup="$(mktemp -u "$(dirname "$graphify_output")/.sgt-graphify-old.XXXXXX")"
+  mv "$graphify_output" "$old_backup"
+  if ! mv "$publish_dir" "$graphify_output"; then
+    mv "$old_backup" "$graphify_output" || true
+    old_backup=""
+    _die "Could not publish project graph to $configured_output"
+  fi
+  published=1
+  rm -rf "$old_backup"
+  old_backup=""
+
+# Symlink outside source repos: atomically replace the symlink via a temporary
+# symlink rename.  mv -T (GNU coreutils) calls rename(2) directly so it
+# replaces the symlink in one atomic operation rather than following it to the
+# backing directory.
 elif [[ -L "$configured_output" ]]; then
   old_link_target="$(readlink "$configured_output")"
   # Resolve to absolute path so cleanup can remove it unambiguously.

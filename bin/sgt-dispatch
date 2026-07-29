@@ -593,11 +593,15 @@ for rname in "${TARGET_REPOS[@]}"; do
       _info "already exists — reusing"
     else
       if git -C "$repo_path" show-ref --verify --quiet "refs/heads/$BRANCH" 2>/dev/null; then
-        # Guard: if the existing branch has committed work not on any remote, a
-        # prior interrupted dispatch may have done real work.  Block re-dispatch
-        # until the coordinator reconciles, to prevent duplicate or lost effort.
+        # Guard: if the existing branch has committed work not pushed to origin,
+        # a prior interrupted dispatch may have done real work.  Block
+        # re-dispatch until the coordinator reconciles, to prevent duplicate or
+        # lost effort.  Falls back to showing all local commits when the branch
+        # does not yet exist in origin.
         prior_commits="$(git -C "$repo_path" log --oneline \
-          "refs/heads/$BRANCH" --not --remotes 2>/dev/null || true)"
+          "refs/heads/$BRANCH" --not "refs/remotes/origin/$BRANCH" 2>/dev/null \
+          || git -C "$repo_path" log --oneline "refs/heads/$BRANCH" 2>/dev/null \
+          || true)"
         if [[ -n "$prior_commits" ]]; then
           _die "Branch $BRANCH already has committed work not in any remote; reconcile or delete the branch before re-dispatching. Commits found:
 $prior_commits"
