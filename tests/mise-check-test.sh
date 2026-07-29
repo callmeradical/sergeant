@@ -139,4 +139,80 @@ if [[ "$goose_output" != *"goose: goose 1.0"* ]] || [[ "$goose_output" != *"All 
   exit 1
 fi
 
+# Test: version detection must use correct platform flags for tmux and lsof.
+# These stubs mimic Linux behavior: tmux uses -V, lsof uses -v.
+# --version is not accepted by either tool on Linux, producing error output.
+linux_stubs="$test_root/linux-flags/bin"
+mkdir -p "$linux_stubs"
+
+for cmd in git gh yq; do
+  printf '#!/usr/bin/env bash\nprintf "%%s version 1.0\\n" "%s"\n' "$cmd" > "$linux_stubs/$cmd"
+  chmod +x "$linux_stubs/$cmd"
+done
+
+# tmux: Linux style — -V works, --version does not
+cat > "$linux_stubs/tmux" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  -V) printf "tmux 3.4\n" ;;
+  *)  printf "usage: tmux [-2CDlNuVv] ...\n" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$linux_stubs/tmux"
+
+# lsof: Linux style — -v works, --version does not
+cat > "$linux_stubs/lsof" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  -v) printf "lsof version information:\n    revision: 4.95.0\n" ;;
+  *)  printf "lsof: illegal option character: -\n" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$linux_stubs/lsof"
+
+# td: supported
+cat > "$linux_stubs/td" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  --version) printf "td version v0.51.2\n" ;;
+  create)
+    if [[ "${2:-}" == "--help" ]]; then
+      printf "Usage: td create TITLE --description TEXT --json --work-dir DIR\n"
+    else
+      exit 1
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$linux_stubs/td"
+
+printf '#!/usr/bin/env bash\nprintf "OpenCode 1.0\n"\n' > "$linux_stubs/opencode"
+chmod +x "$linux_stubs/opencode"
+
+linux_flags_output="$(PATH="$linux_stubs:/usr/bin:/bin:/usr/sbin:/sbin" MISE_PROJECT_ROOT="$repo_root" "$check_script" 2>&1)"
+linux_flags_status=$?
+
+if [[ "$linux_flags_status" -ne 0 ]]; then
+  printf 'dependency check failed with Linux-style tmux/lsof stubs:\n%s\n' "$linux_flags_output" >&2
+  exit 1
+fi
+if [[ "$linux_flags_output" == *"usage: tmux"* ]]; then
+  printf 'tmux version detection used wrong flag (--version instead of -V):\n%s\n' "$linux_flags_output" >&2
+  exit 1
+fi
+if [[ "$linux_flags_output" == *"illegal option character"* ]]; then
+  printf 'lsof version detection used wrong flag (--version instead of -v):\n%s\n' "$linux_flags_output" >&2
+  exit 1
+fi
+if [[ "$linux_flags_output" != *"tmux 3.4"* ]]; then
+  printf 'tmux version not shown correctly with -V flag:\n%s\n' "$linux_flags_output" >&2
+  exit 1
+fi
+if [[ "$linux_flags_output" != *"lsof version information:"* ]]; then
+  printf 'lsof version not shown correctly with -v flag:\n%s\n' "$linux_flags_output" >&2
+  exit 1
+fi
+
 printf 'mise dependency check validates td and agent prerequisites: ok\n'
+printf 'mise check uses correct version flags for tmux (-V) and lsof (-v) on Linux: ok\n'
