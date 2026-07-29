@@ -7,7 +7,9 @@
 #           _sgt_drain_is_drained (file-path variant),
 #           _sgt_drain_clear, _sgt_drain_with_lock,
 #           _sgt_drain_lock_acquire_fd, _sgt_drain_lock_release_fd,
-#           _sgt_drain_check_admission_locked
+#           _sgt_drain_check_admission_locked,
+#           _sgt_drain_write, _sgt_drain_global_active,
+#           _sgt_drain_project_active
 #
 # Drain state location: $SERGEANT_CONFIG/drain/
 #   Global drain:  $SERGEANT_CONFIG/drain/global
@@ -21,7 +23,11 @@
 SGT_DRAIN_LIB_LOADED=1
 
 _sgt_drain_state_dir() {
-  printf '%s\n' "${SERGEANT_CONFIG:-$HOME/.config/sergeant}/drain"
+  if [[ -n "${SERGEANT_DRAIN_DIR:-}" ]]; then
+    printf '%s\n' "$SERGEANT_DRAIN_DIR"
+  else
+    printf '%s\n' "${SERGEANT_CONFIG:-$HOME/.config/sergeant}/drain"
+  fi
 }
 
 # _sgt_drain_read_project_from_brief <task_dir>
@@ -177,6 +183,41 @@ _sgt_drain_remove_global() {
 #
 # Removes the per-project drain file under an advisory flock.  The project
 # name must already be validated by the caller.
+# _sgt_drain_write <drain_file> [reason] [actor]
+#
+# Writes a drain signal file at the given path.  Creates parent directories as
+# needed.  The file format matches that produced by sgt-drain.
+_sgt_drain_write() {
+  local drain_file="${1:?_sgt_drain_write requires a drain file path}"
+  local reason="${2:-}"
+  local actor="${3:-}"
+  local temporary drain_dir
+  drain_dir="$(dirname "$drain_file")"
+  mkdir -p "$drain_dir" 2>/dev/null || true
+  temporary="${drain_file}.tmp.$$"
+  {
+    [[ -z "$reason" ]] || printf 'reason=%s\n' "$reason"
+    [[ -z "$actor" ]] || printf 'actor=%s\n' "$actor"
+    printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$temporary"
+  mv "$temporary" "$drain_file"
+}
+
+# _sgt_drain_global_active
+#
+# Returns 0 (true) if a global drain is currently active.
+_sgt_drain_global_active() {
+  [[ -f "$(_sgt_drain_global_file)" ]]
+}
+
+# _sgt_drain_project_active <project>
+#
+# Returns 0 (true) if a project-specific drain is currently active.
+_sgt_drain_project_active() {
+  local project="${1:?_sgt_drain_project_active requires a project name}"
+  [[ -f "$(_sgt_drain_project_file "$project")" ]]
+}
+
 _sgt_drain_remove_project() {
   local project="${1:?_sgt_drain_remove_project requires a project name}"
   local drain_dir lockfile

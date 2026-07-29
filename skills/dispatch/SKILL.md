@@ -1,3 +1,8 @@
+---
+name: dispatch
+description: Plan and execute a cross-repo task by dispatching autonomous subagents — one per repo — each in an isolated git worktree.
+---
+
 # Skill: dispatch
 
 Plan and execute a cross-repo task by dispatching autonomous subagents — one per repo — each in an isolated git worktree.
@@ -48,7 +53,7 @@ Branch: feat/add-oauth
 Backend: local tmux
 ```
 
-Ask for confirmation before dispatching.
+Confirm the plan is accurate before dispatching.
 
 ### Step 2 — Dispatch
 
@@ -133,7 +138,7 @@ This runs `treehouse init` in each repo and creates a `treehouse.toml`. Commit t
 - If `treehouse.toml` exists in a repo → `treehouse get --lease --lease-holder "sgt-<task-id>-<repo>"`
 - Branch is checked out in the leased worktree: `git checkout -b <branch>`
 - Pool is in `~/.treehouse/<repo-slug>/<n>/<repo-name>/`
-- Cleanup via `treehouse return <path> --force`
+- Cleanup via `treehouse return <path>`
 
 **If treehouse is not initialized** in a repo, dispatch falls back to plain `git worktree add` (sibling path: `<repo-parent>/<repo-name>-sgt-<task-id>/`).
 
@@ -168,13 +173,13 @@ Each dispatched agent is expected to:
    - Merge/rebase conflict: load `resolving-merge-conflicts`, trace both intents, preserve both where possible, and never abort automatically
 5. Establish public behavioral seams from td/spec before tests. If a consequential seam is undecided, escalate `needs_input` rather than guessing
 6. Implement one vertical slice at a time: focused red test, minimum green implementation, then refactor. Reject tautological tests, internal mocking, horizontal test/implementation phases, and speculative refactoring
-7. For `needs_input` or `blocked`, write `.sergeant-message`, notify Sergeant, remain alive, and wait. Consume/remove `.sergeant-response`, clear the message, log the decision to td, restore `in_progress`, and continue
+7. For `needs_input` or `blocked`, write `.sergeant-message` and notify Sergeant. Consume/remove `.sergeant-response` when it arrives, clear the message, log the decision to td, restore `in_progress`, and continue
 8. Run focused tests and typechecking/lint regularly and the full required suite at the end. Do not run no-mistakes for routine worker completion, prototypes, investigations, documentation drafts, intermediate commits, or remediation loops; an explicit user instruction overrides this default
-9. At an explicit final shipping boundary only, after implementation and repository-native validation, run `no-mistakes axi run --intent "<objective and approved tradeoffs>"`, skip only proven-irrelevant gates, treat findings as validation-only, and stop at `checks-passed`
+9. At an explicit final shipping boundary only, after implementation and repository-native validation, run `no-mistakes axi run --intent-file <path>` (or `--intent "<objective and approved tradeoffs>"`), skip only proven-irrelevant gates, treat findings as validation-only, and stop at `checks-passed`. Safety-sensitive work — touching auth, OAuth, security, secret, credential, payment, database, migration, stateful, production, destructive operations — is the standard-isolated lighter path only when the objective does not trigger those classifiers. Readiness requires concrete State Transitions, Failure Windows, and Negative Test Matrix sections for stateful work.
 10. Route each no-mistakes finding through `sgt-no-mistakes-finding`: every actionable finding creates or updates separate deduplicated owning-repo td work; correctness/security/data-integrity/test and ask-user work is P1 and remains gated, warning debt is P2, informational debt is P3, and cosmetic/evidence noise is ignored. Never remediate findings in the validation run
 11. Load the canonical `code-review` skill when available, then launch separate parallel subagents for independent reviews: a standards axis over the pinned diff and documented standards plus concise Fowler smells, and a spec axis over requirements and scope. For UI-facing work identified by frontend, UI, visual, interaction, accessibility, or user-facing output language in the mission, repo role, or repo group, also launch a separate accessibility axis. Keep evidence separate and skip the spec axis explicitly when no spec exists
 12. Route each axis's strict JSON artifact through `sgt-review-findings`; actionable findings become deduplicated owning-repo td tasks, blockers publish fleet state plus notification, and cosmetic/false-positive dispositions create no cards. Never persist review bodies, prompts, secrets, or credentials
-13. Remediate all blocking repository-native test and independent-review findings, rerun affected tests and all required axes until each reports zero blocking findings. No-mistakes findings require a separate td dispatch
+13. Remediate all blocking repository-native test and independent-review findings, rerun affected tests and all required axes until each reports zero blocking findings. Review any changed code: verify mutation before validation, check for partial publication or rollback windows, and confirm identity and provenance. After two remediation cycles on any axis, escalate `blocked` rather than continuing to loop. No-mistakes findings require a separate td dispatch
 14. Commit, open a PR, wait for required CI, resolve all non-outdated review threads, and satisfy dependency order
 15. For tracked work, log td decisions, handoff, then run `td review` only when implementation and review evidence are ready
 16. Write `.sergeant-result` and set `.sergeant-status=done` only after every gate passes. `failed: <exact reason>` is reserved for an unrecoverable terminal failure

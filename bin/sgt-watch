@@ -222,9 +222,9 @@ _classify_stalled_worker() {
 
 # _committed_work_log: emit a one-line-per-commit log of work committed above
 # the dispatch base in the recorded worktree.  Uses initial_sha when present
-# (written by sgt-dispatch); falls back to --not --remotes for pre-existing
-# fleet states.  Returns empty string when no committed work is detected or
-# when git is unavailable.
+# (written by sgt-dispatch).  Returns empty string when no committed work is
+# detected, when initial_sha is absent (pre-existing fleet state), or when
+# git is unavailable.
 _committed_work_log() {
   local repo_dir="$1"
   local worktree_path initial_sha log_output
@@ -235,11 +235,12 @@ _committed_work_log() {
   if [[ -n "$initial_sha" ]]; then
     log_output="$(git -C "$worktree_path" log --oneline "${initial_sha}..HEAD" 2>/dev/null || true)"
   else
-    # Fallback for fleet states predating initial_sha: show commits not on any
-    # remote tracking branch.  Requires explicit HEAD to work with git log.
-    log_output="$(git -C "$worktree_path" log --oneline HEAD --not --remotes 2>/dev/null || true)"
+    # Fallback for fleet states predating initial_sha: show commits not in the
+    # upstream tracking branch (if configured).  Suppresses output silently
+    # when no upstream is set.
+    log_output="$(git -C "$worktree_path" log --oneline HEAD --not "@{u}" 2>/dev/null || true)"
   fi
-  printf '%s' "$log_output"
+  printf '%s' "${log_output:-}"
 }
 
 _reconcile_incomplete_dispatch() {

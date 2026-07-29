@@ -627,7 +627,7 @@ _validation_copy_owned "$WORKTREE/.sergeant-intent.md" "$VALIDATION_INTENT" inte
 [[ "$(_sgt_intent_revision "$VALIDATION_INTENT")" == "$EXPECTED_REVISION" ]] || {
   _die "Validation intent snapshot revision mismatch"
 }
-printf -v VALIDATION_COMMAND '%q %q %q %q %q' \
+printf -v VALIDATION_COMMAND '%q %q %q %q %s' \
   "$SCRIPT_DIR/sgt-validation-worker" "$REPO_STATE" "$VALIDATION_WORKTREE" "$EXPECTED_REVISION" "$SKIP"
 PANE_FORMAT='#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}'
 PANE_SNAPSHOT="$(tmux list-panes -t "$PANE" -F "$PANE_FORMAT" 2>/dev/null || true)"
