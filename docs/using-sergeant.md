@@ -134,8 +134,11 @@ sgt-cleanup <fleet-task-id>
 ```
 
 Cleanup requires terminal/reconciled state, owner and lease identity, preserved
-evidence, and no uncommitted or in-use worktree state. Never use cleanup to resolve
-a waiting, blocked, or orphaned worker.
+evidence, no uncommitted or in-use worktree state, and the fleet record plus
+recorded worktree on the same filesystem so Sergeant can stage terminal evidence
+atomically. If you override `SERGEANT_FLEET` or move a worktree, restore that
+same-filesystem layout before retrying cleanup. Never use cleanup to resolve a
+waiting, blocked, or orphaned worker.
 
 ## Common project operations
 

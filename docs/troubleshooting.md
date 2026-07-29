@@ -143,8 +143,10 @@ existing graph without confirming the desired global-per-project path.
 
 Do not force or delete fleet files manually. Cleanup safety depends on terminal
 proof, staged evidence, explicit cleanup phases, exact configured repository
-identity, and original worktree/lease identity. Preserve the worktree and run the
-owning remediation or supported retry path.
+identity, and original worktree/lease identity. If cleanup reports an unsupported
+layout, move `SERGEANT_FLEET` or the worktree back onto the same filesystem
+before retrying. Preserve the worktree and run the owning remediation or
+supported retry path.
 
 ## Where to inspect state
 
