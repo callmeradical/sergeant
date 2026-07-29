@@ -36,7 +36,10 @@ PROJECT="$1"
 DRY_RUN=false
 [[ "${2:-}" == "--dry-run" ]] && DRY_RUN=true
 
-command -v dagr >/dev/null 2>&1 || _die "dagr is required — install from github.com/callmeradical/dagr"
+command -v dagr >/dev/null 2>&1 || _die "dagr is not installed (optional dependency).
+  Install: go install github.com/callmeradical/dagr/cmd/dagr@latest
+  Docs:    https://github.com/callmeradical/dagr
+  All other Sergeant commands work without dagr."
 command -v yq >/dev/null 2>&1    || _die "yq is required to parse project YAML"
 
 CONFIG_FILE="${SERGEANT_CONFIG:-$HOME/.config/sergeant}/${PROJECT}.yaml"
