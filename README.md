@@ -204,6 +204,7 @@ Agent-loaded skills for structured workflows:
 - `lsof` — for verifying cleanup does not remove an in-use worktree
 - `treehouse` — pre-warmed worktree pools (optional but recommended for dispatch)
 - `graphify` — knowledge graph generation (optional, needed for `sgt-graphify`)
+- [`dagr`](https://github.com/callmeradical/dagr) — SQLite DAG execution engine (optional; needed only for `sgt-dag-run` and DAG-directed workflows; all other Sergeant commands work without it)
 - A supported agent harness: OpenCode or Claude Code
 
 ## License
