@@ -269,8 +269,10 @@ Cleanup requires terminal/reconciled state, configured cleanup-owner proof for
 the repository/worktree or treehouse lease, preserved evidence, explicit
 cleanup-phase proof when replaying an interrupted removal or reconciling an
 already-absent worktree, fully acknowledged response transport, and no
-uncommitted or in-use worktree state. Never use cleanup to resolve a waiting,
-blocked, or orphaned worker.
+uncommitted or in-use worktree state. Never use cleanup to resolve a waiting or
+blocked worker. Cleanup may remove an orphaned worker only after reconciliation
+proves the owning td task is already closed and the worktree is otherwise
+cleanup-safe.
 
 ## Common project operations
 
