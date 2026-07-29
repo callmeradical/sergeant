@@ -98,6 +98,22 @@ _pane_is_supervisor() {
   mv "$repo_dir/pane_identity.tmp.$$" "$repo_dir/pane_identity" || return 1
 }
 
+# _sgt_dagr_advance — if the fleet task has dagr tracking files, call
+# "dagr run step-done/step-fail" to advance the associated DAG run.
+_sgt_dagr_advance() {
+  local repo_dir="$1" wt_status="$2"
+  local dagr_run_id dagr_stage_id
+  dagr_run_id="$(cat "$repo_dir/dagr_run_id" 2>/dev/null || true)"
+  dagr_stage_id="$(cat "$repo_dir/dagr_stage_id" 2>/dev/null || true)"
+  [[ -n "$dagr_run_id" && -n "$dagr_stage_id" ]] || return 0
+  command -v dagr >/dev/null 2>&1 || return 0
+  if [[ "$wt_status" == "done" ]]; then
+    dagr run step-done "$dagr_run_id" "$dagr_stage_id" --result "done" 2>/dev/null || true
+  else
+    dagr run step-done "$dagr_run_id" "$dagr_stage_id" --result "$wt_status" 2>/dev/null || true
+  fi
+}
+
 _recycle_terminal_worker() {
   local repo_dir="$1"
   local pane pane_id
@@ -333,6 +349,8 @@ _sync_task() {
         if ! _recycle_terminal_worker "$repo_dir"; then
           printf 'WARNING: terminal worker was not recycled: %s\n' "$repo_dir" >&2
         fi
+        # If this fleet task is part of a dagr run, advance the DAG
+        _sgt_dagr_advance "$repo_dir" "$wt_status"
         ;;
     esac
 

@@ -81,6 +81,8 @@ the operation with ad hoc shell commands.
 | `bin/sgt-ack-response <task-id> <repo> <response-id>` | Acknowledge one consumed response from the exact worker pane |
 | `bin/sgt-validate <task-id> <repo> [--skip <steps>]` | Launch coordinator-owned no-mistakes in a split worker-window pane |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees + fleet state when done |
+| `bin/sgt-dag-run <project>` | Create dagr DAG from project YAML `dag:` block and start a run; dispatches ready stages automatically |
+| `bin/sgt-dag-dispatch-hook` | Stage hook used internally by sgt-dag-run; called by dagr when a stage becomes ready |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
 | `bin/sgt-td-list <project>` | Show td tasks across all repos in a project |
 | `bin/sgt-td-create <project> "<title>" --repos <list>` | Create td tasks in repos (called automatically by sgt-dispatch) |

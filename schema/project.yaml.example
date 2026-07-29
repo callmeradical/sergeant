@@ -102,6 +102,28 @@ graphify:
     - "**/.git/**"
     - "**/dist/**"
 
+# Optional. DAG workflow definition for this project.
+# Run with: sgt-dag-run <project>
+# sgt-watch auto-advances the DAG when fleet tasks complete.
+dag:
+  name: myapp-delivery           # DAG name in dagr (must be unique across all projects)
+  description: "Delivery pipeline for myapp"
+  stages:
+    - name: foundation            # stage name (unique within this dag)
+      repos: [myapp-api]          # repos to dispatch to
+      td: td-abc123               # optional: pull brief from a td task
+      # brief: "..."              # or provide explicit brief (used when td not set)
+
+    - name: integration
+      repos: [myapp-api, myapp-frontend]
+      td: td-def456
+      after: [foundation]         # this stage runs after foundation completes
+
+    - name: infra
+      repos: [myapp-infra]
+      brief: "Apply the Terraform changes from the integration stage"
+      after: [integration]
+
 # Optional. Defaults applied to every repo before group + repo instructions.
 defaults:
   agent_instructions: |
