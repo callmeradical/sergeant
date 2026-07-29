@@ -129,15 +129,27 @@ assert_cleanup_rejected "dangling-alias" "dangling-symlink-alias"
 [[ -L "$TEST_ROOT/fleet/dangling-alias" ]]
 
 stale_state="$TEST_ROOT/fleet/stale-dead-pane/app"
-mkdir -p "$stale_state/terminal-evidence" "$TEST_ROOT/stale-bin"
+mkdir -p "$stale_state" "$TEST_ROOT/stale-bin"
 init_test_repo "$TEST_ROOT/stale-dead-pane-repo"
+git -C "$TEST_ROOT/stale-dead-pane-repo" worktree add -q -b stale-dead-pane-worker \
+  "$TEST_ROOT/stale-dead-pane-sgt-stale-dead-pane"
+record_retry_owner stale-dead-pane app "$TEST_ROOT/stale-dead-pane-repo"
+printf '%s\n' "$TEST_ROOT/stale-dead-pane-sgt-stale-dead-pane" > "$stale_state/worktree"
+printf 'git\n' > "$stale_state/wt_type"
 printf 'done\n' > "$stale_state/status"
 printf 'result\n' > "$stale_state/result"
-printf '%s\n' "$TEST_ROOT/missing-stale-worktree" > "$stale_state/worktree"
-printf 'done\n' > "$stale_state/terminal-evidence/.sergeant-status"
-printf 'result\n' > "$stale_state/terminal-evidence/.sergeant-result"
-record_absent_cleanup_owner stale-dead-pane app "$TEST_ROOT/stale-dead-pane-repo" \
-  "$TEST_ROOT/missing-stale-worktree" git "$stale_state/terminal-evidence"
+printf 'done\n' > "$TEST_ROOT/stale-dead-pane-sgt-stale-dead-pane/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/stale-dead-pane-sgt-stale-dead-pane/.sergeant-result"
+# Run partial cleanup to get "removed" phase with absent worktree, then advance to reconciled-absent
+SGT_CLEANUP_FAIL_POINT=phase-publish-reconciled-absent \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" stale-dead-pane >/dev/null 2>&1 || true
+[[ "$(sed -n '1p' "$stale_state/cleanup-phase")" == "removed" ]]
+[[ ! -d "$TEST_ROOT/stale-dead-pane-sgt-stale-dead-pane" ]]
+# Advance to reconciled-absent (simulating a prior successful reconciliation)
+worktree_path="$TEST_ROOT/stale-dead-pane-sgt-stale-dead-pane"
+printf 'reconciled-absent\n%s\n' "$worktree_path" > "$stale_state/cleanup-phase"
 printf '%%77\n' > "$stale_state/validation_pane"
 printf '0|%%77|7777|123456|validation-command\n' > "$stale_state/validation_pane_identity"
 chmod 600 "$stale_state/validation_pane_identity"
@@ -162,6 +174,7 @@ EOF
 chmod +x "$TEST_ROOT/stale-bin/tmux"
 set +e
 PATH="$TEST_ROOT/stale-bin:$PATH" STALE_TMUX_LOG="$TEST_ROOT/stale-tmux.log" \
+SERGEANT_CONFIG="$TEST_ROOT/config" \
 SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" stale-dead-pane > "$TEST_ROOT/stale-dead-pane.log" 2>&1
 stale_status=$?
