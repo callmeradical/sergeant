@@ -5,7 +5,9 @@
 # Provides: _sgt_is_drained, _sgt_drain_state_dir,
 #           _sgt_drain_global_file, _sgt_drain_project_file,
 #           _sgt_drain_is_drained (file-path variant),
-#           _sgt_drain_clear, _sgt_drain_with_lock,
+#           _sgt_drain_write, _sgt_drain_global_active,
+#           _sgt_drain_project_active,
+#           _sgt_drain_clear,
 #           _sgt_drain_lock_acquire_fd, _sgt_drain_lock_release_fd,
 #           _sgt_drain_check_admission_locked,
 #           _sgt_drain_write, _sgt_drain_global_active,
@@ -15,9 +17,10 @@
 #   Global drain:  $SERGEANT_CONFIG/drain/global
 #   Project drain: $SERGEANT_CONFIG/drain/<project>
 #
-# Drain file format (plain text, two lines):
-#   reason=<text>
-#   created=<ISO-8601 timestamp>
+# Drain file format (plain text, key=value lines):
+#   reason=<text>     optional
+#   actor=<text>      optional
+#   created=<ISO-8601 timestamp>  always present
 
 [[ "${SGT_DRAIN_LIB_LOADED:-}" == "1" ]] && return 0
 SGT_DRAIN_LIB_LOADED=1
@@ -150,6 +153,48 @@ _sgt_drain_project_file() {
 # Used by sgt-interactive-worker which already resolved the file path.
 _sgt_drain_is_drained() {
   [[ -f "${1:?_sgt_drain_is_drained requires a drain file path}" ]]
+}
+
+# _sgt_drain_write <drain_file> <reason> <actor>
+#
+# Creates a drain file atomically using a tmp+mv pattern.  The caller must
+# have already resolved the drain file path (e.g. via _sgt_drain_global_file
+# or _sgt_drain_project_file).  reason and actor are optional free-text fields
+# recorded in the drain file for human inspection; drain activation is based
+# solely on file existence.
+_sgt_drain_write() {
+  local drain_file="${1:?_sgt_drain_write requires a drain file path}"
+  local reason="${2:-}"
+  local actor="${3:-}"
+  local tmp
+  mkdir -p "$(dirname "$drain_file")" 2>/dev/null || true
+  tmp="${drain_file}.tmp.$$"
+  {
+    [[ -n "$reason" ]] && printf 'reason=%s\n' "$reason"
+    [[ -n "$actor" ]] && printf 'actor=%s\n' "$actor"
+    printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$tmp"
+  mv "$tmp" "$drain_file"
+}
+
+# _sgt_drain_global_active
+#
+# Returns 0 (true) when a global drain file is present, 1 otherwise.
+# Convenience wrapper around _sgt_drain_state_dir for callers that do not
+# need the explicit file-path variants.
+_sgt_drain_global_active() {
+  [[ -f "$(_sgt_drain_state_dir)/global" ]]
+}
+
+# _sgt_drain_project_active <project>
+#
+# Returns 0 (true) when a per-project drain file is present for <project>,
+# 1 otherwise.  The project name must already be validated by the caller
+# (match [A-Za-z0-9][A-Za-z0-9._-]*).
+_sgt_drain_project_active() {
+  local project="${1:?_sgt_drain_project_active requires a project name}"
+  [[ "$project" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+  [[ -f "$(_sgt_drain_state_dir)/$project" ]]
 }
 
 # _sgt_drain_clear <drain_file>

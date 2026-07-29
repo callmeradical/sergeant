@@ -91,6 +91,21 @@ else
   _skip "sgt-recover drain gating" "git not available in this environment"
 fi
 
+# sgt-drain-worker: _sgt_drain_write helper and drain detection in the worker
+# (covers _sgt_drain_write, _sgt_drain_global_active, _sgt_drain_project_active).
+# Requires git for fixture setup.
+if command -v git >/dev/null 2>&1; then
+  _run "drain write helper + worker drain detection" \
+    bash "$ROOT_DIR/tests/sgt-drain-worker-test.sh"
+else
+  _skip "drain write helper + worker drain detection" "git not available in this environment"
+fi
+
+# sgt-worker-drain: _watch_progress drain-signal write (cooperative drain for
+# interactive workers; requires tmux is absent — no tmux pane launched).
+_run "worker drain checkpoint + _watch_progress drain signal" \
+  bash "$ROOT_DIR/tests/sgt-worker-drain-test.sh"
+
 # ── Pass 2: Bash 3.2 ─────────────────────────────────────────────────────────
 
 printf '\n── Pass 2: Bash 3.2 ────────────────────────────────────────\n'
