@@ -66,6 +66,7 @@ worker_evidence_identity() {
 
   (
     cd "$evidence_dir" || exit 1
+    # shellcheck disable=SC2030,SC2031
     export LC_ALL=C
     for evidence in .sergeant-*; do
       [[ -f "$evidence" ]] || continue
@@ -3703,6 +3704,7 @@ _capture_evidence_identity() {
   local evidence_dir="$1"
   (
     cd "$evidence_dir" || exit 1
+    # shellcheck disable=SC2030,SC2031
     export LC_ALL=C
     for evidence in .sergeant-*; do
       [[ -e "$evidence" || -L "$evidence" ]] || continue
@@ -3730,9 +3732,7 @@ write_cleanup_owner_v4() {
 # correct v4 worker and evidence identity hashes for use in retry tests.
 # Args: task_id fake_git_log [env vars]
 run_stable_identity_first_pass() {
-  local task_id="$1" fake_git_log="$2" task_dir config_file
-  task_dir="$TEST_ROOT/fleet/$task_id"
-  config_file="$TEST_ROOT/config/$task_id.yaml"
+  local task_id="$1" fake_git_log="$2"
 
   cat > "$TEST_ROOT/fake-bin/git-stable-id" <<'GITEOF'
 #!/usr/bin/env bash
@@ -3757,7 +3757,7 @@ GITEOF
 # tamper_repo_identity replaces the repo identity field (line 6) in a v4 cleanup-owner.
 tamper_repo_identity() {
   local state_dir="$1" new_identity="${2:-wrong-identity-hash}"
-  local before line6
+  local before
   before="$(cat "$state_dir/cleanup-owner")"
   # Lines: 1=4, 2=project, 3=root, 4=worktree, 5=wt_type, 6=repo_identity, 7=worker, 8=evidence, 9=holder
   {
@@ -4034,6 +4034,7 @@ printf 'result\n' > \
 if [[ -f "$TEST_ROOT/fake-bin/git" ]]; then
   cp -p "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/git.saved"
 else
+  # shellcheck disable=SC2016
   printf '#!/usr/bin/env bash\n"$REAL_GIT" "$@"\n' > "$TEST_ROOT/fake-bin/git.saved"
   chmod +x "$TEST_ROOT/fake-bin/git.saved"
 fi
