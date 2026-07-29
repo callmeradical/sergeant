@@ -1346,7 +1346,7 @@ set -e
 [[ "$restore_failure_status" -ne 0 ]] || {
   printf 'cleanup accepted removing-state restore failure without diagnostic\n' >&2; exit 1
 }
-[[ "$restore_failure_output" == *"evidence restore failed during removing-state replay"* ]] || {
+[[ "$restore_failure_output" == *"Failed to restore persisted worker evidence: restore-diag"* ]] || {
   printf 'unexpected removing restore failure output: %s\n' "$restore_failure_output" >&2; exit 1
 }
 # Live worktree evidence must not be mutated

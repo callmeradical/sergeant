@@ -543,18 +543,6 @@ _require_terminal_repos() {
       fi
       if [[ "$restore_after_validation" == true ]]; then
         expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
-        _restore_worker_evidence "$repo_dir" "$worktree" \
-          "$expected_evidence_identity" || \
-          _die "$repo_name: evidence restore failed during removing-state replay; replay aborted"
-      fi
-      if [[ "$restore_after_validation" == true ]]; then
-        expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
-        _restore_worker_evidence "$repo_dir" "$worktree" \
-          "$expected_evidence_identity" || \
-          _die "Failed to restore worker evidence during retry preflight: $repo_name"
-      fi
-      if [[ "$restore_after_validation" == true ]]; then
-        expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
         if ! _restore_worker_evidence "$repo_dir" "$worktree" \
           "$expected_evidence_identity"; then
           _die "Failed to restore persisted worker evidence: $repo_name; inspect preserved evidence: $repo_dir/terminal-evidence; restore artifacts: $repo_dir/restore-evidence.tmp.*; worktree: $worktree"
