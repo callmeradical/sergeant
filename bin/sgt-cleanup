@@ -559,10 +559,9 @@ _require_terminal_repos() {
       fi
       if [[ "$restore_after_validation" == true ]]; then
         expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
-        if ! _restore_worker_evidence "$repo_dir" "$worktree" \
-          "$expected_evidence_identity"; then
+        _restore_worker_evidence "$repo_dir" "$worktree" \
+          "$expected_evidence_identity" || \
           _die "Failed to restore persisted worker evidence: $repo_name; inspect preserved evidence: $repo_dir/terminal-evidence; restore artifacts: $repo_dir/restore-evidence.tmp.*; worktree: $worktree"
-        fi
       fi
     else
       if [[ -z "$worktree" ]]; then
@@ -1643,11 +1642,12 @@ _require_completed_removal_proof() {
     _die "Cannot prove completed git worktree removal: $worktree"
 }
 
-# _preflight_validation_checkout — pre-flight ownership check for the validation checkout.
-# Must be called BEFORE any destructive step (pane kills, worktree removal) so
-# that a rejected cleanup leaves the fleet state completely unchanged.
-# Args: repo_dir worktree task_id
-_preflight_validation_checkout() {
+# _validate_retry_validation_checkout — pre-flight ownership check for the
+# validation checkout.  Must be called BEFORE any destructive step (pane kills,
+# worktree removal) so that a rejected retry leaves the fleet state completely
+# unchanged.  Distinct from _validate_retry_owner, which validates the worker
+# worktree identity and sets VALIDATED_RETRY_ROOT.
+_validate_retry_validation_checkout() {
   local repo_dir="$1" worktree="$2" task_id="$3"
   local repo_name validation_worktree validation_head validation_mode
   local validation_identity validation_git_dir validation_git_identity validation_owner
@@ -1793,9 +1793,12 @@ for repo_dir in "$TASK_DIR"/*/; do
     _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
       "$_preflight_retry_type" "$_preflight_retry_root"
   fi
-  # Validate validation-checkout ownership before any destructive step so that a
-  # rejected checkout leaves the live pane and fleet evidence untouched.
-  _preflight_validation_checkout "$repo_dir" "$worktree" "$TASK_ID"
+
+  # Validate the validation checkout's identity BEFORE any destructive step
+  # (pane kills, worktree removal) so that a rejected validation checkout leaves
+  # the live worker pane and fleet evidence completely unchanged.
+  _validate_retry_validation_checkout "$repo_dir" "$worktree" "$TASK_ID"
+
   _stop_validation_pane "$repo_dir"
   _stop_local_worker "$repo_dir" "$worktree"
 
