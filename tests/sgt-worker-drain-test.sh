@@ -15,16 +15,9 @@ repo_state="$TEST_ROOT/state"
 fake_bin="$TEST_ROOT/fake-bin"
 config_dir="$TEST_ROOT/config"
 
-mkdir -p "$repo_state" "$source_repo" "$fake_bin" "$config_dir" "$drain_dir"
+mkdir -p "$repo_state" "$source_repo" "$worktree" "$fake_bin" "$config_dir" "$drain_dir"
 export SERGEANT_CONFIG="$config_dir"
 
-git -C "$source_repo" init -q
-git -C "$source_repo" config user.name Test
-git -C "$source_repo" config user.email test@example.invalid
-touch "$source_repo/README.md"
-git -C "$source_repo" add README.md
-git -C "$source_repo" commit -qm fixture
-git -C "$source_repo" worktree add -q -b worker-drain-test "$worktree"
 cat > "$config_dir/test.yaml" <<EOF
 repos:
   - name: app
