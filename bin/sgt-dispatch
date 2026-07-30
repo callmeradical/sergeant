@@ -698,6 +698,7 @@ $td_context_block"
   for review_policy_phrase in \
     "accessibility review only for ui-facing changes" \
     "accessibility review only applies to ui-facing changes" \
+    "accessibility review applies only to ui-facing changes" \
     "accessibility review is required only for ui-facing changes" \
     "accessibility review only when repository or task policy explicitly requires it" \
     "accessibility or risk review only when this task or repository explicitly requires it"; do

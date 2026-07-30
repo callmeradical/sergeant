@@ -611,7 +611,7 @@ brief="$(grep -rl "^Maintain nonvisual backend mission$" "$TEST_ROOT"/app-sgt-*/
 assert_not_contains "Accessibility axis"
 
 write_routing_config "Backend service" "product" "Internal services" "Maintain deployment automation"
-policy_mission="Document that accessibility review only applies to UI-facing changes"
+policy_mission="Document that accessibility review applies only to UI-facing changes"
 PATH="$TEST_ROOT/fake-bin:$PATH" \
 SERGEANT_CONFIG="$TEST_ROOT/config" \
 SERGEANT_FLEET="$TEST_ROOT/fleet" \
