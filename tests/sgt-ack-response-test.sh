@@ -22,6 +22,30 @@ printf '%s\n' "${PANE_IDENTITY:-0|%42|4242|123456|worker-command}"
 EOF
 chmod +x "$fake_bin/tmux"
 
+real_stat="$(command -v stat)"
+real_uname="$(command -v uname)"
+cat > "$fake_bin/stat" <<'EOF'
+#!/usr/bin/env bash
+last="${!#}"
+if [[ "$last" == /dev/fd/* && -n "${TEST_FD_MODE:-}" && \
+  ( "$*" == *'%a'* || "$*" == *'%Lp'* ) ]]; then
+  printf '%s\n' "$TEST_FD_MODE"
+  exit 0
+fi
+exec "$REAL_STAT" "$@"
+EOF
+cat > "$fake_bin/uname" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${TEST_SYSTEM:-}" ]]; then
+  printf '%s\n' "$TEST_SYSTEM"
+  exit 0
+fi
+exec "$REAL_UNAME" "$@"
+EOF
+chmod +x "$fake_bin/stat" "$fake_bin/uname"
+export REAL_STAT="$real_stat" REAL_UNAME="$real_uname"
+export TEST_FD_MODE=400 TEST_SYSTEM=Darwin
+
 publish_fixture() {
   printf 'approved response\n' > "$repo_state/response"
   printf 'response-123\n' > "$repo_state/response_id"

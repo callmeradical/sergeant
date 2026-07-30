@@ -47,6 +47,12 @@ chmod +x "$fake_bin/tmux"
 
 real_chmod="$(command -v chmod)"
 real_stat="$(command -v stat)"
+real_uname="$(command -v uname)"
+if "$real_stat" -c '%a' -- "$repo/pane_identity" >/dev/null 2>&1; then
+  path_mode_format='%a'
+else
+  path_mode_format='%Lp'
+fi
 cat > "$fake_bin/chmod" <<'EOF'
 #!/usr/bin/env bash
 exec "$REAL_CHMOD" "$@"
@@ -56,14 +62,27 @@ export REAL_CHMOD="$real_chmod"
 cat > "$fake_bin/stat" <<'EOF'
 #!/usr/bin/env bash
 last="${!#}"
-if [[ "$last" == */pane_identity && -n "${LEGACY_IDENTITY_RACE:-}" && \
+if [[ "$last" == /dev/fd/* && "${TEST_DARWIN_FD_MODE:-}" == 1 && \
+  ( "$*" == *'%a'* || "$*" == *'%Lp'* ) ]]; then
+  mode="$("$REAL_STAT" -L -c '%a' -- "$last" 2>/dev/null || \
+    "$REAL_STAT" -L -f '%Lp' "$last")" || exit 1
+  case "$mode" in
+    600) mode=400 ;;
+    640|660) mode=440 ;;
+    644|664) mode=444 ;;
+  esac
+  printf '%s\n' "$mode"
+  exit 0
+fi
+if [[ "$last" == */pane_identity && "$*" == *"$TEST_PATH_MODE_FORMAT"* && \
+  -n "${LEGACY_IDENTITY_RACE:-}" && \
   -n "${LEGACY_IDENTITY_RACE_MARKER:-}" ]]; then
   count_file="${LEGACY_IDENTITY_RACE_MARKER}.count"
   count=0
   [[ ! -f "$count_file" ]] || count="$(cat "$count_file")"
   count=$((count + 1))
   printf '%s\n' "$count" > "$count_file"
-  if [[ "$count" -eq 3 ]]; then
+  if [[ "$count" -eq 4 ]]; then
     case "$LEGACY_IDENTITY_RACE" in
       replace-content)
         printf 'tampered-pane\n' > "$last"
@@ -80,8 +99,18 @@ if [[ "$last" == */pane_identity && -n "${LEGACY_IDENTITY_RACE:-}" && \
 fi
 exec "$REAL_STAT" "$@"
 EOF
-chmod +x "$fake_bin/stat"
+cat > "$fake_bin/uname" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${TEST_DARWIN_FD_MODE:-}" == 1 ]]; then
+  printf 'Darwin\n'
+  exit 0
+fi
+exec "$REAL_UNAME" "$@"
+EOF
+chmod +x "$fake_bin/stat" "$fake_bin/uname"
 export REAL_STAT="$real_stat"
+export REAL_UNAME="$real_uname" TEST_DARWIN_FD_MODE=1
+export TEST_PATH_MODE_FORMAT="$path_mode_format"
 
 printf 'needs_input\n' > "$worktree/.sergeant-status"
 printf 'Choose a safe option.\n' > "$worktree/.sergeant-message"
