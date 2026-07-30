@@ -84,16 +84,16 @@ result="$(
       [[ -z "${notification_pid:-}" ]] || kill "$notification_pid" 2>/dev/null || true
       [[ -z "${watch_progress_pid:-}" ]] || kill "$watch_progress_pid" 2>/dev/null || true
       status="$(_status)"
-      case "$status" in
-        drained)
-          _sync_state
-          rm -f "$REPO_STATE/diagnostic"
-          "$ROOT_DIR/bin/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
-          printf 'exit:0\n'
-          return 0
-          ;;
-        *) printf 'exit:other(%s)\n' "$status"; return 1 ;;
-      esac
+      # Bash 3.2 misparses case patterns in a heredoc nested inside $().
+      if [[ "$status" == "drained" ]]; then
+        _sync_state
+        rm -f "$REPO_STATE/diagnostic"
+        "$ROOT_DIR/bin/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
+        printf 'exit:0\n'
+        return 0
+      fi
+      printf 'exit:other(%s)\n' "$status"
+      return 1
     }
     _finish 0
 INNER
