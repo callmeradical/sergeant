@@ -384,7 +384,7 @@ assert_contains "without \`--yes\`"
 assert_not_contains "An explicit user instruction to run no-mistakes overrides this default"
 assert_not_contains 'no-mistakes axi run --intent'
 assert_not_contains "Run no-mistakes when available or required"
-assert_contains "### 6. Route no-mistakes findings"
+assert_contains "### 9. Route no-mistakes findings"
 assert_contains "coordinator owns every no-mistakes gate and finding"
 assert_contains "Do not approve a validation gate"
 assert_contains "separate deduplicated td work"
@@ -467,10 +467,11 @@ assert_order \
   "### 3. Implement approved work with TDD" \
   "### 4. Escalate and resume" \
   "### 5. Validate" \
-  "### 6. Route no-mistakes findings" \
-  "### 7. One bounded independent two-axis review pass" \
-  "### 8. Remediate and repeat" \
-  "### 9. Complete delivery and td lifecycle"
+  "### 6. One bounded independent two-axis review pass" \
+  "### 7. Remediate affected checks" \
+  "### 8. Publish readiness and run coordinator validation" \
+  "### 9. Route no-mistakes findings" \
+  "### 10. Complete delivery and td lifecycle"
 
 assert_order \
   "Surface \`wayfinder\`, \`to-spec\`, and Sergeant's custom \`to-tickets\`" \
@@ -607,6 +608,16 @@ SERGEANT_FLEET="$TEST_ROOT/fleet" \
 SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-dispatch" test "Maintain nonvisual backend mission" --repos app >/dev/null
 brief="$(grep -rl "^Maintain nonvisual backend mission$" "$TEST_ROOT"/app-sgt-*/.sergeant-brief.md)"
+assert_not_contains "Accessibility axis"
+
+write_routing_config "Backend service" "product" "Internal services" "Maintain deployment automation"
+policy_mission="Document that accessibility review only applies to UI-facing changes"
+PATH="$TEST_ROOT/fake-bin:$PATH" \
+SERGEANT_CONFIG="$TEST_ROOT/config" \
+SERGEANT_FLEET="$TEST_ROOT/fleet" \
+SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test "$policy_mission" --repos app >/dev/null
+brief="$(grep -rl "^${policy_mission}$" "$TEST_ROOT"/app-sgt-*/.sergeant-brief.md)"
 assert_not_contains "Accessibility axis"
 
 for repo_name in role-ui group-ui; do

@@ -161,11 +161,13 @@ start or repeat no-mistakes.
 Every dispatched implementation, independent review, PR description, successor,
 recovery, and final shipping gate must use the same canonical intent revision from
 `.sergeant-intent.md`. Workers and remediation loops never run no-mistakes. After
-readiness, the coordinator uses `sgt-validate` to launch the single validation-only
-boundary in a split pane of the worker's tmux window. Its default medium profile
-skips the redundant no-mistakes `review` and `document` stages. Remediation that
-changes HEAD requires the affected independent review checks before updating the
-readiness marker, but does not restart unaffected axes or no-mistakes.
+native validation, independent review, and affected remediation checks pass on a
+committed HEAD, the worker publishes readiness. Only then does the coordinator use
+`sgt-validate` to launch the single validation-only boundary in a split pane of the
+worker's tmux window. Its default medium profile skips the redundant no-mistakes
+`review` and `document` stages. Remediation that changes HEAD requires the affected
+independent review checks before updating the readiness marker, but does not
+restart unaffected axes or no-mistakes.
 
 ### Avoid no-op outcomes
 
