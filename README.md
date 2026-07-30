@@ -179,7 +179,20 @@ Correctness, security, data-integrity, and test findings cannot be deferred or i
 
 ### Independent review routing
 
-Generated worker briefs always require separate Standards and Spec reviews. Frontend, UI, visual, interaction, accessibility, or user-facing output language in the mission, repo role, or repo group also requires a separate independent accessibility review. Non-UI work retains the two-axis review, while `sgt-no-mistakes-finding` continues to route structured accessibility findings whenever a review supplies them.
+Generated worker briefs encode `review_level=medium`. Workers run focused tests
+during implementation and at most one repository-required full suite, followed by
+one bounded independent review pass covering documented standards and mission/spec
+correctness. The review prioritizes correctness, regressions, and material scope
+errors and ignores cosmetic observations and speculative refactoring. Frontend,
+UI, visual, interaction, accessibility, or user-facing output work requires a
+separate accessibility review; non-UI work does not. An extra risk review runs only
+when repository or task policy explicitly requires it. After remediation, workers
+rerun only affected tests and review checks rather than every axis or the full
+suite.
+
+Required CI, unresolved active review threads, and dependency order still gate
+completion. The coordinator owns one final no-mistakes run with the default medium
+profile; workers and remediation loops do not repeat it.
 
 ### Independent review findings
 

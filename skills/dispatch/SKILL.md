@@ -108,7 +108,7 @@ tmux attach -t sgt-<task-id>
 ### Step 4 — Reconcile results
 
 When all workers are done, review the PRs:
-- Verify each repo's completion evidence: pinned-base scope, focused/full validation, separate standards/spec review artifacts, an accessibility review artifact for UI-facing work, zero blocking findings, required CI, and resolved non-outdated review threads
+- Verify each repo's completion evidence: pinned-base scope, focused validation plus at most one repository-required full suite, one bounded standards/spec review pass, an accessibility review artifact only for UI-facing work, any explicitly required extra risk review, zero blocking findings, required CI, and resolved non-outdated review threads
 - Check dependency order: merge infra before API before app if there are runtime dependencies; a worker is not done until its dependency gate is satisfied
 - If any repo failed, read the failure reason from fleet state and decide: retry, fix manually, or reassign
 - Note any cross-repo implications in each PR description (e.g., "merge after smith-infra #42")
@@ -160,6 +160,17 @@ The workers themselves are responsible for honoring this. The brief makes it exp
 
 ## Worker contract
 
+Generated briefs set `review_level=medium`: run focused tests during implementation
+and at most one repository-required full suite; run one bounded independent review
+pass covering documented standards and mission/spec correctness; prioritize
+correctness, regressions, and material scope errors while ignoring cosmetic
+observations and speculative refactoring. Require a separate accessibility review
+only for UI-facing changes and an extra risk review only when repository or task
+policy explicitly requires it. After remediation, rerun only affected tests and
+review checks rather than every axis or the full suite. Required CI, unresolved
+review threads, dependency order, and the single coordinator-owned no-mistakes
+medium-profile gate remain mandatory.
+
 Each dispatched agent is expected to:
 
 1. Read `.sergeant-brief.md` at session start
@@ -174,16 +185,15 @@ Each dispatched agent is expected to:
 5. Establish public behavioral seams from td/spec before tests. If a consequential seam is undecided, escalate `needs_input` rather than guessing
 6. Implement one vertical slice at a time: focused red test, minimum green implementation, then refactor. Reject tautological tests, internal mocking, horizontal test/implementation phases, and speculative refactoring
 7. For `needs_input` or `blocked`, write `.sergeant-message` and notify Sergeant. Consume/remove `.sergeant-response` when it arrives, clear the message, log the decision to td, restore `in_progress`, and continue
-8. Run focused tests and typechecking/lint regularly and the full required suite at the end. Do not run no-mistakes for routine worker completion, prototypes, investigations, documentation drafts, intermediate commits, or remediation loops; an explicit user instruction overrides this default
-9. At an explicit final shipping boundary only, after implementation and repository-native validation, run `no-mistakes axi run --intent-file <path>` (or `--intent "<objective and approved tradeoffs>"`), skip only proven-irrelevant gates, treat findings as validation-only, and stop at `checks-passed`. Safety-sensitive work — touching auth, OAuth, security, secret, credential, payment, database, migration, stateful, production, destructive operations — is the standard-isolated lighter path only when the objective does not trigger those classifiers. Readiness requires concrete State Transitions, Failure Windows, and Negative Test Matrix sections for stateful work.
-10. Route each no-mistakes finding through `sgt-no-mistakes-finding`: every actionable finding creates or updates separate deduplicated owning-repo td work; correctness/security/data-integrity/test and ask-user work is P1 and remains gated, warning debt is P2, informational debt is P3, and cosmetic/evidence noise is ignored. Never remediate findings in the validation run
-11. Load the canonical `code-review` skill when available, then launch separate parallel subagents for independent reviews: a standards axis over the pinned diff and documented standards plus concise Fowler smells, and a spec axis over requirements and scope. For UI-facing work identified by frontend, UI, visual, interaction, accessibility, or user-facing output language in the mission, repo role, repo group name or description, or inherited instructions, also launch a separate accessibility axis. Keep evidence separate and skip the spec axis explicitly when no spec exists
-12. Route each axis's strict JSON artifact through `sgt-review-findings`; actionable findings become deduplicated owning-repo td tasks, blockers publish fleet state plus notification, and cosmetic/false-positive dispositions create no cards. Never persist review bodies, prompts, secrets, or credentials
-13. Keep one TD record per no-mistakes finding. Findings with the same originating run, head, owning module, and root cause share one serialized remediation worker/branch. Remediation never runs no-mistakes; before merging the group, rerun native tests and independent rereviews that verify mutation before validation, partial publication or rollback, and identity/provenance, then resume the retained run. After two remediation cycles, stop fix dispatch and require architectural/root-cause review plus a human decision
-14. Remediate all blocking repository-native test and independent-review findings, rerun affected tests and all required axes until each reports zero blocking findings. No-mistakes findings require a separate td dispatch
-15. Commit, open a PR, wait for required CI, resolve all non-outdated review threads, and satisfy dependency order
-16. For tracked work, log td decisions, handoff, then run `td review` only when implementation and review evidence are ready
-17. Write `.sergeant-result` and set `.sergeant-status=done` only after every gate passes. `failed: <exact reason>` is reserved for an unrecoverable terminal failure
+8. Run focused tests and typechecking/lint during implementation and at most one repository-required full suite at the end
+9. Load the canonical `code-review` skill when available, then run one bounded independent review pass with a standards axis over the pinned diff and documented standards plus concise Fowler smells and a spec axis over requirements and scope. Prioritize correctness, regressions, and material scope errors; ignore cosmetic observations and speculative refactoring. For UI-facing work identified by frontend, UI, visual, interaction, accessibility, or user-facing output language in the mission, repo role, repo group name or description, or inherited instructions, also run a separate accessibility axis. Run an extra risk review only when repository or task policy explicitly requires it; when required, cover applicable risks such as mutation before validation, partial publication, rollback, identity, and provenance. Keep evidence separate and skip the spec axis explicitly when no spec exists
+10. Route each axis's strict JSON artifact through `sgt-review-findings`; actionable findings become deduplicated owning-repo td tasks, blockers publish fleet state plus notification, and cosmetic/false-positive dispositions create no cards. Never persist review bodies, prompts, secrets, or credentials
+11. Remediate blocking repository-native test and independent-review findings, then rerun only affected tests and review checks. Do not rerun the full suite or unaffected axes unless repository or task policy explicitly requires it. If an affected check remains blocked after remediation, escalate `blocked` instead of starting a broad review/test loop
+12. Commit the reviewed branch and publish `.sergeant-validation-ready` only after native validation, independent review, and remediation are complete. Workers never run no-mistakes. The coordinator invokes `sgt-validate` once with the canonical intent and default medium profile. Work touching auth, OAuth, security, secret, credential, payment, database, migration, stateful, production, destructive operations requires `--intent-file <path>`; the `standard-isolated` path applies only when the objective does not trigger those classifiers. Safety-sensitive or stateful work still requires concrete State Transitions, Failure Windows, and Negative Test Matrix sections before implementation
+13. The coordinator routes each no-mistakes finding through `sgt-no-mistakes-finding`: every actionable finding creates or updates separate deduplicated owning-repo td work; correctness/security/data-integrity/test and ask-user work is P1 and remains gated, warning debt is P2, informational debt is P3, and cosmetic/evidence noise is ignored. Keep one TD record per finding; findings with the same originating run, head, owning module, and root cause share one serialized remediation worker and branch. Workers never remediate findings from the validation run, and remediation never runs no-mistakes. Before merging grouped remediation, rerun native tests and independent rereviews that verify mutation before validation, partial publication or rollback, and identity/provenance, then resume the retained run. After two remediation cycles, stop fix dispatch and require architectural/root-cause review plus a human decision
+14. Push the committed branch, open a PR, wait for required CI, resolve all non-outdated review threads, and satisfy dependency order
+15. For tracked work, log td decisions, handoff, then run `td review` only when implementation and review evidence are ready
+16. Write `.sergeant-result` and set `.sergeant-status=done` only after every gate passes. `failed: <exact reason>` is reserved for an unrecoverable terminal failure
 
 If a canonical skill cannot be loaded, the generated brief's embedded rules remain mandatory for that phase.
 

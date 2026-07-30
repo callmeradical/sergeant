@@ -75,6 +75,22 @@ contain the eight sections shown by `sgt-dispatch`; malformed, missing,
 traversing, symlinked, or oversized input fails before dispatch mutation. Other
 objectives use the named `standard-isolated` lighter path.
 
+## Worker review policy
+
+Every generated worker brief encodes `review_level=medium`. Workers run focused
+tests during implementation and at most one repository-required full suite. They
+then run one bounded independent review pass covering documented standards and
+mission/spec correctness, prioritizing correctness, regressions, and material
+scope errors while ignoring cosmetic observations and speculative refactoring.
+A separate accessibility review is required only for UI-facing changes; an extra
+risk review is required only when repository or task policy explicitly says so.
+After remediation, rerun only affected tests and review checks rather than every
+axis or the full suite.
+
+Required CI, unresolved active review threads, and dependency order remain
+completion gates. The final coordinator-owned no-mistakes run uses the default
+medium profile once; workers and remediation loops do not repeat it.
+
 ## Monitor work
 
 Background (default for OpenCode — returns promptly with monitor identity and control commands):
@@ -216,9 +232,9 @@ identity no longer matches, or any later relaunch step fails.
 For each repository require:
 
 - intended fixed point and diff scope;
-- repository-native tests/lint/typecheck/build;
-- independent Standards and Spec reviews;
-- Accessibility review for UI-facing work;
+- focused repository-native tests/lint/typecheck/build and at most one repository-required full suite;
+- one bounded independent Standards and Spec review pass;
+- Accessibility review only for UI-facing work and extra risk review only when repository or task policy explicitly requires it;
 - required CI and zero unresolved active review threads;
 - dependency and deployment order;
 - truthful td handoff/review state.

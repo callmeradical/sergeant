@@ -154,7 +154,7 @@ Run regressions for the objective and unchanged neighboring behavior; no safety-
 
 ## Validation Evidence
 
-Record focused and full native validation plus independent review evidence before shipping.
+Record focused native validation, at most one repository-required full suite, and independent review evidence before shipping.
 EOF
   _sgt_intent_validate "$output_file"
 }

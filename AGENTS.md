@@ -143,14 +143,29 @@ When the user brings you a task:
 
 Workers use `in_progress`, `needs_input`, `blocked`, and `waiting` as nonterminal states. A waiting worker may remain alive or may exit after a durable handoff. Deferred waits should publish `.sergeant-wake-condition` and resume through `sgt-wake`; human decisions still resume through `sgt-respond`. Do not infer progress from liveness, do not rewrite an expected blocked exit as orphaned, and do not clean a waiting worktree. Use `sgt-respond`, `sgt-wake`, or supported recovery only after reconciling status, response generation, pane identity, and handoff evidence.
 
+### Worker review policy
+
+All future generated worker briefs encode `review_level=medium`. Workers at this
+level must:
+
+- run focused tests during implementation and at most one repository-required full suite;
+- run one bounded independent review pass covering documented standards and mission/spec correctness, prioritizing correctness, regressions, and material scope errors while ignoring cosmetic observations and speculative refactoring;
+- run a separate accessibility review only for UI-facing changes and an extra risk review only when repository or task policy explicitly requires it; and
+- after remediation, rerun only affected tests and review checks rather than every review axis or the full suite.
+
+Required CI, unresolved active review threads, dependency order, and the final
+coordinator-owned no-mistakes gate remain mandatory. The coordinator runs that
+gate once with the default medium profile; workers and remediation loops do not
+start or repeat no-mistakes.
+
 Every dispatched implementation, independent review, PR description, successor,
 recovery, and final shipping gate must use the same canonical intent revision from
 `.sergeant-intent.md`. Workers and remediation loops never run no-mistakes. After
 readiness, the coordinator uses `sgt-validate` to launch the single validation-only
 boundary in a split pane of the worker's tmux window. Its default medium profile
 skips the redundant no-mistakes `review` and `document` stages. Remediation that
-changes HEAD still requires independent rereview before updating the readiness
-marker, but must not trigger repeated no-mistakes review cycles.
+changes HEAD requires the affected independent review checks before updating the
+readiness marker, but does not restart unaffected axes or no-mistakes.
 
 ### Avoid no-op outcomes
 

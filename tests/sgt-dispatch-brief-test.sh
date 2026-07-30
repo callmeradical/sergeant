@@ -184,6 +184,14 @@ grep -Fxq 'Harden worker loop' "$fleet_intent" || {
   printf 'canonical intent did not preserve the dispatch objective\n' >&2
   exit 1
 }
+grep -Fq 'at most one repository-required full suite' "$fleet_intent" || {
+  printf 'canonical intent did not use the medium validation policy\n' >&2
+  exit 1
+}
+if grep -Fq 'focused and full native validation' "$fleet_intent"; then
+  printf 'canonical intent retained the high-scrutiny full-suite policy\n' >&2
+  exit 1
+fi
 
 cat > "$TEST_ROOT/approved-intent.md" <<'EOF'
 # Sergeant Intent
@@ -339,6 +347,7 @@ assert_order() {
 }
 
 assert_contains "merge-base with the current origin/main"
+assert_contains "**Review level:** \`review_level=medium\`"
 assert_contains "**td task:** td-app-1"
 assert_contains "td start td-app-1 --work-dir ."
 assert_contains "td handoff td-app-1 --work-dir ."
@@ -366,7 +375,8 @@ assert_contains "notification_id|target_nonce"
 assert_contains ".sergeant-notification-accepts/"
 assert_contains ".sergeant-notification-complete/"
 assert_contains "Do not act until that supervisor sends acceptance"
-assert_contains "full required suite once at the end"
+assert_contains "at most one repository-required full suite"
+assert_not_contains "full required suite once at the end"
 assert_contains "Never run no-mistakes from this agent process"
 assert_contains '.sergeant-validation-ready'
 assert_contains 'sgt-validate'
@@ -378,7 +388,13 @@ assert_contains "### 6. Route no-mistakes findings"
 assert_contains "coordinator owns every no-mistakes gate and finding"
 assert_contains "Do not approve a validation gate"
 assert_contains "separate deduplicated td work"
-assert_contains "separate parallel subagents"
+assert_contains "one bounded independent review pass"
+assert_contains "Run each required axis once in the initial pass"
+assert_contains "correctness, regressions, and material scope errors"
+assert_contains "Ignore cosmetic observations and speculative refactoring"
+assert_contains "additional risk review only when active repository or task policy explicitly requires it"
+assert_not_contains "launch an independent readiness review"
+assert_not_contains "separate parallel subagents"
 assert_contains "Standards axis"
 assert_contains "Fowler smell heuristic"
 assert_contains "skip findings enforced by tooling"
@@ -390,7 +406,12 @@ assert_contains "sgt-review-findings"
 assert_contains "structured JSON finding artifact"
 assert_contains "review bodies, prompts, secrets, or credentials"
 assert_contains "task IDs and recommended remediation"
-assert_contains "blocking findings are zero"
+assert_contains "Rerun only affected focused tests and affected review checks"
+assert_contains "Do not rerun the repository full suite or every independent review axis"
+assert_not_contains "rerun all required independent review axes"
+assert_contains "blocking findings remain zero"
+assert_contains "default medium profile"
+assert_contains "no repeated no-mistakes cycles"
 assert_contains "required CI is green"
 assert_contains "no unresolved non-outdated review threads"
 assert_contains "dependency order is satisfied"
@@ -447,7 +468,7 @@ assert_order \
   "### 4. Escalate and resume" \
   "### 5. Validate" \
   "### 6. Route no-mistakes findings" \
-  "### 7. Independent two-axis review" \
+  "### 7. One bounded independent two-axis review pass" \
   "### 8. Remediate and repeat" \
   "### 9. Complete delivery and td lifecycle"
 

@@ -711,6 +711,7 @@ $td_context_block"
 **Branch:** $BRANCH
 **Worktree:** $worktree_path
 **Fleet state:** $repo_task_dir/
+**Review level:** \`review_level=medium\`
 $td_task_line
 
 ---
@@ -800,23 +801,25 @@ Maintain \`.sergeant-gate-generation\` as a monotonic integer for waiting gates.
 
 ### 5. Validate
 
-Run focused tests and typechecking/lint regularly. Run the repository's full required suite once at the end.
+Run focused tests and typechecking/lint during implementation. Run at most one repository-required full suite, at the end.
 
-Before the final shipping boundary, launch an independent readiness review over mutation before validation, partial publication and rollback, identity and provenance, stale and legacy states, suppressed failures, race windows, and missing negative tests. Record evidence against the canonical intent.
+Run an additional risk review only when active repository or task policy explicitly requires it. When required, scope that review to the applicable risks, such as mutation before validation, partial publication and rollback, identity and provenance, stale and legacy states, suppressed failures, race windows, and missing negative tests, and record evidence against the canonical intent.
 
 Commit the reviewed branch before publishing readiness. Validation requires a clean worktree at that committed HEAD; do not create readiness evidence from an uncommitted diff.
 
 Never run no-mistakes from this agent process. After implementation, repository-native validation, and independent reviews complete with zero blockers, write \`.sergeant-validation-ready\` with exactly one \`intent_revision=$INTENT_REVISION\`, the current \`head_sha=\$(git rev-parse HEAD)\`, and \`standards_review=passed\`, \`spec_review=passed\`, and \`readiness_review=passed\`. Then notify Sergeant that coordinator-owned validation may begin.
 
-The coordinator invokes \`sgt-validate $TASK_ID $rname\`, which runs no-mistakes interactively in a split pane of this window with the canonical intent and without \`--yes\`. The validation run is read-only; actionable findings become separate td work.
+The \`readiness_review\` marker records completion of the bounded review pass and any explicitly required extra risk review; it does not require another review pass.
+
+The coordinator invokes \`sgt-validate $TASK_ID $rname\` once, which runs no-mistakes interactively in a split pane of this window with the canonical intent, the default medium profile, and without \`--yes\`. The validation run is read-only; actionable findings become separate td work.
 
 ### 6. Route no-mistakes findings
 
-The Sergeant coordinator owns every no-mistakes gate and finding. Do not approve a validation gate, route a finding, or remediate validation output from this worker pane. Actionable findings become separate deduplicated td work and remediation never runs no-mistakes. Resume this worker only through an explicit Sergeant response tied to that owning work.
+The Sergeant coordinator owns every no-mistakes gate and finding. Do not approve a validation gate, route a finding, or remediate validation output from this worker pane. Actionable findings become separate deduplicated td work and remediation never runs no-mistakes. The final coordinator-owned gate runs once; no repeated no-mistakes cycles are permitted. Resume this worker only through an explicit Sergeant response tied to that owning work.
 
-### 7. Independent $review_axis_label-axis review
+### 7. One bounded independent $review_axis_label-axis review pass
 
-Before completion, load and use the canonical \`code-review\` skill when available, then launch separate parallel subagents for these axes so their contexts cannot contaminate each other. Keep their output in separate sections. Do not blend or rerank the axes. If the skill cannot be loaded, use the embedded review rules below.
+Before completion, load and use the canonical \`code-review\` skill when available, then run one bounded independent review pass covering the required axes below. Run each required axis once in the initial pass and keep its output in a separate section. Do not blend or rerank the axes. Prioritize correctness, regressions, and material scope errors. Ignore cosmetic observations and speculative refactoring instead of creating remediation work for them. If the skill cannot be loaded, use the embedded review rules below.
 
 - **Standards axis:** Review the diff versus the pinned merge-base against active repo instructions, AGENTS, CONTRIBUTING, and coding standards. Add a concise Fowler smell heuristic (duplication, long functions/modules, large parameter lists, feature envy, data clumps, primitive obsession, shotgun surgery, and inappropriate intimacy). Separate hard documented-standard violations from judgement-call smells, and skip findings enforced by tooling.
 - **Spec axis:** Review against the originating td issue/spec/mission. Report missing or partial requirements, scope creep, and incorrectly implemented requirements. If no spec exists, report this axis as skipped/no spec.$accessibility_axis_markdown
@@ -825,13 +828,13 @@ Require each reviewer to return a structured JSON finding artifact with only: \`
 
 ### 8. Remediate and repeat
 
-Remediate every blocking repository-native test or independent-review finding, rerun affected tests, then rerun all required independent review axes. Repeat until blocking findings are zero on each axis. Do not remediate no-mistakes findings in this validation run; their owning td work requires a separate dispatch.
+Remediate every blocking repository-native test or independent-review finding. Rerun only affected focused tests and affected review checks. Do not rerun the repository full suite or every independent review axis unless active repository or task policy explicitly requires it. Completion requires that blocking findings remain zero for all required checks. Do not remediate no-mistakes findings in this validation run; their owning td work requires a separate dispatch.
 
 ### 9. Complete delivery and td lifecycle
 
 The branch was committed before readiness. Open the PR via \`gh pr create\`. If this work has a td task, log decisions throughout, handoff before td review, and run td review only after implementation and review evidence is ready.
 
-Do not write \`done\` merely because a PR exists. Success requires: the branch is committed; the PR is open; focused and full validation are complete; required CI is green; there are no unresolved non-outdated review threads; dependency order is satisfied; and independent review is complete with zero blocking findings.
+Do not write \`done\` merely because a PR exists. Success requires: the branch is committed; the PR is open; focused validation and any repository-required full suite are complete; required CI is green; there are no unresolved non-outdated review threads; dependency order is satisfied; and independent review is complete with zero blocking findings.
 
 While waiting for CI, reviews, or dependencies that fit a supported wake condition, publish \`.sergeant-status=waiting\` with \`.sergeant-wake-condition\` instead of sleeping or polling in-process. Use \`needs_input\` for human decisions, \`blocked\` for durable external blockers without a supported wake adapter, and \`failed: <exact reason>\` only for unrecoverable terminal failure. Only after every success gate passes:
 
