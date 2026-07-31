@@ -241,6 +241,39 @@ if grep -Fq 'defer td-deferred --clear' "$TEST_ROOT/td.log"; then
 fi
 grep -Fq 'update td-deferred' "$TEST_ROOT/td.log"
 
+# dedup update must preserve manually added labels — not replace them with only standard ones
+TD_LIST_RESULT='[{"id":"td-labelled","status":"open","defer_until":"","labels":["independent-review","finding","standards","urgent","security"],"description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1"}]' \
+  run_router "$TEST_ROOT/findings.json"
+if ! grep -Fq 'urgent' "$TEST_ROOT/td.log"; then
+  printf 'dedup update dropped manually added label "urgent"\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'security' "$TEST_ROOT/td.log"; then
+  printf 'dedup update dropped manually added label "security"\n' >&2
+  exit 1
+fi
+
+# gate-less recovery must not clear a block caused by a different axis
+# Setup: blocking state from axis=standards routing failure, gate file only for standards
+gate_dir="$TEST_ROOT/worktree/.sergeant-review-gates"
+mkdir -p "$gate_dir"
+# gate-less case: no gate file exists for the current invocation (standards already cleaned up
+# its gate) but the worker is still blocked by a different axis (spec) routing failure
+# Simulate: spec gate is present, standards gate absent → standards clean run must not unblock
+printf 'gen1\nspec routing failure\n' > "$gate_dir/spec-code-review"
+printf 'blocked\n' > "$TEST_ROOT/worktree/.sergeant-status"
+printf 'Review finding routing failed. axis: spec.\n' > "$TEST_ROOT/worktree/.sergeant-message"
+printf 'gen1\n' > "$TEST_ROOT/worktree/.sergeant-gate-generation"
+ROUTER_AXIS=standards run_router "$TEST_ROOT/findings.json" || true
+if [[ "$(cat "$TEST_ROOT/worktree/.sergeant-status" 2>/dev/null)" != "blocked" ]]; then
+  printf 'gate-less recovery cleared block caused by a different axis\n' >&2
+  exit 1
+fi
+# Clean up gate state for subsequent tests
+rm -rf "$gate_dir"
+rm -f "$TEST_ROOT/worktree/.sergeant-message"
+printf 'in_progress\n' > "$TEST_ROOT/worktree/.sergeant-status"
+
 ROUTER_TASK_ID='fleet/invalid' run_router "$TEST_ROOT/findings.json"
 [[ "$status" -eq 2 && "$output" == *'invalid fleet task'* ]]
 [[ ! -s "$TEST_ROOT/notify.log" ]]
