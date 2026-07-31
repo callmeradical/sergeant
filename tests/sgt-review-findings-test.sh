@@ -53,10 +53,6 @@ exec /usr/bin/mv "$@"
 EOF
 chmod +x "$TEST_ROOT/fake-bin/mv"
 
-# ── INSTALLED_BIN: simulates an installed bin/ directory where sgt-review-findings
-# and its sibling scripts live.  sgt-review-findings resolves sgt-notify via
-# $SCRIPT_DIR (the fix for #96), so the fake sgt-notify must live alongside it
-# rather than on PATH.  The shared notify body is written once and installed here.
 INSTALLED_BIN="$TEST_ROOT/installed-bin"
 mkdir -p "$INSTALLED_BIN"
 ln -s "$ROOT_DIR/bin/sgt-review-findings" "$INSTALLED_BIN/sgt-review-findings"
@@ -73,8 +69,6 @@ printf '%s\n' "$*" >> "$NOTIFY_LOG"
 EOF
 chmod +x "$INSTALLED_BIN/sgt-notify"
 
-# fake-bin-no-notify: td, yq, mv stubs without sgt-notify; used by the #96 test
-# to confirm the script works when sgt-notify is absent from PATH entirely.
 mkdir -p "$TEST_ROOT/fake-bin-no-notify"
 for _f in "$TEST_ROOT/fake-bin"/*; do
   ln -s "$_f" "$TEST_ROOT/fake-bin-no-notify/$(basename "$_f")"
@@ -96,7 +90,7 @@ run_router() {
     "$INSTALLED_BIN/sgt-review-findings" test app \
       --input "$1" --axis standards --source code-review \
       --branch fix/review --head-sha abc1234 --parent-task td-parent \
-      --task-id fleet-1 --worktree "$WORKTREE" 2>&1)"
+      --task-id "${ROUTER_TASK_ID:-fleet-1}" --worktree "$WORKTREE" 2>&1)"
   status=$?
   set -e
 }
@@ -122,6 +116,7 @@ grep -Fq 'Acceptance criteria: Match exact pane identity' "$TEST_ROOT/td.log"
 grep -Fq 'Branch: fix/review' "$TEST_ROOT/td.log"
 grep -Fq 'Head SHA: abc1234' "$TEST_ROOT/td.log"
 grep -Fq 'Parent mission: td-parent' "$TEST_ROOT/td.log"
+grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log"
 grep -Fq 'independent-review-finding:app:standards:code-review:std-1' "$TEST_ROOT/td.log"
 [[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
 [[ "$(cat "$WORKTREE/.sergeant-gate-generation")" == '1' ]]
@@ -147,6 +142,11 @@ if grep -Eq 'super-secret|raw-token|hidden-value|hunter2|dXNlcjpwYXNz|ghp_|AKIA|
   exit 1
 fi
 
+# 40-char hex SHA (git SHA) must not be redacted by the high-entropy filter
+printf '{"findings":[{"id":"std-sha","severity":"warning","disposition":"actionable","summary":"SHA in evidence","evidence":"commit a6af6854056c77a7a1ed73e61b74cd7fead52e30 removed file","paths":[],"acceptance_criteria":"SHA preserved","recommendation":"none"}]}\n' > "$TEST_ROOT/sha.json"
+run_router "$TEST_ROOT/sha.json"
+grep -Fq 'a6af6854056c77a7a1ed73e61b74cd7fead52e30' "$TEST_ROOT/td.log"
+
 TD_LIST_RESULT=null run_router "$TEST_ROOT/secrets.json"
 [[ "$status" -eq 0 && "$output" == *'td-created-1'* ]]
 grep -q '^create ' "$TEST_ROOT/td.log"
@@ -162,8 +162,45 @@ fi
 TD_LIST_RESULT='[{"id":"td-existing","status":"in_progress","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1"}]' \
   run_router "$TEST_ROOT/findings.json"
 grep -Fq 'update td-existing' "$TEST_ROOT/td.log"
+grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log"
 if grep -Fq 'reopen td-existing' "$TEST_ROOT/td.log"; then
   printf 'rerun changed active finding state\n' >&2
+  exit 1
+fi
+
+# dedup update with a different fleet task ID must write the new ID into the body
+TD_LIST_RESULT='[{"id":"td-existing","status":"in_progress","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1"}]' \
+  ROUTER_TASK_ID='fleet-new' run_router "$TEST_ROOT/findings.json"
+grep -Fq 'update td-existing' "$TEST_ROOT/td.log"
+grep -Fq 'Originating fleet task: fleet-new' "$TEST_ROOT/td.log"
+if grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log"; then
+  printf 'stale fleet task ID retained in updated body\n' >&2
+  exit 1
+fi
+
+# closed existing task must be reopened before update
+TD_LIST_RESULT='[{"id":"td-closed","status":"closed","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1"}]' \
+  run_router "$TEST_ROOT/findings.json"
+grep -Fq 'reopen td-closed' "$TEST_ROOT/td.log"
+grep -Fq 'update td-closed' "$TEST_ROOT/td.log"
+grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log"
+reopen_line="$(grep -nF 'reopen td-closed' "$TEST_ROOT/td.log" | cut -d: -f1)"
+update_line="$(grep -nF 'update td-closed' "$TEST_ROOT/td.log" | cut -d: -f1)"
+[[ "$reopen_line" -lt "$update_line" ]]
+
+# deferred existing task must have deferral cleared before update
+TD_LIST_RESULT='[{"id":"td-deferred","status":"in_progress","defer_until":"2099-01-01","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1"}]' \
+  run_router "$TEST_ROOT/findings.json"
+grep -Fq 'defer td-deferred --clear' "$TEST_ROOT/td.log"
+grep -Fq 'update td-deferred' "$TEST_ROOT/td.log"
+defer_line="$(grep -nF 'defer td-deferred' "$TEST_ROOT/td.log" | cut -d: -f1)"
+update_line="$(grep -nF 'update td-deferred' "$TEST_ROOT/td.log" | cut -d: -f1)"
+[[ "$defer_line" -lt "$update_line" ]]
+
+ROUTER_TASK_ID='fleet/invalid' run_router "$TEST_ROOT/findings.json"
+[[ "$status" -eq 2 && "$output" == *'invalid fleet task'* ]]
+if grep -Eq '^(create|update) ' "$TEST_ROOT/td.log"; then
+  printf 'malformed fleet task entered td metadata\n' >&2
   exit 1
 fi
 
@@ -215,11 +252,6 @@ set -e
 [[ "$status" -eq 2 && "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
 grep -Fq 'blocked [app]' "$TEST_ROOT/notify.log"
 
-# ─── Issue #96: sgt-notify reachable via $SCRIPT_DIR when bin/ not on PATH ────
-#
-# The PATH used here omits both $ROOT_DIR/bin and any installed Sergeant location,
-# so bare sgt-notify invocations cannot resolve.  Only the $SCRIPT_DIR-relative
-# invocation introduced by the fix (using $SCRIPT_DIR_TEST/sgt-notify) succeeds.
 rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation}
 : > "$TEST_ROOT/notify.log"
 : > "$TEST_ROOT/td.log"
