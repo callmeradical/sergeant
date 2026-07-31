@@ -254,17 +254,17 @@ if ! grep -Fq 'security' "$TEST_ROOT/td.log"; then
 fi
 
 # gate-less recovery must not clear a block caused by a different axis
-# Setup: blocking state from axis=standards routing failure, gate file only for standards
+# Setup: worker is blocked by a spec routing failure, but the current standards
+# rerun has no findings and no standards gate to clean up.
 gate_dir="$TEST_ROOT/worktree/.sergeant-review-gates"
 mkdir -p "$gate_dir"
-# gate-less case: no gate file exists for the current invocation (standards already cleaned up
-# its gate) but the worker is still blocked by a different axis (spec) routing failure
-# Simulate: spec gate is present, standards gate absent → standards clean run must not unblock
+# Simulate: spec gate is present, standards gate absent -> standards clean run
+# must not unblock the worker.
 printf 'gen1\nspec routing failure\n' > "$gate_dir/spec-code-review"
 printf 'blocked\n' > "$TEST_ROOT/worktree/.sergeant-status"
 printf 'Review finding routing failed. axis: spec.\n' > "$TEST_ROOT/worktree/.sergeant-message"
 printf 'gen1\n' > "$TEST_ROOT/worktree/.sergeant-gate-generation"
-ROUTER_AXIS=standards run_router "$TEST_ROOT/findings.json" || true
+PRESERVE_FLEET=1 ROUTER_AXIS=standards run_router "$TEST_ROOT/clean.json"
 if [[ "$(cat "$TEST_ROOT/worktree/.sergeant-status" 2>/dev/null)" != "blocked" ]]; then
   printf 'gate-less recovery cleared block caused by a different axis\n' >&2
   exit 1
