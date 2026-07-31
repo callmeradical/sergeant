@@ -86,9 +86,9 @@ for skill in codebase-design code-review diagnosing-bugs domain-modeling grillin
 done
 grep -Fq 'Copyright (c) 2026 Matt Pocock' "$CANONICAL_DIR/THIRD_PARTY_NOTICES.md"
 grep -Fq 'https://github.com/mattpocock/skills' "$CANONICAL_DIR/THIRD_PARTY_NOTICES.md"
-grep -Fq '`to-tickets`' "$CANONICAL_DIR/THIRD_PARTY_NOTICES.md"
-grep -Fq '`no-mistakes`' "$CANONICAL_DIR/THIRD_PARTY_NOTICES.md"
-grep -Fq '`sergeant-setup`' "$CANONICAL_DIR/THIRD_PARTY_NOTICES.md"
+grep -Fq "\`to-tickets\`" "$CANONICAL_DIR/THIRD_PARTY_NOTICES.md"
+grep -Fq "\`no-mistakes\`" "$CANONICAL_DIR/THIRD_PARTY_NOTICES.md"
+grep -Fq "\`sergeant-setup\`" "$CANONICAL_DIR/THIRD_PARTY_NOTICES.md"
 grep -Fq 'no-mistakes' "$CANONICAL_DIR/PROVENANCE.md"
 
 printf 'repo-scoped skill discovery: ok\n'
