@@ -7,14 +7,22 @@ CANONICAL_DIR="$ROOT_DIR/.agents/skills"
 CLAUDE_DIR="$ROOT_DIR/.claude/skills"
 
 expected=(
+  codebase-design
   code-review
   diagnosing-bugs
+  domain-modeling
+  grilling
+  grill-with-docs
+  implement
+  no-mistakes
   prototype
+  research
   resolving-merge-conflicts
   sergeant-setup
   tdd
   to-spec
   to-tickets
+  triage
   wayfinder
 )
 
@@ -43,7 +51,8 @@ for skill_dir in "$CANONICAL_DIR"/*/; do
 done
 
 [[ "${actual[*]}" == "${expected[*]}" ]] || fail "canonical inventory drift: ${actual[*]}"
-[[ ! -e "$CANONICAL_DIR/no-mistakes" ]] || fail 'optional no-mistakes skill must not be vendored'
+# no-mistakes is now vendored (coordinator-only, with user-invocable guard stripped)
+[[ -e "$CANONICAL_DIR/no-mistakes" ]] || fail 'no-mistakes skill must be vendored'
 
 for skill in "${expected[@]}"; do
   link="$CLAUDE_DIR/$skill"
@@ -71,12 +80,15 @@ assert config == {
 }
 PY
 
-for skill in code-review diagnosing-bugs prototype resolving-merge-conflicts tdd to-spec wayfinder; do
+for skill in codebase-design code-review diagnosing-bugs domain-modeling grilling grill-with-docs \
+             implement prototype research resolving-merge-conflicts tdd to-spec triage wayfinder; do
   grep -Fq "\`$skill\`" "$CANONICAL_DIR/THIRD_PARTY_NOTICES.md" || fail "missing notice: $skill"
 done
 grep -Fq 'Copyright (c) 2026 Matt Pocock' "$CANONICAL_DIR/THIRD_PARTY_NOTICES.md"
 grep -Fq 'https://github.com/mattpocock/skills' "$CANONICAL_DIR/THIRD_PARTY_NOTICES.md"
-grep -Fq "\`to-tickets\` is Sergeant project-authored material" "$CANONICAL_DIR/THIRD_PARTY_NOTICES.md"
+grep -Fq '`to-tickets`' "$CANONICAL_DIR/THIRD_PARTY_NOTICES.md"
+grep -Fq '`no-mistakes`' "$CANONICAL_DIR/THIRD_PARTY_NOTICES.md"
+grep -Fq '`sergeant-setup`' "$CANONICAL_DIR/THIRD_PARTY_NOTICES.md"
 grep -Fq 'no-mistakes' "$CANONICAL_DIR/PROVENANCE.md"
 
 printf 'repo-scoped skill discovery: ok\n'
