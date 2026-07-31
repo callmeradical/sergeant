@@ -834,7 +834,7 @@ Commit the reviewed branch before publishing readiness. Validation requires a cl
 
 Never run no-mistakes from this agent process. After implementation, repository-native validation, independent review, and remediation complete with zero blockers, write \`.sergeant-validation-ready\` with exactly one \`intent_revision=$INTENT_REVISION\`, the current \`head_sha=\$(git rev-parse HEAD)\`, and \`standards_review=passed\`, \`spec_review=passed\`, and \`readiness_review=passed\`. Then notify Sergeant that coordinator-owned validation may begin.
 
-The \`readiness_review\` marker records completion of the bounded review pass and any explicitly required extra risk review; it does not require another review pass.
+The \`readiness_review=passed\` marker means the bounded Standards/Spec review pass completed and every extra risk review required by active repository or task policy completed. It does not attest that an unconditional standalone readiness-risk review ran.
 
 The coordinator invokes \`sgt-validate $TASK_ID $rname\` once, which runs no-mistakes interactively in a split pane of this window with the canonical intent, the default medium profile, and without \`--yes\`. The validation run is read-only; actionable findings become separate td work.
 

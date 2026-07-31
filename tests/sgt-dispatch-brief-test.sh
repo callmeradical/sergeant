@@ -411,6 +411,7 @@ assert_contains "Do not rerun the repository full suite or every independent rev
 assert_not_contains "rerun all required independent review axes"
 assert_contains "blocking findings remain zero"
 assert_contains "default medium profile"
+assert_contains "does not attest that an unconditional standalone readiness-risk review ran"
 assert_contains "no repeated no-mistakes cycles"
 assert_contains "required CI is green"
 assert_contains "no unresolved non-outdated review threads"
