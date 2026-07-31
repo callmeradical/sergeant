@@ -48,6 +48,9 @@ EOF
 cat > "$fake_bin/systemd-run" <<'FAKEEOF'
 #!/usr/bin/env bash
 set -euo pipefail
+# When SGT_FAKE_ARGS_LOG is set, record all arguments (one per line) for
+# inspection by tests that need to verify what was passed to systemd-run.
+[[ -n "${SGT_FAKE_ARGS_LOG:-}" ]] && printf '%s\n' "$@" > "$SGT_FAKE_ARGS_LOG"
 state="${SGT_FAKE_SYSTEMD_STATE}"
 unit=""
 for arg in "$@"; do
@@ -417,5 +420,99 @@ adopt14_output="$(SGT_FAKE_SYSTEMD_MODE=fail \
 grep -Fq 'sgt-watch-task-adopt-14.service' <<< "$adopt14_output"
 [[ "$(cat "$task_c14/monitor_invocation_id")" == "inv-new-live" ]]
 printf 'sgt-watch --background adopts running unit (stale invocation ID): ok\n'
+
+# ── Test 15: PATH forwarded to background monitor unit ────────────────────────
+# When launching the monitor, _sgt_background_watch must pass --setenv=PATH=...
+# to systemd-run so user-installed tools (e.g. td from /home/linuxbrew/.linuxbrew/bin)
+# remain resolvable inside the transient unit.  Without the fix the monitor runs
+# with the lean systemd user-manager PATH and sgt-td-memory fails with
+# "td unavailable for handoff".
+# The extended fake_bin/systemd-run records args to SGT_FAKE_ARGS_LOG when set.
+task_c15="$fleet/task-path-15"
+repo_c15="$task_c15/app"
+worktree_c15="$TEST_ROOT/worktree15"
+unit_c15="sgt-watch-task-path-15.service"
+mkdir -p "$repo_c15" "$worktree_c15"
+printf '%s\n' "$worktree_c15" > "$repo_c15/worktree"
+printf 'in_progress\n' > "$repo_c15/status"
+printf 'in_progress\n' > "$worktree_c15/.sergeant-status"
+rm -f "$fake_systemd_state/$unit_c15.status" "$fake_systemd_state/$unit_c15.invocation_id"
+
+args_log="$TEST_ROOT/systemd-run-args-15.log"
+custom_user_bin="/home/testuser/.linuxbrew/bin"
+custom_path="${custom_user_bin}:${PATH}"
+monitor_output="$(PATH="$custom_path" \
+  SGT_FAKE_INVOCATION_ID="inv-path-15" \
+  SGT_FAKE_ARGS_LOG="$args_log" \
+  SGT_FAKE_SYSTEMD_STATE="$fake_systemd_state" \
+  SERGEANT_FLEET="$fleet" \
+  SERGEANT_SYSTEMCTL="$fake_bin/systemctl" \
+  SERGEANT_SYSTEMD_RUN="$fake_bin/systemd-run" \
+  "$ROOT/bin/sgt-watch" "task-path-15" --background 2>&1)"
+# Monitor identity must be printed on success
+grep -Fq 'sgt-watch-task-path-15.service' <<< "$monitor_output" || \
+  { printf 'FAIL: monitor identity not printed\n' >&2; exit 1; }
+[[ -f "$args_log" ]] || { printf 'FAIL: systemd-run was not called (args log missing)\n' >&2; exit 1; }
+# --setenv=PATH=... must appear in the recorded args
+grep -Fq -- "--setenv=PATH=" "$args_log" || \
+  { printf 'FAIL: --setenv=PATH= was not passed to systemd-run\n' >&2; exit 1; }
+# The forwarded PATH must include our custom directory
+grep -F "$custom_user_bin" "$args_log" || \
+  { printf 'FAIL: forwarded PATH does not include custom user bin dir\n' >&2; exit 1; }
+printf 'sgt-watch --background PATH forwarded to monitor unit: ok\n'
+
+# ── Test 16: sgt-td-memory handoff fails with minimal PATH ───────────────────
+# This is the direct regression test for the failure mode described in #138:
+# when the PATH passed to sgt-td-memory does not include td, it must write
+# "td unavailable for handoff" to the diagnostic file and exit non-zero.
+# After the fix, forwarding the user's PATH to the systemd unit ensures
+# sgt-td-memory finds td in the service environment.
+td_test_root="$TEST_ROOT/td-test"
+td_repo_state="$td_test_root/state"
+td_worktree="$td_test_root/worktree"
+td_fake_bin="$td_test_root/bin"
+mkdir -p "$td_repo_state" "$td_worktree" "$td_fake_bin"
+
+# Fake td binary — succeeds immediately (just needs to be found via PATH)
+cat > "$td_fake_bin/td" <<'FAKEEOF'
+#!/usr/bin/env bash
+exit 0
+FAKEEOF
+chmod +x "$td_fake_bin/td"
+
+# Minimal repo state: a td_task file is required for sgt-td-memory to proceed
+printf 'fake-td-task-id\n' > "$td_repo_state/td_task"
+
+# Initialize a minimal git repo in the worktree so git commands succeed
+git init -q "$td_worktree"
+git -C "$td_worktree" config user.email "test@test"
+git -C "$td_worktree" config user.name "Test"
+printf 'init\n' > "$td_worktree/README"
+git -C "$td_worktree" add .
+git -C "$td_worktree" commit -q -m "init"
+printf 'in_progress\n' > "$td_worktree/.sergeant-status"
+
+# Case A: PATH that includes essential tools (bash, git) but deliberately
+# excludes any directory containing td → sgt-td-memory must fail with the
+# "td unavailable for handoff" diagnostic.
+# /bin and /usr/bin provide bash and git; exclude /usr/local/bin where td lives.
+no_td_path="/bin:/usr/bin:/sbin:/usr/sbin"
+PATH="$no_td_path" "$ROOT/bin/sgt-td-memory" handoff \
+  "$td_repo_state" "$td_worktree" 2>/dev/null || true
+diag_a="$(cat "$td_repo_state/diagnostic" 2>/dev/null || true)"
+[[ "$diag_a" == *"td unavailable for handoff"* ]] || \
+  { printf 'FAIL: expected "td unavailable for handoff" diagnostic, got: %s\n' "$diag_a" >&2; exit 1; }
+
+# Case B: PATH with fake td directory prepended → sgt-td-memory must find td
+# and exit 0 (fake td exits 0, so the handoff command succeeds).
+rm -f "$td_repo_state/diagnostic"
+PATH="$td_fake_bin:$no_td_path" "$ROOT/bin/sgt-td-memory" handoff \
+  "$td_repo_state" "$td_worktree" 2>/dev/null
+[[ ! -f "$td_repo_state/diagnostic" ]] || {
+  diag_b="$(cat "$td_repo_state/diagnostic")"
+  [[ "$diag_b" != *"td unavailable"* ]] || \
+    { printf 'FAIL: sgt-td-memory still reports td unavailable with full PATH: %s\n' "$diag_b" >&2; exit 1; }
+}
+printf 'sgt-td-memory handoff: minimal PATH fails, full PATH succeeds: ok\n'
 
 printf '\nsgt-watch background mode: all tests passed\n'

@@ -659,6 +659,13 @@ _sgt_background_watch() {
   if [[ -n "${SGT_FAKE_SYSTEMD_STATE:-}" ]]; then
     env_args+=(--setenv="SGT_FAKE_SYSTEMD_STATE=$SGT_FAKE_SYSTEMD_STATE")
   fi
+  # Propagate the calling user's PATH so user-installed tools (e.g. td from
+  # /home/linuxbrew/.linuxbrew/bin) remain resolvable inside the transient unit.
+  # The systemd user manager starts with a lean minimal PATH that omits custom
+  # install prefixes, causing sgt-td-memory to fail with "td unavailable for handoff".
+  if [[ -n "${PATH:-}" ]]; then
+    env_args+=(--setenv="PATH=$PATH")
+  fi
 
   _sgt_systemd_run --user \
     --unit="$unit" \
