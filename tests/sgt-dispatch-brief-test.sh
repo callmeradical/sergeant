@@ -146,10 +146,8 @@ SGT_WIKI_DISABLED=1 \
 
 brief="$(printf '%s\n' "$TEST_ROOT"/app-sgt-*/.sergeant-brief.md)"
 [[ -f "$brief" ]] || { printf 'brief was not generated\n' >&2; exit 1; }
-review_policy="$(dirname "$brief")/.sergeant-review-policy"
-[[ -f "$review_policy" ]] || { printf 'review policy metadata was not generated\n' >&2; exit 1; }
-[[ "$(cat "$review_policy")" == "review_level=medium" ]] || {
-  printf 'review policy metadata is not machine-readable\n' >&2
+grep -Fxq 'review_level=medium' "$brief" || {
+  printf 'brief review level is not machine-readable\n' >&2
   exit 1
 }
 
@@ -353,7 +351,7 @@ assert_order() {
 }
 
 assert_contains "merge-base with the current origin/main"
-assert_contains "**Review level:** \`review_level=medium\`"
+assert_not_contains "**Review level:**"
 assert_contains "**td task:** td-app-1"
 assert_contains "td start td-app-1 --work-dir ."
 assert_contains "td handoff td-app-1 --work-dir ."

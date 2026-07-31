@@ -712,8 +712,6 @@ $td_context_block"
     accessibility_axis_markdown=$'\n- **Accessibility axis:** Because this is UI-facing work, launch a separate independent accessibility review covering keyboard access, semantics, focus behavior, contrast, responsive behavior, and assistive-technology compatibility as applicable.'
   fi
 
-  printf 'review_level=medium\n' > "$worktree_path/.sergeant-review-policy"
-
   cat > "$worktree_path/.sergeant-brief.md" << BRIEF_EOF
 # Sergeant Brief
 
@@ -723,7 +721,7 @@ $td_context_block"
 **Branch:** $BRANCH
 **Worktree:** $worktree_path
 **Fleet state:** $repo_task_dir/
-**Review level:** \`review_level=medium\`
+review_level=medium
 $td_task_line
 
 ---
