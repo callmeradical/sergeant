@@ -268,7 +268,7 @@ mkdir -p "$fleet/task-classes"
 write_ack_callback hermes-discord "$TEST_ROOT/class-deliveries"
 CALLBACK_LOG="$TEST_ROOT/class-deliveries" callback register \
   task-classes hermes-discord req-classes-001
-for event_type in needs_input blocked failed done; do
+for event_type in needs_input blocked failed "done"; do
   CALLBACK_LOG="$TEST_ROOT/class-deliveries" callback enqueue \
     task-classes "$event_type" "direct-$event_type-1" <<< "Safe $event_type status."
 done
@@ -279,7 +279,7 @@ assert_all_event_types task-classes
 mkdir -p "$fleet/task-sealed"
 write_ack_callback hermes-discord "$TEST_ROOT/sealed-deliveries"
 callback register task-sealed hermes-discord req-sealed-001
-callback enqueue task-sealed done sealed-done-1 <<< "Safe terminal result."
+callback enqueue task-sealed "done" sealed-done-1 <<< "Safe terminal result."
 callback drain task-sealed
 callback seal task-sealed
 if callback enqueue task-sealed blocked sealed-late-1 <<< \
