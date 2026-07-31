@@ -46,7 +46,7 @@ printf 'sgt-drain project drain scopes correctly: ok\n'
 "$ROOT_DIR/bin/sgt-drain" --global --reason "test global" >/dev/null
 [[ -f "$config_dir/drain/global" ]] || { printf 'sgt-drain --global should create global drain file\n' >&2; exit 1; }
 grep -q 'reason=test global' "$config_dir/drain/global" || { printf 'global drain file should contain reason\n' >&2; exit 1; }
-grep -q 'created=' "$config_dir/drain/global" || { printf 'global drain file should contain created timestamp\n' >&2; exit 1; }
+grep -qE 'created(_at)?=' "$config_dir/drain/global" || { printf 'global drain file should contain created timestamp\n' >&2; exit 1; }
 _sgt_is_drained "anyproject" || { printf 'global drain should be active after sgt-drain --global\n' >&2; exit 1; }
 printf 'sgt-drain --global creates drain: ok\n'
 
@@ -93,7 +93,7 @@ printf 'sgt-drain --undrain no-op when not drained: ok\n'
 
 "$ROOT_DIR/bin/sgt-drain" --global >/dev/null
 [[ -f "$config_dir/drain/global" ]] || { printf 'drain without reason should still create file\n' >&2; exit 1; }
-grep -q 'created=' "$config_dir/drain/global" || { printf 'drain without reason should have created timestamp\n' >&2; exit 1; }
+grep -qE 'created(_at)?=' "$config_dir/drain/global" || { printf 'drain without reason should have created timestamp\n' >&2; exit 1; }
 "$ROOT_DIR/bin/sgt-drain" --undrain --global >/dev/null
 printf 'sgt-drain without reason: ok\n'
 
@@ -102,16 +102,20 @@ printf 'sgt-drain: all tests passed\n'
 # ── Slice 11 (bug #82): sgt-drain --status shows active drain state ──────────
 
 # No drain active: --status should exit 0 and print "no active drain"
-output="$("$ROOT_DIR/bin/sgt-drain" --status 2>&1)"
-[[ $? -eq 0 ]] || { printf 'sgt-drain --status should exit 0 when no drain active\n' >&2; exit 1; }
+if ! output="$("$ROOT_DIR/bin/sgt-drain" --status 2>&1)"; then
+  printf 'sgt-drain --status should exit 0 when no drain active\n' >&2
+  exit 1
+fi
 printf '%s\n' "$output" | grep -qi "no.*drain\|inactive\|none" || \
   { printf 'sgt-drain --status should report no active drain, got: %s\n' "$output" >&2; exit 1; }
 printf 'sgt-drain --status no drain: ok\n'
 
 # Global drain active: --status should show it
 "$ROOT_DIR/bin/sgt-drain" --global --reason "maintenance" >/dev/null
-output="$("$ROOT_DIR/bin/sgt-drain" --status 2>&1)"
-[[ $? -eq 0 ]] || { printf 'sgt-drain --status should exit 0 with active drain\n' >&2; exit 1; }
+if ! output="$("$ROOT_DIR/bin/sgt-drain" --status 2>&1)"; then
+  printf 'sgt-drain --status should exit 0 with active drain\n' >&2
+  exit 1
+fi
 printf '%s\n' "$output" | grep -qi "global\|active\|maintenance" || \
   { printf 'sgt-drain --status should report global drain, got: %s\n' "$output" >&2; exit 1; }
 "$ROOT_DIR/bin/sgt-drain" --undrain --global >/dev/null
@@ -119,8 +123,10 @@ printf 'sgt-drain --status global drain: ok\n'
 
 # Project drain active: --status --global should show no drain, --status should show project
 "$ROOT_DIR/bin/sgt-drain" myproject --reason "testing" >/dev/null
-output="$("$ROOT_DIR/bin/sgt-drain" --status myproject 2>&1)"
-[[ $? -eq 0 ]] || { printf 'sgt-drain --status <project> should exit 0\n' >&2; exit 1; }
+if ! output="$("$ROOT_DIR/bin/sgt-drain" --status myproject 2>&1)"; then
+  printf 'sgt-drain --status <project> should exit 0\n' >&2
+  exit 1
+fi
 printf '%s\n' "$output" | grep -qi "myproject\|active\|testing" || \
   { printf 'sgt-drain --status <project> should report project drain, got: %s\n' "$output" >&2; exit 1; }
 "$ROOT_DIR/bin/sgt-drain" --undrain myproject >/dev/null

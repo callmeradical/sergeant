@@ -73,19 +73,21 @@ drain_dir="$(_sgt_drain_state_dir)"
 if [[ "$MODE" == "status" ]]; then
   # Show active drain state.  With no scope, report global and all project drains.
   found=0
+  global_file="$(_sgt_drain_global_file)"
   if [[ -z "$SCOPE" || "$SCOPE" == "global" ]]; then
-    if [[ -f "$drain_dir/global" ]]; then
+    if [[ -f "$global_file" ]]; then
       echo "global drain: active"
-      grep -E "^reason=|^created=" "$drain_dir/global" 2>/dev/null | sed 's/^/  /' || true
+      grep -E "^reason=|^created_at=|^created=" "$global_file" 2>/dev/null | sed 's/^/  /' || true
       found=1
     elif [[ "$SCOPE" == "global" ]]; then
       echo "global drain: none"
     fi
   fi
   if [[ -n "$SCOPE" && "$SCOPE" != "global" ]]; then
-    if [[ -f "$drain_dir/$SCOPE" ]]; then
+    scope_file="$(_sgt_drain_project_file "$SCOPE")"
+    if [[ -f "$scope_file" ]]; then
       echo "${SCOPE} drain: active"
-      grep -E "^reason=|^created=" "$drain_dir/$SCOPE" 2>/dev/null | sed 's/^/  /' || true
+      grep -E "^reason=|^created_at=|^created=" "$scope_file" 2>/dev/null | sed 's/^/  /' || true
       found=1
     else
       echo "${SCOPE} drain: none"
@@ -95,9 +97,9 @@ if [[ "$MODE" == "status" ]]; then
     if [[ -d "$drain_dir" ]]; then
       while IFS= read -r -d '' drain_file; do
         name="$(basename "$drain_file")"
-        [[ "$name" == "global" ]] && continue
+        [[ "$name" == "global" || "$name" == "admission.lock" ]] && continue
         echo "${name} drain: active"
-        grep -E "^reason=|^created=" "$drain_file" 2>/dev/null | sed 's/^/  /' || true
+        grep -E "^reason=|^created_at=|^created=" "$drain_file" 2>/dev/null | sed 's/^/  /' || true
         found=1
       done < <(find "$drain_dir" -maxdepth 1 -type f -print0 2>/dev/null)
     fi
@@ -108,18 +110,16 @@ fi
 
 [[ -n "$SCOPE" ]] || _die "Must specify a project name or --global"
 
-drain_file="$drain_dir/$SCOPE"
+if [[ "$SCOPE" == "global" ]]; then
+  drain_file="$(_sgt_drain_global_file)"
+else
+  drain_file="$(_sgt_drain_project_file "$SCOPE")"
+fi
 
 if [[ "$MODE" == "undrain" ]]; then
-  rm -f "$drain_file"
+  _sgt_drain_with_lock "_sgt_drain_clear \"$drain_file\""
   echo "sgt-drain: undrained ${SCOPE}."
 else
-  mkdir -p "$drain_dir"
-  temporary="${drain_file}.tmp.$$"
-  {
-    [[ -n "$REASON" ]] && printf 'reason=%s\n' "$REASON"
-    printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  } > "$temporary"
-  mv "$temporary" "$drain_file"
+  _sgt_drain_with_lock "_sgt_drain_write \"$drain_file\" \"${REASON:-}\" \"\""
   echo "sgt-drain: drained ${SCOPE}."
 fi

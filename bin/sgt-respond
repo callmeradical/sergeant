@@ -299,9 +299,9 @@ if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && _pane_is_supervisor "$
   _sgt_notification_target_create "$REPO_DIR" "$response_id" \
     "$(cat "$REPO_DIR/pane_identity")" >/dev/null || \
     _die "notification target race detected; response not delivered to local pane"
+  _sgt_response_lock_release
   _sgt_wait_worker_notification "$pane" "$REPO_DIR" "$response_id" || \
     _die "Worker did not acknowledge its durable response notification; response remains pending"
-  _sgt_response_lock_release
   _cleanup_response_input
   trap - EXIT
   echo "sgt-respond: notified local pane $pane."
@@ -321,8 +321,8 @@ fi
 # ── Drain admission check for worker relaunch ─────────────────────────────────
 # Drain blocks relaunch (new pane/process) but never blocks response storage or
 # delivery to an already-live pane (handled above). The response was already
-# stored above; on drain, exit non-zero so the caller knows relaunch was
-# deferred while the stored response is preserved for later consumption.
+# stored above; on drain, retain a generation-bound drain_held marker so an
+# explicit undrain can reevaluate this waiting worker exactly once.
 #
 # The drain admission lock is held from the check through the new-window call so
 # a concurrent drain set either waits until the pane is spawned (and the new
@@ -330,7 +330,7 @@ fi
 # and blocks this relaunch.  The response lock is already held; nested locking
 # is safe because drain set never acquires the response lock.
 _SGT_RESPOND_DRAIN_FD=9
-_sgt_respond_drain_project=""
+_sgt_respond_drain_project="${SGT_PROJECT:-}"
 [[ -f "$REPO_DIR/project" ]] && \
   _sgt_respond_drain_project="$(tr -d '\n' < "$REPO_DIR/project" 2>/dev/null || true)"
 if ! _sgt_drain_lock_acquire_fd "$_SGT_RESPOND_DRAIN_FD" 2>/dev/null; then
@@ -347,7 +347,7 @@ if ! _sgt_drain_check_admission_locked "${_sgt_respond_drain_project:-}"; then
   _sgt_response_lock_release 2>/dev/null || true
   _cleanup_response_input
   trap - EXIT
-  echo "sgt-respond: drain is active; response stored for consumption after drain is cleared."
+  echo "sgt-respond: response stored; worker relaunch held by drain [project: ${_sgt_respond_drain_project:-global}]."
   exit 0
 fi
 # Drain admission lock remains held until after new-window (see release below).
@@ -383,20 +383,6 @@ rm -f "$worktree/.sergeant-notification-ack" "$worktree/.sergeant-notification-a
 delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
 _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$delivery_notification_id" response \
   "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
-
-# ── Drain admission check ──────────────────────────────────────────────────
-# Drain prevents new pane starts for matching projects.  The response has
-# already been stored generation-safely; write a drain_held marker so that
-# an explicit undrain can reevaluate this waiting worker exactly once.
-
-if _sgt_is_drained "$SGT_PROJECT"; then
-  _atomic_write "$REPO_DIR/drain_held" "$gate_generation"
-  _sgt_response_lock_release
-  _cleanup_response_input
-  trap - EXIT
-  echo "sgt-respond: response stored; worker relaunch held by drain [project: ${SGT_PROJECT:-global}]."
-  exit 0
-fi
 
 worker_command="$(_sgt_worker_command \
   "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")"
@@ -437,13 +423,13 @@ else
   _record_relaunch_orphan "tmux failed to capture exact relaunched worker pane identity"
   _die "Worker relaunch identity capture failed for $TASK_ID/$REPO"
 fi
+_sgt_response_lock_release
 if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" "$delivery_notification_id"; then
   tmux kill-pane -t "$new_pane" 2>/dev/null || true
   _record_relaunch_orphan "relaunched interactive worker did not acknowledge its durable response notification"
   _die "Worker relaunch notification acknowledgement timed out for $TASK_ID/$REPO"
 fi
 rm -f "$REPO_DIR/drain_held"
-_sgt_response_lock_release
 _cleanup_response_input
 trap - EXIT
 echo "sgt-respond: relaunched worker in pane $new_pane."

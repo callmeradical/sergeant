@@ -50,7 +50,9 @@ for skill_dir in "$CANONICAL_DIR"/*/; do
     fail "invalid frontmatter end: $skill"
 done
 
-[[ "${actual[*]}" == "${expected[*]}" ]] || fail "canonical inventory drift: ${actual[*]}"
+actual_sorted="$(printf '%s\n' "${actual[@]}" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
+expected_sorted="$(printf '%s\n' "${expected[@]}" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
+[[ "$actual_sorted" == "$expected_sorted" ]] || fail "canonical inventory drift: ${actual_sorted}"
 # no-mistakes is now vendored (coordinator-only, with user-invocable guard stripped)
 [[ -e "$CANONICAL_DIR/no-mistakes" ]] || fail 'no-mistakes skill must be vendored'
 
