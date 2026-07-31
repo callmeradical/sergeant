@@ -291,9 +291,9 @@ if matches:
     print("\x1f".join(matches[0]))
 ' "$marker")" || _routing_failure "td returned invalid or duplicate finding data"
 
-  task_id="" existing_status="" defer_until=""
+  task_id="" existing_status="" _defer_until=""
   if [[ -n "$existing_match" ]]; then
-    IFS=$'\x1f' read -r task_id existing_status defer_until <<< "$existing_match"
+    IFS=$'\x1f' read -r task_id existing_status _defer_until <<< "$existing_match"
     if [[ "$existing_status" == "closed" ]]; then
       td reopen "$task_id" --work-dir "$repo_path" --json >/dev/null 2>&1 || _routing_failure "failed to reopen td task"
     fi

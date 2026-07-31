@@ -428,12 +428,12 @@ output="$(PATH="$TEST_ROOT/fake-bin-no-notify:/usr/bin:/bin" \
 status=$?
 set -e
 [[ "$output" != *'ERROR: sgt-notify failed'* ]] || {
-  printf 'sgt-notify must be reachable via $SCRIPT_DIR when bin/ not on PATH\n' >&2
+  printf '%s\n' "sgt-notify must be reachable via \$SCRIPT_DIR when bin/ not on PATH" >&2
   exit 1
 }
 [[ "$status" -eq 2 ]] || { printf 'blocking findings did not gate (installed-bin): %s\n' "$output" >&2; exit 1; }
 grep -Fq 'blocked [app]' "$TEST_ROOT/notify.log" || {
-  printf 'sgt-notify was not called via $SCRIPT_DIR-relative path\n' >&2
+  printf '%s\n' "sgt-notify was not called via \$SCRIPT_DIR-relative path" >&2
   exit 1
 }
 
