@@ -284,23 +284,29 @@ if items is None:
 if not isinstance(items, list):
     raise SystemExit(1)
 needle = "Deduplication key: " + sys.argv[1]
-matches = [(item["id"], item.get("status") or "", item.get("defer_until") or "") for item in items if needle in item.get("description", "").splitlines()]
+matches = [(item["id"], item.get("status") or "", item.get("defer_until") or "",
+            ",".join(item.get("labels") or []))
+           for item in items if needle in item.get("description", "").splitlines()]
 if len(matches) > 1:
     raise SystemExit(1)
 if matches:
     print("\x1f".join(matches[0]))
 ' "$marker")" || _routing_failure "td returned invalid or duplicate finding data"
 
-  task_id="" existing_status="" _defer_until=""
+  task_id="" existing_status="" _defer_until="" existing_labels=""
   if [[ -n "$existing_match" ]]; then
-    IFS=$'\x1f' read -r task_id existing_status _defer_until <<< "$existing_match"
+    IFS=$'\x1f' read -r task_id existing_status _defer_until existing_labels <<< "$existing_match"
     if [[ "$existing_status" == "closed" ]]; then
       td reopen "$task_id" --work-dir "$repo_path" --json >/dev/null 2>&1 || _routing_failure "failed to reopen td task"
     fi
     # Preserve defer_until: a deliberately deferred finding must stay deferred
     # across reruns. Only an explicit human action (td defer --clear) may clear it.
+    # Preserve existing labels: merge standard labels with any manually added ones
+    # so reruns do not strip user-added labels (td-a70708, td-7ad6b2).
+    merged_labels="$(printf '%s,independent-review,finding,%s' "$existing_labels" "$AXIS" \
+      | tr ',' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ',' | sed 's/,$//')"
     td update "$task_id" --priority "$priority" --description "$body" \
-      --labels independent-review,finding,"$AXIS" --work-dir "$repo_path" --json >/dev/null 2>&1 \
+      --labels "$merged_labels" --work-dir "$repo_path" --json >/dev/null 2>&1 \
       || _routing_failure "failed to update td task"
     printf '%s: td %s updated; remediation: %s\n' "$finding_id" "$task_id" "$recommendation"
   else
@@ -354,9 +360,18 @@ if [[ -n "$invocation_gate_generation" && "$current_gate_generation" == "$invoca
 elif [[ -z "$invocation_gate_generation" && -z "$current_gate_generation" &&
         "$current_generation" == "$invocation_generation" && "$current_status" == "blocked" &&
         "$current_message" == "Review finding routing failed."* ]]; then
-  printf 'in_progress\n' > "$WORKTREE/.sergeant-status.tmp"
-  mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
-  rm -f "$WORKTREE/.sergeant-message"
+  # Gate-less recovery: only clear the block when no other axis has an open gate.
+  # A clean retry for this axis must not unblock a worker still blocked by a
+  # different axis's routing failure (td-5a8bde).
+  other_axis_gate=false
+  for _g in "$WORKTREE/.sergeant-review-gates"/*; do
+    [[ -f "$_g" ]] && other_axis_gate=true && break
+  done
+  if [[ "$other_axis_gate" == false ]]; then
+    printf 'in_progress\n' > "$WORKTREE/.sergeant-status.tmp"
+    mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
+    rm -f "$WORKTREE/.sergeant-message"
+  fi
 fi
 _sgt_response_lock_release || { printf 'ERROR: could not unlock review gate state\n' >&2; exit 2; }
 
