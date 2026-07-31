@@ -297,9 +297,8 @@ if matches:
     if [[ "$existing_status" == "closed" ]]; then
       td reopen "$task_id" --work-dir "$repo_path" --json >/dev/null 2>&1 || _routing_failure "failed to reopen td task"
     fi
-    if [[ -n "$defer_until" ]]; then
-      td defer "$task_id" --clear --work-dir "$repo_path" --json >/dev/null 2>&1 || _routing_failure "failed to undefer td task"
-    fi
+    # Preserve defer_until: a deliberately deferred finding must stay deferred
+    # across reruns. Only an explicit human action (td defer --clear) may clear it.
     td update "$task_id" --priority "$priority" --description "$body" \
       --labels independent-review,finding,"$AXIS" --work-dir "$repo_path" --json >/dev/null 2>&1 \
       || _routing_failure "failed to update td task"
