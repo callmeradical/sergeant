@@ -4158,8 +4158,10 @@ printf 'result\n' > \
 if [[ -f "$TEST_ROOT/fake-bin/git" ]]; then
   cp -p "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/git.saved"
 else
-  # shellcheck disable=SC2016
-  printf '#!/usr/bin/env bash\n"$REAL_GIT" "$@"\n' > "$TEST_ROOT/fake-bin/git.saved"
+  cat > "$TEST_ROOT/fake-bin/git.saved" <<'EOF'
+#!/usr/bin/env bash
+"$REAL_GIT" "$@"
+EOF
   chmod +x "$TEST_ROOT/fake-bin/git.saved"
 fi
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
