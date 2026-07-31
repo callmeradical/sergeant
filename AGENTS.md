@@ -145,8 +145,8 @@ Workers use `in_progress`, `needs_input`, `blocked`, and `waiting` as nontermina
 
 ### Worker review policy
 
-All future generated worker briefs encode `review_level=medium`. Workers at this
-level must:
+Generated worker briefs and `.sergeant-review-policy` must encode
+`review_level=medium`; `tests/sgt-dispatch-brief-test.sh` must fail when either output omits it. Workers at this level must:
 
 - run focused tests during implementation and at most one repository-required full suite;
 - run one bounded independent review pass covering documented standards and mission/spec correctness, prioritizing correctness, regressions, and material scope errors while ignoring cosmetic observations and speculative refactoring;

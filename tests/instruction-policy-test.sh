@@ -38,12 +38,14 @@ require_file "docs/getting-started.md"
 require_file "docs/skills.md"
 require_file "docs/using-sergeant.md"
 require_file "docs/troubleshooting.md"
-for policy_file in AGENTS.md skills/dispatch/SKILL.md README.md docs/using-sergeant.md; do
+for policy_file in AGENTS.md skills/dispatch/SKILL.md README.md docs/using-sergeant.md bin/sgt-dispatch; do
   require_text "$policy_file" 'review_level=medium'
   require_text "$policy_file" "at most one repository-required full suite"
   require_text "$policy_file" "one bounded independent review pass"
   require_text "$policy_file" "rerun only affected tests and review checks"
 done
+reject_text "AGENTS.md" "All future generated worker briefs encode"
+require_text "AGENTS.md" '`tests/sgt-dispatch-brief-test.sh` must fail when either output omits it'
 require_text "docs/getting-started.md" "for agent in opencode goose claude"
 require_text "docs/getting-started.md" "Install OpenCode, Goose, or Claude before using Sergeant interactive dispatch."
 

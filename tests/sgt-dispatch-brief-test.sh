@@ -146,6 +146,12 @@ SGT_WIKI_DISABLED=1 \
 
 brief="$(printf '%s\n' "$TEST_ROOT"/app-sgt-*/.sergeant-brief.md)"
 [[ -f "$brief" ]] || { printf 'brief was not generated\n' >&2; exit 1; }
+review_policy="$(dirname "$brief")/.sergeant-review-policy"
+[[ -f "$review_policy" ]] || { printf 'review policy metadata was not generated\n' >&2; exit 1; }
+[[ "$(cat "$review_policy")" == "review_level=medium" ]] || {
+  printf 'review policy metadata is not machine-readable\n' >&2
+  exit 1
+}
 
 task_dir="$(printf '%s\n' "$TEST_ROOT"/fleet/*)"
 fleet_intent="$task_dir/.sergeant-intent.md"
@@ -406,7 +412,7 @@ assert_contains "sgt-review-findings"
 assert_contains "structured JSON finding artifact"
 assert_contains "review bodies, prompts, secrets, or credentials"
 assert_contains "task IDs and recommended remediation"
-assert_contains "Rerun only affected focused tests and affected review checks"
+assert_contains "rerun only affected tests and review checks"
 assert_contains "Do not rerun the repository full suite or every independent review axis"
 assert_not_contains "rerun all required independent review axes"
 assert_contains "blocking findings remain zero"

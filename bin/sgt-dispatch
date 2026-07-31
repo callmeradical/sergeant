@@ -712,6 +712,8 @@ $td_context_block"
     accessibility_axis_markdown=$'\n- **Accessibility axis:** Because this is UI-facing work, launch a separate independent accessibility review covering keyboard access, semantics, focus behavior, contrast, responsive behavior, and assistive-technology compatibility as applicable.'
   fi
 
+  printf 'review_level=medium\n' > "$worktree_path/.sergeant-review-policy"
+
   cat > "$worktree_path/.sergeant-brief.md" << BRIEF_EOF
 # Sergeant Brief
 
@@ -826,7 +828,7 @@ Require each review axis to return a structured JSON finding artifact with only:
 
 ### 7. Remediate affected checks
 
-Remediate every blocking repository-native test or independent-review finding. Rerun only affected focused tests and affected review checks. Do not rerun the repository full suite or every independent review axis unless active repository or task policy explicitly requires it. Completion requires that blocking findings remain zero for all required checks.
+Remediate every blocking repository-native test or independent-review finding. After remediation, rerun only affected tests and review checks. Do not rerun the repository full suite or every independent review axis unless active repository or task policy explicitly requires it. Completion requires that blocking findings remain zero for all required checks.
 
 ### 8. Publish readiness and run coordinator validation
 
