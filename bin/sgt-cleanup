@@ -1552,8 +1552,8 @@ _git_worktree_removal_proven() {
         valid=false
         break
       fi
-      for canonical in "${registered_paths[@]}"; do
-        if [[ "$canonical" == "$path" ]]; then
+      for seen_path in "${registered_paths[@]}"; do
+        if [[ "$seen_path" == "$path" ]]; then
           valid=false
           break
         fi
