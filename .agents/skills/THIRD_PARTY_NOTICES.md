@@ -3,12 +3,19 @@
 The following repo-scoped skills are redistributed from
 [mattpocock/skills](https://github.com/mattpocock/skills) under its MIT License:
 
+- `codebase-design`
 - `code-review`
 - `diagnosing-bugs`
+- `domain-modeling`
+- `grill-with-docs`
+- `grilling`
+- `implement`
 - `prototype`
+- `research`
 - `resolving-merge-conflicts`
 - `tdd`
 - `to-spec`
+- `triage`
 - `wayfinder`
 
 Copyright (c) 2026 Matt Pocock
@@ -31,8 +38,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-`to-tickets` is Sergeant project-authored material. It is distributed under
-Sergeant's project MIT License: Copyright (c) 2026 Lars Cromley.
-
-`sergeant-setup` is Sergeant project-authored material. It is distributed under
-Sergeant's project MIT License: Copyright (c) 2026 Lars Cromley.
+`no-mistakes`, `to-tickets`, and `sergeant-setup` are Sergeant project-authored
+material. They are distributed under Sergeant's project MIT License:
+Copyright (c) 2026 Lars Cromley.
