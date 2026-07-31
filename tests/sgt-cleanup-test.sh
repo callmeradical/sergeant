@@ -1256,6 +1256,130 @@ mv "$TEST_ROOT/present-retry-cleanup-phase" \
 printf 'git\n' > "$TEST_ROOT/fleet/present-retry/app/wt_type"
 rm "$TEST_ROOT/fake-bin/git"
 
+# Regression: absent-worktree in partial-removal or removed phase must validate
+# the persisted owner before proceeding; without the fix it bypasses the owner
+# check and treats the replay as fresh cleanup (finding reappeared-worktree-replay-validation).
+init_test_repo "$TEST_ROOT/absent-replay"
+mkdir -p "$TEST_ROOT/fleet/absent-replay/app"
+git -C "$TEST_ROOT/absent-replay" worktree add -q -b absent-replay-worker \
+  "$TEST_ROOT/absent-replay-sgt-absent-replay"
+record_retry_owner absent-replay app "$TEST_ROOT/absent-replay"
+printf '%s\n' "$TEST_ROOT/absent-replay-sgt-absent-replay" \
+  > "$TEST_ROOT/fleet/absent-replay/app/worktree"
+printf 'git\n' > "$TEST_ROOT/fleet/absent-replay/app/wt_type"
+printf 'done\n' > "$TEST_ROOT/fleet/absent-replay/app/status"
+printf 'result\n' > "$TEST_ROOT/fleet/absent-replay/app/result"
+printf 'done\n' > "$TEST_ROOT/absent-replay-sgt-absent-replay/.sergeant-status"
+printf 'result\n' > "$TEST_ROOT/absent-replay-sgt-absent-replay/.sergeant-result"
+
+# Fake git: removes the worktree directory but fails the git command so cleanup
+# records partial-removal phase instead of proceeding to removed/reconciled.
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" rev-list "*|*" for-each-ref "*|*" config --get remote.origin.url "*|*" status --porcelain=v1 "*|*" diff "*|*" ls-files "*|*" hash-object "*|*" check-ref-format "*|*" worktree list --porcelain -z "*) "$REAL_GIT" "$@" ;;
+  *" rev-parse --is-inside-work-tree "*) printf 'true\n' ;;
+  *" rev-parse "*) "$REAL_GIT" "$@" ;;
+  *" status "*) ;;
+  *" worktree remove "*)
+    rm -rf "${!#}"
+    exit 1
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git"
+
+init_test_repo "$TEST_ROOT/absent-replay-other"
+for absent_phase in partial-removal removed; do
+  # Reset fleet state for each iteration.
+  rm -rf "$TEST_ROOT/fleet/absent-replay"
+  mkdir -p "$TEST_ROOT/fleet/absent-replay/app"
+  # Rebuild the git worktree if the previous iteration's fake-git or
+  # SGT_CLEANUP_FAIL_POINT removed the directory.  git worktree remove
+  # deregisters the worktree from the git registry; prune cleans stale refs
+  # before re-adding at the same path.
+  if [[ ! -d "$TEST_ROOT/absent-replay-sgt-absent-replay" ]]; then
+    git -C "$TEST_ROOT/absent-replay" worktree prune --expire now 2>/dev/null || true
+    git -C "$TEST_ROOT/absent-replay" worktree add -q -B absent-replay-worker \
+      "$TEST_ROOT/absent-replay-sgt-absent-replay"
+  fi
+  record_retry_owner absent-replay app "$TEST_ROOT/absent-replay"
+  printf '%s\n' "$TEST_ROOT/absent-replay-sgt-absent-replay" \
+    > "$TEST_ROOT/fleet/absent-replay/app/worktree"
+  printf 'git\n' > "$TEST_ROOT/fleet/absent-replay/app/wt_type"
+  printf 'done\n' > "$TEST_ROOT/fleet/absent-replay/app/status"
+  printf 'result\n' > "$TEST_ROOT/fleet/absent-replay/app/result"
+  printf 'done\n' > "$TEST_ROOT/absent-replay-sgt-absent-replay/.sergeant-status"
+  printf 'result\n' > "$TEST_ROOT/absent-replay-sgt-absent-replay/.sergeant-result"
+
+  if [[ "$absent_phase" == "partial-removal" ]]; then
+    # Fake git removes the directory but fails → cleanup records partial-removal.
+    if PATH="$TEST_ROOT/fake-bin:$PATH" \
+      SERGEANT_CONFIG="$TEST_ROOT/config" \
+      SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+      "$ROOT_DIR/bin/sgt-cleanup" absent-replay >/dev/null 2>&1; then
+      printf 'absent-replay partial-removal first-pass unexpectedly succeeded\n' >&2
+      exit 1
+    fi
+    [[ "$(sed -n '1p' "$TEST_ROOT/fleet/absent-replay/app/cleanup-phase")" == \
+      "partial-removal" ]] || {
+      printf 'partial-removal phase not recorded after failed worktree removal\n' >&2
+      exit 1
+    }
+  else
+    # SGT_CLEANUP_FAIL_POINT after git worktree remove → worktree absent, removed phase.
+    SGT_CLEANUP_FAIL_POINT=phase-publish-reconciled-absent \
+      SERGEANT_CONFIG="$TEST_ROOT/config" \
+      SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+      "$ROOT_DIR/bin/sgt-cleanup" absent-replay >/dev/null 2>&1 || true
+    [[ "$(sed -n '1p' "$TEST_ROOT/fleet/absent-replay/app/cleanup-phase")" == \
+      "removed" ]] || {
+      printf 'removed phase not recorded after SGT_CLEANUP_FAIL_POINT\n' >&2
+      exit 1
+    }
+  fi
+  [[ ! -d "$TEST_ROOT/absent-replay-sgt-absent-replay" ]]
+
+  # Point the project config at a different repo — owner validation must reject this.
+  absent_owner_before="$(cksum "$TEST_ROOT/fleet/absent-replay/app/cleanup-owner")"
+  absent_phase_before="$(cksum "$TEST_ROOT/fleet/absent-replay/app/cleanup-phase")"
+  absent_terminal_before="$(cksum \
+    "$TEST_ROOT/fleet/absent-replay/app/terminal-evidence"/.sergeant-*)"
+  cat > "$TEST_ROOT/config/absent-replay.yaml" <<EOF
+name: absent-replay
+repos:
+  - name: app
+    path: $TEST_ROOT/absent-replay-other
+EOF
+  if SERGEANT_CONFIG="$TEST_ROOT/config" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" absent-replay \
+      > "$TEST_ROOT/absent-$absent_phase-owner.log" 2>&1; then
+    printf 'cleanup skipped owner validation during absent %s replay\n' \
+      "$absent_phase" >&2
+    exit 1
+  fi
+  grep -Fq 'Configured retry owner changed: app' \
+    "$TEST_ROOT/absent-$absent_phase-owner.log" || {
+    printf 'unexpected error for absent %s owner check: %s\n' \
+      "$absent_phase" "$(cat "$TEST_ROOT/absent-$absent_phase-owner.log")" >&2
+    exit 1
+  }
+  # Fleet state must be preserved — no mutation on rejected retry.
+  [[ "$(cksum "$TEST_ROOT/fleet/absent-replay/app/cleanup-owner")" == \
+    "$absent_owner_before" ]]
+  [[ "$(cksum "$TEST_ROOT/fleet/absent-replay/app/cleanup-phase")" == \
+    "$absent_phase_before" ]]
+  [[ "$(cksum \
+    "$TEST_ROOT/fleet/absent-replay/app/terminal-evidence"/.sergeant-*)" == \
+    "$absent_terminal_before" ]]
+  # Restore correct config for next iteration.
+  record_retry_owner absent-replay app "$TEST_ROOT/absent-replay"
+done
+rm "$TEST_ROOT/fake-bin/git"
+printf 'absent-worktree partial-removal/removed replay validates owner: ok\n'
+
 # Regression for td-777c21: configured repo whose .git is a file (linked worktree)
 # must be accepted by cleanup-owner identity validation during retry.
 # Prior to the fix, _repo_git_dir required .git to be a directory and rejected linked
@@ -4171,8 +4295,10 @@ printf 'result\n' > \
 if [[ -f "$TEST_ROOT/fake-bin/git" ]]; then
   cp -p "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/git.saved"
 else
-  # shellcheck disable=SC2016
-  printf '#!/usr/bin/env bash\n"$REAL_GIT" "$@"\n' > "$TEST_ROOT/fake-bin/git.saved"
+  cat > "$TEST_ROOT/fake-bin/git.saved" <<'EOF'
+#!/usr/bin/env bash
+"$REAL_GIT" "$@"
+EOF
   chmod +x "$TEST_ROOT/fake-bin/git.saved"
 fi
 cat > "$TEST_ROOT/fake-bin/git" <<'EOF'

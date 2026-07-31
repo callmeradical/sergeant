@@ -617,6 +617,20 @@ _require_terminal_repos() {
         ) ]] || \
           _die "$repo_name has no reconciled cleanup phase for its absent worktree"
 
+        # Every persisted removal phase is replay state: validate the persisted
+        # owner before proceeding so a reappeared or misidentified worktree is
+        # rejected fail-closed before evidence is inspected or a remover runs.
+        # removing_phase (without type/root) is rejected earlier at line 558-559
+        # so it never reaches this block; removing_phase (with type/root) requires
+        # an absent worktree and is handled by the main loop's own owner check.
+        if [[ "$cleanup_phase" == "$partial_phase" || \
+              "$cleanup_phase" == "$removed_phase" ]]; then
+          [[ "$retry_type" == "$wt_type" ]] || \
+            _die "Retry worktree type changed: $repo_name"
+          _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+            "$retry_type" "$retry_root"
+        fi
+
         evidence_dir="$repo_dir/terminal-evidence"
         # For orphaned workers with a closed td task, a prior cleanup pass may
         # have staged terminal evidence whose .sergeant-status is the worker's
@@ -1653,6 +1667,7 @@ _validate_retry_validation_checkout() {
   local validation_identity validation_git_dir validation_git_identity validation_owner
 
   repo_name="$(basename "$repo_dir")"
+  task_id="$TASK_ID"
   validation_worktree="$(cat "$repo_dir/validation_worktree" 2>/dev/null || true)"
   [[ -n "$validation_worktree" && ( -e "$validation_worktree" || -L "$validation_worktree" ) ]] || \
     return 0
