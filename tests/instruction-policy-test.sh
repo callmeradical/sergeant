@@ -88,6 +88,8 @@ require_text "skills/dispatch/SKILL.md" "auth, OAuth, security, secret, credenti
 require_text "skills/dispatch/SKILL.md" "mutation before validation"
 reject_text "skills/dispatch/SKILL.md" "After two remediation cycles"
 reject_text "skills/dispatch/SKILL.md" "rerun affected tests and all required axes"
+require_text "skills/dispatch/SKILL.md" "Keep one TD record per finding"
+require_text "skills/dispatch/SKILL.md" "If remediation reaches a second cycle"
 require_text "docs/using-sergeant.md" '--intent-file intent.md'
 require_text "docs/using-sergeant.md" ".sergeant-intent.md"
 reject_text "AGENTS.md" 'no-mistakes axi run --intent "<the user'
