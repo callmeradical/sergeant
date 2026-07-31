@@ -133,7 +133,12 @@ _sgt_drain_lock_acquire_fd() {
   if command -v flock >/dev/null 2>&1; then
     # shellcheck disable=SC1083
     eval "exec ${fd}>\"${lock_file}\"" 2>/dev/null || true
-    flock -w "${SERGEANT_DRAIN_LOCK_TIMEOUT_SECS:-10}" "$fd" 2>/dev/null || true
+    # BusyBox flock does not support -w; poll with -n for portability.
+    local _deadline=$(( $(date +%s) + ${SERGEANT_DRAIN_LOCK_TIMEOUT_SECS:-10} ))
+    until flock -n "$fd" 2>/dev/null; do
+      [[ $(date +%s) -lt $_deadline ]] || break
+      sleep 0.1 2>/dev/null || sleep 1
+    done
   fi
   return 0
 }
@@ -176,10 +181,15 @@ _sgt_drain_with_lock() {
   lock_file="$(_sgt_drain_lock_file)"
   mkdir -p "$(dirname "$lock_file")"
   (
-    flock -x -w "${SERGEANT_DRAIN_LOCK_TIMEOUT_SECS:-10}" 200 || {
-      printf 'ERROR: could not acquire drain admission lock\n' >&2
-      exit 1
-    }
+    # BusyBox flock does not support -w; poll with -n for portability.
+    local _dl=$(( $(date +%s) + ${SERGEANT_DRAIN_LOCK_TIMEOUT_SECS:-10} ))
+    until flock -x -n 200 2>/dev/null; do
+      if [[ $(date +%s) -ge $_dl ]]; then
+        printf 'ERROR: could not acquire drain admission lock\n' >&2
+        exit 1
+      fi
+      sleep 0.1 2>/dev/null || sleep 1
+    done
     eval "$body"
   ) 200>"$lock_file"
 }
