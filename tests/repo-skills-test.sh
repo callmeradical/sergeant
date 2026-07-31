@@ -7,12 +7,12 @@ CANONICAL_DIR="$ROOT_DIR/.agents/skills"
 CLAUDE_DIR="$ROOT_DIR/.claude/skills"
 
 expected=(
-  codebase-design
   code-review
+  codebase-design
   diagnosing-bugs
   domain-modeling
-  grilling
   grill-with-docs
+  grilling
   implement
   no-mistakes
   prototype
