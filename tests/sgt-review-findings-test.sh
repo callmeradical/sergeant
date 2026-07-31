@@ -232,14 +232,14 @@ reopen_line="$(grep -nF 'reopen td-closed' "$TEST_ROOT/td.log" | cut -d: -f1)"
 update_line="$(grep -nF 'update td-closed' "$TEST_ROOT/td.log" | cut -d: -f1)"
 [[ "$reopen_line" -lt "$update_line" ]]
 
-# deferred existing task must have deferral cleared before update
+# deferred existing task must NOT have deferral cleared on rerun — preserve defer_until
 TD_LIST_RESULT='[{"id":"td-deferred","status":"in_progress","defer_until":"2099-01-01","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1"}]' \
   run_router "$TEST_ROOT/findings.json"
-grep -Fq 'defer td-deferred --clear' "$TEST_ROOT/td.log"
+if grep -Fq 'defer td-deferred --clear' "$TEST_ROOT/td.log"; then
+  printf 'deferred task had deferral cleared on rerun — must be preserved\n' >&2
+  exit 1
+fi
 grep -Fq 'update td-deferred' "$TEST_ROOT/td.log"
-defer_line="$(grep -nF 'defer td-deferred' "$TEST_ROOT/td.log" | cut -d: -f1)"
-update_line="$(grep -nF 'update td-deferred' "$TEST_ROOT/td.log" | cut -d: -f1)"
-[[ "$defer_line" -lt "$update_line" ]]
 
 ROUTER_TASK_ID='fleet/invalid' run_router "$TEST_ROOT/findings.json"
 [[ "$status" -eq 2 && "$output" == *'invalid fleet task'* ]]
@@ -428,12 +428,12 @@ output="$(PATH="$TEST_ROOT/fake-bin-no-notify:/usr/bin:/bin" \
 status=$?
 set -e
 [[ "$output" != *'ERROR: sgt-notify failed'* ]] || {
-  printf 'sgt-notify must be reachable via $SCRIPT_DIR when bin/ not on PATH\n' >&2
+  printf '%s\n' "sgt-notify must be reachable via \$SCRIPT_DIR when bin/ not on PATH" >&2
   exit 1
 }
 [[ "$status" -eq 2 ]] || { printf 'blocking findings did not gate (installed-bin): %s\n' "$output" >&2; exit 1; }
 grep -Fq 'blocked [app]' "$TEST_ROOT/notify.log" || {
-  printf 'sgt-notify was not called via $SCRIPT_DIR-relative path\n' >&2
+  printf '%s\n' "sgt-notify was not called via \$SCRIPT_DIR-relative path" >&2
   exit 1
 }
 

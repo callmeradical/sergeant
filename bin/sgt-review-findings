@@ -291,15 +291,14 @@ if matches:
     print("\x1f".join(matches[0]))
 ' "$marker")" || _routing_failure "td returned invalid or duplicate finding data"
 
-  task_id="" existing_status="" defer_until=""
+  task_id="" existing_status="" _defer_until=""
   if [[ -n "$existing_match" ]]; then
-    IFS=$'\x1f' read -r task_id existing_status defer_until <<< "$existing_match"
+    IFS=$'\x1f' read -r task_id existing_status _defer_until <<< "$existing_match"
     if [[ "$existing_status" == "closed" ]]; then
       td reopen "$task_id" --work-dir "$repo_path" --json >/dev/null 2>&1 || _routing_failure "failed to reopen td task"
     fi
-    if [[ -n "$defer_until" ]]; then
-      td defer "$task_id" --clear --work-dir "$repo_path" --json >/dev/null 2>&1 || _routing_failure "failed to undefer td task"
-    fi
+    # Preserve defer_until: a deliberately deferred finding must stay deferred
+    # across reruns. Only an explicit human action (td defer --clear) may clear it.
     td update "$task_id" --priority "$priority" --description "$body" \
       --labels independent-review,finding,"$AXIS" --work-dir "$repo_path" --json >/dev/null 2>&1 \
       || _routing_failure "failed to update td task"
