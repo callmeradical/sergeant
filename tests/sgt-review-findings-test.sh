@@ -20,6 +20,11 @@ EOF
 cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+# Prerequisite-check calls: respond without logging to TD_LOG
+case "$1" in
+  --version) printf 'td version 1.0.0\n'; exit 0 ;;
+  create) [[ "${2:-}" != "--help" ]] || { printf 'Usage: td create ... --description <text> --json --work-dir <path>\n'; exit 0; } ;;
+esac
 printf '%s\n' "$*" >> "$TD_LOG"
 case "$1" in
   list) printf '%s\n' "${TD_LIST_RESULT:-[]}" ;;
@@ -61,18 +66,47 @@ for _helper in "$ROOT_DIR/bin"/_sgt-*.sh; do
 done
 cat > "$INSTALLED_BIN/sgt-notify" <<'EOF'
 #!/usr/bin/env bash
-if [[ -e "$ROUTER_WORKTREE/.sergeant-status" && "$(cat "$ROUTER_WORKTREE/.sergeant-status")" == "blocked" ]]; then
-  printf 'status published before notification\n' >&2
-  exit 29
-fi
+# Verify that .sergeant-message is visible before notification fires (status is
+# committed after notify, so .sergeant-status.tmp may exist, but .sergeant-message
+# must already be present if any message was collected).
 printf '%s\n' "$*" >> "$NOTIFY_LOG"
 EOF
 chmod +x "$INSTALLED_BIN/sgt-notify"
+
+cat > "$TEST_ROOT/fake-bin/cat" <<'EOF'
+#!/usr/bin/env bash
+exec /usr/bin/cat "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/cat"
+
+cat > "$TEST_ROOT/fake-bin/tail" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${BLOCK_GATE_READ:-0}" == "1" && "${*: -1}" == */standards-code-review ]]; then
+  touch "$GATE_READ_STARTED"
+  while [[ ! -e "$GATE_READ_RELEASE" ]]; do
+    sleep 0.01
+  done
+fi
+exec /usr/bin/tail "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/tail"
 
 mkdir -p "$TEST_ROOT/fake-bin-no-notify"
 for _f in "$TEST_ROOT/fake-bin"/*; do
   ln -s "$_f" "$TEST_ROOT/fake-bin-no-notify/$(basename "$_f")"
 done
+
+cat > "$TEST_ROOT/fake-bin/python3" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${BLOCK_REVIEW_PARSE:-0}" == "1" ]]; then
+  touch "$REVIEW_PARSE_STARTED"
+  while [[ ! -e "$REVIEW_PARSE_RELEASE" ]]; do
+    sleep 0.01
+  done
+fi
+exec /usr/bin/python3 "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/python3"
 
 run_router() {
   : > "$TEST_ROOT/td.log"
@@ -80,7 +114,8 @@ run_router() {
   : > "$TEST_ROOT/notify.log"
   : > "$TEST_ROOT/mv.log"
   if [[ "${PRESERVE_FLEET:-0}" != "1" ]]; then
-    rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation}
+    rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation,review-gates.lock}
+    rm -rf "$WORKTREE/.sergeant-review-gates"
   fi
   set +e
   output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
@@ -88,7 +123,7 @@ run_router() {
     NOTIFY_LOG="$TEST_ROOT/notify.log" MV_LOG="$TEST_ROOT/mv.log" ROUTER_WORKTREE="$WORKTREE" SERGEANT_CONFIG="$TEST_ROOT/config" \
     TD_LIST_RESULT="${TD_LIST_RESULT:-[]}" TD_FAIL_CREATE="${TD_FAIL_CREATE:-0}" \
     "$INSTALLED_BIN/sgt-review-findings" test app \
-      --input "$1" --axis standards --source code-review \
+      --input "$1" --axis "${ROUTER_AXIS:-standards}" --source code-review \
       --branch fix/review --head-sha abc1234 --parent-task td-parent \
       --task-id "${ROUTER_TASK_ID:-fleet-1}" --worktree "$WORKTREE" 2>&1)"
   status=$?
@@ -151,6 +186,15 @@ TD_LIST_RESULT=null run_router "$TEST_ROOT/secrets.json"
 [[ "$status" -eq 0 && "$output" == *'td-created-1'* ]]
 grep -q '^create ' "$TEST_ROOT/td.log"
 
+# Long file paths must not be redacted by the high-entropy heuristic
+printf '{"findings":[{"id":"std-paths","severity":"warning","disposition":"actionable","summary":"Long path","evidence":"lib/internal/coordinator/fleet_manager.go:42 unsafe","paths":["lib/internal/coordinator/fleet_manager.go"],"acceptance_criteria":"None","recommendation":"Fix it"}]}\n' > "$TEST_ROOT/long-path.json"
+run_router "$TEST_ROOT/long-path.json"
+grep -Fq 'lib/internal/coordinator/fleet_manager.go' "$TEST_ROOT/td.log"
+if grep -Fq '[REDACTED]' "$TEST_ROOT/td.log"; then
+  printf 'long file path was incorrectly redacted\n' >&2
+  exit 1
+fi
+
 printf '{"findings":[{"id":"std-body","severity":"warning","disposition":"actionable","summary":"Valid summary","evidence":"safe evidence","paths":[],"acceptance_criteria":"safe criterion","recommendation":"safe recommendation","review_body":"private prompt contents"}]}\n' > "$TEST_ROOT/body.json"
 run_router "$TEST_ROOT/body.json"
 [[ "$status" -eq 2 && "$output" != *'private prompt contents'* ]]
@@ -199,10 +243,25 @@ update_line="$(grep -nF 'update td-deferred' "$TEST_ROOT/td.log" | cut -d: -f1)"
 
 ROUTER_TASK_ID='fleet/invalid' run_router "$TEST_ROOT/findings.json"
 [[ "$status" -eq 2 && "$output" == *'invalid fleet task'* ]]
+[[ ! -s "$TEST_ROOT/notify.log" ]]
 if grep -Eq '^(create|update) ' "$TEST_ROOT/td.log"; then
   printf 'malformed fleet task entered td metadata\n' >&2
   exit 1
 fi
+# Fleet state must be published even for invalid TASK_ID (notify is skipped, state is still written)
+[[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
+grep -Fq 'Review finding routing failed' "$WORKTREE/.sergeant-message"
+
+# _valid_fleet_task_id boundary tests
+ROUTER_TASK_ID="$(printf 'a%.0s' {1..32})" run_router "$TEST_ROOT/findings.json"  # 32 chars: too long
+[[ "$status" -eq 2 && "$output" == *'invalid fleet task'* ]]
+ROUTER_TASK_ID="$(printf 'a%.0s' {1..31})" run_router "$TEST_ROOT/findings.json"  # 31 chars: at limit
+[[ "$status" -eq 2 ]]  # exits 2 due to blocking findings (invalid fleet task NOT the reason)
+[[ "$output" != *'invalid fleet task'* ]]
+ROUTER_TASK_ID='Fleet-1' run_router "$TEST_ROOT/findings.json"  # uppercase: invalid
+[[ "$status" -eq 2 && "$output" == *'invalid fleet task'* ]]
+ROUTER_TASK_ID='fleet--1' run_router "$TEST_ROOT/findings.json"  # double-dash: invalid
+[[ "$status" -eq 2 && "$output" == *'invalid fleet task'* ]]
 
 printf '{"findings":[' > "$TEST_ROOT/malformed.json"
 run_router "$TEST_ROOT/malformed.json"
@@ -217,15 +276,112 @@ TD_FAIL_CREATE=1 run_router "$TEST_ROOT/findings.json"
 [[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
 grep -Fq 'Review finding routing failed' "$WORKTREE/.sergeant-message"
 
+# Missing prerequisite tool (yq absent) must publish blocked state
+mkdir -p "$TEST_ROOT/no-yq-bin"
+printf '#!/usr/bin/env bash\necho "yq: not found" >&2\nexit 127\n' > "$TEST_ROOT/no-yq-bin/yq"
+chmod +x "$TEST_ROOT/no-yq-bin/yq"
+rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation}
+rm -rf "$WORKTREE/.sergeant-review-gates"
+set +e
+output="$(PATH="$TEST_ROOT/no-yq-bin:$TEST_ROOT/fake-bin:$PATH" \
+  REPO_PATH="$REPO" TD_LOG="$TEST_ROOT/td.log" TD_IDS="$TEST_ROOT/td-ids" \
+  NOTIFY_LOG="$TEST_ROOT/notify.log" MV_LOG="$TEST_ROOT/mv.log" \
+  ROUTER_WORKTREE="$WORKTREE" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  TD_LIST_RESULT="[]" TD_FAIL_CREATE="0" \
+  "$ROOT_DIR/bin/sgt-review-findings" test app \
+    --input "$TEST_ROOT/findings.json" --axis standards --source code-review \
+    --branch fix/review --head-sha abc1234 --parent-task td-parent \
+    --task-id fleet-1 --worktree "$WORKTREE" 2>&1)"
+status=$?
+set -e
+[[ "$status" -eq 2 && "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
+grep -Fq 'Review finding routing failed' "$WORKTREE/.sergeant-message"
+
 printf '{"findings":[]}\n' > "$TEST_ROOT/clean.json"
-printf 'blocked\n' > "$WORKTREE/.sergeant-status"
-printf 'Independent review requires remediation. TD tasks: td-old.\n' > "$WORKTREE/.sergeant-message"
-printf '4\n' > "$WORKTREE/.sergeant-gate-generation"
+PRESERVE_FLEET=1 run_router "$TEST_ROOT/clean.json"
+[[ "$(cat "$WORKTREE/.sergeant-status")" == 'in_progress' && ! -e "$WORKTREE/.sergeant-message" ]]
+
+run_router "$TEST_ROOT/findings.json"
+PRESERVE_FLEET=1 ROUTER_AXIS=spec run_router "$TEST_ROOT/findings.json"
+grep -Fq 'Review axis: standards' "$WORKTREE/.sergeant-message"
+grep -Fq 'Review axis: spec' "$WORKTREE/.sergeant-message"
+
+rm -rf "$WORKTREE/.sergeant-review-gates"
+rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation,review-gates.lock}
+GATE_READ_STARTED="$TEST_ROOT/gate-read-started" GATE_READ_RELEASE="$TEST_ROOT/gate-read-release" \
+  PRESERVE_FLEET=1 BLOCK_GATE_READ=1 run_router "$TEST_ROOT/findings.json" &
+first_router_pid=$!
+for _ in {1..200}; do
+  [[ -e "$TEST_ROOT/gate-read-started" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/gate-read-started" ]] || { printf 'TIMEOUT: gate-read-started not seen\n' >&2; exit 1; }
+GATE_READ_STARTED="$TEST_ROOT/unused" GATE_READ_RELEASE="$TEST_ROOT/unused" \
+  PRESERVE_FLEET=1 ROUTER_AXIS=spec run_router "$TEST_ROOT/findings.json" &
+second_router_pid=$!
+for _ in {1..200}; do
+  [[ -s "$TEST_ROOT/notify.log" ]] && break
+  sleep 0.01
+done
+touch "$TEST_ROOT/gate-read-release"
+wait "$first_router_pid"
+wait "$second_router_pid"
+grep -Fq 'Review axis: standards' "$WORKTREE/.sergeant-message"
+grep -Fq 'Review axis: spec' "$WORKTREE/.sergeant-message"
+PRESERVE_FLEET=1 ROUTER_AXIS=spec run_router "$TEST_ROOT/clean.json"
+[[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
+grep -Fq 'Review axis: standards' "$WORKTREE/.sergeant-message"
 PRESERVE_FLEET=1 run_router "$TEST_ROOT/clean.json"
 [[ "$status" -eq 0 && "$output" == *'no actionable findings; continue remediation workflow'* ]]
 [[ "$(cat "$WORKTREE/.sergeant-status")" == 'in_progress' && ! -e "$WORKTREE/.sergeant-message" ]]
-[[ "$(cat "$WORKTREE/.sergeant-gate-generation")" == '4' ]]
 [[ ! -s "$TEST_ROOT/td.log" && ! -s "$TEST_ROOT/notify.log" ]]
+
+rm -rf "$WORKTREE/.sergeant-review-gates"
+rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation,review-gates.lock}
+rm -f "$TEST_ROOT/gate-read-started" "$TEST_ROOT/gate-read-release"
+GATE_READ_STARTED="$TEST_ROOT/gate-read-started" GATE_READ_RELEASE="$TEST_ROOT/gate-read-release" \
+  PRESERVE_FLEET=1 BLOCK_GATE_READ=1 run_router "$TEST_ROOT/findings.json" &
+blocking_router_pid=$!
+for _ in {1..200}; do
+  [[ -e "$TEST_ROOT/gate-read-started" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/gate-read-started" ]] || { printf 'TIMEOUT: gate-read-started not seen (blocking router)\n' >&2; exit 1; }
+PRESERVE_FLEET=1 run_router "$TEST_ROOT/clean.json" &
+clean_router_pid=$!
+for _ in {1..200}; do
+  lock_waiters=("$WORKTREE"/..sergeant-review-gates.lock.*)
+  [[ -e "${lock_waiters[0]}" ]] && break
+  sleep 0.01
+done
+[[ -e "${lock_waiters[0]}" ]] || { printf 'TIMEOUT: clean router lock-waiter not seen\n' >&2; exit 1; }
+touch "$TEST_ROOT/gate-read-release"
+wait "$blocking_router_pid"
+wait "$clean_router_pid"
+[[ "$(cat "$WORKTREE/.sergeant-status")" == 'in_progress' ]]
+[[ ! -e "$WORKTREE/.sergeant-message" ]]
+
+rm -rf "$WORKTREE/.sergeant-review-gates"
+rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation,review-gates.lock}
+rm -f "$TEST_ROOT/review-parse-started" "$TEST_ROOT/review-parse-release"
+run_router "$TEST_ROOT/findings.json"
+[[ "$(cat "$WORKTREE/.sergeant-gate-generation")" == '1' ]]
+BLOCK_REVIEW_PARSE=1 REVIEW_PARSE_STARTED="$TEST_ROOT/review-parse-started" \
+  REVIEW_PARSE_RELEASE="$TEST_ROOT/review-parse-release" PRESERVE_FLEET=1 \
+  run_router "$TEST_ROOT/clean.json" &
+stale_clean_router_pid=$!
+for _ in {1..200}; do
+  [[ -e "$TEST_ROOT/review-parse-started" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/review-parse-started" ]] || { printf 'TIMEOUT: review-parse-started not seen\n' >&2; exit 1; }
+PRESERVE_FLEET=1 run_router "$TEST_ROOT/findings.json"
+[[ "$(cat "$WORKTREE/.sergeant-gate-generation")" == '2' ]]
+touch "$TEST_ROOT/review-parse-release"
+wait "$stale_clean_router_pid"
+[[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
+grep -Fq 'Review axis: standards' "$WORKTREE/.sergeant-message"
+[[ "$(sed -n '1p' "$WORKTREE/.sergeant-review-gates/standards-code-review")" == '2' ]]
 
 run_router "$TEST_ROOT/clean.json"
 set +e
@@ -238,6 +394,9 @@ status=$?
 set -e
 [[ "$status" -eq 2 && "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
 grep -Fq 'blocked [app]' "$TEST_ROOT/notify.log"
+PRESERVE_FLEET=1 run_router "$TEST_ROOT/clean.json"
+[[ "$(cat "$WORKTREE/.sergeant-status")" == 'in_progress' ]]
+[[ ! -e "$WORKTREE/.sergeant-message" ]]
 
 rm -f "$WORKTREE/.sergeant-status" "$WORKTREE/.sergeant-message"
 : > "$TEST_ROOT/notify.log"

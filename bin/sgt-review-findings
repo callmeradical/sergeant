@@ -6,6 +6,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-response-lock.sh
+source "$SCRIPT_DIR/_sgt-response-lock.sh"
 
 usage() {
   cat >&2 <<'EOF'
@@ -40,19 +42,50 @@ WORKTREE="${WORKTREE:-$PWD}"
 TASK_ID="${TASK_ID:-unknown}"
 [[ -d "$WORKTREE" ]] || _die "Worktree unavailable: $WORKTREE"
 
+_valid_fleet_task_id() {
+  [[ ${#1} -le 31 && "$1" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]
+}
+
+_valid_review_context() {
+  [[ "$AXIS" =~ ^(standards|spec|accessibility)$ ]] && [[ "$SOURCE" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+_review_gate_path() {
+  printf '%s/%s-%s\n' "$WORKTREE/.sergeant-review-gates" "$AXIS" "$SOURCE"
+}
+
+_review_gate_messages() {
+  local gate
+  for gate in "$WORKTREE/.sergeant-review-gates"/*; do
+    [[ -f "$gate" ]] || continue
+    tail -n +2 "$gate"
+  done
+}
+
 _publish_blocked() {
-  local message="$1" notice="$2" generation current notify_status
+  local message="$1" notice="$2" generation current notify_status gate_path
+  _sgt_response_lock_acquire "$WORKTREE" ".sergeant-review-gates.lock" || return 1
   current="$( { tr -d '\n' < "$WORKTREE/.sergeant-gate-generation"; } 2>/dev/null || true)"
   [[ "$current" =~ ^[0-9]+$ ]] || current=0
   generation=$((current + 1))
+  if _valid_review_context; then
+    mkdir -p "$WORKTREE/.sergeant-review-gates"
+    gate_path="$(_review_gate_path)"
+    printf '%s\n%s\n' "$generation" "$message" > "$gate_path.tmp"
+    mv "$gate_path.tmp" "$gate_path"
+    message="$(_review_gate_messages)"
+  fi
   printf '%s\n' "$message" > "$WORKTREE/.sergeant-message.tmp"
   printf '%s\n' "$generation" > "$WORKTREE/.sergeant-gate-generation.tmp"
   printf 'blocked\n' > "$WORKTREE/.sergeant-status.tmp"
   mv "$WORKTREE/.sergeant-gate-generation.tmp" "$WORKTREE/.sergeant-gate-generation"
   mv "$WORKTREE/.sergeant-message.tmp" "$WORKTREE/.sergeant-message"
   notify_status=0
-  "$SCRIPT_DIR/sgt-notify" "$TASK_ID" "blocked [$REPO]: $notice" >/dev/null 2>&1 || notify_status=$?
+  if _valid_fleet_task_id "$TASK_ID"; then
+    "$SCRIPT_DIR/sgt-notify" "$TASK_ID" "blocked [$REPO]: $notice" >/dev/null 2>&1 || notify_status=$?
+  fi
   mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
+  _sgt_response_lock_release || return 1
   if (( notify_status != 0 )); then
     printf 'ERROR: sgt-notify failed while publishing blocked review findings\n' >&2
     return "$notify_status"
@@ -70,28 +103,40 @@ _routing_failure() {
   fi
   _publish_blocked \
     "Review finding routing failed. Routed TD tasks: $routed. Recommended remediation: $remediation. No review body was retained. Retry sgt-review-findings after correcting the structured artifact or td failure." \
-    "review finding routing failed; routed td tasks: $routed"
+    "review finding routing failed; routed td tasks: $routed" || true
   printf 'ERROR: %s\n' "$reason" >&2
   exit 2
 }
 
 for required in INPUT AXIS SOURCE BRANCH HEAD_SHA PARENT_TASK; do
-  [[ -n "${!required}" ]] || _routing_failure "missing required review field: ${required,,}"
+  field_name="$(printf '%s' "$required" | tr '[:upper:]_' '[:lower:]-')"
+  [[ -n "${!required}" ]] || _routing_failure "missing required review field: $field_name"
 done
 [[ "$TASK_ID" != "unknown" ]] || _routing_failure "missing required review field: task_id"
 _axis_re='^(standards|spec|accessibility)$'
 [[ "$AXIS" =~ $_axis_re ]] || _routing_failure "invalid review axis"
 [[ "$SOURCE" =~ ^[A-Za-z0-9._-]+$ ]] || _routing_failure "invalid review source"
+
+invocation_generation=""
+invocation_gate_generation=""
+_sgt_response_lock_acquire "$WORKTREE" ".sergeant-review-gates.lock" || _routing_failure "could not lock review gate state"
+invocation_generation="$( { tr -d '\n' < "$WORKTREE/.sergeant-gate-generation"; } 2>/dev/null || true)"
+gate_path="$(_review_gate_path)"
+if [[ -f "$gate_path" ]]; then
+  IFS= read -r invocation_gate_generation < "$gate_path" || true
+fi
+_sgt_response_lock_release || { printf 'ERROR: could not unlock review gate state\n' >&2; exit 2; }
+
 [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || _routing_failure "invalid branch"
 [[ "$HEAD_SHA" =~ ^[A-Fa-f0-9]{7,64}$ ]] || _routing_failure "invalid head SHA"
 [[ "$PARENT_TASK" =~ ^[A-Za-z0-9._-]+$ ]] || _routing_failure "invalid parent task"
-[[ "$TASK_ID" =~ ^[A-Za-z0-9._-]+$ ]] || _routing_failure "invalid fleet task"
+_valid_fleet_task_id "$TASK_ID" || _routing_failure "invalid fleet task"
 
 CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
 [[ -f "$CONFIG_FILE" ]] || _routing_failure "project not found"
-command -v yq >/dev/null 2>&1 || _routing_failure "yq is required"
-command -v git >/dev/null 2>&1 || _routing_failure "git is required"
-command -v td >/dev/null 2>&1 || _routing_failure "td is required"
+( _require_yq ) 2>/dev/null || _routing_failure "yq is required"
+( _require_git ) 2>/dev/null || _routing_failure "git is required"
+( _require_marcus_td ) 2>/dev/null || _routing_failure "td is required (github.com/marcus/td)"
 [[ -f "$INPUT" ]] || _routing_failure "review input is unavailable"
 
 repo_count="$(yq '.repos | length' "$CONFIG_FILE" 2>/dev/null)" || _routing_failure "project configuration is invalid"
@@ -182,7 +227,10 @@ then
   _routing_failure "invalid review output"
 fi
 
-mapfile -d '' -t fields < "$parsed"
+fields=()
+while IFS= read -r -d '' field; do
+  fields[${#fields[@]}]="$field"
+done < "$parsed"
 (( ${#fields[@]} % 8 == 0 )) || _routing_failure "invalid review output"
 
 declare -a blocking_tasks=() blocking_recommendations=()
@@ -240,12 +288,12 @@ matches = [(item["id"], item.get("status") or "", item.get("defer_until") or "")
 if len(matches) > 1:
     raise SystemExit(1)
 if matches:
-    print("\t".join(matches[0]))
+    print("\x1f".join(matches[0]))
 ' "$marker")" || _routing_failure "td returned invalid or duplicate finding data"
 
   task_id="" existing_status="" defer_until=""
   if [[ -n "$existing_match" ]]; then
-    IFS=$'\t' read -r task_id existing_status defer_until <<< "$existing_match"
+    IFS=$'\x1f' read -r task_id existing_status defer_until <<< "$existing_match"
     if [[ "$existing_status" == "closed" ]]; then
       td reopen "$task_id" --work-dir "$repo_path" --json >/dev/null 2>&1 || _routing_failure "failed to reopen td task"
     fi
@@ -277,18 +325,41 @@ if (( ${#blocking_tasks[@]} > 0 )); then
   task_list="$(IFS=', '; printf '%s' "${blocking_tasks[*]}")"
   remediation_list="$(IFS='; '; printf '%s' "${blocking_recommendations[*]}")"
   _publish_blocked \
-    "Independent review requires remediation. TD tasks: $task_list. Recommended remediation: $remediation_list" \
+    "Independent review requires remediation. Review axis: $AXIS. Review source: $SOURCE. TD tasks: $task_list. Recommended remediation: $remediation_list" \
     "independent review requires remediation; td tasks: $task_list"
   exit 2
 fi
 
+_sgt_response_lock_acquire "$WORKTREE" ".sergeant-review-gates.lock" || _routing_failure "could not lock review gate state"
 current_status="$( { tr -d '\n' < "$WORKTREE/.sergeant-status"; } 2>/dev/null || true)"
 current_message="$(cat "$WORKTREE/.sergeant-message" 2>/dev/null || true)"
-if [[ "$current_status" == "blocked" ]] && [[ "$current_message" == "Independent review requires remediation."* || "$current_message" == "Review finding routing failed."* ]]; then
+current_generation="$( { tr -d '\n' < "$WORKTREE/.sergeant-gate-generation"; } 2>/dev/null || true)"
+gate_path="$(_review_gate_path)"
+current_gate_generation=""
+if [[ -f "$gate_path" ]]; then
+  IFS= read -r current_gate_generation < "$gate_path" || true
+fi
+if [[ -n "$invocation_gate_generation" && "$current_gate_generation" == "$invocation_gate_generation" ]]; then
+  rm -f "$gate_path"
+  remaining_message="$(_review_gate_messages)"
+  if [[ -n "$remaining_message" ]]; then
+    printf '%s\n' "$remaining_message" > "$WORKTREE/.sergeant-message.tmp"
+    mv "$WORKTREE/.sergeant-message.tmp" "$WORKTREE/.sergeant-message"
+  elif [[ "$current_generation" == "$invocation_generation" && "$current_status" == "blocked" ]] &&
+       [[ "$current_message" == "Independent review requires remediation."* || "$current_message" == "Review finding routing failed."* ]]; then
+    printf 'in_progress\n' > "$WORKTREE/.sergeant-status.tmp"
+    mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
+    rm -f "$WORKTREE/.sergeant-message"
+    rmdir "$WORKTREE/.sergeant-review-gates" 2>/dev/null || true
+  fi
+elif [[ -z "$invocation_gate_generation" && -z "$current_gate_generation" &&
+        "$current_generation" == "$invocation_generation" && "$current_status" == "blocked" &&
+        "$current_message" == "Review finding routing failed."* ]]; then
   printf 'in_progress\n' > "$WORKTREE/.sergeant-status.tmp"
   mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
   rm -f "$WORKTREE/.sergeant-message"
 fi
+_sgt_response_lock_release || { printf 'ERROR: could not unlock review gate state\n' >&2; exit 2; }
 
 if (( actionable_count == 0 )); then
   printf 'no actionable findings; continue remediation workflow\n'

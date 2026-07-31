@@ -8,8 +8,9 @@ _sgt_require_running_bash || return 1
 
 _sgt_response_lock_acquire() {
   local repo_state="$1"
-  local lock_path="$repo_state/response.lock"
-  local candidate="$repo_state/.response.lock.$$.$RANDOM.$RANDOM"
+  local lock_name="${2:-response.lock}"
+  local lock_path="$repo_state/$lock_name"
+  local candidate="$repo_state/.$lock_name.$$.$RANDOM.$RANDOM"
   local candidate_name="${candidate##*/}"
   local owner current_owner interval
   interval="${SGT_RESPONSE_LOCK_INTERVAL:-0.01}"
@@ -63,6 +64,11 @@ _sgt_response_lock_acquire() {
 
     if [[ -e "$lock_path" || -L "$lock_path" ]]; then
       owner="$(cat "$lock_path" 2>/dev/null || readlink "$lock_path" 2>/dev/null || true)"
+      if [[ -z "$owner" ]]; then
+        # Lock file disappeared between the -e check and the read (TOCTOU: just released).
+        # Retry; the next iteration will find the file gone and attempt ln.
+        continue
+      fi
       if [[ ! "$owner" =~ ^[0-9]+$ ]]; then
         rm -f "$candidate"
         printf 'ERROR: Response lock has an invalid owner: %s\n' "$lock_path" >&2
