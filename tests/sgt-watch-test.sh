@@ -23,6 +23,20 @@ cat > "$fake_bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
   display-message)
+    target=""
+    previous=""
+    for argument in "$@"; do
+      [[ "$previous" == -t ]] && target="$argument"
+      previous="$argument"
+    done
+    extra_identity="${EXTRA_PANE_IDENTITY:-}"
+    extra_remainder="${extra_identity#*|}"
+    extra_pane="${extra_remainder%%|*}"
+    if [[ -n "$extra_identity" && "$target" == "$extra_pane" ]]; then
+      [[ -z "${EXTRA_TMUX_STATE:-}" || ! -e "$EXTRA_TMUX_STATE" ]] || exit 1
+      printf '%s\n' "$extra_identity"
+      exit 0
+    fi
     [[ ! -e "$TMUX_STATE" ]] || exit 1
     [[ "${PANE_DEAD:-0}" == "0" ]] || exit 1
     case "${!#}" in
@@ -33,13 +47,49 @@ case "$1" in
         printf '%s\n' "${PANE_ACTIVITY:-0}"
         ;;
       *)
-        printf '%s\n' "${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
+        printf '%s\n' "${PANE_IDENTITY:-$(cat "$EXPECTED_WORKER/pane_identity")}"
         ;;
     esac
     ;;
+  list-panes)
+    if [[ ! -e "$TMUX_STATE" && "${PANE_DEAD:-0}" == "0" ]]; then
+      current_identity="${PANE_IDENTITY:-$(cat "$EXPECTED_WORKER/pane_identity")}"
+      if [[ "${!#}" == '#{pane_id}' ]]; then
+        current_remainder="${current_identity#*|}"
+        printf '%s\n' "${current_remainder%%|*}"
+      else
+        printf '%s\n' "$current_identity"
+      fi
+    fi
+    if [[ -n "${EXTRA_PANE_IDENTITY:-}" &&
+          ( -z "${EXTRA_TMUX_STATE:-}" || ! -e "$EXTRA_TMUX_STATE" ) ]]; then
+      if [[ "${!#}" == '#{pane_id}' ]]; then
+        extra_remainder="${EXTRA_PANE_IDENTITY#*|}"
+        printf '%s\n' "${extra_remainder%%|*}"
+      else
+        printf '%s\n' "$EXTRA_PANE_IDENTITY"
+      fi
+    fi
+    if [[ -n "${UNRELATED_PANE_IDENTITY:-}" ]]; then
+      if [[ "${!#}" == '#{pane_id}' ]]; then
+        unrelated_remainder="${UNRELATED_PANE_IDENTITY#*|}"
+        printf '%s\n' "${unrelated_remainder%%|*}"
+      else
+        printf '%s\n' "$UNRELATED_PANE_IDENTITY"
+      fi
+    fi
+    ;;
   kill-pane)
     printf '%s\n' "$*" >> "$TMUX_LOG"
-    : > "$TMUX_STATE"
+    target="${!#}"
+    extra_identity="${EXTRA_PANE_IDENTITY:-}"
+    extra_remainder="${extra_identity#*|}"
+    extra_pane="${extra_remainder%%|*}"
+    if [[ -n "$extra_pane" && "$target" == "$extra_pane" && -n "${EXTRA_TMUX_STATE:-}" ]]; then
+      : > "$EXTRA_TMUX_STATE"
+    else
+      : > "$TMUX_STATE"
+    fi
     ;;
 esac
 EOF
@@ -57,13 +107,9 @@ cat > "$fake_bin/stat" <<'EOF'
 #!/usr/bin/env bash
 last="${!#}"
 if [[ "$last" == */pane_identity && -n "${LEGACY_IDENTITY_RACE:-}" && \
-  -n "${LEGACY_IDENTITY_RACE_MARKER:-}" ]]; then
-  count_file="${LEGACY_IDENTITY_RACE_MARKER}.count"
-  count=0
-  [[ ! -f "$count_file" ]] || count="$(cat "$count_file")"
-  count=$((count + 1))
-  printf '%s\n' "$count" > "$count_file"
-  if [[ "$count" -eq 3 ]]; then
+  -n "${LEGACY_IDENTITY_RACE_MARKER:-}" && \
+  ! -e "$LEGACY_IDENTITY_RACE_MARKER" ]] && \
+  compgen -G "${last}.tmp.*" >/dev/null; then
     case "$LEGACY_IDENTITY_RACE" in
       replace-content)
         printf 'tampered-pane\n' > "$last"
@@ -76,7 +122,6 @@ if [[ "$last" == */pane_identity && -n "${LEGACY_IDENTITY_RACE:-}" && \
         ;;
     esac
     : > "$LEGACY_IDENTITY_RACE_MARKER"
-  fi
 fi
 exec "$REAL_STAT" "$@"
 EOF
@@ -154,7 +199,7 @@ for forged_command in "wrapper $legacy_command extra" "${legacy_command}-prefix-
   [[ ! -e "$repo/pane_identity" ]]
 done
 
-printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo" > "$repo/pane_identity"
+printf '%s\n' "$legacy_identity" > "$repo/pane_identity"
 
 printf 'done\n' > "$worktree/.sergeant-status"
 rm -f "$worktree/.sergeant-result"
@@ -184,6 +229,58 @@ EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" "$ROOT/bi
 [[ "$(cat "$repo/result")" == "https://example.invalid/pr/1" ]]
 grep -Fq 'kill-pane -t %42' "$TMUX_LOG"
 [[ -s "$repo/worker_recycled" ]]
+grep -Fq 'pane_identity=0|%42|' "$repo/worker_recycled"
+
+# A prior recycle receipt and stale current pointer must not hide an older live
+# pane that owns this exact worker command.
+printf 'drained\n' > "$worktree/.sergeant-status"
+printf 'drained\n' > "$repo/status"
+printf 'drained\n' > "$worktree/.sergeant-drained"
+printf 'worker_pid=4242\nworker_start=Mon Jan  1 00:00:00 2024\n' \
+  > "$repo/drain_handoff"
+chmod 600 "$repo/drain_handoff"
+printf '%%99\n' > "$repo/pane"
+printf '0|%%99|9999|654321|missing-current-worker\n' > "$repo/pane_identity"
+chmod 600 "$repo/pane_identity"
+recorded_executable="$TEST_ROOT/old install/bin/sgt-interactive-worker"
+printf '%s\n' "$recorded_executable" > "$repo/worker_executable"
+printf -v stale_command '%q %q %q %q' \
+  "$recorded_executable" "$repo" "$worktree" opencode
+tmux_stale_command="${stale_command//\\/\\\\}"
+extra_identity="0|%41|4141|123455|\"$tmux_stale_command\""
+unrelated_identity="0|%39|3939|123453|/bin/sh -c $stale_command"
+EXPECTED_WORKER="$repo" EXTRA_PANE_IDENTITY="$extra_identity" \
+  UNRELATED_PANE_IDENTITY="$unrelated_identity" \
+  EXTRA_TMUX_STATE="$TEST_ROOT/extra-tmux.state" \
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT/bin/sgt-watch" --sync task-1
+[[ "$(cat "$repo/status")" == "drained" ]]
+grep -Fq 'kill-pane -t %41' "$TMUX_LOG"
+if grep -Fq 'kill-pane -t %39' "$TMUX_LOG"; then
+  printf 'unrelated terminal pane was recycled\n' >&2
+  exit 1
+fi
+
+for preserved_status in blocked waiting orphaned; do
+  rm -f "$TEST_ROOT/preserved-tmux.state"
+  printf '%s\n' "$preserved_status" > "$worktree/.sergeant-status"
+  printf '%s\n' "$preserved_status" > "$repo/status"
+  preserved_identity="0|%40|4040|123454|$legacy_command"
+  EXPECTED_WORKER="$repo" EXTRA_PANE_IDENTITY="$preserved_identity" \
+    EXTRA_TMUX_STATE="$TEST_ROOT/preserved-tmux.state" \
+    PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+    "$ROOT/bin/sgt-watch" --sync task-1
+  if grep -Fq 'kill-pane -t %40' "$TMUX_LOG"; then
+    printf 'nonterminal %s worker pane was recycled\n' "$preserved_status" >&2
+    exit 1
+  fi
+done
+
+printf 'done\n' > "$worktree/.sergeant-status"
+printf 'done\n' > "$repo/status"
+printf 'https://example.invalid/pr/1\n' > "$worktree/.sergeant-result"
+rm -f "$worktree/.sergeant-drained"
+rm -f "$repo/drain_handoff"
 
 incomplete_repo="$fleet/task-incomplete/app"
 mkdir -p "$incomplete_repo"
@@ -398,6 +495,10 @@ printf 'Brief: drained lifecycle test\n' > "$drained_task/brief.md"
 printf '%s\n' "$drained_wt" > "$drained_task/drainedrepo/worktree"
 printf 'local-tmux\n' > "$drained_task/drainedrepo/backend"
 printf 'drained\n' > "$drained_wt/.sergeant-status"
+printf 'drained\n' > "$drained_wt/.sergeant-drained"
+printf 'worker_pid=4242\nworker_start=Mon Jan  1 00:00:00 2024\n' \
+  > "$drained_task/drainedrepo/drain_handoff"
+chmod 600 "$drained_task/drainedrepo/drain_handoff"
 # Note: no pane file — drained worker's supervisor has exited
 
 # --sync: drained status propagated to fleet without triggering orphan detector

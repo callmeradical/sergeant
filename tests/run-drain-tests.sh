@@ -106,6 +106,17 @@ fi
 _run "worker drain checkpoint + _watch_progress drain signal" \
   bash "$ROOT_DIR/tests/sgt-worker-drain-test.sh"
 
+# Terminal lifecycle regressions for drain, recycle, response, and recovery.
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  _run "terminal worker recycling" bash "$ROOT_DIR/tests/sgt-watch-test.sh"
+  _run "worker recovery ownership" bash "$ROOT_DIR/tests/sgt-recover-test.sh"
+  _run "worker response ownership" bash "$ROOT_DIR/tests/sgt-respond-pane-ownership-test.sh"
+  _run "worker response lifecycle" bash "$ROOT_DIR/tests/sgt-respond-test.sh"
+  _run "interactive worker lifecycle" bash "$ROOT_DIR/tests/sgt-worker-test.sh"
+else
+  _skip "terminal lifecycle regressions" "git or tmux not available in this environment"
+fi
+
 # ── Pass 2: Bash 3.2 ─────────────────────────────────────────────────────────
 
 printf '\n── Pass 2: Bash 3.2 ────────────────────────────────────────\n'
@@ -115,6 +126,9 @@ if [[ -x "$BASH32" ]]; then
   # both bugs: --status (bug #82) and lock helpers (bug #81).
   _run "drain state, --status, lock helpers" \
     "$BASH32" "$ROOT_DIR/tests/sgt-drain-test.sh"
+
+  _run "terminal lifecycle Bash 3.2 syntax" \
+    "$BASH32" "$ROOT_DIR/tests/sgt-lifecycle-bash32-test.sh"
 
   # sgt-recover uses git worktrees for fixture setup and is skipped in the
   # Bash 3.2 pass when git is unavailable (e.g. bash:3.2 Alpine image).

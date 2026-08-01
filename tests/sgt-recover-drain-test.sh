@@ -6,6 +6,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
+TMUX_KILLED_DIR="$TEST_ROOT/killed-panes"
+TMUX_OLD_IDENTITY_FILE="$TEST_ROOT/old-pane-identity"
+mkdir -p "$TMUX_KILLED_DIR"
+export TMUX_KILLED_DIR TMUX_OLD_IDENTITY_FILE
 
 fleet="$TEST_ROOT/fleet"
 task_dir="$fleet/task-1"
@@ -41,9 +45,15 @@ case "$1" in
       [[ "$previous" == -t ]] && target="$arg"
       previous="$arg"
     done
-    pane_identity="${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
+    [[ ! -e "$TMUX_KILLED_DIR/${target#%}" ]] || exit 1
+    old_identity="$(cat "$TMUX_OLD_IDENTITY_FILE")"
+    old_remainder="${old_identity#*|}"
+    old_remainder="${old_remainder#*|}"
+    old_remainder="${old_remainder#*|}"
+    worker_command="${old_remainder#*|}"
+    pane_identity="${PANE_IDENTITY:-0|$target|4242|123456|$worker_command}"
     if [[ "$target" == "${NEW_PANE:-%99}" ]]; then
-      pane_identity="0|$target|9999|654321|sgt-interactive-worker:$EXPECTED_WORKER"
+      pane_identity="0|$target|9999|654321|$worker_command"
       if [[ "${AUTO_DELIVER:-1}" == 1 && -s "$EXPECTED_WORKER/notification_id" ]]; then
         notification_id="$(cat "$EXPECTED_WORKER/notification_id")"
         notification_worktree="$(cat "$EXPECTED_WORKER/worktree")"
@@ -68,7 +78,23 @@ case "$1" in
     [[ "${FAIL_WINDOW:-0}" == 0 ]] || exit 7
     printf '%s\n' "${NEW_PANE:-%99}"
     ;;
-  kill-pane) exit 0 ;;
+  list-panes)
+    old_identity="$(cat "$TMUX_OLD_IDENTITY_FILE")"
+    old_remainder="${old_identity#*|}"
+    old_pane="${old_remainder%%|*}"
+    if [[ ! -e "$TMUX_KILLED_DIR/${old_pane#%}" ]]; then
+      if [[ "${!#}" == '#{pane_id}' ]]; then
+        printf '%s\n' "$old_pane"
+      else
+        printf '%s\n' "$old_identity"
+      fi
+    fi
+    ;;
+  kill-pane)
+    target="${!#}"
+    : > "$TMUX_KILLED_DIR/${target#%}"
+    exit 0
+    ;;
   send-keys) exit 0 ;;
 esac
 EOF
@@ -84,14 +110,17 @@ _setup_stalled_worker() {
   local wt="$1"
   local pane="${2:-%42}"
   mkdir -p "$repo_state"
+  rm -f "$TMUX_KILLED_DIR/${pane#%}" "$TMUX_KILLED_DIR/99"
   printf '%s\n' "$wt" > "$repo_state/worktree"
   printf 'in_progress\n' > "$repo_state/status"
   printf 'in_progress\n' > "$wt/.sergeant-status"
   printf 'live worker stalled: no progress for 401s (grace=300s); last event at epoch 1000\n' \
     > "$repo_state/diagnostic"
   printf '%s\n' "$pane" > "$repo_state/pane"
-  printf '0|%s|4242|123456|sgt-interactive-worker:%s\n' "$pane" "$repo_state" \
-    > "$repo_state/pane_identity"
+  printf -v worker_command '%q %q %q %q' \
+    "$ROOT_DIR/bin/sgt-interactive-worker" "$repo_state" "$wt" opencode
+  printf '0|%s|4242|123456|%s\n' "$pane" "$worker_command" > "$repo_state/pane_identity"
+  cp "$repo_state/pane_identity" "$TMUX_OLD_IDENTITY_FILE"
   chmod 600 "$repo_state/pane_identity"
   printf 'sgt\n' > "$repo_state/tmux_session"
   printf 'task/app\n' > "$repo_state/window_name"

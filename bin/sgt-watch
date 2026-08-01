@@ -115,31 +115,63 @@ _sgt_dagr_advance() {
 }
 
 _recycle_terminal_worker() {
-  local repo_dir="$1"
-  local pane pane_id
+  local repo_dir="${1%/}"
+  local worktree agent listed identity remainder pane_id current killed_any existing_diagnostic
+  local recycled_identities recycle_receipt
 
-  [[ ! -s "$repo_dir/worker_recycled" ]] || return 0
-  pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
-  [[ -n "$pane" ]] || return 0
   if ! command -v tmux >/dev/null 2>&1; then
-    printf 'terminal worker could not be recycled because tmux is unavailable\n' > "$repo_dir/diagnostic"
+    printf 'terminal worker recycle: tmux is unavailable\n' \
+      > "$repo_dir/diagnostic"
     return 1
   fi
-  pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
-  if [[ "$pane_id" != "$pane" ]]; then
-    date -u +%Y-%m-%dT%H:%M:%SZ > "$repo_dir/worker_recycled"
-    return 0
-  fi
-  if ! _pane_is_supervisor "$pane" "$repo_dir"; then
-    printf 'terminal worker pane identity does not match; refusing recycle: %s\n' "$pane" > "$repo_dir/diagnostic"
+  worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+  agent="$(cat "$repo_dir/agent" 2>/dev/null || true)"
+  if ! listed="$(_sgt_live_worker_pane_identities \
+    "$SCRIPT_DIR/sgt-interactive-worker" "$repo_dir" "$worktree" "$agent")"; then
+    printf 'terminal worker recycle: could not enumerate tmux panes\n' \
+      > "$repo_dir/diagnostic"
     return 1
   fi
-  if ! tmux kill-pane -t "$pane" 2>/dev/null ||
-     tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
-    printf 'failed to recycle terminal worker pane: %s\n' "$pane" > "$repo_dir/diagnostic"
-    return 1
+
+  killed_any=false
+  recycled_identities=""
+  while IFS= read -r identity; do
+    [[ -n "$identity" ]] || continue
+    remainder="${identity#*|}"
+    pane_id="${remainder%%|*}"
+
+    current="$(_sgt_pane_identity "$pane_id" || true)"
+    if [[ "$current" != "$identity" ]]; then
+      if _sgt_tmux_pane_absent "$pane_id"; then
+        continue
+      fi
+      printf 'terminal worker recycle: pane changed during verification: %s\n' \
+        "$pane_id" > "$repo_dir/diagnostic"
+      return 1
+    fi
+    tmux kill-pane -t "$pane_id" 2>/dev/null || true
+    if ! _sgt_tmux_pane_absent "$pane_id"; then
+      printf 'terminal worker recycle: pane remains after termination: %s\n' "$pane_id" \
+        > "$repo_dir/diagnostic"
+      return 1
+    fi
+    killed_any=true
+    recycled_identities="${recycled_identities}${recycled_identities:+$'\n'}pane_identity=$identity"
+  done <<< "$listed"
+
+  existing_diagnostic="$(cat "$repo_dir/diagnostic" 2>/dev/null || true)"
+  [[ "$existing_diagnostic" != "terminal worker recycle:"* ]] || \
+    rm -f "$repo_dir/diagnostic"
+  # Informational, identity-bound receipt only. Every sync still re-enumerates
+  # exact live ownership; this file never suppresses a later pane/process check.
+  if $killed_any; then
+    recycle_receipt="recycled_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"$'\n'"$recycled_identities"
+    _sgt_replace_owned_file "$repo_dir/worker_recycled" "$recycle_receipt" || {
+      printf 'terminal worker recycle: could not publish identity receipt\n' \
+        > "$repo_dir/diagnostic"
+      return 1
+    }
   fi
-  date -u +%Y-%m-%dT%H:%M:%SZ > "$repo_dir/worker_recycled"
   return 0
 }
 
@@ -293,9 +325,20 @@ _sync_task() {
 
   for repo_dir in "$task_dir"/*/; do
     [[ -d "$repo_dir" ]] || continue
-    local worktree wt_status fleet_status pane
+    local worktree wt_status fleet_status pane replacement_phase
     fleet_status="$(cat "$repo_dir/status" 2>/dev/null || echo "")"
     worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
+    replacement_phase="$(_sgt_read_owned_file \
+      "${repo_dir%/}/replacement_phase" 2>/dev/null || true)"
+    if [[ "$replacement_phase" == "launching" ]]; then
+      continue
+    fi
+    if [[ ( -e "${repo_dir%/}/replacement_phase" ||
+            -L "${repo_dir%/}/replacement_phase" ) && -z "$replacement_phase" ]]; then
+      printf 'worker replacement journal is unreadable; reconciliation required\n' \
+        > "${repo_dir%/}/diagnostic"
+      continue
+    fi
     if [[ -z "$worktree" || ! -d "$worktree" ]]; then
       if [[ "$fleet_status" == "dispatched" ]]; then
         _reconcile_incomplete_dispatch "$repo_dir"
@@ -336,6 +379,18 @@ _sync_task() {
       rm -f "$repo_dir/message"
     fi
 
+    replacement_phase="$(_sgt_read_owned_file \
+      "${repo_dir%/}/replacement_phase" 2>/dev/null || true)"
+    if [[ "$replacement_phase" == "launching" ]]; then
+      continue
+    fi
+    if [[ ( -e "${repo_dir%/}/replacement_phase" ||
+            -L "${repo_dir%/}/replacement_phase" ) && -z "$replacement_phase" ]]; then
+      printf 'worker replacement journal is unreadable; reconciliation required\n' \
+        > "${repo_dir%/}/diagnostic"
+      continue
+    fi
+
     if [[ "$wt_status" == "done" && ! -s "$worktree/.sergeant-result" ]]; then
       printf 'orphaned\n' > "$worktree/.sergeant-status"
       printf 'orphaned\n' > "$repo_dir/status"
@@ -351,6 +406,15 @@ _sync_task() {
         fi
         # If this fleet task is part of a dagr run, advance the DAG
         _sgt_dagr_advance "$repo_dir" "$wt_status"
+        ;;
+      drained)
+        if [[ -z "$(_sgt_read_owned_file \
+          "${repo_dir%/}/drain_handoff" 2>/dev/null || true)" ]]; then
+          printf 'drained worker lacks durable handoff evidence; refusing recycle\n' \
+            > "$repo_dir/diagnostic"
+        elif ! _recycle_terminal_worker "$repo_dir"; then
+          printf 'WARNING: drained worker was not recycled: %s\n' "$repo_dir" >&2
+        fi
         ;;
     esac
 

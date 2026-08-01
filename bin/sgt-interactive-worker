@@ -57,15 +57,41 @@ _drain_is_active() {
   return 1
 }
 
+_write_drain_handoff() {
+  local worker_start
+  worker_start="$(ps -o lstart= -p "$$" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+  [[ -n "$worker_start" ]] || return 1
+  _sgt_replace_owned_file "$REPO_STATE/drain_handoff" \
+    "worker_pid=$$"$'\n'"worker_start=$worker_start"
+}
+
 # _do_drain: write drained state and exit cleanly. Never returns.
 _do_drain() {
-  "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
+  local worker_pgid
+  if ! "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE"; then
+    printf 'drain handoff failed; worker remains active for retry\n' > "$REPO_STATE/diagnostic"
+    return 1
+  fi
+  worker_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
+  if [[ ! "$worker_pgid" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'drain could not resolve worker process group\n' > "$REPO_STATE/diagnostic"
+    return 1
+  fi
+  if ! _write_drain_handoff; then
+    printf 'drain could not publish durable handoff proof\n' > "$REPO_STATE/diagnostic"
+    return 1
+  fi
   printf 'drained\n' > "$WORKTREE/.sergeant-drained"
   printf 'drained\n' > "$WORKTREE/.sergeant-status"
   printf 'drained\n' > "$REPO_STATE/status"
   rm -f "$REPO_STATE/result"
-  # Kill the agent session so the EXIT trap fires with the drained status already written.
-  kill -TERM "$BASHPID" 2>/dev/null || exit 0
+  # This function runs in a background subshell. Terminate the pane-owned
+  # process group so the supervisor, agent, and all watcher loops exit together.
+  kill -TERM -- "-$worker_pgid" 2>/dev/null || {
+    printf 'drain could not terminate worker process group %s\n' "$worker_pgid" \
+      > "$REPO_STATE/diagnostic"
+    return 1
+  }
 }
 
 # _watch_drain: background loop — calls _do_drain when an active drain is detected.
@@ -75,8 +101,8 @@ _watch_drain() {
   while :; do
     sleep "${SGT_DRAIN_CHECK_INTERVAL:-2}"
     if ! $_drain_triggered && [[ ! -f "$WORKTREE/.sergeant-drained" ]] && _drain_is_active; then
+      _do_drain || continue
       _drain_triggered=true
-      _do_drain
     fi
   done
 }
@@ -96,6 +122,9 @@ _record_worker_identity() {
     printf '%s\n' "$pgid" > "$tmp" && mv "$tmp" "$REPO_STATE/worker_process_group" || return 0
   tmp="$(mktemp "$REPO_STATE/worker_process_start.XXXXXX")" && \
     printf '%s\n' "$start" > "$tmp" && mv "$tmp" "$REPO_STATE/worker_process_start" || return 0
+  tmp="$(mktemp "$REPO_STATE/worker_executable.XXXXXX")" && \
+    printf '%s\n' "$SCRIPT_DIR/sgt-interactive-worker" > "$tmp" && \
+    mv "$tmp" "$REPO_STATE/worker_executable" || return 0
 }
 _record_worker_identity
 
@@ -179,6 +208,16 @@ _finish() {
     drained)
       # Worker checkpointed cooperatively in response to a drain signal.
       # .sergeant-drained and td handoff were already written by _do_drain.
+      if [[ -z "$(_sgt_read_owned_file "$REPO_STATE/drain_handoff" 2>/dev/null || true)" ]]; then
+        if ! "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || \
+           ! _write_drain_handoff; then
+          rm -f "$WORKTREE/.sergeant-drained"
+          printf 'needs_input\n' > "$WORKTREE/.sergeant-status"
+          printf 'needs_input\n' > "$REPO_STATE/status"
+          printf 'drained worker exited before durable td handoff\n' > "$REPO_STATE/diagnostic"
+          exit 1
+        fi
+      fi
       _sync_state
       rm -f "$REPO_STATE/diagnostic"
       exit 0

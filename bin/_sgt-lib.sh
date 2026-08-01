@@ -152,6 +152,32 @@ _sgt_path_mode() {
 _sgt_fd_mode() {
   stat -L -c '%a' -- "$1" 2>/dev/null || stat -L -f '%Lp' "$1" 2>/dev/null
 }
+_sgt_fd_mode_matches_path() {
+  local fd_mode="$1" path_mode="$2"
+  # Linux reports the underlying inode mode through /dev/fd. Darwin reports
+  # 0400 for a read-only descriptor even when the owned path itself is 0600.
+  [[ "$fd_mode" == "$path_mode" ]] && return 0
+  case "$path_mode:$fd_mode" in
+    600:400|640:440|644:444|660:440|664:444) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+_sgt_file_identity() {
+  stat -L -c '%d:%i' -- "$1" 2>/dev/null || stat -L -f '%d:%i' "$1" 2>/dev/null
+}
+_sgt_file_inode() {
+  stat -L -c '%i' -- "$1" 2>/dev/null || stat -L -f '%i' "$1" 2>/dev/null
+}
+_sgt_same_file() {
+  local first_identity second_identity first_inode second_inode
+  first_identity="$(_sgt_file_identity "$1")" || return 1
+  second_identity="$(_sgt_file_identity "$2")" || return 1
+  [[ "$first_identity" == "$second_identity" ]] && return 0
+  [[ "$(uname -s 2>/dev/null || true)" == "Darwin" ]] || return 1
+  first_inode="$(_sgt_file_inode "$1")" || return 1
+  second_inode="$(_sgt_file_inode "$2")" || return 1
+  [[ "$first_inode" == "$second_inode" ]]
+}
 _sgt_legacy_identity_mode() {
   case "$1" in
     640|644|660|664) return 0 ;;
@@ -168,8 +194,10 @@ _sgt_read_owned_file() {
     exec 9<&-
     return 1
   }
-  if [[ "$fd_mode" != "600" || ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
-    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
+  if ! _sgt_fd_mode_matches_path "$fd_mode" "$mode" || \
+    [[ ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
+    ! -f "$path" || -L "$path" || ! -O "$path" ]] || \
+    ! _sgt_same_file "$path" /dev/fd/9; then
     exec 9<&-
     return 1
   fi
@@ -178,8 +206,9 @@ _sgt_read_owned_file() {
     exec 9<&-
     return 1
   }
-  if [[ "$fd_mode" != "600" || ! -O /dev/fd/9 || -L "$path" || \
-    ! "$path" -ef /dev/fd/9 ]]; then
+  if ! _sgt_fd_mode_matches_path "$fd_mode" "$mode" || \
+    [[ ! -O /dev/fd/9 || -L "$path" ]] || \
+    ! _sgt_same_file "$path" /dev/fd/9; then
     exec 9<&-
     return 1
   fi
@@ -197,8 +226,10 @@ _sgt_read_matching_legacy_pane_identity() {
     exec 9<&-
     return 1
   }
-  if [[ "$fd_mode" != "$mode" || ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
-    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
+  if ! _sgt_fd_mode_matches_path "$fd_mode" "$mode" || \
+    [[ ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
+    ! -f "$path" || -L "$path" || ! -O "$path" ]] || \
+    ! _sgt_same_file "$path" /dev/fd/9; then
     exec 9<&-
     return 1
   fi
@@ -224,9 +255,12 @@ _sgt_read_matching_legacy_pane_identity() {
     exec 9<&-
     return 1
   }
-  if [[ "$current_mode" != "$mode" || "$fd_mode" != "$mode" || \
+  if [[ "$current_mode" != "$mode" ]] || \
+    ! _sgt_fd_mode_matches_path "$fd_mode" "$mode" || \
+    [[ \
     ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
-    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
+    ! -f "$path" || -L "$path" || ! -O "$path" ]] || \
+    ! _sgt_same_file "$path" /dev/fd/9; then
     rm -f "$candidate"
     exec 9<&-
     return 1
@@ -253,10 +287,14 @@ _sgt_read_same_owned_files() {
   exec 9< "$second" || { exec 8<&-; return 1; }
   first_fd_mode="$(_sgt_fd_mode /dev/fd/8)"
   second_fd_mode="$(_sgt_fd_mode /dev/fd/9)"
-  if [[ "$first_fd_mode" != "600" || "$second_fd_mode" != "600" || \
+  if ! _sgt_fd_mode_matches_path "$first_fd_mode" "$first_mode" || \
+    ! _sgt_fd_mode_matches_path "$second_fd_mode" "$second_mode" || \
+    [[ \
     ! -f /dev/fd/8 || ! -f /dev/fd/9 || ! -O /dev/fd/8 || ! -O /dev/fd/9 || \
-    ! "$first" -ef /dev/fd/8 || ! "$second" -ef /dev/fd/9 || \
-    ! /dev/fd/8 -ef /dev/fd/9 || -L "$first" || -L "$second" ]]; then
+    -L "$first" || -L "$second" ]] || \
+    ! _sgt_same_file "$first" /dev/fd/8 || \
+    ! _sgt_same_file "$second" /dev/fd/9 || \
+    ! _sgt_same_file /dev/fd/8 /dev/fd/9; then
     exec 8<&- 9<&-
     return 1
   fi
@@ -264,11 +302,14 @@ _sgt_read_same_owned_files() {
   second_value="$(cat <&9)" || { exec 8<&- 9<&-; return 1; }
   first_fd_mode="$(_sgt_fd_mode /dev/fd/8)"
   second_fd_mode="$(_sgt_fd_mode /dev/fd/9)"
-  if [[ "$first_fd_mode" != "600" || "$second_fd_mode" != "600" || \
+  if ! _sgt_fd_mode_matches_path "$first_fd_mode" "$first_mode" || \
+    ! _sgt_fd_mode_matches_path "$second_fd_mode" "$second_mode" || \
+    [[ \
     ! -f /dev/fd/8 || ! -f /dev/fd/9 || ! -O /dev/fd/8 || ! -O /dev/fd/9 || \
-    -L "$first" || -L "$second" || \
-    ! "$first" -ef /dev/fd/8 || ! "$second" -ef /dev/fd/9 || \
-    ! /dev/fd/8 -ef /dev/fd/9 ]]; then
+    -L "$first" || -L "$second" ]] || \
+    ! _sgt_same_file "$first" /dev/fd/8 || \
+    ! _sgt_same_file "$second" /dev/fd/9 || \
+    ! _sgt_same_file /dev/fd/8 /dev/fd/9; then
     exec 8<&- 9<&-
     return 1
   fi
@@ -282,6 +323,37 @@ _sgt_replace_owned_file() {
   (umask 077; set -C; printf '%s\n' "$value" > "$candidate") 2>/dev/null || return 1
   chmod 600 "$candidate" || { rm -f "$candidate"; return 1; }
   mv "$candidate" "$path" || { rm -f "$candidate"; return 1; }
+}
+_sgt_worker_process_identity_fields() {
+  printf '%s\n' worker_pid worker_process_group worker_process_start worker_executable
+}
+_sgt_journal_worker_process_identity() {
+  local repo_dir="$1" field value previous
+  while IFS= read -r field; do
+    previous="$repo_dir/replacement_previous_$field"
+    rm -f "$previous" || return 1
+    [[ -e "$repo_dir/$field" ]] || continue
+    value="$(_sgt_read_owned_file "$repo_dir/$field")" || return 1
+    _sgt_replace_owned_file "$previous" "$value" || return 1
+  done < <(_sgt_worker_process_identity_fields)
+}
+_sgt_restore_worker_process_identity() {
+  local repo_dir="$1" field value previous
+  while IFS= read -r field; do
+    previous="$repo_dir/replacement_previous_$field"
+    if [[ -e "$previous" ]]; then
+      value="$(_sgt_read_owned_file "$previous")" || return 1
+      _sgt_replace_owned_file "$repo_dir/$field" "$value" || return 1
+    else
+      rm -f "$repo_dir/$field" || return 1
+    fi
+  done < <(_sgt_worker_process_identity_fields)
+}
+_sgt_remove_worker_process_identity() {
+  local repo_dir="$1" field
+  while IFS= read -r field; do
+    rm -f "$repo_dir/$field" || return 1
+  done < <(_sgt_worker_process_identity_fields)
 }
 _sgt_pane_identity_matches() {
   local pane="$1" repo_dir="$2" identity_name="${3:-pane_identity}" expected actual current
@@ -298,6 +370,73 @@ _sgt_pane_identity_matches() {
 }
 _sgt_worker_command() {
   printf '%q %q %q %q' "$1" "$2" "$3" "$4"
+}
+_sgt_worker_command_matches() {
+  local pane_command="$1" current_script="$2" repo_dir="$3" worktree="$4" agent="$5"
+  local recorded_script installed_script candidate expected seen
+  case "$pane_command" in
+    \"*\") pane_command="${pane_command#\"}"; pane_command="${pane_command%\"}" ;;
+  esac
+  # tmux doubles backslashes when a quoted start command contains shell-escaped
+  # spaces. Normalize once before comparing against Bash's %q output.
+  pane_command="${pane_command//\\\\/\\}"
+  recorded_script="$(cat "$repo_dir/worker_executable" 2>/dev/null || true)"
+  installed_script="$(command -v sgt-interactive-worker 2>/dev/null || true)"
+  seen=""
+  for candidate in "$current_script" "$recorded_script" "$installed_script" \
+    "$HOME/.local/bin/sgt-interactive-worker"; do
+    [[ -n "$candidate" ]] || continue
+    case $'\n'"$seen"$'\n' in
+      *$'\n'"$candidate"$'\n'*) continue ;;
+    esac
+    seen="${seen}${seen:+$'\n'}${candidate}"
+    expected="$(_sgt_worker_command "$candidate" "$repo_dir" "$worktree" "$agent")"
+    [[ "$pane_command" == "$expected" ]] && return 0
+  done
+  return 1
+}
+_sgt_live_worker_pane_identities() {
+  local current_script="$1" repo_dir="${2%/}" worktree="$3" agent="$4"
+  local listed identity remainder pane_command tmux_error
+  tmux_error="$(mktemp)" || return 2
+  if ! listed="$(tmux list-panes -a -F \
+    '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+    2>"$tmux_error")"; then
+    listed="$(cat "$tmux_error" 2>/dev/null || true)"
+    rm -f "$tmux_error"
+    case "$listed" in
+      "no server running on "*|"error connecting to "*"(No such file or directory)"*) return 0 ;;
+      *) return 2 ;;
+    esac
+  fi
+  rm -f "$tmux_error"
+  while IFS= read -r identity; do
+    [[ -n "$identity" && "${identity%%|*}" == "0" ]] || continue
+    remainder="${identity#*|}"
+    remainder="${remainder#*|}"
+    remainder="${remainder#*|}"
+    pane_command="${remainder#*|}"
+    _sgt_worker_command_matches "$pane_command" "$current_script" "$repo_dir" \
+      "$worktree" "$agent" || continue
+    printf '%s\n' "$identity"
+  done <<< "$listed"
+}
+_sgt_tmux_pane_absent() {
+  local target="$1" pane_ids listed_pane tmux_error
+  tmux_error="$(mktemp)" || return 2
+  if ! pane_ids="$(tmux list-panes -a -F '#{pane_id}' 2>"$tmux_error")"; then
+    pane_ids="$(cat "$tmux_error" 2>/dev/null || true)"
+    rm -f "$tmux_error"
+    case "$pane_ids" in
+      "no server running on "*|"error connecting to "*"(No such file or directory)"*) return 0 ;;
+      *) return 2 ;;
+    esac
+  fi
+  rm -f "$tmux_error"
+  while IFS= read -r listed_pane; do
+    [[ "$listed_pane" == "$target" ]] && return 1
+  done <<< "$pane_ids"
+  return 0
 }
 _sgt_notification_target_create() {
   local repo_dir="$1" notification_id="$2" pane_identity="$3"

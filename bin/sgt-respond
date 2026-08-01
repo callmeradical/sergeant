@@ -205,6 +205,77 @@ case "$status" in
   needs_input|blocked|waiting|orphaned) ;;
   *) _die "Worker status '$status' is not waiting or resumable; response was not published" ;;
 esac
+replacement_phase="$(_sgt_read_owned_file "$REPO_DIR/replacement_phase" 2>/dev/null || true)"
+if [[ ( -e "$REPO_DIR/replacement_phase" || -L "$REPO_DIR/replacement_phase" ) &&
+      -z "$replacement_phase" ]]; then
+  _die "Replacement journal is unreadable; reconciliation required before response"
+fi
+case "$replacement_phase" in
+  ""|response-pending) ;;
+  *) _die "Unresolved replacement pane ownership requires reconciliation before response" ;;
+esac
+
+pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
+agent="$(cat "$REPO_DIR/agent" 2>/dev/null || true)"
+pane_verified_live=false
+_pane_is_supervisor() {
+  local target="$1"
+  _sgt_pane_identity_matches "$target" "$REPO_DIR"
+}
+
+_assert_pane_relaunchable() {
+  local runtime_identity live_workers worker_identity remainder worker_pane pane_absence_status
+  local recorded_worker_identity stored_worker_identity
+  recorded_worker_identity=""
+  stored_worker_identity=""
+  pane_verified_live=false
+  command -v tmux >/dev/null 2>&1 || return 0
+  if ! live_workers="$(_sgt_live_worker_pane_identities \
+    "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")"; then
+    _die "Could not enumerate live worker panes; relaunch refused"
+  fi
+  while IFS= read -r worker_identity; do
+    [[ -n "$worker_identity" ]] || continue
+    remainder="${worker_identity#*|}"
+    worker_pane="${remainder%%|*}"
+    if [[ "$worker_pane" != "$pane" ]]; then
+      _die "Another live worker pane $worker_pane owns this fleet state; relaunch refused"
+    fi
+    recorded_worker_identity="$worker_identity"
+  done <<< "$live_workers"
+  [[ -n "$pane" ]] || return 0
+  if _pane_is_supervisor "$pane"; then
+    pane_verified_live=true
+    return 0
+  fi
+  if [[ -n "$recorded_worker_identity" && ! -L "$REPO_DIR/pane_identity" ]]; then
+    stored_worker_identity="$(cat "$REPO_DIR/pane_identity" 2>/dev/null || true)"
+    runtime_identity="$(_sgt_pane_identity "$pane" || true)"
+    if [[ "$runtime_identity" == "$recorded_worker_identity" &&
+          ( ! -e "$REPO_DIR/pane_identity" ||
+            ( -f "$REPO_DIR/pane_identity" && -O "$REPO_DIR/pane_identity" &&
+              "$stored_worker_identity" == "$recorded_worker_identity" ) ) ]]; then
+      _sgt_replace_owned_file "$REPO_DIR/pane_identity" "$recorded_worker_identity" || \
+        _die "Could not migrate live worker pane identity; relaunch refused"
+      pane_verified_live=true
+      return 0
+    fi
+  fi
+  runtime_identity="$(_sgt_pane_identity "$pane" || true)"
+  if [[ "${runtime_identity%%|*}" == "0" ]]; then
+    _die "Recorded worker pane $pane is live but its identity does not match; relaunch refused"
+  fi
+  [[ "${runtime_identity%%|*}" == "1" ]] && return 0
+  if _sgt_tmux_pane_absent "$pane"; then
+    return 0
+  fi
+  pane_absence_status=$?
+  [[ "$pane_absence_status" -ne 2 ]] || \
+    _die "Could not verify whether recorded worker pane $pane is absent; relaunch refused"
+  _die "Recorded worker pane $pane exists but its identity could not be verified; relaunch refused"
+}
+
+_assert_pane_relaunchable
 
 _atomic_write() {
   local target="$1"
@@ -243,6 +314,7 @@ _publish_local_response_transport() {
 }
 
 pending_response_file=""
+response_source=""
 gate_generation="$(cat "$worktree/.sergeant-gate-generation" 2>/dev/null || true)"
 if [[ "$status" == "orphaned" && ! "$gate_generation" =~ ^[1-9][0-9]*$ ]]; then
   gate_generation=1
@@ -259,16 +331,21 @@ fi
 response_id="$(cat "$REPO_DIR/response_id" 2>/dev/null || true)"
 if [[ -n "$pending_response_file" ]]; then
   [[ "$(cat "$REPO_DIR/response_generation" 2>/dev/null || true)" == "$gate_generation" && \
-     "$(cat "$worktree/.sergeant-response-generation" 2>/dev/null || true)" == "$gate_generation" && \
-     -n "$response_id" && \
-     "$(cat "$worktree/.sergeant-response-id" 2>/dev/null || true)" == "$response_id" ]] || \
+     -n "$response_id" ]] || \
     _die "Pending response generation does not match the worker gate"
+  [[ ! -e "$worktree/.sergeant-response-generation" || \
+     "$(cat "$worktree/.sergeant-response-generation" 2>/dev/null || true)" == "$gate_generation" ]] || \
+    _die "Pending worktree response generation does not match the worker gate"
+  [[ ! -e "$worktree/.sergeant-response-id" || \
+     "$(cat "$worktree/.sergeant-response-id" 2>/dev/null || true)" == "$response_id" ]] || \
+    _die "Pending worktree response identity does not match the worker gate"
   if [[ -f "$worktree/.sergeant-response" && "$status" != "orphaned" ]]; then
     # A drain_held marker matching the current gate generation means the prior
     # delivery was held by drain admission.  Allow relaunch now that drain may
     # have been lifted; the marker is cleared on successful relaunch below.
     _sgt_drain_held_gen="$(cat "$REPO_DIR/drain_held" 2>/dev/null || true)"
-    if [[ "$_sgt_drain_held_gen" != "$gate_generation" ]]; then
+    if [[ "$_sgt_drain_held_gen" != "$gate_generation" &&
+          "$replacement_phase" != "response-pending" ]]; then
       _die "A Sergeant response is already pending consumption for $TASK_ID/$REPO"
     fi
   fi
@@ -278,39 +355,66 @@ if [[ -n "$pending_response_file" ]]; then
   if [[ ! -f "$worktree/.sergeant-response" ]]; then
     _atomic_write_file "$worktree/.sergeant-response" "$pending_response_file"
   fi
+  response_source="$pending_response_file"
 else
   response_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-  if [[ -n "$worktree" && -d "$worktree" ]]; then
-    printf '%s' "$response_id" | "$SCRIPT_DIR/sgt-td-memory" response "$REPO_DIR" "$worktree" || \
-      _die "Failed to record response provenance in td; response was not published"
-  fi
-  _publish_local_response_transport "$RESPONSE_INPUT" "$response_id" "$gate_generation"
+  _sgt_replace_owned_file "$REPO_DIR/replacement_phase" "response-pending" || \
+    _die "Could not publish response delivery journal"
+  replacement_phase="response-pending"
+  _atomic_write "$REPO_DIR/response_generation" "$gate_generation" || \
+    _die "Could not journal response generation"
+  _atomic_write "$REPO_DIR/response_id" "$response_id" || \
+    _die "Could not journal response identity"
+  _atomic_write_file "$REPO_DIR/response" "$RESPONSE_INPUT" || \
+    _die "Could not journal response body"
+  response_source="$REPO_DIR/response"
 fi
 
-pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
-_pane_is_supervisor() {
-  local target="$1"
-  _sgt_pane_identity_matches "$target" "$REPO_DIR"
-}
+if [[ "$(cat "$REPO_DIR/response_td_recorded" 2>/dev/null || true)" != "$response_id" &&
+      -n "$worktree" && -d "$worktree" ]]; then
+  printf '%s' "$response_id" | "$SCRIPT_DIR/sgt-td-memory" response "$REPO_DIR" "$worktree" || \
+    _die "Failed to record response provenance in td; response remains journaled"
+  _sgt_replace_owned_file "$REPO_DIR/response_td_recorded" "$response_id" || \
+    _die "Failed to record durable td response provenance"
+fi
+_publish_local_response_transport "$response_source" "$response_id" "$gate_generation"
 
-if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && _pane_is_supervisor "$pane"; then
-  _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$response_id" response \
-    "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
-  _sgt_notification_target_create "$REPO_DIR" "$response_id" \
-    "$(cat "$REPO_DIR/pane_identity")" >/dev/null || \
-    _die "notification target race detected; response not delivered to local pane"
+_assert_pane_relaunchable
+
+if [[ -n "$pane" && "$pane_verified_live" == "true" ]] && \
+   command -v tmux >/dev/null 2>&1; then
+  if [[ "$(cat "$REPO_DIR/notification_id" 2>/dev/null || true)" != "$response_id" ]]; then
+    _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$response_id" response \
+      "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
+  fi
+  response_target_nonce="$(cat "$REPO_DIR/notification_target" 2>/dev/null || true)"
+  response_target_identity=""
+  if [[ "$response_target_nonce" =~ ^[a-f0-9]{32}$ ]]; then
+    response_target_identity="$(cat \
+      "$REPO_DIR/notifications/$response_id/targets/$response_target_nonce/pane_identity" \
+      2>/dev/null || true)"
+  fi
+  if [[ -z "$response_target_identity" ]]; then
+    _sgt_notification_target_create "$REPO_DIR" "$response_id" \
+      "$(cat "$REPO_DIR/pane_identity")" >/dev/null || \
+      _die "notification target race detected; response not delivered to local pane"
+  elif [[ "$response_target_identity" != "$(cat "$REPO_DIR/pane_identity")" ]]; then
+    _die "existing response target belongs to a different worker pane"
+  fi
   _sgt_response_lock_release
   _sgt_wait_worker_notification "$pane" "$REPO_DIR" "$response_id" || \
     _die "Worker did not acknowledge its durable response notification; response remains pending"
   _cleanup_response_input
+  rm -f "$REPO_DIR/replacement_phase"
   trap - EXIT
   echo "sgt-respond: notified local pane $pane."
   exit 0
 fi
 
+_assert_pane_relaunchable
+
 tmux_session="$(cat "$REPO_DIR/tmux_session" 2>/dev/null || true)"
 window_name="$(cat "$REPO_DIR/window_name" 2>/dev/null || true)"
-agent="$(cat "$REPO_DIR/agent" 2>/dev/null || true)"
 if ! command -v tmux >/dev/null 2>&1 || [[ -z "$tmux_session" || -z "$window_name" || -z "$agent" ]]; then
   _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$response_id" response \
     "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
@@ -386,6 +490,41 @@ _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$delivery_notification
 
 worker_command="$(_sgt_worker_command \
   "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")"
+relaunch_old_pane="$pane"
+relaunch_old_identity="$(_sgt_read_owned_file "$REPO_DIR/pane_identity" 2>/dev/null || true)"
+
+_clear_replacement_journal() {
+  rm -f "$REPO_DIR/replacement_candidate_pane" \
+    "$REPO_DIR/replacement_candidate_pane_identity" \
+    "$REPO_DIR/replacement_previous_pane" \
+    "$REPO_DIR/replacement_previous_pane_identity" \
+    "$REPO_DIR/replacement_previous_worker_pid" \
+    "$REPO_DIR/replacement_previous_worker_process_group" \
+    "$REPO_DIR/replacement_previous_worker_process_start" \
+    "$REPO_DIR/replacement_previous_worker_executable" \
+    "$REPO_DIR/replacement_phase"
+}
+
+_sgt_replace_owned_file "$REPO_DIR/replacement_phase" "launching" || \
+  _die "Could not publish worker replacement journal"
+if [[ -n "$relaunch_old_pane" ]]; then
+  if ! _sgt_replace_owned_file "$REPO_DIR/replacement_previous_pane" \
+    "$relaunch_old_pane"; then
+    _clear_replacement_journal
+    _die "Could not preserve prior worker pane"
+  fi
+fi
+if [[ -n "$relaunch_old_identity" ]]; then
+  if ! _sgt_replace_owned_file "$REPO_DIR/replacement_previous_pane_identity" \
+    "$relaunch_old_identity"; then
+    _clear_replacement_journal
+    _die "Could not preserve prior worker pane identity"
+  fi
+fi
+if ! _sgt_journal_worker_process_identity "$REPO_DIR"; then
+  _clear_replacement_journal
+  _die "Could not preserve prior worker process identity"
+fi
 
 _record_relaunch_orphan() {
   local reason="$1"
@@ -399,37 +538,112 @@ if ! new_pane="$(tmux new-window -P -F '#{pane_id}' -t "$tmux_session:" -n "$win
   -c "$worktree" "$worker_command")"; then
   # Release drain admission lock before reporting failure.
   _sgt_drain_lock_release_fd "$_SGT_RESPOND_DRAIN_FD"
+  _clear_replacement_journal
   _record_relaunch_orphan "tmux failed to relaunch worker supervisor"
   _die "Worker relaunch failed for $TASK_ID/$REPO"
 fi
 # Worker pane is now live — release drain admission lock.
 _sgt_drain_lock_release_fd "$_SGT_RESPOND_DRAIN_FD"
 if [[ -z "$new_pane" ]]; then
+  _clear_replacement_journal
   _record_relaunch_orphan "tmux returned no pane for relaunched worker supervisor"
   _die "Worker relaunch returned no pane for $TASK_ID/$REPO"
 fi
+
+_abort_relaunch() {
+  local reason="$1" replacement_identity expected_identity remainder pane_command
+  local restore_failed=false
+  replacement_identity="$(_sgt_pane_identity "$new_pane" || true)"
+  expected_identity="$(_sgt_read_owned_file \
+    "$REPO_DIR/replacement_candidate_pane_identity" 2>/dev/null || true)"
+  if [[ -n "$replacement_identity" ]]; then
+    if [[ -n "$expected_identity" ]]; then
+      if [[ "$replacement_identity" != "$expected_identity" ]]; then
+        _record_relaunch_orphan \
+          "$reason; replacement pane identity changed before rollback and was not signalled"
+        _die "Worker relaunch failed for $TASK_ID/$REPO: replacement identity changed"
+      fi
+    else
+      remainder="${replacement_identity#*|}"
+      remainder="${remainder#*|}"
+      remainder="${remainder#*|}"
+      pane_command="${remainder#*|}"
+      if ! _sgt_worker_command_matches "$pane_command" \
+        "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent"; then
+        _record_relaunch_orphan \
+          "$reason; replacement pane ownership could not be verified and was not signalled"
+        _die "Worker relaunch failed for $TASK_ID/$REPO: replacement ownership unverified"
+      fi
+    fi
+    tmux kill-pane -t "$new_pane" 2>/dev/null || true
+  fi
+  if ! _sgt_tmux_pane_absent "$new_pane"; then
+    replacement_identity="$(_sgt_pane_identity "$new_pane" || true)"
+    [[ -n "$replacement_identity" ]] || replacement_identity="$expected_identity"
+    printf '%s\n' "$new_pane" > "$REPO_DIR/pane" || true
+    [[ -z "$replacement_identity" ]] || \
+      _sgt_replace_owned_file "$REPO_DIR/pane_identity" "$replacement_identity" || true
+    if [[ -n "$relaunch_old_pane" ]]; then
+      _sgt_replace_owned_file "$REPO_DIR/replacement_previous_pane" \
+        "$relaunch_old_pane" || true
+    fi
+    if [[ -n "$relaunch_old_identity" ]]; then
+      _sgt_replace_owned_file "$REPO_DIR/replacement_previous_pane_identity" \
+        "$relaunch_old_identity" || true
+    fi
+    _record_relaunch_orphan \
+      "$reason; replacement pane $new_pane could not be terminated and remains recorded"
+    _die "Worker relaunch failed for $TASK_ID/$REPO: replacement pane remains live"
+  fi
+  if [[ -n "$relaunch_old_pane" ]]; then
+    printf '%s\n' "$relaunch_old_pane" > "$REPO_DIR/pane" || restore_failed=true
+  else
+    rm -f "$REPO_DIR/pane" || restore_failed=true
+  fi
+  if [[ -n "$relaunch_old_identity" ]]; then
+    _sgt_replace_owned_file "$REPO_DIR/pane_identity" "$relaunch_old_identity" || \
+      restore_failed=true
+  else
+    rm -f "$REPO_DIR/pane_identity" || restore_failed=true
+  fi
+  if [[ -n "$relaunch_old_pane" ]]; then
+    _sgt_restore_worker_process_identity "$REPO_DIR" || restore_failed=true
+  else
+    _sgt_remove_worker_process_identity "$REPO_DIR" || restore_failed=true
+  fi
+  if $restore_failed; then
+    _record_relaunch_orphan "$reason; prior worker ownership restoration failed"
+    _die "Worker relaunch failed for $TASK_ID/$REPO: ownership restoration failed"
+  fi
+  _clear_replacement_journal
+  _record_relaunch_orphan "$reason"
+  _die "Worker relaunch failed for $TASK_ID/$REPO: $reason"
+}
+
+_sgt_replace_owned_file "$REPO_DIR/replacement_candidate_pane" "$new_pane" || \
+  _abort_relaunch "could not publish replacement candidate pane"
 printf '%s\n' "$new_pane" > "$REPO_DIR/pane"
 if pane_identity="$(_sgt_pane_identity "$new_pane")" && [[ -n "$pane_identity" ]]; then
+  _sgt_replace_owned_file "$REPO_DIR/replacement_candidate_pane_identity" \
+    "$pane_identity" || _abort_relaunch "could not publish replacement candidate identity"
   _sgt_replace_owned_file "$REPO_DIR/pane_identity" "$pane_identity" || \
-    _die "Could not publish worker pane identity"
+    _abort_relaunch "could not publish worker pane identity"
+  rm -f "$REPO_DIR/worker_recycled" || \
+    _abort_relaunch "could not clear stale worker recycle receipt"
   if ! _sgt_notification_target_create "$REPO_DIR" "$delivery_notification_id" \
       "$pane_identity" >/dev/null; then
-    tmux kill-pane -t "$new_pane" 2>/dev/null || true
-    _record_relaunch_orphan "notification target race detected during relaunch"
-    _die "notification target race detected for $TASK_ID/$REPO; relaunched worker orphaned"
+    _abort_relaunch "notification target race detected during relaunch"
   fi
 else
-  tmux kill-pane -t "$new_pane" 2>/dev/null || true
-  _record_relaunch_orphan "tmux failed to capture exact relaunched worker pane identity"
-  _die "Worker relaunch identity capture failed for $TASK_ID/$REPO"
+  _abort_relaunch "tmux failed to capture exact relaunched worker pane identity"
 fi
 _sgt_response_lock_release
 if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" "$delivery_notification_id"; then
-  tmux kill-pane -t "$new_pane" 2>/dev/null || true
-  _record_relaunch_orphan "relaunched interactive worker did not acknowledge its durable response notification"
-  _die "Worker relaunch notification acknowledgement timed out for $TASK_ID/$REPO"
+  _abort_relaunch \
+    "relaunched interactive worker did not acknowledge its durable response notification"
 fi
 rm -f "$REPO_DIR/drain_held"
+_clear_replacement_journal
 _cleanup_response_input
 trap - EXIT
 echo "sgt-respond: relaunched worker in pane $new_pane."
