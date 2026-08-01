@@ -73,6 +73,10 @@ case "$1" in
       printf 'no server running on /tmp/tmux-test/default\n' >&2
       exit 1
     fi
+    if [[ "${PANE_ABSENT_FAIL:-0}" == "1" && "$4" == '#{pane_id}' ]]; then
+      printf 'lost server\n' >&2
+      exit 1
+    fi
     if [[ "${STALE_WORKER:-0}" == "1" ]]; then
       printf '%s\n' "$STALE_IDENTITY"
     else
@@ -119,6 +123,20 @@ set -e
 [[ "$query_status" -ne 0 ]]
 [[ "$query_output" == *'exists but its identity could not be verified'* ]]
 [[ ! -e "$TEST_ROOT/query-new-window" ]]
+[[ ! -e "$repo_state/response" && ! -e "$worktree/.sergeant-response" ]]
+
+set +e
+absent_fail_output="$(printf 'Do not relaunch when absence is unverifiable.\n' | \
+  PATH="$fake_bin:$PATH" SERGEANT_CONFIG="$config_dir" SERGEANT_FLEET="$fleet" \
+  TMUX_LOG="$TEST_ROOT/absent-fail-tmux.log" NEW_WINDOW_MARKER="$TEST_ROOT/absent-fail-window" \
+  QUERY_FAIL=1 PANE_ABSENT_FAIL=1 "$ROOT_DIR/bin/sgt-respond" task-1 app 2>&1)"
+absent_fail_status=$?
+set -e
+
+[[ "$absent_fail_status" -ne 0 ]]
+[[ "$absent_fail_output" == *'Could not verify whether recorded worker pane %42 is absent'* ]]
+[[ "$absent_fail_output" != *'exists but its identity could not be verified'* ]]
+[[ ! -e "$TEST_ROOT/absent-fail-window" ]]
 [[ ! -e "$repo_state/response" && ! -e "$worktree/.sergeant-response" ]]
 
 printf -v stale_command '%q %q %q %q' \

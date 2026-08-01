@@ -266,13 +266,13 @@ _assert_pane_relaunchable() {
     _die "Recorded worker pane $pane is live but its identity does not match; relaunch refused"
   fi
   [[ "${runtime_identity%%|*}" == "1" ]] && return 0
-  if _sgt_tmux_pane_absent "$pane"; then
-    return 0
-  fi
-  pane_absence_status=$?
-  [[ "$pane_absence_status" -ne 2 ]] || \
-    _die "Could not verify whether recorded worker pane $pane is absent; relaunch refused"
-  _die "Recorded worker pane $pane exists but its identity could not be verified; relaunch refused"
+  pane_absence_status=0
+  _sgt_tmux_pane_absent "$pane" || pane_absence_status=$?
+  case "$pane_absence_status" in
+    0) return 0 ;;
+    2) _die "Could not verify whether recorded worker pane $pane is absent; relaunch refused" ;;
+    *) _die "Recorded worker pane $pane exists but its identity could not be verified; relaunch refused" ;;
+  esac
 }
 
 _assert_pane_relaunchable
