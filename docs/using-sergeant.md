@@ -106,7 +106,8 @@ sgt-watch --sync-all
 ```
 
 Bulk reconciliation syncs worktree status into fleet state, stops only
-identity-verified `done` or `failed` worker panes, and marks interrupted
+identity-verified `done` or `failed` worker panes and `drained` worker panes
+that carry durable handoff evidence, and marks interrupted
 `dispatched` records failed when they have neither a worktree nor an owned live
 pane after a 300-second grace period by default. Set
 `SERGEANT_DISPATCH_GRACE_SECONDS` to change that window. It preserves
