@@ -123,15 +123,27 @@ safety check, or evidence boundary is weakened to improve output compactness.
 
 ## Phase 1 — Native Read-Only Projections
 
-### `sgt-watch --snapshot <task-id> [--repo <repo>]`
+### `sgt-watch --snapshot [<task-id> [--repo <repo>]]`
 
 A new flag for a single bounded read of fleet state.
 
 - Runs once, outputs state, and exits. Does not poll.
-- Output contains: task ID, project, repos with their current status,
-  health/progress evidence, state-valid next command per repo, and a summary
-  count of states.
-- Default output is under 8 KiB for any fleet size.
+- With no task ID, searches the retained fleet for a positive active-work
+  witness. A task ID restricts the search to that task; `--repo` is valid only
+  with a task ID.
+- Emits constant-size `sergeant.watch-status/v1` JSON containing one
+  observation timestamp, scope, `busy`, and `basis`.
+- `busy=true` requires stable `in_progress` or `dispatched` evidence, an exact
+  live Sergeant worker-pane identity, and recent meaningful progress.
+- Every other outcome is `busy=null` with basis
+  `no_verified_active_witness`. Version 1 never emits `busy=false` and does not
+  claim lock-free proof of fleet-wide idleness.
+- Emits no aggregate counts, projected records, next actions, truncation
+  metadata, failed reasons, brief, result, message, diagnostic, intent, prompt,
+  response, worktree/fleet path, pane/PID, or commit-subject bodies.
+- Output is bounded independently of fleet size.
+- A scan inspects at most 64 task directories and 64 repository directories;
+  exhausting either budget produces the ordinary non-witness result.
 - Does not mutate state. Does not require a live pane.
 
 ### `sgt-watch --active` and `sgt-watch --recent <n>`
@@ -166,9 +178,9 @@ A new flag for a single bounded read of fleet state.
 
 ### Acceptance criteria — Phase 1
 
-1. `sgt-watch --snapshot <task>` completes once and exits; output is under
-   8 KiB; state classifications match `sgt-watch <task>` for the same fleet
-   fixtures.
+1. Fleet-wide, task, and task-plus-repo snapshots complete once and exit with
+   constant-size JSON. Exact identity plus recent progress can produce
+   `busy=true`; every non-witness outcome produces `busy=null`, never false.
 2. `sgt-watch --list` default output is under 8 KiB for any fleet; `--all`
    restores full output.
 3. `sgt-validate --check` returns all blockers in one call; executing

@@ -39,8 +39,15 @@ set -e
 }
 [[ -L "$TEST_ROOT/bin/_sgt-intent.sh" ]]
 [[ -L "$TEST_ROOT/bin/_sgt-drain.sh" ]]
+[[ -L "$TEST_ROOT/bin/_sgt-watch-snapshot.sh" ]]
 [[ ! -e "$TEST_ROOT/bin/oc-inject" ]]
 [[ ! -e "$TEST_ROOT/home/.config/opencode/plugins/oc-inject.js" ]]
+
+mkdir -p "$TEST_ROOT/fleet"
+snapshot_output="$(HOME="$TEST_ROOT/home" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  "$TEST_ROOT/bin/sgt-watch" --snapshot)"
+[[ "$snapshot_output" == *'"schema":"sergeant.watch-status/v1"'* ]]
+[[ "$snapshot_output" == *'"busy":null'* ]]
 
 set +e
 output="$(HOME="$TEST_ROOT/home" "$TEST_ROOT/bin/sgt-dispatch" 2>&1)"

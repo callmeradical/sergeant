@@ -11,6 +11,13 @@ POLL_INTERVAL="${SERGEANT_WATCH_INTERVAL:-5}"
 
 _die() { echo "ERROR: $*" >&2; exit 1; }
 
+if [[ "${1:-}" == "--snapshot" ]]; then
+  # shellcheck source=bin/_sgt-watch-snapshot.sh
+  source "$SCRIPT_DIR/_sgt-watch-snapshot.sh"
+  _sgt_watch_snapshot "$@"
+  exit 0
+fi
+
 # Support both orderings:
 #   sgt-watch <task-id> --background   (spec-canonical)
 #   sgt-watch --background <task-id>   (flag-first, consistent with --list/--sync)
@@ -403,7 +410,7 @@ if [[ "${1:-}" == "--sync" ]]; then
   exit 0
 fi
 
-[[ $# -ge 1 ]] || _die "Usage: sgt-watch <task-id> | --list | --sync <task-id> | --sync-all"
+[[ $# -ge 1 ]] || _die "Usage: sgt-watch <task-id> | --snapshot [<task-id> [--repo <repo>]] | --list | --sync <task-id> | --sync-all"
 TASK_ID="$1"
 TASK_DIR="$FLEET_DIR/$TASK_ID"
 [[ -d "$TASK_DIR" ]] || _die "Task not found: $TASK_ID (looked in $FLEET_DIR)"

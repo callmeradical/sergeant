@@ -89,9 +89,35 @@ Foreground (for humans and debugging — blocks until the fleet reaches terminal
 sgt-watch <fleet-task-id>
 ```
 
+Read-only JSON snapshots return once without reconciling or modifying fleet,
+worktree, pane, callback, or td state:
+
+```bash
+sgt-watch --snapshot
+sgt-watch --snapshot <fleet-task-id>
+sgt-watch --snapshot <fleet-task-id> --repo <repo>
+```
+
+Schema `sergeant.watch-status/v1` is constant-size and includes one UTC
+`observed_at`, the requested scope, `busy`, and `basis`. `busy=true` is a
+positive witness: an `in_progress` or `dispatched` worker in scope has a stable
+worktree status, exact live Sergeant worker-pane identity, and recent meaningful
+progress. Every other outcome is `busy=null` with basis
+`no_verified_active_witness`; version 1 never emits `busy=false`.
+
+Snapshots do not claim that a lock-free traversal proved fleet-wide idleness.
+They emit no counts, projected records, next actions, truncation metadata,
+failed reasons, brief, result, message, diagnostic, intent, prompt, response,
+path, pane, PID, or commit bodies. Output is bounded independently of fleet
+size: a scan examines at most 64 task directories and 64 repository directories.
+Exhausting either budget produces the same non-witness result; it is not an idle
+claim.
+
 If managed background execution is unavailable (no systemd user services), use
-`sgt-watch --sync <fleet-task-id>` for bounded one-shot inspection or run
-`sgt-watch <fleet-task-id>` in a separate terminal or tmux pane.
+`sgt-watch --snapshot <fleet-task-id>` for bounded one-shot inspection or run
+`sgt-watch <fleet-task-id>` in a separate terminal or tmux pane. Use
+`sgt-watch --sync <fleet-task-id>` only when the mutating reconciliation and
+lifecycle side effects described below are intended.
 
 Inspect all records:
 

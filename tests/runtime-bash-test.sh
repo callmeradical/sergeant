@@ -175,6 +175,21 @@ watch_output="$(SERGEANT_FLEET="$fleet" SERGEANT_WATCH_INTERVAL=0.01 \
   "$minimum_bash" "$ROOT_DIR/bin/sgt-watch" task-2)"
 [[ "$watch_output" == *'All repos done.'* ]]
 
+snapshot_output="$(SERGEANT_FLEET="$fleet" \
+  "$minimum_bash" "$ROOT_DIR/bin/sgt-watch" --snapshot task-2 --repo app)"
+[[ "$snapshot_output" == *'"schema":"sergeant.watch-status/v1"'* ]]
+[[ "$snapshot_output" == *'"busy":null'* ]]
+[[ "$snapshot_output" == *'"basis":"no_verified_active_witness"'* ]]
+[[ "$snapshot_output" != *'"busy":false'* ]]
+[[ "$snapshot_output" != *'"records"'* ]]
+
+empty_fleet="$TEST_ROOT/empty-fleet"
+mkdir -p "$empty_fleet"
+empty_snapshot="$(SERGEANT_FLEET="$empty_fleet" \
+  "$minimum_bash" "$ROOT_DIR/bin/sgt-watch" --snapshot)"
+[[ "$empty_snapshot" == *'"busy":null'* ]]
+[[ "$empty_snapshot" == *'"basis":"no_verified_active_witness"'* ]]
+
 printf 'runtime paths support Bash 3.2: ok\n'
 
 # Run dispatch-specific Bash 3.2 regression (parse, alternation, branch-name).

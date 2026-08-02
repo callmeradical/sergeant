@@ -136,6 +136,7 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Classify a no-mistakes finding and create/update owning-repo td work |
 | `bin/sgt-review-findings <project> <repo> [options]` | Route structured independent-review findings to td and fleet supervision |
 | `bin/sgt-watch <task-id>` | Monitor dispatched fleet |
+| `bin/sgt-watch --snapshot [<task-id> [--repo <repo>]]` | Read bounded positive active-work status as JSON |
 | `bin/sgt-respond <task-id> <repo> "<response>"` | Respond to and resume a waiting worker |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees and fleet state |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |

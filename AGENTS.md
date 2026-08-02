@@ -71,6 +71,7 @@ the operation with ad hoc shell commands.
 | `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Apply a finding disposition and create/update owning-repo td work |
 | `bin/sgt-review-findings <project> <repo> [options]` | Route structured independent-review findings to td and fleet supervision |
 | `bin/sgt-dispatch <project> --td <id>` | Dispatch from a td task (auto-detects repo) |
+| `bin/sgt-watch --snapshot [<task-id> [--repo <repo>]]` | Emit bounded, read-only positive active-work status as JSON |
 | `bin/sgt-watch <task-id> --background` | Start a managed background monitor (default for OpenCode); returns promptly with monitor identity and control commands |
 | `bin/sgt-watch <task-id>` | Monitor fleet in foreground until all workers done (for humans and debugging) |
 | `bin/sgt-watch --sync-all` | Reconcile every durable fleet record and recycle verified terminal panes |
