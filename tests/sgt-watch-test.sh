@@ -153,9 +153,10 @@ printf 'in_progress\n' > "$repo/status"
 LEGACY_IDENTITY_RACE=replace-content LEGACY_IDENTITY_RACE_MARKER="$legacy_race_marker" \
   PANE_IDENTITY="$legacy_identity" EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" \
   SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
-[[ "$(cat "$repo/pane_identity")" == "$legacy_identity" ]]
+[[ "$(cat "$repo/status")" == "orphaned" ]]
+[[ "$(cat "$repo/pane_identity")" == "tampered-pane" ]]
 [[ "$(stat -c '%a' "$repo/pane_identity" 2>/dev/null || stat -f '%Lp' "$repo/pane_identity")" == \
-  "600" ]]
+  "664" ]]
 [[ -e "$legacy_race_marker" ]]
 
 printf '%s\n' "$legacy_identity" > "$repo/pane_identity"

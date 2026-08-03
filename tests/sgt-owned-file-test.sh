@@ -10,6 +10,7 @@ fake_bin="$TEST_ROOT/bin"
 mkdir -p "$fake_bin"
 real_stat="$(command -v stat)"
 real_uname="$(command -v uname)"
+real_chmod="$(command -v chmod)"
 if "$real_stat" -c '%a' -- "$ROOT_DIR/bin/_sgt-lib.sh" >/dev/null 2>&1; then
   path_mode_format='%a'
 else
@@ -19,6 +20,18 @@ fi
 cat > "$fake_bin/stat" <<'EOF'
 #!/usr/bin/env bash
 last="${!#}"
+if [[ "$last" == /dev/fd/* && "${TEST_DARWIN_FD_MODE:-}" == 1 && \
+  ( "$*" == *'%a'* || "$*" == *'%Lp'* ) ]]; then
+  mode="$("$REAL_STAT" -L -c '%a' -- "$last" 2>/dev/null || \
+    "$REAL_STAT" -L -f '%Lp' "$last")" || exit 1
+  case "$mode" in
+    600) mode=400 ;;
+    640|660) mode=440 ;;
+    644|664) mode=444 ;;
+  esac
+  printf '%s\n' "$mode"
+  exit 0
+fi
 if [[ "$last" == /dev/fd/* && -n "${TEST_FD_MODE:-}" && \
   ( "$*" == *'%a'* || "$*" == *'%Lp'* ) ]]; then
   printf '%s\n' "$TEST_FD_MODE"
@@ -64,8 +77,22 @@ cat > "$fake_bin/uname" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "${TEST_SYSTEM:-Linux}"
 EOF
-chmod +x "$fake_bin/stat" "$fake_bin/uname"
-export REAL_STAT="$real_stat" REAL_UNAME="$real_uname"
+cat > "$fake_bin/chmod" <<'EOF'
+#!/usr/bin/env bash
+last="${!#}"
+if [[ "$last" == /dev/fd/* && -n "${TEST_CHMOD_RACE_PATH:-}" ]]; then
+  rm -f "$TEST_CHMOD_RACE_PATH"
+  printf 'replacement-value\n' > "$TEST_CHMOD_RACE_PATH"
+  "$REAL_CHMOD" 664 "$TEST_CHMOD_RACE_PATH"
+  identity="$("$REAL_STAT" -c '%u:%d:%i' -- "$TEST_CHMOD_RACE_PATH" 2>/dev/null || \
+    "$REAL_STAT" -f '%u:%d:%i' "$TEST_CHMOD_RACE_PATH")" || exit 1
+  printf '%s\n' "$identity" > "$TEST_CHMOD_RACE_IDENTITY"
+  : > "$TEST_CHMOD_RACE_MARKER"
+fi
+exec "$REAL_CHMOD" "$@"
+EOF
+chmod +x "$fake_bin/stat" "$fake_bin/uname" "$fake_bin/chmod"
+export REAL_STAT="$real_stat" REAL_UNAME="$real_uname" REAL_CHMOD="$real_chmod"
 export TEST_PATH_MODE_FORMAT="$path_mode_format"
 
 owned="$TEST_ROOT/owned"
@@ -125,6 +152,39 @@ if PATH="$fake_bin:$PATH" TEST_SYSTEM=Darwin TEST_FD_MODE=400 \
   printf 'accepted descriptor metadata owned by another user\n' >&2
   exit 1
 fi
+
+legacy="$TEST_ROOT/legacy-owned"
+printf 'legacy-value\n' > "$legacy"
+chmod 664 "$legacy"
+output="$(PATH="$fake_bin:$PATH" TEST_SYSTEM=Darwin TEST_DARWIN_FD_MODE=1 \
+  bash -c 'source "$1"; _sgt_read_matching_legacy_pane_identity "$2" "$3"' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$legacy" legacy-value)"
+[[ "$output" == 'legacy-value' ]]
+legacy_mode="$("$real_stat" -c '%a' -- "$legacy" 2>/dev/null || \
+  "$real_stat" -f '%Lp' "$legacy")"
+[[ "$legacy_mode" == 600 ]]
+
+printf 'legacy-value\n' > "$legacy"
+chmod 664 "$legacy"
+chmod_race_marker="$TEST_ROOT/chmod-race-marker"
+chmod_race_identity="$TEST_ROOT/chmod-race-identity"
+if PATH="$fake_bin:$PATH" TEST_SYSTEM=Darwin TEST_DARWIN_FD_MODE=1 \
+  TEST_CHMOD_RACE_PATH="$legacy" TEST_CHMOD_RACE_MARKER="$chmod_race_marker" \
+  TEST_CHMOD_RACE_IDENTITY="$chmod_race_identity" \
+  bash -c 'source "$1"; _sgt_read_matching_legacy_pane_identity "$2" "$3"' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$legacy" legacy-value >/dev/null 2>&1; then
+  printf 'legacy migration overwrote a publication-boundary replacement\n' >&2
+  exit 1
+fi
+[[ -e "$chmod_race_marker" && "$(cat "$legacy")" == 'replacement-value' ]]
+legacy_mode="$("$real_stat" -c '%a' -- "$legacy" 2>/dev/null || \
+  "$real_stat" -f '%Lp' "$legacy")"
+legacy_identity="$("$real_stat" -c '%u:%d:%i' -- "$legacy" 2>/dev/null || \
+  "$real_stat" -f '%u:%d:%i' "$legacy")"
+[[ "$legacy_mode" == 664 && "$legacy_identity" == "$(cat "$chmod_race_identity")" ]]
+for candidate in "$legacy".tmp.*; do
+  [[ ! -e "$candidate" ]]
+done
 
 race_path="$TEST_ROOT/race-owned"
 race_replacement="$TEST_ROOT/race-replacement"

@@ -801,15 +801,21 @@ done
 
 legacy_race_marker="$TEST_ROOT/legacy-pane-race"
 chmod 664 "$fleet/task-1/primary_pane_identity"
-PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
   FAIL_TRANSITION=legacy-identity-content-race IDENTITY_RACE_MARKER="$legacy_race_marker" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
-  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
-[[ "$(cat "$fleet/task-1/primary_pane_identity")" == '0|%11|1111|111111|coordinator-command' ]]
+  "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]]
+[[ "$(cat "$fleet/task-1/primary_pane_identity")" == 'tampered-pane' ]]
 [[ "$(stat -c '%a' "$fleet/task-1/primary_pane_identity" 2>/dev/null || \
-  stat -f '%Lp' "$fleet/task-1/primary_pane_identity")" == "600" ]]
+  stat -f '%Lp' "$fleet/task-1/primary_pane_identity")" == "664" ]]
 [[ -e "$legacy_race_marker" ]]
 cleanup_validation_state
+printf '0|%%11|1111|111111|coordinator-command\n' > "$fleet/task-1/primary_pane_identity"
+chmod 600 "$fleet/task-1/primary_pane_identity"
 
 legacy_replace_marker="$TEST_ROOT/legacy-pane-replaced"
 chmod 664 "$fleet/task-1/primary_pane_identity"
