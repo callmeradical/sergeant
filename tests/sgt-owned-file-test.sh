@@ -24,8 +24,24 @@ if [[ "$last" == /dev/fd/* && -n "${TEST_FD_MODE:-}" && \
   printf '%s\n' "$TEST_FD_MODE"
   exit 0
 fi
-if [[ "$last" == /dev/fd/* && -n "${TEST_FD_INODE:-}" && "$*" == *'%i'* ]]; then
-  printf '%s\n' "$TEST_FD_INODE"
+if [[ "$last" == /dev/fd/* && "$*" == *'%u:%d:%i'* && \
+  ( -n "${TEST_FD_UID:-}" || -n "${TEST_FD_INODE:-}" ) ]]; then
+  identity="$("$REAL_STAT" -L -c '%u:%d:%i' -- "$last" 2>/dev/null || \
+    "$REAL_STAT" -L -f '%u:%d:%i' "$last")" || exit 1
+  uid="${identity%%:*}"
+  device_inode="${identity#*:}"
+  device="${device_inode%:*}"
+  inode="${identity##*:}"
+  [[ -z "${TEST_FD_UID:-}" ]] || uid="$TEST_FD_UID"
+  [[ -z "${TEST_FD_INODE:-}" ]] || inode="$TEST_FD_INODE"
+  printf '%s:%s:%s\n' "$uid" "$device" "$inode"
+  exit 0
+fi
+if [[ -n "${TEST_PATH_UID:-}" && "$last" == "${TEST_OWNER_PATH:-}" && \
+  "$*" == *'%u:%d:%i'* ]]; then
+  identity="$("$REAL_STAT" -c '%u:%d:%i' -- "$last" 2>/dev/null || \
+    "$REAL_STAT" -f '%u:%d:%i' "$last")" || exit 1
+  printf '%s:%s\n' "$TEST_PATH_UID" "${identity#*:}"
   exit 0
 fi
 if [[ -n "${TEST_RACE_PATH:-}" && "$last" == "$TEST_RACE_PATH" && \
@@ -93,10 +109,20 @@ if PATH="$fake_bin:$PATH" TEST_SYSTEM=Darwin TEST_FD_MODE=400 \
   exit 1
 fi
 
-if [[ ! -O /etc/hosts ]] && PATH="$fake_bin:$PATH" TEST_SYSTEM=Darwin TEST_FD_MODE=400 \
+foreign_uid=$((EUID + 1))
+if PATH="$fake_bin:$PATH" TEST_SYSTEM=Darwin TEST_FD_MODE=400 \
+  TEST_PATH_UID="$foreign_uid" TEST_OWNER_PATH="$owned" \
   bash -c 'source "$1"; _sgt_read_owned_file "$2"' _ \
-  "$ROOT_DIR/bin/_sgt-lib.sh" /etc/hosts >/dev/null 2>&1; then
-  printf 'accepted file not owned by the effective user\n' >&2
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$owned" >/dev/null 2>&1; then
+  printf 'accepted path metadata owned by another user\n' >&2
+  exit 1
+fi
+
+if PATH="$fake_bin:$PATH" TEST_SYSTEM=Darwin TEST_FD_MODE=400 \
+  TEST_FD_UID="$foreign_uid" \
+  bash -c 'source "$1"; _sgt_read_owned_file "$2"' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$owned" >/dev/null 2>&1; then
+  printf 'accepted descriptor metadata owned by another user\n' >&2
   exit 1
 fi
 

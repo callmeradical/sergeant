@@ -163,13 +163,15 @@ _sgt_fd_mode_matches_path() {
   esac
 }
 _sgt_path_identity() {
-  stat -c '%d:%i' -- "$1" 2>/dev/null || stat -f '%d:%i' "$1" 2>/dev/null
+  stat -c '%u:%d:%i' -- "$1" 2>/dev/null || stat -f '%u:%d:%i' "$1" 2>/dev/null
 }
-_sgt_fd_inode() {
-  stat -L -c '%i' -- "$1" 2>/dev/null || stat -L -f '%i' "$1" 2>/dev/null
+_sgt_fd_identity() {
+  stat -L -c '%u:%d:%i' -- "$1" 2>/dev/null || stat -L -f '%u:%d:%i' "$1" 2>/dev/null
 }
 _sgt_fd_matches_path() {
-  local path="$1" fd_path="$2" path_identity="$3" system fd_inode
+  local path="$1" fd_path="$2" path_identity="$3" system fd_identity
+  fd_identity="$(_sgt_fd_identity "$fd_path")" || return 1
+  [[ "${path_identity%%:*}" == "$EUID" && "${fd_identity%%:*}" == "$EUID" ]] || return 1
   system="$(uname -s 2>/dev/null)" || return 1
   if [[ "$system" != "Darwin" ]]; then
     [[ "$path" -ef "$fd_path" ]]
@@ -177,19 +179,19 @@ _sgt_fd_matches_path() {
   fi
   # Darwin's fdescfs gives /dev/fd entries a synthetic device ID, but retains
   # the opened vnode's inode. Callers separately pin the path's full identity.
-  fd_inode="$(_sgt_fd_inode "$fd_path")" || return 1
-  [[ "${path_identity#*:}" == "$fd_inode" ]]
+  [[ "${path_identity##*:}" == "${fd_identity##*:}" ]]
 }
 _sgt_owned_fd_matches_path() {
   local path="$1" fd_path="$2" expected_mode="$3" expected_identity="$4"
   local fd_mode current_mode current_identity
   fd_mode="$(_sgt_fd_mode "$fd_path")" || return 1
   current_mode="$(_sgt_path_mode "$path")" || return 1
-  current_identity="$(_sgt_path_identity "$path")" || return 1
   _sgt_fd_mode_matches_path "$fd_mode" "$expected_mode" || return 1
-  [[ "$current_mode" == "$expected_mode" && "$current_identity" == "$expected_identity" && \
-    -f "$fd_path" && -O "$fd_path" && -f "$path" && ! -L "$path" && -O "$path" ]] || \
+  [[ "$current_mode" == "$expected_mode" && -f "$fd_path" && -O "$fd_path" && \
+    -f "$path" && ! -L "$path" && -O "$path" ]] || \
     return 1
+  current_identity="$(_sgt_path_identity "$path")" || return 1
+  [[ "$current_identity" == "$expected_identity" ]] || return 1
   _sgt_fd_matches_path "$path" "$fd_path" "$current_identity"
 }
 _sgt_legacy_identity_mode() {
