@@ -166,7 +166,20 @@ _sgt_path_identity() {
   stat -c '%u:%d:%i' -- "$1" 2>/dev/null || stat -f '%u:%d:%i' "$1" 2>/dev/null
 }
 _sgt_fd_identity() {
-  stat -L -c '%u:%d:%i' -- "$1" 2>/dev/null || stat -L -f '%u:%d:%i' "$1" 2>/dev/null
+  local fd_path="$1" fd_number system
+  system="$(uname -s 2>/dev/null)" || return 1
+  if [[ "$system" == "Darwin" ]]; then
+    fd_number="${fd_path#/dev/fd/}"
+    [[ "$fd_path" == "/dev/fd/$fd_number" ]] || return 1
+    case "$fd_number" in
+      ""|*[!0-9]*) return 1 ;;
+    esac
+    python3 -c 'import os,sys; s=os.fstat(int(sys.argv[1])); print("%d:%d:%d" % (s.st_uid,s.st_dev,s.st_ino))' \
+      "$fd_number" 2>/dev/null
+    return
+  fi
+  stat -L -c '%u:%d:%i' -- "$fd_path" 2>/dev/null || \
+    stat -L -f '%u:%d:%i' "$fd_path" 2>/dev/null
 }
 _sgt_fd_matches_path() {
   local path="$1" fd_path="$2" path_identity="$3" system fd_identity
@@ -178,8 +191,8 @@ _sgt_fd_matches_path() {
     return
   fi
   # Darwin's fdescfs gives /dev/fd entries a synthetic device ID, but retains
-  # the opened vnode's inode. Callers separately pin the path's full identity.
-  [[ "${path_identity##*:}" == "${fd_identity##*:}" ]]
+  # the descriptor's real identity is available through fstat(2).
+  [[ "$path_identity" == "$fd_identity" ]]
 }
 _sgt_owned_fd_matches_path() {
   local path="$1" fd_path="$2" expected_mode="$3" expected_identity="$4"
@@ -242,8 +255,21 @@ _sgt_read_matching_legacy_pane_identity() {
     exec 9<&-
     return 1
   fi
-  exec 9<&-
-  migrated="$(_sgt_read_owned_file "$path" "$identity" 2>/dev/null || true)"
+  exec 8< "$path" || { exec 9<&-; return 1; }
+  if ! _sgt_owned_fd_matches_path "$path" /dev/fd/8 600 "$identity" || \
+    ! _sgt_owned_fd_matches_path "$path" /dev/fd/9 600 "$identity" || \
+    [[ ! /dev/fd/8 -ef /dev/fd/9 ]]; then
+    exec 8<&- 9<&-
+    return 1
+  fi
+  migrated="$(cat <&8)" || { exec 8<&- 9<&-; return 1; }
+  if ! _sgt_owned_fd_matches_path "$path" /dev/fd/8 600 "$identity" || \
+    ! _sgt_owned_fd_matches_path "$path" /dev/fd/9 600 "$identity" || \
+    [[ ! /dev/fd/8 -ef /dev/fd/9 ]]; then
+    exec 8<&- 9<&-
+    return 1
+  fi
+  exec 8<&- 9<&-
   [[ "$migrated" == "$actual" ]] || return 1
   printf '%s\n' "$migrated"
 }

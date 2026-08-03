@@ -11,6 +11,7 @@ mkdir -p "$fake_bin"
 real_stat="$(command -v stat)"
 real_uname="$(command -v uname)"
 real_chmod="$(command -v chmod)"
+real_python="$(command -v python3)"
 if "$real_stat" -c '%a' -- "$ROOT_DIR/bin/_sgt-lib.sh" >/dev/null 2>&1; then
   path_mode_format='%a'
 else
@@ -35,19 +36,6 @@ fi
 if [[ "$last" == /dev/fd/* && -n "${TEST_FD_MODE:-}" && \
   ( "$*" == *'%a'* || "$*" == *'%Lp'* ) ]]; then
   printf '%s\n' "$TEST_FD_MODE"
-  exit 0
-fi
-if [[ "$last" == /dev/fd/* && "$*" == *'%u:%d:%i'* && \
-  ( -n "${TEST_FD_UID:-}" || -n "${TEST_FD_INODE:-}" ) ]]; then
-  identity="$("$REAL_STAT" -L -c '%u:%d:%i' -- "$last" 2>/dev/null || \
-    "$REAL_STAT" -L -f '%u:%d:%i' "$last")" || exit 1
-  uid="${identity%%:*}"
-  device_inode="${identity#*:}"
-  device="${device_inode%:*}"
-  inode="${identity##*:}"
-  [[ -z "${TEST_FD_UID:-}" ]] || uid="$TEST_FD_UID"
-  [[ -z "${TEST_FD_INODE:-}" ]] || inode="$TEST_FD_INODE"
-  printf '%s:%s:%s\n' "$uid" "$device" "$inode"
   exit 0
 fi
 if [[ -n "${TEST_PATH_UID:-}" && "$last" == "${TEST_OWNER_PATH:-}" && \
@@ -77,6 +65,28 @@ cat > "$fake_bin/uname" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "${TEST_SYSTEM:-Linux}"
 EOF
+cat > "$fake_bin/python3" <<'EOF'
+#!/usr/bin/env bash
+identity="$("$REAL_PYTHON" "$@")" || exit 1
+uid="${identity%%:*}"
+device_inode="${identity#*:}"
+device="${device_inode%:*}"
+inode="${identity##*:}"
+[[ -z "${TEST_FD_UID:-}" ]] || uid="$TEST_FD_UID"
+[[ -z "${TEST_FD_DEVICE:-}" ]] || device="$TEST_FD_DEVICE"
+[[ -z "${TEST_FD_INODE:-}" ]] || inode="$TEST_FD_INODE"
+if [[ -n "${TEST_FD_RACE_COUNTER:-}" ]]; then
+  count=0
+  [[ ! -f "$TEST_FD_RACE_COUNTER" ]] || count="$(cat "$TEST_FD_RACE_COUNTER")"
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$TEST_FD_RACE_COUNTER"
+  if [[ "$count" -eq "${TEST_FD_RACE_TRIGGER:-2}" ]]; then
+    rm -f "$TEST_FD_RACE_PATH"
+    mv "$TEST_FD_RACE_REPLACEMENT" "$TEST_FD_RACE_PATH"
+  fi
+fi
+printf '%s:%s:%s\n' "$uid" "$device" "$inode"
+EOF
 cat > "$fake_bin/chmod" <<'EOF'
 #!/usr/bin/env bash
 last="${!#}"
@@ -91,8 +101,9 @@ if [[ "$last" == /dev/fd/* && -n "${TEST_CHMOD_RACE_PATH:-}" ]]; then
 fi
 exec "$REAL_CHMOD" "$@"
 EOF
-chmod +x "$fake_bin/stat" "$fake_bin/uname" "$fake_bin/chmod"
+chmod +x "$fake_bin/stat" "$fake_bin/uname" "$fake_bin/python3" "$fake_bin/chmod"
 export REAL_STAT="$real_stat" REAL_UNAME="$real_uname" REAL_CHMOD="$real_chmod"
+export REAL_PYTHON="$real_python"
 export TEST_PATH_MODE_FORMAT="$path_mode_format"
 
 owned="$TEST_ROOT/owned"
@@ -124,6 +135,18 @@ if PATH="$fake_bin:$PATH" TEST_SYSTEM=Darwin TEST_FD_MODE=400 TEST_FD_INODE=0 \
   bash -c 'source "$1"; _sgt_read_owned_file "$2"' _ \
   "$ROOT_DIR/bin/_sgt-lib.sh" "$owned" >/dev/null 2>&1; then
   printf 'accepted mismatched descriptor inode\n' >&2
+  exit 1
+fi
+
+owned_identity="$("$real_stat" -c '%u:%d:%i' -- "$owned" 2>/dev/null || \
+  "$real_stat" -f '%u:%d:%i' "$owned")"
+owned_device_inode="${owned_identity#*:}"
+foreign_device=$((${owned_device_inode%:*} + 1))
+if PATH="$fake_bin:$PATH" TEST_SYSTEM=Darwin TEST_FD_MODE=400 \
+  TEST_FD_DEVICE="$foreign_device" \
+  bash -c 'source "$1"; _sgt_read_owned_file "$2"' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$owned" >/dev/null 2>&1; then
+  printf 'accepted mismatched descriptor device\n' >&2
   exit 1
 fi
 
@@ -195,8 +218,8 @@ final_replacement_identity="$("$real_stat" -c '%u:%d:%i' -- "$final_replacement"
   "$real_stat" -f '%u:%d:%i' "$final_replacement")"
 final_race_counter="$TEST_ROOT/final-reread-race-counter"
 if PATH="$fake_bin:$PATH" TEST_SYSTEM=Darwin TEST_DARWIN_FD_MODE=1 \
-  TEST_RACE_PATH="$legacy" TEST_RACE_REPLACEMENT="$final_replacement" \
-  TEST_RACE_COUNTER="$final_race_counter" TEST_RACE_TRIGGER=4 \
+  TEST_FD_RACE_PATH="$legacy" TEST_FD_RACE_REPLACEMENT="$final_replacement" \
+  TEST_FD_RACE_COUNTER="$final_race_counter" TEST_FD_RACE_TRIGGER=2 \
   bash -c 'source "$1"; _sgt_read_matching_legacy_pane_identity "$2" "$3"' _ \
   "$ROOT_DIR/bin/_sgt-lib.sh" "$legacy" legacy-value >/dev/null 2>&1; then
   printf 'legacy migration accepted a replacement during its final reread\n' >&2
