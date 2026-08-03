@@ -63,7 +63,7 @@ if [[ -n "${TEST_RACE_PATH:-}" && "$last" == "$TEST_RACE_PATH" && \
   [[ ! -f "$TEST_RACE_COUNTER" ]] || count="$(cat "$TEST_RACE_COUNTER")"
   count=$((count + 1))
   printf '%s\n' "$count" > "$TEST_RACE_COUNTER"
-  if [[ "$count" -eq 2 ]]; then
+  if [[ "$count" -eq "${TEST_RACE_TRIGGER:-2}" ]]; then
     output="$("$REAL_STAT" "$@")" || exit 1
     rm -f "$last"
     mv "$TEST_RACE_REPLACEMENT" "$last"
@@ -185,6 +185,29 @@ legacy_identity="$("$real_stat" -c '%u:%d:%i' -- "$legacy" 2>/dev/null || \
 for candidate in "$legacy".tmp.*; do
   [[ ! -e "$candidate" ]]
 done
+
+printf 'legacy-value\n' > "$legacy"
+chmod 664 "$legacy"
+final_replacement="$TEST_ROOT/final-reread-replacement"
+printf 'legacy-value\n' > "$final_replacement"
+chmod 600 "$final_replacement"
+final_replacement_identity="$("$real_stat" -c '%u:%d:%i' -- "$final_replacement" 2>/dev/null || \
+  "$real_stat" -f '%u:%d:%i' "$final_replacement")"
+final_race_counter="$TEST_ROOT/final-reread-race-counter"
+if PATH="$fake_bin:$PATH" TEST_SYSTEM=Darwin TEST_DARWIN_FD_MODE=1 \
+  TEST_RACE_PATH="$legacy" TEST_RACE_REPLACEMENT="$final_replacement" \
+  TEST_RACE_COUNTER="$final_race_counter" TEST_RACE_TRIGGER=4 \
+  bash -c 'source "$1"; _sgt_read_matching_legacy_pane_identity "$2" "$3"' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$legacy" legacy-value >/dev/null 2>&1; then
+  printf 'legacy migration accepted a replacement during its final reread\n' >&2
+  exit 1
+fi
+legacy_mode="$("$real_stat" -c '%a' -- "$legacy" 2>/dev/null || \
+  "$real_stat" -f '%Lp' "$legacy")"
+legacy_identity="$("$real_stat" -c '%u:%d:%i' -- "$legacy" 2>/dev/null || \
+  "$real_stat" -f '%u:%d:%i' "$legacy")"
+[[ "$(cat "$legacy")" == 'legacy-value' && "$legacy_mode" == 600 ]]
+[[ "$legacy_identity" == "$final_replacement_identity" ]]
 
 race_path="$TEST_ROOT/race-owned"
 race_replacement="$TEST_ROOT/race-replacement"

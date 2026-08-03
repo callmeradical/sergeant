@@ -201,11 +201,12 @@ _sgt_legacy_identity_mode() {
   esac
 }
 _sgt_read_owned_file() {
-  local path="$1" mode identity value
+  local path="$1" expected_identity="${2:-}" mode identity value
   [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
   mode="$(_sgt_path_mode "$path")" || return 1
   [[ "$mode" == "600" ]] || return 1
   identity="$(_sgt_path_identity "$path")" || return 1
+  [[ -z "$expected_identity" || "$identity" == "$expected_identity" ]] || return 1
   exec 9< "$path" || return 1
   if ! _sgt_owned_fd_matches_path "$path" /dev/fd/9 "$mode" "$identity"; then
     exec 9<&-
@@ -242,7 +243,7 @@ _sgt_read_matching_legacy_pane_identity() {
     return 1
   fi
   exec 9<&-
-  migrated="$(_sgt_read_owned_file "$path" 2>/dev/null || true)"
+  migrated="$(_sgt_read_owned_file "$path" "$identity" 2>/dev/null || true)"
   [[ "$migrated" == "$actual" ]] || return 1
   printf '%s\n' "$migrated"
 }
