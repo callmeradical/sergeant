@@ -30,6 +30,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASH32="${BASH32:-/usr/local/bin/bash32}"
 
+if ! command -v python3 >/dev/null 2>&1 || ! python3 --version >/dev/null 2>&1; then
+  printf 'ERROR: Required test tool is unavailable: python3\n' >&2
+  exit 1
+fi
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 pass=0
@@ -105,6 +110,9 @@ fi
 # interactive workers; requires tmux is absent — no tmux pane launched).
 _run "worker drain checkpoint + _watch_progress drain signal" \
   bash "$ROOT_DIR/tests/sgt-worker-drain-test.sh"
+
+_run "Docker Python runtime contract" \
+  bash "$ROOT_DIR/tests/docker-drain-contract-test.sh"
 
 _run "owned fleet-file identity" \
   bash "$ROOT_DIR/tests/sgt-owned-file-test.sh"

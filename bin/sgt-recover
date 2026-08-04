@@ -170,7 +170,8 @@ fi
 # ── 8. Pre-flight: verify old pane identity ──────────────────────────────────
 # Save the old pane reference for the deferred kill and for potential restore
 # on failure.  The identity check is done here (under lock, before any state
-# mutation) so a mismatch refuses recovery without killing anything.
+# mutation) so a mismatch refuses recovery without killing anything. The held
+# response lock also serializes sgt-watch's final orphan classification.
 
 old_pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
 old_pane_identity="$(_sgt_read_owned_file "$REPO_DIR/pane_identity" 2>/dev/null || true)"

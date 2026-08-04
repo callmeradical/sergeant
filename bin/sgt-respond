@@ -215,6 +215,28 @@ case "$replacement_phase" in
   *) _die "Unresolved replacement pane ownership requires reconciliation before response" ;;
 esac
 
+_clear_response_pending_phase() {
+  local current_phase existing_diagnostic
+  current_phase="$(_sgt_read_owned_file "$REPO_DIR/replacement_phase" 2>/dev/null || true)"
+  case "$current_phase" in
+    response-pending)
+      rm -f "$REPO_DIR/replacement_phase" || \
+        _die "Could not clear completed response delivery journal"
+      ;;
+    "")
+      [[ ! -e "$REPO_DIR/replacement_phase" && ! -L "$REPO_DIR/replacement_phase" ]] || \
+        _die "Response delivery journal became unreadable before completion"
+      ;;
+    *) _die "Response delivery journal changed before completion" ;;
+  esac
+  existing_diagnostic="$(cat "$REPO_DIR/diagnostic" 2>/dev/null || true)"
+  if [[ "$existing_diagnostic" == \
+        "worker replacement journal is unreadable; reconciliation required" ]]; then
+    rm -f "$REPO_DIR/diagnostic"
+  fi
+  replacement_phase=""
+}
+
 pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
 agent="$(cat "$REPO_DIR/agent" 2>/dev/null || true)"
 pane_verified_live=false
@@ -405,7 +427,7 @@ if [[ -n "$pane" && "$pane_verified_live" == "true" ]] && \
   _sgt_wait_worker_notification "$pane" "$REPO_DIR" "$response_id" || \
     _die "Worker did not acknowledge its durable response notification; response remains pending"
   _cleanup_response_input
-  rm -f "$REPO_DIR/replacement_phase"
+  _clear_response_pending_phase
   trap - EXIT
   echo "sgt-respond: notified local pane $pane."
   exit 0
@@ -418,6 +440,7 @@ window_name="$(cat "$REPO_DIR/window_name" 2>/dev/null || true)"
 if ! command -v tmux >/dev/null 2>&1 || [[ -z "$tmux_session" || -z "$window_name" || -z "$agent" ]]; then
   _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$response_id" response \
     "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
+  _clear_response_pending_phase
   echo "sgt-respond: no live local pane and relaunch metadata is incomplete; response file is ready."
   exit 0
 fi
@@ -448,6 +471,7 @@ if ! _sgt_drain_check_admission_locked "${_sgt_respond_drain_project:-}"; then
   # worker exactly once (consistent with the direct _sgt_is_drained path below).
   _atomic_write "$REPO_DIR/drain_held" "$gate_generation" 2>/dev/null || true
   _sgt_drain_lock_release_fd "$_SGT_RESPOND_DRAIN_FD"
+  _clear_response_pending_phase
   _sgt_response_lock_release 2>/dev/null || true
   _cleanup_response_input
   trap - EXIT

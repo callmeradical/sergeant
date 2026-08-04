@@ -276,7 +276,7 @@ _docker_pass "System Bash (Debian bookworm-slim)" \
 # runtime-bash-test compatibility check.
 _docker_pass "Bash 3.2 (Alpine)" \
   "$SGT_BASH32_IMAGE" \
-  "BASH32=/usr/local/bin/bash SGT_MINIMUM_BASH=/usr/local/bin/bash bash /repo/tests/run-drain-tests.sh"
+  "apk add --no-cache python3 >/dev/null && command -v python3 >/dev/null && python3 --version && BASH32=/usr/local/bin/bash SGT_MINIMUM_BASH=/usr/local/bin/bash bash /repo/tests/run-drain-tests.sh"
 
 printf '\\n═══════════════════════════════════════════════════════════\\n'
 printf ' Docker drain suite: %d passed, %d failed\\n' "$pass" "$fail"

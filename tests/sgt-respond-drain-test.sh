@@ -28,6 +28,7 @@ touch "$source_repo/README.md"
 git -C "$source_repo" add README.md
 git -C "$source_repo" commit -qm fixture
 git -C "$source_repo" worktree add -q -b drain-test "$worktree"
+worktree="$(cd "$worktree" && pwd -P)"
 
 cat > "$config_dir/test.yaml" <<EOF
 repos:
@@ -136,6 +137,7 @@ respond() {
   # env vars on the LEFT of a pipeline apply only to the left-side command.
   # Use a subshell so PATH and other vars are in scope for sgt-respond (right side).
   (
+    # shellcheck disable=SC2030  # This PATH is intentionally scoped to the subshell.
     export PATH="$fake_bin:$PATH"
     export EXPECTED_WORKER="$repo_state"
     export TD_LOG="${TD_LOG:-$TEST_ROOT/td.log}"
@@ -151,6 +153,7 @@ _reset_worker() {
   rm -f "$repo_state/pane" "$repo_state/response" "$repo_state/response_generation" \
     "$repo_state/response_id" "$repo_state/drain_held" "$repo_state/notification_id" \
     "$repo_state/notification_delivered" "$repo_state/notification_target" \
+    "$repo_state/replacement_phase" \
     "$worktree/.sergeant-response" "$worktree/.sergeant-response-generation" \
     "$worktree/.sergeant-response-id" "$worktree/.sergeant-notification"
   rm -rf "$config_dir/drain"
@@ -165,7 +168,7 @@ _reset_worker
 mkdir -p "$config_dir/drain"
 printf 'reason=maintenance\ncreated=2025-01-01T00:00:00Z\n' > "$config_dir/drain/global"
 
-PATH="$fake_bin:$PATH" PANE_ALIVE=1 PANE_IDENTITY='bash:other-worker' \
+PANE_ALIVE=1 PANE_IDENTITY='bash:other-worker' \
   EXPECTED_WORKER="$repo_state" \
   TMUX_LOG="$TEST_ROOT/drain-global.log" TD_LOG="$TEST_ROOT/td.log" \
   respond 'drain response' >/dev/null 2>&1
@@ -189,6 +192,9 @@ PATH="$fake_bin:$PATH" PANE_ALIVE=1 PANE_IDENTITY='bash:other-worker' \
   printf 'drain: drain_held should contain the gate generation (1), got: %s\n' \
     "$(cat "$repo_state/drain_held")" >&2; exit 1
 }
+[[ ! -e "$repo_state/replacement_phase" ]] || {
+  printf 'drain: completed hold retained a replacement phase\n' >&2; exit 1
+}
 printf 'sgt-respond global drain holds relaunch: ok\n'
 
 _reset_worker
@@ -198,7 +204,7 @@ _reset_worker
 mkdir -p "$config_dir/drain"
 printf 'reason=feature-gate\ncreated=2025-01-01T00:00:00Z\n' > "$config_dir/drain/test"
 
-PATH="$fake_bin:$PATH" PANE_ALIVE=1 PANE_IDENTITY='bash:other-worker' \
+PANE_ALIVE=1 PANE_IDENTITY='bash:other-worker' \
   EXPECTED_WORKER="$repo_state" \
   TMUX_LOG="$TEST_ROOT/drain-project.log" TD_LOG="$TEST_ROOT/td-project.log" \
   respond 'drain project response' >/dev/null 2>&1
@@ -212,6 +218,9 @@ PATH="$fake_bin:$PATH" PANE_ALIVE=1 PANE_IDENTITY='bash:other-worker' \
 [[ -f "$repo_state/drain_held" ]] || {
   printf 'project drain: drain_held should be written\n' >&2; exit 1
 }
+[[ ! -e "$repo_state/replacement_phase" ]] || {
+  printf 'project drain: completed hold retained a replacement phase\n' >&2; exit 1
+}
 printf 'sgt-respond project drain holds relaunch: ok\n'
 
 _reset_worker
@@ -221,7 +230,7 @@ _reset_worker
 mkdir -p "$config_dir/drain"
 printf 'reason=other\ncreated=2025-01-01T00:00:00Z\n' > "$config_dir/drain/otherproject"
 
-PATH="$fake_bin:$PATH" PANE_ALIVE=1 PANE_IDENTITY='bash:other-worker' \
+PANE_ALIVE=1 PANE_IDENTITY='bash:other-worker' \
   NEW_PANE="%77" EXPECTED_WORKER="$repo_state" \
   TMUX_LOG="$TEST_ROOT/drain-other.log" TD_LOG="$TEST_ROOT/td-other.log" \
   respond 'no drain response' >/dev/null 2>&1
@@ -255,7 +264,7 @@ printf '%s\n' "$response_id_hex" > "$worktree/.sergeant-response-id"
 printf '1\n' > "$repo_state/drain_held"
 # No drain active (undrained)
 
-PATH="$fake_bin:$PATH" PANE_ALIVE=1 PANE_IDENTITY='bash:other-worker' \
+PANE_ALIVE=1 PANE_IDENTITY='bash:other-worker' \
   NEW_PANE="%88" EXPECTED_WORKER="$repo_state" \
   TMUX_LOG="$TEST_ROOT/drain-reevaluate.log" TD_LOG="$TEST_ROOT/td-reevaluate.log" \
   respond 'Use option A' >/dev/null 2>&1
@@ -295,7 +304,7 @@ printf '1\n' > "$repo_state/drain_held"
 # No drain active
 
 set +e
-PATH="$fake_bin:$PATH" PANE_ALIVE=1 PANE_IDENTITY='bash:other-worker' \
+PANE_ALIVE=1 PANE_IDENTITY='bash:other-worker' \
   EXPECTED_WORKER="$repo_state" \
   respond 'new response' >/dev/null 2>&1
 mismatch_status=$?

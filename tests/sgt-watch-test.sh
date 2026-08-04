@@ -238,6 +238,31 @@ PANE_IDENTITY="$recovery_new_identity" EXPECTED_WORKER="$repo" \
   "$ROOT/bin/sgt-watch" --sync task-1
 [[ "$(cat "$repo/status")" == "in_progress" ]]
 
+# response-pending is a valid transport phase, not an unreadable replacement.
+printf 'blocked\n' > "$worktree/.sergeant-status"
+printf 'needs_input\n' > "$repo/status"
+printf 'response-pending\n' > "$repo/replacement_phase"
+chmod 600 "$repo/replacement_phase"
+printf 'worker replacement journal is unreadable; reconciliation required\n' \
+  > "$repo/diagnostic"
+PANE_IDENTITY="$recovery_new_identity" EXPECTED_WORKER="$repo" \
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT/bin/sgt-watch" --sync task-1
+[[ "$(cat "$repo/status")" == "needs_input" ]]
+[[ "$(cat "$repo/replacement_phase")" == "response-pending" ]]
+[[ ! -e "$repo/diagnostic" ]]
+rm -f "$repo/replacement_phase"
+
+printf 'unknown-phase\n' > "$repo/replacement_phase"
+chmod 600 "$repo/replacement_phase"
+PANE_IDENTITY="$recovery_new_identity" EXPECTED_WORKER="$repo" \
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT/bin/sgt-watch" --sync task-1
+[[ "$(cat "$repo/replacement_phase")" == "unknown-phase" ]]
+grep -Fq 'worker replacement journal is unreadable; reconciliation required' \
+  "$repo/diagnostic"
+rm -f "$repo/replacement_phase" "$repo/diagnostic"
+
 # Restore the original pane fixture for terminal recycling coverage below.
 printf '%%42\n' > "$repo/pane"
 printf '%s\n' "$legacy_identity" > "$repo/pane_identity"
@@ -278,9 +303,6 @@ grep -Fq 'pane_identity=0|%42|' "$repo/worker_recycled"
 printf 'drained\n' > "$worktree/.sergeant-status"
 printf 'drained\n' > "$repo/status"
 printf 'drained\n' > "$worktree/.sergeant-drained"
-printf 'worker_pid=4242\nworker_start=Mon Jan  1 00:00:00 2024\n' \
-  > "$repo/drain_handoff"
-chmod 600 "$repo/drain_handoff"
 printf '%%99\n' > "$repo/pane"
 printf '0|%%99|9999|654321|missing-current-worker\n' > "$repo/pane_identity"
 chmod 600 "$repo/pane_identity"
@@ -289,6 +311,29 @@ printf '%s\n' "$recorded_executable" > "$repo/worker_executable"
 printf '9999\n' > "$repo/worker_pid"
 printf 'Tue Jan  2 00:00:00 2024\n' > "$repo/worker_process_start"
 chmod 600 "$repo/worker_executable" "$repo/worker_pid" "$repo/worker_process_start"
+
+rm -f "$repo/drain_handoff" "$repo/diagnostic"
+EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT/bin/sgt-watch" --sync task-1
+grep -Fq 'drained worker lacks durable handoff evidence; refusing recycle' \
+  "$repo/diagnostic"
+
+printf 'worker_pid=9999\nworker_start=Tue Jan  2 00:00:00 2024\n' \
+  > "$repo/drain_handoff"
+chmod 600 "$repo/drain_handoff"
+EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT/bin/sgt-watch" --sync task-1
+[[ ! -e "$repo/diagnostic" ]]
+
+printf 'manual reconciliation note\n' > "$repo/diagnostic"
+EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT/bin/sgt-watch" --sync task-1
+[[ "$(cat "$repo/diagnostic")" == 'manual reconciliation note' ]]
+rm -f "$repo/diagnostic"
+
+printf 'worker_pid=4242\nworker_start=Mon Jan  1 00:00:00 2024\n' \
+  > "$repo/drain_handoff"
+chmod 600 "$repo/drain_handoff"
 printf -v stale_command '%q %q %q %q' \
   "$recorded_executable" "$repo" "$worktree" opencode
 tmux_stale_command="${stale_command//\\/\\\\}"

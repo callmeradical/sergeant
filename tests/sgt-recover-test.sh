@@ -5,7 +5,16 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TEST_ROOT"' EXIT
+race_recover_pid=""
+race_watch_pid=""
+_cleanup_test() {
+  [[ -z "$race_watch_pid" ]] || kill "$race_watch_pid" 2>/dev/null || true
+  [[ -z "$race_recover_pid" ]] || kill "$race_recover_pid" 2>/dev/null || true
+  [[ -z "$race_watch_pid" ]] || wait "$race_watch_pid" 2>/dev/null || true
+  [[ -z "$race_recover_pid" ]] || wait "$race_recover_pid" 2>/dev/null || true
+  rm -rf "$TEST_ROOT"
+}
+trap '_cleanup_test' EXIT
 TMUX_KILLED_DIR="$TEST_ROOT/killed-panes"
 TMUX_NEW_DIR="$TEST_ROOT/new-panes"
 TMUX_OLD_IDENTITY_FILE="$TEST_ROOT/old-pane-identity"
@@ -102,6 +111,11 @@ case "$1" in
       previous="$arg"
     done
     [[ ! -e "$TMUX_KILLED_DIR/${target#%}" ]] || exit 1
+    if [[ -n "${RECOVERY_RACE_OLD_PANE_ABSENT:-}" &&
+          -e "$RECOVERY_RACE_OLD_PANE_ABSENT" &&
+          "$target" == "${RECOVERY_RACE_OLD_PANE:-%42}" ]]; then
+      exit 1
+    fi
     base_identity="$(cat "$TMUX_OLD_IDENTITY_FILE")"
     base_remainder="${base_identity#*|}"
     base_remainder="${base_remainder#*|}"
@@ -149,7 +163,9 @@ case "$1" in
     base_identity="$(cat "$TMUX_OLD_IDENTITY_FILE")"
     base_remainder="${base_identity#*|}"
     base_pane="${base_remainder%%|*}"
-    if [[ ! -e "$TMUX_KILLED_DIR/${base_pane#%}" ]]; then
+    if [[ ! -e "$TMUX_KILLED_DIR/${base_pane#%}" &&
+          ( -z "${RECOVERY_RACE_OLD_PANE_ABSENT:-}" ||
+            ! -e "$RECOVERY_RACE_OLD_PANE_ABSENT" ) ]]; then
       if [[ "${!#}" == '#{pane_id}' ]]; then
         printf '%s\n' "$base_pane"
       else
@@ -201,6 +217,24 @@ esac
 TMUX
 chmod +x "$fake_bin/tmux"
 
+real_date="$(command -v date)"
+cat > "$fake_bin/date" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${RECOVERY_PRE_PHASE_READY:-}" && ! -e "$RECOVERY_PRE_PHASE_READY" ]]; then
+  : > "$RECOVERY_RACE_OLD_PANE_ABSENT"
+  : > "$RECOVERY_PRE_PHASE_READY"
+  attempt=0
+  while [[ ! -e "$RECOVERY_PRE_PHASE_RELEASE" && "$attempt" -lt 500 ]]; do
+    sleep 0.01
+    attempt=$((attempt + 1))
+  done
+  [[ -e "$RECOVERY_PRE_PHASE_RELEASE" ]] || exit 71
+fi
+exec "$REAL_DATE" "$@"
+EOF
+chmod +x "$fake_bin/date"
+export REAL_DATE="$real_date"
+
 cat > "$fake_bin/td" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${TD_LOG:-/dev/null}"
@@ -244,6 +278,9 @@ EXPECTED_WORKER="$repo_state" KILL_LOG="$TEST_ROOT/killed.log" \
   exit 1
 }
 [[ "$(cat "$repo_state/worker_pid")" == "9999" ]]
+[[ ! -e "$repo_state/replacement_phase" ]]
+[[ ! -e "$repo_state/replacement_candidate_pane" ]]
+[[ ! -e "$repo_state/replacement_candidate_pane_identity" ]]
 
 # Old pane was killed
 grep -Fq '%42' "$TEST_ROOT/killed.log" || {
@@ -276,6 +313,63 @@ grep -Fq 'new-window' "$TEST_ROOT/windows.log" || {
 }
 
 printf 'sgt-recover happy path: ok\n'
+
+# ── Slice 1b: watch cannot orphan recovery between verification and phase ────
+
+_setup_stalled_worker "$repo_state" "$worktree"
+rm -f "$repo_state/stall_recovery_attempted"
+race_ready="$TEST_ROOT/recovery-pre-phase-ready"
+race_release="$TEST_ROOT/recovery-pre-phase-release"
+race_old_absent="$TEST_ROOT/recovery-old-pane-absent"
+race_recover_log="$TEST_ROOT/recovery-race-recover.log"
+race_watch_log="$TEST_ROOT/recovery-race-watch.log"
+
+EXPECTED_WORKER="$repo_state" RECOVERY_PRE_PHASE_READY="$race_ready" \
+  RECOVERY_PRE_PHASE_RELEASE="$race_release" \
+  RECOVERY_RACE_OLD_PANE_ABSENT="$race_old_absent" \
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-recover" task-1 app >"$race_recover_log" 2>&1 &
+race_recover_pid=$!
+
+for _attempt in {1..500}; do
+  [[ -e "$race_ready" ]] && break
+  kill -0 "$race_recover_pid" 2>/dev/null || break
+  sleep 0.01
+done
+[[ -e "$race_ready" ]] || {
+  printf 'recovery did not reach the pre-phase race boundary\n' >&2
+  exit 1
+}
+
+EXPECTED_WORKER="$repo_state" RECOVERY_RACE_OLD_PANE_ABSENT="$race_old_absent" \
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-watch" --sync task-1 >"$race_watch_log" 2>&1 &
+race_watch_pid=$!
+
+race_observed=false
+for _attempt in {1..500}; do
+  if ! kill -0 "$race_watch_pid" 2>/dev/null || \
+     compgen -G "$repo_state/.response.lock.*" >/dev/null; then
+    race_observed=true
+    break
+  fi
+  sleep 0.01
+done
+$race_observed || {
+  printf 'watch did not reach the recovery serialization boundary\n' >&2
+  exit 1
+}
+
+: > "$race_release"
+wait "$race_recover_pid"
+race_recover_pid=""
+wait "$race_watch_pid"
+race_watch_pid=""
+
+[[ "$(cat "$repo_state/status")" == "in_progress" ]]
+[[ "$(cat "$worktree/.sergeant-status")" == "in_progress" ]]
+[[ "$(cat "$repo_state/pane")" == "%99" ]]
+printf 'sgt-recover serializes watch orphan classification: ok\n'
 
 # ── Slice 2a: Refused when status is not in_progress ─────────────────────────
 
@@ -479,6 +573,7 @@ kill4_content="$(cat "$TEST_ROOT/kill4.log" 2>/dev/null || true)"
     "$kill4_content" >&2
   exit 1
 }
+[[ ! -e "$repo_state/replacement_phase" ]]
 
 printf 'sgt-recover tmux failure escalates: ok\n'
 
@@ -622,6 +717,7 @@ set -e
 [[ "$(cat "$repo_state/replacement_previous_pane_identity")" == "$old_identity" ]]
 [[ "$(cat "$repo_state/worker_pid")" == "9999" ]]
 [[ "$(cat "$repo_state/replacement_previous_worker_pid")" == "4242" ]]
+[[ "$(cat "$repo_state/replacement_phase")" == "launching" ]]
 grep -Fq 'replacement pane %99 could not be terminated and remains recorded' \
   "$repo_state/diagnostic"
 printf 'sgt-recover double termination failure preserves both identities: ok\n'

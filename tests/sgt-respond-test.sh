@@ -282,6 +282,7 @@ assert_publication_failure() {
     printf 'response publication unexpectedly succeeded at %s\n' "$label" >&2
     exit 1
   }
+  [[ "$(cat "$repo_state/replacement_phase")" == "response-pending" ]]
   if [[ -e "$worktree/.sergeant-response" ]]; then
     [[ -s "$repo_state/response_generation" && -s "$repo_state/response_id" && \
        -s "$worktree/.sergeant-response-generation" && -s "$worktree/.sergeant-response-id" ]]
@@ -352,6 +353,36 @@ printf 'resume one delivery target' | PATH="$fake_bin:$PATH" \
 rm -f "$repo_state/response" "$repo_state/response_generation" "$repo_state/response_id" \
   "$repo_state/response_td_recorded" "$worktree/.sergeant-response" \
   "$worktree/.sergeant-response-generation" "$worktree/.sergeant-response-id"
+
+# A stored response with no relaunch metadata is a completed publication path,
+# not an active pane replacement. Preserve the response and clear its phase.
+rm -f "$repo_state/notification_id" "$repo_state/notification_target" \
+  "$repo_state/notification_delivered" "$repo_state/notification_delivered_pane_identity" \
+  "$worktree/.sergeant-notification"
+rm -rf "$repo_state/notifications"
+printf 'needs_input\n' > "$repo_state/status"
+printf 'needs_input\n' > "$worktree/.sergeant-status"
+printf 'worker replacement journal is unreadable; reconciliation required\n' \
+  > "$repo_state/diagnostic"
+rm -f "$repo_state/tmux_session" "$repo_state/window_name"
+incomplete_output="$(printf 'stored without relaunch metadata' | PATH="$fake_bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/incomplete-metadata.log" \
+  TD_LOG="$TEST_ROOT/incomplete-metadata-td.log" \
+  TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=0 \
+  EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-respond" task-1 app)"
+[[ "$incomplete_output" == *'no live local pane and relaunch metadata is incomplete'* ]]
+[[ "$(cat "$repo_state/response")" == 'stored without relaunch metadata' ]]
+[[ "$(cat "$worktree/.sergeant-response")" == 'stored without relaunch metadata' ]]
+[[ ! -e "$repo_state/replacement_phase" ]]
+[[ ! -e "$repo_state/diagnostic" ]]
+printf 'sgt\n' > "$repo_state/tmux_session"
+printf 'task/app\n' > "$repo_state/window_name"
+rm -f "$repo_state/response" "$repo_state/response_generation" "$repo_state/response_id" \
+  "$repo_state/response_td_recorded" "$repo_state/notification_id" \
+  "$repo_state/notification_target" "$repo_state/replacement_phase" \
+  "$worktree/.sergeant-response" "$worktree/.sergeant-response-generation" \
+  "$worktree/.sergeant-response-id" "$worktree/.sergeant-notification"
 
 set +e
 output="$(SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-respond" task-1 app 'argv body rejected' 2>&1)"
