@@ -128,7 +128,7 @@ stub_platform() {
   # Real coreutils the bootstrap genuinely shells out to. Stubbing the platform
   # must not hide a missing dependency, so this is the actual binary.
   local utility
-  for utility in readlink mkdir rm ln; do
+  for utility in readlink mkdir rm ln env; do
     [[ -e "$temp_dir/bin/$utility" ]] && continue
     ln -s "$(host_utility "$utility")" "$temp_dir/bin/$utility"
   done
@@ -1055,6 +1055,95 @@ EOF
   assert_contains "$output" 'mise installation failed'
 }
 
+# A hook conflict is knowable before any package is installed, so it must be in
+# the plan and must stop the run up front like every other conflict.
+test_hook_conflict_stops_the_run_before_any_package_is_installed() {
+  local temp_dir output status
+  new_sandbox; temp_dir="$SANDBOX"
+  require_git "hook conflict gating" || return 0
+
+  make_fake_checkout "$temp_dir/checkout"
+  printf '#!/bin/sh\necho mine\n' > "$temp_dir/checkout/.git/hooks/pre-push"
+  chmod +x "$temp_dir/checkout/.git/hooks/pre-push"
+  cp "$FIXTURE_ROOT/bin/sgt-bootstrap" "$temp_dir/checkout/bin/"
+
+  stub_platform "$temp_dir" Linux '' 0
+  cat > "$temp_dir/bin/apt-get" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$temp_dir/apt-calls'
+EOF
+  chmod +x "$temp_dir/bin/apt-get"
+  stub_commands "$temp_dir/bin" gh tmux shellcheck curl python3 lsof yq \
+    mise go node uv td graphify no-mistakes opencode claude
+  # Hook resolution asks git real questions, so the real git must be reachable.
+  rm -f "$temp_dir/bin/git"
+
+  set +e
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/home/.local/bin" \
+    PATH="$temp_dir/bin:$SYSTEM_PATH" "$temp_dir/checkout/bin/sgt-bootstrap" 2>&1)"
+  status=$?
+  set -e
+
+  [[ "$status" -eq 1 ]] || fail "expected a hook conflict to stop the run, got $status: $output"
+  assert_contains "$output" 'is a git hook this checkout does not own'
+  assert_contains "$output" 'nothing was changed'
+  [[ ! -e "$temp_dir/apt-calls" ]] || \
+    fail "a package manager ran despite a known hook conflict: $(cat "$temp_dir/apt-calls")"
+  [[ "$(cat "$temp_dir/checkout/.git/hooks/pre-push")" == '#!/bin/sh'* ]] || \
+    fail "the user's hook was modified"
+}
+
+test_dry_run_reports_the_hook_plan() {
+  local temp_dir output
+  new_sandbox; temp_dir="$SANDBOX"
+  require_git "hook plan" || return 0
+
+  make_fake_checkout "$temp_dir/checkout"
+  cp "$FIXTURE_ROOT/bin/sgt-bootstrap" "$temp_dir/checkout/bin/"
+  stub_platform "$temp_dir" Linux apt-get 73
+  stub_commands "$temp_dir/bin" "${BASE_TOOLS[@]}" mise go node uv td graphify no-mistakes opencode claude
+  # Hook resolution asks git real questions, so the real git must be reachable.
+  rm -f "$temp_dir/bin/git"
+
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/home/.local/bin" \
+    PATH="$temp_dir/bin:$SYSTEM_PATH" "$temp_dir/checkout/bin/sgt-bootstrap" --dry-run)"
+
+  assert_contains "$output" 'DRY-RUN: link git hook pre-push'
+}
+
+# The plan text and the executed command must come from one literal, so a change
+# to one cannot silently diverge from the other.
+test_dry_run_plan_matches_the_source_installer_commands() {
+  local temp_dir output
+  new_sandbox; temp_dir="$SANDBOX"
+
+  stub_platform "$temp_dir" Linux apt-get 72
+  cat > "$temp_dir/bin/go" <<EOF
+#!/usr/bin/env bash
+printf 'go %s\n' "\$*" >> '$temp_dir/installer-calls'
+EOF
+  cat > "$temp_dir/bin/uv" <<EOF
+#!/usr/bin/env bash
+printf 'uv %s\n' "\$*" >> '$temp_dir/installer-calls'
+EOF
+  chmod +x "$temp_dir/bin/go" "$temp_dir/bin/uv"
+  stub_commands "$temp_dir/bin" "${BASE_TOOLS[@]}" mise node opencode claude
+  stub_sergeant_install "$temp_dir/home"
+
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/home/.local/bin" \
+    PATH="$temp_dir/bin:$SYSTEM_PATH" "$BOOTSTRAP" --dry-run)"
+
+  HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/home/.local/bin" \
+    PATH="$temp_dir/bin:$SYSTEM_PATH" "$BOOTSTRAP" >/dev/null
+
+  # Every command the plan promised must appear in what actually ran.
+  while IFS= read -r planned; do
+    [[ -n "$planned" ]] || continue
+    grep -Fqx "$planned" "$temp_dir/installer-calls" || \
+      fail "the plan promised '$planned' but the run executed: $(cat "$temp_dir/installer-calls")"
+  done <<< "$(printf '%s\n' "$output" | sed -n 's/^DRY-RUN: \(go install .*\|uv tool install .*\)$/\1/p')"
+}
+
 # ── Empty manifest ────────────────────────────────────────────────────────────
 
 # A checkout whose bin/ cannot be resolved must fail loudly in every mode rather
@@ -1315,6 +1404,9 @@ test_dry_run_reports_managed_tool_conflicts
 test_non_executable_tool_is_not_treated_as_installed
 test_dangling_managed_link_is_reclaimed_not_a_conflict
 test_failed_mise_download_is_reported
+test_hook_conflict_stops_the_run_before_any_package_is_installed
+test_dry_run_reports_the_hook_plan
+test_dry_run_plan_matches_the_source_installer_commands
 test_empty_manifest_fails_every_mode
 test_install_links_git_hooks_into_its_own_checkout
 test_install_never_touches_hooks_of_an_unrelated_repository

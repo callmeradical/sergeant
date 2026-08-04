@@ -12,6 +12,18 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
+# Hook resolution reads git configuration, so the fixtures must not inherit the
+# developer's global or system config; otherwise the result of this suite depends
+# on the machine it runs on.
+mkdir -p "$TEST_ROOT/home" "$TEST_ROOT/xdg"
+export HOME="$TEST_ROOT/home"
+export XDG_CONFIG_HOME="$TEST_ROOT/xdg"
+export GIT_CONFIG_GLOBAL="$TEST_ROOT/gitconfig-global"
+export GIT_CONFIG_SYSTEM="$TEST_ROOT/gitconfig-system"
+export GIT_CONFIG_NOSYSTEM=1
+: > "$GIT_CONFIG_GLOBAL"
+: > "$GIT_CONFIG_SYSTEM"
+
 # shellcheck source=bin/_sgt-install-manifest.sh
 source "$ROOT_DIR/bin/_sgt-install-manifest.sh"
 
@@ -209,14 +221,85 @@ test_hooks_dir_resolves_to_the_common_dir_for_a_worktree() {
     fail "worktree hooks dir resolved to '$resolved' instead of the common dir"
 }
 
-test_hooks_dir_honours_core_hooks_path() {
+test_hooks_dir_honours_a_repo_local_core_hooks_path() {
   local resolved
   command -v git >/dev/null 2>&1 || { printf 'SKIP: core.hooksPath (no git)\n'; return 0; }
   git init -q "$TEST_ROOT/h3"
-  git -C "$TEST_ROOT/h3" config core.hooksPath .githooks
+  git -C "$TEST_ROOT/h3" config --local core.hooksPath .githooks
   resolved="$(_sgt_install_hooks_dir "$TEST_ROOT/h3")"
   [[ "$resolved" == "$TEST_ROOT/h3/.githooks" ]] || \
-    fail "core.hooksPath was ignored: $resolved"
+    fail "a repo-local core.hooksPath was ignored: $resolved"
+}
+
+# A global hooksPath belongs to every repository on the machine. Installing
+# Sergeant's pre-push hook there would make every unrelated push run Sergeant's
+# Docker drain suite, so there is nothing here Sergeant may own.
+test_hooks_dir_refuses_a_global_core_hooks_path() {
+  local status
+  command -v git >/dev/null 2>&1 || { printf 'SKIP: global core.hooksPath (no git)\n'; return 0; }
+  git init -q "$TEST_ROOT/h4"
+  printf '[core]\n\thooksPath = %s\n' "$TEST_ROOT/global-hooks" > "$GIT_CONFIG_GLOBAL"
+  set +e
+  _sgt_install_hooks_dir "$TEST_ROOT/h4" >/dev/null
+  status=$?
+  set -e
+  : > "$GIT_CONFIG_GLOBAL"
+  [[ "$status" -ne 0 ]] || fail 'a global core.hooksPath was accepted as a Sergeant hooks directory'
+}
+
+# A repo-local hooksPath pointing outside the checkout is not ours either.
+test_hooks_dir_refuses_a_path_outside_the_checkout() {
+  local status
+  command -v git >/dev/null 2>&1 || { printf 'SKIP: external core.hooksPath (no git)\n'; return 0; }
+  git init -q "$TEST_ROOT/h5"
+  git -C "$TEST_ROOT/h5" config --local core.hooksPath "$TEST_ROOT/elsewhere"
+  set +e
+  _sgt_install_hooks_dir "$TEST_ROOT/h5" >/dev/null
+  status=$?
+  set -e
+  [[ "$status" -ne 0 ]] || fail 'a hooksPath outside the checkout was accepted'
+}
+
+# ── _sgt_install_hook_state ───────────────────────────────────────────────────
+
+test_hook_state_classifies_ownership() {
+  local hooks
+  mkdir -p "$TEST_ROOT/hk/scripts/hooks" "$TEST_ROOT/hk/bin" "$TEST_ROOT/hkdir"
+  cp "$ROOT_DIR/bin/_sgt-install-manifest.sh" "$TEST_ROOT/hk/bin/"
+  printf '#!/bin/sh\n' > "$TEST_ROOT/hk/scripts/hooks/pre-push"
+  hooks="$TEST_ROOT/hkdir"
+
+  [[ "$(_sgt_install_hook_state "$TEST_ROOT/hk/scripts/hooks/pre-push" "$hooks")" == absent ]] || \
+    fail 'an empty hooks directory was not reported absent'
+
+  ln -s "$TEST_ROOT/hk/scripts/hooks/pre-push" "$hooks/pre-push"
+  [[ "$(_sgt_install_hook_state "$TEST_ROOT/hk/scripts/hooks/pre-push" "$hooks")" == linked ]] || \
+    fail 'an exact hook link was not reported linked'
+
+  mkdir -p "$TEST_ROOT/sib/scripts/hooks" "$TEST_ROOT/sib/bin"
+  cp "$ROOT_DIR/bin/_sgt-install-manifest.sh" "$TEST_ROOT/sib/bin/"
+  printf '#!/bin/sh\n' > "$TEST_ROOT/sib/scripts/hooks/pre-push"
+  ln -sfn "$TEST_ROOT/sib/scripts/hooks/pre-push" "$hooks/pre-push"
+  [[ "$(_sgt_install_hook_state "$TEST_ROOT/hk/scripts/hooks/pre-push" "$hooks")" == stale ]] || \
+    fail "another Sergeant checkout's hook was not reported stale"
+
+  rm -f "$hooks/pre-push"
+  printf '#!/bin/sh\necho mine\n' > "$hooks/pre-push"
+  [[ "$(_sgt_install_hook_state "$TEST_ROOT/hk/scripts/hooks/pre-push" "$hooks")" == conflict ]] || \
+    fail "a user's own hook was not reported as a conflict"
+}
+
+# ── _sgt_install_link_points_into ─────────────────────────────────────────────
+
+test_link_ownership_resolves_relative_links() {
+  mkdir -p "$TEST_ROOT/po/bin" "$TEST_ROOT/po/target/bin"
+  printf '#!/bin/sh\n' > "$TEST_ROOT/po/target/bin/sgt-thing"
+  ln -s '../target/bin/sgt-thing' "$TEST_ROOT/po/bin/sgt-thing"
+  _sgt_install_link_points_into "$TEST_ROOT/po/bin/sgt-thing" "$TEST_ROOT/po/target" || \
+    fail 'a relative link into the checkout was not recognised as owned'
+  if _sgt_install_link_points_into "$TEST_ROOT/po/bin/sgt-thing" "$TEST_ROOT/elsewhere"; then
+    fail 'a link outside the checkout was reported as owned'
+  fi
 }
 
 # ── _sgt_command_available ────────────────────────────────────────────────────
@@ -303,7 +386,11 @@ test_managed_real_file_is_a_conflict
 test_managed_relative_link_to_a_users_own_tool_is_a_conflict
 test_hooks_dir_is_absolute_for_a_plain_clone
 test_hooks_dir_resolves_to_the_common_dir_for_a_worktree
-test_hooks_dir_honours_core_hooks_path
+test_hooks_dir_honours_a_repo_local_core_hooks_path
+test_hooks_dir_refuses_a_global_core_hooks_path
+test_hooks_dir_refuses_a_path_outside_the_checkout
+test_hook_state_classifies_ownership
+test_link_ownership_resolves_relative_links
 test_non_executable_file_on_path_is_not_available
 test_executable_on_path_is_available
 test_dangling_link_on_path_is_not_available

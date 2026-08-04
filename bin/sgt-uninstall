@@ -2,7 +2,10 @@
 # sgt-uninstall — Remove everything this checkout installed.
 #
 # Usage:
-#   sgt-uninstall
+#   sgt-uninstall [--hooks-only]
+#
+#   --hooks-only   Remove only this repository's git hooks, keeping the command
+#                  links. Used by `mise run uninstall:hooks`.
 #
 # Environment:
 #   SGT_INSTALL_DIR   Directory holding the command links (default ~/.local/bin)
@@ -30,12 +33,16 @@ esac
 source "$SCRIPT_DIR/_sgt-install-manifest.sh"
 
 ROOT_DIR="$(_sgt_install_script_root "$_self")"
-TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
+TARGET_DIR="$(_sgt_install_target_dir)"
 
-if [[ $# -gt 0 ]]; then
-  printf 'Usage: sgt-uninstall\n' >&2
-  exit 2
-fi
+hooks_only=false
+while (($#)); do
+  case "$1" in
+    --hooks-only) hooks_only=true ;;
+    *) printf 'sgt-uninstall: unknown option: %s\nUsage: sgt-uninstall [--hooks-only]\n' "$1" >&2; exit 2 ;;
+  esac
+  shift
+done
 
 removed=0
 kept=0
@@ -43,27 +50,20 @@ kept=0
 managed_globs="$(_sgt_install_managed_globs)" || exit 1
 deprecated_links="$(_sgt_install_deprecated_links "$ROOT_DIR" "$TARGET_DIR")" || exit 1
 
+if ! "$hooks_only"; then
 # Sweep every name this checkout claims, not just the ones it currently ships.
 while IFS= read -r pattern; do
   [[ -n "$pattern" ]] || continue
   for target in "$TARGET_DIR"/$pattern; do
     [[ -L "$target" ]] || continue
-    link_target="$(readlink "$target")"
-    case "$link_target" in
-      /*) ;;
-      *) link_target="$TARGET_DIR/$link_target" ;;
-    esac
-    case "$link_target" in
-      "$ROOT_DIR"/bin/*)
-        rm "$target"
-        printf '  removed: %s\n' "$target"
-        removed=$((removed + 1))
-        ;;
-      *)
-        printf '  kept (not owned by this checkout): %s\n' "$target"
-        kept=$((kept + 1))
-        ;;
-    esac
+    if _sgt_install_link_points_into "$target" "$ROOT_DIR"; then
+      rm "$target"
+      printf '  removed: %s\n' "$target"
+      removed=$((removed + 1))
+    else
+      printf '  kept (not owned by this checkout): %s\n' "$target"
+      kept=$((kept + 1))
+    fi
   done
 done <<< "$managed_globs"
 
@@ -74,11 +74,12 @@ while IFS= read -r deprecated_entry; do
   deprecated_link="${deprecated_entry%%::*}"
   owned_target="${deprecated_entry##*::}"
   [[ -L "$deprecated_link" ]] || continue
-  [[ "$(readlink "$deprecated_link")" == "$owned_target" ]] || continue
+  [[ "$(_sgt_install_resolve_link "$deprecated_link")" == "$owned_target" ]] || continue
   rm "$deprecated_link"
   printf '  removed: %s\n' "$deprecated_link"
   removed=$((removed + 1))
 done <<< "$deprecated_links"
+fi
 
 # Remove the git hooks sgt-install created, so uninstall really is its inverse.
 hooks_src="$ROOT_DIR/scripts/hooks"

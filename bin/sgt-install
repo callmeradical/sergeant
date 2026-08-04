@@ -2,7 +2,11 @@
 # sgt-install — Symlink this checkout's commands into a directory on PATH.
 #
 # Usage:
-#   sgt-install
+#   sgt-install [--hooks-only]
+#
+#   --hooks-only   Install only this repository's git hooks, skipping the
+#                  command links. Used by `mise run install:hooks` so the hook
+#                  rules live here and nowhere else.
 #
 # Environment:
 #   SGT_INSTALL_DIR   Target directory for command links (default ~/.local/bin)
@@ -41,16 +45,24 @@ esac
 source "$SCRIPT_DIR/_sgt-install-manifest.sh"
 
 ROOT_DIR="$(_sgt_install_script_root "$_self")"
-TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
+TARGET_DIR="$(_sgt_install_target_dir)"
 
-if [[ $# -gt 0 ]]; then
-  printf 'Usage: sgt-install\n' >&2
-  exit 2
-fi
+hooks_only=false
+while (($#)); do
+  case "$1" in
+    --hooks-only) hooks_only=true ;;
+    *) printf 'sgt-install: unknown option: %s\nUsage: sgt-install [--hooks-only]\n' "$1" >&2; exit 2 ;;
+  esac
+  shift
+done
 
 # Resolve the manifest before mutating anything, and fail loudly on an empty
 # result rather than reporting a vacuous success.
-sources="$(_sgt_install_sources "$ROOT_DIR")" || exit 1
+if "$hooks_only"; then
+  sources=''
+else
+  sources="$(_sgt_install_sources "$ROOT_DIR")" || exit 1
+fi
 
 linked=0
 conflicts=0
@@ -96,17 +108,14 @@ done <<< "$sources"
 managed_globs="$(_sgt_install_managed_globs)" || exit 1
 deprecated_links="$(_sgt_install_deprecated_links "$ROOT_DIR" "$TARGET_DIR")" || exit 1
 
+if ! "$hooks_only"; then
 # Sweep links this checkout owns that the manifest no longer names, so renaming
 # or removing a command does not leave a dangling entry on the user's PATH.
 while IFS= read -r pattern; do
   [[ -n "$pattern" ]] || continue
   for stale_target in "$TARGET_DIR"/$pattern; do
-    [[ -L "$stale_target" ]] || continue
-    stale_source="$(readlink "$stale_target")"
-    case "$stale_source" in
-      "$ROOT_DIR"/bin/*) ;;
-      *) continue ;;
-    esac
+    _sgt_install_link_points_into "$stale_target" "$ROOT_DIR" || continue
+    stale_source="$(_sgt_install_resolve_link "$stale_target")"
     [[ -f "$stale_source" ]] && continue
     rm -f "$stale_target"
     printf '  removed stale Sergeant link: %s\n' "$stale_target"
@@ -122,11 +131,12 @@ while IFS= read -r deprecated_entry; do
   deprecated_link="${deprecated_entry%%::*}"
   owned_target="${deprecated_entry##*::}"
   [[ -L "$deprecated_link" ]] || continue
-  [[ "$(readlink "$deprecated_link")" == "$owned_target" ]] || continue
+  [[ "$(_sgt_install_resolve_link "$deprecated_link")" == "$owned_target" ]] || continue
   rm "$deprecated_link"
   printf '  removed deprecated Sergeant link: %s\n' "$deprecated_link"
   removed=$((removed + 1))
 done <<< "$deprecated_links"
+fi
 
 # Install this repository's git hooks. The directory is resolved by
 # _sgt_install_hooks_dir, which returns an absolute path: the plain --git-dir
@@ -144,36 +154,30 @@ if [[ -d "$hooks_src" && -n "$hooks_dst" && -d "$hooks_dst" ]]; then
   for hook in "$hooks_src"/*; do
     [[ -f "$hook" ]] || continue
     hook_target="$hooks_dst/${hook##*/}"
-    if [[ -L "$hook_target" ]]; then
-      hook_link="$(_sgt_install_resolve_link "$hook_target")"
-      if [[ "$hook_link" == "$hook" ]]; then
+    case "$(_sgt_install_hook_state "$hook" "$hooks_dst")" in
+      linked)
         printf '  linked hook: %s -> %s\n' "$hook_target" "$hook"
-      elif [[ ! -e "$hook_link" ]] || _sgt_install_is_sergeant_hook "$hook_link"; then
+        ;;
+      absent|stale)
         # A hook installed by another Sergeant checkout, or a broken one, is
         # Sergeant's to repoint. Worktrees share their primary's hooks directory.
-        rm -f "$hook_target"
-        ln -s "$hook" "$hook_target"
+        publish_link "$hook" "$hook_target"
         printf '  linked hook: %s -> %s\n' "$hook_target" "$hook"
-      else
+        ;;
+      conflict)
+        # A hook the user wrote is theirs; never replace it silently.
         printf '  preserved existing hook: %s (not installed)\n' "$hook_target"
         conflicts=$((conflicts + 1))
-      fi
-    elif [[ -e "$hook_target" ]]; then
-      # A hook the user wrote is theirs; never replace it silently.
-      printf '  preserved existing hook: %s (not installed)\n' "$hook_target"
-      conflicts=$((conflicts + 1))
-    else
-      ln -s "$hook" "$hook_target"
-      printf '  linked hook: %s -> %s\n' "$hook_target" "$hook"
-    fi
+        ;;
+    esac
   done
 fi
 
-printf '\nInstalled %d scripts to %s\n' "$linked" "$TARGET_DIR"
+printf '\nInstalled %d entries\n' "$linked"
 printf 'Removed %d stale or deprecated links\n' "$removed"
 printf 'Preserved %d existing entries\n' "$conflicts"
 
-if [[ ":$PATH:" != *":$TARGET_DIR:"* ]]; then
+if ! "$hooks_only" && [[ ":$PATH:" != *":$TARGET_DIR:"* ]]; then
   printf '\nWARNING: %s is not on your PATH.\n' "$TARGET_DIR"
   printf 'Add this to your shell config (~/.zshrc or ~/.bashrc):\n'
   # Print a literal snippet for the user to copy; do not expand $PATH here.

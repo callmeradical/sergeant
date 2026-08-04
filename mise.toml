@@ -16,47 +16,12 @@ description = "Symlink sgt-* scripts into ~/.local/bin so they're on your PATH"
 run = "./bin/sgt-install"
 
 [tasks."install:hooks"]
-description = "Symlink scripts/hooks/* into .git/hooks/ (bin/sgt-install also does this)"
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-REPO_DIR="$(git -C "${MISE_PROJECT_ROOT:-.}" rev-parse --show-toplevel 2>/dev/null || echo "${MISE_PROJECT_ROOT:-.}")"
-hooks_src="$REPO_DIR/scripts/hooks"
-hooks_dst="$(git -C "$REPO_DIR" rev-parse --git-dir 2>/dev/null)/hooks"
-[[ -d "$hooks_src" && -d "$hooks_dst" ]] || { echo "hooks dirs not found"; exit 1; }
-linked=0
-for hook in "$hooks_src"/*; do
-  [[ -f "$hook" ]] || continue
-  name="$(basename "$hook")"
-  ln -sf "$hook" "$hooks_dst/$name"
-  echo "  linked: $hooks_dst/$name -> $hook"
-  linked=$((linked+1))
-done
-echo "Installed $linked git hooks."
-"""
+description = "Symlink scripts/hooks/* into this checkout's git hooks directory"
+run = "./bin/sgt-install --hooks-only"
 
 [tasks."uninstall:hooks"]
 description = "Remove git hooks installed from scripts/hooks/"
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-REPO_DIR="$(git -C "${MISE_PROJECT_ROOT:-.}" rev-parse --show-toplevel 2>/dev/null || echo "${MISE_PROJECT_ROOT:-.}")"
-hooks_dst="$(git -C "$REPO_DIR" rev-parse --git-dir 2>/dev/null)/hooks"
-hooks_src="$REPO_DIR/scripts/hooks"
-removed=0
-for hook in "$hooks_src"/*; do
-  [[ -f "$hook" ]] || continue
-  name="$(basename "$hook")"
-  link="$hooks_dst/$name"
-  [[ -L "$link" ]] || continue
-  target="$(readlink "$link")"
-  [[ "$target" == "$hook" ]] || continue
-  rm "$link"
-  echo "  removed: $link"
-  removed=$((removed+1))
-done
-echo "Removed $removed git hooks."
-"""
+run = "./bin/sgt-uninstall --hooks-only"
 
 [tasks.uninstall]
 description = "Remove sgt-* symlinks from ~/.local/bin"

@@ -48,7 +48,7 @@ source "$SCRIPT_DIR/_sgt-install-manifest.sh"
 ROOT_DIR="$(_sgt_install_script_root "$_self")"
 # One directory receives both the Sergeant command links and every executable
 # this command installs, so the documented write set is a single path.
-INSTALL_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_DIR="$(_sgt_install_target_dir)"
 export PATH="$INSTALL_DIR:$PATH"
 
 usage() {
@@ -82,6 +82,16 @@ optional_commands=('jq' 'shellcheck' 'curl' 'mise' 'go' 'node' 'uv' \
 # Exactly one interactive agent harness is required, matching
 # docs/getting-started.md and `mise run check`.
 agent_harnesses=('opencode' 'goose' 'claude')
+
+# Tools installed by their own upstream installer, as
+# `command|bin-dir-env-var|installer command` triples. One array drives both the
+# dry-run plan and the install action, so the plan can never describe a command
+# the run does not execute.
+source_installed_tools=(
+  'td|GOBIN|go install github.com/marcus/td@latest'
+  'no-mistakes|GOBIN|go install github.com/kunchenguid/no-mistakes/cmd/no-mistakes@latest'
+  'graphify|UV_TOOL_BIN_DIR|uv tool install graphifyy'
+)
 
 # tool_available <command>
 #
@@ -197,6 +207,19 @@ while IFS= read -r source_file; do
   fi
 done <<< "$sources"
 
+hooks_dst="$(_sgt_install_hooks_dir "$ROOT_DIR" || true)"
+hook_plan=()
+if [[ -n "$hooks_dst" && -d "$ROOT_DIR/scripts/hooks" ]]; then
+  for hook in "$ROOT_DIR"/scripts/hooks/*; do
+    [[ -f "$hook" ]] || continue
+    hook_state="$(_sgt_install_hook_state "$hook" "$hooks_dst")"
+    hook_plan[${#hook_plan[@]}]="$hook_state ${hook##*/}"
+    if [[ "$hook_state" == 'conflict' ]]; then
+      conflicts[${#conflicts[@]}]="$hooks_dst/${hook##*/} is a git hook this checkout does not own"
+    fi
+  done
+fi
+
 sudo_required=false
 if [[ "$platform" == 'Linux' ]] && ((${#packages[@]})) && \
    [[ "${SGT_BOOTSTRAP_EUID:-$EUID}" -ne 0 ]]; then
@@ -230,10 +253,9 @@ if "$dry_run"; then
     printf 'DRY-RUN: mise install %s\n' "${tool_specs[*]}"
     printf 'DRY-RUN: link managed executables into %s\n' "$INSTALL_DIR"
   fi
-  tool_available td || printf 'DRY-RUN: go install github.com/marcus/td@latest\n'
-  tool_available no-mistakes || \
-    printf 'DRY-RUN: go install github.com/kunchenguid/no-mistakes/cmd/no-mistakes@latest\n'
-  tool_available graphify || printf 'DRY-RUN: uv tool install graphifyy\n'
+  for item in "${source_installed_tools[@]}"; do
+    tool_available "${item%%|*}" || printf 'DRY-RUN: %s\n' "${item##*|}"
+  done
   printf 'DRY-RUN: mise install\n'
   printf 'DRY-RUN: mise run install\n'
 
@@ -249,6 +271,18 @@ if "$dry_run"; then
     esac
   done <<< "$sources"
 
+  if [[ -z "$hooks_dst" ]]; then
+    printf 'DRY-RUN: skip git hooks (no hooks directory this checkout owns)\n'
+  else
+    for entry in ${hook_plan[@]+"${hook_plan[@]}"}; do
+      case "${entry%% *}" in
+        linked) printf 'DRY-RUN: preserve git hook %s\n' "${entry#* }" ;;
+        stale) printf 'DRY-RUN: relink git hook %s\n' "${entry#* }" ;;
+        conflict) printf 'DRY-RUN: conflict at git hook %s (manual resolution required)\n' "${entry#* }" ;;
+        *) printf 'DRY-RUN: link git hook %s\n' "${entry#* }" ;;
+      esac
+    done
+  fi
   for conflict in ${conflicts[@]+"${conflicts[@]}"}; do
     printf 'DRY-RUN: conflict would stop this run: %s\n' "$conflict"
   done
@@ -385,24 +419,20 @@ for item in "${managed_tools[@]}"; do
   ln -s "$binary_path" "$managed_target"
 done
 
-if tool_available td; then
-  printf 'OK: td\n'
-else
-  printf 'INSTALLING: td\n'
-  GOBIN="$INSTALL_DIR" go install github.com/marcus/td@latest
-fi
-if tool_available no-mistakes; then
-  printf 'OK: no-mistakes\n'
-else
-  printf 'INSTALLING: no-mistakes\n'
-  GOBIN="$INSTALL_DIR" go install github.com/kunchenguid/no-mistakes/cmd/no-mistakes@latest
-fi
-if tool_available graphify; then
-  printf 'OK: graphify\n'
-else
-  printf 'INSTALLING: graphify\n'
-  UV_TOOL_BIN_DIR="$INSTALL_DIR" uv tool install graphifyy
-fi
+for item in "${source_installed_tools[@]}"; do
+  command_name="${item%%|*}"
+  if tool_available "$command_name"; then
+    printf 'OK: %s\n' "$command_name"
+    continue
+  fi
+  printf 'INSTALLING: %s\n' "$command_name"
+  bin_env="${item#*|}"
+  bin_env="${bin_env%%|*}"
+  # The plan printed this exact string, so the two cannot drift. Word splitting
+  # of the installer command is intended; `env` avoids an eval.
+  # shellcheck disable=SC2086
+  env "$bin_env=$INSTALL_DIR" ${item##*|}
+done
 
 # mise owns the repository's pinned tools and delegates the command links to
 # bin/sgt-install, which exits non-zero if it could not install everything.

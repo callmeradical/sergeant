@@ -17,6 +17,14 @@
 [[ "${SGT_INSTALL_MANIFEST_LOADED:-}" == "1" ]] && return 0
 SGT_INSTALL_MANIFEST_LOADED=1
 
+# _sgt_install_target_dir
+#
+# Print the directory that receives this checkout's command links. Kept here so
+# the three commands cannot disagree about the default.
+_sgt_install_target_dir() {
+  printf '%s\n' "${SGT_INSTALL_DIR:-$HOME/.local/bin}"
+}
+
 # _sgt_install_script_root <script-path>
 #
 # Print the repository root that owns <script-path>, following symlinks so that
@@ -123,22 +131,34 @@ _sgt_install_is_sergeant_hook() {
 
 # _sgt_install_resolve_link <target>
 #
-# Print what <target> points at, as an absolute path. A relative link target is
-# resolved against the directory holding the link, never against the caller's
-# working directory.
+# Print what <target> points at, as an absolute path with any `..` and `.`
+# segments collapsed. A relative link target is resolved against the directory
+# holding the link, never against the caller's working directory, and the result
+# is normalised so callers can compare it as a plain string.
 _sgt_install_resolve_link() {
-  local target="$1" link_target target_dir
+  local target="$1" link_target target_dir resolved base dir
   link_target="$(readlink "$target")"
   case "$link_target" in
-    /*) printf '%s\n' "$link_target" ;;
+    /*) resolved="$link_target" ;;
     *)
       case "$target" in
         */*) target_dir="${target%/*}" ;;
         *) target_dir='.' ;;
       esac
-      printf '%s\n' "$target_dir/$link_target"
+      resolved="$target_dir/$link_target"
       ;;
   esac
+  # Collapse the directory part through the filesystem when it exists; a dangling
+  # link keeps its literal form, which callers treat as broken either way.
+  base="${resolved##*/}"
+  case "$resolved" in
+    */*) dir="${resolved%/*}" ;;
+    *) dir='.' ;;
+  esac
+  if [[ -d "$dir" ]]; then
+    resolved="$(cd "$dir" && pwd)/$base"
+  fi
+  printf '%s\n' "$resolved"
 }
 
 # _sgt_install_link_state <source-file> <target-dir>
@@ -207,24 +227,81 @@ _sgt_install_managed_state() {
 
 # _sgt_install_hooks_dir <repo-root>
 #
-# Print the hooks directory git actually consults for <repo-root>, honouring
-# core.hooksPath and resolving a linked worktree to the common git directory
-# (a worktree's private git dir has no hooks/ and git never reads one there).
+# Print the hooks directory git consults for <repo-root>, resolving a linked
+# worktree to the common git directory (a worktree's private git dir has no
+# hooks/ and git never reads one there).
+#
+# core.hooksPath is honoured only when it is set in THIS repository's config and
+# resolves inside the checkout. A global or system hooksPath belongs to every
+# repository on the machine: writing Sergeant's pre-push hook there would make
+# every unrelated `git push` run Sergeant's Docker drain suite. In that case the
+# repository's own hooks directory is not the one git will read, so this returns
+# non-zero and the caller reports that hooks were not installed.
 _sgt_install_hooks_dir() {
-  local root="$1" configured common
-  if configured="$(git -C "$root" config --path --get core.hooksPath 2>/dev/null)" && \
+  local root="$1" configured resolved common
+  if configured="$(git -C "$root" config --local --path --get core.hooksPath 2>/dev/null)" && \
      [[ -n "$configured" ]]; then
     case "$configured" in
-      /*) printf '%s\n' "$configured" ;;
-      *) printf '%s\n' "$root/$configured" ;;
+      /*) resolved="$configured" ;;
+      *) resolved="$root/$configured" ;;
     esac
-    return 0
+    case "$resolved" in
+      "$root"/*) printf '%s\n' "$resolved"; return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+  # A hooksPath from any wider scope redirects git away from this repository's
+  # hooks directory, so there is nothing here that Sergeant may own.
+  if configured="$(git -C "$root" config --path --get core.hooksPath 2>/dev/null)" && \
+     [[ -n "$configured" ]]; then
+    return 1
   fi
   common="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null)" || return 1
   [[ -n "$common" ]] || return 1
   case "$common" in
     /*) printf '%s\n' "$common/hooks" ;;
     *) printf '%s\n' "$root/$common/hooks" ;;
+  esac
+}
+
+# _sgt_install_hook_state <hook-source> <hooks-dir>
+#
+# Classify what occupies this hook's path, printing linked, absent, stale, or
+# conflict with the same ownership rule as command links: a hook installed by
+# another Sergeant checkout, or a broken link, is Sergeant's to repoint, while a
+# hook the user wrote is preserved. Shared with the bootstrap so a conflict is
+# reported before any package is installed rather than after.
+_sgt_install_hook_state() {
+  local hook="$1" hooks_dir="$2" target link_target
+  target="$hooks_dir/${hook##*/}"
+  if [[ -L "$target" ]]; then
+    link_target="$(_sgt_install_resolve_link "$target")"
+    if [[ "$link_target" == "$hook" ]]; then
+      printf 'linked\n'
+    elif [[ ! -e "$link_target" ]] || _sgt_install_is_sergeant_hook "$link_target"; then
+      printf 'stale\n'
+    else
+      printf 'conflict\n'
+    fi
+  elif [[ -e "$target" ]]; then
+    printf 'conflict\n'
+  else
+    printf 'absent\n'
+  fi
+}
+
+# _sgt_install_link_points_into <link> <repo-root>
+#
+# True when <link> is a symlink resolving to a path inside <repo-root>/bin.
+# The single ownership test used by the stale sweep in both sgt-install and
+# sgt-uninstall, so a relative link is treated identically by each.
+_sgt_install_link_points_into() {
+  local link="$1" root="$2" resolved
+  [[ -L "$link" ]] || return 1
+  resolved="$(_sgt_install_resolve_link "$link")"
+  case "$resolved" in
+    "$root"/bin/*) return 0 ;;
+    *) return 1 ;;
   esac
 }
 
