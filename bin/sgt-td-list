@@ -11,6 +11,15 @@
 #   sgt-td-list <project> --priority P1      # filter by priority
 #   sgt-td-list <project> --repos smith,smith-app  # specific repos only
 #   sgt-td-list <project> --json             # machine-readable output
+#
+# Task limits:
+#   `td list` defaults to `--limit 50`, which silently truncates any repo with a
+#   larger backlog.  sgt-td-list therefore always passes an explicit limit and
+#   escalates it until td returns a complete answer.  A user-supplied --limit
+#   always wins.  Any residual truncation is reported on stderr, never hidden.
+#
+#   SGT_TD_LIST_LIMIT      initial per-repo limit (default 1000)
+#   SGT_TD_LIST_MAX_LIMIT  escalation ceiling     (default 100000)
 
 set -euo pipefail
 
@@ -63,6 +72,112 @@ if [[ -n "$PRIORITY_FILTER" ]]; then
   fi
 fi
 
+# ── Task limits ───────────────────────────────────────────────────────────────
+# td list caps results at 50 by default.  Never rely on that default: pass an
+# explicit limit and escalate it until the repo is reported completely, so
+# per-repo counts and the grand total are true.
+
+TD_LIST_LIMIT="${SGT_TD_LIST_LIMIT:-1000}"
+TD_LIST_MAX_LIMIT="${SGT_TD_LIST_MAX_LIMIT:-100000}"
+
+_is_positive_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
+
+_is_positive_int "$TD_LIST_LIMIT" \
+  || _die "SGT_TD_LIST_LIMIT must be a positive integer, got: $TD_LIST_LIMIT"
+_is_positive_int "$TD_LIST_MAX_LIMIT" \
+  || _die "SGT_TD_LIST_MAX_LIMIT must be a positive integer, got: $TD_LIST_MAX_LIMIT"
+[[ "$TD_LIST_LIMIT" -le "$TD_LIST_MAX_LIMIT" ]] || TD_LIST_LIMIT="$TD_LIST_MAX_LIMIT"
+
+# A --limit / -n passed through by the caller always wins over our default, so
+# never supplement one — not even a malformed one, which td must reject itself.
+USER_LIMIT=""
+USER_LIMIT_SET=false
+if [[ "${#EXTRA_FLAGS[@]}" -gt 0 ]]; then
+  for ((i=0; i<${#EXTRA_FLAGS[@]}; i++)); do
+    case "${EXTRA_FLAGS[$i]}" in
+      --limit|-n)  USER_LIMIT_SET=true; USER_LIMIT="${EXTRA_FLAGS[$((i+1))]:-}" ;;
+      --limit=*)   USER_LIMIT_SET=true; USER_LIMIT="${EXTRA_FLAGS[$i]#--limit=}" ;;
+      -n[0-9]*)    USER_LIMIT_SET=true; USER_LIMIT="${EXTRA_FLAGS[$i]#-n}" ;;
+    esac
+  done
+fi
+
+_truncation_warn() {
+  # _truncation_warn <repo> <count> <cap-description>
+  printf 'WARNING: %s: results truncated at %s task(s) by %s; the true count is higher\n' \
+    "$1" "$2" "$3" >&2
+}
+
+# Task payloads are passed around as two lines — "<count>\n<compact json>" —
+# so one Python process per repo covers both parsing and counting.
+_payload_count() { printf '%s' "${1%%$'\n'*}"; }
+_payload_json()  { printf '%s' "${1#*$'\n'}"; }
+
+_td_list_once() {
+  # _td_list_once <repo_name> <repo_path> [extra td flags...] → task payload
+  # td prints a JSON error object (an uninitialized repo yields {"error": ...})
+  # and exits nonzero, so raw stdout is never safe to treat as a task array.
+  # A repo with no td database is an expected skip; any other td failure is
+  # reported, because a dropped repo would under-report the project silently.
+  local rname="$1" repo_path="$2" payload raw status=0
+  shift 2
+  raw="$(td list --json --work-dir "$repo_path" \
+    ${TD_FILTER:+--filter "$TD_FILTER"} \
+    "$@" \
+    "${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}" 2>/dev/null)" || status=$?
+  payload="$(printf '%s' "$raw" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = None
+tasks = data if isinstance(data, list) else []
+sys.stdout.write('%d\n%s' % (len(tasks), json.dumps(tasks)))
+")"
+  if [[ "$(_payload_count "$payload")" -eq 0 && "$status" -ne 0 ]]; then
+    case "$raw" in
+      *"database not found"*) ;;  # td not initialized here: expected skip
+      *) printf 'WARNING: %s: td list failed (exit %s); its tasks are missing from this report\n' \
+           "$rname" "$status" >&2 ;;
+    esac
+  fi
+  printf '%s' "$payload"
+}
+
+_td_list_tasks() {
+  # _td_list_tasks <repo_name> <repo_path>  → complete task payload for one repo.
+  # Escalates the explicit limit until td returns fewer tasks than requested,
+  # which proves the answer is complete.  Warns when a cap is still in force.
+  local rname="$1" repo_path="$2"
+  local count limit payload
+
+  if $USER_LIMIT_SET; then
+    payload="$(_td_list_once "$rname" "$repo_path")"
+    if _is_positive_int "$USER_LIMIT"; then
+      count="$(_payload_count "$payload")"
+      [[ "$count" -lt "$USER_LIMIT" ]] \
+        || _truncation_warn "$rname" "$count" "the requested --limit $USER_LIMIT"
+    fi
+    printf '%s' "$payload"
+    return 0
+  fi
+
+  limit="$TD_LIST_LIMIT"
+  while :; do
+    payload="$(_td_list_once "$rname" "$repo_path" --limit "$limit")"
+    count="$(_payload_count "$payload")"
+    [[ "$count" -ge "$limit" ]] || { printf '%s' "$payload"; return 0; }
+    if [[ "$limit" -ge "$TD_LIST_MAX_LIMIT" ]]; then
+      _truncation_warn "$rname" "$count" \
+        "the SGT_TD_LIST_MAX_LIMIT ceiling of $TD_LIST_MAX_LIMIT (raise it to see the rest)"
+      printf '%s' "$payload"
+      return 0
+    fi
+    limit=$((limit * 2))
+    [[ "$limit" -le "$TD_LIST_MAX_LIMIT" ]] || limit="$TD_LIST_MAX_LIMIT"
+  done
+}
+
 # ── Resolve target repos ───────────────────────────────────────────────────────
 
 repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
@@ -78,45 +193,44 @@ fi
 
 # ── Collect tasks per repo ────────────────────────────────────────────────────
 
-all_results="[]"
-
 if $JSON_OUT; then
-  # JSON mode: emit array of {repo, task} objects
-  combined="[]"
+  # JSON mode: emit one array of tasks, each tagged with its repo.
+  # Per-repo payloads are staged on disk and merged in a single pass: shell
+  # string concatenation cannot round-trip JSON safely, and a failed merge must
+  # be loud rather than degrade to an empty array.
+  JSON_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/sgt-td-list.XXXXXX")"
+  trap 'rm -rf "$JSON_STAGE"' EXIT
+
+  stage_idx=0
   for rname in "${TARGET_REPOS[@]}"; do
     raw_path="$(yq ".repos[] | select(.name == \"$rname\") | .path" "$CONFIG_FILE")"
     repo_path="$(_resolve_path "$raw_path")"
 
     [[ -d "$repo_path/.git" ]] || continue
 
-    tasks_json="$(td list --json --work-dir "$repo_path" \
-      ${TD_FILTER:+--filter "$TD_FILTER"} \
-      "${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}" 2>/dev/null || echo "[]")"
+    payload="$(_td_list_tasks "$rname" "$repo_path")"
 
-    [[ "$tasks_json" == "[]" || -z "$tasks_json" ]] && continue
+    [[ "$(_payload_count "$payload")" -eq 0 ]] && continue
 
-    # Tag each task with its repo
-    tagged="$(echo "$tasks_json" | python3 -c "
-import sys, json
-tasks = json.load(sys.stdin)
-repo = '$rname'
-for t in tasks:
-    t['_repo'] = repo
-print(json.dumps(tasks))
-" 2>/dev/null || echo "[]")"
-
-    combined="$(echo "$combined $tagged" | python3 -c "
-import sys, json
-parts = sys.stdin.read().split()
-merged = []
-for p in parts:
-    try: merged.extend(json.loads(p))
-    except: pass
-merged.sort(key=lambda t: (t.get('priority','P9'), t.get('_repo','')))
-print(json.dumps(merged, indent=2))
-" 2>/dev/null || echo "[]")"
+    stage_idx=$((stage_idx + 1))
+    _payload_json "$payload" > "$JSON_STAGE/$stage_idx.tasks"
+    printf '%s\n' "$rname"   > "$JSON_STAGE/$stage_idx.repo"
   done
-  echo "$combined"
+
+  python3 -c '
+import json, sys
+from pathlib import Path
+
+stage = Path(sys.argv[1])
+merged = []
+for tasks_file in sorted(stage.glob("*.tasks"), key=lambda p: int(p.stem)):
+    repo = stage.joinpath(tasks_file.stem + ".repo").read_text().strip()
+    for task in json.loads(tasks_file.read_text()):
+        task["_repo"] = repo
+        merged.append(task)
+merged.sort(key=lambda t: (t.get("priority") or "P9", t.get("_repo") or ""))
+print(json.dumps(merged, indent=2))
+' "$JSON_STAGE" || _die "failed to merge td task JSON for project $PROJECT"
   exit 0
 fi
 
@@ -134,15 +248,11 @@ for rname in "${TARGET_REPOS[@]}"; do
 
   [[ -d "$repo_path/.git" ]] || continue
 
-  # Check if td is initialized in this repo
-  tasks_json="$(td list --json --work-dir "$repo_path" \
-    ${TD_FILTER:+--filter "$TD_FILTER"} \
-    "${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}" 2>/dev/null || echo "[]")"
-
-  [[ "$tasks_json" == "[]" || -z "$tasks_json" ]] && continue
-
-  count="$(echo "$tasks_json" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)"
+  # Repos with no td database report zero tasks and are skipped
+  payload="$(_td_list_tasks "$rname" "$repo_path")"
+  count="$(_payload_count "$payload")"
   [[ "$count" -eq 0 ]] && continue
+  tasks_json="$(_payload_json "$payload")"
 
   total=$((total + count))
   echo "── $rname ($count)"
