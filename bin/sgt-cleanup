@@ -807,20 +807,43 @@ _publish_worker_evidence_entry() {
 }
 
 _undo_worker_evidence_removal() {
-  local backup_dir="$1" name repo_dir="$2" worktree="$3"
+  local backup_dir="$2" name worktree="$1"
 
-  shift 3
+  shift 2
   for name in "$@"; do
     _publish_worker_evidence_entry "$backup_dir/$name" "$worktree/$name" || \
       _die "Failed to roll back worker evidence removal: $worktree/$name"
   done
   rmdir "$backup_dir" || \
-    _die "Failed to remove worker evidence rollback directory: $repo_dir"
+    _die "Failed to remove worker evidence rollback directory: $backup_dir"
 }
 
+# Moves every .sergeant-* entry currently in the worktree aside and prints the
+# preserving directory.  Used when an entry reappears after the identity was
+# bound: that entry is unbound third-party data, so it is neither trusted as
+# evidence nor discarded, and moving it out lets the authoritative evidence be
+# republished so a plain retry still converges.
+_quarantine_reappeared_evidence() {
+  local entry name quarantine_dir="$2/reappeared-evidence.tmp.$$" worktree="$1"
+
+  [[ ! -e "$quarantine_dir" && ! -L "$quarantine_dir" ]] || return 1
+  mkdir "$quarantine_dir" || return 1
+  for entry in "$worktree"/.sergeant-*; do
+    [[ -e "$entry" || -L "$entry" ]] || continue
+    name="$(basename "$entry")"
+    _publish_worker_evidence_entry "$entry" "$quarantine_dir/$name" || return 1
+  done
+  printf '%s\n' "$quarantine_dir"
+}
+
+# Moves the bound lifecycle evidence out of the worktree so the remover can run,
+# publishing $LIVE_EVIDENCE_BACKUP for replay.  Returns nonzero for every
+# recoverable refusal and lets the caller report it; it terminates in place only
+# when evidence reappeared after the identity was bound, because that leaves a
+# preserved artifact the operator has to be told about by name.
 _remove_worker_evidence() {
   local backup_dir="$1/live-evidence.tmp.$$" count=0 current_identity evidence \
-    expected_identity="$3" name repo_dir="$1" worktree="$2"
+    expected_identity="$3" name quarantine_dir reappeared repo_dir="$1" worktree="$2"
   local -a moved=()
 
   _same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree" || return 1
@@ -843,21 +866,29 @@ _remove_worker_evidence() {
     ((count += 1))
     if ! _cleanup_fail_point "remove-live-$count" || \
       ! mv "$evidence" "$backup_dir/"; then
-      _undo_worker_evidence_removal "$backup_dir" "$repo_dir" "$worktree" \
+      _undo_worker_evidence_removal "$worktree" "$backup_dir" \
         ${moved[@]+"${moved[@]}"}
       return 1
     fi
     moved[${#moved[@]}]="$(basename "$evidence")"
   done
-  # The loop above walks a glob expanded after the identity check, so an entry
-  # created inside that window survives the removal, breaks the remover, and
-  # would collide with the replayed evidence afterwards.  Fail closed instead.
-  _cleanup_mutation_hook after-live-removal \
-    "${SGT_CLEANUP_MUTATE_PATH:-$worktree/.sergeant-status}" || true
-  if _worker_evidence_present "$worktree"; then
-    _undo_worker_evidence_removal "$backup_dir" "$repo_dir" "$worktree" \
+  if ! _cleanup_mutation_hook after-live-removal \
+    "${SGT_CLEANUP_MUTATE_PATH:-$worktree/.sergeant-status}"; then
+    _undo_worker_evidence_removal "$worktree" "$backup_dir" \
       ${moved[@]+"${moved[@]}"}
-    _die "Worker lifecycle evidence reappeared during cleanup; fleet state preserved: $worktree"
+    return 1
+  fi
+  # The loop above walks a glob expanded after the identity check, so an entry
+  # created inside that window survives the removal and breaks the remover.  Move
+  # the unbound entry aside, put the authoritative evidence back, and stop: the
+  # published phase then still lets a plain retry converge.
+  if _worker_evidence_present "$worktree"; then
+    quarantine_dir="$(_quarantine_reappeared_evidence "$worktree" "$repo_dir")" || \
+      _die "CRITICAL: could not preserve worker evidence that reappeared during cleanup; inspect $worktree and $repo_dir"
+    reappeared="$(cd "$quarantine_dir" && printf '%s ' .sergeant-*)"
+    _undo_worker_evidence_removal "$worktree" "$backup_dir" \
+      ${moved[@]+"${moved[@]}"}
+    _die "Worker lifecycle evidence reappeared during cleanup: ${reappeared% }; live evidence restored, retry after inspecting the preserved copy: $quarantine_dir"
   fi
   LIVE_EVIDENCE_BACKUP="$backup_dir"
 }
@@ -999,7 +1030,10 @@ _restore_cross_filesystem_backup() {
     [[ ! -e "$published_path" && ! -L "$published_path" && \
       ! -e "$temp" && ! -L "$temp" ]] || return 1
     temps[${#temps[@]}]="$temp"
-    if ! cp -pR "$evidence" "$temp" || ! mv "$temp" "$published_path"; then
+    # The absence check above happens before a recursive copy that may take a
+    # while, so prove it again immediately before publishing.
+    if ! cp -pR "$evidence" "$temp" || \
+      ! _publish_worker_evidence_entry "$temp" "$published_path"; then
       for temp in "${temps[@]}"; do
         rm -rf "$temp" || return 1
       done

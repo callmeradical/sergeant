@@ -2169,7 +2169,7 @@ publication_live_before="$(cksum \
   "$TEST_ROOT/publication-transaction-worker"/.sergeant-*)"
 publication_live_hashes="$(for evidence in \
   "$TEST_ROOT/publication-transaction-worker"/.sergeant-*; do
-  git hash-object "$evidence"
+  git hash-object --no-filters "$evidence"
 done)"
 for failure_point in stage-evidence record-owner record-phase \
   publish-evidence publish-owner publish-phase; do
@@ -2255,7 +2255,7 @@ fi
   "$TEST_ROOT/fleet/publication-transaction/app/cleanup-phase")" == removing ]]
 publication_persisted_hashes="$(for evidence in \
   "$TEST_ROOT/fleet/publication-transaction/app/terminal-evidence"/.sergeant-*; do
-  git hash-object "$evidence"
+  git hash-object --no-filters "$evidence"
 done)"
 [[ "$publication_persisted_hashes" == "$publication_live_hashes" ]]
 if compgen -G "$TEST_ROOT/fleet/publication-transaction/app/cleanup-phase.tmp*" \
@@ -5036,7 +5036,7 @@ ledger_seed_forged_name() {
 }
 
 assert_ledger_bind_rejected() {
-  local label="$1" output seed="$2" status task_id state worktree
+  local label="$1" output seed="$2" state status task_id worktree
 
   task_id="ledger-reject-$label"
   state="$TEST_ROOT/fleet/$task_id/app"
@@ -5255,63 +5255,86 @@ printf 'sgt-cleanup ledger-retry: directory evidence replay and tamper-evidence 
 # racing writer would silently relocate live evidence one level deep and wedge the
 # task forever.  Every publication into the worktree must prove the destination is
 # absent and fail closed naming the colliding path.
-ledger_collide_state="$TEST_ROOT/fleet/ledger-collide/app"
-mkdir -p "$ledger_collide_state" "$TEST_ROOT/fake-bin"
-init_test_repo "$TEST_ROOT/ledger-collide-repo"
-git -C "$TEST_ROOT/ledger-collide-repo" worktree add -q -b ledger-collide-worker \
-  "$TEST_ROOT/ledger-collide-worktree"
-record_retry_owner ledger-collide app "$TEST_ROOT/ledger-collide-repo"
-printf '%s\n' "$TEST_ROOT/ledger-collide-worktree" > "$ledger_collide_state/worktree"
-printf 'git\n' > "$ledger_collide_state/wt_type"
-printf 'done\n' > "$ledger_collide_state/status"
-printf 'result\n' > "$ledger_collide_state/result"
-seed_ledger_evidence "$TEST_ROOT/ledger-collide-worktree"
-ledger_collide_before="$(ledger_evidence_snapshot "$TEST_ROOT/ledger-collide-worktree")"
-
-# Fake git: worktree remove recreates a ledger directory in the worktree, then
-# fails — the ordinary removal-failure path with a racing review-gate writer.
-cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+# Fake git: worktree remove stages a racing entry of the requested kind in the
+# worktree, then fails — the ordinary removal-failure path with a racing writer.
+cat > "$TEST_ROOT/fake-bin/ledger-collide-git" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
   *" worktree remove "*)
-    mkdir -p "${!#}/.sergeant-notification-acks"
-    printf 'racing ack\n' > "${!#}/.sergeant-notification-acks/racing-nonce"
+    case "$FAKE_RACE_KIND" in
+      dir)
+        mkdir -p "${!#}/$FAKE_RACE_NAME"
+        printf 'racing entry\n' > "${!#}/$FAKE_RACE_NAME/racing-nonce" ;;
+      file) printf 'racing entry\n' > "${!#}/$FAKE_RACE_NAME" ;;
+      symlink) ln -s "$FAKE_RACE_TARGET" "${!#}/$FAKE_RACE_NAME" ;;
+    esac
     exit 1 ;;
   *) exec "$REAL_GIT" "$@" ;;
 esac
 EOF
-chmod +x "$TEST_ROOT/fake-bin/git"
-set +e
-ledger_collide_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" REAL_GIT="$REAL_GIT" \
-  SERGEANT_CONFIG="$TEST_ROOT/config" \
-  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" ledger-collide 2>&1)"
-ledger_collide_status=$?
-set -e
-rm "$TEST_ROOT/fake-bin/git"
-[[ "$ledger_collide_status" -ne 0 ]] || {
-  printf 'FAIL ledger-collide: cleanup reported success after a failed removal\n' >&2
-  exit 1
+chmod +x "$TEST_ROOT/fake-bin/ledger-collide-git"
+
+assert_ledger_collision_rejected() {
+  local before escape kind="$2" label="$1" name="$3" output state status task_id worktree
+
+  task_id="ledger-collide-$label"
+  state="$TEST_ROOT/fleet/$task_id/app"
+  worktree="$TEST_ROOT/$task_id-worktree"
+  escape="$TEST_ROOT/$task_id-escape"
+  mkdir -p "$state" "$escape"
+  init_test_repo "$TEST_ROOT/$task_id-repo"
+  git -C "$TEST_ROOT/$task_id-repo" worktree add -q -b "$task_id-worker" "$worktree"
+  record_retry_owner "$task_id" app "$TEST_ROOT/$task_id-repo"
+  printf '%s\n' "$worktree" > "$state/worktree"
+  printf 'git\n' > "$state/wt_type"
+  printf 'done\n' > "$state/status"
+  printf 'result\n' > "$state/result"
+  seed_ledger_evidence "$worktree"
+  before="$(ledger_evidence_snapshot "$worktree")"
+
+  cp "$TEST_ROOT/fake-bin/ledger-collide-git" "$TEST_ROOT/fake-bin/git"
+  set +e
+  output="$(PATH="$TEST_ROOT/fake-bin:$PATH" REAL_GIT="$REAL_GIT" \
+    FAKE_RACE_KIND="$kind" FAKE_RACE_NAME="$name" FAKE_RACE_TARGET="$escape" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" "$task_id" 2>&1)"
+  status=$?
+  set -e
+  rm "$TEST_ROOT/fake-bin/git"
+
+  [[ "$status" -ne 0 ]] || {
+    printf 'FAIL %s: cleanup reported success after a failed removal\n' "$task_id" >&2
+    exit 1
+  }
+  [[ "$output" == *"collides with an existing path: $worktree/$name"* && \
+    "$output" == *"Failed to restore worker evidence after git failure: app"* ]] || {
+    printf 'FAIL %s: collision was not reported actionably: %s\n' \
+      "$task_id" "$output" >&2
+    exit 1
+  }
+  [[ ! -e "$worktree/$name/$name" ]] || {
+    printf 'FAIL %s: evidence was nested inside the colliding entry\n' "$task_id" >&2
+    exit 1
+  }
+  # A racing symlink must never relocate evidence outside the worktree.
+  [[ -z "$(ls -A "$escape")" ]] || {
+    printf 'FAIL %s: evidence escaped the worktree into %s\n' "$task_id" "$escape" >&2
+    exit 1
+  }
+  compgen -G "$state/live-evidence.tmp.*" >/dev/null || {
+    printf 'FAIL %s: live evidence backup was not preserved\n' "$task_id" >&2
+    exit 1
+  }
+  [[ "$(ledger_evidence_snapshot "$state/terminal-evidence")" == "$before" ]] || {
+    printf 'FAIL %s: persisted terminal evidence was damaged\n' "$task_id" >&2
+    exit 1
+  }
 }
-[[ ! -e "$TEST_ROOT/ledger-collide-worktree/.sergeant-notification-acks/.sergeant-notification-acks" ]] || {
-  printf 'FAIL ledger-collide: evidence was nested inside the colliding directory\n' >&2
-  exit 1
-}
-[[ "$ledger_collide_output" == *"collides with an existing path"* && \
-  "$ledger_collide_output" == *"Failed to restore worker evidence after git failure: app"* ]] || {
-  printf 'FAIL ledger-collide: collision was not reported actionably: %s\n' \
-    "$ledger_collide_output" >&2
-  exit 1
-}
-compgen -G "$ledger_collide_state/live-evidence.tmp.*" >/dev/null || {
-  printf 'FAIL ledger-collide: live evidence backup was not preserved\n' >&2
-  exit 1
-}
-[[ "$(ledger_evidence_snapshot "$ledger_collide_state/terminal-evidence")" == \
-  "$ledger_collide_before" ]] || {
-  printf 'FAIL ledger-collide: persisted terminal evidence was damaged\n' >&2
-  exit 1
-}
+
+assert_ledger_collision_rejected racing-dir dir .sergeant-notification-acks
+assert_ledger_collision_rejected racing-file file .sergeant-status
+assert_ledger_collision_rejected racing-symlink symlink .sergeant-review-gates
 printf 'sgt-cleanup ledger-collide: colliding evidence publication fails closed ok\n'
 
 # The removal loop walks a glob expanded after the identity check, so an entry
@@ -5348,8 +5371,15 @@ set -e
   printf 'FAIL ledger-leftover: worktree was removed despite reappeared evidence\n' >&2
   exit 1
 }
-[[ -f "$TEST_ROOT/ledger-leftover-worktree/.sergeant-leftover" ]]
-rm "$TEST_ROOT/ledger-leftover-worktree/.sergeant-leftover"
+[[ ! -e "$TEST_ROOT/ledger-leftover-worktree/.sergeant-leftover" ]] || {
+  printf 'FAIL ledger-leftover: the unbound entry was left in the worktree\n' >&2
+  exit 1
+}
+ledger_leftover_quarantine=("$ledger_leftover_state"/reappeared-evidence.tmp.*)
+[[ -f "${ledger_leftover_quarantine[0]}/.sergeant-leftover" ]] || {
+  printf 'FAIL ledger-leftover: the unbound entry was not preserved\n' >&2
+  exit 1
+}
 [[ "$(ledger_evidence_snapshot "$TEST_ROOT/ledger-leftover-worktree")" == \
   "$ledger_leftover_before" ]] || {
   printf 'FAIL ledger-leftover: live evidence was not fully restored\n' >&2
@@ -5363,6 +5393,63 @@ if compgen -G "$ledger_leftover_state/live-evidence.tmp.*" >/dev/null; then
 fi
 [[ "$(sed -n '1p' "$ledger_leftover_state/cleanup-phase")" == "removing" ]]
 printf 'sgt-cleanup ledger-leftover: reappeared evidence fails closed ok\n'
+
+# The realistic reappearance reuses a name that was already moved aside, so the
+# rollback cannot simply republish over it.  Cleanup must preserve the unbound
+# entry, restore the authoritative evidence anyway, and leave a phase that a plain
+# retry converges from — the base implementation recovered from this case.
+ledger_samename_state="$TEST_ROOT/fleet/ledger-samename/app"
+mkdir -p "$ledger_samename_state"
+init_test_repo "$TEST_ROOT/ledger-samename-repo"
+git -C "$TEST_ROOT/ledger-samename-repo" worktree add -q -b ledger-samename-worker \
+  "$TEST_ROOT/ledger-samename-worktree"
+record_retry_owner ledger-samename app "$TEST_ROOT/ledger-samename-repo"
+printf '%s\n' "$TEST_ROOT/ledger-samename-worktree" > "$ledger_samename_state/worktree"
+printf 'git\n' > "$ledger_samename_state/wt_type"
+printf 'done\n' > "$ledger_samename_state/status"
+printf 'result\n' > "$ledger_samename_state/result"
+seed_ledger_evidence "$TEST_ROOT/ledger-samename-worktree"
+ledger_samename_before="$(ledger_evidence_snapshot "$TEST_ROOT/ledger-samename-worktree")"
+set +e
+ledger_samename_output="$(SGT_CLEANUP_MUTATE_POINT=after-live-removal \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" ledger-samename 2>&1)"
+ledger_samename_status=$?
+set -e
+[[ "$ledger_samename_status" -ne 0 && \
+  "$ledger_samename_output" == *"Worker lifecycle evidence reappeared during cleanup"* && \
+  "$ledger_samename_output" == *".sergeant-status"* && \
+  "$ledger_samename_output" == *"reappeared-evidence.tmp."* ]] || {
+  printf 'FAIL ledger-samename: same-name reappearance was not reported actionably: %s\n' \
+    "$ledger_samename_output" >&2
+  exit 1
+}
+[[ "$(ledger_evidence_snapshot "$TEST_ROOT/ledger-samename-worktree")" == \
+  "$ledger_samename_before" ]] || {
+  printf 'FAIL ledger-samename: authoritative live evidence was not restored\n' >&2
+  exit 1
+}
+if compgen -G "$ledger_samename_state/live-evidence.tmp.*" >/dev/null; then
+  printf 'FAIL ledger-samename: authoritative evidence was stranded in a backup\n' >&2
+  exit 1
+fi
+ledger_samename_quarantine=("$ledger_samename_state"/reappeared-evidence.tmp.*)
+[[ -f "${ledger_samename_quarantine[0]}/.sergeant-status" ]] || {
+  printf 'FAIL ledger-samename: the reappeared entry was not preserved\n' >&2
+  exit 1
+}
+grep -Fq 'injected lifecycle evidence mutation' \
+  "${ledger_samename_quarantine[0]}/.sergeant-status"
+# A plain retry must now converge.
+SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" ledger-samename >/dev/null
+[[ ! -e "$TEST_ROOT/ledger-samename-worktree" && ! -e "$TEST_ROOT/fleet/ledger-samename" ]] || {
+  printf 'FAIL ledger-samename: the retry did not converge\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup ledger-samename: same-name reappearance stays retryable ok\n'
 
 # Evidence identity must be a function of raw bytes.  The worktree copy lives
 # inside the owning repository while the staged copy lives in fleet state outside
