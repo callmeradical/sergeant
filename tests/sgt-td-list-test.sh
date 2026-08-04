@@ -103,6 +103,9 @@ while idx < len(argv):
     elif arg.startswith("--limit="):
         limit = int(arg.split("=", 1)[1])
         idx += 1
+    elif len(arg) > 2 and arg.startswith("-n") and arg[2:].isdigit():
+        limit = int(arg[2:])
+        idx += 1
     elif arg == "--filter":
         idx += 2
     else:
@@ -144,6 +147,13 @@ chmod +x "$fake_bin/td"
 cat > "$fake_bin/python3" <<EOF
 #!/usr/bin/env bash
 printf 'python3\n' >> "$TEST_ROOT/python.log"
+if [[ -n "\${SGT_TD_LIST_TEST_FAIL_PYTHON:-}" ]]; then
+  _calls="\$(wc -l < "$TEST_ROOT/python.log" | tr -d ' ')"
+  if [[ "\$_calls" == "\$SGT_TD_LIST_TEST_FAIL_PYTHON" ]]; then
+    printf 'python3: simulated failure\n' >&2
+    exit 1
+  fi
+fi
 exec "$REAL_PYTHON" "\$@"
 EOF
 chmod +x "$fake_bin/python3"
@@ -278,7 +288,10 @@ if ! grep -qiF 'huge' "$err" || ! grep -qi 'truncat' "$err"; then
   printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
   _fail "ceiling_warning: expected a truncation warning naming 'huge' and the count"
 fi
-grep -qF '10' "$err" || _fail "ceiling_warning: warning must report the count reached"
+grep -qF 'at least 11 task(s)' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "ceiling_warning: warning must report the proven lower bound, not an unverified count"
+}
 printf 'ceiling_warning: ok\n'
 
 # Warnings must never corrupt the machine-readable contract.
@@ -377,5 +390,106 @@ _run "$out" "$err" -- example --repos big --limit || true
   _fail "dangling_limit_not_supplemented: must not inject a default beside a caller --limit"
 }
 printf 'dangling_limit_not_supplemented: ok\n'
+
+# ── 9. A caller limit that withholds nothing must not warn ────────────────────
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/exact.out"; err="$TEST_ROOT/exact.err"
+_run "$out" "$err" -- example --repos small --limit 7 \
+  || _fail "exact_limit_no_warning: exited nonzero: $(cat "$err")"
+
+grep -qF '── small (7)' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "exact_limit_no_warning: expected all 7 tasks"
+}
+[[ ! -s "$err" ]] || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "exact_limit_no_warning: --limit 7 on a 7-task repo withholds nothing, so it must not warn"
+}
+printf 'exact_limit_no_warning: ok\n'
+
+# A caller limit that does withhold tasks reports a proven lower bound.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/lower.out"; err="$TEST_ROOT/lower.err"
+_run "$out" "$err" -- example --repos small --limit 3 \
+  || _fail "caller_limit_lower_bound: exited nonzero: $(cat "$err")"
+grep -qF '── small (3)' "$out" || _fail "caller_limit_lower_bound: caller limit must still win"
+grep -qF 'at least 4 task(s)' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "caller_limit_lower_bound: warning must state the proven lower bound"
+}
+printf 'caller_limit_lower_bound: ok\n'
+
+# ── 10. Every caller limit spelling wins and is never supplemented ────────────
+
+for spelling in "--limit=5" "-n5"; do
+  : > "$TEST_ROOT/td.log"
+  out="$TEST_ROOT/spelling.out"; err="$TEST_ROOT/spelling.err"
+  _run "$out" "$err" -- example --repos big "$spelling" \
+    || _fail "caller_limit_spellings: $spelling exited nonzero: $(cat "$err")"
+  grep -qF '── big (5)' "$out" || {
+    printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+    _fail "caller_limit_spellings: $spelling must cap the report at 5"
+  }
+  grep -qF -- "$spelling" "$TEST_ROOT/td.log" || {
+    printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
+    _fail "caller_limit_spellings: $spelling was not forwarded to td"
+  }
+  if ! grep -qiF 'big' "$err" || ! grep -qi 'truncat' "$err"; then
+    printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+    _fail "caller_limit_spellings: $spelling truncated 60 tasks without warning"
+  fi
+  printf 'caller_limit_spellings(%s): ok\n' "$spelling"
+done
+
+# ── 11. Unreadable task output is reported, never counted as zero ─────────────
+
+# The first python3 process parses the first repo's td output.  When it fails,
+# the repo must be named on stderr rather than silently reported as empty.
+: > "$TEST_ROOT/td.log"; : > "$TEST_ROOT/python.log"
+out="$TEST_ROOT/parsefail.out"; err="$TEST_ROOT/parsefail.err"
+_run "$out" "$err" SGT_TD_LIST_TEST_FAIL_PYTHON=1 -- example \
+  || _fail "parse_failure_warns: exited nonzero: $(cat "$err")"
+
+if ! grep -qF 'big' "$err" || ! grep -qi 'fail' "$err"; then
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "parse_failure_warns: expected a warning naming the unreadable repo 'big'"
+fi
+! grep -qF '── big (0)' "$out" || _fail "parse_failure_warns: unreadable repo must not be reported as zero"
+grep -qF '── small (7)' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "parse_failure_warns: healthy repos must still be reported"
+}
+printf 'parse_failure_warns: ok\n'
+
+# A failing renderer must not leave a per-repo header with no rows beneath it.
+: > "$TEST_ROOT/td.log"; : > "$TEST_ROOT/python.log"
+out="$TEST_ROOT/renderfail.out"; err="$TEST_ROOT/renderfail.err"
+_run "$out" "$err" SGT_TD_LIST_TEST_FAIL_PYTHON=2 -- example --repos big \
+  || _fail "render_failure_warns: exited nonzero: $(cat "$err")"
+if ! grep -qF 'big' "$err" || ! grep -qi 'fail' "$err"; then
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "render_failure_warns: a failed listing render must warn and name the repo"
+fi
+printf 'render_failure_warns: ok\n'
+
+# ── 12. --json keeps its contract when a repo fails hard ─────────────────────
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/jsonfail.out"; err="$TEST_ROOT/jsonfail.err"
+_run "$out" "$err" SGT_TD_LIST_TEST_FAIL_REPO=big -- example --json \
+  || _fail "json_failure_warns: exited nonzero: $(cat "$err")"
+
+json_count="$("$REAL_PYTHON" -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$out")" \
+  || _fail "json_failure_warns: stdout must stay valid JSON when a repo fails"
+[[ "$json_count" == "7" ]] || {
+  printf 'actual json count: %s\n' "$json_count" >&2
+  _fail "json_failure_warns: expected the healthy repo's 7 tasks, got $json_count"
+}
+if ! grep -qF 'big' "$err" || ! grep -qi 'fail' "$err"; then
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "json_failure_warns: expected a warning naming the failed repo on stderr"
+fi
+printf 'json_failure_warns: ok\n'
 
 printf '\nAll sgt-td-list tests passed.\n'

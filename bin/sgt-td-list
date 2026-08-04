@@ -20,6 +20,14 @@
 #
 #   SGT_TD_LIST_LIMIT      initial per-repo limit (default 1000)
 #   SGT_TD_LIST_MAX_LIMIT  escalation ceiling     (default 100000)
+#
+#   An initial limit above the ceiling is clamped to the ceiling; completeness
+#   is unaffected, and a repo that reaches the ceiling still warns on stderr.
+#
+# Status filter:
+#   The default view is `--filter status=open`, which is printed in the header
+#   and therefore explicit.  It excludes non-closed work in in_progress,
+#   blocked and in_review; use --all for every non-closed task.
 
 set -euo pipefail
 
@@ -103,60 +111,114 @@ if [[ "${#EXTRA_FLAGS[@]}" -gt 0 ]]; then
 fi
 
 _truncation_warn() {
-  # _truncation_warn <repo> <count> <cap-description>
-  printf 'WARNING: %s: results truncated at %s task(s) by %s; the true count is higher\n' \
-    "$1" "$2" "$3" >&2
+  # _truncation_warn <repo> <proven-lower-bound> <cap-description>
+  # Never claims an exact total: the cap is what stops us from knowing it.
+  printf 'WARNING: %s: results truncated by %s; at least %s task(s) exist, so this report is incomplete\n' \
+    "$1" "$3" "$2" >&2
+}
+
+_unreadable_warn() {
+  # _unreadable_warn <repo> <reason>
+  printf 'WARNING: %s: %s; its tasks are missing from this report\n' "$1" "$2" >&2
 }
 
 # Task payloads are passed around as two lines — "<count>\n<compact json>" —
-# so one Python process per repo covers both parsing and counting.
+# so one Python process per repo covers parsing, validation and counting.
 _payload_count() { printf '%s' "${1%%$'\n'*}"; }
 _payload_json()  { printf '%s' "${1#*$'\n'}"; }
 
 _td_list_once() {
-  # _td_list_once <repo_name> <repo_path> [extra td flags...] → task payload
-  # td prints a JSON error object (an uninitialized repo yields {"error": ...})
-  # and exits nonzero, so raw stdout is never safe to treat as a task array.
-  # A repo with no td database is an expected skip; any other td failure is
-  # reported, because a dropped repo would under-report the project silently.
-  local rname="$1" repo_path="$2" payload raw status=0
+  # _td_list_once <repo_name> <repo_path> [td flags...] → "<count>\n<json>"
+  #
+  # Flags after <repo_path> are appended last so they beat anything in
+  # EXTRA_FLAGS; that is what makes the truncation probe below authoritative.
+  #
+  # Returns 1 when this repo's tasks could not be read, after warning: a repo
+  # dropped without a word is exactly how a backlog gets under-reported.  A
+  # repo with no td database is the one expected silent skip.
+  local rname="$1" repo_path="$2"
+  local count err_file kind payload raw status=0 parse_status=0 td_err
   shift 2
+
+  err_file="$(mktemp "${TMPDIR:-/tmp}/sgt-td-list.XXXXXX")"
   raw="$(td list --json --work-dir "$repo_path" \
     ${TD_FILTER:+--filter "$TD_FILTER"} \
-    "$@" \
-    "${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}" 2>/dev/null)" || status=$?
+    "${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}" \
+    "$@" 2>"$err_file")" || status=$?
+  td_err="$(sed "s/$(printf '\033')\[[0-9;]*m//g" "$err_file" 2>/dev/null | head -1)"
+  rm -f "$err_file"
+
+  # td answers a successful query with a JSON array and a failed one with a
+  # JSON error object, so raw stdout is never safe to treat as a task array.
   payload="$(printf '%s' "$raw" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
 except Exception:
     data = None
-tasks = data if isinstance(data, list) else []
-sys.stdout.write('%d\n%s' % (len(tasks), json.dumps(tasks)))
-")"
-  if [[ "$(_payload_count "$payload")" -eq 0 && "$status" -ne 0 ]]; then
-    case "$raw" in
-      *"database not found"*) ;;  # td not initialized here: expected skip
-      *) printf 'WARNING: %s: td list failed (exit %s); its tasks are missing from this report\n' \
-           "$rname" "$status" >&2 ;;
-    esac
+if isinstance(data, list):
+    sys.stdout.write('ok %d\n%s' % (len(data), json.dumps(data)))
+else:
+    code = ''
+    if isinstance(data, dict):
+        err = data.get('error')
+        if isinstance(err, dict):
+            code = str(err.get('code') or 'error')
+        elif err:
+            code = 'error'
+    sys.stdout.write('err %s\n[]' % code)
+")" || parse_status=$?
+
+  kind="$(_payload_count "$payload")"   # first line: "ok <count>" or "err <code>"
+  count="${kind#* }"
+  case "$kind" in
+    "ok "*)
+      if [[ "$count" =~ ^[0-9]+$ ]]; then
+        if [[ "$status" -ne 0 ]]; then
+          _unreadable_warn "$rname" "td list exited $status after partial output${td_err:+ ($td_err)}"
+          printf '0\n[]'
+          return 1
+        fi
+        printf '%s\n%s' "$count" "$(_payload_json "$payload")"
+        return 0
+      fi
+      ;;
+    "err database_error"*)
+      # td is not initialized in this repo: an expected, documented skip.
+      printf '0\n[]'
+      return 0
+      ;;
+  esac
+
+  if [[ "$parse_status" -ne 0 ]]; then
+    _unreadable_warn "$rname" "could not parse td output (python3 exited $parse_status)"
+  else
+    _unreadable_warn "$rname" "td list failed (exit $status)${td_err:+: $td_err}"
   fi
-  printf '%s' "$payload"
+  printf '0\n[]'
+  return 1
 }
 
 _td_list_tasks() {
-  # _td_list_tasks <repo_name> <repo_path>  → complete task payload for one repo.
-  # Escalates the explicit limit until td returns fewer tasks than requested,
-  # which proves the answer is complete.  Warns when a cap is still in force.
+  # _td_list_tasks <repo_name> <repo_path> → complete "<count>\n<json>" payload.
+  #
+  # Asks for one more task than it is willing to accept: a short answer proves
+  # the repo was reported completely.  Returns 1 when the repo is unreadable.
   local rname="$1" repo_path="$2"
-  local count limit payload
+  local count limit payload probe probe_count
 
   if $USER_LIMIT_SET; then
-    payload="$(_td_list_once "$rname" "$repo_path")"
-    if _is_positive_int "$USER_LIMIT"; then
-      count="$(_payload_count "$payload")"
-      [[ "$count" -lt "$USER_LIMIT" ]] \
-        || _truncation_warn "$rname" "$count" "the requested --limit $USER_LIMIT"
+    # The caller's limit wins untouched, so no default is added to this call.
+    payload="$(_td_list_once "$rname" "$repo_path")" || return 1
+    count="$(_payload_count "$payload")"
+    if _is_positive_int "$USER_LIMIT" && [[ "$count" -ge "$USER_LIMIT" ]]; then
+      # One extra row is all it takes to tell a cap from a coincidence.
+      probe="$(_td_list_once "$rname" "$repo_path" --limit "$((USER_LIMIT + 1))")" || probe=""
+      if [[ -n "$probe" ]]; then
+        probe_count="$(_payload_count "$probe")"
+        [[ "$probe_count" -le "$USER_LIMIT" ]] \
+          || _truncation_warn "$rname" "$probe_count" "the requested --limit $USER_LIMIT"
+      fi
     fi
     printf '%s' "$payload"
     return 0
@@ -164,9 +226,9 @@ _td_list_tasks() {
 
   limit="$TD_LIST_LIMIT"
   while :; do
-    payload="$(_td_list_once "$rname" "$repo_path" --limit "$limit")"
+    payload="$(_td_list_once "$rname" "$repo_path" --limit "$((limit + 1))")" || return 1
     count="$(_payload_count "$payload")"
-    [[ "$count" -ge "$limit" ]] || { printf '%s' "$payload"; return 0; }
+    [[ "$count" -gt "$limit" ]] || { printf '%s' "$payload"; return 0; }
     if [[ "$limit" -ge "$TD_LIST_MAX_LIMIT" ]]; then
       _truncation_warn "$rname" "$count" \
         "the SGT_TD_LIST_MAX_LIMIT ceiling of $TD_LIST_MAX_LIMIT (raise it to see the rest)"
@@ -176,6 +238,14 @@ _td_list_tasks() {
     limit=$((limit * 2))
     [[ "$limit" -le "$TD_LIST_MAX_LIMIT" ]] || limit="$TD_LIST_MAX_LIMIT"
   done
+}
+
+_repo_path_for() {
+  # _repo_path_for <repo_name> → absolute repo path; 1 when the name is unknown
+  local rname="$1" raw_path
+  raw_path="$(yq ".repos[] | select(.name == \"$rname\") | .path" "$CONFIG_FILE" 2>/dev/null || true)"
+  [[ -n "$raw_path" && "$raw_path" != "null" ]] || return 1
+  _resolve_path "$raw_path"
 }
 
 # ── Resolve target repos ───────────────────────────────────────────────────────
@@ -203,12 +273,11 @@ if $JSON_OUT; then
 
   stage_idx=0
   for rname in "${TARGET_REPOS[@]}"; do
-    raw_path="$(yq ".repos[] | select(.name == \"$rname\") | .path" "$CONFIG_FILE")"
-    repo_path="$(_resolve_path "$raw_path")"
+    repo_path="$(_repo_path_for "$rname")" || continue
 
     [[ -d "$repo_path/.git" ]] || continue
 
-    payload="$(_td_list_tasks "$rname" "$repo_path")"
+    payload="$(_td_list_tasks "$rname" "$repo_path")" || continue
 
     [[ "$(_payload_count "$payload")" -eq 0 ]] && continue
 
@@ -242,14 +311,12 @@ echo ""
 total=0
 
 for rname in "${TARGET_REPOS[@]}"; do
-  raw_path="$(yq ".repos[] | select(.name == \"$rname\") | .path" "$CONFIG_FILE" 2>/dev/null || echo "")"
-  [[ -z "$raw_path" || "$raw_path" == "null" ]] && continue
-  repo_path="$(_resolve_path "$raw_path")"
+  repo_path="$(_repo_path_for "$rname")" || continue
 
   [[ -d "$repo_path/.git" ]] || continue
 
   # Repos with no td database report zero tasks and are skipped
-  payload="$(_td_list_tasks "$rname" "$repo_path")"
+  payload="$(_td_list_tasks "$rname" "$repo_path")" || continue
   count="$(_payload_count "$payload")"
   [[ "$count" -eq 0 ]] && continue
   tasks_json="$(_payload_json "$payload")"
@@ -257,7 +324,7 @@ for rname in "${TARGET_REPOS[@]}"; do
   total=$((total + count))
   echo "── $rname ($count)"
 
-  echo "$tasks_json" | python3 -c "
+  printf '%s' "$tasks_json" | python3 -c "
 import sys, json
 tasks = json.load(sys.stdin)
 # Sort by priority then status
@@ -268,9 +335,8 @@ for t in tasks:
     title  = t.get('title','')[:65]
     prio   = t.get('priority','')
     status = t.get('status','')
-    ttype  = t.get('type','')
     print(f'   {tid}  [{prio}]  {status:<12}  {title}')
-" 2>/dev/null
+" || _unreadable_warn "$rname" "failed to render its $count task(s), so the rows above are incomplete"
 
   echo ""
 done
