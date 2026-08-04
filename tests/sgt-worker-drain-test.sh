@@ -77,6 +77,7 @@ printf 'drained\n' > "$worktree/.sergeant-status"
 
 # ── Verify _finish handles drained status via library functions ────────────────
 result="$(
+  # shellcheck disable=SC2097,SC2098  # Prefix re-exports outer ROOT_DIR/fake_bin for the nested bash; PATH/AGENT read the identical outer values.
   REPO_STATE="$repo_state" WORKTREE="$worktree" AGENT="$fake_bin/fake-opencode" \
   SERGEANT_DRAIN_DIR="$drain_dir" ROOT_DIR="$ROOT_DIR" fake_bin="$fake_bin" \
   PATH="$fake_bin:$ROOT_DIR/bin:$PATH" TD_LOG="$TEST_ROOT/td.log" \
@@ -132,6 +133,7 @@ printf 'myproject\n' > "$drain_repo/project"
 SERGEANT_DRAIN_DIR="$drain_dir" "$ROOT_DIR/bin/sgt-drain" --global --reason "worker signal test"
 
 # Simulate one iteration of the drain check from _watch_progress
+# shellcheck disable=SC2097,SC2098  # Prefix re-exports outer drain_dir for the nested bash; SERGEANT_DRAIN_DIR reads the identical outer value.
 ROOT_DIR="$ROOT_DIR" drain_dir="$drain_dir" drain_worktree="$drain_worktree" \
 drain_repo="$drain_repo" SERGEANT_DRAIN_DIR="$drain_dir" bash <<'INNER'
   source "$ROOT_DIR/bin/_sgt-drain.sh"
