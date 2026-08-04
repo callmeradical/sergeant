@@ -198,6 +198,11 @@ if fail_repo and Path(work_dir).name == fail_repo:
     sys.stderr.write("td: unexpected failure\n")
     sys.exit(2)
 
+slow_repo = os.environ.get("SGT_TD_LIST_TEST_SLOW_REPO", "")
+if slow_repo and Path(work_dir).name == slow_repo:
+    import time
+    time.sleep(30)
+
 flood_repo = os.environ.get("SGT_TD_LIST_TEST_FLOOD_REPO", "")
 if flood_repo and Path(work_dir).name == flood_repo:
     # A failure whose first stderr line is enormous.
@@ -505,10 +510,16 @@ printf 'td_failure_warns: ok\n'
 : > "$TEST_ROOT/td.log"
 out="$TEST_ROOT/dangling.out"; err="$TEST_ROOT/dangling.err"
 _run "$out" "$err" -- example --repos big --limit
+_expect_status 2 dangling_limit_not_supplemented "$err"
 ! grep -qE -- '--limit[[:space:]]+--limit' "$TEST_ROOT/td.log" || {
   printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
   _fail "dangling_limit_not_supplemented: must not inject a default beside a caller --limit"
 }
+# td rejects the dangling flag, and that rejection must be reported, not swallowed.
+if ! grep -qF 'big' "$err" || ! grep -qi 'fail' "$err"; then
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "dangling_limit_not_supplemented: td's rejection must be reported and name the repo"
+fi
 printf 'dangling_limit_not_supplemented: ok\n'
 
 # ── 9. A caller limit that withholds nothing must not warn ────────────────────
@@ -864,6 +875,7 @@ printf 'missing_path_warns: ok\n'
 : > "$TEST_ROOT/td.log"
 out="$TEST_ROOT/newline.out"; err="$TEST_ROOT/newline.err"
 _run "$out" "$err" -- newlinename
+_expect_status 0 newline_repo_name "$err"
 grep -qF '── victim (7)' "$out" || {
   printf 'actual output:\n%s\n' "$(cat "$out")" >&2
   _fail "newline_repo_name: a later repo must not lose its identity to a multi-line name"
@@ -872,7 +884,29 @@ grep -qF '── victim (7)' "$out" || {
   printf 'actual output:\n%s\n' "$(cat "$out")" >&2
   _fail "newline_repo_name: tasks must never be published under a phantom repo name"
 }
+
+# --json must attribute the same tasks to the same configured names.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/newline-json.out"; err="$TEST_ROOT/newline-json.err"
+_run "$out" "$err" -- newlinename --json
+_expect_status 0 newline_repo_name_json "$err"
+json_tags="$("$REAL_PYTHON" - "$out" <<'PY'
+import collections, json, sys
+tasks = json.load(open(sys.argv[1]))
+counts = collections.Counter(t.get("_repo") for t in tasks)
+print(" | ".join("%r=%d" % (k, counts[k]) for k in sorted(counts, key=str)))
+PY
+)"
+[[ "$json_tags" == *"victim'=7"* ]] || {
+  printf 'actual repo tags: %s\n' "$json_tags" >&2
+  _fail "newline_repo_name_json: victim's tasks must be tagged with victim"
+}
+[[ "$json_tags" != *"'beta'"* ]] || {
+  printf 'actual repo tags: %s\n' "$json_tags" >&2
+  _fail "newline_repo_name_json: no task may be tagged with a phantom repo name"
+}
 printf 'newline_repo_name: ok\n'
+printf 'newline_repo_name_json: ok\n'
 
 # ── 24. Option parsing: missing values and filter composition ────────────────
 
@@ -944,5 +978,76 @@ grep -qF '── edge (11)' "$out" || {
 }
 printf 'ceiling_boundary: ok\n'
 printf 'ceiling_boundary_fits: ok\n'
+
+# ── 26. A repo reached twice is counted once ──────────────────────────────────
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/dup.out"; err="$TEST_ROOT/dup.err"
+_run "$out" "$err" -- example --repos small,small
+_expect_status 0 duplicate_repo_counted_once "$err"
+[[ "$(grep -c -- '── small (' "$out")" == "1" ]] || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "duplicate_repo_counted_once: a repeated --repos entry must be listed once"
+}
+grep -qF '7 task(s) total' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "duplicate_repo_counted_once: the total must not double-count"
+}
+grep -qi 'more than once' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "duplicate_repo_counted_once: the duplicate must be reported"
+}
+printf 'duplicate_repo_counted_once: ok\n'
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/dupjson.out"; err="$TEST_ROOT/dupjson.err"
+_run "$out" "$err" -- example --repos small,small --json
+_expect_status 0 duplicate_repo_json "$err"
+dup_ids="$("$REAL_PYTHON" -c '
+import json, sys
+tasks = json.load(open(sys.argv[1]))
+ids = [t["id"] for t in tasks]
+print("%d %d" % (len(ids), len(set(ids))))' "$out")"
+[[ "$dup_ids" == "7 7" ]] || {
+  printf 'tasks vs distinct ids: %s\n' "$dup_ids" >&2
+  _fail "duplicate_repo_json: --json must not repeat tasks"
+}
+printf 'duplicate_repo_json: ok\n'
+
+# ── 27. A signal must never leave a clean-looking empty report ────────────────
+
+: > "$TEST_ROOT/td.log"
+signal_tmp="$TEST_ROOT/signal-tmp"; mkdir -p "$signal_tmp"
+out="$TEST_ROOT/signal.out"; err="$TEST_ROOT/signal.err"
+env HOME="$home" PATH="$fake_bin:$PATH" SERGEANT_CONFIG="$config" \
+  TMPDIR="$signal_tmp" SGT_TD_LIST_TEST_SLOW_REPO=big \
+  "$ROOT_DIR/bin/sgt-td-list" example >"$out" 2>"$err" &
+signal_pid=$!
+# Wait until the slow repo read is under way, then terminate the run.
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [[ -s "$TEST_ROOT/td.log" ]] && break
+  sleep 0.2
+done
+kill -TERM "$signal_pid" 2>/dev/null || true
+signal_status=0
+wait "$signal_pid" || signal_status=$?
+
+[[ "$signal_status" -ne 0 ]] || {
+  printf 'actual stdout:\n%s\nactual stderr:\n%s\n' "$(cat "$out")" "$(cat "$err")" >&2
+  _fail "signal_never_reports_success: a terminated run must not exit 0"
+}
+! grep -qF 'task(s) total' "$out" || {
+  printf 'actual stdout:\n%s\n' "$(cat "$out")" >&2
+  _fail "signal_never_reports_success: a terminated run must not print an authoritative total"
+}
+! grep -qF 'No tasks found' "$out" || {
+  printf 'actual stdout:\n%s\n' "$(cat "$out")" >&2
+  _fail "signal_never_reports_success: a terminated run must not claim the project is empty"
+}
+[[ -z "$(ls -A "$signal_tmp" 2>/dev/null)" ]] || {
+  printf 'leftovers in TMPDIR: %s\n' "$(ls -A "$signal_tmp")" >&2
+  _fail "signal_never_reports_success: the workspace must be removed when a signal ends the run"
+}
+printf 'signal_never_reports_success: ok\n'
 
 printf '\nAll sgt-td-list tests passed.\n'
