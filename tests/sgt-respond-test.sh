@@ -9,6 +9,44 @@ TMUX_KILLED_DIR="$TEST_ROOT/killed-panes"
 mkdir -p "$TMUX_KILLED_DIR"
 export TMUX_KILLED_DIR
 
+run_in_pty() {
+  python3 -c '
+import errno
+import os
+import pty
+import sys
+
+payload = sys.stdin.buffer.read()
+pid, master = pty.fork()
+if pid == 0:
+    os.execvpe(sys.argv[1], sys.argv[1:], os.environ)
+
+offset = 0
+while offset < len(payload):
+    try:
+        offset += os.write(master, payload[offset:])
+    except InterruptedError:
+        continue
+
+while True:
+    try:
+        chunk = os.read(master, 4096)
+        if not chunk:
+            break
+        os.write(sys.stdout.fileno(), chunk)
+    except OSError as error:
+        if error.errno == errno.EIO:
+            break
+        raise
+
+_, status = os.waitpid(pid, 0)
+os.close(master)
+if os.WIFEXITED(status):
+    raise SystemExit(os.WEXITSTATUS(status))
+raise SystemExit(128 + os.WTERMSIG(status))
+' "$@"
+}
+
 fleet="$TEST_ROOT/fleet"
 repo_state="$fleet/task-1/app"
 worktree="$TEST_ROOT/worktree"
@@ -294,7 +332,7 @@ set +e
 printf 'resume one delivery target' | PATH="$fake_bin:$PATH" \
   TMUX_LOG="$TEST_ROOT/inflight-first.log" TD_LOG="$TEST_ROOT/inflight-td.log" \
   TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 AUTO_DELIVER=0 \
-  SGT_NOTIFICATION_TIMEOUT=0 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  SGT_NOTIFICATION_ACK_TIMEOUT=0 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
   "$ROOT_DIR/bin/sgt-respond" task-1 app >/dev/null 2>&1
 inflight_first_status=$?
 set -e
@@ -433,7 +471,7 @@ for newline_case in zero one multiple; do
     TD_LOG="$TEST_ROOT/tty-$newline_case-td.log" \
     TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 \
     EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
-    script -qec "\"$ROOT_DIR/bin/sgt-respond\" task-1 app" /dev/null \
+    run_in_pty "$ROOT_DIR/bin/sgt-respond" task-1 app \
     < "$tty_input" >/dev/null
   cmp -s "$expected_response" "$repo_state/response"
   cmp -s "$expected_response" "$worktree/.sergeant-response"
@@ -452,7 +490,7 @@ set +e
 PATH="$fake_bin:$PATH" TMPDIR="$response_tmp" TMUX_LOG="$TEST_ROOT/tty-empty.log" \
   TD_LOG="$TEST_ROOT/tty-empty-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
   PANE_ALIVE=1 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
-  script -qec "\"$ROOT_DIR/bin/sgt-respond\" task-1 app" /dev/null \
+  run_in_pty "$ROOT_DIR/bin/sgt-respond" task-1 app \
   < "$empty_response" >/dev/null
 tty_empty_status=$?
 set -e

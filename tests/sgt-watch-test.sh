@@ -29,6 +29,16 @@ case "$1" in
       [[ "$previous" == -t ]] && target="$argument"
       previous="$argument"
     done
+    if [[ -n "${RECOVERY_RACE_MARKER:-}" && ! -e "$RECOVERY_RACE_MARKER" &&
+          "$target" == "${RECOVERY_RACE_OLD_PANE:-%42}" ]]; then
+      old_identity="$(cat "$EXPECTED_WORKER/pane_identity")"
+      printf 'launching\n' > "$EXPECTED_WORKER/replacement_phase"
+      printf '%s\n' "$RECOVERY_RACE_NEW_IDENTITY" > "$EXPECTED_WORKER/pane_identity"
+      chmod 600 "$EXPECTED_WORKER/replacement_phase" "$EXPECTED_WORKER/pane_identity"
+      : > "$RECOVERY_RACE_MARKER"
+      printf '%s\n' "$old_identity"
+      exit 0
+    fi
     extra_identity="${EXTRA_PANE_IDENTITY:-}"
     extra_remainder="${extra_identity#*|}"
     extra_pane="${extra_remainder%%|*}"
@@ -99,30 +109,29 @@ real_chmod="$(command -v chmod)"
 real_stat="$(command -v stat)"
 cat > "$fake_bin/chmod" <<'EOF'
 #!/usr/bin/env bash
+last="${!#}"
+if [[ "$last" == /dev/fd/9 && -n "${LEGACY_IDENTITY_RACE:-}" &&
+      -n "${LEGACY_IDENTITY_RACE_MARKER:-}" &&
+      ! -e "$LEGACY_IDENTITY_RACE_MARKER" ]]; then
+  case "$LEGACY_IDENTITY_RACE" in
+    replace-content)
+      printf 'tampered-pane\n' > "$LEGACY_IDENTITY_PATH"
+      "$REAL_CHMOD" 664 "$LEGACY_IDENTITY_PATH"
+      ;;
+    replace-path)
+      rm -f "$LEGACY_IDENTITY_PATH"
+      printf 'tampered-pane\n' > "$LEGACY_IDENTITY_PATH"
+      "$REAL_CHMOD" 664 "$LEGACY_IDENTITY_PATH"
+      ;;
+  esac
+  : > "$LEGACY_IDENTITY_RACE_MARKER"
+fi
 exec "$REAL_CHMOD" "$@"
 EOF
 chmod +x "$fake_bin/chmod"
 export REAL_CHMOD="$real_chmod"
 cat > "$fake_bin/stat" <<'EOF'
 #!/usr/bin/env bash
-last="${!#}"
-if [[ "$last" == */pane_identity && -n "${LEGACY_IDENTITY_RACE:-}" && \
-  -n "${LEGACY_IDENTITY_RACE_MARKER:-}" && \
-  ! -e "$LEGACY_IDENTITY_RACE_MARKER" ]] && \
-  compgen -G "${last}.tmp.*" >/dev/null; then
-    case "$LEGACY_IDENTITY_RACE" in
-      replace-content)
-        printf 'tampered-pane\n' > "$last"
-        chmod 664 "$last"
-        ;;
-      replace-path)
-        rm -f "$last"
-        printf 'tampered-pane\n' > "$last"
-        chmod 664 "$last"
-        ;;
-    esac
-    : > "$LEGACY_IDENTITY_RACE_MARKER"
-fi
 exec "$REAL_STAT" "$@"
 EOF
 chmod +x "$fake_bin/stat"
@@ -167,9 +176,11 @@ legacy_race_marker="$TEST_ROOT/legacy-pane-race"
 printf 'in_progress\n' > "$worktree/.sergeant-status"
 printf 'in_progress\n' > "$repo/status"
 LEGACY_IDENTITY_RACE=replace-content LEGACY_IDENTITY_RACE_MARKER="$legacy_race_marker" \
+  LEGACY_IDENTITY_PATH="$repo/pane_identity" \
   PANE_IDENTITY="$legacy_identity" EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" \
   SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
-[[ "$(cat "$repo/pane_identity")" == "$legacy_identity" ]]
+[[ "$(cat "$repo/status")" == "orphaned" ]]
+[[ "$(cat "$repo/pane_identity")" == "tampered-pane" ]]
 [[ "$(stat -c '%a' "$repo/pane_identity" 2>/dev/null || stat -f '%Lp' "$repo/pane_identity")" == \
   "600" ]]
 [[ -e "$legacy_race_marker" ]]
@@ -180,6 +191,7 @@ legacy_replace_marker="$TEST_ROOT/legacy-pane-replaced"
 printf 'in_progress\n' > "$worktree/.sergeant-status"
 printf 'in_progress\n' > "$repo/status"
 LEGACY_IDENTITY_RACE=replace-path LEGACY_IDENTITY_RACE_MARKER="$legacy_replace_marker" \
+  LEGACY_IDENTITY_PATH="$repo/pane_identity" \
   PANE_IDENTITY="$legacy_identity" EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" \
   SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
 [[ "$(cat "$repo/status")" == "orphaned" ]]
@@ -200,6 +212,36 @@ for forged_command in "wrapper $legacy_command extra" "${legacy_command}-prefix-
 done
 
 printf '%s\n' "$legacy_identity" > "$repo/pane_identity"
+
+# Recovery publishes its journal and new identity before the new pane pointer.
+# A sync that observed no journal before this window must not orphan the worker.
+recovery_race_marker="$TEST_ROOT/recovery-publication-race"
+recovery_new_identity="0|%43|4343|123458|$legacy_command"
+printf '%%42\n' > "$repo/pane"
+chmod 600 "$repo/pane_identity"
+printf 'in_progress\n' > "$worktree/.sergeant-status"
+printf 'in_progress\n' > "$repo/status"
+RECOVERY_RACE_MARKER="$recovery_race_marker" \
+  RECOVERY_RACE_NEW_IDENTITY="$recovery_new_identity" \
+  EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT/bin/sgt-watch" --sync task-1
+[[ -e "$recovery_race_marker" ]]
+[[ "$(cat "$repo/status")" == "in_progress" ]]
+[[ "$(cat "$worktree/.sergeant-status")" == "in_progress" ]]
+[[ "$(cat "$repo/replacement_phase")" == "launching" ]]
+
+# Complete the simulated recovery and prove the next coherent observation is live.
+printf '%%43\n' > "$repo/pane"
+rm -f "$repo/replacement_phase"
+PANE_IDENTITY="$recovery_new_identity" EXPECTED_WORKER="$repo" \
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT/bin/sgt-watch" --sync task-1
+[[ "$(cat "$repo/status")" == "in_progress" ]]
+
+# Restore the original pane fixture for terminal recycling coverage below.
+printf '%%42\n' > "$repo/pane"
+printf '%s\n' "$legacy_identity" > "$repo/pane_identity"
+chmod 600 "$repo/pane_identity"
 
 printf 'done\n' > "$worktree/.sergeant-status"
 rm -f "$worktree/.sergeant-result"
@@ -244,6 +286,9 @@ printf '0|%%99|9999|654321|missing-current-worker\n' > "$repo/pane_identity"
 chmod 600 "$repo/pane_identity"
 recorded_executable="$TEST_ROOT/old install/bin/sgt-interactive-worker"
 printf '%s\n' "$recorded_executable" > "$repo/worker_executable"
+printf '9999\n' > "$repo/worker_pid"
+printf 'Tue Jan  2 00:00:00 2024\n' > "$repo/worker_process_start"
+chmod 600 "$repo/worker_executable" "$repo/worker_pid" "$repo/worker_process_start"
 printf -v stale_command '%q %q %q %q' \
   "$recorded_executable" "$repo" "$worktree" opencode
 tmux_stale_command="${stale_command//\\/\\\\}"
@@ -255,7 +300,19 @@ EXPECTED_WORKER="$repo" EXTRA_PANE_IDENTITY="$extra_identity" \
   PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
   "$ROOT/bin/sgt-watch" --sync task-1
 [[ "$(cat "$repo/status")" == "drained" ]]
+[[ ! -e "$TEST_ROOT/extra-tmux.state" ]]
+grep -Fq 'drain handoff does not match current worker identity' "$repo/diagnostic"
+
+printf 'worker_pid=9999\nworker_start=Tue Jan  2 00:00:00 2024\n' \
+  > "$repo/drain_handoff"
+chmod 600 "$repo/drain_handoff"
+EXPECTED_WORKER="$repo" EXTRA_PANE_IDENTITY="$extra_identity" \
+  UNRELATED_PANE_IDENTITY="$unrelated_identity" \
+  EXTRA_TMUX_STATE="$TEST_ROOT/extra-tmux.state" \
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT/bin/sgt-watch" --sync task-1
 grep -Fq 'kill-pane -t %41' "$TMUX_LOG"
+[[ ! -e "$repo/diagnostic" ]]
 if grep -Fq 'kill-pane -t %39' "$TMUX_LOG"; then
   printf 'unrelated terminal pane was recycled\n' >&2
   exit 1
@@ -498,7 +555,12 @@ printf 'drained\n' > "$drained_wt/.sergeant-status"
 printf 'drained\n' > "$drained_wt/.sergeant-drained"
 printf 'worker_pid=4242\nworker_start=Mon Jan  1 00:00:00 2024\n' \
   > "$drained_task/drainedrepo/drain_handoff"
-chmod 600 "$drained_task/drainedrepo/drain_handoff"
+printf '4242\n' > "$drained_task/drainedrepo/worker_pid"
+printf 'Mon Jan  1 00:00:00 2024\n' \
+  > "$drained_task/drainedrepo/worker_process_start"
+chmod 600 "$drained_task/drainedrepo/drain_handoff" \
+  "$drained_task/drainedrepo/worker_pid" \
+  "$drained_task/drainedrepo/worker_process_start"
 # Note: no pane file — drained worker's supervisor has exited
 
 # --sync: drained status propagated to fleet without triggering orphan detector

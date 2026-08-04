@@ -106,6 +106,9 @@ fi
 _run "worker drain checkpoint + _watch_progress drain signal" \
   bash "$ROOT_DIR/tests/sgt-worker-drain-test.sh"
 
+_run "owned fleet-file identity" \
+  bash "$ROOT_DIR/tests/sgt-owned-file-test.sh"
+
 # Terminal lifecycle regressions for drain, recycle, response, and recovery.
 if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   _run "terminal worker recycling" bash "$ROOT_DIR/tests/sgt-watch-test.sh"

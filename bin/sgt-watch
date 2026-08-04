@@ -175,6 +175,33 @@ _recycle_terminal_worker() {
   return 0
 }
 
+_replacement_journal_blocks_sync() {
+  local repo_dir="${1%/}" phase_path phase existed_before=false existed_after=false
+  phase_path="$repo_dir/replacement_phase"
+  [[ ! -e "$phase_path" && ! -L "$phase_path" ]] || existed_before=true
+  phase="$(_sgt_read_owned_file "$phase_path" 2>/dev/null || true)"
+  [[ ! -e "$phase_path" && ! -L "$phase_path" ]] || existed_after=true
+  if [[ "$phase" == "launching" ]]; then
+    return 0
+  fi
+  if [[ "$existed_before" != "$existed_after" ]]; then
+    return 0
+  fi
+  $existed_before || return 1
+  printf 'worker replacement journal is unreadable; reconciliation required\n' \
+    > "$repo_dir/diagnostic"
+  return 0
+}
+
+_clear_drain_handoff_diagnostic() {
+  local repo_dir="${1%/}" existing
+  existing="$(cat "$repo_dir/diagnostic" 2>/dev/null || true)"
+  if [[ "$existing" == \
+        "drain handoff does not match current worker identity; refusing recycle" ]]; then
+    rm -f "$repo_dir/diagnostic"
+  fi
+}
+
 _dispatch_is_expired() {
   local repo_dir="$1"
   local grace now started
@@ -325,18 +352,10 @@ _sync_task() {
 
   for repo_dir in "$task_dir"/*/; do
     [[ -d "$repo_dir" ]] || continue
-    local worktree wt_status fleet_status pane replacement_phase
+    local worktree wt_status fleet_status pane confirmed_pane
     fleet_status="$(cat "$repo_dir/status" 2>/dev/null || echo "")"
     worktree="$(cat "$repo_dir/worktree" 2>/dev/null || echo "")"
-    replacement_phase="$(_sgt_read_owned_file \
-      "${repo_dir%/}/replacement_phase" 2>/dev/null || true)"
-    if [[ "$replacement_phase" == "launching" ]]; then
-      continue
-    fi
-    if [[ ( -e "${repo_dir%/}/replacement_phase" ||
-            -L "${repo_dir%/}/replacement_phase" ) && -z "$replacement_phase" ]]; then
-      printf 'worker replacement journal is unreadable; reconciliation required\n' \
-        > "${repo_dir%/}/diagnostic"
+    if _replacement_journal_blocks_sync "$repo_dir"; then
       continue
     fi
     if [[ -z "$worktree" || ! -d "$worktree" ]]; then
@@ -379,15 +398,7 @@ _sync_task() {
       rm -f "$repo_dir/message"
     fi
 
-    replacement_phase="$(_sgt_read_owned_file \
-      "${repo_dir%/}/replacement_phase" 2>/dev/null || true)"
-    if [[ "$replacement_phase" == "launching" ]]; then
-      continue
-    fi
-    if [[ ( -e "${repo_dir%/}/replacement_phase" ||
-            -L "${repo_dir%/}/replacement_phase" ) && -z "$replacement_phase" ]]; then
-      printf 'worker replacement journal is unreadable; reconciliation required\n' \
-        > "${repo_dir%/}/diagnostic"
+    if _replacement_journal_blocks_sync "$repo_dir"; then
       continue
     fi
 
@@ -412,8 +423,13 @@ _sync_task() {
           "${repo_dir%/}/drain_handoff" 2>/dev/null || true)" ]]; then
           printf 'drained worker lacks durable handoff evidence; refusing recycle\n' \
             > "$repo_dir/diagnostic"
+        elif ! _sgt_drain_handoff_matches_worker "$repo_dir"; then
+          printf 'drain handoff does not match current worker identity; refusing recycle\n' \
+            > "$repo_dir/diagnostic"
         elif ! _recycle_terminal_worker "$repo_dir"; then
           printf 'WARNING: drained worker was not recycled: %s\n' "$repo_dir" >&2
+        else
+          _clear_drain_handoff_diagnostic "$repo_dir"
         fi
         ;;
     esac
@@ -427,6 +443,22 @@ _sync_task() {
           printf 'in-progress worker has no recorded worker pane; resume with sgt-respond\n' > "$repo_dir/diagnostic"
           "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" || true
         elif command -v tmux >/dev/null 2>&1 && ! _pane_is_supervisor "$pane" "$repo_dir"; then
+          # Recovery publishes phase, identity, and pane in separate atomic
+          # writes. Recheck both the journal and pane before classifying a
+          # mismatch so an overlapping replacement remains nonterminal.
+          if _replacement_journal_blocks_sync "$repo_dir"; then
+            continue
+          fi
+          confirmed_pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
+          if [[ "$confirmed_pane" != "$pane" ]] || \
+             _pane_is_supervisor "$confirmed_pane" "$repo_dir"; then
+            continue
+          fi
+          if _replacement_journal_blocks_sync "$repo_dir"; then
+            continue
+          fi
+          [[ "$(cat "$repo_dir/pane" 2>/dev/null || true)" == "$confirmed_pane" ]] || \
+            continue
           printf 'orphaned\n' > "$worktree/.sergeant-status"
           printf 'orphaned\n' > "$repo_dir/status"
           printf 'recorded pane %s is dead or is not the expected worker supervisor; resume with sgt-respond\n' "$pane" > "$repo_dir/diagnostic"
