@@ -91,6 +91,20 @@ the gap in the summary and continue without creating any tracking work.
 Do not continue past Phase 1 until all required prerequisites are either present
 or the user explicitly accepts the risk of proceeding without them.
 
+Detect all of the above with the supported command rather than probing each tool
+by hand; it is read-only and runs no package manager, installer, or third-party
+command:
+
+```bash
+./bin/sgt-bootstrap --verify-only     # or: mise run verify
+```
+
+Treat every `MISSING:` line as a required gap, every `OPTIONAL MISSING:` line as
+optional, and every `MANUAL:` line as a login the user must perform themselves.
+On macOS with Homebrew or Linux with `apt-get`, the supported install for those
+gaps is `./bin/sgt-bootstrap`; classify a prerequisite as `unsupported` only when
+the bootstrap does not cover it (currently `treehouse` and `dagr`).
+
 For each `installable` prerequisite, show the installation command and ask for
 explicit consent before running it:
 
@@ -99,8 +113,16 @@ explicit consent before running it:
 Run it? [y/N]
 ```
 
+Preview the whole plan before asking, so the user sees exactly what would change:
+
+```bash
+./bin/sgt-bootstrap --dry-run
+```
+
 Run the command only after the user types `y` or `yes`. Do not run it on any
-other response.
+other response. `sgt-bootstrap` preserves anything already occupying a path it
+wants and reports it as a conflict; surface those conflicts to the user instead
+of resolving them yourself.
 
 ## Phase 2: Clone and install command links
 
@@ -121,7 +143,7 @@ If the Sergeant repository is not already cloned:
    Run the command only after the user types `y` or `yes`. Leave the filesystem
    unchanged on any other response.
 
-If `mise` is available, first determine the actual install directory:
+First determine the actual install directory:
 
 ```bash
 install_dir="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
@@ -133,9 +155,18 @@ Show the resolved target and ask for consent before running anything:
 Run `mise run install` to symlink commands into <install_dir>? [y/N]
 ```
 
-Run `mise run install` only after the user confirms. If `mise` is unavailable or
-consent is declined, instruct the user to symlink commands from `bin/` into a
-directory on `PATH` manually and verify the result before continuing.
+Run it only after the user confirms. `mise run install` delegates to
+`./bin/sgt-install`, so when `mise` is unavailable run that script directly
+instead of instructing the user to create symlinks by hand:
+
+```bash
+./bin/sgt-install
+```
+
+`sgt-install` exits non-zero when it preserved an existing entry rather than
+installing over it. Treat a non-zero exit as a stop condition: report each
+`preserved existing:` path and let the user resolve it. `./bin/sgt-uninstall`
+reverses the operation, removing only what this checkout installed.
 
 Verify that at least `sgt-list`, `sgt-context`, `sgt-dispatch`, and `sgt-watch`
 resolve on `PATH` before proceeding. Report any missing commands and their

@@ -9,14 +9,20 @@
 #
 # Invoked by `mise run install` and by `sgt-bootstrap`. Safe to rerun.
 #
-# Link policy:
-#   absent target        → create the link
-#   Sergeant-owned link  → repoint it at this checkout
-#   any other symlink    → repoint it (the sgt-* namespace is Sergeant-owned)
-#   real file/directory   → preserve it and report it, never overwrite
+# Link policy, decided by _sgt_install_link_state so the bootstrap's plan and
+# this installer can never disagree:
 #
-# Writes only to the target directory and this repository's git hooks
-# directory. Per docs/repo-scoped-skills.md it never writes to a user's global
+#   absent    create the link
+#   linked    already correct; leave it alone
+#   stale     a Sergeant-owned or dangling link; replace it in place
+#   conflict  a real file, a directory, or a link to something the user owns;
+#             preserve it, report it, and exit non-zero
+#
+# Exits non-zero when any command could not be installed, so `mise run install`
+# cannot report success over a knowingly incomplete installation.
+#
+# Writes only to the target directory and to the git hooks directory of this
+# checkout. Per docs/repo-scoped-skills.md it never writes to a user's global
 # agent configuration; it only removes an oc-inject link this checkout created
 # before that injection path was deprecated.
 
@@ -39,30 +45,71 @@ if [[ $# -gt 0 ]]; then
   exit 2
 fi
 
+# Resolve the manifest before mutating anything, and fail loudly on an empty
+# result rather than reporting a vacuous success.
+sources="$(_sgt_install_sources "$ROOT_DIR")" || exit 1
+
 linked=0
-preserved=0
+conflicts=0
+removed=0
 
 mkdir -p "$TARGET_DIR"
+
+# publish_link <source-file> <target>
+#
+# Replace <target> with a link to <source-file>. `rm -f` removes a symlink
+# itself and never follows it, so an existing link pointing at a directory is
+# replaced rather than being used as a destination the way `ln -sf` would.
+publish_link() {
+  local source_file="$1" target="$2"
+  rm -f "$target"
+  ln -s "$source_file" "$target"
+  [[ "$(readlink "$target")" == "$source_file" ]] || {
+    printf 'sgt-install: failed to publish %s -> %s\n' "$target" "$source_file" >&2
+    return 1
+  }
+}
 
 while IFS= read -r source_file; do
   [[ -n "$source_file" ]] || continue
   target="$TARGET_DIR/${source_file##*/}"
-  if [[ -L "$target" ]]; then
-    if [[ "$(readlink "$target")" != "$source_file" ]]; then
-      ln -sf "$source_file" "$target"
-    fi
-    printf '  linked: %s -> %s\n' "$target" "$source_file"
-    linked=$((linked + 1))
-  elif [[ -e "$target" ]]; then
-    printf '  preserved existing: %s\n' "$target"
-    preserved=$((preserved + 1))
-  else
-    ln -s "$source_file" "$target"
-    printf '  linked: %s -> %s\n' "$target" "$source_file"
-    linked=$((linked + 1))
-  fi
+  case "$(_sgt_install_link_state "$source_file" "$TARGET_DIR")" in
+    linked)
+      printf '  linked: %s -> %s\n' "$target" "$source_file"
+      linked=$((linked + 1))
+      ;;
+    absent|stale)
+      publish_link "$source_file" "$target"
+      printf '  linked: %s -> %s\n' "$target" "$source_file"
+      linked=$((linked + 1))
+      ;;
+    conflict)
+      printf '  preserved existing: %s (not installed)\n' "$target"
+      conflicts=$((conflicts + 1))
+      ;;
+  esac
 done <<EOF
-$(_sgt_install_sources "$ROOT_DIR")
+$sources
+EOF
+
+# Sweep links this checkout owns that the manifest no longer names, so renaming
+# or removing a command does not leave a dangling entry on the user's PATH.
+while IFS= read -r pattern; do
+  [[ -n "$pattern" ]] || continue
+  for stale_target in "$TARGET_DIR"/$pattern; do
+    [[ -L "$stale_target" ]] || continue
+    stale_source="$(readlink "$stale_target")"
+    case "$stale_source" in
+      "$ROOT_DIR"/bin/*) ;;
+      *) continue ;;
+    esac
+    [[ -f "$stale_source" ]] && continue
+    rm -f "$stale_target"
+    printf '  removed stale Sergeant link: %s\n' "$stale_target"
+    removed=$((removed + 1))
+  done
+done <<EOF
+$(_sgt_install_managed_globs)
 EOF
 
 # Remove only the deprecated links this checkout previously created. The source
@@ -76,12 +123,40 @@ while IFS= read -r deprecated_entry; do
   [[ "$(readlink "$deprecated_link")" == "$owned_target" ]] || continue
   rm "$deprecated_link"
   printf '  removed deprecated Sergeant link: %s\n' "$deprecated_link"
+  removed=$((removed + 1))
 done <<EOF
 $(_sgt_install_deprecated_links "$ROOT_DIR" "$TARGET_DIR")
 EOF
 
+# Install this repository's git hooks. --absolute-git-dir is required: the plain
+# --git-dir form prints the relative string ".git" for a normal clone, which
+# would resolve against the caller's working directory and install Sergeant's
+# pre-push hook into whatever unrelated repository the user happens to be in.
+hooks_src="$ROOT_DIR/scripts/hooks"
+hooks_dst=''
+if git_dir="$(git -C "$ROOT_DIR" rev-parse --absolute-git-dir 2>/dev/null)"; then
+  hooks_dst="$git_dir/hooks"
+fi
+if [[ -d "$hooks_src" && -n "$hooks_dst" && -d "$hooks_dst" ]]; then
+  for hook in "$hooks_src"/*; do
+    [[ -f "$hook" ]] || continue
+    hook_target="$hooks_dst/${hook##*/}"
+    if [[ -L "$hook_target" && "$(readlink "$hook_target")" == "$hook" ]]; then
+      printf '  linked hook: %s -> %s\n' "$hook_target" "$hook"
+    elif [[ -e "$hook_target" || -L "$hook_target" ]]; then
+      # A hook the user wrote is theirs; never replace it silently.
+      printf '  preserved existing hook: %s (not installed)\n' "$hook_target"
+      conflicts=$((conflicts + 1))
+    else
+      ln -s "$hook" "$hook_target"
+      printf '  linked hook: %s -> %s\n' "$hook_target" "$hook"
+    fi
+  done
+fi
+
 printf '\nInstalled %d scripts to %s\n' "$linked" "$TARGET_DIR"
-printf 'Preserved %d existing entries\n' "$preserved"
+printf 'Removed %d stale or deprecated links\n' "$removed"
+printf 'Preserved %d existing entries\n' "$conflicts"
 
 if [[ ":$PATH:" != *":$TARGET_DIR:"* ]]; then
   printf '\nWARNING: %s is not on your PATH.\n' "$TARGET_DIR"
@@ -91,17 +166,8 @@ if [[ ":$PATH:" != *":$TARGET_DIR:"* ]]; then
   printf '  export PATH="%s:$PATH"\n' "$TARGET_DIR"
 fi
 
-# Install this repository's git hooks. Absent hook directories are skipped so
-# that linked worktrees without a private hooks directory are not modified.
-hooks_src="$ROOT_DIR/scripts/hooks"
-hooks_dst=''
-if git_dir="$(git -C "$ROOT_DIR" rev-parse --git-dir 2>/dev/null)"; then
-  hooks_dst="$git_dir/hooks"
-fi
-if [[ -d "$hooks_src" && -n "$hooks_dst" && -d "$hooks_dst" ]]; then
-  for hook in "$hooks_src"/*; do
-    [[ -f "$hook" ]] || continue
-    ln -sf "$hook" "$hooks_dst/${hook##*/}"
-    printf '  linked hook: %s -> %s\n' "$hooks_dst/${hook##*/}" "$hook"
-  done
+if ((conflicts > 0)); then
+  printf '\nsgt-install: %d entries were preserved and are NOT installed; resolve them by hand.\n' \
+    "$conflicts" >&2
+  exit 1
 fi

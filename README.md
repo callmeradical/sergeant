@@ -68,18 +68,27 @@ opencode    # or: claude
 `sgt-bootstrap` is safe to rerun. It installs only what is missing and never
 overwrites an existing command, tool, or user file: anything already occupying a
 path Sergeant wants is preserved and reported as a conflict for you to resolve.
-Use `./bin/sgt-bootstrap --verify-only` (or `mise run verify`) for a read-only
-check, and `--dry-run` to print the plan.
+Conflicts are detected before the first package is installed, so a run that
+cannot finish cleanly declines without changing anything. Use
+`./bin/sgt-bootstrap --verify-only` (or `mise run verify`) for a read-only check,
+and `--dry-run` to print the plan; neither mode runs a package manager, an
+installer, or any third-party command.
 
-It writes to two places only: the command directory (`SGT_INSTALL_DIR`,
-default `~/.local/bin`) and this repository. It never writes to
-`~/.config/opencode`, `~/.claude`, or `~/.agents` — Sergeant's skills are
-discovered from the repository itself, so no global skill installation is needed.
-See [Repo-scoped worker skills](docs/repo-scoped-skills.md).
+Sergeant itself writes to two places: the command directory (`SGT_INSTALL_DIR`,
+default `~/.local/bin`) and this repository, whose git hooks it installs. It
+writes nothing under `~/.config/opencode`, `~/.claude`, or `~/.agents` except to
+remove the deprecated `oc-inject` plugin link an older checkout created —
+Sergeant's skills are discovered from the repository itself, so no global skill
+installation is needed. See
+[Repo-scoped worker skills](docs/repo-scoped-skills.md). The third-party
+installers it invokes (`mise`, `go`, `uv`) also manage their own data
+directories, which Sergeant does not control.
 
-Authentication is never automated. Follow any reported `gh`, OpenCode, or Claude
-login action after installation. macOS requires Homebrew and Linux requires
-`apt-get`; any other platform fails without making changes.
+Authentication is never automated, and it is never probed: the bootstrap always
+reports the `gh`, OpenCode, and Claude logins you may need rather than running
+those commands, because invoking a harness would create state in the very
+configuration directory Sergeant promises not to touch. macOS requires Homebrew
+and Linux requires `apt-get`; any other platform fails without making changes.
 
 Then talk to it:
 
@@ -404,8 +413,10 @@ for full setup instructions.
 ## Requirements
 
 Run `./bin/sgt-bootstrap` to install these, or `./bin/sgt-bootstrap --verify-only`
-to check them. See the complete [getting started checklist](docs/getting-started.md)
-for installation and verification.
+to check them. The bootstrap does not install `treehouse` or `dagr`; both are
+optional and have their own installers. See the complete
+[getting started checklist](docs/getting-started.md) for installation and
+verification.
 
 - [`github.com/marcus/td`](https://github.com/marcus/td) — task CLI, required for brief-based `sgt-dispatch` runs, `sgt-no-mistakes-finding`, `sgt-review-findings`, and `sgt-td-*` commands; install with `brew install marcus/tap/td` or `go install github.com/marcus/td@latest`
 - `yq` — YAML parser: `brew install yq`

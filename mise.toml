@@ -16,7 +16,7 @@ description = "Symlink sgt-* scripts into ~/.local/bin so they're on your PATH"
 run = "./bin/sgt-install"
 
 [tasks."install:hooks"]
-description = "Symlink scripts/hooks/* into .git/hooks/ (runs automatically via mise run install)"
+description = "Symlink scripts/hooks/* into .git/hooks/ (bin/sgt-install also does this)"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail

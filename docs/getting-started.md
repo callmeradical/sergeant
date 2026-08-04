@@ -27,7 +27,9 @@ Optional:
 - Node.js/npm to install external agent skills
 
 On macOS with Homebrew, or Linux with `apt-get`, the bootstrap installs every
-entry above. Preview it first, then run it:
+required entry above plus the optional `mise`, `graphify`, and `no-mistakes`.
+It does not install `treehouse` or `dagr`, which have their own installers.
+Preview it first, then run it:
 
 ```bash
 git clone https://github.com/callmeradical/sergeant.git
@@ -38,13 +40,21 @@ cd sergeant
 
 The bootstrap is safe to rerun and never overwrites an existing command, tool,
 or user file; anything already occupying a path Sergeant wants is preserved and
-reported as a conflict. It writes only to the command directory
-(`SGT_INSTALL_DIR`, default `~/.local/bin`) and this repository — never to
-`~/.config/opencode`, `~/.claude`, or `~/.agents`. It does not automate any
-login; follow the `MANUAL:` actions it reports.
+reported as a conflict. Conflicts are reported before the first package is
+installed, so a run that cannot finish declines without changing anything.
+
+Sergeant writes to the command directory (`SGT_INSTALL_DIR`, default
+`~/.local/bin`) and to this repository, whose git hooks it installs. It writes
+nothing under `~/.config/opencode`, `~/.claude`, or `~/.agents` except to remove
+the deprecated `oc-inject` plugin link an older checkout created. The
+third-party installers it invokes (`mise`, `go`, `uv`) manage their own data
+directories.
+
+It does not automate or probe any login; follow the `MANUAL:` actions it reports.
 
 On any other platform, or to check an existing installation, verify without
-changing anything:
+changing anything. Neither read-only mode runs a package manager, an installer,
+or any third-party command:
 
 ```bash
 ./bin/sgt-bootstrap --verify-only   # or: mise run verify

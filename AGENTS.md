@@ -67,7 +67,10 @@ the operation with ad hoc shell commands. The **MCP tool name** equals the scrip
 name without the `bin/` prefix (e.g. `sgt-dispatch`, `sgt-watch`).
 
 | Script | MCP tool | Purpose |
-|---|---|
+|---|---|---|
+| `bin/sgt-bootstrap [--dry-run\|--verify-only]` | — | Install or verify the developer toolchain on macOS/Homebrew or apt Linux; read-only modes change nothing |
+| `bin/sgt-install` | — | Symlink this checkout's commands into `SGT_INSTALL_DIR` (default `~/.local/bin`) and install its git hooks; exits non-zero if anything was preserved instead of installed |
+| `bin/sgt-uninstall` | — | Remove the command links and git hooks this checkout installed, keeping anything it does not own |
 | `bin/sgt-list` | `sgt-list` | List all known projects from `~/.config/sergeant/` |
 | `bin/sgt-status <project>` | `sgt-status` | Git status across every repo in a project |
 | `bin/sgt-sync <project>` | `sgt-sync` | Clone missing repos, pull existing ones |

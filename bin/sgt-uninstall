@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sgt-uninstall — Remove the command links this checkout installed.
+# sgt-uninstall — Remove everything this checkout installed.
 #
 # Usage:
 #   sgt-uninstall
@@ -7,9 +7,13 @@
 # Environment:
 #   SGT_INSTALL_DIR   Directory holding the command links (default ~/.local/bin)
 #
-# The exact inverse of bin/sgt-install: it removes a link only when that link
-# still points at a file in this checkout. A real file, or a link to another
-# checkout or to a user's own command, is left untouched.
+# The inverse of bin/sgt-install: it removes command links and git hooks, but
+# only while they still point at a file in this checkout. A real file, or a link
+# to another checkout or to a user's own command, is left untouched and reported.
+#
+# The sweep is driven by the target directory rather than only by the current
+# manifest, so a link left behind by a command that a later version renamed or
+# removed is still cleaned up.
 
 set -euo pipefail
 
@@ -33,20 +37,30 @@ fi
 removed=0
 kept=0
 
-while IFS= read -r source_file; do
-  [[ -n "$source_file" ]] || continue
-  target="$TARGET_DIR/${source_file##*/}"
-  [[ -L "$target" ]] || continue
-  if [[ "$(readlink "$target")" == "$source_file" ]]; then
-    rm "$target"
-    printf '  removed: %s\n' "$target"
-    removed=$((removed + 1))
-  else
-    printf '  kept (not owned by this checkout): %s\n' "$target"
-    kept=$((kept + 1))
-  fi
+# Sweep every name this checkout claims, not just the ones it currently ships.
+while IFS= read -r pattern; do
+  [[ -n "$pattern" ]] || continue
+  for target in "$TARGET_DIR"/$pattern; do
+    [[ -L "$target" ]] || continue
+    link_target="$(readlink "$target")"
+    case "$link_target" in
+      /*) ;;
+      *) link_target="$TARGET_DIR/$link_target" ;;
+    esac
+    case "$link_target" in
+      "$ROOT_DIR"/bin/*)
+        rm "$target"
+        printf '  removed: %s\n' "$target"
+        removed=$((removed + 1))
+        ;;
+      *)
+        printf '  kept (not owned by this checkout): %s\n' "$target"
+        kept=$((kept + 1))
+        ;;
+    esac
+  done
 done <<EOF
-$(_sgt_install_sources "$ROOT_DIR")
+$(_sgt_install_managed_globs)
 EOF
 
 # Deprecated links this checkout may still own are cleaned up here too, so an
@@ -64,5 +78,26 @@ done <<EOF
 $(_sgt_install_deprecated_links "$ROOT_DIR" "$TARGET_DIR")
 EOF
 
-printf '\nRemoved %d symlinks from %s\n' "$removed" "$TARGET_DIR"
+# Remove the git hooks sgt-install created, so uninstall really is its inverse.
+hooks_src="$ROOT_DIR/scripts/hooks"
+if git_dir="$(git -C "$ROOT_DIR" rev-parse --absolute-git-dir 2>/dev/null)"; then
+  hooks_dst="$git_dir/hooks"
+  if [[ -d "$hooks_src" && -d "$hooks_dst" ]]; then
+    for hook in "$hooks_src"/*; do
+      [[ -f "$hook" ]] || continue
+      hook_target="$hooks_dst/${hook##*/}"
+      [[ -L "$hook_target" ]] || continue
+      if [[ "$(readlink "$hook_target")" == "$hook" ]]; then
+        rm "$hook_target"
+        printf '  removed hook: %s\n' "$hook_target"
+        removed=$((removed + 1))
+      else
+        printf '  kept hook (not owned by this checkout): %s\n' "$hook_target"
+        kept=$((kept + 1))
+      fi
+    done
+  fi
+fi
+
+printf '\nRemoved %d entries installed from %s\n' "$removed" "$ROOT_DIR"
 printf 'Kept %d entries owned by something else\n' "$kept"
