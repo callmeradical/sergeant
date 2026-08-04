@@ -87,7 +87,7 @@ set -e
 
 # Uninstall must be the exact inverse of install: every entry install created is
 # removed, and a user's own file of the same name is left alone.
-printf 'user command\n' > "$TEST_ROOT/bin/sgt-not-ours"
+printf 'user command\n' > "$TEST_ROOT/bin/sgt-a-user-command"
 HOME="$TEST_ROOT/home" SGT_INSTALL_DIR="$TEST_ROOT/bin" \
   "$ROOT_DIR/bin/sgt-uninstall" >/dev/null
 
@@ -101,7 +101,27 @@ while IFS= read -r source_file; do
 done <<EOF
 $(_sgt_install_sources "$ROOT_DIR")
 EOF
-[[ "$(cat "$TEST_ROOT/bin/sgt-not-ours")" == 'user command' ]] || \
-  fail 'sgt-uninstall removed a command it does not own'
+[[ "$(cat "$TEST_ROOT/bin/sgt-a-user-command")" == 'user command' ]] || \
+  fail 'sgt-uninstall removed a real user file inside the sgt-* namespace'
+
+# The structural check above only proves the delegation text. Run the real task
+# runner when it is available, so a wrong relative path or a renamed key fails.
+if command -v mise >/dev/null 2>&1; then
+  MISE_ROOT="$TEST_ROOT/mise"
+  mkdir -p "$MISE_ROOT/bin" "$MISE_ROOT/home"
+  ( cd "$ROOT_DIR" && HOME="$MISE_ROOT/home" SGT_INSTALL_DIR="$MISE_ROOT/bin" \
+      mise run install >/dev/null )
+  [[ -L "$MISE_ROOT/bin/sgt-dispatch" ]] || \
+    fail 'mise run install did not create the command links'
+  [[ -L "$MISE_ROOT/bin/_sgt-install-manifest.sh" ]] || \
+    fail 'mise run install did not link the install manifest'
+  ( cd "$ROOT_DIR" && HOME="$MISE_ROOT/home" SGT_INSTALL_DIR="$MISE_ROOT/bin" \
+      mise run uninstall >/dev/null )
+  [[ ! -e "$MISE_ROOT/bin/sgt-dispatch" ]] || \
+    fail 'mise run uninstall left a command link behind'
+  printf 'mise run install/uninstall via the real task runner: ok\n'
+else
+  printf 'SKIP: mise run install/uninstall (mise is not available on this host)\n'
+fi
 
 printf 'mise install/uninstall round-trip: ok\n'
