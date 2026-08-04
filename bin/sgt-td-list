@@ -162,27 +162,32 @@ fi
 # Resolve every configured name→path pair once, as data.  Interpolating a repo
 # name into a yq expression lets a crafted name select a different repo's path.
 
-# Names and paths are read as two index-aligned lists, so no delimiter has to
-# survive a repo name (yq's @tsv would CSV-quote a name containing a quote).
-REPO_NAMES="$WORK/repo-names"
-REPO_PATHS="$WORK/repo-paths"
-yq -r '[.repos[]?.name] | .[]' "$CONFIG_FILE" > "$REPO_NAMES" \
-  || _die "cannot read repo names from $CONFIG_FILE"
-yq -r '[.repos[]?.path] | .[]' "$CONFIG_FILE" > "$REPO_PATHS" \
-  || _die "cannot read repo paths from $CONFIG_FILE"
-[[ -s "$REPO_NAMES" ]] || _die "project $PROJECT declares no repos in $CONFIG_FILE"
+# name/path pairs are staged NUL-delimited, so nothing in a repo name — quotes,
+# yq operators, spaces, even a newline — can be mistaken for a delimiter or for
+# part of a yq expression.
+REPO_MAP="$WORK/repos.nul"
+yq -o=json '[.repos[]? | {"name": .name, "path": .path}]' "$CONFIG_FILE" \
+  | python3 -c '
+import json, sys
+for repo in json.load(sys.stdin) or []:
+    name = repo.get("name")
+    path = repo.get("path")
+    sys.stdout.write("%s\0%s\0" % ("" if name is None else name,
+                                    "" if path is None else path))
+' > "$REPO_MAP" || _die "cannot read repos from $CONFIG_FILE"
+[[ -s "$REPO_MAP" ]] || _die "project $PROJECT declares no repos in $CONFIG_FILE"
 
 _repo_path_for() {
-  # _repo_path_for <repo_name> → absolute repo path; 1 when the name is unknown
-  local rname="$1" idx=0 name path
-  while IFS= read -r name; do
-    idx=$((idx + 1))
+  # _repo_path_for <repo_name> → absolute repo path
+  #   1  the name is not configured
+  #   2  the name is configured with no usable path
+  local rname="$1" name path
+  while IFS= read -r -d '' name && IFS= read -r -d '' path; do
     [[ "$name" == "$rname" ]] || continue
-    path="$(sed -n "${idx}p" "$REPO_PATHS")"
-    [[ -n "$path" && "$path" != "null" ]] || return 1
+    [[ -n "$path" && "$path" != "null" ]] || return 2
     _resolve_path "$path"
     return 0
-  done < "$REPO_NAMES"
+  done < "$REPO_MAP"
   return 1
 }
 
@@ -293,12 +298,13 @@ _td_list_tasks() {
   # Asks for one more task than it is willing to publish, so a single response
   # proves whether anything was withheld.  Returns 1 for an unreadable repo.
   local rname="$1" repo_path="$2"
-  local head limit payload published total
+  local head keep limit payload published total
 
   if $USER_LIMIT_SET; then
     if _is_positive_int "$USER_LIMIT"; then
       # One request, one snapshot: ask for the caller's limit plus one row and
-      # publish only what the caller asked for.
+      # publish only what the caller asked for.  Truncation is then proven by
+      # the same response that produced the report, not by a later re-read.
       payload="$(_td_list_once "$rname" "$USER_LIMIT" "$repo_path" \
         --limit "$((USER_LIMIT + 1))")" || return 1
       head="$(_payload_head "$payload")"
@@ -307,22 +313,16 @@ _td_list_tasks() {
       [[ "$total" -le "$USER_LIMIT" ]] \
         || _truncation_warn "$rname" "$total" "the requested --limit $USER_LIMIT"
     else
-      # A limit td interprets itself (0 means td's own default, negative means
-      # unlimited) or a malformed one: forward it untouched, then re-read one
-      # row past what came back to see whether anything was withheld.
+      # A limit only td can interpret: forward it untouched.  `--limit 0` is td
+      # asking td for its own default cap, which is the silent truncation this
+      # command exists to prevent, so say so instead of guessing a total.
       payload="$(_td_list_once "$rname" -1 "$repo_path")" || return 1
       head="$(_payload_head "$payload")"
       published="${head#* }"
-      if [[ "$published" -gt 0 ]]; then
-        local probe probe_total
-        if probe="$(_td_list_once "$rname" -1 "$repo_path" \
-              --limit "$((published + 1))")"; then
-          probe_total="$(_payload_head "$probe")"
-          probe_total="${probe_total%% *}"
-          [[ "$probe_total" -le "$published" ]] \
-            || _truncation_warn "$rname" "$probe_total" \
-                 "the requested --limit $USER_LIMIT (a re-read found more)"
-        fi
+      if [[ "$USER_LIMIT" == "0" && "$published" -gt 0 ]]; then
+        _mark_incomplete
+        printf 'WARNING: %s: --limit 0 leaves td to apply its own default limit, so these %s task(s) may be truncated; pass a positive --limit or none at all\n' \
+          "$rname" "$published" >&2
       fi
     fi
     printf '%s\n%s' "$published" "$(_payload_json "$payload")"
@@ -331,17 +331,22 @@ _td_list_tasks() {
 
   limit="$TD_LIST_LIMIT"
   while :; do
-    payload="$(_td_list_once "$rname" -1 "$repo_path" --limit "$((limit + 1))")" || return 1
+    # At the ceiling, publish exactly the ceiling: then a returned extra row
+    # proves tasks were withheld instead of merely hinting at it.
+    keep=-1
+    [[ "$limit" -lt "$TD_LIST_MAX_LIMIT" ]] || keep="$TD_LIST_MAX_LIMIT"
+    payload="$(_td_list_once "$rname" "$keep" "$repo_path" --limit "$((limit + 1))")" || return 1
     head="$(_payload_head "$payload")"
     total="${head%% *}"
+    published="${head#* }"
     if [[ "$total" -le "$limit" ]]; then
-      printf '%s\n%s' "$total" "$(_payload_json "$payload")"
+      printf '%s\n%s' "$published" "$(_payload_json "$payload")"
       return 0
     fi
     if [[ "$limit" -ge "$TD_LIST_MAX_LIMIT" ]]; then
       _truncation_warn "$rname" "$total" \
         "the SGT_TD_LIST_MAX_LIMIT ceiling of $TD_LIST_MAX_LIMIT (raise it to see the rest)"
-      printf '%s\n%s' "$total" "$(_payload_json "$payload")"
+      printf '%s\n%s' "$published" "$(_payload_json "$payload")"
       return 0
     fi
     limit=$((limit * 2))
@@ -351,11 +356,17 @@ _td_list_tasks() {
 
 _repo_payload() {
   # _repo_payload <repo_name> <named-explicitly> → "<published>\n<json>"
-  # Returns 1 when the repo contributes nothing.  A repo the caller named by
-  # hand is never dropped in silence; one merely configured but not cloned is.
-  local rname="$1" named="$2" repo_path
+  # Returns 1 when the repo contributes nothing.  Malformed configuration and a
+  # repo the caller named by hand are always reported; a repo that is merely
+  # configured and not cloned yet is the one quiet skip.
+  local rname="$1" named="$2" repo_path resolve_status=0
 
-  if ! repo_path="$(_repo_path_for "$rname")"; then
+  repo_path="$(_repo_path_for "$rname")" || resolve_status=$?
+  if [[ "$resolve_status" -eq 2 ]]; then
+    _unreadable_warn "$rname" "configured in $PROJECT.yaml with no path"
+    return 1
+  fi
+  if [[ "$resolve_status" -ne 0 ]]; then
     ! $named || _unreadable_warn "$rname" "not configured in $PROJECT.yaml"
     return 1
   fi
@@ -375,9 +386,19 @@ if [[ -n "$REPOS_ARG" ]]; then
   REPOS_NAMED=true
   IFS=',' read -ra TARGET_REPOS <<< "$REPOS_ARG"
 else
-  while IFS= read -r map_name; do
-    [[ -n "$map_name" ]] && TARGET_REPOS+=("$map_name")
-  done < "$REPO_NAMES"
+  while IFS= read -r -d '' map_name && IFS= read -r -d '' _; do
+    if [[ -z "$map_name" ]]; then
+      _unreadable_warn "(unnamed)" "a repo in $PROJECT.yaml has no name"
+      continue
+    fi
+    TARGET_REPOS+=("$map_name")
+  done < "$REPO_MAP"
+fi
+
+# An empty list must not trip `set -u` on Bash 3.2, and must not masquerade as
+# a complete report of nothing.
+if [[ "${#TARGET_REPOS[@]}" -eq 0 ]]; then
+  _die "no usable repos to read for project $PROJECT"
 fi
 
 # ── Collect tasks per repo ────────────────────────────────────────────────────
@@ -391,7 +412,7 @@ if $JSON_OUT; then
   mkdir -p "$JSON_STAGE"
 
   stage_idx=0
-  for rname in "${TARGET_REPOS[@]}"; do
+  for rname in "${TARGET_REPOS[@]+"${TARGET_REPOS[@]}"}"; do
     if [[ -z "$rname" ]]; then
       _unreadable_warn "(empty)" "empty --repos entry"
       continue
@@ -431,7 +452,7 @@ echo ""
 
 total=0
 
-for rname in "${TARGET_REPOS[@]}"; do
+for rname in "${TARGET_REPOS[@]+"${TARGET_REPOS[@]}"}"; do
   if [[ -z "$rname" ]]; then
     _unreadable_warn "(empty)" "empty --repos entry"
     continue

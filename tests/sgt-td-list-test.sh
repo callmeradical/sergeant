@@ -35,6 +35,7 @@ _make_repo() {
 _make_repo big 60      # > td's default 50: the truncation case
 _make_repo small 7
 _make_repo huge 25     # used for the explicit-ceiling truncation warning case
+_make_repo edge 11     # exactly SGT_TD_LIST_MAX_LIMIT + 1 in the ceiling tests
 
 # A repo with no td database at all: real td prints a JSON error object on
 # stdout and exits 1 for these, so they must be skipped, not merged or fatal.
@@ -94,6 +95,25 @@ repos:
     path: bigwt
 EOF
 
+_make_repo victim 7
+
+cat > "$config/nopath.yaml" <<EOF
+name: nopath
+repos:
+  - name: small
+    path: small
+  - name: nopathrepo
+EOF
+
+cat > "$config/newlinename.yaml" <<'YAML'
+name: newlinename
+repos:
+  - name: "alpha\nbeta"
+    path: quoted
+  - name: victim
+    path: victim
+YAML
+
 cat > "$config/norepos.yaml" <<EOF
 name: norepos
 description: a project that declares no repos
@@ -107,6 +127,13 @@ repos:
   - name: small
     path: small
 YAML
+
+cat > "$config/edge.yaml" <<EOF
+name: edge
+repos:
+  - name: edge
+    path: edge
+EOF
 
 cat > "$config/uninitialized.yaml" <<EOF
 name: uninitialized
@@ -218,9 +245,13 @@ chmod +x "$fake_bin/td"
 cat > "$fake_bin/python3" <<EOF
 #!/usr/bin/env bash
 printf 'python3\n' >> "$TEST_ROOT/python.log"
-if [[ -n "\${SGT_TD_LIST_TEST_FAIL_PYTHON:-}" ]]; then
-  _calls="\$(wc -l < "$TEST_ROOT/python.log" | tr -d ' ')"
-  if [[ "\$_calls" == "\$SGT_TD_LIST_TEST_FAIL_PYTHON" ]]; then
+# Failure injection keys on a marker in the program text, not on invocation
+# order, so these tests survive a change in how many passes sgt-td-list makes.
+# Only the FIRST matching invocation fails, which is what makes "one repo is
+# unreadable, the rest are fine" testable.
+if [[ -n "\${SGT_TD_LIST_TEST_FAIL_PYTHON:-}" && "\$*" == *"\$SGT_TD_LIST_TEST_FAIL_PYTHON"* ]]; then
+  if [[ ! -e "$TEST_ROOT/python-failed-once" ]]; then
+    : > "$TEST_ROOT/python-failed-once"
     printf 'python3: simulated failure\n' >&2
     exit 1
   fi
@@ -325,11 +356,13 @@ PY
 }
 printf 'json_repo_tagging: ok\n'
 
-# Tagging and merging happen in one pass over staged payloads (audit finding
-# P-2): at most one python3 process per repo plus one merge.
+# Tagging and merging happen in one pass over staged payloads: one python3
+# process for the repo map, one per repo to parse and count, and one merge.
+# Anything more means per-repo tagging crept back in — that was the shape whose
+# whitespace-split merge silently produced an empty array.
 python_calls="$(wc -l < "$TEST_ROOT/python.log" | tr -d ' ')"
-[[ "$python_calls" -le 3 ]] || {
-  _fail "json_single_merge_pass: expected at most 3 python3 processes for 2 repos, got $python_calls"
+[[ "$python_calls" -le 4 ]] || {
+  _fail "json_single_merge_pass: expected at most 4 python3 processes for 2 repos, got $python_calls"
 }
 printf 'json_single_merge_pass: ok (%s python3 processes for 2 repos)\n' "$python_calls"
 
@@ -348,10 +381,12 @@ grep -qF -- '--limit 5' "$TEST_ROOT/td.log" || {
   printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
   _fail "user_limit_wins: user --limit 5 was not forwarded to td"
 }
-# The default must not be injected alongside the user's limit.
-[[ "$(grep -c -- '--limit' "$TEST_ROOT/td.log")" == "$(grep -c -- '--limit 5' "$TEST_ROOT/td.log")" ]] || {
-  printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
-  _fail "user_limit_wins: a default limit was injected alongside the user-supplied --limit"
+# The default must not be injected alongside the caller's limit: the only limits
+# td may see are the caller's 5 and the deliberate 6 that proves truncation.
+limits_seen="$(grep -o -- '--limit [0-9]*' "$TEST_ROOT/td.log" | sort -u | tr '\n' ',')"
+[[ "$limits_seen" == "--limit 5,--limit 6," ]] || {
+  printf 'actual td calls:\n%s\nlimits seen: %s\n' "$(cat "$TEST_ROOT/td.log")" "$limits_seen" >&2
+  _fail "user_limit_wins: unexpected limits sent to td (a default was injected?)"
 }
 printf 'user_limit_wins: ok\n'
 
@@ -529,11 +564,11 @@ done
 
 # ── 11. Unreadable task output is reported, never counted as zero ─────────────
 
-# The first python3 process parses the first repo's td output.  When it fails,
-# the repo must be named on stderr rather than silently reported as empty.
-: > "$TEST_ROOT/td.log"; : > "$TEST_ROOT/python.log"
+# The per-repo parser turns td's stdout into a payload.  When it fails, the repo
+# must be named on stderr rather than silently reported as empty.
+: > "$TEST_ROOT/td.log"; : > "$TEST_ROOT/python.log"; rm -f "$TEST_ROOT/python-failed-once"
 out="$TEST_ROOT/parsefail.out"; err="$TEST_ROOT/parsefail.err"
-_run "$out" "$err" SGT_TD_LIST_TEST_FAIL_PYTHON=1 -- example
+_run "$out" "$err" 'SGT_TD_LIST_TEST_FAIL_PYTHON=isinstance(data, list)' -- example
 _expect_status 2 parse_failure_warns "$err"
 
 if ! grep -qF 'big' "$err" || ! grep -qi 'fail' "$err"; then
@@ -548,9 +583,9 @@ grep -qF '── small (7)' "$out" || {
 printf 'parse_failure_warns: ok\n'
 
 # A failing renderer must not leave a per-repo header with no rows beneath it.
-: > "$TEST_ROOT/td.log"; : > "$TEST_ROOT/python.log"
+: > "$TEST_ROOT/td.log"; : > "$TEST_ROOT/python.log"; rm -f "$TEST_ROOT/python-failed-once"
 out="$TEST_ROOT/renderfail.out"; err="$TEST_ROOT/renderfail.err"
-_run "$out" "$err" SGT_TD_LIST_TEST_FAIL_PYTHON=2 -- example --repos big
+_run "$out" "$err" 'SGT_TD_LIST_TEST_FAIL_PYTHON=order = {' -- example --repos big
 _expect_status 2 render_failure_warns "$err"
 if ! grep -qF 'big' "$err" || ! grep -qi 'fail' "$err"; then
   printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
@@ -795,5 +830,119 @@ err_size="$(wc -c < "$err" | tr -d ' ')"
 }
 grep -qF 'big' "$err" || _fail "bounded_td_stderr: the repo must still be named"
 printf 'bounded_td_stderr: ok (%s bytes)\n' "$err_size"
+
+# ── 21. A repo map that cannot be read is fatal, not an empty report ──────────
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/mapfail.out"; err="$TEST_ROOT/mapfail.err"
+rm -f "$TEST_ROOT/python-failed-once"
+_run "$out" "$err" 'SGT_TD_LIST_TEST_FAIL_PYTHON=repo.get' -- example
+_expect_status 1 repo_map_failure_is_fatal "$err"
+grep -qi 'cannot read repos' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "repo_map_failure_is_fatal: expected a fatal repo-map error"
+}
+! grep -qi 'No tasks found' "$out" || \
+  _fail "repo_map_failure_is_fatal: must not print an authoritative empty report"
+printf 'repo_map_failure_is_fatal: ok\n'
+
+# ── 22. A repo configured without a path is reported, not dropped ─────────────
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/nopath.out"; err="$TEST_ROOT/nopath.err"
+_run "$out" "$err" -- nopath
+_expect_status 2 missing_path_warns "$err"
+grep -qF 'nopathrepo' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "missing_path_warns: a repo configured with no path must be named on stderr"
+}
+grep -qF '── small (7)' "$out" || _fail "missing_path_warns: healthy repos must still be reported"
+printf 'missing_path_warns: ok\n'
+
+# ── 23. A repo name containing a newline keeps its own identity ───────────────
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/newline.out"; err="$TEST_ROOT/newline.err"
+_run "$out" "$err" -- newlinename
+grep -qF '── victim (7)' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "newline_repo_name: a later repo must not lose its identity to a multi-line name"
+}
+! grep -qE '^── beta \(' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "newline_repo_name: tasks must never be published under a phantom repo name"
+}
+printf 'newline_repo_name: ok\n'
+
+# ── 24. Option parsing: missing values and filter composition ────────────────
+
+for flag in --status --priority --repos; do
+  out="$TEST_ROOT/noval.out"; err="$TEST_ROOT/noval.err"
+  _run "$out" "$err" -- example "$flag"
+  _expect_status 1 "option_requires_value($flag)" "$err"
+  grep -qF -- "$flag requires a value" "$err" || {
+    printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+    _fail "option_requires_value($flag): expected an explicit missing-value error"
+  }
+done
+printf 'option_requires_value: ok\n'
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/prio.out"; err="$TEST_ROOT/prio.err"
+_run "$out" "$err" -- example --repos small --priority P1
+_expect_status 0 priority_filter_composed "$err"
+grep -qF 'status=open AND priority=P1' "$TEST_ROOT/td.log" || {
+  printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
+  _fail "priority_filter_composed: --priority must compose with the status filter"
+}
+grep -qF '[status=open AND priority=P1]' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "priority_filter_composed: the active filter must be printed in the header"
+}
+printf 'priority_filter_composed: ok\n'
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/all.out"; err="$TEST_ROOT/all.err"
+_run "$out" "$err" -- example --repos small --all
+_expect_status 0 all_drops_status_filter "$err"
+! grep -qF 'status=open' "$TEST_ROOT/td.log" || {
+  printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
+  _fail "all_drops_status_filter: --all must not send a status filter to td"
+}
+! grep -qF '[status=' "$out" || _fail "all_drops_status_filter: the header must not claim a status filter"
+printf 'all_drops_status_filter: ok\n'
+
+# ── 25. The ceiling reports what it withheld, and only when it withheld ───────
+
+# A repo holding exactly ceiling + 1 tasks: the ceiling publishes the ceiling and
+# the extra row is the proof that something was withheld.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/edge.out"; err="$TEST_ROOT/edge.err"
+_run "$out" "$err" SGT_TD_LIST_LIMIT=10 SGT_TD_LIST_MAX_LIMIT=10 -- edge
+_expect_status 2 ceiling_boundary "$err"
+grep -qF '── edge (10)' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "ceiling_boundary: the ceiling must publish exactly SGT_TD_LIST_MAX_LIMIT rows"
+}
+grep -qF 'at least 11 task(s)' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "ceiling_boundary: the warning must prove more tasks exist than were published"
+}
+
+# The same repo under a ceiling it fits inside is complete and silent.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/edge-ok.out"; err="$TEST_ROOT/edge-ok.err"
+_run "$out" "$err" SGT_TD_LIST_LIMIT=11 SGT_TD_LIST_MAX_LIMIT=11 -- edge
+_expect_status 0 ceiling_boundary_fits "$err"
+grep -qF '── edge (11)' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "ceiling_boundary_fits: a repo that fits the ceiling must be reported in full"
+}
+[[ ! -s "$err" ]] || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "ceiling_boundary_fits: a complete report must not warn"
+}
+printf 'ceiling_boundary: ok\n'
+printf 'ceiling_boundary_fits: ok\n'
 
 printf '\nAll sgt-td-list tests passed.\n'
