@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
+TEST_BASH="${BASH:-$(command -v bash)}"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 grep -Eq '^[[:space:]]+python3([[:space:]\\]|$)' "$ROOT_DIR/Dockerfile.test" || {
@@ -25,7 +26,7 @@ grep -Eq 'apk add --no-cache python3.*command -v python3' "$ROOT_DIR/mise.toml" 
 mkdir -p "$TEST_ROOT/bin"
 ln -s "$(command -v dirname)" "$TEST_ROOT/bin/dirname"
 set +e
-missing_output="$(PATH="$TEST_ROOT/bin" /bin/bash \
+missing_output="$(PATH="$TEST_ROOT/bin" "$TEST_BASH" \
   "$ROOT_DIR/tests/run-drain-tests.sh" 2>&1)"
 missing_status=$?
 set -e
