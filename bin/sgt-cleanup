@@ -792,6 +792,32 @@ _rollback_remove_path() {
     _die "CRITICAL: rollback cleanup left an artifact for $context: $path"
 }
 
+_publish_worker_evidence_entry() {
+  local destination="$2" source="$1"
+
+  # `mv dir existing_dir` nests instead of replacing and still reports success,
+  # so publishing evidence over a path that reappeared would silently relocate
+  # the live evidence one level deep and permanently break its identity.
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    printf 'ERROR: worker lifecycle evidence collides with an existing path: %s\n' \
+      "$destination" >&2
+    return 1
+  fi
+  mv "$source" "$destination"
+}
+
+_undo_worker_evidence_removal() {
+  local backup_dir="$1" name repo_dir="$2" worktree="$3"
+
+  shift 3
+  for name in "$@"; do
+    _publish_worker_evidence_entry "$backup_dir/$name" "$worktree/$name" || \
+      _die "Failed to roll back worker evidence removal: $worktree/$name"
+  done
+  rmdir "$backup_dir" || \
+    _die "Failed to remove worker evidence rollback directory: $repo_dir"
+}
+
 _remove_worker_evidence() {
   local backup_dir="$1/live-evidence.tmp.$$" count=0 current_identity evidence \
     expected_identity="$3" name repo_dir="$1" worktree="$2"
@@ -817,16 +843,22 @@ _remove_worker_evidence() {
     ((count += 1))
     if ! _cleanup_fail_point "remove-live-$count" || \
       ! mv "$evidence" "$backup_dir/"; then
-      for name in "${moved[@]}"; do
-        mv "$backup_dir/$name" "$worktree/$name" || \
-          _die "Failed to roll back worker evidence removal: $worktree/$name"
-      done
-      rmdir "$backup_dir" || \
-        _die "Failed to remove worker evidence rollback directory: $repo_dir"
+      _undo_worker_evidence_removal "$backup_dir" "$repo_dir" "$worktree" \
+        ${moved[@]+"${moved[@]}"}
       return 1
     fi
     moved[${#moved[@]}]="$(basename "$evidence")"
   done
+  # The loop above walks a glob expanded after the identity check, so an entry
+  # created inside that window survives the removal, breaks the remover, and
+  # would collide with the replayed evidence afterwards.  Fail closed instead.
+  _cleanup_mutation_hook after-live-removal \
+    "${SGT_CLEANUP_MUTATE_PATH:-$worktree/.sergeant-status}" || true
+  if _worker_evidence_present "$worktree"; then
+    _undo_worker_evidence_removal "$backup_dir" "$repo_dir" "$worktree" \
+      ${moved[@]+"${moved[@]}"}
+    _die "Worker lifecycle evidence reappeared during cleanup; fleet state preserved: $worktree"
+  fi
   LIVE_EVIDENCE_BACKUP="$backup_dir"
 }
 
@@ -886,7 +918,7 @@ _restore_worker_evidence() {
     name="$(basename "$evidence")"
     if ! mv "$evidence" "$backup_dir/$name"; then
       for name in "${backed_up[@]}"; do
-        mv "$backup_dir/$name" "$worktree/$name" || \
+        _publish_worker_evidence_entry "$backup_dir/$name" "$worktree/$name" || \
           _die "CRITICAL: worker evidence restore backup failed and rollback failed: $worktree/$name; inspect preserved transaction: $transaction"
       done
       _rollback_remove_path "$transaction" "worker evidence restore backup" \
@@ -908,13 +940,13 @@ _restore_worker_evidence() {
     name="$(basename "$evidence")"
     ((publish_count += 1))
     if ! _cleanup_fail_point "restore-publish-$publish_count" || \
-      ! mv "$evidence" "$worktree/$name"; then
+      ! _publish_worker_evidence_entry "$evidence" "$worktree/$name"; then
       for name in "${published[@]}"; do
         _rollback_remove_path "$worktree/$name" \
           "published worker evidence restore" restore-rollback-cleanup
       done
       for name in "${backed_up[@]}"; do
-        mv "$backup_dir/$name" "$worktree/$name" || \
+        _publish_worker_evidence_entry "$backup_dir/$name" "$worktree/$name" || \
           _die "CRITICAL: worker evidence restore publication failed and rollback failed: $worktree/$name; inspect preserved transaction: $transaction"
       done
       _rollback_remove_path "$transaction" "worker evidence restore publication" \
@@ -942,9 +974,9 @@ _restore_removed_worker_evidence() {
   for evidence in "$backup_dir"/.sergeant-*; do
     [[ -e "$evidence" || -L "$evidence" ]] || continue
     name="$(basename "$evidence")"
-    if ! mv "$evidence" "$worktree/$name"; then
+    if ! _publish_worker_evidence_entry "$evidence" "$worktree/$name"; then
       for name in "${restored[@]}"; do
-        mv "$worktree/$name" "$backup_dir/$name" || \
+        _publish_worker_evidence_entry "$worktree/$name" "$backup_dir/$name" || \
           _die "Failed to roll back worker evidence recovery: $worktree/$name"
       done
       return 1
@@ -1205,8 +1237,12 @@ _worker_evidence_records() {
   # directory, and on names that could forge the record stream.
   [[ ! -L "$entry" && "$entry" != *$'\n'* ]] || return 1
   if [[ -f "$entry" ]]; then
+    # --no-filters keeps the record a function of raw bytes: the live copy is
+    # hashed inside the owning repository, where gitattributes text/eol and clean
+    # filters would otherwise apply, while the staged copy is hashed in fleet
+    # state outside any repository.  Entry modes are deliberately not bound.
     printf 'file\n%s\n' "$entry"
-    git hash-object "$entry" || return 1
+    git hash-object --no-filters "$entry" || return 1
     return 0
   fi
   [[ -d "$entry" ]] || return 1

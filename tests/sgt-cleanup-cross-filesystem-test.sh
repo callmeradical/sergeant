@@ -59,6 +59,12 @@ cat > "$TEST_ROOT/fake-bin/cp" <<'EOF'
 if [[ "${FAKE_RESTORE_FAILURE:-}" == true && "${!#}" == *.restore.* ]]; then
   exit 1
 fi
+# Fail a LATER entry so earlier entries — including directory ledgers — are
+# already published when the rollback runs.
+if [[ -n "${FAKE_RESTORE_FAILURE_MATCH:-}" && \
+  "${!#}" == *"$FAKE_RESTORE_FAILURE_MATCH"*.restore.* ]]; then
+  exit 1
+fi
 "$REAL_CP" "$@"
 EOF
 chmod +x "$TEST_ROOT/fake-bin/cp" "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/stat" \
@@ -344,5 +350,48 @@ set -e
 compgen -G "$TEST_ROOT/fleet/crossfs-rollback-failure/app/live-evidence.tmp.*" \
   >/dev/null
 [[ ! -s "$TEST_ROOT/crossfs-rollback-failure-removals" ]]
+
+# A cross-filesystem restore that fails on a later entry must roll back the
+# entries it already published, including whole directory ledgers, and surface the
+# layout error rather than a rollback failure.
+init_case git crossfs-directory-rollback
+: > "$TEST_ROOT/crossfs-directory-rollback-removals"
+directory_rollback_state="$TEST_ROOT/fleet/crossfs-directory-rollback/app"
+directory_rollback_worktree="$TEST_ROOT/crossfs-directory-rollback-linked-worktree"
+set +e
+directory_rollback_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_CROSS_DEVICE_PATH="$directory_rollback_worktree" \
+  FAKE_CROSS_DEVICE_AFTER=6 \
+  FAKE_STAT_COUNT_FILE="$TEST_ROOT/crossfs-directory-rollback-stat-count" \
+  FAKE_RESTORE_FAILURE_MATCH=.sergeant-status \
+  FAKE_REMOVER_LOG="$TEST_ROOT/crossfs-directory-rollback-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" crossfs-directory-rollback 2>&1)"
+directory_rollback_status=$?
+set -e
+[[ "$directory_rollback_status" -ne 0 ]]
+# The restore genuinely could not republish the evidence, so CRITICAL with a
+# preserved backup is the correct outcome; what must not happen is a partial
+# publication surviving in the worktree.
+[[ "$directory_rollback_output" == *"CRITICAL: cross-filesystem cleanup rollback failed; inspect preserved backup:"* ]] || {
+  printf 'cross-filesystem directory rollback was not reported actionably:\n%s\n' \
+    "$directory_rollback_output" >&2
+  exit 1
+}
+if compgen -G "$directory_rollback_worktree/.sergeant-*" >/dev/null; then
+  printf 'cross-filesystem directory rollback left published evidence behind:\n%s\n' \
+    "$(ls -A "$directory_rollback_worktree")" >&2
+  exit 1
+fi
+compgen -G "$directory_rollback_state/live-evidence.tmp.*" >/dev/null || {
+  printf 'cross-filesystem directory rollback discarded the live evidence backup\n' >&2
+  exit 1
+}
+[[ -f "$directory_rollback_state/terminal-evidence/.sergeant-status" && \
+  -f "$directory_rollback_state/terminal-evidence/.sergeant-review-gates/nested/spec" ]] || {
+  printf 'cross-filesystem directory rollback damaged persisted terminal evidence\n' >&2
+  exit 1
+}
 
 printf 'sgt-cleanup cross-filesystem preflight: ok\n'
