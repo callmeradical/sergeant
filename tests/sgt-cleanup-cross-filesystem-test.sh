@@ -91,6 +91,17 @@ EOF
   printf 'result\n' > "$repo_state/result"
   printf 'done\n' > "$worktree/.sergeant-status"
   printf 'result\n' > "$worktree/.sergeant-result"
+  # GH #169: real workers publish notification ledgers and review gates as
+  # directories, so every cross-filesystem boundary must handle them too.
+  mkdir -p "$worktree/.sergeant-notification-acks" \
+    "$worktree/.sergeant-notification-accepts" \
+    "$worktree/.sergeant-notification-complete" \
+    "$worktree/.sergeant-review-gates/nested"
+  printf 'nid|nonce\n' > "$worktree/.sergeant-notification-acks/nonce"
+  printf 'nid|nonce\n' > "$worktree/.sergeant-notification-accepts/nonce"
+  printf 'nid|nonce\n' > "$worktree/.sergeant-notification-complete/nonce"
+  printf 'standards passed\n' > "$worktree/.sergeant-review-gates/standards"
+  printf 'spec passed\n' > "$worktree/.sergeant-review-gates/nested/spec"
   printf '%s\n' "$mode" > "$repo_state/wt_type"
   if [[ "$mode" == treehouse ]]; then
     printf 'sgt-%s-app\n' "$task_id" > "$repo_state/wt_holder"

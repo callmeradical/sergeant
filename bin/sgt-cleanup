@@ -748,8 +748,8 @@ _stage_worker_evidence() {
   [[ ! -e "$staging_dir" && ! -L "$staging_dir" ]] || return 1
   mkdir "$staging_dir" || return 1
   for evidence in "$worktree"/.sergeant-*; do
-    [[ -f "$evidence" ]] || continue
-    if ! cp -p "$evidence" "$staging_dir/"; then
+    [[ -e "$evidence" || -L "$evidence" ]] || continue
+    if ! cp -pR "$evidence" "$staging_dir/"; then
       _rollback_remove_path "$staging_dir" "terminal evidence staging" \
         evidence-stage-rollback-cleanup
       return 1
@@ -813,7 +813,7 @@ _remove_worker_evidence() {
     return 1
   fi
   for evidence in "$worktree"/.sergeant-*; do
-    [[ -f "$evidence" ]] || continue
+    [[ -e "$evidence" || -L "$evidence" ]] || continue
     ((count += 1))
     if ! _cleanup_fail_point "remove-live-$count" || \
       ! mv "$evidence" "$backup_dir/"; then
@@ -852,10 +852,10 @@ _restore_worker_evidence() {
     return 1
   fi
   for evidence in "$evidence_dir"/.sergeant-*; do
-    [[ -f "$evidence" ]] || continue
+    [[ -e "$evidence" || -L "$evidence" ]] || continue
     ((count += 1))
     if ! _cleanup_fail_point "restore-copy-$count" || \
-      ! cp -p "$evidence" "$staging_dir/"; then
+      ! cp -pR "$evidence" "$staging_dir/"; then
       _rollback_remove_path "$transaction" "worker evidence restore staging" \
         restore-rollback-cleanup
       return 1
@@ -882,7 +882,7 @@ _restore_worker_evidence() {
     _die "$layout_error"
   fi
   for evidence in "$worktree"/.sergeant-*; do
-    [[ -f "$evidence" ]] || continue
+    [[ -e "$evidence" || -L "$evidence" ]] || continue
     name="$(basename "$evidence")"
     if ! mv "$evidence" "$backup_dir/$name"; then
       for name in "${backed_up[@]}"; do
@@ -904,7 +904,7 @@ _restore_worker_evidence() {
     _die "$layout_error"
   fi
   for evidence in "$staging_dir"/.sergeant-*; do
-    [[ -f "$evidence" ]] || continue
+    [[ -e "$evidence" || -L "$evidence" ]] || continue
     name="$(basename "$evidence")"
     ((publish_count += 1))
     if ! _cleanup_fail_point "restore-publish-$publish_count" || \
@@ -940,7 +940,7 @@ _restore_removed_worker_evidence() {
     _die "$layout_error"
   fi
   for evidence in "$backup_dir"/.sergeant-*; do
-    [[ -f "$evidence" ]] || continue
+    [[ -e "$evidence" || -L "$evidence" ]] || continue
     name="$(basename "$evidence")"
     if ! mv "$evidence" "$worktree/$name"; then
       for name in "${restored[@]}"; do
@@ -960,19 +960,19 @@ _restore_cross_filesystem_backup() {
 
   [[ -d "$worktree" && -d "$backup_dir" ]] || return 1
   for evidence in "$backup_dir"/.sergeant-*; do
-    [[ -f "$evidence" ]] || continue
+    [[ -e "$evidence" || -L "$evidence" ]] || continue
     name="$(basename "$evidence")"
     published_path="$worktree/$name"
     temp="$worktree/$name.restore.$$"
     [[ ! -e "$published_path" && ! -L "$published_path" && \
       ! -e "$temp" && ! -L "$temp" ]] || return 1
     temps[${#temps[@]}]="$temp"
-    if ! cp -p "$evidence" "$temp" || ! mv "$temp" "$published_path"; then
+    if ! cp -pR "$evidence" "$temp" || ! mv "$temp" "$published_path"; then
       for temp in "${temps[@]}"; do
-        rm -f "$temp" || return 1
+        rm -rf "$temp" || return 1
       done
       for published_path in "${published[@]}"; do
-        rm -f "$published_path" || return 1
+        rm -rf "$published_path" || return 1
       done
       return 1
     fi
@@ -1198,17 +1198,40 @@ _repo_worktree_identity() {
   ) | git hash-object --stdin
 }
 
+_worker_evidence_records() {
+  local child entry="$1"
+
+  # Fail closed on symlinks, on anything that is neither a regular file nor a
+  # directory, and on names that could forge the record stream.
+  [[ ! -L "$entry" && "$entry" != *$'\n'* ]] || return 1
+  if [[ -f "$entry" ]]; then
+    printf 'file\n%s\n' "$entry"
+    git hash-object "$entry" || return 1
+    return 0
+  fi
+  [[ -d "$entry" ]] || return 1
+  # Normal worker execution publishes notification ledgers and review gates as
+  # directories (.sergeant-notification-acks/, .sergeant-review-gates/, ...).
+  # Hash them recursively so identity stays stable and tamper-evident.
+  printf 'dir\n%s\n' "$entry"
+  for child in "$entry"/* "$entry"/.[!.]* "$entry"/..?*; do
+    [[ -e "$child" || -L "$child" ]] || continue
+    _worker_evidence_records "$child" || return 1
+  done
+  printf 'end-dir\n%s\n' "$entry"
+}
+
 _worker_evidence_identity() {
   local evidence evidence_dir="$1"
 
   (
     cd "$evidence_dir" || exit 1
+    # Byte-order collation keeps glob expansion, and therefore the record
+    # stream, deterministic regardless of the caller's locale.
     export LC_ALL=C
     for evidence in .sergeant-*; do
       [[ -e "$evidence" || -L "$evidence" ]] || continue
-      [[ -f "$evidence" && ! -L "$evidence" ]] || exit 1
-      printf 'file\n%s\n' "$evidence"
-      git hash-object "$evidence" || exit 1
+      _worker_evidence_records "$evidence" || exit 1
     done
   ) | git hash-object --stdin
 }
