@@ -26,6 +26,30 @@ Optional:
 - no-mistakes for final shipping validation
 - Node.js/npm to install external agent skills
 
+On macOS with Homebrew, or Linux with `apt-get`, the bootstrap installs every
+entry above. Preview it first, then run it:
+
+```bash
+git clone https://github.com/callmeradical/sergeant.git
+cd sergeant
+./bin/sgt-bootstrap --dry-run
+./bin/sgt-bootstrap
+```
+
+The bootstrap is safe to rerun and never overwrites an existing command, tool,
+or user file; anything already occupying a path Sergeant wants is preserved and
+reported as a conflict. It writes only to the command directory
+(`SGT_INSTALL_DIR`, default `~/.local/bin`) and this repository — never to
+`~/.config/opencode`, `~/.claude`, or `~/.agents`. It does not automate any
+login; follow the `MANUAL:` actions it reports.
+
+On any other platform, or to check an existing installation, verify without
+changing anything:
+
+```bash
+./bin/sgt-bootstrap --verify-only   # or: mise run verify
+```
+
 Run the repository dependency check after cloning:
 
 ```bash
@@ -55,11 +79,17 @@ resolves on `PATH`.
 
 ## 2. Clone and install command links
 
+`./bin/sgt-bootstrap` already does this. To install or refresh only the command
+links:
+
 ```bash
 git clone https://github.com/callmeradical/sergeant.git
 cd sergeant
-mise run install
+mise run install      # or: ./bin/sgt-install
 ```
+
+Remove them again with `mise run uninstall` (or `./bin/sgt-uninstall`), which
+removes only links still pointing into this checkout.
 
 By default, installation symlinks commands into `~/.local/bin`. Ensure that
 directory is on `PATH`:

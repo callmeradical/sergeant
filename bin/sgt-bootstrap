@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+# sgt-bootstrap — Install or verify the cross-platform Sergeant developer toolchain.
+#
+# Usage:
+#   sgt-bootstrap                 Install everything that is missing
+#   sgt-bootstrap --dry-run       Print the plan; change nothing
+#   sgt-bootstrap --verify-only   Report what is missing; change nothing
+#
+# Environment:
+#   SGT_INSTALL_DIR      Target directory for Sergeant command links
+#   SGT_BOOTSTRAP_EUID   Override the effective UID used for sudo decisions
+#
+# Supported platforms: macOS with Homebrew, and Linux with apt-get. Any other
+# platform, or a supported platform without its package manager, fails before
+# making a change.
+#
+# Safe to rerun. Existing commands, tools, and user files are preserved: a real
+# file where Sergeant expects its own link becomes a reported conflict, never an
+# overwrite. Authentication is never automated; required logins are reported.
+#
+# Per docs/repo-scoped-skills.md this command never writes to a user's global
+# agent configuration. Sergeant's skills are discovered from the repository
+# itself through opencode.json and .claude/skills, so no global skill or plugin
+# installation is required or performed.
+
+set -euo pipefail
+
+_self="${BASH_SOURCE[0]}"
+case "$_self" in
+  */*) _self_dir="${_self%/*}" ;;
+  *) _self_dir='.' ;;
+esac
+SCRIPT_DIR="$(cd "$_self_dir" && pwd)"
+# shellcheck source=_sgt-install-manifest.sh
+source "$SCRIPT_DIR/_sgt-install-manifest.sh"
+
+ROOT_DIR="$(_sgt_install_script_root "$_self")"
+INSTALL_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
+export PATH="$HOME/.local/bin:$PATH"
+
+usage() {
+  cat <<'EOF'
+Usage: sgt-bootstrap [--dry-run] [--verify-only]
+
+  --dry-run       Print the installation plan without changing anything
+  --verify-only   Report missing toolchain entries without changing anything
+EOF
+}
+
+dry_run=false
+verify_only=false
+packages=()
+
+# System packages installed through the platform package manager.
+system_packages=('git:git' 'gh:gh' 'tmux:tmux' 'jq:jq' 'shellcheck:shellcheck' 'curl:curl')
+# Tools installed and pinned through mise, as `command:mise-spec` pairs.
+managed_tools=('go:go@latest' 'node:node@lts' 'uv:uv@latest' \
+  'opencode:opencode@latest' 'claude:claude@latest' 'yq:yq@latest')
+
+# tool_available <command>
+#
+# True when <command> resolves on PATH and, for yq, is Mike Farah's Go
+# implementation rather than the unrelated Python package of the same name.
+tool_available() {
+  local command_name="$1" version
+  command -v "$command_name" >/dev/null 2>&1 || return 1
+  if [[ "$command_name" == 'yq' ]]; then
+    version="$(yq --version 2>&1)"
+    [[ "$version" == *'github.com/mikefarah/yq'* ]]
+  fi
+}
+
+# collect_packages <command:package>...
+#
+# Populate the `packages` array with the package names whose command is absent.
+collect_packages() {
+  local item command_name package_name
+  packages=()
+  for item in "$@"; do
+    command_name="${item%%:*}"
+    package_name="${item#*:}"
+    if command -v "$command_name" >/dev/null 2>&1; then
+      "$dry_run" || printf 'OK: %s\n' "$command_name"
+    else
+      packages+=("$package_name")
+      if "$verify_only"; then
+        printf 'MISSING: %s\n' "$command_name"
+      elif ! "$dry_run"; then
+        printf 'INSTALLING: %s\n' "$command_name"
+      fi
+    fi
+  done
+}
+
+# command_link_state <source-file>
+#
+# Classify what this checkout's command link looks like in INSTALL_DIR:
+#   linked    already points at this checkout
+#   absent    nothing occupies the path
+#   conflict  something else occupies the path and must be resolved by hand
+command_link_state() {
+  local source_file="$1" target="$INSTALL_DIR/${1##*/}"
+  if [[ -L "$target" && "$(readlink "$target")" == "$source_file" ]]; then
+    printf 'linked\n'
+  elif [[ -e "$target" || -L "$target" ]]; then
+    printf 'conflict\n'
+  else
+    printf 'absent\n'
+  fi
+}
+
+while (($#)); do
+  case "$1" in
+    --dry-run) dry_run=true ;;
+    --verify-only) verify_only=true ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'sgt-bootstrap: unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if "$dry_run" && "$verify_only"; then
+  printf 'sgt-bootstrap: --dry-run and --verify-only cannot be combined\n' >&2
+  exit 2
+fi
+
+# ── Platform packages ─────────────────────────────────────────────────────────
+
+case "$(uname -s)" in
+  Linux)
+    command -v apt-get >/dev/null 2>&1 || {
+      printf 'sgt-bootstrap: Linux requires an apt-compatible package manager (apt-get)\n' >&2
+      exit 1
+    }
+    printf 'Platform: Linux (apt)\n'
+    collect_packages "${system_packages[@]}"
+    if "$dry_run"; then
+      if ((${#packages[@]})); then
+        apt_prefix='apt-get'
+        if [[ "${SGT_BOOTSTRAP_EUID:-$EUID}" -ne 0 ]]; then
+          apt_prefix='sudo -n apt-get'
+        fi
+        printf 'DRY-RUN: %s update\n' "$apt_prefix"
+        printf 'DRY-RUN: %s install -y %s\n' "$apt_prefix" "${packages[*]}"
+      else
+        printf 'OK: apt packages already installed\n'
+      fi
+    elif ! "$verify_only" && ((${#packages[@]})); then
+      apt_command=(apt-get)
+      if [[ "${SGT_BOOTSTRAP_EUID:-$EUID}" -ne 0 ]]; then
+        command -v sudo >/dev/null 2>&1 || {
+          printf 'sgt-bootstrap: package installation requires root or passwordless sudo; rerun as root or install: %s\n' \
+            "${packages[*]}" >&2
+          exit 1
+        }
+        apt_command=(sudo -n apt-get)
+      fi
+      DEBIAN_FRONTEND=noninteractive "${apt_command[@]}" update
+      DEBIAN_FRONTEND=noninteractive "${apt_command[@]}" install -y "${packages[@]}"
+    fi
+    ;;
+  Darwin)
+    command -v brew >/dev/null 2>&1 || {
+      printf 'sgt-bootstrap: macOS requires Homebrew: https://brew.sh\n' >&2
+      exit 1
+    }
+    printf 'Platform: macOS (Homebrew)\n'
+    collect_packages "${system_packages[@]}"
+    if "$dry_run"; then
+      if ((${#packages[@]})); then
+        printf 'DRY-RUN: brew install %s\n' "${packages[*]}"
+      else
+        printf 'OK: Homebrew packages already installed\n'
+      fi
+    elif ! "$verify_only" && ((${#packages[@]})); then
+      brew install "${packages[@]}"
+    fi
+    ;;
+  *)
+    printf 'sgt-bootstrap: unsupported platform: %s\n' "$(uname -s)" >&2
+    exit 1
+    ;;
+esac
+
+# ── Dry run ───────────────────────────────────────────────────────────────────
+
+if "$dry_run"; then
+  command -v mise >/dev/null 2>&1 || printf 'DRY-RUN: install mise from https://mise.run\n'
+  tool_specs=()
+  for item in "${managed_tools[@]}"; do
+    tool_available "${item%%:*}" || tool_specs+=("${item#*:}")
+  done
+  if ((${#tool_specs[@]})); then
+    printf 'DRY-RUN: mise install %s\n' "${tool_specs[*]}"
+    printf 'DRY-RUN: link managed executables into %s\n' "$HOME/.local/bin"
+  fi
+  command -v td >/dev/null 2>&1 || \
+    printf 'DRY-RUN: go install github.com/marcus/td@latest\n'
+  command -v no-mistakes >/dev/null 2>&1 || \
+    printf 'DRY-RUN: go install github.com/kunchenguid/no-mistakes/cmd/no-mistakes@latest\n'
+  command -v graphify >/dev/null 2>&1 || printf 'DRY-RUN: uv tool install graphifyy\n'
+  printf 'DRY-RUN: mise install\n'
+  printf 'DRY-RUN: mise run install\n'
+
+  while IFS= read -r source_file; do
+    [[ -n "$source_file" ]] || continue
+    command_name="${source_file##*/}"
+    case "$(command_link_state "$source_file")" in
+      linked) printf 'DRY-RUN: preserve Sergeant command %s\n' "$command_name" ;;
+      conflict) printf 'DRY-RUN: conflict at Sergeant command %s (manual resolution required)\n' \
+        "$command_name" ;;
+      *) printf 'DRY-RUN: link Sergeant command %s\n' "$command_name" ;;
+    esac
+  done <<EOF
+$(_sgt_install_sources "$ROOT_DIR")
+EOF
+
+  command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1 || \
+    printf 'DRY-RUN: manual GitHub authentication may be required (gh auth login).\n'
+  command -v opencode >/dev/null 2>&1 && opencode auth list >/dev/null 2>&1 || \
+    printf 'DRY-RUN: manual OpenCode authentication may be required (opencode auth login).\n'
+  command -v claude >/dev/null 2>&1 && claude auth status >/dev/null 2>&1 || \
+    printf 'DRY-RUN: manual Claude authentication may be required (claude auth login).\n'
+  exit 0
+fi
+
+# ── Verify only ───────────────────────────────────────────────────────────────
+
+if "$verify_only"; then
+  verify_failed=false
+  ((${#packages[@]})) && verify_failed=true
+  required_commands=(mise td graphify no-mistakes)
+  for item in "${managed_tools[@]}"; do
+    required_commands+=("${item%%:*}")
+  done
+  for command_name in "${required_commands[@]}"; do
+    if tool_available "$command_name"; then
+      printf 'OK: %s\n' "$command_name"
+    else
+      printf 'MISSING: %s\n' "$command_name"
+      verify_failed=true
+    fi
+  done
+
+  while IFS= read -r source_file; do
+    [[ -n "$source_file" ]] || continue
+    command_name="${source_file##*/}"
+    if [[ "$(command_link_state "$source_file")" == 'linked' ]]; then
+      printf 'OK: Sergeant command %s\n' "$command_name"
+    else
+      printf 'MISSING: Sergeant command %s\n' "$command_name"
+      verify_failed=true
+    fi
+  done <<EOF
+$(_sgt_install_sources "$ROOT_DIR")
+EOF
+
+  command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1 || \
+    printf 'MANUAL: run gh auth login before using GitHub operations.\n'
+  command -v opencode >/dev/null 2>&1 && opencode auth list >/dev/null 2>&1 || \
+    printf 'MANUAL: run opencode auth login before launching OpenCode agents.\n'
+  command -v claude >/dev/null 2>&1 && claude auth status >/dev/null 2>&1 || \
+    printf 'MANUAL: run claude auth login before launching Claude Code agents.\n'
+
+  "$verify_failed" && exit 1
+  printf 'Verification complete: all required tools are available.\n'
+  exit 0
+fi
+
+# ── Install ───────────────────────────────────────────────────────────────────
+
+install_failed=false
+mkdir -p "$HOME/.local/bin"
+
+if command -v mise >/dev/null 2>&1; then
+  printf 'OK: mise\n'
+else
+  printf 'INSTALLING: mise\n'
+  curl https://mise.run | sh
+  export PATH="$HOME/.local/bin:$PATH"
+fi
+
+for item in "${managed_tools[@]}"; do
+  command_name="${item%%:*}"
+  tool_spec="${item#*:}"
+  if tool_available "$command_name"; then
+    printf 'OK: %s\n' "$command_name"
+    continue
+  fi
+  printf 'INSTALLING: %s\n' "$command_name"
+  managed_target="$HOME/.local/bin/$command_name"
+  # Refuse before installing: an occupied path is a user decision, and the
+  # managed-tool namespace is not Sergeant's to overwrite.
+  if [[ -e "$managed_target" || -L "$managed_target" ]]; then
+    printf 'CONFLICT: %s is not the required %s executable; preserved for manual resolution.\n' \
+      "$managed_target" "$command_name" >&2
+    exit 1
+  fi
+  mise install "$tool_spec"
+  binary_path="$(mise exec "$tool_spec" -- which "$command_name")"
+  [[ -n "$binary_path" ]] || {
+    printf 'sgt-bootstrap: mise installed %s but did not expose %s\n' "$tool_spec" "$command_name" >&2
+    exit 1
+  }
+  ln -s "$binary_path" "$managed_target"
+done
+
+if command -v td >/dev/null 2>&1; then
+  printf 'OK: td\n'
+else
+  printf 'INSTALLING: td\n'
+  GOBIN="$HOME/.local/bin" go install github.com/marcus/td@latest
+fi
+if command -v no-mistakes >/dev/null 2>&1; then
+  printf 'OK: no-mistakes\n'
+else
+  printf 'INSTALLING: no-mistakes\n'
+  GOBIN="$HOME/.local/bin" go install github.com/kunchenguid/no-mistakes/cmd/no-mistakes@latest
+fi
+if command -v graphify >/dev/null 2>&1; then
+  printf 'OK: graphify\n'
+else
+  printf 'INSTALLING: graphify\n'
+  uv tool install graphifyy
+fi
+
+# mise owns the repository's pinned tools and the Sergeant command links.
+(cd "$ROOT_DIR" && mise install && mise run install)
+
+# Reconcile what `mise run install` actually produced. sgt-install preserves a
+# real file rather than overwriting it, so a preserved entry surfaces here as an
+# actionable conflict instead of a silent partial installation.
+while IFS= read -r source_file; do
+  [[ -n "$source_file" ]] || continue
+  if [[ "$(command_link_state "$source_file")" != 'linked' ]]; then
+    printf 'CONFLICT: %s was preserved and does not point to Sergeant; manual resolution required.\n' \
+      "$INSTALL_DIR/${source_file##*/}" >&2
+    install_failed=true
+  fi
+done <<EOF
+$(_sgt_install_sources "$ROOT_DIR")
+EOF
+
+command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1 || \
+  printf 'MANUAL: run gh auth login before using GitHub operations.\n'
+command -v opencode >/dev/null 2>&1 && opencode auth list >/dev/null 2>&1 || \
+  printf 'MANUAL: run opencode auth login before launching OpenCode agents.\n'
+command -v claude >/dev/null 2>&1 && claude auth status >/dev/null 2>&1 || \
+  printf 'MANUAL: run claude auth login before launching Claude Code agents.\n'
+
+"$install_failed" && exit 1
+exit 0

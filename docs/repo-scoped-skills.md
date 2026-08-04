@@ -9,6 +9,14 @@ through the repository-local links in `.claude/skills/`. Those links resolve
 only to `.agents/skills/`; no install step writes to a user's global agent
 configuration.
 
+This is why `bin/sgt-bootstrap` and `bin/sgt-install` write only to the command
+directory (`SGT_INSTALL_DIR`, default `~/.local/bin`) and this repository.
+Neither links a skill into `~/.config/opencode/skills`, `~/.claude/skills`, or
+`~/.agents/skills`, and neither installs an agent plugin. The only thing either
+command touches under `~/.config/opencode` is the removal of the deprecated
+`oc-inject` plugin link that an older checkout created. `tests/sgt-bootstrap-test.sh`
+asserts this policy directly.
+
 The worker-brief inventory is:
 
 - `code-review` — Standards and Spec review axes
