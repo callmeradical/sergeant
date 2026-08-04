@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# sgt-install — Symlink this checkout's commands into a directory on PATH.
+#
+# Usage:
+#   sgt-install
+#
+# Environment:
+#   SGT_INSTALL_DIR   Target directory for command links (default ~/.local/bin)
+#
+# Invoked by `mise run install` and by `sgt-bootstrap`. Safe to rerun.
+#
+# Link policy:
+#   absent target        → create the link
+#   Sergeant-owned link  → repoint it at this checkout
+#   any other symlink    → repoint it (the sgt-* namespace is Sergeant-owned)
+#   real file/directory   → preserve it and report it, never overwrite
+#
+# Writes only to the target directory and this repository's git hooks
+# directory. Per docs/repo-scoped-skills.md it never writes to a user's global
+# agent configuration; it only removes an oc-inject link this checkout created
+# before that injection path was deprecated.
+
+set -euo pipefail
+
+_self="${BASH_SOURCE[0]}"
+case "$_self" in
+  */*) _self_dir="${_self%/*}" ;;
+  *) _self_dir='.' ;;
+esac
+SCRIPT_DIR="$(cd "$_self_dir" && pwd)"
+# shellcheck source=_sgt-install-manifest.sh
+source "$SCRIPT_DIR/_sgt-install-manifest.sh"
+
+ROOT_DIR="$(_sgt_install_script_root "$_self")"
+TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
+
+if [[ $# -gt 0 ]]; then
+  printf 'Usage: sgt-install\n' >&2
+  exit 2
+fi
+
+linked=0
+preserved=0
+
+mkdir -p "$TARGET_DIR"
+
+while IFS= read -r source_file; do
+  [[ -n "$source_file" ]] || continue
+  target="$TARGET_DIR/${source_file##*/}"
+  if [[ -L "$target" ]]; then
+    if [[ "$(readlink "$target")" != "$source_file" ]]; then
+      ln -sf "$source_file" "$target"
+    fi
+    printf '  linked: %s -> %s\n' "$target" "$source_file"
+    linked=$((linked + 1))
+  elif [[ -e "$target" ]]; then
+    printf '  preserved existing: %s\n' "$target"
+    preserved=$((preserved + 1))
+  else
+    ln -s "$source_file" "$target"
+    printf '  linked: %s -> %s\n' "$target" "$source_file"
+    linked=$((linked + 1))
+  fi
+done <<EOF
+$(_sgt_install_sources "$ROOT_DIR")
+EOF
+
+# Remove only the deprecated links this checkout previously created. The source
+# of bin/oc-inject remains for one compatibility window, but it is no longer
+# installed or activated.
+while IFS= read -r deprecated_entry; do
+  [[ -n "$deprecated_entry" ]] || continue
+  deprecated_link="${deprecated_entry%%::*}"
+  owned_target="${deprecated_entry##*::}"
+  [[ -L "$deprecated_link" ]] || continue
+  [[ "$(readlink "$deprecated_link")" == "$owned_target" ]] || continue
+  rm "$deprecated_link"
+  printf '  removed deprecated Sergeant link: %s\n' "$deprecated_link"
+done <<EOF
+$(_sgt_install_deprecated_links "$ROOT_DIR" "$TARGET_DIR")
+EOF
+
+printf '\nInstalled %d scripts to %s\n' "$linked" "$TARGET_DIR"
+printf 'Preserved %d existing entries\n' "$preserved"
+
+if [[ ":$PATH:" != *":$TARGET_DIR:"* ]]; then
+  printf '\nWARNING: %s is not on your PATH.\n' "$TARGET_DIR"
+  printf 'Add this to your shell config (~/.zshrc or ~/.bashrc):\n'
+  # Print a literal snippet for the user to copy; do not expand $PATH here.
+  # shellcheck disable=SC2016
+  printf '  export PATH="%s:$PATH"\n' "$TARGET_DIR"
+fi
+
+# Install this repository's git hooks. Absent hook directories are skipped so
+# that linked worktrees without a private hooks directory are not modified.
+hooks_src="$ROOT_DIR/scripts/hooks"
+hooks_dst=''
+if git_dir="$(git -C "$ROOT_DIR" rev-parse --git-dir 2>/dev/null)"; then
+  hooks_dst="$git_dir/hooks"
+fi
+if [[ -d "$hooks_src" && -n "$hooks_dst" && -d "$hooks_dst" ]]; then
+  for hook in "$hooks_src"/*; do
+    [[ -f "$hook" ]] || continue
+    ln -sf "$hook" "$hooks_dst/${hook##*/}"
+    printf '  linked hook: %s -> %s\n' "$hooks_dst/${hook##*/}" "$hook"
+  done
+fi

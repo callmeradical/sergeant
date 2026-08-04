@@ -18,7 +18,7 @@ You have a project. It has four repos: an API, a frontend, an infra chart, and a
 
 Sergeant fixes that. It is an **agent distro**: a cloned directory with an `AGENTS.md`, shell toolbelt, and skills that turn a general-purpose agent into a project-aware first mate. Launch your agent harness inside it and Sergeant takes over — it knows your projects, their repos, how they group, and what instructions apply to each one.
 
-No install. The cloned repo is the distro. Sergeant supports Bash 3.2 and newer, including the system Bash shipped with macOS.
+The cloned repo is the distro. Sergeant supports Bash 3.2 and newer, including the system Bash shipped with macOS. A single bootstrap command installs the developer toolchain it expects; nothing about your agent harness configuration is touched.
 
 ## Mental model
 
@@ -47,6 +47,10 @@ Each project is a YAML file. That file defines which repos belong to it, how the
 git clone https://github.com/callmeradical/sergeant
 cd sergeant
 
+# Preview, then install the macOS or apt-compatible Linux toolchain
+./bin/sgt-bootstrap --dry-run
+./bin/sgt-bootstrap
+
 # Set your dev root and create the config directory
 mkdir -p ~/.config/sergeant
 cat > ~/.config/sergeant/config.yaml << 'EOF'
@@ -60,6 +64,22 @@ cp schema/project.yaml.example ~/.config/sergeant/myproject.yaml
 # Launch your agent harness — AGENTS.md takes over from here
 opencode    # or: claude
 ```
+
+`sgt-bootstrap` is safe to rerun. It installs only what is missing and never
+overwrites an existing command, tool, or user file: anything already occupying a
+path Sergeant wants is preserved and reported as a conflict for you to resolve.
+Use `./bin/sgt-bootstrap --verify-only` (or `mise run verify`) for a read-only
+check, and `--dry-run` to print the plan.
+
+It writes to two places only: the command directory (`SGT_INSTALL_DIR`,
+default `~/.local/bin`) and this repository. It never writes to
+`~/.config/opencode`, `~/.claude`, or `~/.agents` — Sergeant's skills are
+discovered from the repository itself, so no global skill installation is needed.
+See [Repo-scoped worker skills](docs/repo-scoped-skills.md).
+
+Authentication is never automated. Follow any reported `gh`, OpenCode, or Claude
+login action after installation. macOS requires Homebrew and Linux requires
+`apt-get`; any other platform fails without making changes.
 
 Then talk to it:
 
@@ -215,8 +235,9 @@ Agent-loaded skills for structured workflows:
 
 ## Requirements
 
-See the complete [getting started checklist](docs/getting-started.md) for
-installation and verification.
+Run `./bin/sgt-bootstrap` to install these, or `./bin/sgt-bootstrap --verify-only`
+to check them. See the complete [getting started checklist](docs/getting-started.md)
+for installation and verification.
 
 - [`github.com/marcus/td`](https://github.com/marcus/td) — task CLI, required for brief-based `sgt-dispatch` runs, `sgt-no-mistakes-finding`, `sgt-review-findings`, and `sgt-td-*` commands; install with `brew install marcus/tap/td` or `go install github.com/marcus/td@latest`
 - `yq` — YAML parser: `brew install yq`

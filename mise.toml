@@ -3,66 +3,17 @@
 
 # ── Tasks ─────────────────────────────────────────────────────────────────────
 
+[tasks.bootstrap]
+description = "Install or verify the cross-platform Sergeant developer toolchain"
+run = "./bin/sgt-bootstrap"
+
+[tasks.verify]
+description = "Verify the Sergeant developer toolchain without making changes"
+run = "./bin/sgt-bootstrap --verify-only"
+
 [tasks.install]
 description = "Symlink sgt-* scripts into ~/.local/bin so they're on your PATH"
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-
-REPO_DIR="$(cd "$(dirname "$MISE_ORIGINAL_CWD")" && pwd)/$(basename "$MISE_ORIGINAL_CWD")"
-# Resolve to actual repo root regardless of where mise is invoked from
-REPO_DIR="$(git -C "${MISE_PROJECT_ROOT:-.}" rev-parse --show-toplevel 2>/dev/null || echo "${MISE_PROJECT_ROOT:-.}")"
-BIN_DIR="$REPO_DIR/bin"
-TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
-
-mkdir -p "$TARGET_DIR"
-
-linked=0
-for f in "$BIN_DIR"/sgt-* "$BIN_DIR"/_sgt-lib.sh "$BIN_DIR"/_sgt-bash-version.sh "$BIN_DIR"/_sgt-intent.sh "$BIN_DIR"/_sgt-drain.sh "$BIN_DIR"/_sgt-response-lock.sh "$BIN_DIR/wiki-daily-digest"; do
-  [[ -f "$f" ]] || continue
-  name="$(basename "$f")"
-  ln -sf "$f" "$TARGET_DIR/$name"
-  echo "  linked: $TARGET_DIR/$name -> $f"
-  linked=$((linked+1))
-done
-
-# Remove only legacy links owned by this Sergeant checkout. Source remains for
-# one compatibility window, but oc-inject is no longer installed or activated.
-for deprecated_link in "$TARGET_DIR/oc-inject" "$HOME/.config/opencode/plugins/oc-inject.js"; do
-  [[ -L "$deprecated_link" ]] || continue
-  deprecated_target="$(readlink "$deprecated_link")"
-  case "$deprecated_link:$deprecated_target" in
-    "$TARGET_DIR/oc-inject:$BIN_DIR/oc-inject"|\
-    "$HOME/.config/opencode/plugins/oc-inject.js:$REPO_DIR/opencode/plugins/oc-inject.js")
-      rm "$deprecated_link"
-      echo "  removed deprecated Sergeant link: $deprecated_link"
-      ;;
-  esac
-done
-
-echo ""
-echo "Installed $linked scripts to $TARGET_DIR"
-
-# Check PATH
-if ! echo "$PATH" | tr ':' '\\n' | grep -qxF "$TARGET_DIR"; then
-  echo ""
-  echo "WARNING: $TARGET_DIR is not on your PATH."
-  echo "Add this to your shell config (~/.zshrc or ~/.bashrc):"
-  echo "  export PATH=\"$TARGET_DIR:\\$PATH\""
-fi
-
-# Install git hooks from scripts/hooks/ into .git/hooks/
-hooks_src="$REPO_DIR/scripts/hooks"
-hooks_dst="$(git -C "$REPO_DIR" rev-parse --git-dir 2>/dev/null)/hooks"
-if [[ -d "$hooks_src" && -d "$hooks_dst" ]]; then
-  for hook in "$hooks_src"/*; do
-    [[ -f "$hook" ]] || continue
-    name="$(basename "$hook")"
-    ln -sf "$hook" "$hooks_dst/$name"
-    echo "  linked hook: $hooks_dst/$name -> $hook"
-  done
-fi
-"""
+run = "./bin/sgt-install"
 
 [tasks."install:hooks"]
 description = "Symlink scripts/hooks/* into .git/hooks/ (runs automatically via mise run install)"
@@ -109,27 +60,7 @@ echo "Removed $removed git hooks."
 
 [tasks.uninstall]
 description = "Remove sgt-* symlinks from ~/.local/bin"
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-
-TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
-removed=0
-
-for f in "$TARGET_DIR"/sgt-* "$TARGET_DIR"/_sgt-lib.sh "$TARGET_DIR"/_sgt-bash-version.sh "$TARGET_DIR"/_sgt-intent.sh "$TARGET_DIR"/_sgt-drain.sh "$TARGET_DIR"/_sgt-response-lock.sh "$TARGET_DIR/oc-inject" "$TARGET_DIR/wiki-daily-digest"; do
-  [[ -L "$f" ]] || continue
-  # Only remove if it points back into the sergeant repo
-  target="$(readlink "$f")"
-  if [[ "$target" == *"/sergeant/bin/"* ]]; then
-    rm "$f"
-    echo "  removed: $f"
-    removed=$((removed+1))
-  fi
-done
-
-echo ""
-echo "Removed $removed symlinks from $TARGET_DIR"
-"""
+run = "./bin/sgt-uninstall"
 
 [tasks.check]
 description = "Verify required and optional dependencies are installed"

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# sgt-uninstall — Remove the command links this checkout installed.
+#
+# Usage:
+#   sgt-uninstall
+#
+# Environment:
+#   SGT_INSTALL_DIR   Directory holding the command links (default ~/.local/bin)
+#
+# The exact inverse of bin/sgt-install: it removes a link only when that link
+# still points at a file in this checkout. A real file, or a link to another
+# checkout or to a user's own command, is left untouched.
+
+set -euo pipefail
+
+_self="${BASH_SOURCE[0]}"
+case "$_self" in
+  */*) _self_dir="${_self%/*}" ;;
+  *) _self_dir='.' ;;
+esac
+SCRIPT_DIR="$(cd "$_self_dir" && pwd)"
+# shellcheck source=_sgt-install-manifest.sh
+source "$SCRIPT_DIR/_sgt-install-manifest.sh"
+
+ROOT_DIR="$(_sgt_install_script_root "$_self")"
+TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
+
+if [[ $# -gt 0 ]]; then
+  printf 'Usage: sgt-uninstall\n' >&2
+  exit 2
+fi
+
+removed=0
+kept=0
+
+while IFS= read -r source_file; do
+  [[ -n "$source_file" ]] || continue
+  target="$TARGET_DIR/${source_file##*/}"
+  [[ -L "$target" ]] || continue
+  if [[ "$(readlink "$target")" == "$source_file" ]]; then
+    rm "$target"
+    printf '  removed: %s\n' "$target"
+    removed=$((removed + 1))
+  else
+    printf '  kept (not owned by this checkout): %s\n' "$target"
+    kept=$((kept + 1))
+  fi
+done <<EOF
+$(_sgt_install_sources "$ROOT_DIR")
+EOF
+
+# Deprecated links this checkout may still own are cleaned up here too, so an
+# uninstall does not leave an oc-inject link behind.
+while IFS= read -r deprecated_entry; do
+  [[ -n "$deprecated_entry" ]] || continue
+  deprecated_link="${deprecated_entry%%::*}"
+  owned_target="${deprecated_entry##*::}"
+  [[ -L "$deprecated_link" ]] || continue
+  [[ "$(readlink "$deprecated_link")" == "$owned_target" ]] || continue
+  rm "$deprecated_link"
+  printf '  removed: %s\n' "$deprecated_link"
+  removed=$((removed + 1))
+done <<EOF
+$(_sgt_install_deprecated_links "$ROOT_DIR" "$TARGET_DIR")
+EOF
+
+printf '\nRemoved %d symlinks from %s\n' "$removed" "$TARGET_DIR"
+printf 'Kept %d entries owned by something else\n' "$kept"
