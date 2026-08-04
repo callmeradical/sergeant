@@ -6,16 +6,22 @@
 #
 # Usage:
 #   sgt-td-list <project>                    # open tasks across all repos
-#   sgt-td-list <project> --all              # all statuses
+#   sgt-td-list <project> --all              # all non-closed statuses
 #   sgt-td-list <project> --status open      # specific status
 #   sgt-td-list <project> --priority P1      # filter by priority
 #   sgt-td-list <project> --repos smith,smith-app  # specific repos only
 #   sgt-td-list <project> --json             # machine-readable output
 #
+# Exit status:
+#   0  the report covers every requested repo completely
+#   1  the invocation or environment is unusable (nothing was reported)
+#   2  the report is incomplete: a repo was unreadable or a cap withheld tasks
+#      (details on stderr; stdout still holds everything that could be read)
+#
 # Task limits:
 #   `td list` defaults to `--limit 50`, which silently truncates any repo with a
 #   larger backlog.  sgt-td-list therefore always passes an explicit limit and
-#   escalates it until td returns a complete answer.  A user-supplied --limit
+#   escalates it until td returns a complete answer.  A caller-supplied --limit
 #   always wins.  Any residual truncation is reported on stderr, never hidden.
 #
 #   SGT_TD_LIST_LIMIT      initial per-repo limit (default 1000)
@@ -39,6 +45,12 @@ _require_td() {
   command -v td &>/dev/null || _die "td is required. See your td installation."
 }
 
+_require_python3() {
+  # Every read parses, counts and renders JSON through python3, so a missing
+  # interpreter must fail once and loudly instead of once per repo.
+  command -v python3 &>/dev/null || _die "python3 is required."
+}
+
 [[ $# -ge 1 ]] || _die "Usage: sgt-td-list <project> [options]"
 PROJECT="$1"; shift
 
@@ -46,6 +58,7 @@ CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
 [[ -f "$CONFIG_FILE" ]] || _die "Project not found: $PROJECT"
 _require_yq
 _require_td
+_require_python3
 
 # ── Parse options ─────────────────────────────────────────────────────────────
 
@@ -56,12 +69,14 @@ JSON_OUT=false
 TD_ALL=false
 EXTRA_FLAGS=()
 
+_need_value() { [[ $# -ge 2 ]] || _die "$1 requires a value"; }
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --all)           TD_ALL=true;            shift   ;;
-    --status)        STATUS_FILTER="$2";     shift 2 ;;
-    --priority)      PRIORITY_FILTER="$2";   shift 2 ;;
-    --repos)         REPOS_ARG="$2";         shift 2 ;;
+    --status)        _need_value "$@"; STATUS_FILTER="$2";   shift 2 ;;
+    --priority)      _need_value "$@"; PRIORITY_FILTER="$2"; shift 2 ;;
+    --repos)         _need_value "$@"; REPOS_ARG="$2";       shift 2 ;;
     --json)          JSON_OUT=true;          shift   ;;
     *)               EXTRA_FLAGS+=("$1");    shift   ;;
   esac
@@ -79,6 +94,39 @@ if [[ -n "$PRIORITY_FILTER" ]]; then
     TD_FILTER="priority=$PRIORITY_FILTER"
   fi
 fi
+
+# ── Temporary workspace ───────────────────────────────────────────────────────
+# One workspace for every mode, cleaned up on any exit, so an interrupted run
+# leaves nothing behind and a broken TMPDIR fails once instead of being blamed
+# on td.
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/sgt-td-list.XXXXXX" 2>/dev/null)" \
+  || _die "cannot create a temporary directory in ${TMPDIR:-/tmp}"
+trap 'rm -rf "$WORK"' EXIT INT TERM HUP
+TD_ERR_FILE="$WORK/td-stderr"
+
+# ── Incompleteness tracking ───────────────────────────────────────────────────
+# Warnings alone are invisible to a machine consumer reading stdout, so anything
+# that withholds tasks also has to change the exit status.
+
+# Every repo is read inside a command substitution, so a shell variable set
+# while warning would be discarded with the subshell.  The marker is a file.
+_mark_incomplete() { : > "$WORK/incomplete" 2>/dev/null || true; }
+_report_incomplete() { [[ -e "$WORK/incomplete" ]]; }
+
+_truncation_warn() {
+  # _truncation_warn <repo> <proven-lower-bound> <cap-description>
+  # Never claims an exact total: the cap is what stops us from knowing it.
+  _mark_incomplete
+  printf 'WARNING: %s: results truncated by %s; at least %s task(s) exist, so this report is incomplete\n' \
+    "$1" "$3" "$2" >&2
+}
+
+_unreadable_warn() {
+  # _unreadable_warn <repo> <reason>
+  _mark_incomplete
+  printf 'WARNING: %s: %s; its tasks are missing from this report\n' "$1" "$2" >&2
+}
 
 # ── Task limits ───────────────────────────────────────────────────────────────
 # td list caps results at 50 by default.  Never rely on that default: pass an
@@ -110,129 +158,190 @@ if [[ "${#EXTRA_FLAGS[@]}" -gt 0 ]]; then
   done
 fi
 
-_truncation_warn() {
-  # _truncation_warn <repo> <proven-lower-bound> <cap-description>
-  # Never claims an exact total: the cap is what stops us from knowing it.
-  printf 'WARNING: %s: results truncated by %s; at least %s task(s) exist, so this report is incomplete\n' \
-    "$1" "$3" "$2" >&2
+# ── Repo resolution ───────────────────────────────────────────────────────────
+# Resolve every configured name→path pair once, as data.  Interpolating a repo
+# name into a yq expression lets a crafted name select a different repo's path.
+
+# Names and paths are read as two index-aligned lists, so no delimiter has to
+# survive a repo name (yq's @tsv would CSV-quote a name containing a quote).
+REPO_NAMES="$WORK/repo-names"
+REPO_PATHS="$WORK/repo-paths"
+yq -r '[.repos[]?.name] | .[]' "$CONFIG_FILE" > "$REPO_NAMES" \
+  || _die "cannot read repo names from $CONFIG_FILE"
+yq -r '[.repos[]?.path] | .[]' "$CONFIG_FILE" > "$REPO_PATHS" \
+  || _die "cannot read repo paths from $CONFIG_FILE"
+[[ -s "$REPO_NAMES" ]] || _die "project $PROJECT declares no repos in $CONFIG_FILE"
+
+_repo_path_for() {
+  # _repo_path_for <repo_name> → absolute repo path; 1 when the name is unknown
+  local rname="$1" idx=0 name path
+  while IFS= read -r name; do
+    idx=$((idx + 1))
+    [[ "$name" == "$rname" ]] || continue
+    path="$(sed -n "${idx}p" "$REPO_PATHS")"
+    [[ -n "$path" && "$path" != "null" ]] || return 1
+    _resolve_path "$path"
+    return 0
+  done < "$REPO_NAMES"
+  return 1
 }
 
-_unreadable_warn() {
-  # _unreadable_warn <repo> <reason>
-  printf 'WARNING: %s: %s; its tasks are missing from this report\n' "$1" "$2" >&2
-}
+# ── Reading one repo ──────────────────────────────────────────────────────────
+# Payloads are two lines.  _td_list_once emits "<total> <published>\n<json>";
+# _td_list_tasks narrows that to the public "<published>\n<json>" contract.
 
-# Task payloads are passed around as two lines — "<count>\n<compact json>" —
-# so one Python process per repo covers parsing, validation and counting.
-_payload_count() { printf '%s' "${1%%$'\n'*}"; }
-_payload_json()  { printf '%s' "${1#*$'\n'}"; }
+_payload_head() { printf '%s' "${1%%$'\n'*}"; }
+_payload_json() { printf '%s' "${1#*$'\n'}"; }
+_payload_count() { _payload_head "$1"; }
 
 _td_list_once() {
-  # _td_list_once <repo_name> <repo_path> [td flags...] → "<count>\n<json>"
+  # _td_list_once <repo_name> <keep|-1> <repo_path> [td flags...]
+  #   → "<total returned> <published>\n<json>"
   #
   # Flags after <repo_path> are appended last so they beat anything in
-  # EXTRA_FLAGS; that is what makes the truncation probe below authoritative.
+  # EXTRA_FLAGS; that is what lets a single read decide truncation.
+  # <keep> trims the published rows without hiding the returned total.
   #
   # Returns 1 when this repo's tasks could not be read, after warning: a repo
   # dropped without a word is exactly how a backlog gets under-reported.  A
-  # repo with no td database is the one expected silent skip.
-  local rname="$1" repo_path="$2"
-  local count err_file kind payload raw status=0 parse_status=0 td_err
-  shift 2
+  # missing td database is the one expected silent skip.
+  local rname="$1" keep="$2" repo_path="$3"
+  local code detail head kind message payload raw status=0 parse_status=0 td_err
+  shift 3
 
-  err_file="$(mktemp "${TMPDIR:-/tmp}/sgt-td-list.XXXXXX")"
+  : > "$TD_ERR_FILE"
   raw="$(td list --json --work-dir "$repo_path" \
     ${TD_FILTER:+--filter "$TD_FILTER"} \
     "${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}" \
-    "$@" 2>"$err_file")" || status=$?
-  td_err="$(sed "s/$(printf '\033')\[[0-9;]*m//g" "$err_file" 2>/dev/null | head -1)"
-  rm -f "$err_file"
+    "$@" 2>"$TD_ERR_FILE")" || status=$?
+  # Bound the borrowed text: an operator's stderr is not a place for megabytes.
+  td_err="$(sed "s/$(printf '\033')\[[0-9;]*m//g" "$TD_ERR_FILE" | head -1 || true)"
+  td_err="${td_err:0:200}"
 
-  # td answers a successful query with a JSON array and a failed one with a
-  # JSON error object, so raw stdout is never safe to treat as a task array.
+  # td answers a successful query with a JSON array of task objects and a failed
+  # one with a JSON error object, so raw stdout is never a task array on faith.
   payload="$(printf '%s' "$raw" | python3 -c "
 import sys, json
+keep = int(sys.argv[1])
 try:
     data = json.load(sys.stdin)
 except Exception:
     data = None
-if isinstance(data, list):
-    sys.stdout.write('ok %d\n%s' % (len(data), json.dumps(data)))
+if isinstance(data, list) and all(isinstance(t, dict) for t in data):
+    tasks = data if keep < 0 else data[:keep]
+    sys.stdout.write('ok %d %d\n%s' % (len(data), len(tasks), json.dumps(tasks)))
 else:
-    code = ''
+    code = message = ''
     if isinstance(data, dict):
         err = data.get('error')
         if isinstance(err, dict):
             code = str(err.get('code') or 'error')
+            message = ' '.join(str(err.get('message') or '').split())
         elif err:
             code = 'error'
-    sys.stdout.write('err %s\n[]' % code)
-")" || parse_status=$?
+    sys.stdout.write('err %s %s\n[]' % (code or 'unparsable', message))
+" "$keep")" || parse_status=$?
 
-  kind="$(_payload_count "$payload")"   # first line: "ok <count>" or "err <code>"
-  count="${kind#* }"
-  case "$kind" in
-    "ok "*)
-      if [[ "$count" =~ ^[0-9]+$ ]]; then
-        if [[ "$status" -ne 0 ]]; then
-          _unreadable_warn "$rname" "td list exited $status after partial output${td_err:+ ($td_err)}"
-          printf '0\n[]'
-          return 1
-        fi
-        printf '%s\n%s' "$count" "$(_payload_json "$payload")"
-        return 0
+  head="$(_payload_head "$payload")"
+  kind="${head%% *}"
+  detail="${head#* }"
+
+  if [[ "$parse_status" -eq 0 && "$kind" == "ok" ]]; then
+    if [[ "$detail" =~ ^[0-9]+\ [0-9]+$ ]]; then
+      if [[ "$status" -ne 0 ]]; then
+        _unreadable_warn "$rname" \
+          "td list exited $status after producing output${td_err:+ ($td_err)}"
+        printf '0 0\n[]'
+        return 1
       fi
-      ;;
-    "err database_error"*)
-      # td is not initialized in this repo: an expected, documented skip.
-      printf '0\n[]'
+      printf '%s\n%s' "$detail" "$(_payload_json "$payload")"
       return 0
-      ;;
-  esac
+    fi
+  fi
+
+  code="${detail%% *}"
+  message="${detail#* }"
+  [[ "$message" != "$code" ]] || message=""
+
+  # td reports both "no database here" and "this database is unusable" as
+  # database_error, so only the absent-database message may be skipped quietly.
+  if [[ "$parse_status" -eq 0 && "$kind" == "err" && "$code" == "database_error" ]]; then
+    case "$message" in
+      *"database not found"*|*"run 'td init'"*)
+        printf '0 0\n[]'
+        return 0
+        ;;
+    esac
+  fi
 
   if [[ "$parse_status" -ne 0 ]]; then
     _unreadable_warn "$rname" "could not parse td output (python3 exited $parse_status)"
+  elif [[ "$status" -eq 0 ]]; then
+    _unreadable_warn "$rname" \
+      "td list returned output that is not a task array${code:+ [$code]}${message:+: $message}"
   else
-    _unreadable_warn "$rname" "td list failed (exit $status)${td_err:+: $td_err}"
+    _unreadable_warn "$rname" \
+      "td list failed (exit $status)${message:+: $message}${message:+}${td_err:+ ($td_err)}"
   fi
-  printf '0\n[]'
+  printf '0 0\n[]'
   return 1
 }
 
 _td_list_tasks() {
-  # _td_list_tasks <repo_name> <repo_path> → complete "<count>\n<json>" payload.
+  # _td_list_tasks <repo_name> <repo_path> → "<published>\n<json>"
   #
-  # Asks for one more task than it is willing to accept: a short answer proves
-  # the repo was reported completely.  Returns 1 when the repo is unreadable.
+  # Asks for one more task than it is willing to publish, so a single response
+  # proves whether anything was withheld.  Returns 1 for an unreadable repo.
   local rname="$1" repo_path="$2"
-  local count limit payload probe probe_count
+  local head limit payload published total
 
   if $USER_LIMIT_SET; then
-    # The caller's limit wins untouched, so no default is added to this call.
-    payload="$(_td_list_once "$rname" "$repo_path")" || return 1
-    count="$(_payload_count "$payload")"
-    if _is_positive_int "$USER_LIMIT" && [[ "$count" -ge "$USER_LIMIT" ]]; then
-      # One extra row is all it takes to tell a cap from a coincidence.
-      probe="$(_td_list_once "$rname" "$repo_path" --limit "$((USER_LIMIT + 1))")" || probe=""
-      if [[ -n "$probe" ]]; then
-        probe_count="$(_payload_count "$probe")"
-        [[ "$probe_count" -le "$USER_LIMIT" ]] \
-          || _truncation_warn "$rname" "$probe_count" "the requested --limit $USER_LIMIT"
+    if _is_positive_int "$USER_LIMIT"; then
+      # One request, one snapshot: ask for the caller's limit plus one row and
+      # publish only what the caller asked for.
+      payload="$(_td_list_once "$rname" "$USER_LIMIT" "$repo_path" \
+        --limit "$((USER_LIMIT + 1))")" || return 1
+      head="$(_payload_head "$payload")"
+      total="${head%% *}"
+      published="${head#* }"
+      [[ "$total" -le "$USER_LIMIT" ]] \
+        || _truncation_warn "$rname" "$total" "the requested --limit $USER_LIMIT"
+    else
+      # A limit td interprets itself (0 means td's own default, negative means
+      # unlimited) or a malformed one: forward it untouched, then re-read one
+      # row past what came back to see whether anything was withheld.
+      payload="$(_td_list_once "$rname" -1 "$repo_path")" || return 1
+      head="$(_payload_head "$payload")"
+      published="${head#* }"
+      if [[ "$published" -gt 0 ]]; then
+        local probe probe_total
+        if probe="$(_td_list_once "$rname" -1 "$repo_path" \
+              --limit "$((published + 1))")"; then
+          probe_total="$(_payload_head "$probe")"
+          probe_total="${probe_total%% *}"
+          [[ "$probe_total" -le "$published" ]] \
+            || _truncation_warn "$rname" "$probe_total" \
+                 "the requested --limit $USER_LIMIT (a re-read found more)"
+        fi
       fi
     fi
-    printf '%s' "$payload"
+    printf '%s\n%s' "$published" "$(_payload_json "$payload")"
     return 0
   fi
 
   limit="$TD_LIST_LIMIT"
   while :; do
-    payload="$(_td_list_once "$rname" "$repo_path" --limit "$((limit + 1))")" || return 1
-    count="$(_payload_count "$payload")"
-    [[ "$count" -gt "$limit" ]] || { printf '%s' "$payload"; return 0; }
+    payload="$(_td_list_once "$rname" -1 "$repo_path" --limit "$((limit + 1))")" || return 1
+    head="$(_payload_head "$payload")"
+    total="${head%% *}"
+    if [[ "$total" -le "$limit" ]]; then
+      printf '%s\n%s' "$total" "$(_payload_json "$payload")"
+      return 0
+    fi
     if [[ "$limit" -ge "$TD_LIST_MAX_LIMIT" ]]; then
-      _truncation_warn "$rname" "$count" \
+      _truncation_warn "$rname" "$total" \
         "the SGT_TD_LIST_MAX_LIMIT ceiling of $TD_LIST_MAX_LIMIT (raise it to see the rest)"
-      printf '%s' "$payload"
+      printf '%s\n%s' "$total" "$(_payload_json "$payload")"
       return 0
     fi
     limit=$((limit * 2))
@@ -240,25 +349,35 @@ _td_list_tasks() {
   done
 }
 
-_repo_path_for() {
-  # _repo_path_for <repo_name> → absolute repo path; 1 when the name is unknown
-  local rname="$1" raw_path
-  raw_path="$(yq ".repos[] | select(.name == \"$rname\") | .path" "$CONFIG_FILE" 2>/dev/null || true)"
-  [[ -n "$raw_path" && "$raw_path" != "null" ]] || return 1
-  _resolve_path "$raw_path"
+_repo_payload() {
+  # _repo_payload <repo_name> <named-explicitly> → "<published>\n<json>"
+  # Returns 1 when the repo contributes nothing.  A repo the caller named by
+  # hand is never dropped in silence; one merely configured but not cloned is.
+  local rname="$1" named="$2" repo_path
+
+  if ! repo_path="$(_repo_path_for "$rname")"; then
+    ! $named || _unreadable_warn "$rname" "not configured in $PROJECT.yaml"
+    return 1
+  fi
+  if ! _sgt_is_git_repo "$repo_path"; then
+    ! $named || _unreadable_warn "$rname" "not a git checkout at $repo_path"
+    return 1
+  fi
+  _td_list_tasks "$rname" "$repo_path"
 }
 
 # ── Resolve target repos ───────────────────────────────────────────────────────
 
-repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
 TARGET_REPOS=()
+REPOS_NAMED=false
 
 if [[ -n "$REPOS_ARG" ]]; then
+  REPOS_NAMED=true
   IFS=',' read -ra TARGET_REPOS <<< "$REPOS_ARG"
 else
-  for ((i=0; i<repo_count; i++)); do
-    TARGET_REPOS+=("$(yq ".repos[$i].name" "$CONFIG_FILE")")
-  done
+  while IFS= read -r map_name; do
+    [[ -n "$map_name" ]] && TARGET_REPOS+=("$map_name")
+  done < "$REPO_NAMES"
 fi
 
 # ── Collect tasks per repo ────────────────────────────────────────────────────
@@ -268,16 +387,17 @@ if $JSON_OUT; then
   # Per-repo payloads are staged on disk and merged in a single pass: shell
   # string concatenation cannot round-trip JSON safely, and a failed merge must
   # be loud rather than degrade to an empty array.
-  JSON_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/sgt-td-list.XXXXXX")"
-  trap 'rm -rf "$JSON_STAGE"' EXIT
+  JSON_STAGE="$WORK/stage"
+  mkdir -p "$JSON_STAGE"
 
   stage_idx=0
   for rname in "${TARGET_REPOS[@]}"; do
-    repo_path="$(_repo_path_for "$rname")" || continue
+    if [[ -z "$rname" ]]; then
+      _unreadable_warn "(empty)" "empty --repos entry"
+      continue
+    fi
 
-    [[ -d "$repo_path/.git" ]] || continue
-
-    payload="$(_td_list_tasks "$rname" "$repo_path")" || continue
+    payload="$(_repo_payload "$rname" "$REPOS_NAMED")" || continue
 
     [[ "$(_payload_count "$payload")" -eq 0 ]] && continue
 
@@ -300,6 +420,7 @@ for tasks_file in sorted(stage.glob("*.tasks"), key=lambda p: int(p.stem)):
 merged.sort(key=lambda t: (t.get("priority") or "P9", t.get("_repo") or ""))
 print(json.dumps(merged, indent=2))
 ' "$JSON_STAGE" || _die "failed to merge td task JSON for project $PROJECT"
+  ! _report_incomplete || exit 2
   exit 0
 fi
 
@@ -311,20 +432,19 @@ echo ""
 total=0
 
 for rname in "${TARGET_REPOS[@]}"; do
-  repo_path="$(_repo_path_for "$rname")" || continue
-
-  [[ -d "$repo_path/.git" ]] || continue
+  if [[ -z "$rname" ]]; then
+    _unreadable_warn "(empty)" "empty --repos entry"
+    continue
+  fi
 
   # Repos with no td database report zero tasks and are skipped
-  payload="$(_td_list_tasks "$rname" "$repo_path")" || continue
+  payload="$(_repo_payload "$rname" "$REPOS_NAMED")" || continue
   count="$(_payload_count "$payload")"
   [[ "$count" -eq 0 ]] && continue
-  tasks_json="$(_payload_json "$payload")"
 
-  total=$((total + count))
-  echo "── $rname ($count)"
-
-  printf '%s' "$tasks_json" | python3 -c "
+  # Render before publishing the header and the total: a count with no rows
+  # under it is a partial report dressed up as a complete one.
+  if ! rows="$(_payload_json "$payload" | python3 -c "
 import sys, json
 tasks = json.load(sys.stdin)
 # Sort by priority then status
@@ -336,7 +456,15 @@ for t in tasks:
     prio   = t.get('priority','')
     status = t.get('status','')
     print(f'   {tid}  [{prio}]  {status:<12}  {title}')
-" || _unreadable_warn "$rname" "failed to render its $count task(s), so the rows above are incomplete"
+" 2>"$TD_ERR_FILE")"; then
+    _unreadable_warn "$rname" \
+      "failed to render its $count task(s) ($(head -1 "$TD_ERR_FILE" | cut -c1-120))"
+    continue
+  fi
+
+  total=$((total + count))
+  echo "── $rname ($count)"
+  printf '%s\n' "$rows"
 
   echo ""
 done
@@ -345,4 +473,9 @@ if [[ $total -eq 0 ]]; then
   echo "No tasks found."
 else
   echo "$total task(s) total"
+fi
+
+if _report_incomplete; then
+  echo "report incomplete: see the warnings on stderr"
+  exit 2
 fi
