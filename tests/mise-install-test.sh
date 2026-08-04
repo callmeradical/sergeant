@@ -25,16 +25,19 @@ with open(sys.argv[1], encoding="utf-8") as toml_file:
 for task, expected in (
     ("install", "./bin/sgt-install"),
     ("uninstall", "./bin/sgt-uninstall"),
+    ("install:hooks", "./bin/sgt-install --hooks-only"),
+    ("uninstall:hooks", "./bin/sgt-uninstall --hooks-only"),
     ("bootstrap", "./bin/sgt-bootstrap"),
     ("verify", "./bin/sgt-bootstrap --verify-only"),
 ):
+    header = "[tasks.%s]" % task if ":" not in task else '[tasks."%s"]' % task
     match = re.search(
-        r"^\[tasks\.%s\]$(.*?)(?=^\[tasks|\Z)" % re.escape(task),
+        r"^%s$(.*?)(?=^\[tasks|\Z)" % re.escape(header),
         toml,
         re.MULTILINE | re.DOTALL,
     )
     if match is None:
-        raise SystemExit("mise.toml is missing [tasks.%s]" % task)
+        raise SystemExit("mise.toml is missing %s" % header)
     body = match.group(1)
     if 'run = "%s"' % expected not in body:
         raise SystemExit(
@@ -152,3 +155,20 @@ else
 fi
 
 printf 'mise install/uninstall round-trip: ok\n'
+
+# --hooks-only is the seam mise run install:hooks delegates to, so it must
+# install the hook and leave the command links alone.
+HOOKS_BIN="$TEST_ROOT/hooks-only-bin"
+mkdir -p "$HOOKS_BIN"
+HOME="$TEST_ROOT/home" SGT_INSTALL_DIR="$HOOKS_BIN" \
+  "$FIXTURE_ROOT/bin/sgt-install" --hooks-only >/dev/null
+[[ "$(readlink "$FIXTURE_ROOT/.git/hooks/pre-push")" == "$FIXTURE_ROOT/scripts/hooks/pre-push" ]] || \
+  fail 'sgt-install --hooks-only did not install the git hook'
+[[ -z "$(ls -A "$HOOKS_BIN")" ]] || \
+  fail 'sgt-install --hooks-only created command links'
+HOME="$TEST_ROOT/home" SGT_INSTALL_DIR="$HOOKS_BIN" \
+  "$FIXTURE_ROOT/bin/sgt-uninstall" --hooks-only >/dev/null
+[[ ! -e "$FIXTURE_ROOT/.git/hooks/pre-push" ]] || \
+  fail 'sgt-uninstall --hooks-only did not remove the git hook'
+
+printf 'hooks-only install/uninstall seam: ok\n'
