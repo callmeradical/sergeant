@@ -4959,7 +4959,9 @@ seed_ledger_evidence() {
     "$worktree/.sergeant-review-gates/Spec-Gate"
 }
 
-# Deterministic content snapshot of every evidence entry, files and directories.
+# Deterministic content snapshot of every evidence entry.  Symlinks are recorded
+# by target rather than followed, so a dereferenced or retargeted entry cannot
+# masquerade as a faithful restore.
 ledger_evidence_snapshot() {
   local dir="$1"
 
@@ -4967,7 +4969,9 @@ ledger_evidence_snapshot() {
     cd "$dir" || exit 1
     LC_ALL=C find . -path './.sergeant-*' | LC_ALL=C sort | \
       while IFS= read -r entry; do
-        if [[ -d "$entry" ]]; then
+        if [[ -L "$entry" ]]; then
+          printf 'link %s %s\n' "$entry" "$(readlink "$entry")"
+        elif [[ -d "$entry" ]]; then
           printf 'dir %s\n' "$entry"
         else
           printf 'file %s %s\n' "$entry" "$(cksum < "$entry")"
@@ -4976,17 +4980,25 @@ ledger_evidence_snapshot() {
   )
 }
 
-ledger_state="$TEST_ROOT/fleet/ledger-evidence/app"
-mkdir -p "$ledger_state"
-init_test_repo "$TEST_ROOT/ledger-evidence-repo"
-git -C "$TEST_ROOT/ledger-evidence-repo" worktree add -q -b ledger-evidence-worker \
-  "$TEST_ROOT/ledger-evidence-worktree"
-record_retry_owner ledger-evidence app "$TEST_ROOT/ledger-evidence-repo"
-printf '%s\n' "$TEST_ROOT/ledger-evidence-worktree" > "$ledger_state/worktree"
-printf 'git\n' > "$ledger_state/wt_type"
-printf 'done\n' > "$ledger_state/status"
-printf 'result\n' > "$ledger_state/result"
-seed_ledger_evidence "$TEST_ROOT/ledger-evidence-worktree"
+# Creates the fleet state, owning repo, worker worktree and terminal status a
+# ledger cleanup fixture needs.  The worktree is $TEST_ROOT/<task-id>-worktree.
+seed_ledger_task() {
+  local repo="$2" state task_id="$1" worktree
+
+  state="$TEST_ROOT/fleet/$task_id/$repo"
+  worktree="$TEST_ROOT/$task_id-worktree"
+  mkdir -p "$state"
+  init_test_repo "$TEST_ROOT/$task_id-repo"
+  git -C "$TEST_ROOT/$task_id-repo" worktree add -q -b "$task_id-worker" "$worktree"
+  record_retry_owner "$task_id" "$repo" "$TEST_ROOT/$task_id-repo"
+  printf '%s\n' "$worktree" > "$state/worktree"
+  printf 'git\n' > "$state/wt_type"
+  printf 'done\n' > "$state/status"
+  printf 'result\n' > "$state/result"
+  seed_ledger_evidence "$worktree"
+}
+
+seed_ledger_task ledger-evidence app
 
 set +e
 ledger_output="$(SERGEANT_CONFIG="$TEST_ROOT/config" \
@@ -5041,15 +5053,7 @@ assert_ledger_bind_rejected() {
   task_id="ledger-reject-$label"
   state="$TEST_ROOT/fleet/$task_id/app"
   worktree="$TEST_ROOT/$task_id-worktree"
-  mkdir -p "$state"
-  init_test_repo "$TEST_ROOT/$task_id-repo"
-  git -C "$TEST_ROOT/$task_id-repo" worktree add -q -b "$task_id-worker" "$worktree"
-  record_retry_owner "$task_id" app "$TEST_ROOT/$task_id-repo"
-  printf '%s\n' "$worktree" > "$state/worktree"
-  printf 'git\n' > "$state/wt_type"
-  printf 'done\n' > "$state/status"
-  printf 'result\n' > "$state/result"
-  seed_ledger_evidence "$worktree"
+  seed_ledger_task "$task_id" app
   "$seed" "$worktree"
 
   set +e
@@ -5083,17 +5087,9 @@ assert_ledger_bind_rejected forged-name ledger_seed_forged_name
 printf 'sgt-cleanup ledger-evidence: unbindable ledger evidence rejected ok\n'
 
 # Retry, replay and tamper-evidence for directory evidence.
+mkdir -p "$TEST_ROOT/fake-bin"
+seed_ledger_task ledger-retry app
 ledger_retry_state="$TEST_ROOT/fleet/ledger-retry/app"
-mkdir -p "$ledger_retry_state" "$TEST_ROOT/fake-bin"
-init_test_repo "$TEST_ROOT/ledger-retry-repo"
-git -C "$TEST_ROOT/ledger-retry-repo" worktree add -q -b ledger-retry-worker \
-  "$TEST_ROOT/ledger-retry-worktree"
-record_retry_owner ledger-retry app "$TEST_ROOT/ledger-retry-repo"
-printf '%s\n' "$TEST_ROOT/ledger-retry-worktree" > "$ledger_retry_state/worktree"
-printf 'git\n' > "$ledger_retry_state/wt_type"
-printf 'done\n' > "$ledger_retry_state/status"
-printf 'result\n' > "$ledger_retry_state/result"
-seed_ledger_evidence "$TEST_ROOT/ledger-retry-worktree"
 ledger_live_before="$(ledger_evidence_snapshot "$TEST_ROOT/ledger-retry-worktree")"
 
 # Fake git: pass everything through EXCEPT worktree remove, which fails until
@@ -5251,10 +5247,11 @@ rm "$TEST_ROOT/fake-bin/git"
 printf 'sgt-cleanup ledger-retry: directory evidence replay and tamper-evidence ok\n'
 
 # Replaying evidence must never merge into a path that reappeared underneath it.
-# `mv dir existing_dir` nests instead of replacing and still reports success, so a
-# racing writer would silently relocate live evidence one level deep and wedge the
-# task forever.  Every publication into the worktree must prove the destination is
-# absent and fail closed naming the colliding path.
+# `mv dir existing_dir` nests instead of replacing and still reports success, and
+# an existing symlink relocates the source wherever the link points, so a racing
+# writer would silently move live evidence somewhere it can never be found.  Both
+# shapes must be refused by name.  A racing regular file is still replaced, so the
+# authoritative evidence wins and a plain retry converges.
 # Fake git: worktree remove stages a racing entry of the requested kind in the
 # worktree, then fails — the ordinary removal-failure path with a racing writer.
 cat > "$TEST_ROOT/fake-bin/ledger-collide-git" <<'EOF'
@@ -5274,50 +5271,52 @@ esac
 EOF
 chmod +x "$TEST_ROOT/fake-bin/ledger-collide-git"
 
+run_ledger_collision() {
+  local kind="$2" name="$3" task_id="$1"
+
+  cp "$TEST_ROOT/fake-bin/ledger-collide-git" "$TEST_ROOT/fake-bin/git"
+  set +e
+  ledger_collide_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" REAL_GIT="$REAL_GIT" \
+    FAKE_RACE_KIND="$kind" FAKE_RACE_NAME="$name" \
+    FAKE_RACE_TARGET="$TEST_ROOT/$task_id-escape" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" "$task_id" 2>&1)"
+  ledger_collide_status=$?
+  set -e
+  rm "$TEST_ROOT/fake-bin/git"
+}
+
+# A racing directory or symlink at an evidence destination must be refused by
+# name, with nothing nested, nothing relocated outside the worktree, and both
+# copies of the evidence preserved for a later retry.
 assert_ledger_collision_rejected() {
-  local before escape kind="$2" label="$1" name="$3" output state status task_id worktree
+  local before escape kind="$2" label="$1" name="$3" state task_id worktree
 
   task_id="ledger-collide-$label"
   state="$TEST_ROOT/fleet/$task_id/app"
   worktree="$TEST_ROOT/$task_id-worktree"
   escape="$TEST_ROOT/$task_id-escape"
-  mkdir -p "$state" "$escape"
-  init_test_repo "$TEST_ROOT/$task_id-repo"
-  git -C "$TEST_ROOT/$task_id-repo" worktree add -q -b "$task_id-worker" "$worktree"
-  record_retry_owner "$task_id" app "$TEST_ROOT/$task_id-repo"
-  printf '%s\n' "$worktree" > "$state/worktree"
-  printf 'git\n' > "$state/wt_type"
-  printf 'done\n' > "$state/status"
-  printf 'result\n' > "$state/result"
-  seed_ledger_evidence "$worktree"
+  mkdir -p "$escape"
+  seed_ledger_task "$task_id" app
   before="$(ledger_evidence_snapshot "$worktree")"
 
-  cp "$TEST_ROOT/fake-bin/ledger-collide-git" "$TEST_ROOT/fake-bin/git"
-  set +e
-  output="$(PATH="$TEST_ROOT/fake-bin:$PATH" REAL_GIT="$REAL_GIT" \
-    FAKE_RACE_KIND="$kind" FAKE_RACE_NAME="$name" FAKE_RACE_TARGET="$escape" \
-    SERGEANT_CONFIG="$TEST_ROOT/config" \
-    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-    "$ROOT_DIR/bin/sgt-cleanup" "$task_id" 2>&1)"
-  status=$?
-  set -e
-  rm "$TEST_ROOT/fake-bin/git"
+  run_ledger_collision "$task_id" "$kind" "$name"
 
-  [[ "$status" -ne 0 ]] || {
+  [[ "$ledger_collide_status" -ne 0 ]] || {
     printf 'FAIL %s: cleanup reported success after a failed removal\n' "$task_id" >&2
     exit 1
   }
-  [[ "$output" == *"collides with an existing path: $worktree/$name"* && \
-    "$output" == *"Failed to restore worker evidence after git failure: app"* ]] || {
+  [[ "$ledger_collide_output" == *"collides with an existing path: $worktree/$name"* && \
+    "$ledger_collide_output" == *"Failed to restore worker evidence after git failure: app"* ]] || {
     printf 'FAIL %s: collision was not reported actionably: %s\n' \
-      "$task_id" "$output" >&2
+      "$task_id" "$ledger_collide_output" >&2
     exit 1
   }
   [[ ! -e "$worktree/$name/$name" ]] || {
     printf 'FAIL %s: evidence was nested inside the colliding entry\n' "$task_id" >&2
     exit 1
   }
-  # A racing symlink must never relocate evidence outside the worktree.
   [[ -z "$(ls -A "$escape")" ]] || {
     printf 'FAIL %s: evidence escaped the worktree into %s\n' "$task_id" "$escape" >&2
     exit 1
@@ -5333,123 +5332,44 @@ assert_ledger_collision_rejected() {
 }
 
 assert_ledger_collision_rejected racing-dir dir .sergeant-notification-acks
-assert_ledger_collision_rejected racing-file file .sergeant-status
 assert_ledger_collision_rejected racing-symlink symlink .sergeant-review-gates
-printf 'sgt-cleanup ledger-collide: colliding evidence publication fails closed ok\n'
 
-# The removal loop walks a glob expanded after the identity check, so an entry
-# created inside that window would survive the removal, break the remover, and
-# route into the collision path above.  Cleanup must instead observe the leftover
-# and fail closed with the live evidence fully restored.
-ledger_leftover_state="$TEST_ROOT/fleet/ledger-leftover/app"
-mkdir -p "$ledger_leftover_state"
-init_test_repo "$TEST_ROOT/ledger-leftover-repo"
-git -C "$TEST_ROOT/ledger-leftover-repo" worktree add -q -b ledger-leftover-worker \
-  "$TEST_ROOT/ledger-leftover-worktree"
-record_retry_owner ledger-leftover app "$TEST_ROOT/ledger-leftover-repo"
-printf '%s\n' "$TEST_ROOT/ledger-leftover-worktree" > "$ledger_leftover_state/worktree"
-printf 'git\n' > "$ledger_leftover_state/wt_type"
-printf 'done\n' > "$ledger_leftover_state/status"
-printf 'result\n' > "$ledger_leftover_state/result"
-seed_ledger_evidence "$TEST_ROOT/ledger-leftover-worktree"
-ledger_leftover_before="$(ledger_evidence_snapshot "$TEST_ROOT/ledger-leftover-worktree")"
-set +e
-ledger_leftover_output="$(SGT_CLEANUP_MUTATE_POINT=after-live-removal \
-  SGT_CLEANUP_MUTATE_PATH="$TEST_ROOT/ledger-leftover-worktree/.sergeant-leftover" \
-  SERGEANT_CONFIG="$TEST_ROOT/config" \
-  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" ledger-leftover 2>&1)"
-ledger_leftover_status=$?
-set -e
-[[ "$ledger_leftover_status" -ne 0 && \
-  "$ledger_leftover_output" == *"Worker lifecycle evidence reappeared during cleanup"* ]] || {
-  printf 'FAIL ledger-leftover: cleanup did not fail closed on reappeared evidence: %s\n' \
-    "$ledger_leftover_output" >&2
+# A racing regular file is replaced by the identity-bound evidence, exactly as
+# before directory support, so the replay completes and a plain retry converges
+# instead of wedging the task.
+ledger_overwrite_task=ledger-collide-racing-file
+mkdir -p "$TEST_ROOT/$ledger_overwrite_task-escape"
+seed_ledger_task "$ledger_overwrite_task" app
+ledger_overwrite_before="$(ledger_evidence_snapshot \
+  "$TEST_ROOT/$ledger_overwrite_task-worktree")"
+run_ledger_collision "$ledger_overwrite_task" file .sergeant-status
+[[ "$ledger_collide_status" -ne 0 && \
+  "$ledger_collide_output" == *"Failed to remove git worktree; fleet state preserved"* ]] || {
+  printf 'FAIL %s: a racing regular file did not fall through to the remover: %s\n' \
+    "$ledger_overwrite_task" "$ledger_collide_output" >&2
   exit 1
 }
-[[ -d "$TEST_ROOT/ledger-leftover-worktree" ]] || {
-  printf 'FAIL ledger-leftover: worktree was removed despite reappeared evidence\n' >&2
+[[ "$(ledger_evidence_snapshot "$TEST_ROOT/$ledger_overwrite_task-worktree")" == \
+  "$ledger_overwrite_before" ]] || {
+  printf 'FAIL %s: the bound evidence did not replace the racing file\n' \
+    "$ledger_overwrite_task" >&2
   exit 1
 }
-[[ ! -e "$TEST_ROOT/ledger-leftover-worktree/.sergeant-leftover" ]] || {
-  printf 'FAIL ledger-leftover: the unbound entry was left in the worktree\n' >&2
-  exit 1
-}
-ledger_leftover_quarantine=("$ledger_leftover_state"/reappeared-evidence.tmp.*)
-[[ -f "${ledger_leftover_quarantine[0]}/.sergeant-leftover" ]] || {
-  printf 'FAIL ledger-leftover: the unbound entry was not preserved\n' >&2
-  exit 1
-}
-[[ "$(ledger_evidence_snapshot "$TEST_ROOT/ledger-leftover-worktree")" == \
-  "$ledger_leftover_before" ]] || {
-  printf 'FAIL ledger-leftover: live evidence was not fully restored\n' >&2
-  exit 1
-}
-[[ "$(ledger_evidence_snapshot "$ledger_leftover_state/terminal-evidence")" == \
-  "$ledger_leftover_before" ]]
-if compgen -G "$ledger_leftover_state/live-evidence.tmp.*" >/dev/null; then
-  printf 'FAIL ledger-leftover: rollback left a live evidence backup behind\n' >&2
+if compgen -G "$TEST_ROOT/fleet/$ledger_overwrite_task/app/live-evidence.tmp.*" \
+  >/dev/null; then
+  printf 'FAIL %s: authoritative evidence was stranded in a backup\n' \
+    "$ledger_overwrite_task" >&2
   exit 1
 fi
-[[ "$(sed -n '1p' "$ledger_leftover_state/cleanup-phase")" == "removing" ]]
-printf 'sgt-cleanup ledger-leftover: reappeared evidence fails closed ok\n'
-
-# The realistic reappearance reuses a name that was already moved aside, so the
-# rollback cannot simply republish over it.  Cleanup must preserve the unbound
-# entry, restore the authoritative evidence anyway, and leave a phase that a plain
-# retry converges from — the base implementation recovered from this case.
-ledger_samename_state="$TEST_ROOT/fleet/ledger-samename/app"
-mkdir -p "$ledger_samename_state"
-init_test_repo "$TEST_ROOT/ledger-samename-repo"
-git -C "$TEST_ROOT/ledger-samename-repo" worktree add -q -b ledger-samename-worker \
-  "$TEST_ROOT/ledger-samename-worktree"
-record_retry_owner ledger-samename app "$TEST_ROOT/ledger-samename-repo"
-printf '%s\n' "$TEST_ROOT/ledger-samename-worktree" > "$ledger_samename_state/worktree"
-printf 'git\n' > "$ledger_samename_state/wt_type"
-printf 'done\n' > "$ledger_samename_state/status"
-printf 'result\n' > "$ledger_samename_state/result"
-seed_ledger_evidence "$TEST_ROOT/ledger-samename-worktree"
-ledger_samename_before="$(ledger_evidence_snapshot "$TEST_ROOT/ledger-samename-worktree")"
-set +e
-ledger_samename_output="$(SGT_CLEANUP_MUTATE_POINT=after-live-removal \
-  SERGEANT_CONFIG="$TEST_ROOT/config" \
-  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" ledger-samename 2>&1)"
-ledger_samename_status=$?
-set -e
-[[ "$ledger_samename_status" -ne 0 && \
-  "$ledger_samename_output" == *"Worker lifecycle evidence reappeared during cleanup"* && \
-  "$ledger_samename_output" == *".sergeant-status"* && \
-  "$ledger_samename_output" == *"reappeared-evidence.tmp."* ]] || {
-  printf 'FAIL ledger-samename: same-name reappearance was not reported actionably: %s\n' \
-    "$ledger_samename_output" >&2
-  exit 1
-}
-[[ "$(ledger_evidence_snapshot "$TEST_ROOT/ledger-samename-worktree")" == \
-  "$ledger_samename_before" ]] || {
-  printf 'FAIL ledger-samename: authoritative live evidence was not restored\n' >&2
-  exit 1
-}
-if compgen -G "$ledger_samename_state/live-evidence.tmp.*" >/dev/null; then
-  printf 'FAIL ledger-samename: authoritative evidence was stranded in a backup\n' >&2
-  exit 1
-fi
-ledger_samename_quarantine=("$ledger_samename_state"/reappeared-evidence.tmp.*)
-[[ -f "${ledger_samename_quarantine[0]}/.sergeant-status" ]] || {
-  printf 'FAIL ledger-samename: the reappeared entry was not preserved\n' >&2
-  exit 1
-}
-grep -Fq 'injected lifecycle evidence mutation' \
-  "${ledger_samename_quarantine[0]}/.sergeant-status"
-# A plain retry must now converge.
 SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" ledger-samename >/dev/null
-[[ ! -e "$TEST_ROOT/ledger-samename-worktree" && ! -e "$TEST_ROOT/fleet/ledger-samename" ]] || {
-  printf 'FAIL ledger-samename: the retry did not converge\n' >&2
+  "$ROOT_DIR/bin/sgt-cleanup" "$ledger_overwrite_task" >/dev/null
+[[ ! -e "$TEST_ROOT/$ledger_overwrite_task-worktree" && \
+  ! -e "$TEST_ROOT/fleet/$ledger_overwrite_task" ]] || {
+  printf 'FAIL %s: the retry did not converge\n' "$ledger_overwrite_task" >&2
   exit 1
 }
-printf 'sgt-cleanup ledger-samename: same-name reappearance stays retryable ok\n'
+printf 'sgt-cleanup ledger-collide: colliding evidence publication fails closed ok\n'
 
 # Evidence identity must be a function of raw bytes.  The worktree copy lives
 # inside the owning repository while the staged copy lives in fleet state outside

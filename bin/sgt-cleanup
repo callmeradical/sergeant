@@ -792,13 +792,17 @@ _rollback_remove_path() {
     _die "CRITICAL: rollback cleanup left an artifact for $context: $path"
 }
 
+# Publishes one evidence entry, refusing the destination shapes that `mv` cannot
+# replace safely.  `mv` into an existing directory moves the source INSIDE it and
+# still reports success, and an existing symlink relocates the source wherever the
+# link points, so either would silently move lifecycle evidence somewhere it can
+# never be found again.  An existing regular file is replaced, as it always was:
+# the entry being published is the identity-bound evidence, so it wins over an
+# unbound file that appeared underneath it and the caller still converges.
 _publish_worker_evidence_entry() {
   local destination="$2" source="$1"
 
-  # `mv dir existing_dir` nests instead of replacing and still reports success,
-  # so publishing evidence over a path that reappeared would silently relocate
-  # the live evidence one level deep and permanently break its identity.
-  if [[ -e "$destination" || -L "$destination" ]]; then
+  if [[ -L "$destination" || -d "$destination" ]]; then
     printf 'ERROR: worker lifecycle evidence collides with an existing path: %s\n' \
       "$destination" >&2
     return 1
@@ -818,32 +822,12 @@ _undo_worker_evidence_removal() {
     _die "Failed to remove worker evidence rollback directory: $backup_dir"
 }
 
-# Moves every .sergeant-* entry currently in the worktree aside and prints the
-# preserving directory.  Used when an entry reappears after the identity was
-# bound: that entry is unbound third-party data, so it is neither trusted as
-# evidence nor discarded, and moving it out lets the authoritative evidence be
-# republished so a plain retry still converges.
-_quarantine_reappeared_evidence() {
-  local entry name quarantine_dir="$2/reappeared-evidence.tmp.$$" worktree="$1"
-
-  [[ ! -e "$quarantine_dir" && ! -L "$quarantine_dir" ]] || return 1
-  mkdir "$quarantine_dir" || return 1
-  for entry in "$worktree"/.sergeant-*; do
-    [[ -e "$entry" || -L "$entry" ]] || continue
-    name="$(basename "$entry")"
-    _publish_worker_evidence_entry "$entry" "$quarantine_dir/$name" || return 1
-  done
-  printf '%s\n' "$quarantine_dir"
-}
-
 # Moves the bound lifecycle evidence out of the worktree so the remover can run,
-# publishing $LIVE_EVIDENCE_BACKUP for replay.  Returns nonzero for every
-# recoverable refusal and lets the caller report it; it terminates in place only
-# when evidence reappeared after the identity was bound, because that leaves a
-# preserved artifact the operator has to be told about by name.
+# publishing $LIVE_EVIDENCE_BACKUP for replay.  Returns nonzero for every refusal
+# and lets the single caller report it.
 _remove_worker_evidence() {
   local backup_dir="$1/live-evidence.tmp.$$" count=0 current_identity evidence \
-    expected_identity="$3" name quarantine_dir reappeared repo_dir="$1" worktree="$2"
+    expected_identity="$3" name repo_dir="$1" worktree="$2"
   local -a moved=()
 
   _same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree" || return 1
@@ -872,24 +856,6 @@ _remove_worker_evidence() {
     fi
     moved[${#moved[@]}]="$(basename "$evidence")"
   done
-  if ! _cleanup_mutation_hook after-live-removal \
-    "${SGT_CLEANUP_MUTATE_PATH:-$worktree/.sergeant-status}"; then
-    _undo_worker_evidence_removal "$worktree" "$backup_dir" \
-      ${moved[@]+"${moved[@]}"}
-    return 1
-  fi
-  # The loop above walks a glob expanded after the identity check, so an entry
-  # created inside that window survives the removal and breaks the remover.  Move
-  # the unbound entry aside, put the authoritative evidence back, and stop: the
-  # published phase then still lets a plain retry converge.
-  if _worker_evidence_present "$worktree"; then
-    quarantine_dir="$(_quarantine_reappeared_evidence "$worktree" "$repo_dir")" || \
-      _die "CRITICAL: could not preserve worker evidence that reappeared during cleanup; inspect $worktree and $repo_dir"
-    reappeared="$(cd "$quarantine_dir" && printf '%s ' .sergeant-*)"
-    _undo_worker_evidence_removal "$worktree" "$backup_dir" \
-      ${moved[@]+"${moved[@]}"}
-    _die "Worker lifecycle evidence reappeared during cleanup: ${reappeared% }; live evidence restored, retry after inspecting the preserved copy: $quarantine_dir"
-  fi
   LIVE_EVIDENCE_BACKUP="$backup_dir"
 }
 
@@ -1264,6 +1230,9 @@ _repo_worktree_identity() {
   ) | git hash-object --stdin
 }
 
+# Emits the record stream for one evidence entry.  Callers must have byte-order
+# collation (LC_ALL=C) in effect: the glob expansions below are what order the
+# stream, so the identity would otherwise depend on the ambient locale.
 _worker_evidence_records() {
   local child entry="$1"
 
