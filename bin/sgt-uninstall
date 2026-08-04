@@ -17,12 +17,15 @@
 
 set -euo pipefail
 
+# Resolved with parameter expansion rather than the repo's usual
+# $(dirname "${BASH_SOURCE[0]}") idiom: this command runs before the toolchain
+# exists and its tests exercise it on a deliberately minimal PATH, where an
+# external dirname may be absent.
 _self="${BASH_SOURCE[0]}"
 case "$_self" in
-  */*) _self_dir="${_self%/*}" ;;
-  *) _self_dir='.' ;;
+  */*) SCRIPT_DIR="$(cd "${_self%/*}" && pwd)" ;;
+  *) SCRIPT_DIR="$(pwd)" ;;
 esac
-SCRIPT_DIR="$(cd "$_self_dir" && pwd)"
 # shellcheck source=_sgt-install-manifest.sh
 source "$SCRIPT_DIR/_sgt-install-manifest.sh"
 
@@ -36,6 +39,9 @@ fi
 
 removed=0
 kept=0
+
+managed_globs="$(_sgt_install_managed_globs)" || exit 1
+deprecated_links="$(_sgt_install_deprecated_links "$ROOT_DIR" "$TARGET_DIR")" || exit 1
 
 # Sweep every name this checkout claims, not just the ones it currently ships.
 while IFS= read -r pattern; do
@@ -59,9 +65,7 @@ while IFS= read -r pattern; do
         ;;
     esac
   done
-done <<EOF
-$(_sgt_install_managed_globs)
-EOF
+done <<< "$managed_globs"
 
 # Deprecated links this checkout may still own are cleaned up here too, so an
 # uninstall does not leave an oc-inject link behind.
@@ -74,20 +78,17 @@ while IFS= read -r deprecated_entry; do
   rm "$deprecated_link"
   printf '  removed: %s\n' "$deprecated_link"
   removed=$((removed + 1))
-done <<EOF
-$(_sgt_install_deprecated_links "$ROOT_DIR" "$TARGET_DIR")
-EOF
+done <<< "$deprecated_links"
 
 # Remove the git hooks sgt-install created, so uninstall really is its inverse.
 hooks_src="$ROOT_DIR/scripts/hooks"
-if git_dir="$(git -C "$ROOT_DIR" rev-parse --absolute-git-dir 2>/dev/null)"; then
-  hooks_dst="$git_dir/hooks"
+if hooks_dst="$(_sgt_install_hooks_dir "$ROOT_DIR")"; then
   if [[ -d "$hooks_src" && -d "$hooks_dst" ]]; then
     for hook in "$hooks_src"/*; do
       [[ -f "$hook" ]] || continue
       hook_target="$hooks_dst/${hook##*/}"
       [[ -L "$hook_target" ]] || continue
-      if [[ "$(readlink "$hook_target")" == "$hook" ]]; then
+      if [[ "$(_sgt_install_resolve_link "$hook_target")" == "$hook" ]]; then
         rm "$hook_target"
         printf '  removed hook: %s\n' "$hook_target"
         removed=$((removed + 1))

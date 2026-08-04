@@ -28,12 +28,15 @@
 
 set -euo pipefail
 
+# Resolved with parameter expansion rather than the repo's usual
+# $(dirname "${BASH_SOURCE[0]}") idiom: this command runs before the toolchain
+# exists and its tests exercise it on a deliberately minimal PATH, where an
+# external dirname may be absent.
 _self="${BASH_SOURCE[0]}"
 case "$_self" in
-  */*) _self_dir="${_self%/*}" ;;
-  *) _self_dir='.' ;;
+  */*) SCRIPT_DIR="$(cd "${_self%/*}" && pwd)" ;;
+  *) SCRIPT_DIR="$(pwd)" ;;
 esac
-SCRIPT_DIR="$(cd "$_self_dir" && pwd)"
 # shellcheck source=_sgt-install-manifest.sh
 source "$SCRIPT_DIR/_sgt-install-manifest.sh"
 
@@ -88,9 +91,10 @@ while IFS= read -r source_file; do
       conflicts=$((conflicts + 1))
       ;;
   esac
-done <<EOF
-$sources
-EOF
+done <<< "$sources"
+
+managed_globs="$(_sgt_install_managed_globs)" || exit 1
+deprecated_links="$(_sgt_install_deprecated_links "$ROOT_DIR" "$TARGET_DIR")" || exit 1
 
 # Sweep links this checkout owns that the manifest no longer names, so renaming
 # or removing a command does not leave a dangling entry on the user's PATH.
@@ -108,9 +112,7 @@ while IFS= read -r pattern; do
     printf '  removed stale Sergeant link: %s\n' "$stale_target"
     removed=$((removed + 1))
   done
-done <<EOF
-$(_sgt_install_managed_globs)
-EOF
+done <<< "$managed_globs"
 
 # Remove only the deprecated links this checkout previously created. The source
 # of bin/oc-inject remains for one compatibility window, but it is no longer
@@ -124,26 +126,39 @@ while IFS= read -r deprecated_entry; do
   rm "$deprecated_link"
   printf '  removed deprecated Sergeant link: %s\n' "$deprecated_link"
   removed=$((removed + 1))
-done <<EOF
-$(_sgt_install_deprecated_links "$ROOT_DIR" "$TARGET_DIR")
-EOF
+done <<< "$deprecated_links"
 
-# Install this repository's git hooks. --absolute-git-dir is required: the plain
-# --git-dir form prints the relative string ".git" for a normal clone, which
-# would resolve against the caller's working directory and install Sergeant's
-# pre-push hook into whatever unrelated repository the user happens to be in.
+# Install this repository's git hooks. The directory is resolved by
+# _sgt_install_hooks_dir, which returns an absolute path: the plain --git-dir
+# form prints the relative string ".git" for a normal clone, which would resolve
+# against the caller's working directory and install Sergeant's pre-push hook
+# into whatever unrelated repository the user happens to be in.
 hooks_src="$ROOT_DIR/scripts/hooks"
-hooks_dst=''
-if git_dir="$(git -C "$ROOT_DIR" rev-parse --absolute-git-dir 2>/dev/null)"; then
-  hooks_dst="$git_dir/hooks"
+hooks_dst="$(_sgt_install_hooks_dir "$ROOT_DIR" || true)"
+if [[ -d "$hooks_src" && -z "$hooks_dst" ]]; then
+  printf '  skipped hooks: no git hooks directory resolved for %s\n' "$ROOT_DIR"
+elif [[ -d "$hooks_src" && ! -d "$hooks_dst" ]]; then
+  mkdir -p "$hooks_dst"
 fi
 if [[ -d "$hooks_src" && -n "$hooks_dst" && -d "$hooks_dst" ]]; then
   for hook in "$hooks_src"/*; do
     [[ -f "$hook" ]] || continue
     hook_target="$hooks_dst/${hook##*/}"
-    if [[ -L "$hook_target" && "$(readlink "$hook_target")" == "$hook" ]]; then
-      printf '  linked hook: %s -> %s\n' "$hook_target" "$hook"
-    elif [[ -e "$hook_target" || -L "$hook_target" ]]; then
+    if [[ -L "$hook_target" ]]; then
+      hook_link="$(_sgt_install_resolve_link "$hook_target")"
+      if [[ "$hook_link" == "$hook" ]]; then
+        printf '  linked hook: %s -> %s\n' "$hook_target" "$hook"
+      elif [[ ! -e "$hook_link" ]] || _sgt_install_is_sergeant_hook "$hook_link"; then
+        # A hook installed by another Sergeant checkout, or a broken one, is
+        # Sergeant's to repoint. Worktrees share their primary's hooks directory.
+        rm -f "$hook_target"
+        ln -s "$hook" "$hook_target"
+        printf '  linked hook: %s -> %s\n' "$hook_target" "$hook"
+      else
+        printf '  preserved existing hook: %s (not installed)\n' "$hook_target"
+        conflicts=$((conflicts + 1))
+      fi
+    elif [[ -e "$hook_target" ]]; then
       # A hook the user wrote is theirs; never replace it silently.
       printf '  preserved existing hook: %s (not installed)\n' "$hook_target"
       conflicts=$((conflicts + 1))

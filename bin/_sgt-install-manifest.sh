@@ -83,16 +83,62 @@ _sgt_install_managed_globs() {
 # _sgt_is_sergeant_checkout_path <path>
 #
 # True when <path> looks like a file inside some Sergeant checkout's bin
-# directory, proven by that directory also containing this manifest. Used to
-# decide whether an existing link belongs to Sergeant (safe to repoint) or to
-# the user (must be preserved).
+# directory, proven by that directory also holding a Sergeant runtime helper.
+# Used to decide whether an existing link belongs to Sergeant (safe to repoint)
+# or to the user (must be preserved).
+#
+# _sgt-lib.sh is included because it predates this manifest: a checkout made
+# before the manifest existed must still be recognised as Sergeant's, or an
+# upgrade would report ~38 of Sergeant's own links to the user as their assets.
 _sgt_is_sergeant_checkout_path() {
-  local candidate="$1" candidate_dir
+  local candidate="$1" candidate_dir marker
   case "$candidate" in
     */bin/*) candidate_dir="${candidate%/*}" ;;
     *) return 1 ;;
   esac
-  [[ -f "$candidate_dir/_sgt-install-manifest.sh" ]]
+  for marker in _sgt-install-manifest.sh _sgt-lib.sh; do
+    [[ -f "$candidate_dir/$marker" ]] && return 0
+  done
+  return 1
+}
+
+# _sgt_install_is_sergeant_hook <hook-target>
+#
+# True when <hook-target> is a hook belonging to some Sergeant checkout, proven
+# by a Sergeant runtime helper next to that checkout's scripts/hooks directory.
+# Linked worktrees share one hooks directory with their primary checkout, so a
+# hook installed by a sibling checkout is Sergeant's to repoint, not a user
+# asset to preserve.
+_sgt_install_is_sergeant_hook() {
+  local candidate="$1" checkout marker
+  case "$candidate" in
+    */scripts/hooks/*) checkout="${candidate%/scripts/hooks/*}" ;;
+    *) return 1 ;;
+  esac
+  for marker in _sgt-install-manifest.sh _sgt-lib.sh; do
+    [[ -f "$checkout/bin/$marker" ]] && return 0
+  done
+  return 1
+}
+
+# _sgt_install_resolve_link <target>
+#
+# Print what <target> points at, as an absolute path. A relative link target is
+# resolved against the directory holding the link, never against the caller's
+# working directory.
+_sgt_install_resolve_link() {
+  local target="$1" link_target target_dir
+  link_target="$(readlink "$target")"
+  case "$link_target" in
+    /*) printf '%s\n' "$link_target" ;;
+    *)
+      case "$target" in
+        */*) target_dir="${target%/*}" ;;
+        *) target_dir='.' ;;
+      esac
+      printf '%s\n' "$target_dir/$link_target"
+      ;;
+  esac
 }
 
 # _sgt_install_link_state <source-file> <target-dir>
@@ -112,11 +158,7 @@ _sgt_install_link_state() {
   target="$target_dir/${source_file##*/}"
 
   if [[ -L "$target" ]]; then
-    link_target="$(readlink "$target")"
-    case "$link_target" in
-      /*) ;;
-      *) link_target="$target_dir/$link_target" ;;
-    esac
+    link_target="$(_sgt_install_resolve_link "$target")"
     if [[ "$link_target" == "$source_file" ]]; then
       printf 'linked\n'
     elif [[ ! -e "$link_target" ]]; then
@@ -132,6 +174,58 @@ _sgt_install_link_state() {
   else
     printf 'absent\n'
   fi
+}
+
+# _sgt_install_managed_state <target> <owned-substring>
+#
+# Classify what occupies a managed executable's path, printing one of:
+#
+#   absent    nothing there; safe to install
+#   reclaim   a dangling link, or a link into a tool tree matching
+#             <owned-substring>; safe to replace in place
+#   conflict  anything the user owns; preserve and report
+#
+# Shares _sgt_install_resolve_link with _sgt_install_link_state so a relative
+# user-owned link is never mistaken for a reclaimable one.
+_sgt_install_managed_state() {
+  local target="$1" owned_substring="$2" link_target
+  if [[ -L "$target" ]]; then
+    link_target="$(_sgt_install_resolve_link "$target")"
+    if [[ ! -e "$link_target" ]]; then
+      printf 'reclaim\n'
+    elif [[ "$link_target" == *"$owned_substring"* ]]; then
+      printf 'reclaim\n'
+    else
+      printf 'conflict\n'
+    fi
+  elif [[ -e "$target" ]]; then
+    printf 'conflict\n'
+  else
+    printf 'absent\n'
+  fi
+}
+
+# _sgt_install_hooks_dir <repo-root>
+#
+# Print the hooks directory git actually consults for <repo-root>, honouring
+# core.hooksPath and resolving a linked worktree to the common git directory
+# (a worktree's private git dir has no hooks/ and git never reads one there).
+_sgt_install_hooks_dir() {
+  local root="$1" configured common
+  if configured="$(git -C "$root" config --path --get core.hooksPath 2>/dev/null)" && \
+     [[ -n "$configured" ]]; then
+    case "$configured" in
+      /*) printf '%s\n' "$configured" ;;
+      *) printf '%s\n' "$root/$configured" ;;
+    esac
+    return 0
+  fi
+  common="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  [[ -n "$common" ]] || return 1
+  case "$common" in
+    /*) printf '%s\n' "$common/hooks" ;;
+    *) printf '%s\n' "$root/$common/hooks" ;;
+  esac
 }
 
 # _sgt_command_available <command>

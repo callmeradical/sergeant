@@ -46,15 +46,31 @@ for task, expected in (
         )
 PY
 
+# sgt-install and sgt-uninstall write to their own checkout's git hooks
+# directory, so the behavioural assertions run against a throwaway copy. Driving
+# the real ROOT_DIR would delete the developer's installed pre-push hook as a
+# side effect of running the tests.
+FIXTURE_ROOT="$TEST_ROOT/checkout"
+mkdir -p "$FIXTURE_ROOT"
+cp -R "$ROOT_DIR/bin" "$FIXTURE_ROOT/bin"
+cp -R "$ROOT_DIR/scripts" "$FIXTURE_ROOT/scripts"
+if [[ -d "$ROOT_DIR/opencode" ]]; then
+  cp -R "$ROOT_DIR/opencode" "$FIXTURE_ROOT/opencode"
+fi
+cp "$ROOT_DIR/mise.toml" "$FIXTURE_ROOT/mise.toml"
+git init -q "$FIXTURE_ROOT"
+
 mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/home/.config/opencode/plugins"
-# Create stale oc-inject symlinks to verify mise install removes them.
-# These reference paths that no longer exist in the repo (deleted in GH #179).
-ln -s "/tmp/nonexistent/oc-inject" "$TEST_ROOT/bin/oc-inject"
-ln -s "/tmp/nonexistent/oc-inject.js" \
+# Stale oc-inject links are only removable when they still point at the paths
+# this checkout used to publish, so the fixtures must name the fixture checkout.
+# oc-inject's source was deleted from the repository, so these are deliberately
+# dangling links -- exactly the shape a real upgraded checkout leaves behind.
+ln -s "$FIXTURE_ROOT/bin/oc-inject" "$TEST_ROOT/bin/oc-inject"
+ln -s "$FIXTURE_ROOT/opencode/plugins/oc-inject.js" \
   "$TEST_ROOT/home/.config/opencode/plugins/oc-inject.js"
 
 HOME="$TEST_ROOT/home" SGT_INSTALL_DIR="$TEST_ROOT/bin" \
-  "$ROOT_DIR/bin/sgt-install" >/dev/null
+  "$FIXTURE_ROOT/bin/sgt-install" >/dev/null
 
 [[ -L "$TEST_ROOT/bin/sgt-dispatch" ]] || fail 'sgt-dispatch was not installed'
 [[ -L "$TEST_ROOT/bin/sgt-review-findings" ]] || \
@@ -76,9 +92,13 @@ for helper in "$ROOT_DIR"/bin/_sgt-*.sh; do
     fail "runtime helper was not installed: ${helper##*/}"
 done
 
-# oc-inject is deprecated: its links are removed and never recreated.
-[[ ! -e "$TEST_ROOT/bin/oc-inject" ]] || fail 'deprecated oc-inject link was not removed'
-[[ ! -e "$TEST_ROOT/home/.config/opencode/plugins/oc-inject.js" ]] || \
+# oc-inject is deprecated: its links are removed and never recreated. These
+# fixtures are dangling links, so -e alone would be false whether or not the
+# link survived; -L is what actually proves removal.
+[[ ! -e "$TEST_ROOT/bin/oc-inject" && ! -L "$TEST_ROOT/bin/oc-inject" ]] || \
+  fail 'deprecated oc-inject link was not removed'
+[[ ! -e "$TEST_ROOT/home/.config/opencode/plugins/oc-inject.js" && \
+   ! -L "$TEST_ROOT/home/.config/opencode/plugins/oc-inject.js" ]] || \
   fail 'deprecated oc-inject plugin link was not removed'
 
 set +e
@@ -94,7 +114,7 @@ set -e
 # removed, and a user's own file of the same name is left alone.
 printf 'user command\n' > "$TEST_ROOT/bin/sgt-a-user-command"
 HOME="$TEST_ROOT/home" SGT_INSTALL_DIR="$TEST_ROOT/bin" \
-  "$ROOT_DIR/bin/sgt-uninstall" >/dev/null
+  "$FIXTURE_ROOT/bin/sgt-uninstall" >/dev/null
 
 # shellcheck source=bin/_sgt-install-manifest.sh
 source "$ROOT_DIR/bin/_sgt-install-manifest.sh"
@@ -104,7 +124,7 @@ while IFS= read -r source_file; do
   [[ ! -e "$residue" && ! -L "$residue" ]] || \
     fail "sgt-uninstall left an installed entry behind: ${source_file##*/}"
 done <<EOF
-$(_sgt_install_sources "$ROOT_DIR")
+$(_sgt_install_sources "$FIXTURE_ROOT")
 EOF
 [[ "$(cat "$TEST_ROOT/bin/sgt-a-user-command")" == 'user command' ]] || \
   fail 'sgt-uninstall removed a real user file inside the sgt-* namespace'
@@ -114,14 +134,16 @@ EOF
 if command -v mise >/dev/null 2>&1; then
   MISE_ROOT="$TEST_ROOT/mise"
   mkdir -p "$MISE_ROOT/bin" "$MISE_ROOT/home"
-  ( cd "$ROOT_DIR" && HOME="$MISE_ROOT/home" SGT_INSTALL_DIR="$MISE_ROOT/bin" \
-      mise run install >/dev/null )
+  # Run the real task runner against the fixture's own mise.toml, so the task
+  # delegation is genuinely executed without touching this checkout.
+  HOME="$MISE_ROOT/home" SGT_INSTALL_DIR="$MISE_ROOT/bin" \
+    mise run --cd "$FIXTURE_ROOT" install >/dev/null
   [[ -L "$MISE_ROOT/bin/sgt-dispatch" ]] || \
     fail 'mise run install did not create the command links'
   [[ -L "$MISE_ROOT/bin/_sgt-install-manifest.sh" ]] || \
     fail 'mise run install did not link the install manifest'
-  ( cd "$ROOT_DIR" && HOME="$MISE_ROOT/home" SGT_INSTALL_DIR="$MISE_ROOT/bin" \
-      mise run uninstall >/dev/null )
+  HOME="$MISE_ROOT/home" SGT_INSTALL_DIR="$MISE_ROOT/bin" \
+    mise run --cd "$FIXTURE_ROOT" uninstall >/dev/null
   [[ ! -e "$MISE_ROOT/bin/sgt-dispatch" ]] || \
     fail 'mise run uninstall left a command link behind'
   printf 'mise run install/uninstall via the real task runner: ok\n'

@@ -72,7 +72,9 @@ Conflicts are detected before the first package is installed, so a run that
 cannot finish cleanly declines without changing anything. Use
 `./bin/sgt-bootstrap --verify-only` (or `mise run verify`) for a read-only check,
 and `--dry-run` to print the plan; neither mode runs a package manager, an
-installer, or any third-party command.
+installer, or an agent harness. The one third-party command they do run is
+`yq --version`, which only reads a version string to tell Mike Farah's `yq` from
+the unrelated Python package of the same name.
 
 Sergeant itself writes to two places: the command directory (`SGT_INSTALL_DIR`,
 default `~/.local/bin`) and this repository, whose git hooks it installs. It
