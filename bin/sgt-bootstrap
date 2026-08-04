@@ -15,9 +15,11 @@
 # platform, or a supported platform without its package manager, fails before
 # making a change.
 #
-# --dry-run and --verify-only are genuinely read-only: they run no package
-# manager, no installer, and no third-party command, so they cannot create state
-# in a harness's configuration directory as a side effect of inspecting it.
+# --dry-run and --verify-only run no package manager, no installer, and no agent
+# harness, so they cannot create state in a harness's configuration directory as
+# a side effect of inspecting it. The single third-party command they do run is
+# `yq --version`, which only reads a version string and is needed to tell Mike
+# Farah's yq from the unrelated Python package of the same name.
 #
 # Safe to rerun. Every conflict is detected and reported BEFORE the first package
 # manager or network call, so a run either declines up front or proceeds. A real
@@ -31,12 +33,15 @@
 
 set -euo pipefail
 
+# Resolved with parameter expansion rather than the repo's usual
+# $(dirname "${BASH_SOURCE[0]}") idiom: this command runs before the toolchain
+# exists and its tests exercise it on a deliberately minimal PATH, where an
+# external dirname may be absent.
 _self="${BASH_SOURCE[0]}"
 case "$_self" in
-  */*) _self_dir="${_self%/*}" ;;
-  *) _self_dir='.' ;;
+  */*) SCRIPT_DIR="$(cd "${_self%/*}" && pwd)" ;;
+  *) SCRIPT_DIR="$(pwd)" ;;
 esac
-SCRIPT_DIR="$(cd "$_self_dir" && pwd)"
 # shellcheck source=_sgt-install-manifest.sh
 source "$SCRIPT_DIR/_sgt-install-manifest.sh"
 
@@ -101,32 +106,6 @@ missing_packages() {
   done
 }
 
-# managed_target_state <command>
-#
-# Classify what occupies this command's path in INSTALL_DIR when the command
-# itself is not usable:
-#
-#   absent    nothing there; safe to install
-#   reclaim   a dangling link, or a link into a tool tree this command manages;
-#             replace it in place
-#   conflict  anything the user owns; preserve and report
-managed_target_state() {
-  local target="$INSTALL_DIR/$1" link_target
-  if [[ -L "$target" ]]; then
-    link_target="$(readlink "$target")"
-    if [[ ! -e "$link_target" ]]; then
-      printf 'reclaim\n'
-    elif [[ "$link_target" == *'/mise/installs/'* || "$link_target" == *'/mise/'* ]]; then
-      printf 'reclaim\n'
-    else
-      printf 'conflict\n'
-    fi
-  elif [[ -e "$target" ]]; then
-    printf 'conflict\n'
-  else
-    printf 'absent\n'
-  fi
-}
 
 # report_manual_authentication <prefix>
 #
@@ -190,13 +169,12 @@ case "$platform" in
 esac
 printf 'Platform: %s\n' "$platform_label"
 
+missing_package_list="$(missing_packages "${system_packages[@]}")"
 packages=()
 while IFS= read -r package_name; do
   [[ -n "$package_name" ]] || continue
   packages[${#packages[@]}]="$package_name"
-done <<EOF
-$(missing_packages "${system_packages[@]}")
-EOF
+done <<< "$missing_package_list"
 
 # ── Plan: every conflict is discovered before any mutation ─────────────────────
 
@@ -207,7 +185,7 @@ conflicts=()
 for item in "${managed_tools[@]}"; do
   command_name="${item%%:*}"
   tool_available "$command_name" && continue
-  if [[ "$(managed_target_state "$command_name")" == 'conflict' ]]; then
+  if [[ "$(_sgt_install_managed_state "$INSTALL_DIR/$command_name" '/mise/')" == 'conflict' ]]; then
     conflicts[${#conflicts[@]}]="$INSTALL_DIR/$command_name is not the required $command_name executable"
   fi
 done
@@ -217,9 +195,7 @@ while IFS= read -r source_file; do
   if [[ "$(_sgt_install_link_state "$source_file" "$INSTALL_DIR")" == 'conflict' ]]; then
     conflicts[${#conflicts[@]}]="$INSTALL_DIR/${source_file##*/} is not a Sergeant command link"
   fi
-done <<EOF
-$sources
-EOF
+done <<< "$sources"
 
 sudo_required=false
 if [[ "$platform" == 'Linux' ]] && ((${#packages[@]})) && \
@@ -271,9 +247,7 @@ if "$dry_run"; then
         "$command_name" ;;
       *) printf 'DRY-RUN: link Sergeant command %s\n' "$command_name" ;;
     esac
-  done <<EOF
-$sources
-EOF
+  done <<< "$sources"
 
   for conflict in ${conflicts[@]+"${conflicts[@]}"}; do
     printf 'DRY-RUN: conflict would stop this run: %s\n' "$conflict"
@@ -325,9 +299,7 @@ if "$verify_only"; then
       printf 'MISSING: Sergeant command %s\n' "$command_name"
       verify_failed=true
     fi
-  done <<EOF
-$sources
-EOF
+  done <<< "$sources"
 
   report_manual_authentication 'MANUAL:'
 
@@ -374,11 +346,13 @@ else
   printf 'INSTALLING: mise\n'
   # -f so an HTTP error page is never piped into sh, -L so a redirect is
   # followed rather than yielding an empty body that "succeeds".
-  curl -fsSL https://mise.run | sh || {
+  # Point the installer at the same directory as everything else, so the
+  # documented write set stays a single path.
+  MISE_INSTALL_PATH="$INSTALL_DIR/mise" curl -fsSL https://mise.run | sh || {
     printf 'sgt-bootstrap: mise installation failed; install it manually from https://mise.run\n' >&2
     exit 1
   }
-  export PATH="$INSTALL_DIR:$HOME/.local/bin:$PATH"
+  export PATH="$INSTALL_DIR:$PATH"
   tool_available mise || {
     printf 'sgt-bootstrap: the mise installer completed but mise is not on PATH; install it manually from https://mise.run\n' >&2
     exit 1
@@ -427,7 +401,7 @@ if tool_available graphify; then
   printf 'OK: graphify\n'
 else
   printf 'INSTALLING: graphify\n'
-  uv tool install graphifyy
+  UV_TOOL_BIN_DIR="$INSTALL_DIR" uv tool install graphifyy
 fi
 
 # mise owns the repository's pinned tools and delegates the command links to
@@ -453,9 +427,7 @@ while IFS= read -r source_file; do
       install_failed=true
       ;;
   esac
-done <<EOF
-$sources
-EOF
+done <<< "$sources"
 
 report_manual_authentication 'MANUAL:'
 

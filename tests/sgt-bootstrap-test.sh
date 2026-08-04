@@ -11,8 +11,6 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BOOTSTRAP="$ROOT_DIR/bin/sgt-bootstrap"
-INSTALL="$ROOT_DIR/bin/sgt-install"
 
 # shellcheck source=bin/_sgt-install-manifest.sh
 source "$ROOT_DIR/bin/_sgt-install-manifest.sh"
@@ -36,6 +34,23 @@ HOST_BASH="$(host_utility bash)"
 # RETURN traps do not fire when fail() exits, which leaks temp directories.
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
+
+# Every command under test runs from a throwaway copy of this checkout, never
+# from the checkout itself. sgt-install and sgt-uninstall write to their own
+# repository's git hooks directory, so driving the real ROOT_DIR would install
+# and then delete the developer's pre-push hook as a side effect of running the
+# tests, and a hook the developer already owns would make the suite fail.
+FIXTURE_ROOT="$TEST_ROOT/checkout"
+mkdir -p "$FIXTURE_ROOT"
+cp -R "$ROOT_DIR/bin" "$FIXTURE_ROOT/bin"
+cp -R "$ROOT_DIR/scripts" "$FIXTURE_ROOT/scripts"
+cp -R "$ROOT_DIR/opencode" "$FIXTURE_ROOT/opencode"
+if command -v git >/dev/null 2>&1; then
+  git init -q "$FIXTURE_ROOT"
+fi
+
+BOOTSTRAP="$FIXTURE_ROOT/bin/sgt-bootstrap"
+INSTALL="$FIXTURE_ROOT/bin/sgt-install"
 # Assigns SANDBOX rather than printing it: a command substitution would run the
 # counter in a subshell and hand every test the same directory.
 _case=0
@@ -101,7 +116,7 @@ stub_sergeant_install() {
     target="$home_dir/.local/bin/${source_file##*/}"
     [[ -e "$target" || -L "$target" ]] || ln -s "$source_file" "$target"
   done <<EOF
-$(_sgt_install_sources "$ROOT_DIR")
+$(_sgt_install_sources "$FIXTURE_ROOT")
 EOF
 }
 
@@ -270,7 +285,7 @@ test_dry_run_reports_existing_and_conflicting_commands() {
 
   stub_platform "$temp_dir" Linux apt-get 84
   mkdir -p "$temp_dir/home/.local/bin"
-  ln -s "$ROOT_DIR/bin/sgt-dispatch" "$temp_dir/home/.local/bin/sgt-dispatch"
+  ln -s "$FIXTURE_ROOT/bin/sgt-dispatch" "$temp_dir/home/.local/bin/sgt-dispatch"
   printf 'custom command\n' > "$temp_dir/home/.local/bin/sgt-list"
 
   output="$(HOME="$temp_dir/home" PATH="$temp_dir/bin" "$BOOTSTRAP" --dry-run)"
@@ -660,7 +675,7 @@ test_install_repoints_dangling_sergeant_links() {
 
   HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" "$INSTALL" >/dev/null
 
-  [[ "$(readlink "$temp_dir/bin/sgt-list")" == "$ROOT_DIR/bin/sgt-list" ]] || \
+  [[ "$(readlink "$temp_dir/bin/sgt-list")" == "$FIXTURE_ROOT/bin/sgt-list" ]] || \
     fail 'sgt-install did not reclaim a dangling Sergeant link'
 }
 
@@ -718,7 +733,7 @@ test_install_repoints_another_sergeant_checkout() {
 
   HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" "$INSTALL" >/dev/null
 
-  [[ "$(readlink "$temp_dir/bin/sgt-list")" == "$ROOT_DIR/bin/sgt-list" ]] || \
+  [[ "$(readlink "$temp_dir/bin/sgt-list")" == "$FIXTURE_ROOT/bin/sgt-list" ]] || \
     fail 'sgt-install did not repoint a link from another Sergeant checkout'
 }
 
@@ -727,7 +742,7 @@ test_install_sweeps_links_for_removed_commands() {
   local temp_dir output
   new_sandbox; temp_dir="$SANDBOX"
   mkdir -p "$temp_dir/bin" "$temp_dir/home"
-  ln -s "$ROOT_DIR/bin/sgt-was-renamed-away" "$temp_dir/bin/sgt-was-renamed-away"
+  ln -s "$FIXTURE_ROOT/bin/sgt-was-renamed-away" "$temp_dir/bin/sgt-was-renamed-away"
 
   output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" "$INSTALL")"
 
@@ -741,8 +756,8 @@ test_install_removes_deprecated_oc_inject_links() {
   new_sandbox; temp_dir="$SANDBOX"
 
   mkdir -p "$temp_dir/bin" "$temp_dir/home/.config/opencode/plugins"
-  ln -s "$ROOT_DIR/bin/oc-inject" "$temp_dir/bin/oc-inject"
-  ln -s "$ROOT_DIR/opencode/plugins/oc-inject.js" \
+  ln -s "$FIXTURE_ROOT/bin/oc-inject" "$temp_dir/bin/oc-inject"
+  ln -s "$FIXTURE_ROOT/opencode/plugins/oc-inject.js" \
     "$temp_dir/home/.config/opencode/plugins/oc-inject.js"
 
   output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" "$INSTALL")"
@@ -802,6 +817,14 @@ test_install_warns_when_target_is_not_on_path() {
 # executes them fails the assertion instead of passing vacuously.
 stub_writing_harnesses() {
   local bin_dir="$1" home_dir="$2" command_name
+  # yq is instrumented too: the read-only modes are allowed to read its version
+  # string to tell mikefarah yq from the Python package, and nothing more.
+  cat > "$bin_dir/yq" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$home_dir/yq-invocations'
+printf 'yq (https://github.com/mikefarah/yq/) version v4.44.1\n'
+EOF
+  chmod +x "$bin_dir/yq"
   for command_name in gh opencode claude; do
     cat > "$bin_dir/$command_name" <<EOF
 #!/usr/bin/env bash
@@ -824,7 +847,12 @@ test_dry_run_invokes_no_third_party_command() {
   HOME="$temp_dir/home" PATH="$temp_dir/bin:$SYSTEM_PATH" "$BOOTSTRAP" --dry-run >/dev/null
 
   [[ ! -e "$temp_dir/home/harness-invocations" ]] || \
-    fail "dry-run executed a third-party command: $(cat "$temp_dir/home/harness-invocations")"
+    fail "dry-run executed an agent harness: $(cat "$temp_dir/home/harness-invocations")"
+  # The only permitted third-party invocation is reading yq's version.
+  if [[ -e "$temp_dir/home/yq-invocations" ]]; then
+    [[ "$(sort -u "$temp_dir/home/yq-invocations")" == '--version' ]] || \
+      fail "dry-run invoked yq beyond a version read: $(cat "$temp_dir/home/yq-invocations")"
+  fi
   assert_no_global_agent_config "$temp_dir/home" 'dry-run'
 }
 
@@ -845,7 +873,11 @@ test_verify_only_invokes_no_third_party_command() {
 
   [[ "$status" -eq 0 ]] || fail "expected a complete installation to verify, got $status"
   [[ ! -e "$temp_dir/home/harness-invocations" ]] || \
-    fail "verify-only executed a third-party command: $(cat "$temp_dir/home/harness-invocations")"
+    fail "verify-only executed an agent harness: $(cat "$temp_dir/home/harness-invocations")"
+  if [[ -e "$temp_dir/home/yq-invocations" ]]; then
+    [[ "$(sort -u "$temp_dir/home/yq-invocations")" == '--version' ]] || \
+      fail "verify-only invoked yq beyond a version read: $(cat "$temp_dir/home/yq-invocations")"
+  fi
   [[ ! -e "$temp_dir/home/.claude" ]] || fail 'verify-only wrote to global Claude configuration'
 }
 
@@ -1034,7 +1066,7 @@ test_empty_manifest_fails_every_mode() {
   mkdir -p "$temp_dir/fake/bin" "$temp_dir/home"
   cp "$ROOT_DIR/bin/_sgt-install-manifest.sh" "$temp_dir/fake/bin/"
   for script in sgt-bootstrap sgt-install sgt-uninstall; do
-    cp "$ROOT_DIR/bin/$script" "$temp_dir/fake/bin/$script"
+    cp "$FIXTURE_ROOT/bin/$script" "$temp_dir/fake/bin/$script"
   done
   # Move the manifest's inputs out of reach: bin/ now holds only copies whose
   # own root resolves to a directory with no installable commands.
@@ -1151,6 +1183,33 @@ test_install_preserves_a_users_own_hook() {
     fail "the user's own pre-push hook was replaced"
 }
 
+# Linked worktrees share one hooks directory with their primary checkout, so a
+# hook installed by a sibling Sergeant checkout must be repointed, not reported
+# as a user conflict that fails the install.
+test_install_repoints_a_hook_owned_by_another_sergeant_checkout() {
+  local temp_dir output status
+  new_sandbox; temp_dir="$SANDBOX"
+  require_git "sibling-checkout hook ownership" || return 0
+
+  make_fake_checkout "$temp_dir/checkout"
+  make_fake_checkout "$temp_dir/sibling"
+  ln -s "$temp_dir/sibling/scripts/hooks/pre-push" \
+    "$temp_dir/checkout/.git/hooks/pre-push"
+  mkdir -p "$temp_dir/bin" "$temp_dir/home"
+
+  set +e
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" \
+    "$temp_dir/checkout/bin/sgt-install" 2>&1)"
+  status=$?
+  set -e
+
+  [[ "$status" -eq 0 ]] || \
+    fail "a sibling checkout's hook was treated as a conflict: $output"
+  [[ "$(readlink "$temp_dir/checkout/.git/hooks/pre-push")" == \
+     "$temp_dir/checkout/scripts/hooks/pre-push" ]] || \
+    fail "the sibling checkout's hook was not repointed"
+}
+
 # ── sgt-uninstall ─────────────────────────────────────────────────────────────
 
 test_uninstall_removes_only_what_this_checkout_installed() {
@@ -1202,12 +1261,12 @@ test_uninstall_removes_a_link_for_a_command_no_longer_shipped() {
 
 test_manifest_excludes_non_regular_and_deprecated_entries() {
   local sources
-  sources="$(_sgt_install_sources "$ROOT_DIR")"
+  sources="$(_sgt_install_sources "$FIXTURE_ROOT")"
 
-  assert_contains "$sources" "$ROOT_DIR/bin/sgt-dispatch"
-  assert_contains "$sources" "$ROOT_DIR/bin/_sgt-lib.sh"
-  assert_contains "$sources" "$ROOT_DIR/bin/wiki-daily-digest"
-  assert_not_contains "$sources" "$ROOT_DIR/bin/oc-inject"
+  assert_contains "$sources" "$FIXTURE_ROOT/bin/sgt-dispatch"
+  assert_contains "$sources" "$FIXTURE_ROOT/bin/_sgt-lib.sh"
+  assert_contains "$sources" "$FIXTURE_ROOT/bin/wiki-daily-digest"
+  assert_not_contains "$sources" "$FIXTURE_ROOT/bin/oc-inject"
   assert_not_contains "$sources" '__pycache__'
 }
 
@@ -1260,6 +1319,7 @@ test_empty_manifest_fails_every_mode
 test_install_links_git_hooks_into_its_own_checkout
 test_install_never_touches_hooks_of_an_unrelated_repository
 test_install_preserves_a_users_own_hook
+test_install_repoints_a_hook_owned_by_another_sergeant_checkout
 test_uninstall_removes_only_what_this_checkout_installed
 test_uninstall_removes_a_link_for_a_command_no_longer_shipped
 test_manifest_excludes_non_regular_and_deprecated_entries

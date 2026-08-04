@@ -124,6 +124,101 @@ test_link_to_a_directory_is_a_conflict() {
   assert_state "$SOURCE" "$TEST_ROOT/s9" conflict
 }
 
+# A relative link target must be resolved against the directory holding the
+# link, never against the caller's working directory.
+test_relative_link_to_a_users_own_command_is_a_conflict() {
+  mkdir -p "$TEST_ROOT/s10/bin" "$TEST_ROOT/s10/mine"
+  printf 'user command\n' > "$TEST_ROOT/s10/mine/sgt-list"
+  ln -s '../mine/sgt-list' "$TEST_ROOT/s10/bin/sgt-list"
+  assert_state "$SOURCE" "$TEST_ROOT/s10/bin" conflict
+}
+
+# A checkout predating this manifest is still Sergeant's, so an upgrade must not
+# report Sergeant's own links to the user as their assets.
+test_link_into_a_legacy_sergeant_checkout_is_stale() {
+  mkdir -p "$TEST_ROOT/s11" "$TEST_ROOT/legacy/bin"
+  cp "$ROOT_DIR/bin/_sgt-lib.sh" "$TEST_ROOT/legacy/bin/"
+  printf '#!/usr/bin/env bash\n' > "$TEST_ROOT/legacy/bin/sgt-list"
+  ln -s "$TEST_ROOT/legacy/bin/sgt-list" "$TEST_ROOT/s11/sgt-list"
+  assert_state "$SOURCE" "$TEST_ROOT/s11" stale
+}
+
+# ── _sgt_install_managed_state ────────────────────────────────────────────────
+
+assert_managed_state() {
+  local target="$1" expected="$2" actual
+  actual="$(_sgt_install_managed_state "$target" '/mise/')"
+  [[ "$actual" == "$expected" ]] || \
+    fail "expected managed state '$expected' for $target, got '$actual'"
+}
+
+test_managed_absent_target_is_absent() {
+  mkdir -p "$TEST_ROOT/m1"
+  assert_managed_state "$TEST_ROOT/m1/uv" absent
+}
+
+test_managed_dangling_link_is_reclaimable() {
+  mkdir -p "$TEST_ROOT/m2"
+  ln -s "$TEST_ROOT/gone/uv" "$TEST_ROOT/m2/uv"
+  assert_managed_state "$TEST_ROOT/m2/uv" reclaim
+}
+
+test_managed_link_into_the_mise_tree_is_reclaimable() {
+  mkdir -p "$TEST_ROOT/m3" "$TEST_ROOT/mise/installs/uv/1.0/bin"
+  printf '#!/usr/bin/env bash\n' > "$TEST_ROOT/mise/installs/uv/1.0/bin/uv"
+  ln -s "$TEST_ROOT/mise/installs/uv/1.0/bin/uv" "$TEST_ROOT/m3/uv"
+  assert_managed_state "$TEST_ROOT/m3/uv" reclaim
+}
+
+test_managed_real_file_is_a_conflict() {
+  mkdir -p "$TEST_ROOT/m4"
+  printf 'not really uv\n' > "$TEST_ROOT/m4/uv"
+  assert_managed_state "$TEST_ROOT/m4/uv" conflict
+}
+
+# The defect this guards: an unresolved relative target is tested against the
+# caller's cwd, looks dangling, and is deleted.
+test_managed_relative_link_to_a_users_own_tool_is_a_conflict() {
+  mkdir -p "$TEST_ROOT/m5/bin" "$TEST_ROOT/m5/mine"
+  printf '#!/usr/bin/env bash\n' > "$TEST_ROOT/m5/mine/uv"
+  chmod +x "$TEST_ROOT/m5/mine/uv"
+  ln -s '../mine/uv' "$TEST_ROOT/m5/bin/uv"
+  assert_managed_state "$TEST_ROOT/m5/bin/uv" conflict
+}
+
+# ── _sgt_install_hooks_dir ────────────────────────────────────────────────────
+
+test_hooks_dir_is_absolute_for_a_plain_clone() {
+  local resolved
+  command -v git >/dev/null 2>&1 || { printf 'SKIP: hooks dir (no git)\n'; return 0; }
+  git init -q "$TEST_ROOT/h1"
+  resolved="$(_sgt_install_hooks_dir "$TEST_ROOT/h1")"
+  [[ "$resolved" == /* ]] || fail "hooks dir is not absolute: $resolved"
+  [[ "$resolved" == "$TEST_ROOT/h1/.git/hooks" ]] || fail "unexpected hooks dir: $resolved"
+}
+
+# A linked worktree's private git dir has no hooks/ and git never reads one
+# there, so the common directory is the only correct answer.
+test_hooks_dir_resolves_to_the_common_dir_for_a_worktree() {
+  local resolved
+  command -v git >/dev/null 2>&1 || { printf 'SKIP: worktree hooks dir (no git)\n'; return 0; }
+  git init -q "$TEST_ROOT/h2"
+  ( cd "$TEST_ROOT/h2" &&     git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init &&     git worktree add -q "$TEST_ROOT/h2wt" -b wt ) >/dev/null 2>&1
+  resolved="$(_sgt_install_hooks_dir "$TEST_ROOT/h2wt")"
+  [[ "$resolved" == "$TEST_ROOT/h2/.git/hooks" ]] || \
+    fail "worktree hooks dir resolved to '$resolved' instead of the common dir"
+}
+
+test_hooks_dir_honours_core_hooks_path() {
+  local resolved
+  command -v git >/dev/null 2>&1 || { printf 'SKIP: core.hooksPath (no git)\n'; return 0; }
+  git init -q "$TEST_ROOT/h3"
+  git -C "$TEST_ROOT/h3" config core.hooksPath .githooks
+  resolved="$(_sgt_install_hooks_dir "$TEST_ROOT/h3")"
+  [[ "$resolved" == "$TEST_ROOT/h3/.githooks" ]] || \
+    fail "core.hooksPath was ignored: $resolved"
+}
+
 # ── _sgt_command_available ────────────────────────────────────────────────────
 
 # `command -v` reports success for a non-executable file on PATH, which would
@@ -199,6 +294,16 @@ test_link_to_a_users_own_command_is_a_conflict
 test_link_to_a_users_own_wiki_daily_digest_is_a_conflict
 test_directory_at_target_is_a_conflict
 test_link_to_a_directory_is_a_conflict
+test_relative_link_to_a_users_own_command_is_a_conflict
+test_link_into_a_legacy_sergeant_checkout_is_stale
+test_managed_absent_target_is_absent
+test_managed_dangling_link_is_reclaimable
+test_managed_link_into_the_mise_tree_is_reclaimable
+test_managed_real_file_is_a_conflict
+test_managed_relative_link_to_a_users_own_tool_is_a_conflict
+test_hooks_dir_is_absolute_for_a_plain_clone
+test_hooks_dir_resolves_to_the_common_dir_for_a_worktree
+test_hooks_dir_honours_core_hooks_path
 test_non_executable_file_on_path_is_not_available
 test_executable_on_path_is_available
 test_dangling_link_on_path_is_not_available
