@@ -97,6 +97,12 @@ EOF
 
 _make_repo victim 7
 
+# 10 tasks cycling open, in_progress, open, blocked, open, in_review, open,
+# closed, in_progress, blocked → 9 non-closed, of which 4 are open.
+_make_repo mixed 10
+printf 'open\nin_progress\nopen\nblocked\nopen\nin_review\nopen\nclosed\nin_progress\nblocked\n' \
+  > "$dev_root/mixed/.td-task-statuses"
+
 cat > "$config/nopath.yaml" <<EOF
 name: nopath
 repos:
@@ -113,6 +119,13 @@ repos:
   - name: victim
     path: victim
 YAML
+
+cat > "$config/mixed.yaml" <<EOF
+name: mixed
+repos:
+  - name: mixed
+    path: mixed
+EOF
 
 cat > "$config/norepos.yaml" <<EOF
 name: norepos
@@ -164,6 +177,7 @@ if not argv or argv[0] not in ("list", "ls"):
     sys.exit(0)
 
 work_dir = "."
+td_filter = ""
 limit = 50  # real td default
 idx = 1
 while idx < len(argv):
@@ -181,6 +195,7 @@ while idx < len(argv):
         limit = int(arg[2:])
         idx += 1
     elif arg == "--filter":
+        td_filter = argv[idx + 1]
         idx += 2
     else:
         idx += 1
@@ -224,23 +239,42 @@ if not count_file.is_file():
     sys.exit(1)
 
 total = int(count_file.read_text().strip())
-if limit < 0:
-    emitted = total          # td's unlimited idiom
-elif limit == 0:
-    emitted = min(total, 50) # real td: 0 falls back to its silent default
-else:
-    emitted = min(total, limit)
 
-tasks = [
-    {
-        "id": "td-%06d" % (n + 1),
-        "title": "task %d" % (n + 1),
-        "status": "open",
-        "type": "bug",
-        "priority": "P%d" % (n % 4),
-    }
-    for n in range(emitted)
-]
+statuses_file = Path(work_dir) / ".td-task-statuses"
+if statuses_file.is_file():
+    # One status per line, cycled over the repo's tasks.
+    cycle = [line for line in statuses_file.read_text().split() if line]
+else:
+    cycle = ["open"]
+
+want_status = ""
+for clause in td_filter.split(" AND "):
+    if clause.startswith("status="):
+        want_status = clause[len("status="):]
+
+tasks = []
+for n in range(total):
+    status = cycle[n % len(cycle)]
+    if status == "closed":
+        continue                      # real td excludes closed without --all
+    if want_status and status != want_status:
+        continue
+    tasks.append(
+        {
+            "id": "td-%06d" % (n + 1),
+            "title": "task %d" % (n + 1),
+            "status": status,
+            "type": "bug",
+            "priority": "P%d" % (n % 4),
+        }
+    )
+
+if limit < 0:
+    pass                              # td's unlimited idiom
+elif limit == 0:
+    tasks = tasks[:50]                # real td: 0 falls back to its default
+else:
+    tasks = tasks[:limit]
 print(json.dumps(tasks, indent=2))
 EOF
 chmod +x "$fake_bin/td"
@@ -1049,5 +1083,63 @@ wait "$signal_pid" || signal_status=$?
   _fail "signal_never_reports_success: the workspace must be removed when a signal ends the run"
 }
 printf 'signal_never_reports_success: ok\n'
+
+# ── 28. Status filtering is explicit, and the complete view is complete ────────
+
+# The default view is narrowed to status=open.  That narrowing is a documented,
+# printed filter — not a silent cap — but it does withhold non-closed work, so
+# the header has to say so and --all has to return everything non-closed.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/mixed.out"; err="$TEST_ROOT/mixed.err"
+_run "$out" "$err" -- mixed
+_expect_status 0 default_view_is_labelled "$err"
+grep -qF '[status=open]' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "default_view_is_labelled: the narrowed default view must name its filter in the header"
+}
+grep -qF '── mixed (4)' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "default_view_is_labelled: expected the 4 open tasks under the default filter"
+}
+printf 'default_view_is_labelled: ok\n'
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/mixed-all.out"; err="$TEST_ROOT/mixed-all.err"
+_run "$out" "$err" -- mixed --all
+_expect_status 0 all_reports_every_non_closed_task "$err"
+grep -qF '── mixed (9)' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "all_reports_every_non_closed_task: expected all 9 non-closed tasks (closed excluded)"
+}
+grep -qF '9 task(s) total' "$out" || _fail "all_reports_every_non_closed_task: total must match"
+printf 'all_reports_every_non_closed_task: ok\n'
+
+# The same must hold on the machine-readable path, statuses included.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/mixed-json.out"; err="$TEST_ROOT/mixed-json.err"
+_run "$out" "$err" -- mixed --all --json
+_expect_status 0 all_json_reports_every_status "$err"
+statuses="$("$REAL_PYTHON" -c '
+import collections, json, sys
+tasks = json.load(open(sys.argv[1]))
+counts = collections.Counter(t["status"] for t in tasks)
+print(len(tasks), " ".join("%s=%d" % (k, counts[k]) for k in sorted(counts)))' "$out")"
+[[ "$statuses" == "9 blocked=2 in_progress=2 in_review=1 open=4" ]] || {
+  printf 'actual statuses: %s\n' "$statuses" >&2
+  _fail "all_json_reports_every_status: --all --json must carry every non-closed status"
+}
+printf 'all_json_reports_every_status: ok\n'
+
+# An explicit --status still narrows to exactly that status.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/mixed-blocked.out"; err="$TEST_ROOT/mixed-blocked.err"
+_run "$out" "$err" -- mixed --status blocked
+_expect_status 0 explicit_status_filter "$err"
+grep -qF '── mixed (2)' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "explicit_status_filter: --status blocked must report exactly the blocked tasks"
+}
+grep -qF '[status=blocked]' "$out" || _fail "explicit_status_filter: the header must name the filter"
+printf 'explicit_status_filter: ok\n'
 
 printf '\nAll sgt-td-list tests passed.\n'
