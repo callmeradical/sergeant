@@ -222,7 +222,7 @@ if grep -Fq 'private prompt contents' "$TEST_ROOT/td.log" "$WORKTREE/.sergeant-m
   exit 1
 fi
 
-TD_LIST_RESULT='[{"id":"td-existing","status":"in_progress","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review"}]' \
+TD_LIST_RESULT="[{\"id\":\"td-existing\",\"status\":\"in_progress\",\"description\":\"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review\nFinding content digest: $std1_digest\"}]" \
   run_router "$TEST_ROOT/findings.json"
 grep -Fq 'update td-existing' "$TEST_ROOT/td.log"
 grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log"
@@ -232,7 +232,7 @@ if grep -Fq 'reopen td-existing' "$TEST_ROOT/td.log"; then
 fi
 
 # dedup update with a different fleet task ID must write the new ID into the body
-TD_LIST_RESULT='[{"id":"td-existing","status":"in_progress","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review"}]' \
+TD_LIST_RESULT="[{\"id\":\"td-existing\",\"status\":\"in_progress\",\"description\":\"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review\nFinding content digest: $std1_digest\"}]" \
   ROUTER_TASK_ID='fleet-new' run_router "$TEST_ROOT/findings.json"
 grep -Fq 'update td-existing' "$TEST_ROOT/td.log"
 grep -Fq 'Originating fleet task: fleet-new' "$TEST_ROOT/td.log"
@@ -252,7 +252,7 @@ update_line="$(grep -nF 'update td-closed' "$TEST_ROOT/td.log" | tail -1 | cut -
 [[ "$reopen_line" -lt "$update_line" ]]
 
 # deferred existing task must NOT have deferral cleared on rerun — preserve defer_until
-TD_LIST_RESULT='[{"id":"td-deferred","status":"in_progress","defer_until":"2099-01-01","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review"}]' \
+TD_LIST_RESULT="[{\"id\":\"td-deferred\",\"status\":\"in_progress\",\"defer_until\":\"2099-01-01\",\"description\":\"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review\nFinding content digest: $std1_digest\"}]" \
   run_router "$TEST_ROOT/findings.json"
 if grep -Fq 'defer td-deferred --clear' "$TEST_ROOT/td.log"; then
   printf 'deferred task had deferral cleared on rerun — must be preserved\n' >&2
@@ -261,7 +261,7 @@ fi
 grep -Fq 'update td-deferred' "$TEST_ROOT/td.log"
 
 # dedup update must preserve manually added labels — not replace them with only standard ones
-TD_LIST_RESULT='[{"id":"td-labelled","status":"open","defer_until":"","labels":["independent-review","finding","standards","urgent","security"],"description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review"}]' \
+TD_LIST_RESULT="[{\"id\":\"td-labelled\",\"status\":\"open\",\"defer_until\":\"\",\"labels\":[\"independent-review\",\"finding\",\"standards\",\"urgent\",\"security\"],\"description\":\"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review\nFinding content digest: $std1_digest\"}]" \
   run_router "$TEST_ROOT/findings.json"
 if ! grep -Fq 'urgent' "$TEST_ROOT/td.log"; then
   printf 'dedup update dropped manually added label "urgent"\n' >&2
@@ -501,6 +501,7 @@ printf '{"findings":[{"id":"spec-1","severity":"warning","disposition":"actionab
 ROUTER_PARENT_TASK=td-parent-a ROUTER_BRANCH=feat/a run_router "$TEST_ROOT/spec1-parent-a.json"
 [[ "$status" -eq 0 ]] || { printf 'parent-A route failed: %s\n' "$output" >&2; exit 1; }
 marker_a="$(grep -o 'independent-review-finding:[^ ]*' "$TEST_ROOT/td.log" | head -1)"
+spec1_digest="$(grep -o 'Finding content digest: [0-9a-f]*' "$TEST_ROOT/td.log" | head -1 | awk '{print $4}')"
 [[ -n "$marker_a" ]] || { printf 'no dedup marker recorded for parent A\n' >&2; exit 1; }
 
 TD_LIST_RESULT="[{\"id\":\"td-parent-a-card\",\"status\":\"closed\",\"description\":\"Deduplication key: $marker_a\"}]" \
@@ -528,356 +529,167 @@ marker_b="$(grep -o 'independent-review-finding:[^ ]*' "$TEST_ROOT/td.log" | hea
   exit 1
 }
 
-# Same parent task and branch must still dedup onto the same card.
-TD_LIST_RESULT="[{\"id\":\"td-same-scope\",\"status\":\"open\",\"description\":\"Deduplication key: $marker_a\"}]" \
+# Same parent task and branch, and the same finding content, must still dedup onto
+# the same card rather than refusing.
+TD_LIST_RESULT="[{\"id\":\"td-same-scope\",\"status\":\"open\",\"description\":\"Deduplication key: $marker_a\nFinding content digest: $spec1_digest\"}]" \
   ROUTER_PARENT_TASK=td-parent-a ROUTER_BRANCH=feat/a run_router "$TEST_ROOT/spec1-parent-a.json"
 grep -Fq 'update td-same-scope' "$TEST_ROOT/td.log" || {
   printf 'same-scope rerun did not dedup onto the existing card\n' >&2
   exit 1
 }
 
-# ── td-52d7c2: a dedup update must preserve the previous description and
-# reconcile the title, so review evidence is never destroyed and the title and
-# body cannot describe different findings. ───────────────────────────────────
+# ── td-e0d2ee (owner decision): the REFUSAL branch. The router composes, compares
+# and declines. It never reads a stored card body back to merge, reconcile or
+# rewrite it, so a stored description and a stored title cannot be lost by a write
+# that never happens, and a tampered stored body cannot inject anything — it can
+# only cause a refusal. ───────────────────────────────────────────────────────
 stored_marker='independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review'
 existing_card() {
-  STORED_BODY="$1" STORED_STATUS="${2:-open}" python3 -c '
-import json, os, sys
+  STORED_BODY="$1" STORED_STATUS="${2:-open}" STORED_TITLE="${3:-review: Unsafe cleanup}" python3 -c '
+import json, os
 print(json.dumps([{
   "id": "td-revised",
   "status": os.environ["STORED_STATUS"],
   "defer_until": "",
   "labels": ["independent-review", "finding", "standards"],
+  "title": os.environ["STORED_TITLE"],
   "description": os.environ["STORED_BODY"],
 }]))'
 }
 
-read -r -d '' stored_body <<STORED || true
+# A card the router wrote for THIS finding: its content digest matches, so a rerun
+# deduplicates normally rather than refusing on every second write.
+TD_LIST_RESULT=null run_router "$TEST_ROOT/one.json"
+matching_body="$(cat "$TEST_ROOT/td-desc")"
+[[ -n "$matching_body" ]] || { printf 'no routed body captured\n' >&2; exit 1; }
+
+TD_LIST_RESULT="$(existing_card "$matching_body")" ROUTER_TASK_ID=fleet-later \
+  run_router "$TEST_ROOT/one.json"
+[[ "$status" -eq 2 ]] || { printf 'a matching rerun did not gate its error finding: %s\n' "$output" >&2; exit 1; }
+[[ "$output" == *'td td-revised deduplicated'* ]] || {
+  printf 'a matching rerun did not deduplicate: %s\n' "$output" >&2
+  exit 1
+}
+[[ "$output" != *'refused'* ]] || {
+  printf 'a matching rerun was refused: %s\n' "$output" >&2
+  exit 1
+}
+# The description and the title are never rewritten, so nothing stored can be lost.
+if grep -Eq '^update .*--description' "$TEST_ROOT/td.log"; then
+  printf 'a dedup update rewrote the stored description\n' >&2
+  exit 1
+fi
+if grep -Eq '^update .*--title' "$TEST_ROOT/td.log"; then
+  printf 'a dedup update rewrote the stored title\n' >&2
+  exit 1
+fi
+# Provenance stays current through a comment instead.
+grep -Fq 'Originating fleet task: fleet-later' "$TEST_ROOT/td.log" || {
+  printf 'a dedup update did not record the current occurrence\n' >&2
+  exit 1
+}
+grep -Fq -- '--priority P1' "$TEST_ROOT/td.log"
+
+# Any divergence refuses that one finding and leaves the card completely untouched.
+assert_refused() {
+  local label="$1" stored="$2"
+  TD_LIST_RESULT="$(existing_card "$stored")" run_router "$TEST_ROOT/one.json"
+  [[ "$output" == *'td td-revised refused'* ]] || {
+    printf 'a diverged stored body was not refused (%s): %s\n' "$label" "$output" >&2
+    exit 1
+  }
+  if grep -Eq '^(update|reopen|defer) td-revised' "$TEST_ROOT/td.log"; then
+    printf 'a refused finding still mutated its card (%s)\n' "$label" >&2
+    exit 1
+  fi
+  [[ "$output" == *'std-1'* && "$output" == *'standards'* ]] || {
+    printf 'a refusal did not name the finding and axis (%s): %s\n' "$label" "$output" >&2
+    exit 1
+  }
+  [[ "$output" == *'Reconcile td td-revised by hand'* ]] || {
+    printf 'a refusal did not name the supported next action (%s): %s\n' "$label" "$output" >&2
+    exit 1
+  }
+}
+
+read -r -d '' diverged_digest_body <<DIVERGED || true
 Independent review finding.
 
 Review axis: standards
 Review source: code-review
-Severity: warning
-Summary: Original recorded finding
-Evidence: bin/original:7 original evidence marker
-Affected paths: bin/original
-Acceptance criteria: original criterion
-Recommended remediation: original remediation
-Branch: fix/review
-Head SHA: abc1234
-Parent mission: td-parent
-Originating fleet task: fleet-1
+Evidence: a completely different finding that a human recorded here
 
 Deduplication key: $stored_marker
-Finding content digest: 0000000000000000
-STORED
+Finding content digest: 00000000000000000000000000000000
+DIVERGED
+assert_refused 'different finding' "$diverged_digest_body"
 
-TD_LIST_RESULT="$(existing_card "$stored_body")" run_router "$TEST_ROOT/findings.json"
-grep -Fq 'update td-revised' "$TEST_ROOT/td.log"
-grep -Fq 'bin/original:7 original evidence marker' "$TEST_ROOT/td.log" || {
-  printf 'dedup update discarded the previous description\n' >&2
-  exit 1
-}
-grep -Fq 'bin/run:42 can remove another pane' "$TEST_ROOT/td.log" || {
-  printf 'dedup update did not record the incoming finding\n' >&2
-  exit 1
-}
-grep -Fq -- '--title review: Unsafe cleanup' "$TEST_ROOT/td.log" || {
-  printf 'dedup update did not reconcile the title with the new finding\n' >&2
-  exit 1
-}
-grep -Fq 'Summary: Unsafe cleanup' "$TEST_ROOT/td.log" || {
-  printf 'finding summary is not recorded in the body\n' >&2
-  exit 1
-}
-
-# An unchanged rerun must refresh the current revision in place, not stack a
-# duplicate revision on every routing pass.
-# A pristine card is one the router itself wrote, so capture a real one rather
-# than hand-building a body the router cannot prove it authored.
-TD_LIST_RESULT=null ROUTER_TASK_ID=fleet-old run_router "$TEST_ROOT/one.json"
-unchanged_body="$(cat "$TEST_ROOT/td-desc")"
-TD_LIST_RESULT="$(existing_card "$unchanged_body")" run_router "$TEST_ROOT/one.json"
-grep -Fq 'update td-revised' "$TEST_ROOT/td.log"
-[[ "$(grep -c 'Superseded revision (preserved)' "$TEST_ROOT/td.log")" -eq 0 ]] || {
-  printf 'unchanged rerun stacked a duplicate revision\n' >&2
-  exit 1
-}
-grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log" || {
-  printf 'unchanged rerun did not refresh the current revision metadata\n' >&2
-  exit 1
-}
-
-# A closed card whose stored finding differs from the incoming finding must not be
-# SILENTLY reopened: it is reopened with the stored body kept verbatim as a
-# preserved revision and an explicit reconciliation warning is printed. It must
-# not abort the batch, because the normal remediate/close/rerun loop shifts a
-# finding's evidence and so changes its digest (td-f36fd3).
-TD_LIST_RESULT="$(existing_card "$stored_body" closed)" run_router "$TEST_ROOT/findings.json"
-grep -Fq 'reopen td-revised' "$TEST_ROOT/td.log" || {
-  printf 'closed mismatched card was not reopened\n' >&2
-  exit 1
-}
-grep -Fq 'update td-revised' "$TEST_ROOT/td.log" || {
-  printf 'closed mismatched card was not updated\n' >&2
-  exit 1
-}
-[[ "$output" == *'records a different finding'* ]] || {
-  printf 'closed mismatched card was reopened without a reconciliation warning: %s\n' "$output" >&2
-  exit 1
-}
-# The obligation must also be durable in td, not only in the worker's stderr
-# (td-3ab1c1, td-a1452c, td-f45e3c).
-grep -Fq 'needs-reconciliation' "$TEST_ROOT/td.log" || {
-  printf 'reopened closed card carries no durable needs-reconciliation label\n' >&2
-  exit 1
-}
-grep -Fq 'bin/original:7 original evidence marker' "$TEST_ROOT/td.log" || {
-  printf 'closed mismatched card lost its stored description\n' >&2
-  exit 1
-}
-grep -Fq 'Superseded revision (preserved)' "$TEST_ROOT/td.log" || {
-  printf 'closed mismatched card did not preserve the stored body as a revision\n' >&2
-  exit 1
-}
-# The rest of the batch must still route: std-2 follows std-1 in findings.json.
-grep -Fq 'Long function' "$TEST_ROOT/td.log" || {
-  printf 'a reconciled closed card aborted the remaining findings in the batch\n' >&2
-  exit 1
-}
-
-# A closed card recording the SAME finding still reopens and updates, with no
-# reconciliation warning because nothing needed reconciling.
-TD_LIST_RESULT="$(existing_card "$unchanged_body" closed)" run_router "$TEST_ROOT/findings.json"
-grep -Fq 'reopen td-revised' "$TEST_ROOT/td.log"
-grep -Fq 'update td-revised' "$TEST_ROOT/td.log"
-[[ "$output" != *'records a different finding'* ]] || {
-  printf 'unchanged closed card produced a spurious reconciliation warning\n' >&2
-  exit 1
-}
-if grep -Fq 'needs-reconciliation' "$TEST_ROOT/td.log"; then
-  printf 'unchanged closed card was labelled needs-reconciliation\n' >&2
-  exit 1
-fi
-
-# td-4e009d / td-8c1e7b: a card predating content digests cannot be compared, so
-# the router must say so rather than asserting it records a different finding.
 read -r -d '' digestless_body <<DIGESTLESS || true
 Independent readiness review finding.
 
-Review axis: standards
-Review source: code-review
+Some hand-written prose that predates content digests entirely, of exactly the
+shape td-36da4d and td-0fc5bf carry today.
 
 Deduplication key: $stored_marker
 DIGESTLESS
-TD_LIST_RESULT="$(existing_card "$digestless_body" closed)" run_router "$TEST_ROOT/findings.json"
-grep -Fq 'reopen td-revised' "$TEST_ROOT/td.log"
-[[ "$output" == *'predates content digests'* ]] || {
-  printf 'a digestless closed card was not reported as uncomparable: %s\n' "$output" >&2
-  exit 1
-}
-[[ "$output" != *'records a different finding'* ]] || {
-  printf 'a digestless closed card was falsely reported as a different finding: %s\n' "$output" >&2
-  exit 1
-}
-grep -Fq 'Independent readiness review finding.' "$TEST_ROOT/td.log" || {
-  printf 'a digestless closed card lost its stored description\n' >&2
-  exit 1
-}
+assert_refused 'no digest at all' "$digestless_body"
 
-# An unchanged rerun must not discard text the router did not write. A card whose
-# CURRENT revision block carries a human annotation is preserved as a superseded
-# revision rather than replaced in place (td-898b65).
-read -r -d '' annotated_body <<ANNOTATED || true
+read -r -d '' edited_digest_body <<EDITED || true
 Independent review finding.
 
-Review axis: standards
-Review source: code-review
-Severity: error
-Summary: Unsafe cleanup
-Evidence: bin/run:42 can remove another pane
-Affected paths: bin/run
-Acceptance criteria: Match exact pane identity
-Recommended remediation: Use exact identity matching
-Branch: fix/review
-Head SHA: abc1234
-Parent mission: td-parent
-Originating fleet task: fleet-1
-
 Deduplication key: $stored_marker
-Finding content digest: $std1_digest
+Finding content digest: $std1_digest  <-- verified stale by lars
+EDITED
+assert_refused 'hand-edited digest line' "$edited_digest_body"
 
-Update from the owning worker: partially remediated in commit deadbee; the pane
-identity check landed but the ledger invariant is still open.
-ANNOTATED
-TD_LIST_RESULT="$(existing_card "$annotated_body")" run_router "$TEST_ROOT/one.json"
-grep -Fq 'update td-revised' "$TEST_ROOT/td.log"
-grep -Fq 'partially remediated in commit deadbee' "$TEST_ROOT/td.log" || {
-  printf 'unchanged rerun discarded a human annotation from the current revision\n' >&2
+# A refusal must not abort the run: the rest of the batch still routes.
+diverged_body="$diverged_digest_body"
+TD_LIST_RESULT="$(existing_card "$diverged_body")" run_router "$TEST_ROOT/findings.json"
+[[ "$output" == *'td td-revised refused'* ]] || {
+  printf 'the batch case was not refused: %s\n' "$output" >&2
   exit 1
 }
-grep -Fq 'Superseded revision (preserved)' "$TEST_ROOT/td.log" || {
-  printf 'annotated card was refreshed in place instead of preserving the annotation\n' >&2
-  exit 1
-}
-
-[[ "$output" == *'previous revision preserved'* ]] || {
-  printf 'preserving a revision was not reported on stdout: %s\n' "$output" >&2
+grep -Fq 'Long function' "$TEST_ROOT/td.log" || {
+  printf 'a refusal aborted the remaining findings in the batch\n' >&2
   exit 1
 }
 
-# Once the annotation is preserved below the separator, a further unchanged rerun
-# refreshes in place rather than stacking a revision every pass. Driven as a real
-# round trip: the description the router just wrote becomes the stored
-# description for the next route, so the settling claim is proved by the router's
-# own output rather than a hand-written fixture (td-bdce0f).
-TD_LIST_RESULT="$(existing_card "$(cat "$TEST_ROOT/td-desc")")" run_router "$TEST_ROOT/one.json"
-[[ "$(grep -c 'Superseded revision (preserved)' "$TEST_ROOT/td.log")" -eq 1 ]] || {
-  printf 'a settled card stacked another revision on an unchanged rerun\n' >&2
+# When EVERY finding is refused the axis recorded no evidence at all, which is a
+# routing failure rather than a silent success.
+TD_LIST_RESULT="$(existing_card "$diverged_body")" run_router "$TEST_ROOT/one.json"
+[[ "$status" -eq 2 ]] || { printf 'an all-refused route reported success: %s\n' "$output" >&2; exit 1; }
+[[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]] || {
+  printf 'an all-refused route left the worker unblocked\n' >&2
   exit 1
 }
-grep -Fq 'partially remediated in commit deadbee' "$TEST_ROOT/td.log" || {
-  printf 'a settled card lost its preserved revision\n' >&2
-  exit 1
-}
-[[ "$output" != *'previous revision preserved'* ]] || {
-  printf 'a settled unchanged rerun still reported preserving a revision: %s\n' "$output" >&2
+grep -Fq 'every finding was refused' "$WORKTREE/.sergeant-message" || {
+  printf 'an all-refused route did not publish why\n' >&2
   exit 1
 }
 
-# td-257734 / td-c4acbc / td-bdce0f: a human edit made INLINE on a line the router
-# owns must survive. The fixture MUST be the router's own output, so the stored
-# block carries a valid provenance digest and the assertion is about the digest
-# VALUE rather than the mere presence of a digest line. Reducing untouched() to a
-# label-presence check must fail these cases.
-TD_LIST_RESULT=null run_router "$TEST_ROOT/one.json"
-pristine_body="$(cat "$TEST_ROOT/td-desc")"
-[[ -n "$pristine_body" ]] || { printf 'no pristine router body captured\n' >&2; exit 1; }
-grep -q '^Revision block digest: [0-9a-f]\{32\}$' <<< "$pristine_body" || {
-  printf 'router body carries no provenance digest\n' >&2
-  exit 1
-}
-
-edit_body_line() {
-  # Replace exactly the line with the given prefix, leaving every other byte of
-  # the router-written block, including its provenance digest, untouched.
-  SRC="$1" PREFIX="$2" REPLACEMENT="$3" python3 -c '
-import os, sys
-prefix = os.environ["PREFIX"]
-replacement = os.environ["REPLACEMENT"]
-lines = os.environ["SRC"].split("\n")
-hit = False
-for i, line in enumerate(lines):
-    if line.startswith(prefix):
-        lines[i] = replacement
-        hit = True
-        break
-if not hit:
-    sys.exit("fixture prefix not present: " + prefix)
-sys.stdout.write("\n".join(lines))'
-}
-
-while IFS='|' read -r _prefix _replacement; do
-  [[ -n "$_prefix" ]] || continue
-  inline_body="$(edit_body_line "$pristine_body" "$_prefix" "$_replacement")" || exit 1
-  # Prove the fixture actually changed the line it names and nothing else.
-  [[ "$inline_body" != "$pristine_body" ]] || {
-    printf 'inline fixture did not modify the body: %s\n' "$_prefix" >&2
-    exit 1
-  }
-  grep -Fq -- "$_replacement" <<< "$inline_body" || {
-    printf 'inline fixture did not contain its replacement: %s\n' "$_replacement" >&2
-    exit 1
-  }
-  grep -q '^Revision block digest: [0-9a-f]\{32\}$' <<< "$inline_body" || {
-    printf 'inline fixture lost the provenance digest: %s\n' "$_prefix" >&2
-    exit 1
-  }
-  TD_LIST_RESULT="$(existing_card "$inline_body")" run_router "$TEST_ROOT/one.json"
-  grep -Fq -- "$_replacement" "$TEST_ROOT/td.log" || {
-    printf 'an inline human edit on a router-owned line was discarded: %s\n' "$_replacement" >&2
-    exit 1
-  }
-  grep -Fq 'Superseded revision (preserved)' "$TEST_ROOT/td.log" || {
-    printf 'an inline human edit did not force revision preservation: %s\n' "$_prefix" >&2
-    exit 1
-  }
-done <<'INLINE_CASES'
-Severity: |Severity: error (downgraded to warning by lars, see thread)
-Acceptance criteria: |Acceptance criteria: Match exact pane identity -- and the ledger invariant
-Independent review finding.|Independent review finding. DO NOT CLOSE, see thread
-Evidence: |Evidence: bin/run:42 can remove another pane -- also reproduced by lars
-INLINE_CASES
-
-# Tampering ONLY the provenance digest value, leaving every body line pristine,
-# must also force preservation: the block can no longer be proved to be router
-# output.
-tampered_body="$(edit_body_line "$pristine_body" 'Revision block digest: ' \
-  'Revision block digest: 00000000000000000000000000000000')"
-TD_LIST_RESULT="$(existing_card "$tampered_body")" run_router "$TEST_ROOT/one.json"
-grep -Fq 'Superseded revision (preserved)' "$TEST_ROOT/td.log" || {
-  printf 'a tampered provenance digest did not force revision preservation\n' >&2
-  exit 1
-}
-[[ "$output" == *'previous revision preserved'* ]] || {
-  printf 'a tampered provenance digest was not reported: %s\n' "$output" >&2
-  exit 1
-}
-
-# td-9de8aa title half: the router overwrites the card title on every update, so a
-# stored title carrying content absent from the body must be preserved. This is
-# the shape of the real cards td-36da4d and td-0fc5bf, whose summary exists only
-# in their title.
-TD_LIST_RESULT="$(TITLED_BODY="$pristine_body" python3 -c '
-import json, os
-print(json.dumps([{"id":"td-titled","status":"open","defer_until":"",
-                   "labels":["independent-review","finding","standards"],
-                   "title":"review: the only copy of this summary lives in the title",
-                   "description":os.environ["TITLED_BODY"]}]))')" \
+# A hand-edited title on an otherwise matching card is never overwritten, because
+# the router does not write titles on the dedup path at all. td-36da4d and
+# td-0fc5bf carry their summary only in the title.
+TD_LIST_RESULT="$(existing_card "$matching_body" open 'review: the only copy of this summary lives in the title')" \
   run_router "$TEST_ROOT/one.json"
-grep -Fq 'update td-titled' "$TEST_ROOT/td.log"
-grep -Fq 'Previous title: review: the only copy of this summary lives in the title' "$TEST_ROOT/td.log" || {
-  printf 'a dedup update discarded the previous card title\n' >&2
+if grep -Eq '^update .*--title' "$TEST_ROOT/td.log"; then
+  printf 'a dedup update overwrote a hand-edited title\n' >&2
   exit 1
-}
-grep -Fq 'Superseded revision (preserved)' "$TEST_ROOT/td.log" || {
-  printf 'a changed title did not force revision preservation\n' >&2
-  exit 1
-}
+fi
 
-# A stored title equal to the one the router is about to write is not a change and
-# must not stack a revision.
-TD_LIST_RESULT="$(TITLED_BODY="$pristine_body" python3 -c '
-import json, os
-print(json.dumps([{"id":"td-titled","status":"open","defer_until":"",
-                   "labels":["independent-review","finding","standards"],
-                   "title":"review: Unsafe cleanup",
-                   "description":os.environ["TITLED_BODY"]}]))')" \
-  run_router "$TEST_ROOT/one.json"
-[[ "$(grep -c 'Superseded revision (preserved)' "$TEST_ROOT/td.log")" -eq 0 ]] || {
-  printf 'an unchanged title stacked a preserved revision\n' >&2
+# A closed card matching the finding is reopened and reported, not abandoned.
+TD_LIST_RESULT="$(existing_card "$matching_body" closed)" run_router "$TEST_ROOT/one.json"
+grep -Fq 'reopen td-revised' "$TEST_ROOT/td.log"
+[[ "$output" == *'reopened'* ]] || {
+  printf 'a reopen was not reported: %s\n' "$output" >&2
   exit 1
 }
-
-# A pristine router-written card whose only difference is metadata the router
-# rewrites every pass (head SHA, fleet task) must still refresh in place, or every
-# rerun would stack a revision.
-TD_LIST_RESULT=null run_router "$TEST_ROOT/one.json"
-pristine_desc="$(cat "$TEST_ROOT/td-desc")"
-TD_LIST_RESULT="$(existing_card "$pristine_desc")" ROUTER_TASK_ID=fleet-later \
-  run_router "$TEST_ROOT/one.json"
-[[ "$(grep -c 'Superseded revision (preserved)' "$TEST_ROOT/td.log")" -eq 0 ]] || {
-  printf 'a metadata-only change stacked a preserved revision\n' >&2
+# A closed card that has DIVERGED is refused, so it is not reopened either.
+TD_LIST_RESULT="$(existing_card "$diverged_body" closed)" run_router "$TEST_ROOT/one.json"
+if grep -Fq 'reopen td-revised' "$TEST_ROOT/td.log"; then
+  printf 'a diverged closed card was reopened instead of refused\n' >&2
   exit 1
-}
-grep -Fq 'Originating fleet task: fleet-later' "$TEST_ROOT/td.log" || {
-  printf 'a metadata-only refresh did not update the fleet task\n' >&2
-  exit 1
-}
-[[ "$output" != *'previous revision preserved'* ]] || {
-  printf 'a metadata-only refresh reported preserving a revision\n' >&2
-  exit 1
-}
+fi
 
 # ── td-61a0c8: the router must accept exactly the shared axis vocabulary ──────
 # bin/sgt-dispatch mandates an independent readiness review and tells workers to
@@ -1210,43 +1022,6 @@ set -e
 }
 
 
-# ── td-898b65: the router-owned line allowlist must cover every line the router
-# writes into a card body, or the "did a human edit this block?" check would
-# misread a new router line as an annotation and stack a preserved revision on
-# every unchanged rerun. The router asserts this about its own composed body on
-# each dedup update, so every dedup test above already exercises it; this case
-# pins the failure mode explicitly by planting an unrecognised line in the stored
-# CURRENT block and proving it is treated as content to preserve.
-read -r -d '' foreign_line_body <<FOREIGN || true
-Independent review finding.
-
-Review axis: standards
-Review source: code-review
-Severity: error
-Summary: Unsafe cleanup
-Evidence: bin/run:42 can remove another pane
-Affected paths: bin/run
-Acceptance criteria: Match exact pane identity
-Recommended remediation: Use exact identity matching
-Branch: fix/review
-Head SHA: abc1234
-Parent mission: td-parent
-Originating fleet task: fleet-1
-Unrecognised prefix: this line is not one the router writes
-
-Deduplication key: $stored_marker
-Finding content digest: $std1_digest
-FOREIGN
-TD_LIST_RESULT="$(existing_card "$foreign_line_body")" run_router "$TEST_ROOT/findings.json"
-grep -Fq 'Unrecognised prefix: this line is not one the router writes' "$TEST_ROOT/td.log" || {
-  printf 'an unrecognised stored body line was discarded instead of preserved\n' >&2
-  exit 1
-}
-grep -Fq 'Superseded revision (preserved)' "$TEST_ROOT/td.log" || {
-  printf 'an unrecognised stored body line did not force revision preservation\n' >&2
-  exit 1
-}
-
 # ── td-768961 / td-a38e4d / td-dc514c / td-22f17d: the retry path is the one
 # place that must never fail open. A retained artifact is replayed without the
 # reviewer's original JSON, so every field the router interpolates into a td card
@@ -1364,67 +1139,6 @@ for _entry in "${leftovers[@]}"; do
     exit 1
   }
 done
-
-# ── td-deff3d / td-3ab1c1 / td-a1452c / td-f45e3c: the reconciliation obligation
-# is durable for ANY preserved revision, not only when a closed card is reopened.
-# An open card that gains a superseded revision needs the same human attention.
-TD_LIST_RESULT=null run_router "$TEST_ROOT/one.json"
-open_pristine="$(cat "$TEST_ROOT/td-desc")"
-open_changed="$(edit_body_line "$open_pristine" 'Evidence: ' 'Evidence: edited by hand')"
-TD_LIST_RESULT="$(existing_card "$open_changed")" run_router "$TEST_ROOT/one.json"
-grep -Fq 'Superseded revision (preserved)' "$TEST_ROOT/td.log"
-grep -Fq 'needs-reconciliation' "$TEST_ROOT/td.log" || {
-  printf 'an OPEN card that gained a preserved revision carries no durable marker\n' >&2
-  exit 1
-}
-[[ "$output" == *'reconcile'* ]] || {
-  printf 'an OPEN card preservation was not reported as needing reconciliation: %s\n' "$output" >&2
-  exit 1
-}
-# A pristine refresh must not acquire the marker.
-TD_LIST_RESULT="$(existing_card "$open_pristine")" run_router "$TEST_ROOT/one.json"
-if grep -Fq 'needs-reconciliation' "$TEST_ROOT/td.log"; then
-  printf 'a pristine refresh was labelled needs-reconciliation\n' >&2
-  exit 1
-fi
-
-# td-edae2b: the label must not ride the same td update that can fail after a
-# successful reopen, or the obligation is lost in exactly that window.
-TD_LIST_RESULT="$(existing_card "$open_changed" closed)" run_router "$TEST_ROOT/one.json"
-label_line="$(grep -n 'needs-reconciliation' "$TEST_ROOT/td.log" | head -1 | cut -d: -f1)"
-update_line="$(grep -n -- '^update .*--description' "$TEST_ROOT/td.log" | head -1 | cut -d: -f1)"
-[[ -n "$label_line" && -n "$update_line" && "$label_line" -lt "$update_line" ]] || {
-  printf 'the reconciliation label was not applied before the description update\n' >&2
-  exit 1
-}
-
-# Any reopen of a closed card is reported, including the same-digest case that
-# resurrects remediated debt into the open queue.
-TD_LIST_RESULT="$(existing_card "$open_pristine" closed)" run_router "$TEST_ROOT/one.json"
-grep -Fq 'reopen td-revised' "$TEST_ROOT/td.log"
-[[ "$output" == *'reopened'* ]] || {
-  printf 'a same-digest reopen was not reported at all: %s\n' "$output" >&2
-  exit 1
-}
-
-# ── td-e56f73: a card written before provenance digests existed carries a content
-# digest but no block digest. It must be reported as first-time stamping rather
-# than as a revision that changed, and it must settle on the next route.
-legacy_block="$(printf '%s\n' "$open_pristine" | grep -v '^Revision block digest: ')"
-TD_LIST_RESULT="$(existing_card "$legacy_block")" run_router "$TEST_ROOT/one.json"
-[[ "$output" == *'provenance stamped'* ]] || {
-  printf 'a pre-provenance card was not reported as newly stamped: %s\n' "$output" >&2
-  exit 1
-}
-grep -Fq 'Revision block digest: ' "$TEST_ROOT/td.log" || {
-  printf 'a pre-provenance card was not stamped\n' >&2
-  exit 1
-}
-TD_LIST_RESULT="$(existing_card "$(cat "$TEST_ROOT/td-desc")")" run_router "$TEST_ROOT/one.json"
-[[ "$output" != *'provenance stamped'* ]] || {
-  printf 'a stamped card was reported as newly stamped again\n' >&2
-  exit 1
-}
 
 # ── td-b55433: an empty text field would emit a body line ending in a space, whose
 # byte-exact digest any store-side normalisation would then defeat. Reject it.

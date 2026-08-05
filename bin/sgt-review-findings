@@ -114,20 +114,11 @@ _publish_blocked() {
 # Number of NUL-delimited fields the parser emits per finding. Keep in step with
 # the field tuple written by the embedded parser below.
 SGT_REVIEW_FIELD_STRIDE=10
-# Separator that introduces an older, preserved revision of the same finding.
-# Newest revision first, so the reader sees the current finding at the top.
-SGT_REVIEW_REVISION_SEPARATOR='--- Superseded revision (preserved) ---'
-
-# Provenance of the router's own output. The last line of every revision the
-# router writes is a digest of that revision, so a later route can tell exactly
-# whether the block is still the bytes the router wrote or whether someone has
-# since edited it. Prefix or label heuristics cannot do this: an edit made INLINE
-# on a router-written line still begins with a router label, and refreshing such a
-# block in place destroyed the edit (td-257734, td-c4acbc).
-SGT_REVIEW_BLOCK_DIGEST_LABEL='Revision block digest: '
-
 routed_task_ids=()
 routed_recommendations=()
+# Findings the router declined to record because the stored card no longer
+# corresponds to the incoming finding. Reported, never merged.
+refused_findings=()
 
 # Directory holding the sanitized findings retained for retry. Empty until the
 # parser has produced a durable copy; a failure before that has nothing to keep.
@@ -143,6 +134,7 @@ _artifact_path() {
 
 _routing_failure() {
   local reason="$1" routed="none" remediation="retry the router"
+  local detail=" Reason: $reason."
   local retention="No review body was retained."
   if (( ${#routed_task_ids[@]} > 0 )); then
     routed="$(IFS=', '; printf '%s' "${routed_task_ids[*]}")"
@@ -154,7 +146,7 @@ _routing_failure() {
     retention="Sanitized findings retained at $ARTIFACT_DIR. Retry with: sgt-review-findings $PROJECT $REPO --retry $ARTIFACT_DIR --worktree $WORKTREE"
   fi
   _publish_blocked \
-    "Review finding routing failed. Routed TD tasks: $routed. Recommended remediation: $remediation. $retention Correct the structured artifact or the td failure first." \
+    "Review finding routing failed.$detail Routed TD tasks: $routed. Recommended remediation: $remediation. $retention Correct the structured artifact or the td failure first." \
     "review finding routing failed; routed td tasks: $routed" || true
   printf 'ERROR: %s\n' "$reason" >&2
   exit 2
@@ -231,10 +223,9 @@ _sgt_is_git_repo "$repo_path" || _routing_failure "owning repository is not a gi
 
 parsed="$(mktemp)" || _routing_failure "could not allocate parser output"
 existing_file="$(mktemp)" || _routing_failure "could not allocate td query output"
-composed_file="$(mktemp)" || _routing_failure "could not allocate composed description"
 match_file="$(mktemp)" || _routing_failure "could not allocate dedup match output"
 parse_error_file="$(mktemp)" || _routing_failure "could not allocate parser diagnostics"
-trap 'rm -f "$parsed" "$existing_file" "$composed_file" "$match_file" "$parse_error_file"' EXIT
+trap 'rm -f "$parsed" "$existing_file" "$match_file" "$parse_error_file"' EXIT
 _parse_review_input() {
   SGT_REVIEW_SEVERITY_ALIASES="$SGT_REVIEW_SEVERITY_ALIASES" \
     python3 - "$INPUT" > "$parsed" 2> "$parse_error_file" <<'PY'
@@ -365,18 +356,17 @@ PY
 # the fresh and retry guarantees cannot drift.
 _validate_parsed_records() {
   SGT_REVIEW_SEVERITY_ALIASES="$SGT_REVIEW_SEVERITY_ALIASES" python3 - \
-    "$parsed" "$SGT_REVIEW_FIELD_STRIDE" "$SGT_REVIEW_REVISION_SEPARATOR" \
-    "$SGT_REVIEW_BLOCK_DIGEST_LABEL" "$1" 2> "$parse_error_file" <<'PY'
+    "$parsed" "$SGT_REVIEW_FIELD_STRIDE" "$1" 2> "$parse_error_file" <<'PY'
 import hashlib
 import os
 import re
 import sys
 
-path, stride, separator, block_label = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+path, stride = sys.argv[1], int(sys.argv[2])
 # A clean review legitimately has no findings. A RETAINED artifact never can:
 # retention only happens after a successful parse and is released on success, so an
 # empty one means the only copy of a review was corrupted (td-dc514c).
-allow_empty = sys.argv[5] == "allow-empty"
+allow_empty = sys.argv[3] == "allow-empty"
 SEVERITIES = dict(
     pair.split("=", 1) for pair in os.environ["SGT_REVIEW_SEVERITY_ALIASES"].split()
 )
@@ -384,12 +374,10 @@ CANONICAL = set(SEVERITIES.values())
 DISPOSITIONS = {"actionable", "cosmetic", "false-positive"}
 # Text the router gives structural meaning to inside a card body. A field may never
 # begin with any of these, or it could forge a revision boundary, a deduplication
-# key, or a provenance digest.
+# key. The router gives no other line structural meaning.
 RESERVED = (
     "Deduplication key: ",
     "Finding content digest: ",
-    block_label,
-    separator,
 )
 
 with open(path, "rb") as stream:
@@ -557,48 +545,17 @@ Deduplication key: $marker
 Finding content digest: $content_digest"
   existing_json="$(td list --all --search "$marker" --json --work-dir "$repo_path" 2>/dev/null)" || _routing_failure "failed to query td tasks"
   printf '%s' "$existing_json" > "$existing_file"
-  # The matcher writes its results to files rather than stdout: Apple Bash 3.2.57
-  # (macOS) cannot parse a heredoc nested inside $( ) command substitution.
+  # The matcher only IDENTIFIES a card and reports whether the stored body still
+  # corresponds to this finding. It never reads the stored body back to merge,
+  # reconcile, or rewrite it: the router composes, compares, and declines. That is
+  # the refusal branch of td-e0d2ee, and it is why there is no re-parse step here
+  # for a tampered stored body to be injected through.
   : > "$match_file"
-  if ! SGT_REVIEW_NEW_BODY="$body" SGT_REVIEW_NEW_TITLE="review: $summary" python3 - \
-    "$existing_file" "$marker" "$content_digest" \
-    "$SGT_REVIEW_REVISION_SEPARATOR" "$composed_file" "$match_file" \
-    "$SGT_REVIEW_BLOCK_DIGEST_LABEL" <<'PY'
-import hashlib
+  if ! python3 - "$existing_file" "$marker" "$content_digest" "$match_file" <<'PY'
 import json
-import os
 import sys
 
-items_path, marker, digest, separator, composed_path, match_path, block_label = sys.argv[1:8]
-
-
-def block_digest(lines):
-    """Digest of one router-written revision, over a canonical form.
-
-    Trailing whitespace is not significant to a reader and is exactly what an
-    editor, td, or markdown tooling is liable to normalise, so digesting it would
-    make provenance defeatable by a cosmetic rewrite (td-b55433).
-    """
-    canonical = [line.rstrip() for line in lines]
-    return hashlib.sha256("\n".join(canonical).encode("utf-8")).hexdigest()[:32]
-
-
-def untouched(block):
-    """True when block is byte-identical to what the router wrote for it."""
-    body = list(block)
-    while body and not body[-1].strip():
-        body.pop()
-    if not body or not body[-1].startswith(block_label):
-        return False
-    recorded = body[-1][len(block_label):].strip()
-    return recorded == block_digest(body[:-1])
-
-
-new_body = os.environ["SGT_REVIEW_NEW_BODY"]
-# Stamp this revision with its own digest. Written on every path, including the
-# create path, so a card is self-describing from the moment it exists.
-final_body = new_body + "\n" + block_label + block_digest(new_body.splitlines())
-
+items_path, marker, digest, match_path = sys.argv[1:5]
 try:
     with open(items_path, encoding="utf-8") as stream:
         items = json.load(stream)
@@ -610,81 +567,37 @@ if not isinstance(items, list):
     raise SystemExit(1)
 needle = "Deduplication key: " + marker
 matches = [(item["id"], item.get("status") or "", item.get("defer_until") or "",
-            ",".join(item.get("labels") or []), item.get("description") or "",
-            item.get("title") or "")
+            ",".join(item.get("labels") or []), item.get("description") or "")
            for item in items if needle in (item.get("description") or "").splitlines()]
 if len(matches) > 1:
     raise SystemExit(1)
 if not matches:
-    # No card yet: the create path still needs the stamped body.
-    with open(composed_path, "w", encoding="utf-8") as stream:
-        stream.write(final_body)
     raise SystemExit(0)
 
-task_id, status, defer_until, labels, description, stored_title = matches[0]
+task_id, status, defer_until, labels, description = matches[0]
+# One line decides correspondence: the content digest the router recorded when it
+# wrote this card. Equal means the same externally observable finding, so the card
+# already says everything this route would say. Anything else — a different digest,
+# a missing digest, or a digest someone has edited — means the stored body does not
+# correspond, and the router refuses rather than guessing what to keep.
 prefix = "Finding content digest: "
-stored_digest = ""
+stored = ""
 for line in description.splitlines():
     if line.startswith(prefix):
-        stored_digest = line[len(prefix):].strip()
+        stored = line[len(prefix):].strip()
         break
-if not stored_digest:
-    # A card written before content digests existed, or one whose digest line was
-    # edited. Sameness is not determinable, which is not the same claim as "this
-    # records a different finding" (td-4e009d, td-8c1e7b).
-    state = "unknown"
-elif stored_digest == digest:
-    state = "same"
-else:
-    state = "changed"
-
-lines = description.splitlines()
-try:
-    boundary = lines.index(separator)
-except ValueError:
-    boundary = len(lines)
-# The router overwrites the card title on every update, so a stored title that
-# differs from the one being written is finding content that only exists in a
-# field about to be replaced. Treat it as a change so the old title and body are
-# preserved together (td-257734 title half).
-title_changed = bool(stored_title) and stored_title != os.environ["SGT_REVIEW_NEW_TITLE"]
-# A card written before provenance digests existed carries a content digest but no
-# block digest. Its first route stamps it, which is not the same event as a
-# revision that changed, so it is reported separately (td-e56f73).
-stamped = any(line.startswith(block_label) for line in lines[:boundary])
-if state == "same" and not title_changed and untouched(lines[:boundary]):
-    # Same finding and the current block is byte-for-byte what the router wrote:
-    # refresh its metadata in place and keep older revisions verbatim.
-    action = "refresh"
-    preserved = lines[boundary:]
-else:
-    # A different finding, an undeterminable one, or a block someone has edited:
-    # the whole stored description becomes a preserved older revision. Nothing is
-    # ever replaced or dropped.
-    action = "preserve"
-    preserved = [separator] + lines
-    if stored_title:
-        # Recorded inside the preserved revision, below the separator, so it is
-        # never re-digested as part of a later current block.
-        preserved = [separator, "Previous title: " + stored_title] + lines
-composed = final_body if not preserved else final_body + "\n\n" + "\n".join(preserved)
-with open(composed_path, "w", encoding="utf-8") as stream:
-    stream.write(composed)
-# Key=value rather than positional fields: the record has grown and a reader must
-# not silently fold an unexpected value into the last field (td-6e564c).
+state = "same" if stored and stored == digest else "diverged"
 with open(match_path, "w", encoding="utf-8") as stream:
     stream.write(
         "task_id=%s\nstatus=%s\ndefer_until=%s\nlabels=%s\ndigest_state=%s\n"
-        "revision_action=%s\nprovenance=%s\n"
-        % (task_id, status, defer_until, labels, state, action,
-           "present" if stamped else "new")
+        % (task_id, status, defer_until, labels, state)
     )
 PY
   then
     _routing_failure "td returned invalid or duplicate finding data"
   fi
+
   task_id="" existing_status="" _defer_until="" existing_labels="" digest_state=""
-  revision_action="" provenance_state=""
   if [[ -s "$match_file" ]]; then
     while IFS='=' read -r match_key match_value; do
       case "$match_key" in
@@ -693,81 +606,57 @@ PY
         defer_until) _defer_until="$match_value" ;;
         labels) existing_labels="$match_value" ;;
         digest_state) digest_state="$match_value" ;;
-        revision_action) revision_action="$match_value" ;;
-        provenance) provenance_state="$match_value" ;;
         *) _routing_failure "dedup match metadata is unrecognised: $match_key" ;;
       esac
     done < "$match_file"
-    [[ "$digest_state" =~ ^(same|changed|unknown)$ ]] || \
+    [[ "$digest_state" =~ ^(same|diverged)$ ]] || \
       _routing_failure "dedup match reported an unknown digest state"
-    [[ "$revision_action" =~ ^(refresh|preserve)$ ]] || \
-      _routing_failure "dedup match reported an unknown revision action"
-    [[ "$provenance_state" =~ ^(new|present)$ ]] || \
-      _routing_failure "dedup match reported an unknown provenance state"
     [[ -n "$task_id" ]] || _routing_failure "dedup match reported no td task"
 
-    # Every preserved revision leaves two accounts of one finding on one card, so
-    # the obligation to reconcile them is recorded durably in td for anyone who
-    # never sees this pane — not only when the card was closed (td-deff3d,
-    # td-3ab1c1, td-a1452c, td-f45e3c). A closed card is additionally never
-    # reopened silently: its stored description survives as a superseded revision
-    # and the reopen is always reported, including when the finding is unchanged
-    # (td-f36fd3).
-    reconcile_label=""
-    reopen_note=""
-    if [[ "$revision_action" == "preserve" ]]; then
-      reconcile_label=",needs-reconciliation"
+    if [[ "$digest_state" == "diverged" ]]; then
+      # Refuse this one finding and leave the card completely untouched: no
+      # description, no title, no labels, no status change. Nothing stored can be
+      # lost by a write that never happens. The run continues so one divergence
+      # cannot strand the rest of the batch.
+      printf 'REFUSED: %s finding %s: td %s carries this deduplication key but its stored body does not correspond to this finding, so it was left untouched. Reconcile td %s by hand, or route this finding under a distinct finding id.\n' \
+        "$AXIS" "$finding_id" "$task_id" "$task_id" >&2
+      printf '%s: td %s refused; stored body does not correspond to this finding\n' \
+        "$finding_id" "$task_id"
+      refused_findings+=("$finding_id -> td $task_id")
+      continue
     fi
-    if [[ "$existing_status" == "closed" ]]; then
-      reopen_note=", reopened"
-      case "$digest_state" in
-        same) printf 'NOTICE: %s: reopening closed td %s; the finding is unchanged and is still reported\n' \
-                "$finding_id" "$task_id" >&2 ;;
-        unknown) printf 'WARNING: %s: closed td %s matches this deduplication key but predates content digests, so sameness cannot be determined; reopening it and preserving the stored description as a superseded revision — reconcile the two revisions\n' \
-                "$finding_id" "$task_id" >&2 ;;
-        *) printf 'WARNING: %s: closed td %s matches this deduplication key but records a different finding; reopening it and preserving the stored description as a superseded revision — reconcile the two revisions\n' \
-             "$finding_id" "$task_id" >&2 ;;
-      esac
-    elif [[ -n "$reconcile_label" ]]; then
-      printf 'WARNING: %s: td %s now holds two accounts of this finding; the previous revision is preserved — reconcile the two revisions\n' \
-        "$finding_id" "$task_id" >&2
-    fi
-    # Name the card before mutating it, so a failure between reopen and update
-    # reports the one card this pass actually touched (td-e5ac22).
+
+    # Same finding, already recorded. Refresh only what cannot destroy anything:
+    # the priority and the labels. The description and the title are never
+    # rewritten, so a human annotation or a hand-edited title is safe by
+    # construction rather than by classification.
     routed_task_ids+=("$task_id")
     routed_recommendations+=("$recommendation")
     if [[ "$existing_status" == "closed" ]]; then
       td reopen "$task_id" --work-dir "$repo_path" --json >/dev/null 2>&1 || _routing_failure "failed to reopen td task"
+      printf 'NOTICE: %s: reopening closed td %s; this finding is still reported\n' "$finding_id" "$task_id" >&2
     fi
     # Preserve defer_until: a deliberately deferred finding must stay deferred
     # across reruns. Only an explicit human action (td defer --clear) may clear it.
     # Preserve existing labels: merge standard labels with any manually added ones
     # so reruns do not strip user-added labels (td-a70708, td-7ad6b2).
-    merged_labels="$(printf '%s,independent-review,finding,%s%s' "$existing_labels" "$AXIS" "$reconcile_label" \
+    merged_labels="$(printf '%s,independent-review,finding,%s' "$existing_labels" "$AXIS" \
       | tr ',' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ',' | sed 's/,$//')"
-    # Apply the labels first and on their own. The description update below can
-    # fail, and the reconciliation obligation must survive that (td-edae2b).
-    td update "$task_id" --labels "$merged_labels" --work-dir "$repo_path" --json >/dev/null 2>&1 \
-      || _routing_failure "failed to label td task"
-    # Reconcile the title with the revision now at the top of the body so the
-    # card's title and body cannot describe different findings.
-    td update "$task_id" --title "review: $summary" --priority "$priority" \
-      --description "$(cat "$composed_file")" \
-      --labels "$merged_labels" --work-dir "$repo_path" --json >/dev/null 2>&1 \
+    td update "$task_id" --priority "$priority" --labels "$merged_labels" \
+      --work-dir "$repo_path" --json >/dev/null 2>&1 \
       || _routing_failure "failed to update td task"
-    revision_note=""
-    [[ "$revision_action" != "preserve" ]] || \
-      revision_note=", previous revision preserved, needs reconciliation"
-    # A card written before provenance digests existed cannot be proved pristine, so
-    # its stored revision is still preserved; report the stamping as the separate
-    # fact it is (td-e56f73).
-    provenance_note=""
-    [[ "$provenance_state" != "new" ]] || provenance_note=", provenance stamped for the first time"
-    printf '%s: td %s updated%s%s%s; remediation: %s\n' \
-      "$finding_id" "$task_id" "$reopen_note" "$revision_note" "$provenance_note" "$recommendation"
+    # The current occurrence is recorded as a comment, so provenance stays current
+    # without the router ever rewriting the stored description.
+    td update "$task_id" --comment "Reported again by independent review. Review axis: $AXIS. Review source: $SOURCE. Branch: $BRANCH. Head SHA: $HEAD_SHA. Parent mission: $PARENT_TASK. Originating fleet task: $TASK_ID" \
+      --work-dir "$repo_path" --json >/dev/null 2>&1 \
+      || _routing_failure "failed to comment on td task"
+    reopen_note=""
+    [[ "$existing_status" != "closed" ]] || reopen_note=", reopened"
+    printf '%s: td %s deduplicated%s; remediation: %s\n' \
+      "$finding_id" "$task_id" "$reopen_note" "$recommendation"
   else
     result="$(td create "review: $summary" --type task --priority "$priority" \
-      --labels independent-review,finding,"$AXIS" --description "$(cat "$composed_file")" \
+      --labels independent-review,finding,"$AXIS" --description "$body" \
       --work-dir "$repo_path" --json 2>/dev/null)" || _routing_failure "failed to create td task"
     task_id="$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' 2>/dev/null)" \
       || _routing_failure "td create returned invalid JSON"
@@ -786,11 +675,20 @@ done
 # blocking gate below is a review outcome, not a routing failure.
 _release_parsed_findings
 
+refused_note=""
+if (( ${#refused_findings[@]} > 0 )); then
+  refused_note=" Refused (stored body does not correspond; left untouched): $(IFS='; '; printf '%s' "${refused_findings[*]}")."
+  # Nothing routed at all means this axis recorded no review evidence.
+  if (( ${#routed_task_ids[@]} == 0 )); then
+    _routing_failure "every finding was refused because its stored card does not correspond: $(IFS='; '; printf '%s' "${refused_findings[*]}")"
+  fi
+fi
+
 if (( ${#blocking_tasks[@]} > 0 )); then
   task_list="$(IFS=', '; printf '%s' "${blocking_tasks[*]}")"
   remediation_list="$(IFS='; '; printf '%s' "${blocking_recommendations[*]}")"
   _publish_blocked \
-    "Independent review requires remediation. Review axis: $AXIS. Review source: $SOURCE. TD tasks: $task_list. Recommended remediation: $remediation_list" \
+    "Independent review requires remediation. Review axis: $AXIS. Review source: $SOURCE. TD tasks: $task_list. Recommended remediation: $remediation_list.$refused_note" \
     "independent review requires remediation; td tasks: $task_list"
   exit 2
 fi
@@ -835,6 +733,10 @@ elif [[ -z "$invocation_gate_generation" && -z "$current_gate_generation" &&
 fi
 _sgt_response_lock_release || { printf 'ERROR: could not unlock review gate state\n' >&2; exit 2; }
 
+if (( ${#refused_findings[@]} > 0 )); then
+  printf 'REFUSED %d finding(s) whose stored card no longer corresponds; reconcile them by hand or route them under a distinct finding id:%s\n' \
+    "${#refused_findings[@]}" "$refused_note" >&2
+fi
 if (( actionable_count == 0 )); then
   printf 'no actionable findings; continue remediation workflow\n'
 else
