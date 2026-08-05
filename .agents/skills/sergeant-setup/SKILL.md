@@ -108,11 +108,12 @@ Classify each output line by prefix:
 | `MISSING:` | required gap | must be resolved before Phase 2 |
 | `OPTIONAL MISSING:` | optional gap | report only |
 | `MANUAL PACKAGES:` | platform packages the bootstrap cannot install here | ask the user to install them with their own package manager |
+| `MANUAL HOOKS:` | the git hooks directory is not this checkout's to write | report it; if the message names a primary checkout, hooks are installed from there with `./bin/sgt-install --hooks-only` |
 | `MANUAL:` | an authentication step | ask the user to perform the login |
 | `WARNING:` | the command directory is not on `PATH` | carry into the Phase 2 `PATH` check |
 
-Do not treat a `MANUAL PACKAGES:` line as a login, and do not attempt any login
-yourself.
+Do not treat a `MANUAL PACKAGES:` or `MANUAL HOOKS:` line as a login, and do not
+attempt any login yourself.
 
 On macOS with Homebrew or Linux with `apt-get`, the supported install for a
 `MISSING:` gap is `./bin/sgt-bootstrap`. Classify a prerequisite as `unsupported`

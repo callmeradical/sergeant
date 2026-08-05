@@ -106,7 +106,11 @@ _sgt_install_managed_globs() {
 # _sgt_is_sergeant_checkout_root <dir>
 #
 # True when <dir> is a Sergeant checkout: it carries the repository's mise.toml
-# and scripts/hooks tree alongside a Sergeant runtime helper in bin/.
+# alongside a Sergeant runtime helper in bin/.
+#
+# scripts/hooks is deliberately NOT part of the test. It first appeared well into
+# the repository's history, so requiring it would stop recognising exactly the
+# older checkouts the _sgt-lib.sh marker below exists for.
 #
 # _sgt-lib.sh is accepted as well as this manifest because it predates the
 # manifest: a checkout made before the manifest existed must still be recognised
@@ -228,6 +232,10 @@ _sgt_install_link_state() {
     elif [[ ! -e "$link_target" ]]; then
       # A broken link is not a user asset; reclaim it.
       printf 'stale\n'
+    elif [[ "${link_target%/*}" == "$target_dir" ]]; then
+      # A link resolving to a sibling in the command directory is the user's own
+      # arrangement, whatever that directory's parent looks like.
+      printf 'conflict\n'
     elif [[ -f "$link_target" ]] && _sgt_is_sergeant_checkout_path "$link_target"; then
       printf 'stale\n'
     else

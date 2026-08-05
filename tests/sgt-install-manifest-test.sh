@@ -434,6 +434,18 @@ test_link_ownership_resolves_relative_links() {
   fi
 }
 
+# A link resolving to a sibling in the command directory is the user's own
+# arrangement, even when that directory's parent happens to hold a mise.toml.
+test_link_to_a_sibling_in_the_command_directory_is_a_conflict() {
+  mkdir -p "$TEST_ROOT/proj/bin"
+  : > "$TEST_ROOT/proj/mise.toml"
+  cp "$ROOT_DIR/bin/_sgt-install-manifest.sh" "$TEST_ROOT/proj/bin/"
+  printf '#!/bin/sh\n' > "$TEST_ROOT/proj/bin/mytool"
+  chmod +x "$TEST_ROOT/proj/bin/mytool"
+  ln -s mytool "$TEST_ROOT/proj/bin/sgt-list"
+  assert_state "$SOURCE" "$TEST_ROOT/proj/bin" conflict
+}
+
 # ── _sgt_command_available ────────────────────────────────────────────────────
 
 # `command -v` reports success for a non-executable file on PATH, which would
@@ -512,6 +524,7 @@ test_link_to_a_directory_is_a_conflict
 test_relative_link_to_a_users_own_command_is_a_conflict
 test_link_into_a_legacy_sergeant_checkout_is_stale
 test_install_directory_does_not_identify_itself_as_a_checkout
+test_link_to_a_sibling_in_the_command_directory_is_a_conflict
 test_hooks_dir_refuses_a_linked_worktree
 test_hooks_dir_resolves_a_clone_whose_git_is_a_symlink
 test_hooks_refusal_advice_matches_the_reason
