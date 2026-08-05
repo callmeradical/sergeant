@@ -78,7 +78,10 @@ removed=0
 # never races an `rm` against an `ln`. Renaming also never follows a symlink that
 # points at a directory, which is how `ln -sf` would write inside it instead.
 publish_link() {
-  local source_file="$1" target="$2" staged="$2.sgt-publish.$$"
+  local source_file="$1" target="$2" staged
+  # Staged inside a pattern this checkout claims (see _sgt_install_managed_globs),
+  # so an interrupted publish leaves nothing the sweep cannot reclaim.
+  staged="${2%/*}/sgt-publish.$$.${2##*/}"
   rm -f "$staged"
   ln -s "$source_file" "$staged" || return 1
   mv -f "$staged" "$target" || { rm -f "$staged"; return 1; }
@@ -123,7 +126,13 @@ if ! "$hooks_only"; then
     for stale_target in "$TARGET_DIR"/$pattern; do
       _sgt_install_link_points_into "$stale_target" "$ROOT_DIR" || continue
       stale_source="$(_sgt_install_resolve_link "$stale_target")"
-      [[ -f "$stale_source" ]] && continue
+      # A leftover staged link is always reclaimed, even when its source exists.
+      # Both shapes are matched: the current staged name and the one an earlier
+      # version wrote.
+      case "${stale_target##*/}" in
+        sgt-publish.*|*.sgt-publish.*) ;;
+        *) [[ -f "$stale_source" ]] && continue ;;
+      esac
       rm -f "$stale_target"
       printf '  removed stale Sergeant link: %s\n' "$stale_target"
       removed=$((removed + 1))
@@ -151,7 +160,7 @@ hooks_dst="$(_sgt_install_hooks_dir "$ROOT_DIR" || true)"
 hooks_unresolved=false
 if [[ -d "$hooks_src" && -z "$hooks_dst" ]]; then
   hooks_unresolved=true
-  printf '  skipped hooks: no git hooks directory this checkout owns (a linked worktree shares its primary checkout, or a wider-scope core.hooksPath redirects git elsewhere)\n' >&2
+  printf '  skipped hooks: %s\n' "$(_sgt_install_hooks_refusal_advice "$ROOT_DIR")" >&2
 elif [[ -d "$hooks_src" && ! -d "$hooks_dst" ]]; then
   mkdir -p "$hooks_dst"
 fi
@@ -201,7 +210,7 @@ fi
 # When hooks are the requested work, failing to resolve their directory is the
 # whole outcome, not a detail to skip past.
 if "$hooks_only" && "$hooks_unresolved"; then
-  printf 'sgt-install: no git hooks were installed; unset core.hooksPath for this repository or install %s by hand.\n' \
-    "$hooks_src" >&2
+  printf 'sgt-install: no git hooks were installed: %s.\n' \
+    "$(_sgt_install_hooks_refusal_advice "$ROOT_DIR")" >&2
   exit 1
 fi

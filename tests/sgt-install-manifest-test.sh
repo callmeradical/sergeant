@@ -350,6 +350,51 @@ test_hooks_dir_refuses_a_path_outside_the_checkout() {
   [[ "$status" -ne 0 ]] || fail 'a hooksPath outside the checkout was accepted'
 }
 
+# Comparing an absolute git dir against a composed one misreads a clone whose
+# .git is a symlink — a supported git layout — as a linked worktree.
+test_hooks_dir_resolves_a_clone_whose_git_is_a_symlink() {
+  local resolved
+  command -v git >/dev/null 2>&1 || { printf 'SKIP: symlinked .git (no git)\n'; return 0; }
+  git init -q "$TEST_ROOT/symgit"
+  mv "$TEST_ROOT/symgit/.git" "$TEST_ROOT/symgit-dir"
+  ln -s "$TEST_ROOT/symgit-dir" "$TEST_ROOT/symgit/.git"
+  resolved="$(_sgt_install_hooks_dir "$TEST_ROOT/symgit")" || \
+    fail 'a clone whose .git is a symlink was refused as a linked worktree'
+  [[ "$resolved" == */hooks ]] || fail "unexpected hooks dir: $resolved"
+}
+
+# The refusal reason drives the advice, so a worktree must not be told to unset a
+# core.hooksPath that is not set.
+test_hooks_refusal_advice_matches_the_reason() {
+  local advice
+  command -v git >/dev/null 2>&1 || { printf 'SKIP: refusal advice (no git)\n'; return 0; }
+  git init -q "$TEST_ROOT/adv"
+  ( cd "$TEST_ROOT/adv" && \
+    git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init && \
+    git worktree add -q "$TEST_ROOT/advwt" -b adv ) >/dev/null 2>&1
+  _sgt_install_hooks_dir "$TEST_ROOT/advwt" >/dev/null || true
+  advice="$(_sgt_install_hooks_refusal_advice "$TEST_ROOT/advwt")"
+  [[ "$advice" == *'linked worktree'* ]] || fail "worktree advice was: $advice"
+  [[ "$advice" != *'unset'* ]] || fail 'worktree advice told the user to unset core.hooksPath'
+
+  git init -q "$TEST_ROOT/adv2"
+  git -C "$TEST_ROOT/adv2" config --local core.hooksPath "$TEST_ROOT/elsewhere2"
+  _sgt_install_hooks_dir "$TEST_ROOT/adv2" >/dev/null || true
+  advice="$(_sgt_install_hooks_refusal_advice "$TEST_ROOT/adv2")"
+  [[ "$advice" == *'core.hooksPath'* ]] || fail "hooksPath advice was: $advice"
+}
+
+# A checkout predating scripts/hooks is still Sergeant's, so an upgrade must
+# reclaim its links rather than report them as the user's.
+test_checkout_without_scripts_hooks_is_still_sergeants() {
+  mkdir -p "$TEST_ROOT/pre/bin" "$TEST_ROOT/pret"
+  cp "$ROOT_DIR/bin/_sgt-lib.sh" "$TEST_ROOT/pre/bin/"
+  : > "$TEST_ROOT/pre/mise.toml"
+  printf '#!/usr/bin/env bash\n' > "$TEST_ROOT/pre/bin/sgt-list"
+  ln -s "$TEST_ROOT/pre/bin/sgt-list" "$TEST_ROOT/pret/sgt-list"
+  assert_state "$SOURCE" "$TEST_ROOT/pret" stale
+}
+
 # ── _sgt_install_hook_state ───────────────────────────────────────────────────
 
 test_hook_state_classifies_ownership() {
@@ -468,6 +513,9 @@ test_relative_link_to_a_users_own_command_is_a_conflict
 test_link_into_a_legacy_sergeant_checkout_is_stale
 test_install_directory_does_not_identify_itself_as_a_checkout
 test_hooks_dir_refuses_a_linked_worktree
+test_hooks_dir_resolves_a_clone_whose_git_is_a_symlink
+test_hooks_refusal_advice_matches_the_reason
+test_checkout_without_scripts_hooks_is_still_sergeants
 test_relative_link_resolves_physically_through_a_symlinked_parent
 test_managed_absent_target_is_absent
 test_managed_dangling_link_is_reclaimable

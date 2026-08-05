@@ -98,7 +98,9 @@ _sgt_install_sources() {
 # Used to sweep links left behind by commands that a later version renamed or
 # removed, which the manifest no longer names.
 _sgt_install_managed_globs() {
-  printf '%s\n' 'sgt-*' '_sgt-*.sh' 'wiki-daily-digest'
+  # Both staged-name shapes are claimed so a leftover from an interrupted publish
+  # is always reclaimable, including one written by an earlier version.
+  printf '%s\n' 'sgt-*' '_sgt-*.sh' 'wiki-daily-digest' 'sgt-publish.*' '*.sgt-publish.*'
 }
 
 # _sgt_is_sergeant_checkout_root <dir>
@@ -112,7 +114,10 @@ _sgt_install_managed_globs() {
 # user as their assets.
 _sgt_is_sergeant_checkout_root() {
   local root="$1" marker
-  [[ -f "$root/mise.toml" && -d "$root/scripts/hooks" ]] || return 1
+  # mise.toml is what separates a checkout from a command directory: sgt-install
+  # links its helpers into the latter, so a marker in bin/ alone would let the
+  # install directory identify itself as a checkout.
+  [[ -f "$root/mise.toml" ]] || return 1
   for marker in _sgt-install-manifest.sh _sgt-lib.sh; do
     [[ -f "$root/bin/$marker" ]] && return 0
   done
@@ -289,21 +294,47 @@ _sgt_install_managed_state() {
 # every unrelated `git push` run Sergeant's Docker drain suite. In that case the
 # repository's own hooks directory is not the one git will read, so this returns
 # non-zero and the caller reports that hooks were not installed.
+# Set by _sgt_install_hooks_dir when it refuses, so callers can give advice that
+# matches the actual cause: `worktree`, `hookspath`, or `nogit`.
+# shellcheck disable=SC2034  # Consumed by the commands that source this file.
+_SGT_INSTALL_HOOKS_REFUSAL=''
+
+# _sgt_install_hooks_refusal_advice <repo-root>
+#
+# Print the remediation for the most recent refusal.
+_sgt_install_hooks_refusal_advice() {
+  local root="$1" primary
+  case "$_SGT_INSTALL_HOOKS_REFUSAL" in
+    worktree)
+      primary="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null || true)"
+      primary="${primary%/.git}"
+      printf 'this is a linked worktree, which shares its primary checkout hooks directory; install hooks from the primary checkout%s\n' \
+        "${primary:+ at $primary}"
+      ;;
+    hookspath)
+      printf 'core.hooksPath redirects git away from this repository; unset it for this repository to install hooks here\n'
+      ;;
+    *)
+      printf 'no git hooks directory could be resolved for %s\n' "$root"
+      ;;
+  esac
+}
+
 _sgt_install_hooks_dir() {
+  _SGT_INSTALL_HOOKS_REFUSAL='nogit'
   local root="$1" configured resolved common private
   # A linked worktree shares the primary checkout's hooks directory. Writing
   # there would repoint the primary's hook at the worktree, and once the worktree
   # is removed git silently skips the dangling hook, leaving the gate inert.
+  #
+  # Detected structurally: a linked worktree's private git dir holds a
+  # `commondir` file. Comparing path strings instead would misread a normal clone
+  # whose .git is a symlink, because git resolves --absolute-git-dir but not the
+  # composed --git-common-dir.
   private="$(git -C "$root" rev-parse --absolute-git-dir 2>/dev/null || true)"
-  common="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null || true)"
-  if [[ -n "$private" && -n "$common" ]]; then
-    case "$common" in
-      /*) ;;
-      *) common="$root/$common" ;;
-    esac
-    if [[ "$private" != "$common" ]]; then
-      return 1
-    fi
+  if [[ -n "$private" && -f "$private/commondir" ]]; then
+    _SGT_INSTALL_HOOKS_REFUSAL='worktree'
+    return 1
   fi
   if configured="$(git -C "$root" config --local --path --get core.hooksPath 2>/dev/null)" && \
      [[ -n "$configured" ]]; then
@@ -313,13 +344,14 @@ _sgt_install_hooks_dir() {
     esac
     case "$resolved" in
       "$root"/*) printf '%s\n' "$resolved"; return 0 ;;
-      *) return 1 ;;
+      *) _SGT_INSTALL_HOOKS_REFUSAL='hookspath'; return 1 ;;
     esac
   fi
   # A hooksPath from any wider scope redirects git away from this repository's
   # hooks directory, so there is nothing here that Sergeant may own.
   if configured="$(git -C "$root" config --path --get core.hooksPath 2>/dev/null)" && \
      [[ -n "$configured" ]]; then
+    _SGT_INSTALL_HOOKS_REFUSAL='hookspath'
     return 1
   fi
   common="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null)" || return 1
