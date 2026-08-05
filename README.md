@@ -224,6 +224,9 @@ installation and verification.
 - `git` and `gh` — for repo operations and PRs
 - `tmux` — for local agent dispatch
 - `lsof` — for verifying cleanup does not remove an in-use worktree
+- no additional locking tool is required: drain admission locking uses an atomic
+  lock directory, so `flock` is deliberately not a prerequisite (macOS system
+  installs and minimal images ship without it)
 - `treehouse` — pre-warmed worktree pools (optional but recommended for dispatch)
 - `graphify` — knowledge graph generation (optional, needed for `sgt-graphify`)
 - [`dagr`](https://github.com/callmeradical/dagr) — SQLite DAG execution engine (optional; needed only for `sgt-dag-run` and DAG-directed workflows; all other Sergeant commands work without it)

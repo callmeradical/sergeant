@@ -6,8 +6,8 @@
 # generation-safely for later delivery.
 #
 # Usage:
-#   sgt-drain [<project>] [--reason <text>]    # drain a project
-#   sgt-drain --global    [--reason <text>]    # drain all projects
+#   sgt-drain [<project>] [--reason <text>] [--wait [--timeout <s>]]
+#   sgt-drain --global    [--reason <text>] [--wait [--timeout <s>]]
 #   sgt-drain --undrain   <project>            # undrain a project
 #   sgt-drain --undrain   --global             # undrain globally
 #   sgt-drain --status    [<project>|--global] # show active drain state
@@ -17,6 +17,14 @@
 #   --undrain         Remove an active drain (undrain-only; does not reevaluate).
 #   --global          Target the global drain that covers all projects.
 #   --status          Print active drain state for the given scope (or all scopes).
+#   --wait            After activating the drain, wait for live workers in scope
+#                     to finish their current turn and exit.  The drain is always
+#                     activated BEFORE waiting, so no new work is admitted while
+#                     waiting.  Exits nonzero on timeout with the drain still
+#                     active and the unresolved workers named; workers are never
+#                     terminated.
+#   --timeout <s>     Bound for --wait, in seconds
+#                     (default: $SERGEANT_DRAIN_WAIT_TIMEOUT_SECS, else 300).
 
 set -euo pipefail
 
@@ -33,12 +41,25 @@ _die() { echo "ERROR: $*" >&2; exit 1; }
 MODE="drain"          # drain | undrain | status
 SCOPE=""              # "global" | <project-name> | "" (all, for status)
 REASON=""
+WAIT=false
+TIMEOUT=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --undrain)
       MODE="undrain"
       shift
+      ;;
+    --wait)
+      WAIT=true
+      shift
+      ;;
+    --timeout)
+      [[ $# -ge 2 ]] || _die "--timeout requires a value"
+      TIMEOUT="$2"
+      [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || \
+        _die "--timeout must be a non-negative whole number of seconds: $TIMEOUT"
+      shift 2
       ;;
     --global)
       SCOPE="global"
@@ -65,6 +86,105 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Waiting only means something while setting a drain: there is nothing to wait
+# for when reporting state or removing a drain.
+if $WAIT && [[ "$MODE" != "drain" ]]; then
+  _die "--wait is only valid when setting a drain (not with --undrain or --status)"
+fi
+if [[ -n "$TIMEOUT" ]] && ! $WAIT; then
+  _die "--timeout requires --wait"
+fi
+
+# ── Bounded drain wait ────────────────────────────────────────────────────────
+#
+# A cooperative drain asks live workers to finish the current turn and exit.  A
+# worker is therefore still unresolved only when BOTH hold:
+#
+#   • its recorded status is not terminal (done, drained, failed: <reason>), and
+#   • its recorded process is still alive, verified against the recorded start
+#     time so a reused PID is not mistaken for the original worker.
+#
+# A nonterminal worker whose pane already exited — waiting, needs_input, or
+# blocked after a durable handoff — has nothing left to drain and never blocks.
+
+# _worker_is_live <repo_dir>
+#
+# Returns 0 when the recorded worker process is still running, publishing its
+# pid in _WORKER_PID.  Absent, dead, or PID-reused identities return 1.
+_worker_is_live() {
+  local repo_dir="$1" pid recorded_start actual_start
+  _WORKER_PID=""
+  pid="$(tr -d '\n' < "$repo_dir/worker_pid" 2>/dev/null || true)"
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$pid" 2>/dev/null || ps -p "$pid" >/dev/null 2>&1 || return 1
+  recorded_start="$(tr -d '\n' < "$repo_dir/worker_process_start" 2>/dev/null || true)"
+  if [[ -n "$recorded_start" ]]; then
+    actual_start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+    [[ "$actual_start" == "$recorded_start" ]] || return 1
+  fi
+  _WORKER_PID="$pid"
+  return 0
+}
+
+# _unresolved_workers <scope>
+#
+# Prints one "<task>/<repo> status=<s> pid=<p>" line per worker in scope that is
+# still live and nonterminal.  Prints nothing when the scope is fully drained.
+_unresolved_workers() {
+  local scope="$1" task_dir repo_dir task repo status project
+  [[ -d "$FLEET_DIR" ]] || return 0
+  for task_dir in "$FLEET_DIR"/*/; do
+    [[ -d "$task_dir" ]] || continue
+    task="$(basename "$task_dir")"
+    for repo_dir in "$task_dir"*/; do
+      [[ -d "$repo_dir" ]] || continue
+      repo="$(basename "$repo_dir")"
+      status="$(tr -d '\n' < "$repo_dir/status" 2>/dev/null || true)"
+      case "$status" in
+        done|drained|failed*) continue ;;
+      esac
+      if [[ "$scope" != "global" ]]; then
+        project="$(tr -d '\n' < "$repo_dir/project" 2>/dev/null || true)"
+        [[ "$project" == "$scope" ]] || continue
+      fi
+      _worker_is_live "$repo_dir" || continue
+      printf '%s/%s status=%s pid=%s\n' "$task" "$repo" "${status:-unknown}" "$_WORKER_PID"
+    done
+  done
+}
+
+# _await_drained <scope>
+#
+# Waits for every live worker in scope to exit.  Returns 0 when the scope is
+# clear; on timeout it names the unresolved workers and returns 1, leaving the
+# drain active and every worker running.
+_await_drained() {
+  local scope="$1" unresolved deadline timeout interval count
+  timeout="${TIMEOUT:-${SERGEANT_DRAIN_WAIT_TIMEOUT_SECS:-300}}"
+  interval="${SERGEANT_DRAIN_WAIT_INTERVAL_SECS:-2}"
+  deadline=$(( $(date +%s) + timeout ))
+  while :; do
+    unresolved="$(_unresolved_workers "$scope")"
+    if [[ -z "$unresolved" ]]; then
+      echo "sgt-drain: ${scope} drained; no live workers remain."
+      return 0
+    fi
+    if [[ $(date +%s) -ge $deadline ]]; then
+      count="$(printf '%s\n' "$unresolved" | wc -l | tr -d ' ')"
+      {
+        printf 'ERROR: drain for %s is ACTIVE, but %s worker(s) did not finish within %ss:\n' \
+          "$scope" "$count" "$timeout"
+        printf '%s\n' "$unresolved" | sed 's/^/  /'
+        printf 'ERROR: they were left running and were NOT terminated; rerun with --wait or resolve them individually.\n'
+      } >&2
+      return 1
+    fi
+    sleep "$interval"
+  done
+}
 
 # ── Execute ───────────────────────────────────────────────────────────────────
 
@@ -116,10 +236,16 @@ else
   drain_file="$(_sgt_drain_project_file "$SCOPE")"
 fi
 
+# Locked mutations pass argv, never a shell string: --reason is caller-supplied
+# text and must not be re-parsed by the shell.
 if [[ "$MODE" == "undrain" ]]; then
-  _sgt_drain_with_lock "_sgt_drain_clear \"$drain_file\""
+  _sgt_drain_run_locked _sgt_drain_clear "$drain_file"
   echo "sgt-drain: undrained ${SCOPE}."
 else
-  _sgt_drain_with_lock "_sgt_drain_write \"$drain_file\" \"${REASON:-}\" \"\""
+  _sgt_drain_run_locked _sgt_drain_write "$drain_file" "${REASON:-}" ""
   echo "sgt-drain: drained ${SCOPE}."
+  # The drain is active from here on, so waiting never admits new work.
+  if $WAIT; then
+    _await_drained "$SCOPE"
+  fi
 fi
