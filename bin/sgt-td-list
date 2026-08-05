@@ -43,9 +43,11 @@
 #   two answers are merged.  A narrower view is opt-in through --status, and the
 #   active view is always named in the human header.
 #
-#   One case still excludes deferred tasks: a caller-supplied `--filter`, because
-#   td ignores --deferred when --filter is present, so the deferred half cannot
-#   be narrowed the same way.  The header says so instead of quietly dropping it.
+#   Narrowing uses td's own -s/-p flags.  td applies its closed-and-deferred
+#   exclusion to those but not to `--filter`, so `--filter priority=P2` answers
+#   with closed tasks while `-p P2` does not.  A caller-supplied `--filter`
+#   therefore governs which statuses appear, and the header says so rather than
+#   claiming a non-closed view the query does not deliver.
 #
 #   Before 2026-08, the default narrowed to status=open, which hid in_progress,
 #   in_review and blocked work — and any repo whose tasks were all non-open —
@@ -104,41 +106,48 @@ if $TD_ALL && [[ -n "$STATUS_FILTER" ]]; then
   _die "--all and --status are mutually exclusive: --all is every non-closed status, which is the default"
 fi
 
-# Build td filter expression.  With no --status, no status clause is sent at all,
-# so td returns every non-closed task.  --all is accepted for compatibility and
-# means the same thing.
-TD_FILTER=""
-if ! $TD_ALL && [[ -n "$STATUS_FILTER" ]]; then
-  TD_FILTER="status=$STATUS_FILTER"
+# Narrow with td's own -s/-p flags, never with a hand-built --filter expression.
+# td applies its closed-and-deferred exclusion to the native flags but NOT to
+# --filter, so `--filter priority=P2` answers with closed tasks while `-p P2`
+# does not.  The native flags are also the only ones --deferred honours.
+TD_NARROW_ARGS=()
+if [[ -n "$STATUS_FILTER" ]]; then
+  TD_NARROW_ARGS[${#TD_NARROW_ARGS[@]}]="-s"
+  TD_NARROW_ARGS[${#TD_NARROW_ARGS[@]}]="$STATUS_FILTER"
 fi
 if [[ -n "$PRIORITY_FILTER" ]]; then
-  if [[ -n "$TD_FILTER" ]]; then
-    TD_FILTER="$TD_FILTER AND priority=$PRIORITY_FILTER"
-  else
-    TD_FILTER="priority=$PRIORITY_FILTER"
-  fi
+  TD_NARROW_ARGS[${#TD_NARROW_ARGS[@]}]="-p"
+  TD_NARROW_ARGS[${#TD_NARROW_ARGS[@]}]="$PRIORITY_FILTER"
 fi
 
-# td ignores --deferred whenever --filter is present, so a caller's own TDQ
-# expression is the one view whose deferred half cannot be read.
-INCLUDE_DEFERRED=true
+# A caller's own --filter expression bypasses td's exclusions entirely, so that
+# view is governed by the caller's TDQ and may contain closed or deferred tasks.
+# It also needs no second read, because td already answers with deferred rows.
+CALLER_FILTER=false
 if [[ "${#EXTRA_FLAGS[@]}" -gt 0 ]]; then
   for ((i=0; i<${#EXTRA_FLAGS[@]}; i++)); do
     case "${EXTRA_FLAGS[$i]}" in
-      --filter|-f|--filter=*) INCLUDE_DEFERRED=false ;;
+      --filter|-f|--filter=*|-f*) CALLER_FILTER=true ;;
     esac
   done
 fi
+INCLUDE_DEFERRED=true
+$CALLER_FILTER && INCLUDE_DEFERRED=false
 
 # What the reader is actually looking at, stated rather than implied.
-if [[ -n "$STATUS_FILTER" ]]; then
-  VIEW_LABEL="$TD_FILTER"
+if [[ -n "$STATUS_FILTER" && -n "$PRIORITY_FILTER" ]]; then
+  VIEW_LABEL="status=$STATUS_FILTER AND priority=$PRIORITY_FILTER"
+elif [[ -n "$STATUS_FILTER" ]]; then
+  VIEW_LABEL="status=$STATUS_FILTER"
 elif [[ -n "$PRIORITY_FILTER" ]]; then
-  VIEW_LABEL="all non-closed AND $TD_FILTER"
+  VIEW_LABEL="all non-closed AND priority=$PRIORITY_FILTER"
 else
   VIEW_LABEL="all non-closed"
 fi
-$INCLUDE_DEFERRED || VIEW_LABEL="$VIEW_LABEL; deferred excluded"
+if $CALLER_FILTER; then
+  # Never claim td's exclusions for a query that does not apply them.
+  VIEW_LABEL="$VIEW_LABEL; caller --filter governs which statuses appear"
+fi
 
 # ── Temporary workspace ───────────────────────────────────────────────────────
 # One workspace for every mode, cleaned up on any exit, so an interrupted run
@@ -218,6 +227,7 @@ if [[ "${#EXTRA_FLAGS[@]}" -gt 0 ]]; then
     case "${EXTRA_FLAGS[$i]}" in
       --limit|-n)  USER_LIMIT_SET=true; USER_LIMIT="${EXTRA_FLAGS[$((i+1))]:-}" ;;
       --limit=*)   USER_LIMIT_SET=true; USER_LIMIT="${EXTRA_FLAGS[$i]#--limit=}" ;;
+      -n=*)        USER_LIMIT_SET=true; USER_LIMIT="${EXTRA_FLAGS[$i]#-n=}" ;;
       -n[0-9]*)    USER_LIMIT_SET=true; USER_LIMIT="${EXTRA_FLAGS[$i]#-n}" ;;
     esac
   done
@@ -280,7 +290,7 @@ _td_list_once() {
 
   : > "$TD_ERR_FILE"
   raw="$(td list --json --work-dir "$repo_path" \
-    ${TD_FILTER:+--filter "$TD_FILTER"} \
+    "${TD_NARROW_ARGS[@]+"${TD_NARROW_ARGS[@]}"}" \
     "${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}" \
     "$@" 2>"$TD_ERR_FILE")" || status=$?
   # Bound the borrowed text: an operator's stderr is not a place for megabytes.
@@ -365,13 +375,11 @@ else:
 
 _merge_reads() {
   # _merge_reads <base-json> <deferred-json> → "<total>\n<json>"
-  # td ignores --filter when --deferred is set, so the deferred rows are narrowed
-  # here instead, on the two fields this command builds its own filter from.
+  # Both answers are already narrowed by td (-s/-p are honoured with --deferred),
+  # so this only unions them and drops any task seen twice.
   printf '%s\n%s' "$1" "$2" | python3 -c "
 import sys, json
 
-want_status = sys.argv[1]
-want_priority = sys.argv[2]
 raw = sys.stdin.read().split('\n', 1)
 base = json.loads(raw[0])
 deferred = json.loads(raw[1]) if len(raw) > 1 and raw[1].strip() else []
@@ -381,14 +389,10 @@ seen = set(task.get('id') for task in base)
 for task in deferred:
     if task.get('id') in seen:
         continue
-    if want_status and task.get('status') != want_status:
-        continue
-    if want_priority and task.get('priority') != want_priority:
-        continue
     seen.add(task.get('id'))
     merged.append(task)
 sys.stdout.write('%d\n%s' % (len(merged), json.dumps(merged)))
-" "$STATUS_FILTER" "$PRIORITY_FILTER"
+"
 }
 
 _td_read_complete() {
@@ -439,16 +443,27 @@ _td_list_tasks() {
   local base capped=false deferred="[]" head json payload published read_status=0 total
 
   if $USER_LIMIT_SET && ! _is_positive_int "$USER_LIMIT"; then
-    # A limit only td can interpret: forward it untouched and read once.
-    # `--limit 0` is td asking td for its own default cap, which is the silent
-    # truncation this command exists to prevent, so say so.
+    # A limit only td can interpret: forward it untouched, once per half of the
+    # repo, so a caller's `--limit -1` (td's unlimited idiom) still gets its
+    # deferred tasks.  `--limit 0` is td asking td for its own default cap, which
+    # is the silent truncation this command exists to prevent, so say so.
+    local raw_base raw_deferred="[]" raw_defer_payload
     payload="$(_td_list_once "$rname" -1 "$repo_path")" || return 1
-    head="$(_payload_head "$payload")"
-    published="${head#* }"
+    raw_base="$(_payload_json "$payload")"
+    if $INCLUDE_DEFERRED; then
+      if raw_defer_payload="$(_td_list_once "$rname" -1 "$repo_path" --deferred)"; then
+        raw_deferred="$(_payload_json "$raw_defer_payload")"
+      fi
+    fi
+    payload="$(_merge_reads "$raw_base" "$raw_deferred")" || {
+      _unreadable_warn "$rname" "could not merge its td reads"
+      return 1
+    }
+    published="$(_payload_head "$payload")"
     if [[ "$USER_LIMIT" == "0" && "$published" -gt 0 ]]; then
-      _mark_incomplete
       printf 'WARNING: %s: --limit 0 leaves td to apply its own default limit, so these %s task(s) may be truncated; pass a positive --limit or none at all\n' \
         "$rname" "$published" >&2
+      _mark_incomplete
     fi
     printf '%s\n%s' "$published" "$(_payload_json "$payload")"
     return 0
@@ -459,8 +474,8 @@ _td_list_tasks() {
   [[ "$read_status" -ne 2 ]] || capped=true
 
   if $INCLUDE_DEFERRED && ! $capped; then
-    # td hides deferred tasks from its default answer and refuses to narrow them
-    # with --filter, so they are read separately and merged.
+    # td hides deferred tasks from its default answer and returns them only from
+    # a --deferred query, which honours -s/-p, so the two answers are merged.
     local deferred_payload deferred_status=0
     deferred_payload="$(_td_read_complete "$rname" "$repo_path" --deferred)" || deferred_status=$?
     if [[ "$deferred_status" -eq 0 ]]; then
@@ -472,7 +487,10 @@ _td_list_tasks() {
     # deferred_status 1 already warned and marked the report incomplete.
   fi
 
-  payload="$(_merge_reads "$(_payload_json "$base")" "$deferred")"
+  payload="$(_merge_reads "$(_payload_json "$base")" "$deferred")" || {
+    _unreadable_warn "$rname" "could not merge its td reads"
+    return 1
+  }
   head="$(_payload_head "$payload")"
   total="$head"
   json="$(_payload_json "$payload")"
@@ -484,7 +502,10 @@ _td_list_tasks() {
     json="$(printf '%s' "$json" | python3 -c "
 import sys, json
 sys.stdout.write(json.dumps(json.load(sys.stdin)[:int(sys.argv[1])]))
-" "$USER_LIMIT")"
+" "$USER_LIMIT")" || {
+      _unreadable_warn "$rname" "could not apply the requested --limit $USER_LIMIT"
+      return 1
+    }
     total="$USER_LIMIT"
   fi
 
@@ -515,8 +536,8 @@ _repo_payload() {
       # Not cloned yet is an expected state, but a whole repo missing from a
       # backlog should never be invisible.  Informational, so the exit status
       # still reflects only what could not be read.
-      printf 'note: %s: not cloned at %s; run sgt-sync %s to include it
-'         "$rname" "$repo_path" "$PROJECT" >&2
+      printf 'note: %s: not cloned at %s; run sgt-sync %s to include it\n' \
+        "$rname" "$repo_path" "$PROJECT" >&2
     fi
     return 1
   fi
@@ -593,7 +614,7 @@ if $JSON_OUT; then
 
   # stdout stays a pure task array, so the view that produced it is named on
   # stderr.  Only a narrowed view needs saying: the default is complete.
-  if [[ -n "$TD_FILTER" ]]; then
+  if [[ "$VIEW_LABEL" != "all non-closed" ]]; then
     printf 'note: %s: reporting [%s]; pass no filter for every non-closed task\n' \
       "$PROJECT" "$VIEW_LABEL" >&2
   fi

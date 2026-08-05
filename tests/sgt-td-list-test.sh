@@ -205,6 +205,8 @@ if not argv or argv[0] not in ("list", "ls"):
 work_dir = "."
 td_filter = ""
 deferred_only = False
+want_status = ""
+want_priority = ""
 limit = 50  # real td default
 idx = 1
 while idx < len(argv):
@@ -227,6 +229,12 @@ while idx < len(argv):
     elif arg == "--deferred":
         deferred_only = True
         idx += 1
+    elif arg in ("-s", "--status"):
+        want_status = argv[idx + 1]
+        idx += 2
+    elif arg in ("-p", "--priority"):
+        want_priority = argv[idx + 1]
+        idx += 2
     else:
         idx += 1
 
@@ -270,6 +278,9 @@ if not count_file.is_file():
 
 total = int(count_file.read_text().strip())
 
+def task_priority(n):
+    return "P%d" % (n % 4)
+
 statuses_file = Path(work_dir) / ".td-task-statuses"
 if statuses_file.is_file():
     # One status per line, cycled over the repo's tasks.
@@ -277,31 +288,41 @@ if statuses_file.is_file():
 else:
     cycle = ["open"]
 
-want_status = ""
+# --filter is a raw TDQ expression: td applies neither its closed exclusion nor
+# its deferred exclusion to it, and only the status clause is honoured here.
 for clause in td_filter.split(" AND "):
     if clause.startswith("status="):
         want_status = clause[len("status="):]
+    elif clause.startswith("priority="):
+        want_priority = clause[len("priority="):]
 
 deferred_file = Path(work_dir) / ".td-task-deferred"
 deferred_idx = set()
 if deferred_file.is_file():
     deferred_idx = {int(x) for x in deferred_file.read_text().split() if x}
 
-# Real td: its default answer hides deferred tasks, --deferred returns only
-# those, and --filter makes td ignore --deferred altogether.
+# Real td, verified against v0.55.0: the native -s/-p flags keep td's
+# closed-and-deferred exclusion and are honoured together with --deferred, while
+# a raw --filter expression bypasses both exclusions.
 tasks = []
 for n in range(total):
     status = cycle[n % len(cycle)]
-    if status == "closed":
-        continue                      # real td excludes closed without --all
     is_deferred = (n + 1) in deferred_idx
     if td_filter:
-        pass                          # --filter defeats --deferred
-    elif deferred_only and not is_deferred:
-        continue
-    elif not deferred_only and is_deferred:
-        continue
+        pass                          # --filter applies no exclusion at all
+    else:
+        # Verified against td v0.55.0: closed tasks are excluded unless asked
+        # for by status (-s closed returns them), and deferred tasks come only
+        # from a --deferred query.
+        if status == "closed" and want_status != "closed":
+            continue
+        if deferred_only and not is_deferred:
+            continue
+        if not deferred_only and is_deferred:
+            continue
     if want_status and status != want_status:
+        continue
+    if want_priority and task_priority(n) != want_priority:
         continue
     tasks.append(
         {
@@ -309,7 +330,7 @@ for n in range(total):
             "title": "task %d" % (n + 1),
             "status": status,
             "type": "bug",
-            "priority": "P%d" % (n % 4),
+            "priority": task_priority(n),
         }
     )
 
@@ -1005,11 +1026,17 @@ printf 'option_requires_value: ok\n'
 out="$TEST_ROOT/prio.out"; err="$TEST_ROOT/prio.err"
 _run "$out" "$err" -- example --repos small --priority P1
 _expect_status 0 priority_filter_composed "$err"
-grep -qF 'priority=P1' "$TEST_ROOT/td.log" || {
+# The narrowing must travel as td's native -p, never as a hand-built --filter:
+# td does not apply its closed exclusion to --filter expressions.
+grep -qF -- '-p P1' "$TEST_ROOT/td.log" || {
   printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
-  _fail "priority_filter_composed: --priority must reach td"
+  _fail "priority_filter_composed: --priority must reach td as its native -p flag"
 }
-! grep -qF 'status=' "$TEST_ROOT/td.log" || {
+! grep -qF -- '--filter' "$TEST_ROOT/td.log" || {
+  printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
+  _fail "priority_filter_composed: a hand-built --filter expression would defeat td's closed exclusion"
+}
+! grep -qF -- '-s ' "$TEST_ROOT/td.log" || {
   printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
   _fail "priority_filter_composed: --priority alone must not narrow the status view"
 }
@@ -1023,9 +1050,9 @@ printf 'priority_filter_composed: ok\n'
 out="$TEST_ROOT/all.out"; err="$TEST_ROOT/all.err"
 _run "$out" "$err" -- example --repos small --all
 _expect_status 0 all_drops_status_filter "$err"
-! grep -qF 'status=' "$TEST_ROOT/td.log" || {
+! grep -qE -- '(-s |--filter)' "$TEST_ROOT/td.log" || {
   printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
-  _fail "all_drops_status_filter: --all must not send a status filter to td"
+  _fail "all_drops_status_filter: --all must not narrow the status view"
 }
 grep -qF '[all non-closed]' "$out" || {
   printf 'actual output:\n%s\n' "$(cat "$out")" >&2
@@ -1318,20 +1345,30 @@ grep -qF 'td-000006' "$out" || {
 }
 printf 'deferred_respects_status_filter: ok\n'
 
-# A caller-supplied --filter defeats td's --deferred, so the view says so.
+# A caller's own --filter expression bypasses td's closed and deferred
+# exclusions, so the header must not claim a non-closed view, and the redundant
+# second read must not be issued.
 : > "$TEST_ROOT/td.log"
 out="$TEST_ROOT/callerfilter.out"; err="$TEST_ROOT/callerfilter.err"
 _run "$out" "$err" -- mixed --filter 'status=open'
-_expect_status 0 caller_filter_discloses_deferred_gap "$err"
-grep -qF 'deferred excluded' "$out" || {
+_expect_status 0 caller_filter_view_is_honest "$err"
+grep -qF 'caller --filter governs which statuses appear' "$out" || {
   printf 'actual output:\n%s\n' "$(cat "$out")" >&2
-  _fail "caller_filter_discloses_deferred_gap: the header must disclose the deferred gap"
+  _fail "caller_filter_view_is_honest: the header must say the caller's filter governs the statuses"
+}
+! grep -qF 'deferred excluded' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "caller_filter_view_is_honest: td returns deferred rows for --filter, so claiming otherwise is false"
+}
+grep -qF 'td-000003' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "caller_filter_view_is_honest: td's --filter answer includes deferred rows, so they must be listed"
 }
 ! grep -qF -- '--deferred' "$TEST_ROOT/td.log" || {
   printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
-  _fail "caller_filter_discloses_deferred_gap: a deferred read td would ignore must not be issued"
+  _fail "caller_filter_view_is_honest: a second read that adds nothing must not be issued"
 }
-printf 'caller_filter_discloses_deferred_gap: ok\n'
+printf 'caller_filter_view_is_honest: ok\n'
 
 # ── 32. --all and --status cannot silently disagree ───────────────────────────
 
@@ -1360,5 +1397,83 @@ grep -qF 'sgt-sync' "$err" || {
 }
 grep -qF '── small (7)' "$out" || _fail "uncloned_repo_is_noted: cloned repos must still be reported"
 printf 'uncloned_repo_is_noted: ok\n'
+
+# ── 34. Only an explicit --status closed may surface closed tasks ─────────────
+
+# Regression: narrowing used to be sent as a hand-built `--filter` expression,
+# and td applies its closed exclusion to -s/-p but NOT to --filter, so
+# `--priority P<n>` reported closed tasks under a header claiming "all
+# non-closed".  Fixture task 8 is the closed one, and it is P3 (8 % 4 == 3).
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/prio-closed.out"; err="$TEST_ROOT/prio-closed.err"
+_run "$out" "$err" -- mixed --priority P3
+_expect_status 0 priority_view_excludes_closed "$err"
+! grep -qF 'td-000008' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "priority_view_excludes_closed: a closed task must never appear in a non-closed view"
+}
+! grep -qF 'closed  ' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "priority_view_excludes_closed: no row may carry the closed status"
+}
+printf 'priority_view_excludes_closed: ok\n'
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/prio-closed-json.out"; err="$TEST_ROOT/prio-closed-json.err"
+_run "$out" "$err" -- mixed --priority P3 --json
+_expect_status 0 priority_view_excludes_closed_json "$err"
+closed_seen="$("$REAL_PYTHON" -c '
+import json, sys
+tasks = json.load(open(sys.argv[1]))
+print(sum(1 for t in tasks if t["status"] == "closed"), len(tasks))' "$out")"
+[[ "${closed_seen%% *}" == "0" ]] || {
+  printf 'closed tasks in --json output: %s\n' "$closed_seen" >&2
+  _fail "priority_view_excludes_closed_json: --json must not carry closed tasks"
+}
+printf 'priority_view_excludes_closed_json: ok\n'
+
+# A caller who explicitly asks for closed tasks still gets them.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/status-closed.out"; err="$TEST_ROOT/status-closed.err"
+_run "$out" "$err" -- mixed --status closed
+_expect_status 0 explicit_closed_status_works "$err"
+grep -qF 'td-000008' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "explicit_closed_status_works: --status closed must reach the closed task"
+}
+printf 'explicit_closed_status_works: ok\n'
+
+# A negative caller limit is td's unlimited idiom, and must not lose the
+# deferred half of a repo.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/neg.out"; err="$TEST_ROOT/neg.err"
+_run "$out" "$err" -- mixed --limit -1
+_expect_status 0 negative_limit_keeps_deferred "$err"
+grep -qF '── mixed (9)' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "negative_limit_keeps_deferred: --limit -1 must still report all 9 non-closed tasks"
+}
+for id in td-000003 td-000006; do
+  grep -qF "$id" "$out" || {
+    printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+    _fail "negative_limit_keeps_deferred: deferred task $id must not be dropped"
+  }
+done
+printf 'negative_limit_keeps_deferred: ok\n'
+
+# The -n=<n> spelling is a caller limit too, and must win over the default.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/neq.out"; err="$TEST_ROOT/neq.err"
+_run "$out" "$err" -- example --repos big -n=5
+_expect_status 2 caller_limit_eq_shorthand "$err"
+grep -qF '── big (5)' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "caller_limit_eq_shorthand: -n=5 must cap the printed rows at 5"
+}
+if ! grep -qF 'big' "$err" || ! grep -qi 'truncat' "$err"; then
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "caller_limit_eq_shorthand: -n=5 withheld 55 tasks, so it must warn"
+fi
+printf 'caller_limit_eq_shorthand: ok\n'
 
 printf '\nAll sgt-td-list tests passed.\n'
