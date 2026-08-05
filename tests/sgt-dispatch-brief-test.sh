@@ -403,6 +403,11 @@ for axis in $SGT_REVIEW_AXES_REQUIRED; do
   assert_line "$(_sgt_review_axis_guidance "$axis")"
 done
 assert_contains "--axis <$(printf '%s' "$SGT_REVIEW_AXES_REQUIRED" | tr ' ' '|')>"
+# The severity vocabulary the contract states must be the same shared definition
+# the router validates against (owner decision on td-61a0c8, Option A).
+assert_contains "canonical values \`$(printf '%s' "$SGT_REVIEW_SEVERITIES" | tr ' ' '|')\`"
+assert_contains "$(_sgt_review_severity_alias_table)"
+assert_contains "Only the \`error\` family publishes a blocking gate"
 for axis in $SGT_REVIEW_AXES_CONDITIONAL; do
   assert_not_contains "$(_sgt_review_axis_guidance "$axis")"
 done

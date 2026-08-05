@@ -11,29 +11,6 @@ source "$SCRIPT_DIR/_sgt-response-lock.sh"
 # shellcheck source=bin/_sgt-review-axes.sh
 source "$SCRIPT_DIR/_sgt-review-axes.sh"
 
-# Finding severities this router accepts, as one source of truth shared by the
-# embedded parser, the retained-artifact guard, and the usage text. Every listed
-# severity must map to a td priority in _review_severity_priority below.
-SGT_REVIEW_SEVERITIES="error warning info informational"
-
-_review_severity_priority() {
-  case "$1" in
-    error) printf 'P1' ;;
-    warning) printf 'P2' ;;
-    info|informational) printf 'P3' ;;
-    *) return 1 ;;
-  esac
-}
-
-_review_severity_valid() {
-  local candidate="$1" severity
-  # shellcheck disable=SC2046  # deliberate word splitting over the severity list
-  for severity in $SGT_REVIEW_SEVERITIES; do
-    [[ "$candidate" == "$severity" ]] && return 0
-  done
-  return 1
-}
-
 usage() {
   cat >&2 <<EOF
 Usage: sgt-review-findings <project> <repo> --input <json> --axis <axis> --source <source>
@@ -43,8 +20,13 @@ Usage: sgt-review-findings <project> <repo> --input <json> --axis <axis> --sourc
 Retry a route that failed after parsing, from the sanitized artifact it retained:
   sgt-review-findings <project> <repo> --retry <artifact-dir> --worktree <path>
 
-Accepted --axis values:     $(_sgt_review_axes)
-Accepted finding severities: $SGT_REVIEW_SEVERITIES
+Accepted --axis values: $(_sgt_review_axes)
+
+Canonical finding severities: $(printf '%s' "$SGT_REVIEW_SEVERITIES" | tr ' ' '|')
+Accepted spellings and their td priorities:
+  $(_sgt_review_severity_alias_table)
+Only the error family publishes a blocking review gate; warning and info route as
+reviewable debt.
 EOF
   exit 1
 }
@@ -131,7 +113,7 @@ _publish_blocked() {
 
 # Number of NUL-delimited fields the parser emits per finding. Keep in step with
 # the field tuple written by the embedded parser below.
-SGT_REVIEW_FIELD_STRIDE=9
+SGT_REVIEW_FIELD_STRIDE=10
 # Separator that introduces an older, preserved revision of the same finding.
 # Newest revision first, so the reader sees the current finding at the top.
 SGT_REVIEW_REVISION_SEPARATOR='--- Superseded revision (preserved) ---'
@@ -243,9 +225,11 @@ parsed="$(mktemp)" || _routing_failure "could not allocate parser output"
 existing_file="$(mktemp)" || _routing_failure "could not allocate td query output"
 composed_file="$(mktemp)" || _routing_failure "could not allocate composed description"
 match_file="$(mktemp)" || _routing_failure "could not allocate dedup match output"
-trap 'rm -f "$parsed" "$existing_file" "$composed_file" "$match_file"' EXIT
+parse_error_file="$(mktemp)" || _routing_failure "could not allocate parser diagnostics"
+trap 'rm -f "$parsed" "$existing_file" "$composed_file" "$match_file" "$parse_error_file"' EXIT
 _parse_review_input() {
-  SGT_REVIEW_SEVERITIES="$SGT_REVIEW_SEVERITIES" python3 - "$INPUT" > "$parsed" <<'PY'
+  SGT_REVIEW_SEVERITY_ALIASES="$SGT_REVIEW_SEVERITY_ALIASES" \
+    python3 - "$INPUT" > "$parsed" 2> "$parse_error_file" <<'PY'
 import hashlib
 import json
 import os
@@ -253,7 +237,11 @@ import re
 import sys
 
 ALLOWED = {"id", "severity", "disposition", "summary", "evidence", "paths", "acceptance_criteria", "recommendation"}
-SEVERITIES = set(os.environ["SGT_REVIEW_SEVERITIES"].split())
+# Accepted reviewer spelling -> canonical severity, from bin/_sgt-review-axes.sh.
+SEVERITIES = dict(
+    pair.split("=", 1) for pair in os.environ["SGT_REVIEW_SEVERITY_ALIASES"].split()
+)
+SAFE_TOKEN = re.compile(r"[A-Za-z0-9._-]{1,32}")
 SECRET_VALUE = re.compile(r"(?i)((?:password|token|secret|credential|api[_-]?key)\s*[:=]\s*)([^\s,;]+)")
 BEARER = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 BASIC = re.compile(r"(?i)\bbasic\s+[^\s,;]+")
@@ -294,10 +282,25 @@ try:
         finding_id = clean(finding["id"], 120)
         if not re.fullmatch(r"[A-Za-z0-9._-]+", finding_id):
             raise ValueError("finding id")
-        severity = finding["severity"]
+        reported_severity = finding["severity"]
         disposition = finding["disposition"]
-        if severity not in SEVERITIES:
-            raise ValueError("severity")
+        if not isinstance(reported_severity, str) or reported_severity not in SEVERITIES:
+            # Name the finding and the accepted values so a reviewer can correct
+            # the artifact without reading the router (td-c09980). The rejected
+            # value is echoed only when it is a short safe token, so an unexpected
+            # payload cannot leak through the error path.
+            shown = reported_severity if isinstance(reported_severity, str) else ""
+            shown = shown if SAFE_TOKEN.fullmatch(shown) else "(unprintable)"
+            raise ValueError(
+                "finding %s: severity %s is not accepted; accepted severities: %s"
+                % (finding_id, shown, " ".join(sorted(SEVERITIES)))
+            )
+        # Normalize to the canonical severity: every accepted spelling of one
+        # severity must be the same finding, map to the same td priority, and
+        # produce the same content digest.
+        severity = SEVERITIES[reported_severity]
+        if reported_severity == severity:
+            reported_severity = ""
         if disposition not in {"actionable", "cosmetic", "false-positive"}:
             raise ValueError("disposition")
         paths = finding["paths"]
@@ -328,11 +331,15 @@ try:
             acceptance,
             recommendation,
             digest,
+            reported_severity,
         )
         for field in fields:
             sys.stdout.buffer.write(field.encode("utf-8") + b"\0")
-except (OSError, json.JSONDecodeError, UnicodeError, ValueError, TypeError):
-    print("invalid review output", file=sys.stderr)
+except ValueError as error:
+    print(error, file=sys.stderr)
+    raise SystemExit(1)
+except (OSError, json.JSONDecodeError, UnicodeError, TypeError):
+    print("malformed review artifact", file=sys.stderr)
     raise SystemExit(1)
 PY
 }
@@ -346,9 +353,15 @@ _valid_parsed_fields() {
   (( ${#fields[@]} % SGT_REVIEW_FIELD_STRIDE == 0 )) || return 1
   for ((offset=0; offset<${#fields[@]}; offset+=SGT_REVIEW_FIELD_STRIDE)); do
     [[ "${fields[offset]}" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
-    _review_severity_valid "${fields[offset+1]}" || return 1
+    # Field 1 is already canonical, so it must map to itself.
+    [[ "$(_sgt_review_severity_canonical "${fields[offset+1]}" 2>/dev/null)" == "${fields[offset+1]}" ]] || return 1
     [[ "${fields[offset+2]}" =~ ^(actionable|cosmetic|false-positive)$ ]] || return 1
     [[ "${fields[offset+8]}" =~ ^[0-9a-f]{32}$ ]] || return 1
+    # Reported spelling is empty for a canonical severity, otherwise an accepted
+    # alias of the canonical severity recorded alongside it.
+    if [[ -n "${fields[offset+9]}" ]]; then
+      [[ "$(_sgt_review_severity_canonical "${fields[offset+9]}" 2>/dev/null)" == "${fields[offset+1]}" ]] || return 1
+    fi
   done
 }
 
@@ -385,7 +398,8 @@ _release_parsed_findings() {
 if [[ -n "$RETRY" ]]; then
   cp "$ARTIFACT_DIR/findings" "$parsed" || _routing_failure "retry artifact is unreadable"
 else
-  _parse_review_input || _routing_failure "invalid review output"
+  _parse_review_input || \
+    _routing_failure "invalid review output: $(tr '\n' ' ' < "$parse_error_file")"
 fi
 
 fields=()
@@ -409,14 +423,21 @@ for ((offset=0; offset<${#fields[@]}; offset+=SGT_REVIEW_FIELD_STRIDE)); do
   acceptance="${fields[offset+6]}"
   recommendation="${fields[offset+7]}"
   content_digest="${fields[offset+8]}"
+  reported_severity="${fields[offset+9]}"
 
   if [[ "$disposition" != "actionable" ]]; then
     printf '%s: ignored %s finding\n' "$finding_id" "$disposition"
     continue
   fi
   actionable_count=$((actionable_count + 1))
-  priority="$(_review_severity_priority "$severity")" || \
+  priority="$(_sgt_review_severity_priority "$severity")" || \
     _routing_failure "severity $severity has no td priority mapping"
+  # Keep the reviewer's own spelling for provenance without letting it change
+  # the canonical severity, the priority, or the content digest.
+  reported_severity_line=""
+  [[ -z "$reported_severity" ]] || \
+    reported_severity_line="
+Reported severity: $reported_severity"
 
   # Scope the dedup marker to the originating mission and branch. Reviewers emit
   # generic finding ids ("spec-1", "STANDARDS-001"), so an axis/source/id-only
@@ -427,7 +448,7 @@ for ((offset=0; offset<${#fields[@]}; offset+=SGT_REVIEW_FIELD_STRIDE)); do
 
 Review axis: $AXIS
 Review source: $SOURCE
-Severity: $severity
+Severity: $severity$reported_severity_line
 Summary: $summary
 Evidence: $evidence
 Affected paths: $paths
@@ -540,7 +561,7 @@ PY
     printf '%s: td %s created; remediation: %s\n' "$finding_id" "$task_id" "$recommendation"
   fi
 
-  if [[ "$severity" == "error" ]]; then
+  if _sgt_review_severity_blocking "$severity"; then
     blocking_tasks+=("$task_id")
     blocking_recommendations+=("$recommendation")
   fi

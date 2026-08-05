@@ -816,4 +816,162 @@ if grep -Eq '^(create|update) ' "$TEST_ROOT/td.log"; then
 fi
 rm -rf "$WORKTREE/.sergeant-review-artifacts"
 
+# ── td-61a0c8 (owner decision, Option A): canonical severities plus a shared
+# alias table. Canonical set is error|warning|info; every accepted reviewer
+# spelling normalizes to one of them and maps to a fixed td priority. Only the
+# `error` family publishes a blocking gate. ───────────────────────────────────
+severity_finding() {
+  printf '{"findings":[{"id":"sev-1","severity":"%s","disposition":"actionable","summary":"Severity mapping","evidence":"bin/sev:1 evidence","paths":["bin/sev"],"acceptance_criteria":"Map it","recommendation":"Fix it"}]}\n' \
+    "$1" > "$TEST_ROOT/severity.json"
+}
+
+# canonical value -> priority, and alias -> the same canonical priority.
+for _case in \
+    'error P1 blocking' \
+    'blocker P1 blocking' \
+    'critical P1 blocking' \
+    'high P1 blocking' \
+    'warning P2 debt' \
+    'major P2 debt' \
+    'medium P2 debt' \
+    'info P3 debt' \
+    'minor P3 debt' \
+    'low P3 debt' \
+    'informational P3 debt'; do
+  # shellcheck disable=SC2086  # deliberate word splitting of the case tuple
+  set -- $_case
+  _severity="$1" _expect_priority="$2" _expect_gate="$3"
+  severity_finding "$_severity"
+  rm -rf "$WORKTREE/.sergeant-review-artifacts"
+  run_router "$TEST_ROOT/severity.json"
+  grep -Fq -- "--priority $_expect_priority" "$TEST_ROOT/td.log" || {
+    printf 'severity %s did not map to %s\n' "$_severity" "$_expect_priority" >&2
+    exit 1
+  }
+  # The body records the canonical severity, so an alias and its canonical
+  # spelling describe one finding rather than two.
+  case "$_expect_priority" in
+    P1) _canonical=error ;;
+    P2) _canonical=warning ;;
+    P3) _canonical=info ;;
+  esac
+  grep -Fq "Severity: $_canonical" "$TEST_ROOT/td.log" || {
+    printf 'severity %s was not normalized to %s in the body\n' "$_severity" "$_canonical" >&2
+    exit 1
+  }
+  if [[ "$_expect_gate" == blocking ]]; then
+    [[ "$status" -eq 2 ]] || {
+      printf 'severity %s did not publish a blocking gate\n' "$_severity" >&2
+      exit 1
+    }
+    [[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]] || {
+      printf 'severity %s did not block the worker\n' "$_severity" >&2
+      exit 1
+    }
+    grep -Fq 'blocked [app]' "$TEST_ROOT/notify.log" || {
+      printf 'severity %s did not notify a blocking gate\n' "$_severity" >&2
+      exit 1
+    }
+  else
+    [[ "$status" -eq 0 ]] || {
+      printf 'severity %s blocked the worker but must route as debt: %s\n' "$_severity" "$output" >&2
+      exit 1
+    }
+    # run_router starts from cleared fleet state, so a non-blocking route leaves
+    # no status at all rather than writing one.
+    [[ "$(cat "$WORKTREE/.sergeant-status" 2>/dev/null || true)" != 'blocked' ]] || {
+      printf 'severity %s blocked the worker\n' "$_severity" >&2
+      exit 1
+    }
+    [[ ! -s "$TEST_ROOT/notify.log" ]] || {
+      printf 'severity %s published a blocking notification\n' "$_severity" >&2
+      exit 1
+    }
+  fi
+done
+
+# An alias records the reviewer's reported spelling for provenance without
+# changing the canonical severity.
+severity_finding high
+rm -rf "$WORKTREE/.sergeant-review-artifacts"
+run_router "$TEST_ROOT/severity.json"
+grep -Fq 'Reported severity: high' "$TEST_ROOT/td.log" || {
+  printf 'aliased severity did not record the reported spelling\n' >&2
+  exit 1
+}
+# A canonical spelling needs no provenance line.
+severity_finding error
+rm -rf "$WORKTREE/.sergeant-review-artifacts"
+run_router "$TEST_ROOT/severity.json"
+if grep -Fq 'Reported severity:' "$TEST_ROOT/td.log"; then
+  printf 'canonical severity added a redundant reported-severity line\n' >&2
+  exit 1
+fi
+
+# An alias and its canonical spelling are the same finding, so re-routing one
+# after the other must not stack a preserved revision.
+severity_finding high
+rm -rf "$WORKTREE/.sergeant-review-artifacts"
+run_router "$TEST_ROOT/severity.json"
+sev_digest="$(grep -o 'Finding content digest: [0-9a-f]*' "$TEST_ROOT/td.log" | head -1 | awk '{print $4}')"
+severity_finding error
+rm -rf "$WORKTREE/.sergeant-review-artifacts"
+run_router "$TEST_ROOT/severity.json"
+[[ "$(grep -o 'Finding content digest: [0-9a-f]*' "$TEST_ROOT/td.log" | head -1 | awk '{print $4}')" == "$sev_digest" ]] || {
+  printf 'alias and canonical spelling produced different content digests\n' >&2
+  exit 1
+}
+
+# A severity outside the canonical set and alias table is rejected, and the
+# message names the accepted values.
+severity_finding urgent
+rm -rf "$WORKTREE/.sergeant-review-artifacts"
+run_router "$TEST_ROOT/severity.json"
+[[ "$status" -eq 2 ]] || { printf 'unaccepted severity was routed: %s\n' "$output" >&2; exit 1; }
+[[ "$output" == *'sev-1'* ]] || {
+  printf 'severity rejection did not name the offending finding: %s\n' "$output" >&2
+  exit 1
+}
+for _accepted in error blocker critical high warning major medium info minor low informational; do
+  [[ "$output" == *"$_accepted"* ]] || {
+    printf 'severity rejection did not name accepted value %s: %s\n' "$_accepted" "$output" >&2
+    exit 1
+  }
+done
+if grep -Eq '^(create|update) ' "$TEST_ROOT/td.log"; then
+  printf 'unaccepted severity reached td\n' >&2
+  exit 1
+fi
+
+# The shared definition is the single source of truth: every accepted spelling it
+# lists must route, and its priority must match the shared mapping.
+for _accepted in $(_sgt_review_severity_accepted); do
+  severity_finding "$_accepted"
+  rm -rf "$WORKTREE/.sergeant-review-artifacts"
+  run_router "$TEST_ROOT/severity.json"
+  _shared_priority="$(_sgt_review_severity_priority "$_accepted")" || {
+    printf 'shared definition accepts %s but maps it to no priority\n' "$_accepted" >&2
+    exit 1
+  }
+  grep -Fq -- "--priority $_shared_priority" "$TEST_ROOT/td.log" || {
+    printf 'router disagreed with the shared priority mapping for %s\n' "$_accepted" >&2
+    exit 1
+  }
+done
+
+# The usage text documents the canonical set and the alias table.
+set +e
+usage_output="$("$INSTALLED_BIN/sgt-review-findings" 2>&1)"
+set -e
+[[ "$usage_output" == *"error|warning|info"* ]] || {
+  printf 'usage text does not document the canonical severity set: %s\n' "$usage_output" >&2
+  exit 1
+}
+[[ "$usage_output" == *"$(_sgt_review_severity_alias_table)"* ]] || {
+  printf 'usage text does not document the shared alias table: %s\n' "$usage_output" >&2
+  exit 1
+}
+
+rm -rf "$WORKTREE/.sergeant-review-artifacts"
+
 printf 'sgt-review-findings: ok\n'
