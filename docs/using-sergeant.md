@@ -232,7 +232,7 @@ writes `.sergeant-validation-ready` with the recorded `intent_revision`, current
 not run no-mistakes. The coordinator starts the one final validation boundary:
 
 ```bash
-sgt-validate <fleet-task-id> <repo> [--skip <steps>]
+sgt-validate <fleet-task-id> <repo> [--skip <steps>] [--allow-argv-intent]
 ```
 
 `sgt-validate` splits the worker's existing tmux window, renames that shared
@@ -245,6 +245,49 @@ Before cloning the validation checkout or publishing launch state, the
 coordinator acquires an identity-checked validation-launch reservation for that
 task/repository pair. Concurrent launches fail closed until the recorded owner
 exits or stale-ownership recovery proves the reservation is abandoned.
+
+### Intent transport and the argv consent gate
+
+Canonical intent must not appear in process arguments, where any local process
+can read it from `ps` or `/proc/<pid>/cmdline`. Before it creates a validation
+run, `sgt-validate` probes `no-mistakes axi run --help` and requires
+`--intent-file`, which delivers the intent through a path instead of argv.
+
+When the installed no-mistakes does not offer `--intent-file`, the launch fails
+closed and names the required capability, the observed version, the observed flag
+surface, and the operator's options. No run, marker, or state change is created.
+Passing `--allow-argv-intent` consents, for that invocation only, to delivering
+the intent through `--intent`, accepting the exposure. The transport actually
+used is recorded in fleet state as `validation_intent_transport`, so a consented
+run stays auditable. Consent is a flag rather than an environment variable so it
+cannot be exported once and silently reapplied to later runs.
+
+### Coordinator ownership and handover
+
+Validation is owned by the tmux pane that dispatched the task. A coordinator in
+any other pane - a new session, a restarted client, a replacement coordinator -
+must take ownership explicitly:
+
+```bash
+sgt-validate <fleet-task-id> <repo> --claim-ownership
+sgt-validate <fleet-task-id> <repo> --release-ownership
+```
+
+A claim is accepted only when the claiming pane proves it really runs inside the
+pane it names, by walking its own process ancestry to that pane's process. A
+caller that merely exports `TMUX_PANE` cannot satisfy this. The prior owner must
+also be takeover-eligible: its pane is dead or absent, its recorded identity no
+longer matches the live pane, or it released ownership with
+`--release-ownership` from its own pane. A live, unreleased owner is never
+displaced.
+
+Every transfer appends the timestamp, reason, repository, prior and new pane, and
+both identity tuples to an owner-only `coordinator_handover.log` in the task's
+fleet directory. A release is consumed by the claim that uses it, so it cannot be
+replayed later by a third pane. Each precondition failure - unset `TMUX_PANE`, a
+pane that is not live, an unrecorded or malformed pane ID, an unrecorded or
+unsafely owned identity, a recycled pane, and a live or gone dispatcher - reports
+its own cause and remedy.
 
 If launch fails before the validation child commits the release, Sergeant rolls
 back only the checkout, pane, temp files, and fleet-state markers that the
