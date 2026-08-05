@@ -105,7 +105,9 @@ Classify each output line by prefix:
 | Prefix | Meaning | Action |
 |---|---|---|
 | `OK:` | present | skip |
-| `MISSING:` | required gap | must be resolved before Phase 2 |
+| `MISSING: <tool>` | a required prerequisite is absent | must be resolved before Phase 2 |
+| `MISSING: Sergeant command <name>` | the command link does not exist yet | expected before Phase 2; Phase 2 installs it |
+| `MISSING: git hook <name>` | the hook is not linked yet | expected before Phase 2; Phase 2 installs it |
 | `OPTIONAL MISSING:` | optional gap | report only |
 | `MANUAL PACKAGES:` | platform packages the bootstrap cannot install here | ask the user to install them with their own package manager |
 | `MANUAL HOOKS:` | the git hooks directory is not this checkout's to write | report it; if the message names a primary checkout, hooks are installed from there with `./bin/sgt-install --hooks-only` |
@@ -115,8 +117,21 @@ Classify each output line by prefix:
 Do not treat a `MANUAL PACKAGES:` or `MANUAL HOOKS:` line as a login, and do not
 attempt any login yourself.
 
+On a fresh clone `--verify-only` exits non-zero solely because the command links
+and hooks do not exist yet. That is not a Phase 1 blocker: only a
+`MISSING: <tool>` line is.
+
+`--verify-only` proves presence, not capability. It reports `OK: td` for any `td`
+on `PATH`, so still confirm the Marcus implementation explicitly:
+
+```bash
+td create --help    # must list --description, --json and --work-dir
+```
+
+`mise run check` performs the same capability check if it is available.
+
 On macOS with Homebrew or Linux with `apt-get`, the supported install for a
-`MISSING:` gap is `./bin/sgt-bootstrap`. Classify a prerequisite as `unsupported`
+`MISSING: <tool>` gap is `./bin/sgt-bootstrap`. Classify a prerequisite as `unsupported`
 only when the bootstrap cannot install it: `treehouse` and `dagr` are reported by
 `--verify-only` but installed by their own installers, not by Sergeant.
 

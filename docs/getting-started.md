@@ -24,12 +24,13 @@ Optional:
 - Treehouse for leased worktree pools
 - Graphify for project knowledge graphs
 - no-mistakes for final shipping validation
-- Node.js/npm to install external agent skills
+- Node.js (ships `npm`) to install external agent skills
 
 On macOS with Homebrew, or Linux with `apt-get`, the bootstrap installs every
-required entry above plus the optional `mise`, Node.js, `graphify`, and
-`no-mistakes`, along with the supporting tools it needs itself (`jq`,
-`shellcheck`, `curl`, Go, and `uv`). It reports but does not install `treehouse`
+required entry above except Bash itself, which it only verifies, plus the
+optional `mise`, Node.js (which ships `npm`), `graphify`, and `no-mistakes`,
+along with the supporting tools it needs itself (`jq`, `shellcheck`, `curl`, Go,
+and `uv`). It reports but does not install `treehouse`
 or `dagr`, which have their own installers.
 Preview it first, then run it:
 
@@ -44,10 +45,15 @@ The bootstrap is safe to rerun and never overwrites anything you own: a real
 file, a directory, or a symlink pointing outside a Sergeant checkout is preserved
 and reported as a conflict. It does reclaim its own entries without asking — a
 symlink already pointing into some Sergeant checkout, a broken symlink, or an
-executable already at a name it manages — so installing from a second clone
-repoints the commands at that clone. Conflicts are reported before the first
-package is installed, so a run that cannot finish declines without changing
-anything.
+executable it previously installed at one of the tool names it manages — so
+installing from a second clone repoints the commands at that clone. A real
+executable at one of Sergeant's own command names, or at a git hook, is preserved
+and reported.
+
+Every conflict knowable before the package phase is reported first, so a run that
+cannot finish declines without changing anything. Git hooks are the one
+exception: git may itself be a package the run installs, so a hook conflict is
+only detectable once git is present.
 
 Sergeant writes to the command directory (`SGT_INSTALL_DIR`, which must be an
 absolute path and defaults to `~/.local/bin`) and to this repository, whose git
