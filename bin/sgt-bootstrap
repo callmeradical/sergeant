@@ -151,6 +151,13 @@ if "$dry_run" && "$verify_only"; then
   exit 2
 fi
 
+# Install mode links executables into INSTALL_DIR and then runs them, so it must
+# see that directory. The read-only modes deliberately do not extend PATH: they
+# report what the user's own shell can reach, matching `mise run check`.
+if ! "$dry_run" && ! "$verify_only"; then
+  export PATH="$INSTALL_DIR:$PATH"
+fi
+
 # Resolve the manifest before anything else so a mis-resolved checkout fails
 # here rather than reporting a complete installation over an empty plan.
 sources="$(_sgt_install_sources "$ROOT_DIR")" || exit 1
@@ -200,6 +207,13 @@ done <<< "$missing_package_list"
 # exactly the conflicts a real run would decline on.
 conflicts=()
 
+# mise is installed by its own upstream script straight into INSTALL_DIR, so its
+# path obeys the same preserve-and-decline rule as every other path written here.
+if ! tool_available mise && \
+   [[ "$(_sgt_install_managed_state "$INSTALL_DIR/mise" '/mise/')" == 'conflict' ]]; then
+  conflicts[${#conflicts[@]}]="$INSTALL_DIR/mise is not the required mise executable"
+fi
+
 for item in "${managed_tools[@]}"; do
   command_name="${item%%:*}"
   tool_available "$command_name" && continue
@@ -217,6 +231,8 @@ for item in "${source_installed_tools[@]}"; do
     conflicts[${#conflicts[@]}]="$INSTALL_DIR/$command_name is not the required $command_name executable"
   fi
 done
+
+
 
 while IFS= read -r source_file; do
   [[ -n "$source_file" ]] || continue
@@ -433,7 +449,6 @@ else
     printf 'sgt-bootstrap: mise installation failed; install it manually from https://mise.run\n' >&2
     exit 1
   }
-  export PATH="$INSTALL_DIR:$PATH"
   tool_available mise || {
     printf 'sgt-bootstrap: the mise installer completed but mise is not on PATH; install it manually from https://mise.run\n' >&2
     exit 1
@@ -447,8 +462,12 @@ for item in "${managed_tools[@]}"; do
     printf 'OK: %s\n' "$command_name"
     continue
   fi
-  printf 'INSTALLING: %s\n' "$command_name"
   managed_target="$INSTALL_DIR/$command_name"
+  if [[ "$(_sgt_install_managed_state "$managed_target" '/mise/')" == 'present' ]]; then
+    printf 'OK: %s (in %s)\n' "$command_name" "$INSTALL_DIR"
+    continue
+  fi
+  printf 'INSTALLING: %s\n' "$command_name"
   mise install "$tool_spec"
   # `command -v` inside the tool's own environment; the external `which` is not
   # POSIX and Debian is removing it.
@@ -472,6 +491,17 @@ for item in "${source_installed_tools[@]}"; do
     printf 'OK: %s\n' "$command_name"
     continue
   fi
+  if [[ "$(_sgt_install_managed_state "$INSTALL_DIR/$command_name" '/mise/')" == 'present' ]]; then
+    printf 'OK: %s (in %s)\n' "$command_name" "$INSTALL_DIR"
+    continue
+  fi
+  installer="${item##*|}"
+  installer="${installer%% *}"
+  tool_available "$installer" || {
+    printf 'sgt-bootstrap: cannot install %s: %s is not available; install %s manually.\n' \
+      "$command_name" "$installer" "$command_name" >&2
+    exit 1
+  }
   printf 'INSTALLING: %s\n' "$command_name"
   bin_env="${item#*|}"
   bin_env="${bin_env%%|*}"

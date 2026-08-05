@@ -24,6 +24,7 @@ export XDG_CONFIG_HOME="$TEST_ROOT/xdg"
 export GIT_CONFIG_GLOBAL="$TEST_ROOT/gitconfig-global"
 export GIT_CONFIG_SYSTEM="$TEST_ROOT/gitconfig-system"
 export GIT_CONFIG_NOSYSTEM=1
+unset SGT_INSTALL_DIR
 : > "$GIT_CONFIG_GLOBAL"
 : > "$GIT_CONFIG_SYSTEM"
 
@@ -203,20 +204,46 @@ test_managed_link_into_the_mise_tree_is_reclaimable() {
   assert_managed_state "$TEST_ROOT/m3/uv" reclaim
 }
 
-test_managed_real_file_is_a_conflict() {
+# An executable already at the name is this command's own output on a rerun:
+# `go install` and `uv tool install` write real files, so a second run must
+# recognise them instead of reporting them to the user as their conflict.
+test_managed_executable_is_present() {
+  mkdir -p "$TEST_ROOT/m4x"
+  printf '#!/bin/sh\n' > "$TEST_ROOT/m4x/uv"
+  chmod +x "$TEST_ROOT/m4x/uv"
+  assert_managed_state "$TEST_ROOT/m4x/uv" present
+}
+
+# A non-executable file is not a tool, so it is the user's and is preserved.
+test_managed_non_executable_file_is_a_conflict() {
   mkdir -p "$TEST_ROOT/m4"
   printf 'not really uv\n' > "$TEST_ROOT/m4/uv"
   assert_managed_state "$TEST_ROOT/m4/uv" conflict
 }
 
+test_managed_directory_is_a_conflict() {
+  mkdir -p "$TEST_ROOT/m4d/uv"
+  assert_managed_state "$TEST_ROOT/m4d/uv" conflict
+}
+
 # The defect this guards: an unresolved relative target is tested against the
-# caller's cwd, looks dangling, and is deleted.
-test_managed_relative_link_to_a_users_own_tool_is_a_conflict() {
+# caller's cwd, looks dangling, and is deleted. A non-executable target proves
+# both that the link was resolved and that a user's file is preserved.
+test_managed_relative_link_to_a_users_own_file_is_a_conflict() {
   mkdir -p "$TEST_ROOT/m5/bin" "$TEST_ROOT/m5/mine"
-  printf '#!/usr/bin/env bash\n' > "$TEST_ROOT/m5/mine/uv"
-  chmod +x "$TEST_ROOT/m5/mine/uv"
+  printf 'my notes\n' > "$TEST_ROOT/m5/mine/uv"
   ln -s '../mine/uv' "$TEST_ROOT/m5/bin/uv"
   assert_managed_state "$TEST_ROOT/m5/bin/uv" conflict
+}
+
+# Resolution must still happen for an executable target: an unresolved relative
+# link would look dangling and be reclaimed.
+test_managed_relative_link_to_an_executable_is_present() {
+  mkdir -p "$TEST_ROOT/m6/bin" "$TEST_ROOT/m6/mine"
+  printf '#!/bin/sh\n' > "$TEST_ROOT/m6/mine/uv"
+  chmod +x "$TEST_ROOT/m6/mine/uv"
+  ln -s '../mine/uv' "$TEST_ROOT/m6/bin/uv"
+  assert_managed_state "$TEST_ROOT/m6/bin/uv" present
 }
 
 # ── _sgt_install_hooks_dir ────────────────────────────────────────────────────
@@ -404,8 +431,11 @@ test_relative_link_resolves_physically_through_a_symlinked_parent
 test_managed_absent_target_is_absent
 test_managed_dangling_link_is_reclaimable
 test_managed_link_into_the_mise_tree_is_reclaimable
-test_managed_real_file_is_a_conflict
-test_managed_relative_link_to_a_users_own_tool_is_a_conflict
+test_managed_executable_is_present
+test_managed_non_executable_file_is_a_conflict
+test_managed_directory_is_a_conflict
+test_managed_relative_link_to_a_users_own_file_is_a_conflict
+test_managed_relative_link_to_an_executable_is_present
 test_hooks_dir_is_absolute_for_a_plain_clone
 test_hooks_dir_resolves_to_the_common_dir_for_a_worktree
 test_hooks_dir_honours_a_repo_local_core_hooks_path

@@ -203,12 +203,21 @@ _sgt_install_link_state() {
 
 # _sgt_install_managed_state <target> <owned-substring>
 #
-# Classify what occupies a managed executable's path, printing one of:
+# Classify what occupies the path of an executable this command installs,
+# printing one of:
 #
+#   present   an executable already occupies the name; the installer owns this
+#             name in the directory it manages and may replace its own binary
 #   absent    nothing there; safe to install
 #   reclaim   a dangling link, or a link into a tool tree matching
 #             <owned-substring>; safe to replace in place
-#   conflict  anything the user owns; preserve and report
+#   conflict  something that is not a runnable tool — a non-executable file, a
+#             directory, or a link to one — so it is the user's and is preserved
+#
+# `present` matters for rerun safety: `go install` and `uv tool install` write
+# real files into the install directory, so a second run must recognise its own
+# output instead of reporting it to the user as their conflict. A non-executable
+# file at one of these names is not a tool and is always preserved.
 #
 # Shares _sgt_install_resolve_link with _sgt_install_link_state so a relative
 # user-owned link is never mistaken for a reclaimable one.
@@ -220,9 +229,13 @@ _sgt_install_managed_state() {
       printf 'reclaim\n'
     elif [[ "$link_target" == *"$owned_substring"* ]]; then
       printf 'reclaim\n'
+    elif [[ -f "$link_target" && -x "$link_target" ]]; then
+      printf 'present\n'
     else
       printf 'conflict\n'
     fi
+  elif [[ -f "$target" && -x "$target" ]]; then
+    printf 'present\n'
   elif [[ -e "$target" ]]; then
     printf 'conflict\n'
   else
