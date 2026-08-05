@@ -5633,7 +5633,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ "$subcommand" == show ]] || exit 1
-if [[ -z "$work_dir" || "$work_dir" != "${TD_REQUIRED_WORK_DIR:-}" ]]; then
+# An unbound lookup, or one bound outside the owning repository, fails exactly as
+# a real td run does from a directory with no td database.
+if [[ -z "$work_dir" || ! -d "$work_dir" ]] || \
+  [[ -n "${TD_REQUIRED_WORK_DIR:-}" && "$work_dir" != "$TD_REQUIRED_WORK_DIR" ]]; then
   printf "ERROR: database not found: run 'td init' first\n" >&2
   exit 1
 fi
@@ -5797,6 +5800,339 @@ td_unbound_lines="$(printf '%s\n' "$td_audit_lines" | grep -v -- '--work-dir' ||
   exit 1
 }
 printf 'sgt-cleanup gh#171 audit: every td invocation is repository-bound ok\n'
-rm -f "$TEST_ROOT/fake-bin/td"
+
+# ── GH #170: evidence-preserving retirement of unfinishable handshakes ────────
+# A dead worker that never completed its response handshake can only be retired
+# when the owning task is closed AND the recorded worker is provably gone.  The
+# exact partial state is archived first, and no acknowledgement is ever invented.
+reaped_pid() {
+  local pid
+  ( exit 0 ) &
+  pid=$!
+  wait "$pid" 2>/dev/null || true
+  printf '%s\n' "$pid"
+}
+RETIRE_DEAD_PID="$(reaped_pid)"
+[[ -n "$RETIRE_DEAD_PID" ]] && ! kill -0 "$RETIRE_DEAD_PID" 2>/dev/null || {
+  printf 'FAIL gh#170: could not obtain a reaped PID for the dead-owner fixtures\n' >&2
+  exit 1
+}
+
+seed_retirement_task() {
+  local repo="${2:-app}" task_id="$1"
+
+  retire_state="$TEST_ROOT/fleet/$task_id/$repo"
+  retire_worktree="$TEST_ROOT/$task_id-worktree"
+  retire_repo="$TEST_ROOT/$task_id-repo"
+  rm -rf "$TEST_ROOT/fleet/$task_id" "$retire_worktree"
+  mkdir -p "$retire_state"
+  init_test_repo "$retire_repo"
+  git -C "$retire_repo" worktree add -q -b "$task_id-worker" "$retire_worktree"
+  record_retry_owner "$task_id" "$repo" "$retire_repo"
+  printf '%s\n' "$retire_worktree" > "$retire_state/worktree"
+  printf 'git\n' > "$retire_state/wt_type"
+  printf 'done\n' > "$retire_state/status"
+  printf 'result\n' > "$retire_state/result"
+  printf 'done\n' > "$retire_worktree/.sergeant-status"
+  printf 'result\n' > "$retire_worktree/.sergeant-result"
+  printf 'td-retire-%s\n' "$task_id" > "$retire_state/td_task"
+  printf '%s\n' "$RETIRE_DEAD_PID" > "$retire_state/worker_pid"
+  printf 'Mon Jan  1 00:00:00 2024\n' > "$retire_state/worker_process_start"
+}
+
+# One fixture per class of partial handshake state that cleanup used to refuse
+# forever.  None of them is a complete acknowledgement.
+seed_retirement_partial() {
+  case "$1" in
+    pending-transport)
+      printf 'response body\n' > "$retire_state/response"
+      printf 'response-123\n' > "$retire_state/response_id"
+      printf '1\n' > "$retire_state/response_generation"
+      printf 'response body\n' > "$retire_worktree/.sergeant-response"
+      printf 'response-123\n' > "$retire_worktree/.sergeant-response-id"
+      printf '1\n' > "$retire_worktree/.sergeant-response-generation"
+      ;;
+    applied-unacked)
+      printf 'response body\n' > "$retire_state/response"
+      printf 'response-123\n' > "$retire_state/response_id"
+      printf '1\n' > "$retire_state/response_generation"
+      printf 'response body\n' > "$retire_worktree/.sergeant-response"
+      printf 'response_id=response-123\ngate_generation=1\nstatus=done\n' \
+        > "$retire_worktree/.sergeant-response-applied"
+      ;;
+    fleet-ack-only)
+      printf 'response-123\n' > "$retire_state/response_id"
+      printf '1\n' > "$retire_state/response_generation"
+      printf 'response-123\n' > "$retire_state/response_ack"
+      ;;
+    incomplete-archive)
+      printf 'response-123\n' > "$retire_state/response_id"
+      printf '1\n' > "$retire_state/response_generation"
+      printf 'response-123\n' > "$retire_state/response_ack"
+      printf 'response-123\n' > "$retire_worktree/.sergeant-response-ack"
+      mkdir -p "$retire_state/response-archive/response-123"
+      printf 'response body\n' > "$retire_state/response-archive/response-123/body"
+      printf '1\n' > "$retire_state/response-archive/response-123/gate_generation"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+run_retirement_cleanup() {
+  local task_id="$1"
+
+  set +e
+  retire_output="$(PATH="${RETIRE_PATH_PREFIX:-$TEST_ROOT/fake-bin}:$PATH" \
+    TD_FAKE_STATUS="${TD_FAKE_STATUS:-closed}" \
+    RETIRE_PANE_IDENTITY="${RETIRE_PANE_IDENTITY:-}" \
+    SGT_CLEANUP_FAIL_POINT="${RETIRE_FAIL_POINT:-}" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 "$ROOT_DIR/bin/sgt-cleanup" "$task_id" 2>&1)"
+  retire_status=$?
+  set -e
+}
+
+assert_retirement_refused() {
+  local expected="$2" label="$1"
+
+  [[ "$retire_status" -ne 0 ]] || {
+    printf 'FAIL gh#170 %s: cleanup accepted an unretirable handshake\n' "$label" >&2
+    exit 1
+  }
+  [[ "$retire_output" == *"pending or incomplete response acknowledgement"* ]] || {
+    printf 'FAIL gh#170 %s: unexpected refusal: %s\n' "$label" "$retire_output" >&2
+    exit 1
+  }
+  [[ "$retire_output" == *"$expected"* ]] || {
+    printf 'FAIL gh#170 %s: refusal did not explain %q: %s\n' "$label" "$expected" \
+      "$retire_output" >&2
+    exit 1
+  }
+  [[ -d "$retire_state" && -d "$retire_worktree" ]] || {
+    printf 'FAIL gh#170 %s: a refused retirement destroyed state\n' "$label" >&2
+    exit 1
+  }
+  [[ ! -e "$retire_state/response-retirement" ]] || {
+    printf 'FAIL gh#170 %s: a refused retirement published an archive\n' "$label" >&2
+    exit 1
+  }
+}
+
+for retire_class in pending-transport applied-unacked fleet-ack-only incomplete-archive; do
+  seed_retirement_task "retire-$retire_class"
+  seed_retirement_partial "$retire_class"
+  run_retirement_cleanup "retire-$retire_class"
+  [[ "$retire_status" -eq 0 ]] || {
+    printf 'FAIL gh#170 %s: a dead owner with partial response state was not retired: %s\n' \
+      "$retire_class" "$retire_output" >&2
+    exit 1
+  }
+  [[ ! -e "$TEST_ROOT/fleet/retire-$retire_class" && ! -e "$retire_worktree" ]] || {
+    printf 'FAIL gh#170 %s: retirement left state behind\n' "$retire_class" >&2
+    exit 1
+  }
+  printf 'sgt-cleanup gh#170: %s retires with a dead owner ok\n' "$retire_class"
+done
+
+# A dead pane whose recorded identity still matches is proof the owner exited.
+seed_retirement_task retire-dead-pane
+seed_retirement_partial pending-transport
+mkdir -p "$TEST_ROOT/retire-bin"
+cp "$TEST_ROOT/fake-bin/td" "$TEST_ROOT/retire-bin/td"
+printf '%%91\n' > "$retire_state/pane"
+printf '0|%%91|%s|123456|worker-command\n' "$RETIRE_DEAD_PID" > "$retire_state/pane_identity"
+chmod 600 "$retire_state/pane_identity"
+cat > "$TEST_ROOT/retire-bin/tmux" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  display-message)
+    format=""
+    for argument in "$@"; do format="$argument"; done
+    if [[ "$format" == '#{pane_id}' ]]; then
+      printf '%s\n' "${RETIRE_PANE_ID:-%91}"
+    else
+      printf '%s\n' "${RETIRE_PANE_IDENTITY:?}"
+    fi
+    ;;
+  kill-pane) : ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/retire-bin/tmux"
+RETIRE_PATH_PREFIX="$TEST_ROOT/retire-bin" \
+  RETIRE_PANE_IDENTITY="1|%91|$RETIRE_DEAD_PID|123456|worker-command" \
+  run_retirement_cleanup retire-dead-pane
+[[ "$retire_status" -eq 0 ]] || {
+  printf 'FAIL gh#170 dead-pane: a dead pane with a matching identity was not retired: %s\n' \
+    "$retire_output" >&2
+  exit 1
+}
+[[ ! -e "$TEST_ROOT/fleet/retire-dead-pane" ]] || {
+  printf 'FAIL gh#170 dead-pane: retirement left fleet state behind\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup gh#170: dead pane with a matching identity retires ok\n'
+
+# A live pane is a live owner: never retire underneath it.
+seed_retirement_task retire-live-pane
+seed_retirement_partial pending-transport
+printf '%%91\n' > "$retire_state/pane"
+printf '0|%%91|%s|123456|worker-command\n' "$RETIRE_DEAD_PID" > "$retire_state/pane_identity"
+chmod 600 "$retire_state/pane_identity"
+RETIRE_PATH_PREFIX="$TEST_ROOT/retire-bin" \
+  RETIRE_PANE_IDENTITY="0|%91|$RETIRE_DEAD_PID|123456|worker-command" \
+  run_retirement_cleanup retire-live-pane
+assert_retirement_refused live-pane 'is still live'
+printf 'sgt-cleanup gh#170: live worker pane refuses retirement ok\n'
+
+# A pane that no longer belongs to the recorded worker cannot prove anything.
+seed_retirement_task retire-pane-mismatch
+seed_retirement_partial pending-transport
+printf '%%91\n' > "$retire_state/pane"
+printf '0|%%91|%s|123456|worker-command\n' "$RETIRE_DEAD_PID" > "$retire_state/pane_identity"
+chmod 600 "$retire_state/pane_identity"
+RETIRE_PATH_PREFIX="$TEST_ROOT/retire-bin" \
+  RETIRE_PANE_IDENTITY="1|%91|4242|999999|other-command" \
+  run_retirement_cleanup retire-pane-mismatch
+assert_retirement_refused pane-mismatch 'pane identity does not match'
+printf 'sgt-cleanup gh#170: mismatched worker pane refuses retirement ok\n'
+
+# A live recorded process is a live owner.
+seed_retirement_task retire-live-owner
+seed_retirement_partial pending-transport
+printf '%s\n' "$$" > "$retire_state/worker_pid"
+ps -o lstart= -p "$$" | sed 's/^ *//;s/ *$//' > "$retire_state/worker_process_start"
+run_retirement_cleanup retire-live-owner
+assert_retirement_refused live-owner 'is still alive'
+printf 'sgt-cleanup gh#170: live worker process refuses retirement ok\n'
+
+# A recycled PID proves nothing about the recorded owner.
+seed_retirement_task retire-pid-reuse
+seed_retirement_partial pending-transport
+printf '%s\n' "$$" > "$retire_state/worker_pid"
+printf 'Mon Jan  1 00:00:00 2024\n' > "$retire_state/worker_process_start"
+run_retirement_cleanup retire-pid-reuse
+assert_retirement_refused pid-reuse 'was reused'
+printf 'sgt-cleanup gh#170: reused worker PID refuses retirement ok\n'
+
+# Live processes in the recorded process group outlive the pane.
+seed_retirement_task retire-live-group
+seed_retirement_partial pending-transport
+ps -o pgid= -p "$$" | tr -d ' ' > "$retire_state/worker_process_group"
+run_retirement_cleanup retire-live-group
+assert_retirement_refused live-group 'process group'
+printf 'sgt-cleanup gh#170: live worker process group refuses retirement ok\n'
+
+# Without recorded process provenance there is nothing to prove death with.
+seed_retirement_task retire-no-provenance
+seed_retirement_partial pending-transport
+rm -f "$retire_state/worker_pid" "$retire_state/worker_process_start"
+run_retirement_cleanup retire-no-provenance
+assert_retirement_refused no-provenance 'provenance is incomplete'
+printf 'sgt-cleanup gh#170: missing worker provenance refuses retirement ok\n'
+
+# The owning work must be closed, not merely dispatched somewhere.
+seed_retirement_task retire-open-task
+seed_retirement_partial pending-transport
+TD_FAKE_STATUS=in_progress run_retirement_cleanup retire-open-task
+assert_retirement_refused open-task 'owning td task is in_progress'
+printf 'sgt-cleanup gh#170: open owning task refuses retirement ok\n'
+
+# The archive records the exact partial state and owner evidence, invents no
+# acknowledgement, and a retried cleanup converges on the same result.
+seed_retirement_task retire-idempotent
+seed_retirement_partial applied-unacked
+RETIRE_FAIL_POINT=phase-publish-reconciled-absent run_retirement_cleanup retire-idempotent
+[[ "$retire_status" -ne 0 ]] || {
+  printf 'FAIL gh#170 idempotent: the injected reconciliation failure did not stop cleanup\n' >&2
+  exit 1
+}
+retirement_dir="$retire_state/response-retirement"
+[[ -d "$retirement_dir" && ! -L "$retirement_dir" ]] || {
+  printf 'FAIL gh#170 idempotent: retirement published no archive\n' >&2
+  exit 1
+}
+[[ "$(cat "$retirement_dir/partial/fleet/response")" == 'response body' && \
+  "$(sed -n 's/^response_id=//p' \
+    "$retirement_dir/partial/worktree/.sergeant-response-applied")" == 'response-123' ]] || {
+  printf 'FAIL gh#170 idempotent: the archive did not preserve the exact partial state\n' >&2
+  exit 1
+}
+[[ "$(cat "$retirement_dir/body")" == 'response body' && \
+  "$(cat "$retirement_dir/gate_generation")" == '1' && \
+  "$(cat "$retirement_dir/applied_status")" == 'done' ]] || {
+  printf 'FAIL gh#170 idempotent: the archive did not reuse the response-archive fields\n' >&2
+  exit 1
+}
+grep -Fq 'response_id=response-123' "$retirement_dir/manifest" || {
+  printf 'FAIL gh#170 idempotent: the manifest did not bind the retired response\n' >&2
+  exit 1
+}
+grep -Fq "worker_pid=$RETIRE_DEAD_PID" "$retirement_dir/owner" && \
+  grep -Fq 'td_status=closed' "$retirement_dir/owner" || {
+  printf 'FAIL gh#170 idempotent: the archive did not record owner death evidence\n' >&2
+  exit 1
+}
+[[ ! -e "$retire_state/response_ack" && \
+  ! -e "$retire_state/terminal-evidence/.sergeant-response-ack" && \
+  ! -e "$retirement_dir/partial/fleet/response_ack" ]] || {
+  printf 'FAIL gh#170 idempotent: retirement fabricated an acknowledgement\n' >&2
+  exit 1
+}
+run_retirement_cleanup retire-idempotent
+[[ "$retire_status" -eq 0 ]] || {
+  printf 'FAIL gh#170 idempotent: the retried cleanup did not converge: %s\n' \
+    "$retire_output" >&2
+  exit 1
+}
+[[ ! -e "$TEST_ROOT/fleet/retire-idempotent" ]] || {
+  printf 'FAIL gh#170 idempotent: the retried cleanup left fleet state behind\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup gh#170: retirement archive is exact and retry converges ok\n'
+
+# Response state that changes after retirement is a new handshake, not a retirement.
+seed_retirement_task retire-mutated
+seed_retirement_partial pending-transport
+RETIRE_FAIL_POINT=phase-publish-reconciled-absent run_retirement_cleanup retire-mutated
+[[ -d "$retire_state/response-retirement" ]] || {
+  printf 'FAIL gh#170 mutated: retirement published no archive to validate\n' >&2
+  exit 1
+}
+printf 'a later response\n' > "$retire_state/response"
+run_retirement_cleanup retire-mutated
+[[ "$retire_status" -ne 0 ]] || {
+  printf 'FAIL gh#170 mutated: cleanup accepted response state that changed after retirement\n' >&2
+  exit 1
+}
+[[ "$retire_output" == *"changed after retirement"* ]] || {
+  printf 'FAIL gh#170 mutated: unexpected refusal: %s\n' "$retire_output" >&2
+  exit 1
+}
+[[ -d "$retire_state" ]] || {
+  printf 'FAIL gh#170 mutated: a refused retry destroyed fleet state\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup gh#170: response state changed after retirement refused ok\n'
+
+# A tampered archive is not evidence.
+seed_retirement_task retire-tampered
+seed_retirement_partial pending-transport
+RETIRE_FAIL_POINT=phase-publish-reconciled-absent run_retirement_cleanup retire-tampered
+[[ -f "$retire_state/response-retirement/partial/fleet/response" ]] || {
+  printf 'FAIL gh#170 tampered: retirement published no archived copy to tamper with\n' >&2
+  exit 1
+}
+printf 'tampered\n' > "$retire_state/response-retirement/partial/fleet/response"
+run_retirement_cleanup retire-tampered
+[[ "$retire_status" -ne 0 ]] || {
+  printf 'FAIL gh#170 tampered: cleanup accepted a tampered retirement archive\n' >&2
+  exit 1
+}
+[[ "$retire_output" == *"retirement archive"* ]] || {
+  printf 'FAIL gh#170 tampered: unexpected refusal: %s\n' "$retire_output" >&2
+  exit 1
+}
+printf 'sgt-cleanup gh#170: tampered retirement archive refused ok\n'
+rm -rf "$TEST_ROOT/fake-bin/td" "$TEST_ROOT/retire-bin"
 
 printf 'sgt-cleanup: all tests passed\n'

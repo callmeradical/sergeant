@@ -47,15 +47,6 @@ trap '_cleanup_ack_response' EXIT
 RESPONSE_GENERATION="$(cat "$REPO_STATE/response_generation" 2>/dev/null || true)"
 [[ "$RESPONSE_GENERATION" =~ ^[1-9][0-9]*$ ]] || \
   _die "Pending response generation is invalid"
-_proof_field() {
-  local key="$1"
-  local proof_file="$2"
-  awk -F= -v key="$key" '
-    $1 == key { count++; value = substr($0, length(key) + 2) }
-    END { if (count == 1 && value != "") print value; else exit 1 }
-  ' "$proof_file"
-}
-
 ARCHIVE_DIR="$REPO_STATE/response-archive"
 umask 077
 mkdir -p "$ARCHIVE_DIR"
@@ -64,15 +55,9 @@ ARCHIVE_ENTRY="$ARCHIVE_DIR/$RESPONSE_ID"
 if [[ -e "$ARCHIVE_ENTRY" || -L "$ARCHIVE_ENTRY" ]]; then
   [[ -d "$ARCHIVE_ENTRY" && ! -L "$ARCHIVE_ENTRY" ]] || \
     _die "Response archive entry is invalid: $RESPONSE_ID"
-  for archive_file in body gate_generation applied_status proof; do
-    [[ -f "$ARCHIVE_ENTRY/$archive_file" && ! -L "$ARCHIVE_ENTRY/$archive_file" ]] || \
-      _die "Response archive entry is incomplete: $RESPONSE_ID"
-  done
-  ARCHIVE_STATUS="$(cat "$ARCHIVE_ENTRY/applied_status")"
-  [[ "$(cat "$ARCHIVE_ENTRY/gate_generation")" == "$RESPONSE_GENERATION" && \
-     "$(_proof_field response_id "$ARCHIVE_ENTRY/proof" 2>/dev/null || true)" == "$RESPONSE_ID" && \
-     "$(_proof_field gate_generation "$ARCHIVE_ENTRY/proof" 2>/dev/null || true)" == "$RESPONSE_GENERATION" && \
-     "$(_proof_field status "$ARCHIVE_ENTRY/proof" 2>/dev/null || true)" == "$ARCHIVE_STATUS" ]] || \
+  _sgt_response_archive_entry_complete "$ARCHIVE_ENTRY" || \
+    _die "Response archive entry is incomplete: $RESPONSE_ID"
+  _sgt_response_archive_entry_matches "$ARCHIVE_ENTRY" "$RESPONSE_ID" "$RESPONSE_GENERATION" || \
     _die "Response archive entry does not match pending response: $RESPONSE_ID"
   for response_file in "$REPO_STATE/response" "$WORKTREE/.sergeant-response"; do
     [[ ! -e "$response_file" && ! -L "$response_file" ]] || \
@@ -94,9 +79,9 @@ else
     _die "Pending response generation is invalid"
   PROOF_FILE="$WORKTREE/.sergeant-response-applied"
   [[ -f "$PROOF_FILE" ]] || _die "Response post-application proof is required before acknowledgement"
-  PROOF_ID="$(_proof_field response_id "$PROOF_FILE")" || _die "Response post-application proof is malformed"
-  PROOF_GENERATION="$(_proof_field gate_generation "$PROOF_FILE")" || _die "Response post-application proof is malformed"
-  PROOF_STATUS="$(_proof_field status "$PROOF_FILE")" || _die "Response post-application proof is malformed"
+  PROOF_ID="$(_sgt_response_archive_field response_id "$PROOF_FILE")" || _die "Response post-application proof is malformed"
+  PROOF_GENERATION="$(_sgt_response_archive_field gate_generation "$PROOF_FILE")" || _die "Response post-application proof is malformed"
+  PROOF_STATUS="$(_sgt_response_archive_field status "$PROOF_FILE")" || _die "Response post-application proof is malformed"
   CURRENT_STATUS="$(cat "$WORKTREE/.sergeant-status" 2>/dev/null || true)"
   [[ "$PROOF_ID" == "$RESPONSE_ID" && "$PROOF_GENERATION" == "$RESPONSE_GENERATION" && \
      "$PROOF_STATUS" == "$CURRENT_STATUS" ]] || _die "Response post-application proof does not match current state"

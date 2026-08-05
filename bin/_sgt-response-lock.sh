@@ -1,10 +1,57 @@
 #!/usr/bin/env bash
-# Shared serialization for response publication and consumption.
+# Shared serialization and archive format for response publication and consumption.
 
 _SGT_RESPONSE_LOCK_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-bash-version.sh
 source "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/_sgt-bash-version.sh"
 _sgt_require_running_bash || return 1
+
+# ── Response archive format ──────────────────────────────────────────────────
+# A consumed response is recorded as a directory of four fields: `body` (the
+# exact response transport), `gate_generation`, `applied_status`, and `proof`
+# (the worker's .sergeant-response-applied record).  sgt-ack-response publishes
+# these entries, sgt-cleanup validates them before retiring fleet state, and
+# sgt-cleanup's retirement archive reuses the same field names for the fields it
+# can prove.  Every reader parses the format through the helpers below so the
+# format has exactly one definition.
+_SGT_RESPONSE_ARCHIVE_FIELDS="body gate_generation applied_status proof"
+
+# Print the single value of one `key=value` field, or fail when the key is
+# missing, empty, or recorded more than once.
+_sgt_response_archive_field() {
+  local key="$1" record_file="$2"
+
+  awk -F= -v key="$key" '
+    $1 == key { count++; value = substr($0, length(key) + 2) }
+    END { if (count == 1 && value != "") print value; else exit 1 }
+  ' "$record_file"
+}
+
+# Every canonical field of an archive entry is present as a regular file.
+_sgt_response_archive_entry_complete() {
+  local entry="$1" field
+
+  [[ -d "$entry" && ! -L "$entry" ]] || return 1
+  for field in $_SGT_RESPONSE_ARCHIVE_FIELDS; do
+    [[ -f "$entry/$field" && ! -L "$entry/$field" ]] || return 1
+  done
+}
+
+# A complete entry whose recorded proof binds the same response identity,
+# gate generation, and applied status as the entry itself.
+_sgt_response_archive_entry_matches() {
+  local entry="$1" response_id="$2" gate_generation="$3" applied_status
+
+  _sgt_response_archive_entry_complete "$entry" || return 1
+  applied_status="$(cat "$entry/applied_status")" || return 1
+  [[ "$(cat "$entry/gate_generation")" == "$gate_generation" ]] || return 1
+  [[ "$(_sgt_response_archive_field response_id "$entry/proof" 2>/dev/null || true)" == \
+    "$response_id" ]] || return 1
+  [[ "$(_sgt_response_archive_field gate_generation "$entry/proof" 2>/dev/null || true)" == \
+    "$gate_generation" ]] || return 1
+  [[ "$(_sgt_response_archive_field status "$entry/proof" 2>/dev/null || true)" == \
+    "$applied_status" ]]
+}
 
 _sgt_response_lock_acquire() {
   local repo_state="$1"
