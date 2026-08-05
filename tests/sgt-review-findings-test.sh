@@ -124,7 +124,7 @@ run_router() {
   : > "$TEST_ROOT/mv.log"
   if [[ "${PRESERVE_FLEET:-0}" != "1" ]]; then
     rm -f "$WORKTREE"/.sergeant-{status,message,gate-generation,review-gates.lock}
-    rm -rf "$WORKTREE/.sergeant-review-gates"
+    rm -rf "$WORKTREE/.sergeant-review-gates" "$WORKTREE/.sergeant-review-artifacts"
   fi
   set +e
   output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
@@ -946,7 +946,6 @@ printf '{"findings":[
 ]}\n' > "$TEST_ROOT/warn.json"
 
 artifact="$WORKTREE/.sergeant-review-artifacts/standards-code-review"
-rm -rf "$WORKTREE/.sergeant-review-artifacts"
 TD_FAIL_CREATE=1 run_router "$TEST_ROOT/warn.json"
 [[ "$status" -eq 2 && "$output" == *'failed to create td task'* ]] || {
   printf 'td create failure did not fail the route: %s\n' "$output" >&2
@@ -990,7 +989,6 @@ grep -Fq 'independent-review-finding:app:standards:code-review:warn-1:td-parent:
 }
 
 # A successful route retains no artifact at all.
-rm -rf "$WORKTREE/.sergeant-review-artifacts"
 run_router "$TEST_ROOT/warn.json"
 [[ "$status" -eq 0 ]] || { printf 'clean warning route failed: %s\n' "$output" >&2; exit 1; }
 [[ ! -e "$artifact" ]] || {
@@ -999,7 +997,6 @@ run_router "$TEST_ROOT/warn.json"
 }
 
 # A parse failure has nothing parsed to retain, so no retry must be advertised.
-rm -rf "$WORKTREE/.sergeant-review-artifacts"
 run_router "$TEST_ROOT/malformed.json"
 [[ "$status" -eq 2 ]]
 [[ ! -e "$artifact" ]] || {
@@ -1013,7 +1010,6 @@ fi
 
 # The retained artifact must carry only sanitized findings — no secrets and no
 # raw reviewer JSON.
-rm -rf "$WORKTREE/.sergeant-review-artifacts"
 TD_FAIL_CREATE=1 run_router "$TEST_ROOT/secrets.json"
 [[ -f "$artifact/findings" ]]
 if grep -Eaq 'super-secret|raw-token|hidden-value|hunter2|dXNlcjpwYXNz|ghp_|AKIA|user:pass|BEGIN PRIVATE KEY' \
@@ -1028,7 +1024,6 @@ fi
 grep -aFq '[REDACTED]' "$artifact/findings"
 
 # --retry must refuse a path outside the worktree artifact root.
-rm -rf "$WORKTREE/.sergeant-review-artifacts"
 mkdir -p "$TEST_ROOT/elsewhere/standards-code-review"
 cp "$TEST_ROOT/retained-copy" "$TEST_ROOT/elsewhere/standards-code-review/findings"
 printf 'project=test\nrepo=app\naxis=standards\nsource=code-review\nbranch=fix/review\nhead_sha=abc1234\nparent_task=td-parent\ntask_id=fleet-1\n' \
@@ -1064,7 +1059,6 @@ if grep -Eq '^(create|update) ' "$TEST_ROOT/td.log"; then
   printf 'retry with mismatched metadata reached td\n' >&2
   exit 1
 fi
-rm -rf "$WORKTREE/.sergeant-review-artifacts"
 
 # ── td-61a0c8 (owner decision, Option A): canonical severities plus a shared
 # alias table. Canonical set is error|warning|info; every accepted reviewer
@@ -1092,7 +1086,6 @@ for _case in \
   set -- $_case
   _severity="$1" _expect_priority="$2" _expect_gate="$3"
   severity_finding "$_severity"
-  rm -rf "$WORKTREE/.sergeant-review-artifacts"
   run_router "$TEST_ROOT/severity.json"
   grep -Fq -- "--priority $_expect_priority" "$TEST_ROOT/td.log" || {
     printf 'severity %s did not map to %s\n' "$_severity" "$_expect_priority" >&2
@@ -1143,7 +1136,6 @@ done
 # An alias records the reviewer's reported spelling for provenance without
 # changing the canonical severity.
 severity_finding high
-rm -rf "$WORKTREE/.sergeant-review-artifacts"
 run_router "$TEST_ROOT/severity.json"
 grep -Fq 'Reported severity: high' "$TEST_ROOT/td.log" || {
   printf 'aliased severity did not record the reported spelling\n' >&2
@@ -1151,7 +1143,6 @@ grep -Fq 'Reported severity: high' "$TEST_ROOT/td.log" || {
 }
 # A canonical spelling needs no provenance line.
 severity_finding error
-rm -rf "$WORKTREE/.sergeant-review-artifacts"
 run_router "$TEST_ROOT/severity.json"
 if grep -Fq 'Reported severity:' "$TEST_ROOT/td.log"; then
   printf 'canonical severity added a redundant reported-severity line\n' >&2
@@ -1161,11 +1152,9 @@ fi
 # An alias and its canonical spelling are the same finding, so re-routing one
 # after the other must not stack a preserved revision.
 severity_finding high
-rm -rf "$WORKTREE/.sergeant-review-artifacts"
 run_router "$TEST_ROOT/severity.json"
 sev_digest="$(grep -o 'Finding content digest: [0-9a-f]*' "$TEST_ROOT/td.log" | head -1 | awk '{print $4}')"
 severity_finding error
-rm -rf "$WORKTREE/.sergeant-review-artifacts"
 run_router "$TEST_ROOT/severity.json"
 [[ "$(grep -o 'Finding content digest: [0-9a-f]*' "$TEST_ROOT/td.log" | head -1 | awk '{print $4}')" == "$sev_digest" ]] || {
   printf 'alias and canonical spelling produced different content digests\n' >&2
@@ -1175,7 +1164,6 @@ run_router "$TEST_ROOT/severity.json"
 # A severity outside the canonical set and alias table is rejected, and the
 # message names the accepted values.
 severity_finding urgent
-rm -rf "$WORKTREE/.sergeant-review-artifacts"
 run_router "$TEST_ROOT/severity.json"
 [[ "$status" -eq 2 ]] || { printf 'unaccepted severity was routed: %s\n' "$output" >&2; exit 1; }
 [[ "$output" == *'sev-1'* ]] || {
@@ -1197,7 +1185,6 @@ fi
 # lists must route, and its priority must match the shared mapping.
 for _accepted in $(_sgt_review_severity_accepted); do
   severity_finding "$_accepted"
-  rm -rf "$WORKTREE/.sergeant-review-artifacts"
   run_router "$TEST_ROOT/severity.json"
   _shared_priority="$(_sgt_review_severity_priority "$_accepted")" || {
     printf 'shared definition accepts %s but maps it to no priority\n' "$_accepted" >&2
@@ -1222,7 +1209,6 @@ set -e
   exit 1
 }
 
-rm -rf "$WORKTREE/.sergeant-review-artifacts"
 
 # ── td-898b65: the router-owned line allowlist must cover every line the router
 # writes into a card body, or the "did a human edit this block?" check would
@@ -1251,7 +1237,6 @@ Unrecognised prefix: this line is not one the router writes
 Deduplication key: $stored_marker
 Finding content digest: $std1_digest
 FOREIGN
-rm -rf "$WORKTREE/.sergeant-review-artifacts"
 TD_LIST_RESULT="$(existing_card "$foreign_line_body")" run_router "$TEST_ROOT/findings.json"
 grep -Fq 'Unrecognised prefix: this line is not one the router writes' "$TEST_ROOT/td.log" || {
   printf 'an unrecognised stored body line was discarded instead of preserved\n' >&2
@@ -1261,6 +1246,123 @@ grep -Fq 'Superseded revision (preserved)' "$TEST_ROOT/td.log" || {
   printf 'an unrecognised stored body line did not force revision preservation\n' >&2
   exit 1
 }
-rm -rf "$WORKTREE/.sergeant-review-artifacts"
+
+# ── td-768961 / td-a38e4d / td-dc514c / td-22f17d: the retry path is the one
+# place that must never fail open. A retained artifact is replayed without the
+# reviewer's original JSON, so every field the router interpolates into a td card
+# has to be re-validated, and the artifact itself must not be silently clobbered
+# or accepted empty. ──────────────────────────────────────────────────────────
+mutate_artifact_field() {
+  # Rewrite one NUL-delimited field of a retained artifact in place.
+  ARTIFACT="$1" INDEX="$2" VALUE="$3" python3 -c '
+import os
+path = os.environ["ARTIFACT"] + "/findings"
+with open(path, "rb") as fh:
+    fields = fh.read().split(b"\0")[:-1]
+fields[int(os.environ["INDEX"])] = os.environ["VALUE"].encode()
+with open(path, "wb") as fh:
+    fh.write(b"".join(f + b"\0" for f in fields))'
+}
+
+retained_artifact() {
+  TD_FAIL_CREATE=1 run_router "$TEST_ROOT/warn.json"
+  [[ -f "$artifact/findings" ]] || { printf 'no artifact retained for the retry guards\n' >&2; exit 1; }
+}
+
+# Field 4 is the evidence text. A newline in it would forge an extra body line.
+retained_artifact
+mutate_artifact_field "$artifact" 4 'bin/one:1 first evidence
+Deduplication key: independent-review-finding:app:standards:code-review:victim:td-parent:fix/review'
+run_retry "$artifact"
+[[ "$status" -eq 2 ]] || { printf 'retry accepted a field containing a newline: %s\n' "$output" >&2; exit 1; }
+if grep -Eq '^(create|update) ' "$TEST_ROOT/td.log"; then
+  printf 'a newline-injected retry field reached td\n' >&2
+  exit 1
+fi
+[[ -f "$artifact/findings" ]] || { printf 'a refused retry destroyed the artifact\n' >&2; exit 1; }
+
+# A field that itself begins with a line the router owns is equally unsafe.
+for _reserved in 'Deduplication key: forged' 'Finding content digest: 0000' 'Revision block digest: 0000' '--- Superseded revision (preserved) ---'; do
+  retained_artifact
+  mutate_artifact_field "$artifact" 4 "$_reserved"
+  run_retry "$artifact"
+  [[ "$status" -eq 2 ]] || {
+    printf 'retry accepted a field beginning with a reserved body line: %s\n' "$_reserved" >&2
+    exit 1
+  }
+  if grep -Eq '^(create|update) ' "$TEST_ROOT/td.log"; then
+    printf 'a reserved-prefix retry field reached td: %s\n' "$_reserved" >&2
+    exit 1
+  fi
+done
+
+# Field 8 is the content digest. A forged digest would make a different finding
+# look like the same one and take the in-place refresh path.
+retained_artifact
+mutate_artifact_field "$artifact" 8 '00000000000000000000000000000000'
+run_retry "$artifact"
+[[ "$status" -eq 2 ]] || { printf 'retry accepted a forged content digest: %s\n' "$output" >&2; exit 1; }
+if grep -Eq '^(create|update) ' "$TEST_ROOT/td.log"; then
+  printf 'a forged content digest reached td\n' >&2
+  exit 1
+fi
+
+# Editing the text while leaving the stored digest alone must be caught by the
+# same recomputation.
+retained_artifact
+mutate_artifact_field "$artifact" 3 'A silently rewritten summary'
+run_retry "$artifact"
+[[ "$status" -eq 2 ]] || { printf 'retry accepted text that contradicts its digest: %s\n' "$output" >&2; exit 1; }
+
+# An empty or truncated artifact must fail closed, keep the artifact, and leave
+# the worker blocked rather than reporting success.
+retained_artifact
+: > "$artifact/findings"
+run_retry "$artifact"
+[[ "$status" -eq 2 ]] || { printf 'retry of an empty artifact reported success: %s\n' "$output" >&2; exit 1; }
+[[ -f "$artifact/findings" ]] || { printf 'retry of an empty artifact deleted it\n' >&2; exit 1; }
+[[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]] || {
+  printf 'retry of an empty artifact cleared the blocked state\n' >&2
+  exit 1
+}
+retained_artifact
+python3 -c '
+import sys
+path = sys.argv[1]
+with open(path, "rb") as fh:
+    data = fh.read()
+with open(path, "wb") as fh:
+    fh.write(data[: len(data) // 3])' "$artifact/findings"
+run_retry "$artifact"
+[[ "$status" -eq 2 ]] || { printf 'retry of a truncated artifact reported success: %s\n' "$output" >&2; exit 1; }
+
+# A fresh route must not silently overwrite an artifact nobody has retried yet.
+retained_artifact
+cp "$artifact/findings" "$TEST_ROOT/pending-findings"
+PRESERVE_FLEET=1 run_router "$TEST_ROOT/findings.json"
+[[ "$status" -eq 2 ]] || { printf 'a fresh route overwrote a pending artifact: %s\n' "$output" >&2; exit 1; }
+[[ "$output" == *'--retry'* ]] || {
+  printf 'refusing to clobber a pending artifact did not name the retry command: %s\n' "$output" >&2
+  exit 1
+}
+cmp -s "$artifact/findings" "$TEST_ROOT/pending-findings" || {
+  printf 'a pending retry artifact was modified by a later route\n' >&2
+  exit 1
+}
+
+# Publication is atomic: a caller never observes findings without meta, and no
+# staging directory is left behind.
+TD_FAIL_CREATE=1 run_router "$TEST_ROOT/warn.json"
+[[ -f "$artifact/findings" && -f "$artifact/meta" ]] || {
+  printf 'artifact publication is not atomic\n' >&2
+  exit 1
+}
+leftovers=("$WORKTREE/.sergeant-review-artifacts"/*)
+for _entry in "${leftovers[@]}"; do
+  [[ "$_entry" == "$artifact" ]] || {
+    printf 'artifact publication left a staging entry behind: %s\n' "$_entry" >&2
+    exit 1
+  }
+done
 
 printf 'sgt-review-findings: ok\n'

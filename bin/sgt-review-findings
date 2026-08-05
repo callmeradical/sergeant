@@ -352,36 +352,104 @@ except (OSError, json.JSONDecodeError, UnicodeError, TypeError):
 PY
 }
 
-# Re-check every field the routing logic branches on. The parser already enforces
-# these for fresh input; a retained artifact is re-validated so a corrupted or
-# tampered retry cannot reach td.
-_valid_parsed_fields() {
-  local offset
-  (( ${#fields[@]} > 0 )) || return 0
-  (( ${#fields[@]} % SGT_REVIEW_FIELD_STRIDE == 0 )) || return 1
-  for ((offset=0; offset<${#fields[@]}; offset+=SGT_REVIEW_FIELD_STRIDE)); do
-    [[ "${fields[offset]}" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
-    # Field 1 is already canonical, so it must map to itself.
-    [[ "$(_sgt_review_severity_canonical "${fields[offset+1]}" 2>/dev/null)" == "${fields[offset+1]}" ]] || return 1
-    [[ "${fields[offset+2]}" =~ ^(actionable|cosmetic|false-positive)$ ]] || return 1
-    [[ "${fields[offset+8]}" =~ ^[0-9a-f]{32}$ ]] || return 1
-    # Reported spelling is empty for a canonical severity, otherwise an accepted
-    # alias of the canonical severity recorded alongside it.
-    if [[ -n "${fields[offset+9]}" ]]; then
-      [[ "$(_sgt_review_severity_canonical "${fields[offset+9]}" 2>/dev/null)" == "${fields[offset+1]}" ]] || return 1
-    fi
-  done
+# Re-check every parsed record before it can reach td. The parser already enforces
+# this for fresh input; a retained artifact is replayed WITHOUT the reviewer's
+# original JSON and without re-running clean(), so the same guarantees have to be
+# re-established here or a corrupted artifact becomes an injection channel into a
+# td card body (td-768961, td-a38e4d). One implementation is used on both paths so
+# the fresh and retry guarantees cannot drift.
+_validate_parsed_records() {
+  SGT_REVIEW_SEVERITY_ALIASES="$SGT_REVIEW_SEVERITY_ALIASES" python3 - \
+    "$parsed" "$SGT_REVIEW_FIELD_STRIDE" "$SGT_REVIEW_REVISION_SEPARATOR" \
+    "$SGT_REVIEW_BLOCK_DIGEST_LABEL" "$1" 2> "$parse_error_file" <<'PY'
+import hashlib
+import os
+import re
+import sys
+
+path, stride, separator, block_label = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+# A clean review legitimately has no findings. A RETAINED artifact never can:
+# retention only happens after a successful parse and is released on success, so an
+# empty one means the only copy of a review was corrupted (td-dc514c).
+allow_empty = sys.argv[5] == "allow-empty"
+SEVERITIES = dict(
+    pair.split("=", 1) for pair in os.environ["SGT_REVIEW_SEVERITY_ALIASES"].split()
+)
+CANONICAL = set(SEVERITIES.values())
+DISPOSITIONS = {"actionable", "cosmetic", "false-positive"}
+# Text the router gives structural meaning to inside a card body. A field may never
+# begin with any of these, or it could forge a revision boundary, a deduplication
+# key, or a provenance digest.
+RESERVED = (
+    "Deduplication key: ",
+    "Finding content digest: ",
+    block_label,
+    separator,
+)
+
+with open(path, "rb") as stream:
+    raw = stream.read()
+if not raw:
+    if allow_empty:
+        raise SystemExit(0)
+    sys.exit("retained review findings are empty")
+records = raw.split(b"\0")[:-1]
+if raw[-1:] != b"\0" or len(records) % stride != 0:
+    sys.exit("review findings are truncated or malformed")
+
+for offset in range(0, len(records), stride):
+    try:
+        fields = [field.decode("utf-8") for field in records[offset:offset + stride]]
+    except UnicodeError:
+        sys.exit("review findings are not valid UTF-8")
+    finding_id, severity, disposition = fields[0], fields[1], fields[2]
+    summary, evidence, paths, acceptance, recommendation = fields[3:8]
+    digest, reported = fields[8], fields[9]
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", finding_id):
+        sys.exit("finding id is not acceptable")
+    if severity not in CANONICAL:
+        sys.exit("finding %s: severity is not canonical" % finding_id)
+    if disposition not in DISPOSITIONS:
+        sys.exit("finding %s: disposition is not acceptable" % finding_id)
+    if reported and SEVERITIES.get(reported) != severity:
+        sys.exit("finding %s: reported severity disagrees with the canonical one" % finding_id)
+    for name, value in (
+        ("summary", summary), ("evidence", evidence), ("paths", paths),
+        ("acceptance_criteria", acceptance), ("recommendation", recommendation),
+    ):
+        if "\n" in value or "\r" in value:
+            sys.exit("finding %s: %s spans more than one line" % (finding_id, name))
+        if value.startswith(RESERVED):
+            sys.exit("finding %s: %s begins with a reserved body line" % (finding_id, name))
+    # Re-derive the digest from the content it is supposed to cover, so a stored
+    # digest can never certify text that has since been altered.
+    expected = hashlib.sha256(
+        "\x00".join((severity, summary, evidence, paths, acceptance, recommendation)).encode("utf-8")
+    ).hexdigest()[:32]
+    if digest != expected:
+        sys.exit("finding %s: content digest does not match its content" % finding_id)
+PY
 }
 
 # Retain the sanitized parsed findings so a later td or routing failure cannot
 # destroy the only copy of the review (td-61a0c8). Only post-redaction fields are
 # written; the raw reviewer artifact is never copied here.
 _retain_parsed_findings() {
-  local dir
+  local dir staging
   dir="$(_artifact_path)"
-  mkdir -p "$dir" || return 1
-  cp "$parsed" "$dir/findings.tmp" || return 1
-  mv "$dir/findings.tmp" "$dir/findings" || return 1
+  # Never overwrite an artifact nobody has retried yet: it is by construction the
+  # only surviving copy of that review (td-22f17d).
+  if [[ -f "$dir/findings" ]]; then
+    printf 'ERROR: a retained review artifact is already pending at %s; retry it with: sgt-review-findings %s %s --retry %s --worktree %s\n' \
+      "$dir" "$PROJECT" "$REPO" "$dir" "$WORKTREE" >&2
+    return 1
+  fi
+  mkdir -p "$(_artifact_root)" || return 1
+  # Stage into a private directory and publish with a single rename, so a crash can
+  # never leave findings without meta and two invocations cannot collide on a temp
+  # name (td-88b571, td-03e123, td-716804).
+  staging="$(mktemp -d "$(_artifact_root)/.staging.XXXXXX")" || return 1
+  cp "$parsed" "$staging/findings" || { rm -rf "$staging"; return 1; }
   {
     printf 'project=%s\n' "$PROJECT"
     printf 'repo=%s\n' "$REPO"
@@ -391,8 +459,8 @@ _retain_parsed_findings() {
     printf 'head_sha=%s\n' "$HEAD_SHA"
     printf 'parent_task=%s\n' "$PARENT_TASK"
     printf 'task_id=%s\n' "$TASK_ID"
-  } > "$dir/meta.tmp" || return 1
-  mv "$dir/meta.tmp" "$dir/meta" || return 1
+  } > "$staging/meta" || { rm -rf "$staging"; return 1; }
+  mv "$staging" "$dir" || { rm -rf "$staging"; return 1; }
   ARTIFACT_DIR="$dir"
 }
 
@@ -400,10 +468,14 @@ _release_parsed_findings() {
   [[ -n "$ARTIFACT_DIR" ]] || return 0
   # Never let a cleanup problem abort the run under set -e before the review
   # outcome has been published (td-4403b5).
-  rm -rf "$ARTIFACT_DIR" || \
+  if rm -rf "$ARTIFACT_DIR"; then
+    ARTIFACT_DIR=""
+  else
+    # Keep naming the survivor so a later routing failure reports retention
+    # truthfully instead of claiming nothing was kept (td-4403b5).
     printf 'WARNING: could not remove the retained review artifact %s\n' "$ARTIFACT_DIR" >&2
+  fi
   rmdir "$(_artifact_root)" 2>/dev/null || true
-  ARTIFACT_DIR=""
 }
 
 if [[ -n "$RETRY" ]]; then
@@ -413,12 +485,18 @@ else
     _routing_failure "invalid review output: $(tr '\n' ' ' < "$parse_error_file")"
 fi
 
+review_findings_emptiness="reject-empty"
+[[ -n "$RETRY" ]] || review_findings_emptiness="allow-empty"
+_validate_parsed_records "$review_findings_emptiness" || \
+  _routing_failure "unusable review findings: $(tr '\n' ' ' < "$parse_error_file")"
+
 fields=()
 while IFS= read -r -d '' field; do
   fields[${#fields[@]}]="$field"
 done < "$parsed"
-_valid_parsed_fields || _routing_failure "invalid review output"
-if [[ -z "$RETRY" ]]; then
+# A review with no findings has nothing to retain, and retaining an empty artifact
+# would block the next route for this axis on a pending retry that carries nothing.
+if [[ -z "$RETRY" && ${#fields[@]} -gt 0 ]]; then
   _retain_parsed_findings || _routing_failure "could not retain the parsed review findings"
 fi
 
