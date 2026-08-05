@@ -477,7 +477,7 @@ Finding content digest: $content_digest"
   # The matcher writes its results to files rather than stdout: Apple Bash 3.2.57
   # (macOS) cannot parse a heredoc nested inside $( ) command substitution.
   : > "$match_file"
-  if ! SGT_REVIEW_NEW_BODY="$body" python3 - \
+  if ! SGT_REVIEW_NEW_BODY="$body" SGT_REVIEW_NEW_TITLE="review: $summary" python3 - \
     "$existing_file" "$marker" "$content_digest" \
     "$SGT_REVIEW_REVISION_SEPARATOR" "$composed_file" "$match_file" \
     "$SGT_REVIEW_BLOCK_DIGEST_LABEL" <<'PY'
@@ -521,7 +521,8 @@ if not isinstance(items, list):
     raise SystemExit(1)
 needle = "Deduplication key: " + marker
 matches = [(item["id"], item.get("status") or "", item.get("defer_until") or "",
-            ",".join(item.get("labels") or []), item.get("description") or "")
+            ",".join(item.get("labels") or []), item.get("description") or "",
+            item.get("title") or "")
            for item in items if needle in (item.get("description") or "").splitlines()]
 if len(matches) > 1:
     raise SystemExit(1)
@@ -531,7 +532,7 @@ if not matches:
         stream.write(final_body)
     raise SystemExit(0)
 
-task_id, status, defer_until, labels, description = matches[0]
+task_id, status, defer_until, labels, description, stored_title = matches[0]
 prefix = "Finding content digest: "
 stored_digest = ""
 for line in description.splitlines():
@@ -553,7 +554,12 @@ try:
     boundary = lines.index(separator)
 except ValueError:
     boundary = len(lines)
-if state == "same" and untouched(lines[:boundary]):
+# The router overwrites the card title on every update, so a stored title that
+# differs from the one being written is finding content that only exists in a
+# field about to be replaced. Treat it as a change so the old title and body are
+# preserved together (td-257734 title half).
+title_changed = bool(stored_title) and stored_title != os.environ["SGT_REVIEW_NEW_TITLE"]
+if state == "same" and not title_changed and untouched(lines[:boundary]):
     # Same finding and the current block is byte-for-byte what the router wrote:
     # refresh its metadata in place and keep older revisions verbatim.
     action = "refresh"
@@ -564,6 +570,10 @@ else:
     # ever replaced or dropped.
     action = "preserve"
     preserved = [separator] + lines
+    if stored_title:
+        # Recorded inside the preserved revision, below the separator, so it is
+        # never re-digested as part of a later current block.
+        preserved = [separator, "Previous title: " + stored_title] + lines
 composed = final_body if not preserved else final_body + "\n\n" + "\n".join(preserved)
 with open(composed_path, "w", encoding="utf-8") as stream:
     stream.write(composed)

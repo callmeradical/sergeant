@@ -745,33 +745,119 @@ grep -Fq 'partially remediated in commit deadbee' "$TEST_ROOT/td.log" || {
   exit 1
 }
 
-# td-257734 / td-c4acbc: a human edit made INLINE on a line the router owns must
-# also survive. Ownership cannot be decided from the line prefix, because every
-# such edit still begins with a router label.
-for _inline in \
-    'Severity: error (downgraded to warning by lars, see thread)' \
-    'Acceptance criteria: Match exact pane identity -- and the ledger invariant' \
-    'Independent review finding. DO NOT CLOSE, see thread'; do
-  inline_body="$(printf '%s\n' "$annotated_body" \
-    | sed "s|^Update from the owning worker.*||" \
-    | python3 -c '
-import sys
-edit = sys.argv[1]
-label = edit.split(":")[0] + ":" if ":" in edit.split(" ")[0] else "Independent review finding."
-out = []
-for line in sys.stdin.read().splitlines():
-    out.append(edit if line.startswith(label) else line)
-print("\n".join(out))' "$_inline")"
+# td-257734 / td-c4acbc / td-bdce0f: a human edit made INLINE on a line the router
+# owns must survive. The fixture MUST be the router's own output, so the stored
+# block carries a valid provenance digest and the assertion is about the digest
+# VALUE rather than the mere presence of a digest line. Reducing untouched() to a
+# label-presence check must fail these cases.
+TD_LIST_RESULT=null run_router "$TEST_ROOT/one.json"
+pristine_body="$(cat "$TEST_ROOT/td-desc")"
+[[ -n "$pristine_body" ]] || { printf 'no pristine router body captured\n' >&2; exit 1; }
+grep -q '^Revision block digest: [0-9a-f]\{32\}$' <<< "$pristine_body" || {
+  printf 'router body carries no provenance digest\n' >&2
+  exit 1
+}
+
+edit_body_line() {
+  # Replace exactly the line with the given prefix, leaving every other byte of
+  # the router-written block, including its provenance digest, untouched.
+  SRC="$1" PREFIX="$2" REPLACEMENT="$3" python3 -c '
+import os, sys
+prefix = os.environ["PREFIX"]
+replacement = os.environ["REPLACEMENT"]
+lines = os.environ["SRC"].split("\n")
+hit = False
+for i, line in enumerate(lines):
+    if line.startswith(prefix):
+        lines[i] = replacement
+        hit = True
+        break
+if not hit:
+    sys.exit("fixture prefix not present: " + prefix)
+sys.stdout.write("\n".join(lines))'
+}
+
+while IFS='|' read -r _prefix _replacement; do
+  [[ -n "$_prefix" ]] || continue
+  inline_body="$(edit_body_line "$pristine_body" "$_prefix" "$_replacement")" || exit 1
+  # Prove the fixture actually changed the line it names and nothing else.
+  [[ "$inline_body" != "$pristine_body" ]] || {
+    printf 'inline fixture did not modify the body: %s\n' "$_prefix" >&2
+    exit 1
+  }
+  grep -Fq -- "$_replacement" <<< "$inline_body" || {
+    printf 'inline fixture did not contain its replacement: %s\n' "$_replacement" >&2
+    exit 1
+  }
+  grep -q '^Revision block digest: [0-9a-f]\{32\}$' <<< "$inline_body" || {
+    printf 'inline fixture lost the provenance digest: %s\n' "$_prefix" >&2
+    exit 1
+  }
   TD_LIST_RESULT="$(existing_card "$inline_body")" run_router "$TEST_ROOT/one.json"
-  grep -Fq "$_inline" "$TEST_ROOT/td.log" || {
-    printf 'an inline human edit on a router-owned line was discarded: %s\n' "$_inline" >&2
+  grep -Fq -- "$_replacement" "$TEST_ROOT/td.log" || {
+    printf 'an inline human edit on a router-owned line was discarded: %s\n' "$_replacement" >&2
     exit 1
   }
   grep -Fq 'Superseded revision (preserved)' "$TEST_ROOT/td.log" || {
-    printf 'an inline human edit did not force revision preservation: %s\n' "$_inline" >&2
+    printf 'an inline human edit did not force revision preservation: %s\n' "$_prefix" >&2
     exit 1
   }
-done
+done <<'INLINE_CASES'
+Severity: |Severity: error (downgraded to warning by lars, see thread)
+Acceptance criteria: |Acceptance criteria: Match exact pane identity -- and the ledger invariant
+Independent review finding.|Independent review finding. DO NOT CLOSE, see thread
+Evidence: |Evidence: bin/run:42 can remove another pane -- also reproduced by lars
+INLINE_CASES
+
+# Tampering ONLY the provenance digest value, leaving every body line pristine,
+# must also force preservation: the block can no longer be proved to be router
+# output.
+tampered_body="$(edit_body_line "$pristine_body" 'Revision block digest: ' \
+  'Revision block digest: 00000000000000000000000000000000')"
+TD_LIST_RESULT="$(existing_card "$tampered_body")" run_router "$TEST_ROOT/one.json"
+grep -Fq 'Superseded revision (preserved)' "$TEST_ROOT/td.log" || {
+  printf 'a tampered provenance digest did not force revision preservation\n' >&2
+  exit 1
+}
+[[ "$output" == *'previous revision preserved'* ]] || {
+  printf 'a tampered provenance digest was not reported: %s\n' "$output" >&2
+  exit 1
+}
+
+# td-9de8aa title half: the router overwrites the card title on every update, so a
+# stored title carrying content absent from the body must be preserved. This is
+# the shape of the real cards td-36da4d and td-0fc5bf, whose summary exists only
+# in their title.
+TD_LIST_RESULT="$(TITLED_BODY="$pristine_body" python3 -c '
+import json, os
+print(json.dumps([{"id":"td-titled","status":"open","defer_until":"",
+                   "labels":["independent-review","finding","standards"],
+                   "title":"review: the only copy of this summary lives in the title",
+                   "description":os.environ["TITLED_BODY"]}]))')" \
+  run_router "$TEST_ROOT/one.json"
+grep -Fq 'update td-titled' "$TEST_ROOT/td.log"
+grep -Fq 'Previous title: review: the only copy of this summary lives in the title' "$TEST_ROOT/td.log" || {
+  printf 'a dedup update discarded the previous card title\n' >&2
+  exit 1
+}
+grep -Fq 'Superseded revision (preserved)' "$TEST_ROOT/td.log" || {
+  printf 'a changed title did not force revision preservation\n' >&2
+  exit 1
+}
+
+# A stored title equal to the one the router is about to write is not a change and
+# must not stack a revision.
+TD_LIST_RESULT="$(TITLED_BODY="$pristine_body" python3 -c '
+import json, os
+print(json.dumps([{"id":"td-titled","status":"open","defer_until":"",
+                   "labels":["independent-review","finding","standards"],
+                   "title":"review: Unsafe cleanup",
+                   "description":os.environ["TITLED_BODY"]}]))')" \
+  run_router "$TEST_ROOT/one.json"
+[[ "$(grep -c 'Superseded revision (preserved)' "$TEST_ROOT/td.log")" -eq 0 ]] || {
+  printf 'an unchanged title stacked a preserved revision\n' >&2
+  exit 1
+}
 
 # A pristine router-written card whose only difference is metadata the router
 # rewrites every pass (head SHA, fleet task) must still refresh in place, or every
