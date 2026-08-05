@@ -10,7 +10,10 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Physical paths throughout: the manifest resolves link targets physically, so a
+# fixture built from a logical path (macOS puts TMPDIR under /var/folders, and
+# /var is a symlink to private/var) would never compare equal.
+ROOT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
 # shellcheck source=bin/_sgt-install-manifest.sh
 source "$ROOT_DIR/bin/_sgt-install-manifest.sh"
@@ -32,7 +35,7 @@ HOST_BASH="$(host_utility bash)"
 
 # One sandbox root with an EXIT trap, matching every other test in this repo.
 # RETURN traps do not fire when fail() exits, which leaks temp directories.
-TEST_ROOT="$(mktemp -d)"
+TEST_ROOT="$(cd -P "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 # Hook resolution reads git configuration, so no fixture may inherit the
@@ -185,34 +188,67 @@ test_macos_dry_run_plans_homebrew_packages() {
   assert_contains "$output" 'brew install git gh tmux jq shellcheck curl python3 lsof'
 }
 
-test_unsupported_platform_fails_clearly() {
+# Installing packages needs a supported package manager; inspecting the machine
+# does not. docs/getting-started.md and the sergeant-setup skill both send users
+# on an unsupported platform to --verify-only, so the read-only modes must run
+# everywhere and name the blocker as a manual step.
+test_unsupported_platform_blocks_install_only() {
   local temp_dir output status
   new_sandbox; temp_dir="$SANDBOX"
 
   stub_platform "$temp_dir" FreeBSD '' 0
-
-  set +e
-  output="$(HOME="$temp_dir/home" PATH="$temp_dir/bin:$SYSTEM_PATH" "$BOOTSTRAP" --dry-run 2>&1)"
-  status=$?
-  set -e
-
-  [[ "$status" -eq 1 ]] || fail "expected unsupported platform exit 1, got $status"
-  assert_contains "$output" 'unsupported platform: FreeBSD'
-}
-
-test_missing_package_manager_fails_clearly() {
-  local temp_dir output status
-  new_sandbox; temp_dir="$SANDBOX"
-
-  stub_platform "$temp_dir" Linux '' 0
+  stub_commands "$temp_dir/bin" "${BASE_TOOLS[@]}" mise go node uv td graphify no-mistakes opencode claude
 
   set +e
   output="$(HOME="$temp_dir/home" PATH="$temp_dir/bin" "$BOOTSTRAP" --dry-run 2>&1)"
   status=$?
   set -e
+  [[ "$status" -eq 0 ]] || fail "expected --dry-run to work on FreeBSD, got $status: $output"
+  assert_contains "$output" 'Platform: FreeBSD (no supported package manager)'
 
-  [[ "$status" -eq 1 ]] || fail "expected missing apt-get exit 1, got $status"
+  set +e
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/home/.local/bin" \
+    PATH="$temp_dir/bin" "$BOOTSTRAP" --verify-only 2>&1)"
+  status=$?
+  set -e
+  assert_contains "$output" 'MANUAL: unsupported platform for automated package installation: FreeBSD'
+  assert_contains "$output" 'OK: git'
+
+  # Only the install mode is fatal, and only when packages are actually missing.
+  rm -f "$temp_dir/bin/jq"
+  set +e
+  output="$(HOME="$temp_dir/home" PATH="$temp_dir/bin" "$BOOTSTRAP" 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -eq 1 ]] || fail "expected install on FreeBSD to fail, got $status"
+  assert_contains "$output" 'unsupported platform for automated package installation: FreeBSD'
+  assert_contains "$output" 'install these packages yourself and rerun: jq'
+}
+
+test_missing_package_manager_blocks_install_only() {
+  local temp_dir output status
+  new_sandbox; temp_dir="$SANDBOX"
+
+  stub_platform "$temp_dir" Linux '' 0
+  stub_commands "$temp_dir/bin" "${BASE_TOOLS[@]}" mise go node uv td graphify no-mistakes opencode claude
+
+  # Nothing missing: an apt-less Linux with a complete toolchain must verify.
+  set +e
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/home/.local/bin" \
+    PATH="$temp_dir/bin" "$BOOTSTRAP" --verify-only 2>&1)"
+  status=$?
+  set -e
+  assert_contains "$output" 'MANUAL: Linux requires an apt-compatible package manager'
+  assert_contains "$output" 'OK: python3'
+
+  rm -f "$temp_dir/bin/tmux"
+  set +e
+  output="$(HOME="$temp_dir/home" PATH="$temp_dir/bin" "$BOOTSTRAP" 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -eq 1 ]] || fail "expected missing apt-get to fail the install, got $status"
   assert_contains "$output" 'requires an apt-compatible package manager'
+  assert_contains "$output" 'install these packages yourself and rerun: tmux'
 }
 
 test_modes_are_mutually_exclusive() {
@@ -325,23 +361,22 @@ EOF
   assert_contains "$output" 'mise install yq@latest'
 }
 
-test_managed_link_is_found_outside_original_path() {
+# A tool in the install directory counts only when that directory is on PATH.
+# Crediting it otherwise would report a toolchain the user cannot actually run.
+test_managed_tool_counts_only_when_the_install_dir_is_on_path() {
   local temp_dir output
   new_sandbox; temp_dir="$SANDBOX"
 
   stub_platform "$temp_dir" Linux apt-get 86
   mkdir -p "$temp_dir/home/.local/bin"
-  stub_commands "$temp_dir/bin" "${BASE_TOOLS[@]}" \
-    mise go node uv td graphify no-mistakes opencode
-  cat > "$temp_dir/claude" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-  chmod +x "$temp_dir/claude"
-  ln -s "$temp_dir/claude" "$temp_dir/home/.local/bin/claude"
+  stub_commands "$temp_dir/bin" "${BASE_TOOLS[@]}" mise go node uv td graphify no-mistakes opencode
+  stub_commands "$temp_dir/home/.local/bin" claude
 
   output="$(HOME="$temp_dir/home" PATH="$temp_dir/bin" "$BOOTSTRAP" --dry-run)"
+  assert_contains "$output" 'claude@latest'
 
+  output="$(HOME="$temp_dir/home" \
+    PATH="$temp_dir/bin:$temp_dir/home/.local/bin" "$BOOTSTRAP" --dry-run)"
   assert_not_contains "$output" 'claude@latest'
 }
 
@@ -937,6 +972,25 @@ test_verify_only_accepts_one_harness_and_no_optional_tools() {
   assert_not_contains "$output" 'MISSING: an agent harness'
 }
 
+# A tool reachable only through the install directory is not on the user's PATH,
+# so verify-only must not credit it: `mise run check` would fail on that machine.
+test_verify_only_does_not_prepend_the_install_directory_to_path() {
+  local temp_dir output
+  new_sandbox; temp_dir="$SANDBOX"
+
+  stub_platform "$temp_dir" Linux apt-get 68
+  mkdir -p "$temp_dir/instdir"
+  stub_commands "$temp_dir/instdir" git gh tmux yq python3 lsof td opencode
+
+  set +e
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/instdir" \
+    PATH="$temp_dir/bin" "$BOOTSTRAP" --verify-only 2>&1)"
+  set -e
+
+  assert_contains "$output" 'MISSING: git'
+  assert_contains "$output" 'is not on your PATH'
+}
+
 # ── Validate before mutate ────────────────────────────────────────────────────
 
 # A conflict that is knowable up front must stop the run before any package is
@@ -1411,6 +1465,29 @@ test_hooks_only_reports_its_work_and_creates_no_command_directory() {
     fail 'sgt-install --hooks-only created the command directory'
 }
 
+test_hooks_only_fails_when_no_hooks_directory_is_owned() {
+  local temp_dir output status
+  new_sandbox; temp_dir="$SANDBOX"
+  require_git "hooks-only failure reporting" || return 0
+
+  make_fake_checkout "$temp_dir/checkout"
+  # A wider-scope hooksPath redirects git away from this repository, so there is
+  # no hooks directory this checkout may own.
+  printf '[core]\n\thooksPath = %s\n' "$temp_dir/global-hooks" > "$GIT_CONFIG_GLOBAL"
+
+  set +e
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" \
+    "$temp_dir/checkout/bin/sgt-install" --hooks-only 2>&1)"
+  status=$?
+  set -e
+  : > "$GIT_CONFIG_GLOBAL"
+
+  [[ "$status" -ne 0 ]] || fail 'sgt-install --hooks-only reported success installing no hooks'
+  assert_contains "$output" 'no git hooks were installed'
+  [[ ! -e "$temp_dir/global-hooks" ]] || \
+    fail 'sgt-install wrote into a global hooks directory'
+}
+
 # ── sgt-uninstall ─────────────────────────────────────────────────────────────
 
 test_uninstall_removes_only_what_this_checkout_installed() {
@@ -1473,8 +1550,8 @@ test_manifest_excludes_non_regular_and_deprecated_entries() {
 
 test_linux_dry_run_plans_apt_packages
 test_macos_dry_run_plans_homebrew_packages
-test_unsupported_platform_fails_clearly
-test_missing_package_manager_fails_clearly
+test_unsupported_platform_blocks_install_only
+test_missing_package_manager_blocks_install_only
 test_modes_are_mutually_exclusive
 test_unknown_option_fails_clearly
 test_dry_run_does_not_plan_installed_packages
@@ -1482,7 +1559,7 @@ test_dry_run_plans_workspace_tools_without_changes
 test_dry_run_plans_no_global_agent_configuration
 test_dry_run_reports_existing_and_conflicting_commands
 test_python_yq_is_replaced_with_mikefarah_yq
-test_managed_link_is_found_outside_original_path
+test_managed_tool_counts_only_when_the_install_dir_is_on_path
 test_verify_only_reports_missing_without_installing
 test_verify_only_reports_wrong_command_link_as_missing
 test_verify_only_does_not_require_deprecated_oc_inject
@@ -1511,6 +1588,7 @@ test_dry_run_invokes_no_third_party_command
 test_verify_only_invokes_no_third_party_command
 test_authentication_is_always_reported_as_manual
 test_verify_only_accepts_one_harness_and_no_optional_tools
+test_verify_only_does_not_prepend_the_install_directory_to_path
 test_conflicts_stop_the_run_before_any_package_is_installed
 test_dry_run_reports_managed_tool_conflicts
 test_non_executable_tool_is_not_treated_as_installed
@@ -1528,6 +1606,7 @@ test_install_never_touches_hooks_of_an_unrelated_repository
 test_install_preserves_a_users_own_hook
 test_install_repoints_a_hook_owned_by_another_sergeant_checkout
 test_hooks_only_reports_its_work_and_creates_no_command_directory
+test_hooks_only_fails_when_no_hooks_directory_is_owned
 test_uninstall_removes_only_what_this_checkout_installed
 test_uninstall_removes_a_link_for_a_command_no_longer_shipped
 test_manifest_excludes_non_regular_and_deprecated_entries

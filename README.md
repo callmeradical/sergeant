@@ -89,8 +89,10 @@ directories, which Sergeant does not control.
 Authentication is never automated, and it is never probed: the bootstrap always
 reports the `gh`, OpenCode, and Claude logins you may need rather than running
 those commands, because invoking a harness would create state in the very
-configuration directory Sergeant promises not to touch. macOS requires Homebrew
-and Linux requires `apt-get`; any other platform fails without making changes.
+configuration directory Sergeant promises not to touch. Installing platform packages requires Homebrew on
+macOS or `apt-get` on Linux; anywhere else the bootstrap reports those packages
+as a manual step and, in install mode, stops without making changes. The
+read-only modes work on every platform.
 
 Then talk to it:
 

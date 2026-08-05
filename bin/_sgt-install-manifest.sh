@@ -321,6 +321,26 @@ _sgt_command_available() {
   [[ -n "$resolved" && -x "$resolved" ]]
 }
 
+# _sgt_install_owned_deprecated_links <repo-root> <target-dir>
+#
+# Print, one per line, only the deprecated links this checkout actually owns:
+# a symlink still pointing at the recorded path inside <repo-root>. Both
+# sgt-install and sgt-uninstall consume this, so the ownership rule lives here
+# with the other classifiers rather than being restated at each call site.
+_sgt_install_owned_deprecated_links() {
+  local root="$1" target_dir="$2" entry link owned
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    link="${entry%%::*}"
+    owned="${entry##*::}"
+    [[ -L "$link" ]] || continue
+    [[ "$(_sgt_install_resolve_link "$link")" == "$owned" ]] || continue
+    printf '%s\n' "$link"
+  done <<EOF
+$(_sgt_install_deprecated_links "$root" "$target_dir")
+EOF
+}
+
 # _sgt_install_deprecated_links <repo-root> <target-dir>
 #
 # Print, one per line, `<link-path>::<owned-target>` pairs for links that older
