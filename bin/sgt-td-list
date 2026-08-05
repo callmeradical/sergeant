@@ -60,8 +60,9 @@
 #   Narrowing uses td's own -s/-p flags.  td applies its closed-and-deferred
 #   exclusion to those but not to `--filter`, so `--filter priority=P2` answers
 #   with closed tasks while `-p P2` does not.  A caller-supplied `--filter`
-#   therefore governs which statuses appear, and the header says so rather than
-#   claiming a non-closed view the query does not deliver.
+#   therefore governs the whole answer — it also makes td discard its own -s and
+#   -p narrowing, so combining it with --status or --priority is refused — and the
+#   header names it rather than claiming a view the query does not deliver.
 #
 #   Before 2026-08, the default narrowed to status=open, which hid in_progress,
 #   in_review and blocked work — and any repo whose tasks were all non-open —
@@ -254,6 +255,12 @@ if [[ "${#EXTRA_FLAGS[@]}" -gt 0 ]]; then
     _takes_value "${EXTRA_FLAGS[$i]}" && skip_value=true
   done
 fi
+if $CALLER_FILTER && [[ -n "$STATUS_FILTER$PRIORITY_FILTER" ]]; then
+  # td ignores -s and -p whenever --filter is present, so this combination can
+  # only produce a report that contradicts the narrowing the caller asked for.
+  _die "--filter cannot be combined with --status or --priority: td ignores them when --filter is present; put every clause in the filter expression"
+fi
+
 INCLUDE_DEFERRED=true
 $CALLER_FILTER && INCLUDE_DEFERRED=false
 $CALLER_SPECIAL_VIEW && INCLUDE_DEFERRED=false
@@ -269,8 +276,10 @@ else
   VIEW_LABEL="all non-closed"
 fi
 if $CALLER_FILTER; then
-  # Never claim td's exclusions for a query that does not apply them.
-  VIEW_LABEL="$VIEW_LABEL; caller --filter governs which statuses appear"
+  # td discards its own -s and -p narrowing when --filter is present, and applies
+  # no closed or deferred exclusion, so the caller's expression is the only true
+  # description of the answer.
+  VIEW_LABEL="caller --filter governs which tasks appear"
 elif $CALLER_DEFERRED_VIEW; then
   VIEW_LABEL="$VIEW_LABEL; caller td flags govern which tasks appear, deferred ones excluded"
 elif $CALLER_SELECTION; then
@@ -602,7 +611,8 @@ _td_list_tasks() {
   local capped_half=""
   if [[ "$read_status" -eq 2 ]]; then
     capped=true
-    capped_half=", and this repo's deferred tasks were not read at all"
+    # Only views that would have issued a second read lose their deferred half.
+    $INCLUDE_DEFERRED && capped_half=", and this repo's deferred tasks were not read at all"
   fi
 
   if $INCLUDE_DEFERRED && ! $capped; then

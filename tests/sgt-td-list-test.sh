@@ -1427,9 +1427,13 @@ printf 'deferred_respects_status_filter: ok\n'
 out="$TEST_ROOT/callerfilter.out"; err="$TEST_ROOT/callerfilter.err"
 _run "$out" "$err" -- mixed --filter 'status=open'
 _expect_status 0 caller_filter_view_is_honest "$err"
-grep -qF 'caller --filter governs which statuses appear' "$out" || {
+grep -qF '[caller --filter governs which tasks appear]' "$out" || {
   printf 'actual output:\n%s\n' "$(cat "$out")" >&2
-  _fail "caller_filter_view_is_honest: the header must say the caller's filter governs the statuses"
+  _fail "caller_filter_view_is_honest: the label must name the caller's filter as the whole story"
+}
+! grep -qF 'all non-closed' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "caller_filter_view_is_honest: td applies no exclusion to --filter, so no non-closed claim may stand"
 }
 ! grep -qF 'deferred excluded' "$out" || {
   printf 'actual output:\n%s\n' "$(cat "$out")" >&2
@@ -1944,5 +1948,49 @@ grep -qF 'caller td flags may narrow which tasks appear' "$err" || {
 ! grep -qF 'deferred ones excluded' "$err" || \
   _fail "special_view_json: the note must not claim an exclusion td does not apply"
 printf 'special_view_json: ok\n'
+
+# ── 46. --filter cannot be combined with the narrowing td would discard ─────────
+
+# td ignores -s and -p whenever --filter is present, so the combination could
+# only report rows that contradict the narrowing the caller asked for.
+for combo in "--status open" "--priority P1"; do
+  out="$TEST_ROOT/fcombo.out"; err="$TEST_ROOT/fcombo.err"
+  # shellcheck disable=SC2086
+  _run "$out" "$err" -- mixed $combo --filter 'type=bug'
+  _expect_status 1 "filter_combination_refused($combo)" "$err"
+  grep -qF 'cannot be combined' "$err" || {
+    printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+    _fail "filter_combination_refused($combo): td would discard $combo, so refuse the combination"
+  }
+  [[ ! -s "$out" ]] || _fail "filter_combination_refused($combo): no report may be printed"
+done
+printf 'filter_combination_refused: ok\n'
+
+# ── 47. A ceiling only claims an unread deferred half when one was planned ─────
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/ceilfilter.out"; err="$TEST_ROOT/ceilfilter.err"
+_run "$out" "$err" SGT_TD_LIST_LIMIT=1 SGT_TD_LIST_MAX_LIMIT=1 -- mixed --filter 'type=bug'
+_expect_status 2 ceiling_claims_only_what_it_lost "$err"
+grep -qi 'truncated' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "ceiling_claims_only_what_it_lost: the ceiling must still report truncation"
+}
+! grep -qF 'deferred tasks were not read at all' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "ceiling_claims_only_what_it_lost: no deferred read was planned, so none was lost"
+}
+printf 'ceiling_claims_only_what_it_lost: ok\n'
+
+# The default view, which does plan one, still says so.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/ceildefault.out"; err="$TEST_ROOT/ceildefault.err"
+_run "$out" "$err" SGT_TD_LIST_LIMIT=1 SGT_TD_LIST_MAX_LIMIT=1 -- mixed
+_expect_status 2 ceiling_still_names_lost_deferred "$err"
+grep -qF 'deferred tasks were not read at all' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "ceiling_still_names_lost_deferred: the default view does lose its deferred half"
+}
+printf 'ceiling_still_names_lost_deferred: ok\n'
 
 printf '\nAll sgt-td-list tests passed.\n'

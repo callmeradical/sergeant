@@ -25,7 +25,9 @@ For the same reason sgt-td-list refuses anything that would re-point or widen th
 query behind the header: `-a` and `--all=<bool>`, `--deferred`, `--open=<bool>`,
 `--work-dir`, bundled short clusters such as `-ra`, and bare words, which td
 would read as a query expression — pass those as `--filter '<expr>'`, whose view
-is labelled as caller-governed.
+is labelled as caller-governed. `--filter` cannot be combined with `--status` or
+`--priority`, because td discards its own narrowing flags whenever a filter
+expression is present; put every clause in the expression instead.
 
 Use resolved project output to identify repository ownership and instructions.
 Do not infer ownership from the current working directory.
