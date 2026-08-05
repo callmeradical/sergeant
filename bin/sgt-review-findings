@@ -8,12 +8,43 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_sgt-lib.sh"
 # shellcheck source=bin/_sgt-response-lock.sh
 source "$SCRIPT_DIR/_sgt-response-lock.sh"
+# shellcheck source=bin/_sgt-review-axes.sh
+source "$SCRIPT_DIR/_sgt-review-axes.sh"
+
+# Finding severities this router accepts, as one source of truth shared by the
+# embedded parser, the retained-artifact guard, and the usage text. Every listed
+# severity must map to a td priority in _review_severity_priority below.
+SGT_REVIEW_SEVERITIES="error warning info informational"
+
+_review_severity_priority() {
+  case "$1" in
+    error) printf 'P1' ;;
+    warning) printf 'P2' ;;
+    info|informational) printf 'P3' ;;
+    *) return 1 ;;
+  esac
+}
+
+_review_severity_valid() {
+  local candidate="$1" severity
+  # shellcheck disable=SC2046  # deliberate word splitting over the severity list
+  for severity in $SGT_REVIEW_SEVERITIES; do
+    [[ "$candidate" == "$severity" ]] && return 0
+  done
+  return 1
+}
 
 usage() {
-  cat >&2 <<'EOF'
+  cat >&2 <<EOF
 Usage: sgt-review-findings <project> <repo> --input <json> --axis <axis> --source <source>
   --branch <branch> --head-sha <sha> --parent-task <id> --task-id <fleet-id>
   --worktree <path>
+
+Retry a route that failed after parsing, from the sanitized artifact it retained:
+  sgt-review-findings <project> <repo> --retry <artifact-dir> --worktree <path>
+
+Accepted --axis values:     $(_sgt_review_axes)
+Accepted finding severities: $SGT_REVIEW_SEVERITIES
 EOF
   exit 1
 }
@@ -21,7 +52,7 @@ EOF
 [[ $# -ge 2 ]] || usage
 PROJECT="$1"; shift
 REPO="$1"; shift
-INPUT="" AXIS="" SOURCE="" BRANCH="" HEAD_SHA="" PARENT_TASK="" TASK_ID="" WORKTREE=""
+INPUT="" AXIS="" SOURCE="" BRANCH="" HEAD_SHA="" PARENT_TASK="" TASK_ID="" WORKTREE="" RETRY=""
 
 while [[ $# -gt 0 ]]; do
   [[ $# -ge 2 ]] || usage
@@ -34,20 +65,26 @@ while [[ $# -gt 0 ]]; do
     --parent-task) PARENT_TASK="$2"; shift 2 ;;
     --task-id) TASK_ID="$2"; shift 2 ;;
     --worktree) WORKTREE="$2"; shift 2 ;;
+    --retry) RETRY="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
 
 WORKTREE="${WORKTREE:-$PWD}"
-TASK_ID="${TASK_ID:-unknown}"
 [[ -d "$WORKTREE" ]] || _die "Worktree unavailable: $WORKTREE"
+# --retry replays a retained artifact, so it carries its own review context.
+# Accepting both would leave two disagreeing sources of truth for one route.
+if [[ -n "$RETRY" ]]; then
+  [[ -z "$INPUT$AXIS$SOURCE$BRANCH$HEAD_SHA$PARENT_TASK$TASK_ID" ]] || usage
+fi
+TASK_ID="${TASK_ID:-unknown}"
 
 _valid_fleet_task_id() {
   [[ ${#1} -le 31 && "$1" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]
 }
 
 _valid_review_context() {
-  [[ "$AXIS" =~ ^(standards|spec|accessibility)$ ]] && [[ "$SOURCE" =~ ^[A-Za-z0-9._-]+$ ]]
+  _sgt_review_axis_valid "$AXIS" && [[ "$SOURCE" =~ ^[A-Za-z0-9._-]+$ ]]
 }
 
 _review_gate_path() {
@@ -92,29 +129,81 @@ _publish_blocked() {
   fi
 }
 
+# Number of NUL-delimited fields the parser emits per finding. Keep in step with
+# the field tuple written by the embedded parser below.
+SGT_REVIEW_FIELD_STRIDE=9
+# Separator that introduces an older, preserved revision of the same finding.
+# Newest revision first, so the reader sees the current finding at the top.
+SGT_REVIEW_REVISION_SEPARATOR='--- Superseded revision (preserved) ---'
+
 routed_task_ids=()
 routed_recommendations=()
 
+# Directory holding the sanitized findings retained for retry. Empty until the
+# parser has produced a durable copy; a failure before that has nothing to keep.
+ARTIFACT_DIR=""
+
+_artifact_root() {
+  printf '%s/.sergeant-review-artifacts\n' "$WORKTREE"
+}
+
+_artifact_path() {
+  printf '%s/%s-%s\n' "$(_artifact_root)" "$AXIS" "$SOURCE"
+}
+
 _routing_failure() {
   local reason="$1" routed="none" remediation="retry the router"
+  local retention="No review body was retained."
   if (( ${#routed_task_ids[@]} > 0 )); then
     routed="$(IFS=', '; printf '%s' "${routed_task_ids[*]}")"
     remediation="$(IFS='; '; printf '%s' "${routed_recommendations[*]}")"
   fi
+  # Never claim nothing was kept while an artifact exists, and never advertise a
+  # retry command for an artifact that was never published (td-61a0c8).
+  if [[ -n "$ARTIFACT_DIR" && -d "$ARTIFACT_DIR" ]]; then
+    retention="Sanitized findings retained at $ARTIFACT_DIR. Retry with: sgt-review-findings $PROJECT $REPO --retry $ARTIFACT_DIR --worktree $WORKTREE"
+  fi
   _publish_blocked \
-    "Review finding routing failed. Routed TD tasks: $routed. Recommended remediation: $remediation. No review body was retained. Retry sgt-review-findings after correcting the structured artifact or td failure." \
+    "Review finding routing failed. Routed TD tasks: $routed. Recommended remediation: $remediation. $retention Correct the structured artifact or the td failure first." \
     "review finding routing failed; routed td tasks: $routed" || true
   printf 'ERROR: %s\n' "$reason" >&2
   exit 2
 }
 
-for required in INPUT AXIS SOURCE BRANCH HEAD_SHA PARENT_TASK; do
+# Recover the review context from a retained artifact. The artifact is confined to
+# this worktree's artifact root so a retry cannot be pointed at arbitrary content.
+if [[ -n "$RETRY" ]]; then
+  artifact_name="${RETRY#"$(_artifact_root)/"}"
+  [[ "$RETRY" == "$(_artifact_root)/"* && "$artifact_name" =~ ^[A-Za-z0-9._-]+$ ]] || \
+    _routing_failure "retry artifact is not inside $(_artifact_root)"
+  [[ -f "$RETRY/findings" && -f "$RETRY/meta" ]] || \
+    _routing_failure "retry artifact is incomplete: $RETRY"
+  ARTIFACT_DIR="$RETRY"
+  while IFS='=' read -r meta_key meta_value; do
+    case "$meta_key" in
+      project) meta_project="$meta_value" ;;
+      repo) meta_repo="$meta_value" ;;
+      axis) AXIS="$meta_value" ;;
+      source) SOURCE="$meta_value" ;;
+      branch) BRANCH="$meta_value" ;;
+      head_sha) HEAD_SHA="$meta_value" ;;
+      parent_task) PARENT_TASK="$meta_value" ;;
+      task_id) TASK_ID="$meta_value" ;;
+      *) _routing_failure "retry artifact metadata is unrecognised: $meta_key" ;;
+    esac
+  done < "$RETRY/meta"
+  [[ "${meta_project:-}" == "$PROJECT" && "${meta_repo:-}" == "$REPO" ]] || \
+    _routing_failure "retry artifact belongs to ${meta_project:-unknown}/${meta_repo:-unknown}, not $PROJECT/$REPO"
+fi
+
+for required in AXIS SOURCE BRANCH HEAD_SHA PARENT_TASK; do
   field_name="$(printf '%s' "$required" | tr '[:upper:]_' '[:lower:]-')"
   [[ -n "${!required}" ]] || _routing_failure "missing required review field: $field_name"
 done
+[[ -n "$RETRY" || -n "$INPUT" ]] || _routing_failure "missing required review field: input"
 [[ "$TASK_ID" != "unknown" ]] || _routing_failure "missing required review field: task_id"
-_axis_re='^(standards|spec|accessibility)$'
-[[ "$AXIS" =~ $_axis_re ]] || _routing_failure "invalid review axis"
+_sgt_review_axis_valid "$AXIS" || \
+  _routing_failure "invalid review axis: $AXIS is not one of $(_sgt_review_axes)"
 [[ "$SOURCE" =~ ^[A-Za-z0-9._-]+$ ]] || _routing_failure "invalid review source"
 
 invocation_generation=""
@@ -137,7 +226,7 @@ CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
 ( _require_yq ) 2>/dev/null || _routing_failure "yq is required"
 ( _require_git ) 2>/dev/null || _routing_failure "git is required"
 ( _require_marcus_td ) 2>/dev/null || _routing_failure "td is required (github.com/marcus/td)"
-[[ -f "$INPUT" ]] || _routing_failure "review input is unavailable"
+[[ -n "$RETRY" || -f "$INPUT" ]] || _routing_failure "review input is unavailable"
 
 repo_count="$(yq '.repos | length' "$CONFIG_FILE" 2>/dev/null)" || _routing_failure "project configuration is invalid"
 repo_path=""
@@ -151,13 +240,20 @@ done
 _sgt_is_git_repo "$repo_path" || _routing_failure "owning repository is not a git repository"
 
 parsed="$(mktemp)" || _routing_failure "could not allocate parser output"
-trap 'rm -f "$parsed"' EXIT
-if ! python3 - "$INPUT" > "$parsed" <<'PY'
+existing_file="$(mktemp)" || _routing_failure "could not allocate td query output"
+composed_file="$(mktemp)" || _routing_failure "could not allocate composed description"
+match_file="$(mktemp)" || _routing_failure "could not allocate dedup match output"
+trap 'rm -f "$parsed" "$existing_file" "$composed_file" "$match_file"' EXIT
+_parse_review_input() {
+  SGT_REVIEW_SEVERITIES="$SGT_REVIEW_SEVERITIES" python3 - "$INPUT" > "$parsed" <<'PY'
+import hashlib
 import json
+import os
 import re
 import sys
 
 ALLOWED = {"id", "severity", "disposition", "summary", "evidence", "paths", "acceptance_criteria", "recommendation"}
+SEVERITIES = set(os.environ["SGT_REVIEW_SEVERITIES"].split())
 SECRET_VALUE = re.compile(r"(?i)((?:password|token|secret|credential|api[_-]?key)\s*[:=]\s*)([^\s,;]+)")
 BEARER = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 BASIC = re.compile(r"(?i)\bbasic\s+[^\s,;]+")
@@ -200,22 +296,38 @@ try:
             raise ValueError("finding id")
         severity = finding["severity"]
         disposition = finding["disposition"]
-        if severity not in {"error", "warning", "info", "informational"}:
+        if severity not in SEVERITIES:
             raise ValueError("severity")
         if disposition not in {"actionable", "cosmetic", "false-positive"}:
             raise ValueError("disposition")
         paths = finding["paths"]
         if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
             raise ValueError("paths")
+        summary = clean(finding["summary"], 240)
+        evidence = clean(finding["evidence"], 1000)
+        joined_paths = ", ".join(clean(path, 240) for path in paths) or "not provided"
+        acceptance = clean(finding["acceptance_criteria"], 1000)
+        recommendation = clean(finding["recommendation"], 500)
+        # Digest the sanitized, externally observable finding content only.
+        # Branch, head SHA, parent mission and fleet task legitimately change
+        # between routing passes without the finding itself changing, so they are
+        # excluded: a rerun of the same finding must refresh its metadata in
+        # place instead of stacking a new preserved revision (td-52d7c2).
+        digest = hashlib.sha256(
+            "\x00".join(
+                (severity, summary, evidence, joined_paths, acceptance, recommendation)
+            ).encode("utf-8")
+        ).hexdigest()[:32]
         fields = (
             finding_id,
             severity,
             disposition,
-            clean(finding["summary"], 240),
-            clean(finding["evidence"], 1000),
-            ", ".join(clean(path, 240) for path in paths) or "not provided",
-            clean(finding["acceptance_criteria"], 1000),
-            clean(finding["recommendation"], 500),
+            summary,
+            evidence,
+            joined_paths,
+            acceptance,
+            recommendation,
+            digest,
         )
         for field in fields:
             sys.stdout.buffer.write(field.encode("utf-8") + b"\0")
@@ -223,19 +335,71 @@ except (OSError, json.JSONDecodeError, UnicodeError, ValueError, TypeError):
     print("invalid review output", file=sys.stderr)
     raise SystemExit(1)
 PY
-then
-  _routing_failure "invalid review output"
+}
+
+# Re-check every field the routing logic branches on. The parser already enforces
+# these for fresh input; a retained artifact is re-validated so a corrupted or
+# tampered retry cannot reach td.
+_valid_parsed_fields() {
+  local offset
+  (( ${#fields[@]} > 0 )) || return 0
+  (( ${#fields[@]} % SGT_REVIEW_FIELD_STRIDE == 0 )) || return 1
+  for ((offset=0; offset<${#fields[@]}; offset+=SGT_REVIEW_FIELD_STRIDE)); do
+    [[ "${fields[offset]}" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+    _review_severity_valid "${fields[offset+1]}" || return 1
+    [[ "${fields[offset+2]}" =~ ^(actionable|cosmetic|false-positive)$ ]] || return 1
+    [[ "${fields[offset+8]}" =~ ^[0-9a-f]{32}$ ]] || return 1
+  done
+}
+
+# Retain the sanitized parsed findings so a later td or routing failure cannot
+# destroy the only copy of the review (td-61a0c8). Only post-redaction fields are
+# written; the raw reviewer artifact is never copied here.
+_retain_parsed_findings() {
+  local dir
+  dir="$(_artifact_path)"
+  mkdir -p "$dir" || return 1
+  cp "$parsed" "$dir/findings.tmp" || return 1
+  mv "$dir/findings.tmp" "$dir/findings" || return 1
+  {
+    printf 'project=%s\n' "$PROJECT"
+    printf 'repo=%s\n' "$REPO"
+    printf 'axis=%s\n' "$AXIS"
+    printf 'source=%s\n' "$SOURCE"
+    printf 'branch=%s\n' "$BRANCH"
+    printf 'head_sha=%s\n' "$HEAD_SHA"
+    printf 'parent_task=%s\n' "$PARENT_TASK"
+    printf 'task_id=%s\n' "$TASK_ID"
+  } > "$dir/meta.tmp" || return 1
+  mv "$dir/meta.tmp" "$dir/meta" || return 1
+  ARTIFACT_DIR="$dir"
+}
+
+_release_parsed_findings() {
+  [[ -n "$ARTIFACT_DIR" ]] || return 0
+  rm -rf "$ARTIFACT_DIR"
+  rmdir "$(_artifact_root)" 2>/dev/null || true
+  ARTIFACT_DIR=""
+}
+
+if [[ -n "$RETRY" ]]; then
+  cp "$ARTIFACT_DIR/findings" "$parsed" || _routing_failure "retry artifact is unreadable"
+else
+  _parse_review_input || _routing_failure "invalid review output"
 fi
 
 fields=()
 while IFS= read -r -d '' field; do
   fields[${#fields[@]}]="$field"
 done < "$parsed"
-(( ${#fields[@]} % 8 == 0 )) || _routing_failure "invalid review output"
+_valid_parsed_fields || _routing_failure "invalid review output"
+if [[ -z "$RETRY" ]]; then
+  _retain_parsed_findings || _routing_failure "could not retain the parsed review findings"
+fi
 
 declare -a blocking_tasks=() blocking_recommendations=()
 actionable_count=0
-for ((offset=0; offset<${#fields[@]}; offset+=8)); do
+for ((offset=0; offset<${#fields[@]}; offset+=SGT_REVIEW_FIELD_STRIDE)); do
   finding_id="${fields[offset]}"
   severity="${fields[offset+1]}"
   disposition="${fields[offset+2]}"
@@ -244,24 +408,27 @@ for ((offset=0; offset<${#fields[@]}; offset+=8)); do
   paths="${fields[offset+5]}"
   acceptance="${fields[offset+6]}"
   recommendation="${fields[offset+7]}"
+  content_digest="${fields[offset+8]}"
 
   if [[ "$disposition" != "actionable" ]]; then
     printf '%s: ignored %s finding\n' "$finding_id" "$disposition"
     continue
   fi
   actionable_count=$((actionable_count + 1))
-  case "$severity" in
-    error) priority="P1" ;;
-    warning) priority="P2" ;;
-    info|informational) priority="P3" ;;
-  esac
+  priority="$(_review_severity_priority "$severity")" || \
+    _routing_failure "severity $severity has no td priority mapping"
 
-  marker="independent-review-finding:$REPO:$AXIS:$SOURCE:$finding_id"
+  # Scope the dedup marker to the originating mission and branch. Reviewers emit
+  # generic finding ids ("spec-1", "STANDARDS-001"), so an axis/source/id-only
+  # marker collides across unrelated sessions and the update path then overwrites
+  # a historical card's evidence irrecoverably (td-52d7c2).
+  marker="independent-review-finding:$REPO:$AXIS:$SOURCE:$finding_id:$PARENT_TASK:$BRANCH"
   body="Independent review finding.
 
 Review axis: $AXIS
 Review source: $SOURCE
 Severity: $severity
+Summary: $summary
 Evidence: $evidence
 Affected paths: $paths
 Acceptance criteria: $acceptance
@@ -271,31 +438,83 @@ Head SHA: $HEAD_SHA
 Parent mission: $PARENT_TASK
 Originating fleet task: $TASK_ID
 
-Deduplication key: $marker"
+Deduplication key: $marker
+Finding content digest: $content_digest"
   existing_json="$(td list --all --search "$marker" --json --work-dir "$repo_path" 2>/dev/null)" || _routing_failure "failed to query td tasks"
-  existing_match="$(printf '%s' "$existing_json" | python3 -c '
-import json, sys
+  printf '%s' "$existing_json" > "$existing_file"
+  # The matcher writes its results to files rather than stdout: Apple Bash 3.2.57
+  # (macOS) cannot parse a heredoc nested inside $( ) command substitution.
+  : > "$match_file"
+  if ! SGT_REVIEW_NEW_BODY="$body" python3 - \
+    "$existing_file" "$marker" "$content_digest" \
+    "$SGT_REVIEW_REVISION_SEPARATOR" "$composed_file" "$match_file" <<'PY'
+import json
+import os
+import sys
+
+items_path, marker, digest, separator, composed_path, match_path = sys.argv[1:7]
 try:
-    items = json.load(sys.stdin)
-except (json.JSONDecodeError, TypeError):
+    with open(items_path, encoding="utf-8") as stream:
+        items = json.load(stream)
+except (OSError, json.JSONDecodeError, UnicodeError, TypeError, ValueError):
     raise SystemExit(1)
 if items is None:
     items = []
 if not isinstance(items, list):
     raise SystemExit(1)
-needle = "Deduplication key: " + sys.argv[1]
+needle = "Deduplication key: " + marker
 matches = [(item["id"], item.get("status") or "", item.get("defer_until") or "",
-            ",".join(item.get("labels") or []))
-           for item in items if needle in item.get("description", "").splitlines()]
+            ",".join(item.get("labels") or []), item.get("description") or "")
+           for item in items if needle in (item.get("description") or "").splitlines()]
 if len(matches) > 1:
     raise SystemExit(1)
-if matches:
-    print("\x1f".join(matches[0]))
-' "$marker")" || _routing_failure "td returned invalid or duplicate finding data"
+if not matches:
+    raise SystemExit(0)
 
-  task_id="" existing_status="" _defer_until="" existing_labels=""
+task_id, status, defer_until, labels, description = matches[0]
+prefix = "Finding content digest: "
+stored_digest = ""
+for line in description.splitlines():
+    if line.startswith(prefix):
+        stored_digest = line[len(prefix):].strip()
+        break
+state = "same" if stored_digest and stored_digest == digest else "changed"
+
+new_body = os.environ["SGT_REVIEW_NEW_BODY"]
+lines = description.splitlines()
+try:
+    boundary = lines.index(separator)
+except ValueError:
+    boundary = len(lines)
+if state == "same":
+    # Same externally observable finding: refresh the current revision's
+    # metadata in place and keep every preserved older revision verbatim.
+    preserved = lines[boundary:]
+else:
+    # Changed finding: the whole stored description becomes a preserved older
+    # revision. Nothing is ever replaced or dropped.
+    preserved = [separator] + lines
+composed = new_body if not preserved else new_body + "\n\n" + "\n".join(preserved)
+with open(composed_path, "w", encoding="utf-8") as stream:
+    stream.write(composed)
+with open(match_path, "w", encoding="utf-8") as stream:
+    stream.write("\x1f".join((task_id, status, defer_until, labels, state)))
+PY
+  then
+    _routing_failure "td returned invalid or duplicate finding data"
+  fi
+  existing_match="$(cat "$match_file")"
+
+  task_id="" existing_status="" _defer_until="" existing_labels="" digest_state=""
   if [[ -n "$existing_match" ]]; then
-    IFS=$'\x1f' read -r task_id existing_status _defer_until existing_labels <<< "$existing_match"
+    IFS=$'\x1f' read -r task_id existing_status _defer_until existing_labels digest_state <<< "$existing_match"
+    # Never reopen a closed card whose stored body records a different finding.
+    # The marker is mission-scoped, so this means a reviewer reused one finding id
+    # for two different findings; overwriting either one destroys evidence
+    # irrecoverably, so fail closed and let a human reconcile (td-52d7c2).
+    if [[ "$existing_status" == "closed" && "$digest_state" != "same" ]]; then
+      _routing_failure "closed td task $task_id matches the deduplication key of finding $finding_id but records a different finding; reconcile it manually"
+    fi
     if [[ "$existing_status" == "closed" ]]; then
       td reopen "$task_id" --work-dir "$repo_path" --json >/dev/null 2>&1 || _routing_failure "failed to reopen td task"
     fi
@@ -305,7 +524,10 @@ if matches:
     # so reruns do not strip user-added labels (td-a70708, td-7ad6b2).
     merged_labels="$(printf '%s,independent-review,finding,%s' "$existing_labels" "$AXIS" \
       | tr ',' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ',' | sed 's/,$//')"
-    td update "$task_id" --priority "$priority" --description "$body" \
+    # Reconcile the title with the revision now at the top of the body so the
+    # card's title and body cannot describe different findings.
+    td update "$task_id" --title "review: $summary" --priority "$priority" \
+      --description "$(cat "$composed_file")" \
       --labels "$merged_labels" --work-dir "$repo_path" --json >/dev/null 2>&1 \
       || _routing_failure "failed to update td task"
     printf '%s: td %s updated; remediation: %s\n' "$finding_id" "$task_id" "$recommendation"
@@ -325,6 +547,10 @@ if matches:
   routed_task_ids+=("$task_id")
   routed_recommendations+=("$recommendation")
 done
+
+# Every finding reached td, so the retained copy has served its purpose. A
+# blocking gate below is a review outcome, not a routing failure.
+_release_parsed_findings
 
 if (( ${#blocking_tasks[@]} > 0 )); then
   task_list="$(IFS=', '; printf '%s' "${blocking_tasks[*]}")"

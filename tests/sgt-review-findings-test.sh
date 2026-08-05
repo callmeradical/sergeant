@@ -124,7 +124,8 @@ run_router() {
     TD_LIST_RESULT="${TD_LIST_RESULT:-[]}" TD_FAIL_CREATE="${TD_FAIL_CREATE:-0}" \
     "$INSTALLED_BIN/sgt-review-findings" test app \
       --input "$1" --axis "${ROUTER_AXIS:-standards}" --source code-review \
-      --branch fix/review --head-sha abc1234 --parent-task td-parent \
+      --branch "${ROUTER_BRANCH:-fix/review}" --head-sha abc1234 \
+      --parent-task "${ROUTER_PARENT_TASK:-td-parent}" \
       --task-id "${ROUTER_TASK_ID:-fleet-1}" --worktree "$WORKTREE" 2>&1)"
   status=$?
   set -e
@@ -152,7 +153,7 @@ grep -Fq 'Branch: fix/review' "$TEST_ROOT/td.log"
 grep -Fq 'Head SHA: abc1234' "$TEST_ROOT/td.log"
 grep -Fq 'Parent mission: td-parent' "$TEST_ROOT/td.log"
 grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log"
-grep -Fq 'independent-review-finding:app:standards:code-review:std-1' "$TEST_ROOT/td.log"
+grep -Fq 'independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review' "$TEST_ROOT/td.log"
 [[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
 [[ "$(cat "$WORKTREE/.sergeant-gate-generation")" == '1' ]]
 grep -Fq 'td-created-1' "$WORKTREE/.sergeant-message"
@@ -163,6 +164,10 @@ generation_line="$(grep -nF '.sergeant-gate-generation' "$TEST_ROOT/mv.log" | cu
 message_line="$(grep -nF '.sergeant-message' "$TEST_ROOT/mv.log" | cut -d: -f1)"
 status_line="$(grep -nF '.sergeant-status' "$TEST_ROOT/mv.log" | cut -d: -f1)"
 [[ "$generation_line" -lt "$message_line" && "$message_line" -lt "$status_line" ]]
+# Content digest of std-1 as the router computes it; reused by the dedup fixtures
+# below so a fixture can represent "the same finding" without hardcoding a hash.
+std1_digest="$(grep -o 'Finding content digest: [0-9a-f]*' "$TEST_ROOT/td.log" | head -1 | awk '{print $4}')"
+[[ -n "$std1_digest" ]] || { printf 'no finding content digest recorded for std-1\n' >&2; exit 1; }
 
 cat > "$TEST_ROOT/secrets.json" <<'EOF'
 {"findings":[{"id":"std-secret","severity":"warning","disposition":"actionable","summary":"Credential exposure","evidence":"token=super-secret Bearer raw-token Basic dXNlcjpwYXNz ghp_123456789012345678901234567890123456 AKIAIOSFODNN7EXAMPLE https://user:pass@example.test -----BEGIN PRIVATE KEY-----","paths":["bin/run"],"acceptance_criteria":"Redact credential=hidden-value","recommendation":"Remove password=hunter2"}]}
@@ -203,7 +208,7 @@ if grep -Fq 'private prompt contents' "$TEST_ROOT/td.log" "$WORKTREE/.sergeant-m
   exit 1
 fi
 
-TD_LIST_RESULT='[{"id":"td-existing","status":"in_progress","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1"}]' \
+TD_LIST_RESULT='[{"id":"td-existing","status":"in_progress","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review"}]' \
   run_router "$TEST_ROOT/findings.json"
 grep -Fq 'update td-existing' "$TEST_ROOT/td.log"
 grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log"
@@ -213,7 +218,7 @@ if grep -Fq 'reopen td-existing' "$TEST_ROOT/td.log"; then
 fi
 
 # dedup update with a different fleet task ID must write the new ID into the body
-TD_LIST_RESULT='[{"id":"td-existing","status":"in_progress","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1"}]' \
+TD_LIST_RESULT='[{"id":"td-existing","status":"in_progress","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review"}]' \
   ROUTER_TASK_ID='fleet-new' run_router "$TEST_ROOT/findings.json"
 grep -Fq 'update td-existing' "$TEST_ROOT/td.log"
 grep -Fq 'Originating fleet task: fleet-new' "$TEST_ROOT/td.log"
@@ -222,8 +227,8 @@ if grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log"; then
   exit 1
 fi
 
-# closed existing task must be reopened before update
-TD_LIST_RESULT='[{"id":"td-closed","status":"closed","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1"}]' \
+# closed existing task recording the same finding must be reopened before update
+TD_LIST_RESULT="[{\"id\":\"td-closed\",\"status\":\"closed\",\"description\":\"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review\nFinding content digest: $std1_digest\"}]" \
   run_router "$TEST_ROOT/findings.json"
 grep -Fq 'reopen td-closed' "$TEST_ROOT/td.log"
 grep -Fq 'update td-closed' "$TEST_ROOT/td.log"
@@ -233,7 +238,7 @@ update_line="$(grep -nF 'update td-closed' "$TEST_ROOT/td.log" | cut -d: -f1)"
 [[ "$reopen_line" -lt "$update_line" ]]
 
 # deferred existing task must NOT have deferral cleared on rerun — preserve defer_until
-TD_LIST_RESULT='[{"id":"td-deferred","status":"in_progress","defer_until":"2099-01-01","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1"}]' \
+TD_LIST_RESULT='[{"id":"td-deferred","status":"in_progress","defer_until":"2099-01-01","description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review"}]' \
   run_router "$TEST_ROOT/findings.json"
 if grep -Fq 'defer td-deferred --clear' "$TEST_ROOT/td.log"; then
   printf 'deferred task had deferral cleared on rerun — must be preserved\n' >&2
@@ -242,7 +247,7 @@ fi
 grep -Fq 'update td-deferred' "$TEST_ROOT/td.log"
 
 # dedup update must preserve manually added labels — not replace them with only standard ones
-TD_LIST_RESULT='[{"id":"td-labelled","status":"open","defer_until":"","labels":["independent-review","finding","standards","urgent","security"],"description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1"}]' \
+TD_LIST_RESULT='[{"id":"td-labelled","status":"open","defer_until":"","labels":["independent-review","finding","standards","urgent","security"],"description":"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review"}]' \
   run_router "$TEST_ROOT/findings.json"
 if ! grep -Fq 'urgent' "$TEST_ROOT/td.log"; then
   printf 'dedup update dropped manually added label "urgent"\n' >&2
@@ -469,5 +474,346 @@ grep -Fq 'blocked [app]' "$TEST_ROOT/notify.log" || {
   printf '%s\n' "sgt-notify was not called via \$SCRIPT_DIR-relative path" >&2
   exit 1
 }
+
+# ── td-52d7c2: dedup marker must be scoped to the parent task and branch ──────
+# Reproduces the reported sequence: route a generic finding id for parent A,
+# close that card, then route a DIFFERENT finding with the same generic id for
+# parent B. Parent A's card must be untouched and a new card must be created.
+printf '{"findings":[{"id":"spec-1","severity":"warning","disposition":"actionable","summary":"Bootstrap prerequisites are unchecked","evidence":"bin/run:10 skips the prerequisite probe","paths":["bin/run"],"acceptance_criteria":"Probe prerequisites","recommendation":"Add the probe"}]}\n' \
+  > "$TEST_ROOT/spec1-parent-a.json"
+printf '{"findings":[{"id":"spec-1","severity":"warning","disposition":"actionable","summary":"Rename bundled into finding commit","evidence":"bin/other:99 bundles a rename","paths":["bin/other"],"acceptance_criteria":"Split the rename","recommendation":"Split the commit"}]}\n' \
+  > "$TEST_ROOT/spec1-parent-b.json"
+
+ROUTER_PARENT_TASK=td-parent-a ROUTER_BRANCH=feat/a run_router "$TEST_ROOT/spec1-parent-a.json"
+[[ "$status" -eq 0 ]] || { printf 'parent-A route failed: %s\n' "$output" >&2; exit 1; }
+marker_a="$(grep -o 'independent-review-finding:[^ ]*' "$TEST_ROOT/td.log" | head -1)"
+[[ -n "$marker_a" ]] || { printf 'no dedup marker recorded for parent A\n' >&2; exit 1; }
+
+TD_LIST_RESULT="[{\"id\":\"td-parent-a-card\",\"status\":\"closed\",\"description\":\"Deduplication key: $marker_a\"}]" \
+  ROUTER_PARENT_TASK=td-parent-b ROUTER_BRANCH=feat/b run_router "$TEST_ROOT/spec1-parent-b.json"
+[[ "$status" -eq 0 ]] || { printf 'parent-B route failed: %s\n' "$output" >&2; exit 1; }
+if grep -Eq '^(reopen|update) td-parent-a-card' "$TEST_ROOT/td.log"; then
+  printf 'cross-parent finding collision reopened or overwrote an unrelated card\n' >&2
+  exit 1
+fi
+grep -q '^create ' "$TEST_ROOT/td.log" || {
+  printf 'cross-parent finding did not create a new card\n' >&2
+  exit 1
+}
+marker_b="$(grep -o 'independent-review-finding:[^ ]*' "$TEST_ROOT/td.log" | head -1)"
+[[ "$marker_a" != "$marker_b" ]] || {
+  printf 'dedup marker is not scoped to the parent task and branch: %s\n' "$marker_a" >&2
+  exit 1
+}
+[[ "$marker_a" == *td-parent-a* && "$marker_a" == *feat/a* ]] || {
+  printf 'dedup marker omits the parent task or branch: %s\n' "$marker_a" >&2
+  exit 1
+}
+[[ "$marker_b" == *td-parent-b* && "$marker_b" == *feat/b* ]] || {
+  printf 'dedup marker omits the parent task or branch: %s\n' "$marker_b" >&2
+  exit 1
+}
+
+# Same parent task and branch must still dedup onto the same card.
+TD_LIST_RESULT="[{\"id\":\"td-same-scope\",\"status\":\"open\",\"description\":\"Deduplication key: $marker_a\"}]" \
+  ROUTER_PARENT_TASK=td-parent-a ROUTER_BRANCH=feat/a run_router "$TEST_ROOT/spec1-parent-a.json"
+grep -Fq 'update td-same-scope' "$TEST_ROOT/td.log" || {
+  printf 'same-scope rerun did not dedup onto the existing card\n' >&2
+  exit 1
+}
+
+# ── td-52d7c2: a dedup update must preserve the previous description and
+# reconcile the title, so review evidence is never destroyed and the title and
+# body cannot describe different findings. ───────────────────────────────────
+stored_marker='independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review'
+existing_card() {
+  STORED_BODY="$1" STORED_STATUS="${2:-open}" python3 -c '
+import json, os, sys
+print(json.dumps([{
+  "id": "td-revised",
+  "status": os.environ["STORED_STATUS"],
+  "defer_until": "",
+  "labels": ["independent-review", "finding", "standards"],
+  "description": os.environ["STORED_BODY"],
+}]))'
+}
+
+read -r -d '' stored_body <<STORED || true
+Independent review finding.
+
+Review axis: standards
+Review source: code-review
+Severity: warning
+Summary: Original recorded finding
+Evidence: bin/original:7 original evidence marker
+Affected paths: bin/original
+Acceptance criteria: original criterion
+Recommended remediation: original remediation
+Branch: fix/review
+Head SHA: abc1234
+Parent mission: td-parent
+Originating fleet task: fleet-1
+
+Deduplication key: $stored_marker
+Finding content digest: 0000000000000000
+STORED
+
+TD_LIST_RESULT="$(existing_card "$stored_body")" run_router "$TEST_ROOT/findings.json"
+grep -Fq 'update td-revised' "$TEST_ROOT/td.log"
+grep -Fq 'bin/original:7 original evidence marker' "$TEST_ROOT/td.log" || {
+  printf 'dedup update discarded the previous description\n' >&2
+  exit 1
+}
+grep -Fq 'bin/run:42 can remove another pane' "$TEST_ROOT/td.log" || {
+  printf 'dedup update did not record the incoming finding\n' >&2
+  exit 1
+}
+grep -Fq -- '--title review: Unsafe cleanup' "$TEST_ROOT/td.log" || {
+  printf 'dedup update did not reconcile the title with the new finding\n' >&2
+  exit 1
+}
+grep -Fq 'Summary: Unsafe cleanup' "$TEST_ROOT/td.log" || {
+  printf 'finding summary is not recorded in the body\n' >&2
+  exit 1
+}
+
+# An unchanged rerun must refresh the current revision in place, not stack a
+# duplicate revision on every routing pass.
+current_digest="$(grep -o 'Finding content digest: [0-9a-f]*' "$TEST_ROOT/td.log" | head -1 | awk '{print $4}')"
+[[ -n "$current_digest" ]] || { printf 'no finding content digest recorded\n' >&2; exit 1; }
+read -r -d '' unchanged_body <<UNCHANGED || true
+Independent review finding.
+
+Review axis: standards
+Review source: code-review
+Severity: error
+Summary: Unsafe cleanup
+Evidence: bin/run:42 can remove another pane
+Affected paths: bin/run
+Acceptance criteria: Match exact pane identity
+Recommended remediation: Use exact identity matching
+Branch: fix/review
+Head SHA: abc1234
+Parent mission: td-parent
+Originating fleet task: fleet-old
+
+Deduplication key: $stored_marker
+Finding content digest: $current_digest
+UNCHANGED
+TD_LIST_RESULT="$(existing_card "$unchanged_body")" run_router "$TEST_ROOT/findings.json"
+grep -Fq 'update td-revised' "$TEST_ROOT/td.log"
+[[ "$(grep -c 'Superseded revision (preserved)' "$TEST_ROOT/td.log")" -eq 0 ]] || {
+  printf 'unchanged rerun stacked a duplicate revision\n' >&2
+  exit 1
+}
+grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log" || {
+  printf 'unchanged rerun did not refresh the current revision metadata\n' >&2
+  exit 1
+}
+
+# A closed card whose stored finding differs from the incoming finding must not
+# be silently reopened and overwritten; the router refuses and reports.
+TD_LIST_RESULT="$(existing_card "$stored_body" closed)" run_router "$TEST_ROOT/findings.json"
+[[ "$status" -eq 2 ]] || { printf 'closed mismatched card did not fail closed: %s\n' "$output" >&2; exit 1; }
+[[ "$output" == *'records a different finding'* ]] || {
+  printf 'closed mismatched card did not report the reconciliation blocker: %s\n' "$output" >&2
+  exit 1
+}
+if grep -Eq '^(reopen|update) td-revised' "$TEST_ROOT/td.log"; then
+  printf 'closed card with a different stored finding was silently reopened or overwritten\n' >&2
+  exit 1
+fi
+
+# A closed card recording the SAME finding still reopens and updates.
+TD_LIST_RESULT="$(existing_card "$unchanged_body" closed)" run_router "$TEST_ROOT/findings.json"
+grep -Fq 'reopen td-revised' "$TEST_ROOT/td.log"
+grep -Fq 'update td-revised' "$TEST_ROOT/td.log"
+
+# ── td-61a0c8: the router must accept exactly the shared axis vocabulary ──────
+# bin/sgt-dispatch mandates an independent readiness review and tells workers to
+# route each axis with this command, so `readiness` must route end to end.
+# shellcheck source=bin/_sgt-review-axes.sh
+source "$ROOT_DIR/bin/_sgt-review-axes.sh"
+
+ROUTER_AXIS=readiness run_router "$TEST_ROOT/findings.json"
+[[ "$status" -eq 2 ]] || { printf 'readiness route did not gate on its error finding: %s\n' "$output" >&2; exit 1; }
+[[ "$output" != *'invalid review axis'* ]] || {
+  printf 'router rejected the readiness axis the dispatch contract demands\n' >&2
+  exit 1
+}
+grep -Fq 'Review axis: readiness' "$TEST_ROOT/td.log"
+grep -Fq 'independent-review-finding:app:readiness:code-review:std-1:td-parent:fix/review' "$TEST_ROOT/td.log"
+grep -Fq -- '--labels independent-review,finding,readiness' "$TEST_ROOT/td.log"
+grep -Fq 'Review axis: readiness' "$WORKTREE/.sergeant-message"
+grep -Fq 'blocked [app]' "$TEST_ROOT/notify.log"
+[[ -f "$WORKTREE/.sergeant-review-gates/readiness-code-review" ]] || {
+  printf 'readiness axis did not publish its own review gate\n' >&2
+  exit 1
+}
+
+# Every axis in the shared definition routes; nothing outside it does.
+for _axis in $(_sgt_review_axes); do
+  ROUTER_AXIS="$_axis" run_router "$TEST_ROOT/clean.json"
+  [[ "$status" -eq 0 ]] || {
+    printf 'router rejected shared review axis %s: %s\n' "$_axis" "$output" >&2
+    exit 1
+  }
+  _sgt_review_axis_guidance "$_axis" >/dev/null || {
+    printf 'shared review axis %s has no reviewer guidance\n' "$_axis" >&2
+    exit 1
+  }
+done
+for _axis in invalid performance security; do
+  ROUTER_AXIS="$_axis" run_router "$TEST_ROOT/clean.json"
+  [[ "$status" -eq 2 ]] || {
+    printf 'router accepted unshared review axis %s\n' "$_axis" >&2
+    exit 1
+  }
+  [[ "$(cat "$WORKTREE/.sergeant-status")" == 'blocked' ]]
+done
+
+# ── td-61a0c8: a routing failure must retain a sanitized, retryable artifact ───
+run_retry() {
+  : > "$TEST_ROOT/td.log"
+  : > "$TEST_ROOT/td-ids"
+  : > "$TEST_ROOT/notify.log"
+  : > "$TEST_ROOT/mv.log"
+  set +e
+  output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+    REPO_PATH="$REPO" TD_LOG="$TEST_ROOT/td.log" TD_IDS="$TEST_ROOT/td-ids" \
+    NOTIFY_LOG="$TEST_ROOT/notify.log" MV_LOG="$TEST_ROOT/mv.log" \
+    ROUTER_WORKTREE="$WORKTREE" SERGEANT_CONFIG="$TEST_ROOT/config" \
+    TD_LIST_RESULT="${TD_LIST_RESULT:-[]}" TD_FAIL_CREATE="${TD_FAIL_CREATE:-0}" \
+    "$INSTALLED_BIN/sgt-review-findings" test app \
+      --retry "$1" --worktree "$WORKTREE" 2>&1)"
+  status=$?
+  set -e
+}
+
+printf '{"findings":[
+  {"id":"warn-1","severity":"warning","disposition":"actionable","summary":"First debt","evidence":"bin/one:1 first evidence","paths":["bin/one"],"acceptance_criteria":"Fix one","recommendation":"Do one"},
+  {"id":"warn-2","severity":"warning","disposition":"actionable","summary":"Second debt","evidence":"bin/two:2 second evidence","paths":["bin/two"],"acceptance_criteria":"Fix two","recommendation":"Do two"}
+]}\n' > "$TEST_ROOT/warn.json"
+
+artifact="$WORKTREE/.sergeant-review-artifacts/standards-code-review"
+rm -rf "$WORKTREE/.sergeant-review-artifacts"
+TD_FAIL_CREATE=1 run_router "$TEST_ROOT/warn.json"
+[[ "$status" -eq 2 && "$output" == *'failed to create td task'* ]] || {
+  printf 'td create failure did not fail the route: %s\n' "$output" >&2
+  exit 1
+}
+[[ -f "$artifact/findings" && -f "$artifact/meta" ]] || {
+  printf 'routing failure destroyed the only copy of the parsed findings\n' >&2
+  exit 1
+}
+grep -Fq -- "--retry $artifact" "$WORKTREE/.sergeant-message" || {
+  printf 'blocked message does not name a supported retry command: %s\n' \
+    "$(cat "$WORKTREE/.sergeant-message")" >&2
+  exit 1
+}
+if grep -Fq 'No review body was retained' "$WORKTREE/.sergeant-message"; then
+  printf 'blocked message still claims nothing was retained\n' >&2
+  exit 1
+fi
+grep -Fq 'axis=standards' "$artifact/meta"
+grep -Fq 'source=code-review' "$artifact/meta"
+grep -Fq 'branch=fix/review' "$artifact/meta"
+grep -Fq 'parent_task=td-parent' "$artifact/meta"
+grep -Fq 'task_id=fleet-1' "$artifact/meta"
+
+# The retry routes the retained findings without the original reviewer output.
+retained_findings="$artifact/findings"
+cp "$retained_findings" "$TEST_ROOT/retained-copy"
+run_retry "$artifact"
+[[ "$status" -eq 0 ]] || { printf 'retry from the retained artifact failed: %s\n' "$output" >&2; exit 1; }
+[[ "$(grep -c '^create ' "$TEST_ROOT/td.log")" -eq 2 ]] || {
+  printf 'retry did not route every retained finding\n' >&2
+  exit 1
+}
+grep -Fq 'Review axis: standards' "$TEST_ROOT/td.log"
+grep -Fq 'bin/one:1 first evidence' "$TEST_ROOT/td.log"
+grep -Fq 'bin/two:2 second evidence' "$TEST_ROOT/td.log"
+grep -Fq 'independent-review-finding:app:standards:code-review:warn-1:td-parent:fix/review' "$TEST_ROOT/td.log"
+[[ ! -e "$artifact" ]] || {
+  printf 'successful retry left a stale retry artifact behind\n' >&2
+  exit 1
+}
+
+# A successful route retains no artifact at all.
+rm -rf "$WORKTREE/.sergeant-review-artifacts"
+run_router "$TEST_ROOT/warn.json"
+[[ "$status" -eq 0 ]] || { printf 'clean warning route failed: %s\n' "$output" >&2; exit 1; }
+[[ ! -e "$artifact" ]] || {
+  printf 'successful route retained a retry artifact\n' >&2
+  exit 1
+}
+
+# A parse failure has nothing parsed to retain, so no retry must be advertised.
+rm -rf "$WORKTREE/.sergeant-review-artifacts"
+run_router "$TEST_ROOT/malformed.json"
+[[ "$status" -eq 2 ]]
+[[ ! -e "$artifact" ]] || {
+  printf 'parse failure published an artifact with no parsed findings\n' >&2
+  exit 1
+}
+if grep -Fq -- '--retry' "$WORKTREE/.sergeant-message"; then
+  printf 'parse failure advertised a retry artifact that does not exist\n' >&2
+  exit 1
+fi
+
+# The retained artifact must carry only sanitized findings — no secrets and no
+# raw reviewer JSON.
+rm -rf "$WORKTREE/.sergeant-review-artifacts"
+TD_FAIL_CREATE=1 run_router "$TEST_ROOT/secrets.json"
+[[ -f "$artifact/findings" ]]
+if grep -Eaq 'super-secret|raw-token|hidden-value|hunter2|dXNlcjpwYXNz|ghp_|AKIA|user:pass|BEGIN PRIVATE KEY' \
+   "$artifact/findings" "$artifact/meta"; then
+  printf 'retained retry artifact contains unredacted secrets\n' >&2
+  exit 1
+fi
+if grep -Faq '"disposition"' "$artifact/findings"; then
+  printf 'retained retry artifact contains raw reviewer output\n' >&2
+  exit 1
+fi
+grep -aFq '[REDACTED]' "$artifact/findings"
+
+# --retry must refuse a path outside the worktree artifact root.
+rm -rf "$WORKTREE/.sergeant-review-artifacts"
+mkdir -p "$TEST_ROOT/elsewhere/standards-code-review"
+cp "$TEST_ROOT/retained-copy" "$TEST_ROOT/elsewhere/standards-code-review/findings"
+printf 'project=test\nrepo=app\naxis=standards\nsource=code-review\nbranch=fix/review\nhead_sha=abc1234\nparent_task=td-parent\ntask_id=fleet-1\n' \
+  > "$TEST_ROOT/elsewhere/standards-code-review/meta"
+run_retry "$TEST_ROOT/elsewhere/standards-code-review"
+[[ "$status" -eq 2 ]] || { printf 'retry accepted an artifact outside the worktree\n' >&2; exit 1; }
+if grep -Eq '^(create|update) ' "$TEST_ROOT/td.log"; then
+  printf 'retry outside the worktree reached td\n' >&2
+  exit 1
+fi
+run_retry "$WORKTREE/.sergeant-review-artifacts/../../escape"
+[[ "$status" -eq 2 ]] || { printf 'retry accepted a traversal path\n' >&2; exit 1; }
+
+# --retry and --input are mutually exclusive.
+mkdir -p "$artifact"
+cp "$TEST_ROOT/retained-copy" "$artifact/findings"
+printf 'project=test\nrepo=app\naxis=standards\nsource=code-review\nbranch=fix/review\nhead_sha=abc1234\nparent_task=td-parent\ntask_id=fleet-1\n' > "$artifact/meta"
+set +e
+output="$(PATH="$TEST_ROOT/fake-bin:$PATH" REPO_PATH="$REPO" TD_LOG="$TEST_ROOT/td.log" \
+  TD_IDS="$TEST_ROOT/td-ids" NOTIFY_LOG="$TEST_ROOT/notify.log" MV_LOG="$TEST_ROOT/mv.log" \
+  ROUTER_WORKTREE="$WORKTREE" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  "$INSTALLED_BIN/sgt-review-findings" test app --retry "$artifact" \
+    --input "$TEST_ROOT/warn.json" --worktree "$WORKTREE" 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]] || { printf '--retry accepted a conflicting --input\n' >&2; exit 1; }
+
+# A retry whose meta names a different project or repo must refuse.
+printf 'project=other\nrepo=app\naxis=standards\nsource=code-review\nbranch=fix/review\nhead_sha=abc1234\nparent_task=td-parent\ntask_id=fleet-1\n' > "$artifact/meta"
+run_retry "$artifact"
+[[ "$status" -eq 2 ]] || { printf 'retry accepted mismatched project metadata\n' >&2; exit 1; }
+if grep -Eq '^(create|update) ' "$TEST_ROOT/td.log"; then
+  printf 'retry with mismatched metadata reached td\n' >&2
+  exit 1
+fi
+rm -rf "$WORKTREE/.sergeant-review-artifacts"
 
 printf 'sgt-review-findings: ok\n'
