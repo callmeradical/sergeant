@@ -5243,6 +5243,20 @@ run_ledger_retry
 printf 'gate lock\n' > \
   "$TEST_ROOT/ledger-retry-worktree/.sergeant-review-gates/.gate-lock"
 
+# '..'-prefixed children need their own glob, so they need their own assertion.
+printf 'tampered double dot\n' > \
+  "$TEST_ROOT/ledger-retry-worktree/.sergeant-review-gates/..double-dot"
+run_ledger_retry
+[[ "$ledger_retry_status" -ne 0 && \
+  "$ledger_retry_output" == *"Retry worker lifecycle evidence changed"* ]] || {
+  printf 'FAIL ledger-retry: cleanup accepted a mutated ..-prefixed ledger child: %s\n' \
+    "$ledger_retry_output" >&2
+  exit 1
+}
+[[ "$(ledger_retry_removals)" -eq 1 ]]
+printf 'double dot\n' > \
+  "$TEST_ROOT/ledger-retry-worktree/.sergeant-review-gates/..double-dot"
+
 # A partially removed ledger must be replayable from persisted evidence: drop
 # every live entry (the crash window between removal and worktree deletion) and
 # require the retry to restore it before reaching the remover again.  The replay
@@ -5445,11 +5459,23 @@ SERGEANT_CONFIG="$TEST_ROOT/config" \
 }
 printf 'sgt-cleanup ledger-collide: colliding evidence publication fails closed ok\n'
 
-# Evidence identity must be a function of raw bytes.  The worktree copy lives
-# inside the owning repository while the staged copy lives in fleet state outside
-# any repository, so hashing with gitattributes filters enabled gives two
-# different identities for byte-identical evidence and blocks cleanup forever.
-ledger_attrs_state="$TEST_ROOT/fleet/ledger-attrs/app"
+# Every lifecycle hash must be a function of raw bytes.  The worktree copy lives
+# inside the owning repository while the staged copy lives in fleet state, so
+# hashing with gitattributes filters enabled gives two different identities for
+# byte-identical evidence and blocks cleanup forever.  Fleet state is placed inside
+# a filtered repository as well, so the cleanup-phase write verification — which
+# compares a path hash against a --stdin hash of the same bytes, after the worktree
+# is already gone — is covered by the same case.
+ledger_attrs_fleet="$TEST_ROOT/ledger-attrs-fleet-repo"
+init_test_repo "$ledger_attrs_fleet"
+# A clean filter, so every path hashed inside fleet state diverges from the same
+# bytes hashed without filters — both the staged evidence and the cleanup-phase
+# write verification.
+printf '* filter=sgtcase\n' > "$ledger_attrs_fleet/.gitattributes"
+git -C "$ledger_attrs_fleet" config filter.sgtcase.clean 'tr a-z A-Z'
+git -C "$ledger_attrs_fleet" add .gitattributes
+git -C "$ledger_attrs_fleet" commit -qm 'uppercase clean filter'
+ledger_attrs_state="$ledger_attrs_fleet/fleet/ledger-attrs/app"
 mkdir -p "$ledger_attrs_state"
 init_test_repo "$TEST_ROOT/ledger-attrs-repo"
 printf '* text=auto\n' > "$TEST_ROOT/ledger-attrs-repo/.gitattributes"
@@ -5457,7 +5483,15 @@ git -C "$TEST_ROOT/ledger-attrs-repo" add .gitattributes
 git -C "$TEST_ROOT/ledger-attrs-repo" commit -qm 'normalize line endings'
 git -C "$TEST_ROOT/ledger-attrs-repo" worktree add -q -b ledger-attrs-worker \
   "$TEST_ROOT/ledger-attrs-worktree"
-record_retry_owner ledger-attrs app "$TEST_ROOT/ledger-attrs-repo"
+# Written inline rather than through record_retry_owner: the brief has to land in
+# the filtered fleet repo, not the default fleet root.
+cat > "$TEST_ROOT/config/ledger-attrs.yaml" <<EOF
+name: ledger-attrs
+repos:
+  - name: app
+    path: $TEST_ROOT/ledger-attrs-repo
+EOF
+printf 'Project: ledger-attrs\n' > "$ledger_attrs_fleet/fleet/ledger-attrs/brief.md"
 printf '%s\n' "$TEST_ROOT/ledger-attrs-worktree" > "$ledger_attrs_state/worktree"
 printf 'git\n' > "$ledger_attrs_state/wt_type"
 printf 'done\n' > "$ledger_attrs_state/status"
@@ -5467,8 +5501,11 @@ printf 'standards passed\r\n' > \
   "$TEST_ROOT/ledger-attrs-worktree/.sergeant-review-gates/standards-subagent"
 printf 'crlf diagnostic\r\n' > "$TEST_ROOT/ledger-attrs-worktree/.sergeant-diagnostic"
 set +e
-ledger_attrs_output="$(SERGEANT_CONFIG="$TEST_ROOT/config" \
-  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+# Run from inside the filtered fleet repository: git resolves attributes against
+# the process working directory, so this is what makes the fleet-side path hashes
+# filter-sensitive.
+ledger_attrs_output="$(cd "$ledger_attrs_fleet" && SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$ledger_attrs_fleet/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" ledger-attrs 2>&1)"
 ledger_attrs_status=$?
 set -e
@@ -5477,7 +5514,8 @@ set -e
     "$ledger_attrs_output" >&2
   exit 1
 }
-[[ ! -e "$TEST_ROOT/ledger-attrs-worktree" && ! -e "$TEST_ROOT/fleet/ledger-attrs" ]] || {
+[[ ! -e "$TEST_ROOT/ledger-attrs-worktree" && \
+  ! -e "$ledger_attrs_fleet/fleet/ledger-attrs" ]] || {
   printf 'FAIL ledger-attrs: cleanup left state behind\n' >&2
   exit 1
 }

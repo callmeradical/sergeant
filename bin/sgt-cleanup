@@ -792,6 +792,8 @@ _rollback_remove_path() {
     _die "CRITICAL: rollback cleanup left an artifact for $context: $path"
 }
 
+# Usage: _move_worker_evidence_entry <source> <destination>
+#
 # Moves one evidence entry, in either direction: into the worktree when
 # publishing or replaying, and into a fleet-owned backup when rolling back.
 # Refuses the destination shapes `mv` cannot replace safely.  `mv` into an
@@ -1071,7 +1073,10 @@ _record_cleanup_phase() {
       "phase-rollback-$phase"
     return 1
   }
-  actual="$(git hash-object "$temp")" || {
+  # --no-filters because $expected is an unfiltered --stdin hash of the same
+  # bytes: without it, fleet state living inside a repository with a clean or eol
+  # attribute makes the two disagree and this write verification never succeeds.
+  actual="$(git hash-object --no-filters "$temp")" || {
     _rollback_remove_path "$temp" "$phase cleanup-phase validation" \
       "phase-rollback-$phase"
     return 1
