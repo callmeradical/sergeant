@@ -66,15 +66,21 @@ opencode    # or: claude
 ```
 
 `sgt-bootstrap` is safe to rerun. It installs only what is missing and never
-overwrites an existing command, tool, or user file: anything already occupying a
-path Sergeant wants is preserved and reported as a conflict for you to resolve.
-Conflicts are detected before the first package is installed, so a run that
-cannot finish cleanly declines without changing anything. Use
-`./bin/sgt-bootstrap --verify-only` (or `mise run verify`) for a read-only check,
-and `--dry-run` to print the plan; neither mode runs a package manager, an
-installer, or an agent harness. The one third-party command they do run is
-`yq --version`, which only reads a version string to tell Mike Farah's `yq` from
-the unrelated Python package of the same name.
+overwrites anything you own: a real file, a directory, or a symlink pointing at
+something outside a Sergeant checkout is preserved and reported as a conflict for
+you to resolve. What it does reclaim without asking is its own: a symlink already
+pointing into some Sergeant checkout, a broken symlink, or an executable already
+sitting at a name it manages. So installing from a second clone repoints the
+commands at that clone rather than reporting a conflict. Conflicts are detected
+before the first package is installed, so a run that cannot finish cleanly
+declines without changing anything.
+
+Use `./bin/sgt-bootstrap --verify-only` (or `mise run verify`) for a read-only
+check, and `--dry-run` to print the plan. Neither mode runs a package manager, an
+installer, or an agent harness. The only third-party commands they run are
+read-only queries: `yq --version`, to tell Mike Farah's `yq` from the unrelated
+Python package of the same name, and `git config` / `git rev-parse` to locate the
+git hooks directory.
 
 Sergeant itself writes to two places: the command directory (`SGT_INSTALL_DIR`,
 default `~/.local/bin`) and this repository, whose git hooks it installs. It
@@ -249,7 +255,7 @@ Agent-loaded skills for structured workflows:
 ## Requirements
 
 Run `./bin/sgt-bootstrap` to install these, or `./bin/sgt-bootstrap --verify-only`
-to check them. The bootstrap does not install `treehouse` or `dagr`; both are
+to check them. `treehouse` and `dagr` are reported but not installed; both are
 optional and have their own installers. See the complete
 [getting started checklist](docs/getting-started.md) for installation and
 verification.

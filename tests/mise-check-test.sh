@@ -218,8 +218,9 @@ printf 'mise dependency check validates td and agent prerequisites: ok\n'
 printf 'mise check uses correct version flags for tmux (-V) and lsof (-v) on Linux: ok\n'
 
 # `mise run check` and bin/sgt-bootstrap are the repository's two definitions of
-# which tools are required and which are optional. They must agree, or a user can
-# satisfy one and still fail the other.
+# which tools are required and which are optional. Their NAMES must agree, or a
+# user can satisfy one and still fail the other. Capability probes (such as
+# mise's Marcus-td check) are deliberately not compared.
 python3 "$repo_root/tests/support/assert-toolchain-sets.py" \
   "$repo_root/mise.toml" "$repo_root/bin/sgt-bootstrap"
 

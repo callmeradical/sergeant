@@ -63,8 +63,8 @@ the operation with ad hoc shell commands.
 | Script | Purpose |
 |---|---|
 | `bin/sgt-bootstrap [--dry-run\|--verify-only]` | Install or verify the developer toolchain on macOS/Homebrew or apt Linux; read-only modes change nothing |
-| `bin/sgt-install` | Symlink this checkout's commands into `SGT_INSTALL_DIR` (default `~/.local/bin`) and install its git hooks; exits non-zero if anything was preserved instead of installed |
-| `bin/sgt-uninstall` | Remove the command links and git hooks this checkout installed, keeping anything it does not own |
+| `bin/sgt-install [--hooks-only]` | Symlink this checkout's commands into `SGT_INSTALL_DIR` (default `~/.local/bin`) and install its git hooks, removing its own links for commands it no longer ships; exits non-zero if anything was preserved instead of installed |
+| `bin/sgt-uninstall [--hooks-only]` | Remove the command links and git hooks this checkout installed, keeping anything it does not own |
 | `bin/sgt-list` | List all known projects from `~/.config/sergeant/` |
 | `bin/sgt-status <project>` | Git status across every repo in a project |
 | `bin/sgt-sync <project>` | Clone missing repos, pull existing ones |

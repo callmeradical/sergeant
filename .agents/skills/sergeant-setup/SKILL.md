@@ -92,18 +92,32 @@ Do not continue past Phase 1 until all required prerequisites are either present
 or the user explicitly accepts the risk of proceeding without them.
 
 Detect all of the above with the supported command rather than probing each tool
-by hand; it is read-only and runs no package manager, installer, or third-party
-command:
+by hand. It is read-only: it runs no package manager, installer, or agent
+harness, and its only third-party calls are the read-only `yq --version` and
+`git config` / `git rev-parse`:
 
 ```bash
 ./bin/sgt-bootstrap --verify-only     # or: mise run verify
 ```
 
-Treat every `MISSING:` line as a required gap, every `OPTIONAL MISSING:` line as
-optional, and every `MANUAL:` line as a login the user must perform themselves.
-On macOS with Homebrew or Linux with `apt-get`, the supported install for those
-gaps is `./bin/sgt-bootstrap`; classify a prerequisite as `unsupported` only when
-the bootstrap does not cover it (currently `treehouse` and `dagr`).
+Classify each output line by prefix:
+
+| Prefix | Meaning | Action |
+|---|---|---|
+| `OK:` | present | skip |
+| `MISSING:` | required gap | must be resolved before Phase 2 |
+| `OPTIONAL MISSING:` | optional gap | report only |
+| `MANUAL PACKAGES:` | platform packages the bootstrap cannot install here | ask the user to install them with their own package manager |
+| `MANUAL:` | an authentication step | ask the user to perform the login |
+| `WARNING:` | the command directory is not on `PATH` | carry into the Phase 2 `PATH` check |
+
+Do not treat a `MANUAL PACKAGES:` line as a login, and do not attempt any login
+yourself.
+
+On macOS with Homebrew or Linux with `apt-get`, the supported install for a
+`MISSING:` gap is `./bin/sgt-bootstrap`. Classify a prerequisite as `unsupported`
+only when the bootstrap cannot install it: `treehouse` and `dagr` are reported by
+`--verify-only` but installed by their own installers, not by Sergeant.
 
 For each `installable` prerequisite, show the installation command and ask for
 explicit consent before running it:

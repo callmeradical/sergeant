@@ -90,6 +90,23 @@ assert_not_contains() {
   [[ "$output" != *"$unexpected"* ]] || fail "expected output not to contain: $unexpected"
 }
 
+# The read-only modes may only ask git read-only questions.
+assert_read_only_git() {
+  local home_dir="$1" context="$2" invocation
+  [[ -e "$home_dir/git-invocations" ]] || return 0
+  while IFS= read -r invocation; do
+    [[ -n "$invocation" ]] || continue
+    # Strip the leading -C <dir>, which every call carries.
+    invocation="${invocation#-C }"
+    invocation="${invocation#* }"
+    case "$invocation" in
+      'config --local --path --get core.hooksPath'|'config --path --get core.hooksPath'|\
+      'rev-parse --git-common-dir') ;;
+      *) fail "$context invoked git beyond a read-only query: $invocation" ;;
+    esac
+  done < "$home_dir/git-invocations"
+}
+
 assert_no_global_agent_config() {
   local home_dir="$1" context="$2"
   [[ ! -e "$home_dir/.config/opencode" ]] || \
@@ -214,7 +231,7 @@ test_unsupported_platform_blocks_install_only() {
     PATH="$temp_dir/bin" "$BOOTSTRAP" --verify-only 2>&1)"
   status=$?
   set -e
-  assert_contains "$output" 'MANUAL: unsupported platform for automated package installation: FreeBSD'
+  assert_contains "$output" 'MANUAL PACKAGES: unsupported platform for automated package installation: FreeBSD'
   assert_contains "$output" 'OK: git'
 
   # Only the install mode is fatal, and only when packages are actually missing.
@@ -241,7 +258,7 @@ test_missing_package_manager_blocks_install_only() {
     PATH="$temp_dir/bin" "$BOOTSTRAP" --verify-only 2>&1)"
   status=$?
   set -e
-  assert_contains "$output" 'MANUAL: Linux requires an apt-compatible package manager'
+  assert_contains "$output" 'MANUAL PACKAGES: Linux requires an apt-compatible package manager'
   assert_contains "$output" 'OK: python3'
 
   rm -f "$temp_dir/bin/tmux"
@@ -866,6 +883,14 @@ test_install_warns_when_target_is_not_on_path() {
 # executes them fails the assertion instead of passing vacuously.
 stub_writing_harnesses() {
   local bin_dir="$1" home_dir="$2" command_name
+  # git is instrumented too: the read-only modes may ask it where the hooks
+  # directory is, and nothing else.
+  cat > "$bin_dir/git" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$home_dir/git-invocations'
+exec $(host_utility git) "\$@"
+EOF
+  chmod +x "$bin_dir/git"
   # yq is instrumented too: the read-only modes are allowed to read its version
   # string to tell mikefarah yq from the Python package, and nothing more.
   cat > "$bin_dir/yq" <<EOF
@@ -897,11 +922,13 @@ test_dry_run_invokes_no_third_party_command() {
 
   [[ ! -e "$temp_dir/home/harness-invocations" ]] || \
     fail "dry-run executed an agent harness: $(cat "$temp_dir/home/harness-invocations")"
-  # The only permitted third-party invocation is reading yq's version.
+  # The only permitted third-party invocations are reading yq's version and
+  # asking git where the hooks directory is.
   if [[ -e "$temp_dir/home/yq-invocations" ]]; then
     [[ "$(sort -u "$temp_dir/home/yq-invocations")" == '--version' ]] || \
       fail "dry-run invoked yq beyond a version read: $(cat "$temp_dir/home/yq-invocations")"
   fi
+  assert_read_only_git "$temp_dir/home" 'dry-run'
   assert_no_global_agent_config "$temp_dir/home" 'dry-run'
 }
 
@@ -927,6 +954,7 @@ test_verify_only_invokes_no_third_party_command() {
     [[ "$(sort -u "$temp_dir/home/yq-invocations")" == '--version' ]] || \
       fail "verify-only invoked yq beyond a version read: $(cat "$temp_dir/home/yq-invocations")"
   fi
+  assert_read_only_git "$temp_dir/home" 'verify-only'
   [[ ! -e "$temp_dir/home/.claude" ]] || fail 'verify-only wrote to global Claude configuration'
 }
 
