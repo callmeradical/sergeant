@@ -75,8 +75,11 @@ removed=0
 # Replace <target> with a link to <source-file>, atomically. The link is created
 # under a temporary name and renamed into place: `rename` over an existing
 # symlink is atomic, so a concurrent run never observes the target missing and
-# never races an `rm` against an `ln`. Renaming also never follows a symlink that
-# points at a directory, which is how `ln -sf` would write inside it instead.
+# never races an `rm` against an `ln`.
+#
+# What keeps this from writing inside a directory the way `ln -sf` would is the
+# classification above, not `mv` itself: `mv` does follow a symlink that points at
+# a directory, so any such target must already have been classified `conflict`.
 publish_link() {
   local source_file="$1" target="$2" staged
   # Staged inside a pattern this checkout claims (see _sgt_install_managed_globs),

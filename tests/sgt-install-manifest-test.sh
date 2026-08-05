@@ -444,6 +444,24 @@ test_link_to_a_sibling_in_the_command_directory_is_a_conflict() {
   chmod +x "$TEST_ROOT/proj/bin/mytool"
   ln -s mytool "$TEST_ROOT/proj/bin/sgt-list"
   assert_state "$SOURCE" "$TEST_ROOT/proj/bin" conflict
+
+  # Every spelling of the same directory must classify identically: link targets
+  # are resolved physically, so a logical command directory would not match.
+  ln -s "$TEST_ROOT/proj" "$TEST_ROOT/projlink"
+  assert_state "$SOURCE" "$TEST_ROOT/projlink/bin" conflict
+  assert_state "$SOURCE" "$TEST_ROOT/projlink/bin/" conflict
+}
+
+# mv follows a symlink that points at a directory, so such a hook target must be
+# classified as a conflict rather than replaced in place.
+test_hook_link_to_a_directory_is_a_conflict() {
+  local hooks
+  make_checkout "$TEST_ROOT/hkd"
+  mkdir -p "$TEST_ROOT/hkddir" "$TEST_ROOT/hkd/scripts/hooks/pre-push-dir"
+  hooks="$TEST_ROOT/hkddir"
+  ln -s "$TEST_ROOT/hkd/scripts/hooks/pre-push-dir" "$hooks/pre-push"
+  [[ "$(_sgt_install_hook_state "$TEST_ROOT/hkd/scripts/hooks/pre-push" "$hooks")" == conflict ]] || \
+    fail 'a hook link resolving to a directory was not reported as a conflict'
 }
 
 # ── _sgt_command_available ────────────────────────────────────────────────────
@@ -525,6 +543,7 @@ test_relative_link_to_a_users_own_command_is_a_conflict
 test_link_into_a_legacy_sergeant_checkout_is_stale
 test_install_directory_does_not_identify_itself_as_a_checkout
 test_link_to_a_sibling_in_the_command_directory_is_a_conflict
+test_hook_link_to_a_directory_is_a_conflict
 test_hooks_dir_refuses_a_linked_worktree
 test_hooks_dir_resolves_a_clone_whose_git_is_a_symlink
 test_hooks_refusal_advice_matches_the_reason
