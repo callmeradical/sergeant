@@ -242,6 +242,42 @@ _publish_local_response_transport() {
   _atomic_write_file "$worktree/.sergeant-response" "$response_file"
 }
 
+# ── Bounded delivery recovery ─────────────────────────────────────────────────
+# Delivering to a live, identity-verified pane is bounded by
+# SGT_NOTIFICATION_ACK_TIMEOUT.  When that bound elapses the response is stored
+# but unconsumed.  Previously this dead-ended: the error said the response
+# "remains pending" and every retry was refused with "already pending
+# consumption", leaving no supported next action.
+#
+# The timeout now records a generation-bound escalation marker.  Rerunning the
+# same command is the documented recovery path: it skips redelivery to the
+# unresponsive pane and performs exactly one bounded worker relaunch.
+#
+# _delivery_escalation_armed: 0 when an escalation is recorded for this exact
+# response id and gate generation.
+_delivery_escalation_armed() {
+  local marker="$REPO_DIR/response_delivery_unacked"
+  [[ -f "$marker" ]] || return 1
+  [[ "$(sed -n 's/^response_id=//p' "$marker" 2>/dev/null || true)" == "$response_id" ]] || return 1
+  [[ "$(sed -n 's/^gate_generation=//p' "$marker" 2>/dev/null || true)" == "$gate_generation" ]]
+}
+
+_arm_delivery_escalation() {
+  local reason="$1" identity="$2"
+  {
+    printf 'response_id=%s\n' "$response_id"
+    printf 'gate_generation=%s\n' "$gate_generation"
+    printf 'pane=%s\n' "${pane:-}"
+    printf 'pane_identity=%s\n' "$identity"
+    printf 'reason=%s\n' "$reason"
+    printf 'recorded_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  } > "$REPO_DIR/response_delivery_unacked.tmp.$$" &&
+    mv "$REPO_DIR/response_delivery_unacked.tmp.$$" "$REPO_DIR/response_delivery_unacked" || {
+      rm -f "$REPO_DIR/response_delivery_unacked.tmp.$$"
+      return 1
+    }
+}
+
 pending_response_file=""
 gate_generation="$(cat "$worktree/.sergeant-gate-generation" 2>/dev/null || true)"
 if [[ "$status" == "orphaned" && ! "$gate_generation" =~ ^[1-9][0-9]*$ ]]; then
@@ -268,8 +304,15 @@ if [[ -n "$pending_response_file" ]]; then
     # delivery was held by drain admission.  Allow relaunch now that drain may
     # have been lifted; the marker is cleared on successful relaunch below.
     _sgt_drain_held_gen="$(cat "$REPO_DIR/drain_held" 2>/dev/null || true)"
-    if [[ "$_sgt_drain_held_gen" != "$gate_generation" ]]; then
-      _die "A Sergeant response is already pending consumption for $TASK_ID/$REPO"
+    # An unacknowledged-delivery marker for this exact response and gate means a
+    # previous invocation delivered to a live pane that never acknowledged.  This
+    # used to dead-end the operator with "already pending consumption" and no
+    # supported next action.  Rerunning the same command is now the bounded
+    # recovery path: it escalates from delivery to one worker relaunch.
+    if [[ "$_sgt_drain_held_gen" != "$gate_generation" ]] && \
+       ! _delivery_escalation_armed; then
+      _die "$(printf 'A Sergeant response is already pending consumption for %s/%s.\n  response: %s (gate %s)\n  The worker has not consumed it and no delivery escalation is recorded.\n  If the worker is live, let it finish consuming. If it is stuck, run: sgt-recover %s %s' \
+        "$TASK_ID" "$REPO" "$response_id" "$gate_generation" "$TASK_ID" "$REPO")"
     fi
   fi
   if ! cmp -s "$RESPONSE_INPUT" "$pending_response_file"; then
@@ -293,19 +336,33 @@ _pane_is_supervisor() {
   _sgt_pane_identity_matches "$target" "$REPO_DIR"
 }
 
+superseded_live_pane=""
 if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && _pane_is_supervisor "$pane"; then
-  _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$response_id" response \
-    "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
-  _sgt_notification_target_create "$REPO_DIR" "$response_id" \
-    "$(cat "$REPO_DIR/pane_identity")" >/dev/null || \
-    _die "notification target race detected; response not delivered to local pane"
-  _sgt_response_lock_release
-  _sgt_wait_worker_notification "$pane" "$REPO_DIR" "$response_id" || \
-    _die "Worker did not acknowledge its durable response notification; response remains pending"
-  _cleanup_response_input
-  trap - EXIT
-  echo "sgt-respond: notified local pane $pane."
-  exit 0
+  if _delivery_escalation_armed; then
+    # One prior delivery to this live pane went unacknowledged within the bound.
+    # Escalate to the bounded relaunch below instead of redelivering forever.
+    # The pane is killed only after the replacement is fully validated.
+    superseded_live_pane="$pane"
+    echo "sgt-respond: prior delivery to pane $pane was not acknowledged; escalating to one bounded worker relaunch." >&2
+  else
+    _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$response_id" response \
+      "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
+    _sgt_notification_target_create "$REPO_DIR" "$response_id" \
+      "$(cat "$REPO_DIR/pane_identity")" >/dev/null || \
+      _die "notification target race detected; response not delivered to local pane"
+    _sgt_response_lock_release
+    if ! _sgt_wait_worker_notification "$pane" "$REPO_DIR" "$response_id"; then
+      _arm_delivery_escalation "live pane did not acknowledge within SGT_NOTIFICATION_ACK_TIMEOUT" \
+        "$(cat "$REPO_DIR/pane_identity" 2>/dev/null || true)" || true
+      _die "$(printf 'Worker did not acknowledge its durable response notification within the delivery bound; the response is stored and recoverable.\n  response: %s (gate %s)\n  pane: %s\n  Rerun the same command to perform one bounded worker relaunch: sgt-respond %s %s' \
+        "$response_id" "$gate_generation" "$pane" "$TASK_ID" "$REPO")"
+    fi
+    rm -f "$REPO_DIR/response_delivery_unacked"
+    _cleanup_response_input
+    trap - EXIT
+    echo "sgt-respond: notified local pane $pane."
+    exit 0
+  fi
 fi
 
 tmux_session="$(cat "$REPO_DIR/tmux_session" 2>/dev/null || true)"
@@ -439,13 +496,20 @@ else
   _record_relaunch_orphan "tmux failed to capture exact relaunched worker pane identity"
   _die "Worker relaunch identity capture failed for $TASK_ID/$REPO"
 fi
+# Retire the superseded pane only now that the replacement is live, its identity
+# is published, and its notification target exists — the same ordering
+# sgt-recover uses.  A failure before this point leaves the original supervisor
+# untouched.
+if [[ -n "$superseded_live_pane" && "$superseded_live_pane" != "$new_pane" ]]; then
+  tmux kill-pane -t "$superseded_live_pane" 2>/dev/null || true
+fi
 _sgt_response_lock_release
 if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" "$delivery_notification_id"; then
   tmux kill-pane -t "$new_pane" 2>/dev/null || true
   _record_relaunch_orphan "relaunched interactive worker did not acknowledge its durable response notification"
   _die "Worker relaunch notification acknowledgement timed out for $TASK_ID/$REPO"
 fi
-rm -f "$REPO_DIR/drain_held"
+rm -f "$REPO_DIR/drain_held" "$REPO_DIR/response_delivery_unacked"
 _cleanup_response_input
 trap - EXIT
 echo "sgt-respond: relaunched worker in pane $new_pane."

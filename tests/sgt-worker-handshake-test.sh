@@ -233,6 +233,17 @@ EOF
     exit 1
   }
 
+  # ── Readiness owed nothing to the legacy OpenCode banner ─────────────────────
+  # GH #156: readiness was keyed on the literal string "Ask anything...".  The
+  # pane never renders it, yet both the initial notification and the response
+  # notification were received and acknowledged.
+  if tmux capture-pane -p -t "$TMUX_SESSION:$window" 2>/dev/null | \
+     grep -Fq 'Ask anything'; then
+    printf '%s/%s pane rendered the legacy readiness banner; the test premise is void\n' \
+      "$harness" "$turn" >&2
+    exit 1
+  fi
+
   # ── Launch args came from the shared registry ────────────────────────────────
   [[ "$(cat "$arg_log")" == "$(printf '%s|%s' \
       "$(_sgt_harness_launch_args "$harness" | grep -c . || true)" \
