@@ -16,10 +16,13 @@ each repo is read twice and the answers are merged. A repo configured in the
 project but not cloned yet is noted on stderr and does not change the exit
 status — run `sgt-sync <project>` to include it.
 
-Pass at most one `--status` and one `--priority`; a repeated value would widen
-the answer past what the header states, so it is refused. `-a`, `--deferred`,
-`--work-dir` and bundled short clusters such as `-ra` are refused too, because
-each would change which tasks td returns without changing the reported view.
+Pass at most one `--status`, one `--priority` and one `--repos`; a repeated value
+would change the answer without changing the reported view, so it is refused.
+For the same reason sgt-td-list refuses anything that would re-point or widen the
+query behind the header: `-a` and `--all=<bool>`, `--deferred`, `--open=<bool>`,
+`--work-dir`, bundled short clusters such as `-ra`, and bare words, which td
+would read as a query expression — pass those as `--filter '<expr>'`, whose view
+is labelled as caller-governed.
 
 Use resolved project output to identify repository ownership and instructions.
 Do not infer ownership from the current working directory.

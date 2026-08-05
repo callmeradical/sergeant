@@ -147,6 +147,15 @@ repos:
     path: deferheavy
 EOF
 
+cat > "$config/shadowed.yaml" <<EOF
+name: shadowed
+repos:
+  - name: twin
+    path: small
+  - name: twin
+    path: big
+EOF
+
 cat > "$config/notcloned.yaml" <<EOF
 name: notcloned
 repos:
@@ -1724,5 +1733,98 @@ bound="$(sed -n 's/.*more than \([0-9]*\) task(s).*/\1/p' "$err" | head -1)"
   _fail "ceiling_in_deferred_half: the bound must account for every published row"
 }
 printf 'ceiling_in_deferred_half: ok (printed %s, bound %s)\n' "$printed" "$bound"
+
+# ── 41. A bare word would become a td query, so it is refused ─────────────────
+
+# td reads `td list <expr>` as a TDQ filter, so a stray positional silently
+# answers a different question than the header describes.
+for stray in "status=closed" "open" "zzz"; do
+  out="$TEST_ROOT/stray.out"; err="$TEST_ROOT/stray.err"
+  _run "$out" "$err" -- mixed "$stray"
+  _expect_status 1 "positional_refused($stray)" "$err"
+  grep -qF 'unexpected argument' "$err" || {
+    printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+    _fail "positional_refused($stray): a bare word must be refused, not forwarded as a td query"
+  }
+  [[ ! -s "$out" ]] || _fail "positional_refused($stray): no report may be printed"
+done
+printf 'positional_refused: ok\n'
+
+# A value that belongs to a forwarded flag is still accepted.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/fwdval.out"; err="$TEST_ROOT/fwdval.err"
+_run "$out" "$err" -- mixed --sort priority
+_expect_status 0 forwarded_flag_value_accepted "$err"
+grep -qF -- '--sort priority' "$TEST_ROOT/td.log" || {
+  printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
+  _fail "forwarded_flag_value_accepted: a forwarded flag must keep its value"
+}
+printf 'forwarded_flag_value_accepted: ok\n'
+
+# ── 42. The =<bool> spelling of a refused flag is refused too ─────────────────
+
+for spelling in "--all=true" "--all=false" "--deferred=true" "--open=true"; do
+  out="$TEST_ROOT/eqbool.out"; err="$TEST_ROOT/eqbool.err"
+  _run "$out" "$err" -- mixed "$spelling"
+  _expect_status 1 "equals_bool_refused($spelling)" "$err"
+  grep -qi 'not supported\|not needed' "$err" || {
+    printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+    _fail "equals_bool_refused($spelling): the =<bool> spelling must be refused like the bare one"
+  }
+  [[ ! -s "$out" ]] || {
+    printf 'actual stdout:\n%s\n' "$(cat "$out")" >&2
+    _fail "equals_bool_refused($spelling): no report may be printed"
+  }
+done
+printf 'equals_bool_refused: ok\n'
+
+# ── 43. A repeated --repos would drop the repos named first ───────────────────
+
+for pair in "--repos big --repos small" "--repos=big --repos=small" "--repos big --repos=small"; do
+  out="$TEST_ROOT/reporepeat.out"; err="$TEST_ROOT/reporepeat.err"
+  # shellcheck disable=SC2086
+  _run "$out" "$err" -- example $pair
+  _expect_status 1 "repeated_repos_refused($pair)" "$err"
+  grep -qF 'pass --repos once' "$err" || {
+    printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+    _fail "repeated_repos_refused($pair): a second --repos would drop the first list"
+  }
+done
+printf 'repeated_repos_refused: ok\n'
+
+# ── 44. Two configured entries sharing a name lose a checkout ─────────────────
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/shadow.out"; err="$TEST_ROOT/shadow.err"
+_run "$out" "$err" -- shadowed
+_expect_status 2 shadowed_repo_name_warns "$err"
+grep -qF 'configured twice' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "shadowed_repo_name_warns: a shadowed checkout must be named, not silently dropped"
+}
+grep -qF '── twin (7)' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "shadowed_repo_name_warns: the first entry must still be reported"
+}
+grep -qF 'report incomplete' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "shadowed_repo_name_warns: losing a checkout makes the report incomplete"
+}
+printf 'shadowed_repo_name_warns: ok\n'
+
+# A duplicate that resolves to the same path loses nothing, so it stays quiet.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/dupsame.out"; err="$TEST_ROOT/dupsame.err"
+_run "$out" "$err" -- example --repos small,small
+_expect_status 0 same_path_duplicate_stays_complete "$err"
+grep -qi 'more than once' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "same_path_duplicate_stays_complete: the duplicate must still be reported"
+}
+! grep -qF 'configured twice' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "same_path_duplicate_stays_complete: nothing was lost, so nothing may claim otherwise"
+}
+printf 'same_path_duplicate_stays_complete: ok\n'
 
 printf '\nAll sgt-td-list tests passed.\n'

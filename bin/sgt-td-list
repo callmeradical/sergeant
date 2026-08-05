@@ -46,8 +46,10 @@
 #   One status and one priority per invocation: td's -s is a stringArray that
 #   accumulates, and a second value would widen the answer past what the header
 #   claims, so a repeated status or priority is refused instead.  td flags that
-#   would re-point or widen the query — -a, --deferred, -w/--work-dir, and any
-#   bundled short cluster — are refused for the same reason.
+#   would re-point or widen the query — -a, --all=<bool>, --deferred,
+#   --open=<bool>, -w/--work-dir, bundled short clusters, and bare words that td
+#   would read as a query expression — are refused for the same reason.  Pass a
+#   td query as --filter '<expr>', whose view is labelled as caller-governed.
 #
 #   Narrowing uses td's own -s/-p flags.  td applies its closed-and-deferred
 #   exclusion to those but not to `--filter`, so `--filter priority=P2` answers
@@ -96,6 +98,18 @@ EXTRA_FLAGS=()
 
 _need_value() { [[ $# -ge 2 && -n "$2" ]] || _die "$1 requires a value"; }
 
+# The td list flags that consume the argument after them.  Knowing this set is
+# what lets a stray positional be refused: td reads a bare word as a TDQ
+# expression and would answer a different question than the header describes.
+_takes_value() {
+  case "$1" in
+    --filter|-f|--limit|-n|--labels|-l|--search|-q|--type|-t|--id|-i|\
+    --epic|--parent|--sort|--format|--points|--created|--updated|--closed|\
+    --implementer|--reviewer) return 0 ;;
+  esac
+  return 1
+}
+
 # Every spelling td accepts for a status or priority narrowing is claimed here
 # rather than forwarded, because a forwarded copy would land after ours and win
 # while the header still described the view we asked for.
@@ -111,13 +125,22 @@ _set_priority() {
     || _die "pass a priority once: already narrowed to priority=$PRIORITY_FILTER"
   PRIORITY_FILTER="$1"
 }
+_set_repos() {
+  [[ -n "$1" ]] || _die "--repos requires a value"
+  [[ -z "$REPOS_ARG" ]] \
+    || _die "pass --repos once: already limited to $REPOS_ARG"
+  REPOS_ARG="$1"
+}
 
+pending_value=false
 while [[ $# -gt 0 ]]; do
+  was_pending=$pending_value
+  pending_value=false
   case "$1" in
     --all)           TD_ALL=true;            shift   ;;
     --json)          JSON_OUT=true;          shift   ;;
-    --repos)         _need_value "$@"; REPOS_ARG="$2";       shift 2 ;;
-    --repos=*)       REPOS_ARG="${1#--repos=}"; [[ -n "$REPOS_ARG" ]] || _die "--repos requires a value"; shift ;;
+    --repos)         _need_value "$@"; _set_repos "$2";      shift 2 ;;
+    --repos=*)       _set_repos "${1#--repos=}";             shift   ;;
     --status|-s)     _need_value "$@"; _set_status "$2";     shift 2 ;;
     --status=*)      _set_status "${1#--status=}";           shift   ;;
     -s=*)            _set_status "${1#-s=}";                 shift   ;;
@@ -127,11 +150,15 @@ while [[ $# -gt 0 ]]; do
     -p=*)            _set_priority "${1#-p=}";               shift   ;;
     -p?*)            _set_priority "${1#-p}";                shift   ;;
     -o|--open)       _set_status open;                       shift   ;;
-    -a)
-      # td's -a widens to closed and deferred, which no view here claims.
-      _die "-a is not supported: the default already includes deferred tasks; use --status closed for closed ones"
+    --open=*)
+      _die "--open=<bool> is not supported: pass --status open"
       ;;
-    --deferred)
+    -a|--all=*)
+      # td's -a widens to closed and deferred, which no view here claims, and
+      # --all=<bool> would reach td as that flag rather than as our alias.
+      _die "including closed tasks this way is not supported: the default already covers every non-closed task; use --status closed for closed ones"
+      ;;
+    --deferred|--deferred=*)
       _die "--deferred is not needed: the default view already includes deferred tasks"
       ;;
     -w|--work-dir|-w=*|--work-dir=*|-w?*)
@@ -146,7 +173,19 @@ while [[ $# -gt 0 ]]; do
       # accounting.  Refuse the bundle rather than reimplement cobra's parser.
       _die "bundled short flags are not supported: pass ${1} as separate flags"
       ;;
-    *)               EXTRA_FLAGS+=("$1");    shift   ;;
+    -*)
+      EXTRA_FLAGS+=("$1")
+      _takes_value "$1" && pending_value=true
+      shift
+      ;;
+    *)
+      if $was_pending; then
+        EXTRA_FLAGS+=("$1")
+        shift
+      else
+        _die "unexpected argument: $1 (pass a td query with --filter '<expr>')"
+      fi
+      ;;
   esac
 done
 
@@ -179,26 +218,17 @@ CALLER_SELECTION=false
 skip_value=false
 if [[ "${#EXTRA_FLAGS[@]}" -gt 0 ]]; then
   for ((i=0; i<${#EXTRA_FLAGS[@]}; i++)); do
-    # A flag's own value is not a flag: `--limit -1` must not read as a narrowing.
     if $skip_value; then
       skip_value=false
       continue
     fi
     case "${EXTRA_FLAGS[$i]}" in
-      --filter|-f)
-        CALLER_FILTER=true
-        skip_value=true
-        ;;
-      --filter=*|-f?*)                       CALLER_FILTER=true ;;
-      --limit|-n)                            skip_value=true ;;  # the cap logic owns it
-      --limit=*|-n=*|-n[0-9]*)               : ;;
-      --search|-q|--type|-t|--id|-i|--labels|-l|--epic|--parent|--sort|--format|\
-      --points|--created|--updated|--closed|--implementer|--reviewer)
-        CALLER_SELECTION=true
-        skip_value=true
-        ;;
+      --filter|-f|--filter=*|-f?*)           CALLER_FILTER=true ;;
+      --limit|-n|--limit=*|-n=*|-n[0-9]*)     : ;;  # the cap logic owns it
       -*)                                    CALLER_SELECTION=true ;;
     esac
+    # A flag's own value is not a flag: `--limit -1` must not read as a narrowing.
+    _takes_value "${EXTRA_FLAGS[$i]}" && skip_value=true
   done
 fi
 INCLUDE_DEFERRED=true
@@ -659,6 +689,26 @@ for rname in "${TARGET_REPOS[@]+"${TARGET_REPOS[@]}"}"; do
   SEEN_REPOS+=("$rname")
   DEDUPED_REPOS+=("$rname")
 done
+
+# Two configured entries may share a name while pointing at different checkouts.
+# Only the first is reachable by name, so the second's tasks can never be
+# reported: that is a lost repo, not a harmless duplicate.
+if [[ -s "$REPO_MAP" ]]; then
+  _seen_names="$WORK/seen-names"
+  : > "$_seen_names"
+  while IFS= read -r -d '' _map_name && IFS= read -r -d '' _map_path; do
+    [[ -n "$_map_name" ]] || continue
+    if grep -qxF -- "$_map_name" "$_seen_names" 2>/dev/null; then
+      _first_path="$(_repo_path_for "$_map_name" || true)"
+      if [[ "$_first_path" != "$(_resolve_path "$_map_path")" ]]; then
+        _unreadable_warn "$_map_name" \
+          "configured twice in $PROJECT.yaml with different paths, so $(_resolve_path "$_map_path") was never read"
+      fi
+      continue
+    fi
+    printf '%s\n' "$_map_name" >> "$_seen_names"
+  done < "$REPO_MAP"
+fi
 TARGET_REPOS=("${DEDUPED_REPOS[@]+"${DEDUPED_REPOS[@]}"}")
 
 # An empty list must not trip `set -u` on Bash 3.2, and must not masquerade as
