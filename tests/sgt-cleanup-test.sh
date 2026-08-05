@@ -5521,4 +5521,79 @@ set -e
 }
 printf 'sgt-cleanup ledger-attrs: identity ignores gitattributes filters ok\n'
 
+# The ledger cases above are all terminal 'done' workers.  The other status that
+# reaches the remover is an orphaned worker whose td card is closed (GH #95), and
+# real orphaned worktrees carry the same ledger directories, so assert that
+# combination too rather than inferring it from the done path.
+ledger_orphan_task=ledger-orphan-closed-td
+seed_ledger_task "$ledger_orphan_task" app
+ledger_orphan_state="$TEST_ROOT/fleet/$ledger_orphan_task/app"
+printf 'orphaned\n' > "$ledger_orphan_state/status"
+rm -f "$ledger_orphan_state/result"
+printf 'td-ledger-orphan-fake\n' > "$ledger_orphan_state/td_task"
+# The worker's last write is a nonterminal status: the supervisor marked the fleet
+# record orphaned externally, which is the realistic shape.
+printf 'in_progress\n' > "$TEST_ROOT/$ledger_orphan_task-worktree/.sergeant-status"
+rm -f "$TEST_ROOT/$ledger_orphan_task-worktree/.sergeant-result"
+ledger_orphan_before="$(ledger_evidence_snapshot \
+  "$TEST_ROOT/$ledger_orphan_task-worktree")"
+cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "show" && "$2" == "--format" && "$3" == "json" ]]; then
+  printf '{"status":"%s","id":"%s"}\n' "${TD_FAKE_STATUS:-closed}" "$4"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$TEST_ROOT/fake-bin/td"
+set +e
+ledger_orphan_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" TD_FAKE_STATUS=closed \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" "$ledger_orphan_task" 2>&1)"
+ledger_orphan_status=$?
+set -e
+[[ "$ledger_orphan_status" -eq 0 ]] || {
+  printf 'FAIL %s: orphaned worker with a closed td card and ledger directories was rejected: %s\n' \
+    "$ledger_orphan_task" "$ledger_orphan_output" >&2
+  exit 1
+}
+[[ ! -e "$TEST_ROOT/$ledger_orphan_task-worktree" && \
+  ! -e "$TEST_ROOT/fleet/$ledger_orphan_task" ]] || {
+  printf 'FAIL %s: cleanup left state behind\n' "$ledger_orphan_task" >&2
+  exit 1
+}
+# An open td card must still block it, with the ledger directories untouched.
+seed_ledger_task "$ledger_orphan_task" app
+printf 'orphaned\n' > "$ledger_orphan_state/status"
+rm -f "$ledger_orphan_state/result"
+printf 'td-ledger-orphan-fake\n' > "$ledger_orphan_state/td_task"
+printf 'in_progress\n' > "$TEST_ROOT/$ledger_orphan_task-worktree/.sergeant-status"
+rm -f "$TEST_ROOT/$ledger_orphan_task-worktree/.sergeant-result"
+set +e
+ledger_orphan_open_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" TD_FAKE_STATUS=open \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" "$ledger_orphan_task" 2>&1)"
+ledger_orphan_open_status=$?
+set -e
+rm -f "$TEST_ROOT/fake-bin/td"
+[[ "$ledger_orphan_open_status" -ne 0 && \
+  "$ledger_orphan_open_output" == *"app is not terminal: orphaned"* ]] || {
+  printf 'FAIL %s: cleanup accepted an orphaned worker whose td card is open: %s\n' \
+    "$ledger_orphan_task" "$ledger_orphan_open_output" >&2
+  exit 1
+}
+[[ -d "$TEST_ROOT/$ledger_orphan_task-worktree" ]] || {
+  printf 'FAIL %s: rejection removed the worktree\n' "$ledger_orphan_task" >&2
+  exit 1
+}
+[[ "$(ledger_evidence_snapshot "$TEST_ROOT/$ledger_orphan_task-worktree")" == \
+  "$ledger_orphan_before" ]] || {
+  printf 'FAIL %s: rejection mutated the ledger directories\n' "$ledger_orphan_task" >&2
+  exit 1
+}
+rm -rf "$TEST_ROOT/fleet/$ledger_orphan_task"
+printf 'sgt-cleanup ledger-orphan: orphaned worker with a closed td card cleans ok\n'
+
 printf 'sgt-cleanup: all tests passed\n'
