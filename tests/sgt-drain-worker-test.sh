@@ -43,6 +43,14 @@ mk_env() {
   local state="$root/state"
   local task_dir="$root/task"
   mkdir -p "$worktree" "$state" "$task_dir"
+  # A real git worktree: sgt-td-memory verifies the worktree it is handed and
+  # refuses to attach handoff evidence to an unverified path (GH #173).
+  git -C "$worktree" init -q -b main .
+  git -C "$worktree" config user.name Test
+  git -C "$worktree" config user.email test@example.invalid
+  printf 'fixture\n' > "$worktree/fixture.txt"
+  git -C "$worktree" add fixture.txt
+  git -C "$worktree" commit -qm 'drain fixture'
   printf 'Project: %s\nBrief: test\n' "$project" > "$task_dir/brief.md"
   printf 'td-drain-test\n' > "$state/td_task"
   # Symlink state inside task dir so dirname(state) = task_dir

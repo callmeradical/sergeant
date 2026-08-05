@@ -29,15 +29,54 @@ source "$SCRIPT_DIR/_sgt-response-lock.sh"
   exit 2
 }
 harness="$(basename "$AGENT")"
-case "$harness" in
-  opencode|oc|goose|claude) ;;
-  *)
-    echo "ERROR: unsupported interactive agent: $AGENT" >&2
-    exit 2
-    ;;
-esac
+if ! _sgt_harness_launch_contract "$harness" >/dev/null; then
+  echo "ERROR: unsupported interactive agent: $AGENT" >&2
+  exit 2
+fi
 
 mkdir -p "$REPO_STATE"
+
+# ── Pinned model tuple ────────────────────────────────────────────────────────
+# The tuple lives in durable fleet state, so a worker resumed by sgt-respond,
+# sgt-recover, or sgt-wake runs the same pinned model as the original dispatch.
+# A tuple this harness cannot honor is a terminal failure: dropping the pin and
+# inheriting the ambient default is exactly the defect this contract prevents.
+
+AGENT_MODEL="$(cat "$REPO_STATE/agent_model" 2>/dev/null || true)"
+AGENT_MODEL_SOURCE="$(cat "$REPO_STATE/agent_model_source" 2>/dev/null || true)"
+[[ -n "$AGENT_MODEL" ]] || AGENT_MODEL="unpinned"
+[[ -n "$AGENT_MODEL_SOURCE" ]] || AGENT_MODEL_SOURCE="unpinned"
+if ! _sgt_resolve_agent_launch "$harness" "$AGENT_MODEL"; then
+  _reject_reason="$(_sgt_agent_launch_reject_message "$harness" "$AGENT_MODEL")"
+  printf '%s\n' "$_reject_reason" > "$REPO_STATE/diagnostic"
+  printf 'failed: cannot honor pinned model tuple %s\n' "$AGENT_MODEL" \
+    > "$REPO_STATE/status"
+  printf 'failed: cannot honor pinned model tuple %s\n' "$AGENT_MODEL" \
+    > "$WORKTREE/.sergeant-status"
+  echo "ERROR: $_reject_reason" >&2
+  exit 2
+fi
+
+# Record what this worker is about to run.  Every field is derived from the
+# validated tuple and the shared harness contract, never from the ambient
+# environment, so the evidence cannot carry a credential.
+_write_launch_record() {
+  local tmp="$REPO_STATE/launch_record.tmp.$$"
+  {
+    printf 'harness=%s\n' "$harness"
+    printf 'agent=%s\n' "$AGENT"
+    printf 'model=%s\n' "$AGENT_MODEL"
+    printf 'model_source=%s\n' "$AGENT_MODEL_SOURCE"
+    printf 'provider=%s\n' "$SGT_AGENT_MODEL_PROVIDER"
+    printf 'model_id=%s\n' "$SGT_AGENT_MODEL_ID"
+    printf 'variant=%s\n' "$SGT_AGENT_MODEL_VARIANT"
+    printf 'model_transport=%s\n' "$SGT_LAUNCH_MODEL_TRANSPORT"
+    printf 'model_argv=%s\n' \
+      "${SGT_LAUNCH_MODEL_ARGV[*]+${SGT_LAUNCH_MODEL_ARGV[*]}}"
+    printf 'model_env=%s\n' \
+      "${SGT_LAUNCH_MODEL_ENV[*]+${SGT_LAUNCH_MODEL_ENV[*]}}"
+  } > "$tmp" && mv "$tmp" "$REPO_STATE/launch_record"
+}
 
 # ── Cooperative drain ─────────────────────────────────────────────────────────
 # Discover the project name from the fleet task brief.md (parent of REPO_STATE).
@@ -402,8 +441,21 @@ _watch_progress &
 watch_progress_pid=$!
 _watch_drain &
 watch_drain_pid=$!
+
+# Base harness invocation, then the shared model/variant words appended from the
+# one harness contract.  Nothing here knows which flag belongs to which harness.
 case "$harness" in
-  goose) "$AGENT" session ;;
-  opencode|oc) "$AGENT" --dangerously-skip-permissions ;;
-  *) "$AGENT" ;;
+  goose)       set -- session ;;
+  opencode|oc) set -- --dangerously-skip-permissions ;;
+  *)           set -- ;;
 esac
+if [[ "${#SGT_LAUNCH_MODEL_ARGV[@]}" -gt 0 ]]; then
+  set -- "$@" "${SGT_LAUNCH_MODEL_ARGV[@]}"
+fi
+if [[ "${#SGT_LAUNCH_MODEL_ENV[@]}" -gt 0 ]]; then
+  for _launch_pair in "${SGT_LAUNCH_MODEL_ENV[@]}"; do
+    export "${_launch_pair?launch environment pair missing}"
+  done
+fi
+_write_launch_record
+"$AGENT" "$@"

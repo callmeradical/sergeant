@@ -36,6 +36,170 @@ _sgt_detect_agent() {
 # shellcheck disable=SC2034  # Shared default consumed by sourced scripts.
 AGENT_CMD="${SERGEANT_AGENT:-$(_sgt_detect_agent)}"
 
+# ── Interactive harness launch contract ──────────────────────────────────────
+# One shared definition drives three things: the capability gate
+# (_require_interactive_agent), pinned-tuple validation
+# (_sgt_require_agent_model), and launch argument/environment construction
+# (_sgt_resolve_agent_launch).  Adding a harness means adding exactly one line
+# here.
+#
+# A contract is three space-separated fields:
+#
+#   1. model_transport — how a pinned provider/model reaches the harness.
+#        argv-qualified  argv "--model <provider>/<model>".  OpenCode's own
+#                        help states: "-m, --model  model to use in the format
+#                        of provider/model".
+#        argv-bare       argv "--model <model>".  Claude Code selects a model
+#                        by name; the provider is carried by its credentials.
+#        env-goose       env GOOSE_PROVIDER + GOOSE_MODEL.  "goose session"
+#                        exposes no model or provider flag, so the environment
+#                        is its only launch-time selector.
+#
+#   2. variant_transport — how a pinned variant reaches the harness.
+#        none            the harness has no launch-time variant selector, so a
+#                        pinned variant fails closed rather than silently
+#                        inheriting the ambient default.  OpenCode, for
+#                        example, exposes "variant" only under AgentConfig in
+#                        its published config schema, never on the CLI.
+#
+#   3. provider_scope — which providers the harness can actually be pinned to.
+#        any             the provider travels to the harness explicitly, so any
+#                        provider is honorable and the recorded provider is
+#                        verifiable from the launch invocation.
+#        <name>          an argv-bare harness never receives a provider, so only
+#                        the single provider its bare model namespace addresses
+#                        can be recorded truthfully; every other provider fails
+#                        closed rather than recording an unverifiable pin.
+_sgt_harness_launch_contract() {
+  case "$1" in
+    opencode|oc) printf 'argv-qualified none any\n' ;;
+    claude)      printf 'argv-bare none anthropic\n' ;;
+    goose)       printf 'env-goose none any\n' ;;
+    *)           return 1 ;;
+  esac
+}
+
+# Canonical pinned tuple: provider/model[:variant].  The charsets are
+# deliberately narrow so a recorded tuple can never carry a shell
+# metacharacter, whitespace, or a credential into durable launch evidence.
+# The pattern is held in a variable because Bash 3.2 rejects an inline
+# alternation or group on the right-hand side of [[ =~ ]].
+_SGT_AGENT_MODEL_RE='^([a-z0-9][a-z0-9-]*)/([A-Za-z0-9][A-Za-z0-9._-]*)(:([A-Za-z0-9][A-Za-z0-9._-]*))?$'
+
+# _sgt_parse_agent_model <tuple>
+# Returns 1 for a malformed tuple.  On success sets SGT_AGENT_MODEL_PROVIDER,
+# SGT_AGENT_MODEL_ID, and SGT_AGENT_MODEL_VARIANT (empty when unpinned).
+_sgt_parse_agent_model() {
+  SGT_AGENT_MODEL_PROVIDER=""
+  SGT_AGENT_MODEL_ID=""
+  SGT_AGENT_MODEL_VARIANT=""
+  [[ "$1" =~ $_SGT_AGENT_MODEL_RE ]] || return 1
+  SGT_AGENT_MODEL_PROVIDER="${BASH_REMATCH[1]}"
+  SGT_AGENT_MODEL_ID="${BASH_REMATCH[2]}"
+  SGT_AGENT_MODEL_VARIANT="${BASH_REMATCH[4]}"
+}
+
+# _sgt_resolve_agent_launch <harness> <tuple>
+# Resolves how a pinned tuple reaches a harness at launch.  Returns 1 without
+# printing anything when the harness cannot honor the tuple, so the coordinator
+# and the worker fail closed from the same decision and render the same
+# diagnostic through _sgt_agent_launch_reject_message.
+#
+# An empty tuple or the literal "unpinned" means "inherit the ambient harness
+# default"; it is honorable and is recorded as such rather than left blank.
+#
+# On success sets, alongside the _sgt_parse_agent_model fields:
+#   SGT_LAUNCH_MODEL_TRANSPORT  the contract's model transport, or "none"
+#   SGT_LAUNCH_MODEL_ARGV       array of extra argv words (may be empty)
+#   SGT_LAUNCH_MODEL_ENV        array of NAME=VALUE pairs (may be empty)
+# On failure sets SGT_LAUNCH_REJECT to the reason.
+_sgt_resolve_agent_launch() {
+  local harness="$1" tuple="$2" contract
+  local model_transport variant_transport provider_scope
+  SGT_LAUNCH_MODEL_TRANSPORT="none"
+  SGT_LAUNCH_MODEL_ARGV=()
+  SGT_LAUNCH_MODEL_ENV=()
+  SGT_LAUNCH_REJECT=""
+  SGT_AGENT_MODEL_PROVIDER=""
+  SGT_AGENT_MODEL_ID=""
+  SGT_AGENT_MODEL_VARIANT=""
+
+  if ! contract="$(_sgt_harness_launch_contract "$harness")"; then
+    SGT_LAUNCH_REJECT="unsupported-harness"
+    return 1
+  fi
+  [[ -n "$tuple" && "$tuple" != "unpinned" ]] || return 0
+  read -r model_transport variant_transport provider_scope <<< "$contract"
+
+  if ! _sgt_parse_agent_model "$tuple"; then
+    SGT_LAUNCH_REJECT="malformed-tuple"
+    return 1
+  fi
+  if [[ -n "$SGT_AGENT_MODEL_VARIANT" && "$variant_transport" == "none" ]]; then
+    SGT_LAUNCH_REJECT="variant-unsupported"
+    return 1
+  fi
+  if [[ "$provider_scope" != "any" && "$SGT_AGENT_MODEL_PROVIDER" != "$provider_scope" ]]; then
+    SGT_LAUNCH_REJECT="provider-out-of-scope"
+    return 1
+  fi
+
+  # shellcheck disable=SC2034  # Resolved launch plan consumed by sourced scripts.
+  SGT_LAUNCH_MODEL_TRANSPORT="$model_transport"
+  case "$model_transport" in
+    argv-qualified)
+      # shellcheck disable=SC2034  # Consumed by sgt-interactive-worker.
+      SGT_LAUNCH_MODEL_ARGV=(--model "$SGT_AGENT_MODEL_PROVIDER/$SGT_AGENT_MODEL_ID")
+      ;;
+    argv-bare)
+      # shellcheck disable=SC2034  # Consumed by sgt-interactive-worker.
+      SGT_LAUNCH_MODEL_ARGV=(--model "$SGT_AGENT_MODEL_ID")
+      ;;
+    env-goose)
+      # shellcheck disable=SC2034  # Consumed by sgt-interactive-worker.
+      SGT_LAUNCH_MODEL_ENV=("GOOSE_PROVIDER=$SGT_AGENT_MODEL_PROVIDER" \
+        "GOOSE_MODEL=$SGT_AGENT_MODEL_ID")
+      ;;
+  esac
+}
+
+# _sgt_agent_launch_reject_message <harness> <tuple>
+# Renders the diagnostic for the most recent _sgt_resolve_agent_launch failure.
+# Both the coordinator (which dies) and the worker (which records a fleet
+# diagnostic) use this, so an operator sees one wording for one cause.
+_sgt_agent_launch_reject_message() {
+  local harness="$1" tuple="$2" scope
+  case "$SGT_LAUNCH_REJECT" in
+    unsupported-harness)
+      printf 'unsupported interactive agent: %s (expected opencode, goose, or claude)\n' \
+        "$harness"
+      ;;
+    variant-unsupported)
+      printf '%s cannot pin a model variant at launch: drop :%s from %s, or configure the variant in the harness itself\n' \
+        "$harness" "$SGT_AGENT_MODEL_VARIANT" "$tuple"
+      ;;
+    provider-out-of-scope)
+      scope="$(_sgt_harness_launch_contract "$harness")"
+      printf '%s can only be pinned to provider %s, not %s: %s\n' \
+        "$harness" "${scope##* }" "$SGT_AGENT_MODEL_PROVIDER" "$tuple"
+      ;;
+    *)
+      printf 'model must be provider/model or provider/model:variant, with a [a-z0-9-] provider and [A-Za-z0-9._-] model: %s\n' \
+        "$tuple"
+      ;;
+  esac
+}
+
+# _sgt_require_agent_model <harness> <tuple>
+# Dies with an actionable diagnostic when a harness cannot honor a pinned
+# tuple.  Callers must invoke this before creating any intent file, td task,
+# worktree, or fleet state.
+_sgt_require_agent_model() {
+  local harness="$1" tuple="$2"
+  _sgt_resolve_agent_launch "$harness" "$tuple" || \
+    _die "$(_sgt_agent_launch_reject_message "$harness" "$tuple")"
+}
+
 # ── Global config (dev_root) ──────────────────────────────────────────────────
 
 DEV_ROOT="$HOME/Dev"  # sensible default
@@ -132,10 +296,8 @@ _require_git() {
 _require_interactive_agent() {
   local agent_name
   agent_name="$(basename "$AGENT_CMD")"
-  case "$agent_name" in
-    opencode|oc|goose|claude) ;;
-    *) _die "unsupported interactive agent: $AGENT_CMD (expected opencode, goose, or claude)" ;;
-  esac
+  _sgt_harness_launch_contract "$agent_name" >/dev/null || \
+    _die "unsupported interactive agent: $AGENT_CMD (expected opencode, goose, or claude)"
   command -v "$AGENT_CMD" &>/dev/null || _die "interactive agent not found: $AGENT_CMD"
   if [[ "$agent_name" == "goose" ]] && ! "$AGENT_CMD" session --help >/dev/null 2>&1; then
     _die "Goose does not support interactive sessions: expected 'goose session --help' to succeed"
@@ -145,6 +307,58 @@ _sgt_pane_identity() {
   local pane="$1"
   tmux display-message -p -t "$pane" \
     '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' 2>/dev/null
+}
+
+# A tmux pane id is always "%" followed by digits.  Held in a variable because
+# Bash 3.2 mishandles some inline right-hand-side patterns in [[ =~ ]].
+_SGT_TMUX_PANE_ID_RE='^%[0-9]+$'
+_sgt_is_tmux_pane_id() {
+  [[ "$1" =~ $_SGT_TMUX_PANE_ID_RE ]]
+}
+
+# _sgt_verify_pane_identity <pane-id>
+# Prints the pane's exact identity only when the live tmux server confirms that
+# the pane exists, is not dead, and reports back the very pane id that was
+# asked for.  Returns 1 otherwise, so an absent, stale, or forged identity fails
+# closed instead of being adopted.
+_sgt_verify_pane_identity() {
+  local pane="$1" identity
+  identity="$(_sgt_pane_identity "$pane" || true)"
+  [[ -n "$identity" && "${identity%%|*}" == "0" && \
+     "${identity#*|}" == "$pane|"* ]] || return 1
+  printf '%s\n' "$identity"
+}
+
+# Sergeant keeps at most one managed coordinator pane per tmux session, so an
+# API-driven coordinator that dispatches repeatedly does not accumulate panes.
+# shellcheck disable=SC2034  # Shared default consumed by sourced scripts.
+SGT_MANAGED_COORDINATOR_WINDOW="sgt-coordinator"
+# The managed coordinator pane runs a reader that echoes every line it receives
+# and never executes it.  A tmux-injected notification therefore stays readable
+# evidence for whoever attaches, and can never become a shell command in the
+# coordinator's own pane.  Single-quoted so the loop body reaches tmux verbatim.
+# shellcheck disable=SC2016  # Deliberately unexpanded: this string is sh source for tmux.
+SGT_MANAGED_COORDINATOR_COMMAND='while IFS= read -r sgt_line; do printf "%s\n" "$sgt_line"; done; exec sleep 2147483647'
+
+# _sgt_managed_coordinator_pane <session> <window>
+# Prints the pane id of the session's single managed coordinator pane, selecting
+# it when the window already exists and creating it when it does not.  Returns 1
+# when no pane can be obtained, including when an existing managed window holds
+# a pane that no longer verifies; nothing here kills or replaces a window the
+# caller did not create, so a stale window is reported rather than destroyed.
+# The caller verifies the returned pane id, exactly as it verifies the ambient
+# and explicit paths.
+_sgt_managed_coordinator_pane() {
+  local session="$1" window="$2" pane
+  pane="$(tmux list-panes -t "$session:$window" -F '#{pane_id}' 2>/dev/null | \
+    head -1 || true)"
+  if [[ -z "$pane" ]]; then
+    tmux new-session -d -s "$session" -n sergeant 2>/dev/null || true
+    pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$session:" -n "$window" \
+      "$SGT_MANAGED_COORDINATOR_COMMAND" 2>/dev/null || true)"
+  fi
+  [[ -n "$pane" ]] || return 1
+  printf '%s\n' "$pane"
 }
 _sgt_path_mode() {
   stat -c '%a' -- "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null

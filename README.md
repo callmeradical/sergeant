@@ -141,6 +141,73 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
 | `bin/sgt-callback <command>` | Operate durable profile-bound callback events |
 
+### Pinning the worker's model
+
+`sgt-dispatch --agent` (or `SERGEANT_AGENT`) chooses the harness *executable*.
+`sgt-dispatch --model` (or `SERGEANT_MODEL`) pins what that harness *runs*. The
+two are orthogonal, and precedence is explicit:
+
+```
+--model  >  SERGEANT_MODEL  >  the harness's own ambient default
+```
+
+The tuple is written `provider/model` with an optional `:variant`. Providers use
+`[a-z0-9-]` and models use `[A-Za-z0-9._-]`; a tuple outside that charset is
+rejected, which is also why recorded launch evidence can never carry a secret.
+
+```bash
+sgt-dispatch smith "Add OAuth" --repos smith --model anthropic/claude-opus-5
+SERGEANT_MODEL=openai/gpt-5.2 sgt-dispatch smith --td td-a3cf60
+```
+
+Each harness reaches its model through a different documented interface, and
+Sergeant validates against that interface before creating any state:
+
+| Harness | How the model is pinned | Providers it can be pinned to |
+|---|---|---|
+| `opencode`, `oc` | argv `--model <provider>/<model>` | any |
+| `claude` | argv `--model <model>` | `anthropic` only — Claude Code never receives a provider at launch, so any other provider would be an unverifiable record |
+| `goose` | env `GOOSE_PROVIDER` + `GOOSE_MODEL` — `goose session` has no model flag | any |
+
+No supported harness has a launch-time *variant* selector, so pinning a
+`:variant` fails closed with an actionable diagnostic instead of silently
+inheriting the ambient default. Configure a variant inside the harness itself.
+
+Dispatch records the resolved tuple in `agent_model` and its origin in
+`agent_model_source`. The worker records what it actually launched in
+`launch_record` (harness, model, provider, transport, and the exact model argv
+and environment it used), so the model a worker ran is provable afterwards. A
+resumed or recovered worker reads the same fleet record, so it inherits the same
+pin. A worker handed a tuple its harness cannot honor fails terminally rather
+than falling back to the ambient default.
+
+### Dispatching without an interactive coordinator pane
+
+By default `sgt-dispatch` binds the tmux pane it was invoked from. An API-driven
+coordinator that is not inside a pane has two options, both of which still
+require a persistent interactive worker and still fail before any intent file,
+td task, worktree, or fleet state is created:
+
+```bash
+# Create or select Sergeant's single managed coordinator pane.
+sgt-dispatch smith "Add OAuth" --repos smith --managed-coordinator-pane
+
+# Bind a pane the caller already prepared.
+sgt-dispatch smith "Add OAuth" --repos smith --coordinator-pane '%7'
+```
+
+The two options cannot be combined. Every path — ambient, explicit, and managed
+— goes through one verification: the live tmux server must confirm the pane
+exists, is not dead, and reports back the same pane id, so an absent, stale, or
+forged identity is refused rather than adopted.
+
+`--managed-coordinator-pane` deliberately does **not** start a tmux server; a
+coordinator must already be able to reach a live one, so a headless environment
+fails loudly instead of acquiring a pane nobody can observe. The managed pane is
+reused across dispatches and runs a reader that displays each line it receives
+and never executes it, so a tmux-injected notification can never become a shell
+command in the coordinator's pane.
+
 ### No-mistakes
 
 **Use no-mistakes as a final shipping gate, not an implementation loop.** Implementation, focused repository-native tests, lint, and independent review must be complete before starting it. A clean run takes several minutes; invoking it during development or repeatedly restarting it multiplies that cost.
