@@ -19,6 +19,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 TMUX_SESSION="sgt-worker-handshake-test-$$"
+# Run against a private tmux server.  Sharing the developer's server makes these
+# tests contend with every other pane on it — including ones leaked by other
+# suites — which turns pane operations slow enough to blow the per-test budget,
+# and it leaks panes back the other way.  Child `tmux` calls inside the worker
+# follow $TMUX, so they reach this same private server.
+export TMUX_TMPDIR="$TEST_ROOT/tmux"
+mkdir -p "$TMUX_TMPDIR"
+
 trap 'tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true; rm -rf "$TEST_ROOT"' EXIT
 
 command -v tmux >/dev/null 2>&1 || {
