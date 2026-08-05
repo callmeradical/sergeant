@@ -109,6 +109,16 @@ _dispatch() {
     "$ROOT_DIR/bin/sgt-dispatch" test "$brief" --repos app "$@"
 }
 
+# _dispatch_output <log-name> <brief> [args...]
+# Runs a dispatch expected to fail and prints its combined output.
+_dispatch_output() {
+  local log_name="$1" brief="$2"
+  shift 2
+  set +e
+  _dispatch "$log_name" "$brief" "$@" 2>&1
+  set -e
+}
+
 # _reject <log-name> <brief> <expected-stderr-substring> [extra args...]
 # Asserts sgt-dispatch fails, says why, and mutates nothing.
 _reject() {
@@ -201,27 +211,53 @@ _reject shell-metachar 'Shell metachar' \
 _reject empty-value 'Empty value' \
   '--model requires provider/model' --model ''
 
-# ── 6. A variant no harness can pin at launch fails closed ───────────────────
-# No supported harness exposes a launch-time variant selector, so a pinned
-# variant must abort rather than silently inherit the ambient default.
+# ── 6. A variant is pinned where the harness supports it ─────────────────────
+# opencode has no --variant flag, but it accepts "--agent <name>" at launch and
+# its agent definitions carry a first-class variant field, so a pinned variant is
+# reachable.  Measured, not assumed: see the launch-side assertions in
+# tests/sgt-worker-model-tuple-test.sh.
 
-_reject opencode-variant 'Opencode variant' \
-  'cannot pin a model variant at launch' --model anthropic/claude-opus-5:high
+_dispatch opencode-variant 'Opencode variant' \
+  --model anthropic/claude-opus-5:high >/dev/null
+state="$(printf '%s\n' "$TEST_ROOT"/fleet/opencode-variant-*/app)"
+[[ "$(cat "$state/agent_model")" == "anthropic/claude-opus-5:high" ]] || {
+  printf 'FAIL: a pinned variant was not recorded (got %q)\n' \
+    "$(cat "$state/agent_model" 2>/dev/null || true)" >&2
+  exit 1
+}
+[[ "$(cat "$state/agent_model_source")" == "flag" ]]
+
+# ── 7. A variant fails closed only where the transport is genuinely unknown ───
+# goose exposes no launch-time variant selector, so the diagnostic must name goose
+# and that reason rather than making a blanket claim about all harnesses.
+
 _reject goose-variant 'Goose variant' \
-  'cannot pin a model variant at launch' \
-  --agent goose --model anthropic/claude-opus-5:high
+  'goose has no known launch-time variant selector' \
+  --agent goose --model openai/gpt-5.2:high
+# The model itself is still pinnable on goose, through its environment.
+_dispatch goose-model 'Goose model' \
+  --agent goose --model openai/gpt-5.2 >/dev/null
+state="$(printf '%s\n' "$TEST_ROOT"/fleet/goose-model-*/app)"
+[[ "$(cat "$state/agent_model")" == "openai/gpt-5.2" ]]
 
-# ── 7. A provider the harness cannot be pinned to fails closed ───────────────
-# Claude Code never receives a provider at launch, so pinning it to a foreign
-# provider would record evidence the harness could not honor or verify.
+# An unmeasured harness surface fails closed as UNMEASURED, which is a different
+# statement from "this harness cannot do it" and must not be asserted as one.
+_reject claude-unmeasured 'Claude unmeasured' \
+  'launch-time model surface is unmeasured on this host' \
+  --agent claude --model anthropic/claude-opus-5
+if [[ "$(_dispatch_output claude-unmeasured-wording 'Claude wording' \
+  --agent claude --model anthropic/claude-opus-5)" == *"cannot pin a model variant"* ]]; then
+  printf 'FAIL: an unmeasured harness was described as incapable\n' >&2
+  exit 1
+fi
+# An unpinned dispatch on that harness is unaffected.
+_dispatch claude-unpinned 'Claude unpinned' --agent claude >/dev/null
+state="$(printf '%s\n' "$TEST_ROOT"/fleet/claude-unpinned-*/app)"
+[[ "$(cat "$state/agent_model")" == "unpinned" ]]
 
-_reject claude-foreign-provider 'Claude foreign provider' \
-  'can only be pinned to provider anthropic, not openai' \
-  --agent claude --model openai/gpt-5.2
-_dispatch claude-scoped 'Claude scoped provider' \
-  --agent claude --model anthropic/claude-opus-5 >/dev/null
-state="$(printf '%s\n' "$TEST_ROOT"/fleet/claude-scoped-provider-*/app)"
-[[ "$(cat "$state/agent_model")" == "anthropic/claude-opus-5" ]]
+# The internal unpinned sentinel is not an accepted user value.
+_reject sentinel 'Sentinel value' \
+  'model must be provider/model' --model unpinned
 
 # ── 8. Recorded tuples never carry a secret ──────────────────────────────────
 # The charset that validation enforces is the guarantee, so a credential-shaped

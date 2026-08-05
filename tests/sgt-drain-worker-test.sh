@@ -28,6 +28,14 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 # shellcheck disable=SC1091
 source "$ROOT_DIR/bin/_sgt-drain.sh"
 
+# mk_env below builds real git worktrees because sgt-td-memory refuses to attach
+# handoff evidence to a path that is not one (GH #173), so skip early where git is
+# unavailable, matching the other git-dependent drain tests.
+command -v git >/dev/null 2>&1 || {
+  printf 'sgt-drain-worker: skipped (git unavailable)\n'
+  exit 0
+}
+
 fake_td="$TEST_ROOT/fake-bin/td"
 mkdir -p "$TEST_ROOT/fake-bin"
 cat > "$fake_td" <<'EOF'
@@ -53,6 +61,8 @@ mk_env() {
   git -C "$worktree" commit -qm 'drain fixture'
   printf 'Project: %s\nBrief: test\n' "$project" > "$task_dir/brief.md"
   printf 'td-drain-test\n' > "$state/td_task"
+  # sgt-td-memory binds to the worktree the fleet record owns (GH #173).
+  printf '%s\n' "$worktree" > "$state/worktree"
   # Symlink state inside task dir so dirname(state) = task_dir
   ln -sfn "$state" "$task_dir/sergeant"
   printf '%s\n' "$root"

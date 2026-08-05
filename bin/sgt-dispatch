@@ -138,6 +138,11 @@ fi
 # orthogonal to SERGEANT_AGENT: the agent selects the harness executable, the
 # model pins what that harness runs. Validation happens here, before any intent
 # file, td task, worktree, or fleet state exists.
+#
+# Resolution is EXPLICIT-ONLY by decision, not by omission: there is deliberately
+# no project-level or per-repo model default. Adding one expands the project YAML
+# schema, which is owned elsewhere, so a project-level default with precedence
+# below SERGEANT_MODEL is deferred to its own card (td-bc44c4).
 if [[ -n "$MODEL_ARG" ]]; then
   AGENT_MODEL="$MODEL_ARG"
   AGENT_MODEL_SOURCE="flag"
@@ -145,8 +150,15 @@ elif [[ -n "${SERGEANT_MODEL:-}" ]]; then
   AGENT_MODEL="$SERGEANT_MODEL"
   AGENT_MODEL_SOURCE="env"
 else
-  AGENT_MODEL="unpinned"
+  AGENT_MODEL="$SGT_AGENT_MODEL_UNPINNED"
   AGENT_MODEL_SOURCE="unpinned"
+fi
+# A raw user value must be a real tuple. The unpinned sentinel is internal: it
+# is what "no pin was given" resolves to, never something a caller may assert,
+# because recording "model=unpinned, source=flag" would misstate provenance.
+if [[ "$AGENT_MODEL_SOURCE" != "unpinned" ]]; then
+  _sgt_is_agent_model_tuple "$AGENT_MODEL" || \
+    _die "model must be provider/model or provider/model:variant, with a [a-z0-9-] provider and [A-Za-z0-9._-] model: $AGENT_MODEL"
 fi
 _sgt_require_agent_model "$(basename "$AGENT_CMD")" "$AGENT_MODEL"
 if [[ -n "$ORIGIN_PROFILE" || -n "$CORRELATION_ID" ]]; then
@@ -225,6 +237,10 @@ _require_interactive_agent
 SGT_TMUX_SESSION="${SERGEANT_TMUX_SESSION:-sgt}"
 TMUX_SESSION="$SGT_TMUX_SESSION"
 
+PRIMARY_PANE_ID=""
+PRIMARY_PANE_IDENTITY=""
+SGT_MANAGED_COORDINATOR_CREATED="false"
+
 # ── Bind the coordinator pane ────────────────────────────────────────────────
 # Three entry paths, one verification.  An explicit identity is verified against
 # the live tmux server; a managed pane is created or selected on a server that is
@@ -242,16 +258,40 @@ elif $MANAGED_COORDINATOR; then
   # acquiring a pane nobody can observe.
   tmux list-sessions >/dev/null 2>&1 || \
     _die "sgt-dispatch found no reachable tmux server for --managed-coordinator-pane; start tmux first"
-  PRIMARY_PANE_ID="$(_sgt_managed_coordinator_pane "$TMUX_SESSION" \
-    "$SGT_MANAGED_COORDINATOR_WINDOW")" || \
-    _die "sgt-dispatch could not create or select the managed coordinator pane in $TMUX_SESSION:$SGT_MANAGED_COORDINATOR_WINDOW; remove that window if it is stale"
+  if $DRY_RUN; then
+    # --dry-run must not create anything, including tmux state.  Report what
+    # would be bound and skip the rest of the coordinator binding.
+    echo "[dry-run] would create or select managed coordinator pane in $TMUX_SESSION:$SGT_MANAGED_COORDINATOR_WINDOW"
+  else
+    managed_pane_result="$(_sgt_managed_coordinator_pane "$TMUX_SESSION" \
+      "$SGT_MANAGED_COORDINATOR_WINDOW")" || \
+      _die "sgt-dispatch could not create or select the managed coordinator pane in $TMUX_SESSION:$SGT_MANAGED_COORDINATOR_WINDOW; remove that window if it is not Sergeant's"
+    PRIMARY_PANE_ID="${managed_pane_result%% *}"
+    SGT_MANAGED_COORDINATOR_CREATED="${managed_pane_result##* }"
+  fi
 elif [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" ]]; then
   PRIMARY_PANE_ID="$TMUX_PANE"
 else
   _die "sgt-dispatch requires an interactive coordinator tmux pane: run it inside tmux, or pass --managed-coordinator-pane or --coordinator-pane <pane-id>"
 fi
-PRIMARY_PANE_IDENTITY="$(_sgt_verify_pane_identity "$PRIMARY_PANE_ID")" || \
-  _die "sgt-dispatch could not bind exact coordinator pane identity: $PRIMARY_PANE_ID"
+
+# Roll back exactly the managed coordinator window this invocation created, and
+# only that one, if the dispatch does not complete.  Selecting an existing window
+# records nothing to remove, so a pane Sergeant merely adopted is never killed.
+# Installed as an EXIT trap immediately, because several later preflight steps
+# (intent preparation, fleet reconciliation, drain admission, td creation, repo
+# validation) can still abort after the pane is bound.
+_rollback_managed_coordinator_pane() {
+  [[ "${SGT_MANAGED_COORDINATOR_CREATED:-false}" == "true" ]] || return 0
+  SGT_MANAGED_COORDINATOR_CREATED="false"
+  tmux kill-window -t "$TMUX_SESSION:=$SGT_MANAGED_COORDINATOR_WINDOW" 2>/dev/null || true
+}
+trap _rollback_managed_coordinator_pane EXIT
+
+if [[ -n "$PRIMARY_PANE_ID" ]]; then
+  PRIMARY_PANE_IDENTITY="$(_sgt_verify_pane_identity "$PRIMARY_PANE_ID")" || \
+    _die "sgt-dispatch could not bind exact coordinator pane identity: $PRIMARY_PANE_ID"
+fi
 
 INTENT_TMP="$(mktemp)"
 
@@ -267,6 +307,9 @@ TD_CREATE_STATE_FILE="$(mktemp)"
 TD_CREATE_STDERR="$(mktemp)"
 _cleanup_dispatch_tmps() {
   rm -f "$REPO_TD_MAP" "$TD_CREATE_STATE_FILE" "$TD_CREATE_STDERR" "$INTENT_TMP" "${DEPS_TMP:-}"
+  # This trap replaces the coordinator-pane rollback trap, so it must keep
+  # honouring it; the rollback is a no-op once the dispatch has completed.
+  _rollback_managed_coordinator_pane
 }
 trap _cleanup_dispatch_tmps EXIT
 
@@ -1005,6 +1048,10 @@ BRIEF_EOF
 
   echo ""
 done
+
+# Every repo dispatched: the managed coordinator pane is now owned by live fleet
+# state, so the rollback must not remove it.
+SGT_MANAGED_COORDINATOR_CREATED="false"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 

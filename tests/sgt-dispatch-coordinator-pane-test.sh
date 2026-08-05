@@ -51,9 +51,16 @@ case "$1" in
   list-sessions) printf 'sgt: 1 windows\n' ;;
   has-session) exit 0 ;;
   list-panes)
-    # The managed coordinator window exists only once it has been created.
-    if [[ "$*" == *":sgt-coordinator"* && -f "$MANAGED_EXISTS_FLAG" ]]; then
-      printf '%s\n' "$MANAGED_PANE_ID"
+    # The managed coordinator window exists only once it has been created, or
+    # when the test pre-seeds a foreign window with that name.
+    if [[ "$*" == *"sgt-coordinator"* ]]; then
+      if [[ -n "${AMBIGUOUS_MANAGED_PANES:-}" ]]; then
+        printf '%s\n' ${AMBIGUOUS_MANAGED_PANES}
+      elif [[ -f "$MANAGED_EXISTS_FLAG" ]]; then
+        printf '%s\n' "$MANAGED_PANE_ID"
+      elif [[ -n "${FOREIGN_MANAGED_PANE:-}" ]]; then
+        printf '%s\n' "$FOREIGN_MANAGED_PANE"
+      fi
     fi
     ;;
   display-message)
@@ -86,8 +93,19 @@ case "$1" in
         exit 0
       fi
     done
+    if [[ -n "${FOREIGN_MANAGED_PANE:-}" && "$target" == "$FOREIGN_MANAGED_PANE" ]]; then
+      printf '0|%s|3333|333333|bash\n' "$target"
+      exit 0
+    fi
+    for ambiguous in ${AMBIGUOUS_MANAGED_PANES:-}; do
+      if [[ "$target" == "$ambiguous" ]]; then
+        printf '0|%s|4444|444444|%s\n' "$target" "$MANAGED_READER_COMMAND"
+        exit 0
+      fi
+    done
     if [[ "$target" == "$MANAGED_PANE_ID" ]]; then
-      printf '0|%s|2222|222222|%s\n' "$target" "${MANAGED_PANE_COMMAND:-managed-command}"
+      printf '0|%s|2222|222222|%s\n' "$target" \
+        "$(cat "$MANAGED_COMMAND_LOG" 2>/dev/null || printf 'managed-command')"
       exit 0
     fi
     if [[ "$target" == "%42" ]]; then
@@ -103,6 +121,7 @@ case "$1" in
     # other new-window call is a worker pane.
     if [[ "$*" == *'-n sgt-coordinator'* ]]; then
       printf '%s\n' "${!#}" > "$MANAGED_COMMAND_LOG"
+      printf '%s\n' "${!#}" >> "$MANAGED_CREATE_LOG"
       touch "$MANAGED_EXISTS_FLAG"
       printf '%s\n' "$MANAGED_PANE_ID"
     else
@@ -111,6 +130,10 @@ case "$1" in
     ;;
   send-keys) ;;
   kill-pane) ;;
+  kill-window)
+    printf '%s\n' "$*" >> "$KILL_WINDOW_LOG"
+    rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG"
+    ;;
 esac
 EOF
 chmod +x "$TEST_ROOT/fake-bin/tmux"
@@ -153,6 +176,19 @@ git -C "$TEST_ROOT/repo" remote add origin git@github.com:org/test.git
 MANAGED_PANE_ID='%77'
 MANAGED_COMMAND_LOG="$TEST_ROOT/managed-command"
 MANAGED_EXISTS_FLAG="$TEST_ROOT/managed-exists"
+MANAGED_CREATE_LOG="$TEST_ROOT/managed-create.log"
+# The exact reader command Sergeant creates its managed pane with, read from the
+# shared library so the fixture cannot drift from the implementation.
+MANAGED_READER_COMMAND="$(
+  # shellcheck source=bin/_sgt-lib.sh
+  source "$ROOT_DIR/bin/_sgt-lib.sh" >/dev/null 2>&1
+  printf '%s' "$SGT_MANAGED_COORDINATOR_COMMAND"
+)"
+[[ -n "$MANAGED_READER_COMMAND" ]] || {
+  printf 'FAIL: could not read the managed coordinator reader command\n' >&2
+  exit 1
+}
+KILL_WINDOW_LOG="$TEST_ROOT/kill-window.log"
 
 _fleet_task_count() {
   find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' '
@@ -168,6 +204,10 @@ _dispatch_no_tmux() {
     MANAGED_PANE_ID="$MANAGED_PANE_ID" \
     MANAGED_COMMAND_LOG="$MANAGED_COMMAND_LOG" \
     MANAGED_EXISTS_FLAG="$MANAGED_EXISTS_FLAG" \
+    MANAGED_CREATE_LOG="$MANAGED_CREATE_LOG" KILL_WINDOW_LOG="$KILL_WINDOW_LOG" \
+    MANAGED_READER_COMMAND="$MANAGED_READER_COMMAND" \
+    ${FOREIGN_MANAGED_PANE:+FOREIGN_MANAGED_PANE="$FOREIGN_MANAGED_PANE"} \
+    ${AMBIGUOUS_MANAGED_PANES:+AMBIGUOUS_MANAGED_PANES="$AMBIGUOUS_MANAGED_PANES"} \
     SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
     SGT_WIKI_DISABLED=1 \
     "$ROOT_DIR/bin/sgt-dispatch" test "$brief" --repos app "$@"
@@ -201,7 +241,7 @@ _reject_no_tmux() {
 
 # ── 1. A non-tmux shell can create a managed coordinator pane ─────────────────
 
-rm -f "$MANAGED_COMMAND_LOG"
+rm -f "$MANAGED_COMMAND_LOG" "$MANAGED_CREATE_LOG"
 _dispatch_no_tmux managed 'Managed coordinator' --managed-coordinator-pane >/dev/null
 state="$(printf '%s\n' "$TEST_ROOT"/fleet/managed-coordinator-*/app)"
 task_dir="$(dirname "$state")"
@@ -223,11 +263,11 @@ fi
 
 # The managed pane must not run a shell: an injected notification is displayed,
 # never executed.
-[[ -s "$MANAGED_COMMAND_LOG" ]] || {
+[[ -s "$MANAGED_CREATE_LOG" ]] || {
   printf 'FAIL: no managed coordinator pane command was created\n' >&2
   exit 1
 }
-managed_command="$(cat "$MANAGED_COMMAND_LOG")"
+managed_command="$(cat "$MANAGED_CREATE_LOG")"
 case "$managed_command" in
   *'read'*) ;;
   *)
@@ -241,7 +281,7 @@ esac
 # The managed window is selected when it already exists, so repeated dispatches
 # from an API coordinator do not accumulate coordinator panes.
 
-rm -f "$MANAGED_COMMAND_LOG"
+rm -f "$MANAGED_CREATE_LOG"
 _dispatch_no_tmux managed-reuse 'Managed reuse' \
   --managed-coordinator-pane >/dev/null
 state="$(printf '%s\n' "$TEST_ROOT"/fleet/managed-reuse-*/app)"
@@ -250,7 +290,7 @@ if grep -Fq -e '-n sgt-coordinator' "$TEST_ROOT/managed-reuse.log"; then
   printf 'FAIL: a second managed coordinator pane was created instead of reused\n' >&2
   exit 1
 fi
-[[ ! -e "$MANAGED_COMMAND_LOG" ]]
+[[ ! -e "$MANAGED_CREATE_LOG" ]]
 
 # ── 3. An explicitly supplied live pane identity is accepted ─────────────────
 
@@ -294,6 +334,8 @@ _reject_no_tmux both-options 'Both coordinator options' \
 LIVE_PANES='%11' TMUX=fixture TMUX_PANE='%11' \
   PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/in-pane.log" \
   MANAGED_PANE_ID="$MANAGED_PANE_ID" MANAGED_COMMAND_LOG="$MANAGED_COMMAND_LOG" \
+  MANAGED_EXISTS_FLAG="$MANAGED_EXISTS_FLAG" KILL_WINDOW_LOG="$KILL_WINDOW_LOG" \
+  MANAGED_CREATE_LOG="$MANAGED_CREATE_LOG" \
   SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
   SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-dispatch" test 'In pane coordinator' --repos app >/dev/null
@@ -312,6 +354,8 @@ set +e
 output="$(DEAD_PANES='%12' TMUX=fixture TMUX_PANE='%12' \
   PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/dead-ambient.log" \
   MANAGED_PANE_ID="$MANAGED_PANE_ID" MANAGED_COMMAND_LOG="$MANAGED_COMMAND_LOG" \
+  MANAGED_EXISTS_FLAG="$MANAGED_EXISTS_FLAG" KILL_WINDOW_LOG="$KILL_WINDOW_LOG" \
+  MANAGED_CREATE_LOG="$MANAGED_CREATE_LOG" \
   SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
   SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-dispatch" test 'Dead ambient coordinator' --repos app 2>&1)"
@@ -320,5 +364,105 @@ set -e
 [[ "$status" -ne 0 ]]
 [[ "$output" == *'could not bind exact coordinator pane identity'* ]]
 [[ "$before" == "$(_fleet_task_count)" ]]
+
+# ── 10. A window Sergeant did not create is never adopted ────────────────────
+# Adoption requires the pane's start command to be Sergeant's non-executing
+# reader.  Without that check, any window a user happened to name
+# "sgt-coordinator" — a shell, an editor — would become the coordinator target
+# and an injected notification would execute in it.
+
+rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG" "$MANAGED_CREATE_LOG"
+FOREIGN_MANAGED_PANE='%88' _reject_no_tmux foreign-window 'Foreign coordinator window' \
+  'could not create or select the managed coordinator pane' --managed-coordinator-pane
+[[ ! -e "$MANAGED_CREATE_LOG" ]] || {
+  printf 'FAIL: a foreign coordinator window was replaced instead of reported\n' >&2
+  exit 1
+}
+[[ ! -e "$KILL_WINDOW_LOG" ]] || {
+  printf 'FAIL: a window Sergeant did not create was killed\n' >&2
+  exit 1
+}
+
+# ── 11. An ambiguous managed window name is refused, not duplicated ──────────
+# Two windows sharing the managed name must not silently become "create a third".
+
+AMBIGUOUS_MANAGED_PANES='%91 %92' _reject_no_tmux ambiguous-window \
+  'Ambiguous coordinator window' \
+  'could not create or select the managed coordinator pane' --managed-coordinator-pane
+[[ ! -e "$MANAGED_CREATE_LOG" ]] || {
+  printf 'FAIL: an ambiguous managed window name created another window\n' >&2
+  exit 1
+}
+
+# ── 12. A later preflight failure rolls back the window this run created ─────
+# Repo validation runs after the pane is bound, so this exercises the rollback
+# path GH #172 requires: exactly the window this invocation created is removed,
+# and no fleet state survives.
+
+rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG" "$MANAGED_CREATE_LOG" "$KILL_WINDOW_LOG"
+before="$(_fleet_task_count)"
+set +e
+output="$(_dispatch_no_tmux rollback 'Rollback coordinator' \
+  --managed-coordinator-pane --repos no-such-repo 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]] || {
+  printf 'FAIL: dispatch accepted an unknown repo\n' >&2
+  exit 1
+}
+[[ "$output" == *"not found in project"* ]] || {
+  printf 'FAIL: rollback case failed for the wrong reason: %s\n' "$output" >&2
+  exit 1
+}
+[[ "$before" == "$(_fleet_task_count)" ]] || {
+  printf 'FAIL: rollback case left fleet state behind\n' >&2
+  exit 1
+}
+[[ -s "$MANAGED_CREATE_LOG" ]] || {
+  printf 'FAIL: rollback case never created a managed pane to roll back\n' >&2
+  exit 1
+}
+grep -Fq 'sgt-coordinator' "$KILL_WINDOW_LOG" 2>/dev/null || {
+  printf 'FAIL: the managed coordinator window this run created was not rolled back\n' >&2
+  exit 1
+}
+
+# A window Sergeant only selected is never rolled back by a later failure.
+rm -f "$KILL_WINDOW_LOG" "$MANAGED_CREATE_LOG"
+_dispatch_no_tmux rollback-seed 'Rollback seed' --managed-coordinator-pane >/dev/null
+rm -f "$KILL_WINDOW_LOG" "$MANAGED_CREATE_LOG"
+set +e
+_dispatch_no_tmux rollback-selected 'Rollback selected' \
+  --managed-coordinator-pane --repos no-such-repo >/dev/null 2>&1
+set -e
+[[ ! -e "$MANAGED_CREATE_LOG" ]]
+[[ ! -e "$KILL_WINDOW_LOG" ]] || {
+  printf 'FAIL: a merely selected managed coordinator window was killed on failure\n' >&2
+  exit 1
+}
+
+# ── 13. --dry-run creates no tmux state ──────────────────────────────────────
+
+rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG" "$MANAGED_CREATE_LOG" \
+  "$KILL_WINDOW_LOG" "$TEST_ROOT/dry-run.log"
+before="$(_fleet_task_count)"
+if ! _dispatch_no_tmux dry-run 'Dry run coordinator' \
+  --managed-coordinator-pane --dry-run >/dev/null 2>&1; then
+  printf 'FAIL: --dry-run with a managed coordinator pane did not succeed\n' >&2
+  exit 1
+fi
+[[ "$before" == "$(_fleet_task_count)" ]] || {
+  printf 'FAIL: --dry-run created fleet state\n' >&2
+  exit 1
+}
+[[ ! -e "$MANAGED_CREATE_LOG" ]] || {
+  printf 'FAIL: --dry-run created a managed coordinator pane\n' >&2
+  exit 1
+}
+if grep -Fq -e '-n sgt-coordinator' "$TEST_ROOT/dry-run.log" 2>/dev/null || \
+   grep -Fq 'new-session' "$TEST_ROOT/dry-run.log" 2>/dev/null; then
+  printf 'FAIL: --dry-run mutated tmux\n' >&2
+  exit 1
+fi
 
 printf 'sgt-dispatch coordinator pane: ok\n'

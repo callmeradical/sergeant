@@ -160,26 +160,48 @@ sgt-dispatch smith "Add OAuth" --repos smith --model anthropic/claude-opus-5
 SERGEANT_MODEL=openai/gpt-5.2 sgt-dispatch smith --td td-a3cf60
 ```
 
-Each harness reaches its model through a different documented interface, and
-Sergeant validates against that interface before creating any state:
+Every transport below is **measured** on a host with that harness installed, never
+inferred from documentation. Sergeant validates against it before creating any
+state:
 
-| Harness | How the model is pinned | Providers it can be pinned to |
+| Harness | Model transport | Variant transport |
 |---|---|---|
-| `opencode`, `oc` | argv `--model <provider>/<model>` | any |
-| `claude` | argv `--model <model>` | `anthropic` only — Claude Code never receives a provider at launch, so any other provider would be an unverifiable record |
-| `goose` | env `GOOSE_PROVIDER` + `GOOSE_MODEL` — `goose session` has no model flag | any |
+| `opencode`, `oc` | argv `--model <provider>/<model>` | argv `--agent <name>` against a Sergeant-generated agent definition carrying the variant |
+| `goose` | env `GOOSE_PROVIDER` + `GOOSE_MODEL` — `goose session` has no model flag, and Sergeant controls the worker environment at spawn | none known — a pinned variant fails closed |
+| `claude` | unmeasured on this host | unmeasured on this host |
 
-No supported harness has a launch-time *variant* selector, so pinning a
-`:variant` fails closed with an actionable diagnostic instead of silently
-inheriting the ambient default. Configure a variant inside the harness itself.
+`opencode` has no `--variant` flag, but it does accept `--agent <name>` at launch
+and its agent definitions carry a first-class `variant` field. So Sergeant writes
+a definition pinning both model and variant into **fleet state** (never the
+worktree, so a pinned variant cannot leave untracked files in the repository
+under review) and points the harness at it with `OPENCODE_CONFIG`.
+
+A pin fails closed in two distinct situations, and the diagnostic says which:
+
+- **no known transport** — the harness has been measured and exposes no way to
+  pin that axis at launch. Configure it in the harness itself.
+- **unmeasured** — the harness is not installed here, so its launch surface has
+  not been observed. This is *not* a claim that the harness cannot do it.
 
 Dispatch records the resolved tuple in `agent_model` and its origin in
 `agent_model_source`. The worker records what it actually launched in
-`launch_record` (harness, model, provider, transport, and the exact model argv
-and environment it used), so the model a worker ran is provable afterwards. A
-resumed or recovered worker reads the same fleet record, so it inherits the same
-pin. A worker handed a tuple its harness cannot honor fails terminally rather
-than falling back to the ambient default.
+`launch_record`: harness, model, provider, both transports, the generated
+definition, and the exact model argv and environment it used.
+
+`launch_record` also carries two honesty fields:
+
+- `launch_state` is `intended` before the harness is executed and becomes
+  `confirmed` only once the harness reports itself ready, so a harness that
+  rejects a pin and exits never leaves evidence claiming the model ran.
+- `provider_verified` says whether the invocation itself proves the provider.
+
+A resumed or recovered worker reads the same fleet record, so it inherits the
+same pin. A worker handed a tuple its harness cannot honor fails terminally
+rather than falling back to the ambient default.
+
+The tuple is resolved from the flag, the environment, or the unpinned default —
+**explicitly only**. There is deliberately no project-level model default; that
+would expand the project schema and is tracked separately.
 
 ### Dispatching without an interactive coordinator pane
 

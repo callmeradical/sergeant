@@ -44,10 +44,27 @@ mkdir -p "$REPO_STATE"
 
 AGENT_MODEL="$(cat "$REPO_STATE/agent_model" 2>/dev/null || true)"
 AGENT_MODEL_SOURCE="$(cat "$REPO_STATE/agent_model_source" 2>/dev/null || true)"
-[[ -n "$AGENT_MODEL" ]] || AGENT_MODEL="unpinned"
-[[ -n "$AGENT_MODEL_SOURCE" ]] || AGENT_MODEL_SOURCE="unpinned"
-if ! _sgt_resolve_agent_launch "$harness" "$AGENT_MODEL"; then
-  _reject_reason="$(_sgt_agent_launch_reject_message "$harness" "$AGENT_MODEL")"
+[[ -n "$AGENT_MODEL" ]] || AGENT_MODEL="$SGT_AGENT_MODEL_UNPINNED"
+# Normalise the recorded provenance instead of copying fleet state verbatim into
+# evidence: a stale or hand-edited source must not appear in the launch record,
+# and a pinned model with no recorded source is "unknown", never "unpinned".
+case "$AGENT_MODEL_SOURCE" in
+  flag|env|unpinned) ;;
+  *)
+    if [[ "$AGENT_MODEL" == "$SGT_AGENT_MODEL_UNPINNED" ]]; then
+      AGENT_MODEL_SOURCE="unpinned"
+    else
+      AGENT_MODEL_SOURCE="unknown"
+    fi
+    ;;
+esac
+# Called directly, not in a command substitution: the resolved base argv, model
+# argv, and model environment are out-parameters that a subshell would discard.
+# $REPO_STATE is passed so a variant transport that needs a generated harness
+# definition materialises it in fleet state, never in the worktree under review.
+if ! _sgt_resolve_agent_launch "$harness" "$AGENT_MODEL" "$REPO_STATE"; then
+  _reject_reason="$(_sgt_agent_launch_reject_message "$harness" "$AGENT_MODEL" \
+    "$SGT_LAUNCH_REJECT")"
   printf '%s\n' "$_reject_reason" > "$REPO_STATE/diagnostic"
   printf 'failed: cannot honor pinned model tuple %s\n' "$AGENT_MODEL" \
     > "$REPO_STATE/status"
@@ -60,22 +77,44 @@ fi
 # Record what this worker is about to run.  Every field is derived from the
 # validated tuple and the shared harness contract, never from the ambient
 # environment, so the evidence cannot carry a credential.
+#
+# launch_state distinguishes intent from proof.  It is written as "intended"
+# before the harness is executed and promoted to "confirmed" only once the
+# harness reports itself ready (see _promote_launch_record), so a harness that
+# rejects the pin and exits never leaves evidence claiming the model ran.
+#
+# provider_verified says whether the invocation itself proves the provider. It is
+# false for an argv-bare transport, which never receives a provider at all.
 _write_launch_record() {
-  local tmp="$REPO_STATE/launch_record.tmp.$$"
+  local state="$1" tmp="$REPO_STATE/launch_record.tmp.$$"
   {
     printf 'harness=%s\n' "$harness"
     printf 'agent=%s\n' "$AGENT"
+    printf 'launch_state=%s\n' "$state"
     printf 'model=%s\n' "$AGENT_MODEL"
     printf 'model_source=%s\n' "$AGENT_MODEL_SOURCE"
     printf 'provider=%s\n' "$SGT_AGENT_MODEL_PROVIDER"
+    printf 'provider_verified=%s\n' "$SGT_LAUNCH_PROVIDER_VERIFIED"
     printf 'model_id=%s\n' "$SGT_AGENT_MODEL_ID"
     printf 'variant=%s\n' "$SGT_AGENT_MODEL_VARIANT"
     printf 'model_transport=%s\n' "$SGT_LAUNCH_MODEL_TRANSPORT"
+    printf 'variant_transport=%s\n' "$SGT_LAUNCH_VARIANT_TRANSPORT"
+    printf 'definition=%s\n' "$SGT_LAUNCH_DEFINITION"
+    printf 'base_argv=%s\n' \
+      "${SGT_LAUNCH_BASE_ARGV[*]+${SGT_LAUNCH_BASE_ARGV[*]}}"
     printf 'model_argv=%s\n' \
       "${SGT_LAUNCH_MODEL_ARGV[*]+${SGT_LAUNCH_MODEL_ARGV[*]}}"
     printf 'model_env=%s\n' \
       "${SGT_LAUNCH_MODEL_ENV[*]+${SGT_LAUNCH_MODEL_ENV[*]}}"
   } > "$tmp" && mv "$tmp" "$REPO_STATE/launch_record"
+}
+
+# Promote the record once the harness is observably ready.  Called from the
+# delivery loop, which already establishes readiness before it sends anything.
+_promote_launch_record() {
+  [[ -f "$REPO_STATE/launch_record" ]] || return 0
+  grep -q '^launch_state=intended$' "$REPO_STATE/launch_record" 2>/dev/null || return 0
+  _write_launch_record confirmed
 }
 
 # ── Cooperative drain ─────────────────────────────────────────────────────────
@@ -184,6 +223,9 @@ _sync_state() {
   fi
 }
 
+# Readiness is also the moment the launch record stops being a claim about
+# intent and becomes evidence that this harness really came up, so promote the
+# record here rather than asserting a confirmed launch before the fact.
 _harness_ready() {
   local pane_command pane_output ready_text
   [[ -n "${TMUX_PANE:-}" ]] || return 1
@@ -192,14 +234,18 @@ _harness_ready() {
   case "$harness" in
     opencode|oc)
       ready_text="${SGT_OPENCODE_READY_TEXT-Ask anything...}"
-      [[ -n "$ready_text" ]] || return 0
+      if [[ -z "$ready_text" ]]; then
+        _promote_launch_record
+        return 0
+      fi
       pane_output="$(tmux capture-pane -p -t "$TMUX_PANE" -S -80 2>/dev/null || true)"
-      [[ "$pane_output" == *"$ready_text"* ]]
+      [[ "$pane_output" == *"$ready_text"* ]] || return 1
       ;;
     *)
-      [[ "$pane_command" == "$harness" ]]
+      [[ "$pane_command" == "$harness" ]] || return 1
       ;;
   esac
+  _promote_launch_record
 }
 
 _finish() {
@@ -442,20 +488,32 @@ watch_progress_pid=$!
 _watch_drain &
 watch_drain_pid=$!
 
-# Base harness invocation, then the shared model/variant words appended from the
-# one harness contract.  Nothing here knows which flag belongs to which harness.
-case "$harness" in
-  goose)       set -- session ;;
-  opencode|oc) set -- --dangerously-skip-permissions ;;
-  *)           set -- ;;
-esac
+# Base session argv then the model words, both from the one harness contract.
+# Nothing here knows which flag or subcommand belongs to which harness.
+set --
+if [[ "${#SGT_LAUNCH_BASE_ARGV[@]}" -gt 0 ]]; then
+  set -- "${SGT_LAUNCH_BASE_ARGV[@]}"
+fi
 if [[ "${#SGT_LAUNCH_MODEL_ARGV[@]}" -gt 0 ]]; then
   set -- "$@" "${SGT_LAUNCH_MODEL_ARGV[@]}"
 fi
 if [[ "${#SGT_LAUNCH_MODEL_ENV[@]}" -gt 0 ]]; then
   for _launch_pair in "${SGT_LAUNCH_MODEL_ENV[@]}"; do
-    export "${_launch_pair?launch environment pair missing}"
+    [[ "$_launch_pair" == ?*=* ]] || {
+      echo "ERROR: malformed launch environment pair: $_launch_pair" >&2
+      exit 2
+    }
+    # shellcheck disable=SC2163  # Deliberate: the word is a NAME=VALUE assignment.
+    export "$_launch_pair"
   done
 fi
-_write_launch_record
+rm -f "$REPO_STATE/launch_record"
+if ! _write_launch_record intended; then
+  printf 'launch evidence unwritable at %s/launch_record\n' "$REPO_STATE" \
+    > "$REPO_STATE/diagnostic"
+  printf 'failed: cannot record launch evidence\n' > "$REPO_STATE/status"
+  printf 'failed: cannot record launch evidence\n' > "$WORKTREE/.sergeant-status"
+  echo "ERROR: cannot record launch evidence; refusing to launch unprovable worker" >&2
+  exit 2
+fi
 "$AGENT" "$@"
