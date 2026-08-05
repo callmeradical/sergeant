@@ -1158,6 +1158,10 @@ assert_ownership_failure 'TMUX_PANE is not set' env -u TMUX_PANE
 assert_ownership_failure 'dispatching pane %11 is still live' env TMUX_PANE=%12
 assert_ownership_failure 'is gone; claim it with --claim-ownership' \
   env TMUX_PANE=%12 PRIMARY_PANE_STATE=dead
+# A live dispatching pane whose identity no longer matches the dispatch record is
+# a recycled pane, not a live owner and not an absent pane.
+assert_ownership_failure 'no longer matches the dispatch record' \
+  env TMUX_PANE=%12 PRIMARY_PANE_STATE=recycled
 assert_ownership_failure 'was recycled' env TMUX_PANE=%11 PRIMARY_PANE_STATE=recycled
 
 mv "$fleet/task-1/primary_pane_id" "$TEST_ROOT/saved-primary-pane-id"
@@ -1215,12 +1219,23 @@ grep -Fq "reason=dispatching-pane-dead" "$handover_log"
 [[ "$(cat "$repo_state/validation_status")" == "launched" ]]
 cleanup_validation_state
 
+# A recycled dispatching pane is claimable, and the audit names that reason.
+printf '%%11\n' > "$fleet/task-1/primary_pane_id"
+bash -c 'source "$1"; _sgt_replace_owned_file "$2" "$3"' _ "$ROOT_DIR/bin/_sgt-lib.sh" \
+  "$fleet/task-1/primary_pane_identity" '0|%11|1111|111111|coordinator-command'
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%12 PRIMARY_PANE_STATE=recycled SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --claim-ownership >/dev/null
+[[ "$(cat "$fleet/task-1/primary_pane_id")" == "%12" ]]
+grep -Fq 'reason=dispatching-pane-recycled' "$fleet/task-1/coordinator_handover.log"
+cleanup_validation_state
+
 # The new owner validates from its own pane without claiming again.
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
   TMUX_PANE=%12 PRIMARY_PANE_STATE=dead SERGEANT_FLEET="$fleet" \
   "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
 cleanup_validation_state
-[[ "$(wc -l < "$handover_log")" == "1" ]]
+[[ "$(wc -l < "$handover_log")" == "2" ]]
 
 # Restore %11 ownership for the release-path checks.
 printf '%%11\n' > "$fleet/task-1/primary_pane_id"

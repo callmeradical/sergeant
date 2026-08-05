@@ -132,10 +132,11 @@ _resolve_coordinator_ownership() {
     fi
     _die "A coordinator pane identity was never recorded for task $TASK_ID"
   fi
+  PRIMARY_PANE_PRESENT=false
   PRIMARY_OWNER_IS_LIVE=false
-  if [[ "$RECORDED_PRIMARY_IDENTITY" == "$live_identity" ]] && \
-    _pane_identity_is_live "$live_identity"; then
-    PRIMARY_OWNER_IS_LIVE=true
+  if _pane_identity_is_live "$live_identity"; then
+    PRIMARY_PANE_PRESENT=true
+    [[ "$RECORDED_PRIMARY_IDENTITY" != "$live_identity" ]] || PRIMARY_OWNER_IS_LIVE=true
   fi
 }
 _append_handover_record() {
@@ -165,6 +166,8 @@ _claim_coordinator_ownership() {
   elif $PRIMARY_OWNER_IS_LIVE; then
     _die "Refusing handover: dispatching coordinator pane $PRIMARY_PANE_ID" \
       "is still live and has not released ownership"
+  elif $PRIMARY_PANE_PRESENT; then
+    reason=dispatching-pane-recycled
   else
     reason=dispatching-pane-dead
   fi
@@ -253,6 +256,10 @@ elif $PRIMARY_OWNER_IS_LIVE; then
   _die "Coordinator pane $TMUX_PANE does not own task $TASK_ID and dispatching" \
     "pane $PRIMARY_PANE_ID is still live; validate from it, or release it there" \
     "with --release-ownership"
+elif $PRIMARY_PANE_PRESENT; then
+  _die "Coordinator pane $TMUX_PANE does not own task $TASK_ID and pane" \
+    "$PRIMARY_PANE_ID is live but no longer matches the dispatch record, so the" \
+    "dispatching coordinator is gone; claim it with --claim-ownership"
 else
   _die "Coordinator pane $TMUX_PANE does not own task $TASK_ID and dispatching" \
     "pane $PRIMARY_PANE_ID is gone; claim it with --claim-ownership"
