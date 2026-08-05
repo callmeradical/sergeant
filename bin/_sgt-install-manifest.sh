@@ -222,12 +222,16 @@ _sgt_install_resolve_link() {
 # Both the planner and the installer call this, so `--dry-run` cannot promise an
 # action that `sgt-install` then refuses, or vice versa.
 _sgt_install_link_state() {
-  local source_file="$1" target_dir="$2" target link_target
+  local source_file="$1" target_dir="$2" target link_target resolved_dir
   # Resolved physically and stripped of a trailing slash so the sibling test
   # below compares like with like: link targets are resolved physically, and a
   # command directory reached through a symlink would otherwise never match.
   target_dir="${target_dir%/}"
-  [[ -d "$target_dir" ]] && target_dir="$(cd -P "$target_dir" && pwd -P)"
+  # An unreadable directory keeps its original spelling rather than collapsing to
+  # the empty string and classifying against /.
+  if resolved_dir="$(cd -P "$target_dir" 2>/dev/null && pwd -P)"; then
+    target_dir="$resolved_dir"
+  fi
   target="$target_dir/${source_file##*/}"
 
   if [[ -L "$target" ]]; then
