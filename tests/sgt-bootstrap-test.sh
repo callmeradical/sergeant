@@ -1785,6 +1785,66 @@ test_uninstall_reclaims_a_dangling_hook() {
   assert_contains "$output" 'removed dangling Sergeant hook'
 }
 
+# The refusal cause must survive the command substitution every caller uses, so
+# it is asserted through the commands rather than the bare function.
+test_hook_refusal_advice_reaches_the_commands() {
+  local temp_dir output
+  new_sandbox; temp_dir="$SANDBOX"
+  require_git "hook refusal advice" || return 0
+
+  make_fake_checkout "$temp_dir/primary"
+  ( cd "$temp_dir/primary" && \
+    git -c user.email=t@t -c user.name=t add -A >/dev/null && \
+    git -c user.email=t@t -c user.name=t commit -q -m init && \
+    git worktree add -q "$temp_dir/wt" -b worker ) >/dev/null 2>&1
+  cp "$FIXTURE_ROOT/bin/sgt-bootstrap" "$temp_dir/wt/bin/"
+  mkdir -p "$temp_dir/bin" "$temp_dir/home"
+
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" \
+    "$temp_dir/wt/bin/sgt-install" 2>&1 || true)"
+  assert_contains "$output" 'linked worktree'
+  assert_not_contains "$output" 'unset it for this repository'
+
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" \
+    "$temp_dir/wt/bin/sgt-install" --hooks-only 2>&1 || true)"
+  assert_contains "$output" 'linked worktree'
+
+  # A wider-scope hooksPath must produce the other advice, not the worktree one.
+  printf '[core]\n\thooksPath = %s\n' "$temp_dir/global-hooks" > "$GIT_CONFIG_GLOBAL"
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" \
+    "$temp_dir/primary/bin/sgt-install" --hooks-only 2>&1 || true)"
+  : > "$GIT_CONFIG_GLOBAL"
+  assert_contains "$output" 'core.hooksPath'
+  assert_not_contains "$output" 'linked worktree'
+}
+
+# The stranded-hook scan must only look at this checkout's own git directories.
+test_uninstall_ignores_an_unrelated_repository_in_the_cwd() {
+  local temp_dir output status
+  new_sandbox; temp_dir="$SANDBOX"
+  require_git "foreign-repo uninstall" || return 0
+
+  make_fake_checkout "$temp_dir/checkout"
+  git init -q "$temp_dir/foreign"
+  ln -s "$temp_dir/checkout/scripts/hooks/pre-push" \
+    "$temp_dir/foreign/.git/hooks/pre-push"
+  mkdir -p "$temp_dir/bin" "$temp_dir/home"
+  printf '[core]\n\thooksPath = %s\n' "$temp_dir/global-hooks" > "$GIT_CONFIG_GLOBAL"
+
+  set +e
+  output="$( cd "$temp_dir/foreign" && HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" \
+    "$temp_dir/checkout/bin/sgt-uninstall" 2>&1 )"
+  status=$?
+  set -e
+  : > "$GIT_CONFIG_GLOBAL"
+
+  [[ "$status" -eq 0 ]] || \
+    fail "sgt-uninstall failed over an unrelated repository's hook: $output"
+  assert_not_contains "$output" 'still points into this checkout'
+  [[ -L "$temp_dir/foreign/.git/hooks/pre-push" ]] || \
+    fail "an unrelated repository's hook was removed"
+}
+
 # ── sgt-uninstall ─────────────────────────────────────────────────────────────
 
 test_uninstall_removes_only_what_this_checkout_installed() {
@@ -1941,6 +2001,8 @@ test_hooks_only_reports_its_work_and_creates_no_command_directory
 test_hooks_only_fails_when_no_hooks_directory_is_owned
 test_uninstall_removes_only_what_this_checkout_installed
 test_install_from_a_worktree_leaves_the_primary_hook_alone
+test_hook_refusal_advice_reaches_the_commands
+test_uninstall_ignores_an_unrelated_repository_in_the_cwd
 test_uninstall_reclaims_a_dangling_hook
 test_uninstall_fails_when_it_cannot_reach_the_hook_it_installed
 test_uninstall_removes_a_link_for_a_command_no_longer_shipped

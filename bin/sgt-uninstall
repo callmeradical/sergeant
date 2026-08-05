@@ -118,10 +118,14 @@ printf 'Kept %d entries owned by something else\n' "$kept"
 # outcome, or a hook this checkout installed is demonstrably still in place.
 if "$hooks_unresolved"; then
   stranded=0
+  # Both candidates must be absolute: `--git-common-dir` prints the relative
+  # string ".git" for a normal clone, which would resolve against the caller's
+  # working directory and inspect an unrelated repository's hooks.
+  primary_checkout="$(_sgt_install_primary_checkout "$ROOT_DIR")"
   for candidate in \
       "$(git -C "$ROOT_DIR" rev-parse --absolute-git-dir 2>/dev/null || true)" \
-      "$(git -C "$ROOT_DIR" rev-parse --git-common-dir 2>/dev/null || true)"; do
-    [[ -n "$candidate" && -d "$candidate/hooks" ]] || continue
+      "${primary_checkout:+$primary_checkout/.git}"; do
+    [[ -n "$candidate" && "$candidate" == /* && -d "$candidate/hooks" ]] || continue
     for hook in "$hooks_src"/*; do
       [[ -f "$hook" ]] || continue
       hook_target="$candidate/hooks/${hook##*/}"
