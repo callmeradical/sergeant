@@ -69,11 +69,17 @@ opencode    # or: claude
 overwrites anything you own: a real file, a directory, or a symlink pointing at
 something outside a Sergeant checkout is preserved and reported as a conflict for
 you to resolve. What it does reclaim without asking is its own: a symlink already
-pointing into some Sergeant checkout, a broken symlink, or an executable already
-sitting at a name it manages. So installing from a second clone repoints the
-commands at that clone rather than reporting a conflict. Conflicts are detected
-before the first package is installed, so a run that cannot finish cleanly
-declines without changing anything.
+pointing into some Sergeant checkout, a broken symlink, or an executable it
+previously installed at one of the tool names it manages (the mise-, Go- and
+uv-installed binaries). A real executable at one of Sergeant's own command names,
+or at a git hook, is preserved and reported like any other file. So installing
+from a second clone repoints the commands at that clone rather than reporting a
+conflict.
+
+Every conflict knowable before the package phase is reported first, so a run that
+cannot finish cleanly declines without changing anything. Git hooks are the one
+exception: git may itself be a package the run installs, so a hook conflict is
+only detectable once git is present.
 
 Use `./bin/sgt-bootstrap --verify-only` (or `mise run verify`) for a read-only
 check, and `--dry-run` to print the plan. Neither mode runs a package manager, an

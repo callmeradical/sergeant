@@ -19,14 +19,20 @@
 #
 # --dry-run and --verify-only run no package manager, no installer, and no agent
 # harness, so they cannot create state in a harness's configuration directory as
-# a side effect of inspecting it. The single third-party command they do run is
-# `yq --version`, which only reads a version string and is needed to tell Mike
-# Farah's yq from the unrelated Python package of the same name.
+# a side effect of inspecting it. The only third-party commands they run are
+# read-only queries: `yq --version`, needed to tell Mike Farah's yq from the
+# unrelated Python package of the same name, and `git config` / `git rev-parse`
+# to locate the git hooks directory.
 #
-# Safe to rerun. Every conflict is detected and reported BEFORE the first package
-# manager or network call, so a run either declines up front or proceeds. A real
-# file or a user-owned link where Sergeant wants its own entry is preserved and
-# reported, never overwritten. Authentication is never automated.
+# --verify-only proves presence, not capability: `mise run check` additionally
+# validates that td is the Marcus implementation.
+#
+# Safe to rerun. Every conflict knowable before the package phase is reported
+# first, so a run either declines up front or proceeds. Git hook conflicts are
+# the one exception: git may itself be a package this run installs, so hook state
+# is only knowable once git is present. A real file or a user-owned link where
+# Sergeant wants its own entry is preserved and reported, never overwritten.
+# Authentication is never automated.
 #
 # Per docs/repo-scoped-skills.md this command never writes to a user's global
 # agent configuration. Sergeant's skills are discovered from the repository
