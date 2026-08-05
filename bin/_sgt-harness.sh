@@ -185,12 +185,14 @@ _sgt_harness_settle_seconds() {
 # configured wall-clock minimum.  No presentation string, no harness-name
 # comparison.
 _sgt_harness_ready_tui() {
-  local pane="$1" dead capture now settle first_observation
+  local pane="$1" observed capture now settle first_observation
   [[ -n "$pane" ]] || return 1
   command -v tmux >/dev/null 2>&1 || return 1
 
-  dead="$(tmux display-message -p -t "$pane" '#{pane_dead}' 2>/dev/null)" || return 1
-  [[ "$dead" == "0" ]] || return 1
+  # `display-message -t <gone>` silently falls back to the default target, so the
+  # pane id has to be read back and compared rather than the exit status trusted.
+  observed="$(tmux display-message -p -t "$pane" '#{pane_id}|#{pane_dead}' 2>/dev/null)" || return 1
+  [[ "$observed" == "$pane|0" ]] || return 1
 
   capture="$(tmux capture-pane -p -t "$pane" 2>/dev/null)" || return 1
   # Any non-whitespace glyph proves the harness has drawn its interface.  The
