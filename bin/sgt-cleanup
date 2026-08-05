@@ -792,19 +792,22 @@ _rollback_remove_path() {
     _die "CRITICAL: rollback cleanup left an artifact for $context: $path"
 }
 
-# Publishes one evidence entry, refusing the destination shapes that `mv` cannot
-# replace safely.  `mv` into an existing directory moves the source INSIDE it and
-# still reports success, and an existing symlink relocates the source wherever the
-# link points, so either would silently move lifecycle evidence somewhere it can
-# never be found again.  An existing regular file is replaced, as it always was:
-# the entry being published is the identity-bound evidence, so it wins over an
-# unbound file that appeared underneath it and the caller still converges.
-_publish_worker_evidence_entry() {
+# Moves one evidence entry, in either direction: into the worktree when
+# publishing or replaying, and into a fleet-owned backup when rolling back.
+# Refuses the destination shapes `mv` cannot replace safely.  `mv` into an
+# existing directory moves the source INSIDE it and still reports success, and a
+# symlink to a directory does the same through the link, so either would silently
+# move lifecycle evidence somewhere it can never be found again; a symlink to a
+# non-directory is refused as well rather than replaced in place.  An existing
+# regular file is replaced, as it always was: the entry being moved is the
+# identity-bound evidence, so it wins over an unbound file that appeared
+# underneath it and the caller still converges.
+_move_worker_evidence_entry() {
   local destination="$2" source="$1"
 
   if [[ -L "$destination" || -d "$destination" ]]; then
-    printf 'ERROR: worker lifecycle evidence collides with an existing path: %s\n' \
-      "$destination" >&2
+    printf 'ERROR: worker lifecycle evidence collides with an existing path: %s (moving %s)\n' \
+      "$destination" "$source" >&2
     return 1
   fi
   mv "$source" "$destination"
@@ -815,7 +818,7 @@ _undo_worker_evidence_removal() {
 
   shift 2
   for name in "$@"; do
-    _publish_worker_evidence_entry "$backup_dir/$name" "$worktree/$name" || \
+    _move_worker_evidence_entry "$backup_dir/$name" "$worktree/$name" || \
       _die "Failed to roll back worker evidence removal: $worktree/$name"
   done
   rmdir "$backup_dir" || \
@@ -914,8 +917,8 @@ _restore_worker_evidence() {
     [[ -e "$evidence" || -L "$evidence" ]] || continue
     name="$(basename "$evidence")"
     if ! mv "$evidence" "$backup_dir/$name"; then
-      for name in "${backed_up[@]}"; do
-        _publish_worker_evidence_entry "$backup_dir/$name" "$worktree/$name" || \
+      for name in ${backed_up[@]+"${backed_up[@]}"}; do
+        _move_worker_evidence_entry "$backup_dir/$name" "$worktree/$name" || \
           _die "CRITICAL: worker evidence restore backup failed and rollback failed: $worktree/$name; inspect preserved transaction: $transaction"
       done
       _rollback_remove_path "$transaction" "worker evidence restore backup" \
@@ -937,13 +940,13 @@ _restore_worker_evidence() {
     name="$(basename "$evidence")"
     ((publish_count += 1))
     if ! _cleanup_fail_point "restore-publish-$publish_count" || \
-      ! _publish_worker_evidence_entry "$evidence" "$worktree/$name"; then
-      for name in "${published[@]}"; do
+      ! _move_worker_evidence_entry "$evidence" "$worktree/$name"; then
+      for name in ${published[@]+"${published[@]}"}; do
         _rollback_remove_path "$worktree/$name" \
           "published worker evidence restore" restore-rollback-cleanup
       done
-      for name in "${backed_up[@]}"; do
-        _publish_worker_evidence_entry "$backup_dir/$name" "$worktree/$name" || \
+      for name in ${backed_up[@]+"${backed_up[@]}"}; do
+        _move_worker_evidence_entry "$backup_dir/$name" "$worktree/$name" || \
           _die "CRITICAL: worker evidence restore publication failed and rollback failed: $worktree/$name; inspect preserved transaction: $transaction"
       done
       _rollback_remove_path "$transaction" "worker evidence restore publication" \
@@ -971,9 +974,9 @@ _restore_removed_worker_evidence() {
   for evidence in "$backup_dir"/.sergeant-*; do
     [[ -e "$evidence" || -L "$evidence" ]] || continue
     name="$(basename "$evidence")"
-    if ! _publish_worker_evidence_entry "$evidence" "$worktree/$name"; then
-      for name in "${restored[@]}"; do
-        _publish_worker_evidence_entry "$worktree/$name" "$backup_dir/$name" || \
+    if ! _move_worker_evidence_entry "$evidence" "$worktree/$name"; then
+      for name in ${restored[@]+"${restored[@]}"}; do
+        _move_worker_evidence_entry "$worktree/$name" "$backup_dir/$name" || \
           _die "Failed to roll back worker evidence recovery: $worktree/$name"
       done
       return 1
@@ -996,14 +999,16 @@ _restore_cross_filesystem_backup() {
     [[ ! -e "$published_path" && ! -L "$published_path" && \
       ! -e "$temp" && ! -L "$temp" ]] || return 1
     temps[${#temps[@]}]="$temp"
-    # The absence check above happens before a recursive copy that may take a
-    # while, so prove it again immediately before publishing.
+    # The absence check above can go stale during a recursive copy of a whole
+    # ledger tree, so publication additionally refuses the destination shapes mv
+    # cannot replace safely.  That narrows the rename race without closing it; the
+    # remaining window is tracked with the shared worktree lock work.
     if ! cp -pR "$evidence" "$temp" || \
-      ! _publish_worker_evidence_entry "$temp" "$published_path"; then
-      for temp in "${temps[@]}"; do
+      ! _move_worker_evidence_entry "$temp" "$published_path"; then
+      for temp in ${temps[@]+"${temps[@]}"}; do
         rm -rf "$temp" || return 1
       done
-      for published_path in "${published[@]}"; do
+      for published_path in ${published[@]+"${published[@]}"}; do
         rm -rf "$published_path" || return 1
       done
       return 1
@@ -1248,7 +1253,10 @@ _worker_evidence_records() {
     git hash-object --no-filters "$entry" || return 1
     return 0
   fi
-  [[ -d "$entry" ]] || return 1
+  # An unreadable directory would expand to no children and hash identically to an
+  # empty one, so refuse it instead: the `dir` record with no children has to mean
+  # a directory that really is empty.
+  [[ -d "$entry" && -r "$entry" && -x "$entry" ]] || return 1
   # Normal worker execution publishes notification ledgers and review gates as
   # directories (.sergeant-notification-acks/, .sergeant-review-gates/, ...).
   # Hash them recursively so identity stays stable and tamper-evident.

@@ -73,7 +73,7 @@ worker_evidence_records() {
     git hash-object --no-filters "$entry" || return 1
     return 0
   fi
-  [[ -d "$entry" ]] || return 1
+  [[ -d "$entry" && -r "$entry" && -x "$entry" ]] || return 1
   printf 'dir\n%s\n' "$entry"
   for child in "$entry"/* "$entry"/.[!.]* "$entry"/..?*; do
     [[ -e "$child" || -L "$child" ]] || continue
@@ -4957,6 +4957,10 @@ seed_ledger_evidence() {
   # across locales.
   printf 'spec gate passed\n' > \
     "$worktree/.sergeant-review-gates/Spec-Gate"
+  # Hidden children: real review-gate and notification writers take dotfile locks
+  # inside these directories, so the recursive walk must bind them too.
+  printf 'gate lock\n' > "$worktree/.sergeant-review-gates/.gate-lock"
+  printf 'double dot\n' > "$worktree/.sergeant-review-gates/..double-dot"
 }
 
 # Deterministic content snapshot of every evidence entry.  Symlinks are recorded
@@ -5047,6 +5051,10 @@ ledger_seed_forged_name() {
   : > "$1/.sergeant-review-gates/forged"$'\n'"file"$'\n'"record"
 }
 
+ledger_seed_unreadable_dir() {
+  chmod 000 "$1/.sergeant-review-gates/nested"
+}
+
 assert_ledger_bind_rejected() {
   local label="$1" output seed="$2" state status task_id worktree
 
@@ -5084,6 +5092,16 @@ assert_ledger_bind_rejected ledger-symlink ledger_seed_ledger_symlink
 assert_ledger_bind_rejected nested-fifo ledger_seed_nested_fifo
 assert_ledger_bind_rejected top-fifo ledger_seed_top_fifo
 assert_ledger_bind_rejected forged-name ledger_seed_forged_name
+# An unreadable directory expands to no children and would otherwise hash exactly
+# like an empty one.  Skipped as root, where the mode is not enforced.
+if [[ "$(id -u)" -ne 0 ]]; then
+  assert_ledger_bind_rejected unreadable-dir ledger_seed_unreadable_dir
+  # Restore the mode so the fixture teardown can remove the worktree.
+  chmod 755 \
+    "$TEST_ROOT/ledger-reject-unreadable-dir-worktree/.sergeant-review-gates/nested"
+else
+  printf 'sgt-cleanup ledger-evidence: SKIP unreadable directory rejection (running as root)\n'
+fi
 printf 'sgt-cleanup ledger-evidence: unbindable ledger evidence rejected ok\n'
 
 # Retry, replay and tamper-evidence for directory evidence.
@@ -5210,6 +5228,21 @@ run_ledger_retry
 [[ "$(ledger_retry_removals)" -eq 1 ]]
 mkdir "$TEST_ROOT/ledger-retry-worktree/.sergeant-notification-accepts"
 
+# Hidden children inside a ledger directory are bound too, so a dotfile lock
+# cannot be edited without changing the identity.
+printf 'tampered lock\n' > \
+  "$TEST_ROOT/ledger-retry-worktree/.sergeant-review-gates/.gate-lock"
+run_ledger_retry
+[[ "$ledger_retry_status" -ne 0 && \
+  "$ledger_retry_output" == *"Retry worker lifecycle evidence changed"* ]] || {
+  printf 'FAIL ledger-retry: cleanup accepted a mutated hidden ledger child: %s\n' \
+    "$ledger_retry_output" >&2
+  exit 1
+}
+[[ "$(ledger_retry_removals)" -eq 1 ]]
+printf 'gate lock\n' > \
+  "$TEST_ROOT/ledger-retry-worktree/.sergeant-review-gates/.gate-lock"
+
 # A partially removed ledger must be replayable from persisted evidence: drop
 # every live entry (the crash window between removal and worktree deletion) and
 # require the retry to restore it before reaching the remover again.  The replay
@@ -5232,6 +5265,41 @@ LEDGER_RETRY_LOCALE="$ledger_alt_locale" run_ledger_retry
 }
 [[ "$(ledger_evidence_snapshot "$ledger_retry_state/terminal-evidence")" == \
   "$ledger_persisted_before" ]]
+
+# A retry replay that fails partway through publishing must undo the directory
+# ledgers it already put back, leaving nothing published in the worktree and the
+# persisted evidence intact — the publish rollback is where nesting would be most
+# lossy, because the completed restore discards the only live backup.
+ledger_retry_publish_before="$(ledger_evidence_snapshot \
+  "$TEST_ROOT/ledger-retry-worktree")"
+set +e
+ledger_retry_publish_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  REAL_GIT="$REAL_GIT" LC_ALL=C \
+  SGT_CLEANUP_FAIL_POINT=restore-publish-2 \
+  FAKE_GIT_LOG="$TEST_ROOT/ledger-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" ledger-retry 2>&1)"
+ledger_retry_publish_status=$?
+set -e
+[[ "$ledger_retry_publish_status" -ne 0 && \
+  "$ledger_retry_publish_output" == *"Failed to restore persisted worker evidence: app"* ]] || {
+  printf 'FAIL ledger-retry: publish failure was not reported actionably: %s\n' \
+    "$ledger_retry_publish_output" >&2
+  exit 1
+}
+[[ "$(ledger_retry_removals)" -eq 2 ]]
+[[ "$(ledger_evidence_snapshot "$TEST_ROOT/ledger-retry-worktree")" == \
+  "$ledger_retry_publish_before" ]] || {
+  printf 'FAIL ledger-retry: the publish rollback left the worktree inconsistent\n' >&2
+  exit 1
+}
+[[ "$(ledger_evidence_snapshot "$ledger_retry_state/terminal-evidence")" == \
+  "$ledger_persisted_before" ]]
+if compgen -G "$ledger_retry_state/restore-evidence.tmp.*" >/dev/null; then
+  printf 'FAIL ledger-retry: the publish rollback left a restore transaction behind\n' >&2
+  exit 1
+fi
 
 # Finally allow the removal: the retry must complete and clear fleet state.
 touch "$TEST_ROOT/ledger-retry-allow"
@@ -5264,6 +5332,7 @@ case " $* " in
         printf 'racing entry\n' > "${!#}/$FAKE_RACE_NAME/racing-nonce" ;;
       file) printf 'racing entry\n' > "${!#}/$FAKE_RACE_NAME" ;;
       symlink) ln -s "$FAKE_RACE_TARGET" "${!#}/$FAKE_RACE_NAME" ;;
+      dangling) ln -s "$FAKE_RACE_TARGET/absent" "${!#}/$FAKE_RACE_NAME" ;;
     esac
     exit 1 ;;
   *) exec "$REAL_GIT" "$@" ;;
@@ -5331,8 +5400,13 @@ assert_ledger_collision_rejected() {
   }
 }
 
+# .sergeant-notification-accepts is the FIRST entry in byte order, so its rollback
+# runs with an empty restored-entry list — the case that aborts under Bash 3.2 when
+# the array expansion is unguarded.
+assert_ledger_collision_rejected first-entry dir .sergeant-notification-accepts
 assert_ledger_collision_rejected racing-dir dir .sergeant-notification-acks
 assert_ledger_collision_rejected racing-symlink symlink .sergeant-review-gates
+assert_ledger_collision_rejected dangling-symlink dangling .sergeant-result
 
 # A racing regular file is replaced by the identity-bound evidence, exactly as
 # before directory support, so the replay completes and a plain retry converges
