@@ -107,6 +107,9 @@ printf 'in_progress\nblocked\nin_review\n' > "$dev_root/nonopen/.td-task-statuse
 _make_repo mixed 10
 printf 'open\nin_progress\nopen\nblocked\nopen\nin_review\nopen\nclosed\nin_progress\nblocked\n' \
   > "$dev_root/mixed/.td-task-statuses"
+# Tasks 3 (open) and 6 (in_review) are deferred: non-closed, and hidden from td's
+# default answer, so they are exactly the tasks a single read would lose.
+printf '3 6\n' > "$dev_root/mixed/.td-task-deferred"
 
 cat > "$config/nopath.yaml" <<EOF
 name: nopath
@@ -130,6 +133,15 @@ name: mixed
 repos:
   - name: mixed
     path: mixed
+EOF
+
+cat > "$config/notcloned.yaml" <<EOF
+name: notcloned
+repos:
+  - name: small
+    path: small
+  - name: ghostrepo
+    path: ghostrepo
 EOF
 
 cat > "$config/nonopen.yaml" <<EOF
@@ -192,6 +204,7 @@ if not argv or argv[0] not in ("list", "ls"):
 
 work_dir = "."
 td_filter = ""
+deferred_only = False
 limit = 50  # real td default
 idx = 1
 while idx < len(argv):
@@ -211,6 +224,9 @@ while idx < len(argv):
     elif arg == "--filter":
         td_filter = argv[idx + 1]
         idx += 2
+    elif arg == "--deferred":
+        deferred_only = True
+        idx += 1
     else:
         idx += 1
 
@@ -266,11 +282,25 @@ for clause in td_filter.split(" AND "):
     if clause.startswith("status="):
         want_status = clause[len("status="):]
 
+deferred_file = Path(work_dir) / ".td-task-deferred"
+deferred_idx = set()
+if deferred_file.is_file():
+    deferred_idx = {int(x) for x in deferred_file.read_text().split() if x}
+
+# Real td: its default answer hides deferred tasks, --deferred returns only
+# those, and --filter makes td ignore --deferred altogether.
 tasks = []
 for n in range(total):
     status = cycle[n % len(cycle)]
     if status == "closed":
         continue                      # real td excludes closed without --all
+    is_deferred = (n + 1) in deferred_idx
+    if td_filter:
+        pass                          # --filter defeats --deferred
+    elif deferred_only and not is_deferred:
+        continue
+    elif not deferred_only and is_deferred:
+        continue
     if want_status and status != want_status:
         continue
     tasks.append(
@@ -409,13 +439,13 @@ PY
 }
 printf 'json_repo_tagging: ok\n'
 
-# Tagging and merging happen in one pass over staged payloads: one python3
-# process for the repo map, one per repo to parse and count, and one merge.
-# Anything more means per-repo tagging crept back in — that was the shape whose
-# whitespace-split merge silently produced an empty array.
+# Per repo: one parse for td's default answer, one for its deferred answer, and
+# one merge — plus one repo-map read and one final tag-and-merge pass for the
+# whole project.  Anything more means per-repo tagging crept back in, and that
+# was the shape whose whitespace-split merge silently produced an empty array.
 python_calls="$(wc -l < "$TEST_ROOT/python.log" | tr -d ' ')"
-[[ "$python_calls" -le 4 ]] || {
-  _fail "json_single_merge_pass: expected at most 4 python3 processes for 2 repos, got $python_calls"
+[[ "$python_calls" -le 8 ]] || {
+  _fail "json_single_merge_pass: expected at most 8 python3 processes for 2 repos, got $python_calls"
 }
 printf 'json_single_merge_pass: ok (%s python3 processes for 2 repos)\n' "$python_calls"
 
@@ -436,8 +466,10 @@ grep -qF -- '--limit 5' "$TEST_ROOT/td.log" || {
 }
 # The default must not be injected alongside the caller's limit: the only limits
 # td may see are the caller's 5 and the deliberate 6 that proves truncation.
+# The caller's cap limits what is printed, not what is read, so the read uses the
+# normal escalating limit and the caller's own flag is still forwarded.
 limits_seen="$(grep -o -- '--limit [0-9]*' "$TEST_ROOT/td.log" | sort -u | tr '\n' ',')"
-[[ "$limits_seen" == "--limit 5,--limit 6," ]] || {
+[[ "$limits_seen" == "--limit 1001,--limit 5," ]] || {
   printf 'actual td calls:\n%s\nlimits seen: %s\n' "$(cat "$TEST_ROOT/td.log")" "$limits_seen" >&2
   _fail "user_limit_wins: unexpected limits sent to td (a default was injected?)"
 }
@@ -587,17 +619,17 @@ grep -qF '── small (7)' "$out" || {
 }
 printf 'exact_limit_no_warning: ok\n'
 
-# A caller limit that does withhold tasks reports a proven lower bound.
+# A caller limit that does withhold tasks names the exact total it withheld from.
 : > "$TEST_ROOT/td.log"
 out="$TEST_ROOT/lower.out"; err="$TEST_ROOT/lower.err"
 _run "$out" "$err" -- example --repos small --limit 3
-_expect_status 2 caller_limit_lower_bound "$err"
-grep -qF '── small (3)' "$out" || _fail "caller_limit_lower_bound: caller limit must still win"
-grep -qF 'at least 4 task(s)' "$err" || {
+_expect_status 2 caller_limit_exact_total "$err"
+grep -qF '── small (3)' "$out" || _fail "caller_limit_exact_total: caller limit must still cap the printed rows"
+grep -qF '7 task(s) exist' "$err" || {
   printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
-  _fail "caller_limit_lower_bound: warning must state the proven lower bound"
+  _fail "caller_limit_exact_total: the repo was read completely, so the warning must name the exact total"
 }
-printf 'caller_limit_lower_bound: ok\n'
+printf 'caller_limit_exact_total: ok\n'
 
 # ── 10. Every caller limit spelling wins and is never supplemented ────────────
 
@@ -981,7 +1013,7 @@ grep -qF 'priority=P1' "$TEST_ROOT/td.log" || {
   printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
   _fail "priority_filter_composed: --priority alone must not narrow the status view"
 }
-grep -qF '[all non-closed AND priority=P1; deferred excluded]' "$out" || {
+grep -qF '[all non-closed AND priority=P1]' "$out" || {
   printf 'actual output:\n%s\n' "$(cat "$out")" >&2
   _fail "priority_filter_composed: the header must name the active view"
 }
@@ -995,9 +1027,9 @@ _expect_status 0 all_drops_status_filter "$err"
   printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
   _fail "all_drops_status_filter: --all must not send a status filter to td"
 }
-grep -qF '[all non-closed; deferred excluded]' "$out" || {
+grep -qF '[all non-closed]' "$out" || {
   printf 'actual output:\n%s\n' "$(cat "$out")" >&2
-  _fail "all_drops_status_filter: --all must name the same view as the default"
+  _fail "all_matches_default_label: --all must name the same view as the default"
 }
 printf 'all_drops_status_filter: ok\n'
 
@@ -1114,7 +1146,7 @@ printf 'signal_never_reports_success: ok\n'
 out="$TEST_ROOT/mixed.out"; err="$TEST_ROOT/mixed.err"
 _run "$out" "$err" -- mixed
 _expect_status 0 default_view_is_complete "$err"
-grep -qF '[all non-closed; deferred excluded]' "$out" || {
+grep -qF '[all non-closed]' "$out" || {
   printf 'actual output:\n%s\n' "$(cat "$out")" >&2
   _fail "default_view_is_complete: the header must name the active view"
 }
@@ -1175,7 +1207,7 @@ grep -qF '── mixed (2)' "$out" || {
   printf 'actual output:\n%s\n' "$(cat "$out")" >&2
   _fail "explicit_status_filter: --status blocked must report exactly the blocked tasks"
 }
-grep -qF '[status=blocked; deferred excluded]' "$out" || {
+grep -qF '[status=blocked]' "$out" || {
   printf 'actual output:\n%s\n' "$(cat "$out")" >&2
   _fail "explicit_status_filter: the header must name the narrowed view"
 }
@@ -1226,5 +1258,107 @@ grep -qF 'status=open' "$err" || {
   _fail "json_states_narrowed_view: a narrowed --json run must name its view on stderr"
 }
 printf 'json_states_narrowed_view: ok\n'
+
+# ── 31. Deferred tasks are non-closed, so the default view includes them ──────
+
+# td hides deferred tasks from its default answer and returns them only from a
+# separate --deferred query, so a single read loses them silently.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/defer.out"; err="$TEST_ROOT/defer.err"
+_run "$out" "$err" -- mixed
+_expect_status 0 deferred_tasks_included "$err"
+grep -qF '── mixed (9)' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "deferred_tasks_included: all 9 non-closed tasks must be reported, deferred ones included"
+}
+for id in td-000003 td-000006; do
+  grep -qF "$id" "$out" || {
+    printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+    _fail "deferred_tasks_included: deferred task $id is non-closed and must appear"
+  }
+done
+grep -qF -- '--deferred' "$TEST_ROOT/td.log" || {
+  printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
+  _fail "deferred_tasks_included: the deferred half of the repo must actually be read"
+}
+# The two reads overlap in nothing, and a task must never be counted twice.
+[[ "$(grep -c -- 'td-000003' "$out")" == "1" ]] || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "deferred_tasks_included: merging the two reads must not duplicate a task"
+}
+printf 'deferred_tasks_included: ok\n'
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/defer-json.out"; err="$TEST_ROOT/defer-json.err"
+_run "$out" "$err" -- mixed --json
+_expect_status 0 deferred_tasks_included_json "$err"
+json_ids="$("$REAL_PYTHON" -c '
+import json, sys
+tasks = json.load(open(sys.argv[1]))
+ids = [t["id"] for t in tasks]
+print(len(ids), len(set(ids)), "td-000003" in ids, "td-000006" in ids)' "$out")"
+[[ "$json_ids" == "9 9 True True" ]] || {
+  printf 'actual (count distinct has3 has6): %s\n' "$json_ids" >&2
+  _fail "deferred_tasks_included_json: --json must carry every non-closed task exactly once"
+}
+printf 'deferred_tasks_included_json: ok\n'
+
+# A narrowed --status view narrows the deferred half too: task 6 is in_review.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/defer-status.out"; err="$TEST_ROOT/defer-status.err"
+_run "$out" "$err" -- mixed --status in_review
+_expect_status 0 deferred_respects_status_filter "$err"
+grep -qF 'td-000006' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "deferred_respects_status_filter: a deferred in_review task must appear under --status in_review"
+}
+! grep -qF 'td-000003' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "deferred_respects_status_filter: a deferred open task must not appear under --status in_review"
+}
+printf 'deferred_respects_status_filter: ok\n'
+
+# A caller-supplied --filter defeats td's --deferred, so the view says so.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/callerfilter.out"; err="$TEST_ROOT/callerfilter.err"
+_run "$out" "$err" -- mixed --filter 'status=open'
+_expect_status 0 caller_filter_discloses_deferred_gap "$err"
+grep -qF 'deferred excluded' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "caller_filter_discloses_deferred_gap: the header must disclose the deferred gap"
+}
+! grep -qF -- '--deferred' "$TEST_ROOT/td.log" || {
+  printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
+  _fail "caller_filter_discloses_deferred_gap: a deferred read td would ignore must not be issued"
+}
+printf 'caller_filter_discloses_deferred_gap: ok\n'
+
+# ── 32. --all and --status cannot silently disagree ───────────────────────────
+
+out="$TEST_ROOT/conflict.out"; err="$TEST_ROOT/conflict.err"
+_run "$out" "$err" -- mixed --all --status blocked
+_expect_status 1 all_status_conflict_is_explicit "$err"
+grep -qF 'mutually exclusive' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "all_status_conflict_is_explicit: combining --all and --status must be an explicit error"
+}
+printf 'all_status_conflict_is_explicit: ok\n'
+
+# ── 33. A configured repo that is not cloned is visible, not invisible ────────
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/ghost.out"; err="$TEST_ROOT/ghost.err"
+_run "$out" "$err" -- notcloned
+_expect_status 0 uncloned_repo_is_noted "$err"
+grep -qF 'ghostrepo' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "uncloned_repo_is_noted: a configured repo that is not cloned must be named"
+}
+grep -qF 'sgt-sync' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "uncloned_repo_is_noted: the note must say how to include it"
+}
+grep -qF '── small (7)' "$out" || _fail "uncloned_repo_is_noted: cloned repos must still be reported"
+printf 'uncloned_repo_is_noted: ok\n'
 
 printf '\nAll sgt-td-list tests passed.\n'

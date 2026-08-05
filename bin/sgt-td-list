@@ -37,13 +37,15 @@
 #   is unaffected, and a repo that reaches the ceiling still warns on stderr.
 #
 # Status filter:
-#   The default view is every non-closed task, matching td's own default: open,
-#   in_progress, in_review and blocked.  A narrower view is opt-in through
-#   --status, and the active view is always named in the human header.
+#   The default view is every non-closed task: open, in_progress, in_review and
+#   blocked, including deferred ones.  td's own default hides deferred tasks and
+#   `td list --deferred` returns only those, so each repo is read twice and the
+#   two answers are merged.  A narrower view is opt-in through --status, and the
+#   active view is always named in the human header.
 #
-#   Deferred tasks are the one exclusion, because td only offers them together
-#   with closed ones (`td list -a`) or alone (`td list --deferred`).  The header
-#   says so rather than leaving a reader to infer it.
+#   One case still excludes deferred tasks: a caller-supplied `--filter`, because
+#   td ignores --deferred when --filter is present, so the deferred half cannot
+#   be narrowed the same way.  The header says so instead of quietly dropping it.
 #
 #   Before 2026-08, the default narrowed to status=open, which hid in_progress,
 #   in_review and blocked work — and any repo whose tasks were all non-open —
@@ -97,6 +99,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# --all used to silently discard an explicit --status.  Say so instead.
+if $TD_ALL && [[ -n "$STATUS_FILTER" ]]; then
+  _die "--all and --status are mutually exclusive: --all is every non-closed status, which is the default"
+fi
+
 # Build td filter expression.  With no --status, no status clause is sent at all,
 # so td returns every non-closed task.  --all is accepted for compatibility and
 # means the same thing.
@@ -112,15 +119,26 @@ if [[ -n "$PRIORITY_FILTER" ]]; then
   fi
 fi
 
+# td ignores --deferred whenever --filter is present, so a caller's own TDQ
+# expression is the one view whose deferred half cannot be read.
+INCLUDE_DEFERRED=true
+if [[ "${#EXTRA_FLAGS[@]}" -gt 0 ]]; then
+  for ((i=0; i<${#EXTRA_FLAGS[@]}; i++)); do
+    case "${EXTRA_FLAGS[$i]}" in
+      --filter|-f|--filter=*) INCLUDE_DEFERRED=false ;;
+    esac
+  done
+fi
+
 # What the reader is actually looking at, stated rather than implied.
-if [[ -n "$STATUS_FILTER" ]] && ! $TD_ALL; then
+if [[ -n "$STATUS_FILTER" ]]; then
   VIEW_LABEL="$TD_FILTER"
 elif [[ -n "$PRIORITY_FILTER" ]]; then
   VIEW_LABEL="all non-closed AND $TD_FILTER"
 else
   VIEW_LABEL="all non-closed"
 fi
-VIEW_LABEL="$VIEW_LABEL; deferred excluded"
+$INCLUDE_DEFERRED || VIEW_LABEL="$VIEW_LABEL; deferred excluded"
 
 # ── Temporary workspace ───────────────────────────────────────────────────────
 # One workspace for every mode, cleaned up on any exit, so an interrupted run
@@ -152,8 +170,18 @@ _mark_incomplete() { : 2>/dev/null > "$WORK/incomplete" || true; }
 _report_incomplete() { [[ -e "$WORK/incomplete" ]]; }
 
 _truncation_warn() {
-  # _truncation_warn <repo> <proven-lower-bound> <cap-description>
-  # Never claims an exact total: the cap is what stops us from knowing it.
+  # _truncation_warn <repo> <exact-total> <cap-description>
+  # Used where the repo was read completely and only the published rows were
+  # capped, so the total is known.
+  printf 'WARNING: %s: results truncated by %s; %s task(s) exist, so this report is incomplete\n' \
+    "$1" "$3" "$2" >&2
+  _mark_incomplete
+}
+
+_ceiling_warn() {
+  # _ceiling_warn <repo> <proven-lower-bound> <cap-description>
+  # Used at the escalation ceiling, which is the one cap that stops us from
+  # learning the true total, so the message claims only what was proven.
   printf 'WARNING: %s: results truncated by %s; at least %s task(s) exist, so this report is incomplete\n' \
     "$1" "$3" "$2" >&2
   _mark_incomplete
@@ -335,66 +363,133 @@ else:
   return 1
 }
 
+_merge_reads() {
+  # _merge_reads <base-json> <deferred-json> → "<total>\n<json>"
+  # td ignores --filter when --deferred is set, so the deferred rows are narrowed
+  # here instead, on the two fields this command builds its own filter from.
+  printf '%s\n%s' "$1" "$2" | python3 -c "
+import sys, json
+
+want_status = sys.argv[1]
+want_priority = sys.argv[2]
+raw = sys.stdin.read().split('\n', 1)
+base = json.loads(raw[0])
+deferred = json.loads(raw[1]) if len(raw) > 1 and raw[1].strip() else []
+
+merged = list(base)
+seen = set(task.get('id') for task in base)
+for task in deferred:
+    if task.get('id') in seen:
+        continue
+    if want_status and task.get('status') != want_status:
+        continue
+    if want_priority and task.get('priority') != want_priority:
+        continue
+    seen.add(task.get('id'))
+    merged.append(task)
+sys.stdout.write('%d\n%s' % (len(merged), json.dumps(merged)))
+" "$STATUS_FILTER" "$PRIORITY_FILTER"
+}
+
+_td_read_complete() {
+  # _td_read_complete <repo_name> <repo_path> [td flags...] → "<total>\n<json>"
+  #   0  the repo was read completely
+  #   2  the escalation ceiling stopped the read (already warned)
+  #   1  the repo is unreadable (already warned)
+  #
+  # Asks for one more task than it is willing to accept, so a short response
+  # proves the answer is complete.
+  local rname="$1" repo_path="$2"
+  local head keep limit payload published total
+  shift 2
+
+  limit="$TD_LIST_LIMIT"
+  while :; do
+    # At the ceiling, publish exactly the ceiling: a returned extra row is then
+    # proof that tasks were withheld rather than a hint.
+    keep=-1
+    [[ "$limit" -lt "$TD_LIST_MAX_LIMIT" ]] || keep="$TD_LIST_MAX_LIMIT"
+    payload="$(_td_list_once "$rname" "$keep" "$repo_path" "$@" --limit "$((limit + 1))")" || return 1
+    head="$(_payload_head "$payload")"
+    total="${head%% *}"
+    published="${head#* }"
+    if [[ "$total" -le "$limit" ]]; then
+      printf '%s\n%s' "$total" "$(_payload_json "$payload")"
+      return 0
+    fi
+    if [[ "$limit" -ge "$TD_LIST_MAX_LIMIT" ]]; then
+      _ceiling_warn "$rname" "$total" \
+        "the SGT_TD_LIST_MAX_LIMIT ceiling of $TD_LIST_MAX_LIMIT (raise it to see the rest)"
+      printf '%s\n%s' "$published" "$(_payload_json "$payload")"
+      return 2
+    fi
+    limit=$((limit * 2))
+    [[ "$limit" -le "$TD_LIST_MAX_LIMIT" ]] || limit="$TD_LIST_MAX_LIMIT"
+  done
+}
+
 _td_list_tasks() {
   # _td_list_tasks <repo_name> <repo_path> → "<published>\n<json>"
   #
-  # Asks for one more task than it is willing to publish, so a single response
-  # proves whether anything was withheld.  Returns 1 for an unreadable repo.
+  # The complete non-closed set is td's default answer merged with td's deferred
+  # answer, because td will not return both at once.  A caller limit caps what is
+  # published, never what is read, so the truncation warning can name the exact
+  # total instead of a lower bound.
   local rname="$1" repo_path="$2"
-  local head keep limit payload published total
+  local base capped=false deferred="[]" head json payload published read_status=0 total
 
-  if $USER_LIMIT_SET; then
-    if _is_positive_int "$USER_LIMIT"; then
-      # One request, one snapshot: ask for the caller's limit plus one row and
-      # publish only what the caller asked for.  Truncation is then proven by
-      # the same response that produced the report, not by a later re-read.
-      payload="$(_td_list_once "$rname" "$USER_LIMIT" "$repo_path" \
-        --limit "$((USER_LIMIT + 1))")" || return 1
-      head="$(_payload_head "$payload")"
-      total="${head%% *}"
-      published="${head#* }"
-      [[ "$total" -le "$USER_LIMIT" ]] \
-        || _truncation_warn "$rname" "$total" "the requested --limit $USER_LIMIT"
-    else
-      # A limit only td can interpret: forward it untouched.  `--limit 0` is td
-      # asking td for its own default cap, which is the silent truncation this
-      # command exists to prevent, so say so instead of guessing a total.
-      payload="$(_td_list_once "$rname" -1 "$repo_path")" || return 1
-      head="$(_payload_head "$payload")"
-      published="${head#* }"
-      if [[ "$USER_LIMIT" == "0" && "$published" -gt 0 ]]; then
-        _mark_incomplete
-        printf 'WARNING: %s: --limit 0 leaves td to apply its own default limit, so these %s task(s) may be truncated; pass a positive --limit or none at all\n' \
-          "$rname" "$published" >&2
-      fi
+  if $USER_LIMIT_SET && ! _is_positive_int "$USER_LIMIT"; then
+    # A limit only td can interpret: forward it untouched and read once.
+    # `--limit 0` is td asking td for its own default cap, which is the silent
+    # truncation this command exists to prevent, so say so.
+    payload="$(_td_list_once "$rname" -1 "$repo_path")" || return 1
+    head="$(_payload_head "$payload")"
+    published="${head#* }"
+    if [[ "$USER_LIMIT" == "0" && "$published" -gt 0 ]]; then
+      _mark_incomplete
+      printf 'WARNING: %s: --limit 0 leaves td to apply its own default limit, so these %s task(s) may be truncated; pass a positive --limit or none at all\n' \
+        "$rname" "$published" >&2
     fi
     printf '%s\n%s' "$published" "$(_payload_json "$payload")"
     return 0
   fi
 
-  limit="$TD_LIST_LIMIT"
-  while :; do
-    # At the ceiling, publish exactly the ceiling: then a returned extra row
-    # proves tasks were withheld instead of merely hinting at it.
-    keep=-1
-    [[ "$limit" -lt "$TD_LIST_MAX_LIMIT" ]] || keep="$TD_LIST_MAX_LIMIT"
-    payload="$(_td_list_once "$rname" "$keep" "$repo_path" --limit "$((limit + 1))")" || return 1
-    head="$(_payload_head "$payload")"
-    total="${head%% *}"
-    published="${head#* }"
-    if [[ "$total" -le "$limit" ]]; then
-      printf '%s\n%s' "$published" "$(_payload_json "$payload")"
-      return 0
+  base="$(_td_read_complete "$rname" "$repo_path")" || read_status=$?
+  [[ "$read_status" -ne 1 ]] || return 1
+  [[ "$read_status" -ne 2 ]] || capped=true
+
+  if $INCLUDE_DEFERRED && ! $capped; then
+    # td hides deferred tasks from its default answer and refuses to narrow them
+    # with --filter, so they are read separately and merged.
+    local deferred_payload deferred_status=0
+    deferred_payload="$(_td_read_complete "$rname" "$repo_path" --deferred)" || deferred_status=$?
+    if [[ "$deferred_status" -eq 0 ]]; then
+      deferred="$(_payload_json "$deferred_payload")"
+    elif [[ "$deferred_status" -eq 2 ]]; then
+      capped=true
+      deferred="$(_payload_json "$deferred_payload")"
     fi
-    if [[ "$limit" -ge "$TD_LIST_MAX_LIMIT" ]]; then
-      _truncation_warn "$rname" "$total" \
-        "the SGT_TD_LIST_MAX_LIMIT ceiling of $TD_LIST_MAX_LIMIT (raise it to see the rest)"
-      printf '%s\n%s' "$published" "$(_payload_json "$payload")"
-      return 0
-    fi
-    limit=$((limit * 2))
-    [[ "$limit" -le "$TD_LIST_MAX_LIMIT" ]] || limit="$TD_LIST_MAX_LIMIT"
-  done
+    # deferred_status 1 already warned and marked the report incomplete.
+  fi
+
+  payload="$(_merge_reads "$(_payload_json "$base")" "$deferred")"
+  head="$(_payload_head "$payload")"
+  total="$head"
+  json="$(_payload_json "$payload")"
+
+  if $USER_LIMIT_SET && [[ "$total" -gt "$USER_LIMIT" ]]; then
+    # The whole repo was read, so the caller's cap only limits what is printed
+    # and the exact total is known.
+    $capped || _truncation_warn "$rname" "$total" "the requested --limit $USER_LIMIT"
+    json="$(printf '%s' "$json" | python3 -c "
+import sys, json
+sys.stdout.write(json.dumps(json.load(sys.stdin)[:int(sys.argv[1])]))
+" "$USER_LIMIT")"
+    total="$USER_LIMIT"
+  fi
+
+  printf '%s\n%s' "$total" "$json"
+  return 0
 }
 
 _repo_payload() {
@@ -414,7 +509,15 @@ _repo_payload() {
     return 1
   fi
   if ! _sgt_is_git_repo "$repo_path"; then
-    ! $named || _unreadable_warn "$rname" "not a git checkout at $repo_path"
+    if $named; then
+      _unreadable_warn "$rname" "not a git checkout at $repo_path"
+    else
+      # Not cloned yet is an expected state, but a whole repo missing from a
+      # backlog should never be invisible.  Informational, so the exit status
+      # still reflects only what could not be read.
+      printf 'note: %s: not cloned at %s; run sgt-sync %s to include it
+'         "$rname" "$repo_path" "$PROJECT" >&2
+    fi
     return 1
   fi
   _td_list_tasks "$rname" "$repo_path"

@@ -11,8 +11,10 @@ sgt-td-list <project>        # every non-closed task; --status open narrows it
 `sgt-td-list` exits 0 for a complete report, 1 when the invocation or
 environment is unusable, and 2 when the report is incomplete because a repo
 could not be read or a limit withheld tasks. The active view is named in the
-header; deferred tasks are excluded, because td offers them only alongside
-closed ones.
+header. Deferred tasks are included: td hides them from its default answer, so
+each repo is read twice and the answers are merged. A repo configured in the
+project but not cloned yet is noted on stderr and does not change the exit
+status — run `sgt-sync <project>` to include it.
 
 Use resolved project output to identify repository ownership and instructions.
 Do not infer ownership from the current working directory.
