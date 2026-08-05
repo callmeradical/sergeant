@@ -408,6 +408,12 @@ _response_state_present() {
 _named_tree_digest() {
   local digest name names="$2" root="$1" stream
 
+  # A symlinked root would let an identical copy elsewhere stand in for the
+  # entries this digest is supposed to bind, so refuse it the same way each entry
+  # is refused.  A root that does not exist is legitimate: every entry under it is
+  # then recorded as absent.
+  [[ ! -L "$root" ]] || return 1
+  [[ ! -e "$root" || -d "$root" ]] || return 1
   stream="$(mktemp)" || return 1
   if ! (
     # The collation is deliberately confined to this subshell: only the record
@@ -509,7 +515,7 @@ _response_owner_provably_dead() {
 # report its own "No such file or directory" for every legitimately absent field.
 _response_state_field() {
   # shellcheck disable=SC2002
-  cat "$1" 2>/dev/null | tr -d '\n'
+  { cat "$1" 2>/dev/null || true; } | tr -d '\n'
 }
 
 # The owner evidence a retirement archive keeps, in the shared key=value field
@@ -644,7 +650,13 @@ _publish_response_retirement_staged() {
       retirement-stage-rollback-cleanup
     return 1
   fi
-  if ! _cleanup_fail_point retirement-publish || ! mv "$staging" "$retirement"; then
+  # `mv` into an existing directory moves the source inside it and still reports
+  # success, so the destination shape is checked before the rename and the
+  # published archive is proven to be at the archive path afterwards.
+  if ! _cleanup_fail_point retirement-publish || \
+    [[ -e "$retirement" || -L "$retirement" ]] || \
+    ! mv "$staging" "$retirement" || \
+    [[ ! -f "$retirement/manifest" || -L "$retirement/manifest" ]]; then
     printf 'could not publish the retirement archive: %s\n' "$retirement"
     _rollback_remove_path "$staging" "retirement archive publication" \
       retirement-stage-rollback-cleanup
@@ -670,6 +682,14 @@ _validate_response_retirement() {
       return 1
     fi
   done
+  # The archived copies must be the directories that were bound, not links to a
+  # tree that happens to hash the same.
+  for name in partial partial/fleet partial/worktree; do
+    if [[ ! -d "$retirement/$name" || -L "$retirement/$name" ]]; then
+      printf 'the retirement archive is incomplete: %s\n' "$retirement/$name"
+      return 1
+    fi
+  done
   recorded_fleet="$(_sgt_response_archive_field fleet_state_digest \
     "$retirement/manifest" 2>/dev/null || true)"
   recorded_worktree="$(_sgt_response_archive_field worktree_state_digest \
@@ -687,6 +707,13 @@ _validate_response_retirement() {
     "$(_response_retirement_fields_digest "$retirement" 2>/dev/null || true)" != \
       "$recorded_fields" ]]; then
     printf 'the retirement archive no longer matches the state it preserved\n'
+    return 1
+  fi
+  # Re-deriving the whole manifest binds every field it records, including the
+  # retired response identity and generation, to the state that is there now.
+  if [[ "$(_response_retirement_manifest "$repo_dir" "$recorded_fleet" \
+    "$recorded_worktree" "$recorded_fields")" != "$(cat "$retirement/manifest")" ]]; then
+    printf 'the retired response no longer matches the retirement archive\n'
     return 1
   fi
   if [[ "$(_response_retirement_owner_record "$repo_dir" "$td_status")" != \
@@ -823,29 +850,50 @@ _require_response_cleanup_safe() {
 # on success and the reason it could not be resolved on failure.
 #
 # Terminal classification must never depend on the directory cleanup happens to
-# run from, so the binding is the configured repository root — the same verified
-# owner identity every destructive step in this file already checks — and never a
-# path the caller supplied.  The recorded worktree is not itself trusted as the
-# binding: a worktree replaced by an unrelated repository would otherwise answer
-# the lookup out of a foreign td database.  When one is recorded and still
-# present, it must belong to that configured owner or the lookup fails closed
-# here, before any pane is stopped and before any evidence is published.
+# run from, so the binding is an owner identity the fleet itself recorded, never a
+# path the caller supplied.  Resolution mirrors _validate_retry_owner, which is
+# already the file's rule for deciding an owner when the project configuration has
+# moved on:
+#
+#   1. the configured repository root, when the project YAML resolves it;
+#   2. otherwise a hard refusal when brief.md names a project whose YAML no longer
+#      resolves, exactly as _validate_retry_owner refuses that case;
+#   3. otherwise, for a legacy fleet that names no project at all, the owner root a
+#      previous cleanup pass already recorded and validated in cleanup-owner.
+#
+# The recorded worktree is never trusted as the binding on its own: a worktree
+# replaced by an unrelated repository would answer the lookup out of a foreign td
+# database.  When one is recorded and still present it must belong to the resolved
+# owner, so a mismatch fails closed here — before any pane is stopped and before
+# any evidence is published — rather than at the removal gate.
 _owning_repository_work_dir() {
   local repo_dir="$1" repo_name="$2"
-  local configured_root worktree
+  local owner_root worktree
 
-  if ! configured_root="$(_configured_repo_root "$repo_name" 2>/dev/null)"; then
-    printf 'no configured repository root resolves for %s\n' "$repo_name"
+  if ! owner_root="$(_configured_repo_root "$repo_name" 2>/dev/null)"; then
+    if _task_project >/dev/null 2>&1; then
+      printf 'the configured repository root for %s no longer resolves\n' "$repo_name"
+      return 1
+    fi
+    owner_root="$(sed -n '3p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
+    if [[ -z "$owner_root" ]]; then
+      printf 'no configured or recorded repository root resolves for %s\n' "$repo_name"
+      return 1
+    fi
+  fi
+  if [[ ! -d "$owner_root" || -L "$owner_root" ]] || \
+    ! git -C "$owner_root" rev-parse --git-dir >/dev/null 2>&1; then
+    printf 'the owning repository is unavailable for %s: %s\n' "$repo_name" "$owner_root"
     return 1
   fi
   worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
   if [[ -n "$worktree" && -d "$worktree" && ! -L "$worktree" ]] && \
-    ! _require_worktree_owner "$configured_root" "$worktree"; then
-    printf 'the recorded worktree does not belong to the configured repository %s: %s\n' \
-      "$configured_root" "$worktree"
+    ! _require_worktree_owner "$owner_root" "$worktree"; then
+    printf 'the recorded worktree does not belong to the owning repository %s: %s\n' \
+      "$owner_root" "$worktree"
     return 1
   fi
-  printf '%s\n' "$configured_root"
+  printf '%s\n' "$owner_root"
 }
 
 # _owning_td_task_state — print the status of the td task recorded for a repo's

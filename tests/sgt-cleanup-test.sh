@@ -5725,7 +5725,7 @@ TD_WORK_DIR_LOG="$TEST_ROOT/bound-foreign.log" \
   printf 'FAIL gh#171: cleanup accepted a worktree owned by an unrelated repository\n' >&2
   exit 1
 }
-[[ "$bound_output" == *"does not belong to the configured repository"* ]] || {
+[[ "$bound_output" == *"does not belong to the owning repository"* ]] || {
   printf 'FAIL gh#171: a foreign worktree was not reported as an ownership mismatch: %s\n' \
     "$bound_output" >&2
   exit 1
@@ -6386,6 +6386,45 @@ for retire_tamper in partial/fleet/response body proof; do
     'no longer matches the state it preserved' retry
 done
 printf 'sgt-cleanup gh#170: tampered retirement archive refused ok\n'
+
+# An archived copy replaced by a link to an identical tree elsewhere is not the
+# state that was bound, however equal its contents are.
+for retire_link in partial partial/fleet partial/worktree; do
+  seed_retirement_task retire-linked
+  seed_retirement_partial applied-unacked
+  RETIRE_FAIL_POINT=phase-publish-reconciled-absent run_retirement_cleanup retire-linked
+  [[ -d "$retire_state/response-retirement/$retire_link" ]] || {
+    printf 'FAIL gh#170 linked: retirement published no %s to relink\n' "$retire_link" >&2
+    exit 1
+  }
+  rm -rf "$TEST_ROOT/retire-linked-elsewhere"
+  cp -a "$retire_state/response-retirement/$retire_link" \
+    "$TEST_ROOT/retire-linked-elsewhere"
+  rm -rf "$retire_state/response-retirement/$retire_link"
+  ln -s "$TEST_ROOT/retire-linked-elsewhere" \
+    "$retire_state/response-retirement/$retire_link"
+  run_retirement_cleanup retire-linked
+  assert_retirement_refused "linked-$retire_link" 'the retirement archive is incomplete' retry
+done
+printf 'sgt-cleanup gh#170: symlinked retirement archive copies refused ok\n'
+
+# The manifest binds the retired response identity, not just the digests.
+seed_retirement_task retire-response-drift
+seed_retirement_partial pending-transport
+RETIRE_FAIL_POINT=phase-publish-reconciled-absent run_retirement_cleanup retire-response-drift
+[[ -f "$retire_state/response-retirement/manifest" ]] || {
+  printf 'FAIL gh#170 response-drift: retirement published no archive to validate\n' >&2
+  exit 1
+}
+sed 's/^response_id=.*/response_id=response-999/' \
+  "$retire_state/response-retirement/manifest" \
+  > "$retire_state/response-retirement/manifest.tmp"
+mv "$retire_state/response-retirement/manifest.tmp" \
+  "$retire_state/response-retirement/manifest"
+run_retirement_cleanup retire-response-drift
+assert_retirement_refused response-drift \
+  'the retired response no longer matches the retirement archive' retry
+printf 'sgt-cleanup gh#170: retired response drift refused ok\n'
 rm -f "$TEST_ROOT/fake-bin/td"
 rm -rf "$TEST_ROOT/retire-bin" "$TEST_ROOT/retire-notmux-bin"
 
