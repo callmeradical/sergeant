@@ -20,6 +20,15 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 
 FLEET_DIR="$TEST_ROOT/fleet"
 export SERGEANT_FLEET="$FLEET_DIR"
+# ── Drain state isolation (td-79f0a8) ────────────────────────────────────────
+# Commands exercised here source bin/_sgt-drain.sh, which resolves
+# SERGEANT_DRAIN_DIR, else SERGEANT_CONFIG/drain, else the operator's real
+# $HOME/.config/sergeant/drain.  Pin it to this suite's temporary root so the
+# tests never consult — or mutate — live drain state.
+export SERGEANT_DRAIN_DIR="$TEST_ROOT/drain"
+export SERGEANT_CONFIG="$TEST_ROOT/sergeant-config"
+mkdir -p "$SERGEANT_DRAIN_DIR" "$SERGEANT_CONFIG"
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
