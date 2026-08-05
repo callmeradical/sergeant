@@ -1,4 +1,5 @@
 .DS_Store
 .todos/
+__pycache__/
 bin/sergeant-mcp
 dist/
