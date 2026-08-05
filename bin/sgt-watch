@@ -116,9 +116,45 @@ _sgt_dagr_advance() {
   fi
 }
 
+# _recycle_evidence_covers <repo_dir> <identity>
+#
+# 0 when the recorded recycle evidence names this exact pane identity.
+#
+# worker_recycled used to be a permanent task-level marker: any non-empty content
+# meant "already recycled", it was stamped merely because the recorded pane was
+# absent, and nothing ever cleared or rebound it.  A relaunch that rewrote
+# pane/pane_identity therefore permanently suppressed recycling of every later
+# pane.  Binding the evidence to the exact identity makes it answer the only
+# question that matters — "has THIS pane been retired?" — and makes an empty or
+# malformed marker prove nothing.
+_recycle_evidence_covers() {
+  local repo_dir="$1" identity="$2"
+  [[ -n "$identity" ]] || return 1
+  [[ -s "$repo_dir/worker_recycled" ]] || return 1
+  grep -Fq "identity=$identity" "$repo_dir/worker_recycled" 2>/dev/null
+}
+
+# _record_recycle_evidence <repo_dir> <pane> <identity> <outcome>
+# Rebind the current evidence and append to the append-only history so no earlier
+# recycling is ever lost.
+_record_recycle_evidence() {
+  local repo_dir="$1" pane="$2" identity="$3" outcome="$4" stamp temporary
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  temporary="$repo_dir/worker_recycled.tmp.$$"
+  {
+    printf 'pane=%s\n' "$pane"
+    printf 'identity=%s\n' "$identity"
+    printf 'outcome=%s\n' "$outcome"
+    printf 'recycled_at=%s\n' "$stamp"
+  } > "$temporary" || { rm -f "$temporary"; return 1; }
+  mv "$temporary" "$repo_dir/worker_recycled" || { rm -f "$temporary"; return 1; }
+  printf '%s\t%s\t%s\t%s\n' "$stamp" "$pane" "$identity" "$outcome" \
+    >> "$repo_dir/worker_recycled_log" 2>/dev/null || true
+}
+
 _recycle_terminal_worker() {
   local repo_dir="$1"
-  local pane pane_id worktree_path
+  local pane pane_id worktree_path identity
 
   # Settle the accepted action lease before the pane is taken away.  Recycling
   # used to stop the only process that could ever publish completion, which is
@@ -130,16 +166,22 @@ _recycle_terminal_worker() {
     _sgt_finalize_action_lease "$repo_dir" "$worktree_path" "terminal_recycle" || true
   fi
 
-  [[ ! -s "$repo_dir/worker_recycled" ]] || return 0
   pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
   [[ -n "$pane" ]] || return 0
+  identity="$(_sgt_read_owned_file "$repo_dir/pane_identity" 2>/dev/null || \
+    cat "$repo_dir/pane_identity" 2>/dev/null || true)"
+  # Already retired this exact pane: nothing to do.
+  _recycle_evidence_covers "$repo_dir" "$identity" && return 0
+
   if ! command -v tmux >/dev/null 2>&1; then
     printf 'terminal worker could not be recycled because tmux is unavailable\n' > "$repo_dir/diagnostic"
     return 1
   fi
+  # `display-message -t <gone>` silently falls back to the default target, so the
+  # returned pane id must be compared rather than the exit status trusted.
   pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
   if [[ "$pane_id" != "$pane" ]]; then
-    date -u +%Y-%m-%dT%H:%M:%SZ > "$repo_dir/worker_recycled"
+    _record_recycle_evidence "$repo_dir" "$pane" "$identity" "pane_absent" || return 1
     return 0
   fi
   if ! _pane_is_supervisor "$pane" "$repo_dir"; then
@@ -147,11 +189,11 @@ _recycle_terminal_worker() {
     return 1
   fi
   if ! tmux kill-pane -t "$pane" 2>/dev/null ||
-     tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+     [[ "$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)" == "$pane" ]]; then
     printf 'failed to recycle terminal worker pane: %s\n' "$pane" > "$repo_dir/diagnostic"
     return 1
   fi
-  date -u +%Y-%m-%dT%H:%M:%SZ > "$repo_dir/worker_recycled"
+  _record_recycle_evidence "$repo_dir" "$pane" "$identity" "pane_killed" || return 1
   return 0
 }
 
@@ -356,11 +398,21 @@ _sync_task() {
       continue
     fi
 
+    # Recycle every safely terminal state.  `drained` was recognised throughout
+    # sgt-watch but never recycled, so a cooperatively drained worker kept its
+    # pane and its agent process indefinitely.  Nonterminal and unreconciled
+    # states — in_progress, needs_input, blocked, waiting, orphaned — are
+    # deliberately excluded: they are resumable and must fail closed.
     case "$wt_status" in
-      done|failed:*)
+      done|failed:*|drained)
         if ! _recycle_terminal_worker "$repo_dir"; then
           printf 'WARNING: terminal worker was not recycled: %s\n' "$repo_dir" >&2
         fi
+        ;;
+    esac
+
+    case "$wt_status" in
+      done|failed:*)
         # If this fleet task is part of a dagr run, advance the DAG
         _sgt_dagr_advance "$repo_dir" "$wt_status"
         ;;
