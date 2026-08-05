@@ -748,8 +748,8 @@ _stage_worker_evidence() {
   [[ ! -e "$staging_dir" && ! -L "$staging_dir" ]] || return 1
   mkdir "$staging_dir" || return 1
   for evidence in "$worktree"/.sergeant-*; do
-    [[ -f "$evidence" ]] || continue
-    if ! cp -p "$evidence" "$staging_dir/"; then
+    [[ -e "$evidence" || -L "$evidence" ]] || continue
+    if ! cp -pR "$evidence" "$staging_dir/"; then
       _rollback_remove_path "$staging_dir" "terminal evidence staging" \
         evidence-stage-rollback-cleanup
       return 1
@@ -792,6 +792,44 @@ _rollback_remove_path() {
     _die "CRITICAL: rollback cleanup left an artifact for $context: $path"
 }
 
+# Usage: _move_worker_evidence_entry <source> <destination>
+#
+# Moves one evidence entry, in either direction: into the worktree when
+# publishing or replaying, and into a fleet-owned backup when rolling back.
+# Refuses the destination shapes `mv` cannot replace safely.  `mv` into an
+# existing directory moves the source INSIDE it and still reports success, and a
+# symlink to a directory does the same through the link, so either would silently
+# move lifecycle evidence somewhere it can never be found again; a symlink to a
+# non-directory is refused as well rather than replaced in place.  An existing
+# regular file is replaced, as it always was: the entry being moved is the
+# identity-bound evidence, so it wins over an unbound file that appeared
+# underneath it and the caller still converges.
+_move_worker_evidence_entry() {
+  local destination="$2" source="$1"
+
+  if [[ -L "$destination" || -d "$destination" ]]; then
+    printf 'ERROR: worker lifecycle evidence collides with an existing path: %s (moving %s)\n' \
+      "$destination" "$source" >&2
+    return 1
+  fi
+  mv "$source" "$destination"
+}
+
+_undo_worker_evidence_removal() {
+  local backup_dir="$2" name worktree="$1"
+
+  shift 2
+  for name in "$@"; do
+    _move_worker_evidence_entry "$backup_dir/$name" "$worktree/$name" || \
+      _die "Failed to roll back worker evidence removal: $worktree/$name"
+  done
+  rmdir "$backup_dir" || \
+    _die "Failed to remove worker evidence rollback directory: $backup_dir"
+}
+
+# Moves the bound lifecycle evidence out of the worktree so the remover can run,
+# publishing $LIVE_EVIDENCE_BACKUP for replay.  Returns nonzero for every refusal
+# and lets the single caller report it.
 _remove_worker_evidence() {
   local backup_dir="$1/live-evidence.tmp.$$" count=0 current_identity evidence \
     expected_identity="$3" name repo_dir="$1" worktree="$2"
@@ -813,16 +851,12 @@ _remove_worker_evidence() {
     return 1
   fi
   for evidence in "$worktree"/.sergeant-*; do
-    [[ -f "$evidence" ]] || continue
+    [[ -e "$evidence" || -L "$evidence" ]] || continue
     ((count += 1))
     if ! _cleanup_fail_point "remove-live-$count" || \
       ! mv "$evidence" "$backup_dir/"; then
-      for name in "${moved[@]}"; do
-        mv "$backup_dir/$name" "$worktree/$name" || \
-          _die "Failed to roll back worker evidence removal: $worktree/$name"
-      done
-      rmdir "$backup_dir" || \
-        _die "Failed to remove worker evidence rollback directory: $repo_dir"
+      _undo_worker_evidence_removal "$worktree" "$backup_dir" \
+        ${moved[@]+"${moved[@]}"}
       return 1
     fi
     moved[${#moved[@]}]="$(basename "$evidence")"
@@ -852,10 +886,10 @@ _restore_worker_evidence() {
     return 1
   fi
   for evidence in "$evidence_dir"/.sergeant-*; do
-    [[ -f "$evidence" ]] || continue
+    [[ -e "$evidence" || -L "$evidence" ]] || continue
     ((count += 1))
     if ! _cleanup_fail_point "restore-copy-$count" || \
-      ! cp -p "$evidence" "$staging_dir/"; then
+      ! cp -pR "$evidence" "$staging_dir/"; then
       _rollback_remove_path "$transaction" "worker evidence restore staging" \
         restore-rollback-cleanup
       return 1
@@ -882,11 +916,11 @@ _restore_worker_evidence() {
     _die "$layout_error"
   fi
   for evidence in "$worktree"/.sergeant-*; do
-    [[ -f "$evidence" ]] || continue
+    [[ -e "$evidence" || -L "$evidence" ]] || continue
     name="$(basename "$evidence")"
     if ! mv "$evidence" "$backup_dir/$name"; then
-      for name in "${backed_up[@]}"; do
-        mv "$backup_dir/$name" "$worktree/$name" || \
+      for name in ${backed_up[@]+"${backed_up[@]}"}; do
+        _move_worker_evidence_entry "$backup_dir/$name" "$worktree/$name" || \
           _die "CRITICAL: worker evidence restore backup failed and rollback failed: $worktree/$name; inspect preserved transaction: $transaction"
       done
       _rollback_remove_path "$transaction" "worker evidence restore backup" \
@@ -904,17 +938,17 @@ _restore_worker_evidence() {
     _die "$layout_error"
   fi
   for evidence in "$staging_dir"/.sergeant-*; do
-    [[ -f "$evidence" ]] || continue
+    [[ -e "$evidence" || -L "$evidence" ]] || continue
     name="$(basename "$evidence")"
     ((publish_count += 1))
     if ! _cleanup_fail_point "restore-publish-$publish_count" || \
-      ! mv "$evidence" "$worktree/$name"; then
-      for name in "${published[@]}"; do
+      ! _move_worker_evidence_entry "$evidence" "$worktree/$name"; then
+      for name in ${published[@]+"${published[@]}"}; do
         _rollback_remove_path "$worktree/$name" \
           "published worker evidence restore" restore-rollback-cleanup
       done
-      for name in "${backed_up[@]}"; do
-        mv "$backup_dir/$name" "$worktree/$name" || \
+      for name in ${backed_up[@]+"${backed_up[@]}"}; do
+        _move_worker_evidence_entry "$backup_dir/$name" "$worktree/$name" || \
           _die "CRITICAL: worker evidence restore publication failed and rollback failed: $worktree/$name; inspect preserved transaction: $transaction"
       done
       _rollback_remove_path "$transaction" "worker evidence restore publication" \
@@ -940,11 +974,11 @@ _restore_removed_worker_evidence() {
     _die "$layout_error"
   fi
   for evidence in "$backup_dir"/.sergeant-*; do
-    [[ -f "$evidence" ]] || continue
+    [[ -e "$evidence" || -L "$evidence" ]] || continue
     name="$(basename "$evidence")"
-    if ! mv "$evidence" "$worktree/$name"; then
-      for name in "${restored[@]}"; do
-        mv "$worktree/$name" "$backup_dir/$name" || \
+    if ! _move_worker_evidence_entry "$evidence" "$worktree/$name"; then
+      for name in ${restored[@]+"${restored[@]}"}; do
+        _move_worker_evidence_entry "$worktree/$name" "$backup_dir/$name" || \
           _die "Failed to roll back worker evidence recovery: $worktree/$name"
       done
       return 1
@@ -960,19 +994,24 @@ _restore_cross_filesystem_backup() {
 
   [[ -d "$worktree" && -d "$backup_dir" ]] || return 1
   for evidence in "$backup_dir"/.sergeant-*; do
-    [[ -f "$evidence" ]] || continue
+    [[ -e "$evidence" || -L "$evidence" ]] || continue
     name="$(basename "$evidence")"
     published_path="$worktree/$name"
     temp="$worktree/$name.restore.$$"
     [[ ! -e "$published_path" && ! -L "$published_path" && \
       ! -e "$temp" && ! -L "$temp" ]] || return 1
     temps[${#temps[@]}]="$temp"
-    if ! cp -p "$evidence" "$temp" || ! mv "$temp" "$published_path"; then
-      for temp in "${temps[@]}"; do
-        rm -f "$temp" || return 1
+    # The absence check above can go stale during a recursive copy of a whole
+    # ledger tree, so publication additionally refuses the destination shapes mv
+    # cannot replace safely.  That narrows the rename race without closing it; the
+    # remaining window is tracked with the shared worktree lock work.
+    if ! cp -pR "$evidence" "$temp" || \
+      ! _move_worker_evidence_entry "$temp" "$published_path"; then
+      for temp in ${temps[@]+"${temps[@]}"}; do
+        rm -rf "$temp" || return 1
       done
-      for published_path in "${published[@]}"; do
-        rm -f "$published_path" || return 1
+      for published_path in ${published[@]+"${published[@]}"}; do
+        rm -rf "$published_path" || return 1
       done
       return 1
     fi
@@ -1034,7 +1073,10 @@ _record_cleanup_phase() {
       "phase-rollback-$phase"
     return 1
   }
-  actual="$(git hash-object "$temp")" || {
+  # --no-filters because $expected is an unfiltered --stdin hash of the same
+  # bytes: without it, fleet state living inside a repository with a clean or eol
+  # attribute makes the two disagree and this write verification never succeeds.
+  actual="$(git hash-object --no-filters "$temp")" || {
     _rollback_remove_path "$temp" "$phase cleanup-phase validation" \
       "phase-rollback-$phase"
     return 1
@@ -1198,17 +1240,50 @@ _repo_worktree_identity() {
   ) | git hash-object --stdin
 }
 
+# Emits the record stream for one evidence entry.  Callers must have byte-order
+# collation (LC_ALL=C) in effect: the glob expansions below are what order the
+# stream, so the identity would otherwise depend on the ambient locale.
+_worker_evidence_records() {
+  local child entry="$1"
+
+  # Fail closed on symlinks, on anything that is neither a regular file nor a
+  # directory, and on names that could forge the record stream.
+  [[ ! -L "$entry" && "$entry" != *$'\n'* ]] || return 1
+  if [[ -f "$entry" ]]; then
+    # --no-filters keeps the record a function of raw bytes: the live copy is
+    # hashed inside the owning repository, where gitattributes text/eol and clean
+    # filters would otherwise apply, while the staged copy is hashed in fleet
+    # state outside any repository.  Entry modes are deliberately not bound.
+    printf 'file\n%s\n' "$entry"
+    git hash-object --no-filters "$entry" || return 1
+    return 0
+  fi
+  # An unreadable directory would expand to no children and hash identically to an
+  # empty one, so refuse it instead: the `dir` record with no children has to mean
+  # a directory that really is empty.
+  [[ -d "$entry" && -r "$entry" && -x "$entry" ]] || return 1
+  # Normal worker execution publishes notification ledgers and review gates as
+  # directories (.sergeant-notification-acks/, .sergeant-review-gates/, ...).
+  # Hash them recursively so identity stays stable and tamper-evident.
+  printf 'dir\n%s\n' "$entry"
+  for child in "$entry"/* "$entry"/.[!.]* "$entry"/..?*; do
+    [[ -e "$child" || -L "$child" ]] || continue
+    _worker_evidence_records "$child" || return 1
+  done
+  printf 'end-dir\n%s\n' "$entry"
+}
+
 _worker_evidence_identity() {
   local evidence evidence_dir="$1"
 
   (
     cd "$evidence_dir" || exit 1
+    # Byte-order collation keeps glob expansion, and therefore the record
+    # stream, deterministic regardless of the caller's locale.
     export LC_ALL=C
     for evidence in .sergeant-*; do
       [[ -e "$evidence" || -L "$evidence" ]] || continue
-      [[ -f "$evidence" && ! -L "$evidence" ]] || exit 1
-      printf 'file\n%s\n' "$evidence"
-      git hash-object "$evidence" || exit 1
+      _worker_evidence_records "$evidence" || exit 1
     done
   ) | git hash-object --stdin
 }

@@ -61,6 +61,27 @@ repo_owner_identity() {
     git hash-object --stdin
 }
 
+# Mirrors _worker_evidence_identity/_worker_evidence_records in bin/sgt-cleanup;
+# keep both in step, including directory evidence such as the notification
+# ledgers and review gates.
+worker_evidence_records() {
+  local child entry="$1"
+
+  [[ ! -L "$entry" && "$entry" != *$'\n'* ]] || return 1
+  if [[ -f "$entry" ]]; then
+    printf 'file\n%s\n' "$entry"
+    git hash-object --no-filters "$entry" || return 1
+    return 0
+  fi
+  [[ -d "$entry" && -r "$entry" && -x "$entry" ]] || return 1
+  printf 'dir\n%s\n' "$entry"
+  for child in "$entry"/* "$entry"/.[!.]* "$entry"/..?*; do
+    [[ -e "$child" || -L "$child" ]] || continue
+    worker_evidence_records "$child" || return 1
+  done
+  printf 'end-dir\n%s\n' "$entry"
+}
+
 worker_evidence_identity() {
   local evidence_dir="$1"
 
@@ -69,9 +90,8 @@ worker_evidence_identity() {
     # shellcheck disable=SC2030,SC2031
     export LC_ALL=C
     for evidence in .sergeant-*; do
-      [[ -f "$evidence" ]] || continue
-      printf 'file\n%s\n' "$evidence"
-      git hash-object "$evidence" || exit 1
+      [[ -e "$evidence" || -L "$evidence" ]] || continue
+      worker_evidence_records "$evidence" || exit 1
     done
   ) | git hash-object --stdin
 }
@@ -2149,7 +2169,7 @@ publication_live_before="$(cksum \
   "$TEST_ROOT/publication-transaction-worker"/.sergeant-*)"
 publication_live_hashes="$(for evidence in \
   "$TEST_ROOT/publication-transaction-worker"/.sergeant-*; do
-  git hash-object "$evidence"
+  git hash-object --no-filters "$evidence"
 done)"
 for failure_point in stage-evidence record-owner record-phase \
   publish-evidence publish-owner publish-phase; do
@@ -2235,7 +2255,7 @@ fi
   "$TEST_ROOT/fleet/publication-transaction/app/cleanup-phase")" == removing ]]
 publication_persisted_hashes="$(for evidence in \
   "$TEST_ROOT/fleet/publication-transaction/app/terminal-evidence"/.sergeant-*; do
-  git hash-object "$evidence"
+  git hash-object --no-filters "$evidence"
 done)"
 [[ "$publication_persisted_hashes" == "$publication_live_hashes" ]]
 if compgen -G "$TEST_ROOT/fleet/publication-transaction/app/cleanup-phase.tmp*" \
@@ -3960,20 +3980,11 @@ _capture_identity() {
     git hash-object --stdin
 }
 
-# _capture_evidence_identity computes the same hash as _worker_evidence_identity.
+# Delegates to the single test-side mirror of _worker_evidence_identity so the
+# two cannot drift; a third copy silently produced wrong identities for directory
+# evidence.
 _capture_evidence_identity() {
-  local evidence_dir="$1"
-  (
-    cd "$evidence_dir" || exit 1
-    # shellcheck disable=SC2030,SC2031
-    export LC_ALL=C
-    for evidence in .sergeant-*; do
-      [[ -e "$evidence" || -L "$evidence" ]] || continue
-      [[ -f "$evidence" && ! -L "$evidence" ]] || exit 1
-      printf 'file\n%s\n' "$evidence"
-      git hash-object "$evidence" || exit 1
-    done
-  ) | git hash-object --stdin
+  worker_evidence_identity "$1"
 }
 
 # write_cleanup_owner_v4 writes a version-4 cleanup-owner with all required fields.
@@ -4913,5 +4924,676 @@ set -e
 }
 rm "$TEST_ROOT/fake-bin/git"
 printf 'sgt-cleanup removing-replay-vcheckout: pre-flight validation-checkout rejection ok\n'
+
+# ── GH #169: notification ledger directories are first-class evidence ─────────
+# Normal worker execution creates .sergeant-notification-acks/,
+# .sergeant-notification-accepts/, .sergeant-notification-complete/ and
+# .sergeant-review-gates/ as DIRECTORIES, not regular files.  The lifecycle
+# evidence identity and every staging, removal, restore, retry and rollback
+# helper must bind and replay directory evidence; otherwise no real fleet task
+# can ever be cleaned.
+seed_ledger_evidence() {
+  local worktree="$1"
+
+  printf 'done\n' > "$worktree/.sergeant-status"
+  printf 'result\n' > "$worktree/.sergeant-result"
+  mkdir -p "$worktree/.sergeant-notification-acks" \
+    "$worktree/.sergeant-notification-accepts" \
+    "$worktree/.sergeant-notification-complete" \
+    "$worktree/.sergeant-review-gates/nested"
+  printf 'ledger-nid|ledger-nonce\n' > \
+    "$worktree/.sergeant-notification-acks/ledger-nonce"
+  # .sergeant-notification-accepts/ stays empty on purpose: sgt-interactive-worker
+  # creates all three ledger directories before any token is written, so an empty
+  # ledger is the common real shape and must be bound too.
+  printf 'ledger-nid|ledger-nonce\n' > \
+    "$worktree/.sergeant-notification-complete/ledger-nonce"
+  printf 'standards passed\n' > \
+    "$worktree/.sergeant-review-gates/standards-subagent"
+  printf 'spec passed\n' > \
+    "$worktree/.sergeant-review-gates/nested/spec-subagent"
+  # Mixed case: 'Spec-Gate' sorts before 'nested' under C collation and after it
+  # under en_US, so the identity must pin byte-order collation to stay stable
+  # across locales.
+  printf 'spec gate passed\n' > \
+    "$worktree/.sergeant-review-gates/Spec-Gate"
+  # Hidden children: real review-gate and notification writers take dotfile locks
+  # inside these directories, so the recursive walk must bind them too.
+  printf 'gate lock\n' > "$worktree/.sergeant-review-gates/.gate-lock"
+  printf 'double dot\n' > "$worktree/.sergeant-review-gates/..double-dot"
+}
+
+# Deterministic content snapshot of every evidence entry.  Symlinks are recorded
+# by target rather than followed, so a dereferenced or retargeted entry cannot
+# masquerade as a faithful restore.
+ledger_evidence_snapshot() {
+  local dir="$1"
+
+  (
+    cd "$dir" || exit 1
+    LC_ALL=C find . -path './.sergeant-*' | LC_ALL=C sort | \
+      while IFS= read -r entry; do
+        if [[ -L "$entry" ]]; then
+          printf 'link %s %s\n' "$entry" "$(readlink "$entry")"
+        elif [[ -d "$entry" ]]; then
+          printf 'dir %s\n' "$entry"
+        else
+          printf 'file %s %s\n' "$entry" "$(cksum < "$entry")"
+        fi
+      done
+  )
+}
+
+# Creates the fleet state, owning repo, worker worktree and terminal status a
+# ledger cleanup fixture needs.  The worktree is $TEST_ROOT/<task-id>-worktree.
+seed_ledger_task() {
+  local repo="$2" state task_id="$1" worktree
+
+  state="$TEST_ROOT/fleet/$task_id/$repo"
+  worktree="$TEST_ROOT/$task_id-worktree"
+  mkdir -p "$state"
+  init_test_repo "$TEST_ROOT/$task_id-repo"
+  git -C "$TEST_ROOT/$task_id-repo" worktree add -q -b "$task_id-worker" "$worktree"
+  record_retry_owner "$task_id" "$repo" "$TEST_ROOT/$task_id-repo"
+  printf '%s\n' "$worktree" > "$state/worktree"
+  printf 'git\n' > "$state/wt_type"
+  printf 'done\n' > "$state/status"
+  printf 'result\n' > "$state/result"
+  seed_ledger_evidence "$worktree"
+}
+
+seed_ledger_task ledger-evidence app
+
+set +e
+ledger_output="$(SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" ledger-evidence 2>&1)"
+ledger_status=$?
+set -e
+[[ "$ledger_status" -eq 0 ]] || {
+  printf 'FAIL ledger-evidence: cleanup refused notification ledger directories: %s\n' \
+    "$ledger_output" >&2
+  exit 1
+}
+[[ ! -e "$TEST_ROOT/ledger-evidence-worktree" ]] || {
+  printf 'FAIL ledger-evidence: worktree survived a successful cleanup\n' >&2
+  exit 1
+}
+[[ ! -e "$TEST_ROOT/fleet/ledger-evidence" ]] || {
+  printf 'FAIL ledger-evidence: fleet state survived a successful cleanup\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup ledger-evidence: directory evidence cleans successfully ok\n'
+
+# Anything in the evidence tree that is not a regular file or a directory must
+# fail closed: the recursive identity may never follow a link out of the worktree,
+# may never read a special node, and may never accept a name that could forge a
+# record in the newline-delimited stream.
+ledger_seed_nested_symlink() {
+  rm -rf "${1:?}/.sergeant-review-gates/nested/spec-subagent"
+  ln -s "$TEST_ROOT/home/canary" "$1/.sergeant-review-gates/nested/spec-subagent"
+}
+
+ledger_seed_ledger_symlink() {
+  rm -rf "${1:?}/.sergeant-notification-acks"
+  ln -s "$TEST_ROOT/home" "$1/.sergeant-notification-acks"
+}
+
+ledger_seed_nested_fifo() {
+  mkfifo "$1/.sergeant-review-gates/nested/gate-fifo"
+}
+
+ledger_seed_top_fifo() {
+  mkfifo "$1/.sergeant-transport-fifo"
+}
+
+ledger_seed_forged_name() {
+  : > "$1/.sergeant-review-gates/forged"$'\n'"file"$'\n'"record"
+}
+
+ledger_seed_unreadable_dir() {
+  chmod 000 "$1/.sergeant-review-gates/nested"
+}
+
+assert_ledger_bind_rejected() {
+  local label="$1" output seed="$2" state status task_id worktree
+
+  task_id="ledger-reject-$label"
+  state="$TEST_ROOT/fleet/$task_id/app"
+  worktree="$TEST_ROOT/$task_id-worktree"
+  seed_ledger_task "$task_id" app
+  "$seed" "$worktree"
+
+  set +e
+  output="$(SERGEANT_CONFIG="$TEST_ROOT/config" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" "$task_id" 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -ne 0 && \
+    "$output" == *"Cannot bind worker lifecycle evidence before cleanup: app"* ]] || {
+    printf 'FAIL %s: cleanup accepted unbindable ledger evidence: %s\n' \
+      "$task_id" "$output" >&2
+    exit 1
+  }
+  [[ -d "$worktree" && -d "$TEST_ROOT/fleet/$task_id" ]] || {
+    printf 'FAIL %s: rejection destroyed preserved state\n' "$task_id" >&2
+    exit 1
+  }
+  [[ ! -e "$state/terminal-evidence" && ! -e "$state/cleanup-owner" ]] || {
+    printf 'FAIL %s: rejection published cleanup state\n' "$task_id" >&2
+    exit 1
+  }
+  rm -rf "$TEST_ROOT/fleet/$task_id"
+}
+
+assert_ledger_bind_rejected nested-symlink ledger_seed_nested_symlink
+assert_ledger_bind_rejected ledger-symlink ledger_seed_ledger_symlink
+assert_ledger_bind_rejected nested-fifo ledger_seed_nested_fifo
+assert_ledger_bind_rejected top-fifo ledger_seed_top_fifo
+assert_ledger_bind_rejected forged-name ledger_seed_forged_name
+# An unreadable directory expands to no children and would otherwise hash exactly
+# like an empty one.  Skipped as root, where the mode is not enforced.
+if [[ "$(id -u)" -ne 0 ]]; then
+  assert_ledger_bind_rejected unreadable-dir ledger_seed_unreadable_dir
+  # Restore the mode so the fixture teardown can remove the worktree.
+  chmod 755 \
+    "$TEST_ROOT/ledger-reject-unreadable-dir-worktree/.sergeant-review-gates/nested"
+else
+  printf 'sgt-cleanup ledger-evidence: SKIP unreadable directory rejection (running as root)\n'
+fi
+printf 'sgt-cleanup ledger-evidence: unbindable ledger evidence rejected ok\n'
+
+# Retry, replay and tamper-evidence for directory evidence.
+mkdir -p "$TEST_ROOT/fake-bin"
+seed_ledger_task ledger-retry app
+ledger_retry_state="$TEST_ROOT/fleet/ledger-retry/app"
+ledger_live_before="$(ledger_evidence_snapshot "$TEST_ROOT/ledger-retry-worktree")"
+
+# Fake git: pass everything through EXCEPT worktree remove, which fails until
+# the allow marker exists.
+cat > "$TEST_ROOT/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" worktree remove "*)
+    printf '%s\n' "${!#}" >> "$FAKE_GIT_LOG"
+    if [[ -n "${FAKE_GIT_ALLOW:-}" && -e "${FAKE_GIT_ALLOW:-}" ]]; then
+      exec "$REAL_GIT" "$@"
+    fi
+    exit 1 ;;
+  *) exec "$REAL_GIT" "$@" ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/fake-bin/git"
+
+# BSD userland spells the same locale en_US.UTF-8, so probe case-insensitively
+# and say so out loud when no alternate collation exists — otherwise the replay
+# below silently reruns under the collation that bound the identity.
+ledger_alt_locale="$(locale -a 2>/dev/null | grep -iE '^en_US\.utf-?8$' | head -1 || true)"
+if [[ -z "$ledger_alt_locale" ]]; then
+  ledger_alt_locale=C
+  printf 'sgt-cleanup ledger-retry: SKIP cross-collation replay (no en_US.UTF-8 locale)\n'
+fi
+
+run_ledger_retry() {
+  set +e
+  ledger_retry_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+    REAL_GIT="$REAL_GIT" \
+    LC_ALL="${LEDGER_RETRY_LOCALE:-C}" \
+    FAKE_GIT_LOG="$TEST_ROOT/ledger-retry-removals" \
+    FAKE_GIT_ALLOW="${LEDGER_RETRY_ALLOW:-}" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" ledger-retry 2>&1)"
+  ledger_retry_status=$?
+  set -e
+}
+
+ledger_retry_removals() {
+  wc -l < "$TEST_ROOT/ledger-retry-removals" | tr -d ' '
+}
+
+run_ledger_retry
+[[ "$ledger_retry_status" -ne 0 ]] || {
+  printf 'FAIL ledger-retry: cleanup succeeded although worktree removal failed\n' >&2
+  exit 1
+}
+[[ "$(sed -n '1p' "$ledger_retry_state/cleanup-phase")" == "removing" ]] || {
+  printf 'FAIL ledger-retry: cleanup did not reach the removing phase: %s\n' \
+    "$ledger_retry_output" >&2
+  exit 1
+}
+[[ "$(ledger_retry_removals)" -eq 1 ]]
+# Staged terminal evidence must contain the directory ledgers verbatim.
+[[ "$(ledger_evidence_snapshot "$ledger_retry_state/terminal-evidence")" == \
+  "$ledger_live_before" ]] || {
+  printf 'FAIL ledger-retry: staged terminal evidence lost directory ledgers\n' >&2
+  exit 1
+}
+# The rollback after the failed removal must have replayed the live ledgers.
+[[ "$(ledger_evidence_snapshot "$TEST_ROOT/ledger-retry-worktree")" == \
+  "$ledger_live_before" ]] || {
+  printf 'FAIL ledger-retry: failed removal did not restore live directory ledgers\n' >&2
+  exit 1
+}
+ledger_persisted_before="$(ledger_evidence_snapshot \
+  "$ledger_retry_state/terminal-evidence")"
+ledger_owner_before="$(cksum "$ledger_retry_state/cleanup-owner")"
+ledger_phase_before="$(cksum "$ledger_retry_state/cleanup-phase")"
+
+# A mutation inside a live ledger directory must change the bound identity.
+printf 'tampered ack\n' > \
+  "$TEST_ROOT/ledger-retry-worktree/.sergeant-notification-acks/ledger-nonce"
+run_ledger_retry
+[[ "$ledger_retry_status" -ne 0 && \
+  "$ledger_retry_output" == *"Retry worker lifecycle evidence changed"* ]] || {
+  printf 'FAIL ledger-retry: cleanup accepted a mutated live ledger directory: %s\n' \
+    "$ledger_retry_output" >&2
+  exit 1
+}
+[[ "$(ledger_retry_removals)" -eq 1 ]]
+[[ -d "$TEST_ROOT/ledger-retry-worktree" ]]
+[[ "$(ledger_evidence_snapshot "$ledger_retry_state/terminal-evidence")" == \
+  "$ledger_persisted_before" ]]
+[[ "$(cksum "$ledger_retry_state/cleanup-owner")" == "$ledger_owner_before" ]]
+[[ "$(cksum "$ledger_retry_state/cleanup-phase")" == "$ledger_phase_before" ]]
+printf 'ledger-nid|ledger-nonce\n' > \
+  "$TEST_ROOT/ledger-retry-worktree/.sergeant-notification-acks/ledger-nonce"
+
+# A mutation inside a persisted ledger directory must also fail closed.
+printf 'tampered gate\n' > \
+  "$ledger_retry_state/terminal-evidence/.sergeant-review-gates/nested/spec-subagent"
+run_ledger_retry
+[[ "$ledger_retry_status" -ne 0 && \
+  "$ledger_retry_output" == *"persisted terminal evidence"* ]] || {
+  printf 'FAIL ledger-retry: cleanup accepted a mutated persisted ledger directory: %s\n' \
+    "$ledger_retry_output" >&2
+  exit 1
+}
+[[ "$(ledger_retry_removals)" -eq 1 ]]
+[[ "$(ledger_evidence_snapshot "$TEST_ROOT/ledger-retry-worktree")" == \
+  "$ledger_live_before" ]]
+printf 'spec passed\n' > \
+  "$ledger_retry_state/terminal-evidence/.sergeant-review-gates/nested/spec-subagent"
+
+# An empty ledger directory is bound too, so removing it must fail closed.
+rmdir "$TEST_ROOT/ledger-retry-worktree/.sergeant-notification-accepts"
+run_ledger_retry
+[[ "$ledger_retry_status" -ne 0 && \
+  "$ledger_retry_output" == *"Retry worker lifecycle evidence changed"* ]] || {
+  printf 'FAIL ledger-retry: cleanup accepted a removed empty ledger directory: %s\n' \
+    "$ledger_retry_output" >&2
+  exit 1
+}
+[[ "$(ledger_retry_removals)" -eq 1 ]]
+mkdir "$TEST_ROOT/ledger-retry-worktree/.sergeant-notification-accepts"
+
+# Hidden children inside a ledger directory are bound too, so a dotfile lock
+# cannot be edited without changing the identity.
+printf 'tampered lock\n' > \
+  "$TEST_ROOT/ledger-retry-worktree/.sergeant-review-gates/.gate-lock"
+run_ledger_retry
+[[ "$ledger_retry_status" -ne 0 && \
+  "$ledger_retry_output" == *"Retry worker lifecycle evidence changed"* ]] || {
+  printf 'FAIL ledger-retry: cleanup accepted a mutated hidden ledger child: %s\n' \
+    "$ledger_retry_output" >&2
+  exit 1
+}
+[[ "$(ledger_retry_removals)" -eq 1 ]]
+printf 'gate lock\n' > \
+  "$TEST_ROOT/ledger-retry-worktree/.sergeant-review-gates/.gate-lock"
+
+# '..'-prefixed children need their own glob, so they need their own assertion.
+printf 'tampered double dot\n' > \
+  "$TEST_ROOT/ledger-retry-worktree/.sergeant-review-gates/..double-dot"
+run_ledger_retry
+[[ "$ledger_retry_status" -ne 0 && \
+  "$ledger_retry_output" == *"Retry worker lifecycle evidence changed"* ]] || {
+  printf 'FAIL ledger-retry: cleanup accepted a mutated ..-prefixed ledger child: %s\n' \
+    "$ledger_retry_output" >&2
+  exit 1
+}
+[[ "$(ledger_retry_removals)" -eq 1 ]]
+printf 'double dot\n' > \
+  "$TEST_ROOT/ledger-retry-worktree/.sergeant-review-gates/..double-dot"
+
+# A partially removed ledger must be replayable from persisted evidence: drop
+# every live entry (the crash window between removal and worktree deletion) and
+# require the retry to restore it before reaching the remover again.  The replay
+# runs under a different collation than the run that bound the identity.
+rm -rf "$TEST_ROOT/ledger-retry-worktree"/.sergeant-*
+LEDGER_RETRY_LOCALE="$ledger_alt_locale" run_ledger_retry
+[[ "$ledger_retry_status" -ne 0 ]] || {
+  printf 'FAIL ledger-retry: cleanup succeeded although worktree removal failed\n' >&2
+  exit 1
+}
+[[ "$(ledger_retry_removals)" -eq 2 ]] || {
+  printf 'FAIL ledger-retry: retry did not reach the remover after ledger replay: %s\n' \
+    "$ledger_retry_output" >&2
+  exit 1
+}
+[[ "$(ledger_evidence_snapshot "$TEST_ROOT/ledger-retry-worktree")" == \
+  "$ledger_live_before" ]] || {
+  printf 'FAIL ledger-retry: retry did not replay persisted directory ledgers\n' >&2
+  exit 1
+}
+[[ "$(ledger_evidence_snapshot "$ledger_retry_state/terminal-evidence")" == \
+  "$ledger_persisted_before" ]]
+
+# A retry replay that fails partway through publishing must undo the directory
+# ledgers it already put back, leaving nothing published in the worktree and the
+# persisted evidence intact — the publish rollback is where nesting would be most
+# lossy, because the completed restore discards the only live backup.
+ledger_retry_publish_before="$(ledger_evidence_snapshot \
+  "$TEST_ROOT/ledger-retry-worktree")"
+set +e
+ledger_retry_publish_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  REAL_GIT="$REAL_GIT" LC_ALL=C \
+  SGT_CLEANUP_FAIL_POINT=restore-publish-2 \
+  FAKE_GIT_LOG="$TEST_ROOT/ledger-retry-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" ledger-retry 2>&1)"
+ledger_retry_publish_status=$?
+set -e
+[[ "$ledger_retry_publish_status" -ne 0 && \
+  "$ledger_retry_publish_output" == *"Failed to restore persisted worker evidence: app"* ]] || {
+  printf 'FAIL ledger-retry: publish failure was not reported actionably: %s\n' \
+    "$ledger_retry_publish_output" >&2
+  exit 1
+}
+[[ "$(ledger_retry_removals)" -eq 2 ]]
+[[ "$(ledger_evidence_snapshot "$TEST_ROOT/ledger-retry-worktree")" == \
+  "$ledger_retry_publish_before" ]] || {
+  printf 'FAIL ledger-retry: the publish rollback left the worktree inconsistent\n' >&2
+  exit 1
+}
+[[ "$(ledger_evidence_snapshot "$ledger_retry_state/terminal-evidence")" == \
+  "$ledger_persisted_before" ]]
+if compgen -G "$ledger_retry_state/restore-evidence.tmp.*" >/dev/null; then
+  printf 'FAIL ledger-retry: the publish rollback left a restore transaction behind\n' >&2
+  exit 1
+fi
+
+# Finally allow the removal: the retry must complete and clear fleet state.
+touch "$TEST_ROOT/ledger-retry-allow"
+LEDGER_RETRY_ALLOW="$TEST_ROOT/ledger-retry-allow" run_ledger_retry
+[[ "$ledger_retry_status" -eq 0 ]] || {
+  printf 'FAIL ledger-retry: replayed retry did not complete: %s\n' \
+    "$ledger_retry_output" >&2
+  exit 1
+}
+[[ ! -e "$TEST_ROOT/ledger-retry-worktree" ]]
+[[ ! -e "$TEST_ROOT/fleet/ledger-retry" ]]
+rm "$TEST_ROOT/fake-bin/git"
+printf 'sgt-cleanup ledger-retry: directory evidence replay and tamper-evidence ok\n'
+
+# Replaying evidence must never merge into a path that reappeared underneath it.
+# `mv dir existing_dir` nests instead of replacing and still reports success, and
+# an existing symlink relocates the source wherever the link points, so a racing
+# writer would silently move live evidence somewhere it can never be found.  Both
+# shapes must be refused by name.  A racing regular file is still replaced, so the
+# authoritative evidence wins and a plain retry converges.
+# Fake git: worktree remove stages a racing entry of the requested kind in the
+# worktree, then fails — the ordinary removal-failure path with a racing writer.
+cat > "$TEST_ROOT/fake-bin/ledger-collide-git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" worktree remove "*)
+    case "$FAKE_RACE_KIND" in
+      dir)
+        mkdir -p "${!#}/$FAKE_RACE_NAME"
+        printf 'racing entry\n' > "${!#}/$FAKE_RACE_NAME/racing-nonce" ;;
+      file) printf 'racing entry\n' > "${!#}/$FAKE_RACE_NAME" ;;
+      symlink) ln -s "$FAKE_RACE_TARGET" "${!#}/$FAKE_RACE_NAME" ;;
+      dangling) ln -s "$FAKE_RACE_TARGET/absent" "${!#}/$FAKE_RACE_NAME" ;;
+    esac
+    exit 1 ;;
+  *) exec "$REAL_GIT" "$@" ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/fake-bin/ledger-collide-git"
+
+run_ledger_collision() {
+  local kind="$2" name="$3" task_id="$1"
+
+  cp "$TEST_ROOT/fake-bin/ledger-collide-git" "$TEST_ROOT/fake-bin/git"
+  set +e
+  ledger_collide_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" REAL_GIT="$REAL_GIT" \
+    FAKE_RACE_KIND="$kind" FAKE_RACE_NAME="$name" \
+    FAKE_RACE_TARGET="$TEST_ROOT/$task_id-escape" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" "$task_id" 2>&1)"
+  ledger_collide_status=$?
+  set -e
+  rm "$TEST_ROOT/fake-bin/git"
+}
+
+# A racing directory or symlink at an evidence destination must be refused by
+# name, with nothing nested, nothing relocated outside the worktree, and both
+# copies of the evidence preserved for a later retry.
+assert_ledger_collision_rejected() {
+  local before escape kind="$2" label="$1" name="$3" state task_id worktree
+
+  task_id="ledger-collide-$label"
+  state="$TEST_ROOT/fleet/$task_id/app"
+  worktree="$TEST_ROOT/$task_id-worktree"
+  escape="$TEST_ROOT/$task_id-escape"
+  mkdir -p "$escape"
+  seed_ledger_task "$task_id" app
+  before="$(ledger_evidence_snapshot "$worktree")"
+
+  run_ledger_collision "$task_id" "$kind" "$name"
+
+  [[ "$ledger_collide_status" -ne 0 ]] || {
+    printf 'FAIL %s: cleanup reported success after a failed removal\n' "$task_id" >&2
+    exit 1
+  }
+  [[ "$ledger_collide_output" == *"collides with an existing path: $worktree/$name"* && \
+    "$ledger_collide_output" == *"Failed to restore worker evidence after git failure: app"* ]] || {
+    printf 'FAIL %s: collision was not reported actionably: %s\n' \
+      "$task_id" "$ledger_collide_output" >&2
+    exit 1
+  }
+  [[ ! -e "$worktree/$name/$name" ]] || {
+    printf 'FAIL %s: evidence was nested inside the colliding entry\n' "$task_id" >&2
+    exit 1
+  }
+  [[ -z "$(ls -A "$escape")" ]] || {
+    printf 'FAIL %s: evidence escaped the worktree into %s\n' "$task_id" "$escape" >&2
+    exit 1
+  }
+  compgen -G "$state/live-evidence.tmp.*" >/dev/null || {
+    printf 'FAIL %s: live evidence backup was not preserved\n' "$task_id" >&2
+    exit 1
+  }
+  [[ "$(ledger_evidence_snapshot "$state/terminal-evidence")" == "$before" ]] || {
+    printf 'FAIL %s: persisted terminal evidence was damaged\n' "$task_id" >&2
+    exit 1
+  }
+}
+
+# .sergeant-notification-accepts is the FIRST entry in byte order, so its rollback
+# runs with an empty restored-entry list — the case that aborts under Bash 3.2 when
+# the array expansion is unguarded.
+assert_ledger_collision_rejected first-entry dir .sergeant-notification-accepts
+assert_ledger_collision_rejected racing-dir dir .sergeant-notification-acks
+assert_ledger_collision_rejected racing-symlink symlink .sergeant-review-gates
+assert_ledger_collision_rejected dangling-symlink dangling .sergeant-result
+
+# A racing regular file is replaced by the identity-bound evidence, exactly as
+# before directory support, so the replay completes and a plain retry converges
+# instead of wedging the task.
+ledger_overwrite_task=ledger-collide-racing-file
+mkdir -p "$TEST_ROOT/$ledger_overwrite_task-escape"
+seed_ledger_task "$ledger_overwrite_task" app
+ledger_overwrite_before="$(ledger_evidence_snapshot \
+  "$TEST_ROOT/$ledger_overwrite_task-worktree")"
+run_ledger_collision "$ledger_overwrite_task" file .sergeant-status
+[[ "$ledger_collide_status" -ne 0 && \
+  "$ledger_collide_output" == *"Failed to remove git worktree; fleet state preserved"* ]] || {
+  printf 'FAIL %s: a racing regular file did not fall through to the remover: %s\n' \
+    "$ledger_overwrite_task" "$ledger_collide_output" >&2
+  exit 1
+}
+[[ "$(ledger_evidence_snapshot "$TEST_ROOT/$ledger_overwrite_task-worktree")" == \
+  "$ledger_overwrite_before" ]] || {
+  printf 'FAIL %s: the bound evidence did not replace the racing file\n' \
+    "$ledger_overwrite_task" >&2
+  exit 1
+}
+if compgen -G "$TEST_ROOT/fleet/$ledger_overwrite_task/app/live-evidence.tmp.*" \
+  >/dev/null; then
+  printf 'FAIL %s: authoritative evidence was stranded in a backup\n' \
+    "$ledger_overwrite_task" >&2
+  exit 1
+fi
+SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" "$ledger_overwrite_task" >/dev/null
+[[ ! -e "$TEST_ROOT/$ledger_overwrite_task-worktree" && \
+  ! -e "$TEST_ROOT/fleet/$ledger_overwrite_task" ]] || {
+  printf 'FAIL %s: the retry did not converge\n' "$ledger_overwrite_task" >&2
+  exit 1
+}
+printf 'sgt-cleanup ledger-collide: colliding evidence publication fails closed ok\n'
+
+# Every lifecycle hash must be a function of raw bytes.  The worktree copy lives
+# inside the owning repository while the staged copy lives in fleet state, so
+# hashing with gitattributes filters enabled gives two different identities for
+# byte-identical evidence and blocks cleanup forever.  Fleet state is placed inside
+# a filtered repository as well, so the cleanup-phase write verification — which
+# compares a path hash against a --stdin hash of the same bytes, after the worktree
+# is already gone — is covered by the same case.
+ledger_attrs_fleet="$TEST_ROOT/ledger-attrs-fleet-repo"
+init_test_repo "$ledger_attrs_fleet"
+# A clean filter, so every path hashed inside fleet state diverges from the same
+# bytes hashed without filters — both the staged evidence and the cleanup-phase
+# write verification.
+printf '* filter=sgtcase\n' > "$ledger_attrs_fleet/.gitattributes"
+git -C "$ledger_attrs_fleet" config filter.sgtcase.clean 'tr a-z A-Z'
+git -C "$ledger_attrs_fleet" add .gitattributes
+git -C "$ledger_attrs_fleet" commit -qm 'uppercase clean filter'
+ledger_attrs_state="$ledger_attrs_fleet/fleet/ledger-attrs/app"
+mkdir -p "$ledger_attrs_state"
+init_test_repo "$TEST_ROOT/ledger-attrs-repo"
+printf '* text=auto\n' > "$TEST_ROOT/ledger-attrs-repo/.gitattributes"
+git -C "$TEST_ROOT/ledger-attrs-repo" add .gitattributes
+git -C "$TEST_ROOT/ledger-attrs-repo" commit -qm 'normalize line endings'
+git -C "$TEST_ROOT/ledger-attrs-repo" worktree add -q -b ledger-attrs-worker \
+  "$TEST_ROOT/ledger-attrs-worktree"
+# Written inline rather than through record_retry_owner: the brief has to land in
+# the filtered fleet repo, not the default fleet root.
+cat > "$TEST_ROOT/config/ledger-attrs.yaml" <<EOF
+name: ledger-attrs
+repos:
+  - name: app
+    path: $TEST_ROOT/ledger-attrs-repo
+EOF
+printf 'Project: ledger-attrs\n' > "$ledger_attrs_fleet/fleet/ledger-attrs/brief.md"
+printf '%s\n' "$TEST_ROOT/ledger-attrs-worktree" > "$ledger_attrs_state/worktree"
+printf 'git\n' > "$ledger_attrs_state/wt_type"
+printf 'done\n' > "$ledger_attrs_state/status"
+printf 'result\n' > "$ledger_attrs_state/result"
+seed_ledger_evidence "$TEST_ROOT/ledger-attrs-worktree"
+printf 'standards passed\r\n' > \
+  "$TEST_ROOT/ledger-attrs-worktree/.sergeant-review-gates/standards-subagent"
+printf 'crlf diagnostic\r\n' > "$TEST_ROOT/ledger-attrs-worktree/.sergeant-diagnostic"
+set +e
+# Run from inside the filtered fleet repository: git resolves attributes against
+# the process working directory, so this is what makes the fleet-side path hashes
+# filter-sensitive.
+ledger_attrs_output="$(cd "$ledger_attrs_fleet" && SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$ledger_attrs_fleet/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" ledger-attrs 2>&1)"
+ledger_attrs_status=$?
+set -e
+[[ "$ledger_attrs_status" -eq 0 ]] || {
+  printf 'FAIL ledger-attrs: gitattributes filters blocked cleanup: %s\n' \
+    "$ledger_attrs_output" >&2
+  exit 1
+}
+[[ ! -e "$TEST_ROOT/ledger-attrs-worktree" && \
+  ! -e "$ledger_attrs_fleet/fleet/ledger-attrs" ]] || {
+  printf 'FAIL ledger-attrs: cleanup left state behind\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup ledger-attrs: identity ignores gitattributes filters ok\n'
+
+# The ledger cases above are all terminal 'done' workers.  The other status that
+# reaches the remover is an orphaned worker whose td card is closed (GH #95), and
+# real orphaned worktrees carry the same ledger directories, so assert that
+# combination too rather than inferring it from the done path.
+ledger_orphan_task=ledger-orphan-closed-td
+seed_ledger_task "$ledger_orphan_task" app
+ledger_orphan_state="$TEST_ROOT/fleet/$ledger_orphan_task/app"
+printf 'orphaned\n' > "$ledger_orphan_state/status"
+rm -f "$ledger_orphan_state/result"
+printf 'td-ledger-orphan-fake\n' > "$ledger_orphan_state/td_task"
+# The worker's last write is a nonterminal status: the supervisor marked the fleet
+# record orphaned externally, which is the realistic shape.
+printf 'in_progress\n' > "$TEST_ROOT/$ledger_orphan_task-worktree/.sergeant-status"
+rm -f "$TEST_ROOT/$ledger_orphan_task-worktree/.sergeant-result"
+ledger_orphan_before="$(ledger_evidence_snapshot \
+  "$TEST_ROOT/$ledger_orphan_task-worktree")"
+cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "show" && "$2" == "--format" && "$3" == "json" ]]; then
+  printf '{"status":"%s","id":"%s"}\n' "${TD_FAKE_STATUS:-closed}" "$4"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$TEST_ROOT/fake-bin/td"
+set +e
+ledger_orphan_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" TD_FAKE_STATUS=closed \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" "$ledger_orphan_task" 2>&1)"
+ledger_orphan_status=$?
+set -e
+[[ "$ledger_orphan_status" -eq 0 ]] || {
+  printf 'FAIL %s: orphaned worker with a closed td card and ledger directories was rejected: %s\n' \
+    "$ledger_orphan_task" "$ledger_orphan_output" >&2
+  exit 1
+}
+[[ ! -e "$TEST_ROOT/$ledger_orphan_task-worktree" && \
+  ! -e "$TEST_ROOT/fleet/$ledger_orphan_task" ]] || {
+  printf 'FAIL %s: cleanup left state behind\n' "$ledger_orphan_task" >&2
+  exit 1
+}
+# An open td card must still block it, with the ledger directories untouched.
+seed_ledger_task "$ledger_orphan_task" app
+printf 'orphaned\n' > "$ledger_orphan_state/status"
+rm -f "$ledger_orphan_state/result"
+printf 'td-ledger-orphan-fake\n' > "$ledger_orphan_state/td_task"
+printf 'in_progress\n' > "$TEST_ROOT/$ledger_orphan_task-worktree/.sergeant-status"
+rm -f "$TEST_ROOT/$ledger_orphan_task-worktree/.sergeant-result"
+set +e
+ledger_orphan_open_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" TD_FAKE_STATUS=open \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" "$ledger_orphan_task" 2>&1)"
+ledger_orphan_open_status=$?
+set -e
+rm -f "$TEST_ROOT/fake-bin/td"
+[[ "$ledger_orphan_open_status" -ne 0 && \
+  "$ledger_orphan_open_output" == *"app is not terminal: orphaned"* ]] || {
+  printf 'FAIL %s: cleanup accepted an orphaned worker whose td card is open: %s\n' \
+    "$ledger_orphan_task" "$ledger_orphan_open_output" >&2
+  exit 1
+}
+[[ -d "$TEST_ROOT/$ledger_orphan_task-worktree" ]] || {
+  printf 'FAIL %s: rejection removed the worktree\n' "$ledger_orphan_task" >&2
+  exit 1
+}
+[[ "$(ledger_evidence_snapshot "$TEST_ROOT/$ledger_orphan_task-worktree")" == \
+  "$ledger_orphan_before" ]] || {
+  printf 'FAIL %s: rejection mutated the ledger directories\n' "$ledger_orphan_task" >&2
+  exit 1
+}
+rm -rf "$TEST_ROOT/fleet/$ledger_orphan_task"
+printf 'sgt-cleanup ledger-orphan: orphaned worker with a closed td card cleans ok\n'
 
 printf 'sgt-cleanup: all tests passed\n'

@@ -59,6 +59,19 @@ cat > "$TEST_ROOT/fake-bin/cp" <<'EOF'
 if [[ "${FAKE_RESTORE_FAILURE:-}" == true && "${!#}" == *.restore.* ]]; then
   exit 1
 fi
+# Fail a LATER entry so earlier entries — including directory ledgers — are
+# already published when the rollback runs.
+if [[ -n "${FAKE_RESTORE_FAILURE_MATCH:-}" && \
+  "${!#}" == *"$FAKE_RESTORE_FAILURE_MATCH"*.restore.* ]]; then
+  exit 1
+fi
+# Race a directory into the destination between the copy and the publication, so
+# the publication has to prove absence again instead of nesting into it.
+if [[ -n "${FAKE_RESTORE_COLLIDE_MATCH:-}" && \
+  "${!#}" == *"$FAKE_RESTORE_COLLIDE_MATCH"*.restore.* ]]; then
+  collide="${!#}"
+  mkdir -p "${collide%%.restore.*}"
+fi
 "$REAL_CP" "$@"
 EOF
 chmod +x "$TEST_ROOT/fake-bin/cp" "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/stat" \
@@ -91,6 +104,17 @@ EOF
   printf 'result\n' > "$repo_state/result"
   printf 'done\n' > "$worktree/.sergeant-status"
   printf 'result\n' > "$worktree/.sergeant-result"
+  # GH #169: real workers publish notification ledgers and review gates as
+  # directories, so every cross-filesystem boundary must handle them too.
+  mkdir -p "$worktree/.sergeant-notification-acks" \
+    "$worktree/.sergeant-notification-accepts" \
+    "$worktree/.sergeant-notification-complete" \
+    "$worktree/.sergeant-review-gates/nested"
+  printf 'nid|nonce\n' > "$worktree/.sergeant-notification-acks/nonce"
+  printf 'nid|nonce\n' > "$worktree/.sergeant-notification-accepts/nonce"
+  printf 'nid|nonce\n' > "$worktree/.sergeant-notification-complete/nonce"
+  printf 'standards passed\n' > "$worktree/.sergeant-review-gates/standards"
+  printf 'spec passed\n' > "$worktree/.sergeant-review-gates/nested/spec"
   printf '%s\n' "$mode" > "$repo_state/wt_type"
   if [[ "$mode" == treehouse ]]; then
     printf 'sgt-%s-app\n' "$task_id" > "$repo_state/wt_holder"
@@ -333,5 +357,80 @@ set -e
 compgen -G "$TEST_ROOT/fleet/crossfs-rollback-failure/app/live-evidence.tmp.*" \
   >/dev/null
 [[ ! -s "$TEST_ROOT/crossfs-rollback-failure-removals" ]]
+
+# A cross-filesystem restore that fails on a later entry cannot republish the
+# evidence, so CRITICAL with a preserved backup is the correct outcome.  What must
+# not survive is a partial publication: every entry it already put back —
+# including whole directory ledgers — has to be removed again.
+init_case git crossfs-directory-rollback
+: > "$TEST_ROOT/crossfs-directory-rollback-removals"
+directory_rollback_state="$TEST_ROOT/fleet/crossfs-directory-rollback/app"
+directory_rollback_worktree="$TEST_ROOT/crossfs-directory-rollback-linked-worktree"
+set +e
+directory_rollback_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_CROSS_DEVICE_PATH="$directory_rollback_worktree" \
+  FAKE_CROSS_DEVICE_AFTER=6 \
+  FAKE_STAT_COUNT_FILE="$TEST_ROOT/crossfs-directory-rollback-stat-count" \
+  FAKE_RESTORE_FAILURE_MATCH=.sergeant-status \
+  FAKE_REMOVER_LOG="$TEST_ROOT/crossfs-directory-rollback-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" crossfs-directory-rollback 2>&1)"
+directory_rollback_status=$?
+set -e
+[[ "$directory_rollback_status" -ne 0 ]]
+[[ "$directory_rollback_output" == *"CRITICAL: cross-filesystem cleanup rollback failed; inspect preserved backup:"* ]] || {
+  printf 'cross-filesystem directory rollback was not reported actionably:\n%s\n' \
+    "$directory_rollback_output" >&2
+  exit 1
+}
+if compgen -G "$directory_rollback_worktree/.sergeant-*" >/dev/null; then
+  printf 'cross-filesystem directory rollback left published evidence behind:\n%s\n' \
+    "$(ls -A "$directory_rollback_worktree")" >&2
+  exit 1
+fi
+compgen -G "$directory_rollback_state/live-evidence.tmp.*" >/dev/null || {
+  printf 'cross-filesystem directory rollback discarded the live evidence backup\n' >&2
+  exit 1
+}
+[[ -f "$directory_rollback_state/terminal-evidence/.sergeant-status" && \
+  -f "$directory_rollback_state/terminal-evidence/.sergeant-review-gates/nested/spec" ]] || {
+  printf 'cross-filesystem directory rollback damaged persisted terminal evidence\n' >&2
+  exit 1
+}
+
+# A directory racing into the destination between the copy and the publication
+# must be refused by name, never merged into: nesting there would destroy the only
+# remaining copy when the backup is discarded at the end of the restore.
+init_case git crossfs-directory-collide
+: > "$TEST_ROOT/crossfs-directory-collide-removals"
+directory_collide_state="$TEST_ROOT/fleet/crossfs-directory-collide/app"
+directory_collide_worktree="$TEST_ROOT/crossfs-directory-collide-linked-worktree"
+set +e
+directory_collide_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_CROSS_DEVICE_PATH="$directory_collide_worktree" \
+  FAKE_CROSS_DEVICE_AFTER=6 \
+  FAKE_STAT_COUNT_FILE="$TEST_ROOT/crossfs-directory-collide-stat-count" \
+  FAKE_RESTORE_COLLIDE_MATCH=.sergeant-review-gates \
+  FAKE_REMOVER_LOG="$TEST_ROOT/crossfs-directory-collide-removals" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" crossfs-directory-collide 2>&1)"
+directory_collide_status=$?
+set -e
+[[ "$directory_collide_status" -ne 0 ]]
+[[ "$directory_collide_output" == *"collides with an existing path: $directory_collide_worktree/.sergeant-review-gates"* ]] || {
+  printf 'cross-filesystem restore merged into a raced destination:\n%s\n' \
+    "$directory_collide_output" >&2
+  exit 1
+}
+[[ ! -e "$directory_collide_worktree/.sergeant-review-gates/.sergeant-review-gates" ]] || {
+  printf 'cross-filesystem restore nested evidence inside the raced destination\n' >&2
+  exit 1
+}
+compgen -G "$directory_collide_state/live-evidence.tmp.*" >/dev/null || {
+  printf 'cross-filesystem restore discarded the only remaining evidence copy\n' >&2
+  exit 1
+}
 
 printf 'sgt-cleanup cross-filesystem preflight: ok\n'
