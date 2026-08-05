@@ -6,7 +6,7 @@
 #
 # Usage:
 #   sgt-td-list <project>                    # every non-closed task, all repos
-#   sgt-td-list <project> --status open      # narrow to one status
+#   sgt-td-list <project> --status open      # narrow to one status (-s, -o too)
 #   sgt-td-list <project> --priority P1      # filter by priority
 #   sgt-td-list <project> --repos smith,smith-app  # specific repos only
 #   sgt-td-list <project> --json             # machine-readable output
@@ -88,15 +88,46 @@ JSON_OUT=false
 TD_ALL=false
 EXTRA_FLAGS=()
 
-_need_value() { [[ $# -ge 2 ]] || _die "$1 requires a value"; }
+_need_value() { [[ $# -ge 2 && -n "$2" ]] || _die "$1 requires a value"; }
+
+# Every spelling td accepts for a status or priority narrowing is claimed here
+# rather than forwarded, because a forwarded copy would land after ours and win
+# while the header still described the view we asked for.
+_set_status() {
+  [[ -n "$1" ]] || _die "--status requires a value"
+  [[ -z "$STATUS_FILTER" ]] \
+    || _die "pass a status once: already narrowed to status=$STATUS_FILTER"
+  STATUS_FILTER="$1"
+}
+_set_priority() {
+  [[ -n "$1" ]] || _die "--priority requires a value"
+  [[ -z "$PRIORITY_FILTER" ]] \
+    || _die "pass a priority once: already narrowed to priority=$PRIORITY_FILTER"
+  PRIORITY_FILTER="$1"
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --all)           TD_ALL=true;            shift   ;;
-    --status)        _need_value "$@"; STATUS_FILTER="$2";   shift 2 ;;
-    --priority)      _need_value "$@"; PRIORITY_FILTER="$2"; shift 2 ;;
-    --repos)         _need_value "$@"; REPOS_ARG="$2";       shift 2 ;;
     --json)          JSON_OUT=true;          shift   ;;
+    --repos)         _need_value "$@"; REPOS_ARG="$2";       shift 2 ;;
+    --repos=*)       REPOS_ARG="${1#--repos=}"; [[ -n "$REPOS_ARG" ]] || _die "--repos requires a value"; shift ;;
+    --status|-s)     _need_value "$@"; _set_status "$2";     shift 2 ;;
+    --status=*)      _set_status "${1#--status=}";           shift   ;;
+    -s=*)            _set_status "${1#-s=}";                 shift   ;;
+    -s?*)            _set_status "${1#-s}";                  shift   ;;
+    --priority|-p)   _need_value "$@"; _set_priority "$2";   shift 2 ;;
+    --priority=*)    _set_priority "${1#--priority=}";       shift   ;;
+    -p=*)            _set_priority "${1#-p=}";               shift   ;;
+    -p?*)            _set_priority "${1#-p}";                shift   ;;
+    -o|--open)       _set_status open;                       shift   ;;
+    -a)
+      # td's -a widens to closed and deferred, which no view here claims.
+      _die "-a is not supported: the default already includes deferred tasks; use --status closed for closed ones"
+      ;;
+    --deferred)
+      _die "--deferred is not needed: the default view already includes deferred tasks"
+      ;;
     *)               EXTRA_FLAGS+=("$1");    shift   ;;
   esac
 done
@@ -123,11 +154,16 @@ fi
 # A caller's own --filter expression bypasses td's exclusions entirely, so that
 # view is governed by the caller's TDQ and may contain closed or deferred tasks.
 # It also needs no second read, because td already answers with deferred rows.
+# Any other forwarded td flag may still narrow which tasks come back, so the
+# label says that instead of claiming a set nobody verified.
 CALLER_FILTER=false
+CALLER_SELECTION=false
 if [[ "${#EXTRA_FLAGS[@]}" -gt 0 ]]; then
   for ((i=0; i<${#EXTRA_FLAGS[@]}; i++)); do
     case "${EXTRA_FLAGS[$i]}" in
-      --filter|-f|--filter=*|-f*) CALLER_FILTER=true ;;
+      --filter|-f|--filter=*|-f?*)          CALLER_FILTER=true ;;
+      --limit|-n|--limit=*|-n=*|-n[0-9]*)    : ;;  # accounted for by the cap logic
+      -*)                                    CALLER_SELECTION=true ;;
     esac
   done
 fi
@@ -147,6 +183,8 @@ fi
 if $CALLER_FILTER; then
   # Never claim td's exclusions for a query that does not apply them.
   VIEW_LABEL="$VIEW_LABEL; caller --filter governs which statuses appear"
+elif $CALLER_SELECTION; then
+  VIEW_LABEL="$VIEW_LABEL; caller td flags may narrow which tasks appear"
 fi
 
 # ── Temporary workspace ───────────────────────────────────────────────────────
@@ -294,14 +332,11 @@ _td_list_once() {
     "${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}" \
     "$@" 2>"$TD_ERR_FILE")" || status=$?
   # Bound the borrowed text: an operator's stderr is not a place for megabytes.
-  # Prefer td's own error line: cobra prints its usage banner first for a flag
-  # error, and "(Usage:)" is not a reason anyone can act on.
+  # td puts its reason in the JSON error object on stdout and only its cobra
+  # usage banner on stderr, so borrow stderr only for an explicit error line and
+  # never for the banner or its indented body.
   td_err="$(sed "s/$(printf '\033')\[[0-9;]*m//g" "$TD_ERR_FILE" \
     | grep -m1 -E '^(ERROR|Error|error)' || true)"
-  if [[ -z "$td_err" ]]; then
-    td_err="$(sed "s/$(printf '\033')\[[0-9;]*m//g" "$TD_ERR_FILE" \
-      | grep -m1 -v -E '^[[:space:]]*(Usage:|Flags:|Aliases:|Global Flags:|)$' || true)"
-  fi
   td_err="${td_err:0:200}"
 
   # td answers a successful query with a JSON array of task objects and a failed
@@ -366,8 +401,11 @@ else:
     _unreadable_warn "$rname" \
       "td list returned output that is not a task array${code:+ [$code]}${message:+: $message}"
   else
-    _unreadable_warn "$rname" \
-      "td list failed (exit $status)${message:+: $message}${td_err:+ ($td_err)}"
+    if [[ -n "$message" ]]; then
+      _unreadable_warn "$rname" "td list failed (exit $status): $message"
+    else
+      _unreadable_warn "$rname" "td list failed (exit $status)${td_err:+: $td_err}"
+    fi
   fi
   printf '0 0\n[]'
   return 1
@@ -423,7 +461,7 @@ _td_read_complete() {
     fi
     if [[ "$limit" -ge "$TD_LIST_MAX_LIMIT" ]]; then
       _ceiling_warn "$rname" "$total" \
-        "the SGT_TD_LIST_MAX_LIMIT ceiling of $TD_LIST_MAX_LIMIT (raise it to see the rest)"
+        "the SGT_TD_LIST_MAX_LIMIT ceiling of $TD_LIST_MAX_LIMIT (raise it to see the rest, including this repo's deferred tasks, which were not read)"
       printf '%s\n%s' "$published" "$(_payload_json "$payload")"
       return 2
     fi

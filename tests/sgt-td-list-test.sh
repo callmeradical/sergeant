@@ -207,6 +207,7 @@ td_filter = ""
 deferred_only = False
 want_status = ""
 want_priority = ""
+include_everything = False
 limit = 50  # real td default
 idx = 1
 while idx < len(argv):
@@ -230,8 +231,21 @@ while idx < len(argv):
         deferred_only = True
         idx += 1
     elif arg in ("-s", "--status"):
+        # Real td's -s is a stringArray and accumulates; sgt-td-list claims every
+        # status spelling itself so td can never receive two, and this fake fails
+        # loudly if that ever stops being true.
+        if want_status:
+            sys.stderr.write("fake td: -s passed twice (%r then %r)\n"
+                             % (want_status, argv[idx + 1]))
+            sys.exit(64)
         want_status = argv[idx + 1]
         idx += 2
+    elif arg in ("-a", "--all"):
+        include_everything = True
+        idx += 1
+    elif arg in ("-o", "--open"):
+        want_status = "open"
+        idx += 1
     elif arg in ("-p", "--priority"):
         want_priority = argv[idx + 1]
         idx += 2
@@ -255,6 +269,15 @@ slow_repo = os.environ.get("SGT_TD_LIST_TEST_SLOW_REPO", "")
 if slow_repo and Path(work_dir).name == slow_repo:
     import time
     time.sleep(30)
+
+usage_repo = os.environ.get("SGT_TD_LIST_TEST_USAGE_ERROR_REPO", "")
+if usage_repo and Path(work_dir).name == usage_repo:
+    # Real td flag error: the reason goes to stdout as JSON, and only cobra's
+    # usage banner goes to stderr.
+    print(json.dumps({"error": {"code": "invalid_input",
+                                "message": "unknown flag: --nope"}}))
+    sys.stderr.write("Usage:\n  td list [filters] [flags]\n\nFlags:\n  -a, --all\n")
+    sys.exit(1)
 
 flood_repo = os.environ.get("SGT_TD_LIST_TEST_FLOOD_REPO", "")
 if flood_repo and Path(work_dir).name == flood_repo:
@@ -308,8 +331,8 @@ tasks = []
 for n in range(total):
     status = cycle[n % len(cycle)]
     is_deferred = (n + 1) in deferred_idx
-    if td_filter:
-        pass                          # --filter applies no exclusion at all
+    if td_filter or include_everything:
+        pass                          # neither --filter nor -a applies exclusions
     else:
         # Verified against td v0.55.0: closed tasks are excluded unless asked
         # for by status (-s closed returns them), and deferred tasks come only
@@ -1475,5 +1498,147 @@ if ! grep -qF 'big' "$err" || ! grep -qi 'truncat' "$err"; then
   _fail "caller_limit_eq_shorthand: -n=5 withheld 55 tasks, so it must warn"
 fi
 printf 'caller_limit_eq_shorthand: ok\n'
+
+# ── 35. Caller-passed td flags can never desync the header from the rows ───────
+
+# td flags that change which statuses appear are claimed by sgt-td-list itself,
+# so a forwarded copy can never land after ours and win while the header still
+# describes the view we asked for.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/dashs.out"; err="$TEST_ROOT/dashs.err"
+_run "$out" "$err" -- mixed -s closed
+_expect_status 0 short_status_flag_is_claimed "$err"
+grep -qF '[status=closed]' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "short_status_flag_is_claimed: -s closed must be labelled like --status closed"
+}
+grep -qF 'td-000008' "$out" || _fail "short_status_flag_is_claimed: -s closed must reach the closed task"
+printf 'short_status_flag_is_claimed: ok\n'
+
+for spelling in "--status=closed" "-s=closed" "-sclosed"; do
+  : > "$TEST_ROOT/td.log"
+  out="$TEST_ROOT/spell.out"; err="$TEST_ROOT/spell.err"
+  _run "$out" "$err" -- mixed "$spelling"
+  _expect_status 0 "status_spelling($spelling)" "$err"
+  grep -qF '[status=closed]' "$out" || {
+    printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+    _fail "status_spelling($spelling): every status spelling must be claimed and labelled"
+  }
+done
+printf 'status_spelling: ok\n'
+
+# -o is exactly --status open, and must be labelled as such.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/dasho.out"; err="$TEST_ROOT/dasho.err"
+_run "$out" "$err" -- mixed -o
+_expect_status 0 open_shorthand_is_claimed "$err"
+grep -qF '[status=open]' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "open_shorthand_is_claimed: -o must be labelled status=open"
+}
+grep -qF '── mixed (4)' "$out" || _fail "open_shorthand_is_claimed: -o must report the 4 open tasks"
+printf 'open_shorthand_is_claimed: ok\n'
+
+# td's -a widens to closed and deferred, which no view here claims: refuse it.
+out="$TEST_ROOT/dasha.out"; err="$TEST_ROOT/dasha.err"
+_run "$out" "$err" -- mixed -a
+_expect_status 1 td_all_flag_refused "$err"
+grep -qF 'not supported' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "td_all_flag_refused: -a must be refused with a pointer to the supported flags"
+}
+printf 'td_all_flag_refused: ok\n'
+
+# --deferred would flip the base read; the default already covers it.
+out="$TEST_ROOT/dashdef.out"; err="$TEST_ROOT/dashdef.err"
+_run "$out" "$err" -- mixed --deferred
+_expect_status 1 deferred_flag_refused "$err"
+grep -qF 'not needed' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "deferred_flag_refused: --deferred must be refused as redundant"
+}
+printf 'deferred_flag_refused: ok\n'
+
+# Every --all/--status spelling collides, not just the long one with a space.
+for narrowing in "--status closed" "--status=closed" "-s closed" "-sclosed"; do
+  out="$TEST_ROOT/conf.out"; err="$TEST_ROOT/conf.err"
+  # shellcheck disable=SC2086
+  _run "$out" "$err" -- mixed --all $narrowing
+  _expect_status 1 "all_status_conflict($narrowing)" "$err"
+  grep -qF 'mutually exclusive' "$err" || {
+    printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+    _fail "all_status_conflict($narrowing): --all with $narrowing must be refused"
+  }
+done
+printf 'all_status_conflict_spellings: ok\n'
+
+# A status or priority passed twice would accumulate inside td; refuse it.
+out="$TEST_ROOT/twice.out"; err="$TEST_ROOT/twice.err"
+_run "$out" "$err" -- mixed --status open -s closed
+_expect_status 1 status_passed_twice_refused "$err"
+grep -qF 'once' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "status_passed_twice_refused: two statuses would accumulate in td, so refuse"
+}
+printf 'status_passed_twice_refused: ok\n'
+
+# An empty value is a caller bug, not a request for everything.
+for flag in --status --priority; do
+  out="$TEST_ROOT/empty.out"; err="$TEST_ROOT/empty.err"
+  _run "$out" "$err" -- mixed "$flag" ""
+  _expect_status 1 "empty_value_refused($flag)" "$err"
+  grep -qF -- "$flag requires a value" "$err" || {
+    printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+    _fail "empty_value_refused($flag): an empty value must be refused"
+  }
+done
+printf 'empty_value_refused: ok\n'
+
+# Any other forwarded td flag may narrow the answer, so the label says so.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/sel.out"; err="$TEST_ROOT/sel.err"
+_run "$out" "$err" -- mixed --sort priority
+_expect_status 0 caller_selection_flag_labelled "$err"
+grep -qF 'caller td flags may narrow which tasks appear' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "caller_selection_flag_labelled: a forwarded td flag must be disclosed in the label"
+}
+printf 'caller_selection_flag_labelled: ok\n'
+
+# ── 36. A td flag error is reported with td's reason, not its usage banner ─────
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/usage.out"; err="$TEST_ROOT/usage.err"
+_run "$out" "$err" SGT_TD_LIST_TEST_USAGE_ERROR_REPO=big -- example
+_expect_status 2 td_error_omits_usage_banner "$err"
+grep -qF 'unknown flag' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "td_error_omits_usage_banner: td's own reason must be reported"
+}
+! grep -qF 'td list [filters]' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "td_error_omits_usage_banner: the usage banner must not be borrowed"
+}
+! grep -qF 'Usage:' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "td_error_omits_usage_banner: the usage banner must not be borrowed"
+}
+printf 'td_error_omits_usage_banner: ok\n'
+
+# ── 37. A ceiling that skips the deferred half says so ────────────────────────
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/ceildef.out"; err="$TEST_ROOT/ceildef.err"
+_run "$out" "$err" SGT_TD_LIST_LIMIT=2 SGT_TD_LIST_MAX_LIMIT=2 -- mixed
+_expect_status 2 ceiling_names_unread_deferred "$err"
+grep -qF 'deferred tasks, which were not read' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "ceiling_names_unread_deferred: the ceiling must say the deferred half went unread"
+}
+! grep -qF -- '--deferred' "$TEST_ROOT/td.log" || {
+  printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
+  _fail "ceiling_names_unread_deferred: no deferred read is issued once the ceiling is hit"
+}
+printf 'ceiling_names_unread_deferred: ok\n'
 
 printf '\nAll sgt-td-list tests passed.\n'
