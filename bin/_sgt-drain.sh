@@ -8,11 +8,11 @@
 #           _sgt_drain_write, _sgt_drain_global_active,
 #           _sgt_drain_project_active,
 #           _sgt_drain_clear, _sgt_drain_read_field,
-#           _sgt_drain_lock_file, _sgt_drain_lock_dir,
-#           _sgt_drain_host_id, _sgt_drain_lock_acquire_fd,
-#           _sgt_drain_lock_release_fd,
-#           _sgt_drain_check_admission_locked,
-#           _sgt_drain_run_locked, _sgt_drain_with_lock,
+#           _sgt_drain_lock_file, _sgt_drain_lock_record,
+#           _sgt_drain_host_id, _sgt_drain_process_alive,
+#           _sgt_drain_process_start,
+#           _sgt_drain_lock_acquire_fd, _sgt_drain_lock_release_fd,
+#           _sgt_drain_check_admission_locked, _sgt_drain_run_locked,
 #           _sgt_drain_remove_global, _sgt_drain_remove_project
 #
 # Drain state location: $SERGEANT_CONFIG/drain/
@@ -111,8 +111,8 @@ _sgt_is_drained() {
 # concurrent sgt-drain cannot slip in between, and by sgt-drain itself to
 # read-then-write drain state atomically.
 #
-# Outcome contract — shared by _sgt_drain_lock_acquire_fd, _sgt_drain_run_locked
-# and _sgt_drain_with_lock.  Callers can tell all three cases apart:
+# Outcome contract — shared by _sgt_drain_lock_acquire_fd and
+# _sgt_drain_run_locked.  Callers can tell all three cases apart:
 #
 #   0  acquired     the lock is held        SGT_DRAIN_LOCK_STATE=acquired
 #   2  timeout      another owner holds it  SGT_DRAIN_LOCK_STATE=timeout
@@ -121,122 +121,212 @@ _sgt_is_drained() {
 # A nonzero return ALWAYS means the lock is not held.  No path returns success
 # without exclusion, so a caller can never proceed silently unlocked.
 #
-# Exclusion is an atomically created lock DIRECTORY, not flock(1).  flock is
-# absent from macOS system installs and limited on BusyBox, and guarding it with
-# `command -v flock` previously meant the whole lock silently degraded to a
-# no-op.  mkdir(2) is atomic everywhere Sergeant runs, needs no extra
-# prerequisite, and mirrors the reclaimable lock already used by sgt-wake.
+# Exclusion is a hard link, not flock(1).  flock is absent from macOS system
+# installs and limited on BusyBox, and guarding it with `command -v flock`
+# previously meant the whole lock silently degraded to a no-op.  link(2) fails
+# atomically when the target exists, is available everywhere Sergeant runs, and
+# — unlike mkdir — publishes the lock together with its owner record in one
+# atomic step, so the lock can never exist in an unattributable state that no
+# later contender is able to reclaim.
+#
+# Every lock instance carries a nonce.  Reclamation and release are both bound
+# to that nonce, so a contender can neither destroy a lock that was reacquired
+# while it was deciding, nor release a lock it no longer owns.
 #
 # Usage pattern (mirroring sgt-respond):
 #   _sgt_drain_lock_acquire_fd N [purpose]        # 0 = held; 2/3 = not held
 #   _sgt_drain_check_admission_locked [project]   # 0 = admit, 1 = draining
 #   ... spawn new pane ...
 #   _sgt_drain_lock_release_fd N                  # release
-
-# _sgt_drain_lock_dir
 #
-# Prints the path of the lock directory that provides the actual exclusion.
-_sgt_drain_lock_dir() {
-  printf '%s.d\n' "$(_sgt_drain_lock_file)"
+# The <fd> argument is an opaque per-process handle: it names which acquisition
+# a later release refers to.  It is no longer a file descriptor carrying kernel
+# state, because ownership is proven by the on-disk record instead.
+#
+# NOTE: because release is explicit rather than kernel-backed, a holder killed
+# mid-flight leaves its record behind.  That is safe: the record always names a
+# verifiable owner, so the next contender reclaims it automatically.  No EXIT
+# trap is installed here on purpose — this library is sourced by scripts that
+# own their own traps.
+
+# _sgt_drain_lock_record
+#
+# Prints the path of the lock record that provides the actual exclusion.  Its
+# contents are the owner record.
+_sgt_drain_lock_record() {
+  printf '%s.held\n' "$(_sgt_drain_lock_file)"
 }
 
 # _sgt_drain_host_id
 #
-# Prints a stable host identifier.  Owner liveness can only be verified on the
-# host that recorded the lock, so the host is part of the lock record.
+# Prints a host identifier, or nothing when the host cannot be identified.
+# Owner liveness can only be verified on the host that recorded the lock, so an
+# empty result must be treated as unverifiable rather than as a match.
 _sgt_drain_host_id() {
-  local host
-  host="$(uname -n 2>/dev/null || true)"
-  [[ -n "$host" ]] || host="unknown-host"
-  printf '%s\n' "$host"
+  uname -n 2>/dev/null || true
+}
+
+# _sgt_drain_nonce
+#
+# Prints a unique token identifying one lock acquisition.
+_sgt_drain_nonce() {
+  local token
+  token="$(dd if=/dev/urandom bs=8 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' || true)"
+  [[ -n "$token" ]] || token="$$$(date +%s)$RANDOM"
+  printf '%s\n' "$token"
+}
+
+# _sgt_drain_process_alive <pid>
+#
+# Returns 0 when the process exists, 1 when it PROVABLY does not, and 2 when
+# liveness cannot be determined.  Callers must treat 2 as "still alive" so an
+# unverifiable owner is never displaced.
+#
+# /proc is authoritative on Linux and BusyBox — where `ps -p` does not exist —
+# and `kill -0` alone is not, because it also fails with EPERM for a live
+# process owned by another user.
+_sgt_drain_process_alive() {
+  local pid="$1"
+  case "$pid" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  if [[ -d /proc/self ]]; then
+    [[ -d "/proc/$pid" ]] && return 0
+    return 1
+  fi
+  kill -0 "$pid" 2>/dev/null && return 0
+  ps -p "$pid" >/dev/null 2>&1 && return 0
+  # Without a usable ps, an EPERM from kill -0 is indistinguishable from death.
+  ps -p "$$" >/dev/null 2>&1 || return 2
+  return 1
 }
 
 # _sgt_drain_process_start <pid>
 #
-# Prints the process start time, used to detect PID reuse.
+# Prints a stable process start token used to detect PID reuse, or nothing when
+# it cannot be determined.  Prefers /proc/<pid>/stat field 22 (Linux and
+# BusyBox) and falls back to ps lstart (macOS).
 _sgt_drain_process_start() {
-  ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//;s/ *$//'
+  local pid="$1" tail_fields
+  case "$pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  if [[ -r "/proc/$pid/stat" ]]; then
+    # The comm field may contain spaces and parentheses, so read everything
+    # after the final ") "; starttime is then the 20th remaining field.
+    tail_fields="$(sed 's/^.*) //' "/proc/$pid/stat" 2>/dev/null || true)"
+    if [[ -n "$tail_fields" ]]; then
+      printf '%s\n' "$tail_fields" | awk '{print $20}'
+      return 0
+    fi
+  fi
+  ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true
 }
 
-# _sgt_drain_lock_write_owner <lock_dir> <purpose>
+# _sgt_drain_lock_owner_is_gone <record>
 #
-# Records proven owner state INSIDE the held lock, so a later contender can
-# decide whether the lock is live or safely reclaimable.  Written only after
-# the lock directory was created, so the contents always describe the holder.
-_sgt_drain_lock_write_owner() {
-  local lock_dir="$1" purpose="$2" temporary
-  temporary="$lock_dir/owner.tmp.$$"
-  {
-    printf 'owner_pid=%s\n'      "$$"
-    printf 'owner_start=%s\n'    "$(_sgt_drain_process_start "$$")"
-    printf 'owner_host=%s\n'     "$(_sgt_drain_host_id)"
-    printf 'owner_user=%s\n'     "${USER:-$(id -un 2>/dev/null || printf 'unknown')}"
-    printf 'owner_purpose=%s\n'  "$purpose"
-    printf 'created_at=%s\n'     "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf 'created_epoch=%s\n'  "$(date +%s)"
-  } > "$temporary" 2>/dev/null || return 1
-  mv "$temporary" "$lock_dir/owner" 2>/dev/null || return 1
-  return 0
-}
-
-# _sgt_drain_lock_owner_is_gone <lock_dir>
+# Returns 0 only when the recorded owner is PROVABLY gone: an identified host
+# matching this one, and a pid that either no longer exists or has been reused
+# by a different process.  Anything unverifiable — an unidentified host, a
+# foreign host, a missing or malformed record, or an undeterminable liveness —
+# returns 1 so a live lock is never stolen.
 #
-# Returns 0 only when the recorded owner is PROVABLY gone: same host, and the
-# pid is either absent or has been reused by a different process.  Anything
-# unverifiable — a foreign host, a missing or malformed record — returns 1 so
-# a live lock is never stolen.
+# On success the observed owner_nonce is published in _SGT_DRAIN_OBSERVED_NONCE
+# so the caller can bind its reclamation to this exact lock instance.
 _sgt_drain_lock_owner_is_gone() {
-  local lock_dir="$1" owner_file="$1/owner"
-  local pid host recorded_start actual_start
-  [[ -f "$owner_file" ]] || return 1
-  host="$(_sgt_drain_read_field "$owner_file" owner_host)"
-  [[ "$host" == "$(_sgt_drain_host_id)" ]] || return 1
-  pid="$(_sgt_drain_read_field "$owner_file" owner_pid)"
+  local record="$1"
+  local pid host local_host recorded_start actual_start alive_rc
+  _SGT_DRAIN_OBSERVED_NONCE=""
+  [[ -f "$record" ]] || return 1
+
+  host="$(_sgt_drain_read_field "$record" owner_host)"
+  local_host="$(_sgt_drain_host_id)"
+  # An unidentified host must never compare equal to another unidentified host.
+  [[ -n "$host" && -n "$local_host" && "$host" == "$local_host" ]] || return 1
+
+  pid="$(_sgt_drain_read_field "$record" owner_pid)"
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  # kill -0 also fails with EPERM for a live process owned by another user, so
-  # confirm absence with ps before declaring the owner gone.
-  if ! kill -0 "$pid" 2>/dev/null && ! ps -p "$pid" >/dev/null 2>&1; then
+
+  alive_rc=0
+  _sgt_drain_process_alive "$pid" || alive_rc=$?
+  if [[ $alive_rc -eq 1 ]]; then
+    _SGT_DRAIN_OBSERVED_NONCE="$(_sgt_drain_read_field "$record" owner_nonce)"
     return 0
   fi
-  recorded_start="$(_sgt_drain_read_field "$owner_file" owner_start)"
-  if [[ -n "$recorded_start" ]]; then
-    actual_start="$(_sgt_drain_process_start "$pid")"
-    [[ "$actual_start" == "$recorded_start" ]] || return 0
+  [[ $alive_rc -eq 0 ]] || return 1
+
+  # The pid exists: only a changed start token proves it is a different process.
+  recorded_start="$(_sgt_drain_read_field "$record" owner_start)"
+  actual_start="$(_sgt_drain_process_start "$pid")"
+  if [[ -n "$recorded_start" && -n "$actual_start" && "$actual_start" != "$recorded_start" ]]; then
+    _SGT_DRAIN_OBSERVED_NONCE="$(_sgt_drain_read_field "$record" owner_nonce)"
+    return 0
   fi
   return 1
 }
 
-# _sgt_drain_lock_reclaim <lock_dir>
+# _sgt_drain_lock_reclaim <record> <expected_nonce>
 #
-# Reclaims a lock proven stale.  The directory is renamed first: rename is
-# atomic, so exactly one contender wins the reclamation and the loser keeps
-# waiting instead of deleting the winner's fresh lock.
+# Reclaims a lock proven stale, but only that exact instance.  The record is
+# renamed first, because rename is atomic: at most one contender can move it.
+# The nonce is then re-checked, so a lock that was legitimately reacquired
+# between the staleness decision and the rename is restored instead of deleted.
 _sgt_drain_lock_reclaim() {
-  local lock_dir="$1" quarantine
-  quarantine="${lock_dir}.stale.$$"
-  rm -rf "$quarantine" 2>/dev/null || true
-  mv "$lock_dir" "$quarantine" 2>/dev/null || return 1
-  rm -rf "$quarantine" 2>/dev/null || true
+  local record="$1" expected_nonce="$2" quarantine observed
+  quarantine="${record}.stale.$$"
+  rm -f "$quarantine" 2>/dev/null || true
+  mv "$record" "$quarantine" 2>/dev/null || return 1
+
+  observed="$(_sgt_drain_read_field "$quarantine" owner_nonce)"
+  if [[ -n "$expected_nonce" && "$observed" != "$expected_nonce" ]]; then
+    # A different lock instance than the one proven stale — put it back.  ln
+    # refuses to clobber, so a third party that has already taken the lock keeps
+    # it and this now-orphaned copy is discarded.
+    ln "$quarantine" "$record" 2>/dev/null || true
+    rm -f "$quarantine" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$quarantine" 2>/dev/null || true
   return 0
 }
 
-# _sgt_drain_lock_report_timeout <lock_dir>
+# _sgt_drain_lock_sweep_quarantine <record>
+#
+# Removes quarantine copies left by a reclaimer that died mid-rename.  Only
+# copies whose owning reclaimer is provably gone are removed, so a concurrent
+# reclamation is never disturbed.
+_sgt_drain_lock_sweep_quarantine() {
+  local record="$1" leftover leftover_pid rc
+  for leftover in "$record".stale.*; do
+    [[ -e "$leftover" ]] || continue
+    leftover_pid="${leftover##*.stale.}"
+    case "$leftover_pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    rc=0
+    _sgt_drain_process_alive "$leftover_pid" || rc=$?
+    [[ $rc -eq 1 ]] || continue
+    rm -f "$leftover" 2>/dev/null || true
+  done
+}
+
+# _sgt_drain_lock_report_timeout <record>
 #
 # Reports who holds the lock, for how long, and why, plus the exact recovery
 # command — an undiagnosable "could not acquire lock" is not actionable.
 _sgt_drain_lock_report_timeout() {
-  local lock_dir="$1" owner_file="$1/owner"
+  local record="$1"
   local pid user host purpose created epoch age
   local waited="${SERGEANT_DRAIN_LOCK_TIMEOUT_SECS:-10}"
-  if [[ -f "$owner_file" ]]; then
-    pid="$(_sgt_drain_read_field "$owner_file" owner_pid)"
-    user="$(_sgt_drain_read_field "$owner_file" owner_user)"
-    host="$(_sgt_drain_read_field "$owner_file" owner_host)"
-    purpose="$(_sgt_drain_read_field "$owner_file" owner_purpose)"
-    created="$(_sgt_drain_read_field "$owner_file" created_at)"
-    epoch="$(_sgt_drain_read_field "$owner_file" created_epoch)"
+  if [[ -f "$record" ]]; then
+    pid="$(_sgt_drain_read_field "$record" owner_pid)"
+    user="$(_sgt_drain_read_field "$record" owner_user)"
+    host="$(_sgt_drain_read_field "$record" owner_host)"
+    purpose="$(_sgt_drain_read_field "$record" owner_purpose)"
+    created="$(_sgt_drain_read_field "$record" created_at)"
+    epoch="$(_sgt_drain_read_field "$record" created_epoch)"
     age="unknown"
     case "$epoch" in
       ''|*[!0-9]*) : ;;
@@ -244,66 +334,79 @@ _sgt_drain_lock_report_timeout() {
     esac
     printf 'ERROR: could not acquire drain admission lock after %ss: held by owner_pid=%s user=%s host=%s purpose=%s since=%s age=%s\n' \
       "$waited" "$pid" "$user" "$host" "$purpose" "$created" "$age" >&2
-    printf 'ERROR: retry when that process finishes, or if it is gone remove the stale lock: rm -rf %s\n' \
-      "$lock_dir" >&2
+    printf 'ERROR: retry when that process finishes; a lock whose owner has died is reclaimed automatically on the next attempt.\n' >&2
   else
-    printf 'ERROR: could not acquire drain admission lock after %ss: %s exists with no owner record (purpose unknown)\n' \
-      "$waited" "$lock_dir" >&2
-    printf 'ERROR: if no drain, dispatch, or respond command is running, remove it: rm -rf %s\n' \
-      "$lock_dir" >&2
+    printf 'ERROR: could not acquire drain admission lock after %ss: contended at %s\n' \
+      "$waited" "$record" >&2
   fi
 }
 
 # _sgt_drain_lock_acquire_fd <fd> [purpose]
 #
-# Acquires the drain admission lock and attaches <fd> to the lock file so the
-# documented release-by-fd pattern keeps working.  See the outcome contract
-# above: 0 = acquired, 2 = timeout, 3 = unavailable.
+# Acquires the drain admission lock.  See the outcome contract above:
+# 0 = acquired, 2 = timeout, 3 = unavailable.
 _sgt_drain_lock_acquire_fd() {
   local fd="${1:?_sgt_drain_lock_acquire_fd requires an fd}"
   local purpose="${2:-}"
-  local lock_file lock_dir state_dir deadline
+  local record state_dir deadline nonce staging
 
   SGT_DRAIN_LOCK_STATE="unavailable"
   case "$fd" in
     ''|*[!0-9]*)
-      printf 'ERROR: invalid drain admission lock fd: %s\n' "$fd" >&2
+      printf 'ERROR: invalid drain admission lock handle: %s\n' "$fd" >&2
       return 3
       ;;
   esac
   [[ -n "$purpose" ]] || purpose="${0##*/}"
   purpose="$(printf '%s' "$purpose" | tr -d '\n\r')"
 
-  lock_file="$(_sgt_drain_lock_file)"
-  lock_dir="$(_sgt_drain_lock_dir)"
-  state_dir="$(dirname "$lock_file")"
+  record="$(_sgt_drain_lock_record)"
+  state_dir="$(dirname "$record")"
   if ! mkdir -p "$state_dir" 2>/dev/null || [[ ! -w "$state_dir" ]]; then
     printf 'ERROR: drain admission lock unavailable: %s is not writable\n' "$state_dir" >&2
     return 3
   fi
 
+  _sgt_drain_lock_sweep_quarantine "$record"
+
+  nonce="$(_sgt_drain_nonce)"
+  staging="${record}.staging.$$.$nonce"
+  # The record is complete BEFORE it becomes the lock, so the lock is never
+  # visible without the owner state needed to verify or reclaim it.
+  if ! {
+    printf 'owner_pid=%s\n'      "$$"
+    printf 'owner_start=%s\n'    "$(_sgt_drain_process_start "$$")"
+    printf 'owner_host=%s\n'     "$(_sgt_drain_host_id)"
+    printf 'owner_user=%s\n'     "${USER:-$(id -un 2>/dev/null || printf 'unknown')}"
+    printf 'owner_purpose=%s\n'  "$purpose"
+    printf 'owner_nonce=%s\n'    "$nonce"
+    printf 'created_at=%s\n'     "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'created_epoch=%s\n'  "$(date +%s)"
+  } > "$staging" 2>/dev/null; then
+    rm -f "$staging" 2>/dev/null || true
+    printf 'ERROR: drain admission lock unavailable: cannot stage owner record at %s\n' \
+      "$staging" >&2
+    return 3
+  fi
+
   deadline=$(( $(date +%s) + ${SERGEANT_DRAIN_LOCK_TIMEOUT_SECS:-10} ))
   while :; do
-    if mkdir "$lock_dir" 2>/dev/null; then
-      if ! _sgt_drain_lock_write_owner "$lock_dir" "$purpose"; then
-        rm -rf "$lock_dir" 2>/dev/null || true
-        printf 'ERROR: drain admission lock unavailable: cannot record owner in %s\n' \
-          "$lock_dir" >&2
-        return 3
-      fi
-      # shellcheck disable=SC1083
-      eval "exec ${fd}>\"\$lock_file\"" 2>/dev/null || true
+    if ln "$staging" "$record" 2>/dev/null; then
+      rm -f "$staging" 2>/dev/null || true
       eval "_SGT_DRAIN_LOCK_HELD_${fd}=1"
+      eval "_SGT_DRAIN_LOCK_PATH_${fd}=\$record"
+      eval "_SGT_DRAIN_LOCK_NONCE_${fd}=\$nonce"
       SGT_DRAIN_LOCK_STATE="acquired"
       return 0
     fi
-    if _sgt_drain_lock_owner_is_gone "$lock_dir" && _sgt_drain_lock_reclaim "$lock_dir"; then
-      continue
+    if _sgt_drain_lock_owner_is_gone "$record"; then
+      _sgt_drain_lock_reclaim "$record" "$_SGT_DRAIN_OBSERVED_NONCE" && continue
     fi
     if [[ $(date +%s) -ge $deadline ]]; then
+      rm -f "$staging" 2>/dev/null || true
       # shellcheck disable=SC2034  # Read by callers as part of the outcome contract.
       SGT_DRAIN_LOCK_STATE="timeout"
-      _sgt_drain_lock_report_timeout "$lock_dir"
+      _sgt_drain_lock_report_timeout "$record"
       return 2
     fi
     sleep 0.1 2>/dev/null || sleep 1
@@ -312,23 +415,50 @@ _sgt_drain_lock_acquire_fd() {
 
 # _sgt_drain_lock_release_fd <fd>
 #
-# Releases the lock and closes <fd>.  Removes the lock directory only when this
-# process actually acquired it through <fd>, so a failed acquisition can never
-# release someone else's lock.  Idempotent.
+# Releases a lock acquired through <fd>.  The on-disk nonce is verified first,
+# so this can never remove a lock that now belongs to another process — for
+# example after an operator removed the record by hand and someone else took
+# it.  Returns nonzero, keeping the handle marked, when the lock is still
+# present but could not be removed.
 _sgt_drain_lock_release_fd() {
   local fd="${1:?_sgt_drain_lock_release_fd requires an fd}"
-  local held lock_dir
+  local held record nonce observed
   case "$fd" in
     ''|*[!0-9]*) return 0 ;;
   esac
   eval "held=\${_SGT_DRAIN_LOCK_HELD_${fd}:-}"
-  # shellcheck disable=SC1083
-  eval "exec ${fd}>&-" 2>/dev/null || true
-  if [[ "$held" == "1" ]]; then
-    lock_dir="$(_sgt_drain_lock_dir)"
-    rm -rf "$lock_dir" 2>/dev/null || true
-    eval "unset _SGT_DRAIN_LOCK_HELD_${fd}"
+  [[ "$held" == "1" ]] || return 0
+  eval "record=\${_SGT_DRAIN_LOCK_PATH_${fd}:-}"
+  eval "nonce=\${_SGT_DRAIN_LOCK_NONCE_${fd}:-}"
+
+  if [[ -z "$record" || ! -e "$record" ]]; then
+    _sgt_drain_lock_forget_handle "$fd"
+    return 0
   fi
+
+  observed="$(_sgt_drain_read_field "$record" owner_nonce)"
+  if [[ "$observed" != "$nonce" ]]; then
+    printf 'ERROR: drain admission lock %s is no longer held by this process; leaving it in place\n' \
+      "$record" >&2
+    _sgt_drain_lock_forget_handle "$fd"
+    return 1
+  fi
+
+  rm -f "$record" 2>/dev/null || true
+  if [[ -e "$record" ]]; then
+    printf 'ERROR: could not release drain admission lock %s\n' "$record" >&2
+    return 1
+  fi
+  _sgt_drain_lock_forget_handle "$fd"
+  return 0
+}
+
+# _sgt_drain_lock_forget_handle <fd>
+#
+# Clears the bookkeeping for one lock handle.
+_sgt_drain_lock_forget_handle() {
+  local fd="$1"
+  eval "unset _SGT_DRAIN_LOCK_HELD_${fd} _SGT_DRAIN_LOCK_PATH_${fd} _SGT_DRAIN_LOCK_NONCE_${fd}"
   return 0
 }
 
@@ -350,37 +480,32 @@ _sgt_drain_check_admission_locked() {
   return 0
 }
 
-# Internal fd used by the command-running lock wrappers below.
+# Internal handle used by the command-running lock wrapper below.
 _SGT_DRAIN_LOCK_INTERNAL_FD=200
 
 # _sgt_drain_run_locked <command> [args...]
 #
 # Runs a command with its arguments while holding the admission lock, then
-# releases it and returns the command's exit status.  Prefer this over
-# _sgt_drain_with_lock: arguments are passed as argv, so caller-supplied text
-# (a drain reason, a path) is never re-parsed by the shell.
+# releases it and returns the command's exit status.  Arguments are passed as
+# argv, so caller-supplied text (a drain reason, a path) is never re-parsed by
+# the shell.
 #
-# Returns the lock outcome (2 timeout, 3 unavailable) when the lock could not be
-# acquired, and does NOT run the command in that case.
+# When the lock could not be acquired the command does NOT run and the lock
+# outcome (2 timeout, 3 unavailable) is returned.  Because a wrapped command may
+# itself exit 2 or 3, SGT_DRAIN_LOCK_STATE is the authoritative lock outcome for
+# callers that need to distinguish the two.
 _sgt_drain_run_locked() {
   local rc=0 acquired=0
-  [[ $# -ge 1 ]] || return 0
+  # Misuse must not report success: an empty invocation never held the lock.
+  [[ $# -ge 1 ]] || {
+    printf 'ERROR: _sgt_drain_run_locked requires a command\n' >&2
+    return 3
+  }
   _sgt_drain_lock_acquire_fd "$_SGT_DRAIN_LOCK_INTERNAL_FD" "${0##*/}" || acquired=$?
   [[ $acquired -eq 0 ]] || return $acquired
   "$@" || rc=$?
-  _sgt_drain_lock_release_fd "$_SGT_DRAIN_LOCK_INTERNAL_FD"
+  _sgt_drain_lock_release_fd "$_SGT_DRAIN_LOCK_INTERNAL_FD" || true
   return $rc
-}
-
-# _sgt_drain_with_lock <body>
-#
-# Runs <body> (a shell string) while holding the admission lock, sharing the
-# outcome contract above.  Retained for callers that must evaluate a shell
-# string; never pass untrusted or caller-supplied text through it — use
-# _sgt_drain_run_locked instead.
-_sgt_drain_with_lock() {
-  local body="${1:?_sgt_drain_with_lock requires a body}"
-  _sgt_drain_run_locked eval "$body"
 }
 
 # ── File-path helpers ─────────────────────────────────────────────────────────

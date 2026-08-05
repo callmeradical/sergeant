@@ -24,10 +24,11 @@
 #   kind, generation, not_before, deadline, max_attempts, backoff_base,
 #   run_id, check_name, task_id, repo, td_task_id, app, env
 #
-# Allowlisted field value pattern: [A-Za-z0-9._/:-]*
-# check_name additionally admits spaces, parentheses, commas, and @#+ because
-# GitHub check names are human-authored (e.g. "build (ubuntu-latest, 3.11)").
-# Neither allowlist permits shell metacharacters, quotes, backslashes, control
+# Allowlisted field value pattern: [A-Za-z0-9._/:-]*, never starting with '-'
+# check_name uses a wider allowlist because GitHub check names are
+# human-authored (e.g. "build (ubuntu-latest, 3.11)", "Build & Test").  See
+# _CHECK_NAME_VALUE_PATTERN below for exactly what each admits and why that is
+# safe.  Neither allowlist permits $ backtick \ quotes ; | < > control
 # characters, or secrets.
 
 set -euo pipefail
@@ -67,12 +68,17 @@ condition_file="$worktree/.sergeant-wake-condition"
 
 _ALLOWED_FIELDS="kind generation not_before deadline max_attempts backoff_base run_id check_name task_id repo td_task_id app env"
 _SECRET_PATTERN='(token|password|key|secret|auth|credential|passwd|apikey|api_key)'
-_STRICT_VALUE_PATTERN='^[A-Za-z0-9._/:-]*$'
-# GitHub check names are human-authored: "All Tests Pass",
-# "build (ubuntu-latest, 3.11)".  Spaces, parentheses, and commas are therefore
-# admitted, while every shell metacharacter, quote, backslash, and control
-# character remains rejected.
-_CHECK_NAME_VALUE_PATTERN='^[A-Za-z0-9][A-Za-z0-9 ._/:@#,+()-]*$'
+# Neither pattern admits a leading '-': every value becomes an argument to gh(1)
+# or td(1), and a dash-leading value would be read there as an option rather
+# than as data.
+_STRICT_VALUE_PATTERN='^([A-Za-z0-9._/:][A-Za-z0-9._/:-]*)?$'
+# GitHub check names are human-authored, so the allowlist admits what real names
+# contain: space, and . _ / : @ # , + ( ) [ ] & ! % ? * = -
+# It rejects $ backtick \ ' " ; | & pipelines, < > redirection, { } ~ and every
+# control character.  Glob characters (* ? [ ]) are admitted, which is safe only
+# because the value is used exclusively as quoted argv to python3/gh and as
+# quoted printf data — it is never eval'd, word-split, or expanded by the shell.
+_CHECK_NAME_VALUE_PATTERN='^[]A-Za-z0-9._/:@#,+()[&!%?*=][]A-Za-z0-9 ._/:@#,+()[&!%?*=-]*$'
 
 declare -A _COND=()
 
@@ -102,10 +108,16 @@ while IFS='=' read -r field value; do
     exit 1
   fi
 
-  # Allowlist value characters.  check_name carries a human-authored GitHub check
-  # name, which routinely contains spaces and parentheses, so it uses a wider
-  # allowlist.  Neither allowlist admits a shell metacharacter, a quote, or a
-  # control character, so values remain safe as quoted argv and printf data.
+  # A present-but-empty field is a distinct mistake from a malformed one; saying
+  # "invalid characters" for an empty value sends the reader looking for a
+  # character that is not there.
+  if [[ -z "$value" ]]; then
+    printf 'ERROR: empty value for wake-condition field: %s\n' "$field" >&2
+    exit 1
+  fi
+
+  # Allowlist value characters.  check_name carries a human-authored GitHub
+  # check name, so it uses the wider allowlist documented above.
   if [[ "$field" == "check_name" ]]; then
     _value_pattern="$_CHECK_NAME_VALUE_PATTERN"
   else
@@ -255,41 +267,50 @@ _result_unsupported() { condition_result="unsupported"; }
 # a non-GitHub host), in which case the caller falls back to letting gh resolve
 # the repository from the worktree cwd.
 _gh_repo_slug() {
-  local dir="$1" url slug
+  local dir="$1" url slug host_pattern
   command -v git >/dev/null 2>&1 || return 1
   url="$(git -C "$dir" remote get-url origin 2>/dev/null || true)"
   [[ -n "$url" ]] || return 1
+  # The host is anchored: a remote on a host that merely ENDS in github.com
+  # (mygithub.com) must not be rewritten into a github.com slug and queried as
+  # the wrong repository.
+  host_pattern='^(https?://([^@/]+@)?|git@|ssh://([^@/]+@)?)github\.com[:/]+'
+  [[ "$url" =~ $host_pattern ]] || return 1
   slug="${url%.git}"
-  slug="${slug#*github.com/}"
-  slug="${slug#*github.com:}"
+  slug="${slug#*github.com}"
+  slug="${slug#"${slug%%[^:/]*}"}"
   [[ "$slug" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || return 1
   printf '%s\n' "$slug"
 }
 
-# _gh_run_view <run_id> <json_fields>
+# _gh_run_view <repo_dir> <run_id> <json_fields>
 #
-# Queries a workflow run bound to the worker's repository.  On success sets
-# _GH_JSON and returns 0.  On failure sets _GH_ERROR to the sanitised gh
-# diagnostic and returns 1, so an unresolvable repository, an auth failure, and
-# a genuinely pending run stay distinguishable.
+# Queries a workflow run bound to <repo_dir>, the worker's recorded worktree.
+# On success sets _GH_JSON and returns 0.  On failure sets _GH_ERROR to the
+# sanitised gh diagnostic and returns 1, so an unresolvable repository, an auth
+# failure, and a genuinely pending run stay distinguishable.
 _gh_run_view() {
-  local run_id="$1" fields="$2" rc=0 slug out err
+  local repo_dir="$1" run_id="$2" fields="$3" rc=0 slug work out err
   local -a args
   _GH_JSON=""
   _GH_ERROR=""
   args=(run view "$run_id" --json "$fields")
-  slug="$(_gh_repo_slug "$worktree" || true)"
+  slug="$(_gh_repo_slug "$repo_dir" || true)"
   [[ -z "$slug" ]] || args+=(--repo "$slug")
 
-  out="$(mktemp)"
-  err="$(mktemp)"
-  ( cd "$worktree" && gh "${args[@]}" ) >"$out" 2>"$err" || rc=$?
+  if ! work="$(mktemp -d)"; then
+    _GH_ERROR="cannot create a temporary directory for the gh query"
+    return 1
+  fi
+  out="$work/stdout"
+  err="$work/stderr"
+  ( cd "$repo_dir" && gh "${args[@]}" ) >"$out" 2>"$err" || rc=$?
   _GH_JSON="$(cat "$out" 2>/dev/null || true)"
   # Collapse the diagnostic to one sanitised, bounded line — it is persisted to
   # fleet state, so it must never carry newlines or unbounded output.
   _GH_ERROR="$(tr -c '[:print:]' ' ' < "$err" 2>/dev/null | \
     sed -e 's/  */ /g' -e 's/^ //' -e 's/ $//' | cut -c1-300)"
-  rm -f "$out" "$err"
+  rm -rf "$work"
 
   if (( rc != 0 )); then
     [[ -n "$_GH_ERROR" ]] || _GH_ERROR="gh exited $rc without a diagnostic"
@@ -402,15 +423,18 @@ case "$kind" in
     # run would wake a worker on a failed check.
     run_id="${_COND[run_id]:-}"
     check_name="${_COND[check_name]:-}"
-    if [[ -z "$run_id" ]]; then
-      _result_error "github_check requires run_id field"
+    if [[ -z "$run_id" || ! "$run_id" =~ ^[0-9]+$ ]]; then
+      # A malformed condition cannot become well-formed by waiting.
+      _result_escalate "github_check requires a numeric run_id field; add it to .sergeant-wake-condition and resume with sgt-respond"
     elif [[ -z "$check_name" ]]; then
-      _result_error "github_check requires check_name field"
+      # Conditions written before check_name was required land here: retrying
+      # would strand the worker in waiting forever, so escalate with the remedy.
+      _result_escalate "github_check requires a check_name field naming the exact check to wait for; add check_name=<name> to .sergeant-wake-condition and resume with sgt-respond"
     elif ! command -v gh >/dev/null 2>&1; then
       _result_error "gh CLI not available for github_check adapter"
     elif ! command -v python3 >/dev/null 2>&1; then
       _result_error "python3 not available for github_check adapter"
-    elif ! _gh_run_view "$run_id" status,conclusion,jobs; then
+    elif ! _gh_run_view "$worktree" "$run_id" status,conclusion,jobs; then
       _result_error "gh run view failed for run_id=$run_id: $_GH_ERROR"
     else
       if ! _gh_select_check "$_GH_JSON" "$check_name"; then
@@ -419,7 +443,8 @@ case "$kind" in
         case "$_GH_MATCH_COUNT" in
           0)
             if [[ "$_GH_RUN_STATUS" == "completed" ]]; then
-              _result_error "github_check not found: no check named '$check_name' in completed run_id=$run_id"
+              # The run is finished, so the named check will never appear.
+              _result_escalate "github_check not found: no check named '$check_name' in completed run_id=$run_id; correct check_name or choose another run, then resume with sgt-respond"
             else
               # The run is still going; the named check may not have started.
               _result_unmet
@@ -437,7 +462,9 @@ case "$kind" in
             fi
             ;;
           *)
-            _result_error "github_check ambiguous: $_GH_MATCH_COUNT checks named '$check_name' in run_id=$run_id"
+            # Which of the duplicates gates the wake cannot be decided here, and
+            # the run's job names will not change.
+            _result_escalate "github_check ambiguous: $_GH_MATCH_COUNT checks named '$check_name' in run_id=$run_id; disambiguate check_name and resume with sgt-respond"
             ;;
         esac
       fi

@@ -167,7 +167,7 @@ printf 'drain lock helpers refuse when drained: ok\n'
 # acquired (0), timeout (2), and unavailable (3) must be told apart, and a
 # failed acquisition must never let a caller proceed as if the lock were held.
 
-lock_dir="$(_sgt_drain_lock_dir)"
+lock_record="$(_sgt_drain_lock_record)"
 
 rc=0
 SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=1 _sgt_drain_lock_acquire_fd 9 "drain-test" || rc=$?
@@ -176,15 +176,20 @@ SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=1 _sgt_drain_lock_acquire_fd 9 "drain-test" || 
   { printf 'acquire should report state=acquired, got %s\n' "$SGT_DRAIN_LOCK_STATE" >&2; exit 1; }
 printf 'drain lock acquired outcome: ok\n'
 
-# The lock record must carry proven owner state for stale-lock recovery.
-[[ -f "$lock_dir/owner" ]] || \
-  { printf 'lock record %s/owner should exist while held\n' "$lock_dir" >&2; exit 1; }
-for field in owner_pid owner_host owner_user owner_purpose created_at created_epoch; do
-  grep -q "^${field}=" "$lock_dir/owner" || \
+# The lock record must carry proven owner state for stale-lock recovery, and it
+# must never exist without it.
+[[ -f "$lock_record" ]] || \
+  { printf 'lock record %s should exist while held\n' "$lock_record" >&2; exit 1; }
+for field in owner_pid owner_start owner_host owner_user owner_purpose owner_nonce created_at created_epoch; do
+  grep -q "^${field}=" "$lock_record" || \
     { printf 'lock record should carry %s\n' "$field" >&2; exit 1; }
 done
-grep -q '^owner_purpose=drain-test$' "$lock_dir/owner" || \
+grep -q '^owner_purpose=drain-test$' "$lock_record" || \
   { printf 'lock record should carry the caller purpose\n' >&2; exit 1; }
+grep -q "^owner_pid=$$\$" "$lock_record" || \
+  { printf 'lock record should carry the owning pid\n' >&2; exit 1; }
+held_nonce="$(_sgt_drain_read_field "$lock_record" owner_nonce)"
+[[ -n "$held_nonce" ]] || { printf 'lock record should carry a non-empty nonce\n' >&2; exit 1; }
 printf 'drain lock owner record: ok\n'
 
 # A second acquisition, in a separate process, must time out — not succeed.
@@ -194,6 +199,8 @@ SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=1 bash -c '
   rc=0
   _sgt_drain_lock_acquire_fd 8 "contender" || rc=$?
   printf "rc=%s state=%s\n" "$rc" "${SGT_DRAIN_LOCK_STATE:-}"
+  # A loser must never remove the real owner'"'"'s lock, even if it releases.
+  _sgt_drain_lock_release_fd 8 || true
 ' _ "$ROOT_DIR" > "$contend_out" 2>"$TEST_ROOT/contend.err" || true
 grep -q 'rc=2 state=timeout' "$contend_out" || \
   { printf 'contended acquire should report rc=2 state=timeout, got: %s\n' \
@@ -205,7 +212,13 @@ grep -q "owner_pid=$$\|pid=$$" "$TEST_ROOT/contend.err" || \
 grep -qi 'purpose' "$TEST_ROOT/contend.err" || \
   { printf 'timeout diagnostic should name the lock purpose, got: %s\n' \
       "$(cat "$TEST_ROOT/contend.err")" >&2; exit 1; }
+# The owner still holds an intact lock after the loser gave up and released.
+[[ -f "$lock_record" ]] || \
+  { printf 'a failed acquirer must not remove the real owner lock\n' >&2; exit 1; }
+[[ "$(_sgt_drain_read_field "$lock_record" owner_nonce)" == "$held_nonce" ]] || \
+  { printf 'a failed acquirer must not replace the real owner record\n' >&2; exit 1; }
 printf 'drain lock timeout outcome: ok\n'
+printf 'drain lock loser leaves owner intact: ok\n'
 
 # Fail closed: sgt-drain must not mutate drain state when it cannot lock.
 rc=0
@@ -223,60 +236,193 @@ _sgt_drain_lock_release_fd 9
 [[ -f "$config_dir/drain/global" ]] || \
   { printf 'sgt-drain should succeed after the lock is released\n' >&2; exit 1; }
 "$ROOT_DIR/bin/sgt-drain" --undrain --global >/dev/null
-[[ ! -d "$lock_dir" ]] || \
-  { printf 'lock directory should not be left behind after release\n' >&2; exit 1; }
+[[ ! -e "$lock_record" ]] || \
+  { printf 'lock record should not be left behind after release\n' >&2; exit 1; }
 printf 'drain lock release: ok\n'
 
-# ── Slice 14 (td-a21178): a stale lock owned by a dead process is reclaimed ──
+# Misuse of the wrapper must not report success without holding the lock.
+rc=0
+_sgt_drain_run_locked >/dev/null 2>&1 || rc=$?
+[[ $rc -ne 0 ]] || \
+  { printf '_sgt_drain_run_locked with no command must not return 0\n' >&2; exit 1; }
+printf 'drain lock wrapper rejects misuse: ok\n'
+
+# ── Slice 14 (td-a21178): stale-lock reclamation is bound to one instance ─────
+
+# _write_lock_record <path> <pid> <host> <purpose> <nonce> [start]
+_write_lock_record() {
+  {
+    printf 'owner_pid=%s\n'     "$2"
+    printf 'owner_start=%s\n'   "${6:-}"
+    printf 'owner_host=%s\n'    "$3"
+    printf 'owner_user=%s\n'    "someone"
+    printf 'owner_purpose=%s\n' "$4"
+    printf 'owner_nonce=%s\n'   "$5"
+    printf 'created_at=%s\n'    "2025-01-01T00:00:00Z"
+    printf 'created_epoch=0\n'
+  } > "$1"
+}
 
 # Produce a genuinely dead pid.
 bash -c 'exit 0' & dead_pid=$!
 wait "$dead_pid" 2>/dev/null || true
 
-mkdir -p "$lock_dir"
-{
-  printf 'owner_pid=%s\n' "$dead_pid"
-  printf 'owner_host=%s\n' "$(_sgt_drain_host_id)"
-  printf 'owner_user=%s\n' "someone"
-  printf 'owner_purpose=%s\n' "crashed-holder"
-  printf 'created_at=%s\n' "2025-01-01T00:00:00Z"
-  printf 'created_epoch=%s\n' "0"
-} > "$lock_dir/owner"
+_write_lock_record "$lock_record" "$dead_pid" "$(_sgt_drain_host_id)" "crashed-holder" "nonce-dead"
 
 rc=0
 SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=1 _sgt_drain_lock_acquire_fd 9 "reclaimer" || rc=$?
 [[ $rc -eq 0 ]] || { printf 'a lock owned by a dead pid should be reclaimed, got rc=%s\n' "$rc" >&2; exit 1; }
-grep -q '^owner_purpose=reclaimer$' "$lock_dir/owner" || \
+grep -q '^owner_purpose=reclaimer$' "$lock_record" || \
   { printf 'reclaimed lock should record the new owner\n' >&2; exit 1; }
 _sgt_drain_lock_release_fd 9
 printf 'drain lock stale reclamation: ok\n'
 
-# A lock whose owner cannot be verified must NOT be stolen (fail closed).
-mkdir -p "$lock_dir"
-{
-  printf 'owner_pid=1\n'
-  printf 'owner_host=%s\n' "some-other-host"
-  printf 'owner_user=someone\n'
-  printf 'owner_purpose=remote-holder\n'
-  printf 'created_at=2025-01-01T00:00:00Z\n'
-  printf 'created_epoch=0\n'
-} > "$lock_dir/owner"
+# A live pid whose start token no longer matches is a reused pid, so the lock is
+# reclaimable even though the pid exists.
+recorded_start="$(_sgt_drain_process_start "$$")"
+if [[ -n "$recorded_start" ]]; then
+  _write_lock_record "$lock_record" "$$" "$(_sgt_drain_host_id)" "reused-pid" \
+    "nonce-reused" "${recorded_start}-stale"
+  rc=0
+  SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=1 _sgt_drain_lock_acquire_fd 9 "reuse-reclaimer" || rc=$?
+  [[ $rc -eq 0 ]] || \
+    { printf 'a reused pid should be reclaimable, got rc=%s\n' "$rc" >&2; exit 1; }
+  _sgt_drain_lock_release_fd 9
+  printf 'drain lock reclaims reused pid: ok\n'
+else
+  printf 'drain lock reclaims reused pid: skipped (no process start token available)\n'
+fi
+
+# A live owner with a matching start token must NOT be reclaimed.
+_write_lock_record "$lock_record" "$$" "$(_sgt_drain_host_id)" "live-holder" \
+  "nonce-live" "$(_sgt_drain_process_start "$$")"
 rc=0
 SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=1 _sgt_drain_lock_acquire_fd 9 "thief" 2>/dev/null || rc=$?
-[[ $rc -eq 2 ]] || { printf 'an unverifiable foreign lock must not be stolen, got rc=%s\n' "$rc" >&2; exit 1; }
-grep -q '^owner_purpose=remote-holder$' "$lock_dir/owner" || \
-  { printf 'an unverifiable foreign lock must be left intact\n' >&2; exit 1; }
-rm -rf "$lock_dir"
-printf 'drain lock refuses to steal unverifiable locks: ok\n'
+[[ $rc -eq 2 ]] || { printf 'a live lock must not be reclaimed, got rc=%s\n' "$rc" >&2; exit 1; }
+grep -q '^owner_purpose=live-holder$' "$lock_record" || \
+  { printf 'a live lock must be left intact\n' >&2; exit 1; }
+printf 'drain lock refuses to steal a live lock: ok\n'
+
+# A lock recorded on another host cannot be verified, so it must not be stolen.
+_write_lock_record "$lock_record" "1" "some-other-host" "remote-holder" "nonce-remote"
+rc=0
+SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=1 _sgt_drain_lock_acquire_fd 9 "thief" 2>/dev/null || rc=$?
+[[ $rc -eq 2 ]] || { printf 'a foreign-host lock must not be stolen, got rc=%s\n' "$rc" >&2; exit 1; }
+grep -q '^owner_purpose=remote-holder$' "$lock_record" || \
+  { printf 'a foreign-host lock must be left intact\n' >&2; exit 1; }
+printf 'drain lock refuses to steal a foreign-host lock: ok\n'
+
+# Two hosts that both fail to identify themselves must not be treated as equal.
+unknown_host_bin="$TEST_ROOT/unknown-host-bin"
+mkdir -p "$unknown_host_bin"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$unknown_host_bin/uname"
+chmod +x "$unknown_host_bin/uname"
+_write_lock_record "$lock_record" "999999" "" "unidentified-holder" "nonce-unknown"
+rc=0
+PATH="$unknown_host_bin:$PATH" SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=1 \
+  bash -c 'source "$1/bin/_sgt-drain.sh"; _sgt_drain_lock_acquire_fd 7 "thief"' \
+  _ "$ROOT_DIR" >/dev/null 2>&1 || rc=$?
+[[ $rc -eq 2 ]] || \
+  { printf 'an unidentified host must not match another unidentified host, got rc=%s\n' "$rc" >&2; exit 1; }
+grep -q '^owner_purpose=unidentified-holder$' "$lock_record" || \
+  { printf 'an unverifiable lock must be left intact\n' >&2; exit 1; }
+rm -f "$lock_record"
+printf 'drain lock refuses to steal an unidentifiable lock: ok\n'
+
+# ── Slice 14b (td-a21178): a holder killed mid-flight self-heals ─────────────
+#
+# Release is no longer kernel-backed, so a SIGKILLed holder must not wedge the
+# lock for every later drain, dispatch, and respond.
+
+holder_ready="$TEST_ROOT/holder-ready"
+rm -f "$holder_ready"
+bash -c '
+  source "$1/bin/_sgt-drain.sh"
+  _sgt_drain_lock_acquire_fd 6 "killed-holder" || exit 1
+  printf "held\n" > "$2"
+  sleep 60
+' _ "$ROOT_DIR" "$holder_ready" &
+holder_pid=$!
+waited=0
+while [[ ! -f "$holder_ready" && $waited -lt 50 ]]; do
+  sleep 0.1
+  waited=$((waited + 1))
+done
+[[ -f "$holder_ready" ]] || { printf 'holder failed to acquire the lock\n' >&2; exit 1; }
+[[ -f "$lock_record" ]] || { printf 'holder should have created the lock record\n' >&2; exit 1; }
+kill -9 "$holder_pid" 2>/dev/null || true
+wait "$holder_pid" 2>/dev/null || true
+rc=0
+SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=2 _sgt_drain_lock_acquire_fd 9 "successor" || rc=$?
+[[ $rc -eq 0 ]] || \
+  { printf 'a SIGKILLed holder must not wedge the lock, got rc=%s\n' "$rc" >&2; exit 1; }
+_sgt_drain_lock_release_fd 9
+printf 'drain lock self-heals after SIGKILL: ok\n'
+
+# ── Slice 14c (STD-002): release never removes another process's lock ────────
+#
+# The timeout diagnostic used to tell operators to delete the lock by hand.  If
+# they do, and someone else then acquires it, the original holder's release must
+# leave the new owner's lock alone.
+
+SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=1 _sgt_drain_lock_acquire_fd 9 "original" >/dev/null
+rm -f "$lock_record"
+_write_lock_record "$lock_record" "$$" "$(_sgt_drain_host_id)" "new-owner" \
+  "nonce-new-owner" "$(_sgt_drain_process_start "$$")"
+rc=0
+_sgt_drain_lock_release_fd 9 2>/dev/null || rc=$?
+[[ $rc -ne 0 ]] || \
+  { printf 'releasing a lock this process no longer owns should report failure\n' >&2; exit 1; }
+[[ -f "$lock_record" ]] || \
+  { printf 'release must NOT remove a lock owned by another process\n' >&2; exit 1; }
+grep -q '^owner_purpose=new-owner$' "$lock_record" || \
+  { printf 'release must leave the new owner record intact\n' >&2; exit 1; }
+rm -f "$lock_record"
+printf 'drain lock release respects ownership: ok\n'
+
+# ── Slice 14d (STD-001): reclamation is bound to the instance proven stale ───
+#
+# A contender decides a lock is stale, then the lock is legitimately reacquired
+# before the contender acts.  Reclaiming must fail rather than destroy the new
+# owner's lock — otherwise two processes hold the lock at once.
+
+bash -c 'exit 0' & dead_pid=$!
+wait "$dead_pid" 2>/dev/null || true
+_write_lock_record "$lock_record" "$dead_pid" "$(_sgt_drain_host_id)" "stale" "nonce-stale"
+
+_sgt_drain_lock_owner_is_gone "$lock_record" || \
+  { printf 'setup: the stale lock should be seen as reclaimable\n' >&2; exit 1; }
+observed_nonce="$_SGT_DRAIN_OBSERVED_NONCE"
+[[ "$observed_nonce" == "nonce-stale" ]] || \
+  { printf 'staleness check should publish the observed nonce, got: %s\n' "$observed_nonce" >&2; exit 1; }
+
+# The race: a legitimate owner takes the lock in the meantime.
+rm -f "$lock_record"
+_write_lock_record "$lock_record" "$$" "$(_sgt_drain_host_id)" "race-winner" \
+  "nonce-winner" "$(_sgt_drain_process_start "$$")"
+
+rc=0
+_sgt_drain_lock_reclaim "$lock_record" "$observed_nonce" || rc=$?
+[[ $rc -ne 0 ]] || \
+  { printf 'reclaiming a reacquired lock must fail\n' >&2; exit 1; }
+[[ -f "$lock_record" ]] || \
+  { printf 'reclamation must not destroy a lock reacquired during the race\n' >&2; exit 1; }
+grep -q '^owner_purpose=race-winner$' "$lock_record" || \
+  { printf 'the race winner record must survive reclamation, got: %s\n' \
+      "$(cat "$lock_record")" >&2; exit 1; }
+rm -f "$lock_record"
+printf 'drain lock reclamation is instance-bound: ok\n'
 
 # ── Slice 15 (td-929656): drain never depends on flock ──────────────────────
 #
 # The library documents a no-flock fallback for minimal installs and macOS
-# system Bash.  A broken or absent flock must not break drain or undrain.
+# system Bash.  flock must not merely be tolerated — it must never be invoked.
 
 fake_bin="$TEST_ROOT/nofl0ck-bin"
 mkdir -p "$fake_bin"
-printf '#!/usr/bin/env bash\nexit 1\n' > "$fake_bin/flock"
+flock_canary="$TEST_ROOT/flock-was-invoked"
+rm -f "$flock_canary"
+printf '#!/usr/bin/env bash\ntouch %s\nexit 1\n' "$flock_canary" > "$fake_bin/flock"
 chmod +x "$fake_bin/flock"
 
 PATH="$fake_bin:$PATH" "$ROOT_DIR/bin/sgt-drain" --global --reason "no flock" >/dev/null
@@ -285,7 +431,9 @@ PATH="$fake_bin:$PATH" "$ROOT_DIR/bin/sgt-drain" --global --reason "no flock" >/
 PATH="$fake_bin:$PATH" "$ROOT_DIR/bin/sgt-drain" --undrain --global >/dev/null
 [[ ! -f "$config_dir/drain/global" ]] || \
   { printf 'sgt-drain --undrain must work when flock is unusable\n' >&2; exit 1; }
-printf 'drain works without usable flock: ok\n'
+[[ ! -e "$flock_canary" ]] || \
+  { printf 'drain must never invoke flock\n' >&2; exit 1; }
+printf 'drain never invokes flock: ok\n'
 
 # ── Slice 16 (td-a21178): an unusable lock location reports "unavailable" ────
 #
@@ -370,6 +518,37 @@ rc=0
 [[ $rc -ne 0 ]] || { printf '--wait with --undrain should be rejected\n' >&2; exit 1; }
 printf 'sgt-drain --wait misuse rejected: ok\n'
 
+# A project name and --global are contradictory; silently letting --global win
+# would escalate a one-project pause into blocking every project.
+for scope_args in "myproject --global" "--global myproject"; do
+  rc=0
+  # shellcheck disable=SC2086  # Deliberate word splitting of the argument pair.
+  "$ROOT_DIR/bin/sgt-drain" $scope_args --reason "meant one scope" >/dev/null 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] || \
+    { printf 'sgt-drain %s should be rejected\n' "$scope_args" >&2; exit 1; }
+  [[ ! -f "$config_dir/drain/global" ]] || \
+    { printf 'sgt-drain %s must not create a global drain\n' "$scope_args" >&2; exit 1; }
+  [[ ! -f "$config_dir/drain/myproject" ]] || \
+    { printf 'sgt-drain %s must not create a project drain\n' "$scope_args" >&2; exit 1; }
+done
+printf 'sgt-drain rejects contradictory scopes: ok\n'
+
+# Non-numeric wait tuning from the environment must be rejected, not silently
+# coerced to 0 (an instant timeout) or fed to sleep mid-wait.
+rc=0
+SERGEANT_DRAIN_WAIT_TIMEOUT_SECS=abc "$ROOT_DIR/bin/sgt-drain" --global --wait \
+  >/dev/null 2>&1 || rc=$?
+[[ $rc -ne 0 ]] || \
+  { printf 'a non-numeric SERGEANT_DRAIN_WAIT_TIMEOUT_SECS should be rejected\n' >&2; exit 1; }
+"$ROOT_DIR/bin/sgt-drain" --undrain --global >/dev/null
+rc=0
+SERGEANT_DRAIN_WAIT_INTERVAL_SECS=x "$ROOT_DIR/bin/sgt-drain" --global --wait --timeout 1 \
+  >/dev/null 2>&1 || rc=$?
+[[ $rc -ne 0 ]] || \
+  { printf 'a non-numeric SERGEANT_DRAIN_WAIT_INTERVAL_SECS should be rejected\n' >&2; exit 1; }
+"$ROOT_DIR/bin/sgt-drain" --undrain --global >/dev/null
+printf 'sgt-drain validates wait tuning from the environment: ok\n'
+
 # ── Slice 20 (td-a21178 / GH #167): resolved workers do not block the wait ───
 #
 # done, drained, and failed workers are finished, and a nonterminal worker whose
@@ -425,6 +604,72 @@ wait "$live_pid" 2>/dev/null || true
 "$ROOT_DIR/bin/sgt-drain" --undrain myproject >/dev/null
 printf 'sgt-drain --wait timeout is truthful and non-destructive: ok\n'
 
+# ── Slice 21b (RDY-001): absent identity is not proof of exit ────────────────
+#
+# sgt-interactive-worker skips recording worker identity when ps cannot report a
+# pgid or start time, so a perfectly healthy worker can have no worker_pid file.
+# Treating that as "finished" would report a fleet as quiesced while it runs.
+
+sleep 30 & unidentified_pid=$!
+_mk_fleet_worker "task-f" "no-identity" "myproject" "in_progress"
+
+rc=0
+out="$("$ROOT_DIR/bin/sgt-drain" myproject --wait --timeout 1 2>&1)" || rc=$?
+[[ $rc -ne 0 ]] || \
+  { printf 'a nonterminal worker with no recorded identity must not be reported as drained, got: %s\n' "$out" >&2; exit 1; }
+printf '%s\n' "$out" | grep -q 'task-f/no-identity' || \
+  { printf 'an unverifiable worker should be named, got: %s\n' "$out" >&2; exit 1; }
+printf '%s\n' "$out" | grep -q 'liveness=unverifiable' || \
+  { printf 'an unverifiable worker should be reported as such, got: %s\n' "$out" >&2; exit 1; }
+printf '%s\n' "$out" | grep -q 'No such file or directory' && \
+  { printf 'missing fleet state files must not leak shell errors, got: %s\n' "$out" >&2; exit 1; }
+"$ROOT_DIR/bin/sgt-drain" --undrain myproject >/dev/null
+printf 'sgt-drain --wait blocks on unverifiable identity: ok\n'
+
+# A nonterminal worker with no recorded project cannot be attributed to a scope,
+# so a project-scoped wait must report it rather than silently skip it.
+rm -rf "$fleet_dir/task-f"
+mkdir -p "$fleet_dir/task-g/no-project"
+printf 'in_progress\n' > "$fleet_dir/task-g/no-project/status"
+printf '%s\n' "$unidentified_pid" > "$fleet_dir/task-g/no-project/worker_pid"
+
+rc=0
+out="$("$ROOT_DIR/bin/sgt-drain" myproject --wait --timeout 1 2>&1)" || rc=$?
+[[ $rc -ne 0 ]] || \
+  { printf 'a live worker with no recorded project must not be silently skipped, got: %s\n' "$out" >&2; exit 1; }
+printf '%s\n' "$out" | grep -q 'task-g/no-project' || \
+  { printf 'an unattributable worker should be named, got: %s\n' "$out" >&2; exit 1; }
+kill "$unidentified_pid" 2>/dev/null || true
+wait "$unidentified_pid" 2>/dev/null || true
+rm -rf "$fleet_dir/task-g"
+"$ROOT_DIR/bin/sgt-drain" --undrain myproject >/dev/null
+printf 'sgt-drain --wait blocks on unattributable workers: ok\n'
+
+# ── Slice 21c (RDY-009): --wait must not hold the admission lock ──────────────
+#
+# The default wait is 300s; holding the admission lock across it would wedge
+# every dispatch and respond for five minutes.
+
+sleep 30 & wait_blocker_pid=$!
+_mk_fleet_worker "task-h" "busy" "myproject" "in_progress" "$wait_blocker_pid"
+"$ROOT_DIR/bin/sgt-drain" myproject --wait --timeout 4 >/dev/null 2>&1 &
+drain_wait_pid=$!
+sleep 1
+rc=0
+SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=1 bash -c '
+  source "$1/bin/_sgt-drain.sh"
+  _sgt_drain_lock_acquire_fd 5 "concurrent-probe" || exit $?
+  _sgt_drain_lock_release_fd 5
+' _ "$ROOT_DIR" >/dev/null 2>&1 || rc=$?
+[[ $rc -eq 0 ]] || \
+  { printf '--wait must not hold the admission lock while polling, got rc=%s\n' "$rc" >&2; exit 1; }
+wait "$drain_wait_pid" 2>/dev/null || true
+kill "$wait_blocker_pid" 2>/dev/null || true
+wait "$wait_blocker_pid" 2>/dev/null || true
+rm -rf "$fleet_dir/task-h"
+"$ROOT_DIR/bin/sgt-drain" --undrain myproject >/dev/null
+printf 'sgt-drain --wait does not hold the admission lock: ok\n'
+
 # ── Slice 22 (td-a21178 / GH #167): a global wait spans every project ────────
 
 sleep 30 & live_pid=$!
@@ -458,6 +703,41 @@ grep -q 'reason=maintenance \$(touch' "$config_dir/drain/global" || \
       "$(cat "$config_dir/drain/global")" >&2; exit 1; }
 "$ROOT_DIR/bin/sgt-drain" --undrain --global >/dev/null
 printf 'drain reason is data not code: ok\n'
+
+# ── Slice 17b (td-79f0a8): legitimate drain works on the DEFAULT path ────────
+#
+# The isolation guard must not be mistaken for drain being broken.  This
+# exercises the real fallback chain — no SERGEANT_DRAIN_DIR, no SERGEANT_CONFIG,
+# so the path resolves to $HOME/.config/sergeant/drain — with HOME redirected
+# into the test root.  It proves the default resolution still drains, undrains,
+# and reports status, without ever touching the operator's installation.
+
+default_home="$TEST_ROOT/default-home"
+mkdir -p "$default_home"
+_default_drain() {
+  env -u SERGEANT_DRAIN_DIR -u SERGEANT_CONFIG HOME="$default_home" \
+    "$ROOT_DIR/bin/sgt-drain" "$@"
+}
+
+_default_drain --global --reason "default path check" >/dev/null
+[[ -f "$default_home/.config/sergeant/drain/global" ]] || \
+  { printf 'drain on the default path should create %s/.config/sergeant/drain/global\n' \
+      "$default_home" >&2; exit 1; }
+_default_drain --status 2>&1 | grep -qi 'global' || \
+  { printf 'drain --status should report the default-path global drain\n' >&2; exit 1; }
+_default_drain --undrain --global >/dev/null
+[[ ! -f "$default_home/.config/sergeant/drain/global" ]] || \
+  { printf 'undrain on the default path should remove the drain file\n' >&2; exit 1; }
+
+# Project scope works on the default path too: a drain CAN be aimed at one
+# project, so a whole-fleet pause is never required to pause one project.
+_default_drain someproject --reason "project scope on default path" >/dev/null
+[[ -f "$default_home/.config/sergeant/drain/someproject" ]] || \
+  { printf 'a project-scoped drain should be creatable on the default path\n' >&2; exit 1; }
+[[ ! -f "$default_home/.config/sergeant/drain/global" ]] || \
+  { printf 'a project-scoped drain must NOT create a global drain\n' >&2; exit 1; }
+_default_drain --undrain someproject >/dev/null
+printf 'legitimate drain works on the default resolved path: ok\n'
 
 # ── Slice 18 (td-39252c): the dead admission helper is gone ──────────────────
 #

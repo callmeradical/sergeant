@@ -29,7 +29,6 @@ export SERGEANT_DRAIN_DIR="$TEST_ROOT/drain"
 export SERGEANT_CONFIG="$TEST_ROOT/sergeant-config"
 mkdir -p "$SERGEANT_DRAIN_DIR" "$SERGEANT_CONFIG"
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 _setup_waiting_worker() {
@@ -828,6 +827,90 @@ JSON
     "[[ ! -s '$TEST_ROOT/t26-respond-calls' ]]"
   _assert "check_name injection: no command executed" \
     "[[ ! -e '$TEST_ROOT/t26-pwned' ]]"
+  # Discriminating: the value must be rejected at parse time, before the
+  # condition can reach any external command.
+  _assert "check_name injection: rejected before GitHub was queried" \
+    "[[ ! -e '$TEST_ROOT/t26-slug' ]]"
+)
+
+# ── Test 26b (SPEC-001): ordinary check names are representable ───────────────
+# Real GitHub check names contain ampersands, brackets, and leading dots.
+
+(
+  for name in "Build & Test" "test [linux]" ".NET build" "cov 80%" "build (matrix=3.11)"; do
+    task="t26b"; repo="app"; wt="$TEST_ROOT/t26b-wt"
+    rm -rf "${FLEET_DIR:?}/${task:?}" "${wt:?}"
+    _setup_waiting_worker "$task" "$repo" "$wt" "github_check" \
+      "run_id=777"$'\n'"check_name=$name"
+    _init_worktree_repo "$wt" "https://github.com/acme/widget.git"
+
+    fake_bin="$TEST_ROOT/t26b-fakebin"
+    _setup_fake_respond "$fake_bin"
+    run_json="$TEST_ROOT/t26b-run.json"
+    python3 - "$name" > "$run_json" <<'PY'
+import json, sys
+print(json.dumps({"status": "completed", "conclusion": "success",
+                  "jobs": [{"name": sys.argv[1], "status": "completed",
+                            "conclusion": "success"}]}))
+PY
+    rm -f "$TEST_ROOT/t26b-slug"
+    _setup_fake_gh "$fake_bin" "$run_json" "$TEST_ROOT/t26b-slug"
+    export FAKE_RESPOND_CALLS="$TEST_ROOT/t26b-respond-calls"
+    export FAKE_RESPOND_INPUT="$TEST_ROOT/t26b-respond-input"
+    rm -f "$FAKE_RESPOND_CALLS"
+
+    exit_code=0
+    PATH="$fake_bin:$PATH" \
+      "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || exit_code=$?
+    _assert "check_name '$name': exits zero" "[[ $exit_code -eq 0 ]]"
+    _assert "check_name '$name': sgt-respond called" \
+      "[[ -s '$FAKE_RESPOND_CALLS' ]]"
+  done
+)
+
+# ── Test 26c (STD-017): a present-but-empty field is named as empty ───────────
+
+(
+  task="t26c"; repo="app"; wt="$TEST_ROOT/t26c-wt"
+  _setup_waiting_worker "$task" "$repo" "$wt" "github_check" \
+    "run_id=777"$'\n'"check_name="
+
+  fake_bin="$TEST_ROOT/t26c-fakebin"
+  _setup_fake_respond "$fake_bin"
+  export FAKE_RESPOND_CALLS="$TEST_ROOT/t26c-respond-calls"
+
+  err="$TEST_ROOT/t26c.err"
+  exit_code=0
+  PATH="$fake_bin:$PATH" \
+    "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>"$err" || exit_code=$?
+  _assert "empty check_name: exits nonzero" "[[ $exit_code -ne 0 ]]"
+  _assert_file_contains "empty check_name: reported as empty, not as bad characters" \
+    "$err" "empty value"
+)
+
+# ── Test 26d (RDY-007): a dash-leading value is not passed to gh as an option ──
+
+(
+  task="t26d"; repo="app"; wt="$TEST_ROOT/t26d-wt"
+  _setup_waiting_worker "$task" "$repo" "$wt" "github_check" \
+    "run_id=--help"$'\n'"check_name=unit-tests"
+  _init_worktree_repo "$wt" "https://github.com/acme/widget.git"
+
+  fake_bin="$TEST_ROOT/t26d-fakebin"
+  _setup_fake_respond "$fake_bin"
+  run_json="$TEST_ROOT/t26d-run.json"
+  printf '{"status":"completed","conclusion":"success","jobs":[]}\n' > "$run_json"
+  _setup_fake_gh "$fake_bin" "$run_json" "$TEST_ROOT/t26d-slug"
+  export FAKE_RESPOND_CALLS="$TEST_ROOT/t26d-respond-calls"
+
+  exit_code=0
+  PATH="$fake_bin:$PATH" \
+    "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || exit_code=$?
+  _assert "dash-leading run_id: exits nonzero" "[[ $exit_code -ne 0 ]]"
+  _assert "dash-leading run_id: sgt-respond not called" \
+    "[[ ! -s '$TEST_ROOT/t26d-respond-calls' ]]"
+  _assert "dash-leading run_id: gh was never invoked" \
+    "[[ ! -e '$TEST_ROOT/t26d-slug' ]]"
 )
 
 # ── Test 27 (td-cccc42 / GH #174): a failed named check must NOT wake ────────
@@ -1037,6 +1120,144 @@ JSON
     "[[ \"\$(cat '$FLEET_DIR/$task/$repo/status' 2>/dev/null)\" == 'waiting' ]]"
   _assert "pending check: attempt recorded" \
     "[[ -f '$FLEET_DIR/$task/$repo/wake_attempts' ]]"
+)
+
+# ── Test 34 (td-cccc42): every non-success conclusion is refused ─────────────
+# The criterion names failure, cancelled, skipped, and timed_out explicitly.
+
+(
+  for conclusion in cancelled timed_out neutral action_required; do
+    task="t34"; repo="app"; wt="$TEST_ROOT/t34-wt"
+    rm -rf "${FLEET_DIR:?}/${task:?}" "${wt:?}"
+    _setup_waiting_worker "$task" "$repo" "$wt" "github_check" \
+      "run_id=777"$'\n'"check_name=unit-tests"
+    _init_worktree_repo "$wt" "https://github.com/acme/widget.git"
+
+    fake_bin="$TEST_ROOT/t34-fakebin"
+    _setup_fake_respond "$fake_bin"
+    run_json="$TEST_ROOT/t34-run.json"
+    printf '{"status":"completed","conclusion":"%s","jobs":[{"name":"unit-tests","status":"completed","conclusion":"%s"}]}\n' \
+      "$conclusion" "$conclusion" > "$run_json"
+    _setup_fake_gh "$fake_bin" "$run_json" "$TEST_ROOT/t34-slug"
+    export FAKE_RESPOND_CALLS="$TEST_ROOT/t34-respond-calls"
+    rm -f "$FAKE_RESPOND_CALLS"
+
+    exit_code=0
+    PATH="$fake_bin:$PATH" \
+      "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || exit_code=$?
+    _assert "conclusion $conclusion: exits nonzero" "[[ $exit_code -ne 0 ]]"
+    _assert "conclusion $conclusion: sgt-respond NOT called" \
+      "[[ ! -s '$FAKE_RESPOND_CALLS' ]]"
+    _assert "conclusion $conclusion: escalated to needs_input" \
+      "[[ \"\$(cat '$FLEET_DIR/$task/$repo/status' 2>/dev/null)\" == 'needs_input' ]]"
+  done
+)
+
+# ── Test 35 (RDY-003): permanently unsatisfiable conditions escalate ─────────
+# A condition that can never be met must not be retried until the attempt budget
+# or deadline expires — it must surface to a human.  A legacy condition file
+# written before check_name was required is the important real-world case.
+
+(
+  # Legacy: run_id only, no check_name (valid under the previous implementation).
+  task="t35a"; repo="app"; wt="$TEST_ROOT/t35a-wt"
+  _setup_waiting_worker "$task" "$repo" "$wt" "github_check" "run_id=777"
+  _init_worktree_repo "$wt" "https://github.com/acme/widget.git"
+
+  fake_bin="$TEST_ROOT/t35a-fakebin"
+  _setup_fake_respond "$fake_bin"
+  run_json="$TEST_ROOT/t35a-run.json"
+  printf '{"status":"completed","conclusion":"success","jobs":[]}\n' > "$run_json"
+  _setup_fake_gh "$fake_bin" "$run_json" "$TEST_ROOT/t35a-slug"
+  export FAKE_RESPOND_CALLS="$TEST_ROOT/t35a-respond-calls"
+
+  exit_code=0
+  PATH="$fake_bin:$PATH" \
+    "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || exit_code=$?
+  _assert "legacy condition: exits nonzero" "[[ $exit_code -ne 0 ]]"
+  _assert "legacy condition: escalated to needs_input, not left waiting" \
+    "[[ \"\$(cat '$FLEET_DIR/$task/$repo/status' 2>/dev/null)\" == 'needs_input' ]]"
+  _assert "legacy condition: no attempt burned" \
+    "[[ ! -f '$FLEET_DIR/$task/$repo/wake_attempts' ]]"
+  _assert_file_contains "legacy condition: message states the remedy" \
+    "$wt/.sergeant-message" "check_name"
+)
+
+(
+  # An absent named check on a completed run can never appear.
+  task="t35b"; repo="app"; wt="$TEST_ROOT/t35b-wt"
+  _setup_waiting_worker "$task" "$repo" "$wt" "github_check" \
+    "run_id=777"$'\n'"check_name=nonexistent"
+  _init_worktree_repo "$wt" "https://github.com/acme/widget.git"
+
+  fake_bin="$TEST_ROOT/t35b-fakebin"
+  _setup_fake_respond "$fake_bin"
+  run_json="$TEST_ROOT/t35b-run.json"
+  printf '{"status":"completed","conclusion":"success","jobs":[{"name":"other","status":"completed","conclusion":"success"}]}\n' \
+    > "$run_json"
+  _setup_fake_gh "$fake_bin" "$run_json" "$TEST_ROOT/t35b-slug"
+  export FAKE_RESPOND_CALLS="$TEST_ROOT/t35b-respond-calls"
+
+  exit_code=0
+  PATH="$fake_bin:$PATH" \
+    "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || exit_code=$?
+  _assert "absent check on completed run: exits nonzero" "[[ $exit_code -ne 0 ]]"
+  _assert "absent check on completed run: escalated, not retried forever" \
+    "[[ \"\$(cat '$FLEET_DIR/$task/$repo/status' 2>/dev/null)\" == 'needs_input' ]]"
+)
+
+# ── Test 36 (STD-015): only a real github.com remote binds the query ─────────
+# A host that merely ends in github.com must not be rewritten into a slug and
+# queried as an unrelated repository.
+
+(
+  task="t36"; repo="app"; wt="$TEST_ROOT/t36-wt"
+  _setup_waiting_worker "$task" "$repo" "$wt" "github_check" \
+    "run_id=777"$'\n'"check_name=unit-tests"
+  _init_worktree_repo "$wt" "https://mygithub.com/acme/widget.git"
+
+  fake_bin="$TEST_ROOT/t36-fakebin"
+  _setup_fake_respond "$fake_bin"
+  run_json="$TEST_ROOT/t36-run.json"
+  printf '{"status":"completed","conclusion":"success","jobs":[{"name":"unit-tests","status":"completed","conclusion":"success"}]}\n' \
+    > "$run_json"
+  _setup_fake_gh "$fake_bin" "$run_json" "$TEST_ROOT/t36-slug"
+  export FAKE_RESPOND_CALLS="$TEST_ROOT/t36-respond-calls"
+  export FAKE_RESPOND_INPUT="$TEST_ROOT/t36-respond-input"
+
+  PATH="$fake_bin:$PATH" \
+    "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || true
+  # gh must still have been invoked (resolving the repo from the worktree cwd),
+  # but without a forced --repo derived from the non-GitHub host.
+  _assert "non-github remote: gh was still invoked" \
+    "[[ -s '$TEST_ROOT/t36-slug.args' ]]"
+  _assert "non-github remote: no --repo was passed" \
+    "! grep -q -- '--repo' '$TEST_ROOT/t36-slug.args'"
+)
+
+# ── Test 37 (RDY-009): a malformed run response never satisfies the condition ─
+
+(
+  task="t37"; repo="app"; wt="$TEST_ROOT/t37-wt"
+  _setup_waiting_worker "$task" "$repo" "$wt" "github_check" \
+    "run_id=777"$'\n'"check_name=unit-tests"
+  _init_worktree_repo "$wt" "https://github.com/acme/widget.git"
+
+  fake_bin="$TEST_ROOT/t37-fakebin"
+  _setup_fake_respond "$fake_bin"
+  run_json="$TEST_ROOT/t37-run.json"
+  printf 'not json at all\n' > "$run_json"
+  _setup_fake_gh "$fake_bin" "$run_json" "$TEST_ROOT/t37-slug"
+  export FAKE_RESPOND_CALLS="$TEST_ROOT/t37-respond-calls"
+
+  exit_code=0
+  PATH="$fake_bin:$PATH" \
+    "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || exit_code=$?
+  _assert "malformed run JSON: exits nonzero" "[[ $exit_code -ne 0 ]]"
+  _assert "malformed run JSON: sgt-respond NOT called" \
+    "[[ ! -s '$TEST_ROOT/t37-respond-calls' ]]"
+  _assert "malformed run JSON: still waiting (transient adapter fault)" \
+    "[[ \"\$(cat '$FLEET_DIR/$task/$repo/status' 2>/dev/null)\" == 'waiting' ]]"
 )
 
 printf 'sgt-wake: all tests passed\n'
