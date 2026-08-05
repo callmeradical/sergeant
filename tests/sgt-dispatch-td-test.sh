@@ -16,8 +16,11 @@ WEB_REPO="$TEST_ROOT/web"
 mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/config" "$TEST_ROOT/fake-bin" \
   "$TEST_ROOT/fleet" "$APP_MAIN_REPO" "$APP_REPO" "$API_REPO" "$WEB_REPO" \
   "$TEST_ROOT/td-active" "$TEST_ROOT/td-counter"
+# sgt-watch sources _sgt-response-lock.sh for the shared action-lease finalizer it
+# invokes during terminal recycling, so that library has to be staged too.
 cp "$ROOT_DIR/bin/sgt-dispatch" "$ROOT_DIR/bin/_sgt-lib.sh" "$ROOT_DIR/bin/_sgt-bash-version.sh" \
-  "$ROOT_DIR/bin/_sgt-intent.sh" "$ROOT_DIR/bin/_sgt-drain.sh" "$ROOT_DIR/bin/sgt-td-create" \
+  "$ROOT_DIR/bin/_sgt-intent.sh" "$ROOT_DIR/bin/_sgt-drain.sh" \
+  "$ROOT_DIR/bin/_sgt-response-lock.sh" "$ROOT_DIR/bin/sgt-td-create" \
   "$ROOT_DIR/bin/sgt-td-memory" "$ROOT_DIR/bin/sgt-watch" "$TEST_ROOT/bin/"
 
 cat > "$TEST_ROOT/config/test.yaml" <<EOF
