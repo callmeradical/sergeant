@@ -4557,8 +4557,12 @@ exit 1
 EOF
 chmod +x "$TEST_ROOT/fake-bin/td"
 
-# Test A: orphaned + absent worktree + closed td → cleanup must succeed
+# Test A: orphaned + absent worktree + closed td → cleanup must succeed.
+# The absent worktree cannot bind the td lookup, so the configured repository
+# root is what identifies the owning repository (GH #171).
 mkdir -p "$TEST_ROOT/fleet/orphaned-absent-closed/app"
+init_test_repo "$TEST_ROOT/orphaned-absent-closed-repo"
+record_retry_owner orphaned-absent-closed app "$TEST_ROOT/orphaned-absent-closed-repo"
 printf 'orphaned\n' > "$TEST_ROOT/fleet/orphaned-absent-closed/app/status"
 printf '%s\n' "$TEST_ROOT/orphaned-absent-gone" \
   > "$TEST_ROOT/fleet/orphaned-absent-closed/app/worktree"
@@ -4735,8 +4739,12 @@ set -e
 }
 printf 'sgt-cleanup orphaned+present+uncommitted-changes rejected: ok\n'
 
-# Test C: orphaned + absent worktree + open td → must still be rejected
+# Test C: orphaned + absent worktree + open td → must still be rejected.
+# The configured repository root binds the lookup (GH #171) so the refusal is
+# about the td status itself, not about an unresolvable owner.
 mkdir -p "$TEST_ROOT/fleet/orphaned-absent-open/app"
+init_test_repo "$TEST_ROOT/orphaned-absent-open-repo"
+record_retry_owner orphaned-absent-open app "$TEST_ROOT/orphaned-absent-open-repo"
 printf 'orphaned\n' > "$TEST_ROOT/fleet/orphaned-absent-open/app/status"
 printf '%s\n' "$TEST_ROOT/orphaned-open-gone" \
   > "$TEST_ROOT/fleet/orphaned-absent-open/app/worktree"
@@ -5595,5 +5603,200 @@ rm -f "$TEST_ROOT/fake-bin/td"
 }
 rm -rf "$TEST_ROOT/fleet/$ledger_orphan_task"
 printf 'sgt-cleanup ledger-orphan: orphaned worker with a closed td card cleans ok\n'
+
+# ── GH #171: every td lookup is bound to the worker's own repository ──────────
+# The caller's current directory may never decide terminal classification.  This
+# fake td reproduces the real failure: an unbound lookup, or one bound to an
+# unrelated checkout, reports "database not found" exactly as a real td run from
+# outside the owning repository does.
+write_binding_td() {
+  cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
+#!/usr/bin/env bash
+work_dir=""
+subcommand=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --work-dir|-w)
+      work_dir="${2:-}"
+      shift
+      shift
+      ;;
+    --format|-f)
+      shift
+      shift
+      ;;
+    --json|--long|--short) shift ;;
+    *)
+      [[ -n "$subcommand" ]] || subcommand="$1"
+      shift
+      ;;
+  esac
+done
+[[ "$subcommand" == show ]] || exit 1
+if [[ -z "$work_dir" || "$work_dir" != "${TD_REQUIRED_WORK_DIR:-}" ]]; then
+  printf "ERROR: database not found: run 'td init' first\n" >&2
+  exit 1
+fi
+printf '{"status":"%s"}\n' "${TD_FAKE_STATUS:-closed}"
+EOF
+  chmod +x "$TEST_ROOT/fake-bin/td"
+}
+write_binding_td
+
+seed_bound_orphan() {
+  local repo="${2:-app}" task_id="$1" with_config="${3:-config}"
+
+  bound_state="$TEST_ROOT/fleet/$task_id/$repo"
+  bound_worktree="$TEST_ROOT/$task_id-worktree"
+  bound_repo="$TEST_ROOT/$task_id-repo"
+  rm -rf "$TEST_ROOT/fleet/$task_id" "$bound_worktree"
+  mkdir -p "$bound_state"
+  init_test_repo "$bound_repo"
+  git -C "$bound_repo" worktree add -q -b "$task_id-worker" "$bound_worktree"
+  [[ "$with_config" != config ]] || record_retry_owner "$task_id" "$repo" "$bound_repo"
+  printf '%s\n' "$bound_worktree" > "$bound_state/worktree"
+  printf 'git\n' > "$bound_state/wt_type"
+  printf 'orphaned\n' > "$bound_state/status"
+  printf 'td-bound-%s\n' "$task_id" > "$bound_state/td_task"
+  printf 'in_progress\n' > "$bound_worktree/.sergeant-status"
+}
+
+run_bound_cleanup() {
+  local task_id="$1"
+
+  set +e
+  bound_output="$(cd "$TEST_ROOT/protected" && PATH="$TEST_ROOT/fake-bin:$PATH" \
+    TD_REQUIRED_WORK_DIR="${TD_REQUIRED_WORK_DIR:-}" TD_FAKE_STATUS="${TD_FAKE_STATUS:-closed}" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 "$ROOT_DIR/bin/sgt-cleanup" "$task_id" 2>&1)"
+  bound_status=$?
+  set -e
+}
+
+# Bound to the worker's own present worktree, from an unrelated current directory.
+seed_bound_orphan bound-worktree
+TD_REQUIRED_WORK_DIR="$TEST_ROOT/bound-worktree-worktree" TD_FAKE_STATUS=closed \
+  run_bound_cleanup bound-worktree
+[[ "$bound_status" -eq 0 ]] || {
+  printf 'FAIL gh#171: closed td task in the owning worktree was not accepted from an unrelated cwd: %s\n' \
+    "$bound_output" >&2
+  exit 1
+}
+[[ ! -e "$TEST_ROOT/fleet/bound-worktree" ]] || {
+  printf 'FAIL gh#171: fleet state survived a bound-worktree cleanup\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup gh#171: td lookup bound to the recorded worktree ok\n'
+
+# Absent worktree falls back to the configured repository root, never the caller's cwd.
+seed_bound_orphan bound-configured
+rm -rf "$TEST_ROOT/bound-configured-worktree"
+git -C "$TEST_ROOT/bound-configured-repo" worktree prune
+TD_REQUIRED_WORK_DIR="$TEST_ROOT/bound-configured-repo" TD_FAKE_STATUS=closed \
+  run_bound_cleanup bound-configured
+[[ "$bound_status" -eq 0 ]] || {
+  printf 'FAIL gh#171: closed td task was not resolved from the configured repository root: %s\n' \
+    "$bound_output" >&2
+  exit 1
+}
+[[ ! -e "$TEST_ROOT/fleet/bound-configured" ]] || {
+  printf 'FAIL gh#171: fleet state survived a bound-configured cleanup\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup gh#171: td lookup bound to the configured repository root ok\n'
+
+# An infrastructural lookup failure is reported distinctly, never as "not terminal".
+seed_bound_orphan bound-unreadable
+TD_REQUIRED_WORK_DIR="$TEST_ROOT/bound-unreadable-never" TD_FAKE_STATUS=closed \
+  run_bound_cleanup bound-unreadable
+[[ "$bound_status" -ne 0 ]] || {
+  printf 'FAIL gh#171: cleanup accepted a worker whose td lookup failed\n' >&2
+  exit 1
+}
+[[ "$bound_output" == *"Cannot read the owning td task"* ]] || {
+  printf 'FAIL gh#171: infrastructural td failure was not reported distinctly: %s\n' \
+    "$bound_output" >&2
+  exit 1
+}
+[[ "$bound_output" == *"database not found"* ]] || {
+  printf 'FAIL gh#171: infrastructural td failure lost its cause: %s\n' "$bound_output" >&2
+  exit 1
+}
+[[ "$bound_output" != *"is not terminal"* ]] || {
+  printf 'FAIL gh#171: infrastructural td failure degraded to "not terminal": %s\n' \
+    "$bound_output" >&2
+  exit 1
+}
+[[ -d "$TEST_ROOT/fleet/bound-unreadable" && -d "$TEST_ROOT/bound-unreadable-worktree" ]] || {
+  printf 'FAIL gh#171: a refused infrastructural lookup destroyed state\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup gh#171: unreadable td database reported distinctly ok\n'
+
+# A genuinely open task stays nonterminal and names the status it resolved.
+seed_bound_orphan bound-open
+TD_REQUIRED_WORK_DIR="$TEST_ROOT/bound-open-worktree" TD_FAKE_STATUS=open \
+  run_bound_cleanup bound-open
+[[ "$bound_status" -ne 0 ]] || {
+  printf 'FAIL gh#171: cleanup accepted an orphaned worker whose td task is open\n' >&2
+  exit 1
+}
+[[ "$bound_output" == *"app is not terminal: orphaned"* && \
+  "$bound_output" == *"owning td task is open"* ]] || {
+  printf 'FAIL gh#171: open td task was not reported as nonterminal: %s\n' "$bound_output" >&2
+  exit 1
+}
+[[ -d "$TEST_ROOT/fleet/bound-open" ]] || {
+  printf 'FAIL gh#171: a refused open td task destroyed fleet state\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup gh#171: open td task reported as nonterminal ok\n'
+
+# No binding at all: refuse with a distinct diagnostic instead of guessing a
+# repository from the caller's current directory.
+seed_bound_orphan bound-unbindable app no-config
+rm -rf "$TEST_ROOT/bound-unbindable-worktree"
+git -C "$TEST_ROOT/bound-unbindable-repo" worktree prune
+rm -f "$TEST_ROOT/config/bound-unbindable.yaml"
+TD_REQUIRED_WORK_DIR="$TEST_ROOT/bound-unbindable-repo" TD_FAKE_STATUS=closed \
+  run_bound_cleanup bound-unbindable
+[[ "$bound_status" -ne 0 ]] || {
+  printf 'FAIL gh#171: cleanup accepted an unbindable td lookup\n' >&2
+  exit 1
+}
+[[ "$bound_output" == *"Cannot bind the owning repository"* ]] || {
+  printf 'FAIL gh#171: an unbindable td lookup was not reported distinctly: %s\n' \
+    "$bound_output" >&2
+  exit 1
+}
+[[ "$bound_output" != *"is not terminal"* ]] || {
+  printf 'FAIL gh#171: an unbindable td lookup degraded to "not terminal": %s\n' \
+    "$bound_output" >&2
+  exit 1
+}
+[[ -d "$TEST_ROOT/fleet/bound-unbindable" ]] || {
+  printf 'FAIL gh#171: a refused unbindable lookup destroyed fleet state\n' >&2
+  exit 1
+}
+rm -rf "$TEST_ROOT/fleet/bound-unbindable" "$TEST_ROOT/fleet/bound-unreadable" \
+  "$TEST_ROOT/fleet/bound-open"
+printf 'sgt-cleanup gh#171: unbindable td lookup refused distinctly ok\n'
+
+# Audit: no td invocation in bin/sgt-cleanup may omit its repository binding.
+td_audit_lines="$(grep -nE \
+  '(^|[^[:alnum:]_.-])td[[:space:]]+(show|list|context|tree|create|update|log|start|close|reopen|delete|handoff|review)([[:space:]]|$)' \
+  "$ROOT_DIR/bin/sgt-cleanup" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+[[ -n "$td_audit_lines" ]] || {
+  printf 'FAIL gh#171 audit: found no td invocation in bin/sgt-cleanup to audit\n' >&2
+  exit 1
+}
+td_unbound_lines="$(printf '%s\n' "$td_audit_lines" | grep -v -- '--work-dir' || true)"
+[[ -z "$td_unbound_lines" ]] || {
+  printf 'FAIL gh#171 audit: td invocation without a repository binding:\n%s\n' \
+    "$td_unbound_lines" >&2
+  exit 1
+}
+printf 'sgt-cleanup gh#171 audit: every td invocation is repository-bound ok\n'
+rm -f "$TEST_ROOT/fake-bin/td"
 
 printf 'sgt-cleanup: all tests passed\n'
