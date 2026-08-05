@@ -110,6 +110,17 @@ case "$1" in
         fi
         ;;
       *'%11'*)
+        if [[ -n "${PRIMARY_PANE_FLIP:-}" ]]; then
+          count=0
+          [[ ! -f "$CONCURRENT_DIR/primary-reads" ]] || \
+            count="$(cat "$CONCURRENT_DIR/primary-reads")"
+          count=$((count + 1))
+          printf '%s\n' "$count" > "$CONCURRENT_DIR/primary-reads"
+          if [[ "$count" -ge "$PRIMARY_PANE_FLIP" ]]; then
+            printf '0|%%11|9911|991111|flipped-command\n'
+            exit 0
+          fi
+        fi
         case "${PRIMARY_PANE_STATE:-live}" in
           dead) printf '1|%%11|1111|111111|coordinator-command\n' ;;
           gone) printf '||||\n' ;;
@@ -1094,6 +1105,61 @@ set -e
 [[ ! -e "$validation_path" ]]
 rm "$repo_state/validation-intent.md"
 
+# Each absent marker field, and each unpassed review axis, reports its own cause.
+ready_messages=""
+for missing_field in intent_revision head_sha standards_review spec_review \
+  readiness_review; do
+  grep -v "^${missing_field}=" "$worktree/.sergeant-validation-ready" \
+    > "$TEST_ROOT/ready-partial"
+  cp "$TEST_ROOT/ready-partial" "$worktree/.sergeant-validation-ready"
+  set +e
+  output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+    TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -ne 0 && "$output" == *"no single non-empty $missing_field value"* ]] || {
+    printf 'missing %s did not report its own cause: %s\n' "$missing_field" "$output" >&2
+    exit 1
+  }
+  ready_messages="$ready_messages
+$output"
+  cat > "$worktree/.sergeant-validation-ready" <<EOF
+intent_revision=$revision
+head_sha=$head_sha
+standards_review=passed
+spec_review=passed
+readiness_review=passed
+EOF
+done
+for failed_axis in standards spec readiness; do
+  sed "s/^${failed_axis}_review=passed/${failed_axis}_review=blocked/" \
+    "$worktree/.sergeant-validation-ready" > "$TEST_ROOT/ready-axis"
+  cp "$TEST_ROOT/ready-axis" "$worktree/.sergeant-validation-ready"
+  set +e
+  output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+    TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -ne 0 && "$output" == *"${failed_axis}_review=blocked"* ]] || {
+    printf 'unpassed %s review did not report its own cause: %s\n' "$failed_axis" "$output" >&2
+    exit 1
+  }
+  ready_messages="$ready_messages
+$output"
+  cat > "$worktree/.sergeant-validation-ready" <<EOF
+intent_revision=$revision
+head_sha=$head_sha
+standards_review=passed
+spec_review=passed
+readiness_review=passed
+EOF
+done
+[[ "$(printf '%s\n' "$ready_messages" | grep -c .)" == \
+  "$(printf '%s\n' "$ready_messages" | grep . | sort -u | wc -l)" ]] || {
+  printf 'validation-ready diagnostics are not distinct\n' >&2
+  exit 1
+}
+
 rm "$worktree/.sergeant-validation-ready"
 before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
 set +e
@@ -1284,6 +1350,22 @@ status=$?
 set -e
 [[ "$status" -ne 0 && "$output" == *'mutually exclusive'* ]]
 
+# Releasing ownership launches nothing, so launch-only options are refused rather
+# than silently ignored.
+for release_conflict in --skip:lint --allow-argv-intent:; do
+  set +e
+  output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+    TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app \
+    --release-ownership "${release_conflict%%:*}" ${release_conflict#*:} 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -ne 0 && "$output" == *'does not launch validation'* ]] || {
+    printf '%s was silently ignored with --release-ownership: %s\n' \
+      "${release_conflict%%:*}" "$output" >&2
+    exit 1
+  }
+done
+
 # An interrupted handover leaves recoverable state: a later claim from the same
 # verified pane completes the transfer instead of stranding it.
 printf '%%11\n' > "$fleet/task-1/primary_pane_id"
@@ -1310,6 +1392,83 @@ bash -c 'source "$1"; _sgt_replace_owned_file "$2" "$3"' _ "$ROOT_DIR/bin/_sgt-l
   "$fleet/task-1/primary_pane_identity" '0|%11|1111|111111|coordinator-command'
 rm -f "$handover_log"
 
+# An audit log that is not owner-only cannot be trusted to record the transfer, so
+# the handover fails closed and the existing log is preserved untouched.
+printf 'preexisting-audit\n' > "$handover_log"
+chmod 644 "$handover_log"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%12 PRIMARY_PANE_STATE=dead SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --claim-ownership 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'Failed to record coordinator ownership handover'* ]]
+[[ "$(cat "$handover_log")" == "preexisting-audit" ]]
+[[ "$(cat "$fleet/task-1/primary_pane_id")" == "%11" ]]
+rm -f "$handover_log"
+
+# An owner that resumes validating revokes a pending release, so a later claim is
+# refused again.
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --release-ownership >/dev/null
+[[ -e "$fleet/task-1/primary_pane_released" ]]
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+[[ ! -e "$fleet/task-1/primary_pane_released" ]] || {
+  printf 'a resuming owner did not revoke its pending release\n' >&2
+  exit 1
+}
+cleanup_validation_state
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%12 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --claim-ownership 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'still live and has not released ownership'* ]]
+
+# The recorded coordinator identity must not change between the reads that verify
+# it; a pane replaced mid-verification is reported, not silently accepted.
+rm -f "$concurrent_dir/primary-reads"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  PRIMARY_PANE_FLIP=2 TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'changed while ownership was being verified'* ]] || {
+  printf 'a pane replaced mid-verification was not reported: %s\n' "$output" >&2
+  exit 1
+}
+rm -f "$concurrent_dir/primary-reads"
+
+# The durable transport audit survives a retry reset, which clears the per-run
+# transport record.
+transport_log="$repo_state/validation_transport.log"
+rm -f "$transport_log"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  NO_MISTAKES_NO_INTENT_FILE=1 TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --allow-argv-intent >/dev/null
+grep -Fq 'transport=argv' "$transport_log"
+grep -Fq "head=$head_sha" "$transport_log"
+[[ "$(stat -c '%a' "$transport_log" 2>/dev/null || stat -f '%Lp' "$transport_log")" == "600" ]]
+printf 'exited:0\n' > "$repo_state/validation_status"
+rm -f "$concurrent_dir/pane-live"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+[[ "$(wc -l < "$transport_log")" == "2" ]] || {
+  printf 'the durable transport audit did not survive the retry reset: %s\n' \
+    "$(cat "$transport_log")" >&2
+  exit 1
+}
+grep -Fq 'transport=argv' "$transport_log"
+grep -Fq 'transport=intent-file' "$transport_log"
+cleanup_validation_state
+rm -f "$transport_log"
+
 cat > "$worktree/.sergeant-validation-ready" <<EOF
 intent_revision=$revision
 head_sha=0000000000000000000000000000000000000000
@@ -1323,7 +1482,7 @@ output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
 status=$?
 set -e
-[[ "$status" -ne 0 && "$output" == *'HEAD or review evidence'* ]]
+[[ "$status" -ne 0 && "$output" == *'records a stale head_sha'* ]]
 [[ "$(wc -l < "$TEST_ROOT/tmux.log")" == "$before_lines" ]]
 
 cat > "$worktree/.sergeant-validation-ready" <<EOF

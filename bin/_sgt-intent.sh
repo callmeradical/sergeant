@@ -52,6 +52,45 @@ _sgt_resolve_intent_transport() {
 # Actionable diagnostic for a failed transport resolution. $1 is the status
 # _sgt_resolve_intent_transport returned: 1 when no intent flag exists at all,
 # 2 when only the argv transport exists and the operator has not consented.
+# Is one specific transport available on the installed build? Used where the
+# coordinator's recorded decision must be honoured exactly rather than
+# re-optimised.
+_sgt_intent_transport_available() {
+  local transport="$1" flags
+  flags="$(_sgt_no_mistakes_axi_run_flags)" || return 1
+  case "$transport" in
+    intent-file)
+      case "$flags" in *' --intent-file '*) return 0 ;; esac
+      ;;
+    argv)
+      case "$flags" in *' --intent '*) return 0 ;; esac
+      ;;
+  esac
+  return 1
+}
+
+# The consented argv transport was recorded at launch, but the build running the
+# validation does not accept --intent.
+_sgt_intent_argv_unavailable_diagnostic() {
+  local flags
+  flags="$(_sgt_no_mistakes_axi_run_flags 2>/dev/null || true)"
+  printf 'no-mistakes cannot serve the consented argv intent transport\n'
+  printf '  recorded transport:  argv (operator consented at launch)\n'
+  printf '  required capability: no-mistakes axi run --intent <text>\n'
+  printf '  observed version:    %s\n' "$(_sgt_no_mistakes_version)"
+  printf '  observed axi run flags:%s\n' "${flags:- none}"
+  printf '  options:\n'
+  case "$flags" in
+    *' --intent-file '*)
+      printf '    1. Relaunch validation without --allow-argv-intent: this build\n'
+      printf '       accepts the private --intent-file transport.\n'
+      ;;
+    *)
+      printf '    1. Install a no-mistakes build that accepts an intent flag.\n'
+      ;;
+  esac
+}
+
 _sgt_intent_transport_diagnostic() {
   local status="$1" flags
   flags="$(_sgt_no_mistakes_axi_run_flags 2>/dev/null || true)"

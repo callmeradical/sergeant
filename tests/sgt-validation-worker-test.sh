@@ -45,7 +45,9 @@ case "$1" in
     ;;
 esac
 if [[ "$*" == *'axi run --help'* ]]; then
-  printf '      --intent string   what the user set out to accomplish\n'
+  if [[ "${NO_MISTAKES_NO_INTENT:-}" != "1" ]]; then
+    printf '      --intent string   what the user set out to accomplish\n'
+  fi
   if [[ "${NO_MISTAKES_NO_INTENT_FILE:-}" != "1" ]]; then
     printf '      --intent-file string   read the intent from a file instead of argv\n'
   fi
@@ -386,6 +388,40 @@ grep -Fq 'required capability: no-mistakes axi run --intent-file' \
 }
 [[ ! -e "$missing_log" && ! -e "$missing_state/validation-child-ready" ]] || {
   printf 'worker proceeded without the private intent transport\n' >&2
+  exit 1
+}
+
+# The diagnostic must describe the build actually installed: when only the argv
+# transport exists, it must name --allow-argv-intent as the operator's remedy
+# instead of claiming no intent flag exists at all.
+grep -Fq 'Re-run with --allow-argv-intent' "$missing_state/worker.err" || {
+  printf 'worker diagnostic did not name the available remedy: %s\n' \
+    "$(cat "$missing_state/worker.err" 2>/dev/null || echo empty)" >&2
+  exit 1
+}
+if grep -Fq 'this build accepts no intent flag' "$missing_state/worker.err"; then
+  printf 'worker diagnostic contradicted the observed flag surface\n' >&2
+  exit 1
+fi
+
+# A build that offers only the private transport must not run a consented argv
+# request through --intent, which that build does not accept.
+mismatch_state="$TEST_ROOT/argv-unavailable-state"
+new_transport_state "$mismatch_state"
+mismatch_log="$TEST_ROOT/argv-unavailable-no-mistakes.log"
+launch_transport_worker "$mismatch_state" "$mismatch_log" argv \
+  "NO_MISTAKES_NO_INTENT=1" >/dev/null
+for _ in $(seq 1 200); do
+  [[ -s "$mismatch_state/worker.err" ]] && break
+  sleep 0.02
+done
+grep -Fq 'required capability' "$mismatch_state/worker.err" || {
+  printf 'worker accepted an argv transport the build cannot serve: %s\n' \
+    "$(cat "$mismatch_state/worker.err" 2>/dev/null || echo empty)" >&2
+  exit 1
+}
+[[ ! -e "$mismatch_log" && ! -e "$mismatch_state/validation-child-ready" ]] || {
+  printf 'unavailable argv transport reached the handshake or a run\n' >&2
   exit 1
 }
 

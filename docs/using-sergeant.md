@@ -257,10 +257,18 @@ When the installed no-mistakes does not offer `--intent-file`, the launch fails
 closed and names the required capability, the observed version, the observed flag
 surface, and the operator's options. No run, marker, or state change is created.
 Passing `--allow-argv-intent` consents, for that invocation only, to delivering
-the intent through `--intent`, accepting the exposure. The transport actually
-used is recorded in fleet state as `validation_intent_transport`, so a consented
-run stays auditable. Consent is a flag rather than an environment variable so it
-cannot be exported once and silently reapplied to later runs.
+the intent through `--intent`, accepting the exposure. Consent is a flag rather
+than an environment variable so it cannot be exported once and silently reapplied
+to later runs.
+
+The transport actually launched is recorded twice: `validation_intent_transport`
+holds it for the current run and is cleared when a finished run is reset for a
+retry, and `validation_transport.log` appends the timestamp, transport, HEAD, and
+intent revision of every committed launch so the privacy decision stays auditable
+across retries. Both are owner-only. The validation worker re-checks the recorded
+transport against the build that will actually run, so a no-mistakes replaced
+between launch and run can neither downgrade the private transport into argv nor
+invoke a flag that build rejects.
 
 ### Coordinator ownership and handover
 

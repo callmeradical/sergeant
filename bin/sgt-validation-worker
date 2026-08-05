@@ -41,27 +41,27 @@ command -v no-mistakes >/dev/null 2>&1 || {
   echo "ERROR: no-mistakes is required" >&2
   exit 2
 }
-# The coordinator already probed the transport; re-resolve it here so a binary
-# swapped between launch and run cannot silently downgrade the private transport
-# into argv. Only the coordinator's recorded decision is permitted.
+# Re-check the coordinator's recorded transport against the build that will
+# actually run, so a binary swapped between launch and run can neither downgrade
+# the private transport into argv nor invoke a flag this build rejects. The
+# recorded decision is honoured exactly; it is never re-optimised here.
 case "$INTENT_TRANSPORT" in
-  intent-file)
-    _sgt_resolve_intent_transport false >/dev/null 2>&1 || {
-      _sgt_intent_transport_diagnostic 1 >&2
-      exit 2
-    }
-    ;;
-  argv)
-    _sgt_resolve_intent_transport true >/dev/null 2>&1 || {
-      _sgt_intent_transport_diagnostic 1 >&2
-      exit 2
-    }
-    ;;
+  intent-file|argv) ;;
   *)
     echo "ERROR: unsupported validation intent transport: $INTENT_TRANSPORT" >&2
     exit 2
     ;;
 esac
+if ! _sgt_intent_transport_available "$INTENT_TRANSPORT"; then
+  # Diagnose against the build actually installed, so the reported remedy exists.
+  if [[ "$INTENT_TRANSPORT" == "intent-file" ]]; then
+    _sgt_resolve_intent_transport false >/dev/null 2>&1
+    _sgt_intent_transport_diagnostic "$?" >&2
+  else
+    _sgt_intent_argv_unavailable_diagnostic >&2
+  fi
+  exit 2
+fi
 
 _lock_field() {
   local key="$1"
@@ -169,17 +169,13 @@ done
 printf 'running\n' > "$REPO_STATE/validation_status"
 cd "$WORKTREE" || exit 2
 
-# Seal the intent so no-mistakes receives an unreplaceable file descriptor.
-# Protocol: (1) mktemp creates the path exclusively; (2) both a read fd (8) and
-# a write fd (9) are opened before any content is written; (3) the path is
-# unlinked immediately so the inode is only accessible through those two fds;
-# (4) content is written through fd 9 then fd 9 is closed; (5) the hash is
-# verified through fd 8 via /dev/fd/8 (inherited by subprocesses); (6)
-# no-mistakes receives /dev/fd/8 as --intent-file and reads from the same
-# inode. No directory-entry replacement is possible at any point.
-# Re-verify the intent immediately before exec so content changes made after the
-# startup check are caught. Pass via --intent-file rather than --intent so the
-# intent content does not appear in ps or /proc argv.
+# Re-verify the canonical intent immediately before invoking no-mistakes, so a
+# content change made after the startup check is caught rather than validated.
+#
+# Transport privacy: with the intent-file transport only the intent PATH reaches
+# argv, so intent content never appears in ps or /proc/<pid>/cmdline. The argv
+# transport does expose the content and is reachable only because the coordinator
+# passed --allow-argv-intent for this run.
 if [[ "$(_sgt_intent_revision "$VALIDATION_INTENT")" != "$EXPECTED_REVISION" ]]; then
   printf 'exited:2\n' > "$REPO_STATE/validation_status"
   echo "ERROR: canonical validation intent was modified after initial verification" >&2
