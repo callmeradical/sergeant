@@ -99,6 +99,11 @@ _make_repo victim 7
 
 # 10 tasks cycling open, in_progress, open, blocked, open, in_review, open,
 # closed, in_progress, blocked → 9 non-closed, of which 4 are open.
+# A repo with no open tasks at all: under the old status=open default it
+# disappeared from the report entirely, repo header and all.
+_make_repo nonopen 3
+printf 'in_progress\nblocked\nin_review\n' > "$dev_root/nonopen/.td-task-statuses"
+
 _make_repo mixed 10
 printf 'open\nin_progress\nopen\nblocked\nopen\nin_review\nopen\nclosed\nin_progress\nblocked\n' \
   > "$dev_root/mixed/.td-task-statuses"
@@ -125,6 +130,15 @@ name: mixed
 repos:
   - name: mixed
     path: mixed
+EOF
+
+cat > "$config/nonopen.yaml" <<EOF
+name: nonopen
+repos:
+  - name: nonopen
+    path: nonopen
+  - name: small
+    path: small
 EOF
 
 cat > "$config/norepos.yaml" <<EOF
@@ -959,13 +973,17 @@ printf 'option_requires_value: ok\n'
 out="$TEST_ROOT/prio.out"; err="$TEST_ROOT/prio.err"
 _run "$out" "$err" -- example --repos small --priority P1
 _expect_status 0 priority_filter_composed "$err"
-grep -qF 'status=open AND priority=P1' "$TEST_ROOT/td.log" || {
+grep -qF 'priority=P1' "$TEST_ROOT/td.log" || {
   printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
-  _fail "priority_filter_composed: --priority must compose with the status filter"
+  _fail "priority_filter_composed: --priority must reach td"
 }
-grep -qF '[status=open AND priority=P1]' "$out" || {
+! grep -qF 'status=' "$TEST_ROOT/td.log" || {
+  printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
+  _fail "priority_filter_composed: --priority alone must not narrow the status view"
+}
+grep -qF '[all non-closed AND priority=P1; deferred excluded]' "$out" || {
   printf 'actual output:\n%s\n' "$(cat "$out")" >&2
-  _fail "priority_filter_composed: the active filter must be printed in the header"
+  _fail "priority_filter_composed: the header must name the active view"
 }
 printf 'priority_filter_composed: ok\n'
 
@@ -973,11 +991,14 @@ printf 'priority_filter_composed: ok\n'
 out="$TEST_ROOT/all.out"; err="$TEST_ROOT/all.err"
 _run "$out" "$err" -- example --repos small --all
 _expect_status 0 all_drops_status_filter "$err"
-! grep -qF 'status=open' "$TEST_ROOT/td.log" || {
+! grep -qF 'status=' "$TEST_ROOT/td.log" || {
   printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
   _fail "all_drops_status_filter: --all must not send a status filter to td"
 }
-! grep -qF '[status=' "$out" || _fail "all_drops_status_filter: the header must not claim a status filter"
+grep -qF '[all non-closed; deferred excluded]' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "all_drops_status_filter: --all must name the same view as the default"
+}
 printf 'all_drops_status_filter: ok\n'
 
 # ── 25. The ceiling reports what it withheld, and only when it withheld ───────
@@ -1086,39 +1107,54 @@ printf 'signal_never_reports_success: ok\n'
 
 # ── 28. Status filtering is explicit, and the complete view is complete ────────
 
-# The default view is narrowed to status=open.  That narrowing is a documented,
-# printed filter — not a silent cap — but it does withhold non-closed work, so
-# the header has to say so and --all has to return everything non-closed.
+# The default view is every non-closed task: narrowing it to status=open used to
+# hide in_progress, in_review and blocked work — and whole repos — from a report
+# whose job is a truthful backlog.  The header always names the active view.
 : > "$TEST_ROOT/td.log"
 out="$TEST_ROOT/mixed.out"; err="$TEST_ROOT/mixed.err"
 _run "$out" "$err" -- mixed
-_expect_status 0 default_view_is_labelled "$err"
-grep -qF '[status=open]' "$out" || {
+_expect_status 0 default_view_is_complete "$err"
+grep -qF '[all non-closed; deferred excluded]' "$out" || {
   printf 'actual output:\n%s\n' "$(cat "$out")" >&2
-  _fail "default_view_is_labelled: the narrowed default view must name its filter in the header"
+  _fail "default_view_is_complete: the header must name the active view"
 }
-grep -qF '── mixed (4)' "$out" || {
+grep -qF '── mixed (9)' "$out" || {
   printf 'actual output:\n%s\n' "$(cat "$out")" >&2
-  _fail "default_view_is_labelled: expected the 4 open tasks under the default filter"
+  _fail "default_view_is_complete: the default must report all 9 non-closed tasks"
 }
-printf 'default_view_is_labelled: ok\n'
+grep -qF '9 task(s) total' "$out" || _fail "default_view_is_complete: total must match"
+for status in in_progress blocked in_review; do
+  grep -qF "$status" "$out" || {
+    printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+    _fail "default_view_is_complete: the default must include $status tasks"
+  }
+done
+# The 8th fixture task is the closed one; the header legitimately contains the
+# word "non-closed", so assert on the task itself, not on the word.
+! grep -qF 'td-000008' "$out" || _fail "default_view_is_complete: closed tasks must stay out"
+printf 'default_view_is_complete: ok\n'
 
+# --all is still accepted and still means every non-closed status.
 : > "$TEST_ROOT/td.log"
 out="$TEST_ROOT/mixed-all.out"; err="$TEST_ROOT/mixed-all.err"
 _run "$out" "$err" -- mixed --all
-_expect_status 0 all_reports_every_non_closed_task "$err"
+_expect_status 0 all_matches_default "$err"
 grep -qF '── mixed (9)' "$out" || {
   printf 'actual output:\n%s\n' "$(cat "$out")" >&2
-  _fail "all_reports_every_non_closed_task: expected all 9 non-closed tasks (closed excluded)"
+  _fail "all_matches_default: --all must report the same 9 non-closed tasks as the default"
 }
-grep -qF '9 task(s) total' "$out" || _fail "all_reports_every_non_closed_task: total must match"
-printf 'all_reports_every_non_closed_task: ok\n'
+grep -qF '9 task(s) total' "$out" || _fail "all_matches_default: total must match"
+printf 'all_matches_default: ok\n'
 
 # The same must hold on the machine-readable path, statuses included.
 : > "$TEST_ROOT/td.log"
 out="$TEST_ROOT/mixed-json.out"; err="$TEST_ROOT/mixed-json.err"
-_run "$out" "$err" -- mixed --all --json
+_run "$out" "$err" -- mixed --json
 _expect_status 0 all_json_reports_every_status "$err"
+[[ ! -s "$err" ]] || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "all_json_reports_every_status: the complete default view has nothing to disclaim"
+}
 statuses="$("$REAL_PYTHON" -c '
 import collections, json, sys
 tasks = json.load(open(sys.argv[1]))
@@ -1139,7 +1175,56 @@ grep -qF '── mixed (2)' "$out" || {
   printf 'actual output:\n%s\n' "$(cat "$out")" >&2
   _fail "explicit_status_filter: --status blocked must report exactly the blocked tasks"
 }
-grep -qF '[status=blocked]' "$out" || _fail "explicit_status_filter: the header must name the filter"
+grep -qF '[status=blocked; deferred excluded]' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "explicit_status_filter: the header must name the narrowed view"
+}
 printf 'explicit_status_filter: ok\n'
+
+# ── 29. A repo whose tasks are all non-open still appears ─────────────────────
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/nonopen.out"; err="$TEST_ROOT/nonopen.err"
+_run "$out" "$err" -- nonopen
+_expect_status 0 repo_without_open_tasks_appears "$err"
+grep -qF '── nonopen (3)' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "repo_without_open_tasks_appears: a repo with only in_progress/blocked/in_review work must be listed"
+}
+grep -qF '10 task(s) total' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "repo_without_open_tasks_appears: the total must include it (3 + 7)"
+}
+printf 'repo_without_open_tasks_appears: ok\n'
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/nonopen-json.out"; err="$TEST_ROOT/nonopen-json.err"
+_run "$out" "$err" -- nonopen --json
+_expect_status 0 repo_without_open_tasks_json "$err"
+json_repos="$("$REAL_PYTHON" -c '
+import collections, json, sys
+tasks = json.load(open(sys.argv[1]))
+counts = collections.Counter(t["_repo"] for t in tasks)
+print(" ".join("%s=%d" % (k, counts[k]) for k in sorted(counts)))' "$out")"
+[[ "$json_repos" == "nonopen=3 small=7" ]] || {
+  printf 'actual repo tags: %s\n' "$json_repos" >&2
+  _fail "repo_without_open_tasks_json: --json must include the repo with no open tasks"
+}
+printf 'repo_without_open_tasks_json: ok\n'
+
+# ── 30. A narrowed --json run discloses the view that produced it ─────────────
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/prov.out"; err="$TEST_ROOT/prov.err"
+_run "$out" "$err" -- mixed --status open --json
+_expect_status 0 json_states_narrowed_view "$err"
+json_count="$("$REAL_PYTHON" -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$out")" \
+  || _fail "json_states_narrowed_view: stdout must stay valid JSON"
+[[ "$json_count" == "4" ]] || _fail "json_states_narrowed_view: expected the 4 open tasks, got $json_count"
+grep -qF 'status=open' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "json_states_narrowed_view: a narrowed --json run must name its view on stderr"
+}
+printf 'json_states_narrowed_view: ok\n'
 
 printf '\nAll sgt-td-list tests passed.\n'

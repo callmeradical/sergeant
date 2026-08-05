@@ -5,8 +5,14 @@
 ```bash
 sgt-list
 sgt-context <project>
-sgt-td-list <project>
+sgt-td-list <project>        # every non-closed task; --status open narrows it
 ```
+
+`sgt-td-list` exits 0 for a complete report, 1 when the invocation or
+environment is unusable, and 2 when the report is incomplete because a repo
+could not be read or a limit withheld tasks. The active view is named in the
+header; deferred tasks are excluded, because td offers them only alongside
+closed ones.
 
 Use resolved project output to identify repository ownership and instructions.
 Do not infer ownership from the current working directory.

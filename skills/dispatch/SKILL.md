@@ -29,9 +29,13 @@ Prerequisites:
 Before planning from scratch, see if the task already exists in td:
 
 ```bash
-sgt-td-list <project>
+sgt-td-list <project>              # every non-closed task, all repos
 sgt-td-list <project> --priority P1
+sgt-td-list <project> --status open  # narrow when you only want unstarted work
 ```
+
+`sgt-td-list` exits 2 when a repo was unreadable or a limit withheld tasks. Do
+not plan from a backlog that exited 2 without reading the warnings on stderr.
 
 If the user's request maps to an open td task, use `--td <id>` when dispatching. The brief, branch name, and full task context are pulled from td automatically — and the worker's brief will include `td start`, `td log`, `td handoff`, and `td review` instructions so the task lifecycle is tracked end-to-end.
 

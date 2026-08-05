@@ -31,7 +31,9 @@ When operating through Sergeant:
 
 1. Run `sgt-list` if the project name is not already established.
 2. Run `sgt-context <project>`.
-3. Run `sgt-td-list <project> --all --json` to deduplicate against every status.
+3. Run `sgt-td-list <project> --json` to deduplicate against every non-closed
+   status (this is the default view; `--all` remains an accepted alias). Add
+   `td list -a` in an owning repo when a closed duplicate matters.
 4. For architecture or codebase questions, use the existing graphify graph before
    reading files individually.
 5. Read any referenced issue, PR, specification, ADR, or findings register in full.

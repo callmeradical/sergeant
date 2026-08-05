@@ -84,7 +84,7 @@ the operation with ad hoc shell commands.
 | `bin/sgt-dag-run <project>` | Create dagr DAG from project YAML `dag:` block and start a run; dispatches ready stages automatically (**requires dagr**) |
 | `bin/sgt-dag-dispatch-hook` | Stage hook used internally by sgt-dag-run; called by dagr when a stage becomes ready (**requires dagr**) |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
-| `bin/sgt-td-list <project>` | Show td tasks across all repos in a project |
+| `bin/sgt-td-list <project>` | Show every non-closed td task across all repos in a project (`--status open` narrows it; exit 2 means the report is incomplete) |
 | `bin/sgt-td-create <project> "<title>" --repos <list>` | Create td tasks in repos (called automatically by sgt-dispatch) |
 | `bin/sgt-notify <task-id> "<message>"` | Record a durable wake marker, sync any registered callback origin, and optionally inject into the primary session pane |
 | `bin/sgt-callback <command>` | Register, enqueue, drain, and verify durable profile-bound callback events |
@@ -131,7 +131,7 @@ protocol from memory.
 When the user brings you a task:
 
 1. **Load context** — run `sgt-context <project>` and identify the owning repository or repositories, inherited instructions, configured paths, and cross-repository dependencies before selecting an execution mode.
-2. **Check the queue** — run `sgt-td-list <project>` and reuse a matching task in direct or dispatch mode; create a task only when no canonical task exists.
+2. **Check the queue** — run `sgt-td-list <project>`, which reports every non-closed task in every repo, and reuse a matching task in direct or dispatch mode; create a task only when no canonical task exists. Treat exit 2 as an incomplete backlog and read the warnings before planning from it.
 3. **Choose execution mode** — direct for explicit single-repo work in this session; dispatch for cross-repo, parallel, or explicitly delegated work.
 4. **Reconcile existing state** — run `sgt-watch --sync-all`, then inspect active workers, branches, worktrees, retained gates, and handoffs before starting. Resume or take over preserved work rather than creating duplicates.
 5. **Confirm only unresolved decisions that change scope or risk** — ask when repository ownership, user-visible behavior, security/privacy policy, data retention, destructive action, or an irreversible tradeoff is unknown. Do not ask the user to reconfirm an execution mode, plan, or tradeoff already recorded in the conversation or td.
