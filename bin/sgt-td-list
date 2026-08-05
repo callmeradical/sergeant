@@ -55,7 +55,8 @@
 #   own deferred handling, and a --deferred read overrides such a view instead of
 #   intersecting it, which would inject rows from outside the view.  No second
 #   read is issued for them.  --overdue and --due-soon do return deferred tasks,
-#   so only --surfacing is labelled as excluding them.
+#   so only --surfacing is labelled as excluding them.  Their `=<bool>` spellings
+#   are refused, because that decision must not hinge on parsing a boolean.
 #
 #   Narrowing uses td's own -s/-p flags.  td applies its closed-and-deferred
 #   exclusion to those but not to `--filter`, so `--filter priority=P2` answers
@@ -167,6 +168,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --deferred|--deferred=*)
       _die "--deferred is not needed: the default view already includes deferred tasks"
+      ;;
+    --overdue=*|--due-soon=*|--surfacing=*)
+      # These views decide whether a deferred read may run at all, and reading a
+      # boolean value the way cobra does is not worth the risk of getting the
+      # decision wrong: ask for the bare flag.
+      _die "${1%%=*}=<bool> is not supported: pass ${1%%=*} on its own"
       ;;
     -w|--work-dir|-w=*|--work-dir=*|-w?*)
       # Each repo's work directory comes from the project configuration.  A

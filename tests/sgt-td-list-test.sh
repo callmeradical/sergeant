@@ -1993,4 +1993,29 @@ grep -qF 'deferred tasks were not read at all' "$err" || {
 }
 printf 'ceiling_still_names_lost_deferred: ok\n'
 
+# ── 48. The =<bool> spelling of a special view is refused ─────────────────────
+
+# td accepts --overdue=true as the same flag, but that spelling used to slip past
+# the guard that suppresses the deferred read, so the report published rows from
+# outside the requested view.
+for spelling in "--overdue=true" "--overdue=1" "--overdue=false" "--due-soon=true" "--surfacing=true"; do
+  : > "$TEST_ROOT/td.log"
+  out="$TEST_ROOT/viewbool.out"; err="$TEST_ROOT/viewbool.err"
+  _run "$out" "$err" -- mixed "$spelling"
+  _expect_status 1 "special_view_bool_refused($spelling)" "$err"
+  grep -qF 'is not supported: pass' "$err" || {
+    printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+    _fail "special_view_bool_refused($spelling): the =<bool> spelling must be refused"
+  }
+  [[ ! -s "$out" ]] || {
+    printf 'actual stdout:\n%s\n' "$(cat "$out")" >&2
+    _fail "special_view_bool_refused($spelling): no report may be printed"
+  }
+  [[ ! -s "$TEST_ROOT/td.log" ]] || {
+    printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
+    _fail "special_view_bool_refused($spelling): td must not be queried at all"
+  }
+done
+printf 'special_view_bool_refused: ok\n'
+
 printf '\nAll sgt-td-list tests passed.\n'
