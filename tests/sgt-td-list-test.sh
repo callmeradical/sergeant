@@ -2018,4 +2018,25 @@ for spelling in "--overdue=true" "--overdue=1" "--overdue=false" "--due-soon=tru
 done
 printf 'special_view_bool_refused: ok\n'
 
+# ── 49. Only one of td's three special views per invocation ───────────────────
+
+# td keeps one of --overdue/--due-soon/--surfacing and discards the rest, so a
+# combination would report one view under a label describing another: --surfacing
+# contributes a "deferred ones excluded" claim that --overdue's answer contradicts.
+for combo in "--overdue --surfacing" "--surfacing --overdue" "--due-soon --surfacing" "--overdue --due-soon"; do
+  out="$TEST_ROOT/twoviews.out"; err="$TEST_ROOT/twoviews.err"
+  # shellcheck disable=SC2086
+  _run "$out" "$err" -- mixed $combo
+  _expect_status 1 "one_special_view_only($combo)" "$err"
+  grep -qF 'pass only one of' "$err" || {
+    printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+    _fail "one_special_view_only($combo): td discards all but one, so refuse the combination"
+  }
+  [[ ! -s "$out" ]] || {
+    printf 'actual stdout:\n%s\n' "$(cat "$out")" >&2
+    _fail "one_special_view_only($combo): no report may be printed"
+  }
+done
+printf 'one_special_view_only: ok\n'
+
 printf '\nAll sgt-td-list tests passed.\n'

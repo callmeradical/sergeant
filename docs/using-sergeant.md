@@ -15,9 +15,10 @@ header. Deferred tasks are included: td hides them from its default answer, so
 each repo is read twice and the answers are merged. td's own `--overdue`,
 `--due-soon` and `--surfacing` views apply their own deferred handling — a
 `--deferred` read would override such a view rather than narrow it — so no second
-read is made for them and the header names the caller's flag. Pass those three
-flags bare; their `=<bool>` spellings are refused, because whether a deferred read
-may run must not hinge on parsing a boolean. A repo configured in the
+read is made for them and the header names the caller's flag. Pass one of those three
+flags, bare: their `=<bool>` spellings are refused, because whether a deferred read
+may run must not hinge on parsing a boolean, and a combination is refused because
+td keeps one of them and discards the rest. A repo configured in the
 project but not cloned yet is noted on stderr and does not change the exit
 status — run `sgt-sync <project>` to include it.
 
