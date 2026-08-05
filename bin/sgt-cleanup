@@ -393,38 +393,23 @@ _response_state_present() {
   return 1
 }
 
-# Emits a path-independent record stream for one response-state entry.  The
-# labels are relative, so a digest binds content and shape rather than the
-# directory the state currently lives in: cleanup legitimately replays the
-# worker side from fleet-owned staging once the worktree is gone.  Symlinks and
-# anything that is neither a regular file nor a readable directory fail closed,
-# so unreadable or forged state can never be recorded as intact evidence.
-_response_state_records() {
-  local child entry="$1" label="$2"
+# _named_tree_digest — bind a fixed list of named entries under one root to a
+# single digest.  Entries are recorded by _worker_evidence_records under their
+# relative names, so the digest binds content and shape rather than the directory
+# the state currently lives in: cleanup legitimately replays a worker's handshake
+# state from fleet-owned staging once the worktree is gone.  An absent entry is
+# recorded as absent; a symlink, an unreadable directory, or anything that is
+# neither a regular file nor a directory fails the whole digest, so forged or
+# unreadable state can never be recorded as intact evidence.
+#
+# The record stream is materialised before it is hashed rather than piped, so the
+# guard does not depend on `pipefail` remaining set for a partial stream to be
+# rejected.
+_named_tree_digest() {
+  local digest name names="$2" root="$1" stream
 
-  [[ ! -L "$entry" && "$label" != *$'\n'* ]] || return 1
-  if [[ -f "$entry" ]]; then
-    printf 'file\n%s\n' "$label"
-    git hash-object --no-filters "$entry" || return 1
-    return 0
-  fi
-  [[ -d "$entry" && -r "$entry" && -x "$entry" ]] || return 1
-  printf 'dir\n%s\n' "$label"
-  for child in "$entry"/* "$entry"/.[!.]* "$entry"/..?*; do
-    [[ -e "$child" || -L "$child" ]] || continue
-    _response_state_records "$child" "$label/${child##*/}" || return 1
-  done
-  printf 'end-dir\n%s\n' "$label"
-}
-
-# Binds one side of the handshake state to a single digest.  Byte-order collation
-# keeps glob expansion, and therefore the record stream, independent of the
-# caller's locale.
-_response_state_digest() {
-  local digest name names root="$1" side="$2"
-
-  names="$(_response_state_names "$side")" || return 1
-  digest="$(
+  stream="$(mktemp)" || return 1
+  if ! (
     # The collation is deliberately confined to this subshell: only the record
     # stream built here depends on it.
     # shellcheck disable=SC2030
@@ -432,21 +417,41 @@ _response_state_digest() {
     for name in $names; do
       printf 'entry\n%s\n' "$name"
       if [[ -e "$root/$name" || -L "$root/$name" ]]; then
-        _response_state_records "$root/$name" "$name" || exit 1
+        _worker_evidence_records "$root/$name" "$name" || exit 1
       else
         printf 'absent\n'
       fi
-    done | git hash-object --stdin
-  )" || return 1
+    done
+  ) > "$stream"; then
+    rm -f "$stream"
+    return 1
+  fi
+  digest="$(git hash-object --stdin < "$stream")" || {
+    rm -f "$stream"
+    return 1
+  }
+  rm -f "$stream"
   [[ -n "$digest" ]] || return 1
   printf '%s\n' "$digest"
+}
+
+# Binds one side of the handshake state to a single digest.
+_response_state_digest() {
+  local names root="$1"
+
+  names="$(_response_state_names "$2")" || return 1
+  _named_tree_digest "$root" "$names"
 }
 
 # _response_owner_provably_dead — succeed only when the worker that owned an
 # unfinished response handshake is provably gone, printing the reason on refusal.
 #
 # Every refusal is fail-closed, including the ones that merely cannot be proven:
-#   • fleet state records no worker process provenance to reason about
+#   • fleet state records incomplete worker process provenance.  All three of
+#     worker_pid, worker_process_start and worker_process_group are written
+#     together by sgt-interactive-worker, so a missing or malformed one means the
+#     escaped-descendant check below could not run — the same reason
+#     _stop_validation_pane refuses an incomplete validation provenance.
 #   • the recorded pane is still live, or is no longer this worker's pane
 #   • the recorded PID is alive — the same process, or a reused number
 #   • live processes remain in the recorded worker process group
@@ -458,7 +463,8 @@ _response_owner_provably_dead() {
   recorded_pid="$(cat "$repo_dir/worker_pid" 2>/dev/null || true)"
   recorded_start="$(cat "$repo_dir/worker_process_start" 2>/dev/null || true)"
   recorded_pgid="$(cat "$repo_dir/worker_process_group" 2>/dev/null || true)"
-  if [[ ! "$recorded_pid" =~ ^[1-9][0-9]*$ || -z "$recorded_start" ]]; then
+  if [[ ! "$recorded_pid" =~ ^[1-9][0-9]*$ || -z "$recorded_start" || \
+    ! "$recorded_pgid" =~ ^[1-9][0-9]*$ ]]; then
     printf 'recorded worker process provenance is incomplete\n'
     return 1
   fi
@@ -492,21 +498,30 @@ _response_owner_provably_dead() {
     fi
     return 1
   fi
-  if [[ -n "$recorded_pgid" && -n "$(_process_group_pids "$recorded_pgid")" ]]; then
+  if [[ -n "$(_process_group_pids "$recorded_pgid")" ]]; then
     printf 'live processes remain in recorded worker process group %s\n' "$recorded_pgid"
     return 1
   fi
 }
 
+# Reads one optional fleet-state field.  `cat` is used deliberately: an input
+# redirection is applied before `2>/dev/null` takes effect, so the shell would
+# report its own "No such file or directory" for every legitimately absent field.
+_response_state_field() {
+  # shellcheck disable=SC2002
+  cat "$1" 2>/dev/null | tr -d '\n'
+}
+
 # The owner evidence a retirement archive keeps, in the shared key=value field
 # format.  Fields fleet state does not record are omitted, never invented, and
 # the record is re-derived on every retry so a rewritten provenance file cannot
-# launder a live worker into an archived dead one.
+# launder a live worker into an archived dead one.  `td_status` is the status the
+# lookup actually returned, not an assumption about it.
 _response_retirement_owner_record() {
   local name repo_dir="$1" td_status="$2" value
 
   for name in worker_pid worker_process_start worker_process_group pane td_task; do
-    value="$(tr -d '\n' < "$repo_dir/$name" 2>/dev/null || true)"
+    value="$(_response_state_field "$repo_dir/$name")"
     [[ -n "$value" ]] || continue
     printf '%s=%s\n' "$name" "$value"
   done
@@ -516,14 +531,15 @@ _response_retirement_owner_record() {
 }
 
 _response_retirement_manifest() {
-  local fleet_digest="$2" repo_dir="$1" value worktree_digest="$3"
+  local fields_digest="$4" fleet_digest="$2" repo_dir="$1" value worktree_digest="$3"
 
-  value="$(tr -d '\n' < "$repo_dir/response_id" 2>/dev/null || true)"
+  value="$(_response_state_field "$repo_dir/response_id")"
   [[ -z "$value" ]] || printf 'response_id=%s\n' "$value"
-  value="$(tr -d '\n' < "$repo_dir/response_generation" 2>/dev/null || true)"
+  value="$(_response_state_field "$repo_dir/response_generation")"
   [[ -z "$value" ]] || printf 'gate_generation=%s\n' "$value"
   printf 'fleet_state_digest=%s\n' "$fleet_digest"
   printf 'worktree_state_digest=%s\n' "$worktree_digest"
+  printf 'archive_fields_digest=%s\n' "$fields_digest"
 }
 
 # Publishes the response-archive fields this handshake can actually prove: `body`
@@ -531,13 +547,17 @@ _response_retirement_manifest() {
 # `gate_generation`/`applied_status` are read back out of them.  A field with no
 # recorded source stays absent — retirement never fabricates one, which is what
 # keeps a retired entry distinguishable from an acknowledged one.
+#
+# The sources are the archived copies rather than the live state, so the fields
+# and the copies they came from cannot disagree, and they are bound by
+# archive_fields_digest so a rewritten field is as detectable as a rewritten copy.
 _write_response_retirement_fields() {
   local applied_status generation proof_root="$2" repo_dir="$1" staging="$3"
 
   if [[ -f "$repo_dir/response" && ! -L "$repo_dir/response" ]]; then
     cp -p "$repo_dir/response" "$staging/body" || return 1
   fi
-  generation="$(tr -d '\n' < "$repo_dir/response_generation" 2>/dev/null || true)"
+  generation="$(_response_state_field "$repo_dir/response_generation")"
   if [[ -n "$generation" ]]; then
     printf '%s\n' "$generation" > "$staging/gate_generation" || return 1
   fi
@@ -550,6 +570,11 @@ _write_response_retirement_fields() {
       printf '%s\n' "$applied_status" > "$staging/applied_status" || return 1
     fi
   fi
+}
+
+# Binds the shared archive fields published at the archive root.
+_response_retirement_fields_digest() {
+  _named_tree_digest "$1" "$_SGT_RESPONSE_ARCHIVE_FIELDS"
 }
 
 _copy_response_retirement_state() {
@@ -568,11 +593,24 @@ _publish_response_retirement() {
   ( umask 077; _publish_response_retirement_staged "$@" )
 }
 
+# Publishes the retirement archive.  It lives in fleet state beside the
+# `response-archive` entries it shares its field names with, and has that same
+# lifetime: it is retained until the task's fleet state is removed, which is what
+# makes a retried cleanup converge.  It is deliberately not a durable audit
+# record — writing one outside the fleet task would be a new externally published
+# state transition, which this work is not authorized to introduce.
+#
+# Every refusal prints its reason BEFORE rolling back, because a rollback failure
+# reports through _die and would otherwise leave the caller with no reason at all.
 _publish_response_retirement_staged() {
-  local fleet_digest="$3" proof_root="$2" repo_dir="$1" worktree_digest="$4"
+  local fields_digest fleet_digest="$3" proof_root="$2" repo_dir="$1" \
+    td_status="$5" worktree_digest="$4"
   local retirement="$repo_dir/response-retirement" staging
 
-  staging="$repo_dir/response-retirement.tmp.$$"
+  # A random suffix, as elsewhere in this file: a bare PID would let a staging
+  # directory leaked by a killed run refuse cleanup forever once a later run
+  # recycled that PID.
+  staging="$repo_dir/response-retirement.tmp.$$.$RANDOM.$RANDOM"
   if [[ -e "$staging" || -L "$staging" ]]; then
     printf 'a retirement archive staging directory already exists: %s\n' "$staging"
     return 1
@@ -581,15 +619,18 @@ _publish_response_retirement_staged() {
     printf 'could not stage the retirement archive: %s\n' "$staging"
     return 1
   fi
-  if ! _copy_response_retirement_state "$repo_dir" fleet "$staging/partial/fleet" || \
+  if ! _cleanup_fail_point retirement-record || \
+    ! _copy_response_retirement_state "$repo_dir" fleet "$staging/partial/fleet" || \
     ! _copy_response_retirement_state "$proof_root" worktree "$staging/partial/worktree" || \
     ! _write_response_retirement_fields "$repo_dir" "$proof_root" "$staging" || \
-    ! _response_retirement_owner_record "$repo_dir" closed > "$staging/owner" || \
+    ! _response_retirement_owner_record "$repo_dir" "$td_status" \
+      > "$staging/owner" || \
+    ! fields_digest="$(_response_retirement_fields_digest "$staging")" || \
     ! _response_retirement_manifest "$repo_dir" "$fleet_digest" "$worktree_digest" \
-      > "$staging/manifest"; then
+      "$fields_digest" > "$staging/manifest"; then
+    printf 'could not record the partial response state as evidence\n'
     _rollback_remove_path "$staging" "retirement archive staging" \
       retirement-stage-rollback-cleanup
-    printf 'could not record the partial response state as evidence\n'
     return 1
   fi
   # Re-bind both sides after copying so a write that lands during the copy is
@@ -598,15 +639,15 @@ _publish_response_retirement_staged() {
       "$fleet_digest" || \
     "$(_response_state_digest "$proof_root" worktree 2>/dev/null || true)" != \
       "$worktree_digest" ]]; then
+    printf 'the partial response state changed while it was being archived\n'
     _rollback_remove_path "$staging" "changed retirement archive staging" \
       retirement-stage-rollback-cleanup
-    printf 'the partial response state changed while it was being archived\n'
     return 1
   fi
-  if ! mv "$staging" "$retirement"; then
+  if ! _cleanup_fail_point retirement-publish || ! mv "$staging" "$retirement"; then
+    printf 'could not publish the retirement archive: %s\n' "$retirement"
     _rollback_remove_path "$staging" "retirement archive publication" \
       retirement-stage-rollback-cleanup
-    printf 'could not publish the retirement archive: %s\n' "$retirement"
     return 1
   fi
 }
@@ -614,8 +655,10 @@ _publish_response_retirement_staged() {
 # _validate_response_retirement — a published retirement archive is evidence only
 # while it still describes the state it preserved, for the owner it recorded.
 _validate_response_retirement() {
-  local fleet_digest="$3" proof_root="$2" repo_dir="$1" worktree_digest="$4"
-  local name recorded_fleet recorded_worktree retirement="$1/response-retirement"
+  local fleet_digest="$3" proof_root="$2" repo_dir="$1" td_status="$5" \
+    worktree_digest="$4"
+  local name recorded_fields recorded_fleet recorded_worktree
+  local retirement="$repo_dir/response-retirement"
 
   if [[ ! -d "$retirement" || -L "$retirement" ]]; then
     printf 'the retirement archive is not a directory: %s\n' "$retirement"
@@ -631,18 +674,22 @@ _validate_response_retirement() {
     "$retirement/manifest" 2>/dev/null || true)"
   recorded_worktree="$(_sgt_response_archive_field worktree_state_digest \
     "$retirement/manifest" 2>/dev/null || true)"
-  if [[ -z "$recorded_fleet" || -z "$recorded_worktree" ]]; then
+  recorded_fields="$(_sgt_response_archive_field archive_fields_digest \
+    "$retirement/manifest" 2>/dev/null || true)"
+  if [[ -z "$recorded_fleet" || -z "$recorded_worktree" || -z "$recorded_fields" ]]; then
     printf 'the retirement archive does not bind the state it preserved\n'
     return 1
   fi
   if [[ "$(_response_state_digest "$retirement/partial/fleet" fleet \
       2>/dev/null || true)" != "$recorded_fleet" || \
     "$(_response_state_digest "$retirement/partial/worktree" worktree \
-      2>/dev/null || true)" != "$recorded_worktree" ]]; then
+      2>/dev/null || true)" != "$recorded_worktree" || \
+    "$(_response_retirement_fields_digest "$retirement" 2>/dev/null || true)" != \
+      "$recorded_fields" ]]; then
     printf 'the retirement archive no longer matches the state it preserved\n'
     return 1
   fi
-  if [[ "$(_response_retirement_owner_record "$repo_dir" closed)" != \
+  if [[ "$(_response_retirement_owner_record "$repo_dir" "$td_status")" != \
     "$(cat "$retirement/owner")" ]]; then
     printf 'the recorded worker no longer matches the retirement archive\n'
     return 1
@@ -671,11 +718,14 @@ _validate_response_retirement() {
 #
 # `check` mode writes nothing: the preflight proves eligibility before any
 # mutation, and publication happens later under the response lock.
+#
+# Exit code 2 is reserved for a td lookup that could not be performed, so the
+# caller can report an infrastructural failure as itself rather than as a
+# handshake that was left incomplete.
 _retire_response_state() {
-  local mode="$3" proof_root="$2" repo_dir="$1"
-  local fleet_digest lookup=0 reason repo_name state worktree_digest
+  local mode="$3" proof_root="$2" repo_dir="$1" repo_name="$4"
+  local fleet_digest lookup=0 reason state worktree_digest
 
-  repo_name="$(basename "$repo_dir")"
   state="$(_owning_td_task_state "$repo_dir" "$repo_name")" || lookup=$?
   case "$lookup" in
     0)
@@ -686,7 +736,7 @@ _retire_response_state() {
       ;;
     2)
       printf '%s\n' "$state"
-      return 1
+      return 2
       ;;
     *)
       printf 'no owning td task is recorded\n'
@@ -704,19 +754,25 @@ _retire_response_state() {
   fi
   if [[ -e "$repo_dir/response-retirement" || -L "$repo_dir/response-retirement" ]]; then
     _validate_response_retirement "$repo_dir" "$proof_root" "$fleet_digest" \
-      "$worktree_digest"
+      "$worktree_digest" "$state"
     return
   fi
   [[ "$mode" == "publish" ]] || return 0
   _publish_response_retirement "$repo_dir" "$proof_root" "$fleet_digest" \
-    "$worktree_digest"
+    "$worktree_digest" "$state"
 }
 
 _require_retired_response_state() {
-  local mode="$3" proof_root="$2" reason repo_dir="$1" repo_name="$4"
+  local mode="$3" proof_root="$2" repo_dir="$1" repo_name="$4"
+  local reason status=0
 
-  reason="$(_retire_response_state "$repo_dir" "$proof_root" "$mode")" || \
-    _die "$repo_name has pending or incomplete response acknowledgement${reason:+: $reason}"
+  reason="$(_retire_response_state "$repo_dir" "$proof_root" "$mode" "$repo_name")" || \
+    status=$?
+  case "$status" in
+    0) return 0 ;;
+    2) _die "$reason" ;;
+    *) _die "$repo_name has pending or incomplete response acknowledgement${reason:+: $reason}" ;;
+  esac
 }
 
 # _require_response_cleanup_safe — refuse to retire fleet state while a response
@@ -763,27 +819,32 @@ _require_response_cleanup_safe() {
 }
 
 # _owning_repository_work_dir — resolve the repository that owns a fleet repo's
-# work, for use as the `--work-dir` binding of every td lookup.
+# work, for use as the `--work-dir` binding of every td lookup.  Prints the path
+# on success and the reason it could not be resolved on failure.
 #
 # Terminal classification must never depend on the directory cleanup happens to
-# run from, so the binding comes only from state the fleet itself recorded:
-#
-#   1. the worker's own recorded worktree, while it is still a git work tree
-#   2. the configured repository root for this fleet repo (project YAML)
-#
-# Returns 1 when neither is available.  The caller reports that as an
-# infrastructural lookup failure and never as "the task is not closed".
+# run from, so the binding is the configured repository root — the same verified
+# owner identity every destructive step in this file already checks — and never a
+# path the caller supplied.  The recorded worktree is not itself trusted as the
+# binding: a worktree replaced by an unrelated repository would otherwise answer
+# the lookup out of a foreign td database.  When one is recorded and still
+# present, it must belong to that configured owner or the lookup fails closed
+# here, before any pane is stopped and before any evidence is published.
 _owning_repository_work_dir() {
   local repo_dir="$1" repo_name="$2"
   local configured_root worktree
 
+  if ! configured_root="$(_configured_repo_root "$repo_name" 2>/dev/null)"; then
+    printf 'no configured repository root resolves for %s\n' "$repo_name"
+    return 1
+  fi
   worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
   if [[ -n "$worktree" && -d "$worktree" && ! -L "$worktree" ]] && \
-    git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    printf '%s\n' "$worktree"
-    return 0
+    ! _require_worktree_owner "$configured_root" "$worktree"; then
+    printf 'the recorded worktree does not belong to the configured repository %s: %s\n' \
+      "$configured_root" "$worktree"
+    return 1
   fi
-  configured_root="$(_configured_repo_root "$repo_name" 2>/dev/null)" || return 1
   printf '%s\n' "$configured_root"
 }
 
@@ -812,8 +873,8 @@ _owning_td_task_state() {
     return 2
   fi
   if ! work_dir="$(_owning_repository_work_dir "$repo_dir" "$repo_name")"; then
-    printf 'Cannot bind the owning repository for %s: neither the recorded worktree nor a configured repository root is available to resolve %s\n' \
-      "$repo_name" "$td_task"
+    printf 'Cannot bind the owning repository for %s to resolve %s: %s\n' \
+      "$repo_name" "$td_task" "${work_dir:-no repository binding is available}"
     return 2
   fi
   error_file="$(mktemp)"
@@ -1652,18 +1713,24 @@ _repo_worktree_identity() {
 # Emits the record stream for one evidence entry.  Callers must have byte-order
 # collation (LC_ALL=C) in effect: the glob expansions below are what order the
 # stream, so the identity would otherwise depend on the ambient locale.
+#
+# The optional second argument is the name the entry is recorded under, defaulting
+# to its path.  _worker_evidence_identity relies on that default because its
+# stream is persisted in cleanup-owner and replayed across retries, so its shape
+# cannot change; _named_tree_digest passes relative labels so its digests survive
+# the state being replayed from a different directory.
 _worker_evidence_records() {
-  local child entry="$1"
+  local child entry="$1" label="${2:-$1}"
 
   # Fail closed on symlinks, on anything that is neither a regular file nor a
   # directory, and on names that could forge the record stream.
-  [[ ! -L "$entry" && "$entry" != *$'\n'* ]] || return 1
+  [[ ! -L "$entry" && "$label" != *$'\n'* ]] || return 1
   if [[ -f "$entry" ]]; then
     # --no-filters keeps the record a function of raw bytes: the live copy is
     # hashed inside the owning repository, where gitattributes text/eol and clean
     # filters would otherwise apply, while the staged copy is hashed in fleet
     # state outside any repository.  Entry modes are deliberately not bound.
-    printf 'file\n%s\n' "$entry"
+    printf 'file\n%s\n' "$label"
     git hash-object --no-filters "$entry" || return 1
     return 0
   fi
@@ -1674,12 +1741,12 @@ _worker_evidence_records() {
   # Normal worker execution publishes notification ledgers and review gates as
   # directories (.sergeant-notification-acks/, .sergeant-review-gates/, ...).
   # Hash them recursively so identity stays stable and tamper-evident.
-  printf 'dir\n%s\n' "$entry"
+  printf 'dir\n%s\n' "$label"
   for child in "$entry"/* "$entry"/.[!.]* "$entry"/..?*; do
     [[ -e "$child" || -L "$child" ]] || continue
-    _worker_evidence_records "$child" || return 1
+    _worker_evidence_records "$child" "$label/${child##*/}" || return 1
   done
-  printf 'end-dir\n%s\n' "$entry"
+  printf 'end-dir\n%s\n' "$label"
 }
 
 _worker_evidence_identity() {

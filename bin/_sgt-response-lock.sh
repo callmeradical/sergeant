@@ -39,18 +39,26 @@ _sgt_response_archive_entry_complete() {
 
 # A complete entry whose recorded proof binds the same response identity,
 # gate generation, and applied status as the entry itself.
+#
+# Every field must be present and non-empty.  An empty `applied_status` beside a
+# `proof` with no `status=` line would otherwise compare equal as "" == "" and let
+# an entry that records no applied status at all pass as a complete
+# acknowledgement, so the three proof lookups must succeed rather than default to
+# empty and both entry fields are range-checked.
 _sgt_response_archive_entry_matches() {
-  local entry="$1" response_id="$2" gate_generation="$3" applied_status
+  local entry="$1" response_id="$2" gate_generation="$3"
+  local applied_status entry_generation proof_generation proof_id proof_status
 
+  [[ -n "$response_id" && "$gate_generation" =~ ^[1-9][0-9]*$ ]] || return 1
   _sgt_response_archive_entry_complete "$entry" || return 1
   applied_status="$(cat "$entry/applied_status")" || return 1
-  [[ "$(cat "$entry/gate_generation")" == "$gate_generation" ]] || return 1
-  [[ "$(_sgt_response_archive_field response_id "$entry/proof" 2>/dev/null || true)" == \
-    "$response_id" ]] || return 1
-  [[ "$(_sgt_response_archive_field gate_generation "$entry/proof" 2>/dev/null || true)" == \
-    "$gate_generation" ]] || return 1
-  [[ "$(_sgt_response_archive_field status "$entry/proof" 2>/dev/null || true)" == \
-    "$applied_status" ]]
+  entry_generation="$(cat "$entry/gate_generation")" || return 1
+  [[ -n "$applied_status" && "$entry_generation" == "$gate_generation" ]] || return 1
+  proof_id="$(_sgt_response_archive_field response_id "$entry/proof")" || return 1
+  proof_generation="$(_sgt_response_archive_field gate_generation "$entry/proof")" || return 1
+  proof_status="$(_sgt_response_archive_field status "$entry/proof")" || return 1
+  [[ "$proof_id" == "$response_id" && "$proof_generation" == "$gate_generation" && \
+    "$proof_status" == "$applied_status" ]]
 }
 
 _sgt_response_lock_acquire() {
