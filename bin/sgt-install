@@ -68,7 +68,7 @@ linked=0
 conflicts=0
 removed=0
 
-mkdir -p "$TARGET_DIR"
+"$hooks_only" || mkdir -p "$TARGET_DIR"
 
 # publish_link <source-file> <target>
 #
@@ -109,33 +109,33 @@ managed_globs="$(_sgt_install_managed_globs)" || exit 1
 deprecated_links="$(_sgt_install_deprecated_links "$ROOT_DIR" "$TARGET_DIR")" || exit 1
 
 if ! "$hooks_only"; then
-# Sweep links this checkout owns that the manifest no longer names, so renaming
-# or removing a command does not leave a dangling entry on the user's PATH.
-while IFS= read -r pattern; do
-  [[ -n "$pattern" ]] || continue
-  for stale_target in "$TARGET_DIR"/$pattern; do
-    _sgt_install_link_points_into "$stale_target" "$ROOT_DIR" || continue
-    stale_source="$(_sgt_install_resolve_link "$stale_target")"
-    [[ -f "$stale_source" ]] && continue
-    rm -f "$stale_target"
-    printf '  removed stale Sergeant link: %s\n' "$stale_target"
-    removed=$((removed + 1))
-  done
-done <<< "$managed_globs"
+  # Sweep links this checkout owns that the manifest no longer names, so renaming
+  # or removing a command does not leave a dangling entry on the user's PATH.
+  while IFS= read -r pattern; do
+    [[ -n "$pattern" ]] || continue
+    for stale_target in "$TARGET_DIR"/$pattern; do
+      _sgt_install_link_points_into "$stale_target" "$ROOT_DIR" || continue
+      stale_source="$(_sgt_install_resolve_link "$stale_target")"
+      [[ -f "$stale_source" ]] && continue
+      rm -f "$stale_target"
+      printf '  removed stale Sergeant link: %s\n' "$stale_target"
+      removed=$((removed + 1))
+    done
+  done <<< "$managed_globs"
 
-# Remove only the deprecated links this checkout previously created. The source
-# of bin/oc-inject remains for one compatibility window, but it is no longer
-# installed or activated.
-while IFS= read -r deprecated_entry; do
-  [[ -n "$deprecated_entry" ]] || continue
-  deprecated_link="${deprecated_entry%%::*}"
-  owned_target="${deprecated_entry##*::}"
-  [[ -L "$deprecated_link" ]] || continue
-  [[ "$(_sgt_install_resolve_link "$deprecated_link")" == "$owned_target" ]] || continue
-  rm "$deprecated_link"
-  printf '  removed deprecated Sergeant link: %s\n' "$deprecated_link"
-  removed=$((removed + 1))
-done <<< "$deprecated_links"
+  # Remove only the deprecated links this checkout previously created. The source
+  # of bin/oc-inject remains for one compatibility window, but it is no longer
+  # installed or activated.
+  while IFS= read -r deprecated_entry; do
+    [[ -n "$deprecated_entry" ]] || continue
+    deprecated_link="${deprecated_entry%%::*}"
+    owned_target="${deprecated_entry##*::}"
+    [[ -L "$deprecated_link" ]] || continue
+    [[ "$(_sgt_install_resolve_link "$deprecated_link")" == "$owned_target" ]] || continue
+    rm "$deprecated_link"
+    printf '  removed deprecated Sergeant link: %s\n' "$deprecated_link"
+    removed=$((removed + 1))
+  done <<< "$deprecated_links"
 fi
 
 # Install this repository's git hooks. The directory is resolved by
@@ -157,12 +157,14 @@ if [[ -d "$hooks_src" && -n "$hooks_dst" && -d "$hooks_dst" ]]; then
     case "$(_sgt_install_hook_state "$hook" "$hooks_dst")" in
       linked)
         printf '  linked hook: %s -> %s\n' "$hook_target" "$hook"
+        linked=$((linked + 1))
         ;;
       absent|stale)
         # A hook installed by another Sergeant checkout, or a broken one, is
         # Sergeant's to repoint. Worktrees share their primary's hooks directory.
         publish_link "$hook" "$hook_target"
         printf '  linked hook: %s -> %s\n' "$hook_target" "$hook"
+        linked=$((linked + 1))
         ;;
       conflict)
         # A hook the user wrote is theirs; never replace it silently.

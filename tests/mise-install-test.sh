@@ -8,6 +8,17 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
+# Hook resolution reads git configuration, so no fixture may inherit the
+# developer's global or system config; otherwise these results depend on the
+# machine the suite runs on.
+mkdir -p "$TEST_ROOT/git-home" "$TEST_ROOT/git-xdg"
+export XDG_CONFIG_HOME="$TEST_ROOT/git-xdg"
+export GIT_CONFIG_GLOBAL="$TEST_ROOT/gitconfig-global"
+export GIT_CONFIG_SYSTEM="$TEST_ROOT/gitconfig-system"
+export GIT_CONFIG_NOSYSTEM=1
+: > "$GIT_CONFIG_GLOBAL"
+: > "$GIT_CONFIG_SYSTEM"
+
 fail() {
   printf '%s\n' "$*" >&2
   exit 1

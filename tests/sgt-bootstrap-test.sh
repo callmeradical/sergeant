@@ -35,6 +35,17 @@ HOST_BASH="$(host_utility bash)"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
+# Hook resolution reads git configuration, so no fixture may inherit the
+# developer's global or system config; otherwise these results depend on the
+# machine the suite runs on.
+mkdir -p "$TEST_ROOT/git-home" "$TEST_ROOT/git-xdg"
+export XDG_CONFIG_HOME="$TEST_ROOT/git-xdg"
+export GIT_CONFIG_GLOBAL="$TEST_ROOT/gitconfig-global"
+export GIT_CONFIG_SYSTEM="$TEST_ROOT/gitconfig-system"
+export GIT_CONFIG_NOSYSTEM=1
+: > "$GIT_CONFIG_GLOBAL"
+: > "$GIT_CONFIG_SYSTEM"
+
 # Every command under test runs from a throwaway copy of this checkout, never
 # from the checkout itself. sgt-install and sgt-uninstall write to their own
 # repository's git hooks directory, so driving the real ROOT_DIR would install
@@ -1114,7 +1125,7 @@ test_dry_run_reports_the_hook_plan() {
 # The plan text and the executed command must come from one literal, so a change
 # to one cannot silently diverge from the other.
 test_dry_run_plan_matches_the_source_installer_commands() {
-  local temp_dir output
+  local temp_dir output planned_commands
   new_sandbox; temp_dir="$SANDBOX"
 
   stub_platform "$temp_dir" Linux apt-get 72
@@ -1136,12 +1147,96 @@ EOF
   HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/home/.local/bin" \
     PATH="$temp_dir/bin:$SYSTEM_PATH" "$BOOTSTRAP" >/dev/null
 
+  # Extended regex: BRE alternation with \| is a GNU sed extension that BSD sed
+  # treats literally, which would silently extract nothing and assert nothing.
+  planned_commands="$(printf '%s\n' "$output" | \
+    sed -n -E 's/^DRY-RUN: [A-Z_]+=[^ ]+ ((go install|uv tool install) .*)$/\1/p')"
+  [[ -n "$planned_commands" ]] || \
+    fail "no installer commands were extracted from the plan: $output"
+
   # Every command the plan promised must appear in what actually ran.
   while IFS= read -r planned; do
     [[ -n "$planned" ]] || continue
     grep -Fqx "$planned" "$temp_dir/installer-calls" || \
       fail "the plan promised '$planned' but the run executed: $(cat "$temp_dir/installer-calls")"
-  done <<< "$(printf '%s\n' "$output" | sed -n 's/^DRY-RUN: \(go install .*\|uv tool install .*\)$/\1/p')"
+  done <<< "$planned_commands"
+}
+
+# go install and uv write directly into the install directory, so a user file
+# there must stop the run before either installer executes.
+test_source_installed_tool_conflict_stops_the_run() {
+  local temp_dir output status
+  new_sandbox; temp_dir="$SANDBOX"
+
+  stub_platform "$temp_dir" Linux apt-get 71
+  mkdir -p "$temp_dir/home/.local/bin"
+  printf 'MY OWN NOTES\n' > "$temp_dir/home/.local/bin/td"
+  cat > "$temp_dir/bin/go" <<EOF
+#!/usr/bin/env bash
+printf 'go %s\n' "\$*" >> '$temp_dir/installer-calls'
+printf '#!/bin/sh\n' > "\$GOBIN/td"
+EOF
+  chmod +x "$temp_dir/bin/go"
+  stub_commands "$temp_dir/bin" "${BASE_TOOLS[@]}" mise node uv graphify no-mistakes opencode claude
+
+  set +e
+  output="$(HOME="$temp_dir/home" PATH="$temp_dir/bin:$SYSTEM_PATH" "$BOOTSTRAP" 2>&1)"
+  status=$?
+  set -e
+
+  [[ "$status" -eq 1 ]] || fail "expected a td conflict to stop the run, got $status: $output"
+  assert_contains "$output" "$temp_dir/home/.local/bin/td is not the required td executable"
+  assert_contains "$output" 'nothing was changed'
+  [[ ! -e "$temp_dir/installer-calls" ]] || \
+    fail "an installer ran despite a known conflict: $(cat "$temp_dir/installer-calls")"
+  [[ "$(cat "$temp_dir/home/.local/bin/td")" == 'MY OWN NOTES' ]] || \
+    fail "the user's file at the td path was overwritten"
+}
+
+test_dry_run_reports_source_installed_tool_conflicts() {
+  local temp_dir output
+  new_sandbox; temp_dir="$SANDBOX"
+
+  stub_platform "$temp_dir" Linux apt-get 70
+  mkdir -p "$temp_dir/home/.local/bin"
+  printf 'MY OWN NOTES\n' > "$temp_dir/home/.local/bin/graphify"
+  stub_commands "$temp_dir/bin" "${BASE_TOOLS[@]}" mise go node uv td no-mistakes opencode claude
+
+  output="$(HOME="$temp_dir/home" PATH="$temp_dir/bin:$SYSTEM_PATH" "$BOOTSTRAP" --dry-run)"
+
+  assert_contains "$output" "$temp_dir/home/.local/bin/graphify is not the required graphify executable"
+  assert_contains "$output" 'conflict would stop this run'
+}
+
+# The assignment has to prefix the shell that interprets the installer: in a
+# pipeline a prefix applies only to the command it precedes.
+test_mise_installer_receives_the_install_path() {
+  local temp_dir seen
+  new_sandbox; temp_dir="$SANDBOX"
+
+  stub_platform "$temp_dir" Linux apt-get 69
+  stub_commands "$temp_dir/bin" "${BASE_TOOLS[@]}" go node uv td graphify no-mistakes opencode claude
+  # Written after stub_commands, which also provides a plain curl stub. Emits an
+  # installer that records the variable it was given; the pipeline runs it under
+  # sh, which inherits HOME.
+  cat > "$temp_dir/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+cat <<'INSTALLER'
+printf '%s\n' "${MISE_INSTALL_PATH:-UNSET}" > "$HOME/installer-saw"
+INSTALLER
+EOF
+  chmod +x "$temp_dir/bin/curl"
+  stub_sergeant_install "$temp_dir/home"
+
+  set +e
+  HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/home/.local/bin" \
+    PATH="$temp_dir/bin:$SYSTEM_PATH" "$BOOTSTRAP" >/dev/null 2>&1
+  set -e
+
+  [[ -f "$temp_dir/home/installer-saw" ]] || fail 'the mise installer was never executed'
+  seen="$(cat "$temp_dir/home/installer-saw")"
+  [[ "$seen" == "$temp_dir/home/.local/bin/mise" ]] || \
+    fail "the mise installer saw MISE_INSTALL_PATH='$seen'"
 }
 
 # ── Empty manifest ────────────────────────────────────────────────────────────
@@ -1299,6 +1394,23 @@ test_install_repoints_a_hook_owned_by_another_sergeant_checkout() {
     fail "the sibling checkout's hook was not repointed"
 }
 
+test_hooks_only_reports_its_work_and_creates_no_command_directory() {
+  local temp_dir output
+  new_sandbox; temp_dir="$SANDBOX"
+  require_git "hooks-only reporting" || return 0
+
+  make_fake_checkout "$temp_dir/checkout"
+  mkdir -p "$temp_dir/home"
+
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/should-not-exist" \
+    "$temp_dir/checkout/bin/sgt-install" --hooks-only)"
+
+  assert_contains "$output" 'linked hook'
+  assert_contains "$output" 'Installed 1 entries'
+  [[ ! -e "$temp_dir/should-not-exist" ]] || \
+    fail 'sgt-install --hooks-only created the command directory'
+}
+
 # ── sgt-uninstall ─────────────────────────────────────────────────────────────
 
 test_uninstall_removes_only_what_this_checkout_installed() {
@@ -1407,11 +1519,15 @@ test_failed_mise_download_is_reported
 test_hook_conflict_stops_the_run_before_any_package_is_installed
 test_dry_run_reports_the_hook_plan
 test_dry_run_plan_matches_the_source_installer_commands
+test_source_installed_tool_conflict_stops_the_run
+test_dry_run_reports_source_installed_tool_conflicts
+test_mise_installer_receives_the_install_path
 test_empty_manifest_fails_every_mode
 test_install_links_git_hooks_into_its_own_checkout
 test_install_never_touches_hooks_of_an_unrelated_repository
 test_install_preserves_a_users_own_hook
 test_install_repoints_a_hook_owned_by_another_sergeant_checkout
+test_hooks_only_reports_its_work_and_creates_no_command_directory
 test_uninstall_removes_only_what_this_checkout_installed
 test_uninstall_removes_a_link_for_a_command_no_longer_shipped
 test_manifest_excludes_non_regular_and_deprecated_entries

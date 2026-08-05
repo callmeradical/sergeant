@@ -54,7 +54,9 @@ _sgt_install_script_root() {
     */*) dir="${script%/*}" ;;
     *) dir='.' ;;
   esac
-  (cd "$dir/.." && pwd)
+  # Physical, to match _sgt_install_resolve_link so a checkout reached through a
+  # symlink still compares equal to a link resolved from the target directory.
+  (cd -P "$dir/.." && pwd -P)
 }
 
 # _sgt_install_sources <repo-root>
@@ -148,15 +150,18 @@ _sgt_install_resolve_link() {
       resolved="$target_dir/$link_target"
       ;;
   esac
-  # Collapse the directory part through the filesystem when it exists; a dangling
-  # link keeps its literal form, which callers treat as broken either way.
+  # Resolve the directory part physically so the result matches what the kernel
+  # would follow: `cd`/`pwd` default to logical mode, which collapses `..`
+  # lexically and leaves a symlinked parent component unresolved, producing a
+  # path that never existed. A dangling link keeps its literal form, which
+  # callers treat as broken either way.
   base="${resolved##*/}"
   case "$resolved" in
     */*) dir="${resolved%/*}" ;;
     *) dir='.' ;;
   esac
   if [[ -d "$dir" ]]; then
-    resolved="$(cd "$dir" && pwd)/$base"
+    resolved="$(cd -P "$dir" && pwd -P)/$base"
   fi
   printf '%s\n' "$resolved"
 }

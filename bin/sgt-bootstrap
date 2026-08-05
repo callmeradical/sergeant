@@ -200,6 +200,16 @@ for item in "${managed_tools[@]}"; do
   fi
 done
 
+# go install and uv write straight into INSTALL_DIR, so an entry the user owns
+# there must be found before either installer runs.
+for item in "${source_installed_tools[@]}"; do
+  command_name="${item%%|*}"
+  tool_available "$command_name" && continue
+  if [[ "$(_sgt_install_managed_state "$INSTALL_DIR/$command_name" '/mise/')" == 'conflict' ]]; then
+    conflicts[${#conflicts[@]}]="$INSTALL_DIR/$command_name is not the required $command_name executable"
+  fi
+done
+
 while IFS= read -r source_file; do
   [[ -n "$source_file" ]] || continue
   if [[ "$(_sgt_install_link_state "$source_file" "$INSTALL_DIR")" == 'conflict' ]]; then
@@ -254,7 +264,10 @@ if "$dry_run"; then
     printf 'DRY-RUN: link managed executables into %s\n' "$INSTALL_DIR"
   fi
   for item in "${source_installed_tools[@]}"; do
-    tool_available "${item%%|*}" || printf 'DRY-RUN: %s\n' "${item##*|}"
+    tool_available "${item%%|*}" && continue
+    bin_env="${item#*|}"
+    bin_env="${bin_env%%|*}"
+    printf 'DRY-RUN: %s=%s %s\n' "$bin_env" "$INSTALL_DIR" "${item##*|}"
   done
   printf 'DRY-RUN: mise install\n'
   printf 'DRY-RUN: mise run install\n'
@@ -381,8 +394,10 @@ else
   # -f so an HTTP error page is never piped into sh, -L so a redirect is
   # followed rather than yielding an empty body that "succeeds".
   # Point the installer at the same directory as everything else, so the
-  # documented write set stays a single path.
-  MISE_INSTALL_PATH="$INSTALL_DIR/mise" curl -fsSL https://mise.run | sh || {
+  # documented write set stays a single path. The assignment must prefix the
+  # shell that interprets the installer: in a pipeline a prefix applies only to
+  # the command it precedes, so putting it on curl would silently do nothing.
+  curl -fsSL https://mise.run | MISE_INSTALL_PATH="$INSTALL_DIR/mise" sh || {
     printf 'sgt-bootstrap: mise installation failed; install it manually from https://mise.run\n' >&2
     exit 1
   }

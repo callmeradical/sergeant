@@ -155,6 +155,24 @@ test_link_into_a_legacy_sergeant_checkout_is_stale() {
   assert_state "$SOURCE" "$TEST_ROOT/s11" stale
 }
 
+# Logical `cd`/`pwd` collapse `..` lexically and leave a symlinked parent
+# unresolved, yielding a path the kernel would never follow. With the install
+# directory itself a symlink and a logical sibling present, a user's relative
+# link must still be recognised as theirs.
+test_relative_link_resolves_physically_through_a_symlinked_parent() {
+  local resolved expected
+  mkdir -p "$TEST_ROOT/phys/opt/bin" "$TEST_ROOT/phys/opt/mine" "$TEST_ROOT/phys/logical/mine"
+  ln -s ../opt/bin "$TEST_ROOT/phys/logical/bin"
+  printf '#!/bin/sh\n' > "$TEST_ROOT/phys/opt/mine/sgt-list"
+  ln -s ../mine/sgt-list "$TEST_ROOT/phys/logical/bin/sgt-list"
+
+  expected="$TEST_ROOT/phys/opt/mine/sgt-list"
+  resolved="$(_sgt_install_resolve_link "$TEST_ROOT/phys/logical/bin/sgt-list")"
+  [[ "$resolved" == "$expected" ]] || \
+    fail "resolved '$resolved' instead of the physical target '$expected'"
+  assert_state "$SOURCE" "$TEST_ROOT/phys/logical/bin" conflict
+}
+
 # ── _sgt_install_managed_state ────────────────────────────────────────────────
 
 assert_managed_state() {
@@ -379,6 +397,7 @@ test_directory_at_target_is_a_conflict
 test_link_to_a_directory_is_a_conflict
 test_relative_link_to_a_users_own_command_is_a_conflict
 test_link_into_a_legacy_sergeant_checkout_is_stale
+test_relative_link_resolves_physically_through_a_symlinked_parent
 test_managed_absent_target_is_absent
 test_managed_dangling_link_is_reclaimable
 test_managed_link_into_the_mise_tree_is_reclaimable
