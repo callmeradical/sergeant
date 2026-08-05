@@ -62,6 +62,143 @@ TASK_STATE="$FLEET_DIR/$TASK_ID"
 WORKTREE="$(cat "$REPO_STATE/worktree" 2>/dev/null || true)"
 PANE="$(cat "$REPO_STATE/pane" 2>/dev/null || true)"
 [[ -d "$WORKTREE" ]] || _die "Worker worktree unavailable"
+
+PRIMARY_PANE_ID_RECORD="$TASK_STATE/primary_pane_id"
+PRIMARY_PANE_IDENTITY_RECORD="$TASK_STATE/primary_pane_identity"
+PRIMARY_PANE_RELEASED_RECORD="$TASK_STATE/primary_pane_released"
+COORDINATOR_HANDOVER_LOG="$TASK_STATE/coordinator_handover.log"
+
+# Injection point for partial-publication tests.
+_validation_transition() {
+  [[ "${SGT_VALIDATE_FAIL_TRANSITION:-}" != "$1" ]]
+}
+# Prove this process really lives inside <pane-pid>'s process tree. A caller that
+# merely exports TMUX_PANE cannot satisfy this, which is what makes accepting an
+# ownership handover from a previously unseen pane safe.
+_coordinator_runs_in_pane() {
+  local target="$1" pid="$$" hops=0
+  [[ "$target" =~ ^[0-9]+$ ]] || return 1
+  while [[ "$hops" -lt 64 ]]; do
+    [[ "$pid" != "$target" ]] || return 0
+    [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || return 1
+    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+    hops=$((hops + 1))
+  done
+  return 1
+}
+# tmux prints empty fields for a pane ID it does not know, so an absent pane and
+# a dead pane are both rejected here.
+_pane_identity_is_live() {
+  local identity="$1" rest
+  [[ "${identity%%|*}" == "0" ]] || return 1
+  rest="${identity#*|}"
+  [[ -n "${rest%%|*}" ]]
+}
+_pane_identity_pid() {
+  local rest="${1#*|}"
+  rest="${rest#*|}"
+  printf '%s\n' "${rest%%|*}"
+}
+_recorded_coordinator_identity() {
+  local live="$1"
+  _sgt_read_owned_file "$PRIMARY_PANE_IDENTITY_RECORD" 2>/dev/null && return 0
+  [[ -n "$live" ]] || return 1
+  _sgt_read_matching_legacy_pane_identity "$PRIMARY_PANE_IDENTITY_RECORD" "$live" \
+    2>/dev/null
+}
+# Resolve validation ownership for this task, failing with a cause-specific
+# message. Sets CURRENT_PANE_IDENTITY, PRIMARY_PANE_ID, RECORDED_PRIMARY_IDENTITY
+# and PRIMARY_OWNER_IS_LIVE.
+_resolve_coordinator_ownership() {
+  local live_identity
+  [[ -n "${TMUX_PANE:-}" ]] || \
+    _die "Validation must run from a tmux coordinator pane," \
+      "but TMUX_PANE is not set"
+  CURRENT_PANE_IDENTITY="$(_sgt_pane_identity "$TMUX_PANE" 2>/dev/null || true)"
+  _pane_identity_is_live "$CURRENT_PANE_IDENTITY" || \
+    _die "Coordinator pane $TMUX_PANE is not a live tmux pane in this tmux server"
+  PRIMARY_PANE_ID="$(cat "$PRIMARY_PANE_ID_RECORD" 2>/dev/null || true)"
+  [[ -n "$PRIMARY_PANE_ID" ]] || \
+    _die "Dispatch did not record a coordinator pane for task $TASK_ID," \
+      "so validation ownership cannot be verified"
+  [[ "$PRIMARY_PANE_ID" =~ ^%[0-9]+$ ]] || \
+    _die "Recorded coordinator pane ID is malformed: $PRIMARY_PANE_ID"
+  live_identity="$(_sgt_pane_identity "$PRIMARY_PANE_ID" 2>/dev/null || true)"
+  RECORDED_PRIMARY_IDENTITY="$(_recorded_coordinator_identity "$live_identity" || true)"
+  if [[ -z "$RECORDED_PRIMARY_IDENTITY" ]]; then
+    if [[ -e "$PRIMARY_PANE_IDENTITY_RECORD" || -L "$PRIMARY_PANE_IDENTITY_RECORD" ]]; then
+      _die "Recorded coordinator pane identity is unreadable or unsafely owned:" \
+        "$PRIMARY_PANE_IDENTITY_RECORD"
+    fi
+    _die "A coordinator pane identity was never recorded for task $TASK_ID"
+  fi
+  PRIMARY_OWNER_IS_LIVE=false
+  if [[ "$RECORDED_PRIMARY_IDENTITY" == "$live_identity" ]] && \
+    _pane_identity_is_live "$live_identity"; then
+    PRIMARY_OWNER_IS_LIVE=true
+  fi
+}
+_append_handover_record() {
+  local reason="$1" prior_pane="$2" prior_identity="$3" line
+  [[ ! -L "$COORDINATOR_HANDOVER_LOG" ]] || return 1
+  _validation_transition handover-audit || return 1
+  # Tab-separated so a pane_start_command containing spaces stays parseable.
+  printf -v line 'at=%s\treason=%s\trepo=%s\tprior_pane=%s\tnew_pane=%s' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason" "$REPO" "$prior_pane" "$TMUX_PANE"
+  printf -v line '%s\tprior_identity=%s\tnew_identity=%s' "$line" \
+    "$prior_identity" "$CURRENT_PANE_IDENTITY"
+  # The redirection stays inside the subshell so umask applies before creation.
+  (umask 077; printf '%s\n' "$line" >> "$COORDINATOR_HANDOVER_LOG")
+}
+# Transfer ownership to this pane. Ordered so an interruption is recoverable: the
+# audit line is harmless on its own, and a half-published transfer still presents
+# the prior owner as gone, so repeating the claim completes it.
+_claim_coordinator_ownership() {
+  local reason released prior_pane="$PRIMARY_PANE_ID"
+  local prior_identity="$RECORDED_PRIMARY_IDENTITY"
+  _coordinator_runs_in_pane "$(_pane_identity_pid "$CURRENT_PANE_IDENTITY")" || \
+    _die "Claiming coordinator cannot prove it runs in pane $TMUX_PANE;" \
+      "run sgt-validate from inside the claiming pane"
+  released="$(_sgt_read_owned_file "$PRIMARY_PANE_RELEASED_RECORD" 2>/dev/null || true)"
+  if [[ -n "$released" && "$released" == "$RECORDED_PRIMARY_IDENTITY" ]]; then
+    reason=released-by-owner
+  elif $PRIMARY_OWNER_IS_LIVE; then
+    _die "Refusing handover: dispatching coordinator pane $PRIMARY_PANE_ID" \
+      "is still live and has not released ownership"
+  else
+    reason=dispatching-pane-dead
+  fi
+  _append_handover_record "$reason" "$prior_pane" "$prior_identity" || \
+    _die "Failed to record coordinator ownership handover"
+  _validation_transition handover-identity || \
+    _die "Failed to publish coordinator ownership identity"
+  _sgt_replace_owned_file "$PRIMARY_PANE_IDENTITY_RECORD" "$CURRENT_PANE_IDENTITY" || \
+    _die "Failed to publish coordinator ownership identity"
+  _validation_transition handover-pane-id || _die "Failed to publish coordinator ownership"
+  _sgt_replace_owned_file "$PRIMARY_PANE_ID_RECORD" "$TMUX_PANE" || \
+    _die "Failed to publish coordinator ownership"
+  rm -f "$PRIMARY_PANE_RELEASED_RECORD"
+  PRIMARY_PANE_ID="$TMUX_PANE"
+  RECORDED_PRIMARY_IDENTITY="$CURRENT_PANE_IDENTITY"
+  PRIMARY_OWNER_IS_LIVE=true
+  printf 'Coordinator ownership of %s transferred from %s to %s (%s).\n' \
+    "$TASK_ID" "$prior_pane" "$TMUX_PANE" "$reason"
+}
+
+# Releasing ownership is an ownership operation only: it never inspects worker
+# readiness and never launches a run.
+if $RELEASE_OWNERSHIP; then
+  _require_tmux
+  _resolve_coordinator_ownership
+  [[ "$TMUX_PANE" == "$PRIMARY_PANE_ID" && \
+    "$RECORDED_PRIMARY_IDENTITY" == "$CURRENT_PANE_IDENTITY" ]] || \
+    _die "Only the recorded coordinator pane can release ownership;" \
+      "task $TASK_ID is owned by $PRIMARY_PANE_ID"
+  _sgt_replace_owned_file "$PRIMARY_PANE_RELEASED_RECORD" "$RECORDED_PRIMARY_IDENTITY" || \
+    _die "Failed to record coordinator ownership release"
+  printf 'Coordinator ownership of %s released by pane %s.\n' "$TASK_ID" "$TMUX_PANE"
+  exit 0
+fi
 _sgt_intent_revision_matches "$TASK_STATE" "$REPO_STATE" "$WORKTREE" || \
   _die "canonical intent revision mismatch; audited human decision/new revision required"
 EXPECTED_REVISION="$(cat "$TASK_STATE/intent_revision")"
@@ -102,11 +239,24 @@ INTENT_TRANSPORT_STATUS=$?
 set -e
 [[ "$INTENT_TRANSPORT_STATUS" -eq 0 ]] || \
   _die "$(_sgt_intent_transport_diagnostic "$INTENT_TRANSPORT_STATUS")"
-PRIMARY_PANE_ID="$(cat "$TASK_STATE/primary_pane_id" 2>/dev/null || true)"
-[[ -n "${TMUX_PANE:-}" && "$TMUX_PANE" == "$PRIMARY_PANE_ID" ]] || \
-  _die "Current coordinator pane identity does not match dispatch ownership"
-_sgt_pane_identity_matches "$TMUX_PANE" "$TASK_STATE" primary_pane_identity || \
-  _die "Current coordinator pane identity does not match dispatch ownership"
+_resolve_coordinator_ownership
+if [[ "$TMUX_PANE" == "$PRIMARY_PANE_ID" ]]; then
+  if ! $PRIMARY_OWNER_IS_LIVE; then
+    $CLAIM_OWNERSHIP || \
+      _die "Dispatching coordinator pane $PRIMARY_PANE_ID was recycled and its" \
+        "recorded identity no longer matches; claim it with --claim-ownership"
+    _claim_coordinator_ownership
+  fi
+elif $CLAIM_OWNERSHIP; then
+  _claim_coordinator_ownership
+elif $PRIMARY_OWNER_IS_LIVE; then
+  _die "Coordinator pane $TMUX_PANE does not own task $TASK_ID and dispatching" \
+    "pane $PRIMARY_PANE_ID is still live; validate from it, or release it there" \
+    "with --release-ownership"
+else
+  _die "Coordinator pane $TMUX_PANE does not own task $TASK_ID and dispatching" \
+    "pane $PRIMARY_PANE_ID is gone; claim it with --claim-ownership"
+fi
 _WORKER_STATUS="$(cat "$REPO_STATE/status" 2>/dev/null || true)"
 # A done or needs_input worker has exited cleanly; its pane will be dead.
 # Allow validation to proceed without requiring a live pane for terminal workers.
@@ -181,9 +331,6 @@ _validation_legacy_checkout_matches() {
   git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
   [[ -n "$expected_head" && "$(git -C "$checkout" rev-parse HEAD 2>/dev/null || true)" == \
     "$expected_head" ]]
-}
-_validation_transition() {
-  [[ "${SGT_VALIDATE_FAIL_TRANSITION:-}" != "$1" ]]
 }
 
 VALIDATION_COMMITTED=false

@@ -109,7 +109,21 @@ case "$1" in
             : > "$CONCURRENT_DIR/pane-identity-captured"
         fi
         ;;
-      *'%11'*) printf '0|%%11|1111|111111|coordinator-command\n' ;;
+      *'%11'*)
+        case "${PRIMARY_PANE_STATE:-live}" in
+          dead) printf '1|%%11|1111|111111|coordinator-command\n' ;;
+          gone) printf '||||\n' ;;
+          recycled) printf '0|%%11|5151|515151|unrelated-command\n' ;;
+          *) printf '0|%%11|1111|111111|coordinator-command\n' ;;
+        esac
+        ;;
+      # %12 is a claiming coordinator pane whose pane_pid really is an ancestor
+      # of sgt-validate, so pane residency can be proven.
+      *'%12'*) printf '0|%%12|%s|121212|claim-coordinator-command\n' "$CLAIM_PANE_PID" ;;
+      # %13 sets TMUX_PANE without running inside that pane.
+      *'%13'*) printf '0|%%13|999999|131313|forged-coordinator-command\n' ;;
+      # %99 does not exist; tmux prints empty fields for an unknown pane ID.
+      *'%99'*) printf '||||\n' ;;
       *) printf '0|%%42|4242|123456|worker-command\n' ;;
     esac
     fi
@@ -150,6 +164,7 @@ chmod +x "$fake_bin/tmux"
 cat > "$fake_bin/ps" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
+  *'ppid='*) exec "$REAL_PS" "$@" ;;
   *'pgid='*)
     [[ "${FAIL_TRANSITION:-}" != "pane-pgid" && \
       "${FAIL_TRANSITION:-}" != "pane-reuse" ]] || exit 7
@@ -180,6 +195,10 @@ export REAL_RM="$real_rm"
 export REAL_CHMOD="$real_chmod"
 export REAL_STAT="$real_stat"
 export REAL_SHASUM="$real_shasum" VALIDATION_PATH="$validation_path"
+export REAL_PS="$(command -v ps)"
+# sgt-validate runs as a child of this test, so this PID is a real ancestor and
+# stands in for the claiming coordinator pane's pane_pid.
+export CLAIM_PANE_PID="$$"
 export CONCURRENT_DIR="$concurrent_dir" TEST_REPO_STATE="$repo_state"
 printf '%s\n' "$revision" > "$concurrent_dir/revision"
 
@@ -1092,14 +1111,189 @@ standards_review=passed
 spec_review=passed
 readiness_review=passed
 EOF
-before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
+# ── coordinator ownership: distinct diagnostics and verified handover ─────────
+# Each precondition failure must name its own cause, because each has a
+# different remedy. No failure may reach tmux or mutate ownership records.
+ownership_flags=()
+assert_ownership_failure() {
+  local expected="$1"
+  shift
+  local output status before_mutations before_id before_identity
+  # Ownership resolution legitimately reads tmux; it must never mutate it.
+  before_mutations="$(grep -Ec '^(split-window|new-window|rename-window|kill-pane)' \
+    "$TEST_ROOT/tmux.log" || true)"
+  before_id="$(cat "$fleet/task-1/primary_pane_id" 2>/dev/null || true)"
+  before_identity="$(cat "$fleet/task-1/primary_pane_identity" 2>/dev/null || true)"
+  set +e
+  output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+    SERGEANT_FLEET="$fleet" "$@" "$ROOT_DIR/bin/sgt-validate" task-1 app \
+    ${ownership_flags[@]+"${ownership_flags[@]}"} 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -ne 0 ]] || {
+    printf 'expected ownership failure %s but the launch succeeded\n' "$expected" >&2
+    exit 1
+  }
+  [[ "$output" == *"$expected"* ]] || {
+    printf 'expected ownership diagnostic %s, got: %s\n' "$expected" "$output" >&2
+    exit 1
+  }
+  [[ "$(grep -Ec '^(split-window|new-window|rename-window|kill-pane)' \
+    "$TEST_ROOT/tmux.log" || true)" == "$before_mutations" ]] || {
+    printf 'ownership failure %s mutated tmux\n' "$expected" >&2
+    exit 1
+  }
+  [[ "$(cat "$fleet/task-1/primary_pane_id" 2>/dev/null || true)" == "$before_id" && \
+    "$(cat "$fleet/task-1/primary_pane_identity" 2>/dev/null || true)" == \
+    "$before_identity" ]] || {
+    printf 'ownership failure %s mutated the ownership records\n' "$expected" >&2
+    exit 1
+  }
+  ownership_messages="$ownership_messages
+$expected"
+}
+ownership_messages=""
+
+assert_ownership_failure 'TMUX_PANE is not set' env -u TMUX_PANE
+assert_ownership_failure 'dispatching pane %11 is still live' env TMUX_PANE=%12
+assert_ownership_failure 'is gone; claim it with --claim-ownership' \
+  env TMUX_PANE=%12 PRIMARY_PANE_STATE=dead
+assert_ownership_failure 'was recycled' env TMUX_PANE=%11 PRIMARY_PANE_STATE=recycled
+
+mv "$fleet/task-1/primary_pane_id" "$TEST_ROOT/saved-primary-pane-id"
+assert_ownership_failure 'did not record a coordinator pane' env TMUX_PANE=%11
+printf 'not-a-pane\n' > "$fleet/task-1/primary_pane_id"
+assert_ownership_failure 'Recorded coordinator pane ID is malformed' env TMUX_PANE=%11
+mv "$TEST_ROOT/saved-primary-pane-id" "$fleet/task-1/primary_pane_id"
+
+mv "$fleet/task-1/primary_pane_identity" "$TEST_ROOT/saved-primary-identity"
+assert_ownership_failure 'coordinator pane identity was never recorded' env TMUX_PANE=%11
+printf 'unsafe\n' > "$fleet/task-1/primary_pane_identity"
+chmod 606 "$fleet/task-1/primary_pane_identity"
+assert_ownership_failure 'unreadable or unsafely owned' env TMUX_PANE=%11
+rm -f "$fleet/task-1/primary_pane_identity"
+mv "$TEST_ROOT/saved-primary-identity" "$fleet/task-1/primary_pane_identity"
+
+# A claim is refused while the dispatching pane is still live and unreleased, and
+# refused when the claimant cannot prove it runs in the pane it names - even
+# though the dispatching pane really is gone.
+ownership_flags=(--claim-ownership)
+assert_ownership_failure 'still live and has not released ownership' env TMUX_PANE=%12
+assert_ownership_failure 'cannot prove it runs in pane %13' \
+  env TMUX_PANE=%13 PRIMARY_PANE_STATE=gone
+assert_ownership_failure 'is not a live tmux pane' \
+  env TMUX_PANE=%99 PRIMARY_PANE_STATE=dead
+ownership_flags=()
+
+# Every diagnostic above must be distinct from every other.
+[[ "$(printf '%s\n' "$ownership_messages" | grep -c .)" == \
+  "$(printf '%s\n' "$ownership_messages" | grep . | sort -u | wc -l)" ]] || {
+  printf 'ownership diagnostics are not distinct\n' >&2
+  exit 1
+}
+
+# A verified claim over a dead dispatching pane transfers ownership, records the
+# transfer with both identities, and lets validation proceed.
+prior_identity="$(cat "$fleet/task-1/primary_pane_identity")"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%12 PRIMARY_PANE_STATE=dead SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --claim-ownership >/dev/null
+[[ "$(cat "$fleet/task-1/primary_pane_id")" == "%12" ]]
+[[ "$(cat "$fleet/task-1/primary_pane_identity")" == "0|%12|$CLAIM_PANE_PID|121212|claim-coordinator-command" ]]
+[[ "$(stat -c '%a' "$fleet/task-1/primary_pane_identity" 2>/dev/null || \
+  stat -f '%Lp' "$fleet/task-1/primary_pane_identity")" == "600" ]]
+handover_log="$fleet/task-1/coordinator_handover.log"
+[[ -f "$handover_log" ]]
+[[ "$(stat -c '%a' "$handover_log" 2>/dev/null || stat -f '%Lp' "$handover_log")" == "600" ]] || {
+  printf 'handover audit log is not owner-only\n' >&2
+  exit 1
+}
+grep -Fq "prior_pane=%11" "$handover_log"
+grep -Fq "prior_identity=$prior_identity" "$handover_log"
+grep -Fq "new_pane=%12" "$handover_log"
+grep -Fq "reason=dispatching-pane-dead" "$handover_log"
+[[ "$(cat "$repo_state/validation_status")" == "launched" ]]
+cleanup_validation_state
+
+# The new owner validates from its own pane without claiming again.
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%12 PRIMARY_PANE_STATE=dead SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+cleanup_validation_state
+[[ "$(wc -l < "$handover_log")" == "1" ]]
+
+# Restore %11 ownership for the release-path checks.
+printf '%%11\n' > "$fleet/task-1/primary_pane_id"
+bash -c 'source "$1"; _sgt_replace_owned_file "$2" "$3"' _ "$ROOT_DIR/bin/_sgt-lib.sh" \
+  "$fleet/task-1/primary_pane_identity" '0|%11|1111|111111|coordinator-command'
+
+# A live owner can hand over deliberately by releasing ownership first.
 set +e
 output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
-  TMUX_PANE=%12 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+  TMUX_PANE=%12 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --release-ownership 2>&1)"
 status=$?
 set -e
-[[ "$status" -ne 0 && "$output" == *'coordinator pane identity'* ]]
-[[ "$(wc -l < "$TEST_ROOT/tmux.log")" == "$before_lines" ]]
+[[ "$status" -ne 0 && "$output" == *'Only the recorded coordinator pane can release ownership'* ]]
+[[ ! -e "$fleet/task-1/primary_pane_released" ]]
+
+before_mutations="$(grep -Ec '^(split-window|new-window|rename-window|kill-pane)' \
+  "$TEST_ROOT/tmux.log" || true)"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --release-ownership >/dev/null
+[[ "$(cat "$fleet/task-1/primary_pane_released")" == "0|%11|1111|111111|coordinator-command" ]]
+[[ "$(grep -Ec '^(split-window|new-window|rename-window|kill-pane)' \
+  "$TEST_ROOT/tmux.log" || true)" == "$before_mutations" ]] || {
+  printf 'releasing ownership launched validation\n' >&2
+  exit 1
+}
+[[ ! -e "$repo_state/validation_status" ]]
+
+# The released owner is still live, and the claim now succeeds.
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%12 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --claim-ownership >/dev/null
+[[ "$(cat "$fleet/task-1/primary_pane_id")" == "%12" ]]
+grep -Fq 'reason=released-by-owner' "$handover_log"
+# The release is consumed, so a third pane cannot replay it.
+[[ ! -e "$fleet/task-1/primary_pane_released" ]]
+cleanup_validation_state
+
+# --claim-ownership and --release-ownership are mutually exclusive.
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%12 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --claim-ownership --release-ownership 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'mutually exclusive'* ]]
+
+# An interrupted handover leaves recoverable state: a later claim from the same
+# verified pane completes the transfer instead of stranding it.
+printf '%%11\n' > "$fleet/task-1/primary_pane_id"
+bash -c 'source "$1"; _sgt_replace_owned_file "$2" "$3"' _ "$ROOT_DIR/bin/_sgt-lib.sh" \
+  "$fleet/task-1/primary_pane_identity" '0|%11|1111|111111|coordinator-command'
+: > "$handover_log"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  SGT_VALIDATE_FAIL_TRANSITION=handover-pane-id \
+  TMUX_PANE=%12 PRIMARY_PANE_STATE=dead SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --claim-ownership 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'Failed to publish coordinator ownership'* ]]
+[[ "$(cat "$fleet/task-1/primary_pane_id")" == "%11" ]]
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%12 PRIMARY_PANE_STATE=dead SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --claim-ownership >/dev/null
+[[ "$(cat "$fleet/task-1/primary_pane_id")" == "%12" ]]
+cleanup_validation_state
+
+printf '%%11\n' > "$fleet/task-1/primary_pane_id"
+bash -c 'source "$1"; _sgt_replace_owned_file "$2" "$3"' _ "$ROOT_DIR/bin/_sgt-lib.sh" \
+  "$fleet/task-1/primary_pane_identity" '0|%11|1111|111111|coordinator-command'
+rm -f "$handover_log"
 
 cat > "$worktree/.sergeant-validation-ready" <<EOF
 intent_revision=$revision
