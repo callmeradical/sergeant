@@ -26,6 +26,15 @@ case "$1" in
   create) [[ "${2:-}" != "--help" ]] || { printf 'Usage: td create ... --description <text> --json --work-dir <path>\n'; exit 0; } ;;
 esac
 printf '%s\n' "$*" >> "$TD_LOG"
+# Capture the exact --description value so a test can feed a routed body back in
+# as the stored description and drive a real round trip.
+if [[ -n "${TD_DESC:-}" ]]; then
+  _prev=""
+  for _arg in "$@"; do
+    [[ "$_prev" == "--description" ]] && { printf '%s' "$_arg" > "$TD_DESC"; break; }
+    _prev="$_arg"
+  done
+fi
 case "$1" in
   list) printf '%s\n' "${TD_LIST_RESULT:-[]}" ;;
   create)
@@ -121,6 +130,7 @@ run_router() {
   output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
     REPO_PATH="$REPO" TD_LOG="$TEST_ROOT/td.log" TD_IDS="$TEST_ROOT/td-ids" \
     NOTIFY_LOG="$TEST_ROOT/notify.log" MV_LOG="$TEST_ROOT/mv.log" ROUTER_WORKTREE="$WORKTREE" SERGEANT_CONFIG="$TEST_ROOT/config" \
+    TD_DESC="$TEST_ROOT/td-desc" \
     TD_LIST_RESULT="${TD_LIST_RESULT:-[]}" TD_FAIL_CREATE="${TD_FAIL_CREATE:-0}" \
     "$INSTALLED_BIN/sgt-review-findings" test app \
       --input "$1" --axis "${ROUTER_AXIS:-standards}" --source code-review \
@@ -138,6 +148,10 @@ cat > "$TEST_ROOT/findings.json" <<'EOF'
   {"id":"std-3","severity":"info","disposition":"cosmetic","summary":"Heading style","evidence":"README heading is subjective","paths":["README.md"],"acceptance_criteria":"None","recommendation":"No change"}
 ]}
 EOF
+
+printf '{"findings":[
+  {"id":"std-1","severity":"error","disposition":"actionable","summary":"Unsafe cleanup","evidence":"bin/run:42 can remove another pane","paths":["bin/run"],"acceptance_criteria":"Match exact pane identity","recommendation":"Use exact identity matching"}
+]}\n' > "$TEST_ROOT/one.json"
 
 run_router "$TEST_ROOT/findings.json"
 [[ "$status" -eq 2 ]] || { printf 'blocking findings did not gate: %s\n' "$output" >&2; exit 1; }
@@ -579,28 +593,11 @@ grep -Fq 'Summary: Unsafe cleanup' "$TEST_ROOT/td.log" || {
 
 # An unchanged rerun must refresh the current revision in place, not stack a
 # duplicate revision on every routing pass.
-current_digest="$(grep -o 'Finding content digest: [0-9a-f]*' "$TEST_ROOT/td.log" | head -1 | awk '{print $4}')"
-[[ -n "$current_digest" ]] || { printf 'no finding content digest recorded\n' >&2; exit 1; }
-read -r -d '' unchanged_body <<UNCHANGED || true
-Independent review finding.
-
-Review axis: standards
-Review source: code-review
-Severity: error
-Summary: Unsafe cleanup
-Evidence: bin/run:42 can remove another pane
-Affected paths: bin/run
-Acceptance criteria: Match exact pane identity
-Recommended remediation: Use exact identity matching
-Branch: fix/review
-Head SHA: abc1234
-Parent mission: td-parent
-Originating fleet task: fleet-old
-
-Deduplication key: $stored_marker
-Finding content digest: $current_digest
-UNCHANGED
-TD_LIST_RESULT="$(existing_card "$unchanged_body")" run_router "$TEST_ROOT/findings.json"
+# A pristine card is one the router itself wrote, so capture a real one rather
+# than hand-building a body the router cannot prove it authored.
+TD_LIST_RESULT=null ROUTER_TASK_ID=fleet-old run_router "$TEST_ROOT/one.json"
+unchanged_body="$(cat "$TEST_ROOT/td-desc")"
+TD_LIST_RESULT="$(existing_card "$unchanged_body")" run_router "$TEST_ROOT/one.json"
 grep -Fq 'update td-revised' "$TEST_ROOT/td.log"
 [[ "$(grep -c 'Superseded revision (preserved)' "$TEST_ROOT/td.log")" -eq 0 ]] || {
   printf 'unchanged rerun stacked a duplicate revision\n' >&2
@@ -629,6 +626,12 @@ grep -Fq 'update td-revised' "$TEST_ROOT/td.log" || {
   printf 'closed mismatched card was reopened without a reconciliation warning: %s\n' "$output" >&2
   exit 1
 }
+# The obligation must also be durable in td, not only in the worker's stderr
+# (td-3ab1c1, td-a1452c, td-f45e3c).
+grep -Fq 'needs-reconciliation' "$TEST_ROOT/td.log" || {
+  printf 'reopened closed card carries no durable needs-reconciliation label\n' >&2
+  exit 1
+}
 grep -Fq 'bin/original:7 original evidence marker' "$TEST_ROOT/td.log" || {
   printf 'closed mismatched card lost its stored description\n' >&2
   exit 1
@@ -650,6 +653,35 @@ grep -Fq 'reopen td-revised' "$TEST_ROOT/td.log"
 grep -Fq 'update td-revised' "$TEST_ROOT/td.log"
 [[ "$output" != *'records a different finding'* ]] || {
   printf 'unchanged closed card produced a spurious reconciliation warning\n' >&2
+  exit 1
+}
+if grep -Fq 'needs-reconciliation' "$TEST_ROOT/td.log"; then
+  printf 'unchanged closed card was labelled needs-reconciliation\n' >&2
+  exit 1
+fi
+
+# td-4e009d / td-8c1e7b: a card predating content digests cannot be compared, so
+# the router must say so rather than asserting it records a different finding.
+read -r -d '' digestless_body <<DIGESTLESS || true
+Independent readiness review finding.
+
+Review axis: standards
+Review source: code-review
+
+Deduplication key: $stored_marker
+DIGESTLESS
+TD_LIST_RESULT="$(existing_card "$digestless_body" closed)" run_router "$TEST_ROOT/findings.json"
+grep -Fq 'reopen td-revised' "$TEST_ROOT/td.log"
+[[ "$output" == *'predates content digests'* ]] || {
+  printf 'a digestless closed card was not reported as uncomparable: %s\n' "$output" >&2
+  exit 1
+}
+[[ "$output" != *'records a different finding'* ]] || {
+  printf 'a digestless closed card was falsely reported as a different finding: %s\n' "$output" >&2
+  exit 1
+}
+grep -Fq 'Independent readiness review finding.' "$TEST_ROOT/td.log" || {
+  printf 'a digestless closed card lost its stored description\n' >&2
   exit 1
 }
 
@@ -678,7 +710,7 @@ Finding content digest: $std1_digest
 Update from the owning worker: partially remediated in commit deadbee; the pane
 identity check landed but the ledger invariant is still open.
 ANNOTATED
-TD_LIST_RESULT="$(existing_card "$annotated_body")" run_router "$TEST_ROOT/findings.json"
+TD_LIST_RESULT="$(existing_card "$annotated_body")" run_router "$TEST_ROOT/one.json"
 grep -Fq 'update td-revised' "$TEST_ROOT/td.log"
 grep -Fq 'partially remediated in commit deadbee' "$TEST_ROOT/td.log" || {
   printf 'unchanged rerun discarded a human annotation from the current revision\n' >&2
@@ -689,42 +721,75 @@ grep -Fq 'Superseded revision (preserved)' "$TEST_ROOT/td.log" || {
   exit 1
 }
 
-# Once the annotation has been preserved below the separator, a further unchanged
-# rerun refreshes in place again rather than stacking a revision every pass.
-read -r -d '' settled_body <<SETTLED || true
-Independent review finding.
+[[ "$output" == *'previous revision preserved'* ]] || {
+  printf 'preserving a revision was not reported on stdout: %s\n' "$output" >&2
+  exit 1
+}
 
-Review axis: standards
-Review source: code-review
-Severity: error
-Summary: Unsafe cleanup
-Evidence: bin/run:42 can remove another pane
-Affected paths: bin/run
-Acceptance criteria: Match exact pane identity
-Recommended remediation: Use exact identity matching
-Branch: fix/review
-Head SHA: abc1234
-Parent mission: td-parent
-Originating fleet task: fleet-1
-
-Deduplication key: $stored_marker
-Finding content digest: $std1_digest
-
---- Superseded revision (preserved) ---
-Independent review finding.
-
-Update from the owning worker: partially remediated in commit deadbee.
-
-Deduplication key: $stored_marker
-Finding content digest: $std1_digest
-SETTLED
-TD_LIST_RESULT="$(existing_card "$settled_body")" run_router "$TEST_ROOT/findings.json"
+# Once the annotation is preserved below the separator, a further unchanged rerun
+# refreshes in place rather than stacking a revision every pass. Driven as a real
+# round trip: the description the router just wrote becomes the stored
+# description for the next route, so the settling claim is proved by the router's
+# own output rather than a hand-written fixture (td-bdce0f).
+TD_LIST_RESULT="$(existing_card "$(cat "$TEST_ROOT/td-desc")")" run_router "$TEST_ROOT/one.json"
 [[ "$(grep -c 'Superseded revision (preserved)' "$TEST_ROOT/td.log")" -eq 1 ]] || {
-  printf 'settled annotated card stacked another revision on an unchanged rerun\n' >&2
+  printf 'a settled card stacked another revision on an unchanged rerun\n' >&2
   exit 1
 }
 grep -Fq 'partially remediated in commit deadbee' "$TEST_ROOT/td.log" || {
-  printf 'settled annotated card lost its preserved revision\n' >&2
+  printf 'a settled card lost its preserved revision\n' >&2
+  exit 1
+}
+[[ "$output" != *'previous revision preserved'* ]] || {
+  printf 'a settled unchanged rerun still reported preserving a revision: %s\n' "$output" >&2
+  exit 1
+}
+
+# td-257734 / td-c4acbc: a human edit made INLINE on a line the router owns must
+# also survive. Ownership cannot be decided from the line prefix, because every
+# such edit still begins with a router label.
+for _inline in \
+    'Severity: error (downgraded to warning by lars, see thread)' \
+    'Acceptance criteria: Match exact pane identity -- and the ledger invariant' \
+    'Independent review finding. DO NOT CLOSE, see thread'; do
+  inline_body="$(printf '%s\n' "$annotated_body" \
+    | sed "s|^Update from the owning worker.*||" \
+    | python3 -c '
+import sys
+edit = sys.argv[1]
+label = edit.split(":")[0] + ":" if ":" in edit.split(" ")[0] else "Independent review finding."
+out = []
+for line in sys.stdin.read().splitlines():
+    out.append(edit if line.startswith(label) else line)
+print("\n".join(out))' "$_inline")"
+  TD_LIST_RESULT="$(existing_card "$inline_body")" run_router "$TEST_ROOT/one.json"
+  grep -Fq "$_inline" "$TEST_ROOT/td.log" || {
+    printf 'an inline human edit on a router-owned line was discarded: %s\n' "$_inline" >&2
+    exit 1
+  }
+  grep -Fq 'Superseded revision (preserved)' "$TEST_ROOT/td.log" || {
+    printf 'an inline human edit did not force revision preservation: %s\n' "$_inline" >&2
+    exit 1
+  }
+done
+
+# A pristine router-written card whose only difference is metadata the router
+# rewrites every pass (head SHA, fleet task) must still refresh in place, or every
+# rerun would stack a revision.
+TD_LIST_RESULT=null run_router "$TEST_ROOT/one.json"
+pristine_desc="$(cat "$TEST_ROOT/td-desc")"
+TD_LIST_RESULT="$(existing_card "$pristine_desc")" ROUTER_TASK_ID=fleet-later \
+  run_router "$TEST_ROOT/one.json"
+[[ "$(grep -c 'Superseded revision (preserved)' "$TEST_ROOT/td.log")" -eq 0 ]] || {
+  printf 'a metadata-only change stacked a preserved revision\n' >&2
+  exit 1
+}
+grep -Fq 'Originating fleet task: fleet-later' "$TEST_ROOT/td.log" || {
+  printf 'a metadata-only refresh did not update the fleet task\n' >&2
+  exit 1
+}
+[[ "$output" != *'previous revision preserved'* ]] || {
+  printf 'a metadata-only refresh reported preserving a revision\n' >&2
   exit 1
 }
 
