@@ -6,6 +6,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-response-lock.sh
+source "$SCRIPT_DIR/_sgt-response-lock.sh"
 FLEET_DIR="${SERGEANT_FLEET:-$FLEET_DIR}"
 POLL_INTERVAL="${SERGEANT_WATCH_INTERVAL:-5}"
 
@@ -116,7 +118,17 @@ _sgt_dagr_advance() {
 
 _recycle_terminal_worker() {
   local repo_dir="$1"
-  local pane pane_id
+  local pane pane_id worktree_path
+
+  # Settle the accepted action lease before the pane is taken away.  Recycling
+  # used to stop the only process that could ever publish completion, which is
+  # how a completed turn became permanently unrecoverable: sgt-respond and
+  # sgt-recover then both refused the lease as prior-supervisor-owned.
+  worktree_path="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+  if [[ -n "$worktree_path" && -d "$worktree_path" ]]; then
+    _SGT_RESPONSE_LOCK_DIR=""
+    _sgt_finalize_action_lease "$repo_dir" "$worktree_path" "terminal_recycle" || true
+  fi
 
   [[ ! -s "$repo_dir/worker_recycled" ]] || return 0
   pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"

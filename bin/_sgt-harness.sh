@@ -32,9 +32,13 @@
 #     `node` for claude — so comparing it to the harness name can never succeed
 #     (GH #175).
 #
-# The probe therefore requires that the pane is alive, that the harness has
-# rendered something, and that a short settle window has elapsed since that
-# first render.  Every accepted harness uses it, including interpreted ones.
+# The probe therefore requires that the pane is alive and that the harness has
+# been observed rendering on two consecutive probes.  Requiring two consecutive
+# observations, rather than a fixed wall-clock delay, scales with whatever
+# interval the caller already polls at: one second in the worker's delivery loop,
+# milliseconds in tests.  SGT_HARNESS_SETTLE_SECONDS adds a wall-clock minimum on
+# top when a deployment wants one; it defaults to none.
+# Every accepted harness uses this probe, including interpreted ones.
 
 _SGT_HARNESS_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-bash-version.sh
@@ -163,24 +167,25 @@ _sgt_harness_require_accepted() {
   return 1
 }
 
-# First-render bookkeeping for the settle window.  A worker probes exactly one
-# pane, so a single slot is enough; switching panes restarts the window.
+# First-render bookkeeping.  A worker probes exactly one pane, so a single slot
+# is enough; switching panes restarts the observation.
 _SGT_HARNESS_READY_PANE=""
 _SGT_HARNESS_READY_SINCE=""
 
-# _sgt_harness_settle_seconds: how long a pane must have been rendering before
-# keystrokes are considered safe to deliver.
+# _sgt_harness_settle_seconds: optional wall-clock minimum on top of the
+# two-consecutive-observations rule.  Defaults to none.
 _sgt_harness_settle_seconds() {
-  local settle="${SGT_HARNESS_SETTLE_SECONDS-2}"
-  [[ "$settle" =~ ^[0-9]+$ ]] || settle=2
+  local settle="${SGT_HARNESS_SETTLE_SECONDS-0}"
+  [[ "$settle" =~ ^[0-9]+$ ]] || settle=0
   printf '%s\n' "$settle"
 }
 
 # _sgt_harness_ready_tui <pane>
-# Alive pane + rendered output + elapsed settle window.  No presentation string,
-# no harness-name comparison.
+# Alive pane + rendered output observed on two consecutive probes + any
+# configured wall-clock minimum.  No presentation string, no harness-name
+# comparison.
 _sgt_harness_ready_tui() {
-  local pane="$1" dead capture now settle
+  local pane="$1" dead capture now settle first_observation
   [[ -n "$pane" ]] || return 1
   command -v tmux >/dev/null 2>&1 || return 1
 
@@ -195,10 +200,15 @@ _sgt_harness_ready_tui() {
 
   now="$(date +%s)"
   [[ "$now" =~ ^[0-9]+$ ]] || return 1
+  first_observation=0
   if [[ "$_SGT_HARNESS_READY_PANE" != "$pane" || ! "$_SGT_HARNESS_READY_SINCE" =~ ^[0-9]+$ ]]; then
     _SGT_HARNESS_READY_PANE="$pane"
     _SGT_HARNESS_READY_SINCE="$now"
+    first_observation=1
   fi
+  # Never deliver on the very first sighting of a drawn pane: a TUI that has just
+  # painted its first frame may still be installing its input handlers.
+  (( first_observation == 0 )) || return 1
 
   settle="$(_sgt_harness_settle_seconds)"
   (( now >= _SGT_HARNESS_READY_SINCE )) || return 1

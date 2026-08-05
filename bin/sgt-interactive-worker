@@ -60,6 +60,11 @@ _drain_is_active() {
 # _do_drain: write drained state and exit cleanly. Never returns.
 _do_drain() {
   "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
+  # A durable handoff settles the accepted action lease: either it is finalized
+  # from the agent's own completion proof, or the drain is recorded as the reason
+  # it stays outstanding.  Without this a cooperatively drained worker left the
+  # lease pending forever and could never be resumed.
+  _sgt_finalize_action_lease "$REPO_STATE" "$WORKTREE" "drain_handoff" || true
   printf 'drained\n' > "$WORKTREE/.sergeant-drained"
   printf 'drained\n' > "$WORKTREE/.sergeant-status"
   printf 'drained\n' > "$REPO_STATE/status"
@@ -236,7 +241,19 @@ _finish() {
   [[ -z "${notification_pid:-}" ]] || kill "$notification_pid" 2>/dev/null || true
   [[ -z "${watch_progress_pid:-}" ]] || kill "$watch_progress_pid" 2>/dev/null || true
   [[ -z "${watch_drain_pid:-}" ]] || kill "$watch_drain_pid" 2>/dev/null || true
+  # A background loop may have been killed mid-critical-section, leaving a
+  # response lock recorded against this still-live PID.  Every loop is dead now,
+  # so reclaiming our own lock is safe — and necessary, because acquiring it
+  # would otherwise wait on our own liveness forever.
+  _sgt_response_lock_reclaim "$REPO_STATE"
   status="$(_status)"
+  # Settle the accepted action lease at the exit boundary, before any branch can
+  # return.  This covers done, failed, drained, needs_input, blocked, waiting and
+  # orphaned alike: the lease is either finalized from the agent's own completion
+  # proof or explicitly recorded as pending with the exit reason.  No branch may
+  # exit leaving it silently outstanding.  The background loops are already dead,
+  # so there is no competing writer.
+  _sgt_finalize_action_lease "$REPO_STATE" "$WORKTREE" "worker_exit:$status" || true
   case "$status" in
     done)
       if [[ ! -s "$WORKTREE/.sergeant-result" ]]; then
@@ -328,18 +345,13 @@ _deliver_notifications() {
       fi
       mkdir -p "$(dirname "$ack_path")" "$(dirname "$accept_path")" \
         "$(dirname "$complete_path")"
+      # The agent published its own completion proof for this turn.  Settle the
+      # lease through the one shared finalizer rather than a second inline
+      # implementation; it takes the response lock, re-verifies identity, lease
+      # and proof under it, and records the outcome either way.
       if [[ "$(cat "$complete_path" 2>/dev/null || true)" == "$ack_token" &&
             ! -f "$target_dir/completed" ]]; then
-        if ! _sgt_response_lock_acquire "$REPO_STATE"; then
-          sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
-          continue
-        fi
-        if [[ "$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)" == "$nonce" &&
-              "$(cat "$REPO_STATE/notifications/$notification_id/action_lease" 2>/dev/null || true)" == "$nonce" ]]; then
-          printf '%s\n' "$ack_token" > "$target_dir/completed.tmp.$$" &&
-            mv "$target_dir/completed.tmp.$$" "$target_dir/completed"
-        fi
-        _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
+        _sgt_finalize_action_lease "$REPO_STATE" "$WORKTREE" "notification_complete" || true
       fi
       # Once acceptance delivery is durable, execution belongs to the agent.
       # Keep publishing completion evidence silently without replaying the nudge.

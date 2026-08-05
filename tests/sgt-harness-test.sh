@@ -210,8 +210,29 @@ if _sgt_harness_ready definitely-not-a-harness "$interpreted_pane" 2>/dev/null; 
   exit 1
 fi
 
-# ── 8. The settle window is honoured ──────────────────────────────────────────
-# With a long settle window the same freshly-drawn pane must not be ready yet.
+# ── 8. A drawn pane is never ready on its first sighting ──────────────────────
+# A TUI that has only just painted its first frame may not have installed its
+# input handlers, so keystrokes could be dropped.
+
+tmux new-window -d -t "$TMUX_SESSION:" -n firstsight \
+  "'$TEST_ROOT/interpreted-harness'"
+firstsight_pane="$(tmux display-message -p -t "$TMUX_SESSION:firstsight" '#{pane_id}')"
+for _ in $(seq 1 300); do
+  [[ -n "$(tmux capture-pane -p -t "$firstsight_pane" 2>/dev/null | tr -d ' \n')" ]] && break
+  sleep 0.05
+done
+_SGT_HARNESS_READY_PANE=""
+_SGT_HARNESS_READY_SINCE=""
+if _sgt_harness_ready claude "$firstsight_pane"; then
+  printf 'a pane was reported ready on its first drawn sighting\n' >&2
+  exit 1
+fi
+_sgt_harness_ready claude "$firstsight_pane" || {
+  printf 'a pane drawn on two consecutive probes was still not ready\n' >&2
+  exit 1
+}
+
+# ── 9. The optional wall-clock settle minimum is honoured on top ──────────────
 
 tmux new-window -d -t "$TMUX_SESSION:" -n settle \
   "'$TEST_ROOT/interpreted-harness'"
@@ -220,6 +241,11 @@ for _ in $(seq 1 300); do
   [[ -n "$(tmux capture-pane -p -t "$settle_pane" 2>/dev/null | tr -d ' \n')" ]] && break
   sleep 0.05
 done
+_SGT_HARNESS_READY_PANE=""
+_SGT_HARNESS_READY_SINCE=""
+# First sighting registers the pane; the second would be ready but for the
+# wall-clock minimum.
+SGT_HARNESS_SETTLE_SECONDS=600 _sgt_harness_ready claude "$settle_pane" || true
 if SGT_HARNESS_SETTLE_SECONDS=600 _sgt_harness_ready claude "$settle_pane"; then
   printf 'the readiness settle window was ignored\n' >&2
   exit 1
