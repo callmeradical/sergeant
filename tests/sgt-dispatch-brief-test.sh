@@ -408,6 +408,7 @@ assert_contains "--axis <$(printf '%s' "$SGT_REVIEW_AXES_REQUIRED" | tr ' ' '|')
 assert_contains "canonical values \`$(printf '%s' "$SGT_REVIEW_SEVERITIES" | tr ' ' '|')\`"
 assert_contains "$(_sgt_review_severity_alias_table)"
 assert_contains "Only the \`error\` family publishes a blocking gate"
+assert_contains "The axis list below is authoritative"
 for axis in $SGT_REVIEW_AXES_CONDITIONAL; do
   assert_not_contains "$(_sgt_review_axis_guidance "$axis")"
 done

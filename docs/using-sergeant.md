@@ -217,7 +217,7 @@ For each repository require:
 
 - intended fixed point and diff scope;
 - repository-native tests/lint/typecheck/build;
-- independent Standards and Spec reviews;
+- independent Standards, Spec, and Readiness reviews;
 - Accessibility review for UI-facing work;
 - required CI and zero unresolved active review threads;
 - dependency and deployment order;

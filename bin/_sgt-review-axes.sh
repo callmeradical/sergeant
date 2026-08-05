@@ -26,16 +26,6 @@ _sgt_review_axes() {
   printf '%s %s\n' "$SGT_REVIEW_AXES_REQUIRED" "$SGT_REVIEW_AXES_CONDITIONAL"
 }
 
-# ERE alternation over the full axis vocabulary, anchored for direct use in [[ =~ ]].
-_sgt_review_axis_pattern() {
-  local axis pattern=""
-  # shellcheck disable=SC2046  # deliberate word splitting over the axis list
-  for axis in $(_sgt_review_axes); do
-    pattern="${pattern:+$pattern|}$axis"
-  done
-  printf '^(%s)$\n' "$pattern"
-}
-
 _sgt_review_axis_valid() {
   local candidate="$1" axis
   # shellcheck disable=SC2046  # deliberate word splitting over the axis list

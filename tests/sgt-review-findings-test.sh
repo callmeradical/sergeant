@@ -247,8 +247,8 @@ TD_LIST_RESULT="[{\"id\":\"td-closed\",\"status\":\"closed\",\"description\":\"D
 grep -Fq 'reopen td-closed' "$TEST_ROOT/td.log"
 grep -Fq 'update td-closed' "$TEST_ROOT/td.log"
 grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log"
-reopen_line="$(grep -nF 'reopen td-closed' "$TEST_ROOT/td.log" | cut -d: -f1)"
-update_line="$(grep -nF 'update td-closed' "$TEST_ROOT/td.log" | cut -d: -f1)"
+reopen_line="$(grep -nF 'reopen td-closed' "$TEST_ROOT/td.log" | head -1 | cut -d: -f1)"
+update_line="$(grep -nF 'update td-closed' "$TEST_ROOT/td.log" | tail -1 | cut -d: -f1)"
 [[ "$reopen_line" -lt "$update_line" ]]
 
 # deferred existing task must NOT have deferral cleared on rerun — preserve defer_until
@@ -1364,5 +1364,77 @@ for _entry in "${leftovers[@]}"; do
     exit 1
   }
 done
+
+# ── td-deff3d / td-3ab1c1 / td-a1452c / td-f45e3c: the reconciliation obligation
+# is durable for ANY preserved revision, not only when a closed card is reopened.
+# An open card that gains a superseded revision needs the same human attention.
+TD_LIST_RESULT=null run_router "$TEST_ROOT/one.json"
+open_pristine="$(cat "$TEST_ROOT/td-desc")"
+open_changed="$(edit_body_line "$open_pristine" 'Evidence: ' 'Evidence: edited by hand')"
+TD_LIST_RESULT="$(existing_card "$open_changed")" run_router "$TEST_ROOT/one.json"
+grep -Fq 'Superseded revision (preserved)' "$TEST_ROOT/td.log"
+grep -Fq 'needs-reconciliation' "$TEST_ROOT/td.log" || {
+  printf 'an OPEN card that gained a preserved revision carries no durable marker\n' >&2
+  exit 1
+}
+[[ "$output" == *'reconcile'* ]] || {
+  printf 'an OPEN card preservation was not reported as needing reconciliation: %s\n' "$output" >&2
+  exit 1
+}
+# A pristine refresh must not acquire the marker.
+TD_LIST_RESULT="$(existing_card "$open_pristine")" run_router "$TEST_ROOT/one.json"
+if grep -Fq 'needs-reconciliation' "$TEST_ROOT/td.log"; then
+  printf 'a pristine refresh was labelled needs-reconciliation\n' >&2
+  exit 1
+fi
+
+# td-edae2b: the label must not ride the same td update that can fail after a
+# successful reopen, or the obligation is lost in exactly that window.
+TD_LIST_RESULT="$(existing_card "$open_changed" closed)" run_router "$TEST_ROOT/one.json"
+label_line="$(grep -n 'needs-reconciliation' "$TEST_ROOT/td.log" | head -1 | cut -d: -f1)"
+update_line="$(grep -n -- '^update .*--description' "$TEST_ROOT/td.log" | head -1 | cut -d: -f1)"
+[[ -n "$label_line" && -n "$update_line" && "$label_line" -lt "$update_line" ]] || {
+  printf 'the reconciliation label was not applied before the description update\n' >&2
+  exit 1
+}
+
+# Any reopen of a closed card is reported, including the same-digest case that
+# resurrects remediated debt into the open queue.
+TD_LIST_RESULT="$(existing_card "$open_pristine" closed)" run_router "$TEST_ROOT/one.json"
+grep -Fq 'reopen td-revised' "$TEST_ROOT/td.log"
+[[ "$output" == *'reopened'* ]] || {
+  printf 'a same-digest reopen was not reported at all: %s\n' "$output" >&2
+  exit 1
+}
+
+# ── td-e56f73: a card written before provenance digests existed carries a content
+# digest but no block digest. It must be reported as first-time stamping rather
+# than as a revision that changed, and it must settle on the next route.
+legacy_block="$(printf '%s\n' "$open_pristine" | grep -v '^Revision block digest: ')"
+TD_LIST_RESULT="$(existing_card "$legacy_block")" run_router "$TEST_ROOT/one.json"
+[[ "$output" == *'provenance stamped'* ]] || {
+  printf 'a pre-provenance card was not reported as newly stamped: %s\n' "$output" >&2
+  exit 1
+}
+grep -Fq 'Revision block digest: ' "$TEST_ROOT/td.log" || {
+  printf 'a pre-provenance card was not stamped\n' >&2
+  exit 1
+}
+TD_LIST_RESULT="$(existing_card "$(cat "$TEST_ROOT/td-desc")")" run_router "$TEST_ROOT/one.json"
+[[ "$output" != *'provenance stamped'* ]] || {
+  printf 'a stamped card was reported as newly stamped again\n' >&2
+  exit 1
+}
+
+# ── td-b55433: an empty text field would emit a body line ending in a space, whose
+# byte-exact digest any store-side normalisation would then defeat. Reject it.
+printf '{"findings":[{"id":"empty-1","severity":"warning","disposition":"actionable","summary":"","evidence":"e","paths":["p"],"acceptance_criteria":"a","recommendation":"r"}]}\n' \
+  > "$TEST_ROOT/empty-field.json"
+run_router "$TEST_ROOT/empty-field.json"
+[[ "$status" -eq 2 ]] || { printf 'an empty finding field was accepted: %s\n' "$output" >&2; exit 1; }
+[[ "$output" == *'empty-1'* ]] || {
+  printf 'an empty field rejection did not name the finding: %s\n' "$output" >&2
+  exit 1
+}
 
 printf 'sgt-review-findings: ok\n'

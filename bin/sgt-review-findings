@@ -314,6 +314,11 @@ try:
         paths = finding["paths"]
         if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
             raise ValueError("paths")
+        for name in ("summary", "evidence", "acceptance_criteria", "recommendation"):
+            if not str(finding[name]).strip():
+                # An empty field renders a body line ending in a space, which makes
+                # the revision digest depend on invisible whitespace (td-b55433).
+                raise ValueError("finding %s: %s is empty" % (finding_id, name))
         summary = clean(finding["summary"], 240)
         evidence = clean(finding["evidence"], 1000)
         joined_paths = ", ".join(clean(path, 240) for path in paths) or "not provided"
@@ -568,8 +573,14 @@ items_path, marker, digest, separator, composed_path, match_path, block_label = 
 
 
 def block_digest(lines):
-    """Digest of the exact bytes of one router-written revision."""
-    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()[:32]
+    """Digest of one router-written revision, over a canonical form.
+
+    Trailing whitespace is not significant to a reader and is exactly what an
+    editor, td, or markdown tooling is liable to normalise, so digesting it would
+    make provenance defeatable by a cosmetic rewrite (td-b55433).
+    """
+    canonical = [line.rstrip() for line in lines]
+    return hashlib.sha256("\n".join(canonical).encode("utf-8")).hexdigest()[:32]
 
 
 def untouched(block):
@@ -637,6 +648,10 @@ except ValueError:
 # field about to be replaced. Treat it as a change so the old title and body are
 # preserved together (td-257734 title half).
 title_changed = bool(stored_title) and stored_title != os.environ["SGT_REVIEW_NEW_TITLE"]
+# A card written before provenance digests existed carries a content digest but no
+# block digest. Its first route stamps it, which is not the same event as a
+# revision that changed, so it is reported separately (td-e56f73).
+stamped = any(line.startswith(block_label) for line in lines[:boundary])
 if state == "same" and not title_changed and untouched(lines[:boundary]):
     # Same finding and the current block is byte-for-byte what the router wrote:
     # refresh its metadata in place and keep older revisions verbatim.
@@ -659,14 +674,17 @@ with open(composed_path, "w", encoding="utf-8") as stream:
 # not silently fold an unexpected value into the last field (td-6e564c).
 with open(match_path, "w", encoding="utf-8") as stream:
     stream.write(
-        "task_id=%s\nstatus=%s\ndefer_until=%s\nlabels=%s\ndigest_state=%s\nrevision_action=%s\n"
-        % (task_id, status, defer_until, labels, state, action)
+        "task_id=%s\nstatus=%s\ndefer_until=%s\nlabels=%s\ndigest_state=%s\n"
+        "revision_action=%s\nprovenance=%s\n"
+        % (task_id, status, defer_until, labels, state, action,
+           "present" if stamped else "new")
     )
 PY
   then
     _routing_failure "td returned invalid or duplicate finding data"
   fi
-  task_id="" existing_status="" _defer_until="" existing_labels="" digest_state="" revision_action=""
+  task_id="" existing_status="" _defer_until="" existing_labels="" digest_state=""
+  revision_action="" provenance_state=""
   if [[ -s "$match_file" ]]; then
     while IFS='=' read -r match_key match_value; do
       case "$match_key" in
@@ -676,6 +694,7 @@ PY
         labels) existing_labels="$match_value" ;;
         digest_state) digest_state="$match_value" ;;
         revision_action) revision_action="$match_value" ;;
+        provenance) provenance_state="$match_value" ;;
         *) _routing_failure "dedup match metadata is unrecognised: $match_key" ;;
       esac
     done < "$match_file"
@@ -683,25 +702,35 @@ PY
       _routing_failure "dedup match reported an unknown digest state"
     [[ "$revision_action" =~ ^(refresh|preserve)$ ]] || \
       _routing_failure "dedup match reported an unknown revision action"
+    [[ "$provenance_state" =~ ^(new|present)$ ]] || \
+      _routing_failure "dedup match reported an unknown provenance state"
     [[ -n "$task_id" ]] || _routing_failure "dedup match reported no td task"
 
-    # A closed card is never reopened SILENTLY. Its stored description is
-    # preserved verbatim as a superseded revision, the reason is reported, and a
-    # needs-reconciliation label makes the obligation durable in td for anyone who
-    # never sees this pane (td-3ab1c1, td-a1452c). Aborting the batch instead
-    # stranded every later finding, and the ordinary remediate/close/rerun loop
-    # shifts a finding's evidence and so its digest, which made the abort the
-    # common case rather than the exception (td-f36fd3).
+    # Every preserved revision leaves two accounts of one finding on one card, so
+    # the obligation to reconcile them is recorded durably in td for anyone who
+    # never sees this pane — not only when the card was closed (td-deff3d,
+    # td-3ab1c1, td-a1452c, td-f45e3c). A closed card is additionally never
+    # reopened silently: its stored description survives as a superseded revision
+    # and the reopen is always reported, including when the finding is unchanged
+    # (td-f36fd3).
     reconcile_label=""
-    if [[ "$existing_status" == "closed" && "$digest_state" != "same" ]]; then
+    reopen_note=""
+    if [[ "$revision_action" == "preserve" ]]; then
       reconcile_label=",needs-reconciliation"
-      if [[ "$digest_state" == "unknown" ]]; then
-        printf 'WARNING: %s: closed td %s matches this deduplication key but predates content digests, so sameness cannot be determined; reopening it and preserving the stored description as a superseded revision — reconcile the two revisions\n' \
-          "$finding_id" "$task_id" >&2
-      else
-        printf 'WARNING: %s: closed td %s matches this deduplication key but records a different finding; reopening it and preserving the stored description as a superseded revision — reconcile the two revisions\n' \
-          "$finding_id" "$task_id" >&2
-      fi
+    fi
+    if [[ "$existing_status" == "closed" ]]; then
+      reopen_note=", reopened"
+      case "$digest_state" in
+        same) printf 'NOTICE: %s: reopening closed td %s; the finding is unchanged and is still reported\n' \
+                "$finding_id" "$task_id" >&2 ;;
+        unknown) printf 'WARNING: %s: closed td %s matches this deduplication key but predates content digests, so sameness cannot be determined; reopening it and preserving the stored description as a superseded revision — reconcile the two revisions\n' \
+                "$finding_id" "$task_id" >&2 ;;
+        *) printf 'WARNING: %s: closed td %s matches this deduplication key but records a different finding; reopening it and preserving the stored description as a superseded revision — reconcile the two revisions\n' \
+             "$finding_id" "$task_id" >&2 ;;
+      esac
+    elif [[ -n "$reconcile_label" ]]; then
+      printf 'WARNING: %s: td %s now holds two accounts of this finding; the previous revision is preserved — reconcile the two revisions\n' \
+        "$finding_id" "$task_id" >&2
     fi
     # Name the card before mutating it, so a failure between reopen and update
     # reports the one card this pass actually touched (td-e5ac22).
@@ -716,6 +745,10 @@ PY
     # so reruns do not strip user-added labels (td-a70708, td-7ad6b2).
     merged_labels="$(printf '%s,independent-review,finding,%s%s' "$existing_labels" "$AXIS" "$reconcile_label" \
       | tr ',' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ',' | sed 's/,$//')"
+    # Apply the labels first and on their own. The description update below can
+    # fail, and the reconciliation obligation must survive that (td-edae2b).
+    td update "$task_id" --labels "$merged_labels" --work-dir "$repo_path" --json >/dev/null 2>&1 \
+      || _routing_failure "failed to label td task"
     # Reconcile the title with the revision now at the top of the body so the
     # card's title and body cannot describe different findings.
     td update "$task_id" --title "review: $summary" --priority "$priority" \
@@ -723,9 +756,15 @@ PY
       --labels "$merged_labels" --work-dir "$repo_path" --json >/dev/null 2>&1 \
       || _routing_failure "failed to update td task"
     revision_note=""
-    [[ "$revision_action" != "preserve" ]] || revision_note=", previous revision preserved"
-    printf '%s: td %s updated%s; remediation: %s\n' \
-      "$finding_id" "$task_id" "$revision_note" "$recommendation"
+    [[ "$revision_action" != "preserve" ]] || \
+      revision_note=", previous revision preserved, needs reconciliation"
+    # A card written before provenance digests existed cannot be proved pristine, so
+    # its stored revision is still preserved; report the stamping as the separate
+    # fact it is (td-e56f73).
+    provenance_note=""
+    [[ "$provenance_state" != "new" ]] || provenance_note=", provenance stamped for the first time"
+    printf '%s: td %s updated%s%s%s; remediation: %s\n' \
+      "$finding_id" "$task_id" "$reopen_note" "$revision_note" "$provenance_note" "$recommendation"
   else
     result="$(td create "review: $summary" --type task --priority "$priority" \
       --labels independent-review,finding,"$AXIS" --description "$(cat "$composed_file")" \
