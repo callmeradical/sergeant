@@ -62,6 +62,7 @@ mkdir -p "$FIXTURE_ROOT"
 cp -R "$ROOT_DIR/bin" "$FIXTURE_ROOT/bin"
 cp -R "$ROOT_DIR/scripts" "$FIXTURE_ROOT/scripts"
 cp -R "$ROOT_DIR/opencode" "$FIXTURE_ROOT/opencode"
+cp "$ROOT_DIR/mise.toml" "$FIXTURE_ROOT/mise.toml"
 if command -v git >/dev/null 2>&1; then
   git init -q "$FIXTURE_ROOT"
 fi
@@ -101,7 +102,7 @@ assert_read_only_git() {
     invocation="${invocation#* }"
     case "$invocation" in
       'config --local --path --get core.hooksPath'|'config --path --get core.hooksPath'|\
-      'rev-parse --git-common-dir') ;;
+      'rev-parse --git-common-dir'|'rev-parse --absolute-git-dir') ;;
       *) fail "$context invoked git beyond a read-only query: $invocation" ;;
     esac
   done < "$home_dir/git-invocations"
@@ -381,23 +382,26 @@ EOF
   assert_contains "$output" 'mise install yq@latest'
 }
 
-# A tool in the install directory counts only when that directory is on PATH.
-# Crediting it otherwise would report a toolchain the user cannot actually run.
-test_managed_tool_counts_only_when_the_install_dir_is_on_path() {
+# --dry-run is a plan for the install run, so it sees the install directory the
+# way that run will; --verify-only reflects the user's own shell instead. A test
+# for the latter lives with the verification cases.
+test_dry_run_sees_tools_in_the_install_directory() {
   local temp_dir output
   new_sandbox; temp_dir="$SANDBOX"
 
   stub_platform "$temp_dir" Linux apt-get 86
-  mkdir -p "$temp_dir/home/.local/bin"
+  mkdir -p "$temp_dir/instdir"
   stub_commands "$temp_dir/bin" "${BASE_TOOLS[@]}" mise go node uv td graphify no-mistakes opencode
-  stub_commands "$temp_dir/home/.local/bin" claude
+  stub_commands "$temp_dir/instdir" claude
 
-  output="$(HOME="$temp_dir/home" PATH="$temp_dir/bin" "$BOOTSTRAP" --dry-run)"
-  assert_contains "$output" 'claude@latest'
-
-  output="$(HOME="$temp_dir/home" \
-    PATH="$temp_dir/bin:$temp_dir/home/.local/bin" "$BOOTSTRAP" --dry-run)"
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/instdir" \
+    PATH="$temp_dir/bin" "$BOOTSTRAP" --dry-run)"
   assert_not_contains "$output" 'claude@latest'
+
+  rm -f "$temp_dir/instdir/claude"
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/instdir" \
+    PATH="$temp_dir/bin" "$BOOTSTRAP" --dry-run)"
+  assert_contains "$output" 'claude@latest'
 }
 
 # ── Verification ──────────────────────────────────────────────────────────────
@@ -792,8 +796,9 @@ test_install_preserves_a_users_own_symlinked_commands() {
 test_install_repoints_another_sergeant_checkout() {
   local temp_dir
   new_sandbox; temp_dir="$SANDBOX"
-  mkdir -p "$temp_dir/bin" "$temp_dir/home" "$temp_dir/other/bin"
+  mkdir -p "$temp_dir/bin" "$temp_dir/home" "$temp_dir/other/bin" "$temp_dir/other/scripts/hooks"
   cp "$ROOT_DIR/bin/_sgt-install-manifest.sh" "$temp_dir/other/bin/"
+  : > "$temp_dir/other/mise.toml"
   printf '#!/usr/bin/env bash\n' > "$temp_dir/other/bin/sgt-list"
   ln -s "$temp_dir/other/bin/sgt-list" "$temp_dir/bin/sgt-list"
 
@@ -1214,13 +1219,20 @@ test_dry_run_plan_matches_the_source_installer_commands() {
   new_sandbox; temp_dir="$SANDBOX"
 
   stub_platform "$temp_dir" Linux apt-get 72
+  # The stubs record their invocation AND produce the binary, so the run's own
+  # reconciliation of installed tools is satisfied the way it would be for real.
   cat > "$temp_dir/bin/go" <<EOF
 #!/usr/bin/env bash
 printf 'go %s\n' "\$*" >> '$temp_dir/installer-calls'
+name="\${!#}"; name="\${name##*/}"; name="\${name%@*}"
+printf '#!/bin/sh\n' > "\$GOBIN/\$name"
+chmod +x "\$GOBIN/\$name"
 EOF
   cat > "$temp_dir/bin/uv" <<EOF
 #!/usr/bin/env bash
 printf 'uv %s\n' "\$*" >> '$temp_dir/installer-calls'
+printf '#!/bin/sh\n' > "\$UV_TOOL_BIN_DIR/graphify"
+chmod +x "\$UV_TOOL_BIN_DIR/graphify"
 EOF
   chmod +x "$temp_dir/bin/go" "$temp_dir/bin/uv"
   stub_commands "$temp_dir/bin" "${BASE_TOOLS[@]}" mise node opencode claude
@@ -1398,6 +1410,85 @@ EOF
     fail "the user's file at the mise path was overwritten"
 }
 
+# A path mise reports but that is not a runnable binary must never be published
+# into the user's command directory.
+test_unusable_mise_binary_is_not_published() {
+  local temp_dir output status
+  new_sandbox; temp_dir="$SANDBOX"
+
+  stub_platform "$temp_dir" Linux apt-get 64
+  mkdir -p "$temp_dir/instdir"
+  cat > "$temp_dir/bin/mise" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == 'exec' ]]; then printf '%s\n' '$temp_dir/nowhere/bin/uv'; fi
+exit 0
+EOF
+  chmod +x "$temp_dir/bin/mise"
+  stub_commands "$temp_dir/bin" "${BASE_TOOLS[@]}" go node td graphify no-mistakes opencode claude
+
+  set +e
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/instdir" \
+    PATH="$temp_dir/bin" "$BOOTSTRAP" 2>&1)"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'an unusable mise binary was reported as installed'
+  assert_contains "$output" 'did not expose a runnable uv'
+  [[ ! -e "$temp_dir/instdir/uv" && ! -L "$temp_dir/instdir/uv" ]] || \
+    fail 'a link to an unusable binary was published'
+}
+
+# A relative install directory resolves differently for each caller, and the
+# bootstrap runs `mise run install` from the checkout, so it must be refused.
+test_relative_install_directory_is_refused() {
+  local temp_dir output status command_path
+  new_sandbox; temp_dir="$SANDBOX"
+  mkdir -p "$temp_dir/home"
+
+  for command_path in "$INSTALL" "$FIXTURE_ROOT/bin/sgt-uninstall" "$BOOTSTRAP"; do
+    set +e
+    output="$(cd "$temp_dir" && HOME="$temp_dir/home" SGT_INSTALL_DIR='mybin' \
+      "$command_path" --verify-only 2>&1)"
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || \
+      fail "${command_path##*/} accepted a relative SGT_INSTALL_DIR"
+    assert_contains "$output" 'SGT_INSTALL_DIR must be an absolute path'
+  done
+  [[ ! -e "$temp_dir/mybin" ]] || fail 'a relative install directory was created'
+}
+
+# Two checkouts installing into one directory must not race each other into a
+# hard failure, and a command must never be transiently absent.
+test_concurrent_installs_do_not_race() {
+  local temp_dir root
+  new_sandbox; temp_dir="$SANDBOX"
+
+  make_fake_checkout "$temp_dir/coA" 2>/dev/null || true
+  mkdir -p "$temp_dir/coA/bin" "$temp_dir/coB/bin" "$temp_dir/bin" "$temp_dir/home"
+  cp -R "$FIXTURE_ROOT/bin/." "$temp_dir/coA/bin/"
+  cp -R "$FIXTURE_ROOT/bin/." "$temp_dir/coB/bin/"
+  for root in coA coB; do
+    mkdir -p "$temp_dir/$root/scripts/hooks"
+    : > "$temp_dir/$root/mise.toml"
+    printf '#!/usr/bin/env bash\n' > "$temp_dir/$root/scripts/hooks/pre-push"
+  done
+
+  ( for _ in 1 2 3 4 5; do
+      HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" \
+        "$temp_dir/coA/bin/sgt-install" >/dev/null 2>>"$temp_dir/a.err" || printf 'x' >> "$temp_dir/a.fail"
+    done ) &
+  ( for _ in 1 2 3 4 5; do
+      HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" \
+        "$temp_dir/coB/bin/sgt-install" >/dev/null 2>>"$temp_dir/b.err" || printf 'x' >> "$temp_dir/b.fail"
+    done ) &
+  wait
+
+  [[ ! -e "$temp_dir/a.fail" && ! -e "$temp_dir/b.fail" ]] || \
+    fail "concurrent installs failed: $(cat "$temp_dir/a.err" "$temp_dir/b.err" 2>/dev/null)"
+  [[ -L "$temp_dir/bin/_sgt-lib.sh" ]] || fail 'a runtime helper is missing after concurrent installs'
+}
+
 # ── Empty manifest ────────────────────────────────────────────────────────────
 
 # A checkout whose bin/ cannot be resolved must fail loudly in every mode rather
@@ -1448,6 +1539,9 @@ require_git() {
 make_fake_checkout() {
   local root="$1"
   mkdir -p "$root/bin" "$root/scripts/hooks"
+  # mise.toml plus scripts/hooks is what distinguishes a checkout from any
+  # directory that merely holds a Sergeant helper, including the install dir.
+  : > "$root/mise.toml"
   cp "$ROOT_DIR/bin/_sgt-install-manifest.sh" "$root/bin/"
   cp "$ROOT_DIR/bin/sgt-install" "$root/bin/"
   cp "$ROOT_DIR/bin/sgt-uninstall" "$root/bin/"
@@ -1593,6 +1687,56 @@ test_hooks_only_fails_when_no_hooks_directory_is_owned() {
     fail 'sgt-install wrote into a global hooks directory'
 }
 
+# Sergeant's own dispatch model runs workers in linked worktrees, which share the
+# primary checkout's hooks directory. Writing there would repoint the primary's
+# hook at the worktree and leave it dangling once the worktree is removed — a
+# state git silently ignores, making the pre-push gate inert.
+test_install_from_a_worktree_leaves_the_primary_hook_alone() {
+  local temp_dir output
+  new_sandbox; temp_dir="$SANDBOX"
+  require_git "worktree hook isolation" || return 0
+
+  make_fake_checkout "$temp_dir/primary"
+  ( cd "$temp_dir/primary" && \
+    git -c user.email=t@t -c user.name=t add -A >/dev/null && \
+    git -c user.email=t@t -c user.name=t commit -q -m init && \
+    git worktree add -q "$temp_dir/wt" -b worker ) >/dev/null 2>&1
+  mkdir -p "$temp_dir/bin" "$temp_dir/home"
+
+  HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" \
+    "$temp_dir/primary/bin/sgt-install" >/dev/null
+  [[ "$(readlink "$temp_dir/primary/.git/hooks/pre-push")" == \
+     "$temp_dir/primary/scripts/hooks/pre-push" ]] || fail 'the primary hook was not installed'
+
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" \
+    "$temp_dir/wt/bin/sgt-install" 2>&1 || true)"
+
+  [[ "$(readlink "$temp_dir/primary/.git/hooks/pre-push")" == \
+     "$temp_dir/primary/scripts/hooks/pre-push" ]] || \
+    fail "installing from a worktree repointed the primary's shared hook"
+  assert_contains "$output" 'skipped hooks'
+}
+
+# A hook left dangling by a removed checkout is already inert, so uninstall must
+# be able to clear it rather than reporting it as someone else's.
+test_uninstall_reclaims_a_dangling_hook() {
+  local temp_dir output
+  new_sandbox; temp_dir="$SANDBOX"
+  require_git "dangling hook reclamation" || return 0
+
+  make_fake_checkout "$temp_dir/checkout"
+  mkdir -p "$temp_dir/bin" "$temp_dir/home"
+  ln -s "$temp_dir/removed-checkout/scripts/hooks/pre-push" \
+    "$temp_dir/checkout/.git/hooks/pre-push"
+
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" \
+    "$temp_dir/checkout/bin/sgt-uninstall" 2>&1)"
+
+  [[ ! -L "$temp_dir/checkout/.git/hooks/pre-push" ]] || \
+    fail 'a dangling Sergeant hook was left in place'
+  assert_contains "$output" 'removed dangling Sergeant hook'
+}
+
 # ── sgt-uninstall ─────────────────────────────────────────────────────────────
 
 test_uninstall_removes_only_what_this_checkout_installed() {
@@ -1692,7 +1836,7 @@ test_dry_run_plans_workspace_tools_without_changes
 test_dry_run_plans_no_global_agent_configuration
 test_dry_run_reports_existing_and_conflicting_commands
 test_python_yq_is_replaced_with_mikefarah_yq
-test_managed_tool_counts_only_when_the_install_dir_is_on_path
+test_dry_run_sees_tools_in_the_install_directory
 test_verify_only_reports_missing_without_installing
 test_verify_only_reports_wrong_command_link_as_missing
 test_verify_only_does_not_require_deprecated_oc_inject
@@ -1735,6 +1879,9 @@ test_dry_run_reports_source_installed_tool_conflicts
 test_mise_installer_receives_the_install_path
 test_rerun_is_safe_when_the_install_dir_is_not_on_path
 test_user_file_at_the_mise_path_stops_the_run
+test_unusable_mise_binary_is_not_published
+test_relative_install_directory_is_refused
+test_concurrent_installs_do_not_race
 test_empty_manifest_fails_every_mode
 test_install_links_git_hooks_into_its_own_checkout
 test_install_never_touches_hooks_of_an_unrelated_repository
@@ -1743,6 +1890,8 @@ test_install_repoints_a_hook_owned_by_another_sergeant_checkout
 test_hooks_only_reports_its_work_and_creates_no_command_directory
 test_hooks_only_fails_when_no_hooks_directory_is_owned
 test_uninstall_removes_only_what_this_checkout_installed
+test_install_from_a_worktree_leaves_the_primary_hook_alone
+test_uninstall_reclaims_a_dangling_hook
 test_uninstall_fails_when_it_cannot_reach_the_hook_it_installed
 test_uninstall_removes_a_link_for_a_command_no_longer_shipped
 test_manifest_excludes_non_regular_and_deprecated_entries

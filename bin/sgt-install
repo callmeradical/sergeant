@@ -72,15 +72,22 @@ removed=0
 
 # publish_link <source-file> <target>
 #
-# Replace <target> with a link to <source-file>. `rm -f` removes a symlink
-# itself and never follows it, so an existing link pointing at a directory is
-# replaced rather than being used as a destination the way `ln -sf` would.
+# Replace <target> with a link to <source-file>, atomically. The link is created
+# under a temporary name and renamed into place: `rename` over an existing
+# symlink is atomic, so a concurrent run never observes the target missing and
+# never races an `rm` against an `ln`. Renaming also never follows a symlink that
+# points at a directory, which is how `ln -sf` would write inside it instead.
 publish_link() {
-  local source_file="$1" target="$2"
-  rm -f "$target"
-  ln -s "$source_file" "$target"
-  [[ "$(readlink "$target")" == "$source_file" ]] || {
-    printf 'sgt-install: failed to publish %s -> %s\n' "$target" "$source_file" >&2
+  local source_file="$1" target="$2" staged="$2.sgt-publish.$$"
+  rm -f "$staged"
+  ln -s "$source_file" "$staged" || return 1
+  mv -f "$staged" "$target" || { rm -f "$staged"; return 1; }
+  # Only that a link now exists is asserted, not where it points: a concurrent
+  # install from another checkout may legitimately have won the rename, and both
+  # runs converge because each publishes atomically. mv's exit status already
+  # proves this run's link was put in place.
+  [[ -L "$target" ]] || {
+    printf 'sgt-install: %s is not a link after publishing %s\n' "$target" "$source_file" >&2
     return 1
   }
 }
@@ -144,7 +151,7 @@ hooks_dst="$(_sgt_install_hooks_dir "$ROOT_DIR" || true)"
 hooks_unresolved=false
 if [[ -d "$hooks_src" && -z "$hooks_dst" ]]; then
   hooks_unresolved=true
-  printf '  skipped hooks: no git hooks directory this checkout owns (a wider-scope core.hooksPath redirects git elsewhere)\n' >&2
+  printf '  skipped hooks: no git hooks directory this checkout owns (a linked worktree shares its primary checkout, or a wider-scope core.hooksPath redirects git elsewhere)\n' >&2
 elif [[ -d "$hooks_src" && ! -d "$hooks_dst" ]]; then
   mkdir -p "$hooks_dst"
 fi

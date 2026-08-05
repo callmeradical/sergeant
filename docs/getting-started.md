@@ -48,8 +48,12 @@ repoints the commands at that clone. Conflicts are reported before the first
 package is installed, so a run that cannot finish declines without changing
 anything.
 
-Sergeant writes to the command directory (`SGT_INSTALL_DIR`, default
-`~/.local/bin`) and to this repository, whose git hooks it installs. It writes
+Sergeant writes to the command directory (`SGT_INSTALL_DIR`, which must be an
+absolute path and defaults to `~/.local/bin`) and to this repository, whose git
+hooks it installs. Run it from a primary checkout: a linked `git worktree` shares
+its primary's hooks directory, so installing from one reports `skipped hooks`
+rather than repointing the primary's hook at a worktree that may later be
+removed. It writes
 nothing under `~/.config/opencode`, `~/.claude`, or `~/.agents` except to remove
 the deprecated `oc-inject` plugin link an older checkout created. The
 third-party installers it invokes (`mise`, `go`, `uv`) manage their own data

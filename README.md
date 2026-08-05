@@ -83,7 +83,10 @@ Python package of the same name, and `git config` / `git rev-parse` to locate th
 git hooks directory.
 
 Sergeant itself writes to two places: the command directory (`SGT_INSTALL_DIR`,
-default `~/.local/bin`) and this repository, whose git hooks it installs. It
+which must be an absolute path and defaults to `~/.local/bin`) and this
+repository, whose git hooks it installs. Install from a primary checkout: a
+linked `git worktree` shares its primary's hooks directory, so installing from
+one skips hooks instead of repointing the primary's. It
 writes nothing under `~/.config/opencode`, `~/.claude`, or `~/.agents` except to
 remove the deprecated `oc-inject` plugin link an older checkout created —
 Sergeant's skills are discovered from the repository itself, so no global skill

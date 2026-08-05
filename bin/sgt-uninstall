@@ -91,7 +91,14 @@ else
       [[ -f "$hook" ]] || continue
       hook_target="$hooks_dst/${hook##*/}"
       [[ -L "$hook_target" ]] || continue
-      if [[ "$(_sgt_install_resolve_link "$hook_target")" == "$hook" ]]; then
+      hook_link="$(_sgt_install_resolve_link "$hook_target")"
+      if [[ ! -e "$hook_link" ]] && _sgt_install_is_sergeant_hook_path "$hook_link"; then
+        # A hook left dangling by a removed checkout is silently ignored by git,
+        # so the gate is already inert; reclaiming it is the only useful action.
+        rm "$hook_target"
+        printf '  removed dangling Sergeant hook: %s\n' "$hook_target"
+        removed=$((removed + 1))
+      elif [[ "$hook_link" == "$hook" ]]; then
         rm "$hook_target"
         printf '  removed hook: %s\n' "$hook_target"
         removed=$((removed + 1))
