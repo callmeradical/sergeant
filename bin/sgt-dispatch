@@ -615,17 +615,18 @@ for rname in "${TARGET_REPOS[@]}"; do
       _info "already exists — reusing"
     else
       if git -C "$repo_path" show-ref --verify --quiet "refs/heads/$BRANCH" 2>/dev/null; then
-        # Guard: if the existing branch has committed work not pushed to origin,
-        # a prior interrupted dispatch may have done real work.  Block
-        # re-dispatch until the coordinator reconciles, to prevent duplicate or
-        # lost effort.  Falls back to showing all local commits when the branch
-        # does not yet exist in origin.
-        prior_commits="$(git -C "$repo_path" log --oneline \
-          "refs/heads/$BRANCH" --not "refs/remotes/origin/$BRANCH" 2>/dev/null \
-          || git -C "$repo_path" log --oneline "refs/heads/$BRANCH" 2>/dev/null \
-          || true)"
+        # Guard: if the existing branch carries committed work that is not
+        # reachable from any remote, a prior interrupted dispatch may have done
+        # real work.  Block re-dispatch until the coordinator reconciles, to
+        # prevent duplicate or lost effort.
+        #
+        # Reachability from ANY remote is the test.  Comparing against only
+        # "refs/remotes/origin/$BRANCH" used to make this fire for every branch
+        # that had never been pushed, which blocked resuming preserved work in
+        # any repository the operator cannot push to (td-7f3a9a).
+        prior_commits="$(_sgt_branch_unpushed_commits "$repo_path" "$BRANCH")"
         if [[ -n "$prior_commits" ]]; then
-          _die "Branch $BRANCH already has committed work not in any remote; reconcile or delete the branch before re-dispatching. Commits found:
+          _die "Branch $BRANCH already has committed work not reachable from any remote; reconcile or delete the branch before re-dispatching. Commits found:
 $prior_commits"
         fi
         git -C "$repo_path" worktree add "$worktree_path" "$BRANCH" 2>&1 | sed 's/^/    /'
