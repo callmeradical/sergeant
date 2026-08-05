@@ -4,8 +4,11 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TEST_ROOT="$(mktemp -d)"
+# Physical paths throughout: the manifest resolves link targets physically, so a
+# fixture built from a logical path (macOS puts TMPDIR under /var/folders, and
+# /var is a symlink to private/var) would never compare equal.
+ROOT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+TEST_ROOT="$(cd -P "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 # Hook resolution reads git configuration, so no fixture may inherit the

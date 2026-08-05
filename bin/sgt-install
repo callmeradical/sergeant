@@ -106,7 +106,7 @@ while IFS= read -r source_file; do
 done <<< "$sources"
 
 managed_globs="$(_sgt_install_managed_globs)" || exit 1
-deprecated_links="$(_sgt_install_deprecated_links "$ROOT_DIR" "$TARGET_DIR")" || exit 1
+deprecated_links="$(_sgt_install_owned_deprecated_links "$ROOT_DIR" "$TARGET_DIR")" || exit 1
 
 if ! "$hooks_only"; then
   # Sweep links this checkout owns that the manifest no longer names, so renaming
@@ -126,12 +126,8 @@ if ! "$hooks_only"; then
   # Remove only the deprecated links this checkout previously created. The source
   # of bin/oc-inject remains for one compatibility window, but it is no longer
   # installed or activated.
-  while IFS= read -r deprecated_entry; do
-    [[ -n "$deprecated_entry" ]] || continue
-    deprecated_link="${deprecated_entry%%::*}"
-    owned_target="${deprecated_entry##*::}"
-    [[ -L "$deprecated_link" ]] || continue
-    [[ "$(_sgt_install_resolve_link "$deprecated_link")" == "$owned_target" ]] || continue
+  while IFS= read -r deprecated_link; do
+    [[ -n "$deprecated_link" ]] || continue
     rm "$deprecated_link"
     printf '  removed deprecated Sergeant link: %s\n' "$deprecated_link"
     removed=$((removed + 1))
@@ -145,8 +141,10 @@ fi
 # into whatever unrelated repository the user happens to be in.
 hooks_src="$ROOT_DIR/scripts/hooks"
 hooks_dst="$(_sgt_install_hooks_dir "$ROOT_DIR" || true)"
+hooks_unresolved=false
 if [[ -d "$hooks_src" && -z "$hooks_dst" ]]; then
-  printf '  skipped hooks: no git hooks directory resolved for %s\n' "$ROOT_DIR"
+  hooks_unresolved=true
+  printf '  skipped hooks: no git hooks directory this checkout owns (a wider-scope core.hooksPath redirects git elsewhere)\n' >&2
 elif [[ -d "$hooks_src" && ! -d "$hooks_dst" ]]; then
   mkdir -p "$hooks_dst"
 fi
@@ -190,5 +188,13 @@ fi
 if ((conflicts > 0)); then
   printf '\nsgt-install: %d entries were preserved and are NOT installed; resolve them by hand.\n' \
     "$conflicts" >&2
+  exit 1
+fi
+
+# When hooks are the requested work, failing to resolve their directory is the
+# whole outcome, not a detail to skip past.
+if "$hooks_only" && "$hooks_unresolved"; then
+  printf 'sgt-install: no git hooks were installed; unset core.hooksPath for this repository or install %s by hand.\n' \
+    "$hooks_src" >&2
   exit 1
 fi

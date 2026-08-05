@@ -48,7 +48,7 @@ removed=0
 kept=0
 
 managed_globs="$(_sgt_install_managed_globs)" || exit 1
-deprecated_links="$(_sgt_install_deprecated_links "$ROOT_DIR" "$TARGET_DIR")" || exit 1
+deprecated_links="$(_sgt_install_owned_deprecated_links "$ROOT_DIR" "$TARGET_DIR")" || exit 1
 
 if ! "$hooks_only"; then
   # Sweep every name this checkout claims, not just the ones it currently ships.
@@ -69,12 +69,8 @@ if ! "$hooks_only"; then
 
   # Deprecated links this checkout may still own are cleaned up here too, so an
   # uninstall does not leave an oc-inject link behind.
-  while IFS= read -r deprecated_entry; do
-    [[ -n "$deprecated_entry" ]] || continue
-    deprecated_link="${deprecated_entry%%::*}"
-    owned_target="${deprecated_entry##*::}"
-    [[ -L "$deprecated_link" ]] || continue
-    [[ "$(_sgt_install_resolve_link "$deprecated_link")" == "$owned_target" ]] || continue
+  while IFS= read -r deprecated_link; do
+    [[ -n "$deprecated_link" ]] || continue
     rm "$deprecated_link"
     printf '  removed: %s\n' "$deprecated_link"
     removed=$((removed + 1))
@@ -83,7 +79,10 @@ fi
 
 # Remove the git hooks sgt-install created, so uninstall really is its inverse.
 hooks_src="$ROOT_DIR/scripts/hooks"
-if hooks_dst="$(_sgt_install_hooks_dir "$ROOT_DIR")"; then
+if ! hooks_dst="$(_sgt_install_hooks_dir "$ROOT_DIR")"; then
+  [[ -d "$hooks_src" ]] && \
+    printf '  skipped hooks: no git hooks directory this checkout owns\n'
+else
   if [[ -d "$hooks_src" && -d "$hooks_dst" ]]; then
     for hook in "$hooks_src"/*; do
       [[ -f "$hook" ]] || continue

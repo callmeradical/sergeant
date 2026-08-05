@@ -11,9 +11,11 @@
 #                        executables this command installs (default ~/.local/bin)
 #   SGT_BOOTSTRAP_EUID   Override the effective UID used for sudo decisions
 #
-# Supported platforms: macOS with Homebrew, and Linux with apt-get. Any other
-# platform, or a supported platform without its package manager, fails before
-# making a change.
+# Installing platform packages requires macOS with Homebrew or Linux with
+# apt-get. Anywhere else, install mode reports the packages as a manual step and
+# stops before making a change, while --dry-run and --verify-only still work:
+# docs/getting-started.md and the sergeant-setup skill both send users on an
+# unsupported platform to --verify-only to find out what they are missing.
 #
 # --dry-run and --verify-only run no package manager, no installer, and no agent
 # harness, so they cannot create state in a harness's configuration directory as
@@ -49,7 +51,6 @@ ROOT_DIR="$(_sgt_install_script_root "$_self")"
 # One directory receives both the Sergeant command links and every executable
 # this command installs, so the documented write set is a single path.
 INSTALL_DIR="$(_sgt_install_target_dir)"
-export PATH="$INSTALL_DIR:$PATH"
 
 usage() {
   cat <<'EOF'
@@ -156,25 +157,32 @@ sources="$(_sgt_install_sources "$ROOT_DIR")" || exit 1
 
 # ── Platform ──────────────────────────────────────────────────────────────────
 
+# A package manager is required to INSTALL packages, not to inspect the machine.
+# The read-only modes must work everywhere, because docs/getting-started.md and
+# the sergeant-setup skill both point users on an unsupported platform at
+# `--verify-only` to find out what they are missing.
 platform="$(uname -s)"
+packages_automatable=true
+platform_blocker=''
 case "$platform" in
   Linux)
-    tool_available apt-get || {
-      printf 'sgt-bootstrap: Linux requires an apt-compatible package manager (apt-get)\n' >&2
-      exit 1
-    }
     platform_label='Linux (apt)'
+    if ! tool_available apt-get; then
+      packages_automatable=false
+      platform_blocker='Linux requires an apt-compatible package manager (apt-get)'
+    fi
     ;;
   Darwin)
-    tool_available brew || {
-      printf 'sgt-bootstrap: macOS requires Homebrew: https://brew.sh\n' >&2
-      exit 1
-    }
     platform_label='macOS (Homebrew)'
+    if ! tool_available brew; then
+      packages_automatable=false
+      platform_blocker='macOS requires Homebrew: https://brew.sh'
+    fi
     ;;
   *)
-    printf 'sgt-bootstrap: unsupported platform: %s\n' "$platform" >&2
-    exit 1
+    platform_label="$platform (no supported package manager)"
+    packages_automatable=false
+    platform_blocker="unsupported platform for automated package installation: $platform"
     ;;
 esac
 printf 'Platform: %s\n' "$platform_label"
@@ -241,7 +249,14 @@ fi
 # ── Mode: dry run ─────────────────────────────────────────────────────────────
 
 if "$dry_run"; then
-  if ((${#packages[@]})); then
+  if ! "$packages_automatable"; then
+    if ((${#packages[@]})); then
+      printf 'MANUAL: install these platform packages yourself (%s): %s\n' \
+        "$platform_blocker" "${packages[*]}"
+    else
+      printf 'OK: platform packages already installed\n'
+    fi
+  elif ((${#packages[@]})); then
     if [[ "$platform" == 'Linux' ]]; then
       apt_prefix='apt-get'
       "$sudo_required" && apt_prefix='sudo -n DEBIAN_FRONTEND=noninteractive apt-get'
@@ -308,6 +323,11 @@ fi
 if "$verify_only"; then
   verify_failed=false
 
+  if ! "$packages_automatable"; then
+    printf 'MANUAL: %s; install platform packages with your own package manager.\n' \
+      "$platform_blocker"
+  fi
+
   for command_name in "${required_commands[@]}"; do
     if tool_available "$command_name"; then
       printf 'OK: %s\n' "$command_name"
@@ -348,6 +368,12 @@ if "$verify_only"; then
     fi
   done <<< "$sources"
 
+  # Sergeant's commands are only usable once the install directory is on PATH,
+  # so a complete installation the shell cannot reach is still worth reporting.
+  if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+    printf 'WARNING: %s is not on your PATH; add it before using these commands.\n' \
+      "$INSTALL_DIR"
+  fi
   report_manual_authentication 'MANUAL:'
 
   "$verify_failed" && exit 1
@@ -360,6 +386,12 @@ fi
 # Decline before mutating anything. Every conflict above was detected from state
 # that is knowable without installing a package, so a run that cannot finish
 # never starts.
+if ! "$packages_automatable" && ((${#packages[@]})); then
+  printf 'sgt-bootstrap: %s; install these packages yourself and rerun: %s\n' \
+    "$platform_blocker" "${packages[*]}" >&2
+  exit 1
+fi
+
 if ((${#conflicts[@]})); then
   for conflict in "${conflicts[@]}"; do
     printf 'CONFLICT: %s; preserved for manual resolution.\n' "$conflict" >&2
@@ -473,6 +505,23 @@ while IFS= read -r source_file; do
       ;;
   esac
 done <<< "$sources"
+
+# A hooks directory that could not be resolved was already reported in the plan,
+# so it is a skip rather than an installation error. A hook that was planned and
+# still is not linked afterwards is a real failure.
+if [[ -z "$hooks_dst" ]]; then
+  [[ -d "$ROOT_DIR/scripts/hooks" ]] && \
+    printf 'MANUAL: no git hooks directory this checkout owns; install %s yourself if you want the pre-push gate.\n' \
+      "$ROOT_DIR/scripts/hooks"
+else
+  for hook in "$ROOT_DIR"/scripts/hooks/*; do
+    [[ -f "$hook" ]] || continue
+    if [[ "$(_sgt_install_hook_state "$hook" "$hooks_dst")" != 'linked' ]]; then
+      printf 'NOT INSTALLED: git hook %s at %s.\n' "${hook##*/}" "$hooks_dst" >&2
+      install_failed=true
+    fi
+  done
+fi
 
 report_manual_authentication 'MANUAL:'
 

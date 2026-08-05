@@ -53,7 +53,9 @@ directories.
 It does not automate or probe any login; follow the `MANUAL:` actions it reports.
 
 On any other platform, or to check an existing installation, verify without
-changing anything. Neither read-only mode runs a package manager, an installer,
+changing anything. Both read-only modes work everywhere: on a platform without a
+supported package manager they report the platform packages as a `MANUAL:` step
+and still verify everything else. Neither runs a package manager, an installer,
 or an agent harness; the only third-party command either runs is `yq --version`,
 to tell Mike Farah's `yq` from the Python package of the same name:
 
