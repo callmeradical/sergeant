@@ -19,6 +19,7 @@ export XDG_CONFIG_HOME="$TEST_ROOT/git-xdg"
 export GIT_CONFIG_GLOBAL="$TEST_ROOT/gitconfig-global"
 export GIT_CONFIG_SYSTEM="$TEST_ROOT/gitconfig-system"
 export GIT_CONFIG_NOSYSTEM=1
+unset SGT_INSTALL_DIR
 : > "$GIT_CONFIG_GLOBAL"
 : > "$GIT_CONFIG_SYSTEM"
 

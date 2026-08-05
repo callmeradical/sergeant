@@ -46,6 +46,9 @@ export XDG_CONFIG_HOME="$TEST_ROOT/git-xdg"
 export GIT_CONFIG_GLOBAL="$TEST_ROOT/gitconfig-global"
 export GIT_CONFIG_SYSTEM="$TEST_ROOT/gitconfig-system"
 export GIT_CONFIG_NOSYSTEM=1
+# SGT_INSTALL_DIR is user-settable, and install mode writes to it. Leaving it
+# inherited would aim the suite's writes at the developer's own command directory.
+unset SGT_INSTALL_DIR
 : > "$GIT_CONFIG_GLOBAL"
 : > "$GIT_CONFIG_SYSTEM"
 
@@ -142,7 +145,7 @@ stub_platform() {
   # Real coreutils the bootstrap genuinely shells out to. Stubbing the platform
   # must not hide a missing dependency, so this is the actual binary.
   local utility
-  for utility in readlink mkdir rm ln env; do
+  for utility in readlink mkdir rm ln env chmod cp; do
     [[ -e "$temp_dir/bin/$utility" ]] && continue
     ln -s "$(host_utility "$utility")" "$temp_dir/bin/$utility"
   done
@@ -1293,6 +1296,80 @@ EOF
     fail "the mise installer saw MISE_INSTALL_PATH='$seen'"
 }
 
+# Rerun safety with the install directory off PATH: the second run must
+# recognise the executables the first run wrote instead of declining on them.
+test_rerun_is_safe_when_the_install_dir_is_not_on_path() {
+  local temp_dir first second status
+  new_sandbox; temp_dir="$SANDBOX"
+
+  stub_platform "$temp_dir" Linux apt-get 67
+  mkdir -p "$temp_dir/instdir" "$temp_dir/uvtools/graphifyy/bin"
+  cat > "$temp_dir/bin/go" <<'EOF'
+#!/usr/bin/env bash
+name="${!#}"; name="${name##*/}"; name="${name%@*}"
+printf '#!/bin/sh
+' > "$GOBIN/${name##*/}"
+chmod +x "$GOBIN/${name##*/}"
+EOF
+  cat > "$temp_dir/bin/uv" <<EOF
+#!/usr/bin/env bash
+printf '#!/bin/sh\n' > '$temp_dir/uvtools/graphifyy/bin/graphify'
+chmod +x '$temp_dir/uvtools/graphifyy/bin/graphify'
+ln -sfn '$temp_dir/uvtools/graphifyy/bin/graphify' "\$UV_TOOL_BIN_DIR/graphify"
+EOF
+  chmod +x "$temp_dir/bin/go" "$temp_dir/bin/uv"
+  stub_commands "$temp_dir/bin" "${BASE_TOOLS[@]}" mise node opencode claude
+  stub_sergeant_install "$temp_dir/home"
+  # The Sergeant command links live in the install dir the fixture set up.
+  rm -rf "$temp_dir/instdir"; cp -R "$temp_dir/home/.local/bin" "$temp_dir/instdir"
+
+  set +e
+  first="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/instdir" \
+    PATH="$temp_dir/bin" "$BOOTSTRAP" 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -eq 0 ]] || fail "first run failed: $first"
+  [[ -x "$temp_dir/instdir/td" ]] || fail 'the first run did not install td'
+
+  set +e
+  second="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/instdir" \
+    PATH="$temp_dir/bin" "$BOOTSTRAP" 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -eq 0 ]] || fail "the rerun declined its own installation: $second"
+  assert_not_contains "$second" 'CONFLICT'
+  assert_not_contains "$second" 'nothing was changed'
+}
+
+# mise's own path obeys the same preserve-and-decline rule as every other path
+# this command writes.
+test_user_file_at_the_mise_path_stops_the_run() {
+  local temp_dir output status
+  new_sandbox; temp_dir="$SANDBOX"
+
+  stub_platform "$temp_dir" Linux apt-get 66
+  mkdir -p "$temp_dir/home/.local/bin"
+  printf 'MY OWN MISE WRAPPER\n' > "$temp_dir/home/.local/bin/mise"
+  cat > "$temp_dir/bin/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl\n' >> '$temp_dir/curl-calls'
+EOF
+  chmod +x "$temp_dir/bin/curl"
+  stub_commands "$temp_dir/bin" git gh tmux jq shellcheck python3 lsof yq \
+    go node uv td graphify no-mistakes opencode claude
+
+  set +e
+  output="$(HOME="$temp_dir/home" PATH="$temp_dir/bin:$SYSTEM_PATH" "$BOOTSTRAP" 2>&1)"
+  status=$?
+  set -e
+
+  [[ "$status" -eq 1 ]] || fail "expected a mise conflict to stop the run, got $status: $output"
+  assert_contains "$output" "$temp_dir/home/.local/bin/mise is not the required mise executable"
+  [[ ! -e "$temp_dir/curl-calls" ]] || fail 'the mise installer ran despite a known conflict'
+  [[ "$(cat "$temp_dir/home/.local/bin/mise")" == 'MY OWN MISE WRAPPER' ]] || \
+    fail "the user's file at the mise path was overwritten"
+}
+
 # ── Empty manifest ────────────────────────────────────────────────────────────
 
 # A checkout whose bin/ cannot be resolved must fail loudly in every mode rather
@@ -1518,6 +1595,34 @@ test_uninstall_removes_only_what_this_checkout_installed() {
   assert_contains "$output" 'removed hook'
 }
 
+# A hook this checkout installed can still be in place while the hooks directory
+# has become unresolvable, so reporting a clean removal would be false.
+test_uninstall_fails_when_it_cannot_reach_the_hook_it_installed() {
+  local temp_dir output status
+  new_sandbox; temp_dir="$SANDBOX"
+  require_git "uninstall hook reachability" || return 0
+
+  make_fake_checkout "$temp_dir/checkout"
+  mkdir -p "$temp_dir/bin" "$temp_dir/home"
+  HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" \
+    "$temp_dir/checkout/bin/sgt-install" >/dev/null
+  [[ -L "$temp_dir/checkout/.git/hooks/pre-push" ]] || fail 'the fixture hook was not installed'
+
+  printf '[core]\n\thooksPath = %s\n' "$temp_dir/global-hooks" > "$GIT_CONFIG_GLOBAL"
+  set +e
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" \
+    "$temp_dir/checkout/bin/sgt-uninstall" 2>&1)"
+  status=$?
+  set -e
+  : > "$GIT_CONFIG_GLOBAL"
+
+  [[ "$status" -ne 0 ]] || \
+    fail 'sgt-uninstall reported a clean removal while a hook it installed remained'
+  assert_contains "$output" 'could not resolve a git hooks directory'
+  [[ -L "$temp_dir/checkout/.git/hooks/pre-push" ]] || \
+    fail 'the hook was removed despite the unresolvable hooks directory'
+}
+
 test_uninstall_removes_a_link_for_a_command_no_longer_shipped() {
   local temp_dir
   new_sandbox; temp_dir="$SANDBOX"
@@ -1600,6 +1705,8 @@ test_dry_run_plan_matches_the_source_installer_commands
 test_source_installed_tool_conflict_stops_the_run
 test_dry_run_reports_source_installed_tool_conflicts
 test_mise_installer_receives_the_install_path
+test_rerun_is_safe_when_the_install_dir_is_not_on_path
+test_user_file_at_the_mise_path_stops_the_run
 test_empty_manifest_fails_every_mode
 test_install_links_git_hooks_into_its_own_checkout
 test_install_never_touches_hooks_of_an_unrelated_repository
@@ -1608,6 +1715,7 @@ test_install_repoints_a_hook_owned_by_another_sergeant_checkout
 test_hooks_only_reports_its_work_and_creates_no_command_directory
 test_hooks_only_fails_when_no_hooks_directory_is_owned
 test_uninstall_removes_only_what_this_checkout_installed
+test_uninstall_fails_when_it_cannot_reach_the_hook_it_installed
 test_uninstall_removes_a_link_for_a_command_no_longer_shipped
 test_manifest_excludes_non_regular_and_deprecated_entries
 

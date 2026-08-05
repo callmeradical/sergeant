@@ -79,9 +79,12 @@ fi
 
 # Remove the git hooks sgt-install created, so uninstall really is its inverse.
 hooks_src="$ROOT_DIR/scripts/hooks"
+hooks_unresolved=false
 if ! hooks_dst="$(_sgt_install_hooks_dir "$ROOT_DIR")"; then
-  [[ -d "$hooks_src" ]] && \
-    printf '  skipped hooks: no git hooks directory this checkout owns\n'
+  if [[ -d "$hooks_src" ]]; then
+    hooks_unresolved=true
+    printf '  skipped hooks: no git hooks directory this checkout owns\n' >&2
+  fi
 else
   if [[ -d "$hooks_src" && -d "$hooks_dst" ]]; then
     for hook in "$hooks_src"/*; do
@@ -102,3 +105,11 @@ fi
 
 printf '\nRemoved %d entries installed from %s\n' "$removed" "$ROOT_DIR"
 printf 'Kept %d entries owned by something else\n' "$kept"
+
+# A hook this checkout installed may still be in place while the hooks directory
+# is no longer resolvable, so reporting success would be false.
+if "$hooks_unresolved"; then
+  printf 'sgt-uninstall: could not resolve a git hooks directory this checkout owns; any hook linked to %s must be removed by hand.\n' \
+    "$hooks_src" >&2
+  exit 1
+fi
