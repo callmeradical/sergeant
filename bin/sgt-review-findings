@@ -118,6 +118,29 @@ SGT_REVIEW_FIELD_STRIDE=10
 # Newest revision first, so the reader sees the current finding at the top.
 SGT_REVIEW_REVISION_SEPARATOR='--- Superseded revision (preserved) ---'
 
+# Every line the router itself writes into a card body, as the exact literal or
+# the line prefix. Anything else in a stored revision block was written by a human
+# or another tool and must be preserved rather than refreshed away (td-898b65).
+# The router asserts its own composed body against this list, so adding a body
+# line without listing it here fails loudly on the next route instead of silently
+# making annotations look like router output.
+SGT_REVIEW_BODY_PREFIXES='Independent review finding.
+Review axis: 
+Review source: 
+Severity: 
+Reported severity: 
+Summary: 
+Evidence: 
+Affected paths: 
+Acceptance criteria: 
+Recommended remediation: 
+Branch: 
+Head SHA: 
+Parent mission: 
+Originating fleet task: 
+Deduplication key: 
+Finding content digest: '
+
 routed_task_ids=()
 routed_recommendations=()
 
@@ -466,7 +489,7 @@ Finding content digest: $content_digest"
   # The matcher writes its results to files rather than stdout: Apple Bash 3.2.57
   # (macOS) cannot parse a heredoc nested inside $( ) command substitution.
   : > "$match_file"
-  if ! SGT_REVIEW_NEW_BODY="$body" python3 - \
+  if ! SGT_REVIEW_NEW_BODY="$body" SGT_REVIEW_BODY_PREFIXES="$SGT_REVIEW_BODY_PREFIXES" python3 - \
     "$existing_file" "$marker" "$content_digest" \
     "$SGT_REVIEW_REVISION_SEPARATOR" "$composed_file" "$match_file" <<'PY'
 import json
@@ -474,6 +497,12 @@ import os
 import sys
 
 items_path, marker, digest, separator, composed_path, match_path = sys.argv[1:7]
+BODY_PREFIXES = tuple(os.environ["SGT_REVIEW_BODY_PREFIXES"].split("\n"))
+
+
+def router_owned(line):
+    """True when the router itself wrote this body line."""
+    return not line.strip() or line.startswith(BODY_PREFIXES)
 try:
     with open(items_path, encoding="utf-8") as stream:
         items = json.load(stream)
@@ -502,39 +531,55 @@ for line in description.splitlines():
 state = "same" if stored_digest and stored_digest == digest else "changed"
 
 new_body = os.environ["SGT_REVIEW_NEW_BODY"]
+# Fail loudly if the router's own body has grown a line the allowlist does not
+# cover, rather than later mistaking that line for a human annotation.
+unowned = [line for line in new_body.splitlines() if not router_owned(line)]
+if unowned:
+    raise SystemExit(1)
+
 lines = description.splitlines()
 try:
     boundary = lines.index(separator)
 except ValueError:
     boundary = len(lines)
-if state == "same":
-    # Same externally observable finding: refresh the current revision's
-    # metadata in place and keep every preserved older revision verbatim.
+# Anything in the CURRENT revision block that the router did not write is a human
+# annotation or another tool's note. Refreshing the block in place would destroy
+# it, which is the loss this epic exists to prevent (td-898b65).
+annotated = any(not router_owned(line) for line in lines[:boundary])
+if state == "same" and not annotated:
+    # Same finding, nothing but router output above the separator: refresh the
+    # current revision's metadata in place and keep older revisions verbatim.
+    action = "refresh"
     preserved = lines[boundary:]
 else:
-    # Changed finding: the whole stored description becomes a preserved older
-    # revision. Nothing is ever replaced or dropped.
+    # Changed finding, or a block carrying content the router does not own: the
+    # whole stored description becomes a preserved older revision. Nothing is
+    # ever replaced or dropped.
+    action = "preserve"
     preserved = [separator] + lines
 composed = new_body if not preserved else new_body + "\n\n" + "\n".join(preserved)
 with open(composed_path, "w", encoding="utf-8") as stream:
     stream.write(composed)
 with open(match_path, "w", encoding="utf-8") as stream:
-    stream.write("\x1f".join((task_id, status, defer_until, labels, state)))
+    stream.write("\x1f".join((task_id, status, defer_until, labels, state, action)))
 PY
   then
     _routing_failure "td returned invalid or duplicate finding data"
   fi
   existing_match="$(cat "$match_file")"
 
-  task_id="" existing_status="" _defer_until="" existing_labels="" digest_state=""
+  task_id="" existing_status="" _defer_until="" existing_labels="" digest_state="" revision_action=""
   if [[ -n "$existing_match" ]]; then
-    IFS=$'\x1f' read -r task_id existing_status _defer_until existing_labels digest_state <<< "$existing_match"
-    # Never reopen a closed card whose stored body records a different finding.
-    # The marker is mission-scoped, so this means a reviewer reused one finding id
-    # for two different findings; overwriting either one destroys evidence
-    # irrecoverably, so fail closed and let a human reconcile (td-52d7c2).
+    IFS=$'\x1f' read -r task_id existing_status _defer_until existing_labels digest_state revision_action <<< "$existing_match"
+    # A closed card whose stored body records a different finding must never be
+    # reopened SILENTLY: its stored description is preserved verbatim as a
+    # superseded revision and the reconciliation is reported here. Aborting the
+    # batch instead would strand every later finding, and the ordinary
+    # remediate/close/rerun loop shifts a finding's evidence and so its digest,
+    # which made the abort the common case rather than the exception (td-f36fd3).
     if [[ "$existing_status" == "closed" && "$digest_state" != "same" ]]; then
-      _routing_failure "closed td task $task_id matches the deduplication key of finding $finding_id but records a different finding; reconcile it manually"
+      printf 'WARNING: %s: closed td %s matches this deduplication key but records a different finding; reopening it and preserving the stored description as a superseded revision — reconcile the two revisions\n' \
+        "$finding_id" "$task_id" >&2
     fi
     if [[ "$existing_status" == "closed" ]]; then
       td reopen "$task_id" --work-dir "$repo_path" --json >/dev/null 2>&1 || _routing_failure "failed to reopen td task"
@@ -551,7 +596,12 @@ PY
       --description "$(cat "$composed_file")" \
       --labels "$merged_labels" --work-dir "$repo_path" --json >/dev/null 2>&1 \
       || _routing_failure "failed to update td task"
-    printf '%s: td %s updated; remediation: %s\n' "$finding_id" "$task_id" "$recommendation"
+    if [[ "$revision_action" == "preserve" ]]; then
+      printf '%s: td %s updated, previous revision preserved; remediation: %s\n' \
+        "$finding_id" "$task_id" "$recommendation"
+    else
+      printf '%s: td %s updated; remediation: %s\n' "$finding_id" "$task_id" "$recommendation"
+    fi
   else
     result="$(td create "review: $summary" --type task --priority "$priority" \
       --labels independent-review,finding,"$AXIS" --description "$body" \

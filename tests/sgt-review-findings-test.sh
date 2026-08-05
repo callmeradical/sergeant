@@ -611,23 +611,122 @@ grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log" || {
   exit 1
 }
 
-# A closed card whose stored finding differs from the incoming finding must not
-# be silently reopened and overwritten; the router refuses and reports.
+# A closed card whose stored finding differs from the incoming finding must not be
+# SILENTLY reopened: it is reopened with the stored body kept verbatim as a
+# preserved revision and an explicit reconciliation warning is printed. It must
+# not abort the batch, because the normal remediate/close/rerun loop shifts a
+# finding's evidence and so changes its digest (td-f36fd3).
 TD_LIST_RESULT="$(existing_card "$stored_body" closed)" run_router "$TEST_ROOT/findings.json"
-[[ "$status" -eq 2 ]] || { printf 'closed mismatched card did not fail closed: %s\n' "$output" >&2; exit 1; }
-[[ "$output" == *'records a different finding'* ]] || {
-  printf 'closed mismatched card did not report the reconciliation blocker: %s\n' "$output" >&2
+grep -Fq 'reopen td-revised' "$TEST_ROOT/td.log" || {
+  printf 'closed mismatched card was not reopened\n' >&2
   exit 1
 }
-if grep -Eq '^(reopen|update) td-revised' "$TEST_ROOT/td.log"; then
-  printf 'closed card with a different stored finding was silently reopened or overwritten\n' >&2
+grep -Fq 'update td-revised' "$TEST_ROOT/td.log" || {
+  printf 'closed mismatched card was not updated\n' >&2
   exit 1
-fi
+}
+[[ "$output" == *'records a different finding'* ]] || {
+  printf 'closed mismatched card was reopened without a reconciliation warning: %s\n' "$output" >&2
+  exit 1
+}
+grep -Fq 'bin/original:7 original evidence marker' "$TEST_ROOT/td.log" || {
+  printf 'closed mismatched card lost its stored description\n' >&2
+  exit 1
+}
+grep -Fq 'Superseded revision (preserved)' "$TEST_ROOT/td.log" || {
+  printf 'closed mismatched card did not preserve the stored body as a revision\n' >&2
+  exit 1
+}
+# The rest of the batch must still route: std-2 follows std-1 in findings.json.
+grep -Fq 'Long function' "$TEST_ROOT/td.log" || {
+  printf 'a reconciled closed card aborted the remaining findings in the batch\n' >&2
+  exit 1
+}
 
-# A closed card recording the SAME finding still reopens and updates.
+# A closed card recording the SAME finding still reopens and updates, with no
+# reconciliation warning because nothing needed reconciling.
 TD_LIST_RESULT="$(existing_card "$unchanged_body" closed)" run_router "$TEST_ROOT/findings.json"
 grep -Fq 'reopen td-revised' "$TEST_ROOT/td.log"
 grep -Fq 'update td-revised' "$TEST_ROOT/td.log"
+[[ "$output" != *'records a different finding'* ]] || {
+  printf 'unchanged closed card produced a spurious reconciliation warning\n' >&2
+  exit 1
+}
+
+# An unchanged rerun must not discard text the router did not write. A card whose
+# CURRENT revision block carries a human annotation is preserved as a superseded
+# revision rather than replaced in place (td-898b65).
+read -r -d '' annotated_body <<ANNOTATED || true
+Independent review finding.
+
+Review axis: standards
+Review source: code-review
+Severity: error
+Summary: Unsafe cleanup
+Evidence: bin/run:42 can remove another pane
+Affected paths: bin/run
+Acceptance criteria: Match exact pane identity
+Recommended remediation: Use exact identity matching
+Branch: fix/review
+Head SHA: abc1234
+Parent mission: td-parent
+Originating fleet task: fleet-1
+
+Deduplication key: $stored_marker
+Finding content digest: $std1_digest
+
+Update from the owning worker: partially remediated in commit deadbee; the pane
+identity check landed but the ledger invariant is still open.
+ANNOTATED
+TD_LIST_RESULT="$(existing_card "$annotated_body")" run_router "$TEST_ROOT/findings.json"
+grep -Fq 'update td-revised' "$TEST_ROOT/td.log"
+grep -Fq 'partially remediated in commit deadbee' "$TEST_ROOT/td.log" || {
+  printf 'unchanged rerun discarded a human annotation from the current revision\n' >&2
+  exit 1
+}
+grep -Fq 'Superseded revision (preserved)' "$TEST_ROOT/td.log" || {
+  printf 'annotated card was refreshed in place instead of preserving the annotation\n' >&2
+  exit 1
+}
+
+# Once the annotation has been preserved below the separator, a further unchanged
+# rerun refreshes in place again rather than stacking a revision every pass.
+read -r -d '' settled_body <<SETTLED || true
+Independent review finding.
+
+Review axis: standards
+Review source: code-review
+Severity: error
+Summary: Unsafe cleanup
+Evidence: bin/run:42 can remove another pane
+Affected paths: bin/run
+Acceptance criteria: Match exact pane identity
+Recommended remediation: Use exact identity matching
+Branch: fix/review
+Head SHA: abc1234
+Parent mission: td-parent
+Originating fleet task: fleet-1
+
+Deduplication key: $stored_marker
+Finding content digest: $std1_digest
+
+--- Superseded revision (preserved) ---
+Independent review finding.
+
+Update from the owning worker: partially remediated in commit deadbee.
+
+Deduplication key: $stored_marker
+Finding content digest: $std1_digest
+SETTLED
+TD_LIST_RESULT="$(existing_card "$settled_body")" run_router "$TEST_ROOT/findings.json"
+[[ "$(grep -c 'Superseded revision (preserved)' "$TEST_ROOT/td.log")" -eq 1 ]] || {
+  printf 'settled annotated card stacked another revision on an unchanged rerun\n' >&2
+  exit 1
+}
+grep -Fq 'partially remediated in commit deadbee' "$TEST_ROOT/td.log" || {
+  printf 'settled annotated card lost its preserved revision\n' >&2
+  exit 1
+}
 
 # ── td-61a0c8: the router must accept exactly the shared axis vocabulary ──────
 # bin/sgt-dispatch mandates an independent readiness review and tells workers to
@@ -972,6 +1071,45 @@ set -e
   exit 1
 }
 
+rm -rf "$WORKTREE/.sergeant-review-artifacts"
+
+# ── td-898b65: the router-owned line allowlist must cover every line the router
+# writes into a card body, or the "did a human edit this block?" check would
+# misread a new router line as an annotation and stack a preserved revision on
+# every unchanged rerun. The router asserts this about its own composed body on
+# each dedup update, so every dedup test above already exercises it; this case
+# pins the failure mode explicitly by planting an unrecognised line in the stored
+# CURRENT block and proving it is treated as content to preserve.
+read -r -d '' foreign_line_body <<FOREIGN || true
+Independent review finding.
+
+Review axis: standards
+Review source: code-review
+Severity: error
+Summary: Unsafe cleanup
+Evidence: bin/run:42 can remove another pane
+Affected paths: bin/run
+Acceptance criteria: Match exact pane identity
+Recommended remediation: Use exact identity matching
+Branch: fix/review
+Head SHA: abc1234
+Parent mission: td-parent
+Originating fleet task: fleet-1
+Unrecognised prefix: this line is not one the router writes
+
+Deduplication key: $stored_marker
+Finding content digest: $std1_digest
+FOREIGN
+rm -rf "$WORKTREE/.sergeant-review-artifacts"
+TD_LIST_RESULT="$(existing_card "$foreign_line_body")" run_router "$TEST_ROOT/findings.json"
+grep -Fq 'Unrecognised prefix: this line is not one the router writes' "$TEST_ROOT/td.log" || {
+  printf 'an unrecognised stored body line was discarded instead of preserved\n' >&2
+  exit 1
+}
+grep -Fq 'Superseded revision (preserved)' "$TEST_ROOT/td.log" || {
+  printf 'an unrecognised stored body line did not force revision preservation\n' >&2
+  exit 1
+}
 rm -rf "$WORKTREE/.sergeant-review-artifacts"
 
 printf 'sgt-review-findings: ok\n'
