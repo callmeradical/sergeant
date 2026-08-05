@@ -48,8 +48,27 @@ spec_review=passed
 readiness_review=passed
 EOF
 
+# Stub no-mistakes advertising the same axi run flag surface as a real build.
+# NO_MISTAKES_NO_INTENT_FILE=1 drops --intent-file to emulate an installed build
+# without the private intent transport.
 cat > "$fake_bin/no-mistakes" <<'EOF'
 #!/usr/bin/env bash
+case "$1" in
+  --version|-v)
+    printf 'no-mistakes version %s\n' "${NO_MISTAKES_FAKE_VERSION:-v9.9.9 (stub)}"
+    exit 0
+    ;;
+esac
+if [[ "$*" == *'axi run --help'* ]]; then
+  printf '  -h, --help            help for run\n'
+  printf '      --intent string   what the user set out to accomplish\n'
+  if [[ "${NO_MISTAKES_NO_INTENT_FILE:-}" != "1" ]]; then
+    printf '      --intent-file string   read the intent from a file instead of argv\n'
+  fi
+  printf '      --skip string     comma-separated pipeline steps to skip\n'
+  printf '  -y, --yes             auto-resolve every gate\n'
+  exit 0
+fi
 exit 0
 EOF
 chmod +x "$fake_bin/no-mistakes"
@@ -423,7 +442,7 @@ rm "$repo_state/validation_pane" "$repo_state/validation_pane_identity" \
   "$repo_state/validation_status" "$repo_state/validation_worktree" \
   "$repo_state/validation_worktree_identity" "$repo_state/validation_worktree_git_dir" \
   "$repo_state/validation_worktree_git_identity" "$repo_state/validation_worktree_owner" \
-  "$repo_state/validation_head"
+  "$repo_state/validation_head" "$repo_state/validation_intent_transport"
 rm -rf "$validation_worktree"
 printf 'implementation-app-task-1\n' > "$repo_state/window_name"
 printf 'implementation\n' > "$repo_state/stage"
@@ -442,7 +461,8 @@ cleanup_validation_state() {
     "$repo_state/validation_status" \
     "$repo_state/validation_worktree" "$repo_state/validation_worktree_identity" \
     "$repo_state/validation_worktree_git_dir" "$repo_state/validation_worktree_git_identity" \
-    "$repo_state/validation_worktree_owner" "$repo_state/validation_head"
+    "$repo_state/validation_worktree_owner" "$repo_state/validation_head" \
+    "$repo_state/validation_intent_transport"
   [[ -z "$launched_worktree" ]] || rm -rf "$launched_worktree"
   printf 'implementation-app-task-1\n' > "$repo_state/window_name"
   printf 'implementation\n' > "$repo_state/stage"
@@ -502,7 +522,7 @@ assert_failed_launch_rolls_back_and_retries() {
     validation-success validation-success-ack \
     validation_status validation_worktree validation_worktree_identity \
     validation_worktree_git_dir validation_worktree_git_identity validation_worktree_owner \
-    validation_head \
+    validation_head validation_intent_transport \
     validation-launch.lock; do
     [[ ! -e "$repo_state/$path" ]] || {
       printf 'injected %s failure stranded %s: %s\n' "$transition" "$path" "$output" >&2
@@ -916,6 +936,108 @@ set -e
 wait "$winner_pid"
 [[ "$(cat "$repo_state/validation_worktree")" == "$validation_path" ]]
 cleanup_validation_state
+
+# ── no-mistakes intent-transport capability probe ─────────────────────────────
+# An installed no-mistakes without --intent-file must fail closed BEFORE any
+# validation run, marker mutation, or state change, and the diagnostic must name
+# the required capability, the observed version, and the operator's options.
+before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  NO_MISTAKES_NO_INTENT_FILE=1 NO_MISTAKES_FAKE_VERSION='v1.41.2 (867d64d)' \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]] || {
+  printf 'missing --intent-file capability did not fail the launch\n' >&2
+  exit 1
+}
+for expected in 'private intent transport' '--intent-file' 'v1.41.2 (867d64d)' \
+  '--allow-argv-intent'; do
+  [[ "$output" == *"$expected"* ]] || {
+    printf 'capability diagnostic omitted %s: %s\n' "$expected" "$output" >&2
+    exit 1
+  }
+done
+[[ "$(wc -l < "$TEST_ROOT/tmux.log")" == "$before_lines" ]] || {
+  printf 'capability probe failure reached tmux\n' >&2
+  exit 1
+}
+for path in validation-launch.lock validation_worktree validation-intent.md \
+  validation_status validation_intent_transport; do
+  [[ ! -e "$repo_state/$path" ]] || {
+    printf 'capability probe failure mutated %s\n' "$path" >&2
+    exit 1
+  }
+done
+[[ ! -e "$validation_path" ]] || {
+  printf 'capability probe failure created a validation snapshot\n' >&2
+  exit 1
+}
+[[ "$(cat "$repo_state/stage")" == "implementation" ]]
+
+# The supported private transport is recorded for audit and keeps intent content
+# out of the launched argv.
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+[[ "$(cat "$repo_state/validation_intent_transport")" == "intent-file" ]] || {
+  printf 'supported transport was not recorded: %s\n' \
+    "$(cat "$repo_state/validation_intent_transport" 2>/dev/null || echo missing)" >&2
+  exit 1
+}
+grep -Fq 'intent-file' "$concurrent_dir/validation-command"
+if grep -Fq 'Validate the interactive worker safely' "$TEST_ROOT/tmux.log"; then
+  printf 'supported transport leaked intent content into argv\n' >&2
+  exit 1
+fi
+cleanup_validation_state
+
+# The argv fallback is consent-gated: it runs only when the operator passes
+# --allow-argv-intent, and the privacy tradeoff is recorded in fleet state.
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  NO_MISTAKES_NO_INTENT_FILE=1 \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --allow-argv-intent >/dev/null
+[[ "$(cat "$repo_state/validation_intent_transport")" == "argv" ]] || {
+  printf 'consented argv transport was not recorded: %s\n' \
+    "$(cat "$repo_state/validation_intent_transport" 2>/dev/null || echo missing)" >&2
+  exit 1
+}
+grep -Fq 'argv' "$concurrent_dir/validation-command"
+cleanup_validation_state
+
+# --allow-argv-intent must not downgrade a build that does support --intent-file.
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --allow-argv-intent >/dev/null
+[[ "$(cat "$repo_state/validation_intent_transport")" == "intent-file" ]] || {
+  printf 'consent flag downgraded a capable build\n' >&2
+  exit 1
+}
+cleanup_validation_state
+
+# --skip and --allow-argv-intent compose in either order, and an explicitly
+# empty --skip still requests the full pipeline.
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  NO_MISTAKES_NO_INTENT_FILE=1 \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --allow-argv-intent --skip lint >/dev/null
+grep -Fq 'lint' "$concurrent_dir/validation-command"
+if grep -Fq 'review,document' "$concurrent_dir/validation-command"; then
+  printf 'composed flags lost the explicit skip list\n' >&2
+  exit 1
+fi
+cleanup_validation_state
+
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --unknown-flag 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'Usage: sgt-validate'* ]]
 
 for dangling_path in "$validation_path" "$repo_state/validation_worktree" \
   "$repo_state/validation-intent.md" "$repo_state/validation_head" \

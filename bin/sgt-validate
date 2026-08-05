@@ -9,14 +9,49 @@ source "$SCRIPT_DIR/_sgt-lib.sh"
 # shellcheck source=bin/_sgt-intent.sh
 source "$SCRIPT_DIR/_sgt-intent.sh"
 
-[[ $# -eq 2 || ( $# -eq 4 && "$3" == "--skip" ) ]] || \
-  _die "Usage: sgt-validate <task-id> <repo> [--skip <steps>]"
+_usage() {
+  _die "Usage: sgt-validate <task-id> <repo> [--skip <steps>] [--allow-argv-intent]
+       sgt-validate <task-id> <repo> --claim-ownership [--skip <steps>] [--allow-argv-intent]
+       sgt-validate <task-id> <repo> --release-ownership"
+}
 
+[[ $# -ge 2 ]] || _usage
 TASK_ID="$1"
 REPO="$2"
+shift 2
 # Native checks and independent review evidence are required before this boundary,
 # so the default medium profile avoids repeating review and documentation work.
-SKIP="${4-review,document}"
+SKIP="review,document"
+ALLOW_ARGV_INTENT=false
+CLAIM_OWNERSHIP=false
+RELEASE_OWNERSHIP=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --skip)
+      [[ $# -ge 2 ]] || _usage
+      SKIP="$2"
+      shift 2
+      ;;
+    # Consent gate for the argv intent transport. Deliberately a flag and not an
+    # environment variable: an exported variable would silently re-consent to
+    # exposing canonical intent in argv on every later run.
+    --allow-argv-intent)
+      ALLOW_ARGV_INTENT=true
+      shift
+      ;;
+    --claim-ownership)
+      CLAIM_OWNERSHIP=true
+      shift
+      ;;
+    --release-ownership)
+      RELEASE_OWNERSHIP=true
+      shift
+      ;;
+    *) _usage ;;
+  esac
+done
+! $RELEASE_OWNERSHIP || ! $CLAIM_OWNERSHIP || \
+  _die "--release-ownership and --claim-ownership are mutually exclusive"
 [[ "$TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid task ID: $TASK_ID"
 [[ "$REPO" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid repo: $REPO"
 [[ -z "$SKIP" || "$SKIP" =~ ^[a-z]+(,[a-z]+)*$ ]] || _die "Invalid --skip list: $SKIP"
@@ -59,6 +94,14 @@ _sgt_worktree_is_validation_clean "$WORKTREE" || \
   _die "Worker code tree must be clean before validation snapshot"
 _require_tmux
 command -v no-mistakes >/dev/null 2>&1 || _die "no-mistakes is required"
+# Probe the intent transport before any validation run, marker, or state change
+# exists, so an incompatible no-mistakes build cannot record a failed run.
+set +e
+INTENT_TRANSPORT="$(_sgt_resolve_intent_transport "$ALLOW_ARGV_INTENT")"
+INTENT_TRANSPORT_STATUS=$?
+set -e
+[[ "$INTENT_TRANSPORT_STATUS" -eq 0 ]] || \
+  _die "$(_sgt_intent_transport_diagnostic "$INTENT_TRANSPORT_STATUS")"
 PRIMARY_PANE_ID="$(cat "$TASK_STATE/primary_pane_id" 2>/dev/null || true)"
 [[ -n "${TMUX_PANE:-}" && "$TMUX_PANE" == "$PRIMARY_PANE_ID" ]] || \
   _die "Current coordinator pane identity does not match dispatch ownership"
@@ -87,6 +130,7 @@ VALIDATION_WORKTREE_GIT_IDENTITY_RECORD="$REPO_STATE/validation_worktree_git_ide
 VALIDATION_WORKTREE_OWNER_RECORD="$REPO_STATE/validation_worktree_owner"
 VALIDATION_WORKTREE_RECORD_TEMP="${VALIDATION_WORKTREE_RECORD}.tmp.$$"
 VALIDATION_INTENT="$REPO_STATE/validation-intent.md"
+VALIDATION_INTENT_TRANSPORT_RECORD="$REPO_STATE/validation_intent_transport"
 VALIDATION_INTENT_TEMP="${VALIDATION_INTENT}.tmp.$$"
 VALIDATION_RELEASE_TEMP="$REPO_STATE/validation-release.tmp"
 VALIDATION_RELEASE_OWNER="$REPO_STATE/validation-release-owner"
@@ -456,6 +500,7 @@ _reset_retryable_validation_state() {
     "$VALIDATION_WORKTREE_RECORD" "$VALIDATION_WORKTREE_IDENTITY_RECORD" \
     "$VALIDATION_WORKTREE_GIT_DIR_RECORD" "$VALIDATION_WORKTREE_GIT_IDENTITY_RECORD" \
     "$VALIDATION_WORKTREE_OWNER_RECORD" "$REPO_STATE/validation_head" \
+    "$VALIDATION_INTENT_TRANSPORT_RECORD" \
     "$VALIDATION_CHILD_READY" "$VALIDATION_CHILD_ACCEPTED" "$VALIDATION_CHILD_COMMIT" \
     "$VALIDATION_CHILD_COMMITTED" "$VALIDATION_SUCCESS" "$VALIDATION_SUCCESS_ACK" || \
     _die "Failed to clear finished validation state for retry"
@@ -568,7 +613,7 @@ for path in "$VALIDATION_WORKTREE_RECORD" "$VALIDATION_WORKTREE_RECORD_TEMP" \
   "$VALIDATION_WORKTREE_GIT_IDENTITY_RECORD" "$VALIDATION_WORKTREE_OWNER_RECORD" \
   "$VALIDATION_INTENT" "$VALIDATION_INTENT_TEMP" "$REPO_STATE/validation_pane" \
   "$REPO_STATE/validation-release" "$VALIDATION_RELEASE_OWNER" \
-  "$REPO_STATE/validation_head" \
+  "$REPO_STATE/validation_head" "$VALIDATION_INTENT_TRANSPORT_RECORD" \
   "$REPO_STATE/validation_pane_identity" "$REPO_STATE/validation_pane_pid" \
   "$REPO_STATE/validation_process_group" "$REPO_STATE/validation_process_start" \
   "$REPO_STATE/validation_status" "$VALIDATION_RELEASE_TEMP" \
@@ -621,14 +666,23 @@ _validation_write_owned "$VALIDATION_WORKTREE_OWNER_RECORD" "$VALIDATION_OWNER" 
   worktree-owner || _die "Failed to publish validation checkout owner"
 _validation_write_owned "$REPO_STATE/validation_head" "$CURRENT_HEAD" \
   state-validation_head || _die "Failed to publish validation HEAD"
+# Durable audit of the intent transport actually used, so a consented argv run
+# stays visible after the fact.
+_validation_write_owned "$VALIDATION_INTENT_TRANSPORT_RECORD" "$INTENT_TRANSPORT" \
+  state-validation_intent_transport || \
+  _die "Failed to publish validation intent transport"
 _validation_transition intent-copy || _die "Failed to snapshot canonical validation intent"
 _validation_copy_owned "$WORKTREE/.sergeant-intent.md" "$VALIDATION_INTENT" intent || \
   _die "Failed to snapshot canonical validation intent"
 [[ "$(_sgt_intent_revision "$VALIDATION_INTENT")" == "$EXPECTED_REVISION" ]] || {
   _die "Validation intent snapshot revision mismatch"
 }
-printf -v VALIDATION_COMMAND '%q %q %q %q %s' \
-  "$SCRIPT_DIR/sgt-validation-worker" "$REPO_STATE" "$VALIDATION_WORKTREE" "$EXPECTED_REVISION" "$SKIP"
+# SKIP stays unquoted: printf %q escapes a comma (brace-expansion special), and
+# the recorded pane_start_command is compared literally. SKIP is already
+# constrained to ^[a-z]+(,[a-z]+)*$, and an empty SKIP simply omits the argument.
+printf -v VALIDATION_COMMAND '%q %q %q %q %q %s' \
+  "$SCRIPT_DIR/sgt-validation-worker" "$REPO_STATE" "$VALIDATION_WORKTREE" \
+  "$EXPECTED_REVISION" "$INTENT_TRANSPORT" "$SKIP"
 PANE_FORMAT='#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}'
 PANE_SNAPSHOT="$(tmux list-panes -t "$PANE" -F "$PANE_FORMAT" 2>/dev/null || true)"
 set +e

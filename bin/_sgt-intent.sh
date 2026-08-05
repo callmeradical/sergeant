@@ -12,6 +12,64 @@ _sgt_intent_revision() {
   fi
 }
 
+_sgt_no_mistakes_version() {
+  no-mistakes --version 2>/dev/null | sed -n '1s/^no-mistakes version //p'
+}
+
+# Flag names accepted by `no-mistakes axi run`, space-delimited and space-padded.
+# Help output is the only capability surface no-mistakes exposes, so the probe
+# reads it rather than inferring support from a version number.
+_sgt_no_mistakes_axi_run_flags() {
+  local flags
+  flags="$(no-mistakes axi run --help 2>&1 | \
+    sed -n 's/^[[:space:]]\{2,\}\(-[A-Za-z], \)\{0,1\}\(--[a-z][a-z-]*\).*/\2/p' | \
+    sort -u | tr '\n' ' ')"
+  [[ -n "$flags" ]] || return 1
+  printf ' %s\n' "$flags"
+}
+
+# Resolve the intent transport for a coordinator-owned validation run.
+# Prints the transport name, or fails when no permitted transport exists.
+# Transports:
+#   intent-file  private: no-mistakes reads the canonical intent from a path, so
+#                intent content never enters argv (td-102049).
+#   argv         exposes intent content through ps and /proc/<pid>/cmdline; only
+#                selected when the operator explicitly consents.
+_sgt_resolve_intent_transport() {
+  local allow_argv="$1" flags
+  flags="$(_sgt_no_mistakes_axi_run_flags)" || return 1
+  case "$flags" in
+    *' --intent-file '*) printf 'intent-file\n'; return 0 ;;
+  esac
+  case "$flags" in
+    *' --intent '*) ;;
+    *) return 1 ;;
+  esac
+  [[ "$allow_argv" == "true" ]] || return 2
+  printf 'argv\n'
+}
+
+# Actionable diagnostic for a failed transport resolution. $1 is the status
+# _sgt_resolve_intent_transport returned: 1 when no intent flag exists at all,
+# 2 when only the argv transport exists and the operator has not consented.
+_sgt_intent_transport_diagnostic() {
+  local status="$1" flags
+  flags="$(_sgt_no_mistakes_axi_run_flags 2>/dev/null || true)"
+  printf 'no-mistakes lacks the private intent transport required for validation\n'
+  printf '  required capability: no-mistakes axi run --intent-file <path>\n'
+  printf '  observed version:    %s\n' "$(_sgt_no_mistakes_version)"
+  printf '  observed axi run flags:%s\n' "${flags:- none}"
+  printf '  options:\n'
+  printf '    1. Install a no-mistakes build that accepts --intent-file.\n'
+  if [[ "$status" == "2" ]]; then
+    printf '    2. Re-run with --allow-argv-intent to consent to canonical intent in\n'
+    printf '       argv, which exposes it through ps and /proc/<pid>/cmdline.\n'
+  else
+    printf '    2. --allow-argv-intent cannot help: this build accepts no intent flag,\n'
+    printf '       so no canonical intent can reach the run at all.\n'
+  fi
+}
+
 _sgt_intent_revision_matches() {
   local task_dir="$1" repo_state="$2" worktree="$3"
   local fleet_intent="$task_dir/.sergeant-intent.md"

@@ -3,15 +3,17 @@
 
 set -uo pipefail
 
-[[ $# -ge 3 && $# -le 4 ]] || {
-  echo "Usage: sgt-validation-worker <repo-state-dir> <worktree> <intent-revision> [skip]" >&2
+[[ $# -ge 4 && $# -le 5 ]] || {
+  echo "Usage: sgt-validation-worker <repo-state-dir> <worktree> <intent-revision>" \
+    "<intent-transport> [skip]" >&2
   exit 2
 }
 
 REPO_STATE="$1"
 WORKTREE="$2"
 EXPECTED_REVISION="$3"
-SKIP="${4:-}"
+INTENT_TRANSPORT="$4"
+SKIP="${5:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-intent.sh
 source "$SCRIPT_DIR/_sgt-intent.sh"
@@ -39,6 +41,27 @@ command -v no-mistakes >/dev/null 2>&1 || {
   echo "ERROR: no-mistakes is required" >&2
   exit 2
 }
+# The coordinator already probed the transport; re-resolve it here so a binary
+# swapped between launch and run cannot silently downgrade the private transport
+# into argv. Only the coordinator's recorded decision is permitted.
+case "$INTENT_TRANSPORT" in
+  intent-file)
+    _sgt_resolve_intent_transport false >/dev/null 2>&1 || {
+      _sgt_intent_transport_diagnostic 1 >&2
+      exit 2
+    }
+    ;;
+  argv)
+    _sgt_resolve_intent_transport true >/dev/null 2>&1 || {
+      _sgt_intent_transport_diagnostic 1 >&2
+      exit 2
+    }
+    ;;
+  *)
+    echo "ERROR: unsupported validation intent transport: $INTENT_TRANSPORT" >&2
+    exit 2
+    ;;
+esac
 
 _lock_field() {
   local key="$1"
@@ -163,7 +186,13 @@ if [[ "$(_sgt_intent_revision "$VALIDATION_INTENT")" != "$EXPECTED_REVISION" ]];
   exit 2
 fi
 
-args=(axi run --intent-file "$VALIDATION_INTENT")
+if [[ "$INTENT_TRANSPORT" == "intent-file" ]]; then
+  args=(axi run --intent-file "$VALIDATION_INTENT")
+else
+  # Consented argv transport: the operator accepted that intent content is
+  # visible through ps and /proc/<pid>/cmdline for this run.
+  args=(axi run --intent "$(cat "$VALIDATION_INTENT")")
+fi
 [[ -z "$SKIP" ]] || args+=(--skip "$SKIP")
 no-mistakes "${args[@]}"
 status=$?
