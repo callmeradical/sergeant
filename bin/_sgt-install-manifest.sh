@@ -223,6 +223,11 @@ _sgt_install_resolve_link() {
 # action that `sgt-install` then refuses, or vice versa.
 _sgt_install_link_state() {
   local source_file="$1" target_dir="$2" target link_target
+  # Resolved physically and stripped of a trailing slash so the sibling test
+  # below compares like with like: link targets are resolved physically, and a
+  # command directory reached through a symlink would otherwise never match.
+  target_dir="${target_dir%/}"
+  [[ -d "$target_dir" ]] && target_dir="$(cd -P "$target_dir" && pwd -P)"
   target="$target_dir/${source_file##*/}"
 
   if [[ -L "$target" ]]; then
@@ -395,7 +400,8 @@ _sgt_install_hook_state() {
     link_target="$(_sgt_install_resolve_link "$target")"
     if [[ "$link_target" == "$hook" ]]; then
       printf 'linked\n'
-    elif [[ ! -e "$link_target" ]] || _sgt_install_is_sergeant_hook "$link_target"; then
+    elif [[ ! -e "$link_target" ]] || \
+         { [[ -f "$link_target" ]] && _sgt_install_is_sergeant_hook "$link_target"; }; then
       printf 'stale\n'
     else
       printf 'conflict\n'

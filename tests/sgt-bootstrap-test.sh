@@ -1537,6 +1537,49 @@ test_leftover_staged_links_are_swept() {
   [[ -z "$leftovers" ]] || fail "leftover staged links remain:$leftovers"
 }
 
+# The post-install reconciliation is the last line of defence: if `mise run
+# install` produced nothing, the run must not read as a success.
+test_reconciliation_fails_when_no_links_were_created() {
+  local temp_dir output status
+  new_sandbox; temp_dir="$SANDBOX"
+
+  stub_platform "$temp_dir" Linux apt-get 62
+  mkdir -p "$temp_dir/instdir"
+  stub_commands "$temp_dir/bin" "${BASE_TOOLS[@]}" mise go node uv td graphify no-mistakes opencode claude
+
+  set +e
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/instdir" \
+    PATH="$temp_dir/bin" "$BOOTSTRAP" 2>&1)"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "an install that created no links reported success: $output"
+  assert_contains "$output" 'was not created; check the output of mise run install'
+}
+
+# An installer that exits 0 without producing a usable binary must fail the run.
+test_reconciliation_fails_when_a_tool_is_still_unusable() {
+  local temp_dir output status
+  new_sandbox; temp_dir="$SANDBOX"
+
+  stub_platform "$temp_dir" Linux apt-get 61
+  stub_commands "$temp_dir/bin" "${BASE_TOOLS[@]}" mise node uv graphify no-mistakes opencode claude
+  # go exits 0 but writes nothing, so td never becomes usable. Written after
+  # stub_commands so it is not overwritten.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$temp_dir/bin/go"
+  chmod +x "$temp_dir/bin/go"
+  stub_sergeant_install "$temp_dir/home"
+
+  set +e
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/home/.local/bin" \
+    PATH="$temp_dir/bin" "$BOOTSTRAP" 2>&1)"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "an unusable tool reported success: $output"
+  assert_contains "$output" 'td is still not usable after installation'
+}
+
 # ── Empty manifest ────────────────────────────────────────────────────────────
 
 # A checkout whose bin/ cannot be resolved must fail loudly in every mode rather
@@ -2010,6 +2053,8 @@ test_relative_install_directory_is_refused
 test_concurrent_installs_do_not_race
 test_wrong_identity_tool_in_the_install_dir_is_a_conflict
 test_leftover_staged_links_are_swept
+test_reconciliation_fails_when_no_links_were_created
+test_reconciliation_fails_when_a_tool_is_still_unusable
 test_empty_manifest_fails_every_mode
 test_install_links_git_hooks_into_its_own_checkout
 test_install_never_touches_hooks_of_an_unrelated_repository
