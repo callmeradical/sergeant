@@ -584,6 +584,13 @@ done
 # bin/sgt-install, which exits non-zero if it could not install everything.
 (cd "$ROOT_DIR" && mise install && mise run install)
 
+# git may have arrived with the packages, so resolve the hooks directory again
+# rather than reusing the plan-time value.
+hooks_dst=''
+if tool_available git; then
+  hooks_dst="$(_sgt_install_hooks_dir "$ROOT_DIR" || true)"
+fi
+
 # Reconcile what the install actually produced, distinguishing a link that was
 # never created from one that something else occupies.
 install_failed=false
@@ -620,13 +627,6 @@ else
       install_failed=true
     fi
   done
-fi
-
-# git may have arrived with the packages, so resolve the hooks directory again
-# rather than reusing the plan-time value.
-hooks_dst=''
-if tool_available git; then
-  hooks_dst="$(_sgt_install_hooks_dir "$ROOT_DIR" || true)"
 fi
 
 # Reconcile the tools as well as the links: a published link to a path that has

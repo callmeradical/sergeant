@@ -62,11 +62,11 @@ directories.
 
 It does not automate or probe any login; follow the `MANUAL:` actions it reports.
 `--verify-only` also reports a `WARNING:` when the command directory is not on
-your `PATH`, and a `MANUAL:` line for platform packages it cannot install itself.
+your `PATH`, and a `MANUAL PACKAGES:` line for platform packages it cannot install itself.
 
 On any other platform, or to check an existing installation, verify without
 changing anything. Both read-only modes work everywhere: on a platform without a
-supported package manager they report the platform packages as a `MANUAL:` step
+supported package manager they report the platform packages as a `MANUAL PACKAGES:` step
 and still verify everything else. Neither runs a package manager, an installer,
 or an agent harness; the only third-party commands either runs are read-only
 queries: `yq --version`, to tell Mike Farah's `yq` from the Python package of the

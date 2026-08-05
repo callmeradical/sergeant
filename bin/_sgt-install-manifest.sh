@@ -294,34 +294,47 @@ _sgt_install_managed_state() {
 # every unrelated `git push` run Sergeant's Docker drain suite. In that case the
 # repository's own hooks directory is not the one git will read, so this returns
 # non-zero and the caller reports that hooks were not installed.
-# Set by _sgt_install_hooks_dir when it refuses, so callers can give advice that
-# matches the actual cause: `worktree`, `hookspath`, or `nogit`.
-# shellcheck disable=SC2034  # Consumed by the commands that source this file.
-_SGT_INSTALL_HOOKS_REFUSAL=''
-
 # _sgt_install_hooks_refusal_advice <repo-root>
 #
-# Print the remediation for the most recent refusal.
+# Print the remediation for why _sgt_install_hooks_dir refused <repo-root>.
+#
+# The cause is re-derived rather than remembered: every caller resolves the hooks
+# directory in a command substitution, so a variable set inside the resolver
+# would never reach the parent shell and the advice would always be generic.
 _sgt_install_hooks_refusal_advice() {
-  local root="$1" primary
-  case "$_SGT_INSTALL_HOOKS_REFUSAL" in
-    worktree)
-      primary="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null || true)"
-      primary="${primary%/.git}"
-      printf 'this is a linked worktree, which shares its primary checkout hooks directory; install hooks from the primary checkout%s\n' \
-        "${primary:+ at $primary}"
-      ;;
-    hookspath)
-      printf 'core.hooksPath redirects git away from this repository; unset it for this repository to install hooks here\n'
-      ;;
-    *)
-      printf 'no git hooks directory could be resolved for %s\n' "$root"
-      ;;
+  local root="$1" private primary
+  private="$(git -C "$root" rev-parse --absolute-git-dir 2>/dev/null || true)"
+  if [[ -n "$private" && -f "$private/commondir" ]]; then
+    primary="$(_sgt_install_primary_checkout "$root")"
+    printf 'this is a linked worktree, which shares its primary checkout hooks directory; install hooks from the primary checkout%s\n' \
+      "${primary:+ at $primary}"
+    return 0
+  fi
+  if git -C "$root" config --path --get core.hooksPath >/dev/null 2>&1; then
+    printf 'core.hooksPath redirects git away from this repository; unset it for this repository to install hooks here\n'
+    return 0
+  fi
+  printf 'no git hooks directory could be resolved for %s\n' "$root"
+}
+
+# _sgt_install_primary_checkout <repo-root>
+#
+# Print the working tree that owns the shared git directory of <repo-root>, or
+# nothing when it cannot be determined.
+_sgt_install_primary_checkout() {
+  local root="$1" common
+  common="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null || true)"
+  [[ -n "$common" ]] || return 0
+  case "$common" in
+    /*) ;;
+    *) common="$root/$common" ;;
   esac
+  [[ -d "$common" ]] || return 0
+  common="$(cd -P "$common" && pwd -P)"
+  printf '%s\n' "${common%/.git}"
 }
 
 _sgt_install_hooks_dir() {
-  _SGT_INSTALL_HOOKS_REFUSAL='nogit'
   local root="$1" configured resolved common private
   # A linked worktree shares the primary checkout's hooks directory. Writing
   # there would repoint the primary's hook at the worktree, and once the worktree
@@ -333,7 +346,6 @@ _sgt_install_hooks_dir() {
   # composed --git-common-dir.
   private="$(git -C "$root" rev-parse --absolute-git-dir 2>/dev/null || true)"
   if [[ -n "$private" && -f "$private/commondir" ]]; then
-    _SGT_INSTALL_HOOKS_REFUSAL='worktree'
     return 1
   fi
   if configured="$(git -C "$root" config --local --path --get core.hooksPath 2>/dev/null)" && \
@@ -344,14 +356,13 @@ _sgt_install_hooks_dir() {
     esac
     case "$resolved" in
       "$root"/*) printf '%s\n' "$resolved"; return 0 ;;
-      *) _SGT_INSTALL_HOOKS_REFUSAL='hookspath'; return 1 ;;
+      *) return 1 ;;
     esac
   fi
   # A hooksPath from any wider scope redirects git away from this repository's
   # hooks directory, so there is nothing here that Sergeant may own.
   if configured="$(git -C "$root" config --path --get core.hooksPath 2>/dev/null)" && \
      [[ -n "$configured" ]]; then
-    _SGT_INSTALL_HOOKS_REFUSAL='hookspath'
     return 1
   fi
   common="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null)" || return 1
