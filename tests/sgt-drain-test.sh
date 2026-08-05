@@ -413,6 +413,91 @@ grep -q '^owner_purpose=race-winner$' "$lock_record" || \
 rm -f "$lock_record"
 printf 'drain lock reclamation is instance-bound: ok\n'
 
+# ── Slice 14e (RDY-001): lock artifacts are never reported as drains ─────────
+#
+# The lock record shares the drain directory with drain files.  Reporting it
+# would invent a drain nobody set, and the obvious response —
+# `sgt-drain --undrain <that name>` — would delete a lock a live dispatch holds.
+
+SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=1 _sgt_drain_lock_acquire_fd 9 "held-by-dispatch" >/dev/null
+touch "${lock_record}.staging.999.deadbeef" \
+      "${lock_record}.stale.999" \
+      "$config_dir/drain/global.tmp.ABCDEF"
+out="$("$ROOT_DIR/bin/sgt-drain" --status 2>&1)"
+printf '%s\n' "$out" | grep -qi 'no active drain' || \
+  { printf '--status must ignore lock artifacts, got: %s\n' "$out" >&2; exit 1; }
+for artifact in admission.lock.held admission.lock.held.staging.999.deadbeef admission.lock; do
+  rc=0
+  "$ROOT_DIR/bin/sgt-drain" --undrain "$artifact" >/dev/null 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] || \
+    { printf 'undrain of lock artifact %s must be refused\n' "$artifact" >&2; exit 1; }
+done
+[[ -f "$lock_record" ]] || \
+  { printf 'the live lock record must survive --status and refused undrains\n' >&2; exit 1; }
+rm -f "${lock_record}.staging.999.deadbeef" "${lock_record}.stale.999" \
+      "$config_dir/drain/global.tmp.ABCDEF"
+_sgt_drain_lock_release_fd 9
+printf 'drain lock artifacts are not reported as drains: ok\n'
+
+# ── Slice 14f (RDY-002): a record without a nonce is unverifiable ─────────────
+#
+# An absent nonce cannot bind a reclamation, so it must NOT be reclaimable.
+# Otherwise a contender deletes whatever occupies the path — including a lock
+# legitimately acquired during the race.
+
+bash -c 'exit 0' & dead_pid=$!
+wait "$dead_pid" 2>/dev/null || true
+{
+  printf 'owner_pid=%s\n' "$dead_pid"
+  printf 'owner_start=\n'
+  printf 'owner_host=%s\n' "$(_sgt_drain_host_id)"
+  printf 'owner_user=someone\n'
+  printf 'owner_purpose=nonce-less-holder\n'
+  printf 'created_at=2025-01-01T00:00:00Z\n'
+  printf 'created_epoch=0\n'
+} > "$lock_record"
+
+_sgt_drain_lock_owner_is_gone "$lock_record" && \
+  { printf 'a record with no owner_nonce must not be classified as reclaimable\n' >&2; exit 1; }
+rc=0
+_sgt_drain_lock_reclaim "$lock_record" "" || rc=$?
+[[ $rc -ne 0 ]] || \
+  { printf 'reclaim with an empty expected nonce must refuse\n' >&2; exit 1; }
+[[ -f "$lock_record" ]] || \
+  { printf 'reclaim with an empty expected nonce must not delete the record\n' >&2; exit 1; }
+grep -q '^owner_purpose=nonce-less-holder$' "$lock_record" || \
+  { printf 'the nonce-less record must be left intact\n' >&2; exit 1; }
+rm -f "$lock_record"
+printf 'drain lock refuses to reclaim a nonce-less record: ok\n'
+
+# ── Slice 14g (STD-004): record values cannot inject extra fields ────────────
+#
+# A newline in USER or in the host name would inject an owner_nonce that grep
+# -m1 reads first, so the true owner could never release its own lock.
+
+rc=0
+USER="$(printf 'evil\nowner_nonce=HIJACK')" \
+  SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=1 _sgt_drain_lock_acquire_fd 9 "injection-probe" || rc=$?
+[[ $rc -eq 0 ]] || { printf 'acquire should succeed with a hostile USER, got rc=%s\n' "$rc" >&2; exit 1; }
+[[ "$(_sgt_drain_read_field "$lock_record" owner_nonce)" != "HIJACK" ]] || \
+  { printf 'a newline in USER must not inject owner_nonce\n' >&2; exit 1; }
+rc=0
+_sgt_drain_lock_release_fd 9 || rc=$?
+[[ $rc -eq 0 ]] || \
+  { printf 'the true owner must be able to release its own lock, got rc=%s\n' "$rc" >&2; exit 1; }
+[[ ! -e "$lock_record" ]] || \
+  { printf 'release should have removed the record\n' >&2; exit 1; }
+printf 'drain lock record values cannot inject fields: ok\n'
+
+# ── Slice 14h (RDY-008): killed acquirers do not leave staging files ─────────
+
+touch "${lock_record}.staging.999.aaaa"
+SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=1 _sgt_drain_lock_acquire_fd 9 "sweeper" >/dev/null
+[[ ! -e "${lock_record}.staging.999.aaaa" ]] || \
+  { printf 'a staging file owned by a dead pid should be swept\n' >&2; exit 1; }
+_sgt_drain_lock_release_fd 9
+printf 'drain lock sweeps abandoned staging files: ok\n'
+
 # ── Slice 15 (td-929656): drain never depends on flock ──────────────────────
 #
 # The library documents a no-flock fallback for minimal installs and macOS
@@ -593,14 +678,25 @@ kill -0 "$live_pid" 2>/dev/null || \
 printf '%s\n' "$out" | grep -q 'task-c' && \
   { printf 'a project-scoped wait must not report other projects, got: %s\n' "$out" >&2; exit 1; }
 
-# Once the worker resolves, the same wait succeeds.
+# A worker that merely CLAIMS to be drained while its process is still alive
+# must not satisfy the wait: sgt-interactive-worker writes `drained` before it
+# kills its pane and before its exit-path handoff runs.
 printf 'drained\n' > "$fleet_dir/task-d/busy-repo/status"
+rc=0
+out="$("$ROOT_DIR/bin/sgt-drain" myproject --wait --timeout 1 2>&1)" || rc=$?
+[[ $rc -ne 0 ]] || \
+  { printf 'a drained-but-still-running worker must not satisfy the wait\n' >&2; exit 1; }
+printf '%s\n' "$out" | grep -q 'status=drained.*liveness=live' || \
+  { printf 'a drained-but-live worker should be reported as live, got: %s\n' "$out" >&2; exit 1; }
+printf 'sgt-drain --wait rejects a drained claim contradicted by a live process: ok\n'
+
+# Once the worker's process actually exits, the same wait succeeds.
+kill "$live_pid" 2>/dev/null || true
+wait "$live_pid" 2>/dev/null || true
 rc=0
 out="$("$ROOT_DIR/bin/sgt-drain" myproject --wait --timeout 2 2>&1)" || rc=$?
 [[ $rc -eq 0 ]] || \
-  { printf 'the wait should succeed once workers drain, got rc=%s: %s\n' "$rc" "$out" >&2; exit 1; }
-kill "$live_pid" 2>/dev/null || true
-wait "$live_pid" 2>/dev/null || true
+  { printf 'the wait should succeed once workers actually exit, got rc=%s: %s\n' "$rc" "$out" >&2; exit 1; }
 "$ROOT_DIR/bin/sgt-drain" --undrain myproject >/dev/null
 printf 'sgt-drain --wait timeout is truthful and non-destructive: ok\n'
 

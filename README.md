@@ -225,8 +225,11 @@ installation and verification.
 - `tmux` — for local agent dispatch
 - `lsof` — for verifying cleanup does not remove an in-use worktree
 - no additional locking tool is required: drain admission locking uses an atomic
-  lock directory, so `flock` is deliberately not a prerequisite (macOS system
-  installs and minimal images ship without it)
+  hard link, so `flock` is deliberately not a prerequisite (macOS system
+  installs and minimal images ship without it). The drain state directory
+  (`$SERGEANT_CONFIG/drain`, default `~/.config/sergeant/drain`) must be
+  writable by the invoking user and on a filesystem that supports hard links;
+  otherwise dispatch and respond fail closed rather than proceeding unlocked.
 - `treehouse` — pre-warmed worktree pools (optional but recommended for dispatch)
 - `graphify` — knowledge graph generation (optional, needed for `sgt-graphify`)
 - [`dagr`](https://github.com/callmeradical/dagr) — SQLite DAG execution engine (optional; needed only for `sgt-dag-run` and DAG-directed workflows; all other Sergeant commands work without it)

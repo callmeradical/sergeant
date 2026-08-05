@@ -223,6 +223,26 @@ _sgt_drain_process_start() {
   ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true
 }
 
+# _sgt_drain_snapshot_field <snapshot> <field>
+#
+# Reads one field from an already-captured record body, so a whole record can be
+# parsed from a single read.
+_sgt_drain_snapshot_field() {
+  printf '%s\n' "$1" | grep -m1 "^${2}=" | cut -d= -f2- || true
+}
+
+# _sgt_drain_record_line <field> <value>
+#
+# Emits one record line with the value forced onto a single line.  Every value
+# must be sanitised: a newline in USER, in `uname -n`, or in a process start
+# token would inject additional fields, and an injected owner_nonce read first
+# by grep -m1 would stop the true owner from ever releasing its own lock.
+_sgt_drain_record_line() {
+  local field="$1" value="$2"
+  value="$(printf '%s' "$value" | tr -d '\n\r' | cut -c1-256)"
+  printf '%s=%s\n' "$field" "$value"
+}
+
 # _sgt_drain_lock_owner_is_gone <record>
 #
 # Returns 0 only when the recorded owner is PROVABLY gone: an identified host
@@ -235,33 +255,46 @@ _sgt_drain_process_start() {
 # so the caller can bind its reclamation to this exact lock instance.
 _sgt_drain_lock_owner_is_gone() {
   local record="$1"
-  local pid host local_host recorded_start actual_start alive_rc
+  local snapshot pid host nonce local_host recorded_start actual_start alive_rc
   _SGT_DRAIN_OBSERVED_NONCE=""
   [[ -f "$record" ]] || return 1
 
-  host="$(_sgt_drain_read_field "$record" owner_host)"
+  # Read the record ONCE.  Field-at-a-time reads would each re-open the path, so
+  # a competing reclaimer renaming the record mid-check could hand back fields
+  # from different generations — including an empty nonce, which used to make
+  # reclamation unbounded.
+  snapshot="$(cat "$record" 2>/dev/null || true)"
+  [[ -n "$snapshot" ]] || return 1
+
+  host="$(_sgt_drain_snapshot_field "$snapshot" owner_host)"
   local_host="$(_sgt_drain_host_id)"
   # An unidentified host must never compare equal to another unidentified host.
   [[ -n "$host" && -n "$local_host" && "$host" == "$local_host" ]] || return 1
 
-  pid="$(_sgt_drain_read_field "$record" owner_pid)"
+  pid="$(_sgt_drain_snapshot_field "$snapshot" owner_pid)"
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
 
+  # A record without a nonce cannot be bound to a reclamation, so it is
+  # unverifiable — never reclaimable.  Treating it as reclaimable would let a
+  # contender delete a lock legitimately acquired during the race.
+  nonce="$(_sgt_drain_snapshot_field "$snapshot" owner_nonce)"
+  [[ -n "$nonce" ]] || return 1
+
   alive_rc=0
   _sgt_drain_process_alive "$pid" || alive_rc=$?
   if [[ $alive_rc -eq 1 ]]; then
-    _SGT_DRAIN_OBSERVED_NONCE="$(_sgt_drain_read_field "$record" owner_nonce)"
+    _SGT_DRAIN_OBSERVED_NONCE="$nonce"
     return 0
   fi
   [[ $alive_rc -eq 0 ]] || return 1
 
   # The pid exists: only a changed start token proves it is a different process.
-  recorded_start="$(_sgt_drain_read_field "$record" owner_start)"
+  recorded_start="$(_sgt_drain_snapshot_field "$snapshot" owner_start)"
   actual_start="$(_sgt_drain_process_start "$pid")"
   if [[ -n "$recorded_start" && -n "$actual_start" && "$actual_start" != "$recorded_start" ]]; then
-    _SGT_DRAIN_OBSERVED_NONCE="$(_sgt_drain_read_field "$record" owner_nonce)"
+    _SGT_DRAIN_OBSERVED_NONCE="$nonce"
     return 0
   fi
   return 1
@@ -275,33 +308,49 @@ _sgt_drain_lock_owner_is_gone() {
 # between the staleness decision and the rename is restored instead of deleted.
 _sgt_drain_lock_reclaim() {
   local record="$1" expected_nonce="$2" quarantine observed
+  # Without a nonce there is nothing to bind the reclamation to, so refuse
+  # rather than delete whatever happens to occupy the path.
+  [[ -n "$expected_nonce" ]] || return 1
   quarantine="${record}.stale.$$"
   rm -f "$quarantine" 2>/dev/null || true
   mv "$record" "$quarantine" 2>/dev/null || return 1
 
   observed="$(_sgt_drain_read_field "$quarantine" owner_nonce)"
-  if [[ -n "$expected_nonce" && "$observed" != "$expected_nonce" ]]; then
+  if [[ "$observed" != "$expected_nonce" ]]; then
     # A different lock instance than the one proven stale — put it back.  ln
     # refuses to clobber, so a third party that has already taken the lock keeps
-    # it and this now-orphaned copy is discarded.
-    ln "$quarantine" "$record" 2>/dev/null || true
-    rm -f "$quarantine" 2>/dev/null || true
+    # it.  The quarantine copy is discarded only once the record is back in
+    # place (by us or by that third party); otherwise it is the ONLY copy of a
+    # live record and must be kept for the next contender to find.
+    if ln "$quarantine" "$record" 2>/dev/null || [[ -e "$record" ]]; then
+      rm -f "$quarantine" 2>/dev/null || true
+    else
+      printf 'ERROR: could not restore drain admission lock record %s; preserved at %s\n' \
+        "$record" "$quarantine" >&2
+    fi
     return 1
   fi
   rm -f "$quarantine" 2>/dev/null || true
   return 0
 }
 
-# _sgt_drain_lock_sweep_quarantine <record>
+# _sgt_drain_lock_sweep_artifacts <record>
 #
-# Removes quarantine copies left by a reclaimer that died mid-rename.  Only
-# copies whose owning reclaimer is provably gone are removed, so a concurrent
-# reclamation is never disturbed.
-_sgt_drain_lock_sweep_quarantine() {
+# Removes quarantine copies left by a reclaimer that died mid-rename, and
+# staging records left by an acquirer killed while contending.  Both embed their
+# owning pid, and only artifacts whose owner is provably gone are removed, so a
+# concurrent reclamation or acquisition is never disturbed.  Without this, a
+# Ctrl-C during contention would leave a staging file in shared state forever.
+_sgt_drain_lock_sweep_artifacts() {
   local record="$1" leftover leftover_pid rc
-  for leftover in "$record".stale.*; do
+  for leftover in "$record".stale.* "$record".staging.*; do
     [[ -e "$leftover" ]] || continue
-    leftover_pid="${leftover##*.stale.}"
+    case "$leftover" in
+      *.stale.*)   leftover_pid="${leftover##*.stale.}" ;;
+      *.staging.*) leftover_pid="${leftover##*.staging.}"
+                   leftover_pid="${leftover_pid%%.*}" ;;
+      *)           continue ;;
+    esac
     case "$leftover_pid" in
       ''|*[!0-9]*) continue ;;
     esac
@@ -362,26 +411,31 @@ _sgt_drain_lock_acquire_fd() {
 
   record="$(_sgt_drain_lock_record)"
   state_dir="$(dirname "$record")"
+  if [[ -e "$state_dir" && ! -d "$state_dir" ]]; then
+    printf 'ERROR: drain admission lock unavailable: %s exists but is not a directory\n' \
+      "$state_dir" >&2
+    return 3
+  fi
   if ! mkdir -p "$state_dir" 2>/dev/null || [[ ! -w "$state_dir" ]]; then
     printf 'ERROR: drain admission lock unavailable: %s is not writable\n' "$state_dir" >&2
     return 3
   fi
 
-  _sgt_drain_lock_sweep_quarantine "$record"
+  _sgt_drain_lock_sweep_artifacts "$record"
 
   nonce="$(_sgt_drain_nonce)"
   staging="${record}.staging.$$.$nonce"
   # The record is complete BEFORE it becomes the lock, so the lock is never
   # visible without the owner state needed to verify or reclaim it.
   if ! {
-    printf 'owner_pid=%s\n'      "$$"
-    printf 'owner_start=%s\n'    "$(_sgt_drain_process_start "$$")"
-    printf 'owner_host=%s\n'     "$(_sgt_drain_host_id)"
-    printf 'owner_user=%s\n'     "${USER:-$(id -un 2>/dev/null || printf 'unknown')}"
-    printf 'owner_purpose=%s\n'  "$purpose"
-    printf 'owner_nonce=%s\n'    "$nonce"
-    printf 'created_at=%s\n'     "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf 'created_epoch=%s\n'  "$(date +%s)"
+    _sgt_drain_record_line owner_pid      "$$"
+    _sgt_drain_record_line owner_start    "$(_sgt_drain_process_start "$$")"
+    _sgt_drain_record_line owner_host     "$(_sgt_drain_host_id)"
+    _sgt_drain_record_line owner_user     "${USER:-$(id -un 2>/dev/null || printf 'unknown')}"
+    _sgt_drain_record_line owner_purpose  "$purpose"
+    _sgt_drain_record_line owner_nonce    "$nonce"
+    _sgt_drain_record_line created_at     "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    _sgt_drain_record_line created_epoch  "$(date +%s)"
   } > "$staging" 2>/dev/null; then
     rm -f "$staging" 2>/dev/null || true
     printf 'ERROR: drain admission lock unavailable: cannot stage owner record at %s\n' \
@@ -398,6 +452,16 @@ _sgt_drain_lock_acquire_fd() {
       eval "_SGT_DRAIN_LOCK_NONCE_${fd}=\$nonce"
       SGT_DRAIN_LOCK_STATE="acquired"
       return 0
+    fi
+    # `ln` failing while the target does NOT exist is not contention: the
+    # filesystem cannot make hard links (FAT/exFAT, some CIFS and FUSE mounts).
+    # Spinning to the deadline and reporting "contended" would send the operator
+    # after a holder that does not exist.
+    if [[ ! -e "$record" ]]; then
+      rm -f "$staging" 2>/dev/null || true
+      printf 'ERROR: drain admission lock unavailable: %s cannot create hard links, which the lock requires\n' \
+        "$state_dir" >&2
+      return 3
     fi
     if _sgt_drain_lock_owner_is_gone "$record"; then
       _sgt_drain_lock_reclaim "$record" "$_SGT_DRAIN_OBSERVED_NONCE" && continue
@@ -576,7 +640,7 @@ _sgt_drain_project_active() {
 
 # _sgt_drain_remove_global
 #
-# Removes the global drain file under an advisory flock.  Safe to call when
+# Removes the global drain file under the drain admission lock.  Safe to call when
 # no drain is active (idempotent).
 _sgt_drain_remove_global() {
   local drain_file
@@ -586,7 +650,7 @@ _sgt_drain_remove_global() {
 
 # _sgt_drain_remove_project <project>
 #
-# Removes the per-project drain file under an advisory flock.  The project
+# Removes the per-project drain file under the drain admission lock.  The project
 # name must already be validated by the caller.
 _sgt_drain_remove_project() {
   local project="${1:?_sgt_drain_remove_project requires a project name}"

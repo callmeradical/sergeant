@@ -41,6 +41,20 @@ source "$SCRIPT_DIR/_sgt-drain.sh"
 
 _die() { echo "ERROR: $*" >&2; exit 1; }
 
+# _is_lock_artifact <name>
+#
+# True for any file the admission lock owns, plus the temp files _sgt_drain_write
+# creates.  These share the drain directory with drain files but are not drains.
+_is_lock_artifact() {
+  local name="$1" lock_base
+  lock_base="$(basename "$(_sgt_drain_lock_file)")"
+  case "$name" in
+    "$lock_base"|"$lock_base".*) return 0 ;;
+    *.tmp.*)                     return 0 ;;
+  esac
+  return 1
+}
+
 # ── Parse arguments ───────────────────────────────────────────────────────────
 
 MODE="drain"          # drain | undrain | status
@@ -98,6 +112,10 @@ while [[ $# -gt 0 ]]; do
       [[ -z "$PROJECT" ]] || _die "Unexpected argument: $1 (project already set to '$PROJECT')"
       [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || \
         _die "Invalid project name: $1 (must match [A-Za-z0-9][A-Za-z0-9._-]*)"
+      # A project whose drain file would collide with an admission-lock artifact
+      # is refused, so no drain or undrain can ever target the live lock.
+      ! _is_lock_artifact "$1" || \
+        _die "Invalid project name: $1 (reserved for drain admission lock state)"
       PROJECT="$1"
       shift
       ;;
@@ -208,11 +226,17 @@ _unresolved_workers() {
       [[ -d "$repo_dir" ]] || continue
       repo="$(basename "$repo_dir")"
       status="$(_fleet_read "$repo_dir/status")"
-      # Statuses a cooperative drain can never resolve by waiting.  Kept
-      # identical to sgt-drain-force so the two commands cannot disagree about
-      # the same fleet state.
+      # Statuses a cooperative drain can never resolve by waiting, so liveness
+      # is irrelevant for them.  This list is intentionally narrower than
+      # sgt-drain-force's: force decides whom to kill, whereas --wait decides
+      # whether everyone has exited.  `done` and `drained` are deliberately NOT
+      # here:
+      # sgt-interactive-worker writes `drained` BEFORE killing its pane and
+      # before its exit-path handoff runs, so a worker claiming to be finished
+      # can still be executing.  Those statuses are checked against liveness
+      # below instead.
       case "$status" in
-        done|drained|force-stopped|orphaned|failed*) continue ;;
+        force-stopped|orphaned|failed*) continue ;;
       esac
       project="$(_fleet_read "$repo_dir/project")"
       if [[ "$scope" != "global" && -n "$project" ]]; then
@@ -220,6 +244,16 @@ _unresolved_workers() {
       fi
       _worker_liveness "$repo_dir"
       [[ "$_WORKER_LIVENESS" != "gone" ]] || continue
+      # A worker whose status already claims completion, and whose exit simply
+      # cannot be verified, is accepted at its word: blocking every drain
+      # forever on long-finished workers that predate identity recording would
+      # be worse than trusting a terminal claim.  A claim contradicted by a LIVE
+      # process is not accepted.
+      if [[ "$_WORKER_LIVENESS" == "unverifiable" ]]; then
+        case "$status" in
+          done|drained) continue ;;
+        esac
+      fi
       printf '%s/%s status=%s pid=%s liveness=%s project=%s\n' \
         "$task" "$repo" "${status:-unknown}" "$_WORKER_PID" "$_WORKER_LIVENESS" \
         "${project:-unknown}"
@@ -290,7 +324,13 @@ if [[ "$MODE" == "status" ]]; then
     if [[ -d "$drain_dir" ]]; then
       while IFS= read -r -d '' drain_file; do
         name="$(basename "$drain_file")"
-        [[ "$name" == "global" || "$name" == "admission.lock" ]] && continue
+        [[ "$name" == "global" ]] && continue
+        # Lock records, their staging copies, their quarantine copies, and
+        # in-flight drain temp files all live in this directory and are NOT
+        # drains.  Reporting them would invent drains that nobody set — and the
+        # obvious response, `sgt-drain --undrain <that name>`, would delete a
+        # lock a live dispatch is holding.
+        _is_lock_artifact "$name" && continue
         echo "${name} drain: active"
         grep -E "^reason=|^created_at=|^created=" "$drain_file" 2>/dev/null | sed 's/^/  /' || true
         found=1
