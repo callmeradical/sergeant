@@ -22,7 +22,18 @@ SGT_INSTALL_MANIFEST_LOADED=1
 # Print the directory that receives this checkout's command links. Kept here so
 # the three commands cannot disagree about the default.
 _sgt_install_target_dir() {
-  printf '%s\n' "${SGT_INSTALL_DIR:-$HOME/.local/bin}"
+  local target="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
+  # A relative value resolves against each caller's working directory, and
+  # sgt-bootstrap runs `mise run install` from the checkout, so the two would
+  # write to different places and litter the repository.
+  case "$target" in
+    /*) printf '%s\n' "$target" ;;
+    *)
+      printf '_sgt-install-manifest: SGT_INSTALL_DIR must be an absolute path, got %s\n' \
+        "$target" >&2
+      return 2
+      ;;
+  esac
 }
 
 # _sgt_install_script_root <script-path>
@@ -90,26 +101,40 @@ _sgt_install_managed_globs() {
   printf '%s\n' 'sgt-*' '_sgt-*.sh' 'wiki-daily-digest'
 }
 
-# _sgt_is_sergeant_checkout_path <path>
+# _sgt_is_sergeant_checkout_root <dir>
 #
-# True when <path> looks like a file inside some Sergeant checkout's bin
-# directory, proven by that directory also holding a Sergeant runtime helper.
-# Used to decide whether an existing link belongs to Sergeant (safe to repoint)
-# or to the user (must be preserved).
+# True when <dir> is a Sergeant checkout: it carries the repository's mise.toml
+# and scripts/hooks tree alongside a Sergeant runtime helper in bin/.
 #
-# _sgt-lib.sh is included because it predates this manifest: a checkout made
-# before the manifest existed must still be recognised as Sergeant's, or an
-# upgrade would report ~38 of Sergeant's own links to the user as their assets.
-_sgt_is_sergeant_checkout_path() {
-  local candidate="$1" candidate_dir marker
-  case "$candidate" in
-    */bin/*) candidate_dir="${candidate%/*}" ;;
-    *) return 1 ;;
-  esac
+# _sgt-lib.sh is accepted as well as this manifest because it predates the
+# manifest: a checkout made before the manifest existed must still be recognised
+# as Sergeant's, or an upgrade would report ~38 of Sergeant's own links to the
+# user as their assets.
+_sgt_is_sergeant_checkout_root() {
+  local root="$1" marker
+  [[ -f "$root/mise.toml" && -d "$root/scripts/hooks" ]] || return 1
   for marker in _sgt-install-manifest.sh _sgt-lib.sh; do
-    [[ -f "$candidate_dir/$marker" ]] && return 0
+    [[ -f "$root/bin/$marker" ]] && return 0
   done
   return 1
+}
+
+# _sgt_is_sergeant_checkout_path <path>
+#
+# True when <path> is a file inside some Sergeant checkout's bin directory.
+#
+# The whole checkout must be identifiable, not just the directory holding the
+# file: sgt-install links its own runtime helpers into the target directory, so a
+# per-directory marker would make the install directory identify itself as a
+# checkout and every user symlink resolving inside it would look like Sergeant's
+# to reclaim.
+_sgt_is_sergeant_checkout_path() {
+  local candidate="$1" root
+  case "$candidate" in
+    */bin/*) root="${candidate%/bin/*}" ;;
+    *) return 1 ;;
+  esac
+  _sgt_is_sergeant_checkout_root "$root"
 }
 
 # _sgt_install_is_sergeant_hook <hook-target>
@@ -120,15 +145,24 @@ _sgt_is_sergeant_checkout_path() {
 # hook installed by a sibling checkout is Sergeant's to repoint, not a user
 # asset to preserve.
 _sgt_install_is_sergeant_hook() {
-  local candidate="$1" checkout marker
+  local candidate="$1" checkout
   case "$candidate" in
     */scripts/hooks/*) checkout="${candidate%/scripts/hooks/*}" ;;
     *) return 1 ;;
   esac
-  for marker in _sgt-install-manifest.sh _sgt-lib.sh; do
-    [[ -f "$checkout/bin/$marker" ]] && return 0
-  done
-  return 1
+  _sgt_is_sergeant_checkout_root "$checkout"
+}
+
+# _sgt_install_is_sergeant_hook_path <path>
+#
+# True when <path> merely looks like a Sergeant hook by position, whether or not
+# the checkout still exists. Used to reclaim a hook left dangling by a removed
+# checkout, which git silently ignores — leaving the pre-push gate inert.
+_sgt_install_is_sergeant_hook_path() {
+  case "$1" in
+    */scripts/hooks/*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # _sgt_install_resolve_link <target>
@@ -256,7 +290,21 @@ _sgt_install_managed_state() {
 # repository's own hooks directory is not the one git will read, so this returns
 # non-zero and the caller reports that hooks were not installed.
 _sgt_install_hooks_dir() {
-  local root="$1" configured resolved common
+  local root="$1" configured resolved common private
+  # A linked worktree shares the primary checkout's hooks directory. Writing
+  # there would repoint the primary's hook at the worktree, and once the worktree
+  # is removed git silently skips the dangling hook, leaving the gate inert.
+  private="$(git -C "$root" rev-parse --absolute-git-dir 2>/dev/null || true)"
+  common="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null || true)"
+  if [[ -n "$private" && -n "$common" ]]; then
+    case "$common" in
+      /*) ;;
+      *) common="$root/$common" ;;
+    esac
+    if [[ "$private" != "$common" ]]; then
+      return 1
+    fi
+  fi
   if configured="$(git -C "$root" config --local --path --get core.hooksPath 2>/dev/null)" && \
      [[ -n "$configured" ]]; then
     case "$configured" in

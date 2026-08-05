@@ -156,9 +156,10 @@ if "$dry_run" && "$verify_only"; then
 fi
 
 # Install mode links executables into INSTALL_DIR and then runs them, so it must
-# see that directory. The read-only modes deliberately do not extend PATH: they
-# report what the user's own shell can reach, matching `mise run check`.
-if ! "$dry_run" && ! "$verify_only"; then
+# see that directory, and --dry-run must share that view or its plan would promise
+# work the run then skips. --verify-only deliberately does not extend PATH: it
+# reports what the user's own shell can reach, matching `mise run check`.
+if ! "$verify_only"; then
   export PATH="$INSTALL_DIR:$PATH"
 fi
 
@@ -398,6 +399,23 @@ if "$verify_only"; then
     fi
   done <<< "$sources"
 
+  if [[ -z "$hooks_dst" ]]; then
+    if [[ -d "$ROOT_DIR/scripts/hooks" ]]; then
+      printf 'MANUAL HOOKS: no git hooks directory this checkout owns; install %s yourself for the pre-push gate.\n' \
+        "$ROOT_DIR/scripts/hooks"
+    fi
+  else
+    for hook in "$ROOT_DIR"/scripts/hooks/*; do
+      [[ -f "$hook" ]] || continue
+      if [[ "$(_sgt_install_hook_state "$hook" "$hooks_dst")" == 'linked' ]]; then
+        printf 'OK: git hook %s\n' "${hook##*/}"
+      else
+        printf 'MISSING: git hook %s at %s\n' "${hook##*/}" "$hooks_dst"
+        verify_failed=true
+      fi
+    done
+  fi
+
   # Sergeant's commands are only usable once the install directory is on PATH,
   # so a complete installation the shell cannot reach is still worth reporting.
   if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
@@ -489,8 +507,9 @@ for item in "${managed_tools[@]}"; do
   # runs, not by this one.
   # shellcheck disable=SC2016
   binary_path="$(mise exec "$tool_spec" -- sh -c 'command -v "$1"' _ "$command_name" 2>/dev/null || true)"
-  [[ -n "$binary_path" ]] || {
-    printf 'sgt-bootstrap: mise installed %s but did not expose %s\n' "$tool_spec" "$command_name" >&2
+  [[ -n "$binary_path" && -f "$binary_path" && -x "$binary_path" ]] || {
+    printf 'sgt-bootstrap: mise installed %s but did not expose a runnable %s (got %s)\n' \
+      "$tool_spec" "$command_name" "${binary_path:-nothing}" >&2
     exit 1
   }
   # Reclaiming a dangling or mise-owned link keeps a rerun able to repair the
@@ -555,7 +574,7 @@ done <<< "$sources"
 # still is not linked afterwards is a real failure.
 if [[ -z "$hooks_dst" ]]; then
   [[ -d "$ROOT_DIR/scripts/hooks" ]] && \
-    printf 'MANUAL: no git hooks directory this checkout owns; install %s yourself if you want the pre-push gate.\n' \
+    printf 'WARNING: the pre-push gate was NOT installed; no git hooks directory this checkout owns. Install %s yourself if you want it.\n' \
       "$ROOT_DIR/scripts/hooks"
 else
   for hook in "$ROOT_DIR"/scripts/hooks/*; do
@@ -566,6 +585,20 @@ else
     fi
   done
 fi
+
+# Reconcile the tools as well as the links: a published link to a path that has
+# since gone, or an installer that reported success without producing a usable
+# binary, must not read as a completed installation.
+for item in "${managed_tools[@]}" "${source_installed_tools[@]}"; do
+  case "$item" in
+    *'|'*) command_name="${item%%|*}" ;;
+    *) command_name="${item%%:*}" ;;
+  esac
+  tool_available "$command_name" && continue
+  [[ "$(_sgt_install_managed_state "$INSTALL_DIR/$command_name" '/mise/')" == 'present' ]] && continue
+  printf 'NOT INSTALLED: %s is still not usable after installation.\n' "$command_name" >&2
+  install_failed=true
+done
 
 report_manual_authentication 'MANUAL:'
 

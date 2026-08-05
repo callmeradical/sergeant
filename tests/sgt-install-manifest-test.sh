@@ -43,11 +43,21 @@ assert_state() {
     fail "expected link state '$expected' for ${source_file##*/}, got '$actual'"
 }
 
+# Builds a directory that is identifiable as a Sergeant checkout: bin/ with a
+# runtime helper, plus the mise.toml and scripts/hooks that distinguish a real
+# checkout from any directory that merely holds a helper.
+make_checkout() {
+  local root="$1" helper="${2:-_sgt-install-manifest.sh}"
+  mkdir -p "$root/bin" "$root/scripts/hooks"
+  cp "$ROOT_DIR/bin/$helper" "$root/bin/$helper"
+  : > "$root/mise.toml"
+  printf '#!/usr/bin/env bash\n' > "$root/bin/sgt-list"
+  printf '#!/usr/bin/env bash\n' > "$root/scripts/hooks/pre-push"
+}
+
 # A second checkout, so "another Sergeant clone" is a real path and not a guess.
 OTHER_ROOT="$TEST_ROOT/other-checkout"
-mkdir -p "$OTHER_ROOT/bin"
-cp "$ROOT_DIR/bin/_sgt-install-manifest.sh" "$OTHER_ROOT/bin/"
-printf '#!/usr/bin/env bash\n' > "$OTHER_ROOT/bin/sgt-list"
+make_checkout "$OTHER_ROOT"
 
 SOURCE="$ROOT_DIR/bin/sgt-list"
 
@@ -152,11 +162,39 @@ test_relative_link_to_a_users_own_command_is_a_conflict() {
 # A checkout predating this manifest is still Sergeant's, so an upgrade must not
 # report Sergeant's own links to the user as their assets.
 test_link_into_a_legacy_sergeant_checkout_is_stale() {
-  mkdir -p "$TEST_ROOT/s11" "$TEST_ROOT/legacy/bin"
-  cp "$ROOT_DIR/bin/_sgt-lib.sh" "$TEST_ROOT/legacy/bin/"
-  printf '#!/usr/bin/env bash\n' > "$TEST_ROOT/legacy/bin/sgt-list"
+  mkdir -p "$TEST_ROOT/s11"
+  make_checkout "$TEST_ROOT/legacy" _sgt-lib.sh
   ln -s "$TEST_ROOT/legacy/bin/sgt-list" "$TEST_ROOT/s11/sgt-list"
   assert_state "$SOURCE" "$TEST_ROOT/s11" stale
+}
+
+# sgt-install links its own helpers into the target directory, so a per-directory
+# marker would make that directory identify itself as a checkout and every user
+# symlink resolving inside it would look reclaimable.
+test_install_directory_does_not_identify_itself_as_a_checkout() {
+  mkdir -p "$TEST_ROOT/selfid/bin"
+  cp "$ROOT_DIR/bin/_sgt-install-manifest.sh" "$TEST_ROOT/selfid/bin/"
+  printf '#!/bin/sh\n' > "$TEST_ROOT/selfid/bin/wiki-daily-digest.py"
+  chmod +x "$TEST_ROOT/selfid/bin/wiki-daily-digest.py"
+  ln -s wiki-daily-digest.py "$TEST_ROOT/selfid/bin/wiki-daily-digest"
+  assert_state "$ROOT_DIR/bin/wiki-daily-digest" "$TEST_ROOT/selfid/bin" conflict
+}
+
+# A linked worktree shares its primary's hooks directory; writing there would
+# repoint the primary's hook and leave it dangling once the worktree is removed.
+test_hooks_dir_refuses_a_linked_worktree() {
+  local status
+  command -v git >/dev/null 2>&1 || { printf 'SKIP: worktree refusal (no git)\n'; return 0; }
+  git init -q "$TEST_ROOT/wtp"
+  ( cd "$TEST_ROOT/wtp" && \
+    git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init && \
+    git worktree add -q "$TEST_ROOT/wtlinked" -b linked ) >/dev/null 2>&1
+  set +e
+  _sgt_install_hooks_dir "$TEST_ROOT/wtlinked" >/dev/null
+  status=$?
+  set -e
+  [[ "$status" -ne 0 ]] || \
+    fail 'a linked worktree was given its primary checkout hooks directory'
 }
 
 # Logical `cd`/`pwd` collapse `..` lexically and leave a symlinked parent
@@ -259,14 +297,18 @@ test_hooks_dir_is_absolute_for_a_plain_clone() {
 
 # A linked worktree's private git dir has no hooks/ and git never reads one
 # there, so the common directory is the only correct answer.
-test_hooks_dir_resolves_to_the_common_dir_for_a_worktree() {
+# The primary checkout of a repository that has worktrees still owns its own
+# hooks directory; only the linked worktrees are refused.
+test_hooks_dir_resolves_for_the_primary_of_a_worktree_repository() {
   local resolved
-  command -v git >/dev/null 2>&1 || { printf 'SKIP: worktree hooks dir (no git)\n'; return 0; }
+  command -v git >/dev/null 2>&1 || { printf 'SKIP: primary hooks dir (no git)\n'; return 0; }
   git init -q "$TEST_ROOT/h2"
-  ( cd "$TEST_ROOT/h2" &&     git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init &&     git worktree add -q "$TEST_ROOT/h2wt" -b wt ) >/dev/null 2>&1
-  resolved="$(_sgt_install_hooks_dir "$TEST_ROOT/h2wt")"
+  ( cd "$TEST_ROOT/h2" && \
+    git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init && \
+    git worktree add -q "$TEST_ROOT/h2wt" -b wt ) >/dev/null 2>&1
+  resolved="$(_sgt_install_hooks_dir "$TEST_ROOT/h2")"
   [[ "$resolved" == "$TEST_ROOT/h2/.git/hooks" ]] || \
-    fail "worktree hooks dir resolved to '$resolved' instead of the common dir"
+    fail "primary hooks dir resolved to '$resolved'"
 }
 
 test_hooks_dir_honours_a_repo_local_core_hooks_path() {
@@ -312,9 +354,8 @@ test_hooks_dir_refuses_a_path_outside_the_checkout() {
 
 test_hook_state_classifies_ownership() {
   local hooks
-  mkdir -p "$TEST_ROOT/hk/scripts/hooks" "$TEST_ROOT/hk/bin" "$TEST_ROOT/hkdir"
-  cp "$ROOT_DIR/bin/_sgt-install-manifest.sh" "$TEST_ROOT/hk/bin/"
-  printf '#!/bin/sh\n' > "$TEST_ROOT/hk/scripts/hooks/pre-push"
+  make_checkout "$TEST_ROOT/hk"
+  mkdir -p "$TEST_ROOT/hkdir"
   hooks="$TEST_ROOT/hkdir"
 
   [[ "$(_sgt_install_hook_state "$TEST_ROOT/hk/scripts/hooks/pre-push" "$hooks")" == absent ]] || \
@@ -324,9 +365,7 @@ test_hook_state_classifies_ownership() {
   [[ "$(_sgt_install_hook_state "$TEST_ROOT/hk/scripts/hooks/pre-push" "$hooks")" == linked ]] || \
     fail 'an exact hook link was not reported linked'
 
-  mkdir -p "$TEST_ROOT/sib/scripts/hooks" "$TEST_ROOT/sib/bin"
-  cp "$ROOT_DIR/bin/_sgt-install-manifest.sh" "$TEST_ROOT/sib/bin/"
-  printf '#!/bin/sh\n' > "$TEST_ROOT/sib/scripts/hooks/pre-push"
+  make_checkout "$TEST_ROOT/sib"
   ln -sfn "$TEST_ROOT/sib/scripts/hooks/pre-push" "$hooks/pre-push"
   [[ "$(_sgt_install_hook_state "$TEST_ROOT/hk/scripts/hooks/pre-push" "$hooks")" == stale ]] || \
     fail "another Sergeant checkout's hook was not reported stale"
@@ -427,6 +466,8 @@ test_directory_at_target_is_a_conflict
 test_link_to_a_directory_is_a_conflict
 test_relative_link_to_a_users_own_command_is_a_conflict
 test_link_into_a_legacy_sergeant_checkout_is_stale
+test_install_directory_does_not_identify_itself_as_a_checkout
+test_hooks_dir_refuses_a_linked_worktree
 test_relative_link_resolves_physically_through_a_symlinked_parent
 test_managed_absent_target_is_absent
 test_managed_dangling_link_is_reclaimable
@@ -437,7 +478,7 @@ test_managed_directory_is_a_conflict
 test_managed_relative_link_to_a_users_own_file_is_a_conflict
 test_managed_relative_link_to_an_executable_is_present
 test_hooks_dir_is_absolute_for_a_plain_clone
-test_hooks_dir_resolves_to_the_common_dir_for_a_worktree
+test_hooks_dir_resolves_for_the_primary_of_a_worktree_repository
 test_hooks_dir_honours_a_repo_local_core_hooks_path
 test_hooks_dir_refuses_a_global_core_hooks_path
 test_hooks_dir_refuses_a_path_outside_the_checkout
