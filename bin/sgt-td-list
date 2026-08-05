@@ -43,6 +43,12 @@
 #   two answers are merged.  A narrower view is opt-in through --status, and the
 #   active view is always named in the human header.
 #
+#   One status and one priority per invocation: td's -s is a stringArray that
+#   accumulates, and a second value would widen the answer past what the header
+#   claims, so a repeated status or priority is refused instead.  td flags that
+#   would re-point or widen the query — -a, --deferred, -w/--work-dir, and any
+#   bundled short cluster — are refused for the same reason.
+#
 #   Narrowing uses td's own -s/-p flags.  td applies its closed-and-deferred
 #   exclusion to those but not to `--filter`, so `--filter priority=P2` answers
 #   with closed tasks while `-p P2` does not.  A caller-supplied `--filter`
@@ -128,6 +134,18 @@ while [[ $# -gt 0 ]]; do
     --deferred)
       _die "--deferred is not needed: the default view already includes deferred tasks"
       ;;
+    -w|--work-dir|-w=*|--work-dir=*|-w?*)
+      # Each repo's work directory comes from the project configuration.  A
+      # forwarded copy would land last and win, so every repo would be read from
+      # one path while its tasks were still published under other repo names.
+      _die "the work directory comes from $PROJECT.yaml and cannot be overridden; use --repos to choose repos"
+      ;;
+    -[aormh]?*)
+      # A bundled cluster hides flags this command has to account for: -ra smuggles
+      # -a past its refusal, -rf past the --filter disclosure, -an5 past the limit
+      # accounting.  Refuse the bundle rather than reimplement cobra's parser.
+      _die "bundled short flags are not supported: pass ${1} as separate flags"
+      ;;
     *)               EXTRA_FLAGS+=("$1");    shift   ;;
   esac
 done
@@ -158,11 +176,27 @@ fi
 # label says that instead of claiming a set nobody verified.
 CALLER_FILTER=false
 CALLER_SELECTION=false
+skip_value=false
 if [[ "${#EXTRA_FLAGS[@]}" -gt 0 ]]; then
   for ((i=0; i<${#EXTRA_FLAGS[@]}; i++)); do
+    # A flag's own value is not a flag: `--limit -1` must not read as a narrowing.
+    if $skip_value; then
+      skip_value=false
+      continue
+    fi
     case "${EXTRA_FLAGS[$i]}" in
-      --filter|-f|--filter=*|-f?*)          CALLER_FILTER=true ;;
-      --limit|-n|--limit=*|-n=*|-n[0-9]*)    : ;;  # accounted for by the cap logic
+      --filter|-f)
+        CALLER_FILTER=true
+        skip_value=true
+        ;;
+      --filter=*|-f?*)                       CALLER_FILTER=true ;;
+      --limit|-n)                            skip_value=true ;;  # the cap logic owns it
+      --limit=*|-n=*|-n[0-9]*)               : ;;
+      --search|-q|--type|-t|--id|-i|--labels|-l|--epic|--parent|--sort|--format|\
+      --points|--created|--updated|--closed|--implementer|--reviewer)
+        CALLER_SELECTION=true
+        skip_value=true
+        ;;
       -*)                                    CALLER_SELECTION=true ;;
     esac
   done
@@ -226,11 +260,11 @@ _truncation_warn() {
 }
 
 _ceiling_warn() {
-  # _ceiling_warn <repo> <proven-lower-bound> <cap-description>
-  # Used at the escalation ceiling, which is the one cap that stops us from
-  # learning the true total, so the message claims only what was proven.
-  printf 'WARNING: %s: results truncated by %s; at least %s task(s) exist, so this report is incomplete\n' \
-    "$1" "$3" "$2" >&2
+  # _ceiling_warn <repo> <published-count> <which-half>
+  # The escalation ceiling is the one cap that stops us from learning the true
+  # total, so the message claims only what the published rows already prove.
+  printf 'WARNING: %s: results truncated by the SGT_TD_LIST_MAX_LIMIT ceiling of %s (raise it to see the rest)%s; more than %s task(s) exist, so this report is incomplete\n' \
+    "$1" "$TD_LIST_MAX_LIMIT" "$3" "$2" >&2
   _mark_incomplete
 }
 
@@ -460,8 +494,8 @@ _td_read_complete() {
       return 0
     fi
     if [[ "$limit" -ge "$TD_LIST_MAX_LIMIT" ]]; then
-      _ceiling_warn "$rname" "$total" \
-        "the SGT_TD_LIST_MAX_LIMIT ceiling of $TD_LIST_MAX_LIMIT (raise it to see the rest, including this repo's deferred tasks, which were not read)"
+      # The caller warns after merging both halves, so the reported bound counts
+      # every row actually published and names which half the ceiling stopped.
       printf '%s\n%s' "$published" "$(_payload_json "$payload")"
       return 2
     fi
@@ -509,7 +543,11 @@ _td_list_tasks() {
 
   base="$(_td_read_complete "$rname" "$repo_path")" || read_status=$?
   [[ "$read_status" -ne 1 ]] || return 1
-  [[ "$read_status" -ne 2 ]] || capped=true
+  local capped_half=""
+  if [[ "$read_status" -eq 2 ]]; then
+    capped=true
+    capped_half=", and this repo's deferred tasks were not read at all"
+  fi
 
   if $INCLUDE_DEFERRED && ! $capped; then
     # td hides deferred tasks from its default answer and returns them only from
@@ -520,6 +558,7 @@ _td_list_tasks() {
       deferred="$(_payload_json "$deferred_payload")"
     elif [[ "$deferred_status" -eq 2 ]]; then
       capped=true
+      capped_half=", reached while reading this repo's deferred tasks"
       deferred="$(_payload_json "$deferred_payload")"
     fi
     # deferred_status 1 already warned and marked the report incomplete.
@@ -532,6 +571,10 @@ _td_list_tasks() {
   head="$(_payload_head "$payload")"
   total="$head"
   json="$(_payload_json "$payload")"
+
+  # One warning per repo, after both halves are known, so the bound counts every
+  # published row instead of one read's return value.
+  $capped && _ceiling_warn "$rname" "$total" "$capped_half"
 
   if $USER_LIMIT_SET && [[ "$total" -gt "$USER_LIMIT" ]]; then
     # The whole repo was read, so the caller's cap only limits what is printed

@@ -97,6 +97,11 @@ EOF
 
 _make_repo victim 7
 
+# One non-deferred task and three deferred ones: raising the ceiling to 2 makes
+# the base read complete and the deferred read hit the ceiling.
+_make_repo deferheavy 4
+printf '2 3 4\n' > "$dev_root/deferheavy/.td-task-deferred"
+
 # 10 tasks cycling open, in_progress, open, blocked, open, in_review, open,
 # closed, in_progress, blocked → 9 non-closed, of which 4 are open.
 # A repo with no open tasks at all: under the old status=open default it
@@ -133,6 +138,13 @@ name: mixed
 repos:
   - name: mixed
     path: mixed
+EOF
+
+cat > "$config/deferheavy.yaml" <<EOF
+name: deferheavy
+repos:
+  - name: deferheavy
+    path: deferheavy
 EOF
 
 cat > "$config/notcloned.yaml" <<EOF
@@ -537,9 +549,9 @@ if ! grep -qiF 'huge' "$err" || ! grep -qi 'truncat' "$err"; then
   printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
   _fail "ceiling_warning: expected a truncation warning naming 'huge' and the count"
 fi
-grep -qF 'at least 11 task(s)' "$err" || {
+grep -qF 'more than 10 task(s)' "$err" || {
   printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
-  _fail "ceiling_warning: warning must report the proven lower bound, not an unverified count"
+  _fail "ceiling_warning: the bound must be what the published rows prove"
 }
 printf 'ceiling_warning: ok\n'
 
@@ -1095,7 +1107,7 @@ grep -qF '── edge (10)' "$out" || {
   printf 'actual output:\n%s\n' "$(cat "$out")" >&2
   _fail "ceiling_boundary: the ceiling must publish exactly SGT_TD_LIST_MAX_LIMIT rows"
 }
-grep -qF 'at least 11 task(s)' "$err" || {
+grep -qF 'more than 10 task(s)' "$err" || {
   printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
   _fail "ceiling_boundary: the warning must prove more tasks exist than were published"
 }
@@ -1631,7 +1643,7 @@ printf 'td_error_omits_usage_banner: ok\n'
 out="$TEST_ROOT/ceildef.out"; err="$TEST_ROOT/ceildef.err"
 _run "$out" "$err" SGT_TD_LIST_LIMIT=2 SGT_TD_LIST_MAX_LIMIT=2 -- mixed
 _expect_status 2 ceiling_names_unread_deferred "$err"
-grep -qF 'deferred tasks, which were not read' "$err" || {
+grep -qF "deferred tasks were not read at all" "$err" || {
   printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
   _fail "ceiling_names_unread_deferred: the ceiling must say the deferred half went unread"
 }
@@ -1640,5 +1652,77 @@ grep -qF 'deferred tasks, which were not read' "$err" || {
   _fail "ceiling_names_unread_deferred: no deferred read is issued once the ceiling is hit"
 }
 printf 'ceiling_names_unread_deferred: ok\n'
+
+# ── 38. Bundled short flags and a forwarded work directory are refused ─────────
+
+# A bundled cluster used to smuggle -a past its refusal, -f past the --filter
+# disclosure and -n past the limit accounting, all under an unchanged header.
+for bundle in -ra -ar "-as" "-ap" -an5 -rf -of -mf; do
+  out="$TEST_ROOT/bundle.out"; err="$TEST_ROOT/bundle.err"
+  _run "$out" "$err" -- mixed "$bundle" closed
+  _expect_status 1 "bundled_short_flags_refused($bundle)" "$err"
+  grep -qF 'bundled short flags are not supported' "$err" || {
+    printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+    _fail "bundled_short_flags_refused($bundle): a bundle hides flags this command must account for"
+  }
+  [[ ! -s "$out" ]] || {
+    printf 'actual stdout:\n%s\n' "$(cat "$out")" >&2
+    _fail "bundled_short_flags_refused($bundle): no report may be printed"
+  }
+done
+printf 'bundled_short_flags_refused: ok\n'
+
+# A forwarded work directory would read every repo from one path while still
+# publishing the rows under each repo's own name.
+for wd in "-w" "--work-dir"; do
+  out="$TEST_ROOT/wd.out"; err="$TEST_ROOT/wd.err"
+  _run "$out" "$err" -- mixed "$wd" "$dev_root/small"
+  _expect_status 1 "work_dir_override_refused($wd)" "$err"
+  grep -qF 'cannot be overridden' "$err" || {
+    printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+    _fail "work_dir_override_refused($wd): the work directory belongs to the project configuration"
+  }
+  [[ ! -s "$out" ]] || _fail "work_dir_override_refused($wd): no report may be printed"
+done
+out="$TEST_ROOT/wd.out"; err="$TEST_ROOT/wd.err"
+_run "$out" "$err" -- mixed "--work-dir=$dev_root/small"
+_expect_status 1 work_dir_override_refused_equals "$err"
+grep -qF 'cannot be overridden' "$err" || _fail "work_dir_override_refused_equals: --work-dir= must be refused too"
+printf 'work_dir_override_refused: ok\n'
+
+# ── 39. A flag's own value is never mistaken for a flag ───────────────────────
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/negval.out"; err="$TEST_ROOT/negval.err"
+_run "$out" "$err" -- mixed --limit -1
+_expect_status 0 negative_limit_value_is_not_a_flag "$err"
+grep -qF '[all non-closed]' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "negative_limit_value_is_not_a_flag: -1 is a value, so no narrowing caveat belongs in the header"
+}
+printf 'negative_limit_value_is_not_a_flag: ok\n'
+
+# ── 40. A ceiling reached in the deferred half says which half it stopped ──────
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/defceil.out"; err="$TEST_ROOT/defceil.err"
+_run "$out" "$err" SGT_TD_LIST_LIMIT=2 SGT_TD_LIST_MAX_LIMIT=2 -- deferheavy
+_expect_status 2 ceiling_in_deferred_half "$err"
+grep -qF "reached while reading this repo's deferred tasks" "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "ceiling_in_deferred_half: the warning must name the half the ceiling stopped"
+}
+! grep -qF 'were not read at all' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "ceiling_in_deferred_half: the deferred tasks were read, so claiming otherwise is false"
+}
+# The bound must exceed the rows actually printed.
+printed="$(grep -cE '^   td-' "$out")"
+bound="$(sed -n 's/.*more than \([0-9]*\) task(s).*/\1/p' "$err" | head -1)"
+[[ -n "$bound" && "$bound" -ge "$printed" ]] || {
+  printf 'printed=%s bound=%s\nstderr:\n%s\n' "$printed" "$bound" "$(cat "$err")" >&2
+  _fail "ceiling_in_deferred_half: the bound must account for every published row"
+}
+printf 'ceiling_in_deferred_half: ok (printed %s, bound %s)\n' "$printed" "$bound"
 
 printf '\nAll sgt-td-list tests passed.\n'
