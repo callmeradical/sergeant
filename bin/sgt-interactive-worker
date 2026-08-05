@@ -83,8 +83,13 @@ fi
 # harness reports itself ready (see _promote_launch_record), so a harness that
 # rejects the pin and exits never leaves evidence claiming the model ran.
 #
-# provider_verified says whether the invocation itself proves the provider. It is
-# false for an argv-bare transport, which never receives a provider at all.
+# provider_verified and variant_verified say whether the launch invocation itself
+# proves that axis.  Both pinned model transports carry the provider explicitly,
+# so provider_verified is true whenever a model is pinned and false only when
+# nothing is.  variant_verified is always false today: the variant transport is
+# genuine, but no supported harness reports back which variant it resolved, so
+# claiming otherwise would be exactly the unevidenced assertion this contract
+# exists to prevent.
 _write_launch_record() {
   local state="$1" tmp="$REPO_STATE/launch_record.tmp.$$"
   {
@@ -95,6 +100,7 @@ _write_launch_record() {
     printf 'model_source=%s\n' "$AGENT_MODEL_SOURCE"
     printf 'provider=%s\n' "$SGT_AGENT_MODEL_PROVIDER"
     printf 'provider_verified=%s\n' "$SGT_LAUNCH_PROVIDER_VERIFIED"
+    printf 'variant_verified=%s\n' "$SGT_LAUNCH_VARIANT_VERIFIED"
     printf 'model_id=%s\n' "$SGT_AGENT_MODEL_ID"
     printf 'variant=%s\n' "$SGT_AGENT_MODEL_VARIANT"
     printf 'model_transport=%s\n' "$SGT_LAUNCH_MODEL_TRANSPORT"

@@ -159,6 +159,12 @@ _assert_evidence_matches pinned-opencode
 [[ "$(_field "$record" variant)" == "" ]]
 [[ "$(_field "$record" model_source)" == "flag" ]]
 [[ "$(_field "$record" model_transport)" == "argv-qualified" ]]
+# A pinned model carries its provider in the invocation, so that axis is proven.
+[[ "$(_field "$record" provider_verified)" == "true" ]] || {
+  printf 'FAIL: a pinned model recorded provider_verified=%q\n' \
+    "$(_field "$record" provider_verified)" >&2
+  exit 1
+}
 
 # The pinned model, not the harness's ambient default, is what ran.
 [[ "$(_field "$observed" observed_model)" != "anthropic/claude-haiku-4-5" ]] || {
@@ -232,6 +238,13 @@ assert agent["variant"] == "high", agent
 PY_DEF
 [[ "$(_field "$record" variant)" == "high" ]]
 [[ "$(_field "$record" variant_transport)" == "agent-definition" ]]
+# The variant transport is genuine but unverifiable: no supported harness reports
+# back which variant it resolved, so the evidence must not claim it does.
+[[ "$(_field "$record" variant_verified)" == "false" ]] || {
+  printf 'FAIL: a variant was recorded as verified without a read-back: %q\n' \
+    "$(_field "$record" variant_verified)" >&2
+  exit 1
+}
 # The two halves of the tuple travel by two different routes, so the evidence is
 # checked against both: the model over argv, the variant over the definition.
 [[ "$(_field "$observed" observed_model)" == \
@@ -262,7 +275,10 @@ if command -v opencode >/dev/null 2>&1; then
     if [[ "$baseline_list" == *"sgt-pinned"* ]]; then
       printf 'note: sgt-pinned is ambient here; corroboration inconclusive\n'
     elif [[ "$harness_list" == *"sgt-pinned"* ]]; then
-      printf 'note: opencode resolved the generated agent definition\n'
+      # Proves the harness LOADS the definition. It cannot prove which variant the
+      # harness resolved: the listing prints the same output for a bogus variant,
+      # which is exactly why variant_verified stays false.
+      printf 'note: opencode loaded the generated definition (transport confirmed, variant not verifiable)\n'
     else
       printf 'FAIL: opencode did not register the generated agent definition\n' >&2
       exit 1
@@ -295,6 +311,18 @@ record="$TEST_ROOT/unpinned/state/launch_record"
 [[ "$(_field "$record" model)" == "unpinned" ]]
 [[ "$(_field "$record" model_source)" == "unpinned" ]]
 [[ "$(_field "$record" provider)" == "" ]]
+# Nothing was pinned, so nothing is proven.
+[[ "$(_field "$record" provider_verified)" == "false" ]]
+
+# ── 4b. Launch evidence records intent, not proof, until the harness comes up ──
+# A worker whose harness never reports ready must leave launch_state=intended, so
+# evidence can never claim a model ran when the harness died on startup.
+
+[[ "$(_field "$record" launch_state)" == "intended" ]] || {
+  printf 'FAIL: a harness that never reported ready recorded launch_state=%q\n' \
+    "$(_field "$record" launch_state)" >&2
+  exit 1
+}
 
 # ── 5. Fleet state with no tuple at all is treated as unpinned ───────────────
 # Fleet directories created before this contract existed must keep launching.
@@ -318,7 +346,7 @@ fi
 # fleet record must not silently drop the pin and inherit the ambient default.
 
 _reject_launch reject-unmeasured claude anthropic/claude-opus-5 \
-  'launch-time model surface is unmeasured on this host'
+  'Sergeant has not measured claude launch-time model pinning'
 _reject_launch reject-malformed opencode 'claude-opus-5' \
   'model must be provider/model'
 

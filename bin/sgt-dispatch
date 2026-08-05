@@ -158,7 +158,8 @@ fi
 # because recording "model=unpinned, source=flag" would misstate provenance.
 if [[ "$AGENT_MODEL_SOURCE" != "unpinned" ]]; then
   _sgt_is_agent_model_tuple "$AGENT_MODEL" || \
-    _die "model must be provider/model or provider/model:variant, with a [a-z0-9-] provider and [A-Za-z0-9._-] model: $AGENT_MODEL"
+    _die "$(_sgt_agent_launch_reject_message "$(basename "$AGENT_CMD")" "$AGENT_MODEL" \
+      malformed-tuple)"
 fi
 _sgt_require_agent_model "$(basename "$AGENT_CMD")" "$AGENT_MODEL"
 if [[ -n "$ORIGIN_PROFILE" || -n "$CORRELATION_ID" ]]; then

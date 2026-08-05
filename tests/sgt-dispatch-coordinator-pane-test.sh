@@ -97,15 +97,28 @@ case "$1" in
       printf '0|%s|3333|333333|bash\n' "$target"
       exit 0
     fi
+    # Ownership marker lookup. Real tmux prints an empty line for a pane that
+    # has no such option set.
+    if [[ "$*" == *"@sgt_coordinator"* ]]; then
+      if [[ -n "${AMBIGUOUS_MANAGED_PANES:-}" ]]; then
+        printf '%s\n' "${SGT_MARKER:-sergeant-managed-coordinator}"
+      elif [[ "$target" == "$MANAGED_PANE_ID" && -f "$MANAGED_MARKER_LOG" ]]; then
+        cat "$MANAGED_MARKER_LOG"
+      else
+        printf '\n'
+      fi
+      exit 0
+    fi
     for ambiguous in ${AMBIGUOUS_MANAGED_PANES:-}; do
       if [[ "$target" == "$ambiguous" ]]; then
-        printf '0|%s|4444|444444|%s\n' "$target" "$MANAGED_READER_COMMAND"
+        printf '0|%s|4444|444444|%s\n' "$target" "$ESCAPED_READER_COMMAND"
         exit 0
       fi
     done
     if [[ "$target" == "$MANAGED_PANE_ID" ]]; then
-      printf '0|%s|2222|222222|%s\n' "$target" \
-        "$(cat "$MANAGED_COMMAND_LOG" 2>/dev/null || printf 'managed-command')"
+      # Real tmux renders pane_start_command quoted and backslash-escaped, which
+      # is exactly why ownership is not inferred from it.
+      printf '0|%s|2222|222222|%s\n' "$target" "$ESCAPED_READER_COMMAND"
       exit 0
     fi
     if [[ "$target" == "%42" ]]; then
@@ -116,6 +129,12 @@ case "$1" in
     exit 1
     ;;
   new-session) exit 0 ;;
+  set-option)
+    # Only the managed ownership marker is modelled.
+    if [[ "$*" == *"@sgt_coordinator"* ]]; then
+      printf '%s\n' "${!#}" > "$MANAGED_MARKER_LOG"
+    fi
+    ;;
   new-window)
     # A managed coordinator window is created with -n sgt-coordinator; every
     # other new-window call is a worker pane.
@@ -132,7 +151,7 @@ case "$1" in
   kill-pane) ;;
   kill-window)
     printf '%s\n' "$*" >> "$KILL_WINDOW_LOG"
-    rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG"
+    rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG" "$MANAGED_MARKER_LOG"
     ;;
 esac
 EOF
@@ -177,6 +196,12 @@ MANAGED_PANE_ID='%77'
 MANAGED_COMMAND_LOG="$TEST_ROOT/managed-command"
 MANAGED_EXISTS_FLAG="$TEST_ROOT/managed-exists"
 MANAGED_CREATE_LOG="$TEST_ROOT/managed-create.log"
+MANAGED_MARKER_LOG="$TEST_ROOT/managed-marker"
+# pane_start_command as REAL tmux renders it: quoted and backslash-escaped. The
+# fixture must not replay the raw command, or a regression to comparing against
+# this field would pass here while failing against a live server.
+ESCAPED_READER_COMMAND='"while IFS= read -r sgt_line; do printf \"%s\\n\" \"\$sgt_line\"; done; exec sleep 2147483647"'
+
 # The exact reader command Sergeant creates its managed pane with, read from the
 # shared library so the fixture cannot drift from the implementation.
 MANAGED_READER_COMMAND="$(
@@ -206,6 +231,8 @@ _dispatch_no_tmux() {
     MANAGED_EXISTS_FLAG="$MANAGED_EXISTS_FLAG" \
     MANAGED_CREATE_LOG="$MANAGED_CREATE_LOG" KILL_WINDOW_LOG="$KILL_WINDOW_LOG" \
     MANAGED_READER_COMMAND="$MANAGED_READER_COMMAND" \
+    MANAGED_MARKER_LOG="$MANAGED_MARKER_LOG" \
+    ESCAPED_READER_COMMAND="$ESCAPED_READER_COMMAND" \
     ${FOREIGN_MANAGED_PANE:+FOREIGN_MANAGED_PANE="$FOREIGN_MANAGED_PANE"} \
     ${AMBIGUOUS_MANAGED_PANES:+AMBIGUOUS_MANAGED_PANES="$AMBIGUOUS_MANAGED_PANES"} \
     SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
@@ -276,6 +303,11 @@ case "$managed_command" in
     exit 1
     ;;
 esac
+# Ownership is stamped as a pane option, which is what later adoption checks.
+[[ "$(cat "$MANAGED_MARKER_LOG" 2>/dev/null || true)" == "sergeant-managed-coordinator" ]] || {
+  printf 'FAIL: the managed coordinator pane was not stamped with its ownership marker\n' >&2
+  exit 1
+}
 
 # ── 2. A managed coordinator pane is reused, not duplicated ──────────────────
 # The managed window is selected when it already exists, so repeated dispatches
@@ -335,7 +367,8 @@ LIVE_PANES='%11' TMUX=fixture TMUX_PANE='%11' \
   PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/in-pane.log" \
   MANAGED_PANE_ID="$MANAGED_PANE_ID" MANAGED_COMMAND_LOG="$MANAGED_COMMAND_LOG" \
   MANAGED_EXISTS_FLAG="$MANAGED_EXISTS_FLAG" KILL_WINDOW_LOG="$KILL_WINDOW_LOG" \
-  MANAGED_CREATE_LOG="$MANAGED_CREATE_LOG" \
+  MANAGED_CREATE_LOG="$MANAGED_CREATE_LOG" MANAGED_MARKER_LOG="$MANAGED_MARKER_LOG" \
+  ESCAPED_READER_COMMAND="$ESCAPED_READER_COMMAND" \
   SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
   SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-dispatch" test 'In pane coordinator' --repos app >/dev/null
@@ -355,7 +388,8 @@ output="$(DEAD_PANES='%12' TMUX=fixture TMUX_PANE='%12' \
   PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/dead-ambient.log" \
   MANAGED_PANE_ID="$MANAGED_PANE_ID" MANAGED_COMMAND_LOG="$MANAGED_COMMAND_LOG" \
   MANAGED_EXISTS_FLAG="$MANAGED_EXISTS_FLAG" KILL_WINDOW_LOG="$KILL_WINDOW_LOG" \
-  MANAGED_CREATE_LOG="$MANAGED_CREATE_LOG" \
+  MANAGED_CREATE_LOG="$MANAGED_CREATE_LOG" MANAGED_MARKER_LOG="$MANAGED_MARKER_LOG" \
+  ESCAPED_READER_COMMAND="$ESCAPED_READER_COMMAND" \
   SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
   SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-dispatch" test 'Dead ambient coordinator' --repos app 2>&1)"
@@ -371,7 +405,7 @@ set -e
 # "sgt-coordinator" — a shell, an editor — would become the coordinator target
 # and an injected notification would execute in it.
 
-rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG" "$MANAGED_CREATE_LOG"
+rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG" "$MANAGED_CREATE_LOG" "$MANAGED_MARKER_LOG"
 FOREIGN_MANAGED_PANE='%88' _reject_no_tmux foreign-window 'Foreign coordinator window' \
   'could not create or select the managed coordinator pane' --managed-coordinator-pane
 [[ ! -e "$MANAGED_CREATE_LOG" ]] || {
@@ -399,7 +433,7 @@ AMBIGUOUS_MANAGED_PANES='%91 %92' _reject_no_tmux ambiguous-window \
 # path GH #172 requires: exactly the window this invocation created is removed,
 # and no fleet state survives.
 
-rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG" "$MANAGED_CREATE_LOG" "$KILL_WINDOW_LOG"
+rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG" "$MANAGED_CREATE_LOG" "$KILL_WINDOW_LOG" "$MANAGED_MARKER_LOG"
 before="$(_fleet_task_count)"
 set +e
 output="$(_dispatch_no_tmux rollback 'Rollback coordinator' \
@@ -444,7 +478,7 @@ set -e
 # ── 13. --dry-run creates no tmux state ──────────────────────────────────────
 
 rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG" "$MANAGED_CREATE_LOG" \
-  "$KILL_WINDOW_LOG" "$TEST_ROOT/dry-run.log"
+  "$KILL_WINDOW_LOG" "$MANAGED_MARKER_LOG" "$TEST_ROOT/dry-run.log"
 before="$(_fleet_task_count)"
 if ! _dispatch_no_tmux dry-run 'Dry run coordinator' \
   --managed-coordinator-pane --dry-run >/dev/null 2>&1; then

@@ -60,19 +60,26 @@ AGENT_CMD="${SERGEANT_AGENT:-$(_sgt_detect_agent)}"
 #                        its only launch-time selector; this is legitimate
 #                        because Sergeant controls the worker environment at
 #                        spawn.
-#        unmeasured      the harness is not installed here, so its launch-time
-#                        model surface has not been observed.  A pin fails closed
-#                        because it cannot be verified, NOT because the harness
-#                        is known to lack the capability.
+#        unmeasured      Sergeant has not measured this harness's launch-time
+#                        model surface.  A pin fails closed because Sergeant
+#                        cannot honor what it has not measured, NOT because the
+#                        harness is known to lack the capability.  The verdict is
+#                        about Sergeant's knowledge, so the diagnostic must not
+#                        claim anything about the caller's host.
 #
 #   2. variant_transport — how a pinned variant reaches the harness.
 #        agent-definition  the harness has no --variant flag, but it accepts
 #                          "--agent <name>" at launch and its agent definitions
 #                          carry a first-class "variant" field.  Sergeant writes
 #                          a fleet-owned definition carrying the pinned model and
-#                          variant and launches against it.  Indirect but
-#                          genuine: measured by loading such a definition and
-#                          observing the harness register the agent.
+#                          variant and launches against it.  Measured: the harness
+#                          does load such a definition and register the agent.
+#                          TRANSPORT ONLY, NOT VERIFICATION.  The harness exposes
+#                          no launch-time surface that reports which variant it
+#                          resolved (its agent listing prints the same output for
+#                          a bogus variant), so a launch on this transport records
+#                          variant_verified=false.  Tracked separately; do not
+#                          upgrade that field without a measured read-back.
 #        unknown           no launch-time variant selector has been found for
 #                          this harness.  A pinned variant fails closed naming
 #                          the harness and this reason.
@@ -146,6 +153,7 @@ SGT_LAUNCH_VARIANT_TRANSPORT="none"
 SGT_LAUNCH_DEFINITION=""
 SGT_LAUNCH_PROVIDER_SCOPE=""
 SGT_LAUNCH_PROVIDER_VERIFIED="false"
+SGT_LAUNCH_VARIANT_VERIFIED="false"
 SGT_LAUNCH_BASE_ARGV=()
 SGT_LAUNCH_MODEL_ARGV=()
 SGT_LAUNCH_MODEL_ENV=()
@@ -197,6 +205,7 @@ _sgt_resolve_agent_launch() {
   SGT_LAUNCH_VARIANT_TRANSPORT="none"
   SGT_LAUNCH_PROVIDER_SCOPE=""
   SGT_LAUNCH_PROVIDER_VERIFIED="false"
+  SGT_LAUNCH_VARIANT_VERIFIED="false"
   SGT_LAUNCH_BASE_ARGV=()
   SGT_LAUNCH_MODEL_ARGV=()
   SGT_LAUNCH_MODEL_ENV=()
@@ -260,7 +269,7 @@ _sgt_resolve_agent_launch() {
       # The harness has no --variant flag but does accept "--agent <name>", and
       # its agent definitions carry a variant field.  Launch against a
       # Sergeant-generated definition that pins both model and variant.
-      SGT_LAUNCH_MODEL_ARGV=("${SGT_LAUNCH_MODEL_ARGV[@]}" \
+      SGT_LAUNCH_MODEL_ARGV=("${SGT_LAUNCH_MODEL_ARGV[@]+${SGT_LAUNCH_MODEL_ARGV[@]}}" \
         --agent "$SGT_AGENT_VARIANT_AGENT_NAME")
       [[ -n "$state_dir" ]] || return 0
       SGT_LAUNCH_DEFINITION="$state_dir/opencode-config.json"
@@ -290,7 +299,7 @@ _sgt_agent_launch_reject_message() {
         "$harness"
       ;;
     model-transport-unmeasured)
-      printf '%s cannot be pinned to %s here: its launch-time model surface is unmeasured on this host, so the pin could not be verified. Install %s and measure it, or dispatch without --model.\n' \
+      printf 'Sergeant has not measured %s launch-time model pinning, so it cannot honor %s: dispatch without --model, or add a measured contract line for %s.\n' \
         "$harness" "$tuple" "$harness"
       ;;
     variant-transport-unknown)
@@ -298,7 +307,7 @@ _sgt_agent_launch_reject_message() {
         "$harness" "$SGT_AGENT_MODEL_VARIANT" "$tuple" "$harness"
       ;;
     variant-transport-unmeasured)
-      printf '%s variant pinning is unmeasured on this host, so :%s in %s could not be verified: install %s and measure it, or drop the variant.\n' \
+      printf 'Sergeant has not measured %s variant pinning, so it cannot honor :%s in %s: drop the variant, or add a measured contract line for %s.\n' \
         "$harness" "$SGT_AGENT_MODEL_VARIANT" "$tuple" "$harness"
       ;;
     variant-definition-unwritable)
@@ -466,25 +475,25 @@ SGT_MANAGED_COORDINATOR_WINDOW="sgt-coordinator"
 # shellcheck disable=SC2016  # Deliberately unexpanded: this string is sh source for tmux.
 SGT_MANAGED_COORDINATOR_COMMAND='while IFS= read -r sgt_line; do printf "%s\n" "$sgt_line"; done; exec sleep 2147483647'
 
-# _sgt_managed_coordinator_pane <session> <window>
-# Prints "<pane-id> <created>" for the session's single managed coordinator pane,
-# selecting it when the window already exists and creating it when it does not.
-# <created> is "true" only when this call created the window, so a caller can
-# later remove exactly what it created and never a window it merely selected.
-# It is returned on stdout rather than through a global because callers read this
-# in a command substitution, which would discard a global.
+# Ownership token for the managed coordinator pane, set as a tmux pane option at
+# creation and required before the pane is ever adopted.
 #
-# A window is only ever adopted when it is genuinely Sergeant's: its pane must be
-# alive AND its start command must be exactly SGT_MANAGED_COORDINATOR_COMMAND.
-# That is what makes the non-executing-reader guarantee real — without it, any
-# window a user happened to name "sgt-coordinator" (a shell, an editor) would be
-# adopted as the coordinator target and injected notifications would run in it.
-#
-# Returns 1 rather than destroying anything when the window exists but is not
-# adoptable, or when its name is ambiguous.  Nothing here kills or replaces a
-# window this call did not create.
+# This is deliberately NOT pane_start_command: tmux renders that field quoted and
+# backslash-escaped, so comparing it against the literal command can never match
+# and every reuse would be refused.  A pane option round-trips exactly and is
+# absent on a pane Sergeant did not create, which is precisely the question being
+# asked.
+SGT_MANAGED_COORDINATOR_OPTION='@sgt_coordinator'
+SGT_MANAGED_COORDINATOR_MARKER='sergeant-managed-coordinator'
+
+# _sgt_managed_coordinator_marker <pane>
+# Prints the pane's Sergeant ownership marker, empty when it has none.
+_sgt_managed_coordinator_marker() {
+  tmux display-message -p -t "$1" "#{$SGT_MANAGED_COORDINATOR_OPTION}" 2>/dev/null
+}
+
 _sgt_managed_coordinator_pane() {
-  local session="$1" window="$2" pane identity panes
+  local session="$1" window="$2" pane panes
 
   # Exact name match ("=" prefix): a substring match, or two windows sharing the
   # name, must not silently become "create another one".
@@ -494,9 +503,13 @@ _sgt_managed_coordinator_pane() {
     # refuse rather than guess which pane is the coordinator.
     [[ "$(printf '%s\n' "$panes" | grep -c .)" == "1" ]] || return 1
     pane="$panes"
-    identity="$(_sgt_verify_pane_identity "$pane")" || return 1
-    # The fifth identity field is pane_start_command.
-    [[ "${identity##*|}" == "$SGT_MANAGED_COORDINATOR_COMMAND" ]] || return 1
+    _sgt_verify_pane_identity "$pane" >/dev/null || return 1
+    # Adopt only a pane carrying Sergeant's own ownership marker.  Without this,
+    # any window a user happened to name the same thing — a shell, an editor —
+    # would become the coordinator target and an injected notification would run
+    # in it.
+    [[ "$(_sgt_managed_coordinator_marker "$pane")" == "$SGT_MANAGED_COORDINATOR_MARKER" ]] || \
+      return 1
     printf '%s false\n' "$pane"
     return 0
   fi
@@ -505,8 +518,17 @@ _sgt_managed_coordinator_pane() {
   pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$session:" -n "$window" \
     "$SGT_MANAGED_COORDINATOR_COMMAND" 2>/dev/null)" || return 1
   [[ -n "$pane" ]] || return 1
+  # Stamp ownership before returning.  A pane that cannot be marked could never
+  # be adopted later, so fail closed rather than leak an unadoptable window.
+  if ! tmux set-option -p -t "$pane" "$SGT_MANAGED_COORDINATOR_OPTION" \
+      "$SGT_MANAGED_COORDINATOR_MARKER" 2>/dev/null ||
+     [[ "$(_sgt_managed_coordinator_marker "$pane")" != "$SGT_MANAGED_COORDINATOR_MARKER" ]]; then
+    tmux kill-pane -t "$pane" 2>/dev/null || true
+    return 1
+  fi
   printf '%s true\n' "$pane"
 }
+
 _sgt_path_mode() {
   stat -c '%a' -- "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
 }

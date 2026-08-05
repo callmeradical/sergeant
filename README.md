@@ -168,7 +168,7 @@ state:
 |---|---|---|
 | `opencode`, `oc` | argv `--model <provider>/<model>` | argv `--agent <name>` against a Sergeant-generated agent definition carrying the variant |
 | `goose` | env `GOOSE_PROVIDER` + `GOOSE_MODEL` — `goose session` has no model flag, and Sergeant controls the worker environment at spawn | none known — a pinned variant fails closed |
-| `claude` | unmeasured on this host | unmeasured on this host |
+| `claude` | not measured by Sergeant | not measured by Sergeant |
 
 `opencode` has no `--variant` flag, but it does accept `--agent <name>` at launch
 and its agent definitions carry a first-class `variant` field. So Sergeant writes
@@ -194,6 +194,9 @@ definition, and the exact model argv and environment it used.
   `confirmed` only once the harness reports itself ready, so a harness that
   rejects a pin and exits never leaves evidence claiming the model ran.
 - `provider_verified` says whether the invocation itself proves the provider.
+- `variant_verified` is always `false` today. The variant *transport* is real, but
+  no supported harness reports back which variant it resolved, so Sergeant records
+  the pin without claiming it was honored.
 
 A resumed or recovered worker reads the same fleet record, so it inherits the
 same pin. A worker handed a tuple its harness cannot honor fails terminally

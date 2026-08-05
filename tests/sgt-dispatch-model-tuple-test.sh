@@ -243,7 +243,7 @@ state="$(printf '%s\n' "$TEST_ROOT"/fleet/goose-model-*/app)"
 # An unmeasured harness surface fails closed as UNMEASURED, which is a different
 # statement from "this harness cannot do it" and must not be asserted as one.
 _reject claude-unmeasured 'Claude unmeasured' \
-  'launch-time model surface is unmeasured on this host' \
+  'Sergeant has not measured claude launch-time model pinning' \
   --agent claude --model anthropic/claude-opus-5
 if [[ "$(_dispatch_output claude-unmeasured-wording 'Claude wording' \
   --agent claude --model anthropic/claude-opus-5)" == *"cannot pin a model variant"* ]]; then
