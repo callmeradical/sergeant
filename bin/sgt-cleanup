@@ -402,9 +402,11 @@ _response_state_present() {
 # neither a regular file nor a directory fails the whole digest, so forged or
 # unreadable state can never be recorded as intact evidence.
 #
-# The record stream is materialised before it is hashed rather than piped, so the
-# guard does not depend on `pipefail` remaining set for a partial stream to be
-# rejected.
+# The record stream is materialised before it is hashed rather than piped, so a
+# refused entry rejects the digest through this function's own control flow rather
+# than through the process-wide `pipefail`.  _worker_evidence_identity still pipes
+# the same stream and so still relies on `pipefail`; unifying the two would change
+# nothing about the digests either produces and is left as follow-up.
 _named_tree_digest() {
   local digest name names="$2" root="$1" stream
 
@@ -514,7 +516,6 @@ _response_owner_provably_dead() {
 # redirection is applied before `2>/dev/null` takes effect, so the shell would
 # report its own "No such file or directory" for every legitimately absent field.
 _response_state_field() {
-  # shellcheck disable=SC2002
   { cat "$1" 2>/dev/null || true; } | tr -d '\n'
 }
 
@@ -551,15 +552,24 @@ _response_retirement_manifest() {
 # Publishes the response-archive fields this handshake can actually prove: `body`
 # and `proof` are the exact transport and post-application records, and
 # `gate_generation`/`applied_status` are read back out of them.  A field with no
-# recorded source stays absent — retirement never fabricates one, which is what
-# keeps a retired entry distinguishable from an acknowledged one.
+# recorded source stays absent — retirement never fabricates one.
 #
-# The sources are the archived copies rather than the live state, so the fields
-# and the copies they came from cannot disagree, and they are bound by
-# archive_fields_digest so a rewritten field is as detectable as a rewritten copy.
+# A partial handshake that did get as far as an applied proof yields all four
+# fields, so shape alone would make the archive indistinguishable from a real
+# acknowledgement.  The retired marker is what distinguishes it: it is written
+# first, it is covered by archive_fields_digest, and
+# _sgt_response_archive_entry_complete refuses any entry carrying it, so these
+# fields can never be read as an acknowledgement even if the archive were moved
+# into response-archive/<id>.
+#
+# The fields are bound by archive_fields_digest so a rewritten field is as
+# detectable as a rewritten copy, and they carry the same 0600 discipline
+# sgt-ack-response applies to the fields of a real archive entry.
 _write_response_retirement_fields() {
-  local applied_status generation proof_root="$2" repo_dir="$1" staging="$3"
+  local applied_status field generation proof_root="$2" repo_dir="$1" staging="$3"
 
+  printf 'response handshake retired by sgt-cleanup; this is not an acknowledgement\n' \
+    > "$staging/$_SGT_RESPONSE_RETIRED_MARKER" || return 1
   if [[ -f "$repo_dir/response" && ! -L "$repo_dir/response" ]]; then
     cp -p "$repo_dir/response" "$staging/body" || return 1
   fi
@@ -576,11 +586,17 @@ _write_response_retirement_fields() {
       printf '%s\n' "$applied_status" > "$staging/applied_status" || return 1
     fi
   fi
+  for field in $_SGT_RESPONSE_ARCHIVE_FIELDS "$_SGT_RESPONSE_RETIRED_MARKER"; do
+    [[ -f "$staging/$field" ]] || continue
+    chmod 600 "$staging/$field" || return 1
+  done
 }
 
-# Binds the shared archive fields published at the archive root.
+# Binds the shared archive fields published at the archive root, together with the
+# marker that keeps them from ever being read as an acknowledgement.
 _response_retirement_fields_digest() {
-  _named_tree_digest "$1" "$_SGT_RESPONSE_ARCHIVE_FIELDS"
+  _named_tree_digest "$1" \
+    "$_SGT_RESPONSE_ARCHIVE_FIELDS $_SGT_RESPONSE_RETIRED_MARKER"
 }
 
 _copy_response_retirement_state() {
@@ -606,8 +622,9 @@ _publish_response_retirement() {
 # record — writing one outside the fleet task would be a new externally published
 # state transition, which this work is not authorized to introduce.
 #
-# Every refusal prints its reason BEFORE rolling back, because a rollback failure
-# reports through _die and would otherwise leave the caller with no reason at all.
+# Every refusal prints its reason BEFORE rolling back, and returns 3 rather than 1
+# when the rollback itself failed, so the caller reports the preserved artifact
+# instead of appending a generic handshake refusal to a CRITICAL rollback message.
 _publish_response_retirement_staged() {
   local fields_digest fleet_digest="$3" proof_root="$2" repo_dir="$1" \
     td_status="$5" worktree_digest="$4"
@@ -635,8 +652,7 @@ _publish_response_retirement_staged() {
     ! _response_retirement_manifest "$repo_dir" "$fleet_digest" "$worktree_digest" \
       "$fields_digest" > "$staging/manifest"; then
     printf 'could not record the partial response state as evidence\n'
-    _rollback_remove_path "$staging" "retirement archive staging" \
-      retirement-stage-rollback-cleanup
+    _retirement_rollback "$staging" "retirement archive staging" || return 3
     return 1
   fi
   # Re-bind both sides after copying so a write that lands during the copy is
@@ -646,20 +662,41 @@ _publish_response_retirement_staged() {
     "$(_response_state_digest "$proof_root" worktree 2>/dev/null || true)" != \
       "$worktree_digest" ]]; then
     printf 'the partial response state changed while it was being archived\n'
-    _rollback_remove_path "$staging" "changed retirement archive staging" \
-      retirement-stage-rollback-cleanup
+    _retirement_rollback "$staging" "changed retirement archive staging" || return 3
     return 1
   fi
   # `mv` into an existing directory moves the source inside it and still reports
-  # success, so the destination shape is checked before the rename and the
-  # published archive is proven to be at the archive path afterwards.
+  # success, so the destination shape is checked before the rename.
   if ! _cleanup_fail_point retirement-publish || \
-    [[ -e "$retirement" || -L "$retirement" ]] || \
-    ! mv "$staging" "$retirement" || \
-    [[ ! -f "$retirement/manifest" || -L "$retirement/manifest" ]]; then
+    [[ -e "$retirement" || -L "$retirement" ]] || ! mv "$staging" "$retirement"; then
     printf 'could not publish the retirement archive: %s\n' "$retirement"
-    _rollback_remove_path "$staging" "retirement archive publication" \
-      retirement-stage-rollback-cleanup
+    _retirement_rollback "$staging" "retirement archive publication" || return 3
+    return 1
+  fi
+  # Past the rename the staging path is gone, so an archive that did not land in
+  # the shape a later run will validate has to be rolled back at its published
+  # path.  Rolling back the staging path instead would leave an archive no run can
+  # accept and none can remove.
+  if [[ ! -f "$retirement/manifest" || -L "$retirement/manifest" ]]; then
+    printf 'the published retirement archive is malformed: %s\n' "$retirement"
+    _retirement_rollback "$retirement" "malformed retirement archive publication" || \
+      return 3
+    return 1
+  fi
+}
+
+# Removes one retirement transaction artifact.  Unlike _rollback_remove_path this
+# reports through its return status and stdout instead of _die, because every
+# retirement caller reads it through a command substitution where _die would only
+# exit the substitution and the real refusal reason would be lost.
+_retirement_rollback() {
+  local context="$2" path="$1"
+
+  [[ -e "$path" || -L "$path" ]] || return 0
+  if ! _cleanup_fail_point retirement-stage-rollback-cleanup || \
+    ! rm -rf "$path" || [[ -e "$path" || -L "$path" ]]; then
+    printf 'CRITICAL: rollback cleanup failed for %s; inspect preserved artifact: %s\n' \
+      "$context" "$path"
     return 1
   fi
 }
@@ -786,7 +823,15 @@ _retire_response_state() {
   fi
   [[ "$mode" == "publish" ]] || return 0
   _publish_response_retirement "$repo_dir" "$proof_root" "$fleet_digest" \
-    "$worktree_digest" "$state"
+    "$worktree_digest" "$state" || return
+  # Retiring a handshake without an acknowledgement is a decision an operator has
+  # to be able to see in the run log, not only in fleet state this run is about to
+  # remove.  On success the single stdout line is the notice, not a refusal.
+  reason="$(_response_state_field "$repo_dir/response_id")"
+  printf 'retiring unfinishable response handshake: %s response=%s generation=%s owner_pid=%s\n' \
+    "$repo_name" "${reason:-none}" \
+    "$(_response_state_field "$repo_dir/response_generation")" \
+    "$(_response_state_field "$repo_dir/worker_pid")"
 }
 
 _require_retired_response_state() {
@@ -796,8 +841,14 @@ _require_retired_response_state() {
   reason="$(_retire_response_state "$repo_dir" "$proof_root" "$mode" "$repo_name")" || \
     status=$?
   case "$status" in
-    0) return 0 ;;
-    2) _die "$reason" ;;
+    0)
+      [[ -z "$reason" ]] || printf '  %s\n' "$reason"
+      return 0
+      ;;
+    # 2: the owning td task could not be looked up.  3: a retirement transaction
+    # could not be rolled back.  Both are reported as themselves; only a genuine
+    # handshake refusal gets the handshake headline.
+    2|3) _die "$reason" ;;
     *) _die "$repo_name has pending or incomplete response acknowledgement${reason:+: $reason}" ;;
   esac
 }
@@ -868,23 +919,43 @@ _require_response_cleanup_safe() {
 # any evidence is published — rather than at the removal gate.
 _owning_repository_work_dir() {
   local repo_dir="$1" repo_name="$2"
-  local owner_root worktree
+  local owner_identity owner_root recorded_identity worktree
 
   if ! owner_root="$(_configured_repo_root "$repo_name" 2>/dev/null)"; then
     if _task_project >/dev/null 2>&1; then
       printf 'the configured repository root for %s no longer resolves\n' "$repo_name"
       return 1
     fi
-    owner_root="$(sed -n '3p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
+    if [[ "$(sed -n '1p' "$repo_dir/cleanup-owner" 2>/dev/null || true)" != "4" ]]; then
+      printf 'no configured or recorded repository root resolves for %s\n' "$repo_name"
+      return 1
+    fi
+    owner_root="$(sed -n '3p' "$repo_dir/cleanup-owner")"
     if [[ -z "$owner_root" ]]; then
       printf 'no configured or recorded repository root resolves for %s\n' "$repo_name"
       return 1
     fi
   fi
   if [[ ! -d "$owner_root" || -L "$owner_root" ]] || \
+    [[ "$owner_root" != "$(cd "$owner_root" && pwd -P)" ]] || \
     ! git -C "$owner_root" rev-parse --git-dir >/dev/null 2>&1; then
-    printf 'the owning repository is unavailable for %s: %s\n' "$repo_name" "$owner_root"
+    printf 'the owning repository is unavailable or aliased for %s: %s\n' \
+      "$repo_name" "$owner_root"
     return 1
+  fi
+  # When a previous pass recorded an owner identity, the repository standing at
+  # that path must still be the same repository.  This is the check that makes the
+  # binding a verified identity rather than a path, and it covers the case a
+  # present-worktree cross-check cannot: a recorded worktree that is gone or moved.
+  recorded_identity="$(sed -n '6p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
+  if [[ "$(sed -n '1p' "$repo_dir/cleanup-owner" 2>/dev/null || true)" == "4" && \
+    -n "$recorded_identity" ]]; then
+    owner_identity="$(_repo_owner_identity "$owner_root" 2>/dev/null || true)"
+    if [[ "$owner_identity" != "$recorded_identity" ]]; then
+      printf 'the owning repository for %s is no longer the recorded one: %s\n' \
+        "$repo_name" "$owner_root"
+      return 1
+    fi
   fi
   worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
   if [[ -n "$worktree" && -d "$worktree" && ! -L "$worktree" ]] && \

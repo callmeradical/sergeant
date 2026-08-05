@@ -156,11 +156,49 @@ existing graph without confirming the desired global-per-project path.
 Do not force or delete fleet files manually. Cleanup safety depends on terminal
 proof, staged evidence, exact configured repository identity, original
 worktree/lease identity, explicit cleanup phases for replayed removals or
-already-absent worktrees, proof that a recorded removal actually completed, and
-fully converged response acknowledgement. Preserve the worktree and run the
-owning remediation or supported retry path; cleanup intentionally refuses while
-response archive, acknowledgement markers, or active plaintext transport are
-only partially published.
+already-absent worktrees, proof that a recorded removal actually completed, and a
+response handshake that is either fully converged or explicitly retired.
+Preserve the worktree and run the owning remediation or supported retry path;
+cleanup intentionally refuses while response archive, acknowledgement markers, or
+active plaintext transport are only partially published and the handshake could
+still be completed.
+
+### Cleanup refuses an unfinished response handshake
+
+`<repo> has pending or incomplete response acknowledgement` means a response was
+delivered but never acknowledged. Resume the worker and acknowledge it with
+`sgt-ack-response` from that worker's own pane; that is the only path that
+completes a handshake.
+
+When the worker is gone for good, cleanup can retire the handshake instead, but
+only when both of these hold, re-checked on every attempt:
+
+- the owning `td` task is **closed**, resolved in that repo's own repository; and
+- the recorded worker is **provably dead** — its pane is gone or dead with a
+  matching identity, its recorded PID is not running, no process remains in its
+  recorded process group, and `worker_pid`, `worker_process_start` and
+  `worker_process_group` are all recorded.
+
+The refusal names which condition failed, for example `recorded worker process
+<pid> is still alive`, `recorded worker PID <pid> was reused`, `recorded worker
+pane identity does not match`, or `owning td task is in_progress, not closed`. A
+live, PID-reused, or identity-mismatched owner is always refused: it is never
+correct to retire a handshake underneath a worker that might still finish it.
+
+Retirement records the exact partial state under
+`~/.local/share/sergeant/fleet/<task>/<repo>/response-retirement/` before it
+mutates anything — verbatim copies of both sides under `partial/`, the owner death
+evidence in `owner`, and the response-archive fields it can prove. It never writes
+an acknowledgement, and the `retired` marker in that directory means the archive
+can never be read as one. The archive has the same lifetime as the fleet task's
+`response-archive`: it exists so a retried cleanup converges, and it is removed
+with the rest of the fleet state, so capture it before a successful run if you
+need it. A retirement prints `retiring unfinishable response handshake: <repo>
+response=<id> generation=<n> owner_pid=<pid>` in the cleanup output.
+
+Cleanup refuses a retirement archive that no longer describes the state it
+preserved — including a changed response, a tampered or symlinked copy, and a
+recorded owner that has drifted — rather than trusting stale evidence.
 
 ## Where to inspect state
 

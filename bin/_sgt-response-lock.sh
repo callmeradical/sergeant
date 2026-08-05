@@ -27,11 +27,19 @@ _sgt_response_archive_field() {
   ' "$record_file"
 }
 
-# Every canonical field of an archive entry is present as a regular file.
+# A retired handshake records the same fields, so an archive entry also has to
+# prove it is not one: sgt-cleanup marks a retirement archive with this file, and
+# an entry carrying it is never an acknowledgement no matter where it is found.
+_SGT_RESPONSE_RETIRED_MARKER="retired"
+
+# Every canonical field of an archive entry is present as a regular file, and the
+# entry does not claim to be a retirement.
 _sgt_response_archive_entry_complete() {
   local entry="$1" field
 
   [[ -d "$entry" && ! -L "$entry" ]] || return 1
+  [[ ! -e "$entry/$_SGT_RESPONSE_RETIRED_MARKER" && \
+    ! -L "$entry/$_SGT_RESPONSE_RETIRED_MARKER" ]] || return 1
   for field in $_SGT_RESPONSE_ARCHIVE_FIELDS; do
     [[ -f "$entry/$field" && ! -L "$entry/$field" ]] || return 1
   done

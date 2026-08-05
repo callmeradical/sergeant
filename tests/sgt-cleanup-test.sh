@@ -5814,6 +5814,92 @@ TD_REQUIRED_WORK_DIR="$TEST_ROOT/bound-unbindable-repo" TD_FAKE_STATUS=closed \
 }
 printf 'sgt-cleanup gh#171: unbindable td lookup refused distinctly ok\n'
 
+# A project that names itself but whose YAML has gone cannot be bound: the owner
+# is unknown, not assumed, exactly as _validate_retry_owner refuses that case.
+seed_bound_orphan bound-yaml-gone
+rm -f "$TEST_ROOT/config/bound-yaml-gone.yaml"
+TD_REQUIRED_WORK_DIR="$TEST_ROOT/bound-yaml-gone-repo" TD_FAKE_STATUS=closed \
+  run_bound_cleanup bound-yaml-gone
+[[ "$bound_status" -ne 0 ]] || {
+  printf 'FAIL gh#171: cleanup accepted a project whose YAML no longer resolves\n' >&2
+  exit 1
+}
+[[ "$bound_output" == *"configured repository root for app no longer resolves"* ]] || {
+  printf 'FAIL gh#171: a removed project YAML was not reported distinctly: %s\n' \
+    "$bound_output" >&2
+  exit 1
+}
+[[ -d "$TEST_ROOT/fleet/bound-yaml-gone" ]] || {
+  printf 'FAIL gh#171: a refused removed-YAML lookup destroyed fleet state\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup gh#171: removed project YAML refused distinctly ok\n'
+
+# A legacy fleet that names no project at all binds to the owner root a previous
+# pass already recorded and identity-verified in cleanup-owner.
+seed_bound_orphan bound-legacy
+rm -f "$TEST_ROOT/config/bound-legacy.yaml" "$TEST_ROOT/fleet/bound-legacy/brief.md"
+rm -rf "$TEST_ROOT/bound-legacy-worktree"
+git -C "$TEST_ROOT/bound-legacy-repo" worktree prune
+mkdir -p "$bound_state/terminal-evidence"
+printf 'in_progress\n' > "$bound_state/terminal-evidence/.sergeant-status"
+record_absent_cleanup_owner bound-legacy app "$TEST_ROOT/bound-legacy-repo" \
+  "$TEST_ROOT/bound-legacy-worktree" git "$bound_state/terminal-evidence"
+: > "$TEST_ROOT/bound-legacy.log"
+TD_WORK_DIR_LOG="$TEST_ROOT/bound-legacy.log" \
+  TD_REQUIRED_WORK_DIR="$TEST_ROOT/bound-legacy-repo" TD_FAKE_STATUS=closed \
+  run_bound_cleanup bound-legacy
+[[ "$bound_status" -eq 0 ]] || {
+  printf 'FAIL gh#171: a legacy fleet did not bind to its recorded owner root: %s\n' \
+    "$bound_output" >&2
+  exit 1
+}
+[[ "$(LC_ALL=C sort -u < "$TEST_ROOT/bound-legacy.log")" == \
+  "$TEST_ROOT/bound-legacy-repo" ]] || {
+  printf 'FAIL gh#171: the legacy binding was not the recorded owner root: %s\n' \
+    "$(cat "$TEST_ROOT/bound-legacy.log")" >&2
+  exit 1
+}
+printf 'sgt-cleanup gh#171: legacy fleet binds to its recorded owner root ok\n'
+
+# That recorded owner root is only trusted while it is still the same repository.
+seed_bound_orphan bound-legacy-drift
+rm -f "$TEST_ROOT/config/bound-legacy-drift.yaml" \
+  "$TEST_ROOT/fleet/bound-legacy-drift/brief.md"
+rm -rf "$TEST_ROOT/bound-legacy-drift-worktree"
+git -C "$TEST_ROOT/bound-legacy-drift-repo" worktree prune
+mkdir -p "$bound_state/terminal-evidence"
+printf 'in_progress\n' > "$bound_state/terminal-evidence/.sergeant-status"
+record_absent_cleanup_owner bound-legacy-drift app \
+  "$TEST_ROOT/bound-legacy-drift-repo" "$TEST_ROOT/bound-legacy-drift-worktree" git \
+  "$bound_state/terminal-evidence"
+# Replace the repository standing at the recorded path with a different one.
+rm -rf "$TEST_ROOT/bound-legacy-drift-repo"
+init_test_repo "$TEST_ROOT/bound-legacy-drift-repo"
+: > "$TEST_ROOT/bound-legacy-drift.log"
+TD_WORK_DIR_LOG="$TEST_ROOT/bound-legacy-drift.log" \
+  TD_REQUIRED_WORK_DIR="$TEST_ROOT/bound-legacy-drift-repo" TD_FAKE_STATUS=closed \
+  run_bound_cleanup bound-legacy-drift
+[[ "$bound_status" -ne 0 ]] || {
+  printf 'FAIL gh#171: cleanup accepted a replaced recorded owner repository\n' >&2
+  exit 1
+}
+[[ "$bound_output" == *"no longer the recorded one"* ]] || {
+  printf 'FAIL gh#171: a replaced owner repository was not reported distinctly: %s\n' \
+    "$bound_output" >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/bound-legacy-drift.log" ]] || {
+  printf 'FAIL gh#171: a replaced owner repository still reached a td database: %s\n' \
+    "$(cat "$TEST_ROOT/bound-legacy-drift.log")" >&2
+  exit 1
+}
+[[ -d "$TEST_ROOT/fleet/bound-legacy-drift" ]] || {
+  printf 'FAIL gh#171: a refused owner drift destroyed fleet state\n' >&2
+  exit 1
+}
+printf 'sgt-cleanup gh#171: replaced recorded owner repository refused ok\n'
+
 # A multi-repository fleet resolves each worker in its own owning repository.
 multi_task=bound-multi
 rm -rf "$TEST_ROOT/fleet/$multi_task"
@@ -6026,6 +6112,13 @@ for retire_class in pending-transport applied-unacked fleet-ack-only incomplete-
   [[ "$retire_output" != *"No such file or directory"* ]] || {
     printf 'FAIL gh#170 %s: retirement leaked redirection errors: %s\n' \
       "$retire_class" "$retire_output" >&2
+    exit 1
+  }
+  # Retiring without an acknowledgement must be visible in the run log, since the
+  # fleet state that records it is about to be removed.
+  [[ "$retire_output" == *"retiring unfinishable response handshake: app"* ]] || {
+    printf 'FAIL gh#170 %s: retirement was silent: %s\n' "$retire_class" \
+      "$retire_output" >&2
     exit 1
   }
   printf 'sgt-cleanup gh#170: %s retires with a dead owner ok\n' "$retire_class"
@@ -6425,6 +6518,82 @@ run_retirement_cleanup retire-response-drift
 assert_retirement_refused response-drift \
   'the retired response no longer matches the retirement archive' retry
 printf 'sgt-cleanup gh#170: retired response drift refused ok\n'
+
+# A retirement archive is marked as one, so its fields can never be read as an
+# acknowledgement even if the archive is relocated into response-archive/<id>.
+seed_retirement_task retire-marker
+seed_retirement_partial applied-unacked
+RETIRE_FAIL_POINT=phase-publish-reconciled-absent run_retirement_cleanup retire-marker
+[[ -f "$retire_state/response-retirement/retired" ]] || {
+  printf 'FAIL gh#170 marker: the retirement archive carries no retired marker\n' >&2
+  exit 1
+}
+retire_relocated="$retire_state/response-archive/response-123"
+mkdir -p "$retire_state/response-archive"
+rm -rf "$retire_relocated"
+cp -a "$retire_state/response-retirement" "$retire_relocated"
+for retire_field in body gate_generation applied_status proof; do
+  [[ -f "$retire_relocated/$retire_field" ]] || {
+    printf 'FAIL gh#170 marker: relocated archive lacks %s, so the check is vacuous\n' \
+      "$retire_field" >&2
+    exit 1
+  }
+done
+(
+  # shellcheck source=bin/_sgt-response-lock.sh
+  source "$ROOT_DIR/bin/_sgt-response-lock.sh"
+  if _sgt_response_archive_entry_matches "$retire_relocated" response-123 1; then
+    printf 'FAIL gh#170 marker: a retirement archive validated as an acknowledgement\n' >&2
+    exit 1
+  fi
+  rm -f "$retire_relocated/retired"
+  _sgt_response_archive_entry_matches "$retire_relocated" response-123 1 || {
+    printf 'FAIL gh#170 marker: only the marker may distinguish it, but it did not\n' >&2
+    exit 1
+  }
+)
+printf 'sgt-cleanup gh#170: retirement archive never validates as an acknowledgement ok\n'
+
+# Audit: the handshake state lists must cover every response path sgt-respond and
+# sgt-ack-response actually write, or a future handshake file would be neither
+# refused nor archived.
+handshake_declared="$(awk '
+  /_RESPONSE_(FLEET|WORKTREE)_STATE="/ {
+    collecting = 1
+    sub(/^[^"]*"/, "")
+  }
+  collecting {
+    line = $0
+    if (line ~ /"/) {
+      sub(/".*$/, "", line)
+      collecting = 0
+    }
+    gsub(/\\[[:space:]]*$/, "", line)
+    print line
+  }
+' "$ROOT_DIR/bin/sgt-cleanup" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u)"
+# The pattern deliberately matches the literal shell variable references in those
+# scripts, so it must not be expanded here.
+# shellcheck disable=SC2016
+handshake_written="$( { grep -ohE '(\$(REPO_STATE|REPO_DIR|repo_dir|repo_state)/response[A-Za-z_-]*|\$(WORKTREE|worktree)/\.sergeant-response[A-Za-z-]*)' \
+  "$ROOT_DIR/bin/sgt-respond" "$ROOT_DIR/bin/sgt-ack-response" || true; } \
+  | sed 's#^.*/##' | LC_ALL=C sort -u)"
+[[ -n "$handshake_written" ]] || {
+  printf 'FAIL gh#170 audit: found no handshake paths to audit\n' >&2
+  exit 1
+}
+handshake_missing=""
+while IFS= read -r handshake_path; do
+  [[ -n "$handshake_path" ]] || continue
+  printf '%s\n' "$handshake_declared" | grep -Fqx "$handshake_path" || \
+    handshake_missing="$handshake_missing $handshake_path"
+done <<< "$handshake_written"
+[[ -z "$handshake_missing" ]] || {
+  printf 'FAIL gh#170 audit: handshake paths written by sgt-respond/sgt-ack-response but absent from the sgt-cleanup state lists:%s\n' \
+    "$handshake_missing" >&2
+  exit 1
+}
+printf 'sgt-cleanup gh#170 audit: handshake state lists cover every written path ok\n'
 rm -f "$TEST_ROOT/fake-bin/td"
 rm -rf "$TEST_ROOT/retire-bin" "$TEST_ROOT/retire-notmux-bin"
 
