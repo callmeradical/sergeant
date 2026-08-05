@@ -115,6 +115,10 @@ printf 'open\nin_progress\nopen\nblocked\nopen\nin_review\nopen\nclosed\nin_prog
 # Tasks 3 (open) and 6 (in_review) are deferred: non-closed, and hidden from td's
 # default answer, so they are exactly the tasks a single read would lose.
 printf '3 6\n' > "$dev_root/mixed/.td-task-deferred"
+# Task 3 is deferred and overdue, task 1 is overdue and not deferred, task 6 is
+# deferred and due soon: real td's --overdue/--due-soon include deferred rows.
+printf '1 3\n' > "$dev_root/mixed/.td-task-overdue"
+printf '6\n' > "$dev_root/mixed/.td-task-duesoon"
 
 cat > "$config/nopath.yaml" <<EOF
 name: nopath
@@ -292,6 +296,15 @@ for flag in ("--overdue", "--due-soon", "--surfacing"):
         special_view = flag
         break
 
+
+def _index_set(name):
+    fh = Path(work_dir) / name
+    return {int(x) for x in fh.read_text().split() if x} if fh.is_file() else set()
+
+
+overdue_idx = _index_set(".td-task-overdue")
+duesoon_idx = _index_set(".td-task-duesoon")
+
 slow_repo = os.environ.get("SGT_TD_LIST_TEST_SLOW_REPO", "")
 if slow_repo and Path(work_dir).name == slow_repo:
     import time
@@ -346,12 +359,6 @@ for clause in td_filter.split(" AND "):
     elif clause.startswith("priority="):
         want_priority = clause[len("priority="):]
 
-if special_view:
-    # Real td: these views exclude deferred tasks by construction, and answer
-    # from due dates this fixture does not model, so they answer with nothing.
-    print(json.dumps([]))
-    sys.exit(0)
-
 deferred_file = Path(work_dir) / ".td-task-deferred"
 deferred_idx = set()
 if deferred_file.is_file():
@@ -364,7 +371,19 @@ tasks = []
 for n in range(total):
     status = cycle[n % len(cycle)]
     is_deferred = (n + 1) in deferred_idx
-    if td_filter or include_everything:
+    if special_view:
+        # Verified against td v0.55.0: --overdue and --due-soon answer from due
+        # dates and DO include deferred tasks, while --surfacing (previously
+        # deferred, now resurfaced) returns none of them.
+        if special_view == "--overdue" and (n + 1) not in overdue_idx:
+            continue
+        if special_view == "--due-soon" and (n + 1) not in duesoon_idx:
+            continue
+        if special_view == "--surfacing":
+            continue
+        if status == "closed":
+            continue
+    elif td_filter or include_everything:
         pass                          # neither --filter nor -a applies exclusions
     else:
         # Verified against td v0.55.0: closed tasks are excluded unless asked
@@ -1845,39 +1864,85 @@ printf 'same_path_duplicate_stays_complete: ok\n'
 # construction: --deferred overrides them instead of intersecting, so a second
 # read would inject exactly the rows the view exists to exclude, and --surfacing
 # means "no longer deferred".
+# No second read for any of them: --deferred overrides such a view instead of
+# narrowing it, so it would inject rows from outside the view.
 for view in --overdue --due-soon --surfacing; do
   : > "$TEST_ROOT/td.log"
   out="$TEST_ROOT/view.out"; err="$TEST_ROOT/view.err"
   _run "$out" "$err" -- mixed "$view"
-  _expect_status 0 "deferred_exclusive_view($view)" "$err"
+  _expect_status 0 "special_view_skips_deferred_read($view)" "$err"
   ! grep -qF -- '--deferred' "$TEST_ROOT/td.log" || {
     printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
-    _fail "deferred_exclusive_view($view): a deferred read would inject rows $view excludes"
-  }
-  for id in td-000003 td-000006; do
-    ! grep -qF "$id" "$out" || {
-      printf 'actual output:\n%s\n' "$(cat "$out")" >&2
-      _fail "deferred_exclusive_view($view): deferred task $id must not appear under $view"
-    }
-  done
-  grep -qF 'deferred ones excluded' "$out" || {
-    printf 'actual output:\n%s\n' "$(cat "$out")" >&2
-    _fail "deferred_exclusive_view($view): the header must say deferred tasks are excluded"
+    _fail "special_view_skips_deferred_read($view): a deferred read would override $view"
   }
 done
-printf 'deferred_exclusive_view: ok\n'
+printf 'special_view_skips_deferred_read: ok\n'
 
-# The same flags on the --json path keep stdout a valid array and disclose the view.
+# --overdue and --due-soon DO return deferred tasks, so the label must not claim
+# they are excluded — it may only say the caller's flags govern the answer.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/overdue.out"; err="$TEST_ROOT/overdue.err"
+_run "$out" "$err" -- mixed --overdue
+_expect_status 0 overdue_view_label_is_honest "$err"
+grep -qF 'td-000003' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "overdue_view_label_is_honest: td returns deferred overdue tasks, so it must be listed"
+}
+grep -qF 'td-000001' "$out" || _fail "overdue_view_label_is_honest: the non-deferred overdue task must be listed"
+! grep -qF 'deferred ones excluded' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "overdue_view_label_is_honest: the header must not claim an exclusion td does not apply"
+}
+grep -qF 'caller td flags may narrow which tasks appear' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "overdue_view_label_is_honest: the header must name the caller's flag"
+}
+printf 'overdue_view_label_is_honest: ok\n'
+
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/duesoon.out"; err="$TEST_ROOT/duesoon.err"
+_run "$out" "$err" -- mixed --due-soon
+_expect_status 0 duesoon_view_label_is_honest "$err"
+grep -qF 'td-000006' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "duesoon_view_label_is_honest: td returns deferred due-soon tasks, so it must be listed"
+}
+! grep -qF 'deferred ones excluded' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "duesoon_view_label_is_honest: the header must not claim an exclusion td does not apply"
+}
+printf 'duesoon_view_label_is_honest: ok\n'
+
+# --surfacing means "no longer deferred", so there the exclusion claim is true.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/surf.out"; err="$TEST_ROOT/surf.err"
+_run "$out" "$err" -- mixed --surfacing
+_expect_status 0 surfacing_view_excludes_deferred "$err"
+grep -qF 'deferred ones excluded' "$out" || {
+  printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+  _fail "surfacing_view_excludes_deferred: --surfacing excludes deferred tasks, so say so"
+}
+for id in td-000003 td-000006; do
+  ! grep -qF "$id" "$out" || {
+    printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+    _fail "surfacing_view_excludes_deferred: a still-deferred task must not appear under --surfacing"
+  }
+done
+printf 'surfacing_view_excludes_deferred: ok\n'
+
+# The --json path keeps stdout a valid array and discloses the view on stderr.
 : > "$TEST_ROOT/td.log"
 out="$TEST_ROOT/view-json.out"; err="$TEST_ROOT/view-json.err"
-_run "$out" "$err" -- mixed --surfacing --json
-_expect_status 0 deferred_exclusive_view_json "$err"
-"$REAL_PYTHON" -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len(d))' "$out" >/dev/null \
-  || _fail "deferred_exclusive_view_json: stdout must stay valid JSON"
-grep -qF 'deferred ones excluded' "$err" || {
+_run "$out" "$err" -- mixed --overdue --json
+_expect_status 0 special_view_json "$err"
+"$REAL_PYTHON" -c 'import json,sys; json.load(open(sys.argv[1]))' "$out" \
+  || _fail "special_view_json: stdout must stay valid JSON"
+grep -qF 'caller td flags may narrow which tasks appear' "$err" || {
   printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
-  _fail "deferred_exclusive_view_json: the note must disclose the view"
+  _fail "special_view_json: the note must disclose the view"
 }
-printf 'deferred_exclusive_view_json: ok\n'
+! grep -qF 'deferred ones excluded' "$err" || \
+  _fail "special_view_json: the note must not claim an exclusion td does not apply"
+printf 'special_view_json: ok\n'
 
 printf '\nAll sgt-td-list tests passed.\n'

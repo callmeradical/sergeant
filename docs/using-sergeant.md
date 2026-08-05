@@ -13,8 +13,9 @@ environment is unusable, and 2 when the report is incomplete because a repo
 could not be read or a limit withheld tasks. The active view is named in the
 header. Deferred tasks are included: td hides them from its default answer, so
 each repo is read twice and the answers are merged. td's own `--overdue`,
-`--due-soon` and `--surfacing` views exclude deferred tasks by construction, so
-no second read is made for them and the header says so. A repo configured in the
+`--due-soon` and `--surfacing` views apply their own deferred handling — a
+`--deferred` read would override such a view rather than narrow it — so no second
+read is made for them and the header names the caller's flag. A repo configured in the
 project but not cloned yet is noted on stderr and does not change the exit
 status — run `sgt-sync <project>` to include it.
 

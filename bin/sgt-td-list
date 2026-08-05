@@ -51,9 +51,11 @@
 #   would read as a query expression — are refused for the same reason.  Pass a
 #   td query as --filter '<expr>', whose view is labelled as caller-governed.
 #
-#   td's own special views — --overdue, --due-soon and --surfacing — exclude
-#   deferred tasks by construction (--deferred overrides them rather than
-#   intersecting), so no second read is issued for them and the header says so.
+#   td's own special views — --overdue, --due-soon and --surfacing — apply their
+#   own deferred handling, and a --deferred read overrides such a view instead of
+#   intersecting it, which would inject rows from outside the view.  No second
+#   read is issued for them.  --overdue and --due-soon do return deferred tasks,
+#   so only --surfacing is labelled as excluding them.
 #
 #   Narrowing uses td's own -s/-p flags.  td applies its closed-and-deferred
 #   exclusion to those but not to `--filter`, so `--filter priority=P2` answers
@@ -220,6 +222,7 @@ fi
 CALLER_FILTER=false
 CALLER_SELECTION=false
 CALLER_DEFERRED_VIEW=false
+CALLER_SPECIAL_VIEW=false
 skip_value=false
 if [[ "${#EXTRA_FLAGS[@]}" -gt 0 ]]; then
   for ((i=0; i<${#EXTRA_FLAGS[@]}; i++)); do
@@ -230,11 +233,19 @@ if [[ "${#EXTRA_FLAGS[@]}" -gt 0 ]]; then
     case "${EXTRA_FLAGS[$i]}" in
       --filter|-f|--filter=*|-f?*)           CALLER_FILTER=true ;;
       --limit|-n|--limit=*|-n=*|-n[0-9]*)     : ;;  # the cap logic owns it
-      --overdue|--due-soon|--surfacing)
-        # td's special views are deferred-exclusive: --deferred overrides them
-        # rather than intersecting, so a second read would inject rows the view
-        # exists to exclude.  --surfacing means "no longer deferred".
+      --overdue|--due-soon)
+        # These views apply td's own deferred handling: they already return
+        # deferred tasks that are overdue or due soon.  A --deferred read would
+        # override the view rather than intersect it, injecting rows from outside
+        # it, so the second read is skipped and the label stays generic.
         CALLER_SELECTION=true
+        CALLER_SPECIAL_VIEW=true
+        ;;
+      --surfacing)
+        # "Previously deferred, now resurfaced": deferred tasks are excluded by
+        # the view's own meaning, and a --deferred read would contradict it.
+        CALLER_SELECTION=true
+        CALLER_SPECIAL_VIEW=true
         CALLER_DEFERRED_VIEW=true
         ;;
       -*)                                    CALLER_SELECTION=true ;;
@@ -245,7 +256,7 @@ if [[ "${#EXTRA_FLAGS[@]}" -gt 0 ]]; then
 fi
 INCLUDE_DEFERRED=true
 $CALLER_FILTER && INCLUDE_DEFERRED=false
-$CALLER_DEFERRED_VIEW && INCLUDE_DEFERRED=false
+$CALLER_SPECIAL_VIEW && INCLUDE_DEFERRED=false
 
 # What the reader is actually looking at, stated rather than implied.
 if [[ -n "$STATUS_FILTER" && -n "$PRIORITY_FILTER" ]]; then
