@@ -1489,6 +1489,54 @@ test_concurrent_installs_do_not_race() {
   [[ -L "$temp_dir/bin/_sgt-lib.sh" ]] || fail 'a runtime helper is missing after concurrent installs'
 }
 
+# An executable of the right name that is the wrong tool must not be accepted as
+# installed: install mode would say OK while verification says MISSING.
+test_wrong_identity_tool_in_the_install_dir_is_a_conflict() {
+  local temp_dir output status
+  new_sandbox; temp_dir="$SANDBOX"
+
+  stub_platform "$temp_dir" Linux apt-get 63
+  mkdir -p "$temp_dir/instdir"
+  printf '#!/bin/sh\nprintf "yq 3.2.3\\n"\n' > "$temp_dir/instdir/yq"
+  chmod +x "$temp_dir/instdir/yq"
+  stub_commands "$temp_dir/bin" git gh tmux jq shellcheck curl python3 lsof \
+    mise go node uv td graphify no-mistakes opencode claude
+
+  set +e
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/instdir" \
+    PATH="$temp_dir/bin" "$BOOTSTRAP" 2>&1)"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "a wrong yq was accepted as installed: $output"
+  assert_contains "$output" "$temp_dir/instdir/yq is not the required yq executable"
+  assert_not_contains "$output" 'OK: yq'
+  [[ "$(cat "$temp_dir/instdir/yq")" == *'yq 3.2.3'* ]] || fail "the user's yq was replaced"
+}
+
+# An interrupted publish must not leave a file in the command directory that no
+# sweep ever reclaims.
+test_leftover_staged_links_are_swept() {
+  local temp_dir
+  new_sandbox; temp_dir="$SANDBOX"
+
+  mkdir -p "$temp_dir/bin" "$temp_dir/home"
+  # Both shapes: the current staged name and the one an earlier version wrote.
+  ln -s "$FIXTURE_ROOT/bin/sgt-dispatch" "$temp_dir/bin/sgt-publish.12345.sgt-dispatch"
+  ln -s "$FIXTURE_ROOT/bin/_sgt-lib.sh" "$temp_dir/bin/sgt-publish.12345._sgt-lib.sh"
+  ln -s "$FIXTURE_ROOT/bin/_sgt-lib.sh" "$temp_dir/bin/_sgt-lib.sh.sgt-publish.12345"
+  ln -s "$FIXTURE_ROOT/bin/sgt-dispatch" "$temp_dir/bin/sgt-dispatch.sgt-publish.12345"
+
+  HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" "$INSTALL" >/dev/null
+
+  local leftover leftovers=''
+  for leftover in "$temp_dir/bin"/*sgt-publish*; do
+    [[ -e "$leftover" || -L "$leftover" ]] || continue
+    leftovers="$leftovers ${leftover##*/}"
+  done
+  [[ -z "$leftovers" ]] || fail "leftover staged links remain:$leftovers"
+}
+
 # ── Empty manifest ────────────────────────────────────────────────────────────
 
 # A checkout whose bin/ cannot be resolved must fail loudly in every mode rather
@@ -1790,7 +1838,7 @@ test_uninstall_fails_when_it_cannot_reach_the_hook_it_installed() {
 
   [[ "$status" -ne 0 ]] || \
     fail 'sgt-uninstall reported a clean removal while a hook it installed remained'
-  assert_contains "$output" 'could not resolve a git hooks directory'
+  assert_contains "$output" 'still points into this checkout and was not removed'
   [[ -L "$temp_dir/checkout/.git/hooks/pre-push" ]] || \
     fail 'the hook was removed despite the unresolvable hooks directory'
 }
@@ -1882,6 +1930,8 @@ test_user_file_at_the_mise_path_stops_the_run
 test_unusable_mise_binary_is_not_published
 test_relative_install_directory_is_refused
 test_concurrent_installs_do_not_race
+test_wrong_identity_tool_in_the_install_dir_is_a_conflict
+test_leftover_staged_links_are_swept
 test_empty_manifest_fails_every_mode
 test_install_links_git_hooks_into_its_own_checkout
 test_install_never_touches_hooks_of_an_unrelated_repository

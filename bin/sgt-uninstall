@@ -83,7 +83,7 @@ hooks_unresolved=false
 if ! hooks_dst="$(_sgt_install_hooks_dir "$ROOT_DIR")"; then
   if [[ -d "$hooks_src" ]]; then
     hooks_unresolved=true
-    printf '  skipped hooks: no git hooks directory this checkout owns\n' >&2
+    printf '  skipped hooks: %s\n' "$(_sgt_install_hooks_refusal_advice "$ROOT_DIR")" >&2
   fi
 else
   if [[ -d "$hooks_src" && -d "$hooks_dst" ]]; then
@@ -113,10 +113,28 @@ fi
 printf '\nRemoved %d entries installed from %s\n' "$removed" "$ROOT_DIR"
 printf 'Kept %d entries owned by something else\n' "$kept"
 
-# A hook this checkout installed may still be in place while the hooks directory
-# is no longer resolvable, so reporting success would be false.
+# An unresolvable hooks directory usually means there was never a hook here to
+# remove, which is not a failure. Two cases are: hooks were the requested
+# outcome, or a hook this checkout installed is demonstrably still in place.
 if "$hooks_unresolved"; then
-  printf 'sgt-uninstall: could not resolve a git hooks directory this checkout owns; any hook linked to %s must be removed by hand.\n' \
-    "$hooks_src" >&2
-  exit 1
+  stranded=0
+  for candidate in \
+      "$(git -C "$ROOT_DIR" rev-parse --absolute-git-dir 2>/dev/null || true)" \
+      "$(git -C "$ROOT_DIR" rev-parse --git-common-dir 2>/dev/null || true)"; do
+    [[ -n "$candidate" && -d "$candidate/hooks" ]] || continue
+    for hook in "$hooks_src"/*; do
+      [[ -f "$hook" ]] || continue
+      hook_target="$candidate/hooks/${hook##*/}"
+      [[ -L "$hook_target" ]] || continue
+      [[ "$(_sgt_install_resolve_link "$hook_target")" == "$hook" ]] || continue
+      printf 'sgt-uninstall: %s still points into this checkout and was not removed.\n' \
+        "$hook_target" >&2
+      stranded=$((stranded + 1))
+    done
+  done
+  if ((stranded > 0)) || "$hooks_only"; then
+    printf 'sgt-uninstall: no git hooks were removed: %s.\n' \
+      "$(_sgt_install_hooks_refusal_advice "$ROOT_DIR")" >&2
+    exit 1
+  fi
 fi

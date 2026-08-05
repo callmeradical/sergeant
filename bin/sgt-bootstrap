@@ -98,17 +98,37 @@ source_installed_tools=(
   'graphify|UV_TOOL_BIN_DIR|uv tool install graphifyy'
 )
 
+# tool_identity_ok <command> <path>
+#
+# True when the binary at <path> really is <command>. Only yq is ambiguous: an
+# unrelated Python package installs a program of the same name.
+tool_identity_ok() {
+  local command_name="$1" path="$2" version
+  [[ "$command_name" == 'yq' ]] || return 0
+  version="$("$path" --version 2>&1 || true)"
+  [[ "$version" == *'github.com/mikefarah/yq'* ]]
+}
+
 # tool_available <command>
 #
-# True when <command> resolves on PATH to an executable and, for yq, is Mike
-# Farah's Go implementation rather than the unrelated Python package.
+# True when <command> resolves on PATH to an executable that passes its identity
+# check.
 tool_available() {
-  local command_name="$1" version
-  _sgt_command_available "$command_name" || return 1
-  if [[ "$command_name" == 'yq' ]]; then
-    version="$(yq --version 2>&1)"
-    [[ "$version" == *'github.com/mikefarah/yq'* ]]
-  fi
+  local command_name="$1" resolved
+  resolved="$(type -P "$command_name" 2>/dev/null)" || return 1
+  [[ -n "$resolved" && -x "$resolved" ]] || return 1
+  tool_identity_ok "$command_name" "$resolved"
+}
+
+# managed_entry_usable <command>
+#
+# True when this command's own entry in INSTALL_DIR is already a usable copy of
+# <command>. An executable alone is not enough: a wrong tool of the same name
+# there would otherwise be accepted as installed while verification rejects it.
+managed_entry_usable() {
+  local command_name="$1" target="$INSTALL_DIR/$1"
+  [[ "$(_sgt_install_managed_state "$target" '/mise/')" == 'present' ]] || return 1
+  tool_identity_ok "$command_name" "$target"
 }
 
 # missing_packages <command:package>...
@@ -222,9 +242,15 @@ fi
 for item in "${managed_tools[@]}"; do
   command_name="${item%%:*}"
   tool_available "$command_name" && continue
-  if [[ "$(_sgt_install_managed_state "$INSTALL_DIR/$command_name" '/mise/')" == 'conflict' ]]; then
-    conflicts[${#conflicts[@]}]="$INSTALL_DIR/$command_name is not the required $command_name executable"
-  fi
+  managed_entry_usable "$command_name" && continue
+  # `reclaim` (a dangling or mise-owned link) is this command's own to replace.
+  # A remaining `present` means an executable of the right name that failed its
+  # identity check, so it belongs to the user just as `conflict` does.
+  case "$(_sgt_install_managed_state "$INSTALL_DIR/$command_name" '/mise/')" in
+    conflict|present)
+      conflicts[${#conflicts[@]}]="$INSTALL_DIR/$command_name is not the required $command_name executable"
+      ;;
+  esac
 done
 
 # go install and uv write straight into INSTALL_DIR, so an entry the user owns
@@ -232,6 +258,7 @@ done
 for item in "${source_installed_tools[@]}"; do
   command_name="${item%%|*}"
   tool_available "$command_name" && continue
+  managed_entry_usable "$command_name" && continue
   if [[ "$(_sgt_install_managed_state "$INSTALL_DIR/$command_name" '/mise/')" == 'conflict' ]]; then
     conflicts[${#conflicts[@]}]="$INSTALL_DIR/$command_name is not the required $command_name executable"
   fi
@@ -246,7 +273,15 @@ while IFS= read -r source_file; do
   fi
 done <<< "$sources"
 
-hooks_dst="$(_sgt_install_hooks_dir "$ROOT_DIR" || true)"
+# git may itself be one of the packages this run installs, so hook state is only
+# knowable now when git is already present. It is re-resolved after the package
+# phase either way.
+hooks_dst=''
+hooks_known=false
+if tool_available git; then
+  hooks_known=true
+  hooks_dst="$(_sgt_install_hooks_dir "$ROOT_DIR" || true)"
+fi
 hook_plan=()
 if [[ -n "$hooks_dst" && -d "$ROOT_DIR/scripts/hooks" ]]; then
   for hook in "$ROOT_DIR"/scripts/hooks/*; do
@@ -320,8 +355,10 @@ if "$dry_run"; then
     esac
   done <<< "$sources"
 
-  if [[ -z "$hooks_dst" ]]; then
-    printf 'DRY-RUN: skip git hooks (no hooks directory this checkout owns)\n'
+  if ! "$hooks_known"; then
+    printf 'DRY-RUN: resolve git hooks after installing git\n'
+  elif [[ -z "$hooks_dst" ]]; then
+    printf 'DRY-RUN: skip git hooks (%s)\n' "$(_sgt_install_hooks_refusal_advice "$ROOT_DIR")"
   else
     for entry in ${hook_plan[@]+"${hook_plan[@]}"}; do
       case "${entry%% *}" in
@@ -401,8 +438,7 @@ if "$verify_only"; then
 
   if [[ -z "$hooks_dst" ]]; then
     if [[ -d "$ROOT_DIR/scripts/hooks" ]]; then
-      printf 'MANUAL HOOKS: no git hooks directory this checkout owns; install %s yourself for the pre-push gate.\n' \
-        "$ROOT_DIR/scripts/hooks"
+      printf 'MANUAL HOOKS: %s.\n' "$(_sgt_install_hooks_refusal_advice "$ROOT_DIR")"
     fi
   else
     for hook in "$ROOT_DIR"/scripts/hooks/*; do
@@ -495,7 +531,7 @@ for item in "${managed_tools[@]}"; do
     continue
   fi
   managed_target="$INSTALL_DIR/$command_name"
-  if [[ "$(_sgt_install_managed_state "$managed_target" '/mise/')" == 'present' ]]; then
+  if managed_entry_usable "$command_name"; then
     printf 'OK: %s (in %s)\n' "$command_name" "$INSTALL_DIR"
     continue
   fi
@@ -524,7 +560,7 @@ for item in "${source_installed_tools[@]}"; do
     printf 'OK: %s\n' "$command_name"
     continue
   fi
-  if [[ "$(_sgt_install_managed_state "$INSTALL_DIR/$command_name" '/mise/')" == 'present' ]]; then
+  if managed_entry_usable "$command_name"; then
     printf 'OK: %s (in %s)\n' "$command_name" "$INSTALL_DIR"
     continue
   fi
@@ -574,8 +610,8 @@ done <<< "$sources"
 # still is not linked afterwards is a real failure.
 if [[ -z "$hooks_dst" ]]; then
   [[ -d "$ROOT_DIR/scripts/hooks" ]] && \
-    printf 'WARNING: the pre-push gate was NOT installed; no git hooks directory this checkout owns. Install %s yourself if you want it.\n' \
-      "$ROOT_DIR/scripts/hooks"
+    printf 'WARNING: the pre-push gate was NOT installed: %s.\n' \
+      "$(_sgt_install_hooks_refusal_advice "$ROOT_DIR")"
 else
   for hook in "$ROOT_DIR"/scripts/hooks/*; do
     [[ -f "$hook" ]] || continue
@@ -584,6 +620,13 @@ else
       install_failed=true
     fi
   done
+fi
+
+# git may have arrived with the packages, so resolve the hooks directory again
+# rather than reusing the plan-time value.
+hooks_dst=''
+if tool_available git; then
+  hooks_dst="$(_sgt_install_hooks_dir "$ROOT_DIR" || true)"
 fi
 
 # Reconcile the tools as well as the links: a published link to a path that has
@@ -595,7 +638,7 @@ for item in "${managed_tools[@]}" "${source_installed_tools[@]}"; do
     *) command_name="${item%%:*}" ;;
   esac
   tool_available "$command_name" && continue
-  [[ "$(_sgt_install_managed_state "$INSTALL_DIR/$command_name" '/mise/')" == 'present' ]] && continue
+  managed_entry_usable "$command_name" && continue
   printf 'NOT INSTALLED: %s is still not usable after installation.\n' "$command_name" >&2
   install_failed=true
 done
