@@ -1920,6 +1920,24 @@ test_uninstall_removes_a_link_for_a_command_no_longer_shipped() {
     fail 'sgt-uninstall left a dangling link for a removed command'
 }
 
+# The claimed globs overlap, so an entry matching more than one must still be
+# reported once and counted once.
+test_uninstall_reports_each_entry_once() {
+  local temp_dir output count
+  new_sandbox; temp_dir="$SANDBOX"
+
+  mkdir -p "$temp_dir/bin" "$temp_dir/home" "$temp_dir/other/bin"
+  printf '#!/bin/sh\n' > "$temp_dir/other/bin/sgt-list"
+  ln -s "$temp_dir/other/bin/sgt-list" "$temp_dir/bin/sgt-publish.999.sgt-list"
+
+  output="$(HOME="$temp_dir/home" SGT_INSTALL_DIR="$temp_dir/bin" \
+    "$FIXTURE_ROOT/bin/sgt-uninstall" 2>&1)"
+
+  count="$(printf '%s\n' "$output" | grep -c 'kept (not owned by this checkout)' || true)"
+  [[ "$count" -eq 1 ]] || fail "the entry was reported $count times: $output"
+  assert_contains "$output" 'Kept 1 entries owned by something else'
+}
+
 # ── Manifest ──────────────────────────────────────────────────────────────────
 
 test_manifest_excludes_non_regular_and_deprecated_entries() {
@@ -2006,6 +2024,7 @@ test_uninstall_ignores_an_unrelated_repository_in_the_cwd
 test_uninstall_reclaims_a_dangling_hook
 test_uninstall_fails_when_it_cannot_reach_the_hook_it_installed
 test_uninstall_removes_a_link_for_a_command_no_longer_shipped
+test_uninstall_reports_each_entry_once
 test_manifest_excludes_non_regular_and_deprecated_entries
 
 printf 'PASS: sgt-bootstrap and sgt-install behavior\n'

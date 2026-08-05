@@ -46,6 +46,10 @@ done
 
 removed=0
 kept=0
+# The claimed globs overlap and the candidate git directories coincide for a
+# normal clone, so each path is reported once.
+seen_targets='|'
+seen_hooks='|'
 
 managed_globs="$(_sgt_install_managed_globs)" || exit 1
 deprecated_links="$(_sgt_install_owned_deprecated_links "$ROOT_DIR" "$TARGET_DIR")" || exit 1
@@ -56,6 +60,10 @@ if ! "$hooks_only"; then
     [[ -n "$pattern" ]] || continue
     for target in "$TARGET_DIR"/$pattern; do
       [[ -L "$target" ]] || continue
+      case "$seen_targets" in
+        *"|$target|"*) continue ;;
+      esac
+      seen_targets="$seen_targets$target|"
       if _sgt_install_link_points_into "$target" "$ROOT_DIR"; then
         rm "$target"
         printf '  removed: %s\n' "$target"
@@ -130,6 +138,10 @@ if "$hooks_unresolved"; then
       [[ -f "$hook" ]] || continue
       hook_target="$candidate/hooks/${hook##*/}"
       [[ -L "$hook_target" ]] || continue
+      case "$seen_hooks" in
+        *"|$hook_target|"*) continue ;;
+      esac
+      seen_hooks="$seen_hooks$hook_target|"
       [[ "$(_sgt_install_resolve_link "$hook_target")" == "$hook" ]] || continue
       printf 'sgt-uninstall: %s still points into this checkout and was not removed.\n' \
         "$hook_target" >&2
