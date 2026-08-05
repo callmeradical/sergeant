@@ -361,7 +361,23 @@ fi
 current_action_lease="$(cat "$REPO_DIR/notifications/$current_notification_id/action_lease" 2>/dev/null || true)"
 if [[ -n "$current_action_lease" &&
       ! -f "$REPO_DIR/notifications/$current_notification_id/targets/$current_action_lease/completed" ]]; then
-  _die "Pending notification action lease belongs to the prior supervisor; relaunch refused"
+  # A supervisor that accepted a notification and then died between the agent
+  # publishing its completion proof and the supervisor recording it left the
+  # lease outstanding.  Refusing unconditionally made that worker permanently
+  # unrecoverable, because no supported command could settle the lease.
+  #
+  # Try to converge first, through the one shared finalizer.  It publishes
+  # completion only from the agent's own exact proof for this turn, so a
+  # mismatched identity or nonce, or an interrupted turn that never produced a
+  # proof, still fails closed.  Nothing is fabricated.  The response lock is
+  # already held here, so the finalizer reuses it.
+  _sgt_finalize_action_lease "$REPO_DIR" "$worktree" "respond_relaunch_convergence" || true
+  if [[ ! -f "$REPO_DIR/notifications/$current_notification_id/targets/$current_action_lease/completed" ]]; then
+    _die "$(printf 'Pending notification action lease belongs to the prior supervisor; relaunch refused.\n  notification: %s\n  lease target: %s\n  evidence: %s\n  The agent never published .sergeant-notification-complete/%s for this turn, so completion cannot be proven.\n  Resolve by inspecting that worktree turn, then rerun: sgt-respond %s %s' \
+      "$current_notification_id" "$current_action_lease" \
+      "$REPO_DIR/notifications/$current_notification_id/action_lease_pending" \
+      "$current_action_lease" "$TASK_ID" "$REPO")"
+  fi
 fi
 if [[ -n "$current_notification_id" && -n "$current_target_identity" ]]; then
   superseded_dir="$REPO_DIR/notifications/$current_notification_id"

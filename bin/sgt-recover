@@ -118,10 +118,19 @@ fi
 [[ "$diagnostic" == "live worker stalled:"* ]] || \
   _recover_die "Recovery is unavailable: stall diagnostic no longer present"
 
-# ── 5. Pre-flight: check for an unfinished notification action_lease ─────────
+# ── 5. Pre-flight: converge or refuse an unfinished notification action_lease ─
 # An in-flight action_lease means the prior supervisor accepted a notification
 # but died before writing 'completed'.  Replacing notification state now would
-# destroy the exact-once delivery evidence.  Refuse and escalate.
+# destroy the exact-once delivery evidence.
+#
+# Refusing unconditionally, as this used to, is what made such a worker
+# permanently unrecoverable: no supported command could settle the lease.  Try
+# convergence first through the one shared finalizer, which publishes completion
+# only from the agent's own exact proof for this turn.  A mismatched identity or
+# nonce, or a turn that never produced a proof, still fails closed and is still
+# refused — the td-6da427 guard against overwriting an in-flight lease is
+# preserved, not reverted.  The response lock is already held, so the finalizer
+# reuses it.
 
 current_notification_id="$(cat "$REPO_DIR/notification_id" 2>/dev/null || true)"
 if [[ -n "$current_notification_id" ]]; then
@@ -129,8 +138,12 @@ if [[ -n "$current_notification_id" ]]; then
     "$REPO_DIR/notifications/$current_notification_id/action_lease" 2>/dev/null || true)"
   if [[ -n "$current_action_lease" &&
         ! -f "$REPO_DIR/notifications/$current_notification_id/targets/$current_action_lease/completed" ]]; then
-    _escalate "pending notification action lease blocks recovery; prior delivery evidence must be preserved"
-    _recover_die "Stall recovery refused: unfinished notification action lease for $TASK_ID/$REPO"
+    _sgt_finalize_action_lease "$REPO_DIR" "$worktree" "recover_convergence" || true
+  fi
+  if [[ -n "$current_action_lease" &&
+        ! -f "$REPO_DIR/notifications/$current_notification_id/targets/$current_action_lease/completed" ]]; then
+    _escalate "pending notification action lease blocks recovery; prior delivery evidence must be preserved: notification $current_notification_id lease target $current_action_lease has no agent completion proof; resolve with sgt-respond $TASK_ID $REPO after inspecting that turn"
+    _recover_die "Stall recovery refused: unfinished notification action lease for $TASK_ID/$REPO (notification $current_notification_id, lease target $current_action_lease); the agent never published .sergeant-notification-complete/$current_action_lease, so completion cannot be proven. Resolve with: sgt-respond $TASK_ID $REPO"
   fi
 fi
 
