@@ -286,6 +286,12 @@ if fail_repo and Path(work_dir).name == fail_repo:
     sys.stderr.write("td: unexpected failure\n")
     sys.exit(2)
 
+special_view = ""
+for flag in ("--overdue", "--due-soon", "--surfacing"):
+    if flag in argv:
+        special_view = flag
+        break
+
 slow_repo = os.environ.get("SGT_TD_LIST_TEST_SLOW_REPO", "")
 if slow_repo and Path(work_dir).name == slow_repo:
     import time
@@ -339,6 +345,12 @@ for clause in td_filter.split(" AND "):
         want_status = clause[len("status="):]
     elif clause.startswith("priority="):
         want_priority = clause[len("priority="):]
+
+if special_view:
+    # Real td: these views exclude deferred tasks by construction, and answer
+    # from due dates this fixture does not model, so they answer with nothing.
+    print(json.dumps([]))
+    sys.exit(0)
 
 deferred_file = Path(work_dir) / ".td-task-deferred"
 deferred_idx = set()
@@ -1826,5 +1838,46 @@ grep -qi 'more than once' "$err" || {
   _fail "same_path_duplicate_stays_complete: nothing was lost, so nothing may claim otherwise"
 }
 printf 'same_path_duplicate_stays_complete: ok\n'
+
+# ── 45. td's deferred-exclusive views never gain a deferred row ────────────────
+
+# td's --overdue, --due-soon and --surfacing exclude deferred tasks by
+# construction: --deferred overrides them instead of intersecting, so a second
+# read would inject exactly the rows the view exists to exclude, and --surfacing
+# means "no longer deferred".
+for view in --overdue --due-soon --surfacing; do
+  : > "$TEST_ROOT/td.log"
+  out="$TEST_ROOT/view.out"; err="$TEST_ROOT/view.err"
+  _run "$out" "$err" -- mixed "$view"
+  _expect_status 0 "deferred_exclusive_view($view)" "$err"
+  ! grep -qF -- '--deferred' "$TEST_ROOT/td.log" || {
+    printf 'actual td calls:\n%s\n' "$(cat "$TEST_ROOT/td.log")" >&2
+    _fail "deferred_exclusive_view($view): a deferred read would inject rows $view excludes"
+  }
+  for id in td-000003 td-000006; do
+    ! grep -qF "$id" "$out" || {
+      printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+      _fail "deferred_exclusive_view($view): deferred task $id must not appear under $view"
+    }
+  done
+  grep -qF 'deferred ones excluded' "$out" || {
+    printf 'actual output:\n%s\n' "$(cat "$out")" >&2
+    _fail "deferred_exclusive_view($view): the header must say deferred tasks are excluded"
+  }
+done
+printf 'deferred_exclusive_view: ok\n'
+
+# The same flags on the --json path keep stdout a valid array and disclose the view.
+: > "$TEST_ROOT/td.log"
+out="$TEST_ROOT/view-json.out"; err="$TEST_ROOT/view-json.err"
+_run "$out" "$err" -- mixed --surfacing --json
+_expect_status 0 deferred_exclusive_view_json "$err"
+"$REAL_PYTHON" -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len(d))' "$out" >/dev/null \
+  || _fail "deferred_exclusive_view_json: stdout must stay valid JSON"
+grep -qF 'deferred ones excluded' "$err" || {
+  printf 'actual stderr:\n%s\n' "$(cat "$err")" >&2
+  _fail "deferred_exclusive_view_json: the note must disclose the view"
+}
+printf 'deferred_exclusive_view_json: ok\n'
 
 printf '\nAll sgt-td-list tests passed.\n'

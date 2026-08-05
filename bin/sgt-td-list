@@ -51,6 +51,10 @@
 #   would read as a query expression — are refused for the same reason.  Pass a
 #   td query as --filter '<expr>', whose view is labelled as caller-governed.
 #
+#   td's own special views — --overdue, --due-soon and --surfacing — exclude
+#   deferred tasks by construction (--deferred overrides them rather than
+#   intersecting), so no second read is issued for them and the header says so.
+#
 #   Narrowing uses td's own -s/-p flags.  td applies its closed-and-deferred
 #   exclusion to those but not to `--filter`, so `--filter priority=P2` answers
 #   with closed tasks while `-p P2` does not.  A caller-supplied `--filter`
@@ -215,6 +219,7 @@ fi
 # label says that instead of claiming a set nobody verified.
 CALLER_FILTER=false
 CALLER_SELECTION=false
+CALLER_DEFERRED_VIEW=false
 skip_value=false
 if [[ "${#EXTRA_FLAGS[@]}" -gt 0 ]]; then
   for ((i=0; i<${#EXTRA_FLAGS[@]}; i++)); do
@@ -225,6 +230,13 @@ if [[ "${#EXTRA_FLAGS[@]}" -gt 0 ]]; then
     case "${EXTRA_FLAGS[$i]}" in
       --filter|-f|--filter=*|-f?*)           CALLER_FILTER=true ;;
       --limit|-n|--limit=*|-n=*|-n[0-9]*)     : ;;  # the cap logic owns it
+      --overdue|--due-soon|--surfacing)
+        # td's special views are deferred-exclusive: --deferred overrides them
+        # rather than intersecting, so a second read would inject rows the view
+        # exists to exclude.  --surfacing means "no longer deferred".
+        CALLER_SELECTION=true
+        CALLER_DEFERRED_VIEW=true
+        ;;
       -*)                                    CALLER_SELECTION=true ;;
     esac
     # A flag's own value is not a flag: `--limit -1` must not read as a narrowing.
@@ -233,6 +245,7 @@ if [[ "${#EXTRA_FLAGS[@]}" -gt 0 ]]; then
 fi
 INCLUDE_DEFERRED=true
 $CALLER_FILTER && INCLUDE_DEFERRED=false
+$CALLER_DEFERRED_VIEW && INCLUDE_DEFERRED=false
 
 # What the reader is actually looking at, stated rather than implied.
 if [[ -n "$STATUS_FILTER" && -n "$PRIORITY_FILTER" ]]; then
@@ -247,6 +260,8 @@ fi
 if $CALLER_FILTER; then
   # Never claim td's exclusions for a query that does not apply them.
   VIEW_LABEL="$VIEW_LABEL; caller --filter governs which statuses appear"
+elif $CALLER_DEFERRED_VIEW; then
+  VIEW_LABEL="$VIEW_LABEL; caller td flags govern which tasks appear, deferred ones excluded"
 elif $CALLER_SELECTION; then
   VIEW_LABEL="$VIEW_LABEL; caller td flags may narrow which tasks appear"
 fi
