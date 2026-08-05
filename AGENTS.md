@@ -74,7 +74,8 @@ the operation with ad hoc shell commands.
 | `bin/sgt-watch <task-id> --background` | Start a managed background monitor (default for OpenCode); returns promptly with monitor identity and control commands |
 | `bin/sgt-watch <task-id>` | Monitor fleet in foreground until all workers done (for humans and debugging) |
 | `bin/sgt-watch --sync-all` | Reconcile every durable fleet record and recycle verified terminal panes |
-| `bin/sgt-watch --list` | List all active tasks |
+| `bin/sgt-watch --list` | List every retained fleet record, including terminal ones |
+| `bin/sgt-watch --snapshot [<task-id>] [--repo <repo>]` | Bounded read-only JSON observation of whether Sergeant is verifiably working; never reconciles or mutates state |
 | `bin/sgt-respond <task-id> <repo>` | Read a worker response from stdin and resume its loop |
 | `bin/sgt-wake <task-id> <repo>` | Evaluate a waiting worker's durable wake condition and resume it when met |
 | `bin/sgt-recover <task-id> <repo>` | Attempt one bounded stall recovery for a live-but-stalled in-progress worker |

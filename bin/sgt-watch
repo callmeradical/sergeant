@@ -29,12 +29,177 @@ if [[ "${1:-}" == "--background" || "${2:-}" == "--background" ]]; then
   exit 0
 fi
 
+# ── Bounded read-only snapshot ────────────────────────────────────────────────
+#
+#   sgt-watch --snapshot
+#   sgt-watch --snapshot <task-id>
+#   sgt-watch --snapshot <task-id> --repo <repo>
+#
+# Answers exactly one narrow question — "is Sergeant verifiably doing work right
+# now?" — as constant-size versioned JSON.  --list renders every retained record
+# for humans and embeds free-form brief text, and --sync/--sync-all mutate
+# lifecycle state, so neither is usable by a coordinator or bridge that needs a
+# side-effect-free observation.
+#
+# Strictly read-only: this branch runs before any reconciliation, never writes,
+# and deliberately avoids _pane_is_supervisor because that migrates legacy
+# pane_identity files as a side effect.
+#
+# `busy: true` requires ALL of a stable active status, an exact live Sergeant
+# worker identity, and recent progress attributable to that pane.  Every other
+# outcome is `busy: null`.  Version 1 never emits `busy: false`: absence of a
+# verified witness is not proof of idleness.
+#
+# `basis` is a closed allowlist of exactly two values, so an unknown condition
+# maps to the null basis instead of inventing one.
+_SGT_SNAPSHOT_SCHEMA='sergeant.watch-status/v1'
+
+# _snapshot_scope_id_is_valid: bound the only caller-supplied values that reach
+# the output, which is what keeps the document constant-size.
+_snapshot_scope_id_is_valid() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+}
+
+# _snapshot_pane_is_verified_worker <pane> <repo_dir>
+# Read-only exact identity match against the recorded worker pane.
+_snapshot_pane_is_verified_worker() {
+  local pane="$1" repo_dir="$2" actual expected observed_pane observed_dead
+  [[ -n "$pane" ]] || return 1
+  command -v tmux >/dev/null 2>&1 || return 1
+  actual="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
+  [[ -n "$actual" ]] || return 1
+  # pane_dead|pane_id|pane_pid|pane_created|pane_start_command.  `display-message
+  # -t <gone>` falls back to the default target, so the pane id is compared.
+  observed_dead="${actual%%|*}"
+  observed_pane="${actual#*|}"
+  observed_pane="${observed_pane%%|*}"
+  [[ "$observed_dead" == "0" && "$observed_pane" == "$pane" ]] || return 1
+  expected="$(cat "$repo_dir/pane_identity" 2>/dev/null || true)"
+  [[ -n "$expected" && "$expected" == "$actual" ]]
+}
+
+# _snapshot_repo_is_active_witness <repo_dir>
+_snapshot_repo_is_active_witness() {
+  local repo_dir="$1" status pane recent now last_event pane_activity
+  [[ -d "$repo_dir" ]] || return 1
+  status="$(cat "$repo_dir/status" 2>/dev/null | tr -d '\n' || true)"
+  # in_progress is the only status that claims work is happening.  Terminal,
+  # waiting and unreconciled states are never a witness.
+  [[ "$status" == "in_progress" ]] || return 1
+  pane="$(cat "$repo_dir/pane" 2>/dev/null | tr -d '\n' || true)"
+  _snapshot_pane_is_verified_worker "$pane" "$repo_dir" || return 1
+
+  recent="${SERGEANT_SNAPSHOT_RECENT_SECONDS:-300}"
+  [[ "$recent" =~ ^[0-9]+$ ]] || recent=300
+  now="$(date +%s)"
+  [[ "$now" =~ ^[0-9]+$ ]] || return 1
+  last_event="$(cat "$repo_dir/progress_ts" 2>/dev/null | tr -d '\n' || true)"
+  [[ "$last_event" =~ ^[1-9][0-9]*$ ]] || last_event=0
+  pane_activity="$(tmux display-message -p -t "$pane" '#{pane_activity}' 2>/dev/null || true)"
+  if [[ "$pane_activity" =~ ^[1-9][0-9]*$ ]] && (( pane_activity > last_event )); then
+    last_event="$pane_activity"
+  fi
+  (( last_event > 0 && now >= last_event && now - last_event <= recent ))
+}
+
+_snapshot_emit() {
+  local kind="$1" task_id="$2" repo="$3" busy="$4" basis="$5"
+  local task_field repo_field
+  if [[ -n "$task_id" ]]; then task_field="\"$task_id\""; else task_field='null'; fi
+  if [[ -n "$repo" ]]; then repo_field="\"$repo\""; else repo_field='null'; fi
+  printf '{"schema":"%s","observed_at":"%s","scope":{"kind":"%s","task_id":%s,"repo":%s},"busy":%s,"basis":"%s"}\n' \
+    "$_SGT_SNAPSHOT_SCHEMA" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$kind" "$task_field" "$repo_field" "$busy" "$basis"
+}
+
+if [[ "${1:-}" == "--snapshot" ]]; then
+  snapshot_task=""
+  snapshot_repo=""
+  snapshot_task_given=0
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --repo)
+        [[ -n "${2:-}" ]] || _die "--repo requires a repository name"
+        snapshot_repo="$2"
+        shift 2
+        ;;
+      -*) _die "Unknown option for --snapshot: $1" ;;
+      *)
+        (( snapshot_task_given == 0 )) || \
+          _die "Usage: sgt-watch --snapshot [<task-id>] [--repo <repo>]"
+        snapshot_task="$1"
+        snapshot_task_given=1
+        shift
+        ;;
+    esac
+  done
+  # Validate before observing anything, so a malformed scope can never reach the
+  # output and can never make the document unbounded.
+  if (( snapshot_task_given == 1 )); then
+    _snapshot_scope_id_is_valid "$snapshot_task" || \
+      _die "Invalid task ID for --snapshot: $snapshot_task"
+  fi
+  if [[ -n "$snapshot_repo" ]]; then
+    [[ -n "$snapshot_task" ]] || _die "--repo requires a task ID"
+    _snapshot_scope_id_is_valid "$snapshot_repo" || \
+      _die "Invalid repo for --snapshot: $snapshot_repo"
+  fi
+
+  if [[ -n "$snapshot_repo" ]]; then
+    snapshot_kind="repo"
+  elif [[ -n "$snapshot_task" ]]; then
+    snapshot_kind="task"
+  else
+    snapshot_kind="fleet"
+  fi
+
+  snapshot_busy="null"
+  snapshot_basis="no_verified_active_witness"
+  if [[ -n "$snapshot_repo" ]]; then
+    if _snapshot_repo_is_active_witness "$FLEET_DIR/$snapshot_task/$snapshot_repo"; then
+      snapshot_busy="true"
+      snapshot_basis="verified_active_witness"
+    fi
+  elif [[ -n "$snapshot_task" ]]; then
+    if [[ -d "$FLEET_DIR/$snapshot_task" ]]; then
+      for snapshot_repo_dir in "$FLEET_DIR/$snapshot_task"/*/; do
+        [[ -d "$snapshot_repo_dir" ]] || continue
+        if _snapshot_repo_is_active_witness "${snapshot_repo_dir%/}"; then
+          snapshot_busy="true"
+          snapshot_basis="verified_active_witness"
+          break
+        fi
+      done
+    fi
+  elif [[ -d "$FLEET_DIR" ]]; then
+    for snapshot_task_dir in "$FLEET_DIR"/*/; do
+      [[ -d "$snapshot_task_dir" ]] || continue
+      for snapshot_repo_dir in "$snapshot_task_dir"*/; do
+        [[ -d "$snapshot_repo_dir" ]] || continue
+        if _snapshot_repo_is_active_witness "${snapshot_repo_dir%/}"; then
+          snapshot_busy="true"
+          snapshot_basis="verified_active_witness"
+          break 2
+        fi
+      done
+    done
+  fi
+
+  _snapshot_emit "$snapshot_kind" "$snapshot_task" "$snapshot_repo" \
+    "$snapshot_busy" "$snapshot_basis"
+  exit 0
+fi
+
 if [[ "${1:-}" == "--list" ]]; then
   if [[ ! -d "$FLEET_DIR" ]] || [[ -z "$(ls -A "$FLEET_DIR" 2>/dev/null)" ]]; then
     echo "No tasks found in $FLEET_DIR"
     exit 0
   fi
-  echo "Active tasks:"
+  # Retained records include terminal ones, so this heading must not claim they
+  # are active.  Use --snapshot for a machine-readable activity observation.
+  echo "Fleet tasks (retained records, including terminal):"
   echo ""
   for task_dir in "$FLEET_DIR"/*/; do
     task_id="$(basename "$task_dir")"
