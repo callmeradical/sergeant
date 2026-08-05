@@ -27,8 +27,10 @@ Optional:
 - Node.js/npm to install external agent skills
 
 On macOS with Homebrew, or Linux with `apt-get`, the bootstrap installs every
-required entry above plus the optional `mise`, `graphify`, and `no-mistakes`.
-It does not install `treehouse` or `dagr`, which have their own installers.
+required entry above plus the optional `mise`, Node.js, `graphify`, and
+`no-mistakes`, along with the supporting tools it needs itself (`jq`,
+`shellcheck`, `curl`, Go, and `uv`). It reports but does not install `treehouse`
+or `dagr`, which have their own installers.
 Preview it first, then run it:
 
 ```bash
@@ -38,10 +40,14 @@ cd sergeant
 ./bin/sgt-bootstrap
 ```
 
-The bootstrap is safe to rerun and never overwrites an existing command, tool,
-or user file; anything already occupying a path Sergeant wants is preserved and
-reported as a conflict. Conflicts are reported before the first package is
-installed, so a run that cannot finish declines without changing anything.
+The bootstrap is safe to rerun and never overwrites anything you own: a real
+file, a directory, or a symlink pointing outside a Sergeant checkout is preserved
+and reported as a conflict. It does reclaim its own entries without asking — a
+symlink already pointing into some Sergeant checkout, a broken symlink, or an
+executable already at a name it manages — so installing from a second clone
+repoints the commands at that clone. Conflicts are reported before the first
+package is installed, so a run that cannot finish declines without changing
+anything.
 
 Sergeant writes to the command directory (`SGT_INSTALL_DIR`, default
 `~/.local/bin`) and to this repository, whose git hooks it installs. It writes
@@ -51,13 +57,16 @@ third-party installers it invokes (`mise`, `go`, `uv`) manage their own data
 directories.
 
 It does not automate or probe any login; follow the `MANUAL:` actions it reports.
+`--verify-only` also reports a `WARNING:` when the command directory is not on
+your `PATH`, and a `MANUAL:` line for platform packages it cannot install itself.
 
 On any other platform, or to check an existing installation, verify without
 changing anything. Both read-only modes work everywhere: on a platform without a
 supported package manager they report the platform packages as a `MANUAL:` step
 and still verify everything else. Neither runs a package manager, an installer,
-or an agent harness; the only third-party command either runs is `yq --version`,
-to tell Mike Farah's `yq` from the Python package of the same name:
+or an agent harness; the only third-party commands either runs are read-only
+queries: `yq --version`, to tell Mike Farah's `yq` from the Python package of the
+same name, and `git config` / `git rev-parse` to locate the git hooks directory:
 
 ```bash
 ./bin/sgt-bootstrap --verify-only   # or: mise run verify
@@ -101,8 +110,11 @@ cd sergeant
 mise run install      # or: ./bin/sgt-install
 ```
 
-Remove them again with `mise run uninstall` (or `./bin/sgt-uninstall`), which
-removes only links still pointing into this checkout.
+Remove them again with `mise run uninstall` (or `./bin/sgt-uninstall`). It is the
+inverse of the install: it removes the command links **and** this checkout's git
+hooks, and only while they still point into this checkout. Use
+`mise run uninstall:hooks` (`./bin/sgt-uninstall --hooks-only`) to remove just
+the hooks.
 
 By default, installation symlinks commands into `~/.local/bin`. Ensure that
 directory is on `PATH`:

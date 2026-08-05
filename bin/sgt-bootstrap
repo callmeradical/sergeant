@@ -71,14 +71,18 @@ system_packages=('git:git' 'gh:gh' 'tmux:tmux' 'jq:jq' 'shellcheck:shellcheck' \
 managed_tools=('go:go@latest' 'node:node@lts' 'uv:uv@latest' \
   'opencode:opencode@latest' 'claude:claude@latest' 'yq:yq@latest')
 
-# Commands whose absence fails verification. This mirrors the required set of
-# `mise run check`, which is the repository's other definition of "required".
+# Commands whose absence fails verification. These are the same NAMES that
+# `mise run check` requires, pinned by tests/support/assert-toolchain-sets.py.
+# `mise run check` additionally validates td's capabilities (Marcus td with
+# --description, --json and --work-dir); this command only checks presence.
 required_commands=('git' 'gh' 'tmux' 'yq' 'python3' 'lsof' 'td')
 
 # Commands the bootstrap installs or uses but whose absence is reported without
 # failing verification, matching the optional set of `mise run check`.
+# treehouse and dagr are reported but not installed: both have their own
+# installers, which this command does not drive.
 optional_commands=('jq' 'shellcheck' 'curl' 'mise' 'go' 'node' 'uv' \
-  'graphify' 'no-mistakes' 'treehouse')
+  'graphify' 'no-mistakes' 'treehouse' 'dagr')
 
 # Exactly one interactive agent harness is required, matching
 # docs/getting-started.md and `mise run check`.
@@ -267,7 +271,7 @@ fi
 if "$dry_run"; then
   if ! "$packages_automatable"; then
     if ((${#packages[@]})); then
-      printf 'MANUAL: install these platform packages yourself (%s): %s\n' \
+      printf 'MANUAL PACKAGES: install these yourself (%s): %s\n' \
         "$platform_blocker" "${packages[*]}"
     else
       printf 'OK: platform packages already installed\n'
@@ -340,8 +344,18 @@ if "$verify_only"; then
   verify_failed=false
 
   if ! "$packages_automatable"; then
-    printf 'MANUAL: %s; install platform packages with your own package manager.\n' \
+    printf 'MANUAL PACKAGES: %s; install platform packages with your own package manager.\n' \
       "$platform_blocker"
+  fi
+
+  # Bash is the interpreter running this script, so it is reported rather than
+  # looked up; the repository's floor is 3.2.
+  if [[ "${BASH_VERSINFO[0]}" -gt 3 ]] || \
+     { [[ "${BASH_VERSINFO[0]}" -eq 3 ]] && [[ "${BASH_VERSINFO[1]}" -ge 2 ]]; }; then
+    printf 'OK: bash %s\n' "$BASH_VERSION"
+  else
+    printf 'MISSING: bash 3.2 or newer (running %s)\n' "$BASH_VERSION"
+    verify_failed=true
   fi
 
   for command_name in "${required_commands[@]}"; do

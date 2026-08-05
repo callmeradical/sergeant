@@ -4,9 +4,14 @@
 Usage: assert-toolchain-sets.py <mise.toml> <bin/sgt-bootstrap>
 
 `mise run check` and `bin/sgt-bootstrap --verify-only` are the two commands a
-user may run to find out whether their toolchain is complete. If their required
-and optional sets drift, one reports success while the other fails, and the
-docs that point at both become wrong. Exits non-zero naming the divergence.
+user may run to find out whether their toolchain is complete. If the NAMES in
+their required and optional sets drift, one reports success while the other
+fails, and the docs that point at both become wrong. Exits non-zero naming the
+divergence.
+
+Only names are compared. `mise run check` additionally validates td's
+capabilities, which bin/sgt-bootstrap deliberately does not; see its
+required_commands comment.
 """
 
 import re

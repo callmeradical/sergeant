@@ -24,7 +24,7 @@ description = "Remove git hooks installed from scripts/hooks/"
 run = "./bin/sgt-uninstall --hooks-only"
 
 [tasks.uninstall]
-description = "Remove sgt-* symlinks from ~/.local/bin"
+description = "Remove the command links and git hooks this checkout installed"
 run = "./bin/sgt-uninstall"
 
 [tasks.check]
