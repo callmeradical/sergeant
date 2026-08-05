@@ -117,9 +117,12 @@ EOF
     printf '%s: handshake never completed\n' "$label" >&2
     exit 1
   }
-  # Wait for the supervisor process to be gone so _finish has run.
+  # Wait for the supervisor pane to be gone so _finish has run.  `display-message
+  # -t <gone>` silently falls back to the default target, so the returned pane id
+  # must be compared rather than the exit status trusted.
   for _ in $(seq 1 3000); do
-    tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 || break
+    [[ "$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)" == "$pane" ]] \
+      || break
     sleep 0.02
   done
   printf '%s %s %s %s\n' "$state" "$worktree" "$notification_id" "$nonce"
