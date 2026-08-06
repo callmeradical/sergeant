@@ -101,6 +101,10 @@ name without the `bin/` prefix (e.g. `sgt-dispatch`, `sgt-watch`).
 | `bin/sgt-undrain --global\|<project>` | `sgt-undrain` | Deactivate a drain signal |
 | `bin/sgt-drain --status [--global\|<project>]` | `sgt-drain` | Show active drain state |
 | `wiki-daily-digest [--date YYYY-MM-DD] [--since DATE] [--dry-run]` | `wiki-daily-digest` | Synthesize opencode session history into `~/wiki/sessions/` |
+| `bin/sgt-msg-send <project> --from <agent> --to <agent\|broadcast> "<msg>"` | `sgt-msg-send` | Send a durable SQLite-backed message to an agent inbox |
+| `bin/sgt-msg-recv <project> --agent <agent> [--unread-only] [--mark-read]` | `sgt-msg-recv` | Read messages for an agent; returns JSON array |
+| `bin/sgt-msg-ack <project> <message-id>` | `sgt-msg-ack` | Acknowledge (mark read) a specific message by ID |
+| `bin/sgt-msg-list <project> [--all] [--agent <agent>]` | `sgt-msg-list` | List inbox messages in a human-readable table |
 
 Use the bare command when it resolves on `PATH`; otherwise run the matching
 script from this repository's `bin/` directory. Fall back to manual operations

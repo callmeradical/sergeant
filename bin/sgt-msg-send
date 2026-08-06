@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# sgt-msg-send — Send a message to an agent inbox in a project
+#
+# Usage:
+#   sgt-msg-send <project> --from <agent> --to <agent|broadcast> "<message>"
+#
+# Options:
+#   --from <agent>    Sender agent name/id (required)
+#   --to <agent>      Recipient agent name/id or "broadcast" (required)
+#   --metadata <json> Optional JSON metadata blob
+#
+# Output: message ID on success
+# Exit:   0 success, 1 error
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+_die() { echo "error: $*" >&2; exit 1; }
+
+[[ $# -lt 1 ]] && _die "Usage: sgt-msg-send <project> --from <agent> --to <agent> \"<message>\""
+
+PROJECT="$1"; shift
+
+FROM_AGENT=""
+TO_AGENT=""
+BODY=""
+METADATA=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --from)     FROM_AGENT="$2"; shift 2 ;;
+    --to)       TO_AGENT="$2";   shift 2 ;;
+    --metadata) METADATA="$2";   shift 2 ;;
+    -*)         _die "Unknown flag: $1" ;;
+    *)          BODY="$1";       shift ;;
+  esac
+done
+
+[[ -z "$FROM_AGENT" ]] && _die "--from <agent> is required"
+[[ -z "$TO_AGENT"   ]] && _die "--to <agent|broadcast> is required"
+[[ -z "$BODY"       ]] && _die "message body is required"
+[[ -z "$PROJECT"    ]] && _die "<project> is required"
+
+DB_DIR="${SERGEANT_MSG_DB_DIR:-$HOME/.sergeant/messages}"
+mkdir -p "$DB_DIR"
+DB="$DB_DIR/${PROJECT}.db"
+
+sqlite3 "$DB" <<'SQL'
+CREATE TABLE IF NOT EXISTS messages (
+  id          TEXT PRIMARY KEY,
+  project     TEXT NOT NULL,
+  from_agent  TEXT NOT NULL,
+  to_agent    TEXT NOT NULL,
+  body        TEXT NOT NULL,
+  sent_at     TEXT NOT NULL,
+  read_at     TEXT
+);
+SQL
+
+MSG_ID="$(date +%s%N 2>/dev/null || date +%s)$(echo $RANDOM | sha256sum 2>/dev/null | head -c 8 || echo $RANDOM)"
+MSG_ID="$(printf '%s' "$MSG_ID" | sha256sum | head -c 16)"
+SENT_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+sqlite3 "$DB" "INSERT INTO messages (id, project, from_agent, to_agent, body, sent_at, read_at)
+  VALUES ('${MSG_ID}', '${PROJECT}', '${FROM_AGENT}', '${TO_AGENT}', '${BODY}', '${SENT_AT}', NULL);"
+
+echo "$MSG_ID"

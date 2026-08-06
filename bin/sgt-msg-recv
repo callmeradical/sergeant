@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# sgt-msg-recv — Read messages for an agent in a project inbox
+#
+# Usage:
+#   sgt-msg-recv <project> --agent <agent> [--unread-only] [--mark-read] [--limit N]
+#
+# Options:
+#   --agent <agent>  Recipient agent name (required); also matches "broadcast"
+#   --unread-only    Only return messages where read_at IS NULL
+#   --mark-read      Mark all returned messages as read
+#   --limit N        Max messages to return (default: 100)
+#
+# Output: JSON array of message objects
+# Exit:   0 always (empty array if no messages)
+
+set -euo pipefail
+
+_die() { echo "error: $*" >&2; exit 1; }
+
+[[ $# -lt 1 ]] && _die "Usage: sgt-msg-recv <project> --agent <agent> [--unread-only] [--mark-read] [--limit N]"
+
+PROJECT="$1"; shift
+
+AGENT=""
+UNREAD_ONLY=0
+MARK_READ=0
+LIMIT=100
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --agent)       AGENT="$2";   shift 2 ;;
+    --unread-only) UNREAD_ONLY=1; shift ;;
+    --mark-read)   MARK_READ=1;  shift ;;
+    --limit)       LIMIT="$2";   shift 2 ;;
+    *) _die "Unknown flag: $1" ;;
+  esac
+done
+
+[[ -z "$AGENT" ]]   && _die "--agent <agent> is required"
+[[ -z "$PROJECT" ]] && _die "<project> is required"
+
+DB_DIR="${SERGEANT_MSG_DB_DIR:-$HOME/.sergeant/messages}"
+DB="$DB_DIR/${PROJECT}.db"
+
+if [[ ! -f "$DB" ]]; then
+  echo "[]"
+  exit 0
+fi
+
+sqlite3 "$DB" <<'SQL'
+CREATE TABLE IF NOT EXISTS messages (
+  id TEXT PRIMARY KEY, project TEXT NOT NULL, from_agent TEXT NOT NULL,
+  to_agent TEXT NOT NULL, body TEXT NOT NULL, sent_at TEXT NOT NULL, read_at TEXT
+);
+SQL
+
+UNREAD_CLAUSE=""
+[[ $UNREAD_ONLY -eq 1 ]] && UNREAD_CLAUSE="AND read_at IS NULL"
+
+ROWS=$(sqlite3 -json "$DB" \
+  "SELECT id, project, from_agent, to_agent, body, sent_at, COALESCE(read_at,'') as read_at
+   FROM messages
+   WHERE (to_agent = '${AGENT}' OR to_agent = 'broadcast')
+   ${UNREAD_CLAUSE}
+   ORDER BY sent_at ASC
+   LIMIT ${LIMIT};")
+
+echo "${ROWS:-[]}"
+
+if [[ $MARK_READ -eq 1 ]]; then
+  NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  sqlite3 "$DB" \
+    "UPDATE messages SET read_at='${NOW}'
+     WHERE (to_agent='${AGENT}' OR to_agent='broadcast')
+     AND read_at IS NULL ${UNREAD_CLAUSE};"
+fi

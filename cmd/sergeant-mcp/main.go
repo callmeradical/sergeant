@@ -298,6 +298,30 @@ var tools = []toolDef{
 		description: "Run coordinator-owned no-mistakes in an interactive pane. NOTE: requires a real TTY — use sgt-validate to launch this indirectly via sgt-dispatch.",
 		argsDesc:    `CLI args: <repo-state-dir> <worktree> <intent-revision> <intent-transport> [skip]`,
 	},
+	{
+		scriptName:  "sgt-msg-send",
+		toolName:    "sgt-msg-send",
+		description: "Send a message to an agent inbox in a project. Creates a SQLite-backed durable message for inter-agent communication.",
+		argsDesc:    `CLI args: <project> --from <agent> --to <agent|broadcast> \"<message>\" [--metadata <json>]`,
+	},
+	{
+		scriptName:  "sgt-msg-recv",
+		toolName:    "sgt-msg-recv",
+		description: "Read messages for an agent in a project inbox. Returns a JSON array of message objects.",
+		argsDesc:    `CLI args: <project> --agent <agent> [--unread-only] [--mark-read] [--limit N]`,
+	},
+	{
+		scriptName:  "sgt-msg-ack",
+		toolName:    "sgt-msg-ack",
+		description: "Acknowledge (mark read) a specific message by ID in a project inbox.",
+		argsDesc:    `CLI args: <project> <message-id>`,
+	},
+	{
+		scriptName:  "sgt-msg-list",
+		toolName:    "sgt-msg-list",
+		description: "List messages in a project inbox in a human-readable table. Shows id, from, to, sent_at, read status, and body preview.",
+		argsDesc:    `CLI args: <project> [--all] [--agent <agent>]`,
+	},
 }
 
 func main() {

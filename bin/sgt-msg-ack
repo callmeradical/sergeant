@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# sgt-msg-ack — Acknowledge (mark read) a specific message by ID
+#
+# Usage:
+#   sgt-msg-ack <project> <message-id>
+#
+# Output: "acked <id>"
+# Exit:   0 success, 1 not found or error
+
+set -euo pipefail
+
+_die() { echo "error: $*" >&2; exit 1; }
+
+[[ $# -lt 2 ]] && _die "Usage: sgt-msg-ack <project> <message-id>"
+
+PROJECT="$1"
+MSG_ID="$2"
+
+DB_DIR="${SERGEANT_MSG_DB_DIR:-$HOME/.sergeant/messages}"
+DB="$DB_DIR/${PROJECT}.db"
+
+[[ ! -f "$DB" ]] && _die "no message database for project: $PROJECT"
+
+NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM messages WHERE id='${MSG_ID}';")
+[[ "$ROWS" -eq 0 ]] && _die "message not found: $MSG_ID" && exit 1
+
+sqlite3 "$DB" "UPDATE messages SET read_at='${NOW}' WHERE id='${MSG_ID}';"
+echo "acked $MSG_ID"
