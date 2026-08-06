@@ -224,8 +224,9 @@ python3 scripts/gauntlet/reconcile-work.py --check-fleet-owner-reconciled
 
 - Required artifact: `.gauntlet/existing-work.md` with one row per **ref in any
   namespace, reflog/stash entry and worktree**: namespace/trust class, commit
-  count, dirty count, owning td, coordinator,
-  overlap set, provisional disposition and evidence. It does not execute the
+  count, dirty count, owning td, coordinator, merge-base, commits ahead/behind
+  current integration SHA, net deleted paths, intended path scope, overlap set,
+  provisional disposition and evidence. It does not execute the
   disposition. No builder in any phase may start against an overlap set until
   Phase -0B integrates or explicitly preserves it with a trigger. Negative
   phase numbers do not exempt bootstrap work.
@@ -478,6 +479,9 @@ python3 scripts/gauntlet/reconcile-work.py --check-no-overlap-builders --phase -
   unlisted boundary.
 - All 21 existing tmux-touching test files migrate in this phase, after Phase
   -0B has disposed existing branches that modify them.
+- Precondition: Phase -0B reports zero unresolved existing-work rows. If a later
+  deferred branch changes any migrated file, it enters Phase 6.5 and invalidates
+  the affected conformance evidence until rerun.
 - Verification commands and expected outcomes:
 
 ```bash
@@ -574,6 +578,10 @@ python3 scripts/gauntlet/reconcile-work.py --check-disposition
 
 python3 scripts/gauntlet/reconcile-work.py --check-no-overlap-builders
 # zero new builders overlap any unresolved existing branch
+
+python3 scripts/gauntlet/reconcile-work.py --check-merge-safety <ref>
+# refuses until ref is rebased onto CURRENT integration SHA and every deletion
+# belongs to the owning card/spec path scope
 ```
 
 - Every shipped branch uses the repaired Phase -0A validation boundary. Every
@@ -583,9 +591,22 @@ python3 scripts/gauntlet/reconcile-work.py --check-no-overlap-builders
   `tmux list-sessions`, real fleet hashes and leaked-process count must be
   byte/count-identical; the sandbox itself must leave zero child processes.
 - After each merge, update the plan's current integration SHA and rerun overlap
-  analysis; initial fixed point remains historical evidence.
+  and merge-safety analysis for every remaining ref; initial fixed point remains
+  historical evidence. Evidence is never reused across two integration SHAs.
+- Before merge: rebase in an isolated worktree, resolve conflicts against both
+  intents, rerun native tests and fresh spec/standards critics. A stale branch
+  that deletes paths outside its intent is preserved/superseded, not merged.
+- Phase -0B completes only when zero unresolved existing-work rows remain. Phase
+  -1 cannot begin while any merge/preserve/supersede/discard action is pending.
+- A deferred branch triggered after Phase -1 enters Phase 6.5 as new work and
+  reruns conformance for every tmux-touching file it changes; Phase -0B never
+  reopens after Phase -1.
 - Evidence baseline: critic round 4 counted 166 unpushed commits across 19
   branches, 9 dirty worktrees and 0 open PRs. Detection alone is not success.
+- Staleness evidence at critic round 21: branches were observed 270-366 commits
+  behind main, with 27k+ net deletions and only 16 test files versus main's 40.
+  `feat/no-mistakes-diagnose-cleanup-restore-fai` is the mandatory negative
+  fixture: merge safety must FAIL naming lag and out-of-scope deleted tests.
 - Largest remaining gap: no disposition map exists
 
 ### Phase 0 — Make the backlog truthful
@@ -965,6 +986,11 @@ shellcheck bin/* tests/*.sh
   green. Added Phase 6.5 to execute every remaining domain wave; deferrals now
   require individual user approval, owner and trigger; final bar requires zero
   P0/P1 and no unresolved in-progress/review state.
+- 2026-08-05: Critic round 21 found stale branches hundreds of commits behind
+  main could delete shipped tests while every disposition gate passed. Added
+  per-ref merge-base/ahead/behind/deletion/intent evidence, mandatory rebase and
+  path-scoped deletion review, per-merge re-baselining, and zero unresolved
+  branches before Phase -1. Deferred late branches re-enter via Phase 6.5.
 
 ## Round log
 
@@ -1098,3 +1124,9 @@ shellcheck bin/* tests/*.sh
   backlog map, individual human-approved deferrals only, Phase 6.5 domain waves,
   and final zero P0/P1/in-progress/in-review outcomes. Evidence report:
   `.gauntlet/rounds/plan/20-critic.md`.
+- Round 21 critic: quality bar won on merge safety. Branches 270-366 commits
+  behind main carried 27k+ deletions and could remove shipped tests outside their
+  intent while all current gates passed. Challenge accepted: mandatory rebase to
+  current integration SHA, intent-scoped deletion critic, per-merge
+  re-baselining, and zero unresolved rows before conformance. Evidence report:
+  `.gauntlet/rounds/plan/21-critic.md`.
