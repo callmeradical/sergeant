@@ -12,6 +12,9 @@
 #   --repos repo1,repo2,...   Repos to dispatch (required unless --td auto-detects)
 #   --td <task-id>            Pull brief and context from a td task
 #   --branch <name>           Branch name for all worktrees (default: derived from brief)
+#   --adopt-branch            Resume an existing branch that already carries commits
+#                             absent from every remote (non-destructive; required to
+#                             re-dispatch preserved work in a read-only-upstream repo)
 #   --deps "repo1>repo2,..."  Dependency ordering: repo1 must finish before repo2 starts
 #   --agent <harness>         Interactive harness: opencode, goose, or claude
 #   --stage <name>            Window stage slug (default: implementation)
@@ -46,6 +49,7 @@ CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
 BRIEF=""
 REPOS_ARG=""
 BRANCH_ARG=""
+ADOPT_BRANCH=0
 DEPS_ARG=""
 TD_TASK_ID=""
 INTENT_FILE=""
@@ -65,6 +69,7 @@ while [[ $# -gt 0 ]]; do
     --repos)   REPOS_ARG="$2";   shift 2 ;;
     --td)      TD_TASK_ID="$2";  shift 2 ;;
     --branch)  BRANCH_ARG="$2";  shift 2 ;;
+    --adopt-branch) ADOPT_BRANCH=1; shift ;;
     --deps)    DEPS_ARG="$2";    shift 2 ;;
     --agent)
       [[ -n "${2:-}" ]] || _die "--agent requires opencode, goose, or claude"
@@ -615,18 +620,23 @@ for rname in "${TARGET_REPOS[@]}"; do
       _info "already exists — reusing"
     else
       if git -C "$repo_path" show-ref --verify --quiet "refs/heads/$BRANCH" 2>/dev/null; then
-        # Guard: if the existing branch has committed work not pushed to origin,
-        # a prior interrupted dispatch may have done real work.  Block
-        # re-dispatch until the coordinator reconciles, to prevent duplicate or
-        # lost effort.  Falls back to showing all local commits when the branch
-        # does not yet exist in origin.
-        prior_commits="$(git -C "$repo_path" log --oneline \
-          "refs/heads/$BRANCH" --not "refs/remotes/origin/$BRANCH" 2>/dev/null \
-          || git -C "$repo_path" log --oneline "refs/heads/$BRANCH" 2>/dev/null \
-          || true)"
-        if [[ -n "$prior_commits" ]]; then
-          _die "Branch $BRANCH already has committed work not in any remote; reconcile or delete the branch before re-dispatching. Commits found:
+        # Guard: if the existing branch carries committed work that is not
+        # reachable from any remote, a prior interrupted dispatch may have done
+        # real work.  Block re-dispatch until the coordinator reconciles, to
+        # prevent duplicate or lost effort.
+        #
+        # Reachability from ANY remote is the test.  Comparing against only
+        # "refs/remotes/origin/$BRANCH" used to make this fire for every branch
+        # that had never been pushed, which blocked resuming preserved work in
+        # any repository the operator cannot push to (td-7f3a9a).
+        prior_commits="$(_sgt_branch_unpushed_commits "$repo_path" "$BRANCH")"
+        if [[ -n "$prior_commits" && "$ADOPT_BRANCH" -ne 1 ]]; then
+          _die "Branch $BRANCH already has committed work not reachable from any remote. Re-run with --adopt-branch to resume it, which checks the branch out at a new worktree and preserves every commit. Commits found:
 $prior_commits"
+        fi
+        if [[ -n "$prior_commits" ]]; then
+          _info "adopting existing branch $BRANCH with preserved commits:"
+          printf '%s\n' "$prior_commits" | sed 's/^/      /'
         fi
         git -C "$repo_path" worktree add "$worktree_path" "$BRANCH" 2>&1 | sed 's/^/    /'
       else
