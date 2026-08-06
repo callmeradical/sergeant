@@ -277,10 +277,18 @@ python3 scripts/gauntlet/reconcile-work.py --check-fleet-owner-reconciled
   commits, twelve no-mistakes/recover commits and one stash commit are reachable
   from no head/remote ref. Inventory is complete only when every unique commit
   from `git rev-list --all --reflog --glob=refs/* refs/stash` has an owner row.
-- Trust classes are explicit: `origin` is canonical; `no-mistakes` is a trusted
-  same-repository pipeline commit store; `gate` is pipeline evidence, not
-  automatically mergeable; third-party forks such as `pr13-head` are untrusted
-  until commit provenance and owning PR are verified.
+- Trust is classified per ref, never per remote. `origin/main` is canonical. A
+  ref with a merge-base to canonical history is `same-repository`; `gate` refs
+  are pipeline evidence, not automatically mergeable; third-party forks are
+  untrusted until provenance/PR verification; a ref with no merge-base is
+  `foreign-history` even when stored under the no-mistakes remote.
+- Row schema permits `merge_base=none`, `unrelated_history=true`. Foreign refs
+  still get owner, tree digest and preservation evidence, but are excluded from
+  Sergeant overlap/rebase/merge. Misclassifying them as same-repository without a
+  merge-base fails closed.
+- Critic round 31 found two no-mistakes refs with no shared history and a
+  dashboard project tree, 42 unique commits each and 168 apparent Sergeant
+  deletions. They are mandatory foreign-history fixtures.
 - Remote URLs are never recorded verbatim. Evidence stores sanitized host/path
   plus a digest. A credential-bearing URL was observed in critic round 14; it
   must be rotated by the owning coordinator and must never enter fixtures, logs
@@ -441,7 +449,11 @@ python3 scripts/gauntlet/adjudicate-dead-record.py --task <approved-task> \
   - `feat/replace-agent-sleeps-with-durable-wake-c` edits `bin/sgt-wake`;
   - `origin/fix/sgt-cleanup-rejecting-orphaned-worke` edits `bin/sgt-wake`;
   - `feat/add-cross-platform-sergeant-developer-bo` edits `.gitignore`.
-  All three `sgt-wake` refs also edit `tests/sgt-wake-test.sh`, the Phase -2
+  - `feat/no-mistakes-require-same-filesystem-clea` touches wake paths (net-empty
+    merge, still provenance/owner relevant).
+  - two unrelated-history no-mistakes refs have trees differing on these paths
+    but are foreign-history, not Sergeant overlap.
+  All three real `sgt-wake` refs also edit `tests/sgt-wake-test.sh`, the Phase -2
   mutation seam.
 - Phase -3.5 transfers every dead/nonterminal owner in this overlap set; Phase -3
   assigns owner/provenance for remote-only refs. Only when one coordinator owns
@@ -565,10 +577,13 @@ tests/run-gauntlet-tests.sh --docker-bash-3.2 --test tests/sgt-wake-bash32-compa
 
 ```bash
 python3 scripts/gauntlet/reconcile-work.py --check-no-overlap-builders --phase -2
-# must initially FAIL naming all four refs above, then PASS only after each has a
-# valid exact owner handover/provenance row and the one-coordinator merge order
-# is durable. This is ownership transfer, not final branch disposition.
+# must initially FAIL naming seven path-differing refs. It records two no-merge-
+# base refs as excluded-foreign, leaving five Sergeant refs. It PASSes only after
+# those five have valid owner/provenance rows and one-coordinator merge order.
+# This is ownership transfer, not final branch disposition.
 ```
+- Trust mutation: mark a foreign-history ref as same-repository; the gate must
+  FAIL naming empty merge-base and out-of-scope deleted paths.
 - Largest remaining gap: inert substrate does not exist
 
 ### Phase -1 — Migrate legacy tests and enforce substrate conformance
@@ -1169,6 +1184,10 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   were green on broken code. Phase -2 now owns explicit subshell propagation, a
   forced-failure harness self-test, and a dedicated unsuppressed Bash 3.2
   compatibility test.
+- 2026-08-05: Critic round 31 found the no-mistakes remote mixes Sergeant refs
+  with unrelated dashboard history. Replaced remote-level trust with per-ref
+  trust, nullable merge-base and `foreign-history`; expanded Phase -2 path set to
+  seven refs, two excluded foreign and five requiring Sergeant ownership.
 - 2026-08-05: Critic round 29 falsified the claimed silent misparse: production
   `set -e` makes Bash 3.2 abort immediately at `declare -A`. Corrected the defect
   to total wake incompatibility, changed mutation evidence to require the named
@@ -1363,6 +1382,12 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   Challenge accepted: explicit propagation on every case, forced-failure
   meta-test, and dedicated unsuppressed Bash 3.2 compatibility seam. Evidence
   report: `.gauntlet/rounds/plan/30-critic.md`.
+- Round 31 critic: quality bar won. Two no-mistakes refs had no merge-base and a
+  foreign dashboard tree, making merge-base/rebase/deletion checks impossible;
+  Phase -2 also undercounted path-differing refs. Challenge accepted: per-ref
+  foreign-history class, nullable merge-base, preservation without Sergeant
+  merge, seven-ref overlap gate with two excluded foreign, and a trust mutation
+  that must fail. Evidence report: `.gauntlet/rounds/plan/31-critic.md`.
 - Round 25 critic: quality bar won. `sgt-wake` used an associative array that
   silently collapsed all fields on Bash 3.2; existing 3.2 tests did not run wake.
   Full ShellCheck also could not pass and no phase owned the findings. Challenge
