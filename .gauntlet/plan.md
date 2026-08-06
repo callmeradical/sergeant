@@ -120,11 +120,11 @@ python3 scripts/gauntlet/inventory.py --check-control-cards-class \
 # every excluded card is plan-control-only and owns no product diff
 ```
 
-Phase 8 measures product backlog excluding this exact set. After Phase 8 evidence
-is committed, reviewed and merged, the Gauntlet stops for the user. The user
-approves closing the exact control cards; a read-only post-run check then
-requires every one closed. This human step is outside the td-controlled worker
-population and breaks self-reference without creating a bulk exclusion.
+Phase 8 ships/closes all product cards before terminal measurement. The Gauntlet
+then stops for the user. A read-only external observer with no td card measures
+the merged main; only after it passes does the user approve closing exact
+plan-control cards. This breaks self-reference without excluding a card that owns
+a product diff.
 
 ## Phases
 
@@ -517,7 +517,7 @@ python3 scripts/gauntlet/check-test-conformance.py --all-tmux-references
 
 - Mutation: reinsert bare `tmux kill-session` in a migrated test; conformance
   must FAIL naming file:line, then restore green.
-- Evidence: 21 tmux-touching files, six kill-session calls across five files;
+- Evidence: 21 tmux-touching files, six kill-session calls across four files;
   some tests isolate HOME but no rule makes that universal.
 - Largest remaining gap: conformance and migrations do not exist
 
@@ -637,7 +637,8 @@ python3 scripts/gauntlet/reconcile-work.py --check-merge-safety <ref>
 - Status: pending
 - Depends on: Phase -1
 - Builder scope: inventory, deduplication, shipped-vs-open reconciliation,
-  phase assignment; no product implementation
+  phase assignment, `scripts/gauntlet/inventory.py`, `.gauntlet/backlog-map.md`
+  and `.gauntlet/control-cards.txt`; no product implementation
 - Critic input: td database, git history, PR state, existing fleet records
 - Existing owners: td-4f9390, td-4ffd5e, roadmap td-1b73e4/td-a141df
 - Verification commands and expected outcomes:
@@ -845,6 +846,9 @@ python3 scripts/gauntlet/inventory.py --check-wave-complete <wave>
 - Evidence: critic round 20 measured only 54 of 492 cards transitively owned by
   named phases; 438 lacked an execution phase.
 - Largest remaining gap: domain waves have not been generated
+- Wave completion is checked after the wave PR merges and its owning product card
+  closes, by the next coordinator/critic. A builder never grades its own active
+  card while it is `in_progress` or `in_review`.
 
 ### Phase 7 — End-to-end factory gauntlet
 
@@ -870,20 +874,21 @@ tests/agent-factory-gauntlet.sh --fresh --two-coordinators --all-faults
 
 - Status: pending
 - Depends on: Phase 7 verified
-- Builder scope: reconcile td/PR/fleet state, documentation and release only
+- Builder scope: reconcile td/PR/fleet state, documentation and release under
+  normal product cards; merge and close them before terminal measurement
 - Critic input: full repository, plan, backlog inventory, shipped main
-- Verification commands and expected outcomes:
+- Pre-merge artifact verification:
 
 ```bash
-python3 scripts/gauntlet/inventory.py --all \
-  --control-file .gauntlet/control-cards.txt
 python3 scripts/gauntlet/inventory.py --check-control-cards-class \
   --control-file .gauntlet/control-cards.txt
 tests/agent-factory-gauntlet.sh --fresh --two-coordinators --all-faults
 shellcheck bin/* tests/*.sh
 ```
 
-- Final inventory must report:
+- These commands do not claim terminal backlog counts while a Phase 8 product
+  card/PR is active. Terminal inventory is post-merge.
+- Required post-merge external inventory outcomes:
   - measured product P0 = 0;
   - measured product P1 = 0 except exact user-approved external blockers;
   - measured `in_progress` = 0 and `in_review` = 0;
@@ -893,11 +898,16 @@ shellcheck bin/* tests/*.sh
   - every non-closed excluded card appears exactly once in
     `.gauntlet/control-cards.txt` and passes its class check.
 
-- Post-run human closure, after Phase 8 evidence PR is merged:
+- Post-run external measurement and human closure:
 
 ```bash
-# user approves closing the exact control-card ids, then a read-only process
-# outside any td worker runs:
+# read-only process outside any td worker, after all Phase 8 product PRs/cards
+# are merged/closed:
+python3 scripts/gauntlet/inventory.py --all \
+  --control-file .gauntlet/control-cards.txt
+# measured product counts must meet the terminal outcomes above
+
+# then user approves closing exact plan-control ids; observer reruns:
 python3 scripts/gauntlet/inventory.py --check-control-closed \
   --control-file .gauntlet/control-cards.txt
 # must PASS: every control card closed
@@ -1035,6 +1045,11 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   Added an exact plan-control card set, guarded as non-product, measured the
   product backlog excluding only that set, and required user-approved post-merge
   closure plus a read-only all-closed assertion.
+- 2026-08-05: Critic round 23 found Phase 8 still measured before its own product
+  card/PR closed, and control-card tooling had no owning phase. Phase 0 now owns
+  the control file/tools; Phase 8 ships/closes product work first; terminal
+  counts run post-merge by a read-only observer; then the user closes plan-only
+  controls and the observer verifies them.
 
 ## Round log
 
@@ -1180,3 +1195,9 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   product counts excluding only those ids, then human closure after evidence
   merge and a read-only all-closed assertion. Evidence report:
   `.gauntlet/rounds/plan/22-critic.md`.
+- Round 23 critic: quality bar won. Phase 8's own docs/release card was product
+  work and could not be excluded, so pre-merge in-progress/review zero remained
+  impossible; control tooling also had no owner. Challenge accepted: Phase 0
+  owns control artifacts, Phase 8 closes product PRs/cards first, an external
+  post-merge observer measures terminal counts, then the user closes plan
+  controls. Evidence report: `.gauntlet/rounds/plan/23-critic.md`.
