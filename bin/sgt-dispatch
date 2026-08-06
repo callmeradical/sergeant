@@ -17,7 +17,14 @@
 #                             re-dispatch preserved work in a read-only-upstream repo)
 #   --deps "repo1>repo2,..."  Dependency ordering: repo1 must finish before repo2 starts
 #   --agent <harness>         Interactive harness: opencode, goose, or claude
+#   --model <tuple>           Pin provider/model[:variant] for the worker's harness
+#                             (precedence: --model > SERGEANT_MODEL > harness default)
 #   --stage <name>            Window stage slug (default: implementation)
+#   --coordinator-pane <id>   Bind an explicit tmux pane id as the coordinator
+#                             (verified against the live tmux server)
+#   --managed-coordinator-pane
+#                             Create or select Sergeant's managed coordinator pane
+#                             on an already reachable tmux server
 #   --intent-file <path>       Canonical structured intent for safety/stateful work
 #   --origin-profile <name>    Fixed local callback profile (requires --correlation-id)
 #   --correlation-id <id>      Opaque callback request ID (requires --origin-profile)
@@ -56,6 +63,9 @@ DEPS_ARG=""
 TD_TASK_ID=""
 INTENT_FILE=""
 AGENT_OVERRIDE=""
+MODEL_ARG=""
+COORDINATOR_PANE_ARG=""
+MANAGED_COORDINATOR=false
 ORIGIN_PROFILE=""
 CORRELATION_ID=""
 STAGE="implementation"
@@ -77,6 +87,20 @@ while [[ $# -gt 0 ]]; do
       [[ -n "${2:-}" ]] || _die "--agent requires opencode, goose, or claude"
       AGENT_OVERRIDE="$2"
       shift 2
+      ;;
+    --model)
+      [[ -n "${2:-}" ]] || _die "--model requires provider/model or provider/model:variant"
+      MODEL_ARG="$2"
+      shift 2
+      ;;
+    --coordinator-pane)
+      [[ -n "${2:-}" ]] || _die "--coordinator-pane requires a tmux pane id such as %3"
+      COORDINATOR_PANE_ARG="$2"
+      shift 2
+      ;;
+    --managed-coordinator-pane)
+      MANAGED_COORDINATOR=true
+      shift
       ;;
     --stage)
       [[ -n "${2:-}" ]] || _die "--stage requires a lowercase slug"
@@ -105,6 +129,46 @@ done
 
 [[ -z "$AGENT_OVERRIDE" ]] || AGENT_CMD="$AGENT_OVERRIDE"
 [[ "$STAGE" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || _die "stage must be a lowercase slug: $STAGE"
+
+# Coordinator pane selection is validated for shape here, before anything talks
+# to tmux, so a malformed or argument-injecting value never reaches a tmux call.
+if [[ -n "$COORDINATOR_PANE_ARG" ]]; then
+  ! $MANAGED_COORDINATOR || \
+    _die "--managed-coordinator-pane and --coordinator-pane cannot be combined"
+  _sgt_is_tmux_pane_id "$COORDINATOR_PANE_ARG" || \
+    _die "--coordinator-pane requires a tmux pane id such as %3: $COORDINATOR_PANE_ARG"
+fi
+
+# Resolve the pinned harness tuple. Precedence is explicit and recorded so the
+# launch evidence names its own source: an explicit --model beats SERGEANT_MODEL,
+# which beats inheriting the ambient harness default. SERGEANT_MODEL is
+# orthogonal to SERGEANT_AGENT: the agent selects the harness executable, the
+# model pins what that harness runs. Validation happens here, before any intent
+# file, td task, worktree, or fleet state exists.
+#
+# Resolution is EXPLICIT-ONLY by decision, not by omission: there is deliberately
+# no project-level or per-repo model default. Adding one expands the project YAML
+# schema, which is owned elsewhere, so a project-level default with precedence
+# below SERGEANT_MODEL is deferred to its own card (td-bc44c4).
+if [[ -n "$MODEL_ARG" ]]; then
+  AGENT_MODEL="$MODEL_ARG"
+  AGENT_MODEL_SOURCE="flag"
+elif [[ -n "${SERGEANT_MODEL:-}" ]]; then
+  AGENT_MODEL="$SERGEANT_MODEL"
+  AGENT_MODEL_SOURCE="env"
+else
+  AGENT_MODEL="$SGT_AGENT_MODEL_UNPINNED"
+  AGENT_MODEL_SOURCE="unpinned"
+fi
+# A raw user value must be a real tuple. The unpinned sentinel is internal: it
+# is what "no pin was given" resolves to, never something a caller may assert,
+# because recording "model=unpinned, source=flag" would misstate provenance.
+if [[ "$AGENT_MODEL_SOURCE" != "unpinned" ]]; then
+  _sgt_is_agent_model_tuple "$AGENT_MODEL" || \
+    _die "$(_sgt_agent_launch_reject_message "$(basename "$AGENT_CMD")" "$AGENT_MODEL" \
+      malformed-tuple)"
+fi
+_sgt_require_agent_model "$(basename "$AGENT_CMD")" "$AGENT_MODEL"
 if [[ -n "$ORIGIN_PROFILE" || -n "$CORRELATION_ID" ]]; then
   [[ -n "$ORIGIN_PROFILE" && -n "$CORRELATION_ID" ]] || \
     _die "--origin-profile and --correlation-id must be provided together"
@@ -171,14 +235,71 @@ IFS=',' read -ra TARGET_REPOS <<< "$REPOS_ARG"
 _require_yq
 _require_git
 _require_tmux
-[[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" ]] || \
-  _die "sgt-dispatch requires an interactive coordinator tmux pane"
-PRIMARY_PANE_ID="$TMUX_PANE"
-PRIMARY_PANE_IDENTITY="$(_sgt_pane_identity "$PRIMARY_PANE_ID" || true)"
-[[ -n "$PRIMARY_PANE_IDENTITY" && "${PRIMARY_PANE_IDENTITY%%|*}" == "0" && \
-   "${PRIMARY_PANE_IDENTITY#*|}" == "$PRIMARY_PANE_ID|"* ]] || \
-  _die "sgt-dispatch could not bind exact coordinator pane identity"
+# The harness gate runs before any pane is created so an unusable harness never
+# leaves a managed coordinator pane behind.
 _require_interactive_agent
+
+# All dispatches share a single "sgt" tmux session — each task gets its own
+# windows within it. This keeps tmux list-sessions clean.
+# Override with SERGEANT_TMUX_SESSION=<name> if you want task-scoped sessions.
+SGT_TMUX_SESSION="${SERGEANT_TMUX_SESSION:-sgt}"
+TMUX_SESSION="$SGT_TMUX_SESSION"
+
+PRIMARY_PANE_ID=""
+PRIMARY_PANE_IDENTITY=""
+SGT_MANAGED_COORDINATOR_CREATED="false"
+
+# ── Bind the coordinator pane ────────────────────────────────────────────────
+# Three entry paths, one verification.  An explicit identity is verified against
+# the live tmux server; a managed pane is created or selected on a server that is
+# already reachable; otherwise the ambient pane is used exactly as before.
+#
+# None of this weakens the persistent interactive worker requirement: the worker
+# is still launched as an interactive harness session in its own tmux window, and
+# every path here fails before any intent file, td task, worktree, or fleet state
+# is created.
+if [[ -n "$COORDINATOR_PANE_ARG" ]]; then
+  PRIMARY_PANE_ID="$COORDINATOR_PANE_ARG"
+elif $MANAGED_COORDINATOR; then
+  # Deliberately does not start a server: a coordinator must already be able to
+  # reach a live tmux server, so a headless environment fails loudly instead of
+  # acquiring a pane nobody can observe.
+  tmux list-sessions >/dev/null 2>&1 || \
+    _die "sgt-dispatch found no reachable tmux server for --managed-coordinator-pane; start tmux first"
+  if $DRY_RUN; then
+    # --dry-run must not create anything, including tmux state.  Report what
+    # would be bound and skip the rest of the coordinator binding.
+    echo "[dry-run] would create or select managed coordinator pane in $TMUX_SESSION:$SGT_MANAGED_COORDINATOR_WINDOW"
+  else
+    managed_pane_result="$(_sgt_managed_coordinator_pane "$TMUX_SESSION" \
+      "$SGT_MANAGED_COORDINATOR_WINDOW")" || \
+      _die "sgt-dispatch could not create or select the managed coordinator pane in $TMUX_SESSION:$SGT_MANAGED_COORDINATOR_WINDOW; remove that window if it is not Sergeant's"
+    PRIMARY_PANE_ID="${managed_pane_result%% *}"
+    SGT_MANAGED_COORDINATOR_CREATED="${managed_pane_result##* }"
+  fi
+elif [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" ]]; then
+  PRIMARY_PANE_ID="$TMUX_PANE"
+else
+  _die "sgt-dispatch requires an interactive coordinator tmux pane: run it inside tmux, or pass --managed-coordinator-pane or --coordinator-pane <pane-id>"
+fi
+
+# Roll back exactly the managed coordinator window this invocation created, and
+# only that one, if the dispatch does not complete.  Selecting an existing window
+# records nothing to remove, so a pane Sergeant merely adopted is never killed.
+# Installed as an EXIT trap immediately, because several later preflight steps
+# (intent preparation, fleet reconciliation, drain admission, td creation, repo
+# validation) can still abort after the pane is bound.
+_rollback_managed_coordinator_pane() {
+  [[ "${SGT_MANAGED_COORDINATOR_CREATED:-false}" == "true" ]] || return 0
+  SGT_MANAGED_COORDINATOR_CREATED="false"
+  tmux kill-window -t "$TMUX_SESSION:=$SGT_MANAGED_COORDINATOR_WINDOW" 2>/dev/null || true
+}
+trap _rollback_managed_coordinator_pane EXIT
+
+if [[ -n "$PRIMARY_PANE_ID" ]]; then
+  PRIMARY_PANE_IDENTITY="$(_sgt_verify_pane_identity "$PRIMARY_PANE_ID")" || \
+    _die "sgt-dispatch could not bind exact coordinator pane identity: $PRIMARY_PANE_ID"
+fi
 
 INTENT_TMP="$(mktemp)"
 
@@ -194,6 +315,9 @@ TD_CREATE_STATE_FILE="$(mktemp)"
 TD_CREATE_STDERR="$(mktemp)"
 _cleanup_dispatch_tmps() {
   rm -f "$REPO_TD_MAP" "$TD_CREATE_STATE_FILE" "$TD_CREATE_STDERR" "$INTENT_TMP" "${DEPS_TMP:-}"
+  # This trap replaces the coordinator-pane rollback trap, so it must keep
+  # honouring it; the rollback is a no-op once the dispatch has completed.
+  _rollback_managed_coordinator_pane
 }
 trap _cleanup_dispatch_tmps EXIT
 
@@ -390,11 +514,6 @@ else
 fi
 
 TASK_DIR="$FLEET_DIR/$TASK_ID"
-# All dispatches share a single "sgt" tmux session — each task gets its own
-# windows within it. This keeps tmux list-sessions clean.
-# Override with SERGEANT_TMUX_SESSION=<name> if you want task-scoped sessions.
-SGT_TMUX_SESSION="${SERGEANT_TMUX_SESSION:-sgt}"
-TMUX_SESSION="$SGT_TMUX_SESSION"
 
 echo ""
 echo "=== sgt-dispatch: $PROJECT ==="
@@ -448,8 +567,11 @@ _record_dispatch_orphan() {
 
 # ── Capture primary pane (for sgt-notify callbacks) ──────────────────────────
 
+# Resolved against the bound coordinator pane, not the ambient one, so a managed
+# or explicitly supplied pane records its own session:window.pane target.
 PRIMARY_PANE=""
-PRIMARY_PANE="$(tmux display-message -p '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)"
+PRIMARY_PANE="$(tmux display-message -p -t "$PRIMARY_PANE_ID" \
+  '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)"
 
 # ── Create fleet task directory ───────────────────────────────────────────────
 
@@ -898,6 +1020,8 @@ BRIEF_EOF
   printf '%s\n' "$WINDOW_NAME" > "$repo_task_dir/window_name"
   printf '%s\n' "$STAGE" > "$repo_task_dir/stage"
   printf '%s\n' "$AGENT_CMD" > "$repo_task_dir/agent"
+  printf '%s\n' "$AGENT_MODEL" > "$repo_task_dir/agent_model"
+  printf '%s\n' "$AGENT_MODEL_SOURCE" > "$repo_task_dir/agent_model_source"
   initial_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
   _sgt_publish_worker_notification "$repo_task_dir" "$worktree_path" \
     "$initial_notification_id" initial "Read the .sergeant-brief.md file and execute the mission."
@@ -946,6 +1070,10 @@ BRIEF_EOF
 
   echo ""
 done
+
+# Every repo dispatched: the managed coordinator pane is now owned by live fleet
+# state, so the rollback must not remove it.
+SGT_MANAGED_COORDINATOR_CREATED="false"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 

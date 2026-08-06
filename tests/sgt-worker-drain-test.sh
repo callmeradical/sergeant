@@ -18,6 +18,26 @@ config_dir="$TEST_ROOT/config"
 mkdir -p "$repo_state" "$source_repo" "$worktree" "$fake_bin" "$config_dir" "$drain_dir"
 export SERGEANT_CONFIG="$config_dir"
 
+# sgt-td-memory verifies the worktree it is handed and refuses to attach handoff
+# evidence to a path that is not a git worktree (GH #173), so the drain fixtures
+# below are real git worktrees.  That makes git a hard requirement for this test,
+# and tests/run-drain-tests.sh also runs it in the pinned bash:3.2 image, which
+# has no git, so skip early there exactly as the other git-dependent drain tests
+# are skipped.
+command -v git >/dev/null 2>&1 || {
+  printf 'sgt-worker drain checkpoint: skipped (git unavailable)\n'
+  exit 0
+}
+_init_fixture_worktree() {
+  git -C "$1" init -q -b main .
+  git -C "$1" config user.name Test
+  git -C "$1" config user.email test@example.invalid
+  printf 'fixture\n' > "$1/fixture.txt"
+  git -C "$1" add fixture.txt
+  git -C "$1" commit -qm 'drain fixture'
+}
+_init_fixture_worktree "$worktree"
+
 cat > "$config_dir/test.yaml" <<EOF
 repos:
   - name: app
@@ -42,6 +62,8 @@ chmod +x "$fake_bin/fake-opencode"
 # Pre-set drained status so the _finish handler sees it on agent exit.
 
 printf 'td-drain-1\n' > "$repo_state/td_task"
+# sgt-td-memory binds to the worktree the fleet record owns (GH #173).
+printf '%s\n' "$worktree" > "$repo_state/worktree"
 printf 'myproject\n' > "$repo_state/project"
 printf 'drained\n' > "$worktree/.sergeant-status"
 

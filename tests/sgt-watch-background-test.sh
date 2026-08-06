@@ -480,8 +480,10 @@ exit 0
 FAKEEOF
 chmod +x "$td_fake_bin/td"
 
-# Minimal repo state: a td_task file is required for sgt-td-memory to proceed
+# Minimal repo state: sgt-td-memory needs the td task and the worktree the fleet
+# record owns, since it refuses to attach handoff evidence to any other checkout.
 printf 'fake-td-task-id\n' > "$td_repo_state/td_task"
+printf '%s\n' "$td_worktree" > "$td_repo_state/worktree"
 
 # Initialize a minimal git repo in the worktree so git commands succeed
 git init -q "$td_worktree"
