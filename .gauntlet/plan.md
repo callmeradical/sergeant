@@ -440,7 +440,8 @@ python3 scripts/gauntlet/adjudicate-dead-record.py --task <approved-task> \
   - `feat/replace-agent-sleeps-with-durable-wake-c` edits `bin/sgt-wake`;
   - `origin/fix/sgt-cleanup-rejecting-orphaned-worke` edits `bin/sgt-wake`;
   - `feat/add-cross-platform-sergeant-developer-bo` edits `.gitignore`.
-  Two also edit `tests/sgt-wake-test.sh`, the Phase -2 mutation seam.
+  All three `sgt-wake` refs also edit `tests/sgt-wake-test.sh`, the Phase -2
+  mutation seam.
 - Phase -3.5 transfers every dead/nonterminal owner in this overlap set; Phase -3
   assigns owner/provenance for remote-only refs. Only when one coordinator owns
   the whole set may Phase -2 edit. `.gauntlet/existing-work.md` records that the
@@ -498,8 +499,9 @@ tests/run-gauntlet-tests.sh --docker-bash-3.2 --test tests/sgt-wake-test.sh
 - Bash mutation: add `declare -A _fe_boundary` to `factory-env.sh`; the pinned
   Bash 3.2 run must FAIL naming that file/line, then restore green.
 - Product mutation: restore `declare -A _COND=()` in `bin/sgt-wake`; the pinned
-  Bash 3.2 wake test must FAIL on a named condition-field mismatch (not silently
-  pass with the last value copied into every field), then restore green.
+  Bash 3.2 wake test must FAIL at the associative-array declaration with a named
+  compatibility error before any wake decision, then restore the 3.2-safe parser
+  and rerun green. `set -euo pipefail` remains enabled throughout.
 - CI requirement: workflow runs ShellCheck, system-Bash tests, pinned Bash 3.2
   tests and native suites. No phase may claim CI green before that workflow
   exists and succeeds.
@@ -532,10 +534,12 @@ tests/run-gauntlet-tests.sh --docker-bash-3.2 --test tests/sgt-wake-test.sh
   product-plus-isolation work and remain Phase -0B-owned. Real default socket
   and 24 fleet records are live.
 - Bash evidence from critic round 25: `bin/sgt-wake:68` uses `declare -A _COND`.
-  Under pinned Bash 3.2 it does not fail; every field collapses to index 0 and
-  receives the last-written value, producing plausible wrong wake decisions.
-  Current Docker coverage runs only two of 42 tests under Bash 3.2 and omits
-  `sgt-wake-test.sh`.
+  Under pinned Bash 3.2, with `set -euo pipefail` active at line 30, the script
+  aborts immediately at `declare -A` with exit 2 before reading any condition.
+  The earlier silent-field-collapse observation only occurs with `set -e`
+  removed and does not describe production. Current Docker coverage runs only
+  two tests under Bash 3.2 and omits `sgt-wake-test.sh`, so the total wake outage
+  was invisible.
 - Environment evidence from critic round 27: the pinned base has Bash 3.2 and
   flock but lacks git, tmux and python3; it has `/sbin/apk` (Alpine 3.22.5), so
   the derived pinned toolchain image is feasible and Phase -2-owned.
@@ -1142,6 +1146,10 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   overlapped four refs, while its gate incorrectly asserted no overlap. Expanded
   the overlap set, require exact owner transfer/provenance before edits, and made
   the gate fail-then-pass under one coordinator with a recorded merge order.
+- 2026-08-05: Critic round 29 falsified the claimed silent misparse: production
+  `set -e` makes Bash 3.2 abort immediately at `declare -A`. Corrected the defect
+  to total wake incompatibility, changed mutation evidence to require the named
+  declaration abort, and corrected wake-test overlap from two refs to three.
 - 2026-08-05: Critic round 25 found shipped `sgt-wake` silently misparses every
   condition under Bash 3.2, and Phase -2 had no product-fix authority. Granted
   one narrow parser repair with explicit merge order against the existing wake
@@ -1321,6 +1329,12 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   exact ownership first, record one-coordinator merge order, and require the
   overlap gate to fail then pass before Phase -2 edits. Evidence report:
   `.gauntlet/rounds/plan/28-critic.md`.
+- Round 29 critic: quality bar won by falsifying the defect mechanism. With
+  production `set -e`, Bash 3.2 aborts at the associative-array declaration;
+  field-collapse only appears in an impossible no-errexit control. Challenge
+  accepted: mutation expects the real compatibility abort and the plan records
+  all three wake-test overlaps. Evidence report:
+  `.gauntlet/rounds/plan/29-critic.md`.
 - Round 25 critic: quality bar won. `sgt-wake` used an associative array that
   silently collapsed all fields on Bash 3.2; existing 3.2 tests did not run wake.
   Full ShellCheck also could not pass and no phase owned the findings. Challenge
