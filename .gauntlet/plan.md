@@ -86,9 +86,11 @@ Backlog is clear only when:
 
 ## Progress verification
 
-Run these on every resume before trusting phase status:
+Before Phase -5 is verified, do **not** fetch. Read local evidence only. After
+Phase -5, run these on every resume before trusting phase status:
 
 ```bash
+scripts/gauntlet/check-remote-secrets.py --require-credential-free
 git fetch origin --prune
 git status --short --branch
 git diff --stat origin/main...HEAD
@@ -100,10 +102,50 @@ Do **not** run `sgt-watch --sync-all` until Phase 2 verifies session scoping.
 
 ## Phases
 
-### Phase -4 — Reconcile the external no-mistakes dependency
+### Phase -5 — Establish credential-free GitHub auth continuity
 
 - Status: pending
 - Depends on: none
+- Builder scope: plan-local `scripts/gauntlet/check-remote-secrets.py` plus
+  operator auth configuration; no Sergeant product implementation
+- Owning security card: td-a764cc
+- Why first: origin currently embeds credential userinfo and there is no SSH
+  remote or configured credential helper. Revoking it before replacement breaks
+  every fetch/push/PR phase; fetching before the gate leaks/uses the exposed
+  credential.
+- Human/security gate: the user chooses and authorizes one credential-free
+  mechanism — `gh auth setup-git`/credential helper or SSH. Never print, copy or
+  persist the old credential in plan evidence.
+- Exact sequence and expected outcomes:
+
+```bash
+scripts/gauntlet/check-remote-secrets.py --require-credential-free
+# initially FAILS, naming origin but never printing credential/userinfo
+
+# configure approved credential-free URL + external auth mechanism
+git ls-remote origin -h refs/heads/main >/dev/null
+git push --dry-run origin HEAD:refs/heads/gauntlet-auth-probe
+# both must succeed before old credential is revoked
+
+# owning coordinator revokes/rotates old credential outside logs/td
+scripts/gauntlet/check-remote-secrets.py --require-credential-free
+git ls-remote origin -h refs/heads/main >/dev/null
+git push --dry-run origin HEAD:refs/heads/gauntlet-auth-probe
+# all PASS after revocation
+```
+
+- Tool tests: fixture URLs cover HTTPS userinfo, token-like username/password,
+  SSH and credential-helper HTTPS. Failing output names remote and violation but
+  never echoes secret material. Mutation that includes the raw URL in error
+  output must FAIL a canary-secret assertion.
+- Evidence baseline: critic round 17 found credential userinfo in origin, zero
+  SSH remotes and no local/global credential helper. Exact secret is excluded.
+- Largest remaining gap: replacement auth has not been configured or proved
+
+### Phase -4 — Reconcile the external no-mistakes dependency
+
+- Status: pending
+- Depends on: Phase -5
 - Builder scope: external dependency reconciliation plus the plan-local
   `scripts/gauntlet/reconcile-external.py` evidence tool; no Sergeant or
   no-mistakes product implementation
@@ -137,7 +179,7 @@ no-mistakes axi run --help
 ### Phase -3 — Inventory existing work before assigning builders
 
 - Status: pending
-- Depends on: none
+- Depends on: Phase -5
 - Builder scope: ownership/branch/worktree/PR inventory plus plan-local
   `scripts/gauntlet/reconcile-work.py`; no disposition, push, merge or product
   implementation
@@ -184,10 +226,10 @@ python3 scripts/gauntlet/reconcile-work.py --check-fleet-owner-reconciled
   `worker_process_start` unchanged; reconciliation must FAIL as reused. Sha256
   of every real identity/start file must be byte-identical before and after.
 
-- Baseline evidence updated at critic round 8: 22 worktrees, 102 local branches,
-  80 remote refs, 397 non-merge commits off `origin/main`, and 74 local-only
-  branches with commits. The earlier 166-commit/19-branch count was materially
-  incomplete because the schema omitted local refs not attached to worktrees.
+- Baseline evidence updated at critic rounds 8/17: 22 worktrees, 337 local head
+  refs, 103 branches with commits off `origin/main`, and 166 remote refs. The
+  earlier 166-commit/19-branch and 102/74 branch counts were materially
+  incomplete.
 - Remote baseline at critic round 14: origin is not the only commit store.
   `refs/remotes/no-mistakes/*` holds 82 refs and 124 non-merge commits reachable
   from no local branch or origin ref; a gate ref holds 2 more. Twenty-seven
@@ -396,7 +438,8 @@ python3 scripts/gauntlet/reconcile-work.py --check-no-overlap-builders --phase -
 
 - Status: pending
 - Depends on: Phase -0B
-- Builder scope: migrate existing tests only; no product lifecycle changes
+- Builder scope: migrate existing tests and create
+  `scripts/gauntlet/check-test-conformance.py`; no product lifecycle changes
 - Critic input: all tmux/process/worktree tests and closed boundary inventory
 - Mutual exclusion: no test that kills tmux, process groups or worktrees runs
   outside `factory_env_new`.
@@ -810,6 +853,11 @@ shellcheck bin/* tests/*.sh
   dirt under `refs/gauntlet/preserve/*`, archive untracked product files by
   content digest, preserve `.sergeant-*` evidence, and never modify the worker
   branch/index/worktree before handover.
+- 2026-08-05: Critic round 17 found the credential P0 would revoke the only
+  working GitHub auth before replacement, while progress verification fetched
+  through it first. Added Phase -5: configure credential-free external auth,
+  prove read/write with ls-remote and push --dry-run, revoke, then prove again.
+  It also owns the remote-secret checker and corrected branch/ref baselines.
 
 ## Round log
 
@@ -918,3 +966,9 @@ shellcheck bin/* tests/*.sh
   the files Phase -0A needs. Challenge accepted: non-destructive quarantine under
   a preservation ref plus untracked content archive, status unchanged, then
   audited handover. Evidence report: `.gauntlet/rounds/plan/16-critic.md`.
+- Round 17 critic: quality bar won. Remote-secret rotation had no replacement
+  auth mechanism and progress verification fetched through the exposed URL
+  before the gate. Challenge accepted: credential-free auth continuity before
+  revocation, pre/post read+write proof, secret-safe checker owned by Phase -5,
+  and no fetch before the phase passes. Evidence report:
+  `.gauntlet/rounds/plan/17-critic.md`.
