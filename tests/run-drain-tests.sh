@@ -69,6 +69,13 @@ printf '════════════════════════
 
 printf '\n── Pass 1: system Bash ─────────────────────────────────────\n'
 
+# Global-state isolation guard FIRST: it proves no suite in tests/ can write to
+# the operator's real drain, fleet, or notification state.  It runs before the
+# drain suites deliberately, because a leaking suite must be caught before it is
+# given the chance to run against a live installation.
+_run "global state isolation guard" \
+  bash "$ROOT_DIR/tests/global-state-isolation-test.sh"
+
 # Core drain state + --status (bug #82) + lock helpers (bug #81)
 _run "drain state, --status, lock helpers" \
   bash "$ROOT_DIR/tests/sgt-drain-test.sh"
