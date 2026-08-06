@@ -1,10 +1,73 @@
 #!/usr/bin/env bash
-# Shared serialization for response publication and consumption.
+# Shared serialization and archive format for response publication and consumption.
 
 _SGT_RESPONSE_LOCK_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-bash-version.sh
 source "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/_sgt-bash-version.sh"
 _sgt_require_running_bash || return 1
+
+# ── Response archive format ──────────────────────────────────────────────────
+# A consumed response is recorded as a directory of four fields: `body` (the
+# exact response transport), `gate_generation`, `applied_status`, and `proof`
+# (the worker's .sergeant-response-applied record).  sgt-ack-response publishes
+# these entries, sgt-cleanup validates them before retiring fleet state, and
+# sgt-cleanup's retirement archive reuses the same field names for the fields it
+# can prove.  Every reader parses the format through the helpers below so the
+# format has exactly one definition.
+_SGT_RESPONSE_ARCHIVE_FIELDS="body gate_generation applied_status proof"
+
+# Print the single value of one `key=value` field, or fail when the key is
+# missing, empty, or recorded more than once.
+_sgt_response_archive_field() {
+  local key="$1" record_file="$2"
+
+  awk -F= -v key="$key" '
+    $1 == key { count++; value = substr($0, length(key) + 2) }
+    END { if (count == 1 && value != "") print value; else exit 1 }
+  ' "$record_file"
+}
+
+# A retired handshake records the same fields, so an archive entry also has to
+# prove it is not one: sgt-cleanup marks a retirement archive with this file, and
+# an entry carrying it is never an acknowledgement no matter where it is found.
+_SGT_RESPONSE_RETIRED_MARKER="retired"
+
+# Every canonical field of an archive entry is present as a regular file, and the
+# entry does not claim to be a retirement.
+_sgt_response_archive_entry_complete() {
+  local entry="$1" field
+
+  [[ -d "$entry" && ! -L "$entry" ]] || return 1
+  [[ ! -e "$entry/$_SGT_RESPONSE_RETIRED_MARKER" && \
+    ! -L "$entry/$_SGT_RESPONSE_RETIRED_MARKER" ]] || return 1
+  for field in $_SGT_RESPONSE_ARCHIVE_FIELDS; do
+    [[ -f "$entry/$field" && ! -L "$entry/$field" ]] || return 1
+  done
+}
+
+# A complete entry whose recorded proof binds the same response identity,
+# gate generation, and applied status as the entry itself.
+#
+# Every field must be present and non-empty.  An empty `applied_status` beside a
+# `proof` with no `status=` line would otherwise compare equal as "" == "" and let
+# an entry that records no applied status at all pass as a complete
+# acknowledgement, so the three proof lookups must succeed rather than default to
+# empty and both entry fields are range-checked.
+_sgt_response_archive_entry_matches() {
+  local entry="$1" response_id="$2" gate_generation="$3"
+  local applied_status entry_generation proof_generation proof_id proof_status
+
+  [[ -n "$response_id" && "$gate_generation" =~ ^[1-9][0-9]*$ ]] || return 1
+  _sgt_response_archive_entry_complete "$entry" || return 1
+  applied_status="$(cat "$entry/applied_status")" || return 1
+  entry_generation="$(cat "$entry/gate_generation")" || return 1
+  [[ -n "$applied_status" && "$entry_generation" == "$gate_generation" ]] || return 1
+  proof_id="$(_sgt_response_archive_field response_id "$entry/proof")" || return 1
+  proof_generation="$(_sgt_response_archive_field gate_generation "$entry/proof")" || return 1
+  proof_status="$(_sgt_response_archive_field status "$entry/proof")" || return 1
+  [[ "$proof_id" == "$response_id" && "$proof_generation" == "$gate_generation" && \
+    "$proof_status" == "$applied_status" ]]
+}
 
 _sgt_response_lock_acquire() {
   local repo_state="$1"
