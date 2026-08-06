@@ -181,6 +181,25 @@ else
   _fail "_sgt_read_same_owned_files: symlink first-arg should be rejected"
 fi
 
+# Reject when second argument is a symlink (R003 — symmetric coverage).
+f8="$TEST_ROOT/base-for-sym2"
+printf 'data\n' > "$f8"
+chmod 600 "$f8"
+f8b="$TEST_ROOT/hardlink-of-base2"
+ln "$f8" "$f8b"
+f8sym="$TEST_ROOT/sym-to-base2"
+ln -s "$f8" "$f8sym"
+set +e
+bash -c 'source "$1"; _sgt_read_same_owned_files "$2" "$3"' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$f8b" "$f8sym" >/dev/null 2>&1
+status=$?
+set -e
+if [[ "$status" -ne 0 ]]; then
+  _pass "_sgt_read_same_owned_files: symlink second-arg rejected"
+else
+  _fail "_sgt_read_same_owned_files: symlink second-arg should be rejected"
+fi
+
 # ── _sgt_read_matching_legacy_pane_identity ──────────────────────────────────
 
 # Basic success: mode-644 file migrates to 600 and returns correct content.
@@ -219,6 +238,24 @@ if [[ "$status" -ne 0 ]]; then
   _pass "_sgt_read_matching_legacy_pane_identity: content mismatch rejected"
 else
   _fail "_sgt_read_matching_legacy_pane_identity: content mismatch should be rejected"
+fi
+
+# Reject when path argument is a symlink (R004 — symlink coverage).
+f_leg_real="$TEST_ROOT/legacy-identity-real"
+printf '0|%%42|4242|123456|worker-cmd\n' > "$f_leg_real"
+chmod 644 "$f_leg_real"
+f_leg_sym="$TEST_ROOT/legacy-identity-sym"
+ln -s "$f_leg_real" "$f_leg_sym"
+set +e
+bash -c 'source "$1"; _sgt_read_matching_legacy_pane_identity "$2" "$3"' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$f_leg_sym" '0|%42|4242|123456|worker-cmd' \
+  >/dev/null 2>&1
+status=$?
+set -e
+if [[ "$status" -ne 0 ]]; then
+  _pass "_sgt_read_matching_legacy_pane_identity: symlink path rejected"
+else
+  _fail "_sgt_read_matching_legacy_pane_identity: symlink path should be rejected"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────

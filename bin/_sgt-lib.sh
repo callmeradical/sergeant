@@ -538,9 +538,17 @@ _sgt_path_mode() {
 # access-masked value (e.g. 0400 for a file opened O_RDONLY whose real mode is
 # 0600) and assigns /dev/fd/N a different device number than the underlying
 # file, so both `stat /dev/fd/N` mode checks and `-ef /dev/fd/N` comparisons
-# are unreliable on macOS.  Comparing the inode:device tuple of the original
-# path before and after opening the fd achieves the same TOCTOU protection
-# without going through the fdescfs layer.
+# are unreliable on macOS.
+#
+# Comparing the inode:device tuple of the original path before and after
+# opening the fd detects the common case of a single swap (attacker replaces
+# the path between the pre-check and the open, or between the open and the
+# read).  It is slightly weaker than a path-to-fd comparison on Linux
+# (/proc/self/fd/N) for a precise double-swap attack (swap in before exec,
+# swap back before post-open stat), but the files read through this helper are
+# owned by the current user and live in the fleet directory; a peer process
+# that could execute a double-swap in the microsecond window could already
+# read those files directly.
 _sgt_path_inode_dev() {
   stat -c '%i:%d' -- "$1" 2>/dev/null || stat -f '%i:%d' -- "$1" 2>/dev/null
 }
@@ -653,10 +661,10 @@ _sgt_read_same_owned_files() {
   exec 9< "$second" || { exec 8<&-; return 1; }
   # Post-open: re-verify both paths still name the same inodes, modes, and
   # that they still form a hardlink pair.
-  post_first_id="$(_sgt_path_inode_dev "$first")"
-  post_second_id="$(_sgt_path_inode_dev "$second")"
-  first_mode="$(_sgt_path_mode "$first")"
-  second_mode="$(_sgt_path_mode "$second")"
+  post_first_id="$(_sgt_path_inode_dev "$first")" || { exec 8<&- 9<&-; return 1; }
+  post_second_id="$(_sgt_path_inode_dev "$second")" || { exec 8<&- 9<&-; return 1; }
+  first_mode="$(_sgt_path_mode "$first")" || { exec 8<&- 9<&-; return 1; }
+  second_mode="$(_sgt_path_mode "$second")" || { exec 8<&- 9<&-; return 1; }
   if [[ "$first_mode" != "600" || "$second_mode" != "600" || \
     ! -f "$first" || ! -f "$second" || ! -O "$first" || ! -O "$second" || \
     -L "$first" || -L "$second" || \
@@ -668,10 +676,10 @@ _sgt_read_same_owned_files() {
   first_value="$(cat <&8)" || { exec 8<&- 9<&-; return 1; }
   second_value="$(cat <&9)" || { exec 8<&- 9<&-; return 1; }
   # Post-read: re-verify nothing changed while we were reading.
-  post_first_id="$(_sgt_path_inode_dev "$first")"
-  post_second_id="$(_sgt_path_inode_dev "$second")"
-  first_mode="$(_sgt_path_mode "$first")"
-  second_mode="$(_sgt_path_mode "$second")"
+  post_first_id="$(_sgt_path_inode_dev "$first")" || { exec 8<&- 9<&-; return 1; }
+  post_second_id="$(_sgt_path_inode_dev "$second")" || { exec 8<&- 9<&-; return 1; }
+  first_mode="$(_sgt_path_mode "$first")" || { exec 8<&- 9<&-; return 1; }
+  second_mode="$(_sgt_path_mode "$second")" || { exec 8<&- 9<&-; return 1; }
   if [[ "$first_mode" != "600" || "$second_mode" != "600" || \
     ! -O "$first" || ! -O "$second" || -L "$first" || -L "$second" || \
     "$post_first_id" != "$first_id" || "$post_second_id" != "$second_id" || \
