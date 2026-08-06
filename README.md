@@ -136,10 +136,36 @@ Shell scripts for the agent (and for you directly):
 | `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Classify a no-mistakes finding and create/update owning-repo td work |
 | `bin/sgt-review-findings <project> <repo> [options]` | Route structured independent-review findings to td and fleet supervision |
 | `bin/sgt-watch <task-id>` | Monitor dispatched fleet |
+| `bin/sgt-watch --snapshot [<task-id>] [--repo <repo>]` | Bounded read-only JSON observation of whether Sergeant is verifiably working |
 | `bin/sgt-respond <task-id> <repo> "<response>"` | Respond to and resume a waiting worker |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees and fleet state |
 | `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
 | `bin/sgt-callback <command>` | Operate durable profile-bound callback events |
+
+#### Observing activity without side effects
+
+`sgt-watch --list` renders every retained record, including terminal ones, for a
+human reader. `--sync` and `--sync-all` reconcile lifecycle state and may kill
+panes. Neither is safe for a coordinator or bridge that only wants to observe.
+
+`sgt-watch --snapshot` is strictly read-only and emits constant-size versioned
+JSON:
+
+```console
+$ sgt-watch --snapshot
+{"schema":"sergeant.watch-status/v1","observed_at":"2026-08-05T17:41:02Z","scope":{"kind":"fleet","task_id":null,"repo":null},"busy":null,"basis":"no_verified_active_witness"}
+
+$ sgt-watch --snapshot my-task --repo app
+{"schema":"sergeant.watch-status/v1","observed_at":"2026-08-05T17:41:09Z","scope":{"kind":"repo","task_id":"my-task","repo":"app"},"busy":true,"basis":"verified_active_witness"}
+```
+
+`busy: true` requires all three of a stable `in_progress` status, an exact live
+Sergeant worker pane identity, and progress attributable to that pane within
+`SERGEANT_SNAPSHOT_RECENT_SECONDS` (default 300). Every other outcome is
+`busy: null` with `basis: no_verified_active_witness`; version 1 never emits
+`busy: false`, because the absence of a verified witness is not proof of
+idleness. `basis` is a closed allowlist of those two values, so an unrecognised
+condition maps to the null basis rather than inventing one.
 
 ### No-mistakes
 

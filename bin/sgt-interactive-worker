@@ -19,6 +19,8 @@ source "$SCRIPT_DIR/_sgt-lib.sh"
 source "$SCRIPT_DIR/_sgt-drain.sh"
 # shellcheck source=bin/_sgt-response-lock.sh
 source "$SCRIPT_DIR/_sgt-response-lock.sh"
+# shellcheck source=bin/_sgt-harness.sh
+source "$SCRIPT_DIR/_sgt-harness.sh"
 
 [[ -d "$WORKTREE" ]] || {
   echo "ERROR: worktree unavailable: $WORKTREE" >&2
@@ -28,14 +30,12 @@ source "$SCRIPT_DIR/_sgt-response-lock.sh"
   echo "ERROR: interactive worker requires a terminal" >&2
   exit 2
 }
+# Capability gate, readiness probe, and launch invocation all come from the one
+# registry in bin/_sgt-harness.sh.  Validation runs first, so a harness added to
+# the accepted list without a readiness probe fails here instead of shipping and
+# then hanging forever on an unsatisfiable readiness check.
 harness="$(basename "$AGENT")"
-case "$harness" in
-  opencode|oc|goose|claude) ;;
-  *)
-    echo "ERROR: unsupported interactive agent: $AGENT" >&2
-    exit 2
-    ;;
-esac
+_sgt_harness_require_accepted "$harness" || exit 2
 
 mkdir -p "$REPO_STATE"
 
@@ -57,15 +57,87 @@ _drain_is_active() {
   return 1
 }
 
-# _do_drain: write drained state and exit cleanly. Never returns.
+# _drain_terminate: stop the whole worker, then remove its pane.  Never returns.
+#
+# This runs inside the backgrounded _watch_drain subshell, which is why the
+# previous `kill -TERM "$BASHPID"` never worked: BASHPID is the subshell, so only
+# the watcher died while the worker shell, the agent, the notification loop and
+# the progress loop all survived and the pane stayed open.
+#
+# Signal the whole process group instead.  We are in that group, so we ignore
+# TERM for the rest of this function in order to outlive our own signal and
+# guarantee the escalation and the pane removal happen.  SIGKILL cannot be
+# trapped, so the final sweep also ends this subshell — by which point every
+# durable artefact has been written and the pane is gone.
+_drain_terminate() {
+  local pgid attempts attempt
+  trap '' TERM
+
+  pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
+  if [[ ! "$pgid" =~ ^[1-9][0-9]*$ ]]; then
+    pgid="$(cat "$REPO_STATE/worker_process_group" 2>/dev/null | tr -d ' \n' || true)"
+  fi
+  # Only signal the group when this worker actually leads it.  A tmux pane command
+  # is its own group leader, so pgid == worker pid.  If it is not, the group
+  # contains processes this worker does not own and must not signal; fall back to
+  # terminating just the worker shell and let its own EXIT path clean up.
+  if [[ "$pgid" =~ ^[1-9][0-9]*$ && "$pgid" != "$$" ]]; then
+    printf 'drain terminated the worker shell only: pid %s does not lead process group %s\n' \
+      "$$" "$pgid" > "$REPO_STATE/diagnostic" 2>/dev/null || true
+    pgid=""
+  fi
+
+  attempts="${SGT_DRAIN_TERMINATE_ATTEMPTS:-100}"
+  [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=100
+
+  if [[ -z "$pgid" ]]; then
+    kill -TERM "$$" 2>/dev/null || true
+    for attempt in $(seq 1 "$attempts"); do
+      kill -0 "$$" 2>/dev/null || break
+      sleep "${SGT_DRAIN_TERMINATE_INTERVAL:-0.05}"
+    done
+  fi
+
+  if [[ "$pgid" =~ ^[1-9][0-9]*$ ]]; then
+    # Graceful first: the agent gets a chance to exit and the worker shell runs
+    # its EXIT trap with the drained status already published.
+    kill -TERM -"$pgid" 2>/dev/null || true
+    for attempt in $(seq 1 "$attempts"); do
+      kill -0 "$$" 2>/dev/null || break
+      sleep "${SGT_DRAIN_TERMINATE_INTERVAL:-0.05}"
+    done
+  fi
+
+  # Remove the pane before the final sweep, so pane removal cannot be lost to it.
+  if [[ -n "${TMUX_PANE:-}" ]] && command -v tmux >/dev/null 2>&1; then
+    tmux kill-pane -t "$TMUX_PANE" 2>/dev/null || true
+  fi
+
+  # Sweep anything that ignored TERM, including this subshell.
+  if [[ "$pgid" =~ ^[1-9][0-9]*$ ]]; then
+    kill -KILL -"$pgid" 2>/dev/null || true
+  else
+    kill -KILL "$$" 2>/dev/null || true
+  fi
+  exit 0
+}
+
+# _do_drain: publish durable drained state, then terminate.  Never returns.
 _do_drain() {
   "$SCRIPT_DIR/sgt-td-memory" handoff "$REPO_STATE" "$WORKTREE" || true
+  # A durable handoff settles the accepted action lease: either it is finalized
+  # from the agent's own completion proof, or the drain is recorded as the reason
+  # it stays outstanding.  Without this a cooperatively drained worker left the
+  # lease pending forever and could never be resumed.
+  _sgt_finalize_action_lease "$REPO_STATE" "$WORKTREE" "drain_handoff" || true
   printf 'drained\n' > "$WORKTREE/.sergeant-drained"
   printf 'drained\n' > "$WORKTREE/.sergeant-status"
   printf 'drained\n' > "$REPO_STATE/status"
+  # Drain is not a way to discard unfinished work: no result is invented, and the
+  # status stays the honest nonterminal `drained`.
   rm -f "$REPO_STATE/result"
-  # Kill the agent session so the EXIT trap fires with the drained status already written.
-  kill -TERM "$BASHPID" 2>/dev/null || exit 0
+  # Everything durable is now published; only after that does the worker stop.
+  _drain_terminate
 }
 
 # _watch_drain: background loop — calls _do_drain when an active drain is detected.
@@ -146,21 +218,88 @@ _sync_state() {
 }
 
 _harness_ready() {
-  local pane_command pane_output ready_text
   [[ -n "${TMUX_PANE:-}" ]] || return 1
+  _sgt_harness_ready "$harness" "$TMUX_PANE"
+}
 
-  pane_command="$(tmux display-message -p -t "$TMUX_PANE" '#{pane_current_command}' 2>/dev/null || true)"
-  case "$harness" in
-    opencode|oc)
-      ready_text="${SGT_OPENCODE_READY_TEXT-Ask anything...}"
-      [[ -n "$ready_text" ]] || return 0
-      pane_output="$(tmux capture-pane -p -t "$TMUX_PANE" -S -80 2>/dev/null || true)"
-      [[ "$pane_output" == *"$ready_text"* ]]
-      ;;
-    *)
-      [[ "$pane_command" == "$harness" ]]
-      ;;
-  esac
+# ── Bounded readiness ─────────────────────────────────────────────────────────
+# Readiness used to be an unbounded gate: `_harness_ready || { sleep; continue; }`
+# spun forever when readiness could not be satisfied, and the eventual exit was
+# recorded as a misleading `orphaned`.  The gate below waits at most
+# SGT_HARNESS_READY_TIMEOUT seconds per notification target, then reports the
+# unreachable state exactly once as durable nonce-scoped evidence plus a
+# recoverable needs_input gate.  It never fabricates acknowledgement,
+# acceptance, delivery, completion, or an action lease.
+
+_SGT_READY_GATE_KEY=""
+_SGT_READY_GATE_SINCE=""
+_SGT_READY_GATE_REPORTED=""
+
+_harness_ready_timeout() {
+  local timeout="${SGT_HARNESS_READY_TIMEOUT-300}"
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=300
+  printf '%s\n' "$timeout"
+}
+
+# _publish_readiness_failure: record an unreachable readiness state once.
+_publish_readiness_failure() {
+  local notification_id="$1" nonce="$2" target_dir="$3" waited="$4"
+  local generation reason temporary
+  reason="interactive $harness harness never reached a deliverable prompt: notification $notification_id readiness unmet after ${waited}s"
+  temporary="$target_dir/readiness_failed.tmp.$$"
+  {
+    printf 'notification_id=%s\n' "$notification_id"
+    printf 'target_nonce=%s\n' "$nonce"
+    printf 'harness=%s\n' "$harness"
+    printf 'waited_seconds=%s\n' "$waited"
+    printf 'reason=%s\n' "$reason"
+  } > "$temporary" || { rm -f "$temporary"; return 1; }
+  mv "$temporary" "$target_dir/readiness_failed" || { rm -f "$temporary"; return 1; }
+  printf '%s\n' "$reason" > "$REPO_STATE/diagnostic"
+  generation="$(tr -d '\n' < "$WORKTREE/.sergeant-gate-generation" 2>/dev/null || true)"
+  [[ "$generation" =~ ^[0-9]+$ ]] || generation=0
+  generation=$((generation + 1))
+  printf '%s\n' "$generation" > "$WORKTREE/.sergeant-gate-generation"
+  {
+    printf '%s\n' "$reason"
+    printf '\n'
+    printf 'evidence: %s\n' "$target_dir/readiness_failed"
+    printf 'No acknowledgement, acceptance, delivery, or action lease was fabricated; the notification is still pending.\n'
+    printf 'Confirm the harness can render an interactive prompt, then resume with sgt-respond.\n'
+  } > "$WORKTREE/.sergeant-message"
+  cp "$WORKTREE/.sergeant-message" "$REPO_STATE/message" 2>/dev/null || true
+  printf 'needs_input\n' > "$WORKTREE/.sergeant-status"
+  printf 'needs_input\n' > "$REPO_STATE/status"
+}
+
+# _harness_ready_gate: 0 when the pane can receive the nudge; 1 otherwise.
+# Reports once when the readiness bound for this notification target elapses.
+_harness_ready_gate() {
+  local notification_id="$1" nonce="$2" target_dir="$3"
+  local key now timeout waited
+  _harness_ready && return 0
+  key="$notification_id|$nonce"
+  now="$(date +%s)"
+  [[ "$now" =~ ^[0-9]+$ ]] || return 1
+  if [[ "$_SGT_READY_GATE_KEY" != "$key" ]]; then
+    _SGT_READY_GATE_KEY="$key"
+    _SGT_READY_GATE_SINCE="$now"
+    _SGT_READY_GATE_REPORTED=""
+  fi
+  # Already reported for this target: stay unready without re-reporting.
+  [[ -z "$_SGT_READY_GATE_REPORTED" ]] || return 1
+  [[ "$_SGT_READY_GATE_SINCE" =~ ^[0-9]+$ ]] || return 1
+  (( now >= _SGT_READY_GATE_SINCE )) || return 1
+  timeout="$(_harness_ready_timeout)"
+  waited=$(( now - _SGT_READY_GATE_SINCE ))
+  (( waited >= timeout )) || return 1
+  if [[ -f "$target_dir/readiness_failed" ]]; then
+    _SGT_READY_GATE_REPORTED="$key"
+    return 1
+  fi
+  _publish_readiness_failure "$notification_id" "$nonce" "$target_dir" "$waited" || return 1
+  _SGT_READY_GATE_REPORTED="$key"
+  return 1
 }
 
 _finish() {
@@ -169,7 +308,19 @@ _finish() {
   [[ -z "${notification_pid:-}" ]] || kill "$notification_pid" 2>/dev/null || true
   [[ -z "${watch_progress_pid:-}" ]] || kill "$watch_progress_pid" 2>/dev/null || true
   [[ -z "${watch_drain_pid:-}" ]] || kill "$watch_drain_pid" 2>/dev/null || true
+  # A background loop may have been killed mid-critical-section, leaving a
+  # response lock recorded against this still-live PID.  Every loop is dead now,
+  # so reclaiming our own lock is safe — and necessary, because acquiring it
+  # would otherwise wait on our own liveness forever.
+  _sgt_response_lock_reclaim "$REPO_STATE"
   status="$(_status)"
+  # Settle the accepted action lease at the exit boundary, before any branch can
+  # return.  This covers done, failed, drained, needs_input, blocked, waiting and
+  # orphaned alike: the lease is either finalized from the agent's own completion
+  # proof or explicitly recorded as pending with the exit reason.  No branch may
+  # exit leaving it silently outstanding.  The background loops are already dead,
+  # so there is no competing writer.
+  _sgt_finalize_action_lease "$REPO_STATE" "$WORKTREE" "worker_exit:$status" || true
   case "$status" in
     done)
       if [[ ! -s "$WORKTREE/.sergeant-result" ]]; then
@@ -254,25 +405,20 @@ _deliver_notifications() {
           "$target_identity" == "$pane_identity" ]]; then
       if [[ "$(cat "$ack_path" 2>/dev/null || true)" != "$ack_token" &&
             "$(cat "$complete_path" 2>/dev/null || true)" != "$ack_token" ]]; then
-        _harness_ready || {
+        _harness_ready_gate "$notification_id" "$nonce" "$target_dir" || {
           sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
           continue
         }
       fi
       mkdir -p "$(dirname "$ack_path")" "$(dirname "$accept_path")" \
         "$(dirname "$complete_path")"
+      # The agent published its own completion proof for this turn.  Settle the
+      # lease through the one shared finalizer rather than a second inline
+      # implementation; it takes the response lock, re-verifies identity, lease
+      # and proof under it, and records the outcome either way.
       if [[ "$(cat "$complete_path" 2>/dev/null || true)" == "$ack_token" &&
             ! -f "$target_dir/completed" ]]; then
-        if ! _sgt_response_lock_acquire "$REPO_STATE"; then
-          sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
-          continue
-        fi
-        if [[ "$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)" == "$nonce" &&
-              "$(cat "$REPO_STATE/notifications/$notification_id/action_lease" 2>/dev/null || true)" == "$nonce" ]]; then
-          printf '%s\n' "$ack_token" > "$target_dir/completed.tmp.$$" &&
-            mv "$target_dir/completed.tmp.$$" "$target_dir/completed"
-        fi
-        _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
+        _sgt_finalize_action_lease "$REPO_STATE" "$WORKTREE" "notification_complete" || true
       fi
       # Once acceptance delivery is durable, execution belongs to the agent.
       # Keep publishing completion evidence silently without replaying the nudge.
@@ -402,8 +548,17 @@ _watch_progress &
 watch_progress_pid=$!
 _watch_drain &
 watch_drain_pid=$!
-case "$harness" in
-  goose) "$AGENT" session ;;
-  opencode|oc) "$AGENT" --dangerously-skip-permissions ;;
-  *) "$AGENT" ;;
-esac
+# Launch arguments come from the same registry that gated acceptance and that
+# supplies the readiness probe, so the three can no longer diverge.
+harness_launch_args=()
+while IFS= read -r harness_launch_arg; do
+  [[ -n "$harness_launch_arg" ]] || continue
+  harness_launch_args+=("$harness_launch_arg")
+done <<EOF
+$(_sgt_harness_launch_args "$harness")
+EOF
+if [[ "${#harness_launch_args[@]}" -gt 0 ]]; then
+  "$AGENT" "${harness_launch_args[@]}"
+else
+  "$AGENT"
+fi

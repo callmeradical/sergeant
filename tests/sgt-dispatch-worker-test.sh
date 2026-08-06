@@ -76,6 +76,7 @@ cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
 
 set -euo pipefail
 
+printf '%s\n' "$*" >> "${TD_LOG:-/dev/null}"
 if [[ "${1:-}" == "--version" ]]; then
   printf 'td version v0.1.0\n'
   exit 0
@@ -302,18 +303,37 @@ target_race_target_count="$(find "$target_race_state/notifications" -mindepth 3 
 [[ "$target_race_target_count" == "0" ]]
 grep -Fq 'kill-pane -t %42' "$TEST_ROOT/target-race.log"
 
+# Capability validation must abort before ANY durable side effect exists: no
+# fleet directory, no intent file, no td task, and no worktree (td-db6323 /
+# GH #175).  Asserting only the fleet count previously left the other three
+# unproven.
 before_count="$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+before_worktrees="$(find "$(dirname "$TEST_ROOT/repo")" -maxdepth 1 -type d -name 'app-sgt-*' | \
+  wc -l | tr -d ' ')"
+before_intents="$(find "$TEST_ROOT" -name '.sergeant-intent.md' | wc -l | tr -d ' ')"
 set +e
 output="$(PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/unsupported.log" \
+  TD_LOG="$TEST_ROOT/unsupported-td.log" \
   SERGEANT_AGENT=fake-agent SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-dispatch" test 'Unsupported agent' --repos app 2>&1)"
 status=$?
 set -e
 after_count="$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+after_worktrees="$(find "$(dirname "$TEST_ROOT/repo")" -maxdepth 1 -type d -name 'app-sgt-*' | \
+  wc -l | tr -d ' ')"
+after_intents="$(find "$TEST_ROOT" -name '.sergeant-intent.md' | wc -l | tr -d ' ')"
 [[ "$status" -ne 0 && "$output" == *"unsupported interactive agent"* ]]
 [[ "$before_count" == "$after_count" ]]
+[[ "$before_worktrees" == "$after_worktrees" ]]
+[[ "$before_intents" == "$after_intents" ]]
 [[ ! -e "$TEST_ROOT/unsupported.log" ]]
+if [[ -e "$TEST_ROOT/unsupported-td.log" ]] && \
+   grep -Eq '(^| )(create|start|log|handoff|review)( |$)' "$TEST_ROOT/unsupported-td.log"; then
+  printf 'capability validation created td work before failing:\n%s\n' \
+    "$(cat "$TEST_ROOT/unsupported-td.log")" >&2
+  exit 1
+fi
 
 removed_flag="--""remote"
 before_count="$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"

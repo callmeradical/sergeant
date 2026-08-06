@@ -6,6 +6,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-response-lock.sh
+source "$SCRIPT_DIR/_sgt-response-lock.sh"
 FLEET_DIR="${SERGEANT_FLEET:-$FLEET_DIR}"
 POLL_INTERVAL="${SERGEANT_WATCH_INTERVAL:-5}"
 
@@ -27,12 +29,177 @@ if [[ "${1:-}" == "--background" || "${2:-}" == "--background" ]]; then
   exit 0
 fi
 
+# ── Bounded read-only snapshot ────────────────────────────────────────────────
+#
+#   sgt-watch --snapshot
+#   sgt-watch --snapshot <task-id>
+#   sgt-watch --snapshot <task-id> --repo <repo>
+#
+# Answers exactly one narrow question — "is Sergeant verifiably doing work right
+# now?" — as constant-size versioned JSON.  --list renders every retained record
+# for humans and embeds free-form brief text, and --sync/--sync-all mutate
+# lifecycle state, so neither is usable by a coordinator or bridge that needs a
+# side-effect-free observation.
+#
+# Strictly read-only: this branch runs before any reconciliation, never writes,
+# and deliberately avoids _pane_is_supervisor because that migrates legacy
+# pane_identity files as a side effect.
+#
+# `busy: true` requires ALL of a stable active status, an exact live Sergeant
+# worker identity, and recent progress attributable to that pane.  Every other
+# outcome is `busy: null`.  Version 1 never emits `busy: false`: absence of a
+# verified witness is not proof of idleness.
+#
+# `basis` is a closed allowlist of exactly two values, so an unknown condition
+# maps to the null basis instead of inventing one.
+_SGT_SNAPSHOT_SCHEMA='sergeant.watch-status/v1'
+
+# _snapshot_scope_id_is_valid: bound the only caller-supplied values that reach
+# the output, which is what keeps the document constant-size.
+_snapshot_scope_id_is_valid() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+}
+
+# _snapshot_pane_is_verified_worker <pane> <repo_dir>
+# Read-only exact identity match against the recorded worker pane.
+_snapshot_pane_is_verified_worker() {
+  local pane="$1" repo_dir="$2" actual expected observed_pane observed_dead
+  [[ -n "$pane" ]] || return 1
+  command -v tmux >/dev/null 2>&1 || return 1
+  actual="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
+  [[ -n "$actual" ]] || return 1
+  # pane_dead|pane_id|pane_pid|pane_created|pane_start_command.  `display-message
+  # -t <gone>` falls back to the default target, so the pane id is compared.
+  observed_dead="${actual%%|*}"
+  observed_pane="${actual#*|}"
+  observed_pane="${observed_pane%%|*}"
+  [[ "$observed_dead" == "0" && "$observed_pane" == "$pane" ]] || return 1
+  expected="$(cat "$repo_dir/pane_identity" 2>/dev/null || true)"
+  [[ -n "$expected" && "$expected" == "$actual" ]]
+}
+
+# _snapshot_repo_is_active_witness <repo_dir>
+_snapshot_repo_is_active_witness() {
+  local repo_dir="$1" status pane recent now last_event pane_activity
+  [[ -d "$repo_dir" ]] || return 1
+  status="$(cat "$repo_dir/status" 2>/dev/null | tr -d '\n' || true)"
+  # in_progress is the only status that claims work is happening.  Terminal,
+  # waiting and unreconciled states are never a witness.
+  [[ "$status" == "in_progress" ]] || return 1
+  pane="$(cat "$repo_dir/pane" 2>/dev/null | tr -d '\n' || true)"
+  _snapshot_pane_is_verified_worker "$pane" "$repo_dir" || return 1
+
+  recent="${SERGEANT_SNAPSHOT_RECENT_SECONDS:-300}"
+  [[ "$recent" =~ ^[0-9]+$ ]] || recent=300
+  now="$(date +%s)"
+  [[ "$now" =~ ^[0-9]+$ ]] || return 1
+  last_event="$(cat "$repo_dir/progress_ts" 2>/dev/null | tr -d '\n' || true)"
+  [[ "$last_event" =~ ^[1-9][0-9]*$ ]] || last_event=0
+  pane_activity="$(tmux display-message -p -t "$pane" '#{pane_activity}' 2>/dev/null || true)"
+  if [[ "$pane_activity" =~ ^[1-9][0-9]*$ ]] && (( pane_activity > last_event )); then
+    last_event="$pane_activity"
+  fi
+  (( last_event > 0 && now >= last_event && now - last_event <= recent ))
+}
+
+_snapshot_emit() {
+  local kind="$1" task_id="$2" repo="$3" busy="$4" basis="$5"
+  local task_field repo_field
+  if [[ -n "$task_id" ]]; then task_field="\"$task_id\""; else task_field='null'; fi
+  if [[ -n "$repo" ]]; then repo_field="\"$repo\""; else repo_field='null'; fi
+  printf '{"schema":"%s","observed_at":"%s","scope":{"kind":"%s","task_id":%s,"repo":%s},"busy":%s,"basis":"%s"}\n' \
+    "$_SGT_SNAPSHOT_SCHEMA" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$kind" "$task_field" "$repo_field" "$busy" "$basis"
+}
+
+if [[ "${1:-}" == "--snapshot" ]]; then
+  snapshot_task=""
+  snapshot_repo=""
+  snapshot_task_given=0
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --repo)
+        [[ -n "${2:-}" ]] || _die "--repo requires a repository name"
+        snapshot_repo="$2"
+        shift 2
+        ;;
+      -*) _die "Unknown option for --snapshot: $1" ;;
+      *)
+        (( snapshot_task_given == 0 )) || \
+          _die "Usage: sgt-watch --snapshot [<task-id>] [--repo <repo>]"
+        snapshot_task="$1"
+        snapshot_task_given=1
+        shift
+        ;;
+    esac
+  done
+  # Validate before observing anything, so a malformed scope can never reach the
+  # output and can never make the document unbounded.
+  if (( snapshot_task_given == 1 )); then
+    _snapshot_scope_id_is_valid "$snapshot_task" || \
+      _die "Invalid task ID for --snapshot: $snapshot_task"
+  fi
+  if [[ -n "$snapshot_repo" ]]; then
+    [[ -n "$snapshot_task" ]] || _die "--repo requires a task ID"
+    _snapshot_scope_id_is_valid "$snapshot_repo" || \
+      _die "Invalid repo for --snapshot: $snapshot_repo"
+  fi
+
+  if [[ -n "$snapshot_repo" ]]; then
+    snapshot_kind="repo"
+  elif [[ -n "$snapshot_task" ]]; then
+    snapshot_kind="task"
+  else
+    snapshot_kind="fleet"
+  fi
+
+  snapshot_busy="null"
+  snapshot_basis="no_verified_active_witness"
+  if [[ -n "$snapshot_repo" ]]; then
+    if _snapshot_repo_is_active_witness "$FLEET_DIR/$snapshot_task/$snapshot_repo"; then
+      snapshot_busy="true"
+      snapshot_basis="verified_active_witness"
+    fi
+  elif [[ -n "$snapshot_task" ]]; then
+    if [[ -d "$FLEET_DIR/$snapshot_task" ]]; then
+      for snapshot_repo_dir in "$FLEET_DIR/$snapshot_task"/*/; do
+        [[ -d "$snapshot_repo_dir" ]] || continue
+        if _snapshot_repo_is_active_witness "${snapshot_repo_dir%/}"; then
+          snapshot_busy="true"
+          snapshot_basis="verified_active_witness"
+          break
+        fi
+      done
+    fi
+  elif [[ -d "$FLEET_DIR" ]]; then
+    for snapshot_task_dir in "$FLEET_DIR"/*/; do
+      [[ -d "$snapshot_task_dir" ]] || continue
+      for snapshot_repo_dir in "$snapshot_task_dir"*/; do
+        [[ -d "$snapshot_repo_dir" ]] || continue
+        if _snapshot_repo_is_active_witness "${snapshot_repo_dir%/}"; then
+          snapshot_busy="true"
+          snapshot_basis="verified_active_witness"
+          break 2
+        fi
+      done
+    done
+  fi
+
+  _snapshot_emit "$snapshot_kind" "$snapshot_task" "$snapshot_repo" \
+    "$snapshot_busy" "$snapshot_basis"
+  exit 0
+fi
+
 if [[ "${1:-}" == "--list" ]]; then
   if [[ ! -d "$FLEET_DIR" ]] || [[ -z "$(ls -A "$FLEET_DIR" 2>/dev/null)" ]]; then
     echo "No tasks found in $FLEET_DIR"
     exit 0
   fi
-  echo "Active tasks:"
+  # Retained records include terminal ones, so this heading must not claim they
+  # are active.  Use --snapshot for a machine-readable activity observation.
+  echo "Fleet tasks (retained records, including terminal):"
   echo ""
   for task_dir in "$FLEET_DIR"/*/; do
     task_id="$(basename "$task_dir")"
@@ -114,20 +281,72 @@ _sgt_dagr_advance() {
   fi
 }
 
+# _recycle_evidence_covers <repo_dir> <identity>
+#
+# 0 when the recorded recycle evidence names this exact pane identity.
+#
+# worker_recycled used to be a permanent task-level marker: any non-empty content
+# meant "already recycled", it was stamped merely because the recorded pane was
+# absent, and nothing ever cleared or rebound it.  A relaunch that rewrote
+# pane/pane_identity therefore permanently suppressed recycling of every later
+# pane.  Binding the evidence to the exact identity makes it answer the only
+# question that matters — "has THIS pane been retired?" — and makes an empty or
+# malformed marker prove nothing.
+_recycle_evidence_covers() {
+  local repo_dir="$1" identity="$2"
+  [[ -n "$identity" ]] || return 1
+  [[ -s "$repo_dir/worker_recycled" ]] || return 1
+  grep -Fq "identity=$identity" "$repo_dir/worker_recycled" 2>/dev/null
+}
+
+# _record_recycle_evidence <repo_dir> <pane> <identity> <outcome>
+# Rebind the current evidence and append to the append-only history so no earlier
+# recycling is ever lost.
+_record_recycle_evidence() {
+  local repo_dir="$1" pane="$2" identity="$3" outcome="$4" stamp temporary
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  temporary="$repo_dir/worker_recycled.tmp.$$"
+  {
+    printf 'pane=%s\n' "$pane"
+    printf 'identity=%s\n' "$identity"
+    printf 'outcome=%s\n' "$outcome"
+    printf 'recycled_at=%s\n' "$stamp"
+  } > "$temporary" || { rm -f "$temporary"; return 1; }
+  mv "$temporary" "$repo_dir/worker_recycled" || { rm -f "$temporary"; return 1; }
+  printf '%s\t%s\t%s\t%s\n' "$stamp" "$pane" "$identity" "$outcome" \
+    >> "$repo_dir/worker_recycled_log" 2>/dev/null || true
+}
+
 _recycle_terminal_worker() {
   local repo_dir="$1"
-  local pane pane_id
+  local pane pane_id worktree_path identity
 
-  [[ ! -s "$repo_dir/worker_recycled" ]] || return 0
+  # Settle the accepted action lease before the pane is taken away.  Recycling
+  # used to stop the only process that could ever publish completion, which is
+  # how a completed turn became permanently unrecoverable: sgt-respond and
+  # sgt-recover then both refused the lease as prior-supervisor-owned.
+  worktree_path="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+  if [[ -n "$worktree_path" && -d "$worktree_path" ]]; then
+    _SGT_RESPONSE_LOCK_DIR=""
+    _sgt_finalize_action_lease "$repo_dir" "$worktree_path" "terminal_recycle" || true
+  fi
+
   pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
   [[ -n "$pane" ]] || return 0
+  identity="$(_sgt_read_owned_file "$repo_dir/pane_identity" 2>/dev/null || \
+    cat "$repo_dir/pane_identity" 2>/dev/null || true)"
+  # Already retired this exact pane: nothing to do.
+  _recycle_evidence_covers "$repo_dir" "$identity" && return 0
+
   if ! command -v tmux >/dev/null 2>&1; then
     printf 'terminal worker could not be recycled because tmux is unavailable\n' > "$repo_dir/diagnostic"
     return 1
   fi
+  # `display-message -t <gone>` silently falls back to the default target, so the
+  # returned pane id must be compared rather than the exit status trusted.
   pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
   if [[ "$pane_id" != "$pane" ]]; then
-    date -u +%Y-%m-%dT%H:%M:%SZ > "$repo_dir/worker_recycled"
+    _record_recycle_evidence "$repo_dir" "$pane" "$identity" "pane_absent" || return 1
     return 0
   fi
   if ! _pane_is_supervisor "$pane" "$repo_dir"; then
@@ -135,11 +354,11 @@ _recycle_terminal_worker() {
     return 1
   fi
   if ! tmux kill-pane -t "$pane" 2>/dev/null ||
-     tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+     [[ "$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)" == "$pane" ]]; then
     printf 'failed to recycle terminal worker pane: %s\n' "$pane" > "$repo_dir/diagnostic"
     return 1
   fi
-  date -u +%Y-%m-%dT%H:%M:%SZ > "$repo_dir/worker_recycled"
+  _record_recycle_evidence "$repo_dir" "$pane" "$identity" "pane_killed" || return 1
   return 0
 }
 
@@ -344,11 +563,21 @@ _sync_task() {
       continue
     fi
 
+    # Recycle every safely terminal state.  `drained` was recognised throughout
+    # sgt-watch but never recycled, so a cooperatively drained worker kept its
+    # pane and its agent process indefinitely.  Nonterminal and unreconciled
+    # states — in_progress, needs_input, blocked, waiting, orphaned — are
+    # deliberately excluded: they are resumable and must fail closed.
     case "$wt_status" in
-      done|failed:*)
+      done|failed:*|drained)
         if ! _recycle_terminal_worker "$repo_dir"; then
           printf 'WARNING: terminal worker was not recycled: %s\n' "$repo_dir" >&2
         fi
+        ;;
+    esac
+
+    case "$wt_status" in
+      done|failed:*)
         # If this fleet task is part of a dagr run, advance the DAG
         _sgt_dagr_advance "$repo_dir" "$wt_status"
         ;;

@@ -432,9 +432,22 @@ _sgt_publish_worker_notification() {
     }
   fi
 }
+# _sgt_wait_worker_notification <pane> <repo_dir> <notification_id>
+#
+# Waits for the DELIVERY handshake only: the nudge reached the exact target pane
+# and acceptance was published for that target's nonce.  Returning 0 does NOT
+# mean the agent has acted.  Action completion is a separate, later state owned
+# by the action lease and reported by _sgt_notification_action_completed /
+# _sgt_notification_action_pending in bin/_sgt-response-lock.sh.
+#
+# Conflating the two is what GH #168 reported: delivery was called success while
+# the accepted lease was still outstanding, so callers believed a turn was
+# settled when nothing had published completion.  The two states now have
+# distinct names and distinct durable artefacts — targets/<nonce>/handshake_complete
+# for delivery, targets/<nonce>/completed for the action.
 _sgt_wait_worker_notification() {
   local pane="$1" repo_dir="$2" notification_id="$3"
-  local timeout="${SGT_NOTIFICATION_ACK_TIMEOUT:-60}" accepted attempt delivered expected_identity nonce pane_identity target_dir
+  local timeout="${SGT_NOTIFICATION_ACK_TIMEOUT:-60}" accepted attempt delivered expected_identity nonce pane_identity target_dir temporary
   [[ "$timeout" =~ ^[0-9]+$ ]] || return 1
 
   attempt=0
@@ -449,7 +462,19 @@ _sgt_wait_worker_notification() {
     [[ "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$pane_identity" ]] || return 1
     delivered="$(cat "$target_dir/delivered" 2>/dev/null || true)"
     accepted="$(cat "$target_dir/accepted" 2>/dev/null || true)"
-    [[ "$delivered" == "$notification_id|$nonce" && "$accepted" == "$notification_id|$nonce" ]] && return 0
+    if [[ "$delivered" == "$notification_id|$nonce" && "$accepted" == "$notification_id|$nonce" ]]; then
+      # Record delivery as its own state, distinct from action completion.
+      if [[ ! -e "$target_dir/handshake_complete" ]]; then
+        temporary="$target_dir/handshake_complete.tmp.$$.$RANDOM"
+        if printf '%s\n' "$notification_id|$nonce" > "$temporary" 2>/dev/null; then
+          mv "$temporary" "$target_dir/handshake_complete" 2>/dev/null || \
+            rm -f "$temporary" 2>/dev/null || true
+        else
+          rm -f "$temporary" 2>/dev/null || true
+        fi
+      fi
+      return 0
+    fi
     (( attempt >= timeout * 10 )) && return 1
     attempt=$((attempt + 1))
     sleep 0.1
