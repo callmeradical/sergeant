@@ -240,7 +240,7 @@ python3 scripts/gauntlet/reconcile-work.py --check-inventory-complete
 
 python3 scripts/gauntlet/reconcile-work.py --check-fleet-owner-reconciled
 # one row per fleet record. Every nonterminal status — in_progress,
-# needs_input, blocked, waiting, orphaned — must report branch, worktree,
+# needs_input, blocked, waiting, orphaned, drained — must report branch, worktree,
 # pane_identity, worker_process_start and DERIVED liveness. Bare pane numbers
 # are never ownership evidence because tmux reuses them after restart.
 ```
@@ -302,6 +302,9 @@ python3 scripts/gauntlet/reconcile-work.py --check-fleet-owner-reconciled
   have dead pane identities, including the canonical Phase -2 and Phase -0A
   branches; `add-cross-platform-serge-4dfdd3` remains `needs_input`. They require
   per-record response, wake or audited handover — never fleet-wide sync.
+- Drained baseline at critic round 32: four records with worktrees, two carrying
+  fourteen dirty paths. Cooperative drain is not success; drained records need
+  inventory, handover and explicit cleanup predicates.
 - Fixed-point note: initial `origin/main` is `fa864ab`. The default checkout at
   `5a10451` is an unpushed feature branch, not a newer integration base. The plan
   always resolves `origin/main` rather than treating incidental checkout HEAD as
@@ -325,7 +328,7 @@ python3 scripts/gauntlet/reconcile-work.py --check-fleet-owner-reconciled
   rewrite, no cleanup, no branch edits
 - Why it exists: phase-canonical branches are owned by fleet records in every
   nonterminal status (`orphaned`, `blocked`, `needs_input`, `waiting`,
-  `in_progress`) with dead pane identities. Existing commands cannot transfer
+  `in_progress`, `drained`) with dead pane identities. Existing commands cannot transfer
   them: recover accepts only `in_progress`, respond needs a pending response,
   wake needs a wake condition, and fleet-wide sync is prohibited. Observation
   became a blocking gate with no legal release path.
@@ -904,6 +907,9 @@ tests/sgt-cleanup-cross-filesystem-test.sh
 tests/sgt-cleanup-foreign-owner-test.sh             # unauthorized cleanup must FAIL
 tests/sgt-cleanup-closed-td-cross-repo-test.sh      # must PASS from arbitrary coordinator cwd
 tests/sgt-cleanup-process-leak-test.sh               # suite leaves zero fake agents
+tests/sgt-cleanup-drained-test.sh
+# drained + open td or unpreserved dirt -> REFUSE
+# drained + td closed + content-merged branch + preserved/clean tree -> PASS
 ```
 
 - Precondition: every listed legacy test must have passed the Phase -1
@@ -911,6 +917,14 @@ tests/sgt-cleanup-process-leak-test.sh               # suite leaves zero fake ag
 
 - Evidence: PR #178 fixed directory evidence; 249 leaked fake agents then
   prevented cleanup of the task that spawned them
+- `drained` gets an explicit cleanup case. Safe cleanup requires exact
+  dead/handover owner, td closed, branch merged by content (not ancestry), no
+  unpreserved product dirt, and durable result/reconciliation evidence. Missing
+  any condition refuses and preserves state.
+- Mutation: remove each drained safety predicate in turn; unsafe cleanup test
+  must FAIL, then restore green.
+- Update AGENTS.md's state taxonomy here; its list omitted drained, which is how
+  this gap propagated into the plan.
 - Largest remaining gap: terminal state still depends on stale recorded status
 
 ### Phase 6.5 — Execute every remaining backlog wave
@@ -1188,6 +1202,10 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   with unrelated dashboard history. Replaced remote-level trust with per-ref
   trust, nullable merge-base and `foreign-history`; expanded Phase -2 path set to
   seven refs, two excluded foreign and five requiring Sergeant ownership.
+- 2026-08-05: Critic round 32 found `drained` was rejected by cleanup but omitted
+  from inventory/adjudication, leaving four worktrees and fourteen dirty paths
+  unreachable. Added it to the state taxonomy and Phase -3/-3.5, plus an
+  evidence-gated cleanup case and mutation proof in Phase 6.
 - 2026-08-05: Critic round 29 falsified the claimed silent misparse: production
   `set -e` makes Bash 3.2 abort immediately at `declare -A`. Corrected the defect
   to total wake incompatibility, changed mutation evidence to require the named
@@ -1388,6 +1406,12 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   foreign-history class, nullable merge-base, preservation without Sergeant
   merge, seven-ref overlap gate with two excluded foreign, and a trust mutation
   that must fail. Evidence report: `.gauntlet/rounds/plan/31-critic.md`.
+- Round 32 critic: quality bar won. `drained` was neither terminal nor listed as
+  nonterminal: four real records bypassed inventory/handover and cleanup refused
+  them, two with fourteen dirty paths. Challenge accepted: first-class drained
+  state, exact handover, explicit cleanup refusal/safe predicates, mutation tests
+  and AGENTS taxonomy correction. Evidence report:
+  `.gauntlet/rounds/plan/32-critic.md`.
 - Round 25 critic: quality bar won. `sgt-wake` used an associative array that
   silently collapsed all fields on Bash 3.2; existing 3.2 tests did not run wake.
   Full ShellCheck also could not pass and no phase owned the findings. Challenge
