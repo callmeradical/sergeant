@@ -24,8 +24,12 @@
 #   kind, generation, not_before, deadline, max_attempts, backoff_base,
 #   run_id, check_name, task_id, repo, td_task_id, app, env
 #
-# Allowlisted field value pattern: [A-Za-z0-9._/:-]*
-# No spaces, no shell metacharacters, no secrets permitted.
+# Allowlisted field value pattern: [A-Za-z0-9._/:-]*, never starting with '-'
+# check_name uses a wider allowlist because GitHub check names are
+# human-authored (e.g. "build (ubuntu-latest, 3.11)", "Build & Test").  See
+# _CHECK_NAME_VALUE_PATTERN below for exactly what each admits and why that is
+# safe.  Neither allowlist permits $ backtick \ quotes ; | < > control
+# characters, or secrets.
 
 set -euo pipefail
 
@@ -64,8 +68,46 @@ condition_file="$worktree/.sergeant-wake-condition"
 
 _ALLOWED_FIELDS="kind generation not_before deadline max_attempts backoff_base run_id check_name task_id repo td_task_id app env"
 _SECRET_PATTERN='(token|password|key|secret|auth|credential|passwd|apikey|api_key)'
+# Neither pattern admits a leading '-': every value becomes an argument to gh(1)
+# or td(1), and a dash-leading value would be read there as an option rather
+# than as data.
+_STRICT_VALUE_PATTERN='^([A-Za-z0-9._/:][A-Za-z0-9._/:-]*)?$'
+# GitHub check names are human-authored, so the allowlist admits what real names
+# contain: space, and . _ / : @ # , + ( ) [ ] & ! % ? * = -
+# It rejects $ backtick \ ' " ; | & pipelines, < > redirection, { } ~ and every
+# control character.  Glob characters (* ? [ ]) are admitted, which is safe only
+# because the value is used exclusively as quoted argv to python3/gh and as
+# quoted printf data — it is never eval'd, word-split, or expanded by the shell.
+_CHECK_NAME_VALUE_PATTERN='^[]A-Za-z0-9._/:@#,+()[&!%?*=][]A-Za-z0-9 ._/:@#,+()[&!%?*=-]*$'
 
-declare -A _COND=()
+# Bash 3.2-compatible key-value store for wake condition fields.
+# Uses two parallel arrays: _COND_KEYS and _COND_VALS.
+# Use _cond_get <field> to look up a value.
+_COND_KEYS=()
+_COND_VALS=()
+
+_cond_set() {
+  local k="$1" v="$2" i
+  for i in "${!_COND_KEYS[@]}"; do
+    if [[ "${_COND_KEYS[$i]}" == "$k" ]]; then
+      _COND_VALS[$i]="$v"
+      return
+    fi
+  done
+  _COND_KEYS+=("$k")
+  _COND_VALS+=("$v")
+}
+
+_cond_get() {
+  local k="$1" i
+  for i in "${!_COND_KEYS[@]}"; do
+    if [[ "${_COND_KEYS[$i]}" == "$k" ]]; then
+      printf '%s' "${_COND_VALS[$i]}"
+      return
+    fi
+  done
+  # return empty string when key absent
+}
 
 while IFS='=' read -r field value; do
   # Strip whitespace.
@@ -93,20 +135,36 @@ while IFS='=' read -r field value; do
     exit 1
   fi
 
-  # Allowlist value characters: alphanumeric, dot, dash, underscore, slash, colon.
-  if ! [[ "$value" =~ ^[A-Za-z0-9._/:-]*$ ]]; then
+  # A present-but-empty field is a distinct mistake from a malformed one; saying
+  # "invalid characters" for an empty value sends the reader looking for a
+  # character that is not there.
+  if [[ -z "$value" ]]; then
+    printf 'ERROR: empty value for wake-condition field: %s\n' "$field" >&2
+    exit 1
+  fi
+
+  # Allowlist value characters.  check_name carries a human-authored GitHub
+  # check name, so it uses the wider allowlist documented above.
+  if [[ "$field" == "check_name" ]]; then
+    _value_pattern="$_CHECK_NAME_VALUE_PATTERN"
+  else
+    _value_pattern="$_STRICT_VALUE_PATTERN"
+  fi
+  if ! [[ "$value" =~ $_value_pattern ]]; then
     printf 'ERROR: invalid characters in field value for %s\n' "$field" >&2
     exit 1
   fi
 
-  _COND["$field"]="$value"
+  _cond_set "$field" "$value"
 done < "$condition_file"
 
-kind="${_COND[kind]:-}"
-generation="${_COND[generation]:-}"
-deadline="${_COND[deadline]:-}"
-max_attempts="${_COND[max_attempts]:-}"
-backoff_base="${_COND[backoff_base]:-30}"
+kind="$(_cond_get kind)"
+generation="$(_cond_get generation)"
+deadline="$(_cond_get deadline)"
+max_attempts="$(_cond_get max_attempts)"
+backoff_base="${backoff_base:-30}"
+backoff_base_raw="$(_cond_get backoff_base)"
+[[ -n "$backoff_base_raw" ]] && backoff_base="$backoff_base_raw"
 
 [[ -n "$kind" ]]       || _die "Wake condition is missing required field: kind"
 [[ -n "$generation" ]] || _die "Wake condition is missing required field: generation"
@@ -208,19 +266,139 @@ _record_attempt() {
 }
 
 # ── Evaluate condition ───────────────────────────────────────────────────────
-# condition_result: "met:<evidence>" | "unmet" | "error:<reason>" | "unsupported"
+# condition_result: "met:<evidence>" | "unmet" | "error:<reason>"
+#                 | "escalate:<reason>" | "unsupported"
+#
+# "unmet" means the condition may still be met on a later attempt.  "escalate"
+# means the condition has become permanently unsatisfiable, so retrying until
+# the attempt budget or deadline expires would be dishonest and wasteful.
 
 condition_result=""
 
 _result_met()         { condition_result="met:$1"; }
 _result_unmet()       { condition_result="unmet"; }
 _result_error()       { condition_result="error:$1"; }
+_result_escalate()    { condition_result="escalate:$1"; }
 _result_unsupported() { condition_result="unsupported"; }
+
+# ── GitHub query helpers ─────────────────────────────────────────────────────
+# gh(1) resolves its base repository from the current directory's git remote.
+# sgt-wake runs from wherever the scheduler was invoked, which is normally NOT
+# inside the worker's repository, so every gh query must be bound explicitly to
+# the worker's recorded worktree.  Otherwise gh fails with "failed to determine
+# base repo" and a resolution failure becomes indistinguishable from a pending
+# run.
+
+# _gh_repo_slug <dir>
+#
+# Prints the owner/name slug of <dir>'s `origin` remote when it is a GitHub
+# remote.  Returns 1 when the slug cannot be determined (no git, no remote, or
+# a non-GitHub host), in which case the caller falls back to letting gh resolve
+# the repository from the worktree cwd.
+_gh_repo_slug() {
+  local dir="$1" url slug host_pattern
+  command -v git >/dev/null 2>&1 || return 1
+  url="$(git -C "$dir" remote get-url origin 2>/dev/null || true)"
+  [[ -n "$url" ]] || return 1
+  # The host is anchored: a remote on a host that merely ENDS in github.com
+  # (mygithub.com) must not be rewritten into a github.com slug and queried as
+  # the wrong repository.
+  host_pattern='^(https?://([^@/]+@)?|git@|ssh://([^@/]+@)?)github\.com[:/]+'
+  [[ "$url" =~ $host_pattern ]] || return 1
+  slug="${url%.git}"
+  slug="${slug#*github.com}"
+  slug="${slug#"${slug%%[^:/]*}"}"
+  [[ "$slug" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || return 1
+  printf '%s\n' "$slug"
+}
+
+# _gh_run_view <repo_dir> <run_id> <json_fields>
+#
+# Queries a workflow run bound to <repo_dir>, the worker's recorded worktree.
+# On success sets _GH_JSON and returns 0.  On failure sets _GH_ERROR to the
+# sanitised gh diagnostic and returns 1, so an unresolvable repository, an auth
+# failure, and a genuinely pending run stay distinguishable.
+_gh_run_view() {
+  local repo_dir="$1" run_id="$2" fields="$3" rc=0 slug work out err
+  local -a args
+  _GH_JSON=""
+  _GH_ERROR=""
+  args=(run view "$run_id" --json "$fields")
+  slug="$(_gh_repo_slug "$repo_dir" || true)"
+  [[ -z "$slug" ]] || args+=(--repo "$slug")
+
+  if ! work="$(mktemp -d)"; then
+    _GH_ERROR="cannot create a temporary directory for the gh query"
+    return 1
+  fi
+  out="$work/stdout"
+  err="$work/stderr"
+  ( cd "$repo_dir" && gh "${args[@]}" ) >"$out" 2>"$err" || rc=$?
+  _GH_JSON="$(cat "$out" 2>/dev/null || true)"
+  # Collapse the diagnostic to one sanitised, bounded line — it is persisted to
+  # fleet state, so it must never carry newlines or unbounded output.
+  _GH_ERROR="$(tr -c '[:print:]' ' ' < "$err" 2>/dev/null | \
+    sed -e 's/  */ /g' -e 's/^ //' -e 's/ $//' | cut -c1-300)"
+  rm -rf "$work"
+
+  if (( rc != 0 )); then
+    [[ -n "$_GH_ERROR" ]] || _GH_ERROR="gh exited $rc without a diagnostic"
+    return 1
+  fi
+  if [[ -z "$_GH_JSON" ]]; then
+    _GH_ERROR="gh returned empty output"
+    return 1
+  fi
+  return 0
+}
+
+# _gh_select_check <run_json> <check_name>
+#
+# Selects the checks (workflow-run jobs) whose name is exactly <check_name> and
+# publishes the outcome in _GH_RUN_STATUS, _GH_MATCH_COUNT, _GH_JOB_STATUS, and
+# _GH_JOB_CONCLUSION.  Returns 1 when the run JSON cannot be parsed, so an
+# unparseable response never masquerades as an absent or satisfied check.
+_gh_select_check() {
+  local run_json="$1" name="$2" parsed key value
+  _GH_RUN_STATUS=""
+  _GH_MATCH_COUNT=""
+  _GH_JOB_STATUS=""
+  _GH_JOB_CONCLUSION=""
+
+  parsed="$(printf '%s\n' "$run_json" | python3 -c '
+import json, sys
+
+name = sys.argv[1]
+data = json.load(sys.stdin)
+jobs = data.get("jobs") or []
+matches = [j for j in jobs if (j.get("name") or "") == name]
+print("run_status=%s" % (data.get("status") or ""))
+print("match_count=%d" % len(matches))
+if len(matches) == 1:
+    print("job_status=%s" % (matches[0].get("status") or ""))
+    print("job_conclusion=%s" % (matches[0].get("conclusion") or ""))
+' "$name" 2>/dev/null)" || return 1
+
+  while IFS='=' read -r key value; do
+    # GitHub-supplied values are only ever compared against literals and
+    # embedded in evidence text, but keep them constrained anyway.
+    [[ "$value" =~ ^[A-Za-z0-9_-]*$ ]] || return 1
+    case "$key" in
+      run_status)      _GH_RUN_STATUS="$value" ;;
+      match_count)     _GH_MATCH_COUNT="$value" ;;
+      job_status)      _GH_JOB_STATUS="$value" ;;
+      job_conclusion)  _GH_JOB_CONCLUSION="$value" ;;
+    esac
+  done <<< "$parsed"
+
+  [[ "$_GH_MATCH_COUNT" =~ ^[0-9]+$ ]] || return 1
+  return 0
+}
 
 case "$kind" in
 
   not_before)
-    not_before="${_COND[not_before]:-}"
+    not_before="$(_cond_get not_before)"
     if [[ -z "$not_before" || ! "$not_before" =~ ^[0-9]+$ ]]; then
       _result_error "not_before field missing or invalid"
     elif (( now >= not_before )); then
@@ -231,8 +409,8 @@ case "$kind" in
     ;;
 
   fleet_dependency)
-    dep_task="${_COND[task_id]:-}"
-    dep_repo="${_COND[repo]:-}"
+    dep_task="$(_cond_get task_id)"
+    dep_repo="$(_cond_get repo)"
     if [[ -z "$dep_task" || -z "$dep_repo" ]]; then
       _result_error "fleet_dependency requires task_id and repo fields"
     else
@@ -246,7 +424,7 @@ case "$kind" in
     ;;
 
   td_dependency)
-    td_task="${_COND[td_task_id]:-}"
+    td_task="$(_cond_get td_task_id)"
     if [[ -z "$td_task" ]]; then
       _result_error "td_dependency requires td_task_id field"
     elif ! command -v td >/dev/null 2>&1; then
@@ -268,31 +446,54 @@ case "$kind" in
     ;;
 
   github_check)
-    run_id="${_COND[run_id]:-}"
-    if [[ -z "$run_id" ]]; then
-      _result_error "github_check requires run_id field"
+    # The condition is met only when the ONE check named by check_name has
+    # concluded successfully.  Both run_id and check_name are required: without
+    # a selected check there is nothing to evaluate, and accepting any completed
+    # run would wake a worker on a failed check.
+    run_id="$(_cond_get run_id)"
+    check_name="$(_cond_get check_name)"
+    if [[ -z "$run_id" || ! "$run_id" =~ ^[0-9]+$ ]]; then
+      # A malformed condition cannot become well-formed by waiting.
+      _result_escalate "github_check requires a numeric run_id field; add it to .sergeant-wake-condition and resume with sgt-respond"
+    elif [[ -z "$check_name" ]]; then
+      # Conditions written before check_name was required land here: retrying
+      # would strand the worker in waiting forever, so escalate with the remedy.
+      _result_escalate "github_check requires a check_name field naming the exact check to wait for; add check_name=<name> to .sergeant-wake-condition and resume with sgt-respond"
     elif ! command -v gh >/dev/null 2>&1; then
       _result_error "gh CLI not available for github_check adapter"
+    elif ! command -v python3 >/dev/null 2>&1; then
+      _result_error "python3 not available for github_check adapter"
+    elif ! _gh_run_view "$worktree" "$run_id" status,conclusion,jobs; then
+      _result_error "gh run view failed for run_id=$run_id: $_GH_ERROR"
     else
-      gh_output="$(gh run view "$run_id" --json conclusion,status 2>/dev/null || true)"
-      if [[ -z "$gh_output" ]]; then
-        _result_error "gh run view returned empty output for run_id=$run_id"
+      if ! _gh_select_check "$_GH_JSON" "$check_name"; then
+        _result_error "could not parse gh run JSON for run_id=$run_id"
       else
-        gh_status="$(printf '%s\n' "$gh_output" | \
-          python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status',''))" \
-          2>/dev/null || true)"
-        gh_conclusion="$(printf '%s\n' "$gh_output" | \
-          python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('conclusion',''))" \
-          2>/dev/null || true)"
-        case "${gh_status:-}" in
-          completed)
-            _result_met "github_check completed: run_id=$run_id conclusion=$gh_conclusion"
+        case "$_GH_MATCH_COUNT" in
+          0)
+            if [[ "$_GH_RUN_STATUS" == "completed" ]]; then
+              # The run is finished, so the named check will never appear.
+              _result_escalate "github_check not found: no check named '$check_name' in completed run_id=$run_id; correct check_name or choose another run, then resume with sgt-respond"
+            else
+              # The run is still going; the named check may not have started.
+              _result_unmet
+            fi
             ;;
-          "")
-            _result_error "could not parse gh run status for run_id=$run_id"
+          1)
+            if [[ "$_GH_JOB_STATUS" != "completed" ]]; then
+              _result_unmet
+            elif [[ "$_GH_JOB_CONCLUSION" == "success" ]]; then
+              _result_met "github_check succeeded: run_id=$run_id check_name='$check_name' conclusion=success"
+            else
+              # A concluded non-success check can never become success, so this
+              # is terminal for the condition — escalate instead of retrying.
+              _result_escalate "github_check concluded '$_GH_JOB_CONCLUSION' (not success) for run_id=$run_id check_name='$check_name'; the wake condition can no longer be met"
+            fi
             ;;
           *)
-            _result_unmet
+            # Which of the duplicates gates the wake cannot be decided here, and
+            # the run's job names will not change.
+            _result_escalate "github_check ambiguous: $_GH_MATCH_COUNT checks named '$check_name' in run_id=$run_id; disambiguate check_name and resume with sgt-respond"
             ;;
         esac
       fi
@@ -326,6 +527,17 @@ case "$condition_result" in
       "Wake condition kind=$kind (generation=$generation) cannot be auto-evaluated; manual response required"
     printf 'sgt-wake: unsupported condition kind=%s for %s/%s\n' \
       "$kind" "$TASK_ID" "$REPO" >&2
+    exit 1
+    ;;
+
+  escalate:*)
+    escalate_reason="${condition_result#escalate:}"
+    _write_fleet_file "$REPO_DIR/diagnostic" \
+      "sgt-wake condition unsatisfiable: $escalate_reason (kind=$kind generation=$generation)"
+    _set_needs_input_state \
+      "Wake condition kind=$kind (generation=$generation) can no longer be met: $escalate_reason. Decide how to proceed and resume with sgt-respond."
+    printf 'sgt-wake: condition unsatisfiable for %s/%s: %s\n' \
+      "$TASK_ID" "$REPO" "$escalate_reason" >&2
     exit 1
     ;;
 

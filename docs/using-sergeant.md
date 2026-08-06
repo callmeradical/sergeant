@@ -153,14 +153,57 @@ sgt-wake <fleet-task-id> <repo>
 ```
 
 `sgt-wake` evaluates the condition and resumes the exact waiting worker through
-`sgt-respond` when the condition is met. Supported kinds are `not_before`,
-`github_check`, `fleet_dependency`, `td_dependency`, `deployment`, and
-`human_response`. Every condition requires `generation=<int>`. Optional fields
-are `deadline=<unix_timestamp>`, `max_attempts=<int>`, and
-`backoff_base=<seconds>`. `human_response` does not auto-resume; it converts the
-worker to `needs_input` so a human can reply with `sgt-respond`. `deployment`
-remains a declared condition kind, but today it also escalates to
-`needs_input` until an installation-specific deployment adapter is wired.
+`sgt-respond` when the condition is met. Every condition requires
+`generation=<int>`. Optional fields are `deadline=<unix_timestamp>`,
+`max_attempts=<int>`, and `backoff_base=<seconds>`.
+
+| Kind | Required fields | Resumes when |
+|---|---|---|
+| `not_before` | `not_before=<unix_timestamp>` | that timestamp has passed |
+| `github_check` | `run_id=<id>` and `check_name=<name>` | the check named `check_name` in that run concludes `success` |
+| `fleet_dependency` | `task_id=<id>` and `repo=<repo>` | that worker reaches `done` |
+| `td_dependency` | `td_task_id=<id>` | that td task is closed |
+| `deployment` | `app=<name>` and `env=<name>` | never auto-evaluated today |
+| `human_response` | — | never auto-evaluated |
+
+`github_check` requires **both** `run_id` and `check_name`, and resumes only
+when that exact check concludes successfully. `failure`, `cancelled`, `skipped`,
+`timed_out`, and every other non-success conclusion never resume the worker.
+`check_name` may contain spaces and the other characters real check names use,
+for example `check_name=build (ubuntu-latest, 3.11)`.
+
+A condition that can no longer be met converts the worker to `needs_input` with
+the remedy in `.sergeant-message` instead of retrying until its deadline. That
+covers a named check that concluded unsuccessfully, a check absent from a run
+that has already completed, an ambiguous duplicate check name, and a condition
+missing a required field. Conditions written before `check_name` became required
+therefore surface as `needs_input` asking for `check_name`, rather than waiting
+forever; add the field and resume with `sgt-respond`.
+
+`human_response` does not auto-resume; it converts the worker to `needs_input`
+so a human can reply with `sgt-respond`. `deployment` remains a declared
+condition kind, but today it also escalates to `needs_input` until an
+installation-specific deployment adapter is wired.
+
+## Pause admission with a drain
+
+```bash
+sgt-drain <project>|--global [--reason <text>] [--wait [--timeout <s>]]
+sgt-drain --status [<project>|--global]
+sgt-drain --undrain <project>|--global
+```
+
+A drain refuses new pane starts for the matching scope; responses are still
+stored generation-safely for later delivery. `--wait` activates the drain first
+and then waits for live workers in scope to finish their current turn and exit.
+On timeout it leaves the drain active, exits nonzero, and names the unresolved
+workers without terminating any of them. A worker is only treated as finished
+when its exit can be proven, so a worker whose identity was never recorded
+blocks the wait rather than being silently counted as drained.
+
+Tuning: `SERGEANT_DRAIN_WAIT_TIMEOUT_SECS` (default 300),
+`SERGEANT_DRAIN_WAIT_INTERVAL_SECS` (default 2), and
+`SERGEANT_DRAIN_LOCK_TIMEOUT_SECS` (default 10) for the admission lock.
 
 ## Respond to a worker
 

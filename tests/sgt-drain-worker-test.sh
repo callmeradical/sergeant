@@ -22,11 +22,35 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
+# ── Drain state isolation (MUST precede any drain helper call) ────────────────
+#
+# _sgt_drain_state_dir resolves SERGEANT_DRAIN_DIR, else SERGEANT_CONFIG/drain,
+# else $HOME/.config/sergeant/drain.  Without an override this suite wrote FOUR
+# real global drains into the live shared drain directory, and every interactive
+# worker of every coordinator that polled during one of those windows
+# cooperatively drained and died mid-mission.  Both variables are exported so
+# that any subprocess resolves the same temporary root regardless of which one
+# it consults.
+export SERGEANT_DRAIN_DIR="$TEST_ROOT/drain"
+export SERGEANT_CONFIG="$TEST_ROOT/config"
+mkdir -p "$SERGEANT_DRAIN_DIR" "$SERGEANT_CONFIG"
+
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
 # Source the drain library directly for drain-state manipulation
 # shellcheck disable=SC1091
 source "$ROOT_DIR/bin/_sgt-drain.sh"
+
+# Fail closed: prove the isolation actually took effect before writing anything.
+_resolved_drain_dir="$(_sgt_drain_state_dir)"
+case "$_resolved_drain_dir" in
+  "$TEST_ROOT"/*) : ;;
+  *)
+    printf 'FAIL: drain state dir resolved outside the test root: %s\n' \
+      "$_resolved_drain_dir" >&2
+    exit 1
+    ;;
+esac
 
 fake_td="$TEST_ROOT/fake-bin/td"
 mkdir -p "$TEST_ROOT/fake-bin"
