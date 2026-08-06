@@ -410,13 +410,18 @@ python3 scripts/gauntlet/adjudicate-dead-record.py --task <approved-task> \
   - `SERGEANT_CONFIG`, `SERGEANT_DRAIN_DIR`, callback and rescue roots;
   - fake `SERGEANT_SYSTEMCTL`, `SERGEANT_SYSTEMD_RUN`, `gh` and no-mistakes;
   - unique `SERGEANT_TMUX_SESSION` and bare git origin.
+- Required executable wrapper: `tests/factory-env-run <name> -- <command...>`
+  creates the substrate, runs an unchanged legacy test under the isolated
+  environment, tracks/kills its process group and sandbox tmux server, and
+  verifies host sentinels byte-identical afterward. This lets Phase -0A/-0B run
+  existing tests safely before Phase -1 edits those test files permanently.
 - Fixture origins use generated local paths with no credentials. The substrate
   refuses credential-bearing remote URLs and proves no secret appears in copied
   config, command output or artifacts.
 - New foundation files only:
   `tests/lib/factory-env.sh`, `tests/gauntlet/boundaries.txt`,
   `tests/factory-env-isolation-test.sh`, and
-  `tests/factory-env-boundaries-test.sh`. This phase intentionally does not
+  `tests/factory-env-boundaries-test.sh`, `tests/factory-env-run`. This phase intentionally does not
   migrate the 21 legacy tmux tests; Phase -1 does so after disposition.
 - Verification commands and expected outcomes:
 
@@ -425,6 +430,7 @@ tests/factory-env-isolation-test.sh
 tests/factory-env-isolation-test.sh --kill-tmux
 tests/factory-env-isolation-test.sh --two-coordinators
 tests/factory-env-boundaries-test.sh
+tests/factory-env-run validation-worker -- tests/sgt-validation-worker-test.sh
 # all PASS while real fleet/tmux/systemd/GitHub/no-mistakes sentinels remain
 # byte-identical before and after
 ```
@@ -501,6 +507,10 @@ python3 scripts/gauntlet/check-test-conformance.py --all-tmux-references
 tests/sgt-validate-capability-probe-test.sh
 # must PASS for shims with and without --intent-file support
 
+tests/factory-env-run validation-worker -- tests/sgt-validation-worker-test.sh
+# must PASS without changing ambient tmux sessions, fleet records, user-systemd
+# units, GitHub/no-mistakes state or process-leak baseline
+
 grep -R "command -v no-mistakes" bin/
 # must return zero; production resolves through SERGEANT_NO_MISTAKES
 
@@ -537,6 +547,8 @@ python3 scripts/gauntlet/reconcile-work.py --check-no-overlap-builders --phase -
   adopted Phase -2 substrate and canonical validation repair; all three are the
   minimum foundation required to execute the next phase and are reviewed as
   separate commits/critic artifacts on one stacked branch.
+- Native validation for this phase runs every tmux/process-touching legacy test
+  through `tests/factory-env-run`; a bare invocation is a phase failure.
 - End-to-end proof belongs to Phase -0B, after existing work has an owner map.
 - Evidence: installed no-mistakes lacks `--intent-file`; validation exits 1 and
   creates zero runs.
@@ -563,6 +575,10 @@ python3 scripts/gauntlet/reconcile-work.py --check-no-overlap-builders
 
 - Every shipped branch uses the repaired Phase -0A validation boundary. Every
   discard requires explicit human approval and a durable patch/branch anchor.
+- Every existing branch's tmux/process-touching tests run through
+  `tests/factory-env-run` until Phase -1 migrates the files. Before/after ambient
+  `tmux list-sessions`, real fleet hashes and leaked-process count must be
+  byte/count-identical; the sandbox itself must leave zero child processes.
 - After each merge, update the plan's current integration SHA and rerun overlap
   analysis; initial fixed point remains historical evidence.
 - Evidence baseline: critic round 4 counted 166 unpushed commits across 19
@@ -819,7 +835,7 @@ shellcheck bin/* tests/*.sh
   fourth. Reordered to inventory -> adopt/ship one canonical validation branch
   -> dispose all existing work -> build the substrate -> backlog work. Extended
   the no-overlap rule to every phase and corrected tmux-test counts to 21 files,
-  six kill-session calls across five files.
+  six kill-session calls across four files.
 - 2026-08-05: Critic round 7 found the repaired validation phase needed the
   substrate while the substrate was scheduled after validation/disposition.
   Split substrate creation from legacy-test migration: Phase -2 creates only new
@@ -884,6 +900,12 @@ shellcheck bin/* tests/*.sh
   temporary-index preservation commits; added unmerged-index capture. Corrected
   the auth baseline and now prove git transport plus GitHub API access before
   and after credential rotation.
+- 2026-08-05: Critic round 19 found Phase -0A/-0B still invoked ambient legacy
+  tests before Phase -1 migration; a leaked validation test session was live on
+  the judging server. Added Phase -2's `factory-env-run` wrapper so unchanged
+  legacy tests execute hermetically during bootstrap/disposition, with host
+  tmux/fleet/systemd/process baselines unchanged. Corrected kill-session count to
+  six calls across four files.
 
 ## Round log
 
@@ -1004,3 +1026,10 @@ shellcheck bin/* tests/*.sh
   access after revocation. Challenge accepted: exact index/patch archives,
   temporary-index commits, unmerged-stage capture, and pre/post git plus gh API
   proof. Evidence report: `.gauntlet/rounds/plan/18-critic.md`.
+- Round 19 critic: quality bar won. Bootstrap/disposition ran the exact ambient
+  validation/cleanup tests that previously leaked sessions and 249 fake agents;
+  permanent test migration was scheduled afterward. Challenge accepted: an
+  inert wrapper from Phase -2 runs unchanged legacy tests under the sandbox and
+  proves ambient session/fleet/process baselines unchanged; Phase -1 still makes
+  conformance permanent later. Evidence report:
+  `.gauntlet/rounds/plan/19-critic.md`.
