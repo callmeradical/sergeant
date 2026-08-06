@@ -1,0 +1,22 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "sergeant",
+  "version": "1.0.0",
+  "description": "An AI agent orchestration system for working across multi-repo projects, with specialized capabilities for cross-repo dispatch, wiki management, code review, and project-aware context loading.",
+  "author": {
+    "name": "Lars Cromley",
+    "url": "https://github.com/callmeradical"
+  },
+  "homepage": "https://github.com/callmeradical/sergeant",
+  "repository": "https://github.com/callmeradical/sergeant",
+  "license": "MIT",
+  "keywords": [
+    "agent",
+    "orchestration",
+    "multi-repo",
+    "dispatch",
+    "code-review",
+    "wiki",
+    "cross-repo"
+  ]
+}
