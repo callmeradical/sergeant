@@ -449,6 +449,10 @@ python3 scripts/gauntlet/adjudicate-dead-record.py --task <approved-task> \
 - `factory-env.sh`, `factory-env-run` and every new Gauntlet shell file are Bash
   3.2 compatible. The pinned Bash 3.2 image is authoritative; associative arrays,
   `mapfile`, `${var^^}` and other Bash-4-only syntax are prohibited.
+- Required Bash 3.2 toolchain artifact: `Dockerfile.bash32`, based on the exact
+  pinned `bash:3.2@sha256:3a13e5...` image and installing **without upgrading
+  bash**: git, tmux, python3, PyYAML, jq, curl, coreutils, findutils, util-linux
+  and openssh-client. The base provides `apk`; CI verifies every tool/version.
 - Required executable wrapper: `tests/factory-env-run <name> -- <command...>`
   creates the substrate, runs an unchanged legacy test under the isolated
   environment, tracks/kills its process group and sandbox tmux server, and
@@ -463,7 +467,7 @@ python3 scripts/gauntlet/adjudicate-dead-record.py --task <approved-task> \
   `tests/factory-env-boundaries-test.sh`, `tests/factory-env-run`,
   `tests/run-gauntlet-tests.sh`, `.gauntlet/shell-files.txt`,
   `.gauntlet/python-files.txt`, `.gauntlet/shellcheck-baseline.txt`, and
-  `.github/workflows/ci.yml`. This phase intentionally does not
+  `.github/workflows/ci.yml`, `Dockerfile.bash32`. This phase intentionally does not
   migrate the 21 legacy tmux tests; Phase -1 does so after disposition.
 - Verification commands and expected outcomes:
 
@@ -475,7 +479,7 @@ tests/factory-env-boundaries-test.sh
 tests/factory-env-run validation-worker -- tests/sgt-validation-worker-test.sh
 mise run test:docker:drain
 tests/run-gauntlet-tests.sh --docker-bash-3.2
-tests/factory-env-run wake-bash32 -- bash-3.2 tests/sgt-wake-test.sh
+tests/run-gauntlet-tests.sh --docker-bash-3.2 --test tests/sgt-wake-test.sh
 # all PASS while real fleet/tmux/systemd/GitHub/no-mistakes sentinels remain
 # byte-identical before and after
 ```
@@ -491,6 +495,12 @@ tests/factory-env-run wake-bash32 -- bash-3.2 tests/sgt-wake-test.sh
 - CI requirement: workflow runs ShellCheck, system-Bash tests, pinned Bash 3.2
   tests and native suites. No phase may claim CI green before that workflow
   exists and succeeds.
+- The Bash 3.2 runner builds `Dockerfile.bash32`, copies the repo into a
+  disposable writable directory/volume, and never mounts the real checkout
+  writable. It verifies `bash --version` is 3.2 and every required tool exists.
+  Consumers invoke the image's `bash`; no `bash-3.2` executable exists.
+- Bash 3.2 coverage includes every new Gauntlet shell file and every migrated
+  tmux test. Missing tools are fixed in the image, not used as exclusions.
 - ShellCheck bootstrap: Phase -2 records existing findings in
   `.gauntlet/shellcheck-baseline.txt` using `.gauntlet/shell-files.txt` (never
   `shellcheck bin/*`, which includes Python and directories). The inventory is
@@ -518,6 +528,9 @@ tests/factory-env-run wake-bash32 -- bash-3.2 tests/sgt-wake-test.sh
   receives the last-written value, producing plausible wrong wake decisions.
   Current Docker coverage runs only two of 42 tests under Bash 3.2 and omits
   `sgt-wake-test.sh`.
+- Environment evidence from critic round 27: the pinned base has Bash 3.2 and
+  flock but lacks git, tmux and python3; it has `/sbin/apk` (Alpine 3.22.5), so
+  the derived pinned toolchain image is feasible and Phase -2-owned.
 - Overlap gate before edits:
 
 ```bash
@@ -1113,6 +1126,10 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   Python executable and tracked `__pycache__`, guaranteeing exit 2 before code
   findings. Added authoritative shell/Python inventories, Python Ruff/compile
   gates, bytecode cleanup/ignore, and made every phase consume the same lists.
+- 2026-08-05: Critic round 27 found the pinned Bash 3.2 image lacked git, tmux
+  and Python and the plan invoked a nonexistent `bash-3.2` executable. Added a
+  Phase -2-owned derived toolchain image, writable disposable repo runner and
+  explicit wake/factory coverage under the image's real `bash`.
 - 2026-08-05: Critic round 25 found shipped `sgt-wake` silently misparses every
   condition under Bash 3.2, and Phase -2 had no product-fix authority. Granted
   one narrow parser repair with explicit merge order against the existing wake
@@ -1280,6 +1297,12 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   that glob. Challenge accepted: one tracked shell inventory for baseline/CI/
   terminal use, one Python inventory with Ruff/compile gates, and Phase -2-owned
   bytecode cleanup. Evidence report: `.gauntlet/rounds/plan/26-critic.md`.
+- Round 27 critic: quality bar won. The authoritative Bash 3.2 base lacked git,
+  tmux and Python, so wake/factory tests were unrunnable; the plan also named a
+  nonexistent binary. Challenge accepted: derived pinned toolchain image without
+  upgrading bash, writable disposable checkout, tool/version assertions, and
+  direct wake test through the runner. Evidence report:
+  `.gauntlet/rounds/plan/27-critic.md`.
 - Round 25 critic: quality bar won. `sgt-wake` used an associative array that
   silently collapsed all fields on Bash 3.2; existing 3.2 tests did not run wake.
   Full ShellCheck also could not pass and no phase owned the findings. Challenge
