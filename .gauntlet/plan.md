@@ -418,8 +418,9 @@ python3 scripts/gauntlet/adjudicate-dead-record.py --task <approved-task> \
 
 - Status: pending
 - Depends on: Phase -4, Phase -3.5
-- Builder scope: new test infrastructure files only; no existing test or
-  production lifecycle script changes
+- Builder scope: new test infrastructure files plus one narrowly scoped
+  bootstrap compatibility fix in `bin/sgt-wake`: replace its Bash-4 associative
+  condition map with a Bash-3.2-safe representation. No other product change.
 - Critic input: sandbox root, real-host sentinels, boundary inventory
 - Explicitly rejected substrate base:
   `feat/epic-durable-condition-evaluation-for-wa` adds a useful
@@ -430,6 +431,12 @@ python3 scripts/gauntlet/adjudicate-dead-record.py --task <approved-task> \
   ideas after disposition, not code before then.
 - `feat/epic-worker-lifecycle-and-supervision-in` likewise remains Phase -0B
   work; its edits to existing tests are not Phase -2 input.
+- Existing overlap/merge order:
+  `feat/epic-durable-condition-evaluation-for-wa` also edits `bin/sgt-wake` but
+  does **not** fix the associative array. Phase -3.5 transfers its dead owner;
+  `.gauntlet/existing-work.md` records that the Phase -2 compatibility commit
+  merges first and the durable-condition branch rebases later, preserving the
+  Bash-3.2 parser. No two live builders edit the file concurrently.
 - Required artifact: `tests/lib/factory-env.sh` exposes
   `factory_env_new <name>` and allocates:
   - one tmux socket strategy used by helper and production commands;
@@ -452,7 +459,8 @@ python3 scripts/gauntlet/adjudicate-dead-record.py --task <approved-task> \
   `tests/lib/factory-env.sh`, `tests/gauntlet/boundaries.txt`,
   `tests/factory-env-isolation-test.sh`, and
   `tests/factory-env-boundaries-test.sh`, `tests/factory-env-run`,
-  `tests/run-gauntlet-tests.sh`, and `.github/workflows/ci.yml`. This phase intentionally does not
+  `tests/run-gauntlet-tests.sh`, `.gauntlet/shellcheck-baseline.txt`, and
+  `.github/workflows/ci.yml`. This phase intentionally does not
   migrate the 21 legacy tmux tests; Phase -1 does so after disposition.
 - Verification commands and expected outcomes:
 
@@ -464,6 +472,7 @@ tests/factory-env-boundaries-test.sh
 tests/factory-env-run validation-worker -- tests/sgt-validation-worker-test.sh
 mise run test:docker:drain
 tests/run-gauntlet-tests.sh --docker-bash-3.2
+tests/factory-env-run wake-bash32 -- bash-3.2 tests/sgt-wake-test.sh
 # all PASS while real fleet/tmux/systemd/GitHub/no-mistakes sentinels remain
 # byte-identical before and after
 ```
@@ -473,9 +482,17 @@ tests/run-gauntlet-tests.sh --docker-bash-3.2
   boundary, then restore green.
 - Bash mutation: add `declare -A _fe_boundary` to `factory-env.sh`; the pinned
   Bash 3.2 run must FAIL naming that file/line, then restore green.
+- Product mutation: restore `declare -A _COND=()` in `bin/sgt-wake`; the pinned
+  Bash 3.2 wake test must FAIL on a named condition-field mismatch (not silently
+  pass with the last value copied into every field), then restore green.
 - CI requirement: workflow runs ShellCheck, system-Bash tests, pinned Bash 3.2
   tests and native suites. No phase may claim CI green before that workflow
   exists and succeeds.
+- ShellCheck bootstrap: Phase -2 records existing findings in
+  `.gauntlet/shellcheck-baseline.txt` using an explicit shell-file inventory
+  (never `shellcheck bin/*`, which includes Python and directories). CI fails on
+  any new finding. Phase 6.5 owns reducing the baseline to zero; Phase 8 requires
+  raw ShellCheck green with no baseline.
 - Remote mutation: inject a credential-bearing fixture URL; conformance must
   FAIL naming the remote without printing the credential. A third-party fork ref
   cannot become mergeable until its trust class changes with provenance evidence.
@@ -488,6 +505,11 @@ tests/run-gauntlet-tests.sh --docker-bash-3.2
   -S` or `TMUX_TMPDIR` on main. Two preserved branches contain non-separable
   product-plus-isolation work and remain Phase -0B-owned. Real default socket
   and 24 fleet records are live.
+- Bash evidence from critic round 25: `bin/sgt-wake:68` uses `declare -A _COND`.
+  Under pinned Bash 3.2 it does not fail; every field collapses to index 0 and
+  receives the last-written value, producing plausible wrong wake decisions.
+  Current Docker coverage runs only two of 42 tests under Bash 3.2 and omits
+  `sgt-wake-test.sh`.
 - Overlap gate before edits:
 
 ```bash
@@ -860,6 +882,8 @@ python3 scripts/gauntlet/inventory.py --check-wave-complete <wave>
 - Evidence: critic round 20 measured only 54 of 492 cards transitively owned by
   named phases; 438 lacked an execution phase.
 - Largest remaining gap: domain waves have not been generated
+- Shell quality wave must drive `.gauntlet/shellcheck-baseline.txt` to empty.
+  Phase 8 does not accept a "no new findings" baseline; it requires zero.
 - Wave completion is checked after the wave PR merges and its owning product card
   closes, by the next coordinator/critic. A builder never grades its own active
   card while it is `in_progress` or `in_review`.
@@ -1072,6 +1096,11 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   Only two of 42 test files had pinned Bash 3.2 coverage, and one was scheduled
   for migration. Phase -2 now owns CI and Bash-3.2-compatible substrate/test
   runners; Phases -1/7/8 rerun them; Bash-4 syntax mutation must fail.
+- 2026-08-05: Critic round 25 found shipped `sgt-wake` silently misparses every
+  condition under Bash 3.2, and Phase -2 had no product-fix authority. Granted
+  one narrow parser repair with explicit merge order against the existing wake
+  branch. Added pinned Bash 3.2 wake test and a committed ShellCheck baseline
+  that Phase 6.5 must burn to zero before Phase 8.
 
 ## Round log
 
@@ -1229,3 +1258,10 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   and pinned Bash 3.2 Gauntlet runner, coverage preserved through migration and
   final phases, and a Bash-4-only mutation that must fail. Evidence report:
   `.gauntlet/rounds/plan/24-critic.md`.
+- Round 25 critic: quality bar won. `sgt-wake` used an associative array that
+  silently collapsed all fields on Bash 3.2; existing 3.2 tests did not run wake.
+  Full ShellCheck also could not pass and no phase owned the findings. Challenge
+  accepted: narrow Phase -2 wake parser repair, mutation-proved Bash 3.2 wake
+  coverage, explicit merge order against the durable-condition branch, and a
+  no-new-findings baseline burned to zero by Phase 6.5. Evidence report:
+  `.gauntlet/rounds/plan/25-critic.md`.
