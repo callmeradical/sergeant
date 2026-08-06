@@ -9,14 +9,57 @@ source "$SCRIPT_DIR/_sgt-lib.sh"
 # shellcheck source=bin/_sgt-intent.sh
 source "$SCRIPT_DIR/_sgt-intent.sh"
 
-[[ $# -eq 2 || ( $# -eq 4 && "$3" == "--skip" ) ]] || \
-  _die "Usage: sgt-validate <task-id> <repo> [--skip <steps>]"
+_usage() {
+  _die "Usage: sgt-validate <task-id> <repo> [--skip <steps>] [--allow-argv-intent]
+       sgt-validate <task-id> <repo> --claim-ownership [--skip <steps>] [--allow-argv-intent]
+       sgt-validate <task-id> <repo> --release-ownership"
+}
 
+[[ $# -ge 2 ]] || _usage
 TASK_ID="$1"
 REPO="$2"
+shift 2
 # Native checks and independent review evidence are required before this boundary,
 # so the default medium profile avoids repeating review and documentation work.
-SKIP="${4-review,document}"
+SKIP="review,document"
+ALLOW_ARGV_INTENT=false
+CLAIM_OWNERSHIP=false
+RELEASE_OWNERSHIP=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --skip)
+      [[ $# -ge 2 ]] || _usage
+      SKIP="$2"
+      shift 2
+      ;;
+    # Consent gate for the argv intent transport. Deliberately a flag and not an
+    # environment variable: an exported variable would silently re-consent to
+    # exposing canonical intent in argv on every later run.
+    --allow-argv-intent)
+      ALLOW_ARGV_INTENT=true
+      shift
+      ;;
+    --claim-ownership)
+      CLAIM_OWNERSHIP=true
+      shift
+      ;;
+    --release-ownership)
+      RELEASE_OWNERSHIP=true
+      shift
+      ;;
+    *) _usage ;;
+  esac
+done
+! $RELEASE_OWNERSHIP || ! $CLAIM_OWNERSHIP || \
+  _die "--release-ownership and --claim-ownership are mutually exclusive"
+# Releasing ownership launches nothing, so accepting launch options would imply a
+# validation run that never happens.
+if $RELEASE_OWNERSHIP; then
+  [[ "$SKIP" == "review,document" ]] || \
+    _die "--release-ownership does not launch validation, so --skip does not apply"
+  ! $ALLOW_ARGV_INTENT || \
+    _die "--release-ownership does not launch validation, so --allow-argv-intent does not apply"
+fi
 [[ "$TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid task ID: $TASK_ID"
 [[ "$REPO" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid repo: $REPO"
 [[ -z "$SKIP" || "$SKIP" =~ ^[a-z]+(,[a-z]+)*$ ]] || _die "Invalid --skip list: $SKIP"
@@ -27,6 +70,166 @@ TASK_STATE="$FLEET_DIR/$TASK_ID"
 WORKTREE="$(cat "$REPO_STATE/worktree" 2>/dev/null || true)"
 PANE="$(cat "$REPO_STATE/pane" 2>/dev/null || true)"
 [[ -d "$WORKTREE" ]] || _die "Worker worktree unavailable"
+
+PRIMARY_PANE_ID_RECORD="$TASK_STATE/primary_pane_id"
+PRIMARY_PANE_IDENTITY_RECORD="$TASK_STATE/primary_pane_identity"
+PRIMARY_PANE_RELEASED_RECORD="$TASK_STATE/primary_pane_released"
+COORDINATOR_HANDOVER_LOG="$TASK_STATE/coordinator_handover.log"
+
+# Injection point for partial-publication tests.
+_validation_transition() {
+  [[ "${SGT_VALIDATE_FAIL_TRANSITION:-}" != "$1" ]]
+}
+# Prove this process really lives inside <pane-pid>'s process tree. A caller that
+# merely exports TMUX_PANE cannot satisfy this, which is what makes accepting an
+# ownership handover from a previously unseen pane safe.
+_coordinator_runs_in_pane() {
+  local target="$1" pid="$$" hops=0
+  [[ "$target" =~ ^[0-9]+$ ]] || return 1
+  while [[ "$hops" -lt 64 ]]; do
+    [[ "$pid" != "$target" ]] || return 0
+    [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || return 1
+    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+    hops=$((hops + 1))
+  done
+  return 1
+}
+# tmux prints empty fields for a pane ID it does not know, so an absent pane and
+# a dead pane are both rejected here.
+_pane_identity_is_live() {
+  local identity="$1" rest
+  [[ "${identity%%|*}" == "0" ]] || return 1
+  rest="${identity#*|}"
+  [[ -n "${rest%%|*}" ]]
+}
+_pane_identity_pid() {
+  local rest="${1#*|}"
+  rest="${rest#*|}"
+  printf '%s\n' "${rest%%|*}"
+}
+_recorded_coordinator_identity() {
+  local live="$1"
+  _sgt_read_owned_file "$PRIMARY_PANE_IDENTITY_RECORD" 2>/dev/null && return 0
+  [[ -n "$live" ]] || return 1
+  _sgt_read_matching_legacy_pane_identity "$PRIMARY_PANE_IDENTITY_RECORD" "$live" \
+    2>/dev/null
+}
+# Resolve validation ownership for this task, failing with a cause-specific
+# message. Sets CURRENT_PANE_IDENTITY, PRIMARY_PANE_ID, RECORDED_PRIMARY_IDENTITY,
+# PRIMARY_PANE_PRESENT (the recorded pane resolves to a live pane) and
+# PRIMARY_OWNER_IS_LIVE (that live pane is still the recorded owner).
+_resolve_coordinator_ownership() {
+  local live_identity recheck_identity current_recheck
+  [[ -n "${TMUX_PANE:-}" ]] || \
+    _die "Validation must run from a tmux coordinator pane," \
+      "but TMUX_PANE is not set"
+  CURRENT_PANE_IDENTITY="$(_sgt_pane_identity "$TMUX_PANE" 2>/dev/null || true)"
+  _pane_identity_is_live "$CURRENT_PANE_IDENTITY" || \
+    _die "Coordinator pane $TMUX_PANE is not a live tmux pane in this tmux server"
+  PRIMARY_PANE_ID="$(cat "$PRIMARY_PANE_ID_RECORD" 2>/dev/null || true)"
+  [[ -n "$PRIMARY_PANE_ID" ]] || \
+    _die "Dispatch did not record a coordinator pane for task $TASK_ID," \
+      "so validation ownership cannot be verified"
+  [[ "$PRIMARY_PANE_ID" =~ ^%[0-9]+$ ]] || \
+    _die "Recorded coordinator pane ID is malformed: $PRIMARY_PANE_ID"
+  live_identity="$(_sgt_pane_identity "$PRIMARY_PANE_ID" 2>/dev/null || true)"
+  RECORDED_PRIMARY_IDENTITY="$(_recorded_coordinator_identity "$live_identity" || true)"
+  if [[ -z "$RECORDED_PRIMARY_IDENTITY" ]]; then
+    if [[ -e "$PRIMARY_PANE_IDENTITY_RECORD" || -L "$PRIMARY_PANE_IDENTITY_RECORD" ]]; then
+      _die "Recorded coordinator pane identity is unreadable or unsafely owned:" \
+        "$PRIMARY_PANE_IDENTITY_RECORD"
+    fi
+    _die "A coordinator pane identity was never recorded for task $TASK_ID"
+  fi
+  # Read both panes again: a pane that is replaced while ownership is being
+  # verified must not be resolved from a stale first read.
+  recheck_identity="$(_sgt_pane_identity "$PRIMARY_PANE_ID" 2>/dev/null || true)"
+  current_recheck="$(_sgt_pane_identity "$TMUX_PANE" 2>/dev/null || true)"
+  [[ "$recheck_identity" == "$live_identity" && \
+    "$current_recheck" == "$CURRENT_PANE_IDENTITY" ]] || \
+    _die "Coordinator pane identity changed while ownership was being verified"
+  PRIMARY_PANE_PRESENT=false
+  PRIMARY_OWNER_IS_LIVE=false
+  if _pane_identity_is_live "$live_identity"; then
+    PRIMARY_PANE_PRESENT=true
+    [[ "$RECORDED_PRIMARY_IDENTITY" != "$live_identity" ]] || PRIMARY_OWNER_IS_LIVE=true
+  fi
+}
+# Append one line to an owner-only audit log, creating it privately when absent
+# and refusing a log this process cannot prove it owns. An audit trail that any
+# other user could have written or replaced is not evidence.
+_append_owned_audit_line() {
+  local path="$1" line="$2" mode
+  if [[ -e "$path" || -L "$path" ]]; then
+    [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
+    mode="$(_sgt_path_mode "$path")" || return 1
+    [[ "$mode" == "600" ]] || return 1
+  else
+    (umask 077; set -C; : > "$path") 2>/dev/null || return 1
+  fi
+  printf '%s\n' "$line" >> "$path"
+}
+_append_handover_record() {
+  local reason="$1" prior_pane="$2" prior_identity="$3" line
+  _validation_transition handover-audit || return 1
+  # Tab-separated so a pane_start_command containing spaces stays parseable.
+  printf -v line 'at=%s\treason=%s\trepo=%s\tprior_pane=%s\tnew_pane=%s' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason" "$REPO" "$prior_pane" "$TMUX_PANE"
+  printf -v line '%s\tprior_identity=%s\tnew_identity=%s' "$line" \
+    "$prior_identity" "$CURRENT_PANE_IDENTITY"
+  _append_owned_audit_line "$COORDINATOR_HANDOVER_LOG" "$line"
+}
+# Transfer ownership to this pane. Ordered so an interruption is recoverable: the
+# audit line is harmless on its own, and a half-published transfer still presents
+# the prior owner as gone, so repeating the claim completes it.
+_claim_coordinator_ownership() {
+  local reason released prior_pane="$PRIMARY_PANE_ID"
+  local prior_identity="$RECORDED_PRIMARY_IDENTITY"
+  _coordinator_runs_in_pane "$(_pane_identity_pid "$CURRENT_PANE_IDENTITY")" || \
+    _die "Claiming coordinator cannot prove it runs in pane $TMUX_PANE;" \
+      "run sgt-validate from inside the claiming pane"
+  released="$(_sgt_read_owned_file "$PRIMARY_PANE_RELEASED_RECORD" 2>/dev/null || true)"
+  if [[ -n "$released" && "$released" == "$RECORDED_PRIMARY_IDENTITY" ]]; then
+    reason="released-by-owner"
+  elif $PRIMARY_OWNER_IS_LIVE; then
+    _die "Refusing handover: dispatching coordinator pane $PRIMARY_PANE_ID" \
+      "is still live and has not released ownership"
+  elif $PRIMARY_PANE_PRESENT; then
+    reason="dispatching-pane-recycled"
+  else
+    reason="dispatching-pane-dead"
+  fi
+  _append_handover_record "$reason" "$prior_pane" "$prior_identity" || \
+    _die "Failed to record coordinator ownership handover"
+  _validation_transition handover-identity || \
+    _die "Failed to publish coordinator ownership identity"
+  _sgt_replace_owned_file "$PRIMARY_PANE_IDENTITY_RECORD" "$CURRENT_PANE_IDENTITY" || \
+    _die "Failed to publish coordinator ownership identity"
+  _validation_transition handover-pane-id || _die "Failed to publish coordinator ownership"
+  _sgt_replace_owned_file "$PRIMARY_PANE_ID_RECORD" "$TMUX_PANE" || \
+    _die "Failed to publish coordinator ownership"
+  rm -f "$PRIMARY_PANE_RELEASED_RECORD"
+  PRIMARY_PANE_ID="$TMUX_PANE"
+  RECORDED_PRIMARY_IDENTITY="$CURRENT_PANE_IDENTITY"
+  PRIMARY_OWNER_IS_LIVE=true
+  printf 'Coordinator ownership of %s transferred from %s to %s (%s).\n' \
+    "$TASK_ID" "$prior_pane" "$TMUX_PANE" "$reason"
+}
+
+# Releasing ownership is an ownership operation only: it never inspects worker
+# readiness and never launches a run.
+if $RELEASE_OWNERSHIP; then
+  _require_tmux
+  _resolve_coordinator_ownership
+  [[ "$TMUX_PANE" == "$PRIMARY_PANE_ID" && \
+    "$RECORDED_PRIMARY_IDENTITY" == "$CURRENT_PANE_IDENTITY" ]] || \
+    _die "Only the recorded coordinator pane can release ownership;" \
+      "task $TASK_ID is owned by $PRIMARY_PANE_ID"
+  _sgt_replace_owned_file "$PRIMARY_PANE_RELEASED_RECORD" "$RECORDED_PRIMARY_IDENTITY" || \
+    _die "Failed to record coordinator ownership release"
+  printf 'Coordinator ownership of %s released by pane %s.\n' "$TASK_ID" "$TMUX_PANE"
+  exit 0
+fi
 _sgt_intent_revision_matches "$TASK_STATE" "$REPO_STATE" "$WORKTREE" || \
   _die "canonical intent revision mismatch; audited human decision/new revision required"
 EXPECTED_REVISION="$(cat "$TASK_STATE/intent_revision")"
@@ -39,31 +242,70 @@ _ready_field() {
     END { if (count == 1 && value != "") print value; else exit 1 }
   ' "$file"
 }
-READY_INTENT="$(_ready_field intent_revision "$WORKTREE/.sergeant-validation-ready")" || \
-  _die "validation-ready marker has incomplete HEAD or review evidence"
-READY_HEAD="$(_ready_field head_sha "$WORKTREE/.sergeant-validation-ready")" || \
-  _die "validation-ready marker has incomplete HEAD or review evidence"
-STANDARDS_REVIEW="$(_ready_field standards_review "$WORKTREE/.sergeant-validation-ready")" || \
-  _die "validation-ready marker has incomplete HEAD or review evidence"
-SPEC_REVIEW="$(_ready_field spec_review "$WORKTREE/.sergeant-validation-ready")" || \
-  _die "validation-ready marker has incomplete HEAD or review evidence"
-READINESS_REVIEW="$(_ready_field readiness_review "$WORKTREE/.sergeant-validation-ready")" || \
-  _die "validation-ready marker has incomplete HEAD or review evidence"
+# Each missing field is its own precondition failure with its own remedy, so name
+# the field rather than reporting one message for five different causes.
+_require_ready_field() {
+  local key="$1" value
+  value="$(_ready_field "$key" "$WORKTREE/.sergeant-validation-ready")" || \
+    _die "validation-ready marker has no single non-empty $key value"
+  printf '%s\n' "$value"
+}
+READY_INTENT="$(_require_ready_field intent_revision)"
+READY_HEAD="$(_require_ready_field head_sha)"
+STANDARDS_REVIEW="$(_require_ready_field standards_review)"
+SPEC_REVIEW="$(_require_ready_field spec_review)"
+READINESS_REVIEW="$(_require_ready_field readiness_review)"
 CURRENT_HEAD="$(git -C "$WORKTREE" rev-parse HEAD 2>/dev/null || true)"
 [[ "$READY_INTENT" == "$EXPECTED_REVISION" ]] || \
   _die "validation-ready marker does not match the canonical intent revision"
-[[ "$READY_HEAD" == "$CURRENT_HEAD" && "$STANDARDS_REVIEW" == "passed" && \
-   "$SPEC_REVIEW" == "passed" && "$READINESS_REVIEW" == "passed" ]] || \
-  _die "validation-ready marker has stale HEAD or review evidence"
+[[ "$READY_HEAD" == "$CURRENT_HEAD" ]] || \
+  _die "validation-ready marker records a stale head_sha $READY_HEAD," \
+    "but the reviewed worktree is now at ${CURRENT_HEAD:-an unreadable HEAD}"
+for _REVIEW_AXIS in standards:"$STANDARDS_REVIEW" spec:"$SPEC_REVIEW" \
+  readiness:"$READINESS_REVIEW"; do
+  [[ "${_REVIEW_AXIS#*:}" == "passed" ]] || \
+    _die "validation-ready marker records ${_REVIEW_AXIS%%:*}_review=${_REVIEW_AXIS#*:}," \
+      "but validation requires passed"
+done
 _sgt_worktree_is_validation_clean "$WORKTREE" || \
   _die "Worker code tree must be clean before validation snapshot"
 _require_tmux
 command -v no-mistakes >/dev/null 2>&1 || _die "no-mistakes is required"
-PRIMARY_PANE_ID="$(cat "$TASK_STATE/primary_pane_id" 2>/dev/null || true)"
-[[ -n "${TMUX_PANE:-}" && "$TMUX_PANE" == "$PRIMARY_PANE_ID" ]] || \
-  _die "Current coordinator pane identity does not match dispatch ownership"
-_sgt_pane_identity_matches "$TMUX_PANE" "$TASK_STATE" primary_pane_identity || \
-  _die "Current coordinator pane identity does not match dispatch ownership"
+# Probe the intent transport before any validation run, marker, or state change
+# exists, so an incompatible no-mistakes build cannot record a failed run.
+set +e
+INTENT_TRANSPORT="$(_sgt_resolve_intent_transport "$ALLOW_ARGV_INTENT")"
+INTENT_TRANSPORT_STATUS=$?
+set -e
+[[ "$INTENT_TRANSPORT_STATUS" -eq 0 ]] || \
+  _die "$(_sgt_intent_transport_diagnostic "$INTENT_TRANSPORT_STATUS")"
+_resolve_coordinator_ownership
+if [[ "$TMUX_PANE" == "$PRIMARY_PANE_ID" ]]; then
+  if $PRIMARY_OWNER_IS_LIVE; then
+    # Resuming validation from the owning pane re-asserts ownership, so a pending
+    # release must not keep the task claimable behind the owner's back.
+    rm -f "$PRIMARY_PANE_RELEASED_RECORD" || \
+      _die "Failed to revoke the pending coordinator ownership release"
+  else
+    $CLAIM_OWNERSHIP || \
+      _die "Dispatching coordinator pane $PRIMARY_PANE_ID was recycled and its" \
+        "recorded identity no longer matches; claim it with --claim-ownership"
+    _claim_coordinator_ownership
+  fi
+elif $CLAIM_OWNERSHIP; then
+  _claim_coordinator_ownership
+elif $PRIMARY_OWNER_IS_LIVE; then
+  _die "Coordinator pane $TMUX_PANE does not own task $TASK_ID and dispatching" \
+    "pane $PRIMARY_PANE_ID is still live; validate from it, or release it there" \
+    "with --release-ownership"
+elif $PRIMARY_PANE_PRESENT; then
+  _die "Coordinator pane $TMUX_PANE does not own task $TASK_ID and pane" \
+    "$PRIMARY_PANE_ID is live but no longer matches the dispatch record, so the" \
+    "dispatching coordinator is gone; claim it with --claim-ownership"
+else
+  _die "Coordinator pane $TMUX_PANE does not own task $TASK_ID and dispatching" \
+    "pane $PRIMARY_PANE_ID is gone; claim it with --claim-ownership"
+fi
 _WORKER_STATUS="$(cat "$REPO_STATE/status" 2>/dev/null || true)"
 # A done or needs_input worker has exited cleanly; its pane will be dead.
 # Allow validation to proceed without requiring a live pane for terminal workers.
@@ -87,6 +329,10 @@ VALIDATION_WORKTREE_GIT_IDENTITY_RECORD="$REPO_STATE/validation_worktree_git_ide
 VALIDATION_WORKTREE_OWNER_RECORD="$REPO_STATE/validation_worktree_owner"
 VALIDATION_WORKTREE_RECORD_TEMP="${VALIDATION_WORKTREE_RECORD}.tmp.$$"
 VALIDATION_INTENT="$REPO_STATE/validation-intent.md"
+VALIDATION_INTENT_TRANSPORT_RECORD="$REPO_STATE/validation_intent_transport"
+# The per-run record above is cleared by a retry reset. This append-only log keeps
+# the privacy-relevant transport decision auditable across retries.
+VALIDATION_TRANSPORT_LOG="$REPO_STATE/validation_transport.log"
 VALIDATION_INTENT_TEMP="${VALIDATION_INTENT}.tmp.$$"
 VALIDATION_RELEASE_TEMP="$REPO_STATE/validation-release.tmp"
 VALIDATION_RELEASE_OWNER="$REPO_STATE/validation-release-owner"
@@ -137,9 +383,6 @@ _validation_legacy_checkout_matches() {
   git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
   [[ -n "$expected_head" && "$(git -C "$checkout" rev-parse HEAD 2>/dev/null || true)" == \
     "$expected_head" ]]
-}
-_validation_transition() {
-  [[ "${SGT_VALIDATE_FAIL_TRANSITION:-}" != "$1" ]]
 }
 
 VALIDATION_COMMITTED=false
@@ -456,6 +699,7 @@ _reset_retryable_validation_state() {
     "$VALIDATION_WORKTREE_RECORD" "$VALIDATION_WORKTREE_IDENTITY_RECORD" \
     "$VALIDATION_WORKTREE_GIT_DIR_RECORD" "$VALIDATION_WORKTREE_GIT_IDENTITY_RECORD" \
     "$VALIDATION_WORKTREE_OWNER_RECORD" "$REPO_STATE/validation_head" \
+    "$VALIDATION_INTENT_TRANSPORT_RECORD" \
     "$VALIDATION_CHILD_READY" "$VALIDATION_CHILD_ACCEPTED" "$VALIDATION_CHILD_COMMIT" \
     "$VALIDATION_CHILD_COMMITTED" "$VALIDATION_SUCCESS" "$VALIDATION_SUCCESS_ACK" || \
     _die "Failed to clear finished validation state for retry"
@@ -568,7 +812,7 @@ for path in "$VALIDATION_WORKTREE_RECORD" "$VALIDATION_WORKTREE_RECORD_TEMP" \
   "$VALIDATION_WORKTREE_GIT_IDENTITY_RECORD" "$VALIDATION_WORKTREE_OWNER_RECORD" \
   "$VALIDATION_INTENT" "$VALIDATION_INTENT_TEMP" "$REPO_STATE/validation_pane" \
   "$REPO_STATE/validation-release" "$VALIDATION_RELEASE_OWNER" \
-  "$REPO_STATE/validation_head" \
+  "$REPO_STATE/validation_head" "$VALIDATION_INTENT_TRANSPORT_RECORD" \
   "$REPO_STATE/validation_pane_identity" "$REPO_STATE/validation_pane_pid" \
   "$REPO_STATE/validation_process_group" "$REPO_STATE/validation_process_start" \
   "$REPO_STATE/validation_status" "$VALIDATION_RELEASE_TEMP" \
@@ -621,14 +865,23 @@ _validation_write_owned "$VALIDATION_WORKTREE_OWNER_RECORD" "$VALIDATION_OWNER" 
   worktree-owner || _die "Failed to publish validation checkout owner"
 _validation_write_owned "$REPO_STATE/validation_head" "$CURRENT_HEAD" \
   state-validation_head || _die "Failed to publish validation HEAD"
+# Durable audit of the intent transport actually used, so a consented argv run
+# stays visible after the fact.
+_validation_write_owned "$VALIDATION_INTENT_TRANSPORT_RECORD" "$INTENT_TRANSPORT" \
+  state-validation_intent_transport || \
+  _die "Failed to publish validation intent transport"
 _validation_transition intent-copy || _die "Failed to snapshot canonical validation intent"
 _validation_copy_owned "$WORKTREE/.sergeant-intent.md" "$VALIDATION_INTENT" intent || \
   _die "Failed to snapshot canonical validation intent"
 [[ "$(_sgt_intent_revision "$VALIDATION_INTENT")" == "$EXPECTED_REVISION" ]] || {
   _die "Validation intent snapshot revision mismatch"
 }
-printf -v VALIDATION_COMMAND '%q %q %q %q %s' \
-  "$SCRIPT_DIR/sgt-validation-worker" "$REPO_STATE" "$VALIDATION_WORKTREE" "$EXPECTED_REVISION" "$SKIP"
+# SKIP stays unquoted: printf %q escapes a comma (brace-expansion special), and
+# the recorded pane_start_command is compared literally. SKIP is already
+# constrained to ^[a-z]+(,[a-z]+)*$, and an empty SKIP simply omits the argument.
+printf -v VALIDATION_COMMAND '%q %q %q %q %q %s' \
+  "$SCRIPT_DIR/sgt-validation-worker" "$REPO_STATE" "$VALIDATION_WORKTREE" \
+  "$EXPECTED_REVISION" "$INTENT_TRANSPORT" "$SKIP"
 PANE_FORMAT='#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}'
 PANE_SNAPSHOT="$(tmux list-panes -t "$PANE" -F "$PANE_FORMAT" 2>/dev/null || true)"
 set +e
@@ -733,5 +986,13 @@ _wait_validation_handshake "$VALIDATION_SUCCESS_ACK" "$VALIDATION_HANDSHAKE" || 
 [[ "$(_validation_current_pane_identity "$VALIDATION_PANE" || true)" == \
   "$VALIDATION_IDENTITY" ]] || _die "Validation child exited before success publication"
 rm -f "$WINDOW_BACKUP" "$STAGE_BACKUP"
+# Recorded as the last publication step: the log is append-only, so a failure here
+# still rolls the launch back and may leave the line behind. Over-recording an
+# intent-transport decision is the conservative direction for a privacy audit.
+printf -v TRANSPORT_AUDIT_LINE 'at=%s\ttransport=%s\trepo=%s\thead=%s\tintent_revision=%s' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$INTENT_TRANSPORT" "$REPO" "$CURRENT_HEAD" \
+  "$EXPECTED_REVISION"
+_append_owned_audit_line "$VALIDATION_TRANSPORT_LOG" "$TRANSPORT_AUDIT_LINE" || \
+  _die "Failed to record the validation intent transport audit"
 VALIDATION_COMMITTED=true
 printf 'Validation launched in pane %s beside worker %s.\n' "$VALIDATION_PANE" "$PANE"

@@ -48,8 +48,27 @@ spec_review=passed
 readiness_review=passed
 EOF
 
+# Stub no-mistakes advertising the same axi run flag surface as a real build.
+# NO_MISTAKES_NO_INTENT_FILE=1 drops --intent-file to emulate an installed build
+# without the private intent transport.
 cat > "$fake_bin/no-mistakes" <<'EOF'
 #!/usr/bin/env bash
+case "$1" in
+  --version|-v)
+    printf 'no-mistakes version %s\n' "${NO_MISTAKES_FAKE_VERSION:-v9.9.9 (stub)}"
+    exit 0
+    ;;
+esac
+if [[ "$*" == *'axi run --help'* ]]; then
+  printf '  -h, --help            help for run\n'
+  printf '      --intent string   what the user set out to accomplish\n'
+  if [[ "${NO_MISTAKES_NO_INTENT_FILE:-}" != "1" ]]; then
+    printf '      --intent-file string   read the intent from a file instead of argv\n'
+  fi
+  printf '      --skip string     comma-separated pipeline steps to skip\n'
+  printf '  -y, --yes             auto-resolve every gate\n'
+  exit 0
+fi
 exit 0
 EOF
 chmod +x "$fake_bin/no-mistakes"
@@ -90,7 +109,32 @@ case "$1" in
             : > "$CONCURRENT_DIR/pane-identity-captured"
         fi
         ;;
-      *'%11'*) printf '0|%%11|1111|111111|coordinator-command\n' ;;
+      *'%11'*)
+        if [[ -n "${PRIMARY_PANE_FLIP:-}" ]]; then
+          count=0
+          [[ ! -f "$CONCURRENT_DIR/primary-reads" ]] || \
+            count="$(cat "$CONCURRENT_DIR/primary-reads")"
+          count=$((count + 1))
+          printf '%s\n' "$count" > "$CONCURRENT_DIR/primary-reads"
+          if [[ "$count" -ge "$PRIMARY_PANE_FLIP" ]]; then
+            printf '0|%%11|9911|991111|flipped-command\n'
+            exit 0
+          fi
+        fi
+        case "${PRIMARY_PANE_STATE:-live}" in
+          dead) printf '1|%%11|1111|111111|coordinator-command\n' ;;
+          gone) printf '||||\n' ;;
+          recycled) printf '0|%%11|5151|515151|unrelated-command\n' ;;
+          *) printf '0|%%11|1111|111111|coordinator-command\n' ;;
+        esac
+        ;;
+      # %12 is a claiming coordinator pane whose pane_pid really is an ancestor
+      # of sgt-validate, so pane residency can be proven.
+      *'%12'*) printf '0|%%12|%s|121212|claim-coordinator-command\n' "$CLAIM_PANE_PID" ;;
+      # %13 sets TMUX_PANE without running inside that pane.
+      *'%13'*) printf '0|%%13|999999|131313|forged-coordinator-command\n' ;;
+      # %99 does not exist; tmux prints empty fields for an unknown pane ID.
+      *'%99'*) printf '||||\n' ;;
       *) printf '0|%%42|4242|123456|worker-command\n' ;;
     esac
     fi
@@ -131,6 +175,7 @@ chmod +x "$fake_bin/tmux"
 cat > "$fake_bin/ps" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
+  *'ppid='*) exec "$REAL_PS" "$@" ;;
   *'pgid='*)
     [[ "${FAIL_TRANSITION:-}" != "pane-pgid" && \
       "${FAIL_TRANSITION:-}" != "pane-reuse" ]] || exit 7
@@ -161,6 +206,10 @@ export REAL_RM="$real_rm"
 export REAL_CHMOD="$real_chmod"
 export REAL_STAT="$real_stat"
 export REAL_SHASUM="$real_shasum" VALIDATION_PATH="$validation_path"
+export REAL_PS="$(command -v ps)"
+# sgt-validate runs as a child of this test, so this PID is a real ancestor and
+# stands in for the claiming coordinator pane's pane_pid.
+export CLAIM_PANE_PID="$$"
 export CONCURRENT_DIR="$concurrent_dir" TEST_REPO_STATE="$repo_state"
 printf '%s\n' "$revision" > "$concurrent_dir/revision"
 
@@ -423,7 +472,7 @@ rm "$repo_state/validation_pane" "$repo_state/validation_pane_identity" \
   "$repo_state/validation_status" "$repo_state/validation_worktree" \
   "$repo_state/validation_worktree_identity" "$repo_state/validation_worktree_git_dir" \
   "$repo_state/validation_worktree_git_identity" "$repo_state/validation_worktree_owner" \
-  "$repo_state/validation_head"
+  "$repo_state/validation_head" "$repo_state/validation_intent_transport"
 rm -rf "$validation_worktree"
 printf 'implementation-app-task-1\n' > "$repo_state/window_name"
 printf 'implementation\n' > "$repo_state/stage"
@@ -442,7 +491,8 @@ cleanup_validation_state() {
     "$repo_state/validation_status" \
     "$repo_state/validation_worktree" "$repo_state/validation_worktree_identity" \
     "$repo_state/validation_worktree_git_dir" "$repo_state/validation_worktree_git_identity" \
-    "$repo_state/validation_worktree_owner" "$repo_state/validation_head"
+    "$repo_state/validation_worktree_owner" "$repo_state/validation_head" \
+    "$repo_state/validation_intent_transport"
   [[ -z "$launched_worktree" ]] || rm -rf "$launched_worktree"
   printf 'implementation-app-task-1\n' > "$repo_state/window_name"
   printf 'implementation\n' > "$repo_state/stage"
@@ -502,7 +552,7 @@ assert_failed_launch_rolls_back_and_retries() {
     validation-success validation-success-ack \
     validation_status validation_worktree validation_worktree_identity \
     validation_worktree_git_dir validation_worktree_git_identity validation_worktree_owner \
-    validation_head \
+    validation_head validation_intent_transport \
     validation-launch.lock; do
     [[ ! -e "$repo_state/$path" ]] || {
       printf 'injected %s failure stranded %s: %s\n' "$transition" "$path" "$output" >&2
@@ -917,6 +967,108 @@ wait "$winner_pid"
 [[ "$(cat "$repo_state/validation_worktree")" == "$validation_path" ]]
 cleanup_validation_state
 
+# ── no-mistakes intent-transport capability probe ─────────────────────────────
+# An installed no-mistakes without --intent-file must fail closed BEFORE any
+# validation run, marker mutation, or state change, and the diagnostic must name
+# the required capability, the observed version, and the operator's options.
+before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  NO_MISTAKES_NO_INTENT_FILE=1 NO_MISTAKES_FAKE_VERSION='v1.41.2 (867d64d)' \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]] || {
+  printf 'missing --intent-file capability did not fail the launch\n' >&2
+  exit 1
+}
+for expected in 'private intent transport' '--intent-file' 'v1.41.2 (867d64d)' \
+  '--allow-argv-intent'; do
+  [[ "$output" == *"$expected"* ]] || {
+    printf 'capability diagnostic omitted %s: %s\n' "$expected" "$output" >&2
+    exit 1
+  }
+done
+[[ "$(wc -l < "$TEST_ROOT/tmux.log")" == "$before_lines" ]] || {
+  printf 'capability probe failure reached tmux\n' >&2
+  exit 1
+}
+for path in validation-launch.lock validation_worktree validation-intent.md \
+  validation_status validation_intent_transport; do
+  [[ ! -e "$repo_state/$path" ]] || {
+    printf 'capability probe failure mutated %s\n' "$path" >&2
+    exit 1
+  }
+done
+[[ ! -e "$validation_path" ]] || {
+  printf 'capability probe failure created a validation snapshot\n' >&2
+  exit 1
+}
+[[ "$(cat "$repo_state/stage")" == "implementation" ]]
+
+# The supported private transport is recorded for audit and keeps intent content
+# out of the launched argv.
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+[[ "$(cat "$repo_state/validation_intent_transport")" == "intent-file" ]] || {
+  printf 'supported transport was not recorded: %s\n' \
+    "$(cat "$repo_state/validation_intent_transport" 2>/dev/null || echo missing)" >&2
+  exit 1
+}
+grep -Fq 'intent-file' "$concurrent_dir/validation-command"
+if grep -Fq 'Validate the interactive worker safely' "$TEST_ROOT/tmux.log"; then
+  printf 'supported transport leaked intent content into argv\n' >&2
+  exit 1
+fi
+cleanup_validation_state
+
+# The argv fallback is consent-gated: it runs only when the operator passes
+# --allow-argv-intent, and the privacy tradeoff is recorded in fleet state.
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  NO_MISTAKES_NO_INTENT_FILE=1 \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --allow-argv-intent >/dev/null
+[[ "$(cat "$repo_state/validation_intent_transport")" == "argv" ]] || {
+  printf 'consented argv transport was not recorded: %s\n' \
+    "$(cat "$repo_state/validation_intent_transport" 2>/dev/null || echo missing)" >&2
+  exit 1
+}
+grep -Fq 'argv' "$concurrent_dir/validation-command"
+cleanup_validation_state
+
+# --allow-argv-intent must not downgrade a build that does support --intent-file.
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --allow-argv-intent >/dev/null
+[[ "$(cat "$repo_state/validation_intent_transport")" == "intent-file" ]] || {
+  printf 'consent flag downgraded a capable build\n' >&2
+  exit 1
+}
+cleanup_validation_state
+
+# --skip and --allow-argv-intent compose in either order, and an explicitly
+# empty --skip still requests the full pipeline.
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  NO_MISTAKES_NO_INTENT_FILE=1 \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --allow-argv-intent --skip lint >/dev/null
+grep -Fq 'lint' "$concurrent_dir/validation-command"
+if grep -Fq 'review,document' "$concurrent_dir/validation-command"; then
+  printf 'composed flags lost the explicit skip list\n' >&2
+  exit 1
+fi
+cleanup_validation_state
+
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --unknown-flag 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'Usage: sgt-validate'* ]]
+
 for dangling_path in "$validation_path" "$repo_state/validation_worktree" \
   "$repo_state/validation-intent.md" "$repo_state/validation_head" \
   "$repo_state/validation_pane" "$repo_state/validation_pane_identity" \
@@ -953,6 +1105,61 @@ set -e
 [[ ! -e "$validation_path" ]]
 rm "$repo_state/validation-intent.md"
 
+# Each absent marker field, and each unpassed review axis, reports its own cause.
+ready_messages=""
+for missing_field in intent_revision head_sha standards_review spec_review \
+  readiness_review; do
+  grep -v "^${missing_field}=" "$worktree/.sergeant-validation-ready" \
+    > "$TEST_ROOT/ready-partial"
+  cp "$TEST_ROOT/ready-partial" "$worktree/.sergeant-validation-ready"
+  set +e
+  output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+    TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -ne 0 && "$output" == *"no single non-empty $missing_field value"* ]] || {
+    printf 'missing %s did not report its own cause: %s\n' "$missing_field" "$output" >&2
+    exit 1
+  }
+  ready_messages="$ready_messages
+$output"
+  cat > "$worktree/.sergeant-validation-ready" <<EOF
+intent_revision=$revision
+head_sha=$head_sha
+standards_review=passed
+spec_review=passed
+readiness_review=passed
+EOF
+done
+for failed_axis in standards spec readiness; do
+  sed "s/^${failed_axis}_review=passed/${failed_axis}_review=blocked/" \
+    "$worktree/.sergeant-validation-ready" > "$TEST_ROOT/ready-axis"
+  cp "$TEST_ROOT/ready-axis" "$worktree/.sergeant-validation-ready"
+  set +e
+  output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+    TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -ne 0 && "$output" == *"${failed_axis}_review=blocked"* ]] || {
+    printf 'unpassed %s review did not report its own cause: %s\n' "$failed_axis" "$output" >&2
+    exit 1
+  }
+  ready_messages="$ready_messages
+$output"
+  cat > "$worktree/.sergeant-validation-ready" <<EOF
+intent_revision=$revision
+head_sha=$head_sha
+standards_review=passed
+spec_review=passed
+readiness_review=passed
+EOF
+done
+[[ "$(printf '%s\n' "$ready_messages" | grep -c .)" == \
+  "$(printf '%s\n' "$ready_messages" | grep . | sort -u | wc -l)" ]] || {
+  printf 'validation-ready diagnostics are not distinct\n' >&2
+  exit 1
+}
+
 rm "$worktree/.sergeant-validation-ready"
 before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
 set +e
@@ -970,14 +1177,297 @@ standards_review=passed
 spec_review=passed
 readiness_review=passed
 EOF
-before_lines="$(wc -l < "$TEST_ROOT/tmux.log")"
+# ── coordinator ownership: distinct diagnostics and verified handover ─────────
+# Each precondition failure must name its own cause, because each has a
+# different remedy. No failure may reach tmux or mutate ownership records.
+ownership_flags=()
+assert_ownership_failure() {
+  local expected="$1"
+  shift
+  local output status before_mutations before_id before_identity
+  # Ownership resolution legitimately reads tmux; it must never mutate it.
+  before_mutations="$(grep -Ec '^(split-window|new-window|rename-window|kill-pane)' \
+    "$TEST_ROOT/tmux.log" || true)"
+  before_id="$(cat "$fleet/task-1/primary_pane_id" 2>/dev/null || true)"
+  before_identity="$(cat "$fleet/task-1/primary_pane_identity" 2>/dev/null || true)"
+  set +e
+  output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+    SERGEANT_FLEET="$fleet" "$@" "$ROOT_DIR/bin/sgt-validate" task-1 app \
+    ${ownership_flags[@]+"${ownership_flags[@]}"} 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -ne 0 ]] || {
+    printf 'expected ownership failure %s but the launch succeeded\n' "$expected" >&2
+    exit 1
+  }
+  [[ "$output" == *"$expected"* ]] || {
+    printf 'expected ownership diagnostic %s, got: %s\n' "$expected" "$output" >&2
+    exit 1
+  }
+  [[ "$(grep -Ec '^(split-window|new-window|rename-window|kill-pane)' \
+    "$TEST_ROOT/tmux.log" || true)" == "$before_mutations" ]] || {
+    printf 'ownership failure %s mutated tmux\n' "$expected" >&2
+    exit 1
+  }
+  [[ "$(cat "$fleet/task-1/primary_pane_id" 2>/dev/null || true)" == "$before_id" && \
+    "$(cat "$fleet/task-1/primary_pane_identity" 2>/dev/null || true)" == \
+    "$before_identity" ]] || {
+    printf 'ownership failure %s mutated the ownership records\n' "$expected" >&2
+    exit 1
+  }
+  ownership_messages="$ownership_messages
+$expected"
+}
+ownership_messages=""
+
+assert_ownership_failure 'TMUX_PANE is not set' env -u TMUX_PANE
+assert_ownership_failure 'dispatching pane %11 is still live' env TMUX_PANE=%12
+assert_ownership_failure 'is gone; claim it with --claim-ownership' \
+  env TMUX_PANE=%12 PRIMARY_PANE_STATE=dead
+# A live dispatching pane whose identity no longer matches the dispatch record is
+# a recycled pane, not a live owner and not an absent pane.
+assert_ownership_failure 'no longer matches the dispatch record' \
+  env TMUX_PANE=%12 PRIMARY_PANE_STATE=recycled
+assert_ownership_failure 'was recycled' env TMUX_PANE=%11 PRIMARY_PANE_STATE=recycled
+
+mv "$fleet/task-1/primary_pane_id" "$TEST_ROOT/saved-primary-pane-id"
+assert_ownership_failure 'did not record a coordinator pane' env TMUX_PANE=%11
+printf 'not-a-pane\n' > "$fleet/task-1/primary_pane_id"
+assert_ownership_failure 'Recorded coordinator pane ID is malformed' env TMUX_PANE=%11
+mv "$TEST_ROOT/saved-primary-pane-id" "$fleet/task-1/primary_pane_id"
+
+mv "$fleet/task-1/primary_pane_identity" "$TEST_ROOT/saved-primary-identity"
+assert_ownership_failure 'coordinator pane identity was never recorded' env TMUX_PANE=%11
+printf 'unsafe\n' > "$fleet/task-1/primary_pane_identity"
+chmod 606 "$fleet/task-1/primary_pane_identity"
+assert_ownership_failure 'unreadable or unsafely owned' env TMUX_PANE=%11
+rm -f "$fleet/task-1/primary_pane_identity"
+mv "$TEST_ROOT/saved-primary-identity" "$fleet/task-1/primary_pane_identity"
+
+# A claim is refused while the dispatching pane is still live and unreleased, and
+# refused when the claimant cannot prove it runs in the pane it names - even
+# though the dispatching pane really is gone.
+ownership_flags=(--claim-ownership)
+assert_ownership_failure 'still live and has not released ownership' env TMUX_PANE=%12
+assert_ownership_failure 'cannot prove it runs in pane %13' \
+  env TMUX_PANE=%13 PRIMARY_PANE_STATE=gone
+assert_ownership_failure 'is not a live tmux pane' \
+  env TMUX_PANE=%99 PRIMARY_PANE_STATE=dead
+ownership_flags=()
+
+# Every diagnostic above must be distinct from every other.
+[[ "$(printf '%s\n' "$ownership_messages" | grep -c .)" == \
+  "$(printf '%s\n' "$ownership_messages" | grep . | sort -u | wc -l)" ]] || {
+  printf 'ownership diagnostics are not distinct\n' >&2
+  exit 1
+}
+
+# A verified claim over a dead dispatching pane transfers ownership, records the
+# transfer with both identities, and lets validation proceed.
+prior_identity="$(cat "$fleet/task-1/primary_pane_identity")"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%12 PRIMARY_PANE_STATE=dead SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --claim-ownership >/dev/null
+[[ "$(cat "$fleet/task-1/primary_pane_id")" == "%12" ]]
+[[ "$(cat "$fleet/task-1/primary_pane_identity")" == "0|%12|$CLAIM_PANE_PID|121212|claim-coordinator-command" ]]
+[[ "$(stat -c '%a' "$fleet/task-1/primary_pane_identity" 2>/dev/null || \
+  stat -f '%Lp' "$fleet/task-1/primary_pane_identity")" == "600" ]]
+handover_log="$fleet/task-1/coordinator_handover.log"
+[[ -f "$handover_log" ]]
+[[ "$(stat -c '%a' "$handover_log" 2>/dev/null || stat -f '%Lp' "$handover_log")" == "600" ]] || {
+  printf 'handover audit log is not owner-only\n' >&2
+  exit 1
+}
+grep -Fq "prior_pane=%11" "$handover_log"
+grep -Fq "prior_identity=$prior_identity" "$handover_log"
+grep -Fq "new_pane=%12" "$handover_log"
+grep -Fq "reason=dispatching-pane-dead" "$handover_log"
+[[ "$(cat "$repo_state/validation_status")" == "launched" ]]
+cleanup_validation_state
+
+# A recycled dispatching pane is claimable, and the audit names that reason.
+printf '%%11\n' > "$fleet/task-1/primary_pane_id"
+bash -c 'source "$1"; _sgt_replace_owned_file "$2" "$3"' _ "$ROOT_DIR/bin/_sgt-lib.sh" \
+  "$fleet/task-1/primary_pane_identity" '0|%11|1111|111111|coordinator-command'
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%12 PRIMARY_PANE_STATE=recycled SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --claim-ownership >/dev/null
+[[ "$(cat "$fleet/task-1/primary_pane_id")" == "%12" ]]
+grep -Fq 'reason=dispatching-pane-recycled' "$fleet/task-1/coordinator_handover.log"
+cleanup_validation_state
+
+# The new owner validates from its own pane without claiming again.
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%12 PRIMARY_PANE_STATE=dead SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+cleanup_validation_state
+[[ "$(wc -l < "$handover_log")" == "2" ]]
+
+# Restore %11 ownership for the release-path checks.
+printf '%%11\n' > "$fleet/task-1/primary_pane_id"
+bash -c 'source "$1"; _sgt_replace_owned_file "$2" "$3"' _ "$ROOT_DIR/bin/_sgt-lib.sh" \
+  "$fleet/task-1/primary_pane_identity" '0|%11|1111|111111|coordinator-command'
+
+# A live owner can hand over deliberately by releasing ownership first.
 set +e
 output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
-  TMUX_PANE=%12 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+  TMUX_PANE=%12 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --release-ownership 2>&1)"
 status=$?
 set -e
-[[ "$status" -ne 0 && "$output" == *'coordinator pane identity'* ]]
-[[ "$(wc -l < "$TEST_ROOT/tmux.log")" == "$before_lines" ]]
+[[ "$status" -ne 0 && "$output" == *'Only the recorded coordinator pane can release ownership'* ]]
+[[ ! -e "$fleet/task-1/primary_pane_released" ]]
+
+before_mutations="$(grep -Ec '^(split-window|new-window|rename-window|kill-pane)' \
+  "$TEST_ROOT/tmux.log" || true)"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --release-ownership >/dev/null
+[[ "$(cat "$fleet/task-1/primary_pane_released")" == "0|%11|1111|111111|coordinator-command" ]]
+[[ "$(grep -Ec '^(split-window|new-window|rename-window|kill-pane)' \
+  "$TEST_ROOT/tmux.log" || true)" == "$before_mutations" ]] || {
+  printf 'releasing ownership launched validation\n' >&2
+  exit 1
+}
+[[ ! -e "$repo_state/validation_status" ]]
+
+# The released owner is still live, and the claim now succeeds.
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%12 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --claim-ownership >/dev/null
+[[ "$(cat "$fleet/task-1/primary_pane_id")" == "%12" ]]
+grep -Fq 'reason=released-by-owner' "$handover_log"
+# The release is consumed, so a third pane cannot replay it.
+[[ ! -e "$fleet/task-1/primary_pane_released" ]]
+cleanup_validation_state
+
+# --claim-ownership and --release-ownership are mutually exclusive.
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%12 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --claim-ownership --release-ownership 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'mutually exclusive'* ]]
+
+# Releasing ownership launches nothing, so launch-only options are refused rather
+# than silently ignored.
+for release_conflict in --skip:lint --allow-argv-intent:; do
+  set +e
+  output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+    TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app \
+    --release-ownership "${release_conflict%%:*}" ${release_conflict#*:} 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -ne 0 && "$output" == *'does not launch validation'* ]] || {
+    printf '%s was silently ignored with --release-ownership: %s\n' \
+      "${release_conflict%%:*}" "$output" >&2
+    exit 1
+  }
+done
+
+# An interrupted handover leaves recoverable state: a later claim from the same
+# verified pane completes the transfer instead of stranding it.
+printf '%%11\n' > "$fleet/task-1/primary_pane_id"
+bash -c 'source "$1"; _sgt_replace_owned_file "$2" "$3"' _ "$ROOT_DIR/bin/_sgt-lib.sh" \
+  "$fleet/task-1/primary_pane_identity" '0|%11|1111|111111|coordinator-command'
+: > "$handover_log"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  SGT_VALIDATE_FAIL_TRANSITION=handover-pane-id \
+  TMUX_PANE=%12 PRIMARY_PANE_STATE=dead SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --claim-ownership 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'Failed to publish coordinator ownership'* ]]
+[[ "$(cat "$fleet/task-1/primary_pane_id")" == "%11" ]]
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%12 PRIMARY_PANE_STATE=dead SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --claim-ownership >/dev/null
+[[ "$(cat "$fleet/task-1/primary_pane_id")" == "%12" ]]
+cleanup_validation_state
+
+printf '%%11\n' > "$fleet/task-1/primary_pane_id"
+bash -c 'source "$1"; _sgt_replace_owned_file "$2" "$3"' _ "$ROOT_DIR/bin/_sgt-lib.sh" \
+  "$fleet/task-1/primary_pane_identity" '0|%11|1111|111111|coordinator-command'
+rm -f "$handover_log"
+
+# An audit log that is not owner-only cannot be trusted to record the transfer, so
+# the handover fails closed and the existing log is preserved untouched.
+printf 'preexisting-audit\n' > "$handover_log"
+chmod 644 "$handover_log"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%12 PRIMARY_PANE_STATE=dead SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --claim-ownership 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'Failed to record coordinator ownership handover'* ]]
+[[ "$(cat "$handover_log")" == "preexisting-audit" ]]
+[[ "$(cat "$fleet/task-1/primary_pane_id")" == "%11" ]]
+rm -f "$handover_log"
+
+# An owner that resumes validating revokes a pending release, so a later claim is
+# refused again.
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --release-ownership >/dev/null
+[[ -e "$fleet/task-1/primary_pane_released" ]]
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+[[ ! -e "$fleet/task-1/primary_pane_released" ]] || {
+  printf 'a resuming owner did not revoke its pending release\n' >&2
+  exit 1
+}
+cleanup_validation_state
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%12 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --claim-ownership 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'still live and has not released ownership'* ]]
+
+# The recorded coordinator identity must not change between the reads that verify
+# it; a pane replaced mid-verification is reported, not silently accepted.
+rm -f "$concurrent_dir/primary-reads"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  PRIMARY_PANE_FLIP=2 TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'changed while ownership was being verified'* ]] || {
+  printf 'a pane replaced mid-verification was not reported: %s\n' "$output" >&2
+  exit 1
+}
+rm -f "$concurrent_dir/primary-reads"
+
+# The durable transport audit survives a retry reset, which clears the per-run
+# transport record.
+transport_log="$repo_state/validation_transport.log"
+rm -f "$transport_log"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  NO_MISTAKES_NO_INTENT_FILE=1 TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app --allow-argv-intent >/dev/null
+grep -Fq 'transport=argv' "$transport_log"
+grep -Fq "head=$head_sha" "$transport_log"
+[[ "$(stat -c '%a' "$transport_log" 2>/dev/null || stat -f '%Lp' "$transport_log")" == "600" ]]
+printf 'exited:0\n' > "$repo_state/validation_status"
+rm -f "$concurrent_dir/pane-live"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+[[ "$(wc -l < "$transport_log")" == "2" ]] || {
+  printf 'the durable transport audit did not survive the retry reset: %s\n' \
+    "$(cat "$transport_log")" >&2
+  exit 1
+}
+grep -Fq 'transport=argv' "$transport_log"
+grep -Fq 'transport=intent-file' "$transport_log"
+cleanup_validation_state
+rm -f "$transport_log"
 
 cat > "$worktree/.sergeant-validation-ready" <<EOF
 intent_revision=$revision
@@ -992,7 +1482,7 @@ output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
 status=$?
 set -e
-[[ "$status" -ne 0 && "$output" == *'HEAD or review evidence'* ]]
+[[ "$status" -ne 0 && "$output" == *'records a stale head_sha'* ]]
 [[ "$(wc -l < "$TEST_ROOT/tmux.log")" == "$before_lines" ]]
 
 cat > "$worktree/.sergeant-validation-ready" <<EOF
