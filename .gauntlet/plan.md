@@ -434,11 +434,19 @@ python3 scripts/gauntlet/adjudicate-dead-record.py --task <approved-task> \
 - `feat/epic-worker-lifecycle-and-supervision-in` likewise remains Phase -0B
   work; its edits to existing tests are not Phase -2 input.
 - Existing overlap/merge order:
-  `feat/epic-durable-condition-evaluation-for-wa` also edits `bin/sgt-wake` but
-  does **not** fix the associative array. Phase -3.5 transfers its dead owner;
-  `.gauntlet/existing-work.md` records that the Phase -2 compatibility commit
-  merges first and the durable-condition branch rebases later, preserving the
-  Bash-3.2 parser. No two live builders edit the file concurrently.
+  Phase -3 inventory must include every ref touching Phase -2 product paths.
+  Baseline at critic round 28:
+  - `feat/epic-durable-condition-evaluation-for-wa` edits `bin/sgt-wake`;
+  - `feat/replace-agent-sleeps-with-durable-wake-c` edits `bin/sgt-wake`;
+  - `origin/fix/sgt-cleanup-rejecting-orphaned-worke` edits `bin/sgt-wake`;
+  - `feat/add-cross-platform-sergeant-developer-bo` edits `.gitignore`.
+  Two also edit `tests/sgt-wake-test.sh`, the Phase -2 mutation seam.
+- Phase -3.5 transfers every dead/nonterminal owner in this overlap set; Phase -3
+  assigns owner/provenance for remote-only refs. Only when one coordinator owns
+  the whole set may Phase -2 edit. `.gauntlet/existing-work.md` records that the
+  narrow Phase -2 compatibility/hygiene commit merges first; each existing
+  product branch rebases later and must preserve it. No two live builders edit
+  the paths concurrently, and no ref is discarded before Phase -0B.
 - Required artifact: `tests/lib/factory-env.sh` exposes
   `factory_env_new <name>` and allocates:
   - one tmux socket strategy used by helper and production commands;
@@ -535,9 +543,9 @@ tests/run-gauntlet-tests.sh --docker-bash-3.2 --test tests/sgt-wake-test.sh
 
 ```bash
 python3 scripts/gauntlet/reconcile-work.py --check-no-overlap-builders --phase -2
-# must PASS because every Phase -2 path is new and no existing branch edits it.
-# Existing isolation-themed branches remain Phase -0B-owned; conceptual
-# similarity is not file/state overlap.
+# must initially FAIL naming all four refs above, then PASS only after each has a
+# valid exact owner handover/provenance row and the one-coordinator merge order
+# is durable. This is ownership transfer, not final branch disposition.
 ```
 - Largest remaining gap: inert substrate does not exist
 
@@ -1130,6 +1138,10 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   and Python and the plan invoked a nonexistent `bash-3.2` executable. Added a
   Phase -2-owned derived toolchain image, writable disposable repo runner and
   explicit wake/factory coverage under the image's real `bash`.
+- 2026-08-05: Critic round 28 found Phase -2's `sgt-wake`/`.gitignore` edits
+  overlapped four refs, while its gate incorrectly asserted no overlap. Expanded
+  the overlap set, require exact owner transfer/provenance before edits, and made
+  the gate fail-then-pass under one coordinator with a recorded merge order.
 - 2026-08-05: Critic round 25 found shipped `sgt-wake` silently misparses every
   condition under Bash 3.2, and Phase -2 had no product-fix authority. Granted
   one narrow parser repair with explicit merge order against the existing wake
@@ -1303,6 +1315,12 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   upgrading bash, writable disposable checkout, tool/version assertions, and
   direct wake test through the runner. Evidence report:
   `.gauntlet/rounds/plan/27-critic.md`.
+- Round 28 critic: quality bar won. Phase -2 claimed its paths were new while
+  three refs edited `sgt-wake` and one edited `.gitignore`, creating a hidden
+  dependency on Phase -0B. Challenge accepted: enumerate all overlaps, transfer
+  exact ownership first, record one-coordinator merge order, and require the
+  overlap gate to fail then pass before Phase -2 edits. Evidence report:
+  `.gauntlet/rounds/plan/28-critic.md`.
 - Round 25 critic: quality bar won. `sgt-wake` used an associative array that
   silently collapsed all fields on Bash 3.2; existing 3.2 tests did not run wake.
   Full ShellCheck also could not pass and no phase owned the findings. Challenge
