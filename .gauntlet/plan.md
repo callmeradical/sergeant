@@ -253,6 +253,10 @@ python3 scripts/gauntlet/reconcile-work.py --check-fleet-owner-reconciled
 - It **does not** rewrite `status`; every historical status remains unchanged.
   The marker transfers coordinator ownership only. A real blocker or decision
   remains blocked after handover. Phase -0B still owns final branch disposition.
+- Phase -3.5 has preservation-only authority before handover. It may create an
+  anchored `refs/gauntlet/preserve/<task-id>` and a content-addressed rescue
+  artifact; it may not checkout/reset, modify the worker index/worktree, commit
+  onto the worker branch, delete files or stash-pop.
 - Real fleet safety: dry-run opens real fleet files read-only; mutation tests
   require `--fleet-root <temporary-copy>` and refuse paths under
   `$HOME/.local/share/sergeant`; `--apply` writes only a new handover marker via
@@ -275,14 +279,38 @@ python3 scripts/gauntlet/adjudicate-dead-record.py \
 # individually approved from the dry-run
 ```
 
+- Dirty worktree quarantine:
+  - `.sergeant-*` runtime/evidence files are not product dirt; include their
+    file list/hashes in evidence but do not let them block handover.
+  - tracked/index modifications are captured without changing the worktree:
+    `git stash create`, followed by
+    `git update-ref refs/gauntlet/preserve/<task-id> <oid>`. Verify the ref.
+  - untracked non-runtime files are archived under the rescue root with sorted
+    file list, modes and sha256. Verify the archive before handover.
+  - after capture, the tree may remain dirty and is classified
+    `dirty-preserved`; the new owner restores/reviews preservation artifacts
+    before adopting the branch.
+
+```bash
+python3 scripts/gauntlet/adjudicate-dead-record.py --task <approved-task> \
+  --expected-pane-identity '<identity>' --handover-to "$TMUX_PANE" \
+  --quarantine --apply
+# prints preservation ref, untracked archive digest and handover digest; git
+# status must be byte-identical before/after
+```
+
 - Fail closed if: status is terminal; expected identity differs; pane/process is
-  live; worktree is dirty; branch/head changed after dry-run; td/PR state is
+  live; product dirt exists but quarantine was not requested/verified;
+  branch/head changed after dry-run; td/PR state is
   ambiguous; a newer handover exists; or target coordinator cannot be proved
   live.
 - Mutation proof on fixture only: use a PATH-injected fake tmux command that
   reports one synthetic foreign pane as live, replace the copied dead record's
   pane id with it while keeping the old process start, and require adjudication
   to FAIL as reused. Do not start or kill any ambient pane.
+- Preservation mutation on fixture: make the stash oid unanchored, corrupt one
+  archive byte, or change git status after capture; each must FAIL before
+  handover, then restore fixture green.
 - Human gate: show the complete dry-run table before `--apply`. The user
   approves exact task ids/identities individually, never a blanket transfer.
 - Later ownership work (Phase 2/td-af6916) productizes this behavior; the
@@ -291,6 +319,10 @@ python3 scripts/gauntlet/adjudicate-dead-record.py \
   nonterminal Sergeant records owning phase work, including durable-condition,
   validation, worker-lifecycle, cleanup, dispatch, review-routing, fleet-global
   and harness branches. No supported command transfers them.
+- Critic round 16 measured five dead records with product dirt. The canonical
+  validation branch has five commits plus two uncommitted tracked edits in
+  `bin/sgt-validate` and `bin/sgt-validation-worker`; it is the mandatory first
+  quarantine proof.
 - Largest remaining gap: adjudication tool does not exist
 
 ### Phase -2 — Create an inert hermetic substrate
@@ -772,6 +804,12 @@ shellcheck bin/* tests/*.sh
   every ref namespace and reflog/stash, gave remote-secret rotation a P0 owner/
   command/pass condition, and clarified early tools execute from the foundation
   worktree before their bootstrap PR merges.
+- 2026-08-05: Critic round 16 found clean-worktree handover was impossible for
+  five dead owners, including uncommitted validation edits needed by Phase -0A.
+  Granted Phase -3.5 narrow preservation-only authority: anchor tracked/index
+  dirt under `refs/gauntlet/preserve/*`, archive untracked product files by
+  content digest, preserve `.sergeant-*` evidence, and never modify the worker
+  branch/index/worktree before handover.
 
 ## Round log
 
@@ -874,3 +912,9 @@ shellcheck bin/* tests/*.sh
   Challenge accepted: enumerate all refs/reflogs, own every unique commit,
   enforce secret-safe remotes, and execute early tools from the durable plan
   branch before it merges. Evidence report: `.gauntlet/rounds/plan/15-critic.md`.
+- Round 16 critic: quality bar won. Handover required a clean worktree while
+  ownership was required to preserve dirt, creating a cycle. Five dead records
+  were dirty; the canonical validation branch had two tracked edits in exactly
+  the files Phase -0A needs. Challenge accepted: non-destructive quarantine under
+  a preservation ref plus untracked content archive, status unchanged, then
+  audited handover. Evidence report: `.gauntlet/rounds/plan/16-critic.md`.
