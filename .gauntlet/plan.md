@@ -437,6 +437,9 @@ python3 scripts/gauntlet/adjudicate-dead-record.py --task <approved-task> \
   - `SERGEANT_CONFIG`, `SERGEANT_DRAIN_DIR`, callback and rescue roots;
   - fake `SERGEANT_SYSTEMCTL`, `SERGEANT_SYSTEMD_RUN`, `gh` and no-mistakes;
   - unique `SERGEANT_TMUX_SESSION` and bare git origin.
+- `factory-env.sh`, `factory-env-run` and every new Gauntlet shell file are Bash
+  3.2 compatible. The pinned Bash 3.2 image is authoritative; associative arrays,
+  `mapfile`, `${var^^}` and other Bash-4-only syntax are prohibited.
 - Required executable wrapper: `tests/factory-env-run <name> -- <command...>`
   creates the substrate, runs an unchanged legacy test under the isolated
   environment, tracks/kills its process group and sandbox tmux server, and
@@ -448,7 +451,8 @@ python3 scripts/gauntlet/adjudicate-dead-record.py --task <approved-task> \
 - New foundation files only:
   `tests/lib/factory-env.sh`, `tests/gauntlet/boundaries.txt`,
   `tests/factory-env-isolation-test.sh`, and
-  `tests/factory-env-boundaries-test.sh`, `tests/factory-env-run`. This phase intentionally does not
+  `tests/factory-env-boundaries-test.sh`, `tests/factory-env-run`,
+  `tests/run-gauntlet-tests.sh`, and `.github/workflows/ci.yml`. This phase intentionally does not
   migrate the 21 legacy tmux tests; Phase -1 does so after disposition.
 - Verification commands and expected outcomes:
 
@@ -458,6 +462,8 @@ tests/factory-env-isolation-test.sh --kill-tmux
 tests/factory-env-isolation-test.sh --two-coordinators
 tests/factory-env-boundaries-test.sh
 tests/factory-env-run validation-worker -- tests/sgt-validation-worker-test.sh
+mise run test:docker:drain
+tests/run-gauntlet-tests.sh --docker-bash-3.2
 # all PASS while real fleet/tmux/systemd/GitHub/no-mistakes sentinels remain
 # byte-identical before and after
 ```
@@ -465,6 +471,11 @@ tests/factory-env-run validation-worker -- tests/sgt-validation-worker-test.sh
 - Mutation evidence: hardcode ambient tmux/fleet/drain/rescue/systemd/GitHub/
   no-mistakes one at a time; each isolation test must FAIL naming the escaped
   boundary, then restore green.
+- Bash mutation: add `declare -A _fe_boundary` to `factory-env.sh`; the pinned
+  Bash 3.2 run must FAIL naming that file/line, then restore green.
+- CI requirement: workflow runs ShellCheck, system-Bash tests, pinned Bash 3.2
+  tests and native suites. No phase may claim CI green before that workflow
+  exists and succeeds.
 - Remote mutation: inject a credential-bearing fixture URL; conformance must
   FAIL naming the remote without printing the credential. A third-party fork ref
   cannot become mergeable until its trust class changes with provenance evidence.
@@ -513,6 +524,9 @@ python3 scripts/gauntlet/check-test-conformance.py --all-tmux-references
 # must enumerate every test file containing `tmux` (21 at critic round 8) and
 # print zero files that lack `factory_env_new`; a grep over kill verbs alone is
 # insufficient because 17 other tmux-touching files would pass silently
+mise run test:docker:drain
+tests/run-gauntlet-tests.sh --docker-bash-3.2
+# migrated tests remain in the pinned Bash 3.2 coverage set
 ```
 
 - Mutation: reinsert bare `tmux kill-session` in a migrated test; conformance
@@ -863,6 +877,8 @@ python3 scripts/gauntlet/inventory.py --check-wave-complete <wave>
 ```bash
 tests/agent-factory-gauntlet.sh --fresh --two-coordinators --all-faults
 # must PASS twice consecutively from clean state
+mise run test:docker:drain
+tests/run-gauntlet-tests.sh --docker-bash-3.2
 ```
 
 - The critic reruns with one guard mutation per subsystem. Each mutation must
@@ -884,6 +900,8 @@ python3 scripts/gauntlet/inventory.py --check-control-cards-class \
   --control-file .gauntlet/control-cards.txt
 tests/agent-factory-gauntlet.sh --fresh --two-coordinators --all-faults
 shellcheck bin/* tests/*.sh
+mise run test:docker:drain
+tests/run-gauntlet-tests.sh --docker-bash-3.2
 ```
 
 - These commands do not claim terminal backlog counts while a Phase 8 product
@@ -1050,6 +1068,10 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   the control file/tools; Phase 8 ships/closes product work first; terminal
   counts run post-merge by a read-only observer; then the user closes plan-only
   controls and the observer verifies them.
+- 2026-08-05: Critic round 24 found Bash 3.2 and CI existed only as bar prose.
+  Only two of 42 test files had pinned Bash 3.2 coverage, and one was scheduled
+  for migration. Phase -2 now owns CI and Bash-3.2-compatible substrate/test
+  runners; Phases -1/7/8 rerun them; Bash-4 syntax mutation must fail.
 
 ## Round log
 
@@ -1201,3 +1223,9 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   owns control artifacts, Phase 8 closes product PRs/cards first, an external
   post-merge observer measures terminal counts, then the user closes plan
   controls. Evidence report: `.gauntlet/rounds/plan/23-critic.md`.
+- Round 24 critic: quality bar won. Bash 3.2 and CI were claimed in the bar but
+  no phase created or measured them; migrating a covered test could silently
+  delete one of only two Bash 3.2 proofs. Challenge accepted: Phase -2-owned CI
+  and pinned Bash 3.2 Gauntlet runner, coverage preserved through migration and
+  final phases, and a Bash-4-only mutation that must fail. Evidence report:
+  `.gauntlet/rounds/plan/24-critic.md`.
