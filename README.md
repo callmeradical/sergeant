@@ -193,15 +193,23 @@ Correctness, security, data-integrity, and test findings cannot be deferred or i
 
 ### Independent review routing
 
-Generated worker briefs always require separate Standards and Spec reviews. Frontend, UI, visual, interaction, accessibility, or user-facing output language in the mission, repo role, or repo group also requires a separate independent accessibility review. Non-UI work retains the two-axis review, while `sgt-no-mistakes-finding` continues to route structured accessibility findings whenever a review supplies them.
+Generated worker briefs require one independent review per axis named in `SGT_REVIEW_AXES_REQUIRED` in `bin/_sgt-review-axes.sh` — Standards, Spec, and Readiness. Frontend, UI, visual, interaction, accessibility, or user-facing output language in the mission, repo role, or repo group additionally requires the conditional Accessibility axis. That one definition drives both the axes the generated brief demands and the `--axis` values `sgt-review-findings` accepts, so the contract and the router cannot drift. `sgt-no-mistakes-finding` continues to route structured accessibility findings whenever a review supplies them.
 
 ### Independent review findings
 
-Dispatched workers pass each Standards, Spec, or accessibility review's strict JSON finding artifact to `sgt-review-findings`. The router creates or updates one owning-repository td task per actionable finding, preserves active task state on reruns, and publishes blocking task IDs and remediation guidance through `.sergeant-message`, `.sergeant-status`, and `sgt-notify`. Cosmetic and false-positive dispositions create no cards. The schema rejects free-form review bodies, and credential-shaped values in accepted fields are redacted before durable storage.
+Dispatched workers pass each axis's strict JSON finding artifact to `sgt-review-findings`. The router creates or updates one owning-repository td task per actionable finding, preserves active task state on reruns, and publishes blocking task IDs and remediation guidance through `.sergeant-message`, `.sergeant-status`, and `sgt-notify`. Cosmetic and false-positive dispositions create no cards. The schema rejects free-form review bodies, and credential-shaped values in accepted fields are redacted before durable storage.
 
-### Independent review findings
+Set each finding's `severity` to a canonical `error`, `warning`, or `info`. The router also accepts and normalizes the spellings reviewers actually emit — `blocker`, `critical`, and `high` become `error` (P1); `major` and `medium` become `warning` (P2); `minor`, `low`, and `informational` become `info` (P3). Only the `error` family publishes a blocking gate, so reserve it for must-fix findings. The canonical set, the alias table, and the accepted axes are all printed by `sgt-review-findings` with no arguments.
 
-Dispatched workers pass each Standards, Spec, or accessibility review's strict JSON finding artifact to `sgt-review-findings`. The router creates or updates one owning-repository td task per actionable finding, preserves active task state on reruns, and publishes blocking task IDs and remediation guidance through `.sergeant-message`, `.sergeant-status`, and `sgt-notify`. Cosmetic and false-positive dispositions create no cards. The schema rejects free-form review bodies, and credential-shaped values in accepted fields are redacted before durable storage.
+Deduplication is scoped to the owning repo, axis, source, finding id, parent mission, and branch, so two sessions cannot collide on a generic finding id such as `spec-1`. An update never replaces a stored card: each revision the router writes ends with a `Revision block digest:` line over its own bytes, so a later route can tell whether the stored revision is still exactly what the router wrote. If anything has changed it — an edited value, an added line, a hand-written note, or a changed card title — the whole stored revision is kept below a `--- Superseded revision (preserved) ---` separator and the card is labelled `needs-reconciliation`. Remove that label once a human has merged the two accounts of the finding; nothing else clears it. A closed card matching a finding is always reopened rather than abandoned, and the reopen is always reported.
+
+When a route fails after parsing, the sanitized findings are retained under `<worktree>/.sergeant-review-artifacts/<axis>-<source>/` and the blocked message names the exact retry command:
+
+```bash
+sgt-review-findings <project> <repo> --retry <artifact-dir> --worktree <path>
+```
+
+The retained artifact holds only post-redaction fields, never the reviewer's original output, and a retry re-validates every field and recomputes each content digest before anything reaches td. A route will refuse rather than overwrite an artifact nobody has retried yet.
 
 ## Skills
 

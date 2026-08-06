@@ -308,22 +308,30 @@ assert_intent_rejected_without_mutation \
 
 assert_contains() {
   local expected="$1"
-  grep -Fq "$expected" "$brief" || {
+  grep -Fq -- "$expected" "$brief" || {
     printf 'missing brief contract: %s\n' "$expected" >&2
+    exit 1
+  }
+}
+
+assert_line() {
+  local expected="$1"
+  grep -Fxq -- "$expected" "$brief" || {
+    printf 'missing brief contract line: %s\n' "$expected" >&2
     exit 1
   }
 }
 
 assert_not_contains() {
   local unexpected="$1"
-  if grep -Fq "$unexpected" "$brief"; then
+  if grep -Fq -- "$unexpected" "$brief"; then
     printf 'unexpected brief contract: %s\n' "$unexpected" >&2
     exit 1
   fi
 }
 
 line_of() {
-  grep -nF "$1" "$brief" | cut -d: -f1 | sed -n '1p'
+  grep -nF -- "$1" "$brief" | cut -d: -f1 | sed -n '1p'
 }
 
 assert_order() {
@@ -386,6 +394,29 @@ assert_contains "Spec axis"
 assert_contains "If no spec exists, report this axis as skipped"
 assert_contains "Do not blend or rerank the axes"
 assert_not_contains "Accessibility axis"
+
+# The axis vocabulary the generated contract demands must be the same shared
+# definition the router validates against, so the two cannot drift (td-61a0c8).
+# shellcheck source=bin/_sgt-review-axes.sh
+source "$ROOT_DIR/bin/_sgt-review-axes.sh"
+for axis in $SGT_REVIEW_AXES_REQUIRED; do
+  assert_line "$(_sgt_review_axis_guidance "$axis")"
+done
+assert_contains "--axis <$(printf '%s' "$SGT_REVIEW_AXES_REQUIRED" | tr ' ' '|')>"
+# The severity vocabulary the contract states must be the same shared definition
+# the router validates against (owner decision on td-61a0c8, Option A).
+assert_contains "canonical values \`$(printf '%s' "$SGT_REVIEW_SEVERITIES" | tr ' ' '|')\`"
+assert_contains "$(_sgt_review_severity_alias_table)"
+assert_contains "Only the \`error\` family publishes a blocking gate"
+assert_contains "The axis list below is authoritative"
+for axis in $SGT_REVIEW_AXES_CONDITIONAL; do
+  assert_not_contains "$(_sgt_review_axis_guidance "$axis")"
+done
+required_axis_count=0
+for axis in $SGT_REVIEW_AXES_REQUIRED; do
+  required_axis_count=$((required_axis_count + 1))
+done
+assert_contains "### 7. Independent $(_sgt_review_axis_count_word "$required_axis_count")-axis review"
 assert_contains "sgt-review-findings"
 assert_contains "structured JSON finding artifact"
 assert_contains "review bodies, prompts, secrets, or credentials"
@@ -447,7 +478,7 @@ assert_order \
   "### 4. Escalate and resume" \
   "### 5. Validate" \
   "### 6. Route no-mistakes findings" \
-  "### 7. Independent two-axis review" \
+  "### 7. Independent $(_sgt_review_axis_count_word "$required_axis_count")-axis review" \
   "### 8. Remediate and repeat" \
   "### 9. Complete delivery and td lifecycle"
 
