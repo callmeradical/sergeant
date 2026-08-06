@@ -79,7 +79,9 @@ the operation with ad hoc shell commands.
 | `bin/sgt-wake <task-id> <repo>` | Evaluate a waiting worker's durable wake condition and resume it when met |
 | `bin/sgt-recover <task-id> <repo>` | Attempt one bounded stall recovery for a live-but-stalled in-progress worker |
 | `bin/sgt-ack-response <task-id> <repo> <response-id>` | Acknowledge one consumed response from the exact worker pane |
-| `bin/sgt-validate <task-id> <repo> [--skip <steps>]` | Launch coordinator-owned no-mistakes in a split worker-window pane |
+| `bin/sgt-validate <task-id> <repo> [--skip <steps>] [--allow-argv-intent]` | Launch coordinator-owned no-mistakes in a split worker-window pane |
+| `bin/sgt-validate <task-id> <repo> --claim-ownership` | Take validation ownership from a gone or released dispatching pane, with identity proof and an audit record |
+| `bin/sgt-validate <task-id> <repo> --release-ownership` | Release validation ownership from the recorded coordinator pane so another pane can claim it |
 | `bin/sgt-cleanup <task-id>` | Remove worktrees + fleet state when done |
 | `bin/sgt-dag-run <project>` | Create dagr DAG from project YAML `dag:` block and start a run; dispatches ready stages automatically (**requires dagr**) |
 | `bin/sgt-dag-dispatch-hook` | Stage hook used internally by sgt-dag-run; called by dagr when a stage becomes ready (**requires dagr**) |

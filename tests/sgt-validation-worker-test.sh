@@ -34,8 +34,26 @@ coordinator=test-coordinator
 purpose=test/validation-launch
 EOF
 
+# Capability probes must not count as a run, so --version and `axi run --help`
+# answer without touching NO_MISTAKES_LOG.
 cat > "$fake_bin/no-mistakes" <<'EOF'
 #!/usr/bin/env bash
+case "$1" in
+  --version|-v)
+    printf 'no-mistakes version %s\n' "${NO_MISTAKES_FAKE_VERSION:-v9.9.9 (stub)}"
+    exit 0
+    ;;
+esac
+if [[ "$*" == *'axi run --help'* ]]; then
+  if [[ "${NO_MISTAKES_NO_INTENT:-}" != "1" ]]; then
+    printf '      --intent string   what the user set out to accomplish\n'
+  fi
+  if [[ "${NO_MISTAKES_NO_INTENT_FILE:-}" != "1" ]]; then
+    printf '      --intent-file string   read the intent from a file instead of argv\n'
+  fi
+  printf '      --skip string     comma-separated pipeline steps to skip\n'
+  exit 0
+fi
 printf '%s\n' "$*" > "$NO_MISTAKES_LOG"
 EOF
 chmod +x "$fake_bin/no-mistakes"
@@ -46,7 +64,7 @@ pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION" -n validation \
   "env PATH='$fake_bin:$PATH' NO_MISTAKES_LOG='$TEST_ROOT/no-mistakes.log' \
   SGT_VALIDATION_COMMIT_ACK_DELAY=0.3 \
   SGT_VALIDATION_SUCCESS_ACK_DELAY=0.3 \
-  '$ROOT_DIR/bin/sgt-validation-worker' '$state' '$worktree' '$revision' \
+  '$ROOT_DIR/bin/sgt-validation-worker' '$state' '$worktree' '$revision' intent-file \
   2>'$TEST_ROOT/worker.err'")"
 sleep 0.1
 [[ ! -e "$TEST_ROOT/no-mistakes.log" ]]
@@ -129,7 +147,7 @@ EOF
 dead_pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION" -n dead-coordinator \
   -c "$worktree" \
   "env PATH='$fake_bin:$PATH' NO_MISTAKES_LOG='$TEST_ROOT/dead-no-mistakes.log' \
-  '$ROOT_DIR/bin/sgt-validation-worker' '$dead_state' '$worktree' '$revision'")"
+  '$ROOT_DIR/bin/sgt-validation-worker' '$dead_state' '$worktree' '$revision' intent-file")"
 for _ in $(seq 1 100); do
   tmux display-message -p -t "$dead_pane" '#{pane_dead}' 2>/dev/null | grep -qx 1 && break
   sleep 0.02
@@ -149,7 +167,7 @@ EOF
 exit_pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION" -n child-exit \
   -c "$worktree" \
   "env PATH='$fake_bin:$PATH' NO_MISTAKES_LOG='$TEST_ROOT/exit-no-mistakes.log' \
-  '$ROOT_DIR/bin/sgt-validation-worker' '$exit_state' '$worktree' '$revision'")"
+  '$ROOT_DIR/bin/sgt-validation-worker' '$exit_state' '$worktree' '$revision' intent-file")"
 for _ in $(seq 1 100); do
   [[ -f "$exit_state/validation-child-ready" ]] && break
   sleep 0.02
@@ -161,7 +179,7 @@ rm -f "$exit_state/validation-child-ready"
 symlink_pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION" -n release-symlink \
   -c "$worktree" \
   "env PATH='$fake_bin:$PATH' NO_MISTAKES_LOG='$TEST_ROOT/symlink-no-mistakes.log' \
-  '$ROOT_DIR/bin/sgt-validation-worker' '$exit_state' '$worktree' '$revision'")"
+  '$ROOT_DIR/bin/sgt-validation-worker' '$exit_state' '$worktree' '$revision' intent-file")"
 for _ in $(seq 1 100); do
   [[ -f "$exit_state/validation-child-ready" ]] && break
   sleep 0.02
@@ -214,7 +232,7 @@ pane2="$(tmux new-session -d -P -F '#{pane_id}' -s "$TMUX_SESSION2" -n validatio
   -c "$worktree2" \
   "env PATH='$fake_bin:$PATH' NO_MISTAKES_LOG='$mutated_log' \
   SGT_VALIDATION_COMMIT_ACK_DELAY=0 SGT_VALIDATION_SUCCESS_ACK_DELAY=0 \
-  '$ROOT_DIR/bin/sgt-validation-worker' '$state2' '$worktree2' '$revision2'")"
+  '$ROOT_DIR/bin/sgt-validation-worker' '$state2' '$worktree2' '$revision2' intent-file")"
 # Wait for validation-child-ready to get the HANDSHAKE token.
 # The mutation must happen AFTER the worker's initial revision check passes.
 for _ in $(seq 1 200); do
@@ -268,6 +286,162 @@ done
 [[ "$(cat "$state2/validation_status" 2>/dev/null)" == 'exited:2' ]] || {
   printf 'mutation test: expected exited:2, got: %s\n' \
     "$(cat "$state2/validation_status" 2>/dev/null || echo 'empty')" >&2
+  exit 1
+}
+
+# ── intent transport contract ────────────────────────────────────────────────
+# Drives the coordinator side of the handshake so a worker reaches the phase
+# where it invokes no-mistakes.
+release_worker() {
+  local dir="$1" worker_pane="$2"
+  printf '%s\n' "$worker_pane" > "$dir/validation_pane"
+  tmux display-message -p -t "$worker_pane" \
+    '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+    > "$dir/validation_pane_identity"
+  chmod 600 "$dir/validation_pane_identity"
+  cp "$dir/validation-child-ready" "$dir/validation-release.tmp"
+  mv "$dir/validation-release.tmp" "$dir/validation-release"
+  chmod 600 "$dir/validation-release"
+  ln "$dir/validation-release" "$dir/validation-release-owner"
+  wait_for_file "$dir/validation-child-accepted"
+  cp "$dir/validation-child-accepted" "$dir/validation-child-commit"
+  wait_for_file "$dir/validation-child-committed"
+  cp "$dir/validation-child-committed" "$dir/validation-success"
+  wait_for_file "$dir/validation-success-ack"
+  rm -f "$dir/validation-launch.lock"
+}
+wait_for_file() {
+  local path="$1" _
+  for _ in $(seq 1 200); do
+    [[ -f "$path" ]] && return 0
+    sleep 0.02
+  done
+  return 1
+}
+new_transport_state() {
+  local dir="$1"
+  mkdir -p "$dir"
+  cp "$state/validation-intent.md" "$dir/validation-intent.md"
+  printf '%s\n' "$head_sha" > "$dir/validation_head"
+  cat > "$dir/validation-launch.lock" <<EOF
+pid=$$
+start=$coordinator_start
+coordinator=test-coordinator
+purpose=test/validation-transport
+EOF
+}
+launch_transport_worker() {
+  local dir="$1" log="$2" transport="$3" extra_env="${4:-}"
+  tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION" -n "transport-$$-$RANDOM" \
+    -c "$worktree" \
+    "env PATH='$fake_bin:$PATH' NO_MISTAKES_LOG='$log' $extra_env \
+    SGT_VALIDATION_COMMIT_ACK_DELAY=0 SGT_VALIDATION_SUCCESS_ACK_DELAY=0 \
+    '$ROOT_DIR/bin/sgt-validation-worker' '$dir' '$worktree' '$revision' '$transport' \
+    2>'$dir/worker.err'"
+}
+
+# A consented argv transport passes the intent content through --intent.
+argv_state="$TEST_ROOT/argv-state"
+new_transport_state "$argv_state"
+argv_log="$TEST_ROOT/argv-no-mistakes.log"
+argv_pane="$(launch_transport_worker "$argv_state" "$argv_log" argv \
+  "NO_MISTAKES_NO_INTENT_FILE=1")"
+wait_for_file "$argv_state/validation-child-ready" || {
+  cat "$argv_state/worker.err" >&2
+  exit 1
+}
+release_worker "$argv_state" "$argv_pane"
+wait_for_file "$argv_log" || {
+  cat "$argv_state/worker.err" >&2
+  printf 'consented argv transport never invoked no-mistakes\n' >&2
+  exit 1
+}
+grep -Fq 'axi run --intent ' "$argv_log" || {
+  printf 'argv transport did not use --intent: %s\n' "$(cat "$argv_log")" >&2
+  exit 1
+}
+grep -Fq 'Validate only after release.' "$argv_log" || {
+  printf 'argv transport did not deliver the canonical intent\n' >&2
+  exit 1
+}
+if grep -Fq -- '--intent-file' "$argv_log"; then
+  printf 'argv transport used the private transport flag\n' >&2
+  exit 1
+fi
+
+# The private transport must fail closed when the installed build lost the flag,
+# rather than degrading to argv.
+missing_state="$TEST_ROOT/missing-capability-state"
+new_transport_state "$missing_state"
+missing_log="$TEST_ROOT/missing-no-mistakes.log"
+launch_transport_worker "$missing_state" "$missing_log" intent-file \
+  "NO_MISTAKES_NO_INTENT_FILE=1" >/dev/null
+for _ in $(seq 1 200); do
+  [[ -s "$missing_state/worker.err" ]] && break
+  sleep 0.02
+done
+grep -Fq 'required capability: no-mistakes axi run --intent-file' \
+  "$missing_state/worker.err" || {
+  printf 'worker did not report the missing capability: %s\n' \
+    "$(cat "$missing_state/worker.err" 2>/dev/null || echo empty)" >&2
+  exit 1
+}
+[[ ! -e "$missing_log" && ! -e "$missing_state/validation-child-ready" ]] || {
+  printf 'worker proceeded without the private intent transport\n' >&2
+  exit 1
+}
+
+# The diagnostic must describe the build actually installed: when only the argv
+# transport exists, it must name --allow-argv-intent as the operator's remedy
+# instead of claiming no intent flag exists at all.
+grep -Fq 'Re-run with --allow-argv-intent' "$missing_state/worker.err" || {
+  printf 'worker diagnostic did not name the available remedy: %s\n' \
+    "$(cat "$missing_state/worker.err" 2>/dev/null || echo empty)" >&2
+  exit 1
+}
+if grep -Fq 'this build accepts no intent flag' "$missing_state/worker.err"; then
+  printf 'worker diagnostic contradicted the observed flag surface\n' >&2
+  exit 1
+fi
+
+# A build that offers only the private transport must not run a consented argv
+# request through --intent, which that build does not accept.
+mismatch_state="$TEST_ROOT/argv-unavailable-state"
+new_transport_state "$mismatch_state"
+mismatch_log="$TEST_ROOT/argv-unavailable-no-mistakes.log"
+launch_transport_worker "$mismatch_state" "$mismatch_log" argv \
+  "NO_MISTAKES_NO_INTENT=1" >/dev/null
+for _ in $(seq 1 200); do
+  [[ -s "$mismatch_state/worker.err" ]] && break
+  sleep 0.02
+done
+grep -Fq 'required capability' "$mismatch_state/worker.err" || {
+  printf 'worker accepted an argv transport the build cannot serve: %s\n' \
+    "$(cat "$mismatch_state/worker.err" 2>/dev/null || echo empty)" >&2
+  exit 1
+}
+[[ ! -e "$mismatch_log" && ! -e "$mismatch_state/validation-child-ready" ]] || {
+  printf 'unavailable argv transport reached the handshake or a run\n' >&2
+  exit 1
+}
+
+# An unrecognised transport is refused before any handshake or run.
+unknown_state="$TEST_ROOT/unknown-transport-state"
+new_transport_state "$unknown_state"
+unknown_log="$TEST_ROOT/unknown-no-mistakes.log"
+launch_transport_worker "$unknown_state" "$unknown_log" plaintext >/dev/null
+for _ in $(seq 1 200); do
+  [[ -s "$unknown_state/worker.err" ]] && break
+  sleep 0.02
+done
+grep -Fq 'unsupported validation intent transport: plaintext' \
+  "$unknown_state/worker.err" || {
+  printf 'worker accepted an unsupported transport: %s\n' \
+    "$(cat "$unknown_state/worker.err" 2>/dev/null || echo empty)" >&2
+  exit 1
+}
+[[ ! -e "$unknown_log" && ! -e "$unknown_state/validation-child-ready" ]] || {
+  printf 'unsupported transport reached the handshake or a run\n' >&2
   exit 1
 }
 
