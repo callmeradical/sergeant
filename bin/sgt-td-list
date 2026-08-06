@@ -18,17 +18,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
 
-_require_td() {
-  command -v td &>/dev/null || _die "td is required. See your td installation."
-}
-
 [[ $# -ge 1 ]] || _die "Usage: sgt-td-list <project> [options]"
 PROJECT="$1"; shift
 
 CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
 [[ -f "$CONFIG_FILE" ]] || _die "Project not found: $PROJECT"
 _require_yq
-_require_td
+_require_marcus_td
 
 # ── Parse options ─────────────────────────────────────────────────────────────
 
@@ -77,8 +73,6 @@ else
 fi
 
 # ── Collect tasks per repo ────────────────────────────────────────────────────
-
-all_results="[]"
 
 if $JSON_OUT; then
   # JSON mode: emit array of {repo, task} objects

@@ -44,7 +44,6 @@ fi
 parse_fail=0
 for f in \
     "$ROOT_DIR"/bin/sgt-* \
-    "$ROOT_DIR"/bin/oc-inject \
     "$ROOT_DIR"/bin/wiki-daily-digest \
     "$ROOT_DIR"/bin/_sgt-*.sh; do
   [[ -f "$f" ]] || continue
@@ -65,7 +64,6 @@ done
 inline_fail=0
 for f in \
     "$ROOT_DIR"/bin/sgt-* \
-    "$ROOT_DIR"/bin/oc-inject \
     "$ROOT_DIR"/bin/wiki-daily-digest \
     "$ROOT_DIR"/bin/_sgt-*.sh; do
   [[ -f "$f" ]] || continue

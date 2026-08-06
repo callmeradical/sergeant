@@ -47,6 +47,44 @@ source "$SCRIPT_DIR/_sgt-drain.sh"
 # shellcheck source=bin/_sgt-review-axes.sh
 source "$SCRIPT_DIR/_sgt-review-axes.sh"
 
+# ── Brief template renderer ───────────────────────────────────────────────────
+# _sgt_render_brief <output-path> <vars...>
+#
+# Reads templates/worker-brief.md from the Sergeant repo, substitutes every
+# {{PLACEHOLDER}} with the corresponding shell variable, and writes the result
+# to <output-path>.  Only the explicitly listed variables are substituted; no
+# shell expansion of arbitrary content occurs.  The template is the canonical
+# source for brief format changes — edit it instead of this script.
+_BRIEF_TEMPLATE="$SCRIPT_DIR/../templates/worker-brief.md"
+
+_sgt_render_brief() {
+  local output="$1"
+  [[ -f "$_BRIEF_TEMPLATE" ]] || \
+    _die "worker brief template not found: $_BRIEF_TEMPLATE"
+  local content
+  content="$(cat "$_BRIEF_TEMPLATE")"
+  # Substitution order: longer tokens first to avoid partial matches.
+  content="${content//\{\{TASK_ID\}\}/$TASK_ID}"
+  content="${content//\{\{PROJECT\}\}/$PROJECT}"
+  content="${content//\{\{REPO_NAME\}\}/$rname}"
+  content="${content//\{\{BRANCH\}\}/$BRANCH}"
+  content="${content//\{\{WORKTREE_PATH\}\}/$worktree_path}"
+  content="${content//\{\{REPO_TASK_DIR\}\}/$repo_task_dir}"
+  content="${content//\{\{TD_TASK_LINE\}\}/$td_task_line}"
+  content="${content//\{\{BRIEF\}\}/$BRIEF}"
+  content="${content//\{\{ROLE_LINE\}\}/$role_line}"
+  content="${content//\{\{DEPS_SECTION\}\}/$deps_section}"
+  content="${content//\{\{TD_SECTION\}\}/$td_section}"
+  content="${content//\{\{MERGED_INSTRUCTIONS\}\}/$merged}"
+  content="${content//\{\{INTENT_REVISION\}\}/$INTENT_REVISION}"
+  content="${content//\{\{REVIEW_AXIS_LABEL\}\}/$review_axis_label}"
+  content="${content//\{\{REVIEW_AXIS_MARKDOWN\}\}/$review_axis_markdown}"
+  content="${content//\{\{REVIEW_SEVERITIES\}\}/$(printf '%s' "$SGT_REVIEW_SEVERITIES" | tr ' ' '|')}"
+  content="${content//\{\{REVIEW_SEVERITY_ALIAS_TABLE\}\}/$(_sgt_review_severity_alias_table)}"
+  content="${content//\{\{REVIEW_AXES_PIPE\}\}/$(printf '%s' "$review_axes" | tr ' ' '|')}"
+  printf '%s\n' "$content" > "$output"
+}
+
 # ── Parse args ───────────────────────────────────────────────────────────────
 
 [[ $# -ge 1 ]] || _die "Usage: sgt-dispatch <project> \"<brief>\" [options]"
@@ -538,11 +576,10 @@ done
 # ── Parse dependency order ────────────────────────────────────────────────────
 # Format: "infra>api,infra>app" → infra must finish before api and app
 # Store in a temp file: "<dependent> <prereq>" one per line
-
-DEPS_TMP="$(mktemp)"
-trap _cleanup_dispatch_tmps EXIT
+# DEPS_TMP is created only when --deps was given; cleanup guard uses ${DEPS_TMP:-}.
 
 if [[ -n "$DEPS_ARG" ]]; then
+  DEPS_TMP="$(mktemp)"
   IFS=',' read -ra dep_pairs <<< "$DEPS_ARG"
   for pair in "${dep_pairs[@]}"; do
     prereq="${pair%%>*}"
@@ -553,16 +590,8 @@ fi
 
 # Look up comma-separated prereqs for a repo
 _wait_for() {
+  [[ -f "${DEPS_TMP:-}" ]] || return 0
   grep "^$1 " "$DEPS_TMP" 2>/dev/null | awk '{print $2}' | paste -sd ',' - 2>/dev/null || true
-}
-
-_record_dispatch_orphan() {
-  local repo_task_dir="$1"
-  local worktree_path="$2"
-  local reason="$3"
-  printf 'orphaned\n' > "$repo_task_dir/status"
-  printf '%s\n' "$reason" > "$repo_task_dir/diagnostic"
-  "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
 }
 
 # ── Capture primary pane (for sgt-notify callbacks) ──────────────────────────
@@ -869,145 +898,7 @@ $td_context_block"
   done
   review_axis_label="$(_sgt_review_axis_count_word "$review_axis_count")"
 
-  cat > "$worktree_path/.sergeant-brief.md" << BRIEF_EOF
-# Sergeant Brief
-
-**Task ID:** $TASK_ID
-**Project:** $PROJECT
-**Repo:** $rname
-**Branch:** $BRANCH
-**Worktree:** $worktree_path
-**Fleet state:** $repo_task_dir/
-$td_task_line
-
----
-
-## Mission
-
-$BRIEF
-
-This agent is responsible for the **$rname** repo only.
-$role_line
-
-$deps_section
-$td_section
-
-## Active instructions
-
-$merged
-
----
-
-## Deliver
-
-Follow these gates in order. Preserve the evidence in the PR description or a linked review artifact.
-
-### 1. Pin scope and source of truth
-
-Before implementation, fetch refs and pin the fixed point, normally the merge-base with the current origin/main. Record the base SHA, commit list and diff scope; if that base is unavailable, record the explicit alternative.
-
-Identify the originating spec from the full td task context, this Sergeant mission, and any referenced issue, PRD, spec, or ADR. If no originating spec exists, record that explicitly.
-
-.sergeant-intent.md is the canonical source for implementation decisions, independent reviews, PR description, and the one final no-mistakes --intent. Intent revision: $INTENT_REVISION. Successor and recovery work must inherit this exact revision. Do not silently regenerate it; only an audited human decision creates a new intent revision.
-
-### 2. Route the work
-
-Triage context and readiness before choosing an implementation loop: read the full td issue/spec/comments and linked material, check for redundant or prior work, identify the work category, and record whether it is ready.
-
-- **Huge or foggy:** Surface a wayfinding/spec/ticketing blocker with the missing decisions. Surface \`wayfinder\`, \`to-spec\`, and Sergeant's custom \`to-tickets\` as escalation or planning paths. Do not silently execute them as implementation or invent the route.
-- **Hard bug or performance regression:** When available, load and use the canonical \`diagnosing-bugs\` skill. First establish one fast deterministic red-capable command. Reproduce and minimise, rank falsifiable hypotheses, instrument one variable at a time, then turn the minimal reproduction into a regression test before fixing it.
-- **Uncertain state, design, or UI:** When available, load and use the canonical \`prototype\` skill. Create a clearly throwaway prototype, surface it for human-in-the-loop feedback, and never promote prototype code directly. Discard it and implement the approved direction through the normal TDD path.
-- **Approved feature or fix:** When available, load and use the canonical \`tdd\` skill before implementation. Implement tracer-bullet vertical slices with TDD.
-- **Merge or rebase conflict:** When available, load and use the canonical \`resolving-merge-conflicts\` skill. Trace both intents to their issues/specs, preserve both where possible, and never abort automatically. Escalate when intent cannot be reconciled.
-
-If a canonical skill cannot be loaded, follow the embedded rules in this brief for that phase.
-
-### 3. Implement approved work with TDD
-
-Establish public behavioral seams before writing tests. Use seams already specified by td/spec; if a consequential seam is genuinely undecided, surface needs_input rather than guessing.
-
-For safety-sensitive or stateful work, implementation is blocked unless the canonical intent has concrete State Transitions, Failure Windows, and Negative Test Matrix sections supplied through the explicit readiness path. Publish needs_input when any is missing. The named standard-isolated lighter path applies only when the objective does not trigger Sergeant's safety/stateful classifier.
-
-For each non-trivial behavior, work red before green: one vertical slice, test, and minimum implementation at a time. Run the failing focused test for the right reason, add only enough implementation to pass, then refactor after green. Reject tautological tests, internal mocking, and horizontal slicing such as writing all tests before all implementation. Scrutinize refactoring during review. Do not speculate ahead.
-
-### 4. Escalate and resume
-
-Your worker runs as a persistent interactive agent session in its recorded tmux pane. Non-interactive agent modes are prohibited: do not launch \`opencode run\`, \`goose run\`, Claude print mode, \`--auto\`, \`--prompt\`, or an equivalent one-shot agent. Sergeant delivers only a fixed ID-bearing notification through interactive terminal input; prompt, response, and secret bodies remain in durable files and never appear in process arguments.
-
-For every Sergeant notification, read \`.sergeant-notification\` and copy the exact supervisor-scoped token from the nudge (\`notification_id|target_nonce\`) to the named file under \`.sergeant-notification-acks/\`. Do not act until that supervisor sends acceptance and the named file under \`.sergeant-notification-accepts/\` contains the same token. Then follow the instruction exactly once and write the token to the named file under \`.sergeant-notification-complete/\`. Repeated nudges with the same token are retries, not new work.
-
-If an agent exits before a terminal or waiting state, the supervisor records \`orphaned\` with durable diagnostics and td recovery pointers. Resume orphaned work through \`sgt-respond\`; do not overwrite or discard its recovery state.
-
-When Sergeant notifies you of a response, read \`.sergeant-response\`, \`.sergeant-response-id\`, and \`.sergeant-response-generation\`; apply the approved decision once and restore \`.sergeant-status\` to \`in_progress\`, a terminal state, or a later gate generation. Write \`.sergeant-response-applied\` with exactly one \`response_id\`, \`gate_generation\`, and matching \`status\`, then run \`sgt-ack-response $TASK_ID $rname "\$(cat .sergeant-response-id)"\` from this exact worker pane. Do not clear, replay, or acknowledge a response by hand; the command validates pane ownership and proof, publishes retryable archive and acknowledgement state, and clears plaintext transport only after that state converges.
-
-Completion requires both .sergeant-status=done and a non-empty .sergeant-result; a PR or successful turn alone is not terminal completion.
-
-Supported nonterminal statuses are \`in_progress\`, \`needs_input\`, \`blocked\`, and \`waiting\`; terminal statuses are \`done\` and \`failed: <reason>\`.
-
-Do not use sleep or polling loops for deferred work such as CI checks, dependency completion, or time-based delays. Use the \`waiting\` status with a structured wake condition instead: write \`.sergeant-wake-condition\` with a supported \`kind\` and the required fields, set \`.sergeant-status=waiting\`, then exit the session cleanly. The Sergeant scheduler (\`sgt-wake\`) evaluates the condition and resumes the session automatically when it is met.
-
-Supported wake condition kinds and their required fields:
-
-\`\`\`
-kind=not_before        not_before=<unix_timestamp>
-kind=github_check      run_id=<id> check_name=<name>
-kind=fleet_dependency  task_id=<id> repo=<repo>
-kind=td_dependency     td_task_id=<id>
-kind=deployment        app=<name> env=<name>
-kind=human_response    (sets needs_input; requires manual sgt-respond)
-\`\`\`
-
-Optional fields on any kind: \`deadline=<unix_timestamp>\` (terminal failure if exceeded), \`max_attempts=<int>\` (becomes needs_input if exceeded), and \`backoff_base=<seconds>\` (base retry backoff before jitter). Required field on all conditions: \`generation=<int>\`. Do not persist arbitrary shell commands, prompt bodies, response text, tokens, or secrets in \`.sergeant-wake-condition\`; only the above allowlisted field names and alphanumeric-safe values are accepted.
-
-For \`needs_input\` or \`blocked\`, write \`.sergeant-message\` with concise context, evidence, the exact question or blocker, a recommendation, and 2-4 options when useful. Call \`sgt-notify $TASK_ID "needs_input [$rname]: <summary>"\` or the equivalent \`blocked\` message. The worker remains alive and waits for a response; do not exit or mark the task failed.
-
-When \`.sergeant-response\` appears, follow the post-application proof and \`sgt-ack-response\` protocol above. Valid proof is \`in_progress\` after applying the decision, \`done\` with a non-empty result, \`failed: <nonblank reason>\`, or a later \`needs_input\`/\`blocked\` gate generation. Unexpected exit or invalid proof retains active transport, while successful acknowledgement archives replay evidence before clearing it. Clear \`.sergeant-message\`, log the decision to td when tracked, and continue only when a consequential question is answered.
-
-Maintain \`.sergeant-gate-generation\` as a monotonic integer for waiting gates. Before every new \`needs_input\` or \`blocked\` publication, increment the generation and persist it before writing the waiting status and message. A repeated blocker message is still a new gate only when the generation advances.
-
-### 5. Validate
-
-Run focused tests and typechecking/lint regularly. Run the repository's full required suite once at the end.
-
-Before the final shipping boundary, launch and route the readiness axis defined in step 7, and record its evidence against the canonical intent.
-
-Commit the reviewed branch before publishing readiness. Validation requires a clean worktree at that committed HEAD; do not create readiness evidence from an uncommitted diff.
-
-Never run no-mistakes from this agent process. After implementation, repository-native validation, and independent reviews complete with zero blockers, write \`.sergeant-validation-ready\` with exactly one \`intent_revision=$INTENT_REVISION\`, the current \`head_sha=\$(git rev-parse HEAD)\`, and \`standards_review=passed\`, \`spec_review=passed\`, and \`readiness_review=passed\`. Then notify Sergeant that coordinator-owned validation may begin.
-
-The coordinator invokes \`sgt-validate $TASK_ID $rname\`, which runs no-mistakes interactively in a split pane of this window with the canonical intent and without \`--yes\`. The validation run is read-only; actionable findings become separate td work.
-
-### 6. Route no-mistakes findings
-
-The Sergeant coordinator owns every no-mistakes gate and finding. Do not approve a validation gate, route a finding, or remediate validation output from this worker pane. Actionable findings become separate deduplicated td work and remediation never runs no-mistakes. Resume this worker only through an explicit Sergeant response tied to that owning work.
-
-### 7. Independent $review_axis_label-axis review
-
-Before completion, load and use the canonical \`code-review\` skill when available for its review technique, then launch separate parallel subagents for these axes so their contexts cannot contaminate each other. The axis list below is authoritative: run every axis named here even when that skill describes fewer. Keep their output in separate sections. Do not blend or rerank the axes. If the skill cannot be loaded, use the embedded review rules below.
-
-$review_axis_markdown
-Require each reviewer to return a structured JSON finding artifact with only: \`findings\`, and per finding \`id\`, \`severity\`, \`disposition\`, \`summary\`, \`evidence\`, \`paths\`, \`acceptance_criteria\`, and \`recommendation\`. Set \`severity\` to one of the canonical values \`$(printf '%s' "$SGT_REVIEW_SEVERITIES" | tr ' ' '|')\`; the router also accepts and normalizes these reviewer spellings: $(_sgt_review_severity_alias_table). Only the \`error\` family publishes a blocking gate, so reserve it for must-fix findings; \`warning\` and \`info\` route as reviewable debt. Route each axis separately with \`sgt-review-findings $PROJECT $rname --axis <$(printf '%s' "$review_axes" | tr ' ' '|')>\`, passing the artifact, axis/source, branch/head, parent td mission, fleet task ID, and worktree. The router deduplicates actionable findings into owning-repository td tasks, publishes blocking state and notification, and prints task IDs and recommended remediation. Cosmetic and false-positive dispositions create no cards. Never pass review bodies, prompts, secrets, or credentials into the artifact, td, or fleet metadata. Treat malformed output or routing failure as blocked; do not continue or leave findings only in worker.log.
-
-### 8. Remediate and repeat
-
-Remediate every blocking repository-native test or independent-review finding, rerun affected tests, then rerun all required independent review axes. Repeat until blocking findings are zero on each axis. Do not remediate no-mistakes findings in this validation run; their owning td work requires a separate dispatch.
-
-### 9. Complete delivery and td lifecycle
-
-The branch was committed before readiness. Open the PR via \`gh pr create\`. If this work has a td task, log decisions throughout, handoff before td review, and run td review only after implementation and review evidence is ready.
-
-Do not write \`done\` merely because a PR exists. Success requires: the branch is committed; the PR is open; focused and full validation are complete; required CI is green; there are no unresolved non-outdated review threads; dependency order is satisfied; and independent review is complete with zero blocking findings.
-
-While waiting for CI, reviews, or dependencies that fit a supported wake condition, publish \`.sergeant-status=waiting\` with \`.sergeant-wake-condition\` instead of sleeping or polling in-process. Use \`needs_input\` for human decisions, \`blocked\` for durable external blockers without a supported wake adapter, and \`failed: <exact reason>\` only for unrecoverable terminal failure. Only after every success gate passes:
-
-1. Write the PR URL: \`echo "https://github.com/..." > .sergeant-result\`
-2. Write \`echo "done" > .sergeant-status\`
-3. Notify: \`sgt-notify $TASK_ID "done: PR https://github.com/..."\`
-
-For failure, notify with \`sgt-notify $TASK_ID "failed: <exact blocker>"\`.
-
-The primary sergeant session is watching via \`sgt-watch $TASK_ID --background\`.
-BRIEF_EOF
+  _sgt_render_brief "$worktree_path/.sergeant-brief.md"
 
   echo "in_progress" > "$repo_task_dir/status"
   _info "brief written → $worktree_path/.sergeant-brief.md"

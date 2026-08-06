@@ -15,8 +15,10 @@ awk '
 chmod +x "$TEST_ROOT/install.sh"
 
 mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/home/.config/opencode/plugins"
-ln -s "$ROOT_DIR/bin/oc-inject" "$TEST_ROOT/bin/oc-inject"
-ln -s "$ROOT_DIR/opencode/plugins/oc-inject.js" \
+# Create stale oc-inject symlinks to verify mise install removes them.
+# These reference paths that no longer exist in the repo (deleted in GH #179).
+ln -s "/tmp/nonexistent/oc-inject" "$TEST_ROOT/bin/oc-inject"
+ln -s "/tmp/nonexistent/oc-inject.js" \
   "$TEST_ROOT/home/.config/opencode/plugins/oc-inject.js"
 
 HOME="$TEST_ROOT/home" MISE_PROJECT_ROOT="$ROOT_DIR" \

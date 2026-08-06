@@ -11,8 +11,6 @@ source "$SCRIPT_DIR/_sgt-response-lock.sh"
 FLEET_DIR="${SERGEANT_FLEET:-$FLEET_DIR}"
 POLL_INTERVAL="${SERGEANT_WATCH_INTERVAL:-5}"
 
-_die() { echo "ERROR: $*" >&2; exit 1; }
-
 # Support both orderings:
 #   sgt-watch <task-id> --background   (spec-canonical)
 #   sgt-watch --background <task-id>   (flag-first, consistent with --list/--sync)
