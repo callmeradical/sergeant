@@ -318,4 +318,36 @@ cmp -s "$expected" "$repo_state/response-archive/response-123/body"
 [[ "$(cat "$repo_state/response_ack")" == response-123 ]]
 [[ "$(cat "$worktree/.sergeant-response-ack")" == response-123 ]]
 
+# An archive entry that records no applied status is not a replayable
+# acknowledgement.  An empty applied_status beside a proof with no status= line
+# used to compare equal as "" == "" and be accepted as fully converged.
+setup_retry_fixture empty-status
+mkdir -p "$repo_state/response-archive/response-123"
+printf 'approved response\n' > "$repo_state/response-archive/response-123/body"
+printf '1\n' > "$repo_state/response-archive/response-123/gate_generation"
+: > "$repo_state/response-archive/response-123/applied_status"
+printf 'response_id=response-123\ngate_generation=1\n' \
+  > "$repo_state/response-archive/response-123/proof"
+set +e
+PATH="$fake_bin:$PATH" REAL_MV="$real_mv" REAL_RM="$real_rm" \
+  FAIL_COUNTER="$TEST_ROOT/empty-status-count" TMUX_PANE=%42 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-ack-response" task-empty-status app response-123 \
+  > "$TEST_ROOT/empty-status.log" 2>&1
+empty_status_result=$?
+set -e
+[[ "$empty_status_result" -ne 0 ]] || {
+  printf 'FAIL: an archive entry with no applied status was accepted as an acknowledgement\n' >&2
+  exit 1
+}
+grep -Fq 'Response archive entry does not match pending response' \
+  "$TEST_ROOT/empty-status.log" || {
+  printf 'FAIL: unexpected refusal for an archive entry with no applied status: %s\n' \
+    "$(cat "$TEST_ROOT/empty-status.log")" >&2
+  exit 1
+}
+[[ ! -e "$repo_state/response_ack" && ! -e "$worktree/.sergeant-response-ack" ]] || {
+  printf 'FAIL: a refused replay published an acknowledgement\n' >&2
+  exit 1
+}
+
 printf 'sgt-ack-response consumption: ok\n'
