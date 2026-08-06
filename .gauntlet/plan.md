@@ -77,12 +77,15 @@ Initial untrusted inventory:
 
 Backlog is clear only when:
 
-- every card belongs to one phase or is deferred with a durable trigger;
+- every card belongs to one implementation wave, is closed as duplicate/shipped,
+  or is individually deferred by the user with a named owner and trigger;
 - duplicates are closed with pointers to one canonical owner;
 - no `in_progress` card lacks a live owner or durable handoff;
 - no merged/delivered card remains open;
 - no actionable finding lives only in a PR, validation run or agent context;
 - every P0/P1 has a current owner or verified blocker.
+- P0 count is zero and P1 count is zero except individually user-approved
+  external blockers. There is no bulk deferral path.
 
 ## Progress verification
 
@@ -606,9 +609,17 @@ python3 scripts/gauntlet/inventory.py --check-shipped-open
 # Must print zero: duplicate dedupe keys with more than one non-closed card.
 python3 scripts/gauntlet/inventory.py --check-duplicate-owners
 
-# Must print a phase or explicit deferred trigger for every non-closed card.
+# Every non-closed card has exactly one implementation wave, duplicate/shipped
+# disposition, or individually user-approved deferral. Unapproved deferral fails.
 python3 scripts/gauntlet/inventory.py --check-phase-coverage
 ```
+
+- Required artifact: `.gauntlet/backlog-map.md`, one row for every non-closed td
+  card: id, priority, status, canonical/duplicate, owning domain wave,
+  dependency, current owner and evidence command.
+- Deferral is not a phase outcome. Each deferred row requires explicit user
+  approval, a named human owner, a dated/event trigger and a reason. P0/P1 may
+  only be deferred for a verified external blocker.
 
 - Evidence: pending; `scripts/gauntlet/inventory.py` does not exist yet. The
   original `--check-ownerless-in-progress` criterion was removed after critic
@@ -755,10 +766,45 @@ tests/sgt-cleanup-process-leak-test.sh               # suite leaves zero fake ag
   prevented cleanup of the task that spawned them
 - Largest remaining gap: terminal state still depends on stale recorded status
 
-### Phase 7 — End-to-end factory gauntlet
+### Phase 6.5 — Execute every remaining backlog wave
 
 - Status: pending
 - Depends on: Phases 0-6
+- Builder scope: every actionable card in `.gauntlet/backlog-map.md` not already
+  closed by Phases 1-6; wave boundaries are domains/modules with non-overlapping
+  file and state ownership
+- Critic input: each card's spec/acceptance, wave diff, real artifact and domain
+  quality bar
+- Required waves are generated from all non-closed cards. At minimum they cover
+  setup/install/onboarding, operator console, Tasks AXI migration, docs/help,
+  remaining code-improvement epics, routed findings and lifecycle cards not
+  absorbed by Phases 1-6.
+- Per-wave contract:
+  1. reconcile duplicates and already-shipped cards against main;
+  2. order tracer-bullet slices by dependency;
+  3. fresh builder per slice, TDD at a public seam;
+  4. fresh standards/spec critics inspect actual artifacts;
+  5. loop on the largest gap until evidence wins;
+  6. ship through the repaired gate and update every owning card immediately.
+- Verification:
+
+```bash
+python3 scripts/gauntlet/inventory.py --check-actionable-unowned
+# zero
+python3 scripts/gauntlet/inventory.py --check-wave-complete <wave>
+# zero actionable open/in_progress/in_review cards in the wave
+```
+
+- Any wave changing lifecycle behavior invalidates the affected Phase 1-6
+  evidence and the Phase 7 fault evidence until rerun.
+- Evidence: critic round 20 measured only 54 of 492 cards transitively owned by
+  named phases; 438 lacked an execution phase.
+- Largest remaining gap: domain waves have not been generated
+
+### Phase 7 — End-to-end factory gauntlet
+
+- Status: pending
+- Depends on: Phases 0-6 and Phase 6.5
 - Builder scope: one harness only; no new features
 - Critic input: fresh environment, two coordinators, full fault matrix
 - Precondition: Phase -1 conformance test passes over every tmux-touching test;
@@ -788,6 +834,14 @@ python3 scripts/gauntlet/inventory.py --all
 tests/agent-factory-gauntlet.sh --fresh --two-coordinators --all-faults
 shellcheck bin/* tests/*.sh
 ```
+
+- Final inventory must report:
+  - P0 = 0;
+  - P1 = 0 except exact user-approved external blockers;
+  - `in_progress` = 0 and `in_review` = 0;
+  - uncovered actionable cards = 0;
+  - non-closed total equals exactly the individually approved deferred register,
+    never a numeric cap or bulk status change.
 
 - Final smoothing critic checks that the independently improved lifecycle
   modules behave as one factory rather than separate mechanisms.
@@ -906,6 +960,11 @@ shellcheck bin/* tests/*.sh
   legacy tests execute hermetically during bootstrap/disposition, with host
   tmux/fleet/systemd/process baselines unchanged. Corrected kill-session count to
   six calls across four files.
+- 2026-08-05: Critic round 20 found only 54 of 492 cards were transitively owned
+  by named phases and the rest could be bulk-deferred while every gate stayed
+  green. Added Phase 6.5 to execute every remaining domain wave; deferrals now
+  require individual user approval, owner and trigger; final bar requires zero
+  P0/P1 and no unresolved in-progress/review state.
 
 ## Round log
 
@@ -1033,3 +1092,9 @@ shellcheck bin/* tests/*.sh
   proves ambient session/fleet/process baselines unchanged; Phase -1 still makes
   conformance permanent later. Evidence report:
   `.gauntlet/rounds/plan/19-critic.md`.
+- Round 20 critic: quality bar won on backlog ownership. Only 54 of 492 cards
+  belonged transitively to phases; Phase 0 could mark the other 438 deferred and
+  Phase 8 would pass without implementing them. Challenge accepted: complete
+  backlog map, individual human-approved deferrals only, Phase 6.5 domain waves,
+  and final zero P0/P1/in-progress/in-review outcomes. Evidence report:
+  `.gauntlet/rounds/plan/20-critic.md`.
