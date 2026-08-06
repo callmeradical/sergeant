@@ -44,6 +44,7 @@ From a free-form brief when no task exists:
 sgt-dispatch <project> "<objective and constraints>" \
   --repos repo-a,repo-b \
   --agent opencode \
+  --model anthropic/claude-opus-5 \
   --stage implementation \
   --branch feat/example \
   --deps 'repo-a>repo-b' \
@@ -57,12 +58,28 @@ artifact is canonical for implementation decisions, reviews, PR text,
 successor/recovery work, and final validation.
 
 `--agent` selects `opencode`, `goose`, or `claude`; `SERGEANT_AGENT` provides the
-same override and OpenCode is the default. `--stage` is a lowercase slug used in
-the `<stage>-<repo>-<task>` tmux window name and defaults to `implementation`.
+same override and OpenCode is the default. `--model` pins what that harness runs
+as `provider/model[:variant]`; `SERGEANT_MODEL` provides the same override, and
+precedence is `--model` > `SERGEANT_MODEL` > the harness's own default. The two
+are orthogonal: `--agent` chooses the executable, `--model` chooses what it runs.
+An unhonorable tuple fails before any state is created. `--stage` is a lowercase
+slug used in the `<stage>-<repo>-<task>` tmux window name and defaults to
+`implementation`.
+
+A coordinator that is not inside tmux can bind a pane with
+`--managed-coordinator-pane` (create or select Sergeant's managed pane) or
+`--coordinator-pane <pane-id>` (bind a pane it prepared). The two cannot be
+combined, neither starts a tmux server, and every path verifies the pane against
+the live server first.
+
 Workers always run as persistent
 interactive TTY sessions. Sergeant never starts one-shot run, prompt, print, or
-automatic modes. It launches OpenCode with `--dangerously-skip-permissions`,
-Goose with `goose session`, and Claude without prompt arguments. Initial briefs
+automatic modes. The base invocation is OpenCode with
+`--dangerously-skip-permissions`, Goose with `goose session`, and Claude with no
+prompt arguments; when a tuple is pinned, that base is extended with the
+harness's own measured model transport — argv for OpenCode, plus `--agent`
+against a generated definition when a variant is pinned, and
+`GOOSE_PROVIDER`/`GOOSE_MODEL` in the environment for Goose. Initial briefs
 and later responses remain in durable files. A worker-owned loop retries only a
 fixed ID-bearing terminal nudge until the agent acknowledges that ID before
 acting, so delayed TUI startup and coordinator crashes do not lose or duplicate
