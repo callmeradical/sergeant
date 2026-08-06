@@ -200,6 +200,33 @@ Cleanup refuses a retirement archive that no longer describes the state it
 preserved — including a changed response, a tampered or symlinked copy, and a
 recorded owner that has drifted — rather than trusting stale evidence.
 
+## sgt-cleanup reports "fleet state and worktree must be on the same filesystem"
+
+This is a deliberate constraint, not a bug. `sgt-cleanup` uses atomic rename operations
+to safely move and restore evidence during terminal worker removal. Atomic rename only
+works within a single filesystem (`EXDEV` on rename across devices). Sergeant therefore
+refuses cross-filesystem layouts rather than falling back to a non-atomic copy+delete
+that could leave evidence in an inconsistent state.
+
+**Resolution:** Ensure `SERGEANT_FLEET` and all project worktrees reside on the same
+filesystem. If you set `SERGEANT_FLEET` to a path on a different device (e.g., a network
+drive or separate partition), move it to a local path on the same device as your
+repositories:
+
+```bash
+# Check your current fleet location
+echo "${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
+
+# Confirm the worktree device
+stat -c '%d' /path/to/your/worktree
+
+# Confirm the fleet device (they must match)
+stat -c '%d' "$SERGEANT_FLEET"
+```
+
+See `bin/sgt-cleanup:_same_filesystem_pair` for the implementation and
+`tests/sgt-cleanup-cross-filesystem-test.sh` for the test coverage.
+
 ## Where to inspect state
 
 | State | Path or command |
@@ -210,7 +237,7 @@ recorded owner that has drifted — rather than trusting stale evidence.
 | Task state | `td context <id> --work-dir <repo-path>` |
 | Git state | `git status`, worktree list, branch and PR heads |
 | no-mistakes run | `no-mistakes axi status --run <id>` |
-| Deprecated OpenCode injection state | See [oc-inject.md](oc-inject.md) |
+
 
 If documentation does not cover the observed failure, use the `sergeant-help`
 skill to search the docs, then create a td task containing the exact reproduction,

@@ -20,7 +20,7 @@ state.
 - [Project YAML schema](schema.md)
 - [Durable callback protocol](callbacks.md)
 - [Repo-scoped worker skills](repo-scoped-skills.md)
-- [Deprecated OpenCode message injection](oc-inject.md)
+
 - [Annotated project example](../schema/project.yaml.example)
 - [Repository agent policy](../AGENTS.md)
 - [Sergeant command skills](../skills/)

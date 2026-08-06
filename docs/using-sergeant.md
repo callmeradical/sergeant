@@ -85,6 +85,30 @@ fixed ID-bearing terminal nudge until the agent acknowledges that ID before
 acting, so delayed TUI startup and coordinator crashes do not lose or duplicate
 the mission, and no body appears in process arguments.
 
+### Security posture: `--dangerously-skip-permissions`
+
+OpenCode is launched with `--dangerously-skip-permissions` in every Sergeant
+worker. This is intentional and the rationale is:
+
+- Workers run in an **automated dispatch context**, not an interactive session.
+  The operator is not at the keyboard and cannot respond to individual
+  permission prompts.
+- **Operator trust is scoped at dispatch time**: the intent file and worker
+  brief reviewed and approved before dispatch define the boundaries of the work.
+  The agent cannot escalate beyond that scope.
+- Interactive permission gates exist for human-supervised sessions where the
+  operator can make real-time decisions. In a Sergeant worker, those gates would
+  cause the worker to hang indefinitely waiting for input that will never come.
+
+The flag is not a capability grant — it is a bypass of the interactive
+confirmation UI. The actual trust boundary is the intent file content approved
+at dispatch time, the worker brief injected into the session, and the repository
+permissions of the worktree the worker checks out into.
+
+For security-sensitive work (auth, credentials, payments, databases, production
+state), use `--intent-file` and ensure the intent file enumerates the exact
+actions the worker may take. See the intent file requirements above.
+
 `--intent-file` is required when the objective names auth/OAuth, security,
 secrets or credentials, payments, databases or migrations, stateful/production
 work, destructive work, persistent state, or state transitions. The file must

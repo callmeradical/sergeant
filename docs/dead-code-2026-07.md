@@ -1,5 +1,11 @@
 # Sergeant — Dead Code Audit, July 2026
 
+> **Status (August 2026):** D-1 through D-7 actioned in PR #190 (GH #181).
+> D-8 and D-9 were already resolved in the working tree before this pass;
+> the audit's line numbers for those items were stale. See below for corrections.
+
+
+
 **Scope:** All 25 scripts in `bin/`, cross-referenced against call sites in
 `bin/`, `tests/`, and `skills/`.  
 **Method:** Function-level call-graph analysis plus targeted variable and branch
@@ -214,27 +220,28 @@ Bodies are functionally identical (same `lsof` invocation, same line parser).
 
 ### D-9 `_process_group_pids` defined in both `sgt-cleanup` and `sgt-validate`
 
-**Files:** `bin/sgt-cleanup` line 123, `bin/sgt-validate` line 101  
-Bodies are identical.
+**Files:** `bin/sgt-cleanup` line 123, `bin/sgt-validate` line 101 (July audit)
 
-**Fix for D-8 and D-9:** Promote both to `_sgt-lib.sh` (matching the
-recommendation in `audit-2026-07.md` §S-2). Delete the local copies.
+> **August 2026 correction:** `_process_group_pids` is defined only in
+> `bin/sgt-cleanup` in the current working tree. `bin/sgt-validate` uses
+> `pgrep -g` inline and no longer defines a separate helper. D-9 as stated
+> is already resolved; no further action required.
 
 ---
 
 ## Summary table
 
-| ID | File | Artefact | Kind | Action |
+| ID | File | Artefact | Kind | Status (Aug 2026) |
 |---|---|---|---|---|
-| D-1 | `sgt-dispatch:381` | `_record_dispatch_orphan()` | Function never called | Wire up at 4 inline sites, or delete |
-| D-2 | `_sgt-lib.sh:365` | `_require_treehouse()` | Function never called | Delete or wire up in callers |
-| D-3 | `sgt-td-list:81` | `all_results="[]"` | Variable never read | Delete assignment |
-| D-4 | `sgt-td-memory:29` | `session_id` cat from unwritten file | Always reads "unavailable" | Write the file at dispatch, or drop the field |
-| D-5 | `sgt-dispatch:364–365` | `DEPS_TMP` + double `trap` | Unconditional mktemp + redundant trap | Move mktemp inside `--deps` block; one trap |
-| D-6 | `sgt-watch:12`, `sgt-respond:14` | `_die()` redefinitions | Identical no-op shadow | Delete both local copies |
-| D-7 | `sgt-td-list:21` | `_require_td()` | Weaker diverged copy of lib function | Delete; call `_require_marcus_td` |
-| D-8 | `sgt-cleanup:45`, `sgt-validate:68` | `_worktree_cwd_pids()` | Duplicate body | Promote to lib; delete both local copies |
-| D-9 | `sgt-cleanup:123`, `sgt-validate:101` | `_process_group_pids()` | Duplicate body | Promote to lib; delete both local copies |
+| D-1 | `sgt-dispatch` | `_record_dispatch_orphan()` | Function never called | ✅ Deleted (PR #190) |
+| D-2 | `_sgt-lib.sh` | `_require_treehouse()` | Function never called | ✅ Deleted (PR #190) |
+| D-3 | `sgt-td-list` | `all_results="[]"` | Variable never read | ✅ Deleted (PR #190) |
+| D-4 | `sgt-td-memory` | `session_id` cat from unwritten file | Always reads "unavailable" | ✅ Removed field (PR #190) |
+| D-5 | `sgt-dispatch` | `DEPS_TMP` + double `trap` | Unconditional mktemp + redundant trap | ✅ Fixed: conditional mktemp, one trap (PR #190) |
+| D-6 | `sgt-watch`, `sgt-respond` | `_die()` redefinitions | Identical no-op shadow | ✅ Deleted both local copies (PR #190) |
+| D-7 | `sgt-td-list` | `_require_td()` | Weaker diverged copy of lib function | ✅ Deleted; calls `_require_marcus_td` (PR #190) |
+| D-8 | `sgt-cleanup`, `sgt-validate` | `_worktree_cwd_pids()` | Alleged duplicate | ✅ Already resolved before this pass; `sgt-validate` uses `lsof -t +D` inline |
+| D-9 | `sgt-cleanup`, `sgt-validate` | `_process_group_pids()` | Alleged duplicate | ✅ Already resolved before this pass; `sgt-validate` uses `pgrep -g` inline |
 
 ---
 

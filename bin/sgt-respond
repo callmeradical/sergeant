@@ -13,8 +13,6 @@ source "$SCRIPT_DIR/_sgt-response-lock.sh"
 # shellcheck source=bin/_sgt-drain.sh
 source "$SCRIPT_DIR/_sgt-drain.sh"
 
-_die() { echo "ERROR: $*" >&2; exit 1; }
-
 [[ $# -eq 2 ]] || _die "Usage: sgt-respond <task-id> <repo>; reads the response from standard input"
 
 TASK_ID="$1"

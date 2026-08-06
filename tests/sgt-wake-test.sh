@@ -697,16 +697,17 @@ AGENT
 ) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 22: sgt-dispatch brief template prohibits sleep and documents waiting
-# Expect: sgt-dispatch source contains the required wake guidance strings.
-# The brief template is embedded in sgt-dispatch; verify its content directly.
+# Expect: the worker brief template contains the required wake guidance strings.
+# The brief was extracted from sgt-dispatch to templates/worker-brief.md
+# (GH #182); check the template file, not the dispatch script.
 
 (
-  dispatch="$ROOT_DIR/bin/sgt-dispatch"
-  _assert_file_contains "dispatch brief prohibits sleep loops" "$dispatch" \
+  brief_template="$ROOT_DIR/templates/worker-brief.md"
+  _assert_file_contains "dispatch brief prohibits sleep loops" "$brief_template" \
     "Do not use sleep or polling loops for deferred work"
-  _assert_file_contains "dispatch brief documents waiting status" "$dispatch" \
+  _assert_file_contains "dispatch brief documents waiting status" "$brief_template" \
     "waiting"
-  _assert_file_contains "dispatch brief documents wake condition file" "$dispatch" \
+  _assert_file_contains "dispatch brief documents wake condition file" "$brief_template" \
     ".sergeant-wake-condition"
 ) || _wake_test_failed=$((_wake_test_failed + 1))
 

@@ -948,10 +948,6 @@ _require_marcus_td() {
     _die "Unsupported td detected at $td_path: $td_version. Required implementation: github.com/marcus/td with create/json/work-dir support. $install_hint"
   fi
 }
-_require_treehouse() {
-  command -v treehouse &>/dev/null || _die "treehouse is required: install from https://github.com/kunchenguid/treehouse"
-}
-
 # ── Managed background monitor helpers ───────────────────────────────────────
 #
 # Background monitor: run sgt-watch as a transient systemd user unit so

@@ -28,18 +28,13 @@ for f in "$BIN_DIR"/sgt-* "$BIN_DIR"/_sgt-*.sh "$BIN_DIR/wiki-daily-digest"; do
   linked=$((linked+1))
 done
 
-# Remove only legacy links owned by this Sergeant checkout. Source remains for
-# one compatibility window, but oc-inject is no longer installed or activated.
+# Remove legacy oc-inject links that may still exist from earlier Sergeant
+# checkouts. oc-inject was deleted in August 2026 (GH #179). The file no
+# longer ships in bin/ so any remaining symlinks are stale.
 for deprecated_link in "$TARGET_DIR/oc-inject" "$HOME/.config/opencode/plugins/oc-inject.js"; do
   [[ -L "$deprecated_link" ]] || continue
-  deprecated_target="$(readlink "$deprecated_link")"
-  case "$deprecated_link:$deprecated_target" in
-    "$TARGET_DIR/oc-inject:$BIN_DIR/oc-inject"|\
-    "$HOME/.config/opencode/plugins/oc-inject.js:$REPO_DIR/opencode/plugins/oc-inject.js")
-      rm "$deprecated_link"
-      echo "  removed deprecated Sergeant link: $deprecated_link"
-      ;;
-  esac
+  rm "$deprecated_link"
+  echo "  removed stale oc-inject link: $deprecated_link"
 done
 
 echo ""
@@ -118,7 +113,7 @@ set -euo pipefail
 TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
 removed=0
 
-for f in "$TARGET_DIR"/sgt-* "$TARGET_DIR"/_sgt-*.sh "$TARGET_DIR/oc-inject" "$TARGET_DIR/wiki-daily-digest"; do
+for f in "$TARGET_DIR"/sgt-* "$TARGET_DIR"/_sgt-*.sh "$TARGET_DIR/wiki-daily-digest"; do
   [[ -L "$f" ]] || continue
   # Only remove if it points back into the sergeant repo
   target="$(readlink "$f")"
