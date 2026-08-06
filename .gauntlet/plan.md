@@ -422,7 +422,8 @@ python3 scripts/gauntlet/adjudicate-dead-record.py --task <approved-task> \
   bootstrap compatibility fix in `bin/sgt-wake`: replace its Bash-4 associative
   condition map with a Bash-3.2-safe representation; plus hygiene required for
   language-specific CI: untrack generated Python bytecode and ignore
-  `__pycache__`. No other product change.
+  `__pycache__`; plus repair failure propagation in the exact owning test
+  `tests/sgt-wake-test.sh`. No other product change.
 - Critic input: sandbox root, real-host sentinels, boundary inventory
 - Explicitly rejected substrate base:
   `feat/epic-durable-condition-evaluation-for-wa` adds a useful
@@ -476,7 +477,8 @@ python3 scripts/gauntlet/adjudicate-dead-record.py --task <approved-task> \
   `tests/factory-env-boundaries-test.sh`, `tests/factory-env-run`,
   `tests/run-gauntlet-tests.sh`, `.gauntlet/shell-files.txt`,
   `.gauntlet/python-files.txt`, `.gauntlet/shellcheck-baseline.txt`, and
-  `.github/workflows/ci.yml`, `Dockerfile.bash32`. This phase intentionally does not
+  `.github/workflows/ci.yml`, `Dockerfile.bash32`,
+  `tests/sgt-wake-bash32-compat-test.sh`. This phase intentionally does not
   migrate the 21 legacy tmux tests; Phase -1 does so after disposition.
 - Verification commands and expected outcomes:
 
@@ -489,6 +491,7 @@ tests/factory-env-run validation-worker -- tests/sgt-validation-worker-test.sh
 mise run test:docker:drain
 tests/run-gauntlet-tests.sh --docker-bash-3.2
 tests/run-gauntlet-tests.sh --docker-bash-3.2 --test tests/sgt-wake-test.sh
+tests/run-gauntlet-tests.sh --docker-bash-3.2 --test tests/sgt-wake-bash32-compat-test.sh
 # all PASS while real fleet/tmux/systemd/GitHub/no-mistakes sentinels remain
 # byte-identical before and after
 ```
@@ -502,6 +505,16 @@ tests/run-gauntlet-tests.sh --docker-bash-3.2 --test tests/sgt-wake-test.sh
   Bash 3.2 wake test must FAIL at the associative-array declaration with a named
   compatibility error before any wake decision, then restore the 3.2-safe parser
   and rerun green. `set -euo pipefail` remains enabled throughout.
+- Wake harness repair: every isolated case explicitly propagates its subshell
+  status (`(...) || exit $?` or equivalent); `set -e` is not the evidence.
+  `SGT_WAKE_TEST_FORCE_ASSERT_FAILURE=1 tests/sgt-wake-test.sh` must exit nonzero
+  and must not print `all tests passed`. Mutation removing one explicit
+  propagation must make that self-test falsely green and therefore fail a
+  harness-meta-test.
+- Dedicated compatibility test captures stderr without suppressing it. With the
+  associative-array mutation it must exit nonzero and assert the Bash 3.2
+  `declare -A` incompatibility; with the safe parser it must reach and correctly
+  evaluate a named wake condition.
 - CI requirement: workflow runs ShellCheck, system-Bash tests, pinned Bash 3.2
   tests and native suites. No phase may claim CI green before that workflow
   exists and succeeds.
@@ -543,6 +556,11 @@ tests/run-gauntlet-tests.sh --docker-bash-3.2 --test tests/sgt-wake-test.sh
 - Environment evidence from critic round 27: the pinned base has Bash 3.2 and
   flock but lacks git, tmux and python3; it has `/sbin/apk` (Alpine 3.22.5), so
   the derived pinned toolchain image is feasible and Phase -2-owned.
+- Test-harness evidence from critic round 30: `sgt-wake-test.sh` ran 21 cases in
+  bare subshells; `_assert` exited only the subshell, the parent continued, and
+  the file printed `all tests passed` with exit 0 despite eight failures. The
+  production associative-array defect was therefore invisible even in the new
+  toolchain until explicit propagation is added.
 - Overlap gate before edits:
 
 ```bash
@@ -1146,6 +1164,11 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   overlapped four refs, while its gate incorrectly asserted no overlap. Expanded
   the overlap set, require exact owner transfer/provenance before edits, and made
   the gate fail-then-pass under one coordinator with a recorded merge order.
+- 2026-08-05: Critic round 30 found `sgt-wake-test.sh` swallowed every failing
+  subshell and printed success, so both the must-pass and must-fail mutation gates
+  were green on broken code. Phase -2 now owns explicit subshell propagation, a
+  forced-failure harness self-test, and a dedicated unsuppressed Bash 3.2
+  compatibility test.
 - 2026-08-05: Critic round 29 falsified the claimed silent misparse: production
   `set -e` makes Bash 3.2 abort immediately at `declare -A`. Corrected the defect
   to total wake incompatibility, changed mutation evidence to require the named
@@ -1335,6 +1358,11 @@ python3 scripts/gauntlet/inventory.py --check-control-closed \
   accepted: mutation expects the real compatibility abort and the plan records
   all three wake-test overlaps. Evidence report:
   `.gauntlet/rounds/plan/29-critic.md`.
+- Round 30 critic: quality bar won. The wake test's 21 bare subshells swallowed
+  `_assert` exits; eight failures still produced exit 0 and `all tests passed`.
+  Challenge accepted: explicit propagation on every case, forced-failure
+  meta-test, and dedicated unsuppressed Bash 3.2 compatibility seam. Evidence
+  report: `.gauntlet/rounds/plan/30-critic.md`.
 - Round 25 critic: quality bar won. `sgt-wake` used an associative array that
   silently collapsed all fields on Bash 3.2; existing 3.2 tests did not run wake.
   Full ShellCheck also could not pass and no phase owned the findings. Challenge
