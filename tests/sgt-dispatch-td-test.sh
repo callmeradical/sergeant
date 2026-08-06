@@ -18,6 +18,8 @@ mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/config" "$TEST_ROOT/fake-bin" \
   "$TEST_ROOT/td-active" "$TEST_ROOT/td-counter"
 # Copy every sourced helper, not a hand-maintained subset: a missing helper makes
 # the copied sgt-dispatch fail at its source line instead of under test.
+# _sgt-response-lock.sh is also needed: sgt-watch sources it for the shared
+# action-lease finalizer invoked during terminal recycling.
 cp "$ROOT_DIR/bin/sgt-dispatch" "$ROOT_DIR"/bin/_sgt-*.sh "$ROOT_DIR/bin/sgt-td-create" \
   "$ROOT_DIR/bin/sgt-td-memory" "$ROOT_DIR/bin/sgt-watch" "$TEST_ROOT/bin/"
 
