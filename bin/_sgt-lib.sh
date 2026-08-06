@@ -735,3 +735,30 @@ _sgt_stop_background_monitor() {
   _sgt_systemctl --user stop "$unit" || \
     _die "Failed to stop background monitor: $unit"
 }
+
+# _sgt_branch_unpushed_commits <repo-path> <branch>
+#
+# Print the one-line log of commits on <branch> that are not reachable from ANY
+# remote-tracking ref, or nothing when the branch is fully published or absent.
+#
+# Reachability, not name matching, is the contract.  A commit that exists on a
+# remote under a different branch name is published and must not be reported.
+#
+# Two failure modes this deliberately avoids (td-7f3a9a):
+#   1. Excluding only "refs/remotes/origin/<branch>" makes the rev-list argument
+#      invalid whenever that ref does not exist, which is the normal case for a
+#      branch that has never been pushed.  The previous implementation fell back
+#      to listing the branch's ENTIRE history, so the caller's guard fired for
+#      every unpublished branch and re-dispatch onto preserved work became
+#      impossible in any repository the operator cannot push to.
+#   2. "git log" on an absent ref is a fatal error, not an empty result, so the
+#      ref must be verified before it is used.
+#
+# "--not --remotes" is always a valid argument set: with no remotes configured it
+# excludes nothing, so every commit is correctly reported as unpushed.
+_sgt_branch_unpushed_commits() {
+  local repo_path="$1" branch="$2"
+  [[ -n "$repo_path" && -n "$branch" ]] || return 0
+  git -C "$repo_path" show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null || return 0
+  git -C "$repo_path" log --oneline "refs/heads/$branch" --not --remotes 2>/dev/null || true
+}
