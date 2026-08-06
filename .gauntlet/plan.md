@@ -103,6 +103,29 @@ sgt-watch --list
 
 Do **not** run `sgt-watch --sync-all` until Phase 2 verifies session scoping.
 
+## Measured backlog versus Gauntlet control cards
+
+The Gauntlet cannot include its own running control card in the terminal product
+population it measures: td-445c24 must remain open/in-progress while Phase 8
+evidence is produced.
+
+Required artifact: `.gauntlet/control-cards.txt`, exact td ids only. Initially it
+contains `td-445c24`; later phase-control cards are added explicitly. A card
+qualifies only when its entire purpose is controlling/measuring this Gauntlet —
+never product implementation, findings or deferred work.
+
+```bash
+python3 scripts/gauntlet/inventory.py --check-control-cards-class \
+  --control-file .gauntlet/control-cards.txt
+# every excluded card is plan-control-only and owns no product diff
+```
+
+Phase 8 measures product backlog excluding this exact set. After Phase 8 evidence
+is committed, reviewed and merged, the Gauntlet stops for the user. The user
+approves closing the exact control cards; a read-only post-run check then
+requires every one closed. This human step is outside the td-controlled worker
+population and breaks self-reference without creating a bulk exclusion.
+
 ## Phases
 
 ### Phase -5 — Establish credential-free GitHub auth continuity
@@ -813,7 +836,8 @@ tests/sgt-cleanup-process-leak-test.sh               # suite leaves zero fake ag
 python3 scripts/gauntlet/inventory.py --check-actionable-unowned
 # zero
 python3 scripts/gauntlet/inventory.py --check-wave-complete <wave>
-# zero actionable open/in_progress/in_review cards in the wave
+# zero actionable open/in_progress/in_review cards in the wave, excluding only
+# exact ids in .gauntlet/control-cards.txt
 ```
 
 - Any wave changing lifecycle behavior invalidates the affected Phase 1-6
@@ -851,18 +875,33 @@ tests/agent-factory-gauntlet.sh --fresh --two-coordinators --all-faults
 - Verification commands and expected outcomes:
 
 ```bash
-python3 scripts/gauntlet/inventory.py --all
+python3 scripts/gauntlet/inventory.py --all \
+  --control-file .gauntlet/control-cards.txt
+python3 scripts/gauntlet/inventory.py --check-control-cards-class \
+  --control-file .gauntlet/control-cards.txt
 tests/agent-factory-gauntlet.sh --fresh --two-coordinators --all-faults
 shellcheck bin/* tests/*.sh
 ```
 
 - Final inventory must report:
-  - P0 = 0;
-  - P1 = 0 except exact user-approved external blockers;
-  - `in_progress` = 0 and `in_review` = 0;
+  - measured product P0 = 0;
+  - measured product P1 = 0 except exact user-approved external blockers;
+  - measured `in_progress` = 0 and `in_review` = 0;
   - uncovered actionable cards = 0;
   - non-closed total equals exactly the individually approved deferred register,
-    never a numeric cap or bulk status change.
+    never a numeric cap or bulk status change;
+  - every non-closed excluded card appears exactly once in
+    `.gauntlet/control-cards.txt` and passes its class check.
+
+- Post-run human closure, after Phase 8 evidence PR is merged:
+
+```bash
+# user approves closing the exact control-card ids, then a read-only process
+# outside any td worker runs:
+python3 scripts/gauntlet/inventory.py --check-control-closed \
+  --control-file .gauntlet/control-cards.txt
+# must PASS: every control card closed
+```
 
 - Final smoothing critic checks that the independently improved lifecycle
   modules behave as one factory rather than separate mechanisms.
@@ -991,6 +1030,11 @@ shellcheck bin/* tests/*.sh
   per-ref merge-base/ahead/behind/deletion/intent evidence, mandatory rebase and
   path-scoped deletion review, per-merge re-baselining, and zero unresolved
   branches before Phase -1. Deferred late branches re-enter via Phase 6.5.
+- 2026-08-05: Critic round 22 found the terminal P0/in-progress-zero bar included
+  the Gauntlet's own running epic, making it self-referential and impossible.
+  Added an exact plan-control card set, guarded as non-product, measured the
+  product backlog excluding only that set, and required user-approved post-merge
+  closure plus a read-only all-closed assertion.
 
 ## Round log
 
@@ -1130,3 +1174,9 @@ shellcheck bin/* tests/*.sh
   current integration SHA, intent-scoped deletion critic, per-merge
   re-baselining, and zero unresolved rows before conformance. Evidence report:
   `.gauntlet/rounds/plan/21-critic.md`.
+- Round 22 critic: quality bar won on self-reference. td-445c24 must remain
+  non-closed while producing Phase 8 evidence, so literal P0/in-progress zero was
+  unsatisfiable. Challenge accepted: exact control-card file, class guard,
+  product counts excluding only those ids, then human closure after evidence
+  merge and a read-only all-closed assertion. Evidence report:
+  `.gauntlet/rounds/plan/22-critic.md`.
