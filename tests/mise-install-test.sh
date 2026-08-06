@@ -39,6 +39,14 @@ set -e
 }
 [[ -L "$TEST_ROOT/bin/_sgt-intent.sh" ]]
 [[ -L "$TEST_ROOT/bin/_sgt-drain.sh" ]]
+# Every sourced helper must be installed, or an installed sgt-* script fails at
+# its source line. Enumerating helpers by name has broken this before.
+for helper in "$ROOT_DIR"/bin/_sgt-*.sh; do
+  [[ -L "$TEST_ROOT/bin/$(basename "$helper")" ]] || {
+    printf 'runtime helper was not installed: %s\n' "$(basename "$helper")" >&2
+    exit 1
+  }
+done
 [[ ! -e "$TEST_ROOT/bin/oc-inject" ]]
 [[ ! -e "$TEST_ROOT/home/.config/opencode/plugins/oc-inject.js" ]]
 
