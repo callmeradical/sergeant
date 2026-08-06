@@ -109,10 +109,10 @@ Do **not** run `sgt-watch --sync-all` until Phase 2 verifies session scoping.
 - Builder scope: plan-local `scripts/gauntlet/check-remote-secrets.py` plus
   operator auth configuration; no Sergeant product implementation
 - Owning security card: td-a764cc
-- Why first: origin currently embeds credential userinfo and there is no SSH
-  remote or configured credential helper. Revoking it before replacement breaks
-  every fetch/push/PR phase; fetching before the gate leaks/uses the exposed
-  credential.
+- Why first: origin currently embeds credential userinfo. A GitHub credential
+  helper and authenticated `gh` accounts exist, but they are not yet proved as
+  the replacement path for this repository. Revoking before read/write/API proof
+  risks breaking fetch/push/PR; fetching first leaks/uses the exposed credential.
 - Human/security gate: the user chooses and authorizes one credential-free
   mechanism — `gh auth setup-git`/credential helper or SSH. Never print, copy or
   persist the old credential in plan evidence.
@@ -125,21 +125,31 @@ scripts/gauntlet/check-remote-secrets.py --require-credential-free
 # configure approved credential-free URL + external auth mechanism
 git ls-remote origin -h refs/heads/main >/dev/null
 git push --dry-run origin HEAD:refs/heads/gauntlet-auth-probe
-# both must succeed before old credential is revoked
+gh auth status
+gh api user --jq .login
+gh api repos/callmeradical/sergeant --jq '.permissions.push'
+# git read/write and GitHub API identity/push permission must succeed before
+# old credential is revoked
 
 # owning coordinator revokes/rotates old credential outside logs/td
 scripts/gauntlet/check-remote-secrets.py --require-credential-free
 git ls-remote origin -h refs/heads/main >/dev/null
 git push --dry-run origin HEAD:refs/heads/gauntlet-auth-probe
-# all PASS after revocation
+gh auth status
+gh api user --jq .login
+gh api repos/callmeradical/sergeant --jq '.permissions.push'
+# all PASS after revocation; Phase -0A's real draft PR is the final API-write
+# proof before the bootstrap exception ends
 ```
 
 - Tool tests: fixture URLs cover HTTPS userinfo, token-like username/password,
   SSH and credential-helper HTTPS. Failing output names remote and violation but
   never echoes secret material. Mutation that includes the raw URL in error
   output must FAIL a canary-secret assertion.
-- Evidence baseline: critic round 17 found credential userinfo in origin, zero
-  SSH remotes and no local/global credential helper. Exact secret is excluded.
+- Evidence baseline corrected at critic round 18: credential userinfo exists in
+  origin; no SSH remote exists, but a GitHub credential helper and two
+  authenticated `gh` accounts do. Replacement continuity still requires the
+  repository-specific pre/post proof above. Exact secret is excluded.
 - Largest remaining gap: replacement auth has not been configured or proved
 
 ### Phase -4 — Reconcile the external no-mistakes dependency
@@ -295,10 +305,11 @@ python3 scripts/gauntlet/reconcile-work.py --check-fleet-owner-reconciled
 - It **does not** rewrite `status`; every historical status remains unchanged.
   The marker transfers coordinator ownership only. A real blocker or decision
   remains blocked after handover. Phase -0B still owns final branch disposition.
-- Phase -3.5 has preservation-only authority before handover. It may create an
-  anchored `refs/gauntlet/preserve/<task-id>` and a content-addressed rescue
-  artifact; it may not checkout/reset, modify the worker index/worktree, commit
-  onto the worker branch, delete files or stash-pop.
+- Phase -3.5 has preservation-only authority before handover. It may create a
+  content-addressed rescue artifact and, when there are no unmerged index stages,
+  an anchored `refs/gauntlet/preserve/<task-id>` using a **temporary index**. It
+  may not checkout/reset, open the live index for write, modify the worktree,
+  commit onto the worker branch, delete files or stash-pop.
 - Real fleet safety: dry-run opens real fleet files read-only; mutation tests
   require `--fleet-root <temporary-copy>` and refuse paths under
   `$HOME/.local/share/sergeant`; `--apply` writes only a new handover marker via
@@ -324,9 +335,16 @@ python3 scripts/gauntlet/adjudicate-dead-record.py \
 - Dirty worktree quarantine:
   - `.sergeant-*` runtime/evidence files are not product dirt; include their
     file list/hashes in evidence but do not let them block handover.
-  - tracked/index modifications are captured without changing the worktree:
-    `git stash create`, followed by
-    `git update-ref refs/gauntlet/preserve/<task-id> <oid>`. Verify the ref.
+  - capture exact live `.git/index` bytes, `GIT_OPTIONAL_LOCKS=0 git diff
+    --binary HEAD`, `git diff --cached --binary`, `git ls-files -u`, HEAD, status
+    and hashes. Read-only commands run with optional locks disabled.
+  - when there are no unmerged index stages, build a preservation commit using a
+    temporary `GIT_INDEX_FILE`: `read-tree HEAD`, apply the binary worktree patch
+    to that temp index, `write-tree`, `commit-tree`, then atomically update
+    `refs/gauntlet/preserve/<task-id>`. The live index is never passed to git.
+  - when unmerged stages exist, do not synthesize a commit. Preserve exact index
+    bytes, stage blob ids/modes and worktree files in the rescue artifact; the
+    handover marker records that restore requires conflict-state reconstruction.
   - untracked non-runtime files are archived under the rescue root with sorted
     file list, modes and sha256. Verify the archive before handover.
   - after capture, the tree may remain dirty and is classified
@@ -337,8 +355,9 @@ python3 scripts/gauntlet/adjudicate-dead-record.py \
 python3 scripts/gauntlet/adjudicate-dead-record.py --task <approved-task> \
   --expected-pane-identity '<identity>' --handover-to "$TMUX_PANE" \
   --quarantine --apply
-# prints preservation ref, untracked archive digest and handover digest; git
-# status must be byte-identical before/after
+# prints optional preservation ref, index/patch/untracked archive digests and
+# handover digest; sha256 + size + mtime of the live index and worktree file
+# hashes must be byte-identical before/after
 ```
 
 - Fail closed if: status is terminal; expected identity differs; pane/process is
@@ -350,9 +369,10 @@ python3 scripts/gauntlet/adjudicate-dead-record.py --task <approved-task> \
   reports one synthetic foreign pane as live, replace the copied dead record's
   pane id with it while keeping the old process start, and require adjudication
   to FAIL as reused. Do not start or kill any ambient pane.
-- Preservation mutation on fixture: make the stash oid unanchored, corrupt one
-  archive byte, or change git status after capture; each must FAIL before
-  handover, then restore fixture green.
+- Preservation mutation on fixture: point `GIT_INDEX_FILE` at the live index,
+  leave a preservation commit unanchored, corrupt one archive byte, or change a
+  worktree/index hash after capture; each must FAIL before handover. Restore the
+  fixture green.
 - Human gate: show the complete dry-run table before `--apply`. The user
   approves exact task ids/identities individually, never a blanket transfer.
 - Later ownership work (Phase 2/td-af6916) productizes this behavior; the
@@ -858,6 +878,12 @@ shellcheck bin/* tests/*.sh
   through it first. Added Phase -5: configure credential-free external auth,
   prove read/write with ls-remote and push --dry-run, revoke, then prove again.
   It also owns the remote-secret checker and corrected branch/ref baselines.
+- 2026-08-05: Critic round 18 proved `git stash create` mutates the live index
+  while status remains unchanged, making the quarantine check blind to its own
+  violation. Replaced it with read-only binary patches, exact index capture and
+  temporary-index preservation commits; added unmerged-index capture. Corrected
+  the auth baseline and now prove git transport plus GitHub API access before
+  and after credential rotation.
 
 ## Round log
 
@@ -972,3 +998,9 @@ shellcheck bin/* tests/*.sh
   revocation, pre/post read+write proof, secret-safe checker owned by Phase -5,
   and no fetch before the phase passes. Evidence report:
   `.gauntlet/rounds/plan/17-critic.md`.
+- Round 18 critic: quality bar won. `git stash create` rewrote the live index
+  hash/size despite identical status, and unmerged indexes had no capture path.
+  The auth premise ignored an existing helper/gh login and did not prove API
+  access after revocation. Challenge accepted: exact index/patch archives,
+  temporary-index commits, unmerged-stage capture, and pre/post git plus gh API
+  proof. Evidence report: `.gauntlet/rounds/plan/18-critic.md`.
