@@ -153,6 +153,12 @@ EOF
   chmod +x "$fake_bin/gh"
 }
 
+# ── Subshell failure propagation ─────────────────────────────────────────────
+# Each test case runs in an isolated subshell.  Under set -euo pipefail, _assert
+# calls exit 1 which exits only the subshell — the parent process never sees the
+# failure unless we explicitly capture each subshell's exit code.
+_wake_test_failed=0
+
 # ── Test 1: not_before condition — not yet met (future timestamp) ────────────
 # Expect: records attempt, exits nonzero, does NOT call sgt-respond.
 
@@ -173,7 +179,7 @@ EOF
   _assert "not_before future: sgt-respond not called" "[[ ! -s '$TEST_ROOT/t1-respond-calls' ]]"
   _assert "not_before future: attempt recorded" \
     "[[ -f '$FLEET_DIR/$task/$repo/wake_attempts' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 2: not_before condition — met (past timestamp) ─────────────────────
 # Expect: calls sgt-respond with wake evidence, exits zero.
@@ -196,7 +202,7 @@ EOF
   _assert "not_before past: evidence non-empty" "[[ -s '$TEST_ROOT/t2-respond-input' ]]"
   _assert_file_contains "not_before past: evidence contains kind" \
     "$TEST_ROOT/t2-respond-input" "not_before"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 3: fleet_dependency condition — dependency done ─────────────────────
 # Expect: condition met → calls sgt-respond.
@@ -221,7 +227,7 @@ EOF
   _assert "fleet_dependency done: sgt-respond called" "[[ -s '$TEST_ROOT/t3-respond-calls' ]]"
   _assert_file_contains "fleet_dependency done: evidence contains kind" \
     "$TEST_ROOT/t3-respond-input" "fleet_dependency"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 4: fleet_dependency condition — dependency still in_progress ────────
 # Expect: records attempt, exits nonzero.
@@ -246,7 +252,7 @@ EOF
   _assert "fleet_dependency in_progress: exits nonzero" "[[ $exit_code -ne 0 ]]"
   _assert "fleet_dependency in_progress: sgt-respond not called" \
     "[[ ! -s '$TEST_ROOT/t4-respond-calls' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 5: td_dependency condition — td task done ───────────────────────────
 # Expect: condition met → calls sgt-respond.
@@ -277,7 +283,7 @@ EOF
   _assert "td_dependency done: sgt-respond called" "[[ -s '$TEST_ROOT/t5-respond-calls' ]]"
   _assert_file_contains "td_dependency done: evidence contains kind" \
     "$TEST_ROOT/t5-respond-input" "td_dependency"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 6: td_dependency condition — td task open ───────────────────────────
 # Expect: records attempt, exits nonzero.
@@ -307,7 +313,7 @@ EOF
   _assert "td_dependency open: exits nonzero" "[[ $exit_code -ne 0 ]]"
   _assert "td_dependency open: sgt-respond not called" \
     "[[ ! -s '$TEST_ROOT/t6-respond-calls' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 7: github_check condition — named check completed successfully ──────
 # Expect: condition met → calls sgt-respond.
@@ -338,7 +344,7 @@ EOF
   _assert "github_check success: sgt-respond called" "[[ -s '$TEST_ROOT/t7-respond-calls' ]]"
   _assert_file_contains "github_check success: evidence contains kind" \
     "$TEST_ROOT/t7-respond-input" "github_check"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 8: github_check condition — check still pending ─────────────────────
 # Expect: records attempt, exits nonzero.
@@ -368,7 +374,7 @@ EOF
   _assert "github_check pending: exits nonzero" "[[ $exit_code -ne 0 ]]"
   _assert "github_check pending: sgt-respond not called" \
     "[[ ! -s '$TEST_ROOT/t8-respond-calls' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 9: human_response condition ────────────────────────────────────────
 # Expect: sets needs_input so human can resume via sgt-respond.
@@ -390,7 +396,7 @@ EOF
     "[[ ! -s '$TEST_ROOT/t9-respond-calls' ]]"
   _assert "human_response: status set to needs_input" \
     "[[ \"\$(cat '$FLEET_DIR/$task/$repo/status' 2>/dev/null)\" == 'needs_input' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 10: expired deadline ────────────────────────────────────────────────
 # Expect: sets failed status with reason.
@@ -417,7 +423,7 @@ EOF
     "[[ \"\$status\" == failed:* ]]"
   _assert_file_contains "expired deadline: worktree status is failed" \
     "$wt/.sergeant-status" "failed:"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 11: max_attempts exceeded ──────────────────────────────────────────
 # Expect: sets needs_input with message.
@@ -446,7 +452,7 @@ EOF
     "[[ \"\$(cat '$wt/.sergeant-status' 2>/dev/null)\" == 'needs_input' ]]"
   _assert "max_attempts: message file written" \
     "[[ -s '$wt/.sergeant-message' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 12: unsupported condition kind ─────────────────────────────────────
 # Expect: sets needs_input (unsupported condition cannot be auto-evaluated).
@@ -466,7 +472,7 @@ EOF
   status="$(cat "$FLEET_DIR/$task/$repo/status" 2>/dev/null || true)"
   _assert "unsupported kind: status set to needs_input" \
     "[[ \"\$status\" == 'needs_input' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 13: invalid/suspicious fields rejected ──────────────────────────────
 # Expect: exits nonzero without calling sgt-respond; does NOT execute any command.
@@ -492,7 +498,7 @@ EOF
   _assert "suspicious field token: exits nonzero" "[[ $exit_code -ne 0 ]]"
   _assert "suspicious field token: sgt-respond not called" \
     "[[ ! -s '$TEST_ROOT/t13-respond-calls' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 14: deduplication — concurrent schedulers, same generation ──────────
 # Expect: second invocation detects active lock and exits without recording.
@@ -519,7 +525,7 @@ EOF
     "[[ ! -s '$TEST_ROOT/t14-respond-calls' ]]"
   # Clean up lock.
   rm -rf "$lock_dir"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 15: atomic attempt recording with backoff fields ───────────────────
 # Expect: wake_attempts, last_attempt_ts, backoff_jitter, next_not_before written.
@@ -552,7 +558,7 @@ EOF
   next="$(cat "$FLEET_DIR/$task/$repo/wake_next_not_before")"
   _assert "atomic attempt: next_not_before includes backoff" \
     "(( next >= last_ts + 60 ))"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 16: sgt-wake requires waiting status ────────────────────────────────
 # Expect: if worker is not in 'waiting' state, exits nonzero without resume.
@@ -576,7 +582,7 @@ EOF
   _assert "non-waiting status: exits nonzero" "[[ $exit_code -ne 0 ]]"
   _assert "non-waiting status: sgt-respond not called" \
     "[[ ! -s '$TEST_ROOT/t16-respond-calls' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 17: no wake condition file ─────────────────────────────────────────
 # Expect: exits nonzero cleanly (no condition to evaluate).
@@ -599,7 +605,7 @@ EOF
   _assert "no condition file: exits nonzero" "[[ $exit_code -ne 0 ]]"
   _assert "no condition file: sgt-respond not called" \
     "[[ ! -s '$TEST_ROOT/t17-respond-calls' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 18: github_check adapter error (gh returns error) ──────────────────
 # Expect: records adapter error in fleet diagnostic, exits nonzero.
@@ -628,7 +634,7 @@ EOF
     "[[ ! -s '$TEST_ROOT/t18-respond-calls' ]]"
   _assert "gh error: diagnostic recorded" \
     "[[ -s '$FLEET_DIR/$task/$repo/diagnostic' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 19: deployment condition — sets needs_input (adapter not yet wired) ─
 # Expect: deployment kind is known but auto-evaluation is unsupported → needs_input.
@@ -653,7 +659,7 @@ EOF
     "[[ \"\$status\" == 'needs_input' ]]"
   _assert "deployment: message written" \
     "[[ -s '$wt/.sergeant-message' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 21: sgt-interactive-worker exits cleanly with 'waiting' status ──────
 # Expect: worker exits with 'waiting' (not orphaned), fleet status = waiting.
@@ -688,7 +694,7 @@ AGENT
     "[[ \"\$fleet_status\" == 'waiting' ]]"
   _assert "interactive-worker waiting: no orphan diagnostic" \
     "[[ ! -s '$repo_state/diagnostic' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 22: sgt-dispatch brief template prohibits sleep and documents waiting
 # Expect: sgt-dispatch source contains the required wake guidance strings.
@@ -702,7 +708,7 @@ AGENT
     "waiting"
   _assert_file_contains "dispatch brief documents wake condition file" "$dispatch" \
     ".sergeant-wake-condition"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 23 (td-89a991 / GH #176): github_check resolves the owning repo ─────
 # The scheduler normally runs from wherever the coordinator invoked it, which is
@@ -742,7 +748,7 @@ JSON
     "[[ -s '$TEST_ROOT/t23-respond-calls' ]]"
   _assert "github_check from outside repo: queried the worker's own repository" \
     "[[ \"\$(cat '$slug_file' 2>/dev/null)\" == 'acme/widget' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 24 (td-89a991 / GH #176): gh failure is surfaced, not swallowed ─────
 # Expect: the real gh error text reaches the fleet diagnostic so a resolution
@@ -771,7 +777,7 @@ EOF
     "[[ ! -s '$TEST_ROOT/t24-respond-calls' ]]"
   _assert_file_contains "gh failure: stderr surfaced in diagnostic" \
     "$FLEET_DIR/$task/$repo/diagnostic" "Resource not accessible by integration"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 25 (td-cccc42 / GH #174): check_name may contain spaces ─────────────
 # Ordinary GitHub check names contain spaces and parentheses.  Expect: the
@@ -802,7 +808,7 @@ JSON
     "[[ -s '$TEST_ROOT/t25-respond-calls' ]]"
   _assert "check_name with spaces: ssh remote resolved to a slug" \
     "[[ \"\$(cat '$TEST_ROOT/t25-slug' 2>/dev/null)\" == 'acme/widget' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 26 (td-cccc42 / GH #174): metacharacters in check_name rejected ─────
 # Allowing spaces must not open a word-splitting or injection vector.
@@ -831,7 +837,7 @@ JSON
   # condition can reach any external command.
   _assert "check_name injection: rejected before GitHub was queried" \
     "[[ ! -e '$TEST_ROOT/t26-slug' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 26b (SPEC-001): ordinary check names are representable ───────────────
 # Real GitHub check names contain ampersands, brackets, and leading dots.
@@ -866,7 +872,7 @@ PY
     _assert "check_name '$name': sgt-respond called" \
       "[[ -s '$FAKE_RESPOND_CALLS' ]]"
   done
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 26c (STD-017): a present-but-empty field is named as empty ───────────
 
@@ -886,7 +892,7 @@ PY
   _assert "empty check_name: exits nonzero" "[[ $exit_code -ne 0 ]]"
   _assert_file_contains "empty check_name: reported as empty, not as bad characters" \
     "$err" "empty value"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 26d (RDY-007): a dash-leading value is not passed to gh as an option ──
 
@@ -911,7 +917,7 @@ PY
     "[[ ! -s '$TEST_ROOT/t26d-respond-calls' ]]"
   _assert "dash-leading run_id: gh was never invoked" \
     "[[ ! -e '$TEST_ROOT/t26d-slug' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 27 (td-cccc42 / GH #174): a failed named check must NOT wake ────────
 # Expect: no resume, and a conclusive non-success conclusion escalates to
@@ -944,7 +950,7 @@ JSON
     "[[ \"\$status\" == 'needs_input' ]]"
   _assert_file_contains "failed check: message names the conclusion" \
     "$wt/.sergeant-message" "failure"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 28 (td-cccc42 / GH #174): only the named check gates the wake ───────
 # A run with several checks must be evaluated on the selected check alone.
@@ -976,7 +982,7 @@ JSON
     "[[ -s '$TEST_ROOT/t28-respond-calls' ]]"
   _assert_file_contains "named check success: evidence names the check" \
     "$TEST_ROOT/t28-respond-input" "unit-tests"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 29 (td-cccc42 / GH #174): a skipped named check must NOT wake ───────
 # Same run, but the selected check is the skipped one.
@@ -1004,7 +1010,7 @@ JSON
   _assert "skipped check: exits nonzero" "[[ $exit_code -ne 0 ]]"
   _assert "skipped check: sgt-respond NOT called" \
     "[[ ! -s '$TEST_ROOT/t29-respond-calls' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 30 (td-cccc42 / GH #174): absent named check is distinct from failed ─
 # A completed run that never produced the named check is an adapter error, not
@@ -1034,7 +1040,7 @@ JSON
     "[[ ! -s '$TEST_ROOT/t30-respond-calls' ]]"
   _assert_file_contains "absent check: reported as not found" \
     "$FLEET_DIR/$task/$repo/diagnostic" "not found"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 31 (td-cccc42 / GH #174): an ambiguous named check is reported ──────
 
@@ -1063,7 +1069,7 @@ JSON
     "[[ ! -s '$TEST_ROOT/t31-respond-calls' ]]"
   _assert_file_contains "ambiguous check: reported as ambiguous" \
     "$FLEET_DIR/$task/$repo/diagnostic" "ambiguous"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 32 (td-cccc42 / GH #174): check_name is required (fail closed) ──────
 # Without a selected check there is nothing to evaluate, so the adapter must
@@ -1089,7 +1095,7 @@ JSON
     "[[ ! -s '$TEST_ROOT/t32-respond-calls' ]]"
   _assert "missing check_name: GitHub was never queried" \
     "[[ ! -e '$TEST_ROOT/t32-slug' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 33 (td-cccc42 / GH #174): named check still running is unmet ────────
 # A pending check must record an attempt and keep waiting — not escalate.
@@ -1120,7 +1126,7 @@ JSON
     "[[ \"\$(cat '$FLEET_DIR/$task/$repo/status' 2>/dev/null)\" == 'waiting' ]]"
   _assert "pending check: attempt recorded" \
     "[[ -f '$FLEET_DIR/$task/$repo/wake_attempts' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 34 (td-cccc42): every non-success conclusion is refused ─────────────
 # The criterion names failure, cancelled, skipped, and timed_out explicitly.
@@ -1151,7 +1157,7 @@ JSON
     _assert "conclusion $conclusion: escalated to needs_input" \
       "[[ \"\$(cat '$FLEET_DIR/$task/$repo/status' 2>/dev/null)\" == 'needs_input' ]]"
   done
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 35 (RDY-003): permanently unsatisfiable conditions escalate ─────────
 # A condition that can never be met must not be retried until the attempt budget
@@ -1181,7 +1187,7 @@ JSON
     "[[ ! -f '$FLEET_DIR/$task/$repo/wake_attempts' ]]"
   _assert_file_contains "legacy condition: message states the remedy" \
     "$wt/.sergeant-message" "check_name"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 (
   # An absent named check on a completed run can never appear.
@@ -1204,7 +1210,7 @@ JSON
   _assert "absent check on completed run: exits nonzero" "[[ $exit_code -ne 0 ]]"
   _assert "absent check on completed run: escalated, not retried forever" \
     "[[ \"\$(cat '$FLEET_DIR/$task/$repo/status' 2>/dev/null)\" == 'needs_input' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 36 (STD-015): only a real github.com remote binds the query ─────────
 # A host that merely ends in github.com must not be rewritten into a slug and
@@ -1233,7 +1239,7 @@ JSON
     "[[ -s '$TEST_ROOT/t36-slug.args' ]]"
   _assert "non-github remote: no --repo was passed" \
     "! grep -q -- '--repo' '$TEST_ROOT/t36-slug.args'"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 37 (RDY-009): a malformed run response never satisfies the condition ─
 
@@ -1258,6 +1264,10 @@ JSON
     "[[ ! -s '$TEST_ROOT/t37-respond-calls' ]]"
   _assert "malformed run JSON: still waiting (transient adapter fault)" \
     "[[ \"\$(cat '$FLEET_DIR/$task/$repo/status' 2>/dev/null)\" == 'waiting' ]]"
-)
+) || _wake_test_failed=$((_wake_test_failed + 1))
 
+if [[ "$_wake_test_failed" -gt 0 ]]; then
+  printf 'FAIL: %d sgt-wake test case(s) failed\n' "$_wake_test_failed" >&2
+  exit 1
+fi
 printf 'sgt-wake: all tests passed\n'

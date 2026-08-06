@@ -80,7 +80,34 @@ _STRICT_VALUE_PATTERN='^([A-Za-z0-9._/:][A-Za-z0-9._/:-]*)?$'
 # quoted printf data — it is never eval'd, word-split, or expanded by the shell.
 _CHECK_NAME_VALUE_PATTERN='^[]A-Za-z0-9._/:@#,+()[&!%?*=][]A-Za-z0-9 ._/:@#,+()[&!%?*=-]*$'
 
-declare -A _COND=()
+# Bash 3.2-compatible key-value store for wake condition fields.
+# Uses two parallel arrays: _COND_KEYS and _COND_VALS.
+# Use _cond_get <field> to look up a value.
+_COND_KEYS=()
+_COND_VALS=()
+
+_cond_set() {
+  local k="$1" v="$2" i
+  for i in "${!_COND_KEYS[@]}"; do
+    if [[ "${_COND_KEYS[$i]}" == "$k" ]]; then
+      _COND_VALS[$i]="$v"
+      return
+    fi
+  done
+  _COND_KEYS+=("$k")
+  _COND_VALS+=("$v")
+}
+
+_cond_get() {
+  local k="$1" i
+  for i in "${!_COND_KEYS[@]}"; do
+    if [[ "${_COND_KEYS[$i]}" == "$k" ]]; then
+      printf '%s' "${_COND_VALS[$i]}"
+      return
+    fi
+  done
+  # return empty string when key absent
+}
 
 while IFS='=' read -r field value; do
   # Strip whitespace.
@@ -128,14 +155,16 @@ while IFS='=' read -r field value; do
     exit 1
   fi
 
-  _COND["$field"]="$value"
+  _cond_set "$field" "$value"
 done < "$condition_file"
 
-kind="${_COND[kind]:-}"
-generation="${_COND[generation]:-}"
-deadline="${_COND[deadline]:-}"
-max_attempts="${_COND[max_attempts]:-}"
-backoff_base="${_COND[backoff_base]:-30}"
+kind="$(_cond_get kind)"
+generation="$(_cond_get generation)"
+deadline="$(_cond_get deadline)"
+max_attempts="$(_cond_get max_attempts)"
+backoff_base="${backoff_base:-30}"
+backoff_base_raw="$(_cond_get backoff_base)"
+[[ -n "$backoff_base_raw" ]] && backoff_base="$backoff_base_raw"
 
 [[ -n "$kind" ]]       || _die "Wake condition is missing required field: kind"
 [[ -n "$generation" ]] || _die "Wake condition is missing required field: generation"
@@ -369,7 +398,7 @@ if len(matches) == 1:
 case "$kind" in
 
   not_before)
-    not_before="${_COND[not_before]:-}"
+    not_before="$(_cond_get not_before)"
     if [[ -z "$not_before" || ! "$not_before" =~ ^[0-9]+$ ]]; then
       _result_error "not_before field missing or invalid"
     elif (( now >= not_before )); then
@@ -380,8 +409,8 @@ case "$kind" in
     ;;
 
   fleet_dependency)
-    dep_task="${_COND[task_id]:-}"
-    dep_repo="${_COND[repo]:-}"
+    dep_task="$(_cond_get task_id)"
+    dep_repo="$(_cond_get repo)"
     if [[ -z "$dep_task" || -z "$dep_repo" ]]; then
       _result_error "fleet_dependency requires task_id and repo fields"
     else
@@ -395,7 +424,7 @@ case "$kind" in
     ;;
 
   td_dependency)
-    td_task="${_COND[td_task_id]:-}"
+    td_task="$(_cond_get td_task_id)"
     if [[ -z "$td_task" ]]; then
       _result_error "td_dependency requires td_task_id field"
     elif ! command -v td >/dev/null 2>&1; then
@@ -421,8 +450,8 @@ case "$kind" in
     # concluded successfully.  Both run_id and check_name are required: without
     # a selected check there is nothing to evaluate, and accepting any completed
     # run would wake a worker on a failed check.
-    run_id="${_COND[run_id]:-}"
-    check_name="${_COND[check_name]:-}"
+    run_id="$(_cond_get run_id)"
+    check_name="$(_cond_get check_name)"
     if [[ -z "$run_id" || ! "$run_id" =~ ^[0-9]+$ ]]; then
       # A malformed condition cannot become well-formed by waiting.
       _result_escalate "github_check requires a numeric run_id field; add it to .sergeant-wake-condition and resume with sgt-respond"

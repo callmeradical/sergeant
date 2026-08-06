@@ -17,6 +17,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
+# ── State isolation (required by global-state-isolation-test.sh) ──────────────
+export SERGEANT_FLEET="$TEST_ROOT/fleet"
+export SERGEANT_DRAIN_DIR="$TEST_ROOT/drain"
+export SERGEANT_CONFIG="$TEST_ROOT/sergeant-config"
+mkdir -p "$SERGEANT_FLEET" "$SERGEANT_DRAIN_DIR" "$SERGEANT_CONFIG"
+
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 # ── usage surface ─────────────────────────────────────────────────────────────
