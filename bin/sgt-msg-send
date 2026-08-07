@@ -15,6 +15,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-msg-lib.sh
+source "$SCRIPT_DIR/_sgt-msg-lib.sh"
 
 _die() { echo "error: $*" >&2; exit 1; }
 
@@ -41,29 +43,21 @@ done
 [[ -z "$TO_AGENT"   ]] && _die "--to <agent|broadcast> is required"
 [[ -z "$BODY"       ]] && _die "message body is required"
 [[ -z "$PROJECT"    ]] && _die "<project> is required"
+_sgt_msg_valid_project "$PROJECT" || \
+  _die "invalid project name: must match [A-Za-z0-9][A-Za-z0-9._-]* and contain no '..'"
 
 DB_DIR="${SERGEANT_MSG_DB_DIR:-$HOME/.sergeant/messages}"
 mkdir -p "$DB_DIR"
-DB="$DB_DIR/${PROJECT}.db"
+DB="$(_sgt_msg_db_path "$DB_DIR" "$PROJECT")"
 
-sqlite3 "$DB" > /dev/null <<'SQL'
-PRAGMA journal_mode=WAL;
-CREATE TABLE IF NOT EXISTS messages (
-  id          TEXT PRIMARY KEY,
-  project     TEXT NOT NULL,
-  from_agent  TEXT NOT NULL,
-  to_agent    TEXT NOT NULL,
-  body        TEXT NOT NULL,
-  sent_at     TEXT NOT NULL,
-  read_at     TEXT
-);
-SQL
+_sgt_msg_schema | sqlite3 "$DB" > /dev/null
 
 MSG_ID="$(date +%s%N 2>/dev/null || date +%s)$(echo $RANDOM | sha256sum 2>/dev/null | head -c 8 || echo $RANDOM)"
 MSG_ID="$(printf '%s' "$MSG_ID" | sha256sum | head -c 16)"
 SENT_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 sqlite3 -cmd ".timeout 1000" "$DB" "INSERT INTO messages (id, project, from_agent, to_agent, body, sent_at, read_at)
-  VALUES ('${MSG_ID}', '${PROJECT}', '${FROM_AGENT}', '${TO_AGENT}', '${BODY}', '${SENT_AT}', NULL);"
+  VALUES ('$(_sgt_msg_q "$MSG_ID")', '$(_sgt_msg_q "$PROJECT")', '$(_sgt_msg_q "$FROM_AGENT")',
+          '$(_sgt_msg_q "$TO_AGENT")', '$(_sgt_msg_q "$BODY")', '$(_sgt_msg_q "$SENT_AT")', NULL);"
 
 echo "$MSG_ID"

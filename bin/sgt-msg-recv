@@ -15,6 +15,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-msg-lib.sh
+source "$SCRIPT_DIR/_sgt-msg-lib.sh"
+
 _die() { echo "error: $*" >&2; exit 1; }
 
 [[ $# -lt 1 ]] && _die "Usage: sgt-msg-recv <project> --agent <agent> [--unread-only] [--mark-read] [--limit N]"
@@ -38,22 +42,19 @@ done
 
 [[ -z "$AGENT" ]]   && _die "--agent <agent> is required"
 [[ -z "$PROJECT" ]] && _die "<project> is required"
+_sgt_msg_valid_project "$PROJECT" || \
+  _die "invalid project name: must match [A-Za-z0-9][A-Za-z0-9._-]* and contain no '..'"
+_sgt_msg_valid_uint "$LIMIT" || _die "--limit must be a non-negative integer"
 
 DB_DIR="${SERGEANT_MSG_DB_DIR:-$HOME/.sergeant/messages}"
-DB="$DB_DIR/${PROJECT}.db"
+DB="$(_sgt_msg_db_path "$DB_DIR" "$PROJECT")"
 
 if [[ ! -f "$DB" ]]; then
   echo "[]"
   exit 0
 fi
 
-sqlite3 "$DB" > /dev/null <<'SQL'
-PRAGMA journal_mode=WAL;
-CREATE TABLE IF NOT EXISTS messages (
-  id TEXT PRIMARY KEY, project TEXT NOT NULL, from_agent TEXT NOT NULL,
-  to_agent TEXT NOT NULL, body TEXT NOT NULL, sent_at TEXT NOT NULL, read_at TEXT
-);
-SQL
+_sgt_msg_schema | sqlite3 "$DB" > /dev/null
 
 UNREAD_CLAUSE=""
 [[ $UNREAD_ONLY -eq 1 ]] && UNREAD_CLAUSE="AND read_at IS NULL"
@@ -61,7 +62,7 @@ UNREAD_CLAUSE=""
 ROWS=$(sqlite3 -cmd ".timeout 1000" -json "$DB" \
   "SELECT id, project, from_agent, to_agent, body, sent_at, COALESCE(read_at,'') as read_at
    FROM messages
-   WHERE (to_agent = '${AGENT}' OR to_agent = 'broadcast')
+   WHERE (to_agent = '$(_sgt_msg_q "$AGENT")' OR to_agent = 'broadcast')
    ${UNREAD_CLAUSE}
    ORDER BY sent_at ASC
    LIMIT ${LIMIT};")
@@ -71,7 +72,7 @@ echo "${ROWS:-[]}"
 if [[ $MARK_READ -eq 1 ]]; then
   NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   sqlite3 "$DB" \
-    "UPDATE messages SET read_at='${NOW}'
-     WHERE (to_agent='${AGENT}' OR to_agent='broadcast')
+    "UPDATE messages SET read_at='$(_sgt_msg_q "$NOW")'
+     WHERE (to_agent='$(_sgt_msg_q "$AGENT")' OR to_agent='broadcast')
      AND read_at IS NULL ${UNREAD_CLAUSE};"
 fi

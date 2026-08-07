@@ -9,6 +9,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-msg-lib.sh
+source "$SCRIPT_DIR/_sgt-msg-lib.sh"
+
 _die() { echo "error: $*" >&2; exit 1; }
 
 [[ $# -lt 2 ]] && _die "Usage: sgt-msg-ack <project> <message-id>"
@@ -16,15 +20,18 @@ _die() { echo "error: $*" >&2; exit 1; }
 PROJECT="$1"
 MSG_ID="$2"
 
+_sgt_msg_valid_project "$PROJECT" || \
+  _die "invalid project name: must match [A-Za-z0-9][A-Za-z0-9._-]* and contain no '..'"
+
 DB_DIR="${SERGEANT_MSG_DB_DIR:-$HOME/.sergeant/messages}"
-DB="$DB_DIR/${PROJECT}.db"
+DB="$(_sgt_msg_db_path "$DB_DIR" "$PROJECT")"
 
 [[ ! -f "$DB" ]] && _die "no message database for project: $PROJECT"
 
 NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-ROWS=$(sqlite3 -cmd ".timeout 1000" "$DB" "SELECT COUNT(*) FROM messages WHERE id='${MSG_ID}';")
+ROWS=$(sqlite3 -cmd ".timeout 1000" "$DB" "SELECT COUNT(*) FROM messages WHERE id='$(_sgt_msg_q "$MSG_ID")';")
 [[ "$ROWS" -eq 0 ]] && _die "message not found: $MSG_ID" && exit 1
 
-sqlite3 -cmd ".timeout 1000" "$DB" "UPDATE messages SET read_at='${NOW}' WHERE id='${MSG_ID}';"
+sqlite3 -cmd ".timeout 1000" "$DB" "UPDATE messages SET read_at='$(_sgt_msg_q "$NOW")' WHERE id='$(_sgt_msg_q "$MSG_ID")';"
 echo "acked $MSG_ID"
