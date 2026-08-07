@@ -330,7 +330,14 @@ var tools = []toolDef{
 	},
 }
 
+var version = "dev"
+
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+		fmt.Println("sergeant-mcp version", version)
+		os.Exit(0)
+	}
+
 	s := server.NewMCPServer(
 		"sergeant",
 		"1.0.0",

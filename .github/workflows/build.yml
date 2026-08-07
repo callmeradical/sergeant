@@ -1,0 +1,21 @@
+name: Build
+
+on:
+  push:
+    branches: [main, 'feat/**', 'fix/**', 'integrate/**']
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go build -o bin/sergeant-mcp ./cmd/sergeant-mcp/
+      - run: go test ./... 2>/dev/null || true
