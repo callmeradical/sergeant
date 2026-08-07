@@ -19,6 +19,7 @@
 #   0  resumed successfully (or confirmed worker pane still alive)
 #   2  nothing to resume (td task closed and no open PR detected)
 #   3  mismatch (td closed but open PR exists), or --dry-run with work to do
+#   4  resume held by an active drain
 #   1  error
 
 set -euo pipefail
@@ -26,6 +27,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-drain.sh
+source "$SCRIPT_DIR/_sgt-drain.sh"
 
 [[ $# -ge 2 ]] || _die "Usage: sgt-session-resume <task-id> <repo> [--dry-run] [--force] [--agent <name>] [--model <tuple>]"
 
@@ -358,7 +361,25 @@ fi
 
 # ── Launch fresh worker pane ─────────────────────────────────────────────────
 
-# Ensure tmux session exists.
+# Drain admission. A resume spawns a worker exactly like dispatch and respond
+# do, so it must honour the same cooperative drain contract: while a drain is
+# active, workers finish their current turn and exit, and nothing new starts.
+# The lock is held across new-window so a drain cannot be issued in the window
+# between the admission check and the pane existing.
+_sgt_drain_read_project_from_brief "$FLEET_DIR/$TASK_ID"
+_SGT_RESUME_DRAIN_FD=9
+if ! _sgt_drain_lock_acquire_fd "$_SGT_RESUME_DRAIN_FD" 2>/dev/null; then
+  _die "cannot acquire drain admission lock"
+fi
+if ! _sgt_drain_check_admission_locked "${SGT_PROJECT:-}"; then
+  _sgt_drain_lock_release_fd "$_SGT_RESUME_DRAIN_FD"
+  echo "sgt-session-resume: resume held by drain [project: ${SGT_PROJECT:-global}]." >&2
+  echo "Undrain with: sgt-undrain ${SGT_PROJECT:---global}" >&2
+  exit 4
+fi
+
+# Ensure tmux session exists. Deliberately after the drain gate so a held
+# resume does not touch the tmux server at all.
 tmux new-session -d -s "$TMUX_SESSION" -n "sergeant" 2>/dev/null || true
 
 WORKER_RUN_CMD="$(_sgt_worker_command \
@@ -367,8 +388,11 @@ WORKER_RUN_CMD="$(_sgt_worker_command \
 new_pane=""
 if ! new_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" \
     -n "$WINDOW_NAME" -c "$worktree" "$WORKER_RUN_CMD")"; then
+  _sgt_drain_lock_release_fd "$_SGT_RESUME_DRAIN_FD"
   _die "tmux failed to launch resumed worker for $TASK_ID/$REPO"
 fi
+# Worker pane is live — release drain admission.
+_sgt_drain_lock_release_fd "$_SGT_RESUME_DRAIN_FD"
 [[ -n "$new_pane" ]] || _die "tmux returned no pane for resumed worker $TASK_ID/$REPO"
 
 # ── Atomically update fleet pane/identity metadata ───────────────────────────
