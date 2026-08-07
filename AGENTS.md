@@ -105,6 +105,7 @@ name without the `bin/` prefix (e.g. `sgt-dispatch`, `sgt-watch`).
 | `bin/sgt-msg-recv <project> --agent <agent> [--unread-only] [--mark-read]` | `sgt-msg-recv` | Read messages for an agent; returns JSON array |
 | `bin/sgt-msg-ack <project> <message-id>` | `sgt-msg-ack` | Acknowledge (mark read) a specific message by ID |
 | `bin/sgt-msg-list <project> [--all] [--agent <agent>]` | `sgt-msg-list` | List inbox messages in a human-readable table |
+| `bin/sgt-session-resume <project> <repo> [options]` | `sgt-session-resume` | Resume an orphaned worker session: injects unread inbox messages, spawns fresh agent in existing worktree |
 
 Use the bare command when it resolves on `PATH`; otherwise run the matching
 script from this repository's `bin/` directory. Fall back to manual operations
@@ -146,7 +147,7 @@ When the user brings you a task:
 1. **Load context** — run `sgt-context <project>` and identify the owning repository or repositories, inherited instructions, configured paths, and cross-repository dependencies before selecting an execution mode.
 2. **Check the queue** — run `sgt-td-list <project>` and reuse a matching task in direct or dispatch mode; create a task only when no canonical task exists.
 3. **Choose execution mode** — direct for explicit single-repo work in this session; dispatch for cross-repo, parallel, or explicitly delegated work.
-4. **Reconcile existing state** — run `sgt-watch --sync-all`, then inspect active workers, branches, worktrees, retained gates, and handoffs before starting. Resume or take over preserved work rather than creating duplicates.
+4. **Reconcile existing state** — run `sgt-watch --sync-all`, then inspect active workers, branches, worktrees, retained gates, and handoffs before starting. Resume or take over preserved work rather than creating duplicates. If a worker's pane is gone but its td task is still open, run `sgt-session-resume <project> <repo>` before dispatching a replacement. This avoids duplicating work on an existing branch.
 5. **Confirm only unresolved decisions that change scope or risk** — ask when repository ownership, user-visible behavior, security/privacy policy, data retention, destructive action, or an irreversible tradeoff is unknown. Do not ask the user to reconfirm an execution mode, plan, or tradeoff already recorded in the conversation or td.
 6. **Execute**:
    - Direct: start the td task and implement through tests, review, and delivery.

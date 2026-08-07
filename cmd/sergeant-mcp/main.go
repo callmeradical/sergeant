@@ -322,6 +322,12 @@ var tools = []toolDef{
 		description: "List messages in a project inbox in a human-readable table. Shows id, from, to, sent_at, read status, and body preview.",
 		argsDesc:    `CLI args: <project> [--all] [--agent <agent>]`,
 	},
+	{
+		scriptName:  "sgt-session-resume",
+		toolName:    "sgt-session-resume",
+		description: "Detect and recover an orphaned worker session where the td task is still open but the tmux pane is dead. Collects unread inbox messages, writes a resume brief into the existing worktree, and spawns a fresh interactive worker.",
+		argsDesc:    `CLI args: <task-id> <repo> [--dry-run] [--force] [--agent opencode|goose|claude] [--model <tuple>]`,
+	},
 }
 
 func main() {
