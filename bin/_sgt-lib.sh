@@ -532,8 +532,25 @@ _sgt_managed_coordinator_pane() {
 _sgt_path_mode() {
   stat -c '%a' -- "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
 }
-_sgt_fd_mode() {
-  stat -L -c '%a' -- "$1" 2>/dev/null || stat -L -f '%Lp' "$1" 2>/dev/null
+# _sgt_path_inode_dev <path>
+# Returns "inode:device" for the given path.  Used instead of /dev/fd identity
+# checks because macOS fdescfs reports a read-only-opened fd's mode as the
+# access-masked value (e.g. 0400 for a file opened O_RDONLY whose real mode is
+# 0600) and assigns /dev/fd/N a different device number than the underlying
+# file, so both `stat /dev/fd/N` mode checks and `-ef /dev/fd/N` comparisons
+# are unreliable on macOS.
+#
+# Comparing the inode:device tuple of the original path before and after
+# opening the fd detects the common case of a single swap (attacker replaces
+# the path between the pre-check and the open, or between the open and the
+# read).  It is slightly weaker than a path-to-fd comparison on Linux
+# (/proc/self/fd/N) for a precise double-swap attack (swap in before exec,
+# swap back before post-open stat), but the files read through this helper are
+# owned by the current user and live in the fleet directory; a peer process
+# that could execute a double-swap in the microsecond window could already
+# read those files directly.
+_sgt_path_inode_dev() {
+  stat -c '%i:%d' -- "$1" 2>/dev/null || stat -f '%i:%d' -- "$1" 2>/dev/null
 }
 _sgt_legacy_identity_mode() {
   case "$1" in
@@ -542,27 +559,28 @@ _sgt_legacy_identity_mode() {
   esac
 }
 _sgt_read_owned_file() {
-  local path="$1" mode fd_mode value
+  local path="$1" mode pre_id post_id value
   [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
   mode="$(_sgt_path_mode "$path")" || return 1
   [[ "$mode" == "600" ]] || return 1
+  # Record inode:device before opening so we can detect a path swap after open.
+  pre_id="$(_sgt_path_inode_dev "$path")" || return 1
   exec 9< "$path" || return 1
-  fd_mode="$(_sgt_fd_mode /dev/fd/9)" || {
-    exec 9<&-
-    return 1
-  }
-  if [[ "$fd_mode" != "600" || ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
-    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
+  # Post-open path re-check: verify the path still names the same inode we
+  # vetted above and that mode/ownership haven't changed under us.
+  mode="$(_sgt_path_mode "$path")" || { exec 9<&-; return 1; }
+  post_id="$(_sgt_path_inode_dev "$path")" || { exec 9<&-; return 1; }
+  if [[ "$mode" != "600" || ! -f "$path" || -L "$path" || ! -O "$path" || \
+    "$post_id" != "$pre_id" ]]; then
     exec 9<&-
     return 1
   fi
   value="$(cat <&9)" || { exec 9<&-; return 1; }
-  fd_mode="$(_sgt_fd_mode /dev/fd/9)" || {
-    exec 9<&-
-    return 1
-  }
-  if [[ "$fd_mode" != "600" || ! -O /dev/fd/9 || -L "$path" || \
-    ! "$path" -ef /dev/fd/9 ]]; then
+  # Post-read path re-check: ensure nothing changed while we were reading.
+  mode="$(_sgt_path_mode "$path")" || { exec 9<&-; return 1; }
+  post_id="$(_sgt_path_inode_dev "$path")" || { exec 9<&-; return 1; }
+  if [[ "$mode" != "600" || ! -O "$path" || -L "$path" || \
+    "$post_id" != "$pre_id" ]]; then
     exec 9<&-
     return 1
   fi
@@ -570,18 +588,21 @@ _sgt_read_owned_file() {
   printf '%s\n' "$value"
 }
 _sgt_read_matching_legacy_pane_identity() {
-  local path="$1" actual="$2" mode fd_mode value migrated candidate current_mode
+  local path="$1" actual="$2" mode pre_id post_id value migrated candidate current_mode
   [[ -n "$actual" ]] || return 1
   [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
   mode="$(_sgt_path_mode "$path")" || return 1
   _sgt_legacy_identity_mode "$mode" || return 1
+  pre_id="$(_sgt_path_inode_dev "$path")" || return 1
   exec 9< "$path" || return 1
-  fd_mode="$(_sgt_fd_mode /dev/fd/9)" || {
+  # Post-open: verify path still names the same inode and mode we vetted.
+  post_id="$(_sgt_path_inode_dev "$path")" || { exec 9<&-; return 1; }
+  if [[ ! -f "$path" || -L "$path" || ! -O "$path" || "$post_id" != "$pre_id" ]]; then
     exec 9<&-
     return 1
-  }
-  if [[ "$fd_mode" != "$mode" || ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
-    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
+  fi
+  current_mode="$(_sgt_path_mode "$path")" || { exec 9<&-; return 1; }
+  if [[ "$current_mode" != "$mode" ]]; then
     exec 9<&-
     return 1
   fi
@@ -602,14 +623,14 @@ _sgt_read_matching_legacy_pane_identity() {
     exec 9<&-
     return 1
   }
-  fd_mode="$(_sgt_fd_mode /dev/fd/9)" || {
+  post_id="$(_sgt_path_inode_dev "$path")" || {
     rm -f "$candidate"
     exec 9<&-
     return 1
   }
-  if [[ "$current_mode" != "$mode" || "$fd_mode" != "$mode" || \
-    ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
-    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
+  # Pre-mv: verify path still names the same inode and mode before replacing.
+  if [[ "$current_mode" != "$mode" || "$post_id" != "$pre_id" || \
+    ! -f "$path" || -L "$path" || ! -O "$path" ]]; then
     rm -f "$candidate"
     exec 9<&-
     return 1
@@ -625,33 +646,45 @@ _sgt_read_matching_legacy_pane_identity() {
   printf '%s\n' "$migrated"
 }
 _sgt_read_same_owned_files() {
-  local first="$1" second="$2" first_mode second_mode first_fd_mode second_fd_mode
-  local first_value second_value
+  local first="$1" second="$2" first_mode second_mode first_id second_id
+  local post_first_id post_second_id first_value second_value
   [[ -f "$first" && ! -L "$first" && -O "$first" && \
     -f "$second" && ! -L "$second" && -O "$second" ]] || return 1
   first_mode="$(_sgt_path_mode "$first")" || return 1
   second_mode="$(_sgt_path_mode "$second")" || return 1
   [[ "$first_mode" == "600" && "$second_mode" == "600" ]] || return 1
+  first_id="$(_sgt_path_inode_dev "$first")" || return 1
+  second_id="$(_sgt_path_inode_dev "$second")" || return 1
+  # Both files must share the same inode (hardlink pair).
+  [[ "$first_id" == "$second_id" ]] || return 1
   exec 8< "$first" || return 1
   exec 9< "$second" || { exec 8<&-; return 1; }
-  first_fd_mode="$(_sgt_fd_mode /dev/fd/8)"
-  second_fd_mode="$(_sgt_fd_mode /dev/fd/9)"
-  if [[ "$first_fd_mode" != "600" || "$second_fd_mode" != "600" || \
-    ! -f /dev/fd/8 || ! -f /dev/fd/9 || ! -O /dev/fd/8 || ! -O /dev/fd/9 || \
-    ! "$first" -ef /dev/fd/8 || ! "$second" -ef /dev/fd/9 || \
-    ! /dev/fd/8 -ef /dev/fd/9 || -L "$first" || -L "$second" ]]; then
+  # Post-open: re-verify both paths still name the same inodes, modes, and
+  # that they still form a hardlink pair.
+  post_first_id="$(_sgt_path_inode_dev "$first")" || { exec 8<&- 9<&-; return 1; }
+  post_second_id="$(_sgt_path_inode_dev "$second")" || { exec 8<&- 9<&-; return 1; }
+  first_mode="$(_sgt_path_mode "$first")" || { exec 8<&- 9<&-; return 1; }
+  second_mode="$(_sgt_path_mode "$second")" || { exec 8<&- 9<&-; return 1; }
+  if [[ "$first_mode" != "600" || "$second_mode" != "600" || \
+    ! -f "$first" || ! -f "$second" || ! -O "$first" || ! -O "$second" || \
+    -L "$first" || -L "$second" || \
+    "$post_first_id" != "$first_id" || "$post_second_id" != "$second_id" || \
+    "$post_first_id" != "$post_second_id" ]]; then
     exec 8<&- 9<&-
     return 1
   fi
   first_value="$(cat <&8)" || { exec 8<&- 9<&-; return 1; }
   second_value="$(cat <&9)" || { exec 8<&- 9<&-; return 1; }
-  first_fd_mode="$(_sgt_fd_mode /dev/fd/8)"
-  second_fd_mode="$(_sgt_fd_mode /dev/fd/9)"
-  if [[ "$first_fd_mode" != "600" || "$second_fd_mode" != "600" || \
-    ! -f /dev/fd/8 || ! -f /dev/fd/9 || ! -O /dev/fd/8 || ! -O /dev/fd/9 || \
+  # Post-read: re-verify nothing changed while we were reading.
+  post_first_id="$(_sgt_path_inode_dev "$first")" || { exec 8<&- 9<&-; return 1; }
+  post_second_id="$(_sgt_path_inode_dev "$second")" || { exec 8<&- 9<&-; return 1; }
+  first_mode="$(_sgt_path_mode "$first")" || { exec 8<&- 9<&-; return 1; }
+  second_mode="$(_sgt_path_mode "$second")" || { exec 8<&- 9<&-; return 1; }
+  if [[ "$first_mode" != "600" || "$second_mode" != "600" || \
+    ! -f "$first" || ! -f "$second" || ! -O "$first" || ! -O "$second" || \
     -L "$first" || -L "$second" || \
-    ! "$first" -ef /dev/fd/8 || ! "$second" -ef /dev/fd/9 || \
-    ! /dev/fd/8 -ef /dev/fd/9 ]]; then
+    "$post_first_id" != "$first_id" || "$post_second_id" != "$second_id" || \
+    "$post_first_id" != "$post_second_id" ]]; then
     exec 8<&- 9<&-
     return 1
   fi
