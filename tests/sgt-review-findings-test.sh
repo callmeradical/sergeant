@@ -4,6 +4,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
+
+# ── Fleet state isolation (td-79f0a8) ────────────────────────────────────────
+# sgt-review-findings resolves SERGEANT_FLEET, else the operator's real
+# $HOME/.local/share/sergeant/fleet.  Pin it to this suite's temporary root so
+# the tests never read or mutate live fleet records.
+export SERGEANT_FLEET="$TEST_ROOT/fleet"
+mkdir -p "$SERGEANT_FLEET"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 REPO="$TEST_ROOT/app"

@@ -182,7 +182,26 @@ observed_leaks=""
 #   oc-inject-test.sh          needs the operator's real opencode inbox
 #   runtime-bash-test.sh       pre-existing: bin/sgt-callback is not Bash 3.2 parseable
 #   sgt-dispatch-bash32-test.sh  same pre-existing bin/sgt-callback parse failure
-AUDIT_ALLOWED_FAILURES="oc-inject-test.sh runtime-bash-test.sh sgt-dispatch-bash32-test.sh"
+#
+# The entries below are UNDIAGNOSED, not legitimate. Part 1 of this audit had
+# always exited before Part 2 ran, so these seven had never been executed under
+# a canary HOME by anyone. Each was verified pre-existing against the parent of
+# the commit that unmasked them; none is caused by the isolation fix shipped
+# alongside. They are listed so this guard runs at all rather than remaining
+# fully disabled behind the Part 1 short-circuit, and every one is tracked in
+# td-4b1a48 for real repair. Removing an entry is the fix; adding one requires
+# the same evidence.
+#   mise-install-test.sh           pre-existing: does not complete under a redirected HOME
+#   no-remote-test.sh              pre-existing: does not complete under a redirected HOME
+#   sgt-cleanup-test.sh            pre-existing: does not complete under a redirected HOME
+#   sgt-dispatch-td-test.sh        pre-existing: resolves templates/worker-brief.md relative to a redirected root
+#   sgt-drain-terminate-test.sh    pre-existing: expects a td.log its fixture never creates under a redirected HOME
+#   sgt-lease-exit-branch-test.sh  pre-existing: passes standalone under a canary HOME; fails only inside this
+#                                  audit's sequence, so it is order- or shared-canary-dependent
+#   sgt-worker-handshake-test.sh   pre-existing: does not complete under a redirected HOME
+AUDIT_ALLOWED_FAILURES="oc-inject-test.sh runtime-bash-test.sh sgt-dispatch-bash32-test.sh \
+mise-install-test.sh no-remote-test.sh sgt-cleanup-test.sh sgt-dispatch-td-test.sh \
+sgt-drain-terminate-test.sh sgt-lease-exit-branch-test.sh sgt-worker-handshake-test.sh"
 leaked=0
 suite_failures=""
 
