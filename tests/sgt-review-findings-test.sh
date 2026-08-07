@@ -1158,4 +1158,40 @@ run_router "$TEST_ROOT/empty-field.json"
   exit 1
 }
 
+# ── GH #197: two independent review invocations may reuse a local finding ID ─
+# When two separate review passes run on the same parent task and branch, each
+# with a different fleet task ID, they must be able to reuse finding IDs (e.g.
+# "spec-1") without the second invocation being refused as "diverged".
+
+printf '{"findings":[{"id":"spec-1","severity":"warning","disposition":"actionable","summary":"First invocation finding","evidence":"file:10","paths":["file"],"acceptance_criteria":"ac","recommendation":"r"}]}\n' \
+  > "$TEST_ROOT/inv1.json"
+printf '{"findings":[{"id":"spec-1","severity":"info","disposition":"actionable","summary":"Second invocation different finding","evidence":"file:20","paths":["file"],"acceptance_criteria":"ac2","recommendation":"r2"}]}\n' \
+  > "$TEST_ROOT/inv2.json"
+
+# First invocation with task-id fleet-inv-1
+ROUTER_TASK_ID=fleet-inv-1 run_router "$TEST_ROOT/inv1.json"
+[[ "$status" -eq 0 ]] || { printf 'GH#197: first invocation failed: %s\n' "$output" >&2; exit 1; }
+inv1_td="$(grep '^td-created-' "$TEST_ROOT/td-ids" | tail -1)"
+[[ -n "$inv1_td" ]] || { printf 'GH#197: first invocation created no td task\n' >&2; exit 1; }
+
+# Simulate that the first finding exists in td (with its dedup key and digest).
+# We need the stored description for the second invocation's td list to see.
+inv1_desc="$(cat "$TEST_ROOT/td-desc" 2>/dev/null || true)"
+# Second invocation: different fleet task ID, same local finding ID "spec-1", different content.
+# The router must create a NEW td task (distinct dedup key) rather than refusing.
+inv1_list_entry="{\"id\":\"$inv1_td\",\"status\":\"open\",\"defer_until\":\"\",\"labels\":\"independent-review,finding,standards\",\"description\":$(python3 -c "import sys,json; print(json.dumps(open('$TEST_ROOT/td-desc').read()))" 2>/dev/null || printf '""')}"
+TD_LIST_RESULT="[$inv1_list_entry]" ROUTER_TASK_ID=fleet-inv-2 \
+  run_router "$TEST_ROOT/inv2.json"
+[[ "$status" -eq 0 ]] || {
+  printf 'GH#197: second invocation with same local finding ID was refused: %s\n' "$output" >&2
+  exit 1
+}
+inv2_td="$(grep '^td-created-' "$TEST_ROOT/td-ids" | tail -1)"
+[[ "$inv2_td" != "$inv1_td" ]] || {
+  printf 'GH#197: second invocation reused the first task instead of creating a new one\n' >&2
+  exit 1
+}
+
+printf 'GH#197: distinct invocations with reused finding IDs route independently\n'
+
 printf 'sgt-review-findings: ok\n'

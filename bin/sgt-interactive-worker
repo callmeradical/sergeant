@@ -268,21 +268,39 @@ _record_progress() {
   date +%s > "$REPO_STATE/progress_ts" 2>/dev/null || true
 }
 
-# _watch_progress: background loop that updates progress_ts whenever the agent
-# changes observable sentinel files (.sergeant-status, .sergeant-message).
-# This gives the stall classifier evidence of real agent activity rather than
-# only the startup timestamp.  Also writes .sergeant-drain-signal when a drain
-# becomes active so the agent can checkpoint cooperatively before exit.
+# _watch_progress: background loop that updates progress_ts.
+#
+# Previously progress_ts was only updated when .sergeant-status or
+# .sergeant-message changed (sentinel change).  On tmux 3.7b+ #{pane_activity}
+# can be empty, so the snapshot falls back to progress_ts — and a live worker
+# running tool calls without changing sentinels would appear idle after the
+# SERGEANT_SNAPSHOT_RECENT_SECONDS window (GH #206).
+#
+# Fix: record progress on every loop tick while the worker is in_progress.
+# This keeps progress_ts current as long as the supervisor process is alive,
+# regardless of sentinel activity.  The stall classifier still uses a longer
+# window (SERGEANT_STALL_SECONDS) and still requires actual tool activity
+# beyond just process liveness for that check.
+#
+# Also writes .sergeant-drain-signal when a drain becomes active so the agent
+# can checkpoint cooperatively before exit.
 _watch_progress() {
-  local prev_sentinel curr_sentinel drain_tmp
+  local prev_sentinel curr_sentinel drain_tmp current_status
   prev_sentinel="$(cat "$WORKTREE/.sergeant-status" "$WORKTREE/.sergeant-message" 2>/dev/null || true)"
   while :; do
     sleep "${SGT_PROGRESS_INTERVAL:-30}"
     curr_sentinel="$(cat "$WORKTREE/.sergeant-status" "$WORKTREE/.sergeant-message" 2>/dev/null || true)"
-    if [[ "$curr_sentinel" != "$prev_sentinel" ]]; then
+    # Update progress_ts on every tick while in_progress, not only on sentinel
+    # changes.  This keeps the snapshot active-witness window current when
+    # #{pane_activity} is unavailable (tmux 3.7b, issue GH #206).
+    current_status="$(tr -d '\n' < "$WORKTREE/.sergeant-status" 2>/dev/null || echo 'in_progress')"
+    if [[ "$current_status" == "in_progress" ]]; then
       _record_progress
-      prev_sentinel="$curr_sentinel"
+    elif [[ "$curr_sentinel" != "$prev_sentinel" ]]; then
+      # For non-in_progress transitions (e.g. blocked, waiting) still record.
+      _record_progress
     fi
+    prev_sentinel="$curr_sentinel"
     # Drain signal: write .sergeant-drain-signal so the agent can react
     # cooperatively to an active global or project drain without requiring a
     # SIGTERM.  Idempotent: skip when the file already exists.

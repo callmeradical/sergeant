@@ -3,7 +3,20 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_sgt_rf_real_dir() {
+  local src="$1" target dir _link _i=0
+  target="$src"
+  while [[ -L "$target" && $_i -lt 20 ]]; do
+    _link="$(readlink "$target" 2>/dev/null || true)"
+    [[ -n "$_link" ]] || break
+    if [[ "$_link" == /* ]]; then target="$_link"; else target="$(dirname "$target")/$_link"; fi
+    _i=$(( _i + 1 ))
+  done
+  dir="$(dirname "$target")"
+  (cd "$dir" && pwd -P)
+}
+SCRIPT_DIR="$(_sgt_rf_real_dir "${BASH_SOURCE[0]}")"
+unset -f _sgt_rf_real_dir
 # shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
 # shellcheck source=bin/_sgt-response-lock.sh
@@ -521,11 +534,14 @@ for ((offset=0; offset<${#fields[@]}; offset+=SGT_REVIEW_FIELD_STRIDE)); do
     reported_severity_line="
 Reported severity: $reported_severity"
 
-  # Scope the dedup marker to the originating mission and branch. Reviewers emit
-  # generic finding ids ("spec-1", "STANDARDS-001"), so an axis/source/id-only
-  # marker collides across unrelated sessions and the update path then overwrites
-  # a historical card's evidence irrecoverably (td-52d7c2).
-  marker="independent-review-finding:$REPO:$AXIS:$SOURCE:$finding_id:$PARENT_TASK:$BRANCH"
+  # Scope the dedup marker to the originating mission, branch, AND the fleet
+  # task ID so that two independent review invocations for the same parent+branch
+  # can reuse a reviewer-local finding ID (e.g. "spec-1", "STANDARDS-001")
+  # without colliding.  Within one invocation, exact retries still converge to
+  # the same task (same TASK_ID → same marker → same dedup key).  Across
+  # invocations, distinct TASK_IDs produce distinct markers so the router creates
+  # separate tasks rather than refusing the second finding as "diverged" (GH #197).
+  marker="independent-review-finding:$REPO:$AXIS:$SOURCE:$finding_id:$PARENT_TASK:$BRANCH:$TASK_ID"
   body="Independent review finding.
 
 Review axis: $AXIS

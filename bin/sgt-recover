@@ -23,7 +23,20 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_sgt_recover_real_dir() {
+  local src="$1" target dir _link _i=0
+  target="$src"
+  while [[ -L "$target" && $_i -lt 20 ]]; do
+    _link="$(readlink "$target" 2>/dev/null || true)"
+    [[ -n "$_link" ]] || break
+    if [[ "$_link" == /* ]]; then target="$_link"; else target="$(dirname "$target")/$_link"; fi
+    _i=$(( _i + 1 ))
+  done
+  dir="$(dirname "$target")"
+  (cd "$dir" && pwd -P)
+}
+SCRIPT_DIR="$(_sgt_recover_real_dir "${BASH_SOURCE[0]}")"
+unset -f _sgt_recover_real_dir
 # shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
 # shellcheck source=bin/_sgt-response-lock.sh

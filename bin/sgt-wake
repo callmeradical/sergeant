@@ -33,7 +33,20 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_sgt_wake_real_dir() {
+  local src="$1" target dir _link _i=0
+  target="$src"
+  while [[ -L "$target" && $_i -lt 20 ]]; do
+    _link="$(readlink "$target" 2>/dev/null || true)"
+    [[ -n "$_link" ]] || break
+    if [[ "$_link" == /* ]]; then target="$_link"; else target="$(dirname "$target")/$_link"; fi
+    _i=$(( _i + 1 ))
+  done
+  dir="$(dirname "$target")"
+  (cd "$dir" && pwd -P)
+}
+SCRIPT_DIR="$(_sgt_wake_real_dir "${BASH_SOURCE[0]}")"
+unset -f _sgt_wake_real_dir
 FLEET_DIR="${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
 
 _die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -72,13 +85,22 @@ _SECRET_PATTERN='(token|password|key|secret|auth|credential|passwd|apikey|api_ke
 # or td(1), and a dash-leading value would be read there as an option rather
 # than as data.
 _STRICT_VALUE_PATTERN='^([A-Za-z0-9._/:][A-Za-z0-9._/:-]*)?$'
-# GitHub check names are human-authored, so the allowlist admits what real names
-# contain: space, and . _ / : @ # , + ( ) [ ] & ! % ? * = -
-# It rejects $ backtick \ ' " ; | & pipelines, < > redirection, { } ~ and every
-# control character.  Glob characters (* ? [ ]) are admitted, which is safe only
-# because the value is used exclusively as quoted argv to python3/gh and as
-# quoted printf data — it is never eval'd, word-split, or expanded by the shell.
-_CHECK_NAME_VALUE_PATTERN='^[]A-Za-z0-9._/:@#,+()[&!%?*=][]A-Za-z0-9 ._/:@#,+()[&!%?*=-]*$'
+# GitHub check names are human-authored and may contain any printable Unicode
+# character that GitHub allows (e.g. "Build · test" with U+00B7 middle dot,
+# matrix names with parentheses, slashes, and accented characters).  We use a
+# *negative* character class: any byte sequence is accepted unless it contains
+# a shell-special character ($, backtick, \, ', ", ;, |, <, >, {, }), a
+# leading '-' (argv option confusion), a control character (U+0000–U+001F,
+# U+007F), or a newline.  This is safe because check_name is used exclusively
+# as a quoted argument to python3/gh and as quoted printf data — it is never
+# eval'd, word-split, or expanded by the shell.
+#
+# Bash's ERE =~ treats the pattern as extended-regex. The negative class
+# [^...] matches any character not listed; we require at least one such
+# character (the + quantifier) and forbid a leading '-'.
+# The first character must not be '-' (would be taken as a flag); all
+# subsequent characters follow the same exclusion list.
+_CHECK_NAME_VALUE_PATTERN='^[^$`\\'\''";<>{}|[:cntrl:]-][^$`\\'\''";<>{}|[:cntrl:]]*$'
 
 # Bash 3.2-compatible key-value store for wake condition fields.
 # Uses two parallel arrays: _COND_KEYS and _COND_VALS.
@@ -569,6 +591,27 @@ case "$condition_result" in
     ;;
 
 esac
+
+# ── Gate-generation pre-flight (GH #202) ────────────────────────────────────
+# The wake condition's `generation` field records the gate generation when the
+# condition was written.  The worker's current gate generation is stored in
+# .sergeant-gate-generation.  If the two differ, the condition belongs to a
+# previous wait cycle — the gate has advanced since the condition was set, so
+# sgt-respond will reject it anyway.  Failing here with an actionable message
+# is safer than discovering the mismatch mid-resume when sgt-respond has
+# already mutated state.
+#
+# We only check when the condition carries a numeric generation (all conditions
+# written since this contract was added will).  A missing or non-numeric
+# generation in the condition is allowed through and will be validated by
+# sgt-respond, which has the definitive gate-generation check.
+
+current_gate_generation="$(tr -d '\n' < "$worktree/.sergeant-gate-generation" 2>/dev/null || true)"
+if [[ "$generation" =~ ^[1-9][0-9]*$ && -n "$current_gate_generation" ]]; then
+  if [[ "$current_gate_generation" != "$generation" ]]; then
+    _die "Gate generation mismatch: wake condition was written at generation $generation but the worker is now at generation $current_gate_generation. The condition belongs to a prior wait cycle and cannot resume this gate. Inspect the worker state with: sgt-watch $TASK_ID --snapshot --repo $REPO"
+  fi
+fi
 
 # ── Condition met — resume via sgt-respond ───────────────────────────────────
 
