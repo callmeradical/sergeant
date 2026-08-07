@@ -681,7 +681,8 @@ _sgt_read_same_owned_files() {
   first_mode="$(_sgt_path_mode "$first")" || { exec 8<&- 9<&-; return 1; }
   second_mode="$(_sgt_path_mode "$second")" || { exec 8<&- 9<&-; return 1; }
   if [[ "$first_mode" != "600" || "$second_mode" != "600" || \
-    ! -O "$first" || ! -O "$second" || -L "$first" || -L "$second" || \
+    ! -f "$first" || ! -f "$second" || ! -O "$first" || ! -O "$second" || \
+    -L "$first" || -L "$second" || \
     "$post_first_id" != "$first_id" || "$post_second_id" != "$second_id" || \
     "$post_first_id" != "$post_second_id" ]]; then
     exec 8<&- 9<&-
