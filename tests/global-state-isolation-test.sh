@@ -96,6 +96,27 @@ done
 }
 printf 'global-state isolation: static declarations present: ok\n'
 
+# ── Part 2 admission ─────────────────────────────────────────────────────────
+#
+# Part 2 runs EVERY suite under a canary HOME. That needs a full toolchain
+# (yq, git, tmux, python3, jq) and takes ~8 minutes.
+#
+# It cannot run everywhere the static audit can. scripts/hooks/pre-push drives
+# this through test:docker:drain in two images, and the Bash 3.2 pass is the
+# pinned upstream bash:3.2 Alpine image mounted read-only, which ships none of
+# that toolchain (verified: yq, git, tmux, python3 and jq are all absent). The
+# Debian image in Dockerfile.test is missing yq. Running Part 2 there does not
+# find leaks, it just reports tooling gaps as suite failures.
+#
+# So Part 2 is opt-in. Every environment still gets Part 1, which is the cheap
+# structural guarantee. Set SGT_ISOLATION_DYNAMIC=1 where the toolchain exists
+# to get the leak proof. A purpose-built Bash 3.2 toolchain image would let it
+# run everywhere; that is tracked separately.
+if [[ "${SGT_ISOLATION_DYNAMIC:-0}" != "1" ]]; then
+  printf 'global-state isolation: dynamic leak audit skipped (set SGT_ISOLATION_DYNAMIC=1 to run it)\n'
+  exit 0
+fi
+
 # ── Part 2: dynamic leak audit against a canary HOME ─────────────────────────
 
 CANARY="$TEST_ROOT/canary-home"
