@@ -341,4 +341,41 @@ if printf '%s' "$list_output" | grep -q 'Active tasks:'; then
   exit 1
 fi
 
+# ── 10. pane_activity unavailable: recent progress_ts keeps busy:true (GH #206) ─
+# When #{pane_activity} returns empty (tmux 3.7b), the snapshot falls back to
+# progress_ts.  A progress_ts written within the recent window must keep the
+# worker as a verified active witness even when pane_activity is zero/empty.
+
+read -r state10 wt10 <<<"$(make_worker t10-no-pane-activity in_progress '%95' "$(date +%s)")"
+# Simulate tmux 3.7b: PANE_ACTIVITY=0 means pane_activity is empty/zero.
+export PANE_ACTIVITY=0
+json10="$(env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet" "PANE_ACTIVITY=0" \
+  "IDENTITY_DIR=$IDENTITY_DIR" "LIVE_PANES=$LIVE_PANES" \
+  "$ROOT_DIR/bin/sgt-watch" --snapshot)"
+assert_valid_shape "$json10" "no-pane-activity snapshot"
+if [[ "$(field "$json10" 'repr(d["busy"])')" != "True" ]]; then
+  printf 'GH#206: pane_activity=0 but recent progress_ts: expected busy=true, got:\n%s\n' \
+    "$json10" >&2
+  exit 1
+fi
+if [[ "$(field "$json10" 'd["basis"]')" != "verified_active_witness" ]]; then
+  printf 'GH#206: recent progress_ts should be a verified_active_witness, got: %s\n' \
+    "$(field "$json10" 'd["basis"]')" >&2
+  exit 1
+fi
+
+# Stale progress_ts (older than the window) + no pane_activity = inconclusive.
+printf '%s\n' "$(( $(date +%s) - 99999 ))" > "$state10/progress_ts"
+json10b="$(env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet" "PANE_ACTIVITY=0" \
+  "IDENTITY_DIR=$IDENTITY_DIR" "LIVE_PANES=$LIVE_PANES" \
+  "SERGEANT_SNAPSHOT_RECENT_SECONDS=300" \
+  "$ROOT_DIR/bin/sgt-watch" --snapshot)"
+assert_valid_shape "$json10b" "no-pane-activity stale snapshot"
+if [[ "$(field "$json10b" 'repr(d["busy"])')" != "None" ]]; then
+  printf 'GH#206: stale progress_ts + no pane_activity: expected busy=null, got:\n%s\n' \
+    "$json10b" >&2
+  exit 1
+fi
+unset PANE_ACTIVITY
+
 printf 'bounded read-only fleet snapshot: ok\n'

@@ -3,7 +3,20 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_sgt_watch_real_dir() {
+  local src="$1" target dir _link _i=0
+  target="$src"
+  while [[ -L "$target" && $_i -lt 20 ]]; do
+    _link="$(readlink "$target" 2>/dev/null || true)"
+    [[ -n "$_link" ]] || break
+    if [[ "$_link" == /* ]]; then target="$_link"; else target="$(dirname "$target")/$_link"; fi
+    _i=$(( _i + 1 ))
+  done
+  dir="$(dirname "$target")"
+  (cd "$dir" && pwd -P)
+}
+SCRIPT_DIR="$(_sgt_watch_real_dir "${BASH_SOURCE[0]}")"
+unset -f _sgt_watch_real_dir
 # shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
 # shellcheck source=bin/_sgt-response-lock.sh
@@ -348,7 +361,13 @@ _recycle_terminal_worker() {
     return 0
   fi
   if ! _pane_is_supervisor "$pane" "$repo_dir"; then
-    printf 'terminal worker pane identity does not match; refusing recycle: %s\n' "$pane" > "$repo_dir/diagnostic"
+    # Write a diagnostic that names a supported next step (issue #203).
+    # sgt-cleanup retires the record without killing an unrelated pane.
+    local _task_id _repo_name
+    _task_id="$(basename "$(dirname "$repo_dir")")"
+    _repo_name="$(basename "$repo_dir")"
+    printf 'terminal worker pane identity does not match; refusing recycle (pane: %s). Run: sgt-cleanup %s\n' \
+      "$pane" "$_task_id" > "$repo_dir/diagnostic"
     return 1
   fi
   if ! tmux kill-pane -t "$pane" 2>/dev/null ||
@@ -569,7 +588,19 @@ _sync_task() {
     case "$wt_status" in
       done|failed:*|drained)
         if ! _recycle_terminal_worker "$repo_dir"; then
-          printf 'WARNING: terminal worker was not recycled: %s\n' "$repo_dir" >&2
+          # Emit a warning with a supported recovery command so the operator
+          # knows the exact next step (issue #203).
+          local _warn_task _warn_repo _warn_recycle_diagnostic
+          _warn_task="$(basename "$(dirname "$repo_dir")")"
+          _warn_repo="$(basename "$repo_dir")"
+          _warn_recycle_diagnostic="$(cat "$repo_dir/diagnostic" 2>/dev/null || true)"
+          printf 'WARNING: terminal worker was not recycled: %s/%s\n' \
+            "$_warn_task" "$_warn_repo" >&2
+          if [[ -n "$_warn_recycle_diagnostic" ]]; then
+            printf '  reason: %s\n' "$_warn_recycle_diagnostic" >&2
+          fi
+          printf '  to retire manually: sgt-cleanup %s\n' "$_warn_task" >&2
+          printf '  to inspect state:   sgt-watch %s --snapshot\n' "$_warn_task" >&2
         fi
         ;;
     esac

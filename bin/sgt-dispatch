@@ -37,7 +37,24 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve SCRIPT_DIR through symlinks so bundled resources (templates/) are
+# found relative to the real distribution even when the script is reached via a
+# symlink in a bin/ directory on PATH.  _sgt_real_dir is defined in _sgt-lib.sh
+# which we haven't sourced yet, so we inline the portable resolution here.
+_sgt_dispatch_real_dir() {
+  local src="$1" target dir _link _i=0
+  target="$src"
+  while [[ -L "$target" && $_i -lt 20 ]]; do
+    _link="$(readlink "$target" 2>/dev/null || true)"
+    [[ -n "$_link" ]] || break
+    if [[ "$_link" == /* ]]; then target="$_link"; else target="$(dirname "$target")/$_link"; fi
+    _i=$(( _i + 1 ))
+  done
+  dir="$(dirname "$target")"
+  (cd "$dir" && pwd -P)
+}
+SCRIPT_DIR="$(_sgt_dispatch_real_dir "${BASH_SOURCE[0]}")"
+unset -f _sgt_dispatch_real_dir
 # shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
 # shellcheck source=bin/_sgt-intent.sh
@@ -468,6 +485,54 @@ PY
 if ! $DRY_RUN; then
   [[ -x "$SCRIPT_DIR/sgt-watch" ]] || _die "sgt-watch is required for fleet reconciliation"
   "$SCRIPT_DIR/sgt-watch" --sync-all >/dev/null
+fi
+
+# ── Review-router contract preflight (GH #204) ───────────────────────────────
+# Verify the sgt-review-findings binary that the worker will invoke accepts the
+# current axis and severity vocabulary before any worktree, td task, or fleet
+# state is created.  A version mismatch causes a late failure after review work
+# has already completed; this preflight catches it early with an actionable error.
+#
+# Probe: pass --axis and --source with a deliberately absent --input so the
+# router exits with a usage error (2) rather than requiring a real artifact.
+# We only verify that the router accepts the axis without an "unsupported axis"
+# or "unknown axis" error.  Dry-run skips so CI stays unblocked without an
+# installed router.
+_sgt_preflight_review_router() {
+  local router_cmd router_usage axis sev
+  if command -v sgt-review-findings >/dev/null 2>&1; then
+    router_cmd="sgt-review-findings"
+  elif [[ -x "$SCRIPT_DIR/sgt-review-findings" ]]; then
+    router_cmd="$SCRIPT_DIR/sgt-review-findings"
+  else
+    return 0  # Router absent from PATH: fail at runtime when the worker calls it.
+  fi
+
+  # Read usage output (the router exits non-zero on no args, which is expected).
+  router_usage="$("$router_cmd" 2>&1 || true)"
+  # Sanity-check that we got usage text and not an environment error.
+  if ! printf '%s' "$router_usage" | grep -qF 'sgt-review-findings'; then
+    _die "review-router preflight: could not read usage from installed sgt-review-findings (got: $(printf '%s' "$router_usage" | head -1)). Update or reinstall Sergeant."
+  fi
+
+  # Verify each required axis appears in the router's usage output.
+  # shellcheck disable=SC2046  # deliberate word splitting
+  for axis in $SGT_REVIEW_AXES_REQUIRED; do
+    if ! printf '%s' "$router_usage" | grep -qF "$axis"; then
+      _die "review-router contract mismatch: installed sgt-review-findings does not list axis '$axis' in its usage output. This dispatch was generated with a newer Sergeant but the installed router is from an older version. Update sgt-review-findings to match this Sergeant distribution."
+    fi
+  done
+
+  # Verify the canonical severities appear in the usage output.
+  # shellcheck disable=SC2046  # deliberate word splitting
+  for sev in $SGT_REVIEW_SEVERITIES; do
+    if ! printf '%s' "$router_usage" | grep -qF "$sev"; then
+      _die "review-router contract mismatch: installed sgt-review-findings does not list severity '$sev' in its usage output. Update or reinstall Sergeant."
+    fi
+  done
+}
+if ! $DRY_RUN; then
+  _sgt_preflight_review_router
 fi
 
 # ── Drain admission check ─────────────────────────────────────────────────────

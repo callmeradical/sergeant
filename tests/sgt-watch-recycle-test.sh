@@ -277,6 +277,27 @@ grep -Fq 'identity' "$state/diagnostic" || {
   exit 1
 }
 
+# ── 7b. Identity mismatch warning is actionable (GH #203) ────────────────────
+# The WARNING emitted to stderr must name a supported next step (sgt-cleanup).
+
+mismatch_stderr="$TEST_ROOT/t7b-stderr"
+read -r state7b wt7b <<<"$(make_worker mismatch-7b done '%61')"
+printf '0|%%61|9999|777777|someone-else\n' > "$state7b/pane_identity"
+chmod 600 "$state7b/pane_identity"
+env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet" \
+  "$ROOT_DIR/bin/sgt-watch" --sync task-mismatch-7b >/dev/null 2>"$mismatch_stderr" || true
+grep -Fq 'sgt-cleanup' "$mismatch_stderr" || {
+  printf 'identity mismatch warning does not name sgt-cleanup:\n%s\n' \
+    "$(cat "$mismatch_stderr")" >&2
+  exit 1
+}
+# The diagnostic file must also reference the recovery command.
+grep -Fq 'sgt-cleanup' "$state7b/diagnostic" || {
+  printf 'identity mismatch diagnostic file does not name sgt-cleanup:\n%s\n' \
+    "$(cat "$state7b/diagnostic" 2>/dev/null || true)" >&2
+  exit 1
+}
+
 # ── 8. An absent pane records evidence without claiming a kill ───────────────
 
 read -r state wt <<<"$(make_worker absent done '%70')"

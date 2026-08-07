@@ -4,7 +4,33 @@
 #
 # Provides: _die, _info, _require_*, _resolve_path, and the SGT_* env vars.
 
-_SGT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# _sgt_real_dir <path>
+# Resolve the real directory of a file, following symlinks portably across
+# Linux (readlink -f), macOS (no -f but has BASH_SOURCE path expansion), and
+# Windows/Git-Bash (realpath or readlink -f both available).  Falls back to the
+# raw dirname when no resolver is available — that is the existing behaviour.
+# This function is defined before SGT_LIB_LOADED is checked so that the lib dir
+# itself is correctly resolved even on the first load.
+_sgt_real_dir() {
+  local src="$1" target dir
+  target="$src"
+  # Chase up to 20 layers of symlinks; bail on a loop.
+  local _i=0
+  while [[ -L "$target" && $_i -lt 20 ]]; do
+    local _link
+    _link="$(readlink "$target" 2>/dev/null || true)"
+    [[ -n "$_link" ]] || break
+    if [[ "$_link" == /* ]]; then
+      target="$_link"
+    else
+      target="$(dirname "$target")/$_link"
+    fi
+    _i=$(( _i + 1 ))
+  done
+  dir="$(dirname "$target")"
+  (cd "$dir" && pwd -P)
+}
+_SGT_LIB_DIR="$(_sgt_real_dir "${BASH_SOURCE[0]}")"
 # shellcheck source=bin/_sgt-bash-version.sh
 source "$_SGT_LIB_DIR/_sgt-bash-version.sh"
 _sgt_require_running_bash || return 1
@@ -541,18 +567,34 @@ _sgt_legacy_identity_mode() {
     *) return 1 ;;
   esac
 }
+_sgt_inode() {
+  stat -f '%i' -- "$1" 2>/dev/null || stat -c '%i' -- "$1" 2>/dev/null
+}
 _sgt_read_owned_file() {
-  local path="$1" mode fd_mode value
+  local path="$1" mode fd_mode value inode_path inode_fd
   [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
   mode="$(_sgt_path_mode "$path")" || return 1
   [[ "$mode" == "600" ]] || return 1
+  inode_path="$(_sgt_inode "$path")" || return 1
+  [[ -n "$inode_path" ]] || return 1
   exec 9< "$path" || return 1
   fd_mode="$(_sgt_fd_mode /dev/fd/9)" || {
     exec 9<&-
     return 1
   }
-  if [[ "$fd_mode" != "600" || ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
-    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
+  # On Linux an O_RDONLY fd reports mode 600 (same as the file); on macOS it
+  # reports 400 (write bit stripped because the fd is read-only).  Accept both
+  # — what matters is the on-disk mode (verified above) and the inode check.
+  case "$fd_mode" in
+    600|400) : ;;  # expected values on Linux and macOS respectively
+    *) exec 9<&-; return 1 ;;
+  esac
+  # Verify the fd refers to the same inode as the path.  The bash [[ -ef ]]
+  # operator behaves incorrectly on macOS for /dev/fd/N in subshells; compare
+  # inodes via stat instead, which is portable across Linux, macOS, and WSL.
+  inode_fd="$(_sgt_inode /dev/fd/9)" || { exec 9<&-; return 1; }
+  if [[ "$inode_fd" != "$inode_path" || ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
+    ! -f "$path" || -L "$path" || ! -O "$path" ]]; then
     exec 9<&-
     return 1
   fi
@@ -561,8 +603,12 @@ _sgt_read_owned_file() {
     exec 9<&-
     return 1
   }
-  if [[ "$fd_mode" != "600" || ! -O /dev/fd/9 || -L "$path" || \
-    ! "$path" -ef /dev/fd/9 ]]; then
+  case "$fd_mode" in
+    600|400) : ;;
+    *) exec 9<&-; return 1 ;;
+  esac
+  inode_fd="$(_sgt_inode /dev/fd/9)" || { exec 9<&-; return 1; }
+  if [[ "$inode_fd" != "$inode_path" || ! -O /dev/fd/9 || -L "$path" ]]; then
     exec 9<&-
     return 1
   fi
@@ -571,17 +617,21 @@ _sgt_read_owned_file() {
 }
 _sgt_read_matching_legacy_pane_identity() {
   local path="$1" actual="$2" mode fd_mode value migrated candidate current_mode
+  local inode_path inode_fd
   [[ -n "$actual" ]] || return 1
   [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
   mode="$(_sgt_path_mode "$path")" || return 1
   _sgt_legacy_identity_mode "$mode" || return 1
+  inode_path="$(_sgt_inode "$path")" || return 1
+  [[ -n "$inode_path" ]] || return 1
   exec 9< "$path" || return 1
   fd_mode="$(_sgt_fd_mode /dev/fd/9)" || {
     exec 9<&-
     return 1
   }
-  if [[ "$fd_mode" != "$mode" || ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
-    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
+  inode_fd="$(_sgt_inode /dev/fd/9)" || { exec 9<&-; return 1; }
+  if [[ "$inode_fd" != "$inode_path" || ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
+    ! -f "$path" || -L "$path" || ! -O "$path" ]]; then
     exec 9<&-
     return 1
   fi
@@ -607,9 +657,10 @@ _sgt_read_matching_legacy_pane_identity() {
     exec 9<&-
     return 1
   }
-  if [[ "$current_mode" != "$mode" || "$fd_mode" != "$mode" || \
+  inode_fd="$(_sgt_inode /dev/fd/9)" || { rm -f "$candidate"; exec 9<&-; return 1; }
+  if [[ "$current_mode" != "$mode" || "$inode_fd" != "$inode_path" || \
     ! -f /dev/fd/9 || ! -O /dev/fd/9 || \
-    ! -f "$path" || -L "$path" || ! -O "$path" || ! "$path" -ef /dev/fd/9 ]]; then
+    ! -f "$path" || -L "$path" || ! -O "$path" ]]; then
     rm -f "$candidate"
     exec 9<&-
     return 1
@@ -626,32 +677,41 @@ _sgt_read_matching_legacy_pane_identity() {
 }
 _sgt_read_same_owned_files() {
   local first="$1" second="$2" first_mode second_mode first_fd_mode second_fd_mode
-  local first_value second_value
+  local first_value second_value first_inode second_inode fd8_inode fd9_inode
   [[ -f "$first" && ! -L "$first" && -O "$first" && \
     -f "$second" && ! -L "$second" && -O "$second" ]] || return 1
   first_mode="$(_sgt_path_mode "$first")" || return 1
   second_mode="$(_sgt_path_mode "$second")" || return 1
   [[ "$first_mode" == "600" && "$second_mode" == "600" ]] || return 1
+  first_inode="$(_sgt_inode "$first")" || return 1
+  second_inode="$(_sgt_inode "$second")" || return 1
+  # The two files must refer to the same inode (same content, same security context).
+  [[ "$first_inode" == "$second_inode" && -n "$first_inode" ]] || return 1
   exec 8< "$first" || return 1
   exec 9< "$second" || { exec 8<&-; return 1; }
-  first_fd_mode="$(_sgt_fd_mode /dev/fd/8)"
-  second_fd_mode="$(_sgt_fd_mode /dev/fd/9)"
-  if [[ "$first_fd_mode" != "600" || "$second_fd_mode" != "600" || \
-    ! -f /dev/fd/8 || ! -f /dev/fd/9 || ! -O /dev/fd/8 || ! -O /dev/fd/9 || \
-    ! "$first" -ef /dev/fd/8 || ! "$second" -ef /dev/fd/9 || \
-    ! /dev/fd/8 -ef /dev/fd/9 || -L "$first" || -L "$second" ]]; then
+  first_fd_mode="$(_sgt_fd_mode /dev/fd/8)" || { exec 8<&- 9<&-; return 1; }
+  second_fd_mode="$(_sgt_fd_mode /dev/fd/9)" || { exec 8<&- 9<&-; return 1; }
+  fd8_inode="$(_sgt_inode /dev/fd/8)" || { exec 8<&- 9<&-; return 1; }
+  fd9_inode="$(_sgt_inode /dev/fd/9)" || { exec 8<&- 9<&-; return 1; }
+  case "$first_fd_mode" in 600|400) : ;; *) exec 8<&- 9<&-; return 1 ;; esac
+  case "$second_fd_mode" in 600|400) : ;; *) exec 8<&- 9<&-; return 1 ;; esac
+  if [[ ! -f /dev/fd/8 || ! -f /dev/fd/9 || ! -O /dev/fd/8 || ! -O /dev/fd/9 || \
+    "$fd8_inode" != "$first_inode" || "$fd9_inode" != "$second_inode" || \
+    -L "$first" || -L "$second" ]]; then
     exec 8<&- 9<&-
     return 1
   fi
   first_value="$(cat <&8)" || { exec 8<&- 9<&-; return 1; }
   second_value="$(cat <&9)" || { exec 8<&- 9<&-; return 1; }
-  first_fd_mode="$(_sgt_fd_mode /dev/fd/8)"
-  second_fd_mode="$(_sgt_fd_mode /dev/fd/9)"
-  if [[ "$first_fd_mode" != "600" || "$second_fd_mode" != "600" || \
-    ! -f /dev/fd/8 || ! -f /dev/fd/9 || ! -O /dev/fd/8 || ! -O /dev/fd/9 || \
+  first_fd_mode="$(_sgt_fd_mode /dev/fd/8)" || { exec 8<&- 9<&-; return 1; }
+  second_fd_mode="$(_sgt_fd_mode /dev/fd/9)" || { exec 8<&- 9<&-; return 1; }
+  fd8_inode="$(_sgt_inode /dev/fd/8)" || { exec 8<&- 9<&-; return 1; }
+  fd9_inode="$(_sgt_inode /dev/fd/9)" || { exec 8<&- 9<&-; return 1; }
+  case "$first_fd_mode" in 600|400) : ;; *) exec 8<&- 9<&-; return 1 ;; esac
+  case "$second_fd_mode" in 600|400) : ;; *) exec 8<&- 9<&-; return 1 ;; esac
+  if [[ ! -f /dev/fd/8 || ! -f /dev/fd/9 || ! -O /dev/fd/8 || ! -O /dev/fd/9 || \
     -L "$first" || -L "$second" || \
-    ! "$first" -ef /dev/fd/8 || ! "$second" -ef /dev/fd/9 || \
-    ! /dev/fd/8 -ef /dev/fd/9 ]]; then
+    "$fd8_inode" != "$first_inode" || "$fd9_inode" != "$second_inode" ]]; then
     exec 8<&- 9<&-
     return 1
   fi

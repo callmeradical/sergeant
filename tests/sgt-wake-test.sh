@@ -875,6 +875,68 @@ PY
   done
 ) || _wake_test_failed=$((_wake_test_failed + 1))
 
+# ── Test 26b2 (GH #198): Unicode check names are accepted byte-for-byte ───────
+# GitHub check names may contain Unicode characters (e.g. middle dot U+00B7 in
+# "Build · test", accented characters in matrix names, etc.).  The wake condition
+# parser must accept these without normalization and without shell evaluation.
+
+(
+  for name in "Build · test" "Intégration" "テスト" "build—matrix" "CI ✓"; do
+    task="t26b2"; repo="app"; wt="$TEST_ROOT/t26b2-wt"
+    rm -rf "${FLEET_DIR:?}/${task:?}" "${wt:?}"
+    _setup_waiting_worker "$task" "$repo" "$wt" "github_check" \
+      "run_id=777"$'\n'"check_name=$name"
+    _init_worktree_repo "$wt" "https://github.com/acme/widget.git"
+
+    fake_bin="$TEST_ROOT/t26b2-fakebin"
+    _setup_fake_respond "$fake_bin"
+    run_json="$TEST_ROOT/t26b2-run.json"
+    python3 - "$name" > "$run_json" <<'PY'
+import json, sys
+print(json.dumps({"status": "completed", "conclusion": "success",
+                  "jobs": [{"name": sys.argv[1], "status": "completed",
+                            "conclusion": "success"}]}))
+PY
+    rm -f "$TEST_ROOT/t26b2-slug"
+    _setup_fake_gh "$fake_bin" "$run_json" "$TEST_ROOT/t26b2-slug"
+    export FAKE_RESPOND_CALLS="$TEST_ROOT/t26b2-respond-calls"
+    export FAKE_RESPOND_INPUT="$TEST_ROOT/t26b2-respond-input"
+    rm -f "$FAKE_RESPOND_CALLS"
+
+    exit_code=0
+    PATH="$fake_bin:$PATH" \
+      "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || exit_code=$?
+    _assert "unicode check_name '$name': exits zero" "[[ $exit_code -eq 0 ]]"
+    _assert "unicode check_name '$name': sgt-respond called" \
+      "[[ -s '$FAKE_RESPOND_CALLS' ]]"
+  done
+) || _wake_test_failed=$((_wake_test_failed + 1))
+
+# ── Test 26b3 (GH #198): dangerous characters in check_name are still rejected ─
+# Unicode admission must not weaken the injection fence.
+
+(
+  task="t26b3"; repo="app"; wt="$TEST_ROOT/t26b3-wt"
+  for bad_name in "\$(touch $TEST_ROOT/t26b3-pwned)" "back\`tick" "semi;colon" "pipe|char" "> redir" "{ brace }"; do
+    rm -rf "${FLEET_DIR:?}/${task:?}" "${wt:?}"
+    _setup_waiting_worker "$task" "$repo" "$wt" "github_check" \
+      "run_id=777"$'\n'"check_name=$bad_name"
+    fake_bin="$TEST_ROOT/t26b3-fakebin"
+    _setup_fake_respond "$fake_bin"
+    export FAKE_RESPOND_CALLS="$TEST_ROOT/t26b3-respond-calls"
+    rm -f "$FAKE_RESPOND_CALLS"
+
+    exit_code=0
+    PATH="$fake_bin:$PATH" \
+      "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || exit_code=$?
+    _assert "dangerous check_name '$bad_name': exits nonzero" "[[ $exit_code -ne 0 ]]"
+    _assert "dangerous check_name '$bad_name': sgt-respond not called" \
+      "[[ ! -s '$FAKE_RESPOND_CALLS' ]]"
+  done
+  _assert "dangerous check_name: no pwned file created" \
+    "[[ ! -e '$TEST_ROOT/t26b3-pwned' ]]"
+) || _wake_test_failed=$((_wake_test_failed + 1))
+
 # ── Test 26c (STD-017): a present-but-empty field is named as empty ───────────
 
 (
@@ -1265,6 +1327,53 @@ JSON
     "[[ ! -s '$TEST_ROOT/t37-respond-calls' ]]"
   _assert "malformed run JSON: still waiting (transient adapter fault)" \
     "[[ \"\$(cat '$FLEET_DIR/$task/$repo/status' 2>/dev/null)\" == 'waiting' ]]"
+) || _wake_test_failed=$((_wake_test_failed + 1))
+
+# ── Test 38 (GH #202): stale generation rejected before sgt-respond is called ─
+# A wake condition's generation field must match the worker's current gate
+# generation; if the gate has advanced, sgt-wake must fail before calling
+# sgt-respond (not after sgt-respond rejects it mid-resume).
+
+(
+  task="t38"; repo="app"; wt="$TEST_ROOT/t38-wt"
+  _setup_waiting_worker "$task" "$repo" "$wt" "not_before" \
+    "not_before=1"  # already past — will be met
+
+  # Write a gate generation that is HIGHER than the condition's generation (1).
+  printf '2\n' > "$wt/.sergeant-gate-generation"
+
+  fake_bin="$TEST_ROOT/t38-fakebin"
+  _setup_fake_respond "$fake_bin"
+  export FAKE_RESPOND_CALLS="$TEST_ROOT/t38-respond-calls"
+
+  exit_code=0
+  PATH="$fake_bin:$PATH" \
+    "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || exit_code=$?
+  _assert "stale generation: exits nonzero" "[[ $exit_code -ne 0 ]]"
+  _assert "stale generation: sgt-respond NOT called (pre-flight catches mismatch)" \
+    "[[ ! -s '$TEST_ROOT/t38-respond-calls' ]]"
+) || _wake_test_failed=$((_wake_test_failed + 1))
+
+# ── Test 38b (GH #202): matching generation allows resume ──────────────────────
+
+(
+  task="t38b"; repo="app"; wt="$TEST_ROOT/t38b-wt"
+  _setup_waiting_worker "$task" "$repo" "$wt" "not_before" \
+    "not_before=1"  # already past — will be met
+
+  # Gate generation matches the condition's generation (1).
+  printf '1\n' > "$wt/.sergeant-gate-generation"
+
+  fake_bin="$TEST_ROOT/t38b-fakebin"
+  _setup_fake_respond "$fake_bin"
+  export FAKE_RESPOND_CALLS="$TEST_ROOT/t38b-respond-calls"
+
+  exit_code=0
+  PATH="$fake_bin:$PATH" \
+    "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || exit_code=$?
+  _assert "matching generation: exits zero" "[[ $exit_code -eq 0 ]]"
+  _assert "matching generation: sgt-respond called" \
+    "[[ -s '$TEST_ROOT/t38b-respond-calls' ]]"
 ) || _wake_test_failed=$((_wake_test_failed + 1))
 
 if [[ "$_wake_test_failed" -gt 0 ]]; then
