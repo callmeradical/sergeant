@@ -57,44 +57,55 @@ sentence cannot change a decision or be checked after the work, remove it.
 
 ## Toolbelt
 
-If a command in this table covers the operation, use it instead of reproducing
-the operation with ad hoc shell commands.
+Sergeant exposes all tools through a single MCP server (`bin/sergeant-mcp`, stdio
+transport) declared in `mcp.json`. When the harness supports MCP, invoke tools by
+their MCP name — identical to the script basename — rather than shelling out
+directly. Fall back to the `bin/sgt-*` script only when MCP is unavailable.
 
-| Script | Purpose |
+If a command in this table covers the operation, use it instead of reproducing
+the operation with ad hoc shell commands. The **MCP tool name** equals the script
+name without the `bin/` prefix (e.g. `sgt-dispatch`, `sgt-watch`).
+
+| Script | MCP tool | Purpose |
 |---|---|
-| `bin/sgt-list` | List all known projects from `~/.config/sergeant/` |
-| `bin/sgt-status <project>` | Git status across every repo in a project |
-| `bin/sgt-sync <project>` | Clone missing repos, pull existing ones |
-| `bin/sgt-context <project>` | Emit full agent context block for a project |
-| `bin/sgt-graphify <project>` | Run graphify across all repos, write to configured output |
-| `bin/sgt-dispatch <project> "<brief>" [options]` | Create worktrees + spawn agent per repo |
-| `bin/sgt-no-mistakes-finding <project> <repo> [options]` | Apply a finding disposition and create/update owning-repo td work |
-| `bin/sgt-review-findings <project> <repo> [options]` | Route structured independent-review findings to td and fleet supervision |
-| `bin/sgt-dispatch <project> --td <id>` | Dispatch from a td task (auto-detects repo) |
-| `bin/sgt-watch <task-id> --background` | Start a managed background monitor (default for OpenCode); returns promptly with monitor identity and control commands |
-| `bin/sgt-watch <task-id>` | Monitor fleet in foreground until all workers done (for humans and debugging) |
-| `bin/sgt-watch --sync-all` | Reconcile every durable fleet record and recycle verified terminal panes |
-| `bin/sgt-watch --list` | List every retained fleet record, including terminal ones |
-| `bin/sgt-watch --snapshot [<task-id>] [--repo <repo>]` | Bounded read-only JSON observation of whether Sergeant is verifiably working; never reconciles or mutates state |
-| `bin/sgt-respond <task-id> <repo>` | Read a worker response from stdin and resume its loop |
-| `bin/sgt-wake <task-id> <repo>` | Evaluate a waiting worker's durable wake condition and resume it when met |
-| `bin/sgt-recover <task-id> <repo>` | Attempt one bounded stall recovery for a live-but-stalled in-progress worker |
-| `bin/sgt-ack-response <task-id> <repo> <response-id>` | Acknowledge one consumed response from the exact worker pane |
-| `bin/sgt-validate <task-id> <repo> [--skip <steps>] [--allow-argv-intent]` | Launch coordinator-owned no-mistakes in a split worker-window pane |
-| `bin/sgt-validate <task-id> <repo> --claim-ownership` | Take validation ownership from a gone or released dispatching pane, with identity proof and an audit record |
-| `bin/sgt-validate <task-id> <repo> --release-ownership` | Release validation ownership from the recorded coordinator pane so another pane can claim it |
-| `bin/sgt-cleanup <task-id>` | Remove worktrees + fleet state when done |
-| `bin/sgt-dag-run <project>` | Create dagr DAG from project YAML `dag:` block and start a run; dispatches ready stages automatically (**requires dagr**) |
-| `bin/sgt-dag-dispatch-hook` | Stage hook used internally by sgt-dag-run; called by dagr when a stage becomes ready (**requires dagr**) |
-| `bin/sgt-treehouse-init <project>` | Initialize treehouse pools in a project's repos |
-| `bin/sgt-td-list <project>` | Show td tasks across all repos in a project |
-| `bin/sgt-td-create <project> "<title>" --repos <list>` | Create td tasks in repos (called automatically by sgt-dispatch) |
-| `bin/sgt-notify <task-id> "<message>"` | Record a durable wake marker, sync any registered callback origin, and optionally inject into the primary session pane |
-| `bin/sgt-callback <command>` | Register, enqueue, drain, and verify durable profile-bound callback events |
-| `bin/sgt-drain --global\|<project> [--wait [--timeout <s>]]` | Issue a cooperative drain signal; workers finish current turn and exit cleanly |
-| `bin/sgt-undrain --global\|<project>` | Deactivate a drain signal |
-| `bin/sgt-drain --status [--global\|<project>]` | Show active drain state |
-| `wiki-daily-digest [--date YYYY-MM-DD] [--since DATE] [--dry-run]` | Synthesize opencode session history into `~/wiki/sessions/` |
+| `bin/sgt-list` | `sgt-list` | List all known projects from `~/.config/sergeant/` |
+| `bin/sgt-status <project>` | `sgt-status` | Git status across every repo in a project |
+| `bin/sgt-sync <project>` | `sgt-sync` | Clone missing repos, pull existing ones |
+| `bin/sgt-context <project>` | `sgt-context` | Emit full agent context block for a project |
+| `bin/sgt-graphify <project>` | `sgt-graphify` | Run graphify across all repos, write to configured output |
+| `bin/sgt-dispatch <project> "<brief>" [options]` | `sgt-dispatch` | Create worktrees + spawn agent per repo |
+| `bin/sgt-no-mistakes-finding <project> <repo> [options]` | `sgt-no-mistakes-finding` | Apply a finding disposition and create/update owning-repo td work |
+| `bin/sgt-review-findings <project> <repo> [options]` | `sgt-review-findings` | Route structured independent-review findings to td and fleet supervision |
+| `bin/sgt-dispatch <project> --td <id>` | `sgt-dispatch` | Dispatch from a td task (auto-detects repo) |
+| `bin/sgt-watch <task-id> --background` | `sgt-watch` | Start a managed background monitor (default for OpenCode); returns promptly with monitor identity and control commands |
+| `bin/sgt-watch <task-id>` | `sgt-watch` | Monitor fleet in foreground until all workers done (for humans and debugging) |
+| `bin/sgt-watch --sync-all` | `sgt-watch` | Reconcile every durable fleet record and recycle verified terminal panes |
+| `bin/sgt-watch --list` | `sgt-watch` | List every retained fleet record, including terminal ones |
+| `bin/sgt-watch --snapshot [<task-id>] [--repo <repo>]` | `sgt-watch` | Bounded read-only JSON observation of whether Sergeant is verifiably working; never reconciles or mutates state |
+| `bin/sgt-respond <task-id> <repo>` | `sgt-respond` | Read a worker response from stdin and resume its loop |
+| `bin/sgt-wake <task-id> <repo>` | `sgt-wake` | Evaluate a waiting worker's durable wake condition and resume it when met |
+| `bin/sgt-recover <task-id> <repo>` | `sgt-recover` | Attempt one bounded stall recovery for a live-but-stalled in-progress worker |
+| `bin/sgt-ack-response <task-id> <repo> <response-id>` | `sgt-ack-response` | Acknowledge one consumed response from the exact worker pane |
+| `bin/sgt-validate <task-id> <repo> [--skip <steps>] [--allow-argv-intent]` | `sgt-validate` | Launch coordinator-owned no-mistakes in a split worker-window pane |
+| `bin/sgt-validate <task-id> <repo> --claim-ownership` | `sgt-validate` | Take validation ownership from a gone or released dispatching pane, with identity proof and an audit record |
+| `bin/sgt-validate <task-id> <repo> --release-ownership` | `sgt-validate` | Release validation ownership from the recorded coordinator pane so another pane can claim it |
+| `bin/sgt-cleanup <task-id>` | `sgt-cleanup` | Remove worktrees + fleet state when done |
+| `bin/sgt-dag-run <project>` | `sgt-dag-run` | Create dagr DAG from project YAML `dag:` block and start a run; dispatches ready stages automatically (**requires dagr**) |
+| `bin/sgt-dag-dispatch-hook` | `sgt-dag-dispatch-hook` | Stage hook used internally by sgt-dag-run; called by dagr when a stage becomes ready (**requires dagr**) |
+| `bin/sgt-treehouse-init <project>` | `sgt-treehouse-init` | Initialize treehouse pools in a project's repos |
+| `bin/sgt-td-list <project>` | `sgt-td-list` | Show td tasks across all repos in a project |
+| `bin/sgt-td-create <project> "<title>" --repos <list>` | `sgt-td-create` | Create td tasks in repos (called automatically by sgt-dispatch) |
+| `bin/sgt-notify <task-id> "<message>"` | `sgt-notify` | Record a durable wake marker, sync any registered callback origin, and optionally inject into the primary session pane |
+| `bin/sgt-callback <command>` | `sgt-callback` | Register, enqueue, drain, and verify durable profile-bound callback events |
+| `bin/sgt-drain --global\|<project> [--wait [--timeout <s>]]` | `sgt-drain` | Issue a cooperative drain signal; workers finish current turn and exit cleanly |
+| `bin/sgt-undrain --global\|<project>` | `sgt-undrain` | Deactivate a drain signal |
+| `bin/sgt-drain --status [--global\|<project>]` | `sgt-drain` | Show active drain state |
+| `wiki-daily-digest [--date YYYY-MM-DD] [--since DATE] [--dry-run]` | `wiki-daily-digest` | Synthesize opencode session history into `~/wiki/sessions/` |
+| `bin/sgt-msg-send <project> --from <agent> --to <agent\|broadcast> "<msg>"` | `sgt-msg-send` | Send a durable SQLite-backed message to an agent inbox |
+| `bin/sgt-msg-recv <project> --agent <agent> [--unread-only] [--mark-read]` | `sgt-msg-recv` | Read messages for an agent; returns JSON array |
+| `bin/sgt-msg-ack <project> <message-id>` | `sgt-msg-ack` | Acknowledge (mark read) a specific message by ID |
+| `bin/sgt-msg-list <project> [--all] [--agent <agent>]` | `sgt-msg-list` | List inbox messages in a human-readable table |
+| `bin/sgt-session-resume <project> <repo> [options]` | `sgt-session-resume` | Resume an orphaned worker session: injects unread inbox messages, spawns fresh agent in existing worktree |
 
 Use the bare command when it resolves on `PATH`; otherwise run the matching
 script from this repository's `bin/` directory. Fall back to manual operations
@@ -136,7 +147,7 @@ When the user brings you a task:
 1. **Load context** — run `sgt-context <project>` and identify the owning repository or repositories, inherited instructions, configured paths, and cross-repository dependencies before selecting an execution mode.
 2. **Check the queue** — run `sgt-td-list <project>` and reuse a matching task in direct or dispatch mode; create a task only when no canonical task exists.
 3. **Choose execution mode** — direct for explicit single-repo work in this session; dispatch for cross-repo, parallel, or explicitly delegated work.
-4. **Reconcile existing state** — run `sgt-watch --sync-all`, then inspect active workers, branches, worktrees, retained gates, and handoffs before starting. Resume or take over preserved work rather than creating duplicates.
+4. **Reconcile existing state** — run `sgt-watch --sync-all`, then inspect active workers, branches, worktrees, retained gates, and handoffs before starting. Resume or take over preserved work rather than creating duplicates. If a worker's pane is gone but its td task is still open, run `sgt-session-resume <project> <repo>` before dispatching a replacement. This avoids duplicating work on an existing branch.
 5. **Confirm only unresolved decisions that change scope or risk** — ask when repository ownership, user-visible behavior, security/privacy policy, data retention, destructive action, or an irreversible tradeoff is unknown. Do not ask the user to reconfirm an execution mode, plan, or tradeoff already recorded in the conversation or td.
 6. **Execute**:
    - Direct: start the td task and implement through tests, review, and delivery.

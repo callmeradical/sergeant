@@ -17,6 +17,15 @@ command -v tmux >/dev/null 2>&1 || {
   exit 0
 }
 TEST_ROOT="$(mktemp -d)"
+
+# ── Drain state isolation (td-79f0a8) ────────────────────────────────────────
+# Commands exercised here source bin/_sgt-drain.sh, which resolves
+# SERGEANT_DRAIN_DIR, else SERGEANT_CONFIG/drain, else the operator's real
+# $HOME/.config/sergeant/drain.  Pin it to this suite's temporary root so the
+# tests never consult — or mutate — live drain state.
+export SERGEANT_DRAIN_DIR="$TEST_ROOT/drain"
+export SERGEANT_CONFIG="$TEST_ROOT/sergeant-config"
+mkdir -p "$SERGEANT_DRAIN_DIR" "$SERGEANT_CONFIG"
 TMUX_SESSION="sgt-worker-model-tuple-test-$$"
 trap 'tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true; rm -rf "$TEST_ROOT"' EXIT
 mkdir -p "$TEST_ROOT/fake-bin"

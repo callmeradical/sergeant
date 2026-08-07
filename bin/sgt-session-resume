@@ -1,0 +1,456 @@
+#!/usr/bin/env bash
+# sgt-session-resume — Detect and recover an orphaned agent session.
+#
+# An agent session is "orphaned" when its td task is still open but the worker's
+# tmux pane is gone (killed, crashed, or the tmux session ended).  This command
+# gathers context (fleet state, unread inbox messages, branch history), writes a
+# resume brief into the existing worktree, and spawns a fresh interactive worker.
+#
+# Usage:
+#   sgt-session-resume <task-id> <repo> [options]
+#
+# Options:
+#   --dry-run        Show what would happen without doing it
+#   --force          Skip confirmation prompts
+#   --agent <name>   Override agent harness (opencode|goose|claude)
+#   --model <tuple>  Override model for resumed session
+#
+# Exit codes:
+#   0  resumed successfully (or confirmed worker pane still alive)
+#   2  nothing to resume (td task closed and no open PR detected)
+#   3  mismatch (td closed but open PR exists), or --dry-run with work to do
+#   4  resume held by an active drain
+#   1  error
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-drain.sh
+source "$SCRIPT_DIR/_sgt-drain.sh"
+
+[[ $# -ge 2 ]] || _die "Usage: sgt-session-resume <task-id> <repo> [--dry-run] [--force] [--agent <name>] [--model <tuple>]"
+
+TASK_ID="$1"; shift
+REPO="$1";    shift
+
+[[ "$TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid task ID: $TASK_ID"
+[[ "$REPO"    =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid repo: $REPO"
+
+DRY_RUN=false
+FORCE=false
+AGENT_OVERRIDE=""
+MODEL_OVERRIDE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=true; shift ;;
+    --force)   FORCE=true;   shift ;;
+    --agent)
+      [[ -n "${2:-}" ]] || _die "--agent requires opencode, goose, or claude"
+      AGENT_OVERRIDE="$2"; shift 2 ;;
+    --model)
+      [[ -n "${2:-}" ]] || _die "--model requires provider/model or provider/model:variant"
+      MODEL_OVERRIDE="$2"; shift 2 ;;
+    *) _die "Unknown option: $1" ;;
+  esac
+done
+
+# ── 1. Load fleet record ─────────────────────────────────────────────────────
+
+REPO_DIR="$FLEET_DIR/$TASK_ID/$REPO"
+
+if [[ ! -d "$FLEET_DIR/$TASK_ID" ]]; then
+  printf 'No fleet record found for task %s\n' "$TASK_ID"
+  exit 2
+fi
+if [[ ! -d "$REPO_DIR" ]]; then
+  printf 'No fleet record found for %s/%s\n' "$TASK_ID" "$REPO"
+  exit 2
+fi
+
+fleet_status="$(cat "$REPO_DIR/status"           2>/dev/null || true)"
+branch="$(cat "$REPO_DIR/branch"                 2>/dev/null || true)"
+worktree="$(cat "$REPO_DIR/worktree"             2>/dev/null || true)"
+agent_stored="$(cat "$REPO_DIR/agent"            2>/dev/null || true)"
+tmux_session_stored="$(cat "$REPO_DIR/tmux_session" 2>/dev/null || true)"
+td_task_id="$(cat "$REPO_DIR/td_task"            2>/dev/null || true)"
+project="$(cat "$REPO_DIR/project"               2>/dev/null || true)"
+model_stored="$(cat "$REPO_DIR/agent_model"      2>/dev/null || true)"
+model_source_stored="$(cat "$REPO_DIR/agent_model_source" 2>/dev/null || true)"
+
+# Resolve agent harness: flag override > fleet record > lib default
+if [[ -n "$AGENT_OVERRIDE" ]]; then
+  AGENT_CMD="$AGENT_OVERRIDE"
+elif [[ -n "$agent_stored" ]]; then
+  AGENT_CMD="$agent_stored"
+fi
+# (AGENT_CMD set from _sgt-lib.sh if still empty at this point)
+
+# Resolve model: flag > SERGEANT_MODEL env > fleet record > unpinned
+if [[ -n "$MODEL_OVERRIDE" ]]; then
+  RESUME_MODEL="$MODEL_OVERRIDE"
+  RESUME_MODEL_SOURCE="flag"
+elif [[ -n "${SERGEANT_MODEL:-}" ]]; then
+  RESUME_MODEL="$SERGEANT_MODEL"
+  RESUME_MODEL_SOURCE="env"
+elif [[ -n "$model_stored" && "$model_stored" != "$SGT_AGENT_MODEL_UNPINNED" ]]; then
+  RESUME_MODEL="$model_stored"
+  RESUME_MODEL_SOURCE="${model_source_stored:-fleet}"
+else
+  RESUME_MODEL="$SGT_AGENT_MODEL_UNPINNED"
+  RESUME_MODEL_SOURCE="unpinned"
+fi
+
+if [[ "$RESUME_MODEL_SOURCE" != "unpinned" ]]; then
+  _sgt_is_agent_model_tuple "$RESUME_MODEL" || \
+    _die "$(_sgt_agent_launch_reject_message "$(basename "$AGENT_CMD")" "$RESUME_MODEL" malformed-tuple)"
+fi
+
+# ── 2. Check td task ─────────────────────────────────────────────────────────
+
+td_status=""
+td_title=""
+td_body=""
+td_terminal=false
+
+if [[ -n "$td_task_id" && -n "$worktree" && -d "$worktree" ]]; then
+  if command -v td &>/dev/null && _sgt_td_supported_version_output "$(td --version 2>&1 || true)" 2>/dev/null; then
+    td_json="$(td list --json --filter "id=$td_task_id" --work-dir "$worktree" 2>/dev/null || echo "[]")"
+    if [[ "$td_json" != "[]" && -n "$td_json" ]]; then
+      td_status="$(printf '%s\n' "$td_json" | python3 -c "
+import sys, json
+tasks = json.load(sys.stdin)
+print(tasks[0].get('status','') if tasks else '')
+" 2>/dev/null || true)"
+      td_title="$(printf '%s\n' "$td_json" | python3 -c "
+import sys, json
+tasks = json.load(sys.stdin)
+print(tasks[0].get('title','') if tasks else '')
+" 2>/dev/null || true)"
+      td_body="$(printf '%s\n' "$td_json" | python3 -c "
+import sys, json
+tasks = json.load(sys.stdin)
+print(tasks[0].get('description','') or tasks[0].get('body','') if tasks else '')
+" 2>/dev/null || true)"
+    fi
+  fi
+fi
+
+case "${td_status:-}" in
+  done|complete|completed|closed) td_terminal=true ;;
+esac
+
+if $td_terminal; then
+  # Check for open PRs on this branch before declaring a clean terminal state.
+  open_prs_json="[]"
+  if [[ -n "$branch" ]] && command -v gh &>/dev/null && [[ -n "$worktree" && -d "$worktree" ]]; then
+    open_prs_json="$(cd "$worktree" && gh pr list --head "$branch" --state open \
+      --json number,url 2>/dev/null || echo "[]")"
+    [[ -n "$open_prs_json" ]] || open_prs_json="[]"
+  fi
+
+  open_pr_count="$(printf '%s\n' "$open_prs_json" | python3 -c \
+    "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)"
+
+  if [[ "$open_pr_count" -eq 0 ]]; then
+    printf 'Nothing to resume: td task %s is %s and no open PR detected for branch %s.\n' \
+      "$td_task_id" "$td_status" "${branch:-<unknown>}"
+    exit 2
+  else
+    printf 'WARNING: td task %s is %s but open PR(s) exist on branch %s:\n' \
+      "$td_task_id" "$td_status" "${branch:-<unknown>}"
+    printf '%s\n' "$open_prs_json" | python3 -c "
+import sys, json
+for pr in json.load(sys.stdin):
+    print('  PR #%s: %s' % (pr.get('number','?'), pr.get('url','?')))
+" 2>/dev/null || true
+    printf '\nThis is a state mismatch. Human decision required — will not auto-resume.\n'
+    exit 3
+  fi
+fi
+
+# ── 3. Check tmux pane ───────────────────────────────────────────────────────
+
+pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
+pane_alive=false
+
+if [[ -n "$pane" ]] && command -v tmux &>/dev/null; then
+  if _sgt_verify_pane_identity "$pane" >/dev/null 2>&1; then
+    # Pane exists and is not dead. Check identity match.
+    if _sgt_pane_identity_matches "$pane" "$REPO_DIR" 2>/dev/null; then
+      printf 'Worker pane %s is still active for %s/%s (status: %s).\n' \
+        "$pane" "$TASK_ID" "$REPO" "${fleet_status:-unknown}"
+      printf 'Use sgt-recover if the worker is stalled.\n'
+      exit 0
+    fi
+    # Pane exists but identity differs — tmux reused the pane id.
+    # Treat it as dead.
+  fi
+fi
+# Pane is dead, absent, or has mismatched identity — proceed to resume.
+
+# ── 4. Read message inbox ────────────────────────────────────────────────────
+
+unread_messages="[]"
+unread_count=0
+
+if [[ -n "$project" ]] && [[ -x "$SCRIPT_DIR/sgt-msg-recv" ]]; then
+  unread_messages="$("$SCRIPT_DIR/sgt-msg-recv" "$project" --agent "$REPO" \
+    --unread-only 2>/dev/null || echo "[]")"
+  [[ -n "$unread_messages" ]] || unread_messages="[]"
+  unread_count="$(printf '%s\n' "$unread_messages" | python3 -c \
+    "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)"
+fi
+
+# ── 5. Find worktree ─────────────────────────────────────────────────────────
+
+if [[ -z "$worktree" || ! -d "$worktree" ]]; then
+  printf 'WARNING: Worktree at "%s" is unavailable.\n' "${worktree:-<not recorded>}"
+  printf 'Suggest: sgt-dispatch %s "<original brief>" --repos %s --adopt-branch\n' \
+    "${project:-<project>}" "$REPO"
+  exit 1
+fi
+
+# ── Dry-run early exit ───────────────────────────────────────────────────────
+
+if $DRY_RUN; then
+  resume_count_cur="$(cat "$REPO_DIR/resume_count" 2>/dev/null || echo 0)"
+  [[ "$resume_count_cur" =~ ^[0-9]+$ ]] || resume_count_cur=0
+  printf '[dry-run] Would resume: %s/%s\n'     "$TASK_ID" "$REPO"
+  printf '[dry-run] Worktree:     %s\n'         "$worktree"
+  printf '[dry-run] Branch:       %s\n'         "${branch:-<unknown>}"
+  printf '[dry-run] Agent:        %s\n'         "$AGENT_CMD"
+  printf '[dry-run] Model:        %s (%s)\n'    "$RESUME_MODEL" "$RESUME_MODEL_SOURCE"
+  printf '[dry-run] Inbox:        %d unread messages\n' "$unread_count"
+  printf '[dry-run] td task:      %s (%s)\n'   "${td_task_id:-none}" "${td_status:-unknown}"
+  printf '[dry-run] Fleet status: %s\n'         "${fleet_status:-unknown}"
+  printf '[dry-run] Resume count: %d (would become %d)\n' \
+    "$resume_count_cur" "$((resume_count_cur + 1))"
+  exit 3
+fi
+
+# ── 6. Spawn fresh agent ─────────────────────────────────────────────────────
+
+_require_yq
+_require_tmux
+_require_interactive_agent
+
+# Validate the model tuple against the harness before any state mutation.
+_sgt_require_agent_model "$(basename "$AGENT_CMD")" "$RESUME_MODEL"
+# Materialise harness definition files (e.g. opencode variant agent definition)
+# into REPO_DIR so the worker picks them up on next launch.
+_sgt_resolve_agent_launch "$(basename "$AGENT_CMD")" "$RESUME_MODEL" "$REPO_DIR" || \
+  _die "$(_sgt_agent_launch_reject_message "$(basename "$AGENT_CMD")" "$RESUME_MODEL" "$SGT_LAUNCH_REJECT")"
+
+# Prompt for confirmation unless --force or non-interactive.
+if ! $FORCE && [[ -t 0 ]]; then
+  printf 'Resume worker for %s/%s?\n' "$TASK_ID" "$REPO"
+  printf '  Worktree: %s\n'   "$worktree"
+  printf '  Branch:   %s\n'   "${branch:-<unknown>}"
+  printf '  Agent:    %s\n'   "$AGENT_CMD"
+  printf '  Inbox:    %d unread messages\n' "$unread_count"
+  printf 'Proceed? [y/N] '
+  read -r _confirm
+  [[ "$_confirm" =~ ^[Yy]$ ]] || { printf 'Aborted.\n'; exit 1; }
+fi
+
+# Build resume timestamp and window name.
+resume_ts="$(date +%s)"
+resume_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+WINDOW_NAME="${REPO}-resume-${resume_ts}"
+
+# Determine tmux session: use recorded session or the project default.
+TMUX_SESSION="${tmux_session_stored:-${SERGEANT_TMUX_SESSION:-sgt}}"
+
+# ── Write resume brief ───────────────────────────────────────────────────────
+
+git_log_5="$(git -C "$worktree" log --oneline -5 2>/dev/null || echo "(unavailable)")"
+
+last_diagnostic="$(cat "$REPO_DIR/diagnostic" 2>/dev/null || echo "(none)")"
+resume_count_cur=0
+if [[ -f "$REPO_DIR/resume_count" ]]; then
+  resume_count_cur="$(cat "$REPO_DIR/resume_count" 2>/dev/null || echo 0)"
+  [[ "$resume_count_cur" =~ ^[0-9]+$ ]] || resume_count_cur=0
+fi
+
+# Format unread messages for the brief.
+if [[ "$unread_count" -gt 0 ]]; then
+  unread_section="$(printf '%s\n' "$unread_messages" | python3 -c "
+import sys, json
+msgs = json.load(sys.stdin)
+lines = []
+for m in msgs:
+    lines.append('- [%s] from %s:\n  %s' % (
+        m.get('sent_at','?'), m.get('from_agent','?'), m.get('body','').strip()))
+print('\n'.join(lines))
+" 2>/dev/null || echo "(could not format messages)")"
+else
+  unread_section="(none)"
+fi
+
+# Build td context section.
+td_context_section=""
+if [[ -n "$td_task_id" ]]; then
+  td_context_section="**td task:** ${td_task_id}${td_title:+ — ${td_title}}"
+  if [[ -n "$td_body" ]]; then
+    td_context_section="${td_context_section}
+
+${td_body}"
+  fi
+fi
+
+# Write the resume brief.
+{
+  printf '# Session Resume Brief\n\n'
+  printf 'This session is resuming interrupted work. The previous agent session ended\n'
+  printf 'without reaching a terminal state.\n\n'
+  printf '## Task context\n\n'
+  if [[ -n "$td_context_section" ]]; then
+    printf '%s\n\n' "$td_context_section"
+  fi
+  printf '**Task ID:** %s\n' "$TASK_ID"
+  printf '**Repo:** %s\n' "$REPO"
+  printf '**Branch:** %s\n\n' "${branch:-<unknown>}"
+  printf '## Last known state\n\n'
+  printf '**Fleet status:** %s\n' "${fleet_status:-unknown}"
+  printf '**Fleet record:** %s\n' "$REPO_DIR"
+  printf '**Last diagnostic:** %s\n' "$last_diagnostic"
+  if [[ "$resume_count_cur" -gt 0 ]]; then
+    printf '**Resume count:** %d (this is resume #%d)\n' \
+      "$resume_count_cur" "$((resume_count_cur + 1))"
+  fi
+  printf '\n## Unread messages\n\n'
+  printf '%s\n\n' "$unread_section"
+  printf '## Branch state\n\n'
+  printf '```\n%s\n```\n\n' "$git_log_5"
+  printf '## Instructions\n\n'
+  printf 'Review the above context. Continue from where the previous agent left off.\n'
+  printf 'Do not re-do completed work. Check for any open review findings before\n'
+  printf 'proceeding. Follow all standard Sergeant worker protocols.\n\n'
+  printf 'When you start:\n'
+  if [[ -n "$td_task_id" ]]; then
+    printf '1. Run `td start %s --work-dir .` to (re)claim the task\n' "$td_task_id"
+    printf '2. Check `git log --oneline -10` and any open PRs\n'
+    printf '3. Review `.sergeant-brief.md` for the original mission\n'
+    printf '4. Continue implementation where the previous agent left off\n'
+  else
+    printf '1. Check `git log --oneline -10` and any open PRs\n'
+    printf '2. Review `.sergeant-brief.md` for the original mission\n'
+    printf '3. Continue implementation where the previous agent left off\n'
+  fi
+} > "$worktree/.sergeant-resume-brief.md"
+
+# ── Publish resume notification ──────────────────────────────────────────────
+
+resume_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+_sgt_publish_worker_notification "$REPO_DIR" "$worktree" \
+  "$resume_notification_id" resume \
+  "Read .sergeant-resume-brief.md and resume the mission from where the previous session left off."
+
+# Update the fleet record model/agent before launch so sgt-interactive-worker
+# picks up any override.
+if [[ -n "$AGENT_OVERRIDE" ]]; then
+  printf '%s\n' "$AGENT_CMD" > "$REPO_DIR/agent"
+fi
+if [[ "$RESUME_MODEL_SOURCE" != "fleet" ]]; then
+  printf '%s\n' "$RESUME_MODEL"        > "$REPO_DIR/agent_model"
+  printf '%s\n' "$RESUME_MODEL_SOURCE" > "$REPO_DIR/agent_model_source"
+fi
+
+# ── Launch fresh worker pane ─────────────────────────────────────────────────
+
+# Drain admission. A resume spawns a worker exactly like dispatch and respond
+# do, so it must honour the same cooperative drain contract: while a drain is
+# active, workers finish their current turn and exit, and nothing new starts.
+# The lock is held across new-window so a drain cannot be issued in the window
+# between the admission check and the pane existing.
+_sgt_drain_read_project_from_brief "$FLEET_DIR/$TASK_ID"
+_SGT_RESUME_DRAIN_FD=9
+if ! _sgt_drain_lock_acquire_fd "$_SGT_RESUME_DRAIN_FD" 2>/dev/null; then
+  _die "cannot acquire drain admission lock"
+fi
+if ! _sgt_drain_check_admission_locked "${SGT_PROJECT:-}"; then
+  _sgt_drain_lock_release_fd "$_SGT_RESUME_DRAIN_FD"
+  echo "sgt-session-resume: resume held by drain [project: ${SGT_PROJECT:-global}]." >&2
+  echo "Undrain with: sgt-undrain ${SGT_PROJECT:---global}" >&2
+  exit 4
+fi
+
+# Ensure tmux session exists. Deliberately after the drain gate so a held
+# resume does not touch the tmux server at all.
+tmux new-session -d -s "$TMUX_SESSION" -n "sergeant" 2>/dev/null || true
+
+WORKER_RUN_CMD="$(_sgt_worker_command \
+  "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$AGENT_CMD")"
+
+new_pane=""
+if ! new_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" \
+    -n "$WINDOW_NAME" -c "$worktree" "$WORKER_RUN_CMD")"; then
+  _sgt_drain_lock_release_fd "$_SGT_RESUME_DRAIN_FD"
+  _die "tmux failed to launch resumed worker for $TASK_ID/$REPO"
+fi
+# Worker pane is live — release drain admission.
+_sgt_drain_lock_release_fd "$_SGT_RESUME_DRAIN_FD"
+[[ -n "$new_pane" ]] || _die "tmux returned no pane for resumed worker $TASK_ID/$REPO"
+
+# ── Atomically update fleet pane/identity metadata ───────────────────────────
+
+printf '%s\n' "$new_pane" > "$REPO_DIR/pane"
+
+_abort_resume() {
+  local reason="$1"
+  tmux kill-pane -t "$new_pane" 2>/dev/null || true
+  # Restore original pane reference so fleet state stays useful for diagnosis.
+  if [[ -n "$pane" ]]; then
+    printf '%s\n' "$pane" > "$REPO_DIR/pane" || true
+  fi
+  _die "Resume failed: $reason for $TASK_ID/$REPO"
+}
+
+pane_identity=""
+if pane_identity="$(_sgt_pane_identity "$new_pane")" && [[ -n "$pane_identity" ]]; then
+  _sgt_replace_owned_file "$REPO_DIR/pane_identity" "$pane_identity" || \
+    _abort_resume "could not publish new worker pane identity"
+  _sgt_notification_target_create "$REPO_DIR" "$resume_notification_id" \
+      "$pane_identity" >/dev/null || \
+    _abort_resume "notification target race detected during resume"
+else
+  _abort_resume "tmux failed to capture resumed worker pane identity"
+fi
+
+# ── Update fleet record ───────────────────────────────────────────────────────
+
+printf 'in_progress\n'  > "$REPO_DIR/status"
+printf '%s\n' "$resume_iso"   > "$REPO_DIR/resumed_at"
+printf '%s\n' "$WINDOW_NAME"  > "$REPO_DIR/window_name"
+printf '%s\n' "$((resume_count_cur + 1))" > "$REPO_DIR/resume_count"
+
+# Clear stale diagnostic now that a fresh session is live.
+rm -f "$REPO_DIR/diagnostic" 2>/dev/null || true
+
+# ── Wait for notification acknowledgement ────────────────────────────────────
+
+if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" "$resume_notification_id"; then
+  tmux kill-pane -t "$new_pane" 2>/dev/null || true
+  printf 'orphaned\n' > "$REPO_DIR/status"
+  printf 'resumed worker did not acknowledge notification\n' > "$REPO_DIR/diagnostic"
+  _die "Resumed worker notification timed out for $TASK_ID/$REPO"
+fi
+
+# ── 7. Mark messages delivered ───────────────────────────────────────────────
+
+if [[ "$unread_count" -gt 0 && -n "$project" ]] && [[ -x "$SCRIPT_DIR/sgt-msg-recv" ]]; then
+  "$SCRIPT_DIR/sgt-msg-recv" "$project" --agent "$REPO" \
+    --mark-read >/dev/null 2>&1 || true
+fi
+
+# ── 8. Print summary ─────────────────────────────────────────────────────────
+
+printf 'Resumed:  %s/%s\n'    "$TASK_ID" "$REPO"
+printf 'Window:   %s\n'        "$WINDOW_NAME"
+printf 'Branch:   %s\n'        "${branch:-<unknown>}"
+printf 'Worktree: %s\n'        "$worktree"
+printf 'Injected: %d unread messages\n' "$unread_count"
+printf 'TD task:  %s (%s)\n'  "${td_task_id:-none}" "${td_status:-unknown}"
