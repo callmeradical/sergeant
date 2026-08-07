@@ -23,8 +23,8 @@ DB="$DB_DIR/${PROJECT}.db"
 
 NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM messages WHERE id='${MSG_ID}';")
+ROWS=$(sqlite3 -cmd ".timeout 1000" "$DB" "SELECT COUNT(*) FROM messages WHERE id='${MSG_ID}';")
 [[ "$ROWS" -eq 0 ]] && _die "message not found: $MSG_ID" && exit 1
 
-sqlite3 "$DB" "UPDATE messages SET read_at='${NOW}' WHERE id='${MSG_ID}';"
+sqlite3 -cmd ".timeout 1000" "$DB" "UPDATE messages SET read_at='${NOW}' WHERE id='${MSG_ID}';"
 echo "acked $MSG_ID"

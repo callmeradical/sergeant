@@ -47,7 +47,8 @@ AGENT_CLAUSE=""
 printf "%-16s  %-14s  %-14s  %-20s  %-4s  %s\n" "ID" "FROM" "TO" "SENT_AT" "READ" "BODY"
 printf "%-16s  %-14s  %-14s  %-20s  %-4s  %s\n" "----------------" "--------------" "--------------" "--------------------" "----" "----"
 
-sqlite3 "$DB" -separator $'\t' \
+sqlite3 "$DB" > /dev/null 2>&1 "PRAGMA journal_mode=WAL;" || true
+sqlite3 -cmd ".timeout 1000" "$DB" -separator $'\t' \
   "SELECT id, from_agent, to_agent, sent_at, CASE WHEN read_at IS NULL THEN 'no' ELSE 'yes' END, substr(body,1,60)
    FROM messages
    WHERE 1=1 ${UNREAD_CLAUSE} ${AGENT_CLAUSE}

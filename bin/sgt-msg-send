@@ -46,7 +46,8 @@ DB_DIR="${SERGEANT_MSG_DB_DIR:-$HOME/.sergeant/messages}"
 mkdir -p "$DB_DIR"
 DB="$DB_DIR/${PROJECT}.db"
 
-sqlite3 "$DB" <<'SQL'
+sqlite3 "$DB" > /dev/null <<'SQL'
+PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS messages (
   id          TEXT PRIMARY KEY,
   project     TEXT NOT NULL,
@@ -62,7 +63,7 @@ MSG_ID="$(date +%s%N 2>/dev/null || date +%s)$(echo $RANDOM | sha256sum 2>/dev/n
 MSG_ID="$(printf '%s' "$MSG_ID" | sha256sum | head -c 16)"
 SENT_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-sqlite3 "$DB" "INSERT INTO messages (id, project, from_agent, to_agent, body, sent_at, read_at)
+sqlite3 -cmd ".timeout 1000" "$DB" "INSERT INTO messages (id, project, from_agent, to_agent, body, sent_at, read_at)
   VALUES ('${MSG_ID}', '${PROJECT}', '${FROM_AGENT}', '${TO_AGENT}', '${BODY}', '${SENT_AT}', NULL);"
 
 echo "$MSG_ID"
