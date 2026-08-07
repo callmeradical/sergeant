@@ -15,7 +15,18 @@
 
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+# git runs pre-push with the working directory set to the root of the worktree
+# being pushed, so ask git which tree that is.
+#
+# Resolving from this script's own location instead selects the wrong tree: the
+# hook is installed as a symlink into the main checkout's scripts/ directory,
+# and .git/hooks is shared by every linked worktree. A path-relative resolution
+# therefore always picks the main checkout, so the gate reports on a tree nobody
+# is pushing -- passing while broken code ships, and failing while a fix ships.
+REPO_DIR="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "$REPO_DIR" ]]; then
+  REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+fi
 
 # Resolve mise — try PATH first, then common install locations.
 MISE=""
