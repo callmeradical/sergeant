@@ -97,7 +97,7 @@ def atomic_json(path, value, failpoint=None):
         os.close(directory)
 
 
-def load_receipt(path):
+def load_receipt(path, raw_prefix=None):
     receipt = strict_json(Path(path).read_bytes())
     if (not isinstance(receipt, dict) or set(receipt) != ENVELOPE_KEYS or
             receipt.get("version") != 1 or isinstance(receipt.get("version"), bool)):
@@ -111,11 +111,17 @@ def load_receipt(path):
         encoded = json.dumps(attempt, sort_keys=True, separators=(",", ":")).encode()
         if len(encoded) > RECEIPT_ATTEMPT_LIMIT:
             raise ValueError("oversized receipt attempt")
-        validate_attempt(attempt)
+        validate_attempt(attempt, raw_prefix)
     identity = receipt.get("identity")
     validate_receipt_identity(identity)
     if any(attempt_identity(attempt) != identity for attempt in attempts):
         raise ValueError("mixed Treehouse receipt attempt identity")
+    attempt_ids = [attempt["attempt_id"] for attempt in attempts]
+    raw_paths = [attempt["raw_path"] for attempt in attempts]
+    if len(set(attempt_ids)) != len(attempt_ids):
+        raise ValueError("duplicate Treehouse receipt attempt id")
+    if len(set(raw_paths)) != len(raw_paths):
+        raise ValueError("duplicate Treehouse receipt raw path")
     total = receipt.get("total_attempts", len(attempts))
     digest = receipt.get("history_sha256", "0" * 64)
     saturated = receipt.get("count_saturated")
@@ -125,6 +131,12 @@ def load_receipt(path):
     if (not isinstance(saturated, bool) or
             (saturated and total != MAX_RECEIPT_ATTEMPTS)):
         raise ValueError("invalid receipt saturation state")
+    if not attempts:
+        raise ValueError("empty persisted Treehouse receipt")
+    if ((len(attempts) < RECEIPT_RING and total != len(attempts)) or
+            (len(attempts) == RECEIPT_RING and total < RECEIPT_RING) or
+            (saturated and len(attempts) != RECEIPT_RING)):
+        raise ValueError("unreachable Treehouse receipt count and ring state")
     if (not isinstance(digest, str) or len(digest) != 64 or
             any(char not in "0123456789abcdef" for char in digest)):
         raise ValueError("invalid receipt history digest")
@@ -159,7 +171,7 @@ def validate_receipt_identity(identity):
             raise ValueError("invalid receipt identity value")
 
 
-def validate_attempt(attempt):
+def validate_attempt(attempt, raw_prefix=None):
     operation = attempt.get("operation")
     state = attempt.get("state")
     identity_keys = {
@@ -186,6 +198,10 @@ def validate_attempt(attempt):
     raw_path = attempt["raw_path"]
     if not os.path.isabs(raw_path) or os.path.normpath(raw_path) != raw_path:
         raise ValueError("invalid receipt raw path")
+    if operation == "return" and raw_prefix is not None:
+        expected_raw = f"{raw_prefix}.{attempt_id}"
+        if raw_path != expected_raw:
+            raise ValueError("return receipt raw path does not match attempt id")
     if state == "completed":
         returncode = attempt["returncode"]
         caught_signal = attempt["signal"]
@@ -202,16 +218,17 @@ def validate_attempt(attempt):
                 raise ValueError("invalid receipt outcome flag")
 
 
-def remove_completed_return_evidence(evicted, newest_raw):
-    newest = Path(newest_raw)
-    prefix = newest.name.rsplit(".", 1)[0]
+def completed_return_evidence(evicted, retained, raw_prefix):
+    prefix_path = Path(raw_prefix)
+    retained_paths = {attempt["raw_path"] for attempt in retained}
     candidates = []
     for attempt in evicted:
         if attempt.get("operation") != "return" or attempt.get("state") != "completed":
             continue
         raw = Path(attempt["raw_path"])
-        if (raw.parent != newest.parent or
-                not re.fullmatch(re.escape(prefix) + r"\.[0-9a-f]{32}", raw.name)):
+        expected = Path(f"{raw_prefix}.{attempt['attempt_id']}")
+        if (raw != expected or raw.parent != prefix_path.parent or
+                attempt["raw_path"] in retained_paths):
             raise SystemExit("unsafe completed Treehouse evidence path")
         candidates.extend((raw, Path(str(raw) + ".stderr")))
     metadata = []
@@ -222,15 +239,24 @@ def remove_completed_return_evidence(evicted, newest_raw):
         if (candidate.is_symlink() or not candidate.is_file() or
                 info.st_uid != os.getuid() or info.st_nlink != 1):
             raise SystemExit("unsafe completed Treehouse evidence file")
-        metadata.append(candidate)
-    for candidate in metadata:
+        metadata.append((candidate, info.st_dev, info.st_ino))
+    return metadata
+
+
+def remove_completed_return_evidence(metadata):
+    for candidate, expected_dev, expected_ino in metadata:
+        info = candidate.lstat()
+        if (candidate.is_symlink() or not candidate.is_file() or
+                info.st_uid != os.getuid() or info.st_nlink != 1 or
+                (info.st_dev, info.st_ino) != (expected_dev, expected_ino)):
+            raise SystemExit("completed Treehouse evidence changed before deletion")
         candidate.unlink()
 
 
-def append_receipt(path, attempt):
+def append_receipt(path, attempt, raw_prefix):
     target = Path(path)
     try:
-        validate_attempt(attempt)
+        validate_attempt(attempt, raw_prefix)
     except ValueError as error:
         raise SystemExit(f"invalid Treehouse receipt identity: {error}") from error
     encoded_attempt = json.dumps(attempt, sort_keys=True,
@@ -242,12 +268,15 @@ def append_receipt(path, attempt):
                "identity": attempt_identity(attempt), "attempts": []}
     if target.exists():
         try:
-            receipt = load_receipt(target)
+            receipt = load_receipt(target, raw_prefix)
         except (ValueError, OSError, UnicodeDecodeError, json.JSONDecodeError):
             raise SystemExit("invalid preserved Treehouse receipt")
     if attempt_identity(attempt) != receipt["identity"]:
         raise SystemExit("Treehouse receipt identity changed")
     attempts = receipt["attempts"] + [attempt]
+    if (attempt["attempt_id"] in {item["attempt_id"] for item in receipt["attempts"]} or
+            attempt["raw_path"] in {item["raw_path"] for item in receipt["attempts"]}):
+        raise SystemExit("duplicate Treehouse receipt attempt evidence")
     evicted = []
     digest = receipt["history_sha256"]
     while len(attempts) > RECEIPT_RING:
@@ -265,14 +294,16 @@ def append_receipt(path, attempt):
     updated = {"version": 1, "total_attempts": total,
                "count_saturated": saturated, "history_sha256": digest,
                "identity": receipt["identity"], "attempts": attempts}
-    atomic_json(target, updated)
+    deletion_plan = []
     if attempt.get("operation") == "return":
-        remove_completed_return_evidence(evicted, attempt["raw_path"])
+        deletion_plan = completed_return_evidence(evicted, attempts, raw_prefix)
+    atomic_json(target, updated)
+    remove_completed_return_evidence(deletion_plan)
 
 
-def finish_receipt(path, attempt_id, returncode, stdout_overflow, stderr_overflow,
-                   timed_out, pipe_timeout):
-    receipt = load_receipt(path)
+def finish_receipt(path, raw_prefix, attempt_id, returncode, stdout_overflow,
+                   stderr_overflow, timed_out, pipe_timeout):
+    receipt = load_receipt(path, raw_prefix)
     attempts = receipt["attempts"]
     if not attempts or attempts[-1].get("attempt_id") != attempt_id:
         raise SystemExit("Treehouse receipt attempt changed")
@@ -288,9 +319,6 @@ def finish_receipt(path, attempt_id, returncode, stdout_overflow, stderr_overflo
 
 def run_bounded(command, cwd, raw_path, receipt_path, identity, failpoint=None):
     is_return = identity.get("operation") == "return"
-    cleanup_orphan_temps(
-        [receipt_path, raw_path, raw_path + ".stderr"],
-        return_raw_prefix=raw_path if is_return else None)
     attempt_id = uuid.uuid4().hex
     if is_return:
         target = Path(f"{raw_path}.{attempt_id}")
@@ -298,7 +326,18 @@ def run_bounded(command, cwd, raw_path, receipt_path, identity, failpoint=None):
         target = Path(raw_path)
     attempt = {"attempt_id": attempt_id, "state": "started",
                "raw_path": str(target), **identity}
-    append_receipt(receipt_path, attempt)
+    validate_attempt(attempt, raw_path)
+    receipt_target = Path(receipt_path)
+    if receipt_target.exists():
+        existing = load_receipt(receipt_target, raw_path)
+        if (attempt_identity(attempt) != existing["identity"] or
+                attempt_id in {item["attempt_id"] for item in existing["attempts"]} or
+                str(target) in {item["raw_path"] for item in existing["attempts"]}):
+            raise SystemExit("Treehouse receipt identity or evidence changed")
+    cleanup_orphan_temps(
+        [receipt_path, raw_path, raw_path + ".stderr"],
+        return_raw_prefix=raw_path if is_return else None)
+    append_receipt(receipt_path, attempt, raw_path)
     temp = target.with_name(f"{target.name}.tmp.{os.getpid()}")
     error_target = target.with_name(f"{target.name}.stderr")
     error_temp = error_target.with_name(f"{error_target.name}.tmp.{os.getpid()}")
@@ -379,7 +418,7 @@ def run_bounded(command, cwd, raw_path, receipt_path, identity, failpoint=None):
         raise SystemExit(90)
     if failpoint and os.environ.get("SGT_CLEANUP_FAIL_POINT") == failpoint:
         os.kill(os.getpid(), signal.SIGKILL)
-    finish_receipt(receipt_path, attempt_id, returncode,
+    finish_receipt(receipt_path, raw_path, attempt_id, returncode,
                    overflow["stdout"], overflow["stderr"], timed_out, pipe_timeout)
     ambiguous = (overflow["stdout"] or overflow["stderr"] or
                  timed_out or pipe_timeout)

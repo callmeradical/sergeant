@@ -451,8 +451,12 @@ set -e
 [[ -f "$live_temp" ]]
 printf 'sgt-cleanup rotation preserves unsafe and unrelated evidence files: ok\n'
 
+valid_receipt_backup="$TEST_ROOT/valid-return-receipt.json"
+cp "$return_receipt" "$valid_receipt_backup"
+corrupt_index=0
 for corrupt_receipt in partial malformed missing extra empty_attempt attempt_extra \
-  mixed_identity oversized; do
+  mixed_identity duplicate_id duplicate_raw mismatched_raw empty_ring \
+  partial_count_gap full_ring_underflow saturated_partial oversized; do
   case "$corrupt_receipt" in
     partial) printf '{"version":1' > "$return_receipt" ;;
     malformed) printf '{"version":2,"attempts":[]}\n' > "$return_receipt" ;;
@@ -524,6 +528,56 @@ Path(sys.argv[1]).write_text(json.dumps({
     "attempts": [attempt]}) + "\n", encoding="utf-8")
 PY
       ;;
+    duplicate_id|duplicate_raw|mismatched_raw|empty_ring|partial_count_gap|\
+      full_ring_underflow|saturated_partial)
+      python3 - "$return_receipt" "$return_state" "$corrupt_receipt" \
+        "$TEST_ROOT/return-failure-main" \
+        "$TEST_ROOT/return-failure-pool-checkout" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+receipt_path, state, mode = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+identity = {
+    "operation": "return", "repo": sys.argv[4], "path": sys.argv[5],
+    "lease_id": "lease-return-failure",
+    "lease_holder": "sgt-return-failure-app",
+}
+attempts = []
+for index in range(4):
+    attempt_id = f"{index + 1:032x}"
+    attempts.append({
+        "attempt_id": attempt_id, "state": "completed", "operation": "return",
+        "raw_path": str(state / f"treehouse-return.raw.{attempt_id}"),
+        "repo": identity["repo"], "path": identity["path"],
+        "lease_id": identity["lease_id"],
+        "lease_holder": identity["lease_holder"], "returncode": 1,
+        "signal": None, "stdout_overflow": False, "stderr_overflow": False,
+        "timed_out": False, "pipe_timeout": False,
+    })
+if mode == "duplicate_id":
+    attempts[1]["attempt_id"] = attempts[0]["attempt_id"]
+elif mode == "duplicate_raw":
+    attempts[1]["raw_path"] = attempts[0]["raw_path"]
+elif mode == "mismatched_raw":
+    attempts[0]["raw_path"] = str(state / ("treehouse-return.raw." + "f" * 32))
+elif mode == "empty_ring":
+    attempts = []
+elif mode == "partial_count_gap":
+    attempts = attempts[:2]
+elif mode == "saturated_partial":
+    attempts = attempts[:2]
+total = {
+    "empty_ring": 0, "partial_count_gap": 3, "full_ring_underflow": 3,
+    "saturated_partial": (1 << 63) - 1,
+}.get(mode, len(attempts))
+receipt_path.write_text(json.dumps({
+    "version": 1, "total_attempts": total,
+    "count_saturated": mode == "saturated_partial",
+    "history_sha256": "0" * 64, "identity": identity, "attempts": attempts,
+}, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+PY
+      ;;
     oversized)
       python3 - "$return_receipt" <<'PY'
 from pathlib import Path
@@ -532,7 +586,30 @@ Path(sys.argv[1]).write_bytes(b"x" * 70000)
 PY
       ;;
   esac
+  corrupt_index=$((corrupt_index + 1))
+  corrupt_temp="$return_state/treehouse-return.raw.$(printf '%032x' \
+    $((1000 + corrupt_index))).tmp.$((99990000 + corrupt_index))"
+  printf 'must survive invalid receipt\n' > "$corrupt_temp"
+  python3 - "$return_receipt" "$return_state" <<'PY'
+import json
+from pathlib import Path
+import sys
+try:
+    receipt = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (UnicodeDecodeError, json.JSONDecodeError):
+    raise SystemExit(0)
+state = Path(sys.argv[2])
+for attempt in receipt.get("attempts", []):
+    raw_value = attempt.get("raw_path") if isinstance(attempt, dict) else None
+    if not isinstance(raw_value, str):
+        continue
+    raw = Path(raw_value)
+    if raw.parent == state and not raw.exists():
+        raw.write_text("critic receipt evidence\n", encoding="utf-8")
+PY
   receipt_before="$(cksum "$return_receipt")"
+  evidence_before="$(find "$return_state" -maxdepth 1 -type f \
+    -name 'treehouse-return.raw.*' -exec cksum {} + | sort)"
   set +e
   HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
     FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
@@ -548,9 +625,14 @@ PY
   set -e
   [[ "$corrupt_status" -ne 0 ]]
   [[ "$(cksum "$return_receipt")" == "$receipt_before" ]]
+  [[ -f "$corrupt_temp" ]]
+  [[ "$(find "$return_state" -maxdepth 1 -type f \
+    -name 'treehouse-return.raw.*' -exec cksum {} + | sort)" == \
+    "$evidence_before" ]]
   [[ -d "$TEST_ROOT/fleet/return-failure" ]]
 done
 printf 'sgt-cleanup preserves malformed and oversized receipts without overwrite: ok\n'
+cp "$valid_receipt_backup" "$return_receipt"
 
 for ((scan_entry = 1; scan_entry <= 1025; scan_entry++)); do
   : > "$return_state/unrelated-scan-entry-$scan_entry"
