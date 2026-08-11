@@ -11,10 +11,18 @@ export TMUX_TMPDIR="$TEST_ROOT/tmux"
 mkdir -p "$TMUX_TMPDIR"
 
 cleanup_fixture() {
-  local pgid
+  local pgid pid pid_file
   tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
   for pgid in $FIXTURE_PGIDS; do
     kill -KILL -- -"$pgid" 2>/dev/null || true
+  done
+  for pid_file in "$TEST_ROOT/fork.pid" "$TEST_ROOT/existing-setsid.pid"; do
+    [[ -e "$pid_file" ]] || continue
+    while read -r pid; do
+      if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
+    done < "$pid_file"
   done
   rm -rf "$TEST_ROOT"
 }
@@ -56,7 +64,10 @@ cat > "$TEST_ROOT/resistant-helper" <<'EOF'
 if [[ "${1:-}" == child ]]; then
   trap '' TERM HUP
 else
-  trap '"$0" child & printf "%s\n" "$!" > "$FORK_PID_FILE"' TERM
+  if [[ "${CREATE_EXISTING_SETSID:-0}" == 1 ]]; then
+    setsid "$0" child & printf '%s\n' "$!" >> "$EXISTING_SETSID_PID_FILE"
+  fi
+  trap 'setsid "$0" child & printf "%s\n" "$!" >> "$FORK_PID_FILE"' TERM
   trap '' HUP
 fi
 while :; do :; done
@@ -64,10 +75,11 @@ EOF
 chmod +x "$TEST_ROOT/resistant-helper"
 export RESISTANT_HELPER="$TEST_ROOT/resistant-helper"
 export FORK_PID_FILE="$TEST_ROOT/fork.pid"
+export EXISTING_SETSID_PID_FILE="$TEST_ROOT/existing-setsid.pid"
 
 tmux new-session -d -s "$TMUX_SESSION" -n keepalive 'while :; do sleep 1; done'
 pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n worker \
-  "env RESISTANT_HELPER='$RESISTANT_HELPER' FORK_PID_FILE='$FORK_PID_FILE' \
+  "env RESISTANT_HELPER='$RESISTANT_HELPER' FORK_PID_FILE='$FORK_PID_FILE' EXISTING_SETSID_PID_FILE='$EXISTING_SETSID_PID_FILE' CREATE_EXISTING_SETSID=1 \
   '$TEST_ROOT/sgt-interactive-worker' '$state'")"
 printf '%s\n' "$pane" > "$state/pane"
 for _ in $(seq 1 100); do
@@ -80,6 +92,8 @@ tmux display-message -p -t "$pane" \
   > "$state/pane_identity"
 chmod 600 "$state/pane_identity"
 helper_pid="$(cat "$state/helper_pid")"
+worker_pid="$(cat "$state/worker_pid")"
+worker_sid="$(cat "$state/worker_session_id")"
 FIXTURE_PGIDS+=" $(cat "$state/worker_process_group")"
 kill -0 "$helper_pid" 2>/dev/null || {
   tmux capture-pane -p -t "$pane" >&2 || true
@@ -98,19 +112,36 @@ if ! kill -0 "$helper_pid" 2>/dev/null; then
   printf 'injected interruption did not preserve the resistant child for retry\n' >&2
   exit 1
 fi
+for _ in $(seq 1 100); do
+  ps -p "$worker_pid" >/dev/null 2>&1 || break
+  sleep 0.01
+done
+if ps -p "$worker_pid" >/dev/null 2>&1; then
+  printf 'pane kill did not exit the recorded session leader\n' >&2
+  exit 1
+fi
+[[ "$(ps -o sid= -p "$helper_pid" | tr -d ' ')" == "$worker_sid" ]]
 [[ -s "$state/worker_recycle_phase" ]] || {
   printf 'retirement phase missing: %s\n' "$(cat "$state/diagnostic" 2>/dev/null || true)" >&2
   exit 1
 }
+awk -F '|' '/^member=/{ if (NF < 4) bad=1; found=1 } END { exit bad || !found }' \
+  "$state/worker_recycle_phase"
 [[ ! -e "$state/worker_recycled" ]]
 
 SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" --sync task >/dev/null
 [[ ! -e "$state/worker_recycle_phase" ]]
 [[ ! -e "$state/diagnostic" ]]
-fork_pid="$(cat "$FORK_PID_FILE" 2>/dev/null || true)"
+fork_pid="$(tail -n 1 "$FORK_PID_FILE" 2>/dev/null || true)"
+existing_setsid_pid="$(tail -n 1 "$EXISTING_SETSID_PID_FILE" 2>/dev/null || true)"
 [[ -n "$fork_pid" ]]
+[[ -n "$existing_setsid_pid" ]]
 if kill -0 "$fork_pid" 2>/dev/null; then
   printf 'TERM-handler descendant survived session retirement: %s\n' "$fork_pid" >&2
+  exit 1
+fi
+if kill -0 "$existing_setsid_pid" 2>/dev/null; then
+  printf 'existing setsid descendant survived lineage retirement: %s\n' "$existing_setsid_pid" >&2
   exit 1
 fi
 
@@ -137,7 +168,7 @@ launch_fixture() {
     printf 'result\n' > "$launched_worktree/.sergeant-result"
   fi
   launched_pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION:" \
-    -n "$name" "env RESISTANT_HELPER='$RESISTANT_HELPER' FORK_PID_FILE='$FORK_PID_FILE' \
+    -n "$name" "env RESISTANT_HELPER='$RESISTANT_HELPER' FORK_PID_FILE='$FORK_PID_FILE' EXISTING_SETSID_PID_FILE='$EXISTING_SETSID_PID_FILE' CREATE_EXISTING_SETSID=0 \
     '$TEST_ROOT/sgt-interactive-worker' '$launched_state'")"
   printf '%s\n' "$launched_pane" > "$launched_state/pane"
   for _ in $(seq 1 100); do
@@ -208,6 +239,29 @@ kill -0 "$keepalive_pid"
 printf '%s\n' "$saved_pgid" > "$launched_state/worker_process_group"
 SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
   --sync task-shared-pgid >/dev/null
+
+# Two recyclers racing the same exact owned pane both converge. The loser of
+# kill-pane must consume the peer's durable process-retirement evidence rather
+# than report a false failure after the peer completed.
+launch_fixture task-concurrent
+SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
+  --sync task-concurrent >"$TEST_ROOT/concurrent-a.out" 2>&1 & recycler_a=$!
+SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
+  --sync task-concurrent >"$TEST_ROOT/concurrent-b.out" 2>&1 & recycler_b=$!
+set +e
+wait "$recycler_a"; recycler_a_status=$?
+wait "$recycler_b"; recycler_b_status=$?
+set -e
+if [[ "$recycler_a_status" -ne 0 || "$recycler_b_status" -ne 0 ]]; then
+  cat "$TEST_ROOT/concurrent-a.out" "$TEST_ROOT/concurrent-b.out" >&2
+  printf 'concurrent recycler statuses: %s %s\n' "$recycler_a_status" "$recycler_b_status" >&2
+  exit 1
+fi
+[[ -s "$launched_state/worker_recycled" ]]
+kill -0 "$launched_pid" 2>/dev/null && {
+  printf 'concurrent recyclers left owned helper alive\n' >&2
+  exit 1
+}
 
 # Waiting remains resumable and retains its exact worker pane/process group.
 launch_fixture task-waiting waiting

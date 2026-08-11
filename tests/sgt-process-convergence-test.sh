@@ -138,6 +138,27 @@ rm -f "$TEST_ROOT/fleet/.coordinator-pane.lock"
 mkdir -p "$TEST_ROOT/fleet/task-stale"
 printf '99999999|stale process start\n' > "$TEST_ROOT/fleet/.coordinator-pane.lock"
 run_cleanup task-stale
+
+# A failed acquisition link with no visible owner can be ordinary EEXIST/release
+# contention. Capability was proved separately, so retry instead of falsely
+# classifying the filesystem as unsupported.
+mkdir -p "$TEST_ROOT/fleet/task-link-race"
+REAL_LN="$(command -v ln)"
+export REAL_LN
+export LINK_RACE_MARKER="$TEST_ROOT/link-race-seen"
+cat > "$TEST_ROOT/fake-bin/ln" <<'EOF'
+#!/usr/bin/env bash
+target="${!#}"
+if [[ "$target" == *.coordinator-pane.lock && ! -e "$LINK_RACE_MARKER" ]]; then
+  : > "$LINK_RACE_MARKER"
+  exit 1
+fi
+exec "$REAL_LN" "$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/ln"
+run_cleanup task-link-race
+[[ -e "$LINK_RACE_MARKER" ]]
+
 mkdir -p "$TEST_ROOT/fleet/task-no-hardlink"
 cat > "$TEST_ROOT/fake-bin/ln" <<'EOF'
 #!/usr/bin/env bash

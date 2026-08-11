@@ -332,19 +332,20 @@ _record_recycle_evidence() {
 }
 
 _load_or_record_recycle_phase() {
-  local repo_dir="$1" identity="$2" process_group="$3" session_id="$4" temporary pid start members=""
+  local repo_dir="$1" identity="$2" process_group="$3" session_id="$4" temporary record records members=""
   if [[ -s "$repo_dir/worker_recycle_phase" ]]; then
     grep -Fqx 'version=1' "$repo_dir/worker_recycle_phase" || return 1
     grep -Fqx "identity=$identity" "$repo_dir/worker_recycle_phase" || return 1
     grep -Fqx "process_group=$process_group" "$repo_dir/worker_recycle_phase" || return 1
     grep -Fqx "session_id=$session_id" "$repo_dir/worker_recycle_phase" || return 1
+    sed -n 's/^member=//p' "$repo_dir/worker_recycle_phase"
     return 0
   fi
-  for pid in $(_worker_session_pids "$session_id"); do
-    start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
-    [[ -n "$start" ]] || continue
-    members+="$pid|$start"$'\n'
-  done
+  records="$(_worker_descendant_records "$session_id")" || return 1
+  [[ -n "$records" ]] || return 1
+  while IFS= read -r record; do
+    [[ -n "$record" ]] && members+="$record"$'\n'
+  done <<< "$records"
   kill -0 "$session_id" 2>/dev/null || return 1
   temporary="$repo_dir/worker_recycle_phase.tmp.$$"
   {
@@ -366,8 +367,31 @@ _load_or_record_recycle_phase() {
   }
 }
 
+_worker_descendant_records() {
+  local root="$1" table known changed=true pid ppid sid start
+  table="$(_sgt_process_table)" || return 1
+  known="$root"
+  while $changed; do
+    changed=false
+    while read -r pid ppid sid; do
+      [[ -n "$pid" ]] || continue
+      if grep -Fxq "$ppid" <<< "$known" && ! grep -Fxq "$pid" <<< "$known"; then
+        known+=$'\n'"$pid"
+        changed=true
+      fi
+    done <<< "$table"
+  done
+  while read -r pid ppid sid; do
+    [[ -n "$pid" ]] || continue
+    if grep -Fxq "$pid" <<< "$known"; then
+      start="$(_sgt_process_start "$pid" 2>/dev/null || true)"
+      [[ -n "$start" ]] && printf '%s|%s|%s|%s\n' "$pid" "$start" "$ppid" "$sid"
+    fi
+  done <<< "$table"
+}
+
 _worker_session_pids() {
-  ps -axo pid=,sid= 2>/dev/null | awk -v sid="$1" '$2 == sid { print $1 }'
+  _sgt_process_table | awk -v sid="$1" '$3 == sid { print $1 }'
 }
 
 _terminal_worker_process_group() {
@@ -390,29 +414,87 @@ _terminal_worker_process_group() {
   if kill -0 "$recorded_pid" 2>/dev/null; then
     actual_start="$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
     actual_pgid="$(ps -o pgid= -p "$recorded_pid" 2>/dev/null | tr -d ' ' || true)"
-    actual_sid="$(ps -o sid= -p "$recorded_pid" 2>/dev/null | tr -d ' ' || true)"
+    actual_sid="$(_sgt_process_session_id "$recorded_pid" 2>/dev/null || true)"
     [[ "$actual_start" == "$recorded_start" && "$actual_pgid" == "$recorded_pgid" && "$actual_sid" == "$recorded_sid" ]] || return 1
   fi
   printf '%s|%s\n' "$recorded_pgid" "$recorded_sid"
 }
 
+_attributable_worker_records() {
+  local session_id="$1" members="$2" record pid start records="" session_pid descendants session_pids
+  # Every phase member is a durable PID/start/PPID/SID lineage point. Retaining
+  # all exact descendants as roots lets a child that called setsid remain
+  # attributable after its original session leader has exited.
+  while IFS= read -r record; do
+    [[ -n "$record" ]] || continue
+    pid="${record%%|*}"
+    start="${record#*|}"; start="${start%%|*}"
+    if [[ "$(_sgt_process_start "$pid" 2>/dev/null || true)" == "$start" ]]; then
+      descendants="$(_worker_descendant_records "$pid" 2>/dev/null)" || return 1
+      records+="$descendants"$'\n'
+    fi
+  done <<< "$members"
+  # A live session cannot be joined by an unrelated external process. Include
+  # its current exact identities even when the original leader is already gone.
+  session_pids="$(_worker_session_pids "$session_id" 2>/dev/null)" || return 1
+  for session_pid in $session_pids; do
+    start="$(_sgt_process_start "$session_pid" 2>/dev/null || true)"
+    [[ -n "$start" ]] && records+="$session_pid|$start|unknown|$session_id"$'\n'
+  done
+  printf '%s\n' "$records" | sed '/^$/d' | awk -F '|' '!seen[$1 FS $2]++'
+}
+
+_signal_exact_worker_records() {
+  local signal="$1" records="$2" record pid start
+  while IFS= read -r record; do
+    [[ -n "$record" ]] || continue
+    pid="${record%%|*}"
+    start="${record#*|}"; start="${start%%|*}"
+    # Revalidate immediately at the signal boundary. PID reuse therefore turns
+    # into an unsignalled ambiguity instead of harming an unrelated process.
+    [[ "$(_sgt_process_start "$pid" 2>/dev/null || true)" == "$start" ]] || continue
+    kill "-$signal" "$pid" 2>/dev/null || true
+  done <<< "$records"
+}
+
 _stop_terminal_worker_process_group() {
-  local process_group="$1" session_id="$2" live_pids pid
+  local process_group="$1" session_id="$2" members="$3" records frozen="" new_records signature prior_signature=""
   [[ -n "$process_group" ]] || return 0
-  live_pids="$(_worker_session_pids "$session_id")"
-  for pid in $live_pids; do kill -TERM "$pid" 2>/dev/null || true; done
-  for _ in $(seq 1 10); do
-    live_pids="$(_worker_session_pids "$session_id")"
-    [[ -z "$live_pids" ]] && return 0
+  records="$(_attributable_worker_records "$session_id" "$members")" || return 1
+  _signal_exact_worker_records TERM "$records"
+  sleep 0.05
+  # Repeatedly refresh and freeze the exact attributable tree. Once a member is
+  # stopped it cannot fork; the next refresh catches children created by a
+  # later-stopped TERM handler, including children that formed a new session.
+  for _ in $(seq 1 20); do
+    new_records="$(_attributable_worker_records "$session_id" "$members")" || return 1
+    frozen="$(printf '%s\n%s\n' "$frozen" "$new_records" | sed '/^$/d' | awk -F '|' '!seen[$1 FS $2]++')"
+    _signal_exact_worker_records STOP "$new_records"
+    signature="$(printf '%s\n' "$frozen" | cut -d '|' -f 1-2 | sort)"
+    if [[ "$signature" == "$prior_signature" ]]; then
+      break
+    fi
+    prior_signature="$signature"
+    sleep 0.01
+  done
+  new_records="$(_attributable_worker_records "$session_id" "$members")" || return 1
+  frozen="$(printf '%s\n%s\n' "$frozen" "$new_records" | sed '/^$/d' | awk -F '|' '!seen[$1 FS $2]++')"
+  _signal_exact_worker_records STOP "$new_records"
+  _signal_exact_worker_records KILL "$frozen"
+  for _ in $(seq 1 20); do
+    records="$(_attributable_worker_records "$session_id" "$members")" || return 1
+    [[ -z "$records" ]] && return 0
     sleep 0.05
   done
-  live_pids="$(_worker_session_pids "$session_id")"
-  for pid in $live_pids; do
-    kill -KILL "$pid" 2>/dev/null || true
-  done
-  for _ in $(seq 1 20); do
-    live_pids="$(_worker_session_pids "$session_id")"
-    [[ -z "$live_pids" ]] && return 0
+  return 1
+}
+
+_wait_for_peer_recycle() {
+  local repo_dir="$1" identity="$2" process_group="$3" attempts
+  attempts="${SGT_RECYCLE_PEER_ATTEMPTS:-20}"
+  [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=20
+  for _ in $(seq 1 "$attempts"); do
+    _recycle_evidence_covers "$repo_dir" "$identity" "$process_group" && return 0
     sleep 0.05
   done
   return 1
@@ -430,7 +512,7 @@ _clear_terminal_recycle_diagnostic() {
 
 _recycle_terminal_worker() {
   local repo_dir="$1"
-  local pane pane_id worktree_path identity process_identity process_group session_id process_status prior_diagnostic
+  local pane pane_id worktree_path identity process_identity process_group session_id process_status prior_diagnostic members
 
   # Settle the accepted action lease before the pane is taken away.  Recycling
   # used to stop the only process that could ever publish completion, which is
@@ -457,11 +539,17 @@ _recycle_terminal_worker() {
       "$pane" > "$repo_dir/diagnostic"
     return 1
   fi
+  process_group="$(cat "$repo_dir/worker_process_group" 2>/dev/null || true)"
+  _recycle_evidence_covers "$repo_dir" "$identity" "$process_group" && return 0
   if process_identity="$(_terminal_worker_process_group "$repo_dir" "$identity")"; then
     process_group="${process_identity%%|*}"
     session_id="${process_identity##*|}"
   else
     process_status=$?
+    if _wait_for_peer_recycle "$repo_dir" "$identity" "$process_group"; then
+      _clear_terminal_recycle_diagnostic "$repo_dir"
+      return 0
+    fi
     if [[ "$process_status" -eq 2 ]]; then
       printf 'terminal worker process provenance is incomplete; refusing recycle: %s\n' \
         "$pane" > "$repo_dir/diagnostic"
@@ -473,7 +561,11 @@ _recycle_terminal_worker() {
   fi
   # Already retired this exact pane and process group: nothing to do.
   _recycle_evidence_covers "$repo_dir" "$identity" "$process_group" && return 0
-  if ! _load_or_record_recycle_phase "$repo_dir" "$identity" "$process_group" "$session_id"; then
+  if ! members="$(_load_or_record_recycle_phase "$repo_dir" "$identity" "$process_group" "$session_id")"; then
+    if _wait_for_peer_recycle "$repo_dir" "$identity" "$process_group"; then
+      _clear_terminal_recycle_diagnostic "$repo_dir"
+      return 0
+    fi
     printf 'terminal worker retirement phase could not be established safely: %s\n' \
       "$pane" > "$repo_dir/diagnostic"
     return 1
@@ -487,7 +579,7 @@ _recycle_terminal_worker() {
   # returned pane id must be compared rather than the exit status trusted.
   pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
   if [[ "$pane_id" != "$pane" ]]; then
-    if ! _stop_terminal_worker_process_group "$process_group" "$session_id"; then
+    if ! _stop_terminal_worker_process_group "$process_group" "$session_id" "$members"; then
       printf 'terminal worker process group did not stop: %s\n' \
         "$process_group" > "$repo_dir/diagnostic"
       return 1
@@ -498,17 +590,45 @@ _recycle_terminal_worker() {
     return 0
   fi
   if ! _pane_is_supervisor "$pane" "$repo_dir"; then
-    # Write a diagnostic that names a supported next step (issue #203).
+    pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
+    if [[ "$pane_id" != "$pane" ]]; then
+      if _wait_for_peer_recycle "$repo_dir" "$identity" "$process_group"; then
+        rm -f "$repo_dir/worker_recycle_phase"
+        _clear_terminal_recycle_diagnostic "$repo_dir"
+        return 0
+      fi
+      if _stop_terminal_worker_process_group "$process_group" "$session_id" "$members" &&
+        _record_recycle_evidence "$repo_dir" "$pane" "$identity" "$process_group"; then
+        rm -f "$repo_dir/worker_recycle_phase"
+        _clear_terminal_recycle_diagnostic "$repo_dir"
+        return 0
+       fi
+     fi
     # sgt-cleanup retires the record without killing an unrelated pane.
-    local _task_id _repo_name
+    local _task_id
     _task_id="$(basename "$(dirname "$repo_dir")")"
-    _repo_name="$(basename "$repo_dir")"
     printf 'terminal worker pane identity does not match; refusing recycle (pane: %s). Run: sgt-cleanup %s\n' \
       "$pane" "$_task_id" > "$repo_dir/diagnostic"
     return 1
   fi
   if ! tmux kill-pane -t "$pane" 2>/dev/null ||
      [[ "$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)" == "$pane" ]]; then
+    if _wait_for_peer_recycle "$repo_dir" "$identity" "$process_group"; then
+      rm -f "$repo_dir/worker_recycle_phase"
+      _clear_terminal_recycle_diagnostic "$repo_dir"
+      return 0
+    fi
+    # A peer can win kill-pane and be interrupted before publishing evidence.
+    # If the exact pane is now absent, finish the durable process phase here.
+    pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
+    if [[ "$pane_id" != "$pane" ]]; then
+      if _stop_terminal_worker_process_group "$process_group" "$session_id" "$members" &&
+        _record_recycle_evidence "$repo_dir" "$pane" "$identity" "$process_group"; then
+        rm -f "$repo_dir/worker_recycle_phase"
+        _clear_terminal_recycle_diagnostic "$repo_dir"
+        return 0
+      fi
+    fi
     printf 'failed to recycle terminal worker pane: %s\n' "$pane" > "$repo_dir/diagnostic"
     return 1
   fi
@@ -516,7 +636,7 @@ _recycle_terminal_worker() {
     printf 'injected interruption after terminal pane kill\n' > "$repo_dir/diagnostic"
     return 1
   fi
-  if ! _stop_terminal_worker_process_group "$process_group" "$session_id"; then
+  if ! _stop_terminal_worker_process_group "$process_group" "$session_id" "$members"; then
     printf 'terminal worker process group did not stop: %s\n' \
       "$process_group" > "$repo_dir/diagnostic"
     return 1

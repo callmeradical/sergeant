@@ -40,6 +40,8 @@ SGT_LIB_LOADED=1
 
 # shellcheck source=bin/_sgt-drain.sh
 source "$_SGT_LIB_DIR/_sgt-drain.sh"
+# shellcheck source=bin/_sgt-process.sh
+source "$_SGT_LIB_DIR/_sgt-process.sh"
 
 # ── Configurable env vars ─────────────────────────────────────────────────────
 
@@ -515,7 +517,7 @@ _SGT_COORDINATOR_LOCK_DIR=""
 _SGT_COORDINATOR_LOCK_OWNER=""
 
 _sgt_coordinator_lock_acquire() {
-  local fleet_dir="$1" attempts attempt interval owner pid start owner_start actual_start candidate reclaim link_failed_without_owner=false
+  local fleet_dir="$1" attempts attempt interval owner pid start owner_start actual_start candidate reclaim probe link_error
   [[ -z "$_SGT_COORDINATOR_LOCK_DIR" ]] || return 0
   mkdir -p "$fleet_dir"
   _SGT_COORDINATOR_LOCK_DIR="$fleet_dir/.coordinator-pane.lock"
@@ -524,8 +526,18 @@ _sgt_coordinator_lock_acquire() {
   _SGT_COORDINATOR_LOCK_OWNER="$$|$start"
   candidate="$fleet_dir/.coordinator-pane.owner.$$.$RANDOM"
   reclaim="$fleet_dir/.coordinator-pane.reclaim"
+  probe="$fleet_dir/.coordinator-pane.link-probe.$$.$RANDOM"
   (umask 077; printf '%s\n' "$_SGT_COORDINATOR_LOCK_OWNER" > "$candidate") || \
     _die "Cannot stage coordinator-pane lock owner identity"
+  # Establish the filesystem primitive separately from lock contention. A
+  # failed acquisition can then only mean another publisher won the name (or
+  # released it during our observation), never an inferred link capability.
+  if ! link_error="$(ln "$candidate" "$probe" 2>&1)"; then
+    rm -f "$candidate" "$probe"
+    _SGT_COORDINATOR_LOCK_DIR=""; _SGT_COORDINATOR_LOCK_OWNER=""
+    _die "Atomic hard-link coordinator lock is unsupported in $fleet_dir: ${link_error:-link creation failed}; use a local writable filesystem with same-directory hard links"
+  fi
+  rm -f "$probe"
   attempts="${SGT_COORDINATOR_LOCK_ATTEMPTS:-200}"
   interval="${SGT_COORDINATOR_LOCK_INTERVAL:-0.05}"
   [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=200
@@ -536,7 +548,6 @@ _sgt_coordinator_lock_acquire() {
       return 0
     fi
     if [[ ! -e "$_SGT_COORDINATOR_LOCK_DIR" && ! -L "$_SGT_COORDINATOR_LOCK_DIR" ]]; then
-      link_failed_without_owner=true
       sleep "$interval"
       continue
     fi
@@ -571,9 +582,6 @@ _sgt_coordinator_lock_acquire() {
   pid="${owner%%|*}"
   _SGT_COORDINATOR_LOCK_DIR=""
   _SGT_COORDINATOR_LOCK_OWNER=""
-  if $link_failed_without_owner && [[ -z "$owner" ]]; then
-    _die "Atomic hard-link coordinator lock is unsupported in $fleet_dir; move SERGEANT_FLEET to a local filesystem with same-directory hard links"
-  fi
   _die "Timed out waiting for coordinator-pane fleet transaction${pid:+ held by PID $pid}; inspect $fleet_dir/.coordinator-pane.lock"
 }
 
