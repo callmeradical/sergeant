@@ -69,96 +69,102 @@ _sgt_response_archive_entry_matches() {
     "$proof_status" == "$applied_status" ]]
 }
 
+_sgt_process_start_token() {
+  local pid="$1" token
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  if [[ -r "/proc/$pid/stat" ]]; then
+    token="$(awk '{ print $22 }' "/proc/$pid/stat" 2>/dev/null)" || return 1
+    [[ "$token" =~ ^[0-9]+$ ]] || return 1
+    printf 'proc:%s\n' "$token"
+  else
+    token="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]][[:space:]]*/ /g')" || return 1
+    [[ -n "$token" ]] || return 1
+    printf 'ps:%s\n' "$token"
+  fi
+}
+
+_sgt_response_lock_record_pid() {
+  local record="$1"
+  [[ "$record" =~ ^[1-9][0-9]*$ ]] && { printf '%s\n' "$record"; return; }
+  printf '%s\n' "$record" | awk -F= '$1 == "pid" { n++; v=$2 } END { if (n == 1 && v ~ /^[1-9][0-9]*$/) print v; else exit 1 }'
+}
+
+_sgt_response_lock_record_live() {
+  local record="$1" pid expected current
+  pid="$(_sgt_response_lock_record_pid "$record")" || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  [[ "$record" =~ ^[1-9][0-9]*$ ]] && return 0
+  [[ "$(printf '%s\n' "$record" | awk 'END { print NR }')" == 3 ]] || return 1
+  expected="$(printf '%s\n' "$record" | awk -F= '$1 == "start" { n++; v=substr($0,7) } END { if (n == 1 && v != "") print v; else exit 1 }')" || return 1
+  current="$(_sgt_process_start_token "$pid")" || return 1
+  [[ "$current" == "$expected" ]]
+}
+
+_sgt_response_lock_record_for_pid() {
+  local pid="$1" start nonce
+  start="$(_sgt_process_start_token "$pid")" || return 1
+  nonce="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  [[ "$nonce" =~ ^[a-f0-9]{32}$ ]] || return 1
+  printf 'pid=%s\nstart=%s\nnonce=%s\n' "$pid" "$start" "$nonce"
+}
+
+_sgt_response_lock_record_is_this_process() {
+  local record="$1" pid expected
+  pid="$(_sgt_response_lock_record_pid "$record")" || return 1
+  [[ "$pid" == "$$" ]] || return 1
+  [[ "$record" =~ ^[1-9][0-9]*$ ]] && return 0
+  expected="$(printf '%s\n' "$record" | awk -F= '$1 == "start" { n++; v=substr($0,7) } END { if (n == 1) print v; else exit 1 }')" || return 1
+  [[ "$expected" == "$(_sgt_process_start_token "$$")" ]]
+}
+
 _sgt_response_lock_acquire() {
   local repo_state="$1"
-  local lock_name="${2:-response.lock}"
-  local lock_path="$repo_state/$lock_name"
-  local candidate="$repo_state/.$lock_name.$$.$RANDOM.$RANDOM"
-  local candidate_name="${candidate##*/}"
-  local owner current_owner interval
+  local lock_path="$repo_state/${2:-response.lock}"
+  local candidate="$repo_state/.${2:-response.lock}.$$.$RANDOM.$RANDOM"
+  local owner current_owner interval timeout started owner_record
   interval="${SGT_RESPONSE_LOCK_INTERVAL:-0.01}"
-
-  if ! printf '%s\n' "$$" > "$candidate"; then
-    printf 'ERROR: Could not create response lock candidate: %s\n' "$candidate" >&2
-    return 1
-  fi
+  timeout="${SGT_RESPONSE_LOCK_TIMEOUT:-30}"
+  [[ "$timeout" =~ ^[0-9]+$ ]] || { printf 'ERROR: Invalid response lock timeout: %s\n' "$timeout" >&2; return 1; }
+  started=$SECONDS
+  owner_record="$(_sgt_response_lock_record_for_pid "$$")" || return 1
+  printf '%s\n' "$owner_record" > "$candidate" || return 1
 
   while true; do
+    if (( SECONDS - started >= timeout )); then
+      rm -f "$candidate"
+      printf 'ERROR: Timed out waiting for response lock: %s\n' "$lock_path" >&2
+      return 1
+    fi
     if [[ -d "$lock_path" ]]; then
       owner="$(cat "$lock_path/pid" 2>/dev/null || true)"
       if [[ -z "$owner" ]]; then
-        if [[ -n "$(ls -A "$lock_path" 2>/dev/null)" ]]; then
-          rm -f "$candidate"
-          printf 'ERROR: Response lock directory has no valid owner: %s\n' "$lock_path" >&2
-          return 1
-        fi
-        if [[ -z "$(find "$lock_path" -prune -mmin +0 -print 2>/dev/null)" ]]; then
-          sleep "$interval"
-          continue
-        fi
-      else
-        if [[ ! "$owner" =~ ^[0-9]+$ ]]; then
-          rm -f "$candidate"
-          printf 'ERROR: Response lock directory has an invalid owner: %s\n' "$lock_path" >&2
-          return 1
-        fi
-        if kill -0 "$owner" 2>/dev/null; then
-          sleep "$interval"
-          continue
-        fi
+        [[ -z "$(ls -A "$lock_path" 2>/dev/null)" ]] || { rm -f "$candidate"; return 1; }
+        sleep "$interval"; continue
       fi
-
+      [[ "$owner" =~ ^[1-9][0-9]*$ ]] || { rm -f "$candidate"; return 1; }
+      if kill -0 "$owner" 2>/dev/null; then sleep "$interval"; continue; fi
       current_owner="$(cat "$lock_path/pid" 2>/dev/null || true)"
-      if [[ "$current_owner" != "$owner" ]]; then
-        continue
-      fi
-      if [[ -n "$owner" ]] && ! rm -f "$lock_path/pid"; then
+      [[ "$current_owner" == "$owner" ]] || continue
+      if ! rm -f "$lock_path/pid" || ! rmdir "$lock_path"; then
         rm -f "$candidate"
-        printf 'ERROR: Could not remove stale response lock owner: %s\n' "$lock_path/pid" >&2
-        return 1
-      fi
-      if ! rmdir "$lock_path" 2>/dev/null; then
-        rm -f "$candidate"
-        printf 'ERROR: Could not recover response lock directory: %s\n' "$lock_path" >&2
         return 1
       fi
       continue
     fi
-
     if [[ -e "$lock_path" || -L "$lock_path" ]]; then
       owner="$(cat "$lock_path" 2>/dev/null || readlink "$lock_path" 2>/dev/null || true)"
-      if [[ -z "$owner" ]]; then
-        # Lock file disappeared between the -e check and the read (TOCTOU: just released).
-        # Retry; the next iteration will find the file gone and attempt ln.
-        continue
-      fi
-      if [[ ! "$owner" =~ ^[0-9]+$ ]]; then
-        rm -f "$candidate"
-        printf 'ERROR: Response lock has an invalid owner: %s\n' "$lock_path" >&2
-        return 1
-      fi
-      if kill -0 "$owner" 2>/dev/null; then
-        sleep "$interval"
-        continue
-      fi
+      [[ -n "$owner" ]] || continue
+      _sgt_response_lock_record_pid "$owner" >/dev/null || { rm -f "$candidate"; printf 'ERROR: Response lock has an invalid owner: %s\n' "$lock_path" >&2; return 1; }
+      if _sgt_response_lock_record_live "$owner"; then sleep "$interval"; continue; fi
       current_owner="$(cat "$lock_path" 2>/dev/null || readlink "$lock_path" 2>/dev/null || true)"
-      if [[ "$current_owner" == "$owner" ]]; then
-        if ! rm -f "$lock_path"; then
-          rm -f "$candidate"
-          printf 'ERROR: Could not remove stale response lock: %s\n' "$lock_path" >&2
-          return 1
-        fi
-      fi
+      [[ "$current_owner" == "$owner" ]] && rm -f "$lock_path"
       continue
     fi
-
     if ln "$candidate" "$lock_path" 2>/dev/null; then
-      if [[ "$lock_path" -ef "$candidate" ]]; then
-        rm -f "$candidate"
-        _SGT_RESPONSE_LOCK_DIR="$lock_path"
-        return 0
-      fi
-      rm -f "$lock_path/$candidate_name"
+      rm -f "$candidate"
+      _SGT_RESPONSE_LOCK_DIR="$lock_path"
+      _SGT_RESPONSE_LOCK_OWNER_RECORD="$owner_record"
+      return 0
     elif [[ ! -e "$lock_path" && ! -L "$lock_path" ]]; then
       rm -f "$candidate"
       printf 'ERROR: Could not create response lock: %s\n' "$lock_path" >&2
@@ -176,13 +182,14 @@ _sgt_response_lock_release() {
   [[ -n "${_SGT_RESPONSE_LOCK_DIR:-}" ]] || return 0
   local owner
   owner="$(cat "$_SGT_RESPONSE_LOCK_DIR" 2>/dev/null || true)"
-  if [[ "$owner" == "$$" ]]; then
+  if [[ "$owner" == "${_SGT_RESPONSE_LOCK_OWNER_RECORD:-$$}" ]]; then
     if ! rm -f "$_SGT_RESPONSE_LOCK_DIR"; then
       printf 'ERROR: Could not release response lock: %s\n' "$_SGT_RESPONSE_LOCK_DIR" >&2
       return 1
     fi
   fi
   _SGT_RESPONSE_LOCK_DIR=""
+  _SGT_RESPONSE_LOCK_OWNER_RECORD=""
 }
 
 # _sgt_response_lock_reclaim <repo_state> [lock_name]
@@ -203,17 +210,18 @@ _sgt_response_lock_reclaim() {
 
   if [[ -d "$lock_path" ]]; then
     owner="$(cat "$lock_path/pid" 2>/dev/null || true)"
-    if [[ "$owner" == "$$" ]]; then
+    if _sgt_response_lock_record_is_this_process "$owner"; then
       rm -f "$lock_path/pid" 2>/dev/null || true
       rmdir "$lock_path" 2>/dev/null || true
     fi
   elif [[ -e "$lock_path" || -L "$lock_path" ]]; then
     owner="$(cat "$lock_path" 2>/dev/null || readlink "$lock_path" 2>/dev/null || true)"
-    if [[ "$owner" == "$$" ]]; then
+    if _sgt_response_lock_record_is_this_process "$owner"; then
       rm -f "$lock_path" 2>/dev/null || true
     fi
   fi
   _SGT_RESPONSE_LOCK_DIR=""
+  _SGT_RESPONSE_LOCK_OWNER_RECORD=""
 }
 
 # _sgt_response_lock_held_by_this_process <repo_state> [lock_name]
@@ -231,7 +239,108 @@ _sgt_response_lock_held_by_this_process() {
   else
     return 1
   fi
-  [[ "$owner" == "$$" ]]
+  _sgt_response_lock_record_is_this_process "$owner"
+}
+
+# Canonical replacement command and pane authentication. The tmux start command
+# is the durable spawn capability: a token appearing somewhere in a foreign
+# command is not ownership proof.
+_sgt_replacement_worker_command() {
+  local token="$1" worker_command="$2"
+  [[ "$token" =~ ^[a-f0-9]{32}$ && -n "$worker_command" && "$worker_command" != *$'\n'* ]] || return 1
+  printf 'env %q %s' "SGT_REPLACEMENT_TOKEN=$token" "$worker_command"
+}
+
+_sgt_replacement_pane_identity_matches() {
+  local identity="$1" pane="$2" expected_command="$3"
+  local dead identity_pane pid created command
+  IFS='|' read -r dead identity_pane pid created command <<< "$identity"
+  [[ "$dead" == 0 && "$identity_pane" == "$pane" && "$pane" =~ ^%[0-9]+$ &&
+     "$pid" =~ ^[1-9][0-9]*$ && "$created" =~ ^[1-9][0-9]*$ &&
+     "$command" == "$expected_command" ]]
+}
+
+# Strict shared relaunch journal. Both public recovery CLIs use this canonical
+# shape; malformed, partial, or extended records are never interpreted.
+_sgt_transfer_journal_render() {
+  printf 'version=1\nresponse_id=%s\nnotification_id=%s\nspawn_token=%s\ngate_generation=%s\ntmux_session=%s\nwindow_name=%s\nworker_command=%s\nphase=%s\npane=%s\npane_identity=%s\n' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}"
+}
+
+_sgt_transfer_journal_read() {
+  local file="$1" canonical
+  [[ -f "$file" && ! -L "$file" && "$(wc -l < "$file" | tr -d ' ')" == 11 ]] || return 1
+  _SGT_TRANSFER_RESPONSE_ID="$(sed -n '2s/^response_id=//p' "$file")"
+  _SGT_TRANSFER_NOTIFICATION_ID="$(sed -n '3s/^notification_id=//p' "$file")"
+  _SGT_TRANSFER_SPAWN_TOKEN="$(sed -n '4s/^spawn_token=//p' "$file")"
+  _SGT_TRANSFER_GATE_GENERATION="$(sed -n '5s/^gate_generation=//p' "$file")"
+  _SGT_TRANSFER_TMUX_SESSION="$(sed -n '6s/^tmux_session=//p' "$file")"
+  _SGT_TRANSFER_WINDOW_NAME="$(sed -n '7s/^window_name=//p' "$file")"
+  _SGT_TRANSFER_WORKER_COMMAND="$(sed -n '8s/^worker_command=//p' "$file")"
+  _SGT_TRANSFER_PHASE="$(sed -n '9s/^phase=//p' "$file")"
+  _SGT_TRANSFER_PANE="$(sed -n '10s/^pane=//p' "$file")"
+  _SGT_TRANSFER_PANE_IDENTITY="$(sed -n '11s/^pane_identity=//p' "$file")"
+  [[ "$(_sgt_response_archive_field version "$file" 2>/dev/null || true)" == 1 &&
+     ( -z "$_SGT_TRANSFER_RESPONSE_ID" || "$_SGT_TRANSFER_RESPONSE_ID" =~ ^[a-f0-9]{32}$ ) &&
+     "$_SGT_TRANSFER_NOTIFICATION_ID" =~ ^[a-f0-9]{32}$ &&
+     "$_SGT_TRANSFER_SPAWN_TOKEN" =~ ^[a-f0-9]{32}$ &&
+     "$_SGT_TRANSFER_GATE_GENERATION" =~ ^[1-9][0-9]*$ &&
+     "$_SGT_TRANSFER_TMUX_SESSION" =~ ^[A-Za-z0-9._:-]+$ &&
+     "$_SGT_TRANSFER_WINDOW_NAME" =~ ^[A-Za-z0-9._:/-]+$ &&
+     -n "$_SGT_TRANSFER_WORKER_COMMAND" ]] || return 1
+  case "$_SGT_TRANSFER_PHASE" in
+    bound|fenced|spawning)
+      [[ -z "$_SGT_TRANSFER_PANE" && -z "$_SGT_TRANSFER_PANE_IDENTITY" ]] || return 1
+      ;;
+    spawned|published|acked)
+      _sgt_replacement_pane_identity_matches "$_SGT_TRANSFER_PANE_IDENTITY" \
+        "$_SGT_TRANSFER_PANE" "$_SGT_TRANSFER_WORKER_COMMAND" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  canonical="$(_sgt_transfer_journal_render "$_SGT_TRANSFER_RESPONSE_ID" \
+    "$_SGT_TRANSFER_NOTIFICATION_ID" "$_SGT_TRANSFER_SPAWN_TOKEN" \
+    "$_SGT_TRANSFER_GATE_GENERATION" "$_SGT_TRANSFER_TMUX_SESSION" \
+    "$_SGT_TRANSFER_WINDOW_NAME" "$_SGT_TRANSFER_WORKER_COMMAND" \
+    "$_SGT_TRANSFER_PHASE" "$_SGT_TRANSFER_PANE" "$_SGT_TRANSFER_PANE_IDENTITY")"
+  cmp -s "$file" <(printf '%s\n' "$canonical")
+}
+
+_sgt_transfer_journal_write() {
+  local file="$1" response_id="$2" notification_id="$3" spawn_token="$4"
+  local generation="$5" session="$6" window="$7" command="$8" phase="$9"
+  local pane="${10:-}" identity="${11:-}" previous="" body temporary
+  if [[ -e "$file" || -L "$file" ]]; then
+    _sgt_transfer_journal_read "$file" || return 1
+    [[ "$_SGT_TRANSFER_RESPONSE_ID" == "$response_id" &&
+       "$_SGT_TRANSFER_NOTIFICATION_ID" == "$notification_id" &&
+       "$_SGT_TRANSFER_SPAWN_TOKEN" == "$spawn_token" &&
+       "$_SGT_TRANSFER_GATE_GENERATION" == "$generation" &&
+       "$_SGT_TRANSFER_TMUX_SESSION" == "$session" &&
+       "$_SGT_TRANSFER_WINDOW_NAME" == "$window" &&
+       "$_SGT_TRANSFER_WORKER_COMMAND" == "$command" ]] || return 1
+    previous="$_SGT_TRANSFER_PHASE"
+    if [[ "$previous" == "$phase" ]]; then
+      [[ "$_SGT_TRANSFER_PANE" == "$pane" && "$_SGT_TRANSFER_PANE_IDENTITY" == "$identity" ]] || return 1
+    else
+      case "$previous:$phase" in
+        bound:fenced|bound:spawning|fenced:spawning|spawning:spawned|\
+        spawned:spawning|spawned:published|spawned:acked|published:acked) ;;
+        *) return 1 ;;
+      esac
+    fi
+  else
+    [[ "$phase" == bound ]] || return 1
+  fi
+  body="$(_sgt_transfer_journal_render "$response_id" "$notification_id" "$spawn_token" \
+    "$generation" "$session" "$window" "$command" "$phase" "$pane" "$identity")"
+  temporary="$file.tmp.$$.$RANDOM"
+  _sgt_transfer_io_failpoint "$file" write && return 1
+  printf '%s\n' "$body" > "$temporary" || { rm -f "$temporary"; return 1; }
+  # Validate the candidate through the same parser before publication.
+  _sgt_transfer_journal_read "$temporary" || { rm -f "$temporary"; return 1; }
+  _sgt_transfer_io_failpoint "$file" rename && { rm -f "$temporary"; return 1; }
+  mv "$temporary" "$file"
 }
 
 # ── Action-lease finalization ─────────────────────────────────────────────────

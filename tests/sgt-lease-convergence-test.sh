@@ -64,8 +64,8 @@ case "$1" in
     fi
     pane_identity="${PANE_IDENTITY:-0|%42|4242|123456|stalled-pane}"
     if [[ "$target" == "${NEW_PANE:-%99}" ]]; then
-      spawn_token="$(cat "${SPAWN_TOKEN_STATE:-$REPO_STATE_DIR/test_spawn_token}" 2>/dev/null || true)"
-      pane_identity="0|$target|9999|654321|env SGT_REPLACEMENT_TOKEN=$spawn_token relaunched"
+      start_command="$(cat "${SPAWN_COMMAND_STATE:-$REPO_STATE_DIR/test_spawn_command}" 2>/dev/null || true)"
+      pane_identity="0|$target|9999|654321|$start_command"
     fi
     # Stand in for a relaunched worker completing its delivery handshake.
     if [[ "${AUTO_DELIVER:-1}" == 1 &&
@@ -95,13 +95,17 @@ case "$1" in
     [[ "${FAIL_WINDOW:-0}" == 0 ]] || exit 7
     window=""
     previous=""
+    start_command=""
     for arg in "$@"; do
       [[ "$previous" == -n ]] && window="$arg"
       previous="$arg"
+      start_command="$arg"
     done
     spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*SGT_REPLACEMENT_TOKEN=\([a-f0-9]\{32\}\).*/\1/p')"
     printf '%s\n' "$spawn_token" \
       > "${SPAWN_TOKEN_STATE:-$REPO_STATE_DIR/test_spawn_token}"
+    printf '%s\n' "$start_command" \
+      > "${SPAWN_COMMAND_STATE:-$REPO_STATE_DIR/test_spawn_command}"
     if [[ -n "${TMUX_PANE_STATE:-}" ]]; then
       printf '%s|%s\n' "${NEW_PANE:-%99}" "$window" > "$TMUX_PANE_STATE"
     fi
@@ -628,13 +632,14 @@ PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
   < "$TEST_ROOT/foreign-input" >/dev/null 2>&1
 set -e
 successor="$(cut -d '|' -f2 "$state/response_successor_notification")"
+foreign_token="$(cut -d '|' -f3 "$state/response_successor_notification")"
 foreign_window="task/app-resume-${successor:0:12}"
 printf '%%77|%s\n' "$foreign_window" > "$TEST_ROOT/foreign-pane-state"
 set +e
 foreign_output="$(PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
   REPO_STATE_DIR="$state" PANE_ALIVE=0 TMUX_PANE_STATE="$TEST_ROOT/foreign-pane-state" \
   NEW_WINDOW_COUNT="$TEST_ROOT/foreign-window-count" FOREIGN_PANE=%77 \
-  FOREIGN_PANE_IDENTITY='0|%77|7777|777777|foreign-shell' \
+  FOREIGN_PANE_IDENTITY="0|%77|7777|777777|sh -c echo-SGT_REPLACEMENT_TOKEN=$foreign_token" \
   KILL_LOG="$TEST_ROOT/foreign-kill.log" \
   "$ROOT_DIR/bin/sgt-respond" "$task" app \
   < "$TEST_ROOT/foreign-input" 2>&1)"
@@ -643,6 +648,39 @@ set -e
 [[ "$foreign_status" -ne 0 && "$foreign_output" == *'foreign pane'* ]]
 [[ ! -e "$TEST_ROOT/foreign-window-count" ]]
 [[ -z "$(cat "$TEST_ROOT/foreign-kill.log" 2>/dev/null || true)" ]]
+
+# Canonical journal parsing is fail-closed at the public CLI: unknown phases,
+# missing fields, and extra fields are never repaired or overwritten on retry.
+for malformed in extra missing bad_phase; do
+  read -r state wt <<<"$(make_worktree malformed-$malformed)"
+  task="task-malformed-$malformed"
+  setup_orphan "$state" "$wt"
+  install_accepted_turn "$state" "$wt"
+  printf 'strict journal' > "$TEST_ROOT/malformed-input"
+  set +e
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+    NEW_WINDOW_COUNT="$TEST_ROOT/malformed-$malformed-count" \
+    SGT_TEST_HOOKS=1 SGT_TEST_INTERRUPT_TRANSFER_AT=replacement_owned \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app < "$TEST_ROOT/malformed-input" \
+    >/dev/null 2>&1
+  set -e
+  journal="$state/response_relaunch_transaction"
+  case "$malformed" in
+    extra) printf 'unexpected=value\n' >> "$journal" ;;
+    missing) sed -i '$d' "$journal" ;;
+    bad_phase) sed -i 's/^phase=.*/phase=unknown/' "$journal" ;;
+  esac
+  if PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+      REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%99 \
+      NEW_WINDOW_COUNT="$TEST_ROOT/malformed-$malformed-count" \
+      "$ROOT_DIR/bin/sgt-respond" "$task" app < "$TEST_ROOT/malformed-input" \
+      >/dev/null 2>&1; then
+    printf 'malformed journal %s was accepted\n' "$malformed" >&2
+    exit 1
+  fi
+  [[ "$(cat "$TEST_ROOT/malformed-$malformed-count")" == 1 ]]
+done
 
 # A real SIGKILL after tmux creates the replacement leaves the durable spawning
 # intent behind. The exact pane is discovered by its nonce-derived window and
@@ -735,11 +773,9 @@ set -e
 bound_successor="$(sed -n 's/^successor_notification=//p' \
   "$state/notifications/$NOTIFY/successor_binding")"
 [[ "$bound_successor" =~ ^[a-f0-9]{32}$ ]]
-printf 'orphaned\n' > "$state/status"
-printf 'orphaned\n' > "$wt/.sergeant-status"
-printf 'resume across cli' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
-  SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" PANE_ALIVE=0 \
-  "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
 [[ "$(cat "$state/notification_id")" == "$bound_successor" ]]
 grep -Fq "new_notification=$bound_successor" \
   "$state/notifications/$NOTIFY/ownership_transition"
@@ -760,8 +796,6 @@ set -e
 [[ "$cross_spawn_status" -ne 0 ]]
 spawn_successor="$(sed -n 's/^notification_id=//p' \
   "$state/response_relaunch_transaction")"
-printf 'orphaned\n' > "$state/status"
-printf 'orphaned\n' > "$wt/.sergeant-status"
 printf 'resume spawned pane across cli' | PATH="$fake_bin:$PATH" \
   SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" \
   PANE_ALIVE=0 NEW_PANE=%98 TMUX_PANE_STATE="$TEST_ROOT/cross-spawn-pane-state" \

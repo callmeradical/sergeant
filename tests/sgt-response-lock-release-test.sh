@@ -79,4 +79,27 @@ _sgt_response_lock_release
   exit 1
 }
 
+# A live PID with a different process-birth identity is stale, not a live owner.
+lockdir5="$TEST_ROOT/state-5"
+mkdir -p "$lockdir5"
+printf 'pid=%s\nstart=proc:0\nnonce=11111111111111111111111111111111\n' "$$" \
+  > "$lockdir5/response.lock"
+SGT_RESPONSE_LOCK_TIMEOUT=1 _sgt_response_lock_acquire "$lockdir5"
+grep -Fxq "start=$(_sgt_process_start_token "$$")" "$lockdir5/response.lock" || {
+  printf 'FAIL case5: reused PID claim was not replaced with exact birth identity\n' >&2
+  exit 1
+}
+_sgt_response_lock_release
+
+# Waiting for a genuinely live owner is bounded.
+lockdir6="$TEST_ROOT/state-6"
+mkdir -p "$lockdir6"
+_sgt_response_lock_record_for_pid "$$" > "$lockdir6/response.lock"
+if SGT_RESPONSE_LOCK_TIMEOUT=1 SGT_RESPONSE_LOCK_INTERVAL=0.01 \
+    _sgt_response_lock_acquire "$lockdir6" 2> "$TEST_ROOT/case6.err"; then
+  printf 'FAIL case6: live competing owner was reclaimed\n' >&2
+  exit 1
+fi
+grep -Fq 'Timed out waiting for response lock' "$TEST_ROOT/case6.err"
+
 printf 'sgt-response-lock-release: ok\n'

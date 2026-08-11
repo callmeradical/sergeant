@@ -70,6 +70,8 @@ fi
   _die "Recovery is unavailable: worker status is '$status' (must be in_progress)"
 
 diagnostic="$(cat "$REPO_DIR/diagnostic" 2>/dev/null || true)"
+gate_generation="$(cat "$worktree/.sergeant-gate-generation" 2>/dev/null || true)"
+[[ "$gate_generation" =~ ^[1-9][0-9]*$ ]] || gate_generation=1
 [[ "$diagnostic" == "live worker stalled:"* ]] || \
   _die "Recovery is unavailable: no stall classification proof in diagnostic"
 initial_pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
@@ -161,9 +163,40 @@ _recover_die() {
 
 # ── 4. One-shot gate: refuse second attempt ──────────────────────────────────
 
+# A completed prior transaction is evidence, not the binding for a later stall.
+# Retire it exactly before starting a new attempt whose marker was explicitly
+# cleared by reconciliation.
+if [[ ! -e "$REPO_DIR/stall_recovery_attempted" ]] &&
+    _sgt_transfer_journal_read "$REPO_DIR/response_relaunch_transaction" &&
+    [[ "$_SGT_TRANSFER_PHASE" == acked ]]; then
+  prior_transfer_archive="$REPO_DIR/transfer_archive/$_SGT_TRANSFER_NOTIFICATION_ID"
+  mkdir -p "$prior_transfer_archive" || _recover_die "Could not archive completed recovery transaction"
+  for prior_transfer_file in response_relaunch_transaction recovery_successor_notification; do
+    [[ -e "$REPO_DIR/$prior_transfer_file" ]] || continue
+    if [[ -e "$prior_transfer_archive/$prior_transfer_file" ]]; then
+      cmp -s "$REPO_DIR/$prior_transfer_file" "$prior_transfer_archive/$prior_transfer_file" || \
+        _recover_die "Completed recovery archive conflicts with preserved evidence"
+      rm -f "$REPO_DIR/$prior_transfer_file"
+    else
+      mv "$REPO_DIR/$prior_transfer_file" "$prior_transfer_archive/$prior_transfer_file" || \
+        _recover_die "Could not archive completed recovery evidence"
+    fi
+  done
+fi
+
 if [[ -f "$REPO_DIR/stall_recovery_attempted" ]]; then
-  _escalate "recovery already attempted; escalating for human input"
-  _recover_die "Recovery already attempted for $TASK_ID/$REPO; escalated to needs_input"
+  attempted_generation="$(sed -n 's/^gate_generation=//p' "$REPO_DIR/stall_recovery_attempted")"
+  attempted_notification="$(sed -n 's/^notification_id=//p' "$REPO_DIR/stall_recovery_attempted")"
+  if _sgt_transfer_journal_read "$REPO_DIR/response_relaunch_transaction" &&
+      [[ -z "$_SGT_TRANSFER_RESPONSE_ID" &&
+         "$_SGT_TRANSFER_GATE_GENERATION" == "$attempted_generation" &&
+         "$_SGT_TRANSFER_NOTIFICATION_ID" == "$attempted_notification" &&
+         "$attempted_generation" == "$gate_generation" ]]; then
+    : # Join the exact generation-bound transaction below.
+  else
+    _escalate "recovery already attempted; no exact transfer journal can be joined"
+    _recover_die "Recovery already attempted for $TASK_ID/$REPO; escalated to needs_input"
+  fi
 fi
 
 [[ "$status" == "in_progress" ]] || \
@@ -204,8 +237,7 @@ if [[ -n "$current_notification_id" ]]; then
     # adjudicate the lease owner's liveness.  A provably dead owner cannot be
     # mid-action, so recovery may proceed; the delivery evidence is preserved and
     # the adjudication is recorded.
-    recovery_generation="$(cat "$worktree/.sergeant-gate-generation" 2>/dev/null || true)"
-    [[ "$recovery_generation" =~ ^[1-9][0-9]*$ ]] || recovery_generation=1
+    recovery_generation="$gate_generation"
     recovery_successor="$(_sgt_bind_action_lease_successor \
       "$REPO_DIR" "$recovery_generation")" || \
       _recover_die "Stall recovery refused: action lease successor binding is malformed or conflicting"
@@ -275,12 +307,6 @@ if [[ -n "$old_pane" ]] && command -v tmux >/dev/null 2>&1; then
     _recover_die "Stall recovery refused: pane identity mismatch for $TASK_ID/$REPO"
   fi
 fi
-
-# ── 9. Stamp recovery attempt ────────────────────────────────────────────────
-# All pre-flight checks passed.  Stamp now so that any subsequent failure
-# prevents a second recovery attempt.
-
-date -u +%Y-%m-%dT%H:%M:%SZ > "$REPO_DIR/stall_recovery_attempted"
 
 # ── 10. Preserve superseded notification target evidence ──────────────────────
 # Mirror sgt-respond's evidence preservation before clearing notification state.
@@ -352,38 +378,69 @@ _sgt_publish_worker_notification "$REPO_DIR" "$worktree" \
 
 _sgt_prepare_worker_process_marker "$REPO_DIR" || \
   _recover_die "Stall recovery failed: worker process marker could not be prepared"
-worker_command="$(printf 'env %q %s' \
-  "SGT_REPLACEMENT_TOKEN=$replacement_spawn_token" \
-  "$(_sgt_worker_command "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")")"
+worker_command="$(_sgt_replacement_worker_command "$replacement_spawn_token" \
+  "$(_sgt_worker_command "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")")" || \
+  _recover_die "Stall recovery failed: could not construct canonical replacement worker command"
 
 relaunch_transaction="$REPO_DIR/response_relaunch_transaction"
 replacement_window_name="${window_name}-resume-${delivery_notification_id:0:12}"
 _write_recovery_transaction() {
   local phase="$1" candidate_pane="${2:-}" candidate_identity="${3:-}"
-  _sgt_replace_owned_file "$relaunch_transaction" \
-    "$(printf 'response_id=\nnotification_id=%s\nspawn_token=%s\ntmux_session=%s\nwindow_name=%s\nphase=%s\npane=%s\npane_identity=%s\n' \
-      "$delivery_notification_id" "$replacement_spawn_token" "$tmux_session" \
-      "$replacement_window_name" "$phase" "$candidate_pane" "$candidate_identity")"
+  _sgt_transfer_journal_write "$relaunch_transaction" "" \
+    "$delivery_notification_id" "$replacement_spawn_token" "$gate_generation" \
+    "$tmux_session" "$replacement_window_name" "$worker_command" "$phase" \
+    "$candidate_pane" "$candidate_identity"
 }
 if [[ -e "$relaunch_transaction" ]]; then
-  [[ -z "$(sed -n 's/^response_id=//p' "$relaunch_transaction")" &&
-     "$(sed -n 's/^notification_id=//p' "$relaunch_transaction")" == "$delivery_notification_id" &&
-     "$(sed -n 's/^spawn_token=//p' "$relaunch_transaction")" == "$replacement_spawn_token" &&
-     "$(sed -n 's/^tmux_session=//p' "$relaunch_transaction")" == "$tmux_session" &&
-     "$(sed -n 's/^window_name=//p' "$relaunch_transaction")" == "$replacement_window_name" ]] || \
+  _sgt_transfer_journal_read "$relaunch_transaction" || \
+    _recover_die "Stall recovery refused: relaunch journal is malformed"
+  [[ -z "$_SGT_TRANSFER_RESPONSE_ID" &&
+     "$_SGT_TRANSFER_NOTIFICATION_ID" == "$delivery_notification_id" &&
+     "$_SGT_TRANSFER_SPAWN_TOKEN" == "$replacement_spawn_token" &&
+     "$_SGT_TRANSFER_GATE_GENERATION" == "$gate_generation" &&
+     "$_SGT_TRANSFER_TMUX_SESSION" == "$tmux_session" &&
+     "$_SGT_TRANSFER_WINDOW_NAME" == "$replacement_window_name" &&
+     "$_SGT_TRANSFER_WORKER_COMMAND" == "$worker_command" ]] || \
     _recover_die "Stall recovery refused: relaunch journal conflicts with this transfer"
 else
-  _write_recovery_transaction intent || \
+  _write_recovery_transaction bound || \
     _recover_die "Stall recovery failed: could not publish relaunch intent"
+fi
+attempt_record="$(printf 'gate_generation=%s\nnotification_id=%s\nspawn_token=%s\n' \
+  "$gate_generation" "$delivery_notification_id" "$replacement_spawn_token")"
+if [[ -e "$REPO_DIR/stall_recovery_attempted" ]]; then
+  [[ "$(cat "$REPO_DIR/stall_recovery_attempted")" == "$attempt_record" ]] || \
+    _recover_die "Stall recovery refused: attempted-generation record conflicts with transfer journal"
+else
+  _sgt_replace_owned_file "$REPO_DIR/stall_recovery_attempted" "$attempt_record" || \
+    _recover_die "Stall recovery failed: could not bind attempted generation"
 fi
 
 new_pane=""
-_write_recovery_transaction spawning || \
-  _recover_die "Stall recovery failed: could not publish relaunch spawning state"
-if ! new_pane="$(tmux new-window -P -F '#{pane_id}' -t "$tmux_session:" \
-    -n "$replacement_window_name" -c "$worktree" "$worker_command")"; then
-  _escalate "tmux failed to relaunch worker supervisor"
-  _recover_die "Stall recovery failed: worker relaunch failed for $TASK_ID/$REPO"
+matching_panes=0
+window_panes=0
+while IFS='|' read -r candidate candidate_window; do
+  [[ "$candidate_window" == "$replacement_window_name" ]] || continue
+  window_panes=$((window_panes + 1))
+  candidate_identity="$(_sgt_pane_identity "$candidate" 2>/dev/null || true)"
+  if _sgt_replacement_pane_identity_matches "$candidate_identity" "$candidate" "$worker_command"; then
+    matching_panes=$((matching_panes + 1))
+    new_pane="$candidate"
+  fi
+done < <(tmux list-panes -a -F '#{pane_id}|#{window_name}' 2>/dev/null || true)
+(( matching_panes <= 1 )) || \
+  _recover_die "Stall recovery refused: relaunch journal resolves to multiple authenticated panes"
+if (( matching_panes == 0 && window_panes > 0 )); then
+  _recover_die "Stall recovery refused: replacement window is owned by a foreign pane"
+fi
+if [[ -z "$new_pane" ]]; then
+  _write_recovery_transaction spawning || \
+    _recover_die "Stall recovery failed: could not publish relaunch spawning state"
+  if ! new_pane="$(tmux new-window -P -F '#{pane_id}' -t "$tmux_session:" \
+      -n "$replacement_window_name" -c "$worktree" "$worker_command")"; then
+    _escalate "tmux failed to relaunch worker supervisor"
+    _recover_die "Stall recovery failed: worker relaunch failed for $TASK_ID/$REPO"
+  fi
 fi
 
 if [[ -z "$new_pane" ]]; then
@@ -413,9 +470,13 @@ _abort_replacement() {
 
 pane_identity=""
 if pane_identity="$(_sgt_pane_identity "$new_pane")" && \
-    [[ "${pane_identity%%|*}" == 0 && "${pane_identity#*|}" == "$new_pane|"* &&
-       "$pane_identity" == *"SGT_REPLACEMENT_TOKEN=$replacement_spawn_token"* ]]; then
-  _write_recovery_transaction spawned "$new_pane" "$pane_identity" || \
+    _sgt_replacement_pane_identity_matches "$pane_identity" "$new_pane" "$worker_command"; then
+  recovery_install_phase=spawned
+  if _sgt_transfer_journal_read "$relaunch_transaction" &&
+      [[ "$_SGT_TRANSFER_PHASE" == acked ]]; then
+    recovery_install_phase=acked
+  fi
+  _write_recovery_transaction "$recovery_install_phase" "$new_pane" "$pane_identity" || \
     _abort_replacement "could not publish spawned worker ownership transaction"
   _sgt_replace_owned_file "$REPO_DIR/pane_identity" "$pane_identity" || \
     _abort_replacement "could not publish new worker pane identity"

@@ -229,11 +229,18 @@ if [[ -n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-status" ]]; th
 else
   status="$(cat "$REPO_DIR/status" 2>/dev/null || true)"
 fi
+joining_recovery_response=false
 case "$status" in
   needs_input|blocked|waiting|orphaned) ;;
   in_progress)
-    [[ "$respond_peer_launch_contended" == true ]] || \
-      _die "Worker status '$status' is not waiting or resumable; response was not published"
+    if [[ "$respond_peer_launch_contended" == true ]]; then
+      :
+    elif _sgt_transfer_journal_read "$REPO_DIR/response_relaunch_transaction" &&
+        [[ -z "$_SGT_TRANSFER_RESPONSE_ID" ]]; then
+      joining_recovery_response=true
+    else
+      _die "Worker status 'in_progress' has no exact recovery transfer journal to join"
+    fi
     ;;
   *) _die "Worker status '$status' is not waiting or resumable; response was not published" ;;
 esac
@@ -275,6 +282,25 @@ _atomic_write_file() {
     rm -f "$temporary"
     return 1
   fi
+}
+
+_create_exact_once() {
+  local target="$1" value="$2" temporary="${1}.tmp.$$.$RANDOM"
+  _sgt_transfer_io_failpoint "$target" write && return 1
+  printf '%s\n' "$value" > "$temporary" || return 1
+  if [[ -e "$target" ]]; then
+    cmp -s "$temporary" "$target" || { rm -f "$temporary"; return 1; }
+    rm -f "$temporary"
+    return 0
+  fi
+  _sgt_transfer_io_failpoint "$target" rename && { rm -f "$temporary"; return 1; }
+  if ! ln "$temporary" "$target" 2>/dev/null; then
+    if [[ ! -e "$target" ]] || ! cmp -s "$temporary" "$target"; then
+      rm -f "$temporary"
+      return 1
+    fi
+  fi
+  rm -f "$temporary"
 }
 
 _publish_local_response_transport() {
@@ -450,13 +476,22 @@ fi
 existing_relaunch_transaction="$REPO_DIR/response_relaunch_transaction"
 recovered_successor=""
 recovered_spawn_token=""
-if [[ -f "$existing_relaunch_transaction" &&
-      "$(sed -n 's/^response_id=//p' "$existing_relaunch_transaction")" == "$response_id" &&
-      "$(sed -n 's/^phase=//p' "$existing_relaunch_transaction")" == acked ]]; then
-  joined_notification="$(sed -n 's/^notification_id=//p' "$existing_relaunch_transaction")"
+if [[ -f "$existing_relaunch_transaction" ]] &&
+    _sgt_transfer_journal_read "$existing_relaunch_transaction" &&
+    [[ "$_SGT_TRANSFER_PHASE" == acked ]]; then
+  joined_response_id="$_SGT_TRANSFER_RESPONSE_ID"
+  joined_notification="$_SGT_TRANSFER_NOTIFICATION_ID"
+  joined_pane="$_SGT_TRANSFER_PANE"
+  joined_pane_identity="$_SGT_TRANSFER_PANE_IDENTITY"
   joined_nonce="$(cat "$REPO_DIR/notification_target" 2>/dev/null || true)"
-  if [[ "$(cat "$REPO_DIR/notification_id" 2>/dev/null || true)" == "$joined_notification" &&
+  joined_action_lease="$(cat "$REPO_DIR/notifications/$joined_notification/action_lease" 2>/dev/null || true)"
+  if [[ "$joined_response_id" == "$response_id" &&
+        "$(cat "$REPO_DIR/notification_id" 2>/dev/null || true)" == "$joined_notification" &&
+        "$(cat "$REPO_DIR/pane" 2>/dev/null || true)" == "$joined_pane" &&
+        "$(cat "$REPO_DIR/pane_identity" 2>/dev/null || true)" == "$joined_pane_identity" &&
+        "$(_sgt_pane_identity "$joined_pane" 2>/dev/null || true)" == "$joined_pane_identity" &&
         "$joined_nonce" =~ ^[a-f0-9]{32}$ &&
+        ( -z "$joined_action_lease" || -f "$REPO_DIR/notifications/$joined_notification/targets/$joined_action_lease/completed" ) &&
         "$(cat "$REPO_DIR/notifications/$joined_notification/targets/$joined_nonce/handshake_complete" 2>/dev/null || true)" == "$joined_notification|$joined_nonce" ]]; then
     _sgt_response_lock_release
     _cleanup_response_input
@@ -464,12 +499,32 @@ if [[ -f "$existing_relaunch_transaction" &&
     echo "sgt-respond: joined acknowledged worker relaunch in pane $(cat "$REPO_DIR/pane")."
     exit 0
   fi
-  _die "Acknowledged worker relaunch journal conflicts with current notification evidence"
+  # An unfinished action lease must pass through the normal dead-owner fence;
+  # an acknowledged journal is not permission to bypass newer lease evidence.
+  [[ "$(cat "$REPO_DIR/notification_id" 2>/dev/null || true)" == "$joined_notification" &&
+     ( "$joined_response_id" != "$response_id" ||
+       ( "$joined_nonce" =~ ^[a-f0-9]{32}$ &&
+         "$(cat "$REPO_DIR/notifications/$joined_notification/targets/$joined_nonce/handshake_complete" 2>/dev/null || true)" == "$joined_notification|$joined_nonce" ) ) ]] || \
+      _die "Acknowledged worker relaunch journal conflicts with current notification evidence"
+  stale_transfer_archive="$REPO_DIR/transfer_archive/$joined_notification"
+  mkdir -p "$stale_transfer_archive" || _die "Could not archive stale acknowledged transfer"
+  for stale_transfer_file in response_relaunch_transaction response_successor_notification; do
+    [[ -e "$REPO_DIR/$stale_transfer_file" ]] || continue
+    if [[ -e "$stale_transfer_archive/$stale_transfer_file" ]]; then
+      cmp -s "$REPO_DIR/$stale_transfer_file" "$stale_transfer_archive/$stale_transfer_file" || \
+        _die "Stale transfer archive conflicts with preserved evidence"
+      rm -f "$REPO_DIR/$stale_transfer_file"
+    else
+      mv "$REPO_DIR/$stale_transfer_file" "$stale_transfer_archive/$stale_transfer_file" || \
+        _die "Could not archive stale acknowledged transfer evidence"
+    fi
+  done
 fi
-if [[ -f "$existing_relaunch_transaction" &&
-      -z "$(sed -n 's/^response_id=//p' "$existing_relaunch_transaction")" ]]; then
-  recovered_successor="$(sed -n 's/^notification_id=//p' "$existing_relaunch_transaction")"
-  recovered_spawn_token="$(sed -n 's/^spawn_token=//p' "$existing_relaunch_transaction")"
+if [[ -f "$existing_relaunch_transaction" ]] &&
+    _sgt_transfer_journal_read "$existing_relaunch_transaction" &&
+    [[ -z "$_SGT_TRANSFER_RESPONSE_ID" ]]; then
+  recovered_successor="$_SGT_TRANSFER_NOTIFICATION_ID"
+  recovered_spawn_token="$_SGT_TRANSFER_SPAWN_TOKEN"
   [[ "$recovered_successor" =~ ^[a-f0-9]{32}$ &&
      "$recovered_spawn_token" =~ ^[a-f0-9]{32}$ ]] || \
     _die "Pending cross-CLI relaunch journal is malformed"
@@ -505,7 +560,7 @@ _ensure_successor_binding() {
     replacement_spawn_token="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
       od -An -tx1 | tr -d ' \n')"
   fi
-  _atomic_write "$REPO_DIR/response_successor_notification" \
+  _create_exact_once "$REPO_DIR/response_successor_notification" \
     "$response_id|$delivery_notification_id|$replacement_spawn_token"
 }
 
@@ -529,22 +584,22 @@ if [[ -n "$current_action_lease" &&
       _die "Action lease successor binding is malformed or conflicts with this generation"
     delivery_notification_id="${shared_successor%%|*}"
     replacement_spawn_token="${shared_successor#*|}"
-    response_successor_binding="$response_id|$delivery_notification_id|$replacement_spawn_token"
-    existing_response_successor="$(cat "$REPO_DIR/response_successor_notification" 2>/dev/null || true)"
-    if [[ -n "$existing_response_successor" ]]; then
-      [[ "$existing_response_successor" == "$response_successor_binding" ]] || \
-        _die "Response successor binding conflicts with the action lease transfer"
-    else
-      _atomic_write "$REPO_DIR/response_successor_notification" "$response_successor_binding" || \
-        _die "Could not publish the response successor notification binding"
-    fi
-    if [[ "$status" != "orphaned" ]] || ! _sgt_fence_dead_action_lease \
+    if [[ "$status" != "orphaned" && "$joining_recovery_response" != true ]] || ! _sgt_fence_dead_action_lease \
         "$REPO_DIR" "$worktree" "$delivery_notification_id" "$gate_generation" \
         "dead action lease ownership transfer"; then
       _die "$(printf 'Pending notification action lease ownership is live, reused, or ambiguous; relaunch refused closed.\n  notification: %s\n  lease target: %s\n  evidence: %s\n  Completion was not fabricated and the preserved worktree was not changed.\n  Inspect the recorded pane/process identities, reconcile the worker, then rerun: sgt-respond %s %s' \
         "$current_notification_id" "$current_action_lease" \
         "$REPO_DIR/notifications/$current_notification_id/action_lease_pending" \
         "$TASK_ID" "$REPO")"
+    fi
+    response_successor_binding="$response_id|$delivery_notification_id|$replacement_spawn_token"
+    existing_response_successor="$(cat "$REPO_DIR/response_successor_notification" 2>/dev/null || true)"
+    if [[ -n "$existing_response_successor" ]]; then
+      [[ "$existing_response_successor" == "$response_successor_binding" ]] || \
+        _die "Response successor binding conflicts with the action lease transfer"
+    else
+      _create_exact_once "$REPO_DIR/response_successor_notification" "$response_successor_binding" || \
+        _die "Could not publish the response successor notification binding"
     fi
     _transfer_interrupt_hook lease_archived
   fi
@@ -660,29 +715,31 @@ _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$delivery_notification
 _transfer_interrupt_hook successor_published
 
 _sgt_prepare_worker_process_marker "$REPO_DIR" || _die "Could not prepare worker process marker"
-worker_command="$(printf 'env %q %s' \
-  "SGT_REPLACEMENT_TOKEN=$replacement_spawn_token" \
-  "$(_sgt_worker_command "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")")"
+worker_command="$(_sgt_replacement_worker_command "$replacement_spawn_token" \
+  "$(_sgt_worker_command "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")")" || \
+  _die "Could not construct canonical replacement worker command"
 
 relaunch_transaction="$REPO_DIR/response_relaunch_transaction"
 replacement_window_name="${window_name}-resume-${delivery_notification_id:0:12}"
+journal_response_id="$response_id"
+[[ -z "$recovered_successor" ]] || journal_response_id=""
 _write_relaunch_transaction() {
   local phase="$1" candidate_pane="${2:-}" candidate_identity="${3:-}"
-  _atomic_write "$relaunch_transaction" \
-    "$(printf 'response_id=%s\nnotification_id=%s\nspawn_token=%s\ntmux_session=%s\nwindow_name=%s\nphase=%s\npane=%s\npane_identity=%s\n' \
-      "$response_id" "$delivery_notification_id" "$replacement_spawn_token" \
-      "$tmux_session" "$replacement_window_name" "$phase" "$candidate_pane" "$candidate_identity")"
+  _sgt_transfer_journal_write "$relaunch_transaction" "$journal_response_id" \
+    "$delivery_notification_id" "$replacement_spawn_token" "$gate_generation" \
+    "$tmux_session" "$replacement_window_name" "$worker_command" "$phase" \
+    "$candidate_pane" "$candidate_identity"
 }
 
 _relaunch_transaction_matches() {
-  local journal_response
-  journal_response="$(sed -n 's/^response_id=//p' "$relaunch_transaction" 2>/dev/null || true)"
-  [[ -f "$relaunch_transaction" &&
-     ( -z "$journal_response" || "$journal_response" == "$response_id" ) &&
-     "$(sed -n 's/^notification_id=//p' "$relaunch_transaction")" == "$delivery_notification_id" &&
-     "$(sed -n 's/^spawn_token=//p' "$relaunch_transaction")" == "$replacement_spawn_token" &&
-     "$(sed -n 's/^tmux_session=//p' "$relaunch_transaction")" == "$tmux_session" &&
-     "$(sed -n 's/^window_name=//p' "$relaunch_transaction")" == "$replacement_window_name" ]]
+  _sgt_transfer_journal_read "$relaunch_transaction" &&
+    [[ -z "$_SGT_TRANSFER_RESPONSE_ID" || "$_SGT_TRANSFER_RESPONSE_ID" == "$response_id" ]] &&
+    [[ "$_SGT_TRANSFER_NOTIFICATION_ID" == "$delivery_notification_id" &&
+       "$_SGT_TRANSFER_SPAWN_TOKEN" == "$replacement_spawn_token" &&
+       "$_SGT_TRANSFER_GATE_GENERATION" == "$gate_generation" &&
+       "$_SGT_TRANSFER_TMUX_SESSION" == "$tmux_session" &&
+       "$_SGT_TRANSFER_WINDOW_NAME" == "$replacement_window_name" &&
+       "$_SGT_TRANSFER_WORKER_COMMAND" == "$worker_command" ]]
 }
 
 _discover_relaunch_pane() {
@@ -694,8 +751,7 @@ _discover_relaunch_pane() {
   while IFS= read -r candidate; do
     [[ -n "$candidate" ]] || continue
     identity="$(_sgt_pane_identity "$candidate" 2>/dev/null || true)"
-    if [[ "${identity%%|*}" == 0 && "${identity#*|}" == "$candidate|"* &&
-          "$identity" == *"SGT_REPLACEMENT_TOKEN=$replacement_spawn_token"* ]]; then
+    if _sgt_replacement_pane_identity_matches "$identity" "$candidate" "$worker_command"; then
       [[ -z "$authenticated" ]] || return 3
       authenticated="$candidate"
     fi
@@ -720,7 +776,7 @@ if [[ -e "$relaunch_transaction" ]]; then
   _relaunch_transaction_matches || \
     _die "Worker relaunch transaction conflicts with this response generation"
 else
-  _write_relaunch_transaction intent || \
+  _write_relaunch_transaction bound || \
     _die "Could not publish worker relaunch intent"
 fi
 
@@ -753,8 +809,7 @@ if [[ -z "$new_pane" ]]; then
 fi
 _transfer_interrupt_hook replacement_spawned
 if pane_identity="$(_sgt_pane_identity "$new_pane")" && \
-    [[ "${pane_identity%%|*}" == 0 && "${pane_identity#*|}" == "$new_pane|"* &&
-       "$pane_identity" == *"SGT_REPLACEMENT_TOKEN=$replacement_spawn_token"* ]]; then
+    _sgt_replacement_pane_identity_matches "$pane_identity" "$new_pane" "$worker_command"; then
   _write_relaunch_transaction spawned "$new_pane" "$pane_identity" || \
     _die "Could not publish spawned worker ownership transaction"
   printf '%s\n' "$new_pane" > "$REPO_DIR/pane"

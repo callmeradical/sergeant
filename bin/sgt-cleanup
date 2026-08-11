@@ -410,7 +410,7 @@ _stop_validation_pane() {
 # digests bind.  Keep them in step with sgt-respond and sgt-ack-response.
 _RESPONSE_FLEET_STATE="response response_id response_generation response_ack \
 response_delivery_unacked response_successor_notification \
-response_relaunch_transaction recovery_successor_notification response-archive"
+response_relaunch_transaction recovery_successor_notification transfer_archive response-archive"
 _RESPONSE_WORKTREE_STATE=".sergeant-response .sergeant-response-id \
 .sergeant-response-generation .sergeant-response-applied .sergeant-response-ack"
 
