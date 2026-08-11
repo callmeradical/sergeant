@@ -304,28 +304,46 @@ _sgt_dagr_advance() {
 # question that matters — "has THIS pane been retired?" — and makes an empty or
 # malformed marker prove nothing.
 _recycle_evidence_covers() {
-  local repo_dir="$1" identity="$2"
+  local repo_dir="$1" identity="$2" process_group="$3"
   [[ -n "$identity" ]] || return 1
   [[ -s "$repo_dir/worker_recycled" ]] || return 1
-  grep -Fq "identity=$identity" "$repo_dir/worker_recycled" 2>/dev/null
+  grep -Fqx "identity=$identity" "$repo_dir/worker_recycled" 2>/dev/null &&
+    grep -Fqx "process_group=$process_group" "$repo_dir/worker_recycled" 2>/dev/null &&
+    grep -Fqx 'outcome=process_group_stopped' "$repo_dir/worker_recycled" 2>/dev/null
 }
 
 # _record_recycle_evidence <repo_dir> <pane> <identity> <outcome>
 # Rebind the current evidence and append to the append-only history so no earlier
 # recycling is ever lost.
 _record_recycle_evidence() {
-  local repo_dir="$1" pane="$2" identity="$3" outcome="$4" stamp temporary
+  local repo_dir="$1" pane="$2" identity="$3" process_group="$4" stamp temporary
   stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
   temporary="$repo_dir/worker_recycled.tmp.$$"
   {
     printf 'pane=%s\n' "$pane"
     printf 'identity=%s\n' "$identity"
-    printf 'outcome=%s\n' "$outcome"
+    printf 'process_group=%s\n' "$process_group"
+    printf 'outcome=process_group_stopped\n'
     printf 'recycled_at=%s\n' "$stamp"
   } > "$temporary" || { rm -f "$temporary"; return 1; }
   mv "$temporary" "$repo_dir/worker_recycled" || { rm -f "$temporary"; return 1; }
-  printf '%s\t%s\t%s\t%s\n' "$stamp" "$pane" "$identity" "$outcome" \
+  printf '%s\t%s\t%s\t%s\n' "$stamp" "$pane" "$identity" "$process_group" \
     >> "$repo_dir/worker_recycled_log" 2>/dev/null || true
+}
+
+_record_recycle_phase() {
+  local repo_dir="$1" identity="$2" process_group="$3" temporary
+  temporary="$repo_dir/worker_recycle_phase.tmp.$$"
+  {
+    printf 'version=1\n'
+    printf 'identity=%s\n' "$identity"
+    printf 'process_group=%s\n' "$process_group"
+    printf 'phase=retiring\n'
+  } > "$temporary" || { rm -f "$temporary"; return 1; }
+  mv "$temporary" "$repo_dir/worker_recycle_phase" || {
+    rm -f "$temporary"
+    return 1
+  }
 }
 
 _terminal_worker_process_group() {
@@ -335,10 +353,8 @@ _terminal_worker_process_group() {
   recorded_pid="$(cat "$repo_dir/worker_pid" 2>/dev/null || true)"
   recorded_pgid="$(cat "$repo_dir/worker_process_group" 2>/dev/null || true)"
   recorded_start="$(cat "$repo_dir/worker_process_start" 2>/dev/null || true)"
-  # Legacy workers did not publish process provenance. Preserve their existing
-  # pane-only recycle behavior; every current worker writes all three records.
-  if [[ -z "$recorded_pid$recorded_pgid$recorded_start" ]]; then
-    return 0
+  if [[ -z "$recorded_pid" || -z "$recorded_pgid" || -z "$recorded_start" ]]; then
+    return 2
   fi
   [[ "$recorded_pid" =~ ^[1-9][0-9]*$ && \
     "$recorded_pgid" =~ ^[1-9][0-9]*$ && -n "$recorded_start" ]] || return 1
@@ -346,9 +362,11 @@ _terminal_worker_process_group() {
   pane_fields="${pane_fields#*|}"
   pane_pid="${pane_fields%%|*}"
   [[ "$pane_pid" == "$recorded_pid" && "$recorded_pid" == "$recorded_pgid" ]] || return 1
-  actual_start="$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
-  actual_pgid="$(ps -o pgid= -p "$recorded_pid" 2>/dev/null | tr -d ' ' || true)"
-  [[ "$actual_start" == "$recorded_start" && "$actual_pgid" == "$recorded_pgid" ]] || return 1
+  if kill -0 "$recorded_pid" 2>/dev/null; then
+    actual_start="$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+    actual_pgid="$(ps -o pgid= -p "$recorded_pid" 2>/dev/null | tr -d ' ' || true)"
+    [[ "$actual_start" == "$recorded_start" && "$actual_pgid" == "$recorded_pgid" ]] || return 1
+  fi
   printf '%s\n' "$recorded_pgid"
 }
 
@@ -370,9 +388,19 @@ _stop_terminal_worker_process_group() {
   return 1
 }
 
+_clear_terminal_recycle_diagnostic() {
+  local repo_dir="$1" diagnostic
+  diagnostic="$(cat "$repo_dir/diagnostic" 2>/dev/null || true)"
+  case "$diagnostic" in
+    terminal\ worker\ process*|injected\ interruption\ after\ terminal\ pane\ kill)
+      rm -f "$repo_dir/diagnostic"
+      ;;
+  esac
+}
+
 _recycle_terminal_worker() {
   local repo_dir="$1"
-  local pane pane_id worktree_path identity process_group
+  local pane pane_id worktree_path identity process_group process_status
 
   # Settle the accepted action lease before the pane is taken away.  Recycling
   # used to stop the only process that could ever publish completion, which is
@@ -386,10 +414,28 @@ _recycle_terminal_worker() {
 
   pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
   [[ -n "$pane" ]] || return 0
-  identity="$(_sgt_read_owned_file "$repo_dir/pane_identity" 2>/dev/null || \
-    cat "$repo_dir/pane_identity" 2>/dev/null || true)"
-  # Already retired this exact pane: nothing to do.
-  _recycle_evidence_covers "$repo_dir" "$identity" && return 0
+  identity="$(_sgt_read_owned_file "$repo_dir/pane_identity" 2>/dev/null || true)"
+  if [[ -z "$identity" ]]; then
+    printf 'terminal worker process provenance is incomplete; refusing recycle: %s\n' \
+      "$pane" > "$repo_dir/diagnostic"
+    return 1
+  fi
+  if process_group="$(_terminal_worker_process_group "$repo_dir" "$identity")"; then
+    :
+  else
+    process_status=$?
+    if [[ "$process_status" -eq 2 ]]; then
+      printf 'terminal worker process provenance is incomplete; refusing recycle: %s\n' \
+        "$pane" > "$repo_dir/diagnostic"
+    else
+      printf 'terminal worker process identity does not match; refusing recycle: %s\n' \
+        "$pane" > "$repo_dir/diagnostic"
+    fi
+    return 1
+  fi
+  # Already retired this exact pane and process group: nothing to do.
+  _recycle_evidence_covers "$repo_dir" "$identity" "$process_group" && return 0
+  _record_recycle_phase "$repo_dir" "$identity" "$process_group" || return 1
 
   if ! command -v tmux >/dev/null 2>&1; then
     printf 'terminal worker could not be recycled because tmux is unavailable\n' > "$repo_dir/diagnostic"
@@ -399,7 +445,14 @@ _recycle_terminal_worker() {
   # returned pane id must be compared rather than the exit status trusted.
   pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
   if [[ "$pane_id" != "$pane" ]]; then
-    _record_recycle_evidence "$repo_dir" "$pane" "$identity" "pane_absent" || return 1
+    if ! _stop_terminal_worker_process_group "$process_group"; then
+      printf 'terminal worker process group did not stop: %s\n' \
+        "$process_group" > "$repo_dir/diagnostic"
+      return 1
+    fi
+    _record_recycle_evidence "$repo_dir" "$pane" "$identity" "$process_group" || return 1
+    rm -f "$repo_dir/worker_recycle_phase"
+    _clear_terminal_recycle_diagnostic "$repo_dir"
     return 0
   fi
   if ! _pane_is_supervisor "$pane" "$repo_dir"; then
@@ -412,14 +465,13 @@ _recycle_terminal_worker() {
       "$pane" "$_task_id" > "$repo_dir/diagnostic"
     return 1
   fi
-  if ! process_group="$(_terminal_worker_process_group "$repo_dir" "$identity")"; then
-    printf 'terminal worker process identity does not match; refusing recycle: %s\n' \
-      "$pane" > "$repo_dir/diagnostic"
-    return 1
-  fi
   if ! tmux kill-pane -t "$pane" 2>/dev/null ||
      [[ "$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)" == "$pane" ]]; then
     printf 'failed to recycle terminal worker pane: %s\n' "$pane" > "$repo_dir/diagnostic"
+    return 1
+  fi
+  if [[ "${SGT_WATCH_RECYCLE_FAIL_POINT:-}" == "after-pane-kill" ]]; then
+    printf 'injected interruption after terminal pane kill\n' > "$repo_dir/diagnostic"
     return 1
   fi
   if ! _stop_terminal_worker_process_group "$process_group"; then
@@ -427,7 +479,9 @@ _recycle_terminal_worker() {
       "$process_group" > "$repo_dir/diagnostic"
     return 1
   fi
-  _record_recycle_evidence "$repo_dir" "$pane" "$identity" "pane_killed" || return 1
+  _record_recycle_evidence "$repo_dir" "$pane" "$identity" "$process_group" || return 1
+  rm -f "$repo_dir/worker_recycle_phase"
+  _clear_terminal_recycle_diagnostic "$repo_dir"
   return 0
 }
 

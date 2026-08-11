@@ -2947,7 +2947,11 @@ if [[ -z "$FILTER_REPO" ]]; then
   # The API-only coordinator pane is task-shared infrastructure. Retire it only
   # after every repo is clean and only when this is the last fleet task owning
   # its exact live identity; explicit/user coordinator panes have no marker.
+  _sgt_coordinator_lock_acquire "$FLEET_DIR"
+  trap '_sgt_coordinator_lock_release' EXIT
   _sgt_retire_managed_coordinator_pane "$TASK_DIR" "$FLEET_DIR"
+  _sgt_coordinator_lock_release
+  trap - EXIT
 
   rm -rf "$TASK_DIR"
 fi

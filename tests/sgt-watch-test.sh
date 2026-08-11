@@ -23,6 +23,9 @@ export TMUX_STATE="$TEST_ROOT/tmux.state"
 printf '%s\n' "$worktree" > "$repo/worktree"
 printf '%%42\n' > "$repo/pane"
 printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo" > "$repo/pane_identity"
+printf '4242\n' > "$repo/worker_pid"
+printf '4242\n' > "$repo/worker_process_group"
+printf 'fixture worker start\n' > "$repo/worker_process_start"
 printf 'opencode\n' > "$repo/agent"
 chmod 600 "$repo/pane_identity"
 printf 'in_progress\n' > "$repo/status"
@@ -163,6 +166,7 @@ for forged_command in "wrapper $legacy_command extra" "${legacy_command}-prefix-
 done
 
 printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo" > "$repo/pane_identity"
+chmod 600 "$repo/pane_identity"
 
 printf 'done\n' > "$worktree/.sergeant-status"
 rm -f "$worktree/.sergeant-result"

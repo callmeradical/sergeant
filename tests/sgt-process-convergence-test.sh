@@ -89,8 +89,27 @@ run_cleanup task-a
 [[ -f "$TEST_ROOT/managed-live" ]]
 [[ ! -e "$TEST_ROOT/kills" ]]
 
-# The last task owner retires only that exact Sergeant-marked pane.
-run_cleanup task-b
+# Cleanup cannot scan past an in-flight owner publication. The publisher holds
+# the fleet transaction from managed-pane selection through exact identity.
+mkdir -p "$TEST_ROOT/fleet/task-inflight" \
+  "$TEST_ROOT/fleet/.coordinator-pane.lock"
+printf 'fixture-publisher\n' > "$TEST_ROOT/fleet/.coordinator-pane.lock/owner"
+printf '%%71\n' > "$TEST_ROOT/fleet/task-inflight/primary_pane_id"
+run_cleanup task-b &
+cleanup_pid=$!
+sleep 0.1
+[[ -f "$TEST_ROOT/managed-live" ]]
+printf '0|%%71|7171|171717|managed-reader\n' \
+  > "$TEST_ROOT/fleet/task-inflight/primary_pane_identity"
+chmod 600 "$TEST_ROOT/fleet/task-inflight/primary_pane_identity"
+rm -f "$TEST_ROOT/fleet/.coordinator-pane.lock/owner"
+rmdir "$TEST_ROOT/fleet/.coordinator-pane.lock"
+wait "$cleanup_pid"
+[[ -f "$TEST_ROOT/managed-live" ]]
+[[ ! -e "$TEST_ROOT/kills" ]]
+
+# The final published owner retires only that exact Sergeant-marked pane.
+run_cleanup task-inflight
 if [[ -e "$TEST_ROOT/managed-live" ]]; then
   printf 'last cleaned fleet owner left managed coordinator pane alive\n' >&2
   exit 1

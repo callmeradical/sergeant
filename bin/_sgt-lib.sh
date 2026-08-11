@@ -511,6 +511,70 @@ SGT_MANAGED_COORDINATOR_COMMAND='while IFS= read -r sgt_line; do printf "%s\n" "
 # asked.
 SGT_MANAGED_COORDINATOR_OPTION='@sgt_coordinator'
 SGT_MANAGED_COORDINATOR_MARKER='sergeant-managed-coordinator'
+_SGT_COORDINATOR_LOCK_DIR=""
+_SGT_COORDINATOR_LOCK_OWNER=""
+
+_sgt_coordinator_lock_acquire() {
+  local fleet_dir="$1" attempts attempt interval owner pid start owner_start actual_start
+  [[ -z "$_SGT_COORDINATOR_LOCK_DIR" ]] || return 0
+  mkdir -p "$fleet_dir"
+  _SGT_COORDINATOR_LOCK_DIR="$fleet_dir/.coordinator-pane.lock"
+  start="$(ps -o lstart= -p "$$" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+  [[ -n "$start" ]] || _die "Cannot establish coordinator-pane lock owner identity"
+  _SGT_COORDINATOR_LOCK_OWNER="$$|$start"
+  attempts="${SGT_COORDINATOR_LOCK_ATTEMPTS:-200}"
+  interval="${SGT_COORDINATOR_LOCK_INTERVAL:-0.05}"
+  [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=200
+  for attempt in $(seq 1 "$attempts"); do
+    if mkdir "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null; then
+      if ! (umask 077; printf '%s\n' "$_SGT_COORDINATOR_LOCK_OWNER" \
+        > "$_SGT_COORDINATOR_LOCK_DIR/owner"); then
+        rmdir "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null || true
+        _SGT_COORDINATOR_LOCK_DIR=""
+        _SGT_COORDINATOR_LOCK_OWNER=""
+        _die "Cannot publish coordinator-pane lock owner identity"
+      fi
+      return 0
+    fi
+    owner="$(cat "$_SGT_COORDINATOR_LOCK_DIR/owner" 2>/dev/null || true)"
+    pid="${owner%%|*}"
+    owner_start="${owner#*|}"
+    if [[ "$pid" =~ ^[1-9][0-9]*$ && -n "$owner_start" && "$owner_start" != "$owner" ]]; then
+      actual_start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+      if [[ "$actual_start" != "$owner_start" ]] && \
+        mkdir "$_SGT_COORDINATOR_LOCK_DIR/reclaim" 2>/dev/null; then
+        # The lock directory never became absent, so no new owner can have
+        # acquired it between the stale proof and this exact recheck.
+        if [[ "$(cat "$_SGT_COORDINATOR_LOCK_DIR/owner" 2>/dev/null || true)" == "$owner" ]]; then
+          actual_start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+          if [[ "$actual_start" != "$owner_start" ]]; then
+            rm -f "$_SGT_COORDINATOR_LOCK_DIR/owner"
+          fi
+        fi
+        rmdir "$_SGT_COORDINATOR_LOCK_DIR/reclaim" 2>/dev/null || true
+        rmdir "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null || true
+      fi
+    fi
+    sleep "$interval"
+  done
+  owner="$(cat "$_SGT_COORDINATOR_LOCK_DIR/owner" 2>/dev/null || true)"
+  pid="${owner%%|*}"
+  _SGT_COORDINATOR_LOCK_DIR=""
+  _SGT_COORDINATOR_LOCK_OWNER=""
+  _die "Timed out waiting for coordinator-pane fleet transaction${pid:+ held by PID $pid}; inspect $fleet_dir/.coordinator-pane.lock"
+}
+
+_sgt_coordinator_lock_release() {
+  local owner
+  [[ -n "$_SGT_COORDINATOR_LOCK_DIR" ]] || return 0
+  owner="$(cat "$_SGT_COORDINATOR_LOCK_DIR/owner" 2>/dev/null || true)"
+  if [[ "$owner" == "$_SGT_COORDINATOR_LOCK_OWNER" ]]; then
+    rm -f "$_SGT_COORDINATOR_LOCK_DIR/owner"
+    rmdir "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null || true
+  fi
+  _SGT_COORDINATOR_LOCK_DIR=""
+  _SGT_COORDINATOR_LOCK_OWNER=""
+}
 
 # _sgt_managed_coordinator_marker <pane>
 # Prints the pane's Sergeant ownership marker, empty when it has none.
