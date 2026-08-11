@@ -328,9 +328,51 @@ _record_recycle_evidence() {
     >> "$repo_dir/worker_recycled_log" 2>/dev/null || true
 }
 
+_terminal_worker_process_group() {
+  local repo_dir="$1" identity="$2"
+  local pane_fields pane_pid recorded_pid recorded_pgid recorded_start actual_start actual_pgid
+
+  recorded_pid="$(cat "$repo_dir/worker_pid" 2>/dev/null || true)"
+  recorded_pgid="$(cat "$repo_dir/worker_process_group" 2>/dev/null || true)"
+  recorded_start="$(cat "$repo_dir/worker_process_start" 2>/dev/null || true)"
+  # Legacy workers did not publish process provenance. Preserve their existing
+  # pane-only recycle behavior; every current worker writes all three records.
+  if [[ -z "$recorded_pid$recorded_pgid$recorded_start" ]]; then
+    return 0
+  fi
+  [[ "$recorded_pid" =~ ^[1-9][0-9]*$ && \
+    "$recorded_pgid" =~ ^[1-9][0-9]*$ && -n "$recorded_start" ]] || return 1
+  pane_fields="${identity#*|}"
+  pane_fields="${pane_fields#*|}"
+  pane_pid="${pane_fields%%|*}"
+  [[ "$pane_pid" == "$recorded_pid" && "$recorded_pid" == "$recorded_pgid" ]] || return 1
+  actual_start="$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+  actual_pgid="$(ps -o pgid= -p "$recorded_pid" 2>/dev/null | tr -d ' ' || true)"
+  [[ "$actual_start" == "$recorded_start" && "$actual_pgid" == "$recorded_pgid" ]] || return 1
+  printf '%s\n' "$recorded_pgid"
+}
+
+_stop_terminal_worker_process_group() {
+  local process_group="$1" live_pids
+  [[ -n "$process_group" ]] || return 0
+  kill -TERM -- -"$process_group" 2>/dev/null || true
+  for _ in $(seq 1 10); do
+    live_pids="$(pgrep -g "$process_group" 2>/dev/null || true)"
+    [[ -z "$live_pids" ]] && return 0
+    sleep 0.05
+  done
+  kill -KILL -- -"$process_group" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    live_pids="$(pgrep -g "$process_group" 2>/dev/null || true)"
+    [[ -z "$live_pids" ]] && return 0
+    sleep 0.05
+  done
+  return 1
+}
+
 _recycle_terminal_worker() {
   local repo_dir="$1"
-  local pane pane_id worktree_path identity
+  local pane pane_id worktree_path identity process_group
 
   # Settle the accepted action lease before the pane is taken away.  Recycling
   # used to stop the only process that could ever publish completion, which is
@@ -370,9 +412,19 @@ _recycle_terminal_worker() {
       "$pane" "$_task_id" > "$repo_dir/diagnostic"
     return 1
   fi
+  if ! process_group="$(_terminal_worker_process_group "$repo_dir" "$identity")"; then
+    printf 'terminal worker process identity does not match; refusing recycle: %s\n' \
+      "$pane" > "$repo_dir/diagnostic"
+    return 1
+  fi
   if ! tmux kill-pane -t "$pane" 2>/dev/null ||
      [[ "$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)" == "$pane" ]]; then
     printf 'failed to recycle terminal worker pane: %s\n' "$pane" > "$repo_dir/diagnostic"
+    return 1
+  fi
+  if ! _stop_terminal_worker_process_group "$process_group"; then
+    printf 'terminal worker process group did not stop: %s\n' \
+      "$process_group" > "$repo_dir/diagnostic"
     return 1
   fi
   _record_recycle_evidence "$repo_dir" "$pane" "$identity" "pane_killed" || return 1

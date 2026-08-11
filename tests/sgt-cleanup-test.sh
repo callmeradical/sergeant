@@ -5,9 +5,38 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 TMUX_SESSION="sgt-cleanup-test-$$"
+export TMUX_TMPDIR="$TEST_ROOT/tmux"
+mkdir -p "$TMUX_TMPDIR"
+
+fixture_process_tree_pids() {
+  local child root_pid="$1"
+  for child in $(pgrep -P "$root_pid" 2>/dev/null || true); do
+    fixture_process_tree_pids "$child"
+  done
+  printf '%s\n' "$root_pid"
+}
 
 cleanup_fixture() {
+  local pid root_pid roots tree_pids=""
   tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+  # A failed assertion can occur while a deliberately signal-resistant fake
+  # agent is still alive. Select only commands containing this test's unique
+  # temp root, then snapshot their descendants before terminating the roots so
+  # helper sleeps cannot be orphaned by the fixture itself.
+  roots="$(ps -axo pid=,command= | awk -v root="$TEST_ROOT" \
+    'index($0, root) { print $1 }' || true)"
+  for root_pid in $roots; do
+    [[ "$root_pid" != "$$" && "$root_pid" != "${BASHPID:-$$}" ]] || continue
+    tree_pids+="$(fixture_process_tree_pids "$root_pid")"$'\n'
+  done
+  for pid in $tree_pids; do
+    [[ "$pid" != "$$" && "$pid" != "${BASHPID:-$$}" ]] || continue
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  for pid in $tree_pids; do
+    [[ "$pid" != "$$" && "$pid" != "${BASHPID:-$$}" ]] || continue
+    kill -KILL "$pid" 2>/dev/null || true
+  done
   rm -rf "$TEST_ROOT"
 }
 trap cleanup_fixture EXIT

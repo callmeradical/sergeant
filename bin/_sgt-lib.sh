@@ -555,6 +555,48 @@ _sgt_managed_coordinator_pane() {
   printf '%s true\n' "$pane"
 }
 
+# _sgt_retire_managed_coordinator_pane <task-dir> <fleet-dir>
+#
+# Retire the exact Sergeant-created coordinator pane after its last fleet owner
+# is cleaned. Explicit/user coordinator panes carry no Sergeant marker and are
+# never touched. A shared managed pane remains while any other task records the
+# same exact live identity.
+_sgt_retire_managed_coordinator_pane() {
+  local task_dir="$1" fleet_dir="$2"
+  local pane expected live other_task other_pane other_identity
+
+  [[ -f "$task_dir/primary_pane_id" && ! -L "$task_dir/primary_pane_id" ]] || return 0
+  pane="$(tr -d '\n' < "$task_dir/primary_pane_id")"
+  [[ -n "$pane" ]] || return 0
+  _sgt_is_tmux_pane_id "$pane" || return 0
+
+  expected="$(_sgt_read_owned_file "$task_dir/primary_pane_identity" 2>/dev/null || true)"
+  [[ -n "$expected" ]] || return 0
+  live="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
+  [[ "$live" == "$expected" && "${live%%|*}" == "0" ]] || return 0
+  [[ "$(_sgt_managed_coordinator_marker "$pane")" == \
+    "$SGT_MANAGED_COORDINATOR_MARKER" ]] || return 0
+
+  for other_task in "$fleet_dir"/*/; do
+    [[ -d "$other_task" ]] || continue
+    other_task="${other_task%/}"
+    [[ "$other_task" != "$task_dir" ]] || continue
+    [[ -f "$other_task/primary_pane_id" && ! -L "$other_task/primary_pane_id" ]] || continue
+    other_pane="$(tr -d '\n' < "$other_task/primary_pane_id")"
+    [[ "$other_pane" == "$pane" ]] || continue
+    other_identity="$(_sgt_read_owned_file \
+      "$other_task/primary_pane_identity" 2>/dev/null || true)"
+    [[ "$other_identity" == "$expected" ]] && return 0
+  done
+
+  echo "  stopping managed coordinator pane: $pane"
+  tmux kill-pane -t "$pane" 2>/dev/null || \
+    _die "Failed to stop managed coordinator pane: $pane"
+  live="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
+  [[ "$live" != "$expected" ]] || \
+    _die "Managed coordinator pane remained active after stop: $pane"
+}
+
 _sgt_path_mode() {
   stat -c '%a' -- "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
 }
