@@ -112,11 +112,13 @@ _sgt_response_lock_record_for_pid() {
 }
 
 _sgt_response_lock_record_is_this_process() {
-  local record="$1" pid expected
-  pid="$(_sgt_response_lock_record_pid "$record")" || return 1
-  [[ "$pid" == "$$" ]] || return 1
-  _sgt_response_lock_record_parse "$record" || return 1
+  local record="$1" acquisition="${_SGT_RESPONSE_LOCK_OWNER_RECORD:-}"
+  local pid expected
+  [[ -n "$acquisition" && "$record" == "$acquisition" ]] || return 1
+  _sgt_response_lock_record_parse "$acquisition" || return 1
+  pid="$_SGT_LOCK_RECORD_PID"
   expected="$_SGT_LOCK_RECORD_START"
+  [[ "$pid" == "$$" ]] || return 1
   [[ "$expected" == "$(_sgt_process_start_token "$$")" ]]
 }
 
@@ -235,8 +237,8 @@ _sgt_response_lock_reclaim() {
 }
 
 # _sgt_response_lock_held_by_this_process <repo_state> [lock_name]
-# 0 when the lock exists and names this process, but this context does not own
-# it.  Waiting on such a lock can never succeed.
+# 0 when the lock contains this process's exact current acquisition record, but
+# this context does not own its path. Waiting on such a lock can never succeed.
 _sgt_response_lock_held_by_this_process() {
   local repo_state="$1"
   local lock_path="$repo_state/${2:-response.lock}"

@@ -219,16 +219,18 @@ _sgt_finalize_action_lease "$state" "$worktree" "held-by-caller" || {
 _sgt_response_lock_release
 [[ ! -e "$state/response.lock" ]]
 
-# ── 7b. A lock recorded against this same process never blocks the finalizer ──
-# The lock records "$$", which is identical in every subshell of one process, so
-# a background loop killed mid-critical-section leaves a record naming a PID that
-# is still alive.  Waiting on it could never succeed.
+# ── 7b. This process's exact acquisition never blocks the finalizer forever ──
+# A background loop inherits the PID, birth token, and acquisition nonce. If it
+# is killed mid-critical-section, waiting on that exact record could never
+# succeed; the exit boundary may reclaim it after all lock users are stopped.
 
 read -r state worktree <<<"$(fixture samepid)"
 printf 'notify-samepid|%s\n' "$NONCE_A" > \
   "$worktree/.sergeant-notification-complete/$NONCE_A"
-_sgt_response_lock_record_for_pid "$$" > "$state/response.lock"
+same_process_owner="$(_sgt_response_lock_record_for_pid "$$")"
+printf '%s\n' "$same_process_owner" > "$state/response.lock"
 _SGT_RESPONSE_LOCK_DIR=""
+_SGT_RESPONSE_LOCK_OWNER_RECORD="$same_process_owner"
 _sgt_response_lock_held_by_this_process "$state" || {
   printf 'a lock naming this process was not detected as such\n' >&2
   exit 1

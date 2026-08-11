@@ -149,4 +149,55 @@ _sgt_response_lock_release
   exit 1
 }
 
+# Same PID and process birth are insufficient without the exact acquisition
+# nonce. Exercise both supported lock layouts through held/reclaim, then prove
+# the immutable current acquisition is still reclaimable.
+for layout in file directory; do
+  lockdir9="$TEST_ROOT/state-9-$layout"
+  mkdir -p "$lockdir9"
+  exact_record="$(_sgt_response_lock_record_for_pid "$$")"
+  if [[ "$layout" == file ]]; then
+    record_path="$lockdir9/response.lock"
+  else
+    mkdir "$lockdir9/response.lock"
+    record_path="$lockdir9/response.lock/pid"
+  fi
+  for variant in different missing; do
+    case "$variant" in
+      different)
+        forged_nonce=ffffffffffffffffffffffffffffffff
+        [[ "$exact_record" != *"nonce=$forged_nonce"* ]] || forged_nonce=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+        forged_record="$(printf '%s\n' "$exact_record" | sed "s/^nonce=.*/nonce=$forged_nonce/")"
+        ;;
+      missing) forged_record="$(printf '%s\n' "$exact_record" | sed '/^nonce=/d')" ;;
+    esac
+    [[ "$forged_record" != "$exact_record" ]]
+    printf '%s\n' "$forged_record" > "$record_path"
+    _SGT_RESPONSE_LOCK_DIR=""
+    _SGT_RESPONSE_LOCK_OWNER_RECORD="$exact_record"
+    if _sgt_response_lock_held_by_this_process "$lockdir9"; then
+      printf 'FAIL case9: %s %s nonce was reported as this acquisition\n' "$variant" "$layout" >&2
+      exit 1
+    fi
+    _sgt_response_lock_reclaim "$lockdir9"
+    [[ "$(cat "$record_path")" == "$forged_record" ]] || {
+      printf 'FAIL case9: %s %s nonce was reclaimed\n' "$variant" "$layout" >&2
+      exit 1
+    }
+  done
+
+  printf '%s\n' "$exact_record" > "$record_path"
+  _SGT_RESPONSE_LOCK_DIR=""
+  _SGT_RESPONSE_LOCK_OWNER_RECORD="$exact_record"
+  _sgt_response_lock_held_by_this_process "$lockdir9" || {
+    printf 'FAIL case9: exact %s acquisition was not recognized\n' "$layout" >&2
+    exit 1
+  }
+  _sgt_response_lock_reclaim "$lockdir9"
+  [[ ! -e "$lockdir9/response.lock" ]] || {
+    printf 'FAIL case9: exact %s acquisition was not reclaimed\n' "$layout" >&2
+    exit 1
+  }
+done
+
 printf 'sgt-response-lock-release: ok\n'
