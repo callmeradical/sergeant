@@ -14,6 +14,7 @@
 # turn that produced no proof at all.
 
 set -euo pipefail
+export FAKE_TMUX_OWNER_PID="$$"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
@@ -61,7 +62,10 @@ case "$1" in
     if [[ "$*" == *'@sergeant_replacement_token'* && "$target" == "${NEW_PANE:-%99}" ]]; then
       spawn_token="$(cat "${SPAWN_TOKEN_STATE:-$REPO_STATE_DIR/test_spawn_token}" 2>/dev/null || true)"
       spawn_role="$(cat "${SPAWN_ROLE_STATE:-$REPO_STATE_DIR/test_spawn_role}" 2>/dev/null || true)"
-      printf '0|%s|9999|bash|%s|%s\n' "$target" "$spawn_token" "$spawn_role"
+      owner_pid="$FAKE_TMUX_OWNER_PID"
+      owner_start="$(awk '{ print $22 }' "/proc/$owner_pid/stat")"
+      printf '0|%s|%s|bash|%s|%s|%s|proc:%s\n' "$target" "$owner_pid" \
+        "$spawn_token" "$spawn_role" "$owner_pid" "$owner_start"
       exit 0
     fi
     # PANE_ALIVE=0 models a dead PRIOR supervisor; a relaunched pane is alive.

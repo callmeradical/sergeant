@@ -120,10 +120,17 @@ touch -t 200001010000 "$empty_repo_state/response.lock"
 printf '%s\n' "$empty_worktree" > "$empty_repo_state/worktree"
 printf 'needs_input\n' > "$empty_repo_state/status"
 printf 'needs_input\n' > "$empty_worktree/.sergeant-status"
-printf 'recover empty lock' | SERGEANT_FLEET="$fleet" \
-  "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" task-1 empty-lock >/dev/null
-[[ "$(cat "$empty_repo_state/response")" == 'recover empty lock' ]]
-[[ ! -e "$empty_repo_state/response.lock" && ! -L "$empty_repo_state/response.lock" ]]
+set +e
+empty_output="$(printf 'recover empty lock' | SERGEANT_FLEET="$fleet" \
+  "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" task-1 empty-lock 2>&1)"
+empty_status=$?
+set -e
+if [[ "$empty_status" -eq 0 ]] || [[ "$empty_output" != *'has no authenticated owner'* ]]; then
+  printf 'empty legacy lock did not fail immediately and actionably\n' >&2
+  exit 1
+fi
+[[ -d "$empty_repo_state/response.lock" ]]
+[[ ! -e "$empty_repo_state/response" && ! -e "$empty_worktree/.sergeant-response" ]]
 
 dead_repo_state="$fleet/task-1/dead-lock"
 dead_worktree="$TEST_ROOT/dead-lock-worktree"
@@ -133,10 +140,17 @@ printf '99999999\n' > "$dead_repo_state/response.lock/pid"
 printf '%s\n' "$dead_worktree" > "$dead_repo_state/worktree"
 printf 'needs_input\n' > "$dead_repo_state/status"
 printf 'needs_input\n' > "$dead_worktree/.sergeant-status"
-printf 'recover dead lock' | SERGEANT_FLEET="$fleet" \
-  "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" task-1 dead-lock >/dev/null
-[[ "$(cat "$dead_repo_state/response")" == 'recover dead lock' ]]
-[[ ! -e "$dead_repo_state/response.lock" && ! -L "$dead_repo_state/response.lock" ]]
+set +e
+dead_output="$(printf 'recover dead lock' | SERGEANT_FLEET="$fleet" \
+  "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" task-1 dead-lock 2>&1)"
+dead_status=$?
+set -e
+if [[ "$dead_status" -eq 0 ]] || [[ "$dead_output" != *'Legacy or malformed response lock directory owner is ambiguous'* ]]; then
+  printf 'scalar directory lock did not fail immediately and actionably\n' >&2
+  exit 1
+fi
+[[ "$(cat "$dead_repo_state/response.lock/pid")" == 99999999 ]]
+[[ ! -e "$dead_repo_state/response" && ! -e "$dead_worktree/.sergeant-response" ]]
 
 stale_repo_state="$fleet/task-1/stale-lock"
 stale_worktree="$TEST_ROOT/stale-lock-worktree"
@@ -146,10 +160,17 @@ ln -s 99999999 "$stale_repo_state/response.lock"
 printf '%s\n' "$stale_worktree" > "$stale_repo_state/worktree"
 printf 'needs_input\n' > "$stale_repo_state/status"
 printf 'needs_input\n' > "$stale_worktree/.sergeant-status"
-printf 'recover stale lock' | SERGEANT_FLEET="$fleet" \
-  "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" task-1 stale-lock >/dev/null
-[[ "$(cat "$stale_repo_state/response")" == 'recover stale lock' ]]
-[[ ! -e "$stale_repo_state/response.lock" && ! -L "$stale_repo_state/response.lock" ]]
+set +e
+stale_output="$(printf 'recover stale lock' | SERGEANT_FLEET="$fleet" \
+  "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" task-1 stale-lock 2>&1)"
+stale_status=$?
+set -e
+if [[ "$stale_status" -eq 0 ]] || [[ "$stale_output" != *'Response lock has an invalid owner'* ]]; then
+  printf 'scalar symlink lock did not fail immediately and actionably\n' >&2
+  exit 1
+fi
+[[ "$(readlink "$stale_repo_state/response.lock")" == 99999999 ]]
+[[ ! -e "$stale_repo_state/response" && ! -e "$stale_worktree/.sergeant-response" ]]
 
 invalid_repo_state="$fleet/task-1/invalid-lock"
 invalid_worktree="$TEST_ROOT/invalid-lock-worktree"

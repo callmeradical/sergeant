@@ -227,7 +227,7 @@ _sgt_response_lock_release
 read -r state worktree <<<"$(fixture samepid)"
 printf 'notify-samepid|%s\n' "$NONCE_A" > \
   "$worktree/.sergeant-notification-complete/$NONCE_A"
-printf '%s\n' "$$" > "$state/response.lock"
+_sgt_response_lock_record_for_pid "$$" > "$state/response.lock"
 _SGT_RESPONSE_LOCK_DIR=""
 _sgt_response_lock_held_by_this_process "$state" || {
   printf 'a lock naming this process was not detected as such\n' >&2

@@ -52,6 +52,42 @@ scanned="$(tmux list-panes -a -F '#{pane_id}|#{window_name}' | awk -F'|' -v w="$
 [[ "$scanned" == "$pane" ]]
 identity="$(_sgt_pane_identity "$scanned")"
 _sgt_replacement_pane_identity_matches "$identity" "$scanned" "$token" "$role"
+original_auth="$(_sgt_replacement_pane_auth "$scanned" "$token" "$role")"
+option_pid="$(tmux display-message -p -t "$scanned" '#{@sergeant_replacement_pid}')"
+option_start="$(tmux display-message -p -t "$scanned" '#{@sergeant_replacement_start}')"
+[[ "$original_auth" == "$scanned|$option_pid|$option_start|$token|$role" ]]
+
+# tmux preserves pane options across respawn-pane. PID + process birth fencing
+# must therefore reject the unrelated replacement even though token/role remain.
+tmux respawn-pane -k -t "$scanned" '/bin/sleep 60'
+for _ in $(seq 1 100); do
+  respawn_pid="$(tmux display-message -p -t "$scanned" '#{pane_pid}')"
+  [[ "$respawn_pid" != "$option_pid" ]] && break
+  sleep 0.01
+done
+[[ "$respawn_pid" != "$option_pid" ]]
+if _sgt_replacement_pane_auth "$scanned" "$token" "$role" >/dev/null 2>&1; then
+  printf 'respawned unrelated process retained replacement ownership\n' >&2
+  exit 1
+fi
+kill -0 "$respawn_pid"
+
+# An authenticated launch that exits immediately is dead evidence, not a pane
+# that can be adopted or confused with a later pane id.
+tmux set-window-option -g remain-on-exit on
+exit_pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$session:" -n immediate-exit \
+  "$(printf '%q %q %q %q' "$ROOT_DIR/bin/sgt-replacement-launch" \
+    99990000111122223333444455556666 worker:exit /bin/true)")"
+for _ in $(seq 1 100); do
+  [[ "$(tmux display-message -p -t "$exit_pane" '#{pane_dead}')" == 1 ]] && break
+  sleep 0.01
+done
+[[ "$(tmux display-message -p -t "$exit_pane" '#{pane_dead}')" == 1 ]]
+if _sgt_replacement_pane_auth "$exit_pane" 99990000111122223333444455556666 worker:exit \
+    >/dev/null 2>&1; then
+  printf 'immediately exited replacement authenticated\n' >&2
+  exit 1
+fi
 
 # A same-name foreign pane can contain the token in its shell command but lacks
 # the pane-local marker and is never authenticated.

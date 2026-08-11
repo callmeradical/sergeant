@@ -5,6 +5,8 @@ _SGT_RESPONSE_LOCK_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-bash-version.sh
 source "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/_sgt-bash-version.sh"
 _sgt_require_running_bash || return 1
+# shellcheck source=bin/_sgt-process-identity.sh
+source "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/_sgt-process-identity.sh"
 
 # ── Response archive format ──────────────────────────────────────────────────
 # A consumed response is recorded as a directory of four fields: `body` (the
@@ -69,23 +71,8 @@ _sgt_response_archive_entry_matches() {
     "$proof_status" == "$applied_status" ]]
 }
 
-_sgt_process_start_token() {
-  local pid="$1" token
-  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
-  if [[ -r "/proc/$pid/stat" ]]; then
-    token="$(awk '{ print $22 }' "/proc/$pid/stat" 2>/dev/null)" || return 1
-    [[ "$token" =~ ^[0-9]+$ ]] || return 1
-    printf 'proc:%s\n' "$token"
-  else
-    token="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]][[:space:]]*/ /g')" || return 1
-    [[ -n "$token" ]] || return 1
-    printf 'ps:%s\n' "$token"
-  fi
-}
-
 _sgt_response_lock_record_pid() {
   local record="$1"
-  [[ "$record" =~ ^[1-9][0-9]*$ ]] && { printf '%s\n' "$record"; return; }
   _sgt_response_lock_record_parse "$record" || return 1
   printf '%s\n' "$_SGT_LOCK_RECORD_PID"
 }
@@ -110,7 +97,6 @@ _sgt_response_lock_record_live() {
   local record="$1" pid expected current
   pid="$(_sgt_response_lock_record_pid "$record")" || return 1
   kill -0 "$pid" 2>/dev/null || return 1
-  [[ "$record" =~ ^[1-9][0-9]*$ ]] && return 0
   _sgt_response_lock_record_parse "$record" || return 1
   expected="$_SGT_LOCK_RECORD_START"
   current="$(_sgt_process_start_token "$pid")" || return 1
@@ -129,7 +115,6 @@ _sgt_response_lock_record_is_this_process() {
   local record="$1" pid expected
   pid="$(_sgt_response_lock_record_pid "$record")" || return 1
   [[ "$pid" == "$$" ]] || return 1
-  [[ "$record" =~ ^[1-9][0-9]*$ ]] && return 0
   _sgt_response_lock_record_parse "$record" || return 1
   expected="$_SGT_LOCK_RECORD_START"
   [[ "$expected" == "$(_sgt_process_start_token "$$")" ]]
@@ -156,11 +141,16 @@ _sgt_response_lock_acquire() {
     if [[ -d "$lock_path" ]]; then
       owner="$(cat "$lock_path/pid" 2>/dev/null || true)"
       if [[ -z "$owner" ]]; then
-        [[ -z "$(ls -A "$lock_path" 2>/dev/null)" ]] || { rm -f "$candidate"; return 1; }
-        sleep "$interval"; continue
+        rm -f "$candidate"
+        printf 'ERROR: Response lock directory has no authenticated owner: %s\n' "$lock_path" >&2
+        return 1
       fi
-      [[ "$owner" =~ ^[1-9][0-9]*$ ]] || { rm -f "$candidate"; return 1; }
-      if kill -0 "$owner" 2>/dev/null; then sleep "$interval"; continue; fi
+      _sgt_response_lock_record_pid "$owner" >/dev/null || {
+        rm -f "$candidate"
+        printf 'ERROR: Legacy or malformed response lock directory owner is ambiguous: %s\n' "$lock_path/pid" >&2
+        return 1
+      }
+      if _sgt_response_lock_record_live "$owner"; then sleep "$interval"; continue; fi
       current_owner="$(cat "$lock_path/pid" 2>/dev/null || true)"
       [[ "$current_owner" == "$owner" ]] || continue
       if ! rm -f "$lock_path/pid" || ! rmdir "$lock_path"; then
@@ -200,7 +190,8 @@ _sgt_response_lock_release() {
   [[ -n "${_SGT_RESPONSE_LOCK_DIR:-}" ]] || return 0
   local owner
   owner="$(cat "$_SGT_RESPONSE_LOCK_DIR" 2>/dev/null || true)"
-  if [[ "$owner" == "${_SGT_RESPONSE_LOCK_OWNER_RECORD:-$$}" ]]; then
+  if [[ -n "${_SGT_RESPONSE_LOCK_OWNER_RECORD:-}" &&
+        "$owner" == "$_SGT_RESPONSE_LOCK_OWNER_RECORD" ]]; then
     if ! rm -f "$_SGT_RESPONSE_LOCK_DIR"; then
       printf 'ERROR: Could not release response lock: %s\n' "$_SGT_RESPONSE_LOCK_DIR" >&2
       return 1
@@ -214,10 +205,11 @@ _sgt_response_lock_release() {
 #
 # Drop a response lock whose recorded owner is THIS process.
 #
-# The lock records "$$", which in Bash is the shell's PID and is therefore
-# identical in every subshell of the same process.  A background loop killed
-# while holding the lock leaves a record naming a PID that is still very much
-# alive, so _sgt_response_lock_acquire's liveness check would spin forever.
+# The lock records an exact PID, process-birth token, and acquisition nonce.
+# Bash keeps $$ and the process-birth token stable in its subshells, so a
+# background loop killed while holding the lock can leave a record naming this
+# still-live shell.  The exact record prevents a bare or reused PID from proving
+# ownership.
 #
 # Only call this once every other context in this process that could hold the
 # lock has been terminated; otherwise it would break mutual exclusion.
@@ -271,48 +263,57 @@ _sgt_replacement_worker_command() {
     "$token" "$role" "$worker_command"
 }
 
-_sgt_replacement_pane_identity_matches() {
-  local identity="$1" pane="$2" expected_token="$3" expected_role="$4"
-  local dead identity_pane pid _created command evidence current
-  local marker_dead marker_pane marker_pid marker_command marker_token marker_role
-  IFS='|' read -r dead identity_pane pid _created command <<< "$identity"
-  [[ "$dead" == 0 && "$identity_pane" == "$pane" && "$pane" =~ ^%[0-9]+$ &&
-     "$pid" =~ ^[1-9][0-9]*$ && -n "$command" ]] || return 1
+_sgt_replacement_pane_auth() {
+  local pane="$1" expected_token="$2" expected_role="$3"
+  local evidence current current_start
+  local marker_dead marker_pane marker_pid marker_command marker_token marker_role marker_option_pid marker_start
+  [[ "$pane" =~ ^%[0-9]+$ ]] || return 1
   evidence=""
   for _ in $(seq 1 "${SGT_REPLACEMENT_MARKER_ATTEMPTS:-100}"); do
     evidence="$(tmux display-message -p -t "$pane" \
-      '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_current_command}|#{@sergeant_replacement_token}|#{@sergeant_replacement_role}' \
+      '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_current_command}|#{@sergeant_replacement_token}|#{@sergeant_replacement_role}|#{@sergeant_replacement_pid}|#{@sergeant_replacement_start}' \
       2>/dev/null)" || return 1
-    IFS='|' read -r marker_dead marker_pane marker_pid marker_command marker_token marker_role <<< "$evidence"
-    if [[ "$marker_token" == "$expected_token" && "$marker_role" == "$expected_role" ]]; then
+    IFS='|' read -r marker_dead marker_pane marker_pid marker_command marker_token marker_role marker_option_pid marker_start <<< "$evidence"
+    if [[ "$marker_token" == "$expected_token" && "$marker_role" == "$expected_role" &&
+          -n "$marker_option_pid" && -n "$marker_start" ]]; then
       break
     fi
     # Any non-empty conflicting marker is another owner. Only the launcher's
     # short, wholly-unmarked publication window is retryable.
-    [[ -z "$marker_token" && -z "$marker_role" ]] || return 1
+    [[ -z "$marker_token" && -z "$marker_role" && -z "$marker_option_pid" && -z "$marker_start" ]] || return 1
     sleep "${SGT_REPLACEMENT_MARKER_INTERVAL:-0.01}"
   done
   current="$(tmux display-message -p -t "$pane" \
-    '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_current_command}|#{@sergeant_replacement_token}|#{@sergeant_replacement_role}' \
+    '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_current_command}|#{@sergeant_replacement_token}|#{@sergeant_replacement_role}|#{@sergeant_replacement_pid}|#{@sergeant_replacement_start}' \
     2>/dev/null)" || return 1
   [[ "$evidence" == "$current" ]] || return 1
-  IFS='|' read -r marker_dead marker_pane marker_pid marker_command marker_token marker_role <<< "$evidence"
-  [[ "$marker_dead" == 0 && "$marker_pane" == "$pane" && "$marker_pid" == "$pid" &&
+  IFS='|' read -r marker_dead marker_pane marker_pid marker_command marker_token marker_role marker_option_pid marker_start <<< "$evidence"
+  current_start="$(_sgt_process_start_token "$marker_pid")" || return 1
+  [[ "$marker_dead" == 0 && "$marker_pane" == "$pane" && "$marker_pid" =~ ^[1-9][0-9]*$ &&
      -n "$marker_command" && "$marker_token" == "$expected_token" &&
-     "$marker_role" == "$expected_role" ]]
+     "$marker_role" == "$expected_role" && "$marker_option_pid" == "$marker_pid" &&
+     "$marker_start" == "$current_start" ]] || return 1
+  printf '%s|%s|%s|%s|%s\n' "$pane" "$marker_pid" "$marker_start" "$marker_token" "$marker_role"
 }
 
-_sgt_replacement_recorded_identity_valid() {
-  local identity="$1" pane="$2" dead identity_pane pid _created command
-  IFS='|' read -r dead identity_pane pid _created command <<< "$identity"
-  [[ "$dead" == 0 && "$identity_pane" == "$pane" && "$pane" =~ ^%[0-9]+$ &&
-     "$pid" =~ ^[1-9][0-9]*$ && -n "$command" ]]
+_sgt_replacement_pane_identity_matches() {
+  _sgt_replacement_pane_auth "$2" "$3" "$4" >/dev/null
+}
+
+_sgt_replacement_recorded_auth_valid() {
+  local auth="$1" pane="$2" token="$3" role="$4"
+  local auth_pane auth_pid auth_start auth_token auth_role
+  IFS='|' read -r auth_pane auth_pid auth_start auth_token auth_role <<< "$auth"
+  [[ "$auth_pane" == "$pane" && "$auth_pid" =~ ^[1-9][0-9]*$ &&
+     ( "$auth_start" =~ ^proc:[0-9]+$ || "$auth_start" == ps:* ) &&
+     "$auth_start" != ps: &&
+     "$auth_token" == "$token" && "$auth_role" == "$role" ]]
 }
 
 # Strict shared relaunch journal. Both public recovery CLIs use this canonical
 # shape; malformed, partial, or extended records are never interpreted.
 _sgt_transfer_journal_render() {
-  printf 'version=1\nresponse_id=%s\nnotification_id=%s\nspawn_token=%s\ngate_generation=%s\ntmux_session=%s\nwindow_name=%s\nworker_role=%s\nworker_command=%s\nphase=%s\npane=%s\npane_identity=%s\n' \
+  printf 'version=1\nresponse_id=%s\nnotification_id=%s\nspawn_token=%s\ngate_generation=%s\ntmux_session=%s\nwindow_name=%s\nworker_role=%s\nworker_command=%s\nphase=%s\npane=%s\npane_auth=%s\n' \
     "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}"
 }
 
@@ -329,7 +330,7 @@ _sgt_transfer_journal_read() {
   _SGT_TRANSFER_WORKER_COMMAND="$(sed -n '9s/^worker_command=//p' "$file")"
   _SGT_TRANSFER_PHASE="$(sed -n '10s/^phase=//p' "$file")"
   _SGT_TRANSFER_PANE="$(sed -n '11s/^pane=//p' "$file")"
-  _SGT_TRANSFER_PANE_IDENTITY="$(sed -n '12s/^pane_identity=//p' "$file")"
+  _SGT_TRANSFER_PANE_AUTH="$(sed -n '12s/^pane_auth=//p' "$file")"
   [[ "$(_sgt_response_archive_field version "$file" 2>/dev/null || true)" == 1 &&
      ( -z "$_SGT_TRANSFER_RESPONSE_ID" || "$_SGT_TRANSFER_RESPONSE_ID" =~ ^[a-f0-9]{32}$ ) &&
      "$_SGT_TRANSFER_NOTIFICATION_ID" =~ ^[a-f0-9]{32}$ &&
@@ -341,11 +342,12 @@ _sgt_transfer_journal_read() {
      -n "$_SGT_TRANSFER_WORKER_COMMAND" ]] || return 1
   case "$_SGT_TRANSFER_PHASE" in
     bound|fenced|spawning)
-      [[ -z "$_SGT_TRANSFER_PANE" && -z "$_SGT_TRANSFER_PANE_IDENTITY" ]] || return 1
+      [[ -z "$_SGT_TRANSFER_PANE" && -z "$_SGT_TRANSFER_PANE_AUTH" ]] || return 1
       ;;
     spawned|published|acked)
-      _sgt_replacement_recorded_identity_valid "$_SGT_TRANSFER_PANE_IDENTITY" \
-        "$_SGT_TRANSFER_PANE" || return 1
+      _sgt_replacement_recorded_auth_valid "$_SGT_TRANSFER_PANE_AUTH" \
+        "$_SGT_TRANSFER_PANE" "$_SGT_TRANSFER_SPAWN_TOKEN" \
+        "$_SGT_TRANSFER_WORKER_ROLE" || return 1
       ;;
     *) return 1 ;;
   esac
@@ -354,7 +356,7 @@ _sgt_transfer_journal_read() {
     "$_SGT_TRANSFER_GATE_GENERATION" "$_SGT_TRANSFER_TMUX_SESSION" \
     "$_SGT_TRANSFER_WINDOW_NAME" "$_SGT_TRANSFER_WORKER_ROLE" \
     "$_SGT_TRANSFER_WORKER_COMMAND" \
-    "$_SGT_TRANSFER_PHASE" "$_SGT_TRANSFER_PANE" "$_SGT_TRANSFER_PANE_IDENTITY")"
+    "$_SGT_TRANSFER_PHASE" "$_SGT_TRANSFER_PANE" "$_SGT_TRANSFER_PANE_AUTH")"
   cmp -s "$file" <(printf '%s\n' "$canonical")
 }
 
@@ -374,7 +376,7 @@ _sgt_transfer_journal_write() {
        "$_SGT_TRANSFER_WORKER_COMMAND" == "$command" ]] || return 1
     previous="$_SGT_TRANSFER_PHASE"
     if [[ "$previous" == "$phase" ]]; then
-      [[ "$_SGT_TRANSFER_PANE" == "$pane" && "$_SGT_TRANSFER_PANE_IDENTITY" == "$identity" ]] || return 1
+      [[ "$_SGT_TRANSFER_PANE" == "$pane" && "$_SGT_TRANSFER_PANE_AUTH" == "$identity" ]] || return 1
     else
       case "$previous:$phase" in
         bound:fenced|bound:spawning|fenced:spawning|spawning:spawned|\

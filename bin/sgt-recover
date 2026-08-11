@@ -424,9 +424,13 @@ window_panes=0
 while IFS='|' read -r candidate candidate_window; do
   [[ "$candidate_window" == "$replacement_window_name" ]] || continue
   window_panes=$((window_panes + 1))
-  candidate_identity="$(_sgt_pane_identity "$candidate" 2>/dev/null || true)"
-  if _sgt_replacement_pane_identity_matches "$candidate_identity" "$candidate" \
-      "$replacement_spawn_token" "$worker_role"; then
+  candidate_auth="$(_sgt_replacement_pane_auth "$candidate" \
+    "$replacement_spawn_token" "$worker_role" 2>/dev/null || true)"
+  if [[ -n "$candidate_auth" ]] &&
+      { [[ "${_SGT_TRANSFER_PHASE:-}" == bound || "${_SGT_TRANSFER_PHASE:-}" == fenced ||
+           "${_SGT_TRANSFER_PHASE:-}" == spawning ]] ||
+        [[ "$_SGT_TRANSFER_PANE" == "$candidate" &&
+           "$_SGT_TRANSFER_PANE_AUTH" == "$candidate_auth" ]]; }; then
     matching_panes=$((matching_panes + 1))
     new_pane="$candidate"
   fi
@@ -475,12 +479,15 @@ pane_identity=""
 if pane_identity="$(_sgt_pane_identity "$new_pane")" && \
     _sgt_replacement_pane_identity_matches "$pane_identity" "$new_pane" \
       "$replacement_spawn_token" "$worker_role"; then
+  pane_auth="$(_sgt_replacement_pane_auth "$new_pane" \
+    "$replacement_spawn_token" "$worker_role")" || \
+    _abort_replacement "could not capture stable replacement pane authentication"
   recovery_install_phase=spawned
   if _sgt_transfer_journal_read "$relaunch_transaction" &&
       [[ "$_SGT_TRANSFER_PHASE" == acked ]]; then
     recovery_install_phase=acked
   fi
-  _write_recovery_transaction "$recovery_install_phase" "$new_pane" "$pane_identity" || \
+  _write_recovery_transaction "$recovery_install_phase" "$new_pane" "$pane_auth" || \
     _abort_replacement "could not publish spawned worker ownership transaction"
   _sgt_replace_owned_file "$REPO_DIR/pane_identity" "$pane_identity" || \
     _abort_replacement "could not publish new worker pane identity"
@@ -509,7 +516,7 @@ if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" \
   _escalate "relaunched worker did not acknowledge recovery notification"
   _recover_die "Stall recovery failed: notification timed out for $TASK_ID/$REPO"
 fi
-_write_recovery_transaction acked "$new_pane" "$pane_identity" || \
+_write_recovery_transaction acked "$new_pane" "$pane_auth" || \
   _recover_die "Stall recovery failed: could not publish acknowledged ownership transaction"
 
 # ── 16. Clear stall evidence now that recovery succeeded ────────────────────

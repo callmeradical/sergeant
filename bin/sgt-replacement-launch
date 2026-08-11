@@ -3,6 +3,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-process-identity.sh
+source "$SCRIPT_DIR/_sgt-process-identity.sh"
+
 [[ $# -ge 3 ]] || { printf 'sgt-replacement-launch: invalid arguments\n' >&2; exit 2; }
 token="$1"
 role="$2"
@@ -10,8 +14,11 @@ shift 2
 [[ "$token" =~ ^[a-f0-9]{32}$ ]] || { printf 'sgt-replacement-launch: invalid token\n' >&2; exit 2; }
 [[ "$role" =~ ^worker:[A-Za-z0-9._-]+$ ]] || { printf 'sgt-replacement-launch: invalid role\n' >&2; exit 2; }
 [[ "${TMUX_PANE:-}" =~ ^%[0-9]+$ ]] || { printf 'sgt-replacement-launch: no tmux pane\n' >&2; exit 2; }
+start_token="$(_sgt_process_start_token "$$")" || exit 2
 
 tmux set-option -p -t "$TMUX_PANE" @sergeant_replacement_token "$token" \; \
-  set-option -p -t "$TMUX_PANE" @sergeant_replacement_role "$role"
+  set-option -p -t "$TMUX_PANE" @sergeant_replacement_role "$role" \; \
+  set-option -p -t "$TMUX_PANE" @sergeant_replacement_pid "$$" \; \
+  set-option -p -t "$TMUX_PANE" @sergeant_replacement_start "$start_token"
 
 exec "$@"

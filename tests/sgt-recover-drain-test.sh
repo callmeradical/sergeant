@@ -2,6 +2,7 @@
 # Tests for sgt-recover drain admission — stall recovery refused when drained.
 
 set -euo pipefail
+export FAKE_TMUX_OWNER_PID="$$"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
@@ -43,8 +44,11 @@ case "$1" in
       previous="$arg"
     done
     if [[ "$*" == *'@sergeant_replacement_token'* && "$target" == "${NEW_PANE:-%99}" ]]; then
-      printf '0|%s|9999|bash|%s|%s\n' "$target" \
-        "$(cat "$EXPECTED_WORKER/test_spawn_token")" "$(cat "$EXPECTED_WORKER/test_spawn_role")"
+      owner_pid="$FAKE_TMUX_OWNER_PID"
+      owner_start="$(awk '{ print $22 }' "/proc/$owner_pid/stat")"
+      printf '0|%s|%s|bash|%s|%s|%s|proc:%s\n' "$target" "$owner_pid" \
+        "$(cat "$EXPECTED_WORKER/test_spawn_token")" "$(cat "$EXPECTED_WORKER/test_spawn_role")" \
+        "$owner_pid" "$owner_start"
       exit 0
     fi
     pane_identity="${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"

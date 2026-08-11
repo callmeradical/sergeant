@@ -18,8 +18,10 @@ source "$ROOT_DIR/bin/_sgt-response-lock.sh"
 lockdir1="$TEST_ROOT/state-1"
 mkdir -p "$lockdir1"
 lockfile1="$lockdir1/response.lock"
-printf '%s\n' "$$" > "$lockfile1"
+owner_record="$(_sgt_response_lock_record_for_pid "$$")"
+printf '%s\n' "$owner_record" > "$lockfile1"
 _SGT_RESPONSE_LOCK_DIR="$lockfile1"
+_SGT_RESPONSE_LOCK_OWNER_RECORD="$owner_record"
 
 chmod 555 "$lockdir1"
 set +e
@@ -122,5 +124,29 @@ for malformed in extra wrong_key; do
     exit 1
   }
 done
+
+# Bare scalar PID records are legacy/ambiguous for every public helper.  Even
+# when the scalar names this process, it proves neither birth identity nor this
+# acquisition and must never be reported live, reclaimed, or released.
+lockdir8="$TEST_ROOT/state-8"
+mkdir -p "$lockdir8"
+printf '%s\n' "$$" > "$lockdir8/response.lock"
+scalar_record="$(cat "$lockdir8/response.lock")"
+if _sgt_response_lock_record_live "$scalar_record"; then
+  printf 'FAIL case8: scalar PID was accepted as a live owner\n' >&2
+  exit 1
+fi
+_sgt_response_lock_reclaim "$lockdir8"
+[[ "$(cat "$lockdir8/response.lock")" == "$$" ]] || {
+  printf 'FAIL case8: scalar PID was reclaimed by this process\n' >&2
+  exit 1
+}
+_SGT_RESPONSE_LOCK_DIR="$lockdir8/response.lock"
+_SGT_RESPONSE_LOCK_OWNER_RECORD=""
+_sgt_response_lock_release
+[[ "$(cat "$lockdir8/response.lock")" == "$$" ]] || {
+  printf 'FAIL case8: scalar PID was released without an exact owner record\n' >&2
+  exit 1
+}
 
 printf 'sgt-response-lock-release: ok\n'
