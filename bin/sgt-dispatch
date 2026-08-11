@@ -813,49 +813,161 @@ for rname in "${TARGET_REPOS[@]}"; do
   if $use_treehouse; then
     _info "acquiring treehouse lease for $rname ..."
     lease_holder="sgt-${TASK_ID}-${rname}"
-    treehouse_allocation=""
-    treehouse_fields=""
+    treehouse_raw="$repo_task_dir/treehouse-acquisition.raw"
+    treehouse_raw_tmp="$treehouse_raw.tmp.$$"
+    treehouse_record="$repo_task_dir/treehouse-acquisition.json"
     treehouse_acquired=false
-    if treehouse_allocation="$(cd "$repo_path" && treehouse get --lease \
-      --lease-holder "$lease_holder" --json 2>/dev/null)"; then
-      treehouse_acquired=true
-      treehouse_fields="$(python3 -c '
-import json, sys
+    [[ ! -e "$treehouse_raw" && ! -e "$treehouse_raw_tmp" && \
+      ! -e "$treehouse_record" ]] || \
+      _die "treehouse acquisition state already exists for $rname"
+    if python3 - "$repo_path" "$treehouse_raw_tmp" "$lease_holder" <<'PY'
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+repo, output_arg, holder = sys.argv[1:]
+limit = 65536
+with Path(output_arg).open("xb") as output, open(os.devnull, "wb") as devnull:
+    process = subprocess.Popen(
+        ["treehouse", "get", "--lease", "--lease-holder", holder, "--json"],
+        cwd=repo, stdout=subprocess.PIPE, stderr=devnull)
+    captured = 0
+    assert process.stdout is not None
+    while chunk := process.stdout.read(65536):
+        if captured <= limit:
+            kept = chunk[:limit + 1 - captured]
+            output.write(kept)
+            captured += len(kept)
+    return_code = process.wait()
+    output.flush()
+    os.fsync(output.fileno())
+raise SystemExit(return_code)
+PY
+    then
+      chmod 600 "$treehouse_raw_tmp"
+      [[ "${SGT_DISPATCH_FAIL_POINT:-}" != treehouse-raw-created ]] || \
+        _die "Injected failure after Treehouse raw acquisition capture: $treehouse_raw_tmp"
+      mv "$treehouse_raw_tmp" "$treehouse_raw"
+      python3 - "$repo_task_dir" <<'PY'
+import os
+import sys
+
+directory = os.open(sys.argv[1], os.O_RDONLY)
 try:
-    allocation = json.load(sys.stdin)
-except (json.JSONDecodeError, OSError):
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+      [[ "${SGT_DISPATCH_FAIL_POINT:-}" != treehouse-raw-published ]] || \
+        _die "Injected failure after Treehouse raw acquisition publication: $treehouse_raw"
+      if ! python3 - "$treehouse_raw" "$treehouse_record" "$repo_path" \
+        "$lease_holder" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+raw_path, record_path, repo_arg, expected_holder = sys.argv[1:]
+raw = Path(raw_path).read_bytes()
+if not raw or len(raw) > 65536:
     raise SystemExit(1)
-path = allocation.get("path") if isinstance(allocation, dict) else None
-lease_id = allocation.get("lease_id") if isinstance(allocation, dict) else None
-holder = allocation.get("lease_holder") if isinstance(allocation, dict) else None
-if not all(isinstance(value, str) and value and "\n" not in value
-           for value in (path, lease_id, holder)):
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON field")
+        result[key] = value
+    return result
+
+try:
+    allocation = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
+except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
     raise SystemExit(1)
-print(path)
-print(lease_id)
-print(holder)
-' <<< "$treehouse_allocation" 2>/dev/null || true)"
+if not isinstance(allocation, dict):
+    raise SystemExit(1)
+def contains_control(value):
+    if isinstance(value, str):
+        return any(ord(char) < 32 or ord(char) == 127 for char in value)
+    if isinstance(value, dict):
+        return any(contains_control(key) or contains_control(item)
+                   for key, item in value.items())
+    if isinstance(value, list):
+        return any(contains_control(item) for item in value)
+    return False
+
+if contains_control(allocation):
+    raise SystemExit(1)
+values = [allocation.get(name) for name in ("path", "lease_id", "lease_holder")]
+if not all(isinstance(value, str) and value for value in values):
+    raise SystemExit(1)
+path, lease_id, holder = values
+repo = str(Path(repo_arg).resolve(strict=True))
+lease_path = Path(path)
+if not lease_path.is_absolute():
+    raise SystemExit(1)
+canonical_path = str(lease_path.resolve(strict=True))
+if canonical_path != path or holder != expected_holder:
+    raise SystemExit(1)
+record = {"version": 1, "repo": repo, "path": path,
+          "lease_id": lease_id, "lease_holder": holder}
+target = Path(record_path)
+temp = target.with_name(target.name + ".tmp." + str(os.getpid()))
+with temp.open("x", encoding="utf-8") as stream:
+    json.dump(record, stream, sort_keys=True, separators=(",", ":"))
+    stream.write("\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+if os.environ.get("SGT_DISPATCH_FAIL_POINT") == "treehouse-record-created":
+    raise SystemExit(1)
+os.replace(temp, target)
+dir_fd = os.open(str(target.parent), os.O_RDONLY)
+try:
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
+PY
+      then
+        _die "treehouse returned an invalid lease allocation for $rname; inspect preserved acquisition: $treehouse_raw"
+      fi
+      [[ "${SGT_DISPATCH_FAIL_POINT:-}" != treehouse-record-published ]] || \
+        _die "Injected failure after Treehouse acquisition record publication: $treehouse_record"
+      treehouse_acquired=true
+    else
+      rm -f "$treehouse_raw_tmp"
     fi
-    worktree_path="$(sed -n '1p' <<< "$treehouse_fields")"
-    lease_id="$(sed -n '2p' <<< "$treehouse_fields")"
-    allocated_holder="$(sed -n '3p' <<< "$treehouse_fields")"
-    if [[ "$treehouse_acquired" == true && ( -z "$worktree_path" || -z "$lease_id" || \
-      "$allocated_holder" != "$lease_holder" || \
-      -n "$(sed -n '4p' <<< "$treehouse_fields")" ) ]]; then
-      _die "treehouse returned an invalid lease allocation for $rname; refusing to lose lease ownership"
-    elif [[ "$treehouse_acquired" != true ]]; then
+    if [[ "$treehouse_acquired" != true ]]; then
       _info "WARNING: treehouse lease failed — falling back to git worktree add"
       use_treehouse=false
     else
+      worktree_path="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$treehouse_record")"
+      lease_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lease_id"])' "$treehouse_record")"
       _info "leased: $worktree_path"
       echo "treehouse"      > "$repo_task_dir/wt_type"
       echo "$lease_holder"  > "$repo_task_dir/wt_holder"
       echo "$lease_id"      > "$repo_task_dir/wt_lease_id"
       # Create and checkout the task branch in the leased worktree
+      treehouse_checkout_ok=false
       if git -C "$worktree_path" show-ref --verify --quiet "refs/heads/$BRANCH" 2>/dev/null; then
-        git -C "$worktree_path" checkout "$BRANCH" 2>&1 | sed 's/^/    /'
+        if git -C "$worktree_path" checkout "$BRANCH" 2>&1 | sed 's/^/    /'; then
+          treehouse_checkout_ok=true
+        fi
       else
-        git -C "$worktree_path" checkout -b "$BRANCH" 2>&1 | sed 's/^/    /'
+        if git -C "$worktree_path" checkout -b "$BRANCH" 2>&1 | sed 's/^/    /'; then
+          treehouse_checkout_ok=true
+        fi
+      fi
+      if [[ "$treehouse_checkout_ok" != true ]]; then
+        printf 'failed: treehouse checkout failed\n' > "$repo_task_dir/status"
+        if (cd "$repo_path" && treehouse return --force \
+          --if-lease-id "$lease_id" --if-lease-holder "$lease_holder" \
+          "$worktree_path" >/dev/null 2>&1); then
+          printf 'returned\n' > "$repo_task_dir/treehouse-acquisition-return"
+        else
+          printf 'return-failed\n' > "$repo_task_dir/treehouse-acquisition-return"
+        fi
+        _die "treehouse checkout failed for $rname; acquisition record preserved: $treehouse_record"
       fi
     fi
   fi

@@ -2786,18 +2786,6 @@ for repo_dir in "$TASK_DIR"/*/; do
     fi
     _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
       "$wt_type" "$retry_root" "$treehouse_owner_validation_mode"
-    treehouse_verified_phase="$(_treehouse_returning_phase "$worktree" \
-      "$retry_root" "$treehouse_lease_id" "$treehouse_holder")"
-    if ! _treehouse_lease_state "$retry_root" "$worktree" \
-      "$treehouse_lease_id" "$treehouse_holder"; then
-      _die "Cannot verify current treehouse lease; fleet state preserved: $worktree"
-    fi
-    if [[ "$TREEHOUSE_LEASE_STATE" == different && \
-      "$(cat "$repo_dir/cleanup-phase")" == "$treehouse_verified_phase" ]]; then
-      treehouse_returned=true
-    elif [[ "$TREEHOUSE_LEASE_STATE" != matched ]]; then
-      _die "Treehouse lease identity does not match captured acquisition: $worktree"
-    fi
   fi
   LIVE_EVIDENCE_BACKUP=""
   if ! _same_filesystem_pair "$repo_dir" "$repo_name" "$worktree"; then
@@ -2840,11 +2828,7 @@ for repo_dir in "$TASK_DIR"/*/; do
       (cd "$retry_root" && treehouse return --force \
         --if-lease-id "$treehouse_lease_id" \
         --if-lease-holder "$treehouse_holder" "$worktree" 2>&1 | sed 's/^/  /'); then
-      if _treehouse_lease_state "$retry_root" "$worktree" \
-        "$treehouse_lease_id" "$treehouse_holder" && \
-        [[ "$TREEHOUSE_LEASE_STATE" == different ]]; then
-        treehouse_returned=true
-      elif [[ ! -d "$worktree" ]]; then
+      if [[ ! -d "$worktree" ]]; then
         _rollback_remove_path "$LIVE_EVIDENCE_BACKUP" \
           "removed treehouse live evidence backup" live-backup-cleanup
         _record_cleanup_phase "$repo_dir" partial-removal "$worktree" \
@@ -2852,11 +2836,9 @@ for repo_dir in "$TASK_DIR"/*/; do
           _die "Failed to record partial treehouse removal: $repo_name"
         _die "Treehouse return failed after worktree removal; retry required: $worktree"
       fi
-      if [[ "$treehouse_returned" != true ]]; then
-        _restore_removed_worker_evidence "$worktree" "$LIVE_EVIDENCE_BACKUP" || \
-          _die "Failed to restore worker evidence after treehouse failure: $repo_name"
-        _die "Failed to return treehouse lease; fleet state preserved: $worktree"
-      fi
+      _restore_removed_worker_evidence "$worktree" "$LIVE_EVIDENCE_BACKUP" || \
+        _die "Failed to restore worker evidence after treehouse failure: $repo_name"
+      _die "Conditional treehouse return did not confirm lease release; retry required; fleet state preserved: $worktree"
     fi
   else
     echo "  removing git worktree: $worktree"

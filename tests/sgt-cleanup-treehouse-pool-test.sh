@@ -59,6 +59,16 @@ record_task treehouse-pool "$TEST_ROOT/treehouse-main" \
 cat > "$TEST_ROOT/fake-bin/treehouse" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$1" == status && "$2" == --json ]]; then
+  case "${FAKE_TREEHOUSE_STATUS_MODE:-valid}" in
+    empty) printf '[]\n'; exit 0 ;;
+    malformed) printf '{bad-json\n'; exit 0 ;;
+    duplicate)
+      printf '[{"path":"%s","lease_id":"%s","lease_holder":"%s"},{"path":"%s","lease_id":"%s","lease_holder":"%s"}]\n' \
+        "$FAKE_TREEHOUSE_PATH" "$FAKE_TREEHOUSE_LEASE_ID" "$FAKE_TREEHOUSE_HOLDER" \
+        "$FAKE_TREEHOUSE_PATH" "$FAKE_TREEHOUSE_LEASE_ID" "$FAKE_TREEHOUSE_HOLDER"
+      exit 0
+      ;;
+  esac
   if [[ -e "$FAKE_TREEHOUSE_ACTIVE" ]]; then
     printf '[{"path":"%s","lease_id":"%s","lease_holder":"%s"}]\n' \
       "$FAKE_TREEHOUSE_PATH" "$FAKE_TREEHOUSE_LEASE_ID" "$FAKE_TREEHOUSE_HOLDER"
@@ -190,6 +200,33 @@ set -e
 [[ -e "$TEST_ROOT/mismatch-active" && -d "$TEST_ROOT/fleet/lease-mismatch" ]]
 printf 'sgt-cleanup rejects a changed Treehouse lease identity: ok\n'
 
+for status_mode in empty malformed duplicate; do
+  init_repo "$TEST_ROOT/status-$status_mode-main"
+  git -C "$TEST_ROOT/status-$status_mode-main" worktree add -q \
+    -b "status-$status_mode-worker" "$TEST_ROOT/status-$status_mode-checkout"
+  record_task "status-$status_mode" "$TEST_ROOT/status-$status_mode-main" \
+    "$TEST_ROOT/status-$status_mode-checkout" treehouse
+  touch "$TEST_ROOT/status-$status_mode-active"
+  return_count="$(wc -l < "$TEST_ROOT/treehouse-return.log")"
+  set +e
+  HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+    FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+    FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/status-$status_mode-active" \
+    FAKE_TREEHOUSE_PATH="$TEST_ROOT/status-$status_mode-checkout" \
+    FAKE_TREEHOUSE_LEASE_ID="lease-status-$status_mode" \
+    FAKE_TREEHOUSE_HOLDER="sgt-status-$status_mode-app" \
+    FAKE_TREEHOUSE_STATUS_MODE="$status_mode" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" "status-$status_mode" app >/dev/null 2>&1
+  status_probe_status=$?
+  set -e
+  [[ "$status_probe_status" -ne 0 ]]
+  [[ "$(wc -l < "$TEST_ROOT/treehouse-return.log")" -eq "$return_count" ]]
+  [[ -d "$TEST_ROOT/fleet/status-$status_mode" ]]
+done
+printf 'sgt-cleanup rejects ambiguous Treehouse status evidence: ok\n'
+
 init_repo "$TEST_ROOT/wrong-path-main"
 git -C "$TEST_ROOT/wrong-path-main" worktree add -q -b wrong-path-worker \
   "$TEST_ROOT/wrong-path-pool-checkout"
@@ -234,7 +271,7 @@ return_failure_output="$(
 return_failure_status=$?
 set -e
 [[ "$return_failure_status" -ne 0 ]]
-[[ "$return_failure_output" == *"Failed to return treehouse lease"* ]]
+[[ "$return_failure_output" == *"Conditional treehouse return did not confirm lease release"* ]]
 [[ -e "$TEST_ROOT/return-failure-active" ]]
 [[ -f "$TEST_ROOT/return-failure-pool-checkout/.sergeant-status" ]]
 [[ -d "$TEST_ROOT/fleet/return-failure" ]]
@@ -261,6 +298,7 @@ set -e
 [[ "$interrupted_status" -ne 0 && ! -e "$TEST_ROOT/interrupted-active" ]]
 [[ "$(sed -n '1p' "$TEST_ROOT/fleet/interrupted-return/app/cleanup-phase")" == returning ]]
 return_count="$(wc -l < "$TEST_ROOT/treehouse-return.log")"
+set +e
 HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
   FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
   FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/interrupted-active" \
@@ -269,10 +307,14 @@ HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
   FAKE_TREEHOUSE_HOLDER=sgt-interrupted-return-app \
   SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
   SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" interrupted-return app >/dev/null
-[[ "$(wc -l < "$TEST_ROOT/treehouse-return.log")" -eq "$return_count" ]]
-[[ "$(sed -n '1p' "$TEST_ROOT/fleet/interrupted-return/app/cleanup-phase")" == returned ]]
-printf 'sgt-cleanup converges after return-success publication interruption: ok\n'
+  "$ROOT_DIR/bin/sgt-cleanup" interrupted-return app >/dev/null 2>&1
+interrupted_retry_status=$?
+set -e
+[[ "$interrupted_retry_status" -ne 0 ]]
+[[ "$(wc -l < "$TEST_ROOT/treehouse-return.log")" -eq $((return_count + 1)) ]]
+[[ "$(sed -n '1p' "$TEST_ROOT/fleet/interrupted-return/app/cleanup-phase")" == returning ]]
+[[ -d "$TEST_ROOT/fleet/interrupted-return" ]]
+printf 'sgt-cleanup retries an ambiguous interrupted conditional return: ok\n'
 
 init_repo "$TEST_ROOT/git-main"
 git -C "$TEST_ROOT/git-main" worktree add -q -b git-worker \

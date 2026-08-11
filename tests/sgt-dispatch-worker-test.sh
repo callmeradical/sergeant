@@ -194,14 +194,44 @@ grep -Fq 'requires both .sergeant-status=done and a non-empty .sergeant-result' 
 
 cat > "$TEST_ROOT/fake-bin/treehouse" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$1" == return ]]; then
+  printf '%s\n' "$*" > "${TREEHOUSE_RETURN_LOG:?}"
+  exit 0
+fi
 if [[ "$1" != get || "$2" != --lease || "$3" != --lease-holder || \
   -z "$4" || "$5" != --json ]]; then
   printf 'unexpected treehouse allocation argv: %s\n' "$*" >&2
   exit 64
 fi
 printf '%s\n' "$*" > "$TREEHOUSE_GET_LOG"
+case "${TREEHOUSE_OUTPUT_MODE:-valid}" in
+  malformed) printf '{not-json\n'; exit 0 ;;
+  duplicate)
+    printf '{"path":"%s","lease_id":"one","lease_id":"two","lease_holder":"%s"}\n' \
+      "$TREEHOUSE_TEST_PATH" "$4"
+    exit 0
+    ;;
+  nul)
+    printf '{"path":"%s","lease_id":"lease\\u0000bad","lease_holder":"%s"}\n' \
+      "$TREEHOUSE_TEST_PATH" "$4"
+    exit 0
+    ;;
+  control)
+    printf '{"path":"%s","lease_id":"lease\\u001fbad","lease_holder":"%s"}\n' \
+      "$TREEHOUSE_TEST_PATH" "$4"
+    exit 0
+    ;;
+  oversized)
+    python3 -c 'import sys; sys.stdout.write("x" * 70000)'
+    exit 0
+    ;;
+esac
 if [[ ! -d "$TREEHOUSE_TEST_PATH" ]]; then
-  "$REAL_GIT" -C "$PWD" worktree add -q --detach "$TREEHOUSE_TEST_PATH"
+  if [[ "${TREEHOUSE_BAD_CHECKOUT:-0}" == 1 ]]; then
+    mkdir -p "$TREEHOUSE_TEST_PATH"
+  else
+    "$REAL_GIT" -C "$PWD" worktree add -q --detach "$TREEHOUSE_TEST_PATH"
+  fi
 fi
 printf '{"path":"%s","lease_id":"lease-dispatch-1","lease_holder":"%s","leased_at":"2026-08-11T00:00:00Z"}\n' \
   "$TREEHOUSE_TEST_PATH" "$4"
@@ -211,6 +241,7 @@ touch "$TEST_ROOT/repo/treehouse.toml"
 REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
   TREEHOUSE_TEST_PATH="$TEST_ROOT/treehouse-checkout" \
   TREEHOUSE_GET_LOG="$TEST_ROOT/treehouse-get.log" \
+  TREEHOUSE_RETURN_LOG="$TEST_ROOT/treehouse-return.log" \
   TMUX_LOG="$TEST_ROOT/treehouse-dispatch.log" \
   SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
   SGT_WIKI_DISABLED=1 \
@@ -221,8 +252,107 @@ treehouse_task_id="$(basename "$(dirname "$treehouse_state")")"
 [[ "$(cat "$treehouse_state/wt_holder")" == "sgt-$treehouse_task_id-app" ]]
 [[ "$(cat "$treehouse_state/wt_lease_id")" == lease-dispatch-1 ]]
 [[ "$(cat "$treehouse_state/worktree")" == "$TEST_ROOT/treehouse-checkout" ]]
+[[ -s "$treehouse_state/treehouse-acquisition.raw" ]]
+python3 - "$treehouse_state/treehouse-acquisition.json" "$TEST_ROOT/treehouse-checkout" \
+  "sgt-$treehouse_task_id-app" "$TEST_ROOT/repo" <<'PY'
+import json, sys
+record = json.load(open(sys.argv[1], encoding="utf-8"))
+assert record == {
+    "version": 1,
+    "repo": sys.argv[4],
+    "path": sys.argv[2],
+    "lease_id": "lease-dispatch-1",
+    "lease_holder": sys.argv[3],
+}
+PY
 [[ "$(cat "$TEST_ROOT/treehouse-get.log")" == \
   "get --lease --lease-holder sgt-$treehouse_task_id-app --json" ]]
+rm "$TEST_ROOT/repo/treehouse.toml"
+
+for bad_mode in malformed duplicate nul control oversized; do
+  touch "$TEST_ROOT/repo/treehouse.toml"
+  set +e
+  REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
+    TREEHOUSE_TEST_PATH="$TEST_ROOT/treehouse-$bad_mode" \
+    TREEHOUSE_GET_LOG="$TEST_ROOT/treehouse-$bad_mode.log" \
+    TREEHOUSE_RETURN_LOG="$TEST_ROOT/treehouse-$bad_mode-return.log" \
+    TREEHOUSE_OUTPUT_MODE="$bad_mode" TMUX_LOG="$TEST_ROOT/treehouse-$bad_mode-tmux.log" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-dispatch" test "Treehouse $bad_mode allocation" --repos app \
+      >/dev/null 2>&1
+  bad_status=$?
+  set -e
+  [[ "$bad_status" -ne 0 ]]
+  bad_raw="$(find "$TEST_ROOT/fleet" -path "*treehouse-$bad_mode-*/app/treehouse-acquisition.raw" -print -quit)"
+  [[ -s "$bad_raw" ]]
+  [[ "$(wc -c < "$bad_raw")" -le 65537 ]]
+  [[ ! -e "$(dirname "$bad_raw")/treehouse-acquisition.json" ]]
+  rm "$TEST_ROOT/repo/treehouse.toml"
+done
+
+for acquisition_point in treehouse-raw-created treehouse-raw-published \
+  treehouse-record-created treehouse-record-published; do
+  touch "$TEST_ROOT/repo/treehouse.toml"
+  set +e
+  REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
+    TREEHOUSE_TEST_PATH="$TEST_ROOT/$acquisition_point-checkout" \
+    TREEHOUSE_GET_LOG="$TEST_ROOT/$acquisition_point.log" \
+    TREEHOUSE_RETURN_LOG="$TEST_ROOT/$acquisition_point-return.log" \
+    SGT_DISPATCH_FAIL_POINT="$acquisition_point" \
+    TMUX_LOG="$TEST_ROOT/$acquisition_point-tmux.log" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-dispatch" test "Acquisition $acquisition_point" --repos app \
+      >/dev/null 2>&1
+  point_status=$?
+  set -e
+  [[ "$point_status" -ne 0 ]]
+  case "$acquisition_point" in
+    treehouse-raw-created)
+      find "$TEST_ROOT/fleet" -path '*/app/treehouse-acquisition.raw.tmp.*' \
+        -type f -size +0c -exec grep -lF -- \
+        "$TEST_ROOT/$acquisition_point-checkout" {} + | grep -q .
+      ;;
+    treehouse-raw-published)
+      find "$TEST_ROOT/fleet" -path '*/app/treehouse-acquisition.raw' \
+        -type f -size +0c -exec grep -lF -- \
+        "$TEST_ROOT/$acquisition_point-checkout" {} + | grep -q .
+      ;;
+    treehouse-record-published)
+      find "$TEST_ROOT/fleet" -path '*/app/treehouse-acquisition.json' \
+        -type f -size +0c -exec grep -lF -- \
+        "$TEST_ROOT/$acquisition_point-checkout" {} + | grep -q .
+      ;;
+    treehouse-record-created)
+      find "$TEST_ROOT/fleet" -path '*/app/treehouse-acquisition.json.tmp.*' \
+        -type f -size +0c -exec grep -lF -- \
+        "$TEST_ROOT/$acquisition_point-checkout" {} + | grep -q .
+      ;;
+  esac
+  rm "$TEST_ROOT/repo/treehouse.toml"
+done
+
+touch "$TEST_ROOT/repo/treehouse.toml"
+set +e
+REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TREEHOUSE_TEST_PATH="$TEST_ROOT/treehouse-bad-checkout" TREEHOUSE_BAD_CHECKOUT=1 \
+  TREEHOUSE_GET_LOG="$TEST_ROOT/treehouse-bad-checkout.log" \
+  TREEHOUSE_RETURN_LOG="$TEST_ROOT/treehouse-bad-checkout-return.log" \
+  TMUX_LOG="$TEST_ROOT/treehouse-bad-checkout-tmux.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Treehouse bad checkout' --repos app >/dev/null 2>&1
+bad_checkout_status=$?
+set -e
+[[ "$bad_checkout_status" -ne 0 ]]
+bad_checkout_record="$(find "$TEST_ROOT/fleet" \
+  -path '*treehouse-bad-checkout-*/app/treehouse-acquisition.json' -print -quit)"
+[[ -s "$bad_checkout_record" ]]
+[[ "$(cat "$(dirname "$bad_checkout_record")/treehouse-acquisition-return")" == returned ]]
+bad_checkout_holder="$(cat "$(dirname "$bad_checkout_record")/wt_holder")"
+[[ "$(cat "$TEST_ROOT/treehouse-bad-checkout-return.log")" == \
+  "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $bad_checkout_holder $TEST_ROOT/treehouse-bad-checkout" ]]
 rm "$TEST_ROOT/repo/treehouse.toml"
 
 for agent in goose claude; do
