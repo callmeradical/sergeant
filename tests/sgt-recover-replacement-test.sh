@@ -54,7 +54,8 @@ case "$1" in
     done
     if [[ "$target" == "%99" ]]; then
       [[ "${FAIL_NEW_PANE_IDENTITY:-0}" == 0 ]] || exit 1
-      pane_identity="0|%99|9999|654321|relaunched"
+      spawn_token="$(cat "$REPO_STATE_DIR/test_spawn_token" 2>/dev/null || true)"
+      pane_identity="0|%99|9999|654321|env SGT_REPLACEMENT_TOKEN=$spawn_token relaunched"
       if [[ "${ACK_NEW_PANE:-1}" == 1 && -s "$REPO_STATE_DIR/notification_id" ]]; then
         notification_id="$(cat "$REPO_STATE_DIR/notification_id")"
         wt="$(cat "$REPO_STATE_DIR/worktree")"
@@ -75,6 +76,8 @@ case "$1" in
   new-window)
     [[ "${FAIL_WINDOW:-0}" == 0 ]] || exit 7
     [[ "${EMPTY_WINDOW:-0}" == 0 ]] || exit 0
+    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*SGT_REPLACEMENT_TOKEN=\([a-f0-9]\{32\}\).*/\1/p')"
+    printf '%s\n' "$spawn_token" > "$REPO_STATE_DIR/test_spawn_token"
     printf '%%99\n'
     ;;
   kill-pane)

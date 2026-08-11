@@ -83,7 +83,8 @@ case "$1" in
     done
     pane_identity="${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
     if [[ "$target" == "${NEW_PANE:-%99}" ]]; then
-      pane_identity="0|$target|9999|654321|sgt-interactive-worker:$EXPECTED_WORKER"
+      spawn_token="$(cat "$EXPECTED_WORKER/test_spawn_token" 2>/dev/null || true)"
+      pane_identity="0|$target|9999|654321|env SGT_REPLACEMENT_TOKEN=$spawn_token sgt-interactive-worker:$EXPECTED_WORKER"
     fi
     # Auto-deliver notification to new pane
     if [[ "${AUTO_DELIVER:-1}" == 1 && "$target" == "${NEW_PANE:-%99}" &&
@@ -109,6 +110,8 @@ case "$1" in
     [[ "${FAIL_WINDOW:-0}" == 0 ]] || exit 7
     [[ "${EMPTY_WINDOW:-0}" == 0 ]] || exit 0
     new_pane="${NEW_PANE:-%99}"
+    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*SGT_REPLACEMENT_TOKEN=\([a-f0-9]\{32\}\).*/\1/p')"
+    printf '%s\n' "$spawn_token" > "$EXPECTED_WORKER/test_spawn_token"
     [[ -z "${WINDOW_LOG:-}" ]] || printf '%s\n' "$*" >> "$WINDOW_LOG"
     printf '%s\n' "$new_pane"
     ;;

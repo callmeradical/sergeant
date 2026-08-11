@@ -60,7 +60,8 @@ case "$1" in
         printf '%s\n' "${LEASE_OWNER_IDENTITY:-0|%41|4141|111111|lease-owner}"
         ;;
       %99)
-        printf '0|%%99|9999|654321|relaunched\n'
+        spawn_token="$(cat "$REPO_STATE_DIR/test_spawn_token" 2>/dev/null || true)"
+        printf '0|%%99|9999|654321|env SGT_REPLACEMENT_TOKEN=%s relaunched\n' "$spawn_token"
         if [[ -s "$REPO_STATE_DIR/notification_id" ]]; then
           notification_id="$(cat "$REPO_STATE_DIR/notification_id")"
           nonce="$(cat "$REPO_STATE_DIR/notification_target" 2>/dev/null || true)"
@@ -77,7 +78,11 @@ case "$1" in
         ;;
     esac
     ;;
-  new-window) printf '%%99\n' ;;
+  new-window)
+    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*SGT_REPLACEMENT_TOKEN=\([a-f0-9]\{32\}\).*/\1/p')"
+    printf '%s\n' "$spawn_token" > "$REPO_STATE_DIR/test_spawn_token"
+    printf '%%99\n'
+    ;;
   kill-pane)
     target_pane=""
     previous=""

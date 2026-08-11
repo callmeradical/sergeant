@@ -54,16 +54,23 @@ case "$1" in
       [[ "$previous" == -t ]] && target="$arg"
       previous="$arg"
     done
+    if [[ "$target" == "${FOREIGN_PANE:-%77}" && -n "${FOREIGN_PANE_IDENTITY:-}" ]]; then
+      printf '%s\n' "$FOREIGN_PANE_IDENTITY"
+      exit 0
+    fi
     # PANE_ALIVE=0 models a dead PRIOR supervisor; a relaunched pane is alive.
     if [[ "$target" != "${NEW_PANE:-%99}" ]]; then
       [[ "${PANE_ALIVE:-1}" == 1 ]] || exit 1
     fi
     pane_identity="${PANE_IDENTITY:-0|%42|4242|123456|stalled-pane}"
     if [[ "$target" == "${NEW_PANE:-%99}" ]]; then
-      pane_identity="0|$target|9999|654321|relaunched"
+      spawn_token="$(cat "${SPAWN_TOKEN_STATE:-$REPO_STATE_DIR/test_spawn_token}" 2>/dev/null || true)"
+      pane_identity="0|$target|9999|654321|env SGT_REPLACEMENT_TOKEN=$spawn_token relaunched"
     fi
     # Stand in for a relaunched worker completing its delivery handshake.
-    if [[ "${AUTO_DELIVER:-1}" == 1 && "$target" == "${NEW_PANE:-%99}" &&
+    if [[ "${AUTO_DELIVER:-1}" == 1 &&
+          ( -z "${ACK_GATE_FILE:-}" || -e "$ACK_GATE_FILE" ) &&
+          "$target" == "${NEW_PANE:-%99}" &&
           -s "$REPO_STATE_DIR/notification_id" ]]; then
       notification_id="$(cat "$REPO_STATE_DIR/notification_id")"
       wt="$(cat "$REPO_STATE_DIR/worktree")"
@@ -92,6 +99,9 @@ case "$1" in
       [[ "$previous" == -n ]] && window="$arg"
       previous="$arg"
     done
+    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*SGT_REPLACEMENT_TOKEN=\([a-f0-9]\{32\}\).*/\1/p')"
+    printf '%s\n' "$spawn_token" \
+      > "${SPAWN_TOKEN_STATE:-$REPO_STATE_DIR/test_spawn_token}"
     if [[ -n "${TMUX_PANE_STATE:-}" ]]; then
       printf '%s|%s\n' "${NEW_PANE:-%99}" "$window" > "$TMUX_PANE_STATE"
     fi
@@ -603,6 +613,37 @@ for io_target in response_successor_notification action_lease_abandoned \
   done
 done
 
+# A same-name pane is never sufficient for adoption. Only the spawn token bound
+# before fencing authenticates the replacement; a foreign collision is left
+# untouched and no second pane is created.
+read -r state wt <<<"$(make_worktree foreign-window)"
+task=task-foreign-window
+setup_orphan "$state" "$wt"
+printf 'foreign collision retry' > "$TEST_ROOT/foreign-input"
+set +e
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 SGT_TEST_HOOKS=1 \
+  SGT_TEST_INTERRUPT_TRANSFER_AT=successor_published \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app \
+  < "$TEST_ROOT/foreign-input" >/dev/null 2>&1
+set -e
+successor="$(cut -d '|' -f2 "$state/response_successor_notification")"
+foreign_window="task/app-resume-${successor:0:12}"
+printf '%%77|%s\n' "$foreign_window" > "$TEST_ROOT/foreign-pane-state"
+set +e
+foreign_output="$(PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 TMUX_PANE_STATE="$TEST_ROOT/foreign-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/foreign-window-count" FOREIGN_PANE=%77 \
+  FOREIGN_PANE_IDENTITY='0|%77|7777|777777|foreign-shell' \
+  KILL_LOG="$TEST_ROOT/foreign-kill.log" \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app \
+  < "$TEST_ROOT/foreign-input" 2>&1)"
+foreign_status=$?
+set -e
+[[ "$foreign_status" -ne 0 && "$foreign_output" == *'foreign pane'* ]]
+[[ ! -e "$TEST_ROOT/foreign-window-count" ]]
+[[ -z "$(cat "$TEST_ROOT/foreign-kill.log" 2>/dev/null || true)" ]]
+
 # A real SIGKILL after tmux creates the replacement leaves the durable spawning
 # intent behind. The exact pane is discovered by its nonce-derived window and
 # adopted; retry must not execute new-window a second time.
@@ -635,8 +676,72 @@ PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
 }
 [[ "$(cat "$TEST_ROOT/sigkill-new-window-count")" == 1 ]]
 [[ "$(cat "$state/pane")" == '%98' ]]
-[[ ! -e "$state/response_relaunch_transaction" ]]
+[[ "$(sed -n 's/^phase=//p' "$state/response_relaunch_transaction")" == acked ]]
 [[ "$(worktree_content_hash "$wt")" == "$content_before" ]]
 [[ "$(cat "$wt/uncommitted.txt")" == 'uncommitted payload survives abrupt transfer' ]]
+
+# Concurrent exact retries serialize through acknowledgement and the follower
+# joins the immutable acked journal instead of spawning or delivering twice.
+read -r state wt <<<"$(make_worktree concurrent-retry)"
+task=task-concurrent-retry
+setup_orphan "$state" "$wt"
+printf 'one concurrent response' > "$TEST_ROOT/concurrent-input"
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/concurrent-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/concurrent-window-count" \
+  ACK_GATE_FILE="$TEST_ROOT/concurrent-ack-gate" SGT_NOTIFICATION_ACK_TIMEOUT=10 \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app \
+  < "$TEST_ROOT/concurrent-input" > "$TEST_ROOT/concurrent-first.out" 2>&1 &
+first_pid=$!
+for _ in $(seq 1 100); do
+  [[ -s "$TEST_ROOT/concurrent-window-count" && -e "$state/response.lock" ]] && break
+  sleep 0.05
+done
+[[ -s "$TEST_ROOT/concurrent-window-count" && -e "$state/response.lock" ]]
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/concurrent-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/concurrent-window-count" \
+  ACK_GATE_FILE="$TEST_ROOT/concurrent-ack-gate" SGT_NOTIFICATION_ACK_TIMEOUT=10 \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app \
+  < "$TEST_ROOT/concurrent-input" > "$TEST_ROOT/concurrent-second.out" 2>&1 &
+second_pid=$!
+sleep 0.2
+kill -0 "$first_pid"
+kill -0 "$second_pid"
+touch "$TEST_ROOT/concurrent-ack-gate"
+wait "$first_pid"
+wait "$second_pid"
+[[ "$(cat "$TEST_ROOT/concurrent-window-count")" == 1 ]]
+grep -Fq 'joined acknowledged worker relaunch' "$TEST_ROOT/concurrent-second.out"
+[[ "$(sed -n 's/^phase=//p' "$state/response_relaunch_transaction")" == acked ]]
+
+# The action-lease successor binding is shared across CLIs. A SIGKILLed recover
+# after fencing can be reconciled orphaned and resumed by sgt-respond without
+# minting a different successor generation.
+read -r state wt <<<"$(make_worktree cross-cli)"
+task=task-cross-cli
+setup_stall "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+set +e
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 SGT_TEST_HOOKS=1 \
+  SGT_TEST_INTERRUPT_RECOVER_AT=fenced \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
+cross_recover_status=$?
+set -e
+[[ "$cross_recover_status" -ne 0 ]]
+bound_successor="$(sed -n 's/^successor_notification=//p' \
+  "$state/notifications/$NOTIFY/successor_binding")"
+[[ "$bound_successor" =~ ^[a-f0-9]{32}$ ]]
+printf 'orphaned\n' > "$state/status"
+printf 'orphaned\n' > "$wt/.sergeant-status"
+printf 'resume across cli' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" PANE_ALIVE=0 \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1
+[[ "$(cat "$state/notification_id")" == "$bound_successor" ]]
+grep -Fq "new_notification=$bound_successor" \
+  "$state/notifications/$NOTIFY/ownership_transition"
 
 printf 'action-lease convergence before refusal: ok\n'

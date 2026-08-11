@@ -382,6 +382,36 @@ _sgt_fence_dead_action_lease() {
   fi
 }
 
+# _sgt_bind_action_lease_successor <repo_state> <generation>
+# Print "successor|spawn-token". The binding is immutable and shared by
+# sgt-respond and sgt-recover, so a crash may be resumed through either CLI.
+_sgt_bind_action_lease_successor() {
+  local repo_state="$1" generation="$2" notification_id lease notification_dir
+  local binding successor spawn_token expected
+  notification_id="$(cat "$repo_state/notification_id" 2>/dev/null || true)"
+  lease="$(cat "$repo_state/notifications/$notification_id/action_lease" 2>/dev/null || true)"
+  [[ -n "$notification_id" && "$lease" =~ ^[a-f0-9]{32}$ &&
+     "$generation" =~ ^[1-9][0-9]*$ ]] || return 1
+  notification_dir="$repo_state/notifications/$notification_id"
+  binding="$(cat "$notification_dir/successor_binding" 2>/dev/null || true)"
+  if [[ -n "$binding" ]]; then
+    [[ "$(sed -n 's/^source_notification=//p' <<< "$binding")" == "$notification_id" &&
+       "$(sed -n 's/^source_lease=//p' <<< "$binding")" == "$lease" &&
+       "$(sed -n 's/^generation=//p' <<< "$binding")" == "$generation" ]] || return 1
+    successor="$(sed -n 's/^successor_notification=//p' <<< "$binding")"
+    spawn_token="$(sed -n 's/^spawn_token=//p' <<< "$binding")"
+    [[ "$successor" =~ ^[a-f0-9]{32}$ && "$spawn_token" =~ ^[a-f0-9]{32}$ ]] || return 1
+    printf '%s|%s\n' "$successor" "$spawn_token"
+    return 0
+  fi
+  successor="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  spawn_token="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  expected="$(printf 'source_notification=%s\nsource_lease=%s\ngeneration=%s\nsuccessor_notification=%s\nspawn_token=%s\n' \
+    "$notification_id" "$lease" "$generation" "$successor" "$spawn_token")"
+  _sgt_action_lease_record "$notification_dir" successor_binding "$expected" || return 1
+  printf '%s|%s\n' "$successor" "$spawn_token"
+}
+
 # _sgt_finalize_action_lease <repo_state> <worktree> <reason>
 #
 # 0  the notification has no outstanding lease, or the lease is now completed.

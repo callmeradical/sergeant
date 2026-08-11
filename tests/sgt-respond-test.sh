@@ -78,7 +78,8 @@ case "$1" in
     done
     pane_identity="${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
     if [[ "$target" == "${NEW_PANE:-%99}" ]]; then
-      pane_identity="0|$target|9999|654321|sgt-interactive-worker:$EXPECTED_WORKER"
+      spawn_token="$(cat "$EXPECTED_WORKER/test_spawn_token" 2>/dev/null || true)"
+      pane_identity="0|$target|9999|654321|env SGT_REPLACEMENT_TOKEN=$spawn_token sgt-interactive-worker:$EXPECTED_WORKER"
       if [[ "${REQUIRE_FRESH_ACK:-0}" == 1 &&
             -e "$(cat "$EXPECTED_WORKER/worktree")/.sergeant-notification-ack" &&
             ! -e "$EXPECTED_WORKER/notification_delivered_pane_identity" ]]; then
@@ -106,7 +107,8 @@ case "$1" in
     if [[ "${REQUIRE_LOCK_RELEASE:-0}" == 1 &&
           -e "$EXPECTED_WORKER/response.lock" ]]; then
       touch "$LOCK_HELD_MARKER"
-    elif [[ "${AUTO_DELIVER:-1}" == 1 && "$deliver" == true && -s "$EXPECTED_WORKER/notification_id" ]]; then
+    fi
+    if [[ "${AUTO_DELIVER:-1}" == 1 && "$deliver" == true && -s "$EXPECTED_WORKER/notification_id" ]]; then
       if [[ "${REQUIRE_TARGET:-0}" == 1 ]]; then
         _rt_nonce="$(cat "$EXPECTED_WORKER/notification_target" 2>/dev/null || true)"
         _rt_id="$(cat "$EXPECTED_WORKER/notification_id" 2>/dev/null || true)"
@@ -139,6 +141,8 @@ case "$1" in
   new-window)
     [[ "${FAIL_WINDOW:-0}" == 0 ]] || exit 7
     [[ "${EMPTY_WINDOW:-0}" == 0 ]] || exit 0
+    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*SGT_REPLACEMENT_TOKEN=\([a-f0-9]\{32\}\).*/\1/p')"
+    printf '%s\n' "$spawn_token" > "$EXPECTED_WORKER/test_spawn_token"
     printf '%s\n' "${NEW_PANE:-%99}"
     ;;
   send-keys) exit 0 ;;
@@ -721,6 +725,8 @@ race_target_count="$(find "$repo_state/notifications/$race_notification_id/targe
 [[ ! -d "$repo_state/response.lock" ]]
 
 rm "$worktree/.sergeant-response" "$repo_state/response"
+rm -f "$repo_state/response_successor_notification" \
+  "$repo_state/response_relaunch_transaction"
 cat > "$fake_bin/td" <<'EOF'
 #!/usr/bin/env bash
 exit 19
@@ -763,6 +769,8 @@ chmod +x "$fake_bin/td"
 printf 'needs_input\n' > "$repo_state/status"
 printf 'needs_input\n' > "$worktree/.sergeant-status"
 rm -f "$worktree/.sergeant-response" "$repo_state/response" "$repo_state/response_id"
+rm -f "$repo_state/response_successor_notification" \
+  "$repo_state/response_relaunch_transaction"
 set +e
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/empty-pane.log" TD_LOG="$TEST_ROOT/empty-pane-td.log" \
 PANE_ALIVE=0 EMPTY_WINDOW=1 SERGEANT_FLEET="$fleet" \

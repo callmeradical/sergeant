@@ -186,6 +186,7 @@ fi
 # reuses it.
 
 delivery_notification_id=""
+replacement_spawn_token=""
 dead_owner_fenced=false
 fenced_owner_pane=""
 current_notification_id="$(cat "$REPO_DIR/notification_id" 2>/dev/null || true)"
@@ -203,18 +204,26 @@ if [[ -n "$current_notification_id" ]]; then
     # adjudicate the lease owner's liveness.  A provably dead owner cannot be
     # mid-action, so recovery may proceed; the delivery evidence is preserved and
     # the adjudication is recorded.
-    delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
-      od -An -tx1 | tr -d ' \n')"
     recovery_generation="$(cat "$worktree/.sergeant-gate-generation" 2>/dev/null || true)"
     [[ "$recovery_generation" =~ ^[1-9][0-9]*$ ]] || recovery_generation=1
+    recovery_successor="$(_sgt_bind_action_lease_successor \
+      "$REPO_DIR" "$recovery_generation")" || \
+      _recover_die "Stall recovery refused: action lease successor binding is malformed or conflicting"
+    delivery_notification_id="${recovery_successor%%|*}"
+    replacement_spawn_token="${recovery_successor#*|}"
     if _sgt_fence_dead_action_lease "$REPO_DIR" "$worktree" \
-        "$delivery_notification_id" "$recovery_generation" "stalled worker recovery"; then
+        "$delivery_notification_id" "$recovery_generation" \
+        "dead action lease ownership transfer"; then
       dead_owner_fenced=true
       fenced_owner_identity="$(cat \
         "$REPO_DIR/notifications/$current_notification_id/targets/$current_action_lease/pane_identity" \
         2>/dev/null || true)"
       fenced_owner_pane="${fenced_owner_identity#*|}"
       fenced_owner_pane="${fenced_owner_pane%%|*}"
+      if [[ "${SGT_TEST_HOOKS:-}" == 1 &&
+            "${SGT_TEST_INTERRUPT_RECOVER_AT:-}" == fenced ]]; then
+        kill -KILL "$$"
+      fi
     else
       _escalate "pending notification action lease blocks recovery; prior delivery evidence must be preserved: notification $current_notification_id lease target $current_action_lease has no agent completion proof and its owner is not provably dead; resolve with sgt-respond $TASK_ID $REPO after inspecting that turn"
       _recover_die "Stall recovery refused: unfinished notification action lease for $TASK_ID/$REPO (notification $current_notification_id, lease target $current_action_lease); the agent never published .sergeant-notification-complete/$current_action_lease and the lease owner is not provably dead, so completion cannot be proven. Resolve with: sgt-respond $TASK_ID $REPO"
@@ -307,9 +316,30 @@ rm -f "$REPO_DIR/notification_target"
 
 # ── 11. Publish recovery notification ────────────────────────────────────────
 
-if [[ -z "$delivery_notification_id" ]]; then
-  delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
-    od -An -tx1 | tr -d ' \n')"
+recovery_binding_file="$REPO_DIR/recovery_successor_notification"
+recovery_binding="$(cat "$recovery_binding_file" 2>/dev/null || true)"
+if [[ -n "$recovery_binding" ]]; then
+  IFS='|' read -r bound_successor bound_token <<< "$recovery_binding"
+  [[ "$bound_successor" =~ ^[a-f0-9]{32}$ && "$bound_token" =~ ^[a-f0-9]{32}$ ]] || \
+    _recover_die "Stall recovery refused: malformed recovery successor binding"
+  if [[ -n "$delivery_notification_id" ]]; then
+    [[ "$delivery_notification_id" == "$bound_successor" &&
+       "$replacement_spawn_token" == "$bound_token" ]] || \
+      _recover_die "Stall recovery refused: recovery successor binding conflicts with fenced transfer"
+  else
+    delivery_notification_id="$bound_successor"
+    replacement_spawn_token="$bound_token"
+  fi
+else
+  if [[ -z "$delivery_notification_id" ]]; then
+    delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
+      od -An -tx1 | tr -d ' \n')"
+    replacement_spawn_token="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
+      od -An -tx1 | tr -d ' \n')"
+  fi
+  _sgt_replace_owned_file "$recovery_binding_file" \
+    "$delivery_notification_id|$replacement_spawn_token" || \
+    _recover_die "Stall recovery failed: could not publish recovery successor binding"
 fi
 _sgt_publish_worker_notification "$REPO_DIR" "$worktree" \
   "$delivery_notification_id" recovery \
@@ -322,8 +352,9 @@ _sgt_publish_worker_notification "$REPO_DIR" "$worktree" \
 
 _sgt_prepare_worker_process_marker "$REPO_DIR" || \
   _recover_die "Stall recovery failed: worker process marker could not be prepared"
-worker_command="$(_sgt_worker_command \
-  "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")"
+worker_command="$(printf 'env %q %s' \
+  "SGT_REPLACEMENT_TOKEN=$replacement_spawn_token" \
+  "$(_sgt_worker_command "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")")"
 
 new_pane=""
 if ! new_pane="$(tmux new-window -P -F '#{pane_id}' -t "$tmux_session:" \
@@ -354,7 +385,9 @@ _abort_replacement() {
 }
 
 pane_identity=""
-if pane_identity="$(_sgt_pane_identity "$new_pane")" && [[ -n "$pane_identity" ]]; then
+if pane_identity="$(_sgt_pane_identity "$new_pane")" && \
+    [[ "${pane_identity%%|*}" == 0 && "${pane_identity#*|}" == "$new_pane|"* &&
+       "$pane_identity" == *"SGT_REPLACEMENT_TOKEN=$replacement_spawn_token"* ]]; then
   _sgt_replace_owned_file "$REPO_DIR/pane_identity" "$pane_identity" || \
     _abort_replacement "could not publish new worker pane identity"
   _sgt_notification_target_create "$REPO_DIR" "$delivery_notification_id" \

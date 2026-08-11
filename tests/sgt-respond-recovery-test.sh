@@ -54,7 +54,8 @@ case "$1" in
     done
     pane_identity="0|%42|4242|123456|stalled-pane"
     if [[ "$target" == "%99" ]]; then
-      pane_identity="0|%99|9999|654321|relaunched"
+      spawn_token="$(cat "$REPO_STATE_DIR/test_spawn_token" 2>/dev/null || true)"
+      pane_identity="0|%99|9999|654321|env SGT_REPLACEMENT_TOKEN=$spawn_token relaunched"
       if [[ "${ACK_NEW_PANE:-1}" == 1 && -s "$REPO_STATE_DIR/notification_id" ]]; then
         notification_id="$(cat "$REPO_STATE_DIR/notification_id")"
         wt="$(cat "$REPO_STATE_DIR/worktree")"
@@ -78,6 +79,8 @@ case "$1" in
     ;;
   new-window)
     printf '%s\n' "$*" >> "${WINDOW_LOG:-/dev/null}"
+    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*SGT_REPLACEMENT_TOKEN=\([a-f0-9]\{32\}\).*/\1/p')"
+    printf '%s\n' "$spawn_token" > "$REPO_STATE_DIR/test_spawn_token"
     printf '%%99\n'
     ;;
   kill-pane)
