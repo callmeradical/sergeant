@@ -235,8 +235,7 @@ case "$status" in
   in_progress)
     if [[ "$respond_peer_launch_contended" == true ]]; then
       :
-    elif _sgt_transfer_journal_read "$REPO_DIR/response_relaunch_transaction" &&
-        [[ -z "$_SGT_TRANSFER_RESPONSE_ID" ]]; then
+    elif _sgt_transfer_journal_read "$REPO_DIR/response_relaunch_transaction"; then
       joining_recovery_response=true
     else
       _die "Worker status 'in_progress' has no exact recovery transfer journal to join"
@@ -533,6 +532,10 @@ fi
 _transfer_interrupt_hook() {
   local boundary="$1"
   if [[ "${SGT_TEST_HOOKS:-}" == "1" &&
+        "${SGT_TEST_KILL_TRANSFER_AT:-}" == "$boundary" ]]; then
+    kill -KILL "$$"
+  fi
+  if [[ "${SGT_TEST_HOOKS:-}" == "1" &&
         "${SGT_TEST_INTERRUPT_TRANSFER_AT:-}" == "$boundary" ]]; then
     _die "test interruption at ownership-transfer boundary: $boundary"
   fi
@@ -715,7 +718,8 @@ _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$delivery_notification
 _transfer_interrupt_hook successor_published
 
 _sgt_prepare_worker_process_marker "$REPO_DIR" || _die "Could not prepare worker process marker"
-worker_command="$(_sgt_replacement_worker_command "$replacement_spawn_token" \
+worker_role="worker:$(basename "$agent")"
+worker_command="$(_sgt_replacement_worker_command "$replacement_spawn_token" "$worker_role" \
   "$(_sgt_worker_command "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")")" || \
   _die "Could not construct canonical replacement worker command"
 
@@ -727,7 +731,7 @@ _write_relaunch_transaction() {
   local phase="$1" candidate_pane="${2:-}" candidate_identity="${3:-}"
   _sgt_transfer_journal_write "$relaunch_transaction" "$journal_response_id" \
     "$delivery_notification_id" "$replacement_spawn_token" "$gate_generation" \
-    "$tmux_session" "$replacement_window_name" "$worker_command" "$phase" \
+    "$tmux_session" "$replacement_window_name" "$worker_role" "$worker_command" "$phase" \
     "$candidate_pane" "$candidate_identity"
 }
 
@@ -739,6 +743,7 @@ _relaunch_transaction_matches() {
        "$_SGT_TRANSFER_GATE_GENERATION" == "$gate_generation" &&
        "$_SGT_TRANSFER_TMUX_SESSION" == "$tmux_session" &&
        "$_SGT_TRANSFER_WINDOW_NAME" == "$replacement_window_name" &&
+       "$_SGT_TRANSFER_WORKER_ROLE" == "$worker_role" &&
        "$_SGT_TRANSFER_WORKER_COMMAND" == "$worker_command" ]]
 }
 
@@ -751,7 +756,8 @@ _discover_relaunch_pane() {
   while IFS= read -r candidate; do
     [[ -n "$candidate" ]] || continue
     identity="$(_sgt_pane_identity "$candidate" 2>/dev/null || true)"
-    if _sgt_replacement_pane_identity_matches "$identity" "$candidate" "$worker_command"; then
+    if _sgt_replacement_pane_identity_matches "$identity" "$candidate" \
+        "$replacement_spawn_token" "$worker_role"; then
       [[ -z "$authenticated" ]] || return 3
       authenticated="$candidate"
     fi
@@ -809,7 +815,8 @@ if [[ -z "$new_pane" ]]; then
 fi
 _transfer_interrupt_hook replacement_spawned
 if pane_identity="$(_sgt_pane_identity "$new_pane")" && \
-    _sgt_replacement_pane_identity_matches "$pane_identity" "$new_pane" "$worker_command"; then
+    _sgt_replacement_pane_identity_matches "$pane_identity" "$new_pane" \
+      "$replacement_spawn_token" "$worker_role"; then
   _write_relaunch_transaction spawned "$new_pane" "$pane_identity" || \
     _die "Could not publish spawned worker ownership transaction"
   printf '%s\n' "$new_pane" > "$REPO_DIR/pane"

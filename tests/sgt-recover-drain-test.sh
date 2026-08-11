@@ -42,6 +42,11 @@ case "$1" in
       [[ "$previous" == -t ]] && target="$arg"
       previous="$arg"
     done
+    if [[ "$*" == *'@sergeant_replacement_token'* && "$target" == "${NEW_PANE:-%99}" ]]; then
+      printf '0|%s|9999|bash|%s|%s\n' "$target" \
+        "$(cat "$EXPECTED_WORKER/test_spawn_token")" "$(cat "$EXPECTED_WORKER/test_spawn_role")"
+      exit 0
+    fi
     pane_identity="${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
     if [[ "$target" == "${NEW_PANE:-%99}" ]]; then
       start_command="$(cat "$EXPECTED_WORKER/test_spawn_command" 2>/dev/null || true)"
@@ -68,8 +73,10 @@ case "$1" in
     ;;
   new-window)
     [[ "${FAIL_WINDOW:-0}" == 0 ]] || exit 7
-    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*SGT_REPLACEMENT_TOKEN=\([a-f0-9]\{32\}\).*/\1/p')"
+    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch \([a-f0-9]\{32\}\) .*/\1/p')"
+    spawn_role="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch [a-f0-9]\{32\} \(worker:[A-Za-z0-9._-]*\) .*/\1/p')"
     printf '%s\n' "$spawn_token" > "$EXPECTED_WORKER/test_spawn_token"
+    printf '%s\n' "$spawn_role" > "$EXPECTED_WORKER/test_spawn_role"
     for start_command in "$@"; do :; done
     printf '%s\n' "$start_command" > "$EXPECTED_WORKER/test_spawn_command"
     printf '%s\n' "${NEW_PANE:-%99}"

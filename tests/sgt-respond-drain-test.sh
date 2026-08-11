@@ -82,6 +82,11 @@ case "$1" in
       [[ "$previous" == -t ]] && target="$argument"
       previous="$argument"
     done
+    if [[ "$*" == *'@sergeant_replacement_token'* && "$target" == "${NEW_PANE:-%99}" ]]; then
+      printf '0|%s|9999|bash|%s|%s\n' "$target" \
+        "$(cat "$EXPECTED_WORKER/test_spawn_token")" "$(cat "$EXPECTED_WORKER/test_spawn_role")"
+      exit 0
+    fi
     pane_identity="${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
     if [[ "$target" == "${NEW_PANE:-%99}" ]]; then
       pane_identity="0|$target|9999|654321|sgt-interactive-worker:$EXPECTED_WORKER"
@@ -106,6 +111,10 @@ case "$1" in
     printf '%s\n' "$pane_identity"
     ;;
   new-window)
+    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch \([a-f0-9]\{32\}\) .*/\1/p')"
+    spawn_role="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch [a-f0-9]\{32\} \(worker:[A-Za-z0-9._-]*\) .*/\1/p')"
+    printf '%s\n' "$spawn_token" > "$EXPECTED_WORKER/test_spawn_token"
+    printf '%s\n' "$spawn_role" > "$EXPECTED_WORKER/test_spawn_role"
     printf '%s\n' "${NEW_PANE:-%99}"
     ;;
   kill-pane) exit 0 ;;
@@ -151,6 +160,8 @@ _reset_worker() {
   rm -f "$repo_state/pane" "$repo_state/response" "$repo_state/response_generation" \
     "$repo_state/response_id" "$repo_state/drain_held" "$repo_state/notification_id" \
     "$repo_state/notification_delivered" "$repo_state/notification_target" \
+    "$repo_state/response_relaunch_transaction" \
+    "$repo_state/response_successor_notification" \
     "$worktree/.sergeant-response" "$worktree/.sergeant-response-generation" \
     "$worktree/.sergeant-response-id" "$worktree/.sergeant-notification"
   rm -rf "$config_dir/drain"

@@ -58,6 +58,12 @@ case "$1" in
       printf '%s\n' "$FOREIGN_PANE_IDENTITY"
       exit 0
     fi
+    if [[ "$*" == *'@sergeant_replacement_token'* && "$target" == "${NEW_PANE:-%99}" ]]; then
+      spawn_token="$(cat "${SPAWN_TOKEN_STATE:-$REPO_STATE_DIR/test_spawn_token}" 2>/dev/null || true)"
+      spawn_role="$(cat "${SPAWN_ROLE_STATE:-$REPO_STATE_DIR/test_spawn_role}" 2>/dev/null || true)"
+      printf '0|%s|9999|bash|%s|%s\n' "$target" "$spawn_token" "$spawn_role"
+      exit 0
+    fi
     # PANE_ALIVE=0 models a dead PRIOR supervisor; a relaunched pane is alive.
     if [[ "$target" != "${NEW_PANE:-%99}" ]]; then
       [[ "${PANE_ALIVE:-1}" == 1 ]] || exit 1
@@ -101,9 +107,12 @@ case "$1" in
       previous="$arg"
       start_command="$arg"
     done
-    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*SGT_REPLACEMENT_TOKEN=\([a-f0-9]\{32\}\).*/\1/p')"
+    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch \([a-f0-9]\{32\}\) .*/\1/p')"
+    spawn_role="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch [a-f0-9]\{32\} \(worker:[A-Za-z0-9._-]*\) .*/\1/p')"
     printf '%s\n' "$spawn_token" \
       > "${SPAWN_TOKEN_STATE:-$REPO_STATE_DIR/test_spawn_token}"
+    printf '%s\n' "$spawn_role" \
+      > "${SPAWN_ROLE_STATE:-$REPO_STATE_DIR/test_spawn_role}"
     printf '%s\n' "$start_command" \
       > "${SPAWN_COMMAND_STATE:-$REPO_STATE_DIR/test_spawn_command}"
     if [[ -n "${TMUX_PANE_STATE:-}" ]]; then
@@ -804,5 +813,131 @@ printf 'resume spawned pane across cli' | PATH="$fake_bin:$PATH" \
 [[ "$(cat "$TEST_ROOT/cross-spawn-window-count")" == 1 ]]
 [[ "$(cat "$state/notification_id")" == "$spawn_successor" ]]
 [[ "$(sed -n 's/^phase=//p' "$state/response_relaunch_transaction")" == acked ]]
+
+# Real tmux 3.4+: the public CLIs create option-stamped panes and adopt them
+# after an actual SIGKILL without relying on rendered pane_start_command.
+if command -v /usr/bin/tmux >/dev/null 2>&1 &&
+    [[ "$(/usr/bin/tmux -V)" == 'tmux 3.4'* ]]; then
+  real_socket="sgt-lease-real-$$"
+  real_bin="$TEST_ROOT/real-bin"
+  mkdir -p "$real_bin"
+  cat > "$real_bin/tmux" <<EOF
+#!/usr/bin/env bash
+exec /usr/bin/tmux -L $real_socket "\$@"
+EOF
+  cat > "$real_bin/opencode" <<'EOF'
+#!/usr/bin/env bash
+exec sleep 60
+EOF
+  chmod +x "$real_bin/tmux" "$real_bin/opencode"
+
+  read -r state wt <<<"$(make_worktree real-respond)"
+  task=task-real-respond
+  setup_orphan "$state" "$wt"
+  printf 'real-sgt\n' > "$state/tmux_session"
+  printf 'real/respond\n' > "$state/window_name"
+  printf '%%99999\n' > "$state/pane"
+  printf '0|%%99999|99999|1|old-worker\n' > "$state/pane_identity"
+  PATH="$real_bin:/usr/bin:$fake_bin" tmux new-session -d -s real-sgt -n base 'sleep 60'
+  printf 'real tmux response' > "$TEST_ROOT/real-respond-input"
+  set +e
+  PATH="$real_bin:/usr/bin:$fake_bin" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    SGT_TEST_HOOKS=1 SGT_TEST_KILL_TRANSFER_AT=replacement_spawned \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app < "$TEST_ROOT/real-respond-input" \
+    >/dev/null 2>&1
+  real_respond_killed=$?
+  set -e
+  [[ "$real_respond_killed" -ne 0 ]]
+  (
+    for _ in $(seq 1 200); do
+      notification_id="$(cat "$state/notification_id" 2>/dev/null || true)"
+      nonce="$(cat "$state/notification_target" 2>/dev/null || true)"
+      identity="$(cat "$state/pane_identity" 2>/dev/null || true)"
+      if [[ "$notification_id" =~ ^[a-f0-9]{32}$ && "$nonce" =~ ^[a-f0-9]{32}$ &&
+            "$identity" == 0\|%* ]]; then
+        target_dir="$state/notifications/$notification_id/targets/$nonce"
+        token="$notification_id|$nonce"
+        mkdir -p "$wt/.sergeant-notification-acks" \
+          "$wt/.sergeant-notification-accepts" "$target_dir"
+        printf '%s\n' "$token" > "$wt/.sergeant-notification-acks/$nonce"
+        printf '%s\n' "$token" > "$wt/.sergeant-notification-accepts/$nonce"
+        printf '%s\n' "$token" > "$target_dir/accepted"
+        printf '%s\n' "$token" > "$target_dir/delivered"
+        printf '%s\n' "$identity" > "$state/notification_delivered_pane_identity"
+        printf '%s\n' "$notification_id" > "$state/notification_delivered"
+        exit 0
+      fi
+      sleep 0.05
+    done
+    exit 1
+  ) &
+  real_ack_pid=$!
+  PATH="$real_bin:/usr/bin:$fake_bin" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    SGT_NOTIFICATION_ACK_TIMEOUT=10 \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app < "$TEST_ROOT/real-respond-input" \
+    >/dev/null 2>&1
+  wait "$real_ack_pid"
+  real_pane="$(cat "$state/pane")"
+  real_token="$(cut -d '|' -f3 "$state/response_successor_notification")"
+  [[ "$(PATH="$real_bin:/usr/bin:$fake_bin" tmux display-message -p -t "$real_pane" \
+    '#{@sergeant_replacement_token}|#{@sergeant_replacement_role}')" == \
+    "$real_token|worker:opencode" ]]
+  [[ "$(PATH="$real_bin:/usr/bin:$fake_bin" tmux list-panes -a -F '#{window_name}' | \
+    grep -c '^real/respond-resume-')" == 1 ]]
+
+  read -r state wt <<<"$(make_worktree real-recover)"
+  task=task-real-recover
+  setup_stall "$state" "$wt"
+  printf 'real-sgt\n' > "$state/tmux_session"
+  printf 'real/recover\n' > "$state/window_name"
+  old_real_pane="$(PATH="$real_bin:/usr/bin:$fake_bin" tmux list-panes -t real-sgt:=base -F '#{pane_id}')"
+  printf '%s\n' "$old_real_pane" > "$state/pane"
+  PATH="$real_bin:/usr/bin:$fake_bin" tmux display-message -p -t "$old_real_pane" \
+    '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+    > "$state/pane_identity"
+  set +e
+  PATH="$real_bin:/usr/bin:$fake_bin" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    SGT_TEST_HOOKS=1 SGT_TEST_INTERRUPT_RECOVER_AT=spawned \
+    "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
+  real_recover_killed=$?
+  set -e
+  [[ "$real_recover_killed" -ne 0 ]]
+  (
+    for _ in $(seq 1 200); do
+      notification_id="$(cat "$state/notification_id" 2>/dev/null || true)"
+      nonce="$(cat "$state/notification_target" 2>/dev/null || true)"
+      identity="$(cat "$state/pane_identity" 2>/dev/null || true)"
+      if [[ "$notification_id" =~ ^[a-f0-9]{32}$ && "$nonce" =~ ^[a-f0-9]{32}$ &&
+            "$identity" == 0\|%* && "$identity" != *"|$old_real_pane|"* ]]; then
+        target_dir="$state/notifications/$notification_id/targets/$nonce"
+        token="$notification_id|$nonce"
+        mkdir -p "$wt/.sergeant-notification-acks" \
+          "$wt/.sergeant-notification-accepts" "$target_dir"
+        printf '%s\n' "$token" > "$wt/.sergeant-notification-acks/$nonce"
+        printf '%s\n' "$token" > "$wt/.sergeant-notification-accepts/$nonce"
+        printf '%s\n' "$token" > "$target_dir/accepted"
+        printf '%s\n' "$token" > "$target_dir/delivered"
+        printf '%s\n' "$identity" > "$state/notification_delivered_pane_identity"
+        printf '%s\n' "$notification_id" > "$state/notification_delivered"
+        exit 0
+      fi
+      sleep 0.05
+    done
+    exit 1
+  ) &
+  real_recover_ack_pid=$!
+  PATH="$real_bin:/usr/bin:$fake_bin" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    SGT_NOTIFICATION_ACK_TIMEOUT=10 \
+    "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
+  wait "$real_recover_ack_pid"
+  recovered_real_pane="$(cat "$state/pane")"
+  recovery_token="$(cut -d '|' -f2 "$state/recovery_successor_notification")"
+  [[ "$(PATH="$real_bin:/usr/bin:$fake_bin" tmux display-message -p -t "$recovered_real_pane" \
+    '#{@sergeant_replacement_token}|#{@sergeant_replacement_role}')" == \
+    "$recovery_token|worker:opencode" ]]
+  [[ "$(PATH="$real_bin:/usr/bin:$fake_bin" tmux list-panes -a -F '#{window_name}' | \
+    grep -c '^real/recover-resume-')" == 1 ]]
+  PATH="$real_bin:/usr/bin:$fake_bin" tmux kill-server
+fi
 
 printf 'action-lease convergence before refusal: ok\n'

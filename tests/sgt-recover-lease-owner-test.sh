@@ -54,6 +54,11 @@ case "$1" in
       [[ "$previous" == -t ]] && target="$arg"
       previous="$arg"
     done
+    if [[ "$*" == *'@sergeant_replacement_token'* && "$target" == "%99" ]]; then
+      printf '0|%%99|9999|bash|%s|%s\n' \
+        "$(cat "$REPO_STATE_DIR/test_spawn_token")" "$(cat "$REPO_STATE_DIR/test_spawn_role")"
+      exit 0
+    fi
     case "$target" in
       %41)
         [[ "${LEASE_OWNER_ALIVE:-0}" == 1 ]] || exit 1
@@ -79,8 +84,10 @@ case "$1" in
     esac
     ;;
   new-window)
-    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*SGT_REPLACEMENT_TOKEN=\([a-f0-9]\{32\}\).*/\1/p')"
+    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch \([a-f0-9]\{32\}\) .*/\1/p')"
+    spawn_role="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch [a-f0-9]\{32\} \(worker:[A-Za-z0-9._-]*\) .*/\1/p')"
     printf '%s\n' "$spawn_token" > "$REPO_STATE_DIR/test_spawn_token"
+    printf '%s\n' "$spawn_role" > "$REPO_STATE_DIR/test_spawn_role"
     for start_command in "$@"; do :; done
     printf '%s\n' "$start_command" > "$REPO_STATE_DIR/test_spawn_command"
     printf '%%99\n'

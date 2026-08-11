@@ -102,4 +102,25 @@ if SGT_RESPONSE_LOCK_TIMEOUT=1 SGT_RESPONSE_LOCK_INTERVAL=0.01 \
 fi
 grep -Fq 'Timed out waiting for response lock' "$TEST_ROOT/case6.err"
 
+# New-format records are an exact schema. Extra fields or renamed keys are
+# ambiguous and must be rejected without reclaiming a possibly live owner.
+for malformed in extra wrong_key; do
+  lockdir7="$TEST_ROOT/state-7-$malformed"
+  mkdir -p "$lockdir7"
+  valid_record="$(_sgt_response_lock_record_for_pid "$$")"
+  case "$malformed" in
+    extra) printf '%s\nextra=value\n' "$valid_record" > "$lockdir7/response.lock" ;;
+    wrong_key) printf '%s\n' "$valid_record" | sed 's/^nonce=/claim=/' > "$lockdir7/response.lock" ;;
+  esac
+  before_record="$(cat "$lockdir7/response.lock")"
+  if SGT_RESPONSE_LOCK_TIMEOUT=1 _sgt_response_lock_acquire "$lockdir7" 2>/dev/null; then
+    printf 'FAIL case7: malformed lock %s was accepted\n' "$malformed" >&2
+    exit 1
+  fi
+  [[ "$(cat "$lockdir7/response.lock")" == "$before_record" ]] || {
+    printf 'FAIL case7: malformed lock %s was reclaimed\n' "$malformed" >&2
+    exit 1
+  }
+done
+
 printf 'sgt-response-lock-release: ok\n'

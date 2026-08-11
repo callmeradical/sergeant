@@ -86,7 +86,24 @@ _sgt_process_start_token() {
 _sgt_response_lock_record_pid() {
   local record="$1"
   [[ "$record" =~ ^[1-9][0-9]*$ ]] && { printf '%s\n' "$record"; return; }
-  printf '%s\n' "$record" | awk -F= '$1 == "pid" { n++; v=$2 } END { if (n == 1 && v ~ /^[1-9][0-9]*$/) print v; else exit 1 }'
+  _sgt_response_lock_record_parse "$record" || return 1
+  printf '%s\n' "$_SGT_LOCK_RECORD_PID"
+}
+
+_sgt_response_lock_record_parse() {
+  local record="$1" canonical
+  [[ "$(printf '%s\n' "$record" | awk 'END { print NR }')" == 3 ]] || return 1
+  _SGT_LOCK_RECORD_PID="$(printf '%s\n' "$record" | sed -n '1s/^pid=//p')"
+  _SGT_LOCK_RECORD_START="$(printf '%s\n' "$record" | sed -n '2s/^start=//p')"
+  _SGT_LOCK_RECORD_NONCE="$(printf '%s\n' "$record" | sed -n '3s/^nonce=//p')"
+  [[ "$_SGT_LOCK_RECORD_PID" =~ ^[1-9][0-9]*$ &&
+     ( "$_SGT_LOCK_RECORD_START" =~ ^proc:[0-9]+$ ||
+       "$_SGT_LOCK_RECORD_START" == ps:* ) &&
+     "$_SGT_LOCK_RECORD_START" != ps: &&
+     "$_SGT_LOCK_RECORD_NONCE" =~ ^[a-f0-9]{32}$ ]] || return 1
+  canonical="$(printf 'pid=%s\nstart=%s\nnonce=%s' "$_SGT_LOCK_RECORD_PID" \
+    "$_SGT_LOCK_RECORD_START" "$_SGT_LOCK_RECORD_NONCE")"
+  [[ "$record" == "$canonical" ]]
 }
 
 _sgt_response_lock_record_live() {
@@ -94,8 +111,8 @@ _sgt_response_lock_record_live() {
   pid="$(_sgt_response_lock_record_pid "$record")" || return 1
   kill -0 "$pid" 2>/dev/null || return 1
   [[ "$record" =~ ^[1-9][0-9]*$ ]] && return 0
-  [[ "$(printf '%s\n' "$record" | awk 'END { print NR }')" == 3 ]] || return 1
-  expected="$(printf '%s\n' "$record" | awk -F= '$1 == "start" { n++; v=substr($0,7) } END { if (n == 1 && v != "") print v; else exit 1 }')" || return 1
+  _sgt_response_lock_record_parse "$record" || return 1
+  expected="$_SGT_LOCK_RECORD_START"
   current="$(_sgt_process_start_token "$pid")" || return 1
   [[ "$current" == "$expected" ]]
 }
@@ -113,7 +130,8 @@ _sgt_response_lock_record_is_this_process() {
   pid="$(_sgt_response_lock_record_pid "$record")" || return 1
   [[ "$pid" == "$$" ]] || return 1
   [[ "$record" =~ ^[1-9][0-9]*$ ]] && return 0
-  expected="$(printf '%s\n' "$record" | awk -F= '$1 == "start" { n++; v=substr($0,7) } END { if (n == 1) print v; else exit 1 }')" || return 1
+  _sgt_response_lock_record_parse "$record" || return 1
+  expected="$_SGT_LOCK_RECORD_START"
   [[ "$expected" == "$(_sgt_process_start_token "$$")" ]]
 }
 
@@ -246,40 +264,72 @@ _sgt_response_lock_held_by_this_process() {
 # is the durable spawn capability: a token appearing somewhere in a foreign
 # command is not ownership proof.
 _sgt_replacement_worker_command() {
-  local token="$1" worker_command="$2"
-  [[ "$token" =~ ^[a-f0-9]{32}$ && -n "$worker_command" && "$worker_command" != *$'\n'* ]] || return 1
-  printf 'env %q %s' "SGT_REPLACEMENT_TOKEN=$token" "$worker_command"
+  local token="$1" role="$2" worker_command="$3"
+  [[ "$token" =~ ^[a-f0-9]{32}$ && "$role" =~ ^worker:[A-Za-z0-9._-]+$ &&
+     -n "$worker_command" && "$worker_command" != *$'\n'* ]] || return 1
+  printf '%q %q %q %s' "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/sgt-replacement-launch" \
+    "$token" "$role" "$worker_command"
 }
 
 _sgt_replacement_pane_identity_matches() {
-  local identity="$1" pane="$2" expected_command="$3"
-  local dead identity_pane pid created command
-  IFS='|' read -r dead identity_pane pid created command <<< "$identity"
+  local identity="$1" pane="$2" expected_token="$3" expected_role="$4"
+  local dead identity_pane pid _created command evidence current
+  local marker_dead marker_pane marker_pid marker_command marker_token marker_role
+  IFS='|' read -r dead identity_pane pid _created command <<< "$identity"
   [[ "$dead" == 0 && "$identity_pane" == "$pane" && "$pane" =~ ^%[0-9]+$ &&
-     "$pid" =~ ^[1-9][0-9]*$ && "$created" =~ ^[1-9][0-9]*$ &&
-     "$command" == "$expected_command" ]]
+     "$pid" =~ ^[1-9][0-9]*$ && -n "$command" ]] || return 1
+  evidence=""
+  for _ in $(seq 1 "${SGT_REPLACEMENT_MARKER_ATTEMPTS:-100}"); do
+    evidence="$(tmux display-message -p -t "$pane" \
+      '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_current_command}|#{@sergeant_replacement_token}|#{@sergeant_replacement_role}' \
+      2>/dev/null)" || return 1
+    IFS='|' read -r marker_dead marker_pane marker_pid marker_command marker_token marker_role <<< "$evidence"
+    if [[ "$marker_token" == "$expected_token" && "$marker_role" == "$expected_role" ]]; then
+      break
+    fi
+    # Any non-empty conflicting marker is another owner. Only the launcher's
+    # short, wholly-unmarked publication window is retryable.
+    [[ -z "$marker_token" && -z "$marker_role" ]] || return 1
+    sleep "${SGT_REPLACEMENT_MARKER_INTERVAL:-0.01}"
+  done
+  current="$(tmux display-message -p -t "$pane" \
+    '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_current_command}|#{@sergeant_replacement_token}|#{@sergeant_replacement_role}' \
+    2>/dev/null)" || return 1
+  [[ "$evidence" == "$current" ]] || return 1
+  IFS='|' read -r marker_dead marker_pane marker_pid marker_command marker_token marker_role <<< "$evidence"
+  [[ "$marker_dead" == 0 && "$marker_pane" == "$pane" && "$marker_pid" == "$pid" &&
+     -n "$marker_command" && "$marker_token" == "$expected_token" &&
+     "$marker_role" == "$expected_role" ]]
+}
+
+_sgt_replacement_recorded_identity_valid() {
+  local identity="$1" pane="$2" dead identity_pane pid _created command
+  IFS='|' read -r dead identity_pane pid _created command <<< "$identity"
+  [[ "$dead" == 0 && "$identity_pane" == "$pane" && "$pane" =~ ^%[0-9]+$ &&
+     "$pid" =~ ^[1-9][0-9]*$ && -n "$command" ]]
 }
 
 # Strict shared relaunch journal. Both public recovery CLIs use this canonical
 # shape; malformed, partial, or extended records are never interpreted.
 _sgt_transfer_journal_render() {
-  printf 'version=1\nresponse_id=%s\nnotification_id=%s\nspawn_token=%s\ngate_generation=%s\ntmux_session=%s\nwindow_name=%s\nworker_command=%s\nphase=%s\npane=%s\npane_identity=%s\n' \
-    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}"
+  printf 'version=1\nresponse_id=%s\nnotification_id=%s\nspawn_token=%s\ngate_generation=%s\ntmux_session=%s\nwindow_name=%s\nworker_role=%s\nworker_command=%s\nphase=%s\npane=%s\npane_identity=%s\n' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}"
 }
 
 _sgt_transfer_journal_read() {
   local file="$1" canonical
-  [[ -f "$file" && ! -L "$file" && "$(wc -l < "$file" | tr -d ' ')" == 11 ]] || return 1
+  [[ -f "$file" && ! -L "$file" && "$(wc -l < "$file" | tr -d ' ')" == 12 ]] || return 1
   _SGT_TRANSFER_RESPONSE_ID="$(sed -n '2s/^response_id=//p' "$file")"
   _SGT_TRANSFER_NOTIFICATION_ID="$(sed -n '3s/^notification_id=//p' "$file")"
   _SGT_TRANSFER_SPAWN_TOKEN="$(sed -n '4s/^spawn_token=//p' "$file")"
   _SGT_TRANSFER_GATE_GENERATION="$(sed -n '5s/^gate_generation=//p' "$file")"
   _SGT_TRANSFER_TMUX_SESSION="$(sed -n '6s/^tmux_session=//p' "$file")"
   _SGT_TRANSFER_WINDOW_NAME="$(sed -n '7s/^window_name=//p' "$file")"
-  _SGT_TRANSFER_WORKER_COMMAND="$(sed -n '8s/^worker_command=//p' "$file")"
-  _SGT_TRANSFER_PHASE="$(sed -n '9s/^phase=//p' "$file")"
-  _SGT_TRANSFER_PANE="$(sed -n '10s/^pane=//p' "$file")"
-  _SGT_TRANSFER_PANE_IDENTITY="$(sed -n '11s/^pane_identity=//p' "$file")"
+  _SGT_TRANSFER_WORKER_ROLE="$(sed -n '8s/^worker_role=//p' "$file")"
+  _SGT_TRANSFER_WORKER_COMMAND="$(sed -n '9s/^worker_command=//p' "$file")"
+  _SGT_TRANSFER_PHASE="$(sed -n '10s/^phase=//p' "$file")"
+  _SGT_TRANSFER_PANE="$(sed -n '11s/^pane=//p' "$file")"
+  _SGT_TRANSFER_PANE_IDENTITY="$(sed -n '12s/^pane_identity=//p' "$file")"
   [[ "$(_sgt_response_archive_field version "$file" 2>/dev/null || true)" == 1 &&
      ( -z "$_SGT_TRANSFER_RESPONSE_ID" || "$_SGT_TRANSFER_RESPONSE_ID" =~ ^[a-f0-9]{32}$ ) &&
      "$_SGT_TRANSFER_NOTIFICATION_ID" =~ ^[a-f0-9]{32}$ &&
@@ -287,29 +337,31 @@ _sgt_transfer_journal_read() {
      "$_SGT_TRANSFER_GATE_GENERATION" =~ ^[1-9][0-9]*$ &&
      "$_SGT_TRANSFER_TMUX_SESSION" =~ ^[A-Za-z0-9._:-]+$ &&
      "$_SGT_TRANSFER_WINDOW_NAME" =~ ^[A-Za-z0-9._:/-]+$ &&
+     "$_SGT_TRANSFER_WORKER_ROLE" =~ ^worker:[A-Za-z0-9._-]+$ &&
      -n "$_SGT_TRANSFER_WORKER_COMMAND" ]] || return 1
   case "$_SGT_TRANSFER_PHASE" in
     bound|fenced|spawning)
       [[ -z "$_SGT_TRANSFER_PANE" && -z "$_SGT_TRANSFER_PANE_IDENTITY" ]] || return 1
       ;;
     spawned|published|acked)
-      _sgt_replacement_pane_identity_matches "$_SGT_TRANSFER_PANE_IDENTITY" \
-        "$_SGT_TRANSFER_PANE" "$_SGT_TRANSFER_WORKER_COMMAND" || return 1
+      _sgt_replacement_recorded_identity_valid "$_SGT_TRANSFER_PANE_IDENTITY" \
+        "$_SGT_TRANSFER_PANE" || return 1
       ;;
     *) return 1 ;;
   esac
   canonical="$(_sgt_transfer_journal_render "$_SGT_TRANSFER_RESPONSE_ID" \
     "$_SGT_TRANSFER_NOTIFICATION_ID" "$_SGT_TRANSFER_SPAWN_TOKEN" \
     "$_SGT_TRANSFER_GATE_GENERATION" "$_SGT_TRANSFER_TMUX_SESSION" \
-    "$_SGT_TRANSFER_WINDOW_NAME" "$_SGT_TRANSFER_WORKER_COMMAND" \
+    "$_SGT_TRANSFER_WINDOW_NAME" "$_SGT_TRANSFER_WORKER_ROLE" \
+    "$_SGT_TRANSFER_WORKER_COMMAND" \
     "$_SGT_TRANSFER_PHASE" "$_SGT_TRANSFER_PANE" "$_SGT_TRANSFER_PANE_IDENTITY")"
   cmp -s "$file" <(printf '%s\n' "$canonical")
 }
 
 _sgt_transfer_journal_write() {
   local file="$1" response_id="$2" notification_id="$3" spawn_token="$4"
-  local generation="$5" session="$6" window="$7" command="$8" phase="$9"
-  local pane="${10:-}" identity="${11:-}" previous="" body temporary
+  local generation="$5" session="$6" window="$7" role="$8" command="$9" phase="${10}"
+  local pane="${11:-}" identity="${12:-}" previous="" body temporary
   if [[ -e "$file" || -L "$file" ]]; then
     _sgt_transfer_journal_read "$file" || return 1
     [[ "$_SGT_TRANSFER_RESPONSE_ID" == "$response_id" &&
@@ -318,6 +370,7 @@ _sgt_transfer_journal_write() {
        "$_SGT_TRANSFER_GATE_GENERATION" == "$generation" &&
        "$_SGT_TRANSFER_TMUX_SESSION" == "$session" &&
        "$_SGT_TRANSFER_WINDOW_NAME" == "$window" &&
+       "$_SGT_TRANSFER_WORKER_ROLE" == "$role" &&
        "$_SGT_TRANSFER_WORKER_COMMAND" == "$command" ]] || return 1
     previous="$_SGT_TRANSFER_PHASE"
     if [[ "$previous" == "$phase" ]]; then
@@ -333,7 +386,7 @@ _sgt_transfer_journal_write() {
     [[ "$phase" == bound ]] || return 1
   fi
   body="$(_sgt_transfer_journal_render "$response_id" "$notification_id" "$spawn_token" \
-    "$generation" "$session" "$window" "$command" "$phase" "$pane" "$identity")"
+    "$generation" "$session" "$window" "$role" "$command" "$phase" "$pane" "$identity")"
   temporary="$file.tmp.$$.$RANDOM"
   _sgt_transfer_io_failpoint "$file" write && return 1
   printf '%s\n' "$body" > "$temporary" || { rm -f "$temporary"; return 1; }
