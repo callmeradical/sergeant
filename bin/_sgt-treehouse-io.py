@@ -6,10 +6,11 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import selectors
 import signal
 import subprocess
 import sys
-import threading
+import time
 import uuid
 
 LIMIT = 65536
@@ -18,7 +19,10 @@ RECEIPT_ATTEMPT_LIMIT = 12000
 MAX_RECEIPT_ATTEMPTS = (1 << 63) - 1
 PIPE_DRAIN_TIMEOUT = 1.0
 COMMAND_TIMEOUT = 300.0
-ENVELOPE_KEYS = {"version", "total_attempts", "history_sha256", "attempts"}
+ENVELOPE_KEYS = {"version", "total_attempts", "count_saturated",
+                 "history_sha256", "identity", "attempts"}
+EVIDENCE_SCAN_LIMIT = 1024
+EVIDENCE_SCAN_SECONDS = 5.0
 
 
 def process_alive(pid):
@@ -51,9 +55,19 @@ def cleanup_orphan_temps(targets, return_raw_prefix=None):
             re.escape(prefix.name) +
             r"\.[0-9a-f]{32}(?:\.stderr)?\.tmp\.(\d+)$"))
     for parent in parents:
-        for candidate in parent.iterdir():
-            matched = next((pattern.fullmatch(candidate.name)
-                            for pattern in patterns), None)
+        started = time.monotonic()
+        candidates = []
+        for entry_count, candidate in enumerate(parent.iterdir(), start=1):
+            if (entry_count > EVIDENCE_SCAN_LIMIT or
+                    time.monotonic() - started > EVIDENCE_SCAN_SECONDS):
+                raise SystemExit("Treehouse evidence directory scan limit exceeded")
+            candidates.append(candidate)
+        for candidate in candidates:
+            matched = None
+            for pattern in patterns:
+                matched = pattern.fullmatch(candidate.name)
+                if matched is not None:
+                    break
             if not matched:
                 continue
             info = candidate.lstat()
@@ -98,16 +112,51 @@ def load_receipt(path):
         if len(encoded) > RECEIPT_ATTEMPT_LIMIT:
             raise ValueError("oversized receipt attempt")
         validate_attempt(attempt)
+    identity = receipt.get("identity")
+    validate_receipt_identity(identity)
+    if any(attempt_identity(attempt) != identity for attempt in attempts):
+        raise ValueError("mixed Treehouse receipt attempt identity")
     total = receipt.get("total_attempts", len(attempts))
     digest = receipt.get("history_sha256", "0" * 64)
+    saturated = receipt.get("count_saturated")
     if (not isinstance(total, int) or isinstance(total, bool) or total < len(attempts)
             or total > MAX_RECEIPT_ATTEMPTS):
         raise ValueError("invalid receipt attempt count")
+    if (not isinstance(saturated, bool) or
+            (saturated and total != MAX_RECEIPT_ATTEMPTS)):
+        raise ValueError("invalid receipt saturation state")
     if (not isinstance(digest, str) or len(digest) != 64 or
             any(char not in "0123456789abcdef" for char in digest)):
         raise ValueError("invalid receipt history digest")
     return {"version": 1, "total_attempts": total,
-            "history_sha256": digest, "attempts": attempts}
+            "count_saturated": saturated, "history_sha256": digest,
+            "identity": identity, "attempts": attempts}
+
+
+def attempt_identity(attempt):
+    keys = {
+        "get": ("operation", "repo", "lease_holder"),
+        "status": ("operation", "repo"),
+        "return": ("operation", "repo", "path", "lease_id", "lease_holder"),
+    }[attempt["operation"]]
+    return {key: attempt[key] for key in keys}
+
+
+def validate_receipt_identity(identity):
+    if not isinstance(identity, dict) or identity.get("operation") not in {
+            "get", "status", "return"}:
+        raise ValueError("invalid receipt identity")
+    operation = identity["operation"]
+    expected = {
+        "get": {"operation", "repo", "lease_holder"},
+        "status": {"operation", "repo"},
+        "return": {"operation", "repo", "path", "lease_id", "lease_holder"},
+    }[operation]
+    if set(identity) != expected:
+        raise ValueError("invalid receipt identity schema")
+    for value in identity.values():
+        if not isinstance(value, str) or not value or len(value.encode()) > 4096:
+            raise ValueError("invalid receipt identity value")
 
 
 def validate_attempt(attempt):
@@ -153,17 +202,29 @@ def validate_attempt(attempt):
                 raise ValueError("invalid receipt outcome flag")
 
 
-def rotate_return_evidence(attempts, newest_raw):
+def remove_completed_return_evidence(evicted, newest_raw):
     newest = Path(newest_raw)
-    base_name = newest.name.rsplit(".", 1)[0]
-    keep = set()
-    for attempt in attempts:
-        raw = attempt.get("raw_path")
-        if isinstance(raw, str):
-            keep.update((raw, raw + ".stderr"))
-    for candidate in newest.parent.glob(base_name + ".*"):
-        if str(candidate) not in keep and candidate.is_file() and not candidate.is_symlink():
-            candidate.unlink()
+    prefix = newest.name.rsplit(".", 1)[0]
+    candidates = []
+    for attempt in evicted:
+        if attempt.get("operation") != "return" or attempt.get("state") != "completed":
+            continue
+        raw = Path(attempt["raw_path"])
+        if (raw.parent != newest.parent or
+                not re.fullmatch(re.escape(prefix) + r"\.[0-9a-f]{32}", raw.name)):
+            raise SystemExit("unsafe completed Treehouse evidence path")
+        candidates.extend((raw, Path(str(raw) + ".stderr")))
+    metadata = []
+    for candidate in candidates:
+        if not candidate.exists() and not candidate.is_symlink():
+            continue
+        info = candidate.lstat()
+        if (candidate.is_symlink() or not candidate.is_file() or
+                info.st_uid != os.getuid() or info.st_nlink != 1):
+            raise SystemExit("unsafe completed Treehouse evidence file")
+        metadata.append(candidate)
+    for candidate in metadata:
+        candidate.unlink()
 
 
 def append_receipt(path, attempt):
@@ -177,25 +238,36 @@ def append_receipt(path, attempt):
     if len(encoded_attempt) > RECEIPT_ATTEMPT_LIMIT:
         raise SystemExit("Treehouse receipt identity is too large")
     receipt = {"version": 1, "total_attempts": 0,
-               "history_sha256": "0" * 64, "attempts": []}
+               "count_saturated": False, "history_sha256": "0" * 64,
+               "identity": attempt_identity(attempt), "attempts": []}
     if target.exists():
         try:
             receipt = load_receipt(target)
         except (ValueError, OSError, UnicodeDecodeError, json.JSONDecodeError):
             raise SystemExit("invalid preserved Treehouse receipt")
+    if attempt_identity(attempt) != receipt["identity"]:
+        raise SystemExit("Treehouse receipt identity changed")
     attempts = receipt["attempts"] + [attempt]
+    evicted = []
     digest = receipt["history_sha256"]
     while len(attempts) > RECEIPT_RING:
-        evicted = attempts.pop(0)
+        evicted_attempt = attempts.pop(0)
+        evicted.append(evicted_attempt)
         canonical_attempt = json.dumps(
-            evicted, sort_keys=True, separators=(",", ":")).encode()
+            evicted_attempt, sort_keys=True, separators=(",", ":")).encode()
         digest = hashlib.sha256(bytes.fromhex(digest) + canonical_attempt).hexdigest()
-    total = min(receipt["total_attempts"] + 1, MAX_RECEIPT_ATTEMPTS)
+    saturated = receipt["count_saturated"]
+    if saturated or receipt["total_attempts"] == MAX_RECEIPT_ATTEMPTS:
+        total = MAX_RECEIPT_ATTEMPTS
+        saturated = True
+    else:
+        total = receipt["total_attempts"] + 1
     updated = {"version": 1, "total_attempts": total,
-               "history_sha256": digest, "attempts": attempts}
+               "count_saturated": saturated, "history_sha256": digest,
+               "identity": receipt["identity"], "attempts": attempts}
     atomic_json(target, updated)
     if attempt.get("operation") == "return":
-        rotate_return_evidence(attempts, attempt["raw_path"])
+        remove_completed_return_evidence(evicted, attempt["raw_path"])
 
 
 def finish_receipt(path, attempt_id, returncode, stdout_overflow, stderr_overflow,
@@ -233,58 +305,61 @@ def run_bounded(command, cwd, raw_path, receipt_path, identity, failpoint=None):
     with temp.open("xb") as output, error_temp.open("xb") as error_output:
         process = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, start_new_session=True)
-        process_group = process.pid
+        leader_pidfd = os.pidfd_open(process.pid)
         overflow = {"stdout": False, "stderr": False}
-        def drain(source, destination, stream_name):
-            captured = 0
-            total = 0
-            try:
-                while chunk := source.read(65536):
-                    total += len(chunk)
-                    if captured <= LIMIT:
-                        kept = chunk[:LIMIT + 1 - captured]
-                        destination.write(kept)
-                        captured += len(kept)
-                    if total > LIMIT:
-                        overflow[stream_name] = True
-            except (OSError, ValueError):
-                pass
-
         assert process.stdout is not None and process.stderr is not None
-        stdout_thread = threading.Thread(
-            target=drain, args=(process.stdout, output, "stdout"), daemon=True)
-        stderr_thread = threading.Thread(
-            target=drain, args=(process.stderr, error_output, "stderr"), daemon=True)
-        stdout_thread.start()
-        stderr_thread.start()
+        streams = selectors.DefaultSelector()
+        captured = {"stdout": 0, "stderr": 0}
+        total = {"stdout": 0, "stderr": 0}
+        for source, destination, name in (
+                (process.stdout, output, "stdout"),
+                (process.stderr, error_output, "stderr")):
+            os.set_blocking(source.fileno(), False)
+            streams.register(source, selectors.EVENT_READ, (destination, name))
         timed_out = False
-        try:
-            returncode = process.wait(timeout=COMMAND_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            try:
-                os.killpg(process_group, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            returncode = process.wait()
-        stdout_thread.join(PIPE_DRAIN_TIMEOUT)
-        stderr_thread.join(PIPE_DRAIN_TIMEOUT)
-        pipe_timeout = stdout_thread.is_alive() or stderr_thread.is_alive()
-        if pipe_timeout:
-            try:
-                os.killpg(process_group, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            stdout_thread.join(PIPE_DRAIN_TIMEOUT)
-            stderr_thread.join(PIPE_DRAIN_TIMEOUT)
-        if stdout_thread.is_alive():
-            process.stdout.close()
-        if stderr_thread.is_alive():
-            process.stderr.close()
-        stdout_thread.join(PIPE_DRAIN_TIMEOUT)
-        stderr_thread.join(PIPE_DRAIN_TIMEOUT)
-        if stdout_thread.is_alive() or stderr_thread.is_alive():
-            raise SystemExit("Treehouse output drains did not terminate")
+        command_deadline = time.monotonic() + COMMAND_TIMEOUT
+        drain_deadline = None
+        while streams.get_map() or process.poll() is None:
+            now = time.monotonic()
+            if process.poll() is None and now >= command_deadline:
+                timed_out = True
+                try:
+                    signal.pidfd_send_signal(leader_pidfd, signal.SIGKILL)
+                except OSError:
+                    pass
+                command_deadline = float("inf")
+            if process.poll() is not None and drain_deadline is None:
+                drain_deadline = now + PIPE_DRAIN_TIMEOUT
+            if drain_deadline is not None and now >= drain_deadline:
+                break
+            wait_for = 0.1
+            if drain_deadline is not None:
+                wait_for = max(0.0, min(wait_for, drain_deadline - now))
+            for key, _ in streams.select(wait_for):
+                destination, name = key.data
+                try:
+                    chunk = os.read(key.fd, 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    streams.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                total[name] += len(chunk)
+                remaining = LIMIT + 1 - captured[name]
+                if remaining > 0:
+                    kept = chunk[:remaining]
+                    destination.write(kept)
+                    captured[name] += len(kept)
+                if total[name] > LIMIT:
+                    overflow[name] = True
+        pipe_timeout = bool(streams.get_map())
+        for key in list(streams.get_map().values()):
+            streams.unregister(key.fileobj)
+            key.fileobj.close()
+        streams.close()
+        returncode = process.wait()
+        os.close(leader_pidfd)
         output.flush()
         os.fsync(output.fileno())
         error_output.flush()
@@ -432,6 +507,17 @@ def checkout_branch(repo, checkout, branch, record_path):
         command.extend([branch] if exists else ["-b", branch])
         result = subprocess.run(command, pass_fds=(descriptor,))
         try:
+            post_common = git_common(
+                descriptor_path, checkout, pass_fds=(descriptor,))
+            post_git_dir = git_directory(descriptor_path, pass_fds=(descriptor,))
+            post_common_info = os.stat(post_common, follow_symlinks=False)
+            post_git_info = os.stat(post_git_dir, follow_symlinks=False)
+            if ((post_common_info.st_dev, post_common_info.st_ino) !=
+                    (left.st_dev, left.st_ino) or
+                    post_git_dir != record["git_dir"] or
+                    (post_git_info.st_dev, post_git_info.st_ino) !=
+                    (record["git_dir_dev"], record["git_dir_ino"])):
+                raise ValueError("checkout Git identity changed during mutation")
             current = os.stat(checkout, follow_symlinks=False)
             same_object = ((opened.st_dev, opened.st_ino) ==
                            (current.st_dev, current.st_ino))

@@ -253,9 +253,9 @@ case "${TREEHOUSE_OUTPUT_MODE:-valid}" in
     printf '{"path":"%s","lease_id":"lease-dispatch-1","lease_holder":"%s"}\n' \
       "$TREEHOUSE_TEST_PATH" "$4"
     case "$TREEHOUSE_OUTPUT_MODE" in
-      inherit_stdout) (sleep 30) 2>/dev/null & ;;
-      inherit_stderr) (sleep 30) >/dev/null & ;;
-      inherit_both) (sleep 30) & ;;
+      inherit_stdout) nohup setsid sleep 30 2>/dev/null & ;;
+      inherit_stderr) nohup setsid sleep 30 >/dev/null & ;;
+      inherit_both) nohup setsid sleep 30 & ;;
     esac
     printf '%s\n' "$!" > "$TREEHOUSE_GRANDCHILD_LOG"
     exit 0
@@ -379,8 +379,8 @@ for ambiguous_outcome in valid_nonzero valid_signal stderr_overflow \
     "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $ambiguous_holder $TEST_ROOT/treehouse-$ambiguous_outcome" ]]
   if [[ "$ambiguous_outcome" == inherit_* ]]; then
     grandchild_pid="$(cat "$TEST_ROOT/treehouse-$ambiguous_outcome-child.log")"
-    if kill -0 "$grandchild_pid" 2>/dev/null; then
-      printf 'Treehouse pipe-inheriting grandchild survived: %s\n' \
+    if ! kill -0 "$grandchild_pid" 2>/dev/null; then
+      printf 'Treehouse helper unexpectedly signaled a reaped leader group: %s\n' \
         "$grandchild_pid" >&2
       exit 1
     fi
@@ -389,6 +389,7 @@ import json, sys
 attempt = json.load(open(sys.argv[1], encoding="utf-8"))["attempts"][-1]
 assert attempt["pipe_timeout"] is True
 PY
+    kill "$grandchild_pid"
   fi
   rm "$TEST_ROOT/repo/treehouse.toml"
 done
@@ -486,6 +487,51 @@ symlink_holder="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])
 rm "$TEST_ROOT/repo/treehouse.toml"
 
 git -C "$TEST_ROOT/repo" worktree add -q --detach \
+  "$TEST_ROOT/treehouse-gitdir-decoy"
+gitdir_decoy_head="$(git -C "$TEST_ROOT/treehouse-gitdir-decoy" rev-parse HEAD)"
+mkdir -p "$TEST_ROOT/gitdir-swap-hooks"
+cat > "$TEST_ROOT/gitdir-swap-hooks/post-checkout" <<'EOF'
+#!/usr/bin/env bash
+matched=false
+while IFS= read -r candidate; do
+  if grep -Fq "\"path\":\"$TREEHOUSE_TEST_PATH\"" "$candidate" 2>/dev/null && \
+    grep -Fq '"identity_verified":true' "$candidate" 2>/dev/null; then
+    matched=true
+    break
+  fi
+done < <(find "$SERGEANT_FLEET" -name treehouse-acquisition.json -type f)
+[[ "$matched" == true ]] || exit 0
+cp "$TREEHOUSE_GITDIR_DECOY/.git" "$TREEHOUSE_TEST_PATH/.git"
+EOF
+chmod +x "$TEST_ROOT/gitdir-swap-hooks/post-checkout"
+touch "$TEST_ROOT/repo/treehouse.toml"
+set +e
+REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TREEHOUSE_TEST_PATH="$TEST_ROOT/treehouse-gitdir-checkout" \
+  TREEHOUSE_GITDIR_DECOY="$TEST_ROOT/treehouse-gitdir-decoy" \
+  TREEHOUSE_GET_LOG="$TEST_ROOT/treehouse-gitdir.log" \
+  TREEHOUSE_RETURN_LOG="$TEST_ROOT/treehouse-gitdir-return.log" \
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath \
+  GIT_CONFIG_VALUE_0="$TEST_ROOT/gitdir-swap-hooks" \
+  TMUX_LOG="$TEST_ROOT/treehouse-gitdir-tmux.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Treehouse gitdir swap' --repos app \
+    >/dev/null 2>&1
+gitdir_swap_status=$?
+set -e
+[[ "$gitdir_swap_status" -ne 0 ]]
+[[ "$(git -C "$TEST_ROOT/treehouse-gitdir-decoy" rev-parse HEAD)" == \
+  "$gitdir_decoy_head" ]]
+gitdir_record="$(find "$TEST_ROOT/fleet" \
+  -path '*treehouse-gitdir-swap-*/app/treehouse-acquisition.json' -print -quit)"
+gitdir_holder="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lease_holder"])' \
+  "$gitdir_record")"
+[[ "$(cat "$TEST_ROOT/treehouse-gitdir-return.log")" == \
+  "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $gitdir_holder $TEST_ROOT/treehouse-gitdir-checkout" ]]
+rm "$TEST_ROOT/repo/treehouse.toml"
+
+git -C "$TEST_ROOT/repo" worktree add -q --detach \
   "$TEST_ROOT/treehouse-preopen-decoy"
 preopen_decoy_head="$(git -C "$TEST_ROOT/treehouse-preopen-decoy" rev-parse HEAD)"
 touch "$TEST_ROOT/repo/treehouse.toml"
@@ -529,6 +575,15 @@ unrelated_head="$(git -C "$TEST_ROOT/swap-unrelated" rev-parse HEAD)"
 mkdir -p "$TEST_ROOT/swap-hooks"
 cat > "$TEST_ROOT/swap-hooks/post-checkout" <<'EOF'
 #!/usr/bin/env bash
+matched=false
+while IFS= read -r candidate; do
+  if grep -Fq "\"path\":\"$TREEHOUSE_TEST_PATH\"" "$candidate" 2>/dev/null && \
+    grep -Fq '"identity_verified":true' "$candidate" 2>/dev/null; then
+    matched=true
+    break
+  fi
+done < <(find "$SERGEANT_FLEET" -name treehouse-acquisition.json -type f)
+[[ "$matched" == true ]] || exit 0
 mv "$TREEHOUSE_TEST_PATH" "$TREEHOUSE_TEST_PATH-original"
 ln -s "$TREEHOUSE_SWAP_REPO" "$TREEHOUSE_TEST_PATH"
 EOF

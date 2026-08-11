@@ -314,7 +314,8 @@ set -e
 [[ -d "$TEST_ROOT/fleet/return-failure" ]]
 printf 'sgt-cleanup preserves a lease after conditional return failure: ok\n'
 
-for ((retry_attempt = 0; retry_attempt < 100; retry_attempt++)); do
+retry_test_attempts="${SGT_TEST_TREEHOUSE_RETRIES:-100}"
+for ((retry_attempt = 0; retry_attempt < retry_test_attempts; retry_attempt++)); do
   if HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
     FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
     FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/return-failure-active" \
@@ -330,10 +331,11 @@ for ((retry_attempt = 0; retry_attempt < 100; retry_attempt++)); do
   fi
 done
 return_receipt="$TEST_ROOT/fleet/return-failure/app/treehouse-return-receipt.json"
-python3 - "$return_receipt" <<'PY'
+python3 - "$return_receipt" "$retry_test_attempts" <<'PY'
 import json, sys
 receipt = json.load(open(sys.argv[1], encoding="utf-8"))
-assert receipt["total_attempts"] == 101
+assert receipt["total_attempts"] == int(sys.argv[2]) + 1
+assert receipt["count_saturated"] is False
 assert len(receipt["attempts"]) == 4
 assert all(attempt["state"] == "completed" for attempt in receipt["attempts"])
 assert len(open(sys.argv[1], "rb").read()) <= 65536
@@ -385,8 +387,72 @@ set -e
 [[ -z "$(find "$return_state" -name '*.tmp.*' -print -quit)" ]]
 printf 'sgt-cleanup removes bounded owned orphan attempt temporaries: ok\n'
 
+python3 - "$return_receipt" <<'PY'
+import json
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+receipt = json.loads(path.read_text(encoding="utf-8"))
+receipt["total_attempts"] = (1 << 63) - 1
+receipt["count_saturated"] = False
+path.write_text(json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8")
+PY
+set +e
+HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+  FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/return-failure-active" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/return-failure-pool-checkout" \
+  FAKE_TREEHOUSE_LEASE_ID=lease-return-failure \
+  FAKE_TREEHOUSE_HOLDER=sgt-return-failure-app \
+  FAKE_TREEHOUSE_RETURN_FAIL=1 \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" return-failure app >/dev/null 2>&1
+saturation_status=$?
+set -e
+[[ "$saturation_status" -ne 0 ]]
+python3 - "$return_receipt" <<'PY'
+import json, sys
+receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+assert receipt["total_attempts"] == (1 << 63) - 1
+assert receipt["count_saturated"] is True
+PY
+printf 'sgt-cleanup records receipt count saturation explicitly: ok\n'
+
+oldest_raw="$(python3 - "$return_receipt" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["attempts"][0]["raw_path"])
+PY
+)"
+ln "$oldest_raw" "$return_state/completed-raw-hardlink"
+printf 'unrelated\n' > "$return_state/treehouse-return.raw.notes"
+ln -s "$return_state/treehouse-return.raw.notes" \
+  "$return_state/treehouse-return.raw.ffffffffffffffffffffffffffffffff"
+live_temp="$return_state/treehouse-return.raw.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.tmp.$$"
+printf 'live temp\n' > "$live_temp"
+set +e
+HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+  FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/return-failure-active" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/return-failure-pool-checkout" \
+  FAKE_TREEHOUSE_LEASE_ID=lease-return-failure \
+  FAKE_TREEHOUSE_HOLDER=sgt-return-failure-app \
+  FAKE_TREEHOUSE_RETURN_FAIL=1 \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" return-failure app >/dev/null 2>&1
+unsafe_rotation_status=$?
+set -e
+[[ "$unsafe_rotation_status" -ne 0 ]]
+[[ -f "$oldest_raw" && -f "$return_state/completed-raw-hardlink" ]]
+[[ -f "$return_state/treehouse-return.raw.notes" ]]
+[[ -L "$return_state/treehouse-return.raw.ffffffffffffffffffffffffffffffff" ]]
+[[ -f "$live_temp" ]]
+printf 'sgt-cleanup rotation preserves unsafe and unrelated evidence files: ok\n'
+
 for corrupt_receipt in partial malformed missing extra empty_attempt attempt_extra \
-  oversized; do
+  mixed_identity oversized; do
   case "$corrupt_receipt" in
     partial) printf '{"version":1' > "$return_receipt" ;;
     malformed) printf '{"version":2,"attempts":[]}\n' > "$return_receipt" ;;
@@ -399,7 +465,10 @@ import json
 from pathlib import Path
 import sys
 Path(sys.argv[1]).write_text(json.dumps({
-    "version": 1, "total_attempts": 0, "history_sha256": "0" * 64,
+    "version": 1, "total_attempts": 0, "count_saturated": False,
+    "history_sha256": "0" * 64,
+    "identity": {"operation": "return", "repo": "/tmp/repo", "path": "/tmp/path",
+                 "lease_id": "lease", "lease_holder": "holder"},
     "attempts": [], "extra": True}) + "\n", encoding="utf-8")
 PY
       ;;
@@ -409,7 +478,10 @@ import json
 from pathlib import Path
 import sys
 Path(sys.argv[1]).write_text(json.dumps({
-    "version": 1, "total_attempts": 1, "history_sha256": "0" * 64,
+    "version": 1, "total_attempts": 1, "count_saturated": False,
+    "history_sha256": "0" * 64,
+    "identity": {"operation": "return", "repo": "/tmp/repo", "path": "/tmp/path",
+                 "lease_id": "lease", "lease_holder": "holder"},
     "attempts": [{}]}) + "\n", encoding="utf-8")
 PY
       ;;
@@ -425,7 +497,30 @@ attempt = {
     "lease_id": "lease", "lease_holder": "holder", "extra": True,
 }
 Path(sys.argv[1]).write_text(json.dumps({
-    "version": 1, "total_attempts": 1, "history_sha256": "0" * 64,
+    "version": 1, "total_attempts": 1, "count_saturated": False,
+    "history_sha256": "0" * 64,
+    "identity": {"operation": "return", "repo": attempt["repo"],
+                 "path": attempt["path"], "lease_id": attempt["lease_id"],
+                 "lease_holder": attempt["lease_holder"]},
+    "attempts": [attempt]}) + "\n", encoding="utf-8")
+PY
+      ;;
+    mixed_identity)
+      python3 - "$return_receipt" "$return_state" <<'PY'
+import json
+from pathlib import Path
+import sys
+attempt = {
+    "attempt_id": "1" * 32, "state": "started", "operation": "return",
+    "raw_path": str(Path(sys.argv[2]) / ("treehouse-return.raw." + "1" * 32)),
+    "repo": "/tmp/repo", "path": "/tmp/path", "lease_id": "lease",
+    "lease_holder": "holder-A",
+}
+Path(sys.argv[1]).write_text(json.dumps({
+    "version": 1, "total_attempts": 1, "count_saturated": False,
+    "history_sha256": "0" * 64,
+    "identity": {"operation": "return", "repo": "/tmp/repo", "path": "/tmp/path",
+                 "lease_id": "lease", "lease_holder": "holder-B"},
     "attempts": [attempt]}) + "\n", encoding="utf-8")
 PY
       ;;
@@ -456,6 +551,29 @@ PY
   [[ -d "$TEST_ROOT/fleet/return-failure" ]]
 done
 printf 'sgt-cleanup preserves malformed and oversized receipts without overwrite: ok\n'
+
+for ((scan_entry = 1; scan_entry <= 1025; scan_entry++)); do
+  : > "$return_state/unrelated-scan-entry-$scan_entry"
+done
+set +e
+scan_limit_output="$(
+  HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+    FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+    FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/return-failure-active" \
+    FAKE_TREEHOUSE_PATH="$TEST_ROOT/return-failure-pool-checkout" \
+    FAKE_TREEHOUSE_LEASE_ID=lease-return-failure \
+    FAKE_TREEHOUSE_HOLDER=sgt-return-failure-app \
+    FAKE_TREEHOUSE_RETURN_FAIL=1 \
+    SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" return-failure app 2>&1
+)"
+scan_limit_status=$?
+set -e
+[[ "$scan_limit_status" -ne 0 ]]
+[[ "$scan_limit_output" == *"Treehouse evidence directory scan limit exceeded"* ]]
+[[ -d "$TEST_ROOT/fleet/return-failure" ]]
+printf 'sgt-cleanup bounds orphan evidence directory scans: ok\n'
 
 init_repo "$TEST_ROOT/return-overflow-main"
 git -C "$TEST_ROOT/return-overflow-main" worktree add -q -b return-overflow-worker \
