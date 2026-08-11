@@ -46,6 +46,7 @@ cat > "$fake_bin/tmux" <<'TMUX'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${TMUX_LOG:-/dev/null}"
 case "$1" in
+  list-panes) exit 0 ;;
   display-message)
     target=""
     previous=""

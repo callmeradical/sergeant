@@ -45,6 +45,7 @@ cat > "$fake_bin/tmux" <<'TMUX'
 printf '%s\n' "$*" >> "${TMUX_LOG:-/dev/null}"
 case "$1" in
   list-panes)
+    [[ "${FAIL_LIST_PANES:-0}" == 0 ]] || exit 8
     [[ -n "${TMUX_PANE_STATE:-}" && -s "$TMUX_PANE_STATE" ]] || exit 0
     cat "$TMUX_PANE_STATE"
     ;;
@@ -730,6 +731,46 @@ PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
 [[ "$(sed -n 's/^phase=//p' "$state/response_relaunch_transaction")" == acked ]]
 [[ "$(worktree_content_hash "$wt")" == "$content_before" ]]
 [[ "$(cat "$wt/uncommitted.txt")" == 'uncommitted payload survives abrupt transfer' ]]
+
+# Recover must distinguish a failed inventory command from an empty inventory.
+# After an abrupt death leaves an authenticated pane live, enumeration failure
+# cannot authorize a second new-window; a later exact retry adopts the first.
+read -r state wt <<<"$(make_worktree recover-inventory-failure)"
+task=task-recover-inventory-failure
+setup_stall "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+set +e
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/recover-inventory-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/recover-inventory-window-count" \
+  SGT_TEST_HOOKS=1 SGT_TEST_INTERRUPT_RECOVER_AT=spawned \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
+inventory_kill_status=$?
+set -e
+[[ "$inventory_kill_status" -ne 0 ]]
+[[ "$(cat "$TEST_ROOT/recover-inventory-window-count")" == 1 ]]
+inventory_before="$(cat "$TEST_ROOT/recover-inventory-pane-state")"
+set +e
+inventory_failure_output="$(PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/recover-inventory-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/recover-inventory-window-count" FAIL_LIST_PANES=1 \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app 2>&1)"
+inventory_failure_status=$?
+set -e
+[[ "$inventory_failure_status" -ne 0 &&
+   "$inventory_failure_output" == *'could not enumerate exact tmux pane inventory'* ]]
+[[ "$(cat "$TEST_ROOT/recover-inventory-window-count")" == 1 ]]
+[[ "$(cat "$TEST_ROOT/recover-inventory-pane-state")" == "$inventory_before" ]]
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/recover-inventory-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/recover-inventory-window-count" \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
+[[ "$(cat "$TEST_ROOT/recover-inventory-window-count")" == 1 ]]
+[[ "$(cat "$state/pane")" == %98 ]]
+[[ "$(sed -n 's/^phase=//p' "$state/response_relaunch_transaction")" == acked ]]
 
 # Concurrent exact retries serialize through acknowledgement and the follower
 # joins the immutable acked journal instead of spawning or delivering twice.

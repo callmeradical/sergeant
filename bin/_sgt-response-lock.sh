@@ -143,6 +143,9 @@ _sgt_response_lock_acquire() {
     if [[ -d "$lock_path" ]]; then
       owner="$(cat "$lock_path/pid" 2>/dev/null || true)"
       if [[ -z "$owner" ]]; then
+        # The directory may have been atomically retired after the -d check.
+        # Only a still-present ownerless directory is ambiguous.
+        [[ -d "$lock_path" ]] || continue
         rm -f "$candidate"
         printf 'ERROR: Response lock directory has no authenticated owner: %s\n' "$lock_path" >&2
         return 1
@@ -300,6 +303,41 @@ _sgt_replacement_pane_auth() {
 
 _sgt_replacement_pane_identity_matches() {
   _sgt_replacement_pane_auth "$2" "$3" "$4" >/dev/null
+}
+
+# Discover the one authenticated replacement pane from one successful, exact
+# inventory snapshot. Status 1 means the replacement window is absent; status 2
+# means tmux failed or returned malformed/duplicate inventory; status 3 means
+# the window is ambiguous; status 4 means its sole pane is foreign.
+_sgt_replacement_discover_pane() {
+  local window_name="$1" token="$2" role="$3" phase="$4"
+  local journal_pane="$5" journal_auth="$6"
+  local inventory line candidate candidate_window candidate_auth
+  local authenticated="" pane_count=0 seen_panes="|"
+  inventory="$(tmux list-panes -a -F '#{pane_id}|#{window_name}' 2>/dev/null)" || return 2
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    candidate="${line%%|*}"
+    [[ "$candidate" != "$line" ]] || return 2
+    candidate_window="${line#*|}"
+    [[ "$candidate" =~ ^%[0-9]+$ && -n "$candidate_window" &&
+       "$candidate_window" != *'|'* ]] || return 2
+    [[ "$seen_panes" != *"|$candidate|"* ]] || return 2
+    seen_panes="${seen_panes}${candidate}|"
+    [[ "$candidate_window" == "$window_name" ]] || continue
+    pane_count=$((pane_count + 1))
+    candidate_auth="$(_sgt_replacement_pane_auth "$candidate" "$token" "$role" 2>/dev/null || true)"
+    if [[ -n "$candidate_auth" ]] &&
+        { [[ "$phase" == bound || "$phase" == fenced || "$phase" == spawning ]] ||
+          [[ "$journal_pane" == "$candidate" && "$journal_auth" == "$candidate_auth" ]]; }; then
+      [[ -z "$authenticated" ]] || return 3
+      authenticated="$candidate"
+    fi
+  done <<< "$inventory"
+  (( pane_count > 0 )) || return 1
+  [[ -n "$authenticated" ]] || return 4
+  (( pane_count == 1 )) || return 3
+  printf '%s\n' "$authenticated"
 }
 
 _sgt_replacement_recorded_auth_valid() {

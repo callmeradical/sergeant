@@ -295,12 +295,30 @@ fi
 
 old_pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
 old_pane_live=false
+journaled_replacement_pending=false
+relaunch_transaction="$REPO_DIR/response_relaunch_transaction"
+if [[ -e "$relaunch_transaction" ]]; then
+  _sgt_transfer_journal_read "$relaunch_transaction" || \
+    _recover_die "Stall recovery refused: relaunch journal is malformed"
+  if [[ -z "$_SGT_TRANSFER_RESPONSE_ID" &&
+        "$_SGT_TRANSFER_GATE_GENERATION" == "$gate_generation" ]]; then
+    case "$_SGT_TRANSFER_PHASE" in
+      spawning|spawned|published|acked) journaled_replacement_pending=true ;;
+    esac
+  fi
+fi
 if [[ -n "$old_pane" ]] && command -v tmux >/dev/null 2>&1; then
   if _sgt_pane_identity_matches "$old_pane" "$REPO_DIR"; then
     old_pane_live=true
   elif $dead_owner_fenced && [[ "$old_pane" == "$fenced_owner_pane" ]]; then
     # The shared fence already proved this exact recorded pane and process gone
     # twice under the response lock. There is no old pane left to kill.
+    old_pane_live=false
+  elif $journaled_replacement_pending; then
+    # A crash after durable spawn intent can leave fleet pane metadata naming
+    # the retired owner. The exact journal and pane inventory below decide
+    # whether to join, spawn, or refuse; stale metadata cannot preempt that
+    # authenticated transaction.
     old_pane_live=false
   else
     _escalate "pane identity mismatch for pane $old_pane; refusing to kill"
@@ -383,7 +401,6 @@ worker_command="$(_sgt_replacement_worker_command "$replacement_spawn_token" "$w
   "$(_sgt_worker_command "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")")" || \
   _recover_die "Stall recovery failed: could not construct canonical replacement worker command"
 
-relaunch_transaction="$REPO_DIR/response_relaunch_transaction"
 replacement_window_name="${window_name}-resume-${delivery_notification_id:0:12}"
 _write_recovery_transaction() {
   local phase="$1" candidate_pane="${2:-}" candidate_identity="${3:-}"
@@ -419,27 +436,18 @@ else
 fi
 
 new_pane=""
-matching_panes=0
-window_panes=0
-while IFS='|' read -r candidate candidate_window; do
-  [[ "$candidate_window" == "$replacement_window_name" ]] || continue
-  window_panes=$((window_panes + 1))
-  candidate_auth="$(_sgt_replacement_pane_auth "$candidate" \
-    "$replacement_spawn_token" "$worker_role" 2>/dev/null || true)"
-  if [[ -n "$candidate_auth" ]] &&
-      { [[ "${_SGT_TRANSFER_PHASE:-}" == bound || "${_SGT_TRANSFER_PHASE:-}" == fenced ||
-           "${_SGT_TRANSFER_PHASE:-}" == spawning ]] ||
-        [[ "$_SGT_TRANSFER_PANE" == "$candidate" &&
-           "$_SGT_TRANSFER_PANE_AUTH" == "$candidate_auth" ]]; }; then
-    matching_panes=$((matching_panes + 1))
-    new_pane="$candidate"
-  fi
-done < <(tmux list-panes -a -F '#{pane_id}|#{window_name}' 2>/dev/null || true)
-(( matching_panes <= 1 )) || \
-  _recover_die "Stall recovery refused: relaunch journal resolves to multiple authenticated panes"
-if (( matching_panes == 0 && window_panes > 0 )); then
+set +e
+new_pane="$(_sgt_replacement_discover_pane "$replacement_window_name" \
+  "$replacement_spawn_token" "$worker_role" "$_SGT_TRANSFER_PHASE" \
+  "$_SGT_TRANSFER_PANE" "$_SGT_TRANSFER_PANE_AUTH" 2>/dev/null)"
+discovery_status=$?
+set -e
+[[ "$discovery_status" -ne 2 ]] || \
+  _recover_die "Stall recovery refused: could not enumerate exact tmux pane inventory"
+[[ "$discovery_status" -ne 3 ]] || \
+  _recover_die "Stall recovery refused: relaunch journal resolves to ambiguous panes"
+[[ "$discovery_status" -ne 4 ]] || \
   _recover_die "Stall recovery refused: replacement window is owned by a foreign pane"
-fi
 if [[ -z "$new_pane" ]]; then
   _write_recovery_transaction spawning || \
     _recover_die "Stall recovery failed: could not publish relaunch spawning state"

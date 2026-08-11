@@ -490,8 +490,9 @@ TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 EXPECTED_WORKER="$r
 locked_pid=$!
 sleep 0.05
 [[ ! -e "$worktree/.sergeant-response" && ! -e "$repo_state/response" ]]
-rm "$repo_state/response.lock/pid"
-rmdir "$repo_state/response.lock"
+mv "$repo_state/response.lock" "$repo_state/response.lock.released"
+rm "$repo_state/response.lock.released/pid"
+rmdir "$repo_state/response.lock.released"
 wait "$locked_pid"
 [[ "$(cat "$worktree/.sergeant-response")" == 'serialized response' ]]
 

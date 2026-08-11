@@ -750,33 +750,6 @@ _relaunch_transaction_matches() {
        "$_SGT_TRANSFER_WORKER_COMMAND" == "$worker_command" ]]
 }
 
-_discover_relaunch_pane() {
-  local inventory panes candidate identity authenticated=""
-  inventory="$(tmux list-panes -a -F '#{pane_id}|#{window_name}' 2>/dev/null)" || return 2
-  panes="$(printf '%s\n' "$inventory" | \
-    awk -F '|' -v expected="$replacement_window_name" '$2 == expected { print $1 }')"
-  [[ -n "$panes" ]] || return 1
-  while IFS= read -r candidate; do
-    [[ -n "$candidate" ]] || continue
-    identity="$(_sgt_pane_identity "$candidate" 2>/dev/null || true)"
-    candidate_auth="$(_sgt_replacement_pane_auth "$candidate" \
-      "$replacement_spawn_token" "$worker_role" 2>/dev/null || true)"
-    if [[ -n "$candidate_auth" ]] &&
-        { [[ "${_SGT_TRANSFER_PHASE:-}" == bound || "${_SGT_TRANSFER_PHASE:-}" == fenced ||
-             "${_SGT_TRANSFER_PHASE:-}" == spawning ]] ||
-          [[ "$_SGT_TRANSFER_PANE" == "$candidate" &&
-             "$_SGT_TRANSFER_PANE_AUTH" == "$candidate_auth" ]]; }; then
-      [[ -z "$authenticated" ]] || return 3
-      authenticated="$candidate"
-    fi
-  done <<< "$panes"
-  # A same-name pane without our unforgeable token is foreign. Never adopt it,
-  # and never create a second same-name pane around it.
-  [[ -n "$authenticated" ]] || return 4
-  [[ "$(printf '%s\n' "$panes" | grep -c .)" == 1 ]] || return 3
-  printf '%s\n' "$authenticated"
-}
-
 _record_relaunch_orphan() {
   local reason="$1"
   rm -f "$relaunch_transaction"
@@ -795,7 +768,9 @@ else
 fi
 
 set +e
-new_pane="$(_discover_relaunch_pane 2>/dev/null)"
+new_pane="$(_sgt_replacement_discover_pane "$replacement_window_name" \
+  "$replacement_spawn_token" "$worker_role" "$_SGT_TRANSFER_PHASE" \
+  "$_SGT_TRANSFER_PANE" "$_SGT_TRANSFER_PANE_AUTH" 2>/dev/null)"
 discovery_status=$?
 set -e
 [[ "$discovery_status" -ne 2 ]] || \
