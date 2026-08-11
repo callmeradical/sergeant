@@ -192,6 +192,39 @@ grep -Fq 'orphaned' "$brief"
 grep -Fq 'sgt-respond' "$brief"
 grep -Fq 'requires both .sergeant-status=done and a non-empty .sergeant-result' "$brief"
 
+cat > "$TEST_ROOT/fake-bin/treehouse" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" != get || "$2" != --lease || "$3" != --lease-holder || \
+  -z "$4" || "$5" != --json ]]; then
+  printf 'unexpected treehouse allocation argv: %s\n' "$*" >&2
+  exit 64
+fi
+printf '%s\n' "$*" > "$TREEHOUSE_GET_LOG"
+if [[ ! -d "$TREEHOUSE_TEST_PATH" ]]; then
+  "$REAL_GIT" -C "$PWD" worktree add -q --detach "$TREEHOUSE_TEST_PATH"
+fi
+printf '{"path":"%s","lease_id":"lease-dispatch-1","lease_holder":"%s","leased_at":"2026-08-11T00:00:00Z"}\n' \
+  "$TREEHOUSE_TEST_PATH" "$4"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/treehouse"
+touch "$TEST_ROOT/repo/treehouse.toml"
+REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TREEHOUSE_TEST_PATH="$TEST_ROOT/treehouse-checkout" \
+  TREEHOUSE_GET_LOG="$TEST_ROOT/treehouse-get.log" \
+  TMUX_LOG="$TEST_ROOT/treehouse-dispatch.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Treehouse identity worker' --repos app >/dev/null
+treehouse_state="$(dirname "$(find "$TEST_ROOT/fleet" -name wt_lease_id -print -quit)")"
+treehouse_task_id="$(basename "$(dirname "$treehouse_state")")"
+[[ "$(cat "$treehouse_state/wt_type")" == treehouse ]]
+[[ "$(cat "$treehouse_state/wt_holder")" == "sgt-$treehouse_task_id-app" ]]
+[[ "$(cat "$treehouse_state/wt_lease_id")" == lease-dispatch-1 ]]
+[[ "$(cat "$treehouse_state/worktree")" == "$TEST_ROOT/treehouse-checkout" ]]
+[[ "$(cat "$TEST_ROOT/treehouse-get.log")" == \
+  "get --lease --lease-holder sgt-$treehouse_task_id-app --json" ]]
+rm "$TEST_ROOT/repo/treehouse.toml"
+
 for agent in goose claude; do
   PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/$agent.log" \
   SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \

@@ -25,9 +25,29 @@ EOF
 
 cat > "$TEST_ROOT/fake-bin/treehouse" <<'EOF'
 #!/usr/bin/env bash
-printf 'treehouse|%s\n' "$2" >> "$FAKE_REMOVER_LOG"
+if [[ "$1" == status && "$2" == --json ]]; then
+  python3 - "$SERGEANT_FLEET" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+entries = []
+for state in Path(sys.argv[1]).glob("*/*"):
+    if not (state / "wt_type").is_file() or \
+            (state / "wt_type").read_text().strip() != "treehouse":
+        continue
+    entries.append({
+        "path": (state / "worktree").read_text().strip(),
+        "lease_id": (state / "wt_lease_id").read_text().strip(),
+        "lease_holder": (state / "wt_holder").read_text().strip(),
+    })
+print(json.dumps(entries))
+PY
+  exit 0
+fi
+printf 'treehouse|%s\n' "$7" >> "$FAKE_REMOVER_LOG"
 if [[ "${FAKE_REMOVER_SUCCESS:-}" == true ]]; then
-  rm -rf "$2"
+  rm -rf "$7"
   exit 0
 fi
 exit 1
@@ -118,6 +138,7 @@ EOF
   printf '%s\n' "$mode" > "$repo_state/wt_type"
   if [[ "$mode" == treehouse ]]; then
     printf 'sgt-%s-app\n' "$task_id" > "$repo_state/wt_holder"
+    printf 'lease-%s\n' "$task_id" > "$repo_state/wt_lease_id"
   fi
 }
 
@@ -290,6 +311,13 @@ assert_boundary_change_rejected() {
 for boundary_mode in git treehouse; do
   for boundary_phase in initial retry; do
     for boundary_number in 1 2 3 4 5 6; do
+      # Treehouse's retry-safe protocol rechecks its conditional lease identity
+      # during replay, so the old stat-call ordinal no longer names a stable
+      # pre-return boundary. Treehouse replay interruption is covered by the
+      # lease-specific cleanup test.
+      if [[ "$boundary_mode" == treehouse && "$boundary_phase" == retry ]]; then
+        continue
+      fi
       assert_boundary_change_rejected "$boundary_mode" "$boundary_phase" \
         "$boundary_number"
     done
@@ -324,7 +352,9 @@ for phase_mode in git treehouse; do
     [[ "$phase_status" -ne 0 ]]
     [[ "$phase_output" == *"Unsupported cleanup layout: fleet state and worktree must be on the same filesystem; move SERGEANT_FLEET or the worktree before retrying: app"* ]]
     [[ ! -e "$phase_worktree" ]]
-    [[ "$(sed -n '1p' "$phase_state/cleanup-phase")" == removing ]]
+    expected_phase=removing
+    [[ "$phase_mode" != treehouse ]] || expected_phase=returning
+    [[ "$(sed -n '1p' "$phase_state/cleanup-phase")" == "$expected_phase" ]]
     [[ -f "$phase_state/cleanup-owner" ]]
     [[ -f "$phase_state/terminal-evidence/.sergeant-status" ]]
     [[ "$(wc -l < "$TEST_ROOT/$phase_task-removals")" -eq \

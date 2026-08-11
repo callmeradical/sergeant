@@ -1810,6 +1810,8 @@ printf '%s\n' "$TEST_ROOT/treehouse-worktree" > \
 printf 'treehouse\n' > "$TEST_ROOT/fleet/treehouse-partial/app/wt_type"
 printf 'sgt-treehouse-partial-app\n' > \
   "$TEST_ROOT/fleet/treehouse-partial/app/wt_holder"
+printf 'lease-treehouse-partial\n' > \
+  "$TEST_ROOT/fleet/treehouse-partial/app/wt_lease_id"
 printf 'done\n' > "$TEST_ROOT/fleet/treehouse-partial/app/status"
 printf 'result\n' > "$TEST_ROOT/fleet/treehouse-partial/app/result"
 printf 'done\n' > "$TEST_ROOT/treehouse-worktree/.sergeant-status"
@@ -1826,10 +1828,17 @@ esac
 EOF
 cat > "$TEST_ROOT/fake-bin/treehouse" <<'EOF'
 #!/usr/bin/env bash
-[[ "$1" == "return" ]]
-printf '%s|%s\n' "$PWD" "$2" >> "$FAKE_TREEHOUSE_LOG"
+if [[ "$1" == status && "$2" == --json ]]; then
+  printf '[{"path":"%s","lease_id":"lease-treehouse-partial","lease_holder":"sgt-treehouse-partial-app"}]\n' \
+    "$FAKE_TREEHOUSE_PATH"
+  exit 0
+fi
+[[ "$1" == return && "$2" == --force && "$3" == --if-lease-id && \
+  "$4" == lease-treehouse-partial && "$5" == --if-lease-holder && \
+  "$6" == sgt-treehouse-partial-app && "$7" == "$FAKE_TREEHOUSE_PATH" ]]
+printf '%s|%s\n' "$PWD" "$7" >> "$FAKE_TREEHOUSE_LOG"
 if [[ ! -e "$FAKE_TREEHOUSE_STATE" ]]; then
-  rm -rf "$2"
+  rm -rf "$7"
   touch "$FAKE_TREEHOUSE_STATE"
   exit 1
 fi
@@ -1838,6 +1847,7 @@ chmod +x "$TEST_ROOT/fake-bin/git" "$TEST_ROOT/fake-bin/treehouse"
 if PATH="$TEST_ROOT/fake-bin:$PATH" \
   FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-removals" \
   FAKE_TREEHOUSE_STATE="$TEST_ROOT/treehouse-failed-once" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/treehouse-worktree" \
   SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" treehouse-partial >/dev/null 2>&1; then
@@ -1853,6 +1863,7 @@ printf 'sgt-another-task-app\n' > \
 if PATH="$TEST_ROOT/fake-bin:$PATH" \
   FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-removals" \
   FAKE_TREEHOUSE_STATE="$TEST_ROOT/treehouse-failed-once" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/treehouse-worktree" \
   SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" treehouse-partial >/dev/null 2>&1; then
@@ -1871,6 +1882,7 @@ printf 'partial-removal\n%s\ntreehouse\n%s\n' \
 if PATH="$TEST_ROOT/fake-bin:$PATH" \
   FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-removals" \
   FAKE_TREEHOUSE_STATE="$TEST_ROOT/treehouse-failed-once" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/treehouse-worktree" \
   SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" treehouse-partial >/dev/null 2>&1; then
@@ -1893,6 +1905,7 @@ treehouse_evidence_before="$(cksum \
 if PATH="$TEST_ROOT/fake-bin:$PATH" \
   FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-removals" \
   FAKE_TREEHOUSE_STATE="$TEST_ROOT/treehouse-failed-once" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/treehouse-worktree" \
   SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" treehouse-partial >/dev/null 2>&1; then
@@ -1915,6 +1928,7 @@ treehouse_removed_phase_before="$(cksum \
 if PATH="$TEST_ROOT/fake-bin:$PATH" \
   FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-removals" \
   FAKE_TREEHOUSE_STATE="$TEST_ROOT/treehouse-failed-once" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/treehouse-worktree" \
   SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-cleanup" treehouse-partial >/dev/null 2>&1; then

@@ -40,6 +40,7 @@ EOF
   printf '%s\n' "$wt_type" > "$state/wt_type"
   if [[ "$wt_type" == treehouse ]]; then
     printf 'sgt-%s-app\n' "$task_id" > "$state/wt_holder"
+    printf 'lease-%s\n' "$task_id" > "$state/wt_lease_id"
   fi
   printf 'done\n' > "$state/status"
   printf 'result\n' > "$state/result"
@@ -57,19 +58,42 @@ record_task treehouse-pool "$TEST_ROOT/treehouse-main" \
 
 cat > "$TEST_ROOT/fake-bin/treehouse" <<'EOF'
 #!/usr/bin/env bash
-[[ "$1" == return && -d "$2" ]]
-printf '%s|%s\n' "$PWD" "$2" >> "$FAKE_TREEHOUSE_LOG"
+if [[ "$1" == status && "$2" == --json ]]; then
+  if [[ -e "$FAKE_TREEHOUSE_ACTIVE" ]]; then
+    printf '[{"path":"%s","lease_id":"%s","lease_holder":"%s"}]\n' \
+      "$FAKE_TREEHOUSE_PATH" "$FAKE_TREEHOUSE_LEASE_ID" "$FAKE_TREEHOUSE_HOLDER"
+  else
+    printf '[{"path":"%s","lease_id":"","lease_holder":""}]\n' \
+      "$FAKE_TREEHOUSE_PATH"
+  fi
+  exit 0
+fi
+if [[ "$1" != return || "$2" != --force || "$3" != --if-lease-id || \
+  "$4" != "$FAKE_TREEHOUSE_LEASE_ID" || "$5" != --if-lease-holder || \
+  "$6" != "$FAKE_TREEHOUSE_HOLDER" || "$7" != "$FAKE_TREEHOUSE_PATH" ]]; then
+  printf 'unsafe return argv: %s\n' "$*" >&2
+  exit 64
+fi
+printf '%s|%s\n' "$PWD" "$*" >> "$FAKE_TREEHOUSE_LOG"
+[[ -e "$FAKE_TREEHOUSE_ACTIVE" ]] || exit 42
+[[ "${FAKE_TREEHOUSE_RETURN_FAIL:-0}" != 1 ]] || exit 43
+rm "$FAKE_TREEHOUSE_ACTIVE"
 printf 'Worktree returned to pool.\n'
 EOF
 chmod +x "$TEST_ROOT/fake-bin/treehouse"
+touch "$TEST_ROOT/treehouse-active"
 
 set +e
 treehouse_output="$(
   HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
     FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+    FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/treehouse-active" \
+    FAKE_TREEHOUSE_PATH="$TEST_ROOT/treehouse-pool-checkout" \
+    FAKE_TREEHOUSE_LEASE_ID=lease-treehouse-pool \
+    FAKE_TREEHOUSE_HOLDER=sgt-treehouse-pool-app \
     SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
     SGT_WIKI_DISABLED=1 \
-    "$ROOT_DIR/bin/sgt-cleanup" treehouse-pool 2>&1
+    "$ROOT_DIR/bin/sgt-cleanup" treehouse-pool app 2>&1
 )"
 treehouse_status=$?
 set -e
@@ -79,8 +103,33 @@ if [[ "$treehouse_status" -ne 0 ]]; then
 fi
 [[ "$treehouse_output" == *"Worktree returned to pool."* ]]
 [[ -d "$TEST_ROOT/treehouse-pool-checkout" ]]
-[[ ! -e "$TEST_ROOT/fleet/treehouse-pool" ]]
+[[ -d "$TEST_ROOT/fleet/treehouse-pool" ]]
+[[ "$(sed -n '1p' "$TEST_ROOT/fleet/treehouse-pool/app/cleanup-phase")" == returned ]]
 [[ "$(wc -l < "$TEST_ROOT/treehouse-return.log")" -eq 1 ]]
+printf 'reused by a later lease\n' > "$TEST_ROOT/treehouse-pool-checkout/README.md"
+printf 'later-worker\n' > "$TEST_ROOT/treehouse-pool-checkout/.sergeant-status"
+
+HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+  FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/treehouse-active" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/treehouse-pool-checkout" \
+  FAKE_TREEHOUSE_LEASE_ID=lease-treehouse-pool \
+  FAKE_TREEHOUSE_HOLDER=sgt-treehouse-pool-app \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" treehouse-pool app >/dev/null
+[[ "$(wc -l < "$TEST_ROOT/treehouse-return.log")" -eq 1 ]]
+
+HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+  FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/treehouse-active" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/treehouse-pool-checkout" \
+  FAKE_TREEHOUSE_LEASE_ID=lease-treehouse-pool \
+  FAKE_TREEHOUSE_HOLDER=sgt-treehouse-pool-app \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" treehouse-pool >/dev/null
+[[ ! -e "$TEST_ROOT/fleet/treehouse-pool" ]]
 printf 'sgt-cleanup accepts a successful Treehouse pool return: ok\n'
 
 init_repo "$TEST_ROOT/unowned-treehouse-main"
@@ -95,6 +144,10 @@ set +e
 unowned_output="$(
   HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
     FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+    FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/unowned-treehouse-active" \
+    FAKE_TREEHOUSE_PATH="$TEST_ROOT/unowned-treehouse-pool-checkout" \
+    FAKE_TREEHOUSE_LEASE_ID=lease-unowned-treehouse \
+    FAKE_TREEHOUSE_HOLDER=sgt-unowned-treehouse-app \
     SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
     SGT_WIKI_DISABLED=1 \
     "$ROOT_DIR/bin/sgt-cleanup" unowned-treehouse 2>&1
@@ -102,11 +155,124 @@ unowned_output="$(
 unowned_status=$?
 set -e
 [[ "$unowned_status" -ne 0 ]]
-[[ "$unowned_output" == *"treehouse lease does not match its owner"* ]]
+[[ "$unowned_output" == *"Treehouse lease identity does not match its fleet owner"* ]]
 [[ "$(wc -l < "$TEST_ROOT/treehouse-return.log")" -eq 1 ]]
 [[ -d "$TEST_ROOT/unowned-treehouse-pool-checkout" ]]
 [[ -d "$TEST_ROOT/fleet/unowned-treehouse" ]]
+[[ -f "$TEST_ROOT/unowned-treehouse-pool-checkout/.sergeant-status" ]]
 printf 'sgt-cleanup rejects an unverified Treehouse holder before return: ok\n'
+
+init_repo "$TEST_ROOT/mismatch-main"
+git -C "$TEST_ROOT/mismatch-main" worktree add -q -b mismatch-worker \
+  "$TEST_ROOT/mismatch-pool-checkout"
+record_task lease-mismatch "$TEST_ROOT/mismatch-main" \
+  "$TEST_ROOT/mismatch-pool-checkout" treehouse
+printf 'captured-wrong-lease\n' > "$TEST_ROOT/fleet/lease-mismatch/app/wt_lease_id"
+touch "$TEST_ROOT/mismatch-active"
+return_count="$(wc -l < "$TEST_ROOT/treehouse-return.log")"
+set +e
+mismatch_output="$(
+  HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+    FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+    FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/mismatch-active" \
+    FAKE_TREEHOUSE_PATH="$TEST_ROOT/mismatch-pool-checkout" \
+    FAKE_TREEHOUSE_LEASE_ID=actual-live-lease \
+    FAKE_TREEHOUSE_HOLDER=sgt-lease-mismatch-app \
+    SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" lease-mismatch app 2>&1
+)"
+mismatch_status=$?
+set -e
+[[ "$mismatch_status" -ne 0 ]]
+[[ "$mismatch_output" == *"lease identity does not match captured acquisition"* ]]
+[[ "$(wc -l < "$TEST_ROOT/treehouse-return.log")" -eq "$return_count" ]]
+[[ -e "$TEST_ROOT/mismatch-active" && -d "$TEST_ROOT/fleet/lease-mismatch" ]]
+printf 'sgt-cleanup rejects a changed Treehouse lease identity: ok\n'
+
+init_repo "$TEST_ROOT/wrong-path-main"
+git -C "$TEST_ROOT/wrong-path-main" worktree add -q -b wrong-path-worker \
+  "$TEST_ROOT/wrong-path-pool-checkout"
+record_task wrong-path "$TEST_ROOT/wrong-path-main" \
+  "$TEST_ROOT/wrong-path-pool-checkout" treehouse
+init_repo "$TEST_ROOT/different-main"
+record_task wrong-path "$TEST_ROOT/different-main" \
+  "$TEST_ROOT/wrong-path-pool-checkout" treehouse
+set +e
+wrong_path_output="$(
+  HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" wrong-path app 2>&1
+)"
+wrong_path_status=$?
+set -e
+[[ "$wrong_path_status" -ne 0 ]]
+[[ "$wrong_path_output" == *"does not belong to configured cleanup owner"* ]]
+[[ -d "$TEST_ROOT/fleet/wrong-path" ]]
+printf 'sgt-cleanup rejects a Treehouse path from another repository: ok\n'
+
+init_repo "$TEST_ROOT/return-failure-main"
+git -C "$TEST_ROOT/return-failure-main" worktree add -q -b return-failure-worker \
+  "$TEST_ROOT/return-failure-pool-checkout"
+record_task return-failure "$TEST_ROOT/return-failure-main" \
+  "$TEST_ROOT/return-failure-pool-checkout" treehouse
+touch "$TEST_ROOT/return-failure-active"
+set +e
+return_failure_output="$(
+  HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+    FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+    FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/return-failure-active" \
+    FAKE_TREEHOUSE_PATH="$TEST_ROOT/return-failure-pool-checkout" \
+    FAKE_TREEHOUSE_LEASE_ID=lease-return-failure \
+    FAKE_TREEHOUSE_HOLDER=sgt-return-failure-app \
+    FAKE_TREEHOUSE_RETURN_FAIL=1 \
+    SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" return-failure app 2>&1
+)"
+return_failure_status=$?
+set -e
+[[ "$return_failure_status" -ne 0 ]]
+[[ "$return_failure_output" == *"Failed to return treehouse lease"* ]]
+[[ -e "$TEST_ROOT/return-failure-active" ]]
+[[ -f "$TEST_ROOT/return-failure-pool-checkout/.sergeant-status" ]]
+[[ -d "$TEST_ROOT/fleet/return-failure" ]]
+printf 'sgt-cleanup preserves a lease after conditional return failure: ok\n'
+
+init_repo "$TEST_ROOT/interrupted-main"
+git -C "$TEST_ROOT/interrupted-main" worktree add -q -b interrupted-worker \
+  "$TEST_ROOT/interrupted-pool-checkout"
+record_task interrupted-return "$TEST_ROOT/interrupted-main" \
+  "$TEST_ROOT/interrupted-pool-checkout" treehouse
+touch "$TEST_ROOT/interrupted-active"
+set +e
+HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+  FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/interrupted-active" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/interrupted-pool-checkout" \
+  FAKE_TREEHOUSE_LEASE_ID=lease-interrupted-return \
+  FAKE_TREEHOUSE_HOLDER=sgt-interrupted-return-app \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 SGT_CLEANUP_FAIL_POINT=phase-publish-returned \
+  "$ROOT_DIR/bin/sgt-cleanup" interrupted-return app >/dev/null 2>&1
+interrupted_status=$?
+set -e
+[[ "$interrupted_status" -ne 0 && ! -e "$TEST_ROOT/interrupted-active" ]]
+[[ "$(sed -n '1p' "$TEST_ROOT/fleet/interrupted-return/app/cleanup-phase")" == returning ]]
+return_count="$(wc -l < "$TEST_ROOT/treehouse-return.log")"
+HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+  FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/interrupted-active" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/interrupted-pool-checkout" \
+  FAKE_TREEHOUSE_LEASE_ID=lease-interrupted-return \
+  FAKE_TREEHOUSE_HOLDER=sgt-interrupted-return-app \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" interrupted-return app >/dev/null
+[[ "$(wc -l < "$TEST_ROOT/treehouse-return.log")" -eq "$return_count" ]]
+[[ "$(sed -n '1p' "$TEST_ROOT/fleet/interrupted-return/app/cleanup-phase")" == returned ]]
+printf 'sgt-cleanup converges after return-success publication interruption: ok\n'
 
 init_repo "$TEST_ROOT/git-main"
 git -C "$TEST_ROOT/git-main" worktree add -q -b git-worker \

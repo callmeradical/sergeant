@@ -813,14 +813,44 @@ for rname in "${TARGET_REPOS[@]}"; do
   if $use_treehouse; then
     _info "acquiring treehouse lease for $rname ..."
     lease_holder="sgt-${TASK_ID}-${rname}"
-    worktree_path="$(cd "$repo_path" && treehouse get --lease --lease-holder "$lease_holder" 2>/dev/null)"
-    if [[ -z "$worktree_path" ]]; then
+    treehouse_allocation=""
+    treehouse_fields=""
+    treehouse_acquired=false
+    if treehouse_allocation="$(cd "$repo_path" && treehouse get --lease \
+      --lease-holder "$lease_holder" --json 2>/dev/null)"; then
+      treehouse_acquired=true
+      treehouse_fields="$(python3 -c '
+import json, sys
+try:
+    allocation = json.load(sys.stdin)
+except (json.JSONDecodeError, OSError):
+    raise SystemExit(1)
+path = allocation.get("path") if isinstance(allocation, dict) else None
+lease_id = allocation.get("lease_id") if isinstance(allocation, dict) else None
+holder = allocation.get("lease_holder") if isinstance(allocation, dict) else None
+if not all(isinstance(value, str) and value and "\n" not in value
+           for value in (path, lease_id, holder)):
+    raise SystemExit(1)
+print(path)
+print(lease_id)
+print(holder)
+' <<< "$treehouse_allocation" 2>/dev/null || true)"
+    fi
+    worktree_path="$(sed -n '1p' <<< "$treehouse_fields")"
+    lease_id="$(sed -n '2p' <<< "$treehouse_fields")"
+    allocated_holder="$(sed -n '3p' <<< "$treehouse_fields")"
+    if [[ "$treehouse_acquired" == true && ( -z "$worktree_path" || -z "$lease_id" || \
+      "$allocated_holder" != "$lease_holder" || \
+      -n "$(sed -n '4p' <<< "$treehouse_fields")" ) ]]; then
+      _die "treehouse returned an invalid lease allocation for $rname; refusing to lose lease ownership"
+    elif [[ "$treehouse_acquired" != true ]]; then
       _info "WARNING: treehouse lease failed — falling back to git worktree add"
       use_treehouse=false
     else
       _info "leased: $worktree_path"
       echo "treehouse"      > "$repo_task_dir/wt_type"
       echo "$lease_holder"  > "$repo_task_dir/wt_holder"
+      echo "$lease_id"      > "$repo_task_dir/wt_lease_id"
       # Create and checkout the task branch in the leased worktree
       if git -C "$worktree_path" show-ref --verify --quiet "refs/heads/$BRANCH" 2>/dev/null; then
         git -C "$worktree_path" checkout "$BRANCH" 2>&1 | sed 's/^/    /'
