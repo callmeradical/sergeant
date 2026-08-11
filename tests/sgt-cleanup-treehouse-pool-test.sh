@@ -62,6 +62,28 @@ if [[ "$1" == status && "$2" == --json ]]; then
   case "${FAKE_TREEHOUSE_STATUS_MODE:-valid}" in
     empty) printf '[]\n'; exit 0 ;;
     malformed) printf '{bad-json\n'; exit 0 ;;
+    constant)
+      printf '[{"path":"%s","lease_id":"%s","lease_holder":"%s","processes":NaN}]\n' \
+        "$FAKE_TREEHOUSE_PATH" "$FAKE_TREEHOUSE_LEASE_ID" "$FAKE_TREEHOUSE_HOLDER"
+      exit 0
+      ;;
+    invalid_utf8) printf '\377'; exit 0 ;;
+    control)
+      printf '[{"path":"%s","lease_id":"lease\\u001fbad","lease_holder":"%s"}]\n' \
+        "$FAKE_TREEHOUSE_PATH" "$FAKE_TREEHOUSE_HOLDER"
+      exit 0
+      ;;
+    duplicate_field)
+      printf '[{"path":"%s","lease_id":"one","lease_id":"%s","lease_holder":"%s"}]\n' \
+        "$FAKE_TREEHOUSE_PATH" "$FAKE_TREEHOUSE_LEASE_ID" "$FAKE_TREEHOUSE_HOLDER"
+      exit 0
+      ;;
+    noncanonical)
+      printf '[{"path":"%s/../%s","lease_id":"%s","lease_holder":"%s"}]\n' \
+        "$FAKE_TREEHOUSE_PATH" "$(basename "$FAKE_TREEHOUSE_PATH")" \
+        "$FAKE_TREEHOUSE_LEASE_ID" "$FAKE_TREEHOUSE_HOLDER"
+      exit 0
+      ;;
     duplicate)
       printf '[{"path":"%s","lease_id":"%s","lease_holder":"%s"},{"path":"%s","lease_id":"%s","lease_holder":"%s"}]\n' \
         "$FAKE_TREEHOUSE_PATH" "$FAKE_TREEHOUSE_LEASE_ID" "$FAKE_TREEHOUSE_HOLDER" \
@@ -200,7 +222,8 @@ set -e
 [[ -e "$TEST_ROOT/mismatch-active" && -d "$TEST_ROOT/fleet/lease-mismatch" ]]
 printf 'sgt-cleanup rejects a changed Treehouse lease identity: ok\n'
 
-for status_mode in empty malformed duplicate; do
+for status_mode in empty malformed constant invalid_utf8 control duplicate_field duplicate \
+  noncanonical; do
   init_repo "$TEST_ROOT/status-$status_mode-main"
   git -C "$TEST_ROOT/status-$status_mode-main" worktree add -q \
     -b "status-$status_mode-worker" "$TEST_ROOT/status-$status_mode-checkout"
@@ -315,6 +338,59 @@ set -e
 [[ "$(sed -n '1p' "$TEST_ROOT/fleet/interrupted-return/app/cleanup-phase")" == returning ]]
 [[ -d "$TEST_ROOT/fleet/interrupted-return" ]]
 printf 'sgt-cleanup retries an ambiguous interrupted conditional return: ok\n'
+
+init_repo "$TEST_ROOT/receipt-crash-main"
+git -C "$TEST_ROOT/receipt-crash-main" worktree add -q -b receipt-crash-worker \
+  "$TEST_ROOT/receipt-crash-checkout"
+record_task receipt-crash "$TEST_ROOT/receipt-crash-main" \
+  "$TEST_ROOT/receipt-crash-checkout" treehouse
+touch "$TEST_ROOT/receipt-crash-active"
+set +e
+HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+  FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/receipt-crash-active" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/receipt-crash-checkout" \
+  FAKE_TREEHOUSE_LEASE_ID=lease-receipt-crash \
+  FAKE_TREEHOUSE_HOLDER=sgt-receipt-crash-app \
+  SGT_CLEANUP_FAIL_POINT=treehouse-return-before-receipt \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" receipt-crash app >/dev/null 2>&1
+receipt_crash_status=$?
+set -e
+[[ "$receipt_crash_status" -ne 0 && ! -e "$TEST_ROOT/receipt-crash-active" ]]
+python3 - "$TEST_ROOT/fleet/receipt-crash/app/treehouse-return-receipt.json" <<'PY'
+import json, sys
+receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+assert receipt["attempts"][-1]["state"] == "started"
+PY
+[[ "$(sed -n '1p' "$TEST_ROOT/fleet/receipt-crash/app/cleanup-phase")" == returning ]]
+set +e
+HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+  FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/receipt-crash-active" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/receipt-crash-checkout" \
+  FAKE_TREEHOUSE_LEASE_ID=lease-receipt-crash \
+  FAKE_TREEHOUSE_HOLDER=sgt-receipt-crash-app \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" receipt-crash app >/dev/null 2>&1
+receipt_retry_status=$?
+set -e
+[[ "$receipt_retry_status" -ne 0 && -d "$TEST_ROOT/fleet/receipt-crash" ]]
+python3 - "$TEST_ROOT/fleet/receipt-crash/app/treehouse-return-receipt.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+first, second = receipt["attempts"][-2:]
+assert first["state"] == "started"
+assert second["state"] == "completed" and second["returncode"] == 42
+assert first["raw_path"] != second["raw_path"]
+assert Path(first["raw_path"]).is_file() and Path(second["raw_path"]).is_file()
+PY
+printf 'sgt-cleanup preserves ambiguous post-return receipt crashes: ok\n'
 
 init_repo "$TEST_ROOT/git-main"
 git -C "$TEST_ROOT/git-main" worktree add -q -b git-worker \

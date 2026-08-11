@@ -1719,30 +1719,28 @@ _treehouse_returned_phase() {
 }
 
 _treehouse_lease_state() {
-  local holder="$4" lease_id="$3" repo_root="$1" status_json worktree="$2"
+  local holder="$4" lease_id="$3" repo_root="$1" status_dir state_file worktree="$2"
+  status_dir="$(mktemp -d)" || return 1
+  state_file="$status_dir/state.json"
 
-  status_json="$(cd "$repo_root" && treehouse status --json 2>/dev/null)" || return 1
+  "$SCRIPT_DIR/_sgt-treehouse-io.py" status "$repo_root" \
+    "$status_dir/status.raw" "$status_dir/receipt.json" \
+    "$state_file" "$worktree" "$lease_id" "$holder" || {
+      rm -rf "$status_dir"
+      return 1
+    }
   TREEHOUSE_LEASE_STATE="$(python3 -c '
 import json, sys
-try:
-    data = json.load(sys.stdin)
-except (json.JSONDecodeError, OSError):
-    raise SystemExit(2)
-if not isinstance(data, list):
-    raise SystemExit(2)
-path, lease_id, holder = sys.argv[1:]
-entries = [entry for entry in data
-           if isinstance(entry, dict) and entry.get("path") == path]
-if len(entries) > 1:
-    raise SystemExit(2)
-if not entries:
-    print("different")
-elif (entries[0].get("lease_id") == lease_id and
-      entries[0].get("lease_holder") == holder):
-    print("matched")
-else:
-    print("different")
-' "$worktree" "$lease_id" "$holder" <<< "$status_json")" || return 1
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+state = value.get("state") if isinstance(value, dict) else None
+if state not in ("matched", "different"):
+    raise SystemExit(1)
+print(state)
+' "$state_file")" || {
+    rm -rf "$status_dir"
+    return 1
+  }
+  rm -rf "$status_dir"
   [[ "$TREEHOUSE_LEASE_STATE" == matched || \
     "$TREEHOUSE_LEASE_STATE" == different ]]
 }
@@ -2758,8 +2756,11 @@ for repo_dir in "$TASK_DIR"/*/; do
 
   if [[ "$retrying_removal" != true ]]; then
     if [[ "$wt_type" == treehouse ]]; then
+      if ! _same_filesystem_pair "$repo_dir" "$repo_name" "$worktree"; then
+        _die "$CLEANUP_LAYOUT_ERROR"
+      fi
       if ! _treehouse_lease_state "$retry_root" "$worktree" \
-        "$treehouse_lease_id" "$treehouse_holder"; then
+        "$treehouse_lease_id" "$treehouse_holder" "$repo_dir"; then
         _die "Cannot verify current treehouse lease; fleet state preserved: $worktree"
       fi
       [[ "$TREEHOUSE_LEASE_STATE" == matched ]] || \
@@ -2825,9 +2826,9 @@ for repo_dir in "$TASK_DIR"/*/; do
       "$LIVE_EVIDENCE_BACKUP" "$retrying_removal" "$initial_marker" \
       "$initial_marker_preexisting"
     if [[ "$treehouse_returned" != true ]] && ! \
-      (cd "$retry_root" && treehouse return --force \
-        --if-lease-id "$treehouse_lease_id" \
-        --if-lease-holder "$treehouse_holder" "$worktree" 2>&1 | sed 's/^/  /'); then
+      "$SCRIPT_DIR/_sgt-treehouse-io.py" return "$retry_root" \
+        "$repo_dir/treehouse-return.raw" "$repo_dir/treehouse-return-receipt.json" \
+        "$worktree" "$treehouse_lease_id" "$treehouse_holder"; then
       if [[ ! -d "$worktree" ]]; then
         _rollback_remove_path "$LIVE_EVIDENCE_BACKUP" \
           "removed treehouse live evidence backup" live-backup-cleanup
@@ -2838,7 +2839,7 @@ for repo_dir in "$TASK_DIR"/*/; do
       fi
       _restore_removed_worker_evidence "$worktree" "$LIVE_EVIDENCE_BACKUP" || \
         _die "Failed to restore worker evidence after treehouse failure: $repo_name"
-      _die "Conditional treehouse return did not confirm lease release; retry required; fleet state preserved: $worktree"
+      _die "Conditional treehouse return did not confirm lease release; retry required; fleet state preserved: $worktree; receipt: $repo_dir/treehouse-return-receipt.json"
     fi
   else
     echo "  removing git worktree: $worktree"

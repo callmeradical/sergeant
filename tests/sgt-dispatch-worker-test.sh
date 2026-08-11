@@ -225,6 +225,25 @@ case "${TREEHOUSE_OUTPUT_MODE:-valid}" in
     python3 -c 'import sys; sys.stdout.write("x" * 70000)'
     exit 0
     ;;
+  valid_nonzero)
+    "$REAL_GIT" -C "$PWD" worktree add -q --detach "$TREEHOUSE_TEST_PATH"
+    printf '{"path":"%s","lease_id":"lease-dispatch-1","lease_holder":"%s"}\n' \
+      "$TREEHOUSE_TEST_PATH" "$4"
+    exit 23
+    ;;
+  valid_signal)
+    "$REAL_GIT" -C "$PWD" worktree add -q --detach "$TREEHOUSE_TEST_PATH"
+    printf '{"path":"%s","lease_id":"lease-dispatch-1","lease_holder":"%s"}\n' \
+      "$TREEHOUSE_TEST_PATH" "$4"
+    kill -TERM "$$"
+    ;;
+  symlink)
+    "$REAL_GIT" -C "$PWD" worktree add -q --detach "$TREEHOUSE_TEST_PATH-target"
+    ln -s "$TREEHOUSE_TEST_PATH-target" "$TREEHOUSE_TEST_PATH"
+    printf '{"path":"%s","lease_id":"lease-dispatch-1","lease_holder":"%s"}\n' \
+      "$TREEHOUSE_TEST_PATH" "$4"
+    exit 0
+    ;;
 esac
 if [[ ! -d "$TREEHOUSE_TEST_PATH" ]]; then
   if [[ "${TREEHOUSE_BAD_CHECKOUT:-0}" == 1 ]]; then
@@ -261,6 +280,8 @@ assert record == {
     "version": 1,
     "repo": sys.argv[4],
     "path": sys.argv[2],
+    "path_canonical": sys.argv[2],
+    "path_is_canonical": True,
     "lease_id": "lease-dispatch-1",
     "lease_holder": sys.argv[3],
 }
@@ -288,6 +309,33 @@ for bad_mode in malformed duplicate nul control oversized; do
   [[ -s "$bad_raw" ]]
   [[ "$(wc -c < "$bad_raw")" -le 65537 ]]
   [[ ! -e "$(dirname "$bad_raw")/treehouse-acquisition.json" ]]
+  rm "$TEST_ROOT/repo/treehouse.toml"
+done
+
+for ambiguous_outcome in valid_nonzero valid_signal; do
+  touch "$TEST_ROOT/repo/treehouse.toml"
+  set +e
+  REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
+    TREEHOUSE_TEST_PATH="$TEST_ROOT/treehouse-$ambiguous_outcome" \
+    TREEHOUSE_GET_LOG="$TEST_ROOT/treehouse-$ambiguous_outcome.log" \
+    TREEHOUSE_RETURN_LOG="$TEST_ROOT/treehouse-$ambiguous_outcome-return.log" \
+    TREEHOUSE_OUTPUT_MODE="$ambiguous_outcome" \
+    TMUX_LOG="$TEST_ROOT/treehouse-$ambiguous_outcome-tmux.log" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-dispatch" test "Treehouse $ambiguous_outcome allocation" \
+      --repos app >/dev/null 2>&1
+  ambiguous_status=$?
+  set -e
+  [[ "$ambiguous_status" -ne 0 ]]
+  ambiguous_record="$(find "$TEST_ROOT/fleet" \
+    -path '*/app/treehouse-acquisition.json' -type f -exec grep -lF -- \
+    "$TEST_ROOT/treehouse-$ambiguous_outcome" {} + | head -1)"
+  [[ -s "$ambiguous_record" ]]
+  ambiguous_holder="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lease_holder"])' \
+    "$ambiguous_record")"
+  [[ "$(cat "$TEST_ROOT/treehouse-$ambiguous_outcome-return.log")" == \
+    "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $ambiguous_holder $TEST_ROOT/treehouse-$ambiguous_outcome" ]]
   rm "$TEST_ROOT/repo/treehouse.toml"
 done
 
@@ -349,10 +397,38 @@ set -e
 bad_checkout_record="$(find "$TEST_ROOT/fleet" \
   -path '*treehouse-bad-checkout-*/app/treehouse-acquisition.json' -print -quit)"
 [[ -s "$bad_checkout_record" ]]
-[[ "$(cat "$(dirname "$bad_checkout_record")/treehouse-acquisition-return")" == returned ]]
-bad_checkout_holder="$(cat "$(dirname "$bad_checkout_record")/wt_holder")"
+[[ -s "$(dirname "$bad_checkout_record")/treehouse-acquisition-return-receipt.json" ]]
+bad_checkout_holder="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lease_holder"])' \
+  "$bad_checkout_record")"
 [[ "$(cat "$TEST_ROOT/treehouse-bad-checkout-return.log")" == \
   "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $bad_checkout_holder $TEST_ROOT/treehouse-bad-checkout" ]]
+rm "$TEST_ROOT/repo/treehouse.toml"
+
+touch "$TEST_ROOT/repo/treehouse.toml"
+set +e
+REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TREEHOUSE_TEST_PATH="$TEST_ROOT/treehouse-symlink" TREEHOUSE_OUTPUT_MODE=symlink \
+  TREEHOUSE_GET_LOG="$TEST_ROOT/treehouse-symlink.log" \
+  TREEHOUSE_RETURN_LOG="$TEST_ROOT/treehouse-symlink-return.log" \
+  TMUX_LOG="$TEST_ROOT/treehouse-symlink-tmux.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Treehouse symlink allocation' --repos app \
+    >/dev/null 2>&1
+symlink_status=$?
+set -e
+[[ "$symlink_status" -ne 0 ]]
+symlink_record="$(find "$TEST_ROOT/fleet" \
+  -path '*treehouse-symlink-*/app/treehouse-acquisition.json' -print -quit)"
+python3 - "$symlink_record" <<'PY'
+import json, sys
+record = json.load(open(sys.argv[1], encoding="utf-8"))
+assert record["path_is_canonical"] is False
+PY
+symlink_holder="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lease_holder"])' \
+  "$symlink_record")"
+[[ "$(cat "$TEST_ROOT/treehouse-symlink-return.log")" == \
+  "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $symlink_holder $TEST_ROOT/treehouse-symlink" ]]
 rm "$TEST_ROOT/repo/treehouse.toml"
 
 for agent in goose claude; do
