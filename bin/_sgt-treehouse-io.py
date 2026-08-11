@@ -2,6 +2,7 @@
 """Bounded, durable Treehouse v2.1 I/O for Sergeant lease operations."""
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import signal
@@ -11,6 +12,9 @@ import threading
 import uuid
 
 LIMIT = 65536
+RECEIPT_RING = 4
+RECEIPT_ATTEMPT_LIMIT = 12000
+MAX_RECEIPT_ATTEMPTS = (1 << 63) - 1
 
 
 def atomic_json(path, value, failpoint=None):
@@ -31,28 +35,82 @@ def atomic_json(path, value, failpoint=None):
         os.close(directory)
 
 
+def load_receipt(path):
+    receipt = strict_json(Path(path).read_bytes())
+    if not isinstance(receipt, dict) or receipt.get("version") != 1:
+        raise ValueError("invalid receipt envelope")
+    attempts = receipt.get("attempts")
+    if not isinstance(attempts, list) or len(attempts) > RECEIPT_RING:
+        raise ValueError("invalid receipt attempt ring")
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            raise ValueError("invalid receipt attempt")
+        encoded = json.dumps(attempt, sort_keys=True, separators=(",", ":")).encode()
+        if len(encoded) > RECEIPT_ATTEMPT_LIMIT:
+            raise ValueError("oversized receipt attempt")
+    total = receipt.get("total_attempts", len(attempts))
+    digest = receipt.get("history_sha256", "0" * 64)
+    if (not isinstance(total, int) or isinstance(total, bool) or total < len(attempts)
+            or total > MAX_RECEIPT_ATTEMPTS):
+        raise ValueError("invalid receipt attempt count")
+    if (not isinstance(digest, str) or len(digest) != 64 or
+            any(char not in "0123456789abcdef" for char in digest)):
+        raise ValueError("invalid receipt history digest")
+    return {"version": 1, "total_attempts": total,
+            "history_sha256": digest, "attempts": attempts}
+
+
+def rotate_return_evidence(attempts, newest_raw):
+    newest = Path(newest_raw)
+    base_name = newest.name.rsplit(".", 1)[0]
+    keep = set()
+    for attempt in attempts:
+        raw = attempt.get("raw_path")
+        if isinstance(raw, str):
+            keep.update((raw, raw + ".stderr"))
+    for candidate in newest.parent.glob(base_name + ".*"):
+        if str(candidate) not in keep and candidate.is_file() and not candidate.is_symlink():
+            candidate.unlink()
+
+
 def append_receipt(path, attempt):
     target = Path(path)
-    attempts = []
+    encoded_attempt = json.dumps(attempt, sort_keys=True,
+                                 separators=(",", ":")).encode()
+    if len(encoded_attempt) > RECEIPT_ATTEMPT_LIMIT:
+        raise SystemExit("Treehouse receipt identity is too large")
+    receipt = {"version": 1, "total_attempts": 0,
+               "history_sha256": "0" * 64, "attempts": []}
     if target.exists():
         try:
-            receipt = strict_json(target.read_bytes())
-            if receipt.get("version") == 1 and isinstance(receipt.get("attempts"), list):
-                attempts = receipt["attempts"]
-        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            receipt = load_receipt(target)
+        except (ValueError, OSError, UnicodeDecodeError, json.JSONDecodeError):
             raise SystemExit("invalid preserved Treehouse receipt")
-    attempts.append(attempt)
-    atomic_json(target, {"version": 1, "attempts": attempts})
+    attempts = receipt["attempts"] + [attempt]
+    digest = receipt["history_sha256"]
+    while len(attempts) > RECEIPT_RING:
+        evicted = attempts.pop(0)
+        canonical_attempt = json.dumps(
+            evicted, sort_keys=True, separators=(",", ":")).encode()
+        digest = hashlib.sha256(bytes.fromhex(digest) + canonical_attempt).hexdigest()
+    total = min(receipt["total_attempts"] + 1, MAX_RECEIPT_ATTEMPTS)
+    updated = {"version": 1, "total_attempts": total,
+               "history_sha256": digest, "attempts": attempts}
+    atomic_json(target, updated)
+    if attempt.get("operation") == "return":
+        rotate_return_evidence(attempts, attempt["raw_path"])
 
 
-def finish_receipt(path, attempt_id, returncode):
-    receipt = strict_json(Path(path).read_bytes())
+def finish_receipt(path, attempt_id, returncode, stdout_overflow, stderr_overflow):
+    receipt = load_receipt(path)
     attempts = receipt["attempts"]
     if not attempts or attempts[-1].get("attempt_id") != attempt_id:
         raise SystemExit("Treehouse receipt attempt changed")
     attempts[-1]["state"] = "completed"
     attempts[-1]["returncode"] = returncode if returncode >= 0 else None
     attempts[-1]["signal"] = -returncode if returncode < 0 else None
+    attempts[-1]["stdout_overflow"] = stdout_overflow
+    attempts[-1]["stderr_overflow"] = stderr_overflow
     atomic_json(path, receipt)
 
 
@@ -71,17 +129,24 @@ def run_bounded(command, cwd, raw_path, receipt_path, identity, failpoint=None):
     with temp.open("xb") as output, error_temp.open("xb") as error_output:
         process = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE)
-        def drain(source, destination):
+        overflow = {"stdout": False, "stderr": False}
+        def drain(source, destination, stream_name):
             captured = 0
+            total = 0
             while chunk := source.read(65536):
+                total += len(chunk)
                 if captured <= LIMIT:
                     kept = chunk[:LIMIT + 1 - captured]
                     destination.write(kept)
                     captured += len(kept)
+                if total > LIMIT:
+                    overflow[stream_name] = True
 
         assert process.stdout is not None and process.stderr is not None
-        stdout_thread = threading.Thread(target=drain, args=(process.stdout, output))
-        stderr_thread = threading.Thread(target=drain, args=(process.stderr, error_output))
+        stdout_thread = threading.Thread(
+            target=drain, args=(process.stdout, output, "stdout"))
+        stderr_thread = threading.Thread(
+            target=drain, args=(process.stderr, error_output, "stderr"))
         stdout_thread.start()
         stderr_thread.start()
         returncode = process.wait()
@@ -106,8 +171,9 @@ def run_bounded(command, cwd, raw_path, receipt_path, identity, failpoint=None):
         raise SystemExit(90)
     if failpoint and os.environ.get("SGT_CLEANUP_FAIL_POINT") == failpoint:
         os.kill(os.getpid(), signal.SIGKILL)
-    finish_receipt(receipt_path, attempt_id, returncode)
-    return returncode, target
+    finish_receipt(receipt_path, attempt_id, returncode,
+                   overflow["stdout"], overflow["stderr"])
+    return returncode, target, overflow["stdout"] or overflow["stderr"]
 
 
 def unique_object(pairs):
@@ -152,27 +218,63 @@ def canonical(path):
     return resolved
 
 
-def git_common(path):
+def git_common(path, expected_top=None, pass_fds=()):
     top = subprocess.run(
         ["git", "-C", path, "rev-parse", "--path-format=absolute", "--show-toplevel"],
-        check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout.rstrip("\n")
-    if top != path or controls(top):
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        pass_fds=pass_fds).stdout.rstrip("\n")
+    if controls(top) or (expected_top is not None and top != expected_top):
         raise ValueError("unexpected git top-level")
     common = subprocess.run(
         ["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
-        check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout.rstrip("\n")
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        pass_fds=pass_fds).stdout.rstrip("\n")
     return canonical(common)
 
 
 def same_repository(repo, checkout):
     repo = canonical(repo)
     checkout = canonical(checkout)
-    repo_common = git_common(repo)
-    checkout_common = git_common(checkout)
+    repo_common = git_common(repo, repo)
+    checkout_common = git_common(checkout, checkout)
     left = os.stat(repo_common, follow_symlinks=False)
     right = os.stat(checkout_common, follow_symlinks=False)
     if (left.st_dev, left.st_ino) != (right.st_dev, right.st_ino):
         raise ValueError("checkout belongs to another repository")
+
+
+def checkout_branch(repo, checkout, branch):
+    repo = canonical(repo)
+    checkout = canonical(checkout)
+    if controls(branch) or not branch or len(branch.encode()) > 1024:
+        raise ValueError("invalid branch")
+    descriptor = os.open(checkout, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(descriptor)
+        descriptor_path = f"/proc/self/fd/{descriptor}"
+        repo_common = git_common(repo, repo)
+        checkout_common = git_common(
+            descriptor_path, checkout, pass_fds=(descriptor,))
+        left = os.stat(repo_common, follow_symlinks=False)
+        right = os.stat(checkout_common, follow_symlinks=False)
+        if (left.st_dev, left.st_ino) != (right.st_dev, right.st_ino):
+            raise ValueError("checkout belongs to another repository")
+        exists = subprocess.run(
+            ["git", "-C", descriptor_path, "show-ref", "--verify", "--quiet",
+             f"refs/heads/{branch}"], pass_fds=(descriptor,)).returncode == 0
+        command = ["git", "-C", descriptor_path, "checkout"]
+        command.extend([branch] if exists else ["-b", branch])
+        result = subprocess.run(command, pass_fds=(descriptor,))
+        try:
+            current = os.stat(checkout, follow_symlinks=False)
+            same_object = ((opened.st_dev, opened.st_ino) ==
+                           (current.st_dev, current.st_ino))
+            same_repository(repo, checkout)
+        except (ValueError, OSError, subprocess.CalledProcessError):
+            return 1
+        return 0 if result.returncode == 0 and same_object else 1
+    finally:
+        os.close(descriptor)
 
 
 def allocation(raw_path, record_path, repo, holder):
@@ -203,7 +305,7 @@ def main():
     mode = sys.argv[1]
     if mode == "get":
         repo, raw, receipt, record, holder = sys.argv[2:]
-        rc, _ = run_bounded(
+        rc, _, overflow = run_bounded(
             ["treehouse", "get", "--lease", "--lease-holder", holder, "--json"],
             repo, raw, receipt,
             {"operation": "get", "repo": repo, "lease_holder": holder})
@@ -212,7 +314,7 @@ def main():
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError,
                 subprocess.CalledProcessError):
             return 12
-        return 0 if rc == 0 else 10
+        return 0 if rc == 0 and not overflow else 10
     if mode == "verify-checkout":
         repo, checkout = sys.argv[2:]
         try:
@@ -220,27 +322,34 @@ def main():
         except (ValueError, OSError, subprocess.CalledProcessError):
             return 1
         return 0
+    if mode == "checkout-branch":
+        repo, checkout, branch = sys.argv[2:]
+        try:
+            return checkout_branch(repo, checkout, branch)
+        except (ValueError, OSError, subprocess.CalledProcessError):
+            return 1
     if mode == "return":
         repo, raw, receipt, path, lease_id, holder = sys.argv[2:]
         # Treehouse v2.1 compares these conditions under its pool lock.  A
         # matching identity succeeds once; a missing lease or mismatch is
         # nonzero and status exposes no historical return receipt.  Keep our
         # started attempt durable so callers fail closed across that ambiguity.
-        rc, attempt_raw = run_bounded(
+        rc, attempt_raw, overflow = run_bounded(
             ["treehouse", "return", "--force", "--if-lease-id", lease_id,
              "--if-lease-holder", holder, path], repo, raw, receipt,
             {"operation": "return", "repo": repo, "path": path,
              "lease_id": lease_id, "lease_holder": holder},
             "treehouse-return-before-receipt")
-        if rc == 0:
+        if rc == 0 and not overflow:
             sys.stdout.buffer.write(attempt_raw.read_bytes())
-        return 0 if rc == 0 else 1
+        return 0 if rc == 0 and not overflow else 1
     if mode == "status":
         repo, raw, receipt, state_path, path, lease_id, holder = sys.argv[2:]
         Path(state_path).unlink(missing_ok=True)
-        rc, _ = run_bounded(["treehouse", "status", "--json"], repo, raw, receipt,
-                            {"operation": "status", "repo": repo})
-        if rc != 0:
+        rc, _, overflow = run_bounded(
+            ["treehouse", "status", "--json"], repo, raw, receipt,
+            {"operation": "status", "repo": repo})
+        if rc != 0 or overflow:
             return 1
         try:
             data = strict_json(Path(raw).read_bytes())

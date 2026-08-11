@@ -84,6 +84,16 @@ if [[ "$1" == status && "$2" == --json ]]; then
         "$FAKE_TREEHOUSE_LEASE_ID" "$FAKE_TREEHOUSE_HOLDER"
       exit 0
       ;;
+    stderr_overflow)
+      python3 -c 'import sys; sys.stderr.write("e" * 70000)'
+      printf '[{"path":"%s","lease_id":"%s","lease_holder":"%s"}]\n' \
+        "$FAKE_TREEHOUSE_PATH" "$FAKE_TREEHOUSE_LEASE_ID" "$FAKE_TREEHOUSE_HOLDER"
+      exit 0
+      ;;
+    simultaneous_overflow)
+      python3 -c 'import sys; sys.stdout.write("o" * 70000); sys.stderr.write("e" * 70000)'
+      exit 0
+      ;;
     duplicate)
       printf '[{"path":"%s","lease_id":"%s","lease_holder":"%s"},{"path":"%s","lease_id":"%s","lease_holder":"%s"}]\n' \
         "$FAKE_TREEHOUSE_PATH" "$FAKE_TREEHOUSE_LEASE_ID" "$FAKE_TREEHOUSE_HOLDER" \
@@ -110,6 +120,10 @@ printf '%s|%s\n' "$PWD" "$*" >> "$FAKE_TREEHOUSE_LOG"
 [[ -e "$FAKE_TREEHOUSE_ACTIVE" ]] || exit 42
 [[ "${FAKE_TREEHOUSE_RETURN_FAIL:-0}" != 1 ]] || exit 43
 rm "$FAKE_TREEHOUSE_ACTIVE"
+if [[ "${FAKE_TREEHOUSE_RETURN_FLOOD:-0}" == 1 ]]; then
+  python3 -c 'import sys; sys.stdout.write("o" * 70000); sys.stderr.write("e" * 70000)'
+  exit 0
+fi
 printf 'Worktree returned to pool.\n'
 EOF
 chmod +x "$TEST_ROOT/fake-bin/treehouse"
@@ -223,7 +237,7 @@ set -e
 printf 'sgt-cleanup rejects a changed Treehouse lease identity: ok\n'
 
 for status_mode in empty malformed constant invalid_utf8 control duplicate_field duplicate \
-  noncanonical; do
+  noncanonical stderr_overflow simultaneous_overflow; do
   init_repo "$TEST_ROOT/status-$status_mode-main"
   git -C "$TEST_ROOT/status-$status_mode-main" worktree add -q \
     -b "status-$status_mode-worker" "$TEST_ROOT/status-$status_mode-checkout"
@@ -299,6 +313,95 @@ set -e
 [[ -f "$TEST_ROOT/return-failure-pool-checkout/.sergeant-status" ]]
 [[ -d "$TEST_ROOT/fleet/return-failure" ]]
 printf 'sgt-cleanup preserves a lease after conditional return failure: ok\n'
+
+for ((retry_attempt = 0; retry_attempt < 100; retry_attempt++)); do
+  if HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+    FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+    FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/return-failure-active" \
+    FAKE_TREEHOUSE_PATH="$TEST_ROOT/return-failure-pool-checkout" \
+    FAKE_TREEHOUSE_LEASE_ID=lease-return-failure \
+    FAKE_TREEHOUSE_HOLDER=sgt-return-failure-app \
+    FAKE_TREEHOUSE_RETURN_FAIL=1 \
+    SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" return-failure app >/dev/null 2>&1; then
+    printf 'conditional return retry unexpectedly succeeded: %s\n' "$retry_attempt" >&2
+    exit 1
+  fi
+done
+return_receipt="$TEST_ROOT/fleet/return-failure/app/treehouse-return-receipt.json"
+python3 - "$return_receipt" <<'PY'
+import json, sys
+receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+assert receipt["total_attempts"] == 101
+assert len(receipt["attempts"]) == 4
+assert all(attempt["state"] == "completed" for attempt in receipt["attempts"])
+assert len(open(sys.argv[1], "rb").read()) <= 65536
+PY
+[[ "$(find "$TEST_ROOT/fleet/return-failure/app" \
+  -name 'treehouse-return.raw.*' -type f | wc -l)" -le 8 ]]
+printf 'sgt-cleanup bounds receipts and raw evidence across hundreds of retries: ok\n'
+
+for corrupt_receipt in partial malformed oversized; do
+  case "$corrupt_receipt" in
+    partial) printf '{"version":1' > "$return_receipt" ;;
+    malformed) printf '{"version":2,"attempts":[]}\n' > "$return_receipt" ;;
+    oversized)
+      python3 - "$return_receipt" <<'PY'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_bytes(b"x" * 70000)
+PY
+      ;;
+  esac
+  receipt_before="$(cksum "$return_receipt")"
+  set +e
+  HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+    FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+    FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/return-failure-active" \
+    FAKE_TREEHOUSE_PATH="$TEST_ROOT/return-failure-pool-checkout" \
+    FAKE_TREEHOUSE_LEASE_ID=lease-return-failure \
+    FAKE_TREEHOUSE_HOLDER=sgt-return-failure-app \
+    FAKE_TREEHOUSE_RETURN_FAIL=1 \
+    SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-cleanup" return-failure app >/dev/null 2>&1
+  corrupt_status=$?
+  set -e
+  [[ "$corrupt_status" -ne 0 ]]
+  [[ "$(cksum "$return_receipt")" == "$receipt_before" ]]
+  [[ -d "$TEST_ROOT/fleet/return-failure" ]]
+done
+printf 'sgt-cleanup preserves malformed and oversized receipts without overwrite: ok\n'
+
+init_repo "$TEST_ROOT/return-overflow-main"
+git -C "$TEST_ROOT/return-overflow-main" worktree add -q -b return-overflow-worker \
+  "$TEST_ROOT/return-overflow-checkout"
+record_task return-overflow "$TEST_ROOT/return-overflow-main" \
+  "$TEST_ROOT/return-overflow-checkout" treehouse
+touch "$TEST_ROOT/return-overflow-active"
+set +e
+HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+  FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/return-overflow-active" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/return-overflow-checkout" \
+  FAKE_TREEHOUSE_LEASE_ID=lease-return-overflow \
+  FAKE_TREEHOUSE_HOLDER=sgt-return-overflow-app \
+  FAKE_TREEHOUSE_RETURN_FLOOD=1 \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" return-overflow app >/dev/null 2>&1
+return_overflow_status=$?
+set -e
+[[ "$return_overflow_status" -ne 0 ]]
+[[ "$(sed -n '1p' "$TEST_ROOT/fleet/return-overflow/app/cleanup-phase")" == returning ]]
+python3 - "$TEST_ROOT/fleet/return-overflow/app/treehouse-return-receipt.json" <<'PY'
+import json, sys
+attempt = json.load(open(sys.argv[1], encoding="utf-8"))["attempts"][-1]
+assert attempt["state"] == "completed" and attempt["returncode"] == 0
+assert attempt["stdout_overflow"] is True and attempt["stderr_overflow"] is True
+PY
+printf 'sgt-cleanup rejects successful returns with simultaneous output floods: ok\n'
 
 init_repo "$TEST_ROOT/interrupted-main"
 git -C "$TEST_ROOT/interrupted-main" worktree add -q -b interrupted-worker \

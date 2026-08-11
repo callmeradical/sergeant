@@ -853,18 +853,10 @@ for rname in "${TARGET_REPOS[@]}"; do
       echo "treehouse"      > "$repo_task_dir/wt_type"
       echo "$lease_holder"  > "$repo_task_dir/wt_holder"
       echo "$lease_id"      > "$repo_task_dir/wt_lease_id"
-      # Create and checkout the task branch in the leased worktree
-      treehouse_checkout_ok=false
-      if git -C "$worktree_path" show-ref --verify --quiet "refs/heads/$BRANCH" 2>/dev/null; then
-        if git -C "$worktree_path" checkout "$BRANCH" 2>&1 | sed 's/^/    /'; then
-          treehouse_checkout_ok=true
-        fi
-      else
-        if git -C "$worktree_path" checkout -b "$BRANCH" 2>&1 | sed 's/^/    /'; then
-          treehouse_checkout_ok=true
-        fi
-      fi
-      if [[ "$treehouse_checkout_ok" != true ]]; then
+      # Hold a verified directory descriptor across branch lookup and checkout;
+      # path swaps cannot redirect Git into a different repository.
+      if ! "$SCRIPT_DIR/_sgt-treehouse-io.py" checkout-branch \
+        "$repo_path" "$worktree_path" "$BRANCH"; then
         printf 'failed: treehouse checkout failed\n' > "$repo_task_dir/status"
         if "$SCRIPT_DIR/_sgt-treehouse-io.py" return "$repo_path" \
           "$repo_task_dir/treehouse-acquisition-return.raw" \

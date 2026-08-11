@@ -225,6 +225,10 @@ case "${TREEHOUSE_OUTPUT_MODE:-valid}" in
     python3 -c 'import sys; sys.stdout.write("x" * 70000)'
     exit 0
     ;;
+  simultaneous_overflow)
+    python3 -c 'import sys; sys.stdout.write("o" * 70000); sys.stderr.write("e" * 70000)'
+    exit 0
+    ;;
   valid_nonzero)
     "$REAL_GIT" -C "$PWD" worktree add -q --detach "$TREEHOUSE_TEST_PATH"
     printf '{"path":"%s","lease_id":"lease-dispatch-1","lease_holder":"%s"}\n' \
@@ -236,6 +240,13 @@ case "${TREEHOUSE_OUTPUT_MODE:-valid}" in
     printf '{"path":"%s","lease_id":"lease-dispatch-1","lease_holder":"%s"}\n' \
       "$TREEHOUSE_TEST_PATH" "$4"
     kill -TERM "$$"
+    ;;
+  stderr_overflow)
+    "$REAL_GIT" -C "$PWD" worktree add -q --detach "$TREEHOUSE_TEST_PATH"
+    python3 -c 'import sys; sys.stderr.write("e" * 70000)'
+    printf '{"path":"%s","lease_id":"lease-dispatch-1","lease_holder":"%s"}\n' \
+      "$TREEHOUSE_TEST_PATH" "$4"
+    exit 0
     ;;
   symlink)
     "$REAL_GIT" -C "$PWD" worktree add -q --detach "$TREEHOUSE_TEST_PATH-target"
@@ -290,7 +301,7 @@ PY
   "get --lease --lease-holder sgt-$treehouse_task_id-app --json" ]]
 rm "$TEST_ROOT/repo/treehouse.toml"
 
-for bad_mode in malformed duplicate nul control oversized; do
+for bad_mode in malformed duplicate nul control oversized simultaneous_overflow; do
   touch "$TEST_ROOT/repo/treehouse.toml"
   set +e
   REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
@@ -305,14 +316,15 @@ for bad_mode in malformed duplicate nul control oversized; do
   bad_status=$?
   set -e
   [[ "$bad_status" -ne 0 ]]
-  bad_raw="$(find "$TEST_ROOT/fleet" -path "*treehouse-$bad_mode-*/app/treehouse-acquisition.raw" -print -quit)"
+  bad_raw="$(find "$TEST_ROOT/fleet" -path '*/app/treehouse-acquisition.raw' \
+    -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)"
   [[ -s "$bad_raw" ]]
   [[ "$(wc -c < "$bad_raw")" -le 65537 ]]
   [[ ! -e "$(dirname "$bad_raw")/treehouse-acquisition.json" ]]
   rm "$TEST_ROOT/repo/treehouse.toml"
 done
 
-for ambiguous_outcome in valid_nonzero valid_signal; do
+for ambiguous_outcome in valid_nonzero valid_signal stderr_overflow; do
   touch "$TEST_ROOT/repo/treehouse.toml"
   set +e
   REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
@@ -429,6 +441,49 @@ symlink_holder="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])
   "$symlink_record")"
 [[ "$(cat "$TEST_ROOT/treehouse-symlink-return.log")" == \
   "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $symlink_holder $TEST_ROOT/treehouse-symlink" ]]
+rm "$TEST_ROOT/repo/treehouse.toml"
+
+mkdir -p "$TEST_ROOT/swap-unrelated"
+git -C "$TEST_ROOT/swap-unrelated" init -q
+git -C "$TEST_ROOT/swap-unrelated" config user.name Test
+git -C "$TEST_ROOT/swap-unrelated" config user.email test@example.invalid
+printf 'unrelated\n' > "$TEST_ROOT/swap-unrelated/UNRELATED"
+git -C "$TEST_ROOT/swap-unrelated" add UNRELATED
+git -C "$TEST_ROOT/swap-unrelated" commit -qm unrelated
+unrelated_head="$(git -C "$TEST_ROOT/swap-unrelated" rev-parse HEAD)"
+mkdir -p "$TEST_ROOT/swap-hooks"
+cat > "$TEST_ROOT/swap-hooks/post-checkout" <<'EOF'
+#!/usr/bin/env bash
+mv "$TREEHOUSE_TEST_PATH" "$TREEHOUSE_TEST_PATH-original"
+ln -s "$TREEHOUSE_SWAP_REPO" "$TREEHOUSE_TEST_PATH"
+EOF
+chmod +x "$TEST_ROOT/swap-hooks/post-checkout"
+touch "$TEST_ROOT/repo/treehouse.toml"
+set +e
+REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TREEHOUSE_TEST_PATH="$TEST_ROOT/treehouse-swap-checkout" \
+  TREEHOUSE_SWAP_REPO="$TEST_ROOT/swap-unrelated" \
+  TREEHOUSE_GET_LOG="$TEST_ROOT/treehouse-swap.log" \
+  TREEHOUSE_RETURN_LOG="$TEST_ROOT/treehouse-swap-return.log" \
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath \
+  GIT_CONFIG_VALUE_0="$TEST_ROOT/swap-hooks" \
+  TMUX_LOG="$TEST_ROOT/treehouse-swap-tmux.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Treehouse checkout swap' --repos app \
+    >/dev/null 2>&1
+swap_status=$?
+set -e
+[[ "$swap_status" -ne 0 && -L "$TEST_ROOT/treehouse-swap-checkout" ]]
+[[ "$(git -C "$TEST_ROOT/swap-unrelated" rev-parse HEAD)" == "$unrelated_head" ]]
+[[ -z "$(git -C "$TEST_ROOT/swap-unrelated" branch --list \
+  'feat/treehouse-checkout-swap')" ]]
+swap_record="$(find "$TEST_ROOT/fleet" \
+  -path '*treehouse-checkout-swap-*/app/treehouse-acquisition.json' -print -quit)"
+swap_holder="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lease_holder"])' \
+  "$swap_record")"
+[[ "$(cat "$TEST_ROOT/treehouse-swap-return.log")" == \
+  "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $swap_holder $TEST_ROOT/treehouse-swap-checkout" ]]
 rm "$TEST_ROOT/repo/treehouse.toml"
 
 for agent in goose claude; do
