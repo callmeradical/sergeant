@@ -448,6 +448,8 @@ fi
 # A concurrent/retried exact invocation joins an already acknowledged immutable
 # replacement journal instead of creating or delivering another notification.
 existing_relaunch_transaction="$REPO_DIR/response_relaunch_transaction"
+recovered_successor=""
+recovered_spawn_token=""
 if [[ -f "$existing_relaunch_transaction" &&
       "$(sed -n 's/^response_id=//p' "$existing_relaunch_transaction")" == "$response_id" &&
       "$(sed -n 's/^phase=//p' "$existing_relaunch_transaction")" == acked ]]; then
@@ -463,6 +465,14 @@ if [[ -f "$existing_relaunch_transaction" &&
     exit 0
   fi
   _die "Acknowledged worker relaunch journal conflicts with current notification evidence"
+fi
+if [[ -f "$existing_relaunch_transaction" &&
+      -z "$(sed -n 's/^response_id=//p' "$existing_relaunch_transaction")" ]]; then
+  recovered_successor="$(sed -n 's/^notification_id=//p' "$existing_relaunch_transaction")"
+  recovered_spawn_token="$(sed -n 's/^spawn_token=//p' "$existing_relaunch_transaction")"
+  [[ "$recovered_successor" =~ ^[a-f0-9]{32}$ &&
+     "$recovered_spawn_token" =~ ^[a-f0-9]{32}$ ]] || \
+    _die "Pending cross-CLI relaunch journal is malformed"
 fi
 
 _transfer_interrupt_hook() {
@@ -486,10 +496,15 @@ _ensure_successor_binding() {
     return 0
   fi
   [[ -z "$successor_binding" ]] || return 1
-  delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
-    od -An -tx1 | tr -d ' \n')"
-  replacement_spawn_token="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
-    od -An -tx1 | tr -d ' \n')"
+  if [[ -n "$recovered_successor" ]]; then
+    delivery_notification_id="$recovered_successor"
+    replacement_spawn_token="$recovered_spawn_token"
+  else
+    delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
+      od -An -tx1 | tr -d ' \n')"
+    replacement_spawn_token="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
+      od -An -tx1 | tr -d ' \n')"
+  fi
   _atomic_write "$REPO_DIR/response_successor_notification" \
     "$response_id|$delivery_notification_id|$replacement_spawn_token"
 }
@@ -660,8 +675,10 @@ _write_relaunch_transaction() {
 }
 
 _relaunch_transaction_matches() {
+  local journal_response
+  journal_response="$(sed -n 's/^response_id=//p' "$relaunch_transaction" 2>/dev/null || true)"
   [[ -f "$relaunch_transaction" &&
-     "$(sed -n 's/^response_id=//p' "$relaunch_transaction")" == "$response_id" &&
+     ( -z "$journal_response" || "$journal_response" == "$response_id" ) &&
      "$(sed -n 's/^notification_id=//p' "$relaunch_transaction")" == "$delivery_notification_id" &&
      "$(sed -n 's/^spawn_token=//p' "$relaunch_transaction")" == "$replacement_spawn_token" &&
      "$(sed -n 's/^tmux_session=//p' "$relaunch_transaction")" == "$tmux_session" &&

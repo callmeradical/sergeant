@@ -744,4 +744,31 @@ printf 'resume across cli' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
 grep -Fq "new_notification=$bound_successor" \
   "$state/notifications/$NOTIFY/ownership_transition"
 
+read -r state wt <<<"$(make_worktree cross-cli-spawn)"
+task=task-cross-cli-spawn
+setup_stall "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+set +e
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/cross-spawn-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/cross-spawn-window-count" \
+  SGT_TEST_HOOKS=1 SGT_TEST_INTERRUPT_RECOVER_AT=spawned \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
+cross_spawn_status=$?
+set -e
+[[ "$cross_spawn_status" -ne 0 ]]
+spawn_successor="$(sed -n 's/^notification_id=//p' \
+  "$state/response_relaunch_transaction")"
+printf 'orphaned\n' > "$state/status"
+printf 'orphaned\n' > "$wt/.sergeant-status"
+printf 'resume spawned pane across cli' | PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" \
+  PANE_ALIVE=0 NEW_PANE=%98 TMUX_PANE_STATE="$TEST_ROOT/cross-spawn-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/cross-spawn-window-count" \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1
+[[ "$(cat "$TEST_ROOT/cross-spawn-window-count")" == 1 ]]
+[[ "$(cat "$state/notification_id")" == "$spawn_successor" ]]
+[[ "$(sed -n 's/^phase=//p' "$state/response_relaunch_transaction")" == acked ]]
+
 printf 'action-lease convergence before refusal: ok\n'
