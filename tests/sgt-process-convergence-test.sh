@@ -138,5 +138,17 @@ rm -f "$TEST_ROOT/fleet/.coordinator-pane.lock"
 mkdir -p "$TEST_ROOT/fleet/task-stale"
 printf '99999999|stale process start\n' > "$TEST_ROOT/fleet/.coordinator-pane.lock"
 run_cleanup task-stale
+mkdir -p "$TEST_ROOT/fleet/task-no-hardlink"
+cat > "$TEST_ROOT/fake-bin/ln" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$TEST_ROOT/fake-bin/ln"
+set +e
+unsupported_output="$(SGT_COORDINATOR_LOCK_ATTEMPTS=1 run_cleanup task-no-hardlink 2>&1)"
+unsupported_status=$?
+set -e
+[[ "$unsupported_status" -ne 0 && \
+  "$unsupported_output" == *'Atomic hard-link coordinator lock is unsupported'* ]]
 
 printf 'sgt process convergence: ok\n'

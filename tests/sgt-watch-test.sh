@@ -25,8 +25,9 @@ printf '%%42\n' > "$repo/pane"
 printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo" > "$repo/pane_identity"
 printf '4242\n' > "$repo/worker_pid"
 printf '4242\n' > "$repo/worker_process_group"
+printf '4242\n' > "$repo/worker_session_id"
 printf 'fixture worker start\n' > "$repo/worker_process_start"
-printf 'version=1\nidentity=0|%%42|4242|123456|sgt-interactive-worker:%s\nprocess_group=4242\nphase=retiring\nmember=4242|fixture worker start\n' \
+printf 'version=1\nidentity=0|%%42|4242|123456|sgt-interactive-worker:%s\nprocess_group=4242\nsession_id=4242\nphase=retiring\nmember=4242|fixture worker start\n' \
   "$repo" > "$repo/worker_recycle_phase"
 printf 'opencode\n' > "$repo/agent"
 chmod 600 "$repo/pane_identity"
@@ -238,8 +239,12 @@ missing_worktree_repo="$fleet/task-missing-worktree/app"
 mkdir -p "$missing_worktree_repo"
 printf '%s\n' "$TEST_ROOT/missing-worktree" > "$missing_worktree_repo/worktree"
 printf 'in_progress\n' > "$missing_worktree_repo/status"
+set +e
 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
   "$ROOT/bin/sgt-watch" --sync-all
+sync_all_status=$?
+set -e
+[[ "$sync_all_status" -ne 0 ]]
 [[ "$(cat "$incomplete_repo/status")" == \
   'failed: dispatch incomplete: no worktree or owned live pane' ]]
 grep -Fq 'dispatch never acquired a worktree or owned live pane' "$incomplete_repo/diagnostic"
@@ -415,12 +420,15 @@ printf 'drained\n' > "$drained_wt/.sergeant-status"
 # Note: no pane file — drained worker's supervisor has exited
 
 # --sync: drained status propagated to fleet without triggering orphan detector
+set +e
 PATH="$fake_bin:$PATH" SERGEANT_FLEET="$drained_fleet" \
-  "$ROOT/bin/sgt-watch" --sync task-drained
+  "$ROOT/bin/sgt-watch" --sync task-drained >/dev/null 2>&1
+drained_sync_status=$?
+set -e
+[[ "$drained_sync_status" -ne 0 ]]
 [[ "$(cat "$drained_task/drainedrepo/status")" == "drained" ]] || {
   printf 'FAIL sgt-watch drained sync: expected drained status\n' >&2; exit 1; }
-[[ ! -f "$drained_task/drainedrepo/diagnostic" ]] || {
-  printf 'FAIL sgt-watch drained sync: unexpected diagnostic\n' >&2; exit 1; }
+grep -Fq 'process retirement is unproven' "$drained_task/drainedrepo/diagnostic"
 
 # --list: shows drained count
 list_drained_output="$(PATH="$fake_bin:$PATH" SERGEANT_FLEET="$drained_fleet" \
@@ -428,10 +436,12 @@ list_drained_output="$(PATH="$fake_bin:$PATH" SERGEANT_FLEET="$drained_fleet" \
 [[ "$list_drained_output" == *'1 drained'* ]] || {
   printf 'FAIL sgt-watch --list: expected drained count\n' >&2; exit 1; }
 
-# sgt-watch <task>: all workers drained → exits 0 (not looping forever)
-SERGEANT_WATCH_INTERVAL=0.01 PATH="$fake_bin:$PATH" \
-  SERGEANT_FLEET="$drained_fleet" \
-  "$ROOT/bin/sgt-watch" task-drained || {
-  printf 'FAIL sgt-watch task-drained: expected exit 0 when all drained\n' >&2; exit 1; }
+# Foreground watch also refuses terminal success without retirement proof.
+set +e
+drained_watch_output="$(SERGEANT_WATCH_INTERVAL=0.01 PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$drained_fleet" "$ROOT/bin/sgt-watch" task-drained 2>&1)"
+drained_watch_status=$?
+set -e
+[[ "$drained_watch_status" -ne 0 && "$drained_watch_output" != *'All repos done.'* ]]
 
 printf 'sgt-watch drained status: ok\n'

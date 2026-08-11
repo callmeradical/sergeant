@@ -40,19 +40,35 @@ set -euo pipefail
 state="$1"
 pid="$$"
 pgid="$(ps -o pgid= -p "$pid" | tr -d ' ')"
+sid="$(ps -o sid= -p "$pid" | tr -d ' ')"
 start="$(ps -o lstart= -p "$pid" | sed 's/^ *//;s/ *$//')"
 printf '%s\n' "$pid" > "$state/worker_pid"
 printf '%s\n' "$pgid" > "$state/worker_process_group"
+printf '%s\n' "$sid" > "$state/worker_session_id"
 printf '%s\n' "$start" > "$state/worker_process_start"
-bash -c 'trap "" TERM HUP; while :; do :; done' &
+"$RESISTANT_HELPER" &
 printf '%s\n' "$!" > "$state/helper_pid"
 wait
 EOF
 chmod +x "$TEST_ROOT/sgt-interactive-worker"
+cat > "$TEST_ROOT/resistant-helper" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == child ]]; then
+  trap '' TERM HUP
+else
+  trap '"$0" child & printf "%s\n" "$!" > "$FORK_PID_FILE"' TERM
+  trap '' HUP
+fi
+while :; do :; done
+EOF
+chmod +x "$TEST_ROOT/resistant-helper"
+export RESISTANT_HELPER="$TEST_ROOT/resistant-helper"
+export FORK_PID_FILE="$TEST_ROOT/fork.pid"
 
 tmux new-session -d -s "$TMUX_SESSION" -n keepalive 'while :; do sleep 1; done'
 pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n worker \
-  "$TEST_ROOT/sgt-interactive-worker '$state'")"
+  "env RESISTANT_HELPER='$RESISTANT_HELPER' FORK_PID_FILE='$FORK_PID_FILE' \
+  '$TEST_ROOT/sgt-interactive-worker' '$state'")"
 printf '%s\n' "$pane" > "$state/pane"
 for _ in $(seq 1 100); do
   [[ -s "$state/helper_pid" && -s "$state/worker_process_start" ]] && break
@@ -65,7 +81,10 @@ tmux display-message -p -t "$pane" \
 chmod 600 "$state/pane_identity"
 helper_pid="$(cat "$state/helper_pid")"
 FIXTURE_PGIDS+=" $(cat "$state/worker_process_group")"
-kill -0 "$helper_pid"
+kill -0 "$helper_pid" 2>/dev/null || {
+  tmux capture-pane -p -t "$pane" >&2 || true
+  exit 1
+}
 [[ -n "$(pgrep -g "$(cat "$state/worker_process_group")" 2>/dev/null || true)" ]]
 pgrep -g "$(cat "$state/worker_process_group")" | grep -Fxq "$(cat "$state/worker_pid")"
 
@@ -88,6 +107,12 @@ fi
 SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" --sync task >/dev/null
 [[ ! -e "$state/worker_recycle_phase" ]]
 [[ ! -e "$state/diagnostic" ]]
+fork_pid="$(cat "$FORK_PID_FILE" 2>/dev/null || true)"
+[[ -n "$fork_pid" ]]
+if kill -0 "$fork_pid" 2>/dev/null; then
+  printf 'TERM-handler descendant survived session retirement: %s\n' "$fork_pid" >&2
+  exit 1
+fi
 
 if kill -0 "$helper_pid" 2>/dev/null; then
   printf 'terminal sync left owned helper process alive: %s\n' "$helper_pid" >&2
@@ -112,7 +137,8 @@ launch_fixture() {
     printf 'result\n' > "$launched_worktree/.sergeant-result"
   fi
   launched_pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION:" \
-    -n "$name" "$TEST_ROOT/sgt-interactive-worker '$launched_state'")"
+    -n "$name" "env RESISTANT_HELPER='$RESISTANT_HELPER' FORK_PID_FILE='$FORK_PID_FILE' \
+    '$TEST_ROOT/sgt-interactive-worker' '$launched_state'")"
   printf '%s\n' "$launched_pane" > "$launched_state/pane"
   for _ in $(seq 1 100); do
     [[ -s "$launched_state/helper_pid" && -s "$launched_state/worker_process_start" ]] && break
@@ -130,7 +156,7 @@ launch_fixture() {
 # Missing provenance is actionable and cannot be reported as converged.
 launch_fixture task-no-provenance
 rm -f "$launched_state/worker_pid" "$launched_state/worker_process_group" \
-  "$launched_state/worker_process_start"
+  "$launched_state/worker_process_start" "$launched_state/worker_session_id"
 if SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
   --sync task-no-provenance >/dev/null 2>&1; then exit 1; fi
 kill -0 "$launched_pid"
@@ -146,6 +172,17 @@ set -e
 [[ "$foreground_status" -ne 0 && "$sync_all_status" -ne 0 ]]
 [[ "$foreground_output" != *'All repos done.'* ]]
 kill -KILL -- -"$launched_pgid" 2>/dev/null || true
+
+# Terminal state with neither worktree nor pane cannot be reported successful.
+missing_state="$TEST_ROOT/fleet/task-missing/app"
+mkdir -p "$missing_state"
+printf 'done\n' > "$missing_state/status"
+if SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
+  --sync task-missing >/dev/null 2>&1; then
+  printf 'terminal task without resource retirement proof reported success\n' >&2
+  exit 1
+fi
+[[ ! -e "$missing_state/worker_recycled" ]]
 
 # PID reuse evidence and a non-leading/shared PGID both fail closed.
 launch_fixture task-reused-pid

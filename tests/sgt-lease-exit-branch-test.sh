@@ -220,10 +220,15 @@ printf 'notify-recycle|%s\n' "$recycle_nonce" > \
 printf 'done\n' > "$recycle_worktree/.sergeant-status"
 printf 'https://example.invalid/pr/9\n' > "$recycle_worktree/.sergeant-result"
 printf 'done\n' > "$recycle_state/status"
-# No pane recorded: recycling has nothing to kill, but must still finalize.
+# No pane recorded: the lease finalizes, but resource retirement remains
+# unproven and sync must report nonzero.
 printf 'Brief: recycle\n' > "$recycle_fleet/task/brief.md"
 
+set +e
 SERGEANT_FLEET="$recycle_fleet" "$ROOT_DIR/bin/sgt-watch" --sync task >/dev/null
+recycle_sync_status=$?
+set -e
+[[ "$recycle_sync_status" -ne 0 ]]
 
 [[ "$(cat "$recycle_target/completed")" == "notify-recycle|$recycle_nonce" ]] || {
   printf 'terminal recycling did not finalize the accepted lease\n' >&2
@@ -251,7 +256,11 @@ printf 'done\n' > "$unproven_worktree/.sergeant-status"
 printf 'https://example.invalid/pr/10\n' > "$unproven_worktree/.sergeant-result"
 printf 'done\n' > "$unproven_state/status"
 
+set +e
 SERGEANT_FLEET="$recycle_fleet" "$ROOT_DIR/bin/sgt-watch" --sync task >/dev/null
+unproven_sync_status=$?
+set -e
+[[ "$unproven_sync_status" -ne 0 ]]
 
 [[ ! -e "$unproven_target/completed" ]] || {
   printf 'terminal recycling fabricated completion without agent proof\n' >&2
