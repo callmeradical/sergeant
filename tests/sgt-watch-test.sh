@@ -26,9 +26,11 @@ printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo" > "$repo/pane_id
 printf '4242\n' > "$repo/worker_pid"
 printf '4242\n' > "$repo/worker_process_group"
 printf '4242\n' > "$repo/worker_session_id"
-printf 'fixture worker start\n' > "$repo/worker_process_start"
-printf 'version=1\nidentity=0|%%42|4242|123456|sgt-interactive-worker:%s\nprocess_group=4242\nsession_id=4242\nphase=retiring\nmember=4242|fixture worker start\n' \
-  "$repo" > "$repo/worker_recycle_phase"
+printf 'linux:999999999999999\n' > "$repo/worker_process_start"
+printf '%064d\n' 1 > "$repo/worker_process_token"
+chmod 600 "$repo/worker_process_token"
+printf 'version=1\nidentity=0|%%42|4242|123456|sgt-interactive-worker:%s\nprocess_group=4242\nsession_id=4242\nprocess_token=%064d\nphase=retiring\nmember=4242|linux:999999999999999|1|4242|4242\n' \
+  "$repo" 1 > "$repo/worker_recycle_phase"
 printf 'opencode\n' > "$repo/agent"
 chmod 600 "$repo/pane_identity"
 printf 'in_progress\n' > "$repo/status"
@@ -108,7 +110,8 @@ PANE_DEAD=1 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$flee
 printf 'in_progress\n' > "$worktree/.sergeant-status"
 printf 'in_progress\n' > "$repo/status"
 rm -f "$repo/pane_identity"
-printf -v legacy_command '%q %q %q %q' \
+printf -v legacy_command 'env SERGEANT_WORKER_PROCESS_TOKEN=%q %q %q %q %q' \
+  "$(cat "$repo/worker_process_token")" \
   "$ROOT/bin/sgt-interactive-worker" "$repo" "$worktree" opencode
 legacy_identity="0|%42|4242|123457|$legacy_command"
 PANE_IDENTITY="$legacy_identity" EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" \

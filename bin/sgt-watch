@@ -332,12 +332,13 @@ _record_recycle_evidence() {
 }
 
 _load_or_record_recycle_phase() {
-  local repo_dir="$1" identity="$2" process_group="$3" session_id="$4" temporary record records members="" root_identity
+  local repo_dir="$1" identity="$2" process_group="$3" session_id="$4" token="$5" temporary record records members="" root_identity
   if [[ -s "$repo_dir/worker_recycle_phase" ]]; then
     grep -Fqx 'version=1' "$repo_dir/worker_recycle_phase" || return 1
     grep -Fqx "identity=$identity" "$repo_dir/worker_recycle_phase" || return 1
     grep -Fqx "process_group=$process_group" "$repo_dir/worker_recycle_phase" || return 1
     grep -Fqx "session_id=$session_id" "$repo_dir/worker_recycle_phase" || return 1
+    grep -Fqx "process_token=$token" "$repo_dir/worker_recycle_phase" || return 1
     sed -n 's/^member=//p' "$repo_dir/worker_recycle_phase"
     return 0
   fi
@@ -358,6 +359,7 @@ _load_or_record_recycle_phase() {
     printf 'identity=%s\n' "$identity"
     printf 'process_group=%s\n' "$process_group"
     printf 'session_id=%s\n' "$session_id"
+    printf 'process_token=%s\n' "$token"
     printf 'phase=retiring\n'
     while IFS= read -r member; do
       if [[ -n "$member" ]]; then
@@ -370,6 +372,7 @@ _load_or_record_recycle_phase() {
     rm -f "$temporary"
     return 1
   }
+  printf '%s' "$members"
 }
 
 _worker_descendant_records() {
@@ -403,17 +406,19 @@ _worker_session_pids() {
 
 _terminal_worker_process_group() {
   local repo_dir="$1" identity="$2"
-  local pane_fields pane_pid recorded_pid recorded_pgid recorded_sid recorded_start actual_identity fields exact_ppid exact_pgid exact_sid state
+  local pane_fields pane_pid recorded_pid recorded_pgid recorded_sid recorded_start recorded_token actual_identity fields exact_ppid exact_pgid exact_sid state
 
   recorded_pid="$(cat "$repo_dir/worker_pid" 2>/dev/null || true)"
   recorded_pgid="$(cat "$repo_dir/worker_process_group" 2>/dev/null || true)"
   recorded_start="$(cat "$repo_dir/worker_process_start" 2>/dev/null || true)"
   recorded_sid="$(cat "$repo_dir/worker_session_id" 2>/dev/null || true)"
-  if [[ -z "$recorded_pid" || -z "$recorded_pgid" || -z "$recorded_sid" || -z "$recorded_start" ]]; then
+  recorded_token="$(_sgt_read_owned_file "$repo_dir/worker_process_token" 2>/dev/null || true)"
+  if [[ -z "$recorded_pid" || -z "$recorded_pgid" || -z "$recorded_sid" || -z "$recorded_start" || -z "$recorded_token" ]]; then
     return 2
   fi
   [[ "$recorded_pid" =~ ^[1-9][0-9]*$ && \
-    "$recorded_pgid" =~ ^[1-9][0-9]*$ && "$recorded_sid" =~ ^[1-9][0-9]*$ && -n "$recorded_start" ]] || return 1
+    "$recorded_pgid" =~ ^[1-9][0-9]*$ && "$recorded_sid" =~ ^[1-9][0-9]*$ &&
+    "$recorded_token" =~ ^[0-9a-f]{64}$ && -n "$recorded_start" ]] || return 1
   pane_fields="${identity#*|}"
   pane_fields="${pane_fields#*|}"
   pane_pid="${pane_fields%%|*}"
@@ -424,8 +429,11 @@ _terminal_worker_process_group() {
     read -r actual_identity exact_ppid exact_pgid exact_sid state <<< "$fields"
     [[ "$actual_identity" == "$recorded_start" && "$exact_pgid" == "$recorded_pgid" &&
       "$exact_sid" == "$recorded_sid" ]] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 "$SCRIPT_DIR/_sgt-process-token.py" check "$recorded_token" "$recorded_pid" \
+      "${recorded_start#linux:}" >/dev/null || return 1
   fi
-  printf '%s|%s\n' "$recorded_pgid" "$recorded_sid"
+  printf '%s|%s|%s\n' "$recorded_pgid" "$recorded_sid" "$recorded_token"
 }
 
 _attributable_worker_records() {
@@ -477,39 +485,27 @@ _signal_exact_worker_records() {
 }
 
 _stop_terminal_worker_process_group() {
-  local process_group="$1" session_id="$2" members="$3" records frozen="" new_records signature prior_signature="" stop_race_injected=false
+  local process_group="$1" session_id="$2" members="$3" token="$4" root_exact minimum_start
   [[ -n "$process_group" ]] || return 0
-  # Quiesce before any terminal signal. STOP cannot execute a handler, and each
-  # exact frozen parent loses the ability to fork before the next lineage scan.
-  for _ in $(seq 1 20); do
-    new_records="$(_attributable_worker_records "$session_id" "$members")" || return 1
-    frozen="$(printf '%s\n%s\n' "$frozen" "$new_records" | sed '/^$/d' | awk -F '|' '!seen[$1 FS $2]++')"
-    if ! $stop_race_injected && [[ "${SGT_WATCH_RECYCLE_FAIL_POINT:-}" == before-first-stop ]]; then
-      stop_race_injected=true
-      [[ -z "${SGT_WATCH_RECYCLE_RACE_MARKER:-}" ]] || : > "$SGT_WATCH_RECYCLE_RACE_MARKER"
-      sleep 0.05
-    fi
-    [[ -z "$new_records" ]] || _signal_exact_worker_records STOP "$new_records" || return 1
-    sleep 0.01
-    signature="$(printf '%s\n' "$frozen" | cut -d '|' -f 1-2 | sort)"
-    if [[ "$signature" == "$prior_signature" ]]; then
-      break
-    fi
-    prior_signature="$signature"
-    sleep 0.01
-  done
-  new_records="$(_attributable_worker_records "$session_id" "$members")" || return 1
-  frozen="$(printf '%s\n%s\n' "$frozen" "$new_records" | sed '/^$/d' | awk -F '|' '!seen[$1 FS $2]++')"
-  [[ -z "$new_records" ]] || _signal_exact_worker_records STOP "$new_records" || return 1
-  signature="$(printf '%s\n' "$frozen" | cut -d '|' -f 1-2 | sort)"
-  [[ "$signature" == "$prior_signature" ]] || return 1
-  [[ -z "$frozen" ]] || _signal_exact_worker_records KILL "$frozen" true || return 1
-  for _ in $(seq 1 20); do
-    records="$(_attributable_worker_records "$session_id" "$members")" || return 1
-    [[ -z "$records" ]] && return 0
+  [[ "$token" =~ ^[0-9a-f]{64}$ ]] || {
+    printf 'worker process token is missing or malformed\n' >&2
+    return 1
+  }
+  root_exact="$(awk -F '|' -v pid="$session_id" '$1 == pid { print $2; exit }' <<< "$members")"
+  minimum_start="${root_exact#linux:}"
+  [[ "$minimum_start" =~ ^[0-9]+$ ]] || {
+    printf 'worker launch starttime is missing from durable retirement phase\n' >&2
+    return 1
+  }
+  if [[ "${SGT_WATCH_RECYCLE_FAIL_POINT:-}" == before-first-stop ]]; then
+    [[ -z "${SGT_WATCH_RECYCLE_RACE_MARKER:-}" ]] || : > "$SGT_WATCH_RECYCLE_RACE_MARKER"
     sleep 0.05
-  done
-  return 1
+  fi
+  command -v python3 >/dev/null 2>&1 || {
+    printf 'python3 is required for exact pidfd worker retirement\n' >&2
+    return 1
+  }
+  python3 "$SCRIPT_DIR/_sgt-process-token.py" retire "$token" "$minimum_start"
 }
 
 _wait_for_peer_recycle() {
@@ -535,7 +531,7 @@ _clear_terminal_recycle_diagnostic() {
 
 _recycle_terminal_worker() {
   local repo_dir="$1"
-  local pane pane_id worktree_path identity process_identity process_group session_id process_status prior_diagnostic members
+  local pane pane_id worktree_path identity process_identity process_group session_id process_token process_status prior_diagnostic members remainder
 
   # Settle the accepted action lease before the pane is taken away.  Recycling
   # used to stop the only process that could ever publish completion, which is
@@ -566,7 +562,9 @@ _recycle_terminal_worker() {
   _recycle_evidence_covers "$repo_dir" "$identity" "$process_group" && return 0
   if process_identity="$(_terminal_worker_process_group "$repo_dir" "$identity")"; then
     process_group="${process_identity%%|*}"
-    session_id="${process_identity##*|}"
+    remainder="${process_identity#*|}"
+    session_id="${remainder%%|*}"
+    process_token="${remainder#*|}"
   else
     process_status=$?
     if _wait_for_peer_recycle "$repo_dir" "$identity" "$process_group"; then
@@ -584,7 +582,7 @@ _recycle_terminal_worker() {
   fi
   # Already retired this exact pane and process group: nothing to do.
   _recycle_evidence_covers "$repo_dir" "$identity" "$process_group" && return 0
-  if ! members="$(_load_or_record_recycle_phase "$repo_dir" "$identity" "$process_group" "$session_id")"; then
+  if ! members="$(_load_or_record_recycle_phase "$repo_dir" "$identity" "$process_group" "$session_id" "$process_token")"; then
     if _wait_for_peer_recycle "$repo_dir" "$identity" "$process_group"; then
       _clear_terminal_recycle_diagnostic "$repo_dir"
       return 0
@@ -602,7 +600,7 @@ _recycle_terminal_worker() {
   # returned pane id must be compared rather than the exit status trusted.
   pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
   if [[ "$pane_id" != "$pane" ]]; then
-    if ! _stop_terminal_worker_process_group "$process_group" "$session_id" "$members"; then
+    if ! _stop_terminal_worker_process_group "$process_group" "$session_id" "$members" "$process_token"; then
       if _wait_for_peer_recycle "$repo_dir" "$identity" "$process_group"; then
         rm -f "$repo_dir/worker_recycle_phase"
         _clear_terminal_recycle_diagnostic "$repo_dir"
@@ -625,7 +623,7 @@ _recycle_terminal_worker() {
         _clear_terminal_recycle_diagnostic "$repo_dir"
         return 0
       fi
-      if _stop_terminal_worker_process_group "$process_group" "$session_id" "$members" &&
+      if _stop_terminal_worker_process_group "$process_group" "$session_id" "$members" "$process_token" &&
         _record_recycle_evidence "$repo_dir" "$pane" "$identity" "$process_group"; then
         rm -f "$repo_dir/worker_recycle_phase"
         _clear_terminal_recycle_diagnostic "$repo_dir"
@@ -655,7 +653,7 @@ _recycle_terminal_worker() {
     # If the exact pane is now absent, finish the durable process phase here.
     pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
     if [[ "$pane_id" != "$pane" ]]; then
-      if _stop_terminal_worker_process_group "$process_group" "$session_id" "$members" &&
+      if _stop_terminal_worker_process_group "$process_group" "$session_id" "$members" "$process_token" &&
         _record_recycle_evidence "$repo_dir" "$pane" "$identity" "$process_group"; then
         rm -f "$repo_dir/worker_recycle_phase"
         _clear_terminal_recycle_diagnostic "$repo_dir"
@@ -674,7 +672,7 @@ _recycle_terminal_worker() {
     printf 'injected interruption after terminal pane kill\n' > "$repo_dir/diagnostic"
     return 1
   fi
-  if ! _stop_terminal_worker_process_group "$process_group" "$session_id" "$members"; then
+  if ! _stop_terminal_worker_process_group "$process_group" "$session_id" "$members" "$process_token"; then
     if _wait_for_peer_recycle "$repo_dir" "$identity" "$process_group"; then
       rm -f "$repo_dir/worker_recycle_phase"
       _clear_terminal_recycle_diagnostic "$repo_dir"

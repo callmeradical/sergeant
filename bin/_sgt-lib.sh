@@ -822,7 +822,18 @@ _sgt_pane_identity_matches() {
   [[ "$actual" == "$expected" && "$current" == "$actual" ]]
 }
 _sgt_worker_command() {
-  printf '%q %q %q %q' "$1" "$2" "$3" "$4"
+  local worker="$1" repo_dir="$2" worktree="$3" agent="$4" token
+  token="$(_sgt_read_owned_file "$repo_dir/worker_process_token" 2>/dev/null || true)"
+  if [[ -n "$token" && ! "$token" =~ ^[0-9a-f]{64}$ ]]; then
+    return 1
+  fi
+  if [[ -z "$token" ]]; then
+    token="$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    [[ "$token" =~ ^[0-9a-f]{64}$ ]] || return 1
+    _sgt_replace_owned_file "$repo_dir/worker_process_token" "$token" || return 1
+  fi
+  printf 'env SERGEANT_WORKER_PROCESS_TOKEN=%q %q %q %q %q' \
+    "$token" "$worker" "$repo_dir" "$worktree" "$agent"
 }
 _sgt_notification_target_create() {
   local repo_dir="$1" notification_id="$2" pane_identity="$3"

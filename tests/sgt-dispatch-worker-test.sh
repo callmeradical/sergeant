@@ -150,6 +150,7 @@ SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_D
   --origin-profile hermes-discord --correlation-id req-worker-001 >/dev/null
 [[ "$(cat "$interrupted_state/status")" == \
   'failed: dispatch incomplete: no worktree or owned live pane' ]]
+rm -rf "$(dirname "$interrupted_state")"
 repo_state="$(printf '%s\n' "$TEST_ROOT"/fleet/supervise-worker-*/app)"
 task_id="$(basename "$(dirname "$repo_state")")"
 python3 - "$TEST_ROOT/fleet/$task_id/.callbacks/origin.json" <<'PY'
@@ -169,6 +170,8 @@ PY
 [[ "$(cat "$repo_state/stage")" == "implementation" ]]
 [[ "$(cat "$repo_state/dispatch_started")" =~ ^[0-9]+$ ]]
 [[ "$(cat "$repo_state/window_name")" == "implementation-app-$task_id" ]]
+[[ "$(cat "$repo_state/worker_process_token")" =~ ^[0-9a-f]{64}$ ]]
+[[ "$(stat -c %a "$repo_state/worker_process_token")" == 600 ]]
 [[ ! -e "$repo_state/initial_message" ]]
 [[ -s "$repo_state/tmux_session" && -s "$repo_state/window_name" ]]
 [[ -s "$repo_state/worktree_git_pointer" && -s "$repo_state/worktree_git_dir" ]]
