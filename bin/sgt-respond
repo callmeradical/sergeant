@@ -33,6 +33,8 @@ REPO="$2"
 [[ "$TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid task ID: $TASK_ID"
 [[ "$REPO" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid repo: $REPO"
 RESPONSE_INPUT=""
+new_pane=""
+replacement_committed=false
 _cleanup_response_input() {
   [[ -z "$RESPONSE_INPUT" ]] || rm -f "$RESPONSE_INPUT"
 }
@@ -68,6 +70,9 @@ respond_peer_launch_nonce="$SGT_DRAIN_LOCK_CONTENDED_NONCE"
 _sgt_response_lock_acquire "$REPO_DIR"
 _cleanup_respond() {
   local status=$?
+  if [[ -n "$new_pane" && "$replacement_committed" != true ]]; then
+    tmux kill-pane -t "$new_pane" 2>/dev/null || true
+  fi
   _sgt_response_lock_release || status=1
   _sgt_drain_lock_release_fd "$_SGT_RESPOND_LAUNCH_FD" || status=1
   _cleanup_response_input || status=1
@@ -506,6 +511,28 @@ if ! _sgt_drain_check_admission_locked "${_sgt_respond_drain_project:-}"; then
 fi
 # Drain admission lock remains held until after new-window (see release below).
 
+_transfer_interrupt_hook() {
+  local boundary="$1"
+  if [[ "${SGT_TEST_HOOKS:-}" == "1" &&
+        "${SGT_TEST_INTERRUPT_TRANSFER_AT:-}" == "$boundary" ]]; then
+    _die "test interruption at ownership-transfer boundary: $boundary"
+  fi
+}
+
+# Bind retries of this response generation to one successor notification id.
+# The binding is published before any old lease is fenced.
+successor_binding="$(cat "$REPO_DIR/response_successor_notification" 2>/dev/null || true)"
+if [[ "${successor_binding%%|*}" == "$response_id" &&
+      "${successor_binding#*|}" =~ ^[a-f0-9]{32}$ ]]; then
+  delivery_notification_id="${successor_binding#*|}"
+else
+  delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
+    od -An -tx1 | tr -d ' \n')"
+  _atomic_write "$REPO_DIR/response_successor_notification" \
+    "$response_id|$delivery_notification_id" || \
+    _die "Could not publish the response successor notification binding"
+fi
+
 current_notification_id="$(cat "$REPO_DIR/notification_id" 2>/dev/null || true)"
 current_target_nonce="$(cat "$REPO_DIR/notification_target" 2>/dev/null || true)"
 current_target_identity=""
@@ -527,10 +554,15 @@ if [[ -n "$current_action_lease" &&
   # already held here, so the finalizer reuses it.
   _sgt_finalize_action_lease "$REPO_DIR" "$worktree" "respond_relaunch_convergence" || true
   if [[ ! -f "$REPO_DIR/notifications/$current_notification_id/targets/$current_action_lease/completed" ]]; then
-    _die "$(printf 'Pending notification action lease belongs to the prior supervisor; relaunch refused.\n  notification: %s\n  lease target: %s\n  evidence: %s\n  The agent never published .sergeant-notification-complete/%s for this turn, so completion cannot be proven.\n  Resolve by inspecting that worktree turn, then rerun: sgt-respond %s %s' \
-      "$current_notification_id" "$current_action_lease" \
-      "$REPO_DIR/notifications/$current_notification_id/action_lease_pending" \
-      "$current_action_lease" "$TASK_ID" "$REPO")"
+    if [[ "$status" != "orphaned" ]] || ! _sgt_fence_dead_action_lease \
+        "$REPO_DIR" "$worktree" "$delivery_notification_id" "$gate_generation" \
+        "orphaned response relaunch"; then
+      _die "$(printf 'Pending notification action lease ownership is live, reused, or ambiguous; relaunch refused closed.\n  notification: %s\n  lease target: %s\n  evidence: %s\n  Completion was not fabricated and the preserved worktree was not changed.\n  Inspect the recorded pane/process identities, reconcile the worker, then rerun: sgt-respond %s %s' \
+        "$current_notification_id" "$current_action_lease" \
+        "$REPO_DIR/notifications/$current_notification_id/action_lease_pending" \
+        "$TASK_ID" "$REPO")"
+    fi
+    _transfer_interrupt_hook lease_archived
   fi
 fi
 if [[ -n "$current_notification_id" && -n "$current_target_identity" ]]; then
@@ -550,9 +582,9 @@ rm -f "$worktree/.sergeant-notification-ack" "$worktree/.sergeant-notification-a
   "$REPO_DIR/notification_delivered" \
   "$REPO_DIR/notification_delivered_pane_identity" \
   "$REPO_DIR/notification_target"
-delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
 _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$delivery_notification_id" response \
   "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
+_transfer_interrupt_hook successor_published
 
 _sgt_prepare_worker_process_marker "$REPO_DIR" || _die "Could not prepare worker process marker"
 worker_command="$(_sgt_worker_command \
@@ -579,6 +611,7 @@ if [[ -z "$new_pane" ]]; then
   _record_relaunch_orphan "tmux returned no pane for relaunched worker supervisor"
   _die "Worker relaunch returned no pane for $TASK_ID/$REPO"
 fi
+_transfer_interrupt_hook replacement_spawned
 printf '%s\n' "$new_pane" > "$REPO_DIR/pane"
 if pane_identity="$(_sgt_pane_identity "$new_pane")" && [[ -n "$pane_identity" ]]; then
   _sgt_replace_owned_file "$REPO_DIR/pane_identity" "$pane_identity" || \
@@ -589,6 +622,7 @@ if pane_identity="$(_sgt_pane_identity "$new_pane")" && [[ -n "$pane_identity" ]
     _record_relaunch_orphan "notification target race detected during relaunch"
     _die "notification target race detected for $TASK_ID/$REPO; relaunched worker orphaned"
   fi
+  _transfer_interrupt_hook replacement_owned
   _sgt_worker_launch_completion_publish "$REPO_DIR" "$_SGT_RESPOND_LAUNCH_FD" || \
     _die "Could not publish completed worker-launch transaction"
   if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
@@ -616,7 +650,9 @@ if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" "$delivery_notificati
   _record_relaunch_orphan "relaunched interactive worker did not acknowledge its durable response notification"
   _die "Worker relaunch notification acknowledgement timed out for $TASK_ID/$REPO"
 fi
-rm -f "$REPO_DIR/drain_held" "$REPO_DIR/response_delivery_unacked"
+rm -f "$REPO_DIR/drain_held" "$REPO_DIR/response_delivery_unacked" \
+  "$REPO_DIR/response_successor_notification"
+replacement_committed=true
 _cleanup_response_input
 _sgt_drain_lock_release_fd "$_SGT_RESPOND_LAUNCH_FD"
 trap - EXIT

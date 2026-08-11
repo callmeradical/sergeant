@@ -249,6 +249,23 @@ set -e
 
 # ── 3. An identity or nonce mismatch fails closed ────────────────────────────
 
+read -r state wt <<<"$(make_worktree recover-dead-owner)"
+task=task-recover-dead-owner
+setup_stall "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1 || {
+  printf 'sgt-recover did not fence an exactly proven dead owner\n' >&2
+  exit 1
+}
+[[ ! -e "$state/notifications/$NOTIFY/targets/$NONCE/completed" ]]
+grep -Fq "old_lease=$NONCE" \
+  "$state/notifications/$NOTIFY/ownership_transition"
+grep -Fq "new_notification=$(cat "$state/notification_id")" \
+  "$state/notifications/$NOTIFY/ownership_transition"
+[[ "$(cat "$state/pane")" == '%99' ]]
+
 read -r state wt <<<"$(make_worktree recover-mismatch)"
 task=task-recover-mismatch
 setup_stall "$state" "$wt"
@@ -324,29 +341,39 @@ printf 'resume the mission again' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$flee
   exit 1
 }
 
-# ── 6. sgt-respond still refuses a turn with no agent proof ──────────────────
+# 6. sgt-respond fences an exactly proven dead owner without inventing proof.
 
-read -r state wt <<<"$(make_worktree respond-refuse)"
-task=task-respond-refuse
+read -r state wt <<<"$(make_worktree respond-dead-owner)"
+task=task-respond-dead-owner
 setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt"
+printf 'preserved but uncommitted\n' > "$wt/preserved.txt"
 set +e
-respond_refuse="$(printf 'resume' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" \
-  TMUX_LOG="$TEST_ROOT/sr.log" PANE_ALIVE=0 \
-  "$ROOT_DIR/bin/sgt-respond" "$task" app 2>&1)"
-respond_refuse_status=$?
+orphan_recover_output="$(PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app 2>&1)"
+orphan_recover_status=$?
 set -e
-[[ "$respond_refuse_status" -ne 0 ]] || {
-  printf 'sgt-respond relaunched over an unprovable lease\n' >&2
+[[ "$orphan_recover_status" -ne 0 &&
+   "$orphan_recover_output" == *"sgt-respond $task app"* ]] || {
+  printf 'sgt-recover did not direct orphan recovery to its supported CLI path\n' >&2
   exit 1
 }
-[[ "$respond_refuse" == *'belongs to the prior supervisor'* ]]
-[[ "$respond_refuse" == *"$NOTIFY"* && "$respond_refuse" == *"$NONCE"* ]] || {
-  printf 'sgt-respond refusal did not name the lease owner:\n%s\n' "$respond_refuse" >&2
+printf 'resume' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" \
+  TMUX_LOG="$TEST_ROOT/sr.log" PANE_ALIVE=0 \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1 || {
+  printf 'sgt-respond did not fence a provably dead prior owner\n' >&2
   exit 1
 }
-[[ "$respond_refuse" == *"sgt-respond $task app"* ]]
-[[ ! -e "$state/notifications/$NOTIFY/targets/$NONCE/completed" ]]
+[[ "$(cat "$wt/preserved.txt")" == 'preserved but uncommitted' ]]
+[[ ! -e "$state/notifications/$NOTIFY/targets/$NONCE/completed" ]] || {
+  printf 'sgt-respond fabricated completion while fencing a dead owner\n' >&2
+  exit 1
+}
+grep -Fq "lease=$NONCE" "$state/notifications/$NOTIFY/action_lease_abandoned"
+grep -Fq 'old_owner_identity=0|%42|4242|123456|stalled-pane' \
+  "$state/notifications/$NOTIFY/ownership_transition"
+grep -Fq 'new_notification=' "$state/notifications/$NOTIFY/ownership_transition"
+[[ "$(cat "$state/pane")" == '%99' ]]
 
 # ── 7. A live owning supervisor is never relaunched over ──────────────────────
 # When the recorded pane is still the live worker supervisor, sgt-respond
@@ -370,5 +397,91 @@ fi
   printf 'sgt-respond replaced the pane of a live owner\n' >&2
   exit 1
 }
+
+# ── 8. Stale, reused, and process-ambiguous ownership fails closed ───────
+
+read -r state wt <<<"$(make_worktree respond-stale-owner)"
+task=task-respond-stale-owner
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+printf '0|%%43|4343|123457|different-owner\n' \
+  > "$state/notifications/$NOTIFY/targets/$NONCE/pane_identity"
+if printf 'resume' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    REPO_STATE_DIR="$state" PANE_ALIVE=0 "$ROOT_DIR/bin/sgt-respond" "$task" app \
+    >/dev/null 2>&1; then
+  printf 'stale target ownership was fenced\n' >&2
+  exit 1
+fi
+[[ ! -e "$state/notifications/$NOTIFY/action_lease_abandoned" ]]
+
+read -r state wt <<<"$(make_worktree respond-reused-pane)"
+task=task-respond-reused-pane
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+if printf 'resume' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    REPO_STATE_DIR="$state" PANE_ALIVE=1 \
+    PANE_IDENTITY='0|%42|7777|777777|reused-pane' \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1; then
+  printf 'reused pane identity was fenced\n' >&2
+  exit 1
+fi
+[[ ! -e "$state/notifications/$NOTIFY/action_lease_abandoned" ]]
+
+read -r state wt <<<"$(make_worktree respond-live-pid)"
+task=task-respond-live-pid
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+live_pid_identity="0|%42|$$|123456|stale-pane-live-pid"
+printf '%s\n' "$live_pid_identity" > "$state/pane_identity"
+chmod 600 "$state/pane_identity"
+printf '%s\n' "$live_pid_identity" \
+  > "$state/notifications/$NOTIFY/targets/$NONCE/pane_identity"
+if printf 'resume' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    REPO_STATE_DIR="$state" PANE_ALIVE=0 "$ROOT_DIR/bin/sgt-respond" "$task" app \
+    >/dev/null 2>&1; then
+  printf 'live/reused process identity was fenced\n' >&2
+  exit 1
+fi
+[[ ! -e "$state/notifications/$NOTIFY/action_lease_abandoned" ]]
+
+# ── 9. Every durable transfer boundary converges on exact retry ──────────
+
+for boundary in lease_archived successor_published replacement_spawned replacement_owned; do
+  read -r state wt <<<"$(make_worktree interrupt-$boundary)"
+  task="task-interrupt-$boundary"
+  setup_orphan "$state" "$wt"
+  install_accepted_turn "$state" "$wt"
+  printf 'retry me exactly once' > "$TEST_ROOT/input-$boundary"
+  set +e
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+    KILL_LOG="$TEST_ROOT/interrupt-$boundary-kill.log" \
+    SGT_TEST_HOOKS=1 SGT_TEST_INTERRUPT_TRANSFER_AT="$boundary" \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app \
+    < "$TEST_ROOT/input-$boundary" >/dev/null 2>&1
+  interrupted_status=$?
+  set -e
+  [[ "$interrupted_status" -ne 0 ]] || {
+    printf 'boundary %s did not interrupt\n' "$boundary" >&2
+    exit 1
+  }
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%99 \
+    KILL_LOG="$TEST_ROOT/interrupt-$boundary-kill.log" \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app \
+    < "$TEST_ROOT/input-$boundary" >/dev/null 2>&1 || {
+    printf 'boundary %s did not converge on retry\n' "$boundary" >&2
+    exit 1
+  }
+  successor="$(sed -n 's/^new_notification=//p' \
+    "$state/notifications/$NOTIFY/ownership_transition")"
+  [[ -n "$successor" && "$(cat "$state/notification_id")" == "$successor" ]]
+  [[ "$(cat "$state/response")" == 'retry me exactly once' ]]
+  [[ "$(cat "$state/pane")" == '%99' ]]
+  [[ ! -e "$state/notifications/$NOTIFY/targets/$NONCE/completed" ]]
+  if [[ "$boundary" == replacement_spawned || "$boundary" == replacement_owned ]]; then
+    grep -Fq 'kill-pane -t %98' "$TEST_ROOT/interrupt-$boundary-kill.log"
+  fi
+done
 
 printf 'action-lease convergence before refusal: ok\n'

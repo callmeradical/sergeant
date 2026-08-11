@@ -289,6 +289,74 @@ _sgt_notification_action_pending() {
   ! _sgt_notification_action_completed "$repo_state" "$notification_id"
 }
 
+# _sgt_fence_dead_action_lease <repo_state> <worktree> <successor-id> <generation> <reason>
+#
+# Archive an unfinished action lease only when all three durable ownership
+# records (fleet pane, fleet pane identity, and leased target identity) name the
+# same supervisor and both that exact pane and its recorded process are gone.
+# A live pane, a reused pane id/PID, or incomplete/mismatched evidence fails
+# closed. The old lease and target tree are never removed or marked completed.
+_sgt_fence_dead_action_lease() {
+  local repo_state="$1" worktree="$2" successor="$3" generation="$4" reason="$5"
+  local notification_id lease notification_dir target_dir pane fleet_identity target_identity
+  local owner_pid actual expected_transition existing stamp process_probe
+
+  notification_id="$(cat "$repo_state/notification_id" 2>/dev/null || true)"
+  [[ -n "$notification_id" ]] || return 1
+  notification_dir="$repo_state/notifications/$notification_id"
+  lease="$(cat "$notification_dir/action_lease" 2>/dev/null || true)"
+  [[ "$lease" =~ ^[a-f0-9]{32}$ && -n "$successor" && "$generation" =~ ^[1-9][0-9]*$ ]] || return 1
+  target_dir="$notification_dir/targets/$lease"
+  [[ -d "$target_dir" && ! -e "$target_dir/completed" ]] || return 1
+
+  pane="$(cat "$repo_state/pane" 2>/dev/null || true)"
+  fleet_identity="$(_sgt_read_owned_file "$repo_state/pane_identity" 2>/dev/null || true)"
+  target_identity="$(cat "$target_dir/pane_identity" 2>/dev/null || true)"
+  [[ "$pane" =~ ^%[0-9]+$ && -n "$fleet_identity" && "$target_identity" == "$fleet_identity" ]] || return 1
+  [[ "$target_identity" =~ ^[01]\|%[0-9]+\|[1-9][0-9]*\|[0-9]+\| ]] || return 1
+  [[ "${target_identity#*|}" == "$pane|"* ]] || return 1
+  owner_pid="${target_identity#*|*|}"
+  owner_pid="${owner_pid%%|*}"
+
+  # Any resolvable pane is ambiguous: it is either the owner or a reused id.
+  if actual="$(_sgt_pane_identity "$pane" 2>/dev/null)" && [[ -n "$actual" ]]; then
+    return 1
+  fi
+  # Any process at the recorded PID is ambiguous (including PID reuse). `ps`
+  # distinguishes absence from kill(2)'s EPERM; lack of permission must never be
+  # misread as proof of death.
+  command -v ps >/dev/null 2>&1 || return 1
+  process_probe="$(ps -p "$owner_pid" -o pid= 2>/dev/null || true)"
+  [[ -z "${process_probe//[[:space:]]/}" ]] || return 1
+
+  # Re-verify the durable binding immediately before publishing the fence.
+  [[ "$(cat "$repo_state/notification_id" 2>/dev/null || true)" == "$notification_id" &&
+     "$(cat "$notification_dir/action_lease" 2>/dev/null || true)" == "$lease" &&
+     "$(cat "$repo_state/pane" 2>/dev/null || true)" == "$pane" &&
+     "$(_sgt_read_owned_file "$repo_state/pane_identity" 2>/dev/null || true)" == "$fleet_identity" &&
+     "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$target_identity" &&
+     ! -e "$target_dir/completed" ]] || return 1
+  if actual="$(_sgt_pane_identity "$pane" 2>/dev/null)" && [[ -n "$actual" ]]; then
+    return 1
+  fi
+  process_probe="$(ps -p "$owner_pid" -o pid= 2>/dev/null || true)"
+  [[ -z "${process_probe//[[:space:]]/}" ]] || return 1
+
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  _sgt_action_lease_record "$notification_dir" action_lease_abandoned \
+    "$(printf 'notification_id=%s\nlease=%s\nowner_pane=%s\nowner_pid=%s\nowner_identity=%s\nreason=%s; exact pane and process owner proven dead; completion not fabricated\nrecorded_at=%s\n' \
+      "$notification_id" "$lease" "$pane" "$owner_pid" "$target_identity" "$reason" "$stamp")" || return 1
+
+  expected_transition="$(printf 'old_notification=%s\nold_lease=%s\nold_owner_identity=%s\nnew_notification=%s\nnew_generation=%s\nreason=%s\n' \
+    "$notification_id" "$lease" "$target_identity" "$successor" "$generation" "$reason")"
+  if [[ -e "$notification_dir/ownership_transition" ]]; then
+    existing="$(cat "$notification_dir/ownership_transition" 2>/dev/null || true)"
+    [[ "$existing" == "$expected_transition" ]] || return 1
+  else
+    _sgt_action_lease_record "$notification_dir" ownership_transition "$expected_transition" || return 1
+  fi
+}
+
 # _sgt_finalize_action_lease <repo_state> <worktree> <reason>
 #
 # 0  the notification has no outstanding lease, or the lease is now completed.

@@ -63,6 +63,9 @@ _sgt_worker_process_marker_preflight "$REPO_DIR" || \
 # ── 1. Verify stall proof (pre-lock fast path) ───────────────────────────────
 
 status="$(cat "$REPO_DIR/status" 2>/dev/null || true)"
+if [[ "$status" == "orphaned" ]]; then
+  _die "Recovery is unavailable for an orphaned worker; resume its preserved work and adjudicate any dead-owner lease with: sgt-respond $TASK_ID $REPO"
+fi
 [[ "$status" == "in_progress" ]] || \
   _die "Recovery is unavailable: worker status is '$status' (must be in_progress)"
 
@@ -182,55 +185,8 @@ fi
 # preserved, not reverted.  The response lock is already held, so the finalizer
 # reuses it.
 
-# _lease_owner_is_provably_dead <notification-id> <lease-nonce>
-#
-# 0 only when the lease's recorded owner is *provably* gone: the recorded pane no
-# longer resolves at all AND the process recorded in that identity is not running.
-#
-# Everything else fails closed, because it cannot distinguish a dead owner from a
-# live one:
-#   * the recorded pane still resolves with the recorded identity — the owner is
-#     live and may be mid-action;
-#   * the recorded pane resolves with a DIFFERENT identity — the pane id has been
-#     reused, so nothing can be attributed to the recorded owner;
-#   * the pane is gone but the recorded pid is still running — the process may be
-#     the original owner, or the pid may have been reused; either way death is not
-#     proven;
-#   * the recorded identity is missing or malformed — there is nothing to
-#     adjudicate.
-LEASE_OWNER_PANE=""
-LEASE_OWNER_PID=""
-LEASE_OWNER_IDENTITY_RECORDED=""
-_lease_owner_is_provably_dead() {
-  local notification_id="$1" lease="$2"
-  local identity_file recorded actual owner_pane owner_pid
-  LEASE_OWNER_PANE=""
-  LEASE_OWNER_PID=""
-  LEASE_OWNER_IDENTITY_RECORDED=""
-  identity_file="$REPO_DIR/notifications/$notification_id/targets/$lease/pane_identity"
-  [[ -f "$identity_file" ]] || return 1
-  recorded="$(cat "$identity_file" 2>/dev/null || true)"
-  # pane_dead|pane_id|pane_pid|pane_created|pane_start_command
-  [[ "$recorded" =~ ^[01]\|%[0-9]+\|[1-9][0-9]*\|[0-9]+\| ]] || return 1
-  owner_pane="${recorded#*|}"
-  owner_pane="${owner_pane%%|*}"
-  owner_pid="${recorded#*|*|}"
-  owner_pid="${owner_pid%%|*}"
-  [[ -n "$owner_pane" && "$owner_pid" =~ ^[1-9][0-9]*$ ]] || return 1
-  LEASE_OWNER_PANE="$owner_pane"
-  LEASE_OWNER_PID="$owner_pid"
-  LEASE_OWNER_IDENTITY_RECORDED="$recorded"
-  command -v tmux >/dev/null 2>&1 || return 1
-
-  # The pane must be gone entirely.  A resolvable pane means either a live owner
-  # or a reused pane id; neither authorises abandoning the lease.
-  if actual="$(_sgt_pane_identity "$owner_pane" 2>/dev/null)" && [[ -n "$actual" ]]; then
-    return 1
-  fi
-  # The recorded process must also be gone.
-  ! kill -0 "$owner_pid" 2>/dev/null
-}
-
+delivery_notification_id=""
+dead_owner_fenced=false
 current_notification_id="$(cat "$REPO_DIR/notification_id" 2>/dev/null || true)"
 if [[ -n "$current_notification_id" ]]; then
   current_action_lease="$(cat \
@@ -246,14 +202,13 @@ if [[ -n "$current_notification_id" ]]; then
     # adjudicate the lease owner's liveness.  A provably dead owner cannot be
     # mid-action, so recovery may proceed; the delivery evidence is preserved and
     # the adjudication is recorded.
-    if _lease_owner_is_provably_dead "$current_notification_id" "$current_action_lease"; then
-      _sgt_action_lease_record "$REPO_DIR/notifications/$current_notification_id" \
-        action_lease_abandoned \
-        "$(printf 'notification_id=%s\nlease=%s\nowner_pane=%s\nowner_pid=%s\nowner_identity=%s\nreason=lease owner is provably dead: its tmux pane no longer resolves and its recorded process is not running; recovery proceeded without fabricating completion\nrecorded_at=%s\n' \
-          "$current_notification_id" "$current_action_lease" \
-          "$LEASE_OWNER_PANE" "$LEASE_OWNER_PID" "$LEASE_OWNER_IDENTITY_RECORDED" \
-          "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)")" || \
-        _recover_die "Stall recovery failed: could not record the dead-owner lease adjudication for $TASK_ID/$REPO"
+    delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
+      od -An -tx1 | tr -d ' \n')"
+    recovery_generation="$(cat "$worktree/.sergeant-gate-generation" 2>/dev/null || true)"
+    [[ "$recovery_generation" =~ ^[1-9][0-9]*$ ]] || recovery_generation=1
+    if _sgt_fence_dead_action_lease "$REPO_DIR" "$worktree" \
+        "$delivery_notification_id" "$recovery_generation" "stalled worker recovery"; then
+      dead_owner_fenced=true
     else
       _escalate "pending notification action lease blocks recovery; prior delivery evidence must be preserved: notification $current_notification_id lease target $current_action_lease has no agent completion proof and its owner is not provably dead; resolve with sgt-respond $TASK_ID $REPO after inspecting that turn"
       _recover_die "Stall recovery refused: unfinished notification action lease for $TASK_ID/$REPO (notification $current_notification_id, lease target $current_action_lease); the agent never published .sergeant-notification-complete/$current_action_lease and the lease owner is not provably dead, so completion cannot be proven. Resolve with: sgt-respond $TASK_ID $REPO"
@@ -296,6 +251,10 @@ old_pane_live=false
 if [[ -n "$old_pane" ]] && command -v tmux >/dev/null 2>&1; then
   if _sgt_pane_identity_matches "$old_pane" "$REPO_DIR"; then
     old_pane_live=true
+  elif $dead_owner_fenced; then
+    # The shared fence already proved this exact recorded pane and process gone
+    # twice under the response lock. There is no old pane left to kill.
+    old_pane_live=false
   else
     _escalate "pane identity mismatch for pane $old_pane; refusing to kill"
     _recover_die "Stall recovery refused: pane identity mismatch for $TASK_ID/$REPO"
@@ -342,8 +301,10 @@ rm -f "$REPO_DIR/notification_target"
 
 # ── 11. Publish recovery notification ────────────────────────────────────────
 
-delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
-  od -An -tx1 | tr -d ' \n')"
+if [[ -z "$delivery_notification_id" ]]; then
+  delivery_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
+    od -An -tx1 | tr -d ' \n')"
+fi
 _sgt_publish_worker_notification "$REPO_DIR" "$worktree" \
   "$delivery_notification_id" recovery \
   "Resume the mission after stall recovery. Read the current worktree and td state, check the latest td handoff, and continue from where you left off."

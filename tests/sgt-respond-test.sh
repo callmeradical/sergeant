@@ -645,6 +645,9 @@ printf 'orphaned\n' > "$repo_state/status"
 printf 'orphaned\n' > "$worktree/.sergeant-status"
 printf '%s\n' "$stale_nonce" \
   > "$repo_state/notifications/$stale_notification_id/action_lease"
+stale_owner_identity="$(cat "$repo_state/notifications/$stale_notification_id/targets/$stale_nonce/pane_identity")"
+printf '0|%%98|9898|654320|ambiguous-prior-owner\n' \
+  > "$repo_state/notifications/$stale_notification_id/targets/$stale_nonce/pane_identity"
 rm -f "$worktree/.sergeant-response"
 set +e
 lease_output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/lease-block.log" \
@@ -653,8 +656,10 @@ lease_output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/lease-block.log" \
   respond 'resume dead worker' 2>&1)"
 lease_status=$?
 set -e
-[[ "$lease_status" -ne 0 && "$lease_output" == *'action lease belongs to the prior supervisor'* ]]
+[[ "$lease_status" -ne 0 && "$lease_output" == *'ownership is live, reused, or ambiguous'* ]]
 [[ "$(cat "$repo_state/notification_id")" == "$stale_notification_id" ]]
+printf '%s\n' "$stale_owner_identity" \
+  > "$repo_state/notifications/$stale_notification_id/targets/$stale_nonce/pane_identity"
 printf '%s\n' "$stale_notification_id|$stale_nonce" \
   > "$repo_state/notifications/$stale_notification_id/targets/$stale_nonce/completed"
 printf '%s\n' "$stale_notification_id" > "$repo_state/notification_delivered"
