@@ -248,6 +248,18 @@ case "${TREEHOUSE_OUTPUT_MODE:-valid}" in
       "$TREEHOUSE_TEST_PATH" "$4"
     exit 0
     ;;
+  inherit_stdout|inherit_stderr|inherit_both)
+    "$REAL_GIT" -C "$PWD" worktree add -q --detach "$TREEHOUSE_TEST_PATH"
+    printf '{"path":"%s","lease_id":"lease-dispatch-1","lease_holder":"%s"}\n' \
+      "$TREEHOUSE_TEST_PATH" "$4"
+    case "$TREEHOUSE_OUTPUT_MODE" in
+      inherit_stdout) (sleep 30) 2>/dev/null & ;;
+      inherit_stderr) (sleep 30) >/dev/null & ;;
+      inherit_both) (sleep 30) & ;;
+    esac
+    printf '%s\n' "$!" > "$TREEHOUSE_GRANDCHILD_LOG"
+    exit 0
+    ;;
   symlink)
     "$REAL_GIT" -C "$PWD" worktree add -q --detach "$TREEHOUSE_TEST_PATH-target"
     ln -s "$TREEHOUSE_TEST_PATH-target" "$TREEHOUSE_TEST_PATH"
@@ -262,6 +274,22 @@ if [[ ! -d "$TREEHOUSE_TEST_PATH" ]]; then
   else
     "$REAL_GIT" -C "$PWD" worktree add -q --detach "$TREEHOUSE_TEST_PATH"
   fi
+fi
+if [[ "${TREEHOUSE_OUTPUT_MODE:-valid}" == swap_before_open ]]; then
+  (
+    acquisition_record=""
+    while [[ -z "$acquisition_record" ]]; do
+      while IFS= read -r candidate; do
+        if grep -Fq "\"path\":\"$TREEHOUSE_TEST_PATH\"" "$candidate" 2>/dev/null && \
+          grep -Fq '"identity_verified":true' "$candidate" 2>/dev/null; then
+          acquisition_record="$candidate"
+          break
+        fi
+      done < <(find "$SERGEANT_FLEET" -name treehouse-acquisition.json -type f)
+    done
+    mv "$TREEHOUSE_TEST_PATH" "$TREEHOUSE_TEST_PATH-original"
+    mv "$TREEHOUSE_SWAP_DECOY" "$TREEHOUSE_TEST_PATH"
+  ) >/dev/null 2>&1 &
 fi
 printf '{"path":"%s","lease_id":"lease-dispatch-1","lease_holder":"%s","leased_at":"2026-08-11T00:00:00Z"}\n' \
   "$TREEHOUSE_TEST_PATH" "$4"
@@ -287,15 +315,14 @@ python3 - "$treehouse_state/treehouse-acquisition.json" "$TEST_ROOT/treehouse-ch
   "sgt-$treehouse_task_id-app" "$TEST_ROOT/repo" <<'PY'
 import json, sys
 record = json.load(open(sys.argv[1], encoding="utf-8"))
-assert record == {
-    "version": 1,
-    "repo": sys.argv[4],
-    "path": sys.argv[2],
-    "path_canonical": sys.argv[2],
-    "path_is_canonical": True,
-    "lease_id": "lease-dispatch-1",
-    "lease_holder": sys.argv[3],
-}
+assert record["version"] == 1 and record["repo"] == sys.argv[4]
+assert record["path"] == record["path_canonical"] == sys.argv[2]
+assert record["path_is_canonical"] is True and record["identity_verified"] is True
+assert record["lease_id"] == "lease-dispatch-1"
+assert record["lease_holder"] == sys.argv[3]
+assert all(isinstance(record[key], int) for key in
+           ("checkout_dev", "checkout_ino", "git_dir_dev", "git_dir_ino"))
+assert isinstance(record["git_dir"], str) and record["git_dir"]
 PY
 [[ "$(cat "$TEST_ROOT/treehouse-get.log")" == \
   "get --lease --lease-holder sgt-$treehouse_task_id-app --json" ]]
@@ -324,13 +351,15 @@ for bad_mode in malformed duplicate nul control oversized simultaneous_overflow;
   rm "$TEST_ROOT/repo/treehouse.toml"
 done
 
-for ambiguous_outcome in valid_nonzero valid_signal stderr_overflow; do
+for ambiguous_outcome in valid_nonzero valid_signal stderr_overflow \
+  inherit_stdout inherit_stderr inherit_both; do
   touch "$TEST_ROOT/repo/treehouse.toml"
   set +e
   REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
     TREEHOUSE_TEST_PATH="$TEST_ROOT/treehouse-$ambiguous_outcome" \
     TREEHOUSE_GET_LOG="$TEST_ROOT/treehouse-$ambiguous_outcome.log" \
     TREEHOUSE_RETURN_LOG="$TEST_ROOT/treehouse-$ambiguous_outcome-return.log" \
+    TREEHOUSE_GRANDCHILD_LOG="$TEST_ROOT/treehouse-$ambiguous_outcome-child.log" \
     TREEHOUSE_OUTPUT_MODE="$ambiguous_outcome" \
     TMUX_LOG="$TEST_ROOT/treehouse-$ambiguous_outcome-tmux.log" \
     SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
@@ -348,6 +377,19 @@ for ambiguous_outcome in valid_nonzero valid_signal stderr_overflow; do
     "$ambiguous_record")"
   [[ "$(cat "$TEST_ROOT/treehouse-$ambiguous_outcome-return.log")" == \
     "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $ambiguous_holder $TEST_ROOT/treehouse-$ambiguous_outcome" ]]
+  if [[ "$ambiguous_outcome" == inherit_* ]]; then
+    grandchild_pid="$(cat "$TEST_ROOT/treehouse-$ambiguous_outcome-child.log")"
+    if kill -0 "$grandchild_pid" 2>/dev/null; then
+      printf 'Treehouse pipe-inheriting grandchild survived: %s\n' \
+        "$grandchild_pid" >&2
+      exit 1
+    fi
+    python3 - "$(dirname "$ambiguous_record")/treehouse-acquisition-receipt.json" <<'PY'
+import json, sys
+attempt = json.load(open(sys.argv[1], encoding="utf-8"))["attempts"][-1]
+assert attempt["pipe_timeout"] is True
+PY
+  fi
   rm "$TEST_ROOT/repo/treehouse.toml"
 done
 
@@ -441,6 +483,39 @@ symlink_holder="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])
   "$symlink_record")"
 [[ "$(cat "$TEST_ROOT/treehouse-symlink-return.log")" == \
   "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $symlink_holder $TEST_ROOT/treehouse-symlink" ]]
+rm "$TEST_ROOT/repo/treehouse.toml"
+
+git -C "$TEST_ROOT/repo" worktree add -q --detach \
+  "$TEST_ROOT/treehouse-preopen-decoy"
+preopen_decoy_head="$(git -C "$TEST_ROOT/treehouse-preopen-decoy" rev-parse HEAD)"
+touch "$TEST_ROOT/repo/treehouse.toml"
+set +e
+REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TREEHOUSE_TEST_PATH="$TEST_ROOT/treehouse-preopen-checkout" \
+  TREEHOUSE_SWAP_DECOY="$TEST_ROOT/treehouse-preopen-decoy" \
+  TREEHOUSE_GET_LOG="$TEST_ROOT/treehouse-preopen.log" \
+  TREEHOUSE_RETURN_LOG="$TEST_ROOT/treehouse-preopen-return.log" \
+  TREEHOUSE_OUTPUT_MODE=swap_before_open \
+  TMUX_LOG="$TEST_ROOT/treehouse-preopen-tmux.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Treehouse preopen swap' --repos app \
+    >/dev/null 2>&1
+preopen_status=$?
+set -e
+[[ "$preopen_status" -ne 0 ]]
+[[ "$(git -C "$TEST_ROOT/treehouse-preopen-checkout" rev-parse HEAD)" == \
+  "$preopen_decoy_head" ]]
+[[ -z "$(git -C "$TEST_ROOT/treehouse-preopen-checkout" branch --list \
+  'feat/treehouse-preopen-swap')" ]]
+[[ "$(git -C "$TEST_ROOT/treehouse-preopen-checkout-original" rev-parse HEAD)" == \
+  "$preopen_decoy_head" ]]
+preopen_record="$(find "$TEST_ROOT/fleet" \
+  -path '*treehouse-preopen-swap-*/app/treehouse-acquisition.json' -print -quit)"
+preopen_holder="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lease_holder"])' \
+  "$preopen_record")"
+[[ "$(cat "$TEST_ROOT/treehouse-preopen-return.log")" == \
+  "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $preopen_holder $TEST_ROOT/treehouse-preopen-checkout" ]]
 rm "$TEST_ROOT/repo/treehouse.toml"
 
 mkdir -p "$TEST_ROOT/swap-unrelated"

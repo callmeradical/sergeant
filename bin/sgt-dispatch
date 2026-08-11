@@ -841,14 +841,6 @@ for rname in "${TARGET_REPOS[@]}"; do
     if [[ "$treehouse_acquired" == true ]]; then
       worktree_path="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$treehouse_record")"
       lease_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lease_id"])' "$treehouse_record")"
-      if ! "$SCRIPT_DIR/_sgt-treehouse-io.py" verify-checkout \
-        "$repo_path" "$worktree_path"; then
-        "$SCRIPT_DIR/_sgt-treehouse-io.py" return "$repo_path" \
-          "$repo_task_dir/treehouse-acquisition-return.raw" \
-          "$repo_task_dir/treehouse-acquisition-return-receipt.json" \
-          "$worktree_path" "$lease_id" "$lease_holder" || true
-        _die "Treehouse lease belongs to another repository; conditional return attempted and evidence preserved: $treehouse_record"
-      fi
       _info "leased: $worktree_path"
       echo "treehouse"      > "$repo_task_dir/wt_type"
       echo "$lease_holder"  > "$repo_task_dir/wt_holder"
@@ -856,7 +848,7 @@ for rname in "${TARGET_REPOS[@]}"; do
       # Hold a verified directory descriptor across branch lookup and checkout;
       # path swaps cannot redirect Git into a different repository.
       if ! "$SCRIPT_DIR/_sgt-treehouse-io.py" checkout-branch \
-        "$repo_path" "$worktree_path" "$BRANCH"; then
+        "$repo_path" "$worktree_path" "$BRANCH" "$treehouse_record"; then
         printf 'failed: treehouse checkout failed\n' > "$repo_task_dir/status"
         if "$SCRIPT_DIR/_sgt-treehouse-io.py" return "$repo_path" \
           "$repo_task_dir/treehouse-acquisition-return.raw" \

@@ -5,6 +5,7 @@ import json
 import hashlib
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -15,6 +16,53 @@ LIMIT = 65536
 RECEIPT_RING = 4
 RECEIPT_ATTEMPT_LIMIT = 12000
 MAX_RECEIPT_ATTEMPTS = (1 << 63) - 1
+PIPE_DRAIN_TIMEOUT = 1.0
+COMMAND_TIMEOUT = 300.0
+ENVELOPE_KEYS = {"version", "total_attempts", "history_sha256", "attempts"}
+
+
+def process_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def cleanup_orphan_temps(targets, return_raw_prefix=None):
+    patterns = []
+    parents = set()
+    for value in targets:
+        target = Path(value)
+        parent = target.parent.resolve(strict=True)
+        if parent != target.parent or parent.is_symlink():
+            raise SystemExit("unsafe Treehouse evidence directory")
+        parents.add(parent)
+        patterns.append(re.compile(re.escape(target.name) + r"\.tmp\.(\d+)$"))
+    if return_raw_prefix:
+        prefix = Path(return_raw_prefix)
+        parent = prefix.parent.resolve(strict=True)
+        if parent != prefix.parent or parent.is_symlink():
+            raise SystemExit("unsafe Treehouse evidence directory")
+        parents.add(parent)
+        patterns.append(re.compile(
+            re.escape(prefix.name) +
+            r"\.[0-9a-f]{32}(?:\.stderr)?\.tmp\.(\d+)$"))
+    for parent in parents:
+        for candidate in parent.iterdir():
+            matched = next((pattern.fullmatch(candidate.name)
+                            for pattern in patterns), None)
+            if not matched:
+                continue
+            info = candidate.lstat()
+            if (candidate.is_symlink() or not candidate.is_file() or
+                    info.st_uid != os.getuid() or info.st_nlink != 1):
+                raise SystemExit("unsafe orphan Treehouse evidence")
+            pid = int(matched.group(1))
+            if pid == os.getpid() or not process_alive(pid):
+                candidate.unlink()
 
 
 def atomic_json(path, value, failpoint=None):
@@ -37,7 +85,8 @@ def atomic_json(path, value, failpoint=None):
 
 def load_receipt(path):
     receipt = strict_json(Path(path).read_bytes())
-    if not isinstance(receipt, dict) or receipt.get("version") != 1:
+    if (not isinstance(receipt, dict) or set(receipt) != ENVELOPE_KEYS or
+            receipt.get("version") != 1 or isinstance(receipt.get("version"), bool)):
         raise ValueError("invalid receipt envelope")
     attempts = receipt.get("attempts")
     if not isinstance(attempts, list) or len(attempts) > RECEIPT_RING:
@@ -48,6 +97,7 @@ def load_receipt(path):
         encoded = json.dumps(attempt, sort_keys=True, separators=(",", ":")).encode()
         if len(encoded) > RECEIPT_ATTEMPT_LIMIT:
             raise ValueError("oversized receipt attempt")
+        validate_attempt(attempt)
     total = receipt.get("total_attempts", len(attempts))
     digest = receipt.get("history_sha256", "0" * 64)
     if (not isinstance(total, int) or isinstance(total, bool) or total < len(attempts)
@@ -58,6 +108,49 @@ def load_receipt(path):
         raise ValueError("invalid receipt history digest")
     return {"version": 1, "total_attempts": total,
             "history_sha256": digest, "attempts": attempts}
+
+
+def validate_attempt(attempt):
+    operation = attempt.get("operation")
+    state = attempt.get("state")
+    identity_keys = {
+        "get": {"repo", "lease_holder"},
+        "status": {"repo"},
+        "return": {"repo", "path", "lease_id", "lease_holder"},
+    }
+    if operation not in identity_keys or state not in ("started", "completed"):
+        raise ValueError("invalid receipt operation or state")
+    keys = {"attempt_id", "state", "raw_path", "operation"} | identity_keys[operation]
+    if state == "completed":
+        keys |= {"returncode", "signal", "stdout_overflow", "stderr_overflow",
+                 "timed_out", "pipe_timeout"}
+    if set(attempt) != keys:
+        raise ValueError("invalid receipt attempt schema")
+    attempt_id = attempt["attempt_id"]
+    if (not isinstance(attempt_id, str) or
+            not re.fullmatch(r"[0-9a-f]{32}", attempt_id)):
+        raise ValueError("invalid receipt attempt id")
+    for key in identity_keys[operation] | {"raw_path"}:
+        value = attempt[key]
+        if not isinstance(value, str) or not value or len(value.encode()) > 4096:
+            raise ValueError("invalid receipt identity")
+    raw_path = attempt["raw_path"]
+    if not os.path.isabs(raw_path) or os.path.normpath(raw_path) != raw_path:
+        raise ValueError("invalid receipt raw path")
+    if state == "completed":
+        returncode = attempt["returncode"]
+        caught_signal = attempt["signal"]
+        if returncode is not None and (isinstance(returncode, bool) or
+                                       not isinstance(returncode, int) or returncode < 0):
+            raise ValueError("invalid receipt return code")
+        if caught_signal is not None and (isinstance(caught_signal, bool) or
+                                          not isinstance(caught_signal, int) or caught_signal <= 0):
+            raise ValueError("invalid receipt signal")
+        if (returncode is None) == (caught_signal is None):
+            raise ValueError("receipt must contain exactly one outcome")
+        for key in ("stdout_overflow", "stderr_overflow", "timed_out", "pipe_timeout"):
+            if not isinstance(attempt[key], bool):
+                raise ValueError("invalid receipt outcome flag")
 
 
 def rotate_return_evidence(attempts, newest_raw):
@@ -75,6 +168,10 @@ def rotate_return_evidence(attempts, newest_raw):
 
 def append_receipt(path, attempt):
     target = Path(path)
+    try:
+        validate_attempt(attempt)
+    except ValueError as error:
+        raise SystemExit(f"invalid Treehouse receipt identity: {error}") from error
     encoded_attempt = json.dumps(attempt, sort_keys=True,
                                  separators=(",", ":")).encode()
     if len(encoded_attempt) > RECEIPT_ATTEMPT_LIMIT:
@@ -101,7 +198,8 @@ def append_receipt(path, attempt):
         rotate_return_evidence(attempts, attempt["raw_path"])
 
 
-def finish_receipt(path, attempt_id, returncode, stdout_overflow, stderr_overflow):
+def finish_receipt(path, attempt_id, returncode, stdout_overflow, stderr_overflow,
+                   timed_out, pipe_timeout):
     receipt = load_receipt(path)
     attempts = receipt["attempts"]
     if not attempts or attempts[-1].get("attempt_id") != attempt_id:
@@ -111,12 +209,18 @@ def finish_receipt(path, attempt_id, returncode, stdout_overflow, stderr_overflo
     attempts[-1]["signal"] = -returncode if returncode < 0 else None
     attempts[-1]["stdout_overflow"] = stdout_overflow
     attempts[-1]["stderr_overflow"] = stderr_overflow
+    attempts[-1]["timed_out"] = timed_out
+    attempts[-1]["pipe_timeout"] = pipe_timeout
     atomic_json(path, receipt)
 
 
 def run_bounded(command, cwd, raw_path, receipt_path, identity, failpoint=None):
+    is_return = identity.get("operation") == "return"
+    cleanup_orphan_temps(
+        [receipt_path, raw_path, raw_path + ".stderr"],
+        return_raw_prefix=raw_path if is_return else None)
     attempt_id = uuid.uuid4().hex
-    if identity.get("operation") == "return":
+    if is_return:
         target = Path(f"{raw_path}.{attempt_id}")
     else:
         target = Path(raw_path)
@@ -128,30 +232,59 @@ def run_bounded(command, cwd, raw_path, receipt_path, identity, failpoint=None):
     error_temp = error_target.with_name(f"{error_target.name}.tmp.{os.getpid()}")
     with temp.open("xb") as output, error_temp.open("xb") as error_output:
         process = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE)
+                                   stderr=subprocess.PIPE, start_new_session=True)
+        process_group = process.pid
         overflow = {"stdout": False, "stderr": False}
         def drain(source, destination, stream_name):
             captured = 0
             total = 0
-            while chunk := source.read(65536):
-                total += len(chunk)
-                if captured <= LIMIT:
-                    kept = chunk[:LIMIT + 1 - captured]
-                    destination.write(kept)
-                    captured += len(kept)
-                if total > LIMIT:
-                    overflow[stream_name] = True
+            try:
+                while chunk := source.read(65536):
+                    total += len(chunk)
+                    if captured <= LIMIT:
+                        kept = chunk[:LIMIT + 1 - captured]
+                        destination.write(kept)
+                        captured += len(kept)
+                    if total > LIMIT:
+                        overflow[stream_name] = True
+            except (OSError, ValueError):
+                pass
 
         assert process.stdout is not None and process.stderr is not None
         stdout_thread = threading.Thread(
-            target=drain, args=(process.stdout, output, "stdout"))
+            target=drain, args=(process.stdout, output, "stdout"), daemon=True)
         stderr_thread = threading.Thread(
-            target=drain, args=(process.stderr, error_output, "stderr"))
+            target=drain, args=(process.stderr, error_output, "stderr"), daemon=True)
         stdout_thread.start()
         stderr_thread.start()
-        returncode = process.wait()
-        stdout_thread.join()
-        stderr_thread.join()
+        timed_out = False
+        try:
+            returncode = process.wait(timeout=COMMAND_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(process_group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            returncode = process.wait()
+        stdout_thread.join(PIPE_DRAIN_TIMEOUT)
+        stderr_thread.join(PIPE_DRAIN_TIMEOUT)
+        pipe_timeout = stdout_thread.is_alive() or stderr_thread.is_alive()
+        if pipe_timeout:
+            try:
+                os.killpg(process_group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout_thread.join(PIPE_DRAIN_TIMEOUT)
+            stderr_thread.join(PIPE_DRAIN_TIMEOUT)
+        if stdout_thread.is_alive():
+            process.stdout.close()
+        if stderr_thread.is_alive():
+            process.stderr.close()
+        stdout_thread.join(PIPE_DRAIN_TIMEOUT)
+        stderr_thread.join(PIPE_DRAIN_TIMEOUT)
+        if stdout_thread.is_alive() or stderr_thread.is_alive():
+            raise SystemExit("Treehouse output drains did not terminate")
         output.flush()
         os.fsync(output.fileno())
         error_output.flush()
@@ -172,8 +305,10 @@ def run_bounded(command, cwd, raw_path, receipt_path, identity, failpoint=None):
     if failpoint and os.environ.get("SGT_CLEANUP_FAIL_POINT") == failpoint:
         os.kill(os.getpid(), signal.SIGKILL)
     finish_receipt(receipt_path, attempt_id, returncode,
-                   overflow["stdout"], overflow["stderr"])
-    return returncode, target, overflow["stdout"] or overflow["stderr"]
+                   overflow["stdout"], overflow["stderr"], timed_out, pipe_timeout)
+    ambiguous = (overflow["stdout"] or overflow["stderr"] or
+                 timed_out or pipe_timeout)
+    return returncode, target, ambiguous
 
 
 def unique_object(pairs):
@@ -232,6 +367,14 @@ def git_common(path, expected_top=None, pass_fds=()):
     return canonical(common)
 
 
+def git_directory(path, pass_fds=()):
+    directory = subprocess.run(
+        ["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-dir"],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        pass_fds=pass_fds).stdout.rstrip("\n")
+    return canonical(directory)
+
+
 def same_repository(repo, checkout):
     repo = canonical(repo)
     checkout = canonical(checkout)
@@ -243,18 +386,41 @@ def same_repository(repo, checkout):
         raise ValueError("checkout belongs to another repository")
 
 
-def checkout_branch(repo, checkout, branch):
+def checkout_branch(repo, checkout, branch, record_path):
     repo = canonical(repo)
-    checkout = canonical(checkout)
+    if not os.path.isabs(checkout) or os.path.normpath(checkout) != checkout:
+        raise ValueError("invalid checkout path")
     if controls(branch) or not branch or len(branch.encode()) > 1024:
         raise ValueError("invalid branch")
     descriptor = os.open(checkout, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         opened = os.fstat(descriptor)
         descriptor_path = f"/proc/self/fd/{descriptor}"
+        if os.path.realpath(descriptor_path) != checkout:
+            raise ValueError("checkout path changed before open")
+        record = strict_json(Path(record_path).read_bytes())
+        required = {"version", "repo", "path", "path_canonical",
+                    "path_is_canonical", "lease_id", "lease_holder",
+                    "checkout_dev", "checkout_ino", "git_dir",
+                    "git_dir_dev", "git_dir_ino", "identity_verified"}
+        if (not isinstance(record, dict) or set(record) != required or
+                record.get("version") != 1 or record.get("repo") != repo or
+                record.get("path") != checkout or
+                record.get("path_canonical") != checkout or
+                record.get("path_is_canonical") is not True or
+                record.get("identity_verified") is not True or
+                record.get("checkout_dev") != opened.st_dev or
+                record.get("checkout_ino") != opened.st_ino):
+            raise ValueError("checkout allocation identity changed")
         repo_common = git_common(repo, repo)
         checkout_common = git_common(
             descriptor_path, checkout, pass_fds=(descriptor,))
+        checkout_git_dir = git_directory(descriptor_path, pass_fds=(descriptor,))
+        git_info = os.stat(checkout_git_dir, follow_symlinks=False)
+        if (record.get("git_dir") != checkout_git_dir or
+                record.get("git_dir_dev") != git_info.st_dev or
+                record.get("git_dir_ino") != git_info.st_ino):
+            raise ValueError("checkout Git directory changed")
         left = os.stat(repo_common, follow_symlinks=False)
         right = os.stat(checkout_common, follow_symlinks=False)
         if (left.st_dev, left.st_ino) != (right.st_dev, right.st_ino):
@@ -287,13 +453,47 @@ def allocation(raw_path, record_path, repo, holder):
     path, lease_id, actual_holder = fields
     if not os.path.isabs(path) or os.path.normpath(path) != path:
         raise ValueError("allocation path is not absolute and normalized")
-    canonical_path = str(Path(path).resolve(strict=True))
     repo = canonical(repo)
     if actual_holder != holder:
         raise ValueError("allocation holder mismatch")
+    canonical_path = str(Path(path).resolve(strict=True))
+    candidate = {"version": 1, "repo": repo, "path": path,
+                 "path_canonical": canonical_path,
+                 "path_is_canonical": canonical_path == path,
+                 "identity_verified": False,
+                 "checkout_dev": None, "checkout_ino": None,
+                 "git_dir": None, "git_dir_dev": None, "git_dir_ino": None,
+                 "lease_id": lease_id, "lease_holder": actual_holder}
+    atomic_json(record_path, candidate)
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        checkout_info = os.fstat(descriptor)
+        descriptor_path = f"/proc/self/fd/{descriptor}"
+        canonical_path = os.path.realpath(descriptor_path)
+        checkout_common = git_common(
+            descriptor_path, path, pass_fds=(descriptor,))
+        repo_common = git_common(repo, repo)
+        left = os.stat(repo_common, follow_symlinks=False)
+        right = os.stat(checkout_common, follow_symlinks=False)
+        if (left.st_dev, left.st_ino) != (right.st_dev, right.st_ino):
+            raise ValueError("allocation belongs to another repository")
+        checkout_git_dir = git_directory(descriptor_path, pass_fds=(descriptor,))
+        git_info = os.stat(checkout_git_dir, follow_symlinks=False)
+        current = os.stat(path, follow_symlinks=False)
+        if ((checkout_info.st_dev, checkout_info.st_ino) !=
+                (current.st_dev, current.st_ino)):
+            raise ValueError("allocation path changed")
+    finally:
+        os.close(descriptor)
     atomic_json(record_path, {"version": 1, "repo": repo, "path": path,
                               "path_canonical": canonical_path,
                               "path_is_canonical": canonical_path == path,
+                              "identity_verified": True,
+                              "checkout_dev": checkout_info.st_dev,
+                              "checkout_ino": checkout_info.st_ino,
+                              "git_dir": checkout_git_dir,
+                              "git_dir_dev": git_info.st_dev,
+                              "git_dir_ino": git_info.st_ino,
                               "lease_id": lease_id, "lease_holder": actual_holder},
                 "treehouse-record-created")
     if os.environ.get("SGT_DISPATCH_FAIL_POINT") == "treehouse-record-published":
@@ -305,6 +505,7 @@ def main():
     mode = sys.argv[1]
     if mode == "get":
         repo, raw, receipt, record, holder = sys.argv[2:]
+        cleanup_orphan_temps([record])
         rc, _, overflow = run_bounded(
             ["treehouse", "get", "--lease", "--lease-holder", holder, "--json"],
             repo, raw, receipt,
@@ -323,9 +524,9 @@ def main():
             return 1
         return 0
     if mode == "checkout-branch":
-        repo, checkout, branch = sys.argv[2:]
+        repo, checkout, branch, record = sys.argv[2:]
         try:
-            return checkout_branch(repo, checkout, branch)
+            return checkout_branch(repo, checkout, branch, record)
         except (ValueError, OSError, subprocess.CalledProcessError):
             return 1
     if mode == "return":
@@ -345,6 +546,7 @@ def main():
         return 0 if rc == 0 and not overflow else 1
     if mode == "status":
         repo, raw, receipt, state_path, path, lease_id, holder = sys.argv[2:]
+        cleanup_orphan_temps([state_path])
         Path(state_path).unlink(missing_ok=True)
         rc, _, overflow = run_bounded(
             ["treehouse", "status", "--json"], repo, raw, receipt,

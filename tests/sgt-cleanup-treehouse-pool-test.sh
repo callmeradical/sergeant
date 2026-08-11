@@ -342,10 +342,93 @@ PY
   -name 'treehouse-return.raw.*' -type f | wc -l)" -le 8 ]]
 printf 'sgt-cleanup bounds receipts and raw evidence across hundreds of retries: ok\n'
 
-for corrupt_receipt in partial malformed oversized; do
+dead_temp_pid=99999999
+if kill -0 "$dead_temp_pid" 2>/dev/null; then
+  printf 'chosen orphan pid is unexpectedly live: %s\n' "$dead_temp_pid" >&2
+  exit 1
+fi
+return_state="$TEST_ROOT/fleet/return-failure/app"
+for orphan_temp in \
+  "treehouse-return-receipt.json.tmp.$dead_temp_pid" \
+  "treehouse-return.raw.tmp.$dead_temp_pid" \
+  "treehouse-return.raw.stderr.tmp.$dead_temp_pid" \
+  "treehouse-return.raw.0123456789abcdef0123456789abcdef.tmp.$dead_temp_pid" \
+  "treehouse-return.raw.0123456789abcdef0123456789abcdef.stderr.tmp.$dead_temp_pid"; do
+  printf 'orphan\n' > "$return_state/$orphan_temp"
+done
+for ((orphan_index = 1; orphan_index <= 64; orphan_index++)); do
+  orphan_uuid="$(printf '%032x' "$orphan_index")"
+  orphan_pid=$((dead_temp_pid + orphan_index))
+  if kill -0 "$orphan_pid" 2>/dev/null; then
+    printf 'chosen crash-loop pid is unexpectedly live: %s\n' "$orphan_pid" >&2
+    exit 1
+  fi
+  printf 'crash-loop orphan\n' > \
+    "$return_state/treehouse-return.raw.$orphan_uuid.tmp.$orphan_pid"
+  printf 'crash-loop orphan stderr\n' > \
+    "$return_state/treehouse-return.raw.$orphan_uuid.stderr.tmp.$orphan_pid"
+done
+set +e
+HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+  FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/return-failure-active" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/return-failure-pool-checkout" \
+  FAKE_TREEHOUSE_LEASE_ID=lease-return-failure \
+  FAKE_TREEHOUSE_HOLDER=sgt-return-failure-app \
+  FAKE_TREEHOUSE_RETURN_FAIL=1 \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" return-failure app >/dev/null 2>&1
+orphan_retry_status=$?
+set -e
+[[ "$orphan_retry_status" -ne 0 ]]
+[[ -z "$(find "$return_state" -name '*.tmp.*' -print -quit)" ]]
+printf 'sgt-cleanup removes bounded owned orphan attempt temporaries: ok\n'
+
+for corrupt_receipt in partial malformed missing extra empty_attempt attempt_extra \
+  oversized; do
   case "$corrupt_receipt" in
     partial) printf '{"version":1' > "$return_receipt" ;;
     malformed) printf '{"version":2,"attempts":[]}\n' > "$return_receipt" ;;
+    missing)
+      printf '{"version":1,"total_attempts":0,"attempts":[]}\n' > "$return_receipt"
+      ;;
+    extra)
+      python3 - "$return_receipt" <<'PY'
+import json
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_text(json.dumps({
+    "version": 1, "total_attempts": 0, "history_sha256": "0" * 64,
+    "attempts": [], "extra": True}) + "\n", encoding="utf-8")
+PY
+      ;;
+    empty_attempt)
+      python3 - "$return_receipt" <<'PY'
+import json
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_text(json.dumps({
+    "version": 1, "total_attempts": 1, "history_sha256": "0" * 64,
+    "attempts": [{}]}) + "\n", encoding="utf-8")
+PY
+      ;;
+    attempt_extra)
+      python3 - "$return_receipt" "$return_state" <<'PY'
+import json
+from pathlib import Path
+import sys
+attempt = {
+    "attempt_id": "0" * 32, "state": "started", "operation": "return",
+    "raw_path": str(Path(sys.argv[2]) / ("treehouse-return.raw." + "0" * 32)),
+    "repo": str(Path(sys.argv[2]).parent.parent), "path": "/tmp/example",
+    "lease_id": "lease", "lease_holder": "holder", "extra": True,
+}
+Path(sys.argv[1]).write_text(json.dumps({
+    "version": 1, "total_attempts": 1, "history_sha256": "0" * 64,
+    "attempts": [attempt]}) + "\n", encoding="utf-8")
+PY
+      ;;
     oversized)
       python3 - "$return_receipt" <<'PY'
 from pathlib import Path
