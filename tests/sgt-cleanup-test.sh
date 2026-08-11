@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=bin/_sgt-process.sh
+source "$ROOT_DIR/bin/_sgt-process.sh"
 TEST_ROOT="$(mktemp -d)"
 TMUX_SESSION="sgt-cleanup-test-$$"
 export TMUX_TMPDIR="$TEST_ROOT/tmux"
@@ -3203,7 +3205,7 @@ validation_pid="$(cat "$TEST_ROOT/validation.pid")"
 validation_child_pid="$(cat "$TEST_ROOT/validation-child.pid")"
 printf '%s\n' "$validation_pid" > "$repo_state/validation_pane_pid"
 ps -o pgid= -p "$validation_pid" | tr -d ' ' > "$repo_state/validation_process_group"
-ps -o lstart= -p "$validation_pid" | awk '{$1=$1; print}' > "$repo_state/validation_process_start"
+_sgt_process_identity "$validation_pid" > "$repo_state/validation_process_start"
 validation_start="$(cat "$repo_state/validation_process_start")"
 printf 'stale process start\n' > "$repo_state/validation_process_start"
 set +e
@@ -3649,7 +3651,7 @@ chmod +x "$TEST_ROOT/fake-bin/fake-escaped-descendant"
 cat > "$TEST_ROOT/fake-bin/fake-worker-for-escape" <<'EOF'
 #!/usr/bin/env bash
 pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')"
-start="$(ps -o lstart= -p "$$" 2>/dev/null | sed 's/^ *//;s/ *$//')"
+start="$(_sgt_process_identity "$$")"
 printf '%s\n' "$$"    > "$WORKER_STATE_DIR/worker_pid"
 printf '%s\n' "$pgid" > "$WORKER_STATE_DIR/worker_process_group"
 printf '%s\n' "$start" > "$WORKER_STATE_DIR/worker_process_start"
@@ -6285,7 +6287,7 @@ printf 'sgt-cleanup gh#170: absent tmux refuses retirement ok\n'
 seed_retirement_task retire-live-owner
 seed_retirement_partial pending-transport
 printf '%s\n' "$$" > "$retire_state/worker_pid"
-ps -o lstart= -p "$$" | sed 's/^ *//;s/ *$//' > "$retire_state/worker_process_start"
+_sgt_process_identity "$$" > "$retire_state/worker_process_start"
 run_retirement_cleanup retire-live-owner
 assert_retirement_refused live-owner 'is still alive'
 printf 'sgt-cleanup gh#170: live worker process refuses retirement ok\n'

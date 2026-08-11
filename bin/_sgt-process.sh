@@ -48,3 +48,13 @@ _sgt_process_state() {
   fields="$(_sgt_process_stat_fields "$1")" || return 1
   printf '%s\n' "${fields##* }"
 }
+
+_sgt_fd_identity() {
+  local fd="$1" value
+  value="$(stat -Lc '%d:%i' "/proc/$$/fd/$fd" 2>/dev/null || true)"
+  if [[ -z "$value" ]]; then
+    value="$(stat -f '%d:%i' "/dev/fd/$fd" 2>/dev/null || true)"
+  fi
+  [[ "$value" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  printf '%s\n' "$value"
+}

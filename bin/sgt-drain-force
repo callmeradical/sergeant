@@ -16,6 +16,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-process.sh
+source "$SCRIPT_DIR/_sgt-process.sh"
 # shellcheck source=bin/_sgt-drain.sh
 source "$SCRIPT_DIR/_sgt-drain.sh"
 
@@ -137,7 +139,7 @@ for ((i=0; i<count; i++)); do
       [[ -f "$repo_dir/worker_process_start" ]] && \
         recorded_start="$(tr -d '\n' < "$repo_dir/worker_process_start" 2>/dev/null || true)"
       if [[ -n "$recorded_start" ]]; then
-        actual_start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+        actual_start="$(_sgt_process_identity "$pid" 2>/dev/null || true)"
         if [[ "$actual_start" != "$recorded_start" ]]; then
           printf '  INFO: pid %s start-time mismatch for %s/%s (pid reused by another process; worker already gone)\n' \
             "$pid" "$task_id" "$repo_name" >&2

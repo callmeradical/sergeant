@@ -203,24 +203,15 @@ _sgt_drain_process_alive() {
 
 # _sgt_drain_process_start <pid>
 #
-# Prints a stable process start token used to detect PID reuse, or nothing when
-# it cannot be determined.  Prefers /proc/<pid>/stat field 22 (Linux and
-# BusyBox) and falls back to ps lstart (macOS).
+# Prints the shared exact process identity used to detect PID reuse, or nothing
+# when the platform cannot provide that identity.
 _sgt_drain_process_start() {
-  local pid="$1" tail_fields
+  local pid="$1"
   case "$pid" in
     ''|*[!0-9]*) return 0 ;;
   esac
-  if [[ -r "/proc/$pid/stat" ]]; then
-    # The comm field may contain spaces and parentheses, so read everything
-    # after the final ") "; starttime is then the 20th remaining field.
-    tail_fields="$(sed 's/^.*) //' "/proc/$pid/stat" 2>/dev/null || true)"
-    if [[ -n "$tail_fields" ]]; then
-      printf '%s\n' "$tail_fields" | awk '{print $20}'
-      return 0
-    fi
-  fi
-  ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true
+  declare -F _sgt_process_identity >/dev/null 2>&1 || return 0
+  _sgt_process_identity "$pid" 2>/dev/null || true
 }
 
 # _sgt_drain_snapshot_field <snapshot> <field>

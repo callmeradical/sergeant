@@ -14,6 +14,7 @@ mkdir -p "$config_dir"
 # ── Slice 1: no drain — admits everything ────────────────────────────────────
 
 # shellcheck source=bin/_sgt-drain.sh
+source "$ROOT_DIR/bin/_sgt-process.sh"
 source "$ROOT_DIR/bin/_sgt-drain.sh"
 
 _sgt_is_drained "myproject" && { printf '_sgt_is_drained should return 1 when no drain files exist\n' >&2; exit 1; }
@@ -563,9 +564,7 @@ _mk_fleet_worker() {
   printf '%s\n' "$project" > "$dir/project"
   if [[ -n "$pid" ]]; then
     printf '%s\n' "$pid" > "$dir/worker_pid"
-    # A dead pid yields no start time; record whatever ps reports.
-    { ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' \
-      > "$dir/worker_process_start"; } || true
+    _sgt_process_identity "$pid" > "$dir/worker_process_start" 2>/dev/null || true
   fi
   return 0
 }

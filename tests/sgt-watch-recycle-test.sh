@@ -112,9 +112,10 @@ make_worker() {
   printf '4242\n' > "$state/worker_process_group"
   printf '4242\n' > "$state/worker_session_id"
   printf 'linux:999999999999999\n' > "$state/worker_process_start"
-  printf '%064d\n' 1 > "$state/worker_process_token"
-  chmod 600 "$state/worker_process_token"
-  printf 'version=1\nidentity=0|%s|4242|123456|worker\nprocess_group=4242\nsession_id=4242\nprocess_token=%064d\nphase=retiring\nmember=4242|linux:999999999999999|1|4242|4242\n' \
+  printf '%032d|1:1|198|/gone\n' 1 > "$state/worker_process_marker"
+  printf '%032d|1:1|999999999999999\n' 1 > "$state/worker_process_markers"
+  chmod 600 "$state/worker_process_marker" "$state/worker_process_markers"
+  printf 'version=1\nidentity=0|%s|4242|123456|worker\nprocess_group=4242\nsession_id=4242\nprocess_marker=%032d|1:1|198|/gone\nphase=retiring\nmember=4242|linux:999999999999999|1|4242|4242\n' \
     "$pane" 1 > "$state/worker_recycle_phase"
   chmod 600 "$state/pane_identity"
   printf '%s\n' "$pane" >> "$LIVE_PANES"
@@ -222,7 +223,7 @@ printf '4141\n' > "$state/worker_pid"
 printf '4141\n' > "$state/worker_process_group"
 printf '4141\n' > "$state/worker_session_id"
 printf 'linux:999999999999998\n' > "$state/worker_process_start"
-printf 'version=1\nidentity=0|%%41|4141|999999|worker\nprocess_group=4141\nsession_id=4141\nprocess_token=%064d\nphase=retiring\nmember=4141|linux:999999999999998|1|4141|4141\n' 1 \
+printf 'version=1\nidentity=0|%%41|4141|999999|worker\nprocess_group=4141\nsession_id=4141\nprocess_marker=%032d|1:1|198|/gone\nphase=retiring\nmember=4141|linux:999999999999998|1|4141|4141\n' 1 \
   > "$state/worker_recycle_phase"
 printf '%%41\n' >> "$LIVE_PANES"
 printf 'done\n' > "$state/status"

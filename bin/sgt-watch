@@ -332,13 +332,13 @@ _record_recycle_evidence() {
 }
 
 _load_or_record_recycle_phase() {
-  local repo_dir="$1" identity="$2" process_group="$3" session_id="$4" token="$5" temporary record records members="" root_identity
+  local repo_dir="$1" identity="$2" process_group="$3" session_id="$4" marker="$5" temporary record records members="" root_identity
   if [[ -s "$repo_dir/worker_recycle_phase" ]]; then
     grep -Fqx 'version=1' "$repo_dir/worker_recycle_phase" || return 1
     grep -Fqx "identity=$identity" "$repo_dir/worker_recycle_phase" || return 1
     grep -Fqx "process_group=$process_group" "$repo_dir/worker_recycle_phase" || return 1
     grep -Fqx "session_id=$session_id" "$repo_dir/worker_recycle_phase" || return 1
-    grep -Fqx "process_token=$token" "$repo_dir/worker_recycle_phase" || return 1
+    grep -Fqx "process_marker=$marker" "$repo_dir/worker_recycle_phase" || return 1
     sed -n 's/^member=//p' "$repo_dir/worker_recycle_phase"
     return 0
   fi
@@ -359,7 +359,7 @@ _load_or_record_recycle_phase() {
     printf 'identity=%s\n' "$identity"
     printf 'process_group=%s\n' "$process_group"
     printf 'session_id=%s\n' "$session_id"
-    printf 'process_token=%s\n' "$token"
+    printf 'process_marker=%s\n' "$marker"
     printf 'phase=retiring\n'
     while IFS= read -r member; do
       if [[ -n "$member" ]]; then
@@ -400,25 +400,23 @@ _worker_descendant_records() {
   done <<< "$table"
 }
 
-_worker_session_pids() {
-  _sgt_process_table | awk -v sid="$1" '$3 == sid { print $1 }'
-}
-
 _terminal_worker_process_group() {
   local repo_dir="$1" identity="$2"
-  local pane_fields pane_pid recorded_pid recorded_pgid recorded_sid recorded_start recorded_token actual_identity fields exact_ppid exact_pgid exact_sid state
+  local pane_fields pane_pid recorded_pid recorded_pgid recorded_sid recorded_start recorded_marker marker_generation marker_identity marker_fd _marker_path actual_identity fields exact_ppid exact_pgid exact_sid _state
 
   recorded_pid="$(cat "$repo_dir/worker_pid" 2>/dev/null || true)"
   recorded_pgid="$(cat "$repo_dir/worker_process_group" 2>/dev/null || true)"
   recorded_start="$(cat "$repo_dir/worker_process_start" 2>/dev/null || true)"
   recorded_sid="$(cat "$repo_dir/worker_session_id" 2>/dev/null || true)"
-  recorded_token="$(_sgt_read_owned_file "$repo_dir/worker_process_token" 2>/dev/null || true)"
-  if [[ -z "$recorded_pid" || -z "$recorded_pgid" || -z "$recorded_sid" || -z "$recorded_start" || -z "$recorded_token" ]]; then
+  recorded_marker="$(_sgt_read_owned_file "$repo_dir/worker_process_marker" 2>/dev/null || true)"
+  IFS='|' read -r marker_generation marker_identity marker_fd _marker_path <<< "$recorded_marker"
+  if [[ -z "$recorded_pid" || -z "$recorded_pgid" || -z "$recorded_sid" || -z "$recorded_start" || -z "$recorded_marker" ]]; then
     return 2
   fi
   [[ "$recorded_pid" =~ ^[1-9][0-9]*$ && \
     "$recorded_pgid" =~ ^[1-9][0-9]*$ && "$recorded_sid" =~ ^[1-9][0-9]*$ &&
-    "$recorded_token" =~ ^[0-9a-f]{64}$ && -n "$recorded_start" ]] || return 1
+    "$marker_generation" =~ ^[0-9a-f]{32}$ && "$marker_identity" =~ ^[0-9]+:[0-9]+$ &&
+    "$marker_fd" == 198 && -s "$repo_dir/worker_process_markers" && -n "$recorded_start" ]] || return 1
   pane_fields="${identity#*|}"
   pane_fields="${pane_fields#*|}"
   pane_pid="${pane_fields%%|*}"
@@ -426,75 +424,21 @@ _terminal_worker_process_group() {
   if kill -0 "$recorded_pid" 2>/dev/null; then
     actual_identity="$(_sgt_process_identity "$recorded_pid" 2>/dev/null || true)"
     fields="$(_sgt_process_stat_fields "$recorded_pid" 2>/dev/null || true)"
-    read -r actual_identity exact_ppid exact_pgid exact_sid state <<< "$fields"
+    read -r actual_identity exact_ppid exact_pgid exact_sid _state <<< "$fields"
     [[ "$actual_identity" == "$recorded_start" && "$exact_pgid" == "$recorded_pgid" &&
       "$exact_sid" == "$recorded_sid" ]] || return 1
     command -v python3 >/dev/null 2>&1 || return 1
-    python3 "$SCRIPT_DIR/_sgt-process-token.py" check "$recorded_token" "$recorded_pid" \
-      "${recorded_start#linux:}" >/dev/null || return 1
+    python3 "$SCRIPT_DIR/_sgt-process-token.py" check "$repo_dir/worker_process_markers" \
+      "$recorded_pid" "${recorded_start#linux:}" "$marker_identity" >/dev/null || return 1
   fi
-  printf '%s|%s|%s\n' "$recorded_pgid" "$recorded_sid" "$recorded_token"
-}
-
-_attributable_worker_records() {
-  local session_id="$1" members="$2" record pid exact state records="" session_pid descendants session_pids
-  # Every phase member is a durable PID/start/PPID/SID lineage point. Retaining
-  # all exact descendants as roots lets a child that called setsid remain
-  # attributable after its original session leader has exited.
-  while IFS= read -r record; do
-    [[ -n "$record" ]] || continue
-    pid="${record%%|*}"
-    exact="${record#*|}"; exact="${exact%%|*}"
-    if [[ "$(_sgt_process_identity "$pid" 2>/dev/null || true)" == "$exact" ]]; then
-      state="$(_sgt_process_state "$pid" 2>/dev/null || true)"
-      [[ "$state" == Z ]] && continue
-      descendants="$(_worker_descendant_records "$pid" 2>/dev/null)" || return 1
-      records+="$descendants"$'\n'
-    elif kill -0 "$pid" 2>/dev/null; then
-      return 1
-    fi
-  done <<< "$members"
-  # A live session cannot be joined by an unrelated external process. Include
-  # its current exact identities even when the original leader is already gone.
-  session_pids="$(_worker_session_pids "$session_id" 2>/dev/null)" || return 1
-  for session_pid in $session_pids; do
-    exact="$(_sgt_process_identity "$session_pid" 2>/dev/null || true)"
-    [[ -n "$exact" ]] || return 1
-    state="$(_sgt_process_state "$session_pid" 2>/dev/null || true)"
-    [[ "$state" == Z ]] && continue
-    records+="$session_pid|$exact|unknown|unknown|$session_id"$'\n'
-  done
-  printf '%s\n' "$records" | sed '/^$/d' | awk -F '|' '!seen[$1 FS $2]++'
-}
-
-_signal_exact_worker_records() {
-  local signal="$1" records="$2" require_stopped="${3:-false}" record pid exact state
-  while IFS= read -r record; do
-    [[ -n "$record" ]] || continue
-    pid="${record%%|*}"
-    exact="${record#*|}"; exact="${exact%%|*}"
-    # Revalidate immediately at the signal boundary. PID reuse therefore turns
-    # into an unsignalled ambiguity instead of harming an unrelated process.
-    [[ "$(_sgt_process_identity "$pid" 2>/dev/null || true)" == "$exact" ]] || return 1
-    if $require_stopped; then
-      state="$(_sgt_process_state "$pid" 2>/dev/null || true)"
-      [[ "$state" == T || "$state" == t ]] || return 1
-    fi
-    kill "-$signal" "$pid" 2>/dev/null || return 1
-  done <<< "$records"
+  printf '%s|%s|%s\n' "$recorded_pgid" "$recorded_sid" "$recorded_marker"
 }
 
 _stop_terminal_worker_process_group() {
-  local process_group="$1" session_id="$2" members="$3" token="$4" root_exact minimum_start
+  local process_group="$1" session_id="$2" members="$3" marker="$4" phase_file="$5"
   [[ -n "$process_group" ]] || return 0
-  [[ "$token" =~ ^[0-9a-f]{64}$ ]] || {
-    printf 'worker process token is missing or malformed\n' >&2
-    return 1
-  }
-  root_exact="$(awk -F '|' -v pid="$session_id" '$1 == pid { print $2; exit }' <<< "$members")"
-  minimum_start="${root_exact#linux:}"
-  [[ "$minimum_start" =~ ^[0-9]+$ ]] || {
-    printf 'worker launch starttime is missing from durable retirement phase\n' >&2
+  [[ "$marker" == *"|198|"* ]] || {
+    printf 'worker process marker is missing or malformed\n' >&2
     return 1
   }
   if [[ "${SGT_WATCH_RECYCLE_FAIL_POINT:-}" == before-first-stop ]]; then
@@ -505,7 +449,8 @@ _stop_terminal_worker_process_group() {
     printf 'python3 is required for exact pidfd worker retirement\n' >&2
     return 1
   }
-  python3 "$SCRIPT_DIR/_sgt-process-token.py" retire "$token" "$minimum_start"
+  python3 "$SCRIPT_DIR/_sgt-process-token.py" retire \
+    "$(dirname "$phase_file")/worker_process_markers" "$phase_file"
 }
 
 _wait_for_peer_recycle() {
@@ -531,7 +476,7 @@ _clear_terminal_recycle_diagnostic() {
 
 _recycle_terminal_worker() {
   local repo_dir="$1"
-  local pane pane_id worktree_path identity process_identity process_group session_id process_token process_status prior_diagnostic members remainder
+  local pane pane_id worktree_path identity process_identity process_group session_id process_marker process_status prior_diagnostic members remainder
 
   # Settle the accepted action lease before the pane is taken away.  Recycling
   # used to stop the only process that could ever publish completion, which is
@@ -564,7 +509,7 @@ _recycle_terminal_worker() {
     process_group="${process_identity%%|*}"
     remainder="${process_identity#*|}"
     session_id="${remainder%%|*}"
-    process_token="${remainder#*|}"
+    process_marker="${remainder#*|}"
   else
     process_status=$?
     if _wait_for_peer_recycle "$repo_dir" "$identity" "$process_group"; then
@@ -582,7 +527,7 @@ _recycle_terminal_worker() {
   fi
   # Already retired this exact pane and process group: nothing to do.
   _recycle_evidence_covers "$repo_dir" "$identity" "$process_group" && return 0
-  if ! members="$(_load_or_record_recycle_phase "$repo_dir" "$identity" "$process_group" "$session_id" "$process_token")"; then
+  if ! members="$(_load_or_record_recycle_phase "$repo_dir" "$identity" "$process_group" "$session_id" "$process_marker")"; then
     if _wait_for_peer_recycle "$repo_dir" "$identity" "$process_group"; then
       _clear_terminal_recycle_diagnostic "$repo_dir"
       return 0
@@ -600,7 +545,7 @@ _recycle_terminal_worker() {
   # returned pane id must be compared rather than the exit status trusted.
   pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
   if [[ "$pane_id" != "$pane" ]]; then
-    if ! _stop_terminal_worker_process_group "$process_group" "$session_id" "$members" "$process_token"; then
+    if ! _stop_terminal_worker_process_group "$process_group" "$session_id" "$members" "$process_marker" "$repo_dir/worker_recycle_phase"; then
       if _wait_for_peer_recycle "$repo_dir" "$identity" "$process_group"; then
         rm -f "$repo_dir/worker_recycle_phase"
         _clear_terminal_recycle_diagnostic "$repo_dir"
@@ -623,7 +568,7 @@ _recycle_terminal_worker() {
         _clear_terminal_recycle_diagnostic "$repo_dir"
         return 0
       fi
-      if _stop_terminal_worker_process_group "$process_group" "$session_id" "$members" "$process_token" &&
+      if _stop_terminal_worker_process_group "$process_group" "$session_id" "$members" "$process_marker" "$repo_dir/worker_recycle_phase" &&
         _record_recycle_evidence "$repo_dir" "$pane" "$identity" "$process_group"; then
         rm -f "$repo_dir/worker_recycle_phase"
         _clear_terminal_recycle_diagnostic "$repo_dir"
@@ -653,7 +598,7 @@ _recycle_terminal_worker() {
     # If the exact pane is now absent, finish the durable process phase here.
     pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
     if [[ "$pane_id" != "$pane" ]]; then
-      if _stop_terminal_worker_process_group "$process_group" "$session_id" "$members" "$process_token" &&
+      if _stop_terminal_worker_process_group "$process_group" "$session_id" "$members" "$process_marker" "$repo_dir/worker_recycle_phase" &&
         _record_recycle_evidence "$repo_dir" "$pane" "$identity" "$process_group"; then
         rm -f "$repo_dir/worker_recycle_phase"
         _clear_terminal_recycle_diagnostic "$repo_dir"
@@ -672,7 +617,7 @@ _recycle_terminal_worker() {
     printf 'injected interruption after terminal pane kill\n' > "$repo_dir/diagnostic"
     return 1
   fi
-  if ! _stop_terminal_worker_process_group "$process_group" "$session_id" "$members" "$process_token"; then
+  if ! _stop_terminal_worker_process_group "$process_group" "$session_id" "$members" "$process_marker" "$repo_dir/worker_recycle_phase"; then
     if _wait_for_peer_recycle "$repo_dir" "$identity" "$process_group"; then
       rm -f "$repo_dir/worker_recycle_phase"
       _clear_terminal_recycle_diagnostic "$repo_dir"

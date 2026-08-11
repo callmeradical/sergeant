@@ -195,13 +195,9 @@ _worker_liveness() {
   fi
   [[ $alive_rc -eq 0 ]] || return 0
 
-  # The pid exists: a changed start token means it is a different process now.
-  # sgt-interactive-worker records worker_process_start with `ps -o lstart=`, so
-  # the comparison must use the same producer.  When ps cannot report it, the
-  # tokens are incomparable and the worker stays unresolved rather than being
-  # declared gone.
+  # The pid exists: compare the one shared exact kernel identity format.
   recorded_start="$(_fleet_read "$repo_dir/worker_process_start")"
-  actual_start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+  actual_start="$(_sgt_process_identity "$pid" 2>/dev/null || true)"
   if [[ -n "$recorded_start" && -n "$actual_start" && "$actual_start" != "$recorded_start" ]]; then
     _WORKER_LIVENESS="gone"
     return 0

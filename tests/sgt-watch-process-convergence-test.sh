@@ -41,10 +41,21 @@ pid_is_running() {
 
 state="$TEST_ROOT/fleet/task/app"
 worktree="$TEST_ROOT/worktree"
-PROCESS_TOKEN="$(printf 'a%.0s' $(seq 1 64))"
 mkdir -p "$state" "$worktree"
-printf '%s\n' "$PROCESS_TOKEN" > "$state/worker_process_token"
-chmod 600 "$state/worker_process_token"
+make_test_marker() {
+  local marker_state="$1"
+  marker_path="$(mktemp "$marker_state/.marker.XXXXXX")"
+  chmod 400 "$marker_path"
+  marker_identity="$(stat -Lc '%d:%i' "$marker_path")"
+  marker_generation="$(printf '%032x' "$RANDOM")"
+  marker_floor="$(awk '{ line=$0; sub(/^.*\) /, "", line); split(line,f," "); print f[20] }' "/proc/$$/stat")"
+  printf '%s|%s|198|%s\n' "$marker_generation" "$marker_identity" "$marker_path" \
+    > "$marker_state/worker_process_marker"
+  printf '%s|%s|%s\n' "$marker_generation" "$marker_identity" "$marker_floor" \
+    >> "$marker_state/worker_process_markers"
+  chmod 600 "$marker_state/worker_process_marker" "$marker_state/worker_process_markers"
+}
+make_test_marker "$state"
 printf '%s\n' "$worktree" > "$state/worktree"
 printf 'done\n' > "$state/status"
 printf 'result\n' > "$state/result"
@@ -101,7 +112,7 @@ export STOP_RACE_MARKER="$TEST_ROOT/stop-race"
 
 tmux new-session -d -s "$TMUX_SESSION" -n keepalive 'while :; do sleep 1; done'
 pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION:" -n worker \
-  "env SERGEANT_WORKER_PROCESS_TOKEN='$PROCESS_TOKEN' RESISTANT_HELPER='$RESISTANT_HELPER' FORK_PID_FILE='$FORK_PID_FILE' EXISTING_SETSID_PID_FILE='$EXISTING_SETSID_PID_FILE' TERM_HANDLER_FILE='$TERM_HANDLER_FILE' PROCESS_ADAPTER='$PROCESS_ADAPTER' STOP_RACE_MARKER='$STOP_RACE_MARKER' CREATE_EXISTING_SETSID=1 CREATE_FORK_RACE=1 \
+  "exec 198<'$marker_path'; rm -f '$marker_path'; exec env RESISTANT_HELPER='$RESISTANT_HELPER' FORK_PID_FILE='$FORK_PID_FILE' EXISTING_SETSID_PID_FILE='$EXISTING_SETSID_PID_FILE' TERM_HANDLER_FILE='$TERM_HANDLER_FILE' PROCESS_ADAPTER='$PROCESS_ADAPTER' STOP_RACE_MARKER='$STOP_RACE_MARKER' CREATE_EXISTING_SETSID=1 CREATE_FORK_RACE=1 \
   '$TEST_ROOT/sgt-interactive-worker' '$state'")"
 printf '%s\n' "$pane" > "$state/pane"
 for _ in $(seq 1 100); do
@@ -185,9 +196,7 @@ launch_fixture() {
   launched_state="$TEST_ROOT/fleet/$name/app"
   launched_worktree="$TEST_ROOT/$name-worktree"
   mkdir -p "$launched_state" "$launched_worktree"
-  launched_token="$(printf '%064x' "$RANDOM")"
-  printf '%s\n' "$launched_token" > "$launched_state/worker_process_token"
-  chmod 600 "$launched_state/worker_process_token"
+  make_test_marker "$launched_state"
   printf '%s\n' "$launched_worktree" > "$launched_state/worktree"
   printf '%s\n' "$status" > "$launched_state/status"
   printf '%s\n' "$status" > "$launched_worktree/.sergeant-status"
@@ -196,7 +205,7 @@ launch_fixture() {
     printf 'result\n' > "$launched_worktree/.sergeant-result"
   fi
   launched_pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION:" \
-    -n "$name" "env SERGEANT_WORKER_PROCESS_TOKEN='$launched_token' RESISTANT_HELPER='$RESISTANT_HELPER' FORK_PID_FILE='$FORK_PID_FILE' EXISTING_SETSID_PID_FILE='$EXISTING_SETSID_PID_FILE' TERM_HANDLER_FILE='$TERM_HANDLER_FILE' PROCESS_ADAPTER='$PROCESS_ADAPTER' CREATE_EXISTING_SETSID=0 CREATE_FORK_RACE=0 \
+    -n "$name" "exec 198<'$marker_path'; rm -f '$marker_path'; exec env RESISTANT_HELPER='$RESISTANT_HELPER' FORK_PID_FILE='$FORK_PID_FILE' EXISTING_SETSID_PID_FILE='$EXISTING_SETSID_PID_FILE' TERM_HANDLER_FILE='$TERM_HANDLER_FILE' PROCESS_ADAPTER='$PROCESS_ADAPTER' CREATE_EXISTING_SETSID=0 CREATE_FORK_RACE=0 \
     '$TEST_ROOT/sgt-interactive-worker' '$launched_state'")"
   printf '%s\n' "$launched_pane" > "$launched_state/pane"
   for _ in $(seq 1 100); do
@@ -216,7 +225,7 @@ launch_fixture() {
 launch_fixture task-no-provenance
 rm -f "$launched_state/worker_pid" "$launched_state/worker_process_group" \
   "$launched_state/worker_process_start" "$launched_state/worker_session_id" \
-  "$launched_state/worker_process_token"
+  "$launched_state/worker_process_marker" "$launched_state/worker_process_markers"
 if SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
   --sync task-no-provenance >/dev/null 2>&1; then exit 1; fi
 kill -0 "$launched_pid"
@@ -260,16 +269,15 @@ if ! SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
 fi
 
 launch_fixture task-token-conflict
-saved_token="$(cat "$launched_state/worker_process_token")"
-printf 'b%.0s' $(seq 1 64) > "$launched_state/worker_process_token"
-printf '\n' >> "$launched_state/worker_process_token"
+saved_token="$(cat "$launched_state/worker_process_marker")"
+printf 'malformed\n' > "$launched_state/worker_process_marker"
 if SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
   --sync task-token-conflict >/dev/null 2>&1; then
   printf 'conflicting durable token was accepted as worker ownership\n' >&2
   exit 1
 fi
 pid_is_running "$launched_pid"
-printf '%s\n' "$saved_token" > "$launched_state/worker_process_token"
+printf '%s\n' "$saved_token" > "$launched_state/worker_process_marker"
 SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
   --sync task-token-conflict >/dev/null
 

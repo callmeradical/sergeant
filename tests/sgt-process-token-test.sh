@@ -5,67 +5,102 @@ TEST_ROOT="$(mktemp -d)"
 OWNED_PIDS=""
 cleanup() {
   local pid
-  for pid in $OWNED_PIDS; do
-    kill -KILL "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-  done
+  for pid in $OWNED_PIDS; do kill -KILL "$pid" 2>/dev/null || true; done
+  for pid in $OWNED_PIDS; do wait "$pid" 2>/dev/null || true; done
   rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT
+
+make_marker() {
+  marker_path="$(mktemp "$TEST_ROOT/marker.XXXXXX")"
+  marker_identity="$(stat -Lc '%d:%i' "$marker_path")"
+  generation="$(printf '%032x' "$RANDOM")"
+  marker_floor="$(awk '{ line=$0; sub(/^.*\) /, "", line); split(line,f," "); print f[20] }' "/proc/$$/stat")"
+  printf '%s|%s|%s\n' "$generation" "$marker_identity" "$marker_floor" > "$TEST_ROOT/markers"
+  printf 'version=1\nmember=99999999|linux:1|1|1|1\n' > "$TEST_ROOT/phase"
+}
 
 python3 - <<'PY'
 import os, signal
 assert hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal")
 PY
 
-token="$(printf 'c%.0s' $(seq 1 64))"
-SERGEANT_WORKER_PROCESS_TOKEN="$token" python3 - "$TEST_ROOT/unreadable.pid" >/dev/null 2>&1 <<'PY' &
-import ctypes, os, pathlib, time, sys
-pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
-ctypes.CDLL(None).prctl(4, 0)  # PR_SET_DUMPABLE
+# A same-user environment spoofer has no capability FD and is untouched.
+SERGEANT_WORKER_PROCESS_TOKEN=spoof sleep 60 & spoofer=$!
+OWNED_PIDS+=" $spoofer"
+disown "$spoofer" 2>/dev/null || true
+make_marker
+bash -c "exec 198<'$marker_path'; rm -f '$marker_path'; exec env -i PATH='$PATH' sleep 60" & holder=$!
+OWNED_PIDS+=" $holder"
+disown "$holder" 2>/dev/null || true
+for _ in $(seq 1 100); do [[ ! -e "$marker_path" ]] && break; sleep 0.01; done
+[[ ! -e "$marker_path" ]]
+start="$(awk '{ line=$0; sub(/^.*\) /, "", line); split(line,f," "); print f[20] }' "/proc/$holder/stat")"
+printf 'version=1\nmember=%s|linux:%s|1|1|1\n' "$holder" "$start" > "$TEST_ROOT/phase"
+python3 "$ROOT/bin/_sgt-process-token.py" retire "$TEST_ROOT/markers" "$TEST_ROOT/phase"
+kill -0 "$spoofer"
+
+# A live attributable process that deliberately closes the inherited marker is
+# actionable and is never falsely reported retired.
+make_marker
+bash -c "exec 198<'$marker_path'; rm -f '$marker_path'; exec 198<&-; exec sleep 60" & closed=$!
+OWNED_PIDS+=" $closed"
+disown "$closed" 2>/dev/null || true
+closed_start="$(awk '{ line=$0; sub(/^.*\) /, "", line); split(line,f," "); print f[20] }' "/proc/$closed/stat")"
+printf 'version=1\nmember=%s|linux:%s|1|1|1\n' "$closed" "$closed_start" > "$TEST_ROOT/phase"
+set +e
+closed_output="$(python3 "$ROOT/bin/_sgt-process-token.py" retire "$TEST_ROOT/markers" "$TEST_ROOT/phase" 2>&1)"
+closed_status=$?
+set -e
+[[ "$closed_status" -ne 0 && "$closed_output" == *'closed its ownership marker FD'* ]]
+kill -0 "$closed"
+
+# Unreadable fd provenance fails closed, and stale starttime check never signals.
+make_marker
+python3 - "$marker_path" "$TEST_ROOT/unreadable.pid" <<'PY' &
+import ctypes, os, pathlib, sys, time
+fd = os.open(sys.argv[1], os.O_RDONLY)
+os.dup2(fd, 198)
+os.unlink(sys.argv[1])
+pathlib.Path(sys.argv[2]).write_text(str(os.getpid()))
+ctypes.CDLL(None).prctl(4, 0)
 time.sleep(60)
 PY
-launcher=$!
-OWNED_PIDS+=" $launcher"
-disown "$launcher" 2>/dev/null || true
+unreadable=$!
+OWNED_PIDS+=" $unreadable"
+disown "$unreadable" 2>/dev/null || true
 for _ in $(seq 1 100); do [[ -s "$TEST_ROOT/unreadable.pid" ]] && break; sleep 0.01; done
-pid="$(cat "$TEST_ROOT/unreadable.pid")"
-start="$(awk '{ line=$0; sub(/^.*\) /, "", line); split(line,f," "); print f[20] }' "/proc/$pid/stat")"
+unreadable_start="$(awk '{ line=$0; sub(/^.*\) /, "", line); split(line,f," "); print f[20] }' "/proc/$unreadable/stat")"
+printf 'version=1\nmember=%s|linux:%s|1|1|1\n' "$unreadable" "$unreadable_start" > "$TEST_ROOT/phase"
 set +e
-unreadable="$(python3 "$ROOT/bin/_sgt-process-token.py" retire "$token" "$start" 2>&1)"
-status=$?
+unreadable_output="$(python3 "$ROOT/bin/_sgt-process-token.py" retire "$TEST_ROOT/markers" "$TEST_ROOT/phase" 2>&1)"
+unreadable_status=$?
 set -e
-[[ "$status" -ne 0 && "$unreadable" == *'cannot read /proc/'*'/environ'* ]]
-kill -0 "$pid"
+[[ "$unreadable_status" -ne 0 && "$unreadable_output" == *'cannot inspect attributable worker PID'* ]]
+kill -0 "$unreadable"
 
-# A stale starttime (the PID-reuse boundary) and a conflicting token both fail
-# before a signal is sent through a pidfd.
-set +e
-python3 "$ROOT/bin/_sgt-process-token.py" check "$token" "$pid" "$((start + 1))" >/dev/null 2>&1
-reuse_status=$?
-other="$(printf 'd%.0s' $(seq 1 64))"
-python3 "$ROOT/bin/_sgt-process-token.py" check "$other" "$pid" "$start" >/dev/null 2>&1
-conflict_status=$?
-set -e
-[[ "$reuse_status" -ne 0 && "$conflict_status" -ne 0 ]]
-kill -0 "$pid"
-
-# Zombies carrying the token are terminal evidence, not unreadable live owners.
-zombie_token="$(printf 'e%.0s' $(seq 1 64))"
-SERGEANT_WORKER_PROCESS_TOKEN="$zombie_token" python3 - "$TEST_ROOT/zombie.pid" >/dev/null 2>&1 <<'PY' &
-import os, pathlib, time, sys
+# A zombie has already dropped every FD and cannot execute again, so it is
+# terminal at each retirement phase rather than an unreadable live holder.
+make_marker
+python3 - "$marker_path" "$TEST_ROOT/zombie.pid" <<'PY' &
+import os, pathlib, sys, time
 child = os.fork()
 if child == 0:
+    fd = os.open(sys.argv[1], os.O_RDONLY)
+    os.dup2(fd, 198)
+    os.unlink(sys.argv[1])
     os._exit(0)
-pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
+pathlib.Path(sys.argv[2]).write_text(str(child))
 time.sleep(60)
 PY
 zombie_parent=$!
 OWNED_PIDS+=" $zombie_parent"
 disown "$zombie_parent" 2>/dev/null || true
 for _ in $(seq 1 100); do [[ -s "$TEST_ROOT/zombie.pid" ]] && break; sleep 0.01; done
-zombie_start="$(awk '{ line=$0; sub(/^.*\) /, "", line); split(line,f," "); print f[20] }' "/proc/$zombie_parent/stat")"
-python3 "$ROOT/bin/_sgt-process-token.py" retire "$zombie_token" "$zombie_start"
-wait "$zombie_parent" 2>/dev/null || true
+zombie="$(cat "$TEST_ROOT/zombie.pid")"
+for _ in $(seq 1 100); do [[ "$(awk '{print $3}' "/proc/$zombie/stat" 2>/dev/null || true)" == Z ]] && break; sleep 0.01; done
+zombie_start="$(awk '{ line=$0; sub(/^.*\) /, "", line); split(line,f," "); print f[20] }' "/proc/$zombie/stat")"
+printf 'version=1\nmember=%s|linux:%s|1|1|1\n' "$zombie" "$zombie_start" > "$TEST_ROOT/phase"
+python3 "$ROOT/bin/_sgt-process-token.py" retire "$TEST_ROOT/markers" "$TEST_ROOT/phase"
 
-printf 'sgt process token retirement: ok\n'
+printf 'sgt process marker retirement: ok\n'

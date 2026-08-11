@@ -822,18 +822,41 @@ _sgt_pane_identity_matches() {
   [[ "$actual" == "$expected" && "$current" == "$actual" ]]
 }
 _sgt_worker_command() {
-  local worker="$1" repo_dir="$2" worktree="$3" agent="$4" token
-  token="$(_sgt_read_owned_file "$repo_dir/worker_process_token" 2>/dev/null || true)"
-  if [[ -n "$token" && ! "$token" =~ ^[0-9a-f]{64}$ ]]; then
+  local worker="$1" repo_dir="$2" worktree="$3" agent="$4" marker generation identity fd path
+  marker="$(_sgt_read_owned_file "$repo_dir/worker_process_marker" 2>/dev/null || true)"
+  IFS='|' read -r generation identity fd path <<< "$marker"
+  [[ "$generation" =~ ^[0-9a-f]{32}$ && "$identity" =~ ^[0-9]+:[0-9]+$ &&
+    "$fd" == 198 && -n "$path" ]] || return 1
+  printf 'exec 198<%q; rm -f %q; exec %q %q %q %q' \
+    "$path" "$path" "$worker" "$repo_dir" "$worktree" "$agent"
+}
+_sgt_prepare_worker_process_marker() {
+  local repo_dir="$1" path generation identity marker launch_floor history history_tmp
+  path="$(mktemp "$repo_dir/.worker-process-marker.XXXXXX")" || return 1
+  chmod 400 "$path" || { rm -f "$path"; return 1; }
+  identity="$(stat -Lc '%d:%i' "$path" 2>/dev/null || stat -f '%d:%i' "$path" 2>/dev/null || true)"
+  generation="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  launch_floor="$(_sgt_process_identity "$$" 2>/dev/null || true)"
+  launch_floor="${launch_floor#linux:}"
+  [[ "$identity" =~ ^[0-9]+:[0-9]+$ && "$generation" =~ ^[0-9a-f]{32}$ &&
+    "$launch_floor" =~ ^[0-9]+$ ]] || {
+    rm -f "$path"
     return 1
-  fi
-  if [[ -z "$token" ]]; then
-    token="$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-    [[ "$token" =~ ^[0-9a-f]{64}$ ]] || return 1
-    _sgt_replace_owned_file "$repo_dir/worker_process_token" "$token" || return 1
-  fi
-  printf 'env SERGEANT_WORKER_PROCESS_TOKEN=%q %q %q %q %q' \
-    "$token" "$worker" "$repo_dir" "$worktree" "$agent"
+  }
+  marker="$generation|$identity|198|$path"
+  history="$repo_dir/worker_process_markers"
+  [[ ! -L "$history" && ( ! -e "$history" || -f "$history" ) ]] || { rm -f "$path"; return 1; }
+  history_tmp="$(mktemp "$repo_dir/.worker-process-markers.XXXXXX")" || { rm -f "$path"; return 1; }
+  {
+    [[ ! -f "$history" ]] || cat "$history"
+    printf '%s|%s|%s\n' "$generation" "$identity" "$launch_floor"
+  } > "$history_tmp" || { rm -f "$history_tmp" "$path"; return 1; }
+  chmod 600 "$history_tmp" || { rm -f "$history_tmp" "$path"; return 1; }
+  # Publish retained generation evidence before selecting it for launch. A
+  # crash can therefore leave only an unused marker file, never a launched
+  # generation whose capability is absent from durable retirement history.
+  mv "$history_tmp" "$history" || { rm -f "$history_tmp" "$path"; return 1; }
+  _sgt_replace_owned_file "$repo_dir/worker_process_marker" "$marker" || return 1
 }
 _sgt_notification_target_create() {
   local repo_dir="$1" notification_id="$2" pane_identity="$3"

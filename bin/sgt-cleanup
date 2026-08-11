@@ -93,7 +93,7 @@ _process_tree_records() {
   for child_pid in $(pgrep -P "$root_pid" 2>/dev/null || true); do
     _process_tree_records "$child_pid"
   done
-  identity="$(ps -o lstart= -p "$root_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+  identity="$(_sgt_process_identity "$root_pid" 2>/dev/null || true)"
   [[ -n "$identity" ]] && printf '%s|%s\n' "$root_pid" "$identity"
 }
 
@@ -112,7 +112,7 @@ _live_recorded_tree_pids() {
 
   while IFS='|' read -r pid identity; do
     [[ -n "$pid" && -n "$identity" ]] || continue
-    current_identity="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+    current_identity="$(_sgt_process_identity "$pid" 2>/dev/null || true)"
     [[ "$current_identity" == "$identity" ]] && printf '%s\n' "$pid"
   done <<< "$records"
 }
@@ -167,7 +167,7 @@ _recover_escaped_worker_pgid() {
   [[ -n "$recorded_pgid" ]] || return 0
 
   if kill -0 "$recorded_pid" 2>/dev/null; then
-    actual_start="$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+    actual_start="$(_sgt_process_identity "$recorded_pid" 2>/dev/null || true)"
     [[ "$actual_start" == "$recorded_start" ]] || \
       _die "Worker PID was reused; refusing termination of escaped descendants: $recorded_pid"
     actual_pgid="$(ps -o pgid= -p "$recorded_pid" 2>/dev/null | tr -d ' ' || true)"
@@ -496,8 +496,7 @@ _response_owner_provably_dead() {
     fi
   fi
   if kill -0 "$recorded_pid" 2>/dev/null; then
-    actual_start="$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | \
-      sed 's/^ *//;s/ *$//' || true)"
+    actual_start="$(_sgt_process_identity "$recorded_pid" 2>/dev/null || true)"
     if [[ "$actual_start" == "$recorded_start" ]]; then
       printf 'recorded worker process %s is still alive\n' "$recorded_pid"
     else
