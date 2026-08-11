@@ -47,7 +47,13 @@ case "$1" in
   list-panes)
     [[ "${FAIL_LIST_PANES:-0}" == 0 ]] || exit 8
     [[ -n "${TMUX_PANE_STATE:-}" && -s "$TMUX_PANE_STATE" ]] || exit 0
-    cat "$TMUX_PANE_STATE"
+    case "${INVENTORY_SHAPE:-valid}" in
+      valid) cat "$TMUX_PANE_STATE" ;;
+      leading) printf '\n'; cat "$TMUX_PANE_STATE" ;;
+      interior) cat "$TMUX_PANE_STATE"; printf '\n'; cat "$TMUX_PANE_STATE" ;;
+      trailing) cat "$TMUX_PANE_STATE"; printf '\n' ;;
+      *) exit 9 ;;
+    esac
     ;;
   display-message)
     target=""
@@ -696,9 +702,52 @@ for malformed in extra missing bad_phase; do
   [[ "$(cat "$TEST_ROOT/malformed-$malformed-count")" == 1 ]]
 done
 
+# Nonempty inventory output containing any blank row is malformed, not an empty
+# replacement window. Both public CLIs must refuse before new-window for leading,
+# interior, and trailing blank rows.
+for inventory_shape in leading interior trailing; do
+  read -r state wt <<<"$(make_worktree respond-blank-$inventory_shape)"
+  task="task-respond-blank-$inventory_shape"
+  setup_orphan "$state" "$wt"
+  pane_state="$TEST_ROOT/respond-blank-$inventory_shape-panes"
+  printf '%%70|unrelated\n' > "$pane_state"
+  set +e
+  blank_output="$(printf 'blank inventory response' | PATH="$fake_bin:$PATH" \
+    SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" \
+    PANE_ALIVE=0 NEW_PANE=%98 TMUX_PANE_STATE="$pane_state" \
+    INVENTORY_SHAPE="$inventory_shape" \
+    NEW_WINDOW_COUNT="$TEST_ROOT/respond-blank-$inventory_shape-count" \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app 2>&1)"
+  blank_status=$?
+  set -e
+  [[ "$blank_status" -ne 0 &&
+     "$blank_output" == *'Could not enumerate tmux panes'* ]]
+  [[ ! -e "$TEST_ROOT/respond-blank-$inventory_shape-count" ]]
+  [[ "$(cat "$pane_state")" == '%70|unrelated' ]]
+
+  read -r state wt <<<"$(make_worktree recover-blank-$inventory_shape)"
+  task="task-recover-blank-$inventory_shape"
+  setup_stall "$state" "$wt"
+  pane_state="$TEST_ROOT/recover-blank-$inventory_shape-panes"
+  printf '%%70|unrelated\n' > "$pane_state"
+  set +e
+  blank_output="$(PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+    SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" PANE_ALIVE=1 NEW_PANE=%98 \
+    TMUX_PANE_STATE="$pane_state" INVENTORY_SHAPE="$inventory_shape" \
+    NEW_WINDOW_COUNT="$TEST_ROOT/recover-blank-$inventory_shape-count" \
+    "$ROOT_DIR/bin/sgt-recover" "$task" app 2>&1)"
+  blank_status=$?
+  set -e
+  [[ "$blank_status" -ne 0 &&
+     "$blank_output" == *'could not enumerate exact tmux pane inventory'* ]]
+  [[ ! -e "$TEST_ROOT/recover-blank-$inventory_shape-count" ]]
+  [[ "$(cat "$pane_state")" == '%70|unrelated' ]]
+done
+
 # A real SIGKILL after tmux creates the replacement leaves the durable spawning
 # intent behind. The exact pane is discovered by its nonce-derived window and
-# adopted; retry must not execute new-window a second time.
+# adopted; retry must not execute new-window a second time. Its first launch has
+# a genuinely zero-byte successful inventory and proves that case still spawns.
 read -r state wt <<<"$(make_worktree sigkill-spawn)"
 task=task-sigkill-spawn
 setup_orphan "$state" "$wt"
@@ -735,6 +784,7 @@ PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
 # Recover must distinguish a failed inventory command from an empty inventory.
 # After an abrupt death leaves an authenticated pane live, enumeration failure
 # cannot authorize a second new-window; a later exact retry adopts the first.
+# Its first launch also covers genuine zero-byte successful inventory.
 read -r state wt <<<"$(make_worktree recover-inventory-failure)"
 task=task-recover-inventory-failure
 setup_stall "$state" "$wt"

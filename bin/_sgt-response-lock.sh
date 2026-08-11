@@ -312,17 +312,26 @@ _sgt_replacement_pane_identity_matches() {
 _sgt_replacement_discover_pane() {
   local window_name="$1" token="$2" role="$3" phase="$4"
   local journal_pane="$5" journal_auth="$6"
-  local inventory line candidate candidate_window candidate_auth
-  local authenticated="" pane_count=0 seen_panes="|"
-  inventory="$(tmux list-panes -a -F '#{pane_id}|#{window_name}' 2>/dev/null)" || return 2
-  while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
+  local inventory_file line candidate candidate_window candidate_auth
+  local authenticated="" pane_count=0 seen_panes="|" parse_status=0
+  inventory_file="$(mktemp "${TMPDIR:-/tmp}/sgt-pane-inventory.XXXXXX")" || return 2
+  if ! tmux list-panes -a -F '#{pane_id}|#{window_name}' \
+      > "$inventory_file" 2>/dev/null; then
+    rm -f "$inventory_file"
+    return 2
+  fi
+  if [[ ! -s "$inventory_file" ]]; then
+    rm -f "$inventory_file"
+    return 1
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ -z "$line" ]]; then parse_status=2; break; fi
     candidate="${line%%|*}"
-    [[ "$candidate" != "$line" ]] || return 2
+    if [[ "$candidate" == "$line" ]]; then parse_status=2; break; fi
     candidate_window="${line#*|}"
-    [[ "$candidate" =~ ^%[0-9]+$ && -n "$candidate_window" &&
-       "$candidate_window" != *'|'* ]] || return 2
-    [[ "$seen_panes" != *"|$candidate|"* ]] || return 2
+    if [[ ! "$candidate" =~ ^%[0-9]+$ || -z "$candidate_window" ||
+          "$candidate_window" == *'|'* ]]; then parse_status=2; break; fi
+    if [[ "$seen_panes" == *"|$candidate|"* ]]; then parse_status=2; break; fi
     seen_panes="${seen_panes}${candidate}|"
     [[ "$candidate_window" == "$window_name" ]] || continue
     pane_count=$((pane_count + 1))
@@ -330,10 +339,12 @@ _sgt_replacement_discover_pane() {
     if [[ -n "$candidate_auth" ]] &&
         { [[ "$phase" == bound || "$phase" == fenced || "$phase" == spawning ]] ||
           [[ "$journal_pane" == "$candidate" && "$journal_auth" == "$candidate_auth" ]]; }; then
-      [[ -z "$authenticated" ]] || return 3
+      if [[ -n "$authenticated" ]]; then parse_status=3; break; fi
       authenticated="$candidate"
     fi
-  done <<< "$inventory"
+  done < "$inventory_file"
+  rm -f "$inventory_file"
+  (( parse_status == 0 )) || return "$parse_status"
   (( pane_count > 0 )) || return 1
   [[ -n "$authenticated" ]] || return 4
   (( pane_count == 1 )) || return 3
