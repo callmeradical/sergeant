@@ -258,12 +258,31 @@ _sgt_response_lock_held_by_this_process() {
 # _sgt_action_lease_record <notifications-dir> <name> <body>
 # Write a lease outcome record once; never overwrite an existing record so the
 # first, most proximate reason survives repeated finalization attempts.
+_sgt_transfer_io_failpoint() {
+  local target="$1" stage="$2"
+  [[ "${SGT_TEST_HOOKS:-}" == 1 &&
+     "${SGT_TEST_FAIL_TRANSFER_IO_STAGE:-}" == "$stage" &&
+     "${SGT_TEST_FAIL_TRANSFER_IO_TARGET:-}" == "${target##*/}" ]]
+}
+
 _sgt_action_lease_record() {
   local notification_dir="$1" name="$2" body="$3" temporary
   [[ -d "$notification_dir" ]] || return 1
-  [[ ! -e "$notification_dir/$name" ]] || return 0
   temporary="$notification_dir/$name.tmp.$$.$RANDOM"
+  _sgt_transfer_io_failpoint "$notification_dir/$name" write && return 1
   printf '%s' "$body" > "$temporary" || { rm -f "$temporary"; return 1; }
+  if [[ -e "$notification_dir/$name" ]]; then
+    cmp -s "$temporary" "$notification_dir/$name" || {
+      rm -f "$temporary"
+      return 1
+    }
+    rm -f "$temporary"
+    return 0
+  fi
+  if _sgt_transfer_io_failpoint "$notification_dir/$name" rename; then
+    rm -f "$temporary"
+    return 1
+  fi
   mv "$temporary" "$notification_dir/$name" || { rm -f "$temporary"; return 1; }
 }
 
@@ -292,13 +311,14 @@ _sgt_notification_action_pending() {
 # _sgt_fence_dead_action_lease <repo_state> <worktree> <successor-id> <generation> <reason>
 #
 # Archive an unfinished action lease only when all three durable ownership
-# records (fleet pane, fleet pane identity, and leased target identity) name the
-# same supervisor and both that exact pane and its recorded process are gone.
+# records for the accepted target bind one old lease generation and both that
+# exact target pane and its recorded process are gone. The current fleet pane
+# may belong to a later generation and is deliberately not conflated with it.
 # A live pane, a reused pane id/PID, or incomplete/mismatched evidence fails
 # closed. The old lease and target tree are never removed or marked completed.
 _sgt_fence_dead_action_lease() {
   local repo_state="$1" worktree="$2" successor="$3" generation="$4" reason="$5"
-  local notification_id lease notification_dir target_dir pane fleet_identity target_identity
+  local notification_id lease notification_dir target_dir pane target_identity token
   local owner_pid actual expected_transition existing stamp process_probe
 
   notification_id="$(cat "$repo_state/notification_id" 2>/dev/null || true)"
@@ -309,16 +329,19 @@ _sgt_fence_dead_action_lease() {
   target_dir="$notification_dir/targets/$lease"
   [[ -d "$target_dir" && ! -e "$target_dir/completed" ]] || return 1
 
-  pane="$(cat "$repo_state/pane" 2>/dev/null || true)"
-  fleet_identity="$(_sgt_read_owned_file "$repo_state/pane_identity" 2>/dev/null || true)"
   target_identity="$(cat "$target_dir/pane_identity" 2>/dev/null || true)"
-  [[ "$pane" =~ ^%[0-9]+$ && -n "$fleet_identity" && "$target_identity" == "$fleet_identity" ]] || return 1
   [[ "$target_identity" =~ ^[01]\|%[0-9]+\|[1-9][0-9]*\|[0-9]+\| ]] || return 1
-  [[ "${target_identity#*|}" == "$pane|"* ]] || return 1
+  pane="${target_identity#*|}"
+  pane="${pane%%|*}"
+  [[ "$pane" =~ ^%[0-9]+$ ]] || return 1
   owner_pid="${target_identity#*|*|}"
   owner_pid="${owner_pid%%|*}"
+  token="$notification_id|$lease"
+  [[ "$(cat "$target_dir/accepted" 2>/dev/null || true)" == "$token" &&
+     "$(cat "$target_dir/delivered" 2>/dev/null || true)" == "$token" ]] || return 1
 
   # Any resolvable pane is ambiguous: it is either the owner or a reused id.
+  command -v tmux >/dev/null 2>&1 || return 1
   if actual="$(_sgt_pane_identity "$pane" 2>/dev/null)" && [[ -n "$actual" ]]; then
     return 1
   fi
@@ -332,9 +355,9 @@ _sgt_fence_dead_action_lease() {
   # Re-verify the durable binding immediately before publishing the fence.
   [[ "$(cat "$repo_state/notification_id" 2>/dev/null || true)" == "$notification_id" &&
      "$(cat "$notification_dir/action_lease" 2>/dev/null || true)" == "$lease" &&
-     "$(cat "$repo_state/pane" 2>/dev/null || true)" == "$pane" &&
-     "$(_sgt_read_owned_file "$repo_state/pane_identity" 2>/dev/null || true)" == "$fleet_identity" &&
      "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$target_identity" &&
+     "$(cat "$target_dir/accepted" 2>/dev/null || true)" == "$token" &&
+     "$(cat "$target_dir/delivered" 2>/dev/null || true)" == "$token" &&
      ! -e "$target_dir/completed" ]] || return 1
   if actual="$(_sgt_pane_identity "$pane" 2>/dev/null)" && [[ -n "$actual" ]]; then
     return 1
@@ -342,7 +365,9 @@ _sgt_fence_dead_action_lease() {
   process_probe="$(ps -p "$owner_pid" -o pid= 2>/dev/null || true)"
   [[ -z "${process_probe//[[:space:]]/}" ]] || return 1
 
-  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  stamp="$(sed -n 's/^recorded_at=//p' \
+    "$notification_dir/action_lease_abandoned" 2>/dev/null || true)"
+  [[ -n "$stamp" ]] || stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
   _sgt_action_lease_record "$notification_dir" action_lease_abandoned \
     "$(printf 'notification_id=%s\nlease=%s\nowner_pane=%s\nowner_pid=%s\nowner_identity=%s\nreason=%s; exact pane and process owner proven dead; completion not fabricated\nrecorded_at=%s\n' \
       "$notification_id" "$lease" "$pane" "$owner_pid" "$target_identity" "$reason" "$stamp")" || return 1

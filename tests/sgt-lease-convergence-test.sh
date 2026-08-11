@@ -43,6 +43,10 @@ cat > "$fake_bin/tmux" <<'TMUX'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${TMUX_LOG:-/dev/null}"
 case "$1" in
+  list-panes)
+    [[ -n "${TMUX_PANE_STATE:-}" && -s "$TMUX_PANE_STATE" ]] || exit 0
+    cat "$TMUX_PANE_STATE"
+    ;;
   display-message)
     target=""
     previous=""
@@ -82,6 +86,23 @@ case "$1" in
     ;;
   new-window)
     [[ "${FAIL_WINDOW:-0}" == 0 ]] || exit 7
+    window=""
+    previous=""
+    for arg in "$@"; do
+      [[ "$previous" == -n ]] && window="$arg"
+      previous="$arg"
+    done
+    if [[ -n "${TMUX_PANE_STATE:-}" ]]; then
+      printf '%s|%s\n' "${NEW_PANE:-%99}" "$window" > "$TMUX_PANE_STATE"
+    fi
+    if [[ -n "${NEW_WINDOW_COUNT:-}" ]]; then
+      count="$(cat "$NEW_WINDOW_COUNT" 2>/dev/null || printf 0)"
+      printf '%s\n' "$((count + 1))" > "$NEW_WINDOW_COUNT"
+    fi
+    if [[ "${KILL_RESPOND_AFTER_SPAWN:-0}" == 1 ]]; then
+      kill -KILL "$PPID"
+      sleep 1
+    fi
     printf '%s\n' "${NEW_PANE:-%99}"
     ;;
   kill-pane)
@@ -398,6 +419,55 @@ fi
   exit 1
 }
 
+# Missing relaunch metadata is not a lease-adjudication bypass. A dead old
+# generation is fenced before the durable fallback is published; a live owner
+# refuses without replacing the old notification.
+read -r state wt <<<"$(make_worktree respond-incomplete-metadata-dead)"
+task=task-respond-incomplete-metadata-dead
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+rm -f "$state/agent"
+printf 'resume via durable fallback' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" PANE_ALIVE=0 \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1
+[[ -s "$state/notifications/$NOTIFY/action_lease_abandoned" ]]
+[[ -s "$state/notifications/$NOTIFY/ownership_transition" ]]
+[[ "$(cat "$state/notification_id")" != "$NOTIFY" ]]
+[[ ! -e "$state/notifications/$NOTIFY/targets/$NONCE/completed" ]]
+
+read -r state wt <<<"$(make_worktree respond-incomplete-metadata-live)"
+task=task-respond-incomplete-metadata-live
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+rm -f "$state/agent"
+if printf 'must fail closed' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+    SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" PANE_ALIVE=1 \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1; then
+  printf 'incomplete metadata bypassed a live action lease owner\n' >&2
+  exit 1
+fi
+[[ "$(cat "$state/notification_id")" == "$NOTIFY" ]]
+[[ ! -e "$state/notifications/$NOTIFY/action_lease_abandoned" ]]
+[[ ! -e "$state/notifications/$NOTIFY/ownership_transition" ]]
+
+for collision_record in action_lease_abandoned ownership_transition; do
+  read -r state wt <<<"$(make_worktree collision-$collision_record)"
+  task="task-collision-$collision_record"
+  setup_orphan "$state" "$wt"
+  install_accepted_turn "$state" "$wt"
+  printf 'foreign collision evidence\n' \
+    > "$state/notifications/$NOTIFY/$collision_record"
+  if printf 'must preserve collision' | PATH="$fake_bin:$PATH" \
+      SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" \
+      PANE_ALIVE=0 "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1; then
+    printf 'conflicting %s was accepted\n' "$collision_record" >&2
+    exit 1
+  fi
+  [[ "$(cat "$state/notifications/$NOTIFY/$collision_record")" == \
+     'foreign collision evidence' ]]
+  [[ "$(cat "$state/notification_id")" == "$NOTIFY" ]]
+done
+
 # ── 8. Stale, reused, and process-ambiguous ownership fails closed ───────
 
 read -r state wt <<<"$(make_worktree respond-stale-owner)"
@@ -406,6 +476,8 @@ setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 printf '0|%%43|4343|123457|different-owner\n' \
   > "$state/notifications/$NOTIFY/targets/$NONCE/pane_identity"
+printf 'stale-generation|%s\n' "$NONCE" \
+  > "$state/notifications/$NOTIFY/targets/$NONCE/accepted"
 if printf 'resume' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
     REPO_STATE_DIR="$state" PANE_ALIVE=0 "$ROOT_DIR/bin/sgt-respond" "$task" app \
     >/dev/null 2>&1; then
@@ -483,5 +555,88 @@ for boundary in lease_archived successor_published replacement_spawned replaceme
     grep -Fq 'kill-pane -t %98' "$TEST_ROOT/interrupt-$boundary-kill.log"
   fi
 done
+
+worktree_content_hash() {
+  find "$1" -type f ! -path '*/.git/*' ! -path '*/.sergeant-*/*' \
+    ! -name '.git' ! -name '.sergeant-*' \
+    -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+}
+
+# Every atomic write/rename in the ownership-transfer journal is retryable. A
+# failed publication leaves no partial final path and the exact same response
+# resumes without changing user worktree content.
+for io_target in response_successor_notification action_lease_abandoned \
+    ownership_transition response_relaunch_transaction; do
+  for io_stage in write rename; do
+    read -r state wt <<<"$(make_worktree io-$io_target-$io_stage)"
+    task="task-io-$io_target-$io_stage"
+    setup_orphan "$state" "$wt"
+    install_accepted_turn "$state" "$wt"
+    printf 'uncommitted %s %s\n' "$io_target" "$io_stage" > "$wt/io-user.txt"
+    io_before="$(worktree_content_hash "$wt")"
+    printf 'same response across io retry' > "$TEST_ROOT/io-input"
+    set +e
+    PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+      REPO_STATE_DIR="$state" PANE_ALIVE=0 \
+      SGT_TEST_HOOKS=1 SGT_TEST_FAIL_TRANSFER_IO_TARGET="$io_target" \
+      SGT_TEST_FAIL_TRANSFER_IO_STAGE="$io_stage" \
+      "$ROOT_DIR/bin/sgt-respond" "$task" app \
+      < "$TEST_ROOT/io-input" >/dev/null 2>&1
+    io_status=$?
+    set -e
+    [[ "$io_status" -ne 0 ]] || {
+      printf 'I/O failpoint %s/%s did not fail\n' "$io_target" "$io_stage" >&2
+      exit 1
+    }
+    [[ -z "$(find "$state" -name "${io_target}.tmp.*" -print -quit)" ]]
+    PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+      REPO_STATE_DIR="$state" PANE_ALIVE=0 \
+      "$ROOT_DIR/bin/sgt-respond" "$task" app \
+      < "$TEST_ROOT/io-input" >/dev/null 2>&1 || {
+      printf 'I/O failpoint %s/%s did not converge on retry\n' \
+        "$io_target" "$io_stage" >&2
+      exit 1
+    }
+    [[ "$(cat "$state/response")" == 'same response across io retry' ]]
+    [[ "$(cat "$wt/io-user.txt")" == "uncommitted $io_target $io_stage" ]]
+    [[ "$(worktree_content_hash "$wt")" == "$io_before" ]]
+  done
+done
+
+# A real SIGKILL after tmux creates the replacement leaves the durable spawning
+# intent behind. The exact pane is discovered by its nonce-derived window and
+# adopted; retry must not execute new-window a second time.
+read -r state wt <<<"$(make_worktree sigkill-spawn)"
+task=task-sigkill-spawn
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+printf 'uncommitted payload survives abrupt transfer\n' > "$wt/uncommitted.txt"
+content_before="$(worktree_content_hash "$wt")"
+printf 'resume after abrupt death' > "$TEST_ROOT/sigkill-input"
+set +e
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/sigkill-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/sigkill-new-window-count" \
+  KILL_RESPOND_AFTER_SPAWN=1 \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app \
+  < "$TEST_ROOT/sigkill-input" >/dev/null 2>&1
+sigkill_status=$?
+set -e
+[[ "$sigkill_status" -ne 0 && -s "$state/response_relaunch_transaction" ]]
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/sigkill-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/sigkill-new-window-count" \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app \
+  < "$TEST_ROOT/sigkill-input" >/dev/null 2>&1 || {
+  printf 'SIGKILLed replacement was not adopted on exact retry\n' >&2
+  exit 1
+}
+[[ "$(cat "$TEST_ROOT/sigkill-new-window-count")" == 1 ]]
+[[ "$(cat "$state/pane")" == '%98' ]]
+[[ ! -e "$state/response_relaunch_transaction" ]]
+[[ "$(worktree_content_hash "$wt")" == "$content_before" ]]
+[[ "$(cat "$wt/uncommitted.txt")" == 'uncommitted payload survives abrupt transfer' ]]
 
 printf 'action-lease convergence before refusal: ok\n'

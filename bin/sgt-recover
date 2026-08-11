@@ -187,6 +187,7 @@ fi
 
 delivery_notification_id=""
 dead_owner_fenced=false
+fenced_owner_pane=""
 current_notification_id="$(cat "$REPO_DIR/notification_id" 2>/dev/null || true)"
 if [[ -n "$current_notification_id" ]]; then
   current_action_lease="$(cat \
@@ -209,6 +210,11 @@ if [[ -n "$current_notification_id" ]]; then
     if _sgt_fence_dead_action_lease "$REPO_DIR" "$worktree" \
         "$delivery_notification_id" "$recovery_generation" "stalled worker recovery"; then
       dead_owner_fenced=true
+      fenced_owner_identity="$(cat \
+        "$REPO_DIR/notifications/$current_notification_id/targets/$current_action_lease/pane_identity" \
+        2>/dev/null || true)"
+      fenced_owner_pane="${fenced_owner_identity#*|}"
+      fenced_owner_pane="${fenced_owner_pane%%|*}"
     else
       _escalate "pending notification action lease blocks recovery; prior delivery evidence must be preserved: notification $current_notification_id lease target $current_action_lease has no agent completion proof and its owner is not provably dead; resolve with sgt-respond $TASK_ID $REPO after inspecting that turn"
       _recover_die "Stall recovery refused: unfinished notification action lease for $TASK_ID/$REPO (notification $current_notification_id, lease target $current_action_lease); the agent never published .sergeant-notification-complete/$current_action_lease and the lease owner is not provably dead, so completion cannot be proven. Resolve with: sgt-respond $TASK_ID $REPO"
@@ -251,7 +257,7 @@ old_pane_live=false
 if [[ -n "$old_pane" ]] && command -v tmux >/dev/null 2>&1; then
   if _sgt_pane_identity_matches "$old_pane" "$REPO_DIR"; then
     old_pane_live=true
-  elif $dead_owner_fenced; then
+  elif $dead_owner_fenced && [[ "$old_pane" == "$fenced_owner_pane" ]]; then
     # The shared fence already proved this exact recorded pane and process gone
     # twice under the response lock. There is no old pane left to kill.
     old_pane_live=false

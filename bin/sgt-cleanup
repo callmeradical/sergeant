@@ -409,7 +409,8 @@ _stop_validation_pane() {
 # cleanup refuses to discard, what a retirement archive preserves, and what its
 # digests bind.  Keep them in step with sgt-respond and sgt-ack-response.
 _RESPONSE_FLEET_STATE="response response_id response_generation response_ack \
-response-archive"
+response_delivery_unacked response_successor_notification \
+response_relaunch_transaction response-archive"
 _RESPONSE_WORKTREE_STATE=".sergeant-response .sergeant-response-id \
 .sergeant-response-generation .sergeant-response-applied .sergeant-response-ack"
 

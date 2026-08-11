@@ -652,7 +652,8 @@ rm -f "$worktree/.sergeant-response"
 set +e
 lease_output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/lease-block.log" \
   TD_LOG="$TEST_ROOT/lease-block-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
-  PANE_ALIVE=0 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  PANE_ALIVE=1 PANE_IDENTITY='0|%98|9898|654320|ambiguous-prior-owner' \
+  EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
   respond 'resume dead worker' 2>&1)"
 lease_status=$?
 set -e
