@@ -331,19 +331,42 @@ _record_recycle_evidence() {
     >> "$repo_dir/worker_recycled_log" 2>/dev/null || true
 }
 
-_record_recycle_phase() {
-  local repo_dir="$1" identity="$2" process_group="$3" temporary
+_load_or_record_recycle_phase() {
+  local repo_dir="$1" identity="$2" process_group="$3" temporary pid start member members="" leader_found=false
+  if [[ -s "$repo_dir/worker_recycle_phase" ]]; then
+    grep -Fqx 'version=1' "$repo_dir/worker_recycle_phase" || return 1
+    grep -Fqx "identity=$identity" "$repo_dir/worker_recycle_phase" || return 1
+    grep -Fqx "process_group=$process_group" "$repo_dir/worker_recycle_phase" || return 1
+    sed -n 's/^member=//p' "$repo_dir/worker_recycle_phase"
+    return 0
+  fi
+  for pid in $(pgrep -g "$process_group" 2>/dev/null || true); do
+    start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+    [[ -n "$start" ]] || continue
+    members+="$pid|$start"$'\n'
+  done
+  while IFS= read -r member; do
+    [[ "${member%%|*}" == "$process_group" ]] && leader_found=true
+  done <<< "$members"
+  $leader_found || return 1
   temporary="$repo_dir/worker_recycle_phase.tmp.$$"
   {
     printf 'version=1\n'
     printf 'identity=%s\n' "$identity"
     printf 'process_group=%s\n' "$process_group"
     printf 'phase=retiring\n'
+    while IFS= read -r member; do
+      if [[ -n "$member" ]]; then
+        printf 'member=%s\n' "$member"
+      fi
+    done <<< "$members"
+    true
   } > "$temporary" || { rm -f "$temporary"; return 1; }
   mv "$temporary" "$repo_dir/worker_recycle_phase" || {
     rm -f "$temporary"
     return 1
   }
+  printf '%s' "$members"
 }
 
 _terminal_worker_process_group() {
@@ -371,15 +394,25 @@ _terminal_worker_process_group() {
 }
 
 _stop_terminal_worker_process_group() {
-  local process_group="$1" live_pids
+  local process_group="$1" members="$2" live_pids pid start
   [[ -n "$process_group" ]] || return 0
-  kill -TERM -- -"$process_group" 2>/dev/null || true
+  live_pids="$(pgrep -g "$process_group" 2>/dev/null || true)"
+  for pid in $live_pids; do
+    start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+    printf '%s\n' "$members" | grep -Fqx "$pid|$start" || return 1
+  done
+  for pid in $live_pids; do kill -TERM "$pid" 2>/dev/null || true; done
   for _ in $(seq 1 10); do
     live_pids="$(pgrep -g "$process_group" 2>/dev/null || true)"
     [[ -z "$live_pids" ]] && return 0
     sleep 0.05
   done
-  kill -KILL -- -"$process_group" 2>/dev/null || true
+  live_pids="$(pgrep -g "$process_group" 2>/dev/null || true)"
+  for pid in $live_pids; do
+    start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+    printf '%s\n' "$members" | grep -Fqx "$pid|$start" || return 1
+    kill -KILL "$pid" 2>/dev/null || true
+  done
   for _ in $(seq 1 20); do
     live_pids="$(pgrep -g "$process_group" 2>/dev/null || true)"
     [[ -z "$live_pids" ]] && return 0
@@ -400,7 +433,7 @@ _clear_terminal_recycle_diagnostic() {
 
 _recycle_terminal_worker() {
   local repo_dir="$1"
-  local pane pane_id worktree_path identity process_group process_status
+  local pane pane_id worktree_path identity process_group process_status members
 
   # Settle the accepted action lease before the pane is taken away.  Recycling
   # used to stop the only process that could ever publish completion, which is
@@ -435,7 +468,11 @@ _recycle_terminal_worker() {
   fi
   # Already retired this exact pane and process group: nothing to do.
   _recycle_evidence_covers "$repo_dir" "$identity" "$process_group" && return 0
-  _record_recycle_phase "$repo_dir" "$identity" "$process_group" || return 1
+  if ! members="$(_load_or_record_recycle_phase "$repo_dir" "$identity" "$process_group")"; then
+    printf 'terminal worker retirement phase could not be established safely: %s\n' \
+      "$pane" > "$repo_dir/diagnostic"
+    return 1
+  fi
 
   if ! command -v tmux >/dev/null 2>&1; then
     printf 'terminal worker could not be recycled because tmux is unavailable\n' > "$repo_dir/diagnostic"
@@ -445,7 +482,7 @@ _recycle_terminal_worker() {
   # returned pane id must be compared rather than the exit status trusted.
   pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
   if [[ "$pane_id" != "$pane" ]]; then
-    if ! _stop_terminal_worker_process_group "$process_group"; then
+    if ! _stop_terminal_worker_process_group "$process_group" "$members"; then
       printf 'terminal worker process group did not stop: %s\n' \
         "$process_group" > "$repo_dir/diagnostic"
       return 1
@@ -474,7 +511,7 @@ _recycle_terminal_worker() {
     printf 'injected interruption after terminal pane kill\n' > "$repo_dir/diagnostic"
     return 1
   fi
-  if ! _stop_terminal_worker_process_group "$process_group"; then
+  if ! _stop_terminal_worker_process_group "$process_group" "$members"; then
     printf 'terminal worker process group did not stop: %s\n' \
       "$process_group" > "$repo_dir/diagnostic"
     return 1
@@ -631,6 +668,7 @@ _reconcile_incomplete_dispatch() {
 _sync_task() {
   local task_id="$1"
   local task_dir="$FLEET_DIR/$task_id"
+  local recycle_failed=false
   [[ -d "$task_dir" ]] || _die "Task not found: $task_id (looked in $FLEET_DIR)"
 
   for repo_dir in "$task_dir"/*/; do
@@ -707,6 +745,7 @@ _sync_task() {
           fi
           printf '  to retire manually: sgt-cleanup %s\n' "$_warn_task" >&2
           printf '  to inspect state:   sgt-watch %s --snapshot\n' "$_warn_task" >&2
+          recycle_failed=true
         fi
         ;;
     esac
@@ -746,6 +785,8 @@ _sync_task() {
   if [[ -e "$task_dir/.callbacks/origin.json" || -L "$task_dir/.callbacks/origin.json" ]]; then
     "$SCRIPT_DIR/sgt-callback" sync "$task_id"
   fi
+  $recycle_failed && return 1
+  return 0
 }
 
 if [[ "${1:-}" == "--sync-all" ]]; then

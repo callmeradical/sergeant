@@ -91,9 +91,11 @@ run_cleanup task-a
 
 # Cleanup cannot scan past an in-flight owner publication. The publisher holds
 # the fleet transaction from managed-pane selection through exact identity.
-mkdir -p "$TEST_ROOT/fleet/task-inflight" \
-  "$TEST_ROOT/fleet/.coordinator-pane.lock"
-printf 'fixture-publisher\n' > "$TEST_ROOT/fleet/.coordinator-pane.lock/owner"
+mkdir -p "$TEST_ROOT/fleet/task-inflight"
+sleep 10 & publisher_pid=$!
+publisher_start="$(ps -o lstart= -p "$publisher_pid" | sed 's/^ *//;s/ *$//')"
+printf '%s|%s\n' "$publisher_pid" "$publisher_start" \
+  > "$TEST_ROOT/fleet/.coordinator-pane.lock"
 printf '%%71\n' > "$TEST_ROOT/fleet/task-inflight/primary_pane_id"
 run_cleanup task-b &
 cleanup_pid=$!
@@ -102,8 +104,8 @@ sleep 0.1
 printf '0|%%71|7171|171717|managed-reader\n' \
   > "$TEST_ROOT/fleet/task-inflight/primary_pane_identity"
 chmod 600 "$TEST_ROOT/fleet/task-inflight/primary_pane_identity"
-rm -f "$TEST_ROOT/fleet/.coordinator-pane.lock/owner"
-rmdir "$TEST_ROOT/fleet/.coordinator-pane.lock"
+rm -f "$TEST_ROOT/fleet/.coordinator-pane.lock"
+kill "$publisher_pid" 2>/dev/null || true
 wait "$cleanup_pid"
 [[ -f "$TEST_ROOT/managed-live" ]]
 [[ ! -e "$TEST_ROOT/kills" ]]
@@ -115,5 +117,26 @@ if [[ -e "$TEST_ROOT/managed-live" ]]; then
   exit 1
 fi
 [[ "$(cat "$TEST_ROOT/kills")" == '-t %71' ]]
+
+# Legacy ownerless/malformed locks are irreducibly ambiguous and fail quickly;
+# a complete stale atomic owner record is reclaimed by exact PID/start proof.
+mkdir -p "$TEST_ROOT/fleet/task-ownerless" "$TEST_ROOT/fleet/.coordinator-pane.lock"
+set +e
+ownerless_output="$(SGT_COORDINATOR_LOCK_ATTEMPTS=1 run_cleanup task-ownerless 2>&1)"
+ownerless_status=$?
+set -e
+[[ "$ownerless_status" -ne 0 && "$ownerless_output" == *'no exact owner evidence'* ]]
+rmdir "$TEST_ROOT/fleet/.coordinator-pane.lock"
+mkdir -p "$TEST_ROOT/fleet/task-malformed"
+printf 'malformed\n' > "$TEST_ROOT/fleet/.coordinator-pane.lock"
+set +e
+malformed_output="$(SGT_COORDINATOR_LOCK_ATTEMPTS=1 run_cleanup task-malformed 2>&1)"
+malformed_status=$?
+set -e
+[[ "$malformed_status" -ne 0 && "$malformed_output" == *'no exact owner evidence'* ]]
+rm -f "$TEST_ROOT/fleet/.coordinator-pane.lock"
+mkdir -p "$TEST_ROOT/fleet/task-stale"
+printf '99999999|stale process start\n' > "$TEST_ROOT/fleet/.coordinator-pane.lock"
+run_cleanup task-stale
 
 printf 'sgt process convergence: ok\n'

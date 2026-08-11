@@ -515,49 +515,54 @@ _SGT_COORDINATOR_LOCK_DIR=""
 _SGT_COORDINATOR_LOCK_OWNER=""
 
 _sgt_coordinator_lock_acquire() {
-  local fleet_dir="$1" attempts attempt interval owner pid start owner_start actual_start
+  local fleet_dir="$1" attempts attempt interval owner pid start owner_start actual_start candidate reclaim
   [[ -z "$_SGT_COORDINATOR_LOCK_DIR" ]] || return 0
   mkdir -p "$fleet_dir"
   _SGT_COORDINATOR_LOCK_DIR="$fleet_dir/.coordinator-pane.lock"
   start="$(ps -o lstart= -p "$$" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
   [[ -n "$start" ]] || _die "Cannot establish coordinator-pane lock owner identity"
   _SGT_COORDINATOR_LOCK_OWNER="$$|$start"
+  candidate="$fleet_dir/.coordinator-pane.owner.$$.$RANDOM"
+  reclaim="$fleet_dir/.coordinator-pane.reclaim"
+  (umask 077; printf '%s\n' "$_SGT_COORDINATOR_LOCK_OWNER" > "$candidate") || \
+    _die "Cannot stage coordinator-pane lock owner identity"
   attempts="${SGT_COORDINATOR_LOCK_ATTEMPTS:-200}"
   interval="${SGT_COORDINATOR_LOCK_INTERVAL:-0.05}"
   [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=200
   for attempt in $(seq 1 "$attempts"); do
-    if mkdir "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null; then
-      if ! (umask 077; printf '%s\n' "$_SGT_COORDINATOR_LOCK_OWNER" \
-        > "$_SGT_COORDINATOR_LOCK_DIR/owner"); then
-        rmdir "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null || true
-        _SGT_COORDINATOR_LOCK_DIR=""
-        _SGT_COORDINATOR_LOCK_OWNER=""
-        _die "Cannot publish coordinator-pane lock owner identity"
-      fi
+    if [[ ! -e "$_SGT_COORDINATOR_LOCK_DIR" && ! -L "$_SGT_COORDINATOR_LOCK_DIR" && \
+      ! -e "$reclaim" ]] && ln "$candidate" "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null; then
+      rm -f "$candidate"
       return 0
     fi
-    owner="$(cat "$_SGT_COORDINATOR_LOCK_DIR/owner" 2>/dev/null || true)"
+    if [[ -L "$_SGT_COORDINATOR_LOCK_DIR" || \
+      ( -e "$_SGT_COORDINATOR_LOCK_DIR" && ! -f "$_SGT_COORDINATOR_LOCK_DIR" ) ]]; then
+      rm -f "$candidate"
+      _SGT_COORDINATOR_LOCK_DIR=""; _SGT_COORDINATOR_LOCK_OWNER=""
+      _die "Legacy coordinator-pane lock has no exact owner evidence; reconcile publishers before removing $fleet_dir/.coordinator-pane.lock"
+    fi
+    owner="$(cat "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null || true)"
     pid="${owner%%|*}"
     owner_start="${owner#*|}"
-    if [[ "$pid" =~ ^[1-9][0-9]*$ && -n "$owner_start" && "$owner_start" != "$owner" ]]; then
+    if [[ ! "$pid" =~ ^[1-9][0-9]*$ || -z "$owner_start" || "$owner_start" == "$owner" ]]; then
+      rm -f "$candidate"
+      _SGT_COORDINATOR_LOCK_DIR=""; _SGT_COORDINATOR_LOCK_OWNER=""
+      _die "Malformed coordinator-pane lock has no exact owner evidence; reconcile publishers before removing $fleet_dir/.coordinator-pane.lock"
+    fi
+    if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
       actual_start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
-      if [[ "$actual_start" != "$owner_start" ]] && \
-        mkdir "$_SGT_COORDINATOR_LOCK_DIR/reclaim" 2>/dev/null; then
-        # The lock directory never became absent, so no new owner can have
-        # acquired it between the stale proof and this exact recheck.
-        if [[ "$(cat "$_SGT_COORDINATOR_LOCK_DIR/owner" 2>/dev/null || true)" == "$owner" ]]; then
+      if [[ "$actual_start" != "$owner_start" ]] && ln "$candidate" "$reclaim" 2>/dev/null; then
+        if [[ "$(cat "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null || true)" == "$owner" ]]; then
           actual_start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
-          if [[ "$actual_start" != "$owner_start" ]]; then
-            rm -f "$_SGT_COORDINATOR_LOCK_DIR/owner"
-          fi
+          [[ "$actual_start" == "$owner_start" ]] || rm -f "$_SGT_COORDINATOR_LOCK_DIR"
         fi
-        rmdir "$_SGT_COORDINATOR_LOCK_DIR/reclaim" 2>/dev/null || true
-        rmdir "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null || true
+        rm -f "$reclaim"
       fi
     fi
     sleep "$interval"
   done
-  owner="$(cat "$_SGT_COORDINATOR_LOCK_DIR/owner" 2>/dev/null || true)"
+  rm -f "$candidate"
+  owner="$(cat "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null || true)"
   pid="${owner%%|*}"
   _SGT_COORDINATOR_LOCK_DIR=""
   _SGT_COORDINATOR_LOCK_OWNER=""
@@ -567,10 +572,9 @@ _sgt_coordinator_lock_acquire() {
 _sgt_coordinator_lock_release() {
   local owner
   [[ -n "$_SGT_COORDINATOR_LOCK_DIR" ]] || return 0
-  owner="$(cat "$_SGT_COORDINATOR_LOCK_DIR/owner" 2>/dev/null || true)"
+  owner="$(cat "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null || true)"
   if [[ "$owner" == "$_SGT_COORDINATOR_LOCK_OWNER" ]]; then
-    rm -f "$_SGT_COORDINATOR_LOCK_DIR/owner"
-    rmdir "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null || true
+    rm -f "$_SGT_COORDINATOR_LOCK_DIR"
   fi
   _SGT_COORDINATOR_LOCK_DIR=""
   _SGT_COORDINATOR_LOCK_OWNER=""

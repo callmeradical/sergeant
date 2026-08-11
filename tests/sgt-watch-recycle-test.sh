@@ -111,6 +111,8 @@ make_worker() {
   printf '4242\n' > "$state/worker_pid"
   printf '4242\n' > "$state/worker_process_group"
   printf 'fixture worker start\n' > "$state/worker_process_start"
+  printf 'version=1\nidentity=0|%s|4242|123456|worker\nprocess_group=4242\nphase=retiring\nmember=4242|fixture worker start\n' \
+    "$pane" > "$state/worker_recycle_phase"
   chmod 600 "$state/pane_identity"
   printf '%s\n' "$pane" >> "$LIVE_PANES"
   printf '%s %s\n' "$state" "$wt"
@@ -216,6 +218,8 @@ set_pane_identity '%41' '0|%41|4141|999999|worker' "$state"
 printf '4141\n' > "$state/worker_pid"
 printf '4141\n' > "$state/worker_process_group"
 printf 'fixture relaunched worker start\n' > "$state/worker_process_start"
+printf 'version=1\nidentity=0|%%41|4141|999999|worker\nprocess_group=4141\nphase=retiring\nmember=4141|fixture relaunched worker start\n' \
+  > "$state/worker_recycle_phase"
 printf '%%41\n' >> "$LIVE_PANES"
 printf 'done\n' > "$state/status"
 printf 'done\n' > "$wt/.sergeant-status"

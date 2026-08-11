@@ -44,7 +44,7 @@ start="$(ps -o lstart= -p "$pid" | sed 's/^ *//;s/ *$//')"
 printf '%s\n' "$pid" > "$state/worker_pid"
 printf '%s\n' "$pgid" > "$state/worker_process_group"
 printf '%s\n' "$start" > "$state/worker_process_start"
-bash -c 'trap "" TERM HUP; while :; do sleep 1; done' &
+bash -c 'trap "" TERM HUP; while :; do :; done' &
 printf '%s\n' "$!" > "$state/helper_pid"
 wait
 EOF
@@ -66,15 +66,23 @@ chmod 600 "$state/pane_identity"
 helper_pid="$(cat "$state/helper_pid")"
 FIXTURE_PGIDS+=" $(cat "$state/worker_process_group")"
 kill -0 "$helper_pid"
+[[ -n "$(pgrep -g "$(cat "$state/worker_process_group")" 2>/dev/null || true)" ]]
+pgrep -g "$(cat "$state/worker_process_group")" | grep -Fxq "$(cat "$state/worker_pid")"
 
-SGT_WATCH_RECYCLE_FAIL_POINT=after-pane-kill SERGEANT_FLEET="$TEST_ROOT/fleet" \
-  "$ROOT_DIR/bin/sgt-watch" --sync task >/dev/null 2>&1
+if SGT_WATCH_RECYCLE_FAIL_POINT=after-pane-kill SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  "$ROOT_DIR/bin/sgt-watch" --sync task >/dev/null 2>&1; then
+  printf 'terminal sync reported success across an interrupted retirement\n' >&2
+  exit 1
+fi
 
 if ! kill -0 "$helper_pid" 2>/dev/null; then
   printf 'injected interruption did not preserve the resistant child for retry\n' >&2
   exit 1
 fi
-[[ -s "$state/worker_recycle_phase" ]]
+[[ -s "$state/worker_recycle_phase" ]] || {
+  printf 'retirement phase missing: %s\n' "$(cat "$state/diagnostic" 2>/dev/null || true)" >&2
+  exit 1
+}
 [[ ! -e "$state/worker_recycled" ]]
 
 SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" --sync task >/dev/null
@@ -123,18 +131,28 @@ launch_fixture() {
 launch_fixture task-no-provenance
 rm -f "$launched_state/worker_pid" "$launched_state/worker_process_group" \
   "$launched_state/worker_process_start"
-SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
-  --sync task-no-provenance >/dev/null 2>&1
+if SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
+  --sync task-no-provenance >/dev/null 2>&1; then exit 1; fi
 kill -0 "$launched_pid"
 grep -Fq 'process provenance is incomplete' "$launched_state/diagnostic"
+set +e
+foreground_output="$(POLL_INTERVAL=0.01 SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  "$ROOT_DIR/bin/sgt-watch" task-no-provenance 2>&1)"
+foreground_status=$?
+SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
+  --sync-all >/dev/null 2>&1
+sync_all_status=$?
+set -e
+[[ "$foreground_status" -ne 0 && "$sync_all_status" -ne 0 ]]
+[[ "$foreground_output" != *'All repos done.'* ]]
 kill -KILL -- -"$launched_pgid" 2>/dev/null || true
 
 # PID reuse evidence and a non-leading/shared PGID both fail closed.
 launch_fixture task-reused-pid
 saved_start="$(cat "$launched_state/worker_process_start")"
 printf 'stale start identity\n' > "$launched_state/worker_process_start"
-SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
-  --sync task-reused-pid >/dev/null 2>&1
+if SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
+  --sync task-reused-pid >/dev/null 2>&1; then exit 1; fi
 kill -0 "$launched_pid"
 grep -Fq 'process identity does not match' "$launched_state/diagnostic"
 printf '%s\n' "$saved_start" > "$launched_state/worker_process_start"
@@ -146,8 +164,8 @@ saved_pgid="$launched_pgid"
 keepalive_pid="$(tmux display-message -p -t "$TMUX_SESSION:keepalive" '#{pane_pid}')"
 keepalive_pgid="$(ps -o pgid= -p "$keepalive_pid" | tr -d ' ')"
 printf '%s\n' "$keepalive_pgid" > "$launched_state/worker_process_group"
-SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
-  --sync task-shared-pgid >/dev/null 2>&1
+if SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
+  --sync task-shared-pgid >/dev/null 2>&1; then exit 1; fi
 kill -0 "$launched_pid"
 kill -0 "$keepalive_pid"
 printf '%s\n' "$saved_pgid" > "$launched_state/worker_process_group"

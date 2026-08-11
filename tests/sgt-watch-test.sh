@@ -26,6 +26,8 @@ printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo" > "$repo/pane_id
 printf '4242\n' > "$repo/worker_pid"
 printf '4242\n' > "$repo/worker_process_group"
 printf 'fixture worker start\n' > "$repo/worker_process_start"
+printf 'version=1\nidentity=0|%%42|4242|123456|sgt-interactive-worker:%s\nprocess_group=4242\nphase=retiring\nmember=4242|fixture worker start\n' \
+  "$repo" > "$repo/worker_recycle_phase"
 printf 'opencode\n' > "$repo/agent"
 chmod 600 "$repo/pane_identity"
 printf 'in_progress\n' > "$repo/status"
