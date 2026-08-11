@@ -250,7 +250,7 @@ _record_worker_identity() {
   pid="$$"
   pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
   sid="$(_sgt_process_session_id "$$" 2>/dev/null || true)"
-  start="$(ps -o lstart= -p "$$" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+  start="$(_sgt_process_identity "$$" 2>/dev/null || true)"
   [[ -n "$pgid" && -n "$sid" && -n "$start" ]] || return 0
   tmp="$(mktemp "$REPO_STATE/worker_pid.XXXXXX")" && \
     printf '%s\n' "$pid" > "$tmp" && mv "$tmp" "$REPO_STATE/worker_pid" || return 0

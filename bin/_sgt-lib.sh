@@ -517,27 +517,37 @@ _SGT_COORDINATOR_LOCK_DIR=""
 _SGT_COORDINATOR_LOCK_OWNER=""
 
 _sgt_coordinator_lock_acquire() {
-  local fleet_dir="$1" attempts attempt interval owner pid start owner_start actual_start candidate reclaim probe link_error
+  local fleet_dir="$1" attempts attempt interval owner pid start owner_start actual_start candidate reclaim probe_dir link_error
   [[ -z "$_SGT_COORDINATOR_LOCK_DIR" ]] || return 0
   mkdir -p "$fleet_dir"
   _SGT_COORDINATOR_LOCK_DIR="$fleet_dir/.coordinator-pane.lock"
   start="$(ps -o lstart= -p "$$" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
   [[ -n "$start" ]] || _die "Cannot establish coordinator-pane lock owner identity"
   _SGT_COORDINATOR_LOCK_OWNER="$$|$start"
-  candidate="$fleet_dir/.coordinator-pane.owner.$$.$RANDOM"
+  candidate="$(mktemp "$fleet_dir/.coordinator-pane.owner.XXXXXX")" || \
+    _die "Cannot allocate coordinator-pane lock owner identity"
   reclaim="$fleet_dir/.coordinator-pane.reclaim"
-  probe="$fleet_dir/.coordinator-pane.link-probe.$$.$RANDOM"
-  (umask 077; printf '%s\n' "$_SGT_COORDINATOR_LOCK_OWNER" > "$candidate") || \
+  probe_dir="$(mktemp -d "$fleet_dir/.coordinator-pane.link-probe.XXXXXX")" || {
+    rm -f "$candidate"
+    _die "Cannot allocate coordinator-pane hard-link capability probe"
+  }
+  chmod 600 "$candidate" 2>/dev/null || true
+  printf '%s\n' "$_SGT_COORDINATOR_LOCK_OWNER" > "$candidate" || {
+    rm -f "$candidate"
+    rmdir "$probe_dir" 2>/dev/null || true
     _die "Cannot stage coordinator-pane lock owner identity"
+  }
   # Establish the filesystem primitive separately from lock contention. A
   # failed acquisition can then only mean another publisher won the name (or
   # released it during our observation), never an inferred link capability.
-  if ! link_error="$(ln "$candidate" "$probe" 2>&1)"; then
-    rm -f "$candidate" "$probe"
+  if ! link_error="$(ln "$candidate" "$probe_dir/link" 2>&1)"; then
+    rm -f "$candidate" "$probe_dir/link"
+    rmdir "$probe_dir" 2>/dev/null || true
     _SGT_COORDINATOR_LOCK_DIR=""; _SGT_COORDINATOR_LOCK_OWNER=""
     _die "Atomic hard-link coordinator lock is unsupported in $fleet_dir: ${link_error:-link creation failed}; use a local writable filesystem with same-directory hard links"
   fi
-  rm -f "$probe"
+  rm -f "$probe_dir/link"
+  rmdir "$probe_dir" 2>/dev/null || true
   attempts="${SGT_COORDINATOR_LOCK_ATTEMPTS:-200}"
   interval="${SGT_COORDINATOR_LOCK_INTERVAL:-0.05}"
   [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=200
