@@ -279,7 +279,7 @@ def main():
             fail("current worker marker is absent from durable history")
         return
     if len(sys.argv) == 3 and sys.argv[1] in ("holders", "compact"):
-        markers = load_markers(sys.argv[2], allow_empty=True)
+        markers = load_markers(sys.argv[2], allow_empty=sys.argv[1] == "compact")
         if sys.argv[1] == "holders":
             for pid, start in sorted(enumerate_holders(markers).items() if markers else []):
                 print(f"{pid}|linux:{start}")

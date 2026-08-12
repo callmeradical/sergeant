@@ -112,6 +112,13 @@ ln -s "$TEST_ROOT/does-not-exist" "$dangling_repo/worker_process_markers"
 directory_repo="$TEST_ROOT/fleet/task-directory/repo"
 mkdir -p "$directory_repo/worker_process_markers"
 printf 'force-stopped\n' > "$directory_repo/status"
+empty_drain_repo="$TEST_ROOT/fleet/task-empty-drain/repo"
+mkdir -p "$empty_drain_repo"
+printf 'force-stopped\n' > "$empty_drain_repo/status"
+printf '99999999\n' > "$empty_drain_repo/worker_pid"
+printf 'linux:1\n' > "$empty_drain_repo/worker_process_start"
+: > "$empty_drain_repo/worker_process_markers"
+chmod 600 "$empty_drain_repo/worker_process_markers"
 set +e
 symlink_output="$(SERGEANT_FLEET="$TEST_ROOT/fleet" SERGEANT_DRAIN_DIR="$TEST_ROOT/drain" \
   "$ROOT/bin/sgt-drain" --global --wait --timeout 0 2>&1)"
@@ -123,7 +130,9 @@ set -e
   "$symlink_output" == *'malformed durable worker process marker history'* && \
   "$symlink_output" == *'task-dangling/repo'* && \
   "$symlink_output" == *'task-directory/repo'* && \
-  "$symlink_output" == *'history is not a regular file'* ]]
+  "$symlink_output" == *'history is not a regular file'* && \
+  "$symlink_output" == *'task-empty-drain/repo'* && \
+  "$symlink_output" == *'history is empty'* ]]
 [[ -L "$symlink_repo/worker_process_markers" ]]
 [[ -L "$dangling_repo/worker_process_markers" ]]
 [[ -d "$directory_repo/worker_process_markers" ]]

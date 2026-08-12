@@ -442,7 +442,12 @@ _terminal_worker_process_group() {
   [[ "$recorded_pid" =~ ^[1-9][0-9]*$ && \
     "$recorded_pgid" =~ ^[1-9][0-9]*$ && "$recorded_sid" =~ ^[1-9][0-9]*$ &&
     "$marker_generation" =~ ^[0-9a-f]{32}$ && "$marker_identity" =~ ^[0-9]+:[0-9]+$ &&
-    "$marker_fd" == 198 && -s "$repo_dir/worker_process_markers" && -n "$recorded_start" ]] || return 1
+    "$marker_fd" == 198 && -n "$recorded_start" ]] || return 1
+  command -v python3 >/dev/null 2>&1 || return 3
+  if ! python3 "$SCRIPT_DIR/_sgt-process-token.py" holders \
+    "$repo_dir/worker_process_markers" >/dev/null; then
+    return 3
+  fi
   pane_fields="${identity#*|}"
   pane_fields="${pane_fields#*|}"
   pane_pid="${pane_fields%%|*}"
@@ -542,13 +547,20 @@ _recycle_terminal_worker() {
       _clear_terminal_recycle_diagnostic "$repo_dir"
       return 0
     fi
-    if [[ "$process_status" -eq 2 ]]; then
-      printf 'terminal worker process provenance is incomplete; refusing recycle: %s\n' \
-        "$pane" > "$repo_dir/diagnostic"
-    else
-      printf 'terminal worker process identity does not match; refusing recycle: %s\n' \
-        "$pane" > "$repo_dir/diagnostic"
-    fi
+    case "$process_status" in
+      2)
+        printf 'terminal worker process provenance is incomplete; refusing recycle: %s\n' \
+          "$pane" > "$repo_dir/diagnostic"
+        ;;
+      3)
+        printf 'terminal worker marker history is invalid; refusing recycle: %s\n' \
+          "$pane" > "$repo_dir/diagnostic"
+        ;;
+      *)
+        printf 'terminal worker process identity does not match; refusing recycle: %s\n' \
+          "$pane" > "$repo_dir/diagnostic"
+        ;;
+    esac
     return 1
   fi
   # Already retired this exact pane and process group: nothing to do.

@@ -317,6 +317,17 @@ env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet" \
   "$ROOT_DIR/bin/sgt-watch" --sync task-replay-evidence >/dev/null
 _pane_live '%54' && { printf 'replayed marker evidence suppressed retirement\n' >&2; exit 1; }
 
+read -r state wt <<<"$(make_worker empty-history done '%55')"
+: > "$state/worker_process_markers"
+chmod 600 "$state/worker_process_markers"
+if env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet" \
+  "$ROOT_DIR/bin/sgt-watch" --sync task-empty-history >/dev/null 2>&1; then
+  printf 'empty present marker history reported successful recycle\n' >&2
+  exit 1
+fi
+_pane_live '%55' || { printf 'empty history did not preserve live pane\n' >&2; exit 1; }
+grep -Fq 'marker history is invalid' "$state/diagnostic"
+
 # ── 7. An identity mismatch refuses to recycle ───────────────────────────────
 
 read -r state wt <<<"$(make_worker mismatch done '%60')"
