@@ -308,6 +308,9 @@ def acquire_evidence_rotation_lock(raw_prefix):
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise SystemExit("Treehouse evidence rotation is already active") from error
+        if quarantine.exists() or quarantine.is_symlink():
+            raise SystemExit(
+                f"preserved Treehouse evidence quarantine requires inspection: {quarantine}")
         rebound = lock_path.lstat()
         if ((rebound.st_dev, rebound.st_ino) !=
                 (descriptor_info.st_dev, descriptor_info.st_ino)):

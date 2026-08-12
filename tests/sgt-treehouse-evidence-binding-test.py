@@ -170,8 +170,33 @@ def concurrent_receipt_eviction_refuses_the_rotation():
             raise AssertionError("preserved evidence quarantine was ignored")
 
 
+def acquired_rotation_lock_rechecks_the_quarantine():
+    with tempfile.TemporaryDirectory() as directory:
+        raw_prefix = str(Path(directory) / "treehouse-return.raw")
+        quarantine = Path(directory) / ".treehouse-evidence-quarantine"
+        real_flock = TREEHOUSE_IO.fcntl.flock
+
+        def quarantine_before_lock_returns(descriptor, operation):
+            quarantine.mkdir()
+            return real_flock(descriptor, operation)
+
+        TREEHOUSE_IO.fcntl.flock = quarantine_before_lock_returns
+        try:
+            try:
+                descriptor = TREEHOUSE_IO.acquire_evidence_rotation_lock(raw_prefix)
+            except SystemExit as error:
+                assert str(error).startswith(
+                    "preserved Treehouse evidence quarantine requires inspection:")
+            else:
+                os.close(descriptor)
+                raise AssertionError("post-acquisition quarantine was ignored")
+        finally:
+            TREEHOUSE_IO.fcntl.flock = real_flock
+
+
 if __name__ == "__main__":
     receipt_eviction_keeps_identity_bound_across_publication()
     receipt_eviction_quarantines_before_deleting_by_name()
     concurrent_receipt_eviction_refuses_the_rotation()
+    acquired_rotation_lock_rechecks_the_quarantine()
     print("Treehouse eviction binds evidence across receipt publication: ok")
