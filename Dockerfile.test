@@ -24,6 +24,7 @@ RUN apt-get update -qq && \
       tmux \
       lsof \
       procps \
+      python3 \
       util-linux \
       sqlite3 \
       curl \
