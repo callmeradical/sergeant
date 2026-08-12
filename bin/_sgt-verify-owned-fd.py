@@ -3,6 +3,7 @@
 
 import os
 import stat
+import subprocess
 import sys
 import unicodedata
 
@@ -28,10 +29,12 @@ def parse_arguments():
         return None
 
     action = "verify" if len(sys.argv) == 4 else sys.argv[4]
-    if action not in ("verify", "read") or (action == "verify" and len(sys.argv) != 4):
+    if action not in ("verify", "read", "migrate") or (action == "verify" and len(sys.argv) != 4):
         return None
     expected = sys.argv[5] if len(sys.argv) == 6 else None
-    if expected is not None and action != "read":
+    if expected is not None and action not in ("read", "migrate"):
+        return None
+    if action == "migrate" and expected is None:
         return None
     return fd, path, modes, action, expected
 
@@ -103,14 +106,103 @@ def read_text_record(fd, path, modes, expected):
     return data
 
 
+def run_migration_test_hook(phase, path):
+    """Run one explicitly enabled, root-confined migration test hook."""
+    if os.environ.get("SGT_TEST_HOOKS") != "1":
+        return True
+    hook = os.environ.get("_SGT_OWNED_FILE_MIGRATE_HOOK")
+    root = os.environ.get("_SGT_OWNED_FILE_HOOK_ROOT")
+    if not hook:
+        return True
+    if not root or not os.path.isabs(root) or not os.path.isabs(hook):
+        return False
+    if os.path.dirname(hook) != root:
+        return False
+    try:
+        root_stat = os.lstat(root)
+        hook_stat = os.lstat(hook)
+    except OSError:
+        return False
+    uid = os.geteuid()
+    if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_uid != uid:
+        return False
+    if not stat.S_ISREG(hook_stat.st_mode) or hook_stat.st_uid != uid:
+        return False
+    if hook_stat.st_mode & 0o111 == 0:
+        return False
+    try:
+        completed = subprocess.run(
+            [hook, phase, path],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    return completed.returncode == 0
+
+
+def migrate_record(fd, path, modes, expected):
+    """Migrate only the uniquely linked inode already held by fd."""
+    opened = verify_binding(fd, path, modes)
+    if opened is None or opened.st_nlink != 1:
+        return None
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+    except OSError:
+        return None
+    data = read_text_record(fd, path, modes, expected)
+    if data is None:
+        return None
+    stable_size = opened.st_size
+    stable_mtime = opened.st_mtime_ns
+
+    if not run_migration_test_hook("before-fchmod", path):
+        return None
+    # Re-read exact bytes after the test/race boundary.  A same-inode write or
+    # pathname replacement fails before mode mutation.
+    opened = verify_binding(fd, path, modes)
+    if opened is None or opened.st_nlink != 1:
+        return None
+    if opened.st_size != stable_size or opened.st_mtime_ns != stable_mtime:
+        return None
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+    except OSError:
+        return None
+    if read_text_record(fd, path, modes, expected) != data:
+        return None
+
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError:
+        return None
+    if not run_migration_test_hook("after-fchmod", path):
+        return None
+
+    migrated = verify_binding(fd, path, {0o600})
+    if migrated is None or migrated.st_nlink != 1:
+        return None
+    if migrated.st_size != stable_size or migrated.st_mtime_ns != stable_mtime:
+        return None
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+    except OSError:
+        return None
+    if read_text_record(fd, path, {0o600}, expected) != data:
+        return None
+    return data
+
+
 def main() -> int:
     arguments = parse_arguments()
     if arguments is None:
         return 64
     fd, path, modes, action, expected = arguments
 
-    if action == "read":
-        data = read_text_record(fd, path, modes, expected)
+    if action in ("read", "migrate"):
+        data = (read_text_record(fd, path, modes, expected) if action == "read" else
+                migrate_record(fd, path, modes, expected))
         if data is None:
             return 1
         try:

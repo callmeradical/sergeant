@@ -365,7 +365,7 @@ migrate_hook="$TEST_ROOT/swap-before-migrate"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -euo pipefail' \
-  '[[ "$1" == before-migrate ]]' \
+  '[[ "$1" == before-fchmod ]]' \
   'path="$2"' \
   'mv -- "$path" "$path.trusted"' \
   'mv -- "$path.forged" "$path"' > "$migrate_hook"
@@ -390,6 +390,152 @@ if [[ "$status" -ne 0 && "$migrate_mode" == "644" && "$trusted_mode" == "644" &&
   _pass "_sgt_read_matching_legacy_pane_identity: final migration swap rejected"
 else
   _fail "_sgt_read_matching_legacy_pane_identity: final migration swap should fail closed"
+fi
+
+# Rewriting the already-open inode after the exact read must not be hidden by a
+# pathname replacement with the stale expected bytes.
+rewrite_hook="$TEST_ROOT/rewrite-before-fchmod"
+# shellcheck disable=SC2016 # The generated hook expands these values at runtime.
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'if [[ "$1" == before-fchmod ]]; then' \
+  '  printf "attacker-rewrite\\n" > "$2"' \
+  'fi' > "$rewrite_hook"
+chmod 700 "$rewrite_hook"
+rewrite_race="$TEST_ROOT/rewrite-boundary"
+printf 'migration-value\n' > "$rewrite_race"
+chmod 644 "$rewrite_race"
+set +e
+SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
+  _SGT_OWNED_FILE_MIGRATE_HOOK="$rewrite_hook" \
+  bash -c 'source "$1"; _sgt_read_matching_legacy_pane_identity "$2" migration-value' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$rewrite_race" >/dev/null 2>&1
+status=$?
+set -e
+rewrite_mode=$(stat -c '%a' -- "$rewrite_race" 2>/dev/null || stat -f '%Lp' "$rewrite_race" 2>/dev/null)
+rewrite_residue=$(find "$TEST_ROOT" -maxdepth 1 -name 'rewrite-boundary.tmp.*' -print -quit)
+if [[ "$status" -ne 0 && "$rewrite_mode" == "644" && \
+  "$(<"$rewrite_race")" == "attacker-rewrite" && -z "$rewrite_residue" ]]; then
+  _pass "_sgt_read_matching_legacy_pane_identity: same-inode rewrite preserved and rejected"
+else
+  _fail "_sgt_read_matching_legacy_pane_identity: same-inode rewrite was overwritten or accepted"
+fi
+
+# A replacement installed after the former final validation must remain
+# untouched.  Descriptor-local migration may change only the held inode.
+post_validate_hook="$TEST_ROOT/swap-after-validation"
+# shellcheck disable=SC2016 # The generated hook expands these values at runtime.
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'if [[ "$1" == after-fchmod ]]; then' \
+  '  path="$2"' \
+  '  mv -- "$path" "$path.trusted"' \
+  '  mv -- "$path.forged" "$path"' \
+  'fi' > "$post_validate_hook"
+chmod 700 "$post_validate_hook"
+post_validate_race="$TEST_ROOT/post-validation-boundary"
+printf 'migration-value\n' > "$post_validate_race"
+printf 'replacement-bytes\n' > "$post_validate_race.forged"
+chmod 644 "$post_validate_race" "$post_validate_race.forged"
+set +e
+SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
+  _SGT_OWNED_FILE_MIGRATE_HOOK="$post_validate_hook" \
+  bash -c 'source "$1"; _sgt_read_matching_legacy_pane_identity "$2" migration-value' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$post_validate_race" >/dev/null 2>&1
+status=$?
+set -e
+replacement_mode=$(stat -c '%a' -- "$post_validate_race" 2>/dev/null || \
+  stat -f '%Lp' "$post_validate_race" 2>/dev/null)
+original_mode=$(stat -c '%a' -- "$post_validate_race.trusted" 2>/dev/null || \
+  stat -f '%Lp' "$post_validate_race.trusted" 2>/dev/null)
+post_validate_residue=$(find "$TEST_ROOT" -maxdepth 1 \
+  -name 'post-validation-boundary.tmp.*' -print -quit)
+if [[ "$status" -ne 0 && "$replacement_mode" == "644" && "$original_mode" == "600" && \
+  "$(<"$post_validate_race")" == "replacement-bytes" && \
+  "$(<"$post_validate_race.trusted")" == "migration-value" && \
+  -z "$post_validate_residue" ]]; then
+  _pass "_sgt_read_matching_legacy_pane_identity: post-validation replacement untouched"
+else
+  _fail "_sgt_read_matching_legacy_pane_identity: post-validation replacement was overwritten or accepted"
+fi
+
+# fchmod would affect every hardlink to the held inode, so legacy records with
+# aliases are rejected before any mode change.
+legacy_hardlink="$TEST_ROOT/legacy-hardlink"
+legacy_hardlink_alias="$TEST_ROOT/legacy-hardlink-alias"
+printf 'hardlink-value\n' > "$legacy_hardlink"
+chmod 644 "$legacy_hardlink"
+ln "$legacy_hardlink" "$legacy_hardlink_alias"
+set +e
+bash -c 'source "$1"; _sgt_read_matching_legacy_pane_identity "$2" hardlink-value' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$legacy_hardlink" >/dev/null 2>&1
+status=$?
+set -e
+hardlink_mode=$(stat -c '%a' -- "$legacy_hardlink" 2>/dev/null || \
+  stat -f '%Lp' "$legacy_hardlink" 2>/dev/null)
+if [[ "$status" -ne 0 && "$hardlink_mode" == "644" && \
+  "$(<"$legacy_hardlink")" == "hardlink-value" && \
+  "$(<"$legacy_hardlink_alias")" == "hardlink-value" ]]; then
+  _pass "_sgt_read_matching_legacy_pane_identity: legacy hardlink rejected before fchmod"
+else
+  _fail "_sgt_read_matching_legacy_pane_identity: legacy hardlink alias was mutated"
+fi
+
+# A write after fchmod is detected by the final metadata and exact-byte read;
+# failure never restores stale content over the concurrent writer.
+after_fchmod_hook="$TEST_ROOT/rewrite-after-fchmod"
+# shellcheck disable=SC2016 # The generated hook expands these values at runtime.
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'if [[ "$1" == after-fchmod ]]; then' \
+  '  printf "writer-after-fchmod\\n" > "$2"' \
+  'fi' > "$after_fchmod_hook"
+chmod 700 "$after_fchmod_hook"
+after_fchmod_race="$TEST_ROOT/after-fchmod-write"
+printf 'migration-value\n' > "$after_fchmod_race"
+chmod 644 "$after_fchmod_race"
+set +e
+SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
+  _SGT_OWNED_FILE_MIGRATE_HOOK="$after_fchmod_hook" \
+  bash -c 'source "$1"; _sgt_read_matching_legacy_pane_identity "$2" migration-value' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$after_fchmod_race" >/dev/null 2>&1
+status=$?
+set -e
+after_fchmod_mode=$(stat -c '%a' -- "$after_fchmod_race" 2>/dev/null || \
+  stat -f '%Lp' "$after_fchmod_race" 2>/dev/null)
+if [[ "$status" -ne 0 && "$after_fchmod_mode" == "600" && \
+  "$(<"$after_fchmod_race")" == "writer-after-fchmod" ]]; then
+  _pass "_sgt_read_matching_legacy_pane_identity: concurrent post-fchmod write preserved and rejected"
+else
+  _fail "_sgt_read_matching_legacy_pane_identity: concurrent post-fchmod write was hidden"
+fi
+
+# Hook/helper failure before fchmod leaves the original record byte-for-byte
+# and mode-for-mode unchanged, with no candidate file to clean up.
+failure_hook="$TEST_ROOT/fail-before-fchmod"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 42' > "$failure_hook"
+chmod 700 "$failure_hook"
+helper_failure="$TEST_ROOT/helper-failure"
+printf 'migration-value\n' > "$helper_failure"
+chmod 644 "$helper_failure"
+set +e
+SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
+  _SGT_OWNED_FILE_MIGRATE_HOOK="$failure_hook" \
+  bash -c 'source "$1"; _sgt_read_matching_legacy_pane_identity "$2" migration-value' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$helper_failure" >/dev/null 2>&1
+status=$?
+set -e
+helper_failure_mode=$(stat -c '%a' -- "$helper_failure" 2>/dev/null || \
+  stat -f '%Lp' "$helper_failure" 2>/dev/null)
+all_candidate_residue=$(find "$TEST_ROOT" -maxdepth 1 -name '*.tmp.*' -print -quit)
+if [[ "$status" -ne 0 && "$helper_failure_mode" == "644" && \
+  "$(<"$helper_failure")" == "migration-value" && -z "$all_candidate_residue" ]]; then
+  _pass "_sgt_read_matching_legacy_pane_identity: helper failure leaves no mutation or residue"
+else
+  _fail "_sgt_read_matching_legacy_pane_identity: helper failure mutated state or left residue"
 fi
 
 # Merely naming a hook never executes it; the explicit test flag and matching

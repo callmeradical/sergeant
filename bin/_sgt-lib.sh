@@ -582,6 +582,11 @@ _sgt_read_owned_fd() {
     return 1
   fi
 }
+_sgt_migrate_owned_fd() {
+  local fd="$1" path="$2" modes="$3" expected="$4"
+  python3 "$_SGT_LIB_DIR/_sgt-verify-owned-fd.py" \
+    "$fd" "$path" "$modes" migrate "$expected"
+}
 _sgt_owned_file_open_hook() {
   local phase="$1" hook_root="${_SGT_OWNED_FILE_HOOK_ROOT:-}"
   shift
@@ -592,16 +597,6 @@ _sgt_owned_file_open_hook() {
     ! -L "$_SGT_OWNED_FILE_OPEN_HOOK" && -x "$_SGT_OWNED_FILE_OPEN_HOOK" && \
     -O "$_SGT_OWNED_FILE_OPEN_HOOK" ]] || return 1
   "$_SGT_OWNED_FILE_OPEN_HOOK" "$phase" "$@"
-}
-_sgt_owned_file_migrate_hook() {
-  local hook_root="${_SGT_OWNED_FILE_HOOK_ROOT:-}"
-  [[ "${SGT_TEST_HOOKS:-}" == "1" && -n "${_SGT_OWNED_FILE_MIGRATE_HOOK:-}" ]] || return 0
-  [[ "$hook_root" == /* && -d "$hook_root" && ! -L "$hook_root" && -O "$hook_root" && \
-    "${_SGT_OWNED_FILE_MIGRATE_HOOK%/*}" == "$hook_root" && \
-    "$_SGT_OWNED_FILE_MIGRATE_HOOK" == /* && -f "$_SGT_OWNED_FILE_MIGRATE_HOOK" && \
-    ! -L "$_SGT_OWNED_FILE_MIGRATE_HOOK" && -x "$_SGT_OWNED_FILE_MIGRATE_HOOK" && \
-    -O "$_SGT_OWNED_FILE_MIGRATE_HOOK" ]] || return 1
-  "$_SGT_OWNED_FILE_MIGRATE_HOOK" before-migrate "$1"
 }
 _sgt_read_owned_file() {
   local path="$1" mode value
@@ -620,7 +615,7 @@ _sgt_read_owned_file() {
   printf '%s\n' "$value"
 }
 _sgt_read_matching_legacy_pane_identity() {
-  local path="$1" actual="$2" mode value migrated candidate
+  local path="$1" actual="$2" mode migrated
   [[ -n "$actual" ]] || return 1
   [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
   mode="$(_sgt_path_mode "$path")" || return 1
@@ -631,31 +626,11 @@ _sgt_read_matching_legacy_pane_identity() {
     return 1
   }
   _sgt_owned_file_open_hook after-open "$path" || { exec 9<&-; return 1; }
-  value="$(_sgt_read_owned_fd 9 "$path" "$mode" "$actual")" || { exec 9<&-; return 1; }
-  _sgt_validate_owned_fd 9 "$path" "$mode" >/dev/null || { exec 9<&-; return 1; }
-  candidate="${path}.tmp.$$.$RANDOM.$RANDOM"
-  (umask 077; set -C; printf '%s\n' "$value" > "$candidate") 2>/dev/null || {
+  migrated="$(_sgt_migrate_owned_fd 9 "$path" "$mode" "$actual")" || {
     exec 9<&-
     return 1
   }
-  chmod 600 "$candidate" || {
-    rm -f "$candidate"
-    exec 9<&-
-    return 1
-  }
-  # Bind the final pre-migration decision to the still-open legacy descriptor.
-  if ! _sgt_owned_file_migrate_hook "$path" || \
-    ! _sgt_validate_owned_fd 9 "$path" "$mode" >/dev/null; then
-    rm -f "$candidate"
-    exec 9<&-
-    return 1
-  fi
   exec 9<&-
-  mv "$candidate" "$path" || {
-    rm -f "$candidate"
-    return 1
-  }
-  migrated="$(_sgt_read_owned_file "$path" 2>/dev/null || true)"
   [[ "$migrated" == "$actual" ]] || return 1
   printf '%s\n' "$migrated"
 }
