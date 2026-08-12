@@ -260,7 +260,8 @@ _unresolved_workers() {
               ! -L "$repo_dir/worker_process_markers" ]] && continue
             ;;
           force-stopped)
-            [[ ! -f "$repo_dir/worker_process_markers" ]] && continue
+            [[ ! -e "$repo_dir/worker_process_markers" && \
+              ! -L "$repo_dir/worker_process_markers" ]] && continue
             ;;
         esac
       fi

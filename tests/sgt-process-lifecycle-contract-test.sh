@@ -34,7 +34,7 @@ floor="$(awk '{ line=$0; sub(/^.*\) /, "", line); split(line,f," "); print f[20]
 printf '%s|%s|%s\n' "$generation" "$identity" "$floor" > "$repo/worker_process_markers"
 printf '%s|%s|198|%s\n' "$generation" "$identity" "$marker" \
   > "$repo/worker_process_marker"
-chmod 600 "$repo/worker_process_markers"
+chmod 600 "$repo/worker_process_markers" "$repo/worker_process_marker"
 
 # The worker root exits; its grandchild escapes through setsid + double fork and
 # is discoverable only through the inherited marker capability.
@@ -104,6 +104,13 @@ malformed_repo="$TEST_ROOT/fleet/task-malformed/repo"
 mkdir -p "$malformed_repo"
 printf 'failed: fixture\n' > "$malformed_repo/status"
 printf 'not-marker-history\n' > "$malformed_repo/worker_process_markers"
+dangling_repo="$TEST_ROOT/fleet/task-dangling/repo"
+mkdir -p "$dangling_repo"
+printf 'force-stopped\n' > "$dangling_repo/status"
+ln -s "$TEST_ROOT/does-not-exist" "$dangling_repo/worker_process_markers"
+directory_repo="$TEST_ROOT/fleet/task-directory/repo"
+mkdir -p "$directory_repo/worker_process_markers"
+printf 'force-stopped\n' > "$directory_repo/status"
 set +e
 symlink_output="$(SERGEANT_FLEET="$TEST_ROOT/fleet" SERGEANT_DRAIN_DIR="$TEST_ROOT/drain" \
   "$ROOT/bin/sgt-drain" --global --wait --timeout 0 2>&1)"
@@ -112,8 +119,13 @@ set -e
 [[ "$symlink_status" -ne 0 && "$symlink_output" == *'task-symlink/repo'* && \
   "$symlink_output" == *'history is a symlink'* && \
   "$symlink_output" == *'task-malformed/repo'* && \
-  "$symlink_output" == *'malformed durable worker process marker history'* ]]
+  "$symlink_output" == *'malformed durable worker process marker history'* && \
+  "$symlink_output" == *'task-dangling/repo'* && \
+  "$symlink_output" == *'task-directory/repo'* && \
+  "$symlink_output" == *'history is not a regular file'* ]]
 [[ -L "$symlink_repo/worker_process_markers" ]]
+[[ -L "$dangling_repo/worker_process_markers" ]]
+[[ -d "$directory_repo/worker_process_markers" ]]
 
 # A live recorded PID without an exact start identity may be unrelated. Force
 # must not signal it; marker retirement is the only authorised signal path.
@@ -123,9 +135,14 @@ printf 'in_progress\n' > "$unrelated_repo/status"
 printf '%s\n' "$TEST_ROOT/unrelated-worktree" > "$unrelated_repo/worktree"
 sleep 60 & unrelated=$!
 printf '%s\n' "$unrelated" > "$unrelated_repo/worker_pid"
-SERGEANT_FLEET="$TEST_ROOT/fleet" SERGEANT_DRAIN_DIR="$TEST_ROOT/drain" \
-  "$ROOT/bin/sgt-drain-force" --global --yes >/dev/null
+set +e
+unrelated_output="$(SERGEANT_FLEET="$TEST_ROOT/fleet" SERGEANT_DRAIN_DIR="$TEST_ROOT/drain" \
+  "$ROOT/bin/sgt-drain-force" --global --yes 2>&1)"
+unrelated_status=$?
+set -e
+[[ "$unrelated_status" -ne 0 && "$unrelated_output" == *'prior state preserved'* ]]
 kill -0 "$unrelated"
+[[ "$(cat "$unrelated_repo/status")" == in_progress ]]
 kill -KILL "$unrelated" 2>/dev/null || true
 wait "$unrelated" 2>/dev/null || true
 

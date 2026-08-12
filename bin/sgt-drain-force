@@ -123,7 +123,8 @@ fi
 
 any_failed=false
 _record_force_retirement() {
-  local repo_dir="$1" pane identity process_group stamp temporary
+  local repo_dir="$1" process_marker="$2" history_digest="$3"
+  local pane identity process_group stamp temporary
   pane="$(tr -d '\n' < "$repo_dir/pane" 2>/dev/null || true)"
   identity="$(_sgt_read_owned_file "$repo_dir/pane_identity" 2>/dev/null || true)"
   process_group="$(tr -d '\n' < "$repo_dir/worker_process_group" 2>/dev/null || true)"
@@ -136,6 +137,8 @@ _record_force_retirement() {
     printf 'identity=%s\n' "$identity"
     printf 'process_group=%s\n' "$process_group"
     printf 'outcome=marker_holders_retired\n'
+    printf 'process_marker=%s\n' "$process_marker"
+    printf 'marker_history_sha256=%s\n' "$history_digest"
     printf 'recycled_at=%s\n' "$stamp"
   } > "$temporary") || return 1
   mv "$temporary" "$repo_dir/worker_recycled" || return 1
@@ -150,10 +153,35 @@ for ((i=0; i<count; i++)); do
   pid="${eligible_pids[$i]:-}"
   repo_dir="$fleet_dir/$task_id/$repo_name"
   direct_signal_allowed=true
+  root_identity_unproven=false
   marker_evidence_present=false
+  process_marker=""
+  marker_history=""
+  marker_history_digest=""
   if [[ -e "$repo_dir/worker_process_markers" || \
     -L "$repo_dir/worker_process_markers" ]]; then
     marker_evidence_present=true
+  fi
+  if $marker_evidence_present; then
+    process_marker="$(_sgt_read_owned_file \
+      "$repo_dir/worker_process_marker" 2>/dev/null || true)"
+    marker_history="$(_sgt_read_owned_file \
+      "$repo_dir/worker_process_markers" 2>/dev/null || true)"
+    marker_history_digest="$(printf '%s' "$marker_history" | \
+      _sgt_sha256_text 2>/dev/null || true)"
+    if [[ ! "$process_marker" =~ ^[0-9a-f]{32}\|[0-9]+:[0-9]+\|198\|.+$ || \
+      -z "$marker_history" || ! "$marker_history_digest" =~ ^[0-9a-f]{64}$ ]]; then
+      printf '  WARN: marker retirement evidence is malformed (%s/%s); prior state preserved\n' \
+        "$task_id" "$repo_name" >&2
+      any_failed=true
+      continue
+    fi
+    if ! _sgt_marker_record_in_history "$process_marker" "$marker_history"; then
+      printf '  WARN: current marker generation is absent from durable history (%s/%s); prior state preserved\n' \
+        "$task_id" "$repo_name" >&2
+      any_failed=true
+      continue
+    fi
   fi
 
   if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]]; then
@@ -171,6 +199,7 @@ for ((i=0; i<count; i++)); do
           # The root is gone, but detached marker holders may remain. Never
           # publish force-stopped until their shared capability is retired.
           direct_signal_allowed=false
+          root_identity_unproven=true
       fi
 
       # Marker-owning workers are retired exclusively through the pidfd holder
@@ -197,6 +226,13 @@ for ((i=0; i<count; i++)); do
     fi
   fi
 
+  if $root_identity_unproven && ! $marker_evidence_present; then
+    printf '  WARN: recorded PID ownership is unproven and no marker evidence exists (%s/%s); prior state preserved\n' \
+      "$task_id" "$repo_name" >&2
+    any_failed=true
+    continue
+  fi
+
   if ! _sgt_retire_worker_marker_holders "$repo_dir" \
     "$repo_dir/worker_recycle_phase"; then
     printf '  WARN: owned descendants could not be retired (%s/%s); fleet state preserved\n' \
@@ -207,7 +243,8 @@ for ((i=0; i<count; i++)); do
 
   if [[ -e "$repo_dir/worker_process_markers" || \
     -L "$repo_dir/worker_process_markers" ]]; then
-    if ! _record_force_retirement "$repo_dir"; then
+    if ! _record_force_retirement "$repo_dir" "$process_marker" \
+      "$marker_history_digest"; then
       printf '  WARN: marker retirement completed but durable recycle evidence could not be published (%s/%s)\n' \
         "$task_id" "$repo_name" >&2
       any_failed=true

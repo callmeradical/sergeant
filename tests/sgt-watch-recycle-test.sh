@@ -271,6 +271,52 @@ if _pane_live '%51'; then
   exit 1
 fi
 
+# A syntactically plausible record is accepted only as one owned canonical
+# record. Extra fields, symlink substitution, and marker-generation replay must
+# never suppress retirement of the live pane.
+read -r state wt <<<"$(make_worker extra-evidence done '%52')"
+cat > "$state/worker_recycled" <<'EOF'
+pane=%52
+identity=0|%52|4242|123456|worker
+process_group=4242
+outcome=process_group_stopped
+recycled_at=2026-01-01T00:00:00Z
+extra=conflicting
+EOF
+chmod 600 "$state/worker_recycled"
+env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet" \
+  "$ROOT_DIR/bin/sgt-watch" --sync task-extra-evidence >/dev/null
+_pane_live '%52' && { printf 'extra recycle fields suppressed retirement\n' >&2; exit 1; }
+
+read -r state wt <<<"$(make_worker symlink-evidence done '%53')"
+cat > "$TEST_ROOT/external-recycle-evidence" <<'EOF'
+pane=%53
+identity=0|%53|4242|123456|worker
+process_group=4242
+outcome=process_group_stopped
+recycled_at=2026-01-01T00:00:00Z
+EOF
+chmod 600 "$TEST_ROOT/external-recycle-evidence"
+ln -s "$TEST_ROOT/external-recycle-evidence" "$state/worker_recycled"
+env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet" \
+  "$ROOT_DIR/bin/sgt-watch" --sync task-symlink-evidence >/dev/null
+_pane_live '%53' && { printf 'symlink recycle evidence suppressed retirement\n' >&2; exit 1; }
+
+read -r state wt <<<"$(make_worker replay-evidence done '%54')"
+cat > "$state/worker_recycled" <<'EOF'
+pane=%54
+identity=0|%54|4242|123456|worker
+process_group=4242
+outcome=marker_holders_retired
+process_marker=ffffffffffffffffffffffffffffffff|1:1|198|/gone
+marker_history_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+recycled_at=2026-01-01T00:00:00Z
+EOF
+chmod 600 "$state/worker_recycled"
+env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet" \
+  "$ROOT_DIR/bin/sgt-watch" --sync task-replay-evidence >/dev/null
+_pane_live '%54' && { printf 'replayed marker evidence suppressed retirement\n' >&2; exit 1; }
+
 # ── 7. An identity mismatch refuses to recycle ───────────────────────────────
 
 read -r state wt <<<"$(make_worker mismatch done '%60')"

@@ -307,12 +307,37 @@ _sgt_dagr_advance() {
 # malformed marker prove nothing.
 _recycle_evidence_covers() {
   local repo_dir="$1" identity="$2" process_group="$3"
+  local record pane outcome recycled_at process_marker history history_digest expected
   [[ -n "$identity" ]] || return 1
-  [[ -s "$repo_dir/worker_recycled" ]] || return 1
-  grep -Fqx "identity=$identity" "$repo_dir/worker_recycled" 2>/dev/null &&
-    grep -Fqx "process_group=$process_group" "$repo_dir/worker_recycled" 2>/dev/null &&
-    grep -Eq '^outcome=(process_group_stopped|marker_holders_retired)$' \
-      "$repo_dir/worker_recycled" 2>/dev/null
+  record="$(_sgt_read_owned_file "$repo_dir/worker_recycled" 2>/dev/null || true)"
+  [[ -n "$record" ]] || return 1
+  pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
+  outcome="$(sed -n '4s/^outcome=//p' <<< "$record")"
+  case "$outcome" in
+    process_group_stopped)
+      recycled_at="$(sed -n '5s/^recycled_at=//p' <<< "$record")"
+      [[ "$recycled_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+      expected="$(printf 'pane=%s\nidentity=%s\nprocess_group=%s\noutcome=process_group_stopped\nrecycled_at=%s' \
+        "$pane" "$identity" "$process_group" "$recycled_at")"
+      ;;
+    marker_holders_retired)
+      process_marker="$(_sgt_read_owned_file \
+        "$repo_dir/worker_process_marker" 2>/dev/null || true)"
+      history="$(_sgt_read_owned_file \
+        "$repo_dir/worker_process_markers" 2>/dev/null || true)"
+      [[ -n "$process_marker" && -n "$history" ]] || return 1
+      _sgt_marker_record_in_history "$process_marker" "$history" || return 1
+      history_digest="$(printf '%s' "$history" | _sgt_sha256_text 2>/dev/null || true)"
+      recycled_at="$(sed -n '7s/^recycled_at=//p' <<< "$record")"
+      [[ "$history_digest" =~ ^[0-9a-f]{64}$ && \
+        "$recycled_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+      expected="$(printf 'pane=%s\nidentity=%s\nprocess_group=%s\noutcome=marker_holders_retired\nprocess_marker=%s\nmarker_history_sha256=%s\nrecycled_at=%s' \
+        "$pane" "$identity" "$process_group" "$process_marker" \
+        "$history_digest" "$recycled_at")"
+      ;;
+    *) return 1 ;;
+  esac
+  [[ "$record" == "$expected" ]]
 }
 
 # _record_recycle_evidence <repo_dir> <pane> <identity> <outcome>
@@ -322,13 +347,13 @@ _record_recycle_evidence() {
   local repo_dir="$1" pane="$2" identity="$3" process_group="$4" stamp temporary
   stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
   temporary="$repo_dir/worker_recycled.tmp.$$"
-  {
+  (umask 077; {
     printf 'pane=%s\n' "$pane"
     printf 'identity=%s\n' "$identity"
     printf 'process_group=%s\n' "$process_group"
     printf 'outcome=process_group_stopped\n'
     printf 'recycled_at=%s\n' "$stamp"
-  } > "$temporary" || { rm -f "$temporary"; return 1; }
+  } > "$temporary") || { rm -f "$temporary"; return 1; }
   mv "$temporary" "$repo_dir/worker_recycled" || { rm -f "$temporary"; return 1; }
   printf '%s\t%s\t%s\t%s\n' "$stamp" "$pane" "$identity" "$process_group" \
     >> "$repo_dir/worker_recycled_log" 2>/dev/null || true

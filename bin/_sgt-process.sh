@@ -105,3 +105,25 @@ _sgt_retire_worker_marker_holders() {
   python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_sgt-process-token.py" \
     retire "$history" "$phase"
 }
+
+_sgt_sha256_text() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+}
+
+_sgt_marker_record_in_history() {
+  local marker="$1" history="$2" generation identity fd path line floor
+  IFS='|' read -r generation identity fd path <<< "$marker"
+  [[ "$generation" =~ ^[0-9a-f]{32}$ && "$identity" =~ ^[0-9]+:[0-9]+$ && \
+    "$fd" == 198 && -n "$path" ]] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      "$generation|$identity|"*)
+        floor="${line##*|}"
+        [[ "$floor" =~ ^[0-9]+$ && \
+          "$line" == "$generation|$identity|$floor" ]] && return 0
+        ;;
+    esac
+  done <<< "$history"
+  return 1
+}
