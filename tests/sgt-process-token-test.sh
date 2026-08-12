@@ -149,6 +149,7 @@ token_command() {
   local operation="$1" history="$2"
   case "$operation" in
     holders) python3 "$ROOT/bin/_sgt-process-token.py" holders "$history" ;;
+    compact) python3 "$ROOT/bin/_sgt-process-token.py" compact "$history" ;;
     check) python3 "$ROOT/bin/_sgt-process-token.py" check "$history" "$$" \
       "$marker_floor" "$marker_identity" ;;
     retire) python3 "$ROOT/bin/_sgt-process-token.py" retire "$history" "$TEST_ROOT/phase" ;;
@@ -156,7 +157,7 @@ token_command() {
 }
 
 security_line="11111111111111111111111111111111|1:1|1"
-for operation in holders check retire; do
+for operation in holders check retire compact; do
   insecure="$TEST_ROOT/$operation-mode-history"
   printf '%s\n' "$security_line" > "$insecure"
   chmod 644 "$insecure"

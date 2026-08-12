@@ -208,4 +208,43 @@ set -e
 kill -KILL "$ambiguous" 2>/dev/null || true
 wait "$ambiguous" 2>/dev/null || true
 
+# A present history node is never optional merely because it has zero bytes or
+# a torn final record. Cleanup preserves fleet evidence until the secure token
+# parser proves a canonical history.
+assert_cleanup_history_rejected() {
+  local task="$1" expected="$2" output status
+  set +e
+  output="$(SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT/bin/sgt-cleanup" "$task" 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" -ne 0 && "$output" == *'fleet evidence preserved'* && \
+    "$output" == *"$expected"* ]]
+  [[ -d "$TEST_ROOT/fleet/$task" ]]
+}
+
+empty_644="$TEST_ROOT/fleet/task-empty-644/repo"
+mkdir -p "$empty_644"
+printf 'failed: fixture\n' > "$empty_644/status"
+printf '%s/missing-empty-644\n' "$TEST_ROOT" > "$empty_644/worktree"
+: > "$empty_644/worker_process_markers"
+chmod 644 "$empty_644/worker_process_markers"
+assert_cleanup_history_rejected task-empty-644 'mode must be 0600'
+
+empty_600="$TEST_ROOT/fleet/task-empty-600/repo"
+mkdir -p "$empty_600"
+printf 'failed: fixture\n' > "$empty_600/status"
+printf '%s/missing-empty-600\n' "$TEST_ROOT" > "$empty_600/worktree"
+: > "$empty_600/worker_process_markers"
+chmod 600 "$empty_600/worker_process_markers"
+assert_cleanup_history_rejected task-empty-600 'history is empty'
+
+truncated="$TEST_ROOT/fleet/task-truncated/repo"
+mkdir -p "$truncated"
+printf 'failed: fixture\n' > "$truncated/status"
+printf '%s/missing-truncated\n' "$TEST_ROOT" > "$truncated/worktree"
+printf '11111111111111111111111111111111|1:1|1' > "$truncated/worker_process_markers"
+chmod 600 "$truncated/worker_process_markers"
+assert_cleanup_history_rejected task-truncated 'exactly one terminal LF'
+
 printf 'sgt process lifecycle contract: ok\n'

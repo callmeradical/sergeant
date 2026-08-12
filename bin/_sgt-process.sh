@@ -99,7 +99,6 @@ _sgt_retire_worker_marker_holders() {
     return 1
   }
   [[ -f "$history" ]] || return 0
-  [[ -s "$history" ]] || return 0
   [[ -f "$phase" && ! -L "$phase" ]] || phase=/dev/null
   command -v python3 >/dev/null 2>&1 || return 1
   python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_sgt-process-token.py" \
