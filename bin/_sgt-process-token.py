@@ -4,6 +4,7 @@
 import os
 import re
 import signal
+import stat
 import sys
 import time
 
@@ -21,11 +22,56 @@ def stat_fields(pid):
     return fields[0], fields[19]
 
 
+def read_owned_history(path):
+    try:
+        before = os.lstat(path)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid():
+            fail("worker process marker history is not an owned regular file")
+        if stat.S_IMODE(before.st_mode) != 0o600:
+            fail("worker process marker history mode must be 0600")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                fail("worker process marker history changed before open")
+            test_pause = os.environ.get("SGT_PROCESS_TOKEN_TEST_PAUSE_AFTER_OPEN")
+            if test_pause:
+                open(test_pause + ".opened", "xb").close()
+                for _ in range(200):
+                    if os.path.exists(test_pause + ".release"):
+                        break
+                    time.sleep(0.01)
+                else:
+                    fail("test path-swap release timed out")
+            data = os.read(fd, 8193)
+            if len(data) > 8192 or os.read(fd, 1):
+                fail("worker process marker history exceeds 8192 bytes")
+            after = os.lstat(path)
+            final = os.fstat(fd)
+            stable = (
+                "st_dev",
+                "st_ino",
+                "st_uid",
+                "st_mode",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+            if any(getattr(before, key) != getattr(after, key) for key in stable) or any(
+                getattr(opened, key) != getattr(final, key) for key in stable
+            ) or (after.st_dev, after.st_ino) != (final.st_dev, final.st_ino):
+                fail("worker process marker history changed while reading")
+            return data
+        finally:
+            os.close(fd)
+    except (FileNotFoundError, PermissionError, OSError) as exc:
+        fail(f"cannot read worker process marker history exactly: {exc}")
+
+
 def load_markers(path, allow_empty=False):
     markers = {}
-    data = open(path, "rb").read(8193)
-    if len(data) > 8192:
-        fail("worker process marker history exceeds 8192 bytes")
+    data = read_owned_history(path)
     if not data:
         if allow_empty:
             return markers

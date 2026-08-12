@@ -18,6 +18,7 @@ make_marker() {
   printf '%s\n' "$generation" > "$marker_path"
   marker_floor="$(awk '{ line=$0; sub(/^.*\) /, "", line); split(line,f," "); print f[20] }' "/proc/$$/stat")"
   printf '%s|%s|%s\n' "$generation" "$marker_identity" "$marker_floor" > "$TEST_ROOT/markers"
+  chmod 600 "$TEST_ROOT/markers"
   printf 'version=1\nmember=99999999|linux:1|1|1|1\n' > "$TEST_ROOT/phase"
 }
 
@@ -140,5 +141,60 @@ for _ in $(seq 1 100); do [[ "$(awk '{print $3}' "/proc/$zombie/stat" 2>/dev/nul
 zombie_start="$(awk '{ line=$0; sub(/^.*\) /, "", line); split(line,f," "); print f[20] }' "/proc/$zombie/stat")"
 printf 'version=1\nmember=%s|linux:%s|1|1|1\n' "$zombie" "$zombie_start" > "$TEST_ROOT/phase"
 python3 "$ROOT/bin/_sgt-process-token.py" retire "$TEST_ROOT/markers" "$TEST_ROOT/phase"
+
+# Every public token operation independently descriptor-binds marker history.
+# Mode relaxation, symlink substitution, and replacement after open all fail at
+# the ownership boundary before command-specific holder semantics are reached.
+token_command() {
+  local operation="$1" history="$2"
+  case "$operation" in
+    holders) python3 "$ROOT/bin/_sgt-process-token.py" holders "$history" ;;
+    check) python3 "$ROOT/bin/_sgt-process-token.py" check "$history" "$$" \
+      "$marker_floor" "$marker_identity" ;;
+    retire) python3 "$ROOT/bin/_sgt-process-token.py" retire "$history" "$TEST_ROOT/phase" ;;
+  esac
+}
+
+security_line="11111111111111111111111111111111|1:1|1"
+for operation in holders check retire; do
+  insecure="$TEST_ROOT/$operation-mode-history"
+  printf '%s\n' "$security_line" > "$insecure"
+  chmod 644 "$insecure"
+  set +e
+  insecure_output="$(token_command "$operation" "$insecure" 2>&1)"
+  insecure_status=$?
+  set -e
+  [[ "$insecure_status" -ne 0 && "$insecure_output" == *'mode must be 0600'* ]]
+
+  target="$TEST_ROOT/$operation-symlink-target"
+  link="$TEST_ROOT/$operation-symlink-history"
+  printf '%s\n' "$security_line" > "$target"
+  chmod 600 "$target"
+  ln -s "$target" "$link"
+  set +e
+  symlink_output="$(token_command "$operation" "$link" 2>&1)"
+  symlink_status=$?
+  set -e
+  [[ "$symlink_status" -ne 0 && "$symlink_output" == *'not an owned regular file'* ]]
+
+  swapped="$TEST_ROOT/$operation-swap-history"
+  replacement="$TEST_ROOT/$operation-swap-replacement"
+  pause="$TEST_ROOT/$operation-swap"
+  printf '%s\n' "$security_line" > "$swapped"
+  printf '%s\n' "$security_line" > "$replacement"
+  chmod 600 "$swapped" "$replacement"
+  SGT_PROCESS_TOKEN_TEST_PAUSE_AFTER_OPEN="$pause" \
+    token_command "$operation" "$swapped" > "$pause.output" 2>&1 & swap_command=$!
+  for _ in $(seq 1 200); do [[ -e "$pause.opened" ]] && break; sleep 0.01; done
+  [[ -e "$pause.opened" ]]
+  mv "$replacement" "$swapped"
+  : > "$pause.release"
+  set +e
+  wait "$swap_command"
+  swap_status=$?
+  set -e
+  [[ "$swap_status" -ne 0 ]]
+  grep -Fq 'changed while reading' "$pause.output"
+done
 
 printf 'sgt process marker retirement: ok\n'
