@@ -206,6 +206,7 @@ if [[ "$1" != get || "$2" != --lease || "$3" != --lease-holder || \
 fi
 printf '%s\n' "$*" > "$TREEHOUSE_GET_LOG"
 case "${TREEHOUSE_OUTPUT_MODE:-valid}" in
+  definite_failure) exit 7 ;;
   malformed) printf '{not-json\n'; exit 0 ;;
   duplicate)
     printf '{"path":"%s","lease_id":"one","lease_id":"two","lease_holder":"%s"}\n' \
@@ -328,6 +329,27 @@ PY
 [[ "$(cat "$TEST_ROOT/treehouse-get.log")" == \
   "get --lease --lease-holder sgt-$treehouse_task_id-app --json" ]]
 rm "$TEST_ROOT/repo/treehouse.toml"
+
+touch "$TEST_ROOT/repo/treehouse.toml"
+REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TREEHOUSE_TEST_PATH="$TEST_ROOT/treehouse-definite-failure" \
+  TREEHOUSE_GET_LOG="$TEST_ROOT/treehouse-definite-failure.log" \
+  TREEHOUSE_RETURN_LOG="$TEST_ROOT/treehouse-definite-failure-return.log" \
+  TREEHOUSE_OUTPUT_MODE=definite_failure \
+  TMUX_LOG="$TEST_ROOT/treehouse-definite-failure-tmux.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test "Treehouse definite failure fallback" \
+    --repos app >/dev/null
+definite_state="$(dirname "$(find "$TEST_ROOT/fleet" \
+  -path '*/app/treehouse-acquisition-receipt.json' -type f \
+  -exec grep -l '"returncode":7' {} + | head -1)")"
+[[ "$(cat "$definite_state/wt_type")" == git ]]
+[[ -d "$(cat "$definite_state/worktree")" ]]
+[[ ! -e "$definite_state/treehouse-acquisition.json" ]]
+[[ -s "$TEST_ROOT/treehouse-definite-failure-tmux.log" ]]
+rm "$TEST_ROOT/repo/treehouse.toml"
+printf 'sgt-dispatch falls back after durable definite Treehouse failure: ok\n'
 
 for bad_mode in malformed duplicate nul control oversized simultaneous_overflow; do
   touch "$TEST_ROOT/repo/treehouse.toml"

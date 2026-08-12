@@ -178,6 +178,54 @@ HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
 [[ ! -e "$TEST_ROOT/fleet/treehouse-pool" ]]
 printf 'sgt-cleanup accepts a successful Treehouse pool return: ok\n'
 
+init_repo "$TEST_ROOT/legacy-treehouse-main"
+git -C "$TEST_ROOT/legacy-treehouse-main" worktree add -q \
+  -b legacy-treehouse-worker "$TEST_ROOT/legacy-treehouse-pool-checkout"
+record_task legacy-treehouse "$TEST_ROOT/legacy-treehouse-main" \
+  "$TEST_ROOT/legacy-treehouse-pool-checkout" treehouse
+rm "$TEST_ROOT/fleet/legacy-treehouse/app/wt_lease_id"
+touch "$TEST_ROOT/legacy-treehouse-active"
+set +e
+HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+  FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/legacy-treehouse-active" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/legacy-treehouse-pool-checkout" \
+  FAKE_TREEHOUSE_LEASE_ID=lease-legacy-treehouse \
+  FAKE_TREEHOUSE_HOLDER=sgt-legacy-treehouse-app \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 SGT_CLEANUP_FAIL_POINT=legacy-lease-discovered \
+  "$ROOT_DIR/bin/sgt-cleanup" legacy-treehouse app >/dev/null 2>&1
+legacy_discovery_status=$?
+set -e
+[[ "$legacy_discovery_status" -ne 0 ]]
+[[ -s "$TEST_ROOT/fleet/legacy-treehouse/app/treehouse-legacy-lease.json" ]]
+[[ ! -e "$TEST_ROOT/fleet/legacy-treehouse/app/wt_lease_id" ]]
+HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+  FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/legacy-treehouse-active" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/legacy-treehouse-pool-checkout" \
+  FAKE_TREEHOUSE_LEASE_ID=lease-legacy-treehouse \
+  FAKE_TREEHOUSE_HOLDER=sgt-legacy-treehouse-app \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" legacy-treehouse app >/dev/null
+[[ ! -e "$TEST_ROOT/legacy-treehouse-active" ]]
+HOME="$TEST_ROOT/home" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  FAKE_TREEHOUSE_LOG="$TEST_ROOT/treehouse-return.log" \
+  FAKE_TREEHOUSE_ACTIVE="$TEST_ROOT/legacy-treehouse-active" \
+  FAKE_TREEHOUSE_PATH="$TEST_ROOT/legacy-treehouse-pool-checkout" \
+  FAKE_TREEHOUSE_LEASE_ID=lease-legacy-treehouse \
+  FAKE_TREEHOUSE_HOLDER=sgt-legacy-treehouse-app \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-cleanup" legacy-treehouse >/dev/null
+[[ ! -d "$TEST_ROOT/fleet/legacy-treehouse" ]]
+grep -Fq \
+  'return --force --if-lease-id lease-legacy-treehouse --if-lease-holder sgt-legacy-treehouse-app' \
+  "$TEST_ROOT/treehouse-return.log"
+printf 'sgt-cleanup upgrades a legacy Treehouse fleet lease identity: ok\n'
+
+return_count="$(wc -l < "$TEST_ROOT/treehouse-return.log")"
 init_repo "$TEST_ROOT/unowned-treehouse-main"
 git -C "$TEST_ROOT/unowned-treehouse-main" worktree add -q \
   -b unowned-treehouse-worker "$TEST_ROOT/unowned-treehouse-pool-checkout"
@@ -202,7 +250,7 @@ unowned_status=$?
 set -e
 [[ "$unowned_status" -ne 0 ]]
 [[ "$unowned_output" == *"Treehouse lease identity does not match its fleet owner"* ]]
-[[ "$(wc -l < "$TEST_ROOT/treehouse-return.log")" -eq 1 ]]
+[[ "$(wc -l < "$TEST_ROOT/treehouse-return.log")" -eq "$return_count" ]]
 [[ -d "$TEST_ROOT/unowned-treehouse-pool-checkout" ]]
 [[ -d "$TEST_ROOT/fleet/unowned-treehouse" ]]
 [[ -f "$TEST_ROOT/unowned-treehouse-pool-checkout/.sergeant-status" ]]

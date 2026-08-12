@@ -827,6 +827,9 @@ for rname in "${TARGET_REPOS[@]}"; do
     set -e
     if [[ "$treehouse_get_status" -eq 0 ]]; then
       treehouse_acquired=true
+    elif [[ "$treehouse_get_status" -eq 11 ]]; then
+      use_treehouse=false
+      _info "Treehouse reported no allocation — falling back to git worktree"
     else
       if [[ -s "$treehouse_record" ]]; then
         worktree_path="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$treehouse_record")"

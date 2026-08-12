@@ -752,6 +752,8 @@ def main():
             path, lease_id = allocation(raw, record, repo, holder)
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError,
                 subprocess.CalledProcessError):
+            if rc > 0 and not overflow and Path(raw).stat().st_size == 0:
+                return 11
             return 12
         return 0 if rc == 0 and not overflow else 10
     if mode == "verify-checkout":
@@ -782,6 +784,68 @@ def main():
         if rc == 0 and not overflow:
             sys.stdout.buffer.write(attempt_raw.read_bytes())
         return 0 if rc == 0 and not overflow else 1
+    if mode == "discover-lease":
+        repo, raw, receipt, state_path, path, holder = sys.argv[2:]
+        cleanup_orphan_temps([state_path])
+        state_target = Path(state_path)
+        if state_target.exists() or state_target.is_symlink():
+            try:
+                info = state_target.lstat()
+                record = strict_json(state_target.read_bytes())
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                        info.st_nlink != 1 or set(record) != {
+                            "version", "repo", "path", "lease_id", "lease_holder"} or
+                        record["version"] != 1 or record["repo"] != canonical(repo) or
+                        record["path"] != canonical(path) or
+                        record["lease_holder"] != holder or
+                        not isinstance(record["lease_id"], str) or
+                        not record["lease_id"] or
+                        len(record["lease_id"].encode()) > 4096):
+                    raise ValueError("invalid durable legacy lease discovery")
+                same_repository(repo, path)
+            except (ValueError, OSError, UnicodeDecodeError,
+                    json.JSONDecodeError, subprocess.CalledProcessError):
+                return 1
+            return 0
+        rc, _, overflow = run_bounded(
+            ["treehouse", "status", "--json"], repo, raw, receipt,
+            {"operation": "status", "repo": repo})
+        if rc != 0 or overflow:
+            return 1
+        try:
+            data = strict_json(Path(raw).read_bytes())
+            if not isinstance(data, list):
+                raise ValueError("status is not an array")
+            expected = canonical(path)
+            matches = []
+            for entry in data:
+                if not isinstance(entry, dict):
+                    raise ValueError("status entry is not an object")
+                entry_path = entry.get("path")
+                entry_id = entry.get("lease_id")
+                entry_holder = entry.get("lease_holder")
+                if (not isinstance(entry_path, str) or
+                        not isinstance(entry_id, str) or
+                        not isinstance(entry_holder, str)):
+                    raise ValueError("status identity has wrong type")
+                if (not os.path.isabs(entry_path) or
+                        os.path.normpath(entry_path) != entry_path):
+                    raise ValueError("status path is not canonical")
+                if entry_path == expected:
+                    matches.append(entry)
+            if (len(matches) != 1 or not matches[0]["lease_id"] or
+                    matches[0]["lease_holder"] != holder or
+                    len(matches[0]["lease_id"].encode()) > 4096):
+                raise ValueError("legacy lease identity is not unique")
+            same_repository(repo, path)
+            atomic_json(state_path, {
+                "version": 1, "repo": canonical(repo), "path": expected,
+                "lease_id": matches[0]["lease_id"], "lease_holder": holder,
+            })
+        except (ValueError, OSError, UnicodeDecodeError, json.JSONDecodeError,
+                subprocess.CalledProcessError):
+            return 1
+        return 0
     if mode == "status":
         repo, raw, receipt, state_path, path, lease_id, holder = sys.argv[2:]
         cleanup_orphan_temps([state_path])

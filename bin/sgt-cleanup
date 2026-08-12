@@ -1094,7 +1094,11 @@ _require_terminal_repos() {
     treehouse_lease_id=""
     if [[ "$wt_type" == treehouse ]]; then
       treehouse_holder="$(tr -d '\n' < "$repo_dir/wt_holder" 2>/dev/null || true)"
-      treehouse_lease_id="$(tr -d '\n' < "$repo_dir/wt_lease_id" 2>/dev/null || true)"
+      treehouse_lease_id="$(
+        if [[ -f "$repo_dir/wt_lease_id" && ! -L "$repo_dir/wt_lease_id" ]]; then
+          tr -d '\n' < "$repo_dir/wt_lease_id"
+        fi
+      )"
     fi
     treehouse_returning_phase="$(printf 'returning\n%s\ntreehouse\n%s\n' \
       "$worktree" "$retry_root")"
@@ -2740,9 +2744,36 @@ for repo_dir in "$TASK_DIR"/*/; do
   fi
   if [[ "$wt_type" == "treehouse" ]]; then
     treehouse_holder="$(tr -d '\n' < "$repo_dir/wt_holder" 2>/dev/null || true)"
-    treehouse_lease_id="$(tr -d '\n' < "$repo_dir/wt_lease_id" 2>/dev/null || true)"
-    [[ "$treehouse_holder" == "sgt-${TASK_ID}-${repo_name}" && \
-      -n "$treehouse_lease_id" ]] || \
+    treehouse_lease_id="$(
+      if [[ -f "$repo_dir/wt_lease_id" && ! -L "$repo_dir/wt_lease_id" ]]; then
+        tr -d '\n' < "$repo_dir/wt_lease_id"
+      fi
+    )"
+    [[ "$treehouse_holder" == "sgt-${TASK_ID}-${repo_name}" ]] || \
+      _die "Treehouse lease identity does not match its fleet owner: $repo_name"
+    if [[ -z "$treehouse_lease_id" ]]; then
+      legacy_record="$repo_dir/treehouse-legacy-lease.json"
+      [[ ! -L "$repo_dir/wt_lease_id" && ! -L "$legacy_record" ]] || \
+        _die "Unsafe legacy Treehouse lease migration state: $repo_name"
+      if ! "$SCRIPT_DIR/_sgt-treehouse-io.py" discover-lease \
+        "$retry_root" "$repo_dir/treehouse-legacy-lease.raw" \
+        "$repo_dir/treehouse-legacy-lease-receipt.json" "$legacy_record" \
+        "$worktree" "$treehouse_holder"; then
+        _die "Cannot discover legacy Treehouse lease identity: $repo_name"
+      fi
+      _cleanup_fail_point legacy-lease-discovered || \
+        _die "Legacy Treehouse lease discovery interrupted: $repo_name"
+      treehouse_lease_id="$(python3 -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["lease_id"])' \
+        "$legacy_record")"
+      lease_temp="$repo_dir/wt_lease_id.tmp.$$"
+      [[ ! -e "$repo_dir/wt_lease_id" && ! -L "$repo_dir/wt_lease_id" && \
+        ! -e "$lease_temp" && ! -L "$lease_temp" ]] || \
+        _die "Unsafe legacy Treehouse lease migration state: $repo_name"
+      printf '%s\n' "$treehouse_lease_id" > "$lease_temp"
+      mv "$lease_temp" "$repo_dir/wt_lease_id"
+    fi
+    [[ -n "$treehouse_lease_id" ]] || \
       _die "Treehouse lease identity does not match its fleet owner: $repo_name"
     git_file="$worktree/.git"
     [[ -f "$git_file" ]] || \
