@@ -831,9 +831,8 @@ _sgt_worker_command() {
     "$path" "$path" "$worker" "$repo_dir" "$worktree" "$agent"
 }
 _sgt_prepare_worker_process_marker() {
-  local repo_dir="$1" path generation identity marker launch_floor history history_tmp
+  local repo_dir="$1" path generation identity marker launch_floor history history_tmp history_lines
   path="$(mktemp "$repo_dir/.worker-process-marker.XXXXXX")" || return 1
-  chmod 400 "$path" || { rm -f "$path"; return 1; }
   identity="$(stat -Lc '%d:%i' "$path" 2>/dev/null || stat -f '%d:%i' "$path" 2>/dev/null || true)"
   generation="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
   launch_floor="$(_sgt_process_identity "$$" 2>/dev/null || true)"
@@ -843,9 +842,22 @@ _sgt_prepare_worker_process_marker() {
     rm -f "$path"
     return 1
   }
+  printf '%s\n' "$generation" > "$path" || { rm -f "$path"; return 1; }
+  chmod 400 "$path" || { rm -f "$path"; return 1; }
   marker="$generation|$identity|198|$path"
   history="$repo_dir/worker_process_markers"
   [[ ! -L "$history" && ( ! -e "$history" || -f "$history" ) ]] || { rm -f "$path"; return 1; }
+  if [[ -f "$history" ]]; then
+    python3 "$_SGT_LIB_DIR/_sgt-process-token.py" compact "$history" || {
+      rm -f "$path"
+      return 1
+    }
+    history_lines="$(wc -l < "$history" 2>/dev/null || true)"
+    [[ "$history_lines" =~ ^[0-9]+$ && "$history_lines" -lt 64 ]] || {
+      rm -f "$path"
+      return 1
+    }
+  fi
   history_tmp="$(mktemp "$repo_dir/.worker-process-markers.XXXXXX")" || { rm -f "$path"; return 1; }
   {
     [[ ! -f "$history" ]] || cat "$history"

@@ -258,6 +258,12 @@ _stop_local_worker() {
 
   [[ -z "$live_tree_pids" ]] || \
     _die "Worker processes did not terminate: $(tr '\n' ' ' <<< "$live_tree_pids")"
+  # Process groups and ancestry cannot see a setsid/double-fork escape. Every
+  # launched worker generation inherits an unforgeable open marker instead;
+  # fleet and marker evidence must remain intact unless pidfd retirement proves
+  # all holders are gone.
+  _sgt_retire_worker_marker_holders "$repo_dir" "$repo_dir/worker_recycle_phase" || \
+    _die "Worker marker holders could not be retired; fleet evidence preserved: $(basename "$repo_dir")"
   cwd_pids="$(_worktree_cwd_pids "$worktree")"
   [[ -z "$cwd_pids" ]] || \
     _die "Other processes still have $worktree as their current directory: $(tr '\n' ' ' <<< "$cwd_pids")"
@@ -268,7 +274,7 @@ _stop_recorded_validation_group() {
   local actual_start actual_pgid live_pids
 
   if kill -0 "$recorded_pid" 2>/dev/null; then
-    actual_start="$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | awk '{$1=$1; print}' || true)"
+    actual_start="$(_sgt_process_identity "$recorded_pid" 2>/dev/null || true)"
     [[ "$actual_start" == "$recorded_start" ]] || \
       _die "Validation owner PID was reused; refusing process termination: $recorded_pid"
     actual_pgid="$(ps -o pgid= -p "$recorded_pid" 2>/dev/null | tr -d ' ' || true)"
@@ -332,7 +338,7 @@ _stop_validation_pane() {
     pane_pid="${pane_info%%|*}"
     [[ "$pane_pid" == "$recorded_pid" ]] || \
       _die "Validation pane PID does not match recorded ownership: $pane_pid"
-    actual_start="$(ps -o lstart= -p "$pane_pid" 2>/dev/null | awk '{$1=$1; print}' || true)"
+    actual_start="$(_sgt_process_identity "$pane_pid" 2>/dev/null || true)"
     [[ "$actual_start" == "$recorded_start" ]] || \
       _die "Validation owner PID was reused; refusing process termination: $recorded_pid"
     tree_records="$(_process_tree_records "$pane_pid")"

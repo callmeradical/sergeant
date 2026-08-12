@@ -15,6 +15,7 @@ make_marker() {
   marker_path="$(mktemp "$TEST_ROOT/marker.XXXXXX")"
   marker_identity="$(stat -Lc '%d:%i' "$marker_path")"
   generation="$(printf '%032x' "$RANDOM")"
+  printf '%s\n' "$generation" > "$marker_path"
   marker_floor="$(awk '{ line=$0; sub(/^.*\) /, "", line); split(line,f," "); print f[20] }' "/proc/$$/stat")"
   printf '%s|%s|%s\n' "$generation" "$marker_identity" "$marker_floor" > "$TEST_ROOT/markers"
   printf 'version=1\nmember=99999999|linux:1|1|1|1\n' > "$TEST_ROOT/phase"
@@ -76,8 +77,45 @@ set +e
 unreadable_output="$(python3 "$ROOT/bin/_sgt-process-token.py" retire "$TEST_ROOT/markers" "$TEST_ROOT/phase" 2>&1)"
 unreadable_status=$?
 set -e
-[[ "$unreadable_status" -ne 0 && "$unreadable_output" == *'cannot inspect attributable worker PID'* ]]
+[[ "$unreadable_status" -ne 0 && "$unreadable_output" == *'cannot inspect '*"PID $unreadable"*' fd ownership'* ]]
 kill -0 "$unreadable"
+kill -KILL "$unreadable" 2>/dev/null || true
+wait "$unreadable" 2>/dev/null || true
+
+# Every same-UID process launched after a retained marker generation is part of
+# the holder proof. An unreadable, unrecorded fd table is actionable ambiguity;
+# it cannot silently certify a drain or cleanup as complete.
+make_marker
+python3 - "$TEST_ROOT/unreadable-unrecorded.pid" <<'PY' &
+import ctypes, os, pathlib, sys, time
+pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
+ctypes.CDLL(None).prctl(4, 0)
+time.sleep(60)
+PY
+unreadable_unrecorded=$!
+OWNED_PIDS+=" $unreadable_unrecorded"
+disown "$unreadable_unrecorded" 2>/dev/null || true
+for _ in $(seq 1 100); do [[ -s "$TEST_ROOT/unreadable-unrecorded.pid" ]] && break; sleep 0.01; done
+set +e
+ambiguous_output="$(python3 "$ROOT/bin/_sgt-process-token.py" holders "$TEST_ROOT/markers" 2>&1)"
+ambiguous_status=$?
+set -e
+[[ "$ambiguous_status" -ne 0 && "$ambiguous_output" == *'cannot inspect same-UID post-launch PID'* ]]
+kill -KILL "$unreadable_unrecorded" 2>/dev/null || true
+wait "$unreadable_unrecorded" 2>/dev/null || true
+
+# Device/inode reuse is insufficient without the generation bytes stored in the
+# open capability. A same-inode file with unrelated content is not attributed,
+# and compact retires its closed generation from bounded history.
+make_marker
+printf 'not-the-generation\n' > "$marker_path"
+bash -c "exec 198<'$marker_path'; rm -f '$marker_path'; exec sleep 60" & reused=$!
+OWNED_PIDS+=" $reused"
+disown "$reused" 2>/dev/null || true
+for _ in $(seq 1 100); do [[ ! -e "$marker_path" ]] && break; sleep 0.01; done
+[[ -z "$(python3 "$ROOT/bin/_sgt-process-token.py" holders "$TEST_ROOT/markers")" ]]
+python3 "$ROOT/bin/_sgt-process-token.py" compact "$TEST_ROOT/markers"
+[[ ! -s "$TEST_ROOT/markers" ]]
 
 # A zombie has already dropped every FD and cannot execute again, so it is
 # terminal at each retirement phase rather than an unreadable live holder.

@@ -10,7 +10,10 @@ fleet="$TEST_ROOT/fleet"
 repo_state="$fleet/task-1/app"
 worktree="$TEST_ROOT/worktree"
 fake_bin="$TEST_ROOT/bin"
-mkdir -p "$repo_state" "$worktree" "$fake_bin"
+mkdir -p "$repo_state" "$worktree" "$fake_bin" "$TEST_ROOT/proc/7777"
+printf '7777 (validation fixture) S 1 7777 7777 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345 0\n' \
+  > "$TEST_ROOT/proc/7777/stat"
+export SGT_PROC_ROOT="$TEST_ROOT/proc"
 git -C "$worktree" init -q
 git -C "$worktree" config user.name Test
 git -C "$worktree" config user.email test@example.invalid
@@ -141,9 +144,16 @@ case "$1" in
     ;;
   split-window)
     command="${!#}"
+    if [[ "${FAIL_TRANSITION:-}" == "pane-start" ]]; then
+      rm -f "$SGT_PROC_ROOT/7777/stat"
+    else
+      mkdir -p "$SGT_PROC_ROOT/7777"
+      printf '7777 (validation fixture) S 1 7777 7777 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345 0\n' \
+        > "$SGT_PROC_ROOT/7777/stat"
+    fi
     printf '%s\n' "$command" > "$CONCURRENT_DIR/validation-command"
     : > "$CONCURRENT_DIR/pane-live"
-    printf '%s|%%77|7777|Thu Jul 23 00:00:00 2026\n' \
+    printf '%s|%%77|7777|linux:12345\n' \
       "$(cat "$CONCURRENT_DIR/revision")" > "$TEST_REPO_STATE/validation-child-ready"
     [[ "${FAIL_TRANSITION:-}" != "split-empty" ]] || exit 7
     if [[ "${FAIL_TRANSITION:-}" == "pane-pid" ]]; then
@@ -180,10 +190,6 @@ case "$*" in
     [[ "${FAIL_TRANSITION:-}" != "pane-pgid" && \
       "${FAIL_TRANSITION:-}" != "pane-reuse" ]] || exit 7
     printf '7777\n'
-    ;;
-  *'lstart='*)
-    [[ "${FAIL_TRANSITION:-}" != "pane-start" ]] || exit 7
-    printf 'Thu Jul 23 00:00:00 2026\n'
     ;;
   *) exit 1 ;;
 esac
@@ -296,7 +302,7 @@ fi
 "$REAL_LN" "$@" || exit
 if [[ "$destination" == */validation-release && \
   "${FAIL_TRANSITION:-}" != "handshake-timeout" ]]; then
-  printf '%s|%%77|7777|Thu Jul 23 00:00:00 2026\n' \
+  printf '%s|%%77|7777|linux:12345\n' \
       "$(cat "$CONCURRENT_DIR/revision")" > "$TEST_REPO_STATE/validation-child-accepted"
 fi
 if [[ "$destination" == */validation-child-commit ]]; then
@@ -305,7 +311,7 @@ if [[ "$destination" == */validation-child-commit ]]; then
   elif [[ "${FAIL_TRANSITION:-}" == "wrong-commit-ack" ]]; then
     printf 'wrong-ack\n' > "$TEST_REPO_STATE/validation-child-committed"
   elif [[ "${FAIL_TRANSITION:-}" != "commit-ack-timeout" ]]; then
-    printf '%s|%%77|7777|Thu Jul 23 00:00:00 2026\n' \
+    printf '%s|%%77|7777|linux:12345\n' \
       "$(cat "$CONCURRENT_DIR/revision")" > "$TEST_REPO_STATE/validation-child-committed"
     [[ "${FAIL_TRANSITION:-}" != "exit-after-committed" ]] || \
       rm -f "$CONCURRENT_DIR/pane-live"
@@ -317,7 +323,7 @@ if [[ "$destination" == */validation-success ]]; then
   elif [[ "${FAIL_TRANSITION:-}" == "wrong-final-token" ]]; then
     printf 'wrong-final\n' > "$TEST_REPO_STATE/validation-success-ack"
   elif [[ "${FAIL_TRANSITION:-}" != "final-ack-timeout" ]]; then
-    printf '%s|%%77|7777|Thu Jul 23 00:00:00 2026\n' \
+    printf '%s|%%77|7777|linux:12345\n' \
       "$(cat "$CONCURRENT_DIR/revision")" > "$TEST_REPO_STATE/validation-success-ack"
     [[ "${FAIL_TRANSITION:-}" != "exit-after-final-ack" ]] || \
       rm -f "$CONCURRENT_DIR/pane-live"
@@ -666,8 +672,10 @@ cleanup_validation_state
 
 lock_coordinator='%11|0|%11|1111|111111|coordinator-command'
 lock_purpose='task-1/app/validation-launch'
+live_lock_start="$(bash -c 'source "$1"; _sgt_process_identity "$2"' _ \
+  "$ROOT_DIR/bin/_sgt-process.sh" "$$")"
 
-write_validation_lock "$$" 'Thu Jul 23 00:00:00 2026' "$lock_coordinator" "$lock_purpose"
+write_validation_lock "$$" "$live_lock_start" "$lock_coordinator" "$lock_purpose"
 live_lock="$(cat "$repo_state/validation-launch.lock")"
 assert_lock_blocks_and_is_preserved "$live_lock"
 rm "$repo_state/validation-launch.lock"
@@ -688,7 +696,7 @@ set -e
 [[ "$status" -ne 0 && "$(cat "$repo_state/validation-launch.lock")" == 'replacement-owner' ]]
 rm "$repo_state/validation-launch.lock"
 
-write_validation_lock "$$" 'Thu Jul 23 00:00:01 2026' "$lock_coordinator" "$lock_purpose"
+write_validation_lock "$$" 'linux:1' "$lock_coordinator" "$lock_purpose"
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
   "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null

@@ -77,7 +77,7 @@ _coordinator_is_alive() {
   pid="$(_lock_field pid)" || return 1
   start="$(_lock_field start)" || return 1
   [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
-  current="$(ps -o lstart= -p "$pid" 2>/dev/null | awk '{$1=$1; print}')"
+  current="$(_sgt_process_identity "$pid" 2>/dev/null || true)"
   [[ -n "$current" && "$current" == "$start" ]]
 }
 _publish_handshake() {
@@ -93,7 +93,7 @@ _publish_handshake() {
   exit 2
 }
 CHILD_PID="$$"
-CHILD_START="$(ps -o lstart= -p "$CHILD_PID" 2>/dev/null | awk '{$1=$1; print}')"
+CHILD_START="$(_sgt_process_identity "$CHILD_PID" 2>/dev/null || true)"
 [[ -n "$CHILD_START" ]] || exit 2
 HANDSHAKE="$EXPECTED_REVISION|$TMUX_PANE|$CHILD_PID|$CHILD_START"
 _coordinator_is_alive || {

@@ -176,9 +176,18 @@ _fleet_read() {
 # substitution would evaluate this in a subshell, and the pid would never reach
 # the caller.
 _worker_liveness() {
-  local repo_dir="$1" pid recorded_start actual_start alive_rc
+  local repo_dir="$1" pid recorded_start actual_start alive_rc marker_holders marker_rc=0
   _WORKER_PID="$(_fleet_read "$repo_dir/worker_pid")"
   _WORKER_LIVENESS="unverifiable"
+  marker_holders="$(_sgt_worker_marker_holders "$repo_dir" 2>/dev/null)" || marker_rc=$?
+  if [[ "$marker_rc" -ne 0 ]]; then
+    return 0
+  fi
+  if [[ -n "$marker_holders" ]]; then
+    _WORKER_PID="${marker_holders%%|*}"
+    _WORKER_LIVENESS="live"
+    return 0
+  fi
   case "$_WORKER_PID" in
     ''|*[!0-9]*)
       _WORKER_PID="unknown"
@@ -232,7 +241,7 @@ _unresolved_workers() {
       # can still be executing.  Those statuses are checked against liveness
       # below instead.
       case "$status" in
-        force-stopped|orphaned|failed*) continue ;;
+        orphaned|failed*) continue ;;
       esac
       project="$(_fleet_read "$repo_dir/project")"
       if [[ "$scope" != "global" && -n "$project" ]]; then
@@ -248,6 +257,9 @@ _unresolved_workers() {
       if [[ "$_WORKER_LIVENESS" == "unverifiable" ]]; then
         case "$status" in
           done|drained) continue ;;
+          force-stopped)
+            [[ ! -f "$repo_dir/worker_process_markers" ]] && continue
+            ;;
         esac
       fi
       printf '%s/%s status=%s pid=%s liveness=%s project=%s\n' \

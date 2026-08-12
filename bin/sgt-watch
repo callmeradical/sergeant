@@ -795,7 +795,7 @@ _sync_task() {
         printf 'in-progress worker recorded worktree is unavailable; reconcile preserved branch and handoff before recovery\n' > "$repo_dir/diagnostic"
       fi
       case "$fleet_status" in
-        done|failed:*|drained)
+        done|failed:*|drained|force-stopped)
           if ! _recycle_terminal_worker "$repo_dir"; then
             printf 'WARNING: terminal worker was not recycled: %s\n' "$repo_dir" >&2
             recycle_failed=true
@@ -849,7 +849,7 @@ _sync_task() {
     # states — in_progress, needs_input, blocked, waiting, orphaned — are
     # deliberately excluded: they are resumable and must fail closed.
     case "$wt_status" in
-      done|failed:*|drained)
+      done|failed:*|drained|force-stopped)
         if ! _recycle_terminal_worker "$repo_dir"; then
           # Emit a warning with a supported recovery command so the operator
           # knows the exact next step (issue #203).

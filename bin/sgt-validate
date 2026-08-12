@@ -530,7 +530,7 @@ _validation_replace_owned() {
   fi
 }
 _validation_process_start() {
-  ps -o lstart= -p "$1" 2>/dev/null | awk '{$1=$1; print}'
+  _sgt_process_identity "$1" 2>/dev/null
 }
 _validation_lock_field() {
   local key="$1" file="$2"
@@ -918,7 +918,7 @@ VALIDATION_INFO="${VALIDATION_IDENTITY#*|}"
 VALIDATION_INFO="${VALIDATION_INFO#*|}"
 VALIDATION_PID="${VALIDATION_INFO%%|*}"
 VALIDATION_PGID="$(ps -o pgid= -p "$VALIDATION_PID" 2>/dev/null | tr -d ' ' || true)"
-VALIDATION_START="$(ps -o lstart= -p "$VALIDATION_PID" 2>/dev/null | awk '{$1=$1; print}' || true)"
+VALIDATION_START="$(_sgt_process_identity "$VALIDATION_PID" 2>/dev/null || true)"
 [[ -n "$VALIDATION_PID" && -n "$VALIDATION_PGID" && -n "$VALIDATION_START" ]] || \
   _die "Failed to capture validation process ownership"
 VALIDATION_HANDSHAKE="$EXPECTED_REVISION|$VALIDATION_PANE|$VALIDATION_PID|$VALIDATION_START"

@@ -25,6 +25,9 @@ _sgt_process_table() {
 _sgt_process_stat_fields() {
   local pid="$1" proc_root stat rest state ppid pgid sid starttime
   proc_root="${SGT_PROC_ROOT:-/proc}"
+  if [[ ! -r "$proc_root/$pid/stat" && -n "${SGT_PROC_ROOT:-}" ]]; then
+    proc_root=/proc
+  fi
   [[ -r "$proc_root/$pid/stat" ]] || return 1
   stat="$(cat "$proc_root/$pid/stat" 2>/dev/null)" || return 1
   rest="${stat##*) }"
@@ -57,4 +60,31 @@ _sgt_fd_identity() {
   fi
   [[ "$value" =~ ^[0-9]+:[0-9]+$ ]] || return 1
   printf '%s\n' "$value"
+}
+
+# _sgt_worker_marker_holders <repo-state>
+#
+# Lists exact live marker holders. A nonzero result means holder absence could
+# not be proved (including unreadable same-UID post-launch fd tables).
+_sgt_worker_marker_holders() {
+  local repo_dir="$1" history="$1/worker_process_markers"
+  [[ -f "$history" && ! -L "$history" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_sgt-process-token.py" \
+    holders "$history"
+}
+
+# _sgt_retire_worker_marker_holders <repo-state> [phase-file]
+#
+# Retires every capability holder through pidfds and returns only after a fresh
+# scan proves none remain. Successful retirement also compacts closed marker
+# generations so an inode reused by an unrelated file is never retained.
+_sgt_retire_worker_marker_holders() {
+  local repo_dir="$1" phase="${2:-/dev/null}" history
+  history="$repo_dir/worker_process_markers"
+  [[ -s "$history" && ! -L "$history" ]] || return 0
+  [[ -f "$phase" && ! -L "$phase" ]] || phase=/dev/null
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_sgt-process-token.py" \
+    retire "$history" "$phase"
 }
