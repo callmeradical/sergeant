@@ -4,6 +4,7 @@
 import json
 import hashlib
 import errno
+import fcntl
 import os
 from pathlib import Path
 import re
@@ -281,6 +282,42 @@ def close_completed_return_evidence(bindings):
         raise first_error
 
 
+def acquire_evidence_rotation_lock(raw_prefix):
+    evidence_parent = Path(raw_prefix).parent
+    lock_path = evidence_parent / ".treehouse-evidence-rotation.lock"
+    quarantine = evidence_parent / ".treehouse-evidence-quarantine"
+    if quarantine.exists() or quarantine.is_symlink():
+        raise SystemExit(
+            f"preserved Treehouse evidence quarantine requires inspection: {quarantine}")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as error:
+        raise SystemExit("unsafe Treehouse evidence rotation lock") from error
+    try:
+        descriptor_info = os.fstat(descriptor)
+        path_info = lock_path.lstat()
+        if (not stat.S_ISREG(descriptor_info.st_mode) or
+                not stat.S_ISREG(path_info.st_mode) or
+                descriptor_info.st_uid != os.getuid() or
+                descriptor_info.st_nlink != 1 or
+                (path_info.st_dev, path_info.st_ino) !=
+                (descriptor_info.st_dev, descriptor_info.st_ino)):
+            raise SystemExit("unsafe Treehouse evidence rotation lock")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise SystemExit("Treehouse evidence rotation is already active") from error
+        rebound = lock_path.lstat()
+        if ((rebound.st_dev, rebound.st_ino) !=
+                (descriptor_info.st_dev, descriptor_info.st_ino)):
+            raise SystemExit("Treehouse evidence rotation lock changed")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
 def remove_completed_return_evidence(bindings):
     for candidate, descriptor in bindings:
         descriptor_info = os.fstat(descriptor)
@@ -292,9 +329,29 @@ def remove_completed_return_evidence(bindings):
                 (path_info.st_dev, path_info.st_ino) !=
                 (descriptor_info.st_dev, descriptor_info.st_ino)):
             raise SystemExit("completed Treehouse evidence changed before deletion")
-        candidate.unlink()
-        if os.fstat(descriptor).st_nlink != 0:
-            raise SystemExit("completed Treehouse evidence changed during deletion")
+        quarantine_dir = candidate.parent / ".treehouse-evidence-quarantine"
+        quarantine = quarantine_dir / "evidence"
+        quarantine_dir.mkdir(mode=0o700)
+        moved = False
+        try:
+            candidate.rename(quarantine)
+            moved = True
+            quarantined_info = quarantine.lstat()
+            descriptor_info = os.fstat(descriptor)
+            if ((quarantined_info.st_dev, quarantined_info.st_ino) !=
+                    (descriptor_info.st_dev, descriptor_info.st_ino)):
+                raise SystemExit(
+                    f"completed Treehouse evidence quarantined as {quarantine}")
+            # POSIX has no portable unlink-by-file-descriptor operation.  The
+            # held advisory rotation lock serializes Sergeant writers; an
+            # arbitrary same-UID process can ignore that cooperative boundary.
+            quarantine.unlink()
+            if os.fstat(descriptor).st_nlink != 0:
+                raise SystemExit("completed Treehouse evidence changed during deletion")
+            moved = False
+        finally:
+            if not moved:
+                quarantine_dir.rmdir()
 
 
 def append_receipt(path, attempt, raw_prefix):
@@ -339,13 +396,19 @@ def append_receipt(path, attempt, raw_prefix):
                "count_saturated": saturated, "history_sha256": digest,
                "identity": receipt["identity"], "attempts": attempts}
     deletion_plan = []
+    rotation_lock = None
     try:
         if attempt.get("operation") == "return":
+            rotation_lock = acquire_evidence_rotation_lock(raw_prefix)
             deletion_plan = completed_return_evidence(evicted, attempts, raw_prefix)
         atomic_json(target, updated)
         remove_completed_return_evidence(deletion_plan)
     finally:
-        close_completed_return_evidence(deletion_plan)
+        try:
+            close_completed_return_evidence(deletion_plan)
+        finally:
+            if rotation_lock is not None:
+                os.close(rotation_lock)
 
 
 def finish_receipt(path, raw_prefix, attempt_id, returncode, stdout_overflow,
