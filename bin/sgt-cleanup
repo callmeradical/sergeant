@@ -1037,7 +1037,8 @@ _require_terminal_repos() {
   local cleanup_phase configured_root evidence_dir expected_evidence_identity owner_root owner_type \
     partial_phase removed_phase removing_phase proof_dir repo_dir repo_name \
     restore_after_validation retry_root retry_type status td_closed_orphan worktree \
-    worktree_status wt_type
+    treehouse_holder treehouse_lease_id treehouse_returned_phase \
+    treehouse_returning_phase treehouse_returning_verified_phase worktree_status wt_type
 
   for repo_dir in "$TASK_DIR"/*/; do
     [[ -d "$repo_dir" ]] || continue
@@ -1089,8 +1090,22 @@ _require_terminal_repos() {
       "$worktree" "$retry_type" "$retry_root")"
     removed_phase="$(printf 'removed\n%s\n%s\n%s\n' \
       "$worktree" "$retry_type" "$retry_root")"
-    [[ "$retry_type" != treehouse ]] || \
-      removed_phase="$(_treehouse_removed_phase "$worktree" "$retry_root")"
+    treehouse_holder=""
+    treehouse_lease_id=""
+    if [[ "$wt_type" == treehouse ]]; then
+      treehouse_holder="$(tr -d '\n' < "$repo_dir/wt_holder" 2>/dev/null || true)"
+      treehouse_lease_id="$(
+        if [[ -f "$repo_dir/wt_lease_id" && ! -L "$repo_dir/wt_lease_id" ]]; then
+          tr -d '\n' < "$repo_dir/wt_lease_id"
+        fi
+      )"
+    fi
+    treehouse_returning_phase="$(printf 'returning\n%s\ntreehouse\n%s\n' \
+      "$worktree" "$retry_root")"
+    treehouse_returning_verified_phase="$(_treehouse_returning_phase \
+      "$worktree" "$retry_root" "$treehouse_lease_id" "$treehouse_holder")"
+    treehouse_returned_phase="$(_treehouse_returned_phase \
+      "$worktree" "$retry_root" "$treehouse_lease_id" "$treehouse_holder")"
     if [[ -n "$worktree" && -d "$worktree" ]]; then
       proof_dir="$worktree"
       restore_after_validation=false
@@ -1102,6 +1117,14 @@ _require_terminal_repos() {
             "$retry_type" "$retry_root"
           proof_dir="$repo_dir/terminal-evidence"
           restore_after_validation=true
+          ;;
+        "$treehouse_returning_phase"|"$treehouse_returning_verified_phase"|\
+        "$treehouse_returned_phase")
+          [[ "$wt_type" == treehouse ]] || \
+            _die "Retry worktree type changed: $repo_name"
+          _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+            treehouse "$retry_root" returned
+          proof_dir="$repo_dir/terminal-evidence"
           ;;
         "$partial_phase"|"$removed_phase")
           [[ "$retry_type" == "$wt_type" ]] || \
@@ -1209,7 +1232,10 @@ _require_terminal_repos() {
             "$retry_type" == "$wt_type" && \
             ( "$retry_type" == git || "$retry_type" == treehouse ) && \
             -n "$retry_root" ) || \
-          "$cleanup_phase" == $'reconciled-absent\n'"$worktree" \
+          "$cleanup_phase" == $'reconciled-absent\n'"$worktree" || \
+          "$cleanup_phase" == "$treehouse_returning_phase" || \
+          "$cleanup_phase" == "$treehouse_returning_verified_phase" || \
+          "$cleanup_phase" == "$treehouse_returned_phase" \
         ) ]] || \
           _die "$repo_name has no reconciled cleanup phase for its absent worktree"
 
@@ -1219,7 +1245,12 @@ _require_terminal_repos() {
         # removing_phase (without type/root) is rejected earlier at line 558-559
         # so it never reaches this block; removing_phase (with type/root) requires
         # an absent worktree and is handled by the main loop's own owner check.
-        if [[ "$cleanup_phase" == "$partial_phase" || \
+        if [[ "$cleanup_phase" == "$treehouse_returning_phase" || \
+              "$cleanup_phase" == "$treehouse_returning_verified_phase" || \
+              "$cleanup_phase" == "$treehouse_returned_phase" ]]; then
+          _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+            treehouse "$retry_root" returned
+        elif [[ "$cleanup_phase" == "$partial_phase" || \
               "$cleanup_phase" == "$removed_phase" ]]; then
           [[ "$retry_type" == "$wt_type" ]] || \
             _die "Retry worktree type changed: $repo_name"
@@ -1252,7 +1283,7 @@ _require_terminal_repos() {
 }
 
 _require_clean_worktrees() {
-  local changes repo_dir repo_name worktree
+  local changes cleanup_phase repo_dir repo_name worktree wt_type
 
   for repo_dir in "$TASK_DIR"/*/; do
     [[ -d "$repo_dir" ]] || continue
@@ -1264,6 +1295,9 @@ _require_clean_worktrees() {
 
     worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
     [[ -n "$worktree" && -d "$worktree" ]] || continue
+    wt_type="$(cat "$repo_dir/wt_type" 2>/dev/null || echo git)"
+    cleanup_phase="$(sed -n '1p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+    [[ "$wt_type" != treehouse || "$cleanup_phase" != returned ]] || continue
     git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
       _die "Cannot verify $repo_name worktree before cleanup: $worktree"
     changes="$(git -C "$worktree" status --porcelain --untracked-files=all -- \
@@ -1679,13 +1713,40 @@ _record_cleanup_phase() {
   fi
 }
 
-_treehouse_removed_phase() {
-  printf 'removed\n%s\ntreehouse\n%s\nreturned\n' "$1" "$2"
+_treehouse_returning_phase() {
+  printf 'returning\n%s\ntreehouse\n%s\n%s\n%s\nverified\n' \
+    "$1" "$2" "$3" "$4"
 }
 
-_treehouse_removed_phase_proven() {
-  [[ "$(sed -n '5p' "$1/cleanup-phase" 2>/dev/null || true)" == "returned" && \
-    -z "$(sed -n '6p' "$1/cleanup-phase" 2>/dev/null || true)" ]]
+_treehouse_returned_phase() {
+  printf 'returned\n%s\ntreehouse\n%s\n%s\n%s\n' "$1" "$2" "$3" "$4"
+}
+
+_treehouse_lease_state() {
+  local holder="$4" lease_id="$3" repo_root="$1" status_dir state_file worktree="$2"
+  status_dir="$(mktemp -d)" || return 1
+  state_file="$status_dir/state.json"
+
+  "$SCRIPT_DIR/_sgt-treehouse-io.py" status "$repo_root" \
+    "$status_dir/status.raw" "$status_dir/receipt.json" \
+    "$state_file" "$worktree" "$lease_id" "$holder" || {
+      rm -rf "$status_dir"
+      return 1
+    }
+  TREEHOUSE_LEASE_STATE="$(python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+state = value.get("state") if isinstance(value, dict) else None
+if state not in ("matched", "different"):
+    raise SystemExit(1)
+print(state)
+' "$state_file")" || {
+    rm -rf "$status_dir"
+    return 1
+  }
+  rm -rf "$status_dir"
+  [[ "$TREEHOUSE_LEASE_STATE" == matched || \
+    "$TREEHOUSE_LEASE_STATE" == different ]]
 }
 
 _repo_git_dir() {
@@ -2020,20 +2081,25 @@ _configured_repo_root() {
 }
 
 _record_cleanup_owner() {
-  local evidence_dir="${6:-$1/terminal-evidence}" evidence_identity holder identity \
+  local evidence_dir="${6:-$1/terminal-evidence}" evidence_identity holder identity lease_id \
     output="${5:-$1/cleanup-owner}" project repo_dir="$1" repo_root="$2" \
-    worker_identity worktree="$3" wt_type="$4"
+    version=4 worker_identity worktree="$3" wt_type="$4"
 
   identity="$(_repo_owner_identity "$repo_root" create)" || return 1
   worker_identity="$(_worker_checkout_identity "$worktree")" || return 1
   evidence_identity="$(_worker_evidence_identity "$evidence_dir")" || return 1
   project="$(_task_project_or_task_id)" || return 1
   holder=""
-  [[ "$wt_type" != "treehouse" ]] || \
+  lease_id=""
+  if [[ "$wt_type" == "treehouse" ]]; then
+    version=5
     holder="$(tr -d '\n' < "$repo_dir/wt_holder" 2>/dev/null || true)"
-  printf '4\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
-    "$project" "$repo_root" "$worktree" "$wt_type" "$identity" \
-    "$worker_identity" "$evidence_identity" "$holder" \
+    lease_id="$(tr -d '\n' < "$repo_dir/wt_lease_id" 2>/dev/null || true)"
+    [[ -n "$holder" && -n "$lease_id" && "$lease_id" != *$'\n'* ]] || return 1
+  fi
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$version" "$project" "$repo_root" "$worktree" "$wt_type" "$identity" \
+    "$worker_identity" "$evidence_identity" "$holder" "$lease_id" \
     > "$output"
 }
 
@@ -2056,7 +2122,7 @@ _rollback_initial_cleanup() {
 
 _publish_initial_cleanup() {
   local evidence_identity="$5" layout_error marker marker_preexisting=false repo_dir="$1" \
-    repo_root="$2" transaction worktree="$3" wt_type="$4"
+    initial_phase=removing repo_root="$2" transaction worktree="$3" wt_type="$4"
 
   _require_same_filesystem_pair "$repo_dir" "$(basename "$repo_dir")" "$worktree"
   transaction="$repo_dir/cleanup-transaction.tmp.$$"
@@ -2076,13 +2142,28 @@ _publish_initial_cleanup() {
     [[ -z "$layout_error" ]] || _die "$layout_error"
     return 1
   fi
+  [[ "$wt_type" != treehouse ]] || initial_phase=returning
   if ! _cleanup_fail_point stage-evidence || \
     ! _cleanup_fail_point record-owner || \
     ! _record_cleanup_owner "$repo_dir" "$repo_root" "$worktree" "$wt_type" \
       "$transaction/cleanup-owner" "$transaction/terminal-evidence" || \
-    ! _cleanup_fail_point record-phase || \
-    ! printf 'removing\n%s\n%s\n%s\n' "$worktree" "$wt_type" "$repo_root" \
-      > "$transaction/cleanup-phase"; then
+    ! _cleanup_fail_point record-phase; then
+    _rollback_initial_cleanup "$repo_dir" "$transaction" "$marker" \
+      "$marker_preexisting"
+    return 1
+  fi
+  if [[ "$wt_type" == treehouse ]]; then
+    if ! printf '%s\n%s\n%s\n%s\n%s\n%s\nverified\n' \
+      "$initial_phase" "$worktree" "$wt_type" "$repo_root" \
+      "$(tr -d '\n' < "$repo_dir/wt_lease_id")" \
+      "$(tr -d '\n' < "$repo_dir/wt_holder")" > "$transaction/cleanup-phase"; then
+      _rollback_initial_cleanup "$repo_dir" "$transaction" "$marker" \
+        "$marker_preexisting"
+      return 1
+    fi
+  elif ! printf '%s\n%s\n%s\n%s\n' \
+    "$initial_phase" "$worktree" "$wt_type" "$repo_root" \
+    > "$transaction/cleanup-phase"; then
     _rollback_initial_cleanup "$repo_dir" "$transaction" "$marker" \
       "$marker_preexisting"
     return 1
@@ -2110,15 +2191,16 @@ _publish_initial_cleanup() {
 
 _validate_retry_owner() {
   local configured_root evidence_identity expected_holder expected_root holder identity \
-    live_evidence_identity owner_evidence_identity owner_holder owner_identity owner_project \
+    lease_id live_evidence_identity owner_evidence_identity owner_holder owner_identity owner_lease_id owner_project owner_version \
     owner_root owner_type owner_worker_identity owner_worktree project repo_dir="$1" \
-    repo_name="$2" worker_identity worktree="$3" retry_type="$4" retry_root="$5"
+    repo_name="$2" returned_mode="${6:-}" worker_identity worktree="$3" retry_type="$4" retry_root="$5"
 
   case "$retry_type" in
     git|treehouse) ;;
     *) _die "Unsupported retry removal type: $repo_name: $retry_type" ;;
   esac
-  [[ "$(sed -n '1p' "$repo_dir/cleanup-owner" 2>/dev/null || true)" == "4" ]] || \
+  owner_version="$(sed -n '1p' "$repo_dir/cleanup-owner" 2>/dev/null || true)"
+  [[ "$owner_version" == 4 || "$owner_version" == 5 ]] || \
     _die "Retry owner identity is missing: $repo_name"
   owner_project="$(sed -n '2p' "$repo_dir/cleanup-owner")"
   owner_root="$(sed -n '3p' "$repo_dir/cleanup-owner")"
@@ -2128,6 +2210,7 @@ _validate_retry_owner() {
   owner_worker_identity="$(sed -n '7p' "$repo_dir/cleanup-owner")"
   owner_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
   owner_holder="$(sed -n '9p' "$repo_dir/cleanup-owner")"
+  owner_lease_id="$(sed -n '10p' "$repo_dir/cleanup-owner")"
   [[ "$retry_root" == "$owner_root" && "$worktree" == "$owner_worktree" && \
     "$retry_type" == "$owner_type" ]] || \
     _die "Retry cleanup state does not match its recorded owner: $repo_name"
@@ -2146,7 +2229,7 @@ _validate_retry_owner() {
   expected_root="$(cd "$owner_root" && pwd -P)"
   [[ "$owner_root" == "$expected_root" ]] || \
     _die "Retry owner repo is symlink-aliased: $owner_root"
-  if [[ -d "$worktree" ]]; then
+  if [[ -d "$worktree" && "$returned_mode" != returned ]]; then
     worker_identity="$(_worker_checkout_identity "$worktree")" || \
       _die "Retry worker worktree identity is unavailable: $repo_name"
     [[ "$worker_identity" == "$owner_worker_identity" ]] || \
@@ -2156,7 +2239,8 @@ _validate_retry_owner() {
     _die "Retry persisted terminal evidence is unavailable: $repo_name"
   [[ "$evidence_identity" == "$owner_evidence_identity" ]] || \
     _die "Retry persisted terminal evidence changed: $repo_name"
-  if [[ -d "$worktree" ]] && _worker_evidence_present "$worktree"; then
+  if [[ -d "$worktree" && "$returned_mode" != returned ]] && \
+    _worker_evidence_present "$worktree"; then
     live_evidence_identity="$(_worker_evidence_identity "$worktree")" || \
       _die "Retry worker lifecycle evidence is unavailable: $repo_name"
     [[ "$live_evidence_identity" == "$owner_evidence_identity" ]] || \
@@ -2168,9 +2252,13 @@ _validate_retry_owner() {
     _die "Retry owner repo identity changed: $repo_name"
 
   if [[ "$retry_type" == "treehouse" ]]; then
+    [[ "$owner_version" == 5 ]] || \
+      _die "Retry treehouse lease identity is missing: $repo_name"
     expected_holder="sgt-${TASK_ID}-${repo_name}"
     holder="$(tr -d '\n' < "$repo_dir/wt_holder" 2>/dev/null || true)"
-    [[ "$holder" == "$expected_holder" && "$owner_holder" == "$expected_holder" ]] || \
+    lease_id="$(tr -d '\n' < "$repo_dir/wt_lease_id" 2>/dev/null || true)"
+    [[ "$holder" == "$expected_holder" && "$owner_holder" == "$expected_holder" && \
+      -n "$lease_id" && "$lease_id" == "$owner_lease_id" ]] || \
       _die "Retry treehouse lease does not match its owner: $repo_name"
   fi
   VALIDATED_RETRY_ROOT="$owner_root"
@@ -2574,6 +2662,13 @@ for repo_dir in "$TASK_DIR"/*/; do
     retry_type="$(sed -n '3p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     if [[ -n "$retry_root" ]]; then
+      if [[ "$retry_type" == treehouse && "$retry_phase" == returned ]]; then
+        _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+          "$retry_type" "$retry_root" returned
+        echo "  treehouse lease return already completed: $worktree"
+        echo ""
+        continue
+      fi
       _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
         "$retry_type" "$retry_root"
       retry_root="$VALIDATED_RETRY_ROOT"
@@ -2609,16 +2704,33 @@ for repo_dir in "$TASK_DIR"/*/; do
   fi
 
   retry_phase="$(sed -n '1p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+  if [[ "$wt_type" == treehouse && "$retry_phase" == returned ]]; then
+    retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
+    _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+      treehouse "$retry_root" returned
+    echo "  treehouse lease return already completed: $worktree"
+    echo ""
+    _sgt_response_lock_release
+    trap - EXIT
+    continue
+  fi
   retrying_removal=false
   initial_marker=""
   initial_marker_preexisting=false
-  if [[ "$retry_phase" == "removing" ]]; then
+  if [[ "$retry_phase" == "removing" || \
+    ( "$wt_type" == treehouse && "$retry_phase" == returning ) ]]; then
     retry_type="$(sed -n '3p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     retry_root="$(sed -n '4p' "$repo_dir/cleanup-phase" 2>/dev/null || true)"
     [[ "$retry_type" == "$wt_type" ]] || \
       _die "Retry worktree type changed: $repo_name"
-    _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
-      "$retry_type" "$retry_root"
+    if [[ "$wt_type" == treehouse && \
+      "$(sed -n '7p' "$repo_dir/cleanup-phase" 2>/dev/null || true)" == verified ]]; then
+      _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+        "$retry_type" "$retry_root" returned
+    else
+      _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+        "$retry_type" "$retry_root"
+    fi
     retry_root="$VALIDATED_RETRY_ROOT"
     expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
     retrying_removal=true
@@ -2631,6 +2743,38 @@ for repo_dir in "$TASK_DIR"/*/; do
       _die "Worktree does not belong to configured cleanup owner: $repo_name"
   fi
   if [[ "$wt_type" == "treehouse" ]]; then
+    treehouse_holder="$(tr -d '\n' < "$repo_dir/wt_holder" 2>/dev/null || true)"
+    treehouse_lease_id="$(
+      if [[ -f "$repo_dir/wt_lease_id" && ! -L "$repo_dir/wt_lease_id" ]]; then
+        tr -d '\n' < "$repo_dir/wt_lease_id"
+      fi
+    )"
+    [[ "$treehouse_holder" == "sgt-${TASK_ID}-${repo_name}" ]] || \
+      _die "Treehouse lease identity does not match its fleet owner: $repo_name"
+    if [[ -z "$treehouse_lease_id" ]]; then
+      legacy_record="$repo_dir/treehouse-legacy-lease.json"
+      [[ ! -L "$repo_dir/wt_lease_id" && ! -L "$legacy_record" ]] || \
+        _die "Unsafe legacy Treehouse lease migration state: $repo_name"
+      if ! "$SCRIPT_DIR/_sgt-treehouse-io.py" discover-lease \
+        "$retry_root" "$repo_dir/treehouse-legacy-lease.raw" \
+        "$repo_dir/treehouse-legacy-lease-receipt.json" "$legacy_record" \
+        "$worktree" "$treehouse_holder"; then
+        _die "Cannot discover legacy Treehouse lease identity: $repo_name"
+      fi
+      _cleanup_fail_point legacy-lease-discovered || \
+        _die "Legacy Treehouse lease discovery interrupted: $repo_name"
+      treehouse_lease_id="$(python3 -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["lease_id"])' \
+        "$legacy_record")"
+      lease_temp="$repo_dir/wt_lease_id.tmp.$$"
+      [[ ! -e "$repo_dir/wt_lease_id" && ! -L "$repo_dir/wt_lease_id" && \
+        ! -e "$lease_temp" && ! -L "$lease_temp" ]] || \
+        _die "Unsafe legacy Treehouse lease migration state: $repo_name"
+      printf '%s\n' "$treehouse_lease_id" > "$lease_temp"
+      mv "$lease_temp" "$repo_dir/wt_lease_id"
+    fi
+    [[ -n "$treehouse_lease_id" ]] || \
+      _die "Treehouse lease identity does not match its fleet owner: $repo_name"
     git_file="$worktree/.git"
     [[ -f "$git_file" ]] || \
       _die "Cannot identify treehouse lease; fleet state preserved: $worktree"
@@ -2642,6 +2786,17 @@ for repo_dir in "$TASK_DIR"/*/; do
   fi
 
   if [[ "$retrying_removal" != true ]]; then
+    if [[ "$wt_type" == treehouse ]]; then
+      if ! _same_filesystem_pair "$repo_dir" "$repo_name" "$worktree"; then
+        _die "$CLEANUP_LAYOUT_ERROR"
+      fi
+      if ! _treehouse_lease_state "$retry_root" "$worktree" \
+        "$treehouse_lease_id" "$treehouse_holder" "$repo_dir"; then
+        _die "Cannot verify current treehouse lease; fleet state preserved: $worktree"
+      fi
+      [[ "$TREEHOUSE_LEASE_STATE" == matched ]] || \
+        _die "Treehouse lease identity does not match captured acquisition: $worktree"
+    fi
     initial_marker="$(_repo_git_dir "$retry_root" common)/sergeant-instance" || \
       _die "Cannot identify cleanup owner marker: $repo_name"
     [[ ! -e "$initial_marker" && ! -L "$initial_marker" ]] || \
@@ -2654,6 +2809,16 @@ for repo_dir in "$TASK_DIR"/*/; do
     fi
     expected_evidence_identity="$(sed -n '8p' "$repo_dir/cleanup-owner")"
   fi
+  treehouse_returned=false
+  if [[ "$wt_type" == treehouse ]]; then
+    treehouse_owner_validation_mode=""
+    if [[ "$retrying_removal" == true && \
+      "$(sed -n '7p' "$repo_dir/cleanup-phase" 2>/dev/null || true)" == verified ]]; then
+      treehouse_owner_validation_mode=returned
+    fi
+    _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+      "$wt_type" "$retry_root" "$treehouse_owner_validation_mode"
+  fi
   LIVE_EVIDENCE_BACKUP=""
   if ! _same_filesystem_pair "$repo_dir" "$repo_name" "$worktree"; then
     layout_error="$CLEANUP_LAYOUT_ERROR"
@@ -2662,8 +2827,15 @@ for repo_dir in "$TASK_DIR"/*/; do
         "$initial_marker_preexisting"
     _die "$layout_error"
   fi
-  if ! _remove_worker_evidence "$repo_dir" "$worktree" \
-    "$expected_evidence_identity"; then
+  skip_worker_evidence_removal=false
+  if [[ "$wt_type" == treehouse && "$retrying_removal" == true && \
+    "$(sed -n '7p' "$repo_dir/cleanup-phase" 2>/dev/null || true)" == verified ]] && \
+    ! _worker_evidence_present "$worktree"; then
+    skip_worker_evidence_removal=true
+  fi
+  if [[ "$skip_worker_evidence_removal" != true ]] && \
+    ! _remove_worker_evidence "$repo_dir" "$worktree" \
+      "$expected_evidence_identity"; then
     if [[ -n "$CLEANUP_LAYOUT_ERROR" ]]; then
       layout_error="$CLEANUP_LAYOUT_ERROR"
       [[ "$retrying_removal" == true ]] || \
@@ -2675,11 +2847,19 @@ for repo_dir in "$TASK_DIR"/*/; do
   fi
 
   if [[ "$wt_type" == "treehouse" ]]; then
+    # A successful Treehouse return releases a verified lease; it does not
+    # remove the reusable checkout from Treehouse's pool.  Bind the live lease
+    # to the configured repository and Sergeant holder before invoking the
+    # external return operation so a remaining directory cannot weaken the
+    # ordinary git worktree removal contract below.
     echo "  returning treehouse lease: $worktree"
     _require_remover_same_filesystem "$repo_dir" "$repo_name" "$worktree" \
       "$LIVE_EVIDENCE_BACKUP" "$retrying_removal" "$initial_marker" \
       "$initial_marker_preexisting"
-    if ! (cd "$retry_root" && treehouse return "$worktree" 2>&1 | sed 's/^/  /'); then
+    if [[ "$treehouse_returned" != true ]] && ! \
+      "$SCRIPT_DIR/_sgt-treehouse-io.py" return "$retry_root" \
+        "$repo_dir/treehouse-return.raw" "$repo_dir/treehouse-return-receipt.json" \
+        "$worktree" "$treehouse_lease_id" "$treehouse_holder"; then
       if [[ ! -d "$worktree" ]]; then
         _rollback_remove_path "$LIVE_EVIDENCE_BACKUP" \
           "removed treehouse live evidence backup" live-backup-cleanup
@@ -2690,7 +2870,7 @@ for repo_dir in "$TASK_DIR"/*/; do
       fi
       _restore_removed_worker_evidence "$worktree" "$LIVE_EVIDENCE_BACKUP" || \
         _die "Failed to restore worker evidence after treehouse failure: $repo_name"
-      _die "Failed to return treehouse lease; fleet state preserved: $worktree"
+      _die "Conditional treehouse return did not confirm lease release; retry required; fleet state preserved: $worktree; receipt: $repo_dir/treehouse-return-receipt.json"
     fi
   else
     echo "  removing git worktree: $worktree"
@@ -2712,24 +2892,30 @@ for repo_dir in "$TASK_DIR"/*/; do
     fi
   fi
 
-  [[ ! -d "$worktree" ]] || {
+  if [[ "$wt_type" != "treehouse" && -d "$worktree" ]]; then
     _restore_removed_worker_evidence "$worktree" "$LIVE_EVIDENCE_BACKUP" || \
       _die "Failed to restore worker evidence after incomplete removal: $repo_name"
     _die "Worktree removal reported success but the directory remains: $worktree"
-  }
+  fi
   _rollback_remove_path "$LIVE_EVIDENCE_BACKUP" \
     "completed live evidence backup" live-backup-cleanup
   if [[ "$wt_type" == "treehouse" ]]; then
-    _record_cleanup_phase "$repo_dir" removed "$worktree" "$wt_type" "$retry_root" \
-      returned || _die "Failed to publish completed worktree removal: $repo_name"
+    _record_cleanup_phase "$repo_dir" returned "$worktree" "$wt_type" "$retry_root" \
+      "$treehouse_lease_id" "$treehouse_holder" || \
+      _die "Failed to publish completed treehouse lease return: $repo_name"
   else
     _record_cleanup_phase "$repo_dir" removed "$worktree" "$wt_type" "$retry_root" || \
       _die "Failed to publish completed worktree removal: $repo_name"
   fi
-  _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" "$wt_type" "$retry_root"
-  _require_completed_removal_proof "$wt_type" "$retry_root" "$worktree"
-  _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
-    _die "Failed to publish reconciled cleanup phase: $repo_name"
+  if [[ "$wt_type" != "treehouse" ]]; then
+    _validate_retry_owner "$repo_dir" "$repo_name" "$worktree" \
+      "$wt_type" "$retry_root"
+    _require_completed_removal_proof "$wt_type" "$retry_root" "$worktree"
+  fi
+  if [[ "$wt_type" != treehouse ]]; then
+    _record_cleanup_phase "$repo_dir" reconciled-absent "$worktree" || \
+      _die "Failed to publish reconciled cleanup phase: $repo_name"
+  fi
 
   echo ""
   _sgt_response_lock_release

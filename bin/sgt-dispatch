@@ -813,19 +813,55 @@ for rname in "${TARGET_REPOS[@]}"; do
   if $use_treehouse; then
     _info "acquiring treehouse lease for $rname ..."
     lease_holder="sgt-${TASK_ID}-${rname}"
-    worktree_path="$(cd "$repo_path" && treehouse get --lease --lease-holder "$lease_holder" 2>/dev/null)"
-    if [[ -z "$worktree_path" ]]; then
-      _info "WARNING: treehouse lease failed — falling back to git worktree add"
+    treehouse_raw="$repo_task_dir/treehouse-acquisition.raw"
+    treehouse_receipt="$repo_task_dir/treehouse-acquisition-receipt.json"
+    treehouse_record="$repo_task_dir/treehouse-acquisition.json"
+    treehouse_acquired=false
+    [[ ! -e "$treehouse_raw" && ! -e "$treehouse_receipt" && \
+      ! -e "$treehouse_record" ]] || \
+      _die "treehouse acquisition state already exists for $rname"
+    set +e
+    "$SCRIPT_DIR/_sgt-treehouse-io.py" get "$repo_path" "$treehouse_raw" \
+      "$treehouse_receipt" "$treehouse_record" "$lease_holder"
+    treehouse_get_status=$?
+    set -e
+    if [[ "$treehouse_get_status" -eq 0 ]]; then
+      treehouse_acquired=true
+    elif [[ "$treehouse_get_status" -eq 11 ]]; then
       use_treehouse=false
+      _info "Treehouse reported no allocation — falling back to git worktree"
     else
+      if [[ -s "$treehouse_record" ]]; then
+        worktree_path="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$treehouse_record")"
+        lease_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lease_id"])' "$treehouse_record")"
+        "$SCRIPT_DIR/_sgt-treehouse-io.py" return "$repo_path" \
+          "$repo_task_dir/treehouse-acquisition-return.raw" \
+          "$repo_task_dir/treehouse-acquisition-return-receipt.json" \
+          "$worktree_path" "$lease_id" "$lease_holder" || true
+      fi
+      _die "Treehouse acquisition was ambiguous; fallback blocked and evidence preserved: $treehouse_receipt"
+    fi
+    if [[ "$treehouse_acquired" == true ]]; then
+      worktree_path="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$treehouse_record")"
+      lease_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lease_id"])' "$treehouse_record")"
       _info "leased: $worktree_path"
       echo "treehouse"      > "$repo_task_dir/wt_type"
       echo "$lease_holder"  > "$repo_task_dir/wt_holder"
-      # Create and checkout the task branch in the leased worktree
-      if git -C "$worktree_path" show-ref --verify --quiet "refs/heads/$BRANCH" 2>/dev/null; then
-        git -C "$worktree_path" checkout "$BRANCH" 2>&1 | sed 's/^/    /'
-      else
-        git -C "$worktree_path" checkout -b "$BRANCH" 2>&1 | sed 's/^/    /'
+      echo "$lease_id"      > "$repo_task_dir/wt_lease_id"
+      # Hold a verified directory descriptor across branch lookup and checkout;
+      # path swaps cannot redirect Git into a different repository.
+      if ! "$SCRIPT_DIR/_sgt-treehouse-io.py" checkout-branch \
+        "$repo_path" "$worktree_path" "$BRANCH" "$treehouse_record"; then
+        printf 'failed: treehouse checkout failed\n' > "$repo_task_dir/status"
+        if "$SCRIPT_DIR/_sgt-treehouse-io.py" return "$repo_path" \
+          "$repo_task_dir/treehouse-acquisition-return.raw" \
+          "$repo_task_dir/treehouse-acquisition-return-receipt.json" \
+          "$worktree_path" "$lease_id" "$lease_holder"; then
+          printf 'returned\n' > "$repo_task_dir/treehouse-acquisition-return"
+        else
+          printf 'return-failed\n' > "$repo_task_dir/treehouse-acquisition-return"
+        fi
+        _die "treehouse checkout failed for $rname; acquisition record preserved: $treehouse_record"
       fi
     fi
   fi
