@@ -119,6 +119,14 @@ printf '99999999\n' > "$empty_drain_repo/worker_pid"
 printf 'linux:1\n' > "$empty_drain_repo/worker_process_start"
 : > "$empty_drain_repo/worker_process_markers"
 chmod 600 "$empty_drain_repo/worker_process_markers"
+torn_drain_repo="$TEST_ROOT/fleet/task-torn-drain/repo"
+mkdir -p "$torn_drain_repo"
+printf 'force-stopped\n' > "$torn_drain_repo/status"
+printf '99999999\n' > "$torn_drain_repo/worker_pid"
+printf 'linux:1\n' > "$torn_drain_repo/worker_process_start"
+printf '00000000000000000000000000000000|1:1|198|/gone\n' \
+  > "$torn_drain_repo/worker_process_marker"
+chmod 600 "$torn_drain_repo/worker_process_marker"
 set +e
 symlink_output="$(SERGEANT_FLEET="$TEST_ROOT/fleet" SERGEANT_DRAIN_DIR="$TEST_ROOT/drain" \
   "$ROOT/bin/sgt-drain" --global --wait --timeout 0 2>&1)"
@@ -132,7 +140,9 @@ set -e
   "$symlink_output" == *'task-directory/repo'* && \
   "$symlink_output" == *'history is not a regular file'* && \
   "$symlink_output" == *'task-empty-drain/repo'* && \
-  "$symlink_output" == *'history is empty'* ]]
+  "$symlink_output" == *'history is empty'* && \
+  "$symlink_output" == *'task-torn-drain/repo'* && \
+  "$symlink_output" == *'marker exists without durable history'* ]]
 [[ -L "$symlink_repo/worker_process_markers" ]]
 [[ -L "$dangling_repo/worker_process_markers" ]]
 [[ -d "$directory_repo/worker_process_markers" ]]
@@ -255,5 +265,33 @@ printf '%s/missing-truncated\n' "$TEST_ROOT" > "$truncated/worktree"
 printf '11111111111111111111111111111111|1:1|1' > "$truncated/worker_process_markers"
 chmod 600 "$truncated/worker_process_markers"
 assert_cleanup_history_rejected task-truncated 'exactly one terminal LF'
+
+# A current marker without its history is torn launch evidence. Cleanup and
+# force-stop must preserve it rather than treating the worker as legacy.
+torn_cleanup="$TEST_ROOT/fleet/task-torn-cleanup/repo"
+mkdir -p "$torn_cleanup"
+printf 'failed: fixture\n' > "$torn_cleanup/status"
+printf '%s/missing-torn-cleanup\n' "$TEST_ROOT" > "$torn_cleanup/worktree"
+printf '00000000000000000000000000000000|1:1|198|/gone\n' \
+  > "$torn_cleanup/worker_process_marker"
+chmod 600 "$torn_cleanup/worker_process_marker"
+assert_cleanup_history_rejected task-torn-cleanup 'marker exists without durable history'
+
+torn_force="$TEST_ROOT/fleet/task-torn-force/repo"
+mkdir -p "$torn_force"
+printf 'in_progress\n' > "$torn_force/status"
+printf '99999999\n' > "$torn_force/worker_pid"
+printf '%s/missing-torn-force\n' "$TEST_ROOT" > "$torn_force/worktree"
+printf '00000000000000000000000000000000|1:1|198|/gone\n' \
+  > "$torn_force/worker_process_marker"
+chmod 600 "$torn_force/worker_process_marker"
+set +e
+torn_force_output="$(SERGEANT_FLEET="$TEST_ROOT/fleet" SERGEANT_DRAIN_DIR="$TEST_ROOT/drain" \
+  "$ROOT/bin/sgt-drain-force" --global --yes 2>&1)"
+torn_force_status=$?
+set -e
+[[ "$torn_force_status" -ne 0 && \
+  "$torn_force_output" == *'marker exists without durable history'* ]]
+[[ "$(cat "$torn_force/status")" == in_progress ]]
 
 printf 'sgt process lifecycle contract: ok\n'

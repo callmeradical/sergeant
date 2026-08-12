@@ -209,7 +209,8 @@ _worker_liveness() {
   # The pid exists: compare the one shared exact kernel identity format.
   recorded_start="$(_fleet_read "$repo_dir/worker_process_start")"
   actual_start="$(_sgt_process_identity "$pid" 2>/dev/null || true)"
-  if [[ -n "$recorded_start" && -n "$actual_start" && "$actual_start" != "$recorded_start" ]]; then
+  if [[ "$recorded_start" == linux:* && -n "$actual_start" && \
+    "$actual_start" != "$recorded_start" ]]; then
     _WORKER_LIVENESS="gone"
     return 0
   fi
@@ -257,11 +258,15 @@ _unresolved_workers() {
         case "$status" in
           done|drained|orphaned|failed*)
             [[ ! -e "$repo_dir/worker_process_markers" && \
-              ! -L "$repo_dir/worker_process_markers" ]] && continue
+              ! -L "$repo_dir/worker_process_markers" && \
+              ! -e "$repo_dir/worker_process_marker" && \
+              ! -L "$repo_dir/worker_process_marker" ]] && continue
             ;;
           force-stopped)
             [[ ! -e "$repo_dir/worker_process_markers" && \
-              ! -L "$repo_dir/worker_process_markers" ]] && continue
+              ! -L "$repo_dir/worker_process_markers" && \
+              ! -e "$repo_dir/worker_process_marker" && \
+              ! -L "$repo_dir/worker_process_marker" ]] && continue
             ;;
         esac
       fi

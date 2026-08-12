@@ -29,7 +29,9 @@ def parse_arguments():
         return None
 
     action = "verify" if len(sys.argv) == 4 else sys.argv[4]
-    if action not in ("verify", "read", "migrate") or (action == "verify" and len(sys.argv) != 4):
+    if action not in ("verify", "read", "read-multiline", "migrate") or (
+        action == "verify" and len(sys.argv) != 4
+    ):
         return None
     expected = sys.argv[5] if len(sys.argv) == 6 else None
     if expected is not None and action not in ("read", "migrate"):
@@ -103,6 +105,34 @@ def read_text_record(fd, path, modes, expected):
             return None
         if data != expected_bytes:
             return None
+    return data
+
+
+def read_multiline_record(fd, path, modes):
+    """Read one stable, bounded UTF-8 record with a terminal LF."""
+    before = verify_binding(fd, path, modes)
+    if before is None or before.st_size > MAX_RECORD_BYTES:
+        return None
+    try:
+        data = os.read(fd, MAX_RECORD_BYTES + 1)
+    except OSError:
+        return None
+    if len(data) > MAX_RECORD_BYTES or len(data) != before.st_size:
+        return None
+    after = verify_binding(fd, path, modes)
+    if after is None:
+        return None
+    stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(getattr(before, field) != getattr(after, field) for field in stable_fields):
+        return None
+    if not data.endswith(b"\n") or data.endswith(b"\n\n"):
+        return None
+    try:
+        text = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    if any(unicodedata.category(char) == "Cc" and char != "\n" for char in text):
+        return None
     return data
 
 
@@ -219,9 +249,13 @@ def main() -> int:
         return 64
     fd, path, modes, action, expected = arguments
 
-    if action in ("read", "migrate"):
-        data = (read_text_record(fd, path, modes, expected) if action == "read" else
-                migrate_record(fd, path, modes, expected))
+    if action in ("read", "read-multiline", "migrate"):
+        if action == "read":
+            data = read_text_record(fd, path, modes, expected)
+        elif action == "read-multiline":
+            data = read_multiline_record(fd, path, modes)
+        else:
+            data = migrate_record(fd, path, modes, expected)
         if data is None:
             return 1
         try:

@@ -157,8 +157,19 @@ for ((i=0; i<count; i++)); do
   marker_evidence_present=false
   process_marker=""
   marker_history_digest=""
+  marker_validation=""
+  marker_validation_rc=0
+  marker_validation="$(_sgt_worker_marker_holders "$repo_dir" 2>&1)" || marker_validation_rc=$?
+  if [[ "$marker_validation_rc" -ne 0 ]]; then
+    printf '  WARN: marker retirement evidence is malformed: %s (%s/%s); prior state preserved\n' \
+      "$marker_validation" "$task_id" "$repo_name" >&2
+    any_failed=true
+    continue
+  fi
   if [[ -e "$repo_dir/worker_process_markers" || \
-    -L "$repo_dir/worker_process_markers" ]]; then
+    -L "$repo_dir/worker_process_markers" || \
+    -e "$repo_dir/worker_process_marker" || \
+    -L "$repo_dir/worker_process_marker" ]]; then
     marker_evidence_present=true
   fi
   if $marker_evidence_present; then

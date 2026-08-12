@@ -689,6 +689,18 @@ printf '%s\n' "$out" | grep -q 'status=drained.*liveness=live' || \
   { printf 'a drained-but-live worker should be reported as live, got: %s\n' "$out" >&2; exit 1; }
 printf 'sgt-drain --wait rejects a drained claim contradicted by a live process: ok\n'
 
+# Fleets created by origin/main recorded `ps lstart` text. A format mismatch
+# with linux:<ticks> is not evidence of PID reuse and must never certify exit.
+ps -o lstart= -p "$live_pid" | awk '{$1=$1; print}' \
+  > "$fleet_dir/task-d/busy-repo/worker_process_start"
+rc=0
+out="$("$ROOT_DIR/bin/sgt-drain" myproject --wait --timeout 1 2>&1)" || rc=$?
+[[ $rc -ne 0 ]] || \
+  { printf 'a live legacy-identity worker must not satisfy the wait\n' >&2; exit 1; }
+printf '%s\n' "$out" | grep -q 'status=drained.*liveness=live' || \
+  { printf 'legacy identity should remain live/actionable, got: %s\n' "$out" >&2; exit 1; }
+printf 'sgt-drain --wait preserves live legacy identity records: ok\n'
+
 # Once the worker's process actually exits, the same wait succeeds.
 kill "$live_pid" 2>/dev/null || true
 wait "$live_pid" 2>/dev/null || true

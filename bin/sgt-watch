@@ -309,16 +309,24 @@ _recycle_evidence_covers() {
   local repo_dir="$1" identity="$2" process_group="$3"
   local record pane outcome recycled_at process_marker history_digest expected
   [[ -n "$identity" ]] || return 1
-  record="$(_sgt_read_owned_file "$repo_dir/worker_recycled" 2>/dev/null || true)"
+  record="$(_sgt_read_owned_multiline_file \
+    "$repo_dir/worker_recycled" 2>/dev/null || true)"
   [[ -n "$record" ]] || return 1
   pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
   outcome="$(sed -n '4s/^outcome=//p' <<< "$record")"
   case "$outcome" in
     process_group_stopped)
-      recycled_at="$(sed -n '5s/^recycled_at=//p' <<< "$record")"
-      [[ "$recycled_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
-      expected="$(printf 'pane=%s\nidentity=%s\nprocess_group=%s\noutcome=process_group_stopped\nrecycled_at=%s' \
-        "$pane" "$identity" "$process_group" "$recycled_at")"
+      process_marker="$(_sgt_read_owned_file \
+        "$repo_dir/worker_process_marker" 2>/dev/null || true)"
+      [[ -n "$process_marker" ]] || return 1
+      history_digest="$(_sgt_marker_history_digest \
+        "$repo_dir/worker_process_markers" "$process_marker" 2>/dev/null || true)"
+      recycled_at="$(sed -n '7s/^recycled_at=//p' <<< "$record")"
+      [[ "$history_digest" =~ ^[0-9a-f]{64}$ && \
+        "$recycled_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+      expected="$(printf 'pane=%s\nidentity=%s\nprocess_group=%s\noutcome=process_group_stopped\nprocess_marker=%s\nmarker_history_sha256=%s\nrecycled_at=%s' \
+        "$pane" "$identity" "$process_group" "$process_marker" \
+        "$history_digest" "$recycled_at")"
       ;;
     marker_holders_retired)
       process_marker="$(_sgt_read_owned_file \
@@ -342,7 +350,13 @@ _recycle_evidence_covers() {
 # Rebind the current evidence and append to the append-only history so no earlier
 # recycling is ever lost.
 _record_recycle_evidence() {
-  local repo_dir="$1" pane="$2" identity="$3" process_group="$4" stamp temporary
+  local repo_dir="$1" pane="$2" identity="$3" process_group="$4" stamp temporary process_marker history_digest
+  process_marker="$(_sgt_read_owned_file \
+    "$repo_dir/worker_process_marker" 2>/dev/null || true)"
+  [[ -n "$process_marker" ]] || return 1
+  history_digest="$(_sgt_marker_history_digest \
+    "$repo_dir/worker_process_markers" "$process_marker" 2>/dev/null || true)"
+  [[ "$history_digest" =~ ^[0-9a-f]{64}$ ]] || return 1
   stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
   temporary="$repo_dir/worker_recycled.tmp.$$"
   (umask 077; {
@@ -350,6 +364,8 @@ _record_recycle_evidence() {
     printf 'identity=%s\n' "$identity"
     printf 'process_group=%s\n' "$process_group"
     printf 'outcome=process_group_stopped\n'
+    printf 'process_marker=%s\n' "$process_marker"
+    printf 'marker_history_sha256=%s\n' "$history_digest"
     printf 'recycled_at=%s\n' "$stamp"
   } > "$temporary") || { rm -f "$temporary"; return 1; }
   mv "$temporary" "$repo_dir/worker_recycled" || { rm -f "$temporary"; return 1; }
@@ -358,7 +374,7 @@ _record_recycle_evidence() {
 }
 
 _load_or_record_recycle_phase() {
-  local repo_dir="$1" identity="$2" process_group="$3" session_id="$4" marker="$5" temporary record records members="" root_identity
+  local repo_dir="$1" identity="$2" process_group="$3" session_id="$4" marker="$5" temporary record records holders holder_pid holder_start members="" root_identity
   if [[ -s "$repo_dir/worker_recycle_phase" ]]; then
     grep -Fqx 'version=1' "$repo_dir/worker_recycle_phase" || return 1
     grep -Fqx "identity=$identity" "$repo_dir/worker_recycle_phase" || return 1
@@ -368,19 +384,31 @@ _load_or_record_recycle_phase() {
     sed -n 's/^member=//p' "$repo_dir/worker_recycle_phase"
     return 0
   fi
-  records="$(_worker_descendant_records "$session_id")" || return 1
-  [[ -n "$records" ]] || return 1
-  while IFS= read -r record; do
-    [[ -n "$record" ]] && members+="$record"$'\n'
-  done <<< "$records"
+  records="$(_worker_descendant_records "$session_id")" || records=""
   # Close the gap between the earlier pane/provenance check and phase
   # publication. The root row must still be the exact recorded supervisor, not
   # a PID that was reused while the process table was being sampled.
   root_identity="$(awk -F '|' -v pid="$session_id" '$1 == pid { print $2; exit }' <<< "$records")"
-  [[ -n "$root_identity" && "$root_identity" == "$(cat "$repo_dir/worker_process_start" 2>/dev/null || true)" &&
-    "$(_sgt_process_identity "$session_id" 2>/dev/null || true)" == "$root_identity" ]] || return 1
+  if [[ -n "$root_identity" && \
+    "$root_identity" == "$(cat "$repo_dir/worker_process_start" 2>/dev/null || true)" &&
+    "$(_sgt_process_identity "$session_id" 2>/dev/null || true)" == "$root_identity" ]]; then
+    while IFS= read -r record; do
+      [[ -n "$record" ]] && members+="$record"$'\n'
+    done <<< "$records"
+  else
+    # Natural terminal exit can remove the root and its entire session before
+    # watch observes it. The inherited marker is the stronger ownership proof;
+    # bind every exact live holder into the durable phase without reconstructing
+    # ancestry or signalling an unverified process group.
+    holders="$(_sgt_worker_marker_holders "$repo_dir")" || return 1
+    [[ -n "$holders" ]] || return 1
+    while IFS='|' read -r holder_pid holder_start; do
+      [[ "$holder_pid" =~ ^[1-9][0-9]*$ && "$holder_start" == linux:* ]] || return 1
+      members+="$holder_pid|$holder_start|0|0|0"$'\n'
+    done <<< "$holders"
+  fi
   temporary="$repo_dir/worker_recycle_phase.tmp.$$"
-  {
+  (umask 077; {
     printf 'version=1\n'
     printf 'identity=%s\n' "$identity"
     printf 'process_group=%s\n' "$process_group"
@@ -393,7 +421,7 @@ _load_or_record_recycle_phase() {
       fi
     done <<< "$members"
     true
-  } > "$temporary" || { rm -f "$temporary"; return 1; }
+  } > "$temporary") || { rm -f "$temporary"; return 1; }
   mv "$temporary" "$repo_dir/worker_recycle_phase" || {
     rm -f "$temporary"
     return 1
@@ -435,6 +463,7 @@ _terminal_worker_process_group() {
   recorded_start="$(cat "$repo_dir/worker_process_start" 2>/dev/null || true)"
   recorded_sid="$(cat "$repo_dir/worker_session_id" 2>/dev/null || true)"
   recorded_marker="$(_sgt_read_owned_file "$repo_dir/worker_process_marker" 2>/dev/null || true)"
+  [[ ! -s "$repo_dir/worker_process_marker_platform" ]] || return 4
   IFS='|' read -r marker_generation marker_identity marker_fd _marker_path <<< "$recorded_marker"
   if [[ -z "$recorded_pid" || -z "$recorded_pgid" || -z "$recorded_sid" || -z "$recorded_start" || -z "$recorded_marker" ]]; then
     return 2
@@ -466,7 +495,7 @@ _terminal_worker_process_group() {
 }
 
 _stop_terminal_worker_process_group() {
-  local process_group="$1" session_id="$2" members="$3" marker="$4" phase_file="$5"
+  local process_group="$1" session_id="$2" members="$3" marker="$4" phase_file="$5" bound_members phase_status=0
   [[ -n "$process_group" ]] || return 0
   [[ "$marker" == *"|198|"* ]] || {
     printf 'worker process marker is missing or malformed\n' >&2
@@ -480,8 +509,28 @@ _stop_terminal_worker_process_group() {
     printf 'python3 is required for exact pidfd worker retirement\n' >&2
     return 1
   }
+  # A concurrent winner may unlink the shared phase after publishing exact
+  # recycle evidence. Bind this attempt to the already validated inode so the
+  # loser either consumes the same phase or falls back to peer evidence.
+  [[ -f "$phase_file" && ! -L "$phase_file" ]] || return 1
+  exec 9< "$phase_file" || return 1
+  if ! _sgt_validate_owned_fd 9 "$phase_file" "600,644" >/dev/null; then
+    exec 9<&-
+    return 1
+  fi
+  grep -Fqx 'version=1' /dev/fd/9 &&
+    grep -Fqx "process_group=$process_group" /dev/fd/9 &&
+    grep -Fqx "session_id=$session_id" /dev/fd/9 &&
+    grep -Fqx "process_marker=$marker" /dev/fd/9 || phase_status=$?
+  bound_members="$(sed -n 's/^member=//p' /dev/fd/9)"
+  if [[ "$phase_status" -ne 0 || "$bound_members" != "$members" ]]; then
+    exec 9<&-
+    return 1
+  fi
   python3 "$SCRIPT_DIR/_sgt-process-token.py" retire \
-    "$(dirname "$phase_file")/worker_process_markers" "$phase_file"
+    "$(dirname "$phase_file")/worker_process_markers" /dev/fd/9 || phase_status=$?
+  exec 9<&-
+  return "$phase_status"
 }
 
 _wait_for_peer_recycle() {
@@ -489,7 +538,9 @@ _wait_for_peer_recycle() {
   attempts="${SGT_RECYCLE_PEER_ATTEMPTS:-20}"
   [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=20
   for _ in $(seq 1 "$attempts"); do
-    _recycle_evidence_covers "$repo_dir" "$identity" "$process_group" && return 0
+    if _recycle_evidence_covers "$repo_dir" "$identity" "$process_group"; then
+      return 0
+    fi
     sleep 0.05
   done
   return 1
@@ -499,10 +550,24 @@ _clear_terminal_recycle_diagnostic() {
   local repo_dir="$1" diagnostic
   diagnostic="$(cat "$repo_dir/diagnostic" 2>/dev/null || true)"
   case "$diagnostic" in
-    terminal\ worker\ process*|injected\ interruption\ after\ terminal\ pane\ kill)
+    terminal\ worker\ process*|injected\ interruption\ after\ terminal\ pane\ kill*)
       rm -f "$repo_dir/diagnostic"
       ;;
   esac
+}
+
+_ensure_terminal_recycle_diagnostic_action() {
+  local repo_dir="$1" diagnostic task_id
+  diagnostic="$(cat "$repo_dir/diagnostic" 2>/dev/null || true)"
+  [[ "$diagnostic" != *sgt-cleanup* ]] || return 0
+  task_id="$(basename "$(dirname "$repo_dir")")"
+  if [[ -n "$diagnostic" ]]; then
+    printf '%s Run: sgt-cleanup %s\n' "$diagnostic" "$task_id" \
+      > "$repo_dir/diagnostic"
+  else
+    printf 'terminal worker retirement is incomplete. Run: sgt-cleanup %s\n' \
+      "$task_id" > "$repo_dir/diagnostic"
+  fi
 }
 
 _recycle_terminal_worker() {
@@ -554,6 +619,10 @@ _recycle_terminal_worker() {
         ;;
       3)
         printf 'terminal worker marker history is invalid; refusing recycle: %s\n' \
+          "$pane" > "$repo_dir/diagnostic"
+        ;;
+      4)
+        printf 'exact worker retirement is unavailable on this platform; fleet evidence preserved: %s\n' \
           "$pane" > "$repo_dir/diagnostic"
         ;;
       *)
@@ -835,6 +904,7 @@ _sync_task() {
       case "$fleet_status" in
         done|failed:*|drained|force-stopped)
           if ! _recycle_terminal_worker "$repo_dir"; then
+            _ensure_terminal_recycle_diagnostic_action "$repo_dir"
             printf 'WARNING: terminal worker was not recycled: %s\n' "$repo_dir" >&2
             recycle_failed=true
           fi
@@ -894,6 +964,7 @@ _sync_task() {
           local _warn_task _warn_repo _warn_recycle_diagnostic
           _warn_task="$(basename "$(dirname "$repo_dir")")"
           _warn_repo="$(basename "$repo_dir")"
+          _ensure_terminal_recycle_diagnostic_action "$repo_dir"
           _warn_recycle_diagnostic="$(cat "$repo_dir/diagnostic" 2>/dev/null || true)"
           printf 'WARNING: terminal worker was not recycled: %s/%s\n' \
             "$_warn_task" "$_warn_repo" >&2

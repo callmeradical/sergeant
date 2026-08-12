@@ -32,4 +32,25 @@ if SGT_PROC_ROOT="$TEST_ROOT/empty-proc" PS_STYLE=darwin PATH="$TEST_ROOT/bin:$P
   printf 'Darwin/BSD second-resolution identity was accepted as exact\n' >&2
   exit 1
 fi
+
+# Platforms without a proven exact process-birth identity still launch with the
+# inherited marker capability. The zero floor is explicitly platform-tagged;
+# retirement must later fail actionable rather than weakening Linux identity.
+cat > "$TEST_ROOT/bin/uname" <<'EOF'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+EOF
+chmod +x "$TEST_ROOT/bin/uname"
+# shellcheck source=bin/_sgt-lib.sh
+source "$ROOT/bin/_sgt-lib.sh"
+_sgt_process_identity() { return 1; }
+portable_state="$TEST_ROOT/portable-state"
+mkdir -p "$portable_state"
+PATH="$TEST_ROOT/bin:$PATH" _sgt_prepare_worker_process_marker "$portable_state"
+grep -Eq '^[0-9a-f]{32}\|[0-9]+:[0-9]+\|0$' \
+  "$portable_state/worker_process_markers"
+[[ "$(cat "$portable_state/worker_process_marker_platform")" == \
+  'Darwin:no-exact-process-birth' ]]
+portable_command="$(_sgt_worker_command worker "$portable_state" worktree agent)"
+[[ "$portable_command" == exec\ 198\<* ]]
 printf 'sgt process adapter: ok\n'

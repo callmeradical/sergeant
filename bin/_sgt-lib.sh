@@ -718,6 +718,18 @@ _sgt_read_owned_fd() {
     return 1
   fi
 }
+_sgt_read_owned_multiline_file() {
+  local path="$1" mode value
+  [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
+  mode="$(_sgt_path_mode "$path")" || return 1
+  [[ "$mode" == "600" ]] || return 1
+  exec 9< "$path" || return 1
+  value="$(python3 "$_SGT_LIB_DIR/_sgt-verify-owned-fd.py" \
+    9 "$path" 600 read-multiline)" || { exec 9<&-; return 1; }
+  _sgt_validate_owned_fd 9 "$path" 600 >/dev/null || { exec 9<&-; return 1; }
+  exec 9<&-
+  printf '%s\n' "$value"
+}
 _sgt_migrate_owned_fd() {
   local fd="$1" path="$2" modes="$3" expected="$4"
   python3 "$_SGT_LIB_DIR/_sgt-verify-owned-fd.py" \
@@ -831,12 +843,20 @@ _sgt_worker_command() {
     "$path" "$path" "$worker" "$repo_dir" "$worktree" "$agent"
 }
 _sgt_prepare_worker_process_marker() {
-  local repo_dir="$1" path generation identity marker launch_floor history history_tmp history_lines
+  local repo_dir="$1" path generation identity marker launch_identity launch_floor history history_tmp history_lines platform platform_record="" portable_marker=false
   path="$(mktemp "$repo_dir/.worker-process-marker.XXXXXX")" || return 1
   identity="$(stat -Lc '%d:%i' "$path" 2>/dev/null || stat -f '%d:%i' "$path" 2>/dev/null || true)"
   generation="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-  launch_floor="$(_sgt_process_identity "$$" 2>/dev/null || true)"
-  launch_floor="${launch_floor#linux:}"
+  launch_identity="$(_sgt_process_identity "$$" 2>/dev/null || true)"
+  launch_floor="${launch_identity#linux:}"
+  if [[ "$launch_identity" != linux:* || ! "$launch_floor" =~ ^[0-9]+$ ]]; then
+    portable_marker=true
+    launch_floor=0
+    platform="$(uname -s 2>/dev/null || printf unknown)"
+    platform_record="$platform:no-exact-process-birth"
+  else
+    rm -f "$repo_dir/worker_process_marker_platform"
+  fi
   [[ "$identity" =~ ^[0-9]+:[0-9]+$ && "$generation" =~ ^[0-9a-f]{32}$ &&
     "$launch_floor" =~ ^[0-9]+$ ]] || {
     rm -f "$path"
@@ -848,10 +868,12 @@ _sgt_prepare_worker_process_marker() {
   history="$repo_dir/worker_process_markers"
   [[ ! -L "$history" && ( ! -e "$history" || -f "$history" ) ]] || { rm -f "$path"; return 1; }
   if [[ -f "$history" ]]; then
-    python3 "$_SGT_LIB_DIR/_sgt-process-token.py" compact "$history" || {
-      rm -f "$path"
-      return 1
-    }
+    if ! $portable_marker; then
+      python3 "$_SGT_LIB_DIR/_sgt-process-token.py" compact "$history" || {
+        rm -f "$path"
+        return 1
+      }
+    fi
     history_lines="$(wc -l < "$history" 2>/dev/null || true)"
     [[ "$history_lines" =~ ^[0-9]+$ && "$history_lines" -lt 64 ]] || {
       rm -f "$path"
@@ -869,6 +891,10 @@ _sgt_prepare_worker_process_marker() {
   # generation whose capability is absent from durable retirement history.
   mv "$history_tmp" "$history" || { rm -f "$history_tmp" "$path"; return 1; }
   _sgt_replace_owned_file "$repo_dir/worker_process_marker" "$marker" || return 1
+  if $portable_marker; then
+    _sgt_replace_owned_file "$repo_dir/worker_process_marker_platform" \
+      "$platform_record" || return 1
+  fi
 }
 _sgt_notification_target_create() {
   local repo_dir="$1" notification_id="$2" pane_identity="$3"

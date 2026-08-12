@@ -68,6 +68,17 @@ _sgt_fd_identity() {
 # not be proved (including unreadable same-UID post-launch fd tables).
 _sgt_worker_marker_holders() {
   local repo_dir="$1" history="$1/worker_process_markers"
+  if [[ ( -e "$repo_dir/worker_process_marker" || \
+    -L "$repo_dir/worker_process_marker" ) && \
+    ! -e "$history" && ! -L "$history" ]]; then
+    printf 'worker process marker exists without durable history: %s\n' "$repo_dir" >&2
+    return 1
+  fi
+  if [[ -s "$repo_dir/worker_process_marker_platform" ]]; then
+    printf 'exact worker marker inspection is unavailable on %s; fleet evidence preserved\n' \
+      "$(cat "$repo_dir/worker_process_marker_platform" 2>/dev/null || printf unknown)" >&2
+    return 1
+  fi
   [[ ! -L "$history" ]] || {
     printf 'worker process marker history is a symlink: %s\n' "$history" >&2
     return 1
@@ -90,6 +101,17 @@ _sgt_worker_marker_holders() {
 _sgt_retire_worker_marker_holders() {
   local repo_dir="$1" phase="${2:-/dev/null}" history
   history="$repo_dir/worker_process_markers"
+  if [[ ( -e "$repo_dir/worker_process_marker" || \
+    -L "$repo_dir/worker_process_marker" ) && \
+    ! -e "$history" && ! -L "$history" ]]; then
+    printf 'worker process marker exists without durable history: %s\n' "$repo_dir" >&2
+    return 1
+  fi
+  if [[ -s "$repo_dir/worker_process_marker_platform" ]]; then
+    printf 'exact worker marker retirement is unavailable on %s; fleet evidence preserved\n' \
+      "$(cat "$repo_dir/worker_process_marker_platform" 2>/dev/null || printf unknown)" >&2
+    return 1
+  fi
   [[ ! -L "$history" ]] || {
     printf 'worker process marker history is a symlink: %s\n' "$history" >&2
     return 1

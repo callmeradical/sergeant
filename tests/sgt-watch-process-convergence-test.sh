@@ -193,7 +193,7 @@ if [[ "$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)" =
 fi
 
 launch_fixture() {
-  local name="$1" status="${2:-done}"
+  local name="$1" status="${2:-done}" create_existing_setsid="${3:-0}"
   launched_state="$TEST_ROOT/fleet/$name/app"
   launched_worktree="$TEST_ROOT/$name-worktree"
   mkdir -p "$launched_state" "$launched_worktree"
@@ -206,7 +206,7 @@ launch_fixture() {
     printf 'result\n' > "$launched_worktree/.sergeant-result"
   fi
   launched_pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION:" \
-    -n "$name" "exec 198<'$marker_path'; rm -f '$marker_path'; exec env RESISTANT_HELPER='$RESISTANT_HELPER' FORK_PID_FILE='$FORK_PID_FILE' EXISTING_SETSID_PID_FILE='$EXISTING_SETSID_PID_FILE' TERM_HANDLER_FILE='$TERM_HANDLER_FILE' PROCESS_ADAPTER='$PROCESS_ADAPTER' CREATE_EXISTING_SETSID=0 CREATE_FORK_RACE=0 \
+    -n "$name" "exec 198<'$marker_path'; rm -f '$marker_path'; exec env RESISTANT_HELPER='$RESISTANT_HELPER' FORK_PID_FILE='$FORK_PID_FILE' EXISTING_SETSID_PID_FILE='$EXISTING_SETSID_PID_FILE' TERM_HANDLER_FILE='$TERM_HANDLER_FILE' PROCESS_ADAPTER='$PROCESS_ADAPTER' CREATE_EXISTING_SETSID='$create_existing_setsid' CREATE_FORK_RACE=0 \
     '$TEST_ROOT/sgt-interactive-worker' '$launched_state'")"
   printf '%s\n' "$launched_pane" > "$launched_state/pane"
   for _ in $(seq 1 100); do
@@ -294,6 +294,84 @@ kill -0 "$keepalive_pid"
 printf '%s\n' "$saved_pgid" > "$launched_state/worker_process_group"
 SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
   --sync task-shared-pgid >/dev/null
+
+# A terminal root may exit naturally before watch observes it. An escaped
+# marker-owning setsid descendant is still exact owned work and must retire even
+# though no root/session row remains from which to build a lineage phase.
+setsid_lines_before="$(wc -l < "$EXISTING_SETSID_PID_FILE" 2>/dev/null || printf 0)"
+launch_fixture task-natural-exit done 1
+for _ in $(seq 1 100); do
+  setsid_lines_now="$(wc -l < "$EXISTING_SETSID_PID_FILE" 2>/dev/null || printf 0)"
+  [[ "$setsid_lines_now" -gt "$setsid_lines_before" ]] && break
+  sleep 0.01
+done
+natural_setsid_pid="$(tail -n 1 "$EXISTING_SETSID_PID_FILE")"
+natural_helper_pid="$launched_pid"
+natural_worker_pid="$(cat "$launched_state/worker_pid")"
+tmux kill-pane -t "$launched_pane"
+kill -KILL "$natural_helper_pid" 2>/dev/null || true
+for _ in $(seq 1 100); do
+  ! pid_is_running "$natural_worker_pid" && ! pid_is_running "$natural_helper_pid" && break
+  sleep 0.01
+done
+pid_is_running "$natural_setsid_pid"
+[[ ! -e "$launched_state/worker_recycle_phase" ]]
+SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
+  --sync task-natural-exit >/dev/null
+if pid_is_running "$natural_setsid_pid"; then
+  printf 'natural terminal exit left escaped marker holder alive: %s\n' \
+    "$natural_setsid_pid" >&2
+  exit 1
+fi
+[[ -s "$launched_state/worker_recycled" ]]
+
+# Exact-looking prior recycle evidence cannot bypass current marker-history
+# validation. A present truncated history with a live holder remains actionable.
+launch_fixture task-stale-evidence
+stale_marker="$(cat "$launched_state/worker_process_marker")"
+stale_history_digest="$(python3 "$ROOT_DIR/bin/_sgt-marker-history.py" \
+  "$launched_state/worker_process_markers" "$stale_marker")"
+cat > "$launched_state/worker_recycled" <<EOF
+pane=$launched_pane
+identity=$(cat "$launched_state/pane_identity")
+process_group=$launched_pgid
+outcome=process_group_stopped
+process_marker=$stale_marker
+marker_history_sha256=$stale_history_digest
+recycled_at=2026-01-01T00:00:00Z
+EOF
+chmod 600 "$launched_state/worker_recycled"
+printf 'truncated-history' > "$launched_state/worker_process_markers"
+if SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
+  --sync task-stale-evidence >/dev/null 2>&1; then
+  printf 'prior recycle evidence bypassed truncated marker history\n' >&2
+  exit 1
+fi
+pid_is_running "$launched_pid"
+
+# A current process marker without its durable history is a torn state, not a
+# legacy worker. It cannot converge through prior process-group evidence.
+launch_fixture task-missing-history
+missing_marker="$(cat "$launched_state/worker_process_marker")"
+missing_history_digest="$(python3 "$ROOT_DIR/bin/_sgt-marker-history.py" \
+  "$launched_state/worker_process_markers" "$missing_marker")"
+cat > "$launched_state/worker_recycled" <<EOF
+pane=$launched_pane
+identity=$(cat "$launched_state/pane_identity")
+process_group=$launched_pgid
+outcome=process_group_stopped
+process_marker=$missing_marker
+marker_history_sha256=$missing_history_digest
+recycled_at=2026-01-01T00:00:00Z
+EOF
+chmod 600 "$launched_state/worker_recycled"
+rm "$launched_state/worker_process_markers"
+if SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
+  --sync task-missing-history >/dev/null 2>&1; then
+  printf 'current marker without durable history reported convergence\n' >&2
+  exit 1
+fi
+pid_is_running "$launched_pid"
 
 # Two recyclers racing the same exact owned pane both converge. The loser of
 # kill-pane must consume the peer's durable process-retirement evidence rather

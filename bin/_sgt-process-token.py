@@ -100,7 +100,7 @@ def holds_marker(pid, markers):
     directory = f"/proc/{pid}/fd"
     try:
         names = os.listdir(directory)
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return False
     for name in names:
         try:
@@ -117,7 +117,7 @@ def holds_marker(pid, markers):
                 os.close(fd)
             if content == (generation + "\n").encode("ascii"):
                 return True
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             continue
     return False
 
@@ -142,7 +142,7 @@ def enumerate_holders(markers):
                 continue
             if holds_marker(pid, markers):
                 owners[pid] = start
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             continue
         except PermissionError:
             fail(f"cannot inspect same-UID post-launch PID {pid} fd ownership")
