@@ -8,6 +8,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TEST_ROOT="$(mktemp -d)"
+trap 'rm -rf "$TEST_ROOT"' EXIT
+export SERGEANT_CONFIG="$TEST_ROOT/config"
+export SERGEANT_FLEET="$TEST_ROOT/fleet"
+export SGT_WIKI_DISABLED=1
+mkdir -p "$SERGEANT_CONFIG" "$SERGEANT_FLEET"
 
 PASS=0; FAIL=0
 _pass() { PASS=$(( PASS + 1 )); printf 'PASS: %s\n' "$1"; }
@@ -41,9 +47,6 @@ done
 [[ "$all_sev_ok" == "true" ]] && _pass "current router lists all canonical severities"
 
 # ── Test 3: preflight rejects a stale router missing a required axis ──────────
-TEST_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TEST_ROOT"' EXIT
-
 fake_bin="$TEST_ROOT/fake-bin"
 mkdir -p "$fake_bin"
 # A stale router that knows only 'standards' and not 'spec' or 'readiness'.
@@ -76,7 +79,7 @@ _sgt_preflight_review_router
 PROBE
 chmod +x "$probe"
 
-stale_output="$(bash "$probe" 2>&1 || true)"
+stale_output="$(PATH="$fake_bin:/usr/bin:/bin" bash "$probe" 2>&1 || true)"
 if printf '%s' "$stale_output" | grep -qiE 'mismatch|does not list|contract'; then
   _pass "stale router (missing 'spec'): preflight detects and reports mismatch"
 else
@@ -99,7 +102,7 @@ _sgt_preflight_review_router && printf 'OK\n'
 PROBE4
 chmod +x "$probe4"
 
-current_output="$(bash "$probe4" 2>&1 || true)"
+current_output="$(PATH="$ROOT_DIR/bin:/usr/bin:/bin" bash "$probe4" 2>&1 || true)"
 if printf '%s' "$current_output" | grep -qF 'OK'; then
   _pass "current router: preflight passes without error"
 else
