@@ -143,9 +143,14 @@ def run_migration_test_hook(phase, path):
 
 
 def migrate_record(fd, path, modes, expected):
-    """Migrate only the uniquely linked inode already held by fd."""
+    """Migrate mode on the inode held by fd without replacing path content.
+
+    Hardlink aliases owned by the same UID name the same inode and therefore
+    observe the same mode change.  Link count is not used as a security
+    boundary because another same-UID process can change it around fchmod.
+    """
     opened = verify_binding(fd, path, modes)
-    if opened is None or opened.st_nlink != 1:
+    if opened is None:
         return None
     try:
         os.lseek(fd, 0, os.SEEK_SET)
@@ -156,15 +161,17 @@ def migrate_record(fd, path, modes, expected):
         return None
     stable_size = opened.st_size
     stable_mtime = opened.st_mtime_ns
+    stable_ctime = opened.st_ctime_ns
 
     if not run_migration_test_hook("before-fchmod", path):
         return None
     # Re-read exact bytes after the test/race boundary.  A same-inode write or
     # pathname replacement fails before mode mutation.
     opened = verify_binding(fd, path, modes)
-    if opened is None or opened.st_nlink != 1:
+    if opened is None:
         return None
-    if opened.st_size != stable_size or opened.st_mtime_ns != stable_mtime:
+    if (opened.st_size != stable_size or opened.st_mtime_ns != stable_mtime or
+            opened.st_ctime_ns != stable_ctime):
         return None
     try:
         os.lseek(fd, 0, os.SEEK_SET)
@@ -177,13 +184,25 @@ def migrate_record(fd, path, modes, expected):
         os.fchmod(fd, 0o600)
     except OSError:
         return None
+
+    # fchmod legitimately changes ctime.  Snapshot the resulting binding and
+    # metadata before exposing the post-fchmod race seam, then require that
+    # exact snapshot afterward.
+    chmod_snapshot = verify_binding(fd, path, {0o600})
+    if chmod_snapshot is None:
+        return None
+    if (chmod_snapshot.st_size != stable_size or
+            chmod_snapshot.st_mtime_ns != stable_mtime):
+        return None
     if not run_migration_test_hook("after-fchmod", path):
         return None
 
     migrated = verify_binding(fd, path, {0o600})
-    if migrated is None or migrated.st_nlink != 1:
+    if migrated is None:
         return None
-    if migrated.st_size != stable_size or migrated.st_mtime_ns != stable_mtime:
+    snapshot_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(getattr(migrated, field) != getattr(chmod_snapshot, field)
+           for field in snapshot_fields):
         return None
     try:
         os.lseek(fd, 0, os.SEEK_SET)

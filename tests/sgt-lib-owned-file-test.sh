@@ -461,8 +461,8 @@ else
   _fail "_sgt_read_matching_legacy_pane_identity: post-validation replacement was overwritten or accepted"
 fi
 
-# fchmod would affect every hardlink to the held inode, so legacy records with
-# aliases are rejected before any mode change.
+# fchmod changes inode metadata, so same-UID hardlink aliases observe the same
+# mode migration.  No pathname is overwritten and content remains unchanged.
 legacy_hardlink="$TEST_ROOT/legacy-hardlink"
 legacy_hardlink_alias="$TEST_ROOT/legacy-hardlink-alias"
 printf 'hardlink-value\n' > "$legacy_hardlink"
@@ -475,12 +475,82 @@ status=$?
 set -e
 hardlink_mode=$(stat -c '%a' -- "$legacy_hardlink" 2>/dev/null || \
   stat -f '%Lp' "$legacy_hardlink" 2>/dev/null)
-if [[ "$status" -ne 0 && "$hardlink_mode" == "644" && \
+alias_mode=$(stat -c '%a' -- "$legacy_hardlink_alias" 2>/dev/null || \
+  stat -f '%Lp' "$legacy_hardlink_alias" 2>/dev/null)
+if [[ "$status" -eq 0 && "$hardlink_mode" == "600" && "$alias_mode" == "600" && \
   "$(<"$legacy_hardlink")" == "hardlink-value" && \
   "$(<"$legacy_hardlink_alias")" == "hardlink-value" ]]; then
-  _pass "_sgt_read_matching_legacy_pane_identity: legacy hardlink rejected before fchmod"
+  _pass "_sgt_read_matching_legacy_pane_identity: hardlink aliases share descriptor-local mode"
 else
-  _fail "_sgt_read_matching_legacy_pane_identity: legacy hardlink alias was mutated"
+  _fail "_sgt_read_matching_legacy_pane_identity: hardlink migration changed content or diverged"
+fi
+
+# Restoring expected bytes and mtime cannot hide a same-inode rewrite before
+# fchmod: ctime remains a monotonic witness to the intervening mutation.
+restore_before_hook="$TEST_ROOT/restore-before-fchmod"
+# shellcheck disable=SC2016 # The generated hook expands these values at runtime.
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'if [[ "$1" == before-fchmod ]]; then' \
+  '  path="$2"' \
+  '  printf "attacker-value!\\n" > "$path"' \
+  '  printf "migration-value\\n" > "$path"' \
+  '  touch -r "$path.mtime-ref" "$path"' \
+  'fi' > "$restore_before_hook"
+chmod 700 "$restore_before_hook"
+restore_before="$TEST_ROOT/restore-before"
+printf 'migration-value\n' > "$restore_before"
+chmod 644 "$restore_before"
+cp -p -- "$restore_before" "$restore_before.mtime-ref"
+set +e
+SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
+  _SGT_OWNED_FILE_MIGRATE_HOOK="$restore_before_hook" \
+  bash -c 'source "$1"; _sgt_read_matching_legacy_pane_identity "$2" migration-value' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$restore_before" >/dev/null 2>&1
+status=$?
+set -e
+restore_before_mode=$(stat -c '%a' -- "$restore_before" 2>/dev/null || \
+  stat -f '%Lp' "$restore_before" 2>/dev/null)
+if [[ "$status" -ne 0 && "$restore_before_mode" == "644" && \
+  "$(<"$restore_before")" == "migration-value" ]]; then
+  _pass "_sgt_read_matching_legacy_pane_identity: restored pre-fchmod rewrite rejected by ctime"
+else
+  _fail "_sgt_read_matching_legacy_pane_identity: restored pre-fchmod rewrite escaped detection"
+fi
+
+# Capture metadata immediately after fchmod so an after-hook cannot rewrite,
+# restore expected bytes+mtime, and return a false success.
+restore_after_hook="$TEST_ROOT/restore-after-fchmod"
+# shellcheck disable=SC2016 # The generated hook expands these values at runtime.
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'if [[ "$1" == after-fchmod ]]; then' \
+  '  path="$2"' \
+  '  printf "attacker-value!\\n" > "$path"' \
+  '  printf "migration-value\\n" > "$path"' \
+  '  touch -r "$path.mtime-ref" "$path"' \
+  'fi' > "$restore_after_hook"
+chmod 700 "$restore_after_hook"
+restore_after="$TEST_ROOT/restore-after"
+printf 'migration-value\n' > "$restore_after"
+chmod 644 "$restore_after"
+cp -p -- "$restore_after" "$restore_after.mtime-ref"
+set +e
+SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
+  _SGT_OWNED_FILE_MIGRATE_HOOK="$restore_after_hook" \
+  bash -c 'source "$1"; _sgt_read_matching_legacy_pane_identity "$2" migration-value' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$restore_after" >/dev/null 2>&1
+status=$?
+set -e
+restore_after_mode=$(stat -c '%a' -- "$restore_after" 2>/dev/null || \
+  stat -f '%Lp' "$restore_after" 2>/dev/null)
+if [[ "$status" -ne 0 && "$restore_after_mode" == "600" && \
+  "$(<"$restore_after")" == "migration-value" ]]; then
+  _pass "_sgt_read_matching_legacy_pane_identity: restored post-fchmod rewrite rejected by ctime"
+else
+  _fail "_sgt_read_matching_legacy_pane_identity: restored post-fchmod rewrite escaped detection"
 fi
 
 # A write after fchmod is detected by the final metadata and exact-byte read;
