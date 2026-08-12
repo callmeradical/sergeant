@@ -16,10 +16,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=bin/_sgt-process.sh
-source "$SCRIPT_DIR/_sgt-process.sh"
-# shellcheck source=bin/_sgt-drain.sh
-source "$SCRIPT_DIR/_sgt-drain.sh"
+# shellcheck source=bin/_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
 
 _die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 _info() { printf '  %s\n' "$*"; }
@@ -124,13 +122,39 @@ fi
 # ── Execute force-stop ────────────────────────────────────────────────────────
 
 any_failed=false
+_record_force_retirement() {
+  local repo_dir="$1" pane identity process_group stamp temporary
+  pane="$(tr -d '\n' < "$repo_dir/pane" 2>/dev/null || true)"
+  identity="$(_sgt_read_owned_file "$repo_dir/pane_identity" 2>/dev/null || true)"
+  process_group="$(tr -d '\n' < "$repo_dir/worker_process_group" 2>/dev/null || true)"
+  [[ -n "$pane" && -n "$identity" && "$process_group" =~ ^[1-9][0-9]*$ && \
+    -f "$repo_dir/pane_identity" && ! -L "$repo_dir/pane_identity" ]] || return 1
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  temporary="$repo_dir/worker_recycled.tmp.$$.$RANDOM"
+  (umask 077; {
+    printf 'pane=%s\n' "$pane"
+    printf 'identity=%s\n' "$identity"
+    printf 'process_group=%s\n' "$process_group"
+    printf 'outcome=marker_holders_retired\n'
+    printf 'recycled_at=%s\n' "$stamp"
+  } > "$temporary") || return 1
+  mv "$temporary" "$repo_dir/worker_recycled" || return 1
+  printf '%s\t%s\t%s\t%s\n' "$stamp" "$pane" "$identity" "$process_group" \
+    >> "$repo_dir/worker_recycled_log" 2>/dev/null || true
+}
+
 for ((i=0; i<count; i++)); do
   task_id="${eligible_tasks[$i]}"
   repo_name="${eligible_repos[$i]}"
   wt="${eligible_worktrees[$i]}"
   pid="${eligible_pids[$i]:-}"
   repo_dir="$fleet_dir/$task_id/$repo_name"
-  root_identity_matches=true
+  direct_signal_allowed=true
+  marker_evidence_present=false
+  if [[ -e "$repo_dir/worker_process_markers" || \
+    -L "$repo_dir/worker_process_markers" ]]; then
+    marker_evidence_present=true
+  fi
 
   if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]]; then
     if kill -0 "$pid" 2>/dev/null; then
@@ -139,23 +163,27 @@ for ((i=0; i<count; i++)); do
       recorded_start=""
       [[ -f "$repo_dir/worker_process_start" ]] && \
         recorded_start="$(tr -d '\n' < "$repo_dir/worker_process_start" 2>/dev/null || true)"
-      if [[ -n "$recorded_start" ]]; then
-        actual_start="$(_sgt_process_identity "$pid" 2>/dev/null || true)"
-        if [[ "$actual_start" != "$recorded_start" ]]; then
-          printf '  INFO: pid %s start-time mismatch for %s/%s (pid reused by another process; worker already gone)\n' \
+      actual_start="$(_sgt_process_identity "$pid" 2>/dev/null || true)"
+      if [[ -z "$recorded_start" || -z "$actual_start" || \
+        "$actual_start" != "$recorded_start" ]]; then
+          printf '  INFO: pid %s has no matching exact start identity for %s/%s; direct signal skipped\n' \
             "$pid" "$task_id" "$repo_name" >&2
           # The root is gone, but detached marker holders may remain. Never
           # publish force-stopped until their shared capability is retired.
-          root_identity_matches=false
-        fi
+          direct_signal_allowed=false
       fi
 
-      if $root_identity_matches && ! kill -TERM "$pid" 2>/dev/null; then
+      # Marker-owning workers are retired exclusively through the pidfd holder
+      # boundary below. This removes the check-then-kill PID reuse window and
+      # prevents TERM handlers from forking new descendants during force-stop.
+      $marker_evidence_present && direct_signal_allowed=false
+
+      if $direct_signal_allowed && ! kill -TERM "$pid" 2>/dev/null; then
         printf '  WARN: SIGTERM failed for pid %s (%s/%s)\n' "$pid" "$task_id" "$repo_name" >&2
         any_failed=true
         continue
       fi
-      if $root_identity_matches; then
+      if $direct_signal_allowed; then
         waited=0
         while [[ "$waited" -lt 50 ]]; do
           kill -0 "$pid" 2>/dev/null || break
@@ -175,6 +203,16 @@ for ((i=0; i<count; i++)); do
       "$task_id" "$repo_name" >&2
     any_failed=true
     continue
+  fi
+
+  if [[ -e "$repo_dir/worker_process_markers" || \
+    -L "$repo_dir/worker_process_markers" ]]; then
+    if ! _record_force_retirement "$repo_dir"; then
+      printf '  WARN: marker retirement completed but durable recycle evidence could not be published (%s/%s)\n' \
+        "$task_id" "$repo_name" >&2
+      any_failed=true
+      continue
+    fi
   fi
 
   if [[ -n "$wt" && -d "$wt" ]]; then

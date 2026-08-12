@@ -292,9 +292,11 @@ _sgt_dagr_advance() {
   fi
 }
 
-# _recycle_evidence_covers <repo_dir> <identity>
+# _recycle_evidence_covers <repo_dir> <identity> <process-group>
 #
-# 0 when the recorded recycle evidence names this exact pane identity.
+# 0 when the recorded recycle evidence names this exact pane identity and
+# either watcher-owned process-group retirement or force-owned marker-holder
+# retirement completed.
 #
 # worker_recycled used to be a permanent task-level marker: any non-empty content
 # meant "already recycled", it was stamped merely because the recorded pane was
@@ -309,7 +311,8 @@ _recycle_evidence_covers() {
   [[ -s "$repo_dir/worker_recycled" ]] || return 1
   grep -Fqx "identity=$identity" "$repo_dir/worker_recycled" 2>/dev/null &&
     grep -Fqx "process_group=$process_group" "$repo_dir/worker_recycled" 2>/dev/null &&
-    grep -Fqx 'outcome=process_group_stopped' "$repo_dir/worker_recycled" 2>/dev/null
+    grep -Eq '^outcome=(process_group_stopped|marker_holders_retired)$' \
+      "$repo_dir/worker_recycled" 2>/dev/null
 }
 
 # _record_recycle_evidence <repo_dir> <pane> <identity> <outcome>

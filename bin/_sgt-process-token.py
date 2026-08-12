@@ -233,7 +233,6 @@ def main():
         fail("invalid worker marker retirement request")
     markers = load_markers(sys.argv[2])
     retire(markers, load_expected(sys.argv[3]))
-    compact(sys.argv[2], markers)
 
 
 if __name__ == "__main__":

@@ -179,8 +179,10 @@ _worker_liveness() {
   local repo_dir="$1" pid recorded_start actual_start alive_rc marker_holders marker_rc=0
   _WORKER_PID="$(_fleet_read "$repo_dir/worker_pid")"
   _WORKER_LIVENESS="unverifiable"
-  marker_holders="$(_sgt_worker_marker_holders "$repo_dir" 2>/dev/null)" || marker_rc=$?
+  _WORKER_DIAGNOSTIC=""
+  marker_holders="$(_sgt_worker_marker_holders "$repo_dir" 2>&1)" || marker_rc=$?
   if [[ "$marker_rc" -ne 0 ]]; then
+    _WORKER_DIAGNOSTIC="$(printf '%s' "$marker_holders" | tr '\n' ' ')"
     return 0
   fi
   if [[ -n "$marker_holders" ]]; then
@@ -240,9 +242,6 @@ _unresolved_workers() {
       # before its exit-path handoff runs, so a worker claiming to be finished
       # can still be executing.  Those statuses are checked against liveness
       # below instead.
-      case "$status" in
-        orphaned|failed*) continue ;;
-      esac
       project="$(_fleet_read "$repo_dir/project")"
       if [[ "$scope" != "global" && -n "$project" ]]; then
         [[ "$project" == "$scope" ]] || continue
@@ -256,15 +255,18 @@ _unresolved_workers() {
       # process is not accepted.
       if [[ "$_WORKER_LIVENESS" == "unverifiable" ]]; then
         case "$status" in
-          done|drained) continue ;;
+          done|drained|orphaned|failed*)
+            [[ ! -e "$repo_dir/worker_process_markers" && \
+              ! -L "$repo_dir/worker_process_markers" ]] && continue
+            ;;
           force-stopped)
             [[ ! -f "$repo_dir/worker_process_markers" ]] && continue
             ;;
         esac
       fi
-      printf '%s/%s status=%s pid=%s liveness=%s project=%s\n' \
+      printf '%s/%s status=%s pid=%s liveness=%s project=%s%s\n' \
         "$task" "$repo" "${status:-unknown}" "$_WORKER_PID" "$_WORKER_LIVENESS" \
-        "${project:-unknown}"
+        "${project:-unknown}" "${_WORKER_DIAGNOSTIC:+ reason=$_WORKER_DIAGNOSTIC}"
     done
   done
 }

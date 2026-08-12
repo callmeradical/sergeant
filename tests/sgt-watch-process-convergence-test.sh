@@ -45,9 +45,10 @@ mkdir -p "$state" "$worktree"
 make_test_marker() {
   local marker_state="$1"
   marker_path="$(mktemp "$marker_state/.marker.XXXXXX")"
-  chmod 400 "$marker_path"
   marker_identity="$(stat -Lc '%d:%i' "$marker_path")"
   marker_generation="$(printf '%032x' "$RANDOM")"
+  printf '%s\n' "$marker_generation" > "$marker_path"
+  chmod 400 "$marker_path"
   marker_floor="$(awk '{ line=$0; sub(/^.*\) /, "", line); split(line,f," "); print f[20] }' "/proc/$$/stat")"
   printf '%s|%s|198|%s\n' "$marker_generation" "$marker_identity" "$marker_path" \
     > "$marker_state/worker_process_marker"

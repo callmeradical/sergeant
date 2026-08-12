@@ -223,6 +223,7 @@ printf '4141\n' > "$state/worker_pid"
 printf '4141\n' > "$state/worker_process_group"
 printf '4141\n' > "$state/worker_session_id"
 printf 'linux:999999999999998\n' > "$state/worker_process_start"
+printf '%032d|1:1|999999999999998\n' 1 > "$state/worker_process_markers"
 printf 'version=1\nidentity=0|%%41|4141|999999|worker\nprocess_group=4141\nsession_id=4141\nprocess_marker=%032d|1:1|198|/gone\nphase=retiring\nmember=4141|linux:999999999999998|1|4141|4141\n' 1 \
   > "$state/worker_recycle_phase"
 printf '%%41\n' >> "$LIVE_PANES"

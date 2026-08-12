@@ -68,7 +68,15 @@ _sgt_fd_identity() {
 # not be proved (including unreadable same-UID post-launch fd tables).
 _sgt_worker_marker_holders() {
   local repo_dir="$1" history="$1/worker_process_markers"
-  [[ -f "$history" && ! -L "$history" ]] || return 0
+  [[ ! -L "$history" ]] || {
+    printf 'worker process marker history is a symlink: %s\n' "$history" >&2
+    return 1
+  }
+  [[ ! -e "$history" || -f "$history" ]] || {
+    printf 'worker process marker history is not a regular file: %s\n' "$history" >&2
+    return 1
+  }
+  [[ -f "$history" ]] || return 0
   command -v python3 >/dev/null 2>&1 || return 1
   python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_sgt-process-token.py" \
     holders "$history"
@@ -82,7 +90,16 @@ _sgt_worker_marker_holders() {
 _sgt_retire_worker_marker_holders() {
   local repo_dir="$1" phase="${2:-/dev/null}" history
   history="$repo_dir/worker_process_markers"
-  [[ -s "$history" && ! -L "$history" ]] || return 0
+  [[ ! -L "$history" ]] || {
+    printf 'worker process marker history is a symlink: %s\n' "$history" >&2
+    return 1
+  }
+  [[ ! -e "$history" || -f "$history" ]] || {
+    printf 'worker process marker history is not a regular file: %s\n' "$history" >&2
+    return 1
+  }
+  [[ -f "$history" ]] || return 0
+  [[ -s "$history" ]] || return 0
   [[ -f "$phase" && ! -L "$phase" ]] || phase=/dev/null
   command -v python3 >/dev/null 2>&1 || return 1
   python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_sgt-process-token.py" \
