@@ -11,10 +11,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
+export SERGEANT_CONFIG="$TEST_ROOT/config"
+export SERGEANT_FLEET="$TEST_ROOT/fleet"
+export SGT_WIKI_DISABLED=1
 
 SYMLINK_BIN="$TEST_ROOT/installed-bin"
 NESTED_BIN="$TEST_ROOT/nested-bin"
-mkdir -p "$SYMLINK_BIN" "$NESTED_BIN"
+mkdir -p "$SYMLINK_BIN" "$NESTED_BIN" "$SERGEANT_CONFIG" "$SERGEANT_FLEET"
 
 # Symlink the entire bin/ tree into installed-bin (simulates 'make install').
 for _script in "$ROOT_DIR/bin"/sgt-* "$ROOT_DIR/bin"/_sgt-*.sh; do

@@ -15,6 +15,7 @@ fake_bin="$TEST_ROOT/fake-bin"
 config_dir="$TEST_ROOT/config"
 export SERGEANT_CONFIG="$config_dir"
 export SERGEANT_FLEET="$fleet"
+export SGT_WIKI_DISABLED=1
 
 mkdir -p "$repo_state" "$source_repo" "$fake_bin" "$config_dir"
 git -C "$source_repo" init -q
@@ -183,10 +184,18 @@ _setup_stalled_worker "$worktree"
 mkdir -p "$config_dir/drain"
 printf 'reason=other\ncreated=2025-01-01T00:00:00Z\n' > "$config_dir/drain/otherproject"
 
-EXPECTED_WORKER="$repo_state" KILL_LOG="$TEST_ROOT/killed-other.log" \
+set +e
+unrelated_output="$(EXPECTED_WORKER="$repo_state" KILL_LOG="$TEST_ROOT/killed-other.log" \
   TMUX_LOG="$TMUX_LOG" TD_LOG="$TD_LOG" \
   PATH="$fake_bin:$PATH" \
-  "$ROOT_DIR/bin/sgt-recover" task-1 app >/dev/null 2>&1
+  "$ROOT_DIR/bin/sgt-recover" task-1 app 2>&1)"
+unrelated_exit=$?
+set -e
+[[ "$unrelated_exit" -eq 0 ]] || {
+  printf 'sgt-recover unrelated drain: recovery failed: %s\n' \
+    "$unrelated_output" >&2
+  exit 1
+}
 
 # new-window should be called
 grep -qF 'new-window' "$TMUX_LOG" || {
