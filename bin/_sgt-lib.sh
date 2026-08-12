@@ -572,14 +572,36 @@ _sgt_validate_owned_fd() {
   [[ -n "$path" && -n "$modes" ]] || return 1
   python3 "$_SGT_LIB_DIR/_sgt-verify-owned-fd.py" "$fd" "$path" "$modes"
 }
+_sgt_read_owned_fd() {
+  local fd="$1" path="$2" modes="$3"
+  if [[ "$#" -eq 4 ]]; then
+    python3 "$_SGT_LIB_DIR/_sgt-verify-owned-fd.py" "$fd" "$path" "$modes" read "$4"
+  elif [[ "$#" -eq 3 ]]; then
+    python3 "$_SGT_LIB_DIR/_sgt-verify-owned-fd.py" "$fd" "$path" "$modes" read
+  else
+    return 1
+  fi
+}
 _sgt_owned_file_open_hook() {
-  local phase="$1"
+  local phase="$1" hook_root="${_SGT_OWNED_FILE_HOOK_ROOT:-}"
   shift
   [[ "${SGT_TEST_HOOKS:-}" == "1" && -n "${_SGT_OWNED_FILE_OPEN_HOOK:-}" ]] || return 0
-  [[ "$_SGT_OWNED_FILE_OPEN_HOOK" == /* && -f "$_SGT_OWNED_FILE_OPEN_HOOK" && \
+  [[ "$hook_root" == /* && -d "$hook_root" && ! -L "$hook_root" && -O "$hook_root" && \
+    "${_SGT_OWNED_FILE_OPEN_HOOK%/*}" == "$hook_root" && \
+    "$_SGT_OWNED_FILE_OPEN_HOOK" == /* && -f "$_SGT_OWNED_FILE_OPEN_HOOK" && \
     ! -L "$_SGT_OWNED_FILE_OPEN_HOOK" && -x "$_SGT_OWNED_FILE_OPEN_HOOK" && \
     -O "$_SGT_OWNED_FILE_OPEN_HOOK" ]] || return 1
   "$_SGT_OWNED_FILE_OPEN_HOOK" "$phase" "$@"
+}
+_sgt_owned_file_migrate_hook() {
+  local hook_root="${_SGT_OWNED_FILE_HOOK_ROOT:-}"
+  [[ "${SGT_TEST_HOOKS:-}" == "1" && -n "${_SGT_OWNED_FILE_MIGRATE_HOOK:-}" ]] || return 0
+  [[ "$hook_root" == /* && -d "$hook_root" && ! -L "$hook_root" && -O "$hook_root" && \
+    "${_SGT_OWNED_FILE_MIGRATE_HOOK%/*}" == "$hook_root" && \
+    "$_SGT_OWNED_FILE_MIGRATE_HOOK" == /* && -f "$_SGT_OWNED_FILE_MIGRATE_HOOK" && \
+    ! -L "$_SGT_OWNED_FILE_MIGRATE_HOOK" && -x "$_SGT_OWNED_FILE_MIGRATE_HOOK" && \
+    -O "$_SGT_OWNED_FILE_MIGRATE_HOOK" ]] || return 1
+  "$_SGT_OWNED_FILE_MIGRATE_HOOK" before-migrate "$1"
 }
 _sgt_read_owned_file() {
   local path="$1" mode value
@@ -592,8 +614,7 @@ _sgt_read_owned_file() {
     return 1
   }
   _sgt_owned_file_open_hook after-open "$path" || { exec 9<&-; return 1; }
-  _sgt_validate_owned_fd 9 "$path" 600 >/dev/null || { exec 9<&-; return 1; }
-  value="$(cat <&9)" || { exec 9<&-; return 1; }
+  value="$(_sgt_read_owned_fd 9 "$path" 600)" || { exec 9<&-; return 1; }
   _sgt_validate_owned_fd 9 "$path" 600 >/dev/null || { exec 9<&-; return 1; }
   exec 9<&-
   printf '%s\n' "$value"
@@ -610,10 +631,8 @@ _sgt_read_matching_legacy_pane_identity() {
     return 1
   }
   _sgt_owned_file_open_hook after-open "$path" || { exec 9<&-; return 1; }
+  value="$(_sgt_read_owned_fd 9 "$path" "$mode" "$actual")" || { exec 9<&-; return 1; }
   _sgt_validate_owned_fd 9 "$path" "$mode" >/dev/null || { exec 9<&-; return 1; }
-  value="$(cat <&9)" || { exec 9<&-; return 1; }
-  _sgt_validate_owned_fd 9 "$path" "$mode" >/dev/null || { exec 9<&-; return 1; }
-  [[ "$value" == "$actual" ]] || { exec 9<&-; return 1; }
   candidate="${path}.tmp.$$.$RANDOM.$RANDOM"
   (umask 077; set -C; printf '%s\n' "$value" > "$candidate") 2>/dev/null || {
     exec 9<&-
@@ -625,7 +644,8 @@ _sgt_read_matching_legacy_pane_identity() {
     return 1
   }
   # Bind the final pre-migration decision to the still-open legacy descriptor.
-  if ! _sgt_validate_owned_fd 9 "$path" "$mode" >/dev/null; then
+  if ! _sgt_owned_file_migrate_hook "$path" || \
+    ! _sgt_validate_owned_fd 9 "$path" "$mode" >/dev/null; then
     rm -f "$candidate"
     exec 9<&-
     return 1
@@ -661,8 +681,8 @@ _sgt_read_same_owned_files() {
   first_id="$(_sgt_validate_owned_fd 8 "$first" 600)" || { exec 8<&- 9<&-; return 1; }
   second_id="$(_sgt_validate_owned_fd 9 "$second" 600)" || { exec 8<&- 9<&-; return 1; }
   [[ "$first_id" == "$second_id" ]] || { exec 8<&- 9<&-; return 1; }
-  first_value="$(cat <&8)" || { exec 8<&- 9<&-; return 1; }
-  second_value="$(cat <&9)" || { exec 8<&- 9<&-; return 1; }
+  first_value="$(_sgt_read_owned_fd 8 "$first" 600)" || { exec 8<&- 9<&-; return 1; }
+  second_value="$(_sgt_read_owned_fd 9 "$second" 600)" || { exec 8<&- 9<&-; return 1; }
   first_id="$(_sgt_validate_owned_fd 8 "$first" 600)" || { exec 8<&- 9<&-; return 1; }
   second_id="$(_sgt_validate_owned_fd 9 "$second" 600)" || { exec 8<&- 9<&-; return 1; }
   [[ "$first_id" == "$second_id" ]] || { exec 8<&- 9<&-; return 1; }

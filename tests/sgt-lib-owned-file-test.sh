@@ -260,6 +260,81 @@ else
   _fail "_sgt_read_matching_legacy_pane_identity: symlink path should be rejected"
 fi
 
+# Legacy migration must compare the exact bytes on disk before replacing the
+# file.  Command substitution historically normalized each of these malformed
+# records into the expected value.
+_assert_malformed_legacy_rejected() {
+  local path="$1" label="$2" before status mode
+  before="$path.before"
+  cp -- "$path" "$before"
+  set +e
+  bash -c 'source "$1"; _sgt_read_matching_legacy_pane_identity "$2" "$3"' _ \
+    "$ROOT_DIR/bin/_sgt-lib.sh" "$path" '0|%42|4242|123456|worker-cmd' \
+    >/dev/null 2>&1
+  status=$?
+  set -e
+  mode=$(stat -c '%a' -- "$path" 2>/dev/null || stat -f '%Lp' "$path" 2>/dev/null)
+  if [[ "$status" -ne 0 && "$mode" == "644" ]] && cmp -s -- "$before" "$path"; then
+    _pass "_sgt_read_matching_legacy_pane_identity: $label rejected byte-exact"
+  else
+    _fail "_sgt_read_matching_legacy_pane_identity: $label should be rejected without mutation"
+  fi
+}
+
+malformed="$TEST_ROOT/legacy-extra-lf"
+printf '0|%%42|4242|123456|worker-cmd\n\n' > "$malformed"
+chmod 644 "$malformed"
+_assert_malformed_legacy_rejected "$malformed" "extra terminal LF"
+
+malformed="$TEST_ROOT/legacy-missing-lf"
+printf '0|%%42|4242|123456|worker-cmd' > "$malformed"
+chmod 644 "$malformed"
+_assert_malformed_legacy_rejected "$malformed" "missing terminal LF"
+
+malformed="$TEST_ROOT/legacy-nul"
+printf '0|%%42|4242|123456|worker-cmd\0\n' > "$malformed"
+chmod 644 "$malformed"
+_assert_malformed_legacy_rejected "$malformed" "NUL byte"
+
+malformed="$TEST_ROOT/legacy-control"
+printf '0|%%42|4242|123456|worker-cmd\001\n' > "$malformed"
+chmod 644 "$malformed"
+_assert_malformed_legacy_rejected "$malformed" "control byte"
+
+malformed="$TEST_ROOT/legacy-invalid-utf8"
+printf '0|%%42|4242|123456|worker-cmd\377\n' > "$malformed"
+chmod 644 "$malformed"
+_assert_malformed_legacy_rejected "$malformed" "malformed UTF-8"
+
+# The regular one-file and hardlink-pair readers use the same strict textual
+# record transport instead of silently normalizing extra newlines.
+malformed="$TEST_ROOT/owned-extra-lf"
+printf 'owned-value\n\n' > "$malformed"
+chmod 600 "$malformed"
+set +e
+bash -c 'source "$1"; _sgt_read_owned_file "$2"' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$malformed" >/dev/null 2>&1
+status=$?
+set -e
+if [[ "$status" -ne 0 ]]; then
+  _pass "_sgt_read_owned_file: extra terminal LF rejected byte-exact"
+else
+  _fail "_sgt_read_owned_file: extra terminal LF should be rejected"
+fi
+
+malformed_pair="$TEST_ROOT/pair-extra-lf"
+ln "$malformed" "$malformed_pair"
+set +e
+bash -c 'source "$1"; _sgt_read_same_owned_files "$2" "$3"' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$malformed" "$malformed_pair" >/dev/null 2>&1
+status=$?
+set -e
+if [[ "$status" -ne 0 ]]; then
+  _pass "_sgt_read_same_owned_files: extra terminal LF rejected byte-exact"
+else
+  _fail "_sgt_read_same_owned_files: extra terminal LF should be rejected"
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 
 # ── Descriptor-binding race regressions ──────────────────────────────────────────────────
@@ -283,12 +358,113 @@ printf '%s\n' \
   'done' > "$swap_hook"
 chmod 700 "$swap_hook"
 
+# A swap at the final migration boundary is rejected while the legacy fd is
+# still open; the candidate never replaces the newly observed path.
+migrate_hook="$TEST_ROOT/swap-before-migrate"
+# shellcheck disable=SC2016 # The generated hook expands these values at runtime.
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  '[[ "$1" == before-migrate ]]' \
+  'path="$2"' \
+  'mv -- "$path" "$path.trusted"' \
+  'mv -- "$path.forged" "$path"' > "$migrate_hook"
+chmod 700 "$migrate_hook"
+migrate_race="$TEST_ROOT/migrate-boundary"
+printf 'migration-value\n' > "$migrate_race"
+printf 'migration-value\n' > "$migrate_race.forged"
+chmod 644 "$migrate_race" "$migrate_race.forged"
+set +e
+SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
+  _SGT_OWNED_FILE_MIGRATE_HOOK="$migrate_hook" \
+  bash -c 'source "$1"; _sgt_read_matching_legacy_pane_identity "$2" migration-value' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$migrate_race" >/dev/null 2>&1
+status=$?
+set -e
+migrate_mode=$(stat -c '%a' -- "$migrate_race" 2>/dev/null || stat -f '%Lp' "$migrate_race" 2>/dev/null)
+trusted_mode=$(stat -c '%a' -- "$migrate_race.trusted" 2>/dev/null || \
+  stat -f '%Lp' "$migrate_race.trusted" 2>/dev/null)
+if [[ "$status" -ne 0 && "$migrate_mode" == "644" && "$trusted_mode" == "644" && \
+  "$(<"$migrate_race")" == "migration-value" && \
+  "$(<"$migrate_race.trusted")" == "migration-value" ]]; then
+  _pass "_sgt_read_matching_legacy_pane_identity: final migration swap rejected"
+else
+  _fail "_sgt_read_matching_legacy_pane_identity: final migration swap should fail closed"
+fi
+
+# Merely naming a hook never executes it; the explicit test flag and matching
+# test-root boundary are both required.
+hook_disabled="$TEST_ROOT/hook-disabled"
+printf 'trusted-disabled\n' > "$hook_disabled"
+printf 'forged-disabled\n' > "$hook_disabled.forged"
+chmod 600 "$hook_disabled" "$hook_disabled.forged"
+set +e
+result=$(_SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" _SGT_OWNED_FILE_OPEN_HOOK="$swap_hook" \
+  bash -c 'source "$1"; _sgt_read_owned_file "$2"' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$hook_disabled")
+status=$?
+set -e
+if [[ "$status" -eq 0 && "$result" == "trusted-disabled" && \
+  ! -e "$hook_disabled.trusted" && ! -e "$hook_disabled.forged-held" ]]; then
+  _pass "owned-file test hook: disabled without SGT_TEST_HOOKS=1"
+else
+  _fail "owned-file test hook: executed without explicit test enablement"
+fi
+
+# The descriptor verifier rejects malformed numeric and mode arguments rather
+# than allowing them to influence Python or shell parsing.
+set +e
+bash -c 'source "$1"; exec 9< "$2"; _sgt_validate_owned_fd nope "$2" 600' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$hook_disabled" >/dev/null 2>&1
+invalid_fd_status=$?
+bash -c 'source "$1"; exec 9< "$2"; _sgt_validate_owned_fd 9 "$2" "600;echo forged"' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$hook_disabled" >/dev/null 2>&1
+invalid_mode_status=$?
+set -e
+if [[ "$invalid_fd_status" -ne 0 && "$invalid_mode_status" -ne 0 ]]; then
+  _pass "owned-file descriptor verifier: invalid fd and mode rejected"
+else
+  _fail "owned-file descriptor verifier: malformed arguments should fail closed"
+fi
+
+# Successful public calls close every fixed descriptor before returning.
+fd_one="$TEST_ROOT/fd-close-one"
+printf 'fd-one\n' > "$fd_one"
+chmod 600 "$fd_one"
+fd_pair_first="$TEST_ROOT/fd-close-pair-first"
+fd_pair_second="$TEST_ROOT/fd-close-pair-second"
+printf 'fd-pair\n' > "$fd_pair_first"
+chmod 600 "$fd_pair_first"
+ln "$fd_pair_first" "$fd_pair_second"
+fd_legacy="$TEST_ROOT/fd-close-legacy"
+printf 'legacy-fd\n' > "$fd_legacy"
+chmod 644 "$fd_legacy"
+set +e
+bash -c '
+  source "$1"
+  _sgt_read_owned_file "$2" >/dev/null || exit 70
+  if : 2>/dev/null <&9; then exit 71; fi
+  _sgt_read_same_owned_files "$3" "$4" >/dev/null || exit 72
+  if : 2>/dev/null <&8 || : 2>/dev/null <&9; then exit 73; fi
+  _sgt_read_matching_legacy_pane_identity "$5" legacy-fd >/dev/null || exit 74
+  if : 2>/dev/null <&9; then exit 75; fi
+' _ "$ROOT_DIR/bin/_sgt-lib.sh" "$fd_one" "$fd_pair_first" "$fd_pair_second" \
+  "$fd_legacy" >/dev/null 2>&1
+status=$?
+set -e
+if [[ "$status" -eq 0 ]]; then
+  _pass "owned-file readers: fixed descriptors closed after successful calls"
+else
+  _fail "owned-file readers: leaked fd 8 or 9 (status=$status)"
+fi
+
 race_one="$TEST_ROOT/race-one"
 printf 'trusted-one\n' > "$race_one"
 printf 'forged-one\n' > "$race_one.forged"
 chmod 600 "$race_one" "$race_one.forged"
 set +e
-SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_OPEN_HOOK="$swap_hook" \
+SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
+  _SGT_OWNED_FILE_OPEN_HOOK="$swap_hook" \
   bash -c 'source "$1"; _sgt_read_owned_file "$2"' _ \
   "$ROOT_DIR/bin/_sgt-lib.sh" "$race_one" >/dev/null 2>&1
 status=$?
@@ -305,7 +481,8 @@ printf '%s\n' "$legacy_value" > "$race_legacy"
 printf '%s\n' "$legacy_value" > "$race_legacy.forged"
 chmod 644 "$race_legacy" "$race_legacy.forged"
 set +e
-SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_OPEN_HOOK="$swap_hook" \
+SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
+  _SGT_OWNED_FILE_OPEN_HOOK="$swap_hook" \
   bash -c 'source "$1"; _sgt_read_matching_legacy_pane_identity "$2" "$3"' _ \
   "$ROOT_DIR/bin/_sgt-lib.sh" "$race_legacy" "$legacy_value" >/dev/null 2>&1
 status=$?
@@ -325,7 +502,8 @@ printf 'forged-pair\n' > "$race_first.forged"
 ln "$race_first.forged" "$race_second.forged"
 chmod 600 "$race_first" "$race_first.forged"
 set +e
-SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_OPEN_HOOK="$swap_hook" \
+SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
+  _SGT_OWNED_FILE_OPEN_HOOK="$swap_hook" \
   bash -c 'source "$1"; _sgt_read_same_owned_files "$2" "$3"' _ \
   "$ROOT_DIR/bin/_sgt-lib.sh" "$race_first" "$race_second" >/dev/null 2>&1
 status=$?
