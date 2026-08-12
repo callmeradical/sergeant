@@ -3,11 +3,13 @@
 
 import json
 import hashlib
+import errno
 import os
 from pathlib import Path
 import re
 import selectors
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -231,26 +233,68 @@ def completed_return_evidence(evicted, retained, raw_prefix):
                 attempt["raw_path"] in retained_paths):
             raise SystemExit("unsafe completed Treehouse evidence path")
         candidates.extend((raw, Path(str(raw) + ".stderr")))
-    metadata = []
-    for candidate in candidates:
-        if not candidate.exists() and not candidate.is_symlink():
-            continue
-        info = candidate.lstat()
-        if (candidate.is_symlink() or not candidate.is_file() or
-                info.st_uid != os.getuid() or info.st_nlink != 1):
-            raise SystemExit("unsafe completed Treehouse evidence file")
-        metadata.append((candidate, info.st_dev, info.st_ino))
-    return metadata
+    bindings = []
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
+    try:
+        for candidate in candidates:
+            try:
+                descriptor = os.open(candidate, flags)
+            except OSError as error:
+                if error.errno == errno.ENOENT:
+                    continue
+                raise SystemExit(
+                    "unsafe completed Treehouse evidence file") from error
+            try:
+                descriptor_info = os.fstat(descriptor)
+                path_info = candidate.lstat()
+                if (not stat.S_ISREG(descriptor_info.st_mode) or
+                        not stat.S_ISREG(path_info.st_mode) or
+                        descriptor_info.st_uid != os.getuid() or
+                        descriptor_info.st_nlink != 1 or
+                        (path_info.st_dev, path_info.st_ino) !=
+                        (descriptor_info.st_dev, descriptor_info.st_ino)):
+                    raise SystemExit(
+                        "unsafe completed Treehouse evidence file")
+            except OSError as error:
+                os.close(descriptor)
+                raise SystemExit(
+                    "unsafe completed Treehouse evidence file") from error
+            except BaseException:
+                os.close(descriptor)
+                raise
+            bindings.append((candidate, descriptor))
+    except BaseException:
+        close_completed_return_evidence(bindings)
+        raise
+    return bindings
 
 
-def remove_completed_return_evidence(metadata):
-    for candidate, expected_dev, expected_ino in metadata:
-        info = candidate.lstat()
-        if (candidate.is_symlink() or not candidate.is_file() or
-                info.st_uid != os.getuid() or info.st_nlink != 1 or
-                (info.st_dev, info.st_ino) != (expected_dev, expected_ino)):
+def close_completed_return_evidence(bindings):
+    first_error = None
+    for _, descriptor in bindings:
+        try:
+            os.close(descriptor)
+        except OSError as error:
+            if first_error is None:
+                first_error = error
+    if first_error is not None:
+        raise first_error
+
+
+def remove_completed_return_evidence(bindings):
+    for candidate, descriptor in bindings:
+        descriptor_info = os.fstat(descriptor)
+        path_info = candidate.lstat()
+        if (not stat.S_ISREG(descriptor_info.st_mode) or
+                not stat.S_ISREG(path_info.st_mode) or
+                descriptor_info.st_uid != os.getuid() or
+                descriptor_info.st_nlink != 1 or
+                (path_info.st_dev, path_info.st_ino) !=
+                (descriptor_info.st_dev, descriptor_info.st_ino)):
             raise SystemExit("completed Treehouse evidence changed before deletion")
         candidate.unlink()
+        if os.fstat(descriptor).st_nlink != 0:
+            raise SystemExit("completed Treehouse evidence changed during deletion")
 
 
 def append_receipt(path, attempt, raw_prefix):
@@ -295,10 +339,13 @@ def append_receipt(path, attempt, raw_prefix):
                "count_saturated": saturated, "history_sha256": digest,
                "identity": receipt["identity"], "attempts": attempts}
     deletion_plan = []
-    if attempt.get("operation") == "return":
-        deletion_plan = completed_return_evidence(evicted, attempts, raw_prefix)
-    atomic_json(target, updated)
-    remove_completed_return_evidence(deletion_plan)
+    try:
+        if attempt.get("operation") == "return":
+            deletion_plan = completed_return_evidence(evicted, attempts, raw_prefix)
+        atomic_json(target, updated)
+        remove_completed_return_evidence(deletion_plan)
+    finally:
+        close_completed_return_evidence(deletion_plan)
 
 
 def finish_receipt(path, raw_prefix, attempt_id, returncode, stdout_overflow,
