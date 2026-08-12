@@ -156,7 +156,6 @@ for ((i=0; i<count; i++)); do
   root_identity_unproven=false
   marker_evidence_present=false
   process_marker=""
-  marker_history=""
   marker_history_digest=""
   if [[ -e "$repo_dir/worker_process_markers" || \
     -L "$repo_dir/worker_process_markers" ]]; then
@@ -165,19 +164,11 @@ for ((i=0; i<count; i++)); do
   if $marker_evidence_present; then
     process_marker="$(_sgt_read_owned_file \
       "$repo_dir/worker_process_marker" 2>/dev/null || true)"
-    marker_history="$(_sgt_read_owned_file \
-      "$repo_dir/worker_process_markers" 2>/dev/null || true)"
-    marker_history_digest="$(printf '%s' "$marker_history" | \
-      _sgt_sha256_text 2>/dev/null || true)"
+    marker_history_digest="$(_sgt_marker_history_digest \
+      "$repo_dir/worker_process_markers" "$process_marker" 2>/dev/null || true)"
     if [[ ! "$process_marker" =~ ^[0-9a-f]{32}\|[0-9]+:[0-9]+\|198\|.+$ || \
-      -z "$marker_history" || ! "$marker_history_digest" =~ ^[0-9a-f]{64}$ ]]; then
+      ! "$marker_history_digest" =~ ^[0-9a-f]{64}$ ]]; then
       printf '  WARN: marker retirement evidence is malformed (%s/%s); prior state preserved\n' \
-        "$task_id" "$repo_name" >&2
-      any_failed=true
-      continue
-    fi
-    if ! _sgt_marker_record_in_history "$process_marker" "$marker_history"; then
-      printf '  WARN: current marker generation is absent from durable history (%s/%s); prior state preserved\n' \
         "$task_id" "$repo_name" >&2
       any_failed=true
       continue

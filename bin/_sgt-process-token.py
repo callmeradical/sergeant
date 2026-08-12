@@ -23,8 +23,21 @@ def stat_fields(pid):
 
 def load_markers(path, allow_empty=False):
     markers = {}
-    for line in open(path, encoding="ascii"):
-        match = MARKER_RE.fullmatch(line.strip())
+    data = open(path, "rb").read(8193)
+    if len(data) > 8192:
+        fail("worker process marker history exceeds 8192 bytes")
+    if not data:
+        if allow_empty:
+            return markers
+        fail("worker process marker history is empty")
+    if not data.endswith(b"\n") or data.endswith(b"\n\n"):
+        fail("worker process marker history requires exactly one terminal LF")
+    try:
+        lines = data[:-1].decode("ascii", "strict").split("\n")
+    except UnicodeDecodeError:
+        fail("worker process marker history is not canonical ASCII")
+    for line in lines:
+        match = MARKER_RE.fullmatch(line)
         if not match:
             fail("malformed durable worker process marker history")
         generation = line.split("|", 1)[0]
@@ -34,8 +47,6 @@ def load_markers(path, allow_empty=False):
         if prior is not None and prior != (generation, floor):
             fail("worker process marker identity is reused across generations")
         markers[identity] = (generation, floor)
-    if not markers and not allow_empty:
-        fail("worker process marker history is empty")
     return markers
 
 

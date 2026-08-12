@@ -307,7 +307,7 @@ _sgt_dagr_advance() {
 # malformed marker prove nothing.
 _recycle_evidence_covers() {
   local repo_dir="$1" identity="$2" process_group="$3"
-  local record pane outcome recycled_at process_marker history history_digest expected
+  local record pane outcome recycled_at process_marker history_digest expected
   [[ -n "$identity" ]] || return 1
   record="$(_sgt_read_owned_file "$repo_dir/worker_recycled" 2>/dev/null || true)"
   [[ -n "$record" ]] || return 1
@@ -323,11 +323,9 @@ _recycle_evidence_covers() {
     marker_holders_retired)
       process_marker="$(_sgt_read_owned_file \
         "$repo_dir/worker_process_marker" 2>/dev/null || true)"
-      history="$(_sgt_read_owned_file \
-        "$repo_dir/worker_process_markers" 2>/dev/null || true)"
-      [[ -n "$process_marker" && -n "$history" ]] || return 1
-      _sgt_marker_record_in_history "$process_marker" "$history" || return 1
-      history_digest="$(printf '%s' "$history" | _sgt_sha256_text 2>/dev/null || true)"
+      [[ -n "$process_marker" ]] || return 1
+      history_digest="$(_sgt_marker_history_digest \
+        "$repo_dir/worker_process_markers" "$process_marker" 2>/dev/null || true)"
       recycled_at="$(sed -n '7s/^recycled_at=//p' <<< "$record")"
       [[ "$history_digest" =~ ^[0-9a-f]{64}$ && \
         "$recycled_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1

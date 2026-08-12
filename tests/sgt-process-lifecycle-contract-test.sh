@@ -145,6 +145,34 @@ kill -0 "$unrelated"
 [[ "$(cat "$unrelated_repo/status")" == in_progress ]]
 kill -KILL "$unrelated" 2>/dev/null || true
 wait "$unrelated" 2>/dev/null || true
+printf 'orphaned\n' > "$unrelated_repo/status"
+
+# Retirement proof hashes exact canonical bytes. The valid history with one LF
+# must not collide with the same visible line followed by a second LF, and no
+# noncanonical extra line may be ignored.
+history_line="$(cat "$repo/worker_process_markers")"
+printf 'in_progress\n' > "$repo/status"
+printf '%s\n\n' "$history_line" > "$repo/worker_process_markers"
+set +e
+normalization_output="$(SERGEANT_FLEET="$TEST_ROOT/fleet" SERGEANT_DRAIN_DIR="$TEST_ROOT/drain" \
+  "$ROOT/bin/sgt-drain-force" --global --yes 2>&1)"
+normalization_status=$?
+set -e
+[[ "$normalization_status" -ne 0 && \
+  "$normalization_output" == *'marker retirement evidence is malformed'* ]]
+[[ "$(cat "$repo/status")" == in_progress ]]
+
+printf '%s\nnoncanonical-extra\n' "$history_line" > "$repo/worker_process_markers"
+set +e
+extra_output="$(SERGEANT_FLEET="$TEST_ROOT/fleet" SERGEANT_DRAIN_DIR="$TEST_ROOT/drain" \
+  "$ROOT/bin/sgt-drain-force" --global --yes 2>&1)"
+extra_status=$?
+set -e
+[[ "$extra_status" -ne 0 && \
+  "$extra_output" == *'marker retirement evidence is malformed'* ]]
+[[ "$(cat "$repo/status")" == in_progress ]]
+printf '%s\n' "$history_line" > "$repo/worker_process_markers"
+printf 'force-stopped\n' > "$repo/status"
 
 # Cleanup uses the same proof boundary. An unreadable same-UID holder makes the
 # outcome ambiguous, so neither fleet nor marker evidence may be deleted.
