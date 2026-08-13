@@ -877,6 +877,146 @@ set -e
 printf '%s\n' "$original_worktree" > "$repo_state/worktree"
 printf '1\n' > "$original_worktree/.sergeant-gate-generation"
 
+# A terminal wake transaction for gate 2 can archive a complete response left
+# at gate 1, publish the exact terminal response, and record auditable apply
+# evidence. This exercises the public sgt-respond reconciliation seam rather
+# than deleting stale transport in the test fixture.
+printf 'needs_input\n' > "$repo_state/status"
+printf 'needs_input\n' > "$worktree/.sergeant-status"
+printf '2\n' > "$worktree/.sergeant-gate-generation"
+old_response_id=11111111111111111111111111111111
+printf 'old gate response\n' > "$repo_state/response"
+cp "$repo_state/response" "$worktree/.sergeant-response"
+printf '1\n' > "$repo_state/response_generation"
+printf '1\n' > "$worktree/.sergeant-response-generation"
+printf '%s\n' "$old_response_id" > "$repo_state/response_id"
+printf '%s\n' "$old_response_id" > "$worktree/.sergeant-response-id"
+rm -f "$repo_state/notification_id" "$repo_state/notification_target" \
+  "$repo_state/response_relaunch_transaction" "$repo_state/response_successor_notification"
+wake_terminal="$repo_state/wake_terminal/2"
+mkdir -p "$wake_terminal"
+printf 'kind=not_before\ngeneration=2\nnot_before=1\n' > \
+  "$worktree/.sergeant-wake-condition"
+printf 'terminal gate response\n' > "$wake_terminal/response"
+if command -v sha256sum >/dev/null 2>&1; then
+  wake_response_digest="$(sha256sum "$wake_terminal/response" | awk '{print $1}')"
+else
+  wake_response_digest="$(shasum -a 256 "$wake_terminal/response" | awk '{print $1}')"
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+  wake_condition_digest="$(sha256sum "$worktree/.sergeant-wake-condition" | awk '{print $1}')"
+else
+  wake_condition_digest="$(shasum -a 256 "$worktree/.sergeant-wake-condition" | awk '{print $1}')"
+fi
+cat > "$wake_terminal/manifest" <<EOF
+version=1
+kind=not_before
+gate_generation=2
+condition_sha256=$wake_condition_digest
+response_sha256=$wake_response_digest
+EOF
+printf 'not_before condition met\n' > "$wake_terminal/evidence"
+set +e
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/wake-terminal-interrupted.log" \
+  TD_LOG="$TEST_ROOT/wake-terminal-interrupted-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  SGT_TEST_HOOKS=1 SGT_TEST_RESPOND_WAKE_INTERRUPT_AT=stale_archived \
+  SGT_WAKE_TERMINAL_DIR="$wake_terminal" \
+  "$ROOT_DIR/bin/sgt-respond" task-1 app < "$wake_terminal/response" >/dev/null 2>&1
+wake_interrupted_status=$?
+set -e
+[[ "$wake_interrupted_status" -ne 0 ]]
+[[ -f "$wake_terminal/stale_response/1-$old_response_id/response" ]]
+[[ "$(cat "$repo_state/response_generation")" == 1 ]]
+
+# Once the stale archive is durable, bind one new response identity and prove
+# every possible prefix of the six-file current transport can be reconciled by
+# rerunning the public command. No prefix may be mistaken for ambiguous stale
+# transport, and no retry may mint a second response identity.
+current_response_id=22222222222222222222222222222222
+printf 'response_id=%s\ngate_generation=1\n' "$old_response_id" > \
+  "$wake_terminal/stale_response_reconciled"
+rm -f "$repo_state/response" "$repo_state/response_generation" "$repo_state/response_id" \
+  "$worktree/.sergeant-response" "$worktree/.sergeant-response-generation" \
+  "$worktree/.sergeant-response-id"
+printf '%s\n' "$current_response_id" > "$wake_terminal/response_id"
+for publication_prefix in 0 1 2 3 4 5; do
+  (( publication_prefix < 1 )) || printf '2\n' > "$repo_state/response_generation"
+  (( publication_prefix < 2 )) || printf '%s\n' "$current_response_id" > "$repo_state/response_id"
+  (( publication_prefix < 3 )) || printf '2\n' > "$worktree/.sergeant-response-generation"
+  (( publication_prefix < 4 )) || printf '%s\n' "$current_response_id" > "$worktree/.sergeant-response-id"
+  (( publication_prefix < 5 )) || cp "$wake_terminal/response" "$repo_state/response"
+
+  set +e
+  PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/wake-prefix-$publication_prefix.log" \
+    TD_LOG="$TEST_ROOT/wake-prefix-$publication_prefix-td.log" \
+    TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 \
+    EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" SGT_TEST_HOOKS=1 \
+    SGT_TEST_RESPOND_WAKE_INTERRUPT_AT=response_bound \
+    SGT_WAKE_TERMINAL_DIR="$wake_terminal" \
+    "$ROOT_DIR/bin/sgt-respond" task-1 app < "$wake_terminal/response" >/dev/null 2>&1
+  wake_prefix_status=$?
+  set -e
+  [[ "$wake_prefix_status" -ne 0 ]]
+  [[ "$(cat "$repo_state/response_generation")" == 2 &&
+     "$(cat "$worktree/.sergeant-response-generation")" == 2 &&
+     "$(cat "$repo_state/response_id")" == "$current_response_id" &&
+     "$(cat "$worktree/.sergeant-response-id")" == "$current_response_id" ]]
+  cmp "$repo_state/response" "$wake_terminal/response"
+  cmp "$worktree/.sergeant-response" "$wake_terminal/response"
+  [[ "$(cat "$wake_terminal/response_id")" == "$current_response_id" ]]
+  rm -f "$repo_state/response" "$repo_state/response_generation" "$repo_state/response_id" \
+    "$worktree/.sergeant-response" "$worktree/.sergeant-response-generation" \
+    "$worktree/.sergeant-response-id"
+done
+
+# A crash after td provenance but before transport publication must not mint a
+# second response identity. The immutable terminal record owns the ID before
+# any audit side effect, and the retry reuses it without logging a new decision.
+rm -f "$wake_terminal/response_id" "$wake_terminal/applied" \
+  "$repo_state/response" "$repo_state/response_generation" "$repo_state/response_id" \
+  "$worktree/.sergeant-response" "$worktree/.sergeant-response-generation" \
+  "$worktree/.sergeant-response-id"
+set +e
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/wake-terminal-td-bound.log" \
+  TD_LOG="$TEST_ROOT/wake-terminal-td-bound-td.log" \
+  TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 \
+  EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" SGT_TEST_HOOKS=1 \
+  SGT_TEST_RESPOND_WAKE_INTERRUPT_AT=td_recorded \
+  SGT_WAKE_TERMINAL_DIR="$wake_terminal" \
+  "$ROOT_DIR/bin/sgt-respond" task-1 app < "$wake_terminal/response" >/dev/null 2>&1
+wake_td_recorded_status=$?
+set -e
+[[ "$wake_td_recorded_status" -ne 0 ]]
+wake_td_bound_id="$(cat "$wake_terminal/response_id")"
+[[ "$wake_td_bound_id" =~ ^[a-f0-9]{32}$ ]]
+[[ ! -e "$repo_state/response" && ! -e "$worktree/.sergeant-response" ]]
+
+set +e
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/wake-terminal-bound.log" \
+  TD_LOG="$TEST_ROOT/wake-terminal-bound-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  SGT_TEST_HOOKS=1 SGT_TEST_RESPOND_WAKE_INTERRUPT_AT=response_bound \
+  SGT_WAKE_TERMINAL_DIR="$wake_terminal" \
+  "$ROOT_DIR/bin/sgt-respond" task-1 app < "$wake_terminal/response" >/dev/null 2>&1
+wake_bound_status=$?
+set -e
+[[ "$wake_bound_status" -ne 0 ]]
+[[ "$(cat "$repo_state/response_generation")" == 2 ]]
+[[ -f "$wake_terminal/response_id" && ! -e "$wake_terminal/applied" ]]
+[[ "$(cat "$wake_terminal/response_id")" == "$wake_td_bound_id" ]]
+
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/wake-terminal.log" \
+  TD_LOG="$TEST_ROOT/wake-terminal-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  SGT_WAKE_TERMINAL_DIR="$wake_terminal" \
+  "$ROOT_DIR/bin/sgt-respond" task-1 app < "$wake_terminal/response" >/dev/null
+[[ "$(cat "$repo_state/response_generation")" == 2 ]]
+[[ -f "$wake_terminal/response_id" && -f "$wake_terminal/applied" ]]
+grep -Fq "response_id=$old_response_id" "$wake_terminal/stale_response_reconciled"
+cmp "$wake_terminal/stale_response/1-$old_response_id/response" \
+  <(printf 'old gate response\n')
+
 printf 'needs_input\n' > "$repo_state/status"
 printf 'needs_input\n' > "$worktree/.sergeant-status"
 rm -f "$worktree/.sergeant-response" "$worktree/.sergeant-response-generation" \

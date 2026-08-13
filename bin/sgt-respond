@@ -335,6 +335,7 @@ _publish_local_response_transport() {
   local response_file="$1"
   local response_id="$2"
   local gate_generation="$3"
+  _wake_terminal_bind_response
   _atomic_write "$REPO_DIR/response_generation" "$gate_generation"
   _atomic_write "$REPO_DIR/response_id" "$response_id"
   rm -f "$worktree/.sergeant-response-ack"
@@ -390,6 +391,211 @@ fi
 [[ "$gate_generation" =~ ^[1-9][0-9]*$ ]] || \
   _die "Worker gate generation is missing or invalid; response was not published"
 
+# Wake-triggered responses carry an immutable observation owned by this exact
+# repository and gate. Validate it while response ownership is held and bind
+# the eventual response identity back into that record. This same transaction
+# may archive coherent transport from an older gate; torn or future transport
+# remains untouched and fails closed.
+wake_terminal_dir="${SGT_WAKE_TERMINAL_DIR:-}"
+wake_terminal_active=false
+_wake_terminal_manifest_field() {
+  sed -n "s/^$1=//p" "$wake_terminal_dir/manifest" 2>/dev/null
+}
+_wake_terminal_validate() {
+  local expected="$REPO_DIR/wake_terminal/$gate_generation"
+  local condition="$worktree/.sergeant-wake-condition"
+  local condition_digest condition_generation condition_kind manifest_kind
+  local response_digest recorded_digest
+  [[ -n "$wake_terminal_dir" && "$wake_terminal_dir" == "$expected" &&
+     -d "$REPO_DIR/wake_terminal" && ! -L "$REPO_DIR/wake_terminal" &&
+     -d "$wake_terminal_dir" && ! -L "$wake_terminal_dir" &&
+     -f "$wake_terminal_dir/manifest" && ! -L "$wake_terminal_dir/manifest" &&
+     -f "$wake_terminal_dir/evidence" && ! -L "$wake_terminal_dir/evidence" &&
+     -f "$wake_terminal_dir/response" && ! -L "$wake_terminal_dir/response" &&
+     -f "$condition" && ! -L "$condition" ]] || return 1
+  condition_kind="$(sed -n 's/^[[:space:]]*kind[[:space:]]*=[[:space:]]*//p' "$condition")"
+  condition_generation="$(sed -n 's/^[[:space:]]*generation[[:space:]]*=[[:space:]]*//p' "$condition")"
+  condition_digest="$(_sgt_sha256_stream < "$condition")" || return 1
+  manifest_kind="$(_wake_terminal_manifest_field kind)"
+  [[ "$(_wake_terminal_manifest_field version)" == 1 &&
+     "$(_wake_terminal_manifest_field gate_generation)" == "$gate_generation" &&
+     "$(_wake_terminal_manifest_field condition_sha256)" == "$condition_digest" &&
+     "$manifest_kind" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ &&
+     "$manifest_kind" == "$condition_kind" &&
+     "$condition_generation" == "$gate_generation" ]] || return 1
+  recorded_digest="$(_wake_terminal_manifest_field response_sha256)"
+  [[ "$recorded_digest" =~ ^[a-f0-9]{64}$ ]] || return 1
+  response_digest="$(_sgt_sha256_stream < "$wake_terminal_dir/response")" || return 1
+  [[ "$response_digest" == "$recorded_digest" &&
+     "$(_sgt_sha256_stream < "$RESPONSE_INPUT")" == "$recorded_digest" ]]
+}
+_wake_terminal_write_once() {
+  local target="$1" value="$2" temporary="$1.tmp.$$.$RANDOM"
+  printf '%s\n' "$value" > "$temporary" || return 1
+  if [[ -e "$target" ]]; then
+    cmp -s "$temporary" "$target" || { rm -f "$temporary"; return 1; }
+    rm -f "$temporary"
+    return 0
+  fi
+  if ! ln "$temporary" "$target" 2>/dev/null; then
+    if [[ ! -e "$target" ]] || ! cmp -s "$temporary" "$target"; then
+      rm -f "$temporary"
+      return 1
+    fi
+  fi
+  rm -f "$temporary"
+}
+_wake_terminal_bind_response() {
+  [[ "$wake_terminal_active" == true ]] || return 0
+  _wake_terminal_write_once "$wake_terminal_dir/response_id" "$response_id" || \
+    _die "Terminal wake response identity conflicts with preserved evidence"
+}
+_wake_terminal_mark_applied() {
+  [[ "$wake_terminal_active" == true ]] || return 0
+  _wake_terminal_bind_response
+  _wake_terminal_write_once "$wake_terminal_dir/applied" \
+    "response_id=$response_id
+gate_generation=$gate_generation" || \
+    _die "Terminal wake apply marker conflicts with preserved evidence"
+}
+_wake_terminal_archive_stale_response() {
+  local old_generation old_id archive archive_tmp archived archived_count=0
+  local archived_generation archived_id path value
+  # If a prior invocation published the immutable archive and died while
+  # retiring old transport, the archive is sufficient recovery proof. Every
+  # surviving fragment must still agree with it; otherwise ownership is
+  # ambiguous and nothing is removed.
+  for archived in "$wake_terminal_dir/stale_response/"*; do
+    [[ -d "$archived" && ! -L "$archived" ]] || continue
+    archived_count=$((archived_count + 1))
+    archive="$archived"
+  done
+  if (( archived_count > 1 )); then
+    _die "Multiple stale response archives make wake reconciliation ambiguous"
+  fi
+  if (( archived_count == 1 )); then
+    archived_generation="$(cat "$archive/gate_generation" 2>/dev/null || true)"
+    archived_id="$(cat "$archive/response_id" 2>/dev/null || true)"
+    [[ "$archived_generation" =~ ^[1-9][0-9]*$ &&
+       "$archived_generation" -lt "$gate_generation" &&
+       "$archived_id" =~ ^[a-f0-9]{32}$ &&
+       -f "$archive/response" && ! -L "$archive/response" ]] || \
+      _die "Stale response archive is malformed"
+    if [[ -f "$wake_terminal_dir/stale_response_reconciled" &&
+          "$(sed -n 's/^response_id=//p' "$wake_terminal_dir/stale_response_reconciled")" == "$archived_id" &&
+          "$(sed -n 's/^gate_generation=//p' "$wake_terminal_dir/stale_response_reconciled")" == "$archived_generation" &&
+          ( "$(cat "$REPO_DIR/response_generation" 2>/dev/null || true)" == "$gate_generation" ||
+            -f "$wake_terminal_dir/response_id" ) ]]; then
+      return 0
+    fi
+    for path in "$REPO_DIR/response" "$worktree/.sergeant-response"; do
+      [[ ! -e "$path" ]] || { [[ -f "$path" && ! -L "$path" ]] && cmp -s "$path" "$archive/response"; } || \
+        _die "Surviving stale response body conflicts with its archive"
+    done
+    for path in "$REPO_DIR/response_generation" "$worktree/.sergeant-response-generation"; do
+      [[ ! -e "$path" ]] || {
+        value="$(cat "$path" 2>/dev/null || true)"
+        [[ "$value" == "$archived_generation" ]]
+      } || _die "Surviving stale response generation conflicts with its archive"
+    done
+    for path in "$REPO_DIR/response_id" "$worktree/.sergeant-response-id"; do
+      [[ ! -e "$path" ]] || {
+        value="$(cat "$path" 2>/dev/null || true)"
+        [[ "$value" == "$archived_id" ]]
+      } || _die "Surviving stale response identity conflicts with its archive"
+    done
+    rm -f "$REPO_DIR/response" "$REPO_DIR/response_generation" "$REPO_DIR/response_id" \
+      "$worktree/.sergeant-response" "$worktree/.sergeant-response-generation" \
+      "$worktree/.sergeant-response-id" "$worktree/.sergeant-response-ack"
+    _wake_terminal_write_once "$wake_terminal_dir/stale_response_reconciled" \
+      "response_id=$archived_id
+gate_generation=$archived_generation" || \
+      _die "Stale response reconciliation marker conflicts with preserved evidence"
+    return 0
+  fi
+  [[ -f "$REPO_DIR/response" || -f "$worktree/.sergeant-response" ]] || return 0
+  old_generation="$(cat "$REPO_DIR/response_generation" 2>/dev/null || true)"
+  [[ "$old_generation" != "$gate_generation" ]] || return 0
+  old_id="$(cat "$REPO_DIR/response_id" 2>/dev/null || true)"
+  if ! { [[ "$old_generation" =~ ^[1-9][0-9]*$ && "$old_generation" -lt "$gate_generation" &&
+            "$old_id" =~ ^[a-f0-9]{32}$ &&
+            -f "$REPO_DIR/response" && ! -L "$REPO_DIR/response" &&
+            -f "$worktree/.sergeant-response" && ! -L "$worktree/.sergeant-response" &&
+            "$(cat "$worktree/.sergeant-response-generation" 2>/dev/null || true)" == "$old_generation" &&
+            "$(cat "$worktree/.sergeant-response-id" 2>/dev/null || true)" == "$old_id" ]] &&
+         cmp -s "$REPO_DIR/response" "$worktree/.sergeant-response"; }; then
+    _die "Stale response transport is torn, future, or ambiguous; terminal wake evidence is preserved but resume refused. Reconcile by inspecting: sgt-watch $TASK_ID --snapshot --repo $REPO"
+  fi
+  archive="$wake_terminal_dir/stale_response/$old_generation-$old_id"
+  archive_tmp="$wake_terminal_dir/.stale-response.$$.$RANDOM"
+  mkdir -p "$wake_terminal_dir/stale_response"
+  if [[ -d "$archive" ]]; then
+    if ! { [[ "$(cat "$archive/gate_generation" 2>/dev/null || true)" == "$old_generation" &&
+              "$(cat "$archive/response_id" 2>/dev/null || true)" == "$old_id" &&
+              -f "$archive/response" ]] &&
+           cmp -s "$archive/response" "$REPO_DIR/response"; }; then
+      _die "Archived stale response conflicts with current transport"
+    fi
+  else
+    mkdir "$archive_tmp" || _die "Could not stage stale response archive"
+    printf '%s\n' "$old_generation" > "$archive_tmp/gate_generation"
+    printf '%s\n' "$old_id" > "$archive_tmp/response_id"
+    cp "$REPO_DIR/response" "$archive_tmp/response"
+    mv "$archive_tmp" "$archive" || {
+      rm -rf "$archive_tmp"
+      _die "Could not publish stale response archive"
+    }
+  fi
+  if [[ "${SGT_TEST_HOOKS:-}" == 1 &&
+        "${SGT_TEST_RESPOND_WAKE_INTERRUPT_AT:-}" == stale_archived ]]; then
+    _die "test interruption after stale response archive publication"
+  fi
+  rm -f "$REPO_DIR/response" "$REPO_DIR/response_generation" "$REPO_DIR/response_id" \
+    "$worktree/.sergeant-response" "$worktree/.sergeant-response-generation" \
+    "$worktree/.sergeant-response-id" "$worktree/.sergeant-response-ack"
+  _wake_terminal_write_once "$wake_terminal_dir/stale_response_reconciled" \
+    "response_id=$old_id
+gate_generation=$old_generation" || \
+    _die "Stale response reconciliation marker conflicts with preserved evidence"
+}
+
+if [[ -n "$wake_terminal_dir" ]]; then
+  _wake_terminal_validate || \
+    _die "Terminal wake evidence is outside this repo/gate or malformed; response was not published"
+  wake_terminal_active=true
+  _wake_terminal_archive_stale_response
+fi
+
+_wake_terminal_reconcile_current_transport() {
+  local bound_id path value
+  [[ "$wake_terminal_active" == true && -f "$wake_terminal_dir/response_id" ]] || return 0
+  bound_id="$(cat "$wake_terminal_dir/response_id" 2>/dev/null || true)"
+  [[ "$bound_id" =~ ^[a-f0-9]{32}$ ]] || \
+    _die "Terminal wake response identity is malformed"
+  for path in "$REPO_DIR/response" "$worktree/.sergeant-response"; do
+    [[ ! -e "$path" ]] || { [[ -f "$path" && ! -L "$path" ]] &&
+      cmp -s "$path" "$wake_terminal_dir/response"; } || \
+      _die "Partial current response body conflicts with terminal wake evidence"
+  done
+  for path in "$REPO_DIR/response_generation" "$worktree/.sergeant-response-generation"; do
+    [[ ! -e "$path" ]] || {
+      value="$(cat "$path" 2>/dev/null || true)"
+      [[ "$value" == "$gate_generation" ]]
+    } || _die "Partial current response generation conflicts with terminal wake evidence"
+  done
+  for path in "$REPO_DIR/response_id" "$worktree/.sergeant-response-id"; do
+    [[ ! -e "$path" ]] || {
+      value="$(cat "$path" 2>/dev/null || true)"
+      [[ "$value" == "$bound_id" ]]
+    } || _die "Partial current response identity conflicts with terminal wake evidence"
+  done
+  response_id="$bound_id"
+  _publish_local_response_transport "$wake_terminal_dir/response" \
+    "$response_id" "$gate_generation"
+}
+
+_wake_terminal_reconcile_current_transport
+
 peer_launch_completed=false
 SGT_DRAIN_LOCK_CONTENDED_NONCE="$respond_peer_launch_nonce"
 if [[ "$respond_peer_launch_contended" == true ]] && \
@@ -431,6 +637,7 @@ _queue_supplied_response_for_peer() {
   fi
   printf 'sgt-respond: queued response delivered to pane %s (%s).\n' \
     "$pane" "$queued_response_id"
+  response_id="$queued_response_id"
 }
 
 if [[ -f "$REPO_DIR/response" ]]; then
@@ -442,6 +649,7 @@ fi
 response_id="$(cat "$REPO_DIR/response_id" 2>/dev/null || true)"
 if $peer_launch_completed && [[ -z "$pending_response_file" ]]; then
   _queue_supplied_response_for_peer
+  _wake_terminal_mark_applied
   exit 0
 fi
 if [[ -n "$pending_response_file" ]]; then
@@ -453,6 +661,7 @@ if [[ -n "$pending_response_file" ]]; then
   if ! cmp -s "$RESPONSE_INPUT" "$pending_response_file" && \
     $peer_launch_completed; then
     _queue_supplied_response_for_peer
+    _wake_terminal_mark_applied
     exit 0
   fi
   if [[ -f "$worktree/.sergeant-response" && "$status" != "orphaned" ]]; then
@@ -465,7 +674,8 @@ if [[ -n "$pending_response_file" ]]; then
     # used to dead-end the operator with "already pending consumption" and no
     # supported next action.  Rerunning the same command is now the bounded
     # recovery path: it escalates from delivery to one worker relaunch.
-    if [[ "$_sgt_drain_held_gen" != "$gate_generation" ]] && \
+    if [[ "$wake_terminal_active" != true &&
+         "$_sgt_drain_held_gen" != "$gate_generation" ]] && \
        ! _delivery_escalation_armed; then
       _die "$(printf 'A Sergeant response is already pending consumption for %s/%s.\n  response: %s (gate %s)\n  The worker has not consumed it and no delivery escalation is recorded.\n  If the worker is live, let it finish consuming. If it is stuck, run: sgt-recover %s %s' \
         "$TASK_ID" "$REPO" "$response_id" "$gate_generation" "$TASK_ID" "$REPO")"
@@ -478,12 +688,30 @@ if [[ -n "$pending_response_file" ]]; then
     _atomic_write_file "$worktree/.sergeant-response" "$pending_response_file"
   fi
 else
-  response_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  if [[ "$wake_terminal_active" == true && -f "$wake_terminal_dir/response_id" ]]; then
+    response_id="$(cat "$wake_terminal_dir/response_id" 2>/dev/null || true)"
+  else
+    response_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  fi
+  [[ "$response_id" =~ ^[0-9a-f]{32}$ ]] || \
+    _die "Could not allocate canonical response identity"
+  _wake_terminal_bind_response
   if [[ -n "$worktree" && -d "$worktree" ]]; then
     printf '%s' "$response_id" | "$SCRIPT_DIR/sgt-td-memory" response "$REPO_DIR" "$worktree" || \
       _die "Failed to record response provenance in td; response was not published"
   fi
+  if [[ "$wake_terminal_active" == true &&
+        "${SGT_TEST_HOOKS:-}" == 1 &&
+        "${SGT_TEST_RESPOND_WAKE_INTERRUPT_AT:-}" == td_recorded ]]; then
+    _die "test interruption after terminal wake response provenance"
+  fi
   _publish_local_response_transport "$RESPONSE_INPUT" "$response_id" "$gate_generation"
+fi
+
+if [[ "$wake_terminal_active" == true &&
+      "${SGT_TEST_HOOKS:-}" == 1 &&
+      "${SGT_TEST_RESPOND_WAKE_INTERRUPT_AT:-}" == response_bound ]]; then
+  _die "test interruption after terminal wake response binding"
 fi
 
 if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
@@ -551,6 +779,7 @@ if [[ -f "$existing_relaunch_transaction" ]] &&
             "$joined_action_identity" == "$joined_current_identity" ) ) &&
         "$(cat "$REPO_DIR/notifications/$joined_notification/targets/$joined_nonce/handshake_complete" 2>/dev/null || true)" == "$joined_notification|$joined_nonce" ]]; then
     _sgt_response_lock_release
+    _wake_terminal_mark_applied
     _cleanup_response_input
     trap - EXIT
     echo "sgt-respond: joined acknowledged worker relaunch in pane $(cat "$REPO_DIR/pane")."
@@ -597,6 +826,7 @@ fi
 if $peer_launch_completed; then
   printf 'sgt-respond: response stored; verified peer worker-launch transaction completed for %s/%s.\n' \
     "$TASK_ID" "$REPO"
+  _wake_terminal_mark_applied
   exit 0
 fi
 
@@ -715,6 +945,7 @@ if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && _pane_is_supervisor "$
     fi
     rm -f "$REPO_DIR/response_delivery_unacked" \
       "$REPO_DIR/response_successor_notification"
+    _wake_terminal_mark_applied
     _sgt_response_lock_release
     _cleanup_response_input
     _sgt_drain_lock_release_fd "$_SGT_RESPOND_LAUNCH_FD"
@@ -961,6 +1192,7 @@ _write_relaunch_transaction acked "$new_pane" "$pane_auth" || \
 rm -f "$REPO_DIR/drain_held" "$REPO_DIR/response_delivery_unacked"
 rm -f "$relaunch_worker_before_file"
 replacement_committed=true
+_wake_terminal_mark_applied
 _sgt_response_lock_release
 _cleanup_response_input
 _sgt_drain_lock_release_fd "$_SGT_RESPOND_LAUNCH_FD"
