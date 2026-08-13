@@ -69,7 +69,8 @@ mkdir -p "$fleet/task-conflict" "$fleet/task-recycle-conflict" \
   "$fleet/task-live-holder" "$fleet/task-malformed-identity" \
   "$fleet/task-missing-status" "$fleet/task-receipt-race" \
   "$fleet/task-recycle-race" "$fleet/task-marker-race" \
-  "$fleet/task-lifecycle-race"
+  "$fleet/task-lifecycle-race" "$fleet/task-post-status-race" \
+  "$fleet/task-post-marker-race"
 cp -R "$state" "$fleet/task-conflict/app"
 cp -R "$state" "$fleet/task-recycle-conflict/app"
 cp -R "$state" "$fleet/task-live-holder/app"
@@ -79,6 +80,8 @@ cp -R "$state" "$fleet/task-receipt-race/app"
 cp -R "$state" "$fleet/task-recycle-race/app"
 cp -R "$state" "$fleet/task-marker-race/app"
 cp -R "$state" "$fleet/task-lifecycle-race/app"
+cp -R "$state" "$fleet/task-post-status-race/app"
+cp -R "$state" "$fleet/task-post-marker-race/app"
 
 sync_error="$TEST_ROOT/sync.err"
 env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
@@ -233,7 +236,7 @@ if wait "$marker_pid"; then
   printf 'rotated marker generation was accepted\n' >&2
   exit 1
 fi
-grep -Fq 'Worker marker generation changed during stale-pane retirement' \
+grep -Fq 'Terminal worker lifecycle or pane identity changed during stale-pane retirement' \
   "$TEST_ROOT/marker-race.out"
 [[ ! -e "$marker_race_state/worker_stale_pane_retirement" ]]
 [[ ! -e "$marker_race_state/worker_recycled" ]]
@@ -271,5 +274,50 @@ grep -Fq 'Terminal worker lifecycle or pane identity changed during stale-pane r
 [[ ! -e "$lifecycle_race_state/worker_recycled" ]]
 [[ ! -e "$lifecycle_race_state/response.lock" ]]
 [[ ! -s "$kill_log" && -d "$lifecycle_worktree" ]]
+
+post_status_state="$fleet/task-post-status-race/app"
+post_status_worktree="$TEST_ROOT/post-status-worktree"
+post_status_barrier="$TEST_ROOT/post-status-race"
+mkdir -p "$post_status_worktree"
+printf 'done\n' > "$post_status_worktree/.sergeant-status"
+printf '%s\n' "$post_status_worktree" > "$post_status_state/worktree"
+env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
+  SGT_TEST_HOOKS=1 SGT_TEST_STALE_PANE_POST_EVIDENCE_BARRIER="$post_status_barrier" \
+  "$ROOT_DIR/bin/sgt-watch" --retire-stale-pane task-post-status-race --repo app \
+  > "$TEST_ROOT/post-status-race.out" 2>&1 &
+post_status_pid=$!
+wait_for_barrier "$post_status_barrier"
+printf 'in_progress\n' > "$post_status_state/status"
+printf 'in_progress\n' > "$post_status_worktree/.sergeant-status"
+: > "$post_status_barrier.release"
+if wait "$post_status_pid"; then
+  printf 'post-publication nonterminal rotation was accepted\n' >&2
+  exit 1
+fi
+grep -Fq 'changed after recycle evidence publication' "$TEST_ROOT/post-status-race.out"
+[[ -s "$post_status_state/worker_recycled" ]]
+[[ ! -e "$post_status_state/worker_stale_pane_retirement" ]]
+
+post_marker_state="$fleet/task-post-marker-race/app"
+post_marker_barrier="$TEST_ROOT/post-marker-race"
+env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
+  SGT_TEST_HOOKS=1 SGT_TEST_STALE_PANE_POST_EVIDENCE_BARRIER="$post_marker_barrier" \
+  "$ROOT_DIR/bin/sgt-watch" --retire-stale-pane task-post-marker-race --repo app \
+  > "$TEST_ROOT/post-marker-race.out" 2>&1 &
+post_marker_pid=$!
+wait_for_barrier "$post_marker_barrier"
+printf '%032d|3:3|198|/gone\n' 3 > "$post_marker_state/worker_process_marker"
+printf '%032d|3:3|999999999999999\n' 3 > "$post_marker_state/worker_process_markers"
+chmod 600 "$post_marker_state/worker_process_marker" \
+  "$post_marker_state/worker_process_markers"
+: > "$post_marker_barrier.release"
+if wait "$post_marker_pid"; then
+  printf 'post-publication marker rotation was accepted\n' >&2
+  exit 1
+fi
+grep -Fq 'changed after recycle evidence publication' "$TEST_ROOT/post-marker-race.out"
+[[ -s "$post_marker_state/worker_recycled" ]]
+[[ ! -e "$post_marker_state/worker_stale_pane_retirement" ]]
+[[ ! -s "$kill_log" && -d "$post_status_worktree" && -d "$worktree" ]]
 
 printf 'sgt-watch stale-pane retirement: ok\n'
