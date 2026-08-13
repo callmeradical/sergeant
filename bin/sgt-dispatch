@@ -247,7 +247,9 @@ source "$_SGT_BOUND_REVIEW_AXES"
 # source for brief format changes — edit it instead of this script.
 _sgt_render_brief() {
   local output="$1"
-  local content
+  local content review_router_launcher_shell review_router_executable_shell
+  local review_router_identity_shell review_router_capabilities_shell
+  local review_router_project_shell review_router_repo_shell
   if ! content="$(python3 - "$_BRIEF_TEMPLATE" "$_BRIEF_TEMPLATE_ID" <<'PY'
 import os
 import hashlib
@@ -297,9 +299,18 @@ PY
   content="${content//\{\{REVIEW_SEVERITIES\}\}/$(printf '%s' "$SGT_REVIEW_SEVERITIES" | tr ' ' '|')}"
   content="${content//\{\{REVIEW_SEVERITY_ALIAS_TABLE\}\}/$(_sgt_review_severity_alias_table)}"
   content="${content//\{\{REVIEW_AXES_PIPE\}\}/$(printf '%s' "$review_axes" | tr ' ' '|')}"
-  content="${content//\{\{REVIEW_ROUTER_LAUNCHER\}\}/$REVIEW_ROUTER_LAUNCHER}"
-  content="${content//\{\{REVIEW_ROUTER_EXECUTABLE\}\}/$REVIEW_ROUTER_EXECUTABLE}"
-  content="${content//\{\{REVIEW_ROUTER_IDENTITY\}\}/$REVIEW_ROUTER_EXECUTABLE_IDENTITY}"
+  printf -v review_router_launcher_shell '%q' "$REVIEW_ROUTER_LAUNCHER"
+  printf -v review_router_executable_shell '%q' "$REVIEW_ROUTER_EXECUTABLE"
+  printf -v review_router_identity_shell '%q' "$REVIEW_ROUTER_EXECUTABLE_IDENTITY"
+  printf -v review_router_capabilities_shell '%q' "$repo_task_dir/review_router_capabilities.json"
+  printf -v review_router_project_shell '%q' "$PROJECT"
+  printf -v review_router_repo_shell '%q' "$rname"
+  content="${content//\{\{REVIEW_ROUTER_LAUNCHER\}\}/$review_router_launcher_shell}"
+  content="${content//\{\{REVIEW_ROUTER_EXECUTABLE\}\}/$review_router_executable_shell}"
+  content="${content//\{\{REVIEW_ROUTER_IDENTITY\}\}/$review_router_identity_shell}"
+  content="${content//\{\{REVIEW_ROUTER_CAPABILITIES\}\}/$review_router_capabilities_shell}"
+  content="${content//\{\{REVIEW_ROUTER_PROJECT\}\}/$review_router_project_shell}"
+  content="${content//\{\{REVIEW_ROUTER_REPO\}\}/$review_router_repo_shell}"
   printf '%s\n' "$content" > "$output"
 }
 
@@ -1007,11 +1018,7 @@ for name in runtime_files:
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    try:
-        fd = os.open(path, flags)
-    except FileNotFoundError:
-        runtime.update(b"MISSING\0")
-        continue
+    fd = os.open(path, flags)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):

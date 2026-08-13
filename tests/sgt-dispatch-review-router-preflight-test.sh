@@ -19,6 +19,11 @@ REPO="$TEST_ROOT/app"
 mkdir -p "$DIST" "$PREFIX/bin" "$FAKE_BIN" "$CONFIG" "$FLEET" "$REPO"
 chmod 700 "$FLEET"
 cp -R "$ROOT_DIR/bin" "$ROOT_DIR/templates" "$DIST/"
+for runtime_name in _sgt-lib.sh _sgt-response-lock.sh _sgt-review-axes.sh \
+    _sgt-bash-version.sh _sgt-process-identity.sh _sgt-drain.sh _sgt-process.sh \
+    _sgt-response-lock-transition.py _sgt-process-token.py sgt-notify sgt-callback; do
+  cp "$DIST/bin/$runtime_name" "$TEST_ROOT/$runtime_name"
+done
 ln -s "$DIST/bin/sgt-dispatch" "$PREFIX/bin/sgt-dispatch"
 
 cat > "$CONFIG/test.yaml" <<EOF
@@ -197,6 +202,13 @@ chmod +x "$TEST_ROOT/invalid-utf8-router"
 ln -s "$TEST_ROOT/invalid-utf8-router" "$PREFIX/bin/sgt-review-findings"
 assert_rejected_without_mutation 'review-router contract mismatch' 'Invalid UTF8 contract'
 rm "$PREFIX/bin/sgt-review-findings"
+
+# A capability emitter without the complete runtime is not install-compatible.
+ln -s "$DIST/bin/sgt-review-findings" "$PREFIX/bin/sgt-review-findings"
+mv "$DIST/bin/_sgt-response-lock-transition.py" "$TEST_ROOT/missing-transition.py"
+assert_rejected_without_mutation 'could not identify installed sgt-review-findings' 'Missing helper'
+mv "$TEST_ROOT/missing-transition.py" "$DIST/bin/_sgt-response-lock-transition.py"
+rm "$PREFIX/bin/sgt-review-findings"
 assert_rejected_without_mutation 'review-router preflight: sgt-review-findings is not installed on PATH' 'Absent router'
 
 # An older/mixed router cannot impersonate compatibility with prose in --help.
@@ -248,10 +260,13 @@ identity="$(cat "$task_dir/review_router_executable_identity")"
 [[ "$identity" =~ ^[0-9]+:[0-9]+:[a-f0-9]{64}:[a-f0-9]{64}$ ]]
 cmp "$task_dir/review_router_executable" "$repo_state/review_router_executable"
 cmp "$task_dir/review_router_executable_identity" "$repo_state/review_router_executable_identity"
-grep -Fq "$canonical_router" "$worktree/.sergeant-brief.md"
-grep -Fq "$DIST/bin/sgt-review-router-launch" "$worktree/.sergeant-brief.md"
+printf -v canonical_router_shell '%q' "$canonical_router"
+printf -v launcher_shell '%q' "$DIST/bin/sgt-review-router-launch"
+printf -v capabilities_shell '%q' "$repo_state/review_router_capabilities.json"
+grep -Fq "$canonical_router_shell" "$worktree/.sergeant-brief.md"
+grep -Fq "$launcher_shell" "$worktree/.sergeant-brief.md"
 grep -Fq -- "--identity $identity" "$worktree/.sergeant-brief.md"
-grep -Fq -- "--capabilities-file $repo_state/review_router_capabilities.json -- test app" "$worktree/.sergeant-brief.md"
+grep -Fq -- "--capabilities-file $capabilities_shell -- test app" "$worktree/.sergeant-brief.md"
 if grep -Fq 'Route each axis separately with `sgt-review-findings ' "$worktree/.sergeant-brief.md"; then
   printf 'worker brief still invokes an unpinned bare router\n' >&2
   exit 1
@@ -293,13 +308,22 @@ grep -Fq "Sanitized findings retained at $artifact" "$worktree/.sergeant-message
 # The worker-facing launcher, not the replaceable router, enforces the pin.
 cp "$TEST_ROOT/original-router" "$canonical_router"
 cp /usr/bin/true "$canonical_router"
+cat > "$TEST_ROOT/launcher-mismatch-findings.json" <<'EOF'
+{"findings":[{"id":"launcher-1","severity":"warning","disposition":"actionable","summary":"Launcher mismatch","evidence":"router bytes changed after dispatch","paths":["bin/sgt-review-findings"],"acceptance_criteria":"retain sanitized findings","recommendation":"restore the pinned router"}]}
+EOF
 set +e
-wholesale_output="$("$DIST/bin/sgt-review-router-launch" --router "$canonical_router" \
-  --identity "$identity" --capabilities-file "$repo_state/review_router_capabilities.json" \
-  -- test app 2>&1)"
+wholesale_output="$(PATH="$FAKE_BIN:$HOST_PATH" TD_LOG="$TEST_ROOT/launcher-td.log" \
+  SERGEANT_CONFIG="$CONFIG" SERGEANT_FLEET="$FLEET" bash -c \
+  "$rendered_route --input '$TEST_ROOT/launcher-mismatch-findings.json' --source launcher-runtime --branch feat/matching-router --head-sha abc1234 --parent-task td-router-app --task-id launcher-1 --worktree '$worktree'" 2>&1)"
 wholesale_status=$?
 set -e
 [[ "$wholesale_status" -ne 0 && "$wholesale_output" == *'identity mismatch'* ]]
+launcher_artifact="$worktree/.sergeant-review-artifacts/standards-launcher-runtime"
+[[ -s "$launcher_artifact/findings" && -s "$launcher_artifact/meta" ]]
+grep -Fq 'router_launcher=' "$launcher_artifact/meta"
+grep -Fq "Sanitized findings retained at $launcher_artifact" "$worktree/.sergeant-message"
+grep -Fq "$DIST/bin/sgt-review-router-launch" "$worktree/.sergeant-message"
+[[ "$(cat "$worktree/.sergeant-status")" == blocked ]]
 
 cp "$TEST_ROOT/original-router" "$canonical_router"
 printf '\n# helper changed\n' >> "$DIST/bin/_sgt-review-axes.sh"

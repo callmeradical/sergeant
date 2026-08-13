@@ -4,7 +4,8 @@
 import hashlib
 import json
 import os
-import shutil
+import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -80,11 +81,7 @@ def snapshot_identity(router_path, snapshot_dir=None):
     for name in RUNTIME_FILES:
         path = router_path if name == "sgt-review-findings" else os.path.join(router_dir, name)
         runtime.update(name.encode("utf-8") + b"\0")
-        try:
-            info, content = read_regular(path)
-        except FileNotFoundError:
-            runtime.update(b"MISSING\0")
-            continue
+        info, content = read_regular(path)
         runtime.update(hashlib.sha256(content).digest())
         if name == "sgt-review-findings":
             router_info, router_bytes = info, content
@@ -108,6 +105,148 @@ def snapshot_identity(router_path, snapshot_dir=None):
     ) != (router_info.st_dev, router_info.st_ino):
         raise OSError("review router path changed after verification")
     return identity
+
+
+def route_context(args):
+    if len(args) < 2:
+        return None
+    context = {"project": args[0], "repo": args[1]}
+    options = args[2:]
+    while options:
+        if len(options) < 2 or not options[0].startswith("--"):
+            return None
+        context[options[0][2:].replace("-", "_")] = options[1]
+        options = options[2:]
+    required = {
+        "input", "axis", "source", "branch", "head_sha", "parent_task",
+        "task_id", "worktree",
+    }
+    return context if required.issubset(context) else None
+
+
+def clean_text(value, limit):
+    if not isinstance(value, str):
+        raise ValueError("finding field is not text")
+    value = " ".join(value.split())
+    value = re.sub(
+        r"(?i)((?:password|token|secret|credential|api[_-]?key)\s*[:=]\s*)([^\s,;]+)",
+        r"\1[REDACTED]", value,
+    )
+    value = re.sub(r"(?i)\b(?:bearer|basic)\s+[^\s,;]+", "[REDACTED AUTH]", value)
+    value = re.sub(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b", "[REDACTED]", value)
+    value = re.sub(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", "[REDACTED]", value)
+    value = re.sub(r"(?i)(https?://)[^\s/@:]+:[^\s/@]+@", r"\1[REDACTED]@", value)
+    return value[:limit]
+
+
+def retain_runtime_mismatch(reason, args, values, expected_contract):
+    context = route_context(args)
+    if context is None or not os.path.isdir(context["worktree"]):
+        return
+    worktree = context["worktree"]
+    artifact = None
+    try:
+        with open(context["input"], "rb") as stream:
+            document = strict_json(stream.read(), "review artifact")
+        if not isinstance(document, dict) or set(document) != {"findings"}:
+            raise ValueError("top-level review schema")
+        aliases = expected_contract["severity_aliases"]
+        allowed = {
+            "id", "severity", "disposition", "summary", "evidence", "paths",
+            "acceptance_criteria", "recommendation",
+        }
+        records = []
+        for finding in document["findings"]:
+            if not isinstance(finding, dict) or set(finding) != allowed:
+                raise ValueError("finding schema")
+            finding_id = clean_text(finding["id"], 120)
+            if not re.fullmatch(r"[A-Za-z0-9._-]+", finding_id):
+                raise ValueError("finding id")
+            reported = finding["severity"]
+            if reported not in aliases:
+                raise ValueError("finding severity")
+            disposition = finding["disposition"]
+            if disposition not in {"actionable", "cosmetic", "false-positive"}:
+                raise ValueError("finding disposition")
+            paths = finding["paths"]
+            if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+                raise ValueError("finding paths")
+            severity = aliases[reported]
+            summary = clean_text(finding["summary"], 240)
+            evidence = clean_text(finding["evidence"], 1000)
+            joined_paths = ", ".join(clean_text(path, 240) for path in paths) or "not provided"
+            acceptance = clean_text(finding["acceptance_criteria"], 1000)
+            recommendation = clean_text(finding["recommendation"], 500)
+            if not all((summary, evidence, acceptance, recommendation)):
+                raise ValueError("empty finding field")
+            digest = hashlib.sha256("\0".join((
+                severity, summary, evidence, joined_paths, acceptance, recommendation,
+            )).encode()).hexdigest()[:32]
+            reported_value = "" if reported == severity else reported
+            records.append((finding_id, severity, disposition, summary, evidence,
+                            joined_paths, acceptance, recommendation, digest, reported_value))
+        if records:
+            root = os.path.join(worktree, ".sergeant-review-artifacts")
+            os.makedirs(root, exist_ok=True)
+            artifact = os.path.join(root, context["axis"] + "-" + context["source"])
+            if os.path.exists(artifact):
+                raise ValueError("retained artifact already exists")
+            staging = tempfile.mkdtemp(prefix=".staging.", dir=root)
+            with open(os.path.join(staging, "findings"), "xb") as stream:
+                for record in records:
+                    for field in record:
+                        stream.write(field.encode() + b"\0")
+            meta = {
+                "project": context["project"], "repo": context["repo"],
+                "axis": context["axis"], "source": context["source"],
+                "branch": context["branch"], "head_sha": context["head_sha"],
+                "parent_task": context["parent_task"], "task_id": context["task_id"],
+                "router_executable": values["--router"],
+                "router_identity": values["--identity"],
+                "router_capabilities": values["--capabilities-file"],
+                "router_launcher": os.path.realpath(sys.argv[0]),
+            }
+            with open(os.path.join(staging, "meta"), "x", encoding="utf-8") as stream:
+                for key, value in meta.items():
+                    if "\n" in value or "\r" in value:
+                        raise ValueError("invalid route metadata")
+                    stream.write("%s=%s\n" % (key, value))
+            os.rename(staging, artifact)
+    except (OSError, KeyError, TypeError, ValueError):
+        artifact = None
+
+    retry = "No review body was retained."
+    if artifact:
+        retry_args = [
+            os.path.realpath(sys.argv[0]), "--router", values["--router"],
+            "--identity", values["--identity"], "--capabilities-file",
+            values["--capabilities-file"], "--", context["project"], context["repo"],
+            "--retry", artifact, "--worktree", worktree,
+        ]
+        retry = "Sanitized findings retained at %s. Retry with: %s" % (
+            artifact, shlex.join(retry_args),
+        )
+    generation_path = os.path.join(worktree, ".sergeant-gate-generation")
+    try:
+        with open(generation_path, encoding="utf-8") as stream:
+            generation = int(stream.read().strip()) + 1
+    except (OSError, ValueError):
+        generation = 1
+    message = "Review finding routing failed. Reason: %s. %s" % (reason, retry)
+    for name, content in (
+        (".sergeant-message", message + "\n"),
+        (".sergeant-gate-generation", str(generation) + "\n"),
+        (".sergeant-status", "blocked\n"),
+    ):
+        temporary = os.path.join(worktree, name + ".launcher-tmp")
+        with open(temporary, "w", encoding="utf-8") as stream:
+            stream.write(content)
+        os.replace(temporary, os.path.join(worktree, name))
+
+
+def runtime_die(message, args, values, expected_contract):
+    retain_runtime_mismatch(message, args, values, expected_contract)
+    die(message)
 
 
 def main():
@@ -137,9 +276,9 @@ def main():
         with tempfile.TemporaryDirectory(prefix="sgt-review-router-") as snapshot:
             actual_identity = snapshot_identity(router, snapshot)
             if actual_identity != values["--identity"]:
-                die("review-router executable identity mismatch: required %s, installed %s" % (
+                runtime_die("review-router executable identity mismatch: required %s, installed %s" % (
                     values["--identity"], actual_identity
-                ))
+                ), args, values, expected_contract)
             snapshot_router = os.path.join(snapshot, "sgt-review-findings")
             capability = subprocess.run(
                 [snapshot_router, "--capabilities"],
@@ -148,10 +287,10 @@ def main():
                 check=False,
             )
             if capability.returncode != 0:
-                die("pinned review router capability probe failed")
+                runtime_die("pinned review router capability probe failed", args, values, expected_contract)
             actual_contract = strict_json(capability.stdout, "runtime review-router contract")
             if actual_contract != expected_contract:
-                die("runtime review-router contract differs from preflight evidence")
+                runtime_die("runtime review-router contract differs from preflight evidence", args, values, expected_contract)
             env = os.environ.copy()
             env["SGT_REVIEW_ROUTER_PIN_EXECUTABLE"] = router
             env["SGT_REVIEW_ROUTER_PIN_IDENTITY"] = values["--identity"]
@@ -160,7 +299,8 @@ def main():
             completed = subprocess.run([snapshot_router] + args, env=env, check=False)
             return completed.returncode
     except OSError as error:
-        die("could not bind pinned review-router distribution: %s" % error)
+        runtime_die("could not bind pinned review-router distribution: %s" % error,
+                    args, values, expected_contract)
 
 
 if __name__ == "__main__":
