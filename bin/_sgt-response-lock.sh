@@ -98,6 +98,10 @@ _sgt_response_lock_record_live() {
   pid="$(_sgt_response_lock_record_pid "$record")" || return 1
   _sgt_response_lock_record_parse "$record" || return 1
   expected="$_SGT_LOCK_RECORD_START"
+  # Historical ps:lstart records are only second-resolution.  They remain
+  # schema-valid for compatibility, but can never prove that a PID was reused;
+  # preserve them as unverifiable ownership rather than reclaiming the lock.
+  [[ "$expected" != ps:* ]] || return 2
   if _sgt_process_pid_presence "$pid"; then
     :
   else
@@ -287,17 +291,23 @@ _sgt_response_lock_held_by_this_process() {
 # is the durable spawn capability: a token appearing somewhere in a foreign
 # command is not ownership proof.
 _sgt_replacement_worker_command() {
-  local token="$1" role="$2" worker_command="$3"
+  local token="$1" role="$2" marker="$3" worker_command="$4"
+  local marker_generation marker_identity marker_fd marker_path
+  IFS='|' read -r marker_generation marker_identity marker_fd marker_path <<< "$marker"
   [[ "$token" =~ ^[a-f0-9]{32}$ && "$role" =~ ^worker:[A-Za-z0-9._-]+$ &&
+     "$marker_generation" =~ ^[a-f0-9]{32}$ &&
+     "$marker_identity" =~ ^[0-9]+:[0-9]+$ && "$marker_fd" == 198 &&
+     -n "$marker_path" && "$marker_path" != *$'\n'* &&
      -n "$worker_command" && "$worker_command" != *$'\n'* ]] || return 1
-  printf '%q %q %q bash -c %q' "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/sgt-replacement-launch" \
-    "$token" "$role" "$worker_command"
+  printf '%q %q %q %q bash -c %q' "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/sgt-replacement-launch" \
+    "$token" "$role" "$marker" "$worker_command"
 }
 
 _sgt_replacement_pane_auth() {
   local pane="$1" expected_token="$2" expected_role="$3"
   local evidence current current_start
   local marker_dead marker_pane marker_pid marker_command marker_token marker_role marker_option_pid marker_start
+  local portable_start_re='^portable:[a-f0-9]{32}:[0-9]+:[0-9]+$'
   [[ "$pane" =~ ^%[0-9]+$ ]] || return 1
   evidence=""
   for _ in $(seq 1 "${SGT_REPLACEMENT_MARKER_ATTEMPTS:-100}"); do
@@ -319,7 +329,14 @@ _sgt_replacement_pane_auth() {
     2>/dev/null)" || return 1
   [[ "$evidence" == "$current" ]] || return 1
   IFS='|' read -r marker_dead marker_pane marker_pid marker_command marker_token marker_role marker_option_pid marker_start <<< "$evidence"
-  current_start="$(_sgt_process_start_token "$marker_pid")" || return 1
+  if [[ "$marker_start" == proc:* ]]; then
+    current_start="$(_sgt_process_start_token "$marker_pid")" || return 1
+    [[ "$marker_start" == "$current_start" ]] || return 1
+  elif [[ "$marker_start" =~ $portable_start_re ]]; then
+    current_start="$marker_start"
+  else
+    return 1
+  fi
   [[ "$marker_dead" == 0 && "$marker_pane" == "$pane" && "$marker_pid" =~ ^[1-9][0-9]*$ &&
      -n "$marker_command" && "$marker_token" == "$expected_token" &&
      "$marker_role" == "$expected_role" && "$marker_option_pid" == "$marker_pid" &&
@@ -424,8 +441,8 @@ _sgt_replacement_recorded_auth_valid() {
   local auth_pane auth_pid auth_start auth_token auth_role
   IFS='|' read -r auth_pane auth_pid auth_start auth_token auth_role <<< "$auth"
   [[ "$auth_pane" == "$pane" && "$auth_pid" =~ ^[1-9][0-9]*$ &&
-     ( "$auth_start" =~ ^proc:[0-9]+$ || "$auth_start" == ps:* ) &&
-     "$auth_start" != ps: &&
+     ( "$auth_start" =~ ^proc:[0-9]+$ ||
+       "$auth_start" =~ ^portable:[a-f0-9]{32}:[0-9]+:[0-9]+$ ) &&
      "$auth_token" == "$token" && "$auth_role" == "$role" ]]
 }
 

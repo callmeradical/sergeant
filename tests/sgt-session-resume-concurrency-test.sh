@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export FAKE_TMUX_OWNER_PID="$$"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
@@ -40,11 +41,37 @@ case "$1" in
     printf 'launch\n' >> "$LAUNCH_LOG"
     command="${!#}"
     printf '%s\n' "$command" > "$PANE_COMMAND"
+    window=""
+    previous=""
+    for argument in "$@"; do
+      [[ "$previous" == -n ]] && window="$argument"
+      previous="$argument"
+    done
+    printf '%s\n' "$window" > "$PANE_COMMAND.window"
     if [[ -n "${NEW_WINDOW_BARRIER:-}" ]]; then
       : > "$NEW_WINDOW_BARRIER"
       while [[ ! -e "$NEW_WINDOW_RELEASE" ]]; do sleep 0.01; done
     fi
     printf '%%99\n'
+    ;;
+  list-panes)
+    # Strict recovery discovery requires one successful, well-formed inventory;
+    # an unsupported fake command is an operational error, not pane absence.
+    if [[ "$*" == *'#{window_name}'* ]]; then
+      if [[ "${OLD_PANE_GONE:-0}" != 1 ]]; then
+        printf '%%88|%s\n' "$(cat "$TEST_REPO_STATE/window_name" 2>/dev/null || printf old-worker)"
+      fi
+      if [[ -s "$LAUNCH_LOG" &&
+            ( -z "${FAST_EXIT_FILE:-}" || ! -e "$FAST_EXIT_FILE" ) ]]; then
+        printf '%%99|%s\n' "$(cat "$PANE_COMMAND.window")"
+      fi
+    else
+      [[ "${OLD_PANE_GONE:-0}" == 1 ]] || printf '%%88\n'
+      if [[ -s "$LAUNCH_LOG" &&
+            ( -z "${FAST_EXIT_FILE:-}" || ! -e "$FAST_EXIT_FILE" ) ]]; then
+        printf '%%99\n'
+      fi
+    fi
     ;;
   display-message)
     if [[ "$*" == *'-t %88'* ]]; then
@@ -56,7 +83,15 @@ case "$1" in
     if [[ -n "${FAST_EXIT_FILE:-}" && -e "$FAST_EXIT_FILE" ]]; then
       exit 1
     fi
-    identity="0|%99|9999|123456|$(cat "$PANE_COMMAND")"
+    if [[ "$*" == *'@sergeant_replacement_token'* ]]; then
+      replacement_token="$(sed -n 's/.*sgt-replacement-launch \([a-f0-9]\{32\}\) .*/\1/p' "$PANE_COMMAND")"
+      replacement_role="$(sed -n 's/.*sgt-replacement-launch [a-f0-9]\{32\} \(worker:[A-Za-z0-9._-]*\) .*/\1/p' "$PANE_COMMAND")"
+      owner_start="$(awk '{ print $22 }' "/proc/$FAKE_TMUX_OWNER_PID/stat")"
+      printf '0|%%99|%s|bash|%s|%s|%s|proc:%s\n' "$FAKE_TMUX_OWNER_PID" \
+        "$replacement_token" "$replacement_role" "$FAKE_TMUX_OWNER_PID" "$owner_start"
+      exit 0
+    fi
+    identity="0|%99|$FAKE_TMUX_OWNER_PID|123456|$(cat "$PANE_COMMAND")"
     if [[ -s "$TEST_REPO_STATE/notification_id" && \
       -s "$TEST_REPO_STATE/notification_target" ]]; then
       notification_id="$(cat "$TEST_REPO_STATE/notification_id")"
@@ -186,7 +221,10 @@ set -e
 [[ "$stale_resume_status" -ne 0 ]]
 grep -Fq 'changed without completion from the exact observed launch owner' \
   "$TEST_ROOT/stale-journal.out"
-! grep -Fq 'peer launch already advanced' "$TEST_ROOT/stale-journal.out"
+if grep -Fq 'peer launch already advanced' "$TEST_ROOT/stale-journal.out"; then
+  printf 'stale peer journal was accepted as exact launch completion\n' >&2
+  exit 1
+fi
 
 # A short entropy read cannot become a weak lock nonce. Refuse ownership before
 # preparing a new marker generation, leaving current/history bytes unchanged.

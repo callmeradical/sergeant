@@ -98,8 +98,16 @@ case "$1" in
       start_command="$(cat "$EXPECTED_WORKER/test_spawn_command" 2>/dev/null || true)"
       pane_identity="0|$target|$FAKE_TMUX_OWNER_PID|654321|$start_command"
     fi
-    # Auto-deliver notification to new pane
-    if [[ "${AUTO_DELIVER:-1}" == 1 && "$target" == "${NEW_PANE:-%99}" &&
+    deliver=true
+    if [[ "${REQUIRE_LOCK_RELEASE:-0}" == 1 &&
+          -e "$EXPECTED_WORKER/response.lock" ]]; then
+      touch "$LOCK_HELD_MARKER"
+      deliver=false
+    fi
+    # Auto-deliver notification to new pane only after the supervisor releases
+    # response ownership for the interactive worker's accepted/delivered write.
+    if [[ "${AUTO_DELIVER:-1}" == 1 && "$deliver" == true &&
+          "$target" == "${NEW_PANE:-%99}" &&
           -s "$EXPECTED_WORKER/notification_id" ]]; then
       notification_id="$(cat "$EXPECTED_WORKER/notification_id")"
       wt="$(cat "$EXPECTED_WORKER/worktree")"
@@ -191,8 +199,14 @@ _setup_stalled_worker "$repo_state" "$worktree"
 
 EXPECTED_WORKER="$repo_state" KILL_LOG="$TEST_ROOT/killed.log" \
   WINDOW_LOG="$TEST_ROOT/windows.log" TMUX_LOG="$TMUX_LOG" TD_LOG="$TD_LOG" \
+  REQUIRE_LOCK_RELEASE=1 LOCK_HELD_MARKER="$TEST_ROOT/recover-lock-held" \
+  SGT_NOTIFICATION_ACK_TIMEOUT=1 \
   PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
   "$ROOT_DIR/bin/sgt-recover" task-1 app >/dev/null 2>&1
+[[ -e "$TEST_ROOT/recover-lock-held" ]] || {
+  printf 'recover worker never observed response.lock before handshake\n' >&2
+  exit 1
+}
 
 # Status stays in_progress
 [[ "$(cat "$repo_state/status")" == "in_progress" ]] || {

@@ -95,6 +95,23 @@ if [[ "$SGT_DRAIN_LOCK_CONTENDED_LIVE" == true ]] && \
   exit 0
 fi
 _sgt_response_lock_acquire "$REPO_DIR"
+
+# The replacement worker owns accepted/delivered publication under this same
+# response lock. Keep worker-launch serialization across the wait, but release
+# response ownership after the durable pane/target evidence is installed and
+# reacquire it before timeout adjudication or transaction retirement.
+_wait_recovery_notification_with_response_lock_released() {
+  local pane="$1" notification_id="$2" wait_status
+  _sgt_response_lock_release || return 2
+  if _sgt_wait_worker_notification "$pane" "$REPO_DIR" "$notification_id"; then
+    wait_status=0
+  else
+    wait_status=1
+  fi
+  _sgt_response_lock_acquire "$REPO_DIR" || return 2
+  return "$wait_status"
+}
+
 _cleanup_recover() {
   local cleanup_status=0
   _sgt_response_lock_release || cleanup_status=1
@@ -408,8 +425,11 @@ _worker_marker_capability_exists() {
 }
 
 _prepare_recovery_worker_command() {
+  local worker_marker
   _sgt_prepare_worker_process_marker "$REPO_DIR" || return 1
+  worker_marker="$(_sgt_read_owned_file "$REPO_DIR/worker_process_marker")" || return 1
   worker_command="$(_sgt_replacement_worker_command "$replacement_spawn_token" "$worker_role" \
+    "$worker_marker" \
     "$(_sgt_worker_command "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")")" || \
     return 1
   _sgt_replace_owned_file "$relaunch_worker_before_file" \
@@ -547,8 +567,14 @@ fi
 
 # ── 15. Wait for recovery notification acknowledgement ──────────────────────
 
-if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" \
-    "$delivery_notification_id"; then
+set +e
+_wait_recovery_notification_with_response_lock_released \
+  "$new_pane" "$delivery_notification_id"
+delivery_wait_status=$?
+set -e
+[[ "$delivery_wait_status" -ne 2 ]] || \
+  _recover_die "Stall recovery failed: could not reacquire response ownership after worker delivery"
+if [[ "$delivery_wait_status" -ne 0 ]]; then
   tmux kill-pane -t "$new_pane" 2>/dev/null || true
   _escalate "relaunched worker did not acknowledge recovery notification"
   _recover_die "Stall recovery failed: notification timed out for $TASK_ID/$REPO"

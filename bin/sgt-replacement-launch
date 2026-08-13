@@ -7,14 +7,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-process-identity.sh
 source "$SCRIPT_DIR/_sgt-process-identity.sh"
 
-[[ $# -ge 3 ]] || { printf 'sgt-replacement-launch: invalid arguments\n' >&2; exit 2; }
+[[ $# -ge 4 ]] || { printf 'sgt-replacement-launch: invalid arguments\n' >&2; exit 2; }
 token="$1"
 role="$2"
-shift 2
+marker="$3"
+shift 3
 [[ "$token" =~ ^[a-f0-9]{32}$ ]] || { printf 'sgt-replacement-launch: invalid token\n' >&2; exit 2; }
 [[ "$role" =~ ^worker:[A-Za-z0-9._-]+$ ]] || { printf 'sgt-replacement-launch: invalid role\n' >&2; exit 2; }
 [[ "${TMUX_PANE:-}" =~ ^%[0-9]+$ ]] || { printf 'sgt-replacement-launch: no tmux pane\n' >&2; exit 2; }
-start_token="$(_sgt_process_start_token "$$")" || exit 2
+IFS='|' read -r marker_generation marker_identity marker_fd marker_path <<< "$marker"
+[[ "$marker_generation" =~ ^[a-f0-9]{32}$ &&
+   "$marker_identity" =~ ^[0-9]+:[0-9]+$ && "$marker_fd" == 198 &&
+   -n "$marker_path" ]] || exit 2
+if ! start_token="$(_sgt_process_start_token "$$")"; then
+  exec 197< "$marker_path" || exit 2
+  actual_identity="$(stat -Lc '%d:%i' /dev/fd/197 2>/dev/null || \
+    stat -f '%d:%i' /dev/fd/197 2>/dev/null || true)"
+  IFS= read -r actual_generation <&197 || exit 2
+  if IFS= read -r _ <&197; then exit 2; fi
+  [[ "$actual_identity" == "$marker_identity" &&
+     "$actual_generation" == "$marker_generation" ]] || exit 2
+  start_token="portable:$marker_generation:$marker_identity"
+fi
 
 tmux set-option -p -t "$TMUX_PANE" @sergeant_replacement_token "$token" \; \
   set-option -p -t "$TMUX_PANE" @sergeant_replacement_role "$role" \; \

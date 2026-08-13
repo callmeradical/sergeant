@@ -1214,7 +1214,10 @@ _sgt_td_normalize_version() {
   printf '%s\n' "${1#v}"
 }
 _sgt_td_supported_semver() {
-  [[ "$1" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[[:alnum:]]+([.-][[:alnum:]]+)*)?$ ]]
+  # Bash 3.2 parses grouped inline EREs on the right-hand side inconsistently;
+  # keeping the expression in a variable preserves the same accepted grammar.
+  local semver_re='^v?[0-9]+\.[0-9]+\.[0-9]+(-[[:alnum:]]+([.-][[:alnum:]]+)*)?$'
+  [[ "$1" =~ $semver_re ]]
 }
 _sgt_td_supported_version_output() {
   # Accept Marcus td's plain version line or its exact three-line update notice.
@@ -1223,6 +1226,9 @@ _sgt_td_supported_version_output() {
   local line
   local -a lines=()
   local start end current_version update_current_version available_version install_version install_target
+  local version_line_re='^[[:blank:]]*td[[:blank:]]+version[[:blank:]]+([^[:blank:]]+)[[:blank:]]*$'
+  local update_line_re='^[[:blank:]]*Update[[:blank:]]+available:[[:blank:]]+([^[:blank:]]+)[[:blank:]]+→[[:blank:]]+([^[:blank:]]+)[[:blank:]]*$'
+  local install_line_re='^[[:blank:]]*Run:[[:blank:]]+go[[:blank:]]+install[[:blank:]]+-ldflags[[:blank:]]+"-X[[:blank:]]+main\.Version=([^[:blank:]"]+)"[[:blank:]]+github\.com/marcus/td@([^[:blank:]]+)[[:blank:]]*$'
 
   while IFS= read -r line || [[ -n "$line" ]]; do
     lines+=("$line")
@@ -1240,22 +1246,22 @@ _sgt_td_supported_version_output() {
   (( start <= end )) || return 1
 
   if (( start == end )); then
-    [[ "${lines[$start]}" =~ ^[[:blank:]]*td[[:blank:]]+version[[:blank:]]+([^[:blank:]]+)[[:blank:]]*$ ]] || return 1
+    [[ "${lines[$start]}" =~ $version_line_re ]] || return 1
     _sgt_td_supported_semver "${BASH_REMATCH[1]}"
     return
   fi
 
   (( end - start == 3 )) || return 1
   [[ "${lines[$((start + 1))]}" =~ ^[[:blank:]]*$ ]] || return 1
-  [[ "${lines[$start]}" =~ ^[[:blank:]]*td[[:blank:]]+version[[:blank:]]+([^[:blank:]]+)[[:blank:]]*$ ]] || return 1
+  [[ "${lines[$start]}" =~ $version_line_re ]] || return 1
   current_version="${BASH_REMATCH[1]}"
   _sgt_td_supported_semver "$current_version" || return 1
-  [[ "${lines[$((start + 2))]}" =~ ^[[:blank:]]*Update[[:blank:]]+available:[[:blank:]]+([^[:blank:]]+)[[:blank:]]+→[[:blank:]]+([^[:blank:]]+)[[:blank:]]*$ ]] || return 1
+  [[ "${lines[$((start + 2))]}" =~ $update_line_re ]] || return 1
   update_current_version="${BASH_REMATCH[1]}"
   available_version="${BASH_REMATCH[2]}"
   _sgt_td_supported_semver "$update_current_version" || return 1
   _sgt_td_supported_semver "$available_version" || return 1
-  [[ "${lines[$((start + 3))]}" =~ ^[[:blank:]]*Run:[[:blank:]]+go[[:blank:]]+install[[:blank:]]+-ldflags[[:blank:]]+\"-X[[:blank:]]+main\.Version=([^[:blank:]\"]+)\"[[:blank:]]+github\.com/marcus/td@([^[:blank:]]+)[[:blank:]]*$ ]] || return 1
+  [[ "${lines[$((start + 3))]}" =~ $install_line_re ]] || return 1
   install_version="${BASH_REMATCH[1]}"
   install_target="${BASH_REMATCH[2]}"
   _sgt_td_supported_semver "$install_version" || return 1

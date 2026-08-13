@@ -27,12 +27,20 @@ EOF
 chmod +x "$TEST_ROOT/tmux"
 export PATH="$TEST_ROOT:$PATH"
 
+launch_generation=11111111111111111111111111111111
+launch_marker_path="$TEST_ROOT/launch-marker"
+printf '%s\n' "$launch_generation" > "$launch_marker_path"
+chmod 400 "$launch_marker_path"
+launch_marker_identity="$(stat -Lc '%d:%i' "$launch_marker_path" 2>/dev/null || \
+  stat -f '%d:%i' "$launch_marker_path")"
+launch_marker="$launch_generation|$launch_marker_identity|198|$launch_marker_path"
+
 tmux new-session -d -s "$session" -n base 'sleep 60'
 token=11112222333344445555666677778888
 role=worker:auth-test
 window=replacement-auth
-command_line="$(printf '%q %q %q %q %q' "$ROOT_DIR/bin/sgt-replacement-launch" \
-  "$token" "$role" /bin/sleep 60)"
+command_line="$(printf '%q %q %q %q %q %q' "$ROOT_DIR/bin/sgt-replacement-launch" \
+  "$token" "$role" "$launch_marker" /bin/sleep 60)"
 pane="$(tmux new-window -d -P -F '#{pane_id}' \
   -t "$session:" -n "$window" "$command_line")"
 
@@ -76,8 +84,8 @@ kill -0 "$respawn_pid"
 # that can be adopted or confused with a later pane id.
 tmux set-window-option -g remain-on-exit on
 exit_pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$session:" -n immediate-exit \
-  "$(printf '%q %q %q %q' "$ROOT_DIR/bin/sgt-replacement-launch" \
-    99990000111122223333444455556666 worker:exit /bin/true)")"
+  "$(printf '%q %q %q %q %q' "$ROOT_DIR/bin/sgt-replacement-launch" \
+    99990000111122223333444455556666 worker:exit "$launch_marker" /bin/true)")"
 for _ in $(seq 1 100); do
   [[ "$(tmux display-message -p -t "$exit_pane" '#{pane_dead}')" == 1 ]] && break
   sleep 0.01
@@ -98,6 +106,42 @@ if _sgt_replacement_pane_identity_matches "$foreign_identity" "$foreign" "$token
   printf 'foreign token-substring pane authenticated\n' >&2
   exit 1
 fi
+
+# A platform without /proc exact birth tokens authenticates the replacement by
+# its stable tmux pane generation plus the exact worker marker capability.  It
+# must neither fall back to second-resolution ps identity nor signal a PID/group.
+portable_token=abcdefabcdefabcdefabcdefabcdefab
+portable_role=worker:portable-auth
+portable_generation=1234567890abcdef1234567890abcdef
+portable_marker="$TEST_ROOT/portable-marker"
+printf '%s\n' "$portable_generation" > "$portable_marker"
+chmod 400 "$portable_marker"
+portable_identity="$(stat -Lc '%d:%i' "$portable_marker" 2>/dev/null || \
+  stat -f '%d:%i' "$portable_marker")"
+portable_marker_record="$portable_generation|$portable_identity|198|$portable_marker"
+portable_command="$(printf '%q %q %q %q %q %q %q %q %q' env \
+  SGT_TEST_HOOKS=1 SGT_TEST_PROCESS_START_UNAVAILABLE=1 \
+  "$ROOT_DIR/bin/sgt-replacement-launch" "$portable_token" "$portable_role" \
+  "$portable_marker_record" /bin/sleep 60)"
+portable_pane="$(tmux new-window -d -P -F '#{pane_id}' \
+  -t "$session:" -n portable-replacement "$portable_command")"
+for _ in $(seq 1 100); do
+  portable_marker_auth="$(tmux display-message -p -t "$portable_pane" \
+    '#{@sergeant_replacement_start}' 2>/dev/null || true)"
+  [[ "$portable_marker_auth" == "portable:$portable_generation:$portable_identity" ]] && break
+  sleep 0.01
+done
+[[ "$portable_marker_auth" == "portable:$portable_generation:$portable_identity" ]] || {
+  printf 'PORTABLE_REPLACEMENT_LAUNCH_DID_NOT_PUBLISH_MARKER_CAPABILITY\n' >&2
+  exit 1
+}
+portable_pane_identity="$(_sgt_pane_identity "$portable_pane")"
+portable_auth="$(_sgt_replacement_pane_identity_matches "$portable_pane_identity" \
+  "$portable_pane" "$portable_token" "$portable_role")" || {
+  printf 'PORTABLE_REPLACEMENT_ADOPTION_REFUSED\n' >&2
+  exit 1
+}
+[[ "$portable_auth" == "$portable_pane|"*"|portable:$portable_generation:$portable_identity|$portable_token|$portable_role" ]]
 
 # The persisted pane identity and replacement marker authentication must bind
 # the same pane generation.  A raced-in replacement that is internally valid

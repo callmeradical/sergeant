@@ -245,4 +245,22 @@ if PATH="$TEST_ROOT/darwin-ps-bin:$PATH" bash -c \
   exit 1
 fi
 
+# Legacy ps:* lock records were produced from second-resolution lstart text.
+# They can never prove PID reuse, so even a mismatching live record remains
+# unverifiable and must not be reclaimed by a new exact-token producer.
+lockdir11="$TEST_ROOT/state-11"
+mkdir -p "$lockdir11"
+printf 'pid=%s\nstart=ps:Thu Aug 13 12:34:56 2026\nnonce=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' \
+  "$$" > "$lockdir11/response.lock"
+legacy_ps_record="$(cat "$lockdir11/response.lock")"
+if SGT_RESPONSE_LOCK_TIMEOUT=1 _sgt_response_lock_acquire "$lockdir11" \
+    2> "$TEST_ROOT/case11.err"; then
+  printf 'RECLAIMED_LIVE_LEGACY_PS_OWNER\n' >&2
+  exit 1
+fi
+[[ "$(cat "$lockdir11/response.lock")" == "$legacy_ps_record" ]] || {
+  printf 'RECLAIMED_LIVE_LEGACY_PS_OWNER\n' >&2
+  exit 1
+}
+
 printf 'sgt-response-lock-release: ok\n'

@@ -4,6 +4,10 @@
 _sgt_process_start_token() {
   local pid="$1" token
   [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  if [[ "${SGT_TEST_HOOKS:-}" == 1 &&
+        "${SGT_TEST_PROCESS_START_UNAVAILABLE:-}" == 1 ]]; then
+    return 1
+  fi
   if [[ -r "/proc/$pid/stat" ]]; then
     token="$(awk '{ print $22 }' "/proc/$pid/stat" 2>/dev/null)" || return 1
     [[ "$token" =~ ^[0-9]+$ ]] || return 1

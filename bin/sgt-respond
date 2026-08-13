@@ -791,8 +791,11 @@ _worker_marker_capability_exists() {
 }
 
 _prepare_relaunch_worker_command() {
+  local worker_marker
   _sgt_prepare_worker_process_marker "$REPO_DIR" || return 1
+  worker_marker="$(_sgt_read_owned_file "$REPO_DIR/worker_process_marker")" || return 1
   worker_command="$(_sgt_replacement_worker_command "$replacement_spawn_token" "$worker_role" \
+    "$worker_marker" \
     "$(_sgt_worker_command "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")")" || \
     return 1
   _sgt_replace_owned_file "$relaunch_worker_before_file" \
