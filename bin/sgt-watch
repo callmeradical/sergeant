@@ -242,12 +242,24 @@ if [[ "${1:-}" == "--snapshot" ]]; then
   snapshot_task=""
   snapshot_repo=""
   snapshot_task_given=0
+  snapshot_project=""
+  snapshot_td=""
   shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --repo)
         [[ -n "${2:-}" ]] || _die "--repo requires a repository name"
         snapshot_repo="$2"
+        shift 2
+        ;;
+      --project)
+        [[ -n "${2:-}" ]] || _die "--project requires a project name"
+        snapshot_project="$2"
+        shift 2
+        ;;
+      --td)
+        [[ -n "${2:-}" ]] || _die "--td requires a task or epic id"
+        snapshot_td="$2"
         shift 2
         ;;
       -*) _die "Unknown option for --snapshot: $1" ;;
@@ -260,6 +272,251 @@ if [[ "${1:-}" == "--snapshot" ]]; then
         ;;
     esac
   done
+
+  # ── Project/td status-query path (GH #207) ──────────────────────────────
+  # Produces sergeant.status-query/v1 JSON; mutually exclusive with the
+  # existing fleet-task --snapshot path.  Strictly read-only.
+  if [[ -n "$snapshot_project" ]]; then
+    _require_yq
+    _status_query_config="$SERGEANT_CONFIG/$snapshot_project.yaml"
+    _sq_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    _RECENT_S="${SERGEANT_SNAPSHOT_RECENT_SECONDS:-300}"
+    [[ "$_RECENT_S" =~ ^[0-9]+$ ]] || _RECENT_S=300
+
+    # Pipe facts to the JSON helper (one key\tvalue per line; REPO is multi-field).
+    _sq_emit() { python3 "$SCRIPT_DIR/_sgt-status-query-emit.py"; }
+
+    # ── Collect project_state facts (repos + git, no fleet evidence) ────────
+    _sq_project_state_facts() {
+      local proj_name="$1" repo_count="$2"
+      printf 'project_state_present\t1\n'
+      printf 'project_name\t%s\n' "$proj_name"
+      local _i _rname _rpath _rdir _cloned _branch
+      for (( _i=0; _i<repo_count; _i++ )); do
+        _rname="$(yq ".repos[$_i].name" "$_status_query_config")"
+        _rpath="$(yq ".repos[$_i].path" "$_status_query_config")"
+        [[ "$_rpath" == /* ]] && _rdir="$_rpath" || _rdir="${dev_root:-$HOME/dev}/$_rpath"
+        _cloned="0"; _branch=""
+        if git -C "$_rdir" rev-parse --git-dir >/dev/null 2>&1; then
+          _cloned="1"
+          _branch="$(git -C "$_rdir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+        fi
+        printf 'REPO\t%s\t%s\t%s\n' "$_rname" "$_cloned" "$_branch"
+      done
+    }
+
+    # ── Coordinator evidence: exact-identity + managed-marker + fresh heartbeat
+    # The marker value "sergeant-managed-coordinator" is the canonical constant;
+    # this version never queries the coordinator (queried is a closed false).
+    _sq_coordinator_facts() {
+      local _cpane _marker _now _act _recent_s="$1"
+      printf 'coordinator_present\t1\n'
+      _now="$(date +%s)"
+      if command -v tmux >/dev/null 2>&1; then
+        while IFS= read -r _cpane; do
+          [[ -z "$_cpane" ]] && continue
+          _marker="$(tmux display-message -p -t "$_cpane" '#{@sgt_coordinator}' 2>/dev/null || true)"
+          [[ "$_marker" == "sergeant-managed-coordinator" ]] || continue
+          _act="$(tmux display-message -p -t "$_cpane" '#{pane_activity}' 2>/dev/null || true)"
+          if [[ "$_act" =~ ^[1-9][0-9]*$ ]] && (( _now - _act <= _recent_s )); then
+            printf 'coordinator_verified\t1\n'
+            printf 'coordinator_pane\t%s\n' "$_cpane"
+            printf 'coordinator_reason\texact-identity verified coordinator pane\n'
+            return
+          else
+            # Pane found but heartbeat is stale.
+            printf 'coordinator_verified\t0\n'
+            printf 'coordinator_pane\t\n'
+            printf 'coordinator_reason\tcoordinator_pane_heartbeat_stale\n'
+            return
+          fi
+        done < <(tmux list-panes -a -F '#{pane_id}' -f '#{m:sgt-coordinator,#{pane_title}}' 2>/dev/null || true)
+      fi
+      printf 'coordinator_verified\t0\n'
+      printf 'coordinator_pane\t\n'
+      printf 'coordinator_reason\tno_managed_coordinator_pane\n'
+    }
+
+    # ── Unknown project ──────────────────────────────────────────────────────
+    if [[ ! -f "$_status_query_config" ]]; then
+      {
+        printf 'observed_at\t%s\n' "$_sq_ts"
+        printf 'project\t%s\n' "$snapshot_project"
+        printf 'resolved\t0\n'
+        printf 'namespace\tunknown\n'
+        printf 'reason\tproject_not_found\n'
+        printf 'fleet_present\t0\n'
+        printf 'project_state_present\t0\n'
+        printf 'coordinator_present\t0\n'
+      } | _sq_emit
+      exit 0
+    fi
+
+    _sq_proj_name="$(yq '.name // ""' "$_status_query_config")"
+    [[ -n "$_sq_proj_name" ]] || _sq_proj_name="$snapshot_project"
+    _sq_repo_count="$(yq '.repos | length' "$_status_query_config")"
+
+    # ── td resolution ────────────────────────────────────────────────────────
+    # Three outcomes:
+    #   no --td: scan all project fleet records
+    #   --td given, td unavailable: reason=td_unavailable, fleet=null
+    #   --td given, not found in any project repo: reason=td_id_not_found, fleet=null
+    #   --td given, found: namespace=td_epic or td_task
+    _sq_fleet_tasks=()
+    _sq_namespace="project"
+    _sq_reason="ok"
+    _sq_td_resolved=1
+    _sq_fleet_present=1
+
+    if [[ -n "$snapshot_td" ]]; then
+      if ! command -v td >/dev/null 2>&1; then
+        # td binary not on PATH — explicit, never silently absorbed.
+        {
+          printf 'observed_at\t%s\n' "$_sq_ts"
+          printf 'project\t%s\n' "$snapshot_project"
+          printf 'td_id\t%s\n' "$snapshot_td"
+          printf 'resolved\t0\n'
+          printf 'namespace\tunknown\n'
+          printf 'reason\ttd_unavailable\n'
+          printf 'fleet_present\t0\n'
+          _sq_project_state_facts "$_sq_proj_name" "$_sq_repo_count"
+          _sq_coordinator_facts "$_RECENT_S"
+        } | _sq_emit
+        exit 0
+      fi
+
+      _sq_found=0
+      for (( _i=0; _i<_sq_repo_count; _i++ )); do
+        _sq_rname="$(yq ".repos[$_i].name" "$_status_query_config")"
+        _sq_rpath="$(yq ".repos[$_i].path" "$_status_query_config")"
+        [[ "$_sq_rpath" == /* ]] && _sq_rdir="$_sq_rpath" || _sq_rdir="${dev_root:-$HOME/dev}/$_sq_rpath"
+        [[ -d "$_sq_rdir" ]] || continue
+        _sq_td_raw="$(td show "$snapshot_td" --work-dir "$_sq_rdir" --json 2>/dev/null || true)"
+        if [[ -z "$_sq_td_raw" ]]; then continue; fi
+        if ! printf '%s' "$_sq_td_raw" | python3 -c 'import json,sys; d=json.load(sys.stdin); exit(0 if "id" in d else 1)' 2>/dev/null; then
+          continue
+        fi
+        _sq_found=1
+        # Epic or plain task?
+        _sq_kids="$(td list --epic "$snapshot_td" --all --work-dir "$_sq_rdir" --json 2>/dev/null || true)"
+        if [[ -n "$_sq_kids" ]] && _sq_kid_ids="$(printf '%s' "$_sq_kids" | python3 -c 'import json,sys; ds=json.load(sys.stdin); print("\n".join(d["id"] for d in ds))' 2>/dev/null)" && [[ -n "$_sq_kid_ids" ]]; then
+          _sq_namespace="td_epic"
+          _sq_reason="td_epic"
+          while IFS= read -r _kid; do
+            [[ -z "$_kid" ]] && continue
+            _sq_fleet_tasks+=("$_sq_rname/$_kid")
+          done <<< "$_sq_kid_ids"
+        else
+          _sq_namespace="td_task"
+          _sq_reason="td_task"
+          _sq_fleet_tasks+=("$_sq_rname/$snapshot_td")
+        fi
+        break  # id found in first matching repo
+      done
+
+      if (( _sq_found == 0 )); then
+        {
+          printf 'observed_at\t%s\n' "$_sq_ts"
+          printf 'project\t%s\n' "$snapshot_project"
+          printf 'td_id\t%s\n' "$snapshot_td"
+          printf 'resolved\t0\n'
+          printf 'namespace\tunknown\n'
+          printf 'reason\ttd_id_not_found\n'
+          printf 'fleet_present\t0\n'
+          _sq_project_state_facts "$_sq_proj_name" "$_sq_repo_count"
+          _sq_coordinator_facts "$_RECENT_S"
+        } | _sq_emit
+        exit 0
+      fi
+    else
+      # No --td: collect all fleet records for all project repos.
+      for (( _i=0; _i<_sq_repo_count; _i++ )); do
+        _sq_rname="$(yq ".repos[$_i].name" "$_status_query_config")"
+        if [[ -d "$FLEET_DIR" ]]; then
+          for _sq_tdir in "$FLEET_DIR"/*/; do
+            [[ -d "$_sq_tdir/$_sq_rname" ]] || continue
+            _sq_fleet_tasks+=("$_sq_rname/$(basename "$_sq_tdir")")
+          done
+        fi
+      done
+    fi
+
+    # ── Aggregate fleet evidence ──────────────────────────────────────────
+    # _sq_fleet_tasks elements have two formats:
+    #   no-td path:  "repo-name/fleet-task-id"  (direct lookup)
+    #   td path:     "repo-name/td-task-id"      (must scan fleet dirs by td_task marker)
+    _sq_busy="null"
+    _sq_basis="no_verified_active_witness"
+    _sq_total=0 _sq_needs=0 _sq_blocked=0 _sq_waiting=0 _sq_terminal=0 _sq_inprog=0 _sq_other=0
+
+    _sq_count_dir() {
+      local _rd="$1"
+      [[ -d "$_rd" ]] || return
+      _sq_total=$(( _sq_total + 1 ))
+      local _st
+      _st="$(cat "$_rd/status" 2>/dev/null | tr -d '\n' || true)"
+      case "$_st" in
+        needs_input)    _sq_needs=$(( _sq_needs + 1 )) ;;
+        blocked)        _sq_blocked=$(( _sq_blocked + 1 )) ;;
+        waiting)        _sq_waiting=$(( _sq_waiting + 1 )) ;;
+        done|terminal)  _sq_terminal=$(( _sq_terminal + 1 )) ;;
+        in_progress)    _sq_inprog=$(( _sq_inprog + 1 )) ;;
+        *)              _sq_other=$(( _sq_other + 1 )) ;;
+      esac
+      if [[ "$_sq_busy" != "true" ]] && _snapshot_repo_is_active_witness "$_rd"; then
+        _sq_busy="true"; _sq_basis="verified_active_witness"
+      fi
+    }
+
+    if [[ -n "$snapshot_td" ]]; then
+      # td-scoped: scan all fleet/<fleet-task>/<repo> dirs and match on td_task marker.
+      for _sq_rt in "${_sq_fleet_tasks[@]:-}"; do
+        [[ -z "$_sq_rt" ]] && continue
+        _sq_rn="${_sq_rt%%/*}"
+        _sq_wanted_td="${_sq_rt#*/}"
+        if [[ -d "$FLEET_DIR" ]]; then
+          for _sq_ftdir in "$FLEET_DIR"/*/; do
+            _sq_rd="${_sq_ftdir%/}/$_sq_rn"
+            [[ -d "$_sq_rd" ]] || continue
+            _sq_td_file="$(cat "$_sq_rd/td_task" 2>/dev/null | tr -d '\n' || true)"
+            [[ "$_sq_td_file" == "$_sq_wanted_td" ]] || continue
+            _sq_count_dir "$_sq_rd"
+          done
+        fi
+      done
+    else
+      # project-scoped: fleet tasks already directly keyed as "repo/fleet-task-id".
+      for _sq_rt in "${_sq_fleet_tasks[@]:-}"; do
+        [[ -z "$_sq_rt" ]] && continue
+        _sq_rn="${_sq_rt%%/*}"
+        _sq_tk="${_sq_rt#*/}"
+        _sq_count_dir "$FLEET_DIR/$_sq_tk/$_sq_rn"
+      done
+    fi
+
+    {
+      printf 'observed_at\t%s\n' "$_sq_ts"
+      printf 'project\t%s\n' "$snapshot_project"
+      [[ -n "$snapshot_td" ]] && printf 'td_id\t%s\n' "$snapshot_td"
+      printf 'resolved\t1\n'
+      printf 'namespace\t%s\n' "$_sq_namespace"
+      printf 'reason\t%s\n' "$_sq_reason"
+      printf 'fleet_present\t1\n'
+      printf 'fleet_busy\t%s\n' "$_sq_busy"
+      printf 'fleet_basis\t%s\n' "$_sq_basis"
+      printf 'fleet_total\t%d\n' "$_sq_total"
+      printf 'fleet_needs_input\t%d\n' "$_sq_needs"
+      printf 'fleet_blocked\t%d\n' "$_sq_blocked"
+      printf 'fleet_waiting\t%d\n' "$_sq_waiting"
+      printf 'fleet_terminal\t%d\n' "$_sq_terminal"
+      printf 'fleet_in_progress\t%d\n' "$_sq_inprog"
+      printf 'fleet_other\t%d\n' "$_sq_other"
+      _sq_project_state_facts "$_sq_proj_name" "$_sq_repo_count"
+      _sq_coordinator_facts "$_RECENT_S"
+    } | _sq_emit
+    exit 0
+  fi
+  # ── End project/td status-query path ────────────────────────────────────
   # Validate before observing anything, so a malformed scope can never reach the
   # output and can never make the document unbounded.
   if (( snapshot_task_given == 1 )); then
