@@ -586,10 +586,10 @@ _retire_stale_pane() {
     _die "Published recycle evidence no longer matches marker provenance"
   printf 'terminal worker stale pane ownership retired; unrelated live pane was not touched\n' \
     > "$repo_dir/diagnostic"
-  printf 'Retired stale pane ownership for %s/%s; preserved worktree and live pane %s.\n' \
-    "$task_id" "$repo_name" "$pane"
   _sgt_response_lock_release || _die "Failed to release stale-pane retirement lock"
   trap - EXIT
+  printf 'Retired stale pane ownership for %s/%s; preserved worktree and live pane %s.\n' \
+    "$task_id" "$repo_name" "$pane"
 }
 
 _recycle_inactive_pane_zero_holders() {
