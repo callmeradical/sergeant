@@ -511,6 +511,15 @@ _notification_has_one_complete_handshake() {
   done
   [[ "$count" == 1 ]]
 }
+if [[ -f "$existing_relaunch_transaction" ]]; then
+  set +e
+  _sgt_transfer_journal_ack_completed_handshake "$REPO_DIR" \
+    "$existing_relaunch_transaction" "$response_id"
+  completed_handshake_status=$?
+  set -e
+  [[ "$completed_handshake_status" -ne 2 ]] || \
+    _die "Pending worker relaunch transaction is malformed"
+fi
 if [[ -f "$existing_relaunch_transaction" ]] &&
     _sgt_transfer_journal_read "$existing_relaunch_transaction" &&
     [[ "$_SGT_TRANSFER_PHASE" == acked ]]; then
@@ -520,6 +529,11 @@ if [[ -f "$existing_relaunch_transaction" ]] &&
   joined_pane_auth="$_SGT_TRANSFER_PANE_AUTH"
   joined_nonce="$(cat "$REPO_DIR/notification_target" 2>/dev/null || true)"
   joined_action_lease="$(cat "$REPO_DIR/notifications/$joined_notification/action_lease" 2>/dev/null || true)"
+  joined_action_identity="$(cat \
+    "$REPO_DIR/notifications/$joined_notification/targets/$joined_action_lease/pane_identity" \
+    2>/dev/null || true)"
+  joined_current_identity="$(_sgt_read_owned_file \
+    "$REPO_DIR/pane_identity" 2>/dev/null || true)"
   joined_live_auth="$(_sgt_replacement_pane_auth "$joined_pane" \
     "$_SGT_TRANSFER_SPAWN_TOKEN" "$_SGT_TRANSFER_WORKER_ROLE" 2>/dev/null || true)"
   joined_identity_matches=false
@@ -529,7 +543,10 @@ if [[ -f "$existing_relaunch_transaction" ]] &&
         "$(cat "$REPO_DIR/pane" 2>/dev/null || true)" == "$joined_pane" &&
         "$joined_identity_matches" == true && "$joined_live_auth" == "$joined_pane_auth" &&
         "$joined_nonce" =~ ^[a-f0-9]{32}$ &&
-        ( -z "$joined_action_lease" || -f "$REPO_DIR/notifications/$joined_notification/targets/$joined_action_lease/completed" ) &&
+        ( -z "$joined_action_lease" ||
+          -f "$REPO_DIR/notifications/$joined_notification/targets/$joined_action_lease/completed" ||
+          ( "$joined_action_lease" == "$joined_nonce" &&
+            "$joined_action_identity" == "$joined_current_identity" ) ) &&
         "$(cat "$REPO_DIR/notifications/$joined_notification/targets/$joined_nonce/handshake_complete" 2>/dev/null || true)" == "$joined_notification|$joined_nonce" ]]; then
     _sgt_response_lock_release
     _cleanup_response_input
@@ -937,6 +954,7 @@ if [[ "$delivery_wait_status" -ne 0 ]]; then
   _record_relaunch_orphan "relaunched interactive worker did not acknowledge its durable response notification"
   _die "Worker relaunch notification acknowledgement timed out for $TASK_ID/$REPO"
 fi
+_transfer_interrupt_hook handshake_complete
 _write_relaunch_transaction acked "$new_pane" "$pane_auth" || \
   _die "Could not publish acknowledged worker ownership transaction"
 rm -f "$REPO_DIR/drain_held" "$REPO_DIR/response_delivery_unacked"

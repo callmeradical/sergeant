@@ -263,4 +263,56 @@ fi
   exit 1
 }
 
+# A platform without an exact process-birth token can still acquire and release
+# its own nonce-bound lock.  The byte-identical in-memory acquisition is the
+# only portable ownership proof; another invocation may never treat the live
+# PID as stale merely because no exact birth token exists.
+source "$ROOT_DIR/bin/_sgt-process-identity.sh"
+lockdir12="$TEST_ROOT/state-12"
+mkdir -p "$lockdir12"
+SGT_TEST_HOOKS=1 SGT_TEST_PROCESS_START_UNAVAILABLE=1 \
+  _sgt_response_lock_acquire "$lockdir12" || {
+  printf 'PORTABLE_RESPONSE_LOCK_ACQUISITION_FAILED\n' >&2
+  exit 1
+}
+portable_record="$(cat "$lockdir12/response.lock")"
+grep -Fxq "pid=$$" "$lockdir12/response.lock"
+grep -Fxq 'start=portable' "$lockdir12/response.lock"
+SGT_TEST_HOOKS=1 SGT_TEST_PROCESS_START_UNAVAILABLE=1 \
+  _sgt_response_lock_release
+[[ ! -e "$lockdir12/response.lock" ]] || {
+  printf 'PORTABLE_RESPONSE_LOCK_RELEASE_FAILED\n' >&2
+  exit 1
+}
+printf '%s\n' "$portable_record" > "$lockdir12/response.lock"
+if SGT_TEST_HOOKS=1 SGT_TEST_PROCESS_START_UNAVAILABLE=1 \
+    SGT_RESPONSE_LOCK_TIMEOUT=1 _sgt_response_lock_acquire "$lockdir12" \
+    2> "$TEST_ROOT/case12.err"; then
+  printf 'RECLAIMED_LIVE_PORTABLE_OWNER\n' >&2
+  exit 1
+fi
+[[ "$(cat "$lockdir12/response.lock")" == "$portable_record" ]]
+
+# A successful but empty process-table snapshot is observer failure, not proof
+# that a recorded owner is absent.  Preserve the exact record fail-closed.
+lockdir13="$TEST_ROOT/state-13"
+mkdir -p "$lockdir13" "$TEST_ROOT/empty-ps-bin"
+printf 'pid=99999999\nstart=proc:1\nnonce=cccccccccccccccccccccccccccccccc\n' \
+  > "$lockdir13/response.lock"
+empty_ps_record="$(cat "$lockdir13/response.lock")"
+cat > "$TEST_ROOT/empty-ps-bin/ps" <<'PS'
+#!/usr/bin/env bash
+exit 0
+PS
+chmod +x "$TEST_ROOT/empty-ps-bin/ps"
+if PATH="$TEST_ROOT/empty-ps-bin:$PATH" SGT_RESPONSE_LOCK_TIMEOUT=1 \
+    _sgt_response_lock_acquire "$lockdir13" 2> "$TEST_ROOT/case13.err"; then
+  printf 'RECLAIMED_OWNER_ON_EMPTY_PS_SNAPSHOT\n' >&2
+  exit 1
+fi
+[[ "$(cat "$lockdir13/response.lock")" == "$empty_ps_record" ]] || {
+  printf 'RECLAIMED_OWNER_ON_EMPTY_PS_SNAPSHOT\n' >&2
+  exit 1
+}
+
 printf 'sgt-response-lock-release: ok\n'

@@ -85,7 +85,8 @@ _sgt_response_lock_record_parse() {
   _SGT_LOCK_RECORD_NONCE="$(printf '%s\n' "$record" | sed -n '3s/^nonce=//p')"
   [[ "$_SGT_LOCK_RECORD_PID" =~ ^[1-9][0-9]*$ &&
      ( "$_SGT_LOCK_RECORD_START" =~ ^proc:[0-9]+$ ||
-       "$_SGT_LOCK_RECORD_START" == ps:* ) &&
+       "$_SGT_LOCK_RECORD_START" == ps:* ||
+       "$_SGT_LOCK_RECORD_START" == portable ) &&
      "$_SGT_LOCK_RECORD_START" != ps: &&
      "$_SGT_LOCK_RECORD_NONCE" =~ ^[a-f0-9]{32}$ ]] || return 1
   canonical="$(printf 'pid=%s\nstart=%s\nnonce=%s' "$_SGT_LOCK_RECORD_PID" \
@@ -103,7 +104,10 @@ _sgt_response_lock_record_live() {
   # preserve them as unverifiable ownership rather than reclaiming the lock.
   [[ "$expected" != ps:* ]] || return 2
   if _sgt_process_pid_presence "$pid"; then
-    :
+    # A portable record deliberately has no process-birth identity.  A live PID
+    # can therefore never be distinguished from a reused PID by another
+    # invocation and remains unverifiable ownership.
+    [[ "$expected" != portable ]] || return 2
   else
     presence_status=$?
     [[ "$presence_status" -eq 1 ]] && return 1
@@ -115,7 +119,8 @@ _sgt_response_lock_record_live() {
 
 _sgt_response_lock_record_for_pid() {
   local pid="$1" start nonce
-  start="$(_sgt_process_start_token "$pid")" || return 1
+  start="$(_sgt_process_start_token "$pid" 2>/dev/null || true)"
+  [[ -n "$start" ]] || start=portable
   nonce="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
   [[ "$nonce" =~ ^[a-f0-9]{32}$ ]] || return 1
   printf 'pid=%s\nstart=%s\nnonce=%s\n' "$pid" "$start" "$nonce"
@@ -129,6 +134,10 @@ _sgt_response_lock_record_is_this_process() {
   pid="$_SGT_LOCK_RECORD_PID"
   expected="$_SGT_LOCK_RECORD_START"
   [[ "$pid" == "$$" ]] || return 1
+  # The unforgeable part of portable ownership within this invocation is the
+  # exact random acquisition record retained in memory.  Never attempt to
+  # reconstruct it from PID observations.
+  [[ "$expected" != portable ]] || return 0
   [[ "$expected" == "$(_sgt_process_start_token "$$")" ]]
 }
 
@@ -333,6 +342,14 @@ _sgt_replacement_pane_auth() {
     current_start="$(_sgt_process_start_token "$marker_pid")" || return 1
     [[ "$marker_start" == "$current_start" ]] || return 1
   elif [[ "$marker_start" =~ $portable_start_re ]]; then
+    local portable_generation portable_identity
+    portable_generation="${marker_start#portable:}"
+    portable_identity="${portable_generation#*:}"
+    portable_generation="${portable_generation%%:*}"
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/_sgt-process-token.py" portable-check \
+      "$marker_pid" "$portable_generation" "$portable_identity" \
+      >/dev/null 2>&1 || return 1
     current_start="$marker_start"
   else
     return 1
@@ -532,6 +549,47 @@ _sgt_transfer_journal_write() {
   _sgt_transfer_journal_read "$temporary" || { rm -f "$temporary"; return 1; }
   _sgt_transfer_io_failpoint "$file" rename && { rm -f "$temporary"; return 1; }
   mv "$temporary" "$file"
+}
+
+# Advance an installed replacement transaction after an earlier invocation
+# died in the narrow interval between the durable worker handshake and its
+# journal acknowledgement.  The immutable journal, current pane metadata,
+# authenticated replacement capability, and nonce-addressed handshake must all
+# still bind the same target.  An in-flight action lease is intentionally not
+# adjudicated here: it belongs to the already accepted target being resumed.
+# Returns 0 when advanced, 1 when no complete matching handshake exists, and 2
+# when the journal itself is malformed.
+_sgt_transfer_journal_ack_completed_handshake() {
+  local repo_state="$1" journal="$2" expected_response_id="$3"
+  local response_id notification_id spawn_token gate_generation tmux_session
+  local window_name worker_role worker_command phase pane pane_auth nonce live_auth
+  _sgt_transfer_journal_read "$journal" || return 2
+  response_id="$_SGT_TRANSFER_RESPONSE_ID"
+  notification_id="$_SGT_TRANSFER_NOTIFICATION_ID"
+  spawn_token="$_SGT_TRANSFER_SPAWN_TOKEN"
+  gate_generation="$_SGT_TRANSFER_GATE_GENERATION"
+  tmux_session="$_SGT_TRANSFER_TMUX_SESSION"
+  window_name="$_SGT_TRANSFER_WINDOW_NAME"
+  worker_role="$_SGT_TRANSFER_WORKER_ROLE"
+  worker_command="$_SGT_TRANSFER_WORKER_COMMAND"
+  phase="$_SGT_TRANSFER_PHASE"
+  pane="$_SGT_TRANSFER_PANE"
+  pane_auth="$_SGT_TRANSFER_PANE_AUTH"
+  [[ "$response_id" == "$expected_response_id" ]] || return 1
+  [[ "$phase" == spawned || "$phase" == published ]] || return 1
+  [[ "$(cat "$repo_state/notification_id" 2>/dev/null || true)" == "$notification_id" &&
+     "$(cat "$repo_state/pane" 2>/dev/null || true)" == "$pane" ]] || return 1
+  _sgt_pane_identity_matches "$pane" "$repo_state" || return 1
+  live_auth="$(_sgt_replacement_pane_auth "$pane" "$spawn_token" "$worker_role" \
+    2>/dev/null || true)"
+  [[ -n "$pane_auth" && "$live_auth" == "$pane_auth" ]] || return 1
+  nonce="$(cat "$repo_state/notification_target" 2>/dev/null || true)"
+  [[ "$nonce" =~ ^[a-f0-9]{32}$ &&
+     "$(cat "$repo_state/notifications/$notification_id/targets/$nonce/handshake_complete" \
+       2>/dev/null || true)" == "$notification_id|$nonce" ]] || return 1
+  _sgt_transfer_journal_write "$journal" "$response_id" "$notification_id" \
+    "$spawn_token" "$gate_generation" "$tmux_session" "$window_name" \
+    "$worker_role" "$worker_command" acked "$pane" "$pane_auth"
 }
 
 # ── Action-lease finalization ─────────────────────────────────────────────────

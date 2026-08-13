@@ -102,6 +102,10 @@ case "$1" in
         printf '%s\n' "$token" > "$wt/.sergeant-notification-accepts/$nonce"
         printf '%s\n' "$token" > "$target_dir/accepted"
         printf '%s\n' "$token" > "$target_dir/delivered"
+        if [[ "${CREATE_ACTION_LEASE_ON_HANDSHAKE:-0}" == 1 ]]; then
+          printf '%s\n' "$nonce" \
+            > "$REPO_STATE_DIR/notifications/$notification_id/action_lease"
+        fi
         printf '%s\n' "$pane_identity" \
           > "$REPO_STATE_DIR/notification_delivered_pane_identity"
         printf '%s\n' "$notification_id" > "$REPO_STATE_DIR/notification_delivered"
@@ -590,6 +594,30 @@ fi
   exit 1
 }
 
+# A successful zero-byte process inventory is equally unverifiable: a real
+# process table cannot establish absence without at least one valid observer
+# row.  Never fence the accepted owner from an empty snapshot.
+mkdir -p "$TEST_ROOT/ps-probe-empty-bin"
+cat > "$TEST_ROOT/ps-probe-empty-bin/ps" <<'PS'
+#!/usr/bin/env bash
+exit 0
+PS
+chmod +x "$TEST_ROOT/ps-probe-empty-bin/ps"
+read -r state wt <<<"$(make_worktree respond-ps-probe-empty)"
+task=task-respond-ps-probe-empty
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+if printf 'resume' | PATH="$TEST_ROOT/ps-probe-empty-bin:$fake_bin:$PATH" \
+    SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" \
+    PANE_ALIVE=0 "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1; then
+  printf 'FENCED_ON_EMPTY_PS_SNAPSHOT\n' >&2
+  exit 1
+fi
+[[ ! -e "$state/notifications/$NOTIFY/action_lease_abandoned" ]] || {
+  printf 'FENCED_ON_EMPTY_PS_SNAPSHOT\n' >&2
+  exit 1
+}
+
 # ── 9. Every durable transfer boundary converges on exact retry ──────────
 
 for boundary in lease_archived successor_published replacement_spawned replacement_owned; do
@@ -820,6 +848,82 @@ PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
 [[ "$(sed -n 's/^phase=//p' "$state/response_relaunch_transaction")" == acked ]]
 [[ "$(worktree_content_hash "$wt")" == "$content_before" ]]
 [[ "$(cat "$wt/uncommitted.txt")" == 'uncommitted payload survives abrupt transfer' ]]
+
+# A crash after the canonical delivery handshake but before journal ack must
+# resume the already accepted immutable target.  The worker may have begun its
+# action lease in that interval; retry still advances transaction A to acked
+# rather than fencing A and allocating a successor B.
+read -r state wt <<<"$(make_worktree post-handshake-crash)"
+task=task-post-handshake-crash
+setup_orphan "$state" "$wt"
+printf 'resume immutable accepted target' > "$TEST_ROOT/post-handshake-input"
+set +e
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/post-handshake-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/post-handshake-window-count" \
+  CREATE_ACTION_LEASE_ON_HANDSHAKE=1 SGT_TEST_HOOKS=1 \
+  SGT_TEST_INTERRUPT_TRANSFER_AT=handshake_complete \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app \
+  < "$TEST_ROOT/post-handshake-input" >/dev/null 2>&1
+post_handshake_status=$?
+set -e
+[[ "$post_handshake_status" -ne 0 ]] || {
+  printf 'POST_HANDSHAKE_INTERRUPT_DID_NOT_FIRE\n' >&2
+  exit 1
+}
+accepted_notification="$(cat "$state/notification_id")"
+accepted_target="$(cat "$state/notification_target")"
+[[ "$(cat "$state/notifications/$accepted_notification/action_lease")" == \
+  "$accepted_target" ]]
+[[ "$(cat "$state/notifications/$accepted_notification/targets/$accepted_target/handshake_complete")" == \
+  "$accepted_notification|$accepted_target" ]]
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/post-handshake-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/post-handshake-window-count" \
+  CREATE_ACTION_LEASE_ON_HANDSHAKE=1 \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app \
+  < "$TEST_ROOT/post-handshake-input" >/dev/null 2>&1 || {
+  printf 'POST_HANDSHAKE_RETRY_DID_NOT_RESUME_ACCEPTED_TARGET\n' >&2
+  exit 1
+}
+[[ "$(cat "$state/notification_id")" == "$accepted_notification" ]]
+[[ "$(cat "$state/notification_target")" == "$accepted_target" ]]
+[[ "$(cat "$TEST_ROOT/post-handshake-window-count")" == 1 ]]
+[[ "$(sed -n 's/^phase=//p' "$state/response_relaunch_transaction")" == acked ]]
+
+# The same post-handshake crash boundary is shared by sgt-recover.  Retry must
+# acknowledge its installed transaction before inspecting the worker's newly
+# accepted action lease.
+read -r state wt <<<"$(make_worktree recover-post-handshake-crash)"
+task=task-recover-post-handshake-crash
+setup_stall "$state" "$wt"
+set +e
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=1 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/recover-post-handshake-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/recover-post-handshake-window-count" \
+  CREATE_ACTION_LEASE_ON_HANDSHAKE=1 SGT_TEST_HOOKS=1 \
+  SGT_TEST_INTERRUPT_RECOVER_AT=handshake_complete \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
+recover_post_handshake_status=$?
+set -e
+[[ "$recover_post_handshake_status" -ne 0 ]]
+recover_accepted_notification="$(cat "$state/notification_id")"
+recover_accepted_target="$(cat "$state/notification_target")"
+[[ "$(cat "$state/notifications/$recover_accepted_notification/action_lease")" == \
+  "$recover_accepted_target" ]]
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=1 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/recover-post-handshake-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/recover-post-handshake-window-count" \
+  CREATE_ACTION_LEASE_ON_HANDSHAKE=1 \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
+[[ "$(cat "$state/notification_id")" == "$recover_accepted_notification" ]]
+[[ "$(cat "$state/notification_target")" == "$recover_accepted_target" ]]
+[[ "$(cat "$TEST_ROOT/recover-post-handshake-window-count")" == 1 ]]
+[[ "$(sed -n 's/^phase=//p' "$state/response_relaunch_transaction")" == acked ]]
 
 # Recover must distinguish a failed inventory command from an empty inventory.
 # After an abrupt death leaves an authenticated pane live, enumeration failure

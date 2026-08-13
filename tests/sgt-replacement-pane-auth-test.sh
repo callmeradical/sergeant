@@ -143,6 +143,49 @@ portable_auth="$(_sgt_replacement_pane_identity_matches "$portable_pane_identity
 }
 [[ "$portable_auth" == "$portable_pane|"*"|portable:$portable_generation:$portable_identity|$portable_token|$portable_role" ]]
 
+# Pane-local options are claims, not the portable capability itself.  A process
+# that closes the launcher's inherited marker FD cannot be adopted even when it
+# leaves every tmux option intact.
+closed_token=bcdefabcdefabcdefabcdefabcdefabc
+closed_role=worker:portable-closed
+closed_command="$(printf '%q %q %q %q %q %q %q %q %q %q' env \
+  SGT_TEST_HOOKS=1 SGT_TEST_PROCESS_START_UNAVAILABLE=1 \
+  "$ROOT_DIR/bin/sgt-replacement-launch" "$closed_token" "$closed_role" \
+  "$portable_marker_record" /bin/bash -c 'exec 197<&-; exec sleep 60')"
+closed_pane="$(tmux new-window -d -P -F '#{pane_id}' \
+  -t "$session:" -n portable-closed "$closed_command")"
+for _ in $(seq 1 100); do
+  [[ "$(tmux display-message -p -t "$closed_pane" \
+    '#{@sergeant_replacement_start}' 2>/dev/null || true)" == \
+    "portable:$portable_generation:$portable_identity" ]] && break
+  sleep 0.01
+done
+closed_identity="$(_sgt_pane_identity "$closed_pane")"
+if _sgt_replacement_pane_identity_matches "$closed_identity" "$closed_pane" \
+    "$closed_token" "$closed_role"; then
+  printf 'PORTABLE_REPLACEMENT_AUTHENTICATED_CLOSED_CAPABILITY\n' >&2
+  exit 1
+fi
+
+# A foreign pane can forge all four option values.  Without the matching open
+# marker capability on that exact pane PID it is still never authenticated.
+forged_token=cdefabcdefabcdefabcdefabcdefabcd
+forged_role=worker:portable-forged
+forged_pane="$(tmux new-window -d -P -F '#{pane_id}' \
+  -t "$session:" -n portable-forged '/bin/sleep 60')"
+forged_pid="$(tmux display-message -p -t "$forged_pane" '#{pane_pid}')"
+tmux set-option -p -t "$forged_pane" @sergeant_replacement_token "$forged_token" \; \
+  set-option -p -t "$forged_pane" @sergeant_replacement_role "$forged_role" \; \
+  set-option -p -t "$forged_pane" @sergeant_replacement_pid "$forged_pid" \; \
+  set-option -p -t "$forged_pane" @sergeant_replacement_start \
+    "portable:$portable_generation:$portable_identity"
+forged_identity="$(_sgt_pane_identity "$forged_pane")"
+if _sgt_replacement_pane_identity_matches "$forged_identity" "$forged_pane" \
+    "$forged_token" "$forged_role"; then
+  printf 'PORTABLE_REPLACEMENT_AUTHENTICATED_FORGED_OPTIONS\n' >&2
+  exit 1
+fi
+
 # The persisted pane identity and replacement marker authentication must bind
 # the same pane generation.  A raced-in replacement that is internally valid
 # must not authenticate against the caller's older snapshot.

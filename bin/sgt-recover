@@ -218,6 +218,30 @@ if [[ -f "$REPO_DIR/stall_recovery_attempted" ]]; then
   fi
 fi
 
+# A prior recovery may have installed the authenticated pane and observed its
+# durable handshake before dying just ahead of the ack journal write.  Complete
+# that immutable transaction before considering the accepted target's action
+# lease; allocating a successor here would split one accepted turn in two.
+if [[ -f "$REPO_DIR/response_relaunch_transaction" ]]; then
+  set +e
+  _sgt_transfer_journal_ack_completed_handshake "$REPO_DIR" \
+    "$REPO_DIR/response_relaunch_transaction" ""
+  completed_handshake_status=$?
+  set -e
+  [[ "$completed_handshake_status" -ne 2 ]] || \
+    _recover_die "Stall recovery refused: relaunch journal is malformed"
+  if [[ "$completed_handshake_status" -eq 0 ]]; then
+    rm -f "$REPO_DIR/diagnostic" "$REPO_DIR/message" \
+      "$worktree/.sergeant-message" "$REPO_DIR/response_relaunch_worker_before"
+    _sgt_response_lock_release
+    _sgt_drain_lock_release_fd "$_SGT_RECOVER_LAUNCH_FD"
+    trap - EXIT
+    printf 'sgt-recover: resumed acknowledged stall recovery for %s/%s, pane %s.\n' \
+      "$TASK_ID" "$REPO" "$(cat "$REPO_DIR/pane")"
+    exit 0
+  fi
+fi
+
 [[ "$status" == "in_progress" ]] || \
   _recover_die "Recovery is unavailable: worker status changed to '$status' under lock"
 [[ "$diagnostic" == "live worker stalled:"* ]] || \
@@ -315,6 +339,7 @@ fi
 old_pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
 old_pane_live=false
 journaled_replacement_pending=false
+journaled_replacement_pane=""
 relaunch_transaction="$REPO_DIR/response_relaunch_transaction"
 relaunch_worker_before_file="$REPO_DIR/response_relaunch_worker_before"
 if [[ -e "$relaunch_transaction" ]]; then
@@ -323,13 +348,24 @@ if [[ -e "$relaunch_transaction" ]]; then
   if [[ -z "$_SGT_TRANSFER_RESPONSE_ID" &&
         "$_SGT_TRANSFER_GATE_GENERATION" == "$gate_generation" ]]; then
     case "$_SGT_TRANSFER_PHASE" in
-      spawning|spawned|published|acked) journaled_replacement_pending=true ;;
+      spawning|spawned|published|acked)
+        journaled_replacement_pending=true
+        journaled_replacement_pane="$_SGT_TRANSFER_PANE"
+        ;;
     esac
   fi
 fi
 if [[ -n "$old_pane" ]] && command -v tmux >/dev/null 2>&1; then
   if _sgt_pane_identity_matches "$old_pane" "$REPO_DIR"; then
-    old_pane_live=true
+    if $journaled_replacement_pending && \
+        [[ -n "$journaled_replacement_pane" && \
+           "$old_pane" == "$journaled_replacement_pane" ]]; then
+      # A late failure retained the coherent replacement pane+identity pair.
+      # It is the transaction being resumed, not a superseded pane to kill.
+      old_pane_live=false
+    else
+      old_pane_live=true
+    fi
   elif $dead_owner_fenced && [[ "$old_pane" == "$fenced_owner_pane" ]]; then
     # The shared fence already proved this exact recorded pane and process gone
     # twice under the response lock. There is no old pane left to kill.
@@ -523,9 +559,20 @@ fi
 # pane so fleet state stays consistent, and escalate.
 
 printf '%s\n' "$new_pane" > "$REPO_DIR/pane"
+replacement_identity_published=false
 
 _abort_replacement() {
   local reason="$1"
+  if [[ "$replacement_identity_published" == true ]]; then
+    # Pane and identity now form one coherent published owner and the journal
+    # binds that exact replacement.  Preserve it as an actionable transaction
+    # rather than exposing a half-restored ownership pair to lock-free readers.
+    printf 'live worker stalled: recovery transaction pending: %s; rerun sgt-recover %s %s\n' \
+      "$reason" "$TASK_ID" "$REPO" > "$REPO_DIR/diagnostic"
+    printf 'in_progress\n' > "$worktree/.sergeant-status"
+    printf 'in_progress\n' > "$REPO_DIR/status"
+    _recover_die "Stall recovery interrupted after ownership publication: $reason for $TASK_ID/$REPO; rerun sgt-recover $TASK_ID $REPO"
+  fi
   tmux kill-pane -t "$new_pane" 2>/dev/null || true
   if [[ -n "$old_pane" ]]; then
     printf '%s\n' "$old_pane" > "$REPO_DIR/pane" || true
@@ -547,6 +594,11 @@ if pane_identity="$(_sgt_pane_identity "$new_pane")" && \
     _abort_replacement "could not publish spawned worker ownership transaction"
   _sgt_replace_owned_file "$REPO_DIR/pane_identity" "$pane_identity" || \
     _abort_replacement "could not publish new worker pane identity"
+  replacement_identity_published=true
+  if [[ "${SGT_TEST_HOOKS:-}" == 1 &&
+        "${SGT_TEST_FAIL_RECOVER_TARGET_PUBLICATION:-}" == 1 ]]; then
+    _abort_replacement "test target publication failure"
+  fi
   _sgt_notification_target_create "$REPO_DIR" "$delivery_notification_id" \
       "$pane_identity" >/dev/null || \
     _abort_replacement "notification target race detected during stall recovery relaunch"
@@ -578,6 +630,10 @@ if [[ "$delivery_wait_status" -ne 0 ]]; then
   tmux kill-pane -t "$new_pane" 2>/dev/null || true
   _escalate "relaunched worker did not acknowledge recovery notification"
   _recover_die "Stall recovery failed: notification timed out for $TASK_ID/$REPO"
+fi
+if [[ "${SGT_TEST_HOOKS:-}" == 1 &&
+      "${SGT_TEST_INTERRUPT_RECOVER_AT:-}" == handshake_complete ]]; then
+  kill -KILL "$$"
 fi
 _write_recovery_transaction acked "$new_pane" "$pane_auth" || \
   _recover_die "Stall recovery failed: could not publish acknowledged ownership transaction"

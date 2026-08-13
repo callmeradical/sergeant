@@ -26,7 +26,7 @@ _sgt_process_start_token() {
 # A targeted `ps -p` commonly returns the same nonzero status for both absence
 # and operational errors, so ownership fencing must not use it as a death probe.
 _sgt_process_pid_presence() {
-  local pid="$1" snapshot line seen=false parse_status=0
+  local pid="$1" snapshot line seen=false saw_valid=false parse_status=0
   [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 2
   snapshot="$(mktemp "${TMPDIR:-/tmp}/sgt-pid-snapshot.XXXXXX")" || return 2
   if ps -A -o pid= > "$snapshot" 2>/dev/null; then
@@ -44,10 +44,11 @@ _sgt_process_pid_presence() {
       parse_status=2
       break
     fi
+    saw_valid=true
     [[ "$line" == "$pid" ]] && seen=true
   done < "$snapshot"
   rm -f "$snapshot"
-  [[ "$parse_status" -eq 0 ]] || return "$parse_status"
+  [[ "$parse_status" -eq 0 && "$saw_valid" == true ]] || return 2
   [[ "$seen" == true ]] && return 0
   return 1
 }

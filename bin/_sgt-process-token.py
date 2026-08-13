@@ -239,12 +239,14 @@ def enumerate_holders(markers):
     return owners
 
 
-def enumerate_portable_holders(markers):
+def enumerate_portable_holders(markers, target_pid=None):
     """Return lsof-proven marker holders without inventing process identity."""
     command = [
         "lsof", "-w", "-nP", "-a", "-u", str(os.geteuid()),
         "-d", "0-2147483647", "-F", "pDfi",
     ]
+    if target_pid is not None:
+        command[4:4] = ["-p", str(target_pid)]
     try:
         process = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -477,6 +479,19 @@ def compact_portable(path, markers):
 
 
 def main():
+    if len(sys.argv) == 5 and sys.argv[1] == "portable-check":
+        pid_text, generation, identity = sys.argv[2:]
+        if (not pid_text.isdigit() or int(pid_text) <= 0 or
+                not re.fullmatch(r"[0-9a-f]{32}", generation) or
+                not re.fullmatch(r"[0-9]+:[0-9]+", identity)):
+            fail("invalid portable worker marker check request")
+        marker_identity = tuple(map(int, identity.split(":")))
+        holders = enumerate_portable_holders(
+            {marker_identity: (generation, 0)}, int(pid_text)
+        )
+        if marker_identity not in holders.get(int(pid_text), set()):
+            fail(f"portable worker marker is not held by pane PID {pid_text}")
+        return
     if len(sys.argv) == 6 and sys.argv[1] == "check":
         history, pid_text, start, identity = sys.argv[2:]
         markers = load_markers(history)
