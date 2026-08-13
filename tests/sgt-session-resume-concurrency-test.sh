@@ -190,6 +190,102 @@ find "$state" -type f -print0 | sort -z | xargs -0 sha256sum \
 cmp "$TEST_ROOT/entropy-state.before" "$TEST_ROOT/entropy-state.after"
 [[ "$(cat "$state/status")" == in_progress ]]
 
+# A nonce-bound completion journal is not sufficient when its selected marker
+# belongs to malformed history. Resume and recovery must validate the complete
+# marker tuple before accepting peer completion.
+: > "$TEST_ROOT/launch.log"
+printf '%%88\n' > "$state/pane"
+printf '0|%%88|8888|123455|old-worker\n' > "$state/pane_identity"
+chmod 600 "$state/pane_identity"
+printf 'orphaned\n' > "$state/status"
+bash -c '
+  source "$1/bin/_sgt-lib.sh"
+  source "$1/bin/_sgt-drain.sh"
+  _sgt_drain_lock_acquire_fd 8 torn-resume "$2/worker-launch.lock"
+  _sgt_worker_launch_transaction_begin "$2" 8
+  : > "$3"
+  while [[ ! -e "$5" ]]; do sleep 0.01; done
+  _sgt_prepare_worker_process_marker "$2"
+  _sgt_worker_launch_completion_publish "$2" 8
+  cp "$2/worker_process_markers" "$4"
+  printf "truncated-history" > "$2/worker_process_markers"
+  _sgt_drain_lock_release_fd 8
+' _ "$ROOT_DIR" "$state" "$TEST_ROOT/torn-resume-ready" \
+  "$TEST_ROOT/torn-resume-history.valid" "$TEST_ROOT/torn-resume-corrupt" & \
+  torn_resume_owner=$!
+for _ in $(seq 1 100); do
+  [[ -e "$TEST_ROOT/torn-resume-ready" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/torn-resume-ready" ]]
+PATH="$TEST_ROOT/bin:$PATH" LAUNCH_LOG="$TEST_ROOT/launch.log" \
+  PANE_COMMAND="$TEST_ROOT/pane-command" TEST_REPO_STATE="$state" \
+  OLD_PANE_GONE=1 SGT_NOTIFICATION_ACK_TIMEOUT=2 SGT_TEST_HOOKS=1 \
+  _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$state/torn-resume-contended" \
+  "$ROOT_DIR/bin/sgt-session-resume" task-race app --force \
+  > "$TEST_ROOT/torn-resume.out" 2>&1 & torn_resume_waiter=$!
+for _ in $(seq 1 500); do
+  [[ -e "$state/torn-resume-contended" ]] && break
+  sleep 0.01
+done
+[[ -e "$state/torn-resume-contended" ]]
+: > "$TEST_ROOT/torn-resume-corrupt"
+wait "$torn_resume_owner"
+set +e
+wait "$torn_resume_waiter"
+torn_resume_status=$?
+set -e
+[[ "$torn_resume_status" -ne 0 ]]
+grep -Fq 'marker evidence changed while waiting for ownership' \
+  "$TEST_ROOT/torn-resume.out"
+[[ ! -s "$TEST_ROOT/launch.log" ]]
+mv "$TEST_ROOT/torn-resume-history.valid" "$state/worker_process_markers"
+
+printf 'in_progress\n' > "$state/status"
+printf 'live worker stalled: fixture\n' > "$state/diagnostic"
+bash -c '
+  source "$1/bin/_sgt-lib.sh"
+  source "$1/bin/_sgt-drain.sh"
+  _sgt_drain_lock_acquire_fd 8 torn-recover "$2/worker-launch.lock"
+  _sgt_worker_launch_transaction_begin "$2" 8
+  : > "$3"
+  while [[ ! -e "$5" ]]; do sleep 0.01; done
+  _sgt_prepare_worker_process_marker "$2"
+  _sgt_worker_launch_completion_publish "$2" 8
+  cp "$2/worker_process_markers" "$4"
+  printf "truncated-history" > "$2/worker_process_markers"
+  _sgt_drain_lock_release_fd 8
+' _ "$ROOT_DIR" "$state" "$TEST_ROOT/torn-recover-ready" \
+  "$TEST_ROOT/torn-recover-history.valid" "$TEST_ROOT/torn-recover-corrupt" & \
+  torn_recover_owner=$!
+for _ in $(seq 1 100); do
+  [[ -e "$TEST_ROOT/torn-recover-ready" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/torn-recover-ready" ]]
+PATH="$TEST_ROOT/bin:$PATH" LAUNCH_LOG="$TEST_ROOT/launch.log" \
+  PANE_COMMAND="$TEST_ROOT/pane-command" TEST_REPO_STATE="$state" \
+  SGT_NOTIFICATION_ACK_TIMEOUT=2 SGT_TEST_HOOKS=1 \
+  _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$state/torn-recover-contended" \
+  "$ROOT_DIR/bin/sgt-recover" task-race app \
+  > "$TEST_ROOT/torn-recover.out" 2>&1 & torn_recover_waiter=$!
+for _ in $(seq 1 500); do
+  [[ -e "$state/torn-recover-contended" ]] && break
+  sleep 0.01
+done
+[[ -e "$state/torn-recover-contended" ]]
+: > "$TEST_ROOT/torn-recover-corrupt"
+wait "$torn_recover_owner"
+set +e
+wait "$torn_recover_waiter"
+torn_recover_status=$?
+set -e
+[[ "$torn_recover_status" -ne 0 ]]
+grep -Fq 'marker evidence changed while waiting for ownership' \
+  "$TEST_ROOT/torn-recover.out"
+[[ ! -s "$TEST_ROOT/launch.log" ]]
+mv "$TEST_ROOT/torn-recover-history.valid" "$state/worker_process_markers"
+
 # The same transaction also serializes the distinct recovery CLI. Both callers
 # may pass their pre-lock checks, but the loser observes the winner's exact pane
 # generation and must not launch again or replace marker history.

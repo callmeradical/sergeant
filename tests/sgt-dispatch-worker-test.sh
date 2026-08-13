@@ -940,4 +940,45 @@ wait "$inverse_dispatch_pid"
 grep -Fq 'verified peer worker-launch transaction completed' \
   "$TEST_ROOT/inverse-dispatch.out"
 
+# Dispatch must not accept a peer completion journal whose selected marker has
+# malformed durable history. The current marker alone is not launch proof.
+torn_race_state="$TEST_ROOT/fleet/torn-race-public-000000/app"
+FIXED_TASK_RANDOM=1 SGT_TEST_HOOKS=1 \
+  SGT_TEST_DISPATCH_BEFORE_LAUNCH_LOCK_BARRIER=1 \
+  PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/torn-race.log" \
+  TD_LOG="$TEST_ROOT/torn-race-td.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Torn race public' --repos app \
+  > "$TEST_ROOT/torn-race-dispatch.out" 2>&1 & torn_dispatch_pid=$!
+for _ in $(seq 1 500); do
+  [[ -e "$torn_race_state/dispatch-before-launch-lock-ready" ]] && break
+  sleep 0.01
+done
+[[ -e "$torn_race_state/dispatch-before-launch-lock-ready" ]]
+PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/torn-race.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 SGT_TEST_HOOKS=1 \
+  SGT_TEST_SESSION_RESUME_AFTER_COMPLETION_BARRIER=1 \
+  "$ROOT_DIR/bin/sgt-session-resume" torn-race-public-000000 app --force \
+  > "$TEST_ROOT/torn-race-resume.out" 2>&1 & torn_resume_pid=$!
+for _ in $(seq 1 500); do
+  [[ -e "$torn_race_state/session-resume-after-completion-ready" ]] && break
+  sleep 0.01
+done
+[[ -e "$torn_race_state/session-resume-after-completion-ready" ]]
+printf 'truncated-history' > "$torn_race_state/worker_process_markers"
+: > "$torn_race_state/dispatch-before-launch-lock-release"
+sleep 0.3
+: > "$torn_race_state/session-resume-after-completion-release"
+wait "$torn_resume_pid"
+set +e
+wait "$torn_dispatch_pid"
+torn_dispatch_status=$?
+set -e
+[[ "$torn_dispatch_status" -ne 0 ]]
+grep -Fq 'without exact completed mutation evidence' \
+  "$TEST_ROOT/torn-race-dispatch.out"
+[[ "$(grep -c '^new-window ' "$TEST_ROOT/torn-race.log")" -eq 1 ]]
+[[ "$(cat "$torn_race_state/worker_process_markers")" == truncated-history ]]
+
 printf 'sgt-dispatch supervisor launch: ok\n'
