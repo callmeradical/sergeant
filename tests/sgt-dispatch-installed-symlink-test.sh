@@ -237,4 +237,20 @@ set -e
 [[ -z "$(find "$FLEET" -mindepth 1 -print -quit)" ]]
 [[ ! -s "$TEST_ROOT/td.log" ]]
 
+# A real executable named sgt-dispatch outside the distribution's canonical
+# bin/ layout is invalid even when every installed symlink hop itself resolves.
+rm "$DIST/templates/worker-brief.md" "$DIST/templates/cycle-b.md"
+cp "$ROOT_DIR/templates/worker-brief.md" "$DIST/templates/worker-brief.md"
+mkdir -p "$TEST_ROOT/invalid-layout"
+cp "$ROOT_DIR/bin/sgt-dispatch" "$TEST_ROOT/invalid-layout/sgt-dispatch"
+ln -sfn "$TEST_ROOT/invalid-layout/sgt-dispatch" "$HOP/sgt-dispatch"
+set +e
+invalid_output="$(run_dispatch 'Invalid distribution layout' 2>&1)"
+invalid_status=$?
+set -e
+[[ "$invalid_status" -ne 0 && \
+  "$invalid_output" == *'invalid canonical Sergeant distribution'* ]]
+[[ -z "$(find "$FLEET" -mindepth 1 -print -quit)" ]]
+[[ ! -s "$TEST_ROOT/td.log" ]]
+
 printf 'sgt-dispatch installed-symlink transaction: ok\n'

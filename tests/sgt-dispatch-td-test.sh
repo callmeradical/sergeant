@@ -20,8 +20,10 @@ mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/config" "$TEST_ROOT/fake-bin" \
 # the copied sgt-dispatch fail at its source line instead of under test.
 # _sgt-response-lock.sh is also needed: sgt-watch sources it for the shared
 # action-lease finalizer invoked during terminal recycling.
-cp "$ROOT_DIR/bin/sgt-dispatch" "$ROOT_DIR"/bin/_sgt-*.sh "$ROOT_DIR/bin/sgt-td-create" \
-  "$ROOT_DIR/bin/sgt-td-memory" "$ROOT_DIR/bin/sgt-watch" "$TEST_ROOT/bin/"
+cp "$ROOT_DIR/bin/sgt-dispatch" "$ROOT_DIR"/bin/_sgt-* "$ROOT_DIR/bin/sgt-td-create" \
+  "$ROOT_DIR/bin/sgt-td-memory" "$ROOT_DIR/bin/sgt-watch" \
+  "$ROOT_DIR/bin/sgt-interactive-worker" "$TEST_ROOT/bin/"
+cp -R "$ROOT_DIR/templates" "$TEST_ROOT/"
 
 cat > "$TEST_ROOT/config/test.yaml" <<EOF
 name: test
