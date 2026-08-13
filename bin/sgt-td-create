@@ -82,6 +82,7 @@ OWN_STATE_FILE=false
 
 CREATE_STDERR_FILE="$(mktemp)"
 CREATE_RESULT_FILE="$(mktemp)"
+SUCCESS_FILE="${SGT_TD_SUCCESS_FILE:-}"
 PENDING_REPO=""
 PENDING_WORK_DIR=""
 ROLLBACK_DONE=false
@@ -116,6 +117,19 @@ with open(sys.argv[1], encoding="utf-8") as handle:
         if line.strip() and json.loads(line).get("task_id") == sys.argv[2]:
             raise SystemExit(0)
 raise SystemExit(1)
+PY
+}
+
+_mark_create_success() {
+  [[ -n "$SUCCESS_FILE" ]] || return 0
+  python3 - "$SUCCESS_FILE" <<'PY'
+import os
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write("committed\n")
+    handle.flush()
+    os.fsync(handle.fileno())
 PY
 }
 
@@ -279,4 +293,5 @@ Repo role: $repo_role"
   PENDING_WORK_DIR=""
 done
 
+_mark_create_success
 _emit_results

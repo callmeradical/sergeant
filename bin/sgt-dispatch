@@ -525,11 +525,11 @@ INTENT_TMP="$(mktemp)"
 REPO_TD_MAP="$(mktemp)"
 TD_CREATE_STATE_FILE="$(mktemp)"
 TD_CREATE_STDERR="$(mktemp)"
+TD_CREATE_SUCCESS_FILE="$(mktemp)"
 DISPATCH_MUTATIONS_FILE="$(mktemp)"
 DISPATCH_SNAPSHOT_ROOT="$(mktemp -d)"
 DISPATCH_TASK_DIR_CREATED=false
 DISPATCH_SUCCEEDED=false
-DISPATCH_GENERATED_TD_COMMITTED=false
 DISPATCH_ROLLBACK_ERRORS=""
 
 _dispatch_rollback_error() {
@@ -587,7 +587,11 @@ _restore_dispatch_worktree() {
 
 _rollback_dispatch_generated_td_tasks() {
   local rollback_state
-  $DISPATCH_GENERATED_TD_COMMITTED || return 0
+  # The child fsyncs each creation and its success marker before returning.
+  # Those files transfer rollback ownership without a volatile parent flag or
+  # a crash window before result-map parsing.
+  [[ -s "$TD_CREATE_STATE_FILE" && -s "$TD_CREATE_SUCCESS_FILE" ]] || return 0
+  [[ "$(cat "$TD_CREATE_SUCCESS_FILE")" == committed ]] || return 0
   rollback_state="$(mktemp)" || {
     _dispatch_rollback_error "could not allocate generated td rollback state"
     return 1
@@ -759,7 +763,8 @@ _cleanup_dispatch_tmps() {
     _rollback_dispatch_mutations
   fi
   rm -f "$REPO_TD_MAP" "$TD_CREATE_STATE_FILE" "$TD_CREATE_STDERR" \
-    "$DISPATCH_MUTATIONS_FILE" "$INTENT_TMP" "${DEPS_TMP:-}"
+    "$TD_CREATE_SUCCESS_FILE" "$DISPATCH_MUTATIONS_FILE" "$INTENT_TMP" \
+    "${DEPS_TMP:-}"
   rm -rf "$DISPATCH_SNAPSHOT_ROOT"
   # This trap replaces the coordinator-pane rollback trap, so it must keep
   # honouring it; the rollback is a no-op once the dispatch has completed.
@@ -928,7 +933,10 @@ PY
   echo "Creating td tasks ..."
   : > "$TD_CREATE_STATE_FILE"
   : > "$TD_CREATE_STDERR"
-  if ! td_results="$(SGT_TD_STATE_FILE="$TD_CREATE_STATE_FILE" "$SCRIPT_DIR/sgt-td-create" "$PROJECT" "$TD_TITLE" \
+  : > "$TD_CREATE_SUCCESS_FILE"
+  if ! td_results="$(SGT_TD_STATE_FILE="$TD_CREATE_STATE_FILE" \
+    SGT_TD_SUCCESS_FILE="$TD_CREATE_SUCCESS_FILE" \
+    "$SCRIPT_DIR/sgt-td-create" "$PROJECT" "$TD_TITLE" \
     --repos "$REPOS_ARG" \
     --description "$BRIEF" \
     --type task \
@@ -940,8 +948,12 @@ PY
     _die "td task creation failed: $td_error"
   fi
 
+  if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+        "${SGT_DISPATCH_FAIL_POINT:-}" == dispatch-td-create-returned ]]; then
+    kill -TERM "$$"
+  fi
+
   _build_repo_td_map_or_die "$td_results" "$REPOS_ARG"
-  DISPATCH_GENERATED_TD_COMMITTED=true
 
   if [[ -s "$REPO_TD_MAP" ]]; then
     while IFS=' ' read -r rname tid; do
