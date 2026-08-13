@@ -249,7 +249,7 @@ setup_orphan() {
 # ── 1. sgt-recover converges a provably completed turn ────────────────────────
 
 read -r state wt <<<"$(make_worktree recover-converge)"
-task=task-recover-converge
+task="task-recover-converge"
 setup_stall "$state" "$wt"
 install_accepted_turn "$state" "$wt" "$NOTIFY|$NONCE"
 
@@ -275,7 +275,7 @@ grep -Fq 'kill-pane -t %42' "$TEST_ROOT/rc-kill.log"
 # ── 2. sgt-recover still refuses a turn with no agent proof ───────────────────
 
 read -r state wt <<<"$(make_worktree recover-refuse)"
-task=task-recover-refuse
+task="task-recover-refuse"
 setup_stall "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 
@@ -310,7 +310,7 @@ set -e
 # ── 3. An identity or nonce mismatch fails closed ────────────────────────────
 
 read -r state wt <<<"$(make_worktree recover-dead-owner)"
-task=task-recover-dead-owner
+task="task-recover-dead-owner"
 setup_stall "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
@@ -327,7 +327,7 @@ grep -Fq "new_notification=$(cat "$state/notification_id")" \
 [[ "$(cat "$state/pane")" == '%99' ]]
 
 read -r state wt <<<"$(make_worktree recover-mismatch)"
-task=task-recover-mismatch
+task="task-recover-mismatch"
 setup_stall "$state" "$wt"
 install_accepted_turn "$state" "$wt" "some-other-notification|$NONCE"
 set +e
@@ -343,7 +343,7 @@ set -e
 grep -Fq 'mismatch' "$state/notifications/$NOTIFY/action_lease_pending"
 
 read -r state wt <<<"$(make_worktree recover-badnonce)"
-task=task-recover-badnonce
+task="task-recover-badnonce"
 setup_stall "$state" "$wt"
 install_accepted_turn "$state" "$wt" "$NOTIFY|ffffffffffffffffffffffffffffffff"
 set +e
@@ -360,7 +360,7 @@ set -e
 # ── 4. sgt-respond converges a provably completed turn before relaunching ─────
 
 read -r state wt <<<"$(make_worktree respond-converge)"
-task=task-respond-converge
+task="task-respond-converge"
 setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt" "$NOTIFY|$NONCE"
 
@@ -404,7 +404,7 @@ printf 'resume the mission again' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$flee
 # 6. sgt-respond fences an exactly proven dead owner without inventing proof.
 
 read -r state wt <<<"$(make_worktree respond-dead-owner)"
-task=task-respond-dead-owner
+task="task-respond-dead-owner"
 setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 printf 'preserved but uncommitted\n' > "$wt/preserved.txt"
@@ -441,7 +441,7 @@ grep -Fq 'new_notification=' "$state/notifications/$NOTIFY/ownership_transition"
 # lease is never contested by a second supervisor.
 
 read -r state wt <<<"$(make_worktree respond-live)"
-task=task-respond-live
+task="task-respond-live"
 setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 set +e
@@ -463,7 +463,7 @@ fi
 # CLI still returns actionable nonzero because no worker was relaunched. A live
 # owner refuses without replacing the old notification.
 read -r state wt <<<"$(make_worktree respond-incomplete-metadata-dead)"
-task=task-respond-incomplete-metadata-dead
+task="task-respond-incomplete-metadata-dead"
 setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 rm -f "$state/agent"
@@ -482,7 +482,7 @@ set -e
 [[ "$(cat "$state/response")" == 'resume via durable fallback' ]]
 
 read -r state wt <<<"$(make_worktree respond-incomplete-metadata-live)"
-task=task-respond-incomplete-metadata-live
+task="task-respond-incomplete-metadata-live"
 setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 rm -f "$state/agent"
@@ -517,7 +517,7 @@ done
 # ── 8. Stale, reused, and process-ambiguous ownership fails closed ───────
 
 read -r state wt <<<"$(make_worktree respond-stale-owner)"
-task=task-respond-stale-owner
+task="task-respond-stale-owner"
 setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 printf '0|%%43|4343|123457|different-owner\n' \
@@ -533,7 +533,7 @@ fi
 [[ ! -e "$state/notifications/$NOTIFY/action_lease_abandoned" ]]
 
 read -r state wt <<<"$(make_worktree respond-reused-pane)"
-task=task-respond-reused-pane
+task="task-respond-reused-pane"
 setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 if printf 'resume' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
@@ -546,7 +546,7 @@ fi
 [[ ! -e "$state/notifications/$NOTIFY/action_lease_abandoned" ]]
 
 read -r state wt <<<"$(make_worktree respond-live-pid)"
-task=task-respond-live-pid
+task="task-respond-live-pid"
 setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 live_pid_identity="0|%42|$$|123456|stale-pane-live-pid"
@@ -564,7 +564,7 @@ fi
 
 # An unclassified tmux failure is not proof that the exact old pane is gone.
 read -r state wt <<<"$(make_worktree respond-tmux-probe-error)"
-task=task-respond-tmux-probe-error
+task="task-respond-tmux-probe-error"
 setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 if printf 'resume' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
@@ -587,7 +587,7 @@ exit 42
 PS
 chmod +x "$TEST_ROOT/ps-probe-error-bin/ps"
 read -r state wt <<<"$(make_worktree respond-ps-probe-error)"
-task=task-respond-ps-probe-error
+task="task-respond-ps-probe-error"
 setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 if printf 'resume' | PATH="$TEST_ROOT/ps-probe-error-bin:$fake_bin:$PATH" \
@@ -611,7 +611,7 @@ exit 0
 PS
 chmod +x "$TEST_ROOT/ps-probe-empty-bin/ps"
 read -r state wt <<<"$(make_worktree respond-ps-probe-empty)"
-task=task-respond-ps-probe-empty
+task="task-respond-ps-probe-empty"
 setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 if printf 'resume' | PATH="$TEST_ROOT/ps-probe-empty-bin:$fake_bin:$PATH" \
@@ -716,7 +716,7 @@ done
 # before fencing authenticates the replacement; a foreign collision is left
 # untouched and no second pane is created.
 read -r state wt <<<"$(make_worktree foreign-window)"
-task=task-foreign-window
+task="task-foreign-window"
 setup_orphan "$state" "$wt"
 printf 'foreign collision retry' > "$TEST_ROOT/foreign-input"
 set +e
@@ -824,7 +824,7 @@ done
 # adopted; retry must not execute new-window a second time. Its first launch has
 # a genuinely zero-byte successful inventory and proves that case still spawns.
 read -r state wt <<<"$(make_worktree sigkill-spawn)"
-task=task-sigkill-spawn
+task="task-sigkill-spawn"
 setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 printf 'uncommitted payload survives abrupt transfer\n' > "$wt/uncommitted.txt"
@@ -861,7 +861,7 @@ PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
 # action lease in that interval; retry still advances transaction A to acked
 # rather than fencing A and allocating a successor B.
 read -r state wt <<<"$(make_worktree post-handshake-crash)"
-task=task-post-handshake-crash
+task="task-post-handshake-crash"
 setup_orphan "$state" "$wt"
 printf 'resume immutable accepted target' > "$TEST_ROOT/post-handshake-input"
 set +e
@@ -904,7 +904,7 @@ PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
 # acknowledge its installed transaction before inspecting the worker's newly
 # accepted action lease.
 read -r state wt <<<"$(make_worktree recover-post-handshake-crash)"
-task=task-recover-post-handshake-crash
+task="task-recover-post-handshake-crash"
 setup_stall "$state" "$wt"
 set +e
 PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
@@ -937,7 +937,7 @@ PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
 # cannot authorize a second new-window; a later exact retry adopts the first.
 # Its first launch also covers genuine zero-byte successful inventory.
 read -r state wt <<<"$(make_worktree recover-inventory-failure)"
-task=task-recover-inventory-failure
+task="task-recover-inventory-failure"
 setup_stall "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 set +e
@@ -976,7 +976,7 @@ PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
 # Concurrent exact retries serialize through acknowledgement and the follower
 # joins the immutable acked journal instead of spawning or delivering twice.
 read -r state wt <<<"$(make_worktree concurrent-retry)"
-task=task-concurrent-retry
+task="task-concurrent-retry"
 setup_orphan "$state" "$wt"
 printf 'one concurrent response' > "$TEST_ROOT/concurrent-input"
 PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
@@ -1014,7 +1014,7 @@ grep -Fq 'joined acknowledged worker relaunch' "$TEST_ROOT/concurrent-second.out
 # after fencing can be reconciled orphaned and resumed by sgt-respond without
 # minting a different successor generation.
 read -r state wt <<<"$(make_worktree cross-cli)"
-task=task-cross-cli
+task="task-cross-cli"
 setup_stall "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 set +e
@@ -1036,7 +1036,7 @@ grep -Fq "new_notification=$bound_successor" \
   "$state/notifications/$NOTIFY/ownership_transition"
 
 read -r state wt <<<"$(make_worktree cross-cli-spawn)"
-task=task-cross-cli-spawn
+task="task-cross-cli-spawn"
 setup_stall "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 set +e
@@ -1078,7 +1078,7 @@ EOF
   chmod +x "$real_bin/tmux" "$real_bin/opencode"
 
   read -r state wt <<<"$(make_worktree real-respond)"
-  task=task-real-respond
+  task="task-real-respond"
   setup_orphan "$state" "$wt"
   printf 'real-sgt\n' > "$state/tmux_session"
   printf 'real/respond\n' > "$state/window_name"
@@ -1132,7 +1132,7 @@ EOF
     grep -c '^real/respond-resume-')" == 1 ]]
 
   read -r state wt <<<"$(make_worktree real-recover)"
-  task=task-real-recover
+  task="task-real-recover"
   setup_stall "$state" "$wt"
   printf 'real-sgt\n' > "$state/tmux_session"
   printf 'real/recover\n' > "$state/window_name"

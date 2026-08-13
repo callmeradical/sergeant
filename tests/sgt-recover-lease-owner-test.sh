@@ -196,7 +196,7 @@ while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid - 1)); done
 # ── 1. An absent gate-generation file produces no raw shell error ─────────────
 
 read -r state wt <<<"$(make_stalled nogen)"
-task=task-nogen
+task="task-nogen"
 rm -f "$wt/.sergeant-gate-generation"
 set +e
 nogen_output="$(recover "$state" "TMUX_LOG=$TEST_ROOT/nogen.log" 2>&1)"
@@ -220,7 +220,7 @@ fi
 # The same must hold on the escalation path, which is what actually reads the
 # generation in order to advance it.
 read -r state wt <<<"$(make_stalled nogen-escalate)"
-task=task-nogen-escalate
+task="task-nogen-escalate"
 rm -f "$wt/.sergeant-gate-generation"
 install_lease "$state" 4242   # owner pid is the live-ish stalled pid; unprovable
 set +e
@@ -241,7 +241,7 @@ fi
 # The recorded owner pane no longer resolves AND its recorded process is gone.
 
 read -r state wt <<<"$(make_stalled deadowner)"
-task=task-deadowner
+task="task-deadowner"
 printf '1\n' > "$wt/.sergeant-gate-generation"
 install_lease "$state" "$dead_pid"
 dead_output="$(recover "$state" "TMUX_LOG=$TEST_ROOT/dead.log" \
@@ -274,7 +274,7 @@ grep -Fq "$dead_pid" "$state/notifications/$NOTIFY/action_lease_abandoned"
 # ── 3. A live lease owner still fails closed ─────────────────────────────────
 
 read -r state wt <<<"$(make_stalled liveowner)"
-task=task-liveowner
+task="task-liveowner"
 printf '1\n' > "$wt/.sergeant-gate-generation"
 sleep 120 &
 live_pid=$!
@@ -311,7 +311,7 @@ wait "$live_pid" 2>/dev/null || true
 # The recorded pane id resolves, but to a different pane/process than recorded.
 
 read -r state wt <<<"$(make_stalled reused)"
-task=task-reused
+task="task-reused"
 printf '1\n' > "$wt/.sergeant-gate-generation"
 install_lease "$state" "$dead_pid"
 set +e
@@ -321,7 +321,8 @@ reused_output="$(recover "$state" "TMUX_LOG=$TEST_ROOT/reused.log" \
 reused_status=$?
 set -e
 [[ "$reused_status" -ne 0 ]] || {
-  printf 'recovery proceeded although the lease owner pane id was reused\n' >&2
+  printf 'recovery proceeded although the lease owner pane id was reused:\n%s\n' \
+    "$reused_output" >&2
   exit 1
 }
 [[ -z "$(cat "$TEST_ROOT/reused-kill.log" 2>/dev/null || true)" ]]
@@ -332,7 +333,7 @@ set -e
 # Death is not provable, so recovery must not proceed.
 
 read -r state wt <<<"$(make_stalled unprovable)"
-task=task-unprovable
+task="task-unprovable"
 printf '1\n' > "$wt/.sergeant-gate-generation"
 sleep 120 &
 lingering_pid=$!
@@ -345,7 +346,8 @@ set -e
 kill "$lingering_pid" 2>/dev/null || true
 wait "$lingering_pid" 2>/dev/null || true
 [[ "$unprovable_status" -ne 0 ]] || {
-  printf 'recovery proceeded although the lease owner process is still running\n' >&2
+  printf 'recovery proceeded although the lease owner process is still running:\n%s\n' \
+    "$unprovable_output" >&2
   exit 1
 }
 [[ -z "$(cat "$TEST_ROOT/unprovable-kill.log" 2>/dev/null || true)" ]]
@@ -355,7 +357,7 @@ wait "$lingering_pid" 2>/dev/null || true
 # ── 6. A malformed owner identity fails closed ───────────────────────────────
 
 read -r state wt <<<"$(make_stalled malformed)"
-task=task-malformed
+task="task-malformed"
 printf '1\n' > "$wt/.sergeant-gate-generation"
 install_lease "$state" "$dead_pid"
 printf 'not-an-identity\n' > "$state/notifications/$NOTIFY/targets/$LEASE/pane_identity"
@@ -365,7 +367,8 @@ malformed_status_output="$(recover "$state" "TMUX_LOG=$TEST_ROOT/malformed.log" 
 malformed_status=$?
 set -e
 [[ "$malformed_status" -ne 0 ]] || {
-  printf 'recovery proceeded on a malformed lease owner identity\n' >&2
+  printf 'recovery proceeded on a malformed lease owner identity:\n%s\n' \
+    "$malformed_status_output" >&2
   exit 1
 }
 [[ "$(cat "$state/pane")" == "%42" ]]

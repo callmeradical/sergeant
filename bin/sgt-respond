@@ -373,11 +373,12 @@ _arm_delivery_escalation() {
     printf 'pane_identity=%s\n' "$identity"
     printf 'reason=%s\n' "$reason"
     printf 'recorded_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
-  } > "$REPO_DIR/response_delivery_unacked.tmp.$$" &&
-    mv "$REPO_DIR/response_delivery_unacked.tmp.$$" "$REPO_DIR/response_delivery_unacked" || {
-      rm -f "$REPO_DIR/response_delivery_unacked.tmp.$$"
-      return 1
-    }
+  } > "$REPO_DIR/response_delivery_unacked.tmp.$$" || return 1
+  if ! mv "$REPO_DIR/response_delivery_unacked.tmp.$$" \
+      "$REPO_DIR/response_delivery_unacked"; then
+    rm -f "$REPO_DIR/response_delivery_unacked.tmp.$$"
+    return 1
+  fi
 }
 
 pending_response_file=""

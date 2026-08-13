@@ -121,7 +121,7 @@ exit 0
 TD
 chmod +x "$fake_bin/td"
 
-task=task-unacked
+task="task-unacked"
 task_dir="$fleet/$task"
 state="$task_dir/app"
 wt="$TEST_ROOT/wt"
@@ -272,7 +272,7 @@ fourth="$(respond TMUX_LOG="$TEST_ROOT/fourth.log" WINDOW_LOG="$TEST_ROOT/fourth
 fourth_status=$?
 set -e
 [[ "$fourth_status" -ne 0 ]] || {
-  printf 'a stale escalation marker authorised a relaunch\n' >&2
+  printf 'a stale escalation marker authorised a relaunch:\n%s\n' "$fourth" >&2
   exit 1
 }
 [[ ! -s "$TEST_ROOT/fourth-window.log" ]] || {
@@ -292,7 +292,7 @@ fifth="$(respond TMUX_LOG="$TEST_ROOT/fifth.log" WINDOW_LOG="$TEST_ROOT/fifth-wi
 fifth_status=$?
 set -e
 [[ "$fifth_status" -ne 0 ]] || {
-  printf 'an escalation for another response authorised a relaunch\n' >&2
+  printf 'an escalation for another response authorised a relaunch:\n%s\n' "$fifth" >&2
   exit 1
 }
 [[ ! -s "$TEST_ROOT/fifth-window.log" ]]

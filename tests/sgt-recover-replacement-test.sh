@@ -172,7 +172,7 @@ recover() {
 # ── 1. The kill is strictly ordered after the validated replacement ────────────
 
 read -r state wt <<<"$(make_stalled ordering)"
-task=task-ordering
+task="task-ordering"
 recover "$state" "TMUX_LOG=$TEST_ROOT/order.log" "KILL_LOG=$TEST_ROOT/order-kill.log" \
   >/dev/null || {
   printf 'happy-path recovery failed\n' >&2
@@ -208,7 +208,7 @@ done < "$TEST_ROOT/order-kill.log"
 # ── 2. A replacement that returns no pane id refuses and preserves the original ─
 
 read -r state wt <<<"$(make_stalled emptypane)"
-task=task-emptypane
+task="task-emptypane"
 set +e
 empty_output="$(recover "$state" "TMUX_LOG=$TEST_ROOT/empty.log" \
   "KILL_LOG=$TEST_ROOT/empty-kill.log" EMPTY_WINDOW=1)"
@@ -234,7 +234,7 @@ set -e
 # ── 3. A replacement whose identity cannot be captured refuses and restores ────
 
 read -r state wt <<<"$(make_stalled noidentity)"
-task=task-noidentity
+task="task-noidentity"
 set +e
 identity_output="$(recover "$state" "TMUX_LOG=$TEST_ROOT/noid.log" \
   "KILL_LOG=$TEST_ROOT/noid-kill.log" FAIL_NEW_PANE_IDENTITY=1)"
@@ -268,14 +268,15 @@ fi
 # ── 4. A replacement that cannot be launched refuses and touches nothing ──────
 
 read -r state wt <<<"$(make_stalled nolaunch)"
-task=task-nolaunch
+task="task-nolaunch"
 set +e
 launch_output="$(recover "$state" "TMUX_LOG=$TEST_ROOT/nolaunch.log" \
   "KILL_LOG=$TEST_ROOT/nolaunch-kill.log" FAIL_WINDOW=1)"
 launch_status=$?
 set -e
 [[ "$launch_status" -ne 0 ]] || {
-  printf 'recovery succeeded although the replacement could not be launched\n' >&2
+  printf 'recovery succeeded although the replacement could not be launched:\n%s\n' \
+    "$launch_output" >&2
   exit 1
 }
 [[ -z "$(cat "$TEST_ROOT/nolaunch-kill.log" 2>/dev/null || true)" ]] || {
