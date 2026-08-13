@@ -153,6 +153,19 @@ if [[ "\${1:-}" == +%s && -n "\${SWAP_TEMPLATE_ON_REPO_STATE:-}" ]]; then
 fi
 exec "$REAL_DATE" "\$@"
 EOF
+REAL_MKTEMP="$(command -v mktemp)"
+cat > "$FAKE_BIN/mktemp" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+result="\$("$REAL_MKTEMP" "\$@")"
+if [[ " \$* " == *' -d '* && -n "\${SWAP_HELPER_ON_BOOTSTRAP:-}" && \
+      ! -e "\${SWAP_HELPER_MARKER:?}" ]]; then
+  rm -f "\$SWAP_HELPER_ON_BOOTSTRAP"
+  ln -s "\${SWAP_HELPER_TARGET:?}" "\$SWAP_HELPER_ON_BOOTSTRAP"
+  : > "\$SWAP_HELPER_MARKER"
+fi
+printf '%s\n' "\$result"
+EOF
 chmod +x "$FAKE_BIN"/*
 
 git -C "$REPO" init -q
@@ -332,8 +345,19 @@ set -e
 [[ "$aggregate_status" -ne 0 && "$aggregate_output" == *'td-installed-app'* ]]
 grep -Fq 'delete td-installed-app' "$TEST_ROOT/td.log"
 grep -Fq 'delete td-installed-api' "$TEST_ROOT/td.log"
-[[ ! -e "$FLEET/aggregate-rollback-000000" ]]
+aggregate_state="$FLEET/aggregate-rollback-000000"
+[[ -s "$aggregate_state/td-rollback-journal.jsonl" ]]
+grep -Fq 'td-installed-app' "$aggregate_state/td-rollback-journal.jsonl"
+if grep -Fq 'td-installed-api' "$aggregate_state/td-rollback-journal.jsonl"; then
+  printf 'successful td deletion remained in retry journal\n' >&2
+  exit 1
+fi
 [[ ! -e "$(dirname "$REPO")/app-sgt-aggregate-rollback-000000" ]]
+TMUX=fixture TMUX_PANE=%11 PATH="$FAKE_BIN:$PREFIX/bin:$HOST_PATH" \
+  TD_LOG="$TEST_ROOT/td.log" SERGEANT_CONFIG="$CONFIG" SERGEANT_FLEET="$FLEET" \
+  "$DIST/bin/sgt-cleanup" aggregate-rollback-000000 >/dev/null
+[[ "$(grep -c 'delete td-installed-app' "$TEST_ROOT/td.log")" -eq 2 ]]
+[[ ! -e "$aggregate_state" ]]
 
 # A generated td task becomes worker-owned at the durable pane boundary.  A
 # later repository launch failure rolls back only that repository's task and
@@ -373,6 +397,24 @@ git -C "$REPO" branch -D feat/restore-sergeant-files >/dev/null
 rm -f "$FLEET/operator-sentinel"
 : > "$TEST_ROOT/td.log"
 mkdir -p "$TEST_ROOT/outside"
+printf 'printf "OUTSIDE-HELPER\\n" >&2\n' > "$TEST_ROOT/outside/swapped-helper.sh"
+for helper_name in _sgt-lib.sh _sgt-intent.sh _sgt-drain.sh _sgt-review-axes.sh; do
+  cp "$ROOT_DIR/bin/$helper_name" "$DIST/bin/$helper_name"
+  rm -f "$TEST_ROOT/helper-swap-marker"
+  set +e
+  helper_output="$(SWAP_HELPER_ON_BOOTSTRAP="$DIST/bin/$helper_name" \
+    SWAP_HELPER_TARGET="$TEST_ROOT/outside/swapped-helper.sh" \
+    SWAP_HELPER_MARKER="$TEST_ROOT/helper-swap-marker" \
+    run_dispatch "Swap ${helper_name}" 2>&1)"
+  helper_status=$?
+  set -e
+  [[ "$helper_status" -ne 0 && "$helper_output" == *'bundled resource'* ]]
+  [[ "$helper_output" != *'OUTSIDE-HELPER'* ]]
+  [[ -z "$(find "$FLEET" -mindepth 1 -print -quit)" ]]
+  [[ ! -s "$TEST_ROOT/td.log" ]]
+  rm -f "$DIST/bin/$helper_name"
+  cp "$ROOT_DIR/bin/$helper_name" "$DIST/bin/$helper_name"
+done
 cp "$ROOT_DIR/templates/worker-brief.md" "$TEST_ROOT/outside/worker-brief.md"
 mkdir -p "$DIST/templates"
 rm -f "$DIST/templates/worker-brief.md"
