@@ -214,15 +214,22 @@ Dispatch records the resolved tuple in `agent_model` and its origin in
 `launch_record`: harness, model, provider, both transports, the generated
 definition, and the exact model argv and environment it used.
 
-`launch_record` also carries two honesty fields:
+`launch_record` also carries explicit honesty fields:
 
 - `launch_state` is `intended` before the harness is executed and becomes
   `confirmed` only once the harness reports itself ready, so a harness that
   rejects a pin and exits never leaves evidence claiming the model ran.
 - `provider_verified` says whether the invocation itself proves the provider.
-- `variant_verified` is always `false` today. The variant *transport* is real, but
-  no supported harness reports back which variant it resolved, so Sergeant records
-  the pin without claiming it was honored.
+- `requested_variant`, `transported_variant`, and `runtime_confirmed_variant`
+  distinguish operator intent, the generated agent definition, and OpenCode's
+  own resolved-agent result. `variant_verified=true` only when those values
+  match and OpenCode's model catalog reports that the model supports the variant.
+
+An explicit OpenCode variant is probed through the selected OpenCode executable
+before dispatch creates fleet or worktree state. An unavailable model variant,
+an inconclusive probe, or a resolved tuple mismatch fails closed. The worker
+repeats the same probe on every fresh, resumed, recovered, or woken launch, so a
+changed harness cannot silently fall back between sessions.
 
 A resumed or recovered worker reads the same fleet record, so it inherits the
 same pin. A worker handed a tuple its harness cannot honor fails terminally

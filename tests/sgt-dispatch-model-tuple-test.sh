@@ -98,7 +98,7 @@ $provider/claude-opus-5
   "id": "claude-opus-5",
   "providerID": "$provider",
   "variants": {
-    "medium": {},
+    $(if [[ "${OPENCODE_TEST_NO_MEDIUM:-}" == 1 ]]; then printf '"low": {}'; else printf '"medium": {}'; fi),
     "high": {}
   }
 }
@@ -106,6 +106,7 @@ MODELS
   exit 0
 fi
 if [[ "${1:-}" == "debug" && "${2:-}" == "agent" ]]; then
+  [[ "${OPENCODE_TEST_UNVERIFIABLE:-}" != 1 ]] || exit 1
   model="$(sed -n 's/.*"model": "\([^"]*\)".*/\1/p' "$OPENCODE_CONFIG")"
   variant="$(sed -n 's/.*"variant": "\([^"]*\)".*/\1/p' "$OPENCODE_CONFIG")"
   variant="${OPENCODE_TEST_RUNTIME_VARIANT:-$variant}"
@@ -284,6 +285,32 @@ set -e
 }
 [[ "$(_fleet_task_count)" == "$before" ]]
 [[ ! -e "$TEST_ROOT/mismatch-variant.log" ]]
+
+for failure in unsupported unverifiable; do
+  before="$(_fleet_task_count)"
+  set +e
+  if [[ "$failure" == unsupported ]]; then
+    failure_output="$(OPENCODE_TEST_NO_MEDIUM=1 \
+      _dispatch "$failure-variant" 'Unsupported variant' \
+      --model anthropic/claude-opus-5:medium 2>&1)"
+    failure_status=$?
+    expected='does not report variant :medium'
+  else
+    failure_output="$(OPENCODE_TEST_UNVERIFIABLE=1 \
+      _dispatch "$failure-variant" 'Unverifiable variant' \
+      --model anthropic/claude-opus-5:medium 2>&1)"
+    failure_status=$?
+    expected='refuses an unverifiable explicit variant'
+  fi
+  set -e
+  [[ "$failure_status" -ne 0 && "$failure_output" == *"$expected"* ]] || {
+    printf 'FAIL: %s runtime probe did not fail closed: %s\n' \
+      "$failure" "$failure_output" >&2
+    exit 1
+  }
+  [[ "$(_fleet_task_count)" == "$before" ]]
+  [[ ! -e "$TEST_ROOT/$failure-variant.log" ]]
+done
 
 # ── 7. A variant fails closed only where the transport is genuinely unknown ───
 # goose exposes no launch-time variant selector, so the diagnostic must name goose

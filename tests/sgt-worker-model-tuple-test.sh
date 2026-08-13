@@ -35,6 +35,34 @@ mkdir -p "$TEST_ROOT/fake-bin"
 # launcher pinned nothing.  OBSERVED_MODEL is what the harness would really run.
 cat > "$TEST_ROOT/fake-bin/opencode" <<'EOF'
 #!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "models" ]]; then
+  provider="${2:-}"
+  cat <<MODELS
+$provider/claude-opus-5
+{
+  "id": "claude-opus-5",
+  "providerID": "$provider",
+  "variants": {
+    "medium": {},
+    "high": {}
+  }
+}
+MODELS
+  exit 0
+fi
+if [[ "${1:-}" == "debug" && "${2:-}" == "agent" ]]; then
+  model="$(sed -n 's/.*"model": "\([^"]*\)".*/\1/p' "$OPENCODE_CONFIG")"
+  variant="$(sed -n 's/.*"variant": "\([^"]*\)".*/\1/p' "$OPENCODE_CONFIG")"
+  if [[ -f "${OPENCODE_TEST_RUNTIME_VARIANT_FILE:-}" ]]; then
+    variant="$(cat "$OPENCODE_TEST_RUNTIME_VARIANT_FILE")"
+  else
+    variant="${OPENCODE_TEST_RUNTIME_VARIANT:-$variant}"
+  fi
+  printf '{"model":{"providerID":"%s","modelID":"%s"},"variant":"%s"}\n' \
+    "${model%%/*}" "${model#*/}" "$variant"
+  exit 0
+fi
 observed=""
 observed_agent=""
 prev=""
@@ -63,6 +91,21 @@ chmod +x "$TEST_ROOT/fake-bin/opencode"
 ln -s opencode "$TEST_ROOT/fake-bin/goose"
 ln -s opencode "$TEST_ROOT/fake-bin/claude"
 
+cat > "$TEST_ROOT/fake-bin/worker-launch" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+repo_state="\$1"
+worktree="\$2"
+agent="\$3"
+source "$ROOT_DIR/bin/_sgt-lib.sh"
+_sgt_prepare_worker_process_marker "\$repo_state"
+command="\$(_sgt_worker_command "$ROOT_DIR/bin/sgt-interactive-worker" \
+  "\$repo_state" "\$worktree" "\$agent")"
+exec bash -c "\$command"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/worker-launch"
+
+export OPENCODE_TEST_RUNTIME_VARIANT_FILE="$TEST_ROOT/runtime-variant-override"
 tmux new-session -d -s "$TMUX_SESSION" -n keepalive "while :; do sleep 1; done"
 
 # _launch <case> <harness> <pinned-tuple-or-empty> <source>
@@ -80,7 +123,7 @@ _launch() {
   tmux new-window -d -t "$TMUX_SESSION:" -n "$name" \
     "env OBSERVED_LOG='$TEST_ROOT/$name/observed' \
     AMBIENT_DEFAULT_MODEL=anthropic/claude-haiku-4-5 \
-    '$ROOT_DIR/bin/sgt-interactive-worker' '$state' '$worktree' \
+    '$TEST_ROOT/fake-bin/worker-launch' '$state' '$worktree' \
     '$TEST_ROOT/fake-bin/$harness'"
   local _
   for _ in $(seq 1 300); do
@@ -103,7 +146,7 @@ _reject_launch() {
   printf 'flag\n' > "$state/agent_model_source"
   tmux new-window -d -t "$TMUX_SESSION:" -n "$name" \
     "env OBSERVED_LOG='$TEST_ROOT/$name/observed' \
-    '$ROOT_DIR/bin/sgt-interactive-worker' '$state' '$worktree' \
+    '$TEST_ROOT/fake-bin/worker-launch' '$state' '$worktree' \
     '$TEST_ROOT/fake-bin/$harness'"
   local _
   for _ in $(seq 1 300); do
@@ -247,10 +290,16 @@ assert agent["variant"] == "high", agent
 PY_DEF
 [[ "$(_field "$record" variant)" == "high" ]]
 [[ "$(_field "$record" variant_transport)" == "agent-definition" ]]
-# The variant transport is genuine but unverifiable: no supported harness reports
-# back which variant it resolved, so the evidence must not claim it does.
-[[ "$(_field "$record" variant_verified)" == "false" ]] || {
-  printf 'FAIL: a variant was recorded as verified without a read-back: %q\n' \
+# Requested, transported, and runtime-confirmed values are separate evidence.
+[[ "$(_field "$record" requested_variant)" == "high" ]]
+[[ "$(_field "$record" requested_model)" == "anthropic/claude-opus-5:high" ]]
+[[ "$(_field "$record" transported_model)" == "anthropic/claude-opus-5" ]]
+[[ "$(_field "$record" transported_variant)" == "high" ]]
+[[ "$(_field "$record" runtime_confirmed)" == "true" ]]
+[[ "$(_field "$record" runtime_model)" == "anthropic/claude-opus-5" ]]
+[[ "$(_field "$record" runtime_confirmed_variant)" == "high" ]]
+[[ "$(_field "$record" variant_verified)" == "true" ]] || {
+  printf 'FAIL: the harness-confirmed variant was not recorded as verified: %q\n' \
     "$(_field "$record" variant_verified)" >&2
   exit 1
 }
@@ -264,11 +313,36 @@ PY_DEF
 }
 [[ "$(_field "$record" model)" == "anthropic/claude-opus-5:high" ]]
 
+# A resumed worker reads the same durable tuple and repeats the harness-owned
+# confirmation rather than inheriting a new ambient effort.
+rm -f "$TEST_ROOT/pinned-variant/state/result" \
+  "$TEST_ROOT/pinned-variant/state/status" \
+  "$TEST_ROOT/pinned-variant/worktree/.sergeant-status" \
+  "$TEST_ROOT/pinned-variant/worktree/.sergeant-result"
+tmux new-window -d -t "$TMUX_SESSION:" -n pinned-variant-resume \
+  "env OBSERVED_LOG='$TEST_ROOT/pinned-variant/resumed-observed' \
+  AMBIENT_DEFAULT_MODEL=anthropic/claude-haiku-4-5 \
+  '$TEST_ROOT/fake-bin/worker-launch' '$TEST_ROOT/pinned-variant/state' \
+  '$TEST_ROOT/pinned-variant/worktree' '$TEST_ROOT/fake-bin/opencode'"
+for _ in $(seq 1 300); do
+  [[ -f "$TEST_ROOT/pinned-variant/state/result" ]] && break
+  sleep 0.02
+done
+[[ -f "$TEST_ROOT/pinned-variant/resumed-observed" ]]
+[[ "$(_field "$TEST_ROOT/pinned-variant/state/launch_record" requested_variant)" == high ]]
+[[ "$(_field "$TEST_ROOT/pinned-variant/state/launch_record" runtime_confirmed_variant)" == high ]]
+
+# A resumed worker re-probes the durable tuple. If the harness would now resolve
+# a different effort, it fails before invoking the interactive process.
+printf 'medium\n' > "$OPENCODE_TEST_RUNTIME_VARIANT_FILE"
+_reject_launch reject-runtime-mismatch opencode anthropic/claude-opus-5:high \
+  'resolved variant medium, not requested high'
+rm -f "$OPENCODE_TEST_RUNTIME_VARIANT_FILE"
+
 # ── 3b. Corroboration: the harness itself resolves the generated definition ───
-# The hard guarantees above are deterministic (argv, OPENCODE_CONFIG, and the
-# definition's contents).  This block additionally asks the real harness whether
-# it accepts that definition, which is what establishes the transport is genuine
-# rather than merely well-shaped.
+# The gating checks above use the harness model catalog and resolved-agent
+# boundary. This block remains a secondary check that OpenCode loads the
+# generated definition in its agent listing.
 #
 # It is deliberately NON-GATING: it launches a real harness, which is slow and
 # contends with other tests, so an unavailable or inconclusive result prints a
@@ -284,10 +358,7 @@ if command -v opencode >/dev/null 2>&1; then
     if [[ "$baseline_list" == *"sgt-pinned"* ]]; then
       printf 'note: sgt-pinned is ambient here; corroboration inconclusive\n'
     elif [[ "$harness_list" == *"sgt-pinned"* ]]; then
-      # Proves the harness LOADS the definition. It cannot prove which variant the
-      # harness resolved: the listing prints the same output for a bogus variant,
-      # which is exactly why variant_verified stays false.
-      printf 'note: opencode loaded the generated definition (transport confirmed, variant not verifiable)\n'
+      printf 'note: opencode loaded the generated definition\n'
     else
       printf 'FAIL: opencode did not register the generated agent definition\n' >&2
       exit 1

@@ -102,12 +102,10 @@ AGENT_CMD="${SERGEANT_AGENT:-$(_sgt_detect_agent)}"
 #                          a fleet-owned definition carrying the pinned model and
 #                          variant and launches against it.  Measured: the harness
 #                          does load such a definition and register the agent.
-#                          TRANSPORT ONLY, NOT VERIFICATION.  The harness exposes
-#                          no launch-time surface that reports which variant it
-#                          resolved (its agent listing prints the same output for
-#                          a bogus variant), so a launch on this transport records
-#                          variant_verified=false.  Tracked separately; do not
-#                          upgrade that field without a measured read-back.
+#                          The selected executable must additionally confirm the
+#                          model supports the variant and resolve the generated
+#                          agent back to the exact tuple before dispatch mutates
+#                          fleet or worktree state.
 #        unknown           no launch-time variant selector has been found for
 #                          this harness.  A pinned variant fails closed naming
 #                          the harness and this reason.
@@ -183,6 +181,9 @@ SGT_LAUNCH_PROVIDER_SCOPE=""
 SGT_LAUNCH_PROVIDER_VERIFIED="false"
 SGT_LAUNCH_VARIANT_VERIFIED="false"
 SGT_LAUNCH_TRANSPORTED_VARIANT=""
+SGT_LAUNCH_RUNTIME_CONFIRMED="false"
+SGT_LAUNCH_RUNTIME_PROVIDER=""
+SGT_LAUNCH_RUNTIME_MODEL_ID=""
 SGT_LAUNCH_RUNTIME_VARIANT=""
 SGT_LAUNCH_BASE_ARGV=()
 SGT_LAUNCH_MODEL_ARGV=()
@@ -237,6 +238,9 @@ _sgt_resolve_agent_launch() {
   SGT_LAUNCH_PROVIDER_VERIFIED="false"
   SGT_LAUNCH_VARIANT_VERIFIED="false"
   SGT_LAUNCH_TRANSPORTED_VARIANT=""
+  SGT_LAUNCH_RUNTIME_CONFIRMED="false"
+  SGT_LAUNCH_RUNTIME_PROVIDER=""
+  SGT_LAUNCH_RUNTIME_MODEL_ID=""
   SGT_LAUNCH_RUNTIME_VARIANT=""
   SGT_LAUNCH_BASE_ARGV=()
   SGT_LAUNCH_MODEL_ARGV=()
@@ -328,6 +332,9 @@ _sgt_confirm_opencode_variant() {
   local resolved_provider resolved_model resolved_variant
 
   SGT_LAUNCH_RUNTIME_VARIANT=""
+  SGT_LAUNCH_RUNTIME_CONFIRMED="false"
+  SGT_LAUNCH_RUNTIME_PROVIDER=""
+  SGT_LAUNCH_RUNTIME_MODEL_ID=""
   SGT_LAUNCH_VARIANT_VERIFIED="false"
 
   if ! catalog="$("$command" models "$SGT_AGENT_MODEL_PROVIDER" --verbose 2>/dev/null)"; then
@@ -362,6 +369,8 @@ _sgt_confirm_opencode_variant() {
     's/.*"modelID"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
   resolved_variant="$(printf '%s\n' "$resolved" | sed -n \
     's/.*"variant"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  SGT_LAUNCH_RUNTIME_PROVIDER="$resolved_provider"
+  SGT_LAUNCH_RUNTIME_MODEL_ID="$resolved_model"
   SGT_LAUNCH_RUNTIME_VARIANT="$resolved_variant"
 
   if [[ "$resolved_provider" != "$SGT_AGENT_MODEL_PROVIDER" || \
@@ -370,6 +379,9 @@ _sgt_confirm_opencode_variant() {
     SGT_LAUNCH_REJECT="variant-runtime-mismatch"
     return 1
   fi
+  # shellcheck disable=SC2034  # Out-parameters consumed by sourced callers.
+  SGT_LAUNCH_RUNTIME_CONFIRMED="true"
+  # shellcheck disable=SC2034  # Out-parameter consumed by sourced callers.
   SGT_LAUNCH_VARIANT_VERIFIED="true"
 }
 
