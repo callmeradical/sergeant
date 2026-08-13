@@ -71,7 +71,7 @@ mkdir -p "$fleet/task-conflict" "$fleet/task-recycle-conflict" \
   "$fleet/task-recycle-race" "$fleet/task-marker-race" \
   "$fleet/task-lifecycle-race" "$fleet/task-post-status-race" \
   "$fleet/task-post-marker-race" "$fleet/task-absent-worktree" \
-  "$fleet/task-receipt-publication-race"
+  "$fleet/task-receipt-publication-race" "$fleet/task-receipt-retry"
 cp -R "$state" "$fleet/task-conflict/app"
 cp -R "$state" "$fleet/task-recycle-conflict/app"
 cp -R "$state" "$fleet/task-live-holder/app"
@@ -85,6 +85,7 @@ cp -R "$state" "$fleet/task-post-status-race/app"
 cp -R "$state" "$fleet/task-post-marker-race/app"
 cp -R "$state" "$fleet/task-absent-worktree/app"
 cp -R "$state" "$fleet/task-receipt-publication-race/app"
+cp -R "$state" "$fleet/task-receipt-retry/app"
 
 sync_error="$TEST_ROOT/sync.err"
 env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
@@ -367,5 +368,31 @@ find "$receipt_publication_state" -maxdepth 1 -type f \
   -name 'worker_stale_pane_retirement.incomplete.*' | grep -q .
 [[ -s "$receipt_publication_state/worker_recycled" ]]
 [[ ! -s "$kill_log" && -d "$receipt_publication_worktree" ]]
+
+receipt_retry_state="$fleet/task-receipt-retry/app"
+if env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
+  SGT_TEST_HOOKS=1 SGT_TEST_STALE_PANE_FAIL_AFTER_RECEIPT=1 \
+  "$ROOT_DIR/bin/sgt-watch" --retire-stale-pane task-receipt-retry --repo app \
+  > "$TEST_ROOT/receipt-retry-interrupted.out" 2>&1; then
+  printf 'injected post-receipt interruption succeeded unexpectedly\n' >&2
+  exit 1
+fi
+[[ -s "$receipt_retry_state/worker_stale_pane_retirement" ]]
+[[ -s "$receipt_retry_state/worker_recycled" ]]
+retry_receipt="$(cat "$receipt_retry_state/worker_stale_pane_retirement")"
+if retry_holder_output="$(env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  KILL_LOG="$kill_log" FAKE_HOLDERS='778|linux:334' \
+  "$ROOT_DIR/bin/sgt-watch" --retire-stale-pane task-receipt-retry \
+  --repo app 2>&1)"; then
+  printf 'retry trusted an unvalidated receipt without rescanning holders\n' >&2
+  exit 1
+fi
+[[ "$retry_holder_output" == *'Original worker marker holders remain live; stale-pane retirement refused: 778|linux:334'* ]]
+[[ "$(cat "$receipt_retry_state/worker_stale_pane_retirement")" == "$retry_receipt" ]]
+env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
+  "$ROOT_DIR/bin/sgt-watch" --retire-stale-pane task-receipt-retry --repo app \
+  >/dev/null
+[[ "$(cat "$receipt_retry_state/worker_stale_pane_retirement")" == "$retry_receipt" ]]
+[[ ! -s "$kill_log" && -d "$worktree" ]]
 
 printf 'sgt-watch stale-pane retirement: ok\n'
