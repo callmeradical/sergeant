@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Execute the exact preflighted review-router distribution snapshot."""
+
+import hashlib
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+
+
+RUNTIME_FILES = (
+    "sgt-review-findings",
+    "_sgt-lib.sh",
+    "_sgt-response-lock.sh",
+    "_sgt-review-axes.sh",
+    "_sgt-bash-version.sh",
+    "_sgt-process-identity.sh",
+    "_sgt-drain.sh",
+    "_sgt-process.sh",
+    "_sgt-response-lock-transition.py",
+    "_sgt-process-token.py",
+    "sgt-notify",
+    "sgt-callback",
+)
+
+
+def die(message):
+    print("ERROR: " + message, file=sys.stderr)
+    raise SystemExit(2)
+
+
+def strict_json(raw, label):
+    def closed_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key: " + key)
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(raw.decode("utf-8", "strict"), object_pairs_hook=closed_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        die("invalid %s: %s" % (label, error))
+
+
+def read_regular(path):
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError("not a regular file")
+        chunks = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(fd)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+        ):
+            raise OSError("file changed while read")
+        return before, b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def snapshot_identity(router_path, snapshot_dir=None):
+    router_dir = os.path.dirname(router_path)
+    runtime = hashlib.sha256()
+    router_info = None
+    router_bytes = None
+    for name in RUNTIME_FILES:
+        path = router_path if name == "sgt-review-findings" else os.path.join(router_dir, name)
+        runtime.update(name.encode("utf-8") + b"\0")
+        try:
+            info, content = read_regular(path)
+        except FileNotFoundError:
+            runtime.update(b"MISSING\0")
+            continue
+        runtime.update(hashlib.sha256(content).digest())
+        if name == "sgt-review-findings":
+            router_info, router_bytes = info, content
+        if snapshot_dir is not None:
+            destination = os.path.join(snapshot_dir, name)
+            with open(destination, "xb") as stream:
+                stream.write(content)
+            os.chmod(destination, stat.S_IMODE(info.st_mode))
+    if router_info is None:
+        raise OSError("review router is unavailable")
+    router_digest = hashlib.sha256(router_bytes).hexdigest()
+    identity = "%s:%s:%s:%s" % (
+        router_info.st_dev,
+        router_info.st_ino,
+        router_digest,
+        runtime.hexdigest(),
+    )
+    current = os.stat(router_path, follow_symlinks=False)
+    if not stat.S_ISREG(current.st_mode) or (
+        current.st_dev, current.st_ino
+    ) != (router_info.st_dev, router_info.st_ino):
+        raise OSError("review router path changed after verification")
+    return identity
+
+
+def main():
+    args = sys.argv[1:]
+    values = {}
+    while args and args[0] != "--":
+        option = args.pop(0)
+        if option not in ("--router", "--identity", "--capabilities-file") or not args:
+            die("invalid review-router launcher arguments")
+        values[option] = args.pop(0)
+    if not args or args.pop(0) != "--" or not args:
+        die("review-router launcher requires route arguments after --")
+    if set(values) != {"--router", "--identity", "--capabilities-file"}:
+        die("review-router launcher requires router, identity, and capabilities evidence")
+
+    router = values["--router"]
+    if not os.path.isabs(router):
+        die("review router path is not absolute")
+    try:
+        with open(values["--capabilities-file"], "rb") as stream:
+            expected_contract_raw = stream.read()
+    except OSError as error:
+        die("could not read pinned review-router contract: %s" % error)
+    expected_contract = strict_json(expected_contract_raw, "pinned review-router contract")
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="sgt-review-router-") as snapshot:
+            actual_identity = snapshot_identity(router, snapshot)
+            if actual_identity != values["--identity"]:
+                die("review-router executable identity mismatch: required %s, installed %s" % (
+                    values["--identity"], actual_identity
+                ))
+            snapshot_router = os.path.join(snapshot, "sgt-review-findings")
+            capability = subprocess.run(
+                [snapshot_router, "--capabilities"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if capability.returncode != 0:
+                die("pinned review router capability probe failed")
+            actual_contract = strict_json(capability.stdout, "runtime review-router contract")
+            if actual_contract != expected_contract:
+                die("runtime review-router contract differs from preflight evidence")
+            env = os.environ.copy()
+            env["SGT_REVIEW_ROUTER_PIN_EXECUTABLE"] = router
+            env["SGT_REVIEW_ROUTER_PIN_IDENTITY"] = values["--identity"]
+            env["SGT_REVIEW_ROUTER_PIN_CAPABILITIES"] = values["--capabilities-file"]
+            env["SGT_REVIEW_ROUTER_PIN_LAUNCHER"] = os.path.realpath(sys.argv[0])
+            completed = subprocess.run([snapshot_router] + args, env=env, check=False)
+            return completed.returncode
+    except OSError as error:
+        die("could not bind pinned review-router distribution: %s" % error)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

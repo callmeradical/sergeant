@@ -118,6 +118,7 @@ if ! _SGT_LIB_FILE="$(_sgt_dispatch_bundled_file "$SCRIPT_DIR/_sgt-lib.sh" _sgt-
    ! _SGT_INTENT_FILE="$(_sgt_dispatch_bundled_file "$SCRIPT_DIR/_sgt-intent.sh" _sgt-intent.sh)" || \
    ! _SGT_DRAIN_FILE="$(_sgt_dispatch_bundled_file "$SCRIPT_DIR/_sgt-drain.sh" _sgt-drain.sh)" || \
    ! _SGT_REVIEW_AXES_FILE="$(_sgt_dispatch_bundled_file "$SCRIPT_DIR/_sgt-review-axes.sh" _sgt-review-axes.sh)" || \
+   ! _SGT_REVIEW_ROUTER_LAUNCHER_FILE="$(_sgt_dispatch_bundled_file "$SCRIPT_DIR/sgt-review-router-launch" sgt-review-router-launch)" || \
    ! _BRIEF_TEMPLATE="$(_sgt_dispatch_bundled_file "$_SGT_DISTRIBUTION_ROOT/templates/worker-brief.md" worker-brief.md)"; then
   exit 1
 fi
@@ -296,7 +297,9 @@ PY
   content="${content//\{\{REVIEW_SEVERITIES\}\}/$(printf '%s' "$SGT_REVIEW_SEVERITIES" | tr ' ' '|')}"
   content="${content//\{\{REVIEW_SEVERITY_ALIAS_TABLE\}\}/$(_sgt_review_severity_alias_table)}"
   content="${content//\{\{REVIEW_AXES_PIPE\}\}/$(printf '%s' "$review_axes" | tr ' ' '|')}"
-  content="${content//\{\{REVIEW_ROUTER_COMMAND\}\}/$REVIEW_ROUTER_COMMAND}"
+  content="${content//\{\{REVIEW_ROUTER_LAUNCHER\}\}/$REVIEW_ROUTER_LAUNCHER}"
+  content="${content//\{\{REVIEW_ROUTER_EXECUTABLE\}\}/$REVIEW_ROUTER_EXECUTABLE}"
+  content="${content//\{\{REVIEW_ROUTER_IDENTITY\}\}/$REVIEW_ROUTER_EXECUTABLE_IDENTITY}"
   printf '%s\n' "$content" > "$output"
 }
 
@@ -977,7 +980,7 @@ REVIEW_ROUTER_EXECUTABLE=""
 REVIEW_ROUTER_EXECUTABLE_IDENTITY=""
 REVIEW_ROUTER_CONTRACT_REVISION=""
 REVIEW_ROUTER_CONTRACT=""
-REVIEW_ROUTER_COMMAND=""
+REVIEW_ROUTER_LAUNCHER="$_SGT_REVIEW_ROUTER_LAUNCHER_FILE"
 
 _sgt_review_router_executable_identity() {
   python3 - "$1" <<'PY'
@@ -986,23 +989,48 @@ import os
 import stat
 import sys
 
-flags = os.O_RDONLY
-if hasattr(os, "O_NOFOLLOW"):
-    flags |= os.O_NOFOLLOW
-fd = os.open(sys.argv[1], flags)
-try:
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode):
-        raise OSError("review router is not a regular file")
-    digest = hashlib.sha256()
-    while True:
-        chunk = os.read(fd, 65536)
-        if not chunk:
-            break
-        digest.update(chunk)
-    print(f"{info.st_dev}:{info.st_ino}:{digest.hexdigest()}")
-finally:
-    os.close(fd)
+runtime_files = (
+    "sgt-review-findings", "_sgt-lib.sh", "_sgt-response-lock.sh",
+    "_sgt-review-axes.sh", "_sgt-bash-version.sh", "_sgt-process-identity.sh",
+    "_sgt-drain.sh", "_sgt-process.sh",
+    "_sgt-response-lock-transition.py", "_sgt-process-token.py", "sgt-notify",
+    "sgt-callback",
+)
+router = sys.argv[1]
+directory = os.path.dirname(router)
+runtime = hashlib.sha256()
+router_info = None
+router_digest = None
+for name in runtime_files:
+    path = router if name == "sgt-review-findings" else os.path.join(directory, name)
+    runtime.update(name.encode() + b"\0")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        runtime.update(b"MISSING\0")
+        continue
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("runtime dependency is not a regular file")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            digest.update(chunk)
+        runtime.update(digest.digest())
+        if name == "sgt-review-findings":
+            router_info = info
+            router_digest = digest.hexdigest()
+    finally:
+        os.close(fd)
+if router_info is None:
+    raise OSError("review router is unavailable")
+print(f"{router_info.st_dev}:{router_info.st_ino}:{router_digest}:{runtime.hexdigest()}")
 PY
 }
 
@@ -1037,8 +1065,16 @@ import json
 import os
 import sys
 
+def closed_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
 try:
-    doc = json.loads(sys.argv[1])
+    doc = json.loads(sys.argv[1], object_pairs_hook=closed_object)
     expected_keys = {
         "schema", "contract_revision", "artifact_schema_revision", "axes",
         "canonical_severities", "severity_aliases", "argv",
@@ -1071,9 +1107,6 @@ PY
   fi
   REVIEW_ROUTER_EXECUTABLE_IDENTITY="$before_identity"
   REVIEW_ROUTER_CONTRACT_REVISION="$revision"
-  printf -v REVIEW_ROUTER_COMMAND '%q --require-contract-revision %q --require-executable-identity %q' \
-    "$REVIEW_ROUTER_EXECUTABLE" "$REVIEW_ROUTER_CONTRACT_REVISION" \
-    "$REVIEW_ROUTER_EXECUTABLE_IDENTITY"
 }
 if ! $DRY_RUN; then
   _sgt_preflight_review_router
@@ -1372,6 +1405,7 @@ for rname in "${TARGET_REPOS[@]}"; do
   printf '%s\n' "$REVIEW_ROUTER_EXECUTABLE" > "$repo_task_dir/review_router_executable"
   printf '%s\n' "$REVIEW_ROUTER_EXECUTABLE_IDENTITY" > "$repo_task_dir/review_router_executable_identity"
   printf '%s\n' "$REVIEW_ROUTER_CONTRACT_REVISION" > "$repo_task_dir/review_router_contract_revision"
+  printf '%s\n' "$REVIEW_ROUTER_CONTRACT" > "$repo_task_dir/review_router_capabilities.json"
   echo "$BRANCH"    > "$repo_task_dir/branch"
   date +%s          > "$repo_task_dir/dispatch_started"
   echo "dispatched" > "$repo_task_dir/status"

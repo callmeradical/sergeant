@@ -169,6 +169,25 @@ PY
 # No PATH-selected installed router is an installation error, even though the
 # dispatch distribution itself happens to contain a sibling router.
 rm "$PREFIX/bin/sgt-review-findings"
+
+# Duplicate top-level keys are not a machine-readable closed contract.
+cat > "$TEST_ROOT/duplicate-router" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"schema":"sergeant.review-router-capabilities/v1","schema":"sergeant.review-router-capabilities/v1","contract_revision":"sergeant.review-router-contract/v1","artifact_schema_revision":"sergeant.review-findings/v1","axes":["standards","spec","readiness","accessibility"],"canonical_severities":["error","warning","info"],"severity_aliases":{},"argv":[]}'
+EOF
+chmod +x "$TEST_ROOT/duplicate-router"
+ln -s "$TEST_ROOT/duplicate-router" "$PREFIX/bin/sgt-review-findings"
+assert_rejected_without_mutation 'review-router contract mismatch' 'Duplicate contract'
+rm "$PREFIX/bin/sgt-review-findings"
+
+cat > "$TEST_ROOT/duplicate-nested-router" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"schema":"sergeant.review-router-capabilities/v1","contract_revision":"sergeant.review-router-contract/v1","artifact_schema_revision":"sergeant.review-findings/v1","axes":["standards","spec","readiness","accessibility"],"canonical_severities":["error","warning","info"],"severity_aliases":{"error":"error","error":"warning"},"argv":[]}'
+EOF
+chmod +x "$TEST_ROOT/duplicate-nested-router"
+ln -s "$TEST_ROOT/duplicate-nested-router" "$PREFIX/bin/sgt-review-findings"
+assert_rejected_without_mutation 'review-router contract mismatch' 'Duplicate nested contract'
+rm "$PREFIX/bin/sgt-review-findings"
 assert_rejected_without_mutation 'review-router preflight: sgt-review-findings is not installed on PATH' 'Absent router'
 
 # An older/mixed router cannot impersonate compatibility with prose in --help.
@@ -217,19 +236,31 @@ canonical_router="$DIST/bin/sgt-review-findings"
 [[ "$(cat "$task_dir/review_router_executable")" == "$canonical_router" ]]
 [[ "$(cat "$task_dir/review_router_contract_revision")" == 'sergeant.review-router-contract/v1' ]]
 identity="$(cat "$task_dir/review_router_executable_identity")"
-[[ "$identity" =~ ^[0-9]+:[0-9]+:[a-f0-9]{64}$ ]]
+[[ "$identity" =~ ^[0-9]+:[0-9]+:[a-f0-9]{64}:[a-f0-9]{64}$ ]]
 cmp "$task_dir/review_router_executable" "$repo_state/review_router_executable"
 cmp "$task_dir/review_router_executable_identity" "$repo_state/review_router_executable_identity"
 grep -Fq "$canonical_router" "$worktree/.sergeant-brief.md"
-grep -Fq -- "--require-contract-revision sergeant.review-router-contract/v1" "$worktree/.sergeant-brief.md"
-grep -Fq -- "--require-executable-identity $identity" "$worktree/.sergeant-brief.md"
+grep -Fq "$DIST/bin/sgt-review-router-launch" "$worktree/.sergeant-brief.md"
+grep -Fq -- "--identity $identity" "$worktree/.sergeant-brief.md"
+grep -Fq -- "--capabilities-file $repo_state/review_router_capabilities.json -- test app" "$worktree/.sergeant-brief.md"
 if grep -Fq 'Route each axis separately with `sgt-review-findings ' "$worktree/.sergeant-brief.md"; then
   printf 'worker brief still invokes an unpinned bare router\n' >&2
   exit 1
 fi
 
+# Execute the command exactly as rendered (with a concrete axis and the
+# remaining documented route fields) so argument-order regressions are visible.
+printf '{"findings":[]}\n' > "$TEST_ROOT/empty-findings.json"
+# shellcheck disable=SC2016  # sed program intentionally matches literal backticks
+rendered_route="$(sed -n 's/.*Route each axis separately with `\([^`]*\)`.*/\1/p' "$worktree/.sergeant-brief.md")"
+rendered_route="${rendered_route%% --axis*} --axis standards"
+PATH="$FAKE_BIN:$HOST_PATH" TD_LOG="$TEST_ROOT/rendered-td.log" \
+  SERGEANT_CONFIG="$CONFIG" SERGEANT_FLEET="$FLEET" \
+  bash -c "$rendered_route --input '$TEST_ROOT/empty-findings.json' --source rendered-check --branch feat/matching-router --head-sha abc1234 --parent-task td-router-app --task-id rendered-1 --worktree '$worktree'" >/dev/null
+
 # A compatible router whose bytes change after dispatch cannot honor the pinned
 # runtime invocation; it fails closed before parsing or retaining an artifact.
+cp "$canonical_router" "$TEST_ROOT/original-router"
 printf '\n# changed after dispatch\n' >> "$canonical_router"
 cat > "$TEST_ROOT/runtime-findings.json" <<'EOF'
 {"findings":[{"id":"runtime-1","severity":"warning","disposition":"actionable","summary":"Runtime mismatch","evidence":"router bytes changed","paths":["bin/sgt-review-findings"],"acceptance_criteria":"reject the changed executable","recommendation":"reinstall the matching router"}]}
@@ -249,6 +280,39 @@ set -e
 artifact="$worktree/.sergeant-review-artifacts/standards-runtime-check"
 [[ -s "$artifact/findings" && -s "$artifact/meta" ]]
 grep -Fq "Sanitized findings retained at $artifact" "$worktree/.sergeant-message"
+
+# The worker-facing launcher, not the replaceable router, enforces the pin.
+cp "$TEST_ROOT/original-router" "$canonical_router"
+cp /usr/bin/true "$canonical_router"
+set +e
+wholesale_output="$("$DIST/bin/sgt-review-router-launch" --router "$canonical_router" \
+  --identity "$identity" --capabilities-file "$repo_state/review_router_capabilities.json" \
+  -- test app 2>&1)"
+wholesale_status=$?
+set -e
+[[ "$wholesale_status" -ne 0 && "$wholesale_output" == *'identity mismatch'* ]]
+
+cp "$TEST_ROOT/original-router" "$canonical_router"
+printf '\n# helper changed\n' >> "$DIST/bin/_sgt-review-axes.sh"
+set +e
+helper_output="$("$DIST/bin/sgt-review-router-launch" --router "$canonical_router" \
+  --identity "$identity" --capabilities-file "$repo_state/review_router_capabilities.json" \
+  -- test app 2>&1)"
+helper_status=$?
+set -e
+[[ "$helper_status" -ne 0 && "$helper_output" == *'identity mismatch'* ]]
+
+cp "$ROOT_DIR/bin/_sgt-review-axes.sh" "$DIST/bin/_sgt-review-axes.sh"
+cp "$TEST_ROOT/original-router" "$TEST_ROOT/swapped-router"
+rm "$canonical_router"
+ln -s "$TEST_ROOT/swapped-router" "$canonical_router"
+set +e
+symlink_output="$("$DIST/bin/sgt-review-router-launch" --router "$canonical_router" \
+  --identity "$identity" --capabilities-file "$repo_state/review_router_capabilities.json" \
+  -- test app 2>&1)"
+symlink_status=$?
+set -e
+[[ "$symlink_status" -ne 0 && "$symlink_output" == *'could not bind pinned review-router distribution'* ]]
 
 git -C "$REPO" worktree remove --force "$worktree"
 git -C "$REPO" branch -D feat/matching-router >/dev/null

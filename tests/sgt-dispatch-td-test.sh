@@ -23,6 +23,7 @@ mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/config" "$TEST_ROOT/fake-bin" \
 cp "$ROOT_DIR/bin/sgt-dispatch" "$ROOT_DIR"/bin/_sgt-* "$ROOT_DIR/bin/sgt-td-create" \
   "$ROOT_DIR/bin/sgt-td-memory" "$ROOT_DIR/bin/sgt-watch" \
   "$ROOT_DIR/bin/sgt-interactive-worker" "$ROOT_DIR/bin/sgt-review-findings" \
+  "$ROOT_DIR/bin/sgt-review-router-launch" \
   "$TEST_ROOT/bin/"
 ln -s "$TEST_ROOT/bin/sgt-review-findings" "$TEST_ROOT/fake-bin/sgt-review-findings"
 cp -R "$ROOT_DIR/templates" "$TEST_ROOT/"

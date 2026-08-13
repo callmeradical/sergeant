@@ -134,7 +134,7 @@ PROJECT="$1"; shift
 REPO="$1"; shift
 INPUT="" AXIS="" SOURCE="" BRANCH="" HEAD_SHA="" PARENT_TASK="" TASK_ID="" WORKTREE="" RETRY=""
 REQUIRED_CONTRACT_REVISION="" REQUIRED_EXECUTABLE_IDENTITY=""
-REVIEW_ROUTER_IDENTITY_MISMATCH=""
+REVIEW_ROUTER_RUNTIME_MISMATCH=""
 
 while [[ $# -gt 0 ]]; do
   [[ $# -ge 2 ]] || usage
@@ -156,12 +156,12 @@ done
 
 if [[ -n "$REQUIRED_CONTRACT_REVISION$REQUIRED_EXECUTABLE_IDENTITY" ]]; then
   [[ -n "$REQUIRED_CONTRACT_REVISION" && -n "$REQUIRED_EXECUTABLE_IDENTITY" ]] || usage
-  [[ "$REQUIRED_CONTRACT_REVISION" == "$SGT_REVIEW_ROUTER_CONTRACT_REVISION" ]] || \
-    _die "review-router contract revision mismatch: required $REQUIRED_CONTRACT_REVISION, installed $SGT_REVIEW_ROUTER_CONTRACT_REVISION"
-  actual_executable_identity="$(_sgt_rf_executable_identity)" || \
-    _die "could not verify review-router executable identity"
-  if [[ "$actual_executable_identity" != "$REQUIRED_EXECUTABLE_IDENTITY" ]]; then
-    REVIEW_ROUTER_IDENTITY_MISMATCH="review-router executable identity mismatch: required $REQUIRED_EXECUTABLE_IDENTITY, installed $actual_executable_identity"
+  if [[ "$REQUIRED_CONTRACT_REVISION" != "$SGT_REVIEW_ROUTER_CONTRACT_REVISION" ]]; then
+    REVIEW_ROUTER_RUNTIME_MISMATCH="review-router contract revision mismatch: required $REQUIRED_CONTRACT_REVISION, installed $SGT_REVIEW_ROUTER_CONTRACT_REVISION"
+  elif ! actual_executable_identity="$(_sgt_rf_executable_identity)"; then
+    REVIEW_ROUTER_RUNTIME_MISMATCH="could not verify review-router executable identity"
+  elif [[ "$actual_executable_identity" != "$REQUIRED_EXECUTABLE_IDENTITY" ]]; then
+    REVIEW_ROUTER_RUNTIME_MISMATCH="review-router executable identity mismatch: required $REQUIRED_EXECUTABLE_IDENTITY, installed $actual_executable_identity"
   fi
 fi
 
@@ -256,7 +256,19 @@ _routing_failure() {
   # Never claim nothing was kept while an artifact exists, and never advertise a
   # retry command for an artifact that was never published (td-61a0c8).
   if [[ -n "$ARTIFACT_DIR" && -d "$ARTIFACT_DIR" ]]; then
-    retention="Sanitized findings retained at $ARTIFACT_DIR. Retry with: sgt-review-findings $PROJECT $REPO --retry $ARTIFACT_DIR --worktree $WORKTREE"
+    if [[ -n "${SGT_REVIEW_ROUTER_PIN_LAUNCHER:-}" && \
+          -n "${SGT_REVIEW_ROUTER_PIN_EXECUTABLE:-}" && \
+          -n "${SGT_REVIEW_ROUTER_PIN_IDENTITY:-}" && \
+          -n "${SGT_REVIEW_ROUTER_PIN_CAPABILITIES:-}" ]]; then
+      printf -v retry_command '%q --router %q --identity %q --capabilities-file %q -- %q %q --retry %q --worktree %q' \
+        "$SGT_REVIEW_ROUTER_PIN_LAUNCHER" "$SGT_REVIEW_ROUTER_PIN_EXECUTABLE" \
+        "$SGT_REVIEW_ROUTER_PIN_IDENTITY" "$SGT_REVIEW_ROUTER_PIN_CAPABILITIES" \
+        "$PROJECT" "$REPO" "$ARTIFACT_DIR" "$WORKTREE"
+    else
+      printf -v retry_command '%q %q %q --retry %q --worktree %q' \
+        "$SCRIPT_FILE" "$PROJECT" "$REPO" "$ARTIFACT_DIR" "$WORKTREE"
+    fi
+    retention="Sanitized findings retained at $ARTIFACT_DIR. Retry with: $retry_command"
   fi
   _publish_blocked \
     "Review finding routing failed.$detail Routed TD tasks: $routed. Recommended remediation: $remediation. $retention Correct the structured artifact or the td failure first." \
@@ -284,9 +296,33 @@ if [[ -n "$RETRY" ]]; then
       head_sha) HEAD_SHA="$meta_value" ;;
       parent_task) PARENT_TASK="$meta_value" ;;
       task_id) TASK_ID="$meta_value" ;;
+      router_executable) meta_router_executable="$meta_value" ;;
+      router_identity) meta_router_identity="$meta_value" ;;
+      router_capabilities) meta_router_capabilities="$meta_value" ;;
+      router_launcher) meta_router_launcher="$meta_value" ;;
       *) _routing_failure "retry artifact metadata is unrecognised: $meta_key" ;;
     esac
   done < "$RETRY/meta"
+  meta_pin_count=0
+  for meta_pin_value in "${meta_router_executable:-}" "${meta_router_identity:-}" \
+      "${meta_router_capabilities:-}" "${meta_router_launcher:-}"; do
+    [[ -z "$meta_pin_value" ]] || meta_pin_count=$((meta_pin_count + 1))
+  done
+  if (( meta_pin_count > 0 )); then
+    (( meta_pin_count == 4 )) || _routing_failure "retry artifact router provenance is incomplete"
+    if [[ -z "${SGT_REVIEW_ROUTER_PIN_LAUNCHER:-}" ]]; then
+      SGT_REVIEW_ROUTER_PIN_EXECUTABLE="$meta_router_executable"
+      SGT_REVIEW_ROUTER_PIN_IDENTITY="$meta_router_identity"
+      SGT_REVIEW_ROUTER_PIN_CAPABILITIES="$meta_router_capabilities"
+      SGT_REVIEW_ROUTER_PIN_LAUNCHER="$meta_router_launcher"
+      REVIEW_ROUTER_RUNTIME_MISMATCH="retry artifact requires its pinned review-router launcher"
+    elif [[ "$SGT_REVIEW_ROUTER_PIN_EXECUTABLE" != "$meta_router_executable" || \
+            "$SGT_REVIEW_ROUTER_PIN_IDENTITY" != "$meta_router_identity" || \
+            "$SGT_REVIEW_ROUTER_PIN_CAPABILITIES" != "$meta_router_capabilities" || \
+            "$SGT_REVIEW_ROUTER_PIN_LAUNCHER" != "$meta_router_launcher" ]]; then
+      REVIEW_ROUTER_RUNTIME_MISMATCH="retry artifact review-router provenance does not match this launcher"
+    fi
+  fi
   [[ "${meta_project:-}" == "$PROJECT" && "${meta_repo:-}" == "$REPO" ]] || \
     _routing_failure "retry artifact belongs to ${meta_project:-unknown}/${meta_repo:-unknown}, not $PROJECT/$REPO"
 fi
@@ -565,6 +601,12 @@ _retain_parsed_findings() {
     printf 'head_sha=%s\n' "$HEAD_SHA"
     printf 'parent_task=%s\n' "$PARENT_TASK"
     printf 'task_id=%s\n' "$TASK_ID"
+    if [[ -n "${SGT_REVIEW_ROUTER_PIN_LAUNCHER:-}" ]]; then
+      printf 'router_executable=%s\n' "$SGT_REVIEW_ROUTER_PIN_EXECUTABLE"
+      printf 'router_identity=%s\n' "$SGT_REVIEW_ROUTER_PIN_IDENTITY"
+      printf 'router_capabilities=%s\n' "$SGT_REVIEW_ROUTER_PIN_CAPABILITIES"
+      printf 'router_launcher=%s\n' "$SGT_REVIEW_ROUTER_PIN_LAUNCHER"
+    fi
   } > "$staging/meta" || { rm -rf "$staging"; return 1; }
   mv "$staging" "$dir" || { rm -rf "$staging"; return 1; }
   ARTIFACT_DIR="$dir"
@@ -605,8 +647,8 @@ done < "$parsed"
 if [[ -z "$RETRY" && ${#fields[@]} -gt 0 ]]; then
   _retain_parsed_findings || _routing_failure "could not retain the parsed review findings"
 fi
-if [[ -n "$REVIEW_ROUTER_IDENTITY_MISMATCH" ]]; then
-  _routing_failure "$REVIEW_ROUTER_IDENTITY_MISMATCH"
+if [[ -n "$REVIEW_ROUTER_RUNTIME_MISMATCH" ]]; then
+  _routing_failure "$REVIEW_ROUTER_RUNTIME_MISMATCH"
 fi
 
 declare -a blocking_tasks=() blocking_recommendations=()
