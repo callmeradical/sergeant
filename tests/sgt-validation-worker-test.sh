@@ -26,7 +26,13 @@ Validate only after release.
 EOF
 revision="$(bash -c 'source "$1"; _sgt_intent_revision "$2"' _ \
   "$ROOT_DIR/bin/_sgt-intent.sh" "$state/validation-intent.md")"
-coordinator_start="$(ps -o lstart= -p "$$" | awk '{$1=$1; print}')"
+if [[ "${SGT_VALIDATION_WORKER_PORTABLE_ONLY:-}" == 1 ]]; then
+  export SGT_TEST_HOOKS=1 SGT_TEST_PROCESS_IDENTITY_UNAVAILABLE=1
+  export SGT_TEST_PROCESS_PLATFORM=Darwin
+  coordinator_start='platform:Darwin:no-exact-process-birth'
+else
+  coordinator_start="$(ps -o lstart= -p "$$" | awk '{$1=$1; print}')"
+fi
 cat > "$state/validation-launch.lock" <<EOF
 pid=$$
 start=$coordinator_start
@@ -133,6 +139,12 @@ if grep -Fq -- '--yes' "$TEST_ROOT/no-mistakes.log"; then
 fi
 [[ "$(cat "$state/validation_status")" == 'exited:0' ]]
 [[ -s "$state/validation-child-accepted" ]]
+if [[ "${SGT_VALIDATION_WORKER_PORTABLE_ONLY:-}" == 1 ]]; then
+  grep -Fq '|platform:Darwin:no-exact-process-birth' \
+    "$state/validation-child-ready"
+  printf 'sgt-validation-worker portable handshake: ok\n'
+  exit 0
+fi
 
 dead_state="$TEST_ROOT/dead-state"
 mkdir -p "$dead_state"

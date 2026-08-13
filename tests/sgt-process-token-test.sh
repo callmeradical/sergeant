@@ -11,6 +11,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Sergeant supports Python 3 versions before str.removeprefix was added in 3.9.
+if grep -q '\.removeprefix' "$ROOT/bin/_sgt-process-token.py"; then
+  echo "process token helper requires Python 3.9 str.removeprefix" >&2
+  exit 1
+fi
+
 make_marker() {
   marker_path="$(mktemp "$TEST_ROOT/marker.XXXXXX")"
   marker_identity="$(stat -Lc '%d:%i' "$marker_path")"

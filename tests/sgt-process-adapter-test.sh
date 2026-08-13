@@ -54,6 +54,22 @@ chmod +x "$TEST_ROOT/bin/lsof"
 source "$ROOT/bin/_sgt-lib.sh"
 # shellcheck source=bin/_sgt-process.sh
 source "$ROOT/bin/_sgt-process.sh"
+
+# A current marker without durable history is a torn launch publication. A new
+# launch must fail before allocating or replacing any evidence.
+torn_state="$TEST_ROOT/torn-state"
+mkdir -p "$torn_state"
+printf 'prior-current-marker\n' > "$torn_state/worker_process_marker"
+chmod 600 "$torn_state/worker_process_marker"
+cp "$torn_state/worker_process_marker" "$TEST_ROOT/torn-marker.before"
+if _sgt_prepare_worker_process_marker "$torn_state"; then
+  printf 'marker preparation replaced torn current evidence\n' >&2
+  exit 1
+fi
+cmp "$TEST_ROOT/torn-marker.before" "$torn_state/worker_process_marker"
+[[ ! -e "$torn_state/worker_process_markers" ]]
+[[ -z "$(find "$torn_state" -maxdepth 1 -name '.worker-process-marker.*' -print -quit)" ]]
+
 _sgt_process_identity() { return 1; }
 portable_state="$TEST_ROOT/portable-state"
 mkdir -p "$portable_state"

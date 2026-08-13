@@ -42,8 +42,37 @@ _sgt_process_stat_fields() {
 
 _sgt_process_identity() {
   local fields
+  if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+    "${SGT_TEST_PROCESS_IDENTITY_UNAVAILABLE:-}" == 1 ]]; then
+    return 1
+  fi
   fields="$(_sgt_process_stat_fields "$1")" || return 1
   printf '%s\n' "${fields%% *}"
+}
+
+_sgt_process_identity_record() {
+  local pid="$1" identity platform
+  identity="$(_sgt_process_identity "$pid" 2>/dev/null || true)"
+  if [[ -n "$identity" ]]; then
+    printf '%s\n' "$identity"
+    return 0
+  fi
+  if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+    -n "${SGT_TEST_PROCESS_PLATFORM:-}" ]]; then
+    platform="$SGT_TEST_PROCESS_PLATFORM"
+  else
+    platform="$(uname -s 2>/dev/null || true)"
+  fi
+  [[ "$platform" == Darwin ]] || return 1
+  if [[ "${SGT_TEST_HOOKS:-}" != 1 || \
+    "${SGT_TEST_PROCESS_ASSUME_LIVE:-}" != 1 ]]; then
+    kill -0 "$pid" 2>/dev/null || return 1
+  fi
+  printf 'platform:Darwin:no-exact-process-birth\n'
+}
+
+_sgt_process_identity_record_is_portable() {
+  [[ "$1" == platform:Darwin:no-exact-process-birth ]]
 }
 
 _sgt_process_state() {

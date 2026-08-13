@@ -225,9 +225,9 @@ def load_expected(path):
     for line in open(path, encoding="utf-8"):
         if not line.startswith("member="):
             continue
-        fields = line.removeprefix("member=").strip().split("|")
+        fields = line[len("member=") :].strip().split("|")
         if len(fields) >= 2 and fields[0].isdigit() and fields[1].startswith("linux:"):
-            expected[int(fields[0])] = fields[1].removeprefix("linux:")
+            expected[int(fields[0])] = fields[1][len("linux:") :]
     return expected
 
 

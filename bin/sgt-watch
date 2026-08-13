@@ -384,6 +384,25 @@ _record_zero_holder_recycle() {
     "$process_group" marker_holders_retired
 }
 
+_recycle_inactive_pane_zero_holders() {
+  local repo_dir="$1" pane="$2" identity="$3" process_group="$4"
+  local current_identity holders pane_id dead_pane=false
+  command -v tmux >/dev/null 2>&1 || return 1
+  pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
+  if [[ "$pane_id" == "$pane" ]]; then
+    current_identity="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
+    [[ "$current_identity" == "1|${identity#*|}" ]] || return 1
+    dead_pane=true
+  fi
+  holders="$(_sgt_worker_marker_holders "$repo_dir")" || return 1
+  [[ -z "$holders" ]] || return 1
+  if $dead_pane; then
+    tmux kill-pane -t "$pane" 2>/dev/null || return 1
+  fi
+  _record_recycle_evidence "$repo_dir" "$pane" "$identity" \
+    "$process_group" marker_holders_retired
+}
+
 _recycle_portable_terminal_worker() {
   local repo_dir="$1" pane="$2" identity="$3" process_group="$4"
   local holders pane_id
@@ -641,6 +660,12 @@ _recycle_terminal_worker() {
   fi
   process_group="$(cat "$repo_dir/worker_process_group" 2>/dev/null || true)"
   _recycle_evidence_covers "$repo_dir" "$identity" "$process_group" && return 0
+  if _recycle_inactive_pane_zero_holders "$repo_dir" "$pane" "$identity" \
+    "$process_group"; then
+    rm -f "$repo_dir/worker_recycle_phase"
+    _clear_terminal_recycle_diagnostic "$repo_dir"
+    return 0
+  fi
   if process_identity="$(_terminal_worker_process_group "$repo_dir" "$identity")"; then
     process_group="${process_identity%%|*}"
     remainder="${process_identity#*|}"

@@ -311,6 +311,28 @@ grep -Fqx 'outcome=marker_holders_retired' \
   "$launched_state/worker_recycled"
 [[ ! -e "$launched_state/worker_recycle_phase" ]]
 
+# tmux may retain an exact dead pane after the root and all marker holders exit.
+# Its dead identity plus a validated zero-holder scan is completed retirement;
+# watch removes the retained pane and publishes evidence without root identity.
+launch_fixture task-natural-dead-pane
+dead_pane_helper_pid="$launched_pid"
+dead_pane_worker_pid="$(cat "$launched_state/worker_pid")"
+tmux set-option -p -t "$launched_pane" remain-on-exit on
+kill -KILL "$dead_pane_helper_pid" "$dead_pane_worker_pid" 2>/dev/null || true
+for _ in $(seq 1 100); do
+  dead_pane_state="$(tmux display-message -p -t "$launched_pane" \
+    '#{pane_dead}' 2>/dev/null || true)"
+  [[ "$dead_pane_state" == 1 ]] && break
+  sleep 0.01
+done
+[[ "$dead_pane_state" == 1 ]]
+SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
+  --sync task-natural-dead-pane >/dev/null
+grep -Fqx 'outcome=marker_holders_retired' \
+  "$launched_state/worker_recycled"
+[[ "$(tmux display-message -p -t "$launched_pane" \
+  '#{pane_id}' 2>/dev/null || true)" != "$launched_pane" ]]
+
 # On Darwin the pane identity remains exact even though process birth is not.
 # Watch may retire that exact pane and use required lsof capability absence as
 # completion proof, but never signal a PID inferred from ps output.

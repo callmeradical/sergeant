@@ -153,8 +153,10 @@ case "$1" in
     fi
     printf '%s\n' "$command" > "$CONCURRENT_DIR/validation-command"
     : > "$CONCURRENT_DIR/pane-live"
-    printf '%s|%%77|7777|linux:12345\n' \
-      "$(cat "$CONCURRENT_DIR/revision")" > "$TEST_REPO_STATE/validation-child-ready"
+    printf '%s|%%77|7777|%s\n' \
+      "$(cat "$CONCURRENT_DIR/revision")" \
+      "${VALIDATION_START_FIXTURE:-linux:12345}" \
+      > "$TEST_REPO_STATE/validation-child-ready"
     [[ "${FAIL_TRANSITION:-}" != "split-empty" ]] || exit 7
     if [[ "${FAIL_TRANSITION:-}" == "pane-pid" ]]; then
       printf '0|%%77||234567|%s\n' "$command"
@@ -302,8 +304,10 @@ fi
 "$REAL_LN" "$@" || exit
 if [[ "$destination" == */validation-release && \
   "${FAIL_TRANSITION:-}" != "handshake-timeout" ]]; then
-  printf '%s|%%77|7777|linux:12345\n' \
-      "$(cat "$CONCURRENT_DIR/revision")" > "$TEST_REPO_STATE/validation-child-accepted"
+  printf '%s|%%77|7777|%s\n' \
+      "$(cat "$CONCURRENT_DIR/revision")" \
+      "${VALIDATION_START_FIXTURE:-linux:12345}" \
+      > "$TEST_REPO_STATE/validation-child-accepted"
 fi
 if [[ "$destination" == */validation-child-commit ]]; then
   if [[ "${FAIL_TRANSITION:-}" == "commit-child-exit" ]]; then
@@ -311,8 +315,10 @@ if [[ "$destination" == */validation-child-commit ]]; then
   elif [[ "${FAIL_TRANSITION:-}" == "wrong-commit-ack" ]]; then
     printf 'wrong-ack\n' > "$TEST_REPO_STATE/validation-child-committed"
   elif [[ "${FAIL_TRANSITION:-}" != "commit-ack-timeout" ]]; then
-    printf '%s|%%77|7777|linux:12345\n' \
-      "$(cat "$CONCURRENT_DIR/revision")" > "$TEST_REPO_STATE/validation-child-committed"
+    printf '%s|%%77|7777|%s\n' \
+      "$(cat "$CONCURRENT_DIR/revision")" \
+      "${VALIDATION_START_FIXTURE:-linux:12345}" \
+      > "$TEST_REPO_STATE/validation-child-committed"
     [[ "${FAIL_TRANSITION:-}" != "exit-after-committed" ]] || \
       rm -f "$CONCURRENT_DIR/pane-live"
   fi
@@ -323,8 +329,10 @@ if [[ "$destination" == */validation-success ]]; then
   elif [[ "${FAIL_TRANSITION:-}" == "wrong-final-token" ]]; then
     printf 'wrong-final\n' > "$TEST_REPO_STATE/validation-success-ack"
   elif [[ "${FAIL_TRANSITION:-}" != "final-ack-timeout" ]]; then
-    printf '%s|%%77|7777|linux:12345\n' \
-      "$(cat "$CONCURRENT_DIR/revision")" > "$TEST_REPO_STATE/validation-success-ack"
+    printf '%s|%%77|7777|%s\n' \
+      "$(cat "$CONCURRENT_DIR/revision")" \
+      "${VALIDATION_START_FIXTURE:-linux:12345}" \
+      > "$TEST_REPO_STATE/validation-success-ack"
     [[ "${FAIL_TRANSITION:-}" != "exit-after-final-ack" ]] || \
       rm -f "$CONCURRENT_DIR/pane-live"
   fi
@@ -405,6 +413,12 @@ exec "$REAL_SHASUM" "$@"
 EOF
 chmod +x "$fake_bin/shasum"
 
+if [[ "${SGT_VALIDATE_PORTABLE_ONLY:-}" == 1 ]]; then
+  export SGT_TEST_HOOKS=1 SGT_TEST_PROCESS_IDENTITY_UNAVAILABLE=1
+  export SGT_TEST_PROCESS_PLATFORM=Darwin SGT_TEST_PROCESS_ASSUME_LIVE=1
+  export VALIDATION_START_FIXTURE='platform:Darwin:no-exact-process-birth'
+fi
+
 # The release wrapper reads this output during the coordinator's EXIT trap.
 # shellcheck disable=SC2094
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
@@ -420,6 +434,12 @@ PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
 [[ "$(cat "$repo_state/window_name")" == "validation-app-task-1" ]]
 [[ "$(cat "$repo_state/validation_process_group")" == "7777" ]]
 [[ "$(cat "$repo_state/validation_pane_pid")" == "7777" ]]
+if [[ "${SGT_VALIDATE_PORTABLE_ONLY:-}" == 1 ]]; then
+  [[ "$(cat "$repo_state/validation_process_start")" == \
+    'platform:Darwin:no-exact-process-birth' ]]
+  printf 'sgt-validate portable split-pane launch: ok\n'
+  exit 0
+fi
 grep -Fq 'rename-window -t %42 validation-app-task-1' "$TEST_ROOT/tmux.log"
 grep -Fq 'split-window -P -F #{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command} -t %42' \
   "$TEST_ROOT/tmux.log"
