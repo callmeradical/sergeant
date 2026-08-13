@@ -191,7 +191,7 @@ _drain_terminate() {
 
   pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
   if [[ ! "$pgid" =~ ^[1-9][0-9]*$ ]]; then
-    pgid="$(cat "$REPO_STATE/worker_process_group" 2>/dev/null | tr -d ' \n' || true)"
+    pgid="$(tr -d ' \n' < "$REPO_STATE/worker_process_group" 2>/dev/null || true)"
   fi
   # Only signal the group when this worker actually leads it.  A tmux pane command
   # is its own group leader, so pgid == worker pid.  If it is not, the group
