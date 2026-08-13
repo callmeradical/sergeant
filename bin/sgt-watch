@@ -473,7 +473,9 @@ _terminal_recycle_evidence_covers() {
   local repo_dir="$1" identity="$2" process_group="$3"
   _recycle_evidence_covers "$repo_dir" "$identity" "$process_group" || return 1
   if [[ -e "$repo_dir/worker_stale_pane_retirement" || \
-        -L "$repo_dir/worker_stale_pane_retirement" ]]; then
+        -L "$repo_dir/worker_stale_pane_retirement" || \
+        -e "$repo_dir/worker_stale_pane_retirement_pending" || \
+        -L "$repo_dir/worker_stale_pane_retirement_pending" ]]; then
     _stale_pane_retirement_validation_matches "$repo_dir"
   else
     return 0

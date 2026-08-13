@@ -36,6 +36,10 @@ chmod +x "$fake_bin/tmux"
 cat > "$fake_bin/python3" <<'PYTHON'
 #!/usr/bin/env bash
 if [[ "${1:-}" == */_sgt-process-token.py && "${2:-}" == holders ]]; then
+  if [[ "${FAIL_HOLDER_SCAN:-}" == 1 ]]; then
+    [[ -z "${HOLDER_SCAN_REACHED:-}" ]] || : > "$HOLDER_SCAN_REACHED"
+    exit 1
+  fi
   [[ -z "${FAKE_HOLDERS:-}" ]] || printf '%s\n' "$FAKE_HOLDERS"
   exit 0
 fi
@@ -75,6 +79,7 @@ mkdir -p "$fleet/task-conflict" "$fleet/task-recycle-conflict" \
   "$fleet/task-lifecycle-race" "$fleet/task-post-status-race" \
   "$fleet/task-post-marker-race" "$fleet/task-absent-worktree" \
   "$fleet/task-receipt-publication-race" "$fleet/task-receipt-retry"
+mkdir -p "$fleet/task-peer-race"
 cp -R "$state" "$fleet/task-conflict/app"
 cp -R "$state" "$fleet/task-recycle-conflict/app"
 cp -R "$state" "$fleet/task-live-holder/app"
@@ -89,6 +94,7 @@ cp -R "$state" "$fleet/task-post-marker-race/app"
 cp -R "$state" "$fleet/task-absent-worktree/app"
 cp -R "$state" "$fleet/task-receipt-publication-race/app"
 cp -R "$state" "$fleet/task-receipt-retry/app"
+cp -R "$state" "$fleet/task-peer-race/app"
 
 sync_error="$TEST_ROOT/sync.err"
 env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
@@ -430,6 +436,43 @@ env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
   >/dev/null
 [[ "$(cat "$receipt_retry_state/worker_stale_pane_retirement")" == "$retry_receipt" ]]
 [[ -s "$receipt_retry_state/worker_stale_pane_retirement_validated" ]]
+[[ ! -s "$kill_log" && -d "$worktree" ]]
+
+peer_race_state="$fleet/task-peer-race/app"
+peer_pre_barrier="$TEST_ROOT/peer-race-pre"
+peer_post_barrier="$TEST_ROOT/peer-race-post"
+peer_scan_reached="$TEST_ROOT/peer-scan-reached"
+env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
+  SGT_TEST_HOOKS=1 SGT_TEST_STALE_PANE_BARRIER="$peer_pre_barrier" \
+  SGT_TEST_STALE_PANE_POST_EVIDENCE_BARRIER="$peer_post_barrier" \
+  "$ROOT_DIR/bin/sgt-watch" --retire-stale-pane task-peer-race --repo app \
+  > "$TEST_ROOT/peer-race-retire.out" 2>&1 &
+peer_retire_pid=$!
+wait_for_barrier "$peer_pre_barrier"
+env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
+  FAIL_HOLDER_SCAN=1 HOLDER_SCAN_REACHED="$peer_scan_reached" \
+  SGT_RECYCLE_PEER_ATTEMPTS=1 \
+  "$ROOT_DIR/bin/sgt-watch" --sync task-peer-race \
+  > /dev/null 2> "$TEST_ROOT/peer-race-sync.err" &
+peer_sync_pid=$!
+for _ in $(seq 1 200); do
+  [[ -e "$peer_scan_reached" ]] && break
+  sleep 0.01
+done
+[[ -e "$peer_scan_reached" ]]
+: > "$peer_pre_barrier.release"
+wait_for_barrier "$peer_post_barrier"
+if wait "$peer_sync_pid"; then
+  printf 'peer recycler accepted pending staged stale evidence\n' >&2
+  exit 1
+fi
+[[ -s "$peer_race_state/worker_stale_pane_retirement_pending" ]]
+[[ -s "$peer_race_state/worker_recycled" ]]
+[[ ! -e "$peer_race_state/worker_stale_pane_retirement" ]]
+: > "$peer_post_barrier.release"
+wait "$peer_retire_pid"
+[[ -s "$peer_race_state/worker_stale_pane_retirement_validated" ]]
+[[ ! -e "$peer_race_state/worker_stale_pane_retirement_pending" ]]
 [[ ! -s "$kill_log" && -d "$worktree" ]]
 
 printf 'sgt-watch stale-pane retirement: ok\n'
