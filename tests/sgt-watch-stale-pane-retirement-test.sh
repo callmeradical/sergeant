@@ -70,7 +70,8 @@ mkdir -p "$fleet/task-conflict" "$fleet/task-recycle-conflict" \
   "$fleet/task-missing-status" "$fleet/task-receipt-race" \
   "$fleet/task-recycle-race" "$fleet/task-marker-race" \
   "$fleet/task-lifecycle-race" "$fleet/task-post-status-race" \
-  "$fleet/task-post-marker-race"
+  "$fleet/task-post-marker-race" "$fleet/task-absent-worktree" \
+  "$fleet/task-receipt-publication-race"
 cp -R "$state" "$fleet/task-conflict/app"
 cp -R "$state" "$fleet/task-recycle-conflict/app"
 cp -R "$state" "$fleet/task-live-holder/app"
@@ -82,6 +83,8 @@ cp -R "$state" "$fleet/task-marker-race/app"
 cp -R "$state" "$fleet/task-lifecycle-race/app"
 cp -R "$state" "$fleet/task-post-status-race/app"
 cp -R "$state" "$fleet/task-post-marker-race/app"
+cp -R "$state" "$fleet/task-absent-worktree/app"
+cp -R "$state" "$fleet/task-receipt-publication-race/app"
 
 sync_error="$TEST_ROOT/sync.err"
 env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
@@ -319,5 +322,50 @@ grep -Fq 'changed after recycle evidence publication' "$TEST_ROOT/post-marker-ra
 [[ -s "$post_marker_state/worker_recycled" ]]
 [[ ! -e "$post_marker_state/worker_stale_pane_retirement" ]]
 [[ ! -s "$kill_log" && -d "$post_status_worktree" && -d "$worktree" ]]
+
+absent_state="$fleet/task-absent-worktree/app"
+printf '%s\n' "$TEST_ROOT/recorded-worktree-is-absent" > "$absent_state/worktree"
+env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
+  "$ROOT_DIR/bin/sgt-watch" --sync task-absent-worktree \
+  >/dev/null 2> "$TEST_ROOT/absent-worktree.err" || true
+grep -Fq 'sgt-watch --retire-stale-pane task-absent-worktree --repo app' \
+  "$TEST_ROOT/absent-worktree.err"
+env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
+  "$ROOT_DIR/bin/sgt-watch" --retire-stale-pane task-absent-worktree --repo app \
+  >/dev/null
+[[ -s "$absent_state/worker_stale_pane_retirement" ]]
+[[ -s "$absent_state/worker_recycled" ]]
+
+receipt_publication_state="$fleet/task-receipt-publication-race/app"
+receipt_publication_worktree="$TEST_ROOT/receipt-publication-worktree"
+receipt_publication_barrier="$TEST_ROOT/receipt-publication-race"
+mkdir -p "$receipt_publication_worktree"
+printf 'done\n' > "$receipt_publication_worktree/.sergeant-status"
+printf '%s\n' "$receipt_publication_worktree" > "$receipt_publication_state/worktree"
+env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
+  SGT_TEST_HOOKS=1 SGT_TEST_STALE_PANE_RECEIPT_BARRIER="$receipt_publication_barrier" \
+  "$ROOT_DIR/bin/sgt-watch" --retire-stale-pane task-receipt-publication-race \
+  --repo app > "$TEST_ROOT/receipt-publication-race.out" 2>&1 &
+receipt_publication_pid=$!
+wait_for_barrier "$receipt_publication_barrier"
+printf 'in_progress\n' > "$receipt_publication_state/status"
+printf 'in_progress\n' > "$receipt_publication_worktree/.sergeant-status"
+printf '%032d|4:4|198|/gone\n' 4 > "$receipt_publication_state/worker_process_marker"
+printf '%032d|4:4|999999999999999\n' 4 \
+  > "$receipt_publication_state/worker_process_markers"
+chmod 600 "$receipt_publication_state/worker_process_marker" \
+  "$receipt_publication_state/worker_process_markers"
+: > "$receipt_publication_barrier.release"
+if wait "$receipt_publication_pid"; then
+  printf 'lifecycle rotation during receipt publication was accepted\n' >&2
+  exit 1
+fi
+grep -Fq 'changed during receipt publication' \
+  "$TEST_ROOT/receipt-publication-race.out"
+[[ ! -e "$receipt_publication_state/worker_stale_pane_retirement" ]]
+find "$receipt_publication_state" -maxdepth 1 -type f \
+  -name 'worker_stale_pane_retirement.incomplete.*' | grep -q .
+[[ -s "$receipt_publication_state/worker_recycled" ]]
+[[ ! -s "$kill_log" && -d "$receipt_publication_worktree" ]]
 
 printf 'sgt-watch stale-pane retirement: ok\n'
