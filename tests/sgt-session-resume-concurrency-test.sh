@@ -39,7 +39,8 @@ case "$1" in
     printf 'launch\n' >> "$LAUNCH_LOG"
     command="${!#}"
     printf '%s\n' "$command" > "$PANE_COMMAND"
-    sleep 0.2
+    [[ -z "${NEW_WINDOW_BARRIER:-}" ]] || : > "$NEW_WINDOW_BARRIER"
+    sleep "${NEW_WINDOW_DELAY:-0.2}"
     printf '%%99\n'
     ;;
   display-message)
@@ -120,6 +121,7 @@ run_resume_fast_exit() {
   PATH="$TEST_ROOT/bin:$PATH" LAUNCH_LOG="$TEST_ROOT/launch.log" \
     PANE_COMMAND="$TEST_ROOT/pane-command" TEST_REPO_STATE="$state" \
     FAST_EXIT_FILE="$TEST_ROOT/fast-exit" OLD_PANE_GONE=1 \
+    NEW_WINDOW_BARRIER="$TEST_ROOT/winner-in-window" NEW_WINDOW_DELAY=0.5 \
     SGT_NOTIFICATION_ACK_TIMEOUT=1 \
     "$ROOT_DIR/bin/sgt-session-resume" task-race app --force \
       >"$TEST_ROOT/fast-$runner.out" 2>&1
@@ -127,12 +129,17 @@ run_resume_fast_exit() {
   printf '%s\n' "$status" > "$TEST_ROOT/fast-$runner.status"
 }
 run_resume_fast_exit one & first=$!
+for _ in $(seq 1 100); do
+  [[ -e "$TEST_ROOT/winner-in-window" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/winner-in-window" ]]
 run_resume_fast_exit two & second=$!
 wait "$first"
 wait "$second"
 [[ "$(wc -l < "$TEST_ROOT/launch.log")" -eq 1 ]]
 [[ "$(cat "$TEST_ROOT/fast-one.status")" == 0 || \
   "$(cat "$TEST_ROOT/fast-two.status")" == 0 ]]
-grep -hFq 'peer launch already advanced the durable worker generation' \
+grep -hFq 'verified peer worker-launch transaction completed' \
   "$TEST_ROOT/fast-one.out" "$TEST_ROOT/fast-two.out"
 printf 'sgt-session-resume concurrent ownership: ok\n'

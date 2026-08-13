@@ -61,6 +61,7 @@ worktree="$(cat "$REPO_DIR/worktree" 2>/dev/null || true)"
 _SGT_RESPOND_LAUNCH_FD=7
 _sgt_drain_lock_acquire_fd "$_SGT_RESPOND_LAUNCH_FD" worker-launch \
   "$REPO_DIR/worker-launch.lock" || _die "Could not acquire exact worker-launch ownership"
+respond_peer_launch_contended="$SGT_DRAIN_LOCK_CONTENDED_LIVE"
 _sgt_response_lock_acquire "$REPO_DIR"
 _cleanup_respond() {
   local status=$?
@@ -347,6 +348,12 @@ else
       _die "Failed to record response provenance in td; response was not published"
   fi
   _publish_local_response_transport "$RESPONSE_INPUT" "$response_id" "$gate_generation"
+fi
+
+if [[ "$respond_peer_launch_contended" == true ]]; then
+  printf 'sgt-respond: response stored; verified peer worker-launch transaction completed for %s/%s.\n' \
+    "$TASK_ID" "$REPO"
+  exit 0
 fi
 
 pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"

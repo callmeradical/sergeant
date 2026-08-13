@@ -252,6 +252,11 @@ _cleanup_resume_lock() {
   _sgt_drain_lock_release_fd "$_SGT_RESUME_OWNER_FD"
 }
 trap '_cleanup_resume_lock' EXIT
+if [[ "$SGT_DRAIN_LOCK_CONTENDED_LIVE" == true ]]; then
+  printf 'A verified peer worker-launch transaction completed for %s/%s.\n' \
+    "$TASK_ID" "$REPO"
+  exit 0
+fi
 _sgt_worker_process_marker_preflight "$REPO_DIR" || \
   _die "Resume refused: worker process marker evidence changed while waiting for ownership"
 locked_worker_marker="$(_sgt_read_owned_file \

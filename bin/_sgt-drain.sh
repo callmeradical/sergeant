@@ -291,6 +291,26 @@ _sgt_drain_lock_owner_is_gone() {
   return 1
 }
 
+# True only for a complete same-host record whose PID is live and whose exact
+# process birth identity still matches. Ambiguous or legacy records are not
+# evidence that a peer transaction ran.
+_sgt_drain_lock_owner_is_verified_live() {
+  local record="$1" snapshot pid host nonce recorded_start actual_start alive_rc=0
+  [[ -f "$record" ]] || return 1
+  snapshot="$(cat "$record" 2>/dev/null || true)"
+  [[ -n "$snapshot" ]] || return 1
+  host="$(_sgt_drain_snapshot_field "$snapshot" owner_host)"
+  [[ -n "$host" && "$host" == "$(_sgt_drain_host_id)" ]] || return 1
+  pid="$(_sgt_drain_snapshot_field "$snapshot" owner_pid)"
+  nonce="$(_sgt_drain_snapshot_field "$snapshot" owner_nonce)"
+  recorded_start="$(_sgt_drain_snapshot_field "$snapshot" owner_start)"
+  [[ "$pid" =~ ^[1-9][0-9]*$ && -n "$nonce" && -n "$recorded_start" ]] || return 1
+  _sgt_drain_process_alive "$pid" || alive_rc=$?
+  [[ $alive_rc -eq 0 ]] || return 1
+  actual_start="$(_sgt_drain_process_start "$pid")"
+  [[ -n "$actual_start" && "$actual_start" == "$recorded_start" ]]
+}
+
 # _sgt_drain_lock_reclaim <record> <expected_nonce>
 #
 # Reclaims a lock proven stale, but only that exact instance.  The record is
@@ -392,6 +412,7 @@ _sgt_drain_lock_acquire_fd() {
   local record state_dir deadline nonce staging
 
   SGT_DRAIN_LOCK_STATE="unavailable"
+  SGT_DRAIN_LOCK_CONTENDED_LIVE=false
   case "$fd" in
     ''|*[!0-9]*)
       printf 'ERROR: invalid drain admission lock handle: %s\n' "$fd" >&2
@@ -457,6 +478,9 @@ _sgt_drain_lock_acquire_fd() {
     fi
     if _sgt_drain_lock_owner_is_gone "$record"; then
       _sgt_drain_lock_reclaim "$record" "$_SGT_DRAIN_OBSERVED_NONCE" && continue
+    fi
+    if _sgt_drain_lock_owner_is_verified_live "$record"; then
+      SGT_DRAIN_LOCK_CONTENDED_LIVE=true
     fi
     if [[ $(date +%s) -ge $deadline ]]; then
       rm -f "$staging" 2>/dev/null || true
