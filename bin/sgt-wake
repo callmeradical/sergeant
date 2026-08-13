@@ -25,11 +25,9 @@
 #   run_id, check_name, task_id, repo, td_task_id, app, env
 #
 # Allowlisted field value pattern: [A-Za-z0-9._/:-]*, never starting with '-'
-# check_name uses a wider allowlist because GitHub check names are
-# human-authored (e.g. "build (ubuntu-latest, 3.11)", "Build & Test").  See
-# _CHECK_NAME_VALUE_PATTERN below for exactly what each admits and why that is
-# safe.  Neither allowlist permits $ backtick \ quotes ; | < > control
-# characters, or secrets.
+# check_name is opaque UTF-8 because GitHub check names are human-authored. It
+# is validated separately and is only ever passed as quoted data, never shell
+# source. Newlines and control characters remain invalid for line storage.
 
 set -euo pipefail
 
@@ -81,26 +79,48 @@ condition_file="$worktree/.sergeant-wake-condition"
 
 _ALLOWED_FIELDS="kind generation not_before deadline max_attempts backoff_base run_id check_name task_id repo td_task_id app env"
 _SECRET_PATTERN='(token|password|key|secret|auth|credential|passwd|apikey|api_key)'
-# Neither pattern admits a leading '-': every value becomes an argument to gh(1)
-# or td(1), and a dash-leading value would be read there as an option rather
-# than as data.
+# Strict values do not admit a leading '-': those values can become arguments
+# to gh(1) or td(1), where a dash-leading value could be read as an option.
 _STRICT_VALUE_PATTERN='^([A-Za-z0-9._/:][A-Za-z0-9._/:-]*)?$'
 # GitHub check names are human-authored and may contain any printable Unicode
 # character that GitHub allows (e.g. "Build · test" with U+00B7 middle dot,
-# matrix names with parentheses, slashes, and accented characters).  We use a
-# *negative* character class: any byte sequence is accepted unless it contains
-# a shell-special character ($, backtick, \, ', ", ;, |, <, >, {, }), a
-# leading '-' (argv option confusion), a control character (U+0000–U+001F,
-# U+007F), or a newline.  This is safe because check_name is used exclusively
-# as a quoted argument to python3/gh and as quoted printf data — it is never
-# eval'd, word-split, or expanded by the shell.
-#
-# Bash's ERE =~ treats the pattern as extended-regex. The negative class
-# [^...] matches any character not listed; we require at least one such
-# character (the + quantifier) and forbid a leading '-'.
-# The first character must not be '-' (would be taken as a flag); all
-# subsequent characters follow the same exclusion list.
-_CHECK_NAME_VALUE_PATTERN='^[^$`\\'\''";<>{}|[:cntrl:]-][^$`\\'\''";<>{}|[:cntrl:]]*$'
+# matrix names with parentheses, shell punctuation, and accented characters).
+# Python gives validation locale-independent Unicode semantics; quoted argv
+# keeps every accepted byte sequence inert. C0/C1 controls and Unicode line or
+# paragraph separators remain invalid in this line-oriented file format.
+_valid_check_name() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -c '
+import sys, unicodedata
+
+value = sys.argv[1]
+try:
+    value.encode("utf-8")
+except UnicodeEncodeError:
+    raise SystemExit(1)
+if any(unicodedata.category(char) in ("Cc", "Zl", "Zp") for char in value):
+    raise SystemExit(1)
+' "$1"
+}
+
+_valid_check_name_storage() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -c '
+import sys, unicodedata
+
+with open(sys.argv[1], "rb") as condition_file:
+    lines = condition_file.read().split(b"\n")
+for line in lines:
+    field, separator, value = line.partition(b"=")
+    if separator and field.strip() == b"check_name":
+        try:
+            decoded = value.decode("utf-8")
+        except UnicodeDecodeError:
+            raise SystemExit(1)
+        if any(unicodedata.category(char) in ("Cc", "Zl", "Zp") for char in decoded):
+            raise SystemExit(1)
+' "$1"
+}
 
 # Bash 3.2-compatible key-value store for wake condition fields.
 # Uses two parallel arrays: _COND_KEYS and _COND_VALS.
@@ -112,8 +132,7 @@ _cond_set() {
   local k="$1" v="$2" i
   for i in "${!_COND_KEYS[@]}"; do
     if [[ "${_COND_KEYS[$i]}" == "$k" ]]; then
-      _COND_VALS[$i]="$v"
-      return
+      return 1
     fi
   done
   _COND_KEYS+=("$k")
@@ -131,12 +150,27 @@ _cond_get() {
   # return empty string when key absent
 }
 
+# Bash variables cannot retain NUL bytes, so validate check-name storage before
+# read(1) can discard one. Other condition kinds keep their existing runtime
+# dependencies and do not require Python.
+if LC_ALL=C grep -aEq '^[[:space:]]*check_name[[:space:]]*=' "$condition_file"; then
+  if ! _valid_check_name_storage "$condition_file"; then
+    _die "invalid UTF-8 or control characters in field value for check_name"
+  fi
+fi
+
 while IFS='=' read -r field value; do
-  # Strip whitespace.
+  # Strip whitespace from structural fields. A GitHub check name is opaque:
+  # spaces after its '=' belong to the provider name and must be preserved.
+  raw_value="$value"
   field="${field#"${field%%[![:space:]]*}"}"
   field="${field%"${field##*[![:space:]]}"}"
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
+  if [[ "$field" != "check_name" ]]; then
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+  else
+    value="$raw_value"
+  fi
   [[ -n "$field" ]] || continue
   # Skip comment lines.
   [[ "$field" != \#* ]] || continue
@@ -165,19 +199,23 @@ while IFS='=' read -r field value; do
     exit 1
   fi
 
-  # Allowlist value characters.  check_name carries a human-authored GitHub
-  # check name, so it uses the wider allowlist documented above.
+  # GitHub check names are opaque UTF-8. Passing the quoted value as argv keeps
+  # shell punctuation inert while the validator rejects malformed UTF-8 and
+  # control characters that are unsafe in line-oriented storage.
   if [[ "$field" == "check_name" ]]; then
-    _value_pattern="$_CHECK_NAME_VALUE_PATTERN"
-  else
-    _value_pattern="$_STRICT_VALUE_PATTERN"
-  fi
-  if ! [[ "$value" =~ $_value_pattern ]]; then
+    if ! _valid_check_name "$value"; then
+      printf 'ERROR: invalid UTF-8 or control characters in field value for %s\n' "$field" >&2
+      exit 1
+    fi
+  elif ! [[ "$value" =~ $_STRICT_VALUE_PATTERN ]]; then
     printf 'ERROR: invalid characters in field value for %s\n' "$field" >&2
     exit 1
   fi
 
-  _cond_set "$field" "$value"
+  if ! _cond_set "$field" "$value"; then
+    printf 'ERROR: duplicate wake-condition field: %s\n' "$field" >&2
+    exit 1
+  fi
 done < "$condition_file"
 
 kind="$(_cond_get kind)"
