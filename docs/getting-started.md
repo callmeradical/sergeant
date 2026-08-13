@@ -20,6 +20,7 @@ Required:
 Optional:
 
 - `mise` for installation tasks
+- `go` 1.21+ to build the MCP server (`sergeant-mcp`)
 - Treehouse for leased worktree pools
 - Graphify for project knowledge graphs
 - no-mistakes for final shipping validation
@@ -160,7 +161,75 @@ sgt-graphify myproject
 
 Require both `graph.json` and `GRAPH_REPORT.md` at the configured project output.
 
-## 8. Install engineering skills
+## 8. Optional: build the MCP server
+
+`sergeant-mcp` is a Go binary that exposes every `sgt-*` script as an MCP tool
+over stdio, so any MCP-compatible host (Claude Desktop, Cursor, Continue, etc.)
+can call Sergeant commands directly without a tmux session.
+
+### Prerequisites
+
+- Go 1.21 or newer: `go version`
+- The repo already contains `go.mod` and `cmd/sergeant-mcp/`; no extra clone is needed.
+
+### Build
+
+```bash
+# Quick build for the current OS/arch — output: bin/sergeant-mcp
+mise run build
+
+# Without mise:
+go build -o bin/sergeant-mcp ./cmd/sergeant-mcp/
+
+# Cross-compile for all supported platforms (darwin/linux × amd64/arm64)
+mise run build:all
+# Output: dist/sergeant-mcp-{os}-{arch}
+```
+
+Verify:
+
+```bash
+./bin/sergeant-mcp --version
+```
+
+### Connect to an MCP host
+
+The repository ships `mcp.json` at the root — an [Agent Plugins](https://agent-plugins.org)
+manifest that points to `./bin/sergeant-mcp`. MCP hosts that auto-discover
+`mcp.json` will pick it up automatically after you build the binary.
+
+For hosts that require manual configuration add a stdio server entry:
+
+```json
+{
+  "mcpServers": {
+    "sergeant": {
+      "type": "stdio",
+      "command": "/path/to/sergeant/bin/sergeant-mcp"
+    }
+  }
+}
+```
+
+The binary must remain in `bin/` (the same directory as the `sgt-*` scripts)
+because it resolves script paths relative to itself at runtime.
+
+### Available tools
+
+`sergeant-mcp` registers 29 tools — one per public `sgt-*` script plus
+`wiki-daily-digest`. Each tool accepts an `args` string (shell-quoted CLI
+arguments) and, for `sgt-respond`, an optional `stdin` string. Run
+`./bin/sergeant-mcp --list-tools` to see the full list with descriptions.
+
+### Notes
+
+- The binary is not included in GitHub releases; build it from source with
+  `go build` or `mise run build`.
+- `CGO_ENABLED=0` is set by default for a statically linked binary.
+- Commands that require an interactive TTY (`sgt-interactive-worker`,
+  `sgt-validation-worker`) emit a warning when called via MCP.
+
+## 9. Install engineering skills
 
 Sergeant-generated worker briefs already discover their required workflow skills
 from this repository's vendored `.agents/skills/` tree. See

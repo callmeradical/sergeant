@@ -355,6 +355,32 @@ Agent-loaded skills for structured workflows:
 | `skills/cross-repo-work` | Plan and execute changes across multiple repos |
 | `skills/dispatch` | Dispatch subagents per repo with worktrees + briefs |
 
+## MCP server
+
+`sergeant-mcp` exposes every `sgt-*` script as an MCP tool over stdio, letting
+any MCP-compatible host (Claude Desktop, Cursor, Continue, etc.) call Sergeant
+commands without a tmux session.
+
+```bash
+# Build (requires Go 1.21+)
+mise run build           # bin/sergeant-mcp for current OS/arch
+mise run build:all       # dist/ for darwin/linux × amd64/arm64
+
+# Without mise:
+go build -o bin/sergeant-mcp ./cmd/sergeant-mcp/
+```
+
+The repo ships `mcp.json` — an [Agent Plugins](https://agent-plugins.org) manifest
+that points to `./bin/sergeant-mcp`. Hosts that auto-discover `mcp.json` pick it
+up automatically after the build. For manual configuration add a stdio entry
+pointing to `bin/sergeant-mcp`.
+
+The binary resolves script paths relative to itself, so it must stay in `bin/`
+alongside the `sgt-*` scripts.
+
+See [Getting started §8](docs/getting-started.md#8-optional-build-the-mcp-server)
+for full setup instructions.
+
 ## Requirements
 
 See the complete [getting started checklist](docs/getting-started.md) for
