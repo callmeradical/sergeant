@@ -80,7 +80,45 @@ esac
 EOF
 chmod +x "$TEST_ROOT/fake-bin/td"
 
-for agent in opencode goose claude; do
+cat > "$TEST_ROOT/fake-bin/sgt-review-findings" <<'EOF'
+#!/usr/bin/env bash
+printf 'Usage: sgt-review-findings --axis standards|spec|readiness --severity error|warning|info\n' >&2
+exit 2
+EOF
+chmod +x "$TEST_ROOT/fake-bin/sgt-review-findings"
+
+cat > "$TEST_ROOT/fake-bin/opencode" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "models" ]]; then
+  provider="${2:-}"
+  cat <<MODELS
+$provider/claude-opus-5
+{
+  "id": "claude-opus-5",
+  "providerID": "$provider",
+  "variants": {
+    "medium": {},
+    "high": {}
+  }
+}
+MODELS
+  exit 0
+fi
+if [[ "${1:-}" == "debug" && "${2:-}" == "agent" ]]; then
+  model="$(sed -n 's/.*"model": "\([^"]*\)".*/\1/p' "$OPENCODE_CONFIG")"
+  variant="$(sed -n 's/.*"variant": "\([^"]*\)".*/\1/p' "$OPENCODE_CONFIG")"
+  variant="${OPENCODE_TEST_RUNTIME_VARIANT:-$variant}"
+  provider="${model%%/*}"
+  model_id="${model#*/}"
+  printf '{"model":{"providerID":"%s","modelID":"%s"},"variant":"%s"}\n' \
+    "$provider" "$model_id" "$variant"
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$TEST_ROOT/fake-bin/opencode"
+for agent in goose claude; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_ROOT/fake-bin/$agent"
   chmod +x "$TEST_ROOT/fake-bin/$agent"
 done
@@ -226,6 +264,26 @@ state="$(printf '%s\n' "$TEST_ROOT"/fleet/opencode-variant-*/app)"
   exit 1
 }
 [[ "$(cat "$state/agent_model_source")" == "flag" ]]
+
+# The harness resolver is authoritative, not the generated definition. A
+# mismatch must fail before dispatch creates fleet state or reaches tmux.
+before="$(_fleet_task_count)"
+set +e
+mismatch_output="$(OPENCODE_TEST_RUNTIME_VARIANT=xhigh \
+  _dispatch mismatch-variant 'Mismatched variant' \
+  --model anthropic/claude-opus-5:medium 2>&1)"
+mismatch_status=$?
+set -e
+[[ "$mismatch_status" -ne 0 ]] || {
+  printf 'FAIL: dispatch accepted a runtime variant mismatch\n' >&2
+  exit 1
+}
+[[ "$mismatch_output" == *"resolved variant xhigh, not requested medium"* ]] || {
+  printf 'FAIL: mismatch diagnostic was not actionable: %s\n' "$mismatch_output" >&2
+  exit 1
+}
+[[ "$(_fleet_task_count)" == "$before" ]]
+[[ ! -e "$TEST_ROOT/mismatch-variant.log" ]]
 
 # ── 7. A variant fails closed only where the transport is genuinely unknown ───
 # goose exposes no launch-time variant selector, so the diagnostic must name goose
