@@ -549,7 +549,8 @@ rm -f "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" \
   "$repo_state/response_id" "$repo_state/response_generation"
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/consumed-race.log" \
   TD_LOG="$TEST_ROOT/consumed-race-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
-  PANE_ALIVE=1 NEW_PANE=%100 PANE_IDENTITY='0|%42|7777|777777|recycled-pane' \
+  PANE_ALIVE=1 NEW_PANE=%100 REQUIRE_TARGET=1 \
+  PANE_IDENTITY='0|%42|7777|777777|recycled-pane' \
   EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
   respond 'durable second response' >"$TEST_ROOT/consumed-second.out" 2>&1 & consumed_second_pid=$!
 sleep 0.1
@@ -574,11 +575,8 @@ consumed_target_nonce="$(cat "$repo_state/notification_target" 2>/dev/null || tr
 consumed_target_dir="$repo_state/notifications/$consumed_queued_id/targets/$consumed_target_nonce"
 [[ "$(cat "$consumed_target_dir/pane_identity")" == \
   '0|%100|9999|654321|sgt-interactive-worker:'"$repo_state" ]]
-PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/consumed-race.log" \
-  PANE_ALIVE=1 NEW_PANE=%100 REQUIRE_TARGET=1 EXPECTED_WORKER="$repo_state" \
-  SERGEANT_FLEET="$fleet" tmux display-message -p -t %100 '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_start_command}' \
-  > /dev/null
 [[ -f "$consumed_target_dir/accepted" && -f "$consumed_target_dir/delivered" ]]
+grep -Fq 'queued response delivered to pane %100' "$TEST_ROOT/consumed-second.out"
 [[ "$(grep -c '^new-window ' "$TEST_ROOT/consumed-race.log")" -eq 1 ]]
 printf '%%42\n' > "$repo_state/pane"
 printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo_state" \
