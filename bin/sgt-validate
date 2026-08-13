@@ -70,6 +70,10 @@ TASK_STATE="$FLEET_DIR/$TASK_ID"
 WORKTREE="$(cat "$REPO_STATE/worktree" 2>/dev/null || true)"
 PANE="$(cat "$REPO_STATE/pane" 2>/dev/null || true)"
 [[ -d "$WORKTREE" ]] || _die "Worker worktree unavailable"
+if ! $RELEASE_OWNERSHIP; then
+  _sgt_worker_process_marker_preflight "$REPO_STATE" || \
+    _die "Validation refused: worker process marker evidence is torn"
+fi
 
 PRIMARY_PANE_ID_RECORD="$TASK_STATE/primary_pane_id"
 PRIMARY_PANE_IDENTITY_RECORD="$TASK_STATE/primary_pane_identity"

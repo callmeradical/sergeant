@@ -28,11 +28,6 @@ make_marker() {
   printf 'version=1\nmember=99999999|linux:1|1|1|1\n' > "$TEST_ROOT/phase"
 }
 
-python3 - <<'PY'
-import os, signal
-assert hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal")
-PY
-
 # A same-user environment spoofer has no capability FD and is untouched.
 SERGEANT_WORKER_PROCESS_TOKEN=spoof sleep 60 & spoofer=$!
 OWNED_PIDS+=" $spoofer"

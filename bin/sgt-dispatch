@@ -642,6 +642,13 @@ fi
 
 TASK_DIR="$FLEET_DIR/$TASK_ID"
 
+if ! $DRY_RUN; then
+  for rname in "${TARGET_REPOS[@]}"; do
+    _sgt_worker_process_marker_preflight "$TASK_DIR/$rname" || \
+      _die "Dispatch refused: worker process marker evidence is torn"
+  done
+fi
+
 echo ""
 echo "=== sgt-dispatch: $PROJECT ==="
 echo "brief:   $BRIEF"

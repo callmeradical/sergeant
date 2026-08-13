@@ -156,10 +156,12 @@ set -e
 cmp "$TEST_ROOT/torn-marker.before" "$repo_state/worker_process_marker"
 [[ ! -e "$repo_state/worker_process_markers" ]]
 [[ -z "$(find "$repo_state" -maxdepth 1 -name '.worker-process-marker.*' -print -quit)" ]]
+[[ "$(cat "$repo_state/status")" == in_progress ]]
+grep -Fq 'live worker stalled:' "$repo_state/diagnostic"
+[[ ! -e "$repo_state/stall_recovery_attempted" && \
+  ! -e "$repo_state/notification_id" && ! -e "$repo_state/notifications" && \
+  ! -e "$worktree/.sergeant-notification" ]]
 rm "$repo_state/worker_process_marker"
-rm -rf "$repo_state/notifications"
-rm -f "$repo_state/stall_recovery_attempted" "$repo_state/notification_id" \
-  "$worktree/.sergeant-notification"
 
 # ── Slice 1: Happy path — stalled worker recovered ───────────────────────────
 # A worker with status=in_progress and a live-worker-stalled diagnostic is

@@ -50,6 +50,8 @@ cat > "$RESPONSE_INPUT"
 REPO_DIR="$FLEET_DIR/$TASK_ID/$REPO"
 [[ -d "$FLEET_DIR/$TASK_ID" ]] || _die "Task not found: $TASK_ID"
 [[ -d "$REPO_DIR" ]] || _die "Repo not found in task $TASK_ID: $REPO"
+_sgt_worker_process_marker_preflight "$REPO_DIR" || \
+  _die "Response refused: worker process marker evidence is torn"
 
 # Read project name from brief.md for drain admission checks.
 _sgt_drain_read_project_from_brief "$FLEET_DIR/$TASK_ID"

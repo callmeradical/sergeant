@@ -139,6 +139,40 @@ git -C "$TEST_ROOT/repo" add README.md
 git -C "$TEST_ROOT/repo" commit -qm fixture
 git -C "$TEST_ROOT/repo" remote add origin git@github.com:org/test.git
 
+REAL_DD="$(command -v dd)"
+cat > "$TEST_ROOT/fake-bin/dd" <<EOF
+#!/usr/bin/env bash
+if [[ "\${FIXED_TASK_RANDOM:-}" == 1 && " \$* " == *' bs=32 '* ]]; then
+  exec "$REAL_DD" if=/dev/zero bs=32 count=1
+fi
+exec "$REAL_DD" "\$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/dd"
+
+# A pre-existing torn marker at the exact prospective task ID is rejected
+# before dispatch creates its task brief, worktree, or any additional fleet
+# state. The fixed random source makes this public CLI boundary deterministic.
+torn_dispatch_state="$TEST_ROOT/fleet/torn-dispatch-000000/app"
+mkdir -p "$torn_dispatch_state"
+printf 'prior-current-marker\n' > "$torn_dispatch_state/worker_process_marker"
+chmod 600 "$torn_dispatch_state/worker_process_marker"
+cp "$torn_dispatch_state/worker_process_marker" "$TEST_ROOT/torn-dispatch.before"
+set +e
+torn_dispatch_output="$(FIXED_TASK_RANDOM=1 PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/torn-dispatch-tmux.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Torn dispatch' --repos app 2>&1)"
+torn_dispatch_status=$?
+set -e
+[[ "$torn_dispatch_status" -ne 0 && \
+  "$torn_dispatch_output" == *'worker process marker evidence is torn'* ]]
+cmp "$TEST_ROOT/torn-dispatch.before" "$torn_dispatch_state/worker_process_marker"
+[[ ! -e "$TEST_ROOT/fleet/torn-dispatch-000000/brief.md" && \
+  ! -e "$torn_dispatch_state/worktree" && \
+  ! -e "$TEST_ROOT/torn-dispatch-tmux.log" ]]
+[[ "$(find "$torn_dispatch_state" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" == 1 ]]
+rm -rf "$TEST_ROOT/fleet/torn-dispatch-000000"
+
 interrupted_state="$TEST_ROOT/fleet/interrupted-task/app"
 mkdir -p "$interrupted_state"
 printf 'dispatched\n' > "$interrupted_state/status"

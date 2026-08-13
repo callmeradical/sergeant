@@ -26,7 +26,14 @@ export SERGEANT_CONFIG="$TEST_ROOT/config"
 export SERGEANT_DRAIN_DIR="$TEST_ROOT/drain"
 export TMUX_TMPDIR="$TEST_ROOT/tmux"
 export HOME="$TEST_ROOT/home"
-mkdir -p "$SERGEANT_FLEET" "$SERGEANT_CONFIG" "$SERGEANT_DRAIN_DIR" "$TMUX_TMPDIR" "$HOME"
+mkdir -p "$SERGEANT_FLEET" "$SERGEANT_CONFIG" "$SERGEANT_DRAIN_DIR" "$TMUX_TMPDIR" \
+  "$HOME" "$TEST_ROOT/fake-bin"
+cat > "$TEST_ROOT/fake-bin/opencode" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$TEST_ROOT/fake-bin/opencode"
+export PATH="$TEST_ROOT/fake-bin:$PATH"
 unset TMUX
 
 pass=0
@@ -55,6 +62,17 @@ printf 'opencode\n'      > "$REPO_DIR/agent"
 printf '%s\n' "$PROJECT" > "$REPO_DIR/project"
 printf 'sgt-probe\n'     > "$REPO_DIR/tmux_session"
 printf '%%99999\n'       > "$REPO_DIR/pane"
+old_marker_path="$TEST_ROOT/old-worker-marker"
+old_generation=11111111111111111111111111111111
+printf '%s\n' "$old_generation" > "$old_marker_path"
+chmod 400 "$old_marker_path"
+old_marker_identity="$(stat -Lc '%d:%i' "$old_marker_path")"
+old_marker_record="$old_generation|$old_marker_identity|198|$old_marker_path"
+printf '%s\n' "$old_marker_record" > "$REPO_DIR/worker_process_marker"
+chmod 600 "$REPO_DIR/worker_process_marker"
+printf '%s|%s|0\n' "$old_generation" "$old_marker_identity" \
+  > "$REPO_DIR/worker_process_markers"
+chmod 600 "$REPO_DIR/worker_process_markers"
 
 _tmux_server_started() {
   # Any socket under the isolated TMUX_TMPDIR means a server was created.
@@ -65,12 +83,18 @@ _tmux_server_started() {
 # Proves the refusal below is caused by the drain and not by fixture shape.
 # The resume is expected to fail later (no real agent), just not at the gate.
 set +e
-baseline="$("$BIN/sgt-session-resume" "$TASK_ID" "$REPO" --force 2>&1)"
+baseline="$(SGT_NOTIFICATION_ACK_TIMEOUT=0 \
+  "$BIN/sgt-session-resume" "$TASK_ID" "$REPO" --force 2>&1)"
 set -e
 if grep -qi 'held by drain' <<<"$baseline"; then
   _fail "undrained resume passes the drain gate"
 else
   _pass "undrained resume passes the drain gate"
+fi
+if [[ "$(cat "$REPO_DIR/worker_process_marker")" != "$old_marker_record" ]]; then
+  _pass "resume publishes a fresh worker marker generation"
+else
+  _fail "resume publishes a fresh worker marker generation"
 fi
 # Reset anything the baseline attempt changed.
 printf 'orphaned\n' > "$REPO_DIR/status"

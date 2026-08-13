@@ -180,6 +180,25 @@ respond() {
   printf '%s' "$response_body" | "$ROOT_DIR/bin/sgt-respond" task-1 app
 }
 
+# Torn process-capability evidence is rejected before response or notification
+# publication mutates either fleet state or the worktree.
+printf 'prior-current-marker\n' > "$repo_state/worker_process_marker"
+chmod 600 "$repo_state/worker_process_marker"
+cp "$repo_state/worker_process_marker" "$TEST_ROOT/respond-torn.before"
+set +e
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/respond-torn-tmux.log" \
+  TD_LOG="$TEST_ROOT/respond-torn-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  respond 'do not publish this response' >/dev/null 2>&1
+respond_torn_status=$?
+set -e
+[[ "$respond_torn_status" -ne 0 ]]
+cmp "$TEST_ROOT/respond-torn.before" "$repo_state/worker_process_marker"
+[[ ! -e "$repo_state/worker_process_markers" && \
+  ! -e "$repo_state/notification_id" && ! -e "$repo_state/response" && \
+  ! -e "$worktree/.sergeant-response" && ! -e "$TEST_ROOT/respond-torn-tmux.log" ]]
+rm "$repo_state/worker_process_marker"
+
 assert_publication_failure() {
   local target="$1"
   local label="$2"

@@ -353,6 +353,43 @@ PATH="$TEST_ROOT/portable-bin:$PATH" SERGEANT_FLEET="$TEST_ROOT/fleet" \
 grep -Fqx 'outcome=marker_holders_retired' \
   "$launched_state/worker_recycled"
 [[ ! -e "$launched_state/diagnostic" ]]
+[[ "$(tmux display-message -p -t "$launched_pane" \
+  '#{pane_id}' 2>/dev/null || true)" != "$launched_pane" ]]
+
+# Portable capability ownership is inode-based, not descriptor-number-based:
+# a descendant may dup FD 198 to another descriptor and close 198. A bounded
+# all-FD lsof scan must still observe it and refuse false retirement.
+cat > "$TEST_ROOT/portable-bin/lsof" <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *' -d 198 '* ]]; then
+  exit 1
+fi
+printf '%s\n' "$LSOF_FIXTURE_OUTPUT"
+EOF
+chmod +x "$TEST_ROOT/portable-bin/lsof"
+launch_fixture task-portable-fd199
+rm -f "$launched_state/worker_pid" "$launched_state/worker_process_group" \
+  "$launched_state/worker_process_start" "$launched_state/worker_session_id"
+printf 'Darwin:no-exact-process-birth\n' \
+  > "$launched_state/worker_process_marker_platform"
+chmod 600 "$launched_state/worker_process_marker_platform"
+portable_identity="$(cut -d '|' -f2 "$launched_state/worker_process_marker")"
+portable_device="${portable_identity%%:*}"
+portable_inode="${portable_identity#*:}"
+printf -v portable_device_hex '0x%x' "$portable_device"
+set +e
+LSOF_FIXTURE_OUTPUT="p4242
+f199
+D$portable_device_hex
+i$portable_inode" PATH="$TEST_ROOT/portable-bin:$PATH" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
+  --sync task-portable-fd199 >/dev/null 2>&1
+portable_fd199_status=$?
+set -e
+[[ "$portable_fd199_status" -ne 0 ]]
+[[ ! -e "$launched_state/worker_recycled" ]]
+grep -Fq 'portable worker marker retirement remains live or unverifiable' \
+  "$launched_state/diagnostic"
 
 # A terminal root may exit naturally before watch observes it. An escaped
 # marker-owning setsid descendant is still exact owned work and must retire even

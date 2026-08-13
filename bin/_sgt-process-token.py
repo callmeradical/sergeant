@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Retire Linux holders of inherited Sergeant worker marker FDs."""
 
+import ctypes
+import errno
 import os
+import platform
 import re
+import selectors
 import signal
 import stat
 import subprocess
@@ -15,6 +19,89 @@ MARKER_RE = re.compile(r"^[0-9a-f]{32}\|([0-9]+):([0-9]+)\|([0-9]+)$")
 def fail(message):
     print(message, file=sys.stderr)
     raise SystemExit(1)
+
+
+def force_pidfd_syscall():
+    return (os.environ.get("SGT_TEST_HOOKS") == "1" and
+            os.environ.get("SGT_TEST_FORCE_PIDFD_SYSCALL") == "1")
+
+
+def pidfd_syscall_numbers():
+    machine = platform.machine().lower()
+    common_numbering = {
+        "aarch64", "amd64", "arm64", "armv6l", "armv7l", "i386", "i686",
+        "loongarch64", "ppc64", "ppc64le", "riscv64", "s390x", "x86_64",
+    }
+    if machine in common_numbering:
+        return 434, 424
+    return None
+
+
+def libc_pidfd_function(name):
+    if force_pidfd_syscall():
+        return None
+    return getattr(ctypes.CDLL(None, use_errno=True), name, None)
+
+
+def pidfd_available():
+    if (not force_pidfd_syscall() and hasattr(os, "pidfd_open") and
+            hasattr(signal, "pidfd_send_signal")):
+        return True
+    if not sys.platform.startswith("linux"):
+        return False
+    libc = ctypes.CDLL(None)
+    if (not force_pidfd_syscall() and hasattr(libc, "pidfd_open") and
+            hasattr(libc, "pidfd_send_signal")):
+        return True
+    return hasattr(libc, "syscall") and pidfd_syscall_numbers() is not None
+
+
+def pidfd_open(pid):
+    if not force_pidfd_syscall() and hasattr(os, "pidfd_open"):
+        return os.pidfd_open(pid, 0)
+    function = libc_pidfd_function("pidfd_open")
+    if function is not None:
+        function.argtypes = (ctypes.c_int, ctypes.c_uint)
+        function.restype = ctypes.c_int
+        descriptor = function(pid, 0)
+    else:
+        numbers = pidfd_syscall_numbers()
+        if numbers is None:
+            raise NotImplementedError
+        syscall = ctypes.CDLL(None, use_errno=True).syscall
+        syscall.restype = ctypes.c_long
+        descriptor = syscall(numbers[0], pid, 0)
+    if descriptor < 0:
+        error = ctypes.get_errno()
+        if error == errno.ESRCH:
+            raise ProcessLookupError(error, os.strerror(error))
+        raise OSError(error, os.strerror(error))
+    return descriptor
+
+
+def pidfd_send_signal(descriptor, signum):
+    if not force_pidfd_syscall() and hasattr(signal, "pidfd_send_signal"):
+        signal.pidfd_send_signal(descriptor, signum)
+        return
+    function = libc_pidfd_function("pidfd_send_signal")
+    if function is not None:
+        function.argtypes = (
+            ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint,
+        )
+        function.restype = ctypes.c_int
+        result = function(descriptor, signum, None, 0)
+    else:
+        numbers = pidfd_syscall_numbers()
+        if numbers is None:
+            raise NotImplementedError
+        syscall = ctypes.CDLL(None, use_errno=True).syscall
+        syscall.restype = ctypes.c_long
+        result = syscall(numbers[1], descriptor, signum, None, 0)
+    if result < 0:
+        error = ctypes.get_errno()
+        if error == errno.ESRCH:
+            raise ProcessLookupError(error, os.strerror(error))
+        raise OSError(error, os.strerror(error))
 
 
 def stat_fields(pid):
@@ -153,24 +240,57 @@ def enumerate_holders(markers):
 
 
 def enumerate_portable_holders(markers):
-    """Return lsof-proven FD 198 holders without inventing process identity."""
+    """Return lsof-proven marker holders without inventing process identity."""
+    command = [
+        "lsof", "-w", "-nP", "-a", "-u", str(os.geteuid()),
+        "-d", "0-2147483647", "-F", "pDfi",
+    ]
     try:
-        result = subprocess.run(
-            ["lsof", "-w", "-nP", "-a", "-u", str(os.geteuid()),
-             "-d", "198", "-F", "pDfi"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
-            check=False,
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+    except FileNotFoundError as exc:
         fail(f"cannot inspect portable worker marker holders with lsof: {exc}")
-    if result.stderr or result.returncode not in (0, 1):
-        detail = result.stderr.decode("utf-8", "replace").strip()
+
+    streams = selectors.DefaultSelector()
+    streams.register(process.stdout, selectors.EVENT_READ, "stdout")
+    streams.register(process.stderr, selectors.EVENT_READ, "stderr")
+    output = {"stdout": bytearray(), "stderr": bytearray()}
+    deadline = time.monotonic() + 10
+    limit = 1024 * 1024
+    try:
+        while streams.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                process.kill()
+                process.wait()
+                fail("cannot inspect portable worker marker holders with lsof: timed out")
+            ready = streams.select(remaining)
+            if not ready:
+                continue
+            for key, _ in ready:
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if not chunk:
+                    streams.unregister(key.fileobj)
+                    continue
+                output[key.data].extend(chunk)
+                if sum(map(len, output.values())) > limit:
+                    process.kill()
+                    process.wait()
+                    fail("portable lsof marker evidence exceeds 1048576 bytes")
+        returncode = process.wait()
+    finally:
+        streams.close()
+    stdout = bytes(output["stdout"])
+    stderr = bytes(output["stderr"])
+    if stderr or returncode not in (0, 1):
+        detail = stderr.decode("utf-8", "replace").strip()
         fail(
             "cannot inspect portable worker marker holders with lsof: "
-            f"{detail or result.returncode}"
+            f"{detail or returncode}"
         )
     try:
-        lines = result.stdout.decode("ascii", "strict").splitlines()
+        lines = stdout.decode("ascii", "strict").splitlines()
     except UnicodeDecodeError:
         fail("portable lsof marker evidence is not canonical ASCII")
 
@@ -184,7 +304,8 @@ def enumerate_portable_holders(markers):
         nonlocal descriptor, device, inode
         if descriptor is None:
             return
-        if pid is None or descriptor != "198" or device is None or inode is None:
+        if (pid is None or not descriptor.isdecimal() or
+                device is None or inode is None):
             fail("portable lsof marker evidence is incomplete")
         identity = (device, inode)
         if identity in markers:
@@ -215,7 +336,7 @@ def enumerate_portable_holders(markers):
                 fail("portable lsof marker inode is malformed")
             inode = int(value)
     finish_descriptor()
-    if result.returncode == 1 and lines:
+    if returncode == 1 and lines:
         fail("portable lsof returned partial marker evidence")
     return owners
 
@@ -249,7 +370,7 @@ def ensure_expected_holds(expected, holders, markers):
 
 
 def retire(markers, expected):
-    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+    if not pidfd_available():
         fail("exact pidfd worker retirement is unavailable on this platform")
     held = {}
     prior = None
@@ -262,7 +383,7 @@ def retire(markers, expected):
                     fail(f"PID identity changed during worker retirement: {pid}")
                 continue
             try:
-                fd = os.pidfd_open(pid, 0)
+                fd = pidfd_open(pid)
                 state, confirmed = stat_fields(pid)
                 if confirmed != start or not holds_marker(pid, markers):
                     os.close(fd)
@@ -275,7 +396,7 @@ def retire(markers, expected):
                 continue
         for pid, (_, fd) in list(held.items()):
             try:
-                signal.pidfd_send_signal(fd, signal.SIGSTOP)
+                pidfd_send_signal(fd, signal.SIGSTOP)
             except ProcessLookupError:
                 os.close(fd)
                 del held[pid]
@@ -294,7 +415,7 @@ def retire(markers, expected):
             if state != "Z":
                 if state not in ("T", "t"):
                     fail(f"worker marker holder was not stopped before KILL: {pid}")
-                signal.pidfd_send_signal(fd, signal.SIGKILL)
+                pidfd_send_signal(fd, signal.SIGKILL)
         except (FileNotFoundError, ProcessLookupError):
             pass
         finally:

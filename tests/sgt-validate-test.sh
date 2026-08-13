@@ -419,6 +419,26 @@ if [[ "${SGT_VALIDATE_PORTABLE_ONLY:-}" == 1 ]]; then
   export VALIDATION_START_FIXTURE='platform:Darwin:no-exact-process-birth'
 fi
 
+if [[ "${SGT_VALIDATE_TORN_ONLY:-}" == 1 ]]; then
+  printf 'prior-current-marker\n' > "$repo_state/worker_process_marker"
+  chmod 600 "$repo_state/worker_process_marker"
+  cp "$repo_state/worker_process_marker" "$TEST_ROOT/validate-torn.before"
+  set +e
+  PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/validate-torn-tmux.log" \
+    TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+    "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null 2>&1
+  validate_torn_status=$?
+  set -e
+  [[ "$validate_torn_status" -ne 0 ]]
+  cmp "$TEST_ROOT/validate-torn.before" "$repo_state/worker_process_marker"
+  [[ ! -e "$repo_state/worker_process_markers" && \
+    ! -e "$repo_state/validation_worktree" && \
+    ! -e "$repo_state/validation_pane" && \
+    ! -e "$TEST_ROOT/validate-torn-tmux.log" ]]
+  printf 'sgt-validate torn marker preflight: ok\n'
+  exit 0
+fi
+
 # The release wrapper reads this output during the coordinator's EXIT trap.
 # shellcheck disable=SC2094
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \

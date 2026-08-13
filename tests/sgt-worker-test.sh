@@ -25,6 +25,7 @@ mkdir -p "$TEST_ROOT/fake-bin" "$TEST_ROOT/done/state" "$TEST_ROOT/done/worktree
   "$TEST_ROOT/race/state" "$TEST_ROOT/race/worktree" \
   "$TEST_ROOT/failure-bin" \
   "$TEST_ROOT/rejected" \
+  "$TEST_ROOT/invalid-marker/state" "$TEST_ROOT/invalid-marker/worktree" \
   "$TEST_ROOT/orphan/state" "$TEST_ROOT/orphan/worktree"
 
 cat > "$TEST_ROOT/fake-bin/opencode" <<'EOF'
@@ -174,6 +175,26 @@ exec /usr/bin/rm "$@"
 EOF
 chmod +x "$TEST_ROOT/fake-bin/ln" "$TEST_ROOT/fake-bin/mktemp" \
   "$TEST_ROOT/fake-bin/mv" "$TEST_ROOT/fake-bin/rm"
+
+# A worker that did not inherit its exact launch capability must fail before
+# invoking the agent, even if it was started directly or a shell wrapper lost
+# the marker FD.
+printf 'in_progress\n' > "$TEST_ROOT/invalid-marker/worktree/.sergeant-status"
+printf '%032d|1:2|198|%s\n' 0 "$TEST_ROOT/missing-marker" \
+  > "$TEST_ROOT/invalid-marker/state/worker_process_marker"
+chmod 600 "$TEST_ROOT/invalid-marker/state/worker_process_marker"
+tmux new-session -d -s "$TMUX_SESSION" -n invalid-marker \
+  "env ARG_LOG='$TEST_ROOT/invalid-marker.args' FAKE_MODE=done \
+  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/invalid-marker/state' \
+  '$TEST_ROOT/invalid-marker/worktree' '$TEST_ROOT/fake-bin/opencode'"
+for _ in $(seq 1 100); do
+  [[ -s "$TEST_ROOT/invalid-marker/state/status" ]] && break
+  sleep 0.01
+done
+grep -Fqx 'failed: worker process marker validation failed' \
+  "$TEST_ROOT/invalid-marker/state/status"
+[[ ! -e "$TEST_ROOT/invalid-marker.args" ]]
+tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 
 if ARG_LOG="$TEST_ROOT/non-tty.args" \
   "$ROOT_DIR/bin/sgt-interactive-worker" "$TEST_ROOT/done/state" \

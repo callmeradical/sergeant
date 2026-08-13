@@ -839,12 +839,11 @@ _sgt_worker_command() {
   IFS='|' read -r generation identity fd path <<< "$marker"
   [[ "$generation" =~ ^[0-9a-f]{32}$ && "$identity" =~ ^[0-9]+:[0-9]+$ &&
     "$fd" == 198 && -n "$path" ]] || return 1
-  printf 'exec 198<%q; rm -f %q; exec %q %q %q %q' \
+  printf 'exec 198<%q && rm -f %q && exec %q %q %q %q' \
     "$path" "$path" "$worker" "$repo_dir" "$worktree" "$agent"
 }
-_sgt_prepare_worker_process_marker() {
-  local repo_dir="$1" path generation identity marker launch_identity launch_floor history history_tmp history_lines platform platform_record="" portable_marker=false
-  history="$repo_dir/worker_process_markers"
+_sgt_worker_process_marker_preflight() {
+  local repo_dir="$1" history="$1/worker_process_markers"
   if [[ ( -e "$repo_dir/worker_process_marker" || \
     -L "$repo_dir/worker_process_marker" ) && \
     ! -e "$history" && ! -L "$history" ]]; then
@@ -852,6 +851,11 @@ _sgt_prepare_worker_process_marker() {
       "$repo_dir" >&2
     return 1
   fi
+}
+_sgt_prepare_worker_process_marker() {
+  local repo_dir="$1" path generation identity marker launch_identity launch_floor history history_tmp history_lines platform platform_record="" portable_marker=false
+  history="$repo_dir/worker_process_markers"
+  _sgt_worker_process_marker_preflight "$repo_dir" || return 1
   path="$(mktemp "$repo_dir/.worker-process-marker.XXXXXX")" || return 1
   identity="$(stat -Lc '%d:%i' "$path" 2>/dev/null || stat -f '%d:%i' "$path" 2>/dev/null || true)"
   generation="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"

@@ -271,7 +271,12 @@ _record_worker_identity() {
   tmp="$(mktemp "$REPO_STATE/worker_session_id.XXXXXX")" && \
     printf '%s\n' "$sid" > "$tmp" && mv "$tmp" "$REPO_STATE/worker_session_id" || return 0
 }
-_record_worker_identity
+if ! _record_worker_identity; then
+  printf 'failed: worker process marker validation failed\n' > "$REPO_STATE/status"
+  printf 'failed: worker process marker validation failed\n' \
+    > "$WORKTREE/.sergeant-status"
+  exit 2
+fi
 
 _status() {
   tr -d '\n' < "$WORKTREE/.sergeant-status" 2>/dev/null || echo "in_progress"

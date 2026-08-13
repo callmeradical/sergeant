@@ -69,6 +69,8 @@ if [[ ! -d "$REPO_DIR" ]]; then
   printf 'No fleet record found for %s/%s\n' "$TASK_ID" "$REPO"
   exit 2
 fi
+_sgt_worker_process_marker_preflight "$REPO_DIR" || \
+  _die "Resume refused: worker process marker evidence is torn"
 
 fleet_status="$(cat "$REPO_DIR/status"           2>/dev/null || true)"
 branch="$(cat "$REPO_DIR/branch"                 2>/dev/null || true)"
@@ -382,8 +384,15 @@ fi
 # resume does not touch the tmux server at all.
 tmux new-session -d -s "$TMUX_SESSION" -n "sergeant" 2>/dev/null || true
 
+_sgt_prepare_worker_process_marker "$REPO_DIR" || {
+  _sgt_drain_lock_release_fd "$_SGT_RESUME_DRAIN_FD"
+  _die "Could not prepare resumed worker process marker"
+}
 WORKER_RUN_CMD="$(_sgt_worker_command \
-  "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$AGENT_CMD")"
+  "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$AGENT_CMD")" || {
+  _sgt_drain_lock_release_fd "$_SGT_RESUME_DRAIN_FD"
+  _die "Could not construct resumed worker command"
+}
 
 new_pane=""
 if ! new_pane="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" \

@@ -406,12 +406,6 @@ _recycle_inactive_pane_zero_holders() {
 _recycle_portable_terminal_worker() {
   local repo_dir="$1" pane="$2" identity="$3" process_group="$4"
   local holders pane_id
-  holders="$(_sgt_worker_marker_holders "$repo_dir")" || return 1
-  if [[ -z "$holders" ]] && \
-    _record_recycle_evidence "$repo_dir" "$pane" "$identity" \
-      "$process_group" marker_holders_retired; then
-    return 0
-  fi
   command -v tmux >/dev/null 2>&1 || return 1
   pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
   if [[ "$pane_id" == "$pane" ]]; then

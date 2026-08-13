@@ -55,6 +55,8 @@ REPO_DIR="$FLEET_DIR/$TASK_ID/$REPO"
 
 worktree="$(cat "$REPO_DIR/worktree" 2>/dev/null || true)"
 [[ -n "$worktree" && -d "$worktree" ]] || _die "Worktree unavailable for $TASK_ID/$REPO"
+_sgt_worker_process_marker_preflight "$REPO_DIR" || \
+  _die "Recovery refused: worker process marker evidence is torn"
 
 # ── 1. Verify stall proof (pre-lock fast path) ───────────────────────────────
 
