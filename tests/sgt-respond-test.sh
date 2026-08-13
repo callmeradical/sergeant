@@ -476,6 +476,53 @@ rmdir "$repo_state/response.lock"
 wait "$locked_pid"
 [[ "$(cat "$worktree/.sergeant-response")" == 'serialized response' ]]
 
+rm -f "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" \
+  "$worktree/.sergeant-response-generation" "$repo_state/response" \
+  "$repo_state/response_id" "$repo_state/response_generation" \
+  "$repo_state/respond-launch-ready" "$repo_state/respond-launch-release"
+rm -rf "$repo_state/queued_responses"
+printf 'orphaned\n' > "$worktree/.sergeant-status"
+printf 'orphaned\n' > "$repo_state/status"
+printf '1\n' > "$worktree/.sergeant-gate-generation"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/distinct-race.log" \
+  TD_LOG="$TEST_ROOT/distinct-race-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 PANE_IDENTITY='0|%42|7777|777777|recycled-pane' \
+  EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  SGT_TEST_HOOKS=1 SGT_TEST_RESPOND_LAUNCH_BARRIER=1 \
+  respond 'first distinct response' >"$TEST_ROOT/distinct-first.out" 2>&1 & first_response_pid=$!
+for _ in $(seq 1 500); do
+  [[ -e "$repo_state/respond-launch-ready" ]] && break
+  sleep 0.01
+done
+[[ -e "$repo_state/respond-launch-ready" ]]
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/distinct-race.log" \
+  TD_LOG="$TEST_ROOT/distinct-race-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 PANE_IDENTITY='0|%42|7777|777777|recycled-pane' \
+  EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  respond 'second distinct response' >"$TEST_ROOT/distinct-second.out" 2>&1 & second_response_pid=$!
+sleep 0.1
+: > "$repo_state/respond-launch-release"
+set +e
+wait "$first_response_pid"; first_response_status=$?
+wait "$second_response_pid"; second_response_status=$?
+set -e
+if [[ "$first_response_status" -ne 0 || "$second_response_status" -ne 0 ]]; then
+  cat "$TEST_ROOT/distinct-first.out" "$TEST_ROOT/distinct-second.out" >&2
+  exit 1
+fi
+[[ "$(cat "$repo_state/response")" == 'first distinct response' ]]
+queued_body="$(find "$repo_state/queued_responses" -name body -type f -print -quit)"
+[[ -n "$queued_body" && "$(cat "$queued_body")" == 'second distinct response' ]]
+queued_dir="${queued_body%/body}"
+[[ "$(cat "$queued_dir/gate_generation")" == 1 ]]
+queued_id="${queued_dir##*/}"
+[[ -f "$repo_state/notifications/$queued_id/notification" ]]
+[[ "$(grep -c '^new-window ' "$TEST_ROOT/distinct-race.log")" -eq 1 ]]
+printf '%%42\n' > "$repo_state/pane"
+printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo_state" \
+  > "$repo_state/pane_identity"
+chmod 600 "$repo_state/pane_identity"
+
 rm -f "$worktree/.sergeant-response" "$repo_state/response"
 printf 'done\n' > "$worktree/.sergeant-status"
 printf 'done\n' > "$repo_state/status"

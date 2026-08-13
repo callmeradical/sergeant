@@ -350,6 +350,17 @@ _sgt_worker_launch_observed_completion_matches() {
   [[ "$current_digest" == "$digest" ]]
 }
 
+_sgt_worker_launch_current_completion_matches() {
+  local repo="$1" record nonce digest extra marker current_digest
+  record="$(_sgt_read_owned_file "$repo/worker-launch.completed" 2>/dev/null || true)"
+  IFS='|' read -r nonce digest extra <<< "$record"
+  [[ -z "$extra" && "$nonce" =~ ^[0-9a-f]+$ && "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  marker="$(_sgt_read_owned_file "$repo/worker_process_marker" 2>/dev/null || true)"
+  [[ -n "$marker" ]] || return 1
+  current_digest="$(printf '%s' "$marker" | _sgt_worker_launch_sha256)"
+  [[ "$current_digest" == "$digest" ]]
+}
+
 _sgt_worker_launch_sha256() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum | awk '{print $1}'

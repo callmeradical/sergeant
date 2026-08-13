@@ -868,4 +868,34 @@ after_count="$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 -type d | wc -l |
 [[ "$before_count" == "$after_count" ]]
 [[ ! -e "$TEST_ROOT/removed-option-tmux.log" ]]
 
+# Initial dispatch and session resume share the exact repository launch
+# transaction. Resume begins after dispatch published its marker but before the
+# pane launch; it must consume dispatch's completion journal, not launch again.
+race_state="$TEST_ROOT/fleet/race-public-000000/app"
+FIXED_TASK_RANDOM=1 SGT_TEST_HOOKS=1 SGT_TEST_DISPATCH_LAUNCH_BARRIER=1 \
+  PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/dispatch-resume-race.log" \
+  TD_LOG="$TEST_ROOT/dispatch-resume-race-td.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Race public' --repos app \
+  >"$TEST_ROOT/dispatch-resume-dispatch.out" 2>&1 & dispatch_race_pid=$!
+for _ in $(seq 1 500); do
+  [[ -e "$race_state/dispatch-launch-ready" ]] && break
+  sleep 0.01
+done
+[[ -e "$race_state/dispatch-launch-ready" ]]
+PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/dispatch-resume-race.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 "$ROOT_DIR/bin/sgt-session-resume" \
+  race-public-000000 app --force >"$TEST_ROOT/dispatch-resume-resume.out" 2>&1 & \
+  resume_race_pid=$!
+sleep 0.1
+: > "$race_state/dispatch-launch-release"
+wait "$dispatch_race_pid"
+wait "$resume_race_pid"
+[[ "$(grep -c '^new-window ' "$TEST_ROOT/dispatch-resume-race.log")" -eq 1 ]]
+[[ "$(wc -l < "$race_state/worker_process_markers")" -eq 1 ]]
+[[ "$(cat "$race_state/worker-launch.completed")" =~ ^[0-9a-f]+\|[0-9a-f]{64}$ ]]
+grep -Fq 'verified peer worker-launch transaction completed' \
+  "$TEST_ROOT/dispatch-resume-resume.out"
+
 printf 'sgt-dispatch supervisor launch: ok\n'

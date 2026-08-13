@@ -374,6 +374,14 @@ else
   _publish_local_response_transport "$RESPONSE_INPUT" "$response_id" "$gate_generation"
 fi
 
+if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+  "${SGT_TEST_RESPOND_LAUNCH_BARRIER:-}" == 1 ]]; then
+  : > "$REPO_DIR/respond-launch-ready"
+  while [[ ! -e "$REPO_DIR/respond-launch-release" ]]; do
+    sleep 0.01
+  done
+fi
+
 SGT_DRAIN_LOCK_CONTENDED_NONCE="$respond_peer_launch_nonce"
 if [[ "$respond_peer_launch_contended" == true ]] && \
   _sgt_worker_launch_observed_completion_matches "$REPO_DIR"; then

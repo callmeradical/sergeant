@@ -268,9 +268,11 @@ locked_pane_identity="$(_sgt_read_owned_file \
 if [[ "$locked_worker_marker" != "$prelock_worker_marker" || \
   "$locked_resume_count" != "$prelock_resume_count" || \
   "$locked_pane_identity" != "$prelock_pane_identity" ]]; then
-  printf 'A peer launch already advanced the durable worker generation for %s/%s.\n' \
-    "$TASK_ID" "$REPO"
-  exit 0
+  if _sgt_worker_launch_current_completion_matches "$REPO_DIR"; then
+    printf 'A peer launch already advanced the durable worker generation for %s/%s.\n' \
+      "$TASK_ID" "$REPO"
+    exit 0
+  fi
 fi
 pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
 if [[ -n "$pane" ]] && _sgt_pane_identity_matches "$pane" "$REPO_DIR" 2>/dev/null; then

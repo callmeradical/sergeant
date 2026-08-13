@@ -105,12 +105,14 @@ current_pane_identity="$(_sgt_read_owned_file \
   "$REPO_DIR/pane_identity" 2>/dev/null || true)"
 if [[ "$current_pane" != "$initial_pane" || \
   "$current_pane_identity" != "$initial_pane_identity" ]]; then
-  printf 'sgt-recover: peer launch already replaced the worker pane for %s/%s.\n' \
-    "$TASK_ID" "$REPO"
-  _sgt_response_lock_release
-  _sgt_drain_lock_release_fd "$_SGT_RECOVER_LAUNCH_FD"
-  trap - EXIT
-  exit 0
+  if _sgt_worker_launch_current_completion_matches "$REPO_DIR"; then
+    printf 'sgt-recover: peer launch already replaced the worker pane for %s/%s.\n' \
+      "$TASK_ID" "$REPO"
+    _sgt_response_lock_release
+    _sgt_drain_lock_release_fd "$_SGT_RECOVER_LAUNCH_FD"
+    trap - EXIT
+    exit 0
+  fi
 fi
 
 _next_gate_generation() {

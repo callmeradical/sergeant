@@ -452,8 +452,9 @@ records remain available for diagnosis.
 
 Linux uses `/proc` start time and pidfds (with the supported syscall fallback)
 for exact identity and signalling. Existing fleets with legacy `ps lstart`
-records are promoted only when the live process can be matched and exact
-identity recorded; they are never declared gone from a format mismatch alone.
+records are never declared gone from a format mismatch alone. They remain
+actionable retained evidence until the process exits or supported cleanup is
+completed; Sergeant does not label second-resolution timestamps as exact.
 On Darwin, launch remains supported with a platform marker and `lsof` proves
 open marker inodes across all file descriptors. When exact ownership cannot be
 proved, retirement fails actionably without signalling a PID or discarding
