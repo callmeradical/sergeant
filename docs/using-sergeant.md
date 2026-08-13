@@ -85,6 +85,12 @@ fixed ID-bearing terminal nudge until the agent acknowledges that ID before
 acting, so delayed TUI startup and coordinator crashes do not lose or duplicate
 the mission, and no body appears in process arguments.
 
+For an explicit OpenCode variant, dispatch asks that exact executable to confirm
+the variant exists for the model and that the generated agent resolves to the
+requested provider/model/variant before it creates fleet state or a worktree.
+Every later worker launch repeats the check. Durable launch evidence records the
+requested, transported, and runtime-confirmed variant separately.
+
 ### Security posture: `--dangerously-skip-permissions`
 
 OpenCode is launched with `--dangerously-skip-permissions` in every Sergeant

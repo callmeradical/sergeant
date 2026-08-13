@@ -280,7 +280,7 @@ if [[ -n "$pane" ]] && _sgt_pane_identity_matches "$pane" "$REPO_DIR" 2>/dev/nul
 fi
 
 # Validate the model tuple against the harness before any state mutation.
-_sgt_require_agent_model "$(basename "$AGENT_CMD")" "$RESUME_MODEL"
+_sgt_require_agent_model "$(basename "$AGENT_CMD")" "$RESUME_MODEL" "$AGENT_CMD"
 # Materialise harness definition files (e.g. opencode variant agent definition)
 # into REPO_DIR so the worker picks them up on next launch.
 _sgt_resolve_agent_launch "$(basename "$AGENT_CMD")" "$RESUME_MODEL" "$REPO_DIR" || \

@@ -14,6 +14,7 @@ export TMUX=fixture TMUX_PANE=%11
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
+REAL_OPENCODE="$(command -v opencode 2>/dev/null || true)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 mkdir -p "$TEST_ROOT/config" "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin" "$TEST_ROOT/repo"
 chmod 700 "$TEST_ROOT/fleet"
@@ -80,7 +81,46 @@ esac
 EOF
 chmod +x "$TEST_ROOT/fake-bin/td"
 
-for agent in opencode goose claude; do
+cat > "$TEST_ROOT/fake-bin/sgt-review-findings" <<'EOF'
+#!/usr/bin/env bash
+printf 'Usage: sgt-review-findings --axis standards|spec|readiness --severity error|warning|info\n' >&2
+exit 2
+EOF
+chmod +x "$TEST_ROOT/fake-bin/sgt-review-findings"
+
+cat > "$TEST_ROOT/fake-bin/opencode" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "models" ]]; then
+  provider="${2:-}"
+  cat <<MODELS
+$provider/claude-opus-5
+{
+  "id": "claude-opus-5",
+  "providerID": "$provider",
+  "variants": {
+    $(if [[ "${OPENCODE_TEST_NO_MEDIUM:-}" == 1 ]]; then printf '"low": {}'; else printf '"medium": {}'; fi),
+    "high": {}
+  }
+}
+MODELS
+  exit 0
+fi
+if [[ "${1:-}" == "debug" && "${2:-}" == "agent" ]]; then
+  [[ "${OPENCODE_TEST_UNVERIFIABLE:-}" != 1 ]] || exit 1
+  model="$(sed -n 's/.*"model": "\([^"]*\)".*/\1/p' "$OPENCODE_CONFIG")"
+  variant="$(sed -n 's/.*"variant": "\([^"]*\)".*/\1/p' "$OPENCODE_CONFIG")"
+  variant="${OPENCODE_TEST_RUNTIME_VARIANT:-$variant}"
+  provider="${model%%/*}"
+  model_id="${model#*/}"
+  printf '{"model":{"providerID":"%s","modelID":"%s"},"variant":"%s"}\n' \
+    "$provider" "$model_id" "$variant"
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$TEST_ROOT/fake-bin/opencode"
+for agent in goose claude; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_ROOT/fake-bin/$agent"
   chmod +x "$TEST_ROOT/fake-bin/$agent"
 done
@@ -227,6 +267,52 @@ state="$(printf '%s\n' "$TEST_ROOT"/fleet/opencode-variant-*/app)"
 }
 [[ "$(cat "$state/agent_model_source")" == "flag" ]]
 
+# The harness resolver is authoritative, not the generated definition. A
+# mismatch must fail before dispatch creates fleet state or reaches tmux.
+before="$(_fleet_task_count)"
+set +e
+mismatch_output="$(OPENCODE_TEST_RUNTIME_VARIANT=xhigh \
+  _dispatch mismatch-variant 'Mismatched variant' \
+  --model anthropic/claude-opus-5:medium 2>&1)"
+mismatch_status=$?
+set -e
+[[ "$mismatch_status" -ne 0 ]] || {
+  printf 'FAIL: dispatch accepted a runtime variant mismatch\n' >&2
+  exit 1
+}
+[[ "$mismatch_output" == *"resolved variant xhigh, not requested medium"* ]] || {
+  printf 'FAIL: mismatch diagnostic was not actionable: %s\n' "$mismatch_output" >&2
+  exit 1
+}
+[[ "$(_fleet_task_count)" == "$before" ]]
+[[ ! -e "$TEST_ROOT/mismatch-variant.log" ]]
+
+for failure in unsupported unverifiable; do
+  before="$(_fleet_task_count)"
+  set +e
+  if [[ "$failure" == unsupported ]]; then
+    failure_output="$(OPENCODE_TEST_NO_MEDIUM=1 \
+      _dispatch "$failure-variant" 'Unsupported variant' \
+      --model anthropic/claude-opus-5:medium 2>&1)"
+    failure_status=$?
+    expected='does not report variant :medium'
+  else
+    failure_output="$(OPENCODE_TEST_UNVERIFIABLE=1 \
+      _dispatch "$failure-variant" 'Unverifiable variant' \
+      --model anthropic/claude-opus-5:medium 2>&1)"
+    failure_status=$?
+    expected='refuses an unverifiable explicit variant'
+  fi
+  set -e
+  [[ "$failure_status" -ne 0 && "$failure_output" == *"$expected"* ]] || {
+    printf 'FAIL: %s runtime probe did not fail closed: %s\n' \
+      "$failure" "$failure_output" >&2
+    exit 1
+  }
+  [[ "$(_fleet_task_count)" == "$before" ]]
+  [[ ! -e "$TEST_ROOT/$failure-variant.log" ]]
+done
+
 # ── 7. A variant fails closed only where the transport is genuinely unknown ───
 # goose exposes no launch-time variant selector, so the diagnostic must name goose
 # and that reason rather than making a blanket claim about all harnesses.
@@ -269,6 +355,28 @@ if grep -qiE 'secret|token|password|api[_-]?key' \
   "$TEST_ROOT"/fleet/*/app/agent_model "$TEST_ROOT"/fleet/*/app/agent_model_source; then
   printf 'FAIL: recorded tuple evidence contains a secret-shaped field\n' >&2
   exit 1
+fi
+
+# When OpenCode is installed, exercise the public dispatch CLI against that
+# exact executable. Select a real model whose own catalog reports :medium, then
+# require dispatch's actual models/debug-agent preflight to accept it. CI images
+# without OpenCode retain the deterministic fake-boundary cases above.
+if [[ -n "$REAL_OPENCODE" ]]; then
+  real_catalog="$($REAL_OPENCODE models anthropic --verbose 2>/dev/null || true)"
+  real_medium_model="$(printf '%s\n' "$real_catalog" | awk '
+    /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/ { model = $0 }
+    /^[[:space:]]*"medium"[[:space:]]*:/ && model != "" { print model; exit }
+  ')"
+  if [[ -n "$real_medium_model" ]]; then
+    _dispatch real-opencode-boundary 'Real OpenCode boundary' \
+      --agent "$REAL_OPENCODE" --model "$real_medium_model:medium" >/dev/null
+    state="$(printf '%s\n' "$TEST_ROOT"/fleet/real-opencode-boundary-*/app)"
+    [[ "$(cat "$state/agent_model")" == "$real_medium_model:medium" ]]
+  else
+    printf 'note: installed OpenCode exposes no anthropic model with :medium; real boundary skipped\n'
+  fi
+else
+  printf 'note: OpenCode unavailable; real dispatch boundary skipped\n'
 fi
 
 printf 'sgt-dispatch model tuple: ok\n'

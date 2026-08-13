@@ -78,6 +78,19 @@ if ! _sgt_resolve_agent_launch "$harness" "$AGENT_MODEL" "$REPO_STATE"; then
   echo "ERROR: $_reject_reason" >&2
   exit 2
 fi
+if [[ -n "$SGT_AGENT_MODEL_VARIANT" && \
+      ( "$harness" == "opencode" || "$harness" == "oc" ) ]] && \
+    ! _sgt_confirm_opencode_variant "$AGENT" "$SGT_LAUNCH_DEFINITION"; then
+  _reject_reason="$(_sgt_agent_launch_reject_message "$harness" "$AGENT_MODEL" \
+    "$SGT_LAUNCH_REJECT")"
+  printf '%s\n' "$_reject_reason" > "$REPO_STATE/diagnostic"
+  printf 'failed: cannot honor pinned model tuple %s\n' "$AGENT_MODEL" \
+    > "$REPO_STATE/status"
+  printf 'failed: cannot honor pinned model tuple %s\n' "$AGENT_MODEL" \
+    > "$WORKTREE/.sergeant-status"
+  echo "ERROR: $_reject_reason" >&2
+  exit 2
+fi
 
 # Record what this worker is about to run.  Every field is derived from the
 # validated tuple and the shared harness contract, never from the ambient
@@ -88,13 +101,10 @@ fi
 # harness reports itself ready (see _promote_launch_record), so a harness that
 # rejects the pin and exits never leaves evidence claiming the model ran.
 #
-# provider_verified and variant_verified say whether the launch invocation itself
-# proves that axis.  Both pinned model transports carry the provider explicitly,
-# so provider_verified is true whenever a model is pinned and false only when
-# nothing is.  variant_verified is always false today: the variant transport is
-# genuine, but no supported harness reports back which variant it resolved, so
-# claiming otherwise would be exactly the unevidenced assertion this contract
-# exists to prevent.
+# provider_verified and variant_verified say whether the selected harness proves
+# that axis. Both pinned model transports carry the provider explicitly. OpenCode
+# variants are verified by its model catalog plus its resolved-agent boundary;
+# requested, transported, and runtime-confirmed values stay separate below.
 _write_launch_record() {
   local state="$1" tmp="$REPO_STATE/launch_record.tmp.$$"
   {
@@ -102,12 +112,29 @@ _write_launch_record() {
     printf 'agent=%s\n' "$AGENT"
     printf 'launch_state=%s\n' "$state"
     printf 'model=%s\n' "$AGENT_MODEL"
+    printf 'requested_model=%s\n' "$AGENT_MODEL"
     printf 'model_source=%s\n' "$AGENT_MODEL_SOURCE"
     printf 'provider=%s\n' "$SGT_AGENT_MODEL_PROVIDER"
     printf 'provider_verified=%s\n' "$SGT_LAUNCH_PROVIDER_VERIFIED"
     printf 'variant_verified=%s\n' "$SGT_LAUNCH_VARIANT_VERIFIED"
     printf 'model_id=%s\n' "$SGT_AGENT_MODEL_ID"
     printf 'variant=%s\n' "$SGT_AGENT_MODEL_VARIANT"
+    printf 'requested_variant=%s\n' "$SGT_AGENT_MODEL_VARIANT"
+    if [[ -n "$SGT_AGENT_MODEL_PROVIDER" ]]; then
+      printf 'transported_model=%s/%s\n' \
+        "$SGT_AGENT_MODEL_PROVIDER" "$SGT_AGENT_MODEL_ID"
+    else
+      printf 'transported_model=\n'
+    fi
+    printf 'transported_variant=%s\n' "$SGT_LAUNCH_TRANSPORTED_VARIANT"
+    printf 'runtime_confirmed=%s\n' "$SGT_LAUNCH_RUNTIME_CONFIRMED"
+    if [[ -n "$SGT_LAUNCH_RUNTIME_PROVIDER" ]]; then
+      printf 'runtime_model=%s/%s\n' \
+        "$SGT_LAUNCH_RUNTIME_PROVIDER" "$SGT_LAUNCH_RUNTIME_MODEL_ID"
+    else
+      printf 'runtime_model=\n'
+    fi
+    printf 'runtime_confirmed_variant=%s\n' "$SGT_LAUNCH_RUNTIME_VARIANT"
     printf 'model_transport=%s\n' "$SGT_LAUNCH_MODEL_TRANSPORT"
     printf 'variant_transport=%s\n' "$SGT_LAUNCH_VARIANT_TRANSPORT"
     printf 'definition=%s\n' "$SGT_LAUNCH_DEFINITION"
@@ -164,7 +191,7 @@ _drain_terminate() {
 
   pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
   if [[ ! "$pgid" =~ ^[1-9][0-9]*$ ]]; then
-    pgid="$(cat "$REPO_STATE/worker_process_group" 2>/dev/null | tr -d ' \n' || true)"
+    pgid="$(tr -d ' \n' < "$REPO_STATE/worker_process_group" 2>/dev/null || true)"
   fi
   # Only signal the group when this worker actually leads it.  A tmux pane command
   # is its own group leader, so pgid == worker pid.  If it is not, the group

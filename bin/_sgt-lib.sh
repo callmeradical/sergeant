@@ -102,12 +102,10 @@ AGENT_CMD="${SERGEANT_AGENT:-$(_sgt_detect_agent)}"
 #                          a fleet-owned definition carrying the pinned model and
 #                          variant and launches against it.  Measured: the harness
 #                          does load such a definition and register the agent.
-#                          TRANSPORT ONLY, NOT VERIFICATION.  The harness exposes
-#                          no launch-time surface that reports which variant it
-#                          resolved (its agent listing prints the same output for
-#                          a bogus variant), so a launch on this transport records
-#                          variant_verified=false.  Tracked separately; do not
-#                          upgrade that field without a measured read-back.
+#                          The selected executable must additionally confirm the
+#                          model supports the variant and resolve the generated
+#                          agent back to the exact tuple before dispatch mutates
+#                          fleet or worktree state.
 #        unknown           no launch-time variant selector has been found for
 #                          this harness.  A pinned variant fails closed naming
 #                          the harness and this reason.
@@ -182,6 +180,11 @@ SGT_LAUNCH_DEFINITION=""
 SGT_LAUNCH_PROVIDER_SCOPE=""
 SGT_LAUNCH_PROVIDER_VERIFIED="false"
 SGT_LAUNCH_VARIANT_VERIFIED="false"
+SGT_LAUNCH_TRANSPORTED_VARIANT=""
+SGT_LAUNCH_RUNTIME_CONFIRMED="false"
+SGT_LAUNCH_RUNTIME_PROVIDER=""
+SGT_LAUNCH_RUNTIME_MODEL_ID=""
+SGT_LAUNCH_RUNTIME_VARIANT=""
 SGT_LAUNCH_BASE_ARGV=()
 SGT_LAUNCH_MODEL_ARGV=()
 SGT_LAUNCH_MODEL_ENV=()
@@ -234,6 +237,11 @@ _sgt_resolve_agent_launch() {
   SGT_LAUNCH_PROVIDER_SCOPE=""
   SGT_LAUNCH_PROVIDER_VERIFIED="false"
   SGT_LAUNCH_VARIANT_VERIFIED="false"
+  SGT_LAUNCH_TRANSPORTED_VARIANT=""
+  SGT_LAUNCH_RUNTIME_CONFIRMED="false"
+  SGT_LAUNCH_RUNTIME_PROVIDER=""
+  SGT_LAUNCH_RUNTIME_MODEL_ID=""
+  SGT_LAUNCH_RUNTIME_VARIANT=""
   SGT_LAUNCH_BASE_ARGV=()
   SGT_LAUNCH_MODEL_ARGV=()
   SGT_LAUNCH_MODEL_ENV=()
@@ -292,6 +300,7 @@ _sgt_resolve_agent_launch() {
 
   [[ -n "$SGT_AGENT_MODEL_VARIANT" ]] || return 0
   SGT_LAUNCH_VARIANT_TRANSPORT="$variant_transport"
+  SGT_LAUNCH_TRANSPORTED_VARIANT="$SGT_AGENT_MODEL_VARIANT"
   case "$variant_transport" in
     agent-definition)
       # The harness has no --variant flag but does accept "--agent <name>", and
@@ -311,6 +320,71 @@ _sgt_resolve_agent_launch() {
         "OPENCODE_CONFIG=$SGT_LAUNCH_DEFINITION")
       ;;
   esac
+}
+
+# _sgt_confirm_opencode_variant <command> <definition>
+# Ask the selected OpenCode executable, rather than our generated JSON, to
+# confirm both that the model exposes the requested variant and that its agent
+# resolver selected the exact provider/model/variant tuple.  This is the public
+# harness boundary OpenCode itself uses before a chat begins.
+_sgt_confirm_opencode_variant() {
+  local command="$1" definition="$2" catalog resolved
+  local resolved_provider resolved_model resolved_variant
+
+  SGT_LAUNCH_RUNTIME_VARIANT=""
+  SGT_LAUNCH_RUNTIME_CONFIRMED="false"
+  SGT_LAUNCH_RUNTIME_PROVIDER=""
+  SGT_LAUNCH_RUNTIME_MODEL_ID=""
+  SGT_LAUNCH_VARIANT_VERIFIED="false"
+
+  if ! catalog="$("$command" models "$SGT_AGENT_MODEL_PROVIDER" --verbose 2>/dev/null)"; then
+    SGT_LAUNCH_REJECT="variant-runtime-unverifiable"
+    return 1
+  fi
+  if ! printf '%s\n' "$catalog" | awk \
+      -v tuple="$SGT_AGENT_MODEL_PROVIDER/$SGT_AGENT_MODEL_ID" \
+      -v variant="$SGT_AGENT_MODEL_VARIANT" '
+        $0 == tuple { in_model = 1; next }
+        in_model && $0 ~ /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/ { exit 1 }
+        in_model && $0 ~ /^[[:space:]]*"variants"[[:space:]]*:/ { in_variants = 1 }
+        in_variants {
+          line = $0
+          sub(/^[[:space:]]*/, "", line)
+          if (index(line, "\"" variant "\"") == 1) found = 1
+        }
+        END { exit(found ? 0 : 1) }
+      '; then
+    SGT_LAUNCH_REJECT="variant-runtime-unsupported"
+    return 1
+  fi
+
+  if ! resolved="$(OPENCODE_CONFIG="$definition" \
+      "$command" debug agent "$SGT_AGENT_VARIANT_AGENT_NAME" 2>/dev/null)"; then
+    SGT_LAUNCH_REJECT="variant-runtime-unverifiable"
+    return 1
+  fi
+  resolved_provider="$(printf '%s\n' "$resolved" | sed -n \
+    's/.*"providerID"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  resolved_model="$(printf '%s\n' "$resolved" | sed -n \
+    's/.*"modelID"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  resolved_variant="$(printf '%s\n' "$resolved" | sed -n \
+    's/.*"variant"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  # shellcheck disable=SC2034  # Out-parameter consumed by sourced callers.
+  SGT_LAUNCH_RUNTIME_PROVIDER="$resolved_provider"
+  # shellcheck disable=SC2034  # Out-parameter consumed by sourced callers.
+  SGT_LAUNCH_RUNTIME_MODEL_ID="$resolved_model"
+  SGT_LAUNCH_RUNTIME_VARIANT="$resolved_variant"
+
+  if [[ "$resolved_provider" != "$SGT_AGENT_MODEL_PROVIDER" || \
+        "$resolved_model" != "$SGT_AGENT_MODEL_ID" || \
+        "$resolved_variant" != "$SGT_AGENT_MODEL_VARIANT" ]]; then
+    SGT_LAUNCH_REJECT="variant-runtime-mismatch"
+    return 1
+  fi
+  # shellcheck disable=SC2034  # Out-parameters consumed by sourced callers.
+  SGT_LAUNCH_RUNTIME_CONFIRMED="true"
+  # shellcheck disable=SC2034  # Out-parameter consumed by sourced callers.
+  SGT_LAUNCH_VARIANT_VERIFIED="true"
 }
 
 # _sgt_agent_launch_reject_message <harness> <tuple> <reject-reason>
@@ -342,6 +416,21 @@ _sgt_agent_launch_reject_message() {
       printf 'could not write the %s agent definition carrying variant :%s for %s\n' \
         "$harness" "$SGT_AGENT_MODEL_VARIANT" "$tuple"
       ;;
+    variant-runtime-unsupported)
+      printf '%s does not report variant :%s for %s, so Sergeant cannot honor the explicit tuple\n' \
+        "$harness" "$SGT_AGENT_MODEL_VARIANT" \
+        "$SGT_AGENT_MODEL_PROVIDER/$SGT_AGENT_MODEL_ID"
+      ;;
+    variant-runtime-unverifiable)
+      printf '%s could not confirm runtime variant :%s for %s; dispatch refuses an unverifiable explicit variant\n' \
+        "$harness" "$SGT_AGENT_MODEL_VARIANT" \
+        "$SGT_AGENT_MODEL_PROVIDER/$SGT_AGENT_MODEL_ID"
+      ;;
+    variant-runtime-mismatch)
+      printf '%s resolved variant %s, not requested %s for %s\n' \
+        "$harness" "${SGT_LAUNCH_RUNTIME_VARIANT:-<none>}" \
+        "$SGT_AGENT_MODEL_VARIANT" "$SGT_AGENT_MODEL_PROVIDER/$SGT_AGENT_MODEL_ID"
+      ;;
     provider-out-of-scope)
       printf '%s can only be pinned to provider %s, not %s: %s\n' \
         "$harness" "$SGT_LAUNCH_PROVIDER_SCOPE" "$SGT_AGENT_MODEL_PROVIDER" "$tuple"
@@ -353,14 +442,32 @@ _sgt_agent_launch_reject_message() {
   esac
 }
 
-# _sgt_require_agent_model <harness> <tuple>
+# _sgt_require_agent_model <harness> <tuple> [harness-command]
 # Dies with an actionable diagnostic when a harness cannot honor a pinned
 # tuple.  Callers must invoke this before creating any intent file, td task,
 # worktree, or fleet state.
 _sgt_require_agent_model() {
-  local harness="$1" tuple="$2"
+  local harness="$1" tuple="$2" command="${3:-$1}" probe_dir probe_definition
   _sgt_resolve_agent_launch "$harness" "$tuple" || \
     _die "$(_sgt_agent_launch_reject_message "$harness" "$tuple" "$SGT_LAUNCH_REJECT")"
+  [[ -n "$SGT_AGENT_MODEL_VARIANT" ]] || return 0
+  [[ "$harness" == "opencode" || "$harness" == "oc" ]] || return 0
+
+  probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/sgt-variant-probe.XXXXXX")" || \
+    _die "could not create a temporary OpenCode variant probe directory"
+  probe_definition="$probe_dir/opencode-config.json"
+  if ! _sgt_write_opencode_agent_definition "$probe_definition" \
+      "$SGT_AGENT_MODEL_PROVIDER/$SGT_AGENT_MODEL_ID" "$SGT_AGENT_MODEL_VARIANT"; then
+    rm -rf "$probe_dir"
+    _die "could not write the temporary OpenCode variant probe"
+  fi
+  if ! _sgt_confirm_opencode_variant "$command" "$probe_definition"; then
+    local reject_message
+    reject_message="$(_sgt_agent_launch_reject_message "$harness" "$tuple" "$SGT_LAUNCH_REJECT")"
+    rm -rf "$probe_dir"
+    _die "$reject_message"
+  fi
+  rm -rf "$probe_dir"
 }
 
 # ── Global config (dev_root) ──────────────────────────────────────────────────
