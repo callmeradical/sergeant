@@ -791,6 +791,7 @@ rm -rf "$fleet_dir/task-f"
 # Darwin workers deliberately have no ps-derived exact PID birth record. Exact
 # marker absence plus a recorded pane that no longer resolves proves exit and
 # lets cooperative drain converge without signalling an unverified PID.
+if command -v python3 >/dev/null 2>&1; then
 portable_dir="$fleet_dir/task-portable/app"
 mkdir -p "$portable_dir" "$TEST_ROOT/portable-bin"
 printf 'drained\n' > "$portable_dir/status"
@@ -813,92 +814,6 @@ cat > "$TEST_ROOT/portable-bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 printf '0|%%999|9999|654321|unrelated-pane\n'
 EOF
-if ! command -v python3 >/dev/null 2>&1; then
-cat > "$TEST_ROOT/portable-bin/python3" <<'EOF'
-#!/usr/bin/env bash
-# The pinned Bash 3.2 compatibility image intentionally lacks the repository's
-# Python runtime dependency. Supply the owned-FD read seam needed by this one
-# portable-marker fixture; production dependency checks are covered elsewhere.
-if [[ "$1" == */_sgt-marker-history.py ]]; then
-  if [[ "$2" == --fd ]]; then
-    [[ "$#" -eq 5 && "$3" =~ ^[0-9]+$ ]] || exit 1
-    descriptor_mode=true
-    fd="$3" marker="$5"
-    history="$(cat <&"$fd")"
-  else
-    [[ "$#" -eq 3 ]] || exit 1
-    descriptor_mode=false
-    history="$(cat "$2")"
-    marker="${3:-}"
-  fi
-  generation="${marker%%|*}"
-  identity_and_rest="${marker#*|}"
-  identity="${identity_and_rest%%|*}"
-  selected="$(printf '%s\n' "$history" | awk -F'|' \
-    -v generation="$generation" -v identity="$identity" \
-    '$1 == generation && $2 == identity { count++; floor=$3 } END { if (count == 1) print floor }')"
-  [[ "$selected" =~ ^[0-9]+$ ]] || exit 1
-  digest="$(printf '%s\n' "$history" | sha256sum | awk '{print $1}')"
-  if [[ "$descriptor_mode" == true ]]; then
-    printf '%s|%s|true\n' "$digest" "$selected"
-  else
-    printf '%s\n' "$digest"
-  fi
-  exit 0
-fi
-if [[ "$1" == */_sgt-process-token.py && "$2" == portable-holders && "$#" -eq 3 ]]; then
-  exit 0
-fi
-[[ "$1" == */_sgt-verify-owned-fd.py && ( "$#" -eq 4 || "$#" -eq 5 ) ]] || exit 1
-fd="$2" operation="${5:-validate}"
-[[ "$fd" =~ ^[0-9]+$ && -n "$3" && "$4" == 600 ]] || exit 1
-case "$operation" in
-  read)
-    IFS= read -r value <&"$fd" || exit 1
-    printf '%s\n' "$value"
-    if IFS= read -r extra <&"$fd"; then exit 1; fi
-    ;;
-  validate) printf 'fixture-identity\n' ;;
-  *) exit 1 ;;
-esac
-EOF
-chmod +x "$TEST_ROOT/portable-bin/python3"
-shim_probe="$TEST_ROOT/shim-probe"
-shim_other="$TEST_ROOT/shim-other"
-printf 'probe\n' > "$shim_probe"
-printf 'other\n' > "$shim_other"
-chmod 600 "$shim_probe" "$shim_other"
-exec 19< "$shim_probe"
-rc=0
-"$TEST_ROOT/portable-bin/python3" \
-  "$ROOT_DIR/bin/_sgt-verify-owned-fd.py" 19 "$shim_probe" 600 validate \
-  >/dev/null 2>&1 || rc=$?
-[[ $rc -eq 64 ]] || {
-  printf 'Bash 3.2 Python dependency shim accepted unsupported verifier action (rc=%s)\n' "$rc" >&2
-  exit 1
-}
-for verifier_case in \
-  "18 $shim_probe 600" \
-  "19 $TEST_ROOT/missing-shim-probe 600" \
-  "19 $shim_other 600"; do
-  rc=0
-  # shellcheck disable=SC2086 # Deliberately exercise verifier argv parsing.
-  "$TEST_ROOT/portable-bin/python3" \
-    "$ROOT_DIR/bin/_sgt-verify-owned-fd.py" $verifier_case >/dev/null 2>&1 || rc=$?
-  [[ $rc -eq 1 ]] || {
-    printf 'Bash 3.2 Python dependency shim accepted invalid verifier binding (rc=%s): %s\n' \
-      "$rc" "$verifier_case" >&2
-    exit 1
-  }
-done
-exec 19<&-
-rc=0
-"$TEST_ROOT/portable-bin/python3" /unrecognized/script.py >/dev/null 2>&1 || rc=$?
-if [[ $rc -ne 64 ]]; then
-  printf 'Bash 3.2 Python dependency shim accepted an unrecognized invocation (rc=%s)\n' "$rc" >&2
-  exit 1
-fi
-fi
 chmod +x "$TEST_ROOT/portable-bin/lsof" "$TEST_ROOT/portable-bin/tmux"
 rc=0
 out="$(PATH="$TEST_ROOT/portable-bin:$PATH" \
@@ -910,6 +825,13 @@ out="$(PATH="$TEST_ROOT/portable-bin:$PATH" \
 "$ROOT_DIR/bin/sgt-drain" --undrain myproject >/dev/null
 rm -rf "$fleet_dir/task-portable"
 printf 'sgt-drain --wait accepts portable marker and gone-pane proof: ok\n'
+else
+[[ ! -e "$TEST_ROOT/portable-bin/python3" ]] || {
+  printf 'missing-Python drain test must not install a verifier shim\n' >&2
+  exit 1
+}
+printf 'sgt-drain --wait accepts portable marker and gone-pane proof: skipped (python3 unavailable)\n'
+fi
 
 # A nonterminal worker with no recorded project cannot be attributed to a scope,
 # so a project-scoped wait must report it rather than silently skip it.
