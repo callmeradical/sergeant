@@ -885,10 +885,16 @@ done
 [[ -e "$race_state/dispatch-launch-ready" ]]
 PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/dispatch-resume-race.log" \
   SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
-  SGT_WIKI_DISABLED=1 "$ROOT_DIR/bin/sgt-session-resume" \
+  SGT_WIKI_DISABLED=1 SGT_TEST_HOOKS=1 \
+  _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$race_state/resume-contended" \
+  "$ROOT_DIR/bin/sgt-session-resume" \
   race-public-000000 app --force >"$TEST_ROOT/dispatch-resume-resume.out" 2>&1 & \
   resume_race_pid=$!
-sleep 0.3
+for _ in $(seq 1 500); do
+  [[ -e "$race_state/resume-contended" ]] && break
+  sleep 0.01
+done
+[[ -e "$race_state/resume-contended" ]]
 : > "$race_state/dispatch-launch-release"
 wait "$dispatch_race_pid"
 wait "$resume_race_pid"
@@ -909,6 +915,7 @@ grep -Fq 'verified peer worker-launch transaction completed' \
 inverse_state="$TEST_ROOT/fleet/inverse-race-public-000000/app"
 FIXED_TASK_RANDOM=1 SGT_TEST_HOOKS=1 \
   SGT_TEST_DISPATCH_BEFORE_LAUNCH_LOCK_BARRIER=1 \
+  _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$inverse_state/dispatch-contended" \
   PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/inverse-race.log" \
   TD_LOG="$TEST_ROOT/inverse-race-td.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
@@ -931,7 +938,11 @@ for _ in $(seq 1 500); do
 done
 [[ -e "$inverse_state/session-resume-after-completion-ready" ]]
 : > "$inverse_state/dispatch-before-launch-lock-release"
-sleep 0.3
+for _ in $(seq 1 500); do
+  [[ -e "$inverse_state/dispatch-contended" ]] && break
+  sleep 0.01
+done
+[[ -e "$inverse_state/dispatch-contended" ]]
 : > "$inverse_state/session-resume-after-completion-release"
 wait "$inverse_resume_pid"
 wait "$inverse_dispatch_pid"
@@ -945,6 +956,7 @@ grep -Fq 'verified peer worker-launch transaction completed' \
 torn_race_state="$TEST_ROOT/fleet/torn-race-public-000000/app"
 FIXED_TASK_RANDOM=1 SGT_TEST_HOOKS=1 \
   SGT_TEST_DISPATCH_BEFORE_LAUNCH_LOCK_BARRIER=1 \
+  _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$torn_race_state/dispatch-contended" \
   PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/torn-race.log" \
   TD_LOG="$TEST_ROOT/torn-race-td.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
@@ -968,7 +980,11 @@ done
 [[ -e "$torn_race_state/session-resume-after-completion-ready" ]]
 printf 'truncated-history' > "$torn_race_state/worker_process_markers"
 : > "$torn_race_state/dispatch-before-launch-lock-release"
-sleep 0.3
+for _ in $(seq 1 500); do
+  [[ -e "$torn_race_state/dispatch-contended" ]] && break
+  sleep 0.01
+done
+[[ -e "$torn_race_state/dispatch-contended" ]]
 : > "$torn_race_state/session-resume-after-completion-release"
 wait "$torn_resume_pid"
 set +e
@@ -976,7 +992,7 @@ wait "$torn_dispatch_pid"
 torn_dispatch_status=$?
 set -e
 [[ "$torn_dispatch_status" -ne 0 ]]
-grep -Fq 'without exact completed mutation evidence' \
+grep -Fq 'Could not snapshot worker generation before initial launch' \
   "$TEST_ROOT/torn-race-dispatch.out"
 [[ "$(grep -c '^new-window ' "$TEST_ROOT/torn-race.log")" -eq 1 ]]
 [[ "$(cat "$torn_race_state/worker_process_markers")" == truncated-history ]]

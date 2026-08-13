@@ -595,9 +595,20 @@ _sgt_read_owned_multiline_file() {
   exec 9<&-
   printf '%s\n' "$value"
 }
+_sgt_sha256_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    printf 'ERROR: sha256sum or shasum is required\n' >&2
+    return 1
+  fi
+}
 _sgt_worker_marker_tuple_snapshot() {
   local repo_dir="$1" current_path history_path platform_path
   local current snapshot digest floor has_portable extra platform_present=false platform
+  local platform_snapshot=absent tuple_digest
   current_path="$repo_dir/worker_process_marker"
   history_path="$repo_dir/worker_process_markers"
   platform_path="$repo_dir/worker_process_marker_platform"
@@ -667,6 +678,7 @@ _sgt_worker_marker_tuple_snapshot() {
       exec 7<&- 8<&- 9<&-
       return 1
     }
+    platform_snapshot="$platform"
   elif [[ "$has_portable" == true || -e "$platform_path" || -L "$platform_path" ]]; then
     exec 7<&- 8<&-
     return 1
@@ -687,8 +699,17 @@ _sgt_worker_marker_tuple_snapshot() {
     exec 7<&- 8<&-
     return 1
   fi
+  tuple_digest="$(printf 'worker-marker-tuple-v1\ncurrent=%s\nhistory_sha256=%s\nplatform=%s\n' \
+    "$current" "$digest" "$platform_snapshot" | _sgt_sha256_stream)" || {
+    exec 7<&- 8<&-; [[ "$platform_present" == true ]] && exec 9<&-
+    return 1
+  }
+  [[ "$tuple_digest" =~ ^[0-9a-f]{64}$ ]] || {
+    exec 7<&- 8<&-; [[ "$platform_present" == true ]] && exec 9<&-
+    return 1
+  }
   exec 7<&- 8<&-
-  printf '%s\n' "$snapshot"
+  printf '%s|%s\n' "$snapshot" "$tuple_digest"
 }
 _sgt_migrate_owned_fd() {
   local fd="$1" path="$2" modes="$3" expected="$4"
@@ -811,7 +832,8 @@ _sgt_process_marker_command() {
   printf '%s' "$command"
 }
 _sgt_worker_process_marker_preflight() {
-  local repo_dir="$1" history="$1/worker_process_markers" snapshot digest floor history_has_portable extra
+  local repo_dir="$1" history="$1/worker_process_markers" platform snapshot digest floor history_has_portable tuple_digest extra
+  platform="$1/worker_process_marker_platform"
   if [[ ( -e "$repo_dir/worker_process_marker" || \
     -L "$repo_dir/worker_process_marker" ) && \
     ! -e "$history" && ! -L "$history" ]]; then
@@ -820,18 +842,37 @@ _sgt_worker_process_marker_preflight() {
     return 1
   fi
   if [[ ! -e "$repo_dir/worker_process_marker" && \
-    ! -L "$repo_dir/worker_process_marker" && ! -e "$history" && ! -L "$history" ]]; then
+    ! -L "$repo_dir/worker_process_marker" && ! -e "$history" && ! -L "$history" && \
+    ! -e "$platform" && ! -L "$platform" ]]; then
     return 0
   fi
   snapshot="$(_sgt_worker_marker_tuple_snapshot "$repo_dir" 2>/dev/null || true)"
-  IFS='|' read -r digest floor history_has_portable extra <<< "$snapshot"
+  IFS='|' read -r digest floor history_has_portable tuple_digest extra <<< "$snapshot"
   [[ -z "$extra" && "$digest" =~ ^[0-9a-f]{64}$ && \
     "$floor" =~ ^[0-9]+$ && \
-    ( "$history_has_portable" == true || "$history_has_portable" == false ) ]] || {
+    ( "$history_has_portable" == true || "$history_has_portable" == false ) && \
+    "$tuple_digest" =~ ^[0-9a-f]{64}$ ]] || {
     printf 'worker process marker is absent from valid durable history: %s\n' \
       "$repo_dir" >&2
     return 1
   }
+}
+_sgt_worker_process_marker_state_digest() {
+  local repo_dir="$1" current history platform snapshot digest floor portable tuple_digest extra
+  current="$repo_dir/worker_process_marker"
+  history="$repo_dir/worker_process_markers"
+  platform="$repo_dir/worker_process_marker_platform"
+  if [[ ! -e "$current" && ! -L "$current" && ! -e "$history" && ! -L "$history" && \
+    ! -e "$platform" && ! -L "$platform" ]]; then
+    printf 'absent\n'
+    return 0
+  fi
+  snapshot="$(_sgt_worker_marker_tuple_snapshot "$repo_dir" 2>/dev/null || true)"
+  IFS='|' read -r digest floor portable tuple_digest extra <<< "$snapshot"
+  [[ -z "$extra" && "$digest" =~ ^[0-9a-f]{64}$ && "$floor" =~ ^[0-9]+$ && \
+    ( "$portable" == true || "$portable" == false ) && \
+    "$tuple_digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$tuple_digest"
 }
 _sgt_validate_inherited_worker_marker() {
   local repo_dir="$1" marker generation identity fd path actual_identity actual_generation extra digest

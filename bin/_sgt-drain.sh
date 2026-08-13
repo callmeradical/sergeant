@@ -327,32 +327,25 @@ _sgt_drain_lock_owner_is_verified_live() {
 }
 
 _sgt_worker_launch_transaction_begin() {
-  local repo="$1" fd="$2" marker before
-  marker="$(_sgt_read_owned_file "$repo/worker_process_marker" 2>/dev/null || true)"
-  if [[ -n "$marker" ]]; then
-    before="$(printf '%s' "$marker" | _sgt_worker_launch_sha256)"
-    [[ "$before" =~ ^[0-9a-f]{64}$ ]] || return 1
-  else
-    before=absent
-  fi
+  local repo="$1" fd="$2" before
+  before="$(_sgt_worker_process_marker_state_digest "$repo")" || return 1
+  [[ "$before" == absent || "$before" =~ ^[0-9a-f]{64}$ ]] || return 1
   eval "_SGT_WORKER_LAUNCH_BEFORE_${fd}=\$before"
 }
 
 _sgt_worker_launch_completion_publish() {
-  local repo="$1" fd="$2" nonce marker before after
+  local repo="$1" fd="$2" nonce before after
   eval "nonce=\${_SGT_DRAIN_LOCK_NONCE_${fd}:-}"
   eval "before=\${_SGT_WORKER_LAUNCH_BEFORE_${fd}:-}"
   [[ "$nonce" =~ ^[0-9a-f]{16}$ ]] || return 1
   [[ "$before" == absent || "$before" =~ ^[0-9a-f]{64}$ ]] || return 1
-  marker="$(_sgt_read_owned_file "$repo/worker_process_marker" 2>/dev/null || true)"
-  [[ -n "$marker" ]] || return 1
-  after="$(printf '%s' "$marker" | _sgt_worker_launch_sha256)"
+  after="$(_sgt_worker_process_marker_state_digest "$repo")" || return 1
   [[ "$after" =~ ^[0-9a-f]{64}$ && "$before" != "$after" ]] || return 1
   _sgt_replace_owned_file "$repo/worker-launch.completed" "$nonce|$before|$after"
 }
 
 _sgt_worker_launch_observed_completion_matches() {
-  local repo="$1" record nonce before after marker current_digest extra
+  local repo="$1" record nonce before after current_digest extra
   nonce="${SGT_DRAIN_LOCK_CONTENDED_NONCE:-}"
   [[ "$nonce" =~ ^[0-9a-f]{16}$ ]] || return 1
   record="$(_sgt_read_owned_file "$repo/worker-launch.completed" 2>/dev/null || true)"
@@ -360,21 +353,12 @@ _sgt_worker_launch_observed_completion_matches() {
   [[ -z "$extra" && "$record_nonce" == "$nonce" && \
     ( "$before" == absent || "$before" =~ ^[0-9a-f]{64}$ ) && \
     "$after" =~ ^[0-9a-f]{64}$ && "$before" != "$after" ]] || return 1
-  marker="$(_sgt_read_owned_file "$repo/worker_process_marker" 2>/dev/null || true)"
-  [[ -n "$marker" ]] || return 1
-  current_digest="$(printf '%s' "$marker" | _sgt_worker_launch_sha256)"
+  current_digest="$(_sgt_worker_process_marker_state_digest "$repo")" || return 1
   [[ "$current_digest" == "$after" ]]
 }
 
 _sgt_worker_launch_sha256() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum | awk '{print $1}'
-  elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 | awk '{print $1}'
-  else
-    printf 'ERROR: sha256sum or shasum is required for worker launch evidence\n' >&2
-    return 1
-  fi
+  _sgt_sha256_stream
 }
 
 # _sgt_drain_lock_reclaim <record> <expected_nonce>

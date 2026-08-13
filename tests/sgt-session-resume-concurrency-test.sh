@@ -6,6 +6,7 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 export SERGEANT_FLEET="$TEST_ROOT/fleet"
 export SERGEANT_CONFIG="$TEST_ROOT/config"
 export SERGEANT_DRAIN_DIR="$TEST_ROOT/drain"
+export SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=60
 mkdir -p "$SERGEANT_FLEET/task-race/app" "$SERGEANT_CONFIG" \
   "$SERGEANT_DRAIN_DIR" "$TEST_ROOT/bin" "$TEST_ROOT/worktree"
 state="$SERGEANT_FLEET/task-race/app"
@@ -39,8 +40,10 @@ case "$1" in
     printf 'launch\n' >> "$LAUNCH_LOG"
     command="${!#}"
     printf '%s\n' "$command" > "$PANE_COMMAND"
-    [[ -z "${NEW_WINDOW_BARRIER:-}" ]] || : > "$NEW_WINDOW_BARRIER"
-    sleep "${NEW_WINDOW_DELAY:-0.2}"
+    if [[ -n "${NEW_WINDOW_BARRIER:-}" ]]; then
+      : > "$NEW_WINDOW_BARRIER"
+      while [[ ! -e "$NEW_WINDOW_RELEASE" ]]; do sleep 0.01; done
+    fi
     printf '%%99\n'
     ;;
   display-message)
@@ -78,8 +81,24 @@ run_resume() {
     SGT_NOTIFICATION_ACK_TIMEOUT=2 \
     "$ROOT_DIR/bin/sgt-session-resume" task-race app --force >/dev/null 2>&1
 }
-run_resume & first=$!
-run_resume & second=$!
+SGT_TEST_HOOKS=1 SGT_TEST_SESSION_RESUME_AFTER_COMPLETION_BARRIER=1 \
+  run_resume & first=$!
+for _ in $(seq 1 6000); do
+  [[ -e "$state/session-resume-after-completion-ready" ]] && break
+  sleep 0.01
+done
+[[ -e "$state/session-resume-after-completion-ready" ]]
+: > "$TEST_ROOT/initial-peer-gone"
+SGT_TEST_HOOKS=1 \
+  _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$state/initial-resume-contended" \
+  FAST_EXIT_FILE="$TEST_ROOT/initial-peer-gone" \
+  run_resume & second=$!
+for _ in $(seq 1 6000); do
+  [[ -e "$state/initial-resume-contended" ]] && break
+  sleep 0.01
+done
+[[ -e "$state/initial-resume-contended" ]]
+: > "$state/session-resume-after-completion-release"
 wait "$first"
 wait "$second"
 [[ "$(wc -l < "$TEST_ROOT/launch.log")" -eq 1 ]]
@@ -97,19 +116,29 @@ bash -c '
   _sgt_worker_launch_transaction_begin "$2" 8
   if _sgt_worker_launch_completion_publish "$2" 8; then exit 1; fi
   : > "$3"
-  sleep 0.4
+  while [[ ! -e "$4" ]]; do sleep 0.01; done
   _sgt_drain_lock_release_fd 8
-' _ "$ROOT_DIR" "$state" "$TEST_ROOT/zero-mutation-ready" & zero_mutation_pid=$!
-for _ in $(seq 1 100); do
+' _ "$ROOT_DIR" "$state" "$TEST_ROOT/zero-mutation-ready" \
+  "$TEST_ROOT/zero-mutation-release" & zero_mutation_pid=$!
+for _ in $(seq 1 6000); do
   [[ -e "$TEST_ROOT/zero-mutation-ready" ]] && break
   sleep 0.01
 done
 [[ -e "$TEST_ROOT/zero-mutation-ready" ]]
 PATH="$TEST_ROOT/bin:$PATH" LAUNCH_LOG="$TEST_ROOT/launch.log" \
   PANE_COMMAND="$TEST_ROOT/pane-command" TEST_REPO_STATE="$state" \
-  OLD_PANE_GONE=1 SGT_NOTIFICATION_ACK_TIMEOUT=2 \
-  "$ROOT_DIR/bin/sgt-session-resume" task-race app --force >/dev/null
+  OLD_PANE_GONE=1 SGT_NOTIFICATION_ACK_TIMEOUT=2 SGT_TEST_HOOKS=1 \
+  _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$state/zero-mutation-contended" \
+  "$ROOT_DIR/bin/sgt-session-resume" task-race app --force >/dev/null & \
+  zero_mutation_waiter=$!
+for _ in $(seq 1 6000); do
+  [[ -e "$state/zero-mutation-contended" ]] && break
+  sleep 0.01
+done
+[[ -e "$state/zero-mutation-contended" ]]
+: > "$TEST_ROOT/zero-mutation-release"
 wait "$zero_mutation_pid"
+wait "$zero_mutation_waiter"
 [[ "$(wc -l < "$TEST_ROOT/launch.log")" -eq 1 ]]
 
 # A tuple change can converge only through the exact descriptor-bound owner
@@ -124,27 +153,36 @@ bash -c '
   source "$1/bin/_sgt-drain.sh"
   _sgt_drain_lock_acquire_fd 8 stale-journal "$2/worker-launch.lock"
   : > "$3"
-  sleep 0.4
+  while [[ ! -e "$4" ]]; do sleep 0.01; done
   _sgt_prepare_worker_process_marker "$2"
   marker="$(_sgt_read_owned_file "$2/worker_process_marker")"
   digest="$(printf %s "$marker" | _sgt_worker_launch_sha256)"
   _sgt_replace_owned_file "$2/worker-launch.completed" "bbbbbbbbbbbbbbbb|$digest"
   _sgt_drain_lock_release_fd 8
-' _ "$ROOT_DIR" "$state" "$TEST_ROOT/stale-journal-ready" & stale_journal_pid=$!
-for _ in $(seq 1 100); do
+' _ "$ROOT_DIR" "$state" "$TEST_ROOT/stale-journal-ready" \
+  "$TEST_ROOT/stale-journal-release" & stale_journal_pid=$!
+for _ in $(seq 1 6000); do
   [[ -e "$TEST_ROOT/stale-journal-ready" ]] && break
   sleep 0.01
 done
 [[ -e "$TEST_ROOT/stale-journal-ready" ]]
-set +e
 PATH="$TEST_ROOT/bin:$PATH" LAUNCH_LOG="$TEST_ROOT/launch.log" \
   PANE_COMMAND="$TEST_ROOT/pane-command" TEST_REPO_STATE="$state" \
-  OLD_PANE_GONE=1 SGT_NOTIFICATION_ACK_TIMEOUT=2 \
+  OLD_PANE_GONE=1 SGT_NOTIFICATION_ACK_TIMEOUT=2 SGT_TEST_HOOKS=1 \
+  _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$state/stale-journal-contended" \
   "$ROOT_DIR/bin/sgt-session-resume" task-race app --force \
-  > "$TEST_ROOT/stale-journal.out" 2>&1
+  > "$TEST_ROOT/stale-journal.out" 2>&1 & stale_journal_waiter=$!
+for _ in $(seq 1 6000); do
+  [[ -e "$state/stale-journal-contended" ]] && break
+  sleep 0.01
+done
+[[ -e "$state/stale-journal-contended" ]]
+: > "$TEST_ROOT/stale-journal-release"
+wait "$stale_journal_pid"
+set +e
+wait "$stale_journal_waiter"
 stale_resume_status=$?
 set -e
-wait "$stale_journal_pid"
 [[ "$stale_resume_status" -ne 0 ]]
 grep -Fq 'changed without completion from the exact observed launch owner' \
   "$TEST_ROOT/stale-journal.out"
@@ -213,7 +251,7 @@ bash -c '
 ' _ "$ROOT_DIR" "$state" "$TEST_ROOT/torn-resume-ready" \
   "$TEST_ROOT/torn-resume-history.valid" "$TEST_ROOT/torn-resume-corrupt" & \
   torn_resume_owner=$!
-for _ in $(seq 1 100); do
+for _ in $(seq 1 6000); do
   [[ -e "$TEST_ROOT/torn-resume-ready" ]] && break
   sleep 0.01
 done
@@ -224,7 +262,7 @@ PATH="$TEST_ROOT/bin:$PATH" LAUNCH_LOG="$TEST_ROOT/launch.log" \
   _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$state/torn-resume-contended" \
   "$ROOT_DIR/bin/sgt-session-resume" task-race app --force \
   > "$TEST_ROOT/torn-resume.out" 2>&1 & torn_resume_waiter=$!
-for _ in $(seq 1 500); do
+for _ in $(seq 1 6000); do
   [[ -e "$state/torn-resume-contended" ]] && break
   sleep 0.01
 done
@@ -236,7 +274,7 @@ wait "$torn_resume_waiter"
 torn_resume_status=$?
 set -e
 [[ "$torn_resume_status" -ne 0 ]]
-grep -Fq 'marker evidence changed while waiting for ownership' \
+grep -Fq 'Could not snapshot worker generation before resume' \
   "$TEST_ROOT/torn-resume.out"
 [[ ! -s "$TEST_ROOT/launch.log" ]]
 mv "$TEST_ROOT/torn-resume-history.valid" "$state/worker_process_markers"
@@ -258,7 +296,7 @@ bash -c '
 ' _ "$ROOT_DIR" "$state" "$TEST_ROOT/torn-recover-ready" \
   "$TEST_ROOT/torn-recover-history.valid" "$TEST_ROOT/torn-recover-corrupt" & \
   torn_recover_owner=$!
-for _ in $(seq 1 100); do
+for _ in $(seq 1 6000); do
   [[ -e "$TEST_ROOT/torn-recover-ready" ]] && break
   sleep 0.01
 done
@@ -269,7 +307,7 @@ PATH="$TEST_ROOT/bin:$PATH" LAUNCH_LOG="$TEST_ROOT/launch.log" \
   _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$state/torn-recover-contended" \
   "$ROOT_DIR/bin/sgt-recover" task-race app \
   > "$TEST_ROOT/torn-recover.out" 2>&1 & torn_recover_waiter=$!
-for _ in $(seq 1 500); do
+for _ in $(seq 1 6000); do
   [[ -e "$state/torn-recover-contended" ]] && break
   sleep 0.01
 done
@@ -281,7 +319,7 @@ wait "$torn_recover_waiter"
 torn_recover_status=$?
 set -e
 [[ "$torn_recover_status" -ne 0 ]]
-grep -Fq 'marker evidence changed while waiting for ownership' \
+grep -Fq 'Could not snapshot worker generation before recovery' \
   "$TEST_ROOT/torn-recover.out"
 [[ ! -s "$TEST_ROOT/launch.log" ]]
 mv "$TEST_ROOT/torn-recover-history.valid" "$state/worker_process_markers"
@@ -322,20 +360,33 @@ run_resume_fast_exit() {
   PATH="$TEST_ROOT/bin:$PATH" LAUNCH_LOG="$TEST_ROOT/launch.log" \
     PANE_COMMAND="$TEST_ROOT/pane-command" TEST_REPO_STATE="$state" \
     FAST_EXIT_FILE="$TEST_ROOT/fast-exit" OLD_PANE_GONE=1 \
-    NEW_WINDOW_BARRIER="$TEST_ROOT/winner-in-window" NEW_WINDOW_DELAY=0.5 \
+    NEW_WINDOW_BARRIER="${NEW_WINDOW_BARRIER_FOR_RUN:-}" \
+    NEW_WINDOW_RELEASE="${NEW_WINDOW_RELEASE_FOR_RUN:-}" \
+    SGT_TEST_HOOKS="${SGT_TEST_HOOKS_FOR_RUN:-0}" \
+    _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="${CONTENDED_MARKER_FOR_RUN:-}" \
     SGT_NOTIFICATION_ACK_TIMEOUT=1 \
     "$ROOT_DIR/bin/sgt-session-resume" task-race app --force \
       >"$TEST_ROOT/fast-$runner.out" 2>&1
   status=$?
   printf '%s\n' "$status" > "$TEST_ROOT/fast-$runner.status"
 }
-run_resume_fast_exit one & first=$!
-for _ in $(seq 1 100); do
+NEW_WINDOW_BARRIER_FOR_RUN="$TEST_ROOT/winner-in-window" \
+  NEW_WINDOW_RELEASE_FOR_RUN="$TEST_ROOT/winner-window-release" \
+  run_resume_fast_exit one & first=$!
+for _ in $(seq 1 6000); do
   [[ -e "$TEST_ROOT/winner-in-window" ]] && break
   sleep 0.01
 done
 [[ -e "$TEST_ROOT/winner-in-window" ]]
-run_resume_fast_exit two & second=$!
+SGT_TEST_HOOKS_FOR_RUN=1 \
+  CONTENDED_MARKER_FOR_RUN="$state/fast-exit-contended" \
+  run_resume_fast_exit two & second=$!
+for _ in $(seq 1 6000); do
+  [[ -e "$state/fast-exit-contended" ]] && break
+  sleep 0.01
+done
+[[ -e "$state/fast-exit-contended" ]]
+: > "$TEST_ROOT/winner-window-release"
 wait "$first"
 wait "$second"
 [[ "$(wc -l < "$TEST_ROOT/launch.log")" -eq 1 ]]
@@ -357,19 +408,29 @@ bash -c '
   source "$1/bin/_sgt-drain.sh"
   _sgt_drain_lock_acquire_fd 8 lock-only "$2/worker-launch.lock"
   : > "$3"
-  sleep 0.4
+  while [[ ! -e "$4" ]]; do sleep 0.01; done
   _sgt_drain_lock_release_fd 8
-' _ "$ROOT_DIR" "$state" "$TEST_ROOT/lock-only-ready" & lock_only_pid=$!
-for _ in $(seq 1 100); do
+' _ "$ROOT_DIR" "$state" "$TEST_ROOT/lock-only-ready" \
+  "$TEST_ROOT/lock-only-release" & lock_only_pid=$!
+for _ in $(seq 1 6000); do
   [[ -e "$TEST_ROOT/lock-only-ready" ]] && break
   sleep 0.01
 done
 [[ -e "$TEST_ROOT/lock-only-ready" ]]
 PATH="$TEST_ROOT/bin:$PATH" LAUNCH_LOG="$TEST_ROOT/launch.log" \
   PANE_COMMAND="$TEST_ROOT/pane-command" TEST_REPO_STATE="$state" \
-  OLD_PANE_GONE=1 SGT_NOTIFICATION_ACK_TIMEOUT=2 \
-  "$ROOT_DIR/bin/sgt-session-resume" task-race app --force >/dev/null
+  OLD_PANE_GONE=1 SGT_NOTIFICATION_ACK_TIMEOUT=2 SGT_TEST_HOOKS=1 \
+  _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$state/lock-only-contended" \
+  "$ROOT_DIR/bin/sgt-session-resume" task-race app --force >/dev/null & \
+  lock_only_waiter=$!
+for _ in $(seq 1 6000); do
+  [[ -e "$state/lock-only-contended" ]] && break
+  sleep 0.01
+done
+[[ -e "$state/lock-only-contended" ]]
+: > "$TEST_ROOT/lock-only-release"
 wait "$lock_only_pid"
+wait "$lock_only_waiter"
 [[ "$(wc -l < "$TEST_ROOT/launch.log")" -eq 1 ]]
 
 # Verification is descriptor-bound: replacing owner A's pathname with a

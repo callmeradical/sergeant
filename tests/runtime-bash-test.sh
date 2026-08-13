@@ -196,6 +196,22 @@ set -e
 mkdir -p "$TEST_ROOT/journal-bin" "$TEST_ROOT/journal-state"
 cat > "$TEST_ROOT/journal-bin/python3" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$1" == */_sgt-marker-history.py ]]; then
+  fd="$3" marker="$5"
+  history="$(cat <&"$fd")"
+  generation="${marker%%|*}"
+  identity_and_rest="${marker#*|}"
+  identity="${identity_and_rest%%|*}"
+  selected="$(printf '%s\n' "$history" | awk -F'|' \
+    -v generation="$generation" -v identity="$identity" \
+    '$1 == generation && $2 == identity { count++; floor=$3 } END { if (count == 1) print floor }')"
+  [[ "$selected" =~ ^[0-9]+$ ]] || exit 1
+  digest="$(printf '%s\n' "$history" | sha256sum | awk '{print $1}')"
+  portable="$(printf '%s\n' "$history" | awk -F'|' \
+    '$3 == 0 { found=1 } END { print found ? "true" : "false" }')"
+  printf '%s|%s|%s\n' "$digest" "$selected" "$portable"
+  exit 0
+fi
 fd="$2" operation="${5:-validate}"
 case "$operation" in
   read)
@@ -210,7 +226,10 @@ EOF
 chmod +x "$TEST_ROOT/journal-bin/python3"
 printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|1:2|198|/closed\n' \
   > "$TEST_ROOT/journal-state/worker_process_marker"
-chmod 600 "$TEST_ROOT/journal-state/worker_process_marker"
+printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|1:2|1\n' \
+  > "$TEST_ROOT/journal-state/worker_process_markers"
+chmod 600 "$TEST_ROOT/journal-state/worker_process_marker" \
+  "$TEST_ROOT/journal-state/worker_process_markers"
 # shellcheck source=bin/_sgt-lib.sh
 source "$ROOT_DIR/bin/_sgt-lib.sh"
 # shellcheck source=bin/_sgt-drain.sh
@@ -222,6 +241,8 @@ PATH="$TEST_ROOT/journal-bin:$PATH" \
   _sgt_worker_launch_transaction_begin "$TEST_ROOT/journal-state" 8
 printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|3:4|198|/closed-next\n' \
   > "$TEST_ROOT/journal-state/worker_process_marker"
+printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|3:4|1\n' \
+  >> "$TEST_ROOT/journal-state/worker_process_markers"
 PATH="$TEST_ROOT/journal-bin:$PATH" \
   _sgt_worker_launch_completion_publish "$TEST_ROOT/journal-state" 8
 SGT_DRAIN_LOCK_CONTENDED_NONCE="$_SGT_DRAIN_LOCK_NONCE_8"
