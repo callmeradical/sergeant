@@ -1016,6 +1016,16 @@ _recycle_terminal_worker() {
     return 1
   fi
   process_group="$(cat "$repo_dir/worker_process_group" 2>/dev/null || true)"
+  if [[ -e "$repo_dir/worker_stale_pane_retirement" || \
+        -L "$repo_dir/worker_stale_pane_retirement" ]]; then
+    if ! _stale_pane_retirement_validation_matches "$repo_dir"; then
+      local _incomplete_task_id
+      _incomplete_task_id="$(basename "$(dirname "$repo_dir")")"
+      printf 'stale pane retirement receipt requires proof revalidation. Run: sgt-watch --retire-stale-pane %s --repo %s\n' \
+        "$_incomplete_task_id" "$(basename "$repo_dir")" > "$repo_dir/diagnostic"
+      return 1
+    fi
+  fi
   _terminal_recycle_evidence_covers "$repo_dir" "$identity" "$process_group" && return 0
   if _recycle_inactive_pane_zero_holders "$repo_dir" "$pane" "$identity" \
     "$process_group"; then

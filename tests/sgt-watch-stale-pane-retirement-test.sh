@@ -20,6 +20,9 @@ cat > "$fake_bin/tmux" <<'TMUX'
 #!/usr/bin/env bash
 case "$1" in
   display-message)
+    if [[ -n "${PANE_ABSENT_FILE:-}" && -e "$PANE_ABSENT_FILE" ]]; then
+      exit 1
+    fi
     case "${!#}" in
       '#{pane_id}') printf '%%61\n' ;;
       *) printf '0|%%61|88888888|222222|unrelated-process\n' ;;
@@ -390,6 +393,17 @@ if env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
 fi
 grep -Fq 'sgt-watch --retire-stale-pane task-receipt-retry --repo app' \
   "$TEST_ROOT/receipt-retry-sync.err"
+absent_after_receipt="$TEST_ROOT/absent-after-receipt"
+: > "$absent_after_receipt"
+if env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
+  PANE_ABSENT_FILE="$absent_after_receipt" "$ROOT_DIR/bin/sgt-watch" \
+  --sync task-receipt-retry > /dev/null \
+  2> "$TEST_ROOT/receipt-retry-absent-sync.err"; then
+  printf 'sync bypassed interrupted receipt after pane disappeared\n' >&2
+  exit 1
+fi
+grep -Fq 'sgt-watch --retire-stale-pane task-receipt-retry --repo app' \
+  "$TEST_ROOT/receipt-retry-absent-sync.err"
 if retry_holder_output="$(env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
   KILL_LOG="$kill_log" FAKE_HOLDERS='778|linux:334' \
   "$ROOT_DIR/bin/sgt-watch" --retire-stale-pane task-receipt-retry \
