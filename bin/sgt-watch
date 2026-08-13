@@ -472,6 +472,14 @@ _record_stale_pane_retirement_validation() {
 _terminal_recycle_evidence_covers() {
   local repo_dir="$1" identity="$2" process_group="$3"
   _recycle_evidence_covers "$repo_dir" "$identity" "$process_group" || return 1
+  if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+        -n "${SGT_TEST_TERMINAL_EVIDENCE_BARRIER:-}" ]]; then
+    : > "$SGT_TEST_TERMINAL_EVIDENCE_BARRIER.ready"
+    for _ in $(seq 1 200); do
+      [[ -e "$SGT_TEST_TERMINAL_EVIDENCE_BARRIER.release" ]] && break
+      sleep 0.01
+    done
+  fi
   if [[ -e "$repo_dir/worker_stale_pane_retirement" || \
         -L "$repo_dir/worker_stale_pane_retirement" || \
         -e "$repo_dir/worker_stale_pane_retirement_pending" || \
@@ -734,7 +742,7 @@ _retire_stale_pane() {
   if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
         -n "${SGT_TEST_STALE_PANE_POST_EVIDENCE_BARRIER:-}" ]]; then
     : > "$SGT_TEST_STALE_PANE_POST_EVIDENCE_BARRIER.ready"
-    for _ in $(seq 1 200); do
+    for _ in $(seq 1 1000); do
       [[ -e "$SGT_TEST_STALE_PANE_POST_EVIDENCE_BARRIER.release" ]] && break
       sleep 0.01
     done

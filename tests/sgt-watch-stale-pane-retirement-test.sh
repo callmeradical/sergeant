@@ -190,7 +190,7 @@ fi
 
 wait_for_barrier() {
   local barrier="$1"
-  for _ in $(seq 1 200); do
+  for _ in $(seq 1 500); do
     [[ -e "$barrier.ready" ]] && return 0
     sleep 0.01
   done
@@ -442,6 +442,7 @@ peer_race_state="$fleet/task-peer-race/app"
 peer_pre_barrier="$TEST_ROOT/peer-race-pre"
 peer_post_barrier="$TEST_ROOT/peer-race-post"
 peer_scan_reached="$TEST_ROOT/peer-scan-reached"
+peer_evidence_barrier="$TEST_ROOT/peer-evidence"
 env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
   SGT_TEST_HOOKS=1 SGT_TEST_STALE_PANE_BARRIER="$peer_pre_barrier" \
   SGT_TEST_STALE_PANE_POST_EVIDENCE_BARRIER="$peer_post_barrier" \
@@ -451,7 +452,7 @@ peer_retire_pid=$!
 wait_for_barrier "$peer_pre_barrier"
 env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
   FAIL_HOLDER_SCAN=1 HOLDER_SCAN_REACHED="$peer_scan_reached" \
-  SGT_RECYCLE_PEER_ATTEMPTS=1 \
+  SGT_TEST_HOOKS=1 SGT_TEST_TERMINAL_EVIDENCE_BARRIER="$peer_evidence_barrier" \
   "$ROOT_DIR/bin/sgt-watch" --sync task-peer-race \
   > /dev/null 2> "$TEST_ROOT/peer-race-sync.err" &
 peer_sync_pid=$!
@@ -462,12 +463,14 @@ done
 [[ -e "$peer_scan_reached" ]]
 : > "$peer_pre_barrier.release"
 wait_for_barrier "$peer_post_barrier"
+wait_for_barrier "$peer_evidence_barrier"
+[[ -s "$peer_race_state/worker_stale_pane_retirement_pending" ]]
+[[ -s "$peer_race_state/worker_recycled" ]]
+: > "$peer_evidence_barrier.release"
 if wait "$peer_sync_pid"; then
   printf 'peer recycler accepted pending staged stale evidence\n' >&2
   exit 1
 fi
-[[ -s "$peer_race_state/worker_stale_pane_retirement_pending" ]]
-[[ -s "$peer_race_state/worker_recycled" ]]
 [[ ! -e "$peer_race_state/worker_stale_pane_retirement" ]]
 : > "$peer_post_barrier.release"
 wait "$peer_retire_pid"
