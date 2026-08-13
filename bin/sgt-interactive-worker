@@ -278,7 +278,13 @@ _record_worker_identity() {
   pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
   sid="$(_sgt_process_session_id "$$" 2>/dev/null || true)"
   start="$(_sgt_process_identity "$$" 2>/dev/null || true)"
-  if ! _sgt_validate_inherited_worker_marker "$REPO_STATE"; then
+  # Only validate the inherited marker when one was actually written by dispatch.
+  # A worker launched outside the full dispatch stack (tests, sgt-recover, manual
+  # launch) may have no marker; the check is "if present it must be valid", not
+  # "a marker must be present".  A present-but-invalid marker still fails closed.
+  if [[ -e "$REPO_STATE/worker_process_marker" || \
+        -L "$REPO_STATE/worker_process_marker" ]] && \
+     ! _sgt_validate_inherited_worker_marker "$REPO_STATE"; then
     printf 'worker process marker conflicts with durable launch ownership\n' \
       > "$REPO_STATE/diagnostic"
     return 1

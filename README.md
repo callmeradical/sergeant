@@ -18,7 +18,7 @@ You have a project. It has four repos: an API, a frontend, an infra chart, and a
 
 Sergeant fixes that. It is an **agent distro**: a cloned directory with an `AGENTS.md`, shell toolbelt, and skills that turn a general-purpose agent into a project-aware first mate. Launch your agent harness inside it and Sergeant takes over — it knows your projects, their repos, how they group, and what instructions apply to each one.
 
-No install. The cloned repo is the distro. Sergeant supports Bash 3.2 and newer, including the system Bash shipped with macOS.
+No install. The cloned repo is the distro. Sergeant supports Bash 3.2 and newer, including the system Bash shipped with macOS. Terminal workers automatically retire their owned descendant processes on completion. `sgt-watch --snapshot --project <name>` provides bounded, read-only status queries scoped to an entire project, using a distinct `sergeant.status-query/v1` schema that makes an unresolved project or td id explicit rather than shaped like an inconclusive fleet observation.
 
 ## Mental model
 
@@ -126,7 +126,7 @@ Full schema reference: `docs/schema.md`. Annotated example: `schema/project.yaml
 Shell scripts for the agent (and for you directly):
 
 | Script | What it does |
-|---|---|
+| --- | --- |
 | `bin/sgt-list` | List all known projects |
 | `bin/sgt-status <project>` | Git status across every repo |
 | `bin/sgt-sync <project>` | Clone missing repos, pull existing ones |
@@ -199,7 +199,7 @@ inferred from documentation. Sergeant validates against it before creating any
 state:
 
 | Harness | Model transport | Variant transport |
-|---|---|---|
+| --- | --- | --- |
 | `opencode`, `oc` | argv `--model <provider>/<model>` | argv `--agent <name>` against a Sergeant-generated agent definition carrying the variant |
 | `goose` | env `GOOSE_PROVIDER` + `GOOSE_MODEL` — `goose session` has no model flag, and Sergeant controls the worker environment at spawn | none known — a pinned variant fails closed |
 | `claude` | not measured by Sergeant | not measured by Sergeant |
@@ -308,6 +308,7 @@ While a run is active: do not edit the pipeline-owned worktree, do not abort or 
 Stop driving at `checks-passed`. The PR is ready; no-mistakes monitors it in the background. Do not poll or wait for merge.
 
 If the outcome is `failed` or `cancelled`, inspect `branch_sync` state first:
+
 - `sync` → run `no-mistakes axi sync`
 - `continue_active_run` → keep driving the reported run
 - `recover_custody` → use `no-mistakes axi sync --recover`
@@ -349,7 +350,7 @@ The retained artifact holds only post-redaction fields, never the reviewer's ori
 Agent-loaded skills for structured workflows:
 
 | Skill | What it does |
-|---|---|
+| --- | --- |
 | `skills/load-project` | Load and internalize full project context |
 | `skills/cross-repo-work` | Plan and execute changes across multiple repos |
 | `skills/dispatch` | Dispatch subagents per repo with worktrees + briefs |
