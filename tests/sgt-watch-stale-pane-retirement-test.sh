@@ -103,6 +103,7 @@ grep -Fq 'recorded_identity=0|%61|99999999|111111|original-worker' \
   "$state/worker_stale_pane_retirement"
 grep -Fq 'observed_identity=0|%61|88888888|222222|unrelated-process' \
   "$state/worker_stale_pane_retirement"
+[[ -s "$state/worker_stale_pane_retirement_validated" ]]
 
 receipt="$(cat "$state/worker_stale_pane_retirement")"
 recycled="$(cat "$state/worker_recycled")"
@@ -380,6 +381,15 @@ fi
 [[ -s "$receipt_retry_state/worker_stale_pane_retirement" ]]
 [[ -s "$receipt_retry_state/worker_recycled" ]]
 retry_receipt="$(cat "$receipt_retry_state/worker_stale_pane_retirement")"
+[[ ! -e "$receipt_retry_state/worker_stale_pane_retirement_validated" ]]
+if env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
+  FAKE_HOLDERS='778|linux:334' "$ROOT_DIR/bin/sgt-watch" \
+  --sync task-receipt-retry > /dev/null 2> "$TEST_ROOT/receipt-retry-sync.err"; then
+  printf 'sync trusted an interrupted stale-pane receipt\n' >&2
+  exit 1
+fi
+grep -Fq 'sgt-watch --retire-stale-pane task-receipt-retry --repo app' \
+  "$TEST_ROOT/receipt-retry-sync.err"
 if retry_holder_output="$(env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
   KILL_LOG="$kill_log" FAKE_HOLDERS='778|linux:334' \
   "$ROOT_DIR/bin/sgt-watch" --retire-stale-pane task-receipt-retry \
@@ -393,6 +403,7 @@ env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
   "$ROOT_DIR/bin/sgt-watch" --retire-stale-pane task-receipt-retry --repo app \
   >/dev/null
 [[ "$(cat "$receipt_retry_state/worker_stale_pane_retirement")" == "$retry_receipt" ]]
+[[ -s "$receipt_retry_state/worker_stale_pane_retirement_validated" ]]
 [[ ! -s "$kill_log" && -d "$worktree" ]]
 
 printf 'sgt-watch stale-pane retirement: ok\n'

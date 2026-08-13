@@ -397,6 +397,64 @@ _stale_pane_retirement_receipt_matches() {
   [[ "$receipt" == "$expected" ]]
 }
 
+_stale_pane_retirement_validation_matches() {
+  local repo_dir="$1" receipt recycle receipt_digest recycle_digest record validated_at expected
+  receipt="$(_sgt_read_owned_multiline_file \
+    "$repo_dir/worker_stale_pane_retirement" 2>/dev/null || true)"
+  recycle="$(_sgt_read_owned_multiline_file \
+    "$repo_dir/worker_recycled" 2>/dev/null || true)"
+  record="$(_sgt_read_owned_multiline_file \
+    "$repo_dir/worker_stale_pane_retirement_validated" 2>/dev/null || true)"
+  [[ -n "$receipt" && -n "$recycle" && -n "$record" ]] || return 1
+  receipt_digest="$(printf '%s' "$receipt" | _sgt_sha256_stream 2>/dev/null || true)"
+  recycle_digest="$(printf '%s' "$recycle" | _sgt_sha256_stream 2>/dev/null || true)"
+  validated_at="$(sed -n '4s/^validated_at=//p' <<< "$record")"
+  [[ "$receipt_digest" =~ ^[0-9a-f]{64}$ && \
+    "$recycle_digest" =~ ^[0-9a-f]{64}$ && \
+    "$validated_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+  expected="$(printf 'version=1\nreceipt_sha256=%s\nrecycle_sha256=%s\nvalidated_at=%s' \
+    "$receipt_digest" "$recycle_digest" "$validated_at")"
+  [[ "$record" == "$expected" ]]
+}
+
+_record_stale_pane_retirement_validation() {
+  local repo_dir="$1" receipt recycle receipt_digest recycle_digest stamp temporary
+  receipt="$(_sgt_read_owned_multiline_file \
+    "$repo_dir/worker_stale_pane_retirement" 2>/dev/null || true)"
+  recycle="$(_sgt_read_owned_multiline_file \
+    "$repo_dir/worker_recycled" 2>/dev/null || true)"
+  [[ -n "$receipt" && -n "$recycle" ]] || return 1
+  receipt_digest="$(printf '%s' "$receipt" | _sgt_sha256_stream 2>/dev/null || true)"
+  recycle_digest="$(printf '%s' "$recycle" | _sgt_sha256_stream 2>/dev/null || true)"
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  [[ "$receipt_digest" =~ ^[0-9a-f]{64}$ && \
+    "$recycle_digest" =~ ^[0-9a-f]{64}$ && \
+    "$stamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+  temporary="$repo_dir/worker_stale_pane_retirement_validated.tmp.$$.$RANDOM"
+  (umask 077; {
+    printf 'version=1\n'
+    printf 'receipt_sha256=%s\n' "$receipt_digest"
+    printf 'recycle_sha256=%s\n' "$recycle_digest"
+    printf 'validated_at=%s\n' "$stamp"
+  } > "$temporary") || { rm -f "$temporary"; return 1; }
+  if ! ln "$temporary" "$repo_dir/worker_stale_pane_retirement_validated" 2>/dev/null; then
+    rm -f "$temporary"
+    return 1
+  fi
+  rm -f "$temporary"
+}
+
+_terminal_recycle_evidence_covers() {
+  local repo_dir="$1" identity="$2" process_group="$3"
+  _recycle_evidence_covers "$repo_dir" "$identity" "$process_group" || return 1
+  if [[ -e "$repo_dir/worker_stale_pane_retirement" || \
+        -L "$repo_dir/worker_stale_pane_retirement" ]]; then
+    _stale_pane_retirement_validation_matches "$repo_dir"
+  else
+    return 0
+  fi
+}
+
 _record_stale_pane_retirement() {
   local repo_dir="$1" pane="$2" recorded="$3" observed="$4"
   local stamp temporary
@@ -664,6 +722,16 @@ _retire_stale_pane() {
       _die "Lifecycle changed after receipt publication and completed receipt could not be quarantined"
     _die "Terminal worker lifecycle or marker provenance changed during receipt publication"
   fi
+  if [[ -e "$repo_dir/worker_stale_pane_retirement_validated" || \
+        -L "$repo_dir/worker_stale_pane_retirement_validated" ]]; then
+    _stale_pane_retirement_validation_matches "$repo_dir" || \
+      _die "Stale-pane retirement validation evidence conflicts with this retry"
+  else
+    _record_stale_pane_retirement_validation "$repo_dir" || \
+      _die "Failed to publish stale-pane retirement validation evidence"
+    _stale_pane_retirement_validation_matches "$repo_dir" || \
+      _die "Published stale-pane retirement validation evidence is invalid"
+  fi
   printf 'terminal worker stale pane ownership retired; unrelated live pane was not touched\n' \
     > "$repo_dir/diagnostic"
   _sgt_response_lock_release || _die "Failed to release repository lifecycle lock"
@@ -879,7 +947,7 @@ _wait_for_peer_recycle() {
   attempts="${SGT_RECYCLE_PEER_ATTEMPTS:-20}"
   [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=20
   for _ in $(seq 1 "$attempts"); do
-    if _recycle_evidence_covers "$repo_dir" "$identity" "$process_group"; then
+    if _terminal_recycle_evidence_covers "$repo_dir" "$identity" "$process_group"; then
       return 0
     fi
     sleep 0.05
@@ -948,7 +1016,7 @@ _recycle_terminal_worker() {
     return 1
   fi
   process_group="$(cat "$repo_dir/worker_process_group" 2>/dev/null || true)"
-  _recycle_evidence_covers "$repo_dir" "$identity" "$process_group" && return 0
+  _terminal_recycle_evidence_covers "$repo_dir" "$identity" "$process_group" && return 0
   if _recycle_inactive_pane_zero_holders "$repo_dir" "$pane" "$identity" \
     "$process_group"; then
     rm -f "$repo_dir/worker_recycle_phase"
@@ -993,7 +1061,7 @@ _recycle_terminal_worker() {
     return 1
   fi
   # Already retired this exact pane and process group: nothing to do.
-  _recycle_evidence_covers "$repo_dir" "$identity" "$process_group" && return 0
+  _terminal_recycle_evidence_covers "$repo_dir" "$identity" "$process_group" && return 0
   # If the exact capability scan is already empty, retirement completed
   # naturally. Publish marker-bound evidence without constructing a phase or
   # signalling a PID/process group that no longer has a live owner.
