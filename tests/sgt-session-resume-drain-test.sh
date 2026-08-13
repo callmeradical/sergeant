@@ -70,7 +70,8 @@ old_marker_identity="$(stat -Lc '%d:%i' "$old_marker_path")"
 old_marker_record="$old_generation|$old_marker_identity|198|$old_marker_path"
 printf '%s\n' "$old_marker_record" > "$REPO_DIR/worker_process_marker"
 chmod 600 "$REPO_DIR/worker_process_marker"
-printf '%s|%s|0\n' "$old_generation" "$old_marker_identity" \
+old_launch_floor="$(awk '{ print $22 }' /proc/$$/stat)"
+printf '%s|%s|%s\n' "$old_generation" "$old_marker_identity" "$old_launch_floor" \
   > "$REPO_DIR/worker_process_markers"
 chmod 600 "$REPO_DIR/worker_process_markers"
 

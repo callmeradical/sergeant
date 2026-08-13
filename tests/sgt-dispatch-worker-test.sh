@@ -888,14 +888,56 @@ PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/dispatch-resume-race.log" 
   SGT_WIKI_DISABLED=1 "$ROOT_DIR/bin/sgt-session-resume" \
   race-public-000000 app --force >"$TEST_ROOT/dispatch-resume-resume.out" 2>&1 & \
   resume_race_pid=$!
-sleep 0.1
+sleep 0.3
 : > "$race_state/dispatch-launch-release"
 wait "$dispatch_race_pid"
 wait "$resume_race_pid"
 [[ "$(grep -c '^new-window ' "$TEST_ROOT/dispatch-resume-race.log")" -eq 1 ]]
 [[ "$(wc -l < "$race_state/worker_process_markers")" -eq 1 ]]
-[[ "$(cat "$race_state/worker-launch.completed")" =~ ^[0-9a-f]+\|[0-9a-f]{64}$ ]]
+IFS='|' read -r race_nonce race_before race_after race_extra \
+  < "$race_state/worker-launch.completed"
+[[ -z "$race_extra" && "$race_nonce" =~ ^[0-9a-f]{16}$ && \
+  "$race_before" =~ ^(absent|[0-9a-f]{64})$ && \
+  "$race_after" =~ ^[0-9a-f]{64}$ && "$race_before" != "$race_after" ]]
 grep -Fq 'verified peer worker-launch transaction completed' \
   "$TEST_ROOT/dispatch-resume-resume.out"
+
+# Exercise the inverse lock order. Dispatch has created durable task state but
+# pauses before repository launch ownership; resume wins and publishes the one
+# launch. Dispatch must consume that exact observed completion after acquiring
+# ownership and must not create a second pane or marker generation.
+inverse_state="$TEST_ROOT/fleet/inverse-race-public-000000/app"
+FIXED_TASK_RANDOM=1 SGT_TEST_HOOKS=1 \
+  SGT_TEST_DISPATCH_BEFORE_LAUNCH_LOCK_BARRIER=1 \
+  PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/inverse-race.log" \
+  TD_LOG="$TEST_ROOT/inverse-race-td.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Inverse race public' --repos app \
+  >"$TEST_ROOT/inverse-dispatch.out" 2>&1 & inverse_dispatch_pid=$!
+for _ in $(seq 1 500); do
+  [[ -e "$inverse_state/dispatch-before-launch-lock-ready" ]] && break
+  sleep 0.01
+done
+[[ -e "$inverse_state/dispatch-before-launch-lock-ready" ]]
+PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/inverse-race.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 SGT_TEST_HOOKS=1 \
+  SGT_TEST_SESSION_RESUME_AFTER_COMPLETION_BARRIER=1 \
+  "$ROOT_DIR/bin/sgt-session-resume" inverse-race-public-000000 app --force \
+  >"$TEST_ROOT/inverse-resume.out" 2>&1 & inverse_resume_pid=$!
+for _ in $(seq 1 500); do
+  [[ -e "$inverse_state/session-resume-after-completion-ready" ]] && break
+  sleep 0.01
+done
+[[ -e "$inverse_state/session-resume-after-completion-ready" ]]
+: > "$inverse_state/dispatch-before-launch-lock-release"
+sleep 0.3
+: > "$inverse_state/session-resume-after-completion-release"
+wait "$inverse_resume_pid"
+wait "$inverse_dispatch_pid"
+[[ "$(grep -c '^new-window ' "$TEST_ROOT/inverse-race.log")" -eq 1 ]]
+[[ "$(wc -l < "$inverse_state/worker_process_markers")" -eq 1 ]]
+grep -Fq 'verified peer worker-launch transaction completed' \
+  "$TEST_ROOT/inverse-dispatch.out"
 
 printf 'sgt-dispatch supervisor launch: ok\n'

@@ -72,33 +72,30 @@ chmod +x "$fake_bin/chmod"
 export REAL_CHMOD="$real_chmod"
 cat > "$fake_bin/stat" <<'EOF'
 #!/usr/bin/env bash
-last="${!#}"
-if [[ "$last" == */pane_identity && -n "${LEGACY_IDENTITY_RACE:-}" && \
-  -n "${LEGACY_IDENTITY_RACE_MARKER:-}" ]]; then
-  count_file="${LEGACY_IDENTITY_RACE_MARKER}.count"
-  count=0
-  [[ ! -f "$count_file" ]] || count="$(cat "$count_file")"
-  count=$((count + 1))
-  printf '%s\n' "$count" > "$count_file"
-  if [[ "$count" -eq 3 ]]; then
-    case "$LEGACY_IDENTITY_RACE" in
-      replace-content)
-        printf 'tampered-pane\n' > "$last"
-        chmod 664 "$last"
-        ;;
-      replace-path)
-        rm -f "$last"
-        printf 'tampered-pane\n' > "$last"
-        chmod 664 "$last"
-        ;;
-    esac
-    : > "$LEGACY_IDENTITY_RACE_MARKER"
-  fi
-fi
 exec "$REAL_STAT" "$@"
 EOF
 chmod +x "$fake_bin/stat"
 export REAL_STAT="$real_stat"
+cat > "$TEST_ROOT/legacy-open-race-hook" <<'EOF'
+#!/usr/bin/env bash
+phase="$1"
+path="$2"
+[[ "$phase" == after-open && "$path" == */pane_identity ]] || exit 0
+case "$LEGACY_IDENTITY_RACE" in
+  replace-content)
+    printf 'tampered-pane\n' > "$path"
+    chmod 664 "$path"
+    ;;
+  replace-path)
+    rm -f "$path"
+    printf 'tampered-pane\n' > "$path"
+    chmod 664 "$path"
+    ;;
+  *) exit 1 ;;
+esac
+: > "$LEGACY_IDENTITY_RACE_MARKER"
+EOF
+chmod 700 "$TEST_ROOT/legacy-open-race-hook"
 
 printf 'needs_input\n' > "$worktree/.sergeant-status"
 printf 'Choose a safe option.\n' > "$worktree/.sergeant-message"
@@ -139,11 +136,14 @@ legacy_race_marker="$TEST_ROOT/legacy-pane-race"
 printf 'in_progress\n' > "$worktree/.sergeant-status"
 printf 'in_progress\n' > "$repo/status"
 LEGACY_IDENTITY_RACE=replace-content LEGACY_IDENTITY_RACE_MARKER="$legacy_race_marker" \
+  SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
+  _SGT_OWNED_FILE_OPEN_HOOK="$TEST_ROOT/legacy-open-race-hook" \
   PANE_IDENTITY="$legacy_identity" EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" \
   SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
-[[ "$(cat "$repo/pane_identity")" == "$legacy_identity" ]]
+[[ "$(cat "$repo/status")" == "orphaned" ]]
+[[ "$(cat "$repo/pane_identity")" == "tampered-pane" ]]
 [[ "$(stat -c '%a' "$repo/pane_identity" 2>/dev/null || stat -f '%Lp' "$repo/pane_identity")" == \
-  "600" ]]
+  "664" ]]
 [[ -e "$legacy_race_marker" ]]
 
 printf '%s\n' "$legacy_identity" > "$repo/pane_identity"
@@ -152,6 +152,8 @@ legacy_replace_marker="$TEST_ROOT/legacy-pane-replaced"
 printf 'in_progress\n' > "$worktree/.sergeant-status"
 printf 'in_progress\n' > "$repo/status"
 LEGACY_IDENTITY_RACE=replace-path LEGACY_IDENTITY_RACE_MARKER="$legacy_replace_marker" \
+  SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
+  _SGT_OWNED_FILE_OPEN_HOOK="$TEST_ROOT/legacy-open-race-hook" \
   PANE_IDENTITY="$legacy_identity" EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" \
   SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
 [[ "$(cat "$repo/status")" == "orphaned" ]]

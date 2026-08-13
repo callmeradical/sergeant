@@ -497,7 +497,7 @@ done
 [[ -e "$repo_state/respond-launch-ready" ]]
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/distinct-race.log" \
   TD_LOG="$TEST_ROOT/distinct-race-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
-  PANE_ALIVE=1 PANE_IDENTITY='0|%42|7777|777777|recycled-pane' \
+  PANE_ALIVE=1 NEW_PANE=%100 PANE_IDENTITY='1|%99|7777|777777|dead-pane' \
   EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
   respond 'second distinct response' >"$TEST_ROOT/distinct-second.out" 2>&1 & second_response_pid=$!
 sleep 0.1
@@ -518,6 +518,55 @@ queued_dir="${queued_body%/body}"
 queued_id="${queued_dir##*/}"
 [[ -f "$repo_state/notifications/$queued_id/notification" ]]
 [[ "$(grep -c '^new-window ' "$TEST_ROOT/distinct-race.log")" -eq 1 ]]
+
+# Consumption of the first response while its launch owner still holds the
+# transaction cannot make a distinct waiter disappear. The second body is
+# durably queued and notification-bound before peer-completion success.
+rm -rf "$repo_state/queued_responses"
+rm -f "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" \
+  "$worktree/.sergeant-response-generation" "$repo_state/response" \
+  "$repo_state/response_id" "$repo_state/response_generation" \
+  "$repo_state/respond-after-completion-ready" \
+  "$repo_state/respond-after-completion-release"
+printf 'orphaned\n' > "$worktree/.sergeant-status"
+printf 'orphaned\n' > "$repo_state/status"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/consumed-race.log" \
+  TD_LOG="$TEST_ROOT/consumed-race-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 NEW_PANE=%100 PANE_IDENTITY='1|%99|7777|777777|dead-pane' \
+  EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  SGT_TEST_HOOKS=1 SGT_TEST_RESPOND_AFTER_COMPLETION_BARRIER=1 \
+  respond 'consumed first response' >"$TEST_ROOT/consumed-first.out" 2>&1 & consumed_first_pid=$!
+for _ in $(seq 1 500); do
+  [[ -e "$repo_state/respond-after-completion-ready" ]] && break
+  sleep 0.01
+done
+if [[ ! -e "$repo_state/respond-after-completion-ready" ]]; then
+  cat "$TEST_ROOT/consumed-first.out" >&2
+  exit 1
+fi
+rm -f "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" \
+  "$worktree/.sergeant-response-generation" "$repo_state/response" \
+  "$repo_state/response_id" "$repo_state/response_generation"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/consumed-race.log" \
+  TD_LOG="$TEST_ROOT/consumed-race-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 PANE_IDENTITY='0|%42|7777|777777|recycled-pane' \
+  EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  respond 'durable second response' >"$TEST_ROOT/consumed-second.out" 2>&1 & consumed_second_pid=$!
+sleep 0.1
+: > "$repo_state/respond-after-completion-release"
+wait "$consumed_first_pid"
+wait "$consumed_second_pid"
+consumed_queued_body="$(find "$repo_state/queued_responses" -name body -type f \
+  -print -quit 2>/dev/null || true)"
+if [[ -z "$consumed_queued_body" || \
+  "$(cat "$consumed_queued_body")" != 'durable second response' ]]; then
+  cat "$TEST_ROOT/consumed-first.out" "$TEST_ROOT/consumed-second.out" >&2
+  exit 1
+fi
+consumed_queued_dir="${consumed_queued_body%/body}"
+consumed_queued_id="${consumed_queued_dir##*/}"
+[[ -f "$repo_state/notifications/$consumed_queued_id/notification" ]]
+[[ "$(grep -c '^new-window ' "$TEST_ROOT/consumed-race.log")" -eq 1 ]]
 printf '%%42\n' > "$repo_state/pane"
 printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo_state" \
   > "$repo_state/pane_identity"

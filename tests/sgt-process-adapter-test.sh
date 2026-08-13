@@ -81,10 +81,7 @@ if SGT_TEST_HOOKS=1 SGT_TEST_PROCESS_PLATFORM=Darwin \
 fi
 [[ ! -e "$platform_fail_state/worker_process_marker" && \
   ! -e "$platform_fail_state/worker_process_marker_platform" ]]
-if _sgt_worker_process_marker_preflight "$platform_fail_state" >/dev/null 2>&1; then
-  printf 'portable history without platform/current evidence passed preflight\n' >&2
-  exit 1
-fi
+_sgt_worker_process_marker_preflight "$platform_fail_state"
 portable_state="$TEST_ROOT/portable-state"
 mkdir -p "$portable_state"
 PATH="$TEST_ROOT/bin:$PATH" _sgt_prepare_worker_process_marker "$portable_state"
@@ -92,6 +89,38 @@ grep -Eq '^[0-9a-f]{32}\|[0-9]+:[0-9]+\|0$' \
   "$portable_state/worker_process_markers"
 [[ "$(cat "$portable_state/worker_process_marker_platform")" == \
   'Darwin:no-exact-process-birth' ]]
+
+# A failed portable generation is an all-or-nothing publication. Preserve the
+# complete prior current/history/platform tuple byte-for-byte.
+cp "$portable_state/worker_process_marker" "$TEST_ROOT/portable-current.before"
+cp "$portable_state/worker_process_markers" "$TEST_ROOT/portable-history.before"
+cp "$portable_state/worker_process_marker_platform" "$TEST_ROOT/portable-platform.before"
+if PATH="$TEST_ROOT/bin:$PATH" SGT_TEST_HOOKS=1 \
+  SGT_TEST_PROCESS_PLATFORM=Darwin SGT_TEST_MARKER_PLATFORM_WRITE_FAIL=1 \
+  _sgt_prepare_worker_process_marker "$portable_state"; then
+  printf 'portable marker preparation ignored injected platform failure\n' >&2
+  exit 1
+fi
+cmp "$TEST_ROOT/portable-current.before" "$portable_state/worker_process_marker"
+cmp "$TEST_ROOT/portable-history.before" "$portable_state/worker_process_markers"
+cmp "$TEST_ROOT/portable-platform.before" "$portable_state/worker_process_marker_platform"
+
+# A zero-floor generation is portable evidence even when another exact-looking
+# current generation is selected; omitting its platform proof is malformed.
+zero_floor_state="$TEST_ROOT/zero-floor-state"
+mkdir -p "$zero_floor_state"
+printf '11111111111111111111111111111111|1:2|198|/gone\n' \
+  > "$zero_floor_state/worker_process_marker"
+{
+  printf '00000000000000000000000000000000|3:4|0\n'
+  printf '11111111111111111111111111111111|1:2|123\n'
+} > "$zero_floor_state/worker_process_markers"
+chmod 600 "$zero_floor_state/worker_process_marker" \
+  "$zero_floor_state/worker_process_markers"
+if _sgt_worker_process_marker_preflight "$zero_floor_state" >/dev/null 2>&1; then
+  printf 'zero-floor history without platform evidence passed preflight\n' >&2
+  exit 1
+fi
 portable_command="$(_sgt_worker_command worker "$portable_state" worktree agent)"
 [[ "$portable_command" == exec\ 198\<* ]]
 

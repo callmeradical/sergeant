@@ -206,6 +206,10 @@ printf '%s\n' "$ambiguous_generation" > "$ambiguous_marker"
 ambiguous_identity="$(stat -Lc '%d:%i' "$ambiguous_marker")"
 printf '%s|%s|%s\n' "$ambiguous_generation" "$ambiguous_identity" "$floor" \
   > "$ambiguous_repo/worker_process_markers"
+printf '%s|%s|198|%s\n' "$ambiguous_generation" "$ambiguous_identity" \
+  "$ambiguous_marker" > "$ambiguous_repo/worker_process_marker"
+chmod 600 "$ambiguous_repo/worker_process_marker" \
+  "$ambiguous_repo/worker_process_markers"
 python3 - "$ambiguous_marker" "$TEST_ROOT/ambiguous.pid" <<'PY' &
 import ctypes, os, pathlib, sys, time
 fd = os.open(sys.argv[1], os.O_RDONLY)
@@ -227,18 +231,70 @@ set -e
 kill -KILL "$ambiguous" 2>/dev/null || true
 wait "$ambiguous" 2>/dev/null || true
 
+# Cleanup validates every repository and both marker namespaces before it
+# mutates the first repository. A later torn repository preserves the entire
+# task exactly as it was presented.
+all_preflight_task="$TEST_ROOT/fleet/task-all-preflight"
+all_preflight_valid="$all_preflight_task/a-valid"
+all_preflight_torn="$all_preflight_task/z-torn"
+mkdir -p "$all_preflight_valid" "$all_preflight_torn"
+cat > "$TEST_ROOT/fake-bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *' show '* ]]; then
+  printf '%s\n' 1234567890abcdef1234567890abcdef
+  exit 0
+fi
+printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/systemctl"
+printf 'sgt-watch-task-all-preflight.service\n' > "$all_preflight_task/monitor_unit"
+printf '1234567890abcdef1234567890abcdef\n' \
+  > "$all_preflight_task/monitor_invocation_id"
+printf 'failed: fixture\n' > "$all_preflight_valid/status"
+printf '%s/missing-valid-worktree\n' "$TEST_ROOT" > "$all_preflight_valid/worktree"
+all_generation="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+all_marker="$TEST_ROOT/all-preflight-marker"
+printf '%s\n' "$all_generation" > "$all_marker"
+all_identity="$(stat -Lc '%d:%i' "$all_marker")"
+printf '%s|%s|%s\n' "$all_generation" "$all_identity" "$floor" \
+  > "$all_preflight_valid/worker_process_markers"
+printf '%s|%s|198|%s\n' "$all_generation" "$all_identity" "$all_marker" \
+  > "$all_preflight_valid/worker_process_marker"
+chmod 600 "$all_preflight_valid/worker_process_marker" \
+  "$all_preflight_valid/worker_process_markers"
+printf 'failed: fixture\n' > "$all_preflight_torn/status"
+printf '%s/missing-torn-worktree\n' "$TEST_ROOT" > "$all_preflight_torn/worktree"
+printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|1:2|198|/gone\n' \
+  > "$all_preflight_torn/worker_process_marker"
+chmod 600 "$all_preflight_torn/worker_process_marker"
+find "$all_preflight_task" -type f -print0 | sort -z | \
+  xargs -0 sha256sum > "$TEST_ROOT/all-preflight.before"
+set +e
+all_preflight_output="$(SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  SERGEANT_SYSTEMCTL="$TEST_ROOT/fake-bin/systemctl" \
+  SYSTEMCTL_LOG="$TEST_ROOT/all-preflight-systemctl.log" \
+  "$ROOT/bin/sgt-cleanup" task-all-preflight 2>&1)"
+all_preflight_status=$?
+set -e
+[[ "$all_preflight_status" -ne 0 && \
+  "$all_preflight_output" == *'worker process marker evidence is torn'* ]]
+find "$all_preflight_task" -type f -print0 | sort -z | \
+  xargs -0 sha256sum > "$TEST_ROOT/all-preflight.after"
+cmp "$TEST_ROOT/all-preflight.before" "$TEST_ROOT/all-preflight.after"
+[[ ! -e "$TEST_ROOT/all-preflight-systemctl.log" ]]
+
 # A present history node is never optional merely because it has zero bytes or
 # a torn final record. Cleanup preserves fleet evidence until the secure token
 # parser proves a canonical history.
 assert_cleanup_history_rejected() {
-  local task="$1" expected="$2" output status
+  local task="$1" output status
   set +e
   output="$(SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
     "$ROOT/bin/sgt-cleanup" "$task" 2>&1)"
   status=$?
   set -e
-  [[ "$status" -ne 0 && "$output" == *'fleet evidence preserved'* && \
-    "$output" == *"$expected"* ]]
+  [[ "$status" -ne 0 && \
+    "$output" == *'Cleanup refused: worker process marker evidence is torn'* ]]
   [[ -d "$TEST_ROOT/fleet/$task" ]]
 }
 
@@ -248,7 +304,7 @@ printf 'failed: fixture\n' > "$empty_644/status"
 printf '%s/missing-empty-644\n' "$TEST_ROOT" > "$empty_644/worktree"
 : > "$empty_644/worker_process_markers"
 chmod 644 "$empty_644/worker_process_markers"
-assert_cleanup_history_rejected task-empty-644 'mode must be 0600'
+assert_cleanup_history_rejected task-empty-644
 
 empty_600="$TEST_ROOT/fleet/task-empty-600/repo"
 mkdir -p "$empty_600"
@@ -256,7 +312,7 @@ printf 'failed: fixture\n' > "$empty_600/status"
 printf '%s/missing-empty-600\n' "$TEST_ROOT" > "$empty_600/worktree"
 : > "$empty_600/worker_process_markers"
 chmod 600 "$empty_600/worker_process_markers"
-assert_cleanup_history_rejected task-empty-600 'history is empty'
+assert_cleanup_history_rejected task-empty-600
 
 truncated="$TEST_ROOT/fleet/task-truncated/repo"
 mkdir -p "$truncated"
@@ -264,7 +320,7 @@ printf 'failed: fixture\n' > "$truncated/status"
 printf '%s/missing-truncated\n' "$TEST_ROOT" > "$truncated/worktree"
 printf '11111111111111111111111111111111|1:1|1' > "$truncated/worker_process_markers"
 chmod 600 "$truncated/worker_process_markers"
-assert_cleanup_history_rejected task-truncated 'exactly one terminal LF'
+assert_cleanup_history_rejected task-truncated
 
 # A current marker without its history is torn launch evidence. Cleanup and
 # force-stop must preserve it rather than treating the worker as legacy.
@@ -275,7 +331,7 @@ printf '%s/missing-torn-cleanup\n' "$TEST_ROOT" > "$torn_cleanup/worktree"
 printf '00000000000000000000000000000000|1:1|198|/gone\n' \
   > "$torn_cleanup/worker_process_marker"
 chmod 600 "$torn_cleanup/worker_process_marker"
-assert_cleanup_history_rejected task-torn-cleanup 'marker exists without durable history'
+assert_cleanup_history_rejected task-torn-cleanup
 
 torn_force="$TEST_ROOT/fleet/task-torn-force/repo"
 mkdir -p "$torn_force"

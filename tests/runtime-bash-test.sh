@@ -219,6 +219,10 @@ PATH="$TEST_ROOT/journal-bin:$PATH" \
   _sgt_drain_lock_acquire_fd 8 worker-launch \
     "$TEST_ROOT/journal-state/worker-launch.lock"
 PATH="$TEST_ROOT/journal-bin:$PATH" \
+  _sgt_worker_launch_transaction_begin "$TEST_ROOT/journal-state" 8
+printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|3:4|198|/closed-next\n' \
+  > "$TEST_ROOT/journal-state/worker_process_marker"
+PATH="$TEST_ROOT/journal-bin:$PATH" \
   _sgt_worker_launch_completion_publish "$TEST_ROOT/journal-state" 8
 SGT_DRAIN_LOCK_CONTENDED_NONCE="$_SGT_DRAIN_LOCK_NONCE_8"
 PATH="$TEST_ROOT/journal-bin:$PATH" \
