@@ -81,8 +81,13 @@ printf '%s\n' "$worktree" > "$repo_state/worktree"
 printf 'needs_input\n' > "$repo_state/status"
 printf 'needs_input\n' > "$worktree/.sergeant-status"
 
-printf 'Bash 3.2 response' | SERGEANT_FLEET="$fleet" \
-  "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" task-1 app >/dev/null
+set +e
+bash32_response_output="$(printf 'Bash 3.2 response' | SERGEANT_FLEET="$fleet" \
+  "$minimum_bash" "$ROOT_DIR/bin/sgt-respond" task-1 app 2>&1)"
+bash32_response_status=$?
+set -e
+[[ "$bash32_response_status" -ne 0 &&
+   "$bash32_response_output" == *'relaunch metadata is incomplete'* ]]
 [[ "$(cat "$repo_state/response")" == 'Bash 3.2 response' ]]
 [[ "$(cat "$worktree/.sergeant-response")" == 'Bash 3.2 response' ]]
 [[ ! -e "$repo_state/response.lock" && ! -L "$repo_state/response.lock" ]]

@@ -459,20 +459,27 @@ fi
 }
 
 # Missing relaunch metadata is not a lease-adjudication bypass. A dead old
-# generation is fenced before the durable fallback is published; a live owner
-# refuses without replacing the old notification.
+# generation is fenced before durable response evidence is published, but the
+# CLI still returns actionable nonzero because no worker was relaunched. A live
+# owner refuses without replacing the old notification.
 read -r state wt <<<"$(make_worktree respond-incomplete-metadata-dead)"
 task=task-respond-incomplete-metadata-dead
 setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 rm -f "$state/agent"
-printf 'resume via durable fallback' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
-  SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" PANE_ALIVE=0 \
-  "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1
+set +e
+incomplete_output="$(printf 'resume via durable fallback' | PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" PANE_ALIVE=0 \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app 2>&1)"
+incomplete_status=$?
+set -e
+[[ "$incomplete_status" -ne 0 &&
+   "$incomplete_output" == *'relaunch metadata is incomplete'* ]]
 [[ -s "$state/notifications/$NOTIFY/action_lease_abandoned" ]]
 [[ -s "$state/notifications/$NOTIFY/ownership_transition" ]]
 [[ "$(cat "$state/notification_id")" != "$NOTIFY" ]]
 [[ ! -e "$state/notifications/$NOTIFY/targets/$NONCE/completed" ]]
+[[ "$(cat "$state/response")" == 'resume via durable fallback' ]]
 
 read -r state wt <<<"$(make_worktree respond-incomplete-metadata-live)"
 task=task-respond-incomplete-metadata-live

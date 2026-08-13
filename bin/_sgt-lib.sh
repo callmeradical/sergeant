@@ -826,7 +826,7 @@ _sgt_process_marker_command() {
   [[ "$generation" =~ ^[0-9a-f]{32}$ && "$identity" =~ ^[0-9]+:[0-9]+$ &&
     "$fd" == 198 && -n "$path" ]] || return 1
   # shellcheck disable=SC2016  # Expanded by the launched worker shell, not here.
-  printf -v command 'exec 198<%q && { [[ "${SGT_KEEP_WORKER_MARKER_PATH:-}" == 1 ]] || rm -f %q; } && exec' \
+  printf -v command 'exec 198<%q && rm -f %q && exec' \
     "$path" "$path"
   for argument in "$@"; do
     printf -v command '%s %q' "$command" "$argument"
@@ -877,7 +877,7 @@ _sgt_worker_process_marker_state_digest() {
   printf '%s\n' "$tuple_digest"
 }
 _sgt_validate_inherited_worker_marker() {
-  local repo_dir="$1" marker generation identity fd path actual_identity actual_generation extra digest retained=false
+  local repo_dir="$1" marker generation identity fd path actual_identity actual_generation extra digest
   _sgt_worker_process_marker_preflight "$repo_dir" || return 1
   marker="$(_sgt_read_owned_file \
     "$repo_dir/worker_process_marker" 2>/dev/null || true)"
@@ -890,21 +890,13 @@ _sgt_validate_inherited_worker_marker() {
     "$fd" == 198 && -n "$path" ]] || return 1
   actual_identity="$(_sgt_fd_identity 198 2>/dev/null || true)"
   [[ "$actual_identity" == "$identity" ]] || return 1
-  if [[ -e "$path" || -L "$path" ]]; then
-    [[ "${SGT_KEEP_WORKER_MARKER_PATH:-}" == 1 && -f "$path" && ! -L "$path" &&
-       "$path" -ef /dev/fd/198 ]] || return 1
-    retained=true
-  fi
+  [[ ! -e "$path" && ! -L "$path" ]] || return 1
   IFS= read -r actual_generation <&198 || return 1
   [[ "$actual_generation" == "$generation" ]] || return 1
   if IFS= read -r extra <&198; then
     return 1
   fi
-  if $retained; then
-    [[ -f "$path" && ! -L "$path" && "$path" -ef /dev/fd/198 ]] || return 1
-  else
-    [[ ! -e "$path" && ! -L "$path" ]] || return 1
-  fi
+  [[ ! -e "$path" && ! -L "$path" ]] || return 1
 }
 _sgt_prepare_worker_process_marker() {
   local repo_dir="$1" path generation identity marker launch_identity launch_floor history history_tmp history_backup="" history_lines history_has_portable platform platform_record="" desired_platform="" portable_marker=false old_history_present=false

@@ -309,7 +309,11 @@ def enumerate_portable_holders(markers, target_pid=None, descriptor_details=Fals
             return
         if (pid is None or not descriptor.isdecimal() or
                 device is None or inode is None):
-            fail("portable lsof marker evidence is incomplete")
+            # An unrelated descriptor can close while lsof is collecting its
+            # system-wide snapshot.  It contributes no ownership proof; the
+            # required marker descriptor must appear in two complete scans.
+            descriptor = device = inode = name = None
+            return
         identity = (device, inode)
         if identity in markers:
             if descriptor_details:
@@ -353,45 +357,22 @@ def enumerate_portable_holders(markers, target_pid=None, descriptor_details=Fals
     return owners
 
 
-def portable_descriptor_holds_generation(pid, generation, identity):
-    """Read and revalidate the exact lsof-attributed marker descriptor."""
-    marker = {identity: (generation, 0)}
-    holders = enumerate_portable_holders(
-        marker, pid, descriptor_details=True
+def portable_descriptor_is_exclusive(history, pid, generation, identity):
+    """Bind an unlinked descriptor to its durable generation and sole holder."""
+    markers = load_markers(history)
+    if markers.get(identity) != (generation, 0):
+        fail("portable marker claim is absent from durable worker history")
+    target = enumerate_portable_holders(
+        {identity: (generation, 0)}, pid, descriptor_details=True
     )
-    descriptors = holders.get(pid, {}).get(identity, set())
-    expected = (generation + "\n").encode("ascii")
-    for descriptor, name in descriptors:
-        candidates = []
-        if not (os.environ.get("SGT_TEST_HOOKS") == "1" and
-                os.environ.get("SGT_TEST_PORTABLE_CHECK_NO_PROC") == "1"):
-            candidates.append(f"/proc/{pid}/fd/{descriptor}")
-        if name and name.startswith("/") and "\n" not in name:
-            candidates.append(name)
-        for candidate in candidates:
-            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-            if not candidate.startswith("/proc/"):
-                flags |= getattr(os, "O_NOFOLLOW", 0)
-            try:
-                opened_fd = os.open(candidate, flags)
-            except (FileNotFoundError, PermissionError, OSError):
-                continue
-            try:
-                before = os.fstat(opened_fd)
-                if (before.st_dev, before.st_ino) != identity:
-                    continue
-                content = os.read(opened_fd, len(expected) + 1)
-                after = os.fstat(opened_fd)
-                if (after.st_dev, after.st_ino) != identity or content != expected:
-                    continue
-            finally:
-                os.close(opened_fd)
-            confirmed = enumerate_portable_holders(
-                marker, pid, descriptor_details=True
-            ).get(pid, {}).get(identity, set())
-            if any(current_fd == descriptor for current_fd, _ in confirmed):
-                return True
-    return False
+    descriptors = target.get(pid, {}).get(identity, set())
+    if not any(descriptor == 198 for descriptor, _ in descriptors):
+        fail("portable marker capability is not held on durable worker fd198")
+    expected = {pid: {identity}}
+    holders = enumerate_portable_holders({identity: (generation, 0)})
+    confirmed = enumerate_portable_holders({identity: (generation, 0)})
+    if holders != expected or confirmed != expected:
+        fail("portable marker capability is absent, cloned, or unverifiable")
 
 
 def load_expected(path):
@@ -530,18 +511,16 @@ def compact_portable(path, markers):
 
 
 def main():
-    if len(sys.argv) == 5 and sys.argv[1] == "portable-check":
-        pid_text, generation, identity = sys.argv[2:]
+    if len(sys.argv) == 6 and sys.argv[1] == "portable-check":
+        history, pid_text, generation, identity = sys.argv[2:]
         if (not pid_text.isdigit() or int(pid_text) <= 0 or
                 not re.fullmatch(r"[0-9a-f]{32}", generation) or
                 not re.fullmatch(r"[0-9]+:[0-9]+", identity)):
             fail("invalid portable worker marker check request")
         marker_identity = tuple(map(int, identity.split(":")))
-        if not portable_descriptor_holds_generation(
-                int(pid_text), generation, marker_identity):
-            fail(
-                f"portable worker marker generation is not held by pane PID {pid_text}"
-            )
+        portable_descriptor_is_exclusive(
+            history, int(pid_text), generation, marker_identity
+        )
         return
     if len(sys.argv) == 6 and sys.argv[1] == "check":
         history, pid_text, start, identity = sys.argv[2:]

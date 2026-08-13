@@ -824,6 +824,34 @@ set -e
 [[ "$(cat "$worktree/.sergeant-gate-generation")" == '1' ]]
 [[ "$(cat "$repo_state/response_generation")" == '1' ]]
 
+# A dead worker without exact relaunch metadata remains actionable.  Storing a
+# durable response and notification is useful evidence, but it is not a resume:
+# the public CLI must return nonzero and say which metadata prevents relaunch.
+saved_tmux_session="$(cat "$repo_state/tmux_session")"
+saved_window_name="$(cat "$repo_state/window_name")"
+saved_agent="$(cat "$repo_state/agent")"
+rm -f "$repo_state/tmux_session" "$repo_state/window_name" "$repo_state/agent" \
+  "$worktree/.sergeant-response" "$worktree/.sergeant-response-generation" \
+  "$repo_state/response" "$repo_state/response_generation" "$repo_state/response_id" \
+  "$repo_state/notification_id" "$repo_state/notification_target"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/missing-relaunch-metadata.log" \
+  TD_LOG="$TEST_ROOT/missing-relaunch-metadata-td.log" PANE_ALIVE=0 \
+  SERGEANT_FLEET="$fleet" respond 'preserve orphan response' 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]] || {
+  printf 'MISSING_RELAUNCH_METADATA_CLAIMED_RESUMED\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$output" == *'relaunch metadata is incomplete'* ]]
+[[ "$(cat "$worktree/.sergeant-response")" == 'preserve orphan response' ]]
+[[ "$(cat "$repo_state/response")" == 'preserve orphan response' ]]
+[[ -s "$repo_state/notification_id" ]]
+printf '%s\n' "$saved_tmux_session" > "$repo_state/tmux_session"
+printf '%s\n' "$saved_window_name" > "$repo_state/window_name"
+printf '%s\n' "$saved_agent" > "$repo_state/agent"
+
 original_worktree="$worktree"
 for invalid_path in '' "$TEST_ROOT/missing-worktree"; do
   printf '%s\n' "$invalid_path" > "$repo_state/worktree"

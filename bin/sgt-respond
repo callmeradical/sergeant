@@ -535,7 +535,8 @@ if [[ -f "$existing_relaunch_transaction" ]] &&
   joined_current_identity="$(_sgt_read_owned_file \
     "$REPO_DIR/pane_identity" 2>/dev/null || true)"
   joined_live_auth="$(_sgt_replacement_pane_auth "$joined_pane" \
-    "$_SGT_TRANSFER_SPAWN_TOKEN" "$_SGT_TRANSFER_WORKER_ROLE" 2>/dev/null || true)"
+    "$_SGT_TRANSFER_SPAWN_TOKEN" "$_SGT_TRANSFER_WORKER_ROLE" "$REPO_DIR" \
+    2>/dev/null || true)"
   joined_identity_matches=false
   _sgt_pane_identity_matches "$joined_pane" "$REPO_DIR" && joined_identity_matches=true
   if [[ "$joined_response_id" == "$response_id" &&
@@ -729,8 +730,7 @@ if ! command -v tmux >/dev/null 2>&1 || [[ -z "$tmux_session" || -z "$window_nam
   fallback_notification_id="${delivery_notification_id:-$response_id}"
   _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$fallback_notification_id" response \
     "Apply the response in .sergeant-response exactly once using the acknowledgement protocol in .sergeant-brief.md."
-  echo "sgt-respond: no live local pane and relaunch metadata is incomplete; response file is ready."
-  exit 0
+  _die "No live local pane and relaunch metadata is incomplete; the durable response and notification are preserved but the worker was not resumed. Restore exact tmux_session, window_name, and agent evidence, then rerun: sgt-respond $TASK_ID $REPO"
 fi
 
 # ── Drain admission check for worker relaunch ─────────────────────────────────
@@ -870,7 +870,7 @@ fi
 set +e
 new_pane="$(_sgt_replacement_discover_pane "$replacement_window_name" \
   "$replacement_spawn_token" "$worker_role" "$_SGT_TRANSFER_PHASE" \
-  "$_SGT_TRANSFER_PANE" "$_SGT_TRANSFER_PANE_AUTH" 2>/dev/null)"
+  "$_SGT_TRANSFER_PANE" "$_SGT_TRANSFER_PANE_AUTH" "$REPO_DIR" 2>/dev/null)"
 discovery_status=$?
 set -e
 [[ "$discovery_status" -ne 2 ]] || \
@@ -907,7 +907,7 @@ fi
 _transfer_interrupt_hook replacement_spawned
 if pane_identity="$(_sgt_pane_identity "$new_pane")" && \
     pane_auth="$(_sgt_replacement_pane_identity_matches "$pane_identity" "$new_pane" \
-      "$replacement_spawn_token" "$worker_role")"; then
+      "$replacement_spawn_token" "$worker_role" "$REPO_DIR")"; then
   _write_relaunch_transaction spawned "$new_pane" "$pane_auth" || \
     _die "Could not publish spawned worker ownership transaction"
   printf '%s\n' "$new_pane" > "$REPO_DIR/pane"

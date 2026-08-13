@@ -112,17 +112,44 @@ fi
 # must neither fall back to second-resolution ps identity nor signal a PID/group.
 portable_token=abcdefabcdefabcdefabcdefabcdefab
 portable_role=worker:portable-auth
-portable_generation=1234567890abcdef1234567890abcdef
-portable_marker="$TEST_ROOT/portable-marker"
-printf '%s\n' "$portable_generation" > "$portable_marker"
-chmod 400 "$portable_marker"
-portable_identity="$(stat -Lc '%d:%i' "$portable_marker" 2>/dev/null || \
-  stat -f '%d:%i' "$portable_marker")"
-portable_marker_record="$portable_generation|$portable_identity|198|$portable_marker"
-portable_command="$(printf '%q %q %q %q %q %q %q %q %q' env \
+portable_state="$TEST_ROOT/portable-state"
+mkdir -p "$portable_state"
+SGT_TEST_HOOKS=1 SGT_TEST_PROCESS_IDENTITY_UNAVAILABLE=1 \
+  SGT_TEST_PROCESS_PLATFORM=Darwin \
+  _sgt_prepare_worker_process_marker "$portable_state"
+portable_marker_record="$(_sgt_read_owned_file "$portable_state/worker_process_marker")"
+IFS='|' read -r portable_generation portable_identity _ portable_marker \
+  <<< "$portable_marker_record"
+
+# A readable marker name makes the capability cloneable.  A foreign pane that
+# opens the exact durable marker before the launcher unlinks it and then forges
+# every pane option must not become the replacement owner. Authentication is
+# valid only after the durable pathname is retired and the candidate alone
+# holds that exact durable inode on fd198.
+clone_token=abababababababababababababababab
+clone_role=worker:portable-clone
+clone_command="$(printf '%q %q %q' /bin/bash -c \
+  "exec 196<$(printf '%q' "$portable_marker"); exec sleep 60")"
+clone_pane="$(tmux new-window -d -P -F '#{pane_id}' \
+  -t "$session:" -n portable-clone "$clone_command")"
+clone_pid="$(tmux display-message -p -t "$clone_pane" '#{pane_pid}')"
+tmux set-option -p -t "$clone_pane" @sergeant_replacement_token "$clone_token" \; \
+  set-option -p -t "$clone_pane" @sergeant_replacement_role "$clone_role" \; \
+  set-option -p -t "$clone_pane" @sergeant_replacement_pid "$clone_pid" \; \
+  set-option -p -t "$clone_pane" @sergeant_replacement_start \
+    "portable:$portable_generation:$portable_identity"
+clone_identity="$(_sgt_pane_identity "$clone_pane")"
+if _sgt_replacement_pane_identity_matches "$clone_identity" "$clone_pane" \
+    "$clone_token" "$clone_role" "$portable_state"; then
+  printf 'PORTABLE_REPLACEMENT_AUTHENTICATED_CLONED_CAPABILITY\n' >&2
+  exit 1
+fi
+tmux kill-pane -t "$clone_pane"
+portable_command="$(printf '%q %q %q %q %q %q %q %q %q %q' env \
   SGT_TEST_HOOKS=1 SGT_TEST_PROCESS_START_UNAVAILABLE=1 \
   "$ROOT_DIR/bin/sgt-replacement-launch" "$portable_token" "$portable_role" \
-  "$portable_marker_record" /bin/sleep 60)"
+  "$portable_marker_record" /bin/bash -c \
+  "exec 198<$(printf '%q' "$portable_marker"); rm -f $(printf '%q' "$portable_marker"); exec sleep 60")"
 portable_pane="$(tmux new-window -d -P -F '#{pane_id}' \
   -t "$session:" -n portable-replacement "$portable_command")"
 for _ in $(seq 1 100); do
@@ -135,14 +162,43 @@ done
   printf 'PORTABLE_REPLACEMENT_LAUNCH_DID_NOT_PUBLISH_MARKER_CAPABILITY\n' >&2
   exit 1
 }
+[[ ! -e "$portable_marker" && ! -L "$portable_marker" ]] || {
+  printf 'PORTABLE_REPLACEMENT_RETAINED_READABLE_MARKER\n' >&2
+  exit 1
+}
 portable_pane_identity="$(_sgt_pane_identity "$portable_pane")"
 portable_auth="$(SGT_TEST_HOOKS=1 SGT_TEST_PORTABLE_CHECK_NO_PROC=1 \
   _sgt_replacement_pane_identity_matches "$portable_pane_identity" \
-    "$portable_pane" "$portable_token" "$portable_role")" || {
+    "$portable_pane" "$portable_token" "$portable_role" "$portable_state")" || {
   printf 'PORTABLE_REPLACEMENT_ADOPTION_REFUSED\n' >&2
   exit 1
 }
 [[ "$portable_auth" == "$portable_pane|"*"|portable:$portable_generation:$portable_identity|$portable_token|$portable_role" ]]
+
+# Matching bytes are not the durable capability. A foreign pane holding its
+# own same-generation file on fd198 cannot authenticate by claiming the
+# durable marker's dev/inode in its pane options.
+copy_marker="$TEST_ROOT/portable-marker-copy"
+printf '%s\n' "$portable_generation" > "$copy_marker"
+chmod 400 "$copy_marker"
+copy_token=acacacacacacacacacacacacacacacac
+copy_role=worker:portable-copy
+copy_command="$(printf '%q %q %q' /bin/bash -c \
+  "exec 198<$(printf '%q' "$copy_marker"); rm -f $(printf '%q' "$copy_marker"); exec sleep 60")"
+copy_pane="$(tmux new-window -d -P -F '#{pane_id}' \
+  -t "$session:" -n portable-copy "$copy_command")"
+copy_pid="$(tmux display-message -p -t "$copy_pane" '#{pane_pid}')"
+tmux set-option -p -t "$copy_pane" @sergeant_replacement_token "$copy_token" \; \
+  set-option -p -t "$copy_pane" @sergeant_replacement_role "$copy_role" \; \
+  set-option -p -t "$copy_pane" @sergeant_replacement_pid "$copy_pid" \; \
+  set-option -p -t "$copy_pane" @sergeant_replacement_start \
+    "portable:$portable_generation:$portable_identity"
+copy_identity="$(_sgt_pane_identity "$copy_pane")"
+if _sgt_replacement_pane_identity_matches "$copy_identity" "$copy_pane" \
+    "$copy_token" "$copy_role" "$portable_state"; then
+  printf 'PORTABLE_REPLACEMENT_AUTHENTICATED_SAME_BYTES_COPY\n' >&2
+  exit 1
+fi
 
 # Pane-local options are claims, not the portable capability itself.  A process
 # that closes the launcher's inherited marker FD cannot be adopted even when it
@@ -163,7 +219,7 @@ for _ in $(seq 1 100); do
 done
 closed_identity="$(_sgt_pane_identity "$closed_pane")"
 if _sgt_replacement_pane_identity_matches "$closed_identity" "$closed_pane" \
-    "$closed_token" "$closed_role"; then
+    "$closed_token" "$closed_role" "$portable_state"; then
   printf 'PORTABLE_REPLACEMENT_AUTHENTICATED_CLOSED_CAPABILITY\n' >&2
   exit 1
 fi
@@ -182,7 +238,7 @@ tmux set-option -p -t "$forged_pane" @sergeant_replacement_token "$forged_token"
     "portable:$portable_generation:$portable_identity"
 forged_identity="$(_sgt_pane_identity "$forged_pane")"
 if _sgt_replacement_pane_identity_matches "$forged_identity" "$forged_pane" \
-    "$forged_token" "$forged_role"; then
+    "$forged_token" "$forged_role" "$portable_state"; then
   printf 'PORTABLE_REPLACEMENT_AUTHENTICATED_FORGED_OPTIONS\n' >&2
   exit 1
 fi
@@ -205,7 +261,7 @@ tmux set-option -p -t "$wrong_pane" @sergeant_replacement_token "$wrong_token" \
     "portable:$wrong_generation:$portable_identity"
 wrong_identity="$(_sgt_pane_identity "$wrong_pane")"
 if _sgt_replacement_pane_identity_matches "$wrong_identity" "$wrong_pane" \
-    "$wrong_token" "$wrong_role"; then
+    "$wrong_token" "$wrong_role" "$portable_state"; then
   printf 'PORTABLE_REPLACEMENT_AUTHENTICATED_FALSE_GENERATION\n' >&2
   exit 1
 fi
@@ -225,22 +281,22 @@ if _sgt_replacement_pane_identity_matches \
   exit 1
 fi
 
-# The portable launch keeps its immutable marker name so a Darwin lsof-resolved
-# descriptor can be opened.  The worker-side inherited-capability validation
-# accepts that retained name only when it is the exact fd198 inode.
-retained_state="$TEST_ROOT/retained-portable-state"
+# The worker inherits the marker on fd198 and validates it only after the
+# pathname has been unlinked; a readable retained name is never required.
+retained_state="$TEST_ROOT/unlinked-portable-state"
 mkdir -p "$retained_state"
 SGT_TEST_HOOKS=1 SGT_TEST_PROCESS_IDENTITY_UNAVAILABLE=1 \
   SGT_TEST_PROCESS_PLATFORM=Darwin \
   _sgt_prepare_worker_process_marker "$retained_state"
 retained_record="$(_sgt_read_owned_file "$retained_state/worker_process_marker")"
 retained_path="${retained_record##*|}"
-SGT_KEEP_WORKER_MARKER_PATH=1 bash -c '
+bash -c '
   source "$1"
   exec 198< "$3"
+  rm -f "$3"
   _sgt_validate_inherited_worker_marker "$2"
 ' _ "$ROOT_DIR/bin/_sgt-lib.sh" "$retained_state" "$retained_path" || {
-  printf 'PORTABLE_RETAINED_MARKER_REFUSED_BY_WORKER\n' >&2
+  printf 'PORTABLE_UNLINKED_MARKER_REFUSED_BY_WORKER\n' >&2
   exit 1
 }
 

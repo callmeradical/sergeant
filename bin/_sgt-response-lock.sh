@@ -386,7 +386,8 @@ _sgt_replacement_worker_command() {
 
 _sgt_replacement_pane_auth() {
   local pane="$1" expected_token="$2" expected_role="$3"
-  local evidence current current_start
+  local repo_state="${4:-}"
+  local evidence current confirmed current_start
   local marker_dead marker_pane marker_pid marker_command marker_token marker_role marker_option_pid marker_start
   local portable_start_re='^portable:[a-f0-9]{32}:[0-9]+:[0-9]+$'
   [[ "$pane" =~ ^%[0-9]+$ ]] || return 1
@@ -414,18 +415,41 @@ _sgt_replacement_pane_auth() {
     current_start="$(_sgt_process_start_token "$marker_pid")" || return 1
     [[ "$marker_start" == "$current_start" ]] || return 1
   elif [[ "$marker_start" =~ $portable_start_re ]]; then
-    local portable_generation portable_identity
+    local portable_generation portable_identity current_marker portable_valid=false
+    local current_generation current_identity current_fd current_path
     portable_generation="${marker_start#portable:}"
     portable_identity="${portable_generation#*:}"
     portable_generation="${portable_generation%%:*}"
+    [[ -n "$repo_state" ]] || return 1
     command -v python3 >/dev/null 2>&1 || return 1
-    python3 "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/_sgt-process-token.py" portable-check \
-      "$marker_pid" "$portable_generation" "$portable_identity" \
-      >/dev/null 2>&1 || return 1
+    for _ in $(seq 1 "${SGT_REPLACEMENT_MARKER_ATTEMPTS:-100}"); do
+      _sgt_worker_process_marker_preflight "$repo_state" >/dev/null 2>&1 || return 1
+      current_marker="$(_sgt_read_owned_file \
+        "$repo_state/worker_process_marker" 2>/dev/null)" || return 1
+      IFS='|' read -r current_generation current_identity current_fd current_path \
+        <<< "$current_marker"
+      [[ "$current_generation" == "$portable_generation" &&
+         "$current_identity" == "$portable_identity" && "$current_fd" == 198 &&
+         -n "$current_path" ]] || return 1
+      if [[ ! -e "$current_path" && ! -L "$current_path" ]]; then
+        if python3 "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/_sgt-process-token.py" portable-check \
+            "$repo_state/worker_process_markers" "$marker_pid" \
+            "$portable_generation" "$portable_identity" >/dev/null 2>&1; then
+          portable_valid=true
+        fi
+        break
+      fi
+      sleep "${SGT_REPLACEMENT_MARKER_INTERVAL:-0.01}"
+    done
+    $portable_valid || return 1
     current_start="$marker_start"
   else
     return 1
   fi
+  confirmed="$(tmux display-message -p -t "$pane" \
+    '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_current_command}|#{@sergeant_replacement_token}|#{@sergeant_replacement_role}|#{@sergeant_replacement_pid}|#{@sergeant_replacement_start}' \
+    2>/dev/null)" || return 1
+  [[ "$confirmed" == "$current" ]] || return 1
   [[ "$marker_dead" == 0 && "$marker_pane" == "$pane" && "$marker_pid" =~ ^[1-9][0-9]*$ &&
      -n "$marker_command" && "$marker_token" == "$expected_token" &&
      "$marker_role" == "$expected_role" && "$marker_option_pid" == "$marker_pid" &&
@@ -435,12 +459,13 @@ _sgt_replacement_pane_auth() {
 
 _sgt_replacement_pane_identity_matches() {
   local expected_identity="$1" pane="$2" token="$3" role="$4"
+  local repo_state="${5:-}"
   local after auth identity_dead identity_pane identity_pid
   local auth_pane auth_pid auth_start auth_token auth_role
   IFS='|' read -r identity_dead identity_pane identity_pid _ <<< "$expected_identity"
   [[ "$identity_dead" == 0 && "$identity_pane" == "$pane" &&
      "$identity_pid" =~ ^[1-9][0-9]*$ ]] || return 1
-  auth="$(_sgt_replacement_pane_auth "$pane" "$token" "$role")" || return 1
+  auth="$(_sgt_replacement_pane_auth "$pane" "$token" "$role" "$repo_state")" || return 1
   IFS='|' read -r auth_pane auth_pid auth_start auth_token auth_role <<< "$auth"
   [[ "$auth_pane" == "$pane" && "$auth_pid" == "$identity_pid" &&
      -n "$auth_start" && "$auth_token" == "$token" && "$auth_role" == "$role" ]] || return 1
@@ -486,6 +511,7 @@ _sgt_tmux_pane_presence() {
 _sgt_replacement_discover_pane() {
   local window_name="$1" token="$2" role="$3" phase="$4"
   local journal_pane="$5" journal_auth="$6"
+  local repo_state="${7:-}"
   local inventory_file line candidate candidate_window candidate_auth
   local authenticated="" pane_count=0 seen_panes="|" parse_status=0
   inventory_file="$(mktemp "${TMPDIR:-/tmp}/sgt-pane-inventory.XXXXXX")" || return 2
@@ -509,7 +535,8 @@ _sgt_replacement_discover_pane() {
     seen_panes="${seen_panes}${candidate}|"
     [[ "$candidate_window" == "$window_name" ]] || continue
     pane_count=$((pane_count + 1))
-    candidate_auth="$(_sgt_replacement_pane_auth "$candidate" "$token" "$role" 2>/dev/null || true)"
+    candidate_auth="$(_sgt_replacement_pane_auth "$candidate" "$token" "$role" \
+      "$repo_state" 2>/dev/null || true)"
     if [[ -n "$candidate_auth" ]] &&
         { [[ "$phase" == bound || "$phase" == fenced || "$phase" == spawning ]] ||
           [[ "$journal_pane" == "$candidate" && "$journal_auth" == "$candidate_auth" ]]; }; then
@@ -653,7 +680,7 @@ _sgt_transfer_journal_ack_completed_handshake() {
      "$(cat "$repo_state/pane" 2>/dev/null || true)" == "$pane" ]] || return 1
   _sgt_pane_identity_matches "$pane" "$repo_state" || return 1
   live_auth="$(_sgt_replacement_pane_auth "$pane" "$spawn_token" "$worker_role" \
-    2>/dev/null || true)"
+    "$repo_state" 2>/dev/null || true)"
   [[ -n "$pane_auth" && "$live_auth" == "$pane_auth" ]] || return 1
   nonce="$(cat "$repo_state/notification_target" 2>/dev/null || true)"
   [[ "$nonce" =~ ^[a-f0-9]{32}$ &&

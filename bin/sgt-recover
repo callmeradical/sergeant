@@ -518,7 +518,7 @@ new_pane=""
 set +e
 new_pane="$(_sgt_replacement_discover_pane "$replacement_window_name" \
   "$replacement_spawn_token" "$worker_role" "$_SGT_TRANSFER_PHASE" \
-  "$_SGT_TRANSFER_PANE" "$_SGT_TRANSFER_PANE_AUTH" 2>/dev/null)"
+  "$_SGT_TRANSFER_PANE" "$_SGT_TRANSFER_PANE_AUTH" "$REPO_DIR" 2>/dev/null)"
 discovery_status=$?
 set -e
 [[ "$discovery_status" -ne 2 ]] || \
@@ -584,7 +584,7 @@ _abort_replacement() {
 pane_identity=""
 if pane_identity="$(_sgt_pane_identity "$new_pane")" && \
     pane_auth="$(_sgt_replacement_pane_identity_matches "$pane_identity" "$new_pane" \
-      "$replacement_spawn_token" "$worker_role")"; then
+      "$replacement_spawn_token" "$worker_role" "$REPO_DIR")"; then
   recovery_install_phase=spawned
   if _sgt_transfer_journal_read "$relaunch_transaction" &&
       [[ "$_SGT_TRANSFER_PHASE" == acked ]]; then
