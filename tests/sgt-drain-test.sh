@@ -821,10 +821,12 @@ cat > "$TEST_ROOT/portable-bin/python3" <<'EOF'
 # portable-marker fixture; production dependency checks are covered elsewhere.
 if [[ "$1" == */_sgt-marker-history.py ]]; then
   if [[ "$2" == --fd ]]; then
+    [[ "$#" -eq 5 && "$3" =~ ^[0-9]+$ ]] || exit 1
     descriptor_mode=true
     fd="$3" marker="$5"
     history="$(cat <&"$fd")"
   else
+    [[ "$#" -eq 3 ]] || exit 1
     descriptor_mode=false
     history="$(cat "$2")"
     marker="${3:-}"
@@ -844,10 +846,12 @@ if [[ "$1" == */_sgt-marker-history.py ]]; then
   fi
   exit 0
 fi
-if [[ "$1" == */_sgt-process-token.py && "$2" == portable-holders ]]; then
+if [[ "$1" == */_sgt-process-token.py && "$2" == portable-holders && "$#" -eq 3 ]]; then
   exit 0
 fi
+[[ "$1" == */_sgt-verify-owned-fd.py && ( "$#" -eq 4 || "$#" -eq 5 ) ]] || exit 1
 fd="$2" operation="${5:-validate}"
+[[ "$fd" =~ ^[0-9]+$ && -n "$3" && "$4" == 600 ]] || exit 1
 case "$operation" in
   read)
     IFS= read -r value <&"$fd" || exit 1
@@ -859,6 +863,12 @@ case "$operation" in
 esac
 EOF
 chmod +x "$TEST_ROOT/portable-bin/python3"
+if "$TEST_ROOT/portable-bin/python3" /unrecognized/script.py >/dev/null 2>&1 ||
+   "$TEST_ROOT/portable-bin/python3" \
+     "$ROOT_DIR/bin/_sgt-verify-owned-fd.py" bad-fd /tmp/file 600 >/dev/null 2>&1; then
+  printf 'Bash 3.2 Python dependency shim accepted an unrecognized invocation\n' >&2
+  exit 1
+fi
 fi
 chmod +x "$TEST_ROOT/portable-bin/lsof" "$TEST_ROOT/portable-bin/tmux"
 rc=0

@@ -221,25 +221,32 @@ _sgt_drain_process_start() {
 # second-resolution timestamp is never promoted to an exact process identity.
 # Callers must retain a live PID when the field is unsupported or differs.
 _sgt_drain_legacy_process_start() {
-  local pid="$1" table value
+  local pid="$1" table value variant
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  table="$(ps -o pid=,lstart= 2>/dev/null)" || return 1
-  value="$(printf '%s\n' "$table" | awk -v target="$pid" '
-    $1 == target {
-      $1 = ""
-      sub(/^[[:space:]]+/, "")
-      value = $0
-      count++
-    }
-    END {
-      if (count == 1 && value != "") print value
-      else exit 1
-    }
-  ')" || return 1
-  [[ -n "$value" ]] || return 1
-  printf '%s\n' "$value"
+  for variant in gnu bsd; do
+    case "$variant" in
+      gnu) table="$(ps -A -o pid=,lstart= 2>/dev/null)" || continue ;;
+      bsd) table="$(ps -axo pid=,lstart= 2>/dev/null)" || continue ;;
+    esac
+    value="$(printf '%s\n' "$table" | awk -v target="$pid" '
+      $1 == target {
+        $1 = ""
+        sub(/^[[:space:]]+/, "")
+        value = $0
+        count++
+      }
+      END {
+        if (count == 1 && value != "") print value
+        else exit 1
+      }
+    ')" || continue
+    [[ -n "$value" ]] || continue
+    printf '%s\n' "$value"
+    return 0
+  done
+  return 1
 }
 
 # _sgt_drain_snapshot_field <snapshot> <field>
