@@ -714,17 +714,30 @@ _rollback_dispatch_mutations() {
         fi
         ;;
     esac
-    $entry_failed && owned_cleanup_failed=true
-    if ! $entry_failed && [[ ! -s "$repo_state/pane" ]]; then
+    if $entry_failed; then
+      owned_cleanup_failed=true
       case "$repo_state" in
-        "$TASK_DIR"/*) rm -rf "$repo_state" ;;
-        *)
-          owned_cleanup_failed=true
-          _dispatch_rollback_error "refused unexpected repository fleet path: $repo_state"
+        "$TASK_DIR"/*)
+          [[ ! -d "$repo_state" ]] || : > "$repo_state/rollback-preserve-evidence"
           ;;
       esac
     fi
   done < "$DISPATCH_MUTATIONS_FILE"
+
+  # Repository state can exist before its worktree mutation journal (for
+  # example, an auth-switch failure).  Sweep every non-live state owned by this
+  # invocation unless an exact cleanup failure above requires its evidence.
+  for repo_state in "$TASK_DIR"/*; do
+    [[ -d "$repo_state" && ! -s "$repo_state/pane" && \
+       ! -e "$repo_state/rollback-preserve-evidence" ]] || continue
+    case "$repo_state" in
+      "$TASK_DIR"/*) rm -rf "$repo_state" ;;
+      *)
+        owned_cleanup_failed=true
+        _dispatch_rollback_error "refused unexpected repository fleet path: $repo_state"
+        ;;
+    esac
+  done
 
   _rollback_dispatch_generated_td_tasks || true
 
