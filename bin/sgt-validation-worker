@@ -3,9 +3,9 @@
 
 set -uo pipefail
 
-[[ $# -ge 4 && $# -le 5 ]] || {
+[[ $# -ge 4 && $# -le 6 ]] || {
   echo "Usage: sgt-validation-worker <repo-state-dir> <worktree> <intent-revision>" \
-    "<intent-transport> [skip]" >&2
+    "<intent-transport> [skip] [process-marker-state]" >&2
   exit 2
 }
 
@@ -14,6 +14,7 @@ WORKTREE="$2"
 EXPECTED_REVISION="$3"
 INTENT_TRANSPORT="$4"
 SKIP="${5:-}"
+PROCESS_MARKER_STATE="${6:-$REPO_STATE/validation-process}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-intent.sh
 source "$SCRIPT_DIR/_sgt-intent.sh"
@@ -28,6 +29,12 @@ source "$SCRIPT_DIR/_sgt-lib.sh"
   echo "ERROR: validation worker requires a terminal" >&2
   exit 2
 }
+if ! _sgt_validate_inherited_worker_marker "$PROCESS_MARKER_STATE"; then
+  printf 'failed: validation worker process marker validation failed\n' \
+    > "$REPO_STATE/validation_status"
+  echo "ERROR: validation worker process marker validation failed" >&2
+  exit 2
+fi
 VALIDATION_INTENT="$REPO_STATE/validation-intent.md"
 [[ -f "$VALIDATION_INTENT" ]] || {
   echo "ERROR: canonical validation intent unavailable" >&2

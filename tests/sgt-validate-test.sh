@@ -375,7 +375,7 @@ if [[ "$last" == */primary_pane_identity && -n "${IDENTITY_RACE_MARKER:-}" && \
   [[ ! -f "$count_file" ]] || count="$(cat "$count_file")"
   count=$((count + 1))
   printf '%s\n' "$count" > "$count_file"
-  if [[ "$count" -eq 3 ]]; then
+  if [[ "$count" -eq 4 ]]; then
     case "${FAIL_TRANSITION:-}" in
       legacy-identity-content-race)
         printf 'tampered-pane\n' > "$last"
@@ -449,7 +449,7 @@ PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
 
 [[ "$(cat "$repo_state/validation_pane")" == "%77" ]]
 [[ "$(cat "$repo_state/validation_pane_identity")" == \
-  "0|%77|7777|234567|$ROOT_DIR/bin/sgt-validation-worker "* ]]
+  "0|%77|7777|234567|exec 198<"*"$ROOT_DIR/bin/sgt-validation-worker"* ]]
 [[ "$(cat "$repo_state/stage")" == "validation" ]]
 [[ "$(cat "$repo_state/window_name")" == "validation-app-task-1" ]]
 [[ "$(cat "$repo_state/validation_process_group")" == "7777" ]]
@@ -457,6 +457,8 @@ PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
 if [[ "${SGT_VALIDATE_PORTABLE_ONLY:-}" == 1 ]]; then
   [[ "$(cat "$repo_state/validation_process_start")" == \
     'platform:Darwin:no-exact-process-birth' ]]
+  grep -Fq 'exec 198<' "$TEST_ROOT/tmux.log"
+  grep -Fq ' && rm -f ' "$TEST_ROOT/tmux.log"
   printf 'sgt-validate portable split-pane launch: ok\n'
   exit 0
 fi
@@ -464,8 +466,12 @@ grep -Fq 'rename-window -t %42 validation-app-task-1' "$TEST_ROOT/tmux.log"
 grep -Fq 'split-window -P -F #{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command} -t %42' \
   "$TEST_ROOT/tmux.log"
 grep -Fq "$ROOT_DIR/bin/sgt-validation-worker" "$TEST_ROOT/tmux.log"
+grep -Fq 'exec 198<' "$TEST_ROOT/tmux.log"
+grep -Fq ' && rm -f ' "$TEST_ROOT/tmux.log"
+[[ -s "$repo_state/validation-process/worker_process_marker" && \
+  -s "$repo_state/validation-process/worker_process_markers" ]]
 grep -Fq "$revision" "$TEST_ROOT/tmux.log"
-grep -Fq "review,document" "$concurrent_dir/validation-command"
+grep -Fq 'review\,document' "$concurrent_dir/validation-command"
 if grep -Fq 'Validate the interactive worker safely' "$TEST_ROOT/tmux.log" || \
   grep -Fq -- '--yes' "$TEST_ROOT/tmux.log"; then
   printf 'validation launch leaked intent or enabled automatic gates\n' >&2
@@ -483,7 +489,7 @@ validation_worktree="$(cat "$repo_state/validation_worktree")"
 [[ "$(cat "$repo_state/validation_status")" == launched && \
   ! -e "$validation_worktree/stale-finished" ]]
 grep -Fq "lint" "$concurrent_dir/validation-command"
-if grep -Fq "review,document" "$concurrent_dir/validation-command"; then
+if grep -Fq 'review\,document' "$concurrent_dir/validation-command"; then
   printf 'explicit skip did not replace the medium default\n' >&2
   exit 1
 fi
@@ -499,7 +505,7 @@ PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
 validation_worktree="$(cat "$repo_state/validation_worktree")"
 [[ "$(cat "$repo_state/validation_status")" == launched && \
   ! -e "$validation_worktree/legacy-finished" ]]
-if grep -Fq "review,document" "$concurrent_dir/validation-command"; then
+if grep -Fq 'review\,document' "$concurrent_dir/validation-command"; then
   printf 'explicit empty skip did not request full validation\n' >&2
   exit 1
 fi
@@ -1103,7 +1109,7 @@ PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
   "$ROOT_DIR/bin/sgt-validate" task-1 app --allow-argv-intent --skip lint >/dev/null
 grep -Fq 'lint' "$concurrent_dir/validation-command"
-if grep -Fq 'review,document' "$concurrent_dir/validation-command"; then
+if grep -Fq 'review\,document' "$concurrent_dir/validation-command"; then
   printf 'composed flags lost the explicit skip list\n' >&2
   exit 1
 fi

@@ -199,6 +199,26 @@ cmp "$TEST_ROOT/respond-torn.before" "$repo_state/worker_process_marker"
   ! -e "$worktree/.sergeant-response" && ! -e "$TEST_ROOT/respond-torn-tmux.log" ]]
 rm "$repo_state/worker_process_marker"
 
+printf '%032d|1:2|198|%s\n' 1 "$TEST_ROOT/unlinked-marker" \
+  > "$repo_state/worker_process_marker"
+printf '%032d|1:2|1\n' 2 > "$repo_state/worker_process_markers"
+chmod 600 "$repo_state/worker_process_marker" "$repo_state/worker_process_markers"
+cp "$repo_state/worker_process_marker" "$TEST_ROOT/respond-mismatch-marker.before"
+cp "$repo_state/worker_process_markers" "$TEST_ROOT/respond-mismatch-history.before"
+set +e
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/respond-mismatch-tmux.log" \
+  TD_LOG="$TEST_ROOT/respond-mismatch-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  respond 'do not publish mismatched evidence' >/dev/null 2>&1
+respond_mismatch_status=$?
+set -e
+[[ "$respond_mismatch_status" -ne 0 ]]
+cmp "$TEST_ROOT/respond-mismatch-marker.before" "$repo_state/worker_process_marker"
+cmp "$TEST_ROOT/respond-mismatch-history.before" "$repo_state/worker_process_markers"
+[[ ! -e "$repo_state/notification_id" && ! -e "$repo_state/response" && \
+  ! -e "$worktree/.sergeant-response" && ! -e "$TEST_ROOT/respond-mismatch-tmux.log" ]]
+rm "$repo_state/worker_process_marker" "$repo_state/worker_process_markers"
+
 assert_publication_failure() {
   local target="$1"
   local label="$2"

@@ -239,6 +239,23 @@ _require_yq
 _require_tmux
 _require_interactive_agent
 
+_SGT_RESUME_OWNER_FD=8
+_sgt_drain_lock_acquire_fd "$_SGT_RESUME_OWNER_FD" session-resume \
+  "$REPO_DIR/session-resume.lock" || \
+  _die "Could not acquire exact session-resume ownership"
+_cleanup_resume_lock() {
+  _sgt_drain_lock_release_fd "$_SGT_RESUME_OWNER_FD"
+}
+trap '_cleanup_resume_lock' EXIT
+_sgt_worker_process_marker_preflight "$REPO_DIR" || \
+  _die "Resume refused: worker process marker evidence changed while waiting for ownership"
+pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
+if [[ -n "$pane" ]] && _sgt_pane_identity_matches "$pane" "$REPO_DIR" 2>/dev/null; then
+  printf 'Worker pane %s became active while resume ownership was pending for %s/%s.\n' \
+    "$pane" "$TASK_ID" "$REPO"
+  exit 0
+fi
+
 # Validate the model tuple against the harness before any state mutation.
 _sgt_require_agent_model "$(basename "$AGENT_CMD")" "$RESUME_MODEL"
 # Materialise harness definition files (e.g. opencode variant agent definition)

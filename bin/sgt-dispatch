@@ -326,14 +326,9 @@ elif $MANAGED_COORDINATOR; then
     # would be bound and skip the rest of the coordinator binding.
     echo "[dry-run] would create or select managed coordinator pane in $TMUX_SESSION:$SGT_MANAGED_COORDINATOR_WINDOW"
   else
-    # Serialize selection through exact owner publication. Cleanup holds the
-    # same fleet transaction while deciding whether the last owner may retire.
-    _sgt_coordinator_lock_acquire "$FLEET_DIR"
-    if ! managed_pane_result="$(_sgt_managed_coordinator_pane "$TMUX_SESSION" \
-      "$SGT_MANAGED_COORDINATOR_WINDOW")"; then
-      _sgt_coordinator_lock_release
+    managed_pane_result="$(_sgt_managed_coordinator_pane "$TMUX_SESSION" \
+      "$SGT_MANAGED_COORDINATOR_WINDOW")" || \
       _die "sgt-dispatch could not create or select the managed coordinator pane in $TMUX_SESSION:$SGT_MANAGED_COORDINATOR_WINDOW; remove that window if it is not Sergeant's"
-    fi
     PRIMARY_PANE_ID="${managed_pane_result%% *}"
     SGT_MANAGED_COORDINATOR_CREATED="${managed_pane_result##* }"
   fi
@@ -350,28 +345,9 @@ fi
 # (intent preparation, fleet reconciliation, drain admission, td creation, repo
 # validation) can still abort after the pane is bound.
 _rollback_managed_coordinator_pane() {
-  local owner_dir owner_pane owner_identity shared_owner=false
-  if [[ "${SGT_MANAGED_COORDINATOR_CREATED:-false}" == "true" ]]; then
-    _sgt_coordinator_lock_acquire "$FLEET_DIR"
-    for owner_dir in "$FLEET_DIR"/*/; do
-      [[ -d "$owner_dir" ]] || continue
-      owner_dir="${owner_dir%/}"
-      [[ "${TASK_DIR:-}" != "$owner_dir" ]] || continue
-      owner_pane="$(cat "$owner_dir/primary_pane_id" 2>/dev/null || true)"
-      owner_identity="$(_sgt_read_owned_file \
-        "$owner_dir/primary_pane_identity" 2>/dev/null || true)"
-      if [[ "$owner_pane" == "$PRIMARY_PANE_ID" && \
-        "$owner_identity" == "$PRIMARY_PANE_IDENTITY" ]]; then
-        shared_owner=true
-        break
-      fi
-    done
-    SGT_MANAGED_COORDINATOR_CREATED="false"
-    if ! $shared_owner; then
-      tmux kill-window -t "$TMUX_SESSION:=$SGT_MANAGED_COORDINATOR_WINDOW" 2>/dev/null || true
-    fi
-  fi
-  _sgt_coordinator_lock_release
+  [[ "${SGT_MANAGED_COORDINATOR_CREATED:-false}" == "true" ]] || return 0
+  SGT_MANAGED_COORDINATOR_CREATED="false"
+  tmux kill-window -t "$TMUX_SESSION:=$SGT_MANAGED_COORDINATOR_WINDOW" 2>/dev/null || true
 }
 trap _rollback_managed_coordinator_pane EXIT
 
@@ -718,7 +694,6 @@ else
   if [[ -n "$ORIGIN_PROFILE" ]]; then
     "$SCRIPT_DIR/sgt-callback" register "$TASK_ID" "$ORIGIN_PROFILE" "$CORRELATION_ID"
   fi
-  _sgt_coordinator_lock_release
 fi
 
 # ── Create tmux session (local only) ─────────────────────────────────────────

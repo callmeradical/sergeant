@@ -732,6 +732,44 @@ printf '%s\n' "$out" | grep -q 'No such file or directory' && \
   { printf 'missing fleet state files must not leak shell errors, got: %s\n' "$out" >&2; exit 1; }
 "$ROOT_DIR/bin/sgt-drain" --undrain myproject >/dev/null
 printf 'sgt-drain --wait blocks on unverifiable identity: ok\n'
+rm -rf "$fleet_dir/task-f"
+
+# Darwin workers deliberately have no ps-derived exact PID birth record. Exact
+# marker absence plus a recorded pane that no longer resolves proves exit and
+# lets cooperative drain converge without signalling an unverified PID.
+portable_dir="$fleet_dir/task-portable/app"
+mkdir -p "$portable_dir" "$TEST_ROOT/portable-bin"
+printf 'drained\n' > "$portable_dir/status"
+printf 'myproject\n' > "$portable_dir/project"
+printf '%%77\n' > "$portable_dir/pane"
+printf '0|%%77|7777|123456|portable-worker\n' > "$portable_dir/pane_identity"
+printf '%032d|1:2|198|%s\n' 1 "$TEST_ROOT/closed-portable-marker" \
+  > "$portable_dir/worker_process_marker"
+printf '%032d|1:2|0\n' 1 > "$portable_dir/worker_process_markers"
+printf 'Darwin:no-exact-process-birth\n' \
+  > "$portable_dir/worker_process_marker_platform"
+chmod 600 "$portable_dir/pane_identity" "$portable_dir/worker_process_marker" \
+  "$portable_dir/worker_process_markers" \
+  "$portable_dir/worker_process_marker_platform"
+cat > "$TEST_ROOT/portable-bin/lsof" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+cat > "$TEST_ROOT/portable-bin/tmux" <<'EOF'
+#!/usr/bin/env bash
+printf '0|%%999|9999|654321|unrelated-pane\n'
+EOF
+chmod +x "$TEST_ROOT/portable-bin/lsof" "$TEST_ROOT/portable-bin/tmux"
+rc=0
+out="$(PATH="$TEST_ROOT/portable-bin:$PATH" \
+  "$ROOT_DIR/bin/sgt-drain" myproject --wait --timeout 1 2>&1)" || rc=$?
+[[ $rc -eq 0 ]] || {
+  printf 'portable marker/pane exit proof should satisfy drain: %s\n' "$out" >&2
+  exit 1
+}
+"$ROOT_DIR/bin/sgt-drain" --undrain myproject >/dev/null
+rm -rf "$fleet_dir/task-portable"
+printf 'sgt-drain --wait accepts portable marker and gone-pane proof: ok\n'
 
 # A nonterminal worker with no recorded project cannot be attributed to a scope,
 # so a project-scoped wait must report it rather than silently skip it.

@@ -177,6 +177,7 @@ _fleet_read() {
 # the caller.
 _worker_liveness() {
   local repo_dir="$1" pid recorded_start actual_start alive_rc marker_holders marker_rc=0
+  local platform pane recorded_pane actual_pane actual_id
   _WORKER_PID="$(_fleet_read "$repo_dir/worker_pid")"
   _WORKER_LIVENESS="unverifiable"
   _WORKER_DIAGNOSTIC=""
@@ -193,6 +194,23 @@ _worker_liveness() {
   case "$_WORKER_PID" in
     ''|*[!0-9]*)
       _WORKER_PID="unknown"
+      platform="$(_sgt_read_owned_file \
+        "$repo_dir/worker_process_marker_platform" 2>/dev/null || true)"
+      if [[ "$platform" == Darwin:no-exact-process-birth ]]; then
+        pane="$(_fleet_read "$repo_dir/pane")"
+        recorded_pane="$(_sgt_read_owned_file \
+          "$repo_dir/pane_identity" 2>/dev/null || true)"
+        [[ -n "$pane" && -n "$recorded_pane" && \
+          "${recorded_pane#*|}" == "$pane|"* ]] || return 0
+        actual_pane="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
+        actual_id="${actual_pane#*|}"
+        if [[ "$actual_pane" == "$recorded_pane" ]]; then
+          _WORKER_LIVENESS="live"
+        elif [[ "$actual_pane" == "1|${recorded_pane#*|}" || \
+          -z "$actual_pane" || "$actual_id" != "$pane|"* ]]; then
+          _WORKER_LIVENESS="gone"
+        fi
+      fi
       return 0
       ;;
   esac

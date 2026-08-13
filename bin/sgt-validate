@@ -883,9 +883,18 @@ _validation_copy_owned "$WORKTREE/.sergeant-intent.md" "$VALIDATION_INTENT" inte
 # SKIP stays unquoted: printf %q escapes a comma (brace-expansion special), and
 # the recorded pane_start_command is compared literally. SKIP is already
 # constrained to ^[a-z]+(,[a-z]+)*$, and an empty SKIP simply omits the argument.
-printf -v VALIDATION_COMMAND '%q %q %q %q %q %s' \
+VALIDATION_PROCESS_STATE="$REPO_STATE/validation-process"
+mkdir -p "$VALIDATION_PROCESS_STATE" || \
+  _die "Could not reserve validation worker process marker state"
+chmod 700 "$VALIDATION_PROCESS_STATE" || \
+  _die "Could not protect validation worker process marker state"
+_sgt_prepare_worker_process_marker "$VALIDATION_PROCESS_STATE" || \
+  _die "Could not prepare validation worker process marker"
+VALIDATION_COMMAND="$(_sgt_process_marker_command "$VALIDATION_PROCESS_STATE" \
   "$SCRIPT_DIR/sgt-validation-worker" "$REPO_STATE" "$VALIDATION_WORKTREE" \
-  "$EXPECTED_REVISION" "$INTENT_TRANSPORT" "$SKIP"
+  "$EXPECTED_REVISION" "$INTENT_TRANSPORT" "$SKIP" \
+  "$VALIDATION_PROCESS_STATE")" || \
+  _die "Could not construct validation worker command"
 PANE_FORMAT='#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}'
 PANE_SNAPSHOT="$(tmux list-panes -t "$PANE" -F "$PANE_FORMAT" 2>/dev/null || true)"
 set +e

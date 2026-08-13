@@ -111,7 +111,7 @@ PANE_DEAD=1 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$flee
 printf 'in_progress\n' > "$worktree/.sergeant-status"
 printf 'in_progress\n' > "$repo/status"
 rm -f "$repo/pane_identity"
-printf -v legacy_command 'exec 198<%q; rm -f %q; exec %q %q %q %q' \
+printf -v legacy_command 'exec 198<%q && rm -f %q && exec %q %q %q %q' \
   /gone /gone "$ROOT/bin/sgt-interactive-worker" "$repo" "$worktree" opencode
 legacy_identity="0|%42|4242|123457|$legacy_command"
 PANE_IDENTITY="$legacy_identity" EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" \

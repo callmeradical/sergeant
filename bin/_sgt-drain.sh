@@ -388,6 +388,7 @@ _sgt_drain_lock_report_timeout() {
 _sgt_drain_lock_acquire_fd() {
   local fd="${1:?_sgt_drain_lock_acquire_fd requires an fd}"
   local purpose="${2:-}"
+  local record_override="${3:-}"
   local record state_dir deadline nonce staging
 
   SGT_DRAIN_LOCK_STATE="unavailable"
@@ -400,7 +401,7 @@ _sgt_drain_lock_acquire_fd() {
   [[ -n "$purpose" ]] || purpose="${0##*/}"
   purpose="$(printf '%s' "$purpose" | tr -d '\n\r')"
 
-  record="$(_sgt_drain_lock_record)"
+  record="${record_override:-$(_sgt_drain_lock_record)}"
   state_dir="$(dirname "$record")"
   if [[ -e "$state_dir" && ! -d "$state_dir" ]]; then
     printf 'ERROR: drain admission lock unavailable: %s exists but is not a directory\n' \

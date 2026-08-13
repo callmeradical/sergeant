@@ -394,11 +394,11 @@ _recycle_inactive_pane_zero_holders() {
     [[ "$current_identity" == "1|${identity#*|}" ]] || return 1
     dead_pane=true
   fi
-  holders="$(_sgt_worker_marker_holders "$repo_dir")" || return 1
-  [[ -z "$holders" ]] || return 1
   if $dead_pane; then
     tmux kill-pane -t "$pane" 2>/dev/null || return 1
   fi
+  holders="$(_sgt_worker_marker_holders "$repo_dir")" || return 1
+  [[ -z "$holders" ]] || return 1
   _record_recycle_evidence "$repo_dir" "$pane" "$identity" \
     "$process_group" marker_holders_retired
 }

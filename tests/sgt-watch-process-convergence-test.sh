@@ -339,6 +339,12 @@ grep -Fqx 'outcome=marker_holders_retired' \
 mkdir -p "$TEST_ROOT/portable-bin"
 cat > "$TEST_ROOT/portable-bin/lsof" <<'EOF'
 #!/usr/bin/env bash
+if [[ -n "${ORDER_PANE:-}" && \
+  "$(tmux display-message -p -t "$ORDER_PANE" '#{pane_id}' 2>/dev/null || true)" == \
+    "$ORDER_PANE" ]]; then
+  printf 'marker scan preceded exact pane retirement\n' > "$ORDER_FAILURE"
+  exit 2
+fi
 exit 1
 EOF
 chmod +x "$TEST_ROOT/portable-bin/lsof"
@@ -348,11 +354,13 @@ rm -f "$launched_state/worker_pid" "$launched_state/worker_process_group" \
 printf 'Darwin:no-exact-process-birth\n' \
   > "$launched_state/worker_process_marker_platform"
 chmod 600 "$launched_state/worker_process_marker_platform"
-PATH="$TEST_ROOT/portable-bin:$PATH" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+ORDER_PANE="$launched_pane" ORDER_FAILURE="$TEST_ROOT/portable-order-failure" \
+  PATH="$TEST_ROOT/portable-bin:$PATH" SERGEANT_FLEET="$TEST_ROOT/fleet" \
   "$ROOT_DIR/bin/sgt-watch" --sync task-portable-terminal >/dev/null
 grep -Fqx 'outcome=marker_holders_retired' \
   "$launched_state/worker_recycled"
 [[ ! -e "$launched_state/diagnostic" ]]
+[[ ! -e "$TEST_ROOT/portable-order-failure" ]]
 [[ "$(tmux display-message -p -t "$launched_pane" \
   '#{pane_id}' 2>/dev/null || true)" != "$launched_pane" ]]
 

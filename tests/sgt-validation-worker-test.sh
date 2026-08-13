@@ -31,7 +31,8 @@ if [[ "${SGT_VALIDATION_WORKER_PORTABLE_ONLY:-}" == 1 ]]; then
   export SGT_TEST_PROCESS_PLATFORM=Darwin
   coordinator_start='platform:Darwin:no-exact-process-birth'
 else
-  coordinator_start="$(ps -o lstart= -p "$$" | awk '{$1=$1; print}')"
+coordinator_start="$(bash -c 'source "$1"; _sgt_process_identity_record "$2"' \
+  _ "$ROOT_DIR/bin/_sgt-lib.sh" "$$")"
 fi
 cat > "$state/validation-launch.lock" <<EOF
 pid=$$
@@ -63,6 +64,23 @@ fi
 printf '%s\n' "$*" > "$NO_MISTAKES_LOG"
 EOF
 chmod +x "$fake_bin/no-mistakes"
+cat > "$fake_bin/validation-launch" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+repo_state="\$1"
+shift
+if [[ \$# -eq 3 ]]; then
+  set -- "\$@" ""
+fi
+source "$ROOT_DIR/bin/_sgt-lib.sh"
+marker_state="\$repo_state/validation-process"
+mkdir -p "\$marker_state"
+_sgt_prepare_worker_process_marker "\$marker_state"
+command="\$(_sgt_process_marker_command "\$marker_state" \
+  "$ROOT_DIR/bin/sgt-validation-worker" "\$repo_state" "\$@" "\$marker_state")"
+exec bash -c "\$command"
+EOF
+chmod +x "$fake_bin/validation-launch"
 
 tmux new-session -d -s "$TMUX_SESSION" -n anchor "sleep 60"
 pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION" -n validation \
@@ -70,7 +88,7 @@ pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION" -n validation \
   "env PATH='$fake_bin:$PATH' NO_MISTAKES_LOG='$TEST_ROOT/no-mistakes.log' \
   SGT_VALIDATION_COMMIT_ACK_DELAY=0.3 \
   SGT_VALIDATION_SUCCESS_ACK_DELAY=0.3 \
-  '$ROOT_DIR/bin/sgt-validation-worker' '$state' '$worktree' '$revision' intent-file \
+  '$fake_bin/validation-launch' '$state' '$worktree' '$revision' intent-file \
   2>'$TEST_ROOT/worker.err'")"
 sleep 0.1
 [[ ! -e "$TEST_ROOT/no-mistakes.log" ]]
@@ -159,7 +177,7 @@ EOF
 dead_pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION" -n dead-coordinator \
   -c "$worktree" \
   "env PATH='$fake_bin:$PATH' NO_MISTAKES_LOG='$TEST_ROOT/dead-no-mistakes.log' \
-  '$ROOT_DIR/bin/sgt-validation-worker' '$dead_state' '$worktree' '$revision' intent-file")"
+  '$fake_bin/validation-launch' '$dead_state' '$worktree' '$revision' intent-file")"
 for _ in $(seq 1 100); do
   tmux display-message -p -t "$dead_pane" '#{pane_dead}' 2>/dev/null | grep -qx 1 && break
   sleep 0.02
@@ -179,7 +197,7 @@ EOF
 exit_pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION" -n child-exit \
   -c "$worktree" \
   "env PATH='$fake_bin:$PATH' NO_MISTAKES_LOG='$TEST_ROOT/exit-no-mistakes.log' \
-  '$ROOT_DIR/bin/sgt-validation-worker' '$exit_state' '$worktree' '$revision' intent-file")"
+  '$fake_bin/validation-launch' '$exit_state' '$worktree' '$revision' intent-file")"
 for _ in $(seq 1 100); do
   [[ -f "$exit_state/validation-child-ready" ]] && break
   sleep 0.02
@@ -191,7 +209,7 @@ rm -f "$exit_state/validation-child-ready"
 symlink_pane="$(tmux new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION" -n release-symlink \
   -c "$worktree" \
   "env PATH='$fake_bin:$PATH' NO_MISTAKES_LOG='$TEST_ROOT/symlink-no-mistakes.log' \
-  '$ROOT_DIR/bin/sgt-validation-worker' '$exit_state' '$worktree' '$revision' intent-file")"
+  '$fake_bin/validation-launch' '$exit_state' '$worktree' '$revision' intent-file")"
 for _ in $(seq 1 100); do
   [[ -f "$exit_state/validation-child-ready" ]] && break
   sleep 0.02
@@ -244,7 +262,7 @@ pane2="$(tmux new-session -d -P -F '#{pane_id}' -s "$TMUX_SESSION2" -n validatio
   -c "$worktree2" \
   "env PATH='$fake_bin:$PATH' NO_MISTAKES_LOG='$mutated_log' \
   SGT_VALIDATION_COMMIT_ACK_DELAY=0 SGT_VALIDATION_SUCCESS_ACK_DELAY=0 \
-  '$ROOT_DIR/bin/sgt-validation-worker' '$state2' '$worktree2' '$revision2' intent-file")"
+  '$fake_bin/validation-launch' '$state2' '$worktree2' '$revision2' intent-file")"
 # Wait for validation-child-ready to get the HANDSHAKE token.
 # The mutation must happen AFTER the worker's initial revision check passes.
 for _ in $(seq 1 200); do
@@ -348,7 +366,7 @@ launch_transport_worker() {
     -c "$worktree" \
     "env PATH='$fake_bin:$PATH' NO_MISTAKES_LOG='$log' $extra_env \
     SGT_VALIDATION_COMMIT_ACK_DELAY=0 SGT_VALIDATION_SUCCESS_ACK_DELAY=0 \
-    '$ROOT_DIR/bin/sgt-validation-worker' '$dir' '$worktree' '$revision' '$transport' \
+    '$fake_bin/validation-launch' '$dir' '$worktree' '$revision' '$transport' \
     2>'$dir/worker.err'"
 }
 

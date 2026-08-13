@@ -513,99 +513,6 @@ SGT_MANAGED_COORDINATOR_COMMAND='while IFS= read -r sgt_line; do printf "%s\n" "
 # asked.
 SGT_MANAGED_COORDINATOR_OPTION='@sgt_coordinator'
 SGT_MANAGED_COORDINATOR_MARKER='sergeant-managed-coordinator'
-_SGT_COORDINATOR_LOCK_DIR=""
-_SGT_COORDINATOR_LOCK_OWNER=""
-
-_sgt_coordinator_lock_acquire() {
-  local fleet_dir="$1" attempts attempt interval owner pid start owner_start actual_start candidate reclaim probe_dir link_error
-  [[ -z "$_SGT_COORDINATOR_LOCK_DIR" ]] || return 0
-  mkdir -p "$fleet_dir"
-  _SGT_COORDINATOR_LOCK_DIR="$fleet_dir/.coordinator-pane.lock"
-  start="$(ps -o lstart= -p "$$" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
-  [[ -n "$start" ]] || _die "Cannot establish coordinator-pane lock owner identity"
-  _SGT_COORDINATOR_LOCK_OWNER="$$|$start"
-  candidate="$(mktemp "$fleet_dir/.coordinator-pane.owner.XXXXXX")" || \
-    _die "Cannot allocate coordinator-pane lock owner identity"
-  reclaim="$fleet_dir/.coordinator-pane.reclaim"
-  probe_dir="$(mktemp -d "$fleet_dir/.coordinator-pane.link-probe.XXXXXX")" || {
-    rm -f "$candidate"
-    _die "Cannot allocate coordinator-pane hard-link capability probe"
-  }
-  chmod 600 "$candidate" 2>/dev/null || true
-  printf '%s\n' "$_SGT_COORDINATOR_LOCK_OWNER" > "$candidate" || {
-    rm -f "$candidate"
-    rmdir "$probe_dir" 2>/dev/null || true
-    _die "Cannot stage coordinator-pane lock owner identity"
-  }
-  # Establish the filesystem primitive separately from lock contention. A
-  # failed acquisition can then only mean another publisher won the name (or
-  # released it during our observation), never an inferred link capability.
-  if ! link_error="$(ln "$candidate" "$probe_dir/link" 2>&1)"; then
-    rm -f "$candidate" "$probe_dir/link"
-    rmdir "$probe_dir" 2>/dev/null || true
-    _SGT_COORDINATOR_LOCK_DIR=""; _SGT_COORDINATOR_LOCK_OWNER=""
-    _die "Atomic hard-link coordinator lock is unsupported in $fleet_dir: ${link_error:-link creation failed}; use a local writable filesystem with same-directory hard links"
-  fi
-  rm -f "$probe_dir/link"
-  rmdir "$probe_dir" 2>/dev/null || true
-  attempts="${SGT_COORDINATOR_LOCK_ATTEMPTS:-200}"
-  interval="${SGT_COORDINATOR_LOCK_INTERVAL:-0.05}"
-  [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=200
-  for attempt in $(seq 1 "$attempts"); do
-    if [[ ! -e "$_SGT_COORDINATOR_LOCK_DIR" && ! -L "$_SGT_COORDINATOR_LOCK_DIR" && \
-      ! -e "$reclaim" ]] && ln "$candidate" "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null; then
-      rm -f "$candidate"
-      return 0
-    fi
-    if [[ ! -e "$_SGT_COORDINATOR_LOCK_DIR" && ! -L "$_SGT_COORDINATOR_LOCK_DIR" ]]; then
-      sleep "$interval"
-      continue
-    fi
-    if [[ -L "$_SGT_COORDINATOR_LOCK_DIR" || \
-      ( -e "$_SGT_COORDINATOR_LOCK_DIR" && ! -f "$_SGT_COORDINATOR_LOCK_DIR" ) ]]; then
-      rm -f "$candidate"
-      _SGT_COORDINATOR_LOCK_DIR=""; _SGT_COORDINATOR_LOCK_OWNER=""
-      _die "Legacy coordinator-pane lock has no exact owner evidence; reconcile publishers before removing $fleet_dir/.coordinator-pane.lock"
-    fi
-    owner="$(cat "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null || true)"
-    pid="${owner%%|*}"
-    owner_start="${owner#*|}"
-    if [[ ! "$pid" =~ ^[1-9][0-9]*$ || -z "$owner_start" || "$owner_start" == "$owner" ]]; then
-      rm -f "$candidate"
-      _SGT_COORDINATOR_LOCK_DIR=""; _SGT_COORDINATOR_LOCK_OWNER=""
-      _die "Malformed coordinator-pane lock has no exact owner evidence; reconcile publishers before removing $fleet_dir/.coordinator-pane.lock"
-    fi
-    if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
-      actual_start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
-      if [[ "$actual_start" != "$owner_start" ]] && ln "$candidate" "$reclaim" 2>/dev/null; then
-        if [[ "$(cat "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null || true)" == "$owner" ]]; then
-          actual_start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
-          [[ "$actual_start" == "$owner_start" ]] || rm -f "$_SGT_COORDINATOR_LOCK_DIR"
-        fi
-        rm -f "$reclaim"
-      fi
-    fi
-    sleep "$interval"
-  done
-  rm -f "$candidate"
-  owner="$(cat "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null || true)"
-  pid="${owner%%|*}"
-  _SGT_COORDINATOR_LOCK_DIR=""
-  _SGT_COORDINATOR_LOCK_OWNER=""
-  _die "Timed out waiting for coordinator-pane fleet transaction${pid:+ held by PID $pid}; inspect $fleet_dir/.coordinator-pane.lock"
-}
-
-_sgt_coordinator_lock_release() {
-  local owner
-  [[ -n "$_SGT_COORDINATOR_LOCK_DIR" ]] || return 0
-  owner="$(cat "$_SGT_COORDINATOR_LOCK_DIR" 2>/dev/null || true)"
-  if [[ "$owner" == "$_SGT_COORDINATOR_LOCK_OWNER" ]]; then
-    rm -f "$_SGT_COORDINATOR_LOCK_DIR"
-  fi
-  _SGT_COORDINATOR_LOCK_DIR=""
-  _SGT_COORDINATOR_LOCK_OWNER=""
-}
-
 # _sgt_managed_coordinator_marker <pane>
 # Prints the pane's Sergeant ownership marker, empty when it has none.
 _sgt_managed_coordinator_marker() {
@@ -647,48 +554,6 @@ _sgt_managed_coordinator_pane() {
     return 1
   fi
   printf '%s true\n' "$pane"
-}
-
-# _sgt_retire_managed_coordinator_pane <task-dir> <fleet-dir>
-#
-# Retire the exact Sergeant-created coordinator pane after its last fleet owner
-# is cleaned. Explicit/user coordinator panes carry no Sergeant marker and are
-# never touched. A shared managed pane remains while any other task records the
-# same exact live identity.
-_sgt_retire_managed_coordinator_pane() {
-  local task_dir="$1" fleet_dir="$2"
-  local pane expected live other_task other_pane other_identity
-
-  [[ -f "$task_dir/primary_pane_id" && ! -L "$task_dir/primary_pane_id" ]] || return 0
-  pane="$(tr -d '\n' < "$task_dir/primary_pane_id")"
-  [[ -n "$pane" ]] || return 0
-  _sgt_is_tmux_pane_id "$pane" || return 0
-
-  expected="$(_sgt_read_owned_file "$task_dir/primary_pane_identity" 2>/dev/null || true)"
-  [[ -n "$expected" ]] || return 0
-  live="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
-  [[ "$live" == "$expected" && "${live%%|*}" == "0" ]] || return 0
-  [[ "$(_sgt_managed_coordinator_marker "$pane")" == \
-    "$SGT_MANAGED_COORDINATOR_MARKER" ]] || return 0
-
-  for other_task in "$fleet_dir"/*/; do
-    [[ -d "$other_task" ]] || continue
-    other_task="${other_task%/}"
-    [[ "$other_task" != "$task_dir" ]] || continue
-    [[ -f "$other_task/primary_pane_id" && ! -L "$other_task/primary_pane_id" ]] || continue
-    other_pane="$(tr -d '\n' < "$other_task/primary_pane_id")"
-    [[ "$other_pane" == "$pane" ]] || continue
-    other_identity="$(_sgt_read_owned_file \
-      "$other_task/primary_pane_identity" 2>/dev/null || true)"
-    [[ "$other_identity" == "$expected" ]] && return 0
-  done
-
-  echo "  stopping managed coordinator pane: $pane"
-  tmux kill-pane -t "$pane" 2>/dev/null || \
-    _die "Failed to stop managed coordinator pane: $pane"
-  live="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
-  [[ "$live" != "$expected" ]] || \
-    _die "Managed coordinator pane remained active after stop: $pane"
 }
 
 _sgt_path_mode() {
@@ -834,21 +699,75 @@ _sgt_pane_identity_matches() {
   [[ "$actual" == "$expected" && "$current" == "$actual" ]]
 }
 _sgt_worker_command() {
-  local worker="$1" repo_dir="$2" worktree="$3" agent="$4" marker generation identity fd path
+  local worker="$1" repo_dir="$2" worktree="$3" agent="$4"
+  _sgt_process_marker_command "$repo_dir" "$worker" "$repo_dir" "$worktree" "$agent"
+}
+_sgt_process_marker_command() {
+  local repo_dir="$1" marker generation identity fd path argument command
+  shift
   marker="$(_sgt_read_owned_file "$repo_dir/worker_process_marker" 2>/dev/null || true)"
   IFS='|' read -r generation identity fd path <<< "$marker"
   [[ "$generation" =~ ^[0-9a-f]{32}$ && "$identity" =~ ^[0-9]+:[0-9]+$ &&
     "$fd" == 198 && -n "$path" ]] || return 1
-  printf 'exec 198<%q && rm -f %q && exec %q %q %q %q' \
-    "$path" "$path" "$worker" "$repo_dir" "$worktree" "$agent"
+  printf -v command 'exec 198<%q && rm -f %q && exec' "$path" "$path"
+  for argument in "$@"; do
+    printf -v command '%s %q' "$command" "$argument"
+  done
+  printf '%s' "$command"
 }
 _sgt_worker_process_marker_preflight() {
-  local repo_dir="$1" history="$1/worker_process_markers"
+  local repo_dir="$1" history="$1/worker_process_markers" current digest platform
   if [[ ( -e "$repo_dir/worker_process_marker" || \
     -L "$repo_dir/worker_process_marker" ) && \
     ! -e "$history" && ! -L "$history" ]]; then
     printf 'worker process marker exists without durable history: %s\n' \
       "$repo_dir" >&2
+    return 1
+  fi
+  if [[ ! -e "$repo_dir/worker_process_marker" && \
+    ! -L "$repo_dir/worker_process_marker" && ! -e "$history" && ! -L "$history" ]]; then
+    return 0
+  fi
+  current="$(_sgt_read_owned_file \
+    "$repo_dir/worker_process_marker" 2>/dev/null || true)"
+  [[ -n "$current" ]] || {
+    printf 'worker process marker is missing or unreadable: %s\n' "$repo_dir" >&2
+    return 1
+  }
+  digest="$(_sgt_marker_history_digest "$history" "$current" 2>/dev/null || true)"
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+    printf 'worker process marker is absent from valid durable history: %s\n' \
+      "$repo_dir" >&2
+    return 1
+  }
+  if [[ -e "$repo_dir/worker_process_marker_platform" || \
+    -L "$repo_dir/worker_process_marker_platform" ]]; then
+    platform="$(_sgt_read_owned_file \
+      "$repo_dir/worker_process_marker_platform" 2>/dev/null || true)"
+    [[ "$platform" == Darwin:no-exact-process-birth ]] || {
+      printf 'worker process marker platform evidence is invalid: %s\n' \
+        "$repo_dir" >&2
+      return 1
+    }
+  fi
+}
+_sgt_validate_inherited_worker_marker() {
+  local repo_dir="$1" marker generation identity fd path actual_identity actual_generation extra digest
+  _sgt_worker_process_marker_preflight "$repo_dir" || return 1
+  marker="$(_sgt_read_owned_file \
+    "$repo_dir/worker_process_marker" 2>/dev/null || true)"
+  [[ -n "$marker" ]] || return 1
+  digest="$(_sgt_marker_history_digest \
+    "$repo_dir/worker_process_markers" "$marker" 2>/dev/null || true)"
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  IFS='|' read -r generation identity fd path <<< "$marker"
+  [[ "$generation" =~ ^[0-9a-f]{32}$ && "$identity" =~ ^[0-9]+:[0-9]+$ && \
+    "$fd" == 198 && -n "$path" && ! -e "$path" ]] || return 1
+  actual_identity="$(_sgt_fd_identity 198 2>/dev/null || true)"
+  [[ "$actual_identity" == "$identity" ]] || return 1
+  IFS= read -r actual_generation <&198 || return 1
+  [[ "$actual_generation" == "$generation" ]] || return 1
+  if IFS= read -r extra <&198; then
     return 1
   fi
 }
@@ -864,7 +783,12 @@ _sgt_prepare_worker_process_marker() {
   if [[ "$launch_identity" != linux:* || ! "$launch_floor" =~ ^[0-9]+$ ]]; then
     portable_marker=true
     launch_floor=0
-    platform="$(uname -s 2>/dev/null || printf unknown)"
+    if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+      -n "${SGT_TEST_PROCESS_PLATFORM:-}" ]]; then
+      platform="$SGT_TEST_PROCESS_PLATFORM"
+    else
+      platform="$(uname -s 2>/dev/null || printf unknown)"
+    fi
     platform_record="$platform:no-exact-process-birth"
   else
     rm -f "$repo_dir/worker_process_marker_platform"
