@@ -158,11 +158,12 @@ cat > "$FAKE_BIN/mktemp" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 result="\$("$REAL_MKTEMP" "\$@")"
-if [[ " \$* " == *' -d '* && -n "\${SWAP_HELPER_ON_BOOTSTRAP:-}" && \
-      ! -e "\${SWAP_HELPER_MARKER:?}" ]]; then
-  rm -f "\$SWAP_HELPER_ON_BOOTSTRAP"
-  ln -s "\${SWAP_HELPER_TARGET:?}" "\$SWAP_HELPER_ON_BOOTSTRAP"
-  : > "\$SWAP_HELPER_MARKER"
+if [[ " \$* " == *' -d '* && -n "\${SWAP_HELPER_ON_BOOTSTRAP:-}" ]]; then
+  if [[ ! -e "\${SWAP_HELPER_MARKER:?}" ]]; then
+    rm -f "\$SWAP_HELPER_ON_BOOTSTRAP"
+    ln -s "\${SWAP_HELPER_TARGET:?}" "\$SWAP_HELPER_ON_BOOTSTRAP"
+    : > "\$SWAP_HELPER_MARKER"
+  fi
 fi
 printf '%s\n' "\$result"
 EOF

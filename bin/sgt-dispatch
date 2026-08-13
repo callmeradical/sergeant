@@ -113,10 +113,83 @@ _sgt_dispatch_bundled_file() {
 # fails before config, td, tmux, fleet, or worktree mutation when an installation
 # is broken, cyclic, or redirects a bundled file outside its distribution.
 if ! _SGT_LIB_FILE="$(_sgt_dispatch_bundled_file "$SCRIPT_DIR/_sgt-lib.sh" _sgt-lib.sh)" || \
+   ! _SGT_BASH_VERSION_FILE="$(_sgt_dispatch_bundled_file "$SCRIPT_DIR/_sgt-bash-version.sh" _sgt-bash-version.sh)" || \
+   ! _SGT_PROCESS_FILE="$(_sgt_dispatch_bundled_file "$SCRIPT_DIR/_sgt-process.sh" _sgt-process.sh)" || \
    ! _SGT_INTENT_FILE="$(_sgt_dispatch_bundled_file "$SCRIPT_DIR/_sgt-intent.sh" _sgt-intent.sh)" || \
    ! _SGT_DRAIN_FILE="$(_sgt_dispatch_bundled_file "$SCRIPT_DIR/_sgt-drain.sh" _sgt-drain.sh)" || \
    ! _SGT_REVIEW_AXES_FILE="$(_sgt_dispatch_bundled_file "$SCRIPT_DIR/_sgt-review-axes.sh" _sgt-review-axes.sh)" || \
    ! _BRIEF_TEMPLATE="$(_sgt_dispatch_bundled_file "$_SGT_DISTRIBUTION_ROOT/templates/worker-brief.md" worker-brief.md)"; then
+  exit 1
+fi
+
+# Source helpers only from private immutable copies opened with O_NOFOLLOW.
+# Canonical path validation and shell `source` cannot otherwise be atomic: an
+# installed helper path can be replaced between those two operations.
+_SGT_BOOTSTRAP_ROOT="$(mktemp -d)" || {
+  printf 'ERROR: could not allocate bundled resource bindings\n' >&2
+  exit 1
+}
+chmod 700 "$_SGT_BOOTSTRAP_ROOT" || {
+  rm -rf "$_SGT_BOOTSTRAP_ROOT"
+  exit 1
+}
+trap 'rm -rf "$_SGT_BOOTSTRAP_ROOT"' EXIT
+
+_sgt_dispatch_bind_bundled_file() {
+  local source_path="$1" bound_path="$2" label="$3"
+  if ! python3 - "$source_path" "$bound_path" <<'PY'
+import os
+import stat
+import sys
+
+source_path, bound_path = sys.argv[1:]
+read_flags = os.O_RDONLY
+if hasattr(os, "O_NOFOLLOW"):
+    read_flags |= os.O_NOFOLLOW
+source_fd = os.open(source_path, read_flags)
+try:
+    if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+        raise OSError("bundled resource is not a regular file")
+    destination_fd = os.open(
+        bound_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+    )
+    try:
+        while True:
+            chunk = os.read(source_fd, 65536)
+            if not chunk:
+                break
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination_fd, view)
+                view = view[written:]
+        os.fsync(destination_fd)
+    finally:
+        os.close(destination_fd)
+finally:
+    os.close(source_fd)
+PY
+  then
+    printf 'ERROR: could not bind bundled resource (%s): %s\n' \
+      "$label" "$source_path" >&2
+    return 1
+  fi
+}
+
+_SGT_BOUND_LIB="$_SGT_BOOTSTRAP_ROOT/_sgt-lib.sh"
+_SGT_BOUND_BASH_VERSION="$_SGT_BOOTSTRAP_ROOT/_sgt-bash-version.sh"
+_SGT_BOUND_PROCESS="$_SGT_BOOTSTRAP_ROOT/_sgt-process.sh"
+_SGT_BOUND_INTENT="$_SGT_BOOTSTRAP_ROOT/_sgt-intent.sh"
+_SGT_BOUND_DRAIN="$_SGT_BOOTSTRAP_ROOT/_sgt-drain.sh"
+_SGT_BOUND_REVIEW_AXES="$_SGT_BOOTSTRAP_ROOT/_sgt-review-axes.sh"
+if ! _sgt_dispatch_bind_bundled_file "$_SGT_LIB_FILE" "$_SGT_BOUND_LIB" _sgt-lib.sh || \
+   ! _sgt_dispatch_bind_bundled_file "$_SGT_BASH_VERSION_FILE" \
+      "$_SGT_BOUND_BASH_VERSION" _sgt-bash-version.sh || \
+   ! _sgt_dispatch_bind_bundled_file "$_SGT_PROCESS_FILE" \
+      "$_SGT_BOUND_PROCESS" _sgt-process.sh || \
+   ! _sgt_dispatch_bind_bundled_file "$_SGT_INTENT_FILE" "$_SGT_BOUND_INTENT" _sgt-intent.sh || \
+   ! _sgt_dispatch_bind_bundled_file "$_SGT_DRAIN_FILE" "$_SGT_BOUND_DRAIN" _sgt-drain.sh || \
+   ! _sgt_dispatch_bind_bundled_file "$_SGT_REVIEW_AXES_FILE" \
+      "$_SGT_BOUND_REVIEW_AXES" _sgt-review-axes.sh; then
   exit 1
 fi
 # Bind the template's device/inode identity and bytes at the bootstrap
@@ -152,13 +225,16 @@ PY
   exit 1
 fi
 # shellcheck source=/dev/null
-source "$_SGT_LIB_FILE"
+source "$_SGT_BOUND_LIB"
+# Runtime helper executables remain anchored to the canonical distribution;
+# only the shell sources above need the private bootstrap directory.
+_SGT_LIB_DIR="$SCRIPT_DIR"
 # shellcheck source=/dev/null
-source "$_SGT_INTENT_FILE"
+source "$_SGT_BOUND_INTENT"
 # shellcheck source=/dev/null
-source "$_SGT_DRAIN_FILE"
+source "$_SGT_BOUND_DRAIN"
 # shellcheck source=/dev/null
-source "$_SGT_REVIEW_AXES_FILE"
+source "$_SGT_BOUND_REVIEW_AXES"
 
 # ── Brief template renderer ───────────────────────────────────────────────────
 # _sgt_render_brief <output-path> <vars...>
@@ -531,6 +607,7 @@ DISPATCH_SNAPSHOT_ROOT="$(mktemp -d)"
 DISPATCH_TASK_DIR_CREATED=false
 DISPATCH_SUCCEEDED=false
 DISPATCH_ROLLBACK_ERRORS=""
+DISPATCH_TD_ROLLBACK_PENDING=false
 
 _dispatch_rollback_error() {
   [[ -z "$DISPATCH_ROLLBACK_ERRORS" ]] || DISPATCH_ROLLBACK_ERRORS+=$'\n'
@@ -585,6 +662,50 @@ _restore_dispatch_worktree() {
   done < "$snapshot/manifest"
 }
 
+_persist_dispatch_td_rollback_evidence() {
+  local source_file="$1" journal="$TASK_DIR/td-rollback-journal.jsonl"
+  local diagnostic="$TASK_DIR/td-rollback-diagnostic"
+  DISPATCH_TD_ROLLBACK_PENDING=true
+  [[ -d "$TASK_DIR" && ! -L "$TASK_DIR" && -s "$source_file" ]] || return 1
+  if ! python3 - "$source_file" "$journal" "$TASK_DIR" <<'PY'
+import os
+import sys
+
+source, destination, directory = sys.argv[1:]
+temporary = destination + f".tmp.{os.getpid()}"
+source_fd = os.open(source, os.O_RDONLY)
+try:
+    destination_fd = os.open(
+        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+    )
+    try:
+        while True:
+            chunk = os.read(source_fd, 65536)
+            if not chunk:
+                break
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination_fd, view)
+                view = view[written:]
+        os.fsync(destination_fd)
+    finally:
+        os.close(destination_fd)
+finally:
+    os.close(source_fd)
+os.replace(temporary, destination)
+directory_fd = os.open(directory, os.O_RDONLY)
+try:
+    os.fsync(directory_fd)
+finally:
+    os.close(directory_fd)
+PY
+  then
+    return 1
+  fi
+  _sgt_replace_owned_file "$diagnostic" \
+    "generated td rollback is incomplete; run: sgt-cleanup $TASK_ID" || return 1
+}
+
 _rollback_dispatch_generated_td_tasks() {
   local rollback_state
   # The child fsyncs each creation and its success marker before returning.
@@ -629,6 +750,9 @@ PY
   fi
   if ! _sgt_td_rollback_state "$rollback_state"; then
     _dispatch_rollback_error "$SGT_TD_ROLLBACK_ERRORS"
+    if ! _persist_dispatch_td_rollback_evidence "$rollback_state"; then
+      _dispatch_rollback_error "could not preserve generated td rollback evidence"
+    fi
     rm -f "$rollback_state"
     return 1
   fi
@@ -745,7 +869,8 @@ _rollback_dispatch_mutations() {
 
   _rollback_dispatch_generated_td_tasks || true
 
-  if ! $launched_worker && ! $owned_cleanup_failed && $DISPATCH_TASK_DIR_CREATED; then
+  if ! $launched_worker && ! $owned_cleanup_failed && \
+     ! $DISPATCH_TD_ROLLBACK_PENDING && $DISPATCH_TASK_DIR_CREATED; then
     case "$TASK_DIR" in
       "$FLEET_DIR"/*) rm -rf "$TASK_DIR" ;;
       *) _dispatch_rollback_error "refused unexpected fleet path: $TASK_DIR" ;;
@@ -765,7 +890,7 @@ _cleanup_dispatch_tmps() {
   rm -f "$REPO_TD_MAP" "$TD_CREATE_STATE_FILE" "$TD_CREATE_STDERR" \
     "$TD_CREATE_SUCCESS_FILE" "$DISPATCH_MUTATIONS_FILE" "$INTENT_TMP" \
     "${DEPS_TMP:-}"
-  rm -rf "$DISPATCH_SNAPSHOT_ROOT"
+  rm -rf "$DISPATCH_SNAPSHOT_ROOT" "$_SGT_BOOTSTRAP_ROOT"
   # This trap replaces the coordinator-pane rollback trap, so it must keep
   # honouring it; the rollback is a no-op once the dispatch has completed.
   _rollback_managed_coordinator_pane
