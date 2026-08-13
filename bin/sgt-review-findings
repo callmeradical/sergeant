@@ -44,31 +44,14 @@ if [[ -x "$INVOKED_SCRIPT_DIR/sgt-notify" ]]; then
   SGT_REVIEW_NOTIFY="$INVOKED_SCRIPT_DIR/sgt-notify"
 fi
 
+# Delegates to the shared helper so this comparison uses the exact same
+# dev:ino:sha256:runtime_sha256 algorithm and runtime dependency set that
+# bin/sgt-dispatch's _sgt_review_router_executable_identity and
+# bin/sgt-review-router-launch's snapshot_identity compute and persist
+# (GH #204). A locally reimplemented 3-part identity here could never match
+# the 4-part value dispatch actually writes to disk.
 _sgt_rf_executable_identity() {
-  python3 - "$SCRIPT_FILE" <<'PY'
-import hashlib
-import os
-import stat
-import sys
-
-flags = os.O_RDONLY
-if hasattr(os, "O_NOFOLLOW"):
-    flags |= os.O_NOFOLLOW
-fd = os.open(sys.argv[1], flags)
-try:
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode):
-        raise OSError("review router is not a regular file")
-    digest = hashlib.sha256()
-    while True:
-        chunk = os.read(fd, 65536)
-        if not chunk:
-            break
-        digest.update(chunk)
-    print(f"{info.st_dev}:{info.st_ino}:{digest.hexdigest()}")
-finally:
-    os.close(fd)
-PY
+  python3 "$SCRIPT_DIR/_sgt-review-router-identity.py" "$SCRIPT_FILE"
 }
 
 _sgt_rf_capabilities() {
@@ -110,7 +93,7 @@ usage() {
 Usage: sgt-review-findings <project> <repo> --input <json> --axis <axis> --source <source>
   --branch <branch> --head-sha <sha> --parent-task <id> --task-id <fleet-id>
   --worktree <path> [--require-contract-revision <revision>
-  --require-executable-identity <dev:inode:sha256>]
+  --require-executable-identity <dev:inode:sha256:runtime_sha256>]
 
 Print the installed machine-readable compatibility contract:
   sgt-review-findings --capabilities
