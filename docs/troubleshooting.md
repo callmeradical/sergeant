@@ -92,6 +92,17 @@ Use `sgt-watch --sync <task-id>` for one-shot classification and
 Missing pane plus durable blocked/handoff state is waiting work; missing pane from
 `in_progress` without a handoff is orphan evidence.
 
+If a terminal record points at a live pane owned by another exact identity, do
+not use `sgt-cleanup`; cleanup intentionally refuses that mismatch. Run the
+bounded command emitted by `sgt-watch --sync`:
+
+```bash
+sgt-watch --retire-stale-pane <task-id> --repo <repo>
+```
+
+It preserves the worktree and reused pane, and converges only after proving the
+original worker has no marker holders.
+
 ## Repeated notifications
 
 Compare task, repo, state generation, message digest, and timestamp. Repeated

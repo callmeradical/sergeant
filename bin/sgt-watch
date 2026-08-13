@@ -384,6 +384,124 @@ _record_zero_holder_recycle() {
     "$process_group" marker_holders_retired
 }
 
+_stale_pane_retirement_receipt_matches() {
+  local repo_dir="$1" pane="$2" recorded="$3" observed="$4"
+  local receipt retired_at expected
+  receipt="$(_sgt_read_owned_multiline_file \
+    "$repo_dir/worker_stale_pane_retirement" 2>/dev/null || true)"
+  [[ -n "$receipt" ]] || return 1
+  retired_at="$(sed -n '6s/^retired_at=//p' <<< "$receipt")"
+  [[ "$retired_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+  expected="$(printf 'version=1\npane=%s\nrecorded_identity=%s\nobserved_identity=%s\noutcome=marker_holders_retired\nretired_at=%s' \
+    "$pane" "$recorded" "$observed" "$retired_at")"
+  [[ "$receipt" == "$expected" ]]
+}
+
+_record_stale_pane_retirement() {
+  local repo_dir="$1" pane="$2" recorded="$3" observed="$4"
+  local stamp temporary
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  [[ "$stamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+  temporary="$repo_dir/worker_stale_pane_retirement.tmp.$$"
+  (umask 077; {
+    printf 'version=1\n'
+    printf 'pane=%s\n' "$pane"
+    printf 'recorded_identity=%s\n' "$recorded"
+    printf 'observed_identity=%s\n' "$observed"
+    printf 'outcome=marker_holders_retired\n'
+    printf 'retired_at=%s\n' "$stamp"
+  } > "$temporary") || { rm -f "$temporary"; return 1; }
+  mv "$temporary" "$repo_dir/worker_stale_pane_retirement" || {
+    rm -f "$temporary"
+    return 1
+  }
+}
+
+_retire_stale_pane() {
+  local task_id="$1" repo_name="$2" task_dir repo_dir status worktree worktree_status
+  local pane recorded observed observed_dead observed_pane process_group holders current
+
+  _snapshot_scope_id_is_valid "$task_id" || _die "Invalid task ID for --retire-stale-pane: $task_id"
+  _snapshot_scope_id_is_valid "$repo_name" || _die "Invalid repo for --retire-stale-pane: $repo_name"
+  task_dir="$FLEET_DIR/$task_id"
+  repo_dir="$task_dir/$repo_name"
+  [[ -d "$task_dir" && ! -L "$task_dir" ]] || \
+    _die "Task not found: $task_id (looked in $FLEET_DIR)"
+  [[ -d "$repo_dir" && ! -L "$repo_dir" ]] || \
+    _die "Repository fleet record not found: $task_id/$repo_name"
+
+  status="$(tr -d '\n' < "$repo_dir/status" 2>/dev/null || true)"
+  case "$status" in
+    done|failed:*|drained|force-stopped) ;;
+    *) _die "Stale-pane retirement requires a terminal fleet status; found: ${status:-missing}" ;;
+  esac
+  worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+  if [[ -n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-status" ]]; then
+    worktree_status="$(tr -d '\n' < "$worktree/.sergeant-status")"
+    case "$worktree_status" in
+      done|failed:*|drained|force-stopped) ;;
+      *) _die "Stale-pane retirement requires a terminal preserved worktree status; found: ${worktree_status:-missing}" ;;
+    esac
+  fi
+
+  pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
+  [[ -n "$pane" ]] || _die "Stale-pane retirement requires a recorded pane"
+  recorded="$(_sgt_read_owned_file "$repo_dir/pane_identity" 2>/dev/null || true)"
+  [[ -n "$recorded" ]] || _die "Stale-pane retirement requires owned recorded pane identity"
+  command -v tmux >/dev/null 2>&1 || _die "tmux is required for stale-pane retirement"
+  observed="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
+  [[ -n "$observed" ]] || _die "Recorded pane is absent; run sgt-watch --sync $task_id"
+  observed_dead="${observed%%|*}"
+  observed_pane="${observed#*|}"
+  observed_pane="${observed_pane%%|*}"
+  [[ "$observed_dead" == 0 && "$observed_pane" == "$pane" ]] || \
+    _die "Recorded pane is absent; run sgt-watch --sync $task_id"
+  [[ "$observed" != "$recorded" ]] || \
+    _die "Recorded pane still belongs to this worker; run sgt-watch --sync $task_id"
+
+  process_group="$(cat "$repo_dir/worker_process_group" 2>/dev/null || true)"
+  [[ "$process_group" =~ ^[1-9][0-9]*$ ]] || \
+    _die "Stale-pane retirement requires recorded worker process-group provenance"
+
+  if [[ -e "$repo_dir/worker_stale_pane_retirement" || \
+        -L "$repo_dir/worker_stale_pane_retirement" ]]; then
+    _stale_pane_retirement_receipt_matches "$repo_dir" "$pane" "$recorded" "$observed" || \
+      _die "Stale-pane retirement evidence conflicts with the current recorded and observed identities"
+    if _recycle_evidence_covers "$repo_dir" "$recorded" "$process_group"; then
+      printf 'Stale pane ownership already retired: %s/%s\n' "$task_id" "$repo_name"
+      return 0
+    fi
+    [[ ! -e "$repo_dir/worker_recycled" && ! -L "$repo_dir/worker_recycled" ]] || \
+      _die "Existing recycle evidence is invalid or conflicts with stale-pane retirement"
+  elif [[ -e "$repo_dir/worker_recycled" || -L "$repo_dir/worker_recycled" ]]; then
+    _recycle_evidence_covers "$repo_dir" "$recorded" "$process_group" || \
+      _die "Existing recycle evidence is invalid or conflicts with stale-pane retirement"
+    _die "Recycle evidence exists without stale-pane retirement provenance; run sgt-watch --sync $task_id"
+  fi
+
+  _sgt_worker_process_marker_preflight "$repo_dir" || \
+    _die "Worker process marker evidence is torn; stale-pane retirement refused"
+  holders="$(_sgt_worker_marker_holders "$repo_dir")" || \
+    _die "Worker marker holders could not be inspected exactly; stale-pane retirement refused"
+  [[ -z "$holders" ]] || \
+    _die "Original worker marker holders remain live; stale-pane retirement refused: $(tr '\n' ' ' <<< "$holders")"
+
+  current="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
+  [[ "$current" == "$observed" ]] || \
+    _die "Conflicting pane identity changed during stale-pane retirement; retry after inspection"
+  if [[ ! -e "$repo_dir/worker_stale_pane_retirement" ]]; then
+    _record_stale_pane_retirement "$repo_dir" "$pane" "$recorded" "$observed" || \
+      _die "Failed to publish stale-pane retirement evidence"
+  fi
+  _record_recycle_evidence "$repo_dir" "$pane" "$recorded" \
+    "$process_group" marker_holders_retired || \
+    _die "Failed to publish marker-holder retirement evidence"
+  printf 'terminal worker stale pane ownership retired; unrelated live pane was not touched\n' \
+    > "$repo_dir/diagnostic"
+  printf 'Retired stale pane ownership for %s/%s; preserved worktree and live pane %s.\n' \
+    "$task_id" "$repo_name" "$pane"
+}
+
 _recycle_inactive_pane_zero_holders() {
   local repo_dir="$1" pane="$2" identity="$3" process_group="$4"
   local current_identity holders pane_id dead_pane=false
@@ -610,12 +728,19 @@ _clear_terminal_recycle_diagnostic() {
 }
 
 _ensure_terminal_recycle_diagnostic_action() {
-  local repo_dir="$1" diagnostic task_id
+  local repo_dir="$1" diagnostic task_id repo_name action
   diagnostic="$(cat "$repo_dir/diagnostic" 2>/dev/null || true)"
-  [[ "$diagnostic" != *sgt-cleanup* ]] || return 0
+  [[ "$diagnostic" != *'sgt-watch --retire-stale-pane'* && \
+    "$diagnostic" != *sgt-cleanup* ]] || return 0
   task_id="$(basename "$(dirname "$repo_dir")")"
+  repo_name="$(basename "$repo_dir")"
+  if [[ "$diagnostic" == *'pane identity does not match'* ]]; then
+    action="sgt-watch --retire-stale-pane $task_id --repo $repo_name"
+  else
+    action="sgt-cleanup $task_id"
+  fi
   if [[ -n "$diagnostic" ]]; then
-    printf '%s Run: sgt-cleanup %s\n' "$diagnostic" "$task_id" \
+    printf '%s Run: %s\n' "$diagnostic" "$action" \
       > "$repo_dir/diagnostic"
   else
     printf 'terminal worker retirement is incomplete. Run: sgt-cleanup %s\n' \
@@ -765,11 +890,10 @@ _recycle_terminal_worker() {
         return 0
        fi
      fi
-    # sgt-cleanup retires the record without killing an unrelated pane.
     local _task_id
     _task_id="$(basename "$(dirname "$repo_dir")")"
-    printf 'terminal worker pane identity does not match; refusing recycle (pane: %s). Run: sgt-cleanup %s\n' \
-      "$pane" "$_task_id" > "$repo_dir/diagnostic"
+    printf 'terminal worker pane identity does not match; refusing recycle (pane: %s). Run: sgt-watch --retire-stale-pane %s --repo %s\n' \
+      "$pane" "$_task_id" "$(basename "$repo_dir")" > "$repo_dir/diagnostic"
     return 1
   fi
   if ! tmux kill-pane -t "$pane" 2>/dev/null ||
@@ -1049,7 +1173,12 @@ _sync_task() {
           if [[ -n "$_warn_recycle_diagnostic" ]]; then
             printf '  reason: %s\n' "$_warn_recycle_diagnostic" >&2
           fi
-          printf '  to retire manually: sgt-cleanup %s\n' "$_warn_task" >&2
+          if [[ "$_warn_recycle_diagnostic" == *'sgt-watch --retire-stale-pane'* ]]; then
+            printf '  to retire stale pane ownership: sgt-watch --retire-stale-pane %s --repo %s\n' \
+              "$_warn_task" "$_warn_repo" >&2
+          else
+            printf '  to retire manually: sgt-cleanup %s\n' "$_warn_task" >&2
+          fi
           printf '  to inspect state:   sgt-watch %s --snapshot\n' "$_warn_task" >&2
           recycle_failed=true
         fi
@@ -1095,6 +1224,13 @@ _sync_task() {
   return 0
 }
 
+if [[ "${1:-}" == "--retire-stale-pane" ]]; then
+  [[ $# -eq 4 && "${3:-}" == "--repo" && -n "${2:-}" && -n "${4:-}" ]] || \
+    _die "Usage: sgt-watch --retire-stale-pane <task-id> --repo <repo>"
+  _retire_stale_pane "$2" "$4"
+  exit 0
+fi
+
 if [[ "${1:-}" == "--sync-all" ]]; then
   task_count=0
   sync_failed=false
@@ -1118,7 +1254,7 @@ if [[ "${1:-}" == "--sync" ]]; then
   exit 0
 fi
 
-[[ $# -ge 1 ]] || _die "Usage: sgt-watch <task-id> | --list | --sync <task-id> | --sync-all"
+[[ $# -ge 1 ]] || _die "Usage: sgt-watch <task-id> | --list | --sync <task-id> | --sync-all | --retire-stale-pane <task-id> --repo <repo>"
 TASK_ID="$1"
 TASK_DIR="$FLEET_DIR/$TASK_ID"
 [[ -d "$TASK_DIR" ]] || _die "Task not found: $TASK_ID (looked in $FLEET_DIR)"
