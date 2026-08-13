@@ -304,43 +304,105 @@ _status() {
   tr -d '\n' < "$WORKTREE/.sergeant-status" 2>/dev/null || echo "in_progress"
 }
 
-_record_progress() {
-  date +%s > "$REPO_STATE/progress_ts" 2>/dev/null || true
+_record_activity_witness() {
+  local kind="$1" subject_pid="${2:-}" subject_identity="${3:-}"
+  local pane="${TMUX_PANE:-}" identity stamp tmp
+  [[ "$kind" == transition || "$kind" == child ]] || return 1
+  identity="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
+  [[ -n "$pane" && -n "$identity" && "${identity%%|*}" == 0 && \
+    "${identity#*|}" == "$pane|"* ]] || return 1
+  stamp="$(date +%s 2>/dev/null || true)"
+  [[ "$stamp" =~ ^[1-9][0-9]*$ ]] || return 1
+  tmp="$REPO_STATE/activity_witness.tmp.$$.$RANDOM"
+  (umask 077; {
+    printf 'version=1\n'
+    printf 'kind=%s\n' "$kind"
+    printf 'observed_at=%s\n' "$stamp"
+    printf 'pane=%s\n' "$pane"
+    printf 'pane_identity=%s\n' "$identity"
+    printf 'subject_pid=%s\n' "$subject_pid"
+    printf 'subject_identity=%s\n' "$subject_identity"
+  } > "$tmp") || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$REPO_STATE/activity_witness" || { rm -f "$tmp"; return 1; }
 }
 
-# _watch_progress: background loop that updates progress_ts.
-#
-# Previously progress_ts was only updated when .sergeant-status or
-# .sergeant-message changed (sentinel change).  On tmux 3.7b+ #{pane_activity}
-# can be empty, so the snapshot falls back to progress_ts — and a live worker
-# running tool calls without changing sentinels would appear idle after the
-# SERGEANT_SNAPSHOT_RECENT_SECONDS window (GH #206).
-#
-# Fix: record progress on every loop tick while the worker is in_progress.
-# This keeps progress_ts current as long as the supervisor process is alive,
-# regardless of sentinel activity.  The stall classifier still uses a longer
-# window (SERGEANT_STALL_SECONDS) and still requires actual tool activity
-# beyond just process liveness for that check.
+_record_progress() {
+  date +%s > "$REPO_STATE/progress_ts" 2>/dev/null || true
+  _record_activity_witness transition "" "" || true
+}
+
+# _active_agent_child: print one exact current operation below the recorded
+# agent. The agent itself is a persistent harness and is never a witness.
+_active_agent_child() {
+  local agent_pid="" agent_identity table known changed=true pid ppid sid fields helpers
+  local pid_tmp identity_tmp
+  helpers="$(cat "$REPO_STATE/supervisor_helper_pids" 2>/dev/null || true)"
+  [[ -n "$helpers" ]] || return 1
+  table="$(_sgt_process_table 2>/dev/null || true)"
+  [[ -n "$table" ]] || return 1
+  # The foreground harness is the one direct worker child not owned by one of
+  # Sergeant's three background loops. More than one candidate is ambiguous.
+  while read -r pid ppid sid; do
+    [[ "$ppid" == "$$" && "$pid" =~ ^[1-9][0-9]*$ ]] || continue
+    grep -Fxq "$pid" <<< "$helpers" && continue
+    [[ -z "$agent_pid" ]] || return 1
+    agent_pid="$pid"
+  done <<< "$table"
+  [[ -n "$agent_pid" ]] || return 1
+  agent_identity="$(_sgt_process_identity "$agent_pid" 2>/dev/null || true)"
+  [[ "$agent_identity" =~ ^linux:[1-9][0-9]*$ ]] || return 1
+  pid_tmp="$REPO_STATE/agent_pid.tmp.$$.$RANDOM"
+  identity_tmp="$REPO_STATE/agent_process_start.tmp.$$.$RANDOM"
+  (umask 077; printf '%s\n' "$agent_pid" > "$pid_tmp") || return 1
+  (umask 077; printf '%s\n' "$agent_identity" > "$identity_tmp") || {
+    rm -f "$pid_tmp"
+    return 1
+  }
+  mv "$pid_tmp" "$REPO_STATE/agent_pid" || { rm -f "$pid_tmp" "$identity_tmp"; return 1; }
+  mv "$identity_tmp" "$REPO_STATE/agent_process_start" || { rm -f "$identity_tmp"; return 1; }
+  known="$agent_pid"
+  while $changed; do
+    changed=false
+    while read -r pid ppid sid; do
+      [[ "$pid" =~ ^[1-9][0-9]*$ ]] || continue
+      if grep -Fxq "$ppid" <<< "$known" && ! grep -Fxq "$pid" <<< "$known"; then
+        known+=$'\n'"$pid"
+        changed=true
+      fi
+    done <<< "$table"
+  done
+  while IFS= read -r pid; do
+    [[ -n "$pid" && "$pid" != "$agent_pid" ]] || continue
+    fields="$(_sgt_process_stat_fields "$pid" 2>/dev/null || true)"
+    [[ -n "$fields" ]] || continue
+    printf '%s|%s\n' "$pid" "${fields%% *}"
+    return 0
+  done <<< "$known"
+  return 1
+}
+
+# _watch_progress records only meaningful transitions. An unchanged
+# in_progress status, supervisor, or harness never refreshes evidence.
 #
 # Also writes .sergeant-drain-signal when a drain becomes active so the agent
 # can checkpoint cooperatively before exit.
 _watch_progress() {
-  local prev_sentinel curr_sentinel drain_tmp current_status
+  local prev_sentinel curr_sentinel drain_tmp child prev_child="" child_pid child_identity
   prev_sentinel="$(cat "$WORKTREE/.sergeant-status" "$WORKTREE/.sergeant-message" 2>/dev/null || true)"
   while :; do
-    sleep "${SGT_PROGRESS_INTERVAL:-30}"
+    sleep "${SGT_ACTIVITY_INTERVAL:-${SGT_PROGRESS_INTERVAL:-30}}"
     curr_sentinel="$(cat "$WORKTREE/.sergeant-status" "$WORKTREE/.sergeant-message" 2>/dev/null || true)"
-    # Update progress_ts on every tick while in_progress, not only on sentinel
-    # changes.  This keeps the snapshot active-witness window current when
-    # #{pane_activity} is unavailable (tmux 3.7b, issue GH #206).
-    current_status="$(tr -d '\n' < "$WORKTREE/.sergeant-status" 2>/dev/null || echo 'in_progress')"
-    if [[ "$current_status" == "in_progress" ]]; then
-      _record_progress
-    elif [[ "$curr_sentinel" != "$prev_sentinel" ]]; then
-      # For non-in_progress transitions (e.g. blocked, waiting) still record.
+    if [[ "$curr_sentinel" != "$prev_sentinel" ]]; then
       _record_progress
     fi
     prev_sentinel="$curr_sentinel"
+    child="$(_active_agent_child 2>/dev/null || true)"
+    if [[ -n "$child" && "$child" != "$prev_child" ]]; then
+      child_pid="${child%%|*}"
+      child_identity="${child#*|}"
+      _record_activity_witness child "$child_pid" "$child_identity" || true
+    fi
+    prev_child="$child"
     # Drain signal: write .sergeant-drain-signal so the agent can react
     # cooperatively to an active global or project drain without requiring a
     # SIGTERM.  Idempotent: skip when the file already exists.
@@ -698,6 +760,9 @@ _watch_progress &
 watch_progress_pid=$!
 _watch_drain &
 watch_drain_pid=$!
+(umask 077; printf '%s\n%s\n%s\n' \
+  "$notification_pid" "$watch_progress_pid" "$watch_drain_pid" \
+  > "$REPO_STATE/supervisor_helper_pids")
 
 # Build launch argv from the resolved harness contract.  SGT_LAUNCH_BASE_ARGV
 # was populated by _sgt_resolve_agent_launch from the same registry that gated

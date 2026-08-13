@@ -1,192 +1,186 @@
 #!/usr/bin/env bash
-# Regression for GH #206: snapshot preserves active witnesses when pane_activity
-# is unavailable (tmux 3.7b returns empty #{pane_activity}).
-#
-# Seam: sgt-watch --snapshot uses progress_ts as fallback when pane_activity is
-# zero or empty.  A recent progress_ts must keep busy=true; a stale one must not.
+# Public-boundary regression for GH #206. Run this test in Docker so every
+# activity and identity observation comes from the supported tmux runtime, not
+# from a host installation or a fake tmux shim.
 
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TEST_ROOT"' EXIT
+export TMUX_TMPDIR="$TEST_ROOT/tmux"
+mkdir -p "$TMUX_TMPDIR"
+trap 'tmux kill-server >/dev/null 2>&1 || true; rm -rf "$TEST_ROOT"' EXIT
 
 fleet="$TEST_ROOT/fleet"
 fake_bin="$TEST_ROOT/fake-bin"
-IDENTITY_DIR="$TEST_ROOT/identities"
-LIVE_PANES="$TEST_ROOT/live-panes"
-mkdir -p "$fleet" "$fake_bin" "$IDENTITY_DIR"
-: > "$LIVE_PANES"
+export SERGEANT_CONFIG="$TEST_ROOT/config"
+export SERGEANT_DRAIN_DIR="$TEST_ROOT/drain"
+mkdir -p "$fleet" "$fake_bin" "$SERGEANT_CONFIG" "$SERGEANT_DRAIN_DIR"
 
-# Fake tmux: PANE_ACTIVITY env controls what #{pane_activity} returns.
-cat > "$fake_bin/tmux" <<'TMUX'
+cat > "$fake_bin/opencode" <<'AGENT'
 #!/usr/bin/env bash
-_live() {
-  local pane="$1" entry
-  while IFS= read -r entry; do
-    [[ -z "$entry" ]] && continue
-    [[ "$entry" == "$pane" ]] && return 0
-  done < "$LIVE_PANES"
-  return 1
-}
-case "$1" in
-  display-message)
-    target=""
-    previous=""
-    for arg in "$@"; do
-      [[ "$previous" == -t ]] && target="$arg"
-      previous="$arg"
-    done
-    _live "$target" || exit 1
-    case "${!#}" in
-      '#{pane_id}')       printf '%s\n' "$target" ;;
-      '#{pane_activity}') printf '%s\n' "${PANE_ACTIVITY:-0}" ;;
-      *)
-        identity_file="$IDENTITY_DIR/${target#%}"
-        if [[ -s "$identity_file" ]]; then
-          cat "$identity_file"
-        else
-          printf '0|%s|4242|123456|worker\n' "$target"
-        fi
-        ;;
-    esac
+case "${FAKE_AGENT_MODE:-idle}" in
+  child)
+    sleep 60 &
+    wait "$!"
+    ;;
+  idle)
+    while IFS= read -r _line; do :; done
     ;;
 esac
-TMUX
-chmod +x "$fake_bin/tmux"
-
-PASS=0
-FAIL=0
-
-_pass() { PASS=$(( PASS + 1 )); printf 'PASS: %s\n' "$1"; }
-_fail() { FAIL=$(( FAIL + 1 )); printf 'FAIL: %s\n' "$1" >&2; }
+AGENT
+chmod +x "$fake_bin/opencode"
 
 field() {
-  local json="$1" expr="$2"
-  python3 -c "import sys, json; d=json.loads(sys.stdin.read()); print($expr)" <<< "$json" 2>/dev/null
-}
-
-make_worker() {
-  local name="$1" status="$2" pane="$3" progress_ts="$4"
-  local task_dir="$fleet/task-$name" state wt
-  state="$task_dir/app"
-  wt="$TEST_ROOT/wt-$name"
-  mkdir -p "$state" "$wt"
-  printf 'Brief: test %s\n' "$name" > "$task_dir/brief.md"
-  printf '%s\n' "$wt"       > "$state/worktree"
-  printf '%s\n' "$status"   > "$state/status"
-  printf '%s\n' "$status"   > "$wt/.sergeant-status"
-  printf '%s\n' "$pane"     > "$state/pane"
-  printf '0|%s|4242|123456|worker\n' "$pane" > "$IDENTITY_DIR/${pane#%}"
-  printf '0|%s|4242|123456|worker\n' "$pane" > "$state/pane_identity"
-  chmod 600 "$state/pane_identity"
-  printf '%s\n' "$pane"        >> "$LIVE_PANES"
-  printf '%s\n' "$progress_ts" > "$state/progress_ts"
+  python3 -c 'import json,sys; print(eval(sys.argv[1], {"d":json.load(sys.stdin), "repr":repr}))' \
+    "$2" <<< "$1"
 }
 
 snapshot() {
-  env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet" \
-      "IDENTITY_DIR=$IDENTITY_DIR" "LIVE_PANES=$LIVE_PANES" \
-      "${@}" \
-      "$ROOT_DIR/bin/sgt-watch" --snapshot
+  local task="$1"
+  shift
+  env SERGEANT_FLEET="$fleet" "$@" "$ROOT_DIR/bin/sgt-watch" \
+    --snapshot "$task" --repo app
 }
 
-# ── Test 1: recent progress_ts + pane_activity=0 → busy=true ─────────────────
-make_worker "active-no-pane-act" "in_progress" "%80" "$(date +%s)"
-json="$(PANE_ACTIVITY=0 snapshot)"
-busy="$(field "$json" 'repr(d["busy"])')"
-basis="$(field "$json" 'd["basis"]')"
-if [[ "$busy" == "True" && "$basis" == "verified_active_witness" ]]; then
-  _pass "pane_activity=0 + recent progress_ts → busy=true, verified_active_witness"
-else
-  _fail "pane_activity=0 + recent progress_ts: busy=$busy basis=$basis"
-fi
+pane_identity() {
+  tmux display-message -p -t "$1" \
+    '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}'
+}
 
-# ── Test 2: stale progress_ts + pane_activity=0 → busy=null (inconclusive) ───
-task_dir="$fleet/task-active-no-pane-act"
-printf '%s\n' "$(( $(date +%s) - 99999 ))" > "$task_dir/app/progress_ts"
-json2="$(PANE_ACTIVITY=0 SERGEANT_SNAPSHOT_RECENT_SECONDS=300 snapshot)"
-busy2="$(field "$json2" 'repr(d["busy"])')"
-if [[ "$busy2" == "None" ]]; then
-  _pass "pane_activity=0 + stale progress_ts → busy=null (inconclusive)"
-else
-  _fail "pane_activity=0 + stale progress_ts: expected busy=null, got busy=$busy2"
-fi
+publish_pane() {
+  local task="$1" pane="$2" state identity
+  state="$fleet/$task/app"
+  identity="$(pane_identity "$pane")"
+  mkdir -p "$state"
+  printf 'in_progress\n' > "$state/status"
+  printf '%s\n' "$pane" > "$state/pane"
+  printf '%s\n' "$identity" > "$state/pane_identity"
+  chmod 600 "$state/pane_identity"
+  printf '%s\n' "$(( $(date +%s) - 1000 ))" > "$state/progress_ts"
+  printf '%s\n' "$state"
+}
 
-# ── Test 3: live pane_activity (normal tmux) takes precedence over progress_ts ─
-# When pane_activity IS available and recent, the snapshot must still report
-# busy=true — the progress_ts fallback must not break the normal path.
-make_worker "active-with-pane-act" "in_progress" "%81" "$(( $(date +%s) - 99999 ))"
-recent_pane_ts="$(date +%s)"
-json3="$(PANE_ACTIVITY="$recent_pane_ts" snapshot)"
-busy3="$(field "$json3" 'repr(d["busy"])')"
-if [[ "$busy3" == "True" ]]; then
-  _pass "recent pane_activity overrides stale progress_ts → busy=true"
-else
-  _fail "recent pane_activity: expected busy=true, got busy=$busy3"
-fi
+start_worker() {
+  local task="$1" mode="$2" progress_interval="$3" state wt pane worker_command
+  state="$fleet/$task/app"
+  wt="$TEST_ROOT/$task-wt"
+  mkdir -p "$state" "$wt"
+  printf 'Project: sergeant\n' > "$fleet/$task/brief.md"
+  printf 'in_progress\n' > "$wt/.sergeant-status"
+  printf '%s\n' "$wt" > "$state/worktree"
+  worker_command="$(bash -c '
+    source "$1/bin/_sgt-lib.sh"
+    _sgt_prepare_worker_process_marker "$2"
+    _sgt_worker_command "$1/bin/sgt-interactive-worker" "$2" "$3" "$4"
+  ' bash "$ROOT_DIR" "$state" "$wt" "$fake_bin/opencode")"
+  pane="$(tmux new-session -d -P -F '#{pane_id}' -s "$task" \
+    "export FAKE_AGENT_MODE=$mode SGT_PROGRESS_INTERVAL=$progress_interval SGT_ACTIVITY_INTERVAL=0.1; $worker_command")"
+  # Mirror dispatch's publication order after tmux has created the pane.
+  printf '%s\n' "$pane" > "$state/pane"
+  printf '%s\n' "$(pane_identity "$pane")" > "$state/pane_identity"
+  chmod 600 "$state/pane_identity"
+  for _attempt in $(seq 1 100); do
+    [[ -s "$state/worker_pid" ]] && break
+    sleep 0.05
+  done
+  [[ -s "$state/worker_pid" ]] || {
+    tmux capture-pane -p -t "$pane" >&2 || true
+    find "$state" -maxdepth 1 -type f -print -exec sh -c 'printf "%s\\n" "--- $1 ---"; cat "$1"' sh {} \; >&2
+    return 1
+  }
+  printf '%s %s\n' "$state" "$pane"
+}
 
-# ── Test 4: non-in_progress status is never a witness ────────────────────────
-# Use a separate fleet to test the blocked worker in isolation.
-fleet4="$TEST_ROOT/fleet4"
-mkdir -p "$fleet4"
-task4_dir="$fleet4/task-blocked"
-state4="$task4_dir/app"
-wt4="$TEST_ROOT/wt-blocked"
-mkdir -p "$state4" "$wt4"
-printf 'Brief: blocked\n' > "$task4_dir/brief.md"
-printf '%s\n' "$wt4"      > "$state4/worktree"
-printf 'blocked\n'        > "$state4/status"
-printf 'blocked\n'        > "$wt4/.sergeant-status"
-printf '%%82\n'           > "$state4/pane"
-printf '0|%%82|4242|123456|worker\n' > "$IDENTITY_DIR/82"
-printf '0|%%82|4242|123456|worker\n' > "$state4/pane_identity"
-chmod 600 "$state4/pane_identity"
-printf '%%82\n'           >> "$LIVE_PANES"
-printf '%s\n' "$(date +%s)" > "$state4/progress_ts"
+assert_busy() {
+  local json="$1" expected="$2" label="$3" actual
+  actual="$(field "$json" 'repr(d["busy"])')"
+  [[ "$actual" == "$expected" ]] || {
+    printf 'FAIL: %s: expected busy=%s, got %s\n%s\n' \
+      "$label" "$expected" "$actual" "$json" >&2
+    exit 1
+  }
+}
 
-json4="$(PANE_ACTIVITY="$(date +%s)" \
-  env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet4" \
-      "IDENTITY_DIR=$IDENTITY_DIR" "LIVE_PANES=$LIVE_PANES" \
-      "$ROOT_DIR/bin/sgt-watch" --snapshot)"
-busy4="$(field "$json4" 'repr(d["busy"])')"
-if [[ "$busy4" != "True" ]]; then
-  _pass "blocked worker is not a verified active witness"
-else
-  _fail "blocked worker reported busy=true"
-fi
+# 1. tmux 3.7b can leave pane_activity empty. A recent window activity is
+# attributable to the worker only while exact identity and one-pane ownership
+# are both verified.
+pane_output="$(tmux new-session -d -P -F '#{pane_id}' -s output \
+  'bash --noprofile --norc')"
+publish_pane task-output "$pane_output" >/dev/null
+tmux send-keys -t "$pane_output" "printf 'active-output\\n'" Enter
+sleep 0.1
+json="$(snapshot task-output SERGEANT_SNAPSHOT_RECENT_SECONDS=5)"
+assert_busy "$json" True 'active output with pane_activity unavailable'
 
-# ── Test 5: _watch_progress updates progress_ts on every in_progress tick ────
-# Verify that the modified _watch_progress loop writes progress_ts when the
-# status is in_progress, not only on sentinel changes (GH #206 root cause).
-# We simulate the loop directly: run one iteration of the logic and check that
-# progress_ts was updated even with no sentinel change.
-wt5="$TEST_ROOT/wt-progress-tick"
-rs5="$TEST_ROOT/repo-state-tick"
-mkdir -p "$wt5" "$rs5"
-printf 'in_progress\n' > "$wt5/.sergeant-status"
-# Set progress_ts to something old
-printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$rs5/progress_ts"
-old_ts="$(cat "$rs5/progress_ts")"
+# A second pane makes window activity ambiguous. Output from it must not be
+# attributed to the worker pane.
+tmux split-window -d -t "$pane_output" 'bash --noprofile --norc'
+other_pane="$(tmux list-panes -t output -F '#{pane_id}' | tail -1)"
+tmux send-keys -t "$other_pane" "printf 'unrelated-output\\n'" Enter
+sleep 0.1
+json="$(snapshot task-output SERGEANT_SNAPSHOT_RECENT_SECONDS=5 \
+  SGT_TEST_HOOKS=1 SGT_TEST_TMUX_ACTIVITY_UNAVAILABLE=1)"
+assert_busy "$json" None 'ambiguous window activity'
 
-# Run the critical section: if status is in_progress, record progress.
-bash - <<BASH
-set -euo pipefail
-WORKTREE="$wt5"
-REPO_STATE="$rs5"
-_record_progress() { date +%s > "\$REPO_STATE/progress_ts" 2>/dev/null || true; }
-current_status="\$(tr -d '\n' < "\$WORKTREE/.sergeant-status" 2>/dev/null || echo 'in_progress')"
-if [[ "\$current_status" == "in_progress" ]]; then
-  _record_progress
-fi
-BASH
-new_ts="$(cat "$rs5/progress_ts")"
-if [[ "$new_ts" -gt "$old_ts" ]]; then
-  _pass "in_progress tick updates progress_ts unconditionally"
-else
-  _fail "in_progress tick did not update progress_ts: old=$old_ts new=$new_ts"
-fi
+# 2. A newly observed exact descendant of the recorded agent is a bounded
+# operation witness. The supervisor and harness parent alone are not enough.
+child_worker="$(start_worker task-child child 100)"
+state_child="${child_worker%% *}"
+for _attempt in $(seq 1 100); do
+  [[ -s "$state_child/activity_witness" ]] && break
+  sleep 0.05
+done
+[[ -s "$state_child/activity_witness" ]]
+printf '%s\n' "$(( $(date +%s) - 1000 ))" > "$state_child/progress_ts"
+json="$(snapshot task-child SERGEANT_SNAPSHOT_RECENT_SECONDS=5 \
+  SGT_TEST_HOOKS=1 SGT_TEST_TMUX_ACTIVITY_UNAVAILABLE=1)"
+assert_busy "$json" True 'active child operation'
 
-# ── Summary ───────────────────────────────────────────────────────────────────
-printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
-[[ "$FAIL" -eq 0 ]] || exit 1
+# 3. The old implementation refreshed progress_ts merely because the status
+# remained in_progress. A silent live supervisor must become inconclusive.
+idle_worker="$(start_worker task-idle idle 0.1)"
+state_idle="${idle_worker%% *}"
+sleep 2
+json="$(snapshot task-idle SERGEANT_SNAPSHOT_RECENT_SECONDS=1 \
+  SGT_TEST_HOOKS=1 SGT_TEST_TMUX_ACTIVITY_UNAVAILABLE=1)"
+assert_busy "$json" None 'silent idle live worker'
+
+# A real artifact transition restores a bounded witness without a heartbeat.
+idle_witness_before="$(cat "$state_idle/activity_witness")"
+idle_worktree="$(cat "$state_idle/worktree")"
+printf 'Human decision required.\n' > "$idle_worktree/.sergeant-message"
+for _attempt in $(seq 1 100); do
+  [[ "$(cat "$state_idle/activity_witness" 2>/dev/null || true)" != \
+    "$idle_witness_before" ]] && break
+  sleep 0.05
+done
+json="$(snapshot task-idle SERGEANT_SNAPSHOT_RECENT_SECONDS=5 \
+  SGT_TEST_HOOKS=1 SGT_TEST_TMUX_ACTIVITY_UNAVAILABLE=1)"
+assert_busy "$json" True 'status or artifact transition'
+
+# 4. A witness is bound to the exact pane generation. Killing and restarting a
+# pane cannot carry its output/operation witness forward.
+old_witness="$(cat "$state_child/activity_witness")"
+tmux kill-session -t task-child
+replacement="$(tmux new-session -d -P -F '#{pane_id}' -s task-child-restarted \
+  'bash --noprofile --norc')"
+printf '%s\n' "$replacement" > "$state_child/pane"
+printf '%s\n' "$(pane_identity "$replacement")" > "$state_child/pane_identity"
+chmod 600 "$state_child/pane_identity"
+printf '%s\n' "$old_witness" > "$state_child/activity_witness"
+chmod 600 "$state_child/activity_witness"
+json="$(snapshot task-child SERGEANT_SNAPSHOT_RECENT_SECONDS=5 \
+  SGT_TEST_HOOKS=1 SGT_TEST_TMUX_ACTIVITY_UNAVAILABLE=1)"
+assert_busy "$json" None 'interrupted worker generation'
+
+# A forged/reused agent PID with a different birth identity also fails closed.
+printf 'version=1\nkind=child\nobserved_at=%s\npane=%s\npane_identity=%s\nsubject_pid=%s\nsubject_identity=linux:1\n' \
+  "$(date +%s)" "$replacement" "$(pane_identity "$replacement")" "$$" \
+  > "$state_child/activity_witness"
+chmod 600 "$state_child/activity_witness"
+json="$(snapshot task-child SERGEANT_SNAPSHOT_RECENT_SECONDS=5 \
+  SGT_TEST_HOOKS=1 SGT_TEST_TMUX_ACTIVITY_UNAVAILABLE=1)"
+assert_busy "$json" None 'PID reuse mismatch'
+
+printf 'snapshot meaningful activity witnesses: ok\n'
