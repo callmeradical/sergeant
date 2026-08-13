@@ -811,33 +811,38 @@ JSON
     "[[ \"\$(cat '$TEST_ROOT/t25-slug' 2>/dev/null)\" == 'acme/widget' ]]"
 ) || _wake_test_failed=$((_wake_test_failed + 1))
 
-# ── Test 26 (td-cccc42 / GH #174): metacharacters in check_name rejected ─────
-# Allowing spaces must not open a word-splitting or injection vector.
+# ── Test 26 (GH #198): shell punctuation remains opaque data ───────────
+# Shell punctuation is valid check-name data and must never be evaluated.
 
 (
   task="t26"; repo="app"; wt="$TEST_ROOT/t26-wt"
+  check_name="ci \$(touch $TEST_ROOT/t26-pwned)"
   _setup_waiting_worker "$task" "$repo" "$wt" "github_check" \
-    "run_id=777"$'\n'"check_name=ci \$(touch $TEST_ROOT/t26-pwned)"
+    "run_id=777"$'\n'"check_name=$check_name"
+  _init_worktree_repo "$wt" "https://github.com/acme/widget.git"
 
   fake_bin="$TEST_ROOT/t26-fakebin"
   _setup_fake_respond "$fake_bin"
   run_json="$TEST_ROOT/t26-run.json"
-  printf '{"status":"completed","conclusion":"success","jobs":[]}\n' > "$run_json"
+  python3 - "$check_name" > "$run_json" <<'PY'
+import json, sys
+print(json.dumps({"status": "completed", "conclusion": "success",
+                  "jobs": [{"name": sys.argv[1], "status": "completed",
+                            "conclusion": "success"}]}))
+PY
   _setup_fake_gh "$fake_bin" "$run_json" "$TEST_ROOT/t26-slug"
   export FAKE_RESPOND_CALLS="$TEST_ROOT/t26-respond-calls"
 
   exit_code=0
   PATH="$fake_bin:$PATH" \
     "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || exit_code=$?
-  _assert "check_name injection: exits nonzero" "[[ $exit_code -ne 0 ]]"
-  _assert "check_name injection: sgt-respond not called" \
-    "[[ ! -s '$TEST_ROOT/t26-respond-calls' ]]"
-  _assert "check_name injection: no command executed" \
+  _assert "check_name punctuation: exits zero" "[[ $exit_code -eq 0 ]]"
+  _assert "check_name punctuation: sgt-respond called" \
+    "[[ -s '$TEST_ROOT/t26-respond-calls' ]]"
+  _assert "check_name punctuation: no command executed" \
     "[[ ! -e '$TEST_ROOT/t26-pwned' ]]"
-  # Discriminating: the value must be rejected at parse time, before the
-  # condition can reach any external command.
-  _assert "check_name injection: rejected before GitHub was queried" \
-    "[[ ! -e '$TEST_ROOT/t26-slug' ]]"
+  _assert "check_name punctuation: GitHub was queried" \
+    "[[ -e '$TEST_ROOT/t26-slug' ]]"
 ) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 26b (SPEC-001): ordinary check names are representable ───────────────
@@ -912,29 +917,112 @@ PY
   done
 ) || _wake_test_failed=$((_wake_test_failed + 1))
 
-# ── Test 26b3 (GH #198): dangerous characters in check_name are still rejected ─
-# Unicode admission must not weaken the injection fence.
+# ── Test 26b3 (GH #198): edge whitespace is matched byte-for-byte ────
 
 (
   task="t26b3"; repo="app"; wt="$TEST_ROOT/t26b3-wt"
-  for bad_name in "\$(touch $TEST_ROOT/t26b3-pwned)" "back\`tick" "semi;colon" "pipe|char" "> redir" "{ brace }"; do
-    rm -rf "${FLEET_DIR:?}/${task:?}" "${wt:?}"
+  check_name="  Build · test  "
+  _setup_waiting_worker "$task" "$repo" "$wt" "github_check" \
+    "run_id=777"$'\n'"check_name=$check_name"
+  _init_worktree_repo "$wt" "https://github.com/acme/widget.git"
+
+  fake_bin="$TEST_ROOT/t26b3-fakebin"
+  _setup_fake_respond "$fake_bin"
+  run_json="$TEST_ROOT/t26b3-run.json"
+  python3 - "$check_name" > "$run_json" <<'PY'
+import json, sys
+print(json.dumps({"status": "completed", "conclusion": "success",
+                  "jobs": [{"name": sys.argv[1], "status": "completed",
+                            "conclusion": "success"}]}))
+PY
+  _setup_fake_gh "$fake_bin" "$run_json" "$TEST_ROOT/t26b3-slug"
+  export FAKE_RESPOND_CALLS="$TEST_ROOT/t26b3-respond-calls"
+  export FAKE_RESPOND_INPUT="$TEST_ROOT/t26b3-respond-input"
+
+  exit_code=0
+  PATH="$fake_bin:$PATH" \
+    "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || exit_code=$?
+  _assert "check_name edge spaces: exits zero" "[[ $exit_code -eq 0 ]]"
+  _assert "check_name edge spaces: sgt-respond called" \
+    "[[ -s '$FAKE_RESPOND_CALLS' ]]"
+  _assert_file_contains "check_name edge spaces: exact bytes reach wake evidence" \
+    "$FAKE_RESPOND_INPUT" "$check_name"
+) || _wake_test_failed=$((_wake_test_failed + 1))
+
+# ── Test 26b4 (GH #198): unsafe line-storage bytes fail closed ────────
+
+(
+  for test_locale in C C.UTF-8; do
+    for unsafe_kind in tab malformed nul line-separator paragraph-separator; do
+      task="t26b4-${test_locale//./-}-$unsafe_kind"; repo="app"
+      wt="$TEST_ROOT/$task-wt"
+      _setup_waiting_worker "$task" "$repo" "$wt" "github_check" "run_id=777"
+      case "$unsafe_kind" in
+        tab)                 unsafe_bytes='\t' ;;
+        malformed)           unsafe_bytes='\377' ;;
+        nul)                 unsafe_bytes='\000' ;;
+        line-separator)      unsafe_bytes='\342\200\250' ;;
+        paragraph-separator) unsafe_bytes='\342\200\251' ;;
+      esac
+      {
+        printf 'kind=github_check\ngeneration=1\nrun_id=777\ncheck_name=Build '
+        printf '%b' "$unsafe_bytes"
+        printf ' test\n'
+      } > "$wt/.sergeant-wake-condition"
+      _init_worktree_repo "$wt" "https://github.com/acme/widget.git"
+
+      fake_bin="$TEST_ROOT/$task-fakebin"
+      _setup_fake_respond "$fake_bin"
+      run_json="$TEST_ROOT/$task-run.json"
+      printf '{"status":"completed","conclusion":"success","jobs":[]}\n' > "$run_json"
+      slug_file="$TEST_ROOT/$task-slug"
+      _setup_fake_gh "$fake_bin" "$run_json" "$slug_file"
+      export FAKE_RESPOND_CALLS="$TEST_ROOT/$task-respond-calls"
+
+      exit_code=0
+      LC_ALL="$test_locale" PATH="$fake_bin:$PATH" \
+        "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || exit_code=$?
+      _assert "$unsafe_kind under $test_locale: exits nonzero" "[[ $exit_code -ne 0 ]]"
+      _assert "$unsafe_kind under $test_locale: no resume" \
+        "[[ ! -s '$FAKE_RESPOND_CALLS' ]]"
+      _assert "$unsafe_kind under $test_locale: rejected before GitHub query" \
+        "[[ ! -e '$slug_file' ]]"
+    done
+  done
+) || _wake_test_failed=$((_wake_test_failed + 1))
+
+# ── Test 26b5 (GH #198): duplicate condition fields fail closed ────────
+
+(
+  for duplicate_field in kind generation run_id check_name; do
+    task="t26b5-$duplicate_field"; repo="app"; wt="$TEST_ROOT/$task-wt"
     _setup_waiting_worker "$task" "$repo" "$wt" "github_check" \
-      "run_id=777"$'\n'"check_name=$bad_name"
-    fake_bin="$TEST_ROOT/t26b3-fakebin"
+      "run_id=777"$'\n'"check_name=unit-tests"
+    case "$duplicate_field" in
+      kind)       printf '\nkind=github_check\n' >> "$wt/.sergeant-wake-condition" ;;
+      generation) printf '\ngeneration=1\n' >> "$wt/.sergeant-wake-condition" ;;
+      run_id)     printf '\nrun_id=777\n' >> "$wt/.sergeant-wake-condition" ;;
+      check_name) printf '\ncheck_name=unit-tests\n' >> "$wt/.sergeant-wake-condition" ;;
+    esac
+    _init_worktree_repo "$wt" "https://github.com/acme/widget.git"
+
+    fake_bin="$TEST_ROOT/$task-fakebin"
     _setup_fake_respond "$fake_bin"
-    export FAKE_RESPOND_CALLS="$TEST_ROOT/t26b3-respond-calls"
-    rm -f "$FAKE_RESPOND_CALLS"
+    run_json="$TEST_ROOT/$task-run.json"
+    printf '{"status":"completed","conclusion":"success","jobs":[{"name":"unit-tests","status":"completed","conclusion":"success"}]}\n' > "$run_json"
+    slug_file="$TEST_ROOT/$task-slug"
+    _setup_fake_gh "$fake_bin" "$run_json" "$slug_file"
+    export FAKE_RESPOND_CALLS="$TEST_ROOT/$task-respond-calls"
 
     exit_code=0
     PATH="$fake_bin:$PATH" \
       "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || exit_code=$?
-    _assert "dangerous check_name '$bad_name': exits nonzero" "[[ $exit_code -ne 0 ]]"
-    _assert "dangerous check_name '$bad_name': sgt-respond not called" \
+    _assert "duplicate $duplicate_field: exits nonzero" "[[ $exit_code -ne 0 ]]"
+    _assert "duplicate $duplicate_field: no resume" \
       "[[ ! -s '$FAKE_RESPOND_CALLS' ]]"
+    _assert "duplicate $duplicate_field: rejected before GitHub query" \
+      "[[ ! -e '$slug_file' ]]"
   done
-  _assert "dangerous check_name: no pwned file created" \
-    "[[ ! -e '$TEST_ROOT/t26b3-pwned' ]]"
 ) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 26c (STD-017): a present-but-empty field is named as empty ───────────
