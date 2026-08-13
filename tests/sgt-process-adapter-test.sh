@@ -154,6 +154,63 @@ fi
 [[ -e "$TEST_ROOT/history-swap-fired" ]]
 [[ "$(cat "$swap_state/worker_process_markers")" == \
   "$swap_generation|5:6|0" ]]
+
+# Current, history, and portable-platform evidence form one closed tuple. A
+# replacement while platform evidence is being opened must invalidate the
+# whole preflight instead of combining an old history/current snapshot with a
+# newer path state.
+cat > "$TEST_ROOT/tuple-swap-hook" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1" == before-open && "$2" == */worker_process_marker_platform ]] || exit 0
+mv "$TUPLE_REPLACEMENT" "$TUPLE_REPLACE_TARGET"
+: > "$TUPLE_SWAP_MARKER"
+EOF
+chmod 700 "$TEST_ROOT/tuple-swap-hook"
+
+cross_history_state="$TEST_ROOT/cross-history-state"
+mkdir -p "$cross_history_state"
+cross_generation=33333333333333333333333333333333
+printf '%s|7:8|198|/gone\n' "$cross_generation" \
+  > "$cross_history_state/worker_process_marker"
+printf '%s|7:8|0\n' "$cross_generation" \
+  > "$cross_history_state/worker_process_markers"
+printf 'Darwin:no-exact-process-birth\n' \
+  > "$cross_history_state/worker_process_marker_platform"
+printf '%s|7:8|123\n' "$cross_generation" \
+  > "$cross_history_state/history-replacement"
+chmod 600 "$cross_history_state"/*
+if SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
+  _SGT_OWNED_FILE_OPEN_HOOK="$TEST_ROOT/tuple-swap-hook" \
+  TUPLE_REPLACEMENT="$cross_history_state/history-replacement" \
+  TUPLE_REPLACE_TARGET="$cross_history_state/worker_process_markers" \
+  TUPLE_SWAP_MARKER="$TEST_ROOT/cross-history-fired" \
+  _sgt_worker_process_marker_preflight "$cross_history_state" >/dev/null 2>&1; then
+  printf 'cross-snapshot history/platform replacement passed preflight\n' >&2
+  exit 1
+fi
+[[ -e "$TEST_ROOT/cross-history-fired" ]]
+
+cross_current_state="$TEST_ROOT/cross-current-state"
+mkdir -p "$cross_current_state"
+printf '%s|9:10|198|/gone\n' "$cross_generation" \
+  > "$cross_current_state/worker_process_marker"
+printf '%s|9:10|0\n' "$cross_generation" \
+  > "$cross_current_state/worker_process_markers"
+printf 'Darwin:no-exact-process-birth\n' \
+  > "$cross_current_state/worker_process_marker_platform"
+printf '44444444444444444444444444444444|11:12|198|/other\n' \
+  > "$cross_current_state/current-replacement"
+chmod 600 "$cross_current_state"/*
+if SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
+  _SGT_OWNED_FILE_OPEN_HOOK="$TEST_ROOT/tuple-swap-hook" \
+  TUPLE_REPLACEMENT="$cross_current_state/current-replacement" \
+  TUPLE_REPLACE_TARGET="$cross_current_state/worker_process_marker" \
+  TUPLE_SWAP_MARKER="$TEST_ROOT/cross-current-fired" \
+  _sgt_worker_process_marker_preflight "$cross_current_state" >/dev/null 2>&1; then
+  printf 'cross-snapshot current/platform replacement passed preflight\n' >&2
+  exit 1
+fi
+[[ -e "$TEST_ROOT/cross-current-fired" ]]
 portable_command="$(_sgt_worker_command worker "$portable_state" worktree agent)"
 [[ "$portable_command" == exec\ 198\<* ]]
 
