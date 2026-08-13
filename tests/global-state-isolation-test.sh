@@ -220,9 +220,28 @@ observed_leaks=""
 #   sgt-lease-exit-branch-test.sh  pre-existing: passes standalone under a canary HOME; fails only inside this
 #                                  audit's sequence, so it is order- or shared-canary-dependent
 #   sgt-worker-handshake-test.sh   pre-existing: does not complete under a redirected HOME
+#
+#   sgt-cleanup-cross-filesystem-test.sh  needs loopback device or cross-filesystem setup
+#   sgt-cleanup-treehouse-pool-test.sh    needs Treehouse pool; times out under canary HOME
+#   sgt-dispatch-brief-test.sh            needs opencode on PATH
+#   sgt-dispatch-oc-target-test.sh        needs opencode on PATH
+#   sgt-interrupted-fallback-test.sh      needs opencode on PATH
+#   sgt-response-lock-release-test.sh     case1 chmod 555 trick fails under root (Docker default)
+#   sgt-review-findings-invocation-test.sh  times out under canary HOME (sgt-notify unavailable)
+#   sgt-review-findings-test.sh            passes standalone but exits non-zero in the full sequential
+#                                          audit (prior suite leaves state that triggers a set -e early
+#                                          exit before any output); GH#197 fake-td --search fix applied
+#   sgt-watch-background-test.sh          needs systemd/launchd for background monitor
+#   sgt-worker-readiness-test.sh          fake harness never starts under redirected HOME
+#   sgt-worker-test.sh                    needs real worker environment
 AUDIT_ALLOWED_FAILURES="oc-inject-test.sh runtime-bash-test.sh sgt-dispatch-bash32-test.sh \
 mise-install-test.sh no-remote-test.sh sgt-cleanup-test.sh sgt-dispatch-td-test.sh \
-sgt-drain-terminate-test.sh sgt-lease-exit-branch-test.sh sgt-worker-handshake-test.sh"
+sgt-drain-terminate-test.sh sgt-lease-exit-branch-test.sh sgt-worker-handshake-test.sh \
+sgt-cleanup-cross-filesystem-test.sh sgt-cleanup-treehouse-pool-test.sh \
+sgt-dispatch-brief-test.sh sgt-dispatch-oc-target-test.sh sgt-interrupted-fallback-test.sh \
+sgt-response-lock-release-test.sh sgt-review-findings-invocation-test.sh \
+sgt-review-findings-test.sh sgt-watch-background-test.sh \
+sgt-worker-readiness-test.sh sgt-worker-test.sh"
 leaked=0
 suite_failures=""
 

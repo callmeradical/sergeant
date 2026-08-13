@@ -43,7 +43,30 @@ if [[ -n "${TD_DESC:-}" ]]; then
   done
 fi
 case "$1" in
-  list) printf '%s\n' "${TD_LIST_RESULT:-[]}" ;;
+  list)
+    # Filter by --search when present: mimic real td server-side search so tests
+    # that set TD_LIST_RESULT only return entries whose description contains the
+    # search term.  The GH#197 scenario requires this: the second invocation must
+    # not receive a card scoped to a different fleet task ID.
+    _search="" _prev=""
+    for _a in "$@"; do
+      [[ "$_prev" == "--search" ]] && { _search="$_a"; break; }
+      _prev="$_a"
+    done
+    if [[ -n "$_search" ]]; then
+      # Use the real interpreter, not the fake python3 shim in fake-bin, so that
+      # td list filtering is not accidentally blocked by BLOCK_REVIEW_PARSE=1.
+      printf '%s\n' "${TD_LIST_RESULT:-[]}" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+search = sys.argv[1]
+if not isinstance(data, list): data = []
+print(json.dumps([i for i in data if search in (i.get('description') or '')]))
+" "$_search"
+    else
+      printf '%s\n' "${TD_LIST_RESULT:-[]}"
+    fi
+    ;;
   create)
     [[ "${TD_FAIL_CREATE:-0}" != "1" ]] || exit 23
     count="$(wc -l < "$TD_IDS")"
@@ -229,7 +252,7 @@ if grep -Fq 'private prompt contents' "$TEST_ROOT/td.log" "$WORKTREE/.sergeant-m
   exit 1
 fi
 
-TD_LIST_RESULT="[{\"id\":\"td-existing\",\"status\":\"in_progress\",\"description\":\"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review\nFinding content digest: $std1_digest\"}]" \
+TD_LIST_RESULT="[{\"id\":\"td-existing\",\"status\":\"in_progress\",\"description\":\"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review:fleet-1\nFinding content digest: $std1_digest\"}]" \
   run_router "$TEST_ROOT/findings.json"
 grep -Fq 'update td-existing' "$TEST_ROOT/td.log"
 grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log"
@@ -238,18 +261,23 @@ if grep -Fq 'reopen td-existing' "$TEST_ROOT/td.log"; then
   exit 1
 fi
 
-# dedup update with a different fleet task ID must write the new ID into the body
-TD_LIST_RESULT="[{\"id\":\"td-existing\",\"status\":\"in_progress\",\"description\":\"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review\nFinding content digest: $std1_digest\"}]" \
+# GH #197: a different fleet task ID generates a distinct dedup marker, so a
+# re-run from a different invocation creates a new card rather than updating the
+# fleet-1 card.  (Prior to GH #197 the router would update td-existing; now it
+# routes independently because the marker includes the originating TASK_ID.)
+TD_LIST_RESULT="[{\"id\":\"td-existing\",\"status\":\"in_progress\",\"description\":\"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review:fleet-1\nFinding content digest: $std1_digest\"}]" \
   ROUTER_TASK_ID='fleet-new' run_router "$TEST_ROOT/findings.json"
-grep -Fq 'update td-existing' "$TEST_ROOT/td.log"
+grep -q '^create ' "$TEST_ROOT/td.log" || {
+  printf 'fleet-new route did not create a new card\n' >&2; exit 1
+}
 grep -Fq 'Originating fleet task: fleet-new' "$TEST_ROOT/td.log"
-if grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log"; then
-  printf 'stale fleet task ID retained in updated body\n' >&2
+if grep -Fq 'update td-existing' "$TEST_ROOT/td.log"; then
+  printf 'fleet-new modified an unrelated fleet-1 card\n' >&2
   exit 1
 fi
 
 # closed existing task recording the same finding must be reopened before update
-TD_LIST_RESULT="[{\"id\":\"td-closed\",\"status\":\"closed\",\"description\":\"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review\nFinding content digest: $std1_digest\"}]" \
+TD_LIST_RESULT="[{\"id\":\"td-closed\",\"status\":\"closed\",\"description\":\"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review:fleet-1\nFinding content digest: $std1_digest\"}]" \
   run_router "$TEST_ROOT/findings.json"
 grep -Fq 'reopen td-closed' "$TEST_ROOT/td.log"
 grep -Fq 'update td-closed' "$TEST_ROOT/td.log"
@@ -259,7 +287,7 @@ update_line="$(grep -nF 'update td-closed' "$TEST_ROOT/td.log" | tail -1 | cut -
 [[ "$reopen_line" -lt "$update_line" ]]
 
 # deferred existing task must NOT have deferral cleared on rerun — preserve defer_until
-TD_LIST_RESULT="[{\"id\":\"td-deferred\",\"status\":\"in_progress\",\"defer_until\":\"2099-01-01\",\"description\":\"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review\nFinding content digest: $std1_digest\"}]" \
+TD_LIST_RESULT="[{\"id\":\"td-deferred\",\"status\":\"in_progress\",\"defer_until\":\"2099-01-01\",\"description\":\"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review:fleet-1\nFinding content digest: $std1_digest\"}]" \
   run_router "$TEST_ROOT/findings.json"
 if grep -Fq 'defer td-deferred --clear' "$TEST_ROOT/td.log"; then
   printf 'deferred task had deferral cleared on rerun — must be preserved\n' >&2
@@ -268,7 +296,7 @@ fi
 grep -Fq 'update td-deferred' "$TEST_ROOT/td.log"
 
 # dedup update must preserve manually added labels — not replace them with only standard ones
-TD_LIST_RESULT="[{\"id\":\"td-labelled\",\"status\":\"open\",\"defer_until\":\"\",\"labels\":[\"independent-review\",\"finding\",\"standards\",\"urgent\",\"security\"],\"description\":\"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review\nFinding content digest: $std1_digest\"}]" \
+TD_LIST_RESULT="[{\"id\":\"td-labelled\",\"status\":\"open\",\"defer_until\":\"\",\"labels\":[\"independent-review\",\"finding\",\"standards\",\"urgent\",\"security\"],\"description\":\"Deduplication key: independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review:fleet-1\nFinding content digest: $std1_digest\"}]" \
   run_router "$TEST_ROOT/findings.json"
 if ! grep -Fq 'urgent' "$TEST_ROOT/td.log"; then
   printf 'dedup update dropped manually added label "urgent"\n' >&2
@@ -550,7 +578,7 @@ grep -Fq 'update td-same-scope' "$TEST_ROOT/td.log" || {
 # rewrite it, so a stored description and a stored title cannot be lost by a write
 # that never happens, and a tampered stored body cannot inject anything — it can
 # only cause a refusal. ───────────────────────────────────────────────────────
-stored_marker='independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review'
+stored_marker='independent-review-finding:app:standards:code-review:std-1:td-parent:fix/review:fleet-1'
 existing_card() {
   STORED_BODY="$1" STORED_STATUS="${2:-open}" STORED_TITLE="${3:-review: Unsafe cleanup}" python3 -c '
 import json, os
@@ -570,7 +598,7 @@ TD_LIST_RESULT=null run_router "$TEST_ROOT/one.json"
 matching_body="$(cat "$TEST_ROOT/td-desc")"
 [[ -n "$matching_body" ]] || { printf 'no routed body captured\n' >&2; exit 1; }
 
-TD_LIST_RESULT="$(existing_card "$matching_body")" ROUTER_TASK_ID=fleet-later \
+TD_LIST_RESULT="$(existing_card "$matching_body")" \
   run_router "$TEST_ROOT/one.json"
 [[ "$status" -eq 2 ]] || { printf 'a matching rerun did not gate its error finding: %s\n' "$output" >&2; exit 1; }
 [[ "$output" == *'td td-revised deduplicated'* ]] || {
@@ -591,7 +619,7 @@ if grep -Eq '^update .*--title' "$TEST_ROOT/td.log"; then
   exit 1
 fi
 # Provenance stays current through a comment instead.
-grep -Fq 'Originating fleet task: fleet-later' "$TEST_ROOT/td.log" || {
+grep -Fq 'Originating fleet task: fleet-1' "$TEST_ROOT/td.log" || {
   printf 'a dedup update did not record the current occurrence\n' >&2
   exit 1
 }
@@ -1176,7 +1204,8 @@ inv1_td="$(grep '^td-created-' "$TEST_ROOT/td-ids" | tail -1)"
 
 # Simulate that the first finding exists in td (with its dedup key and digest).
 # We need the stored description for the second invocation's td list to see.
-inv1_desc="$(cat "$TEST_ROOT/td-desc" 2>/dev/null || true)"
+# Note: run_router resets td-ids on each call, so we verify a task was CREATED
+# (non-empty td-ids) rather than comparing raw task IDs across two reset calls.
 # Second invocation: different fleet task ID, same local finding ID "spec-1", different content.
 # The router must create a NEW td task (distinct dedup key) rather than refusing.
 inv1_list_entry="{\"id\":\"$inv1_td\",\"status\":\"open\",\"defer_until\":\"\",\"labels\":\"independent-review,finding,standards\",\"description\":$(python3 -c "import sys,json; print(json.dumps(open('$TEST_ROOT/td-desc').read()))" 2>/dev/null || printf '""')}"
@@ -1187,8 +1216,10 @@ TD_LIST_RESULT="[$inv1_list_entry]" ROUTER_TASK_ID=fleet-inv-2 \
   exit 1
 }
 inv2_td="$(grep '^td-created-' "$TEST_ROOT/td-ids" | tail -1)"
-[[ "$inv2_td" != "$inv1_td" ]] || {
-  printf 'GH#197: second invocation reused the first task instead of creating a new one\n' >&2
+# A new task must have been created (td-ids non-empty); deduplication would leave
+# td-ids empty because only td create appends to it.
+[[ -n "$inv2_td" ]] || {
+  printf 'GH#197: second invocation did not create a new task (dedup scope must be per-invocation)\n' >&2
   exit 1
 }
 
