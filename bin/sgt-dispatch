@@ -1035,7 +1035,7 @@ PY
 }
 
 _sgt_preflight_review_router() {
-  local selected before_identity after_identity revision
+  local selected before_identity after_identity revision contract_file
   selected="$(command -v sgt-review-findings 2>/dev/null || true)"
   [[ -n "$selected" && "$selected" == */* ]] || \
     _die "review-router preflight: sgt-review-findings is not installed on PATH. Update or reinstall Sergeant."
@@ -1045,7 +1045,9 @@ _sgt_preflight_review_router() {
     _die "review-router preflight: installed sgt-review-findings is not executable: $REVIEW_ROUTER_EXECUTABLE"
   before_identity="$(_sgt_review_router_executable_identity "$REVIEW_ROUTER_EXECUTABLE")" || \
     _die "review-router preflight: could not identify installed sgt-review-findings"
-  if ! REVIEW_ROUTER_CONTRACT="$("$REVIEW_ROUTER_EXECUTABLE" --capabilities 2>/dev/null)"; then
+  contract_file="$(mktemp)" || _die "review-router preflight: could not allocate contract capture"
+  if ! "$REVIEW_ROUTER_EXECUTABLE" --capabilities > "$contract_file" 2>/dev/null; then
+    rm -f "$contract_file"
     _die "review-router contract mismatch: installed sgt-review-findings does not expose --capabilities. Update or reinstall Sergeant."
   fi
   after_identity="$(_sgt_review_router_executable_identity "$REVIEW_ROUTER_EXECUTABLE")" || \
@@ -1060,7 +1062,7 @@ _sgt_preflight_review_router() {
     SGT_EXPECTED_SEVERITIES="$SGT_REVIEW_SEVERITIES" \
     SGT_EXPECTED_ALIASES="$SGT_REVIEW_SEVERITY_ALIASES" \
     SGT_EXPECTED_ARGV="$SGT_REVIEW_ROUTER_ARGV" \
-      python3 - "$REVIEW_ROUTER_CONTRACT" <<'PY'
+      python3 - "$contract_file" <<'PY'
 import json
 import os
 import sys
@@ -1074,7 +1076,9 @@ def closed_object(pairs):
     return result
 
 try:
-    doc = json.loads(sys.argv[1], object_pairs_hook=closed_object)
+    with open(sys.argv[1], "rb") as stream:
+        raw = stream.read().decode("utf-8", "strict")
+    doc = json.loads(raw, object_pairs_hook=closed_object)
     expected_keys = {
         "schema", "contract_revision", "artifact_schema_revision", "axes",
         "canonical_severities", "severity_aliases", "argv",
@@ -1103,8 +1107,11 @@ except (json.JSONDecodeError, KeyError, TypeError, ValueError):
 print(doc["contract_revision"])
 PY
 )"; then
+    rm -f "$contract_file"
     _die "review-router contract mismatch: installed sgt-review-findings cannot honor this dispatch revision. Update or reinstall Sergeant."
   fi
+  REVIEW_ROUTER_CONTRACT="$(cat "$contract_file")"
+  rm -f "$contract_file"
   REVIEW_ROUTER_EXECUTABLE_IDENTITY="$before_identity"
   REVIEW_ROUTER_CONTRACT_REVISION="$revision"
 }

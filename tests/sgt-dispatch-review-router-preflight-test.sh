@@ -188,6 +188,15 @@ chmod +x "$TEST_ROOT/duplicate-nested-router"
 ln -s "$TEST_ROOT/duplicate-nested-router" "$PREFIX/bin/sgt-review-findings"
 assert_rejected_without_mutation 'review-router contract mismatch' 'Duplicate nested contract'
 rm "$PREFIX/bin/sgt-review-findings"
+
+cat > "$TEST_ROOT/invalid-utf8-router" <<'EOF'
+#!/usr/bin/env bash
+printf '\377{"schema":"sergeant.review-router-capabilities/v1"}\n'
+EOF
+chmod +x "$TEST_ROOT/invalid-utf8-router"
+ln -s "$TEST_ROOT/invalid-utf8-router" "$PREFIX/bin/sgt-review-findings"
+assert_rejected_without_mutation 'review-router contract mismatch' 'Invalid UTF8 contract'
+rm "$PREFIX/bin/sgt-review-findings"
 assert_rejected_without_mutation 'review-router preflight: sgt-review-findings is not installed on PATH' 'Absent router'
 
 # An older/mixed router cannot impersonate compatibility with prose in --help.
