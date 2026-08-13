@@ -691,14 +691,35 @@ printf 'sgt-drain --wait rejects a drained claim contradicted by a live process:
 
 # Fleets created by origin/main recorded `ps lstart` text. A format mismatch
 # with linux:<ticks> is not evidence of PID reuse and must never certify exit.
-ps -o lstart= -p "$live_pid" | awk '{$1=$1; print}' \
+# BusyBox does not support `ps -p` or the lstart field; the public command must
+# retain the live PID with an actionable diagnostic instead of aborting the
+# suite or treating the worker as gone.
+printf 'legacy-lstart-record\n' \
   > "$fleet_dir/task-d/busy-repo/worker_process_start"
+mkdir -p "$TEST_ROOT/busybox-ps-bin"
+cat > "$TEST_ROOT/busybox-ps-bin/ps" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$BUSYBOX_PS_LOG"
+case " $* " in
+  *' -p '*) printf 'ps: unrecognized option: p\n' >&2; exit 2 ;;
+  *) printf 'ps: bad -o argument lstart\n' >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/busybox-ps-bin/ps"
 rc=0
-out="$("$ROOT_DIR/bin/sgt-drain" myproject --wait --timeout 1 2>&1)" || rc=$?
+out="$(PATH="$TEST_ROOT/busybox-ps-bin:$PATH" \
+  BUSYBOX_PS_LOG="$TEST_ROOT/busybox-ps.log" \
+  "$ROOT_DIR/bin/sgt-drain" myproject --wait --timeout 1 2>&1)" || rc=$?
 [[ $rc -ne 0 ]] || \
   { printf 'a live legacy-identity worker must not satisfy the wait\n' >&2; exit 1; }
 printf '%s\n' "$out" | grep -q 'status=drained.*liveness=live' || \
   { printf 'legacy identity should remain live/actionable, got: %s\n' "$out" >&2; exit 1; }
+printf '%s\n' "$out" | grep -q 'legacy process identity unavailable; live PID retained until exit' || \
+  { printf 'legacy identity failure should be actionable, got: %s\n' "$out" >&2; exit 1; }
+grep -q '^-o pid=,lstart=$' "$TEST_ROOT/busybox-ps.log" || \
+  { printf 'legacy identity adapter did not request an unfiltered process table\n' >&2; exit 1; }
+! grep -q -- ' -p ' "$TEST_ROOT/busybox-ps.log" || \
+  { printf 'legacy identity adapter used BusyBox-incompatible ps -p\n' >&2; exit 1; }
 printf 'sgt-drain --wait preserves live legacy identity records: ok\n'
 
 # Once the worker's process actually exits, the same wait succeeds.
