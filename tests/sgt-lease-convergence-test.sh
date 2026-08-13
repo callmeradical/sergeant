@@ -62,6 +62,7 @@ case "$1" in
       [[ "$previous" == -t ]] && target="$arg"
       previous="$arg"
     done
+    [[ "${FAIL_DISPLAY_MESSAGE:-0}" == 0 ]] || exit 42
     if [[ "$target" == "${FOREIGN_PANE:-%77}" && -n "${FOREIGN_PANE_IDENTITY:-}" ]]; then
       printf '%s\n' "$FOREIGN_PANE_IDENTITY"
       exit 0
@@ -82,7 +83,7 @@ case "$1" in
     pane_identity="${PANE_IDENTITY:-0|%42|4242|123456|stalled-pane}"
     if [[ "$target" == "${NEW_PANE:-%99}" ]]; then
       start_command="$(cat "${SPAWN_COMMAND_STATE:-$REPO_STATE_DIR/test_spawn_command}" 2>/dev/null || true)"
-      pane_identity="0|$target|9999|654321|$start_command"
+      pane_identity="0|$target|$FAKE_TMUX_OWNER_PID|654321|$start_command"
     fi
     # Stand in for a relaunched worker completing its delivery handshake.
     if [[ "${AUTO_DELIVER:-1}" == 1 &&
@@ -549,6 +550,45 @@ if printf 'resume' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DIS
   exit 1
 fi
 [[ ! -e "$state/notifications/$NOTIFY/action_lease_abandoned" ]]
+
+# An unclassified tmux failure is not proof that the exact old pane is gone.
+read -r state wt <<<"$(make_worktree respond-tmux-probe-error)"
+task=task-respond-tmux-probe-error
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+if printf 'resume' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    REPO_STATE_DIR="$state" PANE_ALIVE=0 FAIL_DISPLAY_MESSAGE=1 FAIL_LIST_PANES=1 \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1; then
+  printf 'FENCED_ON_UNCLASSIFIED_TMUX_FAILURE\n' >&2
+  exit 1
+fi
+[[ ! -e "$state/notifications/$NOTIFY/action_lease_abandoned" ]] || {
+  printf 'FENCED_ON_UNCLASSIFIED_TMUX_FAILURE\n' >&2
+  exit 1
+}
+
+# Likewise, a process-table probe error cannot prove the recorded owner PID is
+# absent. Preserve the accepted lease without publishing an ownership fence.
+mkdir -p "$TEST_ROOT/ps-probe-error-bin"
+cat > "$TEST_ROOT/ps-probe-error-bin/ps" <<'PS'
+#!/usr/bin/env bash
+exit 42
+PS
+chmod +x "$TEST_ROOT/ps-probe-error-bin/ps"
+read -r state wt <<<"$(make_worktree respond-ps-probe-error)"
+task=task-respond-ps-probe-error
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+if printf 'resume' | PATH="$TEST_ROOT/ps-probe-error-bin:$fake_bin:$PATH" \
+    SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" \
+    PANE_ALIVE=0 "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1; then
+  printf 'FENCED_ON_PS_PROBE_ERROR\n' >&2
+  exit 1
+fi
+[[ ! -e "$state/notifications/$NOTIFY/action_lease_abandoned" ]] || {
+  printf 'FENCED_ON_PS_PROBE_ERROR\n' >&2
+  exit 1
+}
 
 # ── 9. Every durable transfer boundary converges on exact retry ──────────
 

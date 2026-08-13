@@ -71,7 +71,7 @@ case "$1" in
         ;;
       %99)
         start_command="$(cat "$REPO_STATE_DIR/test_spawn_command" 2>/dev/null || true)"
-        printf '0|%%99|9999|654321|%s\n' "$start_command"
+        printf '0|%%99|%s|654321|%s\n' "$FAKE_TMUX_OWNER_PID" "$start_command"
         if [[ -s "$REPO_STATE_DIR/notification_id" ]]; then
           notification_id="$(cat "$REPO_STATE_DIR/notification_id")"
           nonce="$(cat "$REPO_STATE_DIR/notification_target" 2>/dev/null || true)"

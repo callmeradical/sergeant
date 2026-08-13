@@ -94,12 +94,18 @@ _sgt_response_lock_record_parse() {
 }
 
 _sgt_response_lock_record_live() {
-  local record="$1" pid expected current
+  local record="$1" pid expected current presence_status
   pid="$(_sgt_response_lock_record_pid "$record")" || return 1
-  kill -0 "$pid" 2>/dev/null || return 1
   _sgt_response_lock_record_parse "$record" || return 1
   expected="$_SGT_LOCK_RECORD_START"
-  current="$(_sgt_process_start_token "$pid")" || return 1
+  if _sgt_process_pid_presence "$pid"; then
+    :
+  else
+    presence_status=$?
+    [[ "$presence_status" -eq 1 ]] && return 1
+    return 2
+  fi
+  current="$(_sgt_process_start_token "$pid")" || return 2
   [[ "$current" == "$expected" ]]
 }
 
@@ -126,7 +132,7 @@ _sgt_response_lock_acquire() {
   local repo_state="$1"
   local lock_path="$repo_state/${2:-response.lock}"
   local candidate="$repo_state/.${2:-response.lock}.$$.$RANDOM.$RANDOM"
-  local owner current_owner interval timeout started owner_record
+  local owner current_owner interval timeout started owner_record owner_status
   interval="${SGT_RESPONSE_LOCK_INTERVAL:-0.01}"
   timeout="${SGT_RESPONSE_LOCK_TIMEOUT:-30}"
   [[ "$timeout" =~ ^[0-9]+$ ]] || { printf 'ERROR: Invalid response lock timeout: %s\n' "$timeout" >&2; return 1; }
@@ -155,7 +161,17 @@ _sgt_response_lock_acquire() {
         printf 'ERROR: Legacy or malformed response lock directory owner is ambiguous: %s\n' "$lock_path/pid" >&2
         return 1
       }
-      if _sgt_response_lock_record_live "$owner"; then sleep "$interval"; continue; fi
+      if _sgt_response_lock_record_live "$owner"; then
+        sleep "$interval"
+        continue
+      else
+        owner_status=$?
+        if [[ "$owner_status" -ne 1 ]]; then
+          rm -f "$candidate"
+          printf 'ERROR: Response lock owner liveness is unverifiable: %s\n' "$lock_path/pid" >&2
+          return 1
+        fi
+      fi
       current_owner="$(cat "$lock_path/pid" 2>/dev/null || true)"
       [[ "$current_owner" == "$owner" ]] || continue
       if ! rm -f "$lock_path/pid" || ! rmdir "$lock_path"; then
@@ -168,7 +184,17 @@ _sgt_response_lock_acquire() {
       owner="$(cat "$lock_path" 2>/dev/null || readlink "$lock_path" 2>/dev/null || true)"
       [[ -n "$owner" ]] || continue
       _sgt_response_lock_record_pid "$owner" >/dev/null || { rm -f "$candidate"; printf 'ERROR: Response lock has an invalid owner: %s\n' "$lock_path" >&2; return 1; }
-      if _sgt_response_lock_record_live "$owner"; then sleep "$interval"; continue; fi
+      if _sgt_response_lock_record_live "$owner"; then
+        sleep "$interval"
+        continue
+      else
+        owner_status=$?
+        if [[ "$owner_status" -ne 1 ]]; then
+          rm -f "$candidate"
+          printf 'ERROR: Response lock owner liveness is unverifiable: %s\n' "$lock_path" >&2
+          return 1
+        fi
+      fi
       current_owner="$(cat "$lock_path" 2>/dev/null || readlink "$lock_path" 2>/dev/null || true)"
       [[ "$current_owner" == "$owner" ]] && rm -f "$lock_path"
       continue
@@ -302,7 +328,49 @@ _sgt_replacement_pane_auth() {
 }
 
 _sgt_replacement_pane_identity_matches() {
-  _sgt_replacement_pane_auth "$2" "$3" "$4" >/dev/null
+  local expected_identity="$1" pane="$2" token="$3" role="$4"
+  local after auth identity_dead identity_pane identity_pid
+  local auth_pane auth_pid auth_start auth_token auth_role
+  IFS='|' read -r identity_dead identity_pane identity_pid _ <<< "$expected_identity"
+  [[ "$identity_dead" == 0 && "$identity_pane" == "$pane" &&
+     "$identity_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  auth="$(_sgt_replacement_pane_auth "$pane" "$token" "$role")" || return 1
+  IFS='|' read -r auth_pane auth_pid auth_start auth_token auth_role <<< "$auth"
+  [[ "$auth_pane" == "$pane" && "$auth_pid" == "$identity_pid" &&
+     -n "$auth_start" && "$auth_token" == "$token" && "$auth_role" == "$role" ]] || return 1
+  after="$(_sgt_pane_identity "$pane" 2>/dev/null)" || return 1
+  [[ "$after" == "$expected_identity" ]] || return 1
+  printf '%s\n' "$auth"
+}
+
+# Classify a pane from direct evidence plus a successful complete tmux
+# inventory.  A display-message failure alone is not an absence proof because
+# tmux uses nonzero exits for server/protocol failures as well as unknown panes.
+#   0: present or otherwise resolvable, 1: proven absent, 2: unverifiable.
+_sgt_tmux_pane_presence() {
+  local pane="$1" snapshot line seen="|" presence_status=1
+  [[ "$pane" =~ ^%[0-9]+$ ]] || return 2
+  if _sgt_pane_identity "$pane" >/dev/null 2>&1; then
+    return 0
+  fi
+  snapshot="$(mktemp "${TMPDIR:-/tmp}/sgt-pane-presence.XXXXXX")" || return 2
+  if ! tmux list-panes -a -F '#{pane_id}' > "$snapshot" 2>/dev/null; then
+    rm -f "$snapshot"
+    return 2
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^%[0-9]+$ && "$seen" != *"|$line|"* ]] || {
+      presence_status=2
+      break
+    }
+    [[ "$line" == "$pane" ]] && {
+      presence_status=0
+      break
+    }
+    seen="${seen}${line}|"
+  done < "$snapshot"
+  rm -f "$snapshot"
+  return "$presence_status"
 }
 
 # Discover the one authenticated replacement pane from one successful, exact
@@ -534,7 +602,7 @@ _sgt_notification_action_pending() {
 _sgt_fence_dead_action_lease() {
   local repo_state="$1" worktree="$2" successor="$3" generation="$4" reason="$5"
   local notification_id lease notification_dir target_dir pane target_identity token
-  local owner_pid actual expected_transition existing stamp process_probe
+  local owner_pid expected_transition existing stamp probe_status
 
   notification_id="$(cat "$repo_state/notification_id" 2>/dev/null || true)"
   [[ -n "$notification_id" ]] || return 1
@@ -555,17 +623,16 @@ _sgt_fence_dead_action_lease() {
   [[ "$(cat "$target_dir/accepted" 2>/dev/null || true)" == "$token" &&
      "$(cat "$target_dir/delivered" 2>/dev/null || true)" == "$token" ]] || return 1
 
-  # Any resolvable pane is ambiguous: it is either the owner or a reused id.
+  # Only a successful, exact inventory that omits the pane proves absence.
   command -v tmux >/dev/null 2>&1 || return 1
-  if actual="$(_sgt_pane_identity "$pane" 2>/dev/null)" && [[ -n "$actual" ]]; then
-    return 1
-  fi
-  # Any process at the recorded PID is ambiguous (including PID reuse). `ps`
-  # distinguishes absence from kill(2)'s EPERM; lack of permission must never be
-  # misread as proof of death.
+  if _sgt_tmux_pane_presence "$pane"; then return 1; else probe_status=$?; fi
+  [[ "$probe_status" -eq 1 ]] || return 1
+  # Any process at the recorded PID is ambiguous (including PID reuse).  Use a
+  # complete process-table snapshot so an operational ps error cannot be
+  # conflated with an absent selection.
   command -v ps >/dev/null 2>&1 || return 1
-  process_probe="$(ps -p "$owner_pid" -o pid= 2>/dev/null || true)"
-  [[ -z "${process_probe//[[:space:]]/}" ]] || return 1
+  if _sgt_process_pid_presence "$owner_pid"; then return 1; else probe_status=$?; fi
+  [[ "$probe_status" -eq 1 ]] || return 1
 
   # Re-verify the durable binding immediately before publishing the fence.
   [[ "$(cat "$repo_state/notification_id" 2>/dev/null || true)" == "$notification_id" &&
@@ -574,11 +641,10 @@ _sgt_fence_dead_action_lease() {
      "$(cat "$target_dir/accepted" 2>/dev/null || true)" == "$token" &&
      "$(cat "$target_dir/delivered" 2>/dev/null || true)" == "$token" &&
      ! -e "$target_dir/completed" ]] || return 1
-  if actual="$(_sgt_pane_identity "$pane" 2>/dev/null)" && [[ -n "$actual" ]]; then
-    return 1
-  fi
-  process_probe="$(ps -p "$owner_pid" -o pid= 2>/dev/null || true)"
-  [[ -z "${process_probe//[[:space:]]/}" ]] || return 1
+  if _sgt_tmux_pane_presence "$pane"; then return 1; else probe_status=$?; fi
+  [[ "$probe_status" -eq 1 ]] || return 1
+  if _sgt_process_pid_presence "$owner_pid"; then return 1; else probe_status=$?; fi
+  [[ "$probe_status" -eq 1 ]] || return 1
 
   stamp="$(sed -n 's/^recorded_at=//p' \
     "$notification_dir/action_lease_abandoned" 2>/dev/null || true)"

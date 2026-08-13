@@ -88,7 +88,7 @@ case "$1" in
     pane_identity="${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
     if [[ "$target" == "${NEW_PANE:-%99}" ]]; then
       start_command="$(cat "$EXPECTED_WORKER/test_spawn_command" 2>/dev/null || true)"
-      pane_identity="0|$target|9999|654321|$start_command"
+      pane_identity="0|$target|$FAKE_TMUX_OWNER_PID|654321|$start_command"
       if [[ "${REQUIRE_FRESH_ACK:-0}" == 1 &&
             -e "$(cat "$EXPECTED_WORKER/worktree")/.sergeant-notification-ack" &&
             ! -e "$EXPECTED_WORKER/notification_delivered_pane_identity" ]]; then
@@ -104,7 +104,7 @@ case "$1" in
       [[ "$count" -ge "${DELIVER_AFTER:-1}" ]] || deliver=false
     fi
     if [[ "$target" == "${NEW_PANE:-%99}" && "${STALE_SUPERVISOR_ACK:-0}" == 1 &&
-          "${count:-0}" == 2 && -s "$EXPECTED_WORKER/notification_id" ]]; then
+          "${count:-0}" == "${STALE_ACK_AT:-2}" && -s "$EXPECTED_WORKER/notification_id" ]]; then
       notification_id="$(cat "$EXPECTED_WORKER/notification_id")"
       notification_worktree="$(cat "$EXPECTED_WORKER/worktree")"
       printf '%s|0|%%99|9999|654321|stale-supervisor\n' "$notification_id" \
@@ -116,6 +116,7 @@ case "$1" in
     if [[ "${REQUIRE_LOCK_RELEASE:-0}" == 1 &&
           -e "$EXPECTED_WORKER/response.lock" ]]; then
       touch "$LOCK_HELD_MARKER"
+      deliver=false
     fi
     if [[ "${AUTO_DELIVER:-1}" == 1 && "$deliver" == true && -s "$EXPECTED_WORKER/notification_id" ]]; then
       if [[ "${REQUIRE_TARGET:-0}" == 1 ]]; then
@@ -436,8 +437,13 @@ printf 'needs_input\n' > "$worktree/.sergeant-status"
 response='Use option A; $(touch should-not-exist)'
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/live.log" TD_LOG="$TEST_ROOT/td.log" \
   REQUIRE_LOCK_RELEASE=1 LOCK_HELD_MARKER="$TEST_ROOT/lock-held" \
+  SGT_NOTIFICATION_ACK_TIMEOUT=1 \
   TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
   respond "$response" >/dev/null
+[[ -e "$TEST_ROOT/lock-held" ]] || {
+  printf 'worker never observed the response lock held before acknowledgement\n' >&2
+  exit 1
+}
 [[ "$(cat "$repo_state/response")" == "$response" ]]
 [[ "$(cat "$worktree/.sergeant-response")" == "$response" ]]
 [[ "$(cat "$repo_state/pane")" == "%42" ]]
@@ -611,7 +617,7 @@ consumed_target_nonce="$(cat "$repo_state/notification_target" 2>/dev/null || tr
 consumed_target_dir="$repo_state/notifications/$consumed_queued_id/targets/$consumed_target_nonce"
 consumed_successor_identity="$(cat "$repo_state/pane_identity")"
 [[ "$consumed_successor_identity" == \
-  '0|%100|9999|654321|'*'/sgt-replacement-launch '* ]]
+  "0|%100|$FAKE_TMUX_OWNER_PID|654321|"*'/sgt-replacement-launch '* ]]
 [[ "$(cat "$consumed_target_dir/pane_identity")" == "$consumed_successor_identity" ]]
 [[ -f "$consumed_target_dir/accepted" && -f "$consumed_target_dir/delivered" ]]
 grep -Fq 'queued response delivered to pane %100' "$TEST_ROOT/consumed-second.out"
@@ -658,7 +664,8 @@ grep -Fq 'new-window -P -F #{pane_id} -t sgt: -n task/app' "$TEST_ROOT/dead.log"
 grep -Fq "$ROOT_DIR/bin/sgt-interactive-worker" "$TEST_ROOT/dead.log"
 [[ "$(cat "$repo_state/notification_delivered")" == "$(cat "$repo_state/notification_id")" ]]
 [[ "$(cat "$repo_state/notification_id")" != "$(cat "$repo_state/response_id")" ]]
-[[ "$(cat "$repo_state/notification_delivered_pane_identity")" == 0\|%99\|9999\|654321\|* ]]
+[[ "$(cat "$repo_state/notification_delivered_pane_identity")" == \
+  "0|%99|$FAKE_TMUX_OWNER_PID|654321|"* ]]
 
 relaunch_response_id="$(cat "$repo_state/response_id")"
 stale_notification_id="$(cat "$repo_state/notification_id")"
@@ -695,18 +702,20 @@ PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/crash-relaunch.log" \
   TD_LOG="$TEST_ROOT/crash-relaunch-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
   PANE_ALIVE=1 NEW_PANE=%100 REQUIRE_FRESH_ACK=1 REQUIRE_TARGET=1 STALE_SUPERVISOR_ACK=1 \
   REQUIRE_REVOKED_BEFORE_NOTIFICATION=1 \
-  DELIVER_COUNT_FILE="$TEST_ROOT/crash-relaunch-delivery-count" DELIVER_AFTER=3 \
+  DELIVER_COUNT_FILE="$TEST_ROOT/crash-relaunch-delivery-count" DELIVER_AFTER=4 STALE_ACK_AT=3 \
   PANE_IDENTITY="1|%99|9999|654321|dead-pane" EXPECTED_WORKER="$repo_state" \
   SERGEANT_FLEET="$fleet" respond 'resume dead worker' >/dev/null
 [[ "$(cat "$repo_state/response_id")" == "$relaunch_response_id" ]]
 [[ "$(cat "$repo_state/notification_id")" != "$stale_notification_id" ]]
 [[ "$(cat "$repo_state/pane")" == %100 ]]
 [[ "$(cat "$repo_state/notification_delivered")" == "$(cat "$repo_state/notification_id")" ]]
-[[ "$(cat "$repo_state/notification_delivered_pane_identity")" == 0\|%100\|9999\|654321\|* ]]
+[[ "$(cat "$repo_state/notification_delivered_pane_identity")" == \
+  "0|%100|$FAKE_TMUX_OWNER_PID|654321|"* ]]
 new_notif_id="$(cat "$repo_state/notification_id")"
 new_nonce="$(cat "$repo_state/notification_target")"
-[[ "$(cat "$repo_state/notifications/$new_notif_id/targets/$new_nonce/pane_identity")" == 0\|%100\|9999\|654321\|* ]]
-[[ "$(cat "$TEST_ROOT/crash-relaunch-delivery-count")" -ge 3 ]]
+[[ "$(cat "$repo_state/notifications/$new_notif_id/targets/$new_nonce/pane_identity")" == \
+  "0|%100|$FAKE_TMUX_OWNER_PID|654321|"* ]]
+[[ "$(cat "$TEST_ROOT/crash-relaunch-delivery-count")" -ge 4 ]]
 [[ ! -e "$TEST_ROOT/crash-relaunch-td.log" ]]
 [[ "$(cat "$worktree/.sergeant-response")" == 'resume dead worker' ]]
 grep -Fq '%99' \

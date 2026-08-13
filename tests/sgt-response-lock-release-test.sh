@@ -200,4 +200,49 @@ for layout in file directory; do
   }
 done
 
+# A live owner whose birth token cannot be read is unverifiable, not stale.  A
+# contender must fail closed without replacing its exact acquisition record.
+sleep 30 & live_owner=$!
+live_owner_start="$(_sgt_process_start_token "$live_owner")"
+lockdir10="$TEST_ROOT/state-10"
+mkdir -p "$lockdir10"
+printf 'pid=%s\nstart=%s\nnonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' \
+  "$live_owner" "$live_owner_start" > "$lockdir10/response.lock"
+birth_probe_record="$(cat "$lockdir10/response.lock")"
+_sgt_process_start_token() {
+  local pid="$1" token
+  [[ "$pid" != "$live_owner" ]] || return 1
+  token="$(awk '{ print $22 }' "/proc/$pid/stat" 2>/dev/null)" || return 1
+  [[ "$token" =~ ^[0-9]+$ ]] || return 1
+  printf 'proc:%s\n' "$token"
+}
+if SGT_RESPONSE_LOCK_TIMEOUT=1 _sgt_response_lock_acquire "$lockdir10" \
+    2> "$TEST_ROOT/case10.err"; then
+  printf 'RECLAIMED_LIVE_OWNER_WHEN_BIRTH_PROBE_FAILED\n' >&2
+  exit 1
+fi
+[[ "$(cat "$lockdir10/response.lock")" == "$birth_probe_record" ]] || {
+  printf 'RECLAIMED_LIVE_OWNER_WHEN_BIRTH_PROBE_FAILED\n' >&2
+  exit 1
+}
+kill "$live_owner" 2>/dev/null || true
+wait "$live_owner" 2>/dev/null || true
+
+# Second-resolution `ps lstart` text is not an exact process-birth identity.
+# The Darwin/BSD path must leave exact ownership unverifiable and let the
+# portable marker/pane protocol decide liveness instead.
+mkdir -p "$TEST_ROOT/darwin-ps-bin"
+cat > "$TEST_ROOT/darwin-ps-bin/ps" <<'PS'
+#!/usr/bin/env bash
+printf 'Thu Aug 13 12:34:56 2026\n'
+PS
+chmod +x "$TEST_ROOT/darwin-ps-bin/ps"
+if PATH="$TEST_ROOT/darwin-ps-bin:$PATH" bash -c \
+    'source "$1"; _sgt_process_start_token 99999999' _ \
+    "$ROOT_DIR/bin/_sgt-process-identity.sh" > "$TEST_ROOT/darwin-token"; then
+  printf 'DARWIN_LSTART_PROMOTED_TO_EXACT_IDENTITY: %s\n' \
+    "$(cat "$TEST_ROOT/darwin-token")" >&2
+  exit 1
+fi
+
 printf 'sgt-response-lock-release: ok\n'

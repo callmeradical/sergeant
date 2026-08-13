@@ -516,11 +516,8 @@ _abort_replacement() {
 
 pane_identity=""
 if pane_identity="$(_sgt_pane_identity "$new_pane")" && \
-    _sgt_replacement_pane_identity_matches "$pane_identity" "$new_pane" \
-      "$replacement_spawn_token" "$worker_role"; then
-  pane_auth="$(_sgt_replacement_pane_auth "$new_pane" \
-    "$replacement_spawn_token" "$worker_role")" || \
-    _abort_replacement "could not capture stable replacement pane authentication"
+    pane_auth="$(_sgt_replacement_pane_identity_matches "$pane_identity" "$new_pane" \
+      "$replacement_spawn_token" "$worker_role")"; then
   recovery_install_phase=spawned
   if _sgt_transfer_journal_read "$relaunch_transaction" &&
       [[ "$_SGT_TRANSFER_PHASE" == acked ]]; then

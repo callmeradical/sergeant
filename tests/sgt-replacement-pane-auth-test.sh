@@ -51,7 +51,7 @@ source "$ROOT_DIR/bin/_sgt-response-lock.sh"
 scanned="$(tmux list-panes -a -F '#{pane_id}|#{window_name}' | awk -F'|' -v w="$window" '$2 == w { print $1 }')"
 [[ "$scanned" == "$pane" ]]
 identity="$(_sgt_pane_identity "$scanned")"
-_sgt_replacement_pane_identity_matches "$identity" "$scanned" "$token" "$role"
+_sgt_replacement_pane_identity_matches "$identity" "$scanned" "$token" "$role" >/dev/null
 original_auth="$(_sgt_replacement_pane_auth "$scanned" "$token" "$role")"
 option_pid="$(tmux display-message -p -t "$scanned" '#{@sergeant_replacement_pid}')"
 option_start="$(tmux display-message -p -t "$scanned" '#{@sergeant_replacement_start}')"
@@ -96,6 +96,21 @@ foreign="$(tmux new-window -d -P -F '#{pane_id}' -t "$session:" -n "$window" \
 foreign_identity="$(_sgt_pane_identity "$foreign")"
 if _sgt_replacement_pane_identity_matches "$foreign_identity" "$foreign" "$token" "$role"; then
   printf 'foreign token-substring pane authenticated\n' >&2
+  exit 1
+fi
+
+# The persisted pane identity and replacement marker authentication must bind
+# the same pane generation.  A raced-in replacement that is internally valid
+# must not authenticate against the caller's older snapshot.
+_sgt_pane_identity() {
+  printf '0|%%77|2222|222222|new-generation\n'
+}
+_sgt_replacement_pane_auth() {
+  printf '%%77|2222|proc:222222|%s|%s\n' "$token" "$role"
+}
+if _sgt_replacement_pane_identity_matches \
+    '0|%77|1111|111111|old-generation' '%77' "$token" "$role"; then
+  printf 'REPLACEMENT_IDENTITY_ARG_IGNORED\n' >&2
   exit 1
 fi
 

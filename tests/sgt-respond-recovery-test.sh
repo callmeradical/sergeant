@@ -64,7 +64,7 @@ case "$1" in
     pane_identity="0|%42|4242|123456|stalled-pane"
     if [[ "$target" == "%99" ]]; then
       start_command="$(cat "$REPO_STATE_DIR/test_spawn_command" 2>/dev/null || true)"
-      pane_identity="0|%99|9999|654321|$start_command"
+      pane_identity="0|%99|$FAKE_TMUX_OWNER_PID|654321|$start_command"
       if [[ "${ACK_NEW_PANE:-1}" == 1 && -s "$REPO_STATE_DIR/notification_id" ]]; then
         notification_id="$(cat "$REPO_STATE_DIR/notification_id")"
         wt="$(cat "$REPO_STATE_DIR/worktree")"

@@ -55,7 +55,7 @@ case "$1" in
     pane_identity="${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
     if [[ "$target" == "${NEW_PANE:-%99}" ]]; then
       start_command="$(cat "$EXPECTED_WORKER/test_spawn_command" 2>/dev/null || true)"
-      pane_identity="0|$target|9999|654321|$start_command"
+      pane_identity="0|$target|$FAKE_TMUX_OWNER_PID|654321|$start_command"
       if [[ "${AUTO_DELIVER:-1}" == 1 && -s "$EXPECTED_WORKER/notification_id" ]]; then
         notification_id="$(cat "$EXPECTED_WORKER/notification_id")"
         notification_worktree="$(cat "$EXPECTED_WORKER/worktree")"

@@ -70,6 +70,25 @@ eval "respond_worker_launch_before=\${_SGT_WORKER_LAUNCH_BEFORE_${_SGT_RESPOND_L
 respond_peer_launch_contended="$SGT_DRAIN_LOCK_CONTENDED_LIVE"
 respond_peer_launch_nonce="$SGT_DRAIN_LOCK_CONTENDED_NONCE"
 _sgt_response_lock_acquire "$REPO_DIR"
+
+# The interactive worker publishes accepted/delivered while holding this same
+# response lock.  Keep the worker-launch lock across the wait so another public
+# relaunch/response operation cannot replace the durable target, but release the
+# narrower response lock after the notification and target are fully published.
+# Reacquire it before the caller adjudicates timeout evidence or retires any
+# delivery state.
+_wait_worker_notification_with_response_lock_released() {
+  local pane="$1" notification_id="$2" wait_status
+  _sgt_response_lock_release || return 2
+  if _sgt_wait_worker_notification "$pane" "$REPO_DIR" "$notification_id"; then
+    wait_status=0
+  else
+    wait_status=1
+  fi
+  _sgt_response_lock_acquire "$REPO_DIR" || return 2
+  return "$wait_status"
+}
+
 _cleanup_respond() {
   local status=$?
   local marker marker_path
@@ -662,7 +681,14 @@ if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && _pane_is_supervisor "$
     _sgt_notification_target_create "$REPO_DIR" "$live_notification_id" \
       "$(cat "$REPO_DIR/pane_identity")" >/dev/null || \
       _die "notification target race detected; response not delivered to local pane"
-    if ! _sgt_wait_worker_notification "$pane" "$REPO_DIR" "$live_notification_id"; then
+    set +e
+    _wait_worker_notification_with_response_lock_released \
+      "$pane" "$live_notification_id"
+    delivery_wait_status=$?
+    set -e
+    [[ "$delivery_wait_status" -ne 2 ]] || \
+      _die "Could not reacquire response ownership after local worker delivery"
+    if [[ "$delivery_wait_status" -ne 0 ]]; then
       _arm_delivery_escalation "live pane did not acknowledge within SGT_NOTIFICATION_ACK_TIMEOUT" \
         "$(cat "$REPO_DIR/pane_identity" 2>/dev/null || true)" || true
       _die "$(printf 'Worker did not acknowledge its durable response notification within the delivery bound; the response is stored and recoverable.\n  response: %s (gate %s)\n  pane: %s\n  Rerun the same command to perform one bounded worker relaunch: sgt-respond %s %s' \
@@ -860,11 +886,8 @@ if [[ -z "$new_pane" ]]; then
 fi
 _transfer_interrupt_hook replacement_spawned
 if pane_identity="$(_sgt_pane_identity "$new_pane")" && \
-    _sgt_replacement_pane_identity_matches "$pane_identity" "$new_pane" \
-      "$replacement_spawn_token" "$worker_role"; then
-  pane_auth="$(_sgt_replacement_pane_auth "$new_pane" \
-    "$replacement_spawn_token" "$worker_role")" || \
-    _die "Could not capture stable replacement pane authentication"
+    pane_auth="$(_sgt_replacement_pane_identity_matches "$pane_identity" "$new_pane" \
+      "$replacement_spawn_token" "$worker_role")"; then
   _write_relaunch_transaction spawned "$new_pane" "$pane_auth" || \
     _die "Could not publish spawned worker ownership transaction"
   printf '%s\n' "$new_pane" > "$REPO_DIR/pane"
@@ -899,7 +922,14 @@ fi
 if [[ -n "$superseded_live_pane" && "$superseded_live_pane" != "$new_pane" ]]; then
   tmux kill-pane -t "$superseded_live_pane" 2>/dev/null || true
 fi
-if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" "$delivery_notification_id"; then
+set +e
+_wait_worker_notification_with_response_lock_released \
+  "$new_pane" "$delivery_notification_id"
+delivery_wait_status=$?
+set -e
+[[ "$delivery_wait_status" -ne 2 ]] || \
+  _die "Could not reacquire response ownership after replacement worker delivery"
+if [[ "$delivery_wait_status" -ne 0 ]]; then
   tmux kill-pane -t "$new_pane" 2>/dev/null || true
   _record_relaunch_orphan "relaunched interactive worker did not acknowledge its durable response notification"
   _die "Worker relaunch notification acknowledgement timed out for $TASK_ID/$REPO"

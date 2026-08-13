@@ -9,8 +9,41 @@ _sgt_process_start_token() {
     [[ "$token" =~ ^[0-9]+$ ]] || return 1
     printf 'proc:%s\n' "$token"
   else
-    token="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]][[:space:]]*/ /g')" || return 1
-    [[ -n "$token" ]] || return 1
-    printf 'ps:%s\n' "$token"
+    # `ps lstart` is only second-resolution.  Two processes born within the
+    # same second can therefore share it, so it is never exact ownership proof.
+    # Platforms without /proc use the portable marker/pane evidence path and
+    # must fail closed anywhere an exact process-birth token is required.
+    return 1
   fi
+}
+
+# Classify one PID from a successful complete process-table snapshot.
+#   0: present, 1: proven absent, 2: probe failed or returned malformed data.
+# A targeted `ps -p` commonly returns the same nonzero status for both absence
+# and operational errors, so ownership fencing must not use it as a death probe.
+_sgt_process_pid_presence() {
+  local pid="$1" snapshot line seen=false parse_status=0
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 2
+  snapshot="$(mktemp "${TMPDIR:-/tmp}/sgt-pid-snapshot.XXXXXX")" || return 2
+  if ps -A -o pid= > "$snapshot" 2>/dev/null; then
+    :
+  elif ps -axo pid= > "$snapshot" 2>/dev/null; then
+    :
+  else
+    rm -f "$snapshot"
+    return 2
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line//[[:space:]]/}"
+    [[ -z "$line" ]] && continue
+    if [[ ! "$line" =~ ^[1-9][0-9]*$ ]]; then
+      parse_status=2
+      break
+    fi
+    [[ "$line" == "$pid" ]] && seen=true
+  done < "$snapshot"
+  rm -f "$snapshot"
+  [[ "$parse_status" -eq 0 ]] || return "$parse_status"
+  [[ "$seen" == true ]] && return 0
+  return 1
 }
