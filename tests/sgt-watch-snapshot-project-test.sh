@@ -71,6 +71,10 @@ case "$1" in
     case "${!#}" in
       '#{pane_id}') printf '%s\n' "$target" ;;
       '#{pane_activity}') printf '%s\n' "${PANE_ACTIVITY:-0}" ;;
+      '#{pane_id}|#{pane_activity}|#{window_activity}|#{window_panes}')
+        # Multi-field display-message used by _snapshot_recent_tmux_activity.
+        printf '%s|%s|%s|%s\n' "$target" "${PANE_ACTIVITY:-0}" \
+          "${WINDOW_ACTIVITY:-0}" "${WINDOW_PANES:-1}" ;;
       '#{@sgt_coordinator}')
         if [[ "$target" == "${COORDINATOR_PANE:-}" ]]; then
           printf '%s\n' "${COORDINATOR_MARKER:-}"
@@ -187,7 +191,18 @@ make_fleet_repo() {
     chmod 600 "$dir/pane_identity"
     printf '%s\n' "$pane" >> "$LIVE_PANES"
   fi
-  [[ -z "$ts" ]] || printf '%s\n' "$ts" > "$dir/progress_ts"
+  if [[ -n "$ts" ]]; then
+    printf '%s\n' "$ts" > "$dir/progress_ts"
+    # Write a durable activity_witness for the new _snapshot_recent_durable_witness
+    # path introduced in GH#206. Without this, an in_progress+pane setup without
+    # a recent pane_activity cannot be verified as an active witness.
+    if [[ -n "${pane:-}" ]]; then
+      _ident="$(cat "$dir/pane_identity" 2>/dev/null || true)"
+      printf 'version=1\nkind=transition\nobserved_at=%s\npane=%s\npane_identity=%s\nsubject_pid=\nsubject_identity=\n' \
+        "$ts" "$pane" "$_ident" > "$dir/activity_witness"
+      chmod 600 "$dir/activity_witness"
+    fi
+  fi
 }
 
 assert_common_shape() {
