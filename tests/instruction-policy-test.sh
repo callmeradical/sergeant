@@ -81,6 +81,8 @@ require_text "skills/dispatch/SKILL.md" "mutation before validation"
 require_text "skills/dispatch/SKILL.md" "After two remediation cycles"
 require_text "docs/using-sergeant.md" '--intent-file intent.md'
 require_text "docs/using-sergeant.md" ".sergeant-intent.md"
+require_text "docs/using-sergeant.md" "exact lease owner that is provably dead"
+require_text "docs/using-sergeant.md" "any pane/process probe error remains"
 reject_text "AGENTS.md" 'no-mistakes axi run --intent "<the user'
 require_text "skills/cross-repo-work/SKILL.md" "If the user requested planning only"
 reject_text "docs/troubleshooting.md" "follow no-mistakes policy"

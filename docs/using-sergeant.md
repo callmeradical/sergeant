@@ -291,9 +291,19 @@ left the repo `in_progress` with a `live worker stalled` diagnostic and you
 already reconciled the exact pane identity, worktree, td handoff, and active
 response/notification state. Recovery is one-shot per repo attempt: Sergeant
 records `stall_recovery_attempted`, relaunches only after replacement metadata
-is validated, and escalates to `needs_input` instead of retrying when the prior
-notification delivery still holds an unfinished action lease, the recorded pane
-identity no longer matches, or any later relaunch step fails.
+is validated, and escalates to `needs_input` instead of retrying when recovery
+cannot establish exclusive ownership or any later relaunch step fails.
+
+An unfinished notification action lease normally blocks recovery: Sergeant
+preserves its acceptance, delivery, target, and pane/process evidence and emits
+an actionable escalation instead of fabricating completion. The narrow
+exception is an exact lease owner that is provably dead from complete,
+successful pane and process probes. In that case Sergeant may fence and archive
+the old lease, record the ownership transition, and issue or resume the one
+durably bound successor notification. A live or reused owner, ambiguous
+identity, malformed evidence, or any pane/process probe error remains
+fail-closed and actionable; no lease is abandoned and no successor is claimed
+as resumed.
 
 ## Reconcile results
 
