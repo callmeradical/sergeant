@@ -214,6 +214,34 @@ _sgt_drain_process_start() {
   _sgt_process_identity "$pid" 2>/dev/null || true
 }
 
+# _sgt_drain_legacy_process_start <pid>
+#
+# Reads the historical `ps lstart` representation without `ps -p`, which is
+# absent from BusyBox. This value is compatibility evidence only: its
+# second-resolution timestamp is never promoted to an exact process identity.
+# Callers must retain a live PID when the field is unsupported or differs.
+_sgt_drain_legacy_process_start() {
+  local pid="$1" table value
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  table="$(ps -o pid=,lstart= 2>/dev/null)" || return 1
+  value="$(printf '%s\n' "$table" | awk -v target="$pid" '
+    $1 == target {
+      $1 = ""
+      sub(/^[[:space:]]+/, "")
+      value = $0
+      count++
+    }
+    END {
+      if (count == 1 && value != "") print value
+      else exit 1
+    }
+  ')" || return 1
+  [[ -n "$value" ]] || return 1
+  printf '%s\n' "$value"
+}
+
 # _sgt_drain_snapshot_field <snapshot> <field>
 #
 # Reads one field from an already-captured record body, so a whole record can be

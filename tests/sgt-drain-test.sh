@@ -780,6 +780,53 @@ cat > "$TEST_ROOT/portable-bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 printf '0|%%999|9999|654321|unrelated-pane\n'
 EOF
+if ! command -v python3 >/dev/null 2>&1; then
+cat > "$TEST_ROOT/portable-bin/python3" <<'EOF'
+#!/usr/bin/env bash
+# The pinned Bash 3.2 compatibility image intentionally lacks the repository's
+# Python runtime dependency. Supply the owned-FD read seam needed by this one
+# portable-marker fixture; production dependency checks are covered elsewhere.
+if [[ "$1" == */_sgt-marker-history.py ]]; then
+  if [[ "$2" == --fd ]]; then
+    descriptor_mode=true
+    fd="$3" marker="$5"
+    history="$(cat <&"$fd")"
+  else
+    descriptor_mode=false
+    history="$(cat "$2")"
+    marker="${3:-}"
+  fi
+  generation="${marker%%|*}"
+  identity_and_rest="${marker#*|}"
+  identity="${identity_and_rest%%|*}"
+  selected="$(printf '%s\n' "$history" | awk -F'|' \
+    -v generation="$generation" -v identity="$identity" \
+    '$1 == generation && $2 == identity { count++; floor=$3 } END { if (count == 1) print floor }')"
+  [[ "$selected" =~ ^[0-9]+$ ]] || exit 1
+  digest="$(printf '%s\n' "$history" | sha256sum | awk '{print $1}')"
+  if [[ "$descriptor_mode" == true ]]; then
+    printf '%s|%s|true\n' "$digest" "$selected"
+  else
+    printf '%s\n' "$digest"
+  fi
+  exit 0
+fi
+if [[ "$1" == */_sgt-process-token.py && "$2" == portable-holders ]]; then
+  exit 0
+fi
+fd="$2" operation="${5:-validate}"
+case "$operation" in
+  read)
+    IFS= read -r value <&"$fd" || exit 1
+    printf '%s\n' "$value"
+    if IFS= read -r extra <&"$fd"; then exit 1; fi
+    ;;
+  validate) printf 'fixture-identity\n' ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/portable-bin/python3"
+fi
 chmod +x "$TEST_ROOT/portable-bin/lsof" "$TEST_ROOT/portable-bin/tmux"
 rc=0
 out="$(PATH="$TEST_ROOT/portable-bin:$PATH" \
