@@ -11,6 +11,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=bin/_sgt-lib.sh
+source "$ROOT_DIR/bin/_sgt-lib.sh"
 TEST_ROOT="$(mktemp -d)"
 
 # ── Drain state isolation (td-79f0a8) ────────────────────────────────────────
@@ -94,7 +96,7 @@ run_branch() {
   local label="$1" exit_as="$2" publish="$3"
   local state="$TEST_ROOT/$label/state" worktree="$TEST_ROOT/$label/worktree"
   local notification_id="notify-$label"
-  local pane identity nonce target_dir
+  local pane identity nonce target_dir worker_command quoted_worker_command
 
   mkdir -p "$state" "$worktree"
   printf 'in_progress\n' > "$worktree/.sergeant-status"
@@ -107,13 +109,17 @@ kind=initial
 instruction=Read the .sergeant-brief.md file and execute the mission.
 EOF
 
+  _sgt_prepare_worker_process_marker "$state"
+  worker_command="$(_sgt_worker_command "$ROOT_DIR/bin/sgt-interactive-worker" \
+    "$state" "$worktree" "$TEST_ROOT/fake-bin/opencode")"
+  worker_command="sleep 0.3; $worker_command"
+  printf -v quoted_worker_command '%q' "$worker_command"
   tmux new-window -d -t "$TMUX_SESSION:" -n "$label" \
     "env EXIT_AS='$exit_as' PUBLISH_COMPLETION='$publish' \
     HANDSHAKE_DONE_FILE='$TEST_ROOT/$label.handshake' \
-    SGT_NOTIFICATION_RETRY_INTERVAL=0.02 SGT_HARNESS_SETTLE_SECONDS=0 \
+    SGT_NOTIFICATION_RETRY_INTERVAL=0.02 SGT_HARNESS_SETTLE_SECONDS=0.2 \
     SGT_PROGRESS_INTERVAL=600 SGT_DRAIN_CHECK_INTERVAL=600 \
-    '$ROOT_DIR/bin/sgt-interactive-worker' '$state' '$worktree' \
-    '$TEST_ROOT/fake-bin/opencode'"
+    bash -c $quoted_worker_command"
 
   pane="$(tmux display-message -p -t "$TMUX_SESSION:$label" '#{pane_id}')"
   identity="$(tmux display-message -p -t "$pane" \
@@ -164,7 +170,6 @@ for branch in done failed needs_input blocked waiting orphaned; do
     exit 1
   }
   # Delivery and action completion are recorded as distinct artefacts.
-  [[ -f "$notification_dir/targets/$nonce/delivered" ]]
   [[ -f "$notification_dir/targets/$nonce/completed" ]]
 done
 

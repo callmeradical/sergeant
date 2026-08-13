@@ -176,12 +176,19 @@ watch_worktree="$TEST_ROOT/watch-worktree"
 mkdir -p "$watch_task/app" "$watch_worktree"
 printf 'Brief: Bash 3.2 watch\n' > "$watch_task/brief.md"
 printf '%s\n' "$watch_worktree" > "$watch_task/app/worktree"
-printf 'done\n' > "$watch_worktree/.sergeant-status"
+# No pane or capability evidence cannot prove terminal process retirement. Use
+# the failure-terminal fixture here: this regression owns Bash parsing/status
+# convergence, while process retirement is covered by the Docker lifecycle
+# suites with real /proc and pidfd support.
+printf 'failed: Bash 3.2 fixture\n' > "$watch_worktree/.sergeant-status"
 printf 'https://example.test/pr/1\n' > "$watch_worktree/.sergeant-result"
-
+set +e
 watch_output="$(SERGEANT_FLEET="$fleet" SERGEANT_WATCH_INTERVAL=0.01 \
-  "$minimum_bash" "$ROOT_DIR/bin/sgt-watch" task-2)"
-[[ "$watch_output" == *'All repos done.'* ]]
+  "$minimum_bash" "$ROOT_DIR/bin/sgt-watch" task-2 2>&1)"
+watch_status=$?
+set -e
+[[ "$watch_status" -ne 0 && \
+  "$watch_output" == *'terminal worker has no recorded pane; process retirement is unproven'* ]]
 
 printf 'runtime paths support Bash 3.2: ok\n'
 

@@ -625,7 +625,8 @@ PY
         *) _routing_failure "dedup match metadata is unrecognised: $match_key" ;;
       esac
     done < "$match_file"
-    [[ "$digest_state" =~ ^(same|diverged)$ ]] || \
+    digest_state_re='^(same|diverged)$'
+    [[ "$digest_state" =~ $digest_state_re ]] || \
       _routing_failure "dedup match reported an unknown digest state"
     [[ -n "$task_id" ]] || _routing_failure "dedup match reported no td task"
 

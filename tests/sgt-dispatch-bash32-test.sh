@@ -47,6 +47,7 @@ for f in \
     "$ROOT_DIR"/bin/wiki-daily-digest \
     "$ROOT_DIR"/bin/_sgt-*.sh; do
   [[ -f "$f" ]] || continue
+  [[ "$(head -1 "$f")" == *python* ]] && continue
   result=$("$minimum_bash" -n "$f" 2>&1) || {
     printf 'FAIL (parse error under Bash 3.2 in %s):\n  %s\n' "$f" "$result" >&2
     parse_fail=1
@@ -67,6 +68,7 @@ for f in \
     "$ROOT_DIR"/bin/wiki-daily-digest \
     "$ROOT_DIR"/bin/_sgt-*.sh; do
   [[ -f "$f" ]] || continue
+  [[ "$(head -1 "$f")" == *python* ]] && continue
   if grep -vE '^[[:space:]]*#' "$f" 2>/dev/null | \
      grep -qE '=~[^#$]*([(][^)$]*\|)'; then
     printf 'FAIL: %s contains inline complex alternation in =~ (not portable to macOS Bash 3.2):\n' \

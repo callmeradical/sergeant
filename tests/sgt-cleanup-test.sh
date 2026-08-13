@@ -5,6 +5,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=bin/_sgt-process.sh
 source "$ROOT_DIR/bin/_sgt-process.sh"
+# shellcheck source=bin/_sgt-lib.sh
+source "$ROOT_DIR/bin/_sgt-lib.sh"
 TEST_ROOT="$(mktemp -d)"
 TMUX_SESSION="sgt-cleanup-test-$$"
 export TMUX_TMPDIR="$TEST_ROOT/tmux"
@@ -192,11 +194,13 @@ printf 'done\n' > "$stale_state/status"
 printf 'result\n' > "$stale_state/result"
 printf 'done\n' > "$TEST_ROOT/stale-dead-pane-sgt-stale-dead-pane/.sergeant-status"
 printf 'result\n' > "$TEST_ROOT/stale-dead-pane-sgt-stale-dead-pane/.sergeant-result"
+_sgt_prepare_worker_process_marker "$stale_state"
 # Run partial cleanup to get "removed" phase with absent worktree, then advance to reconciled-absent
 SGT_CLEANUP_FAIL_POINT=phase-publish-reconciled-absent \
   SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" stale-dead-pane >/dev/null 2>&1 || true
+  "$ROOT_DIR/bin/sgt-cleanup" stale-dead-pane >"$TEST_ROOT/stale-first.log" 2>&1 || true
+[[ -e "$stale_state/cleanup-phase" ]] || { cat "$TEST_ROOT/stale-first.log" >&2; exit 1; }
 [[ "$(sed -n '1p' "$stale_state/cleanup-phase")" == "removed" ]]
 [[ ! -d "$TEST_ROOT/stale-dead-pane-sgt-stale-dead-pane" ]]
 # Advance to reconciled-absent (simulating a prior successful reconciliation)
