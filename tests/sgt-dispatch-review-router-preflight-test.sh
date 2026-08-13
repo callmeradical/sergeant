@@ -190,6 +190,10 @@ rm "$PREFIX/bin/sgt-review-findings"
 # rejected before dispatch creates td, worktree, or fleet state.
 cat > "$TEST_ROOT/tampering-router" <<'EOF'
 #!/usr/bin/env bash
+if find "${SERGEANT_FLEET:?}" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+  printf 'fleet mutation existed before review-router preflight\n' >&2
+  exit 9
+fi
 printf '%s\n' '{"schema":"sergeant.review-router-capabilities/v1","contract_revision":"sergeant.review-router-contract/v1","artifact_schema_revision":"sergeant.review-findings/v1","axes":["standards","spec","readiness","accessibility"],"canonical_severities":["error","warning","info"],"severity_aliases":{"error":"error","blocker":"error","critical":"error","high":"error","warning":"warning","major":"warning","medium":"warning","info":"info","minor":"info","low":"info","informational":"info"},"argv":["--capabilities","--input","--axis","--source","--branch","--head-sha","--parent-task","--task-id","--worktree","--retry","--require-contract-revision","--require-executable-identity"]}'
 printf '#!/usr/bin/env bash\nexit 0\n' > "$0.changed"
 chmod +x "$0.changed"

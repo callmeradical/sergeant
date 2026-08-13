@@ -508,15 +508,6 @@ _release_dispatch_task_lock() {
     SGT_DISPATCH_TASK_LOCKED=false
   fi
 }
-if ! $DRY_RUN; then
-  _sgt_drain_lock_acquire_fd "$_SGT_DISPATCH_TASK_FD" dispatch-task \
-    "$FLEET_DIR/.dispatch-$TASK_ID.lock" || \
-    _die "Could not acquire exact dispatch task ownership"
-  SGT_DISPATCH_TASK_LOCKED=true
-  # A peer may have created this task while this invocation waited.
-  [[ ! -e "$TASK_DIR" && ! -L "$TASK_DIR" ]] || \
-    _die "Dispatch task ID collision after serialized ownership: $TASK_ID"
-fi
 trap _release_dispatch_task_lock EXIT
 
 _require_yq
@@ -1086,6 +1077,18 @@ PY
 }
 if ! $DRY_RUN; then
   _sgt_preflight_review_router
+fi
+
+# The task-identity lock itself is fleet mutation, so it is deliberately
+# acquired only after the installed router contract is proven compatible.
+if ! $DRY_RUN; then
+  _sgt_drain_lock_acquire_fd "$_SGT_DISPATCH_TASK_FD" dispatch-task \
+    "$FLEET_DIR/.dispatch-$TASK_ID.lock" || \
+    _die "Could not acquire exact dispatch task ownership"
+  SGT_DISPATCH_TASK_LOCKED=true
+  # A peer may have created this task while this invocation waited.
+  [[ ! -e "$TASK_DIR" && ! -L "$TASK_DIR" ]] || \
+    _die "Dispatch task ID collision after serialized ownership: $TASK_ID"
 fi
 
 if ! $DRY_RUN; then
