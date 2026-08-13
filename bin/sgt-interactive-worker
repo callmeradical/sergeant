@@ -78,6 +78,19 @@ if ! _sgt_resolve_agent_launch "$harness" "$AGENT_MODEL" "$REPO_STATE"; then
   echo "ERROR: $_reject_reason" >&2
   exit 2
 fi
+if [[ -n "$SGT_AGENT_MODEL_VARIANT" && \
+      ( "$harness" == "opencode" || "$harness" == "oc" ) ]] && \
+    ! _sgt_confirm_opencode_variant "$AGENT" "$SGT_LAUNCH_DEFINITION"; then
+  _reject_reason="$(_sgt_agent_launch_reject_message "$harness" "$AGENT_MODEL" \
+    "$SGT_LAUNCH_REJECT")"
+  printf '%s\n' "$_reject_reason" > "$REPO_STATE/diagnostic"
+  printf 'failed: cannot honor pinned model tuple %s\n' "$AGENT_MODEL" \
+    > "$REPO_STATE/status"
+  printf 'failed: cannot honor pinned model tuple %s\n' "$AGENT_MODEL" \
+    > "$WORKTREE/.sergeant-status"
+  echo "ERROR: $_reject_reason" >&2
+  exit 2
+fi
 
 # Record what this worker is about to run.  Every field is derived from the
 # validated tuple and the shared harness contract, never from the ambient
@@ -108,6 +121,9 @@ _write_launch_record() {
     printf 'variant_verified=%s\n' "$SGT_LAUNCH_VARIANT_VERIFIED"
     printf 'model_id=%s\n' "$SGT_AGENT_MODEL_ID"
     printf 'variant=%s\n' "$SGT_AGENT_MODEL_VARIANT"
+    printf 'requested_variant=%s\n' "$SGT_AGENT_MODEL_VARIANT"
+    printf 'transported_variant=%s\n' "$SGT_LAUNCH_TRANSPORTED_VARIANT"
+    printf 'runtime_confirmed_variant=%s\n' "$SGT_LAUNCH_RUNTIME_VARIANT"
     printf 'model_transport=%s\n' "$SGT_LAUNCH_MODEL_TRANSPORT"
     printf 'variant_transport=%s\n' "$SGT_LAUNCH_VARIANT_TRANSPORT"
     printf 'definition=%s\n' "$SGT_LAUNCH_DEFINITION"
