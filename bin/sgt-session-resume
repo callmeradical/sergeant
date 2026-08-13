@@ -252,7 +252,8 @@ _cleanup_resume_lock() {
   _sgt_drain_lock_release_fd "$_SGT_RESUME_OWNER_FD"
 }
 trap '_cleanup_resume_lock' EXIT
-if [[ "$SGT_DRAIN_LOCK_CONTENDED_LIVE" == true ]]; then
+if [[ "$SGT_DRAIN_LOCK_CONTENDED_LIVE" == true ]] && \
+  _sgt_worker_launch_observed_completion_matches "$REPO_DIR"; then
   printf 'A verified peer worker-launch transaction completed for %s/%s.\n' \
     "$TASK_ID" "$REPO"
   exit 0
@@ -474,6 +475,8 @@ printf 'in_progress\n'  > "$REPO_DIR/status"
 printf '%s\n' "$resume_iso"   > "$REPO_DIR/resumed_at"
 printf '%s\n' "$WINDOW_NAME"  > "$REPO_DIR/window_name"
 printf '%s\n' "$((resume_count_cur + 1))" > "$REPO_DIR/resume_count"
+_sgt_worker_launch_completion_publish "$REPO_DIR" "$_SGT_RESUME_OWNER_FD" || \
+  _die "Could not publish completed worker-launch transaction"
 
 # Clear stale diagnostic now that a fresh session is live.
 rm -f "$REPO_DIR/diagnostic" 2>/dev/null || true

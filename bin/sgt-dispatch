@@ -302,6 +302,25 @@ if ! $DRY_RUN; then
   done
 fi
 
+_SGT_DISPATCH_TASK_FD=6
+SGT_DISPATCH_TASK_LOCKED=false
+_release_dispatch_task_lock() {
+  if $SGT_DISPATCH_TASK_LOCKED; then
+    _sgt_drain_lock_release_fd "$_SGT_DISPATCH_TASK_FD" || true
+    SGT_DISPATCH_TASK_LOCKED=false
+  fi
+}
+if ! $DRY_RUN; then
+  _sgt_drain_lock_acquire_fd "$_SGT_DISPATCH_TASK_FD" dispatch-task \
+    "$FLEET_DIR/.dispatch-$TASK_ID.lock" || \
+    _die "Could not acquire exact dispatch task ownership"
+  SGT_DISPATCH_TASK_LOCKED=true
+  # A peer may have created this task while this invocation waited.
+  [[ ! -e "$TASK_DIR" && ! -L "$TASK_DIR" ]] || \
+    _die "Dispatch task ID collision after serialized ownership: $TASK_ID"
+fi
+trap _release_dispatch_task_lock EXIT
+
 _require_yq
 _require_git
 _require_tmux
@@ -360,9 +379,11 @@ fi
 # (intent preparation, fleet reconciliation, drain admission, td creation, repo
 # validation) can still abort after the pane is bound.
 _rollback_managed_coordinator_pane() {
-  [[ "${SGT_MANAGED_COORDINATOR_CREATED:-false}" == "true" ]] || return 0
-  SGT_MANAGED_COORDINATOR_CREATED="false"
-  tmux kill-window -t "$TMUX_SESSION:=$SGT_MANAGED_COORDINATOR_WINDOW" 2>/dev/null || true
+  if [[ "${SGT_MANAGED_COORDINATOR_CREATED:-false}" == "true" ]]; then
+    SGT_MANAGED_COORDINATOR_CREATED="false"
+    tmux kill-window -t "$TMUX_SESSION:=$SGT_MANAGED_COORDINATOR_WINDOW" 2>/dev/null || true
+  fi
+  _release_dispatch_task_lock
 }
 trap _rollback_managed_coordinator_pane EXIT
 

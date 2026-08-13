@@ -299,6 +299,14 @@ _sgt_drain_lock_owner_is_verified_live() {
   [[ -f "$record" ]] || return 1
   snapshot="$(cat "$record" 2>/dev/null || true)"
   [[ -n "$snapshot" ]] || return 1
+  printf '%s\n' "$snapshot" | awk -F= '
+    BEGIN { required["owner_pid"]; required["owner_start"]; required["owner_host"];
+      required["owner_user"]; required["owner_purpose"]; required["owner_nonce"];
+      required["created_at"]; required["created_epoch"] }
+    !($1 in required) || substr($0, length($1) + 2) == "" { exit 1 }
+    { seen[$1]++ }
+    END { if (length(seen) != 8) exit 1; for (key in required) if (seen[key] != 1) exit 1 }
+  ' || return 1
   host="$(_sgt_drain_snapshot_field "$snapshot" owner_host)"
   [[ -n "$host" && "$host" == "$(_sgt_drain_host_id)" ]] || return 1
   pid="$(_sgt_drain_snapshot_field "$snapshot" owner_pid)"
@@ -309,6 +317,30 @@ _sgt_drain_lock_owner_is_verified_live() {
   [[ $alive_rc -eq 0 ]] || return 1
   actual_start="$(_sgt_drain_process_start "$pid")"
   [[ -n "$actual_start" && "$actual_start" == "$recorded_start" ]]
+}
+
+_sgt_worker_launch_completion_publish() {
+  local repo="$1" fd="$2" nonce marker digest
+  eval "nonce=\${_SGT_DRAIN_LOCK_NONCE_${fd}:-}"
+  [[ "$nonce" =~ ^[0-9a-f]+$ ]] || return 1
+  marker="$(_sgt_read_owned_file "$repo/worker_process_marker" 2>/dev/null || true)"
+  [[ -n "$marker" ]] || return 1
+  digest="$(printf '%s' "$marker" | shasum -a 256 | awk '{print $1}')"
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  _sgt_replace_owned_file "$repo/worker-launch.completed" "$nonce|$digest"
+}
+
+_sgt_worker_launch_observed_completion_matches() {
+  local repo="$1" record nonce digest marker current_digest extra
+  nonce="${SGT_DRAIN_LOCK_CONTENDED_NONCE:-}"
+  [[ "$nonce" =~ ^[0-9a-f]+$ ]] || return 1
+  record="$(_sgt_read_owned_file "$repo/worker-launch.completed" 2>/dev/null || true)"
+  IFS='|' read -r record_nonce digest extra <<< "$record"
+  [[ -z "$extra" && "$record_nonce" == "$nonce" && "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  marker="$(_sgt_read_owned_file "$repo/worker_process_marker" 2>/dev/null || true)"
+  [[ -n "$marker" ]] || return 1
+  current_digest="$(printf '%s' "$marker" | shasum -a 256 | awk '{print $1}')"
+  [[ "$current_digest" == "$digest" ]]
 }
 
 # _sgt_drain_lock_reclaim <record> <expected_nonce>
@@ -413,6 +445,7 @@ _sgt_drain_lock_acquire_fd() {
 
   SGT_DRAIN_LOCK_STATE="unavailable"
   SGT_DRAIN_LOCK_CONTENDED_LIVE=false
+  SGT_DRAIN_LOCK_CONTENDED_NONCE=""
   case "$fd" in
     ''|*[!0-9]*)
       printf 'ERROR: invalid drain admission lock handle: %s\n' "$fd" >&2
@@ -481,6 +514,8 @@ _sgt_drain_lock_acquire_fd() {
     fi
     if _sgt_drain_lock_owner_is_verified_live "$record"; then
       SGT_DRAIN_LOCK_CONTENDED_LIVE=true
+      [[ -n "$SGT_DRAIN_LOCK_CONTENDED_NONCE" ]] || \
+        SGT_DRAIN_LOCK_CONTENDED_NONCE="$(_sgt_drain_read_field "$record" owner_nonce)"
     fi
     if [[ $(date +%s) -ge $deadline ]]; then
       rm -f "$staging" 2>/dev/null || true

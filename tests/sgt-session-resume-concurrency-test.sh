@@ -142,4 +142,32 @@ wait "$second"
   "$(cat "$TEST_ROOT/fast-two.status")" == 0 ]]
 grep -hFq 'verified peer worker-launch transaction completed' \
   "$TEST_ROOT/fast-one.out" "$TEST_ROOT/fast-two.out"
+
+# Mere exact lock contention is not completion evidence. A peer that acquires
+# and releases without publishing a nonce-bound journal must not suppress the
+# real resume.
+: > "$TEST_ROOT/launch.log"
+rm -f "$TEST_ROOT/lock-only-ready"
+printf '%%88\n' > "$state/pane"
+printf '0|%%88|8888|123455|old-worker\n' > "$state/pane_identity"
+chmod 600 "$state/pane_identity"
+bash -c '
+  source "$1/bin/_sgt-lib.sh"
+  source "$1/bin/_sgt-drain.sh"
+  _sgt_drain_lock_acquire_fd 8 lock-only "$2/worker-launch.lock"
+  : > "$3"
+  sleep 0.4
+  _sgt_drain_lock_release_fd 8
+' _ "$ROOT_DIR" "$state" "$TEST_ROOT/lock-only-ready" & lock_only_pid=$!
+for _ in $(seq 1 100); do
+  [[ -e "$TEST_ROOT/lock-only-ready" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/lock-only-ready" ]]
+PATH="$TEST_ROOT/bin:$PATH" LAUNCH_LOG="$TEST_ROOT/launch.log" \
+  PANE_COMMAND="$TEST_ROOT/pane-command" TEST_REPO_STATE="$state" \
+  OLD_PANE_GONE=1 SGT_NOTIFICATION_ACK_TIMEOUT=2 \
+  "$ROOT_DIR/bin/sgt-session-resume" task-race app --force >/dev/null
+wait "$lock_only_pid"
+[[ "$(wc -l < "$TEST_ROOT/launch.log")" -eq 1 ]]
 printf 'sgt-session-resume concurrent ownership: ok\n'

@@ -78,7 +78,8 @@ initial_pane_identity="$(_sgt_read_owned_file \
 _SGT_RECOVER_LAUNCH_FD=9
 _sgt_drain_lock_acquire_fd "$_SGT_RECOVER_LAUNCH_FD" worker-launch \
   "$REPO_DIR/worker-launch.lock" || _die "Could not acquire exact worker-launch ownership"
-if [[ "$SGT_DRAIN_LOCK_CONTENDED_LIVE" == true ]]; then
+if [[ "$SGT_DRAIN_LOCK_CONTENDED_LIVE" == true ]] && \
+  _sgt_worker_launch_observed_completion_matches "$REPO_DIR"; then
   printf 'sgt-recover: verified peer worker-launch transaction completed for %s/%s.\n' \
     "$TASK_ID" "$REPO"
   _sgt_drain_lock_release_fd "$_SGT_RECOVER_LAUNCH_FD"
@@ -395,6 +396,8 @@ if pane_identity="$(_sgt_pane_identity "$new_pane")" && [[ -n "$pane_identity" ]
   _sgt_notification_target_create "$REPO_DIR" "$delivery_notification_id" \
       "$pane_identity" >/dev/null || \
     _abort_replacement "notification target race detected during stall recovery relaunch"
+  _sgt_worker_launch_completion_publish "$REPO_DIR" "$_SGT_RECOVER_LAUNCH_FD" || \
+    _abort_replacement "could not publish completed worker-launch transaction"
 else
   _abort_replacement "tmux failed to capture relaunched worker pane identity"
 fi
