@@ -397,6 +397,31 @@ _stale_pane_retirement_receipt_matches() {
   [[ "$receipt" == "$expected" ]]
 }
 
+_stale_pane_retirement_pending_matches() {
+  local repo_dir="$1" pane="$2" recorded="$3" observed="$4" record expected
+  record="$(_sgt_read_owned_multiline_file \
+    "$repo_dir/worker_stale_pane_retirement_pending" 2>/dev/null || true)"
+  expected="$(printf 'version=1\npane=%s\nrecorded_identity=%s\nobserved_identity=%s' \
+    "$pane" "$recorded" "$observed")"
+  [[ -n "$record" && "$record" == "$expected" ]]
+}
+
+_record_stale_pane_retirement_pending() {
+  local repo_dir="$1" pane="$2" recorded="$3" observed="$4" temporary
+  temporary="$repo_dir/worker_stale_pane_retirement_pending.tmp.$$.$RANDOM"
+  (umask 077; {
+    printf 'version=1\n'
+    printf 'pane=%s\n' "$pane"
+    printf 'recorded_identity=%s\n' "$recorded"
+    printf 'observed_identity=%s\n' "$observed"
+  } > "$temporary") || { rm -f "$temporary"; return 1; }
+  if ! ln "$temporary" "$repo_dir/worker_stale_pane_retirement_pending" 2>/dev/null; then
+    rm -f "$temporary"
+    return 1
+  fi
+  rm -f "$temporary"
+}
+
 _stale_pane_retirement_validation_matches() {
   local repo_dir="$1" receipt recycle receipt_digest recycle_digest record validated_at expected
   receipt="$(_sgt_read_owned_multiline_file \
@@ -576,6 +601,7 @@ _retire_stale_pane() {
   local process_marker history_digest
   local recycle_already_published=false
   local receipt_already_published=false
+  local pending_already_published=false
 
   _snapshot_scope_id_is_valid "$task_id" || _die "Invalid task ID for --retire-stale-pane: $task_id"
   _snapshot_scope_id_is_valid "$repo_name" || _die "Invalid repo for --retire-stale-pane: $repo_name"
@@ -627,6 +653,13 @@ _retire_stale_pane() {
   process_group="$(cat "$repo_dir/worker_process_group" 2>/dev/null || true)"
   [[ "$process_group" =~ ^[1-9][0-9]*$ ]] || \
     _die "Stale-pane retirement requires recorded worker process-group provenance"
+
+  if [[ -e "$repo_dir/worker_stale_pane_retirement_pending" || \
+        -L "$repo_dir/worker_stale_pane_retirement_pending" ]]; then
+    _stale_pane_retirement_pending_matches "$repo_dir" "$pane" "$recorded" "$observed" || \
+      _die "Stale-pane pending evidence conflicts with the current recorded and observed identities"
+    pending_already_published=true
+  fi
 
   if [[ -e "$repo_dir/worker_stale_pane_retirement" || \
         -L "$repo_dir/worker_stale_pane_retirement" ]]; then
@@ -680,6 +713,13 @@ _retire_stale_pane() {
       ! -L "$repo_dir/worker_stale_pane_retirement" ]] || \
       _die "Stale-pane retirement evidence appeared concurrently or conflicts with this attempt"
   fi
+  if ! $pending_already_published; then
+    _record_stale_pane_retirement_pending "$repo_dir" "$pane" "$recorded" "$observed" || \
+      _die "Stale-pane pending evidence appeared concurrently or could not be published"
+    pending_already_published=true
+  fi
+  _stale_pane_retirement_pending_matches "$repo_dir" "$pane" "$recorded" "$observed" || \
+    _die "Stale-pane pending evidence conflicts with this attempt"
   if ! $recycle_already_published; then
     [[ ! -e "$repo_dir/worker_recycled" && ! -L "$repo_dir/worker_recycled" ]] || \
       _die "Existing recycle evidence is invalid or conflicts with stale-pane retirement"
@@ -732,6 +772,8 @@ _retire_stale_pane() {
     _stale_pane_retirement_validation_matches "$repo_dir" || \
       _die "Published stale-pane retirement validation evidence is invalid"
   fi
+  rm -f "$repo_dir/worker_stale_pane_retirement_pending" || \
+    _die "Failed to clear completed stale-pane pending evidence"
   printf 'terminal worker stale pane ownership retired; unrelated live pane was not touched\n' \
     > "$repo_dir/diagnostic"
   _sgt_response_lock_release || _die "Failed to release repository lifecycle lock"
@@ -1017,7 +1059,9 @@ _recycle_terminal_worker() {
   fi
   process_group="$(cat "$repo_dir/worker_process_group" 2>/dev/null || true)"
   if [[ -e "$repo_dir/worker_stale_pane_retirement" || \
-        -L "$repo_dir/worker_stale_pane_retirement" ]]; then
+        -L "$repo_dir/worker_stale_pane_retirement" || \
+        -e "$repo_dir/worker_stale_pane_retirement_pending" || \
+        -L "$repo_dir/worker_stale_pane_retirement_pending" ]]; then
     if ! _stale_pane_retirement_validation_matches "$repo_dir"; then
       local _incomplete_task_id
       _incomplete_task_id="$(basename "$(dirname "$repo_dir")")"

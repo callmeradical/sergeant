@@ -326,6 +326,18 @@ fi
 grep -Fq 'changed after recycle evidence publication' "$TEST_ROOT/post-marker-race.out"
 [[ -s "$post_marker_state/worker_recycled" ]]
 [[ ! -e "$post_marker_state/worker_stale_pane_retirement" ]]
+[[ -s "$post_marker_state/worker_stale_pane_retirement_pending" ]]
+pending_pane_absent="$TEST_ROOT/pending-pane-absent"
+: > "$pending_pane_absent"
+if env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
+  PANE_ABSENT_FILE="$pending_pane_absent" "$ROOT_DIR/bin/sgt-watch" \
+  --sync task-post-marker-race > /dev/null \
+  2> "$TEST_ROOT/post-marker-pending-sync.err"; then
+  printf 'sync bypassed pending stale evidence after pane disappeared\n' >&2
+  exit 1
+fi
+grep -Fq 'sgt-watch --retire-stale-pane task-post-marker-race --repo app' \
+  "$TEST_ROOT/post-marker-pending-sync.err"
 [[ ! -s "$kill_log" && -d "$post_status_worktree" && -d "$worktree" ]]
 
 absent_state="$fleet/task-absent-worktree/app"
