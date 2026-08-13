@@ -314,6 +314,21 @@ identity, malformed evidence, or any pane/process probe error remains
 fail-closed and actionable; no lease is abandoned and no successor is claimed
 as resumed.
 
+## Retire stale terminal pane ownership
+
+When `sgt-watch --sync <fleet-task-id>` reports that a terminal worker's pane
+identity does not match, run the exact command in its diagnostic:
+
+```bash
+sgt-watch --retire-stale-pane <fleet-task-id> --repo <repo>
+```
+
+This bounded command does not kill the live pane or remove the preserved
+worktree. It succeeds only when both recorded states are terminal, the pane is
+live under a different exact identity, the original worker marker has no live
+holders, and prior evidence matches the same identities. Conflicting evidence,
+live holders, and nonterminal state remain fail-closed.
+
 ## Reconcile results
 
 For each repository require:
