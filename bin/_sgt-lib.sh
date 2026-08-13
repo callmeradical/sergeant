@@ -716,7 +716,7 @@ _sgt_process_marker_command() {
   printf '%s' "$command"
 }
 _sgt_worker_process_marker_preflight() {
-  local repo_dir="$1" history="$1/worker_process_markers" current digest platform
+  local repo_dir="$1" history="$1/worker_process_markers" current digest platform generation floor
   if [[ ( -e "$repo_dir/worker_process_marker" || \
     -L "$repo_dir/worker_process_marker" ) && \
     ! -e "$history" && ! -L "$history" ]]; then
@@ -740,6 +740,11 @@ _sgt_worker_process_marker_preflight() {
       "$repo_dir" >&2
     return 1
   }
+  generation="${current%%|*}"
+  floor="$(awk -F'|' -v generation="$generation" \
+    '$1 == generation { if (++count == 1) value=$3 } END { if (count == 1) print value; else exit 1 }' \
+    "$history" 2>/dev/null || true)"
+  [[ "$floor" =~ ^[0-9]+$ ]] || return 1
   if [[ -e "$repo_dir/worker_process_marker_platform" || \
     -L "$repo_dir/worker_process_marker_platform" ]]; then
     platform="$(_sgt_read_owned_file \
@@ -749,6 +754,11 @@ _sgt_worker_process_marker_preflight() {
         "$repo_dir" >&2
       return 1
     }
+    [[ "$floor" == 0 ]] || return 1
+  elif [[ "$floor" == 0 ]]; then
+    printf 'portable worker process marker has no platform evidence: %s\n' \
+      "$repo_dir" >&2
+    return 1
   fi
 }
 _sgt_validate_inherited_worker_marker() {
@@ -773,11 +783,19 @@ _sgt_validate_inherited_worker_marker() {
 }
 _sgt_prepare_worker_process_marker() {
   local repo_dir="$1" path generation identity marker launch_identity launch_floor history history_tmp history_lines platform platform_record="" portable_marker=false
+  local old_platform="" old_platform_present=false
   history="$repo_dir/worker_process_markers"
   _sgt_worker_process_marker_preflight "$repo_dir" || return 1
   path="$(mktemp "$repo_dir/.worker-process-marker.XXXXXX")" || return 1
   identity="$(stat -Lc '%d:%i' "$path" 2>/dev/null || stat -f '%d:%i' "$path" 2>/dev/null || true)"
   generation="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  if [[ -e "$repo_dir/worker_process_marker_platform" || \
+    -L "$repo_dir/worker_process_marker_platform" ]]; then
+    old_platform="$(_sgt_read_owned_file \
+      "$repo_dir/worker_process_marker_platform" 2>/dev/null || true)"
+    [[ -n "$old_platform" ]] || { rm -f "$path"; return 1; }
+    old_platform_present=true
+  fi
   launch_identity="$(_sgt_process_identity "$$" 2>/dev/null || true)"
   launch_floor="${launch_identity#linux:}"
   if [[ "$launch_identity" != linux:* || ! "$launch_floor" =~ ^[0-9]+$ ]]; then
@@ -790,8 +808,6 @@ _sgt_prepare_worker_process_marker() {
       platform="$(uname -s 2>/dev/null || printf unknown)"
     fi
     platform_record="$platform:no-exact-process-birth"
-  else
-    rm -f "$repo_dir/worker_process_marker_platform"
   fi
   [[ "$identity" =~ ^[0-9]+:[0-9]+$ && "$generation" =~ ^[0-9a-f]{32}$ &&
     "$launch_floor" =~ ^[0-9]+$ ]] || {
@@ -830,10 +846,25 @@ _sgt_prepare_worker_process_marker() {
   # crash can therefore leave only an unused marker file, never a launched
   # generation whose capability is absent from durable retirement history.
   mv "$history_tmp" "$history" || { rm -f "$history_tmp" "$path"; return 1; }
-  _sgt_replace_owned_file "$repo_dir/worker_process_marker" "$marker" || return 1
   if $portable_marker; then
+    if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+      "${SGT_TEST_MARKER_PLATFORM_WRITE_FAIL:-}" == 1 ]]; then
+      rm -f "$path"
+      return 1
+    fi
     _sgt_replace_owned_file "$repo_dir/worker_process_marker_platform" \
       "$platform_record" || return 1
+  else
+    rm -f "$repo_dir/worker_process_marker_platform" || return 1
+  fi
+  if ! _sgt_replace_owned_file "$repo_dir/worker_process_marker" "$marker"; then
+    if $old_platform_present; then
+      _sgt_replace_owned_file "$repo_dir/worker_process_marker_platform" \
+        "$old_platform" >/dev/null 2>&1 || true
+    else
+      rm -f "$repo_dir/worker_process_marker_platform"
+    fi
+    return 1
   fi
 }
 _sgt_notification_target_create() {

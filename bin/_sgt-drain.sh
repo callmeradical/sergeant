@@ -255,7 +255,7 @@ _sgt_drain_lock_owner_is_gone() {
   # from different generations — including an empty nonce, which used to make
   # reclamation unbounded.
   snapshot="$(cat "$record" 2>/dev/null || true)"
-  [[ -n "$snapshot" ]] || return 1
+  [[ -n "$snapshot" ]] || { exec 5<&-; return 1; }
 
   host="$(_sgt_drain_snapshot_field "$snapshot" owner_host)"
   local_host="$(_sgt_drain_host_id)"
@@ -296,8 +296,11 @@ _sgt_drain_lock_owner_is_gone() {
 # evidence that a peer transaction ran.
 _sgt_drain_lock_owner_is_verified_live() {
   local record="$1" snapshot pid host nonce recorded_start actual_start alive_rc=0
+  _SGT_DRAIN_VERIFIED_LIVE_NONCE=""
   [[ -f "$record" ]] || return 1
-  snapshot="$(cat "$record" 2>/dev/null || true)"
+  exec 5< "$record" || return 1
+  [[ "/proc/self/fd/5" -ef "$record" ]] || { exec 5<&-; return 1; }
+  snapshot="$(cat <&5 2>/dev/null || true)"
   [[ -n "$snapshot" ]] || return 1
   printf '%s\n' "$snapshot" | awk -F= '
     BEGIN { required["owner_pid"]; required["owner_start"]; required["owner_host"];
@@ -306,17 +309,21 @@ _sgt_drain_lock_owner_is_verified_live() {
     !($1 in required) || substr($0, length($1) + 2) == "" { exit 1 }
     { seen[$1]++ }
     END { if (length(seen) != 8) exit 1; for (key in required) if (seen[key] != 1) exit 1 }
-  ' || return 1
+  ' || { exec 5<&-; return 1; }
   host="$(_sgt_drain_snapshot_field "$snapshot" owner_host)"
-  [[ -n "$host" && "$host" == "$(_sgt_drain_host_id)" ]] || return 1
+  [[ -n "$host" && "$host" == "$(_sgt_drain_host_id)" ]] || { exec 5<&-; return 1; }
   pid="$(_sgt_drain_snapshot_field "$snapshot" owner_pid)"
   nonce="$(_sgt_drain_snapshot_field "$snapshot" owner_nonce)"
   recorded_start="$(_sgt_drain_snapshot_field "$snapshot" owner_start)"
-  [[ "$pid" =~ ^[1-9][0-9]*$ && -n "$nonce" && -n "$recorded_start" ]] || return 1
+  [[ "$pid" =~ ^[1-9][0-9]*$ && -n "$nonce" && -n "$recorded_start" ]] || { exec 5<&-; return 1; }
   _sgt_drain_process_alive "$pid" || alive_rc=$?
-  [[ $alive_rc -eq 0 ]] || return 1
+  [[ $alive_rc -eq 0 ]] || { exec 5<&-; return 1; }
   actual_start="$(_sgt_drain_process_start "$pid")"
-  [[ -n "$actual_start" && "$actual_start" == "$recorded_start" ]]
+  [[ -n "$actual_start" && "$actual_start" == "$recorded_start" && \
+    "/proc/self/fd/5" -ef "$record" ]] || { exec 5<&-; return 1; }
+  _SGT_DRAIN_VERIFIED_LIVE_NONCE="$nonce"
+  exec 5<&-
+  return 0
 }
 
 _sgt_worker_launch_completion_publish() {
@@ -325,7 +332,7 @@ _sgt_worker_launch_completion_publish() {
   [[ "$nonce" =~ ^[0-9a-f]+$ ]] || return 1
   marker="$(_sgt_read_owned_file "$repo/worker_process_marker" 2>/dev/null || true)"
   [[ -n "$marker" ]] || return 1
-  digest="$(printf '%s' "$marker" | shasum -a 256 | awk '{print $1}')"
+  digest="$(printf '%s' "$marker" | _sgt_worker_launch_sha256)"
   [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
   _sgt_replace_owned_file "$repo/worker-launch.completed" "$nonce|$digest"
 }
@@ -339,8 +346,19 @@ _sgt_worker_launch_observed_completion_matches() {
   [[ -z "$extra" && "$record_nonce" == "$nonce" && "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
   marker="$(_sgt_read_owned_file "$repo/worker_process_marker" 2>/dev/null || true)"
   [[ -n "$marker" ]] || return 1
-  current_digest="$(printf '%s' "$marker" | shasum -a 256 | awk '{print $1}')"
+  current_digest="$(printf '%s' "$marker" | _sgt_worker_launch_sha256)"
   [[ "$current_digest" == "$digest" ]]
+}
+
+_sgt_worker_launch_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    printf 'ERROR: sha256sum or shasum is required for worker launch evidence\n' >&2
+    return 1
+  fi
 }
 
 # _sgt_drain_lock_reclaim <record> <expected_nonce>
@@ -515,7 +533,7 @@ _sgt_drain_lock_acquire_fd() {
     if _sgt_drain_lock_owner_is_verified_live "$record"; then
       SGT_DRAIN_LOCK_CONTENDED_LIVE=true
       [[ -n "$SGT_DRAIN_LOCK_CONTENDED_NONCE" ]] || \
-        SGT_DRAIN_LOCK_CONTENDED_NONCE="$(_sgt_drain_read_field "$record" owner_nonce)"
+        SGT_DRAIN_LOCK_CONTENDED_NONCE="$_SGT_DRAIN_VERIFIED_LIVE_NONCE"
     fi
     if [[ $(date +%s) -ge $deadline ]]; then
       rm -f "$staging" 2>/dev/null || true

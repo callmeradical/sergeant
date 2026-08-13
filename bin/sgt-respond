@@ -324,6 +324,25 @@ if [[ -n "$pending_response_file" ]]; then
      -n "$response_id" && \
      "$(cat "$worktree/.sergeant-response-id" 2>/dev/null || true)" == "$response_id" ]] || \
     _die "Pending response generation does not match the worker gate"
+  SGT_DRAIN_LOCK_CONTENDED_NONCE="$respond_peer_launch_nonce"
+  if ! cmp -s "$RESPONSE_INPUT" "$pending_response_file" && \
+    [[ "$respond_peer_launch_contended" == true ]] && \
+    _sgt_worker_launch_observed_completion_matches "$REPO_DIR"; then
+    queued_response_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
+      od -An -tx1 | tr -d ' \n')"
+    queued_dir="$REPO_DIR/queued_responses/$queued_response_id"
+    mkdir -p "$queued_dir" || _die "Could not allocate queued response evidence"
+    _atomic_write_file "$queued_dir/body" "$RESPONSE_INPUT" || \
+      _die "Could not preserve queued response body"
+    _atomic_write "$queued_dir/gate_generation" "$gate_generation" || \
+      _die "Could not preserve queued response generation"
+    _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$queued_response_id" \
+      response "Apply queued response $queued_response_id from fleet state exactly once." || \
+      _die "Could not bind queued response notification"
+    printf 'sgt-respond: queued distinct response %s for the peer-launched worker.\n' \
+      "$queued_response_id"
+    exit 0
+  fi
   if [[ -f "$worktree/.sergeant-response" && "$status" != "orphaned" ]]; then
     # A drain_held marker matching the current gate generation means the prior
     # delivery was held by drain admission.  Allow relaunch now that drain may

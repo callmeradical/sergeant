@@ -2580,6 +2580,11 @@ for repo_dir in "$TASK_DIR"/*/; do
   status="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
   wt_type="$(cat "$repo_dir/wt_type" 2>/dev/null || echo "git")"
 
+  _sgt_worker_process_marker_preflight "$repo_dir" || \
+    _die "Cleanup refused: worker process marker evidence is torn: $repo_name"
+  _sgt_worker_process_marker_preflight "$repo_dir/validation-process" || \
+    _die "Cleanup refused: validation process marker evidence is torn: $repo_name"
+
   _sgt_response_lock_acquire "$repo_dir"
   trap '_sgt_response_lock_release' EXIT
   _require_response_cleanup_safe "$repo_dir" "$worktree" publish

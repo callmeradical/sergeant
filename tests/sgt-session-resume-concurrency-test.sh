@@ -170,4 +170,28 @@ PATH="$TEST_ROOT/bin:$PATH" LAUNCH_LOG="$TEST_ROOT/launch.log" \
   "$ROOT_DIR/bin/sgt-session-resume" task-race app --force >/dev/null
 wait "$lock_only_pid"
 [[ "$(wc -l < "$TEST_ROOT/launch.log")" -eq 1 ]]
+
+# Verification is descriptor-bound: replacing owner A's pathname with a
+# canonical owner B record during exact-start validation cannot capture B's
+# nonce or count as observed live contention.
+bash -c '
+  source "$1/bin/_sgt-lib.sh"
+  source "$1/bin/_sgt-drain.sh"
+  record="$2/nonce-race.lock"
+  replacement="$2/nonce-race.replacement"
+  start="$(_sgt_process_identity "$$")"
+  write_record() {
+    path="$1" nonce="$2"
+    printf "owner_pid=%s\nowner_start=%s\nowner_host=%s\nowner_user=test\nowner_purpose=worker-launch\nowner_nonce=%s\ncreated_at=2026-01-01T00:00:00Z\ncreated_epoch=1\n" \
+      "$$" "$start" "$(_sgt_drain_host_id)" "$nonce" > "$path"
+  }
+  write_record "$record" aaaaaaaaaaaaaaaa
+  write_record "$replacement" bbbbbbbbbbbbbbbb
+  _sgt_drain_process_start() {
+    mv "$replacement" "$record"
+    printf "%s\n" "$start"
+  }
+  if _sgt_drain_lock_owner_is_verified_live "$record"; then exit 1; fi
+  [[ -z "$_SGT_DRAIN_VERIFIED_LIVE_NONCE" ]]
+' _ "$ROOT_DIR" "$TEST_ROOT"
 printf 'sgt-session-resume concurrent ownership: ok\n'

@@ -190,6 +190,41 @@ set -e
 [[ "$watch_status" -ne 0 && \
   "$watch_output" == *'terminal worker has no recorded pane; process retirement is unproven'* ]]
 
+# Exercise the launch journal under the actual Alpine Bash 3.2 image, which has
+# sha256sum but no shasum. The tiny verifier adapter supplies only the required
+# inherited-FD read operation; production requires Python 3.
+mkdir -p "$TEST_ROOT/journal-bin" "$TEST_ROOT/journal-state"
+cat > "$TEST_ROOT/journal-bin/python3" <<'EOF'
+#!/usr/bin/env bash
+fd="$2" operation="${5:-validate}"
+case "$operation" in
+  read)
+    IFS= read -r value <&"$fd" || exit 1
+    printf '%s\n' "$value"
+    if IFS= read -r extra <&"$fd"; then exit 1; fi
+    ;;
+  validate) printf 'fixture-identity\n' ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/journal-bin/python3"
+printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|1:2|198|/closed\n' \
+  > "$TEST_ROOT/journal-state/worker_process_marker"
+chmod 600 "$TEST_ROOT/journal-state/worker_process_marker"
+# shellcheck source=bin/_sgt-lib.sh
+source "$ROOT_DIR/bin/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-drain.sh
+source "$ROOT_DIR/bin/_sgt-drain.sh"
+PATH="$TEST_ROOT/journal-bin:$PATH" \
+  _sgt_drain_lock_acquire_fd 8 worker-launch \
+    "$TEST_ROOT/journal-state/worker-launch.lock"
+PATH="$TEST_ROOT/journal-bin:$PATH" \
+  _sgt_worker_launch_completion_publish "$TEST_ROOT/journal-state" 8
+SGT_DRAIN_LOCK_CONTENDED_NONCE="$_SGT_DRAIN_LOCK_NONCE_8"
+PATH="$TEST_ROOT/journal-bin:$PATH" \
+  _sgt_worker_launch_observed_completion_matches "$TEST_ROOT/journal-state"
+_sgt_drain_lock_release_fd 8
+
 printf 'runtime paths support Bash 3.2: ok\n'
 
 # Run dispatch-specific Bash 3.2 regression (parse, alternation, branch-name).

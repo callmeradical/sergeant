@@ -71,6 +71,20 @@ cmp "$TEST_ROOT/torn-marker.before" "$torn_state/worker_process_marker"
 [[ -z "$(find "$torn_state" -maxdepth 1 -name '.worker-process-marker.*' -print -quit)" ]]
 
 _sgt_process_identity() { return 1; }
+platform_fail_state="$TEST_ROOT/platform-fail-state"
+mkdir -p "$platform_fail_state"
+if SGT_TEST_HOOKS=1 SGT_TEST_PROCESS_PLATFORM=Darwin \
+  SGT_TEST_MARKER_PLATFORM_WRITE_FAIL=1 \
+  _sgt_prepare_worker_process_marker "$platform_fail_state"; then
+  printf 'portable marker selected a generation after platform publication failure\n' >&2
+  exit 1
+fi
+[[ ! -e "$platform_fail_state/worker_process_marker" && \
+  ! -e "$platform_fail_state/worker_process_marker_platform" ]]
+if _sgt_worker_process_marker_preflight "$platform_fail_state" >/dev/null 2>&1; then
+  printf 'portable history without platform/current evidence passed preflight\n' >&2
+  exit 1
+fi
 portable_state="$TEST_ROOT/portable-state"
 mkdir -p "$portable_state"
 PATH="$TEST_ROOT/bin:$PATH" _sgt_prepare_worker_process_marker "$portable_state"

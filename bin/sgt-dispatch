@@ -1041,6 +1041,10 @@ $td_context_block"
   printf '%s\n' "$AGENT_CMD" > "$repo_task_dir/agent"
   printf '%s\n' "$AGENT_MODEL" > "$repo_task_dir/agent_model"
   printf '%s\n' "$AGENT_MODEL_SOURCE" > "$repo_task_dir/agent_model_source"
+  _SGT_DISPATCH_WORKER_FD=7
+  _sgt_drain_lock_acquire_fd "$_SGT_DISPATCH_WORKER_FD" worker-launch \
+    "$repo_task_dir/worker-launch.lock" || \
+    _die "Could not acquire exact initial worker-launch ownership"
   initial_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
   _sgt_publish_worker_notification "$repo_task_dir" "$worktree_path" \
     "$initial_notification_id" initial "Read the .sergeant-brief.md file and execute the mission."
@@ -1067,6 +1071,11 @@ $td_context_block"
         "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
         _die "notification target race detected for $rname; worker orphaned"
       fi
+      _sgt_worker_launch_completion_publish "$repo_task_dir" \
+        "$_SGT_DISPATCH_WORKER_FD" || \
+        _die "Could not publish completed initial worker launch"
+      _sgt_drain_lock_release_fd "$_SGT_DISPATCH_WORKER_FD" || \
+        _die "Could not release initial worker-launch ownership"
     else
       tmux kill-pane -t "$pane_target" 2>/dev/null || true
       printf 'orphaned\n' > "$repo_task_dir/status"
