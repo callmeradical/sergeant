@@ -216,8 +216,11 @@ sgt-wake <fleet-task-id> <repo>
 `github_check` requires **both** `run_id` and `check_name`, and resumes only
 when that exact check concludes successfully. `failure`, `cancelled`, `skipped`,
 `timed_out`, and every other non-success conclusion never resume the worker.
-`check_name` may contain spaces and the other characters real check names use,
-for example `check_name=build (ubuntu-latest, 3.11)`.
+`check_name` is matched byte-for-byte as opaque UTF-8 and may contain spaces,
+Unicode punctuation, and shell punctuation, for example
+`check_name=Build · test`. It is never whitespace- or punctuation-normalized.
+Newlines, control characters, malformed UTF-8, and duplicate fields are rejected
+because the condition file uses line-oriented storage.
 
 A condition that can no longer be met converts the worker to `needs_input` with
 the remedy in `.sergeant-message` instead of retrying until its deadline. That
