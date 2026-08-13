@@ -103,22 +103,22 @@ if any(unicodedata.category(char) in ("Cc", "Zl", "Zp") for char in value):
 ' "$1"
 }
 
-_valid_check_name_storage() {
+_valid_condition_storage() {
   command -v python3 >/dev/null 2>&1 || return 1
   python3 -c '
 import sys, unicodedata
 
 with open(sys.argv[1], "rb") as condition_file:
-    lines = condition_file.read().split(b"\n")
-for line in lines:
-    field, separator, value = line.partition(b"=")
-    if separator and field.strip() == b"check_name":
-        try:
-            decoded = value.decode("utf-8")
-        except UnicodeDecodeError:
-            raise SystemExit(1)
-        if any(unicodedata.category(char) in ("Cc", "Zl", "Zp") for char in decoded):
-            raise SystemExit(1)
+    raw = condition_file.read()
+try:
+    decoded = raw.decode("utf-8")
+except UnicodeDecodeError:
+    raise SystemExit(1)
+for char in decoded:
+    if char == "\n":
+        continue
+    if unicodedata.category(char) in ("Cc", "Zl", "Zp"):
+        raise SystemExit(1)
 ' "$1"
 }
 
@@ -150,13 +150,24 @@ _cond_get() {
   # return empty string when key absent
 }
 
-# Bash variables cannot retain NUL bytes, so validate check-name storage before
-# read(1) can discard one. Other condition kinds keep their existing runtime
-# dependencies and do not require Python.
-if LC_ALL=C grep -aEq '^[[:space:]]*check_name[[:space:]]*=' "$condition_file"; then
-  if ! _valid_check_name_storage "$condition_file"; then
-    _die "invalid UTF-8 or control characters in field value for check_name"
+# Bash variables cannot retain NUL bytes. Reject raw control bytes before read(1)
+# can discard or normalize them and turn an unsafe field name into an allowed
+# one. grep sees records without their newline delimiters, so [[:cntrl:]] here
+# rejects embedded controls without rejecting the file's structural newlines.
+if LC_ALL=C grep -aEq '[[:cntrl:]]' "$condition_file"; then
+  _die "invalid control characters in wake-condition storage"
+fi
+
+# Python is already required by github_check. When available, validate the
+# entire file before Bash tokenizes it: malformed UTF-8 in a field name must not
+# be hidden by locale-dependent shell parsing. Other condition kinds retain
+# their no-Python path; their existing ASCII field/value allowlists still apply.
+if command -v python3 >/dev/null 2>&1; then
+  if ! _valid_condition_storage "$condition_file"; then
+    _die "invalid UTF-8 or control characters in wake-condition storage"
   fi
+elif LC_ALL=C grep -aEq '^[[:space:]]*check_name[[:space:]]*=' "$condition_file"; then
+  _die "python3 not available to validate check_name"
 fi
 
 while IFS='=' read -r field value; do
