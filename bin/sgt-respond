@@ -348,8 +348,13 @@ _queue_supplied_response_for_peer() {
   _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$queued_response_id" \
     response "Apply queued response $queued_response_id from fleet state exactly once." || \
     _die "Could not bind queued response notification"
-  printf 'sgt-respond: queued distinct response %s for the peer-launched worker.\n' \
-    "$queued_response_id"
+  _sgt_response_lock_release || \
+    _die "Could not release response ownership for queued notification delivery"
+  if ! _sgt_wait_worker_notification "$pane" "$REPO_DIR" "$queued_response_id"; then
+    _die "Queued response $queued_response_id is stored and targeted to pane $pane, but the worker did not accept and deliver its notification within the delivery bound; inspect with: sgt-watch $TASK_ID --snapshot"
+  fi
+  printf 'sgt-respond: queued response delivered to pane %s (%s).\n' \
+    "$pane" "$queued_response_id"
 }
 
 if [[ -f "$REPO_DIR/response" ]]; then

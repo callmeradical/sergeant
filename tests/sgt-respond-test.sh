@@ -479,7 +479,8 @@ wait "$locked_pid"
 rm -f "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" \
   "$worktree/.sergeant-response-generation" "$repo_state/response" \
   "$repo_state/response_id" "$repo_state/response_generation" \
-  "$repo_state/respond-launch-ready" "$repo_state/respond-launch-release"
+  "$repo_state/respond-launch-ready" "$repo_state/respond-launch-release" \
+  "$repo_state/respond-launch-contended"
 rm -rf "$repo_state/queued_responses"
 printf 'orphaned\n' > "$worktree/.sergeant-status"
 printf 'orphaned\n' > "$repo_state/status"
@@ -498,9 +499,16 @@ done
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/distinct-race.log" \
   TD_LOG="$TEST_ROOT/distinct-race-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
   PANE_ALIVE=1 NEW_PANE=%99 PANE_IDENTITY='1|%99|7777|777777|dead-pane' \
+  SGT_TEST_HOOKS=1 \
+  SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=60 \
+  _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$repo_state/respond-launch-contended" \
   EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
   respond 'second distinct response' >"$TEST_ROOT/distinct-second.out" 2>&1 & second_response_pid=$!
-sleep 0.1
+for _ in $(seq 1 6000); do
+  [[ -e "$repo_state/respond-launch-contended" ]] && break
+  sleep 0.01
+done
+[[ -e "$repo_state/respond-launch-contended" ]]
 : > "$repo_state/respond-launch-release"
 set +e
 wait "$first_response_pid"; first_response_status=$?
@@ -527,7 +535,8 @@ rm -f "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" \
   "$worktree/.sergeant-response-generation" "$repo_state/response" \
   "$repo_state/response_id" "$repo_state/response_generation" \
   "$repo_state/respond-after-completion-ready" \
-  "$repo_state/respond-after-completion-release"
+  "$repo_state/respond-after-completion-release" \
+  "$repo_state/respond-after-completion-contended"
 printf 'orphaned\n' > "$worktree/.sergeant-status"
 printf 'orphaned\n' > "$repo_state/status"
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/consumed-race.log" \
@@ -550,10 +559,17 @@ rm -f "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" \
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/consumed-race.log" \
   TD_LOG="$TEST_ROOT/consumed-race-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
   PANE_ALIVE=1 NEW_PANE=%100 REQUIRE_TARGET=1 \
+  SGT_TEST_HOOKS=1 \
+  SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=60 \
+  _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$repo_state/respond-after-completion-contended" \
   PANE_IDENTITY='0|%42|7777|777777|recycled-pane' \
   EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
   respond 'durable second response' >"$TEST_ROOT/consumed-second.out" 2>&1 & consumed_second_pid=$!
-sleep 0.1
+for _ in $(seq 1 6000); do
+  [[ -e "$repo_state/respond-after-completion-contended" ]] && break
+  sleep 0.01
+done
+[[ -e "$repo_state/respond-after-completion-contended" ]]
 : > "$repo_state/respond-after-completion-release"
 wait "$consumed_first_pid"
 wait "$consumed_second_pid"

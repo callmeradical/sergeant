@@ -553,6 +553,13 @@ _sgt_drain_lock_acquire_fd() {
       SGT_DRAIN_LOCK_CONTENDED_LIVE=true
       [[ -n "$SGT_DRAIN_LOCK_CONTENDED_NONCE" ]] || \
         SGT_DRAIN_LOCK_CONTENDED_NONCE="$_SGT_DRAIN_VERIFIED_LIVE_NONCE"
+      if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+        -n "${_SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER:-}" && \
+        "${_SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER%/*}" == "$state_dir" && \
+        ! -e "$_SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER" && \
+        ! -L "$_SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER" ]]; then
+        (umask 077; : > "$_SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER") || return 3
+      fi
     fi
     if [[ $(date +%s) -ge $deadline ]]; then
       rm -f "$staging" 2>/dev/null || true
