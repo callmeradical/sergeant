@@ -68,7 +68,8 @@ chmod 600 "$state/pane_identity" "$state/worker_process_marker" \
 mkdir -p "$fleet/task-conflict" "$fleet/task-recycle-conflict" \
   "$fleet/task-live-holder" "$fleet/task-malformed-identity" \
   "$fleet/task-missing-status" "$fleet/task-receipt-race" \
-  "$fleet/task-recycle-race" "$fleet/task-marker-race"
+  "$fleet/task-recycle-race" "$fleet/task-marker-race" \
+  "$fleet/task-lifecycle-race"
 cp -R "$state" "$fleet/task-conflict/app"
 cp -R "$state" "$fleet/task-recycle-conflict/app"
 cp -R "$state" "$fleet/task-live-holder/app"
@@ -77,6 +78,7 @@ cp -R "$state" "$fleet/task-missing-status/app"
 cp -R "$state" "$fleet/task-receipt-race/app"
 cp -R "$state" "$fleet/task-recycle-race/app"
 cp -R "$state" "$fleet/task-marker-race/app"
+cp -R "$state" "$fleet/task-lifecycle-race/app"
 
 sync_error="$TEST_ROOT/sync.err"
 env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
@@ -236,5 +238,38 @@ grep -Fq 'Worker marker generation changed during stale-pane retirement' \
 [[ ! -e "$marker_race_state/worker_stale_pane_retirement" ]]
 [[ ! -e "$marker_race_state/worker_recycled" ]]
 [[ ! -s "$kill_log" && -d "$worktree" ]]
+
+lifecycle_race_state="$fleet/task-lifecycle-race/app"
+lifecycle_worktree="$TEST_ROOT/lifecycle-race-worktree"
+lifecycle_barrier="$TEST_ROOT/lifecycle-race"
+mkdir -p "$lifecycle_worktree"
+printf 'done\n' > "$lifecycle_worktree/.sergeant-status"
+printf '%s\n' "$lifecycle_worktree" > "$lifecycle_race_state/worktree"
+env PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" KILL_LOG="$kill_log" \
+  SGT_TEST_HOOKS=1 SGT_TEST_STALE_PANE_BARRIER="$lifecycle_barrier" \
+  "$ROOT_DIR/bin/sgt-watch" --retire-stale-pane task-lifecycle-race --repo app \
+  > "$TEST_ROOT/lifecycle-race.out" 2>&1 &
+lifecycle_pid=$!
+wait_for_barrier "$lifecycle_barrier"
+[[ -s "$lifecycle_race_state/response.lock" ]] || {
+  printf 'stale-pane retirement did not hold the canonical lifecycle lock\n' >&2
+  exit 1
+}
+printf 'in_progress\n' > "$lifecycle_race_state/status"
+printf 'in_progress\n' > "$lifecycle_worktree/.sergeant-status"
+printf '0|%%61|77777777|333333|replacement-worker\n' \
+  > "$lifecycle_race_state/pane_identity"
+chmod 600 "$lifecycle_race_state/pane_identity"
+: > "$lifecycle_barrier.release"
+if wait "$lifecycle_pid"; then
+  printf 'concurrent lifecycle generation rotation was accepted\n' >&2
+  exit 1
+fi
+grep -Fq 'Terminal worker lifecycle or pane identity changed during stale-pane retirement' \
+  "$TEST_ROOT/lifecycle-race.out"
+[[ ! -e "$lifecycle_race_state/worker_stale_pane_retirement" ]]
+[[ ! -e "$lifecycle_race_state/worker_recycled" ]]
+[[ ! -e "$lifecycle_race_state/response.lock" ]]
+[[ ! -s "$kill_log" && -d "$lifecycle_worktree" ]]
 
 printf 'sgt-watch stale-pane retirement: ok\n'

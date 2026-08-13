@@ -468,6 +468,8 @@ _retire_stale_pane() {
   local task_id="$1" repo_name="$2" task_dir repo_dir status worktree worktree_status
   local pane recorded observed observed_dead observed_pane process_group holders current
   local process_marker history_digest current_marker current_digest
+  local current_status current_worktree current_worktree_status current_pane
+  local current_recorded current_process_group
 
   _snapshot_scope_id_is_valid "$task_id" || _die "Invalid task ID for --retire-stale-pane: $task_id"
   _snapshot_scope_id_is_valid "$repo_name" || _die "Invalid repo for --retire-stale-pane: $repo_name"
@@ -479,8 +481,8 @@ _retire_stale_pane() {
     _die "Repository fleet record not found: $task_id/$repo_name"
   _SGT_RESPONSE_LOCK_DIR=""
   _SGT_RESPONSE_LOCK_OWNER_RECORD=""
-  _sgt_response_lock_acquire "$repo_dir" stale-pane-retirement.lock || \
-    _die "Could not acquire stale-pane retirement lock: $task_id/$repo_name"
+  _sgt_response_lock_acquire "$repo_dir" || \
+    _die "Could not acquire repository lifecycle lock for stale-pane retirement: $task_id/$repo_name"
   trap '_sgt_response_lock_release' EXIT
 
   status="$(tr -d '\n' < "$repo_dir/status" 2>/dev/null || true)"
@@ -568,9 +570,23 @@ _retire_stale_pane() {
     "$current_digest" == "$history_digest" ]] || \
     _die "Worker marker generation changed during stale-pane retirement"
 
+  current_status="$(tr -d '\n' < "$repo_dir/status" 2>/dev/null || true)"
+  current_worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+  current_pane="$(cat "$repo_dir/pane" 2>/dev/null || true)"
+  current_recorded="$(_sgt_read_owned_file "$repo_dir/pane_identity" 2>/dev/null || true)"
+  current_process_group="$(cat "$repo_dir/worker_process_group" 2>/dev/null || true)"
   current="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
-  [[ "$current" == "$observed" ]] || \
-    _die "Conflicting pane identity changed during stale-pane retirement; retry after inspection"
+  [[ "$current_status" == "$status" && "$current_worktree" == "$worktree" && \
+    "$current_pane" == "$pane" && "$current_recorded" == "$recorded" && \
+    "$current_process_group" == "$process_group" && "$current" == "$observed" ]] || \
+    _die "Terminal worker lifecycle or pane identity changed during stale-pane retirement"
+  if [[ -n "$worktree" && -d "$worktree" ]]; then
+    [[ -f "$worktree/.sergeant-status" && ! -L "$worktree/.sergeant-status" ]] || \
+      _die "Preserved worktree status changed during stale-pane retirement"
+    current_worktree_status="$(tr -d '\n' < "$worktree/.sergeant-status")"
+    [[ "$current_worktree_status" == "$worktree_status" ]] || \
+      _die "Preserved worktree status changed during stale-pane retirement"
+  fi
   if [[ ! -e "$repo_dir/worker_stale_pane_retirement" ]]; then
     _record_stale_pane_retirement "$repo_dir" "$pane" "$recorded" "$observed" || \
       _die "Stale-pane retirement evidence appeared concurrently or could not be published"
@@ -586,7 +602,7 @@ _retire_stale_pane() {
     _die "Published recycle evidence no longer matches marker provenance"
   printf 'terminal worker stale pane ownership retired; unrelated live pane was not touched\n' \
     > "$repo_dir/diagnostic"
-  _sgt_response_lock_release || _die "Failed to release stale-pane retirement lock"
+  _sgt_response_lock_release || _die "Failed to release repository lifecycle lock"
   trap - EXIT
   printf 'Retired stale pane ownership for %s/%s; preserved worktree and live pane %s.\n' \
     "$task_id" "$repo_name" "$pane"
