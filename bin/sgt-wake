@@ -170,7 +170,12 @@ elif LC_ALL=C grep -aEq '^[[:space:]]*check_name[[:space:]]*=' "$condition_file"
   _die "python3 not available to validate check_name"
 fi
 
-while IFS='=' read -r field value; do
+# read returns nonzero at EOF even when it populated an unterminated final
+# record. Process that record as well so a duplicate cannot hide after the last
+# newline. The value bytes remain exactly as read.
+field=""
+value=""
+while IFS='=' read -r field value || [[ -n "$field" || -n "$value" ]]; do
   # Strip whitespace from structural fields. A GitHub check name is opaque:
   # spaces after its '=' belong to the provider name and must be preserved.
   raw_value="$value"
