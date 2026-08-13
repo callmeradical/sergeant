@@ -11,6 +11,7 @@
 # pointing at the surviving original.
 
 set -euo pipefail
+export FAKE_TMUX_OWNER_PID="$$"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
@@ -45,6 +46,7 @@ cat > "$fake_bin/tmux" <<'TMUX'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${TMUX_LOG:-/dev/null}"
 case "$1" in
+  list-panes) exit 0 ;;
   display-message)
     target=""
     previous=""
@@ -52,9 +54,18 @@ case "$1" in
       [[ "$previous" == -t ]] && target="$arg"
       previous="$arg"
     done
+    if [[ "$*" == *'@sergeant_replacement_token'* && "$target" == "%99" ]]; then
+      owner_pid="$FAKE_TMUX_OWNER_PID"
+      owner_start="$(awk '{ print $22 }' "/proc/$owner_pid/stat")"
+      printf '0|%%99|%s|bash|%s|%s|%s|proc:%s\n' "$owner_pid" \
+        "$(cat "$REPO_STATE_DIR/test_spawn_token")" "$(cat "$REPO_STATE_DIR/test_spawn_role")" \
+        "$owner_pid" "$owner_start"
+      exit 0
+    fi
     if [[ "$target" == "%99" ]]; then
       [[ "${FAIL_NEW_PANE_IDENTITY:-0}" == 0 ]] || exit 1
-      pane_identity="0|%99|9999|654321|relaunched"
+      start_command="$(cat "$REPO_STATE_DIR/test_spawn_command" 2>/dev/null || true)"
+      pane_identity="0|%99|$FAKE_TMUX_OWNER_PID|654321|$start_command"
       if [[ "${ACK_NEW_PANE:-1}" == 1 && -s "$REPO_STATE_DIR/notification_id" ]]; then
         notification_id="$(cat "$REPO_STATE_DIR/notification_id")"
         wt="$(cat "$REPO_STATE_DIR/worktree")"
@@ -75,6 +86,12 @@ case "$1" in
   new-window)
     [[ "${FAIL_WINDOW:-0}" == 0 ]] || exit 7
     [[ "${EMPTY_WINDOW:-0}" == 0 ]] || exit 0
+    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch \([a-f0-9]\{32\}\) .*/\1/p')"
+    spawn_role="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch [a-f0-9]\{32\} \(worker:[A-Za-z0-9._-]*\) .*/\1/p')"
+    printf '%s\n' "$spawn_token" > "$REPO_STATE_DIR/test_spawn_token"
+    printf '%s\n' "$spawn_role" > "$REPO_STATE_DIR/test_spawn_role"
+    for start_command in "$@"; do :; done
+    printf '%s\n' "$start_command" > "$REPO_STATE_DIR/test_spawn_command"
     printf '%%99\n'
     ;;
   kill-pane)
@@ -155,7 +172,7 @@ recover() {
 # ── 1. The kill is strictly ordered after the validated replacement ────────────
 
 read -r state wt <<<"$(make_stalled ordering)"
-task=task-ordering
+task="task-ordering"
 recover "$state" "TMUX_LOG=$TEST_ROOT/order.log" "KILL_LOG=$TEST_ROOT/order-kill.log" \
   >/dev/null || {
   printf 'happy-path recovery failed\n' >&2
@@ -191,7 +208,7 @@ done < "$TEST_ROOT/order-kill.log"
 # ── 2. A replacement that returns no pane id refuses and preserves the original ─
 
 read -r state wt <<<"$(make_stalled emptypane)"
-task=task-emptypane
+task="task-emptypane"
 set +e
 empty_output="$(recover "$state" "TMUX_LOG=$TEST_ROOT/empty.log" \
   "KILL_LOG=$TEST_ROOT/empty-kill.log" EMPTY_WINDOW=1)"
@@ -217,7 +234,7 @@ set -e
 # ── 3. A replacement whose identity cannot be captured refuses and restores ────
 
 read -r state wt <<<"$(make_stalled noidentity)"
-task=task-noidentity
+task="task-noidentity"
 set +e
 identity_output="$(recover "$state" "TMUX_LOG=$TEST_ROOT/noid.log" \
   "KILL_LOG=$TEST_ROOT/noid-kill.log" FAIL_NEW_PANE_IDENTITY=1)"
@@ -251,14 +268,15 @@ fi
 # ── 4. A replacement that cannot be launched refuses and touches nothing ──────
 
 read -r state wt <<<"$(make_stalled nolaunch)"
-task=task-nolaunch
+task="task-nolaunch"
 set +e
 launch_output="$(recover "$state" "TMUX_LOG=$TEST_ROOT/nolaunch.log" \
   "KILL_LOG=$TEST_ROOT/nolaunch-kill.log" FAIL_WINDOW=1)"
 launch_status=$?
 set -e
 [[ "$launch_status" -ne 0 ]] || {
-  printf 'recovery succeeded although the replacement could not be launched\n' >&2
+  printf 'recovery succeeded although the replacement could not be launched:\n%s\n' \
+    "$launch_output" >&2
   exit 1
 }
 [[ -z "$(cat "$TEST_ROOT/nolaunch-kill.log" 2>/dev/null || true)" ]] || {

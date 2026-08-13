@@ -14,6 +14,7 @@
 # turn that produced no proof at all.
 
 set -euo pipefail
+export FAKE_TMUX_OWNER_PID="$$"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
@@ -43,6 +44,17 @@ cat > "$fake_bin/tmux" <<'TMUX'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${TMUX_LOG:-/dev/null}"
 case "$1" in
+  list-panes)
+    [[ "${FAIL_LIST_PANES:-0}" == 0 ]] || exit 8
+    [[ -n "${TMUX_PANE_STATE:-}" && -s "$TMUX_PANE_STATE" ]] || exit 0
+    case "${INVENTORY_SHAPE:-valid}" in
+      valid) cat "$TMUX_PANE_STATE" ;;
+      leading) printf '\n'; cat "$TMUX_PANE_STATE" ;;
+      interior) cat "$TMUX_PANE_STATE"; printf '\n'; cat "$TMUX_PANE_STATE" ;;
+      trailing) cat "$TMUX_PANE_STATE"; printf '\n' ;;
+      *) exit 9 ;;
+    esac
+    ;;
   display-message)
     target=""
     previous=""
@@ -50,16 +62,33 @@ case "$1" in
       [[ "$previous" == -t ]] && target="$arg"
       previous="$arg"
     done
+    [[ "${FAIL_DISPLAY_MESSAGE:-0}" == 0 ]] || exit 42
+    if [[ "$target" == "${FOREIGN_PANE:-%77}" && -n "${FOREIGN_PANE_IDENTITY:-}" ]]; then
+      printf '%s\n' "$FOREIGN_PANE_IDENTITY"
+      exit 0
+    fi
+    if [[ "$*" == *'@sergeant_replacement_token'* && "$target" == "${NEW_PANE:-%99}" ]]; then
+      spawn_token="$(cat "${SPAWN_TOKEN_STATE:-$REPO_STATE_DIR/test_spawn_token}" 2>/dev/null || true)"
+      spawn_role="$(cat "${SPAWN_ROLE_STATE:-$REPO_STATE_DIR/test_spawn_role}" 2>/dev/null || true)"
+      owner_pid="$FAKE_TMUX_OWNER_PID"
+      owner_start="$(awk '{ print $22 }' "/proc/$owner_pid/stat")"
+      printf '0|%s|%s|bash|%s|%s|%s|proc:%s\n' "$target" "$owner_pid" \
+        "$spawn_token" "$spawn_role" "$owner_pid" "$owner_start"
+      exit 0
+    fi
     # PANE_ALIVE=0 models a dead PRIOR supervisor; a relaunched pane is alive.
     if [[ "$target" != "${NEW_PANE:-%99}" ]]; then
       [[ "${PANE_ALIVE:-1}" == 1 ]] || exit 1
     fi
     pane_identity="${PANE_IDENTITY:-0|%42|4242|123456|stalled-pane}"
     if [[ "$target" == "${NEW_PANE:-%99}" ]]; then
-      pane_identity="0|$target|9999|654321|relaunched"
+      start_command="$(cat "${SPAWN_COMMAND_STATE:-$REPO_STATE_DIR/test_spawn_command}" 2>/dev/null || true)"
+      pane_identity="0|$target|$FAKE_TMUX_OWNER_PID|654321|$start_command"
     fi
     # Stand in for a relaunched worker completing its delivery handshake.
-    if [[ "${AUTO_DELIVER:-1}" == 1 && "$target" == "${NEW_PANE:-%99}" &&
+    if [[ "${AUTO_DELIVER:-1}" == 1 &&
+          ( -z "${ACK_GATE_FILE:-}" || -e "$ACK_GATE_FILE" ) &&
+          "$target" == "${NEW_PANE:-%99}" &&
           -s "$REPO_STATE_DIR/notification_id" ]]; then
       notification_id="$(cat "$REPO_STATE_DIR/notification_id")"
       wt="$(cat "$REPO_STATE_DIR/worktree")"
@@ -73,6 +102,10 @@ case "$1" in
         printf '%s\n' "$token" > "$wt/.sergeant-notification-accepts/$nonce"
         printf '%s\n' "$token" > "$target_dir/accepted"
         printf '%s\n' "$token" > "$target_dir/delivered"
+        if [[ "${CREATE_ACTION_LEASE_ON_HANDSHAKE:-0}" == 1 ]]; then
+          printf '%s\n' "$nonce" \
+            > "$REPO_STATE_DIR/notifications/$notification_id/action_lease"
+        fi
         printf '%s\n' "$pane_identity" \
           > "$REPO_STATE_DIR/notification_delivered_pane_identity"
         printf '%s\n' "$notification_id" > "$REPO_STATE_DIR/notification_delivered"
@@ -82,6 +115,33 @@ case "$1" in
     ;;
   new-window)
     [[ "${FAIL_WINDOW:-0}" == 0 ]] || exit 7
+    window=""
+    previous=""
+    start_command=""
+    for arg in "$@"; do
+      [[ "$previous" == -n ]] && window="$arg"
+      previous="$arg"
+      start_command="$arg"
+    done
+    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch \([a-f0-9]\{32\}\) .*/\1/p')"
+    spawn_role="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch [a-f0-9]\{32\} \(worker:[A-Za-z0-9._-]*\) .*/\1/p')"
+    printf '%s\n' "$spawn_token" \
+      > "${SPAWN_TOKEN_STATE:-$REPO_STATE_DIR/test_spawn_token}"
+    printf '%s\n' "$spawn_role" \
+      > "${SPAWN_ROLE_STATE:-$REPO_STATE_DIR/test_spawn_role}"
+    printf '%s\n' "$start_command" \
+      > "${SPAWN_COMMAND_STATE:-$REPO_STATE_DIR/test_spawn_command}"
+    if [[ -n "${TMUX_PANE_STATE:-}" ]]; then
+      printf '%s|%s\n' "${NEW_PANE:-%99}" "$window" > "$TMUX_PANE_STATE"
+    fi
+    if [[ -n "${NEW_WINDOW_COUNT:-}" ]]; then
+      count="$(cat "$NEW_WINDOW_COUNT" 2>/dev/null || printf 0)"
+      printf '%s\n' "$((count + 1))" > "$NEW_WINDOW_COUNT"
+    fi
+    if [[ "${KILL_RESPOND_AFTER_SPAWN:-0}" == 1 ]]; then
+      kill -KILL "$PPID"
+      sleep 1
+    fi
     printf '%s\n' "${NEW_PANE:-%99}"
     ;;
   kill-pane)
@@ -189,7 +249,7 @@ setup_orphan() {
 # ── 1. sgt-recover converges a provably completed turn ────────────────────────
 
 read -r state wt <<<"$(make_worktree recover-converge)"
-task=task-recover-converge
+task="task-recover-converge"
 setup_stall "$state" "$wt"
 install_accepted_turn "$state" "$wt" "$NOTIFY|$NONCE"
 
@@ -215,7 +275,7 @@ grep -Fq 'kill-pane -t %42' "$TEST_ROOT/rc-kill.log"
 # ── 2. sgt-recover still refuses a turn with no agent proof ───────────────────
 
 read -r state wt <<<"$(make_worktree recover-refuse)"
-task=task-recover-refuse
+task="task-recover-refuse"
 setup_stall "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 
@@ -249,8 +309,25 @@ set -e
 
 # ── 3. An identity or nonce mismatch fails closed ────────────────────────────
 
+read -r state wt <<<"$(make_worktree recover-dead-owner)"
+task="task-recover-dead-owner"
+setup_stall "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1 || {
+  printf 'sgt-recover did not fence an exactly proven dead owner\n' >&2
+  exit 1
+}
+[[ ! -e "$state/notifications/$NOTIFY/targets/$NONCE/completed" ]]
+grep -Fq "old_lease=$NONCE" \
+  "$state/notifications/$NOTIFY/ownership_transition"
+grep -Fq "new_notification=$(cat "$state/notification_id")" \
+  "$state/notifications/$NOTIFY/ownership_transition"
+[[ "$(cat "$state/pane")" == '%99' ]]
+
 read -r state wt <<<"$(make_worktree recover-mismatch)"
-task=task-recover-mismatch
+task="task-recover-mismatch"
 setup_stall "$state" "$wt"
 install_accepted_turn "$state" "$wt" "some-other-notification|$NONCE"
 set +e
@@ -266,7 +343,7 @@ set -e
 grep -Fq 'mismatch' "$state/notifications/$NOTIFY/action_lease_pending"
 
 read -r state wt <<<"$(make_worktree recover-badnonce)"
-task=task-recover-badnonce
+task="task-recover-badnonce"
 setup_stall "$state" "$wt"
 install_accepted_turn "$state" "$wt" "$NOTIFY|ffffffffffffffffffffffffffffffff"
 set +e
@@ -283,7 +360,7 @@ set -e
 # ── 4. sgt-respond converges a provably completed turn before relaunching ─────
 
 read -r state wt <<<"$(make_worktree respond-converge)"
-task=task-respond-converge
+task="task-respond-converge"
 setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt" "$NOTIFY|$NONCE"
 
@@ -324,29 +401,39 @@ printf 'resume the mission again' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$flee
   exit 1
 }
 
-# ── 6. sgt-respond still refuses a turn with no agent proof ──────────────────
+# 6. sgt-respond fences an exactly proven dead owner without inventing proof.
 
-read -r state wt <<<"$(make_worktree respond-refuse)"
-task=task-respond-refuse
+read -r state wt <<<"$(make_worktree respond-dead-owner)"
+task="task-respond-dead-owner"
 setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt"
+printf 'preserved but uncommitted\n' > "$wt/preserved.txt"
 set +e
-respond_refuse="$(printf 'resume' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" \
-  TMUX_LOG="$TEST_ROOT/sr.log" PANE_ALIVE=0 \
-  "$ROOT_DIR/bin/sgt-respond" "$task" app 2>&1)"
-respond_refuse_status=$?
+orphan_recover_output="$(PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app 2>&1)"
+orphan_recover_status=$?
 set -e
-[[ "$respond_refuse_status" -ne 0 ]] || {
-  printf 'sgt-respond relaunched over an unprovable lease\n' >&2
+[[ "$orphan_recover_status" -ne 0 &&
+   "$orphan_recover_output" == *"sgt-respond $task app"* ]] || {
+  printf 'sgt-recover did not direct orphan recovery to its supported CLI path\n' >&2
   exit 1
 }
-[[ "$respond_refuse" == *'belongs to the prior supervisor'* ]]
-[[ "$respond_refuse" == *"$NOTIFY"* && "$respond_refuse" == *"$NONCE"* ]] || {
-  printf 'sgt-respond refusal did not name the lease owner:\n%s\n' "$respond_refuse" >&2
+printf 'resume' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" \
+  TMUX_LOG="$TEST_ROOT/sr.log" PANE_ALIVE=0 \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1 || {
+  printf 'sgt-respond did not fence a provably dead prior owner\n' >&2
   exit 1
 }
-[[ "$respond_refuse" == *"sgt-respond $task app"* ]]
-[[ ! -e "$state/notifications/$NOTIFY/targets/$NONCE/completed" ]]
+[[ "$(cat "$wt/preserved.txt")" == 'preserved but uncommitted' ]]
+[[ ! -e "$state/notifications/$NOTIFY/targets/$NONCE/completed" ]] || {
+  printf 'sgt-respond fabricated completion while fencing a dead owner\n' >&2
+  exit 1
+}
+grep -Fq "lease=$NONCE" "$state/notifications/$NOTIFY/action_lease_abandoned"
+grep -Fq 'old_owner_identity=0|%42|4242|123456|stalled-pane' \
+  "$state/notifications/$NOTIFY/ownership_transition"
+grep -Fq 'new_notification=' "$state/notifications/$NOTIFY/ownership_transition"
+[[ "$(cat "$state/pane")" == '%99' ]]
 
 # ── 7. A live owning supervisor is never relaunched over ──────────────────────
 # When the recorded pane is still the live worker supervisor, sgt-respond
@@ -354,7 +441,7 @@ set -e
 # lease is never contested by a second supervisor.
 
 read -r state wt <<<"$(make_worktree respond-live)"
-task=task-respond-live
+task="task-respond-live"
 setup_orphan "$state" "$wt"
 install_accepted_turn "$state" "$wt"
 set +e
@@ -370,5 +457,733 @@ fi
   printf 'sgt-respond replaced the pane of a live owner\n' >&2
   exit 1
 }
+
+# Missing relaunch metadata is not a lease-adjudication bypass. A dead old
+# generation is fenced before durable response evidence is published, but the
+# CLI still returns actionable nonzero because no worker was relaunched. A live
+# owner refuses without replacing the old notification.
+read -r state wt <<<"$(make_worktree respond-incomplete-metadata-dead)"
+task="task-respond-incomplete-metadata-dead"
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+rm -f "$state/agent"
+set +e
+incomplete_output="$(printf 'resume via durable fallback' | PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" PANE_ALIVE=0 \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app 2>&1)"
+incomplete_status=$?
+set -e
+[[ "$incomplete_status" -ne 0 &&
+   "$incomplete_output" == *'relaunch metadata is incomplete'* ]]
+[[ -s "$state/notifications/$NOTIFY/action_lease_abandoned" ]]
+[[ -s "$state/notifications/$NOTIFY/ownership_transition" ]]
+[[ "$(cat "$state/notification_id")" != "$NOTIFY" ]]
+[[ ! -e "$state/notifications/$NOTIFY/targets/$NONCE/completed" ]]
+[[ "$(cat "$state/response")" == 'resume via durable fallback' ]]
+
+read -r state wt <<<"$(make_worktree respond-incomplete-metadata-live)"
+task="task-respond-incomplete-metadata-live"
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+rm -f "$state/agent"
+if printf 'must fail closed' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+    SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" PANE_ALIVE=1 \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1; then
+  printf 'incomplete metadata bypassed a live action lease owner\n' >&2
+  exit 1
+fi
+[[ "$(cat "$state/notification_id")" == "$NOTIFY" ]]
+[[ ! -e "$state/notifications/$NOTIFY/action_lease_abandoned" ]]
+[[ ! -e "$state/notifications/$NOTIFY/ownership_transition" ]]
+
+for collision_record in action_lease_abandoned ownership_transition; do
+  read -r state wt <<<"$(make_worktree collision-$collision_record)"
+  task="task-collision-$collision_record"
+  setup_orphan "$state" "$wt"
+  install_accepted_turn "$state" "$wt"
+  printf 'foreign collision evidence\n' \
+    > "$state/notifications/$NOTIFY/$collision_record"
+  if printf 'must preserve collision' | PATH="$fake_bin:$PATH" \
+      SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" \
+      PANE_ALIVE=0 "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1; then
+    printf 'conflicting %s was accepted\n' "$collision_record" >&2
+    exit 1
+  fi
+  [[ "$(cat "$state/notifications/$NOTIFY/$collision_record")" == \
+     'foreign collision evidence' ]]
+  [[ "$(cat "$state/notification_id")" == "$NOTIFY" ]]
+done
+
+# ── 8. Stale, reused, and process-ambiguous ownership fails closed ───────
+
+read -r state wt <<<"$(make_worktree respond-stale-owner)"
+task="task-respond-stale-owner"
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+printf '0|%%43|4343|123457|different-owner\n' \
+  > "$state/notifications/$NOTIFY/targets/$NONCE/pane_identity"
+printf 'stale-generation|%s\n' "$NONCE" \
+  > "$state/notifications/$NOTIFY/targets/$NONCE/accepted"
+if printf 'resume' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    REPO_STATE_DIR="$state" PANE_ALIVE=0 "$ROOT_DIR/bin/sgt-respond" "$task" app \
+    >/dev/null 2>&1; then
+  printf 'stale target ownership was fenced\n' >&2
+  exit 1
+fi
+[[ ! -e "$state/notifications/$NOTIFY/action_lease_abandoned" ]]
+
+read -r state wt <<<"$(make_worktree respond-reused-pane)"
+task="task-respond-reused-pane"
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+if printf 'resume' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    REPO_STATE_DIR="$state" PANE_ALIVE=1 \
+    PANE_IDENTITY='0|%42|7777|777777|reused-pane' \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1; then
+  printf 'reused pane identity was fenced\n' >&2
+  exit 1
+fi
+[[ ! -e "$state/notifications/$NOTIFY/action_lease_abandoned" ]]
+
+read -r state wt <<<"$(make_worktree respond-live-pid)"
+task="task-respond-live-pid"
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+live_pid_identity="0|%42|$$|123456|stale-pane-live-pid"
+printf '%s\n' "$live_pid_identity" > "$state/pane_identity"
+chmod 600 "$state/pane_identity"
+printf '%s\n' "$live_pid_identity" \
+  > "$state/notifications/$NOTIFY/targets/$NONCE/pane_identity"
+if printf 'resume' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    REPO_STATE_DIR="$state" PANE_ALIVE=0 "$ROOT_DIR/bin/sgt-respond" "$task" app \
+    >/dev/null 2>&1; then
+  printf 'live/reused process identity was fenced\n' >&2
+  exit 1
+fi
+[[ ! -e "$state/notifications/$NOTIFY/action_lease_abandoned" ]]
+
+# An unclassified tmux failure is not proof that the exact old pane is gone.
+read -r state wt <<<"$(make_worktree respond-tmux-probe-error)"
+task="task-respond-tmux-probe-error"
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+if printf 'resume' | PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    REPO_STATE_DIR="$state" PANE_ALIVE=0 FAIL_DISPLAY_MESSAGE=1 FAIL_LIST_PANES=1 \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1; then
+  printf 'FENCED_ON_UNCLASSIFIED_TMUX_FAILURE\n' >&2
+  exit 1
+fi
+[[ ! -e "$state/notifications/$NOTIFY/action_lease_abandoned" ]] || {
+  printf 'FENCED_ON_UNCLASSIFIED_TMUX_FAILURE\n' >&2
+  exit 1
+}
+
+# Likewise, a process-table probe error cannot prove the recorded owner PID is
+# absent. Preserve the accepted lease without publishing an ownership fence.
+mkdir -p "$TEST_ROOT/ps-probe-error-bin"
+cat > "$TEST_ROOT/ps-probe-error-bin/ps" <<'PS'
+#!/usr/bin/env bash
+exit 42
+PS
+chmod +x "$TEST_ROOT/ps-probe-error-bin/ps"
+read -r state wt <<<"$(make_worktree respond-ps-probe-error)"
+task="task-respond-ps-probe-error"
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+if printf 'resume' | PATH="$TEST_ROOT/ps-probe-error-bin:$fake_bin:$PATH" \
+    SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" \
+    PANE_ALIVE=0 "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1; then
+  printf 'FENCED_ON_PS_PROBE_ERROR\n' >&2
+  exit 1
+fi
+[[ ! -e "$state/notifications/$NOTIFY/action_lease_abandoned" ]] || {
+  printf 'FENCED_ON_PS_PROBE_ERROR\n' >&2
+  exit 1
+}
+
+# A successful zero-byte process inventory is equally unverifiable: a real
+# process table cannot establish absence without at least one valid observer
+# row.  Never fence the accepted owner from an empty snapshot.
+mkdir -p "$TEST_ROOT/ps-probe-empty-bin"
+cat > "$TEST_ROOT/ps-probe-empty-bin/ps" <<'PS'
+#!/usr/bin/env bash
+exit 0
+PS
+chmod +x "$TEST_ROOT/ps-probe-empty-bin/ps"
+read -r state wt <<<"$(make_worktree respond-ps-probe-empty)"
+task="task-respond-ps-probe-empty"
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+if printf 'resume' | PATH="$TEST_ROOT/ps-probe-empty-bin:$fake_bin:$PATH" \
+    SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" \
+    PANE_ALIVE=0 "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1; then
+  printf 'FENCED_ON_EMPTY_PS_SNAPSHOT\n' >&2
+  exit 1
+fi
+[[ ! -e "$state/notifications/$NOTIFY/action_lease_abandoned" ]] || {
+  printf 'FENCED_ON_EMPTY_PS_SNAPSHOT\n' >&2
+  exit 1
+}
+
+# ── 9. Every durable transfer boundary converges on exact retry ──────────
+
+for boundary in lease_archived successor_published replacement_spawned replacement_owned; do
+  read -r state wt <<<"$(make_worktree interrupt-$boundary)"
+  task="task-interrupt-$boundary"
+  setup_orphan "$state" "$wt"
+  install_accepted_turn "$state" "$wt"
+  printf 'retry me exactly once' > "$TEST_ROOT/input-$boundary"
+  set +e
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+    KILL_LOG="$TEST_ROOT/interrupt-$boundary-kill.log" \
+    SGT_TEST_HOOKS=1 SGT_TEST_INTERRUPT_TRANSFER_AT="$boundary" \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app \
+    < "$TEST_ROOT/input-$boundary" >/dev/null 2>&1
+  interrupted_status=$?
+  set -e
+  [[ "$interrupted_status" -ne 0 ]] || {
+    printf 'boundary %s did not interrupt\n' "$boundary" >&2
+    exit 1
+  }
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%99 \
+    KILL_LOG="$TEST_ROOT/interrupt-$boundary-kill.log" \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app \
+    < "$TEST_ROOT/input-$boundary" >/dev/null 2>&1 || {
+    printf 'boundary %s did not converge on retry\n' "$boundary" >&2
+    exit 1
+  }
+  successor="$(sed -n 's/^new_notification=//p' \
+    "$state/notifications/$NOTIFY/ownership_transition")"
+  [[ -n "$successor" && "$(cat "$state/notification_id")" == "$successor" ]]
+  [[ "$(cat "$state/response")" == 'retry me exactly once' ]]
+  [[ "$(cat "$state/pane")" == '%99' ]]
+  [[ ! -e "$state/notifications/$NOTIFY/targets/$NONCE/completed" ]]
+  if [[ "$boundary" == replacement_spawned || "$boundary" == replacement_owned ]]; then
+    grep -Fq 'kill-pane -t %98' "$TEST_ROOT/interrupt-$boundary-kill.log"
+  fi
+done
+
+worktree_content_hash() {
+  find "$1" -type f ! -path '*/.git/*' ! -path '*/.sergeant-*/*' \
+    ! -name '.git' ! -name '.sergeant-*' \
+    -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+}
+
+# Every atomic write/rename in the ownership-transfer journal is retryable. A
+# failed publication leaves no partial final path and the exact same response
+# resumes without changing user worktree content.
+for io_target in response_successor_notification action_lease_abandoned \
+    ownership_transition response_relaunch_transaction; do
+  for io_stage in write rename; do
+    read -r state wt <<<"$(make_worktree io-$io_target-$io_stage)"
+    task="task-io-$io_target-$io_stage"
+    setup_orphan "$state" "$wt"
+    install_accepted_turn "$state" "$wt"
+    printf 'uncommitted %s %s\n' "$io_target" "$io_stage" > "$wt/io-user.txt"
+    io_before="$(worktree_content_hash "$wt")"
+    printf 'same response across io retry' > "$TEST_ROOT/io-input"
+    set +e
+    PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+      REPO_STATE_DIR="$state" PANE_ALIVE=0 \
+      SGT_TEST_HOOKS=1 SGT_TEST_FAIL_TRANSFER_IO_TARGET="$io_target" \
+      SGT_TEST_FAIL_TRANSFER_IO_STAGE="$io_stage" \
+      "$ROOT_DIR/bin/sgt-respond" "$task" app \
+      < "$TEST_ROOT/io-input" >/dev/null 2>&1
+    io_status=$?
+    set -e
+    [[ "$io_status" -ne 0 ]] || {
+      printf 'I/O failpoint %s/%s did not fail\n' "$io_target" "$io_stage" >&2
+      exit 1
+    }
+    [[ -z "$(find "$state" -name "${io_target}.tmp.*" -print -quit)" ]]
+    PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+      REPO_STATE_DIR="$state" PANE_ALIVE=0 \
+      "$ROOT_DIR/bin/sgt-respond" "$task" app \
+      < "$TEST_ROOT/io-input" >/dev/null 2>&1 || {
+      printf 'I/O failpoint %s/%s did not converge on retry\n' \
+        "$io_target" "$io_stage" >&2
+      exit 1
+    }
+    [[ "$(cat "$state/response")" == 'same response across io retry' ]]
+    [[ "$(cat "$wt/io-user.txt")" == "uncommitted $io_target $io_stage" ]]
+    [[ "$(worktree_content_hash "$wt")" == "$io_before" ]]
+  done
+done
+
+# A same-name pane is never sufficient for adoption. Only the spawn token bound
+# before fencing authenticates the replacement; a foreign collision is left
+# untouched and no second pane is created.
+read -r state wt <<<"$(make_worktree foreign-window)"
+task="task-foreign-window"
+setup_orphan "$state" "$wt"
+printf 'foreign collision retry' > "$TEST_ROOT/foreign-input"
+set +e
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 SGT_TEST_HOOKS=1 \
+  SGT_TEST_INTERRUPT_TRANSFER_AT=successor_published \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app \
+  < "$TEST_ROOT/foreign-input" >/dev/null 2>&1
+set -e
+successor="$(cut -d '|' -f2 "$state/response_successor_notification")"
+foreign_token="$(cut -d '|' -f3 "$state/response_successor_notification")"
+foreign_window="task/app-resume-${successor:0:12}"
+printf '%%77|%s\n' "$foreign_window" > "$TEST_ROOT/foreign-pane-state"
+set +e
+foreign_output="$(PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 TMUX_PANE_STATE="$TEST_ROOT/foreign-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/foreign-window-count" FOREIGN_PANE=%77 \
+  FOREIGN_PANE_IDENTITY="0|%77|7777|777777|sh -c echo-SGT_REPLACEMENT_TOKEN=$foreign_token" \
+  KILL_LOG="$TEST_ROOT/foreign-kill.log" \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app \
+  < "$TEST_ROOT/foreign-input" 2>&1)"
+foreign_status=$?
+set -e
+[[ "$foreign_status" -ne 0 && "$foreign_output" == *'foreign pane'* ]]
+[[ ! -e "$TEST_ROOT/foreign-window-count" ]]
+[[ -z "$(cat "$TEST_ROOT/foreign-kill.log" 2>/dev/null || true)" ]]
+
+# Canonical journal parsing is fail-closed at the public CLI: unknown phases,
+# missing fields, and extra fields are never repaired or overwritten on retry.
+for malformed in extra missing bad_phase; do
+  read -r state wt <<<"$(make_worktree malformed-$malformed)"
+  task="task-malformed-$malformed"
+  setup_orphan "$state" "$wt"
+  install_accepted_turn "$state" "$wt"
+  printf 'strict journal' > "$TEST_ROOT/malformed-input"
+  set +e
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+    NEW_WINDOW_COUNT="$TEST_ROOT/malformed-$malformed-count" \
+    SGT_TEST_HOOKS=1 SGT_TEST_INTERRUPT_TRANSFER_AT=replacement_owned \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app < "$TEST_ROOT/malformed-input" \
+    >/dev/null 2>&1
+  set -e
+  journal="$state/response_relaunch_transaction"
+  case "$malformed" in
+    extra) printf 'unexpected=value\n' >> "$journal" ;;
+    missing) sed -i '$d' "$journal" ;;
+    bad_phase) sed -i 's/^phase=.*/phase=unknown/' "$journal" ;;
+  esac
+  if PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+      REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%99 \
+      NEW_WINDOW_COUNT="$TEST_ROOT/malformed-$malformed-count" \
+      "$ROOT_DIR/bin/sgt-respond" "$task" app < "$TEST_ROOT/malformed-input" \
+      >/dev/null 2>&1; then
+    printf 'malformed journal %s was accepted\n' "$malformed" >&2
+    exit 1
+  fi
+  [[ "$(cat "$TEST_ROOT/malformed-$malformed-count")" == 1 ]]
+done
+
+# Nonempty inventory output containing any blank row is malformed, not an empty
+# replacement window. Both public CLIs must refuse before new-window for leading,
+# interior, and trailing blank rows.
+for inventory_shape in leading interior trailing; do
+  read -r state wt <<<"$(make_worktree respond-blank-$inventory_shape)"
+  task="task-respond-blank-$inventory_shape"
+  setup_orphan "$state" "$wt"
+  pane_state="$TEST_ROOT/respond-blank-$inventory_shape-panes"
+  printf '%%70|unrelated\n' > "$pane_state"
+  set +e
+  blank_output="$(printf 'blank inventory response' | PATH="$fake_bin:$PATH" \
+    SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" \
+    PANE_ALIVE=0 NEW_PANE=%98 TMUX_PANE_STATE="$pane_state" \
+    INVENTORY_SHAPE="$inventory_shape" \
+    NEW_WINDOW_COUNT="$TEST_ROOT/respond-blank-$inventory_shape-count" \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app 2>&1)"
+  blank_status=$?
+  set -e
+  [[ "$blank_status" -ne 0 &&
+     "$blank_output" == *'Could not enumerate tmux panes'* ]]
+  [[ ! -e "$TEST_ROOT/respond-blank-$inventory_shape-count" ]]
+  [[ "$(cat "$pane_state")" == '%70|unrelated' ]]
+
+  read -r state wt <<<"$(make_worktree recover-blank-$inventory_shape)"
+  task="task-recover-blank-$inventory_shape"
+  setup_stall "$state" "$wt"
+  pane_state="$TEST_ROOT/recover-blank-$inventory_shape-panes"
+  printf '%%70|unrelated\n' > "$pane_state"
+  set +e
+  blank_output="$(PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+    SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" PANE_ALIVE=1 NEW_PANE=%98 \
+    TMUX_PANE_STATE="$pane_state" INVENTORY_SHAPE="$inventory_shape" \
+    NEW_WINDOW_COUNT="$TEST_ROOT/recover-blank-$inventory_shape-count" \
+    "$ROOT_DIR/bin/sgt-recover" "$task" app 2>&1)"
+  blank_status=$?
+  set -e
+  [[ "$blank_status" -ne 0 &&
+     "$blank_output" == *'could not enumerate exact tmux pane inventory'* ]]
+  [[ ! -e "$TEST_ROOT/recover-blank-$inventory_shape-count" ]]
+  [[ "$(cat "$pane_state")" == '%70|unrelated' ]]
+done
+
+# A real SIGKILL after tmux creates the replacement leaves the durable spawning
+# intent behind. The exact pane is discovered by its nonce-derived window and
+# adopted; retry must not execute new-window a second time. Its first launch has
+# a genuinely zero-byte successful inventory and proves that case still spawns.
+read -r state wt <<<"$(make_worktree sigkill-spawn)"
+task="task-sigkill-spawn"
+setup_orphan "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+printf 'uncommitted payload survives abrupt transfer\n' > "$wt/uncommitted.txt"
+content_before="$(worktree_content_hash "$wt")"
+printf 'resume after abrupt death' > "$TEST_ROOT/sigkill-input"
+set +e
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/sigkill-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/sigkill-new-window-count" \
+  KILL_RESPOND_AFTER_SPAWN=1 \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app \
+  < "$TEST_ROOT/sigkill-input" >/dev/null 2>&1
+sigkill_status=$?
+set -e
+[[ "$sigkill_status" -ne 0 && -s "$state/response_relaunch_transaction" ]]
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/sigkill-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/sigkill-new-window-count" \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app \
+  < "$TEST_ROOT/sigkill-input" >/dev/null 2>&1 || {
+  printf 'SIGKILLed replacement was not adopted on exact retry\n' >&2
+  exit 1
+}
+[[ "$(cat "$TEST_ROOT/sigkill-new-window-count")" == 1 ]]
+[[ "$(cat "$state/pane")" == '%98' ]]
+[[ "$(sed -n 's/^phase=//p' "$state/response_relaunch_transaction")" == acked ]]
+[[ "$(worktree_content_hash "$wt")" == "$content_before" ]]
+[[ "$(cat "$wt/uncommitted.txt")" == 'uncommitted payload survives abrupt transfer' ]]
+
+# A crash after the canonical delivery handshake but before journal ack must
+# resume the already accepted immutable target.  The worker may have begun its
+# action lease in that interval; retry still advances transaction A to acked
+# rather than fencing A and allocating a successor B.
+read -r state wt <<<"$(make_worktree post-handshake-crash)"
+task="task-post-handshake-crash"
+setup_orphan "$state" "$wt"
+printf 'resume immutable accepted target' > "$TEST_ROOT/post-handshake-input"
+set +e
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/post-handshake-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/post-handshake-window-count" \
+  CREATE_ACTION_LEASE_ON_HANDSHAKE=1 SGT_TEST_HOOKS=1 \
+  SGT_TEST_INTERRUPT_TRANSFER_AT=handshake_complete \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app \
+  < "$TEST_ROOT/post-handshake-input" >/dev/null 2>&1
+post_handshake_status=$?
+set -e
+[[ "$post_handshake_status" -ne 0 ]] || {
+  printf 'POST_HANDSHAKE_INTERRUPT_DID_NOT_FIRE\n' >&2
+  exit 1
+}
+accepted_notification="$(cat "$state/notification_id")"
+accepted_target="$(cat "$state/notification_target")"
+[[ "$(cat "$state/notifications/$accepted_notification/action_lease")" == \
+  "$accepted_target" ]]
+[[ "$(cat "$state/notifications/$accepted_notification/targets/$accepted_target/handshake_complete")" == \
+  "$accepted_notification|$accepted_target" ]]
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/post-handshake-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/post-handshake-window-count" \
+  CREATE_ACTION_LEASE_ON_HANDSHAKE=1 \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app \
+  < "$TEST_ROOT/post-handshake-input" >/dev/null 2>&1 || {
+  printf 'POST_HANDSHAKE_RETRY_DID_NOT_RESUME_ACCEPTED_TARGET\n' >&2
+  exit 1
+}
+[[ "$(cat "$state/notification_id")" == "$accepted_notification" ]]
+[[ "$(cat "$state/notification_target")" == "$accepted_target" ]]
+[[ "$(cat "$TEST_ROOT/post-handshake-window-count")" == 1 ]]
+[[ "$(sed -n 's/^phase=//p' "$state/response_relaunch_transaction")" == acked ]]
+
+# The same post-handshake crash boundary is shared by sgt-recover.  Retry must
+# acknowledge its installed transaction before inspecting the worker's newly
+# accepted action lease.
+read -r state wt <<<"$(make_worktree recover-post-handshake-crash)"
+task="task-recover-post-handshake-crash"
+setup_stall "$state" "$wt"
+set +e
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=1 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/recover-post-handshake-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/recover-post-handshake-window-count" \
+  CREATE_ACTION_LEASE_ON_HANDSHAKE=1 SGT_TEST_HOOKS=1 \
+  SGT_TEST_INTERRUPT_RECOVER_AT=handshake_complete \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
+recover_post_handshake_status=$?
+set -e
+[[ "$recover_post_handshake_status" -ne 0 ]]
+recover_accepted_notification="$(cat "$state/notification_id")"
+recover_accepted_target="$(cat "$state/notification_target")"
+[[ "$(cat "$state/notifications/$recover_accepted_notification/action_lease")" == \
+  "$recover_accepted_target" ]]
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=1 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/recover-post-handshake-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/recover-post-handshake-window-count" \
+  CREATE_ACTION_LEASE_ON_HANDSHAKE=1 \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
+[[ "$(cat "$state/notification_id")" == "$recover_accepted_notification" ]]
+[[ "$(cat "$state/notification_target")" == "$recover_accepted_target" ]]
+[[ "$(cat "$TEST_ROOT/recover-post-handshake-window-count")" == 1 ]]
+[[ "$(sed -n 's/^phase=//p' "$state/response_relaunch_transaction")" == acked ]]
+
+# Recover must distinguish a failed inventory command from an empty inventory.
+# After an abrupt death leaves an authenticated pane live, enumeration failure
+# cannot authorize a second new-window; a later exact retry adopts the first.
+# Its first launch also covers genuine zero-byte successful inventory.
+read -r state wt <<<"$(make_worktree recover-inventory-failure)"
+task="task-recover-inventory-failure"
+setup_stall "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+set +e
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/recover-inventory-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/recover-inventory-window-count" \
+  SGT_TEST_HOOKS=1 SGT_TEST_INTERRUPT_RECOVER_AT=spawned \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
+inventory_kill_status=$?
+set -e
+[[ "$inventory_kill_status" -ne 0 ]]
+[[ "$(cat "$TEST_ROOT/recover-inventory-window-count")" == 1 ]]
+inventory_before="$(cat "$TEST_ROOT/recover-inventory-pane-state")"
+set +e
+inventory_failure_output="$(PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/recover-inventory-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/recover-inventory-window-count" FAIL_LIST_PANES=1 \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app 2>&1)"
+inventory_failure_status=$?
+set -e
+[[ "$inventory_failure_status" -ne 0 &&
+   "$inventory_failure_output" == *'could not enumerate exact tmux pane inventory'* ]]
+[[ "$(cat "$TEST_ROOT/recover-inventory-window-count")" == 1 ]]
+[[ "$(cat "$TEST_ROOT/recover-inventory-pane-state")" == "$inventory_before" ]]
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/recover-inventory-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/recover-inventory-window-count" \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
+[[ "$(cat "$TEST_ROOT/recover-inventory-window-count")" == 1 ]]
+[[ "$(cat "$state/pane")" == %98 ]]
+[[ "$(sed -n 's/^phase=//p' "$state/response_relaunch_transaction")" == acked ]]
+
+# Concurrent exact retries serialize through acknowledgement and the follower
+# joins the immutable acked journal instead of spawning or delivering twice.
+read -r state wt <<<"$(make_worktree concurrent-retry)"
+task="task-concurrent-retry"
+setup_orphan "$state" "$wt"
+printf 'one concurrent response' > "$TEST_ROOT/concurrent-input"
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/concurrent-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/concurrent-window-count" \
+  ACK_GATE_FILE="$TEST_ROOT/concurrent-ack-gate" SGT_NOTIFICATION_ACK_TIMEOUT=10 \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app \
+  < "$TEST_ROOT/concurrent-input" > "$TEST_ROOT/concurrent-first.out" 2>&1 &
+first_pid=$!
+for _ in $(seq 1 100); do
+  [[ -s "$TEST_ROOT/concurrent-window-count" && -e "$state/response.lock" ]] && break
+  sleep 0.05
+done
+[[ -s "$TEST_ROOT/concurrent-window-count" && -e "$state/response.lock" ]]
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/concurrent-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/concurrent-window-count" \
+  ACK_GATE_FILE="$TEST_ROOT/concurrent-ack-gate" SGT_NOTIFICATION_ACK_TIMEOUT=10 \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app \
+  < "$TEST_ROOT/concurrent-input" > "$TEST_ROOT/concurrent-second.out" 2>&1 &
+second_pid=$!
+sleep 0.2
+kill -0 "$first_pid"
+kill -0 "$second_pid"
+touch "$TEST_ROOT/concurrent-ack-gate"
+wait "$first_pid"
+wait "$second_pid"
+[[ "$(cat "$TEST_ROOT/concurrent-window-count")" == 1 ]]
+grep -Fq 'joined acknowledged worker relaunch' "$TEST_ROOT/concurrent-second.out"
+[[ "$(sed -n 's/^phase=//p' "$state/response_relaunch_transaction")" == acked ]]
+
+# The action-lease successor binding is shared across CLIs. A SIGKILLed recover
+# after fencing can be reconciled orphaned and resumed by sgt-respond without
+# minting a different successor generation.
+read -r state wt <<<"$(make_worktree cross-cli)"
+task="task-cross-cli"
+setup_stall "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+set +e
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 SGT_TEST_HOOKS=1 \
+  SGT_TEST_INTERRUPT_RECOVER_AT=fenced \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
+cross_recover_status=$?
+set -e
+[[ "$cross_recover_status" -ne 0 ]]
+bound_successor="$(sed -n 's/^successor_notification=//p' \
+  "$state/notifications/$NOTIFY/successor_binding")"
+[[ "$bound_successor" =~ ^[a-f0-9]{32}$ ]]
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
+[[ "$(cat "$state/notification_id")" == "$bound_successor" ]]
+grep -Fq "new_notification=$bound_successor" \
+  "$state/notifications/$NOTIFY/ownership_transition"
+
+read -r state wt <<<"$(make_worktree cross-cli-spawn)"
+task="task-cross-cli-spawn"
+setup_stall "$state" "$wt"
+install_accepted_turn "$state" "$wt"
+set +e
+PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+  REPO_STATE_DIR="$state" PANE_ALIVE=0 NEW_PANE=%98 \
+  TMUX_PANE_STATE="$TEST_ROOT/cross-spawn-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/cross-spawn-window-count" \
+  SGT_TEST_HOOKS=1 SGT_TEST_INTERRUPT_RECOVER_AT=spawned \
+  "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
+cross_spawn_status=$?
+set -e
+[[ "$cross_spawn_status" -ne 0 ]]
+spawn_successor="$(sed -n 's/^notification_id=//p' \
+  "$state/response_relaunch_transaction")"
+printf 'resume spawned pane across cli' | PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 REPO_STATE_DIR="$state" \
+  PANE_ALIVE=0 NEW_PANE=%98 TMUX_PANE_STATE="$TEST_ROOT/cross-spawn-pane-state" \
+  NEW_WINDOW_COUNT="$TEST_ROOT/cross-spawn-window-count" \
+  "$ROOT_DIR/bin/sgt-respond" "$task" app >/dev/null 2>&1
+[[ "$(cat "$TEST_ROOT/cross-spawn-window-count")" == 1 ]]
+[[ "$(cat "$state/notification_id")" == "$spawn_successor" ]]
+[[ "$(sed -n 's/^phase=//p' "$state/response_relaunch_transaction")" == acked ]]
+
+# Real tmux 3.4+: the public CLIs create option-stamped panes and adopt them
+# after an actual SIGKILL without relying on rendered pane_start_command.
+if command -v /usr/bin/tmux >/dev/null 2>&1 &&
+    [[ "$(/usr/bin/tmux -V)" == 'tmux 3.4'* ]]; then
+  real_socket="sgt-lease-real-$$"
+  real_bin="$TEST_ROOT/real-bin"
+  mkdir -p "$real_bin"
+  cat > "$real_bin/tmux" <<EOF
+#!/usr/bin/env bash
+exec /usr/bin/tmux -L $real_socket "\$@"
+EOF
+  cat > "$real_bin/opencode" <<'EOF'
+#!/usr/bin/env bash
+exec sleep 60
+EOF
+  chmod +x "$real_bin/tmux" "$real_bin/opencode"
+
+  read -r state wt <<<"$(make_worktree real-respond)"
+  task="task-real-respond"
+  setup_orphan "$state" "$wt"
+  printf 'real-sgt\n' > "$state/tmux_session"
+  printf 'real/respond\n' > "$state/window_name"
+  printf '%%99999\n' > "$state/pane"
+  printf '0|%%99999|99999|1|old-worker\n' > "$state/pane_identity"
+  PATH="$real_bin:/usr/bin:$fake_bin" tmux new-session -d -s real-sgt -n base 'sleep 60'
+  printf 'real tmux response' > "$TEST_ROOT/real-respond-input"
+  set +e
+  PATH="$real_bin:/usr/bin:$fake_bin" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    SGT_TEST_HOOKS=1 SGT_TEST_KILL_TRANSFER_AT=replacement_spawned \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app < "$TEST_ROOT/real-respond-input" \
+    >/dev/null 2>&1
+  real_respond_killed=$?
+  set -e
+  [[ "$real_respond_killed" -ne 0 ]]
+  (
+    for _ in $(seq 1 200); do
+      notification_id="$(cat "$state/notification_id" 2>/dev/null || true)"
+      nonce="$(cat "$state/notification_target" 2>/dev/null || true)"
+      identity="$(cat "$state/pane_identity" 2>/dev/null || true)"
+      if [[ "$notification_id" =~ ^[a-f0-9]{32}$ && "$nonce" =~ ^[a-f0-9]{32}$ &&
+            "$identity" == 0\|%* ]]; then
+        target_dir="$state/notifications/$notification_id/targets/$nonce"
+        token="$notification_id|$nonce"
+        mkdir -p "$wt/.sergeant-notification-acks" \
+          "$wt/.sergeant-notification-accepts" "$target_dir"
+        printf '%s\n' "$token" > "$wt/.sergeant-notification-acks/$nonce"
+        printf '%s\n' "$token" > "$wt/.sergeant-notification-accepts/$nonce"
+        printf '%s\n' "$token" > "$target_dir/accepted"
+        printf '%s\n' "$token" > "$target_dir/delivered"
+        printf '%s\n' "$identity" > "$state/notification_delivered_pane_identity"
+        printf '%s\n' "$notification_id" > "$state/notification_delivered"
+        exit 0
+      fi
+      sleep 0.05
+    done
+    exit 1
+  ) &
+  real_ack_pid=$!
+  PATH="$real_bin:/usr/bin:$fake_bin" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    SGT_NOTIFICATION_ACK_TIMEOUT=10 \
+    "$ROOT_DIR/bin/sgt-respond" "$task" app < "$TEST_ROOT/real-respond-input" \
+    >/dev/null 2>&1
+  wait "$real_ack_pid"
+  real_pane="$(cat "$state/pane")"
+  real_token="$(cut -d '|' -f3 "$state/response_successor_notification")"
+  [[ "$(PATH="$real_bin:/usr/bin:$fake_bin" tmux display-message -p -t "$real_pane" \
+    '#{@sergeant_replacement_token}|#{@sergeant_replacement_role}')" == \
+    "$real_token|worker:opencode" ]]
+  [[ "$(PATH="$real_bin:/usr/bin:$fake_bin" tmux list-panes -a -F '#{window_name}' | \
+    grep -c '^real/respond-resume-')" == 1 ]]
+
+  read -r state wt <<<"$(make_worktree real-recover)"
+  task="task-real-recover"
+  setup_stall "$state" "$wt"
+  printf 'real-sgt\n' > "$state/tmux_session"
+  printf 'real/recover\n' > "$state/window_name"
+  old_real_pane="$(PATH="$real_bin:/usr/bin:$fake_bin" tmux list-panes -t real-sgt:=base -F '#{pane_id}')"
+  printf '%s\n' "$old_real_pane" > "$state/pane"
+  PATH="$real_bin:/usr/bin:$fake_bin" tmux display-message -p -t "$old_real_pane" \
+    '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command}' \
+    > "$state/pane_identity"
+  set +e
+  PATH="$real_bin:/usr/bin:$fake_bin" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    SGT_TEST_HOOKS=1 SGT_TEST_INTERRUPT_RECOVER_AT=spawned \
+    "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
+  real_recover_killed=$?
+  set -e
+  [[ "$real_recover_killed" -ne 0 ]]
+  (
+    for _ in $(seq 1 200); do
+      notification_id="$(cat "$state/notification_id" 2>/dev/null || true)"
+      nonce="$(cat "$state/notification_target" 2>/dev/null || true)"
+      identity="$(cat "$state/pane_identity" 2>/dev/null || true)"
+      if [[ "$notification_id" =~ ^[a-f0-9]{32}$ && "$nonce" =~ ^[a-f0-9]{32}$ &&
+            "$identity" == 0\|%* && "$identity" != *"|$old_real_pane|"* ]]; then
+        target_dir="$state/notifications/$notification_id/targets/$nonce"
+        token="$notification_id|$nonce"
+        mkdir -p "$wt/.sergeant-notification-acks" \
+          "$wt/.sergeant-notification-accepts" "$target_dir"
+        printf '%s\n' "$token" > "$wt/.sergeant-notification-acks/$nonce"
+        printf '%s\n' "$token" > "$wt/.sergeant-notification-accepts/$nonce"
+        printf '%s\n' "$token" > "$target_dir/accepted"
+        printf '%s\n' "$token" > "$target_dir/delivered"
+        printf '%s\n' "$identity" > "$state/notification_delivered_pane_identity"
+        printf '%s\n' "$notification_id" > "$state/notification_delivered"
+        exit 0
+      fi
+      sleep 0.05
+    done
+    exit 1
+  ) &
+  real_recover_ack_pid=$!
+  PATH="$real_bin:/usr/bin:$fake_bin" SERGEANT_FLEET="$fleet" SGT_WIKI_DISABLED=1 \
+    SGT_NOTIFICATION_ACK_TIMEOUT=10 \
+    "$ROOT_DIR/bin/sgt-recover" "$task" app >/dev/null 2>&1
+  wait "$real_recover_ack_pid"
+  recovered_real_pane="$(cat "$state/pane")"
+  recovery_token="$(cut -d '|' -f2 "$state/recovery_successor_notification")"
+  [[ "$(PATH="$real_bin:/usr/bin:$fake_bin" tmux display-message -p -t "$recovered_real_pane" \
+    '#{@sergeant_replacement_token}|#{@sergeant_replacement_role}')" == \
+    "$recovery_token|worker:opencode" ]]
+  [[ "$(PATH="$real_bin:/usr/bin:$fake_bin" tmux list-panes -a -F '#{window_name}' | \
+    grep -c '^real/recover-resume-')" == 1 ]]
+  PATH="$real_bin:/usr/bin:$fake_bin" tmux kill-server
+fi
 
 printf 'action-lease convergence before refusal: ok\n'

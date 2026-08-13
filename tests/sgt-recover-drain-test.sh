@@ -2,6 +2,7 @@
 # Tests for sgt-recover drain admission — stall recovery refused when drained.
 
 set -euo pipefail
+export FAKE_TMUX_OWNER_PID="$$"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
@@ -34,6 +35,7 @@ cat > "$fake_bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${TMUX_LOG:-/dev/null}"
 case "$1" in
+  list-panes) exit 0 ;;
   display-message)
     [[ "${PANE_ALIVE:-1}" == 1 ]] || exit 1
     target=""
@@ -42,9 +44,18 @@ case "$1" in
       [[ "$previous" == -t ]] && target="$arg"
       previous="$arg"
     done
+    if [[ "$*" == *'@sergeant_replacement_token'* && "$target" == "${NEW_PANE:-%99}" ]]; then
+      owner_pid="$FAKE_TMUX_OWNER_PID"
+      owner_start="$(awk '{ print $22 }' "/proc/$owner_pid/stat")"
+      printf '0|%s|%s|bash|%s|%s|%s|proc:%s\n' "$target" "$owner_pid" \
+        "$(cat "$EXPECTED_WORKER/test_spawn_token")" "$(cat "$EXPECTED_WORKER/test_spawn_role")" \
+        "$owner_pid" "$owner_start"
+      exit 0
+    fi
     pane_identity="${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
     if [[ "$target" == "${NEW_PANE:-%99}" ]]; then
-      pane_identity="0|$target|9999|654321|sgt-interactive-worker:$EXPECTED_WORKER"
+      start_command="$(cat "$EXPECTED_WORKER/test_spawn_command" 2>/dev/null || true)"
+      pane_identity="0|$target|$FAKE_TMUX_OWNER_PID|654321|$start_command"
       if [[ "${AUTO_DELIVER:-1}" == 1 && -s "$EXPECTED_WORKER/notification_id" ]]; then
         notification_id="$(cat "$EXPECTED_WORKER/notification_id")"
         notification_worktree="$(cat "$EXPECTED_WORKER/worktree")"
@@ -67,6 +78,12 @@ case "$1" in
     ;;
   new-window)
     [[ "${FAIL_WINDOW:-0}" == 0 ]] || exit 7
+    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch \([a-f0-9]\{32\}\) .*/\1/p')"
+    spawn_role="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch [a-f0-9]\{32\} \(worker:[A-Za-z0-9._-]*\) .*/\1/p')"
+    printf '%s\n' "$spawn_token" > "$EXPECTED_WORKER/test_spawn_token"
+    printf '%s\n' "$spawn_role" > "$EXPECTED_WORKER/test_spawn_role"
+    for start_command in "$@"; do :; done
+    printf '%s\n' "$start_command" > "$EXPECTED_WORKER/test_spawn_command"
     printf '%s\n' "${NEW_PANE:-%99}"
     ;;
   kill-pane) exit 0 ;;

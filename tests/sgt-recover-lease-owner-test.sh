@@ -14,6 +14,7 @@
 #     live owner, a reused pane id, or an unprovable owner must still fail closed.
 
 set -euo pipefail
+export FAKE_TMUX_OWNER_PID="$$"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
@@ -47,6 +48,7 @@ cat > "$fake_bin/tmux" <<'TMUX'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${TMUX_LOG:-/dev/null}"
 case "$1" in
+  list-panes) exit 0 ;;
   display-message)
     target=""
     previous=""
@@ -54,13 +56,22 @@ case "$1" in
       [[ "$previous" == -t ]] && target="$arg"
       previous="$arg"
     done
+    if [[ "$*" == *'@sergeant_replacement_token'* && "$target" == "%99" ]]; then
+      owner_pid="$FAKE_TMUX_OWNER_PID"
+      owner_start="$(awk '{ print $22 }' "/proc/$owner_pid/stat")"
+      printf '0|%%99|%s|bash|%s|%s|%s|proc:%s\n' "$owner_pid" \
+        "$(cat "$REPO_STATE_DIR/test_spawn_token")" "$(cat "$REPO_STATE_DIR/test_spawn_role")" \
+        "$owner_pid" "$owner_start"
+      exit 0
+    fi
     case "$target" in
       %41)
         [[ "${LEASE_OWNER_ALIVE:-0}" == 1 ]] || exit 1
         printf '%s\n' "${LEASE_OWNER_IDENTITY:-0|%41|4141|111111|lease-owner}"
         ;;
       %99)
-        printf '0|%%99|9999|654321|relaunched\n'
+        start_command="$(cat "$REPO_STATE_DIR/test_spawn_command" 2>/dev/null || true)"
+        printf '0|%%99|%s|654321|%s\n' "$FAKE_TMUX_OWNER_PID" "$start_command"
         if [[ -s "$REPO_STATE_DIR/notification_id" ]]; then
           notification_id="$(cat "$REPO_STATE_DIR/notification_id")"
           nonce="$(cat "$REPO_STATE_DIR/notification_target" 2>/dev/null || true)"
@@ -77,7 +88,15 @@ case "$1" in
         ;;
     esac
     ;;
-  new-window) printf '%%99\n' ;;
+  new-window)
+    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch \([a-f0-9]\{32\}\) .*/\1/p')"
+    spawn_role="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch [a-f0-9]\{32\} \(worker:[A-Za-z0-9._-]*\) .*/\1/p')"
+    printf '%s\n' "$spawn_token" > "$REPO_STATE_DIR/test_spawn_token"
+    printf '%s\n' "$spawn_role" > "$REPO_STATE_DIR/test_spawn_role"
+    for start_command in "$@"; do :; done
+    printf '%s\n' "$start_command" > "$REPO_STATE_DIR/test_spawn_command"
+    printf '%%99\n'
+    ;;
   kill-pane)
     target_pane=""
     previous=""
@@ -177,7 +196,7 @@ while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid - 1)); done
 # ── 1. An absent gate-generation file produces no raw shell error ─────────────
 
 read -r state wt <<<"$(make_stalled nogen)"
-task=task-nogen
+task="task-nogen"
 rm -f "$wt/.sergeant-gate-generation"
 set +e
 nogen_output="$(recover "$state" "TMUX_LOG=$TEST_ROOT/nogen.log" 2>&1)"
@@ -201,7 +220,7 @@ fi
 # The same must hold on the escalation path, which is what actually reads the
 # generation in order to advance it.
 read -r state wt <<<"$(make_stalled nogen-escalate)"
-task=task-nogen-escalate
+task="task-nogen-escalate"
 rm -f "$wt/.sergeant-gate-generation"
 install_lease "$state" 4242   # owner pid is the live-ish stalled pid; unprovable
 set +e
@@ -222,7 +241,7 @@ fi
 # The recorded owner pane no longer resolves AND its recorded process is gone.
 
 read -r state wt <<<"$(make_stalled deadowner)"
-task=task-deadowner
+task="task-deadowner"
 printf '1\n' > "$wt/.sergeant-gate-generation"
 install_lease "$state" "$dead_pid"
 dead_output="$(recover "$state" "TMUX_LOG=$TEST_ROOT/dead.log" \
@@ -255,7 +274,7 @@ grep -Fq "$dead_pid" "$state/notifications/$NOTIFY/action_lease_abandoned"
 # ── 3. A live lease owner still fails closed ─────────────────────────────────
 
 read -r state wt <<<"$(make_stalled liveowner)"
-task=task-liveowner
+task="task-liveowner"
 printf '1\n' > "$wt/.sergeant-gate-generation"
 sleep 120 &
 live_pid=$!
@@ -292,7 +311,7 @@ wait "$live_pid" 2>/dev/null || true
 # The recorded pane id resolves, but to a different pane/process than recorded.
 
 read -r state wt <<<"$(make_stalled reused)"
-task=task-reused
+task="task-reused"
 printf '1\n' > "$wt/.sergeant-gate-generation"
 install_lease "$state" "$dead_pid"
 set +e
@@ -302,7 +321,8 @@ reused_output="$(recover "$state" "TMUX_LOG=$TEST_ROOT/reused.log" \
 reused_status=$?
 set -e
 [[ "$reused_status" -ne 0 ]] || {
-  printf 'recovery proceeded although the lease owner pane id was reused\n' >&2
+  printf 'recovery proceeded although the lease owner pane id was reused:\n%s\n' \
+    "$reused_output" >&2
   exit 1
 }
 [[ -z "$(cat "$TEST_ROOT/reused-kill.log" 2>/dev/null || true)" ]]
@@ -313,7 +333,7 @@ set -e
 # Death is not provable, so recovery must not proceed.
 
 read -r state wt <<<"$(make_stalled unprovable)"
-task=task-unprovable
+task="task-unprovable"
 printf '1\n' > "$wt/.sergeant-gate-generation"
 sleep 120 &
 lingering_pid=$!
@@ -326,7 +346,8 @@ set -e
 kill "$lingering_pid" 2>/dev/null || true
 wait "$lingering_pid" 2>/dev/null || true
 [[ "$unprovable_status" -ne 0 ]] || {
-  printf 'recovery proceeded although the lease owner process is still running\n' >&2
+  printf 'recovery proceeded although the lease owner process is still running:\n%s\n' \
+    "$unprovable_output" >&2
   exit 1
 }
 [[ -z "$(cat "$TEST_ROOT/unprovable-kill.log" 2>/dev/null || true)" ]]
@@ -336,7 +357,7 @@ wait "$lingering_pid" 2>/dev/null || true
 # ── 6. A malformed owner identity fails closed ───────────────────────────────
 
 read -r state wt <<<"$(make_stalled malformed)"
-task=task-malformed
+task="task-malformed"
 printf '1\n' > "$wt/.sergeant-gate-generation"
 install_lease "$state" "$dead_pid"
 printf 'not-an-identity\n' > "$state/notifications/$NOTIFY/targets/$LEASE/pane_identity"
@@ -346,7 +367,8 @@ malformed_status_output="$(recover "$state" "TMUX_LOG=$TEST_ROOT/malformed.log" 
 malformed_status=$?
 set -e
 [[ "$malformed_status" -ne 0 ]] || {
-  printf 'recovery proceeded on a malformed lease owner identity\n' >&2
+  printf 'recovery proceeded on a malformed lease owner identity:\n%s\n' \
+    "$malformed_status_output" >&2
   exit 1
 }
 [[ "$(cat "$state/pane")" == "%42" ]]

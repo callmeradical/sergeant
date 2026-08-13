@@ -5,6 +5,8 @@ _SGT_RESPONSE_LOCK_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-bash-version.sh
 source "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/_sgt-bash-version.sh"
 _sgt_require_running_bash || return 1
+# shellcheck source=bin/_sgt-process-identity.sh
+source "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/_sgt-process-identity.sh"
 
 # ── Response archive format ──────────────────────────────────────────────────
 # A consumed response is recorded as a directory of four fields: `body` (the
@@ -69,97 +71,225 @@ _sgt_response_archive_entry_matches() {
     "$proof_status" == "$applied_status" ]]
 }
 
+_sgt_response_lock_record_pid() {
+  local record="$1"
+  _sgt_response_lock_record_parse "$record" || return 1
+  printf '%s\n' "$_SGT_LOCK_RECORD_PID"
+}
+
+_sgt_response_lock_record_parse() {
+  local record="$1" canonical
+  [[ "$(printf '%s\n' "$record" | awk 'END { print NR }')" == 3 ]] || return 1
+  _SGT_LOCK_RECORD_PID="$(printf '%s\n' "$record" | sed -n '1s/^pid=//p')"
+  _SGT_LOCK_RECORD_START="$(printf '%s\n' "$record" | sed -n '2s/^start=//p')"
+  _SGT_LOCK_RECORD_NONCE="$(printf '%s\n' "$record" | sed -n '3s/^nonce=//p')"
+  [[ "$_SGT_LOCK_RECORD_PID" =~ ^[1-9][0-9]*$ &&
+     ( "$_SGT_LOCK_RECORD_START" =~ ^proc:[0-9]+$ ||
+       "$_SGT_LOCK_RECORD_START" == ps:* ||
+       "$_SGT_LOCK_RECORD_START" == portable ) &&
+     "$_SGT_LOCK_RECORD_START" != ps: &&
+     "$_SGT_LOCK_RECORD_NONCE" =~ ^[a-f0-9]{32}$ ]] || return 1
+  canonical="$(printf 'pid=%s\nstart=%s\nnonce=%s' "$_SGT_LOCK_RECORD_PID" \
+    "$_SGT_LOCK_RECORD_START" "$_SGT_LOCK_RECORD_NONCE")"
+  [[ "$record" == "$canonical" ]]
+}
+
+_sgt_response_lock_record_live() {
+  local record="$1" pid expected current presence_status
+  pid="$(_sgt_response_lock_record_pid "$record")" || return 1
+  _sgt_response_lock_record_parse "$record" || return 1
+  expected="$_SGT_LOCK_RECORD_START"
+  # Historical ps:lstart records are only second-resolution.  They remain
+  # schema-valid for compatibility, but can never prove that a PID was reused;
+  # preserve them as unverifiable ownership rather than reclaiming the lock.
+  [[ "$expected" != ps:* ]] || return 2
+  if _sgt_process_pid_presence "$pid"; then
+    # A portable record deliberately has no process-birth identity.  A live PID
+    # can therefore never be distinguished from a reused PID by another
+    # invocation and remains unverifiable ownership.
+    [[ "$expected" != portable ]] || return 2
+  else
+    presence_status=$?
+    [[ "$presence_status" -eq 1 ]] && return 1
+    return 2
+  fi
+  current="$(_sgt_process_start_token "$pid")" || return 2
+  [[ "$current" == "$expected" ]]
+}
+
+_sgt_response_lock_record_for_pid() {
+  local pid="$1" start nonce
+  start="$(_sgt_process_start_token "$pid" 2>/dev/null || true)"
+  [[ -n "$start" ]] || start=portable
+  nonce="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  [[ "$nonce" =~ ^[a-f0-9]{32}$ ]] || return 1
+  printf 'pid=%s\nstart=%s\nnonce=%s\n' "$pid" "$start" "$nonce"
+}
+
+_sgt_response_lock_record_is_this_process() {
+  local record="$1" acquisition="${_SGT_RESPONSE_LOCK_OWNER_RECORD:-}"
+  local pid expected
+  [[ -n "$acquisition" && "$record" == "$acquisition" ]] || return 1
+  _sgt_response_lock_record_parse "$acquisition" || return 1
+  pid="$_SGT_LOCK_RECORD_PID"
+  expected="$_SGT_LOCK_RECORD_START"
+  [[ "$pid" == "$$" ]] || return 1
+  # The unforgeable part of portable ownership within this invocation is the
+  # exact random acquisition record retained in memory.  Never attempt to
+  # reconstruct it from PID observations.
+  [[ "$expected" != portable ]] || return 0
+  [[ "$expected" == "$(_sgt_process_start_token "$$")" ]]
+}
+
+_sgt_response_lock_transition() {
+  local lock_path="$1" candidate="$2" expected="$3"
+  local gate_path="${lock_path}.transition"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/_sgt-response-lock-transition.py" \
+      "$lock_path" "$candidate" "$expected" >/dev/null 2>&1
+    return
+  fi
+  command -v flock >/dev/null 2>&1 || return 2
+  (
+    local layout observed entries
+    umask 077
+    [[ ! -L "$gate_path" ]] || return 2
+    : >> "$gate_path" || return 2
+    [[ -f "$gate_path" && ! -L "$gate_path" ]] || return 2
+    exec 19>> "$gate_path" || return 2
+    flock -x 19 || return 2
+    if [[ -d "$lock_path" ]]; then
+      layout="directory"
+      entries="$(find "$lock_path" -mindepth 1 -maxdepth 1 -print 2>/dev/null || true)"
+      [[ "$entries" == "$lock_path/pid" ]] || return 2
+      observed="$(cat "$lock_path/pid" 2>/dev/null || true)"
+    elif [[ -e "$lock_path" || -L "$lock_path" ]]; then
+      layout="file"
+      observed="$(cat "$lock_path" 2>/dev/null || readlink "$lock_path" 2>/dev/null || true)"
+    else
+      layout="absent"
+      observed=""
+    fi
+    if [[ "$expected" == --absent ]]; then
+      [[ "$layout" == absent ]] || return 3
+    else
+      [[ "$layout" != absent && "$observed" == "$expected" ]] || return 3
+      if [[ "$layout" == directory ]]; then
+        rm -f "$lock_path/pid" && rmdir "$lock_path" || return 2
+      else
+        rm -f "$lock_path" || return 2
+      fi
+    fi
+    ln "$candidate" "$lock_path" 2>/dev/null || return 2
+  )
+}
+
 _sgt_response_lock_acquire() {
   local repo_state="$1"
-  local lock_name="${2:-response.lock}"
-  local lock_path="$repo_state/$lock_name"
-  local candidate="$repo_state/.$lock_name.$$.$RANDOM.$RANDOM"
-  local candidate_name="${candidate##*/}"
-  local owner current_owner interval
+  local lock_path="$repo_state/${2:-response.lock}"
+  local candidate="$repo_state/.${2:-response.lock}.$$.$RANDOM.$RANDOM"
+  local owner current_owner interval timeout started owner_record owner_status
   interval="${SGT_RESPONSE_LOCK_INTERVAL:-0.01}"
-
-  if ! printf '%s\n' "$$" > "$candidate"; then
-    printf 'ERROR: Could not create response lock candidate: %s\n' "$candidate" >&2
-    return 1
-  fi
+  timeout="${SGT_RESPONSE_LOCK_TIMEOUT:-30}"
+  [[ "$timeout" =~ ^[0-9]+$ ]] || { printf 'ERROR: Invalid response lock timeout: %s\n' "$timeout" >&2; return 1; }
+  started=$SECONDS
+  owner_record="$(_sgt_response_lock_record_for_pid "$$")" || return 1
+  printf '%s\n' "$owner_record" > "$candidate" || return 1
 
   while true; do
+    if (( SECONDS - started >= timeout )); then
+      rm -f "$candidate"
+      printf 'ERROR: Timed out waiting for response lock: %s\n' "$lock_path" >&2
+      return 1
+    fi
     if [[ -d "$lock_path" ]]; then
       owner="$(cat "$lock_path/pid" 2>/dev/null || true)"
       if [[ -z "$owner" ]]; then
-        if [[ -n "$(ls -A "$lock_path" 2>/dev/null)" ]]; then
-          rm -f "$candidate"
-          printf 'ERROR: Response lock directory has no valid owner: %s\n' "$lock_path" >&2
-          return 1
-        fi
-        if [[ -z "$(find "$lock_path" -prune -mmin +0 -print 2>/dev/null)" ]]; then
-          sleep "$interval"
-          continue
-        fi
-      else
-        if [[ ! "$owner" =~ ^[0-9]+$ ]]; then
-          rm -f "$candidate"
-          printf 'ERROR: Response lock directory has an invalid owner: %s\n' "$lock_path" >&2
-          return 1
-        fi
-        if kill -0 "$owner" 2>/dev/null; then
-          sleep "$interval"
-          continue
-        fi
-      fi
-
-      current_owner="$(cat "$lock_path/pid" 2>/dev/null || true)"
-      if [[ "$current_owner" != "$owner" ]]; then
-        continue
-      fi
-      if [[ -n "$owner" ]] && ! rm -f "$lock_path/pid"; then
+        # The directory may have been atomically retired after the -d check.
+        # Only a still-present ownerless directory is ambiguous.
+        [[ -d "$lock_path" ]] || continue
         rm -f "$candidate"
-        printf 'ERROR: Could not remove stale response lock owner: %s\n' "$lock_path/pid" >&2
+        printf 'ERROR: Response lock directory has no authenticated owner: %s\n' "$lock_path" >&2
         return 1
       fi
-      if ! rmdir "$lock_path" 2>/dev/null; then
+      _sgt_response_lock_record_pid "$owner" >/dev/null || {
         rm -f "$candidate"
-        printf 'ERROR: Could not recover response lock directory: %s\n' "$lock_path" >&2
+        printf 'ERROR: Legacy or malformed response lock directory owner is ambiguous: %s\n' "$lock_path/pid" >&2
         return 1
-      fi
-      continue
-    fi
-
-    if [[ -e "$lock_path" || -L "$lock_path" ]]; then
-      owner="$(cat "$lock_path" 2>/dev/null || readlink "$lock_path" 2>/dev/null || true)"
-      if [[ -z "$owner" ]]; then
-        # Lock file disappeared between the -e check and the read (TOCTOU: just released).
-        # Retry; the next iteration will find the file gone and attempt ln.
-        continue
-      fi
-      if [[ ! "$owner" =~ ^[0-9]+$ ]]; then
-        rm -f "$candidate"
-        printf 'ERROR: Response lock has an invalid owner: %s\n' "$lock_path" >&2
-        return 1
-      fi
-      if kill -0 "$owner" 2>/dev/null; then
+      }
+      if _sgt_response_lock_record_live "$owner"; then
         sleep "$interval"
         continue
-      fi
-      current_owner="$(cat "$lock_path" 2>/dev/null || readlink "$lock_path" 2>/dev/null || true)"
-      if [[ "$current_owner" == "$owner" ]]; then
-        if ! rm -f "$lock_path"; then
+      else
+        owner_status=$?
+        if [[ "$owner_status" -ne 1 ]]; then
           rm -f "$candidate"
-          printf 'ERROR: Could not remove stale response lock: %s\n' "$lock_path" >&2
+          printf 'ERROR: Response lock owner liveness is unverifiable: %s\n' "$lock_path/pid" >&2
           return 1
         fi
       fi
-      continue
-    fi
-
-    if ln "$candidate" "$lock_path" 2>/dev/null; then
-      if [[ "$lock_path" -ef "$candidate" ]]; then
+      current_owner="$(cat "$lock_path/pid" 2>/dev/null || true)"
+      [[ "$current_owner" == "$owner" ]] || continue
+      if _sgt_response_lock_transition "$lock_path" "$candidate" "$owner"; then
         rm -f "$candidate"
         _SGT_RESPONSE_LOCK_DIR="$lock_path"
+        _SGT_RESPONSE_LOCK_OWNER_RECORD="$owner_record"
         return 0
+      else
+        owner_status=$?
+        [[ "$owner_status" -eq 3 ]] && continue
+        rm -f "$candidate"
+        return 1
       fi
-      rm -f "$lock_path/$candidate_name"
-    elif [[ ! -e "$lock_path" && ! -L "$lock_path" ]]; then
+    fi
+    if [[ -e "$lock_path" || -L "$lock_path" ]]; then
+      owner="$(cat "$lock_path" 2>/dev/null || readlink "$lock_path" 2>/dev/null || true)"
+      [[ -n "$owner" ]] || continue
+      _sgt_response_lock_record_pid "$owner" >/dev/null || { rm -f "$candidate"; printf 'ERROR: Response lock has an invalid owner: %s\n' "$lock_path" >&2; return 1; }
+      if _sgt_response_lock_record_live "$owner"; then
+        sleep "$interval"
+        continue
+      else
+        owner_status=$?
+        if [[ "$owner_status" -ne 1 ]]; then
+          rm -f "$candidate"
+          printf 'ERROR: Response lock owner liveness is unverifiable: %s\n' "$lock_path" >&2
+          return 1
+        fi
+      fi
+      current_owner="$(cat "$lock_path" 2>/dev/null || readlink "$lock_path" 2>/dev/null || true)"
+      if [[ "${SGT_TEST_HOOKS:-}" == 1 &&
+            -n "${SGT_TEST_RESPONSE_LOCK_RECLAIM_BARRIER:-}" ]]; then
+        : > "$SGT_TEST_RESPONSE_LOCK_RECLAIM_BARRIER/$$"
+        for _ in $(seq 1 200); do
+          [[ "$(find "$SGT_TEST_RESPONSE_LOCK_RECLAIM_BARRIER" -type f 2>/dev/null | \
+            wc -l | tr -d ' ')" -ge 2 ]] && break
+          sleep 0.01
+        done
+        sleep "${SGT_TEST_RESPONSE_LOCK_RECLAIM_DELAY:-0}"
+      fi
+      [[ "$current_owner" == "$owner" ]] || continue
+      if _sgt_response_lock_transition "$lock_path" "$candidate" "$owner"; then
+        rm -f "$candidate"
+        _SGT_RESPONSE_LOCK_DIR="$lock_path"
+        _SGT_RESPONSE_LOCK_OWNER_RECORD="$owner_record"
+        return 0
+      else
+        owner_status=$?
+        [[ "$owner_status" -eq 3 ]] && continue
+        rm -f "$candidate"
+        return 1
+      fi
+    fi
+    if _sgt_response_lock_transition "$lock_path" "$candidate" --absent; then
+      rm -f "$candidate"
+      _SGT_RESPONSE_LOCK_DIR="$lock_path"
+      _SGT_RESPONSE_LOCK_OWNER_RECORD="$owner_record"
+      return 0
+    else
+      owner_status=$?
+    fi
+    if [[ "$owner_status" -ne 3 && ! -e "$lock_path" && ! -L "$lock_path" ]]; then
       rm -f "$candidate"
       printf 'ERROR: Could not create response lock: %s\n' "$lock_path" >&2
       return 1
@@ -176,23 +306,26 @@ _sgt_response_lock_release() {
   [[ -n "${_SGT_RESPONSE_LOCK_DIR:-}" ]] || return 0
   local owner
   owner="$(cat "$_SGT_RESPONSE_LOCK_DIR" 2>/dev/null || true)"
-  if [[ "$owner" == "$$" ]]; then
+  if [[ -n "${_SGT_RESPONSE_LOCK_OWNER_RECORD:-}" &&
+        "$owner" == "$_SGT_RESPONSE_LOCK_OWNER_RECORD" ]]; then
     if ! rm -f "$_SGT_RESPONSE_LOCK_DIR"; then
       printf 'ERROR: Could not release response lock: %s\n' "$_SGT_RESPONSE_LOCK_DIR" >&2
       return 1
     fi
   fi
   _SGT_RESPONSE_LOCK_DIR=""
+  _SGT_RESPONSE_LOCK_OWNER_RECORD=""
 }
 
 # _sgt_response_lock_reclaim <repo_state> [lock_name]
 #
 # Drop a response lock whose recorded owner is THIS process.
 #
-# The lock records "$$", which in Bash is the shell's PID and is therefore
-# identical in every subshell of the same process.  A background loop killed
-# while holding the lock leaves a record naming a PID that is still very much
-# alive, so _sgt_response_lock_acquire's liveness check would spin forever.
+# The lock records an exact PID, process-birth token, and acquisition nonce.
+# Bash keeps $$ and the process-birth token stable in its subshells, so a
+# background loop killed while holding the lock can leave a record naming this
+# still-live shell.  The exact record prevents a bare or reused PID from proving
+# ownership.
 #
 # Only call this once every other context in this process that could hold the
 # lock has been terminated; otherwise it would break mutual exclusion.
@@ -203,22 +336,23 @@ _sgt_response_lock_reclaim() {
 
   if [[ -d "$lock_path" ]]; then
     owner="$(cat "$lock_path/pid" 2>/dev/null || true)"
-    if [[ "$owner" == "$$" ]]; then
+    if _sgt_response_lock_record_is_this_process "$owner"; then
       rm -f "$lock_path/pid" 2>/dev/null || true
       rmdir "$lock_path" 2>/dev/null || true
     fi
   elif [[ -e "$lock_path" || -L "$lock_path" ]]; then
     owner="$(cat "$lock_path" 2>/dev/null || readlink "$lock_path" 2>/dev/null || true)"
-    if [[ "$owner" == "$$" ]]; then
+    if _sgt_response_lock_record_is_this_process "$owner"; then
       rm -f "$lock_path" 2>/dev/null || true
     fi
   fi
   _SGT_RESPONSE_LOCK_DIR=""
+  _SGT_RESPONSE_LOCK_OWNER_RECORD=""
 }
 
 # _sgt_response_lock_held_by_this_process <repo_state> [lock_name]
-# 0 when the lock exists and names this process, but this context does not own
-# it.  Waiting on such a lock can never succeed.
+# 0 when the lock contains this process's exact current acquisition record, but
+# this context does not own its path. Waiting on such a lock can never succeed.
 _sgt_response_lock_held_by_this_process() {
   local repo_state="$1"
   local lock_path="$repo_state/${2:-response.lock}"
@@ -231,7 +365,330 @@ _sgt_response_lock_held_by_this_process() {
   else
     return 1
   fi
-  [[ "$owner" == "$$" ]]
+  _sgt_response_lock_record_is_this_process "$owner"
+}
+
+# Canonical replacement command and pane authentication. The tmux start command
+# is the durable spawn capability: a token appearing somewhere in a foreign
+# command is not ownership proof.
+_sgt_replacement_worker_command() {
+  local token="$1" role="$2" marker="$3" worker_command="$4"
+  local marker_generation marker_identity marker_fd marker_path
+  IFS='|' read -r marker_generation marker_identity marker_fd marker_path <<< "$marker"
+  [[ "$token" =~ ^[a-f0-9]{32}$ && "$role" =~ ^worker:[A-Za-z0-9._-]+$ &&
+     "$marker_generation" =~ ^[a-f0-9]{32}$ &&
+     "$marker_identity" =~ ^[0-9]+:[0-9]+$ && "$marker_fd" == 198 &&
+     -n "$marker_path" && "$marker_path" != *$'\n'* &&
+     -n "$worker_command" && "$worker_command" != *$'\n'* ]] || return 1
+  printf '%q %q %q %q bash -c %q' "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/sgt-replacement-launch" \
+    "$token" "$role" "$marker" "$worker_command"
+}
+
+_sgt_replacement_pane_auth() {
+  local pane="$1" expected_token="$2" expected_role="$3"
+  local repo_state="${4:-}"
+  local evidence current confirmed current_start
+  local marker_dead marker_pane marker_pid marker_command marker_token marker_role marker_option_pid marker_start
+  local portable_start_re='^portable:[a-f0-9]{32}:[0-9]+:[0-9]+$'
+  [[ "$pane" =~ ^%[0-9]+$ ]] || return 1
+  evidence=""
+  for _ in $(seq 1 "${SGT_REPLACEMENT_MARKER_ATTEMPTS:-100}"); do
+    evidence="$(tmux display-message -p -t "$pane" \
+      '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_current_command}|#{@sergeant_replacement_token}|#{@sergeant_replacement_role}|#{@sergeant_replacement_pid}|#{@sergeant_replacement_start}' \
+      2>/dev/null)" || return 1
+    IFS='|' read -r marker_dead marker_pane marker_pid marker_command marker_token marker_role marker_option_pid marker_start <<< "$evidence"
+    if [[ "$marker_token" == "$expected_token" && "$marker_role" == "$expected_role" &&
+          -n "$marker_option_pid" && -n "$marker_start" ]]; then
+      break
+    fi
+    # Any non-empty conflicting marker is another owner. Only the launcher's
+    # short, wholly-unmarked publication window is retryable.
+    [[ -z "$marker_token" && -z "$marker_role" && -z "$marker_option_pid" && -z "$marker_start" ]] || return 1
+    sleep "${SGT_REPLACEMENT_MARKER_INTERVAL:-0.01}"
+  done
+  current="$(tmux display-message -p -t "$pane" \
+    '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_current_command}|#{@sergeant_replacement_token}|#{@sergeant_replacement_role}|#{@sergeant_replacement_pid}|#{@sergeant_replacement_start}' \
+    2>/dev/null)" || return 1
+  [[ "$evidence" == "$current" ]] || return 1
+  IFS='|' read -r marker_dead marker_pane marker_pid marker_command marker_token marker_role marker_option_pid marker_start <<< "$evidence"
+  if [[ "$marker_start" == proc:* ]]; then
+    current_start="$(_sgt_process_start_token "$marker_pid")" || return 1
+    [[ "$marker_start" == "$current_start" ]] || return 1
+  elif [[ "$marker_start" =~ $portable_start_re ]]; then
+    local portable_generation portable_identity current_marker portable_valid=false
+    local current_generation current_identity current_fd current_path
+    portable_generation="${marker_start#portable:}"
+    portable_identity="${portable_generation#*:}"
+    portable_generation="${portable_generation%%:*}"
+    [[ -n "$repo_state" ]] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    for _ in $(seq 1 "${SGT_REPLACEMENT_MARKER_ATTEMPTS:-100}"); do
+      _sgt_worker_process_marker_preflight "$repo_state" >/dev/null 2>&1 || return 1
+      current_marker="$(_sgt_read_owned_file \
+        "$repo_state/worker_process_marker" 2>/dev/null)" || return 1
+      IFS='|' read -r current_generation current_identity current_fd current_path \
+        <<< "$current_marker"
+      [[ "$current_generation" == "$portable_generation" &&
+         "$current_identity" == "$portable_identity" && "$current_fd" == 198 &&
+         -n "$current_path" ]] || return 1
+      if [[ ! -e "$current_path" && ! -L "$current_path" ]]; then
+        if python3 "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/_sgt-process-token.py" portable-check \
+            "$repo_state/worker_process_markers" "$marker_pid" \
+            "$portable_generation" "$portable_identity" >/dev/null 2>&1; then
+          portable_valid=true
+        fi
+        break
+      fi
+      sleep "${SGT_REPLACEMENT_MARKER_INTERVAL:-0.01}"
+    done
+    $portable_valid || return 1
+    current_start="$marker_start"
+  else
+    return 1
+  fi
+  confirmed="$(tmux display-message -p -t "$pane" \
+    '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_current_command}|#{@sergeant_replacement_token}|#{@sergeant_replacement_role}|#{@sergeant_replacement_pid}|#{@sergeant_replacement_start}' \
+    2>/dev/null)" || return 1
+  [[ "$confirmed" == "$current" ]] || return 1
+  [[ "$marker_dead" == 0 && "$marker_pane" == "$pane" && "$marker_pid" =~ ^[1-9][0-9]*$ &&
+     -n "$marker_command" && "$marker_token" == "$expected_token" &&
+     "$marker_role" == "$expected_role" && "$marker_option_pid" == "$marker_pid" &&
+     "$marker_start" == "$current_start" ]] || return 1
+  printf '%s|%s|%s|%s|%s\n' "$pane" "$marker_pid" "$marker_start" "$marker_token" "$marker_role"
+}
+
+_sgt_replacement_pane_identity_matches() {
+  local expected_identity="$1" pane="$2" token="$3" role="$4"
+  local repo_state="${5:-}"
+  local after auth identity_dead identity_pane identity_pid
+  local auth_pane auth_pid auth_start auth_token auth_role
+  IFS='|' read -r identity_dead identity_pane identity_pid _ <<< "$expected_identity"
+  [[ "$identity_dead" == 0 && "$identity_pane" == "$pane" &&
+     "$identity_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  auth="$(_sgt_replacement_pane_auth "$pane" "$token" "$role" "$repo_state")" || return 1
+  IFS='|' read -r auth_pane auth_pid auth_start auth_token auth_role <<< "$auth"
+  [[ "$auth_pane" == "$pane" && "$auth_pid" == "$identity_pid" &&
+     -n "$auth_start" && "$auth_token" == "$token" && "$auth_role" == "$role" ]] || return 1
+  after="$(_sgt_pane_identity "$pane" 2>/dev/null)" || return 1
+  [[ "$after" == "$expected_identity" ]] || return 1
+  printf '%s\n' "$auth"
+}
+
+# Classify a pane from direct evidence plus a successful complete tmux
+# inventory.  A display-message failure alone is not an absence proof because
+# tmux uses nonzero exits for server/protocol failures as well as unknown panes.
+#   0: present or otherwise resolvable, 1: proven absent, 2: unverifiable.
+_sgt_tmux_pane_presence() {
+  local pane="$1" snapshot line seen="|" presence_status=1
+  [[ "$pane" =~ ^%[0-9]+$ ]] || return 2
+  if _sgt_pane_identity "$pane" >/dev/null 2>&1; then
+    return 0
+  fi
+  snapshot="$(mktemp "${TMPDIR:-/tmp}/sgt-pane-presence.XXXXXX")" || return 2
+  if ! tmux list-panes -a -F '#{pane_id}' > "$snapshot" 2>/dev/null; then
+    rm -f "$snapshot"
+    return 2
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^%[0-9]+$ && "$seen" != *"|$line|"* ]] || {
+      presence_status=2
+      break
+    }
+    [[ "$line" == "$pane" ]] && {
+      presence_status=0
+      break
+    }
+    seen="${seen}${line}|"
+  done < "$snapshot"
+  rm -f "$snapshot"
+  return "$presence_status"
+}
+
+# Discover the one authenticated replacement pane from one successful, exact
+# inventory snapshot. Status 1 means the replacement window is absent; status 2
+# means tmux failed or returned malformed/duplicate inventory; status 3 means
+# the window is ambiguous; status 4 means its sole pane is foreign.
+_sgt_replacement_discover_pane() {
+  local window_name="$1" token="$2" role="$3" phase="$4"
+  local journal_pane="$5" journal_auth="$6"
+  local repo_state="${7:-}"
+  local inventory_file line candidate candidate_window candidate_auth
+  local authenticated="" pane_count=0 seen_panes="|" parse_status=0
+  inventory_file="$(mktemp "${TMPDIR:-/tmp}/sgt-pane-inventory.XXXXXX")" || return 2
+  if ! tmux list-panes -a -F '#{pane_id}|#{window_name}' \
+      > "$inventory_file" 2>/dev/null; then
+    rm -f "$inventory_file"
+    return 2
+  fi
+  if [[ ! -s "$inventory_file" ]]; then
+    rm -f "$inventory_file"
+    return 1
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ -z "$line" ]]; then parse_status=2; break; fi
+    candidate="${line%%|*}"
+    if [[ "$candidate" == "$line" ]]; then parse_status=2; break; fi
+    candidate_window="${line#*|}"
+    if [[ ! "$candidate" =~ ^%[0-9]+$ || -z "$candidate_window" ||
+          "$candidate_window" == *'|'* ]]; then parse_status=2; break; fi
+    if [[ "$seen_panes" == *"|$candidate|"* ]]; then parse_status=2; break; fi
+    seen_panes="${seen_panes}${candidate}|"
+    [[ "$candidate_window" == "$window_name" ]] || continue
+    pane_count=$((pane_count + 1))
+    candidate_auth="$(_sgt_replacement_pane_auth "$candidate" "$token" "$role" \
+      "$repo_state" 2>/dev/null || true)"
+    if [[ -n "$candidate_auth" ]] &&
+        { [[ "$phase" == bound || "$phase" == fenced || "$phase" == spawning ]] ||
+          [[ "$journal_pane" == "$candidate" && "$journal_auth" == "$candidate_auth" ]]; }; then
+      if [[ -n "$authenticated" ]]; then parse_status=3; break; fi
+      authenticated="$candidate"
+    fi
+  done < "$inventory_file"
+  rm -f "$inventory_file"
+  (( parse_status == 0 )) || return "$parse_status"
+  (( pane_count > 0 )) || return 1
+  [[ -n "$authenticated" ]] || return 4
+  (( pane_count == 1 )) || return 3
+  printf '%s\n' "$authenticated"
+}
+
+_sgt_replacement_recorded_auth_valid() {
+  local auth="$1" pane="$2" token="$3" role="$4"
+  local auth_pane auth_pid auth_start auth_token auth_role
+  IFS='|' read -r auth_pane auth_pid auth_start auth_token auth_role <<< "$auth"
+  [[ "$auth_pane" == "$pane" && "$auth_pid" =~ ^[1-9][0-9]*$ &&
+     ( "$auth_start" =~ ^proc:[0-9]+$ ||
+       "$auth_start" =~ ^portable:[a-f0-9]{32}:[0-9]+:[0-9]+$ ) &&
+     "$auth_token" == "$token" && "$auth_role" == "$role" ]]
+}
+
+# Strict shared relaunch journal. Both public recovery CLIs use this canonical
+# shape; malformed, partial, or extended records are never interpreted.
+_sgt_transfer_journal_render() {
+  printf 'version=1\nresponse_id=%s\nnotification_id=%s\nspawn_token=%s\ngate_generation=%s\ntmux_session=%s\nwindow_name=%s\nworker_role=%s\nworker_command=%s\nphase=%s\npane=%s\npane_auth=%s\n' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}"
+}
+
+_sgt_transfer_journal_read() {
+  local file="$1" canonical
+  [[ -f "$file" && ! -L "$file" && "$(wc -l < "$file" | tr -d ' ')" == 12 ]] || return 1
+  _SGT_TRANSFER_RESPONSE_ID="$(sed -n '2s/^response_id=//p' "$file")"
+  _SGT_TRANSFER_NOTIFICATION_ID="$(sed -n '3s/^notification_id=//p' "$file")"
+  _SGT_TRANSFER_SPAWN_TOKEN="$(sed -n '4s/^spawn_token=//p' "$file")"
+  _SGT_TRANSFER_GATE_GENERATION="$(sed -n '5s/^gate_generation=//p' "$file")"
+  _SGT_TRANSFER_TMUX_SESSION="$(sed -n '6s/^tmux_session=//p' "$file")"
+  _SGT_TRANSFER_WINDOW_NAME="$(sed -n '7s/^window_name=//p' "$file")"
+  _SGT_TRANSFER_WORKER_ROLE="$(sed -n '8s/^worker_role=//p' "$file")"
+  _SGT_TRANSFER_WORKER_COMMAND="$(sed -n '9s/^worker_command=//p' "$file")"
+  _SGT_TRANSFER_PHASE="$(sed -n '10s/^phase=//p' "$file")"
+  _SGT_TRANSFER_PANE="$(sed -n '11s/^pane=//p' "$file")"
+  _SGT_TRANSFER_PANE_AUTH="$(sed -n '12s/^pane_auth=//p' "$file")"
+  [[ "$(_sgt_response_archive_field version "$file" 2>/dev/null || true)" == 1 &&
+     ( -z "$_SGT_TRANSFER_RESPONSE_ID" || "$_SGT_TRANSFER_RESPONSE_ID" =~ ^[a-f0-9]{32}$ ) &&
+     "$_SGT_TRANSFER_NOTIFICATION_ID" =~ ^[a-f0-9]{32}$ &&
+     "$_SGT_TRANSFER_SPAWN_TOKEN" =~ ^[a-f0-9]{32}$ &&
+     "$_SGT_TRANSFER_GATE_GENERATION" =~ ^[1-9][0-9]*$ &&
+     "$_SGT_TRANSFER_TMUX_SESSION" =~ ^[A-Za-z0-9._:-]+$ &&
+     "$_SGT_TRANSFER_WINDOW_NAME" =~ ^[A-Za-z0-9._:/-]+$ &&
+     "$_SGT_TRANSFER_WORKER_ROLE" =~ ^worker:[A-Za-z0-9._-]+$ &&
+     -n "$_SGT_TRANSFER_WORKER_COMMAND" ]] || return 1
+  case "$_SGT_TRANSFER_PHASE" in
+    bound|fenced|spawning)
+      [[ -z "$_SGT_TRANSFER_PANE" && -z "$_SGT_TRANSFER_PANE_AUTH" ]] || return 1
+      ;;
+    spawned|published|acked)
+      _sgt_replacement_recorded_auth_valid "$_SGT_TRANSFER_PANE_AUTH" \
+        "$_SGT_TRANSFER_PANE" "$_SGT_TRANSFER_SPAWN_TOKEN" \
+        "$_SGT_TRANSFER_WORKER_ROLE" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  canonical="$(_sgt_transfer_journal_render "$_SGT_TRANSFER_RESPONSE_ID" \
+    "$_SGT_TRANSFER_NOTIFICATION_ID" "$_SGT_TRANSFER_SPAWN_TOKEN" \
+    "$_SGT_TRANSFER_GATE_GENERATION" "$_SGT_TRANSFER_TMUX_SESSION" \
+    "$_SGT_TRANSFER_WINDOW_NAME" "$_SGT_TRANSFER_WORKER_ROLE" \
+    "$_SGT_TRANSFER_WORKER_COMMAND" \
+    "$_SGT_TRANSFER_PHASE" "$_SGT_TRANSFER_PANE" "$_SGT_TRANSFER_PANE_AUTH")"
+  cmp -s "$file" <(printf '%s\n' "$canonical")
+}
+
+_sgt_transfer_journal_write() {
+  local file="$1" response_id="$2" notification_id="$3" spawn_token="$4"
+  local generation="$5" session="$6" window="$7" role="$8" command="$9" phase="${10}"
+  local pane="${11:-}" identity="${12:-}" previous="" body temporary
+  if [[ -e "$file" || -L "$file" ]]; then
+    _sgt_transfer_journal_read "$file" || return 1
+    [[ "$_SGT_TRANSFER_RESPONSE_ID" == "$response_id" &&
+       "$_SGT_TRANSFER_NOTIFICATION_ID" == "$notification_id" &&
+       "$_SGT_TRANSFER_SPAWN_TOKEN" == "$spawn_token" &&
+       "$_SGT_TRANSFER_GATE_GENERATION" == "$generation" &&
+       "$_SGT_TRANSFER_TMUX_SESSION" == "$session" &&
+       "$_SGT_TRANSFER_WINDOW_NAME" == "$window" &&
+       "$_SGT_TRANSFER_WORKER_ROLE" == "$role" &&
+       "$_SGT_TRANSFER_WORKER_COMMAND" == "$command" ]] || return 1
+    previous="$_SGT_TRANSFER_PHASE"
+    if [[ "$previous" == "$phase" ]]; then
+      [[ "$_SGT_TRANSFER_PANE" == "$pane" && "$_SGT_TRANSFER_PANE_AUTH" == "$identity" ]] || return 1
+    else
+      case "$previous:$phase" in
+        bound:fenced|bound:spawning|fenced:spawning|spawning:spawned|\
+        spawned:spawning|spawned:published|spawned:acked|published:acked) ;;
+        *) return 1 ;;
+      esac
+    fi
+  else
+    [[ "$phase" == bound ]] || return 1
+  fi
+  body="$(_sgt_transfer_journal_render "$response_id" "$notification_id" "$spawn_token" \
+    "$generation" "$session" "$window" "$role" "$command" "$phase" "$pane" "$identity")"
+  temporary="$file.tmp.$$.$RANDOM"
+  _sgt_transfer_io_failpoint "$file" write && return 1
+  printf '%s\n' "$body" > "$temporary" || { rm -f "$temporary"; return 1; }
+  # Validate the candidate through the same parser before publication.
+  _sgt_transfer_journal_read "$temporary" || { rm -f "$temporary"; return 1; }
+  _sgt_transfer_io_failpoint "$file" rename && { rm -f "$temporary"; return 1; }
+  mv "$temporary" "$file"
+}
+
+# Advance an installed replacement transaction after an earlier invocation
+# died in the narrow interval between the durable worker handshake and its
+# journal acknowledgement.  The immutable journal, current pane metadata,
+# authenticated replacement capability, and nonce-addressed handshake must all
+# still bind the same target.  An in-flight action lease is intentionally not
+# adjudicated here: it belongs to the already accepted target being resumed.
+# Returns 0 when advanced, 1 when no complete matching handshake exists, and 2
+# when the journal itself is malformed.
+_sgt_transfer_journal_ack_completed_handshake() {
+  local repo_state="$1" journal="$2" expected_response_id="$3"
+  local response_id notification_id spawn_token gate_generation tmux_session
+  local window_name worker_role worker_command phase pane pane_auth nonce live_auth
+  _sgt_transfer_journal_read "$journal" || return 2
+  response_id="$_SGT_TRANSFER_RESPONSE_ID"
+  notification_id="$_SGT_TRANSFER_NOTIFICATION_ID"
+  spawn_token="$_SGT_TRANSFER_SPAWN_TOKEN"
+  gate_generation="$_SGT_TRANSFER_GATE_GENERATION"
+  tmux_session="$_SGT_TRANSFER_TMUX_SESSION"
+  window_name="$_SGT_TRANSFER_WINDOW_NAME"
+  worker_role="$_SGT_TRANSFER_WORKER_ROLE"
+  worker_command="$_SGT_TRANSFER_WORKER_COMMAND"
+  phase="$_SGT_TRANSFER_PHASE"
+  pane="$_SGT_TRANSFER_PANE"
+  pane_auth="$_SGT_TRANSFER_PANE_AUTH"
+  [[ "$response_id" == "$expected_response_id" ]] || return 1
+  [[ "$phase" == spawned || "$phase" == published ]] || return 1
+  [[ "$(cat "$repo_state/notification_id" 2>/dev/null || true)" == "$notification_id" &&
+     "$(cat "$repo_state/pane" 2>/dev/null || true)" == "$pane" ]] || return 1
+  _sgt_pane_identity_matches "$pane" "$repo_state" || return 1
+  live_auth="$(_sgt_replacement_pane_auth "$pane" "$spawn_token" "$worker_role" \
+    "$repo_state" 2>/dev/null || true)"
+  [[ -n "$pane_auth" && "$live_auth" == "$pane_auth" ]] || return 1
+  nonce="$(cat "$repo_state/notification_target" 2>/dev/null || true)"
+  [[ "$nonce" =~ ^[a-f0-9]{32}$ &&
+     "$(cat "$repo_state/notifications/$notification_id/targets/$nonce/handshake_complete" \
+       2>/dev/null || true)" == "$notification_id|$nonce" ]] || return 1
+  _sgt_transfer_journal_write "$journal" "$response_id" "$notification_id" \
+    "$spawn_token" "$gate_generation" "$tmux_session" "$window_name" \
+    "$worker_role" "$worker_command" acked "$pane" "$pane_auth"
 }
 
 # ── Action-lease finalization ─────────────────────────────────────────────────
@@ -258,12 +715,31 @@ _sgt_response_lock_held_by_this_process() {
 # _sgt_action_lease_record <notifications-dir> <name> <body>
 # Write a lease outcome record once; never overwrite an existing record so the
 # first, most proximate reason survives repeated finalization attempts.
+_sgt_transfer_io_failpoint() {
+  local target="$1" stage="$2"
+  [[ "${SGT_TEST_HOOKS:-}" == 1 &&
+     "${SGT_TEST_FAIL_TRANSFER_IO_STAGE:-}" == "$stage" &&
+     "${SGT_TEST_FAIL_TRANSFER_IO_TARGET:-}" == "${target##*/}" ]]
+}
+
 _sgt_action_lease_record() {
   local notification_dir="$1" name="$2" body="$3" temporary
   [[ -d "$notification_dir" ]] || return 1
-  [[ ! -e "$notification_dir/$name" ]] || return 0
   temporary="$notification_dir/$name.tmp.$$.$RANDOM"
+  _sgt_transfer_io_failpoint "$notification_dir/$name" write && return 1
   printf '%s' "$body" > "$temporary" || { rm -f "$temporary"; return 1; }
+  if [[ -e "$notification_dir/$name" ]]; then
+    cmp -s "$temporary" "$notification_dir/$name" || {
+      rm -f "$temporary"
+      return 1
+    }
+    rm -f "$temporary"
+    return 0
+  fi
+  if _sgt_transfer_io_failpoint "$notification_dir/$name" rename; then
+    rm -f "$temporary"
+    return 1
+  fi
   mv "$temporary" "$notification_dir/$name" || { rm -f "$temporary"; return 1; }
 }
 
@@ -287,6 +763,108 @@ _sgt_notification_action_pending() {
   lease="$(cat "$repo_state/notifications/$notification_id/action_lease" 2>/dev/null || true)"
   [[ -n "$lease" ]] || return 1
   ! _sgt_notification_action_completed "$repo_state" "$notification_id"
+}
+
+# _sgt_fence_dead_action_lease <repo_state> <worktree> <successor-id> <generation> <reason>
+#
+# Archive an unfinished action lease only when all three durable ownership
+# records for the accepted target bind one old lease generation and both that
+# exact target pane and its recorded process are gone. The current fleet pane
+# may belong to a later generation and is deliberately not conflated with it.
+# A live pane, a reused pane id/PID, or incomplete/mismatched evidence fails
+# closed. The old lease and target tree are never removed or marked completed.
+_sgt_fence_dead_action_lease() {
+  local repo_state="$1" worktree="$2" successor="$3" generation="$4" reason="$5"
+  local notification_id lease notification_dir target_dir pane target_identity token
+  local owner_pid expected_transition existing stamp probe_status
+
+  notification_id="$(cat "$repo_state/notification_id" 2>/dev/null || true)"
+  [[ -n "$notification_id" ]] || return 1
+  notification_dir="$repo_state/notifications/$notification_id"
+  lease="$(cat "$notification_dir/action_lease" 2>/dev/null || true)"
+  [[ "$lease" =~ ^[a-f0-9]{32}$ && -n "$successor" && "$generation" =~ ^[1-9][0-9]*$ ]] || return 1
+  target_dir="$notification_dir/targets/$lease"
+  [[ -d "$target_dir" && ! -e "$target_dir/completed" ]] || return 1
+
+  target_identity="$(cat "$target_dir/pane_identity" 2>/dev/null || true)"
+  [[ "$target_identity" =~ ^[01]\|%[0-9]+\|[1-9][0-9]*\|[0-9]+\| ]] || return 1
+  pane="${target_identity#*|}"
+  pane="${pane%%|*}"
+  [[ "$pane" =~ ^%[0-9]+$ ]] || return 1
+  owner_pid="${target_identity#*|*|}"
+  owner_pid="${owner_pid%%|*}"
+  token="$notification_id|$lease"
+  [[ "$(cat "$target_dir/accepted" 2>/dev/null || true)" == "$token" &&
+     "$(cat "$target_dir/delivered" 2>/dev/null || true)" == "$token" ]] || return 1
+
+  # Only a successful, exact inventory that omits the pane proves absence.
+  command -v tmux >/dev/null 2>&1 || return 1
+  if _sgt_tmux_pane_presence "$pane"; then return 1; else probe_status=$?; fi
+  [[ "$probe_status" -eq 1 ]] || return 1
+  # Any process at the recorded PID is ambiguous (including PID reuse).  Use a
+  # complete process-table snapshot so an operational ps error cannot be
+  # conflated with an absent selection.
+  command -v ps >/dev/null 2>&1 || return 1
+  if _sgt_process_pid_presence "$owner_pid"; then return 1; else probe_status=$?; fi
+  [[ "$probe_status" -eq 1 ]] || return 1
+
+  # Re-verify the durable binding immediately before publishing the fence.
+  [[ "$(cat "$repo_state/notification_id" 2>/dev/null || true)" == "$notification_id" &&
+     "$(cat "$notification_dir/action_lease" 2>/dev/null || true)" == "$lease" &&
+     "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$target_identity" &&
+     "$(cat "$target_dir/accepted" 2>/dev/null || true)" == "$token" &&
+     "$(cat "$target_dir/delivered" 2>/dev/null || true)" == "$token" &&
+     ! -e "$target_dir/completed" ]] || return 1
+  if _sgt_tmux_pane_presence "$pane"; then return 1; else probe_status=$?; fi
+  [[ "$probe_status" -eq 1 ]] || return 1
+  if _sgt_process_pid_presence "$owner_pid"; then return 1; else probe_status=$?; fi
+  [[ "$probe_status" -eq 1 ]] || return 1
+
+  stamp="$(sed -n 's/^recorded_at=//p' \
+    "$notification_dir/action_lease_abandoned" 2>/dev/null || true)"
+  [[ -n "$stamp" ]] || stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  _sgt_action_lease_record "$notification_dir" action_lease_abandoned \
+    "$(printf 'notification_id=%s\nlease=%s\nowner_pane=%s\nowner_pid=%s\nowner_identity=%s\nreason=%s; exact pane and process owner proven dead; completion not fabricated\nrecorded_at=%s\n' \
+      "$notification_id" "$lease" "$pane" "$owner_pid" "$target_identity" "$reason" "$stamp")" || return 1
+
+  expected_transition="$(printf 'old_notification=%s\nold_lease=%s\nold_owner_identity=%s\nnew_notification=%s\nnew_generation=%s\nreason=%s\n' \
+    "$notification_id" "$lease" "$target_identity" "$successor" "$generation" "$reason")"
+  if [[ -e "$notification_dir/ownership_transition" ]]; then
+    existing="$(cat "$notification_dir/ownership_transition" 2>/dev/null || true)"
+    [[ "$existing" == "$expected_transition" ]] || return 1
+  else
+    _sgt_action_lease_record "$notification_dir" ownership_transition "$expected_transition" || return 1
+  fi
+}
+
+# _sgt_bind_action_lease_successor <repo_state> <generation>
+# Print "successor|spawn-token". The binding is immutable and shared by
+# sgt-respond and sgt-recover, so a crash may be resumed through either CLI.
+_sgt_bind_action_lease_successor() {
+  local repo_state="$1" generation="$2" notification_id lease notification_dir
+  local binding successor spawn_token expected
+  notification_id="$(cat "$repo_state/notification_id" 2>/dev/null || true)"
+  lease="$(cat "$repo_state/notifications/$notification_id/action_lease" 2>/dev/null || true)"
+  [[ -n "$notification_id" && "$lease" =~ ^[a-f0-9]{32}$ &&
+     "$generation" =~ ^[1-9][0-9]*$ ]] || return 1
+  notification_dir="$repo_state/notifications/$notification_id"
+  binding="$(cat "$notification_dir/successor_binding" 2>/dev/null || true)"
+  if [[ -n "$binding" ]]; then
+    [[ "$(sed -n 's/^source_notification=//p' <<< "$binding")" == "$notification_id" &&
+       "$(sed -n 's/^source_lease=//p' <<< "$binding")" == "$lease" &&
+       "$(sed -n 's/^generation=//p' <<< "$binding")" == "$generation" ]] || return 1
+    successor="$(sed -n 's/^successor_notification=//p' <<< "$binding")"
+    spawn_token="$(sed -n 's/^spawn_token=//p' <<< "$binding")"
+    [[ "$successor" =~ ^[a-f0-9]{32}$ && "$spawn_token" =~ ^[a-f0-9]{32}$ ]] || return 1
+    printf '%s|%s\n' "$successor" "$spawn_token"
+    return 0
+  fi
+  successor="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  spawn_token="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  expected="$(printf 'source_notification=%s\nsource_lease=%s\ngeneration=%s\nsuccessor_notification=%s\nspawn_token=%s\n' \
+    "$notification_id" "$lease" "$generation" "$successor" "$spawn_token")"
+  _sgt_action_lease_record "$notification_dir" successor_binding "$expected" || return 1
+  printf '%s|%s\n' "$successor" "$spawn_token"
 }
 
 # _sgt_finalize_action_lease <repo_state> <worktree> <reason>

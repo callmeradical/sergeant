@@ -2,6 +2,7 @@
 # Tests for sgt-recover — bounded stall recovery for in-progress workers.
 
 set -euo pipefail
+export FAKE_TMUX_OWNER_PID="$$"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
@@ -56,6 +57,8 @@ _setup_stalled_worker() {
   printf 'task/app\n' > "$repo_dir/window_name"
   printf 'opencode\n' > "$repo_dir/agent"
   printf 'td-123\n' > "$repo_dir/td_task"
+  rm -f "$repo_dir/response_relaunch_transaction" \
+    "$repo_dir/recovery_successor_notification" "$repo_dir/stall_recovery_attempted"
 }
 
 # ── Fake tmux ───────────────────────────────────────────────────────────────
@@ -73,6 +76,18 @@ cat > "$fake_bin/tmux" <<'TMUX'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${TMUX_LOG:-/dev/null}"
 case "$1" in
+  list-panes)
+    if [[ "${LIST_REPLACEMENT_PANE:-0}" == 1 ]]; then
+      replacement_window="$(sed -n 's/^window_name=//p' \
+        "$EXPECTED_WORKER/response_relaunch_transaction")"
+      if [[ "$*" == *'window_name'* ]]; then
+        printf '%s|%s\n' "${NEW_PANE:-%99}" "$replacement_window"
+      else
+        printf '%s\n' "${NEW_PANE:-%99}"
+      fi
+    fi
+    exit 0
+    ;;
   display-message)
     [[ "${PANE_ALIVE:-1}" == 1 ]] || exit 1
     target=""
@@ -81,12 +96,29 @@ case "$1" in
       [[ "$previous" == -t ]] && target="$arg"
       previous="$arg"
     done
+    if [[ "$*" == *'@sergeant_replacement_token'* && "$target" == "${NEW_PANE:-%99}" ]]; then
+      owner_pid="$FAKE_TMUX_OWNER_PID"
+      owner_start="$(awk '{ print $22 }' "/proc/$owner_pid/stat")"
+      printf '0|%s|%s|bash|%s|%s|%s|proc:%s\n' "$target" "$owner_pid" \
+        "$(cat "$EXPECTED_WORKER/test_spawn_token")" "$(cat "$EXPECTED_WORKER/test_spawn_role")" \
+        "$owner_pid" "$owner_start"
+      exit 0
+    fi
     pane_identity="${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
     if [[ "$target" == "${NEW_PANE:-%99}" ]]; then
-      pane_identity="0|$target|9999|654321|sgt-interactive-worker:$EXPECTED_WORKER"
+      start_command="$(cat "$EXPECTED_WORKER/test_spawn_command" 2>/dev/null || true)"
+      pane_identity="0|$target|$FAKE_TMUX_OWNER_PID|654321|$start_command"
     fi
-    # Auto-deliver notification to new pane
-    if [[ "${AUTO_DELIVER:-1}" == 1 && "$target" == "${NEW_PANE:-%99}" &&
+    deliver=true
+    if [[ "${REQUIRE_LOCK_RELEASE:-0}" == 1 &&
+          -e "$EXPECTED_WORKER/response.lock" ]]; then
+      touch "$LOCK_HELD_MARKER"
+      deliver=false
+    fi
+    # Auto-deliver notification to new pane only after the supervisor releases
+    # response ownership for the interactive worker's accepted/delivered write.
+    if [[ "${AUTO_DELIVER:-1}" == 1 && "$deliver" == true &&
+          "$target" == "${NEW_PANE:-%99}" &&
           -s "$EXPECTED_WORKER/notification_id" ]]; then
       notification_id="$(cat "$EXPECTED_WORKER/notification_id")"
       wt="$(cat "$EXPECTED_WORKER/worktree")"
@@ -109,6 +141,12 @@ case "$1" in
     [[ "${FAIL_WINDOW:-0}" == 0 ]] || exit 7
     [[ "${EMPTY_WINDOW:-0}" == 0 ]] || exit 0
     new_pane="${NEW_PANE:-%99}"
+    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch \([a-f0-9]\{32\}\) .*/\1/p')"
+    spawn_role="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch [a-f0-9]\{32\} \(worker:[A-Za-z0-9._-]*\) .*/\1/p')"
+    printf '%s\n' "$spawn_token" > "$EXPECTED_WORKER/test_spawn_token"
+    printf '%s\n' "$spawn_role" > "$EXPECTED_WORKER/test_spawn_role"
+    for start_command in "$@"; do :; done
+    printf '%s\n' "$start_command" > "$EXPECTED_WORKER/test_spawn_command"
     [[ -z "${WINDOW_LOG:-}" ]] || printf '%s\n' "$*" >> "$WINDOW_LOG"
     printf '%s\n' "$new_pane"
     ;;
@@ -172,8 +210,14 @@ _setup_stalled_worker "$repo_state" "$worktree"
 
 EXPECTED_WORKER="$repo_state" KILL_LOG="$TEST_ROOT/killed.log" \
   WINDOW_LOG="$TEST_ROOT/windows.log" TMUX_LOG="$TMUX_LOG" TD_LOG="$TD_LOG" \
+  REQUIRE_LOCK_RELEASE=1 LOCK_HELD_MARKER="$TEST_ROOT/recover-lock-held" \
+  SGT_NOTIFICATION_ACK_TIMEOUT=1 \
   PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
   "$ROOT_DIR/bin/sgt-recover" task-1 app >/dev/null 2>&1
+[[ -e "$TEST_ROOT/recover-lock-held" ]] || {
+  printf 'recover worker never observed response.lock before handshake\n' >&2
+  exit 1
+}
 
 # Status stays in_progress
 [[ "$(cat "$repo_state/status")" == "in_progress" ]] || {
@@ -599,5 +643,50 @@ EXPECTED_WORKER="$repo_state" KILL_LOG="$TEST_ROOT/kill8.log" \
 }
 
 printf 'sgt-recover completed action_lease allows recovery: ok\n'
+
+# ── Slice 9: late target-publication failure remains exactly retryable ────────
+# Once both replacement pane and pane_identity are durable, a later target
+# publication failure must not restore only one half of the old ownership pair.
+# Preserve the coherent replacement transaction as in_progress so the same
+# recovery command can finish it without spawning or killing another pane.
+_setup_stalled_worker "$repo_state" "$worktree"
+rm -f "$repo_state/stall_recovery_attempted" "$TEST_ROOT/late-killed.log" \
+  "$TEST_ROOT/late-window.log"
+old_identity="$(cat "$repo_state/pane_identity")"
+set +e
+EXPECTED_WORKER="$repo_state" KILL_LOG="$TEST_ROOT/late-killed.log" \
+  WINDOW_LOG="$TEST_ROOT/late-window.log" SGT_TEST_HOOKS=1 \
+  SGT_TEST_FAIL_RECOVER_TARGET_PUBLICATION=1 \
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-recover" task-1 app >/dev/null 2>&1
+late_status=$?
+set -e
+[[ "$late_status" -ne 0 ]]
+late_pane="$(cat "$repo_state/pane")"
+late_identity="$(cat "$repo_state/pane_identity")"
+if [[ "$late_pane" == %42 || "$late_identity" == "$old_identity" ]]; then
+  [[ "$late_pane" == %42 && "$late_identity" == "$old_identity" ]] || {
+    printf 'RECOVER_LATE_ABORT_RESTORED_ONLY_HALF_OF_OWNERSHIP\n' >&2
+    exit 1
+  }
+else
+  [[ "$late_pane" == %99 && "$late_identity" == '0|%99|'* ]]
+  [[ "$(cat "$repo_state/status")" == in_progress ]]
+  [[ "$(cat "$repo_state/diagnostic")" == 'live worker stalled: recovery transaction pending:'* ]]
+  [[ "$(sed -n 's/^phase=//p' "$repo_state/response_relaunch_transaction")" == spawned ]]
+fi
+EXPECTED_WORKER="$repo_state" KILL_LOG="$TEST_ROOT/late-killed.log" \
+  WINDOW_LOG="$TEST_ROOT/late-window.log" LIST_REPLACEMENT_PANE=1 \
+  PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-recover" task-1 app >/dev/null 2>&1 || {
+  printf 'RECOVER_LATE_ABORT_TRANSACTION_WAS_NOT_ACTIONABLE\n' >&2
+  exit 1
+}
+[[ "$(cat "$repo_state/pane")" == %99 ]]
+[[ "$(sed -n 's/^phase=//p' "$repo_state/response_relaunch_transaction")" == acked ]]
+[[ "$(wc -l < "$TEST_ROOT/late-window.log")" == 1 ]]
+
+printf 'sgt-recover late publication failure remains retryable: ok\n'
 
 printf 'sgt-recover: all tests passed\n'

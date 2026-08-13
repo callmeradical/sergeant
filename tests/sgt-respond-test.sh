@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+export FAKE_TMUX_OWNER_PID="$$"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
@@ -76,9 +77,18 @@ case "$1" in
       [[ "$previous" == -t ]] && target="$argument"
       previous="$argument"
     done
+    if [[ "$*" == *'@sergeant_replacement_token'* && "$target" == "${NEW_PANE:-%99}" ]]; then
+      owner_pid="$FAKE_TMUX_OWNER_PID"
+      owner_start="$(awk '{ print $22 }' "/proc/$owner_pid/stat")"
+      printf '0|%s|%s|bash|%s|%s|%s|proc:%s\n' "$target" "$owner_pid" \
+        "$(cat "$EXPECTED_WORKER/test_spawn_token")" "$(cat "$EXPECTED_WORKER/test_spawn_role")" \
+        "$owner_pid" "$owner_start"
+      exit 0
+    fi
     pane_identity="${PANE_IDENTITY:-0|%42|4242|123456|sgt-interactive-worker:$EXPECTED_WORKER}"
     if [[ "$target" == "${NEW_PANE:-%99}" ]]; then
-      pane_identity="0|$target|9999|654321|sgt-interactive-worker:$EXPECTED_WORKER"
+      start_command="$(cat "$EXPECTED_WORKER/test_spawn_command" 2>/dev/null || true)"
+      pane_identity="0|$target|$FAKE_TMUX_OWNER_PID|654321|$start_command"
       if [[ "${REQUIRE_FRESH_ACK:-0}" == 1 &&
             -e "$(cat "$EXPECTED_WORKER/worktree")/.sergeant-notification-ack" &&
             ! -e "$EXPECTED_WORKER/notification_delivered_pane_identity" ]]; then
@@ -94,7 +104,7 @@ case "$1" in
       [[ "$count" -ge "${DELIVER_AFTER:-1}" ]] || deliver=false
     fi
     if [[ "$target" == "${NEW_PANE:-%99}" && "${STALE_SUPERVISOR_ACK:-0}" == 1 &&
-          "${count:-0}" == 2 && -s "$EXPECTED_WORKER/notification_id" ]]; then
+          "${count:-0}" == "${STALE_ACK_AT:-2}" && -s "$EXPECTED_WORKER/notification_id" ]]; then
       notification_id="$(cat "$EXPECTED_WORKER/notification_id")"
       notification_worktree="$(cat "$EXPECTED_WORKER/worktree")"
       printf '%s|0|%%99|9999|654321|stale-supervisor\n' "$notification_id" \
@@ -106,7 +116,9 @@ case "$1" in
     if [[ "${REQUIRE_LOCK_RELEASE:-0}" == 1 &&
           -e "$EXPECTED_WORKER/response.lock" ]]; then
       touch "$LOCK_HELD_MARKER"
-    elif [[ "${AUTO_DELIVER:-1}" == 1 && "$deliver" == true && -s "$EXPECTED_WORKER/notification_id" ]]; then
+      deliver=false
+    fi
+    if [[ "${AUTO_DELIVER:-1}" == 1 && "$deliver" == true && -s "$EXPECTED_WORKER/notification_id" ]]; then
       if [[ "${REQUIRE_TARGET:-0}" == 1 ]]; then
         _rt_nonce="$(cat "$EXPECTED_WORKER/notification_target" 2>/dev/null || true)"
         _rt_id="$(cat "$EXPECTED_WORKER/notification_id" 2>/dev/null || true)"
@@ -139,6 +151,12 @@ case "$1" in
   new-window)
     [[ "${FAIL_WINDOW:-0}" == 0 ]] || exit 7
     [[ "${EMPTY_WINDOW:-0}" == 0 ]] || exit 0
+    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch \([a-f0-9]\{32\}\) .*/\1/p')"
+    spawn_role="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch [a-f0-9]\{32\} \(worker:[A-Za-z0-9._-]*\) .*/\1/p')"
+    printf '%s\n' "$spawn_token" > "$EXPECTED_WORKER/test_spawn_token"
+    printf '%s\n' "$spawn_role" > "$EXPECTED_WORKER/test_spawn_role"
+    for start_command in "$@"; do :; done
+    printf '%s\n' "$start_command" > "$EXPECTED_WORKER/test_spawn_command"
     printf '%s\n' "${NEW_PANE:-%99}"
     ;;
   send-keys) exit 0 ;;
@@ -419,8 +437,13 @@ printf 'needs_input\n' > "$worktree/.sergeant-status"
 response='Use option A; $(touch should-not-exist)'
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/live.log" TD_LOG="$TEST_ROOT/td.log" \
   REQUIRE_LOCK_RELEASE=1 LOCK_HELD_MARKER="$TEST_ROOT/lock-held" \
+  SGT_NOTIFICATION_ACK_TIMEOUT=1 \
   TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
   respond "$response" >/dev/null
+[[ -e "$TEST_ROOT/lock-held" ]] || {
+  printf 'worker never observed the response lock held before acknowledgement\n' >&2
+  exit 1
+}
 [[ "$(cat "$repo_state/response")" == "$response" ]]
 [[ "$(cat "$worktree/.sergeant-response")" == "$response" ]]
 [[ "$(cat "$repo_state/pane")" == "%42" ]]
@@ -464,15 +487,18 @@ fi
 
 rm -f "$worktree/.sergeant-response" "$repo_state/response"
 mkdir "$repo_state/response.lock"
-printf '%s\n' "$$" > "$repo_state/response.lock/pid"
+lock_start="$(awk '{ print $22 }' "/proc/$$/stat")"
+printf 'pid=%s\nstart=proc:%s\nnonce=11112222333344445555666677778888\n' \
+  "$$" "$lock_start" > "$repo_state/response.lock/pid"
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/locked.log" TD_LOG="$TEST_ROOT/locked-td.log" \
 TD_RESPONSE_FILE="$worktree/.sergeant-response" PANE_ALIVE=1 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
   respond 'serialized response' >/dev/null &
 locked_pid=$!
 sleep 0.05
 [[ ! -e "$worktree/.sergeant-response" && ! -e "$repo_state/response" ]]
-rm "$repo_state/response.lock/pid"
-rmdir "$repo_state/response.lock"
+mv "$repo_state/response.lock" "$repo_state/response.lock.released"
+rm "$repo_state/response.lock.released/pid"
+rmdir "$repo_state/response.lock.released"
 wait "$locked_pid"
 [[ "$(cat "$worktree/.sergeant-response")" == 'serialized response' ]]
 
@@ -589,8 +615,10 @@ consumed_queued_id="${consumed_queued_dir##*/}"
 consumed_target_nonce="$(cat "$repo_state/notification_target" 2>/dev/null || true)"
 [[ "$consumed_target_nonce" =~ ^[a-f0-9]{32}$ ]]
 consumed_target_dir="$repo_state/notifications/$consumed_queued_id/targets/$consumed_target_nonce"
-[[ "$(cat "$consumed_target_dir/pane_identity")" == \
-  '0|%100|9999|654321|sgt-interactive-worker:'"$repo_state" ]]
+consumed_successor_identity="$(cat "$repo_state/pane_identity")"
+[[ "$consumed_successor_identity" == \
+  "0|%100|$FAKE_TMUX_OWNER_PID|654321|"*'/sgt-replacement-launch '* ]]
+[[ "$(cat "$consumed_target_dir/pane_identity")" == "$consumed_successor_identity" ]]
 [[ -f "$consumed_target_dir/accepted" && -f "$consumed_target_dir/delivered" ]]
 grep -Fq 'queued response delivered to pane %100' "$TEST_ROOT/consumed-second.out"
 [[ "$(grep -c '^new-window ' "$TEST_ROOT/consumed-race.log")" -eq 1 ]]
@@ -636,7 +664,8 @@ grep -Fq 'new-window -P -F #{pane_id} -t sgt: -n task/app' "$TEST_ROOT/dead.log"
 grep -Fq "$ROOT_DIR/bin/sgt-interactive-worker" "$TEST_ROOT/dead.log"
 [[ "$(cat "$repo_state/notification_delivered")" == "$(cat "$repo_state/notification_id")" ]]
 [[ "$(cat "$repo_state/notification_id")" != "$(cat "$repo_state/response_id")" ]]
-[[ "$(cat "$repo_state/notification_delivered_pane_identity")" == 0\|%99\|9999\|654321\|* ]]
+[[ "$(cat "$repo_state/notification_delivered_pane_identity")" == \
+  "0|%99|$FAKE_TMUX_OWNER_PID|654321|"* ]]
 
 relaunch_response_id="$(cat "$repo_state/response_id")"
 stale_notification_id="$(cat "$repo_state/notification_id")"
@@ -645,16 +674,22 @@ printf 'orphaned\n' > "$repo_state/status"
 printf 'orphaned\n' > "$worktree/.sergeant-status"
 printf '%s\n' "$stale_nonce" \
   > "$repo_state/notifications/$stale_notification_id/action_lease"
+stale_owner_identity="$(cat "$repo_state/notifications/$stale_notification_id/targets/$stale_nonce/pane_identity")"
+printf '0|%%98|9898|654320|ambiguous-prior-owner\n' \
+  > "$repo_state/notifications/$stale_notification_id/targets/$stale_nonce/pane_identity"
 rm -f "$worktree/.sergeant-response"
 set +e
 lease_output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/lease-block.log" \
   TD_LOG="$TEST_ROOT/lease-block-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
-  PANE_ALIVE=0 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  PANE_ALIVE=1 PANE_IDENTITY='0|%98|9898|654320|ambiguous-prior-owner' \
+  EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
   respond 'resume dead worker' 2>&1)"
 lease_status=$?
 set -e
-[[ "$lease_status" -ne 0 && "$lease_output" == *'action lease belongs to the prior supervisor'* ]]
+[[ "$lease_status" -ne 0 && "$lease_output" == *'ownership is live, reused, or ambiguous'* ]]
 [[ "$(cat "$repo_state/notification_id")" == "$stale_notification_id" ]]
+printf '%s\n' "$stale_owner_identity" \
+  > "$repo_state/notifications/$stale_notification_id/targets/$stale_nonce/pane_identity"
 printf '%s\n' "$stale_notification_id|$stale_nonce" \
   > "$repo_state/notifications/$stale_notification_id/targets/$stale_nonce/completed"
 printf '%s\n' "$stale_notification_id" > "$repo_state/notification_delivered"
@@ -667,18 +702,20 @@ PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/crash-relaunch.log" \
   TD_LOG="$TEST_ROOT/crash-relaunch-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
   PANE_ALIVE=1 NEW_PANE=%100 REQUIRE_FRESH_ACK=1 REQUIRE_TARGET=1 STALE_SUPERVISOR_ACK=1 \
   REQUIRE_REVOKED_BEFORE_NOTIFICATION=1 \
-  DELIVER_COUNT_FILE="$TEST_ROOT/crash-relaunch-delivery-count" DELIVER_AFTER=3 \
+  DELIVER_COUNT_FILE="$TEST_ROOT/crash-relaunch-delivery-count" DELIVER_AFTER=4 STALE_ACK_AT=3 \
   PANE_IDENTITY="1|%99|9999|654321|dead-pane" EXPECTED_WORKER="$repo_state" \
   SERGEANT_FLEET="$fleet" respond 'resume dead worker' >/dev/null
 [[ "$(cat "$repo_state/response_id")" == "$relaunch_response_id" ]]
 [[ "$(cat "$repo_state/notification_id")" != "$stale_notification_id" ]]
 [[ "$(cat "$repo_state/pane")" == %100 ]]
 [[ "$(cat "$repo_state/notification_delivered")" == "$(cat "$repo_state/notification_id")" ]]
-[[ "$(cat "$repo_state/notification_delivered_pane_identity")" == 0\|%100\|9999\|654321\|* ]]
+[[ "$(cat "$repo_state/notification_delivered_pane_identity")" == \
+  "0|%100|$FAKE_TMUX_OWNER_PID|654321|"* ]]
 new_notif_id="$(cat "$repo_state/notification_id")"
 new_nonce="$(cat "$repo_state/notification_target")"
-[[ "$(cat "$repo_state/notifications/$new_notif_id/targets/$new_nonce/pane_identity")" == 0\|%100\|9999\|654321\|* ]]
-[[ "$(cat "$TEST_ROOT/crash-relaunch-delivery-count")" -ge 3 ]]
+[[ "$(cat "$repo_state/notifications/$new_notif_id/targets/$new_nonce/pane_identity")" == \
+  "0|%100|$FAKE_TMUX_OWNER_PID|654321|"* ]]
+[[ "$(cat "$TEST_ROOT/crash-relaunch-delivery-count")" -ge 4 ]]
 [[ ! -e "$TEST_ROOT/crash-relaunch-td.log" ]]
 [[ "$(cat "$worktree/.sergeant-response")" == 'resume dead worker' ]]
 grep -Fq '%99' \
@@ -715,6 +752,8 @@ race_target_count="$(find "$repo_state/notifications/$race_notification_id/targe
 [[ ! -d "$repo_state/response.lock" ]]
 
 rm "$worktree/.sergeant-response" "$repo_state/response"
+rm -f "$repo_state/response_successor_notification" \
+  "$repo_state/response_relaunch_transaction"
 cat > "$fake_bin/td" <<'EOF'
 #!/usr/bin/env bash
 exit 19
@@ -757,6 +796,8 @@ chmod +x "$fake_bin/td"
 printf 'needs_input\n' > "$repo_state/status"
 printf 'needs_input\n' > "$worktree/.sergeant-status"
 rm -f "$worktree/.sergeant-response" "$repo_state/response" "$repo_state/response_id"
+rm -f "$repo_state/response_successor_notification" \
+  "$repo_state/response_relaunch_transaction"
 set +e
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/empty-pane.log" TD_LOG="$TEST_ROOT/empty-pane-td.log" \
 PANE_ALIVE=0 EMPTY_WINDOW=1 SERGEANT_FLEET="$fleet" \
@@ -782,6 +823,34 @@ set -e
 [[ "$status" -ne 0 ]]
 [[ "$(cat "$worktree/.sergeant-gate-generation")" == '1' ]]
 [[ "$(cat "$repo_state/response_generation")" == '1' ]]
+
+# A dead worker without exact relaunch metadata remains actionable.  Storing a
+# durable response and notification is useful evidence, but it is not a resume:
+# the public CLI must return nonzero and say which metadata prevents relaunch.
+saved_tmux_session="$(cat "$repo_state/tmux_session")"
+saved_window_name="$(cat "$repo_state/window_name")"
+saved_agent="$(cat "$repo_state/agent")"
+rm -f "$repo_state/tmux_session" "$repo_state/window_name" "$repo_state/agent" \
+  "$worktree/.sergeant-response" "$worktree/.sergeant-response-generation" \
+  "$repo_state/response" "$repo_state/response_generation" "$repo_state/response_id" \
+  "$repo_state/notification_id" "$repo_state/notification_target"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/missing-relaunch-metadata.log" \
+  TD_LOG="$TEST_ROOT/missing-relaunch-metadata-td.log" PANE_ALIVE=0 \
+  SERGEANT_FLEET="$fleet" respond 'preserve orphan response' 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]] || {
+  printf 'MISSING_RELAUNCH_METADATA_CLAIMED_RESUMED\n%s\n' "$output" >&2
+  exit 1
+}
+[[ "$output" == *'relaunch metadata is incomplete'* ]]
+[[ "$(cat "$worktree/.sergeant-response")" == 'preserve orphan response' ]]
+[[ "$(cat "$repo_state/response")" == 'preserve orphan response' ]]
+[[ -s "$repo_state/notification_id" ]]
+printf '%s\n' "$saved_tmux_session" > "$repo_state/tmux_session"
+printf '%s\n' "$saved_window_name" > "$repo_state/window_name"
+printf '%s\n' "$saved_agent" > "$repo_state/agent"
 
 original_worktree="$worktree"
 for invalid_path in '' "$TEST_ROOT/missing-worktree"; do

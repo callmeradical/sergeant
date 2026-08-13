@@ -13,6 +13,7 @@
 # replacement is validated.
 
 set -euo pipefail
+export FAKE_TMUX_OWNER_PID="$$"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
@@ -52,9 +53,18 @@ case "$1" in
       [[ "$previous" == -t ]] && target="$arg"
       previous="$arg"
     done
+    if [[ "$*" == *'@sergeant_replacement_token'* && "$target" == "%99" ]]; then
+      owner_pid="$FAKE_TMUX_OWNER_PID"
+      owner_start="$(awk '{ print $22 }' "/proc/$owner_pid/stat")"
+      printf '0|%%99|%s|bash|%s|%s|%s|proc:%s\n' "$owner_pid" \
+        "$(cat "$REPO_STATE_DIR/test_spawn_token")" "$(cat "$REPO_STATE_DIR/test_spawn_role")" \
+        "$owner_pid" "$owner_start"
+      exit 0
+    fi
     pane_identity="0|%42|4242|123456|stalled-pane"
     if [[ "$target" == "%99" ]]; then
-      pane_identity="0|%99|9999|654321|relaunched"
+      start_command="$(cat "$REPO_STATE_DIR/test_spawn_command" 2>/dev/null || true)"
+      pane_identity="0|%99|$FAKE_TMUX_OWNER_PID|654321|$start_command"
       if [[ "${ACK_NEW_PANE:-1}" == 1 && -s "$REPO_STATE_DIR/notification_id" ]]; then
         notification_id="$(cat "$REPO_STATE_DIR/notification_id")"
         wt="$(cat "$REPO_STATE_DIR/worktree")"
@@ -78,6 +88,12 @@ case "$1" in
     ;;
   new-window)
     printf '%s\n' "$*" >> "${WINDOW_LOG:-/dev/null}"
+    spawn_token="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch \([a-f0-9]\{32\}\) .*/\1/p')"
+    spawn_role="$(printf '%s\n' "$*" | sed -n 's/.*sgt-replacement-launch [a-f0-9]\{32\} \(worker:[A-Za-z0-9._-]*\) .*/\1/p')"
+    printf '%s\n' "$spawn_token" > "$REPO_STATE_DIR/test_spawn_token"
+    printf '%s\n' "$spawn_role" > "$REPO_STATE_DIR/test_spawn_role"
+    for start_command in "$@"; do :; done
+    printf '%s\n' "$start_command" > "$REPO_STATE_DIR/test_spawn_command"
     printf '%%99\n'
     ;;
   kill-pane)
@@ -105,7 +121,7 @@ exit 0
 TD
 chmod +x "$fake_bin/td"
 
-task=task-unacked
+task="task-unacked"
 task_dir="$fleet/$task"
 state="$task_dir/app"
 wt="$TEST_ROOT/wt"
@@ -256,7 +272,7 @@ fourth="$(respond TMUX_LOG="$TEST_ROOT/fourth.log" WINDOW_LOG="$TEST_ROOT/fourth
 fourth_status=$?
 set -e
 [[ "$fourth_status" -ne 0 ]] || {
-  printf 'a stale escalation marker authorised a relaunch\n' >&2
+  printf 'a stale escalation marker authorised a relaunch:\n%s\n' "$fourth" >&2
   exit 1
 }
 [[ ! -s "$TEST_ROOT/fourth-window.log" ]] || {
@@ -276,7 +292,7 @@ fifth="$(respond TMUX_LOG="$TEST_ROOT/fifth.log" WINDOW_LOG="$TEST_ROOT/fifth-wi
 fifth_status=$?
 set -e
 [[ "$fifth_status" -ne 0 ]] || {
-  printf 'an escalation for another response authorised a relaunch\n' >&2
+  printf 'an escalation for another response authorised a relaunch:\n%s\n' "$fifth" >&2
   exit 1
 }
 [[ ! -s "$TEST_ROOT/fifth-window.log" ]]

@@ -18,8 +18,10 @@ source "$ROOT_DIR/bin/_sgt-response-lock.sh"
 lockdir1="$TEST_ROOT/state-1"
 mkdir -p "$lockdir1"
 lockfile1="$lockdir1/response.lock"
-printf '%s\n' "$$" > "$lockfile1"
+owner_record="$(_sgt_response_lock_record_for_pid "$$")"
+printf '%s\n' "$owner_record" > "$lockfile1"
 _SGT_RESPONSE_LOCK_DIR="$lockfile1"
+_SGT_RESPONSE_LOCK_OWNER_RECORD="$owner_record"
 
 chmod 555 "$lockdir1"
 set +e
@@ -76,6 +78,287 @@ _sgt_response_lock_release
 }
 [[ -z "${_SGT_RESPONSE_LOCK_DIR:-}" ]] || {
   printf 'FAIL case4: _SGT_RESPONSE_LOCK_DIR not cleared after non-owner skip\n' >&2
+  exit 1
+}
+
+# A live PID with a different process-birth identity is stale, not a live owner.
+lockdir5="$TEST_ROOT/state-5"
+mkdir -p "$lockdir5"
+printf 'pid=%s\nstart=proc:0\nnonce=11111111111111111111111111111111\n' "$$" \
+  > "$lockdir5/response.lock"
+SGT_RESPONSE_LOCK_TIMEOUT=1 _sgt_response_lock_acquire "$lockdir5"
+grep -Fxq "start=$(_sgt_process_start_token "$$")" "$lockdir5/response.lock" || {
+  printf 'FAIL case5: reused PID claim was not replaced with exact birth identity\n' >&2
+  exit 1
+}
+_sgt_response_lock_release
+
+# Waiting for a genuinely live owner is bounded.
+lockdir6="$TEST_ROOT/state-6"
+mkdir -p "$lockdir6"
+_sgt_response_lock_record_for_pid "$$" > "$lockdir6/response.lock"
+if SGT_RESPONSE_LOCK_TIMEOUT=1 SGT_RESPONSE_LOCK_INTERVAL=0.01 \
+    _sgt_response_lock_acquire "$lockdir6" 2> "$TEST_ROOT/case6.err"; then
+  printf 'FAIL case6: live competing owner was reclaimed\n' >&2
+  exit 1
+fi
+grep -Fq 'Timed out waiting for response lock' "$TEST_ROOT/case6.err"
+
+# New-format records are an exact schema. Extra fields or renamed keys are
+# ambiguous and must be rejected without reclaiming a possibly live owner.
+for malformed in extra wrong_key; do
+  lockdir7="$TEST_ROOT/state-7-$malformed"
+  mkdir -p "$lockdir7"
+  valid_record="$(_sgt_response_lock_record_for_pid "$$")"
+  case "$malformed" in
+    extra) printf '%s\nextra=value\n' "$valid_record" > "$lockdir7/response.lock" ;;
+    wrong_key) printf '%s\n' "$valid_record" | sed 's/^nonce=/claim=/' > "$lockdir7/response.lock" ;;
+  esac
+  before_record="$(cat "$lockdir7/response.lock")"
+  if SGT_RESPONSE_LOCK_TIMEOUT=1 _sgt_response_lock_acquire "$lockdir7" 2>/dev/null; then
+    printf 'FAIL case7: malformed lock %s was accepted\n' "$malformed" >&2
+    exit 1
+  fi
+  [[ "$(cat "$lockdir7/response.lock")" == "$before_record" ]] || {
+    printf 'FAIL case7: malformed lock %s was reclaimed\n' "$malformed" >&2
+    exit 1
+  }
+done
+
+# Bare scalar PID records are legacy/ambiguous for every public helper.  Even
+# when the scalar names this process, it proves neither birth identity nor this
+# acquisition and must never be reported live, reclaimed, or released.
+lockdir8="$TEST_ROOT/state-8"
+mkdir -p "$lockdir8"
+printf '%s\n' "$$" > "$lockdir8/response.lock"
+scalar_record="$(cat "$lockdir8/response.lock")"
+if _sgt_response_lock_record_live "$scalar_record"; then
+  printf 'FAIL case8: scalar PID was accepted as a live owner\n' >&2
+  exit 1
+fi
+_sgt_response_lock_reclaim "$lockdir8"
+[[ "$(cat "$lockdir8/response.lock")" == "$$" ]] || {
+  printf 'FAIL case8: scalar PID was reclaimed by this process\n' >&2
+  exit 1
+}
+_SGT_RESPONSE_LOCK_DIR="$lockdir8/response.lock"
+_SGT_RESPONSE_LOCK_OWNER_RECORD=""
+_sgt_response_lock_release
+[[ "$(cat "$lockdir8/response.lock")" == "$$" ]] || {
+  printf 'FAIL case8: scalar PID was released without an exact owner record\n' >&2
+  exit 1
+}
+
+# Same PID and process birth are insufficient without the exact acquisition
+# nonce. Exercise both supported lock layouts through held/reclaim, then prove
+# the immutable current acquisition is still reclaimable.
+for layout in file directory; do
+  lockdir9="$TEST_ROOT/state-9-$layout"
+  mkdir -p "$lockdir9"
+  exact_record="$(_sgt_response_lock_record_for_pid "$$")"
+  if [[ "$layout" == file ]]; then
+    record_path="$lockdir9/response.lock"
+  else
+    mkdir "$lockdir9/response.lock"
+    record_path="$lockdir9/response.lock/pid"
+  fi
+  for variant in different missing; do
+    case "$variant" in
+      different)
+        forged_nonce=ffffffffffffffffffffffffffffffff
+        [[ "$exact_record" != *"nonce=$forged_nonce"* ]] || forged_nonce=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+        forged_record="$(printf '%s\n' "$exact_record" | sed "s/^nonce=.*/nonce=$forged_nonce/")"
+        ;;
+      missing) forged_record="$(printf '%s\n' "$exact_record" | sed '/^nonce=/d')" ;;
+    esac
+    [[ "$forged_record" != "$exact_record" ]]
+    printf '%s\n' "$forged_record" > "$record_path"
+    _SGT_RESPONSE_LOCK_DIR=""
+    _SGT_RESPONSE_LOCK_OWNER_RECORD="$exact_record"
+    if _sgt_response_lock_held_by_this_process "$lockdir9"; then
+      printf 'FAIL case9: %s %s nonce was reported as this acquisition\n' "$variant" "$layout" >&2
+      exit 1
+    fi
+    _sgt_response_lock_reclaim "$lockdir9"
+    [[ "$(cat "$record_path")" == "$forged_record" ]] || {
+      printf 'FAIL case9: %s %s nonce was reclaimed\n' "$variant" "$layout" >&2
+      exit 1
+    }
+  done
+
+  printf '%s\n' "$exact_record" > "$record_path"
+  _SGT_RESPONSE_LOCK_DIR=""
+  _SGT_RESPONSE_LOCK_OWNER_RECORD="$exact_record"
+  _sgt_response_lock_held_by_this_process "$lockdir9" || {
+    printf 'FAIL case9: exact %s acquisition was not recognized\n' "$layout" >&2
+    exit 1
+  }
+  _sgt_response_lock_reclaim "$lockdir9"
+  [[ ! -e "$lockdir9/response.lock" ]] || {
+    printf 'FAIL case9: exact %s acquisition was not reclaimed\n' "$layout" >&2
+    exit 1
+  }
+done
+
+# A live owner whose birth token cannot be read is unverifiable, not stale.  A
+# contender must fail closed without replacing its exact acquisition record.
+sleep 30 & live_owner=$!
+live_owner_start="$(_sgt_process_start_token "$live_owner")"
+lockdir10="$TEST_ROOT/state-10"
+mkdir -p "$lockdir10"
+printf 'pid=%s\nstart=%s\nnonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' \
+  "$live_owner" "$live_owner_start" > "$lockdir10/response.lock"
+birth_probe_record="$(cat "$lockdir10/response.lock")"
+_sgt_process_start_token() {
+  local pid="$1" token
+  [[ "$pid" != "$live_owner" ]] || return 1
+  token="$(awk '{ print $22 }' "/proc/$pid/stat" 2>/dev/null)" || return 1
+  [[ "$token" =~ ^[0-9]+$ ]] || return 1
+  printf 'proc:%s\n' "$token"
+}
+if SGT_RESPONSE_LOCK_TIMEOUT=1 _sgt_response_lock_acquire "$lockdir10" \
+    2> "$TEST_ROOT/case10.err"; then
+  printf 'RECLAIMED_LIVE_OWNER_WHEN_BIRTH_PROBE_FAILED\n' >&2
+  exit 1
+fi
+[[ "$(cat "$lockdir10/response.lock")" == "$birth_probe_record" ]] || {
+  printf 'RECLAIMED_LIVE_OWNER_WHEN_BIRTH_PROBE_FAILED\n' >&2
+  exit 1
+}
+kill "$live_owner" 2>/dev/null || true
+wait "$live_owner" 2>/dev/null || true
+
+# Second-resolution `ps lstart` text is not an exact process-birth identity.
+# The Darwin/BSD path must leave exact ownership unverifiable and let the
+# portable marker/pane protocol decide liveness instead.
+mkdir -p "$TEST_ROOT/darwin-ps-bin"
+cat > "$TEST_ROOT/darwin-ps-bin/ps" <<'PS'
+#!/usr/bin/env bash
+printf 'Thu Aug 13 12:34:56 2026\n'
+PS
+chmod +x "$TEST_ROOT/darwin-ps-bin/ps"
+if PATH="$TEST_ROOT/darwin-ps-bin:$PATH" bash -c \
+    'source "$1"; _sgt_process_start_token 99999999' _ \
+    "$ROOT_DIR/bin/_sgt-process-identity.sh" > "$TEST_ROOT/darwin-token"; then
+  printf 'DARWIN_LSTART_PROMOTED_TO_EXACT_IDENTITY: %s\n' \
+    "$(cat "$TEST_ROOT/darwin-token")" >&2
+  exit 1
+fi
+
+# Legacy ps:* lock records were produced from second-resolution lstart text.
+# They can never prove PID reuse, so even a mismatching live record remains
+# unverifiable and must not be reclaimed by a new exact-token producer.
+lockdir11="$TEST_ROOT/state-11"
+mkdir -p "$lockdir11"
+printf 'pid=%s\nstart=ps:Thu Aug 13 12:34:56 2026\nnonce=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' \
+  "$$" > "$lockdir11/response.lock"
+legacy_ps_record="$(cat "$lockdir11/response.lock")"
+if SGT_RESPONSE_LOCK_TIMEOUT=1 _sgt_response_lock_acquire "$lockdir11" \
+    2> "$TEST_ROOT/case11.err"; then
+  printf 'RECLAIMED_LIVE_LEGACY_PS_OWNER\n' >&2
+  exit 1
+fi
+[[ "$(cat "$lockdir11/response.lock")" == "$legacy_ps_record" ]] || {
+  printf 'RECLAIMED_LIVE_LEGACY_PS_OWNER\n' >&2
+  exit 1
+}
+
+# A platform without an exact process-birth token can still acquire and release
+# its own nonce-bound lock.  The byte-identical in-memory acquisition is the
+# only portable ownership proof; another invocation may never treat the live
+# PID as stale merely because no exact birth token exists.
+source "$ROOT_DIR/bin/_sgt-process-identity.sh"
+lockdir12="$TEST_ROOT/state-12"
+mkdir -p "$lockdir12"
+SGT_TEST_HOOKS=1 SGT_TEST_PROCESS_START_UNAVAILABLE=1 \
+  _sgt_response_lock_acquire "$lockdir12" || {
+  printf 'PORTABLE_RESPONSE_LOCK_ACQUISITION_FAILED\n' >&2
+  exit 1
+}
+portable_record="$(cat "$lockdir12/response.lock")"
+grep -Fxq "pid=$$" "$lockdir12/response.lock"
+grep -Fxq 'start=portable' "$lockdir12/response.lock"
+SGT_TEST_HOOKS=1 SGT_TEST_PROCESS_START_UNAVAILABLE=1 \
+  _sgt_response_lock_release
+[[ ! -e "$lockdir12/response.lock" ]] || {
+  printf 'PORTABLE_RESPONSE_LOCK_RELEASE_FAILED\n' >&2
+  exit 1
+}
+printf '%s\n' "$portable_record" > "$lockdir12/response.lock"
+if SGT_TEST_HOOKS=1 SGT_TEST_PROCESS_START_UNAVAILABLE=1 \
+    SGT_RESPONSE_LOCK_TIMEOUT=1 _sgt_response_lock_acquire "$lockdir12" \
+    2> "$TEST_ROOT/case12.err"; then
+  printf 'RECLAIMED_LIVE_PORTABLE_OWNER\n' >&2
+  exit 1
+fi
+[[ "$(cat "$lockdir12/response.lock")" == "$portable_record" ]]
+
+# A successful but empty process-table snapshot is observer failure, not proof
+# that a recorded owner is absent.  Preserve the exact record fail-closed.
+lockdir13="$TEST_ROOT/state-13"
+mkdir -p "$lockdir13" "$TEST_ROOT/empty-ps-bin"
+printf 'pid=99999999\nstart=proc:1\nnonce=cccccccccccccccccccccccccccccccc\n' \
+  > "$lockdir13/response.lock"
+empty_ps_record="$(cat "$lockdir13/response.lock")"
+cat > "$TEST_ROOT/empty-ps-bin/ps" <<'PS'
+#!/usr/bin/env bash
+exit 0
+PS
+chmod +x "$TEST_ROOT/empty-ps-bin/ps"
+if PATH="$TEST_ROOT/empty-ps-bin:$PATH" SGT_RESPONSE_LOCK_TIMEOUT=1 \
+    _sgt_response_lock_acquire "$lockdir13" 2> "$TEST_ROOT/case13.err"; then
+  printf 'RECLAIMED_OWNER_ON_EMPTY_PS_SNAPSHOT\n' >&2
+  exit 1
+fi
+[[ "$(cat "$lockdir13/response.lock")" == "$empty_ps_record" ]] || {
+  printf 'RECLAIMED_OWNER_ON_EMPTY_PS_SNAPSHOT\n' >&2
+  exit 1
+}
+
+# Two contenders can classify the same stale record concurrently.  The stale
+# compare, retirement, and candidate install must be one serialized ownership
+# transition: exactly one contender becomes holder while the loser observes the
+# winner and times out rather than deleting it.
+lockdir14="$TEST_ROOT/state-14"
+barrier14="$TEST_ROOT/reclaim-barrier-14"
+results14="$TEST_ROOT/reclaim-results-14"
+release14="$TEST_ROOT/reclaim-release-14"
+mkdir -p "$lockdir14" "$barrier14"
+printf 'pid=99999999\nstart=proc:1\nnonce=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n' \
+  > "$lockdir14/response.lock"
+run_reclaim_contender() {
+  local delay="$1"
+  SGT_TEST_HOOKS=1 \
+  SGT_TEST_RESPONSE_LOCK_RECLAIM_BARRIER="$barrier14" \
+  SGT_TEST_RESPONSE_LOCK_RECLAIM_DELAY="$delay" \
+  SGT_RESPONSE_LOCK_TIMEOUT=1 \
+  bash -c '
+    source "$1"
+    if _sgt_response_lock_acquire "$2" 2>/dev/null; then
+      printf "acquired:%s\n" "$BASHPID" >> "$3"
+      while [[ ! -e "$4" ]]; do sleep 0.01; done
+      _sgt_response_lock_release
+    else
+      printf "refused:%s\n" "$BASHPID" >> "$3"
+    fi
+  ' _ "$ROOT_DIR/bin/_sgt-response-lock.sh" "$lockdir14" "$results14" \
+    "$release14" &
+}
+run_reclaim_contender 0
+reclaimer_a=$!
+run_reclaim_contender 0.2
+reclaimer_b=$!
+for _ in $(seq 1 400); do
+  [[ -f "$results14" && "$(wc -l < "$results14")" -ge 2 ]] && break
+  sleep 0.01
+done
+touch "$release14"
+wait "$reclaimer_a"
+wait "$reclaimer_b"
+[[ "$(grep -c '^acquired:' "$results14" || true)" == 1 &&
+   "$(grep -c '^refused:' "$results14" || true)" == 1 ]] || {
+  printf 'CONCURRENT_STALE_RECLAIM_CREATED_MULTIPLE_HOLDERS\n%s\n' \
+    "$(cat "$results14" 2>/dev/null || true)" >&2
   exit 1
 }
 
