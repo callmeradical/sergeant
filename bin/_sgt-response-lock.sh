@@ -264,7 +264,7 @@ _sgt_replacement_worker_command() {
   local token="$1" role="$2" worker_command="$3"
   [[ "$token" =~ ^[a-f0-9]{32}$ && "$role" =~ ^worker:[A-Za-z0-9._-]+$ &&
      -n "$worker_command" && "$worker_command" != *$'\n'* ]] || return 1
-  printf '%q %q %q %s' "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/sgt-replacement-launch" \
+  printf '%q %q %q bash -c %q' "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/sgt-replacement-launch" \
     "$token" "$role" "$worker_command"
 }
 
