@@ -302,6 +302,20 @@ grep -Fq 'create Interrupt after td create' "$TEST_ROOT/td.log"
 grep -Fq 'delete td-installed-app' "$TEST_ROOT/td.log"
 [[ ! -e "$FLEET/interrupt-after-td-create-000000" ]]
 
+# Parent interruption after the td child returns, but before result-map parsing,
+# must derive rollback ownership from the child's durable nonempty journal.
+: > "$TEST_ROOT/td.log"
+set +e
+SGT_TEST_HOOKS=1 \
+  SGT_DISPATCH_FAIL_POINT=dispatch-td-create-returned \
+  run_dispatch 'Interrupt parent after td' >/dev/null 2>&1
+td_parent_interrupt_status=$?
+set -e
+[[ "$td_parent_interrupt_status" -ne 0 ]]
+grep -Fq 'create Interrupt parent after td' "$TEST_ROOT/td.log"
+grep -Fq 'delete td-installed-app' "$TEST_ROOT/td.log"
+[[ ! -e "$FLEET/interrupt-parent-after-td-000000" ]]
+
 # Rollback is best-effort across all owned resources: failure deleting the
 # first generated td task must not skip the second deletion or fleet cleanup.
 : > "$TEST_ROOT/td.log"
