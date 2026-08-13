@@ -14,6 +14,7 @@ export TMUX=fixture TMUX_PANE=%11
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
+REAL_OPENCODE="$(command -v opencode 2>/dev/null || true)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 mkdir -p "$TEST_ROOT/config" "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin" "$TEST_ROOT/repo"
 chmod 700 "$TEST_ROOT/fleet"
@@ -354,6 +355,28 @@ if grep -qiE 'secret|token|password|api[_-]?key' \
   "$TEST_ROOT"/fleet/*/app/agent_model "$TEST_ROOT"/fleet/*/app/agent_model_source; then
   printf 'FAIL: recorded tuple evidence contains a secret-shaped field\n' >&2
   exit 1
+fi
+
+# When OpenCode is installed, exercise the public dispatch CLI against that
+# exact executable. Select a real model whose own catalog reports :medium, then
+# require dispatch's actual models/debug-agent preflight to accept it. CI images
+# without OpenCode retain the deterministic fake-boundary cases above.
+if [[ -n "$REAL_OPENCODE" ]]; then
+  real_catalog="$($REAL_OPENCODE models anthropic --verbose 2>/dev/null || true)"
+  real_medium_model="$(printf '%s\n' "$real_catalog" | awk '
+    /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/ { model = $0 }
+    /^[[:space:]]*"medium"[[:space:]]*:/ && model != "" { print model; exit }
+  ')"
+  if [[ -n "$real_medium_model" ]]; then
+    _dispatch real-opencode-boundary 'Real OpenCode boundary' \
+      --agent "$REAL_OPENCODE" --model "$real_medium_model:medium" >/dev/null
+    state="$(printf '%s\n' "$TEST_ROOT"/fleet/real-opencode-boundary-*/app)"
+    [[ "$(cat "$state/agent_model")" == "$real_medium_model:medium" ]]
+  else
+    printf 'note: installed OpenCode exposes no anthropic model with :medium; real boundary skipped\n'
+  fi
+else
+  printf 'note: OpenCode unavailable; real dispatch boundary skipped\n'
 fi
 
 printf 'sgt-dispatch model tuple: ok\n'

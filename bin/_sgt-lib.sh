@@ -369,7 +369,9 @@ _sgt_confirm_opencode_variant() {
     's/.*"modelID"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
   resolved_variant="$(printf '%s\n' "$resolved" | sed -n \
     's/.*"variant"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  # shellcheck disable=SC2034  # Out-parameter consumed by sourced callers.
   SGT_LAUNCH_RUNTIME_PROVIDER="$resolved_provider"
+  # shellcheck disable=SC2034  # Out-parameter consumed by sourced callers.
   SGT_LAUNCH_RUNTIME_MODEL_ID="$resolved_model"
   SGT_LAUNCH_RUNTIME_VARIANT="$resolved_variant"
 

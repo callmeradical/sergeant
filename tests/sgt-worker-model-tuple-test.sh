@@ -340,34 +340,24 @@ _reject_launch reject-runtime-mismatch opencode anthropic/claude-opus-5:high \
 rm -f "$OPENCODE_TEST_RUNTIME_VARIANT_FILE"
 
 # ── 3b. Corroboration: the harness itself resolves the generated definition ───
-# The gating checks above use the harness model catalog and resolved-agent
-# boundary. This block remains a secondary check that OpenCode loads the
-# generated definition in its agent listing.
-#
-# It is deliberately NON-GATING: it launches a real harness, which is slow and
-# contends with other tests, so an unavailable or inconclusive result prints a
-# note instead of failing.  A CONTRADICTED result — the harness answering cleanly
-# that it does not know the agent — still fails.
+# The deterministic harness cases above cover mismatch injection. When a real
+# OpenCode is installed, its resolved-agent output must independently confirm
+# the exact tuple in the generated definition.
 
 if command -v opencode >/dev/null 2>&1; then
-  harness_list=""
-  baseline_list=""
-  if harness_list="$(OPENCODE_CONFIG="$definition" timeout 120 opencode agent list 2>/dev/null)" &&
-     baseline_list="$(timeout 120 opencode agent list 2>/dev/null)" &&
-     [[ -n "$harness_list" && -n "$baseline_list" ]]; then
-    if [[ "$baseline_list" == *"sgt-pinned"* ]]; then
-      printf 'note: sgt-pinned is ambient here; corroboration inconclusive\n'
-    elif [[ "$harness_list" == *"sgt-pinned"* ]]; then
-      printf 'note: opencode loaded the generated definition\n'
-    else
-      printf 'FAIL: opencode did not register the generated agent definition\n' >&2
-      exit 1
-    fi
-  else
-    printf 'note: opencode agent list inconclusive; corroboration skipped\n'
-  fi
+  real_agent="$(OPENCODE_CONFIG="$definition" timeout 120 \
+    opencode debug agent sgt-pinned 2>/dev/null)" || {
+    printf 'FAIL: real OpenCode could not resolve the pinned agent\n' >&2
+    exit 1
+  }
+  [[ "$real_agent" == *'"providerID": "anthropic"'* &&
+     "$real_agent" == *'"modelID": "claude-opus-5"'* &&
+     "$real_agent" == *'"variant": "high"'* ]] || {
+    printf 'FAIL: real OpenCode resolved a different pinned tuple\n' >&2
+    exit 1
+  }
 else
-  printf 'note: opencode not installed; corroboration skipped\n'
+  printf 'note: opencode not installed; real harness boundary skipped\n'
 fi
 
 # ── 3c. A variant is refused only where the transport is genuinely unknown ────
