@@ -44,6 +44,33 @@ FLEET_ROOT="$(cd "$FLEET_DIR" && pwd -P)"
 TASK_ROOT="$(cd "$TASK_DIR" && pwd -P)"
 [[ "$TASK_ROOT" == "$FLEET_ROOT/$TASK_ID" ]] || _die "Invalid task ID: $TASK_ID"
 
+# An interrupted dispatch can retain only the generated td deletions that
+# failed, after every worktree/repository cleanup was best-efforted.  This is
+# the supported retry boundary: never discard the owning fleet record until
+# the durable journal is empty.
+TD_ROLLBACK_JOURNAL="$TASK_DIR/td-rollback-journal.jsonl"
+TD_ROLLBACK_DIAGNOSTIC="$TASK_DIR/td-rollback-diagnostic"
+if [[ -e "$TD_ROLLBACK_JOURNAL" || -L "$TD_ROLLBACK_JOURNAL" ]]; then
+  [[ -z "$FILTER_REPO" ]] || \
+    _die "Generated td rollback retry is task-wide; omit the repository filter"
+  TD_ROLLBACK_WORK="$(mktemp)" || _die "Could not allocate td rollback retry state"
+  if ! _sgt_read_owned_multiline_file "$TD_ROLLBACK_JOURNAL" > "$TD_ROLLBACK_WORK"; then
+    rm -f "$TD_ROLLBACK_WORK"
+    _die "Generated td rollback journal is not a strict owned file"
+  fi
+  if ! _sgt_td_rollback_state "$TD_ROLLBACK_WORK"; then
+    _sgt_replace_owned_file "$TD_ROLLBACK_JOURNAL" \
+      "$(cat "$TD_ROLLBACK_WORK")" || true
+    _sgt_replace_owned_file "$TD_ROLLBACK_DIAGNOSTIC" \
+      "generated td rollback retry failed: $SGT_TD_ROLLBACK_ERRORS" || true
+    rm -f "$TD_ROLLBACK_WORK"
+    _die "Generated td rollback retry failed: $SGT_TD_ROLLBACK_ERRORS"
+  fi
+  rm -f "$TD_ROLLBACK_WORK"
+  rm -f "$TD_ROLLBACK_JOURNAL" "$TD_ROLLBACK_DIAGNOSTIC"
+  printf 'Generated td rollback retry completed: %s\n' "$TASK_ID"
+fi
+
 # Marker evidence is a task-wide cleanup admission boundary. Validate both
 # namespaces for every repository before callbacks, monitor shutdown, pane
 # retirement, response locks, or any other lifecycle mutation.

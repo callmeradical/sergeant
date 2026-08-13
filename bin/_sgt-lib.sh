@@ -908,6 +908,89 @@ _sgt_replace_owned_file() {
   chmod 600 "$candidate" || { rm -f "$candidate"; return 1; }
   mv "$candidate" "$path" || { rm -f "$candidate"; return 1; }
 }
+
+# _sgt_td_rollback_state <json-lines-journal>
+# Best-effort every td deletion recorded by sgt-td-create.  Callers inspect the
+# aggregate SGT_TD_ROLLBACK_ERRORS string; a single failed deletion never skips
+# later journal entries.
+_sgt_td_rollback_state() {
+  local state_file="$1" rows_file remaining_file repo_name task_id work_dir delete_output
+  local parse_failed=false cleanup_failed=false journal_update_failed=false
+  SGT_TD_ROLLBACK_ERRORS=""
+  [[ -s "$state_file" ]] || return 0
+  rows_file="$(mktemp)" || {
+    SGT_TD_ROLLBACK_ERRORS="could not allocate td rollback parser state"
+    return 1
+  }
+  remaining_file="$(mktemp "${state_file}.rollback.XXXXXX")" || {
+    rm -f "$rows_file"
+    SGT_TD_ROLLBACK_ERRORS="could not allocate td rollback remainder state"
+    return 1
+  }
+  if ! python3 - "$state_file" > "$rows_file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle:
+        line = line.strip()
+        if not line:
+            continue
+        item = json.loads(line)
+        print("\t".join([item["repo"], item["task_id"], item["work_dir"]]))
+PY
+  then
+    parse_failed=true
+    cleanup_failed=true
+    SGT_TD_ROLLBACK_ERRORS="td rollback journal is malformed: $state_file"
+  fi
+
+  while IFS=$'\t' read -r repo_name task_id work_dir; do
+    [[ -n "$task_id" ]] || continue
+    if ! delete_output="$(td delete "$task_id" --work-dir "$work_dir" --force --json 2>&1)"; then
+      cleanup_failed=true
+      [[ -z "$SGT_TD_ROLLBACK_ERRORS" ]] || SGT_TD_ROLLBACK_ERRORS+=$'\n'
+      SGT_TD_ROLLBACK_ERRORS+="cleanup failed for $task_id in $repo_name"
+      [[ -z "$delete_output" ]] || SGT_TD_ROLLBACK_ERRORS+=": $delete_output"
+      if ! python3 - "$remaining_file" "$repo_name" "$task_id" "$work_dir" <<'PY'
+import json
+import os
+import sys
+
+with open(sys.argv[1], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps({
+        "repo": sys.argv[2],
+        "task_id": sys.argv[3],
+        "work_dir": sys.argv[4],
+    }) + "\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+PY
+      then
+        journal_update_failed=true
+        [[ -z "$SGT_TD_ROLLBACK_ERRORS" ]] || SGT_TD_ROLLBACK_ERRORS+=$'\n'
+        SGT_TD_ROLLBACK_ERRORS+="could not retain failed td rollback entry: $task_id"
+      fi
+    fi
+  done < "$rows_file"
+  rm -f "$rows_file"
+  if $parse_failed; then
+    rm -f "$remaining_file"
+    return 1
+  fi
+  if $journal_update_failed; then
+    rm -f "$remaining_file"
+    return 1
+  fi
+  mv "$remaining_file" "$state_file" || {
+    rm -f "$remaining_file"
+    [[ -z "$SGT_TD_ROLLBACK_ERRORS" ]] || SGT_TD_ROLLBACK_ERRORS+=$'\n'
+    SGT_TD_ROLLBACK_ERRORS+="could not persist remaining td rollback journal: $state_file"
+    return 1
+  }
+  $cleanup_failed && return 1
+  return 0
+}
 _sgt_pane_identity_matches() {
   local pane="$1" repo_dir="$2" identity_name="${3:-pane_identity}" expected actual current
   actual="$(_sgt_pane_identity "$pane")" || return 1
