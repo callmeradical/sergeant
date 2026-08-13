@@ -189,6 +189,10 @@ show the open task queue
 explain which repository owns <feature>
 ```
 
+If a dispatched worker's pane disappears but its td task is still open, use `sgt-session-resume <project> <repo>` before dispatching a replacement; it restores the agent in the existing worktree without duplicating work.
+
+Terminal workers automatically retire their owned descendant processes on completion; agent, shell, and sleep processes started during a session are cleaned up when the worker finishes.
+
 ## Completion checklist
 
 - [ ] Required commands resolve on `PATH` or through `bin/`

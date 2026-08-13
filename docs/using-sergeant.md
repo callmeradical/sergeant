@@ -177,10 +177,39 @@ the exact pane identity, worktree, td handoff, and response/notification state,
 use `sgt-recover <fleet-task-id> <repo>` only for that exact `live worker
 stalled` case.
 
+### Bounded status-query across a project
+
+```bash
+sgt-watch --snapshot --project <project> [--td <td-id>]
+```
+
+This produces a `sergeant.status-query/v1` document rather than
+`sergeant.watch-status/v1`. It is strictly read-only and covers the entire named
+project. Supply `--td <td-id>` to restrict fleet evidence to tasks descended from
+that td epic.
+
+```console
+$ sgt-watch --snapshot --project myapp
+{"schema":"sergeant.status-query/v1","observed_at":"2026-08-05T17:42:01Z","scope":{"project":"myapp","td_id":null},"resolved":true,"namespace":"project","reason":"ok","fleet":{"busy":null,"basis":"no_verified_active_witness","totals":{"total":1,"needs_input":0,"blocked":0,"waiting":0,"terminal":1,"in_progress":0,"other":0}},"project_state":{"name":"myapp","repos":[{"name":"myapp-api","cloned":true,"branch":"feat/oauth"}]},"coordinator":null}
+
+$ sgt-watch --snapshot --project does-not-exist
+{"schema":"sergeant.status-query/v1","observed_at":"2026-08-05T17:42:02Z","scope":{"project":"does-not-exist","td_id":null},"resolved":false,"namespace":"unknown","reason":"project_not_found","fleet":null,"project_state":null,"coordinator":null}
+```
+
+Key behaviors:
+
+- An unknown project produces `resolved:false`, never a shape identical to an
+  inconclusive fleet observation.
+- `busy:null` remains inconclusive; this schema never emits `busy:false`.
+- `project_state` holds config and git evidence (repo names, clone state, active
+  branch) and is strictly separate from fleet evidence.
+- `coordinator` reports locally observed identity evidence; `queried` is always
+  `false` — this version never performs a live round-trip to the coordinator.
+
 ## Worker states
 
 | State | Meaning | Operator action |
-|---|---|---|
+| --- | --- | --- |
 | `in_progress` | Worker reports active work and may carry a nonterminal stall diagnostic | Verify progress evidence before calling it healthy |
 | `needs_input` | Human decision required | Read exact message and respond once per generation |
 | `blocked` | Durable dependency or external blocker | Preserve worktree/handoff; resume after dependency resolution |
@@ -205,7 +234,7 @@ sgt-wake <fleet-task-id> <repo>
 `max_attempts=<int>`, and `backoff_base=<seconds>`.
 
 | Kind | Required fields | Resumes when |
-|---|---|---|
+| --- | --- | --- |
 | `not_before` | `not_before=<unix_timestamp>` | that timestamp has passed |
 | `github_check` | `run_id=<id>` and `check_name=<name>` | the check named `check_name` in that run concludes `success` |
 | `fleet_dependency` | `task_id=<id>` and `repo=<repo>` | that worker reaches `done` |
@@ -313,6 +342,21 @@ durably bound successor notification. A live or reused owner, ambiguous
 identity, malformed evidence, or any pane/process probe error remains
 fail-closed and actionable; no lease is abandoned and no successor is claimed
 as resumed.
+
+## Resume an orphaned worker session
+
+When a worker's pane is gone but its td task is still open and its worktree is
+intact, use `sgt-session-resume` before dispatching a replacement:
+
+```bash
+sgt-session-resume <project> <repo>
+```
+
+This injects any unread inbox messages and spawns a fresh agent in the existing
+worktree. Run `sgt-watch --sync <fleet-task-id>` first to confirm the state is
+`orphaned` or `in_progress` with a gone pane. Do not use `sgt-session-resume`
+for an active `waiting` or `needs_input` gate; use `sgt-wake` or `sgt-respond`
+for those states.
 
 ## Retire stale terminal pane ownership
 
@@ -464,6 +508,7 @@ wiki-daily-digest --since YYYY-MM-DD
 
 Read [Skills and their sources](skills.md) for engineering workflow skills and
 [Troubleshooting](troubleshooting.md) for recovery guidance.
+
 ## Worker process lifecycle evidence
 
 Sergeant keeps process-retirement evidence in each repository's fleet state.

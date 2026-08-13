@@ -67,6 +67,30 @@ stall classification. If Sergeant refuses because pane identity or unfinished
 notification delivery evidence no longer matches, keep the preserved state and
 follow the resulting `needs_input` handoff instead of forcing another retry.
 
+## sgt-watch --snapshot reports inconclusive for a live worker
+
+Symptom: `sgt-watch --snapshot <task-id> --repo <repo>` returns `busy:null` even
+though the worker pane is alive and the task is `in_progress`.
+
+Cause: tmux 3.7b may leave `pane_activity` empty while the worker is running
+(issue #206). Before PR #219, Sergeant used only `pane_activity` as the activity
+witness, so a live worker on tmux 3.7b appeared inconclusive.
+
+Fix: Upgrade to Sergeant 0.13082026 or later. The snapshot now also reads
+`window_activity` when `pane_activity` is empty, provided the worker occupies a
+single-pane window (a split window is deliberately inconclusive: activity from
+another pane must not become a worker witness).
+
+If the result remains inconclusive after upgrading, run:
+
+```bash
+sgt-watch --sync <task-id>
+```
+
+A `live worker stalled` diagnostic with a recent `progress_ts` means the worker
+is alive but has not produced a recent durable witness; wait for the next
+activity event or use `sgt-recover` only for the exact stall classification.
+
 ## Worker became orphaned after blocking
 
 Read `.sergeant-message`, td handoff, response generation, and worker exit reason.
@@ -238,17 +262,75 @@ stat -c '%d' "$SERGEANT_FLEET"
 See `bin/sgt-cleanup:_same_filesystem_pair` for the implementation and
 `tests/sgt-cleanup-cross-filesystem-test.sh` for the test coverage.
 
+## Processes not cleaning up after session ends
+
+Symptom: After a Sergeant session ends, `ps` shows leftover agent, shell, or
+sleep processes that were owned by that session.
+
+Cause: Before PR #212, terminal worker recycling killed only the tmux pane,
+leaving owned descendant processes alive. Workers could exit while their shell,
+agent harness, and sleep helpers continued running.
+
+Fix: Upgrade to Sergeant 0.13082026 or later. Terminal workers now retire their
+owned descendant processes before the pane exits. If processes remain after
+upgrading, confirm the task has reached a terminal state first:
+
+```bash
+sgt-watch --sync-all
+```
+
+Once the task is terminal, remaining processes can be identified by their
+original Sergeant session ancestry and terminated with standard tools. Do not
+kill processes before verifying their task is terminal; a live worker's
+descendants may be doing legitimate work.
+
+## Review-router preflight fails
+
+Symptom: `sgt-dispatch` exits before creating any worktree or fleet state with
+a message such as:
+
+```
+review-router preflight: sgt-review-findings is not installed on PATH. Update or reinstall Sergeant.
+```
+
+Cause: As of 0.13082026, dispatch verifies that `sgt-review-findings` is
+installed, executable, and exposes a compatible `--capabilities` contract before
+creating any state. A missing, unexecutable, or incompatible installation fails
+closed with an actionable message.
+
+Fix: Confirm `sgt-review-findings` is on `PATH`:
+
+```bash
+command -v sgt-review-findings
+```
+
+If missing or wrong version, reinstall:
+
+```bash
+mise run install
+```
+
+Then verify the installed command is executable and returns a capabilities
+document:
+
+```bash
+sgt-review-findings --capabilities
+```
+
+If the command is present but the contract mismatch message names a specific
+capability, the installed `sgt-review-findings` is from an older Sergeant
+checkout. Update the checkout and reinstall.
+
 ## Where to inspect state
 
 | State | Path or command |
-|---|---|
+| --- | --- |
 | Project registry | `~/.config/sergeant/` |
 | Fleet record | `~/.local/share/sergeant/fleet/<task>/<repo>/` |
 | Worker status/message/result | Worktree `.sergeant-*` files and mirrored fleet state |
 | Task state | `td context <id> --work-dir <repo-path>` |
 | Git state | `git status`, worktree list, branch and PR heads |
 | no-mistakes run | `no-mistakes axi status --run <id>` |
-
 
 If documentation does not cover the observed failure, use the `sergeant-help`
 skill to search the docs, then create a td task containing the exact reproduction,
