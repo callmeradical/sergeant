@@ -10,7 +10,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 HOST_PATH="/usr/local/bin:/usr/bin:/bin"
-DIST="$TEST_ROOT/distribution"
+DIST="$TEST_ROOT/sgt path & dollar\$ paren()"
 PREFIX="$TEST_ROOT/prefix"
 FAKE_BIN="$TEST_ROOT/fake-bin"
 CONFIG="$TEST_ROOT/config"
@@ -309,7 +309,7 @@ grep -Fq "Sanitized findings retained at $artifact" "$worktree/.sergeant-message
 cp "$TEST_ROOT/original-router" "$canonical_router"
 cp /usr/bin/true "$canonical_router"
 cat > "$TEST_ROOT/launcher-mismatch-findings.json" <<'EOF'
-{"findings":[{"id":"launcher-1","severity":"warning","disposition":"actionable","summary":"Launcher mismatch","evidence":"router bytes changed after dispatch","paths":["bin/sgt-review-findings"],"acceptance_criteria":"retain sanitized findings","recommendation":"restore the pinned router"}]}
+{"findings":[{"id":"launcher-1","severity":"warning","disposition":"actionable","summary":"Launcher mismatch","evidence":"router bytes changed after dispatch AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","paths":["bin/sgt-review-findings"],"acceptance_criteria":"retain sanitized findings","recommendation":"restore the pinned router"}]}
 EOF
 set +e
 wholesale_output="$(PATH="$FAKE_BIN:$HOST_PATH" TD_LOG="$TEST_ROOT/launcher-td.log" \
@@ -320,6 +320,11 @@ set -e
 [[ "$wholesale_status" -ne 0 && "$wholesale_output" == *'identity mismatch'* ]]
 launcher_artifact="$worktree/.sergeant-review-artifacts/standards-launcher-runtime"
 [[ -s "$launcher_artifact/findings" && -s "$launcher_artifact/meta" ]]
+grep -aFq '[REDACTED]' "$launcher_artifact/findings"
+if grep -aFq 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' "$launcher_artifact/findings"; then
+  printf 'launcher mismatch artifact retained a high-entropy secret\n' >&2
+  exit 1
+fi
 grep -Fq 'router_launcher=' "$launcher_artifact/meta"
 grep -Fq "Sanitized findings retained at $launcher_artifact" "$worktree/.sergeant-message"
 grep -Fq "$DIST/bin/sgt-review-router-launch" "$worktree/.sergeant-message"

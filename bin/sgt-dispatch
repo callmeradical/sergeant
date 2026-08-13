@@ -250,6 +250,11 @@ _sgt_render_brief() {
   local content review_router_launcher_shell review_router_executable_shell
   local review_router_identity_shell review_router_capabilities_shell
   local review_router_project_shell review_router_repo_shell
+  local patsub_replacement_was_set=false
+  if shopt -q patsub_replacement 2>/dev/null; then
+    patsub_replacement_was_set=true
+    shopt -u patsub_replacement
+  fi
   if ! content="$(python3 - "$_BRIEF_TEMPLATE" "$_BRIEF_TEMPLATE_ID" <<'PY'
 import os
 import hashlib
@@ -312,6 +317,9 @@ PY
   content="${content//\{\{REVIEW_ROUTER_PROJECT\}\}/$review_router_project_shell}"
   content="${content//\{\{REVIEW_ROUTER_REPO\}\}/$review_router_repo_shell}"
   printf '%s\n' "$content" > "$output"
+  if $patsub_replacement_was_set; then
+    shopt -s patsub_replacement
+  fi
 }
 
 # ── Parse args ───────────────────────────────────────────────────────────────
