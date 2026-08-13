@@ -140,6 +140,29 @@ chmod +x "$fake_bin/td"
 TMUX_LOG="$TEST_ROOT/tmux.log"
 TD_LOG="$TEST_ROOT/td.log"
 
+# A current process marker without its durable history is torn evidence. The
+# public recovery command must fail before replacing either the marker or its
+# marker-history publication.
+_setup_stalled_worker "$repo_state" "$worktree"
+printf 'prior-current-marker\n' > "$repo_state/worker_process_marker"
+chmod 600 "$repo_state/worker_process_marker"
+cp "$repo_state/worker_process_marker" "$TEST_ROOT/torn-marker.before"
+set +e
+EXPECTED_WORKER="$repo_state" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-recover" task-1 app >/dev/null 2>&1
+torn_status=$?
+set -e
+[[ "$torn_status" -ne 0 ]]
+cmp "$TEST_ROOT/torn-marker.before" "$repo_state/worker_process_marker"
+[[ ! -e "$repo_state/worker_process_markers" ]]
+[[ -z "$(find "$repo_state" -maxdepth 1 -name '.worker-process-marker.*' -print -quit)" ]]
+[[ "$(cat "$repo_state/status")" == in_progress ]]
+grep -Fq 'live worker stalled:' "$repo_state/diagnostic"
+[[ ! -e "$repo_state/stall_recovery_attempted" && \
+  ! -e "$repo_state/notification_id" && ! -e "$repo_state/notifications" && \
+  ! -e "$worktree/.sergeant-notification" ]]
+rm "$repo_state/worker_process_marker"
+
 # ── Slice 1: Happy path — stalled worker recovered ───────────────────────────
 # A worker with status=in_progress and a live-worker-stalled diagnostic is
 # recovered: old pane killed, new pane launched, diagnostic cleared,

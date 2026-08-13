@@ -41,6 +41,8 @@ unset -f _sgt_recover_real_dir
 source "$SCRIPT_DIR/_sgt-lib.sh"
 # shellcheck source=bin/_sgt-response-lock.sh
 source "$SCRIPT_DIR/_sgt-response-lock.sh"
+# shellcheck source=bin/_sgt-drain.sh
+source "$SCRIPT_DIR/_sgt-drain.sh"
 
 [[ $# -eq 2 ]] || _die "Usage: sgt-recover <task-id> <repo>"
 
@@ -55,6 +57,8 @@ REPO_DIR="$FLEET_DIR/$TASK_ID/$REPO"
 
 worktree="$(cat "$REPO_DIR/worktree" 2>/dev/null || true)"
 [[ -n "$worktree" && -d "$worktree" ]] || _die "Worktree unavailable for $TASK_ID/$REPO"
+_sgt_worker_process_marker_preflight "$REPO_DIR" || \
+  _die "Recovery refused: worker process marker evidence is torn"
 
 # ── 1. Verify stall proof (pre-lock fast path) ───────────────────────────────
 
@@ -65,12 +69,30 @@ status="$(cat "$REPO_DIR/status" 2>/dev/null || true)"
 diagnostic="$(cat "$REPO_DIR/diagnostic" 2>/dev/null || true)"
 [[ "$diagnostic" == "live worker stalled:"* ]] || \
   _die "Recovery is unavailable: no stall classification proof in diagnostic"
+initial_pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
+initial_pane_identity="$(_sgt_read_owned_file \
+  "$REPO_DIR/pane_identity" 2>/dev/null || true)"
 
 # ── 2. Acquire lock ──────────────────────────────────────────────────────────
 
+_SGT_RECOVER_LAUNCH_FD=9
+_sgt_drain_lock_acquire_fd "$_SGT_RECOVER_LAUNCH_FD" worker-launch \
+  "$REPO_DIR/worker-launch.lock" || _die "Could not acquire exact worker-launch ownership"
+_sgt_worker_launch_transaction_begin "$REPO_DIR" "$_SGT_RECOVER_LAUNCH_FD" || \
+  _die "Could not snapshot worker generation before recovery"
+if [[ "$SGT_DRAIN_LOCK_CONTENDED_LIVE" == true ]] && \
+  _sgt_worker_launch_observed_completion_matches "$REPO_DIR"; then
+  printf 'sgt-recover: verified peer worker-launch transaction completed for %s/%s.\n' \
+    "$TASK_ID" "$REPO"
+  _sgt_drain_lock_release_fd "$_SGT_RECOVER_LAUNCH_FD"
+  exit 0
+fi
 _sgt_response_lock_acquire "$REPO_DIR"
 _cleanup_recover() {
-  _sgt_response_lock_release
+  local cleanup_status=0
+  _sgt_response_lock_release || cleanup_status=1
+  _sgt_drain_lock_release_fd "$_SGT_RECOVER_LAUNCH_FD" || cleanup_status=1
+  return "$cleanup_status"
 }
 trap '_cleanup_recover' EXIT
 
@@ -78,6 +100,15 @@ trap '_cleanup_recover' EXIT
 
 status="$(cat "$REPO_DIR/status" 2>/dev/null || true)"
 diagnostic="$(cat "$REPO_DIR/diagnostic" 2>/dev/null || true)"
+_sgt_worker_process_marker_preflight "$REPO_DIR" || \
+  _die "Recovery refused: worker process marker evidence changed while waiting for ownership"
+current_pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
+current_pane_identity="$(_sgt_read_owned_file \
+  "$REPO_DIR/pane_identity" 2>/dev/null || true)"
+if [[ "$current_pane" != "$initial_pane" || \
+  "$current_pane_identity" != "$initial_pane_identity" ]]; then
+  _die "Recovery refused: worker pane changed without completion from the exact observed launch owner"
+fi
 
 _next_gate_generation() {
   local current=""
@@ -120,6 +151,7 @@ _escalate() {
 # _recover_die: release lock, clear trap, and exit with an error message.
 _recover_die() {
   _sgt_response_lock_release
+  _sgt_drain_lock_release_fd "$_SGT_RECOVER_LAUNCH_FD"
   trap - EXIT
   _die "$@"
 }
@@ -321,6 +353,8 @@ _sgt_publish_worker_notification "$REPO_DIR" "$worktree" \
 # original stalled pane remains alive and the worker is escalated to
 # needs_input for investigation.
 
+_sgt_prepare_worker_process_marker "$REPO_DIR" || \
+  _recover_die "Stall recovery failed: worker process marker could not be prepared"
 worker_command="$(_sgt_worker_command \
   "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")"
 
@@ -359,6 +393,8 @@ if pane_identity="$(_sgt_pane_identity "$new_pane")" && [[ -n "$pane_identity" ]
   _sgt_notification_target_create "$REPO_DIR" "$delivery_notification_id" \
       "$pane_identity" >/dev/null || \
     _abort_replacement "notification target race detected during stall recovery relaunch"
+  _sgt_worker_launch_completion_publish "$REPO_DIR" "$_SGT_RECOVER_LAUNCH_FD" || \
+    _abort_replacement "could not publish completed worker-launch transaction"
 else
   _abort_replacement "tmux failed to capture relaunched worker pane identity"
 fi
@@ -387,6 +423,7 @@ fi
 rm -f "$REPO_DIR/diagnostic" "$REPO_DIR/message" "$worktree/.sergeant-message"
 
 _sgt_response_lock_release
+_sgt_drain_lock_release_fd "$_SGT_RECOVER_LAUNCH_FD"
 trap - EXIT
 printf 'sgt-recover: stall recovery complete for %s/%s, new pane %s.\n' \
   "$TASK_ID" "$REPO" "$new_pane"

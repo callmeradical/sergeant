@@ -180,6 +180,45 @@ respond() {
   printf '%s' "$response_body" | "$ROOT_DIR/bin/sgt-respond" task-1 app
 }
 
+# Torn process-capability evidence is rejected before response or notification
+# publication mutates either fleet state or the worktree.
+printf 'prior-current-marker\n' > "$repo_state/worker_process_marker"
+chmod 600 "$repo_state/worker_process_marker"
+cp "$repo_state/worker_process_marker" "$TEST_ROOT/respond-torn.before"
+set +e
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/respond-torn-tmux.log" \
+  TD_LOG="$TEST_ROOT/respond-torn-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  respond 'do not publish this response' >/dev/null 2>&1
+respond_torn_status=$?
+set -e
+[[ "$respond_torn_status" -ne 0 ]]
+cmp "$TEST_ROOT/respond-torn.before" "$repo_state/worker_process_marker"
+[[ ! -e "$repo_state/worker_process_markers" && \
+  ! -e "$repo_state/notification_id" && ! -e "$repo_state/response" && \
+  ! -e "$worktree/.sergeant-response" && ! -e "$TEST_ROOT/respond-torn-tmux.log" ]]
+rm "$repo_state/worker_process_marker"
+
+printf '%032d|1:2|198|%s\n' 1 "$TEST_ROOT/unlinked-marker" \
+  > "$repo_state/worker_process_marker"
+printf '%032d|1:2|1\n' 2 > "$repo_state/worker_process_markers"
+chmod 600 "$repo_state/worker_process_marker" "$repo_state/worker_process_markers"
+cp "$repo_state/worker_process_marker" "$TEST_ROOT/respond-mismatch-marker.before"
+cp "$repo_state/worker_process_markers" "$TEST_ROOT/respond-mismatch-history.before"
+set +e
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/respond-mismatch-tmux.log" \
+  TD_LOG="$TEST_ROOT/respond-mismatch-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  respond 'do not publish mismatched evidence' >/dev/null 2>&1
+respond_mismatch_status=$?
+set -e
+[[ "$respond_mismatch_status" -ne 0 ]]
+cmp "$TEST_ROOT/respond-mismatch-marker.before" "$repo_state/worker_process_marker"
+cmp "$TEST_ROOT/respond-mismatch-history.before" "$repo_state/worker_process_markers"
+[[ ! -e "$repo_state/notification_id" && ! -e "$repo_state/response" && \
+  ! -e "$worktree/.sergeant-response" && ! -e "$TEST_ROOT/respond-mismatch-tmux.log" ]]
+rm "$repo_state/worker_process_marker" "$repo_state/worker_process_markers"
+
 assert_publication_failure() {
   local target="$1"
   local label="$2"
@@ -436,6 +475,129 @@ rm "$repo_state/response.lock/pid"
 rmdir "$repo_state/response.lock"
 wait "$locked_pid"
 [[ "$(cat "$worktree/.sergeant-response")" == 'serialized response' ]]
+
+rm -f "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" \
+  "$worktree/.sergeant-response-generation" "$repo_state/response" \
+  "$repo_state/response_id" "$repo_state/response_generation" \
+  "$repo_state/respond-launch-ready" "$repo_state/respond-launch-release" \
+  "$repo_state/respond-launch-contended"
+rm -rf "$repo_state/queued_responses"
+printf 'orphaned\n' > "$worktree/.sergeant-status"
+printf 'orphaned\n' > "$repo_state/status"
+printf '1\n' > "$worktree/.sergeant-gate-generation"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/distinct-race.log" \
+  TD_LOG="$TEST_ROOT/distinct-race-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 PANE_IDENTITY='0|%42|7777|777777|recycled-pane' \
+  EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  SGT_TEST_HOOKS=1 SGT_TEST_RESPOND_LAUNCH_BARRIER=1 \
+  respond 'first distinct response' >"$TEST_ROOT/distinct-first.out" 2>&1 & first_response_pid=$!
+for _ in $(seq 1 500); do
+  [[ -e "$repo_state/respond-launch-ready" ]] && break
+  sleep 0.01
+done
+[[ -e "$repo_state/respond-launch-ready" ]]
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/distinct-race.log" \
+  TD_LOG="$TEST_ROOT/distinct-race-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 NEW_PANE=%99 PANE_IDENTITY='1|%99|7777|777777|dead-pane' \
+  SGT_TEST_HOOKS=1 \
+  SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=60 \
+  _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$repo_state/respond-launch-contended" \
+  EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  respond 'second distinct response' >"$TEST_ROOT/distinct-second.out" 2>&1 & second_response_pid=$!
+for _ in $(seq 1 6000); do
+  [[ -e "$repo_state/respond-launch-contended" ]] && break
+  sleep 0.01
+done
+[[ -e "$repo_state/respond-launch-contended" ]]
+: > "$repo_state/respond-launch-release"
+set +e
+wait "$first_response_pid"; first_response_status=$?
+wait "$second_response_pid"; second_response_status=$?
+set -e
+if [[ "$first_response_status" -ne 0 || "$second_response_status" -ne 0 ]]; then
+  cat "$TEST_ROOT/distinct-first.out" "$TEST_ROOT/distinct-second.out" >&2
+  exit 1
+fi
+[[ "$(cat "$repo_state/response")" == 'first distinct response' ]]
+queued_body="$(find "$repo_state/queued_responses" -name body -type f -print -quit)"
+[[ -n "$queued_body" && "$(cat "$queued_body")" == 'second distinct response' ]]
+queued_dir="${queued_body%/body}"
+[[ "$(cat "$queued_dir/gate_generation")" == 1 ]]
+queued_id="${queued_dir##*/}"
+[[ -f "$repo_state/notifications/$queued_id/notification" ]]
+[[ "$(grep -c '^new-window ' "$TEST_ROOT/distinct-race.log")" -eq 1 ]]
+
+# Consumption of the first response while its launch owner still holds the
+# transaction cannot make a distinct waiter disappear. The second body is
+# durably queued and notification-bound before peer-completion success.
+rm -rf "$repo_state/queued_responses"
+rm -f "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" \
+  "$worktree/.sergeant-response-generation" "$repo_state/response" \
+  "$repo_state/response_id" "$repo_state/response_generation" \
+  "$repo_state/respond-after-completion-ready" \
+  "$repo_state/respond-after-completion-release" \
+  "$repo_state/respond-after-completion-contended"
+printf 'orphaned\n' > "$worktree/.sergeant-status"
+printf 'orphaned\n' > "$repo_state/status"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/consumed-race.log" \
+  TD_LOG="$TEST_ROOT/consumed-race-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 NEW_PANE=%100 PANE_IDENTITY='1|%99|7777|777777|dead-pane' \
+  EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  SGT_TEST_HOOKS=1 SGT_TEST_RESPOND_AFTER_COMPLETION_BARRIER=1 \
+  respond 'consumed first response' >"$TEST_ROOT/consumed-first.out" 2>&1 & consumed_first_pid=$!
+for _ in $(seq 1 500); do
+  [[ -e "$repo_state/respond-after-completion-ready" ]] && break
+  sleep 0.01
+done
+if [[ ! -e "$repo_state/respond-after-completion-ready" ]]; then
+  cat "$TEST_ROOT/consumed-first.out" >&2
+  exit 1
+fi
+rm -f "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" \
+  "$worktree/.sergeant-response-generation" "$repo_state/response" \
+  "$repo_state/response_id" "$repo_state/response_generation"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/consumed-race.log" \
+  TD_LOG="$TEST_ROOT/consumed-race-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
+  PANE_ALIVE=1 NEW_PANE=%100 REQUIRE_TARGET=1 \
+  SGT_TEST_HOOKS=1 \
+  SERGEANT_DRAIN_LOCK_TIMEOUT_SECS=60 \
+  _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$repo_state/respond-after-completion-contended" \
+  PANE_IDENTITY='0|%42|7777|777777|recycled-pane' \
+  EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
+  respond 'durable second response' >"$TEST_ROOT/consumed-second.out" 2>&1 & consumed_second_pid=$!
+for _ in $(seq 1 6000); do
+  [[ -e "$repo_state/respond-after-completion-contended" ]] && break
+  sleep 0.01
+done
+[[ -e "$repo_state/respond-after-completion-contended" ]]
+: > "$repo_state/respond-after-completion-release"
+wait "$consumed_first_pid"
+wait "$consumed_second_pid"
+consumed_queued_body="$(find "$repo_state/queued_responses" -name body -type f \
+  -print -quit 2>/dev/null || true)"
+if [[ -z "$consumed_queued_body" || \
+  "$(cat "$consumed_queued_body")" != 'durable second response' ]]; then
+  cat "$TEST_ROOT/consumed-first.out" "$TEST_ROOT/consumed-second.out" >&2
+  exit 1
+fi
+consumed_queued_dir="${consumed_queued_body%/body}"
+consumed_queued_id="${consumed_queued_dir##*/}"
+[[ -f "$repo_state/notifications/$consumed_queued_id/notification" ]]
+# The queued notification is not deliverable until it is bound to the exact
+# successor pane. Exercise the worker-facing delivery handshake, not just the
+# presence of the queued body.
+consumed_target_nonce="$(cat "$repo_state/notification_target" 2>/dev/null || true)"
+[[ "$consumed_target_nonce" =~ ^[a-f0-9]{32}$ ]]
+consumed_target_dir="$repo_state/notifications/$consumed_queued_id/targets/$consumed_target_nonce"
+[[ "$(cat "$consumed_target_dir/pane_identity")" == \
+  '0|%100|9999|654321|sgt-interactive-worker:'"$repo_state" ]]
+[[ -f "$consumed_target_dir/accepted" && -f "$consumed_target_dir/delivered" ]]
+grep -Fq 'queued response delivered to pane %100' "$TEST_ROOT/consumed-second.out"
+[[ "$(grep -c '^new-window ' "$TEST_ROOT/consumed-race.log")" -eq 1 ]]
+printf '%%42\n' > "$repo_state/pane"
+printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo_state" \
+  > "$repo_state/pane_identity"
+chmod 600 "$repo_state/pane_identity"
 
 rm -f "$worktree/.sergeant-response" "$repo_state/response"
 printf 'done\n' > "$worktree/.sergeant-status"

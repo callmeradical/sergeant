@@ -246,19 +246,32 @@ _watch_drain() {
 # descendants even after this pane has exited.  Writes are atomic (tmp+mv) to
 # prevent cleanup from reading a partial state.
 _record_worker_identity() {
-  local pid pgid start tmp
+  local pid pgid sid start tmp
   pid="$$"
   pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
-  start="$(ps -o lstart= -p "$$" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
-  [[ -n "$pgid" && -n "$start" ]] || return 0
+  sid="$(_sgt_process_session_id "$$" 2>/dev/null || true)"
+  start="$(_sgt_process_identity "$$" 2>/dev/null || true)"
+  if ! _sgt_validate_inherited_worker_marker "$REPO_STATE"; then
+    printf 'worker process marker conflicts with durable launch ownership\n' \
+      > "$REPO_STATE/diagnostic"
+    return 1
+  fi
+  [[ -n "$pgid" && -n "$sid" && -n "$start" ]] || return 0
   tmp="$(mktemp "$REPO_STATE/worker_pid.XXXXXX")" && \
     printf '%s\n' "$pid" > "$tmp" && mv "$tmp" "$REPO_STATE/worker_pid" || return 0
   tmp="$(mktemp "$REPO_STATE/worker_process_group.XXXXXX")" && \
     printf '%s\n' "$pgid" > "$tmp" && mv "$tmp" "$REPO_STATE/worker_process_group" || return 0
   tmp="$(mktemp "$REPO_STATE/worker_process_start.XXXXXX")" && \
     printf '%s\n' "$start" > "$tmp" && mv "$tmp" "$REPO_STATE/worker_process_start" || return 0
+  tmp="$(mktemp "$REPO_STATE/worker_session_id.XXXXXX")" && \
+    printf '%s\n' "$sid" > "$tmp" && mv "$tmp" "$REPO_STATE/worker_session_id" || return 0
 }
-_record_worker_identity
+if ! _record_worker_identity; then
+  printf 'failed: worker process marker validation failed\n' > "$REPO_STATE/status"
+  printf 'failed: worker process marker validation failed\n' \
+    > "$WORKTREE/.sergeant-status"
+  exit 2
+fi
 
 _status() {
   tr -d '\n' < "$WORKTREE/.sergeant-status" 2>/dev/null || echo "in_progress"

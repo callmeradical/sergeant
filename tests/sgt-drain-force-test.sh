@@ -4,6 +4,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=bin/_sgt-process.sh
+source "$ROOT_DIR/bin/_sgt-process.sh"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
@@ -107,6 +109,8 @@ sleep 100 & fake_pid1=$!
 sleep 100 & fake_pid2=$!
 printf '%s\n' "$fake_pid1" > "$repo1/worker_pid"
 printf '%s\n' "$fake_pid2" > "$repo2/worker_pid"
+_sgt_process_identity "$fake_pid1" > "$repo1/worker_process_start"
+_sgt_process_identity "$fake_pid2" > "$repo2/worker_process_start"
 printf '%%fake1\n' > "$repo1/pane"
 printf '%%fake2\n' > "$repo2/pane"
 

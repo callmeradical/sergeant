@@ -176,12 +176,79 @@ watch_worktree="$TEST_ROOT/watch-worktree"
 mkdir -p "$watch_task/app" "$watch_worktree"
 printf 'Brief: Bash 3.2 watch\n' > "$watch_task/brief.md"
 printf '%s\n' "$watch_worktree" > "$watch_task/app/worktree"
-printf 'done\n' > "$watch_worktree/.sergeant-status"
+# No pane or capability evidence cannot prove terminal process retirement. Use
+# the failure-terminal fixture here: this regression owns Bash parsing/status
+# convergence, while process retirement is covered by the Docker lifecycle
+# suites with real /proc and pidfd support.
+printf 'failed: Bash 3.2 fixture\n' > "$watch_worktree/.sergeant-status"
 printf 'https://example.test/pr/1\n' > "$watch_worktree/.sergeant-result"
-
+set +e
 watch_output="$(SERGEANT_FLEET="$fleet" SERGEANT_WATCH_INTERVAL=0.01 \
-  "$minimum_bash" "$ROOT_DIR/bin/sgt-watch" task-2)"
-[[ "$watch_output" == *'All repos done.'* ]]
+  "$minimum_bash" "$ROOT_DIR/bin/sgt-watch" task-2 2>&1)"
+watch_status=$?
+set -e
+[[ "$watch_status" -ne 0 && \
+  "$watch_output" == *'terminal worker has no recorded pane; process retirement is unproven'* ]]
+
+# Exercise the launch journal under the actual Alpine Bash 3.2 image, which has
+# sha256sum but no shasum. The tiny verifier adapter supplies only the required
+# inherited-FD read operation; production requires Python 3.
+mkdir -p "$TEST_ROOT/journal-bin" "$TEST_ROOT/journal-state"
+cat > "$TEST_ROOT/journal-bin/python3" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == */_sgt-marker-history.py ]]; then
+  fd="$3" marker="$5"
+  history="$(cat <&"$fd")"
+  generation="${marker%%|*}"
+  identity_and_rest="${marker#*|}"
+  identity="${identity_and_rest%%|*}"
+  selected="$(printf '%s\n' "$history" | awk -F'|' \
+    -v generation="$generation" -v identity="$identity" \
+    '$1 == generation && $2 == identity { count++; floor=$3 } END { if (count == 1) print floor }')"
+  [[ "$selected" =~ ^[0-9]+$ ]] || exit 1
+  digest="$(printf '%s\n' "$history" | sha256sum | awk '{print $1}')"
+  portable="$(printf '%s\n' "$history" | awk -F'|' \
+    '$3 == 0 { found=1 } END { print found ? "true" : "false" }')"
+  printf '%s|%s|%s\n' "$digest" "$selected" "$portable"
+  exit 0
+fi
+fd="$2" operation="${5:-validate}"
+case "$operation" in
+  read)
+    IFS= read -r value <&"$fd" || exit 1
+    printf '%s\n' "$value"
+    if IFS= read -r extra <&"$fd"; then exit 1; fi
+    ;;
+  validate) printf 'fixture-identity\n' ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/journal-bin/python3"
+printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|1:2|198|/closed\n' \
+  > "$TEST_ROOT/journal-state/worker_process_marker"
+printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|1:2|1\n' \
+  > "$TEST_ROOT/journal-state/worker_process_markers"
+chmod 600 "$TEST_ROOT/journal-state/worker_process_marker" \
+  "$TEST_ROOT/journal-state/worker_process_markers"
+# shellcheck source=bin/_sgt-lib.sh
+source "$ROOT_DIR/bin/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-drain.sh
+source "$ROOT_DIR/bin/_sgt-drain.sh"
+PATH="$TEST_ROOT/journal-bin:$PATH" \
+  _sgt_drain_lock_acquire_fd 8 worker-launch \
+    "$TEST_ROOT/journal-state/worker-launch.lock"
+PATH="$TEST_ROOT/journal-bin:$PATH" \
+  _sgt_worker_launch_transaction_begin "$TEST_ROOT/journal-state" 8
+printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|3:4|198|/closed-next\n' \
+  > "$TEST_ROOT/journal-state/worker_process_marker"
+printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|3:4|1\n' \
+  >> "$TEST_ROOT/journal-state/worker_process_markers"
+PATH="$TEST_ROOT/journal-bin:$PATH" \
+  _sgt_worker_launch_completion_publish "$TEST_ROOT/journal-state" 8
+SGT_DRAIN_LOCK_CONTENDED_NONCE="$_SGT_DRAIN_LOCK_NONCE_8"
+PATH="$TEST_ROOT/journal-bin:$PATH" \
+  _sgt_worker_launch_observed_completion_matches "$TEST_ROOT/journal-state"
+_sgt_drain_lock_release_fd 8
 
 printf 'runtime paths support Bash 3.2: ok\n'
 

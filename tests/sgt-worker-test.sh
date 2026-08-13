@@ -25,6 +25,8 @@ mkdir -p "$TEST_ROOT/fake-bin" "$TEST_ROOT/done/state" "$TEST_ROOT/done/worktree
   "$TEST_ROOT/race/state" "$TEST_ROOT/race/worktree" \
   "$TEST_ROOT/failure-bin" \
   "$TEST_ROOT/rejected" \
+  "$TEST_ROOT/invalid-marker/state" "$TEST_ROOT/invalid-marker/worktree" \
+  "$TEST_ROOT/wrong-generation/state" "$TEST_ROOT/wrong-generation/worktree" \
   "$TEST_ROOT/orphan/state" "$TEST_ROOT/orphan/worktree"
 
 cat > "$TEST_ROOT/fake-bin/opencode" <<'EOF'
@@ -174,6 +176,82 @@ exec /usr/bin/rm "$@"
 EOF
 chmod +x "$TEST_ROOT/fake-bin/ln" "$TEST_ROOT/fake-bin/mktemp" \
   "$TEST_ROOT/fake-bin/mv" "$TEST_ROOT/fake-bin/rm"
+cat > "$TEST_ROOT/fake-bin/worker-launch" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+repo_state="\$1"
+worktree="\$2"
+agent="\$3"
+source "$ROOT_DIR/bin/_sgt-lib.sh"
+_sgt_prepare_worker_process_marker "\$repo_state"
+command="\$(_sgt_worker_command "$ROOT_DIR/bin/sgt-interactive-worker" \
+  "\$repo_state" "\$worktree" "\$agent")"
+exec bash -c "\$command"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/worker-launch"
+
+# A worker that did not inherit its exact launch capability must fail before
+# invoking the agent, even if it was started directly or a shell wrapper lost
+# the marker FD.
+printf 'in_progress\n' > "$TEST_ROOT/invalid-marker/worktree/.sergeant-status"
+printf '%032d|1:2|198|%s\n' 0 "$TEST_ROOT/missing-marker" \
+  > "$TEST_ROOT/invalid-marker/state/worker_process_marker"
+chmod 600 "$TEST_ROOT/invalid-marker/state/worker_process_marker"
+tmux new-session -d -s "$TMUX_SESSION" -n invalid-marker \
+  "env ARG_LOG='$TEST_ROOT/invalid-marker.args' FAKE_MODE=done \
+  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/invalid-marker/state' \
+  '$TEST_ROOT/invalid-marker/worktree' '$TEST_ROOT/fake-bin/opencode'"
+for _ in $(seq 1 100); do
+  [[ -s "$TEST_ROOT/invalid-marker/state/status" ]] && break
+  sleep 0.01
+done
+grep -Fqx 'failed: worker process marker validation failed' \
+  "$TEST_ROOT/invalid-marker/state/status"
+[[ ! -e "$TEST_ROOT/invalid-marker.args" ]]
+tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+
+wrong_generation=11111111111111111111111111111111
+wrong_marker_path="$TEST_ROOT/wrong-generation/marker"
+printf '22222222222222222222222222222222\n' > "$wrong_marker_path"
+chmod 400 "$wrong_marker_path"
+wrong_identity="$(stat -Lc '%d:%i' "$wrong_marker_path")"
+printf '%s|%s|198|%s\n' "$wrong_generation" "$wrong_identity" \
+  "$wrong_marker_path" > "$TEST_ROOT/wrong-generation/state/worker_process_marker"
+printf '%s|%s|0\n' "$wrong_generation" "$wrong_identity" \
+  > "$TEST_ROOT/wrong-generation/state/worker_process_markers"
+chmod 600 "$TEST_ROOT/wrong-generation/state/worker_process_marker" \
+  "$TEST_ROOT/wrong-generation/state/worker_process_markers"
+printf 'in_progress\n' > "$TEST_ROOT/wrong-generation/worktree/.sergeant-status"
+tmux new-session -d -s "$TMUX_SESSION" -n wrong-generation \
+  "exec 198<'$wrong_marker_path' && rm -f '$wrong_marker_path' && \
+  env ARG_LOG='$TEST_ROOT/wrong-generation.args' FAKE_MODE=done \
+  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/wrong-generation/state' \
+  '$TEST_ROOT/wrong-generation/worktree' '$TEST_ROOT/fake-bin/opencode'"
+for _ in $(seq 1 100); do
+  [[ -s "$TEST_ROOT/wrong-generation/state/status" ]] && break
+  sleep 0.01
+done
+grep -Fqx 'failed: worker process marker validation failed' \
+  "$TEST_ROOT/wrong-generation/state/status"
+[[ ! -e "$TEST_ROOT/wrong-generation.args" ]]
+tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+
+rm "$TEST_ROOT/invalid-marker/state/worker_process_marker"
+rm -f "$TEST_ROOT/invalid-marker/state/status" \
+  "$TEST_ROOT/invalid-marker/worktree/.sergeant-status"
+printf 'in_progress\n' > "$TEST_ROOT/invalid-marker/worktree/.sergeant-status"
+tmux new-session -d -s "$TMUX_SESSION" -n missing-marker \
+  "env ARG_LOG='$TEST_ROOT/missing-marker.args' FAKE_MODE=done \
+  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/invalid-marker/state' \
+  '$TEST_ROOT/invalid-marker/worktree' '$TEST_ROOT/fake-bin/opencode'"
+for _ in $(seq 1 100); do
+  [[ -s "$TEST_ROOT/invalid-marker/state/status" ]] && break
+  sleep 0.01
+done
+grep -Fqx 'failed: worker process marker validation failed' \
+  "$TEST_ROOT/invalid-marker/state/status"
+[[ ! -e "$TEST_ROOT/missing-marker.args" ]]
+tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 
 if ARG_LOG="$TEST_ROOT/non-tty.args" \
   "$ROOT_DIR/bin/sgt-interactive-worker" "$TEST_ROOT/done/state" \
@@ -226,7 +304,7 @@ tmux new-window -d -t "$TMUX_SESSION:" -n race-old \
   RACE_STOP_FILE='$TEST_ROOT/race-old-stop' RACE_STOPPED_FILE='$TEST_ROOT/race-old-stopped' \
   RACE_EXIT_FILE='$TEST_ROOT/race-old-exit' \
   PATH='$TEST_ROOT/fake-bin:$PATH' \
-  '$ROOT_DIR/bin/sgt-interactive-worker' '$race_state' '$race_worktree' '$TEST_ROOT/fake-bin/opencode'"
+  '$TEST_ROOT/fake-bin/worker-launch' '$race_state' '$race_worktree' '$TEST_ROOT/fake-bin/opencode'"
 target_worker_pane "$race_state" race-old
 old_race_nonce="$(cat "$race_state/notification_target")"
 printf 'fresh-notification|%s\n' "$(cat "$race_state/notification_target")" \
@@ -256,7 +334,7 @@ tmux new-window -d -t "$TMUX_SESSION:" -n race-new \
   FAIL_LEASE_RENAME_FILE='$TEST_ROOT/fail-lease-rename' FAIL_LEASE_RENAME_MARKER='$TEST_ROOT/fail-lease-rename-marker' \
   RACE_EXIT_FILE='$TEST_ROOT/race-new-exit' \
   PATH='$TEST_ROOT/fake-bin:$PATH' \
-  '$ROOT_DIR/bin/sgt-interactive-worker' '$race_state' '$race_worktree' '$TEST_ROOT/fake-bin/opencode'"
+  '$TEST_ROOT/fake-bin/worker-launch' '$race_state' '$race_worktree' '$TEST_ROOT/fake-bin/opencode'"
 target_worker_pane "$race_state" race-new
 new_race_nonce="$(cat "$race_state/notification_target")"
 printf 'fresh-notification|%s\n' "$(cat "$race_state/notification_target")" \
@@ -392,7 +470,7 @@ tmux new-window -d -t "$TMUX_SESSION:" -n "done" \
   PRE_COMPLETION_REPLAY_LOG='$TEST_ROOT/done-pre-completion-replay.log' \
   REPLAY_LOG='$TEST_ROOT/done-replay.log' \
   NOTIFICATION_STATE='$TEST_ROOT/done/state' SGT_NOTIFICATION_RETRY_INTERVAL=0.01 FAKE_MODE=done \
-  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/done/state' \
+  '$TEST_ROOT/fake-bin/worker-launch' '$TEST_ROOT/done/state' \
   '$TEST_ROOT/done/worktree' '$TEST_ROOT/fake-bin/opencode'"
 target_worker_pane "$TEST_ROOT/done/state" "done"
 # The two negative replay probes each hold stdin for up to one second.
@@ -419,7 +497,7 @@ EOF
 tmux new-window -d -t "$TMUX_SESSION:" -n recovery \
   "env ARG_LOG='$TEST_ROOT/recovery.args' EXPECT_NOTIFICATION_COUNT=1 \
   NOTIFICATION_STATE='$TEST_ROOT/recovery/state' SGT_NOTIFICATION_RETRY_INTERVAL=0.01 FAKE_MODE=done \
-  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/recovery/state' \
+  '$TEST_ROOT/fake-bin/worker-launch' '$TEST_ROOT/recovery/state' \
   '$TEST_ROOT/recovery/worktree' '$TEST_ROOT/fake-bin/opencode'"
 target_worker_pane "$TEST_ROOT/recovery/state" recovery
 for _ in $(seq 1 100); do
@@ -460,7 +538,7 @@ tmux new-window -d -t "$TMUX_SESSION:" -n replacement \
   "env ARG_LOG='$TEST_ROOT/replacement.args' EXPECT_NOTIFICATION_COUNT=1 \
   RECEIVED_LOG='$TEST_ROOT/replacement-received.log' NOTIFICATION_STATE='$TEST_ROOT/replacement/state' \
   SGT_NOTIFICATION_RETRY_INTERVAL=0.01 FAKE_MODE=done \
-  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/replacement/state' \
+  '$TEST_ROOT/fake-bin/worker-launch' '$TEST_ROOT/replacement/state' \
   '$TEST_ROOT/replacement/worktree' '$TEST_ROOT/fake-bin/opencode'"
 target_worker_pane "$TEST_ROOT/replacement/state" replacement
 for _ in $(seq 1 100); do
@@ -477,11 +555,11 @@ done
 
 tmux new-window -d -t "$TMUX_SESSION:" -n goose \
   "env ARG_LOG='$TEST_ROOT/goose.args' FAKE_MODE=done \
-  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/goose/state' \
+  '$TEST_ROOT/fake-bin/worker-launch' '$TEST_ROOT/goose/state' \
   '$TEST_ROOT/goose/worktree' '$TEST_ROOT/fake-bin/goose'"
 tmux new-window -d -t "$TMUX_SESSION:" -n claude \
   "env ARG_LOG='$TEST_ROOT/claude.args' FAKE_MODE=done \
-  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/claude/state' \
+  '$TEST_ROOT/fake-bin/worker-launch' '$TEST_ROOT/claude/state' \
   '$TEST_ROOT/claude/worktree' '$TEST_ROOT/fake-bin/claude'"
 for _ in $(seq 1 100); do
   [[ -f "$TEST_ROOT/goose/state/result" && -f "$TEST_ROOT/claude/state/result" ]] && break
@@ -497,7 +575,7 @@ for waiting_status in needs_input blocked; do
   worktree_dir="$TEST_ROOT/${waiting_status//_/-}/worktree"
   tmux new-window -d -t "$TMUX_SESSION:" -n "$waiting_status" \
     "env ARG_LOG='$TEST_ROOT/$waiting_status.args' FAKE_MODE='$waiting_status' \
-    '$ROOT_DIR/bin/sgt-interactive-worker' '$state_dir' \
+    '$TEST_ROOT/fake-bin/worker-launch' '$state_dir' \
     '$worktree_dir' '$TEST_ROOT/fake-bin/claude'"
   for _ in $(seq 1 100); do
     [[ -f "$state_dir/status" ]] && [[ "$(cat "$state_dir/status")" == "$waiting_status" ]] && break
@@ -510,7 +588,7 @@ done
 
 tmux new-window -d -t "$TMUX_SESSION:" -n orphan \
   "env ARG_LOG='$TEST_ROOT/orphan.args' \
-  '$ROOT_DIR/bin/sgt-interactive-worker' '$TEST_ROOT/orphan/state' \
+  '$TEST_ROOT/fake-bin/worker-launch' '$TEST_ROOT/orphan/state' \
   '$TEST_ROOT/orphan/worktree' '$TEST_ROOT/fake-bin/opencode'"
 for _ in $(seq 1 100); do
   [[ -f "$TEST_ROOT/orphan/state/diagnostic" ]] && break
@@ -553,7 +631,7 @@ tmux new-window -d -t "$TMUX_SESSION:" -n lr \
   FAIL_LOCK_RELEASE_MARKER='$TEST_ROOT/fail-lock-release-marker' \
   POST_NOTIFICATION_WAIT_FILE='$TEST_ROOT/lr-agent-gate' \
   PATH='$TEST_ROOT/fake-bin:$PATH' \
-  '$ROOT_DIR/bin/sgt-interactive-worker' '$lr_state' \
+  '$TEST_ROOT/fake-bin/worker-launch' '$lr_state' \
   '$lr_worktree' '$TEST_ROOT/fake-bin/opencode'"
 target_worker_pane "$lr_state" lr
 

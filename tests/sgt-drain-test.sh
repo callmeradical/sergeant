@@ -14,6 +14,7 @@ mkdir -p "$config_dir"
 # ── Slice 1: no drain — admits everything ────────────────────────────────────
 
 # shellcheck source=bin/_sgt-drain.sh
+source "$ROOT_DIR/bin/_sgt-process.sh"
 source "$ROOT_DIR/bin/_sgt-drain.sh"
 
 _sgt_is_drained "myproject" && { printf '_sgt_is_drained should return 1 when no drain files exist\n' >&2; exit 1; }
@@ -563,9 +564,7 @@ _mk_fleet_worker() {
   printf '%s\n' "$project" > "$dir/project"
   if [[ -n "$pid" ]]; then
     printf '%s\n' "$pid" > "$dir/worker_pid"
-    # A dead pid yields no start time; record whatever ps reports.
-    { ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' \
-      > "$dir/worker_process_start"; } || true
+    _sgt_process_identity "$pid" > "$dir/worker_process_start" 2>/dev/null || true
   fi
   return 0
 }
@@ -690,6 +689,72 @@ printf '%s\n' "$out" | grep -q 'status=drained.*liveness=live' || \
   { printf 'a drained-but-live worker should be reported as live, got: %s\n' "$out" >&2; exit 1; }
 printf 'sgt-drain --wait rejects a drained claim contradicted by a live process: ok\n'
 
+# Fleets created by origin/main recorded `ps lstart` text. A format mismatch
+# with linux:<ticks> is not evidence of PID reuse and must never certify exit.
+# BusyBox does not support `ps -p` or the lstart field; the public command must
+# retain the live PID with an actionable diagnostic instead of aborting the
+# suite or treating the worker as gone.
+printf 'legacy-lstart-record\n' \
+  > "$fleet_dir/task-d/busy-repo/worker_process_start"
+mkdir -p "$TEST_ROOT/busybox-ps-bin"
+cat > "$TEST_ROOT/busybox-ps-bin/ps" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$BUSYBOX_PS_LOG"
+case " $* " in
+  *' -p '*) printf 'ps: unrecognized option: p\n' >&2; exit 2 ;;
+  ' -A -o pid=,lstart= ')
+    [[ "${LEGACY_PS_MODE:-}" == gnu ]] || exit 1
+    printf '1 init-process-start\n%s %s\n' "$LEGACY_PS_PID" "$LEGACY_PS_START"
+    ;;
+  ' -axo pid=,lstart= ')
+    [[ "${LEGACY_PS_MODE:-}" == bsd ]] || exit 1
+    printf '1 init-process-start\n%s %s\n' "$LEGACY_PS_PID" "$LEGACY_PS_START"
+    ;;
+  *) printf 'ps: bad -o argument lstart\n' >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/busybox-ps-bin/ps"
+rc=0
+out="$(PATH="$TEST_ROOT/busybox-ps-bin:$PATH" \
+  BUSYBOX_PS_LOG="$TEST_ROOT/busybox-ps.log" \
+  LEGACY_PS_MODE=gnu LEGACY_PS_PID="$live_pid" \
+  LEGACY_PS_START=legacy-lstart-record \
+  "$ROOT_DIR/bin/sgt-drain" myproject --wait --timeout 1 2>&1)" || rc=$?
+[[ $rc -ne 0 ]] || \
+  { printf 'a live legacy-identity worker must not satisfy the wait\n' >&2; exit 1; }
+printf '%s\n' "$out" | grep -q 'status=drained.*liveness=live' || \
+  { printf 'legacy identity should remain live/actionable, got: %s\n' "$out" >&2; exit 1; }
+printf '%s\n' "$out" | grep -q 'legacy process identity matched but is not exact; live PID retained until exit' || \
+  { printf 'full-table legacy identity match was not reported, got: %s\n' "$out" >&2; exit 1; }
+
+printf 'different-legacy-start\n' \
+  > "$fleet_dir/task-d/busy-repo/worker_process_start"
+rc=0
+out="$(PATH="$TEST_ROOT/busybox-ps-bin:$PATH" \
+  BUSYBOX_PS_LOG="$TEST_ROOT/busybox-ps.log" \
+  LEGACY_PS_MODE=bsd LEGACY_PS_PID="$live_pid" \
+  LEGACY_PS_START=legacy-lstart-record \
+  "$ROOT_DIR/bin/sgt-drain" myproject --wait --timeout 1 2>&1)" || rc=$?
+[[ $rc -ne 0 ]]
+printf '%s\n' "$out" | grep -q 'legacy process identity changed but is not exact; live PID retained until exit' || \
+  { printf 'full-table legacy identity change was not reported, got: %s\n' "$out" >&2; exit 1; }
+
+rc=0
+out="$(PATH="$TEST_ROOT/busybox-ps-bin:$PATH" \
+  BUSYBOX_PS_LOG="$TEST_ROOT/busybox-ps.log" LEGACY_PS_MODE=unsupported \
+  LEGACY_PS_PID="$live_pid" LEGACY_PS_START=legacy-lstart-record \
+  "$ROOT_DIR/bin/sgt-drain" myproject --wait --timeout 1 2>&1)" || rc=$?
+[[ $rc -ne 0 ]]
+printf '%s\n' "$out" | grep -q 'legacy process identity unavailable; live PID retained until exit' || \
+  { printf 'unsupported full-table legacy identity was not actionable, got: %s\n' "$out" >&2; exit 1; }
+grep -q '^-A -o pid=,lstart=$' "$TEST_ROOT/busybox-ps.log" || \
+  { printf 'legacy identity adapter did not request the GNU all-process table\n' >&2; exit 1; }
+grep -q '^-axo pid=,lstart=$' "$TEST_ROOT/busybox-ps.log" || \
+  { printf 'legacy identity adapter did not request the BSD all-process table\n' >&2; exit 1; }
+! grep -q -- ' -p ' "$TEST_ROOT/busybox-ps.log" || \
+  { printf 'legacy identity adapter used BusyBox-incompatible ps -p\n' >&2; exit 1; }
+printf 'sgt-drain --wait preserves live legacy identity records: ok\n'
+
 # Once the worker's process actually exits, the same wait succeeds.
 kill "$live_pid" 2>/dev/null || true
 wait "$live_pid" 2>/dev/null || true
@@ -721,6 +786,52 @@ printf '%s\n' "$out" | grep -q 'No such file or directory' && \
   { printf 'missing fleet state files must not leak shell errors, got: %s\n' "$out" >&2; exit 1; }
 "$ROOT_DIR/bin/sgt-drain" --undrain myproject >/dev/null
 printf 'sgt-drain --wait blocks on unverifiable identity: ok\n'
+rm -rf "$fleet_dir/task-f"
+
+# Darwin workers deliberately have no ps-derived exact PID birth record. Exact
+# marker absence plus a recorded pane that no longer resolves proves exit and
+# lets cooperative drain converge without signalling an unverified PID.
+if command -v python3 >/dev/null 2>&1; then
+portable_dir="$fleet_dir/task-portable/app"
+mkdir -p "$portable_dir" "$TEST_ROOT/portable-bin"
+printf 'drained\n' > "$portable_dir/status"
+printf 'myproject\n' > "$portable_dir/project"
+printf '%%77\n' > "$portable_dir/pane"
+printf '0|%%77|7777|123456|portable-worker\n' > "$portable_dir/pane_identity"
+printf '%032d|1:2|198|%s\n' 1 "$TEST_ROOT/closed-portable-marker" \
+  > "$portable_dir/worker_process_marker"
+printf '%032d|1:2|0\n' 1 > "$portable_dir/worker_process_markers"
+printf 'Darwin:no-exact-process-birth\n' \
+  > "$portable_dir/worker_process_marker_platform"
+chmod 600 "$portable_dir/pane_identity" "$portable_dir/worker_process_marker" \
+  "$portable_dir/worker_process_markers" \
+  "$portable_dir/worker_process_marker_platform"
+cat > "$TEST_ROOT/portable-bin/lsof" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+cat > "$TEST_ROOT/portable-bin/tmux" <<'EOF'
+#!/usr/bin/env bash
+printf '0|%%999|9999|654321|unrelated-pane\n'
+EOF
+chmod +x "$TEST_ROOT/portable-bin/lsof" "$TEST_ROOT/portable-bin/tmux"
+rc=0
+out="$(PATH="$TEST_ROOT/portable-bin:$PATH" \
+  "$ROOT_DIR/bin/sgt-drain" myproject --wait --timeout 1 2>&1)" || rc=$?
+[[ $rc -eq 0 ]] || {
+  printf 'portable marker/pane exit proof should satisfy drain: %s\n' "$out" >&2
+  exit 1
+}
+"$ROOT_DIR/bin/sgt-drain" --undrain myproject >/dev/null
+rm -rf "$fleet_dir/task-portable"
+printf 'sgt-drain --wait accepts portable marker and gone-pane proof: ok\n'
+else
+[[ ! -e "$TEST_ROOT/portable-bin/python3" ]] || {
+  printf 'missing-Python drain test must not install a verifier shim\n' >&2
+  exit 1
+}
+printf 'sgt-drain --wait accepts portable marker and gone-pane proof: skipped (python3 unavailable)\n'
+fi
 
 # A nonterminal worker with no recorded project cannot be attributed to a scope,
 # so a project-scoped wait must report it rather than silently skip it.

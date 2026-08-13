@@ -430,3 +430,35 @@ wiki-daily-digest --since YYYY-MM-DD
 
 Read [Skills and their sources](skills.md) for engineering workflow skills and
 [Troubleshooting](troubleshooting.md) for recovery guidance.
+## Worker process lifecycle evidence
+
+Sergeant keeps process-retirement evidence in each repository's fleet state.
+`worker_process_marker` names the current inherited FD 198 capability;
+`worker_process_markers` is its bounded generation history. The current marker
+must be a member of valid history. A present current marker with missing,
+malformed, or mismatched history is a torn publication: dispatch, resume,
+response, recovery, validation, watch, drain, and cleanup fail before mutation
+and preserve the evidence. Validation workers use the separate
+`validation-process/` namespace so validation cannot replace worker ownership.
+`worker_process_marker_platform` records the portable no-exact-birth case.
+
+Worker launches are serialized by `worker-launch.lock`. A successful launcher
+publishes `worker-launch.completed`, bound to that exact lock nonce and the
+marker digests before and after launch. The digests must differ. A waiter may
+converge only on the canonical completion from the exact live owner it observed;
+observing a lock owner, an unobserved journal, or a mutation-free journal is not
+success. `worker_recycle_phase` records
+an in-progress retirement, while `worker_recycled` binds completed retirement to
+the exact pane, process group, marker, and history digest. Ambiguous or partial
+records remain available for diagnosis.
+
+Linux uses `/proc` start time and pidfds (with the supported syscall fallback)
+for exact identity and signalling. Existing fleets with legacy `ps lstart`
+records are never declared gone from a format mismatch alone. They remain
+actionable retained evidence until the process exits or supported cleanup is
+completed; Sergeant does not label second-resolution timestamps as exact.
+On Darwin, launch remains supported with a platform marker and `lsof` proves
+open marker inodes across all file descriptors. When exact ownership cannot be
+proved, retirement fails actionably without signalling a PID or discarding
+state. `sgt-cleanup` retains fleet, marker, phase, and recycle evidence until all
+holders and the exact pane are proven retired.

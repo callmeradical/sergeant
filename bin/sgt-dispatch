@@ -287,6 +287,40 @@ fi
 TARGET_REPOS=()
 IFS=',' read -ra TARGET_REPOS <<< "$REPOS_ARG"
 
+# Resolve the prospective fleet identity and reject preserved/torn capability
+# evidence before even selecting or creating a managed coordinator pane.
+_rand6() { dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | cut -c1-6; }
+slug="$(echo "$BRIEF" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//' | cut -c1-24 | sed 's/-$//')"
+TASK_ID="${slug}-$(_rand6)"
+TASK_DIR="$FLEET_DIR/$TASK_ID"
+if ! $DRY_RUN; then
+  for rname in "${TARGET_REPOS[@]}"; do
+    _sgt_worker_process_marker_preflight "$TASK_DIR/$rname" || \
+      _die "Dispatch refused: worker process marker evidence is torn"
+    _sgt_worker_process_marker_preflight "$TASK_DIR/$rname/validation-process" || \
+      _die "Dispatch refused: validation process marker evidence is torn"
+  done
+fi
+
+_SGT_DISPATCH_TASK_FD=6
+SGT_DISPATCH_TASK_LOCKED=false
+_release_dispatch_task_lock() {
+  if $SGT_DISPATCH_TASK_LOCKED; then
+    _sgt_drain_lock_release_fd "$_SGT_DISPATCH_TASK_FD" || true
+    SGT_DISPATCH_TASK_LOCKED=false
+  fi
+}
+if ! $DRY_RUN; then
+  _sgt_drain_lock_acquire_fd "$_SGT_DISPATCH_TASK_FD" dispatch-task \
+    "$FLEET_DIR/.dispatch-$TASK_ID.lock" || \
+    _die "Could not acquire exact dispatch task ownership"
+  SGT_DISPATCH_TASK_LOCKED=true
+  # A peer may have created this task while this invocation waited.
+  [[ ! -e "$TASK_DIR" && ! -L "$TASK_DIR" ]] || \
+    _die "Dispatch task ID collision after serialized ownership: $TASK_ID"
+fi
+trap _release_dispatch_task_lock EXIT
+
 _require_yq
 _require_git
 _require_tmux
@@ -345,9 +379,11 @@ fi
 # (intent preparation, fleet reconciliation, drain admission, td creation, repo
 # validation) can still abort after the pane is bound.
 _rollback_managed_coordinator_pane() {
-  [[ "${SGT_MANAGED_COORDINATOR_CREATED:-false}" == "true" ]] || return 0
-  SGT_MANAGED_COORDINATOR_CREATED="false"
-  tmux kill-window -t "$TMUX_SESSION:=$SGT_MANAGED_COORDINATOR_WINDOW" 2>/dev/null || true
+  if [[ "${SGT_MANAGED_COORDINATOR_CREATED:-false}" == "true" ]]; then
+    SGT_MANAGED_COORDINATOR_CREATED="false"
+    tmux kill-window -t "$TMUX_SESSION:=$SGT_MANAGED_COORDINATOR_WINDOW" 2>/dev/null || true
+  fi
+  _release_dispatch_task_lock
 }
 trap _rollback_managed_coordinator_pane EXIT
 
@@ -593,13 +629,6 @@ if ! $DRY_RUN; then
   _sgt_drain_lock_release_fd "$_SGT_DRAIN_ADMISSION_FD"
 fi
 
-# ── Generate task ID ──────────────────────────────────────────────────────────
-
-_rand6() { dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | cut -c1-6; }
-
-slug="$(echo "$BRIEF" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//' | cut -c1-24 | sed 's/-$//')"
-TASK_ID="${slug}-$(_rand6)"
-
 # ── Determine branch name ─────────────────────────────────────────────────────
 
 if [[ -n "$BRANCH_ARG" ]]; then
@@ -615,8 +644,6 @@ else
     BRANCH="feat/$bslug"
   fi
 fi
-
-TASK_DIR="$FLEET_DIR/$TASK_ID"
 
 echo ""
 echo "=== sgt-dispatch: $PROJECT ==="
@@ -1014,9 +1041,41 @@ $td_context_block"
   printf '%s\n' "$AGENT_CMD" > "$repo_task_dir/agent"
   printf '%s\n' "$AGENT_MODEL" > "$repo_task_dir/agent_model"
   printf '%s\n' "$AGENT_MODEL_SOURCE" > "$repo_task_dir/agent_model_source"
+  _SGT_DISPATCH_WORKER_FD=7
+  if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+    "${SGT_TEST_DISPATCH_BEFORE_LAUNCH_LOCK_BARRIER:-}" == 1 ]]; then
+    : > "$repo_task_dir/dispatch-before-launch-lock-ready"
+    while [[ ! -e "$repo_task_dir/dispatch-before-launch-lock-release" ]]; do
+      sleep 0.01
+    done
+  fi
+  _sgt_drain_lock_acquire_fd "$_SGT_DISPATCH_WORKER_FD" worker-launch \
+    "$repo_task_dir/worker-launch.lock" || \
+    _die "Could not acquire exact initial worker-launch ownership"
+  _sgt_worker_launch_transaction_begin "$repo_task_dir" \
+    "$_SGT_DISPATCH_WORKER_FD" || \
+    _die "Could not snapshot worker generation before initial launch"
+  if [[ "$SGT_DRAIN_LOCK_CONTENDED_LIVE" == true ]]; then
+    if _sgt_worker_launch_observed_completion_matches "$repo_task_dir"; then
+      _sgt_drain_lock_release_fd "$_SGT_DISPATCH_WORKER_FD" || \
+        _die "Could not release converged initial worker-launch ownership"
+      _info "verified peer worker-launch transaction completed for $rname"
+      echo ""
+      continue
+    fi
+    _die "Initial dispatch observed a launch owner without exact completed mutation evidence"
+  fi
   initial_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
   _sgt_publish_worker_notification "$repo_task_dir" "$worktree_path" \
     "$initial_notification_id" initial "Read the .sergeant-brief.md file and execute the mission."
+  _sgt_prepare_worker_process_marker "$repo_task_dir" || _die "Could not prepare worker process marker"
+  if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+    "${SGT_TEST_DISPATCH_LAUNCH_BARRIER:-}" == 1 ]]; then
+    : > "$repo_task_dir/dispatch-launch-ready"
+    while [[ ! -e "$repo_task_dir/dispatch-launch-release" ]]; do
+      sleep 0.01
+    done
+  fi
   WORKER_RUN_CMD="$(_sgt_worker_command \
     "$SCRIPT_DIR/sgt-interactive-worker" "$repo_task_dir" "$worktree_path" "$AGENT_CMD")"
   if pane_target="$(tmux new-window -P -F '#{pane_id}' -t "$TMUX_SESSION:" \
@@ -1039,6 +1098,11 @@ $td_context_block"
         "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
         _die "notification target race detected for $rname; worker orphaned"
       fi
+      _sgt_worker_launch_completion_publish "$repo_task_dir" \
+        "$_SGT_DISPATCH_WORKER_FD" || \
+        _die "Could not publish completed initial worker launch"
+      _sgt_drain_lock_release_fd "$_SGT_DISPATCH_WORKER_FD" || \
+        _die "Could not release initial worker-launch ownership"
     else
       tmux kill-pane -t "$pane_target" 2>/dev/null || true
       printf 'orphaned\n' > "$repo_task_dir/status"

@@ -3,11 +3,44 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=bin/_sgt-process.sh
+source "$ROOT_DIR/bin/_sgt-process.sh"
+# shellcheck source=bin/_sgt-lib.sh
+source "$ROOT_DIR/bin/_sgt-lib.sh"
 TEST_ROOT="$(mktemp -d)"
 TMUX_SESSION="sgt-cleanup-test-$$"
+export TMUX_TMPDIR="$TEST_ROOT/tmux"
+mkdir -p "$TMUX_TMPDIR"
+
+fixture_process_tree_pids() {
+  local child root_pid="$1"
+  for child in $(pgrep -P "$root_pid" 2>/dev/null || true); do
+    fixture_process_tree_pids "$child"
+  done
+  printf '%s\n' "$root_pid"
+}
 
 cleanup_fixture() {
+  local pid root_pid roots tree_pids=""
   tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+  # A failed assertion can occur while a deliberately signal-resistant fake
+  # agent is still alive. Select only commands containing this test's unique
+  # temp root, then snapshot their descendants before terminating the roots so
+  # helper sleeps cannot be orphaned by the fixture itself.
+  roots="$(ps -axo pid=,command= | awk -v root="$TEST_ROOT" \
+    'index($0, root) { print $1 }' || true)"
+  for root_pid in $roots; do
+    [[ "$root_pid" != "$$" && "$root_pid" != "${BASHPID:-$$}" ]] || continue
+    tree_pids+="$(fixture_process_tree_pids "$root_pid")"$'\n'
+  done
+  for pid in $tree_pids; do
+    [[ "$pid" != "$$" && "$pid" != "${BASHPID:-$$}" ]] || continue
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  for pid in $tree_pids; do
+    [[ "$pid" != "$$" && "$pid" != "${BASHPID:-$$}" ]] || continue
+    kill -KILL "$pid" 2>/dev/null || true
+  done
   rm -rf "$TEST_ROOT"
 }
 trap cleanup_fixture EXIT
@@ -161,11 +194,13 @@ printf 'done\n' > "$stale_state/status"
 printf 'result\n' > "$stale_state/result"
 printf 'done\n' > "$TEST_ROOT/stale-dead-pane-sgt-stale-dead-pane/.sergeant-status"
 printf 'result\n' > "$TEST_ROOT/stale-dead-pane-sgt-stale-dead-pane/.sergeant-result"
+_sgt_prepare_worker_process_marker "$stale_state"
 # Run partial cleanup to get "removed" phase with absent worktree, then advance to reconciled-absent
 SGT_CLEANUP_FAIL_POINT=phase-publish-reconciled-absent \
   SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-cleanup" stale-dead-pane >/dev/null 2>&1 || true
+  "$ROOT_DIR/bin/sgt-cleanup" stale-dead-pane >"$TEST_ROOT/stale-first.log" 2>&1 || true
+[[ -e "$stale_state/cleanup-phase" ]] || { cat "$TEST_ROOT/stale-first.log" >&2; exit 1; }
 [[ "$(sed -n '1p' "$stale_state/cleanup-phase")" == "removed" ]]
 [[ ! -d "$TEST_ROOT/stale-dead-pane-sgt-stale-dead-pane" ]]
 # Advance to reconciled-absent (simulating a prior successful reconciliation)
@@ -3174,7 +3209,7 @@ validation_pid="$(cat "$TEST_ROOT/validation.pid")"
 validation_child_pid="$(cat "$TEST_ROOT/validation-child.pid")"
 printf '%s\n' "$validation_pid" > "$repo_state/validation_pane_pid"
 ps -o pgid= -p "$validation_pid" | tr -d ' ' > "$repo_state/validation_process_group"
-ps -o lstart= -p "$validation_pid" | awk '{$1=$1; print}' > "$repo_state/validation_process_start"
+_sgt_process_identity "$validation_pid" > "$repo_state/validation_process_start"
 validation_start="$(cat "$repo_state/validation_process_start")"
 printf 'stale process start\n' > "$repo_state/validation_process_start"
 set +e
@@ -3620,7 +3655,7 @@ chmod +x "$TEST_ROOT/fake-bin/fake-escaped-descendant"
 cat > "$TEST_ROOT/fake-bin/fake-worker-for-escape" <<'EOF'
 #!/usr/bin/env bash
 pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')"
-start="$(ps -o lstart= -p "$$" 2>/dev/null | sed 's/^ *//;s/ *$//')"
+start="$(_sgt_process_identity "$$")"
 printf '%s\n' "$$"    > "$WORKER_STATE_DIR/worker_pid"
 printf '%s\n' "$pgid" > "$WORKER_STATE_DIR/worker_process_group"
 printf '%s\n' "$start" > "$WORKER_STATE_DIR/worker_process_start"
@@ -6256,7 +6291,7 @@ printf 'sgt-cleanup gh#170: absent tmux refuses retirement ok\n'
 seed_retirement_task retire-live-owner
 seed_retirement_partial pending-transport
 printf '%s\n' "$$" > "$retire_state/worker_pid"
-ps -o lstart= -p "$$" | sed 's/^ *//;s/ *$//' > "$retire_state/worker_process_start"
+_sgt_process_identity "$$" > "$retire_state/worker_process_start"
 run_retirement_cleanup retire-live-owner
 assert_retirement_refused live-owner 'is still alive'
 printf 'sgt-cleanup gh#170: live worker process refuses retirement ok\n'

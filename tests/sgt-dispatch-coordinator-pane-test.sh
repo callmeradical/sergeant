@@ -434,6 +434,11 @@ AMBIGUOUS_MANAGED_PANES='%91 %92' _reject_no_tmux ambiguous-window \
 # and no fleet state survives.
 
 rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG" "$MANAGED_CREATE_LOG" "$KILL_WINDOW_LOG" "$MANAGED_MARKER_LOG"
+# The fake tmux reuses one pane id across creations; real tmux pane ids are not
+# reused. Remove prior fixture ownership so this case represents a truly
+# unshared newly-created pane.
+find "$TEST_ROOT/fleet" -type f \
+  \( -name primary_pane_id -o -name primary_pane_identity \) -delete
 before="$(_fleet_task_count)"
 set +e
 output="$(_dispatch_no_tmux rollback 'Rollback coordinator' \

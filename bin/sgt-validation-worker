@@ -3,9 +3,9 @@
 
 set -uo pipefail
 
-[[ $# -ge 4 && $# -le 5 ]] || {
+[[ $# -ge 4 && $# -le 6 ]] || {
   echo "Usage: sgt-validation-worker <repo-state-dir> <worktree> <intent-revision>" \
-    "<intent-transport> [skip]" >&2
+    "<intent-transport> [skip] [process-marker-state]" >&2
   exit 2
 }
 
@@ -14,6 +14,7 @@ WORKTREE="$2"
 EXPECTED_REVISION="$3"
 INTENT_TRANSPORT="$4"
 SKIP="${5:-}"
+PROCESS_MARKER_STATE="${6:-$REPO_STATE/validation-process}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/_sgt-intent.sh
 source "$SCRIPT_DIR/_sgt-intent.sh"
@@ -28,6 +29,12 @@ source "$SCRIPT_DIR/_sgt-lib.sh"
   echo "ERROR: validation worker requires a terminal" >&2
   exit 2
 }
+if ! _sgt_validate_inherited_worker_marker "$PROCESS_MARKER_STATE"; then
+  printf 'failed: validation worker process marker validation failed\n' \
+    > "$REPO_STATE/validation_status"
+  echo "ERROR: validation worker process marker validation failed" >&2
+  exit 2
+fi
 VALIDATION_INTENT="$REPO_STATE/validation-intent.md"
 [[ -f "$VALIDATION_INTENT" ]] || {
   echo "ERROR: canonical validation intent unavailable" >&2
@@ -77,7 +84,7 @@ _coordinator_is_alive() {
   pid="$(_lock_field pid)" || return 1
   start="$(_lock_field start)" || return 1
   [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
-  current="$(ps -o lstart= -p "$pid" 2>/dev/null | awk '{$1=$1; print}')"
+  current="$(_sgt_process_identity_record "$pid" 2>/dev/null || true)"
   [[ -n "$current" && "$current" == "$start" ]]
 }
 _publish_handshake() {
@@ -93,7 +100,7 @@ _publish_handshake() {
   exit 2
 }
 CHILD_PID="$$"
-CHILD_START="$(ps -o lstart= -p "$CHILD_PID" 2>/dev/null | awk '{$1=$1; print}')"
+CHILD_START="$(_sgt_process_identity_record "$CHILD_PID" 2>/dev/null || true)"
 [[ -n "$CHILD_START" ]] || exit 2
 HANDSHAKE="$EXPECTED_REVISION|$TMUX_PANE|$CHILD_PID|$CHILD_START"
 _coordinator_is_alive || {

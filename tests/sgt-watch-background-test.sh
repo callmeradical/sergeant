@@ -301,11 +301,29 @@ mkdir -p "$repo3" "$worktree3" "$fake_bin3"
 printf '%s\n' "$worktree3" > "$repo3/worktree"
 printf '%%99\n' > "$repo3/pane"
 printf '0|%%99|5555|111111|sgt-interactive-worker:%s\n' "$repo3" > "$repo3/pane_identity"
+chmod 600 "$repo3/pane_identity"
 printf 'opencode\n' > "$repo3/agent"
 printf 'done\n' > "$worktree3/.sergeant-status"
 printf 'https://example.invalid/pr/fg\n' > "$worktree3/.sergeant-result"
 printf 'done\n' > "$repo3/status"
 printf 'https://example.invalid/pr/fg\n' > "$repo3/result"
+fg_generation=11111111111111111111111111111111
+fg_marker="$fg_generation|1:2|198|/closed"
+printf '%s\n' "$fg_marker" > "$repo3/worker_process_marker"
+printf '%s|1:2|1\n' "$fg_generation" > "$repo3/worker_process_markers"
+chmod 600 "$repo3/worker_process_marker" "$repo3/worker_process_markers"
+fg_history_digest="$(python3 "$ROOT/bin/_sgt-marker-history.py" \
+  "$repo3/worker_process_markers" "$fg_marker")"
+{
+  printf 'pane=%%99\n'
+  printf 'identity=0|%%99|5555|111111|sgt-interactive-worker:%s\n' "$repo3"
+  printf 'process_group=\n'
+  printf 'outcome=marker_holders_retired\n'
+  printf 'process_marker=%s\n' "$fg_marker"
+  printf 'marker_history_sha256=%s\n' "$fg_history_digest"
+  printf 'recycled_at=2026-01-01T00:00:00Z\n'
+} > "$repo3/worker_recycled"
+chmod 600 "$repo3/worker_recycled"
 
 cat > "$fake_bin3/tmux" <<'EOF'
 #!/usr/bin/env bash

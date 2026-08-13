@@ -40,6 +40,8 @@ SGT_LIB_LOADED=1
 
 # shellcheck source=bin/_sgt-drain.sh
 source "$_SGT_LIB_DIR/_sgt-drain.sh"
+# shellcheck source=bin/_sgt-process.sh
+source "$_SGT_LIB_DIR/_sgt-process.sh"
 
 # ── Configurable env vars ─────────────────────────────────────────────────────
 
@@ -511,7 +513,6 @@ SGT_MANAGED_COORDINATOR_COMMAND='while IFS= read -r sgt_line; do printf "%s\n" "
 # asked.
 SGT_MANAGED_COORDINATOR_OPTION='@sgt_coordinator'
 SGT_MANAGED_COORDINATOR_MARKER='sergeant-managed-coordinator'
-
 # _sgt_managed_coordinator_marker <pane>
 # Prints the pane's Sergeant ownership marker, empty when it has none.
 _sgt_managed_coordinator_marker() {
@@ -581,6 +582,134 @@ _sgt_read_owned_fd() {
   else
     return 1
   fi
+}
+_sgt_read_owned_multiline_file() {
+  local path="$1" mode value
+  [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
+  mode="$(_sgt_path_mode "$path")" || return 1
+  [[ "$mode" == "600" ]] || return 1
+  exec 9< "$path" || return 1
+  value="$(python3 "$_SGT_LIB_DIR/_sgt-verify-owned-fd.py" \
+    9 "$path" 600 read-multiline)" || { exec 9<&-; return 1; }
+  _sgt_validate_owned_fd 9 "$path" 600 >/dev/null || { exec 9<&-; return 1; }
+  exec 9<&-
+  printf '%s\n' "$value"
+}
+_sgt_sha256_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    printf 'ERROR: sha256sum or shasum is required\n' >&2
+    return 1
+  fi
+}
+_sgt_worker_marker_tuple_snapshot() {
+  local repo_dir="$1" current_path history_path platform_path
+  local current snapshot digest floor has_portable extra platform_present=false platform
+  local platform_snapshot=absent tuple_digest
+  current_path="$repo_dir/worker_process_marker"
+  history_path="$repo_dir/worker_process_markers"
+  platform_path="$repo_dir/worker_process_marker_platform"
+  [[ -f "$current_path" && ! -L "$current_path" && -O "$current_path" && \
+    -f "$history_path" && ! -L "$history_path" && -O "$history_path" ]] || return 1
+  [[ "$(_sgt_path_mode "$current_path")" == 600 && \
+    "$(_sgt_path_mode "$history_path")" == 600 ]] || return 1
+  if [[ -e "$platform_path" || -L "$platform_path" ]]; then
+    [[ -f "$platform_path" && ! -L "$platform_path" && -O "$platform_path" && \
+      "$(_sgt_path_mode "$platform_path")" == 600 ]] || return 1
+    platform_present=true
+  fi
+
+  _sgt_owned_file_open_hook before-open "$current_path" || return 1
+  exec 7< "$current_path" || {
+    _sgt_owned_file_open_hook after-open "$current_path" >/dev/null 2>&1 || true
+    return 1
+  }
+  _sgt_owned_file_open_hook after-open "$current_path" || { exec 7<&-; return 1; }
+  _sgt_owned_file_open_hook before-open "$history_path" || { exec 7<&-; return 1; }
+  exec 8< "$history_path" || {
+    exec 7<&-
+    _sgt_owned_file_open_hook after-open "$history_path" >/dev/null 2>&1 || true
+    return 1
+  }
+  _sgt_owned_file_open_hook after-open "$history_path" || {
+    exec 7<&- 8<&-
+    return 1
+  }
+  if [[ "$platform_present" == true ]]; then
+    _sgt_owned_file_open_hook before-open "$platform_path" || {
+      exec 7<&- 8<&-
+      return 1
+    }
+    exec 9< "$platform_path" || {
+      exec 7<&- 8<&-
+      _sgt_owned_file_open_hook after-open "$platform_path" >/dev/null 2>&1 || true
+      return 1
+    }
+    _sgt_owned_file_open_hook after-open "$platform_path" || {
+      exec 7<&- 8<&- 9<&-
+      return 1
+    }
+  fi
+
+  current="$(_sgt_read_owned_fd 7 "$current_path" 600)" || {
+    exec 7<&- 8<&-; [[ "$platform_present" == true ]] && exec 9<&-
+    return 1
+  }
+  snapshot="$(python3 "$_SGT_LIB_DIR/_sgt-marker-history.py" \
+    --fd 8 "$history_path" "$current")" || {
+    exec 7<&- 8<&-; [[ "$platform_present" == true ]] && exec 9<&-
+    return 1
+  }
+  IFS='|' read -r digest floor has_portable extra <<< "$snapshot"
+  [[ -z "$extra" && "$digest" =~ ^[0-9a-f]{64}$ && "$floor" =~ ^[0-9]+$ && \
+    ( "$has_portable" == true || "$has_portable" == false ) ]] || {
+    exec 7<&- 8<&-; [[ "$platform_present" == true ]] && exec 9<&-
+    return 1
+  }
+  if [[ "$platform_present" == true ]]; then
+    platform="$(_sgt_read_owned_fd 9 "$platform_path" 600)" || {
+      exec 7<&- 8<&- 9<&-
+      return 1
+    }
+    [[ "$platform" == Darwin:no-exact-process-birth && "$has_portable" == true ]] || {
+      exec 7<&- 8<&- 9<&-
+      return 1
+    }
+    platform_snapshot="$platform"
+  elif [[ "$has_portable" == true || -e "$platform_path" || -L "$platform_path" ]]; then
+    exec 7<&- 8<&-
+    return 1
+  fi
+
+  if ! _sgt_validate_owned_fd 7 "$current_path" 600 >/dev/null || \
+     ! _sgt_validate_owned_fd 8 "$history_path" 600 >/dev/null; then
+    exec 7<&- 8<&-; [[ "$platform_present" == true ]] && exec 9<&-
+    return 1
+  fi
+  if [[ "$platform_present" == true ]]; then
+    _sgt_validate_owned_fd 9 "$platform_path" 600 >/dev/null || {
+      exec 7<&- 8<&- 9<&-
+      return 1
+    }
+    exec 9<&-
+  elif [[ -e "$platform_path" || -L "$platform_path" ]]; then
+    exec 7<&- 8<&-
+    return 1
+  fi
+  tuple_digest="$(printf 'worker-marker-tuple-v1\ncurrent=%s\nhistory_sha256=%s\nplatform=%s\n' \
+    "$current" "$digest" "$platform_snapshot" | _sgt_sha256_stream)" || {
+    exec 7<&- 8<&-; [[ "$platform_present" == true ]] && exec 9<&-
+    return 1
+  }
+  [[ "$tuple_digest" =~ ^[0-9a-f]{64}$ ]] || {
+    exec 7<&- 8<&-; [[ "$platform_present" == true ]] && exec 9<&-
+    return 1
+  }
+  exec 7<&- 8<&-
+  printf '%s|%s\n' "$snapshot" "$tuple_digest"
 }
 _sgt_migrate_owned_fd() {
   local fd="$1" path="$2" modes="$3" expected="$4"
@@ -686,12 +815,211 @@ _sgt_pane_identity_matches() {
   [[ "$actual" == "$expected" && "$current" == "$actual" ]]
 }
 _sgt_worker_command() {
-  printf '%q %q %q %q' "$1" "$2" "$3" "$4"
+  local worker="$1" repo_dir="$2" worktree="$3" agent="$4"
+  _sgt_process_marker_command "$repo_dir" "$worker" "$repo_dir" "$worktree" "$agent"
+}
+_sgt_process_marker_command() {
+  local repo_dir="$1" marker generation identity fd path argument command
+  shift
+  marker="$(_sgt_read_owned_file "$repo_dir/worker_process_marker" 2>/dev/null || true)"
+  IFS='|' read -r generation identity fd path <<< "$marker"
+  [[ "$generation" =~ ^[0-9a-f]{32}$ && "$identity" =~ ^[0-9]+:[0-9]+$ &&
+    "$fd" == 198 && -n "$path" ]] || return 1
+  printf -v command 'exec 198<%q && rm -f %q && exec' "$path" "$path"
+  for argument in "$@"; do
+    printf -v command '%s %q' "$command" "$argument"
+  done
+  printf '%s' "$command"
+}
+_sgt_worker_process_marker_preflight() {
+  local repo_dir="$1" history="$1/worker_process_markers" platform snapshot digest floor history_has_portable tuple_digest extra
+  platform="$1/worker_process_marker_platform"
+  if [[ ( -e "$repo_dir/worker_process_marker" || \
+    -L "$repo_dir/worker_process_marker" ) && \
+    ! -e "$history" && ! -L "$history" ]]; then
+    printf 'worker process marker exists without durable history: %s\n' \
+      "$repo_dir" >&2
+    return 1
+  fi
+  if [[ ! -e "$repo_dir/worker_process_marker" && \
+    ! -L "$repo_dir/worker_process_marker" && ! -e "$history" && ! -L "$history" && \
+    ! -e "$platform" && ! -L "$platform" ]]; then
+    return 0
+  fi
+  snapshot="$(_sgt_worker_marker_tuple_snapshot "$repo_dir" 2>/dev/null || true)"
+  IFS='|' read -r digest floor history_has_portable tuple_digest extra <<< "$snapshot"
+  [[ -z "$extra" && "$digest" =~ ^[0-9a-f]{64}$ && \
+    "$floor" =~ ^[0-9]+$ && \
+    ( "$history_has_portable" == true || "$history_has_portable" == false ) && \
+    "$tuple_digest" =~ ^[0-9a-f]{64}$ ]] || {
+    printf 'worker process marker is absent from valid durable history: %s\n' \
+      "$repo_dir" >&2
+    return 1
+  }
+}
+_sgt_worker_process_marker_state_digest() {
+  local repo_dir="$1" current history platform snapshot digest floor portable tuple_digest extra
+  current="$repo_dir/worker_process_marker"
+  history="$repo_dir/worker_process_markers"
+  platform="$repo_dir/worker_process_marker_platform"
+  if [[ ! -e "$current" && ! -L "$current" && ! -e "$history" && ! -L "$history" && \
+    ! -e "$platform" && ! -L "$platform" ]]; then
+    printf 'absent\n'
+    return 0
+  fi
+  snapshot="$(_sgt_worker_marker_tuple_snapshot "$repo_dir" 2>/dev/null || true)"
+  IFS='|' read -r digest floor portable tuple_digest extra <<< "$snapshot"
+  [[ -z "$extra" && "$digest" =~ ^[0-9a-f]{64}$ && "$floor" =~ ^[0-9]+$ && \
+    ( "$portable" == true || "$portable" == false ) && \
+    "$tuple_digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$tuple_digest"
+}
+_sgt_validate_inherited_worker_marker() {
+  local repo_dir="$1" marker generation identity fd path actual_identity actual_generation extra digest
+  _sgt_worker_process_marker_preflight "$repo_dir" || return 1
+  marker="$(_sgt_read_owned_file \
+    "$repo_dir/worker_process_marker" 2>/dev/null || true)"
+  [[ -n "$marker" ]] || return 1
+  digest="$(_sgt_marker_history_digest \
+    "$repo_dir/worker_process_markers" "$marker" 2>/dev/null || true)"
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  IFS='|' read -r generation identity fd path <<< "$marker"
+  [[ "$generation" =~ ^[0-9a-f]{32}$ && "$identity" =~ ^[0-9]+:[0-9]+$ && \
+    "$fd" == 198 && -n "$path" && ! -e "$path" ]] || return 1
+  actual_identity="$(_sgt_fd_identity 198 2>/dev/null || true)"
+  [[ "$actual_identity" == "$identity" ]] || return 1
+  IFS= read -r actual_generation <&198 || return 1
+  [[ "$actual_generation" == "$generation" ]] || return 1
+  if IFS= read -r extra <&198; then
+    return 1
+  fi
+}
+_sgt_prepare_worker_process_marker() {
+  local repo_dir="$1" path generation identity marker launch_identity launch_floor history history_tmp history_backup="" history_lines history_has_portable platform platform_record="" desired_platform="" portable_marker=false old_history_present=false
+  local old_platform="" old_platform_present=false
+  history="$repo_dir/worker_process_markers"
+  _sgt_worker_process_marker_preflight "$repo_dir" || return 1
+  path="$(mktemp "$repo_dir/.worker-process-marker.XXXXXX")" || return 1
+  identity="$(stat -Lc '%d:%i' "$path" 2>/dev/null || stat -f '%d:%i' "$path" 2>/dev/null || true)"
+  generation="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  if [[ -e "$repo_dir/worker_process_marker_platform" || \
+    -L "$repo_dir/worker_process_marker_platform" ]]; then
+    old_platform="$(_sgt_read_owned_file \
+      "$repo_dir/worker_process_marker_platform" 2>/dev/null || true)"
+    [[ -n "$old_platform" ]] || { rm -f "$path"; return 1; }
+    old_platform_present=true
+  fi
+  launch_identity="$(_sgt_process_identity "$$" 2>/dev/null || true)"
+  launch_floor="${launch_identity#linux:}"
+  if [[ "$launch_identity" != linux:* || ! "$launch_floor" =~ ^[0-9]+$ ]]; then
+    portable_marker=true
+    launch_floor=0
+    if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+      -n "${SGT_TEST_PROCESS_PLATFORM:-}" ]]; then
+      platform="$SGT_TEST_PROCESS_PLATFORM"
+    else
+      platform="$(uname -s 2>/dev/null || printf unknown)"
+    fi
+    platform_record="$platform:no-exact-process-birth"
+  fi
+  [[ "$identity" =~ ^[0-9]+:[0-9]+$ && "$generation" =~ ^[0-9a-f]{32}$ &&
+    "$launch_floor" =~ ^[0-9]+$ ]] || {
+    rm -f "$path"
+    return 1
+  }
+  printf '%s\n' "$generation" > "$path" || { rm -f "$path"; return 1; }
+  chmod 400 "$path" || { rm -f "$path"; return 1; }
+  marker="$generation|$identity|198|$path"
+  [[ ! -L "$history" && ( ! -e "$history" || -f "$history" ) ]] || { rm -f "$path"; return 1; }
+  history_tmp="$(mktemp "$repo_dir/.worker-process-markers.XXXXXX")" || { rm -f "$path"; return 1; }
+  if [[ -f "$history" ]]; then
+    cp -p "$history" "$history_tmp" || { rm -f "$history_tmp" "$path"; return 1; }
+    if $portable_marker; then
+      python3 "$_SGT_LIB_DIR/_sgt-process-token.py" portable-compact "$history_tmp" || {
+        rm -f "$history_tmp" "$path"
+        return 1
+      }
+    else
+      python3 "$_SGT_LIB_DIR/_sgt-process-token.py" compact "$history_tmp" || {
+        rm -f "$history_tmp" "$path"
+        return 1
+      }
+    fi
+    history_lines="$(wc -l < "$history_tmp" 2>/dev/null || true)"
+    [[ "$history_lines" =~ ^[0-9]+$ && "$history_lines" -lt 64 ]] || {
+      rm -f "$history_tmp" "$path"
+      return 1
+    }
+  fi
+  printf '%s|%s|%s\n' "$generation" "$identity" "$launch_floor" \
+    >> "$history_tmp" || { rm -f "$history_tmp" "$path"; return 1; }
+  chmod 600 "$history_tmp" || { rm -f "$history_tmp" "$path"; return 1; }
+  history_has_portable="$(awk -F'|' '$3 == 0 { found=1 } END { print found ? "true" : "false" }' \
+    "$history_tmp" 2>/dev/null || true)"
+  if [[ "$history_has_portable" == true ]]; then
+    if $portable_marker; then
+      desired_platform="$platform_record"
+    else
+      desired_platform="$old_platform"
+    fi
+    [[ "$desired_platform" == Darwin:no-exact-process-birth ]] || {
+      rm -f "$history_tmp" "$path"
+      return 1
+    }
+    if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+      "${SGT_TEST_MARKER_PLATFORM_WRITE_FAIL:-}" == 1 ]]; then
+      rm -f "$history_tmp" "$path"
+      return 1
+    fi
+    _sgt_replace_owned_file "$repo_dir/worker_process_marker_platform" \
+      "$desired_platform" || { rm -f "$history_tmp" "$path"; return 1; }
+  else
+    rm -f "$repo_dir/worker_process_marker_platform" || { rm -f "$history_tmp" "$path"; return 1; }
+  fi
+  if [[ -f "$history" ]]; then
+    history_backup="$(mktemp "$repo_dir/.worker-process-markers-backup.XXXXXX")" || {
+      if $old_platform_present; then
+        _sgt_replace_owned_file "$repo_dir/worker_process_marker_platform" "$old_platform" >/dev/null 2>&1 || true
+      else
+        rm -f "$repo_dir/worker_process_marker_platform"
+      fi
+      rm -f "$history_tmp" "$path"
+      return 1
+    }
+    cp -p "$history" "$history_backup" || { rm -f "$history_backup" "$history_tmp" "$path"; return 1; }
+    old_history_present=true
+  fi
+  if ! mv "$history_tmp" "$history"; then
+    if $old_platform_present; then
+      _sgt_replace_owned_file "$repo_dir/worker_process_marker_platform" "$old_platform" >/dev/null 2>&1 || true
+    else
+      rm -f "$repo_dir/worker_process_marker_platform"
+    fi
+    rm -f "$history_backup" "$history_tmp" "$path"
+    return 1
+  fi
+  if ! _sgt_replace_owned_file "$repo_dir/worker_process_marker" "$marker"; then
+    if $old_history_present; then
+      mv "$history_backup" "$history" >/dev/null 2>&1 || true
+    else
+      rm -f "$history"
+    fi
+    if $old_platform_present; then
+      _sgt_replace_owned_file "$repo_dir/worker_process_marker_platform" \
+        "$old_platform" >/dev/null 2>&1 || true
+    else
+      rm -f "$repo_dir/worker_process_marker_platform"
+    fi
+    rm -f "$history_backup" "$path"
+    return 1
+  fi
+  rm -f "$history_backup"
 }
 _sgt_notification_target_create() {
   local repo_dir="$1" notification_id="$2" pane_identity="$3"
   local nonce target_dir temporary published_nonce
   nonce="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  [[ "$nonce" =~ ^[0-9a-f]{32}$ ]] || return 1
   target_dir="$repo_dir/notifications/$notification_id/targets/$nonce"
   # pane_identity is stored exclusively inside target_dir so it is bound to the
   # nonce atomically; there is no separate top-level notification_target_pane_identity

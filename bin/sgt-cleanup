@@ -44,6 +44,20 @@ FLEET_ROOT="$(cd "$FLEET_DIR" && pwd -P)"
 TASK_ROOT="$(cd "$TASK_DIR" && pwd -P)"
 [[ "$TASK_ROOT" == "$FLEET_ROOT/$TASK_ID" ]] || _die "Invalid task ID: $TASK_ID"
 
+# Marker evidence is a task-wide cleanup admission boundary. Validate both
+# namespaces for every repository before callbacks, monitor shutdown, pane
+# retirement, response locks, or any other lifecycle mutation.
+for _sgt_preflight_repo_dir in "$TASK_DIR"/*/; do
+  [[ -d "$_sgt_preflight_repo_dir" ]] || continue
+  _sgt_preflight_repo_dir="${_sgt_preflight_repo_dir%/}"
+  _sgt_preflight_repo_name="$(basename "$_sgt_preflight_repo_dir")"
+  _sgt_worker_process_marker_preflight "$_sgt_preflight_repo_dir" || \
+    _die "Cleanup refused: worker process marker evidence is torn: $_sgt_preflight_repo_name"
+  _sgt_worker_process_marker_preflight \
+    "$_sgt_preflight_repo_dir/validation-process" || \
+    _die "Cleanup refused: validation process marker evidence is torn: $_sgt_preflight_repo_name"
+done
+
 if [[ -e "$TASK_DIR/.callbacks/origin.json" || -L "$TASK_DIR/.callbacks/origin.json" ]]; then
   "$SCRIPT_DIR/sgt-callback" sync "$TASK_ID"
   if [[ -z "$FILTER_REPO" ]]; then
@@ -93,7 +107,7 @@ _process_tree_records() {
   for child_pid in $(pgrep -P "$root_pid" 2>/dev/null || true); do
     _process_tree_records "$child_pid"
   done
-  identity="$(ps -o lstart= -p "$root_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+  identity="$(_sgt_process_identity "$root_pid" 2>/dev/null || true)"
   [[ -n "$identity" ]] && printf '%s|%s\n' "$root_pid" "$identity"
 }
 
@@ -112,7 +126,7 @@ _live_recorded_tree_pids() {
 
   while IFS='|' read -r pid identity; do
     [[ -n "$pid" && -n "$identity" ]] || continue
-    current_identity="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+    current_identity="$(_sgt_process_identity "$pid" 2>/dev/null || true)"
     [[ "$current_identity" == "$identity" ]] && printf '%s\n' "$pid"
   done <<< "$records"
 }
@@ -167,7 +181,7 @@ _recover_escaped_worker_pgid() {
   [[ -n "$recorded_pgid" ]] || return 0
 
   if kill -0 "$recorded_pid" 2>/dev/null; then
-    actual_start="$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+    actual_start="$(_sgt_process_identity "$recorded_pid" 2>/dev/null || true)"
     [[ "$actual_start" == "$recorded_start" ]] || \
       _die "Worker PID was reused; refusing termination of escaped descendants: $recorded_pid"
     actual_pgid="$(ps -o pgid= -p "$recorded_pid" 2>/dev/null | tr -d ' ' || true)"
@@ -258,6 +272,12 @@ _stop_local_worker() {
 
   [[ -z "$live_tree_pids" ]] || \
     _die "Worker processes did not terminate: $(tr '\n' ' ' <<< "$live_tree_pids")"
+  # Process groups and ancestry cannot see a setsid/double-fork escape. Every
+  # launched worker generation inherits an unforgeable open marker instead;
+  # fleet and marker evidence must remain intact unless pidfd retirement proves
+  # all holders are gone.
+  _sgt_retire_worker_marker_holders "$repo_dir" "$repo_dir/worker_recycle_phase" || \
+    _die "Worker marker holders could not be retired; fleet evidence preserved: $(basename "$repo_dir")"
   cwd_pids="$(_worktree_cwd_pids "$worktree")"
   [[ -z "$cwd_pids" ]] || \
     _die "Other processes still have $worktree as their current directory: $(tr '\n' ' ' <<< "$cwd_pids")"
@@ -268,7 +288,10 @@ _stop_recorded_validation_group() {
   local actual_start actual_pgid live_pids
 
   if kill -0 "$recorded_pid" 2>/dev/null; then
-    actual_start="$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | awk '{$1=$1; print}' || true)"
+    if _sgt_process_identity_record_is_portable "$recorded_start"; then
+      _die "Validation owner has no exact process identity; refusing process-group termination: $recorded_pid"
+    fi
+    actual_start="$(_sgt_process_identity "$recorded_pid" 2>/dev/null || true)"
     [[ "$actual_start" == "$recorded_start" ]] || \
       _die "Validation owner PID was reused; refusing process termination: $recorded_pid"
     actual_pgid="$(ps -o pgid= -p "$recorded_pid" 2>/dev/null | tr -d ' ' || true)"
@@ -277,6 +300,9 @@ _stop_recorded_validation_group() {
   else
     live_pids="$(_process_group_pids "$recorded_pgid")"
     [[ -n "$live_pids" ]] || return 0
+    if _sgt_process_identity_record_is_portable "$recorded_start"; then
+      _die "Validation pane disappeared with portable, unverified descendants in process group $recorded_pgid"
+    fi
     [[ "$recorded_pid" == "$recorded_pgid" ]] || \
       _die "Validation pane disappeared with unverified detached descendants in process group $recorded_pgid"
   fi
@@ -299,6 +325,7 @@ _stop_recorded_validation_group() {
 _stop_validation_pane() {
   local repo_dir="$1" pane pane_identity expected_identity pane_info pane_pid pane_pgid
   local tree_records tree_pids live_tree_pids recorded_pid recorded_pgid recorded_start actual_start
+  local portable_identity=false
   pane="$(cat "$repo_dir/validation_pane" 2>/dev/null || true)"
   [[ -n "$pane" ]] || return 0
   recorded_pid="$(cat "$repo_dir/validation_pane_pid" 2>/dev/null || true)"
@@ -306,6 +333,7 @@ _stop_validation_pane() {
   recorded_start="$(cat "$repo_dir/validation_process_start" 2>/dev/null || true)"
   [[ -n "$recorded_pid" && -n "$recorded_pgid" && -n "$recorded_start" ]] || \
     _die "Validation pane ownership provenance is incomplete: $pane"
+  _sgt_process_identity_record_is_portable "$recorded_start" && portable_identity=true
   if ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
     _stop_recorded_validation_group "$recorded_pid" "$recorded_pgid" "$recorded_start"
     return 0
@@ -332,15 +360,25 @@ _stop_validation_pane() {
     pane_pid="${pane_info%%|*}"
     [[ "$pane_pid" == "$recorded_pid" ]] || \
       _die "Validation pane PID does not match recorded ownership: $pane_pid"
-    actual_start="$(ps -o lstart= -p "$pane_pid" 2>/dev/null | awk '{$1=$1; print}' || true)"
-    [[ "$actual_start" == "$recorded_start" ]] || \
-      _die "Validation owner PID was reused; refusing process termination: $recorded_pid"
+    if ! $portable_identity; then
+      actual_start="$(_sgt_process_identity "$pane_pid" 2>/dev/null || true)"
+      [[ "$actual_start" == "$recorded_start" ]] || \
+        _die "Validation owner PID was reused; refusing process termination: $recorded_pid"
+    fi
     tree_records="$(_process_tree_records "$pane_pid")"
     tree_pids="$(_recorded_tree_pids "$tree_records")"
     pane_pgid="$(ps -o pgid= -p "$pane_pid" 2>/dev/null | tr -d ' ' || true)"
     [[ "$pane_pgid" == "$recorded_pgid" ]] || \
       _die "Validation owner process group changed; refusing process termination: $recorded_pid"
     tmux kill-pane -t "$pane" || _die "Failed to terminate validation pane $pane"
+    if $portable_identity; then
+      for _ in $(seq 1 70); do
+        live_tree_pids="$(_process_group_pids "$recorded_pgid")"
+        [[ -z "$live_tree_pids" ]] && return 0
+        sleep 0.1
+      done
+      _die "Portable validation processes remain after exact pane termination: $(tr '\n' ' ' <<< "$live_tree_pids")"
+    fi
     _terminate_pids "$tree_pids"
     _terminate_process_group "$pane_pgid"
     for _ in $(seq 1 50); do
@@ -496,8 +534,7 @@ _response_owner_provably_dead() {
     fi
   fi
   if kill -0 "$recorded_pid" 2>/dev/null; then
-    actual_start="$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | \
-      sed 's/^ *//;s/ *$//' || true)"
+    actual_start="$(_sgt_process_identity "$recorded_pid" 2>/dev/null || true)"
     if [[ "$actual_start" == "$recorded_start" ]]; then
       printf 'recorded worker process %s is still alive\n' "$recorded_pid"
     else
@@ -2557,6 +2594,11 @@ for repo_dir in "$TASK_DIR"/*/; do
   status="$(cat "$repo_dir/status" 2>/dev/null || echo "unknown")"
   wt_type="$(cat "$repo_dir/wt_type" 2>/dev/null || echo "git")"
 
+  _sgt_worker_process_marker_preflight "$repo_dir" || \
+    _die "Cleanup refused: worker process marker evidence is torn: $repo_name"
+  _sgt_worker_process_marker_preflight "$repo_dir/validation-process" || \
+    _die "Cleanup refused: validation process marker evidence is torn: $repo_name"
+
   _sgt_response_lock_acquire "$repo_dir"
   trap '_sgt_response_lock_release' EXIT
   _require_response_cleanup_safe "$repo_dir" "$worktree" publish
@@ -2582,6 +2624,11 @@ for repo_dir in "$TASK_DIR"/*/; do
   _validate_retry_validation_checkout "$repo_dir" "$worktree" "$TASK_ID"
 
   _stop_validation_pane "$repo_dir"
+  if [[ -d "$repo_dir/validation-process" ]]; then
+    _sgt_retire_worker_marker_holders "$repo_dir/validation-process" \
+      "$repo_dir/validation-process/worker_recycle_phase" || \
+      _die "Validation worker marker retirement is incomplete: $repo_dir"
+  fi
   _stop_local_worker "$repo_dir" "$worktree"
 
   validation_worktree="$(cat "$repo_dir/validation_worktree" 2>/dev/null || true)"

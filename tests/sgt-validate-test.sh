@@ -10,7 +10,10 @@ fleet="$TEST_ROOT/fleet"
 repo_state="$fleet/task-1/app"
 worktree="$TEST_ROOT/worktree"
 fake_bin="$TEST_ROOT/bin"
-mkdir -p "$repo_state" "$worktree" "$fake_bin"
+mkdir -p "$repo_state" "$worktree" "$fake_bin" "$TEST_ROOT/proc/7777"
+printf '7777 (validation fixture) S 1 7777 7777 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345 0\n' \
+  > "$TEST_ROOT/proc/7777/stat"
+export SGT_PROC_ROOT="$TEST_ROOT/proc"
 git -C "$worktree" init -q
 git -C "$worktree" config user.name Test
 git -C "$worktree" config user.email test@example.invalid
@@ -141,10 +144,19 @@ case "$1" in
     ;;
   split-window)
     command="${!#}"
+    if [[ "${FAIL_TRANSITION:-}" == "pane-start" ]]; then
+      rm -f "$SGT_PROC_ROOT/7777/stat"
+    else
+      mkdir -p "$SGT_PROC_ROOT/7777"
+      printf '7777 (validation fixture) S 1 7777 7777 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345 0\n' \
+        > "$SGT_PROC_ROOT/7777/stat"
+    fi
     printf '%s\n' "$command" > "$CONCURRENT_DIR/validation-command"
     : > "$CONCURRENT_DIR/pane-live"
-    printf '%s|%%77|7777|Thu Jul 23 00:00:00 2026\n' \
-      "$(cat "$CONCURRENT_DIR/revision")" > "$TEST_REPO_STATE/validation-child-ready"
+    printf '%s|%%77|7777|%s\n' \
+      "$(cat "$CONCURRENT_DIR/revision")" \
+      "${VALIDATION_START_FIXTURE:-linux:12345}" \
+      > "$TEST_REPO_STATE/validation-child-ready"
     [[ "${FAIL_TRANSITION:-}" != "split-empty" ]] || exit 7
     if [[ "${FAIL_TRANSITION:-}" == "pane-pid" ]]; then
       printf '0|%%77||234567|%s\n' "$command"
@@ -180,10 +192,6 @@ case "$*" in
     [[ "${FAIL_TRANSITION:-}" != "pane-pgid" && \
       "${FAIL_TRANSITION:-}" != "pane-reuse" ]] || exit 7
     printf '7777\n'
-    ;;
-  *'lstart='*)
-    [[ "${FAIL_TRANSITION:-}" != "pane-start" ]] || exit 7
-    printf 'Thu Jul 23 00:00:00 2026\n'
     ;;
   *) exit 1 ;;
 esac
@@ -296,8 +304,10 @@ fi
 "$REAL_LN" "$@" || exit
 if [[ "$destination" == */validation-release && \
   "${FAIL_TRANSITION:-}" != "handshake-timeout" ]]; then
-  printf '%s|%%77|7777|Thu Jul 23 00:00:00 2026\n' \
-      "$(cat "$CONCURRENT_DIR/revision")" > "$TEST_REPO_STATE/validation-child-accepted"
+  printf '%s|%%77|7777|%s\n' \
+      "$(cat "$CONCURRENT_DIR/revision")" \
+      "${VALIDATION_START_FIXTURE:-linux:12345}" \
+      > "$TEST_REPO_STATE/validation-child-accepted"
 fi
 if [[ "$destination" == */validation-child-commit ]]; then
   if [[ "${FAIL_TRANSITION:-}" == "commit-child-exit" ]]; then
@@ -305,8 +315,10 @@ if [[ "$destination" == */validation-child-commit ]]; then
   elif [[ "${FAIL_TRANSITION:-}" == "wrong-commit-ack" ]]; then
     printf 'wrong-ack\n' > "$TEST_REPO_STATE/validation-child-committed"
   elif [[ "${FAIL_TRANSITION:-}" != "commit-ack-timeout" ]]; then
-    printf '%s|%%77|7777|Thu Jul 23 00:00:00 2026\n' \
-      "$(cat "$CONCURRENT_DIR/revision")" > "$TEST_REPO_STATE/validation-child-committed"
+    printf '%s|%%77|7777|%s\n' \
+      "$(cat "$CONCURRENT_DIR/revision")" \
+      "${VALIDATION_START_FIXTURE:-linux:12345}" \
+      > "$TEST_REPO_STATE/validation-child-committed"
     [[ "${FAIL_TRANSITION:-}" != "exit-after-committed" ]] || \
       rm -f "$CONCURRENT_DIR/pane-live"
   fi
@@ -317,8 +329,10 @@ if [[ "$destination" == */validation-success ]]; then
   elif [[ "${FAIL_TRANSITION:-}" == "wrong-final-token" ]]; then
     printf 'wrong-final\n' > "$TEST_REPO_STATE/validation-success-ack"
   elif [[ "${FAIL_TRANSITION:-}" != "final-ack-timeout" ]]; then
-    printf '%s|%%77|7777|Thu Jul 23 00:00:00 2026\n' \
-      "$(cat "$CONCURRENT_DIR/revision")" > "$TEST_REPO_STATE/validation-success-ack"
+    printf '%s|%%77|7777|%s\n' \
+      "$(cat "$CONCURRENT_DIR/revision")" \
+      "${VALIDATION_START_FIXTURE:-linux:12345}" \
+      > "$TEST_REPO_STATE/validation-success-ack"
     [[ "${FAIL_TRANSITION:-}" != "exit-after-final-ack" ]] || \
       rm -f "$CONCURRENT_DIR/pane-live"
   fi
@@ -356,12 +370,13 @@ if [[ "${FAIL_TRANSITION:-}" == "identity-chmod-race" && \
 fi
 if [[ "$last" == */primary_pane_identity && -n "${IDENTITY_RACE_MARKER:-}" && \
   "${FAIL_TRANSITION:-}" == @(legacy-identity-content-race|legacy-identity-publish-replaced) ]]; then
-  count_file="${IDENTITY_RACE_MARKER}.count"
-  count=0
-  [[ ! -f "$count_file" ]] || count="$(cat "$count_file")"
-  count=$((count + 1))
-  printf '%s\n' "$count" > "$count_file"
-  if [[ "$count" -eq 3 ]]; then
+  # Trigger on the observable publication boundary: the legacy record has just
+  # been promoted to canonical owner-only mode. Call counts vary when new
+  # preflight readers are added and do not describe the race being exercised.
+  observed_mode="$("$REAL_STAT" -c '%a' "$last" 2>/dev/null || true)"
+  if [[ ! -e "$IDENTITY_RACE_MARKER" && \
+    ( ( "${FAIL_TRANSITION:-}" == legacy-identity-content-race && "$observed_mode" == 664 ) || \
+      ( "${FAIL_TRANSITION:-}" == legacy-identity-publish-replaced && "$observed_mode" == 600 ) ) ]]; then
     case "${FAIL_TRANSITION:-}" in
       legacy-identity-content-race)
         printf 'tampered-pane\n' > "$last"
@@ -399,6 +414,52 @@ exec "$REAL_SHASUM" "$@"
 EOF
 chmod +x "$fake_bin/shasum"
 
+if [[ "${SGT_VALIDATE_PORTABLE_ONLY:-}" == 1 ]]; then
+  export SGT_TEST_HOOKS=1 SGT_TEST_PROCESS_IDENTITY_UNAVAILABLE=1
+  export SGT_TEST_PROCESS_PLATFORM=Darwin SGT_TEST_PROCESS_ASSUME_LIVE=1
+  export VALIDATION_START_FIXTURE='platform:Darwin:no-exact-process-birth'
+fi
+
+if [[ "${SGT_VALIDATE_TORN_ONLY:-}" == 1 ]]; then
+  printf 'prior-current-marker\n' > "$repo_state/worker_process_marker"
+  chmod 600 "$repo_state/worker_process_marker"
+  cp "$repo_state/worker_process_marker" "$TEST_ROOT/validate-torn.before"
+  set +e
+  PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/validate-torn-tmux.log" \
+    TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+    "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null 2>&1
+  validate_torn_status=$?
+  set -e
+  [[ "$validate_torn_status" -ne 0 ]]
+  cmp "$TEST_ROOT/validate-torn.before" "$repo_state/worker_process_marker"
+  [[ ! -e "$repo_state/worker_process_markers" && \
+    ! -e "$repo_state/validation_worktree" && \
+    ! -e "$repo_state/validation_pane" && \
+    ! -e "$TEST_ROOT/validate-torn-tmux.log" ]]
+  rm -f "$repo_state/worker_process_marker"
+  mkdir -p "$repo_state/validation-process"
+  printf 'prior-validation-marker\n' \
+    > "$repo_state/validation-process/worker_process_marker"
+  chmod 600 "$repo_state/validation-process/worker_process_marker"
+  cp "$repo_state/validation-process/worker_process_marker" \
+    "$TEST_ROOT/validation-torn.before"
+  set +e
+  PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/validation-torn-tmux.log" \
+    TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+    "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null 2>&1
+  validation_torn_status=$?
+  set -e
+  [[ "$validation_torn_status" -ne 0 ]]
+  cmp "$TEST_ROOT/validation-torn.before" \
+    "$repo_state/validation-process/worker_process_marker"
+  [[ ! -e "$repo_state/validation-process/worker_process_markers" && \
+    ! -e "$repo_state/validation_worktree" && \
+    ! -e "$repo_state/validation_pane" && \
+    ! -e "$TEST_ROOT/validation-torn-tmux.log" ]]
+  printf 'sgt-validate torn marker preflight: ok\n'
+  exit 0
+fi
+
 # The release wrapper reads this output during the coordinator's EXIT trap.
 # shellcheck disable=SC2094
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
@@ -409,17 +470,29 @@ PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
 
 [[ "$(cat "$repo_state/validation_pane")" == "%77" ]]
 [[ "$(cat "$repo_state/validation_pane_identity")" == \
-  "0|%77|7777|234567|$ROOT_DIR/bin/sgt-validation-worker "* ]]
+  "0|%77|7777|234567|exec 198<"*"$ROOT_DIR/bin/sgt-validation-worker"* ]]
 [[ "$(cat "$repo_state/stage")" == "validation" ]]
 [[ "$(cat "$repo_state/window_name")" == "validation-app-task-1" ]]
 [[ "$(cat "$repo_state/validation_process_group")" == "7777" ]]
 [[ "$(cat "$repo_state/validation_pane_pid")" == "7777" ]]
+if [[ "${SGT_VALIDATE_PORTABLE_ONLY:-}" == 1 ]]; then
+  [[ "$(cat "$repo_state/validation_process_start")" == \
+    'platform:Darwin:no-exact-process-birth' ]]
+  grep -Fq 'exec 198<' "$TEST_ROOT/tmux.log"
+  grep -Fq ' && rm -f ' "$TEST_ROOT/tmux.log"
+  printf 'sgt-validate portable split-pane launch: ok\n'
+  exit 0
+fi
 grep -Fq 'rename-window -t %42 validation-app-task-1' "$TEST_ROOT/tmux.log"
 grep -Fq 'split-window -P -F #{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_created}|#{pane_start_command} -t %42' \
   "$TEST_ROOT/tmux.log"
 grep -Fq "$ROOT_DIR/bin/sgt-validation-worker" "$TEST_ROOT/tmux.log"
+grep -Fq 'exec 198<' "$TEST_ROOT/tmux.log"
+grep -Fq ' && rm -f ' "$TEST_ROOT/tmux.log"
+[[ -s "$repo_state/validation-process/worker_process_marker" && \
+  -s "$repo_state/validation-process/worker_process_markers" ]]
 grep -Fq "$revision" "$TEST_ROOT/tmux.log"
-grep -Fq "review,document" "$concurrent_dir/validation-command"
+grep -Fq 'review\,document' "$concurrent_dir/validation-command"
 if grep -Fq 'Validate the interactive worker safely' "$TEST_ROOT/tmux.log" || \
   grep -Fq -- '--yes' "$TEST_ROOT/tmux.log"; then
   printf 'validation launch leaked intent or enabled automatic gates\n' >&2
@@ -437,7 +510,7 @@ validation_worktree="$(cat "$repo_state/validation_worktree")"
 [[ "$(cat "$repo_state/validation_status")" == launched && \
   ! -e "$validation_worktree/stale-finished" ]]
 grep -Fq "lint" "$concurrent_dir/validation-command"
-if grep -Fq "review,document" "$concurrent_dir/validation-command"; then
+if grep -Fq 'review\,document' "$concurrent_dir/validation-command"; then
   printf 'explicit skip did not replace the medium default\n' >&2
   exit 1
 fi
@@ -453,7 +526,7 @@ PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
 validation_worktree="$(cat "$repo_state/validation_worktree")"
 [[ "$(cat "$repo_state/validation_status")" == launched && \
   ! -e "$validation_worktree/legacy-finished" ]]
-if grep -Fq "review,document" "$concurrent_dir/validation-command"; then
+if grep -Fq 'review\,document' "$concurrent_dir/validation-command"; then
   printf 'explicit empty skip did not request full validation\n' >&2
   exit 1
 fi
@@ -666,8 +739,10 @@ cleanup_validation_state
 
 lock_coordinator='%11|0|%11|1111|111111|coordinator-command'
 lock_purpose='task-1/app/validation-launch'
+live_lock_start="$(bash -c 'source "$1"; _sgt_process_identity "$2"' _ \
+  "$ROOT_DIR/bin/_sgt-process.sh" "$$")"
 
-write_validation_lock "$$" 'Thu Jul 23 00:00:00 2026' "$lock_coordinator" "$lock_purpose"
+write_validation_lock "$$" "$live_lock_start" "$lock_coordinator" "$lock_purpose"
 live_lock="$(cat "$repo_state/validation-launch.lock")"
 assert_lock_blocks_and_is_preserved "$live_lock"
 rm "$repo_state/validation-launch.lock"
@@ -688,7 +763,7 @@ set -e
 [[ "$status" -ne 0 && "$(cat "$repo_state/validation-launch.lock")" == 'replacement-owner' ]]
 rm "$repo_state/validation-launch.lock"
 
-write_validation_lock "$$" 'Thu Jul 23 00:00:01 2026' "$lock_coordinator" "$lock_purpose"
+write_validation_lock "$$" 'linux:1' "$lock_coordinator" "$lock_purpose"
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
   "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
@@ -844,15 +919,20 @@ done
 
 legacy_race_marker="$TEST_ROOT/legacy-pane-race"
 chmod 664 "$fleet/task-1/primary_pane_identity"
-PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
   FAIL_TRANSITION=legacy-identity-content-race IDENTITY_RACE_MARKER="$legacy_race_marker" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
-  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
-[[ "$(cat "$fleet/task-1/primary_pane_identity")" == '0|%11|1111|111111|coordinator-command' ]]
+  "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]]
+[[ "$(cat "$fleet/task-1/primary_pane_identity")" == tampered-pane ]]
 [[ "$(stat -c '%a' "$fleet/task-1/primary_pane_identity" 2>/dev/null || \
-  stat -f '%Lp' "$fleet/task-1/primary_pane_identity")" == "600" ]]
+  stat -f '%Lp' "$fleet/task-1/primary_pane_identity")" == "664" ]]
 [[ -e "$legacy_race_marker" ]]
-cleanup_validation_state
+printf '0|%%11|1111|111111|coordinator-command\n' > "$fleet/task-1/primary_pane_identity"
+chmod 600 "$fleet/task-1/primary_pane_identity"
 
 legacy_replace_marker="$TEST_ROOT/legacy-pane-replaced"
 chmod 664 "$fleet/task-1/primary_pane_identity"
@@ -1055,7 +1135,7 @@ PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
   "$ROOT_DIR/bin/sgt-validate" task-1 app --allow-argv-intent --skip lint >/dev/null
 grep -Fq 'lint' "$concurrent_dir/validation-command"
-if grep -Fq 'review,document' "$concurrent_dir/validation-command"; then
+if grep -Fq 'review\,document' "$concurrent_dir/validation-command"; then
   printf 'composed flags lost the explicit skip list\n' >&2
   exit 1
 fi

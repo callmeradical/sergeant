@@ -172,7 +172,7 @@ _sgt_drain_host_id() {
 _sgt_drain_nonce() {
   local token
   token="$(dd if=/dev/urandom bs=8 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' || true)"
-  [[ -n "$token" ]] || token="$$$(date +%s)$RANDOM"
+  [[ "$token" =~ ^[0-9a-f]{16}$ ]] || return 1
   printf '%s\n' "$token"
 }
 
@@ -203,24 +203,50 @@ _sgt_drain_process_alive() {
 
 # _sgt_drain_process_start <pid>
 #
-# Prints a stable process start token used to detect PID reuse, or nothing when
-# it cannot be determined.  Prefers /proc/<pid>/stat field 22 (Linux and
-# BusyBox) and falls back to ps lstart (macOS).
+# Prints the shared exact process identity used to detect PID reuse, or nothing
+# when the platform cannot provide that identity.
 _sgt_drain_process_start() {
-  local pid="$1" tail_fields
+  local pid="$1"
   case "$pid" in
     ''|*[!0-9]*) return 0 ;;
   esac
-  if [[ -r "/proc/$pid/stat" ]]; then
-    # The comm field may contain spaces and parentheses, so read everything
-    # after the final ") "; starttime is then the 20th remaining field.
-    tail_fields="$(sed 's/^.*) //' "/proc/$pid/stat" 2>/dev/null || true)"
-    if [[ -n "$tail_fields" ]]; then
-      printf '%s\n' "$tail_fields" | awk '{print $20}'
-      return 0
-    fi
-  fi
-  ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true
+  declare -F _sgt_process_identity >/dev/null 2>&1 || return 0
+  _sgt_process_identity "$pid" 2>/dev/null || true
+}
+
+# _sgt_drain_legacy_process_start <pid>
+#
+# Reads the historical `ps lstart` representation without `ps -p`, which is
+# absent from BusyBox. This value is compatibility evidence only: its
+# second-resolution timestamp is never promoted to an exact process identity.
+# Callers must retain a live PID when the field is unsupported or differs.
+_sgt_drain_legacy_process_start() {
+  local pid="$1" table value variant
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  for variant in gnu bsd; do
+    case "$variant" in
+      gnu) table="$(ps -A -o pid=,lstart= 2>/dev/null)" || continue ;;
+      bsd) table="$(ps -axo pid=,lstart= 2>/dev/null)" || continue ;;
+    esac
+    value="$(printf '%s\n' "$table" | awk -v target="$pid" '
+      $1 == target {
+        $1 = ""
+        sub(/^[[:space:]]+/, "")
+        value = $0
+        count++
+      }
+      END {
+        if (count == 1 && value != "") print value
+        else exit 1
+      }
+    ')" || continue
+    [[ -n "$value" ]] || continue
+    printf '%s\n' "$value"
+    return 0
+  done
+  return 1
 }
 
 # _sgt_drain_snapshot_field <snapshot> <field>
@@ -264,7 +290,7 @@ _sgt_drain_lock_owner_is_gone() {
   # from different generations — including an empty nonce, which used to make
   # reclamation unbounded.
   snapshot="$(cat "$record" 2>/dev/null || true)"
-  [[ -n "$snapshot" ]] || return 1
+  [[ -n "$snapshot" ]] || { exec 5<&-; return 1; }
 
   host="$(_sgt_drain_snapshot_field "$snapshot" owner_host)"
   local_host="$(_sgt_drain_host_id)"
@@ -298,6 +324,76 @@ _sgt_drain_lock_owner_is_gone() {
     return 0
   fi
   return 1
+}
+
+# True only for a complete same-host record whose PID is live and whose exact
+# process birth identity still matches. Ambiguous or legacy records are not
+# evidence that a peer transaction ran.
+_sgt_drain_lock_owner_is_verified_live() {
+  local record="$1" snapshot pid host nonce recorded_start actual_start alive_rc=0
+  _SGT_DRAIN_VERIFIED_LIVE_NONCE=""
+  [[ -f "$record" ]] || return 1
+  exec 5< "$record" || return 1
+  [[ "/proc/self/fd/5" -ef "$record" ]] || { exec 5<&-; return 1; }
+  snapshot="$(cat <&5 2>/dev/null || true)"
+  [[ -n "$snapshot" ]] || return 1
+  printf '%s\n' "$snapshot" | awk -F= '
+    BEGIN { required["owner_pid"]; required["owner_start"]; required["owner_host"];
+      required["owner_user"]; required["owner_purpose"]; required["owner_nonce"];
+      required["created_at"]; required["created_epoch"] }
+    !($1 in required) || substr($0, length($1) + 2) == "" { exit 1 }
+    { seen[$1]++ }
+    END { if (length(seen) != 8) exit 1; for (key in required) if (seen[key] != 1) exit 1 }
+  ' || { exec 5<&-; return 1; }
+  host="$(_sgt_drain_snapshot_field "$snapshot" owner_host)"
+  [[ -n "$host" && "$host" == "$(_sgt_drain_host_id)" ]] || { exec 5<&-; return 1; }
+  pid="$(_sgt_drain_snapshot_field "$snapshot" owner_pid)"
+  nonce="$(_sgt_drain_snapshot_field "$snapshot" owner_nonce)"
+  recorded_start="$(_sgt_drain_snapshot_field "$snapshot" owner_start)"
+  [[ "$pid" =~ ^[1-9][0-9]*$ && -n "$nonce" && -n "$recorded_start" ]] || { exec 5<&-; return 1; }
+  _sgt_drain_process_alive "$pid" || alive_rc=$?
+  [[ $alive_rc -eq 0 ]] || { exec 5<&-; return 1; }
+  actual_start="$(_sgt_drain_process_start "$pid")"
+  [[ -n "$actual_start" && "$actual_start" == "$recorded_start" && \
+    "/proc/self/fd/5" -ef "$record" ]] || { exec 5<&-; return 1; }
+  _SGT_DRAIN_VERIFIED_LIVE_NONCE="$nonce"
+  exec 5<&-
+  return 0
+}
+
+_sgt_worker_launch_transaction_begin() {
+  local repo="$1" fd="$2" before
+  before="$(_sgt_worker_process_marker_state_digest "$repo")" || return 1
+  [[ "$before" == absent || "$before" =~ ^[0-9a-f]{64}$ ]] || return 1
+  eval "_SGT_WORKER_LAUNCH_BEFORE_${fd}=\$before"
+}
+
+_sgt_worker_launch_completion_publish() {
+  local repo="$1" fd="$2" nonce before after
+  eval "nonce=\${_SGT_DRAIN_LOCK_NONCE_${fd}:-}"
+  eval "before=\${_SGT_WORKER_LAUNCH_BEFORE_${fd}:-}"
+  [[ "$nonce" =~ ^[0-9a-f]{16}$ ]] || return 1
+  [[ "$before" == absent || "$before" =~ ^[0-9a-f]{64}$ ]] || return 1
+  after="$(_sgt_worker_process_marker_state_digest "$repo")" || return 1
+  [[ "$after" =~ ^[0-9a-f]{64}$ && "$before" != "$after" ]] || return 1
+  _sgt_replace_owned_file "$repo/worker-launch.completed" "$nonce|$before|$after"
+}
+
+_sgt_worker_launch_observed_completion_matches() {
+  local repo="$1" record nonce before after current_digest extra
+  nonce="${SGT_DRAIN_LOCK_CONTENDED_NONCE:-}"
+  [[ "$nonce" =~ ^[0-9a-f]{16}$ ]] || return 1
+  record="$(_sgt_read_owned_file "$repo/worker-launch.completed" 2>/dev/null || true)"
+  IFS='|' read -r record_nonce before after extra <<< "$record"
+  [[ -z "$extra" && "$record_nonce" == "$nonce" && \
+    ( "$before" == absent || "$before" =~ ^[0-9a-f]{64}$ ) && \
+    "$after" =~ ^[0-9a-f]{64}$ && "$before" != "$after" ]] || return 1
+  current_digest="$(_sgt_worker_process_marker_state_digest "$repo")" || return 1
+  [[ "$current_digest" == "$after" ]]
+}
+
+_sgt_worker_launch_sha256() {
+  _sgt_sha256_stream
 }
 
 # _sgt_drain_lock_reclaim <record> <expected_nonce>
@@ -397,9 +493,12 @@ _sgt_drain_lock_report_timeout() {
 _sgt_drain_lock_acquire_fd() {
   local fd="${1:?_sgt_drain_lock_acquire_fd requires an fd}"
   local purpose="${2:-}"
+  local record_override="${3:-}"
   local record state_dir deadline nonce staging
 
   SGT_DRAIN_LOCK_STATE="unavailable"
+  SGT_DRAIN_LOCK_CONTENDED_LIVE=false
+  SGT_DRAIN_LOCK_CONTENDED_NONCE=""
   case "$fd" in
     ''|*[!0-9]*)
       printf 'ERROR: invalid drain admission lock handle: %s\n' "$fd" >&2
@@ -409,8 +508,12 @@ _sgt_drain_lock_acquire_fd() {
   [[ -n "$purpose" ]] || purpose="${0##*/}"
   purpose="$(printf '%s' "$purpose" | tr -d '\n\r')"
 
-  record="$(_sgt_drain_lock_record)"
+  record="${record_override:-$(_sgt_drain_lock_record)}"
   state_dir="$(dirname "$record")"
+  if ! nonce="$(_sgt_drain_nonce)"; then
+    printf 'ERROR: drain admission lock unavailable: secure entropy read failed\n' >&2
+    return 3
+  fi
   if [[ -e "$state_dir" && ! -d "$state_dir" ]]; then
     printf 'ERROR: drain admission lock unavailable: %s exists but is not a directory\n' \
       "$state_dir" >&2
@@ -423,7 +526,6 @@ _sgt_drain_lock_acquire_fd() {
 
   _sgt_drain_lock_sweep_artifacts "$record"
 
-  nonce="$(_sgt_drain_nonce)"
   staging="${record}.staging.$$.$nonce"
   # The record is complete BEFORE it becomes the lock, so the lock is never
   # visible without the owner state needed to verify or reclaim it.
@@ -465,6 +567,18 @@ _sgt_drain_lock_acquire_fd() {
     fi
     if _sgt_drain_lock_owner_is_gone "$record"; then
       _sgt_drain_lock_reclaim "$record" "$_SGT_DRAIN_OBSERVED_NONCE" && continue
+    fi
+    if _sgt_drain_lock_owner_is_verified_live "$record"; then
+      SGT_DRAIN_LOCK_CONTENDED_LIVE=true
+      [[ -n "$SGT_DRAIN_LOCK_CONTENDED_NONCE" ]] || \
+        SGT_DRAIN_LOCK_CONTENDED_NONCE="$_SGT_DRAIN_VERIFIED_LIVE_NONCE"
+      if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+        -n "${_SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER:-}" && \
+        "${_SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER%/*}" == "$state_dir" && \
+        ! -e "$_SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER" && \
+        ! -L "$_SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER" ]]; then
+        (umask 077; : > "$_SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER") || return 3
+      fi
     fi
     if [[ $(date +%s) -ge $deadline ]]; then
       rm -f "$staging" 2>/dev/null || true

@@ -23,6 +23,15 @@ export TMUX_STATE="$TEST_ROOT/tmux.state"
 printf '%s\n' "$worktree" > "$repo/worktree"
 printf '%%42\n' > "$repo/pane"
 printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo" > "$repo/pane_identity"
+printf '4242\n' > "$repo/worker_pid"
+printf '4242\n' > "$repo/worker_process_group"
+printf '4242\n' > "$repo/worker_session_id"
+printf 'linux:999999999999999\n' > "$repo/worker_process_start"
+printf '%032d|1:1|198|/gone\n' 1 > "$repo/worker_process_marker"
+printf '%032d|1:1|999999999999999\n' 1 > "$repo/worker_process_markers"
+chmod 600 "$repo/worker_process_marker" "$repo/worker_process_markers"
+printf 'version=1\nidentity=0|%%42|4242|123456|sgt-interactive-worker:%s\nprocess_group=4242\nsession_id=4242\nprocess_marker=%032d|1:1|198|/gone\nphase=retiring\nmember=4242|linux:999999999999999|1|4242|4242\n' \
+  "$repo" 1 > "$repo/worker_recycle_phase"
 printf 'opencode\n' > "$repo/agent"
 chmod 600 "$repo/pane_identity"
 printf 'in_progress\n' > "$repo/status"
@@ -63,33 +72,30 @@ chmod +x "$fake_bin/chmod"
 export REAL_CHMOD="$real_chmod"
 cat > "$fake_bin/stat" <<'EOF'
 #!/usr/bin/env bash
-last="${!#}"
-if [[ "$last" == */pane_identity && -n "${LEGACY_IDENTITY_RACE:-}" && \
-  -n "${LEGACY_IDENTITY_RACE_MARKER:-}" ]]; then
-  count_file="${LEGACY_IDENTITY_RACE_MARKER}.count"
-  count=0
-  [[ ! -f "$count_file" ]] || count="$(cat "$count_file")"
-  count=$((count + 1))
-  printf '%s\n' "$count" > "$count_file"
-  if [[ "$count" -eq 3 ]]; then
-    case "$LEGACY_IDENTITY_RACE" in
-      replace-content)
-        printf 'tampered-pane\n' > "$last"
-        chmod 664 "$last"
-        ;;
-      replace-path)
-        rm -f "$last"
-        printf 'tampered-pane\n' > "$last"
-        chmod 664 "$last"
-        ;;
-    esac
-    : > "$LEGACY_IDENTITY_RACE_MARKER"
-  fi
-fi
 exec "$REAL_STAT" "$@"
 EOF
 chmod +x "$fake_bin/stat"
 export REAL_STAT="$real_stat"
+cat > "$TEST_ROOT/legacy-open-race-hook" <<'EOF'
+#!/usr/bin/env bash
+phase="$1"
+path="$2"
+[[ "$phase" == after-open && "$path" == */pane_identity ]] || exit 0
+case "$LEGACY_IDENTITY_RACE" in
+  replace-content)
+    printf 'tampered-pane\n' > "$path"
+    chmod 664 "$path"
+    ;;
+  replace-path)
+    rm -f "$path"
+    printf 'tampered-pane\n' > "$path"
+    chmod 664 "$path"
+    ;;
+  *) exit 1 ;;
+esac
+: > "$LEGACY_IDENTITY_RACE_MARKER"
+EOF
+chmod 700 "$TEST_ROOT/legacy-open-race-hook"
 
 printf 'needs_input\n' > "$worktree/.sergeant-status"
 printf 'Choose a safe option.\n' > "$worktree/.sergeant-message"
@@ -102,8 +108,8 @@ PANE_DEAD=1 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$flee
 printf 'in_progress\n' > "$worktree/.sergeant-status"
 printf 'in_progress\n' > "$repo/status"
 rm -f "$repo/pane_identity"
-printf -v legacy_command '%q %q %q %q' \
-  "$ROOT/bin/sgt-interactive-worker" "$repo" "$worktree" opencode
+printf -v legacy_command 'exec 198<%q && rm -f %q && exec %q %q %q %q' \
+  /gone /gone "$ROOT/bin/sgt-interactive-worker" "$repo" "$worktree" opencode
 legacy_identity="0|%42|4242|123457|$legacy_command"
 PANE_IDENTITY="$legacy_identity" EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" \
   SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
@@ -130,11 +136,14 @@ legacy_race_marker="$TEST_ROOT/legacy-pane-race"
 printf 'in_progress\n' > "$worktree/.sergeant-status"
 printf 'in_progress\n' > "$repo/status"
 LEGACY_IDENTITY_RACE=replace-content LEGACY_IDENTITY_RACE_MARKER="$legacy_race_marker" \
+  SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
+  _SGT_OWNED_FILE_OPEN_HOOK="$TEST_ROOT/legacy-open-race-hook" \
   PANE_IDENTITY="$legacy_identity" EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" \
   SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
-[[ "$(cat "$repo/pane_identity")" == "$legacy_identity" ]]
+[[ "$(cat "$repo/status")" == "orphaned" ]]
+[[ "$(cat "$repo/pane_identity")" == "tampered-pane" ]]
 [[ "$(stat -c '%a' "$repo/pane_identity" 2>/dev/null || stat -f '%Lp' "$repo/pane_identity")" == \
-  "600" ]]
+  "664" ]]
 [[ -e "$legacy_race_marker" ]]
 
 printf '%s\n' "$legacy_identity" > "$repo/pane_identity"
@@ -143,6 +152,8 @@ legacy_replace_marker="$TEST_ROOT/legacy-pane-replaced"
 printf 'in_progress\n' > "$worktree/.sergeant-status"
 printf 'in_progress\n' > "$repo/status"
 LEGACY_IDENTITY_RACE=replace-path LEGACY_IDENTITY_RACE_MARKER="$legacy_replace_marker" \
+  SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
+  _SGT_OWNED_FILE_OPEN_HOOK="$TEST_ROOT/legacy-open-race-hook" \
   PANE_IDENTITY="$legacy_identity" EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" \
   SERGEANT_FLEET="$fleet" "$ROOT/bin/sgt-watch" --sync task-1
 [[ "$(cat "$repo/status")" == "orphaned" ]]
@@ -163,6 +174,7 @@ for forged_command in "wrapper $legacy_command extra" "${legacy_command}-prefix-
 done
 
 printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo" > "$repo/pane_identity"
+chmod 600 "$repo/pane_identity"
 
 printf 'done\n' > "$worktree/.sergeant-status"
 rm -f "$worktree/.sergeant-result"
@@ -232,8 +244,12 @@ missing_worktree_repo="$fleet/task-missing-worktree/app"
 mkdir -p "$missing_worktree_repo"
 printf '%s\n' "$TEST_ROOT/missing-worktree" > "$missing_worktree_repo/worktree"
 printf 'in_progress\n' > "$missing_worktree_repo/status"
+set +e
 EXPECTED_WORKER="$repo" PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
   "$ROOT/bin/sgt-watch" --sync-all
+sync_all_status=$?
+set -e
+[[ "$sync_all_status" -ne 0 ]]
 [[ "$(cat "$incomplete_repo/status")" == \
   'failed: dispatch incomplete: no worktree or owned live pane' ]]
 grep -Fq 'dispatch never acquired a worktree or owned live pane' "$incomplete_repo/diagnostic"
@@ -409,12 +425,15 @@ printf 'drained\n' > "$drained_wt/.sergeant-status"
 # Note: no pane file — drained worker's supervisor has exited
 
 # --sync: drained status propagated to fleet without triggering orphan detector
+set +e
 PATH="$fake_bin:$PATH" SERGEANT_FLEET="$drained_fleet" \
-  "$ROOT/bin/sgt-watch" --sync task-drained
+  "$ROOT/bin/sgt-watch" --sync task-drained >/dev/null 2>&1
+drained_sync_status=$?
+set -e
+[[ "$drained_sync_status" -ne 0 ]]
 [[ "$(cat "$drained_task/drainedrepo/status")" == "drained" ]] || {
   printf 'FAIL sgt-watch drained sync: expected drained status\n' >&2; exit 1; }
-[[ ! -f "$drained_task/drainedrepo/diagnostic" ]] || {
-  printf 'FAIL sgt-watch drained sync: unexpected diagnostic\n' >&2; exit 1; }
+grep -Fq 'process retirement is unproven' "$drained_task/drainedrepo/diagnostic"
 
 # --list: shows drained count
 list_drained_output="$(PATH="$fake_bin:$PATH" SERGEANT_FLEET="$drained_fleet" \
@@ -422,10 +441,12 @@ list_drained_output="$(PATH="$fake_bin:$PATH" SERGEANT_FLEET="$drained_fleet" \
 [[ "$list_drained_output" == *'1 drained'* ]] || {
   printf 'FAIL sgt-watch --list: expected drained count\n' >&2; exit 1; }
 
-# sgt-watch <task>: all workers drained → exits 0 (not looping forever)
-SERGEANT_WATCH_INTERVAL=0.01 PATH="$fake_bin:$PATH" \
-  SERGEANT_FLEET="$drained_fleet" \
-  "$ROOT/bin/sgt-watch" task-drained || {
-  printf 'FAIL sgt-watch task-drained: expected exit 0 when all drained\n' >&2; exit 1; }
+# Foreground watch also refuses terminal success without retirement proof.
+set +e
+drained_watch_output="$(SERGEANT_WATCH_INTERVAL=0.01 PATH="$fake_bin:$PATH" \
+  SERGEANT_FLEET="$drained_fleet" "$ROOT/bin/sgt-watch" task-drained 2>&1)"
+drained_watch_status=$?
+set -e
+[[ "$drained_watch_status" -ne 0 && "$drained_watch_output" != *'All repos done.'* ]]
 
 printf 'sgt-watch drained status: ok\n'

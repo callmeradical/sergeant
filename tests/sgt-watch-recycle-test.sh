@@ -108,6 +108,15 @@ make_worker() {
   printf '%s\n' "$pane" > "$state/pane"
   printf '0|%s|4242|123456|worker\n' "$pane" > "$IDENTITY_DIR/${pane#%}"
   printf '0|%s|4242|123456|worker\n' "$pane" > "$state/pane_identity"
+  printf '4242\n' > "$state/worker_pid"
+  printf '4242\n' > "$state/worker_process_group"
+  printf '4242\n' > "$state/worker_session_id"
+  printf 'linux:999999999999999\n' > "$state/worker_process_start"
+  printf '%032d|1:1|198|/gone\n' 1 > "$state/worker_process_marker"
+  printf '%032d|1:1|999999999999999\n' 1 > "$state/worker_process_markers"
+  chmod 600 "$state/worker_process_marker" "$state/worker_process_markers"
+  printf 'version=1\nidentity=0|%s|4242|123456|worker\nprocess_group=4242\nsession_id=4242\nprocess_marker=%032d|1:1|198|/gone\nphase=retiring\nmember=4242|linux:999999999999999|1|4242|4242\n' \
+    "$pane" 1 > "$state/worker_recycle_phase"
   chmod 600 "$state/pane_identity"
   printf '%s\n' "$pane" >> "$LIVE_PANES"
   printf '%s %s\n' "$state" "$wt"
@@ -210,6 +219,13 @@ _pane_live '%40' && { printf 'the first pane was not recycled\n' >&2; exit 1; }
 # terminal again.
 printf '%%41\n' > "$state/pane"
 set_pane_identity '%41' '0|%41|4141|999999|worker' "$state"
+printf '4141\n' > "$state/worker_pid"
+printf '4141\n' > "$state/worker_process_group"
+printf '4141\n' > "$state/worker_session_id"
+printf 'linux:999999999999998\n' > "$state/worker_process_start"
+printf '%032d|1:1|999999999999998\n' 1 > "$state/worker_process_markers"
+printf 'version=1\nidentity=0|%%41|4141|999999|worker\nprocess_group=4141\nsession_id=4141\nprocess_marker=%032d|1:1|198|/gone\nphase=retiring\nmember=4141|linux:999999999999998|1|4141|4141\n' 1 \
+  > "$state/worker_recycle_phase"
 printf '%%41\n' >> "$LIVE_PANES"
 printf 'done\n' > "$state/status"
 printf 'done\n' > "$wt/.sergeant-status"
@@ -254,6 +270,63 @@ if _pane_live '%51'; then
   printf 'a marker naming no pane identity suppressed recycling of a live pane\n' >&2
   exit 1
 fi
+
+# A syntactically plausible record is accepted only as one owned canonical
+# record. Extra fields, symlink substitution, and marker-generation replay must
+# never suppress retirement of the live pane.
+read -r state wt <<<"$(make_worker extra-evidence done '%52')"
+cat > "$state/worker_recycled" <<'EOF'
+pane=%52
+identity=0|%52|4242|123456|worker
+process_group=4242
+outcome=process_group_stopped
+recycled_at=2026-01-01T00:00:00Z
+extra=conflicting
+EOF
+chmod 600 "$state/worker_recycled"
+env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet" \
+  "$ROOT_DIR/bin/sgt-watch" --sync task-extra-evidence >/dev/null
+_pane_live '%52' && { printf 'extra recycle fields suppressed retirement\n' >&2; exit 1; }
+
+read -r state wt <<<"$(make_worker symlink-evidence done '%53')"
+cat > "$TEST_ROOT/external-recycle-evidence" <<'EOF'
+pane=%53
+identity=0|%53|4242|123456|worker
+process_group=4242
+outcome=process_group_stopped
+recycled_at=2026-01-01T00:00:00Z
+EOF
+chmod 600 "$TEST_ROOT/external-recycle-evidence"
+ln -s "$TEST_ROOT/external-recycle-evidence" "$state/worker_recycled"
+env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet" \
+  "$ROOT_DIR/bin/sgt-watch" --sync task-symlink-evidence >/dev/null
+_pane_live '%53' && { printf 'symlink recycle evidence suppressed retirement\n' >&2; exit 1; }
+
+read -r state wt <<<"$(make_worker replay-evidence done '%54')"
+cat > "$state/worker_recycled" <<'EOF'
+pane=%54
+identity=0|%54|4242|123456|worker
+process_group=4242
+outcome=marker_holders_retired
+process_marker=ffffffffffffffffffffffffffffffff|1:1|198|/gone
+marker_history_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+recycled_at=2026-01-01T00:00:00Z
+EOF
+chmod 600 "$state/worker_recycled"
+env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet" \
+  "$ROOT_DIR/bin/sgt-watch" --sync task-replay-evidence >/dev/null
+_pane_live '%54' && { printf 'replayed marker evidence suppressed retirement\n' >&2; exit 1; }
+
+read -r state wt <<<"$(make_worker empty-history done '%55')"
+: > "$state/worker_process_markers"
+chmod 600 "$state/worker_process_markers"
+if env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet" \
+  "$ROOT_DIR/bin/sgt-watch" --sync task-empty-history >/dev/null 2>&1; then
+  printf 'empty present marker history reported successful recycle\n' >&2
+  exit 1
+fi
+_pane_live '%55' || { printf 'empty history did not preserve live pane\n' >&2; exit 1; }
+grep -Fq 'marker history is invalid' "$state/diagnostic"
 
 # ── 7. An identity mismatch refuses to recycle ───────────────────────────────
 

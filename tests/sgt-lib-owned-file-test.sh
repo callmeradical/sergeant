@@ -50,6 +50,34 @@ else
   _fail "_sgt_read_owned_file: mode-600 file returned status=$status result='$result' (expected 0/'secret-content')"
 fi
 
+# Closed-schema evidence records are multiline, but retain the same descriptor
+# binding, ownership, stable-byte, and canonical terminal-LF requirements.
+f="$TEST_ROOT/owned-multiline"
+printf 'kind=recycle\noutcome=complete\n' > "$f"
+chmod 600 "$f"
+set +e
+result=$(bash -c 'source "$1"; _sgt_read_owned_multiline_file "$2"' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$f")
+status=$?
+set -e
+if [[ "$status" -eq 0 && "$result" == $'kind=recycle\noutcome=complete' ]]; then
+  _pass "_sgt_read_owned_multiline_file: stable mode-600 record returns exact lines"
+else
+  _fail "_sgt_read_owned_multiline_file: valid record returned status=$status result='$result'"
+fi
+
+printf 'kind=recycle\noutcome=complete\n\n' > "$f"
+set +e
+bash -c 'source "$1"; _sgt_read_owned_multiline_file "$2"' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$f" >/dev/null 2>&1
+status=$?
+set -e
+if [[ "$status" -ne 0 ]]; then
+  _pass "_sgt_read_owned_multiline_file: extra terminal LF rejected"
+else
+  _fail "_sgt_read_owned_multiline_file: extra terminal LF should be rejected"
+fi
+
 # Reject mode-644 file.
 f="$TEST_ROOT/owned-644"
 printf 'data\n' > "$f"

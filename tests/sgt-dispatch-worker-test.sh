@@ -139,6 +139,68 @@ git -C "$TEST_ROOT/repo" add README.md
 git -C "$TEST_ROOT/repo" commit -qm fixture
 git -C "$TEST_ROOT/repo" remote add origin git@github.com:org/test.git
 
+REAL_DD="$(command -v dd)"
+cat > "$TEST_ROOT/fake-bin/dd" <<EOF
+#!/usr/bin/env bash
+if [[ "\${FIXED_TASK_RANDOM:-}" == 1 && " \$* " == *' bs=32 '* ]]; then
+  exec "$REAL_DD" if=/dev/zero bs=32 count=1
+fi
+exec "$REAL_DD" "\$@"
+EOF
+chmod +x "$TEST_ROOT/fake-bin/dd"
+
+# A pre-existing torn marker at the exact prospective task ID is rejected
+# before dispatch creates its task brief, worktree, or any additional fleet
+# state. The fixed random source makes this public CLI boundary deterministic.
+torn_dispatch_state="$TEST_ROOT/fleet/torn-dispatch-000000/app"
+mkdir -p "$torn_dispatch_state"
+printf 'prior-current-marker\n' > "$torn_dispatch_state/worker_process_marker"
+chmod 600 "$torn_dispatch_state/worker_process_marker"
+cp "$torn_dispatch_state/worker_process_marker" "$TEST_ROOT/torn-dispatch.before"
+cp -a "$TEST_ROOT/fleet" "$TEST_ROOT/torn-dispatch-fleet.before"
+set +e
+torn_dispatch_output="$(FIXED_TASK_RANDOM=1 PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TD_LOG="$TEST_ROOT/torn-dispatch-td.log" \
+  TMUX_LOG="$TEST_ROOT/torn-dispatch-tmux.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Torn dispatch' --repos app \
+    --managed-coordinator-pane 2>&1)"
+torn_dispatch_status=$?
+set -e
+[[ "$torn_dispatch_status" -ne 0 && \
+  "$torn_dispatch_output" == *'worker process marker evidence is torn'* ]]
+cmp "$TEST_ROOT/torn-dispatch.before" "$torn_dispatch_state/worker_process_marker"
+[[ ! -e "$TEST_ROOT/fleet/torn-dispatch-000000/brief.md" && \
+  ! -e "$torn_dispatch_state/worktree" && \
+  ! -e "$TEST_ROOT/torn-dispatch-tmux.log" ]]
+! grep -q '^create ' "$TEST_ROOT/torn-dispatch-td.log" 2>/dev/null
+diff -r "$TEST_ROOT/torn-dispatch-fleet.before" "$TEST_ROOT/fleet"
+[[ "$(find "$torn_dispatch_state" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" == 1 ]]
+rm -rf "$TEST_ROOT/fleet/torn-dispatch-000000"
+
+validation_torn_state="$TEST_ROOT/fleet/torn-dispatch-000000/app/validation-process"
+mkdir -p "$validation_torn_state"
+printf 'prior-validation-marker\n' > "$validation_torn_state/worker_process_marker"
+chmod 600 "$validation_torn_state/worker_process_marker"
+cp -a "$TEST_ROOT/fleet" "$TEST_ROOT/validation-torn-fleet.before"
+set +e
+validation_torn_output="$(FIXED_TASK_RANDOM=1 PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TD_LOG="$TEST_ROOT/validation-torn-dispatch-td.log" \
+  TMUX_LOG="$TEST_ROOT/validation-torn-dispatch-tmux.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Torn dispatch' --repos app \
+    --managed-coordinator-pane 2>&1)"
+validation_torn_status=$?
+set -e
+[[ "$validation_torn_status" -ne 0 && \
+  "$validation_torn_output" == *'validation process marker evidence is torn'* ]]
+[[ "$(cat "$validation_torn_state/worker_process_marker")" == prior-validation-marker ]]
+! grep -q '^create ' "$TEST_ROOT/validation-torn-dispatch-td.log" 2>/dev/null
+[[ ! -e "$TEST_ROOT/validation-torn-dispatch-tmux.log" ]]
+diff -r "$TEST_ROOT/validation-torn-fleet.before" "$TEST_ROOT/fleet"
+rm -rf "$TEST_ROOT/fleet/torn-dispatch-000000"
+
 interrupted_state="$TEST_ROOT/fleet/interrupted-task/app"
 mkdir -p "$interrupted_state"
 printf 'dispatched\n' > "$interrupted_state/status"
@@ -150,6 +212,7 @@ SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_D
   --origin-profile hermes-discord --correlation-id req-worker-001 >/dev/null
 [[ "$(cat "$interrupted_state/status")" == \
   'failed: dispatch incomplete: no worktree or owned live pane' ]]
+rm -rf "$(dirname "$interrupted_state")"
 repo_state="$(printf '%s\n' "$TEST_ROOT"/fleet/supervise-worker-*/app)"
 task_id="$(basename "$(dirname "$repo_state")")"
 python3 - "$TEST_ROOT/fleet/$task_id/.callbacks/origin.json" <<'PY'
@@ -169,6 +232,8 @@ PY
 [[ "$(cat "$repo_state/stage")" == "implementation" ]]
 [[ "$(cat "$repo_state/dispatch_started")" =~ ^[0-9]+$ ]]
 [[ "$(cat "$repo_state/window_name")" == "implementation-app-$task_id" ]]
+[[ "$(cat "$repo_state/worker_process_marker")" == *'|198|'* ]]
+[[ "$(stat -c %a "$repo_state/worker_process_marker")" == 600 ]]
 [[ ! -e "$repo_state/initial_message" ]]
 [[ -s "$repo_state/tmux_session" && -s "$repo_state/window_name" ]]
 [[ -s "$repo_state/worktree_git_pointer" && -s "$repo_state/worktree_git_dir" ]]
@@ -276,22 +341,6 @@ if [[ ! -d "$TREEHOUSE_TEST_PATH" ]]; then
   else
     "$REAL_GIT" -C "$PWD" worktree add -q --detach "$TREEHOUSE_TEST_PATH"
   fi
-fi
-if [[ "${TREEHOUSE_OUTPUT_MODE:-valid}" == swap_before_open ]]; then
-  (
-    acquisition_record=""
-    while [[ -z "$acquisition_record" ]]; do
-      while IFS= read -r candidate; do
-        if grep -Fq "\"path\":\"$TREEHOUSE_TEST_PATH\"" "$candidate" 2>/dev/null && \
-          grep -Fq '"identity_verified":true' "$candidate" 2>/dev/null; then
-          acquisition_record="$candidate"
-          break
-        fi
-      done < <(find "$SERGEANT_FLEET" -name treehouse-acquisition.json -type f)
-    done
-    mv "$TREEHOUSE_TEST_PATH" "$TREEHOUSE_TEST_PATH-original"
-    mv "$TREEHOUSE_SWAP_DECOY" "$TREEHOUSE_TEST_PATH"
-  ) >/dev/null 2>&1 &
 fi
 printf '{"path":"%s","lease_id":"lease-dispatch-1","lease_holder":"%s","leased_at":"2026-08-11T00:00:00Z"}\n' \
   "$TREEHOUSE_TEST_PATH" "$4"
@@ -552,19 +601,34 @@ gitdir_holder="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))
   "$gitdir_record")"
 [[ "$(cat "$TEST_ROOT/treehouse-gitdir-return.log")" == \
   "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $gitdir_holder $TEST_ROOT/treehouse-gitdir-checkout" ]]
+# Keep this completed adversarial fixture available for inspection without
+# letting the next independent dispatch reconcile its intentionally pane-less
+# terminal record.
+mv "$(dirname "$gitdir_record")" "$TEST_ROOT/treehouse-gitdir-state"
 rm "$TEST_ROOT/repo/treehouse.toml"
 
 git -C "$TEST_ROOT/repo" worktree add -q --detach \
   "$TEST_ROOT/treehouse-preopen-decoy"
 preopen_decoy_head="$(git -C "$TEST_ROOT/treehouse-preopen-decoy" rev-parse HEAD)"
+cat > "$TEST_ROOT/treehouse-preopen-hook" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+mv "$1" "$1-original"
+mv "$TREEHOUSE_SWAP_DECOY" "$1"
+: > "$TREEHOUSE_SWAP_COMPLETE"
+EOF
+chmod +x "$TEST_ROOT/treehouse-preopen-hook"
 touch "$TEST_ROOT/repo/treehouse.toml"
 set +e
 REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
   TREEHOUSE_TEST_PATH="$TEST_ROOT/treehouse-preopen-checkout" \
   TREEHOUSE_SWAP_DECOY="$TEST_ROOT/treehouse-preopen-decoy" \
+  TREEHOUSE_SWAP_COMPLETE="$TEST_ROOT/treehouse-preopen-complete" \
   TREEHOUSE_GET_LOG="$TEST_ROOT/treehouse-preopen.log" \
   TREEHOUSE_RETURN_LOG="$TEST_ROOT/treehouse-preopen-return.log" \
-  TREEHOUSE_OUTPUT_MODE=swap_before_open \
+  SGT_TEST_HOOKS=1 \
+  SGT_TREEHOUSE_PREOPEN_HOOK="$TEST_ROOT/treehouse-preopen-hook" \
+  SGT_TREEHOUSE_TEST_HOOK_ROOT="$TEST_ROOT" \
   TMUX_LOG="$TEST_ROOT/treehouse-preopen-tmux.log" \
   SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
   SGT_WIKI_DISABLED=1 \
@@ -573,6 +637,11 @@ REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
 preopen_status=$?
 set -e
 [[ "$preopen_status" -ne 0 ]]
+for _ in $(seq 1 100); do
+  [[ -e "$TEST_ROOT/treehouse-preopen-complete" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/treehouse-preopen-complete" ]]
 [[ "$(git -C "$TEST_ROOT/treehouse-preopen-checkout" rev-parse HEAD)" == \
   "$preopen_decoy_head" ]]
 [[ -z "$(git -C "$TEST_ROOT/treehouse-preopen-checkout" branch --list \
@@ -585,6 +654,7 @@ preopen_holder="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])
   "$preopen_record")"
 [[ "$(cat "$TEST_ROOT/treehouse-preopen-return.log")" == \
   "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $preopen_holder $TEST_ROOT/treehouse-preopen-checkout" ]]
+mv "$(dirname "$preopen_record")" "$TEST_ROOT/treehouse-preopen-state"
 rm "$TEST_ROOT/repo/treehouse.toml"
 
 mkdir -p "$TEST_ROOT/swap-unrelated"
@@ -637,6 +707,7 @@ swap_holder="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["
   "$swap_record")"
 [[ "$(cat "$TEST_ROOT/treehouse-swap-return.log")" == \
   "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $swap_holder $TEST_ROOT/treehouse-swap-checkout" ]]
+mv "$(dirname "$swap_record")" "$TEST_ROOT/treehouse-checkout-swap-state"
 rm "$TEST_ROOT/repo/treehouse.toml"
 
 for agent in goose claude; do
@@ -796,5 +867,134 @@ after_count="$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 -type d | wc -l |
 [[ "$output" == *"Unknown option"* ]]
 [[ "$before_count" == "$after_count" ]]
 [[ ! -e "$TEST_ROOT/removed-option-tmux.log" ]]
+
+# Initial dispatch and session resume share the exact repository launch
+# transaction. Resume begins after dispatch published its marker but before the
+# pane launch; it must consume dispatch's completion journal, not launch again.
+race_state="$TEST_ROOT/fleet/race-public-000000/app"
+FIXED_TASK_RANDOM=1 SGT_TEST_HOOKS=1 SGT_TEST_DISPATCH_LAUNCH_BARRIER=1 \
+  PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/dispatch-resume-race.log" \
+  TD_LOG="$TEST_ROOT/dispatch-resume-race-td.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Race public' --repos app \
+  >"$TEST_ROOT/dispatch-resume-dispatch.out" 2>&1 & dispatch_race_pid=$!
+for _ in $(seq 1 500); do
+  [[ -e "$race_state/dispatch-launch-ready" ]] && break
+  sleep 0.01
+done
+[[ -e "$race_state/dispatch-launch-ready" ]]
+PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/dispatch-resume-race.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 SGT_TEST_HOOKS=1 \
+  _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$race_state/resume-contended" \
+  "$ROOT_DIR/bin/sgt-session-resume" \
+  race-public-000000 app --force >"$TEST_ROOT/dispatch-resume-resume.out" 2>&1 & \
+  resume_race_pid=$!
+for _ in $(seq 1 500); do
+  [[ -e "$race_state/resume-contended" ]] && break
+  sleep 0.01
+done
+[[ -e "$race_state/resume-contended" ]]
+: > "$race_state/dispatch-launch-release"
+wait "$dispatch_race_pid"
+wait "$resume_race_pid"
+[[ "$(grep -c '^new-window ' "$TEST_ROOT/dispatch-resume-race.log")" -eq 1 ]]
+[[ "$(wc -l < "$race_state/worker_process_markers")" -eq 1 ]]
+IFS='|' read -r race_nonce race_before race_after race_extra \
+  < "$race_state/worker-launch.completed"
+[[ -z "$race_extra" && "$race_nonce" =~ ^[0-9a-f]{16}$ && \
+  "$race_before" =~ ^(absent|[0-9a-f]{64})$ && \
+  "$race_after" =~ ^[0-9a-f]{64}$ && "$race_before" != "$race_after" ]]
+grep -Fq 'verified peer worker-launch transaction completed' \
+  "$TEST_ROOT/dispatch-resume-resume.out"
+
+# Exercise the inverse lock order. Dispatch has created durable task state but
+# pauses before repository launch ownership; resume wins and publishes the one
+# launch. Dispatch must consume that exact observed completion after acquiring
+# ownership and must not create a second pane or marker generation.
+inverse_state="$TEST_ROOT/fleet/inverse-race-public-000000/app"
+FIXED_TASK_RANDOM=1 SGT_TEST_HOOKS=1 \
+  SGT_TEST_DISPATCH_BEFORE_LAUNCH_LOCK_BARRIER=1 \
+  _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$inverse_state/dispatch-contended" \
+  PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/inverse-race.log" \
+  TD_LOG="$TEST_ROOT/inverse-race-td.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Inverse race public' --repos app \
+  >"$TEST_ROOT/inverse-dispatch.out" 2>&1 & inverse_dispatch_pid=$!
+for _ in $(seq 1 500); do
+  [[ -e "$inverse_state/dispatch-before-launch-lock-ready" ]] && break
+  sleep 0.01
+done
+[[ -e "$inverse_state/dispatch-before-launch-lock-ready" ]]
+PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/inverse-race.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 SGT_TEST_HOOKS=1 \
+  SGT_TEST_SESSION_RESUME_AFTER_COMPLETION_BARRIER=1 \
+  "$ROOT_DIR/bin/sgt-session-resume" inverse-race-public-000000 app --force \
+  >"$TEST_ROOT/inverse-resume.out" 2>&1 & inverse_resume_pid=$!
+for _ in $(seq 1 500); do
+  [[ -e "$inverse_state/session-resume-after-completion-ready" ]] && break
+  sleep 0.01
+done
+[[ -e "$inverse_state/session-resume-after-completion-ready" ]]
+: > "$inverse_state/dispatch-before-launch-lock-release"
+for _ in $(seq 1 500); do
+  [[ -e "$inverse_state/dispatch-contended" ]] && break
+  sleep 0.01
+done
+[[ -e "$inverse_state/dispatch-contended" ]]
+: > "$inverse_state/session-resume-after-completion-release"
+wait "$inverse_resume_pid"
+wait "$inverse_dispatch_pid"
+[[ "$(grep -c '^new-window ' "$TEST_ROOT/inverse-race.log")" -eq 1 ]]
+[[ "$(wc -l < "$inverse_state/worker_process_markers")" -eq 1 ]]
+grep -Fq 'verified peer worker-launch transaction completed' \
+  "$TEST_ROOT/inverse-dispatch.out"
+
+# Dispatch must not accept a peer completion journal whose selected marker has
+# malformed durable history. The current marker alone is not launch proof.
+torn_race_state="$TEST_ROOT/fleet/torn-race-public-000000/app"
+FIXED_TASK_RANDOM=1 SGT_TEST_HOOKS=1 \
+  SGT_TEST_DISPATCH_BEFORE_LAUNCH_LOCK_BARRIER=1 \
+  _SGT_TEST_DRAIN_LOCK_CONTENDED_MARKER="$torn_race_state/dispatch-contended" \
+  PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/torn-race.log" \
+  TD_LOG="$TEST_ROOT/torn-race-td.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Torn race public' --repos app \
+  > "$TEST_ROOT/torn-race-dispatch.out" 2>&1 & torn_dispatch_pid=$!
+for _ in $(seq 1 500); do
+  [[ -e "$torn_race_state/dispatch-before-launch-lock-ready" ]] && break
+  sleep 0.01
+done
+[[ -e "$torn_race_state/dispatch-before-launch-lock-ready" ]]
+PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/torn-race.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 SGT_TEST_HOOKS=1 \
+  SGT_TEST_SESSION_RESUME_AFTER_COMPLETION_BARRIER=1 \
+  "$ROOT_DIR/bin/sgt-session-resume" torn-race-public-000000 app --force \
+  > "$TEST_ROOT/torn-race-resume.out" 2>&1 & torn_resume_pid=$!
+for _ in $(seq 1 500); do
+  [[ -e "$torn_race_state/session-resume-after-completion-ready" ]] && break
+  sleep 0.01
+done
+[[ -e "$torn_race_state/session-resume-after-completion-ready" ]]
+printf 'truncated-history' > "$torn_race_state/worker_process_markers"
+: > "$torn_race_state/dispatch-before-launch-lock-release"
+for _ in $(seq 1 500); do
+  [[ -e "$torn_race_state/dispatch-contended" ]] && break
+  sleep 0.01
+done
+[[ -e "$torn_race_state/dispatch-contended" ]]
+: > "$torn_race_state/session-resume-after-completion-release"
+wait "$torn_resume_pid"
+set +e
+wait "$torn_dispatch_pid"
+torn_dispatch_status=$?
+set -e
+[[ "$torn_dispatch_status" -ne 0 ]]
+grep -Fq 'Could not snapshot worker generation before initial launch' \
+  "$TEST_ROOT/torn-race-dispatch.out"
+[[ "$(grep -c '^new-window ' "$TEST_ROOT/torn-race.log")" -eq 1 ]]
+[[ "$(cat "$torn_race_state/worker_process_markers")" == truncated-history ]]
 
 printf 'sgt-dispatch supervisor launch: ok\n'
