@@ -991,6 +991,38 @@ PY
   done
 ) || _wake_test_failed=$((_wake_test_failed + 1))
 
+# ── Test 26b4b (GH #198): unsafe field-name bytes fail before parsing ──
+
+(
+  for test_locale in C C.UTF-8; do
+    task="t26b4b-${test_locale//./-}"; repo="app"; wt="$TEST_ROOT/$task-wt"
+    _setup_waiting_worker "$task" "$repo" "$wt" "github_check" "run_id=777"
+    {
+      printf 'kind=github_check\ngeneration=1\nrun_id=777\ncheck_name'
+      printf '\000'
+      printf '=Build · test\n'
+    } > "$wt/.sergeant-wake-condition"
+    _init_worktree_repo "$wt" "https://github.com/acme/widget.git"
+
+    fake_bin="$TEST_ROOT/$task-fakebin"
+    _setup_fake_respond "$fake_bin"
+    run_json="$TEST_ROOT/$task-run.json"
+    printf '{"status":"completed","conclusion":"success","jobs":[{"name":"Build · test","status":"completed","conclusion":"success"}]}\n' > "$run_json"
+    slug_file="$TEST_ROOT/$task-slug"
+    _setup_fake_gh "$fake_bin" "$run_json" "$slug_file"
+    export FAKE_RESPOND_CALLS="$TEST_ROOT/$task-respond-calls"
+
+    exit_code=0
+    LC_ALL="$test_locale" PATH="$fake_bin:$PATH" \
+      "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" 2>/dev/null || exit_code=$?
+    _assert "NUL in field name under $test_locale: exits nonzero" "[[ $exit_code -ne 0 ]]"
+    _assert "NUL in field name under $test_locale: no resume" \
+      "[[ ! -s '$FAKE_RESPOND_CALLS' ]]"
+    _assert "NUL in field name under $test_locale: rejected before GitHub query" \
+      "[[ ! -e '$slug_file' ]]"
+  done
+) || _wake_test_failed=$((_wake_test_failed + 1))
+
 # ── Test 26b5 (GH #198): duplicate condition fields fail closed ────────
 
 (
