@@ -5,7 +5,7 @@
 #   1. global default_identity is loaded from config.yaml into SGT_DEFAULT_IDENTITY
 #   2. dry-run shows resolved identity (project-level, repo-level, global)
 #   3. resolution order: repo.identity → project.identity → default_identity → no-op
-#   4. failed gh auth switch → fleet status=failed, diagnostic recorded, dispatch aborted
+#   4. failed gh auth switch → transactional dispatch state is rolled back
 
 set -euo pipefail
 export TMUX=fixture TMUX_PANE=%11
@@ -193,7 +193,7 @@ echo "$out" | grep -q "identity:" && \
   _fail "identity should not appear when none configured. Output: $out" || true
 _pass "no identity shown when not configured (no regression)"
 
-# ── Test 6: failed gh auth switch → failed status in fleet, dispatch aborted ──
+# ── Test 6: failed gh auth switch → incomplete dispatch is rolled back ────────
 cat > "$TEST_ROOT/fake-bin/gh" << 'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "auth" && "${2:-}" == "switch" ]]; then
@@ -220,19 +220,16 @@ out="$("$ROOT_DIR/bin/sgt-dispatch" fail-id "test brief" --repos app 2>&1 || tru
 echo "$out" | grep -qi "gh auth switch" || \
   _fail "failed auth switch should mention gh auth switch in error output. Got: $out"
 
-status_file="$(find "$TEST_ROOT/fleet" -name "status" -path "*/app/status" 2>/dev/null | head -1)"
-[[ -n "$status_file" ]] || _fail "no status file created on auth failure"
-status_content="$(cat "$status_file")"
-echo "$status_content" | grep -q "failed" || \
-  _fail "status should contain 'failed' on auth failure, got: '$status_content'"
-_pass "failed gh auth switch writes failed status to fleet state"
-
-diag_file="$(find "$TEST_ROOT/fleet" -name "diagnostic" -path "*/app/diagnostic" 2>/dev/null | head -1)"
-[[ -n "$diag_file" ]] || _fail "no diagnostic file created on auth failure"
-diag_content="$(cat "$diag_file")"
-echo "$diag_content" | grep -q "bad-user" || \
-  _fail "diagnostic should mention bad-user, got: '$diag_content'"
-_pass "failed gh auth switch writes diagnostic with username to fleet state"
+if find "$TEST_ROOT/fleet" -mindepth 1 -print -quit | grep -q .; then
+  _fail "failed auth switch left incomplete fleet state"
+fi
+if compgen -G "$TEST_ROOT/app-sgt-test-brief-*" >/dev/null; then
+  _fail "failed auth switch left an invocation-created worktree"
+fi
+if git -C "$TEST_ROOT/repo" show-ref --verify --quiet refs/heads/feat/test-brief; then
+  _fail "failed auth switch left an invocation-created branch"
+fi
+_pass "failed gh auth switch rolls back fleet, worktree, and branch state"
 
 echo ""
 echo "All identity tests passed."
