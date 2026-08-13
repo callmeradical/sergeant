@@ -105,16 +105,19 @@ cat > "$fake_bin/sgt-respond" <<'EOF'
 #!/usr/bin/env bash
 # Fake sgt-respond: records its invocation and input for test assertions.
 printf '%s\n' "$*" >> "$FAKE_RESPOND_CALLS"
-cat > "$FAKE_RESPOND_INPUT"
+fake_respond_input="${FAKE_RESPOND_INPUT:-${FAKE_RESPOND_CALLS}.input}"
+cat > "$fake_respond_input"
 if [[ -n "${SGT_WAKE_TERMINAL_DIR:-}" ]]; then
   [[ -f "$SGT_WAKE_TERMINAL_DIR/manifest" &&
      -f "$SGT_WAKE_TERMINAL_DIR/evidence" &&
      -f "$SGT_WAKE_TERMINAL_DIR/response" ]] || exit 41
-  cmp -s "$FAKE_RESPOND_INPUT" "$SGT_WAKE_TERMINAL_DIR/response" || exit 42
+  cmp -s "$fake_respond_input" "$SGT_WAKE_TERMINAL_DIR/response" || exit 42
   printf 'fake-response-id\n' > "$SGT_WAKE_TERMINAL_DIR/response_id"
   printf 'response_id=fake-response-id\ngate_generation=%s\n' \
     "$(sed -n 's/^gate_generation=//p' "$SGT_WAKE_TERMINAL_DIR/manifest")" \
     > "$SGT_WAKE_TERMINAL_DIR/applied"
+  printf 'fake-response-id\n' > \
+    "$SERGEANT_FLEET/$1/$2/response_ack"
 fi
 exit 0
 EOF
@@ -212,14 +215,15 @@ _wake_test_failed=0
     "not_before condition met"
   _assert_file_contains "terminal apply: response identity is durable" "$terminal/applied" \
     "response_id=fake-response-id"
+  _assert_file_contains "terminal consume: acknowledgement is auditable" "$terminal/consumed" \
+    "response_id=fake-response-id"
 ) || _wake_test_failed=$((_wake_test_failed + 1))
 
 # ── Test 40 (GH #202): stale and future generations never publish evidence ──
 
 (
   for pair in "1 2 stale" "2 1 future"; do
-    set -- $pair
-    condition_generation="$1"; gate_generation="$2"; label="$3"
+    read -r condition_generation gate_generation label <<< "$pair"
     task="t40-$label"; repo="app"; wt="$TEST_ROOT/t40-$label-wt"
     _setup_waiting_worker "$task" "$repo" "$wt" "not_before" "not_before=1"
     sed -i.bak "s/^generation=.*/generation=$condition_generation/" \
@@ -264,6 +268,27 @@ _wake_test_failed=0
 # ── Test 42 (GH #202): retries converge across durable interruption points ──
 
 (
+  task="t42-observed"; repo="app"; wt="$TEST_ROOT/t42-observed-wt"
+  _setup_waiting_worker "$task" "$repo" "$wt" "not_before" "not_before=1"
+  fake_bin="$TEST_ROOT/t42-observed-fakebin"
+  _setup_fake_respond "$fake_bin"
+  export FAKE_RESPOND_CALLS="$TEST_ROOT/t42-observed-respond-calls"
+  export FAKE_RESPOND_INPUT="$TEST_ROOT/t42-observed-respond-input"
+  exit_code=0
+  PATH="$fake_bin:$PATH" SGT_TEST_HOOKS=1 \
+    SGT_TEST_WAKE_INTERRUPT_AT=observed \
+    "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" >/dev/null 2>&1 || exit_code=$?
+  _assert "observation interruption: exits nonzero" "[[ $exit_code -ne 0 ]]"
+  _assert "observation interruption: no partial publication" \
+    "[[ ! -e '$FLEET_DIR/$task/$repo/wake_terminal/1' ]]"
+  _assert "observation interruption: response not attempted" \
+    "[[ ! -s '$FAKE_RESPOND_CALLS' ]]"
+  PATH="$fake_bin:$PATH" "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" >/dev/null
+  _assert "observation retry: applied exactly once" \
+    "[[ \$(wc -l < '$FAKE_RESPOND_CALLS') -eq 1 ]]"
+) || _wake_test_failed=$((_wake_test_failed + 1))
+
+(
   task="t42-published"; repo="app"; wt="$TEST_ROOT/t42-published-wt"
   _setup_waiting_worker "$task" "$repo" "$wt" "not_before" "not_before=1"
   fake_bin="$TEST_ROOT/t42-published-fakebin"
@@ -298,8 +323,9 @@ _wake_test_failed=0
   _assert "application interruption: exits nonzero" "[[ $exit_code -ne 0 ]]"
   _assert "application interruption: applied marker survives" \
     "[[ -f '$FLEET_DIR/$task/$repo/wake_terminal/1/applied' ]]"
+  printf '2\n' > "$wt/.sergeant-gate-generation"
   PATH="$fake_bin:$PATH" "$ROOT_DIR/bin/sgt-wake" "$task" "$repo" >/dev/null
-  _assert "application retry: response not duplicated" \
+  _assert "application retry after gate advance: response not duplicated" \
     "[[ \$(wc -l < '$FAKE_RESPOND_CALLS') -eq 1 ]]"
 ) || _wake_test_failed=$((_wake_test_failed + 1))
 

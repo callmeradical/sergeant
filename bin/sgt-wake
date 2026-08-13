@@ -62,13 +62,6 @@ REPO_DIR="$FLEET_DIR/$TASK_ID/$REPO"
 worktree="$(cat "$REPO_DIR/worktree" 2>/dev/null || true)"
 [[ -n "$worktree" && -d "$worktree" ]] || _die "Worktree unavailable for $TASK_ID/$REPO"
 
-# ── Verify waiting status ────────────────────────────────────────────────────
-
-current_status="$(tr -d '\n' < "$worktree/.sergeant-status" 2>/dev/null || \
-                  cat "$REPO_DIR/status" 2>/dev/null || true)"
-[[ "$current_status" == "waiting" ]] || \
-  _die "Worker $TASK_ID/$REPO is not in waiting state (status: $current_status)"
-
 condition_file="$worktree/.sergeant-wake-condition"
 [[ -f "$condition_file" ]] || \
   _die "No wake condition file at $condition_file"
@@ -296,10 +289,119 @@ trap '_release_lock' EXIT
 
 _acquire_lock
 
+# A terminal observation is a small generation-bound transaction.  Its three
+# immutable inputs are published before sgt-respond is allowed to mutate
+# response transport.  sgt-respond then records the response identity in this
+# directory before reporting a successful apply.  Consequently a killed
+# sgt-wake can be rerun without observing or applying a different result.
+_wake_hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+current_gate_generation="$(tr -d '\n' < "$worktree/.sergeant-gate-generation" 2>/dev/null || true)"
+[[ "$generation" =~ ^[1-9][0-9]*$ ]] || \
+  _die "Wake condition generation is missing or invalid; terminal evidence was not published"
+[[ "$current_gate_generation" =~ ^[1-9][0-9]*$ ]] || \
+  _die "Worker gate generation is missing or invalid; terminal evidence was not published"
+
+condition_digest="$(_wake_hash_file "$condition_file")" || \
+  _die "sha256sum or shasum is required to bind terminal wake evidence"
+terminal_root="$REPO_DIR/wake_terminal"
+terminal_dir="$terminal_root/$generation"
+terminal_replay=false
+[[ ! -e "$terminal_root" || ( -d "$terminal_root" && ! -L "$terminal_root" ) ]] || \
+  _die "Terminal wake evidence root is not a regular directory; preserved state was not resumed"
+
+_validate_terminal_record() {
+  local manifest="$terminal_dir/manifest" response_digest recorded_digest
+  [[ -d "$terminal_dir" && ! -L "$terminal_dir" &&
+     -f "$manifest" && ! -L "$manifest" &&
+     -f "$terminal_dir/evidence" && ! -L "$terminal_dir/evidence" &&
+     -f "$terminal_dir/response" && ! -L "$terminal_dir/response" ]] || return 1
+  [[ "$(sed -n 's/^version=//p' "$manifest")" == 1 &&
+     "$(sed -n 's/^kind=//p' "$manifest")" == "$kind" &&
+     "$(sed -n 's/^gate_generation=//p' "$manifest")" == "$generation" &&
+     "$(sed -n 's/^condition_sha256=//p' "$manifest")" == "$condition_digest" ]] || return 1
+  recorded_digest="$(sed -n 's/^response_sha256=//p' "$manifest")"
+  [[ "$recorded_digest" =~ ^[a-f0-9]{64}$ ]] || return 1
+  response_digest="$(_wake_hash_file "$terminal_dir/response")" || return 1
+  [[ "$response_digest" == "$recorded_digest" ]]
+}
+
+_validate_applied_record() {
+  local applied="$terminal_dir/applied" response_id applied_generation
+  [[ -f "$applied" && ! -L "$applied" ]] || return 1
+  response_id="$(sed -n 's/^response_id=//p' "$applied")"
+  applied_generation="$(sed -n 's/^gate_generation=//p' "$applied")"
+  [[ "$response_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ &&
+     "$applied_generation" == "$generation" &&
+     "$(cat "$terminal_dir/response_id" 2>/dev/null || true)" == "$response_id" ]]
+}
+
+_record_consumed_if_acknowledged() {
+  local response_id consumed="$terminal_dir/consumed" temporary
+  response_id="$(cat "$terminal_dir/response_id" 2>/dev/null || true)"
+  if [[ -e "$consumed" ]]; then
+    [[ -f "$consumed" && ! -L "$consumed" &&
+       "$(sed -n 's/^response_id=//p' "$consumed")" == "$response_id" &&
+       "$(sed -n 's/^gate_generation=//p' "$consumed")" == "$generation" ]] || return 1
+    return 0
+  fi
+  if [[ "$(cat "$REPO_DIR/response_ack" 2>/dev/null || true)" != "$response_id" &&
+        "$(cat "$worktree/.sergeant-response-ack" 2>/dev/null || true)" != "$response_id" ]]; then
+    return 0
+  fi
+  temporary="$consumed.tmp.$$.$RANDOM"
+  printf 'response_id=%s\ngate_generation=%s\n' "$response_id" "$generation" > "$temporary"
+  if ! ln "$temporary" "$consumed" 2>/dev/null; then
+    cmp -s "$temporary" "$consumed" || { rm -f "$temporary"; return 1; }
+  fi
+  rm -f "$temporary"
+}
+
+if [[ -e "$terminal_dir" ]]; then
+  _validate_terminal_record || \
+    _die "Terminal wake evidence for gate $generation is incomplete or conflicts with kind=$kind. Preserved state was not resumed. Inspect with: sgt-watch $TASK_ID --snapshot --repo $REPO"
+  terminal_replay=true
+  if [[ -e "$terminal_dir/applied" ]]; then
+    [[ "$current_gate_generation" -ge "$generation" ]] || \
+      _die "Applied terminal wake evidence is from future gate $generation; current gate is $current_gate_generation. Preserved state was not resumed."
+    _validate_applied_record || \
+      _die "Applied terminal wake evidence for gate $generation is ambiguous. Preserved state was not resumed. Inspect with: sgt-watch $TASK_ID --snapshot --repo $REPO"
+    _record_consumed_if_acknowledged || \
+      _die "Consumed terminal wake evidence for gate $generation is ambiguous. Preserved state was not resumed. Inspect with: sgt-watch $TASK_ID --snapshot --repo $REPO"
+    printf 'sgt-wake: terminal evidence already applied for %s/%s (kind=%s generation=%s)\n' \
+      "$TASK_ID" "$REPO" "$kind" "$generation"
+    exit 0
+  fi
+fi
+
+[[ "$current_gate_generation" == "$generation" ]] || \
+  _die "Gate generation mismatch: wake condition generation $generation cannot bind to current gate $current_gate_generation. Preserved state was not resumed. Inspect with: sgt-watch $TASK_ID --snapshot --repo $REPO"
+
+current_status="$(tr -d '\n' < "$worktree/.sergeant-status" 2>/dev/null || \
+                  cat "$REPO_DIR/status" 2>/dev/null || true)"
+if [[ "$terminal_replay" != true && "$current_status" != "waiting" ]]; then
+  _die "Worker $TASK_ID/$REPO is not in waiting state (status: $current_status)"
+fi
+
+if [[ "$terminal_replay" == true ]]; then
+  evidence="$(cat "$terminal_dir/evidence")"
+  condition_result="met:$evidence"
+fi
+
 # ── Check deadline ───────────────────────────────────────────────────────────
 
 now="$(date +%s)"
-if [[ -n "$deadline" && "$deadline" =~ ^[0-9]+$ ]]; then
+if [[ "$terminal_replay" == true ]]; then
+  : # Skip adapter evaluation; immutable terminal evidence is the source of truth.
+elif [[ -n "$deadline" && "$deadline" =~ ^[0-9]+$ ]]; then
   if (( now > deadline )); then
     _set_terminal_state "failed: deadline exceeded" \
       "Wake condition deadline exceeded at $deadline (kind=$kind, generation=$generation)"
@@ -317,7 +419,7 @@ if [[ -f "$attempts_file" ]]; then
   [[ "$current_attempts" =~ ^[0-9]+$ ]] || current_attempts=0
 fi
 
-if [[ -n "$max_attempts" && "$max_attempts" =~ ^[0-9]+$ ]]; then
+if [[ "$terminal_replay" != true && -n "$max_attempts" && "$max_attempts" =~ ^[0-9]+$ ]]; then
   if (( current_attempts >= max_attempts )); then
     _set_needs_input_state \
       "Wake condition max_attempts ($max_attempts) reached for kind=$kind generation=$generation; manual intervention required"
@@ -349,7 +451,7 @@ _record_attempt() {
 # means the condition has become permanently unsatisfiable, so retrying until
 # the attempt budget or deadline expires would be dishonest and wasteful.
 
-condition_result=""
+condition_result="${condition_result:-}"
 
 _result_met()         { condition_result="met:$1"; }
 _result_unmet()       { condition_result="unmet"; }
@@ -471,6 +573,7 @@ if len(matches) == 1:
   return 0
 }
 
+if [[ "$terminal_replay" != true ]]; then
 case "$kind" in
 
   not_before)
@@ -593,6 +696,7 @@ case "$kind" in
     ;;
 
 esac
+fi
 
 # ── Route on result ──────────────────────────────────────────────────────────
 
@@ -646,30 +750,43 @@ case "$condition_result" in
 
 esac
 
-# ── Gate-generation pre-flight (GH #202) ────────────────────────────────────
-# The wake condition's `generation` field records the gate generation when the
-# condition was written.  The worker's current gate generation is stored in
-# .sergeant-gate-generation.  If the two differ, the condition belongs to a
-# previous wait cycle — the gate has advanced since the condition was set, so
-# sgt-respond will reject it anyway.  Failing here with an actionable message
-# is safer than discovering the mismatch mid-resume when sgt-respond has
-# already mutated state.
-#
-# We only check when the condition carries a numeric generation (all conditions
-# written since this contract was added will).  A missing or non-numeric
-# generation in the condition is allowed through and will be validated by
-# sgt-respond, which has the definitive gate-generation check.
-
-current_gate_generation="$(tr -d '\n' < "$worktree/.sergeant-gate-generation" 2>/dev/null || true)"
-if [[ "$generation" =~ ^[1-9][0-9]*$ && -n "$current_gate_generation" ]]; then
-  if [[ "$current_gate_generation" != "$generation" ]]; then
-    _die "Gate generation mismatch: wake condition was written at generation $generation but the worker is now at generation $current_gate_generation. The condition belongs to a prior wait cycle and cannot resume this gate. Inspect the worker state with: sgt-watch $TASK_ID --snapshot --repo $REPO"
+if [[ "$terminal_replay" != true ]]; then
+  if [[ "${SGT_TEST_HOOKS:-}" == 1 &&
+        "${SGT_TEST_WAKE_INTERRUPT_AT:-}" == observed ]]; then
+    _die "test interruption after terminal wake observation"
+  fi
+  resume_msg="Wake condition met (kind=$kind generation=$generation): $evidence. Resume the mission from the durable worker state and apply the wake evidence."
+  response_tmp="$(mktemp "$REPO_DIR/wake-terminal-response.XXXXXX")"
+  printf '%s\n' "$resume_msg" > "$response_tmp"
+  response_digest="$(_wake_hash_file "$response_tmp")" || {
+    rm -f "$response_tmp"
+    _die "Could not digest terminal wake response"
+  }
+  mkdir -p "$terminal_root"
+  terminal_tmp="$terminal_root/.${generation}.tmp.$$.$RANDOM"
+  mkdir "$terminal_tmp" || _die "Could not stage terminal wake evidence"
+  {
+    printf 'version=1\n'
+    printf 'kind=%s\n' "$kind"
+    printf 'gate_generation=%s\n' "$generation"
+    printf 'condition_sha256=%s\n' "$condition_digest"
+    printf 'response_sha256=%s\n' "$response_digest"
+  } > "$terminal_tmp/manifest"
+  printf '%s\n' "$evidence" > "$terminal_tmp/evidence"
+  mv "$response_tmp" "$terminal_tmp/response"
+  if ! mv "$terminal_tmp" "$terminal_dir" 2>/dev/null; then
+    rm -rf "$terminal_tmp"
+    _validate_terminal_record || \
+      _die "Concurrent terminal wake evidence conflicts with gate $generation"
   fi
 fi
 
-# ── Condition met — resume via sgt-respond ───────────────────────────────────
+if [[ "${SGT_TEST_HOOKS:-}" == 1 &&
+      "${SGT_TEST_WAKE_INTERRUPT_AT:-}" == published ]]; then
+  _die "test interruption after terminal wake publication"
+fi
 
-resume_msg="Wake condition met (kind=$kind generation=$generation): $evidence. Resume the mission from the durable worker state and apply the wake evidence."
+# ── Condition met — resume via sgt-respond ───────────────────────────────────
 
 if ! command -v sgt-respond >/dev/null 2>&1; then
   sgt_respond="$SCRIPT_DIR/sgt-respond"
@@ -677,8 +794,18 @@ else
   sgt_respond="sgt-respond"
 fi
 
-printf '%s\n' "$resume_msg" | \
-  SERGEANT_FLEET="$FLEET_DIR" "$sgt_respond" "$TASK_ID" "$REPO"
+SERGEANT_FLEET="$FLEET_DIR" SGT_WAKE_TERMINAL_DIR="$terminal_dir" \
+  "$sgt_respond" "$TASK_ID" "$REPO" < "$terminal_dir/response"
+
+_validate_applied_record || \
+  _die "sgt-respond returned without durable terminal-wake application evidence. Reconcile by rerunning: sgt-wake $TASK_ID $REPO"
+_record_consumed_if_acknowledged || \
+  _die "sgt-respond returned conflicting terminal-wake consumption evidence. Inspect with: sgt-watch $TASK_ID --snapshot --repo $REPO"
+
+if [[ "${SGT_TEST_HOOKS:-}" == 1 &&
+      "${SGT_TEST_WAKE_INTERRUPT_AT:-}" == applied ]]; then
+  _die "test interruption after terminal wake application"
+fi
 
 printf 'sgt-wake: resumed %s/%s (kind=%s generation=%s)\n' \
   "$TASK_ID" "$REPO" "$kind" "$generation"
