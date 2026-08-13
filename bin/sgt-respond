@@ -322,15 +322,29 @@ if [[ "$respond_peer_launch_contended" == true ]] && \
 fi
 
 _queue_supplied_response_for_peer() {
-  local queued_response_id queued_dir
+  local queued_response_id queued_dir pane pane_identity target_nonce
   queued_response_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
     od -An -tx1 | tr -d ' \n')"
+  [[ "$queued_response_id" =~ ^[0-9a-f]{32}$ ]] || \
+    _die "Could not allocate canonical queued response identity"
   queued_dir="$REPO_DIR/queued_responses/$queued_response_id"
   mkdir -p "$queued_dir" || _die "Could not allocate queued response evidence"
   _atomic_write_file "$queued_dir/body" "$RESPONSE_INPUT" || \
     _die "Could not preserve queued response body"
   _atomic_write "$queued_dir/gate_generation" "$gate_generation" || \
     _die "Could not preserve queued response generation"
+  pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
+  pane_identity="$(_sgt_read_owned_file \
+    "$REPO_DIR/pane_identity" 2>/dev/null || true)"
+  [[ -n "$pane" && -n "$pane_identity" ]] || \
+    _die "Could not bind queued response to the peer-launched worker pane"
+  _sgt_pane_identity_matches "$pane" "$REPO_DIR" || \
+    _die "Could not verify the peer-launched worker pane for queued response delivery"
+  target_nonce="$(_sgt_notification_target_create \
+    "$REPO_DIR" "$queued_response_id" "$pane_identity")" || \
+    _die "Could not create queued response notification target"
+  [[ "$target_nonce" =~ ^[a-f0-9]{32}$ ]] || \
+    _die "Could not create canonical queued response notification target"
   _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$queued_response_id" \
     response "Apply queued response $queued_response_id from fleet state exactly once." || \
     _die "Could not bind queued response notification"

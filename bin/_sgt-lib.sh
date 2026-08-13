@@ -595,6 +595,22 @@ _sgt_read_owned_multiline_file() {
   exec 9<&-
   printf '%s\n' "$value"
 }
+_sgt_marker_history_snapshot() {
+  local path="$1" marker="$2" value
+  [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
+  [[ "$(_sgt_path_mode "$path")" == 600 ]] || return 1
+  _sgt_owned_file_open_hook before-open "$path" || return 1
+  exec 8< "$path" || {
+    _sgt_owned_file_open_hook after-open "$path" >/dev/null 2>&1 || true
+    return 1
+  }
+  _sgt_owned_file_open_hook after-open "$path" || { exec 8<&-; return 1; }
+  value="$(python3 "$_SGT_LIB_DIR/_sgt-marker-history.py" \
+    --fd 8 "$path" "$marker")" || { exec 8<&-; return 1; }
+  _sgt_validate_owned_fd 8 "$path" 600 >/dev/null || { exec 8<&-; return 1; }
+  exec 8<&-
+  printf '%s\n' "$value"
+}
 _sgt_migrate_owned_fd() {
   local fd="$1" path="$2" modes="$3" expected="$4"
   python3 "$_SGT_LIB_DIR/_sgt-verify-owned-fd.py" \
@@ -716,7 +732,7 @@ _sgt_process_marker_command() {
   printf '%s' "$command"
 }
 _sgt_worker_process_marker_preflight() {
-  local repo_dir="$1" history="$1/worker_process_markers" current digest platform generation floor history_has_portable
+  local repo_dir="$1" history="$1/worker_process_markers" current snapshot digest platform floor history_has_portable extra
   if [[ ( -e "$repo_dir/worker_process_marker" || \
     -L "$repo_dir/worker_process_marker" ) && \
     ! -e "$history" && ! -L "$history" ]]; then
@@ -734,19 +750,15 @@ _sgt_worker_process_marker_preflight() {
     printf 'worker process marker is missing or unreadable: %s\n' "$repo_dir" >&2
     return 1
   }
-  digest="$(_sgt_marker_history_digest "$history" "$current" 2>/dev/null || true)"
-  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+  snapshot="$(_sgt_marker_history_snapshot "$history" "$current" 2>/dev/null || true)"
+  IFS='|' read -r digest floor history_has_portable extra <<< "$snapshot"
+  [[ -z "$extra" && "$digest" =~ ^[0-9a-f]{64}$ && \
+    "$floor" =~ ^[0-9]+$ && \
+    ( "$history_has_portable" == true || "$history_has_portable" == false ) ]] || {
     printf 'worker process marker is absent from valid durable history: %s\n' \
       "$repo_dir" >&2
     return 1
   }
-  generation="${current%%|*}"
-  floor="$(awk -F'|' -v generation="$generation" \
-    '$1 == generation { if (++count == 1) value=$3 } END { if (count == 1) print value; else exit 1 }' \
-    "$history" 2>/dev/null || true)"
-  [[ "$floor" =~ ^[0-9]+$ ]] || return 1
-  history_has_portable="$(awk -F'|' '$3 == 0 { found=1 } END { print found ? "true" : "false" }' \
-    "$history" 2>/dev/null || true)"
   if [[ -e "$repo_dir/worker_process_marker_platform" || \
     -L "$repo_dir/worker_process_marker_platform" ]]; then
     platform="$(_sgt_read_owned_file \
@@ -908,6 +920,7 @@ _sgt_notification_target_create() {
   local repo_dir="$1" notification_id="$2" pane_identity="$3"
   local nonce target_dir temporary published_nonce
   nonce="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  [[ "$nonce" =~ ^[0-9a-f]{32}$ ]] || return 1
   target_dir="$repo_dir/notifications/$notification_id/targets/$nonce"
   # pane_identity is stored exclusively inside target_dir so it is bound to the
   # nonce atomically; there is no separate top-level notification_target_pane_identity

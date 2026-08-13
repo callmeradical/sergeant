@@ -172,7 +172,7 @@ _sgt_drain_host_id() {
 _sgt_drain_nonce() {
   local token
   token="$(dd if=/dev/urandom bs=8 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' || true)"
-  [[ -n "$token" ]] || token="$$$(date +%s)$RANDOM"
+  [[ "$token" =~ ^[0-9a-f]{16}$ ]] || return 1
   printf '%s\n' "$token"
 }
 
@@ -491,6 +491,10 @@ _sgt_drain_lock_acquire_fd() {
 
   record="${record_override:-$(_sgt_drain_lock_record)}"
   state_dir="$(dirname "$record")"
+  if ! nonce="$(_sgt_drain_nonce)"; then
+    printf 'ERROR: drain admission lock unavailable: secure entropy read failed\n' >&2
+    return 3
+  fi
   if [[ -e "$state_dir" && ! -d "$state_dir" ]]; then
     printf 'ERROR: drain admission lock unavailable: %s exists but is not a directory\n' \
       "$state_dir" >&2
@@ -503,7 +507,6 @@ _sgt_drain_lock_acquire_fd() {
 
   _sgt_drain_lock_sweep_artifacts "$record"
 
-  nonce="$(_sgt_drain_nonce)"
   staging="${record}.staging.$$.$nonce"
   # The record is complete BEFORE it becomes the lock, so the lock is never
   # visible without the owner state needed to verify or reclaim it.

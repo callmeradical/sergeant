@@ -169,6 +169,8 @@ rm -f "$state/worker-launch.completed"
 printf '%%88\n' > "$state/pane"
 printf '0|%%88|8888|123455|old-worker\n' > "$state/pane_identity"
 chmod 600 "$state/pane_identity"
+find "$state" -type f -print0 | sort -z | xargs -0 sha256sum \
+  > "$TEST_ROOT/entropy-state.before"
 set +e
 PATH="$TEST_ROOT/short-entropy-bin:$TEST_ROOT/bin:$PATH" \
   LAUNCH_LOG="$TEST_ROOT/entropy-launch.log" \
@@ -183,6 +185,9 @@ grep -Fq 'exact worker-launch ownership' "$TEST_ROOT/entropy.out"
 cmp "$TEST_ROOT/entropy-current.before" "$state/worker_process_marker"
 cmp "$TEST_ROOT/entropy-history.before" "$state/worker_process_markers"
 [[ ! -e "$state/worker-launch.completed" ]]
+find "$state" -type f -print0 | sort -z | xargs -0 sha256sum \
+  > "$TEST_ROOT/entropy-state.after"
+cmp "$TEST_ROOT/entropy-state.before" "$TEST_ROOT/entropy-state.after"
 [[ "$(cat "$state/status")" == in_progress ]]
 
 # The same transaction also serializes the distinct recovery CLI. Both callers

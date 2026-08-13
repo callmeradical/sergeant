@@ -497,7 +497,7 @@ done
 [[ -e "$repo_state/respond-launch-ready" ]]
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/distinct-race.log" \
   TD_LOG="$TEST_ROOT/distinct-race-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
-  PANE_ALIVE=1 NEW_PANE=%100 PANE_IDENTITY='1|%99|7777|777777|dead-pane' \
+  PANE_ALIVE=1 NEW_PANE=%99 PANE_IDENTITY='1|%99|7777|777777|dead-pane' \
   EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
   respond 'second distinct response' >"$TEST_ROOT/distinct-second.out" 2>&1 & second_response_pid=$!
 sleep 0.1
@@ -549,7 +549,7 @@ rm -f "$worktree/.sergeant-response" "$worktree/.sergeant-response-id" \
   "$repo_state/response_id" "$repo_state/response_generation"
 PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/consumed-race.log" \
   TD_LOG="$TEST_ROOT/consumed-race-td.log" TD_RESPONSE_FILE="$worktree/.sergeant-response" \
-  PANE_ALIVE=1 PANE_IDENTITY='0|%42|7777|777777|recycled-pane' \
+  PANE_ALIVE=1 NEW_PANE=%100 PANE_IDENTITY='0|%42|7777|777777|recycled-pane' \
   EXPECTED_WORKER="$repo_state" SERGEANT_FLEET="$fleet" \
   respond 'durable second response' >"$TEST_ROOT/consumed-second.out" 2>&1 & consumed_second_pid=$!
 sleep 0.1
