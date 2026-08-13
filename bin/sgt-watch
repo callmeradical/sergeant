@@ -411,15 +411,63 @@ _record_stale_pane_retirement() {
     printf 'outcome=marker_holders_retired\n'
     printf 'retired_at=%s\n' "$stamp"
   } > "$temporary") || { rm -f "$temporary"; return 1; }
-  mv "$temporary" "$repo_dir/worker_stale_pane_retirement" || {
+  if ! ln "$temporary" "$repo_dir/worker_stale_pane_retirement" 2>/dev/null; then
     rm -f "$temporary"
     return 1
-  }
+  fi
+  rm -f "$temporary"
+}
+
+_record_stale_pane_recycle_evidence() {
+  local repo_dir="$1" pane="$2" identity="$3" process_group="$4"
+  local process_marker="$5" history_digest="$6" stamp temporary
+  local current_marker current_digest
+  current_marker="$(_sgt_read_owned_file \
+    "$repo_dir/worker_process_marker" 2>/dev/null || true)"
+  current_digest="$(_sgt_marker_history_digest \
+    "$repo_dir/worker_process_markers" "$current_marker" 2>/dev/null || true)"
+  [[ "$current_marker" == "$process_marker" && \
+    "$current_digest" == "$history_digest" ]] || return 1
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  [[ "$stamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+  temporary="$repo_dir/worker_recycled.tmp.$$.$RANDOM"
+  (umask 077; {
+    printf 'pane=%s\n' "$pane"
+    printf 'identity=%s\n' "$identity"
+    printf 'process_group=%s\n' "$process_group"
+    printf 'outcome=marker_holders_retired\n'
+    printf 'process_marker=%s\n' "$process_marker"
+    printf 'marker_history_sha256=%s\n' "$history_digest"
+    printf 'recycled_at=%s\n' "$stamp"
+  } > "$temporary") || { rm -f "$temporary"; return 1; }
+  if ! ln "$temporary" "$repo_dir/worker_recycled" 2>/dev/null; then
+    rm -f "$temporary"
+    return 1
+  fi
+  rm -f "$temporary"
+  printf '%s\t%s\t%s\t%s\n' "$stamp" "$pane" "$identity" "$process_group" \
+    >> "$repo_dir/worker_recycled_log" 2>/dev/null || true
+}
+
+_recorded_pane_identity_is_canonical() {
+  local identity="$1" pane="$2" dead remainder recorded_pane pid created command
+  dead="${identity%%|*}"
+  remainder="${identity#*|}"
+  recorded_pane="${remainder%%|*}"
+  remainder="${remainder#*|}"
+  pid="${remainder%%|*}"
+  remainder="${remainder#*|}"
+  created="${remainder%%|*}"
+  command="${remainder#*|}"
+  [[ "$dead" == 0 && "$recorded_pane" == "$pane" && \
+    "$pid" =~ ^[1-9][0-9]*$ && "$created" =~ ^[1-9][0-9]*$ && \
+    -n "$command" && "$remainder" != "$created" ]]
 }
 
 _retire_stale_pane() {
   local task_id="$1" repo_name="$2" task_dir repo_dir status worktree worktree_status
   local pane recorded observed observed_dead observed_pane process_group holders current
+  local process_marker history_digest current_marker current_digest
 
   _snapshot_scope_id_is_valid "$task_id" || _die "Invalid task ID for --retire-stale-pane: $task_id"
   _snapshot_scope_id_is_valid "$repo_name" || _die "Invalid repo for --retire-stale-pane: $repo_name"
@@ -429,6 +477,11 @@ _retire_stale_pane() {
     _die "Task not found: $task_id (looked in $FLEET_DIR)"
   [[ -d "$repo_dir" && ! -L "$repo_dir" ]] || \
     _die "Repository fleet record not found: $task_id/$repo_name"
+  _SGT_RESPONSE_LOCK_DIR=""
+  _SGT_RESPONSE_LOCK_OWNER_RECORD=""
+  _sgt_response_lock_acquire "$repo_dir" stale-pane-retirement.lock || \
+    _die "Could not acquire stale-pane retirement lock: $task_id/$repo_name"
+  trap '_sgt_response_lock_release' EXIT
 
   status="$(tr -d '\n' < "$repo_dir/status" 2>/dev/null || true)"
   case "$status" in
@@ -436,7 +489,9 @@ _retire_stale_pane() {
     *) _die "Stale-pane retirement requires a terminal fleet status; found: ${status:-missing}" ;;
   esac
   worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
-  if [[ -n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-status" ]]; then
+  if [[ -n "$worktree" && -d "$worktree" ]]; then
+    [[ -f "$worktree/.sergeant-status" && ! -L "$worktree/.sergeant-status" ]] || \
+      _die "Preserved worktree status is missing or unsafe; stale-pane retirement refused"
     worktree_status="$(tr -d '\n' < "$worktree/.sergeant-status")"
     case "$worktree_status" in
       done|failed:*|drained|force-stopped) ;;
@@ -448,6 +503,8 @@ _retire_stale_pane() {
   [[ -n "$pane" ]] || _die "Stale-pane retirement requires a recorded pane"
   recorded="$(_sgt_read_owned_file "$repo_dir/pane_identity" 2>/dev/null || true)"
   [[ -n "$recorded" ]] || _die "Stale-pane retirement requires owned recorded pane identity"
+  _recorded_pane_identity_is_canonical "$recorded" "$pane" || \
+    _die "Recorded pane identity is malformed or does not name the recorded pane"
   command -v tmux >/dev/null 2>&1 || _die "tmux is required for stale-pane retirement"
   observed="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
   [[ -n "$observed" ]] || _die "Recorded pane is absent; run sgt-watch --sync $task_id"
@@ -481,25 +538,58 @@ _retire_stale_pane() {
 
   _sgt_worker_process_marker_preflight "$repo_dir" || \
     _die "Worker process marker evidence is torn; stale-pane retirement refused"
+  process_marker="$(_sgt_read_owned_file \
+    "$repo_dir/worker_process_marker" 2>/dev/null || true)"
+  history_digest="$(_sgt_marker_history_digest \
+    "$repo_dir/worker_process_markers" "$process_marker" 2>/dev/null || true)"
+  [[ -n "$process_marker" && "$history_digest" =~ ^[0-9a-f]{64}$ ]] || \
+    _die "Worker marker generation provenance is invalid; stale-pane retirement refused"
   holders="$(_sgt_worker_marker_holders "$repo_dir")" || \
     _die "Worker marker holders could not be inspected exactly; stale-pane retirement refused"
   [[ -z "$holders" ]] || \
     _die "Original worker marker holders remain live; stale-pane retirement refused: $(tr '\n' ' ' <<< "$holders")"
+
+  if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+        -n "${SGT_TEST_STALE_PANE_BARRIER:-}" ]]; then
+    : > "$SGT_TEST_STALE_PANE_BARRIER.ready"
+    for _ in $(seq 1 200); do
+      [[ -e "$SGT_TEST_STALE_PANE_BARRIER.release" ]] && break
+      sleep 0.01
+    done
+  fi
+
+  _sgt_worker_process_marker_preflight "$repo_dir" || \
+    _die "Worker process marker evidence changed during stale-pane retirement"
+  current_marker="$(_sgt_read_owned_file \
+    "$repo_dir/worker_process_marker" 2>/dev/null || true)"
+  current_digest="$(_sgt_marker_history_digest \
+    "$repo_dir/worker_process_markers" "$current_marker" 2>/dev/null || true)"
+  [[ "$current_marker" == "$process_marker" && \
+    "$current_digest" == "$history_digest" ]] || \
+    _die "Worker marker generation changed during stale-pane retirement"
 
   current="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
   [[ "$current" == "$observed" ]] || \
     _die "Conflicting pane identity changed during stale-pane retirement; retry after inspection"
   if [[ ! -e "$repo_dir/worker_stale_pane_retirement" ]]; then
     _record_stale_pane_retirement "$repo_dir" "$pane" "$recorded" "$observed" || \
-      _die "Failed to publish stale-pane retirement evidence"
+      _die "Stale-pane retirement evidence appeared concurrently or could not be published"
   fi
-  _record_recycle_evidence "$repo_dir" "$pane" "$recorded" \
-    "$process_group" marker_holders_retired || \
-    _die "Failed to publish marker-holder retirement evidence"
+  _stale_pane_retirement_receipt_matches "$repo_dir" "$pane" "$recorded" "$observed" || \
+    _die "Stale-pane retirement evidence conflicts with the current recorded and observed identities"
+  [[ ! -e "$repo_dir/worker_recycled" && ! -L "$repo_dir/worker_recycled" ]] || \
+    _die "Existing recycle evidence is invalid or conflicts with stale-pane retirement"
+  _record_stale_pane_recycle_evidence "$repo_dir" "$pane" "$recorded" \
+    "$process_group" "$process_marker" "$history_digest" || \
+    _die "Recycle evidence appeared concurrently or marker provenance changed"
+  _recycle_evidence_covers "$repo_dir" "$recorded" "$process_group" || \
+    _die "Published recycle evidence no longer matches marker provenance"
   printf 'terminal worker stale pane ownership retired; unrelated live pane was not touched\n' \
     > "$repo_dir/diagnostic"
   printf 'Retired stale pane ownership for %s/%s; preserved worktree and live pane %s.\n' \
     "$task_id" "$repo_name" "$pane"
+  _sgt_response_lock_release || _die "Failed to release stale-pane retirement lock"
+  trap - EXIT
 }
 
 _recycle_inactive_pane_zero_holders() {
