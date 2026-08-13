@@ -58,14 +58,20 @@ _sgt_drain_read_project_from_brief "$FLEET_DIR/$TASK_ID"
 
 worktree="$(cat "$REPO_DIR/worktree" 2>/dev/null || true)"
 
+_SGT_RESPOND_LAUNCH_FD=7
+_sgt_drain_lock_acquire_fd "$_SGT_RESPOND_LAUNCH_FD" worker-launch \
+  "$REPO_DIR/worker-launch.lock" || _die "Could not acquire exact worker-launch ownership"
 _sgt_response_lock_acquire "$REPO_DIR"
 _cleanup_respond() {
   local status=$?
   _sgt_response_lock_release || status=1
+  _sgt_drain_lock_release_fd "$_SGT_RESPOND_LAUNCH_FD" || status=1
   _cleanup_response_input || status=1
   return "$status"
 }
 trap '_cleanup_respond' EXIT
+_sgt_worker_process_marker_preflight "$REPO_DIR" || \
+  _die "Response refused: worker process marker evidence changed while waiting for ownership"
 
 _install_legacy_file() {
   local source_file="$1" target="$2" temporary
@@ -372,6 +378,7 @@ if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1 && _pane_is_supervisor "$
     fi
     rm -f "$REPO_DIR/response_delivery_unacked"
     _cleanup_response_input
+    _sgt_drain_lock_release_fd "$_SGT_RESPOND_LAUNCH_FD"
     trap - EXIT
     echo "sgt-respond: notified local pane $pane."
     exit 0
@@ -405,6 +412,7 @@ _sgt_respond_drain_project="${SGT_PROJECT:-}"
   _sgt_respond_drain_project="$(tr -d '\n' < "$REPO_DIR/project" 2>/dev/null || true)"
 if ! _sgt_drain_lock_acquire_fd "$_SGT_RESPOND_DRAIN_FD" 2>/dev/null; then
   _sgt_response_lock_release 2>/dev/null || true
+  _sgt_drain_lock_release_fd "$_SGT_RESPOND_LAUNCH_FD" 2>/dev/null || true
   trap - EXIT
   _die "cannot acquire drain admission lock"
 fi
@@ -415,6 +423,7 @@ if ! _sgt_drain_check_admission_locked "${_sgt_respond_drain_project:-}"; then
   _atomic_write "$REPO_DIR/drain_held" "$gate_generation" 2>/dev/null || true
   _sgt_drain_lock_release_fd "$_SGT_RESPOND_DRAIN_FD"
   _sgt_response_lock_release 2>/dev/null || true
+  _sgt_drain_lock_release_fd "$_SGT_RESPOND_LAUNCH_FD" 2>/dev/null || true
   _cleanup_response_input
   trap - EXIT
   echo "sgt-respond: response stored; worker relaunch held by drain [project: ${_sgt_respond_drain_project:-global}]."
@@ -525,5 +534,6 @@ if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" "$delivery_notificati
 fi
 rm -f "$REPO_DIR/drain_held" "$REPO_DIR/response_delivery_unacked"
 _cleanup_response_input
+_sgt_drain_lock_release_fd "$_SGT_RESPOND_LAUNCH_FD"
 trap - EXIT
 echo "sgt-respond: relaunched worker in pane $new_pane."

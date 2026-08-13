@@ -240,9 +240,9 @@ _require_tmux
 _require_interactive_agent
 
 _SGT_RESUME_OWNER_FD=8
-_sgt_drain_lock_acquire_fd "$_SGT_RESUME_OWNER_FD" session-resume \
-  "$REPO_DIR/session-resume.lock" || \
-  _die "Could not acquire exact session-resume ownership"
+_sgt_drain_lock_acquire_fd "$_SGT_RESUME_OWNER_FD" worker-launch \
+  "$REPO_DIR/worker-launch.lock" || \
+  _die "Could not acquire exact worker-launch ownership"
 _cleanup_resume_lock() {
   _sgt_drain_lock_release_fd "$_SGT_RESUME_OWNER_FD"
 }

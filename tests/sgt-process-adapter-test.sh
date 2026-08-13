@@ -88,9 +88,13 @@ PATH="$TEST_ROOT/bin:$PATH" _sgt_worker_marker_holders "$portable_state" \
   > "$TEST_ROOT/portable-holders"
 [[ ! -s "$TEST_ROOT/portable-holders" ]]
 PATH="$TEST_ROOT/bin:$PATH" _sgt_retire_worker_marker_holders "$portable_state"
-for generation_number in $(seq 1 64); do
-  printf '%032x|1:%s|0\n' "$generation_number" "$generation_number"
-done > "$portable_state/worker_process_markers"
+{
+  current_marker="$(cat "$portable_state/worker_process_marker")"
+  printf '%s|0\n' "${current_marker%|198|*}"
+  for generation_number in $(seq 1 63); do
+    printf '%032x|1:%s|0\n' "$generation_number" "$generation_number"
+  done
+} > "$portable_state/worker_process_markers"
 chmod 600 "$portable_state/worker_process_markers"
 PATH="$TEST_ROOT/bin:$PATH" _sgt_prepare_worker_process_marker "$portable_state"
 [[ "$(wc -l < "$portable_state/worker_process_markers")" -eq 1 ]]

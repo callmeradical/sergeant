@@ -370,12 +370,13 @@ if [[ "${FAIL_TRANSITION:-}" == "identity-chmod-race" && \
 fi
 if [[ "$last" == */primary_pane_identity && -n "${IDENTITY_RACE_MARKER:-}" && \
   "${FAIL_TRANSITION:-}" == @(legacy-identity-content-race|legacy-identity-publish-replaced) ]]; then
-  count_file="${IDENTITY_RACE_MARKER}.count"
-  count=0
-  [[ ! -f "$count_file" ]] || count="$(cat "$count_file")"
-  count=$((count + 1))
-  printf '%s\n' "$count" > "$count_file"
-  if [[ "$count" -eq 4 ]]; then
+  # Trigger on the observable publication boundary: the legacy record has just
+  # been promoted to canonical owner-only mode. Call counts vary when new
+  # preflight readers are added and do not describe the race being exercised.
+  observed_mode="$("$REAL_STAT" -c '%a' "$last" 2>/dev/null || true)"
+  if [[ ! -e "$IDENTITY_RACE_MARKER" && \
+    ( ( "${FAIL_TRANSITION:-}" == legacy-identity-content-race && "$observed_mode" == 664 ) || \
+      ( "${FAIL_TRANSITION:-}" == legacy-identity-publish-replaced && "$observed_mode" == 600 ) ) ]]; then
     case "${FAIL_TRANSITION:-}" in
       legacy-identity-content-race)
         printf 'tampered-pane\n' > "$last"
@@ -435,6 +436,26 @@ if [[ "${SGT_VALIDATE_TORN_ONLY:-}" == 1 ]]; then
     ! -e "$repo_state/validation_worktree" && \
     ! -e "$repo_state/validation_pane" && \
     ! -e "$TEST_ROOT/validate-torn-tmux.log" ]]
+  rm -f "$repo_state/worker_process_marker"
+  mkdir -p "$repo_state/validation-process"
+  printf 'prior-validation-marker\n' \
+    > "$repo_state/validation-process/worker_process_marker"
+  chmod 600 "$repo_state/validation-process/worker_process_marker"
+  cp "$repo_state/validation-process/worker_process_marker" \
+    "$TEST_ROOT/validation-torn.before"
+  set +e
+  PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/validation-torn-tmux.log" \
+    TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+    "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null 2>&1
+  validation_torn_status=$?
+  set -e
+  [[ "$validation_torn_status" -ne 0 ]]
+  cmp "$TEST_ROOT/validation-torn.before" \
+    "$repo_state/validation-process/worker_process_marker"
+  [[ ! -e "$repo_state/validation-process/worker_process_markers" && \
+    ! -e "$repo_state/validation_worktree" && \
+    ! -e "$repo_state/validation_pane" && \
+    ! -e "$TEST_ROOT/validation-torn-tmux.log" ]]
   printf 'sgt-validate torn marker preflight: ok\n'
   exit 0
 fi
@@ -898,15 +919,20 @@ done
 
 legacy_race_marker="$TEST_ROOT/legacy-pane-race"
 chmod 664 "$fleet/task-1/primary_pane_identity"
-PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
   FAIL_TRANSITION=legacy-identity-content-race IDENTITY_RACE_MARKER="$legacy_race_marker" \
   TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
-  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
-[[ "$(cat "$fleet/task-1/primary_pane_identity")" == '0|%11|1111|111111|coordinator-command' ]]
+  "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]]
+[[ "$(cat "$fleet/task-1/primary_pane_identity")" == tampered-pane ]]
 [[ "$(stat -c '%a' "$fleet/task-1/primary_pane_identity" 2>/dev/null || \
-  stat -f '%Lp' "$fleet/task-1/primary_pane_identity")" == "600" ]]
+  stat -f '%Lp' "$fleet/task-1/primary_pane_identity")" == "664" ]]
 [[ -e "$legacy_race_marker" ]]
-cleanup_validation_state
+printf '0|%%11|1111|111111|coordinator-command\n' > "$fleet/task-1/primary_pane_identity"
+chmod 600 "$fleet/task-1/primary_pane_identity"
 
 legacy_replace_marker="$TEST_ROOT/legacy-pane-replaced"
 chmod 664 "$fleet/task-1/primary_pane_identity"

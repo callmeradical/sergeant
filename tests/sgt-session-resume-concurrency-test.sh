@@ -43,6 +43,10 @@ case "$1" in
     printf '%%99\n'
     ;;
   display-message)
+    if [[ "$*" == *'-t %88'* ]]; then
+      printf '0|%%88|8888|123455|old-worker\n'
+      exit 0
+    fi
     [[ "$*" == *'-t %99'* ]] || exit 1
     identity="0|%99|9999|123456|$(cat "$PANE_COMMAND")"
     if [[ -s "$TEST_REPO_STATE/notification_id" && \
@@ -74,4 +78,25 @@ wait "$first"
 wait "$second"
 [[ "$(wc -l < "$TEST_ROOT/launch.log")" -eq 1 ]]
 [[ "$(cat "$state/status")" == in_progress ]]
+
+# The same transaction also serializes the distinct recovery CLI. Both callers
+# may pass their pre-lock checks, but the loser observes the winner's exact pane
+# generation and must not launch again or replace marker history.
+: > "$TEST_ROOT/launch.log"
+printf '%%88\n' > "$state/pane"
+printf '0|%%88|8888|123455|old-worker\n' > "$state/pane_identity"
+chmod 600 "$state/pane_identity"
+printf 'in_progress\n' > "$state/status"
+printf 'live worker stalled: fixture\n' > "$state/diagnostic"
+printf 'implementation-app-task-race\n' > "$state/window_name"
+run_resume & first=$!
+PATH="$TEST_ROOT/bin:$PATH" LAUNCH_LOG="$TEST_ROOT/launch.log" \
+  PANE_COMMAND="$TEST_ROOT/pane-command" TEST_REPO_STATE="$state" \
+  SGT_NOTIFICATION_ACK_TIMEOUT=2 \
+  "$ROOT_DIR/bin/sgt-recover" task-race app >/dev/null 2>&1 & second=$!
+wait "$first"
+wait "$second"
+[[ "$(wc -l < "$TEST_ROOT/launch.log")" -eq 1 ]]
+_sgt_history_lines="$(wc -l < "$state/worker_process_markers")"
+[[ "$_sgt_history_lines" -ge 1 && "$_sgt_history_lines" -le 64 ]]
 printf 'sgt-session-resume concurrent ownership: ok\n'

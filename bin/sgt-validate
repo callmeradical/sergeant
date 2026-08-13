@@ -73,6 +73,8 @@ PANE="$(cat "$REPO_STATE/pane" 2>/dev/null || true)"
 if ! $RELEASE_OWNERSHIP; then
   _sgt_worker_process_marker_preflight "$REPO_STATE" || \
     _die "Validation refused: worker process marker evidence is torn"
+  _sgt_worker_process_marker_preflight "$REPO_STATE/validation-process" || \
+    _die "Validation refused: validation process marker evidence is torn"
 fi
 
 PRIMARY_PANE_ID_RECORD="$TASK_STATE/primary_pane_id"
