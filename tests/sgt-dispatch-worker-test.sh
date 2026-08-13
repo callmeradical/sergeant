@@ -173,7 +173,9 @@ cmp "$TEST_ROOT/torn-dispatch.before" "$torn_dispatch_state/worker_process_marke
 [[ ! -e "$TEST_ROOT/fleet/torn-dispatch-000000/brief.md" && \
   ! -e "$torn_dispatch_state/worktree" && \
   ! -e "$TEST_ROOT/torn-dispatch-tmux.log" ]]
-! grep -q '^create ' "$TEST_ROOT/torn-dispatch-td.log" 2>/dev/null
+if grep -q '^create ' "$TEST_ROOT/torn-dispatch-td.log" 2>/dev/null; then
+  exit 1
+fi
 diff -r "$TEST_ROOT/torn-dispatch-fleet.before" "$TEST_ROOT/fleet"
 [[ "$(find "$torn_dispatch_state" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" == 1 ]]
 rm -rf "$TEST_ROOT/fleet/torn-dispatch-000000"
@@ -196,7 +198,9 @@ set -e
 [[ "$validation_torn_status" -ne 0 && \
   "$validation_torn_output" == *'validation process marker evidence is torn'* ]]
 [[ "$(cat "$validation_torn_state/worker_process_marker")" == prior-validation-marker ]]
-! grep -q '^create ' "$TEST_ROOT/validation-torn-dispatch-td.log" 2>/dev/null
+if grep -q '^create ' "$TEST_ROOT/validation-torn-dispatch-td.log" 2>/dev/null; then
+  exit 1
+fi
 [[ ! -e "$TEST_ROOT/validation-torn-dispatch-tmux.log" ]]
 diff -r "$TEST_ROOT/validation-torn-fleet.before" "$TEST_ROOT/fleet"
 rm -rf "$TEST_ROOT/fleet/torn-dispatch-000000"

@@ -189,8 +189,9 @@ source "$ROOT_DIR/bin/_sgt-lib.sh"
 [[ -z "${SGT_DEFAULT_IDENTITY:-}" ]] || \
   _fail "SGT_DEFAULT_IDENTITY should be empty when not in config (got: '$SGT_DEFAULT_IDENTITY')"
 out="$("$ROOT_DIR/bin/sgt-dispatch" no-id "test brief" --repos app --dry-run 2>&1 || true)"
-echo "$out" | grep -q "identity:" && \
-  _fail "identity should not appear when none configured. Output: $out" || true
+if echo "$out" | grep -q "identity:"; then
+  _fail "identity should not appear when none configured. Output: $out"
+fi
 _pass "no identity shown when not configured (no regression)"
 
 # ── Test 6: failed gh auth switch → incomplete dispatch is rolled back ────────
