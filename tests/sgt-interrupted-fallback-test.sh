@@ -19,6 +19,7 @@ trap 'tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true; rm -rf "$TEST_RO
 
 fake_bin="$TEST_ROOT/bin"
 mkdir -p "$fake_bin"
+ln -s "$ROOT/bin/sgt-review-findings" "$fake_bin/sgt-review-findings"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 

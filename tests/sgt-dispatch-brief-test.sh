@@ -14,6 +14,7 @@ mkdir -p \
   "$TEST_ROOT/repo" \
   "$TEST_ROOT/role-repo" \
   "$TEST_ROOT/group-repo"
+ln -s "$ROOT_DIR/bin/sgt-review-findings" "$TEST_ROOT/fake-bin/sgt-review-findings"
 
 cat > "$TEST_ROOT/config/test.yaml" <<EOF
 name: test

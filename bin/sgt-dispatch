@@ -118,6 +118,7 @@ if ! _SGT_LIB_FILE="$(_sgt_dispatch_bundled_file "$SCRIPT_DIR/_sgt-lib.sh" _sgt-
    ! _SGT_INTENT_FILE="$(_sgt_dispatch_bundled_file "$SCRIPT_DIR/_sgt-intent.sh" _sgt-intent.sh)" || \
    ! _SGT_DRAIN_FILE="$(_sgt_dispatch_bundled_file "$SCRIPT_DIR/_sgt-drain.sh" _sgt-drain.sh)" || \
    ! _SGT_REVIEW_AXES_FILE="$(_sgt_dispatch_bundled_file "$SCRIPT_DIR/_sgt-review-axes.sh" _sgt-review-axes.sh)" || \
+   ! _SGT_REVIEW_ROUTER_LAUNCHER_FILE="$(_sgt_dispatch_bundled_file "$SCRIPT_DIR/sgt-review-router-launch" sgt-review-router-launch)" || \
    ! _BRIEF_TEMPLATE="$(_sgt_dispatch_bundled_file "$_SGT_DISTRIBUTION_ROOT/templates/worker-brief.md" worker-brief.md)"; then
   exit 1
 fi
@@ -246,7 +247,14 @@ source "$_SGT_BOUND_REVIEW_AXES"
 # source for brief format changes — edit it instead of this script.
 _sgt_render_brief() {
   local output="$1"
-  local content
+  local content review_router_launcher_shell review_router_executable_shell
+  local review_router_identity_shell review_router_capabilities_shell
+  local review_router_project_shell review_router_repo_shell
+  local patsub_replacement_was_set=false
+  if shopt -q patsub_replacement 2>/dev/null; then
+    patsub_replacement_was_set=true
+    shopt -u patsub_replacement
+  fi
   if ! content="$(python3 - "$_BRIEF_TEMPLATE" "$_BRIEF_TEMPLATE_ID" <<'PY'
 import os
 import hashlib
@@ -296,7 +304,22 @@ PY
   content="${content//\{\{REVIEW_SEVERITIES\}\}/$(printf '%s' "$SGT_REVIEW_SEVERITIES" | tr ' ' '|')}"
   content="${content//\{\{REVIEW_SEVERITY_ALIAS_TABLE\}\}/$(_sgt_review_severity_alias_table)}"
   content="${content//\{\{REVIEW_AXES_PIPE\}\}/$(printf '%s' "$review_axes" | tr ' ' '|')}"
+  printf -v review_router_launcher_shell '%q' "$REVIEW_ROUTER_LAUNCHER"
+  printf -v review_router_executable_shell '%q' "$REVIEW_ROUTER_EXECUTABLE"
+  printf -v review_router_identity_shell '%q' "$REVIEW_ROUTER_EXECUTABLE_IDENTITY"
+  printf -v review_router_capabilities_shell '%q' "$repo_task_dir/review_router_capabilities.json"
+  printf -v review_router_project_shell '%q' "$PROJECT"
+  printf -v review_router_repo_shell '%q' "$rname"
+  content="${content//\{\{REVIEW_ROUTER_LAUNCHER\}\}/$review_router_launcher_shell}"
+  content="${content//\{\{REVIEW_ROUTER_EXECUTABLE\}\}/$review_router_executable_shell}"
+  content="${content//\{\{REVIEW_ROUTER_IDENTITY\}\}/$review_router_identity_shell}"
+  content="${content//\{\{REVIEW_ROUTER_CAPABILITIES\}\}/$review_router_capabilities_shell}"
+  content="${content//\{\{REVIEW_ROUTER_PROJECT\}\}/$review_router_project_shell}"
+  content="${content//\{\{REVIEW_ROUTER_REPO\}\}/$review_router_repo_shell}"
   printf '%s\n' "$content" > "$output"
+  if $patsub_replacement_was_set; then
+    shopt -s patsub_replacement
+  fi
 }
 
 # ── Parse args ───────────────────────────────────────────────────────────────
@@ -507,15 +530,6 @@ _release_dispatch_task_lock() {
     SGT_DISPATCH_TASK_LOCKED=false
   fi
 }
-if ! $DRY_RUN; then
-  _sgt_drain_lock_acquire_fd "$_SGT_DISPATCH_TASK_FD" dispatch-task \
-    "$FLEET_DIR/.dispatch-$TASK_ID.lock" || \
-    _die "Could not acquire exact dispatch task ownership"
-  SGT_DISPATCH_TASK_LOCKED=true
-  # A peer may have created this task while this invocation waited.
-  [[ ! -e "$TASK_DIR" && ! -L "$TASK_DIR" ]] || \
-    _die "Dispatch task ID collision after serialized ownership: $TASK_ID"
-fi
 trap _release_dispatch_task_lock EXIT
 
 _require_yq
@@ -976,57 +990,165 @@ PY
   fi
 }
 
-if ! $DRY_RUN; then
-  [[ -x "$SCRIPT_DIR/sgt-watch" ]] || _die "sgt-watch is required for fleet reconciliation"
-  "$SCRIPT_DIR/sgt-watch" --sync-all >/dev/null
-fi
-
 # ── Review-router contract preflight (GH #204) ───────────────────────────────
-# Verify the sgt-review-findings binary that the worker will invoke accepts the
-# current axis and severity vocabulary before any worktree, td task, or fleet
-# state is created.  A version mismatch causes a late failure after review work
-# has already completed; this preflight catches it early with an actionable error.
-#
-# Probe: pass --axis and --source with a deliberately absent --input so the
-# router exits with a usage error (2) rather than requiring a real artifact.
-# We only verify that the router accepts the axis without an "unsupported axis"
-# or "unknown axis" error.  Dry-run skips so CI stays unblocked without an
-# installed router.
+# Resolve the PATH-selected executable exactly as a worker would, canonicalize
+# every alias/symlink hop, and validate its closed machine-readable contract.
+# Identity is sampled on both sides of the probe so a changed executable cannot
+# be persisted as verified evidence.
+REVIEW_ROUTER_EXECUTABLE=""
+REVIEW_ROUTER_EXECUTABLE_IDENTITY=""
+REVIEW_ROUTER_CONTRACT_REVISION=""
+REVIEW_ROUTER_CONTRACT=""
+REVIEW_ROUTER_LAUNCHER="$_SGT_REVIEW_ROUTER_LAUNCHER_FILE"
+
+_sgt_review_router_executable_identity() {
+  python3 - "$1" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+runtime_files = (
+    "sgt-review-findings", "_sgt-lib.sh", "_sgt-response-lock.sh",
+    "_sgt-review-axes.sh", "_sgt-bash-version.sh", "_sgt-process-identity.sh",
+    "_sgt-drain.sh", "_sgt-process.sh",
+    "_sgt-response-lock-transition.py", "_sgt-process-token.py", "sgt-notify",
+    "sgt-callback",
+)
+router = sys.argv[1]
+directory = os.path.dirname(router)
+runtime = hashlib.sha256()
+router_info = None
+router_digest = None
+for name in runtime_files:
+    path = router if name == "sgt-review-findings" else os.path.join(directory, name)
+    runtime.update(name.encode() + b"\0")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("runtime dependency is not a regular file")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            digest.update(chunk)
+        runtime.update(digest.digest())
+        if name == "sgt-review-findings":
+            router_info = info
+            router_digest = digest.hexdigest()
+    finally:
+        os.close(fd)
+if router_info is None:
+    raise OSError("review router is unavailable")
+print(f"{router_info.st_dev}:{router_info.st_ino}:{router_digest}:{runtime.hexdigest()}")
+PY
+}
+
 _sgt_preflight_review_router() {
-  local router_cmd router_usage axis sev
-  if command -v sgt-review-findings >/dev/null 2>&1; then
-    router_cmd="sgt-review-findings"
-  elif [[ -x "$SCRIPT_DIR/sgt-review-findings" ]]; then
-    router_cmd="$SCRIPT_DIR/sgt-review-findings"
-  else
-    return 0  # Router absent from PATH: fail at runtime when the worker calls it.
+  local selected before_identity after_identity revision contract_file
+  selected="$(command -v sgt-review-findings 2>/dev/null || true)"
+  [[ -n "$selected" && "$selected" == */* ]] || \
+    _die "review-router preflight: sgt-review-findings is not installed on PATH. Update or reinstall Sergeant."
+  REVIEW_ROUTER_EXECUTABLE="$(_sgt_dispatch_canonical_file "$selected" installed-review-router)" || \
+    _die "review-router preflight: could not resolve installed sgt-review-findings: $selected"
+  [[ -x "$REVIEW_ROUTER_EXECUTABLE" ]] || \
+    _die "review-router preflight: installed sgt-review-findings is not executable: $REVIEW_ROUTER_EXECUTABLE"
+  before_identity="$(_sgt_review_router_executable_identity "$REVIEW_ROUTER_EXECUTABLE")" || \
+    _die "review-router preflight: could not identify installed sgt-review-findings"
+  contract_file="$(mktemp)" || _die "review-router preflight: could not allocate contract capture"
+  if ! "$REVIEW_ROUTER_EXECUTABLE" --capabilities > "$contract_file" 2>/dev/null; then
+    rm -f "$contract_file"
+    _die "review-router contract mismatch: installed sgt-review-findings does not expose --capabilities. Update or reinstall Sergeant."
   fi
+  after_identity="$(_sgt_review_router_executable_identity "$REVIEW_ROUTER_EXECUTABLE")" || \
+    _die "review-router executable changed during preflight: $REVIEW_ROUTER_EXECUTABLE"
+  [[ "$after_identity" == "$before_identity" ]] || \
+    _die "review-router executable changed during preflight: $REVIEW_ROUTER_EXECUTABLE"
 
-  # Read usage output (the router exits non-zero on no args, which is expected).
-  router_usage="$("$router_cmd" 2>&1 || true)"
-  # Sanity-check that we got usage text and not an environment error.
-  if ! printf '%s' "$router_usage" | grep -qF 'sgt-review-findings'; then
-    _die "review-router preflight: could not read usage from installed sgt-review-findings (got: $(printf '%s' "$router_usage" | head -1)). Update or reinstall Sergeant."
+  if ! revision="$(SGT_EXPECTED_SCHEMA="$SGT_REVIEW_ROUTER_CAPABILITIES_SCHEMA" \
+    SGT_EXPECTED_CONTRACT_REVISION="$SGT_REVIEW_ROUTER_CONTRACT_REVISION" \
+    SGT_EXPECTED_ARTIFACT_REVISION="$SGT_REVIEW_ARTIFACT_SCHEMA_REVISION" \
+    SGT_EXPECTED_AXES="$(_sgt_review_axes)" \
+    SGT_EXPECTED_SEVERITIES="$SGT_REVIEW_SEVERITIES" \
+    SGT_EXPECTED_ALIASES="$SGT_REVIEW_SEVERITY_ALIASES" \
+    SGT_EXPECTED_ARGV="$SGT_REVIEW_ROUTER_ARGV" \
+      python3 - "$contract_file" <<'PY'
+import json
+import os
+import sys
+
+def closed_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+try:
+    with open(sys.argv[1], "rb") as stream:
+        raw = stream.read().decode("utf-8", "strict")
+    doc = json.loads(raw, object_pairs_hook=closed_object)
+    expected_keys = {
+        "schema", "contract_revision", "artifact_schema_revision", "axes",
+        "canonical_severities", "severity_aliases", "argv",
+    }
+    expected_aliases = dict(
+        pair.split("=", 1) for pair in os.environ["SGT_EXPECTED_ALIASES"].split()
+    )
+    if set(doc) != expected_keys:
+        raise ValueError("capability fields")
+    if doc["schema"] != os.environ["SGT_EXPECTED_SCHEMA"]:
+        raise ValueError("capability schema")
+    if doc["contract_revision"] != os.environ["SGT_EXPECTED_CONTRACT_REVISION"]:
+        raise ValueError("contract revision")
+    if doc["artifact_schema_revision"] != os.environ["SGT_EXPECTED_ARTIFACT_REVISION"]:
+        raise ValueError("artifact schema revision")
+    if doc["axes"] != os.environ["SGT_EXPECTED_AXES"].split():
+        raise ValueError("axes")
+    if doc["canonical_severities"] != os.environ["SGT_EXPECTED_SEVERITIES"].split():
+        raise ValueError("canonical severities")
+    if doc["severity_aliases"] != expected_aliases:
+        raise ValueError("severity aliases")
+    if doc["argv"] != os.environ["SGT_EXPECTED_ARGV"].split():
+        raise ValueError("argv")
+except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+    raise SystemExit(1)
+print(doc["contract_revision"])
+PY
+)"; then
+    rm -f "$contract_file"
+    _die "review-router contract mismatch: installed sgt-review-findings cannot honor this dispatch revision. Update or reinstall Sergeant."
   fi
-
-  # Verify each required axis appears in the router's usage output.
-  # shellcheck disable=SC2046  # deliberate word splitting
-  for axis in $SGT_REVIEW_AXES_REQUIRED; do
-    if ! printf '%s' "$router_usage" | grep -qF "$axis"; then
-      _die "review-router contract mismatch: installed sgt-review-findings does not list axis '$axis' in its usage output. This dispatch was generated with a newer Sergeant but the installed router is from an older version. Update sgt-review-findings to match this Sergeant distribution."
-    fi
-  done
-
-  # Verify the canonical severities appear in the usage output.
-  # shellcheck disable=SC2046  # deliberate word splitting
-  for sev in $SGT_REVIEW_SEVERITIES; do
-    if ! printf '%s' "$router_usage" | grep -qF "$sev"; then
-      _die "review-router contract mismatch: installed sgt-review-findings does not list severity '$sev' in its usage output. Update or reinstall Sergeant."
-    fi
-  done
+  REVIEW_ROUTER_CONTRACT="$(cat "$contract_file")"
+  rm -f "$contract_file"
+  REVIEW_ROUTER_EXECUTABLE_IDENTITY="$before_identity"
+  REVIEW_ROUTER_CONTRACT_REVISION="$revision"
 }
 if ! $DRY_RUN; then
   _sgt_preflight_review_router
+fi
+
+# The task-identity lock itself is fleet mutation, so it is deliberately
+# acquired only after the installed router contract is proven compatible.
+if ! $DRY_RUN; then
+  _sgt_drain_lock_acquire_fd "$_SGT_DISPATCH_TASK_FD" dispatch-task \
+    "$FLEET_DIR/.dispatch-$TASK_ID.lock" || \
+    _die "Could not acquire exact dispatch task ownership"
+  SGT_DISPATCH_TASK_LOCKED=true
+  # A peer may have created this task while this invocation waited.
+  [[ ! -e "$TASK_DIR" && ! -L "$TASK_DIR" ]] || \
+    _die "Dispatch task ID collision after serialized ownership: $TASK_ID"
+fi
+
+if ! $DRY_RUN; then
+  [[ -x "$SCRIPT_DIR/sgt-watch" ]] || _die "sgt-watch is required for fleet reconciliation"
+  "$SCRIPT_DIR/sgt-watch" --sync-all >/dev/null
 fi
 
 # ── Drain admission check ─────────────────────────────────────────────────────
@@ -1169,6 +1291,10 @@ else
   DISPATCH_TASK_DIR_CREATED=true
   _sgt_intent_install "$INTENT_TMP" "$TASK_DIR/.sergeant-intent.md"
   printf '%s\n' "$INTENT_REVISION" > "$TASK_DIR/intent_revision"
+  printf '%s\n' "$REVIEW_ROUTER_EXECUTABLE" > "$TASK_DIR/review_router_executable"
+  printf '%s\n' "$REVIEW_ROUTER_EXECUTABLE_IDENTITY" > "$TASK_DIR/review_router_executable_identity"
+  printf '%s\n' "$REVIEW_ROUTER_CONTRACT_REVISION" > "$TASK_DIR/review_router_contract_revision"
+  printf '%s\n' "$REVIEW_ROUTER_CONTRACT" > "$TASK_DIR/review_router_capabilities.json"
   printf "Project: %s\nBrief:   %s\nBranch:  %s\nRepos:   %s\n" \
     "$PROJECT" "$BRIEF" "$BRANCH" "${TARGET_REPOS[*]}" > "$TASK_DIR/brief.md"
   [[ -n "$TD_TASK_ID" ]] && echo "$TD_TASK_ID" > "$TASK_DIR/td_task"
@@ -1298,6 +1424,10 @@ for rname in "${TARGET_REPOS[@]}"; do
   mkdir -p "$repo_task_dir"
   _sgt_intent_install "$INTENT_TMP" "$repo_task_dir/.sergeant-intent.md"
   printf '%s\n' "$INTENT_REVISION" > "$repo_task_dir/intent_revision"
+  printf '%s\n' "$REVIEW_ROUTER_EXECUTABLE" > "$repo_task_dir/review_router_executable"
+  printf '%s\n' "$REVIEW_ROUTER_EXECUTABLE_IDENTITY" > "$repo_task_dir/review_router_executable_identity"
+  printf '%s\n' "$REVIEW_ROUTER_CONTRACT_REVISION" > "$repo_task_dir/review_router_contract_revision"
+  printf '%s\n' "$REVIEW_ROUTER_CONTRACT" > "$repo_task_dir/review_router_capabilities.json"
   echo "$BRANCH"    > "$repo_task_dir/branch"
   date +%s          > "$repo_task_dir/dispatch_started"
   echo "dispatched" > "$repo_task_dir/status"

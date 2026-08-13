@@ -13,6 +13,7 @@ fake_bin="$TEST_ROOT/fake-bin"
 repo="$TEST_ROOT/repo"
 inbox="$TEST_ROOT/inbox"
 mkdir -p "$config" "$fleet" "$fake_bin" "$repo" "$inbox/processes/$$"
+ln -s "$ROOT_DIR/bin/sgt-review-findings" "$fake_bin/sgt-review-findings"
 
 cat > "$config/test.yaml" <<EOF
 name: test

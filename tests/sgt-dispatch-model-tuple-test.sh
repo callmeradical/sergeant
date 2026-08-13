@@ -81,12 +81,7 @@ esac
 EOF
 chmod +x "$TEST_ROOT/fake-bin/td"
 
-cat > "$TEST_ROOT/fake-bin/sgt-review-findings" <<'EOF'
-#!/usr/bin/env bash
-printf 'Usage: sgt-review-findings --axis standards|spec|readiness --severity error|warning|info\n' >&2
-exit 2
-EOF
-chmod +x "$TEST_ROOT/fake-bin/sgt-review-findings"
+ln -s "$ROOT_DIR/bin/sgt-review-findings" "$TEST_ROOT/fake-bin/sgt-review-findings"
 
 cat > "$TEST_ROOT/fake-bin/opencode" <<'EOF'
 #!/usr/bin/env bash
