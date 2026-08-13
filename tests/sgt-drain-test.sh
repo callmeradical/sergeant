@@ -863,10 +863,39 @@ case "$operation" in
 esac
 EOF
 chmod +x "$TEST_ROOT/portable-bin/python3"
-if "$TEST_ROOT/portable-bin/python3" /unrecognized/script.py >/dev/null 2>&1 ||
-   "$TEST_ROOT/portable-bin/python3" \
-     "$ROOT_DIR/bin/_sgt-verify-owned-fd.py" bad-fd /tmp/file 600 >/dev/null 2>&1; then
-  printf 'Bash 3.2 Python dependency shim accepted an unrecognized invocation\n' >&2
+shim_probe="$TEST_ROOT/shim-probe"
+shim_other="$TEST_ROOT/shim-other"
+printf 'probe\n' > "$shim_probe"
+printf 'other\n' > "$shim_other"
+chmod 600 "$shim_probe" "$shim_other"
+exec 19< "$shim_probe"
+rc=0
+"$TEST_ROOT/portable-bin/python3" \
+  "$ROOT_DIR/bin/_sgt-verify-owned-fd.py" 19 "$shim_probe" 600 validate \
+  >/dev/null 2>&1 || rc=$?
+[[ $rc -eq 64 ]] || {
+  printf 'Bash 3.2 Python dependency shim accepted unsupported verifier action (rc=%s)\n' "$rc" >&2
+  exit 1
+}
+for verifier_case in \
+  "18 $shim_probe 600" \
+  "19 $TEST_ROOT/missing-shim-probe 600" \
+  "19 $shim_other 600"; do
+  rc=0
+  # shellcheck disable=SC2086 # Deliberately exercise verifier argv parsing.
+  "$TEST_ROOT/portable-bin/python3" \
+    "$ROOT_DIR/bin/_sgt-verify-owned-fd.py" $verifier_case >/dev/null 2>&1 || rc=$?
+  [[ $rc -eq 1 ]] || {
+    printf 'Bash 3.2 Python dependency shim accepted invalid verifier binding (rc=%s): %s\n' \
+      "$rc" "$verifier_case" >&2
+    exit 1
+  }
+done
+exec 19<&-
+rc=0
+"$TEST_ROOT/portable-bin/python3" /unrecognized/script.py >/dev/null 2>&1 || rc=$?
+if [[ $rc -ne 64 ]]; then
+  printf 'Bash 3.2 Python dependency shim accepted an unrecognized invocation (rc=%s)\n' "$rc" >&2
   exit 1
 fi
 fi
