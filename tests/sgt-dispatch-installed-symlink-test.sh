@@ -106,6 +106,13 @@ case "${1:-}" in
     fi
     ;;
   new-window)
+    if [[ -n "${FAIL_NEW_WINDOW_CALL:-}" ]]; then
+      tmux_call_count=0
+      [[ ! -s "${TMUX_CALL_COUNT_FILE:?}" ]] || tmux_call_count="$(cat "$TMUX_CALL_COUNT_FILE")"
+      tmux_call_count=$((tmux_call_count + 1))
+      printf '%s\n' "$tmux_call_count" > "$TMUX_CALL_COUNT_FILE"
+      [[ "$tmux_call_count" != "$FAIL_NEW_WINDOW_CALL" ]] || exit 7
+    fi
     [[ "${FAIL_NEW_WINDOW:-0}" != 1 ]] || exit 7
     for repo_state in "$SERGEANT_FLEET"/*/*; do
       [[ -d "$repo_state" && -f "$repo_state/notification_id" && -f "$repo_state/worktree" ]] || continue
@@ -139,6 +146,10 @@ cat > "$FAKE_BIN/date" <<EOF
 #!/usr/bin/env bash
 if [[ "\${1:-}" == +%s && -n "\${REMOVE_TEMPLATE_ON_REPO_STATE:-}" ]]; then
   rm -f "\$REMOVE_TEMPLATE_ON_REPO_STATE"
+fi
+if [[ "\${1:-}" == +%s && -n "\${SWAP_TEMPLATE_ON_REPO_STATE:-}" ]]; then
+  rm -f "\$SWAP_TEMPLATE_ON_REPO_STATE"
+  ln -s "\${SWAP_TEMPLATE_TARGET:?}" "\$SWAP_TEMPLATE_ON_REPO_STATE"
 fi
 exec "$REAL_DATE" "\$@"
 EOF
@@ -179,6 +190,25 @@ grep -Fq 'Installed dispatch success' "$success_worktree/.sergeant-brief.md"
 git -C "$REPO" worktree remove --force "$success_worktree"
 git -C "$REPO" branch -D feat/installed-dispatch-success >/dev/null
 rm -rf "$FLEET/installed-dispatch-succe-000000"
+
+# Bootstrap-bound template bytes cannot be redirected by replacing the
+# distribution path with an out-of-root symlink before rendering.
+mkdir -p "$TEST_ROOT/outside"
+printf 'OUTSIDE-TEMPLATE {{BRIEF}}\n' > "$TEST_ROOT/outside/swapped-worker-brief.md"
+cp "$ROOT_DIR/templates/worker-brief.md" "$DIST/templates/worker-brief.md"
+SWAP_TEMPLATE_ON_REPO_STATE="$DIST/templates/worker-brief.md" \
+  SWAP_TEMPLATE_TARGET="$TEST_ROOT/outside/swapped-worker-brief.md" \
+  run_dispatch 'Template swap is contained' >/dev/null
+swap_state="$FLEET/template-swap-is-contain-000000/app"
+swap_worktree="$(cat "$swap_state/worktree")"
+grep -Fq 'Template swap is contained' "$swap_worktree/.sergeant-brief.md"
+if grep -Fq 'OUTSIDE-TEMPLATE' "$swap_worktree/.sergeant-brief.md"; then
+  printf 'post-bootstrap template swap escaped the distribution\n' >&2
+  exit 1
+fi
+git -C "$REPO" worktree remove --force "$swap_worktree"
+git -C "$REPO" branch -D feat/template-swap-is-contained >/dev/null
+rm -rf "$FLEET/template-swap-is-contain-000000"
 
 # A template that disappears after preflight but before rendering fails after
 # worktree/fleet creation.  The command must roll back everything it created,
@@ -291,6 +321,35 @@ grep -Fq 'delete td-installed-app' "$TEST_ROOT/td.log"
 grep -Fq 'delete td-installed-api' "$TEST_ROOT/td.log"
 [[ ! -e "$FLEET/aggregate-rollback-000000" ]]
 [[ ! -e "$(dirname "$REPO")/app-sgt-aggregate-rollback-000000" ]]
+
+# A generated td task becomes worker-owned at the durable pane boundary.  A
+# later repository launch failure rolls back only that repository's task and
+# resources; the live worker keeps its td task, fleet state, and worktree.
+: > "$TEST_ROOT/td.log"
+: > "$TEST_ROOT/tmux-call-count"
+cp "$ROOT_DIR/templates/worker-brief.md" "$DIST/templates/worker-brief.md"
+set +e
+partial_output="$(FAIL_NEW_WINDOW_CALL=2 TMUX_CALL_COUNT_FILE="$TEST_ROOT/tmux-call-count" \
+  TMUX=fixture TMUX_PANE=%11 PATH="$FAKE_BIN:$PREFIX/bin:$HOST_PATH" \
+  TD_LOG="$TEST_ROOT/td.log" SERGEANT_CONFIG="$CONFIG" SERGEANT_FLEET="$FLEET" \
+  SERGEANT_DRAIN_DIR="$TEST_ROOT/drain" SGT_WIKI_DISABLED=1 \
+  "$PREFIX/bin/sgt-dispatch" test 'Partial worker ownership' --repos app,api 2>&1)"
+partial_status=$?
+set -e
+[[ "$partial_status" -ne 0 && "$partial_output" == *'tmux failed to launch'* ]]
+partial_state="$FLEET/partial-worker-ownership-000000"
+[[ -s "$partial_state/app/pane" ]]
+partial_app_worktree="$(cat "$partial_state/app/worktree")"
+[[ -d "$partial_app_worktree" ]]
+if grep -Fq 'delete td-installed-app' "$TEST_ROOT/td.log"; then
+  printf 'rollback deleted the live app worker task\n' >&2
+  exit 1
+fi
+grep -Fq 'delete td-installed-api' "$TEST_ROOT/td.log"
+[[ ! -e "$(dirname "$API_REPO")/api-sgt-partial-worker-ownership-000000" ]]
+git -C "$REPO" worktree remove --force "$partial_app_worktree"
+git -C "$REPO" branch -D feat/partial-worker-ownership >/dev/null
+rm -rf "$partial_state"
 
 # Bundled resources that are broken or escape the canonical distribution root
 # are rejected during bootstrap, before td, fleet, worktree, or tmux mutation.
