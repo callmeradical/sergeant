@@ -28,6 +28,11 @@ if ! start_token="$(_sgt_process_start_token "$$")"; then
   [[ "$actual_identity" == "$marker_identity" &&
      "$actual_generation" == "$marker_generation" ]] || exit 2
   start_token="portable:$marker_generation:$marker_identity"
+  # Darwin has no /proc/<pid>/fd path.  Keep this immutable mode-0400 marker
+  # name while the portable worker is live so lsof-resolved authentication can
+  # open it, validate its exact generation bytes, and bind that open back to the
+  # descriptor's dev/inode.  Fleet cleanup removes the private state directory.
+  export SGT_KEEP_WORKER_MARKER_PATH=1
 fi
 
 tmux set-option -p -t "$TMUX_PANE" @sergeant_replacement_token "$token" \; \

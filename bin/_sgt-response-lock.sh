@@ -141,6 +141,49 @@ _sgt_response_lock_record_is_this_process() {
   [[ "$expected" == "$(_sgt_process_start_token "$$")" ]]
 }
 
+_sgt_response_lock_transition() {
+  local lock_path="$1" candidate="$2" expected="$3"
+  local gate_path="${lock_path}.transition"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 "$_SGT_RESPONSE_LOCK_SCRIPT_DIR/_sgt-response-lock-transition.py" \
+      "$lock_path" "$candidate" "$expected" >/dev/null 2>&1
+    return
+  fi
+  command -v flock >/dev/null 2>&1 || return 2
+  (
+    local layout observed entries
+    umask 077
+    [[ ! -L "$gate_path" ]] || return 2
+    : >> "$gate_path" || return 2
+    [[ -f "$gate_path" && ! -L "$gate_path" ]] || return 2
+    exec 19>> "$gate_path" || return 2
+    flock -x 19 || return 2
+    if [[ -d "$lock_path" ]]; then
+      layout="directory"
+      entries="$(find "$lock_path" -mindepth 1 -maxdepth 1 -print 2>/dev/null || true)"
+      [[ "$entries" == "$lock_path/pid" ]] || return 2
+      observed="$(cat "$lock_path/pid" 2>/dev/null || true)"
+    elif [[ -e "$lock_path" || -L "$lock_path" ]]; then
+      layout="file"
+      observed="$(cat "$lock_path" 2>/dev/null || readlink "$lock_path" 2>/dev/null || true)"
+    else
+      layout="absent"
+      observed=""
+    fi
+    if [[ "$expected" == --absent ]]; then
+      [[ "$layout" == absent ]] || return 3
+    else
+      [[ "$layout" != absent && "$observed" == "$expected" ]] || return 3
+      if [[ "$layout" == directory ]]; then
+        rm -f "$lock_path/pid" && rmdir "$lock_path" || return 2
+      else
+        rm -f "$lock_path" || return 2
+      fi
+    fi
+    ln "$candidate" "$lock_path" 2>/dev/null || return 2
+  )
+}
+
 _sgt_response_lock_acquire() {
   local repo_state="$1"
   local lock_path="$repo_state/${2:-response.lock}"
@@ -187,11 +230,17 @@ _sgt_response_lock_acquire() {
       fi
       current_owner="$(cat "$lock_path/pid" 2>/dev/null || true)"
       [[ "$current_owner" == "$owner" ]] || continue
-      if ! rm -f "$lock_path/pid" || ! rmdir "$lock_path"; then
+      if _sgt_response_lock_transition "$lock_path" "$candidate" "$owner"; then
+        rm -f "$candidate"
+        _SGT_RESPONSE_LOCK_DIR="$lock_path"
+        _SGT_RESPONSE_LOCK_OWNER_RECORD="$owner_record"
+        return 0
+      else
+        owner_status=$?
+        [[ "$owner_status" -eq 3 ]] && continue
         rm -f "$candidate"
         return 1
       fi
-      continue
     fi
     if [[ -e "$lock_path" || -L "$lock_path" ]]; then
       owner="$(cat "$lock_path" 2>/dev/null || readlink "$lock_path" 2>/dev/null || true)"
@@ -209,15 +258,38 @@ _sgt_response_lock_acquire() {
         fi
       fi
       current_owner="$(cat "$lock_path" 2>/dev/null || readlink "$lock_path" 2>/dev/null || true)"
-      [[ "$current_owner" == "$owner" ]] && rm -f "$lock_path"
-      continue
+      if [[ "${SGT_TEST_HOOKS:-}" == 1 &&
+            -n "${SGT_TEST_RESPONSE_LOCK_RECLAIM_BARRIER:-}" ]]; then
+        : > "$SGT_TEST_RESPONSE_LOCK_RECLAIM_BARRIER/$$"
+        for _ in $(seq 1 200); do
+          [[ "$(find "$SGT_TEST_RESPONSE_LOCK_RECLAIM_BARRIER" -type f 2>/dev/null | \
+            wc -l | tr -d ' ')" -ge 2 ]] && break
+          sleep 0.01
+        done
+        sleep "${SGT_TEST_RESPONSE_LOCK_RECLAIM_DELAY:-0}"
+      fi
+      [[ "$current_owner" == "$owner" ]] || continue
+      if _sgt_response_lock_transition "$lock_path" "$candidate" "$owner"; then
+        rm -f "$candidate"
+        _SGT_RESPONSE_LOCK_DIR="$lock_path"
+        _SGT_RESPONSE_LOCK_OWNER_RECORD="$owner_record"
+        return 0
+      else
+        owner_status=$?
+        [[ "$owner_status" -eq 3 ]] && continue
+        rm -f "$candidate"
+        return 1
+      fi
     fi
-    if ln "$candidate" "$lock_path" 2>/dev/null; then
+    if _sgt_response_lock_transition "$lock_path" "$candidate" --absent; then
       rm -f "$candidate"
       _SGT_RESPONSE_LOCK_DIR="$lock_path"
       _SGT_RESPONSE_LOCK_OWNER_RECORD="$owner_record"
       return 0
-    elif [[ ! -e "$lock_path" && ! -L "$lock_path" ]]; then
+    else
+      owner_status=$?
+    fi
+    if [[ "$owner_status" -ne 3 && ! -e "$lock_path" && ! -L "$lock_path" ]]; then
       rm -f "$candidate"
       printf 'ERROR: Could not create response lock: %s\n' "$lock_path" >&2
       return 1

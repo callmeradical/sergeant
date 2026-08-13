@@ -239,11 +239,11 @@ def enumerate_holders(markers):
     return owners
 
 
-def enumerate_portable_holders(markers, target_pid=None):
+def enumerate_portable_holders(markers, target_pid=None, descriptor_details=False):
     """Return lsof-proven marker holders without inventing process identity."""
     command = [
         "lsof", "-w", "-nP", "-a", "-u", str(os.geteuid()),
-        "-d", "0-2147483647", "-F", "pDfi",
+        "-d", "0-2147483647", "-F", "pDfin",
     ]
     if target_pid is not None:
         command[4:4] = ["-p", str(target_pid)]
@@ -301,9 +301,10 @@ def enumerate_portable_holders(markers, target_pid=None):
     descriptor = None
     device = None
     inode = None
+    name = None
 
     def finish_descriptor():
-        nonlocal descriptor, device, inode
+        nonlocal descriptor, device, inode, name
         if descriptor is None:
             return
         if (pid is None or not descriptor.isdecimal() or
@@ -311,11 +312,16 @@ def enumerate_portable_holders(markers, target_pid=None):
             fail("portable lsof marker evidence is incomplete")
         identity = (device, inode)
         if identity in markers:
-            owners.setdefault(pid, set()).add(identity)
-        descriptor = device = inode = None
+            if descriptor_details:
+                owners.setdefault(pid, {}).setdefault(identity, set()).add(
+                    (int(descriptor), name)
+                )
+            else:
+                owners.setdefault(pid, set()).add(identity)
+        descriptor = device = inode = name = None
 
     for line in lines:
-        if not line or line[0] not in "pfDi":
+        if not line or line[0] not in "pfDin":
             fail("portable lsof marker evidence is malformed")
         key, value = line[0], line[1:]
         if key == "p":
@@ -337,10 +343,55 @@ def enumerate_portable_holders(markers, target_pid=None):
             if descriptor is None or inode is not None or not value.isdecimal():
                 fail("portable lsof marker inode is malformed")
             inode = int(value)
+        elif key == "n":
+            if descriptor is None or name is not None or not value:
+                fail("portable lsof marker name is malformed")
+            name = value
     finish_descriptor()
     if returncode == 1 and lines:
         fail("portable lsof returned partial marker evidence")
     return owners
+
+
+def portable_descriptor_holds_generation(pid, generation, identity):
+    """Read and revalidate the exact lsof-attributed marker descriptor."""
+    marker = {identity: (generation, 0)}
+    holders = enumerate_portable_holders(
+        marker, pid, descriptor_details=True
+    )
+    descriptors = holders.get(pid, {}).get(identity, set())
+    expected = (generation + "\n").encode("ascii")
+    for descriptor, name in descriptors:
+        candidates = []
+        if not (os.environ.get("SGT_TEST_HOOKS") == "1" and
+                os.environ.get("SGT_TEST_PORTABLE_CHECK_NO_PROC") == "1"):
+            candidates.append(f"/proc/{pid}/fd/{descriptor}")
+        if name and name.startswith("/") and "\n" not in name:
+            candidates.append(name)
+        for candidate in candidates:
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            if not candidate.startswith("/proc/"):
+                flags |= getattr(os, "O_NOFOLLOW", 0)
+            try:
+                opened_fd = os.open(candidate, flags)
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+            try:
+                before = os.fstat(opened_fd)
+                if (before.st_dev, before.st_ino) != identity:
+                    continue
+                content = os.read(opened_fd, len(expected) + 1)
+                after = os.fstat(opened_fd)
+                if (after.st_dev, after.st_ino) != identity or content != expected:
+                    continue
+            finally:
+                os.close(opened_fd)
+            confirmed = enumerate_portable_holders(
+                marker, pid, descriptor_details=True
+            ).get(pid, {}).get(identity, set())
+            if any(current_fd == descriptor for current_fd, _ in confirmed):
+                return True
+    return False
 
 
 def load_expected(path):
@@ -486,11 +537,11 @@ def main():
                 not re.fullmatch(r"[0-9]+:[0-9]+", identity)):
             fail("invalid portable worker marker check request")
         marker_identity = tuple(map(int, identity.split(":")))
-        holders = enumerate_portable_holders(
-            {marker_identity: (generation, 0)}, int(pid_text)
-        )
-        if marker_identity not in holders.get(int(pid_text), set()):
-            fail(f"portable worker marker is not held by pane PID {pid_text}")
+        if not portable_descriptor_holds_generation(
+                int(pid_text), generation, marker_identity):
+            fail(
+                f"portable worker marker generation is not held by pane PID {pid_text}"
+            )
         return
     if len(sys.argv) == 6 and sys.argv[1] == "check":
         history, pid_text, start, identity = sys.argv[2:]

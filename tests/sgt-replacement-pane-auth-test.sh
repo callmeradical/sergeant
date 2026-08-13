@@ -136,8 +136,9 @@ done
   exit 1
 }
 portable_pane_identity="$(_sgt_pane_identity "$portable_pane")"
-portable_auth="$(_sgt_replacement_pane_identity_matches "$portable_pane_identity" \
-  "$portable_pane" "$portable_token" "$portable_role")" || {
+portable_auth="$(SGT_TEST_HOOKS=1 SGT_TEST_PORTABLE_CHECK_NO_PROC=1 \
+  _sgt_replacement_pane_identity_matches "$portable_pane_identity" \
+    "$portable_pane" "$portable_token" "$portable_role")" || {
   printf 'PORTABLE_REPLACEMENT_ADOPTION_REFUSED\n' >&2
   exit 1
 }
@@ -186,6 +187,29 @@ if _sgt_replacement_pane_identity_matches "$forged_identity" "$forged_pane" \
   exit 1
 fi
 
+# Even a real holder of the claimed dev/inode is not proof of a forged
+# generation.  Authentication must open that exact held descriptor, validate
+# its bounded bytes, and revalidate descriptor-to-inode stability.
+wrong_generation=dddddddddddddddddddddddddddddddd
+wrong_token=defabcdefabcdefabcdefabcdefabcde
+wrong_role=worker:portable-wrong-generation
+wrong_command="$(printf '%q %q %q' /bin/bash -c \
+  "exec 197<$(printf '%q' "$portable_marker"); exec sleep 60")"
+wrong_pane="$(tmux new-window -d -P -F '#{pane_id}' \
+  -t "$session:" -n portable-wrong-generation "$wrong_command")"
+wrong_pid="$(tmux display-message -p -t "$wrong_pane" '#{pane_pid}')"
+tmux set-option -p -t "$wrong_pane" @sergeant_replacement_token "$wrong_token" \; \
+  set-option -p -t "$wrong_pane" @sergeant_replacement_role "$wrong_role" \; \
+  set-option -p -t "$wrong_pane" @sergeant_replacement_pid "$wrong_pid" \; \
+  set-option -p -t "$wrong_pane" @sergeant_replacement_start \
+    "portable:$wrong_generation:$portable_identity"
+wrong_identity="$(_sgt_pane_identity "$wrong_pane")"
+if _sgt_replacement_pane_identity_matches "$wrong_identity" "$wrong_pane" \
+    "$wrong_token" "$wrong_role"; then
+  printf 'PORTABLE_REPLACEMENT_AUTHENTICATED_FALSE_GENERATION\n' >&2
+  exit 1
+fi
+
 # The persisted pane identity and replacement marker authentication must bind
 # the same pane generation.  A raced-in replacement that is internally valid
 # must not authenticate against the caller's older snapshot.
@@ -200,5 +224,24 @@ if _sgt_replacement_pane_identity_matches \
   printf 'REPLACEMENT_IDENTITY_ARG_IGNORED\n' >&2
   exit 1
 fi
+
+# The portable launch keeps its immutable marker name so a Darwin lsof-resolved
+# descriptor can be opened.  The worker-side inherited-capability validation
+# accepts that retained name only when it is the exact fd198 inode.
+retained_state="$TEST_ROOT/retained-portable-state"
+mkdir -p "$retained_state"
+SGT_TEST_HOOKS=1 SGT_TEST_PROCESS_IDENTITY_UNAVAILABLE=1 \
+  SGT_TEST_PROCESS_PLATFORM=Darwin \
+  _sgt_prepare_worker_process_marker "$retained_state"
+retained_record="$(_sgt_read_owned_file "$retained_state/worker_process_marker")"
+retained_path="${retained_record##*|}"
+SGT_KEEP_WORKER_MARKER_PATH=1 bash -c '
+  source "$1"
+  exec 198< "$3"
+  _sgt_validate_inherited_worker_marker "$2"
+' _ "$ROOT_DIR/bin/_sgt-lib.sh" "$retained_state" "$retained_path" || {
+  printf 'PORTABLE_RETAINED_MARKER_REFUSED_BY_WORKER\n' >&2
+  exit 1
+}
 
 printf 'real tmux replacement pane authentication: ok\n'

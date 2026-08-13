@@ -315,4 +315,51 @@ fi
   exit 1
 }
 
+# Two contenders can classify the same stale record concurrently.  The stale
+# compare, retirement, and candidate install must be one serialized ownership
+# transition: exactly one contender becomes holder while the loser observes the
+# winner and times out rather than deleting it.
+lockdir14="$TEST_ROOT/state-14"
+barrier14="$TEST_ROOT/reclaim-barrier-14"
+results14="$TEST_ROOT/reclaim-results-14"
+release14="$TEST_ROOT/reclaim-release-14"
+mkdir -p "$lockdir14" "$barrier14"
+printf 'pid=99999999\nstart=proc:1\nnonce=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n' \
+  > "$lockdir14/response.lock"
+run_reclaim_contender() {
+  local delay="$1"
+  SGT_TEST_HOOKS=1 \
+  SGT_TEST_RESPONSE_LOCK_RECLAIM_BARRIER="$barrier14" \
+  SGT_TEST_RESPONSE_LOCK_RECLAIM_DELAY="$delay" \
+  SGT_RESPONSE_LOCK_TIMEOUT=1 \
+  bash -c '
+    source "$1"
+    if _sgt_response_lock_acquire "$2" 2>/dev/null; then
+      printf "acquired:%s\n" "$BASHPID" >> "$3"
+      while [[ ! -e "$4" ]]; do sleep 0.01; done
+      _sgt_response_lock_release
+    else
+      printf "refused:%s\n" "$BASHPID" >> "$3"
+    fi
+  ' _ "$ROOT_DIR/bin/_sgt-response-lock.sh" "$lockdir14" "$results14" \
+    "$release14" &
+}
+run_reclaim_contender 0
+reclaimer_a=$!
+run_reclaim_contender 0.2
+reclaimer_b=$!
+for _ in $(seq 1 400); do
+  [[ -f "$results14" && "$(wc -l < "$results14")" -ge 2 ]] && break
+  sleep 0.01
+done
+touch "$release14"
+wait "$reclaimer_a"
+wait "$reclaimer_b"
+[[ "$(grep -c '^acquired:' "$results14" || true)" == 1 &&
+   "$(grep -c '^refused:' "$results14" || true)" == 1 ]] || {
+  printf 'CONCURRENT_STALE_RECLAIM_CREATED_MULTIPLE_HOLDERS\n%s\n' \
+    "$(cat "$results14" 2>/dev/null || true)" >&2
+  exit 1
+}
+
 printf 'sgt-response-lock-release: ok\n'
