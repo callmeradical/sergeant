@@ -106,6 +106,7 @@ case "${1:-}" in
     fi
     ;;
   new-window)
+    [[ "${FAIL_NEW_WINDOW:-0}" != 1 ]] || exit 7
     for repo_state in "$SERGEANT_FLEET"/*/*; do
       [[ -d "$repo_state" && -f "$repo_state/notification_id" && -f "$repo_state/worktree" ]] || continue
       notification_id="$(cat "$repo_state/notification_id")"
@@ -221,13 +222,36 @@ cmp "$TEST_ROOT/original-brief" "$preexisting_worktree/.sergeant-brief.md"
 [[ "$(stat -c %a "$preexisting_worktree/.sergeant-intent.md")" == 640 ]]
 [[ ! -e "$FLEET/preserve-existing-state-000000" ]]
 
+# A later launch failure occurs after brief and notification publication.  Every
+# Sergeant file that dispatch overwrites or removes is restored byte-for-byte.
+restore_worktree="$(dirname "$REPO")/app-sgt-restore-sergeant-files-000000"
+git -C "$REPO" worktree add -q -b feat/restore-sergeant-files "$restore_worktree"
+for restore_name in .sergeant-intent.md .sergeant-brief.md .sergeant-notification \
+    .sergeant-notification-ack .sergeant-notification-accept; do
+  printf 'original %s without trailing newline' "$restore_name" > "$restore_worktree/$restore_name"
+  chmod 640 "$restore_worktree/$restore_name"
+  cp -a "$restore_worktree/$restore_name" "$TEST_ROOT/original-${restore_name#.}"
+done
+cp "$ROOT_DIR/templates/worker-brief.md" "$DIST/templates/worker-brief.md"
+set +e
+restore_output="$(FAIL_NEW_WINDOW=1 run_dispatch 'Restore Sergeant files' 2>&1)"
+restore_status=$?
+set -e
+[[ "$restore_status" -ne 0 && "$restore_output" == *'tmux failed to launch'* ]]
+for restore_name in .sergeant-intent.md .sergeant-brief.md .sergeant-notification \
+    .sergeant-notification-ack .sergeant-notification-accept; do
+  cmp "$TEST_ROOT/original-${restore_name#.}" "$restore_worktree/$restore_name"
+  [[ "$(stat -c %a "$restore_worktree/$restore_name")" == 640 ]]
+done
+[[ ! -e "$FLEET/restore-sergeant-files-000000" ]]
+
 # A signal at the first instruction after git reports worktree success must find
 # a durable ownership journal and remove that exact worktree and new branch.
 cp "$ROOT_DIR/templates/worker-brief.md" "$DIST/templates/worker-brief.md"
 set +e
-interrupt_output="$(SGT_TEST_HOOKS=1 \
+SGT_TEST_HOOKS=1 \
   SGT_DISPATCH_FAIL_POINT=dispatch-git-worktree-acquired \
-  run_dispatch 'Interrupt after worktree' 2>&1)"
+  run_dispatch 'Interrupt after worktree' >/dev/null 2>&1
 interrupt_status=$?
 set -e
 [[ "$interrupt_status" -ne 0 ]]
@@ -239,9 +263,9 @@ set -e
 # the just-created ID to rollback before dispatch can mutate fleet/worktrees.
 : > "$TEST_ROOT/td.log"
 set +e
-td_interrupt_output="$(SGT_TEST_HOOKS=1 \
+SGT_TEST_HOOKS=1 \
   SGT_TD_CREATE_FAIL_POINT=after-create-success \
-  run_dispatch 'Interrupt after td create' 2>&1)"
+  run_dispatch 'Interrupt after td create' >/dev/null 2>&1
 td_interrupt_status=$?
 set -e
 [[ "$td_interrupt_status" -ne 0 ]]
@@ -272,6 +296,8 @@ grep -Fq 'delete td-installed-api' "$TEST_ROOT/td.log"
 # are rejected during bootstrap, before td, fleet, worktree, or tmux mutation.
 git -C "$REPO" worktree remove --force "$preexisting_worktree"
 git -C "$REPO" branch -D feat/preserve-existing-state >/dev/null
+git -C "$REPO" worktree remove --force "$restore_worktree"
+git -C "$REPO" branch -D feat/restore-sergeant-files >/dev/null
 rm -f "$FLEET/operator-sentinel"
 : > "$TEST_ROOT/td.log"
 mkdir -p "$TEST_ROOT/outside"

@@ -81,7 +81,10 @@ OWN_STATE_FILE=false
 : > "$STATE_FILE"
 
 CREATE_STDERR_FILE="$(mktemp)"
-trap 'rm -f "$CREATE_STDERR_FILE"; $OWN_STATE_FILE && rm -f "$STATE_FILE"' EXIT
+CREATE_RESULT_FILE="$(mktemp)"
+PENDING_REPO=""
+PENDING_WORK_DIR=""
+ROLLBACK_DONE=false
 
 _record_created() {
   python3 - "$STATE_FILE" "$1" "$2" "$TITLE" "$3" <<'PY'
@@ -97,6 +100,22 @@ with open(path, "a", encoding="utf-8") as handle:
         "work_dir": work_dir,
     }))
     handle.write("\n")
+    handle.flush()
+    import os
+    os.fsync(handle.fileno())
+PY
+}
+
+_state_has_task_id() {
+  python3 - "$STATE_FILE" "$1" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle:
+        if line.strip() and json.loads(line).get("task_id") == sys.argv[2]:
+            raise SystemExit(0)
+raise SystemExit(1)
 PY
 }
 
@@ -149,45 +168,40 @@ print(task_id)
 
 _rollback_or_die() {
   local message="$1"
-  local cleanup_failed=false
-  local cleanup_output=""
-
-  while IFS=$'\t' read -r repo_name task_id work_dir; do
-    [[ -n "$task_id" ]] || continue
-    if ! delete_output="$(td delete "$task_id" --work-dir "$work_dir" --force --json 2>&1)"; then
-      cleanup_failed=true
-      if [[ -n "$cleanup_output" ]]; then
-        cleanup_output+=$'\n'
-      fi
-      if [[ -n "$delete_output" ]]; then
-        cleanup_output+="cleanup failed for $task_id in $repo_name: $delete_output"
-      else
-        cleanup_output+="cleanup failed for $task_id in $repo_name"
-      fi
-    fi
-  done < <(
-    python3 - "$STATE_FILE" <<'PY'
-import json
-import sys
-
-path = sys.argv[1]
-with open(path, encoding="utf-8") as handle:
-    for line in handle:
-        line = line.strip()
-        if not line:
-            continue
-        item = json.loads(line)
-        print("\t".join([item["repo"], item["task_id"], item["work_dir"]]))
-PY
-  )
-
-  if $cleanup_failed; then
-    printf '%s\n%s\n' "$message" "$cleanup_output" >&2
+  ROLLBACK_DONE=true
+  if ! _sgt_td_rollback_state "$STATE_FILE"; then
+    printf '%s\n%s\n' "$message" "$SGT_TD_ROLLBACK_ERRORS" >&2
   else
     printf '%s\n' "$message" >&2
   fi
   exit 1
 }
+
+_td_create_cleanup() {
+  local status=$? pending_task_id=""
+  trap - EXIT HUP INT TERM
+  if [[ "$status" -ne 0 ]] && ! $ROLLBACK_DONE; then
+    # If td returned a valid created ID but interruption arrived before the
+    # normal journal append, recover that ID from its already-durable stdout.
+    if [[ -n "$PENDING_REPO" && -s "$CREATE_RESULT_FILE" ]]; then
+      pending_task_id="$(_parse_task_id < "$CREATE_RESULT_FILE" 2>/dev/null || true)"
+      if [[ -n "$pending_task_id" ]] && ! _state_has_task_id "$pending_task_id"; then
+        _record_created "$PENDING_REPO" "$pending_task_id" "$PENDING_WORK_DIR"
+      fi
+    fi
+    if ! _sgt_td_rollback_state "$STATE_FILE"; then
+      printf '%s\n' "$SGT_TD_ROLLBACK_ERRORS" >&2
+    fi
+  fi
+  rm -f "$CREATE_STDERR_FILE" "$CREATE_RESULT_FILE"
+  $OWN_STATE_FILE && rm -f "$STATE_FILE"
+  exit "$status"
+}
+_td_create_signal() { exit "$1"; }
+trap _td_create_cleanup EXIT
+trap '_td_create_signal 129' HUP
+trap '_td_create_signal 130' INT
+trap '_td_create_signal 143' TERM
 
 # Validate every target before creating any task so prerequisite failures do
 # not require rollback.
@@ -241,18 +255,28 @@ Repo role: $repo_role"
   [[ -n "$PARENT"    ]] && td_args+=(--parent "$PARENT")
 
   : > "$CREATE_STDERR_FILE"
-  if ! result="$(td "${td_args[@]}" 2>"$CREATE_STDERR_FILE")"; then
+  : > "$CREATE_RESULT_FILE"
+  PENDING_REPO="$rname"
+  PENDING_WORK_DIR="$repo_path"
+  if ! td "${td_args[@]}" >"$CREATE_RESULT_FILE" 2>"$CREATE_STDERR_FILE"; then
     create_error="$(cat "$CREATE_STDERR_FILE")"
     [[ -n "$create_error" ]] || create_error="td create failed for $rname"
     _rollback_or_die "$create_error"
   fi
 
-  if ! task_id="$(printf '%s' "$result" | _parse_task_id 2>/dev/null)"; then
+  if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+        "${SGT_TD_CREATE_FAIL_POINT:-}" == after-create-success ]]; then
+    kill -TERM "$$"
+  fi
+
+  if ! task_id="$(_parse_task_id < "$CREATE_RESULT_FILE" 2>/dev/null)"; then
     _rollback_or_die "td create returned invalid JSON for $rname"
   fi
   [[ -n "$task_id" ]] || _rollback_or_die "td create returned invalid JSON for $rname"
 
   _record_created "$rname" "$task_id" "$repo_path"
+  PENDING_REPO=""
+  PENDING_WORK_DIR=""
 done
 
 _emit_results

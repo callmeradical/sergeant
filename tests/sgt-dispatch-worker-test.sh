@@ -379,6 +379,32 @@ PY
   "get --lease --lease-holder sgt-$treehouse_task_id-app --json" ]]
 rm "$TEST_ROOT/repo/treehouse.toml"
 
+# Interruption at the first instruction after Treehouse reports a successful
+# lease must use the pre-acquisition journal to return that exact lease and
+# remove the incomplete fleet task.
+touch "$TEST_ROOT/repo/treehouse.toml"
+set +e
+REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TREEHOUSE_TEST_PATH="$TEST_ROOT/treehouse-interrupted-checkout" \
+  TREEHOUSE_GET_LOG="$TEST_ROOT/treehouse-interrupted-get.log" \
+  TREEHOUSE_RETURN_LOG="$TEST_ROOT/treehouse-interrupted-return.log" \
+  SGT_TEST_HOOKS=1 SGT_DISPATCH_FAIL_POINT=dispatch-treehouse-acquired \
+  TMUX_LOG="$TEST_ROOT/treehouse-interrupted-tmux.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Treehouse interrupted acquisition' \
+    --repos app >/dev/null 2>&1
+treehouse_interrupted_status=$?
+set -e
+[[ "$treehouse_interrupted_status" -ne 0 ]]
+grep -Fq 'return --force --if-lease-id lease-dispatch-1' \
+  "$TEST_ROOT/treehouse-interrupted-return.log"
+if compgen -G "$TEST_ROOT/fleet/treehouse-interrupted-acq-*" >/dev/null; then
+  printf 'interrupted Treehouse acquisition left fleet state behind\n' >&2
+  exit 1
+fi
+rm "$TEST_ROOT/repo/treehouse.toml"
+
 touch "$TEST_ROOT/repo/treehouse.toml"
 REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
   TREEHOUSE_TEST_PATH="$TEST_ROOT/treehouse-definite-failure" \
@@ -770,6 +796,7 @@ after_count="$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 -type d | wc -l |
 [[ "$before_count" == "$after_count" ]]
 [[ ! -e "$TEST_ROOT/goose-capability.log" ]]
 
+before_count="$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
 set +e
 PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/failure.log" FAIL_WINDOW=1 \
 SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
@@ -777,9 +804,14 @@ SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_D
 status=$?
 set -e
 [[ "$status" -ne 0 ]]
-failed_state="$(printf '%s\n' "$TEST_ROOT"/fleet/fail-worker-launch-*/app)"
-[[ "$(cat "$failed_state/status")" == "orphaned" ]]
-grep -Fq 'tmux failed to launch worker supervisor' "$failed_state/diagnostic"
+after_count="$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+[[ "$before_count" == "$after_count" ]]
+if compgen -G "$TEST_ROOT/app-sgt-fail-worker-launch-*" >/dev/null; then
+  fail "failed worker launch left a worktree"
+fi
+if git -C "$TEST_ROOT/repo" show-ref --verify --quiet refs/heads/feat/fail-worker-launch; then
+  fail "failed worker launch left a branch"
+fi
 
 set +e
 PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/readiness-timeout.log" AUTO_DELIVER=0 \

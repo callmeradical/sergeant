@@ -467,198 +467,199 @@ REPO_TD_MAP="$(mktemp)"
 TD_CREATE_STATE_FILE="$(mktemp)"
 TD_CREATE_STDERR="$(mktemp)"
 DISPATCH_MUTATIONS_FILE="$(mktemp)"
+DISPATCH_SNAPSHOT_ROOT="$(mktemp -d)"
 DISPATCH_TASK_DIR_CREATED=false
 DISPATCH_SUCCEEDED=false
 DISPATCH_GENERATED_TD_COMMITTED=false
+DISPATCH_ROLLBACK_ERRORS=""
 
-_rollback_dispatch_generated_td_tasks() {
-  local repo_name task_id work_dir delete_output
-  $DISPATCH_GENERATED_TD_COMMITTED || return 0
-  [[ -s "$TD_CREATE_STATE_FILE" ]] || return 0
-  while IFS=$'\t' read -r repo_name task_id work_dir; do
-    [[ -n "$task_id" ]] || continue
-    if ! delete_output="$(td delete "$task_id" --work-dir "$work_dir" --force --json 2>&1)"; then
-      printf 'WARNING: rollback could not delete generated td task %s in %s: %s\n' \
-        "$task_id" "$repo_name" "$delete_output" >&2
-      return 1
-    fi
-  done < <(
-    python3 - "$TD_CREATE_STATE_FILE" <<'PY'
-import json
+_dispatch_rollback_error() {
+  [[ -z "$DISPATCH_ROLLBACK_ERRORS" ]] || DISPATCH_ROLLBACK_ERRORS+=$'\n'
+  DISPATCH_ROLLBACK_ERRORS+="$1"
+}
+
+_journal_dispatch_mutation() {
+  python3 - "$DISPATCH_MUTATIONS_FILE" "$@" <<'PY'
+import os
 import sys
 
-with open(sys.argv[1], encoding="utf-8") as handle:
-    for line in handle:
-        line = line.strip()
-        if not line:
-            continue
-        item = json.loads(line)
-        print("\t".join([item["repo"], item["task_id"], item["work_dir"]]))
+path, *fields = sys.argv[1:]
+with open(path, "a", encoding="utf-8") as handle:
+    handle.write("\t".join(fields) + "\n")
+    handle.flush()
+    os.fsync(handle.fileno())
 PY
-  )
+}
+
+_snapshot_dispatch_worktree() {
+  local worktree="$1" snapshot name state
+  snapshot="$(mktemp -d "$DISPATCH_SNAPSHOT_ROOT/worktree.XXXXXX")" || return 1
+  : > "$snapshot/manifest"
+  for name in .sergeant-intent.md .sergeant-brief.md .sergeant-notification \
+      .sergeant-notification-ack .sergeant-notification-accept; do
+    if [[ -e "$worktree/$name" || -L "$worktree/$name" ]]; then
+      cp -pPR "$worktree/$name" "$snapshot/$name" || return 1
+      state=present
+    else
+      state=absent
+    fi
+    printf '%s\t%s\n' "$state" "$name" >> "$snapshot/manifest"
+  done
+  printf '%s\n' "$snapshot"
+}
+
+_restore_dispatch_worktree() {
+  local worktree="$1" snapshot="$2" state name
+  [[ -n "$worktree" && "$worktree" != / && -s "$snapshot/manifest" ]] || return 1
+  while IFS=$'\t' read -r state name; do
+    case "$name" in
+      .sergeant-intent.md|.sergeant-brief.md|.sergeant-notification|\
+      .sergeant-notification-ack|.sergeant-notification-accept) ;;
+      *) return 1 ;;
+    esac
+    rm -rf "${worktree:?}/${name:?}" || return 1
+    if [[ "$state" == present ]]; then
+      cp -pPR "$snapshot/$name" "$worktree/$name" || return 1
+    elif [[ "$state" != absent ]]; then
+      return 1
+    fi
+  done < "$snapshot/manifest"
+}
+
+_rollback_dispatch_generated_td_tasks() {
+  $DISPATCH_GENERATED_TD_COMMITTED || return 0
+  if ! _sgt_td_rollback_state "$TD_CREATE_STATE_FILE"; then
+    _dispatch_rollback_error "$SGT_TD_ROLLBACK_ERRORS"
+    return 1
+  fi
 }
 
 _rollback_dispatch_mutations() {
   local repo_path worktree_path branch mutation_kind initial_sha repo_state
-  local intent_existed brief_existed changes changed_path current_sha
-  local preserve_state=false launched_worker=false
-
-  [[ -s "$DISPATCH_MUTATIONS_FILE" ]] || {
-    if ! _rollback_dispatch_generated_td_tasks; then
-      return 0
-    fi
-    if $DISPATCH_TASK_DIR_CREATED; then
-      rm -rf "$TASK_DIR"
-      DISPATCH_TASK_DIR_CREATED=false
-    fi
-    return 0
-  }
+  local snapshot changes changed_path current_sha lease_path lease_id lease_holder
+  local entry_failed launched_worker=false owned_cleanup_failed=false
 
   while IFS=$'\t' read -r repo_path worktree_path branch mutation_kind \
-      initial_sha repo_state intent_existed brief_existed; do
-    [[ -n "$worktree_path" ]] || continue
+      initial_sha repo_state snapshot; do
+    [[ -n "$repo_state" ]] || continue
     if [[ -s "$repo_state/pane" ]]; then
       launched_worker=true
       continue
     fi
+    entry_failed=false
 
     case "$mutation_kind" in
-      git-created)
-        changes="$(git -C "$worktree_path" status --porcelain --untracked-files=all 2>/dev/null || true)"
-        while IFS= read -r changed_path; do
-          [[ -n "$changed_path" ]] || continue
-          changed_path="${changed_path#???}"
-          case "$changed_path" in
-            .sergeant-intent.md|.sergeant-brief.md|.sergeant-notification*|.sergeant-status|.sergeant-result) ;;
-            *) preserve_state=true ;;
-          esac
-        done <<< "$changes"
-        if $preserve_state; then
-          printf 'WARNING: rollback preserved worktree containing non-Sergeant changes: %s\n' \
-            "$worktree_path" >&2
-          continue
+      git-pending)
+        # A pending record is written before git runs.  Only remove the path if
+        # git now recognizes the exact path as this repository's worktree.
+        if [[ -d "$worktree_path" && -f "$worktree_path/.git" && ! -L "$worktree_path/.git" ]] && \
+           git -C "$repo_path" worktree list --porcelain | \
+             grep -qFx "worktree $worktree_path"; then
+          changes="$(git -C "$worktree_path" status --porcelain --untracked-files=all 2>/dev/null || true)"
+          while IFS= read -r changed_path; do
+            [[ -n "$changed_path" ]] || continue
+            changed_path="${changed_path#???}"
+            case "$changed_path" in
+              .sergeant-intent.md|.sergeant-brief.md|.sergeant-notification*|.sergeant-status|.sergeant-result) ;;
+              *) entry_failed=true ;;
+            esac
+          done <<< "$changes"
+          if $entry_failed; then
+            _dispatch_rollback_error "preserved worktree containing non-Sergeant changes: $worktree_path"
+          elif ! git -C "$repo_path" worktree remove --force "$worktree_path" >/dev/null 2>&1; then
+            entry_failed=true
+            _dispatch_rollback_error "could not remove worktree: $worktree_path"
+          fi
         fi
-        if ! git -C "$repo_path" worktree remove --force "$worktree_path" >/dev/null 2>&1; then
-          printf 'WARNING: rollback could not remove worktree: %s\n' "$worktree_path" >&2
-          preserve_state=true
-          continue
-        fi
-        current_sha=""
-        if [[ "$branch" != - ]]; then
+        if ! $entry_failed && [[ "$branch" != - ]]; then
           current_sha="$(git -C "$repo_path" rev-parse "refs/heads/$branch" 2>/dev/null || true)"
-        fi
-        if [[ "$branch" != - && -n "$initial_sha" && "$current_sha" == "$initial_sha" ]]; then
-          git -C "$repo_path" branch -D "$branch" >/dev/null 2>&1 || {
-            printf 'WARNING: rollback could not remove invocation-created branch: %s\n' \
-              "$branch" >&2
-            preserve_state=true
-          }
-        elif [[ -n "$current_sha" ]]; then
-          printf 'WARNING: rollback preserved branch with changed commits: %s\n' "$branch" >&2
-          preserve_state=true
+          if [[ -n "$current_sha" && "$current_sha" == "$initial_sha" ]]; then
+            if ! git -C "$repo_path" branch -D "$branch" >/dev/null 2>&1; then
+              entry_failed=true
+              _dispatch_rollback_error "could not remove invocation-created branch: $branch"
+            fi
+          elif [[ -n "$current_sha" ]]; then
+            entry_failed=true
+            _dispatch_rollback_error "preserved branch with changed commits: $branch"
+          fi
         fi
         ;;
       git-reused)
-        if [[ "$intent_existed" == false && -f "$worktree_path/.sergeant-intent.md" && \
-              ! -L "$worktree_path/.sergeant-intent.md" ]] && \
-           [[ "$(_sgt_intent_revision "$worktree_path/.sergeant-intent.md" 2>/dev/null || true)" == \
-              "$INTENT_REVISION" ]]; then
-          rm -f "$worktree_path/.sergeant-intent.md"
-        fi
-        if [[ "$brief_existed" == false && -f "$worktree_path/.sergeant-brief.md" && \
-              ! -L "$worktree_path/.sergeant-brief.md" ]] && \
-           grep -qF "**Intent revision:** \`$INTENT_REVISION\`" \
-             "$worktree_path/.sergeant-brief.md" 2>/dev/null; then
-          rm -f "$worktree_path/.sergeant-brief.md"
+        if ! _restore_dispatch_worktree "$worktree_path" "$snapshot"; then
+          entry_failed=true
+          _dispatch_rollback_error "could not restore preexisting Sergeant files in: $worktree_path"
         fi
         ;;
-      treehouse)
-        if [[ -s "$repo_state/treehouse-acquisition.json" && \
-              -s "$repo_state/wt_lease_id" && -s "$repo_state/wt_holder" ]]; then
-          if ! "$SCRIPT_DIR/_sgt-treehouse-io.py" return "$repo_path" \
-              "$repo_state/treehouse-rollback.raw" \
-              "$repo_state/treehouse-rollback-receipt.json" "$worktree_path" \
-              "$(cat "$repo_state/wt_lease_id")" "$(cat "$repo_state/wt_holder")"; then
-            printf 'WARNING: rollback preserved ambiguous Treehouse acquisition: %s\n' \
-              "$repo_state" >&2
-            preserve_state=true
+      treehouse-pending)
+        if [[ -f "$repo_state/treehouse-preserve-evidence" ]]; then
+          entry_failed=true
+          _dispatch_rollback_error "preserved ambiguous Treehouse evidence: $repo_state"
+        elif [[ -f "$repo_state/treehouse-acquisition-return" ]] && \
+           [[ "$(cat "$repo_state/treehouse-acquisition-return")" == returned ]]; then
+          :
+        elif [[ -s "$repo_state/treehouse-acquisition.json" ]]; then
+          lease_path="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' \
+            "$repo_state/treehouse-acquisition.json" 2>/dev/null || true)"
+          lease_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lease_id"])' \
+            "$repo_state/treehouse-acquisition.json" 2>/dev/null || true)"
+          lease_holder="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lease_holder"])' \
+            "$repo_state/treehouse-acquisition.json" 2>/dev/null || true)"
+          if [[ -z "$lease_path" || -z "$lease_id" || -z "$lease_holder" ]] || \
+             ! "$SCRIPT_DIR/_sgt-treehouse-io.py" return "$repo_path" \
+               "$repo_state/treehouse-rollback.raw" \
+               "$repo_state/treehouse-rollback-receipt.json" "$lease_path" \
+               "$lease_id" "$lease_holder"; then
+            entry_failed=true
+            _dispatch_rollback_error "could not return Treehouse acquisition: $repo_state"
+          else
+            printf 'returned\n' > "$repo_state/treehouse-acquisition-return"
           fi
-        else
-          preserve_state=true
         fi
         ;;
     esac
+    $entry_failed && owned_cleanup_failed=true
   done < "$DISPATCH_MUTATIONS_FILE"
 
-  if $launched_worker || $preserve_state; then
-    return 0
-  fi
-  if ! _rollback_dispatch_generated_td_tasks; then
-    return 0
-  fi
-  if $DISPATCH_TASK_DIR_CREATED; then
+  _rollback_dispatch_generated_td_tasks || true
+
+  if ! $launched_worker && ! $owned_cleanup_failed && $DISPATCH_TASK_DIR_CREATED; then
     case "$TASK_DIR" in
       "$FLEET_DIR"/*) rm -rf "$TASK_DIR" ;;
-      *) printf 'WARNING: rollback refused unexpected fleet path: %s\n' "$TASK_DIR" >&2 ;;
+      *) _dispatch_rollback_error "refused unexpected fleet path: $TASK_DIR" ;;
     esac
     DISPATCH_TASK_DIR_CREATED=false
   fi
+  [[ -z "$DISPATCH_ROLLBACK_ERRORS" ]] || \
+    printf 'ERROR: dispatch rollback incomplete:\n%s\n' "$DISPATCH_ROLLBACK_ERRORS" >&2
 }
 
 _cleanup_dispatch_tmps() {
   local dispatch_status=$?
-  trap - EXIT
+  trap - EXIT HUP INT TERM
   if [[ "$dispatch_status" -ne 0 ]] && ! $DISPATCH_SUCCEEDED; then
     _rollback_dispatch_mutations
   fi
   rm -f "$REPO_TD_MAP" "$TD_CREATE_STATE_FILE" "$TD_CREATE_STDERR" \
     "$DISPATCH_MUTATIONS_FILE" "$INTENT_TMP" "${DEPS_TMP:-}"
+  rm -rf "$DISPATCH_SNAPSHOT_ROOT"
   # This trap replaces the coordinator-pane rollback trap, so it must keep
   # honouring it; the rollback is a no-op once the dispatch has completed.
   _rollback_managed_coordinator_pane
   exit "$dispatch_status"
 }
 trap _cleanup_dispatch_tmps EXIT
+_dispatch_signal() { exit "$1"; }
+trap '_dispatch_signal 129' HUP
+trap '_dispatch_signal 130' INT
+trap '_dispatch_signal 143' TERM
 
 _sgt_intent_prepare "$INTENT_FILE" "$BRIEF" "$INTENT_TMP"
 INTENT_REVISION="$(_sgt_intent_revision "$INTENT_TMP")"
 
 _rollback_generated_td_tasks() {
   local failure_message="$1"
-  local cleanup_failed=false
-  local cleanup_output=""
-
-  while IFS=$'\t' read -r repo_name task_id work_dir; do
-    [[ -n "$task_id" ]] || continue
-    if ! delete_output="$(td delete "$task_id" --work-dir "$work_dir" --force --json 2>&1)"; then
-      cleanup_failed=true
-      if [[ -n "$cleanup_output" ]]; then
-        cleanup_output+=$'\n'
-      fi
-      if [[ -n "$delete_output" ]]; then
-        cleanup_output+="cleanup failed for $task_id in $repo_name: $delete_output"
-      else
-        cleanup_output+="cleanup failed for $task_id in $repo_name"
-      fi
-    fi
-  done < <(
-    python3 - "$TD_CREATE_STATE_FILE" <<'PY'
-import json
-import sys
-
-path = sys.argv[1]
-with open(path, encoding="utf-8") as handle:
-    for line in handle:
-        line = line.strip()
-        if not line:
-            continue
-        item = json.loads(line)
-        print("\t".join([item["repo"], item["task_id"], item["work_dir"]]))
-PY
-  )
-
-  if $cleanup_failed; then
-    _die "$failure_message"$'\n'"$cleanup_output"
+  if ! _sgt_td_rollback_state "$TD_CREATE_STATE_FILE"; then
+    _die "$failure_message"$'\n'"$SGT_TD_ROLLBACK_ERRORS"
   fi
 
   : > "$TD_CREATE_STATE_FILE"
@@ -1006,8 +1007,6 @@ for rname in "${TARGET_REPOS[@]}"; do
 
   repo_task_dir="$TASK_DIR/$rname"
   use_treehouse=false
-  worktree_created_by_dispatch=false
-  branch_created_by_dispatch=false
   if [[ -f "$repo_path/treehouse.toml" ]] && command -v treehouse &>/dev/null; then
     use_treehouse=true
   fi
@@ -1059,6 +1058,8 @@ for rname in "${TARGET_REPOS[@]}"; do
     [[ ! -e "$treehouse_raw" && ! -e "$treehouse_receipt" && \
       ! -e "$treehouse_record" ]] || \
       _die "treehouse acquisition state already exists for $rname"
+    _journal_dispatch_mutation "$repo_path" - - treehouse-pending - \
+      "$repo_task_dir" -
     set +e
     "$SCRIPT_DIR/_sgt-treehouse-io.py" get "$repo_path" "$treehouse_raw" \
       "$treehouse_receipt" "$treehouse_record" "$lease_holder"
@@ -1066,6 +1067,10 @@ for rname in "${TARGET_REPOS[@]}"; do
     set -e
     if [[ "$treehouse_get_status" -eq 0 ]]; then
       treehouse_acquired=true
+      if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+            "${SGT_DISPATCH_FAIL_POINT:-}" == dispatch-treehouse-acquired ]]; then
+        kill -TERM "$$"
+      fi
     elif [[ "$treehouse_get_status" -eq 11 ]]; then
       use_treehouse=false
       _info "Treehouse reported no allocation — falling back to git worktree"
@@ -1073,11 +1078,16 @@ for rname in "${TARGET_REPOS[@]}"; do
       if [[ -s "$treehouse_record" ]]; then
         worktree_path="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$treehouse_record")"
         lease_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lease_id"])' "$treehouse_record")"
-        "$SCRIPT_DIR/_sgt-treehouse-io.py" return "$repo_path" \
+        if "$SCRIPT_DIR/_sgt-treehouse-io.py" return "$repo_path" \
           "$repo_task_dir/treehouse-acquisition-return.raw" \
           "$repo_task_dir/treehouse-acquisition-return-receipt.json" \
-          "$worktree_path" "$lease_id" "$lease_holder" || true
+          "$worktree_path" "$lease_id" "$lease_holder"; then
+          printf 'returned\n' > "$repo_task_dir/treehouse-acquisition-return"
+        else
+          printf 'return-failed\n' > "$repo_task_dir/treehouse-acquisition-return"
+        fi
       fi
+      printf 'preserve\n' > "$repo_task_dir/treehouse-preserve-evidence"
       _die "Treehouse acquisition was ambiguous; fallback blocked and evidence preserved: $treehouse_receipt"
     fi
     if [[ "$treehouse_acquired" == true ]]; then
@@ -1100,6 +1110,7 @@ for rname in "${TARGET_REPOS[@]}"; do
         else
           printf 'return-failed\n' > "$repo_task_dir/treehouse-acquisition-return"
         fi
+        printf 'preserve\n' > "$repo_task_dir/treehouse-preserve-evidence"
         _die "treehouse checkout failed for $rname; acquisition record preserved: $treehouse_record"
       fi
     fi
@@ -1111,7 +1122,12 @@ for rname in "${TARGET_REPOS[@]}"; do
     _info "creating git worktree: $worktree_path"
     if [[ -d "$worktree_path" ]]; then
       _info "already exists — reusing"
+      worktree_snapshot="$(_snapshot_dispatch_worktree "$worktree_path")" || \
+        _die "could not snapshot preexisting Sergeant files: $worktree_path"
+      _journal_dispatch_mutation "$repo_path" "$worktree_path" - git-reused - \
+        "$repo_task_dir" "$worktree_snapshot"
     else
+      mutation_branch="-"
       if git -C "$repo_path" show-ref --verify --quiet "refs/heads/$BRANCH" 2>/dev/null; then
         # Guard: if the existing branch carries committed work that is not
         # reachable from any remote, a prior interrupted dispatch may have done
@@ -1131,12 +1147,20 @@ $prior_commits"
           _info "adopting existing branch $BRANCH with preserved commits:"
           printf '%s\n' "$prior_commits" | sed 's/^/      /'
         fi
+        worktree_initial_sha="$(git -C "$repo_path" rev-parse "refs/heads/$BRANCH")"
+        _journal_dispatch_mutation "$repo_path" "$worktree_path" - git-pending \
+          "$worktree_initial_sha" "$repo_task_dir" -
         git -C "$repo_path" worktree add "$worktree_path" "$BRANCH" 2>&1 | sed 's/^/    /'
-        worktree_created_by_dispatch=true
       else
+        worktree_initial_sha="$(git -C "$repo_path" rev-parse HEAD)"
+        mutation_branch="$BRANCH"
+        _journal_dispatch_mutation "$repo_path" "$worktree_path" "$mutation_branch" \
+          git-pending "$worktree_initial_sha" "$repo_task_dir" -
         git -C "$repo_path" worktree add -b "$BRANCH" "$worktree_path" 2>&1 | sed 's/^/    /'
-        worktree_created_by_dispatch=true
-        branch_created_by_dispatch=true
+      fi
+      if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+            "${SGT_DISPATCH_FAIL_POINT:-}" == dispatch-git-worktree-acquired ]]; then
+        kill -TERM "$$"
       fi
     fi
   fi
@@ -1160,27 +1184,6 @@ $prior_commits"
   # detect committed work added above this base (interrupted fallback guard).
   worktree_initial_sha="$(git -C "$worktree_path" rev-parse HEAD 2>/dev/null || true)"
   [[ -n "$worktree_initial_sha" ]] && printf '%s\n' "$worktree_initial_sha" > "$repo_task_dir/initial_sha"
-  intent_existed=false
-  brief_existed=false
-  [[ -e "$worktree_path/.sergeant-intent.md" || -L "$worktree_path/.sergeant-intent.md" ]] && \
-    intent_existed=true
-  [[ -e "$worktree_path/.sergeant-brief.md" || -L "$worktree_path/.sergeant-brief.md" ]] && \
-    brief_existed=true
-  mutation_kind="git-reused"
-  if $use_treehouse; then
-    mutation_kind="treehouse"
-  elif $worktree_created_by_dispatch; then
-    mutation_kind="git-created"
-  fi
-  # Only an invocation-created branch is eligible for rollback.  Existing
-  # branches and preexisting worktrees remain user-owned even when dispatch
-  # temporarily installs its intent/brief files there.
-  mutation_branch="-"
-  $branch_created_by_dispatch && mutation_branch="$BRANCH"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$repo_path" "$worktree_path" "$mutation_branch" "$mutation_kind" \
-    "$worktree_initial_sha" "$repo_task_dir" "$intent_existed" "$brief_existed" \
-    >> "$DISPATCH_MUTATIONS_FILE"
   _sgt_intent_install "$INTENT_TMP" "$worktree_path/.sergeant-intent.md"
 
   # ── Write brief ─────────────────────────────────────────────────────────────
