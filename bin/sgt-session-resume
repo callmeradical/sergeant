@@ -248,6 +248,8 @@ _SGT_RESUME_OWNER_FD=8
 _sgt_drain_lock_acquire_fd "$_SGT_RESUME_OWNER_FD" worker-launch \
   "$REPO_DIR/worker-launch.lock" || \
   _die "Could not acquire exact worker-launch ownership"
+_sgt_worker_launch_transaction_begin "$REPO_DIR" "$_SGT_RESUME_OWNER_FD" || \
+  _die "Could not snapshot worker generation before resume"
 _cleanup_resume_lock() {
   _sgt_drain_lock_release_fd "$_SGT_RESUME_OWNER_FD"
 }
@@ -268,11 +270,7 @@ locked_pane_identity="$(_sgt_read_owned_file \
 if [[ "$locked_worker_marker" != "$prelock_worker_marker" || \
   "$locked_resume_count" != "$prelock_resume_count" || \
   "$locked_pane_identity" != "$prelock_pane_identity" ]]; then
-  if _sgt_worker_launch_current_completion_matches "$REPO_DIR"; then
-    printf 'A peer launch already advanced the durable worker generation for %s/%s.\n' \
-      "$TASK_ID" "$REPO"
-    exit 0
-  fi
+  _die "Resume refused: durable worker generation changed without completion from the exact observed launch owner"
 fi
 pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
 if [[ -n "$pane" ]] && _sgt_pane_identity_matches "$pane" "$REPO_DIR" 2>/dev/null; then
@@ -479,6 +477,13 @@ printf '%s\n' "$WINDOW_NAME"  > "$REPO_DIR/window_name"
 printf '%s\n' "$((resume_count_cur + 1))" > "$REPO_DIR/resume_count"
 _sgt_worker_launch_completion_publish "$REPO_DIR" "$_SGT_RESUME_OWNER_FD" || \
   _die "Could not publish completed worker-launch transaction"
+if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+  "${SGT_TEST_SESSION_RESUME_AFTER_COMPLETION_BARRIER:-}" == 1 ]]; then
+  : > "$REPO_DIR/session-resume-after-completion-ready"
+  while [[ ! -e "$REPO_DIR/session-resume-after-completion-release" ]]; do
+    sleep 0.01
+  done
+fi
 
 # Clear stale diagnostic now that a fresh session is live.
 rm -f "$REPO_DIR/diagnostic" 2>/dev/null || true

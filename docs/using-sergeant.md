@@ -444,8 +444,10 @@ and preserve the evidence. Validation workers use the separate
 
 Worker launches are serialized by `worker-launch.lock`. A successful launcher
 publishes `worker-launch.completed`, bound to that exact lock nonce and the
-current marker digest. A waiter may converge only on that canonical completion;
-observing a live lock owner alone is not success. `worker_recycle_phase` records
+marker digests before and after launch. The digests must differ. A waiter may
+converge only on the canonical completion from the exact live owner it observed;
+observing a lock owner, an unobserved journal, or a mutation-free journal is not
+success. `worker_recycle_phase` records
 an in-progress retirement, while `worker_recycled` binds completed retirement to
 the exact pane, process group, marker, and history digest. Ambiguous or partial
 records remain available for diagnosis.

@@ -44,6 +44,20 @@ FLEET_ROOT="$(cd "$FLEET_DIR" && pwd -P)"
 TASK_ROOT="$(cd "$TASK_DIR" && pwd -P)"
 [[ "$TASK_ROOT" == "$FLEET_ROOT/$TASK_ID" ]] || _die "Invalid task ID: $TASK_ID"
 
+# Marker evidence is a task-wide cleanup admission boundary. Validate both
+# namespaces for every repository before callbacks, monitor shutdown, pane
+# retirement, response locks, or any other lifecycle mutation.
+for _sgt_preflight_repo_dir in "$TASK_DIR"/*/; do
+  [[ -d "$_sgt_preflight_repo_dir" ]] || continue
+  _sgt_preflight_repo_dir="${_sgt_preflight_repo_dir%/}"
+  _sgt_preflight_repo_name="$(basename "$_sgt_preflight_repo_dir")"
+  _sgt_worker_process_marker_preflight "$_sgt_preflight_repo_dir" || \
+    _die "Cleanup refused: worker process marker evidence is torn: $_sgt_preflight_repo_name"
+  _sgt_worker_process_marker_preflight \
+    "$_sgt_preflight_repo_dir/validation-process" || \
+    _die "Cleanup refused: validation process marker evidence is torn: $_sgt_preflight_repo_name"
+done
+
 if [[ -e "$TASK_DIR/.callbacks/origin.json" || -L "$TASK_DIR/.callbacks/origin.json" ]]; then
   "$SCRIPT_DIR/sgt-callback" sync "$TASK_ID"
   if [[ -z "$FILTER_REPO" ]]; then

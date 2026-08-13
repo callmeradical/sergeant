@@ -61,6 +61,8 @@ worktree="$(cat "$REPO_DIR/worktree" 2>/dev/null || true)"
 _SGT_RESPOND_LAUNCH_FD=7
 _sgt_drain_lock_acquire_fd "$_SGT_RESPOND_LAUNCH_FD" worker-launch \
   "$REPO_DIR/worker-launch.lock" || _die "Could not acquire exact worker-launch ownership"
+_sgt_worker_launch_transaction_begin "$REPO_DIR" "$_SGT_RESPOND_LAUNCH_FD" || \
+  _die "Could not snapshot worker generation before response relaunch"
 respond_peer_launch_contended="$SGT_DRAIN_LOCK_CONTENDED_LIVE"
 respond_peer_launch_nonce="$SGT_DRAIN_LOCK_CONTENDED_NONCE"
 _sgt_response_lock_acquire "$REPO_DIR"
@@ -311,6 +313,31 @@ if [[ "$status" == "orphaned" && ! "$gate_generation" =~ ^[1-9][0-9]*$ ]]; then
 fi
 [[ "$gate_generation" =~ ^[1-9][0-9]*$ ]] || \
   _die "Worker gate generation is missing or invalid; response was not published"
+
+peer_launch_completed=false
+SGT_DRAIN_LOCK_CONTENDED_NONCE="$respond_peer_launch_nonce"
+if [[ "$respond_peer_launch_contended" == true ]] && \
+  _sgt_worker_launch_observed_completion_matches "$REPO_DIR"; then
+  peer_launch_completed=true
+fi
+
+_queue_supplied_response_for_peer() {
+  local queued_response_id queued_dir
+  queued_response_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
+    od -An -tx1 | tr -d ' \n')"
+  queued_dir="$REPO_DIR/queued_responses/$queued_response_id"
+  mkdir -p "$queued_dir" || _die "Could not allocate queued response evidence"
+  _atomic_write_file "$queued_dir/body" "$RESPONSE_INPUT" || \
+    _die "Could not preserve queued response body"
+  _atomic_write "$queued_dir/gate_generation" "$gate_generation" || \
+    _die "Could not preserve queued response generation"
+  _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$queued_response_id" \
+    response "Apply queued response $queued_response_id from fleet state exactly once." || \
+    _die "Could not bind queued response notification"
+  printf 'sgt-respond: queued distinct response %s for the peer-launched worker.\n' \
+    "$queued_response_id"
+}
+
 if [[ -f "$REPO_DIR/response" ]]; then
   pending_response_file="$REPO_DIR/response"
 elif [[ -n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-response" ]]; then
@@ -318,29 +345,19 @@ elif [[ -n "$worktree" && -d "$worktree" && -f "$worktree/.sergeant-response" ]]
 fi
 
 response_id="$(cat "$REPO_DIR/response_id" 2>/dev/null || true)"
+if $peer_launch_completed && [[ -z "$pending_response_file" ]]; then
+  _queue_supplied_response_for_peer
+  exit 0
+fi
 if [[ -n "$pending_response_file" ]]; then
   [[ "$(cat "$REPO_DIR/response_generation" 2>/dev/null || true)" == "$gate_generation" && \
      "$(cat "$worktree/.sergeant-response-generation" 2>/dev/null || true)" == "$gate_generation" && \
      -n "$response_id" && \
      "$(cat "$worktree/.sergeant-response-id" 2>/dev/null || true)" == "$response_id" ]] || \
     _die "Pending response generation does not match the worker gate"
-  SGT_DRAIN_LOCK_CONTENDED_NONCE="$respond_peer_launch_nonce"
   if ! cmp -s "$RESPONSE_INPUT" "$pending_response_file" && \
-    [[ "$respond_peer_launch_contended" == true ]] && \
-    _sgt_worker_launch_observed_completion_matches "$REPO_DIR"; then
-    queued_response_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | \
-      od -An -tx1 | tr -d ' \n')"
-    queued_dir="$REPO_DIR/queued_responses/$queued_response_id"
-    mkdir -p "$queued_dir" || _die "Could not allocate queued response evidence"
-    _atomic_write_file "$queued_dir/body" "$RESPONSE_INPUT" || \
-      _die "Could not preserve queued response body"
-    _atomic_write "$queued_dir/gate_generation" "$gate_generation" || \
-      _die "Could not preserve queued response generation"
-    _sgt_publish_worker_notification "$REPO_DIR" "$worktree" "$queued_response_id" \
-      response "Apply queued response $queued_response_id from fleet state exactly once." || \
-      _die "Could not bind queued response notification"
-    printf 'sgt-respond: queued distinct response %s for the peer-launched worker.\n' \
-      "$queued_response_id"
+    $peer_launch_completed; then
+    _queue_supplied_response_for_peer
     exit 0
   fi
   if [[ -f "$worktree/.sergeant-response" && "$status" != "orphaned" ]]; then
@@ -382,9 +399,7 @@ if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
   done
 fi
 
-SGT_DRAIN_LOCK_CONTENDED_NONCE="$respond_peer_launch_nonce"
-if [[ "$respond_peer_launch_contended" == true ]] && \
-  _sgt_worker_launch_observed_completion_matches "$REPO_DIR"; then
+if $peer_launch_completed; then
   printf 'sgt-respond: response stored; verified peer worker-launch transaction completed for %s/%s.\n' \
     "$TASK_ID" "$REPO"
   exit 0
@@ -557,6 +572,13 @@ if pane_identity="$(_sgt_pane_identity "$new_pane")" && [[ -n "$pane_identity" ]
   fi
   _sgt_worker_launch_completion_publish "$REPO_DIR" "$_SGT_RESPOND_LAUNCH_FD" || \
     _die "Could not publish completed worker-launch transaction"
+  if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+    "${SGT_TEST_RESPOND_AFTER_COMPLETION_BARRIER:-}" == 1 ]]; then
+    : > "$REPO_DIR/respond-after-completion-ready"
+    while [[ ! -e "$REPO_DIR/respond-after-completion-release" ]]; do
+      sleep 0.01
+    done
+  fi
 else
   tmux kill-pane -t "$new_pane" 2>/dev/null || true
   _record_relaunch_orphan "tmux failed to capture exact relaunched worker pane identity"

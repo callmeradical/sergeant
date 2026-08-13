@@ -1042,9 +1042,29 @@ $td_context_block"
   printf '%s\n' "$AGENT_MODEL" > "$repo_task_dir/agent_model"
   printf '%s\n' "$AGENT_MODEL_SOURCE" > "$repo_task_dir/agent_model_source"
   _SGT_DISPATCH_WORKER_FD=7
+  if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+    "${SGT_TEST_DISPATCH_BEFORE_LAUNCH_LOCK_BARRIER:-}" == 1 ]]; then
+    : > "$repo_task_dir/dispatch-before-launch-lock-ready"
+    while [[ ! -e "$repo_task_dir/dispatch-before-launch-lock-release" ]]; do
+      sleep 0.01
+    done
+  fi
   _sgt_drain_lock_acquire_fd "$_SGT_DISPATCH_WORKER_FD" worker-launch \
     "$repo_task_dir/worker-launch.lock" || \
     _die "Could not acquire exact initial worker-launch ownership"
+  _sgt_worker_launch_transaction_begin "$repo_task_dir" \
+    "$_SGT_DISPATCH_WORKER_FD" || \
+    _die "Could not snapshot worker generation before initial launch"
+  if [[ "$SGT_DRAIN_LOCK_CONTENDED_LIVE" == true ]]; then
+    if _sgt_worker_launch_observed_completion_matches "$repo_task_dir"; then
+      _sgt_drain_lock_release_fd "$_SGT_DISPATCH_WORKER_FD" || \
+        _die "Could not release converged initial worker-launch ownership"
+      _info "verified peer worker-launch transaction completed for $rname"
+      echo ""
+      continue
+    fi
+    _die "Initial dispatch observed a launch owner without exact completed mutation evidence"
+  fi
   initial_notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
   _sgt_publish_worker_notification "$repo_task_dir" "$worktree_path" \
     "$initial_notification_id" initial "Read the .sergeant-brief.md file and execute the mission."

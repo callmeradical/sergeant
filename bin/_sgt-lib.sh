@@ -716,7 +716,7 @@ _sgt_process_marker_command() {
   printf '%s' "$command"
 }
 _sgt_worker_process_marker_preflight() {
-  local repo_dir="$1" history="$1/worker_process_markers" current digest platform generation floor
+  local repo_dir="$1" history="$1/worker_process_markers" current digest platform generation floor history_has_portable
   if [[ ( -e "$repo_dir/worker_process_marker" || \
     -L "$repo_dir/worker_process_marker" ) && \
     ! -e "$history" && ! -L "$history" ]]; then
@@ -745,6 +745,8 @@ _sgt_worker_process_marker_preflight() {
     '$1 == generation { if (++count == 1) value=$3 } END { if (count == 1) print value; else exit 1 }' \
     "$history" 2>/dev/null || true)"
   [[ "$floor" =~ ^[0-9]+$ ]] || return 1
+  history_has_portable="$(awk -F'|' '$3 == 0 { found=1 } END { print found ? "true" : "false" }' \
+    "$history" 2>/dev/null || true)"
   if [[ -e "$repo_dir/worker_process_marker_platform" || \
     -L "$repo_dir/worker_process_marker_platform" ]]; then
     platform="$(_sgt_read_owned_file \
@@ -754,8 +756,8 @@ _sgt_worker_process_marker_preflight() {
         "$repo_dir" >&2
       return 1
     }
-    [[ "$floor" == 0 ]] || return 1
-  elif [[ "$floor" == 0 ]]; then
+    [[ "$history_has_portable" == true ]] || return 1
+  elif [[ "$history_has_portable" == true ]]; then
     printf 'portable worker process marker has no platform evidence: %s\n' \
       "$repo_dir" >&2
     return 1
@@ -782,7 +784,7 @@ _sgt_validate_inherited_worker_marker() {
   fi
 }
 _sgt_prepare_worker_process_marker() {
-  local repo_dir="$1" path generation identity marker launch_identity launch_floor history history_tmp history_lines platform platform_record="" portable_marker=false
+  local repo_dir="$1" path generation identity marker launch_identity launch_floor history history_tmp history_backup="" history_lines history_has_portable platform platform_record="" desired_platform="" portable_marker=false old_history_present=false
   local old_platform="" old_platform_present=false
   history="$repo_dir/worker_process_markers"
   _sgt_worker_process_marker_preflight "$repo_dir" || return 1
@@ -818,54 +820,89 @@ _sgt_prepare_worker_process_marker() {
   chmod 400 "$path" || { rm -f "$path"; return 1; }
   marker="$generation|$identity|198|$path"
   [[ ! -L "$history" && ( ! -e "$history" || -f "$history" ) ]] || { rm -f "$path"; return 1; }
+  history_tmp="$(mktemp "$repo_dir/.worker-process-markers.XXXXXX")" || { rm -f "$path"; return 1; }
   if [[ -f "$history" ]]; then
+    cp -p "$history" "$history_tmp" || { rm -f "$history_tmp" "$path"; return 1; }
     if $portable_marker; then
-      python3 "$_SGT_LIB_DIR/_sgt-process-token.py" portable-compact "$history" || {
-        rm -f "$path"
+      python3 "$_SGT_LIB_DIR/_sgt-process-token.py" portable-compact "$history_tmp" || {
+        rm -f "$history_tmp" "$path"
         return 1
       }
     else
-      python3 "$_SGT_LIB_DIR/_sgt-process-token.py" compact "$history" || {
-        rm -f "$path"
+      python3 "$_SGT_LIB_DIR/_sgt-process-token.py" compact "$history_tmp" || {
+        rm -f "$history_tmp" "$path"
         return 1
       }
     fi
-    history_lines="$(wc -l < "$history" 2>/dev/null || true)"
+    history_lines="$(wc -l < "$history_tmp" 2>/dev/null || true)"
     [[ "$history_lines" =~ ^[0-9]+$ && "$history_lines" -lt 64 ]] || {
-      rm -f "$path"
+      rm -f "$history_tmp" "$path"
       return 1
     }
   fi
-  history_tmp="$(mktemp "$repo_dir/.worker-process-markers.XXXXXX")" || { rm -f "$path"; return 1; }
-  {
-    [[ ! -f "$history" ]] || cat "$history"
-    printf '%s|%s|%s\n' "$generation" "$identity" "$launch_floor"
-  } > "$history_tmp" || { rm -f "$history_tmp" "$path"; return 1; }
+  printf '%s|%s|%s\n' "$generation" "$identity" "$launch_floor" \
+    >> "$history_tmp" || { rm -f "$history_tmp" "$path"; return 1; }
   chmod 600 "$history_tmp" || { rm -f "$history_tmp" "$path"; return 1; }
-  # Publish retained generation evidence before selecting it for launch. A
-  # crash can therefore leave only an unused marker file, never a launched
-  # generation whose capability is absent from durable retirement history.
-  mv "$history_tmp" "$history" || { rm -f "$history_tmp" "$path"; return 1; }
-  if $portable_marker; then
+  history_has_portable="$(awk -F'|' '$3 == 0 { found=1 } END { print found ? "true" : "false" }' \
+    "$history_tmp" 2>/dev/null || true)"
+  if [[ "$history_has_portable" == true ]]; then
+    if $portable_marker; then
+      desired_platform="$platform_record"
+    else
+      desired_platform="$old_platform"
+    fi
+    [[ "$desired_platform" == Darwin:no-exact-process-birth ]] || {
+      rm -f "$history_tmp" "$path"
+      return 1
+    }
     if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
       "${SGT_TEST_MARKER_PLATFORM_WRITE_FAIL:-}" == 1 ]]; then
-      rm -f "$path"
+      rm -f "$history_tmp" "$path"
       return 1
     fi
     _sgt_replace_owned_file "$repo_dir/worker_process_marker_platform" \
-      "$platform_record" || return 1
+      "$desired_platform" || { rm -f "$history_tmp" "$path"; return 1; }
   else
-    rm -f "$repo_dir/worker_process_marker_platform" || return 1
+    rm -f "$repo_dir/worker_process_marker_platform" || { rm -f "$history_tmp" "$path"; return 1; }
+  fi
+  if [[ -f "$history" ]]; then
+    history_backup="$(mktemp "$repo_dir/.worker-process-markers-backup.XXXXXX")" || {
+      if $old_platform_present; then
+        _sgt_replace_owned_file "$repo_dir/worker_process_marker_platform" "$old_platform" >/dev/null 2>&1 || true
+      else
+        rm -f "$repo_dir/worker_process_marker_platform"
+      fi
+      rm -f "$history_tmp" "$path"
+      return 1
+    }
+    cp -p "$history" "$history_backup" || { rm -f "$history_backup" "$history_tmp" "$path"; return 1; }
+    old_history_present=true
+  fi
+  if ! mv "$history_tmp" "$history"; then
+    if $old_platform_present; then
+      _sgt_replace_owned_file "$repo_dir/worker_process_marker_platform" "$old_platform" >/dev/null 2>&1 || true
+    else
+      rm -f "$repo_dir/worker_process_marker_platform"
+    fi
+    rm -f "$history_backup" "$history_tmp" "$path"
+    return 1
   fi
   if ! _sgt_replace_owned_file "$repo_dir/worker_process_marker" "$marker"; then
+    if $old_history_present; then
+      mv "$history_backup" "$history" >/dev/null 2>&1 || true
+    else
+      rm -f "$history"
+    fi
     if $old_platform_present; then
       _sgt_replace_owned_file "$repo_dir/worker_process_marker_platform" \
         "$old_platform" >/dev/null 2>&1 || true
     else
       rm -f "$repo_dir/worker_process_marker_platform"
     fi
+    rm -f "$history_backup" "$path"
     return 1
   fi
+  rm -f "$history_backup"
 }
 _sgt_notification_target_create() {
   local repo_dir="$1" notification_id="$2" pane_identity="$3"
