@@ -74,7 +74,7 @@ _snapshot_scope_id_is_valid() {
 # _snapshot_pane_is_verified_worker <pane> <repo_dir>
 # Read-only exact identity match against the recorded worker pane.
 _snapshot_pane_is_verified_worker() {
-  local pane="$1" repo_dir="$2" actual expected observed_pane observed_dead
+  local pane="$1" repo_dir="$2" actual current expected observed_pane observed_dead
   [[ -n "$pane" ]] || return 1
   command -v tmux >/dev/null 2>&1 || return 1
   actual="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
@@ -86,12 +86,130 @@ _snapshot_pane_is_verified_worker() {
   observed_pane="${observed_pane%%|*}"
   [[ "$observed_dead" == "0" && "$observed_pane" == "$pane" ]] || return 1
   expected="$(cat "$repo_dir/pane_identity" 2>/dev/null || true)"
-  [[ -n "$expected" && "$expected" == "$actual" ]]
+  [[ -n "$expected" && "$expected" == "$actual" ]] || return 1
+  current="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
+  [[ "$current" == "$actual" ]]
+}
+
+# _snapshot_recent_tmux_activity <pane> <expected-identity> <now> <recent>
+#
+# tmux 3.7b may leave pane_activity empty while window_activity continues to
+# advance. Window activity is attributable to this pane only when tmux proves
+# that the target window contains exactly one pane. A split window is
+# deliberately inconclusive: activity from another pane must never become a
+# worker witness. Identity is checked on both sides of the activity read so a
+# killed/restarted pane cannot splice two generations into one observation.
+_snapshot_recent_tmux_activity() {
+  local pane="$1" expected="$2" now="$3" recent="$4"
+  local before after record observed_pane pane_activity window_activity window_panes last_event=0
+  before="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
+  [[ -n "$before" && "$before" == "$expected" ]] || return 1
+  record="$(tmux display-message -p -t "$pane" \
+    '#{pane_id}|#{pane_activity}|#{window_activity}|#{window_panes}' 2>/dev/null || true)"
+  after="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
+  [[ "$after" == "$before" ]] || return 1
+  IFS='|' read -r observed_pane pane_activity window_activity window_panes <<< "$record"
+  [[ "$observed_pane" == "$pane" ]] || return 1
+  if [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+        "${SGT_TEST_TMUX_ACTIVITY_UNAVAILABLE:-}" == 1 ]]; then
+    pane_activity=""
+    window_activity=""
+  fi
+  if [[ "$pane_activity" =~ ^[1-9][0-9]*$ ]]; then
+    last_event="$pane_activity"
+  fi
+  if [[ "$window_panes" == 1 && "$window_activity" =~ ^[1-9][0-9]*$ && \
+        "$window_activity" -gt "$last_event" ]]; then
+    last_event="$window_activity"
+  fi
+  (( last_event > 0 && now >= last_event && now - last_event <= recent ))
+}
+
+# _snapshot_pid_descends_from <pid> <ancestor-pid>
+# Proves a current parent chain from an exact live subject to the recorded agent.
+_snapshot_pid_descends_from() {
+  local pid="$1" ancestor="$2" fields ppid steps=0
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "$ancestor" =~ ^[1-9][0-9]*$ && \
+    "$pid" != "$ancestor" ]] || return 1
+  while (( steps < 64 )); do
+    fields="$(_sgt_process_stat_fields "$pid" 2>/dev/null || true)"
+    [[ -n "$fields" ]] || return 1
+    # identity ppid pgid sid state
+    # shellcheck disable=SC2086  # Process stat fields are intentionally positional.
+    set -- $fields
+    ppid="${2:-}"
+    [[ "$ppid" =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ "$ppid" == "$ancestor" ]] && return 0
+    [[ "$ppid" != "$pid" ]] || return 1
+    pid="$ppid"
+    steps=$(( steps + 1 ))
+  done
+  return 1
+}
+
+# _snapshot_recent_durable_witness <repo-dir> <pane> <identity> <now> <recent>
+#
+# The worker publishes this record only for a status/artifact transition or a
+# newly observed operation below the exact agent process. It is never refreshed
+# merely because the supervisor, agent, or in_progress status remains alive.
+_snapshot_recent_durable_witness() {
+  local repo_dir="$1" pane="$2" identity="$3" now="$4" recent="$5"
+  local record version kind observed_at recorded_pane recorded_identity
+  local subject_pid subject_identity expected current agent_pid agent_identity agent_current
+  local remainder pane_pid worker_pid worker_identity worker_current
+  record="$(_sgt_read_owned_multiline_file \
+    "$repo_dir/activity_witness" 2>/dev/null || true)"
+  [[ -n "$record" ]] || return 1
+  version="$(sed -n '1s/^version=//p' <<< "$record")"
+  kind="$(sed -n '2s/^kind=//p' <<< "$record")"
+  observed_at="$(sed -n '3s/^observed_at=//p' <<< "$record")"
+  recorded_pane="$(sed -n '4s/^pane=//p' <<< "$record")"
+  recorded_identity="$(sed -n '5s/^pane_identity=//p' <<< "$record")"
+  subject_pid="$(sed -n '6s/^subject_pid=//p' <<< "$record")"
+  subject_identity="$(sed -n '7s/^subject_identity=//p' <<< "$record")"
+  expected="$(printf 'version=1\nkind=%s\nobserved_at=%s\npane=%s\npane_identity=%s\nsubject_pid=%s\nsubject_identity=%s' \
+    "$kind" "$observed_at" "$recorded_pane" "$recorded_identity" \
+    "$subject_pid" "$subject_identity")"
+  [[ "$record" == "$expected" && "$version" == 1 && \
+    "$recorded_pane" == "$pane" && "$recorded_identity" == "$identity" && \
+    "$observed_at" =~ ^[1-9][0-9]*$ && now -ge observed_at && \
+    $(( now - observed_at )) -le recent ]] || return 1
+  current="$(_sgt_pane_identity "$pane" 2>/dev/null || true)"
+  [[ "$current" == "$identity" ]] || return 1
+  case "$kind" in
+    transition)
+      [[ -z "$subject_pid" && -z "$subject_identity" ]]
+      ;;
+    child)
+      [[ "$subject_pid" =~ ^[1-9][0-9]*$ && \
+        "$subject_identity" =~ ^linux:[1-9][0-9]*$ ]] || return 1
+      [[ "$(_sgt_process_identity "$subject_pid" 2>/dev/null || true)" == \
+        "$subject_identity" ]] || return 1
+      agent_pid="$(tr -d '\n' < "$repo_dir/agent_pid" 2>/dev/null || true)"
+      agent_identity="$(tr -d '\n' < "$repo_dir/agent_process_start" 2>/dev/null || true)"
+      [[ "$agent_pid" =~ ^[1-9][0-9]*$ && \
+        "$agent_identity" =~ ^linux:[1-9][0-9]*$ ]] || return 1
+      agent_current="$(_sgt_process_identity "$agent_pid" 2>/dev/null || true)"
+      [[ "$agent_current" == "$agent_identity" ]] || return 1
+      remainder="${identity#*|}"
+      remainder="${remainder#*|}"
+      pane_pid="${remainder%%|*}"
+      worker_pid="$(tr -d '\n' < "$repo_dir/worker_pid" 2>/dev/null || true)"
+      worker_identity="$(tr -d '\n' < "$repo_dir/worker_process_start" 2>/dev/null || true)"
+      [[ "$pane_pid" =~ ^[1-9][0-9]*$ && "$worker_pid" == "$pane_pid" && \
+        "$worker_identity" =~ ^linux:[1-9][0-9]*$ ]] || return 1
+      worker_current="$(_sgt_process_identity "$worker_pid" 2>/dev/null || true)"
+      [[ "$worker_current" == "$worker_identity" ]] || return 1
+      _snapshot_pid_descends_from "$agent_pid" "$worker_pid" || return 1
+      _snapshot_pid_descends_from "$subject_pid" "$agent_pid"
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # _snapshot_repo_is_active_witness <repo_dir>
 _snapshot_repo_is_active_witness() {
-  local repo_dir="$1" status pane recent now last_event pane_activity
+  local repo_dir="$1" status pane identity recent now
   [[ -d "$repo_dir" ]] || return 1
   status="$(cat "$repo_dir/status" 2>/dev/null | tr -d '\n' || true)"
   # in_progress is the only status that claims work is happening.  Terminal,
@@ -99,18 +217,14 @@ _snapshot_repo_is_active_witness() {
   [[ "$status" == "in_progress" ]] || return 1
   pane="$(cat "$repo_dir/pane" 2>/dev/null | tr -d '\n' || true)"
   _snapshot_pane_is_verified_worker "$pane" "$repo_dir" || return 1
+  identity="$(cat "$repo_dir/pane_identity" 2>/dev/null || true)"
 
   recent="${SERGEANT_SNAPSHOT_RECENT_SECONDS:-300}"
   [[ "$recent" =~ ^[0-9]+$ ]] || recent=300
   now="$(date +%s)"
   [[ "$now" =~ ^[0-9]+$ ]] || return 1
-  last_event="$(cat "$repo_dir/progress_ts" 2>/dev/null | tr -d '\n' || true)"
-  [[ "$last_event" =~ ^[1-9][0-9]*$ ]] || last_event=0
-  pane_activity="$(tmux display-message -p -t "$pane" '#{pane_activity}' 2>/dev/null || true)"
-  if [[ "$pane_activity" =~ ^[1-9][0-9]*$ ]] && (( pane_activity > last_event )); then
-    last_event="$pane_activity"
-  fi
-  (( last_event > 0 && now >= last_event && now - last_event <= recent ))
+  _snapshot_recent_tmux_activity "$pane" "$identity" "$now" "$recent" && return 0
+  _snapshot_recent_durable_witness "$repo_dir" "$pane" "$identity" "$now" "$recent"
 }
 
 _snapshot_emit() {

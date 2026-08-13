@@ -167,6 +167,14 @@ Sergeant worker pane identity, and progress attributable to that pane within
 idleness. `basis` is a closed allowlist of those two values, so an unrecognised
 condition maps to the null basis rather than inventing one.
 
+Meaningful progress is a recent activity timestamp for an identity-verified
+single-pane tmux window, a generation-bound status/artifact transition, or a
+new exact descendant operation below the recorded harness process. Sergeant
+does not refresh this evidence merely because the supervisor, harness, or
+`in_progress` status remains alive. A worker waiting for a human decision must
+publish `needs_input` and `.sergeant-message`; silently remaining `in_progress`
+will correctly become inconclusive after the recent-activity window.
+
 ### Pinning the worker's model
 
 `sgt-dispatch --agent` (or `SERGEANT_AGENT`) chooses the harness *executable*.

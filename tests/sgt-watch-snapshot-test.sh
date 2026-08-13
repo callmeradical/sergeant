@@ -47,6 +47,10 @@ case "$1" in
     case "${!#}" in
       '#{pane_id}') printf '%s\n' "$target" ;;
       '#{pane_activity}') printf '%s\n' "${PANE_ACTIVITY:-0}" ;;
+      '#{pane_id}|#{pane_activity}|#{window_activity}|#{window_panes}')
+        printf '%s|%s|%s|%s\n' "$target" "${PANE_ACTIVITY:-0}" \
+          "${WINDOW_ACTIVITY:-0}" "${WINDOW_PANES:-1}"
+        ;;
       *)
         if [[ -s "$IDENTITY_DIR/${target#%}" ]]; then
           cat "$IDENTITY_DIR/${target#%}"
@@ -115,6 +119,17 @@ make_worker() {
   printf '%s\n' "$pane" >> "$LIVE_PANES"
   printf '%s\n' "$activity" > "$state/progress_ts"
   printf '%s %s\n' "$state" "$wt"
+}
+
+write_transition_witness() {
+  local state="$1" observed_at="$2" pane identity
+  pane="$(cat "$state/pane")"
+  identity="$(cat "$state/pane_identity")"
+  (umask 077; {
+    printf 'version=1\nkind=transition\nobserved_at=%s\n' "$observed_at"
+    printf 'pane=%s\npane_identity=%s\n' "$pane" "$identity"
+    printf 'subject_pid=\nsubject_identity=\n'
+  } > "$state/activity_witness")
 }
 
 # ── 1. An empty fleet is a bounded null observation ───────────────────────────
@@ -188,6 +203,7 @@ assert_valid_shape "$json" 'repo scope'
 
 # ── 4. busy requires status, identity and recent progress together ────────────
 
+write_transition_witness "$state" "$(date +%s)"
 json="$(env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet" "LIVE_PANES=$LIVE_PANES" \
   "IDENTITY_DIR=$IDENTITY_DIR" "$ROOT_DIR/bin/sgt-watch" --snapshot task-readonly --repo app)"
 assert_valid_shape "$json" 'verified witness'
@@ -200,8 +216,8 @@ assert_valid_shape "$json" 'verified witness'
 # The fleet scope sees the same witness.
 [[ "$(field "$(snapshot)" 'repr(d["busy"])')" == "True" ]]
 
-# Stale progress alone removes the witness.
-printf '%s\n' "$(( $(date +%s) - 100000 ))" > "$state/progress_ts"
+# A stale durable transition removes the witness.
+write_transition_witness "$state" "$(( $(date +%s) - 100000 ))"
 json="$(env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet" "LIVE_PANES=$LIVE_PANES" \
   "IDENTITY_DIR=$IDENTITY_DIR" "$ROOT_DIR/bin/sgt-watch" --snapshot task-readonly --repo app)"
 assert_valid_shape "$json" 'stale progress'
@@ -210,7 +226,7 @@ assert_valid_shape "$json" 'stale progress'
   exit 1
 }
 [[ "$(field "$json" 'd["basis"]')" == "no_verified_active_witness" ]]
-printf '%s\n' "$(date +%s)" > "$state/progress_ts"
+write_transition_witness "$state" "$(date +%s)"
 
 # An identity mismatch removes the witness.
 printf '0|%%10|9999|777777|someone-else\n' > "$state/pane_identity"
@@ -341,38 +357,37 @@ if printf '%s' "$list_output" | grep -q 'Active tasks:'; then
   exit 1
 fi
 
-# ── 10. pane_activity unavailable: recent progress_ts keeps busy:true (GH #206) ─
-# When #{pane_activity} returns empty (tmux 3.7b), the snapshot falls back to
-# progress_ts.  A progress_ts written within the recent window must keep the
-# worker as a verified active witness even when pane_activity is zero/empty.
+# ── 10. pane_activity unavailable: exact single-pane window activity (GH #206) ─
 
-read -r state10 wt10 <<<"$(make_worker t10-no-pane-activity in_progress '%95' "$(date +%s)")"
+make_worker t10-no-pane-activity in_progress '%95' \
+  "$(( $(date +%s) - 99999 ))" >/dev/null
 # Simulate tmux 3.7b: PANE_ACTIVITY=0 means pane_activity is empty/zero.
 export PANE_ACTIVITY=0
 json10="$(env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet" "PANE_ACTIVITY=0" \
+  "WINDOW_ACTIVITY=$(date +%s)" "WINDOW_PANES=1" \
   "IDENTITY_DIR=$IDENTITY_DIR" "LIVE_PANES=$LIVE_PANES" \
-  "$ROOT_DIR/bin/sgt-watch" --snapshot)"
+  "$ROOT_DIR/bin/sgt-watch" --snapshot task-t10-no-pane-activity --repo app)"
 assert_valid_shape "$json10" "no-pane-activity snapshot"
 if [[ "$(field "$json10" 'repr(d["busy"])')" != "True" ]]; then
-  printf 'GH#206: pane_activity=0 but recent progress_ts: expected busy=true, got:\n%s\n' \
+  printf 'GH#206: pane_activity=0 but recent single-pane window activity: expected busy=true, got:\n%s\n' \
     "$json10" >&2
   exit 1
 fi
 if [[ "$(field "$json10" 'd["basis"]')" != "verified_active_witness" ]]; then
-  printf 'GH#206: recent progress_ts should be a verified_active_witness, got: %s\n' \
+  printf 'GH#206: single-pane activity should be a verified_active_witness, got: %s\n' \
     "$(field "$json10" 'd["basis"]')" >&2
   exit 1
 fi
 
-# Stale progress_ts (older than the window) + no pane_activity = inconclusive.
-printf '%s\n' "$(( $(date +%s) - 99999 ))" > "$state10/progress_ts"
+# Stale window activity + no pane_activity = inconclusive.
 json10b="$(env "PATH=$fake_bin:$PATH" "SERGEANT_FLEET=$fleet" "PANE_ACTIVITY=0" \
+  "WINDOW_ACTIVITY=$(( $(date +%s) - 99999 ))" "WINDOW_PANES=1" \
   "IDENTITY_DIR=$IDENTITY_DIR" "LIVE_PANES=$LIVE_PANES" \
   "SERGEANT_SNAPSHOT_RECENT_SECONDS=300" \
-  "$ROOT_DIR/bin/sgt-watch" --snapshot)"
+  "$ROOT_DIR/bin/sgt-watch" --snapshot task-t10-no-pane-activity --repo app)"
 assert_valid_shape "$json10b" "no-pane-activity stale snapshot"
 if [[ "$(field "$json10b" 'repr(d["busy"])')" != "None" ]]; then
-  printf 'GH#206: stale progress_ts + no pane_activity: expected busy=null, got:\n%s\n' \
+  printf 'GH#206: stale window activity + no pane_activity: expected busy=null, got:\n%s\n' \
     "$json10b" >&2
   exit 1
 fi
