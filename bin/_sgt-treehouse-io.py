@@ -613,12 +613,37 @@ def same_repository(repo, checkout):
         raise ValueError("checkout belongs to another repository")
 
 
+def run_checkout_open_test_hook(checkout):
+    if os.environ.get("SGT_TEST_HOOKS") != "1":
+        return
+    hook_text = os.environ.get("SGT_TREEHOUSE_PREOPEN_HOOK", "")
+    root_text = os.environ.get("SGT_TREEHOUSE_TEST_HOOK_ROOT", "")
+    if not hook_text or not root_text:
+        return
+    hook = Path(hook_text)
+    root = Path(root_text)
+    try:
+        root_info = root.lstat()
+        hook_info = hook.lstat()
+        root_real = root.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("unsafe Treehouse checkout test hook") from exc
+    if (not root.is_absolute() or root_real != root or root.is_symlink() or
+            not root.is_dir() or root_info.st_uid != os.geteuid() or
+            not hook.is_absolute() or hook.parent != root or hook.is_symlink() or
+            not hook.is_file() or hook_info.st_uid != os.geteuid() or
+            not os.access(hook, os.X_OK)):
+        raise ValueError("unsafe Treehouse checkout test hook")
+    subprocess.run([str(hook), checkout], check=True)
+
+
 def checkout_branch(repo, checkout, branch, record_path):
     repo = canonical(repo)
     if not os.path.isabs(checkout) or os.path.normpath(checkout) != checkout:
         raise ValueError("invalid checkout path")
     if controls(branch) or not branch or len(branch.encode()) > 1024:
         raise ValueError("invalid branch")
+    run_checkout_open_test_hook(checkout)
     descriptor = os.open(checkout, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         opened = os.fstat(descriptor)

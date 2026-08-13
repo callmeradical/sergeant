@@ -280,22 +280,6 @@ if [[ ! -d "$TREEHOUSE_TEST_PATH" ]]; then
     "$REAL_GIT" -C "$PWD" worktree add -q --detach "$TREEHOUSE_TEST_PATH"
   fi
 fi
-if [[ "${TREEHOUSE_OUTPUT_MODE:-valid}" == swap_before_open ]]; then
-  (
-    acquisition_record=""
-    while [[ -z "$acquisition_record" ]]; do
-      while IFS= read -r candidate; do
-        if grep -Fq "\"path\":\"$TREEHOUSE_TEST_PATH\"" "$candidate" 2>/dev/null && \
-          grep -Fq '"identity_verified":true' "$candidate" 2>/dev/null; then
-          acquisition_record="$candidate"
-          break
-        fi
-      done < <(find "$SERGEANT_FLEET" -name treehouse-acquisition.json -type f)
-    done
-    mv "$TREEHOUSE_TEST_PATH" "$TREEHOUSE_TEST_PATH-original"
-    mv "$TREEHOUSE_SWAP_DECOY" "$TREEHOUSE_TEST_PATH"
-  ) >/dev/null 2>&1 &
-fi
 printf '{"path":"%s","lease_id":"lease-dispatch-1","lease_holder":"%s","leased_at":"2026-08-11T00:00:00Z"}\n' \
   "$TREEHOUSE_TEST_PATH" "$4"
 EOF
@@ -555,19 +539,34 @@ gitdir_holder="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))
   "$gitdir_record")"
 [[ "$(cat "$TEST_ROOT/treehouse-gitdir-return.log")" == \
   "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $gitdir_holder $TEST_ROOT/treehouse-gitdir-checkout" ]]
+# Keep this completed adversarial fixture available for inspection without
+# letting the next independent dispatch reconcile its intentionally pane-less
+# terminal record.
+mv "$(dirname "$gitdir_record")" "$TEST_ROOT/treehouse-gitdir-state"
 rm "$TEST_ROOT/repo/treehouse.toml"
 
 git -C "$TEST_ROOT/repo" worktree add -q --detach \
   "$TEST_ROOT/treehouse-preopen-decoy"
 preopen_decoy_head="$(git -C "$TEST_ROOT/treehouse-preopen-decoy" rev-parse HEAD)"
+cat > "$TEST_ROOT/treehouse-preopen-hook" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+mv "$1" "$1-original"
+mv "$TREEHOUSE_SWAP_DECOY" "$1"
+: > "$TREEHOUSE_SWAP_COMPLETE"
+EOF
+chmod +x "$TEST_ROOT/treehouse-preopen-hook"
 touch "$TEST_ROOT/repo/treehouse.toml"
 set +e
 REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
   TREEHOUSE_TEST_PATH="$TEST_ROOT/treehouse-preopen-checkout" \
   TREEHOUSE_SWAP_DECOY="$TEST_ROOT/treehouse-preopen-decoy" \
+  TREEHOUSE_SWAP_COMPLETE="$TEST_ROOT/treehouse-preopen-complete" \
   TREEHOUSE_GET_LOG="$TEST_ROOT/treehouse-preopen.log" \
   TREEHOUSE_RETURN_LOG="$TEST_ROOT/treehouse-preopen-return.log" \
-  TREEHOUSE_OUTPUT_MODE=swap_before_open \
+  SGT_TEST_HOOKS=1 \
+  SGT_TREEHOUSE_PREOPEN_HOOK="$TEST_ROOT/treehouse-preopen-hook" \
+  SGT_TREEHOUSE_TEST_HOOK_ROOT="$TEST_ROOT" \
   TMUX_LOG="$TEST_ROOT/treehouse-preopen-tmux.log" \
   SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
   SGT_WIKI_DISABLED=1 \
@@ -576,6 +575,11 @@ REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
 preopen_status=$?
 set -e
 [[ "$preopen_status" -ne 0 ]]
+for _ in $(seq 1 100); do
+  [[ -e "$TEST_ROOT/treehouse-preopen-complete" ]] && break
+  sleep 0.01
+done
+[[ -e "$TEST_ROOT/treehouse-preopen-complete" ]]
 [[ "$(git -C "$TEST_ROOT/treehouse-preopen-checkout" rev-parse HEAD)" == \
   "$preopen_decoy_head" ]]
 [[ -z "$(git -C "$TEST_ROOT/treehouse-preopen-checkout" branch --list \
@@ -588,6 +592,7 @@ preopen_holder="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])
   "$preopen_record")"
 [[ "$(cat "$TEST_ROOT/treehouse-preopen-return.log")" == \
   "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $preopen_holder $TEST_ROOT/treehouse-preopen-checkout" ]]
+mv "$(dirname "$preopen_record")" "$TEST_ROOT/treehouse-preopen-state"
 rm "$TEST_ROOT/repo/treehouse.toml"
 
 mkdir -p "$TEST_ROOT/swap-unrelated"
@@ -640,6 +645,7 @@ swap_holder="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["
   "$swap_record")"
 [[ "$(cat "$TEST_ROOT/treehouse-swap-return.log")" == \
   "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $swap_holder $TEST_ROOT/treehouse-swap-checkout" ]]
+mv "$(dirname "$swap_record")" "$TEST_ROOT/treehouse-checkout-swap-state"
 rm "$TEST_ROOT/repo/treehouse.toml"
 
 for agent in goose claude; do

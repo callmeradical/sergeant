@@ -41,8 +41,19 @@ cat > "$TEST_ROOT/bin/uname" <<'EOF'
 printf 'Darwin\n'
 EOF
 chmod +x "$TEST_ROOT/bin/uname"
+cat > "$TEST_ROOT/bin/lsof" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${LSOF_FIXTURE_OUTPUT:-}" ]]; then
+  printf '%s\n' "$LSOF_FIXTURE_OUTPUT"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$TEST_ROOT/bin/lsof"
 # shellcheck source=bin/_sgt-lib.sh
 source "$ROOT/bin/_sgt-lib.sh"
+# shellcheck source=bin/_sgt-process.sh
+source "$ROOT/bin/_sgt-process.sh"
 _sgt_process_identity() { return 1; }
 portable_state="$TEST_ROOT/portable-state"
 mkdir -p "$portable_state"
@@ -53,4 +64,37 @@ grep -Eq '^[0-9a-f]{32}\|[0-9]+:[0-9]+\|0$' \
   'Darwin:no-exact-process-birth' ]]
 portable_command="$(_sgt_worker_command worker "$portable_state" worktree agent)"
 [[ "$portable_command" == exec\ 198\<* ]]
+
+# lsof's open-file identity proves a closed portable generation has no holders,
+# so normal retirement and history compaction remain supported without treating
+# second-resolution ps output as an exact process identity.
+PATH="$TEST_ROOT/bin:$PATH" _sgt_worker_marker_holders "$portable_state" \
+  > "$TEST_ROOT/portable-holders"
+[[ ! -s "$TEST_ROOT/portable-holders" ]]
+PATH="$TEST_ROOT/bin:$PATH" _sgt_retire_worker_marker_holders "$portable_state"
+for generation_number in $(seq 1 64); do
+  printf '%032x|1:%s|0\n' "$generation_number" "$generation_number"
+done > "$portable_state/worker_process_markers"
+chmod 600 "$portable_state/worker_process_markers"
+PATH="$TEST_ROOT/bin:$PATH" _sgt_prepare_worker_process_marker "$portable_state"
+[[ "$(wc -l < "$portable_state/worker_process_markers")" -eq 1 ]]
+
+# A live portable holder is positive capability evidence. Without a race-free
+# process handle on this platform it is preserved and never signalled by PID.
+portable_identity="$(cut -d '|' -f2 "$portable_state/worker_process_marker")"
+portable_device="${portable_identity%%:*}"
+portable_inode="${portable_identity#*:}"
+printf -v portable_device_hex '0x%x' "$portable_device"
+export LSOF_FIXTURE_OUTPUT="p4242
+f198
+D$portable_device_hex
+i$portable_inode"
+holders="$(PATH="$TEST_ROOT/bin:$PATH" \
+  _sgt_worker_marker_holders "$portable_state")"
+[[ "$holders" == "4242|portable:$portable_identity" ]]
+if PATH="$TEST_ROOT/bin:$PATH" \
+  _sgt_retire_worker_marker_holders "$portable_state" >/dev/null 2>&1; then
+  printf 'portable retirement signalled or waived a live marker holder\n' >&2
+  exit 1
+fi
 printf 'sgt process adapter: ok\n'

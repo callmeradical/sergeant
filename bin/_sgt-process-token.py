@@ -5,6 +5,7 @@ import os
 import re
 import signal
 import stat
+import subprocess
 import sys
 import time
 
@@ -151,6 +152,74 @@ def enumerate_holders(markers):
     return owners
 
 
+def enumerate_portable_holders(markers):
+    """Return lsof-proven FD 198 holders without inventing process identity."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-w", "-nP", "-a", "-u", str(os.geteuid()),
+             "-d", "198", "-F", "pDfi"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        fail(f"cannot inspect portable worker marker holders with lsof: {exc}")
+    if result.stderr or result.returncode not in (0, 1):
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        fail(
+            "cannot inspect portable worker marker holders with lsof: "
+            f"{detail or result.returncode}"
+        )
+    try:
+        lines = result.stdout.decode("ascii", "strict").splitlines()
+    except UnicodeDecodeError:
+        fail("portable lsof marker evidence is not canonical ASCII")
+
+    owners = {}
+    pid = None
+    descriptor = None
+    device = None
+    inode = None
+
+    def finish_descriptor():
+        nonlocal descriptor, device, inode
+        if descriptor is None:
+            return
+        if pid is None or descriptor != "198" or device is None or inode is None:
+            fail("portable lsof marker evidence is incomplete")
+        identity = (device, inode)
+        if identity in markers:
+            owners.setdefault(pid, set()).add(identity)
+        descriptor = device = inode = None
+
+    for line in lines:
+        if not line or line[0] not in "pfDi":
+            fail("portable lsof marker evidence is malformed")
+        key, value = line[0], line[1:]
+        if key == "p":
+            finish_descriptor()
+            if not value.isascii() or not value.isdecimal() or int(value) <= 0:
+                fail("portable lsof marker PID is malformed")
+            pid = int(value)
+        elif key == "f":
+            finish_descriptor()
+            descriptor = value.rstrip("rwu-")
+        elif key == "D":
+            if descriptor is None or device is not None:
+                fail("portable lsof marker device is malformed")
+            try:
+                device = int(value, 0)
+            except ValueError:
+                fail("portable lsof marker device is malformed")
+        elif key == "i":
+            if descriptor is None or inode is not None or not value.isdecimal():
+                fail("portable lsof marker inode is malformed")
+            inode = int(value)
+    finish_descriptor()
+    if result.returncode == 1 and lines:
+        fail("portable lsof returned partial marker evidence")
+    return owners
+
+
 def load_expected(path):
     expected = {}
     for line in open(path, encoding="utf-8"):
@@ -265,6 +334,27 @@ def compact(path, markers):
     os.replace(temporary, path)
 
 
+def compact_portable(path, markers):
+    holders = enumerate_portable_holders(markers) if markers else {}
+    live = set().union(*holders.values()) if holders else set()
+    if len(live) > 64:
+        fail("too many live worker marker generations; retire workers before relaunch")
+    temporary = f"{path}.tmp.{os.getpid()}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(temporary, flags, 0o600)
+    try:
+        for identity, (generation, floor) in markers.items():
+            if identity in live:
+                os.write(
+                    fd,
+                    f"{generation}|{identity[0]}:{identity[1]}|{floor}\n".encode("ascii"),
+                )
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(temporary, path)
+
+
 def main():
     if len(sys.argv) == 6 and sys.argv[1] == "check":
         history, pid_text, start, identity = sys.argv[2:]
@@ -278,13 +368,24 @@ def main():
         if tuple(map(int, identity.split(":"))) not in markers:
             fail("current worker marker is absent from durable history")
         return
-    if len(sys.argv) == 3 and sys.argv[1] in ("holders", "compact"):
-        markers = load_markers(sys.argv[2], allow_empty=sys.argv[1] == "compact")
+    if len(sys.argv) == 3 and sys.argv[1] in (
+        "holders", "compact", "portable-holders", "portable-compact"
+    ):
+        markers = load_markers(
+            sys.argv[2], allow_empty=sys.argv[1] in ("compact", "portable-compact")
+        )
         if sys.argv[1] == "holders":
             for pid, start in sorted(enumerate_holders(markers).items() if markers else []):
                 print(f"{pid}|linux:{start}")
-        else:
+        elif sys.argv[1] == "compact":
             compact(sys.argv[2], markers)
+        elif sys.argv[1] == "portable-holders":
+            holders = enumerate_portable_holders(markers) if markers else {}
+            for pid, identities in sorted(holders.items()):
+                for device, inode in sorted(identities):
+                    print(f"{pid}|portable:{device}:{inode}")
+        else:
+            compact_portable(sys.argv[2], markers)
         return
     if len(sys.argv) != 4 or sys.argv[1] != "retire":
         fail("invalid worker marker retirement request")

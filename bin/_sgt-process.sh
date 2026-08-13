@@ -67,7 +67,8 @@ _sgt_fd_identity() {
 # Lists exact live marker holders. A nonzero result means holder absence could
 # not be proved (including unreadable same-UID post-launch fd tables).
 _sgt_worker_marker_holders() {
-  local repo_dir="$1" history="$1/worker_process_markers"
+  local repo_dir="$1" history="$1/worker_process_markers" platform_record=""
+  local current_marker history_digest
   if [[ ( -e "$repo_dir/worker_process_marker" || \
     -L "$repo_dir/worker_process_marker" ) && \
     ! -e "$history" && ! -L "$history" ]]; then
@@ -75,9 +76,13 @@ _sgt_worker_marker_holders() {
     return 1
   fi
   if [[ -s "$repo_dir/worker_process_marker_platform" ]]; then
-    printf 'exact worker marker inspection is unavailable on %s; fleet evidence preserved\n' \
-      "$(cat "$repo_dir/worker_process_marker_platform" 2>/dev/null || printf unknown)" >&2
-    return 1
+    platform_record="$(_sgt_read_owned_file \
+      "$repo_dir/worker_process_marker_platform" 2>/dev/null || true)"
+    [[ "$platform_record" == Darwin:no-exact-process-birth ]] || {
+      printf 'unsupported worker marker platform evidence: %s\n' \
+        "${platform_record:-unreadable}" >&2
+      return 1
+    }
   fi
   [[ ! -L "$history" ]] || {
     printf 'worker process marker history is a symlink: %s\n' "$history" >&2
@@ -89,8 +94,24 @@ _sgt_worker_marker_holders() {
   }
   [[ -f "$history" ]] || return 0
   command -v python3 >/dev/null 2>&1 || return 1
-  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_sgt-process-token.py" \
-    holders "$history"
+  if [[ -e "$repo_dir/worker_process_marker" || \
+    -L "$repo_dir/worker_process_marker" ]]; then
+    current_marker="$(_sgt_read_owned_file \
+      "$repo_dir/worker_process_marker" 2>/dev/null || true)"
+    history_digest="$(_sgt_marker_history_digest \
+      "$history" "$current_marker" 2>/dev/null || true)"
+    [[ -n "$current_marker" && "$history_digest" =~ ^[0-9a-f]{64}$ ]] || {
+      printf 'current worker process marker is absent from valid durable history\n' >&2
+      return 1
+    }
+  fi
+  if [[ -n "$platform_record" ]]; then
+    python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_sgt-process-token.py" \
+      portable-holders "$history"
+  else
+    python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_sgt-process-token.py" \
+      holders "$history"
+  fi
 }
 
 # _sgt_retire_worker_marker_holders <repo-state> [phase-file]
@@ -99,7 +120,8 @@ _sgt_worker_marker_holders() {
 # scan proves none remain. Successful retirement also compacts closed marker
 # generations so an inode reused by an unrelated file is never retained.
 _sgt_retire_worker_marker_holders() {
-  local repo_dir="$1" phase="${2:-/dev/null}" history
+  local repo_dir="$1" phase="${2:-/dev/null}" history holders platform_record=""
+  local current_marker history_digest
   history="$repo_dir/worker_process_markers"
   if [[ ( -e "$repo_dir/worker_process_marker" || \
     -L "$repo_dir/worker_process_marker" ) && \
@@ -108,9 +130,13 @@ _sgt_retire_worker_marker_holders() {
     return 1
   fi
   if [[ -s "$repo_dir/worker_process_marker_platform" ]]; then
-    printf 'exact worker marker retirement is unavailable on %s; fleet evidence preserved\n' \
-      "$(cat "$repo_dir/worker_process_marker_platform" 2>/dev/null || printf unknown)" >&2
-    return 1
+    platform_record="$(_sgt_read_owned_file \
+      "$repo_dir/worker_process_marker_platform" 2>/dev/null || true)"
+    [[ "$platform_record" == Darwin:no-exact-process-birth ]] || {
+      printf 'unsupported worker marker platform evidence: %s\n' \
+        "${platform_record:-unreadable}" >&2
+      return 1
+    }
   fi
   [[ ! -L "$history" ]] || {
     printf 'worker process marker history is a symlink: %s\n' "$history" >&2
@@ -121,8 +147,30 @@ _sgt_retire_worker_marker_holders() {
     return 1
   }
   [[ -f "$history" ]] || return 0
-  [[ -f "$phase" && ! -L "$phase" ]] || phase=/dev/null
   command -v python3 >/dev/null 2>&1 || return 1
+  if [[ -e "$repo_dir/worker_process_marker" || \
+    -L "$repo_dir/worker_process_marker" ]]; then
+    current_marker="$(_sgt_read_owned_file \
+      "$repo_dir/worker_process_marker" 2>/dev/null || true)"
+    history_digest="$(_sgt_marker_history_digest \
+      "$history" "$current_marker" 2>/dev/null || true)"
+    [[ -n "$current_marker" && "$history_digest" =~ ^[0-9a-f]{64}$ ]] || {
+      printf 'current worker process marker is absent from valid durable history\n' >&2
+      return 1
+    }
+  fi
+  if [[ -n "$platform_record" ]]; then
+    holders="$(python3 \
+      "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_sgt-process-token.py" \
+      portable-holders "$history")" || return 1
+    if [[ -n "$holders" ]]; then
+      printf 'portable worker marker holders remain live; no PID was signalled: %s\n' \
+        "$(tr '\n' ' ' <<< "$holders")" >&2
+      return 1
+    fi
+    return 0
+  fi
+  [[ -f "$phase" && ! -L "$phase" ]] || phase=/dev/null
   python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_sgt-process-token.py" \
     retire "$history" "$phase"
 }

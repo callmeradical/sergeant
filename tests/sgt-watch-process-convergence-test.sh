@@ -295,11 +295,48 @@ printf '%s\n' "$saved_pgid" > "$launched_state/worker_process_group"
 SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
   --sync task-shared-pgid >/dev/null
 
+# A naturally closed terminal generation needs no phase or signal. A validated
+# zero-holder scan is itself exact completed-retirement proof.
+launch_fixture task-natural-zero
+natural_zero_helper_pid="$launched_pid"
+tmux kill-pane -t "$launched_pane"
+kill -KILL "$natural_zero_helper_pid" 2>/dev/null || true
+for _ in $(seq 1 100); do
+  ! pid_is_running "$natural_zero_helper_pid" && break
+  sleep 0.01
+done
+SERGEANT_FLEET="$TEST_ROOT/fleet" "$ROOT_DIR/bin/sgt-watch" \
+  --sync task-natural-zero >/dev/null
+grep -Fqx 'outcome=marker_holders_retired' \
+  "$launched_state/worker_recycled"
+[[ ! -e "$launched_state/worker_recycle_phase" ]]
+
+# On Darwin the pane identity remains exact even though process birth is not.
+# Watch may retire that exact pane and use required lsof capability absence as
+# completion proof, but never signal a PID inferred from ps output.
+mkdir -p "$TEST_ROOT/portable-bin"
+cat > "$TEST_ROOT/portable-bin/lsof" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$TEST_ROOT/portable-bin/lsof"
+launch_fixture task-portable-terminal
+rm -f "$launched_state/worker_pid" "$launched_state/worker_process_group" \
+  "$launched_state/worker_process_start" "$launched_state/worker_session_id"
+printf 'Darwin:no-exact-process-birth\n' \
+  > "$launched_state/worker_process_marker_platform"
+chmod 600 "$launched_state/worker_process_marker_platform"
+PATH="$TEST_ROOT/portable-bin:$PATH" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  "$ROOT_DIR/bin/sgt-watch" --sync task-portable-terminal >/dev/null
+grep -Fqx 'outcome=marker_holders_retired' \
+  "$launched_state/worker_recycled"
+[[ ! -e "$launched_state/diagnostic" ]]
+
 # A terminal root may exit naturally before watch observes it. An escaped
 # marker-owning setsid descendant is still exact owned work and must retire even
 # though no root/session row remains from which to build a lineage phase.
 setsid_lines_before="$(wc -l < "$EXISTING_SETSID_PID_FILE" 2>/dev/null || printf 0)"
-launch_fixture task-natural-exit done 1
+launch_fixture task-natural-exit "done" 1
 for _ in $(seq 1 100); do
   setsid_lines_now="$(wc -l < "$EXISTING_SETSID_PID_FILE" 2>/dev/null || printf 0)"
   [[ "$setsid_lines_now" -gt "$setsid_lines_before" ]] && break

@@ -868,7 +868,12 @@ _sgt_prepare_worker_process_marker() {
   history="$repo_dir/worker_process_markers"
   [[ ! -L "$history" && ( ! -e "$history" || -f "$history" ) ]] || { rm -f "$path"; return 1; }
   if [[ -f "$history" ]]; then
-    if ! $portable_marker; then
+    if $portable_marker; then
+      python3 "$_SGT_LIB_DIR/_sgt-process-token.py" portable-compact "$history" || {
+        rm -f "$path"
+        return 1
+      }
+    else
       python3 "$_SGT_LIB_DIR/_sgt-process-token.py" compact "$history" || {
         rm -f "$path"
         return 1

@@ -350,7 +350,10 @@ _recycle_evidence_covers() {
 # Rebind the current evidence and append to the append-only history so no earlier
 # recycling is ever lost.
 _record_recycle_evidence() {
-  local repo_dir="$1" pane="$2" identity="$3" process_group="$4" stamp temporary process_marker history_digest
+  local repo_dir="$1" pane="$2" identity="$3" process_group="$4"
+  local outcome="${5:-process_group_stopped}" stamp temporary process_marker history_digest
+  [[ "$outcome" == process_group_stopped || \
+    "$outcome" == marker_holders_retired ]] || return 1
   process_marker="$(_sgt_read_owned_file \
     "$repo_dir/worker_process_marker" 2>/dev/null || true)"
   [[ -n "$process_marker" ]] || return 1
@@ -363,7 +366,7 @@ _record_recycle_evidence() {
     printf 'pane=%s\n' "$pane"
     printf 'identity=%s\n' "$identity"
     printf 'process_group=%s\n' "$process_group"
-    printf 'outcome=process_group_stopped\n'
+    printf 'outcome=%s\n' "$outcome"
     printf 'process_marker=%s\n' "$process_marker"
     printf 'marker_history_sha256=%s\n' "$history_digest"
     printf 'recycled_at=%s\n' "$stamp"
@@ -371,6 +374,43 @@ _record_recycle_evidence() {
   mv "$temporary" "$repo_dir/worker_recycled" || { rm -f "$temporary"; return 1; }
   printf '%s\t%s\t%s\t%s\n' "$stamp" "$pane" "$identity" "$process_group" \
     >> "$repo_dir/worker_recycled_log" 2>/dev/null || true
+}
+
+_record_zero_holder_recycle() {
+  local repo_dir="$1" pane="$2" identity="$3" process_group="$4" holders
+  holders="$(_sgt_worker_marker_holders "$repo_dir")" || return 1
+  [[ -z "$holders" ]] || return 1
+  _record_recycle_evidence "$repo_dir" "$pane" "$identity" \
+    "$process_group" marker_holders_retired
+}
+
+_recycle_portable_terminal_worker() {
+  local repo_dir="$1" pane="$2" identity="$3" process_group="$4"
+  local holders pane_id
+  holders="$(_sgt_worker_marker_holders "$repo_dir")" || return 1
+  if [[ -z "$holders" ]] && \
+    _record_recycle_evidence "$repo_dir" "$pane" "$identity" \
+      "$process_group" marker_holders_retired; then
+    return 0
+  fi
+  command -v tmux >/dev/null 2>&1 || return 1
+  pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
+  if [[ "$pane_id" == "$pane" ]]; then
+    _pane_is_supervisor "$pane" "$repo_dir" || return 1
+    tmux kill-pane -t "$pane" 2>/dev/null || return 1
+  fi
+  for _ in $(seq 1 50); do
+    holders="$(_sgt_worker_marker_holders "$repo_dir")" || return 1
+    if [[ -z "$holders" ]]; then
+      _record_recycle_evidence "$repo_dir" "$pane" "$identity" \
+        "$process_group" marker_holders_retired
+      return
+    fi
+    sleep 0.1
+  done
+  printf 'portable worker marker holders remain after exact pane retirement: %s\n' \
+    "$(tr '\n' ' ' <<< "$holders")" >&2
+  return 1
 }
 
 _load_or_record_recycle_phase() {
@@ -622,7 +662,13 @@ _recycle_terminal_worker() {
           "$pane" > "$repo_dir/diagnostic"
         ;;
       4)
-        printf 'exact worker retirement is unavailable on this platform; fleet evidence preserved: %s\n' \
+        if _recycle_portable_terminal_worker "$repo_dir" "$pane" "$identity" \
+          "$process_group"; then
+          rm -f "$repo_dir/worker_recycle_phase"
+          _clear_terminal_recycle_diagnostic "$repo_dir"
+          return 0
+        fi
+        printf 'portable worker marker retirement remains live or unverifiable; fleet evidence preserved: %s\n' \
           "$pane" > "$repo_dir/diagnostic"
         ;;
       *)
@@ -634,6 +680,19 @@ _recycle_terminal_worker() {
   fi
   # Already retired this exact pane and process group: nothing to do.
   _recycle_evidence_covers "$repo_dir" "$identity" "$process_group" && return 0
+  # If the exact capability scan is already empty, retirement completed
+  # naturally. Publish marker-bound evidence without constructing a phase or
+  # signalling a PID/process group that no longer has a live owner.
+  if command -v tmux >/dev/null 2>&1; then
+    pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
+    if [[ "$pane_id" != "$pane" ]] && \
+      _record_zero_holder_recycle "$repo_dir" "$pane" "$identity" \
+        "$process_group"; then
+      rm -f "$repo_dir/worker_recycle_phase"
+      _clear_terminal_recycle_diagnostic "$repo_dir"
+      return 0
+    fi
+  fi
   if ! members="$(_load_or_record_recycle_phase "$repo_dir" "$identity" "$process_group" "$session_id" "$process_marker")"; then
     if _wait_for_peer_recycle "$repo_dir" "$identity" "$process_group"; then
       _clear_terminal_recycle_diagnostic "$repo_dir"
