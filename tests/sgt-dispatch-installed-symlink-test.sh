@@ -191,24 +191,23 @@ git -C "$REPO" worktree remove --force "$success_worktree"
 git -C "$REPO" branch -D feat/installed-dispatch-success >/dev/null
 rm -rf "$FLEET/installed-dispatch-succe-000000"
 
-# Bootstrap-bound template bytes cannot be redirected by replacing the
+# The verified template identity cannot be redirected by replacing the
 # distribution path with an out-of-root symlink before rendering.
 mkdir -p "$TEST_ROOT/outside"
 printf 'OUTSIDE-TEMPLATE {{BRIEF}}\n' > "$TEST_ROOT/outside/swapped-worker-brief.md"
 cp "$ROOT_DIR/templates/worker-brief.md" "$DIST/templates/worker-brief.md"
-SWAP_TEMPLATE_ON_REPO_STATE="$DIST/templates/worker-brief.md" \
+set +e
+swap_output="$(SWAP_TEMPLATE_ON_REPO_STATE="$DIST/templates/worker-brief.md" \
   SWAP_TEMPLATE_TARGET="$TEST_ROOT/outside/swapped-worker-brief.md" \
-  run_dispatch 'Template swap is contained' >/dev/null
-swap_state="$FLEET/template-swap-is-contain-000000/app"
-swap_worktree="$(cat "$swap_state/worktree")"
-grep -Fq 'Template swap is contained' "$swap_worktree/.sergeant-brief.md"
-if grep -Fq 'OUTSIDE-TEMPLATE' "$swap_worktree/.sergeant-brief.md"; then
-  printf 'post-bootstrap template swap escaped the distribution\n' >&2
-  exit 1
-fi
-git -C "$REPO" worktree remove --force "$swap_worktree"
-git -C "$REPO" branch -D feat/template-swap-is-contained >/dev/null
-rm -rf "$FLEET/template-swap-is-contain-000000"
+  run_dispatch 'Template swap is contained' 2>&1)"
+swap_status=$?
+set -e
+[[ "$swap_status" -ne 0 && "$swap_output" == *'worker brief template'* ]]
+[[ "$swap_output" != *'OUTSIDE-TEMPLATE'* ]]
+[[ ! -e "$FLEET/template-swap-is-contain-000000" ]]
+[[ ! -e "$(dirname "$REPO")/app-sgt-template-swap-is-contain-000000" ]]
+[[ ! -e "$REPO/.git/refs/heads/feat/template-swap-is-contained" ]]
+rm -f "$DIST/templates/worker-brief.md"
 
 # A template that disappears after preflight but before rendering fails after
 # worktree/fleet creation.  The command must roll back everything it created,
@@ -362,6 +361,7 @@ rm -f "$FLEET/operator-sentinel"
 mkdir -p "$TEST_ROOT/outside"
 cp "$ROOT_DIR/templates/worker-brief.md" "$TEST_ROOT/outside/worker-brief.md"
 mkdir -p "$DIST/templates"
+rm -f "$DIST/templates/worker-brief.md"
 ln -s "$TEST_ROOT/outside/worker-brief.md" "$DIST/templates/worker-brief.md"
 set +e
 escape_output="$(run_dispatch 'Escaped template' 2>&1)"

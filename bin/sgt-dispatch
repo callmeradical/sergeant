@@ -119,6 +119,38 @@ if ! _SGT_LIB_FILE="$(_sgt_dispatch_bundled_file "$SCRIPT_DIR/_sgt-lib.sh" _sgt-
    ! _BRIEF_TEMPLATE="$(_sgt_dispatch_bundled_file "$_SGT_DISTRIBUTION_ROOT/templates/worker-brief.md" worker-brief.md)"; then
   exit 1
 fi
+# Bind the template's device/inode identity and bytes at the bootstrap
+# boundary.  The renderer reopens with O_NOFOLLOW and reads only through that
+# verified file descriptor, so a later path replacement cannot redirect it.
+if ! _BRIEF_TEMPLATE_ID="$(python3 - "$_BRIEF_TEMPLATE" <<'PY'
+import os
+import hashlib
+import stat
+import sys
+
+flags = os.O_RDONLY
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+fd = os.open(sys.argv[1], flags)
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError("worker brief template is not a regular file")
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        digest.update(chunk)
+    print(f"{info.st_dev}:{info.st_ino}:{digest.hexdigest()}")
+finally:
+    os.close(fd)
+PY
+)"; then
+  printf 'ERROR: could not bind verified worker brief template: %s\n' \
+    "$_BRIEF_TEMPLATE" >&2
+  exit 1
+fi
 # shellcheck source=/dev/null
 source "$_SGT_LIB_FILE"
 # shellcheck source=/dev/null
@@ -138,10 +170,37 @@ source "$_SGT_REVIEW_AXES_FILE"
 # source for brief format changes — edit it instead of this script.
 _sgt_render_brief() {
   local output="$1"
-  [[ -f "$_BRIEF_TEMPLATE" ]] || \
-    _die "worker brief template not found: $_BRIEF_TEMPLATE"
   local content
-  content="$(cat "$_BRIEF_TEMPLATE")"
+  if ! content="$(python3 - "$_BRIEF_TEMPLATE" "$_BRIEF_TEMPLATE_ID" <<'PY'
+import os
+import hashlib
+import stat
+import sys
+
+flags = os.O_RDONLY
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+fd = os.open(sys.argv[1], flags)
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError("worker brief template is not a regular file")
+    chunks = []
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    digest = hashlib.sha256(b"".join(chunks)).hexdigest()
+    if f"{info.st_dev}:{info.st_ino}:{digest}" != sys.argv[2]:
+        raise OSError("worker brief template identity or bytes changed")
+finally:
+    os.close(fd)
+sys.stdout.buffer.write(b"".join(chunks))
+PY
+)"; then
+    _die "worker brief template unavailable or changed: $_BRIEF_TEMPLATE"
+  fi
   # Substitution order: longer tokens first to avoid partial matches.
   content="${content//\{\{TASK_ID\}\}/$TASK_ID}"
   content="${content//\{\{PROJECT\}\}/$PROJECT}"
@@ -527,11 +586,49 @@ _restore_dispatch_worktree() {
 }
 
 _rollback_dispatch_generated_td_tasks() {
+  local rollback_state
   $DISPATCH_GENERATED_TD_COMMITTED || return 0
-  if ! _sgt_td_rollback_state "$TD_CREATE_STATE_FILE"; then
-    _dispatch_rollback_error "$SGT_TD_ROLLBACK_ERRORS"
+  rollback_state="$(mktemp)" || {
+    _dispatch_rollback_error "could not allocate generated td rollback state"
+    return 1
+  }
+  if ! python3 - "$TD_CREATE_STATE_FILE" "$TASK_DIR" "$rollback_state" <<'PY'
+import json
+import os
+import sys
+
+source, task_dir, destination = sys.argv[1:]
+with open(source, encoding="utf-8") as source_handle, \
+     open(destination, "w", encoding="utf-8") as destination_handle:
+    for line in source_handle:
+        if not line.strip():
+            continue
+        item = json.loads(line)
+        repo_state = os.path.join(task_dir, item["repo"])
+        pane_path = os.path.join(repo_state, "pane")
+        task_path = os.path.join(repo_state, "td_task")
+        if os.path.isfile(pane_path) and os.path.getsize(pane_path) > 0:
+            try:
+                with open(task_path, encoding="utf-8") as task_handle:
+                    if task_handle.read().strip() == item["task_id"]:
+                        continue
+            except OSError:
+                pass
+        destination_handle.write(json.dumps(item) + "\n")
+    destination_handle.flush()
+    os.fsync(destination_handle.fileno())
+PY
+  then
+    _dispatch_rollback_error "could not classify generated td task ownership"
+    rm -f "$rollback_state"
     return 1
   fi
+  if ! _sgt_td_rollback_state "$rollback_state"; then
+    _dispatch_rollback_error "$SGT_TD_ROLLBACK_ERRORS"
+    rm -f "$rollback_state"
+    return 1
+  fi
+  rm -f "$rollback_state"
 }
 
 _rollback_dispatch_mutations() {
@@ -618,6 +715,15 @@ _rollback_dispatch_mutations() {
         ;;
     esac
     $entry_failed && owned_cleanup_failed=true
+    if ! $entry_failed && [[ ! -s "$repo_state/pane" ]]; then
+      case "$repo_state" in
+        "$TASK_DIR"/*) rm -rf "$repo_state" ;;
+        *)
+          owned_cleanup_failed=true
+          _dispatch_rollback_error "refused unexpected repository fleet path: $repo_state"
+          ;;
+      esac
+    fi
   done < "$DISPATCH_MUTATIONS_FILE"
 
   _rollback_dispatch_generated_td_tasks || true
