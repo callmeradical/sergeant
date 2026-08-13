@@ -71,6 +71,11 @@ if [[ ! -d "$REPO_DIR" ]]; then
 fi
 _sgt_worker_process_marker_preflight "$REPO_DIR" || \
   _die "Resume refused: worker process marker evidence is torn"
+prelock_worker_marker="$(_sgt_read_owned_file \
+  "$REPO_DIR/worker_process_marker" 2>/dev/null || true)"
+prelock_resume_count="$(cat "$REPO_DIR/resume_count" 2>/dev/null || true)"
+prelock_pane_identity="$(_sgt_read_owned_file \
+  "$REPO_DIR/pane_identity" 2>/dev/null || true)"
 
 fleet_status="$(cat "$REPO_DIR/status"           2>/dev/null || true)"
 branch="$(cat "$REPO_DIR/branch"                 2>/dev/null || true)"
@@ -249,6 +254,18 @@ _cleanup_resume_lock() {
 trap '_cleanup_resume_lock' EXIT
 _sgt_worker_process_marker_preflight "$REPO_DIR" || \
   _die "Resume refused: worker process marker evidence changed while waiting for ownership"
+locked_worker_marker="$(_sgt_read_owned_file \
+  "$REPO_DIR/worker_process_marker" 2>/dev/null || true)"
+locked_resume_count="$(cat "$REPO_DIR/resume_count" 2>/dev/null || true)"
+locked_pane_identity="$(_sgt_read_owned_file \
+  "$REPO_DIR/pane_identity" 2>/dev/null || true)"
+if [[ "$locked_worker_marker" != "$prelock_worker_marker" || \
+  "$locked_resume_count" != "$prelock_resume_count" || \
+  "$locked_pane_identity" != "$prelock_pane_identity" ]]; then
+  printf 'A peer launch already advanced the durable worker generation for %s/%s.\n' \
+    "$TASK_ID" "$REPO"
+  exit 0
+fi
 pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
 if [[ -n "$pane" ]] && _sgt_pane_identity_matches "$pane" "$REPO_DIR" 2>/dev/null; then
   printf 'Worker pane %s became active while resume ownership was pending for %s/%s.\n' \

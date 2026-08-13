@@ -157,12 +157,14 @@ mkdir -p "$torn_dispatch_state"
 printf 'prior-current-marker\n' > "$torn_dispatch_state/worker_process_marker"
 chmod 600 "$torn_dispatch_state/worker_process_marker"
 cp "$torn_dispatch_state/worker_process_marker" "$TEST_ROOT/torn-dispatch.before"
+cp -a "$TEST_ROOT/fleet" "$TEST_ROOT/torn-dispatch-fleet.before"
 set +e
 torn_dispatch_output="$(FIXED_TASK_RANDOM=1 PATH="$TEST_ROOT/fake-bin:$PATH" \
   TD_LOG="$TEST_ROOT/torn-dispatch-td.log" \
   TMUX_LOG="$TEST_ROOT/torn-dispatch-tmux.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-dispatch" test 'Torn dispatch' --repos app 2>&1)"
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Torn dispatch' --repos app \
+    --managed-coordinator-pane 2>&1)"
 torn_dispatch_status=$?
 set -e
 [[ "$torn_dispatch_status" -ne 0 && \
@@ -172,6 +174,7 @@ cmp "$TEST_ROOT/torn-dispatch.before" "$torn_dispatch_state/worker_process_marke
   ! -e "$torn_dispatch_state/worktree" && \
   ! -e "$TEST_ROOT/torn-dispatch-tmux.log" ]]
 ! grep -q '^create ' "$TEST_ROOT/torn-dispatch-td.log" 2>/dev/null
+diff -r "$TEST_ROOT/torn-dispatch-fleet.before" "$TEST_ROOT/fleet"
 [[ "$(find "$torn_dispatch_state" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" == 1 ]]
 rm -rf "$TEST_ROOT/fleet/torn-dispatch-000000"
 
@@ -179,13 +182,15 @@ validation_torn_state="$TEST_ROOT/fleet/torn-dispatch-000000/app/validation-proc
 mkdir -p "$validation_torn_state"
 printf 'prior-validation-marker\n' > "$validation_torn_state/worker_process_marker"
 chmod 600 "$validation_torn_state/worker_process_marker"
+cp -a "$TEST_ROOT/fleet" "$TEST_ROOT/validation-torn-fleet.before"
 set +e
 validation_torn_output="$(FIXED_TASK_RANDOM=1 PATH="$TEST_ROOT/fake-bin:$PATH" \
   TD_LOG="$TEST_ROOT/validation-torn-dispatch-td.log" \
   TMUX_LOG="$TEST_ROOT/validation-torn-dispatch-tmux.log" \
   SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
   SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-dispatch" test 'Torn dispatch' --repos app 2>&1)"
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Torn dispatch' --repos app \
+    --managed-coordinator-pane 2>&1)"
 validation_torn_status=$?
 set -e
 [[ "$validation_torn_status" -ne 0 && \
@@ -193,6 +198,7 @@ set -e
 [[ "$(cat "$validation_torn_state/worker_process_marker")" == prior-validation-marker ]]
 ! grep -q '^create ' "$TEST_ROOT/validation-torn-dispatch-td.log" 2>/dev/null
 [[ ! -e "$TEST_ROOT/validation-torn-dispatch-tmux.log" ]]
+diff -r "$TEST_ROOT/validation-torn-fleet.before" "$TEST_ROOT/fleet"
 rm -rf "$TEST_ROOT/fleet/torn-dispatch-000000"
 
 interrupted_state="$TEST_ROOT/fleet/interrupted-task/app"

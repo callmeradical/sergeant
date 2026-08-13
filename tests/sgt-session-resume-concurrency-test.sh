@@ -44,10 +44,14 @@ case "$1" in
     ;;
   display-message)
     if [[ "$*" == *'-t %88'* ]]; then
+      [[ "${OLD_PANE_GONE:-}" != 1 ]] || exit 1
       printf '0|%%88|8888|123455|old-worker\n'
       exit 0
     fi
     [[ "$*" == *'-t %99'* ]] || exit 1
+    if [[ -n "${FAST_EXIT_FILE:-}" && -e "$FAST_EXIT_FILE" ]]; then
+      exit 1
+    fi
     identity="0|%99|9999|123456|$(cat "$PANE_COMMAND")"
     if [[ -s "$TEST_REPO_STATE/notification_id" && \
       -s "$TEST_REPO_STATE/notification_target" ]]; then
@@ -59,6 +63,7 @@ case "$1" in
       printf '%s\n' "$token" > "$target/delivered"
     fi
     printf '%s\n' "$identity"
+    [[ -z "${FAST_EXIT_FILE:-}" ]] || : > "$FAST_EXIT_FILE"
     ;;
   kill-pane|send-keys) exit 0 ;;
   *) exit 1 ;;
@@ -99,4 +104,35 @@ wait "$second"
 [[ "$(wc -l < "$TEST_ROOT/launch.log")" -eq 1 ]]
 _sgt_history_lines="$(wc -l < "$state/worker_process_markers")"
 [[ "$_sgt_history_lines" -ge 1 && "$_sgt_history_lines" -le 64 ]]
+
+# A winner may publish its generation and then disappear before the loser gets
+# the transaction lock. The durable generation snapshot, not pane liveness,
+# suppresses the loser's second launch.
+: > "$TEST_ROOT/launch.log"
+rm -f "$TEST_ROOT/fast-exit"
+printf '%%88\n' > "$state/pane"
+printf '0|%%88|8888|123455|old-worker\n' > "$state/pane_identity"
+chmod 600 "$state/pane_identity"
+printf 'orphaned\n' > "$state/status"
+run_resume_fast_exit() {
+  local runner="$1" status
+  set +e
+  PATH="$TEST_ROOT/bin:$PATH" LAUNCH_LOG="$TEST_ROOT/launch.log" \
+    PANE_COMMAND="$TEST_ROOT/pane-command" TEST_REPO_STATE="$state" \
+    FAST_EXIT_FILE="$TEST_ROOT/fast-exit" OLD_PANE_GONE=1 \
+    SGT_NOTIFICATION_ACK_TIMEOUT=1 \
+    "$ROOT_DIR/bin/sgt-session-resume" task-race app --force \
+      >"$TEST_ROOT/fast-$runner.out" 2>&1
+  status=$?
+  printf '%s\n' "$status" > "$TEST_ROOT/fast-$runner.status"
+}
+run_resume_fast_exit one & first=$!
+run_resume_fast_exit two & second=$!
+wait "$first"
+wait "$second"
+[[ "$(wc -l < "$TEST_ROOT/launch.log")" -eq 1 ]]
+[[ "$(cat "$TEST_ROOT/fast-one.status")" == 0 || \
+  "$(cat "$TEST_ROOT/fast-two.status")" == 0 ]]
+grep -hFq 'peer launch already advanced the durable worker generation' \
+  "$TEST_ROOT/fast-one.out" "$TEST_ROOT/fast-two.out"
 printf 'sgt-session-resume concurrent ownership: ok\n'
