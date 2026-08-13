@@ -609,8 +609,10 @@ consumed_queued_id="${consumed_queued_dir##*/}"
 consumed_target_nonce="$(cat "$repo_state/notification_target" 2>/dev/null || true)"
 [[ "$consumed_target_nonce" =~ ^[a-f0-9]{32}$ ]]
 consumed_target_dir="$repo_state/notifications/$consumed_queued_id/targets/$consumed_target_nonce"
-[[ "$(cat "$consumed_target_dir/pane_identity")" == \
-  '0|%100|9999|654321|sgt-interactive-worker:'"$repo_state" ]]
+consumed_successor_identity="$(cat "$repo_state/pane_identity")"
+[[ "$consumed_successor_identity" == \
+  '0|%100|9999|654321|'*'/sgt-replacement-launch '* ]]
+[[ "$(cat "$consumed_target_dir/pane_identity")" == "$consumed_successor_identity" ]]
 [[ -f "$consumed_target_dir/accepted" && -f "$consumed_target_dir/delivered" ]]
 grep -Fq 'queued response delivered to pane %100' "$TEST_ROOT/consumed-second.out"
 [[ "$(grep -c '^new-window ' "$TEST_ROOT/consumed-race.log")" -eq 1 ]]

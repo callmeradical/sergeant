@@ -85,6 +85,8 @@ _sgt_drain_lock_acquire_fd "$_SGT_RECOVER_LAUNCH_FD" worker-launch \
   "$REPO_DIR/worker-launch.lock" || _die "Could not acquire exact worker-launch ownership"
 _sgt_worker_launch_transaction_begin "$REPO_DIR" "$_SGT_RECOVER_LAUNCH_FD" || \
   _die "Could not snapshot worker generation before recovery"
+recover_worker_launch_before=""
+eval "recover_worker_launch_before=\${_SGT_WORKER_LAUNCH_BEFORE_${_SGT_RECOVER_LAUNCH_FD}:-}"
 if [[ "$SGT_DRAIN_LOCK_CONTENDED_LIVE" == true ]] && \
   _sgt_worker_launch_observed_completion_matches "$REPO_DIR"; then
   printf 'sgt-recover: verified peer worker-launch transaction completed for %s/%s.\n' \
@@ -297,6 +299,7 @@ old_pane="$(cat "$REPO_DIR/pane" 2>/dev/null || true)"
 old_pane_live=false
 journaled_replacement_pending=false
 relaunch_transaction="$REPO_DIR/response_relaunch_transaction"
+relaunch_worker_before_file="$REPO_DIR/response_relaunch_worker_before"
 if [[ -e "$relaunch_transaction" ]]; then
   _sgt_transfer_journal_read "$relaunch_transaction" || \
     _recover_die "Stall recovery refused: relaunch journal is malformed"
@@ -394,14 +397,25 @@ _sgt_publish_worker_notification "$REPO_DIR" "$worktree" \
 # original stalled pane remains alive and the worker is escalated to
 # needs_input for investigation.
 
-_sgt_prepare_worker_process_marker "$REPO_DIR" || \
-  _recover_die "Stall recovery failed: worker process marker could not be prepared"
 worker_role="worker:$(basename "$agent")"
-worker_command="$(_sgt_replacement_worker_command "$replacement_spawn_token" "$worker_role" \
-  "$(_sgt_worker_command "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")")" || \
-  _recover_die "Stall recovery failed: could not construct canonical replacement worker command"
-
 replacement_window_name="${window_name}-resume-${delivery_notification_id:0:12}"
+
+_worker_marker_capability_exists() {
+  local marker marker_path
+  marker="$(_sgt_read_owned_file "$REPO_DIR/worker_process_marker" 2>/dev/null || true)"
+  marker_path="${marker##*|}"
+  [[ -n "$marker_path" && -f "$marker_path" && ! -L "$marker_path" ]]
+}
+
+_prepare_recovery_worker_command() {
+  _sgt_prepare_worker_process_marker "$REPO_DIR" || return 1
+  worker_command="$(_sgt_replacement_worker_command "$replacement_spawn_token" "$worker_role" \
+    "$(_sgt_worker_command "$SCRIPT_DIR/sgt-interactive-worker" "$REPO_DIR" "$worktree" "$agent")")" || \
+    return 1
+  _sgt_replace_owned_file "$relaunch_worker_before_file" \
+    "$recover_worker_launch_before"
+}
+
 _write_recovery_transaction() {
   local phase="$1" candidate_pane="${2:-}" candidate_identity="${3:-}"
   _sgt_transfer_journal_write "$relaunch_transaction" "" \
@@ -412,6 +426,12 @@ _write_recovery_transaction() {
 if [[ -e "$relaunch_transaction" ]]; then
   _sgt_transfer_journal_read "$relaunch_transaction" || \
     _recover_die "Stall recovery refused: relaunch journal is malformed"
+  worker_command="$_SGT_TRANSFER_WORKER_COMMAND"
+  relaunch_worker_before="$(_sgt_read_owned_file \
+    "$relaunch_worker_before_file" 2>/dev/null || true)"
+  [[ "$relaunch_worker_before" == absent || \
+     "$relaunch_worker_before" =~ ^[0-9a-f]{64}$ ]] || \
+    _recover_die "Stall recovery refused: relaunch journal is missing its worker-generation snapshot"
   [[ -z "$_SGT_TRANSFER_RESPONSE_ID" &&
      "$_SGT_TRANSFER_NOTIFICATION_ID" == "$delivery_notification_id" &&
      "$_SGT_TRANSFER_SPAWN_TOKEN" == "$replacement_spawn_token" &&
@@ -422,6 +442,9 @@ if [[ -e "$relaunch_transaction" ]]; then
      "$_SGT_TRANSFER_WORKER_COMMAND" == "$worker_command" ]] || \
     _recover_die "Stall recovery refused: relaunch journal conflicts with this transfer"
 else
+  _prepare_recovery_worker_command || \
+    _recover_die "Stall recovery failed: could not prepare canonical replacement worker command"
+  relaunch_worker_before="$recover_worker_launch_before"
   _write_recovery_transaction bound || \
     _recover_die "Stall recovery failed: could not publish relaunch intent"
 fi
@@ -449,6 +472,14 @@ set -e
 [[ "$discovery_status" -ne 4 ]] || \
   _recover_die "Stall recovery refused: replacement window is owned by a foreign pane"
 if [[ -z "$new_pane" ]]; then
+  if ! _worker_marker_capability_exists; then
+    rm -f "$relaunch_transaction" "$relaunch_worker_before_file"
+    _prepare_recovery_worker_command || \
+      _recover_die "Stall recovery failed: could not renew canonical replacement worker command"
+    relaunch_worker_before="$recover_worker_launch_before"
+    _write_recovery_transaction bound || \
+      _recover_die "Stall recovery failed: could not republish renewed relaunch intent"
+  fi
   _write_recovery_transaction spawning || \
     _recover_die "Stall recovery failed: could not publish relaunch spawning state"
   if ! new_pane="$(tmux new-window -P -F '#{pane_id}' -t "$tmux_session:" \
@@ -502,6 +533,7 @@ if pane_identity="$(_sgt_pane_identity "$new_pane")" && \
   _sgt_notification_target_create "$REPO_DIR" "$delivery_notification_id" \
       "$pane_identity" >/dev/null || \
     _abort_replacement "notification target race detected during stall recovery relaunch"
+  eval "_SGT_WORKER_LAUNCH_BEFORE_${_SGT_RECOVER_LAUNCH_FD}=\$relaunch_worker_before"
   _sgt_worker_launch_completion_publish "$REPO_DIR" "$_SGT_RECOVER_LAUNCH_FD" || \
     _abort_replacement "could not publish completed worker-launch transaction"
 else
@@ -526,6 +558,7 @@ if ! _sgt_wait_worker_notification "$new_pane" "$REPO_DIR" \
 fi
 _write_recovery_transaction acked "$new_pane" "$pane_auth" || \
   _recover_die "Stall recovery failed: could not publish acknowledged ownership transaction"
+rm -f "$relaunch_worker_before_file"
 
 # ── 16. Clear stall evidence now that recovery succeeded ────────────────────
 # Preserve evidence through all failure paths above so _escalate can write an
