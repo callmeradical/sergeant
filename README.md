@@ -403,6 +403,10 @@ installation and verification.
 - [`dagr`](https://github.com/callmeradical/dagr) — SQLite DAG execution engine (optional; needed only for `sgt-dag-run` and DAG-directed workflows; all other Sergeant commands work without it)
 - A supported agent harness: OpenCode or Claude Code
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, build, test, and release instructions.
+
 ## License
 
 MIT
