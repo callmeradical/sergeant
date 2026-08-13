@@ -379,6 +379,23 @@ trap _cleanup_dispatch_tmps EXIT
 _sgt_intent_prepare "$INTENT_FILE" "$BRIEF" "$INTENT_TMP"
 INTENT_REVISION="$(_sgt_intent_revision "$INTENT_TMP")"
 
+# Derive the durable fleet identity before any external or local mutation. A
+# deterministic collision can expose preserved process-capability evidence from
+# an earlier task; both worker and validation namespaces must be proven complete
+# before sync, td creation, callbacks, worktrees, or fleet publication begins.
+_rand6() { dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | cut -c1-6; }
+slug="$(echo "$BRIEF" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//' | cut -c1-24 | sed 's/-$//')"
+TASK_ID="${slug}-$(_rand6)"
+TASK_DIR="$FLEET_DIR/$TASK_ID"
+if ! $DRY_RUN; then
+  for rname in "${TARGET_REPOS[@]}"; do
+    _sgt_worker_process_marker_preflight "$TASK_DIR/$rname" || \
+      _die "Dispatch refused: worker process marker evidence is torn"
+    _sgt_worker_process_marker_preflight "$TASK_DIR/$rname/validation-process" || \
+      _die "Dispatch refused: validation process marker evidence is torn"
+  done
+fi
+
 _rollback_generated_td_tasks() {
   local failure_message="$1"
   local cleanup_failed=false
@@ -593,13 +610,6 @@ if ! $DRY_RUN; then
   _sgt_drain_lock_release_fd "$_SGT_DRAIN_ADMISSION_FD"
 fi
 
-# ── Generate task ID ──────────────────────────────────────────────────────────
-
-_rand6() { dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | cut -c1-6; }
-
-slug="$(echo "$BRIEF" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//' | cut -c1-24 | sed 's/-$//')"
-TASK_ID="${slug}-$(_rand6)"
-
 # ── Determine branch name ─────────────────────────────────────────────────────
 
 if [[ -n "$BRANCH_ARG" ]]; then
@@ -614,15 +624,6 @@ else
   else
     BRANCH="feat/$bslug"
   fi
-fi
-
-TASK_DIR="$FLEET_DIR/$TASK_ID"
-
-if ! $DRY_RUN; then
-  for rname in "${TARGET_REPOS[@]}"; do
-    _sgt_worker_process_marker_preflight "$TASK_DIR/$rname" || \
-      _die "Dispatch refused: worker process marker evidence is torn"
-  done
 fi
 
 echo ""
