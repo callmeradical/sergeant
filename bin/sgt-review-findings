@@ -3,32 +3,117 @@
 
 set -euo pipefail
 
-_sgt_rf_real_dir() {
-  local src="$1" target dir _link _i=0
-  target="$src"
-  while [[ -L "$target" && $_i -lt 20 ]]; do
-    _link="$(readlink "$target" 2>/dev/null || true)"
-    [[ -n "$_link" ]] || break
-    if [[ "$_link" == /* ]]; then target="$_link"; else target="$(dirname "$target")/$_link"; fi
-    _i=$(( _i + 1 ))
+_sgt_rf_canonical_file() {
+  local target="$1" parent physical link seen=""
+  while [[ -L "$target" ]]; do
+    parent="$(dirname "$target")"
+    physical="$(cd -P "$parent" 2>/dev/null && pwd)" || return 1
+    target="$physical/$(basename "$target")"
+    case "$seen" in
+      *$'\n'"$target"$'\n'*) return 1 ;;
+    esac
+    seen="$seen"$'\n'"$target"$'\n'
+    link="$(readlink "$target" 2>/dev/null)" || return 1
+    [[ -n "$link" ]] || return 1
+    if [[ "$link" == /* ]]; then target="$link"; else target="$physical/$link"; fi
   done
-  dir="$(dirname "$target")"
-  (cd "$dir" && pwd -P)
+  parent="$(dirname "$target")"
+  physical="$(cd -P "$parent" 2>/dev/null && pwd)" || return 1
+  target="$physical/$(basename "$target")"
+  [[ -f "$target" ]] || return 1
+  printf '%s\n' "$target"
 }
-SCRIPT_DIR="$(_sgt_rf_real_dir "${BASH_SOURCE[0]}")"
-unset -f _sgt_rf_real_dir
+SCRIPT_FILE="$(_sgt_rf_canonical_file "${BASH_SOURCE[0]}")" || {
+  printf 'ERROR: could not resolve canonical sgt-review-findings executable\n' >&2
+  exit 1
+}
+INVOKED_SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || {
+  printf 'ERROR: could not resolve installed sgt-review-findings directory\n' >&2
+  exit 1
+}
+SCRIPT_DIR="$(dirname "$SCRIPT_FILE")"
+unset -f _sgt_rf_canonical_file
 # shellcheck source=bin/_sgt-lib.sh
 source "$SCRIPT_DIR/_sgt-lib.sh"
 # shellcheck source=bin/_sgt-response-lock.sh
 source "$SCRIPT_DIR/_sgt-response-lock.sh"
 # shellcheck source=bin/_sgt-review-axes.sh
 source "$SCRIPT_DIR/_sgt-review-axes.sh"
+SGT_REVIEW_NOTIFY="$SCRIPT_DIR/sgt-notify"
+if [[ -x "$INVOKED_SCRIPT_DIR/sgt-notify" ]]; then
+  SGT_REVIEW_NOTIFY="$INVOKED_SCRIPT_DIR/sgt-notify"
+fi
+
+_sgt_rf_executable_identity() {
+  python3 - "$SCRIPT_FILE" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+flags = os.O_RDONLY
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+fd = os.open(sys.argv[1], flags)
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError("review router is not a regular file")
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        digest.update(chunk)
+    print(f"{info.st_dev}:{info.st_ino}:{digest.hexdigest()}")
+finally:
+    os.close(fd)
+PY
+}
+
+_sgt_rf_capabilities() {
+  SGT_REVIEW_AXES="$(_sgt_review_axes)" \
+  SGT_REVIEW_SEVERITIES="$SGT_REVIEW_SEVERITIES" \
+  SGT_REVIEW_SEVERITY_ALIASES="$SGT_REVIEW_SEVERITY_ALIASES" \
+  SGT_REVIEW_ROUTER_ARGV="$SGT_REVIEW_ROUTER_ARGV" \
+  SGT_REVIEW_ROUTER_CAPABILITIES_SCHEMA="$SGT_REVIEW_ROUTER_CAPABILITIES_SCHEMA" \
+  SGT_REVIEW_ROUTER_CONTRACT_REVISION="$SGT_REVIEW_ROUTER_CONTRACT_REVISION" \
+  SGT_REVIEW_ARTIFACT_SCHEMA_REVISION="$SGT_REVIEW_ARTIFACT_SCHEMA_REVISION" \
+    python3 - <<'PY'
+import json
+import os
+
+aliases = dict(pair.split("=", 1) for pair in os.environ["SGT_REVIEW_SEVERITY_ALIASES"].split())
+print(json.dumps({
+    "schema": os.environ["SGT_REVIEW_ROUTER_CAPABILITIES_SCHEMA"],
+    "contract_revision": os.environ["SGT_REVIEW_ROUTER_CONTRACT_REVISION"],
+    "artifact_schema_revision": os.environ["SGT_REVIEW_ARTIFACT_SCHEMA_REVISION"],
+    "axes": os.environ["SGT_REVIEW_AXES"].split(),
+    "canonical_severities": os.environ["SGT_REVIEW_SEVERITIES"].split(),
+    "severity_aliases": aliases,
+    "argv": os.environ["SGT_REVIEW_ROUTER_ARGV"].split(),
+}, separators=(",", ":")))
+PY
+}
+
+if [[ "${1:-}" == "--capabilities" ]]; then
+  [[ $# -eq 1 ]] || {
+    printf 'ERROR: --capabilities does not accept additional arguments\n' >&2
+    exit 1
+  }
+  _sgt_rf_capabilities
+  exit 0
+fi
 
 usage() {
   cat >&2 <<EOF
 Usage: sgt-review-findings <project> <repo> --input <json> --axis <axis> --source <source>
   --branch <branch> --head-sha <sha> --parent-task <id> --task-id <fleet-id>
-  --worktree <path>
+  --worktree <path> [--require-contract-revision <revision>
+  --require-executable-identity <dev:inode:sha256>]
+
+Print the installed machine-readable compatibility contract:
+  sgt-review-findings --capabilities
 
 Retry a route that failed after parsing, from the sanitized artifact it retained:
   sgt-review-findings <project> <repo> --retry <artifact-dir> --worktree <path>
@@ -48,6 +133,8 @@ EOF
 PROJECT="$1"; shift
 REPO="$1"; shift
 INPUT="" AXIS="" SOURCE="" BRANCH="" HEAD_SHA="" PARENT_TASK="" TASK_ID="" WORKTREE="" RETRY=""
+REQUIRED_CONTRACT_REVISION="" REQUIRED_EXECUTABLE_IDENTITY=""
+REVIEW_ROUTER_IDENTITY_MISMATCH=""
 
 while [[ $# -gt 0 ]]; do
   [[ $# -ge 2 ]] || usage
@@ -61,9 +148,22 @@ while [[ $# -gt 0 ]]; do
     --task-id) TASK_ID="$2"; shift 2 ;;
     --worktree) WORKTREE="$2"; shift 2 ;;
     --retry) RETRY="$2"; shift 2 ;;
+    --require-contract-revision) REQUIRED_CONTRACT_REVISION="$2"; shift 2 ;;
+    --require-executable-identity) REQUIRED_EXECUTABLE_IDENTITY="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
+
+if [[ -n "$REQUIRED_CONTRACT_REVISION$REQUIRED_EXECUTABLE_IDENTITY" ]]; then
+  [[ -n "$REQUIRED_CONTRACT_REVISION" && -n "$REQUIRED_EXECUTABLE_IDENTITY" ]] || usage
+  [[ "$REQUIRED_CONTRACT_REVISION" == "$SGT_REVIEW_ROUTER_CONTRACT_REVISION" ]] || \
+    _die "review-router contract revision mismatch: required $REQUIRED_CONTRACT_REVISION, installed $SGT_REVIEW_ROUTER_CONTRACT_REVISION"
+  actual_executable_identity="$(_sgt_rf_executable_identity)" || \
+    _die "could not verify review-router executable identity"
+  if [[ "$actual_executable_identity" != "$REQUIRED_EXECUTABLE_IDENTITY" ]]; then
+    REVIEW_ROUTER_IDENTITY_MISMATCH="review-router executable identity mismatch: required $REQUIRED_EXECUTABLE_IDENTITY, installed $actual_executable_identity"
+  fi
+fi
 
 WORKTREE="${WORKTREE:-$PWD}"
 [[ -d "$WORKTREE" ]] || _die "Worktree unavailable: $WORKTREE"
@@ -114,7 +214,7 @@ _publish_blocked() {
   mv "$WORKTREE/.sergeant-message.tmp" "$WORKTREE/.sergeant-message"
   notify_status=0
   if _valid_fleet_task_id "$TASK_ID"; then
-    "$SCRIPT_DIR/sgt-notify" "$TASK_ID" "blocked [$REPO]: $notice" >/dev/null 2>&1 || notify_status=$?
+    "$SGT_REVIEW_NOTIFY" "$TASK_ID" "blocked [$REPO]: $notice" >/dev/null 2>&1 || notify_status=$?
   fi
   mv "$WORKTREE/.sergeant-status.tmp" "$WORKTREE/.sergeant-status"
   _sgt_response_lock_release || return 1
@@ -504,6 +604,9 @@ done < "$parsed"
 # would block the next route for this axis on a pending retry that carries nothing.
 if [[ -z "$RETRY" && ${#fields[@]} -gt 0 ]]; then
   _retain_parsed_findings || _routing_failure "could not retain the parsed review findings"
+fi
+if [[ -n "$REVIEW_ROUTER_IDENTITY_MISMATCH" ]]; then
+  _routing_failure "$REVIEW_ROUTER_IDENTITY_MISMATCH"
 fi
 
 declare -a blocking_tasks=() blocking_recommendations=()

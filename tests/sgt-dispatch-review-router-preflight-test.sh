@@ -9,7 +9,7 @@ export TMUX=fixture TMUX_PANE=%11
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
-HOST_PATH="$PATH"
+HOST_PATH="/usr/local/bin:/usr/bin:/bin"
 DIST="$TEST_ROOT/distribution"
 PREFIX="$TEST_ROOT/prefix"
 FAKE_BIN="$TEST_ROOT/fake-bin"
@@ -226,16 +226,25 @@ fi
 
 # A compatible router whose bytes change after dispatch cannot honor the pinned
 # runtime invocation; it fails closed before parsing or retaining an artifact.
-cp "$canonical_router" "$TEST_ROOT/changed-router"
-printf '\n# changed after dispatch\n' >> "$TEST_ROOT/changed-router"
-chmod +x "$TEST_ROOT/changed-router"
+printf '\n# changed after dispatch\n' >> "$canonical_router"
+cat > "$TEST_ROOT/runtime-findings.json" <<'EOF'
+{"findings":[{"id":"runtime-1","severity":"warning","disposition":"actionable","summary":"Runtime mismatch","evidence":"router bytes changed","paths":["bin/sgt-review-findings"],"acceptance_criteria":"reject the changed executable","recommendation":"reinstall the matching router"}]}
+EOF
 set +e
-changed_output="$("$TEST_ROOT/changed-router" test app \
+changed_output="$(PATH="$FAKE_BIN:$HOST_PATH" TD_LOG="$TEST_ROOT/runtime-td.log" \
+  SERGEANT_CONFIG="$CONFIG" SERGEANT_FLEET="$FLEET" \
+  "$canonical_router" test app --input "$TEST_ROOT/runtime-findings.json" \
+  --axis standards --source runtime-check --branch feat/matching-router \
+  --head-sha abc1234 --parent-task td-router-app --task-id runtime-1 \
+  --worktree "$worktree" \
   --require-contract-revision sergeant.review-router-contract/v1 \
   --require-executable-identity "$identity" 2>&1)"
 changed_status=$?
 set -e
 [[ "$changed_status" -ne 0 && "$changed_output" == *'review-router executable identity mismatch'* ]]
+artifact="$worktree/.sergeant-review-artifacts/standards-runtime-check"
+[[ -s "$artifact/findings" && -s "$artifact/meta" ]]
+grep -Fq "Sanitized findings retained at $artifact" "$worktree/.sergeant-message"
 
 git -C "$REPO" worktree remove --force "$worktree"
 git -C "$REPO" branch -D feat/matching-router >/dev/null

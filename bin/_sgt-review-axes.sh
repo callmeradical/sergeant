@@ -12,6 +12,7 @@
 #
 # Space-separated strings rather than arrays: Apple Bash 3.2 errors on
 # "${empty[@]}" under `set -u`, and every sgt-* script runs with `set -u`.
+# shellcheck disable=SC2034  # public constants consumed by sourcing commands
 
 [[ "${SGT_REVIEW_AXES_LOADED:-}" == "1" ]] && return 0
 SGT_REVIEW_AXES_LOADED=1
@@ -74,6 +75,14 @@ SGT_REVIEW_SEVERITIES="error warning info"
 # map to themselves; every other spelling is an alias. Adding a spelling here is
 # the only change needed to accept it end to end.
 SGT_REVIEW_SEVERITY_ALIASES="error=error blocker=error critical=error high=error warning=warning major=warning medium=warning info=info minor=info low=info informational=info"
+
+# Installed review-router compatibility contract. Dispatch validates every
+# field before mutation and passes the revision plus executable identity back to
+# the router at runtime, so a worker cannot silently resolve a different install.
+SGT_REVIEW_ROUTER_CAPABILITIES_SCHEMA="sergeant.review-router-capabilities/v1"
+SGT_REVIEW_ROUTER_CONTRACT_REVISION="sergeant.review-router-contract/v1"
+SGT_REVIEW_ARTIFACT_SCHEMA_REVISION="sergeant.review-findings/v1"
+SGT_REVIEW_ROUTER_ARGV="--capabilities --input --axis --source --branch --head-sha --parent-task --task-id --worktree --retry --require-contract-revision --require-executable-identity"
 
 # Canonical severity for an accepted spelling; fails for anything unaccepted.
 _sgt_review_severity_canonical() {
