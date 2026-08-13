@@ -566,6 +566,19 @@ fi
 consumed_queued_dir="${consumed_queued_body%/body}"
 consumed_queued_id="${consumed_queued_dir##*/}"
 [[ -f "$repo_state/notifications/$consumed_queued_id/notification" ]]
+# The queued notification is not deliverable until it is bound to the exact
+# successor pane. Exercise the worker-facing delivery handshake, not just the
+# presence of the queued body.
+consumed_target_nonce="$(cat "$repo_state/notification_target" 2>/dev/null || true)"
+[[ "$consumed_target_nonce" =~ ^[a-f0-9]{32}$ ]]
+consumed_target_dir="$repo_state/notifications/$consumed_queued_id/targets/$consumed_target_nonce"
+[[ "$(cat "$consumed_target_dir/pane_identity")" == \
+  '0|%100|9999|654321|sgt-interactive-worker:'"$repo_state" ]]
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/consumed-race.log" \
+  PANE_ALIVE=1 NEW_PANE=%100 REQUIRE_TARGET=1 EXPECTED_WORKER="$repo_state" \
+  SERGEANT_FLEET="$fleet" tmux display-message -p -t %100 '#{pane_dead}|#{pane_id}|#{pane_pid}|#{pane_start_command}' \
+  > /dev/null
+[[ -f "$consumed_target_dir/accepted" && -f "$consumed_target_dir/delivered" ]]
 [[ "$(grep -c '^new-window ' "$TEST_ROOT/consumed-race.log")" -eq 1 ]]
 printf '%%42\n' > "$repo_state/pane"
 printf '0|%%42|4242|123456|sgt-interactive-worker:%s\n' "$repo_state" \

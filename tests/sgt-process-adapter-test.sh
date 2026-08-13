@@ -121,6 +121,39 @@ if _sgt_worker_process_marker_preflight "$zero_floor_state" >/dev/null 2>&1; the
   printf 'zero-floor history without platform evidence passed preflight\n' >&2
   exit 1
 fi
+
+# Strict preflight parses history, membership, digest, and platform floor from
+# one descriptor-bound snapshot. A pathname replacement after open is
+# ambiguity and must never be followed through a second path read.
+swap_state="$TEST_ROOT/history-swap-state"
+mkdir -p "$swap_state"
+swap_generation=22222222222222222222222222222222
+printf '%s|5:6|198|/gone\n' "$swap_generation" \
+  > "$swap_state/worker_process_marker"
+printf '%s|5:6|123\n' "$swap_generation" \
+  > "$swap_state/worker_process_markers"
+printf '%s|5:6|0\n' "$swap_generation" \
+  > "$swap_state/history-replacement"
+chmod 600 "$swap_state/worker_process_marker" \
+  "$swap_state/worker_process_markers" "$swap_state/history-replacement"
+cat > "$TEST_ROOT/history-swap-hook" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1" == after-open && "$2" == */worker_process_markers ]] || exit 0
+mv "$HISTORY_REPLACEMENT" "$2"
+: > "$HISTORY_SWAP_MARKER"
+EOF
+chmod 700 "$TEST_ROOT/history-swap-hook"
+if SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
+  _SGT_OWNED_FILE_OPEN_HOOK="$TEST_ROOT/history-swap-hook" \
+  HISTORY_REPLACEMENT="$swap_state/history-replacement" \
+  HISTORY_SWAP_MARKER="$TEST_ROOT/history-swap-fired" \
+  _sgt_worker_process_marker_preflight "$swap_state" >/dev/null 2>&1; then
+  printf 'history pathname swap passed strict marker preflight\n' >&2
+  exit 1
+fi
+[[ -e "$TEST_ROOT/history-swap-fired" ]]
+[[ "$(cat "$swap_state/worker_process_markers")" == \
+  "$swap_generation|5:6|0" ]]
 portable_command="$(_sgt_worker_command worker "$portable_state" worktree agent)"
 [[ "$portable_command" == exec\ 198\<* ]]
 

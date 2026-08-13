@@ -149,6 +149,40 @@ wait "$stale_journal_pid"
 grep -Fq 'changed without completion from the exact observed launch owner' \
   "$TEST_ROOT/stale-journal.out"
 ! grep -Fq 'peer launch already advanced' "$TEST_ROOT/stale-journal.out"
+
+# A short entropy read cannot become a weak lock nonce. Refuse ownership before
+# preparing a new marker generation, leaving current/history bytes unchanged.
+mkdir -p "$TEST_ROOT/short-entropy-bin"
+real_dd="$(command -v dd)"
+cat > "$TEST_ROOT/short-entropy-bin/dd" <<EOF
+#!/usr/bin/env bash
+if [[ " \$* " == *' bs=8 '* ]]; then
+  printf '\\0'
+  exit 0
+fi
+exec "$real_dd" "\$@"
+EOF
+chmod +x "$TEST_ROOT/short-entropy-bin/dd"
+cp "$state/worker_process_marker" "$TEST_ROOT/entropy-current.before"
+cp "$state/worker_process_markers" "$TEST_ROOT/entropy-history.before"
+rm -f "$state/worker-launch.completed"
+printf '%%88\n' > "$state/pane"
+printf '0|%%88|8888|123455|old-worker\n' > "$state/pane_identity"
+chmod 600 "$state/pane_identity"
+set +e
+PATH="$TEST_ROOT/short-entropy-bin:$TEST_ROOT/bin:$PATH" \
+  LAUNCH_LOG="$TEST_ROOT/entropy-launch.log" \
+  PANE_COMMAND="$TEST_ROOT/pane-command" TEST_REPO_STATE="$state" \
+  OLD_PANE_GONE=1 SGT_NOTIFICATION_ACK_TIMEOUT=1 \
+  "$ROOT_DIR/bin/sgt-session-resume" task-race app --force \
+  > "$TEST_ROOT/entropy.out" 2>&1
+entropy_status=$?
+set -e
+[[ "$entropy_status" -ne 0 ]]
+grep -Fq 'exact worker-launch ownership' "$TEST_ROOT/entropy.out"
+cmp "$TEST_ROOT/entropy-current.before" "$state/worker_process_marker"
+cmp "$TEST_ROOT/entropy-history.before" "$state/worker_process_markers"
+[[ ! -e "$state/worker-launch.completed" ]]
 [[ "$(cat "$state/status")" == in_progress ]]
 
 # The same transaction also serializes the distinct recovery CLI. Both callers
