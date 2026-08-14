@@ -1008,16 +1008,66 @@ _sgt_worker_command() {
   local worker="$1" repo_dir="$2" worktree="$3" agent="$4"
   _sgt_process_marker_command "$repo_dir" "$worker" "$repo_dir" "$worktree" "$agent"
 }
+# Recognition-only counterpart of _sgt_worker_command for the pre-GH#228 shape.
+_sgt_worker_command_legacy() {
+  local worker="$1" repo_dir="$2" worktree="$3" agent="$4"
+  _sgt_process_marker_command_legacy "$repo_dir" "$worker" "$repo_dir" "$worktree" "$agent"
+}
+# _sgt_process_marker_command <repo_dir> <argv...>
+# The command Sergeant launches a worker with.  See _sgt_process_marker_command_shaped.
 _sgt_process_marker_command() {
-  local repo_dir="$1" marker generation identity fd path argument command
-  shift
+  _sgt_process_marker_command_shaped bash-wrapped "$@"
+}
+
+# _sgt_process_marker_command_legacy <repo_dir> <argv...>
+# The pre-GH#228 launch shape, which relied on the pane's default-shell being
+# bash.  Nothing launches with this any more.  It exists solely so pane-identity
+# migration can still RECOGNISE a worker that an older Sergeant launched: that
+# path recomputes the expected command and demands exact equality, so without
+# this a live pre-upgrade worker would be recorded `orphaned` on the first
+# `sgt-watch --sync` after an upgrade.
+_sgt_process_marker_command_legacy() {
+  _sgt_process_marker_command_shaped bare-redirect "$@"
+}
+
+_sgt_process_marker_command_shaped() {
+  local shape="$1" repo_dir="$2" marker generation identity fd path argument command
+  shift 2
   marker="$(_sgt_read_owned_file "$repo_dir/worker_process_marker" 2>/dev/null || true)"
   IFS='|' read -r generation identity fd path <<< "$marker"
   [[ "$generation" =~ ^[0-9a-f]{32}$ && "$identity" =~ ^[0-9]+:[0-9]+$ &&
     "$fd" == 198 && -n "$path" ]] || return 1
-  # shellcheck disable=SC2016  # Expanded by the launched worker shell, not here.
-  printf -v command 'exec 198<%q && rm -f %q && exec' \
-    "$path" "$path"
+  # tmux runs a new-window command through the pane's shell, which follows tmux's
+  # `default-shell` option and therefore the user's $SHELL.  `exec 198<file` is
+  # bash-only syntax: zsh parses the bare `198` as a command name
+  # ("command not found: 198"), and sh/dash reject it too ("exec: 198: not
+  # found").  Since zsh is the macOS default shell, every dispatched worker died
+  # before sgt-interactive-worker started, surfacing only a generic
+  # notification-acknowledgement timeout ~60s later (GH #228).
+  #
+  # So pin interpretation to bash instead of trusting the pane's shell.  The only
+  # syntax the outer shell now has to parse is a POSIX command with quoted
+  # arguments.
+  #
+  # zsh's `exec {198}<file` is deliberately not used: it auto-assigns an
+  # available fd and reports it in the named parameter rather than forcing 198,
+  # which would break the `fd == 198` provenance contract asserted above.
+  #
+  # The script is single-quoted literally rather than %q-escaped so that the
+  # substring `exec 198<` survives verbatim in the recorded pane_start_command,
+  # which is how provenance is inspected.  It contains no single quote, so the
+  # literal quoting is safe.
+  # shellcheck disable=SC2016  # Expanded by the launched bash, not here.
+  local launch_script='exec 198<"$1" && rm -f "$1" && shift && exec "$@"'
+  case "$shape" in
+    bash-wrapped)
+      printf -v command "bash -c '%s' sgt-worker-launch %q" "$launch_script" "$path"
+      ;;
+    bare-redirect)
+      printf -v command 'exec 198<%q && rm -f %q && exec' "$path" "$path"
+      ;;
+    *) return 1 ;;
+  esac
   for argument in "$@"; do
     printf -v command '%s %q' "$command" "$argument"
   done

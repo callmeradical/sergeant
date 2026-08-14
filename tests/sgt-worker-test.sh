@@ -13,6 +13,12 @@ export SERGEANT_DRAIN_DIR="$TEST_ROOT/drain"
 export SERGEANT_CONFIG="$TEST_ROOT/sergeant-config"
 mkdir -p "$SERGEANT_DRAIN_DIR" "$SERGEANT_CONFIG"
 TMUX_SESSION="sgt-interactive-worker-test-$$"
+# Confine tmux to this fixture.  This test runs the real sgt-interactive-worker,
+# whose terminate path sends process-group TERM/KILL and kills its own pane; on
+# the default socket those land on the developer's live panes and can take the
+# whole server down with them (td-be53d1).
+export TMUX_TMPDIR="$TEST_ROOT/tmux"
+mkdir -p "$TMUX_TMPDIR"
 trap 'tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true; rm -rf "$TEST_ROOT"' EXIT
 
 mkdir -p "$TEST_ROOT/fake-bin" "$TEST_ROOT/done/state" "$TEST_ROOT/done/worktree" \

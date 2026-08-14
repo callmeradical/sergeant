@@ -5,6 +5,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 TMUX_SESSION="sgt-validation-worker-test-$$"
+# Confine tmux to this fixture.  This test drives real validation worker panes,
+# and the worker terminate path kills panes and process groups; on the default
+# socket those reach the developer's own session (td-be53d1).
+export TMUX_TMPDIR="$TEST_ROOT/tmux"
+mkdir -p "$TMUX_TMPDIR"
 trap 'tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true; rm -rf "$TEST_ROOT"' EXIT
 
 state="$TEST_ROOT/state"

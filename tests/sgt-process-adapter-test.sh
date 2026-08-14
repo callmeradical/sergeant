@@ -212,7 +212,12 @@ if SGT_TEST_HOOKS=1 _SGT_OWNED_FILE_HOOK_ROOT="$TEST_ROOT" \
 fi
 [[ -e "$TEST_ROOT/cross-current-fired" ]]
 portable_command="$(_sgt_worker_command worker "$portable_state" worktree agent)"
-[[ "$portable_command" == exec\ 198\<* ]]
+# The launch command is wrapped in `bash -c` so the pane's default-shell never
+# parses bash's numbered-fd redirect -- zsh, the macOS default, rejects
+# `exec 198<file` outright (GH #228).  The fd-198 redirect must still be present
+# inside the wrapper, which is what carries marker provenance.
+[[ "$portable_command" == bash\ -c\ * ]]
+[[ "$portable_command" == *exec\ 198\<* ]]
 
 # lsof's open-file identity proves a closed portable generation has no holders,
 # so normal retirement and history compaction remain supported without treating

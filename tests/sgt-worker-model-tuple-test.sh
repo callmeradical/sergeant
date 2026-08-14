@@ -27,6 +27,10 @@ export SERGEANT_DRAIN_DIR="$TEST_ROOT/drain"
 export SERGEANT_CONFIG="$TEST_ROOT/sergeant-config"
 mkdir -p "$SERGEANT_DRAIN_DIR" "$SERGEANT_CONFIG"
 TMUX_SESSION="sgt-worker-model-tuple-test-$$"
+# Confine tmux to this fixture: the real worker's terminate path kills panes and
+# process groups, which must not reach the developer's server (td-be53d1).
+export TMUX_TMPDIR="$TEST_ROOT/tmux"
+mkdir -p "$TMUX_TMPDIR"
 trap 'tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true; rm -rf "$TEST_ROOT"' EXIT
 mkdir -p "$TEST_ROOT/fake-bin"
 
