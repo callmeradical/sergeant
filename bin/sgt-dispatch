@@ -1148,7 +1148,16 @@ fi
 
 if ! $DRY_RUN; then
   [[ -x "$SCRIPT_DIR/sgt-watch" ]] || _die "sgt-watch is required for fleet reconciliation"
-  "$SCRIPT_DIR/sgt-watch" --sync-all >/dev/null
+  # The sweep is global fleet hygiene; this dispatch is scoped to one task.
+  # sgt-watch returns nonzero when ANY terminal worker anywhere could not be
+  # recycled, and the two most common terminal states (drained, blocked) are
+  # rejected by sgt-cleanup — so those records are permanent.  Under `set -e`
+  # an unguarded call therefore deadlocks every future dispatch, including
+  # dispatches unrelated to the offending records.  Report and continue: the
+  # sweep's own diagnostics are already on stderr.
+  if ! "$SCRIPT_DIR/sgt-watch" --sync-all >/dev/null; then
+    printf 'WARNING: fleet reconciliation left unrecycled workers (see above); continuing with this dispatch.\n' >&2
+  fi
 fi
 
 # ── Drain admission check ─────────────────────────────────────────────────────
