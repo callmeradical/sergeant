@@ -22,7 +22,21 @@ export TMUX=fixture TMUX_PANE=%11
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 trap '[[ -n "${KEEP_TEST_ROOT:-}" ]] || rm -rf "$TEST_ROOT"' EXIT
-mkdir -p "$TEST_ROOT/config" "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin" "$TEST_ROOT/repo"
+mkdir -p "$TEST_ROOT/config" "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin" "$TEST_ROOT/repo" \
+  "$TEST_ROOT/drain" "$TEST_ROOT/tmux"
+# CONTRIBUTING.md: a suite touching drain or fleet state pins all of them to a
+# temp root.  Dispatch takes the drain path immediately after the sweep
+# (_sgt_drain_lock_acquire_fd / _sgt_drain_check_admission_locked), and today the
+# lock lands in the temp dir only incidentally, because _sgt_drain_state_dir
+# falls back to $SERGEANT_CONFIG/drain.  Declare it so one refactor of that
+# fallback cannot start writing admission.lock into the operator's real
+# ~/.config/sergeant/drain.
+#
+# TMUX_TMPDIR is defence in depth: TMUX/TMUX_PANE are exported globally above,
+# while the tmux stub is only reachable through the PATH prefix on one command,
+# so any tmux call added outside it would reach the operator's live server and
+# could take their session down (td-be53d1).
+export TMUX_TMPDIR="$TEST_ROOT/tmux"
 chmod 700 "$TEST_ROOT/fleet"
 
 PASS=0; FAIL=0
@@ -102,12 +116,26 @@ git -C "$TEST_ROOT/repo" add README.md
 git -C "$TEST_ROOT/repo" commit -qm fixture
 git -C "$TEST_ROOT/repo" remote add origin git@github.com:org/test.git
 
-# A copy of the distribution so sgt-watch can be stubbed while bundled
-# resources (templates/worker-brief.md and friends) still resolve under the
-# same canonical root that sgt-dispatch validates against.  .git is excluded:
-# it is large and irrelevant to resource resolution.
+# A copy of the distribution so sgt-watch can be stubbed while bundled resources
+# (templates/worker-brief.md and friends) still resolve under the same canonical
+# root that sgt-dispatch validates against.
+#
+# Copied selectively, matching tests/sgt-dispatch-td-test.sh.  A whole-tree
+# `tar --exclude=.git` copies every gitignored and untracked directory too: on a
+# working checkout that is ~236 MB (.todos alone was measured at 253 MB), per run,
+# for a fixture that needs only bin/ and templates/.  It also aborts the suite
+# under `set -o pipefail` if the reading tar emits a warning such as "file changed
+# as we read it", which is plausible against a live working tree.
+#
+# All of bin/ rather than a hand-maintained subset: sgt-dispatch resolves at least
+# a dozen siblings from $SCRIPT_DIR, and preflight reaches further still (sgt-notify,
+# and sgt-review-findings for the review-router identity check), so any curated list
+# silently rots into "command not found" inside the fixture rather than a real
+# result.  bin/ plus templates/ is ~1.2 MB, bounded and independent of whatever
+# untracked state the checkout happens to carry.
 mkdir -p "$TEST_ROOT/root"
-tar -C "$ROOT_DIR" --exclude=.git -cf - . | tar -C "$TEST_ROOT/root" -xf -
+cp -R "$ROOT_DIR/bin" "$TEST_ROOT/root/"
+cp -R "$ROOT_DIR/templates" "$TEST_ROOT/root/"
 
 # The stub reproduces production behaviour exactly: warn on stderr about a
 # terminal worker that could not be recycled, then exit 1.
@@ -129,6 +157,7 @@ _fleet_task_count() {
 set +e
 PATH="$TEST_ROOT/fake-bin:$TEST_ROOT/root/bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
 SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+SERGEANT_DRAIN_DIR="$TEST_ROOT/drain" \
 SGT_WIKI_DISABLED=1 \
   "$TEST_ROOT/root/bin/sgt-dispatch" test "unrelated work" --repos app \
   > "$TEST_ROOT/dispatch.out" 2> "$TEST_ROOT/dispatch.err"
@@ -155,10 +184,32 @@ fi
 
 # ── Test 3: the sweep's diagnostics are still surfaced, not swallowed ────────
 # The sweep is advisory, so its warnings must remain visible to the operator.
+#
+# Note what this does and does not prove.  The matched text is emitted by the
+# sgt-watch stub itself and reaches dispatch.err only because the sweep's stderr
+# is never redirected.  That was already true before the fix, so this assertion
+# cannot distinguish "decoupled and surfaced" from "silently swallowed" -- see
+# test 4, which is the one that pins the fix's own behaviour.
 if grep -q "terminal worker was not recycled" "$TEST_ROOT/dispatch.err"; then
   _pass "sweep warnings are still reported on stderr"
 else
   _fail "sweep warnings were suppressed"
+fi
+
+# ── Test 4: dispatch attributes the failure to reconciliation itself ─────────
+# The whole difference between "decoupled and surfaced" and "silently swallowed"
+# is dispatch's own diagnostic.  Without this assertion,
+#
+#     if ! "$SCRIPT_DIR/sgt-watch" --sync-all >/dev/null; then :; fi
+#
+# passes every other test in this file while discarding the failure entirely.
+# The sweep's raw stderr is unlabelled and arrives before dispatch's line, so
+# without an attributed message the operator cannot tell which step degraded --
+# the reporting failure GH #227 was filed about.
+if grep -q "fleet reconciliation" "$TEST_ROOT/dispatch.err"; then
+  _pass "dispatch attributes the sweep failure to reconciliation"
+else
+  _fail "dispatch swallowed the sweep failure without its own diagnostic"
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
