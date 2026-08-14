@@ -550,9 +550,23 @@ PRIMARY_PANE_IDENTITY=""
 SGT_MANAGED_COORDINATOR_CREATED="false"
 
 # ── Bind the coordinator pane ────────────────────────────────────────────────
-# Three entry paths, one verification.  An explicit identity is verified against
-# the live tmux server; a managed pane is created or selected on a server that is
-# already reachable; otherwise the ambient pane is used exactly as before.
+# Sergeant launches and controls every tmux window it owns inside its own
+# session ($TMUX_SESSION) and never crosses that boundary.  The ambient
+# $TMUX_PANE is therefore never bound, even when dispatch runs from inside tmux.
+#
+# Why: an agent harness runs sgt-dispatch from a shell inside the human
+# operator's interactive session, so binding the ambient pane made the operator's
+# own pane the coordinator and notification target.  On 2026-08-14 that recorded
+# primary_pane=0:3.0 primary_pane_id=%11 for a live task and injected worker
+# notifications as keystrokes into the operator's working pane.  Every other
+# fleet record bound a dedicated session, which is what made it a regression
+# rather than the design.  See td-eb9942.
+#
+# Two entry paths, one verification.  An explicit --coordinator-pane identity is
+# verified against the live tmux server; otherwise a managed pane is created or
+# selected inside $TMUX_SESSION.  The managed pane runs a reader that echoes
+# injected lines and never executes them, so a notification can never become a
+# shell command in a pane a human shares.
 #
 # None of this weakens the persistent interactive worker requirement: the worker
 # is still launched as an interactive harness session in its own tmux window, and
@@ -560,27 +574,24 @@ SGT_MANAGED_COORDINATOR_CREATED="false"
 # is created.
 if [[ -n "$COORDINATOR_PANE_ARG" ]]; then
   PRIMARY_PANE_ID="$COORDINATOR_PANE_ARG"
-elif $MANAGED_COORDINATOR; then
+elif $DRY_RUN; then
+  # A dry run reports what would be bound and contacts tmux not at all -- not
+  # even to check reachability.  Requiring a live server here would make
+  # `--dry-run` fail in exactly the environments it exists to be safe in (CI, a
+  # headless shell, a fixture with a minimal tmux stub), and a dry run that needs
+  # the resource it promises not to touch is not a dry run.
+  echo "[dry-run] would create or select managed coordinator pane in $TMUX_SESSION:$SGT_MANAGED_COORDINATOR_WINDOW"
+else
   # Deliberately does not start a server: a coordinator must already be able to
   # reach a live tmux server, so a headless environment fails loudly instead of
   # acquiring a pane nobody can observe.
   tmux list-sessions >/dev/null 2>&1 || \
-    _die "sgt-dispatch found no reachable tmux server for --managed-coordinator-pane; start tmux first"
-  if $DRY_RUN; then
-    # --dry-run must not create anything, including tmux state.  Report what
-    # would be bound and skip the rest of the coordinator binding.
-    echo "[dry-run] would create or select managed coordinator pane in $TMUX_SESSION:$SGT_MANAGED_COORDINATOR_WINDOW"
-  else
-    managed_pane_result="$(_sgt_managed_coordinator_pane "$TMUX_SESSION" \
-      "$SGT_MANAGED_COORDINATOR_WINDOW")" || \
-      _die "sgt-dispatch could not create or select the managed coordinator pane in $TMUX_SESSION:$SGT_MANAGED_COORDINATOR_WINDOW; remove that window if it is not Sergeant's"
-    PRIMARY_PANE_ID="${managed_pane_result%% *}"
-    SGT_MANAGED_COORDINATOR_CREATED="${managed_pane_result##* }"
-  fi
-elif [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" ]]; then
-  PRIMARY_PANE_ID="$TMUX_PANE"
-else
-  _die "sgt-dispatch requires an interactive coordinator tmux pane: run it inside tmux, or pass --managed-coordinator-pane or --coordinator-pane <pane-id>"
+    _die "sgt-dispatch found no reachable tmux server for its coordinator pane; start tmux first, or pass --coordinator-pane <pane-id>"
+  managed_pane_result="$(_sgt_managed_coordinator_pane "$TMUX_SESSION" \
+    "$SGT_MANAGED_COORDINATOR_WINDOW")" || \
+    _die "sgt-dispatch could not create or select the managed coordinator pane in $TMUX_SESSION:$SGT_MANAGED_COORDINATOR_WINDOW; remove that window if it is not Sergeant's"
+  PRIMARY_PANE_ID="${managed_pane_result%% *}"
+  SGT_MANAGED_COORDINATOR_CREATED="${managed_pane_result##* }"
 fi
 
 # Roll back exactly the managed coordinator window this invocation created, and

@@ -78,7 +78,14 @@ case "$1" in
       printf '%s\n' "$token" > "$target_dir/delivered"
     done
     if [[ "$*" == *'#{session_name}'* ]]; then
-      printf 'sgt:3.0\n'
+      # A pane the operator is sitting in lives in their own session, not
+      # Sergeant's.  Reporting one label for every pane would let a regression
+      # that binds the ambient pane still look in-session here.
+      if [[ -n "${FOREIGN_AMBIENT_PANE:-}" && "$target" == "$FOREIGN_AMBIENT_PANE" ]]; then
+        printf '%s\n' "${FOREIGN_AMBIENT_LABEL:-0:3.0}"
+      else
+        printf 'sgt:3.0\n'
+      fi
       exit 0
     fi
     for dead in ${DEAD_PANES:-}; do
@@ -241,6 +248,32 @@ _dispatch_no_tmux() {
     "$ROOT_DIR/bin/sgt-dispatch" test "$brief" --repos app "$@"
 }
 
+# _dispatch_in_foreign_tmux <log-name> <brief> [args...]
+# Runs sgt-dispatch from a shell that IS inside tmux, in a pane belonging to a
+# session other than Sergeant's.  This is the agent-harness shape: the coordinator
+# runs in the human operator's interactive session.
+FOREIGN_AMBIENT_PANE='%11'
+FOREIGN_AMBIENT_LABEL='0:3.0'
+_dispatch_in_foreign_tmux() {
+  local log_name="$1" brief="$2"
+  shift 2
+  env TMUX="/tmp/tmux-1000/default,4242,0" TMUX_PANE="$FOREIGN_AMBIENT_PANE" \
+    PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/$log_name.log" \
+    LIVE_PANES="$FOREIGN_AMBIENT_PANE" \
+    FOREIGN_AMBIENT_PANE="$FOREIGN_AMBIENT_PANE" \
+    FOREIGN_AMBIENT_LABEL="$FOREIGN_AMBIENT_LABEL" \
+    MANAGED_PANE_ID="$MANAGED_PANE_ID" \
+    MANAGED_COMMAND_LOG="$MANAGED_COMMAND_LOG" \
+    MANAGED_EXISTS_FLAG="$MANAGED_EXISTS_FLAG" \
+    MANAGED_CREATE_LOG="$MANAGED_CREATE_LOG" KILL_WINDOW_LOG="$KILL_WINDOW_LOG" \
+    MANAGED_READER_COMMAND="$MANAGED_READER_COMMAND" \
+    MANAGED_MARKER_LOG="$MANAGED_MARKER_LOG" \
+    ESCAPED_READER_COMMAND="$ESCAPED_READER_COMMAND" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-dispatch" test "$brief" --repos app "$@"
+}
+
 # _reject_no_tmux <log-name> <brief> <expected-stderr-substring> [args...]
 _reject_no_tmux() {
   local log_name="$1" brief="$2" expected="$3"
@@ -346,59 +379,109 @@ _reject_no_tmux malformed 'Malformed coordinator' \
 _reject_no_tmux injection 'Injection coordinator' \
   '--coordinator-pane requires a tmux pane id' --coordinator-pane '%1 kill-server'
 
-# ── 5. Without a coordinator option a non-tmux shell still fails, actionably ──
+# ── 5. Without any option, Sergeant creates its own coordinator pane ─────────
+# Confining tmux control to Sergeant's session means the managed pane is the
+# default, not an opt-in.  A coordinator that is not inside tmux at all no longer
+# has to ask for a pane; it gets one inside $TMUX_SESSION.
 
-_reject_no_tmux no-option 'No coordinator option' \
-  '--coordinator-pane'
+rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG" "$MANAGED_CREATE_LOG" \
+  "$MANAGED_MARKER_LOG"
+_dispatch_no_tmux no-option 'No coordinator option' >/dev/null
+state="$(printf '%s\n' "$TEST_ROOT"/fleet/no-coordinator-option-*/app)"
+task_dir="$(dirname "$state")"
+[[ "$(cat "$task_dir/primary_pane_id")" == "$MANAGED_PANE_ID" ]] || {
+  printf 'FAIL: default dispatch did not bind the managed coordinator pane (got %q)\n' \
+    "$(cat "$task_dir/primary_pane_id" 2>/dev/null || true)" >&2
+  exit 1
+}
+[[ "$(cat "$task_dir/primary_pane")" == sgt:* ]] || {
+  printf 'FAIL: default coordinator pane is outside the Sergeant session (got %q)\n' \
+    "$(cat "$task_dir/primary_pane" 2>/dev/null || true)" >&2
+  exit 1
+}
+[[ -s "$MANAGED_CREATE_LOG" ]] || {
+  printf 'FAIL: default dispatch created no managed coordinator pane\n' >&2
+  exit 1
+}
 
 # ── 6. An unreachable tmux server fails with an actionable diagnostic ─────────
 
 SERVER_UP=0 _reject_no_tmux no-server 'No tmux server' \
   'no reachable tmux server' --managed-coordinator-pane
+# The same must hold on the default path, which now needs the server too.
+SERVER_UP=0 _reject_no_tmux no-server-default 'No tmux server default' \
+  'no reachable tmux server'
 
 # ── 7. The two coordinator options are mutually exclusive ────────────────────
 
 _reject_no_tmux both-options 'Both coordinator options' \
   'cannot be combined' --managed-coordinator-pane --coordinator-pane '%55'
 
-# ── 8. Existing in-pane dispatch is unchanged ────────────────────────────────
-# An ambient coordinator pane still binds itself with no new option.
+# ── 8. An ambient pane is never adopted, even when it verifies ───────────────
+# Superseded behavior: dispatch used to bind $TMUX_PANE whenever it ran inside
+# tmux.  Sergeant now confines its windows to its own session, so a perfectly
+# live ambient pane is still ignored and a managed pane is created instead.
 
+rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG" "$MANAGED_CREATE_LOG" \
+  "$MANAGED_MARKER_LOG" "$TEST_ROOT/in-pane.log"
 LIVE_PANES='%11' TMUX=fixture TMUX_PANE='%11' \
   PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/in-pane.log" \
   MANAGED_PANE_ID="$MANAGED_PANE_ID" MANAGED_COMMAND_LOG="$MANAGED_COMMAND_LOG" \
   MANAGED_EXISTS_FLAG="$MANAGED_EXISTS_FLAG" KILL_WINDOW_LOG="$KILL_WINDOW_LOG" \
   MANAGED_CREATE_LOG="$MANAGED_CREATE_LOG" MANAGED_MARKER_LOG="$MANAGED_MARKER_LOG" \
   ESCAPED_READER_COMMAND="$ESCAPED_READER_COMMAND" \
+  MANAGED_READER_COMMAND="$MANAGED_READER_COMMAND" \
   SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
   SGT_WIKI_DISABLED=1 \
   "$ROOT_DIR/bin/sgt-dispatch" test 'In pane coordinator' --repos app >/dev/null
 state="$(printf '%s\n' "$TEST_ROOT"/fleet/in-pane-coordinator-*/app)"
-[[ "$(cat "$(dirname "$state")/primary_pane_id")" == '%11' ]]
-# No managed coordinator window is created when the caller already owns a pane.
-if grep -Fq -e '-n sgt-coordinator' "$TEST_ROOT/in-pane.log"; then
-  printf 'FAIL: in-pane dispatch created a managed coordinator pane\n' >&2
+in_pane_dir="$(dirname "$state")"
+[[ "$(cat "$in_pane_dir/primary_pane_id")" != '%11' ]] || {
+  printf 'FAIL: dispatch adopted the ambient pane %%11 as coordinator\n' >&2
   exit 1
-fi
+}
+[[ "$(cat "$in_pane_dir/primary_pane_id")" == "$MANAGED_PANE_ID" ]] || {
+  printf 'FAIL: in-pane dispatch did not bind the managed pane (got %q)\n' \
+    "$(cat "$in_pane_dir/primary_pane_id" 2>/dev/null || true)" >&2
+  exit 1
+}
+# A managed coordinator window IS created now, precisely because the caller's own
+# pane must not be used.
+[[ -s "$MANAGED_CREATE_LOG" ]] || {
+  printf 'FAIL: in-pane dispatch did not create a managed coordinator pane\n' >&2
+  exit 1
+}
 
-# ── 9. An ambient pane that no longer verifies still fails closed ────────────
+# ── 9. A dead ambient pane cannot affect dispatch at all ─────────────────────
+# Previously a dead $TMUX_PANE failed the whole dispatch closed, because that
+# pane was about to become the coordinator.  Now the ambient pane is never read,
+# so its liveness is irrelevant and dispatch proceeds on the managed pane.
+# Identity verification still guards the explicit --coordinator-pane path, which
+# section 4 covers.
 
-before="$(_fleet_task_count)"
-set +e
-output="$(DEAD_PANES='%12' TMUX=fixture TMUX_PANE='%12' \
+rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG" "$MANAGED_CREATE_LOG" \
+  "$MANAGED_MARKER_LOG" "$TEST_ROOT/dead-ambient.log"
+DEAD_PANES='%12' TMUX=fixture TMUX_PANE='%12' \
   PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/dead-ambient.log" \
   MANAGED_PANE_ID="$MANAGED_PANE_ID" MANAGED_COMMAND_LOG="$MANAGED_COMMAND_LOG" \
   MANAGED_EXISTS_FLAG="$MANAGED_EXISTS_FLAG" KILL_WINDOW_LOG="$KILL_WINDOW_LOG" \
   MANAGED_CREATE_LOG="$MANAGED_CREATE_LOG" MANAGED_MARKER_LOG="$MANAGED_MARKER_LOG" \
   ESCAPED_READER_COMMAND="$ESCAPED_READER_COMMAND" \
+  MANAGED_READER_COMMAND="$MANAGED_READER_COMMAND" \
   SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
   SGT_WIKI_DISABLED=1 \
-  "$ROOT_DIR/bin/sgt-dispatch" test 'Dead ambient coordinator' --repos app 2>&1)"
-status=$?
-set -e
-[[ "$status" -ne 0 ]]
-[[ "$output" == *'could not bind exact coordinator pane identity'* ]]
-[[ "$before" == "$(_fleet_task_count)" ]]
+  "$ROOT_DIR/bin/sgt-dispatch" test 'Dead ambient coordinator' --repos app >/dev/null
+state="$(printf '%s\n' "$TEST_ROOT"/fleet/dead-ambient-coordinat*/app)"
+dead_dir="$(dirname "$state")"
+[[ "$(cat "$dead_dir/primary_pane_id")" == "$MANAGED_PANE_ID" ]] || {
+  printf 'FAIL: dead ambient pane case did not bind the managed pane (got %q)\n' \
+    "$(cat "$dead_dir/primary_pane_id" 2>/dev/null || true)" >&2
+  exit 1
+}
+grep -Fq '%12' "$dead_dir/primary_pane_identity" 2>/dev/null && {
+  printf 'FAIL: the dead ambient pane leaked into the recorded identity\n' >&2
+  exit 1
+}
 
 # ── 10. A window Sergeant did not create is never adopted ────────────────────
 # Adoption requires the pane's start command to be Sergeant's non-executing
@@ -502,6 +585,98 @@ fi
 if grep -Fq -e '-n sgt-coordinator' "$TEST_ROOT/dry-run.log" 2>/dev/null || \
    grep -Fq 'new-session' "$TEST_ROOT/dry-run.log" 2>/dev/null; then
   printf 'FAIL: --dry-run mutated tmux\n' >&2
+  exit 1
+fi
+
+# ── 14. Sergeant never binds a pane outside its own session ──────────────────
+#
+# Owner directive, 2026-08-14 (td-eb9942): Sergeant launches and controls every
+# tmux window inside a session dedicated to Sergeant and must not cross that
+# boundary.  An agent harness runs sgt-dispatch from a shell inside the operator's
+# interactive session, so the ambient pane must never become the coordinator /
+# notification target.  Regression for the 2026-08-14 incident that recorded
+# primary_pane=0:3.0 primary_pane_id=%11 -- the operator's own pane.
+
+rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG" "$MANAGED_CREATE_LOG" \
+  "$KILL_WINDOW_LOG" "$MANAGED_MARKER_LOG" "$TEST_ROOT/foreign-ambient.log"
+_dispatch_in_foreign_tmux foreign-ambient 'Foreign ambient' >/dev/null
+state="$(printf '%s\n' "$TEST_ROOT"/fleet/foreign-ambient-*/app)"
+task_dir="$(dirname "$state")"
+[[ -d "$task_dir" ]] || {
+  printf 'FAIL: no fleet task directory for the ambient-tmux dispatch\n' >&2
+  exit 1
+}
+
+recorded_pane_id="$(cat "$task_dir/primary_pane_id" 2>/dev/null || true)"
+[[ "$recorded_pane_id" != "$FOREIGN_AMBIENT_PANE" ]] || {
+  printf 'FAIL: dispatch bound the operator ambient pane %s as coordinator\n' \
+    "$FOREIGN_AMBIENT_PANE" >&2
+  exit 1
+}
+[[ "$recorded_pane_id" == "$MANAGED_PANE_ID" ]] || {
+  printf 'FAIL: coordinator pane is not the managed pane (got %q, want %q)\n' \
+    "$recorded_pane_id" "$MANAGED_PANE_ID" >&2
+  exit 1
+}
+
+recorded_pane="$(cat "$task_dir/primary_pane" 2>/dev/null || true)"
+[[ "$recorded_pane" != "$FOREIGN_AMBIENT_LABEL" ]] || {
+  printf 'FAIL: coordinator pane label is the operator session %q\n' "$recorded_pane" >&2
+  exit 1
+}
+[[ "$recorded_pane" == sgt:* ]] || {
+  printf 'FAIL: coordinator pane is outside the Sergeant session (got %q)\n' \
+    "$recorded_pane" >&2
+  exit 1
+}
+
+# The recorded identity tuple must not name the operator pane either.
+grep -Fq "$FOREIGN_AMBIENT_PANE" "$task_dir/primary_pane_identity" 2>/dev/null && {
+  printf 'FAIL: primary_pane_identity names the operator ambient pane\n' >&2
+  exit 1
+}
+
+# Nothing may be sent to the operator's pane.
+if grep -F "$FOREIGN_AMBIENT_PANE" "$TEST_ROOT/foreign-ambient.log" 2>/dev/null | \
+   grep -Eq 'send-keys|paste-buffer|respawn-pane|kill-pane'; then
+  printf 'FAIL: dispatch issued a mutating tmux command against the operator pane\n' >&2
+  grep -F "$FOREIGN_AMBIENT_PANE" "$TEST_ROOT/foreign-ambient.log" >&2
+  exit 1
+fi
+
+# The managed pane must still have been created inside the Sergeant session.
+[[ -s "$MANAGED_CREATE_LOG" ]] || {
+  printf 'FAIL: no managed coordinator pane was created for the ambient-tmux case\n' >&2
+  exit 1
+}
+
+# ── 15. --dry-run contacts tmux not at all ───────────────────────────────────
+# Making the managed pane the default must not make --dry-run require a live tmux
+# server.  It previously did, because the reachability probe ran before the
+# DRY_RUN branch, which broke every dry-run caller that has only a minimal tmux
+# stub (six dispatch suites) and would break --dry-run in CI and headless shells.
+# A dry run that needs the resource it promises not to touch is not a dry run.
+
+rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG" "$MANAGED_CREATE_LOG" \
+  "$MANAGED_MARKER_LOG" "$TEST_ROOT/dry-run-no-server.log"
+before="$(_fleet_task_count)"
+if ! SERVER_UP=0 _dispatch_no_tmux dry-run-no-server 'Dry run no server' \
+  --dry-run >/dev/null 2>&1; then
+  printf 'FAIL: --dry-run required a reachable tmux server\n' >&2
+  exit 1
+fi
+[[ "$before" == "$(_fleet_task_count)" ]] || {
+  printf 'FAIL: --dry-run created fleet state\n' >&2
+  exit 1
+}
+[[ ! -e "$MANAGED_CREATE_LOG" ]] || {
+  printf 'FAIL: --dry-run created a managed coordinator pane\n' >&2
+  exit 1
+}
+# It must not have issued any tmux command at all, not even a reachability probe.
+if [[ -s "$TEST_ROOT/dry-run-no-server.log" ]]; then
+  printf 'FAIL: --dry-run issued tmux commands:\n' >&2
+  sed 's/^/    /' "$TEST_ROOT/dry-run-no-server.log" >&2
   exit 1
 fi
 

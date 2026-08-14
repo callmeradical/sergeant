@@ -23,6 +23,42 @@ repos:
 EOF
 cat > "$TEST_ROOT/fake-bin/tmux" <<'EOF'
 #!/usr/bin/env bash
+# ── managed coordinator pane support (td-eb9942) ─────────────────────────────
+# sgt-dispatch no longer binds the ambient $TMUX_PANE; it creates a pane inside
+# its own session instead, so every fixture that dispatches must be able to serve
+# one.  Handled before this stub's logging/counting so coordinator plumbing stays
+# out of the observable tmux log and pre-existing assertions keep their meaning.
+_sgt_coord_pane="${SGT_COORD_PANE:-%79}"
+_sgt_coord_flag="${TMUX_LOG:-/tmp/sgt-coord}.coordinator-created"
+case "${1:-}" in
+  list-sessions) exit 0 ;;
+  list-panes)
+    if [[ "$*" == *sgt-coordinator* ]]; then
+      [[ -f "$_sgt_coord_flag" ]] && printf '%s\n' "$_sgt_coord_pane"
+      exit 0
+    fi
+    ;;
+  new-window)
+    if [[ "$*" == *sgt-coordinator* ]]; then
+      : > "$_sgt_coord_flag"
+      printf '%s\n' "$_sgt_coord_pane"
+      exit 0
+    fi
+    ;;
+  set-option)
+    [[ "$*" == *@sgt_coordinator* ]] && exit 0
+    ;;
+  display-message)
+    if [[ "$*" == *@sgt_coordinator* ]]; then
+      printf 'sergeant-managed-coordinator\n'
+      exit 0
+    fi
+    if [[ "$*" == *"-t $_sgt_coord_pane"* ]]; then
+      printf '0|%s|7979|797979|sgt-coordinator-reader\n' "$_sgt_coord_pane"
+      exit 0
+    fi
+    ;;
+esac
 [[ "${1:-}" == "display-message" ]] || printf '%s\n' "$*" >> "$TMUX_LOG"
 case "$1" in
   has-session) exit 0 ;;
