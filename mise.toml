@@ -253,7 +253,34 @@ run = """
 # not pushed; the bash:3.2 image is pulled from Docker Hub on first use.
 
 set -euo pipefail
-REPO_DIR="$(git -C "${MISE_PROJECT_ROOT:-.}" rev-parse --show-toplevel)"
+
+# Which tree to validate.  SGT_TEST_REPO_DIR wins, because a caller that already
+# knows the answer must not be overridden by a second, independent guess.
+#
+# scripts/hooks/pre-push resolves the worktree being pushed and passes it here.
+# Re-deriving it instead made the gate validate the wrong tree (td-85b6bf): with
+# MISE_PROJECT_ROOT empty -- which is the normal case -- the expression below
+# falls back to `.` and ignores the --cd the hook passed, so a push from a linked
+# worktree was gated on the main checkout. That fails correct branches and, worse,
+# can pass broken ones, because the verdict becomes a function of uncommitted
+# state in a tree nobody is pushing.
+REPO_DIR="${SGT_TEST_REPO_DIR:-}"
+if [[ -z "$REPO_DIR" ]]; then
+  REPO_DIR="$(git -C "${MISE_PROJECT_ROOT:-.}" rev-parse --show-toplevel)"
+fi
+# Resolve physically so the reported path and the Docker mount cannot disagree
+# through a symlink.
+REPO_DIR="$(cd "$REPO_DIR" 2>/dev/null && pwd -P)" || {
+  printf 'test:docker:drain: not a usable directory: %s\\n' "${SGT_TEST_REPO_DIR:-$REPO_DIR}" >&2
+  exit 1
+}
+[[ -d "$REPO_DIR/tests" && -f "$REPO_DIR/Dockerfile.test" ]] || {
+  printf 'test:docker:drain: %s is not a Sergeant checkout (no tests/ or Dockerfile.test)\\n' "$REPO_DIR" >&2
+  exit 1
+}
+# Always state the tree under test.  A wrong-tree run used to be silent, which is
+# what let td-85b6bf go unnoticed until a correct branch was blocked by it.
+printf 'Validating tree: %s\\n' "$REPO_DIR"
 
 SGT_BASH32_IMAGE="docker.io/library/bash:3.2@sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89"
 
