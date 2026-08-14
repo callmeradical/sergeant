@@ -60,15 +60,27 @@ if ! echo "$PATH" | tr ':' '\\n' | grep -qxF "$TARGET_DIR"; then
   echo "  export PATH=\"$TARGET_DIR:\\$PATH\""
 fi
 
-# Install git hooks from scripts/hooks/ into .git/hooks/
+# Install git hooks into the SHARED hooks directory, as dispatchers.
+#
+# --git-path hooks, not --git-dir: in a linked worktree --git-dir is
+# .git/worktrees/<name>, a hooks directory git never consults, so installing
+# there produced hooks that could not fire (td-85b6bf).
+#
+# A dispatcher rather than a symlink to this checkout: the shared directory is
+# used by every worktree, so a symlink pins the hook to whichever checkout ran
+# install, and the branch being acted on never gets its own hook.
 hooks_src="$REPO_DIR/scripts/hooks"
-hooks_dst="$(git -C "$REPO_DIR" rev-parse --git-dir 2>/dev/null)/hooks"
-if [[ -d "$hooks_src" && -d "$hooks_dst" ]]; then
+hooks_dispatch="$REPO_DIR/scripts/git-hook-dispatch.sh"
+hooks_dst="$(cd "$REPO_DIR" && git rev-parse --path-format=absolute --git-path hooks 2>/dev/null || true)"
+if [[ -d "$hooks_src" && -f "$hooks_dispatch" && -n "$hooks_dst" ]]; then
+  mkdir -p "$hooks_dst"
   for hook in "$hooks_src"/*; do
     [[ -f "$hook" ]] || continue
     name="$(basename "$hook")"
-    ln -sf "$hook" "$hooks_dst/$name"
-    echo "  linked hook: $hooks_dst/$name -> $hook"
+    rm -f "$hooks_dst/$name"
+    cp "$hooks_dispatch" "$hooks_dst/$name"
+    chmod +x "$hooks_dst/$name"
+    echo "  installed hook dispatcher: $hooks_dst/$name"
   done
 fi
 """
@@ -79,18 +91,26 @@ run = """
 #!/usr/bin/env bash
 set -euo pipefail
 REPO_DIR="$(git -C "${MISE_PROJECT_ROOT:-.}" rev-parse --show-toplevel 2>/dev/null || echo "${MISE_PROJECT_ROOT:-.}")"
+# See the install task for why this uses --git-path hooks and installs a
+# dispatcher instead of a symlink (td-85b6bf).
 hooks_src="$REPO_DIR/scripts/hooks"
-hooks_dst="$(git -C "$REPO_DIR" rev-parse --git-dir 2>/dev/null)/hooks"
-[[ -d "$hooks_src" && -d "$hooks_dst" ]] || { echo "hooks dirs not found"; exit 1; }
+hooks_dispatch="$REPO_DIR/scripts/git-hook-dispatch.sh"
+hooks_dst="$(cd "$REPO_DIR" && git rev-parse --path-format=absolute --git-path hooks 2>/dev/null || true)"
+[[ -d "$hooks_src" ]] || { echo "hooks source not found: $hooks_src"; exit 1; }
+[[ -f "$hooks_dispatch" ]] || { echo "hook dispatcher not found: $hooks_dispatch"; exit 1; }
+[[ -n "$hooks_dst" ]] || { echo "could not resolve the git hooks directory"; exit 1; }
+mkdir -p "$hooks_dst"
 linked=0
 for hook in "$hooks_src"/*; do
   [[ -f "$hook" ]] || continue
   name="$(basename "$hook")"
-  ln -sf "$hook" "$hooks_dst/$name"
-  echo "  linked: $hooks_dst/$name -> $hook"
+  rm -f "$hooks_dst/$name"
+  cp "$hooks_dispatch" "$hooks_dst/$name"
+  chmod +x "$hooks_dst/$name"
+  echo "  installed dispatcher: $hooks_dst/$name -> <pushed tree>/scripts/hooks/$name"
   linked=$((linked+1))
 done
-echo "Installed $linked git hooks."
+echo "Installed $linked git hook dispatcher(s)."
 """
 
 [tasks."uninstall:hooks"]
