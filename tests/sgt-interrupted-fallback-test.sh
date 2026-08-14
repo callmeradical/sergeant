@@ -15,6 +15,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 TMUX_SESSION="sgt-interrupted-fallback-test-$$"
+# Confine tmux to this fixture.  The fake-tmux shim is only ever prefixed onto
+# individual commands, so the bare `tmux new-session`/`new-window` calls later in
+# this file reach a real server and launch a real sgt-interactive-worker whose
+# terminate path kills panes and process groups (td-be53d1).
+export TMUX_TMPDIR="$TEST_ROOT/tmux"
+mkdir -p "$TMUX_TMPDIR"
 trap 'tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true; rm -rf "$TEST_ROOT"' EXIT
 
 fake_bin="$TEST_ROOT/bin"

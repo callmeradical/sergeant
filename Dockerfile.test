@@ -29,6 +29,15 @@ RUN apt-get update -qq && \
       sqlite3 \
       curl \
       ca-certificates \
+      # zsh and dash are test subjects, not conveniences.  tmux runs a
+      # new-window command through the pane's default-shell, which follows the
+      # user's $SHELL -- /bin/zsh on any default macOS install since Catalina.
+      # A bash-only construct in the worker launch command therefore killed every
+      # dispatched worker on macOS (GH #228), and CI could not see it because the
+      # image had no non-bash shell to run it under.  dash is Debian's /bin/sh and
+      # covers POSIX-only parsing.
+      zsh \
+      dash \
       && rm -rf /var/lib/apt/lists/*
 
 # Verify Bash is present.

@@ -618,7 +618,7 @@ fi
 _pane_is_supervisor() {
   local pane="$1"
   local repo_dir="${2%/}"
-  local actual agent command created expected_command pane_id pane_pid remainder worktree
+  local actual agent command created expected_command legacy_expected_command pane_id pane_pid remainder worktree
 
   if [[ -s "$repo_dir/pane_identity" ]]; then
     _sgt_pane_identity_matches "$pane" "$repo_dir"
@@ -639,7 +639,16 @@ _pane_is_supervisor() {
     "$SCRIPT_DIR/sgt-interactive-worker" "$repo_dir" "$worktree" "$agent")"
   [[ "${actual%%|*}" == 0 && "$pane_id" == "$pane" &&
      "$pane_pid" =~ ^[1-9][0-9]*$ && "$created" =~ ^[1-9][0-9]*$ &&
-     -n "$worktree" && -n "$agent" && "$command" == "$expected_command" ]] || return 1
+     -n "$worktree" && -n "$agent" ]] || return 1
+  # Accept the pre-GH#228 launch shape as well.  Migration recomputes the
+  # expected command with the CURRENT builder, so comparing only against that
+  # would record every live worker launched by an older Sergeant as `orphaned` on
+  # the first sync after an upgrade -- a false terminal state for a running
+  # worker.  Recognising the old shape is read-only; nothing launches with it.
+  legacy_expected_command="$(_sgt_worker_command_legacy \
+    "$SCRIPT_DIR/sgt-interactive-worker" "$repo_dir" "$worktree" "$agent")"
+  [[ "$command" == "$expected_command" ||
+     ( -n "$legacy_expected_command" && "$command" == "$legacy_expected_command" ) ]] || return 1
 
   printf '%s\n' "$actual" > "$repo_dir/pane_identity_migration.tmp.$$" || return 1
   mv "$repo_dir/pane_identity_migration.tmp.$$" "$repo_dir/pane_identity_migration" || return 1

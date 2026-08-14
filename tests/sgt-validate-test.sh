@@ -469,8 +469,12 @@ PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
 [[ -e "$concurrent_dir/exit-release-after-success" ]]
 
 [[ "$(cat "$repo_state/validation_pane")" == "%77" ]]
+# The launch command is wrapped in `bash -c` so the pane's default-shell never
+# has to parse bash's numbered-fd redirect: zsh, the macOS default, rejects
+# `exec 198<file` outright (GH #228).  The fd-198 redirect and the worker path
+# must still both appear inside that wrapper.
 [[ "$(cat "$repo_state/validation_pane_identity")" == \
-  "0|%77|7777|234567|exec 198<"*"$ROOT_DIR/bin/sgt-validation-worker"* ]]
+  "0|%77|7777|234567|bash -c "*"exec 198<"*"$ROOT_DIR/bin/sgt-validation-worker"* ]]
 [[ "$(cat "$repo_state/stage")" == "validation" ]]
 [[ "$(cat "$repo_state/window_name")" == "validation-app-task-1" ]]
 [[ "$(cat "$repo_state/validation_process_group")" == "7777" ]]
