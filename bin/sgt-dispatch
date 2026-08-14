@@ -1150,13 +1150,31 @@ if ! $DRY_RUN; then
   [[ -x "$SCRIPT_DIR/sgt-watch" ]] || _die "sgt-watch is required for fleet reconciliation"
   # The sweep is global fleet hygiene; this dispatch is scoped to one task.
   # sgt-watch returns nonzero when ANY terminal worker anywhere could not be
-  # recycled, and the two most common terminal states (drained, blocked) are
-  # rejected by sgt-cleanup — so those records are permanent.  Under `set -e`
-  # an unguarded call therefore deadlocks every future dispatch, including
-  # dispatches unrelated to the offending records.  Report and continue: the
-  # sweep's own diagnostics are already on stderr.
-  if ! "$SCRIPT_DIR/sgt-watch" --sync-all >/dev/null; then
-    printf 'WARNING: fleet reconciliation left unrecycled workers (see above); continuing with this dispatch.\n' >&2
+  # recycled (bin/sgt-watch:1933).  Recyclable terminal states are
+  # done|failed:*|drained|force-stopped; of those, sgt-cleanup's status gate
+  # accepts only `done` with a result, `failed: <reason>`, and `orphaned` with a
+  # closed td task, so a `drained` or `force-stopped` record is recyclable but
+  # never cleanable — permanent.  Under `set -e` an unguarded call therefore
+  # deadlocks every future dispatch, including dispatches unrelated to the
+  # offending records.
+  #
+  # Continuing is safe for a reason stronger than the states involved: TASK_ID is
+  # freshly generated above, its directory is collision-checked under the
+  # serialized dispatch-task lock, and every worktree path embeds TASK_ID — so a
+  # record the sweep could not recycle is structurally never this dispatch's own
+  # task, and nothing downstream depends on the sweep having succeeded.
+  #
+  # Report the exit status rather than asserting a cause: --sync-all also exits
+  # nonzero when sgt-watch itself fails under its own `set -e`, and reporting
+  # that as routine unrecycled-worker noise would reproduce exactly the
+  # misattribution GH #227 was filed about.
+  # Captured with `|| status=$?` rather than read inside `if ! cmd`, where `$?`
+  # is the status of the negation (always 0) and not the sweep's.
+  _sgt_sweep_status=0
+  "$SCRIPT_DIR/sgt-watch" --sync-all >/dev/null || _sgt_sweep_status=$?
+  if [[ "$_sgt_sweep_status" -ne 0 ]]; then
+    printf 'WARNING: fleet reconciliation exited %s (diagnostics above); continuing with this dispatch.\n' \
+      "$_sgt_sweep_status" >&2
   fi
 fi
 

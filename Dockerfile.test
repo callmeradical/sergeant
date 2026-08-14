@@ -40,6 +40,37 @@ RUN apt-get update -qq && \
       dash \
       && rm -rf /var/lib/apt/lists/*
 
+# yq parses project YAML in sgt-context, which sgt-dispatch calls during
+# preflight.  Without it every dispatch-driving suite fails in this image with
+# "yq is required: brew install yq" — a missing dependency reported as a test
+# failure.  The Bash suite is not in CI (CONTRIBUTING.md:124-126), so that gap
+# was only visible to whoever ran Docker locally.
+#
+# Installed from the mikefarah/yq release, NOT Debian's `yq` package.  Debian
+# ships python-yq, a jq wrapper with different output semantics: for
+# `yq '.name' file` it prints `"test"` where mikefarah v4 prints `test`.  Since
+# sgt-context assigns that output straight into project names and repo paths, the
+# wrong yq would corrupt every resolved path silently instead of failing — worse
+# than having no yq at all.
+#
+# Pinned by version and verified by checksum, matching how test:docker:drain pins
+# the bash:3.2 image by digest.
+ARG YQ_VERSION=v4.44.3
+ARG YQ_SHA256_AMD64=a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7
+ARG YQ_SHA256_ARM64=0e7e1524f68d91b3ff9b089872d185940ab0fa020a5a9052046ef10547023156
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) yq_arch=amd64; yq_sha="$YQ_SHA256_AMD64" ;; \
+      arm64) yq_arch=arm64; yq_sha="$YQ_SHA256_ARM64" ;; \
+      *) printf 'unsupported architecture for yq: %s\n' "$arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /usr/local/bin/yq \
+      "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${yq_arch}"; \
+    printf '%s  /usr/local/bin/yq\n' "$yq_sha" | sha256sum -c -; \
+    chmod +x /usr/local/bin/yq; \
+    yq --version | grep -Fq "$YQ_VERSION"
+
 # Verify Bash is present.
 RUN bash --version | head -1
 
