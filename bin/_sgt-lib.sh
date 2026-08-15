@@ -563,12 +563,34 @@ _require_tmux() {
 _require_git() {
   command -v git &>/dev/null || _die "git is required"
 }
+# Known-incompatible versions of opencode.  Dispatch refuses to proceed when the
+# installed version matches any entry here.  Strip any leading "v" before comparing
+# so "v1.18.10" and "1.18.10" both match.  Add new bad versions here as they are
+# identified — the gate runs before any pane, worktree, or fleet state is created.
+_OPENCODE_BAD_VERSIONS=(
+  "1.18.10"
+)
+
 _require_interactive_agent() {
   local agent_name
   agent_name="$(basename "$AGENT_CMD")"
   _sgt_harness_launch_contract "$agent_name" >/dev/null || \
     _die "unsupported interactive agent: $AGENT_CMD (expected opencode, goose, or claude)"
   command -v "$AGENT_CMD" &>/dev/null || _die "interactive agent not found: $AGENT_CMD"
+  if [[ "$agent_name" == "opencode" ]]; then
+    local raw_version detected_version bad
+    raw_version="$("$AGENT_CMD" --version 2>/dev/null | head -1 || true)"
+    # Tolerate "opencode 1.18.10", "v1.18.10", or bare "1.18.10"; strip any
+    # leading component before the semver token and any leading "v"/"V".
+    detected_version="${raw_version##*[[:space:]]}"
+    detected_version="${detected_version#v}"
+    detected_version="${detected_version#V}"
+    for bad in "${_OPENCODE_BAD_VERSIONS[@]}"; do
+      if [[ "$detected_version" == "$bad" ]]; then
+        _die "opencode $detected_version is known-incompatible with Sergeant; please upgrade"
+      fi
+    done
+  fi
   if [[ "$agent_name" == "goose" ]] && ! "$AGENT_CMD" session --help >/dev/null 2>&1; then
     _die "Goose does not support interactive sessions: expected 'goose session --help' to succeed"
   fi
