@@ -14,8 +14,6 @@ STATE_DIR="${HOME}/.sgt-issue-listener"
 STATE_FILE="${STATE_DIR}/state.json"
 DOCKER_FILE="${REPO_DIR}/docker/issue-fix.Dockerfile"
 DOCKER_IMAGE="sgt-issue-fix:latest"
-OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
-OLLAMA_MODEL="gemma3:27b"
 LOG_FILE="${STATE_DIR}/listener.log"
 NO_DOCKER="${NO_DOCKER:-false}"
 
@@ -29,18 +27,15 @@ for arg in "$@"; do
   esac
 done
 
-# ── Load ANTHROPIC_API_KEY from .bashrc if not in env ─────────────────────────
+# ── Load ANTHROPIC_API_KEY from env file if not already set ───────────────────
+[ -f "${HOME}/.config/sergeant/env" ] && source "${HOME}/.config/sergeant/env"
 if [[ -z "${ANTHROPIC_API_KEY:-}" ]] && [[ -f "${HOME}/.bashrc" ]]; then
   _key=$(grep -oP 'ANTHROPIC_API_KEY=\K\S+' "${HOME}/.bashrc" | head -1 || true)
   [[ -n "${_key}" ]] && export ANTHROPIC_API_KEY="${_key}"
 fi
 
-# ── Model label (no key leak) ─────────────────────────────────────────────────
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-  MODEL_LABEL="claude-haiku-4-5 (Anthropic)"
-else
-  MODEL_LABEL="${OLLAMA_MODEL} (Ollama)"
-fi
+# ── Model label ───────────────────────────────────────────────────────────────
+MODEL_LABEL="claude-sonnet-4-6 (Anthropic)"
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 log() {
@@ -81,40 +76,20 @@ call_llm() {
   local prompt="$1"
   local max_tokens="${2:-1024}"
 
-  if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-    local payload response text
-    payload=$(jq -n \
-      --arg model "claude-haiku-4-5" \
-      --argjson max_tokens "$max_tokens" \
-      --arg content "$prompt" \
-      '{model: $model, max_tokens: $max_tokens, messages: [{role: "user", content: $content}]}')
-    response=$(curl -sf -X POST "https://api.anthropic.com/v1/messages" \
-      -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-      -H "anthropic-version: 2023-06-01" \
-      -H "content-type: application/json" \
-      --max-time 60 \
-      -d "$payload" 2>&1) || { log "Anthropic API call failed; falling back to Ollama"; response=""; }
-    text=$(echo "$response" | jq -r '.content[0].text // empty' 2>/dev/null || true)
-    if [[ -n "$text" ]]; then
-      echo "$text"
-      return
-    fi
-  fi
-
-  log "Calling Ollama (${OLLAMA_MODEL})..."
-  local response
-  response=$(curl -sf -X POST "${OLLAMA_HOST}/api/generate" \
-    -H "Content-Type: application/json" \
-    --max-time 180 \
-    -d "$(jq -n \
-      --arg model "${OLLAMA_MODEL}" \
-      --arg prompt "$prompt" \
-      '{model: $model, prompt: $prompt, stream: false, options: {temperature: 0.2}}')" 2>&1) || {
-    log "Ollama call failed: ${response:0:200}"
-    echo ""
-    return
-  }
-  echo "$response" | jq -r '.response // empty' 2>/dev/null || true
+  local payload response text
+  payload=$(jq -n \
+    --arg model "claude-sonnet-4-6" \
+    --argjson max_tokens "$max_tokens" \
+    --arg content "$prompt" \
+    '{model: $model, max_tokens: $max_tokens, messages: [{role: "user", content: $content}]}')
+  response=$(curl -sf -X POST "https://api.anthropic.com/v1/messages" \
+    -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "content-type: application/json" \
+    --max-time 120 \
+    -d "$payload" 2>&1) || { log "Claude API call failed"; echo ""; return 1; }
+  text=$(echo "$response" | jq -r '.content[0].text // empty' 2>/dev/null || true)
+  echo "$text"
 }
 
 strip_markdown_fences() {
