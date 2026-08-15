@@ -1373,20 +1373,8 @@ _require_clean_worktrees() {
   done
 }
 
-_path_device() {
-  local device parent path="$1"
-
-  while [[ ! -e "$path" && ! -L "$path" ]]; do
-    parent="$(dirname "$path")"
-    [[ "$parent" != "$path" ]] || return 1
-    path="$parent"
-  done
-
-  device="$(stat -c '%d' "$path" 2>/dev/null || \
-    stat -f '%d' "$path" 2>/dev/null)" || return 1
-  [[ -n "$device" && "$device" != *$'\n'* ]] || return 1
-  printf '%s\n' "$device"
-}
+# _path_device is provided by _sgt-lib.sh (sourced above) and shared with
+# sgt-dispatch for the cross-device pre-flight check (#236).
 
 _same_filesystem_pair() {
   local fleet_device repo_dir="$1" repo_name="$2" worktree="$3" worktree_device
