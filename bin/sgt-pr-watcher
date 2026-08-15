@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # sgt-pr-watcher — GitHub PR monitor for the Sergeant project
-# Polls open PRs, runs AI code review via Ollama, posts alerts to ntfy → Discord
+# Polls open PRs, runs AI code review via Claude (claude-sonnet-4-6), posts alerts to ntfy → Discord
 # Runs every 10 minutes via systemd timer.
 #
 # State: ~/.sgt-pr-watcher/state.json
 # Repo:  callmeradical/sergeant (~/dev/sergeant)
 
 set -euo pipefail
+
+###############################################################################
+# Env / API keys
+###############################################################################
+[ -f "${HOME}/.config/sergeant/env" ] && source "${HOME}/.config/sergeant/env"
 
 ###############################################################################
 # Config
@@ -16,8 +21,6 @@ REPO_DIR="${HOME}/dev/sergeant"
 STATE_DIR="${HOME}/.sgt-pr-watcher"
 STATE_FILE="${STATE_DIR}/state.json"
 LOG_FILE="${STATE_DIR}/watcher.log"
-OLLAMA_URL="http://localhost:11434/api/generate"
-OLLAMA_MODEL="gemma3:27b"
 NTFY_URL="https://epictetus.taila4fb6a.ts.net:8443"
 NTFY_TOPIC="smith-events"
 DISCORD_WEBHOOK="https://discord.com/api/webhooks/1528222053822496769/BjlzAZ7czA8vJN6Y_3ASkAa08lwTNlj6Mlk4ooqMLcYwM9QQjJfEHpcRNs_nTrjn3_Cd"
@@ -63,9 +66,24 @@ mark_reviewed() {
 }
 
 ###############################################################################
-# AI review via Ollama
+# AI review via Claude (claude-sonnet-4-6)
 ###############################################################################
-ollama_review() {
+_call_claude() {
+    local prompt="$1"
+    local response
+    response=$(curl -s --max-time 180 https://api.anthropic.com/v1/messages \
+        -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+        -H "anthropic-version: 2023-06-01" \
+        -H "content-type: application/json" \
+        -d "$(jq -n \
+            --arg model "claude-sonnet-4-6" \
+            --arg prompt "$prompt" \
+            '{model: $model, max_tokens: 2048, messages: [{role: "user", content: $prompt}]}'
+        )") || { log "Claude API request failed"; echo ""; return 1; }
+    echo "${response}" | jq -r '.content[0].text // empty' 2>/dev/null || echo ""
+}
+
+ai_review() {
     local pr_num="$1"
     local pr_title="$2"
     local pr_body="$3"
@@ -91,19 +109,7 @@ RISK: LOW / MEDIUM / HIGH — with brief reason
 ISSUES: Any bugs, edge cases, style problems (bullet list; write \"None\" if clean)
 RECOMMENDATION: MERGE / REQUEST_CHANGES / NEEDS_DISCUSSION"
 
-    local payload
-    payload=$(jq -n \
-        --arg model "${OLLAMA_MODEL}" \
-        --arg prompt "${prompt}" \
-        '{"model": $model, "prompt": $prompt, "stream": false, "options": {"temperature": 0.2, "num_predict": 1024}}')
-
-    # Call Ollama with a generous timeout (review can take ~60s for large diffs)
-    local response
-    response=$(curl -s --max-time 180 -X POST "${OLLAMA_URL}" \
-        -H "Content-Type: application/json" \
-        -d "${payload}") || { log "Ollama request failed for PR #${pr_num}"; echo ""; return 1; }
-
-    echo "${response}" | jq -r '.response // ""' 2>/dev/null || echo ""
+    _call_claude "${prompt}"
 }
 
 ###############################################################################
@@ -236,9 +242,9 @@ process_pr() {
     [[ -z "${pr_url}" ]] && pr_url="https://github.com/${REPO}/pull/${pr_num}"
 
     # Run AI review
-    log "Requesting AI review for PR #${pr_num} from Ollama (${OLLAMA_MODEL})..."
+    log "Requesting AI review for PR #${pr_num} from Claude (claude-sonnet-4-6)..."
     local review_text
-    review_text=$(ollama_review "${pr_num}" "${pr_title}" "${pr_body}" "${diff_text}")
+    review_text=$(ai_review "${pr_num}" "${pr_title}" "${pr_body}" "${diff_text}")
 
     if [[ -z "${review_text}" ]]; then
         log "Empty review response for PR #${pr_num} — posting minimal alert"
