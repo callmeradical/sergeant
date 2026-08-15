@@ -1,0 +1,332 @@
+#!/usr/bin/env bash
+# sgt-pr-watcher — GitHub PR monitor for the Sergeant project
+# Polls open PRs, runs AI code review via Ollama, posts alerts to ntfy → Discord
+# Runs every 10 minutes via systemd timer.
+#
+# State: ~/.sgt-pr-watcher/state.json
+# Repo:  callmeradical/sergeant (~/dev/sergeant)
+
+set -euo pipefail
+
+###############################################################################
+# Config
+###############################################################################
+REPO="callmeradical/sergeant"
+REPO_DIR="${HOME}/dev/sergeant"
+STATE_DIR="${HOME}/.sgt-pr-watcher"
+STATE_FILE="${STATE_DIR}/state.json"
+LOG_FILE="${STATE_DIR}/watcher.log"
+OLLAMA_URL="http://localhost:11434/api/generate"
+OLLAMA_MODEL="gemma3:27b"
+NTFY_URL="https://epictetus.taila4fb6a.ts.net:8443"
+NTFY_TOPIC="smith-events"
+DISCORD_WEBHOOK="https://discord.com/api/webhooks/1528222053822496769/BjlzAZ7czA8vJN6Y_3ASkAa08lwTNlj6Mlk4ooqMLcYwM9QQjJfEHpcRNs_nTrjn3_Cd"
+DIFF_MAX_CHARS=12000   # truncate huge diffs to stay within context
+PR_LIMIT=50
+
+###############################################################################
+# Helpers
+###############################################################################
+log() { mkdir -p "${STATE_DIR}"; echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" | tee -a "${LOG_FILE}"; }
+
+die() { log "ERROR: $*"; exit 1; }
+
+json_get() {
+    # json_get <file> <jq-expression>
+    jq -r "$2" "$1" 2>/dev/null || echo ""
+}
+
+ensure_state() {
+    mkdir -p "${STATE_DIR}"
+    if [[ ! -f "${STATE_FILE}" ]]; then
+        echo '{"reviewed_prs":{},"last_run":""}' > "${STATE_FILE}"
+    fi
+}
+
+is_reviewed() {
+    local pr_num="$1"
+    local updated_at="$2"
+    # Returns 0 (true) if already reviewed AND updatedAt hasn't changed
+    local stored_updated
+    stored_updated=$(jq -r ".reviewed_prs[\"${pr_num}\"] // \"\"" "${STATE_FILE}" 2>/dev/null)
+    [[ "${stored_updated}" == "${updated_at}" ]]
+}
+
+mark_reviewed() {
+    local pr_num="$1"
+    local updated_at="$2"
+    local tmp
+    tmp=$(mktemp)
+    jq --arg n "${pr_num}" --arg t "${updated_at}" \
+        '.reviewed_prs[$n] = $t | .last_run = (now | todate)' \
+        "${STATE_FILE}" > "${tmp}" && mv "${tmp}" "${STATE_FILE}"
+}
+
+###############################################################################
+# AI review via Ollama
+###############################################################################
+ollama_review() {
+    local pr_num="$1"
+    local pr_title="$2"
+    local pr_body="$3"
+    local diff_text="$4"
+
+    # Truncate diff if huge
+    if [[ ${#diff_text} -gt ${DIFF_MAX_CHARS} ]]; then
+        diff_text="${diff_text:0:${DIFF_MAX_CHARS}}"$'\n\n[... diff truncated for length ...]'
+    fi
+
+    local prompt
+    prompt="Review this pull request for the Sergeant project (a bash-based distributed task orchestration system).
+
+PR #${pr_num}: ${pr_title}
+Description: ${pr_body:-'(no description)'}
+
+Diff:
+${diff_text}
+
+Provide a structured review with EXACTLY these sections (use these exact headers):
+SUMMARY: What this PR does (2-3 sentences)
+RISK: LOW / MEDIUM / HIGH — with brief reason
+ISSUES: Any bugs, edge cases, style problems (bullet list; write \"None\" if clean)
+RECOMMENDATION: MERGE / REQUEST_CHANGES / NEEDS_DISCUSSION"
+
+    local payload
+    payload=$(jq -n \
+        --arg model "${OLLAMA_MODEL}" \
+        --arg prompt "${prompt}" \
+        '{"model": $model, "prompt": $prompt, "stream": false, "options": {"temperature": 0.2, "num_predict": 1024}}')
+
+    # Call Ollama with a generous timeout (review can take ~60s for large diffs)
+    local response
+    response=$(curl -s --max-time 180 -X POST "${OLLAMA_URL}" \
+        -H "Content-Type: application/json" \
+        -d "${payload}") || { log "Ollama request failed for PR #${pr_num}"; echo ""; return 1; }
+
+    echo "${response}" | jq -r '.response // ""' 2>/dev/null || echo ""
+}
+
+###############################################################################
+# Parse structured review fields
+###############################################################################
+extract_field() {
+    # extract_field <review_text> <field_name>
+    local text="$1"
+    local field="$2"
+    # Grab text from "FIELD:" to the next all-caps header or end
+    echo "${text}" | awk "
+        /^${field}:/ { found=1; sub(/^${field}:[[:space:]]*/,\"\"); print; next }
+        found && /^[A-Z_]+:/ { exit }
+        found { print }
+    " | sed 's/^[[:space:]]*//' | sed '/^$/d' | head -20
+}
+
+###############################################################################
+# Alert via ntfy → Discord bridge + direct Discord webhook fallback
+###############################################################################
+post_alert() {
+    local pr_num="$1"
+    local pr_title="$2"
+    local pr_author="$3"
+    local pr_url="$4"
+    local summary="$5"
+    local risk="$6"
+    local issues="$7"
+    local recommendation="$8"
+
+    # Choose emoji/priority based on recommendation and risk
+    local tags="github"
+    local priority="default"
+    local emoji="🔍"
+
+    case "${recommendation}" in
+        MERGE)            tags="github,white_check_mark"; emoji="✅" ;;
+        REQUEST_CHANGES)  tags="github,warning"; priority="high"; emoji="⚠️" ;;
+        NEEDS_DISCUSSION) tags="github,speech_balloon"; priority="high"; emoji="💬" ;;
+    esac
+
+    if [[ "${risk}" == *"HIGH"* ]]; then
+        priority="high"
+    fi
+
+    local body
+    body="📋 PR #${pr_num}: ${pr_title}
+👤 Author: ${pr_author}
+🔗 ${pr_url}
+
+${summary}
+
+Risk: ${risk}
+${issues}
+
+Recommendation: ${recommendation}
+
+Reply \"merge ${pr_num}\" or \"decline ${pr_num}\" in #sergeant-dev"
+
+    # --- Path 1: ntfy → ChatOps bridge ---
+    local ntfy_status
+    ntfy_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
+        -H "Title: PR #${pr_num}: ${pr_title}" \
+        -H "Tags: ${tags}" \
+        -H "Priority: ${priority}" \
+        -H "Click: ${pr_url}" \
+        -d "${body}" \
+        "${NTFY_URL}/${NTFY_TOPIC}" 2>/dev/null) || ntfy_status="000"
+
+    if [[ "${ntfy_status}" =~ ^2 ]]; then
+        log "ntfy alert posted for PR #${pr_num} (HTTP ${ntfy_status})"
+    else
+        log "ntfy unavailable (HTTP ${ntfy_status}) — falling back to Discord webhook"
+
+        # --- Path 2: direct Discord webhook ---
+        local discord_body
+        discord_body=$(jq -n \
+            --arg content "${emoji} **PR #${pr_num} ready for review — ${recommendation}**
+
+${body}" \
+            --arg username "sgt-pr-watcher" \
+            '{"content": $content, "username": $username}')
+
+        local discord_status
+        discord_status=$(curl -s -o /tmp/discord_response.json -w "%{http_code}" \
+            -H 'Content-Type: application/json' \
+            -d "${discord_body}" \
+            "${DISCORD_WEBHOOK}" 2>/dev/null) || discord_status="000"
+
+        if [[ "${discord_status}" =~ ^2 ]]; then
+            log "Discord webhook posted for PR #${pr_num} (HTTP ${discord_status})"
+        else
+            log "WARNING: Discord webhook returned HTTP ${discord_status} for PR #${pr_num}"
+            cat /tmp/discord_response.json 2>/dev/null >> "${LOG_FILE}" || true
+        fi
+    fi
+}
+
+###############################################################################
+# Process a single PR
+###############################################################################
+process_pr() {
+    local pr_num="$1"
+    local pr_title="$2"
+    local pr_author="$3"
+    local pr_updated_at="$4"
+
+    log "Processing PR #${pr_num}: ${pr_title}"
+
+    # Fetch diff
+    local diff_text
+    diff_text=$(cd "${REPO_DIR}" && gh pr diff "${pr_num}" 2>/dev/null) || {
+        log "Failed to fetch diff for PR #${pr_num} — skipping"
+        return
+    }
+
+    if [[ -z "${diff_text}" ]]; then
+        log "Empty diff for PR #${pr_num} — skipping"
+        return
+    fi
+
+    # Fetch PR body and URL
+    local pr_json
+    pr_json=$(cd "${REPO_DIR}" && gh pr view "${pr_num}" \
+        --json title,body,url,comments 2>/dev/null) || pr_json="{}"
+
+    local pr_body pr_url
+    pr_body=$(echo "${pr_json}" | jq -r '.body // ""' 2>/dev/null | head -50 | tr '\n' ' ')
+    pr_url=$(echo "${pr_json}" | jq -r '.url // ""' 2>/dev/null)
+    [[ -z "${pr_url}" ]] && pr_url="https://github.com/${REPO}/pull/${pr_num}"
+
+    # Run AI review
+    log "Requesting AI review for PR #${pr_num} from Ollama (${OLLAMA_MODEL})..."
+    local review_text
+    review_text=$(ollama_review "${pr_num}" "${pr_title}" "${pr_body}" "${diff_text}")
+
+    if [[ -z "${review_text}" ]]; then
+        log "Empty review response for PR #${pr_num} — posting minimal alert"
+        review_text="SUMMARY: AI review unavailable.
+RISK: UNKNOWN
+ISSUES: Could not generate automated review.
+RECOMMENDATION: NEEDS_DISCUSSION"
+    fi
+
+    log "Review received for PR #${pr_num} (${#review_text} chars)"
+
+    # Extract fields
+    local summary risk issues recommendation
+    summary=$(extract_field "${review_text}" "SUMMARY")
+    risk=$(extract_field "${review_text}" "RISK")
+    issues=$(extract_field "${review_text}" "ISSUES")
+    recommendation=$(extract_field "${review_text}" "RECOMMENDATION")
+
+    # Defaults if parsing fails
+    [[ -z "${summary}" ]]        && summary="See PR for details."
+    [[ -z "${risk}" ]]           && risk="UNKNOWN"
+    [[ -z "${issues}" ]]         && issues="None"
+    [[ -z "${recommendation}" ]] && recommendation="NEEDS_DISCUSSION"
+
+    # Post alert (ntfy → Discord bridge, with Discord webhook fallback)
+    post_alert "${pr_num}" "${pr_title}" "${pr_author}" "${pr_url}" \
+              "${summary}" "${risk}" "${issues}" "${recommendation}"
+
+    # Persist review to log
+    {
+        echo "=== PR #${pr_num} review @ $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
+        echo "${review_text}"
+        echo ""
+    } >> "${STATE_DIR}/reviews.log"
+
+    # Mark reviewed
+    mark_reviewed "${pr_num}" "${pr_updated_at}"
+    log "PR #${pr_num} marked reviewed (updatedAt=${pr_updated_at})"
+}
+
+###############################################################################
+# Main
+###############################################################################
+main() {
+    log "=== sgt-pr-watcher starting ==="
+    ensure_state
+
+    # Fetch open PRs
+    local prs_json
+    prs_json=$(cd "${REPO_DIR}" && gh pr list \
+        --state open \
+        --json number,title,author,headRefName,updatedAt,labels \
+        --limit "${PR_LIMIT}" 2>/dev/null) || {
+        log "Failed to list PRs — check gh auth / network"
+        exit 1
+    }
+
+    local pr_count
+    pr_count=$(echo "${prs_json}" | jq 'length' 2>/dev/null || echo 0)
+    log "Found ${pr_count} open PR(s)"
+
+    if [[ "${pr_count}" -eq 0 ]]; then
+        log "No open PRs — nothing to do"
+        # Still update last_run
+        local tmp
+        tmp=$(mktemp)
+        jq '.last_run = (now | todate)' "${STATE_FILE}" > "${tmp}" && mv "${tmp}" "${STATE_FILE}"
+        exit 0
+    fi
+
+    # Process each PR
+    local processed=0
+    while IFS= read -r pr_json_line; do
+        local pr_num pr_title pr_author pr_updated_at
+        pr_num=$(echo "${pr_json_line}" | jq -r '.number')
+        pr_title=$(echo "${pr_json_line}" | jq -r '.title')
+        pr_author=$(echo "${pr_json_line}" | jq -r '.author.login')
+        pr_updated_at=$(echo "${pr_json_line}" | jq -r '.updatedAt')
+
+        if is_reviewed "${pr_num}" "${pr_updated_at}"; then
+            log "PR #${pr_num} already reviewed at this revision — skipping"
+        else
+            process_pr "${pr_num}" "${pr_title}" "${pr_author}" "${pr_updated_at}"
+            processed=$((processed + 1))
+        fi
+    done < <(echo "${prs_json}" | jq -c '.[]')
+
+    log "Done. Processed ${processed} PR(s) this run."
+}
+
+main "$@"

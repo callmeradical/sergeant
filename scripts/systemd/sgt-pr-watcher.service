@@ -1,0 +1,11 @@
+[Unit]
+Description=Sergeant GitHub PR Watcher
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/larscromley/dev/sergeant/bin/sgt-pr-watcher
+Environment=HOME=/home/larscromley
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/home/larscromley/.local/bin
+StandardOutput=journal
+StandardError=journal
