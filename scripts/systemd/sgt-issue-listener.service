@@ -1,0 +1,20 @@
+[Unit]
+Description=Sergeant GitHub Issue Listener (triage + Docker red/green pipeline)
+Documentation=https://github.com/callmeradical/sergeant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Login shell so .bashrc env vars (ANTHROPIC_API_KEY, etc.) are available
+ExecStart=/bin/bash -l %h/dev/sergeant/bin/sgt-issue-listener
+Environment=HOME=%h
+WorkingDirectory=%h/dev/sergeant
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sgt-issue-listener
+# Allow up to 20 minutes for Docker build + LLM inference on first run
+TimeoutStartSec=1200
+
+[Install]
+WantedBy=default.target

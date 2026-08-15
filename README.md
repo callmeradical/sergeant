@@ -410,3 +410,43 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, build, test, and release instr
 ## License
 
 MIT
+## GitHub Issue Listener
+
+`sgt-issue-listener` is a daemon that polls the Sergeant GitHub repo for new issues, triages them via LLM, and attempts a red/green TDD auto-fix using Docker.
+
+### How it works
+
+1. **Poll** — Every 30 minutes, fetch open issues and skip already-processed ones (state in `~/.sgt-issue-listener/state.json`)
+2. **Triage** — Send the issue title + body to Claude Haiku (or Ollama `gemma3:27b` as fallback) and post a structured triage comment with severity, category, affected files, and whether it's auto-fixable
+3. **Red phase** — For auto-fixable bugs: generate a failing bash test that reproduces the issue, run it in Docker to confirm it fails
+4. **Green phase** — Generate a unified diff patch, apply it to a repo copy, re-run the test to confirm it passes
+5. **PR** — If the green phase passes, commit the test + patch on `auto-fix/issue-<N>` and open a PR
+
+### Setup
+
+```bash
+# Install systemd units
+cp scripts/systemd/sgt-issue-listener.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now sgt-issue-listener.timer
+
+# Check status
+systemctl --user status sgt-issue-listener.timer
+
+# Run manually (with Docker pipeline)
+bin/sgt-issue-listener
+
+# Run triage only (no Docker)
+bin/sgt-issue-listener --no-docker
+```
+
+### Requirements
+
+- `gh` CLI authenticated to the repo
+- Docker (for the red/green TDD pipeline)
+- One of: `ANTHROPIC_API_KEY` in environment (uses Claude Haiku), or Ollama running locally with `gemma3:27b` pulled
+- `jq`, `python3`, `git`
+
+### Docker image
+
+`docker/issue-fix.Dockerfile` — extends `debian:bookworm-slim` with the same dependencies as `Dockerfile.test` plus `jq` and `patch`. The image is built automatically on first run.

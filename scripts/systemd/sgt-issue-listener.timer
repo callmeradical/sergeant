@@ -1,0 +1,14 @@
+[Unit]
+Description=Run Sergeant issue listener every 30 minutes
+After=network-online.target
+
+[Timer]
+# First run 5 minutes after timer starts
+OnBootSec=5min
+# Then every 30 minutes
+OnUnitActiveSec=30min
+# Persist timer state across reboots
+Persistent=true
+
+[Install]
+WantedBy=timers.target

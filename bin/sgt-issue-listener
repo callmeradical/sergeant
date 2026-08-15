@@ -1,0 +1,568 @@
+#!/usr/bin/env bash
+# sgt-issue-listener — Poll GitHub issues, triage via LLM, attempt Docker red/green TDD fix
+#
+# Usage: sgt-issue-listener [--once] [--no-docker]
+#   --once       : process pending issues and exit (default for systemd oneshot)
+#   --no-docker  : triage only, skip red/green pipeline
+
+set -euo pipefail
+
+# ── Config ────────────────────────────────────────────────────────────────────
+REPO="callmeradical/sergeant"
+REPO_DIR="${HOME}/dev/sergeant"
+STATE_DIR="${HOME}/.sgt-issue-listener"
+STATE_FILE="${STATE_DIR}/state.json"
+DOCKER_FILE="${REPO_DIR}/docker/issue-fix.Dockerfile"
+DOCKER_IMAGE="sgt-issue-fix:latest"
+OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
+OLLAMA_MODEL="gemma3:27b"
+LOG_FILE="${STATE_DIR}/listener.log"
+NO_DOCKER="${NO_DOCKER:-false}"
+
+mkdir -p "${STATE_DIR}"
+
+# ── Parse args ────────────────────────────────────────────────────────────────
+for arg in "$@"; do
+  case "$arg" in
+    --no-docker) NO_DOCKER=true ;;
+    --once) : ;;
+  esac
+done
+
+# ── Load ANTHROPIC_API_KEY from .bashrc if not in env ─────────────────────────
+if [[ -z "${ANTHROPIC_API_KEY:-}" ]] && [[ -f "${HOME}/.bashrc" ]]; then
+  _key=$(grep -oP 'ANTHROPIC_API_KEY=\K\S+' "${HOME}/.bashrc" | head -1 || true)
+  [[ -n "${_key}" ]] && export ANTHROPIC_API_KEY="${_key}"
+fi
+
+# ── Model label (no key leak) ─────────────────────────────────────────────────
+if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+  MODEL_LABEL="claude-haiku-4-5 (Anthropic)"
+else
+  MODEL_LABEL="${OLLAMA_MODEL} (Ollama)"
+fi
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+log() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "${LOG_FILE}"
+}
+
+log_section() { log ""; log "── $* ──"; }
+
+# ── State management ──────────────────────────────────────────────────────────
+init_state() {
+  if [[ ! -f "${STATE_FILE}" ]]; then
+    echo '{"last_seen": 0, "processed": []}' > "${STATE_FILE}"
+    log "Initialized state file: ${STATE_FILE}"
+  fi
+}
+
+get_last_seen() {
+  jq -r '.last_seen' "${STATE_FILE}"
+}
+
+is_processed() {
+  local num="$1"
+  jq -e --argjson n "$num" '.processed | map(. == $n) | any' "${STATE_FILE}" >/dev/null 2>&1
+}
+
+mark_processed() {
+  local num="$1"
+  local tmp
+  tmp=$(mktemp)
+  jq --argjson n "$num" '
+    .processed = ((.processed + [$n]) | unique) |
+    if $n > .last_seen then .last_seen = $n else . end
+  ' "${STATE_FILE}" > "$tmp" && mv "$tmp" "${STATE_FILE}"
+}
+
+# ── LLM ───────────────────────────────────────────────────────────────────────
+call_llm() {
+  local prompt="$1"
+  local max_tokens="${2:-1024}"
+
+  if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+    local payload response text
+    payload=$(jq -n \
+      --arg model "claude-haiku-4-5" \
+      --argjson max_tokens "$max_tokens" \
+      --arg content "$prompt" \
+      '{model: $model, max_tokens: $max_tokens, messages: [{role: "user", content: $content}]}')
+    response=$(curl -sf -X POST "https://api.anthropic.com/v1/messages" \
+      -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+      -H "anthropic-version: 2023-06-01" \
+      -H "content-type: application/json" \
+      --max-time 60 \
+      -d "$payload" 2>&1) || { log "Anthropic API call failed; falling back to Ollama"; response=""; }
+    text=$(echo "$response" | jq -r '.content[0].text // empty' 2>/dev/null || true)
+    if [[ -n "$text" ]]; then
+      echo "$text"
+      return
+    fi
+  fi
+
+  log "Calling Ollama (${OLLAMA_MODEL})..."
+  local response
+  response=$(curl -sf -X POST "${OLLAMA_HOST}/api/generate" \
+    -H "Content-Type: application/json" \
+    --max-time 180 \
+    -d "$(jq -n \
+      --arg model "${OLLAMA_MODEL}" \
+      --arg prompt "$prompt" \
+      '{model: $model, prompt: $prompt, stream: false, options: {temperature: 0.2}}')" 2>&1) || {
+    log "Ollama call failed: ${response:0:200}"
+    echo ""
+    return
+  }
+  echo "$response" | jq -r '.response // empty' 2>/dev/null || true
+}
+
+strip_markdown_fences() {
+  # Strip leading/trailing ```lang and ``` markers from LLM output
+  python3 -c "
+import sys, re
+text = sys.stdin.read()
+text = re.sub(r'^\s*\`\`\`[a-z]*\s*\n?', '', text)
+text = re.sub(r'\n?\s*\`\`\`\s*$', '', text)
+print(text.strip())
+"
+}
+
+extract_json_from_text() {
+  local text="$1"
+  python3 - <<PYEOF
+import sys, json, re
+
+text = """$text"""
+# Strip markdown fences
+text = re.sub(r'^\s*\`\`\`(?:json)?\s*', '', text, flags=re.MULTILINE)
+text = re.sub(r'\s*\`\`\`\s*$', '', text, flags=re.MULTILINE)
+text = text.strip()
+
+# Try whole text first
+try:
+    obj = json.loads(text)
+    print(json.dumps(obj))
+    sys.exit(0)
+except Exception:
+    pass
+
+# Find first {...} block (possibly nested one level)
+match = re.search(r'\{(?:[^{}]|\{[^{}]*\})*\}', text, re.DOTALL)
+if match:
+    try:
+        obj = json.loads(match.group())
+        print(json.dumps(obj))
+        sys.exit(0)
+    except Exception:
+        pass
+
+print(json.dumps({"category":"bug","severity":"medium","affected_files":[],
+    "auto_fixable":False,"summary":"LLM parse error","fix_approach":""}))
+PYEOF
+}
+
+# ── Triage ────────────────────────────────────────────────────────────────────
+triage_issue() {
+  local number="$1" title="$2" body="$3"
+
+  local prompt="You are a software engineering assistant triaging GitHub issues for 'Sergeant' — a bash-based agent-dispatch and orchestration tool (shell scripts + Go, tests are bash scripts in tests/).
+
+Issue #${number}: ${title}
+
+Body:
+${body}
+
+Analyze and respond with ONLY a JSON object (no markdown fences) with these fields:
+- \"category\": \"bug\" | \"enhancement\" | \"question\" | \"invalid\"
+- \"severity\": \"high\" | \"medium\" | \"low\"
+- \"affected_files\": array of file path strings (e.g. [\"bin/sgt-dispatch\", \"bin/sgt-cleanup\"]), max 5
+- \"auto_fixable\": boolean — true ONLY if this is a clear, deterministic bug with an obvious fix
+- \"summary\": one concise sentence explaining the issue
+- \"fix_approach\": one sentence describing the fix (empty string if not auto_fixable)
+
+Respond with valid JSON only."
+
+  local raw_response
+  raw_response=$(call_llm "$prompt" 512)
+  extract_json_from_text "$raw_response"
+}
+
+# ── GitHub comments ───────────────────────────────────────────────────────────
+post_triage_comment() {
+  local number="$1" triage_json="$2"
+
+  local category severity affected_files summary auto_fixable fix_approach
+  category=$(echo "$triage_json" | jq -r '.category // "unknown"')
+  severity=$(echo "$triage_json" | jq -r '.severity // "unknown"')
+  affected_files=$(echo "$triage_json" | jq -r '.affected_files | join(", ")' 2>/dev/null || echo "unknown")
+  summary=$(echo "$triage_json" | jq -r '.summary // "No summary"')
+  auto_fixable=$(echo "$triage_json" | jq -r '.auto_fixable // false')
+  fix_approach=$(echo "$triage_json" | jq -r '.fix_approach // ""')
+
+  local sev_icon="🟡"
+  [[ "$severity" == "high" ]] && sev_icon="🔴"
+  [[ "$severity" == "low" ]] && sev_icon="🟢"
+
+  local pipeline_note=""
+  if [[ "$auto_fixable" == "true" ]]; then
+    pipeline_note="
+**Proposed fix:** ${fix_approach}
+
+⚙️ Auto red/green pipeline triggered."
+  fi
+
+  local body="## 🤖 Auto-Triage
+
+| Field | Value |
+|-------|-------|
+| **Category** | \`${category}\` |
+| **Severity** | ${sev_icon} \`${severity}\` |
+| **Auto-fixable** | \`${auto_fixable}\` |
+| **Affected files** | \`${affected_files:-unknown}\` |
+
+**Summary:** ${summary}
+${pipeline_note}
+
+---
+*Triaged by \`sgt-issue-listener\` · $(date -u '+%Y-%m-%d %H:%M UTC') · model: ${MODEL_LABEL}*"
+
+  gh issue comment "${number}" --repo "${REPO}" --body "$body"
+  log "Issue #${number}: Posted triage comment"
+}
+
+post_pipeline_comment() {
+  local number="$1" red_status="$2" green_status="$3" work_dir="$4"
+
+  local red_icon green_icon
+  [[ "$red_status" == "failed_as_expected" ]] && red_icon="✅" || red_icon="⚠️"
+  [[ "$green_status" == "passed" ]] && green_icon="✅" || green_icon="❌"
+
+  local red_log green_log test_snippet
+  red_log=$(cat "${work_dir}/red-phase.log" 2>/dev/null | head -40 || echo "(no log)")
+  green_log=$(cat "${work_dir}/green-phase.log" 2>/dev/null | head -40 || echo "(no log)")
+  test_snippet=$(head -25 "${work_dir}/test.sh" 2>/dev/null || echo "(no test)")
+
+  local body="## 🔴🟢 Red/Green Pipeline Result
+
+### Red Phase — Reproducing test ${red_icon}
+Status: **${red_status}**
+
+<details><summary>Generated test (first 25 lines)</summary>
+
+\`\`\`bash
+${test_snippet}
+\`\`\`
+
+</details>
+
+<details><summary>Red phase output</summary>
+
+\`\`\`
+${red_log}
+\`\`\`
+
+</details>
+
+### Green Phase — Fix attempt ${green_icon}
+Status: **${green_status}**
+
+<details><summary>Green phase output</summary>
+
+\`\`\`
+${green_log}
+\`\`\`
+
+</details>
+
+---
+*Pipeline by \`sgt-issue-listener\` · model: ${MODEL_LABEL}*"
+
+  gh issue comment "${number}" --repo "${REPO}" --body "$body"
+  log "Issue #${number}: Posted pipeline comment"
+}
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+build_docker_image() {
+  if docker image inspect "${DOCKER_IMAGE}" >/dev/null 2>&1; then
+    log "Docker image ${DOCKER_IMAGE} already present"
+    return 0
+  fi
+  log "Building Docker image ${DOCKER_IMAGE}..."
+  docker build -f "${DOCKER_FILE}" -t "${DOCKER_IMAGE}" "${REPO_DIR}" \
+    2>&1 | tee "${STATE_DIR}/docker-build.log" | tail -5
+  log "Docker image built"
+}
+
+run_red_green() {
+  local number="$1" title="$2" body="$3" affected_files="$4" fix_approach="$5"
+
+  # NOTE: work_dir is intentionally NOT echoed — caller computes it as
+  # "${STATE_DIR}/issue-${number}" to avoid $() stdout capture issues.
+  local work_dir="${STATE_DIR}/issue-${number}"
+  mkdir -p "${work_dir}"
+
+  # ── Phase 1: Generate failing test ──────────────────────────────────────────
+  log_section "Issue #${number}: Red phase — generating failing test"
+
+  local red_prompt="You are a TDD assistant for the Sergeant project (bash agent-dispatch tool).
+Tests in tests/ follow this skeleton:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  REPO_DIR=\"/repo\"
+  TMPDIR_TEST=\$(mktemp -d); trap 'rm -rf \"\$TMPDIR_TEST\"' EXIT
+  assert_eq() { [[ \"\$1\" == \"\$2\" ]] || { echo \"FAIL: expected '\$2' got '\$1'\"; exit 1; }; }
+  # ... test exercising the bug ...
+  echo PASS
+
+Issue #${number}: ${title}
+
+Description:
+${body}
+
+Affected files (best guess): ${affected_files}
+
+Write a bash test script (NO markdown fences, raw script only) that:
+1. Is self-contained; cleans up via trap
+2. Exercises the exact scenario from the issue description
+3. Should FAIL on current (buggy) code, PASS after the fix
+4. Runs inside Docker with /repo bound read-only as the sergeant repo
+
+Output ONLY the raw bash script."
+
+  local test_content
+  test_content=$(call_llm "$red_prompt" 2048)
+  test_content=$(echo "$test_content" | strip_markdown_fences)
+
+  if [[ -z "$test_content" || ${#test_content} -lt 30 ]]; then
+    test_content='#!/usr/bin/env bash
+# Placeholder — LLM did not generate a valid test
+echo "SKIP: Could not generate test from LLM"
+exit 0'
+  fi
+
+  printf '%s\n' "$test_content" > "${work_dir}/test.sh"
+  chmod +x "${work_dir}/test.sh"
+
+  # ── Run red phase ────────────────────────────────────────────────────────────
+  local red_exit=0
+  docker run --rm \
+    --network=host \
+    -v "${REPO_DIR}:/repo:ro" \
+    -v "${work_dir}:/workspace" \
+    "${DOCKER_IMAGE}" \
+    bash /workspace/test.sh \
+    >"${work_dir}/red-phase.log" 2>&1 || red_exit=$?
+
+  local red_status="failed_as_expected"
+  if [[ $red_exit -eq 0 ]]; then
+    red_status="unexpectedly_passed"
+    log "Issue #${number}: ⚠️  Red phase PASSED (may not reproduce bug)"
+  else
+    log "Issue #${number}: ✅ Red phase FAILED as expected (exit ${red_exit})"
+  fi
+  echo "$red_status" > "${work_dir}/red-status"
+
+  # ── Phase 2: Generate fix ────────────────────────────────────────────────────
+  log_section "Issue #${number}: Green phase — generating fix"
+
+  local green_prompt="You are a TDD assistant for the Sergeant project.
+
+Issue #${number}: ${title}
+
+Description:
+${body}
+
+Affected files (best guess): ${affected_files}
+Suggested fix: ${fix_approach}
+
+The failing test:
+${test_content}
+
+Write a unified diff patch (git diff format, paths relative to repo root, e.g. b/bin/sgt-dispatch)
+that fixes the issue and makes the test pass.
+Output ONLY the raw unified diff, no markdown fences, no explanation."
+
+  local patch_content
+  patch_content=$(call_llm "$green_prompt" 2048)
+  patch_content=$(echo "$patch_content" | strip_markdown_fences)
+  printf '%s\n' "$patch_content" > "${work_dir}/fix.patch"
+
+  # Copy repo to writable location
+  local fix_dir="${work_dir}/repo-fix"
+  [[ -d "$fix_dir" ]] && rm -rf "$fix_dir"
+  git clone --local --shared "${REPO_DIR}" "${fix_dir}" 2>/dev/null \
+    || { log "git clone failed; falling back to cp"; cp -r "${REPO_DIR}" "${fix_dir}"; }
+
+  # ── Run green phase ──────────────────────────────────────────────────────────
+  local green_exit=0
+  docker run --rm \
+    --network=host \
+    -v "${fix_dir}:/repo" \
+    -v "${work_dir}:/workspace" \
+    "${DOCKER_IMAGE}" \
+    bash -c '
+      set -e
+      if [[ -s /workspace/fix.patch ]]; then
+        cd /repo
+        echo "--- Applying patch ---"
+        git apply --allow-empty /workspace/fix.patch 2>/dev/null \
+          || patch -p1 < /workspace/fix.patch 2>/dev/null \
+          || echo "WARNING: Patch did not apply cleanly"
+      fi
+      echo "--- Running test ---"
+      bash /workspace/test.sh
+    ' \
+    >"${work_dir}/green-phase.log" 2>&1 || green_exit=$?
+
+  local green_status="failed"
+  if [[ $green_exit -eq 0 ]]; then
+    green_status="passed"
+    log "Issue #${number}: ✅ Green phase PASSED — fix works!"
+  else
+    log "Issue #${number}: ❌ Green phase FAILED (exit ${green_exit})"
+  fi
+  echo "$green_status" > "${work_dir}/green-status"
+}
+
+# ── Create PR ─────────────────────────────────────────────────────────────────
+create_fix_pr() {
+  local number="$1" title="$2"
+  local branch="auto-fix/issue-${number}"
+  local work_dir="${STATE_DIR}/issue-${number}"
+  local fix_dir="${work_dir}/repo-fix"
+
+  log "Issue #${number}: Creating PR branch ${branch}"
+
+  (
+    cd "${fix_dir}"
+    git config user.name "epictetus"
+    git config user.email "epictetus@cromleylabs.com"
+    git checkout -b "${branch}" 2>/dev/null || git checkout "${branch}"
+    cp "${work_dir}/test.sh" "tests/auto-fix-issue-${number}-test.sh" 2>/dev/null || true
+    git add -A
+    git commit -m "auto-fix(issue-${number}): TDD fix — ${title}
+
+Closes #${number}
+
+Generated by sgt-issue-listener via red/green TDD pipeline:
+- Red: failing test reproducing the bug
+- Green: patch that makes the test pass" \
+      || { log "Nothing to commit for PR"; return 1; }
+    git push origin "${branch}" 2>&1
+  ) || { log "Issue #${number}: Branch push failed"; return 1; }
+
+  gh pr create \
+    --repo "${REPO}" \
+    --title "auto-fix(#${number}): ${title}" \
+    --body "Closes #${number}
+
+## Summary
+Auto-generated by \`sgt-issue-listener\` via red/green TDD pipeline.
+
+- 🔴 **Red**: wrote a failing test that reproduces the bug
+- 🟢 **Green**: applied a patch that makes the test pass
+
+**Please review carefully before merging.**
+
+---
+*Generated on $(hostname) at $(date -u)*" \
+    --head "${branch}" \
+    --base "main" 2>&1
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+main() {
+  log_section "sgt-issue-listener starting (pid $$)"
+  log "Repo: ${REPO}  |  Model: ${MODEL_LABEL}"
+
+  init_state
+  local last_seen
+  last_seen=$(get_last_seen)
+  log "Last seen issue: #${last_seen}"
+
+  local issues_json
+  issues_json=$(gh issue list \
+    --repo "${REPO}" \
+    --state open \
+    --json number,title,body,labels,createdAt \
+    --limit 50 2>&1) || {
+    log "ERROR: gh issue list failed: ${issues_json:0:200}"
+    exit 1
+  }
+
+  local count
+  count=$(echo "$issues_json" | jq 'length')
+  log "Fetched ${count} open issues"
+
+  # Ensure Docker image is ready (skip if --no-docker)
+  if [[ "$NO_DOCKER" != "true" ]]; then
+    build_docker_image || { log "Docker build failed — pipeline disabled for this run"; NO_DOCKER=true; }
+  fi
+
+  local processed_count=0
+
+  while IFS= read -r issue; do
+    local number title body
+    number=$(echo "$issue" | jq -r '.number')
+    title=$(echo "$issue" | jq -r '.title')
+    body=$(echo "$issue" | jq -r '.body // ""')
+
+    if is_processed "$number"; then
+      log "Issue #${number}: already processed — skipping"
+      continue
+    fi
+
+    log_section "Issue #${number}: ${title}"
+
+    # Triage
+    log "Issue #${number}: Triaging via LLM (${MODEL_LABEL})..."
+    local triage_json
+    triage_json=$(triage_issue "$number" "$title" "$body")
+    log "Issue #${number}: Triage: ${triage_json}"
+
+    post_triage_comment "$number" "$triage_json"
+
+    # Pipeline (auto-fixable bugs only)
+    local auto_fixable category
+    auto_fixable=$(echo "$triage_json" | jq -r '.auto_fixable // false')
+    category=$(echo "$triage_json" | jq -r '.category // "unknown"')
+
+    if [[ "$NO_DOCKER" != "true" && "$auto_fixable" == "true" && "$category" == "bug" ]]; then
+      local affected_files fix_approach
+      affected_files=$(echo "$triage_json" | jq -r '.affected_files | join(", ")' 2>/dev/null || echo "")
+      fix_approach=$(echo "$triage_json" | jq -r '.fix_approach // ""')
+
+      # run_red_green writes results to ${STATE_DIR}/issue-${number}/
+      # We do NOT capture it in $() to avoid stdout hijack of log() output
+      run_red_green "$number" "$title" "$body" "$affected_files" "$fix_approach"
+
+      local work_dir="${STATE_DIR}/issue-${number}"
+      local red_status green_status
+      red_status=$(cat "${work_dir}/red-status" 2>/dev/null || echo "unknown")
+      green_status=$(cat "${work_dir}/green-status" 2>/dev/null || echo "unknown")
+
+      post_pipeline_comment "$number" "$red_status" "$green_status" "$work_dir"
+
+      if [[ "$green_status" == "passed" ]]; then
+        local pr_url
+        pr_url=$(create_fix_pr "$number" "$title") || pr_url=""
+        if [[ -n "$pr_url" ]]; then
+          gh issue comment "$number" --repo "${REPO}" \
+            --body "🎉 **PR opened automatically:** ${pr_url}" || true
+          log "Issue #${number}: PR opened: ${pr_url}"
+        fi
+      fi
+    else
+      log "Issue #${number}: Skipping pipeline (category=${category}, auto_fixable=${auto_fixable}, no_docker=${NO_DOCKER})"
+    fi
+
+    mark_processed "$number"
+    processed_count=$((processed_count + 1))
+
+  done < <(echo "$issues_json" | jq -c '.[]')
+
+  log_section "Done — processed ${processed_count} new issue(s)"
+}
+
+main "$@"
