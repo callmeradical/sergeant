@@ -708,11 +708,20 @@ _deliver_notifications() {
           _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
           continue
         fi
-        tmux send-keys -t "$TMUX_PANE" -l -- \
-          "Sergeant accepted $ack_token. Wait for it in $accept_path, follow the notification exactly once, then write it to $complete_path." 2>/dev/null || {
+        # Verify the payload actually landed before pressing Enter or recording
+        # delivery.  send-keys succeeding only means tmux accepted the bytes; if
+        # the harness input surface is not live yet they are lost outright, not
+        # queued (GH #114).  `accepted` was already written above, so roll it back
+        # on failure -- otherwise the state machine advances past a notification
+        # that was never delivered and never retries it, which is exactly how the
+        # worker ends up orphaned with "exited before terminal completion".
+        if ! _sgt_harness_send_verified "$TMUX_PANE" \
+          "Sergeant accepted $ack_token. Wait for it in $accept_path, follow the notification exactly once, then write it to $complete_path."; then
+          rm -f "$target_dir/accepted" "$accept_path"
           _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
+          sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
           continue
-        }
+        fi
         pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
         [[ "$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)" == "$nonce" &&
            "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$pane_identity" ]] || {
@@ -742,8 +751,13 @@ _deliver_notifications() {
         pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
         [[ "$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)" == "$nonce" &&
            "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$pane_identity" ]] || continue
-        tmux send-keys -t "$TMUX_PANE" -l -- \
-          "Sergeant notification $notification_id is available in .sergeant-notification. Read it, write $ack_token to $ack_path, and do not act until this supervisor sends acceptance and $accept_path contains that token." 2>/dev/null || continue
+        # Same contract as the acceptance send: prove the text arrived before
+        # pressing Enter, and let the loop retry when it did not (GH #114).
+        _sgt_harness_send_verified "$TMUX_PANE" \
+          "Sergeant notification $notification_id is available in .sergeant-notification. Read it, write $ack_token to $ack_path, and do not act until this supervisor sends acceptance and $accept_path contains that token." || {
+          sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
+          continue
+        }
         pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
         [[ "$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)" == "$nonce" &&
            "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$pane_identity" ]] || continue

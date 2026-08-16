@@ -227,6 +227,55 @@ _sgt_harness_ready_tui() {
   (( now - _SGT_HARNESS_READY_SINCE >= settle ))
 }
 
+# _sgt_harness_send_verified <pane> <text>
+# Send literal text to a pane and prove it arrived before the caller proceeds.
+#
+# Why this exists (GH #114, reopened; GH #229).  tmux send-keys reports success
+# once the bytes are handed to the pane's terminal -- it says nothing about
+# whether the program running there consumed them.  Measured against opencode
+# 1.18.18 in an isolated tmux server:
+#
+#   * keys sent at t=0, before the TUI has drawn anything, are LOST PERMANENTLY.
+#     They are not queued and do not arrive later: the pane still showed no trace
+#     of them, and no model turn ran, 45 seconds afterwards.
+#   * keys sent once the first glyph is on screen were accepted and the turn
+#     completed in ~4s.
+#
+# So the window is real and delivery is silent when it fails.  The notification
+# loop previously sent the payload, pressed Enter, and recorded `delivered`
+# without ever checking the text was there -- and because `accepted` is written
+# BEFORE the send, a lost payload advanced the state machine and was never
+# retried.  That is the mechanism behind "worker exits before notification
+# acknowledgement": not a bad CLI version, and not the permission flag.
+#
+# Verifying is cheap and version-independent, which a settle constant is not:
+# whichever harness or version draws when, the caller only proceeds on evidence.
+_sgt_harness_send_verified() {
+  local pane="$1" text="$2" needle tries interval i capture
+  [[ -n "$pane" && -n "$text" ]] || return 1
+  command -v tmux >/dev/null 2>&1 || return 1
+
+  # Match on a bounded slice: tmux wraps long lines at the pane width, so the
+  # full payload is not contiguous in a capture, but a short head is.
+  needle="${text:0:24}"
+  [[ -n "$needle" ]] || return 1
+
+  tmux send-keys -t "$pane" -l -- "$text" 2>/dev/null || return 1
+
+  tries="${SGT_HARNESS_SEND_VERIFY_TRIES-20}"
+  [[ "$tries" =~ ^[0-9]+$ ]] || tries=20
+  interval="${SGT_HARNESS_SEND_VERIFY_INTERVAL-0.25}"
+
+  for (( i = 0; i < tries; i++ )); do
+    capture="$(tmux capture-pane -p -t "$pane" 2>/dev/null)" || return 1
+    case "$capture" in
+      *"$needle"*) return 0 ;;
+    esac
+    sleep "$interval"
+  done
+  return 1
+}
+
 # _sgt_harness_ready <harness> <pane>
 # Dispatches to the probe declared for the harness in the one registry.
 _sgt_harness_ready() {
