@@ -744,15 +744,19 @@ _deliver_notifications() {
           _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
           continue
         }
-        # If complete_path arrived during this send, finalize delivered immediately.
-        if [[ "$(cat "$complete_path" 2>/dev/null || true)" == "$ack_token" ]]; then
-          pending="$target_dir/delivered.tmp.$$"
-          printf '%s\n' "$ack_token" > "$pending"
-          if mv "$pending" "$target_dir/delivered"; then
-            delivered="$ack_token"
-          else
-            rm -f "$pending"
-          fi
+        # Acceptance is confirmed: ack_path proves the notification reached the
+        # agent, accept_path and accepted are durable, and the acceptance nudge
+        # was sent.  Record delivered so _sgt_wait_worker_notification can see
+        # the delivery handshake is complete and return to the caller.  This is
+        # NOT the action-complete marker — the agent still needs to act and write
+        # complete_path.  Setting delivered here is safe because it is gated on
+        # ack_path (filesystem proof), not on a blind send-keys (which was the
+        # original false-positive from GH #114).
+        pending="$target_dir/delivered.tmp.$$"
+        if printf '%s\n' "$ack_token" > "$pending" && mv "$pending" "$target_dir/delivered"; then
+          delivered="$ack_token"
+        else
+          rm -f "$pending"
         fi
         _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
       elif [[ -n "${TMUX_PANE:-}" ]]; then
