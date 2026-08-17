@@ -20,7 +20,9 @@ mkdir -p "$TARGET_DIR"
 linked=0
 # Glob every sourced helper: enumerating them by name silently broke the install
 # whenever a new bin/_sgt-*.sh helper was added (bin/_sgt-review-axes.sh).
-for f in "$BIN_DIR"/sgt-* "$BIN_DIR"/_sgt-*.sh "$BIN_DIR/wiki-daily-digest"; do
+# Python helpers (_sgt-*.py) are also required — omitting them causes response-lock
+# and other failures when running installed commands (#241).
+for f in "$BIN_DIR"/sgt-* "$BIN_DIR"/_sgt-*.sh "$BIN_DIR"/_sgt-*.py "$BIN_DIR/wiki-daily-digest"; do
   [[ -f "$f" ]] || continue
   name="$(basename "$f")"
   ln -sf "$f" "$TARGET_DIR/$name"
@@ -145,7 +147,7 @@ set -euo pipefail
 TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
 removed=0
 
-for f in "$TARGET_DIR"/sgt-* "$TARGET_DIR"/_sgt-*.sh "$TARGET_DIR/wiki-daily-digest"; do
+for f in "$TARGET_DIR"/sgt-* "$TARGET_DIR"/_sgt-*.sh "$TARGET_DIR"/_sgt-*.py "$TARGET_DIR/wiki-daily-digest"; do
   [[ -L "$f" ]] || continue
   # Only remove if it points back into the sergeant repo
   target="$(readlink "$f")"
