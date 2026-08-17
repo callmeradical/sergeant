@@ -127,6 +127,20 @@ else
   _skip "bounded interactive worker readiness" "tmux or git not available"
 fi
 
+# sgt-session-resume end-to-end: resumed worker must acknowledge its notification
+# within the 60-second timeout so dispatch and resume callers do not time out
+# with all ack/accept/complete directories empty.  Pins the PR #246 regression
+# (delivered tied to complete_path, not acceptance) as observed by @mrtnebrle.
+# Requires tmux, git, yq, python3.
+if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1 && \
+   command -v yq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  _run "sgt-session-resume notification handshake" \
+    bash "$ROOT_DIR/tests/sgt-session-resume-notification-test.sh"
+else
+  _skip "sgt-session-resume notification handshake" \
+    "tmux, git, yq, or python3 not available"
+fi
+
 # ── Pass 2: Bash 3.2 ─────────────────────────────────────────────────────────
 
 printf '\n── Pass 2: Bash 3.2 ────────────────────────────────────────\n'

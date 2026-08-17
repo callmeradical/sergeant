@@ -723,41 +723,31 @@ _deliver_notifications() {
             continue
           fi
         fi
-        tmux send-keys -t "$TMUX_PANE" -l -- \
-          "Sergeant accepted $ack_token. Wait for it in $accept_path, follow the notification exactly once, then write it to $complete_path." 2>/dev/null || {
-          _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
-          continue
-        }
-        pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
-        [[ "$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)" == "$nonce" &&
-           "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$pane_identity" ]] || {
-          _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
-          continue
-        }
-        tmux send-keys -t "$TMUX_PANE" Enter 2>/dev/null || {
-          _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
-          continue
-        }
-        pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
-        [[ "$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)" == "$nonce" &&
-           "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$pane_identity" ]] || {
-          _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
-          continue
-        }
         # Acceptance is confirmed: ack_path proves the notification reached the
-        # agent, accept_path and accepted are durable, and the acceptance nudge
-        # was sent.  Record delivered so _sgt_wait_worker_notification can see
-        # the delivery handshake is complete and return to the caller.  This is
-        # NOT the action-complete marker — the agent still needs to act and write
-        # complete_path.  Setting delivered here is safe because it is gated on
-        # ack_path (filesystem proof), not on a blind send-keys (which was the
-        # original false-positive from GH #114).
+        # agent, accept_path and accepted are durable.  Record delivered NOW so
+        # _sgt_wait_worker_notification can see the delivery handshake is complete
+        # and return to the caller — even if the agent exits quickly and the pane
+        # dies before the send-keys below is checked.  Deferring delivered past
+        # subsequent send-keys or pane-identity checks creates a race: a fast
+        # agent can complete and exit before delivered is written, _finish kills
+        # the delivery loop, and _sgt_wait_worker_notification times out with all
+        # proof files present except delivered (Docker-confirmed regression).
+        # Setting delivered here is safe: it is gated on ack_path (filesystem
+        # proof of delivery), not on a blind send-keys (the original #114 bug).
         pending="$target_dir/delivered.tmp.$$"
         if printf '%s\n' "$ack_token" > "$pending" && mv "$pending" "$target_dir/delivered"; then
           delivered="$ack_token"
         else
           rm -f "$pending"
         fi
+        # Send the acceptance message to the pane so the agent knows it can
+        # proceed.  Best-effort: delivered is already durable above, so a
+        # send-keys failure here just means the agent retries on its own loop.
+        # We still hold the response lock while sending so no concurrent path
+        # can observe accepted without the nudge having been attempted.
+        tmux send-keys -t "$TMUX_PANE" -l -- \
+          "Sergeant accepted $ack_token. Wait for it in $accept_path, follow the notification exactly once, then write it to $complete_path." 2>/dev/null || true
+        tmux send-keys -t "$TMUX_PANE" Enter 2>/dev/null || true
         _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
       elif [[ -n "${TMUX_PANE:-}" ]]; then
         pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
