@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# pre-push — Run the drain test suite in Docker before every push.
+# pre-push — Run the drain and notification test suites in Docker before every push.
 #
 # Installed by: mise run install
 # Source:       scripts/hooks/pre-push
 #
-# Runs `mise run test:docker:drain`, which executes the drain test suite
-# in two isolated Docker containers (Debian system Bash + Alpine Bash 3.2).
+# Runs `mise run test:docker:drain` and `mise run test:docker:notification`,
+# each executing in two isolated Docker containers (Debian system Bash + Alpine
+# Bash 3.2).
 #
 # To skip in an emergency:
 #   git push --no-verify
@@ -49,7 +50,7 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-printf 'pre-push: running drain test suite (git push --no-verify to skip)...\n'
+printf 'pre-push: running drain and notification test suites (git push --no-verify to skip)...\n'
 printf 'pre-push: validating %s\n' "$REPO_DIR"
 # Pass the tree explicitly as well as via --cd.  --cd alone was not enough: the
 # task re-derived the tree from "${MISE_PROJECT_ROOT:-.}", and MISE_PROJECT_ROOT
@@ -57,3 +58,4 @@ printf 'pre-push: validating %s\n' "$REPO_DIR"
 # of the worktree being pushed (td-85b6bf).  The resolution above is correct; this
 # makes the task honour it instead of guessing again.
 SGT_TEST_REPO_DIR="$REPO_DIR" "$MISE" run --cd "$REPO_DIR" test:docker:drain
+SGT_TEST_REPO_DIR="$REPO_DIR" "$MISE" run --cd "$REPO_DIR" test:docker:notification
