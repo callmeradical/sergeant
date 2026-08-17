@@ -344,6 +344,73 @@ printf '════════════════════════
 [[ $fail -eq 0 ]]
 """
 
+[tasks."test:docker:notification"]
+description = "Run the notification delivery handshake test suite in Docker (system Bash + Bash 3.2 passes)"
+run = """
+#!/usr/bin/env bash
+# Runs the notification test suite in two Docker passes:
+#
+#   Pass 1 — Debian bookworm-slim (system Bash 5.x)
+#     Tests the delivery handshake, per-harness contract, action-lease
+#     finalizer, convergence, and readiness gate.
+#
+#   Pass 2 — bash:3.2 Alpine image
+#     Re-runs the subset that does not require tmux (action-lease finalizer)
+#     under Bash 3.2 to confirm Bash 3.2 compatibility.
+#
+# Prerequisites: Docker must be available.
+
+set -euo pipefail
+
+REPO_DIR="${SGT_TEST_REPO_DIR:-}"
+if [[ -z "$REPO_DIR" ]]; then
+  REPO_DIR="$(git -C "${MISE_PROJECT_ROOT:-.}" rev-parse --show-toplevel)"
+fi
+REPO_DIR="$(cd "$REPO_DIR" 2>/dev/null && pwd -P)" || {
+  printf 'test:docker:notification: not a usable directory: %s\\n' "${SGT_TEST_REPO_DIR:-$REPO_DIR}" >&2
+  exit 1
+}
+[[ -d "$REPO_DIR/tests" && -f "$REPO_DIR/Dockerfile.test" ]] || {
+  printf 'test:docker:notification: %s is not a Sergeant checkout\\n' "$REPO_DIR" >&2
+  exit 1
+}
+printf 'Validating tree: %s\\n' "$REPO_DIR"
+
+SGT_BASH32_IMAGE="docker.io/library/bash:3.2@sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89"
+
+pass=0
+fail=0
+
+_docker_pass() {
+  local label="$1" image="$2" cmd="$3"
+  printf '\\n══ %s ══\\n' "$label"
+  if docker run --rm -v "${REPO_DIR}:/repo:ro" "$image" sh -c "$cmd"; then
+    printf '\\n✓  %s passed\\n' "$label"
+    pass=$((pass + 1))
+  else
+    printf '\\n✗  %s FAILED\\n' "$label" >&2
+    fail=$((fail + 1))
+  fi
+}
+
+printf 'Building sergeant-test image...\\n'
+docker build -q -f "${REPO_DIR}/Dockerfile.test" -t sergeant-test "${REPO_DIR}"
+printf 'Built.\\n'
+
+_docker_pass "System Bash (Debian bookworm-slim)" \\
+  sergeant-test \\
+  "BASH32='' bash /repo/tests/run-notification-tests.sh"
+
+_docker_pass "Bash 3.2 (Alpine)" \\
+  "$SGT_BASH32_IMAGE" \\
+  "BASH32=/usr/local/bin/bash SGT_MINIMUM_BASH=/usr/local/bin/bash bash /repo/tests/run-notification-tests.sh"
+
+printf '\\n═══════════════════════════════════════════════════════════\\n'
+printf ' Docker notification suite: %d passed, %d failed\\n' "$pass" "$fail"
+printf '═══════════════════════════════════════════════════════════\\n'
+[[ $fail -eq 0 ]]
+"""
+
 [tasks.update]
 description = "Pull latest changes from origin and reinstall symlinks"
 run = """
