@@ -6,6 +6,12 @@
 # (sgt-drain --status).  Also covers adjacent drain functionality
 # (admission gating in sgt-recover, drain state helpers).
 #
+# This runner is also the always-on pre-push Docker gate
+# (scripts/hooks/pre-push → mise run test:docker:drain), so it carries the two
+# suites that are not drain tests but must run on every push in a container:
+# the global-state isolation guard, and the device preflight (#236), which needs
+# two real filesystem devices that only the container reliably provides.
+#
 # Usage (host):
 #   bash tests/run-drain-tests.sh
 #
@@ -75,6 +81,19 @@ printf '\n── Pass 1: system Bash ──────────────�
 # given the chance to run against a live installation.
 _run "global state isolation guard" \
   bash "$ROOT_DIR/tests/global-state-isolation-test.sh"
+
+# Filesystem device preflight (#236).  Runs here, not only by hand, because its
+# symlink cases need a second real device: the Debian image has /dev/shm (tmpfs)
+# alongside the overlay root, so the cross-device topology from the issue is
+# reproducible on every push.  Needs git and yq for its dispatch fixture, which
+# the Bash 3.2 Alpine image does not have.
+if command -v git >/dev/null 2>&1 && command -v yq >/dev/null 2>&1; then
+  _run "dispatch filesystem device preflight (#236)" \
+    bash "$ROOT_DIR/tests/sgt-dispatch-device-preflight-test.sh"
+else
+  _skip "dispatch filesystem device preflight (#236)" \
+    "git or yq not available in this environment"
+fi
 
 # Core drain state + --status (bug #82) + lock helpers (bug #81)
 _run "drain state, --status, lock helpers" \

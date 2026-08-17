@@ -246,23 +246,26 @@ that could leave evidence in an inconsistent state.
 **Resolution:** Ensure `SERGEANT_FLEET` and all project worktrees reside on the same
 filesystem. If you set `SERGEANT_FLEET` to a path on a different device (e.g., a network
 drive or separate partition), move it to a local path on the same device as your
-repositories:
-
-A symlinked path is measured by the directory it resolves to, not by the device
-holding the link itself, so reaching a same-filesystem layout through a symlink
-is supported (#236). Pass `-L` when reproducing the check by hand or `stat`
-reports the link's own device and disagrees with Sergeant:
+repositories. Reproduce the check with the same command Sergeant uses:
 
 ```bash
 # Check your current fleet location
 echo "${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
 
-# Confirm the worktree device
-stat -L -c '%d' /path/to/your/worktree
+# Print a path's device — GNU stat first, BSD/macOS stat as the fallback,
+# exactly as bin/_sgt-lib.sh:_path_device does it
+sgt_device() { stat -Lc '%d' "$1" 2>/dev/null || stat -Lf '%d' "$1"; }
 
-# Confirm the fleet device (they must match)
-stat -L -c '%d' "$SERGEANT_FLEET"
+# Confirm the worktree and fleet devices (they must match)
+sgt_device /path/to/your/worktree
+sgt_device "${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
 ```
+
+`-L` is not optional. A symlinked path is measured by the directory it resolves
+to, not by the device holding the link itself, so a same-filesystem layout
+reached through a symlink is supported (#236). Without `-L`, `stat` reports the
+link's own device and disagrees with Sergeant — which is the false alarm #236
+was filed about.
 
 See `bin/sgt-cleanup:_same_filesystem_pair` and `bin/_sgt-lib.sh:_path_device`
 for the implementation, `tests/sgt-cleanup-cross-filesystem-test.sh` for the

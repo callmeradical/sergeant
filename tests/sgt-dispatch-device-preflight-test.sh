@@ -8,10 +8,21 @@
 # record (#161).  sgt-dispatch must detect and reject this layout before
 # writing any state, preventing the stuck records the issue describes (#236).
 #
-# Seam under test: the sgt-dispatch CLI device-preflight section.
-# `stat` is stubbed to return different device numbers for fleet vs worktree
-# paths; td and all network-adjacent stubs succeed so the failure is squarely
-# owned by the preflight, not a missing prerequisite.
+# Two seams, in one file because they answer one question — which device does a
+# path belong to, and does dispatch act on that answer:
+#
+#   Tests 1-6  the sgt-dispatch CLI device-preflight section, with `stat`
+#              stubbed to return chosen device numbers for fleet vs worktree
+#              paths.  td and all network-adjacent stubs succeed so a failure is
+#              squarely owned by the preflight, not a missing prerequisite.
+#   Test 7     bin/_sgt-lib.sh:_path_device, the shared function both the
+#              preflight and sgt-cleanup ask, against the REAL `stat` and a real
+#              symlink (#236).  Stubbing `stat` is what hid this bug from Tests
+#              1-6, so these cases deliberately do not stub it.  They live here
+#              rather than in a tests/sgt-lib-*-test.sh file because the
+#              behaviour they pin is the preflight verdict Test 7d then asserts
+#              end-to-end, and splitting them would let one half be changed
+#              without the other.
 
 set -euo pipefail
 export TMUX=fixture TMUX_PANE=%11
@@ -27,9 +38,12 @@ mkdir -p "$TEST_ROOT/config" "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin" \
 export TMUX_TMPDIR="$TEST_ROOT/tmux"
 chmod 700 "$TEST_ROOT/fleet"
 
-PASS=0; FAIL=0
+PASS=0; FAIL=0; SKIP=0
 _pass() { PASS=$(( PASS + 1 )); printf 'PASS: %s\n' "$1"; }
 _fail() { FAIL=$(( FAIL + 1 )); printf 'FAIL: %s (%s)\n' "$1" "${2:-}" >&2; }
+# Counted, not just printed: a skipped two-device case must not be readable as
+# "the #236 regression ran and passed" in the summary line.
+_skip() { SKIP=$(( SKIP + 1 )); printf 'SKIP: %s (%s)\n' "$1" "${2:-}"; }
 
 cat > "$TEST_ROOT/config/test.yaml" <<EOF
 name: test
@@ -353,11 +367,15 @@ else
     "$(printf '%s\n' "$combined4" | tail -5)"
 fi
 
-# ── Test 7 (#236 regression): SERGEANT_FLEET reached through a symlink ────────
+# ── Test 7 (#236 regression): device resolution through symlinks ─────────────
 #
 # Every test above stubs `stat`, so none of them can see how the real one
-# behaves.  This one uses the real filesystem and the real `stat`, and
-# reproduces the topology from the issue report:
+# behaves — which is exactly how #236 survived them.  Test 7 uses the real
+# `stat` and real symlinks against bin/_sgt-lib.sh:_path_device, the function
+# both the dispatch preflight and sgt-cleanup ask.
+#
+# Tests 7a-7e need only one device and run everywhere.  Tests 7f and 7g need a
+# second writable device to reproduce the reported topology:
 #
 #   $TEST_ROOT/fleet-link   symlink inode on device A (the container's overlay
 #                           root; $HOME on the reporter's Homebrew install)
@@ -371,11 +389,16 @@ fi
 # unless asked — so _path_device measured device A for the fleet and device B
 # for the worktree and dispatch rejected a layout it must accept.
 #
-# Skipped, loudly, when the environment has only one writable device.  The
-# Docker image always has one (/dev/shm is a tmpfs, / is the overlay), and
-# tests/global-state-isolation-test.sh runs this suite inside that image.
+# The second device comes from /dev/shm (a tmpfs) or $SGT_TEST_ALT_DEVICE_DIR.
+# The Docker image always has both (/dev/shm tmpfs, / overlay) and
+# tests/run-drain-tests.sh runs this suite there on every push; a host without a
+# second device counts a SKIP so a green summary cannot be misread as having
+# exercised #236.
+
+# Deliberately an independent oracle rather than a call into the library: the
+# expected device must not be produced by the code under test.
 _real_device() {
-  stat -c '%d' "$1" 2>/dev/null || stat -f '%d' "$1" 2>/dev/null
+  stat -Lc '%d' "$1" 2>/dev/null || stat -Lf '%d' "$1" 2>/dev/null
 }
 
 # _path_device as the shipped library defines it — the seam under test.
@@ -383,8 +406,57 @@ _lib_path_device() {
   bash -c 'source "$1"; _path_device "$2"' _ "$ROOT_DIR/bin/_sgt-lib.sh" "$1"
 }
 
-ALT_BASE="${SGT_TEST_ALT_DEVICE_DIR:-/dev/shm}"
+# _assert_device <label> <path> <expected-device>
+# Asserts _path_device exits 0 and prints <expected-device>.
+_assert_device() {
+  local label="$1" path="$2" want="$3" got rc
+  set +e
+  got="$(_lib_path_device "$path")"
+  rc=$?
+  set -e
+  if [[ "$rc" -eq 0 && -n "$want" && "$got" == "$want" ]]; then
+    _pass "$label"
+  else
+    _fail "$label" "rc=$rc got=$got want=$want"
+  fi
+}
+
 test_root_device="$(_real_device "$TEST_ROOT" || true)"
+
+# ── Test 7a: a nonexistent path still resolves through its ancestors ──────────
+# The fix must not turn "does not exist yet" into a hard failure: the worktree
+# destination normally does not exist when the preflight measures it.
+_assert_device "_path_device uses the nearest existing ancestor for a nonexistent path" \
+  "$TEST_ROOT/repo/not/created/yet" "$test_root_device"
+
+# ── Test 7b: a dangling symlink resolves to its parent, it does not fail ──────
+# `stat -L` on a dangling symlink fails.  Dereferencing without also treating a
+# dangling link as nonexistent would make _path_device return 1 and dispatch die
+# with "Cannot determine filesystem device" on a layout it used to accept.
+ln -s "$TEST_ROOT/no-such-target" "$TEST_ROOT/dangling-link"
+_assert_device "_path_device resolves a dangling symlink to its parent device" \
+  "$TEST_ROOT/dangling-link" "$test_root_device"
+
+# ── Test 7c: a symlink loop resolves to its parent, it does not hang or fail ──
+# ELOOP is the other way `stat -L` fails.  `-e` reports false for a loop, so the
+# ancestor walk handles it exactly like any other unresolvable path.
+ln -s "$TEST_ROOT/loop-link" "$TEST_ROOT/loop-link"
+_assert_device "_path_device resolves a symlink loop to its parent device" \
+  "$TEST_ROOT/loop-link" "$test_root_device"
+
+# ── Test 7d: a relative symlink resolves against its own directory ────────────
+ln -s repo "$TEST_ROOT/relative-link"
+_assert_device "_path_device resolves a relative symlink" \
+  "$TEST_ROOT/relative-link" "$test_root_device"
+
+# ── Test 7e: a symlink chain resolves to the final target ─────────────────────
+ln -s "$TEST_ROOT/repo" "$TEST_ROOT/chain-hop1"
+ln -s "$TEST_ROOT/chain-hop1" "$TEST_ROOT/chain-hop2"
+_assert_device "_path_device follows a two-hop symlink chain" \
+  "$TEST_ROOT/chain-hop2" "$test_root_device"
+
+# ── Tests 7f-7g: the reported two-device topology ─────────────────────────────
+ALT_BASE="${SGT_TEST_ALT_DEVICE_DIR:-/dev/shm}"
 alt_base_device=""
 if [[ -d "$ALT_BASE" && -w "$ALT_BASE" ]]; then
   alt_base_device="$(_real_device "$ALT_BASE" || true)"
@@ -392,52 +464,22 @@ fi
 
 if [[ -z "$test_root_device" || -z "$alt_base_device" || \
       "$test_root_device" == "$alt_base_device" ]]; then
-  printf 'SKIP: symlinked-fleet device regression (#236) needs a second writable device; %s is not one\n' \
-    "$ALT_BASE"
+  _skip "symlinked-fleet cross-device regression (#236)" \
+    "no second writable device; $ALT_BASE is on the same device as $TEST_ROOT"
+  _skip "dispatch accepts a fleet symlink whose target shares the worktree device" \
+    "no second writable device; $ALT_BASE is on the same device as $TEST_ROOT"
 else
   ALT_ROOT="$(mktemp -d "$ALT_BASE/sgt-devpf-XXXXXX")"
   mkdir -p "$ALT_ROOT/fleet" "$ALT_ROOT/dev"
   chmod 700 "$ALT_ROOT/fleet"
   ln -s "$ALT_ROOT/fleet" "$TEST_ROOT/fleet-link"
-
-  # ── Test 7a: the library seam ───────────────────────────────────────────────
-  link_device="$(_lib_path_device "$TEST_ROOT/fleet-link" || true)"
   target_device="$(_real_device "$ALT_ROOT/fleet" || true)"
-  if [[ -n "$link_device" && "$link_device" == "$target_device" ]]; then
-    _pass "_path_device measures an existing symlink by its resolved target device"
-  else
-    _fail "_path_device measured the symlink inode instead of its target" \
-      "link=$link_device target=$target_device symlink_inode_device=$test_root_device"
-  fi
 
-  # ── Test 7b: a nonexistent path still resolves through its ancestors ────────
-  # The fix must not turn "does not exist yet" into a hard failure: the worktree
-  # destination normally does not exist when dispatch measures it.
-  missing_device="$(_lib_path_device "$ALT_ROOT/fleet/not/created/yet" || true)"
-  if [[ -n "$missing_device" && "$missing_device" == "$target_device" ]]; then
-    _pass "_path_device still uses the nearest existing ancestor for a nonexistent path"
-  else
-    _fail "_path_device lost nearest-existing-ancestor handling for a nonexistent path" \
-      "got=$missing_device want=$target_device"
-  fi
+  # ── Test 7f: the library seam, against the reported topology ───────────────
+  _assert_device "_path_device measures an existing symlink by its resolved target device" \
+    "$TEST_ROOT/fleet-link" "$target_device"
 
-  # ── Test 7c: a dangling symlink resolves to its parent, it does not fail ───
-  # `stat -L` on a dangling symlink fails.  Dereferencing without also treating
-  # a dangling link as nonexistent would make _path_device return 1 and dispatch
-  # die with "Cannot determine filesystem device" on a layout it used to accept.
-  ln -s "$ALT_ROOT/no-such-target" "$TEST_ROOT/dangling-link"
-  set +e
-  dangling_device="$(_lib_path_device "$TEST_ROOT/dangling-link")"
-  dangling_rc=$?
-  set -e
-  if [[ "$dangling_rc" -eq 0 && "$dangling_device" == "$test_root_device" ]]; then
-    _pass "_path_device resolves a dangling symlink to its parent device"
-  else
-    _fail "_path_device failed on a dangling symlink" \
-      "rc=$dangling_rc got=$dangling_device want=$test_root_device"
-  fi
-
-  # ── Test 7d: dispatch end-to-end over the real topology ────────────────────
+  # ── Test 7g: dispatch end-to-end over the real topology ────────────────────
   mkdir -p "$ALT_ROOT/dev/app2"
   git -C "$ALT_ROOT/dev/app2" init -q
   git -C "$ALT_ROOT/dev/app2" config user.name Test
@@ -460,25 +502,37 @@ EOF
   cp "$TEST_ROOT/fake-bin/tmux" "$TEST_ROOT/fake-bin/td" \
     "$TEST_ROOT/fake-bin/opencode" "$TEST_ROOT/fake-bin-real-stat/"
 
+  # This case asserts on the preflight, which runs long before the worker
+  # handshake; the fixture agent never acknowledges, so cap that wait instead of
+  # spending the default 60s on an outcome the assertions do not read.
   set +e
   PATH="$TEST_ROOT/fake-bin-real-stat:$TEST_ROOT/root/bin:$PATH" \
   TMUX_LOG="$TEST_ROOT/tmux5.log" \
   SERGEANT_CONFIG="$TEST_ROOT/config" \
   SERGEANT_FLEET="$TEST_ROOT/fleet-link" \
   SERGEANT_DRAIN_DIR="$TEST_ROOT/drain" \
+  SGT_NOTIFICATION_ACK_TIMEOUT=2 \
   SGT_WIKI_DISABLED=1 \
     "$TEST_ROOT/root/bin/sgt-dispatch" sym-test "symlinked fleet" --repos app2 \
     > "$TEST_ROOT/dispatch5.out" 2> "$TEST_ROOT/dispatch5.err"
   set -e
 
+  # Two assertions, because the absence of a rejection is not proof the
+  # preflight ran: the layout must be accepted (no rejection, and no "cannot
+  # determine" from a dereference that failed instead of resolving) AND the
+  # dispatch must have reached the state creation the preflight guards.
   combined5="$(cat "$TEST_ROOT/dispatch5.out" "$TEST_ROOT/dispatch5.err" 2>/dev/null)"
-  if [[ "$combined5" != *"different device"* && "$combined5" != *"Cross-device"* ]]; then
+  fleet_records="$(find "$ALT_ROOT/fleet" -mindepth 2 -maxdepth 2 -type d -name app2 \
+    2>/dev/null | wc -l | tr -d ' ')"
+  if [[ "$combined5" != *"different device"* && "$combined5" != *"Cross-device"* && \
+        "$combined5" != *"Cannot determine filesystem device"* && \
+        "$fleet_records" -gt 0 ]]; then
     _pass "dispatch accepts a fleet symlink whose target shares the worktree device"
   else
     _fail "dispatch rejected a same-device layout reached through a fleet symlink" \
-      "$(printf '%s\n' "$combined5" | tail -5)"
+      "fleet_records=$fleet_records $(printf '%s' "$combined5" | tail -5)"
   fi
 fi
 
-printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+printf '\n%d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
 [[ "$FAIL" -eq 0 ]]

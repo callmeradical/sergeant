@@ -2028,8 +2028,17 @@ _sgt_branch_unpushed_commits() {
 #        layout that used to be measurable into "Cannot determine filesystem
 #        device".
 #
-# `stat -L` is accepted by both GNU coreutils and BSD/macOS stat, so the
-# existing GNU-then-BSD fallback keeps working unchanged.
+# `-L` is accepted by both GNU coreutils and BSD/macOS stat, so the existing
+# GNU-then-BSD fallback keeps working unchanged.
+#
+# Known limit, unchanged by this fix and shared with every other `-e` test in
+# the toolbelt: a path whose target EXISTS but cannot be reached — EACCES on an
+# intermediate directory, or a symlink loop — is indistinguishable from a
+# nonexistent one here, so it degrades to the nearest readable ancestor's device
+# rather than failing.  The ancestor is the device the caller would fall back to
+# anyway when it creates the missing path, and failing closed would reject
+# layouts that dispatch accepts today; a wrong same-device verdict is possible
+# only for a target the caller cannot traverse either.
 _path_device() {
   local device parent path="$1"
 
@@ -2039,8 +2048,8 @@ _path_device() {
     path="$parent"
   done
 
-  device="$(stat -L -c '%d' "$path" 2>/dev/null || \
-    stat -L -f '%d' "$path" 2>/dev/null)" || return 1
+  device="$(stat -Lc '%d' "$path" 2>/dev/null || \
+    stat -Lf '%d' "$path" 2>/dev/null)" || return 1
   [[ -n "$device" && "$device" != *$'\n'* ]] || return 1
   printf '%s\n' "$device"
 }
