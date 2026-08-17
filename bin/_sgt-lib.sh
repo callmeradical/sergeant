@@ -563,14 +563,253 @@ _require_tmux() {
 _require_git() {
   command -v git &>/dev/null || _die "git is required"
 }
+# ── Version comparison and constraint matching (Bash 3.2) ────────────────────
+
+# _sgt_version_compare <v1> <v2>
+# Pure Bash 3.2 semver comparison.
+# Returns:
+#   0 if v1 == v2
+#   1 if v1 > v2
+#   2 if v1 < v2
+#   3 on parse error
+_sgt_version_compare() {
+  local v1="$1" v2="$2"
+  local semver_re='([0-9]+(\.[0-9]+)*)'
+  [[ "$v1" =~ $semver_re ]] || return 3
+  v1="${BASH_REMATCH[1]}"
+  [[ "$v2" =~ $semver_re ]] || return 3
+  v2="${BASH_REMATCH[1]}"
+
+  local -a a1=() a2=()
+  local IFS="."
+  read -ra a1 <<< "$v1"
+  read -ra a2 <<< "$v2"
+
+  local len1="${#a1[@]}" len2="${#a2[@]}"
+  local max_len=$len1
+  [[ $len2 -gt $max_len ]] && max_len=$len2
+
+  local i n1 n2
+  for ((i=0; i<max_len; i++)); do
+    n1="${a1[i]:-0}"
+    n2="${a2[i]:-0}"
+    [[ "$n1" =~ ^[0-9]+$ ]] || n1=0
+    [[ "$n2" =~ ^[0-9]+$ ]] || n2=0
+    n1=$(( 10#$n1 ))
+    n2=$(( 10#$n2 ))
+    if (( n1 > n2 )); then
+      return 1 # v1 > v2
+    elif (( n1 < n2 )); then
+      return 2 # v1 < v2
+    fi
+  done
+  return 0 # v1 == v2
+}
+
+# _sgt_version_matches <candidate_version> <constraint>
+#
+# Evaluates whether candidate_version matches a version constraint.
+# Supports:
+#   - Exact: "1.18.10", "= 1.18.10", "== 1.18.10"
+#   - Relational: ">= 1.18.0", "> 1.18.0", "<= 1.18.18", "< 2.0.0"
+#   - Ruby-style optimistic/pessimistic operator "~>":
+#       "~> 1"        -> locks major (>= 1.0.0, < 2.0.0)
+#       "~> 1.18"     -> locks major with minimum minor (>= 1.18.0, < 2.0.0)
+#       "~> 1.18.10"  -> locks minor with minimum patch (>= 1.18.10, < 1.19.0)
+#       "~> 1.18.0"   -> locks minor with minimum patch (>= 1.18.0, < 1.19.0)
+_sgt_version_matches() {
+  local candidate="$1" constraint="$2"
+  [[ -n "$candidate" && -n "$constraint" ]] || return 1
+
+  # Trim leading/trailing whitespace
+  constraint="${constraint#"${constraint%%[![:space:]]*}"}"
+  constraint="${constraint%"${constraint##*[![:space:]]}"}"
+
+  local op="" target=""
+  case "$constraint" in
+    "~>"*)
+      op="~>"
+      target="${constraint#\~>}"
+      ;;
+    ">="*)
+      op=">="
+      target="${constraint#>=}"
+      ;;
+    "<="*)
+      op="<="
+      target="${constraint#<=}"
+      ;;
+    ">"*)
+      op=">"
+      target="${constraint#>}"
+      ;;
+    "<"*)
+      op="<"
+      target="${constraint#<}"
+      ;;
+    "=="*)
+      op="=="
+      target="${constraint#==}"
+      ;;
+    "="*)
+      op="="
+      target="${constraint#=}"
+      ;;
+    *)
+      op="="
+      target="$constraint"
+      ;;
+  esac
+
+  # Trim whitespace and optional leading v/V from target
+  target="${target#"${target%%[![:space:]]*}"}"
+  target="${target%"${target##*[![:space:]]}"}"
+  target="${target#v}"
+  target="${target#V}"
+
+  local semver_re='([0-9]+(\.[0-9]+)*)'
+  [[ "$target" =~ $semver_re ]] || return 1
+  target="${BASH_REMATCH[1]}"
+
+  case "$op" in
+    "~>")
+      local -a segs=()
+      local IFS="."
+      read -ra segs <<< "$target"
+      local count="${#segs[@]}"
+      local lower_bound="$target"
+      local upper_bound=""
+
+      if (( count == 1 )); then
+        local maj=$(( 10#${segs[0]} + 1 ))
+        upper_bound="$maj.0.0"
+      else
+        local p=$(( count - 2 ))
+        local -a upper_segs=()
+        local j
+        for ((j=0; j<count; j++)); do
+          if (( j < p )); then
+            upper_segs+=( "${segs[j]}" )
+          elif (( j == p )); then
+            upper_segs+=( "$(( 10#${segs[j]} + 1 ))" )
+          else
+            upper_segs+=( "0" )
+          fi
+        done
+        local old_ifs="$IFS"
+        IFS="."
+        upper_bound="${upper_segs[*]}"
+        IFS="$old_ifs"
+      fi
+
+      # Candidate must be >= lower_bound
+      _sgt_version_compare "$candidate" "$lower_bound"
+      local cmp_lower=$?
+      (( cmp_lower == 0 || cmp_lower == 1 )) || return 1
+
+      # Candidate must be < upper_bound
+      _sgt_version_compare "$candidate" "$upper_bound"
+      local cmp_upper=$?
+      (( cmp_upper == 2 )) || return 1
+      return 0
+      ;;
+    ">=")
+      _sgt_version_compare "$candidate" "$target"
+      local cmp=$?
+      (( cmp == 0 || cmp == 1 )) && return 0 || return 1
+      ;;
+    ">")
+      _sgt_version_compare "$candidate" "$target"
+      local cmp=$?
+      (( cmp == 1 )) && return 0 || return 1
+      ;;
+    "<=")
+      _sgt_version_compare "$candidate" "$target"
+      local cmp=$?
+      (( cmp == 0 || cmp == 2 )) && return 0 || return 1
+      ;;
+    "<")
+      _sgt_version_compare "$candidate" "$target"
+      local cmp=$?
+      (( cmp == 2 )) && return 0 || return 1
+      ;;
+    "="|"==")
+      _sgt_version_compare "$candidate" "$target"
+      local cmp=$?
+      (( cmp == 0 )) && return 0 || return 1
+      ;;
+  esac
+  return 1
+}
+
+# Known-incompatible versions of opencode. Dispatch refuses to proceed when the
+# installed version matches any entry here. Matches exact versions ("1.18.10"),
+# ranges (">= 1.18.10"), or Ruby-style pessimistic constraints ("~> 1.18.10").
+_OPENCODE_BAD_VERSIONS=(
+  "1.18.10"
+)
+
+# Supported major version constraints for interactive agent harnesses.
+_SGT_AGENT_SUPPORTED_VERSIONS_opencode="~> 1"
+_SGT_AGENT_SUPPORTED_VERSIONS_oc="~> 1"
+_SGT_AGENT_SUPPORTED_VERSIONS_goose="~> 1"
+_SGT_AGENT_SUPPORTED_VERSIONS_claude="~> 2"
+
 _require_interactive_agent() {
   local agent_name
   agent_name="$(basename "$AGENT_CMD")"
   _sgt_harness_launch_contract "$agent_name" >/dev/null || \
     _die "unsupported interactive agent: $AGENT_CMD (expected opencode, goose, or claude)"
   command -v "$AGENT_CMD" &>/dev/null || _die "interactive agent not found: $AGENT_CMD"
-  if [[ "$agent_name" == "goose" ]] && ! "$AGENT_CMD" session --help >/dev/null 2>&1; then
-    _die "Goose does not support interactive sessions: expected 'goose session --help' to succeed"
+
+  local canonical_harness="$agent_name"
+  [[ "$canonical_harness" == "oc" ]] && canonical_harness="opencode"
+
+  if [[ "$canonical_harness" == "opencode" ]]; then
+    local raw_version detected_version bad
+    raw_version="$("$AGENT_CMD" --version 2>/dev/null | head -1 || true)"
+    local semver_re='([0-9]+(\.[0-9]+)*)'
+    if [[ "$raw_version" =~ $semver_re ]]; then
+      detected_version="${BASH_REMATCH[1]}"
+      for bad in "${_OPENCODE_BAD_VERSIONS[@]}"; do
+        if _sgt_version_matches "$detected_version" "$bad"; then
+          _die "opencode $detected_version is known-incompatible with Sergeant; please upgrade"
+        fi
+      done
+      local supported_constraint="${_SGT_AGENT_SUPPORTED_VERSIONS_opencode:-~> 1}"
+      if ! _sgt_version_matches "$detected_version" "$supported_constraint"; then
+        _die "opencode $detected_version is not supported by Sergeant (expected $supported_constraint); please upgrade"
+      fi
+    fi
+  fi
+
+  if [[ "$agent_name" == "goose" ]]; then
+    if ! "$AGENT_CMD" session --help >/dev/null 2>&1; then
+      _die "Goose does not support interactive sessions: expected 'goose session --help' to succeed"
+    fi
+    local raw_version detected_version
+    raw_version="$("$AGENT_CMD" --version 2>/dev/null | head -1 || true)"
+    local semver_re='([0-9]+(\.[0-9]+)*)'
+    if [[ "$raw_version" =~ $semver_re ]]; then
+      detected_version="${BASH_REMATCH[1]}"
+      local supported_constraint="${_SGT_AGENT_SUPPORTED_VERSIONS_goose:-~> 1}"
+      if ! _sgt_version_matches "$detected_version" "$supported_constraint"; then
+        _die "goose $detected_version is not supported by Sergeant (expected $supported_constraint); please upgrade"
+      fi
+    fi
+  fi
+
+  if [[ "$agent_name" == "claude" ]]; then
+    local raw_version detected_version
+    raw_version="$("$AGENT_CMD" --version 2>/dev/null | head -1 || true)"
+    local semver_re='([0-9]+(\.[0-9]+)*)'
+    if [[ "$raw_version" =~ $semver_re ]]; then
+      detected_version="${BASH_REMATCH[1]}"
+      local supported_constraint="${_SGT_AGENT_SUPPORTED_VERSIONS_claude:-~> 2}"
+      if ! _sgt_version_matches "$detected_version" "$supported_constraint"; then
+        _die "claude $detected_version is not supported by Sergeant (expected $supported_constraint); please upgrade"
+      fi
+    fi
   fi
 }
 _sgt_pane_identity() {

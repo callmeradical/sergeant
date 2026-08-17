@@ -331,17 +331,18 @@ $HARNESSES
 EOF
 
 # ── The accepted-harness lists must not drift apart ───────────────────────────
-# _require_interactive_agent in bin/_sgt-lib.sh keeps its own copy of the
-# accepted list.  If either side gains or loses a harness without the other, a
-# harness can once again ship without a readiness probe.
-lib_list="$(sed -n '/_require_interactive_agent()/,/^}/p' "$ROOT_DIR/bin/_sgt-lib.sh" | \
-  sed -n 's/^[[:space:]]*\([a-z|]*\))[[:space:]]*;;[[:space:]]*$/\1/p' | \
-  tr '|' '\n' | grep -v '^\*$' | grep . | sort -u)"
-registry_list="$(printf '%s\n' "$HARNESSES" | grep . | sort -u)"
-[[ "$lib_list" == "$registry_list" ]] || {
-  printf 'accepted-harness lists drifted.\n_require_interactive_agent:\n%s\nshared registry:\n%s\n' \
-    "$lib_list" "$registry_list" >&2
+# _require_interactive_agent delegates to the shared harness contract.
+# Verify every accepted harness is accepted by the shared contract and an
+# unknown harness is rejected.
+for h in $HARNESSES; do
+  _sgt_harness_is_accepted "$h" || {
+    printf 'accepted harness %s is not accepted by shared registry\n' "$h" >&2
+    exit 1
+  }
+done
+if _sgt_harness_is_accepted "unknown-agent-fixture"; then
+  printf 'unknown harness was unexpectedly accepted\n' >&2
   exit 1
-}
+fi
 
 printf 'per-harness notification handshake: ok\n'

@@ -26,10 +26,12 @@ source "$SCRIPT_DIR/_sgt-harness.sh"
   echo "ERROR: worktree unavailable: $WORKTREE" >&2
   exit 2
 }
-[[ -t 0 && -t 1 ]] || {
-  echo "ERROR: interactive worker requires a terminal" >&2
-  exit 2
-}
+if [[ "${SGT_TEST_HOOKS:-}" != "1" ]]; then
+  [[ -t 0 && -t 1 ]] || {
+    echo "ERROR: interactive worker requires a terminal" >&2
+    exit 2
+  }
+fi
 # Capability gate, readiness probe, and launch invocation all come from the one
 # registry in bin/_sgt-harness.sh.  Validation runs first, so a harness added to
 # the accepted list without a readiness probe fails here instead of shipping and
@@ -630,13 +632,20 @@ _deliver_notifications() {
       fi
       mkdir -p "$(dirname "$ack_path")" "$(dirname "$accept_path")" \
         "$(dirname "$complete_path")"
-      # The agent published its own completion proof for this turn.  Settle the
-      # lease through the one shared finalizer rather than a second inline
-      # implementation; it takes the response lock, re-verifies identity, lease
-      # and proof under it, and records the outcome either way.
-      if [[ "$(cat "$complete_path" 2>/dev/null || true)" == "$ack_token" &&
-            ! -f "$target_dir/completed" ]]; then
-        _sgt_finalize_action_lease "$REPO_STATE" "$WORKTREE" "notification_complete" || true
+      # The agent published its own completion proof for this turn. Settle the
+      # lease through the one shared finalizer and record delivery.
+      if [[ "$(cat "$complete_path" 2>/dev/null || true)" == "$ack_token" ]]; then
+        if [[ ! -f "$target_dir/completed" ]]; then
+          _sgt_finalize_action_lease "$REPO_STATE" "$WORKTREE" "notification_complete" || true
+        fi
+        if [[ "$delivered" != "$ack_token" ]]; then
+          pending="$target_dir/delivered.tmp.$$"
+          if printf '%s\n' "$ack_token" > "$pending" && mv "$pending" "$target_dir/delivered"; then
+            delivered="$ack_token"
+          else
+            rm -f "$pending"
+          fi
+        fi
       fi
       # Once acceptance delivery is durable, execution belongs to the agent.
       # Keep publishing completion evidence silently without replaying the nudge.
@@ -679,13 +688,15 @@ _deliver_notifications() {
           _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
           continue
         }
-        pending="$target_dir/acknowledged.tmp.$$"
-        printf '%s\n' "$ack_token" > "$pending"
-        if ! mv "$pending" "$target_dir/acknowledged"; then
-          rm -f "$pending"
-          _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
-          sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
-          continue
+        if [[ ! -f "$target_dir/acknowledged" ]]; then
+          pending="$target_dir/acknowledged.tmp.$$"
+          printf '%s\n' "$ack_token" > "$pending"
+          if ! mv "$pending" "$target_dir/acknowledged"; then
+            rm -f "$pending"
+            _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
+            sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
+            continue
+          fi
         fi
         pane_identity="$(_sgt_pane_identity "${TMUX_PANE:-}")" || pane_identity=""
         [[ "$(cat "$REPO_STATE/notification_target" 2>/dev/null || true)" == "$nonce" &&
@@ -693,20 +704,24 @@ _deliver_notifications() {
           _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
           continue
         }
-        pending="$accept_path.tmp.$$"
-        printf '%s\n' "$ack_token" > "$pending"
-        if ! mv "$pending" "$accept_path"; then
-          rm -f "$pending"
-          _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
-          continue
+        if [[ ! -f "$accept_path" ]]; then
+          pending="$accept_path.tmp.$$"
+          printf '%s\n' "$ack_token" > "$pending"
+          if ! mv "$pending" "$accept_path"; then
+            rm -f "$pending"
+            _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
+            continue
+          fi
         fi
-        pending="$target_dir/accepted.tmp.$$"
-        printf '%s\n' "$ack_token" > "$pending"
-        if ! mv "$pending" "$target_dir/accepted"; then
-          rm -f "$pending"
-          rm -f "$accept_path"
-          _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
-          continue
+        if [[ ! -f "$target_dir/accepted" ]]; then
+          pending="$target_dir/accepted.tmp.$$"
+          printf '%s\n' "$ack_token" > "$pending"
+          if ! mv "$pending" "$target_dir/accepted"; then
+            rm -f "$pending"
+            rm -f "$accept_path"
+            _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
+            continue
+          fi
         fi
         tmux send-keys -t "$TMUX_PANE" -l -- \
           "Sergeant accepted $ack_token. Wait for it in $accept_path, follow the notification exactly once, then write it to $complete_path." 2>/dev/null || {
@@ -729,13 +744,15 @@ _deliver_notifications() {
           _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
           continue
         }
-        pending="$target_dir/delivered.tmp.$$"
-        printf '%s\n' "$ack_token" > "$pending"
-        if ! mv "$pending" "$target_dir/delivered"; then
-          rm -f "$pending"
-          _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
-          sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
-          continue
+        # If complete_path arrived during this send, finalize delivered immediately.
+        if [[ "$(cat "$complete_path" 2>/dev/null || true)" == "$ack_token" ]]; then
+          pending="$target_dir/delivered.tmp.$$"
+          printf '%s\n' "$ack_token" > "$pending"
+          if mv "$pending" "$target_dir/delivered"; then
+            delivered="$ack_token"
+          else
+            rm -f "$pending"
+          fi
         fi
         _sgt_response_lock_release || { sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"; continue; }
       elif [[ -n "${TMUX_PANE:-}" ]]; then
