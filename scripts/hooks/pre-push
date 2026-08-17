@@ -5,7 +5,10 @@
 # Source:       scripts/hooks/pre-push
 #
 # Always runs:
-#   mise run test:docker:drain   — drain state contract (fast, always-on)
+#   mise run test:docker:drain   — the always-on Docker gate (fast).  Despite
+#     the name it carries three things: the drain state contract, the
+#     global-state isolation guard, and the filesystem device preflight (#236),
+#     which needs the container's two real devices.  See tests/run-drain-tests.sh.
 #
 # Runs only when notification-delivery code changes:
 #   mise run test:docker:notification — full handshake suite including

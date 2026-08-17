@@ -20,19 +20,21 @@
 #              symlink (#236).  Stubbing `stat` is what hid this bug from Tests
 #              1-6, so these cases deliberately do not stub it.  They live here
 #              rather than in a tests/sgt-lib-*-test.sh file because the
-#              behaviour they pin is the preflight verdict Test 7d then asserts
-#              end-to-end, and splitting them would let one half be changed
-#              without the other.
+#              behaviour they pin is the preflight verdict the Test 7h dispatch
+#              case then asserts end-to-end, and splitting them would let one
+#              half be changed without the other.
 
 set -euo pipefail
 export TMUX=fixture TMUX_PANE=%11
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
-# Second-device fixture root (Test 7); created there, so the trap must remove it
-# too or the tmpfs keeps the fixture after the suite exits.
+# Second-device fixture root (Test 7).  It lives on a machine-shared tmpfs, not
+# under TEST_ROOT, so the trap must remove it too — and must fire on a signalled
+# exit as well, or an interrupted run leaves the fixture behind for everyone.
 ALT_ROOT=""
-trap '[[ -n "${KEEP_TEST_ROOT:-}" ]] || rm -rf "$TEST_ROOT" ${ALT_ROOT:+"$ALT_ROOT"}' EXIT
+trap '[[ -n "${KEEP_TEST_ROOT:-}" ]] || rm -rf "$TEST_ROOT" ${ALT_ROOT:+"$ALT_ROOT"}' \
+  EXIT INT TERM HUP
 mkdir -p "$TEST_ROOT/config" "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin" \
   "$TEST_ROOT/repo" "$TEST_ROOT/drain" "$TEST_ROOT/tmux"
 export TMUX_TMPDIR="$TEST_ROOT/tmux"
@@ -391,9 +393,10 @@ fi
 #
 # The second device comes from /dev/shm (a tmpfs) or $SGT_TEST_ALT_DEVICE_DIR.
 # The Docker image always has both (/dev/shm tmpfs, / overlay) and
-# tests/run-drain-tests.sh runs this suite there on every push; a host without a
-# second device counts a SKIP so a green summary cannot be misread as having
-# exercised #236.
+# tests/run-drain-tests.sh runs this suite there on every push, with
+# SGT_TEST_REQUIRE_ALT_DEVICE=1 so a missing second device fails the gate instead
+# of quietly reporting a green run that covered nothing of #236.  A host without
+# a second device counts a SKIP in the summary line.
 
 # Deliberately an independent oracle rather than a call into the library: the
 # expected device must not be produced by the code under test.
@@ -444,42 +447,72 @@ ln -s "$TEST_ROOT/loop-link" "$TEST_ROOT/loop-link"
 _assert_device "_path_device resolves a symlink loop to its parent device" \
   "$TEST_ROOT/loop-link" "$test_root_device"
 
-# ── Test 7d: a relative symlink resolves against its own directory ────────────
-ln -s repo "$TEST_ROOT/relative-link"
-_assert_device "_path_device resolves a relative symlink" \
-  "$TEST_ROOT/relative-link" "$test_root_device"
-
-# ── Test 7e: a symlink chain resolves to the final target ─────────────────────
-ln -s "$TEST_ROOT/repo" "$TEST_ROOT/chain-hop1"
-ln -s "$TEST_ROOT/chain-hop1" "$TEST_ROOT/chain-hop2"
-_assert_device "_path_device follows a two-hop symlink chain" \
-  "$TEST_ROOT/chain-hop2" "$test_root_device"
-
-# ── Tests 7f-7g: the reported two-device topology ─────────────────────────────
+# ── Tests 7d-7j: the reported two-device topology ─────────────────────────────
+# The second device comes from /dev/shm (a tmpfs) or $SGT_TEST_ALT_DEVICE_DIR.
 ALT_BASE="${SGT_TEST_ALT_DEVICE_DIR:-/dev/shm}"
 alt_base_device=""
-if [[ -d "$ALT_BASE" && -w "$ALT_BASE" ]]; then
+alt_skip_reason=""
+if [[ ! -d "$ALT_BASE" || ! -w "$ALT_BASE" ]]; then
+  alt_skip_reason="$ALT_BASE is missing or not writable; set SGT_TEST_ALT_DEVICE_DIR to a path on a second filesystem"
+else
   alt_base_device="$(_real_device "$ALT_BASE" || true)"
+  if [[ -z "$test_root_device" || -z "$alt_base_device" ]]; then
+    alt_skip_reason="cannot read the device of $ALT_BASE or $TEST_ROOT"
+  elif [[ "$test_root_device" == "$alt_base_device" ]]; then
+    alt_skip_reason="$ALT_BASE is on the same device as $TEST_ROOT; set SGT_TEST_ALT_DEVICE_DIR to a path on a second filesystem"
+  fi
 fi
 
-if [[ -z "$test_root_device" || -z "$alt_base_device" || \
-      "$test_root_device" == "$alt_base_device" ]]; then
-  _skip "symlinked-fleet cross-device regression (#236)" \
-    "no second writable device; $ALT_BASE is on the same device as $TEST_ROOT"
-  _skip "dispatch accepts a fleet symlink whose target shares the worktree device" \
-    "no second writable device; $ALT_BASE is on the same device as $TEST_ROOT"
+# A skip is honest on a one-device host, and a defect anywhere the caller
+# promised two devices.  tests/run-drain-tests.sh and Dockerfile.test set
+# SGT_TEST_REQUIRE_ALT_DEVICE=1 for the containerized pre-push gate, where
+# /dev/shm is always a separate tmpfs: there, an absent second device means the
+# gate stopped covering #236 and must fail rather than report a green skip.
+if [[ -n "$alt_skip_reason" ]]; then
+  if [[ "${SGT_TEST_REQUIRE_ALT_DEVICE:-0}" == "1" ]]; then
+    _fail "#236 two-device cases could not run but SGT_TEST_REQUIRE_ALT_DEVICE=1" \
+      "$alt_skip_reason"
+  else
+    _skip "#236 two-device cases (symlinked-fleet accept and cross-device reject)" \
+      "$alt_skip_reason"
+  fi
 else
   ALT_ROOT="$(mktemp -d "$ALT_BASE/sgt-devpf-XXXXXX")"
-  mkdir -p "$ALT_ROOT/fleet" "$ALT_ROOT/dev"
-  chmod 700 "$ALT_ROOT/fleet"
+  mkdir -p "$ALT_ROOT/fleet" "$ALT_ROOT/fleet-b" "$ALT_ROOT/dev"
+  chmod 700 "$ALT_ROOT/fleet" "$ALT_ROOT/fleet-b"
   ln -s "$ALT_ROOT/fleet" "$TEST_ROOT/fleet-link"
   target_device="$(_real_device "$ALT_ROOT/fleet" || true)"
 
-  # ── Test 7f: the library seam, against the reported topology ───────────────
+  # ── Test 7d: the library seam, against the reported topology ───────────────
   _assert_device "_path_device measures an existing symlink by its resolved target device" \
     "$TEST_ROOT/fleet-link" "$target_device"
 
-  # ── Test 7g: dispatch end-to-end over the real topology ────────────────────
+  # ── Test 7e: a relative symlink resolves against its own directory ──────────
+  # Pointed across the device boundary deliberately: a relative link inside one
+  # filesystem would report the same device before and after the fix and prove
+  # nothing.
+  ln -s fleet-link "$TEST_ROOT/relative-link"
+  _assert_device "_path_device resolves a relative symlink to its target device" \
+    "$TEST_ROOT/relative-link" "$target_device"
+
+  # ── Test 7f: a symlink chain resolves to the final target ──────────────────
+  ln -s "$TEST_ROOT/fleet-link" "$TEST_ROOT/chain-link"
+  _assert_device "_path_device follows a symlink chain to its final target device" \
+    "$TEST_ROOT/chain-link" "$target_device"
+
+  # ── Test 7g: nonexistent path whose nearest existing ancestor is a symlink ──
+  # The composition of 7a and 7d, and the shape dispatch measures when
+  # SERGEANT_FLEET is a symlink whose subdirectories do not exist yet.
+  _assert_device "_path_device resolves a nonexistent path under a symlinked ancestor" \
+    "$TEST_ROOT/fleet-link/not/created/yet" "$target_device"
+
+  # The real stat, not the stub every earlier test installs: the dispatch cases
+  # below are only meaningful against real device numbers.
+  mkdir -p "$TEST_ROOT/fake-bin-real-stat"
+  cp "$TEST_ROOT/fake-bin/tmux" "$TEST_ROOT/fake-bin/td" \
+    "$TEST_ROOT/fake-bin/opencode" "$TEST_ROOT/fake-bin-real-stat/"
+
+  # ── Test 7h: dispatch clears the preflight over the real topology ──────────
   mkdir -p "$ALT_ROOT/dev/app2"
   git -C "$ALT_ROOT/dev/app2" init -q
   git -C "$ALT_ROOT/dev/app2" config user.name Test
@@ -495,12 +528,6 @@ repos:
   - name: app2
     path: $ALT_ROOT/dev/app2
 EOF
-
-  # The real stat, not the stub every earlier test installs: this case is only
-  # meaningful against real device numbers.
-  mkdir -p "$TEST_ROOT/fake-bin-real-stat"
-  cp "$TEST_ROOT/fake-bin/tmux" "$TEST_ROOT/fake-bin/td" \
-    "$TEST_ROOT/fake-bin/opencode" "$TEST_ROOT/fake-bin-real-stat/"
 
   # This case asserts on the preflight, which runs long before the worker
   # handshake; the fixture agent never acknowledges, so cap that wait instead of
@@ -520,17 +547,62 @@ EOF
   # Two assertions, because the absence of a rejection is not proof the
   # preflight ran: the layout must be accepted (no rejection, and no "cannot
   # determine" from a dereference that failed instead of resolving) AND the
-  # dispatch must have reached the state creation the preflight guards.
+  # dispatch must have reached the state creation the preflight guards.  The
+  # dispatch itself does not complete — the stub agent never acknowledges — and
+  # the record survives only because sgt-dispatch's rollback preserves a repo
+  # state whose `pane` file is non-empty.  If that rollback ever stops
+  # preserving it, this case fails loudly rather than silently weakening.
   combined5="$(cat "$TEST_ROOT/dispatch5.out" "$TEST_ROOT/dispatch5.err" 2>/dev/null)"
   fleet_records="$(find "$ALT_ROOT/fleet" -mindepth 2 -maxdepth 2 -type d -name app2 \
     2>/dev/null | wc -l | tr -d ' ')"
   if [[ "$combined5" != *"different device"* && "$combined5" != *"Cross-device"* && \
         "$combined5" != *"Cannot determine filesystem device"* && \
         "$fleet_records" -gt 0 ]]; then
-    _pass "dispatch accepts a fleet symlink whose target shares the worktree device"
+    _pass "dispatch clears the preflight for a fleet symlink whose target shares the worktree device"
   else
     _fail "dispatch rejected a same-device layout reached through a fleet symlink" \
       "fleet_records=$fleet_records $(printf '%s' "$combined5" | tail -5)"
+  fi
+
+  # ── Tests 7i-7j: dereferencing must not make everything look same-device ───
+  # Following symlinks can only ever merge two paths onto one device, so the
+  # cases above cannot show the gate still rejects anything.  Here the symlink's
+  # TARGET is on device B while the repo — and therefore its worktree parent —
+  # stays on device A, which is the layout sgt-cleanup genuinely cannot process
+  # (#161).  Measured with the real stat, unlike Tests 1-3.
+  ln -s "$ALT_ROOT/fleet-b" "$TEST_ROOT/fleet-link-b"
+  reject_fleet_device="$(_lib_path_device "$TEST_ROOT/fleet-link-b" || true)"
+  reject_wt_device="$(_lib_path_device "$TEST_ROOT" || true)"
+  if [[ -n "$reject_fleet_device" && -n "$reject_wt_device" && \
+        "$reject_fleet_device" != "$reject_wt_device" ]]; then
+    _pass "_path_device still separates devices when the symlink target is on another filesystem"
+  else
+    _fail "_path_device collapsed a genuinely cross-device symlink layout onto one device" \
+      "fleet=$reject_fleet_device worktree=$reject_wt_device"
+  fi
+
+  set +e
+  PATH="$TEST_ROOT/fake-bin-real-stat:$TEST_ROOT/root/bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/tmux6.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet-link-b" \
+  SERGEANT_DRAIN_DIR="$TEST_ROOT/drain" \
+  SGT_NOTIFICATION_ACK_TIMEOUT=2 \
+  SGT_WIKI_DISABLED=1 \
+    "$TEST_ROOT/root/bin/sgt-dispatch" test "cross-device through a symlink" --repos app \
+    > "$TEST_ROOT/dispatch6.out" 2> "$TEST_ROOT/dispatch6.err"
+  rc6=$?
+  set -e
+
+  combined6="$(cat "$TEST_ROOT/dispatch6.out" "$TEST_ROOT/dispatch6.err" 2>/dev/null)"
+  reject_records="$(find "$ALT_ROOT/fleet-b" -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
+    | wc -l | tr -d ' ')"
+  if [[ "$rc6" -ne 0 && "$reject_records" -eq 0 && \
+        ( "$combined6" == *"different device"* || "$combined6" == *"Cross-device"* ) ]]; then
+    _pass "dispatch still rejects a layout whose symlink target is on another device"
+  else
+    _fail "dispatch accepted a genuinely cross-device layout reached through a symlink" \
+      "rc=$rc6 records=$reject_records $(printf '%s' "$combined6" | tail -5)"
   fi
 fi
 

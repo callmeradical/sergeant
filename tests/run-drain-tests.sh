@@ -30,6 +30,15 @@
 #   BASH32   path to Bash 3.2 binary (default: /usr/local/bin/bash32)
 #            set to "" to skip the Bash 3.2 pass; the mise task handles
 #            the Bash 3.2 pass in the official bash:3.2 Alpine image
+#   SGT_TEST_ALT_DEVICE_DIR
+#            directory on a SECOND filesystem, used by the device-preflight
+#            suite to reproduce #236 (default: /dev/shm).  Set it on a host
+#            without /dev/shm — macOS, for one — to run those cases instead of
+#            skipping them.
+#   SGT_TEST_REQUIRE_ALT_DEVICE
+#            1 turns that skip into a failure.  Dockerfile.test sets it, because
+#            in the container the second device is guaranteed and a skip there
+#            means the gate stopped covering #236.
 
 set -euo pipefail
 

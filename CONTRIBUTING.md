@@ -88,6 +88,13 @@ The suite builds a local `sergeant-test` Docker image from `Dockerfile.test`,
 mounts the repo read-only, and runs `tests/run-drain-tests.sh`. No host state
 is touched.
 
+Despite the name, this gate carries three things: the drain state contract, the
+global-state isolation guard, and the filesystem device preflight (#236). The
+last one runs here because it needs two real filesystem devices — in the image,
+`/dev/shm` (tmpfs) alongside the overlay root. On a host without a second device
+its cross-device cases skip; point `SGT_TEST_ALT_DEVICE_DIR` at a path on
+another filesystem to run them anyway.
+
 ### Individual test files
 
 Most tests under `tests/` are pure Bash and can run directly:
