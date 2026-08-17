@@ -2001,25 +2001,46 @@ _sgt_branch_unpushed_commits() {
 
 # _path_device <path>
 #
-# Print the filesystem device number of <path>, or of its nearest existing
-# ancestor when <path> does not yet exist.  Returns 1 if no existing ancestor
-# can be found (e.g. the path reaches the filesystem root) or if stat fails.
+# Print the filesystem device number of <path> as reached, following symlinks,
+# or of its nearest existing ancestor when <path> does not resolve to anything.
+# Returns 1 if no existing ancestor can be found (e.g. the path reaches the
+# filesystem root) or if stat fails.
 #
 # Used by sgt-dispatch (cross-device preflight) and sgt-cleanup (post-hoc
 # same-filesystem enforcement) so both scripts share one canonical
 # implementation.  Extracted from sgt-cleanup into this shared library to
 # eliminate duplication (#236).
+#
+# Symlinks are measured by their target, not by their own inode (#236).  Both
+# callers ask the same question — "will the fleet state and the worktree end up
+# on one filesystem?" — and both reach those directories THROUGH the path they
+# pass in, so the device that matters is the one the path resolves to.  A
+# SERGEANT_FLEET symlink whose inode sits on the root filesystem but whose
+# target sits on the same filesystem as the worktrees is a legal layout that
+# sgt-cleanup handles; measuring the symlink inode rejected it as cross-device.
+#
+# Two halves make that work, and neither is sufficient alone:
+#   -e   already follows symlinks, so dropping the `! -L` clause makes a
+#        DANGLING symlink count as nonexistent and fall back to its parent,
+#        exactly as any other nonexistent path does.
+#   -L   makes stat report the target's device rather than the link's.  Without
+#        the loop change it would be handed dangling links, fail, and turn a
+#        layout that used to be measurable into "Cannot determine filesystem
+#        device".
+#
+# `stat -L` is accepted by both GNU coreutils and BSD/macOS stat, so the
+# existing GNU-then-BSD fallback keeps working unchanged.
 _path_device() {
   local device parent path="$1"
 
-  while [[ ! -e "$path" && ! -L "$path" ]]; do
+  while [[ ! -e "$path" ]]; do
     parent="$(dirname "$path")"
     [[ "$parent" != "$path" ]] || return 1
     path="$parent"
   done
 
-  device="$(stat -c '%d' "$path" 2>/dev/null || \
-    stat -f '%d' "$path" 2>/dev/null)" || return 1
+  device="$(stat -L -c '%d' "$path" 2>/dev/null || \
+    stat -L -f '%d' "$path" 2>/dev/null)" || return 1
   [[ -n "$device" && "$device" != *$'\n'* ]] || return 1
   printf '%s\n' "$device"
 }

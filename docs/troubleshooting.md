@@ -248,19 +248,26 @@ filesystem. If you set `SERGEANT_FLEET` to a path on a different device (e.g., a
 drive or separate partition), move it to a local path on the same device as your
 repositories:
 
+A symlinked path is measured by the directory it resolves to, not by the device
+holding the link itself, so reaching a same-filesystem layout through a symlink
+is supported (#236). Pass `-L` when reproducing the check by hand or `stat`
+reports the link's own device and disagrees with Sergeant:
+
 ```bash
 # Check your current fleet location
 echo "${SERGEANT_FLEET:-$HOME/.local/share/sergeant/fleet}"
 
 # Confirm the worktree device
-stat -c '%d' /path/to/your/worktree
+stat -L -c '%d' /path/to/your/worktree
 
 # Confirm the fleet device (they must match)
-stat -c '%d' "$SERGEANT_FLEET"
+stat -L -c '%d' "$SERGEANT_FLEET"
 ```
 
-See `bin/sgt-cleanup:_same_filesystem_pair` for the implementation and
-`tests/sgt-cleanup-cross-filesystem-test.sh` for the test coverage.
+See `bin/sgt-cleanup:_same_filesystem_pair` and `bin/_sgt-lib.sh:_path_device`
+for the implementation, `tests/sgt-cleanup-cross-filesystem-test.sh` for the
+cleanup coverage, and `tests/sgt-dispatch-device-preflight-test.sh` for the
+dispatch preflight and symlink-resolution coverage.
 
 ## Processes not cleaning up after session ends
 

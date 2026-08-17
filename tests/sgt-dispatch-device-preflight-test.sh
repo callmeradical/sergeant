@@ -18,7 +18,10 @@ export TMUX=fixture TMUX_PANE=%11
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
-trap '[[ -n "${KEEP_TEST_ROOT:-}" ]] || rm -rf "$TEST_ROOT"' EXIT
+# Second-device fixture root (Test 7); created there, so the trap must remove it
+# too or the tmpfs keeps the fixture after the suite exits.
+ALT_ROOT=""
+trap '[[ -n "${KEEP_TEST_ROOT:-}" ]] || rm -rf "$TEST_ROOT" ${ALT_ROOT:+"$ALT_ROOT"}' EXIT
 mkdir -p "$TEST_ROOT/config" "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin" \
   "$TEST_ROOT/repo" "$TEST_ROOT/drain" "$TEST_ROOT/tmux"
 export TMUX_TMPDIR="$TEST_ROOT/tmux"
@@ -348,6 +351,133 @@ if [[ "$combined4" != *"different device"* && "$combined4" != *"Cross-device"* ]
 else
   _fail "single-quoted treehouse root triggered a spurious cross-device rejection (TOML parse bug)" \
     "$(printf '%s\n' "$combined4" | tail -5)"
+fi
+
+# ── Test 7 (#236 regression): SERGEANT_FLEET reached through a symlink ────────
+#
+# Every test above stubs `stat`, so none of them can see how the real one
+# behaves.  This one uses the real filesystem and the real `stat`, and
+# reproduces the topology from the issue report:
+#
+#   $TEST_ROOT/fleet-link   symlink inode on device A (the container's overlay
+#                           root; $HOME on the reporter's Homebrew install)
+#           │
+#           └─► $ALT_ROOT/fleet          target directory on device B (a tmpfs)
+#               $ALT_ROOT/dev/app2       repo whose worktree parent is device B
+#
+# The layout is legal: the fleet state and the worktree both end up on device B,
+# so sgt-cleanup can process it.  But `stat -c '%d' <symlink>` reports the
+# device of the symlink inode, not of its target — GNU stat does not dereference
+# unless asked — so _path_device measured device A for the fleet and device B
+# for the worktree and dispatch rejected a layout it must accept.
+#
+# Skipped, loudly, when the environment has only one writable device.  The
+# Docker image always has one (/dev/shm is a tmpfs, / is the overlay), and
+# tests/global-state-isolation-test.sh runs this suite inside that image.
+_real_device() {
+  stat -c '%d' "$1" 2>/dev/null || stat -f '%d' "$1" 2>/dev/null
+}
+
+# _path_device as the shipped library defines it — the seam under test.
+_lib_path_device() {
+  bash -c 'source "$1"; _path_device "$2"' _ "$ROOT_DIR/bin/_sgt-lib.sh" "$1"
+}
+
+ALT_BASE="${SGT_TEST_ALT_DEVICE_DIR:-/dev/shm}"
+test_root_device="$(_real_device "$TEST_ROOT" || true)"
+alt_base_device=""
+if [[ -d "$ALT_BASE" && -w "$ALT_BASE" ]]; then
+  alt_base_device="$(_real_device "$ALT_BASE" || true)"
+fi
+
+if [[ -z "$test_root_device" || -z "$alt_base_device" || \
+      "$test_root_device" == "$alt_base_device" ]]; then
+  printf 'SKIP: symlinked-fleet device regression (#236) needs a second writable device; %s is not one\n' \
+    "$ALT_BASE"
+else
+  ALT_ROOT="$(mktemp -d "$ALT_BASE/sgt-devpf-XXXXXX")"
+  mkdir -p "$ALT_ROOT/fleet" "$ALT_ROOT/dev"
+  chmod 700 "$ALT_ROOT/fleet"
+  ln -s "$ALT_ROOT/fleet" "$TEST_ROOT/fleet-link"
+
+  # ── Test 7a: the library seam ───────────────────────────────────────────────
+  link_device="$(_lib_path_device "$TEST_ROOT/fleet-link" || true)"
+  target_device="$(_real_device "$ALT_ROOT/fleet" || true)"
+  if [[ -n "$link_device" && "$link_device" == "$target_device" ]]; then
+    _pass "_path_device measures an existing symlink by its resolved target device"
+  else
+    _fail "_path_device measured the symlink inode instead of its target" \
+      "link=$link_device target=$target_device symlink_inode_device=$test_root_device"
+  fi
+
+  # ── Test 7b: a nonexistent path still resolves through its ancestors ────────
+  # The fix must not turn "does not exist yet" into a hard failure: the worktree
+  # destination normally does not exist when dispatch measures it.
+  missing_device="$(_lib_path_device "$ALT_ROOT/fleet/not/created/yet" || true)"
+  if [[ -n "$missing_device" && "$missing_device" == "$target_device" ]]; then
+    _pass "_path_device still uses the nearest existing ancestor for a nonexistent path"
+  else
+    _fail "_path_device lost nearest-existing-ancestor handling for a nonexistent path" \
+      "got=$missing_device want=$target_device"
+  fi
+
+  # ── Test 7c: a dangling symlink resolves to its parent, it does not fail ───
+  # `stat -L` on a dangling symlink fails.  Dereferencing without also treating
+  # a dangling link as nonexistent would make _path_device return 1 and dispatch
+  # die with "Cannot determine filesystem device" on a layout it used to accept.
+  ln -s "$ALT_ROOT/no-such-target" "$TEST_ROOT/dangling-link"
+  set +e
+  dangling_device="$(_lib_path_device "$TEST_ROOT/dangling-link")"
+  dangling_rc=$?
+  set -e
+  if [[ "$dangling_rc" -eq 0 && "$dangling_device" == "$test_root_device" ]]; then
+    _pass "_path_device resolves a dangling symlink to its parent device"
+  else
+    _fail "_path_device failed on a dangling symlink" \
+      "rc=$dangling_rc got=$dangling_device want=$test_root_device"
+  fi
+
+  # ── Test 7d: dispatch end-to-end over the real topology ────────────────────
+  mkdir -p "$ALT_ROOT/dev/app2"
+  git -C "$ALT_ROOT/dev/app2" init -q
+  git -C "$ALT_ROOT/dev/app2" config user.name Test
+  git -C "$ALT_ROOT/dev/app2" config user.email test@example.invalid
+  touch "$ALT_ROOT/dev/app2/README.md"
+  git -C "$ALT_ROOT/dev/app2" add README.md
+  git -C "$ALT_ROOT/dev/app2" commit -qm fixture
+  git -C "$ALT_ROOT/dev/app2" remote add origin git@github.com:org/alt-test.git
+
+  cat > "$TEST_ROOT/config/sym-test.yaml" <<EOF
+name: sym-test
+repos:
+  - name: app2
+    path: $ALT_ROOT/dev/app2
+EOF
+
+  # The real stat, not the stub every earlier test installs: this case is only
+  # meaningful against real device numbers.
+  mkdir -p "$TEST_ROOT/fake-bin-real-stat"
+  cp "$TEST_ROOT/fake-bin/tmux" "$TEST_ROOT/fake-bin/td" \
+    "$TEST_ROOT/fake-bin/opencode" "$TEST_ROOT/fake-bin-real-stat/"
+
+  set +e
+  PATH="$TEST_ROOT/fake-bin-real-stat:$TEST_ROOT/root/bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/tmux5.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet-link" \
+  SERGEANT_DRAIN_DIR="$TEST_ROOT/drain" \
+  SGT_WIKI_DISABLED=1 \
+    "$TEST_ROOT/root/bin/sgt-dispatch" sym-test "symlinked fleet" --repos app2 \
+    > "$TEST_ROOT/dispatch5.out" 2> "$TEST_ROOT/dispatch5.err"
+  set -e
+
+  combined5="$(cat "$TEST_ROOT/dispatch5.out" "$TEST_ROOT/dispatch5.err" 2>/dev/null)"
+  if [[ "$combined5" != *"different device"* && "$combined5" != *"Cross-device"* ]]; then
+    _pass "dispatch accepts a fleet symlink whose target shares the worktree device"
+  else
+    _fail "dispatch rejected a same-device layout reached through a fleet symlink" \
+      "$(printf '%s\n' "$combined5" | tail -5)"
+  fi
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
