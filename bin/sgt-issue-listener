@@ -7,6 +7,14 @@
 
 set -euo pipefail
 
+# ── Process lock — prevent concurrent runs (e.g. systemd catch-up + schedule) ─
+_LOCK_FILE="/tmp/sgt-issue-listener.lock"
+exec 9>"${_LOCK_FILE}"
+flock -n 9 || {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Another instance is running — exiting" >&2
+  exit 0
+}
+
 # ── Config ────────────────────────────────────────────────────────────────────
 REPO="callmeradical/sergeant"
 REPO_DIR="${HOME}/dev/sergeant"
@@ -490,6 +498,11 @@ main() {
 
     log_section "Issue #${number}: ${title}"
 
+    # Mark processed immediately so a concurrent or restarted run cannot
+    # double-process the same issue even if we crash before posting.
+    mark_processed "$number"
+    processed_count=$((processed_count + 1))
+
     # Triage
     log "Issue #${number}: Triaging via LLM (${MODEL_LABEL})..."
     local triage_json
@@ -531,9 +544,6 @@ main() {
     else
       log "Issue #${number}: Skipping pipeline (category=${category}, auto_fixable=${auto_fixable}, no_docker=${NO_DOCKER})"
     fi
-
-    mark_processed "$number"
-    processed_count=$((processed_count + 1))
 
   done < <(echo "$issues_json" | jq -c '.[]')
 
