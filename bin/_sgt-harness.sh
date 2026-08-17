@@ -183,10 +183,10 @@ _SGT_HARNESS_READY_PANE=""
 _SGT_HARNESS_READY_SINCE=""
 
 # _sgt_harness_settle_seconds: optional wall-clock minimum on top of the
-# two-consecutive-observations rule.  Defaults to none.
+# two-consecutive-observations rule.  Defaults to 2 seconds for TUI harnesses.
 _sgt_harness_settle_seconds() {
-  local settle="${SGT_HARNESS_SETTLE_SECONDS-0}"
-  [[ "$settle" =~ ^[0-9]+$ ]] || settle=0
+  local settle="${SGT_HARNESS_SETTLE_SECONDS-2}"
+  [[ "$settle" =~ ^[0-9]+$ ]] || settle=2
   printf '%s\n' "$settle"
 }
 
