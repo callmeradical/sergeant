@@ -163,27 +163,36 @@ else
   _fail "supervisor did not send acceptance message to pane"
 fi
 
-# Step 4: Agent writes complete proof
-complete_path="$WORKTREE/.sergeant-notification-complete/$nonce"
-mkdir -p "$(dirname "$complete_path")"
-printf '%s\n' "$ack_token" > "$complete_path"
-
-# Step 5: Supervisor marks delivered and completed
+# Step 4: Supervisor records delivered BEFORE the agent writes complete proof.
+# _sgt_wait_worker_notification polls for delivered+accepted; it must return
+# within the 60s delivery timeout so sgt-dispatch and sgt-session-resume can
+# confirm the handshake before the agent has even started work.  Regression
+# check: delivered must appear right after acceptance, not after complete_path.
 for _ in $(seq 1 100); do
-  [[ -f "$target_dir/delivered" && -f "$target_dir/completed" ]] && break
+  [[ -f "$target_dir/delivered" ]] && break
   sleep 0.02
 done
 
 if [[ -f "$target_dir/delivered" && "$(cat "$target_dir/delivered")" == "$ack_token" ]]; then
-  _pass "supervisor recorded delivery proof in $target_dir/delivered"
+  _pass "supervisor recorded delivery proof before agent writes complete_path"
 else
-  _fail "supervisor did not record delivery proof in $target_dir/delivered"
+  _fail "supervisor did not record delivery proof after acceptance (regression: delivered tied to complete_path)"
 fi
 
+# Step 5: Agent writes complete proof; supervisor finalizes the action lease.
+complete_path="$WORKTREE/.sergeant-notification-complete/$nonce"
+mkdir -p "$(dirname "$complete_path")"
+printf '%s\n' "$ack_token" > "$complete_path"
+
+for _ in $(seq 1 100); do
+  [[ -f "$target_dir/completed" ]] && break
+  sleep 0.02
+done
+
 if [[ -f "$target_dir/completed" && "$(cat "$target_dir/completed")" == "$ack_token" ]]; then
-  _pass "supervisor recorded completion in $target_dir/completed"
+  _pass "supervisor finalized action lease after agent wrote complete_path"
 else
-  _fail "supervisor did not record completion in $target_dir/completed"
+  _fail "supervisor did not finalize action lease after complete_path"
 fi
 
 touch "$TEST_ROOT/agent-exit"
