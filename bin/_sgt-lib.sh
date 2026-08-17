@@ -1652,14 +1652,16 @@ _sgt_wait_worker_notification() {
 
   attempt=0
   while :; do
-    expected_identity="$(cat "$repo_dir/pane_identity" 2>/dev/null || true)"
-    pane_identity="$(_sgt_pane_identity "$pane")" || return 1
-    [[ -n "$expected_identity" && "$pane_identity" == "$expected_identity" &&
-       "${pane_identity%%|*}" == 0 ]] || return 1
+    # Check delivered + accepted FIRST, before any pane-liveness check.
+    # A fast agent can write both proof files and exit before this poll
+    # loop runs.  Checking pane liveness first (the original order) caused
+    # _sgt_wait_worker_notification to return 1 immediately when it saw the
+    # dead pane, even though delivered and accepted were already durable on
+    # disk.  Pane liveness is the right fast-fail when the handshake has NOT
+    # completed; it must not override durable filesystem proof that it HAS.
     nonce="$(cat "$repo_dir/notification_target" 2>/dev/null || true)"
     [[ "$nonce" =~ ^[a-f0-9]{32}$ ]] || return 1
     target_dir="$repo_dir/notifications/$notification_id/targets/$nonce"
-    [[ "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$pane_identity" ]] || return 1
     delivered="$(cat "$target_dir/delivered" 2>/dev/null || true)"
     accepted="$(cat "$target_dir/accepted" 2>/dev/null || true)"
     if [[ "$delivered" == "$notification_id|$nonce" && "$accepted" == "$notification_id|$nonce" ]]; then
@@ -1675,6 +1677,13 @@ _sgt_wait_worker_notification() {
       fi
       return 0
     fi
+    # Handshake not yet complete.  Verify the pane is still alive so we can
+    # detect a worker that exited without completing the handshake.
+    expected_identity="$(cat "$repo_dir/pane_identity" 2>/dev/null || true)"
+    pane_identity="$(_sgt_pane_identity "$pane")" || return 1
+    [[ -n "$expected_identity" && "$pane_identity" == "$expected_identity" &&
+       "${pane_identity%%|*}" == 0 ]] || return 1
+    [[ "$(cat "$target_dir/pane_identity" 2>/dev/null || true)" == "$pane_identity" ]] || return 1
     (( attempt >= timeout * 10 )) && return 1
     attempt=$((attempt + 1))
     sleep 0.1
