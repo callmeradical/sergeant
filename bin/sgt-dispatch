@@ -1204,14 +1204,29 @@ if ! $DRY_RUN; then
     for ((_pf_i=0; _pf_i<_pf_repo_count; _pf_i++)); do
       [[ "$(yq ".repos[$_pf_i].name" "$CONFIG_FILE")" == "$_pf_rname" ]] && break
     done
+    # Guard: if the repo name was not found in the config the inner loop exits
+    # with _pf_i == _pf_repo_count.  Skip the device check; the canonical "repo
+    # not found" error is emitted by the repo-validation section further below.
+    [[ $_pf_i -lt $_pf_repo_count ]] || continue
     _pf_repo_path="$(_resolve_path "$(yq ".repos[$_pf_i].path" "$CONFIG_FILE")")"
     # Treehouse pools may live on a different filesystem from the repo itself.
     # Read the pool root from treehouse.toml; when root is absent or empty the
     # pool lives at $HOME/.treehouse (treehouse default).
     # For plain git-worktree dispatch the destination is a sibling of the repo.
     if [[ -f "$_pf_repo_path/treehouse.toml" ]] && command -v treehouse &>/dev/null; then
-      _pf_th_root="$(awk -F'"' '/^[[:space:]]*root[[:space:]]*=/ { print $2; exit }' \
+      # Parse `root = "..."` or `root = '...'` (TOML allows both quote styles).
+      # Strip the key and all surrounding whitespace and quotes with parameter
+      # expansion so the result is the bare path value — or empty when root is
+      # unset, which treehouse interprets as $HOME (its documented default).
+      _pf_th_line="$(grep -m1 '^[[:space:]]*root[[:space:]]*=' \
         "$_pf_repo_path/treehouse.toml" 2>/dev/null || true)"
+      _pf_th_root="${_pf_th_line#*=}"
+      _pf_th_root="${_pf_th_root#"${_pf_th_root%%[![:space:]]*}"}"
+      _pf_th_root="${_pf_th_root%"${_pf_th_root##*[![:space:]]}"}"
+      case "$_pf_th_root" in
+        '"'*'"') _pf_th_root="${_pf_th_root#'"'}"; _pf_th_root="${_pf_th_root%'"'}" ;;
+        "'"*"'") _pf_th_root="${_pf_th_root#"'"}"; _pf_th_root="${_pf_th_root%"'"}" ;;
+      esac
       if [[ -z "$_pf_th_root" ]]; then
         _pf_expected_wt="$HOME/.treehouse"
       elif [[ "$_pf_th_root" == /* ]]; then
