@@ -36,9 +36,10 @@
 #            without /dev/shm — macOS, for one — to run those cases instead of
 #            skipping them.
 #   SGT_TEST_REQUIRE_ALT_DEVICE
-#            1 turns that skip into a failure.  Dockerfile.test sets it, because
-#            in the container the second device is guaranteed and a skip there
-#            means the gate stopped covering #236.
+#            1 turns any reason for not running the device-preflight suite —
+#            missing second device, missing git or yq — into a failure.
+#            Dockerfile.test sets it, because in the container all of those are
+#            guaranteed and a skip there means the gate stopped covering #236.
 
 set -euo pipefail
 
@@ -96,9 +97,19 @@ _run "global state isolation guard" \
 # alongside the overlay root, so the cross-device topology from the issue is
 # reproducible on every push.  Needs git and yq for its dispatch fixture, which
 # the Bash 3.2 Alpine image does not have.
+#
+# SGT_TEST_REQUIRE_ALT_DEVICE=1 means the caller guarantees this suite's
+# prerequisites, so a skip is a defect rather than an inapplicable case — and it
+# has to be honoured HERE too, not only inside the suite.  A tool-missing skip at
+# this level would report a green gate that never entered the suite, which is the
+# same hole the flag exists to close, one layer out.
 if command -v git >/dev/null 2>&1 && command -v yq >/dev/null 2>&1; then
   _run "dispatch filesystem device preflight (#236)" \
     bash "$ROOT_DIR/tests/sgt-dispatch-device-preflight-test.sh"
+elif [[ "${SGT_TEST_REQUIRE_ALT_DEVICE:-0}" == "1" ]]; then
+  printf '\n  %-12s  %s\n' "[bash]" "dispatch filesystem device preflight (#236)"
+  printf '    ✗ FAILED (git or yq missing but SGT_TEST_REQUIRE_ALT_DEVICE=1)\n' >&2
+  fail=$((fail + 1))
 else
   _skip "dispatch filesystem device preflight (#236)" \
     "git or yq not available in this environment"

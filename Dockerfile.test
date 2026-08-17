@@ -74,11 +74,10 @@ RUN set -eux; \
 # Verify Bash is present.
 RUN bash --version | head -1
 
-# tests/sgt-dispatch-device-preflight-test.sh needs two real filesystem devices
-# to reproduce #236: the symlink inode on the overlay root, its target and the
-# worktree parent on a tmpfs.  This image always has both — /dev/shm is a tmpfs
-# alongside the overlay — so a skip here does not mean "not applicable", it means
-# the gate silently stopped covering the regression.  Fail instead.
+# This image guarantees what the #236 device-preflight suite needs: git, yq, and
+# two real filesystem devices (/dev/shm is a tmpfs alongside the overlay root).
+# A skip here therefore means the gate stopped covering the regression, not that
+# the case is inapplicable.  See tests/run-drain-tests.sh for what the flag does.
 ENV SGT_TEST_REQUIRE_ALT_DEVICE=1
 
 WORKDIR /repo

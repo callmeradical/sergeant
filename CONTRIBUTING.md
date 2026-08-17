@@ -91,9 +91,12 @@ is touched.
 Despite the name, this gate carries three things: the drain state contract, the
 global-state isolation guard, and the filesystem device preflight (#236). The
 last one runs here because it needs two real filesystem devices — in the image,
-`/dev/shm` (tmpfs) alongside the overlay root. On a host without a second device
-its cross-device cases skip; point `SGT_TEST_ALT_DEVICE_DIR` at a path on
-another filesystem to run them anyway.
+`/dev/shm` (tmpfs) alongside the overlay root. On a direct host run without a
+second device its cross-device cases skip; point `SGT_TEST_ALT_DEVICE_DIR` at a
+path on another filesystem to run them anyway. Inside the Docker gate they do
+not skip: `Dockerfile.test` sets `SGT_TEST_REQUIRE_ALT_DEVICE=1`, so a missing
+second device fails the gate rather than passing it with the regression
+uncovered.
 
 ### Individual test files
 

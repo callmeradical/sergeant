@@ -33,8 +33,26 @@ TEST_ROOT="$(mktemp -d)"
 # under TEST_ROOT, so the trap must remove it too — and must fire on a signalled
 # exit as well, or an interrupted run leaves the fixture behind for everyone.
 ALT_ROOT=""
-trap '[[ -n "${KEEP_TEST_ROOT:-}" ]] || rm -rf "$TEST_ROOT" ${ALT_ROOT:+"$ALT_ROOT"}' \
-  EXIT INT TERM HUP
+# Resolved before the trap is installed so cleanup can never expand an empty
+# base into a root-level glob.
+ALT_BASE="${SGT_TEST_ALT_DEVICE_DIR:-/dev/shm}"
+_devpf_cleanup() {
+  if [[ -n "${KEEP_TEST_ROOT:-}" ]]; then
+    printf 'KEEP_TEST_ROOT: retained %s%s\n' "$TEST_ROOT" \
+      "${ALT_ROOT:+ and $ALT_ROOT}" >&2
+    return 0
+  fi
+  rm -rf "$TEST_ROOT"
+  # Removed by glob, not by variable: mktemp creates the directory before the
+  # command substitution assigns ALT_ROOT, and a signal in that window would
+  # otherwise leak it.  The PID stamp keeps concurrent runs from reaping each
+  # other's fixtures.
+  rm -rf "$ALT_BASE"/sgt-devpf-$$-* 2>/dev/null || true
+}
+trap _devpf_cleanup EXIT
+# A returning signal trap resumes the script, which would run every remaining
+# assertion against a fixture that no longer exists.  Terminate instead.
+trap '_devpf_cleanup; trap - EXIT; exit 130' INT TERM HUP
 mkdir -p "$TEST_ROOT/config" "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin" \
   "$TEST_ROOT/repo" "$TEST_ROOT/drain" "$TEST_ROOT/tmux"
 export TMUX_TMPDIR="$TEST_ROOT/tmux"
@@ -376,7 +394,7 @@ fi
 # `stat` and real symlinks against bin/_sgt-lib.sh:_path_device, the function
 # both the dispatch preflight and sgt-cleanup ask.
 #
-# Tests 7a-7e need only one device and run everywhere.  Tests 7f and 7g need a
+# Tests 7a-7c need only one device and run everywhere.  Tests 7d-7j need a
 # second writable device to reproduce the reported topology:
 #
 #   $TEST_ROOT/fleet-link   symlink inode on device A (the container's overlay
@@ -448,8 +466,8 @@ _assert_device "_path_device resolves a symlink loop to its parent device" \
   "$TEST_ROOT/loop-link" "$test_root_device"
 
 # ── Tests 7d-7j: the reported two-device topology ─────────────────────────────
-# The second device comes from /dev/shm (a tmpfs) or $SGT_TEST_ALT_DEVICE_DIR.
-ALT_BASE="${SGT_TEST_ALT_DEVICE_DIR:-/dev/shm}"
+# The second device comes from $ALT_BASE — /dev/shm, or $SGT_TEST_ALT_DEVICE_DIR
+# when set; resolved next to the cleanup trap above.
 alt_base_device=""
 alt_skip_reason=""
 if [[ ! -d "$ALT_BASE" || ! -w "$ALT_BASE" ]]; then
@@ -471,13 +489,13 @@ fi
 if [[ -n "$alt_skip_reason" ]]; then
   if [[ "${SGT_TEST_REQUIRE_ALT_DEVICE:-0}" == "1" ]]; then
     _fail "#236 two-device cases could not run but SGT_TEST_REQUIRE_ALT_DEVICE=1" \
-      "$alt_skip_reason"
+      "$alt_skip_reason; unset SGT_TEST_REQUIRE_ALT_DEVICE to skip them instead"
   else
-    _skip "#236 two-device cases (symlinked-fleet accept and cross-device reject)" \
+    _skip "#236 two-device cases 7d-7j (symlink resolution, dispatch accept, dispatch reject)" \
       "$alt_skip_reason"
   fi
 else
-  ALT_ROOT="$(mktemp -d "$ALT_BASE/sgt-devpf-XXXXXX")"
+  ALT_ROOT="$(mktemp -d "$ALT_BASE/sgt-devpf-$$-XXXXXX")"
   mkdir -p "$ALT_ROOT/fleet" "$ALT_ROOT/fleet-b" "$ALT_ROOT/dev"
   chmod 700 "$ALT_ROOT/fleet" "$ALT_ROOT/fleet-b"
   ln -s "$ALT_ROOT/fleet" "$TEST_ROOT/fleet-link"
