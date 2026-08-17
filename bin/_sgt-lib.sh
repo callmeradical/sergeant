@@ -1989,3 +1989,28 @@ _sgt_branch_unpushed_commits() {
   git -C "$repo_path" show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null || return 0
   git -C "$repo_path" log --oneline "refs/heads/$branch" --not --remotes 2>/dev/null || true
 }
+
+# _path_device <path>
+#
+# Print the filesystem device number of <path>, or of its nearest existing
+# ancestor when <path> does not yet exist.  Returns 1 if no existing ancestor
+# can be found (e.g. the path reaches the filesystem root) or if stat fails.
+#
+# Used by sgt-dispatch (cross-device preflight) and sgt-cleanup (post-hoc
+# same-filesystem enforcement) so both scripts share one canonical
+# implementation.  Extracted from sgt-cleanup into this shared library to
+# eliminate duplication (#236).
+_path_device() {
+  local device parent path="$1"
+
+  while [[ ! -e "$path" && ! -L "$path" ]]; do
+    parent="$(dirname "$path")"
+    [[ "$parent" != "$path" ]] || return 1
+    path="$parent"
+  done
+
+  device="$(stat -c '%d' "$path" 2>/dev/null || \
+    stat -f '%d' "$path" 2>/dev/null)" || return 1
+  [[ -n "$device" && "$device" != *$'\n'* ]] || return 1
+  printf '%s\n' "$device"
+}

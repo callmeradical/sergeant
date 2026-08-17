@@ -1189,6 +1189,72 @@ if ! $DRY_RUN; then
   fi
 fi
 
+# ── Filesystem device preflight (#236) ───────────────────────────────────────
+# Verify that each target repo's expected worktree path lies on the same
+# filesystem device as SERGEANT_FLEET before any persistent side effect (td
+# task, fleet record, branch, worktree).  sgt-cleanup refuses cross-device
+# layouts (#161); catching the mismatch here prevents stuck fleet records that
+# cleanup cannot remove.
+if ! $DRY_RUN; then
+  _pf_fleet_device="$(_path_device "$FLEET_DIR")" || \
+    _die "Cannot determine filesystem device of SERGEANT_FLEET ($FLEET_DIR)"
+  _pf_repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
+  _pf_error_repos=()
+  for _pf_rname in "${TARGET_REPOS[@]}"; do
+    for ((_pf_i=0; _pf_i<_pf_repo_count; _pf_i++)); do
+      [[ "$(yq ".repos[$_pf_i].name" "$CONFIG_FILE")" == "$_pf_rname" ]] && break
+    done
+    # Guard: if the repo name was not found in the config the inner loop exits
+    # with _pf_i == _pf_repo_count.  Skip the device check; the canonical "repo
+    # not found" error is emitted by the repo-validation section further below.
+    [[ $_pf_i -lt $_pf_repo_count ]] || continue
+    _pf_repo_path="$(_resolve_path "$(yq ".repos[$_pf_i].path" "$CONFIG_FILE")")"
+    # Treehouse pools may live on a different filesystem from the repo itself.
+    # Read the pool root from treehouse.toml; when root is absent or empty the
+    # pool lives at $HOME/.treehouse (treehouse default).
+    # For plain git-worktree dispatch the destination is a sibling of the repo.
+    if [[ -f "$_pf_repo_path/treehouse.toml" ]] && command -v treehouse &>/dev/null; then
+      # Parse `root = "..."` or `root = '...'` (TOML allows both quote styles).
+      # Strip the key and all surrounding whitespace and quotes with parameter
+      # expansion so the result is the bare path value — or empty when root is
+      # unset, which treehouse interprets as $HOME (its documented default).
+      _pf_th_line="$(grep -m1 '^[[:space:]]*root[[:space:]]*=' \
+        "$_pf_repo_path/treehouse.toml" 2>/dev/null || true)"
+      _pf_th_root="${_pf_th_line#*=}"
+      _pf_th_root="${_pf_th_root#"${_pf_th_root%%[![:space:]]*}"}"
+      _pf_th_root="${_pf_th_root%"${_pf_th_root##*[![:space:]]}"}"
+      case "$_pf_th_root" in
+        '"'*'"') _pf_th_root="${_pf_th_root#'"'}"; _pf_th_root="${_pf_th_root%'"'}" ;;
+        "'"*"'") _pf_th_root="${_pf_th_root#"'"}"; _pf_th_root="${_pf_th_root%"'"}" ;;
+      esac
+      if [[ -z "$_pf_th_root" ]]; then
+        _pf_expected_wt="$HOME/.treehouse"
+      elif [[ "$_pf_th_root" == /* ]]; then
+        _pf_expected_wt="$_pf_th_root/.treehouse"
+      else
+        _pf_expected_wt="$_pf_repo_path/$_pf_th_root/.treehouse"
+      fi
+    else
+      _pf_expected_wt="$(dirname "$_pf_repo_path")"
+    fi
+    _pf_wt_device="$(_path_device "$_pf_expected_wt")" || \
+      _die "Cannot determine filesystem device of worktree destination for $_pf_rname ($_pf_expected_wt)"
+    if [[ "$_pf_fleet_device" != "$_pf_wt_device" ]]; then
+      _pf_error_repos+=("$_pf_rname: worktree path $_pf_expected_wt is on a different device than SERGEANT_FLEET ($FLEET_DIR)")
+    fi
+  done
+  if [[ "${#_pf_error_repos[@]}" -gt 0 ]]; then
+    _pf_msg="Cross-device layout rejected — set SERGEANT_FLEET to a directory on the same filesystem as the worktrees, or reconfigure the repo paths so they share a device with SERGEANT_FLEET. sgt-cleanup refuses this layout and will leave stuck fleet records (#161):"
+    for _pf_e in "${_pf_error_repos[@]}"; do
+      _pf_msg+=$'\n'"  $_pf_e"
+    done
+    # _die exits; no cleanup needed for preflight temporaries.
+    _die "$_pf_msg"
+  fi
+  unset _pf_fleet_device _pf_repo_count _pf_error_repos _pf_rname _pf_i \
+    _pf_repo_path _pf_th_root _pf_expected_wt _pf_wt_device
+fi
+
 # ── Drain admission check ─────────────────────────────────────────────────────
 # Acquire the drain admission lock and hold it through the first side effect
 # (td task creation), so that a concurrent drain set either waits until
