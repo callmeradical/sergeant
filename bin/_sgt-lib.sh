@@ -42,6 +42,8 @@ SGT_LIB_LOADED=1
 source "$_SGT_LIB_DIR/_sgt-drain.sh"
 # shellcheck source=bin/_sgt-process.sh
 source "$_SGT_LIB_DIR/_sgt-process.sh"
+# shellcheck source=bin/_sgt-harness.sh
+source "$_SGT_LIB_DIR/_sgt-harness.sh"
 
 # ── Configurable env vars ─────────────────────────────────────────────────────
 
@@ -65,12 +67,12 @@ _sgt_detect_agent() {
 AGENT_CMD="${SERGEANT_AGENT:-$(_sgt_detect_agent)}"
 
 # ── Interactive harness launch contract ──────────────────────────────────────
-# One shared definition drives every harness-specific launch decision: the
+# The contract in _sgt-harness.sh drives every harness-specific launch decision: the
 # capability gate (_require_interactive_agent), pinned-tuple validation
 # (_sgt_require_agent_model), and the base plus model argv and environment a
 # worker actually executes (_sgt_resolve_agent_launch).  Adding a harness means
 # adding exactly one line here; the only other harness-aware code left in the
-# tree is the Goose interactive-session probe in _require_interactive_agent.
+# tree is the capability probe in _require_interactive_agent.
 #
 # Every value below is MEASURED on a host with that harness installed, never
 # inferred from documentation alone.  A harness whose surface has not been
@@ -117,18 +119,9 @@ AGENT_CMD="${SERGEANT_AGENT:-$(_sgt_detect_agent)}"
 #                        verifiable from the launch invocation itself.
 #        unmeasured      the harness's provider surface has not been observed.
 #
-#   4. base_argv — the words that start a persistent interactive session, or "-"
-#                  for none.  Interactive-only by construction: no contract may
-#                  name a one-shot or non-interactive subcommand.
-_sgt_harness_launch_contract() {
-  case "$1" in
-    opencode|oc) printf 'argv-qualified agent-definition any --auto\n' ;;
-    goose)       printf 'env-goose unknown any session\n' ;;
-    claude)      printf 'unmeasured unmeasured unmeasured --dangerously-skip-permissions\n' ;;
-    *)           return 1 ;;
-  esac
-}
-
+#   4. base_argv — the single argument that starts an unattended persistent
+#                  session, or "-" for none. Multi-argument base invocations need
+#                  an explicit transport before they can be added safely.
 # The agent name Sergeant generates when it must carry a pinned variant through
 # an agent definition.  Fixed so a resumed worker regenerates the same launch.
 SGT_AGENT_VARIANT_AGENT_NAME="sgt-pinned"
@@ -756,11 +749,28 @@ _SGT_AGENT_SUPPORTED_VERSIONS_goose="~> 1"
 _SGT_AGENT_SUPPORTED_VERSIONS_claude="~> 2"
 
 _require_interactive_agent() {
-  local agent_name
+  local agent_name required_flag help_output
   agent_name="$(basename "$AGENT_CMD")"
-  _sgt_harness_launch_contract "$agent_name" >/dev/null || \
+  _sgt_harness_require_accepted "$agent_name" >/dev/null 2>&1 && \
+    _sgt_harness_launch_contract "$agent_name" >/dev/null || \
     _die "unsupported interactive agent: $AGENT_CMD (expected opencode, goose, or claude)"
   command -v "$AGENT_CMD" &>/dev/null || _die "interactive agent not found: $AGENT_CMD"
+
+  # OpenCode silently ignores unknown options, so successful startup cannot
+  # prove that unattended permission mode was honored. Fail before dispatch
+  # creates td, fleet, branch, or worktree state unless help advertises the exact
+  # launch flag. Test fixtures opt out because their fake TUIs do not implement
+  # a help surface; sgt-harness-test exercises this production preflight directly.
+  case "$agent_name" in
+    opencode|oc|claude)
+      if [[ "${SGT_TEST_HOOKS:-}" != "1" ]]; then
+        required_flag="$(_sgt_harness_launch_args "$agent_name" | head -1)"
+        help_output="$("$AGENT_CMD" --help 2>&1 || true)"
+        printf '%s\n' "$help_output" | grep -Fq -- "$required_flag" || \
+          _die "$agent_name does not support Sergeant's required interactive permission mode: $required_flag"
+      fi
+      ;;
+  esac
 
   local canonical_harness="$agent_name"
   [[ "$canonical_harness" == "oc" ]] && canonical_harness="opencode"

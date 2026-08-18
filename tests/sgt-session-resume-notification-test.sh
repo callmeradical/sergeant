@@ -46,8 +46,9 @@ export SGT_WIKI_DISABLED=1
 export SGT_TEST_HOOKS=1
 # Zero settle so the harness readiness gate fires on first glyph (test speed).
 export SGT_HARNESS_SETTLE_SECONDS=0
-# Short ack timeout: must succeed well inside 15s; default is 60s.
-export SGT_NOTIFICATION_ACK_TIMEOUT=15
+# Short ack timeout: the fake harness deliberately stalls when Sergeant launches
+# it without OpenCode's autonomous permission mode, reproducing the real timeout.
+export SGT_NOTIFICATION_ACK_TIMEOUT=3
 
 mkdir -p "$SERGEANT_FLEET" "$SERGEANT_CONFIG" "$SERGEANT_DRAIN_DIR" \
   "$TMUX_TMPDIR" "$HOME" "$TEST_ROOT/fake-bin" "$TEST_ROOT/worktree"
@@ -78,6 +79,14 @@ mkdir -p "$REPO_DIR"
 cat > "$TEST_ROOT/fake-bin/opencode" <<AGENTEOF
 #!/usr/bin/env bash
 if [[ "\${1:-}" == "--version" ]]; then printf 'opencode 1.18.18\n'; exit 0; fi
+
+# Model OpenCode stopping at an interactive permission gate. Before the fix,
+# Sergeant passed Claude's flag here; the caller timed out and killed the pane.
+if [[ " \$* " != *" --auto "* ]]; then
+  printf 'Agent ready\\n'
+  sleep 10
+  exit 0
+fi
 
 # Print immediately — this is the glyph that satisfies _sgt_harness_ready_tui.
 printf 'Agent ready\\n'

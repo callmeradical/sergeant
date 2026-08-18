@@ -60,7 +60,7 @@ For each non-trivial behavior, work red before green: one vertical slice, test, 
 
 ### 4. Escalate and resume
 
-Your worker runs as a persistent interactive agent session in its recorded tmux pane. Non-interactive agent modes are prohibited: do not launch `opencode run`, `goose run`, Claude print mode, `--auto`, `--prompt`, or an equivalent one-shot agent. Sergeant delivers only a fixed ID-bearing notification through interactive terminal input; prompt, response, and secret bodies remain in durable files and never appear in process arguments.
+Your worker runs as a persistent interactive agent session in its recorded tmux pane. Non-interactive agent modes are prohibited: do not launch `opencode run`, `goose run`, Claude print mode, `--prompt`, or an equivalent one-shot agent. OpenCode's interactive `--auto` permission mode is not a one-shot mode. Sergeant delivers only a fixed ID-bearing notification through interactive terminal input; prompt, response, and secret bodies remain in durable files and never appear in process arguments.
 
 For every Sergeant notification, read `.sergeant-notification` and copy the exact supervisor-scoped token from the nudge (`notification_id|target_nonce`) to the named file under `.sergeant-notification-acks/`. Do not act until that supervisor sends acceptance and the named file under `.sergeant-notification-accepts/` contains the same token. Then follow the instruction exactly once and write the token to the named file under `.sergeant-notification-complete/`. Repeated nudges with the same token are retries, not new work.
 

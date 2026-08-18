@@ -92,9 +92,11 @@ requested, transported, and runtime-confirmed variant separately.
 
 ### Security posture: autonomous permission modes
 
-OpenCode is launched with `--auto`, and Claude is launched with
-`--dangerously-skip-permissions`, in every Sergeant worker. This is intentional
-and the rationale is:
+OpenCode is launched with `--auto`, which preserves explicit deny rules, and
+Claude is launched with `--dangerously-skip-permissions`, which bypasses its
+permission checks, in every Sergeant worker. Goose has no equivalent launch flag;
+its unattended permission behavior remains operator-configured. These choices are
+intentional and the rationale is:
 
 - Workers run in an **automated dispatch context**, not an interactive session.
   The operator is not at the keyboard and cannot respond to individual
@@ -106,8 +108,8 @@ and the rationale is:
   operator can make real-time decisions. In a Sergeant worker, those gates would
   cause the worker to hang indefinitely waiting for input that will never come.
 
-These modes are not capability grants; they bypass the interactive confirmation
-UI. The actual trust boundary is the intent file content approved
+These modes alter interactive confirmation behavior; they do not grant operating
+system capabilities. The actual trust boundary is the intent file content approved
 at dispatch time, the worker brief injected into the session, and the repository
 permissions of the worktree the worker checks out into.
 

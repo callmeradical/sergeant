@@ -6,18 +6,18 @@
 # bin/sgt-interactive-worker: the accepted-harness capability gate, the
 # readiness probe, and the launch invocation.  They drifted, and `claude` ended
 # up accepted by the gate and launchable while being permanently unable to
-# satisfy readiness — so its notification was never injected.  One registry now
-# drives all three, and _sgt_harness_registry_validate fails loudly when a row
-# omits a probe or names a probe that is not implemented.
+# satisfy readiness — so its notification was never injected. This file now owns
+# all three, and _sgt_harness_registry_validate fails loudly when a row omits a
+# probe or names a probe that is not implemented.
 #
 # Registry row format:
 #
-#   <harness>:<probe>:<launch-args>
+#   <harness>:<probe>:
 #
 #   harness      basename of the accepted harness executable
 #   probe        readiness probe identifier; must appear in
 #                _sgt_harness_supported_probes
-#   launch-args  space-separated extra arguments, possibly empty
+#   final colon  reserved so malformed legacy rows fail loudly
 #
 # Readiness contract for the `tui` probe
 # --------------------------------------
@@ -45,10 +45,25 @@ _SGT_HARNESS_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$_SGT_HARNESS_SCRIPT_DIR/_sgt-bash-version.sh"
 _sgt_require_running_bash || return 1
 
+[[ "${SGT_HARNESS_LOADED:-}" == "1" ]] && return 0
+SGT_HARNESS_LOADED=1
+
 # Readiness probes that _sgt_harness_ready actually implements.  A registry row
 # naming anything else is a programming error and fails validation.
 _sgt_harness_supported_probes() {
   printf '%s\n' tui
+}
+
+# Model transport, variant transport, provider scope, and the one base argument
+# that starts an unattended persistent session. Capability preflight and the
+# worker both consume this contract.
+_sgt_harness_launch_contract() {
+  case "$1" in
+    opencode|oc) printf 'argv-qualified agent-definition any --auto\n' ;;
+    goose)       printf 'env-goose unknown any session\n' ;;
+    claude)      printf 'unmeasured unmeasured unmeasured --dangerously-skip-permissions\n' ;;
+    *)           return 1 ;;
+  esac
 }
 
 # The registry.  Bash 3.2 has no associative arrays, so rows are plain lines.
@@ -60,22 +75,21 @@ _sgt_harness_registry() {
     printf '%s\n' "$_SGT_HARNESS_REGISTRY_OVERRIDE"
     return 0
   fi
-  # Interactive workers are launched in each harness's autonomous permission
-  # mode: --auto for OpenCode and --dangerously-skip-permissions for Claude.
+  # Interactive workers use the launch contract above; this registry owns only
+  # accepted harness names and readiness probes.
   # This is a deliberate security posture decision: Sergeant workers execute
   # in an automated dispatch context, not an interactive session. The operator
   # approves scope at dispatch time through the intent file and worker brief
   # content — there is no human at the keyboard to respond to individual
-  # permission gates.  The flag bypasses OpenCode's interactive confirmation
-  # prompts so the worker can proceed autonomously.  Operator trust is scoped
+  # permission gates. Operator trust is scoped
   # to the intent file reviewed and approved at dispatch time; the worker
   # cannot escalate beyond that scope.  See docs/using-sergeant.md for the
   # full security model.
   printf '%s\n' \
-    'opencode:tui:--auto' \
-    'oc:tui:--auto' \
-    'goose:tui:session' \
-    'claude:tui:--dangerously-skip-permissions'
+    'opencode:tui:' \
+    'oc:tui:' \
+    'goose:tui:' \
+    'claude:tui:'
 }
 
 # Print the registry row for a harness, or return 1 when it is not accepted.
@@ -119,13 +133,13 @@ _sgt_harness_probe() {
 # Print the harness launch arguments, one per line.  Prints nothing for a
 # harness that takes no extra arguments; returns 1 for an unknown harness.
 _sgt_harness_launch_args() {
-  local row rest args argument
-  row="$(_sgt_harness_row "$1")" || return 1
-  rest="${row#*:}"
-  args="${rest#*:}"
+  local contract args argument
+  contract="$(_sgt_harness_launch_contract "$1")" || return 1
+  args="${contract##* }"
+  [[ "$args" != "-" ]] || return 0
   [[ -n "$args" ]] || return 0
   # Word splitting is intended: launch args are a fixed, space-separated,
-  # non-user-supplied vector defined in the registry above.
+  # non-user-supplied vector defined in the launch contract above.
   # shellcheck disable=SC2086
   for argument in $args; do
     printf '%s\n' "$argument"
@@ -143,7 +157,7 @@ _sgt_harness_registry_validate() {
     [[ -n "$row" ]] || continue
     if [[ ! "$row" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*:[A-Za-z0-9][A-Za-z0-9._-]*: ]]; then
       harness="${row%%:*}"
-      printf 'ERROR: harness registry row for %s is malformed or declares no readiness probe (expected <harness>:<probe>:<launch-args>): %s\n' \
+      printf 'ERROR: harness registry row for %s is malformed or declares no readiness probe (expected <harness>:<probe>:): %s\n' \
         "${harness:-<unnamed>}" "$row" >&2
       return 1
     fi

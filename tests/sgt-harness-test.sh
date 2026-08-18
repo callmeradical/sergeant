@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regression for the shared harness contract (td-ed15d5 / GH #175).
 #
-# One registry in bin/_sgt-harness.sh must drive all three things that used to
+# One file, bin/_sgt-harness.sh, must drive all three things that used to
 # diverge inside bin/sgt-interactive-worker: the accepted-harness capability
 # gate (was L32-38), the readiness probe (was L148-164), and the launch
 # invocation (was L405-409).
@@ -60,7 +60,7 @@ if _sgt_harness_is_accepted definitely-not-a-harness; then
   exit 1
 fi
 
-# ── 2. The same registry supplies the launch invocation ───────────────────────
+# ── 2. The same file supplies the launch invocation ───────────────────────────
 # These are the exact argument vectors bin/sgt-interactive-worker used to hard
 # code in its own case statement.
 
@@ -91,7 +91,49 @@ if _sgt_harness_launch_args definitely-not-a-harness >/dev/null 2>&1; then
   exit 1
 fi
 
-# ── 3. Every accepted harness declares a probe; a missing probe fails loudly ──
+# ── 3. Production preflight rejects a silently ignored permission flag ────────
+
+mkdir -p "$TEST_ROOT/good-bin" "$TEST_ROOT/bad-bin"
+cat > "$TEST_ROOT/good-bin/opencode" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --help) printf '%s\n' 'Options: --auto';;
+  --version) printf '%s\n' 'opencode 1.18.18';;
+esac
+EOF
+cat > "$TEST_ROOT/good-bin/claude" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --help) printf '%s\n' 'Options: --dangerously-skip-permissions';;
+  --version) printf '%s\n' '2.1.233';;
+esac
+EOF
+cat > "$TEST_ROOT/bad-bin/opencode" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --help) printf '%s\n' 'Options: --model';;
+  --version) printf '%s\n' 'opencode 1.18.18';;
+esac
+EOF
+chmod +x "$TEST_ROOT/good-bin/opencode" "$TEST_ROOT/good-bin/claude" \
+  "$TEST_ROOT/bad-bin/opencode"
+
+for agent in opencode claude; do
+  SERGEANT_AGENT="$TEST_ROOT/good-bin/$agent" bash -c \
+    'source "$1"; _require_interactive_agent' _ "$ROOT_DIR/bin/_sgt-lib.sh"
+done
+set +e
+permission_output="$(SERGEANT_AGENT="$TEST_ROOT/bad-bin/opencode" bash -c \
+  'source "$1"; _require_interactive_agent' _ "$ROOT_DIR/bin/_sgt-lib.sh" 2>&1)"
+permission_status=$?
+set -e
+[[ "$permission_status" -ne 0 && "$permission_output" == *"required interactive permission mode: --auto"* ]] || {
+  printf 'permission preflight accepted unsupported OpenCode: status=%s output=%s\n' \
+    "$permission_status" "$permission_output" >&2
+  exit 1
+}
+
+# ── 4. Every accepted harness declares a probe; a missing probe fails loudly ──
 
 while IFS= read -r harness; do
   [[ -n "$harness" ]] || continue
@@ -108,7 +150,7 @@ _sgt_harness_registry_validate
 
 set +e
 missing_probe_output="$(SGT_TEST_HOOKS=1 \
-  _SGT_HARNESS_REGISTRY_OVERRIDE='opencode:tui:--auto
+  _SGT_HARNESS_REGISTRY_OVERRIDE='opencode:tui:
 newharness::' \
   bash -c 'source "$1"; _sgt_harness_registry_validate' _ "$HARNESS_LIB" 2>&1)"
 missing_probe_status=$?
