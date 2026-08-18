@@ -122,9 +122,9 @@ AGENT_CMD="${SERGEANT_AGENT:-$(_sgt_detect_agent)}"
 #                  name a one-shot or non-interactive subcommand.
 _sgt_harness_launch_contract() {
   case "$1" in
-    opencode|oc) printf 'argv-qualified agent-definition any --dangerously-skip-permissions\n' ;;
+    opencode|oc) printf 'argv-qualified agent-definition any --auto\n' ;;
     goose)       printf 'env-goose unknown any session\n' ;;
-    claude)      printf 'unmeasured unmeasured unmeasured -\n' ;;
+    claude)      printf 'unmeasured unmeasured unmeasured --dangerously-skip-permissions\n' ;;
     *)           return 1 ;;
   esac
 }

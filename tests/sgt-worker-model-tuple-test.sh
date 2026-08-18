@@ -204,7 +204,7 @@ _assert_evidence_matches() {
 _launch pinned-opencode opencode anthropic/claude-opus-5 flag
 observed="$TEST_ROOT/pinned-opencode/observed"
 record="$TEST_ROOT/pinned-opencode/state/launch_record"
-[[ "$(_field "$observed" argv)" == "--dangerously-skip-permissions --model anthropic/claude-opus-5" ]] || {
+[[ "$(_field "$observed" argv)" == "--auto --model anthropic/claude-opus-5" ]] || {
   printf 'FAIL: opencode argv was %q\n' "$(_field "$observed" argv)" >&2
   exit 1
 }
@@ -254,7 +254,7 @@ _assert_evidence_matches pinned-goose
 _launch pinned-variant opencode anthropic/claude-opus-5:high flag
 observed="$TEST_ROOT/pinned-variant/observed"
 record="$TEST_ROOT/pinned-variant/state/launch_record"
-[[ "$(_field "$observed" argv)" == "--dangerously-skip-permissions --model anthropic/claude-opus-5 --agent sgt-pinned" ]] || {
+[[ "$(_field "$observed" argv)" == "--auto --model anthropic/claude-opus-5 --agent sgt-pinned" ]] || {
   printf 'FAIL: variant argv was %q\n' "$(_field "$observed" argv)" >&2
   exit 1
 }
@@ -377,7 +377,7 @@ _launch pinned-goose-model goose openai/gpt-5.2 flag
 _launch unpinned opencode unpinned unpinned
 observed="$TEST_ROOT/unpinned/observed"
 record="$TEST_ROOT/unpinned/state/launch_record"
-[[ "$(_field "$observed" argv)" == "--dangerously-skip-permissions" ]] || {
+[[ "$(_field "$observed" argv)" == "--auto" ]] || {
   printf 'FAIL: unpinned opencode argv was %q\n' "$(_field "$observed" argv)" >&2
   exit 1
 }
@@ -402,7 +402,7 @@ record="$TEST_ROOT/unpinned/state/launch_record"
 # Fleet directories created before this contract existed must keep launching.
 
 _launch legacy opencode '' ''
-[[ "$(_field "$TEST_ROOT/legacy/observed" argv)" == "--dangerously-skip-permissions" ]]
+[[ "$(_field "$TEST_ROOT/legacy/observed" argv)" == "--auto" ]]
 [[ "$(_field "$TEST_ROOT/legacy/state/launch_record" model)" == "unpinned" ]]
 
 # ── 6. The launch record carries no ambient environment ──────────────────────

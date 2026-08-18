@@ -62,11 +62,25 @@ cat > "$TEST_ROOT/fake-bin/_harness-body" <<'HARNESS'
 set -uo pipefail
 
 printf '%s|%s\n' "$#" "$*" > "$ARG_LOG"
+_fail() { printf '%s\n' "$1" > "$FAILURE_LOG"; exit 90; }
+
+# Real interactive workers must be able to perform the acknowledgement write
+# without stopping at a permission prompt. Pin each harness's public CLI
+# contract here so a cooperative fake cannot hide an unusable launch vector.
+case "$HARNESS_NAME" in
+  opencode|oc)
+    [[ " $* " == *" --auto "* ]] || \
+      _fail "$HARNESS_NAME was not launched with --auto"
+    ;;
+  claude)
+    [[ " $* " == *" --dangerously-skip-permissions "* ]] || \
+      _fail "claude was not launched with --dangerously-skip-permissions"
+    ;;
+esac
+
 # Render something so the readiness probe can observe a drawn interface.  No
 # recognisable banner text: readiness must not depend on a presentation string.
 printf 'harness %s up\n' "$HARNESS_NAME"
-
-_fail() { printf '%s\n' "$1" > "$FAILURE_LOG"; exit 90; }
 
 IFS= read -r nudge || _fail 'no nudge line was injected'
 printf '%s\n' "$nudge" > "$NUDGE_LOG"

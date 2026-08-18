@@ -72,12 +72,11 @@ A coordinator that is not inside tmux can bind a pane with
 combined, neither starts a tmux server, and every path verifies the pane against
 the live server first.
 
-Workers always run as persistent
-interactive TTY sessions. Sergeant never starts one-shot run, prompt, print, or
-automatic modes. The base invocation is OpenCode with
-`--dangerously-skip-permissions`, Goose with `goose session`, and Claude with no
-prompt arguments; when a tuple is pinned, that base is extended with the
-harness's own measured model transport — argv for OpenCode, plus `--agent`
+Workers always run as persistent interactive TTY sessions. Sergeant never starts
+one-shot run, prompt, or print modes. The base invocation is OpenCode with
+`--auto`, Goose with `goose session`, and Claude with
+`--dangerously-skip-permissions`; when a tuple is pinned, that base is extended
+with the harness's own measured model transport — argv for OpenCode, plus `--agent`
 against a generated definition when a variant is pinned, and
 `GOOSE_PROVIDER`/`GOOSE_MODEL` in the environment for Goose. Initial briefs
 and later responses remain in durable files. A worker-owned loop retries only a
@@ -91,10 +90,11 @@ requested provider/model/variant before it creates fleet state or a worktree.
 Every later worker launch repeats the check. Durable launch evidence records the
 requested, transported, and runtime-confirmed variant separately.
 
-### Security posture: `--dangerously-skip-permissions`
+### Security posture: autonomous permission modes
 
-OpenCode is launched with `--dangerously-skip-permissions` in every Sergeant
-worker. This is intentional and the rationale is:
+OpenCode is launched with `--auto`, and Claude is launched with
+`--dangerously-skip-permissions`, in every Sergeant worker. This is intentional
+and the rationale is:
 
 - Workers run in an **automated dispatch context**, not an interactive session.
   The operator is not at the keyboard and cannot respond to individual
@@ -106,8 +106,8 @@ worker. This is intentional and the rationale is:
   operator can make real-time decisions. In a Sergeant worker, those gates would
   cause the worker to hang indefinitely waiting for input that will never come.
 
-The flag is not a capability grant — it is a bypass of the interactive
-confirmation UI. The actual trust boundary is the intent file content approved
+These modes are not capability grants; they bypass the interactive confirmation
+UI. The actual trust boundary is the intent file content approved
 at dispatch time, the worker brief injected into the session, and the repository
 permissions of the worktree the worker checks out into.
 

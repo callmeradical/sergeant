@@ -60,7 +60,8 @@ _sgt_harness_registry() {
     printf '%s\n' "$_SGT_HARNESS_REGISTRY_OVERRIDE"
     return 0
   fi
-  # The opencode harness is launched with --dangerously-skip-permissions.
+  # Interactive workers are launched in each harness's autonomous permission
+  # mode: --auto for OpenCode and --dangerously-skip-permissions for Claude.
   # This is a deliberate security posture decision: Sergeant workers execute
   # in an automated dispatch context, not an interactive session. The operator
   # approves scope at dispatch time through the intent file and worker brief
@@ -71,10 +72,10 @@ _sgt_harness_registry() {
   # cannot escalate beyond that scope.  See docs/using-sergeant.md for the
   # full security model.
   printf '%s\n' \
-    'opencode:tui:--dangerously-skip-permissions' \
-    'oc:tui:--dangerously-skip-permissions' \
+    'opencode:tui:--auto' \
+    'oc:tui:--auto' \
     'goose:tui:session' \
-    'claude:tui:'
+    'claude:tui:--dangerously-skip-permissions'
 }
 
 # Print the registry row for a harness, or return 1 when it is not accepted.

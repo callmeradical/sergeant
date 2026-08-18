@@ -484,7 +484,7 @@ for _ in $(seq 1 250); do
   [[ -f "$TEST_ROOT/done/state/result" ]] && break
   sleep 0.02
 done
-[[ "$(cat "$TEST_ROOT/done.args")" == "1|--dangerously-skip-permissions" ]]
+[[ "$(cat "$TEST_ROOT/done.args")" == "1|--auto" ]]
 [[ "$(cat "$TEST_ROOT/done/state/status")" == "done" ]]
 [[ "$(cat "$TEST_ROOT/done/state/worker_mode")" == "interactive" ]]
 [[ ! -e "$TEST_ROOT/done-pre-completion-replay.log" ]]
@@ -572,7 +572,7 @@ for _ in $(seq 1 100); do
   sleep 0.02
 done
 [[ "$(cat "$TEST_ROOT/goose.args")" == "1|session" ]]
-[[ "$(cat "$TEST_ROOT/claude.args")" == "0|" ]]
+[[ "$(cat "$TEST_ROOT/claude.args")" == "1|--dangerously-skip-permissions" ]]
 [[ "$(cat "$TEST_ROOT/goose/state/status")" == "done" ]]
 [[ "$(cat "$TEST_ROOT/claude/state/status")" == "done" ]]
 
@@ -600,7 +600,7 @@ for _ in $(seq 1 100); do
   [[ -f "$TEST_ROOT/orphan/state/diagnostic" ]] && break
   sleep 0.02
 done
-[[ "$(cat "$TEST_ROOT/orphan.args")" == "1|--dangerously-skip-permissions" ]]
+[[ "$(cat "$TEST_ROOT/orphan.args")" == "1|--auto" ]]
 [[ "$(cat "$TEST_ROOT/orphan/state/status")" == "orphaned" ]]
 grep -Fq 'interactive opencode session exited before terminal completion' \
   "$TEST_ROOT/orphan/state/diagnostic"

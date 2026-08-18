@@ -245,9 +245,9 @@ Start the coordinator from the Sergeant checkout in tmux so `AGENTS.md` is loade
 and dispatch can bind the exact coordinator identity:
 
 ```bash
-tmux new-session -s sergeant-coordinator 'opencode --dangerously-skip-permissions'
+tmux new-session -s sergeant-coordinator 'opencode --auto'
 # or: tmux new-session -s sergeant-coordinator 'goose session'
-# or: tmux new-session -s sergeant-coordinator claude
+# or: tmux new-session -s sergeant-coordinator 'claude --dangerously-skip-permissions'
 ```
 
 First checks:

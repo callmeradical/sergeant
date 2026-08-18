@@ -74,16 +74,16 @@ launch_args_of() {
   printf 'goose launch args regressed: %s\n' "$(launch_args_of goose)" >&2
   exit 1
 }
-[[ "$(launch_args_of opencode)" == "--dangerously-skip-permissions" ]] || {
+[[ "$(launch_args_of opencode)" == "--auto" ]] || {
   printf 'opencode launch args regressed: %s\n' "$(launch_args_of opencode)" >&2
   exit 1
 }
-[[ "$(launch_args_of oc)" == "--dangerously-skip-permissions" ]] || {
+[[ "$(launch_args_of oc)" == "--auto" ]] || {
   printf 'oc launch args regressed: %s\n' "$(launch_args_of oc)" >&2
   exit 1
 }
-[[ -z "$(launch_args_of claude)" ]] || {
-  printf 'claude must launch with no extra arguments, got: %s\n' "$(launch_args_of claude)" >&2
+[[ "$(launch_args_of claude)" == "--dangerously-skip-permissions" ]] || {
+  printf 'claude launch args regressed: %s\n' "$(launch_args_of claude)" >&2
   exit 1
 }
 if _sgt_harness_launch_args definitely-not-a-harness >/dev/null 2>&1; then
@@ -108,7 +108,7 @@ _sgt_harness_registry_validate
 
 set +e
 missing_probe_output="$(SGT_TEST_HOOKS=1 \
-  _SGT_HARNESS_REGISTRY_OVERRIDE='opencode:tui:--dangerously-skip-permissions
+  _SGT_HARNESS_REGISTRY_OVERRIDE='opencode:tui:--auto
 newharness::' \
   bash -c 'source "$1"; _sgt_harness_registry_validate' _ "$HARNESS_LIB" 2>&1)"
 missing_probe_status=$?
