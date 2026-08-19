@@ -2018,8 +2018,9 @@ _path_device() {
     path="$parent"
   done
 
-  device="$(stat -c '%d' "$path" 2>/dev/null || \
-    stat -f '%d' "$path" 2>/dev/null)" || return 1
+  [[ ! -L "$path" || -e "$path" ]] || return 1
+  device="$(stat -L -c '%d' "$path" 2>/dev/null || \
+    stat -L -f '%d' "$path" 2>/dev/null)" || return 1
   [[ -n "$device" && "$device" != *$'\n'* ]] || return 1
   printf '%s\n' "$device"
 }
