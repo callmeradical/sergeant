@@ -544,6 +544,20 @@ def register(task_id: str, profile: str, correlation: str) -> None:
                         "correlation_id": correlation,
                     },
                 )
+            # Dispatch registers before repository launch. Flush its initial
+            # task metadata and parent entries before admission can be reported.
+            for entry in task.iterdir():
+                if entry.is_symlink() or not entry.is_file():
+                    continue
+                descriptor = os.open(entry, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                        fail("unsafe fleet task metadata")
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            fsync_directory(task)
+            fsync_directory(root)
     finally:
         os.close(lock_descriptor)
 
