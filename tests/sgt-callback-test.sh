@@ -75,7 +75,7 @@ PY
 # Registration writes only the versioned, strict origin contract.
 mkdir -p "$fleet/task-schema"
 write_ack_callback hermes-discord "$TEST_ROOT/schema-deliveries"
-CALLBACK_LOG="$TEST_ROOT/schema-deliveries" callback register \
+CALLBACK_LOG="$TEST_ROOT/schema-deliveries" callback register-admission \
   task-schema hermes-discord req-schema-001
 python3 - "$fleet/task-schema/.callbacks/origin.json" <<'PY'
 import json

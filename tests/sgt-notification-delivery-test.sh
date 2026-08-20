@@ -43,7 +43,9 @@ fi
 
 WORKTREE="$TEST_ROOT/worktree"
 REPO_STATE="$TEST_ROOT/repo_state"
-mkdir -p "$WORKTREE" "$REPO_STATE"
+mkdir -p "$WORKTREE" "$REPO_STATE" "$TEST_ROOT/.dispatch-rollback" \
+  "$TEST_ROOT/.callbacks"
+printf '{}\n' > "$TEST_ROOT/.callbacks/origin.json"
 
 notification_id="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
 nonce="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
@@ -142,6 +144,19 @@ fi
 ack_path="$WORKTREE/.sergeant-notification-acks/$nonce"
 mkdir -p "$(dirname "$ack_path")"
 printf '%s\n' "$ack_token" > "$ack_path"
+
+# Correlated workers may acknowledge readiness but must not receive acceptance
+# or begin acting before the task-level admission commit is durable.
+for _ in $(seq 1 20); do
+  [[ ! -e "$WORKTREE/.sergeant-notification-accepts/$nonce" ]] || break
+  sleep 0.02
+done
+if [[ ! -e "$WORKTREE/.sergeant-notification-accepts/$nonce" ]]; then
+  _pass "correlated worker withheld acceptance before admission commit"
+else
+  _fail "correlated worker accepted work before admission commit"
+fi
+printf '{}\n' > "$TEST_ROOT/.callbacks/admission.json"
 
 # Step 3: Prove supervisor publishes acceptance and sends acceptance message
 accept_path="$WORKTREE/.sergeant-notification-accepts/$nonce"

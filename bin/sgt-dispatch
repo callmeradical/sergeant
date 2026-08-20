@@ -334,6 +334,7 @@ CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
 
 BRIEF=""
 BRIEF_FILE=""
+BRIEF_POSITIONAL=false
 REPOS_ARG=""
 BRANCH_ARG=""
 ADOPT_BRANCH=0
@@ -352,7 +353,7 @@ JSON_OUTPUT=false
 
 # Brief is optional positional arg (not present when --td is used)
 if [[ $# -gt 0 && "${1:0:2}" != "--" ]]; then
-  BRIEF="$1"; shift
+  BRIEF="$1"; BRIEF_POSITIONAL=true; shift
 fi
 
 while [[ $# -gt 0 ]]; do
@@ -412,6 +413,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+PENDING_TASK_ID=""
+if $JSON_OUTPUT; then
+  ! $DRY_RUN || _die "--json cannot be combined with --dry-run"
+  [[ -n "$ORIGIN_PROFILE" && -n "$CORRELATION_ID" ]] || \
+    _die "--json requires --origin-profile and --correlation-id"
+  [[ -n "$BRIEF_FILE" && "$BRIEF_POSITIONAL" == false ]] || \
+    _die "--json requires --brief-file and rejects positional briefs"
+  exec 3>&1
+  exec 1>&2
+fi
+
 if [[ -n "$BRIEF_FILE" ]]; then
   [[ -z "$BRIEF" ]] || _die "a positional brief and --brief-file cannot be combined"
   if ! BRIEF="$(python3 - "$BRIEF_FILE" <<'PY'
@@ -430,8 +442,8 @@ try:
             raise ValueError("not a regular file")
         if metadata.st_uid != os.getuid():
             raise ValueError("not owned by the current user")
-        if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            raise ValueError("group/world writable")
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise ValueError("mode must be 0600")
         data = os.read(descriptor, 16385)
         if len(data) > 16384 or os.read(descriptor, 1):
             raise ValueError("larger than 16384 bytes")
@@ -458,11 +470,19 @@ PY
 fi
 
 if $JSON_OUTPUT; then
-  ! $DRY_RUN || _die "--json cannot be combined with --dry-run"
-  [[ -n "$ORIGIN_PROFILE" && -n "$CORRELATION_ID" ]] || \
-    _die "--json requires --origin-profile and --correlation-id"
-  exec 3>&1
-  exec 1>&2
+  admission_status=0
+  admission_receipt="$("$SCRIPT_DIR/sgt-callback" resolve-admission \
+    "$ORIGIN_PROFILE" "$CORRELATION_ID")" || admission_status=$?
+  if [[ "$admission_status" -eq 0 ]]; then
+    printf '%s\n' "$admission_receipt" >&3
+    exit 0
+  elif [[ "$admission_status" -eq 3 ]]; then
+    PENDING_TASK_ID="$admission_receipt"
+    [[ "$PENDING_TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || \
+      _die "existing correlated admission has invalid pending identity"
+  elif [[ "$admission_status" -ne 2 ]]; then
+    _die "existing correlated admission is incomplete or invalid"
+  fi
 fi
 
 [[ -z "$AGENT_OVERRIDE" ]] || AGENT_CMD="$AGENT_OVERRIDE"
@@ -511,17 +531,6 @@ if [[ -n "$ORIGIN_PROFILE" || -n "$CORRELATION_ID" ]]; then
   [[ -n "$ORIGIN_PROFILE" && -n "$CORRELATION_ID" ]] || \
     _die "--origin-profile and --correlation-id must be provided together"
   "$SCRIPT_DIR/sgt-callback" validate-origin "$ORIGIN_PROFILE" "$CORRELATION_ID"
-fi
-if $JSON_OUTPUT; then
-  admission_status=0
-  admission_receipt="$("$SCRIPT_DIR/sgt-callback" resolve-admission \
-    "$ORIGIN_PROFILE" "$CORRELATION_ID")" || admission_status=$?
-  if [[ "$admission_status" -eq 0 ]]; then
-    printf '%s\n' "$admission_receipt" >&3
-    exit 0
-  fi
-  [[ "$admission_status" -eq 2 ]] || \
-    _die "existing correlated admission is incomplete or invalid"
 fi
 
 # ── Resolve td task (if --td provided) ───────────────────────────────────────
@@ -581,11 +590,31 @@ fi
 TARGET_REPOS=()
 IFS=',' read -ra TARGET_REPOS <<< "$REPOS_ARG"
 
+# Correlated admission cannot partially discover an invalid repository after
+# td, fleet, worktree, or worker mutation has begun.
+if $JSON_OUTPUT; then
+  _require_yq
+  repo_count="$(yq '.repos | length' "$CONFIG_FILE")"
+  for rname in "${TARGET_REPOS[@]}"; do
+    found=false
+    for ((i=0; i<repo_count; i++)); do
+      if [[ "$(yq ".repos[$i].name" "$CONFIG_FILE")" == "$rname" ]]; then
+        found=true
+        repo_path="$(_resolve_path "$(yq ".repos[$i].path" "$CONFIG_FILE")")"
+        break
+      fi
+    done
+    $found || _die "Repo '$rname' not found in project $PROJECT"
+    _sgt_is_git_repo "$repo_path" || \
+      _die "Correlated admission requires cloned repository '$rname' at $repo_path"
+  done
+fi
+
 # Resolve the prospective fleet identity and reject preserved/torn capability
 # evidence before even selecting or creating a managed coordinator pane.
 _rand6() { dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | cut -c1-6; }
 slug="$(echo "$BRIEF" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//' | cut -c1-24 | sed 's/-$//')"
-TASK_ID="${slug}-$(_rand6)"
+TASK_ID="${PENDING_TASK_ID:-${slug}-$(_rand6)}"
 TASK_DIR="$FLEET_DIR/$TASK_ID"
 if ! $DRY_RUN; then
   for rname in "${TARGET_REPOS[@]}"; do
@@ -708,6 +737,12 @@ DISPATCH_SUCCEEDED=false
 DISPATCH_ROLLBACK_ERRORS=""
 DISPATCH_TD_ROLLBACK_PENDING=false
 
+_dispatch_test_failpoint() {
+  [[ "${SGT_TEST_HOOKS:-}" == 1 && \
+     "${SGT_DISPATCH_FAIL_POINT:-}" == "$1" ]] || return 0
+  kill -"${SGT_DISPATCH_CRASH_SIGNAL:-TERM}" "$$"
+}
+
 _dispatch_rollback_error() {
   [[ -z "$DISPATCH_ROLLBACK_ERRORS" ]] || DISPATCH_ROLLBACK_ERRORS+=$'\n'
   DISPATCH_ROLLBACK_ERRORS+="$1"
@@ -723,7 +758,36 @@ with open(path, "a", encoding="utf-8") as handle:
     handle.write("\t".join(fields) + "\n")
     handle.flush()
     os.fsync(handle.fileno())
+directory = os.open(os.path.dirname(path), os.O_RDONLY)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
 PY
+}
+
+_sgt_wait_worker_notification_ack() {
+  local pane="$1" repo_dir="$2" notification_id="$3"
+  local timeout="${SGT_NOTIFICATION_ACK_TIMEOUT:-60}" attempt=0 nonce token
+  local target_dir worktree pane_identity expected_identity
+  [[ "$timeout" =~ ^[0-9]+$ ]] || return 1
+  worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+  while :; do
+    nonce="$(cat "$repo_dir/notification_target" 2>/dev/null || true)"
+    [[ "$nonce" =~ ^[a-f0-9]{32}$ ]] || return 1
+    token="$notification_id|$nonce"
+    target_dir="$repo_dir/notifications/$notification_id/targets/$nonce"
+    if [[ "$(cat "$worktree/.sergeant-notification-acks/$nonce" 2>/dev/null || true)" == "$token" ||
+          "$(cat "$target_dir/accepted" 2>/dev/null || true)" == "$token" ]]; then
+      return 0
+    fi
+    expected_identity="$(cat "$repo_dir/pane_identity" 2>/dev/null || true)"
+    pane_identity="$(_sgt_pane_identity "$pane")" || return 1
+    [[ -n "$expected_identity" && "$pane_identity" == "$expected_identity" ]] || return 1
+    (( attempt >= timeout * 10 )) && return 1
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
 }
 
 _snapshot_dispatch_worktree() {
@@ -867,8 +931,19 @@ _rollback_dispatch_mutations() {
       initial_sha repo_state snapshot; do
     [[ -n "$repo_state" ]] || continue
     if [[ -s "$repo_state/pane" ]]; then
-      launched_worker=true
-      continue
+      if $JSON_OUTPUT; then
+        pane_target="$(cat "$repo_state/pane" 2>/dev/null || true)"
+        if ! _sgt_is_tmux_pane_id "$pane_target" || \
+           ! tmux kill-pane -t "$pane_target" >/dev/null 2>&1; then
+          owned_cleanup_failed=true
+          _dispatch_rollback_error "could not retire pre-admission worker: $repo_state"
+          continue
+        fi
+        rm -f "$repo_state/pane"
+      else
+        launched_worker=true
+        continue
+      fi
     fi
     entry_failed=false
 
@@ -1226,9 +1301,33 @@ if ! $DRY_RUN; then
     "$FLEET_DIR/.dispatch-$TASK_ID.lock" || \
     _die "Could not acquire exact dispatch task ownership"
   SGT_DISPATCH_TASK_LOCKED=true
-  # A peer may have created this task while this invocation waited.
-  [[ ! -e "$TASK_DIR" && ! -L "$TASK_DIR" ]] || \
-    _die "Dispatch task ID collision after serialized ownership: $TASK_ID"
+  # A retry may own a durable partial transaction for this exact correlation.
+  # Reuse its journal to retire partial workers/worktrees/td state, then replay
+  # under the same task ID. Unrelated collisions remain fatal.
+  if [[ -e "$TASK_DIR" || -L "$TASK_DIR" ]]; then
+    if $JSON_OUTPUT && [[ -n "$PENDING_TASK_ID" && "$TASK_ID" == "$PENDING_TASK_ID" &&
+      -d "$TASK_DIR/.dispatch-rollback" && ! -L "$TASK_DIR/.dispatch-rollback" ]]; then
+      rm -f "$DISPATCH_MUTATIONS_FILE" "$TD_CREATE_STATE_FILE" \
+        "$TD_CREATE_SUCCESS_FILE"
+      rm -rf "$DISPATCH_SNAPSHOT_ROOT"
+      DISPATCH_MUTATIONS_FILE="$TASK_DIR/.dispatch-rollback/mutations"
+      TD_CREATE_STATE_FILE="$TASK_DIR/.dispatch-rollback/td-create-state.jsonl"
+      TD_CREATE_SUCCESS_FILE="$TASK_DIR/.dispatch-rollback/td-create-success"
+      DISPATCH_SNAPSHOT_ROOT="$TASK_DIR/.dispatch-rollback/snapshots"
+      DISPATCH_TASK_DIR_CREATED=true
+      _rollback_dispatch_mutations
+      [[ -z "$DISPATCH_ROLLBACK_ERRORS" && ! -e "$TASK_DIR" ]] || \
+        _die "Could not recover partial correlated admission: $TASK_ID"
+      DISPATCH_MUTATIONS_FILE="$(mktemp)"
+      TD_CREATE_STATE_FILE="$(mktemp)"
+      TD_CREATE_SUCCESS_FILE="$(mktemp)"
+      DISPATCH_SNAPSHOT_ROOT="$(mktemp -d)"
+      DISPATCH_TASK_DIR_CREATED=false
+      DISPATCH_TD_ROLLBACK_PENDING=false
+    else
+      _die "Dispatch task ID collision after serialized ownership: $TASK_ID"
+    fi
+  fi
 fi
 
 if ! $DRY_RUN; then
@@ -1482,8 +1581,29 @@ else
     printf '%s\n' "$PRIMARY_PANE_ID" > "$TASK_DIR/primary_pane_id"
     _sgt_replace_owned_file "$TASK_DIR/primary_pane_identity" "$PRIMARY_PANE_IDENTITY"
   fi
+  if $JSON_OUTPUT; then
+    rollback_dir="$TASK_DIR/.dispatch-rollback"
+    mkdir "$rollback_dir"
+    mv "$DISPATCH_MUTATIONS_FILE" "$rollback_dir/mutations"
+    mv "$TD_CREATE_STATE_FILE" "$rollback_dir/td-create-state.jsonl"
+    mv "$TD_CREATE_SUCCESS_FILE" "$rollback_dir/td-create-success"
+    rm -rf "$DISPATCH_SNAPSHOT_ROOT"
+    mkdir "$rollback_dir/snapshots"
+    DISPATCH_MUTATIONS_FILE="$rollback_dir/mutations"
+    TD_CREATE_STATE_FILE="$rollback_dir/td-create-state.jsonl"
+    TD_CREATE_SUCCESS_FILE="$rollback_dir/td-create-success"
+    DISPATCH_SNAPSHOT_ROOT="$rollback_dir/snapshots"
+  fi
   if [[ -n "$ORIGIN_PROFILE" ]]; then
-    "$SCRIPT_DIR/sgt-callback" register "$TASK_ID" "$ORIGIN_PROFILE" "$CORRELATION_ID"
+    _dispatch_test_failpoint dispatch-before-origin-register
+    if $JSON_OUTPUT; then
+      origin_register_command=register-admission
+    else
+      origin_register_command=register
+    fi
+    "$SCRIPT_DIR/sgt-callback" "$origin_register_command" \
+      "$TASK_ID" "$ORIGIN_PROFILE" "$CORRELATION_ID"
+    _dispatch_test_failpoint dispatch-after-origin-register
   fi
 fi
 
@@ -1916,7 +2036,12 @@ $td_context_block"
       "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_task_dir" "$worktree_path" || true
       _die "tmux failed to capture exact worker pane identity for $rname"
     fi
-    if ! _sgt_wait_worker_notification "$pane_target" "$repo_task_dir" "$initial_notification_id"; then
+    if $JSON_OUTPUT; then
+      wait_notification_command=_sgt_wait_worker_notification_ack
+    else
+      wait_notification_command=_sgt_wait_worker_notification
+    fi
+    if ! "$wait_notification_command" "$pane_target" "$repo_task_dir" "$initial_notification_id"; then
       tmux kill-pane -t "$pane_target" 2>/dev/null || true
       printf 'orphaned\n' > "$repo_task_dir/status"
       printf 'interactive worker did not acknowledge its durable notification\n' > "$repo_task_dir/diagnostic"
@@ -1930,6 +2055,10 @@ $td_context_block"
     _die "tmux failed to launch worker supervisor for $rname"
   fi
 
+  if $JSON_OUTPUT && [[ "$rname" == "${TARGET_REPOS[${#TARGET_REPOS[@]}-1]}" ]]; then
+    _dispatch_test_failpoint dispatch-after-final-launch
+  fi
+
   echo ""
 done
 
@@ -1937,9 +2066,23 @@ done
 # worker launch is also detected from its durable pane file, but this explicit
 # commit marker makes the all-repositories success boundary unambiguous.
 if $JSON_OUTPUT; then
+  _dispatch_test_failpoint dispatch-before-admission-commit
   "$SCRIPT_DIR/sgt-callback" admit "$TASK_ID"
 fi
 DISPATCH_SUCCEEDED=true
+if $JSON_OUTPUT; then
+  _dispatch_test_failpoint dispatch-after-admission-commit
+  for rname in "${TARGET_REPOS[@]}"; do
+    repo_task_dir="$TASK_DIR/$rname"
+    pane_target="$(cat "$repo_task_dir/pane")"
+    initial_notification_id="$(cat "$repo_task_dir/notification_id")"
+    if ! _sgt_wait_worker_notification "$pane_target" "$repo_task_dir" \
+      "$initial_notification_id"; then
+      _die "interactive worker notification acknowledgement timed out for $rname"
+    fi
+  done
+  rm -rf "$TASK_DIR/.dispatch-rollback"
+fi
 
 # Every repo dispatched: the managed coordinator pane is now owned by live fleet
 # state, so the rollback must not remove it.
@@ -1974,7 +2117,9 @@ if ! $DRY_RUN; then
     "$_wiki_body"
 
   if $JSON_OUTPUT; then
+    _dispatch_test_failpoint dispatch-before-admission-stdout
     printf '{"status":"accepted","task_id":"%s","correlation_id":"%s"}\n' \
       "$TASK_ID" "$CORRELATION_ID" >&3
+    _dispatch_test_failpoint dispatch-after-admission-stdout
   fi
 fi

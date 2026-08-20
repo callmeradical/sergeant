@@ -44,9 +44,10 @@ sgt-dispatch hermes-bridge \
   --json
 ```
 
-`--json` requires an origin and cannot be combined with `--dry-run`. Progress
-and diagnostics go to stderr. Failure exits nonzero with no stdout. Only after
-normal dispatch completes and the callback origin is durable, stdout contains:
+`--json` requires an origin and `--brief-file`, rejects a positional brief, and
+cannot be combined with `--dry-run`. Progress and diagnostics go to stderr.
+Failure exits nonzero with no stdout. Only after normal dispatch completes and
+the callback origin is durable, stdout contains:
 
 ```json
 {"status":"accepted","task_id":"implement-request-a1b2c3","correlation_id":"req-7f91b230"}
@@ -59,13 +60,18 @@ Without `--json`, dispatch output and behavior are unchanged.
 Successful JSON admission also commits `.callbacks/admission.json`. Repeating
 the same JSON dispatch with the same profile and correlation returns the
 original receipt without creating td work, a fleet task, worktree, or worker.
-This recovers a response lost after commit. A retained correlation with no valid
-admission marker fails closed instead of creating a duplicate task.
+This recovery validates the private brief first, then resolves the receipt before
+mutable harness, model, and callback-executable preflights. A precommit process
+loss retains the same pending task identity: retry either promotes durable
+all-repository launch evidence or transactionally retires partial workers,
+worktrees, and generated td tasks before replaying that identity. It never mints
+duplicate work for the correlation.
 
 The brief file must be nonempty strict UTF-8, at most 16384 bytes, owned by the
-Sergeant user, not group/world writable, and a real regular file rather than a
-symlink. Control characters and shell-shaped content are rejected before task,
-td, tmux, worktree, or fleet mutation.
+Sergeant user, mode `0600`, and a real regular file rather than a symlink. Mode
+`0640`, mode `0644`, control characters, and shell-shaped content are rejected
+before task, td, tmux, worktree, or fleet mutation. Ownership, type, mode, and
+bytes are checked on the same no-follow opened descriptor.
 
 An existing task can be bound directly before events are produced:
 

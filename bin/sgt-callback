@@ -489,7 +489,27 @@ def enqueue_event(
         return event
 
 
-def register(task_id: str, profile: str, correlation: str) -> None:
+def origin_registry_path(root: Path, correlation: str) -> Path:
+    return root / ".callback-origins" / (
+        hashlib.sha256(correlation.encode()).hexdigest() + ".json"
+    )
+
+
+def load_origin_registry(path: Path, correlation: str) -> dict[str, str]:
+    record = read_json(path, "callback origin registry record")
+    if set(record) != {"version", "kind", "task_id", "correlation_id"} or \
+            record.get("version") != ORIGIN_REGISTRY_VERSION or \
+            record.get("kind") not in {"callback", "admission"} or \
+            record.get("correlation_id") != correlation or \
+            not isinstance(record.get("task_id"), str) or \
+            not TASK_RE.fullmatch(record["task_id"]):
+        fail("invalid callback origin registry record")
+    return record
+
+
+def register(
+    task_id: str, profile: str, correlation: str, kind: str = "callback"
+) -> None:
     validate_origin(profile, correlation)
     task = task_path(task_id)
     root = fleet_root()
@@ -511,17 +531,11 @@ def register(task_id: str, profile: str, correlation: str) -> None:
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
         registry = root / ".callback-origins"
         ensure_private_directory(registry)
-        registry_path = registry / f"{hashlib.sha256(correlation.encode()).hexdigest()}.json"
+        registry_path = origin_registry_path(root, correlation)
         registry_record = None
         if registry_path.exists() or registry_path.is_symlink():
-            registry_record = read_json(registry_path, "callback origin registry record")
-            if set(registry_record) != {"version", "task_id", "correlation_id"} or \
-                    registry_record.get("version") != ORIGIN_REGISTRY_VERSION or \
-                    registry_record.get("correlation_id") != correlation or \
-                    not isinstance(registry_record.get("task_id"), str) or \
-                    not TASK_RE.fullmatch(registry_record["task_id"]):
-                fail("invalid callback origin registry record")
-            if registry_record["task_id"] != task_id:
+            registry_record = load_origin_registry(registry_path, correlation)
+            if registry_record["task_id"] != task_id or registry_record["kind"] != kind:
                 fail("correlation ID is already registered to another task")
         for candidate in root.iterdir():
             if candidate == task or not TASK_RE.fullmatch(candidate.name):
@@ -545,6 +559,7 @@ def register(task_id: str, profile: str, correlation: str) -> None:
                     registry_path,
                     {
                         "version": ORIGIN_REGISTRY_VERSION,
+                        "kind": kind,
                         "task_id": task_id,
                         "correlation_id": correlation,
                     },
@@ -577,6 +592,12 @@ def admit(task_id: str) -> None:
     task = task_path(task_id)
     origin = load_origin(task)
     assert origin is not None
+    registry_record = load_origin_registry(
+        origin_registry_path(fleet_root(), origin["correlation_id"]),
+        origin["correlation_id"],
+    )
+    if registry_record["kind"] != "admission" or registry_record["task_id"] != task_id:
+        fail("task is not registered for correlated admission")
     callback_dir = callback_directory(task)
     admission_path = callback_dir / "admission.json"
     admission = {
@@ -596,21 +617,20 @@ def admit(task_id: str) -> None:
 
 
 def resolve_admission(profile: str, correlation: str) -> None:
-    validate_origin(profile, correlation)
+    validate_name(profile, PROFILE_RE, "callback profile")
+    validate_correlation(correlation)
     root = fleet_root()
     validate_owned_directory(root, "fleet directory")
-    registry_path = root / ".callback-origins" / (
-        hashlib.sha256(correlation.encode()).hexdigest() + ".json"
-    )
+    registry_path = origin_registry_path(root, correlation)
     if not registry_path.exists() and not registry_path.is_symlink():
         raise AdmissionNotFound("correlated admission not found")
-    record = read_json(registry_path, "callback origin registry record")
-    if set(record) != {"version", "task_id", "correlation_id"} or \
-            record.get("version") != ORIGIN_REGISTRY_VERSION or \
-            record.get("correlation_id") != correlation or \
-            not isinstance(record.get("task_id"), str) or \
-            not TASK_RE.fullmatch(record["task_id"]):
-        fail("invalid callback origin registry record")
+    record = load_origin_registry(registry_path, correlation)
+    if record["kind"] != "admission":
+        fail("correlation is not registered for admission")
+    task_candidate = root / record["task_id"]
+    if not task_candidate.exists() and not task_candidate.is_symlink():
+        print(record["task_id"])
+        raise SystemExit(3)
     task = task_path(record["task_id"])
     origin = load_origin(task)
     if origin != {
@@ -619,9 +639,43 @@ def resolve_admission(profile: str, correlation: str) -> None:
         "correlation_id": correlation,
     }:
         fail("callback admission origin mismatch")
-    admission = read_json(
-        callback_directory(task) / "admission.json", "callback admission"
-    )
+    admission_path = callback_directory(task) / "admission.json"
+    if not admission_path.exists() and not admission_path.is_symlink():
+        brief = safe_optional_text(task / "brief.md", 32768, "fleet task brief")
+        repos = []
+        if brief is not None:
+            for line in brief.splitlines():
+                if line.startswith("Repos:"):
+                    repos = line.split(":", 1)[1].split()
+                    break
+        ready = bool(repos)
+        for repo_name in repos:
+            if not TASK_RE.fullmatch(repo_name):
+                fail("invalid repository in pending admission")
+            repo = task / repo_name
+            worktree_value = safe_optional_text(repo / "worktree", 4096, "worktree pointer")
+            notification_id = safe_optional_text(
+                repo / "notification_id", 128, "notification ID"
+            )
+            nonce = safe_optional_text(repo / "notification_target", 64, "notification target")
+            pane = safe_optional_text(repo / "pane", 128, "worker pane")
+            if not all((worktree_value, notification_id, nonce, pane)) or \
+                    not (repo / "worker-launch.completed").is_file():
+                ready = False
+                break
+            token = f"{notification_id}|{nonce}"
+            ack = Path(worktree_value) / ".sergeant-notification-acks" / nonce
+            accepted = repo / "notifications" / notification_id / "targets" / nonce / "accepted"
+            if safe_optional_text(ack, 256, "notification acknowledgement") != token and \
+                    safe_optional_text(accepted, 256, "notification acceptance") != token:
+                ready = False
+                break
+        if ready:
+            admit(record["task_id"])
+        else:
+            print(record["task_id"])
+            raise SystemExit(3)
+    admission = read_json(admission_path, "callback admission")
     expected = {
         "version": ADMISSION_VERSION,
         "status": "accepted",
@@ -1040,6 +1094,7 @@ def usage() -> None:
         "Usage:\n"
         "  sgt-callback validate-origin <profile> <correlation-id>\n"
         "  sgt-callback register <task-id> <profile> <correlation-id>\n"
+        "  sgt-callback register-admission <task-id> <profile> <correlation-id>\n"
         "  sgt-callback admit <task-id>\n"
         "  sgt-callback resolve-admission <profile> <correlation-id>\n"
         "  sgt-callback enqueue <task-id> <needs_input|blocked|failed|done> <source-id> < payload\n"
@@ -1062,6 +1117,8 @@ def main(argv: list[str]) -> None:
         validate_origin(argv[1], argv[2])
     elif command == "register" and len(argv) == 4:
         register(argv[1], argv[2], argv[3])
+    elif command == "register-admission" and len(argv) == 4:
+        register(argv[1], argv[2], argv[3], "admission")
     elif command == "admit" and len(argv) == 2:
         admit(argv[1])
     elif command == "resolve-admission" and len(argv) == 3:
