@@ -602,7 +602,7 @@ _finish() {
 _deliver_notifications() {
   local notification_file="$WORKTREE/.sergeant-notification"
   local accept_path ack_path ack_token complete_path delivered expected_id lease notification_id
-  local nonce pane_identity pending target_dir target_identity
+  local nonce pane_identity pending target_dir target_identity task_dir
   while :; do
     # Retry a previously failed release before reacquiring; see the shared
     # _sgt_response_lock_release contract in bin/_sgt-response-lock.sh.
@@ -654,6 +654,13 @@ _deliver_notifications() {
         continue
       fi
       if [[ "$delivered" != "$ack_token" && "$(cat "$ack_path" 2>/dev/null || true)" == "$ack_token" ]]; then
+        task_dir="$(dirname "$REPO_STATE")"
+        if [[ -d "$task_dir/.dispatch-rollback" &&
+              -e "$task_dir/.callbacks/origin.json" &&
+              ! -e "$task_dir/.callbacks/admission.json" ]]; then
+          sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
+          continue
+        fi
         if ! _sgt_response_lock_acquire "$REPO_STATE"; then
           sleep "${SGT_NOTIFICATION_RETRY_INTERVAL:-1}"
           continue

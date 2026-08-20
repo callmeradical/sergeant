@@ -44,6 +44,24 @@ FLEET_ROOT="$(cd "$FLEET_DIR" && pwd -P)"
 TASK_ROOT="$(cd "$TASK_DIR" && pwd -P)"
 [[ "$TASK_ROOT" == "$FLEET_ROOT/$TASK_ID" ]] || _die "Invalid task ID: $TASK_ID"
 
+# A correlated task remains under its admission transaction lock through every
+# cleanup mutation, including the final tombstone and fleet-directory removal.
+admission_lock_info=""
+admission_lock_status=0
+admission_lock_info="$("$SCRIPT_DIR/sgt-callback" admission-lock-info "$TASK_ID")" || \
+  admission_lock_status=$?
+if [[ "$admission_lock_status" -eq 0 ]]; then
+  admission_correlation="$(printf '%s' "$admission_lock_info" | python3 -c \
+    'import json,sys; print(json.load(sys.stdin)["correlation_id"])')"
+  admission_lock="$(printf '%s' "$admission_lock_info" | python3 -c \
+    'import json,sys; print(json.load(sys.stdin)["lock_path"])')"
+  exec 197>> "$admission_lock"
+  "$SCRIPT_DIR/sgt-callback" lock-admission "$admission_correlation" 197
+  export SGT_ADMISSION_LOCK_FD=197
+elif [[ "$admission_lock_status" -ne 2 ]]; then
+  _die "Could not resolve correlated admission cleanup ownership"
+fi
+
 # An interrupted dispatch can retain only the generated td deletions that
 # failed, after every worktree/repository cleanup was best-efforted.  This is
 # the supported retry boundary: never discard the owning fleet record until
@@ -2992,6 +3010,9 @@ if [[ -z "$FILTER_REPO" ]]; then
   if [[ -e "$TASK_DIR/.callbacks/origin.json" || -L "$TASK_DIR/.callbacks/origin.json" ]]; then
     "$SCRIPT_DIR/sgt-callback" seal "$TASK_ID"
   fi
+  if [[ -n "${admission_correlation:-}" ]]; then
+    "$SCRIPT_DIR/sgt-callback" tombstone-admission "$TASK_ID"
+  fi
 
   # ── Wiki: log the cleanup event ─────────────────────────────────────────
   _result="$(cat "$TASK_DIR/"*"/.sergeant-result" 2>/dev/null | head -1 || true)"
@@ -3008,6 +3029,11 @@ if [[ -z "$FILTER_REPO" ]]; then
 - **Result:** ${_result:-none}"
 
   rm -rf "$TASK_DIR"
+fi
+
+if [[ -n "${admission_correlation:-}" ]]; then
+  exec 197>&-
+  unset SGT_ADMISSION_LOCK_FD
 fi
 
 echo "Done."

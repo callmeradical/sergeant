@@ -72,10 +72,40 @@ if types != expected:
 PY
 }
 
-# Registration writes only the versioned, strict origin contract.
-mkdir -p "$fleet/task-schema"
+# Correlated admission persists its transaction identity before task mutation.
 write_ack_callback hermes-discord "$TEST_ROOT/schema-deliveries"
-CALLBACK_LOG="$TEST_ROOT/schema-deliveries" callback register \
+callback begin-admission task-schema hermes-discord req-schema-001 >/dev/null
+python3 - "$fleet/.callback-transactions" <<'PY'
+from pathlib import Path
+import stat
+import sys
+
+root = Path(sys.argv[1])
+transaction = next(root.iterdir())
+assert stat.S_IMODE(transaction.stat().st_mode) == 0o700
+for name in ("lock", "mutations", "td-create-state.jsonl", "td-create-success", "transaction.json"):
+    assert stat.S_IMODE((transaction / name).stat().st_mode) == 0o600
+PY
+mkdir -p "$fleet/task-schema/repo" "$TEST_ROOT/schema-worktree/.sergeant-notification-acks"
+chmod 700 "$fleet/task-schema/repo"
+cat > "$fleet/task-schema/brief.md" <<'EOF'
+Project: project
+Brief:   Hermes correlated code-work request
+Branch:  feat/hermes-correlated-code-work-request
+Repos:   repo
+EOF
+printf '%s\n' "$TEST_ROOT/schema-worktree" > "$fleet/task-schema/repo/worktree"
+printf '%%9\n' > "$fleet/task-schema/repo/pane"
+printf '0|%%9|9999|999999|fixture-worker\n' > "$fleet/task-schema/repo/pane_identity"
+printf 'completed\n' > "$fleet/task-schema/repo/worker-launch.completed"
+printf 'notice-1\n' > "$fleet/task-schema/repo/notification_id"
+printf '0123456789abcdef0123456789abcdef\n' > "$fleet/task-schema/repo/notification_target"
+printf 'private brief\n' > "$TEST_ROOT/schema-worktree/.sergeant-brief.md"
+chmod 600 "$TEST_ROOT/schema-worktree/.sergeant-brief.md"
+printf 'private intent\n' > "$TEST_ROOT/schema-worktree/.sergeant-intent.md"
+printf 'notice-1|0123456789abcdef0123456789abcdef\n' > \
+  "$TEST_ROOT/schema-worktree/.sergeant-notification-acks/0123456789abcdef0123456789abcdef"
+CALLBACK_LOG="$TEST_ROOT/schema-deliveries" callback register-admission \
   task-schema hermes-discord req-schema-001
 python3 - "$fleet/task-schema/.callbacks/origin.json" <<'PY'
 import json
@@ -92,6 +122,58 @@ assert origin == {
 }
 assert stat.S_IMODE(path.stat().st_mode) == 0o600
 PY
+if callback resolve-admission hermes-discord req-schema-001 >/dev/null 2>&1; then
+  printf 'uncommitted admission resolved as accepted\n' >&2
+  exit 1
+fi
+schema_ack="$TEST_ROOT/schema-worktree/.sergeant-notification-acks/0123456789abcdef0123456789abcdef"
+mv "$schema_ack" "$schema_ack.saved"
+mkdir -p "$fleet/task-schema/repo/notifications/notice-1/targets/0123456789abcdef0123456789abcdef"
+printf 'notice-1|0123456789abcdef0123456789abcdef\n' > \
+  "$fleet/task-schema/repo/notifications/notice-1/targets/0123456789abcdef0123456789abcdef/accepted"
+if callback admit task-schema >/dev/null 2>&1; then
+  printf 'supervisor acceptance was treated as worker acknowledgement\n' >&2
+  exit 1
+fi
+mv "$schema_ack.saved" "$schema_ack"
+callback admit task-schema
+[[ "$(callback resolve-admission hermes-discord req-schema-001)" == \
+  '{"status":"accepted","task_id":"task-schema","correlation_id":"req-schema-001"}' ]]
+
+# Correlations are fleet-unique so a retry cannot create a second callback
+# sequence with the same externally deduplicated identity.
+mkdir -p "$fleet/task-duplicate-correlation"
+if callback register task-duplicate-correlation hermes-discord \
+  req-schema-001 >/dev/null 2>&1; then
+  printf 'duplicate correlation was registered to a second task\n' >&2
+  exit 1
+fi
+[[ ! -e "$fleet/task-duplicate-correlation/.callbacks" ]]
+
+mkdir -p "$fleet/task-retained-correlation" "$fleet/task-reused-correlation"
+callback register task-retained-correlation hermes-discord req-retained-001
+rm -rf "$fleet/task-retained-correlation"
+if callback register task-reused-correlation hermes-discord \
+  req-retained-001 >/dev/null 2>&1; then
+  printf 'cleaned task correlation was reused\n' >&2
+  exit 1
+fi
+[[ ! -e "$fleet/task-reused-correlation/.callbacks" ]]
+
+mkdir -p "$fleet/task-concurrent-one" "$fleet/task-concurrent-two"
+set +e
+callback register task-concurrent-one hermes-discord req-concurrent-001 &
+concurrent_one_pid=$!
+callback register task-concurrent-two hermes-discord req-concurrent-001 &
+concurrent_two_pid=$!
+wait "$concurrent_one_pid"
+concurrent_one_status=$?
+wait "$concurrent_two_pid"
+concurrent_two_status=$?
+set -e
+[[ $((concurrent_one_status + concurrent_two_status)) -ne 0 ]]
+[[ "$(find "$fleet"/task-concurrent-* -path '*/.callbacks/origin.json' \
+  -type f | wc -l | tr -d ' ')" == "1" ]]
 
 # Enqueue, delivery, acknowledgement, and duplicate suppression are durable.
 CALLBACK_LOG="$TEST_ROOT/schema-deliveries" callback enqueue \
@@ -128,6 +210,12 @@ CALLBACK_LOG="$TEST_ROOT/schema-deliveries" callback enqueue \
 CALLBACK_LOG="$TEST_ROOT/schema-deliveries" callback drain task-schema
 [[ "$(event_count task-schema)" == "1" ]]
 [[ "$(wc -l < "$TEST_ROOT/schema-deliveries")" == "1" ]]
+rm -rf "$fleet/task-schema/repo" "$TEST_ROOT/schema-worktree"
+env HOME="$home" SERGEANT_FLEET="$fleet" SERGEANT_CALLBACKS="$callbacks" \
+  SGT_WIKI_DISABLED=1 "$ROOT/bin/sgt-cleanup" task-schema >/dev/null
+[[ ! -e "$fleet/task-schema" ]]
+[[ "$(callback resolve-admission hermes-discord req-schema-001)" == \
+  '{"status":"accepted","task_id":"task-schema","correlation_id":"req-schema-001"}' ]]
 
 # A fleet with no origin remains a no-op and never resolves a callback profile.
 mkdir -p "$fleet/task-no-origin/app" "$TEST_ROOT/no-origin-worktree"

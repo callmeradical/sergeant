@@ -32,6 +32,63 @@ Both flags are required together. A correlation ID must match
 `^[a-z][a-z0-9._-]{7,127}$` and must not contain a 17-20 digit platform ID.
 Use a new opaque request ID, never a Discord guild/channel/user/message ID.
 
+Restricted transports should write the validated brief to a private regular
+file owned by the Sergeant user, then request machine-readable admission:
+
+```bash
+sgt-dispatch hermes-bridge \
+  --brief-file "$private_brief" \
+  --repos sergeant \
+  --origin-profile hermes-discord \
+  --correlation-id req-7f91b230 \
+  --json
+```
+
+`--json` requires an origin and `--brief-file`, rejects a positional brief, and
+cannot be combined with `--dry-run`. Progress and diagnostics go to stderr.
+Failure exits nonzero with no stdout. Only after normal dispatch completes, the
+worker has acknowledged its initial notification, and the authoritative
+transaction records are flushed, stdout contains:
+
+```json
+{"status":"accepted","task_id":"hermes-4f8c7a91b2d344ec991ad4103be9210f","correlation_id":"req-7f91b230"}
+```
+
+The three fields above are the complete admission response. Prompt injection,
+terminal capture, and intermediate `task-id:` progress are never admission.
+Without `--json`, dispatch output and behavior are unchanged.
+
+Before its first task, td, fleet, worktree, or worker mutation, JSON dispatch
+persists a pending transaction under
+`.callback-transactions/<correlation-sha256>/`. Dispatch, retry, rollback, and
+cleanup hold that transaction's lock. Successful admission commits both the
+retained transaction receipt and task-local `.callbacks/admission.json`.
+Repeating the same profile and correlation returns the original receipt without
+creating td work, a fleet task, worktree, or worker, including after normal
+cleanup has replaced the committed transaction with a retained tombstone.
+
+Recovery validates the private brief first, then resolves a committed receipt
+before mutable harness, model, and callback-executable preflights. A precommit
+process loss retains the same opaque task identity. Retry acquires the same lock,
+transactionally retires journaled partial workers, worktrees, and generated td
+tasks, then replays that identity. A committed or tombstoned transaction is never
+rolled back. Worker panes are retired only when their current exact pane identity
+matches the durable launch identity; missing, recycled, or unkillable panes
+preserve evidence and fail closed.
+
+The brief file must be nonempty strict UTF-8, at most 16384 bytes, owned by the
+Sergeant user, mode `0600`, and a real regular file rather than a symlink. Mode
+`0640`, mode `0644`, control characters, and shell-shaped content are rejected
+before task, td, tmux, worktree, or fleet mutation. Ownership, type, mode, and
+bytes are checked on the same no-follow opened descriptor.
+
+The private brief is rendered only into the worker's private
+`.sergeant-brief.md`. Correlated task and td descriptions, stderr, wiki activity,
+task IDs, branch names, worktree paths, and tmux arguments use fixed sanitized
+metadata and opaque identities. A supervisor's notification acceptance is not an
+admission acknowledgement; only the worker-authored per-target acknowledgement
+can satisfy the commit boundary.
+
 An existing task can be bound directly before events are produced:
 
 ```bash
@@ -46,7 +103,11 @@ Registration writes only `.callbacks/origin.json` under the fleet task:
 
 It never stores request text, Discord IDs, destination IDs, tokens, secrets,
 message content, callback commands, or logs. Repeating the same registration is
-idempotent; changing an existing registration is rejected.
+idempotent; changing an existing registration is rejected. Sergeant also keeps
+a private retained mapping under `SERGEANT_FLEET/.callback-origins/`, keyed by a
+SHA-256 digest of the correlation ID. A correlation cannot be registered to a
+second task, including after the original task is cleaned up, so consumer
+idempotency keys cannot be reused.
 
 Tasks with no origin retain the existing Sergeant notification behavior.
 `sgt-callback sync` is a no-op and no callback state is created for them.
