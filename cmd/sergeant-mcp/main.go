@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -26,7 +27,9 @@ import (
 
 // scriptDir returns the directory containing this binary, which must be the
 // same bin/ directory that holds the sgt-* shell scripts.
-func scriptDir() string {
+// We memoize this to prevent expensive disk/syscall operations (os.Executable,
+// EvalSymlinks) on every tool invocation.
+var scriptDir = sync.OnceValue(func() string {
 	exe, err := os.Executable()
 	if err != nil {
 		// Fall back to the working directory.
@@ -39,7 +42,7 @@ func scriptDir() string {
 		resolved = exe
 	}
 	return filepath.Dir(resolved)
-}
+})
 
 // shellSplit splits a shell-style argument string honouring single and double
 // quotes. It does not handle backslash escapes or variable expansion — agents
