@@ -92,6 +92,13 @@ assert origin == {
 }
 assert stat.S_IMODE(path.stat().st_mode) == 0o600
 PY
+if callback resolve-admission hermes-discord req-schema-001 >/dev/null 2>&1; then
+  printf 'uncommitted admission resolved as accepted\n' >&2
+  exit 1
+fi
+callback admit task-schema
+[[ "$(callback resolve-admission hermes-discord req-schema-001)" == \
+  '{"status":"accepted","task_id":"task-schema","correlation_id":"req-schema-001"}' ]]
 
 # Correlations are fleet-unique so a retry cannot create a second callback
 # sequence with the same externally deduplicated identity.

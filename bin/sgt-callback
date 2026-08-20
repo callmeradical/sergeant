@@ -20,6 +20,7 @@ from typing import Any, Iterator
 
 ORIGIN_VERSION = "sergeant.callback-origin/v1"
 ORIGIN_REGISTRY_VERSION = "sergeant.callback-origin-registry/v1"
+ADMISSION_VERSION = "sergeant.admission/v1"
 EVENT_VERSION = "sergeant.callback-event/v1"
 STATE_VERSION = "sergeant.callback-state/v1"
 ACK_VERSION = "sergeant.callback-ack/v1"
@@ -43,6 +44,10 @@ MAX_ACK_BYTES = 1024
 
 
 class CallbackError(Exception):
+    pass
+
+
+class AdmissionNotFound(CallbackError):
     pass
 
 
@@ -568,6 +573,70 @@ def validate_origin(profile: str, correlation: str) -> None:
     callback_path(profile)
 
 
+def admit(task_id: str) -> None:
+    task = task_path(task_id)
+    origin = load_origin(task)
+    assert origin is not None
+    callback_dir = callback_directory(task)
+    admission_path = callback_dir / "admission.json"
+    admission = {
+        "version": ADMISSION_VERSION,
+        "status": "accepted",
+        "task_id": task_id,
+        "correlation_id": origin["correlation_id"],
+    }
+    with TaskLock(callback_dir):
+        if admission_path.exists() or admission_path.is_symlink():
+            if read_json(admission_path, "callback admission") != admission:
+                fail("invalid callback admission record")
+            return
+        write_json(admission_path, admission)
+        fsync_directory(task)
+        fsync_directory(fleet_root())
+
+
+def resolve_admission(profile: str, correlation: str) -> None:
+    validate_origin(profile, correlation)
+    root = fleet_root()
+    validate_owned_directory(root, "fleet directory")
+    registry_path = root / ".callback-origins" / (
+        hashlib.sha256(correlation.encode()).hexdigest() + ".json"
+    )
+    if not registry_path.exists() and not registry_path.is_symlink():
+        raise AdmissionNotFound("correlated admission not found")
+    record = read_json(registry_path, "callback origin registry record")
+    if set(record) != {"version", "task_id", "correlation_id"} or \
+            record.get("version") != ORIGIN_REGISTRY_VERSION or \
+            record.get("correlation_id") != correlation or \
+            not isinstance(record.get("task_id"), str) or \
+            not TASK_RE.fullmatch(record["task_id"]):
+        fail("invalid callback origin registry record")
+    task = task_path(record["task_id"])
+    origin = load_origin(task)
+    if origin != {
+        "version": ORIGIN_VERSION,
+        "profile": profile,
+        "correlation_id": correlation,
+    }:
+        fail("callback admission origin mismatch")
+    admission = read_json(
+        callback_directory(task) / "admission.json", "callback admission"
+    )
+    expected = {
+        "version": ADMISSION_VERSION,
+        "status": "accepted",
+        "task_id": record["task_id"],
+        "correlation_id": correlation,
+    }
+    if admission != expected:
+        fail("invalid callback admission record")
+    print(json.dumps({
+        "status": "accepted",
+        "task_id": record["task_id"],
+        "correlation_id": correlation,
+    }, separators=(",", ":")))
+
+
 def safe_optional_text(path: Path, maximum: int, label: str) -> str | None:
     if not path.exists() and not path.is_symlink():
         return None
@@ -971,6 +1040,8 @@ def usage() -> None:
         "Usage:\n"
         "  sgt-callback validate-origin <profile> <correlation-id>\n"
         "  sgt-callback register <task-id> <profile> <correlation-id>\n"
+        "  sgt-callback admit <task-id>\n"
+        "  sgt-callback resolve-admission <profile> <correlation-id>\n"
         "  sgt-callback enqueue <task-id> <needs_input|blocked|failed|done> <source-id> < payload\n"
         "  sgt-callback sync <task-id>\n"
         "  sgt-callback drain <task-id|--all>\n"
@@ -991,6 +1062,10 @@ def main(argv: list[str]) -> None:
         validate_origin(argv[1], argv[2])
     elif command == "register" and len(argv) == 4:
         register(argv[1], argv[2], argv[3])
+    elif command == "admit" and len(argv) == 2:
+        admit(argv[1])
+    elif command == "resolve-admission" and len(argv) == 3:
+        resolve_admission(argv[1], argv[2])
     elif command == "enqueue" and len(argv) == 4:
         enqueue(argv[1], argv[2], argv[3])
     elif command == "sync" and len(argv) == 2:
@@ -1016,6 +1091,8 @@ def main(argv: list[str]) -> None:
 if __name__ == "__main__":
     try:
         main(sys.argv[1:])
+    except AdmissionNotFound:
+        raise SystemExit(2)
     except CallbackError as error:
         print(f"sgt-callback: {error}", file=sys.stderr)
         raise SystemExit(1)

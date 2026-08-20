@@ -512,6 +512,17 @@ if [[ -n "$ORIGIN_PROFILE" || -n "$CORRELATION_ID" ]]; then
     _die "--origin-profile and --correlation-id must be provided together"
   "$SCRIPT_DIR/sgt-callback" validate-origin "$ORIGIN_PROFILE" "$CORRELATION_ID"
 fi
+if $JSON_OUTPUT; then
+  admission_status=0
+  admission_receipt="$("$SCRIPT_DIR/sgt-callback" resolve-admission \
+    "$ORIGIN_PROFILE" "$CORRELATION_ID")" || admission_status=$?
+  if [[ "$admission_status" -eq 0 ]]; then
+    printf '%s\n' "$admission_receipt" >&3
+    exit 0
+  fi
+  [[ "$admission_status" -eq 2 ]] || \
+    _die "existing correlated admission is incomplete or invalid"
+fi
 
 # ── Resolve td task (if --td provided) ───────────────────────────────────────
 
@@ -1925,6 +1936,9 @@ done
 # EXIT rollback is only for incomplete dispatches.  At least one successful
 # worker launch is also detected from its durable pane file, but this explicit
 # commit marker makes the all-repositories success boundary unambiguous.
+if $JSON_OUTPUT; then
+  "$SCRIPT_DIR/sgt-callback" admit "$TASK_ID"
+fi
 DISPATCH_SUCCEEDED=true
 
 # Every repo dispatched: the managed coordinator pane is now owned by live fleet

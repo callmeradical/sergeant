@@ -388,6 +388,19 @@ if grep -Fq 'Admit a bounded Hermes request.' "$TEST_ROOT/admission.log"; then
   printf 'Hermes request text reached the worker launch argv\n' >&2
   exit 1
 fi
+admission_fleet_count="$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 \
+  -type d | wc -l | tr -d ' ')"
+: > "$TEST_ROOT/admission-retry.log"
+admission_retry_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/admission-retry.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test --brief-file "$TEST_ROOT/hermes-brief" \
+    --repos app --origin-profile hermes-discord \
+    --correlation-id req-admission-001 --json 2>/dev/null)"
+[[ "$admission_retry_output" == "$admission_output" ]]
+[[ "$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 -type d | \
+  wc -l | tr -d ' ')" == "$admission_fleet_count" ]]
+[[ ! -s "$TEST_ROOT/admission-retry.log" ]]
 
 cat > "$TEST_ROOT/fake-bin/treehouse" <<'EOF'
 #!/usr/bin/env bash

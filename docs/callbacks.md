@@ -56,6 +56,12 @@ The three fields above are the complete admission response. Prompt injection,
 terminal capture, and intermediate `task-id:` progress are never admission.
 Without `--json`, dispatch output and behavior are unchanged.
 
+Successful JSON admission also commits `.callbacks/admission.json`. Repeating
+the same JSON dispatch with the same profile and correlation returns the
+original receipt without creating td work, a fleet task, worktree, or worker.
+This recovers a response lost after commit. A retained correlation with no valid
+admission marker fails closed instead of creating a duplicate task.
+
 The brief file must be nonempty strict UTF-8, at most 16384 bytes, owned by the
 Sergeant user, not group/world writable, and a real regular file rather than a
 symlink. Control characters and shell-shaped content are rejected before task,
