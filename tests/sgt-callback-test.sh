@@ -93,6 +93,41 @@ assert origin == {
 assert stat.S_IMODE(path.stat().st_mode) == 0o600
 PY
 
+# Correlations are fleet-unique so a retry cannot create a second callback
+# sequence with the same externally deduplicated identity.
+mkdir -p "$fleet/task-duplicate-correlation"
+if callback register task-duplicate-correlation hermes-discord \
+  req-schema-001 >/dev/null 2>&1; then
+  printf 'duplicate correlation was registered to a second task\n' >&2
+  exit 1
+fi
+[[ ! -e "$fleet/task-duplicate-correlation/.callbacks" ]]
+
+mkdir -p "$fleet/task-retained-correlation" "$fleet/task-reused-correlation"
+callback register task-retained-correlation hermes-discord req-retained-001
+rm -rf "$fleet/task-retained-correlation"
+if callback register task-reused-correlation hermes-discord \
+  req-retained-001 >/dev/null 2>&1; then
+  printf 'cleaned task correlation was reused\n' >&2
+  exit 1
+fi
+[[ ! -e "$fleet/task-reused-correlation/.callbacks" ]]
+
+mkdir -p "$fleet/task-concurrent-one" "$fleet/task-concurrent-two"
+set +e
+callback register task-concurrent-one hermes-discord req-concurrent-001 &
+concurrent_one_pid=$!
+callback register task-concurrent-two hermes-discord req-concurrent-001 &
+concurrent_two_pid=$!
+wait "$concurrent_one_pid"
+concurrent_one_status=$?
+wait "$concurrent_two_pid"
+concurrent_two_status=$?
+set -e
+[[ $((concurrent_one_status + concurrent_two_status)) -ne 0 ]]
+[[ "$(find "$fleet"/task-concurrent-* -path '*/.callbacks/origin.json' \
+  -type f | wc -l | tr -d ' ')" == "1" ]]
+
 # Enqueue, delivery, acknowledgement, and duplicate suppression are durable.
 CALLBACK_LOG="$TEST_ROOT/schema-deliveries" callback enqueue \
   task-schema needs_input coordinator-followup-1 <<< "Choose option A or B."

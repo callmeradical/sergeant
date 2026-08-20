@@ -298,6 +298,97 @@ grep -Fq 'orphaned' "$brief"
 grep -Fq 'sgt-respond' "$brief"
 grep -Fq 'requires both .sergeant-status=done and a non-empty .sergeant-result' "$brief"
 
+# Correlated admission keeps request text out of argv and emits acceptance only
+# after dispatch has completed with a durable callback origin.
+printf 'Admit a bounded Hermes request.\n' > "$TEST_ROOT/hermes-brief"
+chmod 600 "$TEST_ROOT/hermes-brief"
+printf '' > "$TEST_ROOT/brief-empty"
+python3 -c 'import sys; sys.stdout.buffer.write(b"x" * 16385)' \
+  > "$TEST_ROOT/brief-oversized"
+printf '\377' > "$TEST_ROOT/brief-invalid-utf8"
+printf 'request\001control\n' > "$TEST_ROOT/brief-control"
+printf 'rm -rf /tmp/example\n' > "$TEST_ROOT/brief-shell"
+ln -s "$TEST_ROOT/hermes-brief" "$TEST_ROOT/brief-symlink"
+printf 'unsafe mode\n' > "$TEST_ROOT/brief-unsafe-mode"
+chmod 622 "$TEST_ROOT/brief-unsafe-mode"
+chmod 600 "$TEST_ROOT"/brief-empty "$TEST_ROOT"/brief-oversized \
+  "$TEST_ROOT"/brief-invalid-utf8 "$TEST_ROOT"/brief-control \
+  "$TEST_ROOT"/brief-shell
+for rejected_brief in empty oversized invalid-utf8 control shell symlink unsafe-mode; do
+  fleet_count_before_rejection="$(find "$TEST_ROOT/fleet" -mindepth 1 \
+    -maxdepth 1 -type d | wc -l | tr -d ' ')"
+  set +e
+  rejected_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+    TMUX_LOG="$TEST_ROOT/rejected-$rejected_brief.log" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 "$ROOT_DIR/bin/sgt-dispatch" test \
+      --brief-file "$TEST_ROOT/brief-$rejected_brief" --repos app \
+      --origin-profile hermes-discord \
+      --correlation-id "req-rejected-$rejected_brief" --json 2>/dev/null)"
+  rejected_status=$?
+  set -e
+  fleet_count_after_rejection="$(find "$TEST_ROOT/fleet" -mindepth 1 \
+    -maxdepth 1 -type d | wc -l | tr -d ' ')"
+  [[ "$rejected_status" -ne 0 && -z "$rejected_output" ]]
+  [[ "$fleet_count_before_rejection" == "$fleet_count_after_rejection" ]]
+  [[ ! -e "$TEST_ROOT/rejected-$rejected_brief.log" ]]
+done
+
+fleet_count_before_admission_failure="$(find "$TEST_ROOT/fleet" -mindepth 1 \
+  -maxdepth 1 -type d | wc -l | tr -d ' ')"
+set +e
+failed_admission_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/failed-admission.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test --brief-file "$TEST_ROOT/hermes-brief" \
+    --repos app --origin-profile missing-profile \
+    --correlation-id req-admission-failed --json \
+    2>"$TEST_ROOT/failed-admission.stderr")"
+failed_admission_status=$?
+set -e
+fleet_count_after_admission_failure="$(find "$TEST_ROOT/fleet" -mindepth 1 \
+  -maxdepth 1 -type d | wc -l | tr -d ' ')"
+[[ "$failed_admission_status" -ne 0 && -z "$failed_admission_output" ]]
+[[ "$fleet_count_before_admission_failure" == \
+  "$fleet_count_after_admission_failure" ]]
+[[ ! -e "$TEST_ROOT/failed-admission.log" ]]
+
+admission_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/admission.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test --brief-file "$TEST_ROOT/hermes-brief" \
+    --repos app --origin-profile hermes-discord \
+    --correlation-id req-admission-001 --json \
+    2>"$TEST_ROOT/admission.stderr")"
+admission_task_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["task_id"])' \
+  <<< "$admission_output")"
+python3 - "$admission_output" "$admission_task_id" <<'PY'
+import json
+import sys
+
+assert json.loads(sys.argv[1]) == {
+    "status": "accepted",
+    "task_id": sys.argv[2],
+    "correlation_id": "req-admission-001",
+}
+PY
+python3 - "$TEST_ROOT/fleet/$admission_task_id/.callbacks/origin.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+assert json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")) == {
+    "version": "sergeant.callback-origin/v1",
+    "profile": "hermes-discord",
+    "correlation_id": "req-admission-001",
+}
+PY
+grep -Fq '=== dispatch complete ===' "$TEST_ROOT/admission.stderr"
+if grep -Fq 'Admit a bounded Hermes request.' "$TEST_ROOT/admission.log"; then
+  printf 'Hermes request text reached the worker launch argv\n' >&2
+  exit 1
+fi
+
 cat > "$TEST_ROOT/fake-bin/treehouse" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$1" == return ]]; then

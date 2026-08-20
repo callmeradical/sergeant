@@ -126,7 +126,7 @@ var tools = []toolDef{
 		scriptName:  "sgt-dispatch",
 		toolName:    "sgt-dispatch",
 		description: "Dispatch subagents across repos in a project. Creates an isolated git worktree per repo, writes a mission brief, and spawns an agent in a local tmux window.",
-		argsDesc:    `CLI args: <project> "<brief>" --repos repo1,repo2 [--td <id>] [--branch <name>] [--adopt-branch] [--deps "r1>r2"] [--agent opencode|goose|claude] [--model <tuple>] [--stage <name>] [--coordinator-pane <id>] [--managed-coordinator-pane] [--intent-file <path>] [--origin-profile <name>] [--correlation-id <id>] [--dry-run]`,
+		argsDesc:    `CLI args: <project> ["<brief>"|--brief-file <path>] --repos repo1,repo2 [--td <id>] [--branch <name>] [--adopt-branch] [--deps "r1>r2"] [--agent opencode|goose|claude] [--model <tuple>] [--stage <name>] [--coordinator-pane <id>] [--managed-coordinator-pane] [--intent-file <path>] [--origin-profile <name>] [--correlation-id <id>] [--json] [--dry-run]`,
 	},
 	{
 		scriptName:  "sgt-watch",

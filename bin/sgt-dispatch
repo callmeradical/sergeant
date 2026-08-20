@@ -28,7 +28,9 @@
 #   --intent-file <path>       Canonical structured intent for safety/stateful work
 #   --origin-profile <name>    Fixed local callback profile (requires --correlation-id)
 #   --correlation-id <id>      Opaque callback request ID (requires --origin-profile)
-#   --dry-run                 Print what would happen, don't execute
+#   --brief-file <path>        Read the brief from a private UTF-8 file instead of argv
+#   --json                     Emit only correlated acceptance JSON on stdout
+#   --dry-run                  Print what would happen, don't execute
 #
 # Examples:
 #   sgt-dispatch smith "Add OAuth via Google" --repos smith,smith-app,smith-infra
@@ -331,6 +333,7 @@ CONFIG_FILE="$SERGEANT_CONFIG/$PROJECT.yaml"
 [[ -f "$CONFIG_FILE" ]] || _die "Project not found: $PROJECT (looked for $CONFIG_FILE)"
 
 BRIEF=""
+BRIEF_FILE=""
 REPOS_ARG=""
 BRANCH_ARG=""
 ADOPT_BRANCH=0
@@ -345,6 +348,7 @@ ORIGIN_PROFILE=""
 CORRELATION_ID=""
 STAGE="implementation"
 DRY_RUN=false
+JSON_OUTPUT=false
 
 # Brief is optional positional arg (not present when --td is used)
 if [[ $# -gt 0 && "${1:0:2}" != "--" ]]; then
@@ -397,10 +401,69 @@ while [[ $# -gt 0 ]]; do
       CORRELATION_ID="$2"
       shift 2
       ;;
+    --brief-file)
+      [[ -n "${2:-}" ]] || _die "--brief-file requires a path"
+      BRIEF_FILE="$2"
+      shift 2
+      ;;
+    --json) JSON_OUTPUT=true; shift ;;
     --dry-run) DRY_RUN=true;     shift   ;;
     *) _die "Unknown option: $1" ;;
   esac
 done
+
+if [[ -n "$BRIEF_FILE" ]]; then
+  [[ -z "$BRIEF" ]] || _die "a positional brief and --brief-file cannot be combined"
+  if ! BRIEF="$(python3 - "$BRIEF_FILE" <<'PY'
+import os
+import re
+import stat
+import sys
+
+path = sys.argv[1]
+flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+try:
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("not a regular file")
+        if metadata.st_uid != os.getuid():
+            raise ValueError("not owned by the current user")
+        if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise ValueError("group/world writable")
+        data = os.read(descriptor, 16385)
+        if len(data) > 16384 or os.read(descriptor, 1):
+            raise ValueError("larger than 16384 bytes")
+    finally:
+        os.close(descriptor)
+    brief = data.decode("utf-8", "strict").rstrip("\n")
+    if not brief:
+        raise ValueError("empty")
+    if any(ord(character) < 32 and character not in "\n\t" for character in brief):
+        raise ValueError("contains control characters")
+    if "\x60" in brief or re.search(r"[;&|$<>\\]", brief) or re.search(
+        r"(?im)^[ \t]*(?:#!|bash\b|sh\b|zsh\b|curl\b|wget\b|ssh\b|sudo\b|env\b|"
+        r"rm\b|mv\b|cp\b|chmod\b|chown\b|python[0-9.]*\b|node\b)", brief
+    ):
+        raise ValueError("contains shell-shaped content")
+except (OSError, UnicodeError, ValueError) as error:
+    print(f"invalid brief file: {error}", file=sys.stderr)
+    raise SystemExit(1)
+sys.stdout.write(brief)
+PY
+)"; then
+    _die "could not read --brief-file safely"
+  fi
+fi
+
+if $JSON_OUTPUT; then
+  ! $DRY_RUN || _die "--json cannot be combined with --dry-run"
+  [[ -n "$ORIGIN_PROFILE" && -n "$CORRELATION_ID" ]] || \
+    _die "--json requires --origin-profile and --correlation-id"
+  exec 3>&1
+  exec 1>&2
+fi
 
 [[ -z "$AGENT_OVERRIDE" ]] || AGENT_CMD="$AGENT_OVERRIDE"
 [[ "$STAGE" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || _die "stage must be a lowercase slug: $STAGE"
@@ -1451,6 +1514,9 @@ for rname in "${TARGET_REPOS[@]}"; do
   echo "--- $rname ---"
 
   if ! _sgt_is_git_repo "$repo_path"; then
+    if $JSON_OUTPUT; then
+      _die "Correlated admission requires cloned repository '$rname' at $repo_path"
+    fi
     echo "  SKIP: not cloned at $repo_path (run bin/sgt-sync $PROJECT first)"
     echo ""
     continue
@@ -1892,4 +1958,9 @@ if ! $DRY_RUN; then
     "Dispatched $TASK_ID to project $PROJECT" \
     "sergeant,dispatch,$PROJECT" \
     "$_wiki_body"
+
+  if $JSON_OUTPUT; then
+    printf '{"status":"accepted","task_id":"%s","correlation_id":"%s"}\n' \
+      "$TASK_ID" "$CORRELATION_ID" >&3
+  fi
 fi

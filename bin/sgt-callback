@@ -19,6 +19,7 @@ from typing import Any, Iterator
 
 
 ORIGIN_VERSION = "sergeant.callback-origin/v1"
+ORIGIN_REGISTRY_VERSION = "sergeant.callback-origin-registry/v1"
 EVENT_VERSION = "sergeant.callback-event/v1"
 STATE_VERSION = "sergeant.callback-state/v1"
 ACK_VERSION = "sergeant.callback-ack/v1"
@@ -113,6 +114,7 @@ def ensure_private_directory(path: Path) -> None:
         return
     path.mkdir(mode=0o700)
     validate_owned_directory(path, str(path))
+    fsync_directory(path.parent)
 
 
 def task_path(task_id: str) -> Path:
@@ -485,20 +487,65 @@ def enqueue_event(
 def register(task_id: str, profile: str, correlation: str) -> None:
     validate_origin(profile, correlation)
     task = task_path(task_id)
-    callback_dir = callback_directory(task, create=True)
-    origin_path = callback_dir / "origin.json"
+    root = fleet_root()
     origin = {
         "version": ORIGIN_VERSION,
         "profile": profile,
         "correlation_id": correlation,
     }
-    with TaskLock(callback_dir):
-        if origin_path.exists() or origin_path.is_symlink():
-            if load_origin(task) != origin:
-                fail("callback origin is already registered")
-            return
-        write_json(origin_path, origin)
-        events_directory(callback_dir)
+    lock_descriptor = os.open(
+        root / ".callback-origin.lock",
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        lock_metadata = os.fstat(lock_descriptor)
+        if not stat.S_ISREG(lock_metadata.st_mode) or lock_metadata.st_uid != os.getuid():
+            fail("unsafe callback origin registry lock")
+        os.fchmod(lock_descriptor, 0o600)
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        registry = root / ".callback-origins"
+        ensure_private_directory(registry)
+        registry_path = registry / f"{hashlib.sha256(correlation.encode()).hexdigest()}.json"
+        registry_record = None
+        if registry_path.exists() or registry_path.is_symlink():
+            registry_record = read_json(registry_path, "callback origin registry record")
+            if set(registry_record) != {"version", "task_id", "correlation_id"} or \
+                    registry_record.get("version") != ORIGIN_REGISTRY_VERSION or \
+                    registry_record.get("correlation_id") != correlation or \
+                    not isinstance(registry_record.get("task_id"), str) or \
+                    not TASK_RE.fullmatch(registry_record["task_id"]):
+                fail("invalid callback origin registry record")
+            if registry_record["task_id"] != task_id:
+                fail("correlation ID is already registered to another task")
+        for candidate in root.iterdir():
+            if candidate == task or not TASK_RE.fullmatch(candidate.name):
+                continue
+            if not candidate.is_dir() or candidate.is_symlink():
+                continue
+            candidate_origin = load_origin(candidate, absent_ok=True)
+            if candidate_origin is not None and candidate_origin["correlation_id"] == correlation:
+                fail("correlation ID is already registered to another task")
+        callback_dir = callback_directory(task, create=True)
+        origin_path = callback_dir / "origin.json"
+        with TaskLock(callback_dir):
+            if origin_path.exists() or origin_path.is_symlink():
+                if load_origin(task) != origin:
+                    fail("callback origin is already registered")
+            else:
+                write_json(origin_path, origin)
+                events_directory(callback_dir)
+            if registry_record is None:
+                write_json(
+                    registry_path,
+                    {
+                        "version": ORIGIN_REGISTRY_VERSION,
+                        "task_id": task_id,
+                        "correlation_id": correlation,
+                    },
+                )
+    finally:
+        os.close(lock_descriptor)
 
 
 def validate_origin(profile: str, correlation: str) -> None:

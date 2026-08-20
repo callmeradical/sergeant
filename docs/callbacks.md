@@ -32,6 +32,35 @@ Both flags are required together. A correlation ID must match
 `^[a-z][a-z0-9._-]{7,127}$` and must not contain a 17-20 digit platform ID.
 Use a new opaque request ID, never a Discord guild/channel/user/message ID.
 
+Restricted transports should write the validated brief to a private regular
+file owned by the Sergeant user, then request machine-readable admission:
+
+```bash
+sgt-dispatch hermes-bridge \
+  --brief-file "$private_brief" \
+  --repos sergeant \
+  --origin-profile hermes-discord \
+  --correlation-id req-7f91b230 \
+  --json
+```
+
+`--json` requires an origin and cannot be combined with `--dry-run`. Progress
+and diagnostics go to stderr. Failure exits nonzero with no stdout. Only after
+normal dispatch completes and the callback origin is durable, stdout contains:
+
+```json
+{"status":"accepted","task_id":"implement-request-a1b2c3","correlation_id":"req-7f91b230"}
+```
+
+The three fields above are the complete admission response. Prompt injection,
+terminal capture, and intermediate `task-id:` progress are never admission.
+Without `--json`, dispatch output and behavior are unchanged.
+
+The brief file must be nonempty strict UTF-8, at most 16384 bytes, owned by the
+Sergeant user, not group/world writable, and a real regular file rather than a
+symlink. Control characters and shell-shaped content are rejected before task,
+td, tmux, worktree, or fleet mutation.
+
 An existing task can be bound directly before events are produced:
 
 ```bash
@@ -46,7 +75,11 @@ Registration writes only `.callbacks/origin.json` under the fleet task:
 
 It never stores request text, Discord IDs, destination IDs, tokens, secrets,
 message content, callback commands, or logs. Repeating the same registration is
-idempotent; changing an existing registration is rejected.
+idempotent; changing an existing registration is rejected. Sergeant also keeps
+a private retained mapping under `SERGEANT_FLEET/.callback-origins/`, keyed by a
+SHA-256 digest of the correlation ID. A correlation cannot be registered to a
+second task, including after the original task is cleaned up, so consumer
+idempotency keys cannot be reused.
 
 Tasks with no origin retain the existing Sergeant notification behavior.
 `sgt-callback sync` is a no-op and no callback state is created for them.
