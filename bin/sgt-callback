@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -21,6 +22,7 @@ from typing import Any, Iterator
 ORIGIN_VERSION = "sergeant.callback-origin/v1"
 ORIGIN_REGISTRY_VERSION = "sergeant.callback-origin-registry/v1"
 ADMISSION_VERSION = "sergeant.admission/v1"
+TRANSACTION_VERSION = "sergeant.admission-transaction/v1"
 EVENT_VERSION = "sergeant.callback-event/v1"
 STATE_VERSION = "sergeant.callback-state/v1"
 ACK_VERSION = "sergeant.callback-ack/v1"
@@ -282,6 +284,251 @@ class TaskLock:
         self.handle.close()
 
 
+def transaction_directory(root: Path, correlation: str) -> Path:
+    return root / ".callback-transactions" / hashlib.sha256(
+        correlation.encode()
+    ).hexdigest()
+
+
+class AdmissionTransactionLock:
+    def __init__(self, root: Path, correlation: str):
+        self.path = transaction_directory(root, correlation) / "lock"
+        self.descriptor: int | None = None
+        self.inherited = False
+
+    def __enter__(self) -> "AdmissionTransactionLock":
+        inherited = os.environ.get("SGT_ADMISSION_LOCK_FD")
+        if inherited is not None:
+            if not inherited.isdigit():
+                fail("invalid inherited admission lock")
+            descriptor = int(inherited)
+            try:
+                descriptor_info = os.fstat(descriptor)
+                path_info = self.path.lstat()
+            except OSError:
+                fail("unavailable inherited admission lock")
+            if not stat.S_ISREG(path_info.st_mode) or \
+                    not stat.S_ISREG(descriptor_info.st_mode) or \
+                    (descriptor_info.st_dev, descriptor_info.st_ino) != \
+                    (path_info.st_dev, path_info.st_ino):
+                fail("inherited admission lock identity mismatch")
+            self.descriptor = descriptor
+            self.inherited = True
+            return self
+        if not self.path.parent.exists() and not self.path.parent.is_symlink():
+            raise AdmissionNotFound("correlated admission not found")
+        descriptor = os.open(
+            self.path,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        info = os.fstat(descriptor)
+        path_info = self.path.lstat()
+        if not stat.S_ISREG(path_info.st_mode) or \
+                not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or \
+                (info.st_dev, info.st_ino) != (path_info.st_dev, path_info.st_ino):
+            os.close(descriptor)
+            fail("unsafe admission transaction lock")
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        self.descriptor = descriptor
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        if not self.inherited and self.descriptor is not None:
+            fcntl.flock(self.descriptor, fcntl.LOCK_UN)
+            os.close(self.descriptor)
+
+
+def load_transaction(root: Path, correlation: str) -> dict[str, Any]:
+    path = transaction_directory(root, correlation) / "transaction.json"
+    if not path.exists() and not path.is_symlink():
+        raise AdmissionNotFound("correlated admission not found")
+    record = read_json(path, "admission transaction")
+    expected = {
+        "version", "status", "task_id", "profile", "correlation_id", "receipt"
+    }
+    if set(record) != expected or record.get("version") != TRANSACTION_VERSION or \
+            record.get("status") not in {"pending", "committed", "tombstoned"} or \
+            not isinstance(record.get("task_id"), str) or \
+            not TASK_RE.fullmatch(record["task_id"]) or \
+            not isinstance(record.get("profile"), str) or \
+            not PROFILE_RE.fullmatch(record["profile"]) or \
+            record.get("correlation_id") != correlation:
+        fail("invalid admission transaction")
+    receipt = record.get("receipt")
+    if record["status"] == "pending":
+        if receipt is not None:
+            fail("pending admission has a receipt")
+    elif receipt != {
+        "status": "accepted",
+        "task_id": record["task_id"],
+        "correlation_id": correlation,
+    }:
+        fail("invalid retained admission receipt")
+    return record
+
+
+def write_transaction(root: Path, correlation: str, record: dict[str, Any]) -> None:
+    write_json(transaction_directory(root, correlation) / "transaction.json", record)
+
+
+def begin_admission(task_id: str, profile: str, correlation: str) -> None:
+    validate_name(task_id, TASK_RE, "task ID")
+    validate_name(profile, PROFILE_RE, "callback profile")
+    validate_correlation(correlation)
+    root = fleet_root()
+    validate_owned_directory(root, "fleet directory")
+    registry = root / ".callback-origins"
+    transactions = root / ".callback-transactions"
+    ensure_private_directory(registry)
+    ensure_private_directory(transactions)
+    global_lock = root / ".callback-origin.lock"
+    descriptor = os.open(
+        global_lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600
+    )
+    try:
+        lock_info = os.fstat(descriptor)
+        if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid():
+            fail("unsafe callback origin registry lock")
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        tx_dir = transaction_directory(root, correlation)
+        if not tx_dir.exists() and not tx_dir.is_symlink():
+            tx_dir.mkdir(mode=0o700)
+            fsync_directory(transactions)
+        validate_owned_directory(tx_dir, "admission transaction directory")
+        lock_path = tx_dir / "lock"
+        lock_fd = os.open(
+            lock_path,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        lock_info = os.fstat(lock_fd)
+        if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid():
+            os.close(lock_fd)
+            fail("unsafe admission transaction lock")
+        os.fchmod(lock_fd, 0o600)
+        os.close(lock_fd)
+        fsync_directory(tx_dir)
+        with AdmissionTransactionLock(root, correlation):
+            try:
+                transaction = load_transaction(root, correlation)
+            except AdmissionNotFound:
+                transaction = {
+                    "version": TRANSACTION_VERSION,
+                    "status": "pending",
+                    "task_id": task_id,
+                    "profile": profile,
+                    "correlation_id": correlation,
+                    "receipt": None,
+                }
+                for name in (
+                    "mutations", "td-create-state.jsonl", "td-create-success"
+                ):
+                    atomic_write(tx_dir / name, b"")
+                ensure_private_directory(tx_dir / "snapshots")
+                write_transaction(root, correlation, transaction)
+            if transaction["profile"] != profile:
+                fail("correlation is registered to another callback profile")
+            registry_path = origin_registry_path(root, correlation)
+            if registry_path.exists() or registry_path.is_symlink():
+                registry_record = load_origin_registry(registry_path, correlation)
+                if registry_record["kind"] != "admission" or \
+                        registry_record["task_id"] != transaction["task_id"]:
+                    fail("correlation ID is already registered to another task")
+            else:
+                write_json(registry_path, {
+                    "version": ORIGIN_REGISTRY_VERSION,
+                    "kind": "admission",
+                    "task_id": transaction["task_id"],
+                    "correlation_id": correlation,
+                })
+            fsync_directory(root)
+        print(json.dumps({
+            "task_id": transaction["task_id"],
+            "transaction_dir": str(tx_dir),
+            "lock_path": str(lock_path),
+        }, separators=(",", ":")))
+    finally:
+        os.close(descriptor)
+
+
+def lock_admission(correlation: str, descriptor_text: str) -> None:
+    validate_correlation(correlation)
+    if not descriptor_text.isdigit():
+        fail("invalid admission lock descriptor")
+    descriptor = int(descriptor_text)
+    root = fleet_root()
+    lock_path = transaction_directory(root, correlation) / "lock"
+    info = os.fstat(descriptor)
+    path_info = lock_path.lstat()
+    if not stat.S_ISREG(path_info.st_mode) or not stat.S_ISREG(info.st_mode) or \
+            info.st_uid != os.getuid() or \
+            (info.st_dev, info.st_ino) != (path_info.st_dev, path_info.st_ino):
+        fail("admission lock descriptor identity mismatch")
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+
+
+def admission_lock_info(task_id: str) -> None:
+    validate_name(task_id, TASK_RE, "task ID")
+    root = fleet_root()
+    transactions = root / ".callback-transactions"
+    if not transactions.exists() and not transactions.is_symlink():
+        raise AdmissionNotFound("task is not a correlated admission")
+    validate_owned_directory(root, "fleet directory")
+    validate_owned_directory(transactions, "admission transactions")
+    matches: list[tuple[str, dict[str, Any]]] = []
+    for candidate in transactions.iterdir():
+        if not re.fullmatch(r"[a-f0-9]{64}", candidate.name):
+            fail("invalid admission transaction directory")
+        validate_owned_directory(candidate, "admission transaction directory")
+        if not (candidate / "transaction.json").exists():
+            continue
+        raw = read_json(candidate / "transaction.json", "admission transaction")
+        correlation = raw.get("correlation_id")
+        if not isinstance(correlation, str):
+            fail("invalid admission transaction correlation")
+        transaction = load_transaction(root, correlation)
+        if transaction_directory(root, correlation) != candidate:
+            fail("admission transaction directory identity mismatch")
+        if transaction["task_id"] == task_id:
+            matches.append((correlation, transaction))
+    if not matches:
+        raise AdmissionNotFound("task is not a correlated admission")
+    if len(matches) != 1:
+        fail("duplicate admission transaction task identity")
+    correlation, transaction = matches[0]
+    print(json.dumps({
+        "correlation_id": correlation,
+        "lock_path": str(transaction_directory(root, correlation) / "lock"),
+    }, separators=(",", ":")))
+
+
+def reset_pending_admission(correlation: str, transaction_locked: bool = False) -> None:
+    validate_correlation(correlation)
+    root = fleet_root()
+    if not transaction_locked:
+        with AdmissionTransactionLock(root, correlation):
+            reset_pending_admission(correlation, True)
+        return
+    transaction = load_transaction(root, correlation)
+    if transaction["status"] != "pending":
+        fail("only a pending admission can be reset")
+    task = root / transaction["task_id"]
+    if task.exists() or task.is_symlink():
+        fail("pending admission task state still exists")
+    tx_dir = transaction_directory(root, correlation)
+    for name in ("mutations", "td-create-state.jsonl", "td-create-success"):
+        atomic_write(tx_dir / name, b"")
+    snapshots = tx_dir / "snapshots"
+    if snapshots.exists() or snapshots.is_symlink():
+        validate_owned_directory(snapshots, "admission snapshots")
+        shutil.rmtree(snapshots)
+    ensure_private_directory(snapshots)
+    fsync_directory(tx_dir)
+
+
 def validate_payload_bytes(data: bytes) -> str:
     if len(data) > MAX_PAYLOAD_BYTES:
         fail(f"payload exceeds {MAX_PAYLOAD_BYTES} bytes")
@@ -508,16 +755,53 @@ def load_origin_registry(path: Path, correlation: str) -> dict[str, str]:
 
 
 def register(
-    task_id: str, profile: str, correlation: str, kind: str = "callback"
+    task_id: str,
+    profile: str,
+    correlation: str,
+    kind: str = "callback",
+    transaction_locked: bool = False,
 ) -> None:
+    if kind == "admission" and not transaction_locked:
+        with AdmissionTransactionLock(fleet_root(), correlation):
+            register(task_id, profile, correlation, kind, True)
+        return
     validate_origin(profile, correlation)
     task = task_path(task_id)
     root = fleet_root()
+    if kind == "admission":
+        transaction = load_transaction(root, correlation)
+        if transaction["status"] != "pending" or \
+                transaction["task_id"] != task_id or \
+                transaction["profile"] != profile:
+            fail("admission registration does not match pending transaction")
     origin = {
         "version": ORIGIN_VERSION,
         "profile": profile,
         "correlation_id": correlation,
     }
+    if kind == "admission":
+        registry_record = load_origin_registry(
+            origin_registry_path(root, correlation), correlation
+        )
+        if registry_record["task_id"] != task_id or \
+                registry_record["kind"] != "admission":
+            fail("admission registry identity mismatch")
+        callback_dir = callback_directory(task, create=True)
+        origin_path = callback_dir / "origin.json"
+        with TaskLock(callback_dir):
+            if origin_path.exists() or origin_path.is_symlink():
+                if load_origin(task) != origin:
+                    fail("callback origin is already registered")
+            else:
+                write_json(origin_path, origin)
+                events_directory(callback_dir)
+            for entry in task.iterdir():
+                if entry.is_symlink() or not entry.is_file():
+                    continue
+                fsync_regular_file(entry, "fleet task metadata")
+            fsync_directory(task)
+            fsync_directory(root)
+        return
     lock_descriptor = os.open(
         root / ".callback-origin.lock",
         os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
@@ -588,16 +872,106 @@ def validate_origin(profile: str, correlation: str) -> None:
     callback_path(profile)
 
 
-def admit(task_id: str) -> None:
+def fsync_regular_file(path: Path, label: str) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            fail(f"unsafe {label}")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def flush_admission_authority(task: Path, transaction_dir: Path) -> None:
+    brief = read_text(task / "brief.md", 32768, "fleet task brief")
+    repos: list[str] = []
+    for line in brief.splitlines():
+        if line.startswith("Repos:"):
+            repos = line.split(":", 1)[1].split()
+            break
+    if not repos:
+        fail("admission has no repositories")
+    for path in (
+        transaction_dir / "mutations",
+        transaction_dir / "td-create-state.jsonl",
+        transaction_dir / "td-create-success",
+        task / "brief.md",
+        callback_directory(task) / "origin.json",
+    ):
+        fsync_regular_file(path, "admission authority")
+    for repo_name in repos:
+        if not TASK_RE.fullmatch(repo_name):
+            fail("invalid repository in admission authority")
+        repo = task / repo_name
+        validate_owned_directory(repo, "fleet repository state")
+        required = (
+            "worktree", "pane", "pane_identity", "worker-launch.completed",
+            "notification_id", "notification_target",
+        )
+        for name in required:
+            fsync_regular_file(repo / name, f"fleet repository {name}")
+        pane = read_text(repo / "pane", 128, "worker pane").strip()
+        pane_identity = read_text(
+            repo / "pane_identity", 1024, "worker pane identity"
+        ).strip()
+        if not re.fullmatch(r"%[0-9]+", pane) or \
+                len(pane_identity.split("|")) != 5 or \
+                pane_identity.split("|", 2)[1] != pane:
+            fail("invalid worker pane authority")
+        worktree_value = read_text(repo / "worktree", 4096, "worktree pointer").strip()
+        worktree = Path(worktree_value)
+        if not worktree.is_absolute():
+            fail("worktree pointer must be absolute")
+        validate_owned_directory(worktree, "worktree", writable_ok=True)
+        notification_id = read_text(
+            repo / "notification_id", 128, "notification ID"
+        ).strip()
+        nonce = read_text(
+            repo / "notification_target", 64, "notification target"
+        ).strip()
+        token = f"{notification_id}|{nonce}"
+        acknowledgement = worktree / ".sergeant-notification-acks" / nonce
+        if read_text(
+            acknowledgement, 256, "worker notification acknowledgement"
+        ).strip() != token:
+            fail("worker has not acknowledged the admission notification")
+        read_regular(
+            worktree / ".sergeant-brief.md", 262144, "private worker brief", 0o600
+        )
+        for path in (
+            worktree / ".sergeant-brief.md",
+            worktree / ".sergeant-intent.md",
+            acknowledgement,
+        ):
+            fsync_regular_file(path, "worker admission state")
+        fsync_directory(acknowledgement.parent)
+        fsync_directory(worktree)
+        fsync_directory(repo)
+    fsync_directory(callback_directory(task))
+    fsync_directory(task)
+    fsync_directory(transaction_dir)
+    fsync_directory(fleet_root())
+
+
+def admit(task_id: str, transaction_locked: bool = False) -> None:
     task = task_path(task_id)
     origin = load_origin(task)
     assert origin is not None
+    if not transaction_locked:
+        with AdmissionTransactionLock(fleet_root(), origin["correlation_id"]):
+            admit(task_id, True)
+        return
     registry_record = load_origin_registry(
         origin_registry_path(fleet_root(), origin["correlation_id"]),
         origin["correlation_id"],
     )
     if registry_record["kind"] != "admission" or registry_record["task_id"] != task_id:
         fail("task is not registered for correlated admission")
+    transaction = load_transaction(fleet_root(), origin["correlation_id"])
+    if transaction["task_id"] != task_id or transaction["profile"] != origin["profile"]:
+        fail("admission transaction identity mismatch")
+    if transaction["status"] in {"committed", "tombstoned"}:
+        return
     callback_dir = callback_directory(task)
     admission_path = callback_dir / "admission.json"
     admission = {
@@ -607,13 +981,43 @@ def admit(task_id: str) -> None:
         "correlation_id": origin["correlation_id"],
     }
     with TaskLock(callback_dir):
+        flush_admission_authority(
+            task, transaction_directory(fleet_root(), origin["correlation_id"])
+        )
         if admission_path.exists() or admission_path.is_symlink():
             if read_json(admission_path, "callback admission") != admission:
                 fail("invalid callback admission record")
-            return
-        write_json(admission_path, admission)
+        else:
+            write_json(admission_path, admission)
         fsync_directory(task)
         fsync_directory(fleet_root())
+        transaction["status"] = "committed"
+        transaction["receipt"] = {
+            "status": "accepted",
+            "task_id": task_id,
+            "correlation_id": origin["correlation_id"],
+        }
+        write_transaction(fleet_root(), origin["correlation_id"], transaction)
+
+
+def tombstone_admission(task_id: str, transaction_locked: bool = False) -> None:
+    task = task_path(task_id)
+    origin = load_origin(task)
+    assert origin is not None
+    correlation = origin["correlation_id"]
+    if not transaction_locked:
+        with AdmissionTransactionLock(fleet_root(), correlation):
+            tombstone_admission(task_id, True)
+        return
+    transaction = load_transaction(fleet_root(), correlation)
+    if transaction["task_id"] != task_id:
+        fail("admission tombstone identity mismatch")
+    if transaction["status"] == "tombstoned":
+        return
+    if transaction["status"] != "committed":
+        fail("only a committed admission can be tombstoned")
+    transaction["status"] = "tombstoned"
+    write_transaction(fleet_root(), correlation, transaction)
 
 
 def resolve_admission(profile: str, correlation: str) -> None:
@@ -621,74 +1025,19 @@ def resolve_admission(profile: str, correlation: str) -> None:
     validate_correlation(correlation)
     root = fleet_root()
     validate_owned_directory(root, "fleet directory")
-    registry_path = origin_registry_path(root, correlation)
-    if not registry_path.exists() and not registry_path.is_symlink():
-        raise AdmissionNotFound("correlated admission not found")
-    record = load_origin_registry(registry_path, correlation)
-    if record["kind"] != "admission":
-        fail("correlation is not registered for admission")
-    task_candidate = root / record["task_id"]
-    if not task_candidate.exists() and not task_candidate.is_symlink():
-        print(record["task_id"])
+    with AdmissionTransactionLock(root, correlation):
+        transaction = load_transaction(root, correlation)
+        if transaction["profile"] != profile:
+            fail("callback admission origin mismatch")
+        if transaction["status"] in {"committed", "tombstoned"}:
+            print(json.dumps({
+                "status": "accepted",
+                "task_id": transaction["task_id"],
+                "correlation_id": correlation,
+            }, separators=(",", ":")))
+            return
+        print(transaction["task_id"])
         raise SystemExit(3)
-    task = task_path(record["task_id"])
-    origin = load_origin(task)
-    if origin != {
-        "version": ORIGIN_VERSION,
-        "profile": profile,
-        "correlation_id": correlation,
-    }:
-        fail("callback admission origin mismatch")
-    admission_path = callback_directory(task) / "admission.json"
-    if not admission_path.exists() and not admission_path.is_symlink():
-        brief = safe_optional_text(task / "brief.md", 32768, "fleet task brief")
-        repos = []
-        if brief is not None:
-            for line in brief.splitlines():
-                if line.startswith("Repos:"):
-                    repos = line.split(":", 1)[1].split()
-                    break
-        ready = bool(repos)
-        for repo_name in repos:
-            if not TASK_RE.fullmatch(repo_name):
-                fail("invalid repository in pending admission")
-            repo = task / repo_name
-            worktree_value = safe_optional_text(repo / "worktree", 4096, "worktree pointer")
-            notification_id = safe_optional_text(
-                repo / "notification_id", 128, "notification ID"
-            )
-            nonce = safe_optional_text(repo / "notification_target", 64, "notification target")
-            pane = safe_optional_text(repo / "pane", 128, "worker pane")
-            if not all((worktree_value, notification_id, nonce, pane)) or \
-                    not (repo / "worker-launch.completed").is_file():
-                ready = False
-                break
-            token = f"{notification_id}|{nonce}"
-            ack = Path(worktree_value) / ".sergeant-notification-acks" / nonce
-            accepted = repo / "notifications" / notification_id / "targets" / nonce / "accepted"
-            if safe_optional_text(ack, 256, "notification acknowledgement") != token and \
-                    safe_optional_text(accepted, 256, "notification acceptance") != token:
-                ready = False
-                break
-        if ready:
-            admit(record["task_id"])
-        else:
-            print(record["task_id"])
-            raise SystemExit(3)
-    admission = read_json(admission_path, "callback admission")
-    expected = {
-        "version": ADMISSION_VERSION,
-        "status": "accepted",
-        "task_id": record["task_id"],
-        "correlation_id": correlation,
-    }
-    if admission != expected:
-        fail("invalid callback admission record")
-    print(json.dumps({
-        "status": "accepted",
-        "task_id": record["task_id"],
-        "correlation_id": correlation,
-    }, separators=(",", ":")))
 
 
 def safe_optional_text(path: Path, maximum: int, label: str) -> str | None:
@@ -1092,11 +1441,16 @@ def enqueue(task_id: str, event_type: str, source_id: str) -> None:
 def usage() -> None:
     print(
         "Usage:\n"
+        "  sgt-callback begin-admission <task-id> <profile> <correlation-id>\n"
+        "  sgt-callback lock-admission <correlation-id> <fd>\n"
+        "  sgt-callback admission-lock-info <task-id>\n"
+        "  sgt-callback reset-pending-admission <correlation-id>\n"
         "  sgt-callback validate-origin <profile> <correlation-id>\n"
         "  sgt-callback register <task-id> <profile> <correlation-id>\n"
         "  sgt-callback register-admission <task-id> <profile> <correlation-id>\n"
         "  sgt-callback admit <task-id>\n"
         "  sgt-callback resolve-admission <profile> <correlation-id>\n"
+        "  sgt-callback tombstone-admission <task-id>\n"
         "  sgt-callback enqueue <task-id> <needs_input|blocked|failed|done> <source-id> < payload\n"
         "  sgt-callback sync <task-id>\n"
         "  sgt-callback drain <task-id|--all>\n"
@@ -1113,7 +1467,15 @@ def main(argv: list[str]) -> None:
         usage()
         raise SystemExit(1)
     command = argv[0]
-    if command == "validate-origin" and len(argv) == 3:
+    if command == "begin-admission" and len(argv) == 4:
+        begin_admission(argv[1], argv[2], argv[3])
+    elif command == "lock-admission" and len(argv) == 3:
+        lock_admission(argv[1], argv[2])
+    elif command == "admission-lock-info" and len(argv) == 2:
+        admission_lock_info(argv[1])
+    elif command == "reset-pending-admission" and len(argv) == 2:
+        reset_pending_admission(argv[1])
+    elif command == "validate-origin" and len(argv) == 3:
         validate_origin(argv[1], argv[2])
     elif command == "register" and len(argv) == 4:
         register(argv[1], argv[2], argv[3])
@@ -1123,6 +1485,8 @@ def main(argv: list[str]) -> None:
         admit(argv[1])
     elif command == "resolve-admission" and len(argv) == 3:
         resolve_admission(argv[1], argv[2])
+    elif command == "tombstone-admission" and len(argv) == 2:
+        tombstone_admission(argv[1])
     elif command == "enqueue" and len(argv) == 4:
         enqueue(argv[1], argv[2], argv[3])
     elif command == "sync" and len(argv) == 2:
