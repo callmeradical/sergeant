@@ -19,26 +19,38 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
+var (
+	cachedScriptDir string
+	scriptDirOnce   sync.Once
+)
+
 // scriptDir returns the directory containing this binary, which must be the
 // same bin/ directory that holds the sgt-* shell scripts.
+// The result is cached to avoid repeated expensive system calls (os.Executable,
+// filepath.EvalSymlinks) on every tool invocation.
 func scriptDir() string {
-	exe, err := os.Executable()
-	if err != nil {
-		// Fall back to the working directory.
-		wd, _ := os.Getwd()
-		return filepath.Join(wd, "bin")
-	}
-	// Resolve symlinks so the path is stable.
-	resolved, err := filepath.EvalSymlinks(exe)
-	if err != nil {
-		resolved = exe
-	}
-	return filepath.Dir(resolved)
+	scriptDirOnce.Do(func() {
+		exe, err := os.Executable()
+		if err != nil {
+			// Fall back to the working directory.
+			wd, _ := os.Getwd()
+			cachedScriptDir = filepath.Join(wd, "bin")
+			return
+		}
+		// Resolve symlinks so the path is stable.
+		resolved, err := filepath.EvalSymlinks(exe)
+		if err != nil {
+			resolved = exe
+		}
+		cachedScriptDir = filepath.Dir(resolved)
+	})
+	return cachedScriptDir
 }
 
 // shellSplit splits a shell-style argument string honouring single and double
