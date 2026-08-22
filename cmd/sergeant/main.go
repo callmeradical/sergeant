@@ -90,7 +90,10 @@ func runProject(projName string) {
 	// The same generator the dispatch handler uses. Two id formats would let a
 	// CLI run and a dispatched run collide on the runs primary key.
 	taskID := naming.RunID()
-	handoffBase := filepath.Join(home, ".local", "share", "sergeant", "fleet", taskID, "handoff")
+	// dag.FleetRoot is the single authority for the fleet root (D7). Building this
+	// path by hand here is how the CLI kept writing handoffs into v1's directory
+	// after the server stopped.
+	handoffBase := filepath.Join(dag.FleetRoot(), taskID, "handoff")
 	router := handoff.NewRouter(handoffBase)
 
 	runRec := &store.RunRecord{

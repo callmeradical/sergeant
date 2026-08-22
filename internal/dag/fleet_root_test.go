@@ -96,19 +96,32 @@ func TestNoSourceOutsideTheHelperNamesV1FleetRoot(t *testing.T) {
 	internalDir := internalSourceDir(t)
 	repoRoot := filepath.Dir(internalDir)
 
+	// Scan the whole repository, not just internal/. The first version of this
+	// scan walked internal/ alone, and cmd/sergeant/main.go went on building v1's
+	// fleet root unnoticed: a binary is exactly as capable of writing into the
+	// wrong directory as a library is. Scoping an invariant to one subtree only
+	// moves where it can be broken.
 	var offenders []string
-	err := filepath.WalkDir(internalDir, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+		if d.IsDir() {
+			// Nothing under .git or vendor is this repository's own source.
+			if name := d.Name(); name == ".git" || name == "vendor" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
 		offenders = append(offenders, scanForV1FleetRoot(t, repoRoot, path)...)
 		return nil
 	})
+	_ = internalDir
 	if err != nil {
-		t.Fatalf("walking %s: %v", internalDir, err)
+		t.Fatalf("walking %s: %v", repoRoot, err)
 	}
 
 	if len(offenders) > 0 {
