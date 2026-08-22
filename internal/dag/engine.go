@@ -65,20 +65,32 @@ func expandPath(p string) string {
 	return p
 }
 
-// FleetDir is where per-run isolated worktrees are created.
-// SERGEANT_FLEET_DIR overrides the base so tests never touch the real user path.
+// FleetRoot is the base directory for all run state: worktrees, handoff
+// artifacts, and anything else scoped to a run. It is the single authority on
+// where that root is, so that no caller resolves it independently.
+// SERGEANT_FLEET_DIR overrides it so tests never touch the real user path.
 //
 // The default root is ~/.local/share/sergeant-v2/fleet, not v1's
 // ~/.local/share/sergeant/fleet. The two layouts have the same shape but
 // incompatible meaning: v1 stores per-repo metadata under
-// fleet/<task>/<repo>/, whereas v2 puts the actual git worktree there.
-func FleetDir(runID, repoName string) string {
-	base := os.Getenv("SERGEANT_FLEET_DIR")
-	if base == "" {
-		home, _ := os.UserHomeDir()
-		base = filepath.Join(home, ".local", "share", "sergeant-v2", "fleet")
+// fleet/<task>/<repo>/, whereas v2 puts the actual git worktree there. A path
+// built against the wrong root therefore fails silently instead of erroring,
+// and AGENTS.md decision D7 forbids v2 writing under v1's root at all.
+//
+// Resolution happens per call, not once at init, because tests set
+// SERGEANT_FLEET_DIR per test with t.Setenv.
+func FleetRoot() string {
+	if base := os.Getenv("SERGEANT_FLEET_DIR"); base != "" {
+		return base
 	}
-	return filepath.Join(base, runID, repoName)
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "sergeant-v2", "fleet")
+}
+
+// FleetDir is where a run's isolated worktree for one repository is created.
+// It is expressed as a join on FleetRoot so the two cannot disagree.
+func FleetDir(runID, repoName string) string {
+	return filepath.Join(FleetRoot(), runID, repoName)
 }
 
 // BranchName is the per-run branch created inside the isolated worktree.

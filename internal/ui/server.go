@@ -607,8 +607,7 @@ func (srv *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 }
 
 func (srv *Server) handleFleet(w http.ResponseWriter, r *http.Request) {
-	home, _ := os.UserHomeDir()
-	fleetDir := filepath.Join(home, ".local", "share", "sergeant", "fleet")
+	fleetDir := dag.FleetRoot()
 
 	type WorktreeLease struct {
 		TaskID    string `json:"task_id"`
@@ -676,8 +675,7 @@ func (srv *Server) handleCleanWorktrees(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	home, _ := os.UserHomeDir()
-	fleetDir := filepath.Join(home, ".local", "share", "sergeant", "fleet")
+	fleetDir := dag.FleetRoot()
 	_ = os.MkdirAll(fleetDir, 0755)
 
 	recentRuns, _ := srv.Store.ListRecentRuns(200)
@@ -1100,8 +1098,7 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = srv.Store.CreateRun(runRec)
 
-	home, _ := os.UserHomeDir()
-	handoffBase := filepath.Join(home, ".local", "share", "sergeant", "fleet", taskID, "handoff")
+	handoffBase := filepath.Join(dag.FleetRoot(), taskID, "handoff")
 	router := handoff.NewRouter(handoffBase)
 	engine := dag.NewEngine(proj, srv.Store, router)
 
@@ -1503,8 +1500,7 @@ func (srv *Server) handleRunResume(w http.ResponseWriter, r *http.Request) {
 	// changed since.
 	repos := srv.reposForRun(run.ID)
 
-	home, _ := os.UserHomeDir()
-	router := handoff.NewRouter(filepath.Join(home, ".local", "share", "sergeant-v2", "fleet", run.ID, "handoff"))
+	router := handoff.NewRouter(filepath.Join(dag.FleetRoot(), run.ID, "handoff"))
 	engine := dag.NewEngine(proj, srv.Store, router)
 	engine.Resume = true
 
