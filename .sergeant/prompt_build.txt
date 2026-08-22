@@ -1,17 +1,37 @@
-Fix a UI bug: the stage matrix drops a phase when an agent phase and a code gate share the same name.
+Add Intent and Bullet as first-class records in the store. This is the store layer only: no UI wiring, no decomposition logic.
 
-Reproduce: a project whose factory.pipeline contains "build" and whose factory.gates contains a gate also named "build" produces two phase records with the same name and different kind (agent vs code). The API returns both. The matrix renders only one, and the surviving cell is whichever was written last.
+Read docs/prd-sergeant-v2.md section 3a for the domain model, and AGENTS.md first.
 
-File: internal/ui/static/index.html, function renderLiveStitchMatrix.
+Domain model to implement:
+  Project (a named set of repositories, already exists in internal/config)
+    Intent  - a durable statement of desired change; may span repos; the PRIMARY object
+      Bullet - exactly ONE repo, a vertical slice through that repo stack, implemented
+               test-first, yielding one commit and one PR
 
-Current cause: columns and cells are keyed by phase name only. The code does roughly byRepo.get(p.repo).set(p.name, p), so the second phase with the same name overwrites the first.
+Work to do in internal/store/store.go and internal/store/store_test.go:
 
-Required fix:
-1. Key cells by the pair (kind, name) so an agent phase and a code gate with the same name both survive and both render.
-2. Column identity must also be that pair. Keep the plain phase name as the visible column label when that name is unique across kinds. Only when the same name appears with two different kinds, disambiguate the labels, for example "build (agent)" and "build (gate)".
-3. Preserve first-seen ordering of columns.
-4. Do not change any other rendering behaviour.
+1. Add an IntentRecord struct with: ID, Project, Statement (the durable text), Status
+   (proposed, approved, in_progress, satisfied, abandoned), CreatedAt, UpdatedAt.
+2. Add a BulletRecord struct with: ID, IntentID, Repo, Position (int, the merge order
+   within the intent), Status (pending, red, green, sealed, merged, failed), Branch,
+   Worktree, CommitSHA, PRURL, CreatedAt, UpdatedAt.
+3. Add both tables to the schema string, and add them to migrateAddColumns style
+   handling so an EXISTING database gains them. Follow the pattern already used for the
+   runs.brief column: CREATE TABLE IF NOT EXISTS is a no-op on an existing table, so
+   verify with PRAGMA and add what is missing.
+4. Add store methods: CreateIntent, GetIntent, ListIntentsForProject, UpdateIntentStatus,
+   CreateBullet, ListBulletsForIntent (ordered by Position), UpdateBulletStatus.
+5. Guard JSON-ish text the same way existing code does, and use time.Now().UTC() for
+   timestamps to match CreateRun.
 
-Also add a regression test. There is a Playwright setup at /tmp/sergeant-e2e (run node scripts from that directory, import { chromium } from "playwright"). Write the test as a Go test if you can assert the rendering logic without a browser; otherwise add a small node script under /tmp/sergeant-e2e and describe in your summary exactly how you verified that both a build/agent phase and a build/code phase render as separate columns.
+Tests required in internal/store/store_test.go:
+- Create an intent with two bullets in different repos and assert ListBulletsForIntent
+  returns them ordered by Position.
+- Assert a bullet is scoped to exactly one repo (the Repo field is a single string, and
+  a test documents that cross-repo work is a second bullet).
+- Assert the migration works: open a store, close it, reopen it, and confirm the intents
+  and bullets tables exist and are usable. This is the case that broke before.
+- Assert UpdateIntentStatus and UpdateBulletStatus move status and bump UpdatedAt.
 
-Constraints: read AGENTS.md first. Do not shell out to any bin/sgt-* script. Do not use tmux. The HTML is embedded via //go:embed so run go build ./... and go test ./internal/... -count=1 before finishing.
+Constraints: do not shell out to any bin/sgt-* script. Do not use tmux. Do not modify
+the UI. Run go build ./... and go test ./internal/... -count=1 before finishing.

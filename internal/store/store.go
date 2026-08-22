@@ -38,6 +38,34 @@ type PhaseRecord struct {
 	CreatedAt  time.Time       `json:"created_at"`
 }
 
+// IntentRecord is the primary durable object. An intent may span repositories;
+// the ordering between them lives in its bullets' Position values.
+type IntentRecord struct {
+	ID        string    `json:"id"`
+	Project   string    `json:"project"`
+	Statement string    `json:"statement"`
+	Status    string    `json:"status"` // proposed, approved, in_progress, satisfied, abandoned
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// BulletRecord is a tracer bullet: exactly ONE repository, a vertical slice
+// through that repo's stack, yielding one commit and one PR. Repo is a single
+// string on purpose — work in a second repository is a second bullet.
+type BulletRecord struct {
+	ID        string    `json:"id"`
+	IntentID  string    `json:"intent_id"`
+	Repo      string    `json:"repo"`
+	Position  int       `json:"position"` // merge order within the intent
+	Status    string    `json:"status"`   // pending, red, green, sealed, merged, failed
+	Branch    string    `json:"branch,omitempty"`
+	Worktree  string    `json:"worktree,omitempty"`
+	CommitSHA string    `json:"commit_sha,omitempty"`
+	PRURL     string    `json:"pr_url,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type EnvelopeRecord struct {
 	ID        string          `json:"id"`
 	RunID     string          `json:"run_id"`
@@ -80,6 +108,35 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// createIntentsTable and createBulletsTable are consts because the same DDL is
+// needed twice: once in the initial schema, and once by migrateAddTables when an
+// older database is reopened.
+const createIntentsTable = `
+	CREATE TABLE IF NOT EXISTS intents (
+		id TEXT PRIMARY KEY,
+		project TEXT NOT NULL,
+		statement TEXT NOT NULL,
+		status TEXT NOT NULL,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	);`
+
+const createBulletsTable = `
+	CREATE TABLE IF NOT EXISTS bullets (
+		id TEXT PRIMARY KEY,
+		intent_id TEXT NOT NULL,
+		repo TEXT NOT NULL,
+		position INTEGER NOT NULL,
+		status TEXT NOT NULL,
+		branch TEXT NOT NULL DEFAULT '',
+		worktree TEXT NOT NULL DEFAULT '',
+		commit_sha TEXT NOT NULL DEFAULT '',
+		pr_url TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		FOREIGN KEY (intent_id) REFERENCES intents(id)
+	);`
+
 func (s *Store) migrate() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS runs (
@@ -117,11 +174,39 @@ func (s *Store) migrate() error {
 		created_at DATETIME NOT NULL,
 		FOREIGN KEY (run_id) REFERENCES runs(id)
 	);
-	`
+	` + createIntentsTable + createBulletsTable
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
 	}
+	if err := s.migrateAddTables(); err != nil {
+		return err
+	}
 	return s.migrateAddColumns()
+}
+
+// migrateAddTables brings pre-existing databases up to the current set of
+// tables. It is belt-and-braces next to the CREATE TABLE IF NOT EXISTS above:
+// it proves with PRAGMA that each table the code queries is really there, so a
+// database that was created before intents and bullets existed cannot be
+// reopened into a state where every intent query fails.
+func (s *Store) migrateAddTables() error {
+	wanted := []struct{ table, ddl string }{
+		{"intents", createIntentsTable},
+		{"bullets", createBulletsTable},
+	}
+	for _, w := range wanted {
+		has, err := s.hasTable(w.table)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := s.db.Exec(w.ddl); err != nil {
+			return fmt.Errorf("creating %s: %w", w.table, err)
+		}
+	}
+	return nil
 }
 
 // migrateAddColumns brings pre-existing databases up to the current schema.
@@ -130,6 +215,10 @@ func (s *Store) migrate() error {
 func (s *Store) migrateAddColumns() error {
 	wanted := []struct{ table, column, ddl string }{
 		{"runs", "brief", "ALTER TABLE runs ADD COLUMN brief TEXT NOT NULL DEFAULT ''"},
+		{"bullets", "branch", "ALTER TABLE bullets ADD COLUMN branch TEXT NOT NULL DEFAULT ''"},
+		{"bullets", "worktree", "ALTER TABLE bullets ADD COLUMN worktree TEXT NOT NULL DEFAULT ''"},
+		{"bullets", "commit_sha", "ALTER TABLE bullets ADD COLUMN commit_sha TEXT NOT NULL DEFAULT ''"},
+		{"bullets", "pr_url", "ALTER TABLE bullets ADD COLUMN pr_url TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, w := range wanted {
 		has, err := s.hasColumn(w.table, w.column)
@@ -144,6 +233,23 @@ func (s *Store) migrateAddColumns() error {
 		}
 	}
 	return nil
+}
+
+// hasTable reports whether a table exists. PRAGMA table_info on a missing table
+// yields no rows and no error, which is why a bare ALTER on an absent table is
+// the failure this guards against.
+func (s *Store) hasTable(table string) (bool, error) {
+	var name string
+	err := s.db.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table,
+	).Scan(&name)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) hasColumn(table, column string) (bool, error) {
@@ -340,6 +446,128 @@ func (s *Store) DeleteRun(runID string) error {
 	}
 	_, err = s.db.Exec(`DELETE FROM runs WHERE id = ?`, runID)
 	return err
+}
+
+func (s *Store) CreateIntent(i *IntentRecord) error {
+	now := time.Now().UTC()
+	i.CreatedAt = now
+	i.UpdatedAt = now
+	_, err := s.db.Exec(
+		`INSERT INTO intents (id, project, statement, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		i.ID, i.Project, i.Statement, i.Status, i.CreatedAt, i.UpdatedAt,
+	)
+	return err
+}
+
+func (s *Store) GetIntent(intentID string) (*IntentRecord, error) {
+	row := s.db.QueryRow(
+		`SELECT id, project, COALESCE(statement, ''), status, created_at, updated_at FROM intents WHERE id = ?`,
+		intentID,
+	)
+	var i IntentRecord
+	if err := row.Scan(&i.ID, &i.Project, &i.Statement, &i.Status, &i.CreatedAt, &i.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &i, nil
+}
+
+func (s *Store) ListIntentsForProject(project string) ([]IntentRecord, error) {
+	rows, err := s.db.Query(
+		`SELECT id, project, COALESCE(statement, ''), status, created_at, updated_at FROM intents WHERE project = ? ORDER BY created_at DESC, id ASC`,
+		project,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []IntentRecord
+	for rows.Next() {
+		var i IntentRecord
+		if err := rows.Scan(&i.ID, &i.Project, &i.Statement, &i.Status, &i.CreatedAt, &i.UpdatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, i)
+	}
+	return list, rows.Err()
+}
+
+// UpdateIntentStatus reports an error when no intent has that id. A silent
+// no-op would let a caller believe it had moved an intent that does not exist.
+func (s *Store) UpdateIntentStatus(intentID, status string) error {
+	res, err := s.db.Exec(
+		`UPDATE intents SET status = ?, updated_at = ? WHERE id = ?`,
+		status, time.Now().UTC(), intentID,
+	)
+	if err != nil {
+		return err
+	}
+	return requireOneRow(res, "intent", intentID)
+}
+
+func (s *Store) CreateBullet(b *BulletRecord) error {
+	now := time.Now().UTC()
+	b.CreatedAt = now
+	b.UpdatedAt = now
+	_, err := s.db.Exec(
+		`INSERT INTO bullets (id, intent_id, repo, position, status, branch, worktree, commit_sha, pr_url, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		b.ID, b.IntentID, b.Repo, b.Position, b.Status, b.Branch, b.Worktree, b.CommitSHA, b.PRURL, b.CreatedAt, b.UpdatedAt,
+	)
+	return err
+}
+
+// ListBulletsForIntent returns an intent's bullets in merge order.
+func (s *Store) ListBulletsForIntent(intentID string) ([]BulletRecord, error) {
+	rows, err := s.db.Query(
+		`SELECT id, intent_id, repo, position, status,
+		        COALESCE(branch, ''), COALESCE(worktree, ''), COALESCE(commit_sha, ''), COALESCE(pr_url, ''),
+		        created_at, updated_at
+		 FROM bullets WHERE intent_id = ? ORDER BY position ASC, created_at ASC, id ASC`,
+		intentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []BulletRecord
+	for rows.Next() {
+		var b BulletRecord
+		if err := rows.Scan(
+			&b.ID, &b.IntentID, &b.Repo, &b.Position, &b.Status,
+			&b.Branch, &b.Worktree, &b.CommitSHA, &b.PRURL,
+			&b.CreatedAt, &b.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		list = append(list, b)
+	}
+	return list, rows.Err()
+}
+
+// UpdateBulletStatus reports an error when no bullet has that id, for the same
+// reason as UpdateIntentStatus.
+func (s *Store) UpdateBulletStatus(bulletID, status string) error {
+	res, err := s.db.Exec(
+		`UPDATE bullets SET status = ?, updated_at = ? WHERE id = ?`,
+		status, time.Now().UTC(), bulletID,
+	)
+	if err != nil {
+		return err
+	}
+	return requireOneRow(res, "bullet", bulletID)
+}
+
+func requireOneRow(res sql.Result, kind, id string) error {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("no %s with id %q", kind, id)
+	}
+	return nil
 }
 
 func (s *Store) ListRunsForProject(project string, limit int) ([]RunRecord, error) {
