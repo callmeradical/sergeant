@@ -1,0 +1,3 @@
+## 2025-05-24 - Memoizing Static Syscalls in Repeated Contexts
+**Learning:** The MCP server computes `scriptDir()` for every tool invocation. This seemingly simple function calls `os.Executable()` and `filepath.EvalSymlinks()`, which are expensive syscalls resulting in ~12µs overhead per call. While small, this adds up under high load and is completely unnecessary since the binary path is static for the lifetime of the process.
+**Action:** When working on backend servers handling repeated queries or tool calls, always evaluate if static environment variables, paths, or file readings can be cached or memoized (e.g., using `sync.Once` in Go).
