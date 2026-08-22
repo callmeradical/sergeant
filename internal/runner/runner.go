@@ -56,11 +56,20 @@ type PhaseRunner struct {
 	GateTimeout  time.Duration
 }
 
-// Default execution budgets. The previous hardcoded 45s agent budget silently
-// truncated every non-trivial agent phase: the process was killed mid-work and the
-// phase was still recorded as passed.
+// Default execution budgets. Zero means unbounded.
+//
+// An agent phase has NO default deadline. Agent work has no predictable upper
+// bound, so any default is a guess, and when the guess is wrong it kills work
+// that was succeeding. Run sgt-1787427981 was killed at exactly the former 10m
+// default having already committed a change whose build and tests passed; the
+// bullet was recorded failed and the commit orphaned. A deadline that discards
+// completed work is worse than no deadline: an agent that hangs is visible to an
+// operator and cancellable, whereas work destroyed on a timer is silent.
+//
+// A gate keeps its default. A gate is a deterministic command with a known cost,
+// so a gate still running after five minutes is genuinely hung.
 const (
-	DefaultAgentTimeout = 10 * time.Minute
+	DefaultAgentTimeout = 0
 	DefaultGateTimeout  = 5 * time.Minute
 )
 
@@ -264,8 +273,18 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 	for attempt := 0; attempt <= retries; attempt++ {
 		exe, args, extraEnv := BuildAgentCommand(pr.AgentCLI, pr.Model, prompt)
 
+		// A zero budget means unbounded: derive a cancellable child so operator
+		// cancellation still propagates, but attach no deadline. Passing 0 to
+		// context.WithTimeout would produce an already-expired context and kill the
+		// agent instantly, so the two cases cannot share one call.
 		budget := pr.agentTimeout()
-		phaseCtx, cancel := context.WithTimeout(ctx, budget)
+		var phaseCtx context.Context
+		var cancel context.CancelFunc
+		if budget > 0 {
+			phaseCtx, cancel = context.WithTimeout(ctx, budget)
+		} else {
+			phaseCtx, cancel = context.WithCancel(ctx)
+		}
 		cmd := exec.CommandContext(phaseCtx, exe, args...)
 		cmd.Dir = pr.Worktree
 		if len(extraEnv) > 0 {

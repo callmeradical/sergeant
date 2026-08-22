@@ -564,3 +564,53 @@ func TestFleetDirDefaultsToV2Root(t *testing.T) {
 		t.Errorf("FleetDir default = %q, must not use v1 root %q", got, "share/sergeant/fleet")
 	}
 }
+
+// Resuming a run must never destroy the work it is resuming.
+//
+// prepareWorktree used `git worktree add -B <branch>`, and -B *resets* the branch
+// to HEAD. That is correct when starting fresh and catastrophic when resuming: if
+// the worktree directory is gone but the branch survives — a pruned worktree, a
+// cleaned fleet dir, a machine restart — re-preparing the same run id silently
+// discards every commit the previous attempt made.
+//
+// Run sgt-1787427981 is exactly this shape: killed at its timeout with a good
+// commit on sergeant/sgt-1787427981 and nothing to pick it back up with.
+func TestPrepareWorktreeDoesNotDiscardCommitsOnAnExistingBranch(t *testing.T) {
+	ctx := context.Background()
+	src := filepath.Join(t.TempDir(), "svc")
+	newGitRepo(t, src)
+	t.Setenv("SERGEANT_FLEET_DIR", t.TempDir())
+
+	wt, _, err := prepareWorktree(ctx, src, "run-resume-1", "svc")
+	if err != nil {
+		t.Fatalf("first prepareWorktree: %v", err)
+	}
+
+	// The previous attempt committed real work before it died.
+	if err := os.WriteFile(filepath.Join(wt, "work.txt"), []byte("agent output\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, wt, "add", ".")
+	git(t, wt, "commit", "-q", "-m", "work the previous attempt finished")
+	want := gitOutput(ctx, wt, "rev-parse", "HEAD")
+	if want == "" {
+		t.Fatal("could not read the commit under test")
+	}
+
+	// The worktree goes away; the branch does not. `git worktree remove` is the
+	// polite path, and a pruned fleet dir is the impolite one. Both must be safe.
+	git(t, src, "worktree", "remove", "--force", wt)
+
+	wt2, _, err := prepareWorktree(ctx, src, "run-resume-1", "svc")
+	if err != nil {
+		t.Fatalf("second prepareWorktree: %v", err)
+	}
+
+	got := gitOutput(ctx, wt2, "rev-parse", "HEAD")
+	if got != want {
+		t.Errorf("resumed worktree HEAD = %q, want %q; the previous attempt's commit was discarded", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(wt2, "work.txt")); err != nil {
+		t.Errorf("work.txt missing after resume: %v; committed agent output was lost", err)
+	}
+}

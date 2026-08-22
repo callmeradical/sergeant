@@ -187,3 +187,62 @@ func TestAgentPhaseSuccessStillPasses(t *testing.T) {
 		t.Fatalf("expected 1 passed phase, got %+v", phases)
 	}
 }
+
+// An agent phase has no default deadline. Agent work has no predictable upper
+// bound, and a default budget silently kills productive work: run
+// sgt-1787427981 was killed at exactly the former 10m default having already
+// committed work whose build and tests passed, and the bullet was discarded.
+//
+// A gate keeps its default. A gate is a deterministic command, so a gate that
+// stops making progress is genuinely hung and killing it is correct.
+func TestAgentPhaseHasNoDefaultTimeout(t *testing.T) {
+	t.Setenv("SERGEANT_AGENT_TIMEOUT", "")
+	pr, _ := newRunner(t, "opencode", 0)
+
+	if got := pr.agentTimeout(); got != 0 {
+		t.Errorf("agentTimeout() with nothing configured = %v, want 0 (unbounded); a default budget kills real agent work", got)
+	}
+	if DefaultAgentTimeout != 0 {
+		t.Errorf("DefaultAgentTimeout = %v, want 0", DefaultAgentTimeout)
+	}
+	if got := pr.gateTimeout(); got != DefaultGateTimeout || got == 0 {
+		t.Errorf("gateTimeout() = %v, want the %v default; gates stay bounded", got, DefaultGateTimeout)
+	}
+}
+
+// The budget remains available, opt-in, for an operator who wants one.
+func TestAgentTimeoutIsOptIn(t *testing.T) {
+	t.Setenv("SERGEANT_AGENT_TIMEOUT", "45s")
+	pr, _ := newRunner(t, "opencode", 0)
+	if got := pr.agentTimeout(); got != 45*time.Second {
+		t.Errorf("agentTimeout() with env set = %v, want 45s", got)
+	}
+
+	explicit, _ := newRunner(t, "opencode", 2*time.Minute)
+	if got := explicit.agentTimeout(); got != 2*time.Minute {
+		t.Errorf("explicit AgentTimeout = %v, want 2m", got)
+	}
+}
+
+// An unbounded agent phase must still stop when the operator cancels the run.
+// Removing the deadline must not remove cancellation: without the parent context
+// wired through, a cancelled run would leave the agent running forever.
+func TestUnboundedAgentPhaseStillHonoursCancellation(t *testing.T) {
+	dir := t.TempDir()
+	pr, st := newRunner(t, fakeAgent(t, dir, "slow-agent", "sleep 30"), 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(200 * time.Millisecond); cancel() }()
+
+	start := time.Now()
+	_, err := pr.RunAgentPhase(ctx, "build", "do the thing", 0)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("RunAgentPhase returned nil error after cancellation, want a cancellation error")
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("cancellation took %v; an unbounded phase ignored the parent context", elapsed)
+	}
+	_ = st
+}

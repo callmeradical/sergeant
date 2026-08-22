@@ -90,12 +90,34 @@ func prepareWorktree(ctx context.Context, repoPath, runID, repoName string) (str
 	}
 
 	branch := BranchName(runID)
-	// -B resets the branch if a previous attempt left one behind.
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "add", "-B", branch, wt, "HEAD")
+
+	// If the branch already exists, a previous attempt at this run id got far
+	// enough to create it, and it may carry commits. Attach to it as it stands.
+	//
+	// Do NOT pass -B here. -B resets the branch to HEAD, which is right when
+	// starting fresh and destroys work when resuming: a run whose worktree was
+	// removed but whose branch survived would lose every commit the earlier
+	// attempt made. Resuming a run must never discard the work being resumed.
+	args := []string{"-C", repoPath, "worktree", "add"}
+	if branchExists(ctx, repoPath, branch) {
+		args = append(args, wt, branch)
+	} else {
+		args = append(args, "-b", branch, wt, "HEAD")
+	}
+
+	cmd := exec.CommandContext(ctx, "git", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", false, fmt.Errorf("creating worktree for %s: %v: %s", repoName, err, strings.TrimSpace(string(out)))
 	}
 	return wt, true, nil
+}
+
+// branchExists reports whether a local branch is already present. It is the
+// difference between starting a run and resuming one.
+func branchExists(ctx context.Context, repoPath, branch string) bool {
+	err := exec.CommandContext(ctx, "git", "-C", repoPath,
+		"show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run()
+	return err == nil
 }
 
 func gitOutput(ctx context.Context, dir string, args ...string) string {
