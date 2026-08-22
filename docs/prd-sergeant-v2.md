@@ -153,6 +153,32 @@ workflow or by the model. The two are trusted differently (see D2).
   field. It survives a config save only because saving patches the YAML node tree
   and preserves keys the server does not model.
 
+- **D10 — Sergeant is an agent host, and its client contract follows the Agent
+  Host Protocol where AHP has already settled the question.** AHP
+  (`microsoft/agent-host-protocol`) is the client-facing state-synchronisation
+  layer *above* an agent runtime; ACP is the point-to-point layer below. Their own
+  framing is "AHP is a mutex over ACP". Sergeant already occupies the host
+  position: it owns authoritative run state, spawns agents, and serves a
+  dashboard client. It therefore inherits AHP's solved problems and must stop
+  hand-rolling worse versions of them:
+
+  - a dispatch carries a caller-supplied idempotency key, and a repeat of the same
+    key returns the original run instead of starting a second one (AHP
+    `runAutomation` + `requestId`);
+  - clients receive an ordered, sequence-numbered stream and reconnect by
+    replaying from the last sequence they saw, rather than re-reading the whole
+    world every two seconds (AHP subscribe/snapshot/replay).
+
+  Sergeant does **not** adopt AHP as its wire protocol at this time. The protocol
+  is five months old, its Go client is pre-1.0 (0.8.0 against spec 1.0.0), and its
+  doctrine still reserves the right to break. This decision borrows AHP's settled
+  designs; it does not create a dependency.
+
+  AHP is explicitly not a substitute for anything sergeant decides. Its stated
+  anti-goals include agent-to-agent coordination, tool registries, and the agent
+  loop itself — which is to say, intent decomposition, merge ordering, TDD
+  evidence, gates and chain of custody all remain sergeant's own problem.
+
 - **D8 — The dashboard is a view of intents, and it renders the workflow from a
   definition.** The primary list is intents, not runs. Selecting an intent shows its
   bullets, one row per repository. Each bullet renders the workflow as a *definition*

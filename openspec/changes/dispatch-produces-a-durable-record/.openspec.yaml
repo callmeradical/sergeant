@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-08-22
+goal: Persist the intent and its bullets, make dispatch idempotent, and let
+  clients follow state by ordered sequence instead of polling
