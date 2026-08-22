@@ -111,6 +111,24 @@ type GateResult struct {
 	Command  string `json:"command"`
 	Passed   bool   `json:"passed"`
 	Output   string `json:"output"`
+	// Worktree and Branch record where the gate actually ran. A gate result with no
+	// location is unauditable: it says a command passed without saying on what.
+	Worktree string `json:"worktree,omitempty"`
+	Branch   string `json:"branch,omitempty"`
+}
+
+// currentBranch reports the branch checked out in the runner's worktree. It reads
+// disk rather than deriving the name from the run id, so the recorded value is what
+// actually exists. An empty string means it could not be determined.
+func (pr *PhaseRunner) currentBranch() string {
+	if pr.Worktree == "" {
+		return ""
+	}
+	out, err := exec.Command("git", "-C", pr.Worktree, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // RunCodeGate executes a deterministic test/lint shell command with a strict timeout.
@@ -135,6 +153,8 @@ func (pr *PhaseRunner) RunCodeGate(ctx context.Context, name, command string) (*
 		Command:  command,
 		Passed:   passed,
 		Output:   stripANSI(outBuf.String()),
+		Worktree: pr.Worktree,
+		Branch:   pr.currentBranch(),
 	}
 
 	status := "passed"
@@ -303,6 +323,8 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 					"raw_output": stripANSI(outBuf.String()),
 					"agent":      exe,
 					"attempt":    fmt.Sprintf("%d/%d", attempt+1, retries+1),
+					"worktree":   pr.Worktree,
+					"branch":     pr.currentBranch(),
 				}),
 			}
 		}

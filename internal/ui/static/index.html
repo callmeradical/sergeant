@@ -55,12 +55,7 @@
 
     <!-- Dispatch Stage CTA & Global Actions -->
     <div class="flex items-center space-x-3">
-      <button onclick="openDispatchModal()" id="btn-open-dispatch" class="px-3 py-1 bg-[#1f6feb] hover:bg-[#388bfd] text-white font-bold text-xs rounded border border-[#388bfd] transition shadow-sm flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]">
-        <i class="fa-solid fa-bolt text-[10px]" aria-hidden="true"></i> <span>Dispatch stage</span>
-      </button>
-
       <div class="flex items-center space-x-2 text-[#8b949e] text-xs">
-        <button onclick="openRefineProjectModal()" id="btn-open-refine" aria-label="Project governance & gates" title="Project governance & gates" class="min-w-[44px] min-h-[44px] flex items-center justify-center hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14] rounded"><i class="fa-solid fa-gear"></i></button>
         <button onclick="fetchRuns(); fetchFleet();" aria-label="Refresh state" title="Refresh state" class="min-w-[44px] min-h-[44px] flex items-center justify-center hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14] rounded"><i class="fa-solid fa-rotate-right"></i></button>
       </div>
     </div>
@@ -122,6 +117,11 @@
             <span id="system-status-pill" aria-live="polite" aria-atomic="true" class="px-2 py-0.5 rounded text-[10px] font-bold bg-[#161b22] text-slate-300 border border-[#30363d]">
               No active run
             </span>
+            <button type="button" id="btn-open-activity" onclick="openActivityDrawer(this)"
+              class="px-2 py-1 rounded bg-[#161b22] hover:bg-[#21262d] border border-[#30363d] text-[10px] font-bold text-slate-300 hover:text-white flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]">
+              <i class="fa-regular fa-rectangle-list text-[10px]" aria-hidden="true"></i>
+              Activity <span id="activity-count" class="font-mono text-[#8b949e]">0</span>
+            </button>
             <button id="btn-stop-run" onclick="cancelActiveRun()" aria-label="Stop run" title="Stop run"
               class="min-w-[44px] min-h-[44px] flex items-center justify-center rounded text-[#8b949e] hover:text-rose-400 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]">
               <i class="fa-regular fa-circle-stop text-sm" aria-hidden="true"></i>
@@ -129,35 +129,15 @@
           </div>
         </div>
 
-        <!-- 2D Multi-Repo Stage Grid Table -->
-        <div class="border border-[#21262d] rounded bg-[#0b0e14] overflow-x-auto shrink-0">
-          <table class="w-full text-left border-collapse text-[11px]">
-            <caption class="sr-only">Multi-repository stage execution matrix</caption>
-            <thead id="stage-matrix-head">
-              <tr class="border-b border-[#21262d] bg-[#161b22] text-[#8b949e] uppercase text-[10px]">
-                <th scope="col" class="p-2.5 w-36 border-r border-[#21262d]">Repository</th>
-                <th scope="col" class="p-2.5">Delivery</th>
-              </tr>
-            </thead>
-            <tbody id="stage-matrix-tbody" class="divide-y divide-[#21262d]">
-              <tr>
-                <td colspan="4" class="p-6 text-center text-[#8b949e]">Select or dispatch a run to populate the coordination matrix.</td>
-              </tr>
-            </tbody>
-          </table>
+        <!-- Workflow graph. Nodes come from the workflow DEFINITION (/api/workflow),
+             so a stage that has not started is still drawn, greyed. Live status is
+             overlaid from phase records. This replaced a table whose cells happened to
+             be buttons: a table cannot draw edges, and an invisible affordance is not
+             an affordance. -->
+        <div id="workflow-graph" class="flex-1 border border-[#21262d] rounded bg-[#0b0e14] overflow-auto min-h-0 p-3">
+          <div class="text-[#8b949e] text-[11px]">Select or dispatch a run to draw its workflow.</div>
         </div>
 
-        <!-- Handoff envelopes moved into the detail drawer. They were a permanently
-             open panel consuming the lower half of the pane; the graph needs that room,
-             and envelopes are reference material you consult rather than monitor. -->
-        <div class="shrink-0 flex items-center justify-between gap-2 border border-[#21262d] rounded bg-[#161b22] px-3 h-9 text-[10px]">
-          <span class="font-bold text-[#8b949e]">Handoff envelopes</span>
-          <button type="button" id="btn-open-envelopes" onclick="openEnvelopesDrawer(this)"
-            class="px-2 py-1 rounded bg-[#0b0e14] hover:bg-[#21262d] border border-[#30363d] text-slate-300 hover:text-white font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-            <span id="envelope-count-badge">0 envelopes</span>
-            <i class="fa-solid fa-arrow-right-long ml-1 text-[9px]" aria-hidden="true"></i>
-          </button>
-        </div>
       </div>
 
     </main>
@@ -231,159 +211,6 @@
     </div>
   </div>
 
-  <!-- Multi-Repo Stage Dispatch Wizard Modal -->
-  <div id="dispatch-modal" role="dialog" aria-modal="true" aria-labelledby="dispatch-modal-title" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-    <div class="bg-[#161b22] border border-[#30363d] rounded-lg max-w-3xl w-full p-6 space-y-4 shadow-2xl">
-      <div class="flex justify-between items-center pb-3 border-b border-[#21262d]">
-        <div class="flex items-center space-x-2">
-          <i class="fa-solid fa-bolt text-[#58a6ff]" aria-hidden="true"></i>
-          <h3 id="dispatch-modal-title" class="font-bold text-sm text-white">Stage dispatch wizard</h3>
-        </div>
-        <button onclick="closeDispatchModal()" aria-label="Close dialog" class="min-w-[32px] min-h-[32px] flex items-center justify-center text-[#8b949e] hover:text-white rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
-      </div>
-
-      <div class="space-y-3.5 text-xs">
-        <div>
-          <label for="modal-project" class="block text-[10px] uppercase font-bold text-[#8b949e] mb-1">Target project</label>
-          <select id="modal-project" onchange="onModalProjectChange()" class="w-full bg-[#0b0e14] border border-[#30363d] rounded p-2 text-white font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]">
-          </select>
-        </div>
-
-        <div>
-          <span class="block text-[10px] uppercase font-bold text-[#8b949e] mb-1">Target repositories in topology</span>
-          <div id="modal-repo-checkboxes" class="grid grid-cols-2 gap-2 p-2.5 rounded bg-[#0b0e14] border border-[#30363d]">
-            <span class="text-[#8b949e]">Select a project to load repositories</span>
-          </div>
-        </div>
-
-        <div>
-          <label for="modal-agent" class="block text-[10px] uppercase font-bold text-[#8b949e] mb-1">Agent harness</label>
-          <select id="modal-agent" class="w-full bg-[#0b0e14] border border-[#30363d] rounded p-2 text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]">
-            <option value="opencode">opencode (default - headless TDD worker)</option>
-            <option value="claude">claude (Claude Code CLI)</option>
-            <option value="codex">codex (OpenAI Codex CLI)</option>
-            <option value="goose">goose (Goose Autonomous Session)</option>
-            <option value="pi">pi (Minimalist Headless RPC)</option>
-          </select>
-        </div>
-
-        <div>
-          <label for="modal-brief" class="block text-[10px] uppercase font-bold text-[#8b949e] mb-1">Intent brief &amp; acceptance criteria</label>
-          <textarea id="modal-brief" rows="3" class="w-full bg-[#0b0e14] border border-[#30363d] rounded p-2 text-white placeholder-[#8b949e] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]" placeholder="e.g. Implement Stripe webhook verification and update customer portal balance in real time"></textarea>
-        </div>
-
-        <div class="flex items-center space-x-2 pt-1">
-          <input type="checkbox" id="modal-tdd-check" checked class="rounded bg-[#0b0e14] border-[#30363d] text-emerald-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-          <label for="modal-tdd-check" class="text-slate-300">Enforce zero-token TDD gate before commit</label>
-        </div>
-
-        <div id="validation-report" class="hidden p-3 rounded bg-[#0b0e14] border border-[#30363d] space-y-1.5">
-          <div class="flex justify-between items-center">
-            <span class="font-bold text-white">Validation assessment:</span>
-            <span id="val-score" class="font-bold px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 text-[10px] font-mono">100/100 READY</span>
-          </div>
-          <div id="val-checks" class="space-y-0.5 text-[10px]"></div>
-        </div>
-      </div>
-
-      <div class="flex justify-between items-center pt-3 border-t border-[#21262d]">
-        <button onclick="validateCurrentIntent()" class="px-3 py-1.5 rounded bg-[#21262d] hover:bg-[#30363d] text-slate-300 font-semibold border border-[#30363d] text-xs flex items-center space-x-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-          <i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i> <span>Validate intent</span>
-        </button>
-        <div class="flex space-x-2">
-          <button onclick="closeDispatchModal()" class="px-3 py-1.5 rounded bg-[#21262d] hover:bg-[#30363d] text-slate-300 font-semibold border border-[#30363d] text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">Cancel</button>
-          <button onclick="submitDispatch()" class="px-4 py-1.5 rounded bg-[#1f6feb] hover:bg-[#388bfd] text-white font-bold text-xs border border-[#388bfd] shadow-md flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-            <i class="fa-solid fa-rocket" aria-hidden="true"></i> Dispatch pipeline
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Project Definition Refinement Modal -->
-  <div id="refine-project-modal" role="dialog" aria-modal="true" aria-labelledby="refine-modal-title" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-    <div class="bg-[#161b22] border border-[#30363d] rounded-lg max-w-3xl w-full p-6 space-y-4 shadow-2xl">
-      <div class="flex justify-between items-center pb-3 border-b border-[#21262d]">
-        <div class="flex items-center space-x-2">
-          <i class="fa-solid fa-sliders text-amber-400" aria-hidden="true"></i>
-          <h3 id="refine-modal-title" class="font-bold text-sm text-white">Project governance &amp; quality gates</h3>
-        </div>
-        <button onclick="closeRefineProjectModal()" aria-label="Close dialog" class="min-w-[32px] min-h-[32px] flex items-center justify-center text-[#8b949e] hover:text-white rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
-      </div>
-
-      <div class="space-y-3 text-xs">
-        <div>
-          <label for="refine-select-project" class="block text-[10px] uppercase font-bold text-[#8b949e] mb-1">Target project</label>
-          <select id="refine-select-project" onchange="loadProjectForRefine()" class="w-full bg-[#0b0e14] border border-[#30363d] rounded p-2 text-white font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]">
-          </select>
-        </div>
-
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label for="refine-agent" class="block text-[10px] uppercase font-bold text-[#8b949e] mb-1">Default agent</label>
-            <select id="refine-agent" class="w-full bg-[#0b0e14] border border-[#30363d] rounded p-2 text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]">
-              <option value="opencode">opencode (default - headless TDD worker)</option>
-              <option value="claude">claude (Claude Code CLI)</option>
-              <option value="codex">codex (OpenAI Codex CLI)</option>
-              <option value="goose">goose (Goose Autonomous Session)</option>
-              <option value="pi">pi (Minimalist Headless RPC)</option>
-            </select>
-          </div>
-          <div>
-            <label for="refine-description" class="block text-[10px] uppercase font-bold text-[#8b949e] mb-1">Project description</label>
-            <input type="text" id="refine-description" class="w-full bg-[#0b0e14] border border-[#30363d] rounded p-2 text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]">
-          </div>
-        </div>
-
-        <div>
-          <span class="block text-[10px] uppercase font-bold text-[#8b949e] mb-1">Repositories &amp; zero-token code gates</span>
-          <div id="refine-repos-container" class="space-y-2 max-h-56 overflow-y-auto">
-            <div class="p-3 text-center text-[#8b949e]">Loading repos...</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="flex justify-between items-center pt-3 border-t border-[#21262d]">
-        <span class="text-[10px] text-[#8b949e] font-mono">~/.config/sergeant/*.yaml</span>
-        <div class="flex space-x-2">
-          <button onclick="closeRefineProjectModal()" class="px-3 py-1.5 rounded bg-[#21262d] hover:bg-[#30363d] text-slate-300 font-semibold border border-[#30363d] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">Cancel</button>
-          <button onclick="saveProjectRefinement()" class="px-4 py-1.5 rounded bg-[#238636] hover:bg-[#2ea043] text-white font-bold border border-emerald-600 shadow-md flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-            <i class="fa-regular fa-floppy-disk" aria-hidden="true"></i> Save definition
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Project Refine Save Confirmation Modal -->
-  <div id="refine-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="refine-confirm-modal-title" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-    <div class="bg-[#161b22] border border-[#30363d] rounded-lg max-w-lg w-full p-6 space-y-4 shadow-2xl">
-      <div class="flex justify-between items-center pb-3 border-b border-[#21262d]">
-        <div class="flex items-center space-x-2">
-          <i class="fa-solid fa-sliders text-amber-400" aria-hidden="true"></i>
-          <h3 id="refine-confirm-modal-title" class="font-bold text-sm text-white">Confirm project definition update</h3>
-        </div>
-        <button onclick="closeRefineConfirmModal()" aria-label="Close dialog" class="min-w-[32px] min-h-[32px] flex items-center justify-center text-[#8b949e] hover:text-white rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
-      </div>
-      <div class="space-y-3 text-xs">
-        <p class="text-slate-300">Target project: <span id="refine-confirm-project" class="font-bold text-white font-mono">—</span></p>
-        <p class="text-slate-300">The following quality gates and configuration will be saved:</p>
-        <div id="refine-confirm-summary" class="max-h-48 overflow-y-auto p-2.5 rounded bg-[#0b0e14] border border-[#30363d] font-mono text-[10px] space-y-2 text-slate-200">
-        </div>
-        <div class="p-2 rounded bg-[#0b0e14] border border-emerald-900/60 text-emerald-400 text-[10px] flex items-center gap-1.5">
-          <i class="fa-solid fa-shield-halved" aria-hidden="true"></i>
-          <span>Existing pipeline and DAG configuration will be preserved.</span>
-        </div>
-      </div>
-      <div class="flex justify-end space-x-2 pt-3 border-t border-[#21262d]">
-        <button onclick="closeRefineConfirmModal()" class="px-3 py-1.5 rounded bg-[#21262d] hover:bg-[#30363d] text-slate-300 font-semibold border border-[#30363d] text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">Cancel</button>
-        <button onclick="executeConfirmedProjectRefinement()" id="btn-confirm-save-refine" class="px-4 py-1.5 rounded bg-[#238636] hover:bg-[#2ea043] text-white font-bold text-xs border border-emerald-600 shadow-md flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-          <i class="fa-regular fa-floppy-disk" aria-hidden="true"></i> Save configuration
-        </button>
-      </div>
-    </div>
-  </div>
-
   <script>
     let activeRunId = null;
     let allRuns = [];
@@ -445,32 +272,16 @@
         loadedProjects = await res.json() || [];
         setConnectionError(false);
 
+        // Only the header scope filter remains. The dispatch and project-config
+        // selects it also fed were removed with those features.
         const select = document.getElementById('project-filter');
-        const modalSelect = document.getElementById('modal-project');
-        const refineSelect = document.getElementById('refine-select-project');
-        
         select.innerHTML = '<option value="all">Global (All projects)</option>';
-        modalSelect.innerHTML = '';
-        refineSelect.innerHTML = '';
-
         loadedProjects.forEach(p => {
           const opt = document.createElement('option');
           opt.value = p.name;
           opt.innerText = p.name;
           select.appendChild(opt);
-
-          const optModal = document.createElement('option');
-          optModal.value = p.name;
-          optModal.innerText = `${p.name} — ${p.description || 'Multi-repo project'}`;
-          modalSelect.appendChild(optModal);
-
-          const optRefine = document.createElement('option');
-          optRefine.value = p.name;
-          optRefine.innerText = `${p.name} — ${p.description || 'Multi-repo project'}`;
-          refineSelect.appendChild(optRefine);
         });
-
-        populateModalRepos();
       } catch (err) {
         setConnectionError(true);
         console.error("Failed loading projects:", err);
@@ -485,48 +296,9 @@
       fetchRuns();
     }
 
-    function onModalProjectChange() {
-      populateModalRepos();
-    }
 
-    function populateModalRepos() {
-      const modalSelect = document.getElementById('modal-project');
-      const container = document.getElementById('modal-repo-checkboxes');
-      const projName = modalSelect.value;
-      const proj = loadedProjects.find(p => p.name === projName);
 
-      if (!proj || !proj.repos) {
-        container.innerHTML = '<span class="text-[#8b949e]">No repositories configured.</span>';
-        return;
-      }
 
-      const repoKeys = Object.keys(proj.repos);
-      container.innerHTML = repoKeys.map(k => `
-        <label class="flex items-center space-x-2 text-slate-200 cursor-pointer hover:text-white">
-          <input type="checkbox" name="target_repos" value="${k}" checked class="rounded bg-[#161b22] border-[#30363d] text-[#58a6ff] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-          <span class="truncate font-mono">${k}</span>
-          <span class="text-[9px] text-[#8b949e]">(${proj.repos[k].group || 'app'})</span>
-        </label>
-      `).join('');
-    }
-
-    function openRefineProjectModal() {
-      lastFocusedBeforeModal = document.activeElement;
-      setModalAriaHidden(true);
-      const refineSelect = document.getElementById('refine-select-project');
-      if (selectedProject && selectedProject !== 'all') {
-        refineSelect.value = selectedProject;
-      }
-      const modal = document.getElementById('refine-project-modal');
-      modal.classList.remove('hidden');
-      loadProjectForRefine();
-      setTimeout(() => refineSelect.focus(), 50);
-    }
-
-    function closeRefineProjectModal() {
-      document.getElementById('refine-project-modal').classList.add('hidden');
-      restoreModalFocus();
-    }
 
     let pendingProjectRefinePayload = null;
 
@@ -540,329 +312,18 @@
         .replace(/'/g, '&#039;');
     }
 
-    function addGateRow(repoName, gateName = '', gateCmd = '') {
-      const gatesList = document.querySelector(`.repo-gates-list[data-repo="${CSS.escape(repoName)}"]`);
-      if (!gatesList) return;
 
-      const noGatesMsg = gatesList.querySelector('.no-gates-msg');
-      if (noGatesMsg) noGatesMsg.remove();
 
-      const row = document.createElement('div');
-      row.className = "flex items-center gap-2 gate-row";
-      row.innerHTML = `
-        <div class="w-1/3">
-          <input type="text" data-repo="${escapeHtml(repoName)}" value="${escapeHtml(gateName)}" placeholder="Gate name (e.g. test)" class="gate-name-input w-full bg-[#161b22] border border-[#30363d] rounded px-1.5 py-1 text-[10px] text-white font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-        </div>
-        <div class="flex-1">
-          <input type="text" data-repo="${escapeHtml(repoName)}" value="${escapeHtml(gateCmd)}" placeholder="Command (e.g. go test ./...)" class="gate-cmd-input w-full bg-[#161b22] border border-[#30363d] rounded px-1.5 py-1 text-[10px] text-amber-300 font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-        </div>
-        <button type="button" onclick="removeGateRow(this, '${escapeHtml(repoName)}')" aria-label="Remove gate" class="min-w-[24px] min-h-[24px] flex items-center justify-center text-[#8b949e] hover:text-rose-400 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-          <i class="fa-solid fa-xmark text-[10px]" aria-hidden="true"></i>
-        </button>
-      `;
-      gatesList.appendChild(row);
-    }
 
-    function removeGateRow(btn, repoName) {
-      const row = btn.closest('.gate-row');
-      const gatesList = document.querySelector(`.repo-gates-list[data-repo="${CSS.escape(repoName)}"]`);
-      if (row) row.remove();
-      if (gatesList && gatesList.querySelectorAll('.gate-row').length === 0) {
-        gatesList.innerHTML = '<div class="no-gates-msg text-[#8b949e] text-[10px] italic py-0.5">No quality gates configured.</div>';
-      }
-    }
 
-    async function loadProjectForRefine() {
-      const projName = document.getElementById('refine-select-project').value;
-      if (!projName) return;
 
-      try {
-        const res = await fetch(`/api/project-details?name=${encodeURIComponent(projName)}`);
-        const proj = await res.json();
-        currentProjectDefinition = proj;
 
-        document.getElementById('refine-description').value = proj.description || '';
-        document.getElementById('refine-agent').value = (proj.defaults && proj.defaults.agent) ? proj.defaults.agent : 'opencode';
 
-        const container = document.getElementById('refine-repos-container');
-        const repos = proj.repos || {};
-        const repoNames = Object.keys(repos);
 
-        if (repoNames.length === 0) {
-          container.innerHTML = '<div class="p-3 text-center text-[#8b949e]">No repositories configured.</div>';
-          return;
-        }
 
-        container.innerHTML = repoNames.map(rName => {
-          const r = repos[rName];
-          const gates = (r.factory && r.factory.gates) ? r.factory.gates : {};
-          const gateKeys = Object.keys(gates);
 
-          let gatesHTML = '';
-          if (gateKeys.length === 0) {
-            gatesHTML = '<div class="no-gates-msg text-[#8b949e] text-[10px] italic py-0.5">No quality gates configured.</div>';
-          } else {
-            gatesHTML = gateKeys.map(gName => `
-              <div class="flex items-center gap-2 gate-row">
-                <div class="w-1/3">
-                  <input type="text" data-repo="${escapeHtml(rName)}" value="${escapeHtml(gName)}" placeholder="Gate name (e.g. test)" class="gate-name-input w-full bg-[#161b22] border border-[#30363d] rounded px-1.5 py-1 text-[10px] text-white font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-                </div>
-                <div class="flex-1">
-                  <input type="text" data-repo="${escapeHtml(rName)}" value="${escapeHtml(gates[gName])}" placeholder="Command (e.g. go test ./...)" class="gate-cmd-input w-full bg-[#161b22] border border-[#30363d] rounded px-1.5 py-1 text-[10px] text-amber-300 font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-                </div>
-                <button type="button" onclick="removeGateRow(this, '${escapeHtml(rName)}')" aria-label="Remove gate" class="min-w-[24px] min-h-[24px] flex items-center justify-center text-[#8b949e] hover:text-rose-400 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-                  <i class="fa-solid fa-xmark text-[10px]" aria-hidden="true"></i>
-                </button>
-              </div>
-            `).join('');
-          }
 
-          return `
-            <div class="p-2.5 rounded bg-[#0b0e14] border border-[#30363d] space-y-2">
-              <div class="flex justify-between items-center">
-                <span class="font-bold text-white font-mono">${escapeHtml(rName)}</span>
-                <input type="text" data-repo="${escapeHtml(rName)}" value="${escapeHtml(r.role || 'Service')}" placeholder="Role" class="role-input bg-[#161b22] border border-[#30363d] rounded px-1.5 py-0.5 text-[10px] text-slate-300 w-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-              </div>
-              <div class="space-y-1.5 pt-1">
-                <div class="flex justify-between items-center text-[9px] uppercase font-bold text-[#8b949e]">
-                  <span>Quality gates</span>
-                  <button type="button" onclick="addGateRow('${escapeHtml(rName)}')" class="text-[#58a6ff] hover:text-white flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] rounded px-1">
-                    <i class="fa-solid fa-plus text-[9px]" aria-hidden="true"></i> Add gate
-                  </button>
-                </div>
-                <div class="repo-gates-list space-y-1.5" data-repo="${escapeHtml(rName)}">
-                  ${gatesHTML}
-                </div>
-              </div>
-            </div>
-          `;
-        }).join('');
-      } catch (err) {
-        alert("Failed loading project definition: " + err);
-      }
-    }
 
-    function buildProjectRefinementPayload() {
-      const projName = document.getElementById('refine-select-project').value;
-      const description = document.getElementById('refine-description').value;
-      const agent = document.getElementById('refine-agent').value;
-
-      const payload = {
-        name: projName,
-        description: description,
-        defaults: {
-          agent: agent
-        },
-        repos: {}
-      };
-
-      const roleInputs = document.querySelectorAll('#refine-repos-container .role-input');
-      const seenRepos = new Set();
-      roleInputs.forEach(input => {
-        const repo = input.dataset.repo;
-        if (!repo) return;
-        seenRepos.add(repo);
-        if (!payload.repos[repo]) {
-          payload.repos[repo] = {};
-        }
-        const roleVal = input.value.trim();
-        if (roleVal) {
-          payload.repos[repo].role = roleVal;
-        }
-      });
-
-      const gateRows = document.querySelectorAll('#refine-repos-container .gate-row');
-      gateRows.forEach(row => {
-        const nameInput = row.querySelector('.gate-name-input');
-        const cmdInput = row.querySelector('.gate-cmd-input');
-        if (!nameInput || !cmdInput) return;
-
-        const repo = nameInput.dataset.repo;
-        const gateName = nameInput.value.trim();
-        const gateCmd = cmdInput.value.trim();
-
-        if (repo && gateName && gateCmd) {
-          if (!payload.repos[repo]) {
-            payload.repos[repo] = {};
-          }
-          if (!payload.repos[repo].factory) {
-            payload.repos[repo].factory = { gates: {} };
-          }
-          if (!payload.repos[repo].factory.gates) {
-            payload.repos[repo].factory.gates = {};
-          }
-          payload.repos[repo].factory.gates[gateName] = gateCmd;
-        }
-      });
-
-      return payload;
-    }
-
-    function saveProjectRefinement() {
-      const payload = buildProjectRefinementPayload();
-      console.log(JSON.stringify(payload));
-      pendingProjectRefinePayload = payload;
-
-      document.getElementById('refine-confirm-project').innerText = payload.name;
-      const summaryContainer = document.getElementById('refine-confirm-summary');
-      
-      const repoEntries = Object.entries(payload.repos || {});
-      if (repoEntries.length === 0) {
-        summaryContainer.innerHTML = '<div class="text-[#8b949e]">No repositories configured.</div>';
-      } else {
-        summaryContainer.innerHTML = repoEntries.map(([rName, rData]) => {
-          const gates = (rData.factory && rData.factory.gates) ? rData.factory.gates : {};
-          const gateKeys = Object.keys(gates);
-          const gateDesc = gateKeys.length > 0 
-            ? gateKeys.map(g => `<span class="text-amber-300 font-bold">${escapeHtml(g)}</span>: <span class="text-slate-300">${escapeHtml(gates[g])}</span>`).join('<br>&nbsp;&nbsp;')
-            : '<span class="text-[#8b949e]">No gates configured</span>';
-
-          return `
-            <div class="border-b border-[#21262d] pb-1.5 last:border-b-0">
-              <div class="text-white font-bold">${escapeHtml(rName)} <span class="text-[9px] text-[#8b949e] font-normal">(${escapeHtml(rData.role || 'Service')})</span></div>
-              <div class="text-[10px] pl-2 pt-0.5">${gateDesc}</div>
-            </div>
-          `;
-        }).join('');
-      }
-
-      openRefineConfirmModal();
-    }
-
-    function openRefineConfirmModal() {
-      lastFocusedBeforeModal = document.activeElement;
-      setModalAriaHidden(true);
-      const modal = document.getElementById('refine-confirm-modal');
-      modal.classList.remove('hidden');
-      setTimeout(() => document.getElementById('btn-confirm-save-refine').focus(), 50);
-    }
-
-    function closeRefineConfirmModal() {
-      document.getElementById('refine-confirm-modal').classList.add('hidden');
-      restoreModalFocus();
-    }
-
-    async function executeConfirmedProjectRefinement() {
-      if (!pendingProjectRefinePayload) return;
-
-      try {
-        const res = await fetch('/api/refine-project', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(pendingProjectRefinePayload)
-        });
-
-        if (res.ok) {
-          closeRefineConfirmModal();
-          closeRefineProjectModal();
-
-    loadProjects();
-        } else {
-          const text = await res.text();
-          alert("Save failed: " + text);
-        }
-      } catch (err) {
-        alert("Save request failed: " + err);
-      }
-    }
-
-    function openDispatchModal() {
-      lastFocusedBeforeModal = document.activeElement;
-      setModalAriaHidden(true);
-      const modalSelect = document.getElementById('modal-project');
-      if (selectedProject && selectedProject !== 'all') {
-        modalSelect.value = selectedProject;
-      } else if (modalSelect.options.length > 0) {
-        modalSelect.selectedIndex = 0;
-      }
-      populateModalRepos();
-      const modal = document.getElementById('dispatch-modal');
-      modal.classList.remove('hidden');
-      document.getElementById('validation-report').classList.add('hidden');
-      setTimeout(() => document.getElementById('modal-brief').focus(), 50);
-    }
-
-    function closeDispatchModal() {
-      document.getElementById('dispatch-modal').classList.add('hidden');
-      restoreModalFocus();
-    }
-
-    function getSelectedModalRepos() {
-      const cbs = document.querySelectorAll('input[name="target_repos"]:checked');
-      return Array.from(cbs).map(cb => cb.value);
-    }
-
-    async function validateCurrentIntent() {
-      const project = document.getElementById('modal-project').value;
-      const agent = document.getElementById('modal-agent').value;
-      const brief = document.getElementById('modal-brief').value;
-
-      if (!brief.trim()) {
-        alert("Please enter an intent brief first.");
-        return;
-      }
-
-      try {
-        const res = await fetch('/api/validate-intent', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ project, agent, brief })
-        });
-        const data = await res.json();
-        
-        const box = document.getElementById('validation-report');
-        const score = document.getElementById('val-score');
-        const checks = document.getElementById('val-checks');
-
-        box.classList.remove('hidden');
-        score.innerText = `${data.score}/100 ${data.valid ? 'VALIDATED' : 'ACTION REQUIRED'}`;
-        score.className = `font-bold px-1.5 py-0.5 rounded border text-[10px] font-mono ${data.valid ? 'bg-emerald-950 text-emerald-300 border-emerald-800' : 'bg-rose-950 text-rose-300 border-rose-800'}`;
-
-        let html = '';
-        (data.checks_passed || []).forEach(c => {
-          html += `<div class="text-emerald-400"><i class="fa-solid fa-check mr-1" aria-hidden="true"></i>${c}</div>`;
-        });
-        (data.warnings || []).forEach(w => {
-          html += `<div class="text-amber-400"><i class="fa-solid fa-triangle-exclamation mr-1" aria-hidden="true"></i>${w}</div>`;
-        });
-        (data.errors || []).forEach(e => {
-          html += `<div class="text-rose-400"><i class="fa-solid fa-xmark mr-1" aria-hidden="true"></i>${e}</div>`;
-        });
-        checks.innerHTML = html;
-      } catch (err) {
-        alert("Validation request failed: " + err);
-      }
-    }
-
-    async function submitDispatch() {
-      const project = document.getElementById('modal-project').value;
-      const agent = document.getElementById('modal-agent').value;
-      const brief = document.getElementById('modal-brief').value;
-      const repos = getSelectedModalRepos();
-
-      if (!project) {
-        alert("Please select a target project");
-        return;
-      }
-      if (!brief.trim()) {
-        alert("Intent brief & acceptance criteria cannot be empty");
-        return;
-      }
-
-      const res = await fetch('/api/dispatch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project, agent, brief, repos })
-      });
-
-      if (res.ok) {
-        closeDispatchModal();
-        fetchRuns();
-      } else {
-        const text = await res.text();
-        alert("Dispatch error: " + text);
-      }
-    }
 
     async function cancelActiveRun() {
       if (!activeRunId) return;
@@ -1201,8 +662,8 @@
         const data = await res.json();
         setConnectionError(false);
         indexPhasesForDrawer(data.phases || []);
-        renderLiveStitchMatrix(current, data.phases || [], data.envelopes || []);
-        renderLiveContractInspector(data.envelopes || []);
+        renderWorkflowGraph(current, data.phases || []);
+        renderActivity(data.envelopes || []);
       } catch (err) {
         setConnectionError(true);
         console.error("Failed fetching run details:", err);
@@ -1216,12 +677,11 @@
       const briefReset = document.getElementById('active-run-brief');
       if (briefReset) briefReset.textContent = '';
       document.getElementById('active-matrix-project').innerText = 'None';
-      document.getElementById('stage-matrix-tbody').innerHTML = `
-        <tr><td colspan="4" class="p-8 text-center text-[#8b949e]">No pipeline runs recorded for this project. Click <strong>Dispatch stage</strong> above to launch an autonomous run.</td></tr>
-      `;
-      drawerEnvelopes = [];
-      const envBadge = document.getElementById('envelope-count-badge');
-      if (envBadge) envBadge.innerText = '0 envelopes';
+      document.getElementById('workflow-graph').innerHTML =
+        '<div class="text-[#8b949e] text-[11px]">No pipeline runs recorded for this project. Dispatch one from your agent session or <code class="text-slate-300">POST /api/dispatch</code>.</div>';
+      drawerActivity = [];
+      const envBadge = document.getElementById('activity-count');
+      if (envBadge) envBadge.innerText = '0';
     }
 
     function escapeHTML(v) {
@@ -1320,6 +780,15 @@
         ['Repo', escapeHTML(phase.repo || '\u2014')],
         ['Duration', escapeHTML(phase.status === 'running' ? 'running' : formatDuration(phase.duration_ms))],
       ];
+      if (p.branch) rows.push(['Branch', `<code class="text-[#58a6ff]">${escapeHTML(p.branch)}</code>`]);
+      if (p.worktree) {
+        rows.push(['Worktree', `<span class="flex items-start gap-1.5 min-w-0">
+          <code class="text-slate-300 break-all min-w-0">${escapeHTML(p.worktree)}</code>
+          <button type="button" onclick="copyToClipboard('${escapeAttr(p.worktree)}', this)"
+            aria-label="Copy worktree path" title="Copy worktree path"
+            class="shrink-0 px-1 rounded text-[#8b949e] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]"><i class="fa-regular fa-copy text-[10px]" aria-hidden="true"></i></button>
+        </span>`]);
+      }
       if (p.command) rows.push(['Command', `<code class="text-amber-300 break-all">${escapeHTML(p.command)}</code>`]);
       if (p.agent) rows.push(['Agent', `<code class="text-teal-300">${escapeHTML(p.agent)}</code>`]);
       if (p.attempt) rows.push(['Attempt', escapeHTML(p.attempt)]);
@@ -1380,107 +849,313 @@
         <div class="text-[10px] text-[#8b949e] font-mono truncate" title="${escapeAttr(d.branch || '')}">${escapeHTML(d.branch || '')}</div>`;
     }
 
-    function renderLiveStitchMatrix(run, phases, envelopes) {
-      const tbody = document.getElementById('stage-matrix-tbody');
-      const thead = document.getElementById('stage-matrix-head');
-      const list = phases || [];
+    // Cached workflow definitions per repo, so the graph can draw stages that have
+    // not started yet. Without the definition the view can only show history.
+    const workflowDefs = new Map();
 
-      // Columns are derived from the phases that actually ran, in the order they
-      // first appeared. Previously the table had fixed Build/Gate columns filled by
-      // .find(kind==='agent'|'code'), which showed the FIRST agent phase under a
-      // header reading "Build" and silently dropped every other phase.
-      //
-      // A column is identified by the (kind, name) pair, never by name alone. A
-      // pipeline stage and a code gate may legitimately share a name — factory
-      // pipeline "build" plus gate "build" — and keying on name alone let the
-      // phase written last overwrite the other, dropping it from the matrix.
-      const colKey = p => `${p.kind || ''}\u0000${p.name}`;
-      const cols = [];              // {key, kind, name} in first-seen order
-      const seenCols = new Set();
-      const kindsByName = new Map(); // name -> Set(kind), to detect collisions
-      const byRepo = new Map();
-      list.forEach(p => {
-        const key = colKey(p);
-        if (!seenCols.has(key)) {
-          seenCols.add(key);
-          cols.push({ key, kind: p.kind || '', name: p.name });
-        }
-        if (!kindsByName.has(p.name)) kindsByName.set(p.name, new Set());
-        kindsByName.get(p.name).add(p.kind || '');
-        if (!byRepo.has(p.repo)) byRepo.set(p.repo, new Map());
-        byRepo.get(p.repo).set(key, p);
+    async function workflowDefFor(project, repo) {
+      const key = project + '\u0000' + repo;
+      if (workflowDefs.has(key)) return workflowDefs.get(key);
+      try {
+        const res = await fetch(`/api/workflow?project=${encodeURIComponent(project)}&repo=${encodeURIComponent(repo)}`);
+        if (!res.ok) return null;
+        const def = await res.json();
+        workflowDefs.set(key, def);
+        return def;
+      } catch (err) {
+        console.error('Failed fetching workflow definition:', err);
+        return null;
+      }
+    }
+
+    // Node appearance by state. "pending" is a real state, not an absence: the node is
+    // in the definition and has not run.
+    const NODE_LOOK = {
+      passed:  { text: 'text-[#3fb950]', icon: 'fa-solid fa-circle-check' },
+      failed:  { text: 'text-rose-400',  icon: 'fa-solid fa-circle-xmark' },
+      running: { text: 'text-[#58a6ff]', icon: 'fa-solid fa-spinner fa-spin' },
+      pending: { text: 'text-[#6e7681]', icon: 'fa-regular fa-circle' },
+    };
+
+    // Fixed geometry. Positions are computed rather than measured so the SVG edge
+    // layer and the cards agree without a second layout pass.
+    const GEO = { nodeW: 232, nodeH: 34, colGap: 56, rowGap: 10, wrapGap: 34, groupPadX: 8, groupPadY: 8, groupHead: 20, padX: 12, padY: 12 };
+
+    function phaseForNode(node, phaseByKey) {
+      const wanted = node.kind === 'gate' ? 'code' : node.kind === 'stage' ? 'agent' : null;
+      if (!wanted) return null;
+      return phaseByKey.get(wanted + '\u0000' + node.label)
+          || phaseByKey.get((wanted === 'code' ? 'agent' : 'code') + '\u0000' + node.label)
+          || null;
+    }
+
+    // Columns come from the definition's shape, not from a hardcoded list:
+    // each pipeline stage is its own column, the gates share one column as a labelled
+    // group because the engine runs them all inside the test stage, and the delivery
+    // lifecycle collapses into one cell because nothing populates bullet status yet and
+    // five permanently-grey columns would be noise.
+    function buildGraphLayout(def, phaseByKey) {
+      const nodes = (def && def.nodes) ? def.nodes : [];
+      const cols = [];
+
+      nodes.filter(n => n.kind === 'stage').forEach(n => {
+        cols.push({ cells: [{ type: 'node', node: n, phase: phaseForNode(n, phaseByKey) }] });
       });
 
-      // The plain phase name is the label while it is unambiguous. Only a name
-      // carried by more than one kind is qualified, e.g. "build (agent)" and
-      // "build (gate)".
-      const KIND_LABEL = { agent: 'agent', code: 'gate' };
-      const colLabel = c => {
-        const kinds = kindsByName.get(c.name);
-        if (!kinds || kinds.size < 2) return c.name;
-        const qualifier = KIND_LABEL[c.kind] || c.kind;
-        return qualifier ? `${c.name} (${qualifier})` : c.name;
-      };
+      const gates = nodes.filter(n => n.kind === 'gate');
+      if (gates.length) {
+        cols.push({ cells: [{
+          type: 'group', label: 'Gates',
+          items: gates.map(n => ({ node: n, phase: phaseForNode(n, phaseByKey) })),
+        }] });
+      }
 
-      const totalCols = cols.length + 2; // repository + phases + delivery
+      const life = nodes.filter(n => n.kind === 'lifecycle');
+      if (life.length) {
+        cols.push({ cells: [{
+          type: 'group', label: 'Delivery',
+          items: life.map(n => ({ node: n, phase: null })),
+        }] });
+      }
+      return cols;
+    }
 
-      thead.innerHTML = `
-        <tr class="border-b border-[#21262d] bg-[#161b22] text-[#8b949e] uppercase text-[10px]">
-          <th scope="col" class="p-2.5 w-36 border-r border-[#21262d]">Repository</th>
-          ${cols.map(c => `<th scope="col" class="p-2.5 border-r border-[#21262d]">${escapeHTML(colLabel(c))}</th>`).join('')}
-          <th scope="col" class="p-2.5">Delivery</th>
-        </tr>`;
+    function cellHeight(cell) {
+      if (cell.type === 'node') return GEO.nodeH;
+      return GEO.groupHead + GEO.groupPadY * 2 + cell.items.length * GEO.nodeH + (cell.items.length - 1) * GEO.rowGap;
+    }
 
-      if (byRepo.size === 0) {
-        tbody.innerHTML = `<tr><td colspan="${totalCols}" class="p-6 text-center text-[#8b949e]">No phase data recorded for this run yet.</td></tr>`;
+    function columnWidth(col) {
+      return col.cells.some(c => c.type === 'group') ? GEO.nodeW + GEO.groupPadX * 2 : GEO.nodeW;
+    }
+
+    // Packs columns into rows that fit availWidth, then positions every cell.
+    // The graph wraps rather than scrolling sideways: a pipeline you have to scroll to
+    // read is a pipeline you cannot see. Every row still runs left to right, so the
+    // reading direction never reverses; a wrap connector carries the eye down.
+    function positionLayout(cols, availWidth) {
+      const usable = Math.max(GEO.nodeW + GEO.padX * 2, availWidth) - GEO.padX * 2;
+
+      // Pack: greedily fill a row until the next column will not fit.
+      const rows = [];
+      let row = [], rowW = 0;
+      cols.forEach(col => {
+        const w = columnWidth(col);
+        const needed = row.length === 0 ? w : rowW + GEO.colGap + w;
+        if (row.length > 0 && needed > usable) {
+          rows.push(row);
+          row = [col]; rowW = w;
+        } else {
+          row.push(col); rowW = needed;
+        }
+      });
+      if (row.length) rows.push(row);
+
+      const placed = [];
+      let y = GEO.padY;
+      let maxRight = 0;
+
+      rows.forEach((rowCols, ri) => {
+        const rowH = Math.max(...rowCols.map(c =>
+          c.cells.reduce((a, cell) => a + cellHeight(cell), 0) + (c.cells.length - 1) * GEO.rowGap));
+        let x = GEO.padX;
+        rowCols.forEach((col, ciInRow) => {
+          const w = columnWidth(col);
+          let cy = y;
+          col.cells.forEach(cell => {
+            const h = cellHeight(cell);
+            placed.push({
+              cell, row: ri, colInRow: ciInRow, x, y: cy, w, h,
+              inAnchor:  { x: x,     y: cy + h / 2 },
+              outAnchor: { x: x + w, y: cy + h / 2 },
+            });
+            cy += h + GEO.rowGap;
+          });
+          x += w + GEO.colGap;
+          maxRight = Math.max(maxRight, x - GEO.colGap);
+        });
+        y += rowH + GEO.wrapGap;
+      });
+
+      return { placed, rows: rows.length, width: maxRight + GEO.padX, height: y - GEO.wrapGap + GEO.padY };
+    }
+
+    function nodeCardHTML(node, phase, absolute) {
+      const state = phase ? (NODE_LOOK[phase.status] ? phase.status : 'pending') : 'pending';
+      const look = NODE_LOOK[state];
+      const dur = phase ? (phase.status === 'running' ? 'running' : formatDuration(phase.duration_ms)) : '';
+      const pl = (phase && phase.payload) || {};
+      const branch = (pl.branch || '').trim();
+      const worktree = (pl.worktree || '').trim();
+      const kindLabel = node.kind === 'gate' ? 'gate' : node.kind === 'lifecycle' ? 'delivery' : 'stage';
+
+      const clickable = !!phase;
+      const tag = clickable ? 'button' : 'div';
+      const pos = absolute ? `position:absolute;left:${absolute.x}px;top:${absolute.y}px;width:${GEO.nodeW}px;height:${GEO.nodeH}px;` : `width:${GEO.nodeW}px;height:${GEO.nodeH}px;`;
+      const shell = clickable
+        ? `type="button" onclick="openPhaseDrawer('${escapeAttr(phase.kind || '')}','${escapeAttr(phase.name)}', this)"
+           aria-label="${escapeAttr(node.label + ' ' + kindLabel + ', ' + phase.status + (worktree ? ', worktree ' + worktree : '') + '. Open detail.')}"
+           class="group flex items-center gap-2 px-2.5 rounded-md border border-[#30363d] bg-[#161b22] hover:border-[#58a6ff] hover:bg-[#1c2430] cursor-pointer transition text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]"`
+        : `aria-label="${escapeAttr(node.label + ' ' + kindLabel + ', not started')}"
+           class="flex items-center gap-2 px-2.5 rounded-md border border-dashed border-[#30363d] bg-transparent"`;
+
+      return `<${tag} style="${pos}" ${shell}>
+        <i class="${look.icon} ${look.text} text-[11px] shrink-0" aria-hidden="true"></i>
+        <span class="text-[11px] font-semibold ${clickable ? 'text-slate-100' : 'text-[#6e7681]'} truncate">${escapeHTML(node.label)}</span>
+        ${branch || worktree ? `<i class="fa-solid fa-folder-tree text-[8px] text-[#6e7681] shrink-0" title="${escapeAttr([branch, worktree].filter(Boolean).join(' \u2014 '))}" aria-hidden="true"></i>` : ''}
+        <span class="ml-auto shrink-0 font-mono text-[10px] ${phase ? 'text-[#8b949e]' : 'text-[#6e7681]'}">${escapeHTML(dur || (phase ? '' : 'not started'))}</span>
+      </${tag}>`;
+    }
+
+    function groupBoxHTML(cell, x, y, w, h) {
+      const inner = cell.items.map((it, i) => nodeCardHTML(it.node, it.phase, {
+        x: GEO.groupPadX,
+        y: GEO.groupHead + GEO.groupPadY + i * (GEO.nodeH + GEO.rowGap),
+      })).join('');
+      return `<div style="position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px;" class="rounded-md border border-[#30363d] bg-[#0d1117]">
+        <div class="absolute left-0 top-0 px-2 h-[${GEO.groupHead}px] flex items-center text-[9px] uppercase tracking-wider font-bold text-[#6e7681]">${escapeHTML(cell.label)}</div>
+        ${inner}
+      </div>`;
+    }
+
+    // Edges are cubic beziers with a horizontal control offset, which is what gives the
+    // Actions graph its fan-out. Straight 1px rules read as a table rule, not a graph.
+    //
+    // A wrap boundary is drawn differently: the eye has to travel from the right edge of
+    // one row to the left edge of the next, so that edge exits right, drops into the
+    // gutter between rows, and re-enters from the left. Drawing it as a straight
+    // diagonal across the canvas would cross every intervening node.
+    function edgesSVG(placed, width, height) {
+      const groups = new Map(); // "row:colInRow" -> cells
+      placed.forEach(pl => {
+        const k = pl.row + ':' + pl.colInRow;
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(pl);
+      });
+
+      // Column order across the whole graph, following the wrap.
+      const order = [...groups.keys()].sort((a, b) => {
+        const [ar, ac] = a.split(':').map(Number), [br, bc] = b.split(':').map(Number);
+        return ar - br || ac - bc;
+      });
+
+      let paths = '', dots = '';
+      for (let i = 0; i < order.length - 1; i++) {
+        const from = groups.get(order[i]), to = groups.get(order[i + 1]);
+        const sameRow = from[0].row === to[0].row;
+
+        from.forEach(f => {
+          dots += `<circle cx="${f.outAnchor.x}" cy="${f.outAnchor.y}" r="3" fill="#30363d"/>`;
+          to.forEach(t => {
+            if (sameRow) {
+              const dx = Math.max(24, (t.inAnchor.x - f.outAnchor.x) / 2);
+              paths += `<path d="M ${f.outAnchor.x} ${f.outAnchor.y} C ${f.outAnchor.x + dx} ${f.outAnchor.y}, ${t.inAnchor.x - dx} ${t.inAnchor.y}, ${t.inAnchor.x} ${t.inAnchor.y}" fill="none" stroke="#30363d" stroke-width="1.5"/>`;
+            } else {
+              // Wrap: out to the right, down through the gutter, back in from the left.
+              const gutter = (f.outAnchor.y + t.inAnchor.y) / 2;
+              const outX = Math.min(width - 6, f.outAnchor.x + 18);
+              const inX = Math.max(6, t.inAnchor.x - 18);
+              paths += `<path d="M ${f.outAnchor.x} ${f.outAnchor.y}
+                                 L ${outX} ${f.outAnchor.y}
+                                 Q ${outX + 8} ${f.outAnchor.y} ${outX + 8} ${gutter}
+                                 L ${outX + 8} ${gutter}
+                                 L ${inX - 8} ${gutter}
+                                 Q ${inX - 8} ${t.inAnchor.y} ${inX} ${t.inAnchor.y}
+                                 L ${t.inAnchor.x} ${t.inAnchor.y}"
+                        fill="none" stroke="#30363d" stroke-width="1.5" stroke-dasharray="3 3"/>`;
+            }
+          });
+        });
+      }
+      groups.get(order[0])?.forEach(f => {
+        dots += `<circle cx="${f.inAnchor.x}" cy="${f.inAnchor.y}" r="3" fill="#30363d"/>`;
+      });
+      groups.get(order[order.length - 1])?.forEach(l => {
+        dots += `<circle cx="${l.outAnchor.x}" cy="${l.outAnchor.y}" r="3" fill="#30363d"/>`;
+      });
+      return `<svg width="${width}" height="${height}" class="absolute inset-0 pointer-events-none" aria-hidden="true">${paths}${dots}</svg>`;
+    }
+
+    function laneHTML(repo, def, phaseByKey, availWidth) {
+      const cols = buildGraphLayout(def, phaseByKey);
+      if (cols.length === 0) {
+        return `<div class="text-[#8b949e] text-[11px]">No workflow definition for ${escapeHTML(repo)}.</div>`;
+      }
+      const { placed, width, height } = positionLayout(cols, availWidth || 900);
+
+      const cards = placed.map(pl => pl.cell.type === 'node'
+        ? nodeCardHTML(pl.cell.node, pl.cell.phase, { x: pl.x, y: pl.y })
+        : groupBoxHTML(pl.cell, pl.x, pl.y, pl.w, pl.h)).join('');
+
+      return `
+        <section class="mb-5" aria-label="${escapeAttr(repo + ' workflow')}">
+          <div class="flex items-center gap-1.5 mb-2 font-mono text-[11px] font-bold text-white">
+            <i class="fa-solid fa-code-branch text-[#8b949e] text-[9px]" aria-hidden="true"></i>${escapeHTML(repo)}
+          </div>
+          <div class="relative rounded-lg border border-[#21262d] bg-[#0b0e14]" style="width:${width}px;height:${height}px;">
+            ${edgesSVG(placed, width, height)}
+            ${cards}
+          </div>
+        </section>`;
+    }
+
+    async function renderWorkflowGraph(run, phases) {
+      const host = document.getElementById('workflow-graph');
+      const list = phases || [];
+
+      if (!run) {
+        host.innerHTML = '<div class="text-[#8b949e] text-[11px]">Select or dispatch a run to draw its workflow.</div>';
         return;
       }
 
-      tbody.innerHTML = Array.from(byRepo.keys()).map(repo => {
-        const phaseMap = byRepo.get(repo);
-        return `
-          <tr class="hover:bg-[#161b22]/30 transition">
-            <td class="p-2.5 font-bold text-white border-r border-[#21262d]">
-              <div class="flex items-center gap-1.5 font-mono">
-                <i class="fa-solid fa-code-branch text-[#8b949e]" aria-hidden="true"></i> ${escapeHTML(repo)}
-              </div>
-            </td>
-            ${cols.map(c => {
-              const ph = phaseMap.get(c.key);
-              if (!ph) {
-                return `<td class="p-2.5 border-r border-[#21262d] align-top">${phaseCellHTML(null)}</td>`;
-              }
-              // A cell with a phase is a control: it opens that phase's detail.
-              return `<td class="p-0 border-r border-[#21262d] align-top">
-                <button type="button" onclick="openPhaseDrawer('${escapeAttr(ph.kind || '')}','${escapeAttr(ph.name)}', this)"
-                  class="w-full text-left p-2.5 space-y-1 hover:bg-[#161b22]/60 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#58a6ff]"
-                  aria-label="${escapeAttr(ph.name + ' ' + (ph.kind === 'code' ? 'gate' : ph.kind) + ', ' + ph.status + '. Open detail.')}">
-                  ${phaseCellHTML(ph)}
-                </button></td>`;
-            }).join('')}
-            <td class="p-2.5 space-y-1 align-top">${deliveryCellHTML(envelopes, repo)}</td>
-          </tr>`;
-      }).join('');
+      // Repos come from the phases that ran; a run with none yet still draws its
+      // configured repos so the operator sees what is about to happen.
+      const repos = [...new Set(list.map(p => p.repo).filter(Boolean))];
+      if (repos.length === 0) {
+        host.innerHTML = `<div class="text-[#8b949e] text-[11px]">No phase data recorded for this run yet.</div>`;
+        return;
+      }
+
+      const phaseByRepo = new Map();
+      list.forEach(p => {
+        if (!phaseByRepo.has(p.repo)) phaseByRepo.set(p.repo, new Map());
+        phaseByRepo.get(p.repo).set((p.kind || '') + '\u0000' + p.name, p);
+      });
+
+      const lanes = [];
+      for (const repo of repos) {
+        const def = await workflowDefFor(run.project, repo);
+        lanes.push(laneHTML(repo, def, phaseByRepo.get(repo) || new Map(), host.clientWidth - 24));
+      }
+      host.innerHTML = lanes.join('');
+      lastGraphRender = { run, phases: list };
     }
 
-    // Envelopes for the selected run, rendered into the drawer on demand rather than
-    // occupying a permanently open panel.
-    let drawerEnvelopes = [];
+    // Wrapping depends on the container width, so a resize has to re-lay-out.
+    let lastGraphRender = null;
+    let graphResizeTimer = null;
+    window.addEventListener('resize', () => {
+      if (!lastGraphRender) return;
+      clearTimeout(graphResizeTimer);
+      graphResizeTimer = setTimeout(() => {
+        renderWorkflowGraph(lastGraphRender.run, lastGraphRender.phases);
+      }, 120);
+    });
 
-    function openEnvelopesDrawer(opener) {
-      const n = drawerEnvelopes.length;
-      openDrawer(`Handoff envelopes (${n})`, 'envelopes', envelopesHTML(drawerEnvelopes), opener);
+    function openActivityDrawer(opener) {
+      const n = drawerActivity.length;
+      openDrawer(`Activity (${n})`, 'activity', activityHTML(drawerActivity), opener);
     }
 
-    function renderLiveContractInspector(envelopes) {
-      drawerEnvelopes = envelopes || [];
-      const badge = document.getElementById('envelope-count-badge');
-      const n = drawerEnvelopes.length;
-      badge.innerText = n === 1 ? '1 envelope' : `${n} envelopes`;
+    function renderActivity(envelopes) {
+      drawerActivity = envelopes || [];
+      const badge = document.getElementById('activity-count');
+      const n = drawerActivity.length;
+      badge.innerText = String(n);
       // If the drawer is already showing envelopes, keep it current.
-      if (drawerIsOpen() && document.getElementById('drawer-kind').textContent === 'envelopes') {
-        document.getElementById('drawer-title').textContent = `Handoff envelopes (${n})`;
-        document.getElementById('drawer-body').innerHTML = envelopesHTML(drawerEnvelopes);
+      if (drawerIsOpen() && document.getElementById('drawer-kind').textContent === 'activity') {
+        document.getElementById('drawer-title').textContent = `Activity (${n})`;
+        document.getElementById('drawer-body').innerHTML = activityHTML(drawerActivity);
       }
     }
 
@@ -1523,9 +1198,9 @@
         </div>`;
     }
 
-    function envelopesHTML(envelopes) {
+    function activityHTML(envelopes) {
       if (!envelopes || envelopes.length === 0) {
-        return '<div class="text-[#8b949e]">No handoff envelopes recorded for this run yet.</div>';
+        return '<div class="text-[#8b949e]">No activity recorded for this run yet.</div>';
       }
       return envelopes.map(e => {
         let isPR = e.stage === 'review' || (e.summary && e.summary.toLowerCase().includes('pr'));
@@ -1573,12 +1248,11 @@
     }
 
     window.addEventListener('keydown', (e) => {
-      const dispatchModal = document.getElementById('dispatch-modal');
-      const refineModal = document.getElementById('refine-project-modal');
-      const refineConfirmModal = document.getElementById('refine-confirm-modal');
+      // Prune is the only remaining dialog. Dispatching and project configuration were
+      // removed from the frontend: dispatch is an API and agent concern, and project
+      // YAML is edited in a text editor.
       const pruneModal = document.getElementById('prune-modal');
-      
-      const openModal = [refineConfirmModal, dispatchModal, refineModal, pruneModal].find(m => m && !m.classList.contains('hidden'));
+      const openModal = [pruneModal].find(m => m && !m.classList.contains('hidden'));
 
       if (e.key === 'Escape' && !openModal && drawerIsOpen()) {
         closeDrawer();
@@ -1586,10 +1260,7 @@
       }
 
       if (e.key === 'Escape' && openModal) {
-        if (openModal === dispatchModal) closeDispatchModal();
-        else if (openModal === refineModal) closeRefineProjectModal();
-        else if (openModal === refineConfirmModal) closeRefineConfirmModal();
-        else if (openModal === pruneModal) closePruneModal();
+        if (openModal === pruneModal) closePruneModal();
         return;
       }
 

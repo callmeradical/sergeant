@@ -133,7 +133,7 @@ repos:
 		"stage:plan", "stage:build", "stage:test", "stage:review",
 		"gate:lint", "gate:unit-tests",
 		"lifecycle:pending", "lifecycle:red", "lifecycle:green",
-		"lifecycle:sealed", "lifecycle:merged", "lifecycle:failed",
+		"lifecycle:sealed", "lifecycle:merged",
 	}
 	if got := labelsOf(graph.Nodes); !equalStrings(got, want) {
 		t.Errorf("nodes =\n  %v\nwant\n  %v", got, want)
@@ -175,8 +175,8 @@ repos:
 	if got := labelsOfKind(graph.Nodes, NodeKindGate); len(got) != 0 {
 		t.Errorf("gate nodes = %v, want none for a repo that configures no gates", got)
 	}
-	if got := labelsOfKind(graph.Nodes, NodeKindLifecycle); !equalStrings(got, store.BulletStatuses()) {
-		t.Errorf("lifecycle nodes = %v, want %v", got, store.BulletStatuses())
+	if got := labelsOfKind(graph.Nodes, NodeKindLifecycle); !equalStrings(got, store.BulletProgression()) {
+		t.Errorf("lifecycle nodes = %v, want %v", got, store.BulletProgression())
 	}
 
 	assertConnectedChain(t, graph)

@@ -109,7 +109,9 @@ func (c *chain) add(kind, label string) {
 //     performs, including the default pipeline for a repo with no factory block;
 //   - gates come from dag.SortedGateNames, which is the exact order the engine
 //     executes them in;
-//   - the lifecycle tail comes from store.BulletStatuses.
+//   - the lifecycle tail comes from store.BulletProgression, which excludes
+//     "failed" because failure is a state a step can be in, not a step that
+//     follows "merged".
 //
 // Nothing here hardcodes a stage, gate or status name. Adding a gate to the
 // project YAML changes this graph with no code change.
@@ -127,7 +129,7 @@ func buildWorkflowGraph(projectName, repoName string, repoCfg config.Repo) Workf
 	for _, gate := range dag.SortedGateNames(repoCfg) {
 		c.add(NodeKindGate, gate)
 	}
-	for _, status := range store.BulletStatuses() {
+	for _, status := range store.BulletProgression() {
 		c.add(NodeKindLifecycle, status)
 	}
 

@@ -89,6 +89,14 @@ func BulletStatuses() []string {
 	return []string{"pending", "red", "green", "sealed", "merged", "failed"}
 }
 
+// BulletProgression is the ordered lifecycle a bullet advances through. It
+// deliberately excludes "failed": failure is a state any step can be in, not a
+// step that follows "merged". Rendering it as the end of a chain would tell an
+// operator that failure comes after merge.
+func BulletProgression() []string {
+	return []string{"pending", "red", "green", "sealed", "merged"}
+}
+
 type EnvelopeRecord struct {
 	ID        string          `json:"id"`
 	RunID     string          `json:"run_id"`
