@@ -16,10 +16,14 @@ type Store struct {
 }
 
 type RunRecord struct {
-	ID        string    `json:"id"`
-	Project   string    `json:"project"`
-	TaskID    string    `json:"task_id"`
-	Brief     string    `json:"brief"`
+	ID      string `json:"id"`
+	Project string `json:"project"`
+	TaskID  string `json:"task_id"`
+	Brief   string `json:"brief"`
+	// ChangeID is the OpenSpec change this run is accountable to (decision O3).
+	// It is resolved before the run row is written, so a stored run always names
+	// the change whose openspec/changes/<id>/ directory travels in its PR.
+	ChangeID  string    `json:"change_id"`
 	Status    string    `json:"status"` // running, passed, failed
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -145,6 +149,7 @@ func (s *Store) migrate() error {
 		task_id TEXT NOT NULL,
 		status TEXT NOT NULL,
 		brief TEXT NOT NULL DEFAULT '',
+		change_id TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	);
@@ -215,6 +220,7 @@ func (s *Store) migrateAddTables() error {
 func (s *Store) migrateAddColumns() error {
 	wanted := []struct{ table, column, ddl string }{
 		{"runs", "brief", "ALTER TABLE runs ADD COLUMN brief TEXT NOT NULL DEFAULT ''"},
+		{"runs", "change_id", "ALTER TABLE runs ADD COLUMN change_id TEXT NOT NULL DEFAULT ''"},
 		{"bullets", "branch", "ALTER TABLE bullets ADD COLUMN branch TEXT NOT NULL DEFAULT ''"},
 		{"bullets", "worktree", "ALTER TABLE bullets ADD COLUMN worktree TEXT NOT NULL DEFAULT ''"},
 		{"bullets", "commit_sha", "ALTER TABLE bullets ADD COLUMN commit_sha TEXT NOT NULL DEFAULT ''"},
@@ -279,8 +285,8 @@ func (s *Store) CreateRun(r *RunRecord) error {
 	r.CreatedAt = now
 	r.UpdatedAt = now
 	_, err := s.db.Exec(
-		`INSERT INTO runs (id, project, task_id, status, brief, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.Project, r.TaskID, r.Status, r.Brief, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, project, task_id, status, brief, change_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.Project, r.TaskID, r.Status, r.Brief, r.ChangeID, r.CreatedAt, r.UpdatedAt,
 	)
 	return err
 }
@@ -364,7 +370,7 @@ func (s *Store) GetLatestEnvelope(runID, repo string) (*EnvelopeRecord, error) {
 
 func (s *Store) ListRecentRuns(limit int) ([]RunRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT id, project, task_id, status, COALESCE(brief, ''), created_at, updated_at FROM runs ORDER BY created_at DESC LIMIT ?`,
+		`SELECT id, project, task_id, status, COALESCE(brief, ''), COALESCE(change_id, ''), created_at, updated_at FROM runs ORDER BY created_at DESC LIMIT ?`,
 		limit,
 	)
 	if err != nil {
@@ -375,7 +381,7 @@ func (s *Store) ListRecentRuns(limit int) ([]RunRecord, error) {
 	var list []RunRecord
 	for rows.Next() {
 		var r RunRecord
-		if err := rows.Scan(&r.ID, &r.Project, &r.TaskID, &r.Status, &r.Brief, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Project, &r.TaskID, &r.Status, &r.Brief, &r.ChangeID, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, r)
@@ -572,7 +578,7 @@ func requireOneRow(res sql.Result, kind, id string) error {
 
 func (s *Store) ListRunsForProject(project string, limit int) ([]RunRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT id, project, task_id, status, COALESCE(brief, ''), created_at, updated_at FROM runs WHERE project = ? ORDER BY created_at DESC LIMIT ?`,
+		`SELECT id, project, task_id, status, COALESCE(brief, ''), COALESCE(change_id, ''), created_at, updated_at FROM runs WHERE project = ? ORDER BY created_at DESC LIMIT ?`,
 		project, limit,
 	)
 	if err != nil {
@@ -583,7 +589,7 @@ func (s *Store) ListRunsForProject(project string, limit int) ([]RunRecord, erro
 	var list []RunRecord
 	for rows.Next() {
 		var r RunRecord
-		if err := rows.Scan(&r.ID, &r.Project, &r.TaskID, &r.Status, &r.Brief, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Project, &r.TaskID, &r.Status, &r.Brief, &r.ChangeID, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, r)

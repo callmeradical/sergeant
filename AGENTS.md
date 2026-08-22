@@ -59,6 +59,7 @@ Do not weaken these. Each has a test.
 | Each retry attempt gets its own phase record | `TestAgentPhaseRetriesAreObservable` |
 | Saving project config preserves comments, `dag:`, and unmodelled keys | `TestRefineProjectPreservesUnmanagedConfig` |
 | Delivery reports never claim a PR that git cannot prove | `internal/ui/server.go` `describeDelivery` |
+| A dispatch resolves to an OpenSpec change before any run row or worktree exists | `TestDispatchWithUnknownChangeIDIsRejectedAndCreatesNoRun` |
 
 ## Truthfulness
 

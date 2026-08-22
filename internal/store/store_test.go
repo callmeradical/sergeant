@@ -278,6 +278,81 @@ func TestOpenAddsIntentAndBulletTablesToAnOlderDatabase(t *testing.T) {
 	}
 }
 
+// Decision O3 stores the resolved OpenSpec change on the run. A database created
+// before that column existed must gain it on open, or every run query naming it
+// fails and dispatch stops working against an existing installation.
+func TestOpenAddsRunChangeIDToAnOlderDatabase(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy-runs.db")
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("first open failed: %v", err)
+	}
+	// Simulate the older schema: a runs table with no change_id column.
+	if _, err := st.db.Exec("DROP TABLE runs"); err != nil {
+		t.Fatalf("dropping runs: %v", err)
+	}
+	if _, err := st.db.Exec(`CREATE TABLE runs (
+		id TEXT PRIMARY KEY,
+		project TEXT NOT NULL,
+		task_id TEXT NOT NULL,
+		status TEXT NOT NULL,
+		brief TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	)`); err != nil {
+		t.Fatalf("recreating legacy runs: %v", err)
+	}
+	if _, err := st.db.Exec(
+		`INSERT INTO runs (id, project, task_id, status, brief, created_at, updated_at) VALUES ('old', 'p', 'old', 'passed', 'legacy brief', ?, ?)`,
+		time.Now().UTC(), time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("seeding legacy run: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
+
+	upgraded, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen of older database failed: %v", err)
+	}
+	defer upgraded.Close()
+
+	has, err := upgraded.hasColumn("runs", "change_id")
+	if err != nil {
+		t.Fatalf("checking runs.change_id: %v", err)
+	}
+	if !has {
+		t.Fatal("runs.change_id was not added on open")
+	}
+
+	if err := upgraded.CreateRun(&RunRecord{
+		ID: "new", Project: "p", TaskID: "new", Brief: "b", ChangeID: "add-stripe-webhooks", Status: "running",
+	}); err != nil {
+		t.Fatalf("runs table unusable after upgrade: %v", err)
+	}
+
+	runs, err := upgraded.ListRunsForProject("p", 10)
+	if err != nil {
+		t.Fatalf("listing runs after upgrade: %v", err)
+	}
+	byID := map[string]RunRecord{}
+	for _, r := range runs {
+		byID[r.ID] = r
+	}
+	if got := byID["new"].ChangeID; got != "add-stripe-webhooks" {
+		t.Errorf("new run ChangeID = %q, want add-stripe-webhooks", got)
+	}
+	// The pre-existing row has no change; it must read as empty, not as a claim.
+	if got := byID["old"].ChangeID; got != "" {
+		t.Errorf("legacy run ChangeID = %q, want empty", got)
+	}
+	if got := byID["old"].Brief; got != "legacy brief" {
+		t.Errorf("legacy run Brief = %q, want %q", got, "legacy brief")
+	}
+}
+
 func TestUpdateStatusMovesStatusAndBumpsUpdatedAt(t *testing.T) {
 	st, _ := openTestStore(t)
 

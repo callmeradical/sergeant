@@ -973,6 +973,9 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		Brief   string   `json:"brief"`
 		Repos   []string `json:"repos"`
 		Agent   string   `json:"agent"`
+		// ChangeID is optional. When empty, a change is derived from the brief and
+		// scaffolded (decision O3); when set, it must already exist.
+		ChangeID string `json:"change_id"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Project == "" {
@@ -1002,13 +1005,28 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		proj.Defaults.Agent = req.Agent
 	}
 
+	// Decision O3: resolve the OpenSpec change BEFORE anything else exists. No run
+	// row, no branch and no worktree may precede it, or a failure here would leave
+	// behind dispatched work with no planning record — exactly what O3 forbids.
+	changeRepoName, changeRepoPath, err := changeRepo(proj, req.Repos)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	change, err := resolveChange(changeRepoPath, req.ChangeID, req.Brief)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	taskID := fmt.Sprintf("sgt-%d", time.Now().Unix())
 	runRec := &store.RunRecord{
-		ID:      taskID,
-		Project: proj.Name,
-		TaskID:  taskID,
-		Brief:   strings.TrimSpace(req.Brief),
-		Status:  "running",
+		ID:       taskID,
+		Project:  proj.Name,
+		TaskID:   taskID,
+		Brief:    strings.TrimSpace(req.Brief),
+		ChangeID: change.ID,
+		Status:   "running",
 	}
 	_ = srv.Store.CreateRun(runRec)
 
@@ -1113,6 +1131,12 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		"status":  "dispatched",
 		"task_id": taskID,
 		"project": proj.Name,
+		// The change is reported as it was resolved on disk, including which repo
+		// holds it, so the operator can find the audit artifact for this run.
+		"change_id":      change.ID,
+		"change_dir":     change.Dir,
+		"change_repo":    changeRepoName,
+		"change_created": change.Created,
 	})
 }
 
