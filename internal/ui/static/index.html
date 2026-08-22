@@ -50,31 +50,7 @@
         </select>
       </div>
 
-      <div class="hidden md:block h-3.5 w-px bg-[#21262d]"></div>
 
-      <!-- Primary destinations. These were a 208px left rail serving 3 views; as
-           header tabs they cost no extra vertical space and free the rail for content. -->
-      <nav class="hidden md:flex items-center gap-0.5" aria-label="Views">
-        <button onclick="switchStitchTab('stages')" id="stitch-nav-stages" class="px-2.5 h-11 text-[11px] font-bold text-white border-b-2 border-[#58a6ff] flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-          <i class="fa-solid fa-diagram-project text-[#58a6ff] text-[10px]" aria-hidden="true"></i> <span class="hidden lg:inline">Pipeline</span>
-        </button>
-        <button onclick="switchStitchTab('tasks')" id="stitch-nav-tasks" class="px-2.5 h-11 text-[11px] font-semibold text-[#8b949e] border-b-2 border-transparent hover:text-white flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-          <i class="fa-solid fa-server text-teal-400 text-[10px]" aria-hidden="true"></i> <span class="hidden lg:inline">Workers</span>
-        </button>
-        <button onclick="switchStitchTab('repair')" id="stitch-nav-repair" disabled aria-disabled="true" class="px-2.5 h-11 text-[11px] font-semibold text-[#8b949e] border-b-2 border-transparent flex items-center gap-1.5 cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-          <i class="fa-solid fa-screwdriver-wrench text-slate-500 text-[10px]" id="repair-icon" aria-hidden="true"></i> <span class="hidden lg:inline">Repair</span>
-          <span id="repair-alert-dot" class="hidden w-2 h-2 rounded-full bg-rose-500 animate-pulse" aria-hidden="true"></span>
-        </button>
-      </nav>
-
-      <div class="hidden md:block h-3.5 w-px bg-[#21262d]"></div>
-
-      <div class="hidden lg:flex items-center space-x-3 text-[11px] text-[#8b949e]">
-        <span>Runs <span id="stat-total-runs" class="text-white font-bold font-mono">0</span></span>
-        <span>Workers <span id="stat-workers-active" class="text-[#3fb950] font-bold font-mono">0</span></span>
-        <span>Metrics <span id="stat-metrics-badge" class="text-[10px] px-1.5 py-0.5 rounded bg-[#161b22] text-[#8b949e] border border-[#30363d] font-bold font-mono">—</span></span>
-        <span id="last-updated" class="text-[11px] text-[#8b949e]">—</span>
-      </div>
     </div>
 
     <!-- Dispatch Stage CTA & Global Actions -->
@@ -94,22 +70,33 @@
   <div id="main-layout-wrapper" class="flex-1 flex overflow-hidden min-h-0">
 
     <!-- Left Vertical Rail: Navigation & Live Runs List -->
-    <aside class="hidden lg:flex w-52 bg-[#0b0e14] border-r border-[#21262d] flex-col justify-between p-2 shrink-0 overflow-hidden min-h-0">
-      <div class="space-y-3 flex-1 flex flex-col overflow-hidden min-h-0">
-        
-        <!-- Pipeline Runs Section (Nested under Project Scope) -->
-        <div class="flex-1 flex flex-col overflow-hidden pt-2 border-t border-[#21262d] min-h-0">
-          <div class="flex justify-between items-center px-1 pb-1.5 shrink-0">
-            <span class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider">Pipeline runs</span>
-            <span id="sidebar-runs-count" class="text-[9px] text-[#8b949e] font-mono">0</span>
-          </div>
-          <div id="sidebar-runs-list" class="flex-1 overflow-y-auto space-y-1 pr-1 min-h-0">
-            <div class="p-2 text-center text-[#8b949e] text-[10px]">No runs recorded.</div>
-          </div>
-        </div>
-
+    <!-- Master pane for the Pipeline view only. It lists pipeline runs, which have
+         nothing to do with the Workers table or the Repair diagnostics, so it is
+         scoped to its owning tab rather than persisting as shell chrome. -->
+    <aside id="master-rail" aria-label="Pipeline runs" class="hidden lg:flex w-72 bg-[#0b0e14] border-r border-[#21262d] flex-col p-2 gap-2 shrink-0 overflow-hidden min-h-0">
+      <!-- Filter. The list is capped at 50 server-side and already holds 23, so finding
+           a run by eye stops working well before the cap. Matches on slug, brief,
+           project and status, because those are the four things shown on a card. -->
+      <div class="shrink-0 relative">
+        <i class="fa-solid fa-magnifying-glass absolute left-2 top-1/2 -translate-y-1/2 text-[9px] text-[#8b949e]" aria-hidden="true"></i>
+        <input type="search" id="run-filter" placeholder="Filter runs" aria-label="Filter runs"
+          oninput="onRunFilterInput()"
+          class="w-full bg-[#161b22] border border-[#30363d] rounded pl-6 pr-7 py-1 text-[11px] text-white placeholder-[#8b949e] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+        <button type="button" id="run-filter-clear" onclick="clearRunFilter()" aria-label="Clear filter"
+          class="hidden absolute right-1 top-1/2 -translate-y-1/2 min-w-[20px] min-h-[20px] flex items-center justify-center rounded text-[#8b949e] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+          <i class="fa-solid fa-xmark text-[9px]" aria-hidden="true"></i>
+        </button>
       </div>
 
+      <div class="flex-1 flex flex-col overflow-hidden min-h-0">
+        <div class="flex justify-between items-center px-1 pb-1.5 shrink-0">
+          <span class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider">Pipeline runs</span>
+          <span id="sidebar-runs-count" class="text-[9px] text-[#8b949e] font-mono">0</span>
+        </div>
+        <div id="sidebar-runs-list" class="flex-1 overflow-y-auto space-y-1 pr-1 min-h-0" aria-live="polite">
+          <div class="p-2 text-center text-[#8b949e] text-[10px]">No runs recorded.</div>
+        </div>
+      </div>
     </aside>
 
     <!-- Center Main Body Canvas -->
@@ -120,12 +107,15 @@
         
         <!-- Header Banner & System Status -->
         <div class="flex flex-wrap gap-2 justify-between items-start pb-2 shrink-0">
-          <div>
-            <div class="flex items-center space-x-2">
-              <h1 class="text-base font-bold text-white tracking-wide">Pipeline</h1>
-              <span id="stage-run-badge" class="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-[#161b22] text-[#58a6ff] border border-[#30363d]">Run: None</span>
-            </div>
-            <p class="text-[11px] text-[#8b949e] mt-0.5">Pipeline for <span id="active-matrix-project" class="text-teal-300 font-mono font-bold">None</span></p>
+          <div class="min-w-0">
+            <!-- The run identifies this view, so the run is the heading. "Pipeline" was
+                 static text that already appears on the active tab, and "Pipeline for X"
+                 repeated the word a third time. -->
+            <h1 id="stage-run-badge" class="text-base font-bold text-white font-mono tracking-tight truncate">No run selected</h1>
+            <p class="text-[11px] text-[#8b949e] mt-0.5 flex items-center gap-1.5 flex-wrap">
+              <span id="active-matrix-project" class="text-teal-300 font-mono font-bold">None</span>
+              <span id="active-run-meta" class="text-[#8b949e]"></span>
+            </p>
             <p id="active-run-brief" class="text-[11px] text-slate-200 mt-1 max-w-3xl"></p>
           </div>
           <div class="flex items-center space-x-2">
@@ -157,118 +147,61 @@
           </table>
         </div>
 
-        <!-- Bottom: Live Contract Inspector & Envelope Proofs -->
-        <div class="flex-1 border border-[#21262d] rounded bg-[#0b0e14] flex flex-col overflow-hidden min-h-0">
-          <div class="h-8 bg-[#161b22] border-b border-[#21262d] px-3 flex items-center justify-between text-[10px]">
-            <div class="flex items-center space-x-2">
-              <span class="font-bold text-[#8b949e]">Handoff envelopes</span>
-              <span class="px-1.5 py-0.5 bg-[#0b0e14] border border-[#30363d] text-[#58a6ff] rounded font-mono">schema.json / envelopes</span>
-            </div>
-            <span id="envelope-count-badge" class="text-[#8b949e] font-mono">0 envelopes</span>
-          </div>
-
-          <div class="flex-1 p-3 overflow-y-auto font-mono text-[11px] text-[#7ee787] bg-[#0b0e14]/90 space-y-2 min-h-0" id="contract-inspector-code">
-            <div class="text-[#8b949e]">// Awaiting typed contract handoff envelopes from stage workers...</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- View 2: Screen C (Fleet State & Worktree Leases) -->
-      <div id="stitch-view-tasks" class="hidden flex-1 flex flex-col overflow-hidden p-4 space-y-4 min-h-0">
-        <div class="flex justify-between items-center pb-2">
-          <div>
-            <h1 class="text-base font-bold text-white tracking-wide">Workers &amp; Worktree Leases</h1>
-            <p class="text-[11px] text-[#8b949e] mt-0.5"><span id="fleet-active-count" class="font-mono">0</span> active tasks, worktrees allocated across system runtime</p>
-          </div>
-          <button onclick="cleanActiveWorktrees()" class="px-2.5 py-1 bg-[#161b22] hover:bg-[#21262d] text-slate-200 border border-[#30363d] rounded text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-            <i class="fa-solid fa-broom mr-1" aria-hidden="true"></i> Prune worktrees
+        <!-- Handoff envelopes moved into the detail drawer. They were a permanently
+             open panel consuming the lower half of the pane; the graph needs that room,
+             and envelopes are reference material you consult rather than monitor. -->
+        <div class="shrink-0 flex items-center justify-between gap-2 border border-[#21262d] rounded bg-[#161b22] px-3 h-9 text-[10px]">
+          <span class="font-bold text-[#8b949e]">Handoff envelopes</span>
+          <button type="button" id="btn-open-envelopes" onclick="openEnvelopesDrawer(this)"
+            class="px-2 py-1 rounded bg-[#0b0e14] hover:bg-[#21262d] border border-[#30363d] text-slate-300 hover:text-white font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+            <span id="envelope-count-badge">0 envelopes</span>
+            <i class="fa-solid fa-arrow-right-long ml-1 text-[9px]" aria-hidden="true"></i>
           </button>
         </div>
-
-        <div class="border border-[#21262d] rounded bg-[#0b0e14] overflow-x-auto">
-          <table class="w-full text-left border-collapse text-[11px]">
-            <caption class="sr-only">Fleet worktree allocations and leases</caption>
-            <thead>
-              <tr class="border-b border-[#21262d] bg-[#161b22] text-[#8b949e] uppercase text-[10px]">
-                <th scope="col" class="p-2.5">Task ID</th>
-                <th scope="col" class="p-2.5">Worktree path</th>
-                <th scope="col" class="p-2.5">Status</th>
-                <th scope="col" class="p-2.5">Created at</th>
-                <th scope="col" class="p-2.5 text-right">Action</th>
-              </tr>
-            </thead>
-            <tbody id="fleet-stitch-tbody" class="divide-y divide-[#21262d]">
-              <tr>
-                <td colspan="5" class="p-6 text-center text-[#8b949e]">Loading fleet state...</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- View 3: Screen A (Live In-Session Repair Room) -->
-      <div id="stitch-view-repair" class="hidden flex-1 flex flex-col overflow-hidden p-4 space-y-4 min-h-0">
-        
-        <!-- Active Gate Failure State -->
-        <div id="repair-active-container" class="flex-1 flex flex-col space-y-4 overflow-hidden min-h-0">
-          <div class="p-3 bg-rose-950/80 border border-rose-800 rounded flex justify-between items-center text-white">
-            <div class="flex items-center space-x-2 font-bold text-xs">
-              <i class="fa-solid fa-circle-xmark text-rose-400" aria-hidden="true"></i>
-              <span>Run #<span id="repair-run-num" class="font-mono">None</span> — Gate failure diagnostics</span>
-            </div>
-            <div class="flex items-center space-x-2 text-[10px] font-mono">
-              <span id="repair-status-badge" class="px-2 py-0.5 rounded bg-rose-900 text-rose-200">● Gate failed</span>
-            </div>
-          </div>
-
-          <div class="flex-1 grid grid-cols-2 gap-3 overflow-hidden min-h-0">
-            <!-- Phase Terminal Failure Trace -->
-            <div class="border border-[#21262d] rounded bg-[#0b0e14] flex flex-col overflow-hidden min-h-0">
-              <div class="h-7 bg-[#161b22] border-b border-[#21262d] px-3 flex items-center justify-between text-[10px] text-[#8b949e] font-bold">
-                <span>Output / gate failure</span>
-                <span id="repair-failed-phase-name" class="text-rose-400 font-mono">test-gate</span>
-              </div>
-              <div class="flex-1 p-3 overflow-y-auto font-mono text-[11px] text-rose-300 space-y-0.5 min-h-0" id="repair-stdout-content">
-                No gate failures recorded.
-              </div>
-            </div>
-
-            <!-- Diff or Proposed Fix Patch -->
-            <div class="border border-[#21262d] rounded bg-[#0b0e14] flex flex-col overflow-hidden min-h-0">
-              <div class="h-7 bg-[#161b22] border-b border-[#21262d] px-3 flex items-center justify-between text-[10px] text-[#8b949e] font-bold">
-                <span class="text-emerald-400">Repair patch</span>
-                <span id="repair-diff-filename" class="font-mono">diff</span>
-              </div>
-              <div class="flex-1 p-3 overflow-y-auto font-mono text-[11px] space-y-0.5 min-h-0" id="repair-diff-content">
-                <div class="text-[#8b949e]">No repair diff proposed for this failure.</div>
-              </div>
-            </div>
-          </div>
-
-          <div class="h-10 bg-[#161b22] border border-[#21262d] rounded px-3 flex items-center justify-between text-[11px]">
-            <div class="text-[#8b949e]" id="repair-bottom-msg">
-              <span class="text-rose-400">></span> Gate failure detected. Inspect stdout trace.
-            </div>
-          </div>
-        </div>
-
-        <!-- Empty / All-Green State -->
-        <div id="repair-empty-container" class="hidden flex-1 flex flex-col items-center justify-center p-8 space-y-3 border border-[#21262d] rounded bg-[#161b22]/30 text-center">
-          <div class="w-12 h-12 rounded-full bg-emerald-950/60 border border-emerald-800 flex items-center justify-center text-[#3fb950] text-xl">
-            <i class="fa-solid fa-shield-halved" aria-hidden="true"></i>
-          </div>
-          <div class="text-white font-bold text-sm">No active repairs required</div>
-          <p class="text-[#8b949e] text-xs max-w-md">All zero-token deterministic code gates and phase envelopes are passing cleanly. In-session repair will activate automatically if a gate fails.</p>
-          <button onclick="switchStitchTab('stages')" class="px-3 py-1.5 rounded bg-[#21262d] hover:bg-[#30363d] text-slate-300 text-xs font-semibold border border-[#30363d] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-            Return to pipeline
-          </button>
-        </div>
-
       </div>
 
     </main>
 
   </div>
+
+  <!-- Ambient status bar.
+       These four values were crowded into the 44px header, which the design review
+       flagged as carrying nine ungrouped elements. Decision D5 says only three events
+       deserve a human's attention and everything else is ambient fleet state, so this
+       is where ambient state belongs: glanceable, out of the reading path, never
+       shouting. No pulse, no emoji, no unconditional reassurance. -->
+  <footer class="shrink-0 h-6 border-t border-[#21262d] bg-[#0b0e14] px-3 flex items-center justify-between text-[10px] text-[#8b949e] font-mono">
+    <div class="flex items-center gap-3 min-w-0">
+      <span class="truncate">Runs <span id="stat-total-runs" class="text-slate-300 font-bold">0</span></span>
+      <button type="button" id="btn-open-workers" onclick="openWorkersDrawer(this)"
+        class="truncate rounded px-1 -mx-1 hover:text-white hover:bg-[#161b22] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+        Workers <span id="stat-workers-active" class="text-slate-300 font-bold">0</span>
+      </button>
+      <span id="stat-metrics-badge" class="truncate text-slate-300">&mdash;</span>
+    </div>
+    <div class="flex items-center gap-3 shrink-0">
+      <span id="last-updated">&mdash;</span>
+    </div>
+  </footer>
+
+  <!-- Detail drawer.
+       Non-modal by design: you read a phase log while looking at the pipeline, so this
+       must NOT trap focus or set aria-modal the way the three dialogs do. It overlays
+       rather than pushes, so the node you clicked does not move while you read it. -->
+  <aside id="detail-drawer" role="complementary" aria-labelledby="drawer-title" aria-hidden="true" inert
+    class="fixed top-11 right-0 bottom-6 w-full sm:w-[30rem] bg-[#0b0e14] border-l border-[#30363d] shadow-2xl z-40 flex flex-col translate-x-full transition-transform duration-150 ease-out motion-reduce:transition-none">
+    <div class="h-9 shrink-0 bg-[#161b22] border-b border-[#21262d] px-3 flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2 min-w-0">
+        <span id="drawer-kind" class="px-1.5 py-0.5 rounded bg-[#0b0e14] border border-[#30363d] text-[9px] font-mono text-[#8b949e] shrink-0">&mdash;</span>
+        <h2 id="drawer-title" class="text-[11px] font-bold text-white truncate">Detail</h2>
+      </div>
+      <button id="drawer-close" onclick="closeDrawer()" aria-label="Close detail" title="Close detail"
+        class="min-w-[32px] min-h-[32px] flex items-center justify-center rounded text-[#8b949e] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+        <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+      </button>
+    </div>
+    <div id="drawer-body" class="flex-1 overflow-y-auto min-h-0 p-3 space-y-3 text-[11px]"></div>
+  </aside>
 
   <!-- Prune Preview Confirmation Modal -->
   <div id="prune-modal" role="dialog" aria-modal="true" aria-labelledby="prune-modal-title" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -492,67 +425,18 @@
       }
     }
 
+    // A failed run is a state on the run, not a destination. There is no Repair view:
+    // its only real content was the failed phase's output, which the drawer already
+    // shows, and its "Repair patch" panel was permanently empty because nothing
+    // generates diffs.
+    //
+    // Deliberately no global "needs attention" indicator. Any such flag derived from
+    // "some run has ever failed" is lit permanently, which is alarm fatigue and the
+    // mirror of the reassurance fatigue this UI already had. Per D5 an indicator has
+    // to name something a human can act on now; that needs the intent and bullet
+    // model, which does not exist yet.
     function updateRepairTabState(hasFailure) {
       hasGateFailures = hasFailure;
-      const nRepair = document.getElementById('stitch-nav-repair');
-      const rIcon = document.getElementById('repair-icon');
-      const alertDot = document.getElementById('repair-alert-dot');
-
-      if (hasFailure) {
-        nRepair.removeAttribute('disabled');
-        nRepair.removeAttribute('aria-disabled');
-        nRepair.classList.remove('cursor-not-allowed');
-        nRepair.classList.add('hover:text-white');
-        rIcon.className = "fa-solid fa-screwdriver-wrench text-rose-400 text-[10px]";
-        alertDot.classList.remove('hidden');
-      } else {
-        if (activeStitchTab !== 'repair') {
-          nRepair.setAttribute('disabled', 'true');
-          nRepair.setAttribute('aria-disabled', 'true');
-          nRepair.classList.add('cursor-not-allowed');
-          nRepair.classList.remove('hover:text-white');
-        }
-        rIcon.className = "fa-solid fa-screwdriver-wrench text-slate-500 text-[10px]";
-        alertDot.classList.add('hidden');
-      }
-    }
-
-    function switchStitchTab(tab) {
-      if (tab === 'repair' && !hasGateFailures && activeStitchTab !== 'repair') {
-        return;
-      }
-      activeStitchTab = tab;
-      const vStages = document.getElementById('stitch-view-stages');
-      const vTasks = document.getElementById('stitch-view-tasks');
-      const vRepair = document.getElementById('stitch-view-repair');
-      const nStages = document.getElementById('stitch-nav-stages');
-      const nTasks = document.getElementById('stitch-nav-tasks');
-      const nRepair = document.getElementById('stitch-nav-repair');
-
-      vStages.classList.add('hidden');
-      vTasks.classList.add('hidden');
-      vRepair.classList.add('hidden');
-
-      // Destinations are header tabs. An active tab is marked by a bottom border,
-      // which is the conventional tab affordance; a left border reads as a rail item.
-      const baseClasses = "px-2.5 h-11 text-[11px] font-semibold text-[#8b949e] border-b-2 border-transparent hover:text-white flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]";
-      const activeClasses = "px-2.5 h-11 text-[11px] font-bold text-white border-b-2 border-[#58a6ff] flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]";
-
-      nStages.className = baseClasses;
-      nTasks.className = baseClasses;
-      nRepair.className = "px-2.5 h-11 text-[11px] font-semibold text-[#8b949e] border-b-2 border-transparent flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] " + (hasGateFailures ? "hover:text-white" : "cursor-not-allowed");
-
-      if (tab === 'stages') {
-        vStages.classList.remove('hidden');
-        nStages.className = activeClasses;
-      } else if (tab === 'tasks') {
-        vTasks.classList.remove('hidden');
-        nTasks.className = activeClasses;
-        fetchFleet();
-      } else if (tab === 'repair') {
-        vRepair.classList.remove('hidden');
-        nRepair.className = "px-2.5 h-11 text-[11px] font-bold text-white border-b-2 border-rose-500 flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]";
-      }
     }
 
     async function loadProjects() {
@@ -871,7 +755,8 @@
         if (res.ok) {
           closeRefineConfirmModal();
           closeRefineProjectModal();
-          loadProjects();
+
+    loadProjects();
         } else {
           const text = await res.text();
           alert("Save failed: " + text);
@@ -1068,102 +953,49 @@
         const data = await res.json();
         setConnectionError(false);
 
-        const tbody = document.getElementById('fleet-stitch-tbody');
-        const countSpan = document.getElementById('fleet-active-count');
+        drawerLeases = data.leases || [];
         const workersActive = document.getElementById('stat-workers-active');
-        const leases = data.leases || [];
+        if (workersActive) workersActive.innerText = drawerLeases.length;
 
-        countSpan.innerText = leases.length;
-        if (workersActive) workersActive.innerText = leases.length;
-
-        if (leases.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="5" class="p-6 text-center text-[#8b949e]">No active worktrees allocated.</td></tr>';
-          return;
+        // Keep the drawer current if it is already showing workers.
+        if (drawerIsOpen() && document.getElementById('drawer-kind').textContent === 'workers') {
+          document.getElementById('drawer-title').textContent = `Workers & worktrees (${drawerLeases.length})`;
+          document.getElementById('drawer-body').innerHTML = workersHTML(drawerLeases);
         }
-
-        tbody.innerHTML = leases.map(l => {
-          const isRunning = l.status === 'running';
-          const isPassed = l.status === 'passed';
-          const isFailed = l.status === 'failed';
-          let statusBadge = `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold font-mono bg-[#161b22] text-[#8b949e] border border-[#30363d]">${l.status}</span>`;
-          if (isRunning) {
-            statusBadge = `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold font-mono bg-amber-950/60 text-amber-300 border border-amber-800">running</span>`;
-          } else if (isPassed) {
-            statusBadge = `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold font-mono bg-emerald-950/60 text-[#3fb950] border border-emerald-800">passed</span>`;
-          } else if (isFailed) {
-            statusBadge = `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold font-mono bg-rose-950/60 text-rose-300 border border-rose-800">failed</span>`;
-          }
-
-          return `
-            <tr class="hover:bg-[#161b22]/50 transition">
-              <td class="p-2.5 font-bold text-[#58a6ff] font-mono">${l.task_id}</td>
-              <td class="p-2.5 text-slate-300 font-mono truncate max-w-xs" title="${l.path}">${l.path}</td>
-              <td class="p-2.5">
-                ${statusBadge}
-              </td>
-              <td class="p-2.5 text-[#8b949e] font-mono">${new Date(l.created_at).toLocaleTimeString()}</td>
-              <td class="p-2.5 text-right">
-                <button onclick="cleanActiveWorktrees('${l.task_id}')" class="px-2 py-0.5 rounded bg-[#161b22] text-[#8b949e] hover:text-white border border-[#30363d] text-[10px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-                  Prune
-                </button>
-              </td>
-            </tr>
-          `;
-        }).join('');
       } catch (err) {
         setConnectionError(true);
         console.error("Failed fetching fleet:", err);
       }
     }
+    // Renders the run list from allRuns, honouring the filter. Separated from
+    // fetchRuns so typing in the filter re-renders without a network round trip.
+    function renderRunList() {
+      const listContainer = document.getElementById('sidebar-runs-list');
+      const countSpan = document.getElementById('sidebar-runs-count');
+      const shown = allRuns.filter(runMatchesFilter);
 
-    async function fetchRuns() {
-      try {
-        const url = selectedProject === 'all' ? '/api/runs' : `/api/runs?project=${encodeURIComponent(selectedProject)}`;
-        const res = await fetch(url);
-        allRuns = await res.json() || [];
-        setConnectionError(false);
+      countSpan.innerText = runFilter && shown.length !== allRuns.length
+        ? `${shown.length}/${allRuns.length}`
+        : String(allRuns.length);
 
-        const lastUpdatedEl = document.getElementById('last-updated');
-        if (lastUpdatedEl) {
-          lastUpdatedEl.innerText = `Updated ${new Date().toLocaleTimeString()}`;
-        }
+      if (allRuns.length === 0) {
+        listContainer.innerHTML = '<div class="p-2 text-center text-[#8b949e] text-[10px]">No runs recorded.</div>';
+        return;
+      }
+      if (shown.length === 0) {
+        listContainer.innerHTML = `<div class="p-3 text-center text-[#8b949e] text-[10px]">No runs match <span class="font-mono text-slate-300">${escapeHTML(runFilter)}</span>.</div>`;
+        return;
+      }
 
-        document.getElementById('stat-total-runs').innerText = allRuns.length;
+      // Drop placeholders and any card that the filter now excludes.
+      Array.from(listContainer.children).forEach(child => {
+        if (!child.hasAttribute('data-run-id')) child.remove();
+      });
 
-        // Compute honest header pass metric
-        const passed = allRuns.filter(r => r.status === 'passed').length;
-        const done = allRuns.filter(r => ['passed', 'failed'].includes(r.status)).length;
-        const metricsBadge = document.getElementById('stat-metrics-badge');
-        if (metricsBadge) {
-          metricsBadge.innerText = done ? `${passed}/${done} passed` : 'No completed runs';
-        }
+      const existingButtons = Array.from(listContainer.querySelectorAll('[data-run-id]'));
+      const existingMap = new Map(existingButtons.map(b => [b.getAttribute('data-run-id'), b]));
 
-        // Check globally if any run has failed gates
-        const hasFailedRun = allRuns.some(r => r.status === 'failed');
-        updateRepairTabState(hasFailedRun);
-
-        const listContainer = document.getElementById('sidebar-runs-list');
-        const countSpan = document.getElementById('sidebar-runs-count');
-        countSpan.innerText = allRuns.length;
-
-        if (allRuns.length === 0) {
-          listContainer.innerHTML = '<div class="p-2 text-center text-[#8b949e] text-[10px]">No runs recorded.</div>';
-          renderEmptyState();
-          return;
-        }
-
-        // Remove any static or non-run placeholder nodes when runs exist
-        Array.from(listContainer.children).forEach(child => {
-          if (!child.hasAttribute('data-run-id')) {
-            child.remove();
-          }
-        });
-
-        // Key-based in-place DOM update for runs list to preserve scroll & focus
-        const existingButtons = Array.from(listContainer.querySelectorAll('[data-run-id]'));
-        const existingMap = new Map(existingButtons.map(b => [b.getAttribute('data-run-id'), b]));
-
-        allRuns.forEach(r => {
+      shown.forEach(r => {
           const isSelected = (activeRunId === r.id);
           const isPass = r.status === 'passed';
           const isFail = r.status === 'failed';
@@ -1223,10 +1055,73 @@
             </div>
           `;
           existingMap.delete(r.id);
-        });
+      });
 
-        // Remove deleted runs
-        existingMap.forEach(btn => btn.remove());
+      // Remove cards for runs that are gone or filtered out.
+      existingMap.forEach(btn => btn.remove());
+    }
+
+    // ---- Run filter ----------------------------------------------------------
+    let runFilter = '';
+
+    function onRunFilterInput() {
+      const input = document.getElementById('run-filter');
+      runFilter = (input.value || '').trim().toLowerCase();
+      document.getElementById('run-filter-clear').classList.toggle('hidden', runFilter === '');
+      renderRunList();
+    }
+
+    function clearRunFilter() {
+      const input = document.getElementById('run-filter');
+      input.value = '';
+      runFilter = '';
+      document.getElementById('run-filter-clear').classList.add('hidden');
+      renderRunList();
+      input.focus();
+    }
+
+    // Matches the four fields a card actually shows, so what you type maps to what you
+    // can see. Every term must match somewhere, which makes "cid failed" useful.
+    function runMatchesFilter(r) {
+      if (!runFilter) return true;
+      const hay = [r.slug, r.brief, r.project, r.status, r.id, r.change_id]
+        .filter(Boolean).join(' ').toLowerCase();
+      return runFilter.split(/\s+/).every(term => hay.includes(term));
+    }
+
+    async function fetchRuns() {
+      try {
+        const url = selectedProject === 'all' ? '/api/runs' : `/api/runs?project=${encodeURIComponent(selectedProject)}`;
+        const res = await fetch(url);
+        allRuns = await res.json() || [];
+        setConnectionError(false);
+
+        const lastUpdatedEl = document.getElementById('last-updated');
+        if (lastUpdatedEl) {
+          lastUpdatedEl.innerText = `Updated ${new Date().toLocaleTimeString()}`;
+        }
+
+        document.getElementById('stat-total-runs').innerText = allRuns.length;
+
+        // Compute honest header pass metric
+        const passed = allRuns.filter(r => r.status === 'passed').length;
+        const done = allRuns.filter(r => ['passed', 'failed'].includes(r.status)).length;
+        const metricsBadge = document.getElementById('stat-metrics-badge');
+        if (metricsBadge) {
+          metricsBadge.innerText = done ? `${passed}/${done} passed` : 'No completed runs';
+        }
+
+        // Check globally if any run has failed gates
+        const hasFailedRun = allRuns.some(r => r.status === 'failed');
+        updateRepairTabState(hasFailedRun);
+
+        renderRunList();
+
+        if (allRuns.length === 0) {
+          renderEmptyState();
+          return;
+        }
+
 
         if (!activeRunId && allRuns.length > 0) {
           selectRun(allRuns[0].id);
@@ -1261,7 +1156,6 @@
         briefEl.textContent = bText;
         briefEl.title = bText;
       }
-      document.getElementById('repair-run-num').innerText = runId;
       
       const current = allRuns.find(r => r.id === runId);
       const bannerStatus = document.getElementById('system-status-pill');
@@ -1270,6 +1164,14 @@
         lastSelectedRunStatus = current.status;
         lastSelectedRunUpdatedAt = current.updated_at;
         document.getElementById('active-matrix-project').innerText = current.project;
+        const meta = document.getElementById('active-run-meta');
+        if (meta) {
+          const parts = [];
+          if (current.created_at) parts.push(relativeTime(current.created_at));
+          if (current.change_id) parts.push(current.change_id);
+          meta.innerText = parts.length ? '\u00b7 ' + parts.join(' \u00b7 ') : '';
+          meta.title = current.id;
+        }
 
         switch (current.status) {
           case 'passed':
@@ -1300,7 +1202,6 @@
         setConnectionError(false);
         renderLiveStitchMatrix(current, data.phases || [], data.envelopes || []);
         renderLiveContractInspector(data.envelopes || []);
-        renderLiveRepairDiagnostics(current, data.phases || [], data.envelopes || []);
       } catch (err) {
         setConnectionError(true);
         console.error("Failed fetching run details:", err);
@@ -1308,16 +1209,18 @@
     }
 
     function renderEmptyState() {
-      document.getElementById('stage-run-badge').innerText = 'Run: None';
+      document.getElementById('stage-run-badge').innerText = 'No run selected';
+      const metaReset = document.getElementById('active-run-meta');
+      if (metaReset) metaReset.innerText = '';
       const briefReset = document.getElementById('active-run-brief');
       if (briefReset) briefReset.textContent = '';
       document.getElementById('active-matrix-project').innerText = 'None';
       document.getElementById('stage-matrix-tbody').innerHTML = `
         <tr><td colspan="4" class="p-8 text-center text-[#8b949e]">No pipeline runs recorded for this project. Click <strong>Dispatch stage</strong> above to launch an autonomous run.</td></tr>
       `;
-      document.getElementById('contract-inspector-code').innerHTML = `
-        <div class="text-[#8b949e]">// Awaiting pipeline dispatch...</div>
-      `;
+      drawerEnvelopes = [];
+      const envBadge = document.getElementById('envelope-count-badge');
+      if (envBadge) envBadge.innerText = '0 envelopes';
     }
 
     function escapeHTML(v) {
@@ -1361,6 +1264,79 @@
       running: { cls: 'text-[#58a6ff]', icon: 'fa-solid fa-spinner fa-spin', label: 'Running' },
       pending: { cls: 'text-[#8b949e]', icon: 'fa-regular fa-clock',       label: 'Pending' }
     };
+
+    // ---- Detail drawer -------------------------------------------------------
+    // Non-modal: no focus trap, no aria-modal. Focus moves in on open so a keyboard
+    // user lands on the content, and returns to the opener on close.
+    let drawerOpener = null;
+    // Phases for the selected run, keyed by kind + name, so the drawer can be opened
+    // from a matrix cell without refetching.
+    let drawerPhaseIndex = new Map();
+
+    function drawerKey(kind, name) { return (kind || '') + '\u0000' + name; }
+
+    function openDrawer(title, kind, bodyHTML, opener) {
+      const d = document.getElementById('detail-drawer');
+      document.getElementById('drawer-title').textContent = title;
+      document.getElementById('drawer-kind').textContent = kind || '\u2014';
+      document.getElementById('drawer-body').innerHTML = bodyHTML;
+      d.setAttribute('aria-hidden', 'false');
+      d.removeAttribute('inert');
+      d.classList.remove('translate-x-full');
+      drawerOpener = opener || document.activeElement;
+      setTimeout(() => document.getElementById('drawer-close').focus(), 60);
+    }
+
+    function closeDrawer() {
+      const d = document.getElementById('detail-drawer');
+      if (d.getAttribute('aria-hidden') === 'true') return;
+      d.setAttribute('aria-hidden', 'true');
+      d.setAttribute('inert', '');
+      d.classList.add('translate-x-full');
+      if (drawerOpener && typeof drawerOpener.focus === 'function') drawerOpener.focus();
+      drawerOpener = null;
+    }
+
+    function drawerIsOpen() {
+      return document.getElementById('detail-drawer').getAttribute('aria-hidden') === 'false';
+    }
+
+    // Renders whatever the phase payload actually holds. Gates store
+    // {gate_name, command, passed, output}; agent phases store {agent, attempt,
+    // raw_output}. Anything absent renders as an em dash rather than a guess.
+    function phaseDetailHTML(phase) {
+      const p = phase.payload || {};
+      const look = PHASE_LOOK[phase.status] || { cls: 'text-[#8b949e]', label: phase.status };
+      const rows = [
+        ['Status', `<span class="${look.cls} font-bold">${escapeHTML(look.label)}</span>`],
+        ['Repo', escapeHTML(phase.repo || '\u2014')],
+        ['Duration', escapeHTML(phase.status === 'running' ? 'running' : formatDuration(phase.duration_ms))],
+      ];
+      if (p.command) rows.push(['Command', `<code class="text-amber-300 break-all">${escapeHTML(p.command)}</code>`]);
+      if (p.agent) rows.push(['Agent', `<code class="text-teal-300">${escapeHTML(p.agent)}</code>`]);
+      if (p.attempt) rows.push(['Attempt', escapeHTML(p.attempt)]);
+      if (phase.error) rows.push(['Error', `<span class="text-rose-400 break-all">${escapeHTML(phase.error)}</span>`]);
+
+      const output = p.output || p.raw_output || p.malformed_raw || '';
+      const outBlock = output.trim()
+        ? `<pre class="mt-1 p-2 rounded bg-[#161b22] border border-[#21262d] text-[10px] leading-relaxed text-slate-300 whitespace-pre-wrap break-all max-h-[28rem] overflow-y-auto">${escapeHTML(output.trim())}</pre>`
+        : `<div class="text-[#8b949e]">No output captured for this phase.</div>`;
+
+      return `
+        <dl class="grid grid-cols-[5.5rem_1fr] gap-x-3 gap-y-1">
+          ${rows.map(([k, v]) => `<dt class="text-[#8b949e]">${escapeHTML(k)}</dt><dd class="min-w-0">${v}</dd>`).join('')}
+        </dl>
+        <div>
+          <div class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider mb-1">Output</div>
+          ${outBlock}
+        </div>`;
+    }
+
+    function openPhaseDrawer(kind, name, opener) {
+      const phase = drawerPhaseIndex.get(drawerKey(kind, name));
+      if (!phase) return;
+      openDrawer(name, kind === 'code' ? 'gate' : kind, phaseDetailHTML(phase), opener);
+    }
 
     function phaseCellHTML(phase) {
       if (!phase) {
@@ -1415,8 +1391,10 @@
       const seenCols = new Set();
       const kindsByName = new Map(); // name -> Set(kind), to detect collisions
       const byRepo = new Map();
+      drawerPhaseIndex = new Map();
       list.forEach(p => {
         const key = colKey(p);
+        drawerPhaseIndex.set(drawerKey(p.kind, p.name), p);
         if (!seenCols.has(key)) {
           seenCols.add(key);
           cols.push({ key, kind: p.kind || '', name: p.name });
@@ -1461,27 +1439,89 @@
                 <i class="fa-solid fa-code-branch text-[#8b949e]" aria-hidden="true"></i> ${escapeHTML(repo)}
               </div>
             </td>
-            ${cols.map(c => `<td class="p-2.5 border-r border-[#21262d] space-y-1 align-top">${phaseCellHTML(phaseMap.get(c.key))}</td>`).join('')}
+            ${cols.map(c => {
+              const ph = phaseMap.get(c.key);
+              if (!ph) {
+                return `<td class="p-2.5 border-r border-[#21262d] align-top">${phaseCellHTML(null)}</td>`;
+              }
+              // A cell with a phase is a control: it opens that phase's detail.
+              return `<td class="p-0 border-r border-[#21262d] align-top">
+                <button type="button" onclick="openPhaseDrawer('${escapeAttr(ph.kind || '')}','${escapeAttr(ph.name)}', this)"
+                  class="w-full text-left p-2.5 space-y-1 hover:bg-[#161b22]/60 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#58a6ff]"
+                  aria-label="${escapeAttr(ph.name + ' ' + (ph.kind === 'code' ? 'gate' : ph.kind) + ', ' + ph.status + '. Open detail.')}">
+                  ${phaseCellHTML(ph)}
+                </button></td>`;
+            }).join('')}
             <td class="p-2.5 space-y-1 align-top">${deliveryCellHTML(envelopes, repo)}</td>
           </tr>`;
       }).join('');
     }
 
+    // Envelopes for the selected run, rendered into the drawer on demand rather than
+    // occupying a permanently open panel.
+    let drawerEnvelopes = [];
+
+    function openEnvelopesDrawer(opener) {
+      const n = drawerEnvelopes.length;
+      openDrawer(`Handoff envelopes (${n})`, 'envelopes', envelopesHTML(drawerEnvelopes), opener);
+    }
+
     function renderLiveContractInspector(envelopes) {
-      const container = document.getElementById('contract-inspector-code');
+      drawerEnvelopes = envelopes || [];
       const badge = document.getElementById('envelope-count-badge');
-      
-      badge.innerText = `${(envelopes || []).length} envelope(s)`;
-
-      if (!envelopes || envelopes.length === 0) {
-        container.innerHTML = `
-          <div class="text-[#8b949e]">// No handoff envelopes generated yet for this run.</div>
-          <div class="text-[#7ee787]">// Zero-token contract proofs will automatically stream here upon phase completion.</div>
-        `;
-        return;
+      const n = drawerEnvelopes.length;
+      badge.innerText = n === 1 ? '1 envelope' : `${n} envelopes`;
+      // If the drawer is already showing envelopes, keep it current.
+      if (drawerIsOpen() && document.getElementById('drawer-kind').textContent === 'envelopes') {
+        document.getElementById('drawer-title').textContent = `Handoff envelopes (${n})`;
+        document.getElementById('drawer-body').innerHTML = envelopesHTML(drawerEnvelopes);
       }
+    }
 
-      container.innerHTML = envelopes.map(e => {
+    // Worktree leases, opened from the ambient "Workers" count in the status bar.
+    // This was a top-level tab, which put a worktree table beside a run list it had no
+    // relationship to. It is reference material, so it belongs in the drawer.
+    let drawerLeases = [];
+
+    function openWorkersDrawer(opener) {
+      fetchFleet();
+      openDrawer(`Workers & worktrees (${drawerLeases.length})`, 'workers', workersHTML(drawerLeases), opener);
+    }
+
+    function workersHTML(leases) {
+      if (!leases || leases.length === 0) {
+        return '<div class="text-[#8b949e]">No worktrees allocated.</div>';
+      }
+      return `
+        <div class="flex items-center justify-between gap-2 mb-1">
+          <span class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider">Allocated worktrees</span>
+          <button type="button" onclick="cleanActiveWorktrees()"
+            class="px-2 py-0.5 rounded bg-[#161b22] hover:bg-[#21262d] border border-[#30363d] text-slate-300 hover:text-white text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+            Prune all
+          </button>
+        </div>
+        <div class="space-y-1.5">
+        ${leases.map(l => `
+          <div class="p-2 rounded bg-[#161b22] border border-[#30363d] space-y-1">
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-mono font-bold text-[#58a6ff] truncate">${escapeHTML(l.task_id)}</span>
+              <span class="text-[9px] px-1.5 py-0.5 rounded border border-[#30363d] text-[#8b949e] font-mono shrink-0">${escapeHTML(l.status || '—')}</span>
+            </div>
+            <div class="font-mono text-[10px] text-slate-400 break-all" title="${escapeAttr(l.path || '')}">${escapeHTML(l.path || '—')}</div>
+            <div class="flex items-center justify-between gap-2 text-[10px] text-[#8b949e]">
+              <span>${escapeHTML(l.created_at ? relativeTime(l.created_at) : '—')}</span>
+              <button type="button" onclick="cleanActiveWorktrees('${escapeAttr(l.task_id)}')"
+                class="px-2 py-0.5 rounded bg-[#0b0e14] hover:bg-[#21262d] border border-[#30363d] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">Prune</button>
+            </div>
+          </div>`).join('')}
+        </div>`;
+    }
+
+    function envelopesHTML(envelopes) {
+      if (!envelopes || envelopes.length === 0) {
+        return '<div class="text-[#8b949e]">No handoff envelopes recorded for this run yet.</div>';
+      }
+      return envelopes.map(e => {
         let isPR = e.stage === 'review' || (e.summary && e.summary.toLowerCase().includes('pr'));
         let artifactsHTML = '';
         
@@ -1515,61 +1555,17 @@
             <div class="flex justify-between items-center text-[10px]">
               <span class="font-bold text-[#58a6ff] flex items-center gap-1.5 font-mono">
                 <i class="fa-solid ${isPR ? 'fa-code-pull-request text-emerald-400' : 'fa-box-open text-[#58a6ff]'}" aria-hidden="true"></i>
-                ${e.repo} / ${e.stage}
+                ${escapeHTML(e.repo)} / ${escapeHTML(e.stage)}
               </span>
               <span class="text-[#8b949e] font-mono">${new Date(e.created_at).toLocaleTimeString()}</span>
             </div>
-            <div class="text-white text-xs font-medium">${e.summary}</div>
+            <div class="text-white text-xs font-medium">${escapeHTML(e.summary)}</div>
             ${artifactsHTML ? `<div class="space-y-1 pt-1">${artifactsHTML}</div>` : ''}
           </div>
         `;
       }).join('');
     }
 
-    function renderLiveRepairDiagnostics(run, phases, envelopes) {
-      const activeContainer = document.getElementById('repair-active-container');
-      const emptyContainer = document.getElementById('repair-empty-container');
-      const stdoutEl = document.getElementById('repair-stdout-content');
-      const diffEl = document.getElementById('repair-diff-content');
-      const phaseTitleEl = document.getElementById('repair-failed-phase-name');
-      const fileTitleEl = document.getElementById('repair-diff-filename');
-      const msgEl = document.getElementById('repair-bottom-msg');
-      const badgeEl = document.getElementById('repair-status-badge');
-
-      const failedPhase = (phases || []).find(p => p.status === 'failed');
-
-      if (failedPhase) {
-        activeContainer.classList.remove('hidden');
-        emptyContainer.classList.add('hidden');
-
-        phaseTitleEl.innerText = `${failedPhase.repo} :: ${failedPhase.name}`;
-        badgeEl.className = "px-2 py-0.5 rounded bg-rose-900 text-rose-200 font-mono";
-        badgeEl.innerText = "● Gate failed";
-
-        let output = "No output captured for this phase.";
-        if (failedPhase.payload && failedPhase.payload.output) {
-          output = failedPhase.payload.output;
-        } else if (failedPhase.error) {
-          output = failedPhase.error;
-        }
-
-        stdoutEl.innerText = output;
-        fileTitleEl.innerText = failedPhase.name;
-
-        if (failedPhase.payload && failedPhase.payload.diff) {
-          diffEl.innerText = failedPhase.payload.diff;
-        } else {
-          diffEl.innerHTML = `<div class="text-[#8b949e]">No repair diff proposed for this failure.</div>`;
-        }
-
-        msgEl.innerHTML = `<span class="text-rose-400">></span> Gate failure detected on <strong>${failedPhase.repo}</strong>. Inspect stdout trace.`;
-      } else {
-        activeContainer.classList.add('hidden');
-        emptyContainer.classList.remove('hidden');
-      }
-    }
-
-    // Modal Escape & Focus Trap Handler
     window.addEventListener('keydown', (e) => {
       const dispatchModal = document.getElementById('dispatch-modal');
       const refineModal = document.getElementById('refine-project-modal');
@@ -1577,6 +1573,11 @@
       const pruneModal = document.getElementById('prune-modal');
       
       const openModal = [refineConfirmModal, dispatchModal, refineModal, pruneModal].find(m => m && !m.classList.contains('hidden'));
+
+      if (e.key === 'Escape' && !openModal && drawerIsOpen()) {
+        closeDrawer();
+        return;
+      }
 
       if (e.key === 'Escape' && openModal) {
         if (openModal === dispatchModal) closeDispatchModal();
