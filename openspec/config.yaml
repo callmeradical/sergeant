@@ -1,0 +1,63 @@
+schema: spec-driven
+
+context: |
+  Sergeant v2 is a Go-native software factory. Read docs/prd-sergeant-v2.md; its
+  numbered requirements (R2.x, R3.x, R4.x) and settled decisions (D1-D7, O1-O3) are
+  binding. Read AGENTS.md before changing behaviour.
+
+  Domain model:
+    Project            a named set of repositories
+      Intent           a durable statement of desired change; may span repos; PRIMARY
+        Bullet         exactly ONE repo, a vertical slice through that repo's stack,
+                       implemented test-first, yielding one commit and one PR
+
+  A bullet is scoped to one repository. A vertical slice goes top to bottom through
+  that repo's stack. It is never a horizontal slice across repos. Work in a second
+  repository is a second bullet. The intent holds the merge order across its bullets.
+
+  v1 is not a dependency. The bin/sgt-* shell toolbelt is v1. Do not call it, do not
+  use tmux, and do not write into ~/.local/share/sergeant/fleet. Where v2 lacks a v1
+  capability, that is unimplemented v2 scope, not a gap to close by calling v1.
+
+  Truthfulness: never display or record a value that is not derived from stored state.
+  A process exit, a generated file, or a commit alone cannot mark work as passed.
+
+  Tech stack: Go, SQLite via modernc.org/sqlite, an embedded single-file dashboard at
+  internal/ui/static/index.html served through //go:embed (changing it requires a
+  rebuild). Validation is: go build ./... && go vet ./internal/... && go test
+  ./internal/... -count=1
+
+  Branches are named <type>/<change-id> where the suffix is this OpenSpec change id.
+  The audit link is the openspec/changes/<id>/ directory travelling in the pull
+  request, with a "Change-Id: <id>" trailer as the secondary link.
+
+rules:
+  proposal:
+    - Name every repository the change touches, and say which one owns each part.
+    - State which PRD requirement or decision (R2.x, R3.x, D1-D7, O1-O3) the change
+      serves, or say explicitly that it introduces new scope.
+  specs:
+    - Write every scenario so it can become a failing test before implementation.
+      Decision D3 requires a recorded failing gate before implementation and a
+      passing one after, so a scenario that cannot fail is not usable.
+    - Use WHEN/THEN with exactly four hashtags for scenario headings.
+  design:
+    - Say which repository owns each change, and name the merge order if more than
+      one repository is involved.
+    - Do not propose shelling out to bin/sgt-* or using tmux.
+  tasks:
+    - One task touches exactly one repository. Work in a second repository is a
+      separate task, never a sub-bullet of the first.
+    - Order tasks by dependency and state the required merge order explicitly, since
+      sergeant releases a bullet's PR only after its upstream bullets are merged.
+    - Each task states how completion is verified with a command whose exit status
+      decides the outcome.
+
+operations:
+  apply:
+    guidance:
+      - Run go build ./... and go test ./internal/... -count=1 before reporting done.
+      - Never report a task complete when its verification command failed.
+  archive:
+    guidance:
+      - Confirm the delta specs merged into openspec/specs/ before archiving.

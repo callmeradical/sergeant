@@ -7,3 +7,6 @@ dist/
 .impeccable/
 bin/sergeant
 bin/sergeant-mcp
+
+# per-run agent scratch written into worktrees
+.sergeant/
