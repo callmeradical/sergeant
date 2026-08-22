@@ -6,12 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"text/tabwriter"
-	"time"
 
 	"github.com/callmeradical/sergeant/internal/config"
 	"github.com/callmeradical/sergeant/internal/dag"
 	"github.com/callmeradical/sergeant/internal/handoff"
 	"github.com/callmeradical/sergeant/internal/mcp"
+	"github.com/callmeradical/sergeant/internal/naming"
 	"github.com/callmeradical/sergeant/internal/store"
 	"github.com/callmeradical/sergeant/internal/ui"
 )
@@ -87,7 +87,9 @@ func runProject(projName string) {
 	}
 	defer st.Close()
 
-	taskID := fmt.Sprintf("sgt-%d", time.Now().Unix())
+	// The same generator the dispatch handler uses. Two id formats would let a
+	// CLI run and a dispatched run collide on the runs primary key.
+	taskID := naming.RunID()
 	handoffBase := filepath.Join(home, ".local", "share", "sergeant", "fleet", taskID, "handoff")
 	router := handoff.NewRouter(handoffBase)
 

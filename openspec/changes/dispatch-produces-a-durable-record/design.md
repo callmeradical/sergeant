@@ -49,6 +49,27 @@ An empty `request_id` must not collide with another empty one. A unique index
 treats SQL `NULL` as distinct in SQLite, so store the absent case as `NULL`, never
 as `''`.
 
+Two consequences fall out of that, both settled while implementing bullet 2.
+
+**The run row is written before the intent and the bullets.** Bullet 1 wrote the
+intent first, on the reading "planning record, then domain record, then execution
+record". That ordering cannot survive an idempotency key: the key is claimed by
+the run insert, so a repeat that wrote the intent first would have created an
+intent and N bullets by the time the key refused it. D8 makes the intent the
+dashboard's primary noun, so every retry would surface as a duplicate intent on
+the operator's screen. The run insert therefore comes first and carries the key.
+O3's ordering is untouched — the change is still resolved before any row exists —
+and the intent id stays derivable from the run id, so the run can point at its
+intent before the intent row is written.
+
+**A run id no longer comes from `time.Now().Unix()`.** Two dispatches inside one
+second produced the same id and collided on the runs primary key. That made a
+same-second repeat *look* deduplicated when nothing had deduplicated it, and it
+made two dispatches that legitimately omit `request_id` fail outright. The spec's
+same-second scenario names this: accidental collision is a different failure from
+deliberate deduplication. Ids are now `sgt-<epoch>-<hex>` from `naming.RunID`,
+which keeps the epoch readable and makes deduplication the key's job alone.
+
 ## Bullet 3 — sequenced change stream
 
 Add an append-only `changes` table: `seq INTEGER PRIMARY KEY AUTOINCREMENT`,

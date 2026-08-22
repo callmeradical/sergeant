@@ -5,6 +5,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"github.com/callmeradical/sergeant/internal/config"
 	"github.com/callmeradical/sergeant/internal/dag"
 	"github.com/callmeradical/sergeant/internal/handoff"
+	"github.com/callmeradical/sergeant/internal/naming"
 	"github.com/callmeradical/sergeant/internal/runner"
 	"github.com/callmeradical/sergeant/internal/store"
 )
@@ -1005,6 +1007,12 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		// ChangeID is optional. When empty, a change is derived from the brief and
 		// scaffolded (decision O3); when set, it must already exist.
 		ChangeID string `json:"change_id"`
+		// RequestID is the caller's optional idempotency key (decision D10, from
+		// AHP's runAutomation). A repeat of a known key is a retry of the original
+		// request: it returns that run and starts nothing. It stays optional so
+		// existing callers and the MCP contract keep working, and two dispatches
+		// that omit it never deduplicate against each other.
+		RequestID string `json:"request_id"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Project == "" {
@@ -1053,16 +1061,52 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	// work the engine actually performs cannot name different repositories.
 	targetRepos := targetRepositories(proj, req.Repos)
 
-	taskID := fmt.Sprintf("sgt-%d", time.Now().Unix())
+	taskID := naming.RunID()
 	brief := strings.TrimSpace(req.Brief)
+	requestID := strings.TrimSpace(req.RequestID)
+
+	// The intent id is derived from the run id rather than generated
+	// independently (decision D4), so it is known before the intent row exists.
+	// That is what lets the run be written first while still pointing at its
+	// intent.
+	intentID := taskID + "-intent"
+
+	// The run row is inserted before the intent and the bullets, and it carries
+	// the idempotency key. This ordering is the mechanism, not a preference.
+	//
+	// The key is claimed by inserting and inspecting the failure — never by
+	// querying first, which would let two concurrent POSTs both observe an unused
+	// key and both proceed. Because the claim is the run insert, it must come
+	// before anything a repeat would have to undo. Writing the intent first would
+	// mean a repeat had already created an intent and N bullets by the time the
+	// key refused it, and decision D8 makes the intent the dashboard's primary
+	// noun, so every retry would show up as a duplicate on the operator's screen.
+	//
+	// O3's ordering still holds: the change is resolved above, so no run row
+	// precedes the planning record.
+	runRec := &store.RunRecord{
+		ID:        taskID,
+		Project:   proj.Name,
+		TaskID:    taskID,
+		Brief:     brief,
+		ChangeID:  change.ID,
+		IntentID:  intentID,
+		RequestID: requestID,
+		Status:    "running",
+	}
+	if err := srv.Store.CreateRun(runRec); err != nil {
+		if !errors.Is(err, store.ErrDuplicateRequestID) {
+			http.Error(w, fmt.Sprintf("recording the run for this dispatch: %v", err), http.StatusInternalServerError)
+			return
+		}
+		// A retry of a request already served. Answer with the run it created and
+		// start nothing: no intent, no bullet, no worktree, no branch, no agent.
+		srv.respondWithExistingRun(w, requestID, changeRepoPath, changeRepoName, change)
+		return
+	}
 
 	// Decision D4: sergeant stores intents and bullets itself, and decision D8
-	// makes the intent the dashboard's primary noun. The intent is written after
-	// the change is resolved and before the run exists, so the record order reads
-	// planning record, then domain record, then execution record — the ordering O3
-	// requires, extended inward. A dispatch refused above this point has written
-	// nothing.
-	intentID := taskID + "-intent"
+	// makes the intent the dashboard's primary noun.
 	if err := srv.Store.CreateIntent(&store.IntentRecord{
 		ID:        intentID,
 		Project:   proj.Name,
@@ -1087,17 +1131,6 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	runRec := &store.RunRecord{
-		ID:       taskID,
-		Project:  proj.Name,
-		TaskID:   taskID,
-		Brief:    brief,
-		ChangeID: change.ID,
-		IntentID: intentID,
-		Status:   "running",
-	}
-	_ = srv.Store.CreateRun(runRec)
-
 	handoffBase := filepath.Join(dag.FleetRoot(), taskID, "handoff")
 	router := handoff.NewRouter(handoffBase)
 	engine := dag.NewEngine(proj, srv.Store, router)
@@ -1109,17 +1142,68 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 
 	go srv.executeRun(ctx, cancel, engine, proj, taskID, strings.TrimSpace(req.Brief), targetRepos)
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, dispatchResponse(taskID, proj.Name, changeRepoName, change))
+}
+
+// dispatchResponse is the one shape a dispatch answers with.
+//
+// A fresh dispatch and a deduplicated repeat both build their response here, so
+// the caller cannot tell them apart and needs no branch — which is the point of
+// the idempotency key. Two separately written response literals would drift.
+func dispatchResponse(runID, project, changeRepoName string, change ChangeRef) map[string]interface{} {
+	return map[string]interface{}{
 		"status":  "dispatched",
-		"task_id": taskID,
-		"project": proj.Name,
+		"task_id": runID,
+		"project": project,
 		// The change is reported as it was resolved on disk, including which repo
 		// holds it, so the operator can find the audit artifact for this run.
 		"change_id":      change.ID,
 		"change_dir":     change.Dir,
 		"change_repo":    changeRepoName,
 		"change_created": change.Created,
-	})
+	}
+}
+
+// respondWithExistingRun answers a repeat of a known idempotency key with the run
+// that key already created.
+//
+// It reports the stored run's own change, not the change this repeat resolved. A
+// caller that reuses a key with a different brief would otherwise be told its new
+// change id alongside somebody else's run id, and the dashboard rule is that
+// nothing is rendered that cannot be derived from stored state.
+func (srv *Server) respondWithExistingRun(
+	w http.ResponseWriter,
+	requestID, changeRepoPath, changeRepoName string,
+	resolved ChangeRef,
+) {
+	existing, err := srv.Store.GetRunByRequestID(requestID)
+	if err != nil {
+		// The insert was refused for this key and yet no run holds it. Something
+		// deleted the run between the two statements. Say so rather than inventing
+		// a run id.
+		http.Error(w, fmt.Sprintf(
+			"request id %q is already in use but its run could not be read back: %v", requestID, err),
+			http.StatusInternalServerError)
+		return
+	}
+
+	change := resolved
+	if existing.ChangeID != resolved.ID {
+		// The stored run is accountable to a different change than this repeat
+		// named. Prove that change's directory rather than asserting it; a
+		// non-empty id makes resolveChange verify and never scaffold.
+		change, err = resolveChange(changeRepoPath, existing.ChangeID, "")
+		if err != nil {
+			http.Error(w, fmt.Sprintf(
+				"run %s is accountable to change %q, which could not be resolved: %v",
+				existing.ID, existing.ChangeID, err), http.StatusInternalServerError)
+			return
+		}
+	}
+	// A repeat scaffolded nothing, whatever the original did.
+	change.Created = false
+
+	writeJSON(w, http.StatusOK, dispatchResponse(existing.ID, existing.Project, changeRepoName, change))
 }
 
 // DeliveryReport describes what a run actually produced on disk. Every field is
