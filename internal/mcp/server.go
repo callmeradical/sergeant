@@ -76,6 +76,118 @@ func (s *MCPServer) ServeStdio() error {
 	}
 }
 
+// Tools is the advertised tool surface.
+//
+// It is a function rather than a literal inside handleRequest so that what a
+// client is told exists can be asserted directly. A tool that is implemented but
+// not advertised is unreachable, and the two lists drifting apart is not
+// something a test could otherwise catch.
+func Tools() []Tool {
+	return []Tool{
+		{
+			Name:        "sergeant_status",
+			Description: "Get the current Sergeant factory status, active runs, and project topology.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"project": map[string]string{"type": "string", "description": "Optional project name filter"},
+				},
+			},
+		},
+		{
+			Name:        "sergeant_get_brief",
+			Description: "Get the intent brief, acceptance criteria, and worktree paths for a project stage.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"project": map[string]string{"type": "string", "description": "Project name (e.g. cid-system, better-than-boxes)"},
+				},
+				"required": []string{"project"},
+			},
+		},
+		{
+			Name:        "sergeant_run_gates",
+			Description: "Execute 100% deterministic zero-token code quality gates (test, lint) for a repository.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"project": map[string]string{"type": "string", "description": "Target project name"},
+					"repo":    map[string]string{"type": "string", "description": "Target repository name"},
+				},
+				"required": []string{"project", "repo"},
+			},
+		},
+		{
+			Name:        "sergeant_emit_envelope",
+			Description: "Emit a typed machine handoff envelope for downstream stage workers in the factory spine.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"run_id":    map[string]string{"type": "string", "description": "Active task or run ID"},
+					"repo":      map[string]string{"type": "string", "description": "Repository name"},
+					"stage":     map[string]string{"type": "string", "description": "Stage name (e.g. plan, build, test, review)"},
+					"summary":   map[string]string{"type": "string", "description": "Handoff summary"},
+					"artifacts": map[string]interface{}{"type": "array", "items": map[string]string{"type": "string"}, "description": "Paths to exported artifacts or schemas"},
+					"payload":   map[string]interface{}{"type": "object", "description": "Typed structured machine JSON payload"},
+				},
+				"required": []string{"run_id", "repo", "stage", "summary"},
+			},
+		},
+		{
+			Name:        "sergeant_seal_pr",
+			Description: "Seal the verified worktree changes and open a GitHub / Gitea Pull Request.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"run_id":  map[string]string{"type": "string", "description": "Active run ID"},
+					"project": map[string]string{"type": "string", "description": "Project name"},
+					"repo":    map[string]string{"type": "string", "description": "Repository name"},
+					"title":   map[string]string{"type": "string", "description": "Pull Request title"},
+					"body":    map[string]string{"type": "string", "description": "Pull Request description/body"},
+				},
+				"required": []string{"run_id", "project", "repo"},
+			},
+		},
+		// Following a run a client dispatched. Decision D1 makes the agent-driven
+		// path equal in standing to the coordinator-driven one, so an agent must be
+		// able to observe its own work without scraping the dashboard's HTTP
+		// endpoints or guessing a duration. sergeant_status enumerates runs; neither
+		// of these two is expressible through it, because it cannot address one run.
+		{
+			Name: "sergeant_run_status",
+			Description: "Get one run's status, slug and phase results by run id. " +
+				"Reports an explicit not-found for an unknown id rather than an empty status.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"run_id": map[string]string{"type": "string", "description": "The run id to report on"},
+				},
+				"required": []string{"run_id"},
+			},
+		},
+		{
+			Name: "sergeant_run_wait",
+			Description: "Block until a run reaches a terminal status, then report it. " +
+				"Returns immediately if the run has already finished. On exceeding the " +
+				"caller-supplied bound it reports the run as still executing and never " +
+				"invents a terminal status.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"run_id": map[string]string{"type": "string", "description": "The run id to wait on"},
+					"timeout_seconds": map[string]interface{}{
+						"type": "number",
+						"description": fmt.Sprintf(
+							"How long to wait before giving up and reporting the run as still executing. Defaults to %d.",
+							int(defaultRunWaitBound.Seconds())),
+					},
+				},
+				"required": []string{"run_id"},
+			},
+		},
+	}
+}
+
 func (s *MCPServer) handleRequest(req *JSONRPCRequest) {
 	switch req.Method {
 	case "initialize":
@@ -95,73 +207,7 @@ func (s *MCPServer) handleRequest(req *JSONRPCRequest) {
 		// No-op for initialized notification
 
 	case "tools/list":
-		tools := []Tool{
-			{
-				Name:        "sergeant_status",
-				Description: "Get the current Sergeant factory status, active runs, and project topology.",
-				InputSchema: map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"project": map[string]string{"type": "string", "description": "Optional project name filter"},
-					},
-				},
-			},
-			{
-				Name:        "sergeant_get_brief",
-				Description: "Get the intent brief, acceptance criteria, and worktree paths for a project stage.",
-				InputSchema: map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"project": map[string]string{"type": "string", "description": "Project name (e.g. cid-system, better-than-boxes)"},
-					},
-					"required": []string{"project"},
-				},
-			},
-			{
-				Name:        "sergeant_run_gates",
-				Description: "Execute 100% deterministic zero-token code quality gates (test, lint) for a repository.",
-				InputSchema: map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"project": map[string]string{"type": "string", "description": "Target project name"},
-						"repo":    map[string]string{"type": "string", "description": "Target repository name"},
-					},
-					"required": []string{"project", "repo"},
-				},
-			},
-			{
-				Name:        "sergeant_emit_envelope",
-				Description: "Emit a typed machine handoff envelope for downstream stage workers in the factory spine.",
-				InputSchema: map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"run_id":    map[string]string{"type": "string", "description": "Active task or run ID"},
-						"repo":      map[string]string{"type": "string", "description": "Repository name"},
-						"stage":     map[string]string{"type": "string", "description": "Stage name (e.g. plan, build, test, review)"},
-						"summary":   map[string]string{"type": "string", "description": "Handoff summary"},
-						"artifacts": map[string]interface{}{"type": "array", "items": map[string]string{"type": "string"}, "description": "Paths to exported artifacts or schemas"},
-						"payload":   map[string]interface{}{"type": "object", "description": "Typed structured machine JSON payload"},
-					},
-					"required": []string{"run_id", "repo", "stage", "summary"},
-				},
-			},
-			{
-				Name:        "sergeant_seal_pr",
-				Description: "Seal the verified worktree changes and open a GitHub / Gitea Pull Request.",
-				InputSchema: map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"run_id":  map[string]string{"type": "string", "description": "Active run ID"},
-						"project": map[string]string{"type": "string", "description": "Project name"},
-						"repo":    map[string]string{"type": "string", "description": "Repository name"},
-						"title":   map[string]string{"type": "string", "description": "Pull Request title"},
-						"body":    map[string]string{"type": "string", "description": "Pull Request description/body"},
-					},
-					"required": []string{"run_id", "project", "repo"},
-				},
-			},
-		}
-		s.sendResult(req.ID, map[string]interface{}{"tools": tools})
+		s.sendResult(req.ID, map[string]interface{}{"tools": Tools()})
 
 	case "tools/call":
 		var callParams struct {
@@ -326,6 +372,14 @@ func (s *MCPServer) executeTool(name string, args map[string]interface{}) (strin
 			return "", err
 		}
 		return msg, nil
+
+	case "sergeant_run_status":
+		runID, _ := args["run_id"].(string)
+		return s.runStatus(runID)
+
+	case "sergeant_run_wait":
+		runID, _ := args["run_id"].(string)
+		return s.runWait(runID, runWaitBound(args["timeout_seconds"]))
 
 	default:
 		return "", fmt.Errorf("unknown tool '%s'", name)

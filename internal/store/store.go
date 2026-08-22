@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/callmeradical/sergeant/internal/naming"
@@ -21,6 +22,12 @@ import (
 
 type Store struct {
 	db *sql.DB
+
+	// subs is the in-process fan-out of appended change sequence numbers, so a
+	// subscriber learns that state moved without polling. See SubscribeChanges.
+	subMu     sync.Mutex
+	subs      map[int64]chan int64
+	nextSubID int64
 }
 
 type RunRecord struct {
@@ -233,7 +240,7 @@ func (s *Store) migrate() error {
 		created_at DATETIME NOT NULL,
 		FOREIGN KEY (run_id) REFERENCES runs(id)
 	);
-	` + createIntentsTable + createBulletsTable
+	` + createIntentsTable + createBulletsTable + createChangesTable
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
 	}
@@ -293,6 +300,7 @@ func (s *Store) migrateAddTables() error {
 	wanted := []struct{ table, ddl string }{
 		{"intents", createIntentsTable},
 		{"bullets", createBulletsTable},
+		{"changes", createChangesTable},
 	}
 	for _, w := range wanted {
 		has, err := s.hasTable(w.table)
@@ -405,9 +413,32 @@ func (s *Store) hasColumn(table, column string) (bool, error) {
 	return false, rows.Err()
 }
 
-// terminalRunStatuses are the states after which a slug may be reused. A slug is
-// a speech label, so it only has to be unambiguous while the run is live.
-var terminalRunStatuses = map[string]bool{"passed": true, "failed": true, "cancelled": true}
+// terminalRunStatuses are the states a run does not leave on its own.
+//
+// It is one list because two consumers depend on it and must agree. A slug may be
+// reused after a run reaches one of these states, because a slug is a speech
+// label that only has to be unambiguous while the run is live. And a caller
+// waiting for a run to finish returns when it reaches one of these states — a
+// second, shorter copy of this list would make such a wait block forever on a
+// status this one calls finished.
+//
+// timed_out is here because a timed-out run is finished: it is listed as
+// resumable precisely because nothing resumes it by itself.
+var terminalRunStatuses = map[string]bool{
+	"passed":    true,
+	"failed":    true,
+	"cancelled": true,
+	"timed_out": true,
+}
+
+// IsTerminalRunStatus reports whether a run in this status has finished.
+//
+// A wait for a run to complete asks this and nothing else. It must never be
+// answered by inference from elapsed time: a run's status is whatever the store
+// says, not whatever a caller's patience implies.
+func IsTerminalRunStatus(status string) bool {
+	return terminalRunStatuses[status]
+}
 
 // assignSlug gives r a speakable label, avoiding any slug currently held by a
 // non-terminal run. The label is derived from the run id, so it is reproducible;
@@ -480,9 +511,23 @@ func (s *Store) CreateRun(r *RunRecord) error {
 		nullableText(r.RequestID), r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil && isDuplicateRequestID(err) {
+		// A refused key changed nothing, so nothing is appended to the sequence. A
+		// change row here would make a deduplicated repeat look like a transition
+		// and every subscriber would render a run that was not created.
 		return fmt.Errorf("request id %q: %w", r.RequestID, ErrDuplicateRequestID)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return s.recordTransition(ChannelRun, r.ID, map[string]interface{}{
+		"transition": "created",
+		"id":         r.ID,
+		"project":    r.Project,
+		"status":     r.Status,
+		"slug":       r.Slug,
+		"intent_id":  r.IntentID,
+		"change_id":  r.ChangeID,
+	})
 }
 
 // nullableText binds an absent string as SQL NULL rather than as ”.
@@ -539,11 +584,40 @@ func (s *Store) GetRunByRequestID(requestID string) (*RunRecord, error) {
 }
 
 func (s *Store) UpdateRunStatus(runID, status string) error {
-	_, err := s.db.Exec(
+	res, err := s.db.Exec(
 		`UPDATE runs SET status = ?, updated_at = ? WHERE id = ?`,
 		status, time.Now().UTC(), runID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// Only a row that actually moved is announced. This update matches nothing
+	// when the id names no run, and a change row for it would tell every
+	// subscriber that a run it cannot read had changed status. Unlike
+	// UpdateIntentStatus this does not report the miss as an error: several callers
+	// relabel a run they do not know still exists, and turning that into a failure
+	// is a separate decision from keeping the sequence truthful.
+	if !changedARow(res) {
+		return nil
+	}
+	return s.recordTransition(ChannelRun, runID, map[string]interface{}{
+		"transition": "status",
+		"id":         runID,
+		"status":     status,
+		"terminal":   IsTerminalRunStatus(status),
+	})
+}
+
+// changedARow reports whether a statement actually modified something. A driver
+// that cannot say is treated as "yes": announcing a transition that may not have
+// happened costs a subscriber one redundant re-read, while staying silent about
+// one that did costs it the update entirely.
+func changedARow(res sql.Result) bool {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return true
+	}
+	return n > 0
 }
 
 func (s *Store) RecordPhase(p *PhaseRecord) error {
@@ -561,12 +635,27 @@ func (s *Store) RecordPhase(p *PhaseRecord) error {
 		return err
 	}
 
-	// Phase activity is run activity. Clients poll for changes to runs.updated_at
-	// to decide whether to refetch details; without this the run appears frozen at
-	// its first phase for its entire lifetime, and a mid-run gate failure is never
-	// surfaced. This must stay in sync with any other writer of run state.
-	_, err = s.db.Exec(`UPDATE runs SET updated_at = ? WHERE id = ?`, p.CreatedAt, p.RunID)
-	return err
+	// Phase activity is run activity. A client decides whether to re-read a run's
+	// detail from changes to runs.updated_at; without this the run appears frozen
+	// at its first phase for its entire lifetime, and a mid-run gate failure is
+	// never surfaced. This must stay in sync with any other writer of run state.
+	if _, err := s.db.Exec(`UPDATE runs SET updated_at = ? WHERE id = ?`, p.CreatedAt, p.RunID); err != nil {
+		return err
+	}
+
+	// The phase is announced on its own channel, carrying the run it belongs to.
+	// That is what lets a client refresh one run's detail instead of re-reading
+	// the whole list, which is the incremental update the polling loop could not
+	// express.
+	return s.recordTransition(ChannelPhase, p.ID, map[string]interface{}{
+		"id":          p.ID,
+		"run_id":      p.RunID,
+		"repo":        p.Repo,
+		"name":        p.Name,
+		"kind":        p.Kind,
+		"status":      p.Status,
+		"duration_ms": p.DurationMs,
+	})
 }
 
 func (s *Store) RecordEnvelope(e *EnvelopeRecord) error {
@@ -578,7 +667,15 @@ func (s *Store) RecordEnvelope(e *EnvelopeRecord) error {
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID, e.RunID, e.Repo, e.Stage, e.Summary, string(artBytes), dataStr, e.CreatedAt,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.recordTransition(ChannelEnvelope, e.ID, map[string]interface{}{
+		"id":     e.ID,
+		"run_id": e.RunID,
+		"repo":   e.Repo,
+		"stage":  e.Stage,
+	})
 }
 
 // safeRawJSON guards the API against rows whose JSON was written by a buggy
@@ -737,8 +834,21 @@ func (s *Store) DeleteRun(runID string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`DELETE FROM runs WHERE id = ?`, runID)
-	return err
+	res, err := s.db.Exec(`DELETE FROM runs WHERE id = ?`, runID)
+	if err != nil {
+		return err
+	}
+	// A deletion is a transition too. Without it a client that follows the
+	// sequence keeps rendering a run that no longer exists until it happens to
+	// re-read the whole list. Deleting an id that was never there is not a
+	// transition, so it is not announced.
+	if !changedARow(res) {
+		return nil
+	}
+	return s.recordTransition(ChannelRun, runID, map[string]interface{}{
+		"transition": "deleted",
+		"id":         runID,
+	})
 }
 
 func (s *Store) CreateIntent(i *IntentRecord) error {
@@ -749,7 +859,15 @@ func (s *Store) CreateIntent(i *IntentRecord) error {
 		`INSERT INTO intents (id, project, statement, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		i.ID, i.Project, i.Statement, i.Status, i.CreatedAt, i.UpdatedAt,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.recordTransition(ChannelIntent, i.ID, map[string]interface{}{
+		"transition": "created",
+		"id":         i.ID,
+		"project":    i.Project,
+		"status":     i.Status,
+	})
 }
 
 func (s *Store) GetIntent(intentID string) (*IntentRecord, error) {
@@ -795,7 +913,14 @@ func (s *Store) UpdateIntentStatus(intentID, status string) error {
 	if err != nil {
 		return err
 	}
-	return requireOneRow(res, "intent", intentID)
+	if err := requireOneRow(res, "intent", intentID); err != nil {
+		return err
+	}
+	return s.recordTransition(ChannelIntent, intentID, map[string]interface{}{
+		"transition": "status",
+		"id":         intentID,
+		"status":     status,
+	})
 }
 
 func (s *Store) CreateBullet(b *BulletRecord) error {
@@ -807,7 +932,17 @@ func (s *Store) CreateBullet(b *BulletRecord) error {
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		b.ID, b.IntentID, b.Repo, b.Position, b.Status, b.Branch, b.Worktree, b.CommitSHA, b.PRURL, b.CreatedAt, b.UpdatedAt,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.recordTransition(ChannelBullet, b.ID, map[string]interface{}{
+		"transition": "created",
+		"id":         b.ID,
+		"intent_id":  b.IntentID,
+		"repo":       b.Repo,
+		"position":   b.Position,
+		"status":     b.Status,
+	})
 }
 
 // ListBulletsForIntent returns an intent's bullets in merge order.
@@ -849,7 +984,14 @@ func (s *Store) UpdateBulletStatus(bulletID, status string) error {
 	if err != nil {
 		return err
 	}
-	return requireOneRow(res, "bullet", bulletID)
+	if err := requireOneRow(res, "bullet", bulletID); err != nil {
+		return err
+	}
+	return s.recordTransition(ChannelBullet, bulletID, map[string]interface{}{
+		"transition": "status",
+		"id":         bulletID,
+		"status":     status,
+	})
 }
 
 func requireOneRow(res sql.Result, kind, id string) error {

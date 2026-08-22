@@ -1287,13 +1287,88 @@
       }
     });
 
+    // ---- The sequenced state stream ------------------------------------------
+    //
+    // This replaces a 2000ms polling interval that re-read the entire run list
+    // thirty times a minute, per connected browser, forever — whether or not
+    // anything had changed. There was no sequence number and no replay, so a
+    // browser that missed an update could not ask for what it missed; it could
+    // only wait for the next tick. Decision D10 adopts AHP's subscribe/snapshot/
+    // replay model instead: the server tells us when something moved, and tells
+    // us where we are so a reconnect resumes rather than restarts.
+    //
+    // The render path below is unchanged. A change event says *that* state moved;
+    // the existing key-diff in renderRunList still decides what to redraw, which
+    // is why scroll position and focus survive an update.
+
+    // The sequence of the last change applied. A reconnect resumes from it.
+    let lastSeq = 0;
+    let stream = null;
+    let refreshTimer = null;
+
+    // Coalesce refreshes. A run recording twenty phases in one burst would
+    // otherwise trigger twenty full re-reads at once — the cost the polling loop
+    // had, moved to a worse place. One short timer collapses the burst into a
+    // single read. Nothing is armed while the stream is idle, so an idle
+    // dashboard issues no requests at all.
+    function scheduleRefresh() {
+      if (refreshTimer !== null) return;
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        fetchRuns();
+        fetchFleet();
+      }, 80);
+    }
+
+    // A snapshot is the server saying "you are not where you think you are, here
+    // is the current sequence". Adopt it and re-read; the sequence is what makes
+    // the next reconnect resumable.
+    function onStreamSnapshot(ev) {
+      let data = {};
+      try { data = JSON.parse(ev.data) || {}; } catch (err) { data = {}; }
+      lastSeq = typeof data.seq === 'number' ? data.seq : 0;
+      setConnectionError(false);
+      scheduleRefresh();
+    }
+
+    // A change carries its own sequence number. Advancing lastSeq only forwards
+    // means an out-of-order or replayed event cannot move the cursor backwards and
+    // cause the same range to be requested again on reconnect.
+    function onStreamChange(ev) {
+      let data = {};
+      try { data = JSON.parse(ev.data) || {}; } catch (err) { data = {}; }
+      if (typeof data.seq === 'number' && data.seq > lastSeq) lastSeq = data.seq;
+      setConnectionError(false);
+      scheduleRefresh();
+    }
+
+    // Subscribe from the last sequence applied. With nothing applied yet we send
+    // no cursor at all, which asks the server for a snapshot: the log holds
+    // transitions, so replaying it from zero would not describe a run that was
+    // recorded before the log existed.
+    //
+    // There is no reconnect logic here on purpose. EventSource reconnects by
+    // itself and sends Last-Event-ID, which the server prefers over the query
+    // string, so a reconnect resumes from the last event actually delivered.
+    function subscribeToStream() {
+      if (stream) stream.close();
+      const url = lastSeq > 0
+        ? `/api/stream?from=${encodeURIComponent(lastSeq)}`
+        : '/api/stream';
+      stream = new EventSource(url);
+      stream.addEventListener('snapshot', onStreamSnapshot);
+      stream.addEventListener('change', onStreamChange);
+      stream.addEventListener('open', () => setConnectionError(false));
+      stream.addEventListener('error', () => setConnectionError(true));
+      return stream;
+    }
+
     loadProjects();
+    // One read to draw something before the first snapshot arrives. Everything
+    // after this is driven by the stream.
     fetchRuns();
     fetchFleet();
-    setInterval(() => {
-      fetchRuns();
-      fetchFleet();
-    }, 2000);
+    subscribeToStream();
   </script>
 </body>
 </html>

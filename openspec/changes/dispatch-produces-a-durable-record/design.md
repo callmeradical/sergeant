@@ -89,6 +89,61 @@ Frontend: replace the `setInterval` with an `EventSource`. The existing key-diff
 render path stays — it is already the right shape for applying incremental updates
 and becomes cheaper when fed actual deltas.
 
+Seven consequences fall out of that, all settled while implementing bullet 3.
+
+**Five channels, not three.** The task names run, intent and bullet transitions.
+Phase and envelope are announced too, because both already mutate what an operator
+sees — `RecordPhase` bumps `runs.updated_at`, and an envelope is what the activity
+view renders — and a client that could not see them would still need a timer to
+notice them. Announcing a phase on its own channel, carrying its `run_id`, is also
+what lets a client refresh one run's detail instead of the whole list.
+
+**`CurrentSequence` reports the high-water mark, not `MAX(seq)`.** `AUTOINCREMENT`
+keeps its mark in `sqlite_sequence`, which survives a delete. After a prune,
+`MAX(seq)` is *below* a number already handed out, so a snapshot naming it would
+tell a client to resume from behind reality and every later append would look like
+a change it had already applied. The second scenario forbids reuse; this is the
+read-side half of the same guarantee.
+
+**A cursor at or below zero is no cursor, and no cursor means a snapshot.** The log
+holds transitions, not state, so replaying it from zero cannot describe a run
+recorded before the log existed. `CanReplayFrom` therefore refuses zero rather
+than treating it as "replay everything", which would hand a fresh client an
+authoritative-looking but incomplete view.
+
+**`Last-Event-ID` outranks `?from`.** An `EventSource` reconnects to the URL it was
+given, so `?from` keeps naming the sequence the *page* loaded with while
+`Last-Event-ID` names the last event actually delivered. Preferring the query
+string would re-deliver everything since page load on every reconnect — the cost
+the change exists to remove, moved from a timer to the network.
+
+**The stream still ticks once a second, per connection, as a fallback.** The
+primary wake-up is an in-process notification from the store, which fires the
+moment a change is appended. It cannot see a second process writing the same
+database file, and that case is real: `sergeant mcp` records envelopes while
+`sergeant ui` serves the stream. The retired cost was a *browser* re-reading the
+whole run list thirty times a minute; one indexed `seq > ?` query per connected
+client per second is not that, and without it an MCP-driven change would never
+reach the dashboard. Refreshes on the client are coalesced over 80ms for the
+mirror-image reason: a run recording twenty phases in one burst must not cause
+twenty full re-reads at once.
+
+**Only a statement that moved a row is announced.** `UpdateRunStatus` and
+`DeleteRun` match nothing when the id names no run, and both are called with ids
+whose existence the caller has not checked. A change row for a miss would tell
+every subscriber that a run it cannot read had changed status — precisely the
+claim the truthfulness rule forbids. Neither is turned into an error by this
+change: whether relabelling an absent run should fail is a separate decision from
+keeping the sequence truthful.
+
+**`timed_out` joined the terminal run statuses, and the list became one exported
+predicate.** `store.IsTerminalRunStatus` is now the single answer to "has this run
+finished?", asked by slug reuse and by `sergeant_run_wait`. A second, shorter copy
+of the list inside the MCP tool would eventually disagree and make a wait block
+forever on a status the store already calls finished. `timed_out` belongs in it
+because a timed-out run is listed as resumable precisely because nothing resumes
+it by itself.
+
 ## Rejected alternatives
 
 **Deriving idempotency from a hash of the request body.** Two deliberate, distinct
@@ -105,3 +160,16 @@ break. Borrow the design, decline the dependency.
 
 **Shelling out to any `bin/sgt-*` helper for stream fan-out.** Forbidden by D7 and
 not considered.
+
+**Writing the change row in a transaction with the row it reports.** Considered and
+declined for bullet 3. It would make eight write paths transactional to close a
+window that only a disk failure opens, and the failure mode it prevents — a
+transition recorded with no change row — is already reported: `AppendChange`'s
+error is returned to the caller rather than swallowed, so a notification that did
+not happen is never silently treated as one that did.
+
+**Letting `sergeant_run_wait` infer a status from its own timeout.** The whole
+point of the bound is that exceeding it says something about the *wait*, not about
+the run. On timeout the tool reports the status the store holds, `terminal: false`,
+`timed_out: true`, and says the run is still executing. Returning `failed` because
+the caller ran out of patience would record a falsehood.
