@@ -124,6 +124,9 @@ func (srv *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/run-cancel", srv.handleRunCancel)
 	mux.HandleFunc("/api/run-resume", srv.handleRunResume)
 	mux.HandleFunc("/api/run-delete", srv.handleRunDelete)
+	// The sequenced state stream. Clients follow this instead of re-reading
+	// /api/runs on a timer.
+	mux.HandleFunc("/api/stream", srv.handleStream)
 
 	// Static assets
 	mux.HandleFunc("/", srv.handleIndex)

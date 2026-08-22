@@ -38,8 +38,8 @@ is a second bullet. The intent holds the merge order across its bullets.
    goose, pi, claude) in a terminal inside the project. That agent talks to
    sergeant over MCP (`bin/sergeant-mcp`, declared in `mcp.json`):
    `sergeant_get_brief`, `sergeant_run_gates`, `sergeant_emit_envelope`,
-   `sergeant_seal_pr`, `sergeant_status`. Sergeant does not spawn or host the
-   session.
+   `sergeant_seal_pr`, `sergeant_status`, `sergeant_run_status`,
+   `sergeant_run_wait`. Sergeant does not spawn or host the session.
 2. **Coordinator-driven.** The operator dispatches from the UI
    (`POST /api/dispatch`) and sergeant runs bounded headless agent phases itself.
 
