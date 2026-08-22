@@ -142,6 +142,17 @@ workflow or by the model. The two are trusted differently (see D2).
   once its upstream bullets are reviewed and merged, observing real PR state to
   advance the chain. Sergeant never merges. So Sergeant is never the thing that made
   an irreversible change across several repos, which keeps R3.4 honest.
+- **D9 — graphify is a v2 capability, implemented natively.** A project may declare
+  a `graphify:` block (`output`, `include_groups`, `exclude_patterns`). The system
+  builds a graph per repository, merges them into one cross-repository graph, and
+  publishes it atomically to the configured output. It must not call `sgt-graphify`
+  (D7). The graph is exposed to agents over MCP as query, affected and explain
+  tools, so a dispatched agent navigates by graph rather than by grepping files.
+
+  Today the block is parsed and discarded: `config.Project` has no `Graphify`
+  field. It survives a config save only because saving patches the YAML node tree
+  and preserves keys the server does not model.
+
 - **D8 — The dashboard is a view of intents, and it renders the workflow from a
   definition.** The primary list is intents, not runs. Selecting an intent shows its
   bullets, one row per repository. Each bullet renders the workflow as a *definition*

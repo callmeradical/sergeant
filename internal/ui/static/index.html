@@ -50,6 +50,25 @@
         </select>
       </div>
 
+      <div class="hidden md:block h-3.5 w-px bg-[#21262d]"></div>
+
+      <!-- Primary destinations. These were a 208px left rail serving 3 views; as
+           header tabs they cost no extra vertical space and free the rail for content. -->
+      <nav class="hidden md:flex items-center gap-0.5" aria-label="Views">
+        <button onclick="switchStitchTab('stages')" id="stitch-nav-stages" class="px-2.5 h-11 text-[11px] font-bold text-white border-b-2 border-[#58a6ff] flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+          <i class="fa-solid fa-diagram-project text-[#58a6ff] text-[10px]" aria-hidden="true"></i> <span class="hidden lg:inline">Pipeline</span>
+        </button>
+        <button onclick="switchStitchTab('tasks')" id="stitch-nav-tasks" class="px-2.5 h-11 text-[11px] font-semibold text-[#8b949e] border-b-2 border-transparent hover:text-white flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+          <i class="fa-solid fa-server text-teal-400 text-[10px]" aria-hidden="true"></i> <span class="hidden lg:inline">Workers</span>
+        </button>
+        <button onclick="switchStitchTab('repair')" id="stitch-nav-repair" disabled aria-disabled="true" class="px-2.5 h-11 text-[11px] font-semibold text-[#8b949e] border-b-2 border-transparent flex items-center gap-1.5 cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+          <i class="fa-solid fa-screwdriver-wrench text-slate-500 text-[10px]" id="repair-icon" aria-hidden="true"></i> <span class="hidden lg:inline">Repair</span>
+          <span id="repair-alert-dot" class="hidden w-2 h-2 rounded-full bg-rose-500 animate-pulse" aria-hidden="true"></span>
+        </button>
+      </nav>
+
+      <div class="hidden md:block h-3.5 w-px bg-[#21262d]"></div>
+
       <div class="hidden lg:flex items-center space-x-3 text-[11px] text-[#8b949e]">
         <span>Runs <span id="stat-total-runs" class="text-white font-bold font-mono">0</span></span>
         <span>Workers <span id="stat-workers-active" class="text-[#3fb950] font-bold font-mono">0</span></span>
@@ -78,25 +97,6 @@
     <aside class="hidden lg:flex w-52 bg-[#0b0e14] border-r border-[#21262d] flex-col justify-between p-2 shrink-0 overflow-hidden min-h-0">
       <div class="space-y-3 flex-1 flex flex-col overflow-hidden min-h-0">
         
-        <!-- Primary Views Navigation -->
-        <nav class="space-y-0.5 shrink-0" aria-label="Views">
-          <button onclick="switchStitchTab('stages')" id="stitch-nav-stages" class="w-full px-2.5 py-1.5 rounded text-left text-[11px] font-bold bg-[#161b22] text-white border-l-2 border-[#58a6ff] flex items-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-            <i class="fa-solid fa-diagram-project text-[#58a6ff] w-4 text-center" aria-hidden="true"></i> Pipeline
-          </button>
-          <button onclick="switchStitchTab('tasks')" id="stitch-nav-tasks" class="w-full px-2.5 py-1.5 rounded text-left text-[11px] font-semibold text-[#8b949e] hover:text-white hover:bg-[#161b22] flex items-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-            <i class="fa-solid fa-server text-teal-400 w-4 text-center" aria-hidden="true"></i> Workers
-          </button>
-          <button onclick="switchStitchTab('repair')" id="stitch-nav-repair" disabled aria-disabled="true" class="w-full px-2.5 py-1.5 rounded text-left text-[11px] font-semibold text-[#8b949e] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] cursor-not-allowed">
-            <span class="flex items-center gap-2">
-              <i class="fa-solid fa-screwdriver-wrench text-slate-500 w-4 text-center" id="repair-icon" aria-hidden="true"></i> Repair
-            </span>
-            <span id="repair-alert-dot" class="hidden w-2 h-2 rounded-full bg-rose-500 animate-pulse" aria-hidden="true"></span>
-          </button>
-          <button onclick="openRefineProjectModal()" id="stitch-nav-config" class="w-full px-2.5 py-1.5 rounded text-left text-[11px] font-semibold text-[#8b949e] hover:text-white hover:bg-[#161b22] flex items-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-            <i class="fa-solid fa-sliders text-amber-400 w-4 text-center" aria-hidden="true"></i> Config
-          </button>
-        </nav>
-
         <!-- Pipeline Runs Section (Nested under Project Scope) -->
         <div class="flex-1 flex flex-col overflow-hidden pt-2 border-t border-[#21262d] min-h-0">
           <div class="flex justify-between items-center px-1 pb-1.5 shrink-0">
@@ -110,12 +110,6 @@
 
       </div>
 
-      <!-- Left Rail Bottom Support Links -->
-      <div class="space-y-1.5 text-[10px] text-[#8b949e] p-1 border-t border-[#21262d] shrink-0">
-        <button onclick="cleanActiveWorktrees()" class="w-full py-1.5 bg-[#161b22] hover:bg-[#21262d] text-slate-300 rounded border border-[#30363d] font-bold text-[10px] flex items-center justify-center gap-1.5 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-          <i class="fa-solid fa-broom text-[9px]" aria-hidden="true"></i> Clean worktrees
-        </button>
-      </div>
     </aside>
 
     <!-- Center Main Body Canvas -->
@@ -125,7 +119,7 @@
       <div id="stitch-view-stages" class="flex-1 flex flex-col overflow-hidden p-4 space-y-4 min-h-0">
         
         <!-- Header Banner & System Status -->
-        <div class="flex justify-between items-start pb-2">
+        <div class="flex flex-wrap gap-2 justify-between items-start pb-2 shrink-0">
           <div>
             <div class="flex items-center space-x-2">
               <h1 class="text-base font-bold text-white tracking-wide">Pipeline</h1>
@@ -138,11 +132,15 @@
             <span id="system-status-pill" aria-live="polite" aria-atomic="true" class="px-2 py-0.5 rounded text-[10px] font-bold bg-[#161b22] text-slate-300 border border-[#30363d]">
               No active run
             </span>
+            <button id="btn-stop-run" onclick="cancelActiveRun()" aria-label="Stop run" title="Stop run"
+              class="min-w-[44px] min-h-[44px] flex items-center justify-center rounded text-[#8b949e] hover:text-rose-400 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]">
+              <i class="fa-regular fa-circle-stop text-sm" aria-hidden="true"></i>
+            </button>
           </div>
         </div>
 
         <!-- 2D Multi-Repo Stage Grid Table -->
-        <div class="border border-[#21262d] rounded bg-[#0b0e14] overflow-x-auto">
+        <div class="border border-[#21262d] rounded bg-[#0b0e14] overflow-x-auto shrink-0">
           <table class="w-full text-left border-collapse text-[11px]">
             <caption class="sr-only">Multi-repository stage execution matrix</caption>
             <thead id="stage-matrix-head">
@@ -269,11 +267,6 @@
       </div>
 
     </main>
-
-    <!-- Right Vertical Action Strip -->
-    <aside class="hidden xl:flex w-10 bg-[#0b0e14] border-l border-[#21262d] flex-col items-center justify-start py-3 space-y-4 text-[#8b949e] shrink-0">
-      <button title="Stop Run" aria-label="Stop Run" onclick="cancelActiveRun()" class="min-w-[44px] min-h-[44px] flex items-center justify-center hover:text-rose-400 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] rounded"><i class="fa-regular fa-circle-stop text-sm"></i></button>
-    </aside>
 
   </div>
 
@@ -509,17 +502,17 @@
         nRepair.removeAttribute('disabled');
         nRepair.removeAttribute('aria-disabled');
         nRepair.classList.remove('cursor-not-allowed');
-        nRepair.classList.add('hover:text-white', 'hover:bg-[#161b22]');
-        rIcon.className = "fa-solid fa-screwdriver-wrench text-rose-400 w-4 text-center";
+        nRepair.classList.add('hover:text-white');
+        rIcon.className = "fa-solid fa-screwdriver-wrench text-rose-400 text-[10px]";
         alertDot.classList.remove('hidden');
       } else {
         if (activeStitchTab !== 'repair') {
           nRepair.setAttribute('disabled', 'true');
           nRepair.setAttribute('aria-disabled', 'true');
           nRepair.classList.add('cursor-not-allowed');
-          nRepair.classList.remove('hover:text-white', 'hover:bg-[#161b22]');
+          nRepair.classList.remove('hover:text-white');
         }
-        rIcon.className = "fa-solid fa-screwdriver-wrench text-slate-500 w-4 text-center";
+        rIcon.className = "fa-solid fa-screwdriver-wrench text-slate-500 text-[10px]";
         alertDot.classList.add('hidden');
       }
     }
@@ -540,12 +533,14 @@
       vTasks.classList.add('hidden');
       vRepair.classList.add('hidden');
 
-      const baseClasses = "w-full px-2.5 py-1.5 rounded text-left text-[11px] font-semibold text-[#8b949e] hover:text-white hover:bg-[#161b22] flex items-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]";
-      const activeClasses = "w-full px-2.5 py-1.5 rounded text-left text-[11px] font-bold bg-[#161b22] text-white border-l-2 border-[#58a6ff] flex items-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]";
+      // Destinations are header tabs. An active tab is marked by a bottom border,
+      // which is the conventional tab affordance; a left border reads as a rail item.
+      const baseClasses = "px-2.5 h-11 text-[11px] font-semibold text-[#8b949e] border-b-2 border-transparent hover:text-white flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]";
+      const activeClasses = "px-2.5 h-11 text-[11px] font-bold text-white border-b-2 border-[#58a6ff] flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]";
 
       nStages.className = baseClasses;
       nTasks.className = baseClasses;
-      nRepair.className = "w-full px-2.5 py-1.5 rounded text-left text-[11px] font-semibold text-[#8b949e] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] " + (hasGateFailures ? "hover:text-white hover:bg-[#161b22]" : "cursor-not-allowed");
+      nRepair.className = "px-2.5 h-11 text-[11px] font-semibold text-[#8b949e] border-b-2 border-transparent flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] " + (hasGateFailures ? "hover:text-white" : "cursor-not-allowed");
 
       if (tab === 'stages') {
         vStages.classList.remove('hidden');
@@ -556,7 +551,7 @@
         fetchFleet();
       } else if (tab === 'repair') {
         vRepair.classList.remove('hidden');
-        nRepair.className = "w-full px-2.5 py-1.5 rounded text-left text-[11px] font-bold bg-[#161b22] text-white border-l-2 border-rose-500 flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]";
+        nRepair.className = "px-2.5 h-11 text-[11px] font-bold text-white border-b-2 border-rose-500 flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]";
       }
     }
 
