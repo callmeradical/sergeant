@@ -2,12 +2,14 @@ package dag
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/callmeradical/sergeant/internal/config"
 	"github.com/callmeradical/sergeant/internal/handoff"
@@ -139,6 +141,25 @@ func CommitRunOutput(ctx context.Context, runID, repoName, message string) (bool
 	return true, gitOutput(ctx, wt, "rev-parse", "--short", "HEAD"), nil
 }
 
+// sortedGateNames returns a repo's configured gate names in sorted order.
+//
+// Gates run in sorted name order. Ranging over the gates map directly made
+// execution order random (Go randomises map iteration), so which gate failed
+// first varied between identical runs — and a run could report a different
+// failing gate each time. "Deterministic gate" has to mean deterministic
+// ordering too.
+func sortedGateNames(repoCfg config.Repo) []string {
+	if repoCfg.Factory == nil {
+		return nil
+	}
+	names := make([]string, 0, len(repoCfg.Factory.Gates))
+	for name := range repoCfg.Factory.Gates {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // RunStage executes a single multi-repo stage and its constituent intra-repo factories.
 func (e *Engine) RunStage(ctx context.Context, runID string, stage *config.DAGStage) error {
 	// Execute per-repo factory pipelines
@@ -184,18 +205,7 @@ func (e *Engine) RunStage(ctx context.Context, runID string, stage *config.DAGSt
 			switch phase {
 			case "test":
 				if repoCfg.Factory != nil && len(repoCfg.Factory.Gates) > 0 {
-					// Gates run in sorted name order. Ranging over the map directly made
-					// execution order random (Go randomises map iteration), so which gate
-					// failed first varied between identical runs — and a run could report
-					// a different failing gate each time. "Deterministic gate" has to mean
-					// deterministic ordering too.
-					gateNames := make([]string, 0, len(repoCfg.Factory.Gates))
-					for name := range repoCfg.Factory.Gates {
-						gateNames = append(gateNames, name)
-					}
-					sort.Strings(gateNames)
-
-					for _, gateName := range gateNames {
+					for _, gateName := range sortedGateNames(repoCfg) {
 						res, err := pr.RunCodeGate(ctx, gateName, repoCfg.Factory.Gates[gateName])
 						if err != nil || !res.Passed {
 							return fmt.Errorf("deterministic code gate %s failed on %s", gateName, repoName)
@@ -219,4 +229,238 @@ func (e *Engine) RunStage(ctx context.Context, runID string, stage *config.DAGSt
 	}
 
 	return nil
+}
+
+// Red→green evidence (PRD D3).
+//
+// A bullet must record a *failing* gate result before implementation and a
+// *passing* one after. The evidence is produced by the same deterministic gate
+// path the rest of the engine uses, so no model judgment enters the record: a
+// gate either exited non-zero or it did not.
+//
+// The stage is carried in the phase name ("red:<gate>", "green:<gate>") rather
+// than in a separate column, so the two runs of the same gate stay
+// distinguishable in the run record and neither can overwrite the other.
+const (
+	StageRed   = "red"
+	StageGreen = "green"
+
+	// RedExemptionPhaseName, Kind and Status describe a recorded exemption. The
+	// kind is deliberately not "code" and the status deliberately not "passed":
+	// an exemption is an operator's statement, not a gate result, and must never
+	// be mistaken for evidence that a gate ran.
+	RedExemptionPhaseName   = "red:exempt"
+	RedExemptionPhaseKind   = "exemption"
+	RedExemptionPhaseStatus = "exempt"
+)
+
+// GateEvidence is one deterministic gate result observed at one TDD stage.
+//
+// Duration is wall-clock time measured around the gate invocation, so it is
+// slightly larger than the gate process runtime recorded on the phase.
+type GateEvidence struct {
+	Gate     string
+	Status   string // "failed" or "passed"
+	Stage    string // "red" or "green"
+	Output   string
+	Duration time.Duration
+}
+
+// GatePhaseName is the phase name a stage's gate result is recorded under.
+func GatePhaseName(stage, gateName string) string { return stage + ":" + gateName }
+
+// RecordRedState runs a repo's configured gates and requires at least one to
+// fail.
+//
+// If every gate passes there is no red state, which means the change was not
+// written test-first: either the test proving the behaviour does not exist yet,
+// or the implementation landed before it. Both are D3 violations, so this
+// returns an error. The evidence gathered is returned alongside the error so
+// the caller can show what actually ran.
+//
+// A bullet with no natural red state (a pure refactor) must use
+// RecordRedExemption instead of relying on this call to pass.
+func (e *Engine) RecordRedState(ctx context.Context, runID, repoName string) ([]GateEvidence, error) {
+	evidence, err := e.recordGateStage(ctx, runID, repoName, StageRed)
+	if err != nil {
+		return evidence, err
+	}
+	for _, ev := range evidence {
+		if ev.Status == "failed" {
+			return evidence, nil
+		}
+	}
+	return evidence, fmt.Errorf(
+		"no failing gate was observed for repo %s in run %s: all %d gate(s) (%s) passed before implementation, so the work was not test-first; write the failing test first, or record an exemption with RecordRedExemption",
+		repoName, runID, len(evidence), strings.Join(gateNamesOf(evidence), ", "),
+	)
+}
+
+// RecordGreenState runs the same gates and requires all of them to pass.
+func (e *Engine) RecordGreenState(ctx context.Context, runID, repoName string) ([]GateEvidence, error) {
+	evidence, err := e.recordGateStage(ctx, runID, repoName, StageGreen)
+	if err != nil {
+		return evidence, err
+	}
+	var failed []string
+	for _, ev := range evidence {
+		if ev.Status == "failed" {
+			failed = append(failed, ev.Gate)
+		}
+	}
+	if len(failed) > 0 {
+		return evidence, fmt.Errorf(
+			"green state not reached for repo %s in run %s: gate(s) %s still failing",
+			repoName, runID, strings.Join(failed, ", "),
+		)
+	}
+	return evidence, nil
+}
+
+// RecordRedExemption records that a bullet has no natural red state.
+//
+// The exemption is durable and visible: it is written as a phase on the run, so
+// a bullet that skipped red→green cannot do so invisibly. An empty reason is
+// refused, because an unexplained exemption is indistinguishable from skipping
+// the rule.
+func (e *Engine) RecordRedExemption(ctx context.Context, runID, repoName, reason string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return fmt.Errorf("red-state exemption for repo %s in run %s requires a reason: state why this bullet has no natural failing test (for example a pure refactor with unchanged behaviour)", repoName, runID)
+	}
+	if runID == "" || repoName == "" {
+		return fmt.Errorf("red-state exemption requires both a run id and a repo name (got run %q, repo %q)", runID, repoName)
+	}
+	if _, ok := e.Project.Repos[repoName]; !ok {
+		return fmt.Errorf("repo %s not configured in project %s; refusing to record an exemption for a repository the project does not own", repoName, e.Project.Name)
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"stage":  StageRed,
+		"repo":   repoName,
+		"run_id": runID,
+		"reason": reason,
+	})
+	if err != nil {
+		return fmt.Errorf("encoding exemption payload: %w", err)
+	}
+
+	rec := &store.PhaseRecord{
+		ID:      fmt.Sprintf("%s-%s-%d", repoName, RedExemptionPhaseName, time.Now().UnixNano()),
+		RunID:   runID,
+		Repo:    repoName,
+		Name:    RedExemptionPhaseName,
+		Kind:    RedExemptionPhaseKind,
+		Status:  RedExemptionPhaseStatus,
+		Error:   "",
+		Payload: payload,
+	}
+	if err := e.Store.RecordPhase(rec); err != nil {
+		return fmt.Errorf("recording red-state exemption for %s: %w", repoName, err)
+	}
+	return nil
+}
+
+// recordGateStage runs every configured gate for one repo at one TDD stage,
+// recording a phase per gate, and returns what was observed.
+//
+// It reuses runner.PhaseRunner.RunCodeGate — the same path RunStage uses — so
+// there is exactly one way a gate is executed and recorded. Gates run in the
+// worktree, never in the operator's checkout.
+func (e *Engine) recordGateStage(ctx context.Context, runID, repoName, stage string) ([]GateEvidence, error) {
+	repoCfg, ok := e.Project.Repos[repoName]
+	if !ok {
+		return nil, fmt.Errorf("repo %s not configured in project %s", repoName, e.Project.Name)
+	}
+
+	gateNames := sortedGateNames(repoCfg)
+	if len(gateNames) == 0 {
+		// Without a configured gate there is nothing deterministic to observe.
+		// RunStage's placeholder "echo" gate always passes, so accepting it here
+		// would manufacture red→green evidence that proves nothing.
+		return nil, fmt.Errorf("repo %s configures no gates; %s-state evidence requires at least one deterministic gate", repoName, stage)
+	}
+
+	worktree, isolated, err := prepareWorktree(ctx, repoCfg.Path, runID, repoName)
+	if err != nil {
+		return nil, err
+	}
+	if !isolated {
+		return nil, fmt.Errorf("refusing to run %s-state gates for %s without an isolated worktree", stage, repoName)
+	}
+
+	pr := &runner.PhaseRunner{
+		Store:    e.Store,
+		Router:   e.Router,
+		Worktree: worktree,
+		RepoName: repoName,
+		RunID:    runID,
+		AgentCLI: e.Project.Defaults.Agent,
+		Model:    e.Project.Defaults.Model,
+	}
+
+	evidence := make([]GateEvidence, 0, len(gateNames))
+	for _, gateName := range gateNames {
+		start := time.Now()
+		res, err := pr.RunCodeGate(ctx, GatePhaseName(stage, gateName), repoCfg.Factory.Gates[gateName])
+		elapsed := time.Since(start)
+		if err != nil {
+			return evidence, fmt.Errorf("running %s-state gate %s on %s: %w", stage, gateName, repoName, err)
+		}
+		status := "failed"
+		if res.Passed {
+			status = "passed"
+		}
+		evidence = append(evidence, GateEvidence{
+			Gate:     gateName,
+			Status:   status,
+			Stage:    stage,
+			Output:   res.Output,
+			Duration: elapsed,
+		})
+	}
+
+	// D3 evidence is only evidence if it survives the process. RunCodeGate
+	// discards its store error, so confirm from the store that every gate result
+	// is really on the run before reporting the stage as observed.
+	if err := e.verifyEvidencePersisted(runID, repoName, stage, gateNames); err != nil {
+		return evidence, err
+	}
+	return evidence, nil
+}
+
+// verifyEvidencePersisted reads the run's phases back and confirms a record
+// exists for each gate of this stage.
+func (e *Engine) verifyEvidencePersisted(runID, repoName, stage string, gateNames []string) error {
+	phases, err := e.Store.ListPhasesForRun(runID)
+	if err != nil {
+		return fmt.Errorf("reading back %s-state evidence for %s: %w", stage, repoName, err)
+	}
+	recorded := make(map[string]bool, len(phases))
+	for _, ph := range phases {
+		if ph.Repo == repoName && ph.Kind == "code" {
+			recorded[ph.Name] = true
+		}
+	}
+	var missing []string
+	for _, gateName := range gateNames {
+		if !recorded[GatePhaseName(stage, gateName)] {
+			missing = append(missing, gateName)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("%s-state evidence for %s was not persisted: no phase record for gate(s) %s", stage, repoName, strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+func gateNamesOf(evidence []GateEvidence) []string {
+	names := make([]string, 0, len(evidence))
+	for _, ev := range evidence {
+		names = append(names, ev.Gate)
+	}
+	return names
 }
