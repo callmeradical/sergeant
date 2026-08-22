@@ -353,6 +353,95 @@ func TestOpenAddsRunChangeIDToAnOlderDatabase(t *testing.T) {
 	}
 }
 
+// Decision D4 makes the intent the primary durable object and the run a thing
+// that serves one. A run therefore points at its intent. The column is additive
+// in exactly the way change_id and slug are, so an installation created before
+// intents were persisted must gain it on open rather than break every run query.
+func TestOpenAddsRunIntentIDToAnOlderDatabase(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy-intentless.db")
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("first open failed: %v", err)
+	}
+	// Simulate the older schema: a runs table with no intent_id column.
+	if _, err := st.db.Exec("DROP TABLE runs"); err != nil {
+		t.Fatalf("dropping runs: %v", err)
+	}
+	if _, err := st.db.Exec(`CREATE TABLE runs (
+		id TEXT PRIMARY KEY,
+		project TEXT NOT NULL,
+		task_id TEXT NOT NULL,
+		status TEXT NOT NULL,
+		brief TEXT NOT NULL DEFAULT '',
+		slug TEXT NOT NULL DEFAULT '',
+		change_id TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	)`); err != nil {
+		t.Fatalf("recreating legacy runs: %v", err)
+	}
+	if _, err := st.db.Exec(
+		`INSERT INTO runs (id, project, task_id, status, brief, slug, change_id, created_at, updated_at)
+		 VALUES ('old', 'p', 'old', 'passed', 'legacy brief', 'oldly-old-ox', 'legacy-change', ?, ?)`,
+		time.Now().UTC(), time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("seeding legacy run: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
+
+	upgraded, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen of older database failed: %v", err)
+	}
+	defer upgraded.Close()
+
+	has, err := upgraded.hasColumn("runs", "intent_id")
+	if err != nil {
+		t.Fatalf("checking runs.intent_id: %v", err)
+	}
+	if !has {
+		t.Fatal("runs.intent_id was not added on open")
+	}
+
+	if err := upgraded.CreateRun(&RunRecord{
+		ID: "new", Project: "p", TaskID: "new", Brief: "b",
+		ChangeID: "add-stripe-webhooks", IntentID: "new-intent", Status: "running",
+	}); err != nil {
+		t.Fatalf("runs table unusable after upgrade: %v", err)
+	}
+
+	for _, list := range []struct {
+		name string
+		runs func() ([]RunRecord, error)
+	}{
+		{"ListRunsForProject", func() ([]RunRecord, error) { return upgraded.ListRunsForProject("p", 10) }},
+		{"ListRecentRuns", func() ([]RunRecord, error) { return upgraded.ListRecentRuns(10) }},
+	} {
+		runs, err := list.runs()
+		if err != nil {
+			t.Fatalf("%s after upgrade: %v", list.name, err)
+		}
+		byID := map[string]RunRecord{}
+		for _, r := range runs {
+			byID[r.ID] = r
+		}
+		if got := byID["new"].IntentID; got != "new-intent" {
+			t.Errorf("%s: new run IntentID = %q, want new-intent", list.name, got)
+		}
+		// The pre-existing row served no recorded intent; it must read as empty
+		// rather than as a claim about an intent that was never written.
+		if got := byID["old"].IntentID; got != "" {
+			t.Errorf("%s: legacy run IntentID = %q, want empty", list.name, got)
+		}
+		if got := byID["old"].ChangeID; got != "legacy-change" {
+			t.Errorf("%s: legacy run ChangeID = %q, want legacy-change", list.name, got)
+		}
+	}
+}
+
 func TestUpdateStatusMovesStatusAndBumpsUpdatedAt(t *testing.T) {
 	st, _ := openTestStore(t)
 
