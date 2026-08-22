@@ -50,6 +50,16 @@ func (srv *Server) registerRun(runID string, cancel context.CancelFunc) {
 	srv.cancels[runID] = cancel
 }
 
+// isRunActive reports whether this process is currently driving the run. A status
+// check alone is not enough: a run registered as in-flight may not have written
+// its status yet, and resuming it would put two agents in one worktree.
+func (srv *Server) isRunActive(runID string) bool {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	_, ok := srv.cancels[runID]
+	return ok
+}
+
 func (srv *Server) finishRun(runID string) {
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
@@ -110,6 +120,7 @@ func (srv *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/fleet", srv.handleFleet)
 	mux.HandleFunc("/api/clean-worktrees", srv.handleCleanWorktrees)
 	mux.HandleFunc("/api/run-cancel", srv.handleRunCancel)
+	mux.HandleFunc("/api/run-resume", srv.handleRunResume)
 	mux.HandleFunc("/api/run-delete", srv.handleRunDelete)
 
 	// Static assets
@@ -1041,92 +1052,7 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(context.Background())
 	srv.registerRun(taskID, cancel)
 
-	go func() {
-		defer cancel()
-		defer srv.finishRun(taskID)
-
-		// setTerminal refuses to overwrite a cancellation. Previously the goroutine
-		// unconditionally wrote "passed" at the end, silently reviving runs the
-		// operator had stopped.
-		setTerminal := func(status string) {
-			if ctx.Err() != nil {
-				_ = srv.Store.UpdateRunStatus(taskID, "cancelled")
-				return
-			}
-			_ = srv.Store.UpdateRunStatus(taskID, status)
-		}
-
-		var stages []config.DAGStage
-		if proj.DAG != nil && len(proj.DAG.Stages) > 0 {
-			stages = proj.DAG.Stages
-		} else {
-			targetRepos := req.Repos
-			if len(targetRepos) == 0 {
-				for rName := range proj.Repos {
-					targetRepos = append(targetRepos, rName)
-				}
-			}
-			stages = []config.DAGStage{{
-				Name:  "custom-dispatch",
-				Repos: targetRepos,
-				Brief: req.Brief,
-			}}
-		}
-
-		// Commit the agents' output. An uncommitted worktree is eligible for deletion
-		// by "clean worktrees", so leaving it uncommitted means real work can be
-		// destroyed by an unrelated click. Committing also makes it reviewable.
-		commitMsg := firstLine(req.Brief)
-		if commitMsg == "" {
-			commitMsg = "sergeant: automated changes"
-		}
-		commitAll := func() {
-			for _, stage := range stages {
-				for _, repoName := range stage.Repos {
-					if _, _, err := dag.CommitRunOutput(context.Background(), taskID, repoName, commitMsg); err != nil {
-						log.Printf("sergeant: commit failed for run %s repo %s: %v", taskID, repoName, err)
-					}
-				}
-			}
-		}
-
-		for i := range stages {
-			if ctx.Err() != nil {
-				_ = srv.Store.UpdateRunStatus(taskID, "cancelled")
-				return
-			}
-			if err := engine.RunStage(ctx, taskID, &stages[i]); err != nil {
-				// Commit before reporting failure: a failed gate still leaves real agent
-				// work on disk, and it must be reviewable rather than stranded.
-				commitAll()
-				setTerminal("failed")
-				return
-			}
-		}
-
-		if ctx.Err() != nil {
-			_ = srv.Store.UpdateRunStatus(taskID, "cancelled")
-			return
-		}
-
-		commitAll()
-
-		// Delivery. This reports what actually happened on disk. It does NOT claim a
-		// pull request exists — nothing in this path pushes a branch or calls the
-		// GitHub API. Opening the PR is an explicit human action via /api/create-pr.
-		delivery := srv.describeDelivery(proj, taskID)
-		_ = srv.Store.RecordEnvelope(&store.EnvelopeRecord{
-			ID:        fmt.Sprintf("delivery-%s-%d", taskID, time.Now().UnixNano()),
-			RunID:     taskID,
-			Repo:      delivery.Repo,
-			Stage:     "review",
-			Summary:   delivery.Summary,
-			Artifacts: delivery.Artifacts,
-			Data:      marshalRaw(delivery),
-		})
-
-		setTerminal("passed")
-	}()
+	go srv.executeRun(ctx, cancel, engine, proj, taskID, strings.TrimSpace(req.Brief), req.Repos)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "dispatched",
@@ -1339,4 +1265,237 @@ func (srv *Server) handleRunDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "id": req.ID})
+}
+
+// executeRun drives a run's stages to completion and records its terminal status.
+//
+// It serves both a fresh dispatch and a resume. The two differ only in whether the
+// run record already existed and in engine.Resume, which decides whether phases
+// with a passed record are skipped. Keeping one body means a resumed run cannot
+// drift from a dispatched one — commit behaviour, cancellation handling and
+// delivery reporting are identical by construction rather than by discipline.
+func (srv *Server) executeRun(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	engine *dag.Engine,
+	proj *config.Project,
+	taskID string,
+	brief string,
+	repos []string,
+) {
+	defer cancel()
+	defer srv.finishRun(taskID)
+
+	// setTerminal refuses to overwrite a cancellation. Previously the goroutine
+	// unconditionally wrote "passed" at the end, silently reviving runs the
+	// operator had stopped.
+	setTerminal := func(status string) {
+		if ctx.Err() != nil {
+			_ = srv.Store.UpdateRunStatus(taskID, "cancelled")
+			return
+		}
+		_ = srv.Store.UpdateRunStatus(taskID, status)
+	}
+
+	var stages []config.DAGStage
+	if proj.DAG != nil && len(proj.DAG.Stages) > 0 {
+		stages = proj.DAG.Stages
+	} else {
+		targetRepos := repos
+		if len(targetRepos) == 0 {
+			for rName := range proj.Repos {
+				targetRepos = append(targetRepos, rName)
+			}
+		}
+		stages = []config.DAGStage{{
+			Name:  "custom-dispatch",
+			Repos: targetRepos,
+			Brief: brief,
+		}}
+	}
+
+	// Commit the agents' output. An uncommitted worktree is eligible for deletion
+	// by "clean worktrees", so leaving it uncommitted means real work can be
+	// destroyed by an unrelated click. Committing also makes it reviewable.
+	commitMsg := firstLine(brief)
+	if commitMsg == "" {
+		commitMsg = "sergeant: automated changes"
+	}
+	commitAll := func() {
+		for _, stage := range stages {
+			for _, repoName := range stage.Repos {
+				if _, _, err := dag.CommitRunOutput(context.Background(), taskID, repoName, commitMsg); err != nil {
+					log.Printf("sergeant: commit failed for run %s repo %s: %v", taskID, repoName, err)
+				}
+			}
+		}
+	}
+
+	for i := range stages {
+		if ctx.Err() != nil {
+			_ = srv.Store.UpdateRunStatus(taskID, "cancelled")
+			return
+		}
+		if err := engine.RunStage(ctx, taskID, &stages[i]); err != nil {
+			// Commit before reporting failure: a failed gate still leaves real agent
+			// work on disk, and it must be reviewable rather than stranded.
+			commitAll()
+			setTerminal("failed")
+			return
+		}
+	}
+
+	if ctx.Err() != nil {
+		_ = srv.Store.UpdateRunStatus(taskID, "cancelled")
+		return
+	}
+
+	commitAll()
+
+	// Delivery. This reports what actually happened on disk. It does NOT claim a
+	// pull request exists — nothing in this path pushes a branch or calls the
+	// GitHub API. Opening the PR is an explicit human action via /api/create-pr.
+	delivery := srv.describeDelivery(proj, taskID)
+	_ = srv.Store.RecordEnvelope(&store.EnvelopeRecord{
+		ID:        fmt.Sprintf("delivery-%s-%d", taskID, time.Now().UnixNano()),
+		RunID:     taskID,
+		Repo:      delivery.Repo,
+		Stage:     "review",
+		Summary:   delivery.Summary,
+		Artifacts: delivery.Artifacts,
+		Data:      marshalRaw(delivery),
+	})
+
+	setTerminal("passed")
+}
+
+// ResumableStatuses are the run statuses a resume accepts.
+//
+// A passed run is excluded because re-running earned work can only lose it: a
+// flaky gate would turn a pass into a failure. A running run is excluded because
+// resuming it would put two agents in one worktree.
+var ResumableStatuses = []string{"failed", "cancelled", "timed_out"}
+
+func isResumable(status string) bool {
+	for _, s := range ResumableStatuses {
+		if status == s {
+			return true
+		}
+	}
+	return false
+}
+
+// handleRunResume re-enters an existing run instead of starting a new one.
+//
+// A run that dies leaves its worktree, its branch and its commits on disk, and
+// before this there was no way to pick any of it up — the work was orphaned and
+// the only recovery was a human merging the branch by hand. Run sgt-1787427981
+// was killed at the former default agent timeout having already committed a
+// change whose build and tests passed.
+//
+// Resume reuses the run id, so it reuses the worktree and branch (prepareWorktree
+// returns an existing worktree untouched and no longer resets the branch), and
+// skips phases that already hold a passed record. The run record is reused rather
+// than copied: a second row would split one piece of work across two runs and two
+// branches.
+func (srv *Server) handleRunResume(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.ID) == "" {
+		http.Error(w, "invalid request body: an id is required", http.StatusBadRequest)
+		return
+	}
+
+	run, err := srv.Store.GetRun(strings.TrimSpace(req.ID))
+	if err != nil || run == nil {
+		http.Error(w, fmt.Sprintf("no run %q", req.ID), http.StatusNotFound)
+		return
+	}
+
+	if !isResumable(run.Status) {
+		http.Error(w, fmt.Sprintf(
+			"run %s is %s and cannot be resumed; resumable statuses are %s",
+			run.ID, run.Status, strings.Join(ResumableStatuses, ", ")),
+			http.StatusConflict)
+		return
+	}
+
+	// Refuse if this process is already driving the run. The status check above is
+	// not sufficient on its own: a run registered as in-flight may not have written
+	// its status yet.
+	if srv.isRunActive(run.ID) {
+		http.Error(w, fmt.Sprintf("run %s is already executing", run.ID), http.StatusConflict)
+		return
+	}
+
+	proj, err := config.LoadProject(run.Project)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("loading project %s: %v", run.Project, err), http.StatusBadRequest)
+		return
+	}
+
+	// Resume runs the same body as a dispatch. The repository list is recovered
+	// from the phase records where possible, so a resume targets what the original
+	// run targeted rather than re-deriving it from configuration that may have
+	// changed since.
+	repos := srv.reposForRun(run.ID)
+
+	home, _ := os.UserHomeDir()
+	router := handoff.NewRouter(filepath.Join(home, ".local", "share", "sergeant-v2", "fleet", run.ID, "handoff"))
+	engine := dag.NewEngine(proj, srv.Store, router)
+	engine.Resume = true
+
+	_ = srv.Store.UpdateRunStatus(run.ID, "running")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	srv.registerRun(run.ID, cancel)
+	go srv.executeRun(ctx, cancel, engine, proj, run.ID, run.Brief, repos)
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":  "resumed",
+		"task_id": run.ID,
+		"run_id":  run.ID,
+		"project": proj.Name,
+		"skipped": srv.passedPhaseNames(run.ID),
+	})
+}
+
+// reposForRun recovers which repositories a run touched from its phase records.
+// An empty result lets the caller fall back to the project's configured repos.
+func (srv *Server) reposForRun(runID string) []string {
+	phases, err := srv.Store.ListPhasesForRun(runID)
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range phases {
+		if p.Repo != "" && !seen[p.Repo] {
+			seen[p.Repo] = true
+			out = append(out, p.Repo)
+		}
+	}
+	return out
+}
+
+// passedPhaseNames reports which phases a resume will skip, so the response says
+// what it is not going to do rather than leaving the operator to infer it.
+func (srv *Server) passedPhaseNames(runID string) []string {
+	phases, err := srv.Store.ListPhasesForRun(runID)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, p := range phases {
+		if p.Status == "passed" {
+			out = append(out, p.Name)
+		}
+	}
+	return out
 }

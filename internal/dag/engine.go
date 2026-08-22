@@ -21,6 +21,32 @@ type Engine struct {
 	Project *config.Project
 	Store   *store.Store
 	Router  *handoff.Router
+
+	// Resume re-enters an existing run instead of starting a new one: phases with
+	// a passed record are skipped and the rest execute. It must stay false for a
+	// fresh run, or a re-dispatch would silently inherit earlier results.
+	Resume bool
+}
+
+// phasePassed reports whether this run already earned a pass for a phase.
+//
+// A passed phase is a fact, and re-running it on resume would spend an agent
+// invocation re-deriving it — or worse, turn an earned pass into a fresh failure
+// on a flaky gate.
+func (e *Engine) phasePassed(runID, repo, phase string) bool {
+	if !e.Resume {
+		return false
+	}
+	phases, err := e.Store.ListPhasesForRun(runID)
+	if err != nil {
+		return false // cannot prove it passed, so run it
+	}
+	for _, p := range phases {
+		if p.Repo == repo && p.Name == phase && p.Status == "passed" {
+			return true
+		}
+	}
+	return false
 }
 
 func NewEngine(proj *config.Project, s *store.Store, r *handoff.Router) *Engine {
@@ -246,16 +272,25 @@ func (e *Engine) RunStage(ctx context.Context, runID string, stage *config.DAGSt
 			case "test":
 				if repoCfg.Factory != nil && len(repoCfg.Factory.Gates) > 0 {
 					for _, gateName := range SortedGateNames(repoCfg) {
+						// A gate is named individually in the phase record, so resume
+						// skips per gate rather than per pipeline phase. A run that got
+						// through four of five gates re-runs only the fifth.
+						if e.phasePassed(runID, repoName, gateName) {
+							continue
+						}
 						res, err := pr.RunCodeGate(ctx, gateName, repoCfg.Factory.Gates[gateName])
 						if err != nil || !res.Passed {
 							return fmt.Errorf("deterministic code gate %s failed on %s", gateName, repoName)
 						}
 					}
-				} else {
+				} else if !e.phasePassed(runID, repoName, "test") {
 					_, _ = pr.RunCodeGate(ctx, "test", "echo 'Deterministic gate passed'")
 				}
 
 			default:
+				if e.phasePassed(runID, repoName, phase) {
+					continue
+				}
 				prompt := stage.Brief
 				if prompt == "" {
 					prompt = fmt.Sprintf("Execute %s phase for stage %s on %s", phase, stage.Name, repoName)

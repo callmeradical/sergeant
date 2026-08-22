@@ -528,3 +528,85 @@ func TestResolveChangeScaffoldsFromTheBrief(t *testing.T) {
 		t.Errorf("second resolve = %+v, want the same id with Created=false", again)
 	}
 }
+
+func postJSON(t *testing.T, mux http.Handler, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("POST", path, strings.NewReader(body)))
+	return w
+}
+
+// A run that died with work on disk must be resumable. Run sgt-1787427981 was
+// killed at its former default timeout having already committed a change whose
+// build and tests passed; the commit survived on its branch with nothing able to
+// pick it up. Orphaning completed work is the failure being fixed.
+func TestResumeRestartsAFailedRun(t *testing.T) {
+	mux, st, _ := dispatchFixture(t)
+
+	if err := st.CreateRun(&store.RunRecord{
+		ID: "sgt-orphan", Project: "o3", TaskID: "sgt-orphan",
+		Brief: "finish the work", Status: "failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	w := postJSON(t, mux, "/api/run-resume", `{"id":"sgt-orphan"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "sgt-orphan") {
+		t.Errorf("response does not name the resumed run: %s", w.Body.String())
+	}
+
+	// Resume must reuse the run, not create a parallel one. A second row would
+	// split one piece of work across two records and two branches.
+	runs, err := st.ListRecentRuns(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Errorf("resume produced %d run(s), want 1; it must re-enter the run, not fork it", len(runs))
+	}
+}
+
+// Resuming a run that already passed would re-run work for no reason and could
+// turn an earned pass into a fresh failure.
+func TestResumeRefusesARunThatAlreadyPassed(t *testing.T) {
+	mux, st, _ := dispatchFixture(t)
+	if err := st.CreateRun(&store.RunRecord{
+		ID: "sgt-done", Project: "o3", TaskID: "sgt-done", Status: "passed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	w := postJSON(t, mux, "/api/run-resume", `{"id":"sgt-done"}`)
+	if w.Code == http.StatusOK {
+		t.Errorf("status = 200, want a refusal; a passed run must not be resumed")
+	}
+	if !strings.Contains(strings.ToLower(w.Body.String()), "passed") {
+		t.Errorf("refusal does not say why: %s", w.Body.String())
+	}
+}
+
+// Resuming a run that is still executing would put two agents in one worktree.
+func TestResumeRefusesARunningRun(t *testing.T) {
+	mux, st, _ := dispatchFixture(t)
+	if err := st.CreateRun(&store.RunRecord{
+		ID: "sgt-live", Project: "o3", TaskID: "sgt-live", Status: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	w := postJSON(t, mux, "/api/run-resume", `{"id":"sgt-live"}`)
+	if w.Code == http.StatusOK {
+		t.Errorf("status = 200, want a refusal; a running run must not be resumed")
+	}
+}
+
+func TestResumeRejectsAnUnknownRun(t *testing.T) {
+	mux, _, _ := dispatchFixture(t)
+	w := postJSON(t, mux, "/api/run-resume", `{"id":"sgt-nope"}`)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404; body=%s", w.Code, w.Body.String())
+	}
+}

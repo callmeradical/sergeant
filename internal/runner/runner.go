@@ -147,6 +147,7 @@ func (pr *PhaseRunner) RunCodeGate(ctx context.Context, name, command string) (*
 	defer cancel()
 
 	cmd := exec.CommandContext(gateCtx, "bash", "-c", command)
+	superviseGroup(cmd)
 	cmd.Dir = pr.Worktree
 
 	var outBuf bytes.Buffer
@@ -286,6 +287,7 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 			phaseCtx, cancel = context.WithCancel(ctx)
 		}
 		cmd := exec.CommandContext(phaseCtx, exe, args...)
+		superviseGroup(cmd)
 		cmd.Dir = pr.Worktree
 		if len(extraEnv) > 0 {
 			cmd.Env = append(os.Environ(), extraEnv...)

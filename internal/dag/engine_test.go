@@ -614,3 +614,126 @@ func TestPrepareWorktreeDoesNotDiscardCommitsOnAnExistingBranch(t *testing.T) {
 		t.Errorf("work.txt missing after resume: %v; committed agent output was lost", err)
 	}
 }
+
+// Resuming a run skips the phases that already passed and re-runs the rest.
+//
+// Without this, resuming means re-running everything, which throws away gate
+// results that were already earned and re-invokes agents whose work is already
+// committed. A phase that passed is a fact; a resume must not spend an agent
+// invocation to re-derive it.
+func TestResumeSkipsPhasesThatAlreadyPassed(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("SERGEANT_FLEET_DIR", filepath.Join(tempDir, "fleet"))
+
+	repoDir := filepath.Join(tempDir, "svc")
+	newGitRepo(t, repoDir)
+
+	// Two gates. The first already passed on the previous attempt; the second
+	// never ran. Only the second may execute on resume.
+	proj := &config.Project{
+		Name: "p",
+		Repos: map[string]config.Repo{
+			"svc": {
+				Path: repoDir,
+				Factory: &config.FactoryConfig{
+					Pipeline: []string{"test"},
+					Gates: map[string]string{
+						"already-passed": "exit 1", // would FAIL if wrongly re-run
+						"never-ran":      "true",
+					},
+				},
+			},
+		},
+	}
+
+	e := newEngine(t, proj)
+	e.Resume = true
+
+	if err := e.Store.CreateRun(&store.RunRecord{
+		ID: "run-r1", Project: "p", TaskID: "run-r1", Status: "failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The record the previous attempt left behind.
+	if err := e.Store.RecordPhase(&store.PhaseRecord{
+		ID: "ph-1", RunID: "run-r1", Repo: "svc",
+		Name: "already-passed", Kind: "code", Status: "passed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stage := &config.DAGStage{Name: "s", Repos: []string{"svc"}, Brief: "resume me"}
+	if err := e.RunStage(context.Background(), "run-r1", stage); err != nil {
+		t.Fatalf("RunStage on resume: %v; the already-passed gate was re-run and its `exit 1` failed the stage", err)
+	}
+
+	phases, err := e.Store.ListPhasesForRun("run-r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var passedCount, ranAgain int
+	for _, p := range phases {
+		if p.Name == "already-passed" {
+			passedCount++
+			if p.ID != "ph-1" {
+				ranAgain++
+			}
+		}
+	}
+	if ranAgain > 0 {
+		t.Errorf("the already-passed gate produced %d new phase record(s); a passed phase must not re-run on resume", ranAgain)
+	}
+
+	var sawNeverRan bool
+	for _, p := range phases {
+		if p.Name == "never-ran" && p.Status == "passed" {
+			sawNeverRan = true
+		}
+	}
+	if !sawNeverRan {
+		t.Error("the gate that never ran did not execute on resume; resume must continue the run, not merely skip it")
+	}
+}
+
+// A fresh run must not skip anything, or a re-dispatch would silently inherit
+// another run's results.
+func TestFreshRunDoesNotSkipPhases(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("SERGEANT_FLEET_DIR", filepath.Join(tempDir, "fleet"))
+	repoDir := filepath.Join(tempDir, "svc")
+	newGitRepo(t, repoDir)
+
+	proj := &config.Project{
+		Name: "p",
+		Repos: map[string]config.Repo{
+			"svc": {Path: repoDir, Factory: &config.FactoryConfig{
+				Pipeline: []string{"test"},
+				Gates:    map[string]string{"g": "true"},
+			}},
+		},
+	}
+	e := newEngine(t, proj) // Resume defaults to false
+	if err := e.Store.CreateRun(&store.RunRecord{ID: "run-f1", Project: "p", TaskID: "run-f1", Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Store.RecordPhase(&store.PhaseRecord{
+		ID: "old", RunID: "run-f1", Repo: "svc", Name: "g", Kind: "code", Status: "passed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := e.RunStage(context.Background(), "run-f1", &config.DAGStage{Name: "s", Repos: []string{"svc"}}); err != nil {
+		t.Fatalf("RunStage: %v", err)
+	}
+
+	phases, _ := e.Store.ListPhasesForRun("run-f1")
+	var n int
+	for _, p := range phases {
+		if p.Name == "g" {
+			n++
+		}
+	}
+	if n < 2 {
+		t.Errorf("gate ran %d time(s); a fresh run must execute every phase regardless of prior records", n-1)
+	}
+}

@@ -500,6 +500,20 @@ func (s *Store) ListRecentRuns(limit int) ([]RunRecord, error) {
 	return list, nil
 }
 
+// GetRun loads one run by id. ErrNoRows distinguishes "no such run" from a real
+// failure, so a caller can answer 404 rather than 500.
+func (s *Store) GetRun(runID string) (*RunRecord, error) {
+	var r RunRecord
+	err := s.db.QueryRow(
+		`SELECT id, project, task_id, status, COALESCE(brief, ''), COALESCE(change_id, ''), COALESCE(slug, ''), created_at, updated_at FROM runs WHERE id = ?`,
+		runID,
+	).Scan(&r.ID, &r.Project, &r.TaskID, &r.Status, &r.Brief, &r.ChangeID, &r.Slug, &r.CreatedAt, &r.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
 func (s *Store) ListPhasesForRun(runID string) ([]PhaseRecord, error) {
 	rows, err := s.db.Query(
 		`SELECT id, run_id, repo, name, kind, status, error, duration_ms, payload, created_at FROM phases WHERE run_id = ? ORDER BY created_at ASC`,
