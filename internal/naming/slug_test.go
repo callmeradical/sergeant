@@ -5,20 +5,20 @@ import (
 	"testing"
 )
 
-func TestSlugShapeIsAdverbAdjectiveNoun(t *testing.T) {
+func TestSlugShapeIsColourAnimalPlace(t *testing.T) {
 	s := Slug("sgt-1787421263")
 	parts := strings.Split(s, "-")
 	if len(parts) != 3 {
 		t.Fatalf("slug %q should have 3 words, got %d", s, len(parts))
 	}
-	if !inBank(adverbs[:], parts[0]) {
-		t.Errorf("first word %q is not an adverb", parts[0])
+	if !inBank(colours[:], parts[0]) {
+		t.Errorf("first word %q is not a colour", parts[0])
 	}
-	if !inBank(adjectives[:], parts[1]) {
-		t.Errorf("second word %q is not an adjective", parts[1])
+	if !inBank(animals[:], parts[1]) {
+		t.Errorf("second word %q is not an animal", parts[1])
 	}
-	if !inBank(nouns[:], parts[2]) {
-		t.Errorf("third word %q is not a noun", parts[2])
+	if !inBank(places[:], parts[2]) {
+		t.Errorf("third word %q is not a place", parts[2])
 	}
 	if !Valid(s) {
 		t.Errorf("Valid rejected its own output: %q", s)
@@ -58,9 +58,9 @@ func TestBanksAreCleanAndFullSize(t *testing.T) {
 		t.Errorf("Combinations = %d, want %d", Combinations, 32*32*32)
 	}
 	for name, bank := range map[string][]string{
-		"adverbs":    adverbs[:],
-		"adjectives": adjectives[:],
-		"nouns":      nouns[:],
+		"colours": colours[:],
+		"animals": animals[:],
+		"places":  places[:],
 	} {
 		if len(bank) != 32 {
 			t.Errorf("%s has %d entries, want 32", name, len(bank))
@@ -76,10 +76,17 @@ func TestBanksAreCleanAndFullSize(t *testing.T) {
 			}
 		}
 	}
-	// Every adverb must end in -ly so it reads as an adverb modifying the adjective.
-	for _, a := range adverbs {
-		if !strings.HasSuffix(a, "ly") {
-			t.Errorf("adverb %q does not end in -ly", a)
+	// Recall tracks how easily a word can be pictured and said. Keep every entry
+	// short enough to stay sayable; the previous jargon banks failed this.
+	for name, bank := range map[string][]string{
+		"colours": colours[:],
+		"animals": animals[:],
+		"places":  places[:],
+	} {
+		for _, w := range bank {
+			if len(w) > 10 {
+				t.Errorf("%s entry %q is too long to stay sayable", name, w)
+			}
 		}
 	}
 }
@@ -87,11 +94,11 @@ func TestBanksAreCleanAndFullSize(t *testing.T) {
 func TestValidRejectsMalformed(t *testing.T) {
 	bad := []string{
 		"",
-		"chrome",
-		"chrome-samurai",
-		"faintly-chrome-samurai-extra",
-		"samurai-chrome-faintly", // right words, wrong order
-		"loudly-chrome-samurai",  // adverb not in bank
+		"cobalt",
+		"cobalt-heron",
+		"cobalt-heron-straylight-extra",
+		"straylight-heron-cobalt", // right words, wrong order
+		"turquoise-heron-chiba",   // colour not in bank
 	}
 	for _, s := range bad {
 		if Valid(s) {

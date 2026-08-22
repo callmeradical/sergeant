@@ -206,7 +206,42 @@ func (s *Store) migrate() error {
 	if err := s.migrateAddTables(); err != nil {
 		return err
 	}
-	return s.migrateAddColumns()
+	if err := s.migrateAddColumns(); err != nil {
+		return err
+	}
+	return s.backfillSlugs()
+}
+
+// backfillSlugs labels runs that predate the slug column. The slug is derived
+// from the run id, so this is deterministic and idempotent: a run always gets
+// the same label whether it was written before or after the column existed.
+// Terminal runs may share a label; uniqueness is only enforced among live runs,
+// at creation time, because a slug is a speech label rather than a key.
+func (s *Store) backfillSlugs() error {
+	rows, err := s.db.Query(`SELECT id FROM runs WHERE slug IS NULL OR slug = ''`)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, id := range ids {
+		if _, err := s.db.Exec(`UPDATE runs SET slug = ? WHERE id = ?`, naming.Slug(id), id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // migrateAddTables brings pre-existing databases up to the current set of
