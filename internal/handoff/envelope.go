@@ -19,7 +19,9 @@ type Envelope struct {
 
 // Router handles passing envelopes and exported artifacts between worktrees.
 type Router struct {
-	BaseDir string // e.g. ~/.local/share/sergeant/fleet/<task_id>/handoff
+	// BaseDir is <fleet root>/<run_id>/handoff, where the fleet root comes from
+	// dag.FleetRoot. Callers must not build it from a literal path.
+	BaseDir string
 }
 
 func NewRouter(baseDir string) *Router {
