@@ -2,3 +2,8 @@
 .todos/
 bin/sergeant-mcp
 dist/
+
+# design-critique snapshots (local)
+.impeccable/
+bin/sergeant
+bin/sergeant-mcp

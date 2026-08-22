@@ -3,6 +3,15 @@ name: sergeant-setup
 description: Interactively and idempotently bootstrap a new Sergeant installation or diagnose and repair an existing one. Triggers on "set up Sergeant", "install Sergeant", "configure Sergeant", "repair Sergeant", or similar setup and onboarding requests.
 ---
 
+> **V1 ONLY — DO NOT FOLLOW ON THE `v2` BRANCH.**
+> This procedure describes the v1 shell toolbelt (`bin/sgt-*`, tmux workers, the
+> v1 fleet layout). Decision D7 in `docs/prd-sergeant-v2.md` forbids v2 from
+> shelling out to v1 or reusing its supervision plumbing. If you reached this
+> file while working on v2, stop and read `AGENTS.md` instead. Where v2 lacks a
+> capability described here, that is unimplemented v2 scope, not a gap to close
+> by calling v1.
+
+
 # Sergeant Setup
 
 Bootstrap or repair a Sergeant installation interactively and idempotently.

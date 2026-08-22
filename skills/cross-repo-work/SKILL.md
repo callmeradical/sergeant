@@ -3,6 +3,15 @@ name: cross-repo-work
 description: Use when more than one repository owns a requested Sergeant outcome; decomposes ownership, dependencies, merge order, and acceptance before dispatch.
 ---
 
+> **V1 ONLY — DO NOT FOLLOW ON THE `v2` BRANCH.**
+> This procedure describes the v1 shell toolbelt (`bin/sgt-*`, tmux workers, the
+> v1 fleet layout). Decision D7 in `docs/prd-sergeant-v2.md` forbids v2 from
+> shelling out to v1 or reusing its supervision plumbing. If you reached this
+> file while working on v2, stop and read `AGENTS.md` instead. Where v2 lacks a
+> capability described here, that is unimplemented v2 scope, not a gap to close
+> by calling v1.
+
+
 # Skill: cross-repo-work
 
 Decompose a requested outcome across owning repositories and define dependency and

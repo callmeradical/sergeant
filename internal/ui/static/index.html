@@ -1,0 +1,1595 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sergeant — Software Factory Spine</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700;800&display=swap');
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    code, pre, .font-mono {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body class="bg-[#0b0e14] text-[#c9d1d9] h-screen overflow-hidden flex flex-col antialiased selection:bg-emerald-500/30 text-xs">
+
+  <!-- Network / Poll Failure Banner -->
+  <div id="connection-error-banner" class="hidden bg-rose-950 text-rose-300 px-3 py-1.5 text-[11px] font-bold border-b border-rose-800 flex items-center justify-between">
+    <div class="flex items-center gap-2">
+      <i class="fa-solid fa-circle-exclamation text-rose-400" aria-hidden="true"></i>
+      <span>Connection to Sergeant daemon lost. Retrying...</span>
+    </div>
+    <button onclick="fetchRuns(); fetchFleet();" class="px-2 py-0.5 rounded bg-rose-900 hover:bg-rose-800 text-white text-[10px]">Retry Now</button>
+  </div>
+
+  <!-- Top Bar: Clean Unified Header -->
+  <header class="h-11 border-b border-[#21262d] bg-[#0b0e14] px-3 flex items-center justify-between sticky top-0 z-50">
+    <div class="flex items-center space-x-4">
+      <span class="font-extrabold text-xs tracking-wider text-white">Sergeant</span>
+      
+      <div class="h-3.5 w-px bg-[#21262d]"></div>
+
+      <!-- Unified Project Scope Dropdown -->
+      <div class="hidden md:flex items-center space-x-1.5 bg-[#161b22] px-2 py-0.5 rounded border border-[#30363d]">
+        <span class="w-1.5 h-1.5 rounded-full bg-[#3fb950]" aria-hidden="true"></span>
+        <label for="project-filter" class="text-[10px] text-[#8b949e] font-bold">Project:</label>
+        <select id="project-filter" onchange="onProjectChange()" class="bg-transparent text-white font-bold text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14] cursor-pointer">
+          <option value="all">Global (All projects)</option>
+        </select>
+      </div>
+
+      <div class="hidden lg:flex items-center space-x-3 text-[11px] text-[#8b949e]">
+        <span>Runs <span id="stat-total-runs" class="text-white font-bold font-mono">0</span></span>
+        <span>Workers <span id="stat-workers-active" class="text-[#3fb950] font-bold font-mono">0</span></span>
+        <span>Metrics <span id="stat-metrics-badge" class="text-[10px] px-1.5 py-0.5 rounded bg-[#161b22] text-[#8b949e] border border-[#30363d] font-bold font-mono">—</span></span>
+        <span id="last-updated" class="text-[11px] text-[#8b949e]">—</span>
+      </div>
+    </div>
+
+    <!-- Dispatch Stage CTA & Global Actions -->
+    <div class="flex items-center space-x-3">
+      <button onclick="openDispatchModal()" id="btn-open-dispatch" class="px-3 py-1 bg-[#1f6feb] hover:bg-[#388bfd] text-white font-bold text-xs rounded border border-[#388bfd] transition shadow-sm flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]">
+        <i class="fa-solid fa-bolt text-[10px]" aria-hidden="true"></i> <span>Dispatch stage</span>
+      </button>
+
+      <div class="flex items-center space-x-2 text-[#8b949e] text-xs">
+        <button onclick="openRefineProjectModal()" id="btn-open-refine" aria-label="Project governance & gates" title="Project governance & gates" class="min-w-[44px] min-h-[44px] flex items-center justify-center hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14] rounded"><i class="fa-solid fa-gear"></i></button>
+        <button onclick="fetchRuns(); fetchFleet();" aria-label="Refresh state" title="Refresh state" class="min-w-[44px] min-h-[44px] flex items-center justify-center hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14] rounded"><i class="fa-solid fa-rotate-right"></i></button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Viewport Layout -->
+  <div id="main-layout-wrapper" class="flex-1 flex overflow-hidden min-h-0">
+
+    <!-- Left Vertical Rail: Navigation & Live Runs List -->
+    <aside class="hidden lg:flex w-52 bg-[#0b0e14] border-r border-[#21262d] flex-col justify-between p-2 shrink-0 overflow-hidden min-h-0">
+      <div class="space-y-3 flex-1 flex flex-col overflow-hidden min-h-0">
+        
+        <!-- Primary Views Navigation -->
+        <nav class="space-y-0.5 shrink-0" aria-label="Views">
+          <button onclick="switchStitchTab('stages')" id="stitch-nav-stages" class="w-full px-2.5 py-1.5 rounded text-left text-[11px] font-bold bg-[#161b22] text-white border-l-2 border-[#58a6ff] flex items-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+            <i class="fa-solid fa-diagram-project text-[#58a6ff] w-4 text-center" aria-hidden="true"></i> Pipeline
+          </button>
+          <button onclick="switchStitchTab('tasks')" id="stitch-nav-tasks" class="w-full px-2.5 py-1.5 rounded text-left text-[11px] font-semibold text-[#8b949e] hover:text-white hover:bg-[#161b22] flex items-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+            <i class="fa-solid fa-server text-teal-400 w-4 text-center" aria-hidden="true"></i> Workers
+          </button>
+          <button onclick="switchStitchTab('repair')" id="stitch-nav-repair" disabled aria-disabled="true" class="w-full px-2.5 py-1.5 rounded text-left text-[11px] font-semibold text-[#8b949e] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] cursor-not-allowed">
+            <span class="flex items-center gap-2">
+              <i class="fa-solid fa-screwdriver-wrench text-slate-500 w-4 text-center" id="repair-icon" aria-hidden="true"></i> Repair
+            </span>
+            <span id="repair-alert-dot" class="hidden w-2 h-2 rounded-full bg-rose-500 animate-pulse" aria-hidden="true"></span>
+          </button>
+          <button onclick="openRefineProjectModal()" id="stitch-nav-config" class="w-full px-2.5 py-1.5 rounded text-left text-[11px] font-semibold text-[#8b949e] hover:text-white hover:bg-[#161b22] flex items-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+            <i class="fa-solid fa-sliders text-amber-400 w-4 text-center" aria-hidden="true"></i> Config
+          </button>
+        </nav>
+
+        <!-- Pipeline Runs Section (Nested under Project Scope) -->
+        <div class="flex-1 flex flex-col overflow-hidden pt-2 border-t border-[#21262d] min-h-0">
+          <div class="flex justify-between items-center px-1 pb-1.5 shrink-0">
+            <span class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider">Pipeline runs</span>
+            <span id="sidebar-runs-count" class="text-[9px] text-[#8b949e] font-mono">0</span>
+          </div>
+          <div id="sidebar-runs-list" class="flex-1 overflow-y-auto space-y-1 pr-1 min-h-0">
+            <div class="p-2 text-center text-[#8b949e] text-[10px]">No runs recorded.</div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Left Rail Bottom Support Links -->
+      <div class="space-y-1.5 text-[10px] text-[#8b949e] p-1 border-t border-[#21262d] shrink-0">
+        <button onclick="cleanActiveWorktrees()" class="w-full py-1.5 bg-[#161b22] hover:bg-[#21262d] text-slate-300 rounded border border-[#30363d] font-bold text-[10px] flex items-center justify-center gap-1.5 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+          <i class="fa-solid fa-broom text-[9px]" aria-hidden="true"></i> Clean worktrees
+        </button>
+      </div>
+    </aside>
+
+    <!-- Center Main Body Canvas -->
+    <main class="flex-1 flex flex-col overflow-hidden bg-[#0b0e14] min-h-0">
+
+      <!-- View 1: Stages Grid Matrix -->
+      <div id="stitch-view-stages" class="flex-1 flex flex-col overflow-hidden p-4 space-y-4 min-h-0">
+        
+        <!-- Header Banner & System Status -->
+        <div class="flex justify-between items-start pb-2">
+          <div>
+            <div class="flex items-center space-x-2">
+              <h1 class="text-base font-bold text-white tracking-wide">Pipeline</h1>
+              <span id="stage-run-badge" class="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-[#161b22] text-[#58a6ff] border border-[#30363d]">Run: None</span>
+            </div>
+            <p class="text-[11px] text-[#8b949e] mt-0.5">Pipeline for <span id="active-matrix-project" class="text-teal-300 font-mono font-bold">None</span></p>
+            <p id="active-run-brief" class="text-[11px] text-slate-200 mt-1 max-w-3xl"></p>
+          </div>
+          <div class="flex items-center space-x-2">
+            <span id="system-status-pill" aria-live="polite" aria-atomic="true" class="px-2 py-0.5 rounded text-[10px] font-bold bg-[#161b22] text-slate-300 border border-[#30363d]">
+              No active run
+            </span>
+          </div>
+        </div>
+
+        <!-- 2D Multi-Repo Stage Grid Table -->
+        <div class="border border-[#21262d] rounded bg-[#0b0e14] overflow-x-auto">
+          <table class="w-full text-left border-collapse text-[11px]">
+            <caption class="sr-only">Multi-repository stage execution matrix</caption>
+            <thead id="stage-matrix-head">
+              <tr class="border-b border-[#21262d] bg-[#161b22] text-[#8b949e] uppercase text-[10px]">
+                <th scope="col" class="p-2.5 w-36 border-r border-[#21262d]">Repository</th>
+                <th scope="col" class="p-2.5">Delivery</th>
+              </tr>
+            </thead>
+            <tbody id="stage-matrix-tbody" class="divide-y divide-[#21262d]">
+              <tr>
+                <td colspan="4" class="p-6 text-center text-[#8b949e]">Select or dispatch a run to populate the coordination matrix.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Bottom: Live Contract Inspector & Envelope Proofs -->
+        <div class="flex-1 border border-[#21262d] rounded bg-[#0b0e14] flex flex-col overflow-hidden min-h-0">
+          <div class="h-8 bg-[#161b22] border-b border-[#21262d] px-3 flex items-center justify-between text-[10px]">
+            <div class="flex items-center space-x-2">
+              <span class="font-bold text-[#8b949e]">Handoff envelopes</span>
+              <span class="px-1.5 py-0.5 bg-[#0b0e14] border border-[#30363d] text-[#58a6ff] rounded font-mono">schema.json / envelopes</span>
+            </div>
+            <span id="envelope-count-badge" class="text-[#8b949e] font-mono">0 envelopes</span>
+          </div>
+
+          <div class="flex-1 p-3 overflow-y-auto font-mono text-[11px] text-[#7ee787] bg-[#0b0e14]/90 space-y-2 min-h-0" id="contract-inspector-code">
+            <div class="text-[#8b949e]">// Awaiting typed contract handoff envelopes from stage workers...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- View 2: Screen C (Fleet State & Worktree Leases) -->
+      <div id="stitch-view-tasks" class="hidden flex-1 flex flex-col overflow-hidden p-4 space-y-4 min-h-0">
+        <div class="flex justify-between items-center pb-2">
+          <div>
+            <h1 class="text-base font-bold text-white tracking-wide">Workers &amp; Worktree Leases</h1>
+            <p class="text-[11px] text-[#8b949e] mt-0.5"><span id="fleet-active-count" class="font-mono">0</span> active tasks, worktrees allocated across system runtime</p>
+          </div>
+          <button onclick="cleanActiveWorktrees()" class="px-2.5 py-1 bg-[#161b22] hover:bg-[#21262d] text-slate-200 border border-[#30363d] rounded text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+            <i class="fa-solid fa-broom mr-1" aria-hidden="true"></i> Prune worktrees
+          </button>
+        </div>
+
+        <div class="border border-[#21262d] rounded bg-[#0b0e14] overflow-x-auto">
+          <table class="w-full text-left border-collapse text-[11px]">
+            <caption class="sr-only">Fleet worktree allocations and leases</caption>
+            <thead>
+              <tr class="border-b border-[#21262d] bg-[#161b22] text-[#8b949e] uppercase text-[10px]">
+                <th scope="col" class="p-2.5">Task ID</th>
+                <th scope="col" class="p-2.5">Worktree path</th>
+                <th scope="col" class="p-2.5">Status</th>
+                <th scope="col" class="p-2.5">Created at</th>
+                <th scope="col" class="p-2.5 text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody id="fleet-stitch-tbody" class="divide-y divide-[#21262d]">
+              <tr>
+                <td colspan="5" class="p-6 text-center text-[#8b949e]">Loading fleet state...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- View 3: Screen A (Live In-Session Repair Room) -->
+      <div id="stitch-view-repair" class="hidden flex-1 flex flex-col overflow-hidden p-4 space-y-4 min-h-0">
+        
+        <!-- Active Gate Failure State -->
+        <div id="repair-active-container" class="flex-1 flex flex-col space-y-4 overflow-hidden min-h-0">
+          <div class="p-3 bg-rose-950/80 border border-rose-800 rounded flex justify-between items-center text-white">
+            <div class="flex items-center space-x-2 font-bold text-xs">
+              <i class="fa-solid fa-circle-xmark text-rose-400" aria-hidden="true"></i>
+              <span>Run #<span id="repair-run-num" class="font-mono">None</span> — Gate failure diagnostics</span>
+            </div>
+            <div class="flex items-center space-x-2 text-[10px] font-mono">
+              <span id="repair-status-badge" class="px-2 py-0.5 rounded bg-rose-900 text-rose-200">● Gate failed</span>
+            </div>
+          </div>
+
+          <div class="flex-1 grid grid-cols-2 gap-3 overflow-hidden min-h-0">
+            <!-- Phase Terminal Failure Trace -->
+            <div class="border border-[#21262d] rounded bg-[#0b0e14] flex flex-col overflow-hidden min-h-0">
+              <div class="h-7 bg-[#161b22] border-b border-[#21262d] px-3 flex items-center justify-between text-[10px] text-[#8b949e] font-bold">
+                <span>Output / gate failure</span>
+                <span id="repair-failed-phase-name" class="text-rose-400 font-mono">test-gate</span>
+              </div>
+              <div class="flex-1 p-3 overflow-y-auto font-mono text-[11px] text-rose-300 space-y-0.5 min-h-0" id="repair-stdout-content">
+                No gate failures recorded.
+              </div>
+            </div>
+
+            <!-- Diff or Proposed Fix Patch -->
+            <div class="border border-[#21262d] rounded bg-[#0b0e14] flex flex-col overflow-hidden min-h-0">
+              <div class="h-7 bg-[#161b22] border-b border-[#21262d] px-3 flex items-center justify-between text-[10px] text-[#8b949e] font-bold">
+                <span class="text-emerald-400">Repair patch</span>
+                <span id="repair-diff-filename" class="font-mono">diff</span>
+              </div>
+              <div class="flex-1 p-3 overflow-y-auto font-mono text-[11px] space-y-0.5 min-h-0" id="repair-diff-content">
+                <div class="text-[#8b949e]">No repair diff proposed for this failure.</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="h-10 bg-[#161b22] border border-[#21262d] rounded px-3 flex items-center justify-between text-[11px]">
+            <div class="text-[#8b949e]" id="repair-bottom-msg">
+              <span class="text-rose-400">></span> Gate failure detected. Inspect stdout trace.
+            </div>
+          </div>
+        </div>
+
+        <!-- Empty / All-Green State -->
+        <div id="repair-empty-container" class="hidden flex-1 flex flex-col items-center justify-center p-8 space-y-3 border border-[#21262d] rounded bg-[#161b22]/30 text-center">
+          <div class="w-12 h-12 rounded-full bg-emerald-950/60 border border-emerald-800 flex items-center justify-center text-[#3fb950] text-xl">
+            <i class="fa-solid fa-shield-halved" aria-hidden="true"></i>
+          </div>
+          <div class="text-white font-bold text-sm">No active repairs required</div>
+          <p class="text-[#8b949e] text-xs max-w-md">All zero-token deterministic code gates and phase envelopes are passing cleanly. In-session repair will activate automatically if a gate fails.</p>
+          <button onclick="switchStitchTab('stages')" class="px-3 py-1.5 rounded bg-[#21262d] hover:bg-[#30363d] text-slate-300 text-xs font-semibold border border-[#30363d] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+            Return to pipeline
+          </button>
+        </div>
+
+      </div>
+
+    </main>
+
+    <!-- Right Vertical Action Strip -->
+    <aside class="hidden xl:flex w-10 bg-[#0b0e14] border-l border-[#21262d] flex-col items-center justify-start py-3 space-y-4 text-[#8b949e] shrink-0">
+      <button title="Stop Run" aria-label="Stop Run" onclick="cancelActiveRun()" class="min-w-[44px] min-h-[44px] flex items-center justify-center hover:text-rose-400 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] rounded"><i class="fa-regular fa-circle-stop text-sm"></i></button>
+    </aside>
+
+  </div>
+
+  <!-- Prune Preview Confirmation Modal -->
+  <div id="prune-modal" role="dialog" aria-modal="true" aria-labelledby="prune-modal-title" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="bg-[#161b22] border border-[#30363d] rounded-lg max-w-lg w-full p-6 space-y-4 shadow-2xl">
+      <div class="flex justify-between items-center pb-3 border-b border-[#21262d]">
+        <div class="flex items-center space-x-2">
+          <i class="fa-solid fa-broom text-amber-400" aria-hidden="true"></i>
+          <h3 id="prune-modal-title" class="font-bold text-sm text-white">Confirm worktree cleanup</h3>
+        </div>
+        <button onclick="closePruneModal()" aria-label="Close dialog" class="min-w-[32px] min-h-[32px] flex items-center justify-center text-[#8b949e] hover:text-white rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </div>
+      <div class="space-y-3 text-xs">
+        <p class="text-slate-300">The following <span id="prune-count" class="font-bold text-white font-mono">0</span> worktree directories will be deleted:</p>
+        <div id="prune-paths-list" class="max-h-40 overflow-y-auto p-2.5 rounded bg-[#0b0e14] border border-[#30363d] font-mono text-[10px] space-y-1 text-rose-300">
+        </div>
+        <div id="prune-skipped-container" class="hidden space-y-1">
+          <p class="text-amber-400 font-bold text-[10px]">Skipped (in progress):</p>
+          <div id="prune-skipped-list" class="max-h-24 overflow-y-auto p-2 rounded bg-[#0b0e14] border border-[#30363d] font-mono text-[10px] space-y-1 text-[#8b949e]"></div>
+        </div>
+      </div>
+      <div class="flex justify-end space-x-2 pt-3 border-t border-[#21262d]">
+        <button onclick="closePruneModal()" class="px-3 py-1.5 rounded bg-[#21262d] hover:bg-[#30363d] text-slate-300 font-semibold border border-[#30363d] text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">Cancel</button>
+        <button onclick="executeConfirmedPrune()" id="btn-confirm-prune" class="px-4 py-1.5 rounded bg-rose-700 hover:bg-rose-600 text-white font-bold text-xs border border-rose-500 shadow-md flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400">
+          <i class="fa-solid fa-trash-can" aria-hidden="true"></i> Delete worktrees
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Multi-Repo Stage Dispatch Wizard Modal -->
+  <div id="dispatch-modal" role="dialog" aria-modal="true" aria-labelledby="dispatch-modal-title" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="bg-[#161b22] border border-[#30363d] rounded-lg max-w-3xl w-full p-6 space-y-4 shadow-2xl">
+      <div class="flex justify-between items-center pb-3 border-b border-[#21262d]">
+        <div class="flex items-center space-x-2">
+          <i class="fa-solid fa-bolt text-[#58a6ff]" aria-hidden="true"></i>
+          <h3 id="dispatch-modal-title" class="font-bold text-sm text-white">Stage dispatch wizard</h3>
+        </div>
+        <button onclick="closeDispatchModal()" aria-label="Close dialog" class="min-w-[32px] min-h-[32px] flex items-center justify-center text-[#8b949e] hover:text-white rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </div>
+
+      <div class="space-y-3.5 text-xs">
+        <div>
+          <label for="modal-project" class="block text-[10px] uppercase font-bold text-[#8b949e] mb-1">Target project</label>
+          <select id="modal-project" onchange="onModalProjectChange()" class="w-full bg-[#0b0e14] border border-[#30363d] rounded p-2 text-white font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]">
+          </select>
+        </div>
+
+        <div>
+          <span class="block text-[10px] uppercase font-bold text-[#8b949e] mb-1">Target repositories in topology</span>
+          <div id="modal-repo-checkboxes" class="grid grid-cols-2 gap-2 p-2.5 rounded bg-[#0b0e14] border border-[#30363d]">
+            <span class="text-[#8b949e]">Select a project to load repositories</span>
+          </div>
+        </div>
+
+        <div>
+          <label for="modal-agent" class="block text-[10px] uppercase font-bold text-[#8b949e] mb-1">Agent harness</label>
+          <select id="modal-agent" class="w-full bg-[#0b0e14] border border-[#30363d] rounded p-2 text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]">
+            <option value="opencode">opencode (default - headless TDD worker)</option>
+            <option value="claude">claude (Claude Code CLI)</option>
+            <option value="codex">codex (OpenAI Codex CLI)</option>
+            <option value="goose">goose (Goose Autonomous Session)</option>
+            <option value="pi">pi (Minimalist Headless RPC)</option>
+          </select>
+        </div>
+
+        <div>
+          <label for="modal-brief" class="block text-[10px] uppercase font-bold text-[#8b949e] mb-1">Intent brief &amp; acceptance criteria</label>
+          <textarea id="modal-brief" rows="3" class="w-full bg-[#0b0e14] border border-[#30363d] rounded p-2 text-white placeholder-[#8b949e] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]" placeholder="e.g. Implement Stripe webhook verification and update customer portal balance in real time"></textarea>
+        </div>
+
+        <div class="flex items-center space-x-2 pt-1">
+          <input type="checkbox" id="modal-tdd-check" checked class="rounded bg-[#0b0e14] border-[#30363d] text-emerald-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+          <label for="modal-tdd-check" class="text-slate-300">Enforce zero-token TDD gate before commit</label>
+        </div>
+
+        <div id="validation-report" class="hidden p-3 rounded bg-[#0b0e14] border border-[#30363d] space-y-1.5">
+          <div class="flex justify-between items-center">
+            <span class="font-bold text-white">Validation assessment:</span>
+            <span id="val-score" class="font-bold px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 text-[10px] font-mono">100/100 READY</span>
+          </div>
+          <div id="val-checks" class="space-y-0.5 text-[10px]"></div>
+        </div>
+      </div>
+
+      <div class="flex justify-between items-center pt-3 border-t border-[#21262d]">
+        <button onclick="validateCurrentIntent()" class="px-3 py-1.5 rounded bg-[#21262d] hover:bg-[#30363d] text-slate-300 font-semibold border border-[#30363d] text-xs flex items-center space-x-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+          <i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i> <span>Validate intent</span>
+        </button>
+        <div class="flex space-x-2">
+          <button onclick="closeDispatchModal()" class="px-3 py-1.5 rounded bg-[#21262d] hover:bg-[#30363d] text-slate-300 font-semibold border border-[#30363d] text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">Cancel</button>
+          <button onclick="submitDispatch()" class="px-4 py-1.5 rounded bg-[#1f6feb] hover:bg-[#388bfd] text-white font-bold text-xs border border-[#388bfd] shadow-md flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+            <i class="fa-solid fa-rocket" aria-hidden="true"></i> Dispatch pipeline
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Project Definition Refinement Modal -->
+  <div id="refine-project-modal" role="dialog" aria-modal="true" aria-labelledby="refine-modal-title" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="bg-[#161b22] border border-[#30363d] rounded-lg max-w-3xl w-full p-6 space-y-4 shadow-2xl">
+      <div class="flex justify-between items-center pb-3 border-b border-[#21262d]">
+        <div class="flex items-center space-x-2">
+          <i class="fa-solid fa-sliders text-amber-400" aria-hidden="true"></i>
+          <h3 id="refine-modal-title" class="font-bold text-sm text-white">Project governance &amp; quality gates</h3>
+        </div>
+        <button onclick="closeRefineProjectModal()" aria-label="Close dialog" class="min-w-[32px] min-h-[32px] flex items-center justify-center text-[#8b949e] hover:text-white rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <div>
+          <label for="refine-select-project" class="block text-[10px] uppercase font-bold text-[#8b949e] mb-1">Target project</label>
+          <select id="refine-select-project" onchange="loadProjectForRefine()" class="w-full bg-[#0b0e14] border border-[#30363d] rounded p-2 text-white font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]">
+          </select>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label for="refine-agent" class="block text-[10px] uppercase font-bold text-[#8b949e] mb-1">Default agent</label>
+            <select id="refine-agent" class="w-full bg-[#0b0e14] border border-[#30363d] rounded p-2 text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]">
+              <option value="opencode">opencode (default - headless TDD worker)</option>
+              <option value="claude">claude (Claude Code CLI)</option>
+              <option value="codex">codex (OpenAI Codex CLI)</option>
+              <option value="goose">goose (Goose Autonomous Session)</option>
+              <option value="pi">pi (Minimalist Headless RPC)</option>
+            </select>
+          </div>
+          <div>
+            <label for="refine-description" class="block text-[10px] uppercase font-bold text-[#8b949e] mb-1">Project description</label>
+            <input type="text" id="refine-description" class="w-full bg-[#0b0e14] border border-[#30363d] rounded p-2 text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]">
+          </div>
+        </div>
+
+        <div>
+          <span class="block text-[10px] uppercase font-bold text-[#8b949e] mb-1">Repositories &amp; zero-token code gates</span>
+          <div id="refine-repos-container" class="space-y-2 max-h-56 overflow-y-auto">
+            <div class="p-3 text-center text-[#8b949e]">Loading repos...</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex justify-between items-center pt-3 border-t border-[#21262d]">
+        <span class="text-[10px] text-[#8b949e] font-mono">~/.config/sergeant/*.yaml</span>
+        <div class="flex space-x-2">
+          <button onclick="closeRefineProjectModal()" class="px-3 py-1.5 rounded bg-[#21262d] hover:bg-[#30363d] text-slate-300 font-semibold border border-[#30363d] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">Cancel</button>
+          <button onclick="saveProjectRefinement()" class="px-4 py-1.5 rounded bg-[#238636] hover:bg-[#2ea043] text-white font-bold border border-emerald-600 shadow-md flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+            <i class="fa-regular fa-floppy-disk" aria-hidden="true"></i> Save definition
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Project Refine Save Confirmation Modal -->
+  <div id="refine-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="refine-confirm-modal-title" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="bg-[#161b22] border border-[#30363d] rounded-lg max-w-lg w-full p-6 space-y-4 shadow-2xl">
+      <div class="flex justify-between items-center pb-3 border-b border-[#21262d]">
+        <div class="flex items-center space-x-2">
+          <i class="fa-solid fa-sliders text-amber-400" aria-hidden="true"></i>
+          <h3 id="refine-confirm-modal-title" class="font-bold text-sm text-white">Confirm project definition update</h3>
+        </div>
+        <button onclick="closeRefineConfirmModal()" aria-label="Close dialog" class="min-w-[32px] min-h-[32px] flex items-center justify-center text-[#8b949e] hover:text-white rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </div>
+      <div class="space-y-3 text-xs">
+        <p class="text-slate-300">Target project: <span id="refine-confirm-project" class="font-bold text-white font-mono">—</span></p>
+        <p class="text-slate-300">The following quality gates and configuration will be saved:</p>
+        <div id="refine-confirm-summary" class="max-h-48 overflow-y-auto p-2.5 rounded bg-[#0b0e14] border border-[#30363d] font-mono text-[10px] space-y-2 text-slate-200">
+        </div>
+        <div class="p-2 rounded bg-[#0b0e14] border border-emerald-900/60 text-emerald-400 text-[10px] flex items-center gap-1.5">
+          <i class="fa-solid fa-shield-halved" aria-hidden="true"></i>
+          <span>Existing pipeline and DAG configuration will be preserved.</span>
+        </div>
+      </div>
+      <div class="flex justify-end space-x-2 pt-3 border-t border-[#21262d]">
+        <button onclick="closeRefineConfirmModal()" class="px-3 py-1.5 rounded bg-[#21262d] hover:bg-[#30363d] text-slate-300 font-semibold border border-[#30363d] text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">Cancel</button>
+        <button onclick="executeConfirmedProjectRefinement()" id="btn-confirm-save-refine" class="px-4 py-1.5 rounded bg-[#238636] hover:bg-[#2ea043] text-white font-bold text-xs border border-emerald-600 shadow-md flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+          <i class="fa-regular fa-floppy-disk" aria-hidden="true"></i> Save configuration
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let activeRunId = null;
+    let allRuns = [];
+    let selectedProject = "all";
+    let loadedProjects = [];
+    let activeStitchTab = "stages";
+    let currentProjectDefinition = null;
+    let hasGateFailures = false;
+    let lastSelectedRunStatus = null;
+    let lastSelectedRunUpdatedAt = null;
+    let lastFocusedBeforeModal = null;
+    let pendingPruneTaskId = "";
+
+    function setModalAriaHidden(hidden) {
+      const layout = document.getElementById('main-layout-wrapper');
+      if (layout) {
+        if (hidden) {
+          layout.setAttribute('aria-hidden', 'true');
+        } else {
+          layout.removeAttribute('aria-hidden');
+        }
+      }
+    }
+
+    function restoreModalFocus() {
+      setModalAriaHidden(false);
+      if (lastFocusedBeforeModal && typeof lastFocusedBeforeModal.focus === 'function') {
+        lastFocusedBeforeModal.focus();
+      }
+      lastFocusedBeforeModal = null;
+    }
+
+    function setConnectionError(isError) {
+      const banner = document.getElementById('connection-error-banner');
+      if (isError) {
+        banner.classList.remove('hidden');
+      } else {
+        banner.classList.add('hidden');
+      }
+    }
+
+    function updateRepairTabState(hasFailure) {
+      hasGateFailures = hasFailure;
+      const nRepair = document.getElementById('stitch-nav-repair');
+      const rIcon = document.getElementById('repair-icon');
+      const alertDot = document.getElementById('repair-alert-dot');
+
+      if (hasFailure) {
+        nRepair.removeAttribute('disabled');
+        nRepair.removeAttribute('aria-disabled');
+        nRepair.classList.remove('cursor-not-allowed');
+        nRepair.classList.add('hover:text-white', 'hover:bg-[#161b22]');
+        rIcon.className = "fa-solid fa-screwdriver-wrench text-rose-400 w-4 text-center";
+        alertDot.classList.remove('hidden');
+      } else {
+        if (activeStitchTab !== 'repair') {
+          nRepair.setAttribute('disabled', 'true');
+          nRepair.setAttribute('aria-disabled', 'true');
+          nRepair.classList.add('cursor-not-allowed');
+          nRepair.classList.remove('hover:text-white', 'hover:bg-[#161b22]');
+        }
+        rIcon.className = "fa-solid fa-screwdriver-wrench text-slate-500 w-4 text-center";
+        alertDot.classList.add('hidden');
+      }
+    }
+
+    function switchStitchTab(tab) {
+      if (tab === 'repair' && !hasGateFailures && activeStitchTab !== 'repair') {
+        return;
+      }
+      activeStitchTab = tab;
+      const vStages = document.getElementById('stitch-view-stages');
+      const vTasks = document.getElementById('stitch-view-tasks');
+      const vRepair = document.getElementById('stitch-view-repair');
+      const nStages = document.getElementById('stitch-nav-stages');
+      const nTasks = document.getElementById('stitch-nav-tasks');
+      const nRepair = document.getElementById('stitch-nav-repair');
+
+      vStages.classList.add('hidden');
+      vTasks.classList.add('hidden');
+      vRepair.classList.add('hidden');
+
+      const baseClasses = "w-full px-2.5 py-1.5 rounded text-left text-[11px] font-semibold text-[#8b949e] hover:text-white hover:bg-[#161b22] flex items-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]";
+      const activeClasses = "w-full px-2.5 py-1.5 rounded text-left text-[11px] font-bold bg-[#161b22] text-white border-l-2 border-[#58a6ff] flex items-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]";
+
+      nStages.className = baseClasses;
+      nTasks.className = baseClasses;
+      nRepair.className = "w-full px-2.5 py-1.5 rounded text-left text-[11px] font-semibold text-[#8b949e] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] " + (hasGateFailures ? "hover:text-white hover:bg-[#161b22]" : "cursor-not-allowed");
+
+      if (tab === 'stages') {
+        vStages.classList.remove('hidden');
+        nStages.className = activeClasses;
+      } else if (tab === 'tasks') {
+        vTasks.classList.remove('hidden');
+        nTasks.className = activeClasses;
+        fetchFleet();
+      } else if (tab === 'repair') {
+        vRepair.classList.remove('hidden');
+        nRepair.className = "w-full px-2.5 py-1.5 rounded text-left text-[11px] font-bold bg-[#161b22] text-white border-l-2 border-rose-500 flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]";
+      }
+    }
+
+    async function loadProjects() {
+      try {
+        const res = await fetch('/api/projects');
+        loadedProjects = await res.json() || [];
+        setConnectionError(false);
+
+        const select = document.getElementById('project-filter');
+        const modalSelect = document.getElementById('modal-project');
+        const refineSelect = document.getElementById('refine-select-project');
+        
+        select.innerHTML = '<option value="all">Global (All projects)</option>';
+        modalSelect.innerHTML = '';
+        refineSelect.innerHTML = '';
+
+        loadedProjects.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.name;
+          opt.innerText = p.name;
+          select.appendChild(opt);
+
+          const optModal = document.createElement('option');
+          optModal.value = p.name;
+          optModal.innerText = `${p.name} — ${p.description || 'Multi-repo project'}`;
+          modalSelect.appendChild(optModal);
+
+          const optRefine = document.createElement('option');
+          optRefine.value = p.name;
+          optRefine.innerText = `${p.name} — ${p.description || 'Multi-repo project'}`;
+          refineSelect.appendChild(optRefine);
+        });
+
+        populateModalRepos();
+      } catch (err) {
+        setConnectionError(true);
+        console.error("Failed loading projects:", err);
+      }
+    }
+
+    function onProjectChange() {
+      selectedProject = document.getElementById('project-filter').value;
+      activeRunId = null;
+      lastSelectedRunStatus = null;
+      lastSelectedRunUpdatedAt = null;
+      fetchRuns();
+    }
+
+    function onModalProjectChange() {
+      populateModalRepos();
+    }
+
+    function populateModalRepos() {
+      const modalSelect = document.getElementById('modal-project');
+      const container = document.getElementById('modal-repo-checkboxes');
+      const projName = modalSelect.value;
+      const proj = loadedProjects.find(p => p.name === projName);
+
+      if (!proj || !proj.repos) {
+        container.innerHTML = '<span class="text-[#8b949e]">No repositories configured.</span>';
+        return;
+      }
+
+      const repoKeys = Object.keys(proj.repos);
+      container.innerHTML = repoKeys.map(k => `
+        <label class="flex items-center space-x-2 text-slate-200 cursor-pointer hover:text-white">
+          <input type="checkbox" name="target_repos" value="${k}" checked class="rounded bg-[#161b22] border-[#30363d] text-[#58a6ff] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+          <span class="truncate font-mono">${k}</span>
+          <span class="text-[9px] text-[#8b949e]">(${proj.repos[k].group || 'app'})</span>
+        </label>
+      `).join('');
+    }
+
+    function openRefineProjectModal() {
+      lastFocusedBeforeModal = document.activeElement;
+      setModalAriaHidden(true);
+      const refineSelect = document.getElementById('refine-select-project');
+      if (selectedProject && selectedProject !== 'all') {
+        refineSelect.value = selectedProject;
+      }
+      const modal = document.getElementById('refine-project-modal');
+      modal.classList.remove('hidden');
+      loadProjectForRefine();
+      setTimeout(() => refineSelect.focus(), 50);
+    }
+
+    function closeRefineProjectModal() {
+      document.getElementById('refine-project-modal').classList.add('hidden');
+      restoreModalFocus();
+    }
+
+    let pendingProjectRefinePayload = null;
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function addGateRow(repoName, gateName = '', gateCmd = '') {
+      const gatesList = document.querySelector(`.repo-gates-list[data-repo="${CSS.escape(repoName)}"]`);
+      if (!gatesList) return;
+
+      const noGatesMsg = gatesList.querySelector('.no-gates-msg');
+      if (noGatesMsg) noGatesMsg.remove();
+
+      const row = document.createElement('div');
+      row.className = "flex items-center gap-2 gate-row";
+      row.innerHTML = `
+        <div class="w-1/3">
+          <input type="text" data-repo="${escapeHtml(repoName)}" value="${escapeHtml(gateName)}" placeholder="Gate name (e.g. test)" class="gate-name-input w-full bg-[#161b22] border border-[#30363d] rounded px-1.5 py-1 text-[10px] text-white font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+        </div>
+        <div class="flex-1">
+          <input type="text" data-repo="${escapeHtml(repoName)}" value="${escapeHtml(gateCmd)}" placeholder="Command (e.g. go test ./...)" class="gate-cmd-input w-full bg-[#161b22] border border-[#30363d] rounded px-1.5 py-1 text-[10px] text-amber-300 font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+        </div>
+        <button type="button" onclick="removeGateRow(this, '${escapeHtml(repoName)}')" aria-label="Remove gate" class="min-w-[24px] min-h-[24px] flex items-center justify-center text-[#8b949e] hover:text-rose-400 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+          <i class="fa-solid fa-xmark text-[10px]" aria-hidden="true"></i>
+        </button>
+      `;
+      gatesList.appendChild(row);
+    }
+
+    function removeGateRow(btn, repoName) {
+      const row = btn.closest('.gate-row');
+      const gatesList = document.querySelector(`.repo-gates-list[data-repo="${CSS.escape(repoName)}"]`);
+      if (row) row.remove();
+      if (gatesList && gatesList.querySelectorAll('.gate-row').length === 0) {
+        gatesList.innerHTML = '<div class="no-gates-msg text-[#8b949e] text-[10px] italic py-0.5">No quality gates configured.</div>';
+      }
+    }
+
+    async function loadProjectForRefine() {
+      const projName = document.getElementById('refine-select-project').value;
+      if (!projName) return;
+
+      try {
+        const res = await fetch(`/api/project-details?name=${encodeURIComponent(projName)}`);
+        const proj = await res.json();
+        currentProjectDefinition = proj;
+
+        document.getElementById('refine-description').value = proj.description || '';
+        document.getElementById('refine-agent').value = (proj.defaults && proj.defaults.agent) ? proj.defaults.agent : 'opencode';
+
+        const container = document.getElementById('refine-repos-container');
+        const repos = proj.repos || {};
+        const repoNames = Object.keys(repos);
+
+        if (repoNames.length === 0) {
+          container.innerHTML = '<div class="p-3 text-center text-[#8b949e]">No repositories configured.</div>';
+          return;
+        }
+
+        container.innerHTML = repoNames.map(rName => {
+          const r = repos[rName];
+          const gates = (r.factory && r.factory.gates) ? r.factory.gates : {};
+          const gateKeys = Object.keys(gates);
+
+          let gatesHTML = '';
+          if (gateKeys.length === 0) {
+            gatesHTML = '<div class="no-gates-msg text-[#8b949e] text-[10px] italic py-0.5">No quality gates configured.</div>';
+          } else {
+            gatesHTML = gateKeys.map(gName => `
+              <div class="flex items-center gap-2 gate-row">
+                <div class="w-1/3">
+                  <input type="text" data-repo="${escapeHtml(rName)}" value="${escapeHtml(gName)}" placeholder="Gate name (e.g. test)" class="gate-name-input w-full bg-[#161b22] border border-[#30363d] rounded px-1.5 py-1 text-[10px] text-white font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+                </div>
+                <div class="flex-1">
+                  <input type="text" data-repo="${escapeHtml(rName)}" value="${escapeHtml(gates[gName])}" placeholder="Command (e.g. go test ./...)" class="gate-cmd-input w-full bg-[#161b22] border border-[#30363d] rounded px-1.5 py-1 text-[10px] text-amber-300 font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+                </div>
+                <button type="button" onclick="removeGateRow(this, '${escapeHtml(rName)}')" aria-label="Remove gate" class="min-w-[24px] min-h-[24px] flex items-center justify-center text-[#8b949e] hover:text-rose-400 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+                  <i class="fa-solid fa-xmark text-[10px]" aria-hidden="true"></i>
+                </button>
+              </div>
+            `).join('');
+          }
+
+          return `
+            <div class="p-2.5 rounded bg-[#0b0e14] border border-[#30363d] space-y-2">
+              <div class="flex justify-between items-center">
+                <span class="font-bold text-white font-mono">${escapeHtml(rName)}</span>
+                <input type="text" data-repo="${escapeHtml(rName)}" value="${escapeHtml(r.role || 'Service')}" placeholder="Role" class="role-input bg-[#161b22] border border-[#30363d] rounded px-1.5 py-0.5 text-[10px] text-slate-300 w-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+              </div>
+              <div class="space-y-1.5 pt-1">
+                <div class="flex justify-between items-center text-[9px] uppercase font-bold text-[#8b949e]">
+                  <span>Quality gates</span>
+                  <button type="button" onclick="addGateRow('${escapeHtml(rName)}')" class="text-[#58a6ff] hover:text-white flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] rounded px-1">
+                    <i class="fa-solid fa-plus text-[9px]" aria-hidden="true"></i> Add gate
+                  </button>
+                </div>
+                <div class="repo-gates-list space-y-1.5" data-repo="${escapeHtml(rName)}">
+                  ${gatesHTML}
+                </div>
+              </div>
+            </div>
+          `;
+        }).join('');
+      } catch (err) {
+        alert("Failed loading project definition: " + err);
+      }
+    }
+
+    function buildProjectRefinementPayload() {
+      const projName = document.getElementById('refine-select-project').value;
+      const description = document.getElementById('refine-description').value;
+      const agent = document.getElementById('refine-agent').value;
+
+      const payload = {
+        name: projName,
+        description: description,
+        defaults: {
+          agent: agent
+        },
+        repos: {}
+      };
+
+      const roleInputs = document.querySelectorAll('#refine-repos-container .role-input');
+      const seenRepos = new Set();
+      roleInputs.forEach(input => {
+        const repo = input.dataset.repo;
+        if (!repo) return;
+        seenRepos.add(repo);
+        if (!payload.repos[repo]) {
+          payload.repos[repo] = {};
+        }
+        const roleVal = input.value.trim();
+        if (roleVal) {
+          payload.repos[repo].role = roleVal;
+        }
+      });
+
+      const gateRows = document.querySelectorAll('#refine-repos-container .gate-row');
+      gateRows.forEach(row => {
+        const nameInput = row.querySelector('.gate-name-input');
+        const cmdInput = row.querySelector('.gate-cmd-input');
+        if (!nameInput || !cmdInput) return;
+
+        const repo = nameInput.dataset.repo;
+        const gateName = nameInput.value.trim();
+        const gateCmd = cmdInput.value.trim();
+
+        if (repo && gateName && gateCmd) {
+          if (!payload.repos[repo]) {
+            payload.repos[repo] = {};
+          }
+          if (!payload.repos[repo].factory) {
+            payload.repos[repo].factory = { gates: {} };
+          }
+          if (!payload.repos[repo].factory.gates) {
+            payload.repos[repo].factory.gates = {};
+          }
+          payload.repos[repo].factory.gates[gateName] = gateCmd;
+        }
+      });
+
+      return payload;
+    }
+
+    function saveProjectRefinement() {
+      const payload = buildProjectRefinementPayload();
+      console.log(JSON.stringify(payload));
+      pendingProjectRefinePayload = payload;
+
+      document.getElementById('refine-confirm-project').innerText = payload.name;
+      const summaryContainer = document.getElementById('refine-confirm-summary');
+      
+      const repoEntries = Object.entries(payload.repos || {});
+      if (repoEntries.length === 0) {
+        summaryContainer.innerHTML = '<div class="text-[#8b949e]">No repositories configured.</div>';
+      } else {
+        summaryContainer.innerHTML = repoEntries.map(([rName, rData]) => {
+          const gates = (rData.factory && rData.factory.gates) ? rData.factory.gates : {};
+          const gateKeys = Object.keys(gates);
+          const gateDesc = gateKeys.length > 0 
+            ? gateKeys.map(g => `<span class="text-amber-300 font-bold">${escapeHtml(g)}</span>: <span class="text-slate-300">${escapeHtml(gates[g])}</span>`).join('<br>&nbsp;&nbsp;')
+            : '<span class="text-[#8b949e]">No gates configured</span>';
+
+          return `
+            <div class="border-b border-[#21262d] pb-1.5 last:border-b-0">
+              <div class="text-white font-bold">${escapeHtml(rName)} <span class="text-[9px] text-[#8b949e] font-normal">(${escapeHtml(rData.role || 'Service')})</span></div>
+              <div class="text-[10px] pl-2 pt-0.5">${gateDesc}</div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      openRefineConfirmModal();
+    }
+
+    function openRefineConfirmModal() {
+      lastFocusedBeforeModal = document.activeElement;
+      setModalAriaHidden(true);
+      const modal = document.getElementById('refine-confirm-modal');
+      modal.classList.remove('hidden');
+      setTimeout(() => document.getElementById('btn-confirm-save-refine').focus(), 50);
+    }
+
+    function closeRefineConfirmModal() {
+      document.getElementById('refine-confirm-modal').classList.add('hidden');
+      restoreModalFocus();
+    }
+
+    async function executeConfirmedProjectRefinement() {
+      if (!pendingProjectRefinePayload) return;
+
+      try {
+        const res = await fetch('/api/refine-project', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(pendingProjectRefinePayload)
+        });
+
+        if (res.ok) {
+          closeRefineConfirmModal();
+          closeRefineProjectModal();
+          loadProjects();
+        } else {
+          const text = await res.text();
+          alert("Save failed: " + text);
+        }
+      } catch (err) {
+        alert("Save request failed: " + err);
+      }
+    }
+
+    function openDispatchModal() {
+      lastFocusedBeforeModal = document.activeElement;
+      setModalAriaHidden(true);
+      const modalSelect = document.getElementById('modal-project');
+      if (selectedProject && selectedProject !== 'all') {
+        modalSelect.value = selectedProject;
+      } else if (modalSelect.options.length > 0) {
+        modalSelect.selectedIndex = 0;
+      }
+      populateModalRepos();
+      const modal = document.getElementById('dispatch-modal');
+      modal.classList.remove('hidden');
+      document.getElementById('validation-report').classList.add('hidden');
+      setTimeout(() => document.getElementById('modal-brief').focus(), 50);
+    }
+
+    function closeDispatchModal() {
+      document.getElementById('dispatch-modal').classList.add('hidden');
+      restoreModalFocus();
+    }
+
+    function getSelectedModalRepos() {
+      const cbs = document.querySelectorAll('input[name="target_repos"]:checked');
+      return Array.from(cbs).map(cb => cb.value);
+    }
+
+    async function validateCurrentIntent() {
+      const project = document.getElementById('modal-project').value;
+      const agent = document.getElementById('modal-agent').value;
+      const brief = document.getElementById('modal-brief').value;
+
+      if (!brief.trim()) {
+        alert("Please enter an intent brief first.");
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/validate-intent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ project, agent, brief })
+        });
+        const data = await res.json();
+        
+        const box = document.getElementById('validation-report');
+        const score = document.getElementById('val-score');
+        const checks = document.getElementById('val-checks');
+
+        box.classList.remove('hidden');
+        score.innerText = `${data.score}/100 ${data.valid ? 'VALIDATED' : 'ACTION REQUIRED'}`;
+        score.className = `font-bold px-1.5 py-0.5 rounded border text-[10px] font-mono ${data.valid ? 'bg-emerald-950 text-emerald-300 border-emerald-800' : 'bg-rose-950 text-rose-300 border-rose-800'}`;
+
+        let html = '';
+        (data.checks_passed || []).forEach(c => {
+          html += `<div class="text-emerald-400"><i class="fa-solid fa-check mr-1" aria-hidden="true"></i>${c}</div>`;
+        });
+        (data.warnings || []).forEach(w => {
+          html += `<div class="text-amber-400"><i class="fa-solid fa-triangle-exclamation mr-1" aria-hidden="true"></i>${w}</div>`;
+        });
+        (data.errors || []).forEach(e => {
+          html += `<div class="text-rose-400"><i class="fa-solid fa-xmark mr-1" aria-hidden="true"></i>${e}</div>`;
+        });
+        checks.innerHTML = html;
+      } catch (err) {
+        alert("Validation request failed: " + err);
+      }
+    }
+
+    async function submitDispatch() {
+      const project = document.getElementById('modal-project').value;
+      const agent = document.getElementById('modal-agent').value;
+      const brief = document.getElementById('modal-brief').value;
+      const repos = getSelectedModalRepos();
+
+      if (!project) {
+        alert("Please select a target project");
+        return;
+      }
+      if (!brief.trim()) {
+        alert("Intent brief & acceptance criteria cannot be empty");
+        return;
+      }
+
+      const res = await fetch('/api/dispatch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project, agent, brief, repos })
+      });
+
+      if (res.ok) {
+        closeDispatchModal();
+        fetchRuns();
+      } else {
+        const text = await res.text();
+        alert("Dispatch error: " + text);
+      }
+    }
+
+    async function cancelActiveRun() {
+      if (!activeRunId) return;
+      if (!confirm(`Stop and cancel run ${activeRunId}?`)) return;
+      await fetch('/api/run-cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: activeRunId })
+      });
+      fetchRuns();
+    }
+
+    async function cleanActiveWorktrees(taskId = "") {
+      lastFocusedBeforeModal = document.activeElement;
+      setModalAriaHidden(true);
+      pendingPruneTaskId = taskId;
+      try {
+        const res = await fetch('/api/clean-worktrees', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: taskId, dry_run: true })
+        });
+        const data = await res.json();
+        
+        document.getElementById('prune-count').innerText = data.count || 0;
+        const pathsList = document.getElementById('prune-paths-list');
+        if (data.removed && data.removed.length > 0) {
+          pathsList.innerHTML = data.removed.map(p => `<div><i class="fa-regular fa-folder mr-1" aria-hidden="true"></i>${p}</div>`).join('');
+        } else {
+          pathsList.innerHTML = '<div class="text-[#8b949e]">No unallocated worktrees found to delete.</div>';
+        }
+
+        const skipContainer = document.getElementById('prune-skipped-container');
+        const skipList = document.getElementById('prune-skipped-list');
+        if (data.skipped && data.skipped.length > 0) {
+          skipContainer.classList.remove('hidden');
+          skipList.innerHTML = data.skipped.map(s => `<div>${s.path} (${s.reason})</div>`).join('');
+        } else {
+          skipContainer.classList.add('hidden');
+        }
+
+        document.getElementById('prune-modal').classList.remove('hidden');
+        setTimeout(() => document.getElementById('btn-confirm-prune').focus(), 50);
+      } catch (err) {
+        alert("Failed calculating worktree cleanup preview: " + err);
+      }
+    }
+
+    function closePruneModal() {
+      document.getElementById('prune-modal').classList.add('hidden');
+      restoreModalFocus();
+    }
+
+    async function executeConfirmedPrune() {
+      try {
+        const res = await fetch('/api/clean-worktrees', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: pendingPruneTaskId, dry_run: false })
+        });
+        if (res.ok) {
+          closePruneModal();
+          fetchFleet();
+        } else {
+          const t = await res.text();
+          alert("Prune error: " + t);
+        }
+      } catch (err) {
+        alert("Cleanup failed: " + err);
+      }
+    }
+
+    function copyToClipboard(text, btnElement) {
+      navigator.clipboard.writeText(text).then(() => {
+        const origHTML = btnElement.innerHTML;
+        btnElement.innerHTML = '<i class="fa-solid fa-check text-emerald-400" aria-hidden="true"></i> Copied';
+        setTimeout(() => {
+          btnElement.innerHTML = origHTML;
+        }, 1800);
+      }).catch(err => {
+        prompt("Copy URL manually:", text);
+      });
+    }
+
+    async function fetchFleet() {
+      try {
+        const res = await fetch('/api/fleet');
+        const data = await res.json();
+        setConnectionError(false);
+
+        const tbody = document.getElementById('fleet-stitch-tbody');
+        const countSpan = document.getElementById('fleet-active-count');
+        const workersActive = document.getElementById('stat-workers-active');
+        const leases = data.leases || [];
+
+        countSpan.innerText = leases.length;
+        if (workersActive) workersActive.innerText = leases.length;
+
+        if (leases.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="5" class="p-6 text-center text-[#8b949e]">No active worktrees allocated.</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = leases.map(l => {
+          const isRunning = l.status === 'running';
+          const isPassed = l.status === 'passed';
+          const isFailed = l.status === 'failed';
+          let statusBadge = `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold font-mono bg-[#161b22] text-[#8b949e] border border-[#30363d]">${l.status}</span>`;
+          if (isRunning) {
+            statusBadge = `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold font-mono bg-amber-950/60 text-amber-300 border border-amber-800">running</span>`;
+          } else if (isPassed) {
+            statusBadge = `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold font-mono bg-emerald-950/60 text-[#3fb950] border border-emerald-800">passed</span>`;
+          } else if (isFailed) {
+            statusBadge = `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold font-mono bg-rose-950/60 text-rose-300 border border-rose-800">failed</span>`;
+          }
+
+          return `
+            <tr class="hover:bg-[#161b22]/50 transition">
+              <td class="p-2.5 font-bold text-[#58a6ff] font-mono">${l.task_id}</td>
+              <td class="p-2.5 text-slate-300 font-mono truncate max-w-xs" title="${l.path}">${l.path}</td>
+              <td class="p-2.5">
+                ${statusBadge}
+              </td>
+              <td class="p-2.5 text-[#8b949e] font-mono">${new Date(l.created_at).toLocaleTimeString()}</td>
+              <td class="p-2.5 text-right">
+                <button onclick="cleanActiveWorktrees('${l.task_id}')" class="px-2 py-0.5 rounded bg-[#161b22] text-[#8b949e] hover:text-white border border-[#30363d] text-[10px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+                  Prune
+                </button>
+              </td>
+            </tr>
+          `;
+        }).join('');
+      } catch (err) {
+        setConnectionError(true);
+        console.error("Failed fetching fleet:", err);
+      }
+    }
+
+    async function fetchRuns() {
+      try {
+        const url = selectedProject === 'all' ? '/api/runs' : `/api/runs?project=${encodeURIComponent(selectedProject)}`;
+        const res = await fetch(url);
+        allRuns = await res.json() || [];
+        setConnectionError(false);
+
+        const lastUpdatedEl = document.getElementById('last-updated');
+        if (lastUpdatedEl) {
+          lastUpdatedEl.innerText = `Updated ${new Date().toLocaleTimeString()}`;
+        }
+
+        document.getElementById('stat-total-runs').innerText = allRuns.length;
+
+        // Compute honest header pass metric
+        const passed = allRuns.filter(r => r.status === 'passed').length;
+        const done = allRuns.filter(r => ['passed', 'failed'].includes(r.status)).length;
+        const metricsBadge = document.getElementById('stat-metrics-badge');
+        if (metricsBadge) {
+          metricsBadge.innerText = done ? `${passed}/${done} passed` : 'No completed runs';
+        }
+
+        // Check globally if any run has failed gates
+        const hasFailedRun = allRuns.some(r => r.status === 'failed');
+        updateRepairTabState(hasFailedRun);
+
+        const listContainer = document.getElementById('sidebar-runs-list');
+        const countSpan = document.getElementById('sidebar-runs-count');
+        countSpan.innerText = allRuns.length;
+
+        if (allRuns.length === 0) {
+          listContainer.innerHTML = '<div class="p-2 text-center text-[#8b949e] text-[10px]">No runs recorded.</div>';
+          renderEmptyState();
+          return;
+        }
+
+        // Remove any static or non-run placeholder nodes when runs exist
+        Array.from(listContainer.children).forEach(child => {
+          if (!child.hasAttribute('data-run-id')) {
+            child.remove();
+          }
+        });
+
+        // Key-based in-place DOM update for runs list to preserve scroll & focus
+        const existingButtons = Array.from(listContainer.querySelectorAll('[data-run-id]'));
+        const existingMap = new Map(existingButtons.map(b => [b.getAttribute('data-run-id'), b]));
+
+        allRuns.forEach(r => {
+          const isSelected = (activeRunId === r.id);
+          const isPass = r.status === 'passed';
+          const isFail = r.status === 'failed';
+          const isRun = r.status === 'running';
+          const isCancelled = r.status === 'cancelled';
+
+          let statusIcon = '<i class="fa-solid fa-circle-check text-emerald-400" aria-hidden="true"></i>';
+          let statusBg = 'bg-emerald-950/40 text-emerald-400 border-emerald-800/40';
+          let statusLabel = 'Passed';
+
+          if (isFail) {
+            statusIcon = '<i class="fa-solid fa-circle-xmark text-rose-400" aria-hidden="true"></i>';
+            statusBg = 'bg-rose-950/40 text-rose-400 border-rose-800/40';
+            statusLabel = 'Failed';
+          } else if (isRun) {
+            statusIcon = '<i class="fa-solid fa-spinner fa-spin text-amber-400" aria-hidden="true"></i>';
+            statusBg = 'bg-amber-950/40 text-amber-400 border-amber-800/40';
+            statusLabel = 'Running';
+          } else if (isCancelled) {
+            statusIcon = '<i class="fa-solid fa-ban text-[#8b949e]" aria-hidden="true"></i>';
+            statusBg = 'bg-[#161b22] text-[#8b949e] border-[#30363d]';
+            statusLabel = 'Cancelled';
+          } else if (!isPass) {
+            statusIcon = '<i class="fa-regular fa-circle text-[#8b949e]" aria-hidden="true"></i>';
+            statusBg = 'bg-[#161b22] text-[#8b949e] border-[#30363d]';
+            statusLabel = r.status;
+          }
+
+          let btn = existingMap.get(r.id);
+          if (!btn) {
+            btn = document.createElement('button');
+            btn.setAttribute('data-run-id', r.id);
+            btn.onclick = () => selectRun(r.id);
+            listContainer.appendChild(btn);
+          }
+
+          btn.className = `w-full text-left p-2 rounded transition border text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] ${isSelected ? 'bg-[#161b22] border-[#58a6ff] shadow-sm' : 'bg-[#0b0e14] border-[#21262d] hover:border-[#30363d]'}`;
+          // The brief is what the operator actually thinks in. Identifying runs only
+          // by unix epoch forced them to diff the last four digits of near-identical
+          // ids to find the work they just dispatched.
+          const brief = (r.brief || '').trim();
+          btn.innerHTML = `
+            <div class="flex justify-between items-center gap-2">
+              <span class="text-[11px] font-semibold truncate ${isSelected ? 'text-white' : 'text-slate-200'}" title="${escapeAttr(brief || r.id)}">
+                ${escapeHTML(brief || r.id)}
+              </span>
+              <span class="px-1 py-0.5 rounded text-[9px] font-bold border shrink-0 ${statusBg}">
+                ${statusIcon} ${escapeHTML(statusLabel)}
+              </span>
+            </div>
+            <div class="flex justify-between items-center gap-2 mt-0.5 text-[10px] text-[#8b949e]">
+              <span class="truncate font-mono">${escapeHTML(r.project)}</span>
+              <span class="shrink-0" title="${escapeAttr(r.created_at || '')}">${escapeHTML(relativeTime(r.created_at))}</span>
+            </div>
+          `;
+          existingMap.delete(r.id);
+        });
+
+        // Remove deleted runs
+        existingMap.forEach(btn => btn.remove());
+
+        if (!activeRunId && allRuns.length > 0) {
+          selectRun(allRuns[0].id);
+        } else if (activeRunId) {
+          const current = allRuns.find(r => r.id === activeRunId);
+          if (current) {
+            // Only re-fetch details if status or timestamp changed
+            if (current.status !== lastSelectedRunStatus || current.updated_at !== lastSelectedRunUpdatedAt) {
+              selectRun(current.id);
+            }
+          } else if (allRuns.length > 0) {
+            selectRun(allRuns[0].id);
+          }
+        }
+      } catch (err) {
+        setConnectionError(true);
+        console.error("Failed fetching runs:", err);
+      }
+    }
+
+    async function selectRun(runId) {
+      activeRunId = runId;
+      document.getElementById('stage-run-badge').innerText = `Run: ${runId}`;
+      const briefEl = document.getElementById('active-run-brief');
+      const selected = allRuns.find(x => x.id === runId);
+      if (briefEl) {
+        const bText = (selected && selected.brief || '').trim();
+        briefEl.textContent = bText;
+        briefEl.title = bText;
+      }
+      document.getElementById('repair-run-num').innerText = runId;
+      
+      const current = allRuns.find(r => r.id === runId);
+      const bannerStatus = document.getElementById('system-status-pill');
+
+      if (current) {
+        lastSelectedRunStatus = current.status;
+        lastSelectedRunUpdatedAt = current.updated_at;
+        document.getElementById('active-matrix-project').innerText = current.project;
+
+        switch (current.status) {
+          case 'passed':
+            bannerStatus.className = "px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-[#3fb950] border border-emerald-800";
+            bannerStatus.innerText = "● Passed";
+            break;
+          case 'running':
+            bannerStatus.className = "px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-800 animate-pulse";
+            bannerStatus.innerText = "● Running";
+            break;
+          case 'failed':
+            bannerStatus.className = "px-2 py-0.5 rounded text-[10px] font-bold bg-rose-950 text-rose-300 border border-rose-800";
+            bannerStatus.innerText = "● Gate failed";
+            break;
+          case 'cancelled':
+            bannerStatus.className = "px-2 py-0.5 rounded text-[10px] font-bold bg-[#161b22] text-[#8b949e] border border-[#30363d]";
+            bannerStatus.innerText = "● Cancelled";
+            break;
+          default:
+            bannerStatus.className = "px-2 py-0.5 rounded text-[10px] font-bold bg-[#161b22] text-slate-300 border border-[#30363d]";
+            bannerStatus.innerText = `● ${current.status}`;
+        }
+      }
+
+      try {
+        const res = await fetch(`/api/run-details?id=${runId}`);
+        const data = await res.json();
+        setConnectionError(false);
+        renderLiveStitchMatrix(current, data.phases || [], data.envelopes || []);
+        renderLiveContractInspector(data.envelopes || []);
+        renderLiveRepairDiagnostics(current, data.phases || [], data.envelopes || []);
+      } catch (err) {
+        setConnectionError(true);
+        console.error("Failed fetching run details:", err);
+      }
+    }
+
+    function renderEmptyState() {
+      document.getElementById('stage-run-badge').innerText = 'Run: None';
+      const briefReset = document.getElementById('active-run-brief');
+      if (briefReset) briefReset.textContent = '';
+      document.getElementById('active-matrix-project').innerText = 'None';
+      document.getElementById('stage-matrix-tbody').innerHTML = `
+        <tr><td colspan="4" class="p-8 text-center text-[#8b949e]">No pipeline runs recorded for this project. Click <strong>Dispatch stage</strong> above to launch an autonomous run.</td></tr>
+      `;
+      document.getElementById('contract-inspector-code').innerHTML = `
+        <div class="text-[#8b949e]">// Awaiting pipeline dispatch...</div>
+      `;
+    }
+
+    function escapeHTML(v) {
+      return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      })[c]);
+    }
+    const escapeAttr = escapeHTML;
+
+    // Raw milliseconds ("45048ms") are unreadable at a glance, and a running phase
+    // reporting "0ms" reads as an instantaneous result rather than "not finished".
+    function formatDuration(ms) {
+      if (ms == null || isNaN(ms)) return '\u2014';
+      if (ms < 1000) return ms + 'ms';
+      const s = ms / 1000;
+      if (s < 60) return s.toFixed(s < 10 ? 1 : 0) + 's';
+      const m = Math.floor(s / 60), rem = Math.round(s % 60);
+      if (m < 60) return m + 'm' + (rem ? ' ' + rem + 's' : '');
+      const h = Math.floor(m / 60);
+      return h + 'h' + (m % 60 ? ' ' + (m % 60) + 'm' : '');
+    }
+
+    function relativeTime(iso) {
+      if (!iso) return '';
+      const then = new Date(iso).getTime();
+      if (isNaN(then)) return '';
+      const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+      if (secs < 60) return secs + 's ago';
+      const m = Math.round(secs / 60);
+      if (m < 60) return m + 'm ago';
+      const h = Math.round(m / 60);
+      if (h < 24) return h + 'h ago';
+      return Math.round(h / 24) + 'd ago';
+    }
+
+    // Phase status vocabulary. Every branch maps to a real status value; an
+    // unrecognised status is displayed verbatim rather than mislabelled.
+    const PHASE_LOOK = {
+      passed:  { cls: 'text-[#3fb950]', icon: 'fa-solid fa-circle-check',  label: 'Passed' },
+      failed:  { cls: 'text-rose-400',  icon: 'fa-solid fa-circle-xmark',  label: 'Failed' },
+      running: { cls: 'text-[#58a6ff]', icon: 'fa-solid fa-spinner fa-spin', label: 'Running' },
+      pending: { cls: 'text-[#8b949e]', icon: 'fa-regular fa-clock',       label: 'Pending' }
+    };
+
+    function phaseCellHTML(phase) {
+      if (!phase) {
+        return '<span class="text-[#8b949e]">&mdash;</span>';
+      }
+      const look = PHASE_LOOK[phase.status] || { cls: 'text-[#8b949e]', icon: '', label: phase.status };
+      const icon = look.icon ? `<i class="${look.icon} text-[9px]" aria-hidden="true"></i> ` : '';
+      const dur = (phase.status === 'running') ? 'running' : formatDuration(phase.duration_ms);
+      return `
+        <div class="flex justify-between items-center text-[10px] gap-2">
+          <span class="${look.cls} font-bold flex items-center gap-1">${icon}${escapeHTML(look.label)}</span>
+          <span class="text-[#8b949e] font-mono">${escapeHTML(dur)}</span>
+        </div>
+        ${phase.error ? `<div class="text-[10px] text-rose-400 font-mono truncate" title="${escapeAttr(phase.error)}">${escapeHTML(phase.error)}</div>` : ''}`;
+    }
+
+    function deliveryCellHTML(envelopes, repo) {
+      // Read the delivery state from the review envelope. Never infer "PR ready"
+      // from phase statuses — a green pipeline is not a pull request.
+      const env = (envelopes || []).find(e => e.stage === 'review' && (e.repo === repo || !repo));
+      if (!env) {
+        return '<span class="text-[#8b949e]">&mdash;</span>';
+      }
+      const d = env.data || {};
+      let cls = 'text-[#8b949e]', icon = 'fa-regular fa-clock', label = 'No changes';
+      if (d.commits > 0 && d.pushed)      { cls = 'text-[#3fb950]'; icon = 'fa-solid fa-code-pull-request'; label = 'Pushed'; }
+      else if (d.commits > 0)             { cls = 'text-[#58a6ff]'; icon = 'fa-solid fa-code-commit';       label = `${d.commits} commit${d.commits === 1 ? '' : 's'}`; }
+      else if (d.dirty)                   { cls = 'text-amber-400';  icon = 'fa-solid fa-triangle-exclamation'; label = 'Uncommitted'; }
+      return `
+        <div class="flex justify-between items-center text-[10px] gap-2">
+          <span class="${cls} font-bold flex items-center gap-1"><i class="${icon} text-[9px]" aria-hidden="true"></i> ${escapeHTML(label)}</span>
+        </div>
+        <div class="text-[10px] text-[#8b949e] font-mono truncate" title="${escapeAttr(d.branch || '')}">${escapeHTML(d.branch || '')}</div>`;
+    }
+
+    function renderLiveStitchMatrix(run, phases, envelopes) {
+      const tbody = document.getElementById('stage-matrix-tbody');
+      const thead = document.getElementById('stage-matrix-head');
+      const list = phases || [];
+
+      // Columns are derived from the phases that actually ran, in the order they
+      // first appeared. Previously the table had fixed Build/Gate columns filled by
+      // .find(kind==='agent'|'code'), which showed the FIRST agent phase under a
+      // header reading "Build" and silently dropped every other phase.
+      const phaseNames = [];
+      const byRepo = new Map();
+      list.forEach(p => {
+        if (!phaseNames.includes(p.name)) phaseNames.push(p.name);
+        if (!byRepo.has(p.repo)) byRepo.set(p.repo, new Map());
+        byRepo.get(p.repo).set(p.name, p);
+      });
+
+      const cols = phaseNames.length ? phaseNames : [];
+      const totalCols = cols.length + 2; // repository + phases + delivery
+
+      thead.innerHTML = `
+        <tr class="border-b border-[#21262d] bg-[#161b22] text-[#8b949e] uppercase text-[10px]">
+          <th scope="col" class="p-2.5 w-36 border-r border-[#21262d]">Repository</th>
+          ${cols.map(n => `<th scope="col" class="p-2.5 border-r border-[#21262d]">${escapeHTML(n)}</th>`).join('')}
+          <th scope="col" class="p-2.5">Delivery</th>
+        </tr>`;
+
+      if (byRepo.size === 0) {
+        tbody.innerHTML = `<tr><td colspan="${totalCols}" class="p-6 text-center text-[#8b949e]">No phase data recorded for this run yet.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = Array.from(byRepo.keys()).map(repo => {
+        const phaseMap = byRepo.get(repo);
+        return `
+          <tr class="hover:bg-[#161b22]/30 transition">
+            <td class="p-2.5 font-bold text-white border-r border-[#21262d]">
+              <div class="flex items-center gap-1.5 font-mono">
+                <i class="fa-solid fa-code-branch text-[#8b949e]" aria-hidden="true"></i> ${escapeHTML(repo)}
+              </div>
+            </td>
+            ${cols.map(n => `<td class="p-2.5 border-r border-[#21262d] space-y-1 align-top">${phaseCellHTML(phaseMap.get(n))}</td>`).join('')}
+            <td class="p-2.5 space-y-1 align-top">${deliveryCellHTML(envelopes, repo)}</td>
+          </tr>`;
+      }).join('');
+    }
+
+    function renderLiveContractInspector(envelopes) {
+      const container = document.getElementById('contract-inspector-code');
+      const badge = document.getElementById('envelope-count-badge');
+      
+      badge.innerText = `${(envelopes || []).length} envelope(s)`;
+
+      if (!envelopes || envelopes.length === 0) {
+        container.innerHTML = `
+          <div class="text-[#8b949e]">// No handoff envelopes generated yet for this run.</div>
+          <div class="text-[#7ee787]">// Zero-token contract proofs will automatically stream here upon phase completion.</div>
+        `;
+        return;
+      }
+
+      container.innerHTML = envelopes.map(e => {
+        let isPR = e.stage === 'review' || (e.summary && e.summary.toLowerCase().includes('pr'));
+        let artifactsHTML = '';
+        
+        if (e.artifacts && e.artifacts.length) {
+          artifactsHTML = e.artifacts.map(a => {
+            const isURL = a.startsWith('http://') || a.startsWith('https://');
+            if (isURL) {
+              return `
+                <div class="flex items-center space-x-1.5 mt-1">
+                  <a href="${a}" target="_blank" rel="noopener noreferrer" class="px-2 py-1 rounded bg-[#1f6feb] hover:bg-[#388bfd] text-white font-bold text-[10px] flex items-center gap-1 transition shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+                    <i class="fa-brands fa-github text-[11px]" aria-hidden="true"></i> Launch PR <i class="fa-solid fa-arrow-up-right-from-square text-[9px]" aria-hidden="true"></i>
+                  </a>
+                  <button onclick="copyToClipboard('${a}', this)" class="px-2 py-1 rounded bg-[#161b22] hover:bg-[#21262d] text-slate-300 hover:text-white border border-[#30363d] text-[10px] font-bold transition flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+                    <i class="fa-regular fa-copy" aria-hidden="true"></i> Copy URL
+                  </button>
+                  <span class="text-slate-400 font-mono text-[10px] truncate max-w-sm ml-1" title="${a}">${a}</span>
+                </div>
+              `;
+            } else {
+              return `
+                <span class="px-1.5 py-0.5 rounded bg-[#0b0e14] border border-[#30363d] text-teal-300 font-mono text-[10px] flex items-center gap-1">
+                  <i class="fa-regular fa-file-code" aria-hidden="true"></i> ${a}
+                </span>
+              `;
+            }
+          }).join('');
+        }
+
+        return `
+          <div class="p-2.5 rounded bg-[#161b22]/90 border border-[#30363d] space-y-1.5 transition hover:border-[#58a6ff]">
+            <div class="flex justify-between items-center text-[10px]">
+              <span class="font-bold text-[#58a6ff] flex items-center gap-1.5 font-mono">
+                <i class="fa-solid ${isPR ? 'fa-code-pull-request text-emerald-400' : 'fa-box-open text-[#58a6ff]'}" aria-hidden="true"></i>
+                ${e.repo} / ${e.stage}
+              </span>
+              <span class="text-[#8b949e] font-mono">${new Date(e.created_at).toLocaleTimeString()}</span>
+            </div>
+            <div class="text-white text-xs font-medium">${e.summary}</div>
+            ${artifactsHTML ? `<div class="space-y-1 pt-1">${artifactsHTML}</div>` : ''}
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderLiveRepairDiagnostics(run, phases, envelopes) {
+      const activeContainer = document.getElementById('repair-active-container');
+      const emptyContainer = document.getElementById('repair-empty-container');
+      const stdoutEl = document.getElementById('repair-stdout-content');
+      const diffEl = document.getElementById('repair-diff-content');
+      const phaseTitleEl = document.getElementById('repair-failed-phase-name');
+      const fileTitleEl = document.getElementById('repair-diff-filename');
+      const msgEl = document.getElementById('repair-bottom-msg');
+      const badgeEl = document.getElementById('repair-status-badge');
+
+      const failedPhase = (phases || []).find(p => p.status === 'failed');
+
+      if (failedPhase) {
+        activeContainer.classList.remove('hidden');
+        emptyContainer.classList.add('hidden');
+
+        phaseTitleEl.innerText = `${failedPhase.repo} :: ${failedPhase.name}`;
+        badgeEl.className = "px-2 py-0.5 rounded bg-rose-900 text-rose-200 font-mono";
+        badgeEl.innerText = "● Gate failed";
+
+        let output = "No output captured for this phase.";
+        if (failedPhase.payload && failedPhase.payload.output) {
+          output = failedPhase.payload.output;
+        } else if (failedPhase.error) {
+          output = failedPhase.error;
+        }
+
+        stdoutEl.innerText = output;
+        fileTitleEl.innerText = failedPhase.name;
+
+        if (failedPhase.payload && failedPhase.payload.diff) {
+          diffEl.innerText = failedPhase.payload.diff;
+        } else {
+          diffEl.innerHTML = `<div class="text-[#8b949e]">No repair diff proposed for this failure.</div>`;
+        }
+
+        msgEl.innerHTML = `<span class="text-rose-400">></span> Gate failure detected on <strong>${failedPhase.repo}</strong>. Inspect stdout trace.`;
+      } else {
+        activeContainer.classList.add('hidden');
+        emptyContainer.classList.remove('hidden');
+      }
+    }
+
+    // Modal Escape & Focus Trap Handler
+    window.addEventListener('keydown', (e) => {
+      const dispatchModal = document.getElementById('dispatch-modal');
+      const refineModal = document.getElementById('refine-project-modal');
+      const refineConfirmModal = document.getElementById('refine-confirm-modal');
+      const pruneModal = document.getElementById('prune-modal');
+      
+      const openModal = [refineConfirmModal, dispatchModal, refineModal, pruneModal].find(m => m && !m.classList.contains('hidden'));
+
+      if (e.key === 'Escape' && openModal) {
+        if (openModal === dispatchModal) closeDispatchModal();
+        else if (openModal === refineModal) closeRefineProjectModal();
+        else if (openModal === refineConfirmModal) closeRefineConfirmModal();
+        else if (openModal === pruneModal) closePruneModal();
+        return;
+      }
+
+      if (e.key === 'Tab' && openModal) {
+        const focusableSelector = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+        const focusableElements = Array.from(openModal.querySelectorAll(focusableSelector)).filter(el => el.offsetParent !== null);
+        
+        if (focusableElements.length === 0) return;
+
+        const firstElement = focusableElements[0];
+        const lastElement = focusableElements[focusableElements.length - 1];
+
+        if (e.shiftKey) {
+          if (document.activeElement === firstElement || !openModal.contains(document.activeElement)) {
+            e.preventDefault();
+            lastElement.focus();
+          }
+        } else {
+          if (document.activeElement === lastElement || !openModal.contains(document.activeElement)) {
+            e.preventDefault();
+            firstElement.focus();
+          }
+        }
+      }
+    });
+
+    loadProjects();
+    fetchRuns();
+    fetchFleet();
+    setInterval(() => {
+      fetchRuns();
+      fetchFleet();
+    }, 2000);
+  </script>
+</body>
+</html>
