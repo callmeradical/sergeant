@@ -26,6 +26,12 @@ type RunRecord struct {
 	// It is resolved before the run row is written, so a stored run always names
 	// the change whose openspec/changes/<id>/ directory travels in its PR.
 	ChangeID string `json:"change_id"`
+	// IntentID names the intent this run serves (decision D4). It is derived from
+	// the run id rather than generated independently, so the link is
+	// reconstructible from either side without a join table. It reads empty for
+	// runs written before a dispatch persisted its intent; empty means "no intent
+	// was recorded", never "the intent is unknown but exists".
+	IntentID string `json:"intent_id"`
 	// Slug is a short, speakable label for the run (adverb-adjective-noun). It is
 	// a display and speech label only; ID remains the run's identity.
 	Slug      string    `json:"slug"`
@@ -178,6 +184,7 @@ func (s *Store) migrate() error {
 		brief TEXT NOT NULL DEFAULT '',
 		slug TEXT NOT NULL DEFAULT '',
 		change_id TEXT NOT NULL DEFAULT '',
+		intent_id TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	);
@@ -285,6 +292,7 @@ func (s *Store) migrateAddColumns() error {
 		{"runs", "brief", "ALTER TABLE runs ADD COLUMN brief TEXT NOT NULL DEFAULT ''"},
 		{"runs", "change_id", "ALTER TABLE runs ADD COLUMN change_id TEXT NOT NULL DEFAULT ''"},
 		{"runs", "slug", "ALTER TABLE runs ADD COLUMN slug TEXT NOT NULL DEFAULT ''"},
+		{"runs", "intent_id", "ALTER TABLE runs ADD COLUMN intent_id TEXT NOT NULL DEFAULT ''"},
 		{"bullets", "branch", "ALTER TABLE bullets ADD COLUMN branch TEXT NOT NULL DEFAULT ''"},
 		{"bullets", "worktree", "ALTER TABLE bullets ADD COLUMN worktree TEXT NOT NULL DEFAULT ''"},
 		{"bullets", "commit_sha", "ALTER TABLE bullets ADD COLUMN commit_sha TEXT NOT NULL DEFAULT ''"},
@@ -396,8 +404,8 @@ func (s *Store) CreateRun(r *RunRecord) error {
 	r.CreatedAt = now
 	r.UpdatedAt = now
 	_, err := s.db.Exec(
-		`INSERT INTO runs (id, project, task_id, status, brief, change_id, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.Project, r.TaskID, r.Status, r.Brief, r.ChangeID, r.Slug, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, project, task_id, status, brief, change_id, intent_id, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.Project, r.TaskID, r.Status, r.Brief, r.ChangeID, r.IntentID, r.Slug, r.CreatedAt, r.UpdatedAt,
 	)
 	return err
 }
@@ -479,9 +487,26 @@ func (s *Store) GetLatestEnvelope(runID, repo string) (*EnvelopeRecord, error) {
 	return &e, nil
 }
 
+// runColumns is shared by every run query so a column added to RunRecord cannot
+// be read by one lister and silently omitted by another. scanRun consumes it in
+// the same order.
+const runColumns = `id, project, task_id, status,
+	COALESCE(brief, ''), COALESCE(change_id, ''), COALESCE(intent_id, ''), COALESCE(slug, ''),
+	created_at, updated_at`
+
+func scanRun(rows *sql.Rows) (RunRecord, error) {
+	var r RunRecord
+	err := rows.Scan(
+		&r.ID, &r.Project, &r.TaskID, &r.Status,
+		&r.Brief, &r.ChangeID, &r.IntentID, &r.Slug,
+		&r.CreatedAt, &r.UpdatedAt,
+	)
+	return r, err
+}
+
 func (s *Store) ListRecentRuns(limit int) ([]RunRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT id, project, task_id, status, COALESCE(brief, ''), COALESCE(change_id, ''), COALESCE(slug, ''), created_at, updated_at FROM runs ORDER BY created_at DESC LIMIT ?`,
+		`SELECT `+runColumns+` FROM runs ORDER BY created_at DESC LIMIT ?`,
 		limit,
 	)
 	if err != nil {
@@ -491,13 +516,13 @@ func (s *Store) ListRecentRuns(limit int) ([]RunRecord, error) {
 
 	var list []RunRecord
 	for rows.Next() {
-		var r RunRecord
-		if err := rows.Scan(&r.ID, &r.Project, &r.TaskID, &r.Status, &r.Brief, &r.ChangeID, &r.Slug, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		r, err := scanRun(rows)
+		if err != nil {
 			return nil, err
 		}
 		list = append(list, r)
 	}
-	return list, nil
+	return list, rows.Err()
 }
 
 // GetRun loads one run by id. ErrNoRows distinguishes "no such run" from a real
@@ -703,7 +728,7 @@ func requireOneRow(res sql.Result, kind, id string) error {
 
 func (s *Store) ListRunsForProject(project string, limit int) ([]RunRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT id, project, task_id, status, COALESCE(brief, ''), COALESCE(change_id, ''), COALESCE(slug, ''), created_at, updated_at FROM runs WHERE project = ? ORDER BY created_at DESC LIMIT ?`,
+		`SELECT `+runColumns+` FROM runs WHERE project = ? ORDER BY created_at DESC LIMIT ?`,
 		project, limit,
 	)
 	if err != nil {
@@ -713,11 +738,11 @@ func (s *Store) ListRunsForProject(project string, limit int) ([]RunRecord, erro
 
 	var list []RunRecord
 	for rows.Next() {
-		var r RunRecord
-		if err := rows.Scan(&r.ID, &r.Project, &r.TaskID, &r.Status, &r.Brief, &r.ChangeID, &r.Slug, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		r, err := scanRun(rows)
+		if err != nil {
 			return nil, err
 		}
 		list = append(list, r)
 	}
-	return list, nil
+	return list, rows.Err()
 }

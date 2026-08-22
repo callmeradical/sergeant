@@ -2,7 +2,9 @@ package ui
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +15,8 @@ import (
 
 	"github.com/callmeradical/sergeant/internal/config"
 	"github.com/callmeradical/sergeant/internal/store"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestUIFullSuiteAndTDD(t *testing.T) {
@@ -262,13 +266,18 @@ dag:
 // any real checkout. SERGEANT_FLEET_DIR is redirected for the same reason.
 func dispatchFixture(t *testing.T) (mux http.Handler, st *store.Store, repoPath string) {
 	t.Helper()
+	mux, st, repoPaths, _ := dispatchFixtureRepos(t, "svc")
+	return mux, st, repoPaths["svc"]
+}
+
+// dispatchFixtureRepos is dispatchFixture for a project with more than one
+// repository, which is what a dispatch producing several bullets needs. It also
+// returns the database path so a test can assert on rows the public store API
+// deliberately does not expose, such as "no bullet exists at all".
+func dispatchFixtureRepos(t *testing.T, repos ...string) (mux http.Handler, st *store.Store, repoPaths map[string]string, dbPath string) {
+	t.Helper()
 
 	base := t.TempDir()
-	repoPath = filepath.Join(base, "svc")
-	if err := os.MkdirAll(repoPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
 	cfgDir := filepath.Join(base, "config")
 	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -276,19 +285,48 @@ func dispatchFixture(t *testing.T) (mux http.Handler, st *store.Store, repoPath 
 	t.Setenv("SERGEANT_CONFIG", cfgDir)
 	t.Setenv("SERGEANT_FLEET_DIR", filepath.Join(base, "fleet"))
 
-	projYAML := "name: o3\nrepos:\n  - name: svc\n    path: " + repoPath + "\n"
+	repoPaths = map[string]string{}
+	projYAML := "name: o3\nrepos:\n"
+	for _, name := range repos {
+		p := filepath.Join(base, name)
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		repoPaths[name] = p
+		projYAML += "  - name: " + name + "\n    path: " + p + "\n"
+	}
 	if err := os.WriteFile(filepath.Join(cfgDir, "o3.yaml"), []byte(projYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
+	dbPath = filepath.Join(base, "t.db")
 	var err error
-	st, err = store.Open(filepath.Join(base, "t.db"))
+	st, err = store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	return NewServer(st, 0).Handler(), st, repoPath
+	return NewServer(st, 0).Handler(), st, repoPaths, dbPath
+}
+
+// countRows reads the bullets table directly. The store exposes bullets only
+// through their intent, so "no intent was written" cannot by itself prove "no
+// bullet was written" — a bullet with a dangling intent_id would be invisible.
+// The rejected-dispatch scenario claims the stronger thing, so the test checks
+// the stronger thing.
+func countRows(t *testing.T, dbPath, table string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&n); err != nil {
+		t.Fatalf("counting %s: %v", table, err)
+	}
+	return n
 }
 
 func postDispatch(t *testing.T, mux http.Handler, body string) *httptest.ResponseRecorder {
@@ -417,6 +455,171 @@ func TestDispatchRecordsAnExistingChangeIDOnTheRun(t *testing.T) {
 	}
 	if runs[0].ID != resp.TaskID {
 		t.Errorf("run id %q does not match dispatched task_id %q", runs[0].ID, resp.TaskID)
+	}
+}
+
+// Decision D4 puts intents and bullets in sergeant's own store, and decision D8
+// makes the intent the dashboard's primary noun. Neither is satisfiable while a
+// dispatch records only a run, so a dispatch must write the intent it serves and
+// one bullet per target repository.
+func TestDispatchPersistsItsIntentAndOneBulletPerTargetRepo(t *testing.T) {
+	mux, st, repoPaths, _ := dispatchFixtureRepos(t, "api", "web", "worker")
+
+	// changeRepo picks the first requested repo that is configured, so the change
+	// directory has to exist under api for this dispatch to resolve.
+	const changeID = "add-stripe-webhooks"
+	if err := os.MkdirAll(filepath.Join(repoPaths["api"], "openspec", "changes", changeID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	const brief = "add stripe webhooks"
+	w := postDispatch(t, mux,
+		`{"project":"o3","brief":"`+brief+`","change_id":"`+changeID+`","repos":["api","web","worker"]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+
+	intents, err := st.ListIntentsForProject("o3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(intents) != 1 {
+		t.Fatalf("got %d intents, want 1: %+v", len(intents), intents)
+	}
+	intent := intents[0]
+	if want := resp.TaskID + "-intent"; intent.ID != want {
+		t.Errorf("intent id = %q, want %q", intent.ID, want)
+	}
+	if intent.Statement != brief {
+		t.Errorf("intent statement = %q, want %q", intent.Statement, brief)
+	}
+	if intent.Project != "o3" {
+		t.Errorf("intent project = %q, want o3", intent.Project)
+	}
+	if intent.Status != "in_progress" {
+		t.Errorf("intent status = %q, want in_progress", intent.Status)
+	}
+
+	bullets, err := st.ListBulletsForIntent(intent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bullets) != 3 {
+		t.Fatalf("got %d bullets, want 3: %+v", len(bullets), bullets)
+	}
+	// ListBulletsForIntent orders by position, so index i is position i+1.
+	wantRepos := []string{"api", "web", "worker"}
+	seen := map[int]bool{}
+	for i, b := range bullets {
+		if b.Position != i+1 {
+			t.Errorf("bullet %d position = %d, want %d", i, b.Position, i+1)
+		}
+		if seen[b.Position] {
+			t.Errorf("position %d is used by more than one bullet", b.Position)
+		}
+		seen[b.Position] = true
+		if b.Repo != wantRepos[i] {
+			t.Errorf("bullet at position %d names repo %q, want %q", b.Position, b.Repo, wantRepos[i])
+		}
+		// A bullet spanning two repositories is a modelling error, not a large
+		// bullet, so the field must hold exactly one repository name.
+		if strings.ContainsAny(b.Repo, " ,") || strings.TrimSpace(b.Repo) == "" {
+			t.Errorf("bullet repo %q is not exactly one repository name", b.Repo)
+		}
+		if want := fmt.Sprintf("%s-b%d", resp.TaskID, i+1); b.ID != want {
+			t.Errorf("bullet id = %q, want %q", b.ID, want)
+		}
+		if b.IntentID != intent.ID {
+			t.Errorf("bullet %s intent_id = %q, want %q", b.ID, b.IntentID, intent.ID)
+		}
+	}
+
+	runs, err := st.ListRunsForProject("o3", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("got %d runs, want 1", len(runs))
+	}
+	if runs[0].IntentID != intent.ID {
+		t.Errorf("run.IntentID = %q, want %q", runs[0].IntentID, intent.ID)
+	}
+}
+
+// When a dispatch names no repositories every configured repository is a target,
+// and the bullet order must be reproducible. Map iteration order would give the
+// same dispatch a different merge order on every call.
+func TestDispatchWithNoReposBulletsEveryRepoInASortedOrder(t *testing.T) {
+	mux, st, repoPaths, _ := dispatchFixtureRepos(t, "worker", "api", "web")
+
+	// With no requested repos, changeRepo falls back to the sorted repo list, so
+	// api owns the change.
+	const changeID = "add-stripe-webhooks"
+	if err := os.MkdirAll(filepath.Join(repoPaths["api"], "openspec", "changes", changeID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	w := postDispatch(t, mux, `{"project":"o3","brief":"add stripe webhooks","change_id":"`+changeID+`"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	intents, err := st.ListIntentsForProject("o3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(intents) != 1 {
+		t.Fatalf("got %d intents, want 1", len(intents))
+	}
+	bullets, err := st.ListBulletsForIntent(intents[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotRepos []string
+	for _, b := range bullets {
+		gotRepos = append(gotRepos, b.Repo)
+	}
+	want := []string{"api", "web", "worker"}
+	if len(gotRepos) != len(want) {
+		t.Fatalf("bullet repos = %v, want %v", gotRepos, want)
+	}
+	for i := range want {
+		if gotRepos[i] != want[i] {
+			t.Fatalf("bullet repos = %v, want %v", gotRepos, want)
+		}
+	}
+}
+
+// Decision O3 orders the records: the planning record precedes the durable one.
+// A dispatch refused because its change cannot be resolved must therefore leave
+// no intent and no bullet behind.
+func TestDispatchRejectedByChangeResolutionWritesNoIntentOrBullet(t *testing.T) {
+	mux, st, _, dbPath := dispatchFixtureRepos(t, "api", "web")
+
+	w := postDispatch(t, mux,
+		`{"project":"o3","brief":"add stripe webhooks","change_id":"no-such-change","repos":["api","web"]}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+
+	intents, err := st.ListIntentsForProject("o3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(intents) != 0 {
+		t.Errorf("rejected dispatch left %d intent(s) behind: %+v", len(intents), intents)
+	}
+	if n := countRows(t, dbPath, "bullets"); n != 0 {
+		t.Errorf("rejected dispatch left %d bullet(s) behind", n)
+	}
+	if n := countRows(t, dbPath, "runs"); n != 0 {
+		t.Errorf("rejected dispatch left %d run(s) behind", n)
 	}
 }
 

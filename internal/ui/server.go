@@ -974,6 +974,25 @@ func (srv *Server) handleSaveDAG(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// targetRepositories is the list of repositories a dispatch acts on: the ones it
+// named, or every repository in the project when it named none.
+//
+// The fallback is sorted. Position in this list is a bullet's merge order, and
+// map iteration order would give the same dispatch a different merge order on
+// every call — the same reason changeRepo sorts before picking. The returned
+// slice never aliases req.Repos, so a caller cannot append into the request.
+func targetRepositories(proj *config.Project, requested []string) []string {
+	if len(requested) > 0 {
+		return append([]string(nil), requested...)
+	}
+	names := make([]string, 0, len(proj.Repos))
+	for name := range proj.Repos {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1031,13 +1050,52 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The target repositories are resolved once, here, above every record write.
+	// The DAG fallback stage below consumes the same slice, so the bullets and the
+	// work the engine actually performs cannot name different repositories.
+	targetRepos := targetRepositories(proj, req.Repos)
+
 	taskID := fmt.Sprintf("sgt-%d", time.Now().Unix())
+	brief := strings.TrimSpace(req.Brief)
+
+	// Decision D4: sergeant stores intents and bullets itself, and decision D8
+	// makes the intent the dashboard's primary noun. The intent is written after
+	// the change is resolved and before the run exists, so the record order reads
+	// planning record, then domain record, then execution record — the ordering O3
+	// requires, extended inward. A dispatch refused above this point has written
+	// nothing.
+	intentID := taskID + "-intent"
+	if err := srv.Store.CreateIntent(&store.IntentRecord{
+		ID:        intentID,
+		Project:   proj.Name,
+		Statement: brief,
+		Status:    "in_progress",
+	}); err != nil {
+		http.Error(w, fmt.Sprintf("recording the intent for this dispatch: %v", err), http.StatusInternalServerError)
+		return
+	}
+	// One bullet per target repository, positioned in merge order. A bullet names
+	// exactly one repository: work in a second repository is a second bullet.
+	for i, repoName := range targetRepos {
+		if err := srv.Store.CreateBullet(&store.BulletRecord{
+			ID:       fmt.Sprintf("%s-b%d", taskID, i+1),
+			IntentID: intentID,
+			Repo:     repoName,
+			Position: i + 1,
+			Status:   "pending",
+		}); err != nil {
+			http.Error(w, fmt.Sprintf("recording bullet %d of this dispatch: %v", i+1, err), http.StatusInternalServerError)
+			return
+		}
+	}
+
 	runRec := &store.RunRecord{
 		ID:       taskID,
 		Project:  proj.Name,
 		TaskID:   taskID,
-		Brief:    strings.TrimSpace(req.Brief),
+		Brief:    brief,
 		ChangeID: change.ID,
+		IntentID: intentID,
 		Status:   "running",
 	}
 	_ = srv.Store.CreateRun(runRec)
@@ -1052,7 +1110,7 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(context.Background())
 	srv.registerRun(taskID, cancel)
 
-	go srv.executeRun(ctx, cancel, engine, proj, taskID, strings.TrimSpace(req.Brief), req.Repos)
+	go srv.executeRun(ctx, cancel, engine, proj, taskID, strings.TrimSpace(req.Brief), targetRepos)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "dispatched",
@@ -1301,15 +1359,14 @@ func (srv *Server) executeRun(
 	if proj.DAG != nil && len(proj.DAG.Stages) > 0 {
 		stages = proj.DAG.Stages
 	} else {
-		targetRepos := repos
-		if len(targetRepos) == 0 {
-			for rName := range proj.Repos {
-				targetRepos = append(targetRepos, rName)
-			}
-		}
+		// One rule for resolving targets, shared with dispatch. A resume recovers
+		// its repo list from phase records, which is empty when the original run
+		// died before recording any, so the fallback has to apply here too — and it
+		// has to be the same sorted fallback, or a resumed run could take a
+		// different merge order than the dispatch that created it.
 		stages = []config.DAGStage{{
 			Name:  "custom-dispatch",
-			Repos: targetRepos,
+			Repos: targetRepositories(proj, repos),
 			Brief: brief,
 		}}
 	}
