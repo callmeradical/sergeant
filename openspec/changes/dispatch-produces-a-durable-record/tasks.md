@@ -49,10 +49,17 @@ Repository: `sergeant-v2`. Depends on: task 1. Merge third.
   snapshot plus current sequence when `from` is unknown or ahead.
 - Replace the `setInterval(..., 2000)` in `internal/ui/static/index.html` with an
   `EventSource`, keeping the existing key-diff render path.
+- Add MCP tools `sergeant_run_status` and `sergeant_run_wait`, both taking a run
+  id and reading the same sequence the dashboard consumes. Neither may shell out
+  to `bin/sgt-*` (D7). `sergeant_run_wait` takes a caller-supplied bound and, on
+  exceeding it, reports the run as still executing rather than inventing a
+  terminal status.
 
 Verification: `go test ./internal/store/... ./internal/ui/... -count=1` — tests
 assert sequence numbers strictly increase, that a subscription from N excludes N
 and everything before it, and that an unknown `from` yields a snapshot rather than
 an error. Then `go build ./... && go vet ./internal/... && go test ./internal/...
 -count=1`, and a browser check asserting zero `/api/runs` requests in a sixty
-second idle window. Exit status decides.
+second idle window. A test must assert that waiting on an already-terminal run
+returns without delay, and that an exceeded bound reports the run as still
+executing. Exit status decides.
