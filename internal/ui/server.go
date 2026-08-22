@@ -443,6 +443,29 @@ type refineRepoPatch struct {
 	} `json:"factory"`
 }
 
+// runPayload is a run as a client receives it: the stored record, plus the
+// server's answer to "may this run be resumed?".
+//
+// The answer is served rather than left to the client because the refusal in
+// handleRunResume is authoritative. A dashboard holding its own list of resumable
+// statuses would be a second authority for one rule, and the two would drift into
+// offering an action the server rejects. Resumable is derived here from the same
+// ResumableStatuses that endpoint enforces, so there is exactly one list.
+type runPayload struct {
+	store.RunRecord
+	Resumable bool `json:"resumable"`
+}
+
+// runPayloads answers the resume question for every run in a list. It never
+// returns nil, so an empty list serialises as [] rather than null.
+func runPayloads(runs []store.RunRecord) []runPayload {
+	out := make([]runPayload, 0, len(runs))
+	for _, r := range runs {
+		out = append(out, runPayload{RunRecord: r, Resumable: isResumable(r.Status)})
+	}
+	return out
+}
+
 func (srv *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	project := r.URL.Query().Get("project")
 	runs := []store.RunRecord{}
@@ -461,7 +484,7 @@ func (srv *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	if runs == nil {
 		runs = []store.RunRecord{}
 	}
-	writeJSON(w, http.StatusOK, runs)
+	writeJSON(w, http.StatusOK, runPayloads(runs))
 }
 
 func (srv *Server) handleRunDetails(w http.ResponseWriter, r *http.Request) {
@@ -489,10 +512,21 @@ func (srv *Server) handleRunDetails(w http.ResponseWriter, r *http.Request) {
 		envelopes = []store.EnvelopeRecord{}
 	}
 
+	// The phases a resume would skip, named before the operator commits rather
+	// than only reported afterwards by /api/run-resume. Both come from
+	// passedPhaseNames, so what the interface promises and what the resume does
+	// cannot disagree. It reads empty when no phase holds a passed record, which
+	// means "nothing will be skipped", never "unknown".
+	skips := srv.passedPhaseNames(runID)
+	if skips == nil {
+		skips = []string{}
+	}
+
 	resp := map[string]interface{}{
-		"run_id":    runID,
-		"phases":    phases,
-		"envelopes": envelopes,
+		"run_id":       runID,
+		"phases":       phases,
+		"envelopes":    envelopes,
+		"resume_skips": skips,
 	}
 
 	writeJSON(w, http.StatusOK, resp)

@@ -184,9 +184,12 @@ func (srv *Server) writeSnapshot(w io.Writer) (int64, error) {
 	if runs == nil {
 		runs = []store.RunRecord{}
 	}
+	// runPayloads, not the bare records: the snapshot must hold what GET /api/runs
+	// would have returned, including the server's resume answer, or a client that
+	// applied a snapshot would render a drawer with no answer at all.
 	return seq, writeSSE(w, "snapshot", seq, map[string]interface{}{
 		"seq":  seq,
-		"runs": runs,
+		"runs": runPayloads(runs),
 	})
 }
 
