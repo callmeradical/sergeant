@@ -238,3 +238,19 @@ func TestGatesRunInDeterministicOrder(t *testing.T) {
 		}
 	}
 }
+
+// With no override, v2 must place worktrees under its own state root. v1 uses
+// ~/.local/share/sergeant/fleet/<task>/<repo>/ as a metadata directory, so
+// writing worktrees there would corrupt v1's layout.
+func TestFleetDirDefaultsToV2Root(t *testing.T) {
+	t.Setenv("SERGEANT_FLEET_DIR", "")
+
+	got := filepath.ToSlash(FleetDir("run-default-root", "backend"))
+
+	if !strings.Contains(got, "sergeant-v2") {
+		t.Errorf("FleetDir default = %q, want a path containing %q", got, "sergeant-v2")
+	}
+	if strings.Contains(got, "share/sergeant/fleet") {
+		t.Errorf("FleetDir default = %q, must not use v1 root %q", got, "share/sergeant/fleet")
+	}
+}

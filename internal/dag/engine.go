@@ -39,11 +39,16 @@ func expandPath(p string) string {
 
 // FleetDir is where per-run isolated worktrees are created.
 // SERGEANT_FLEET_DIR overrides the base so tests never touch the real user path.
+//
+// The default root is ~/.local/share/sergeant-v2/fleet, not v1's
+// ~/.local/share/sergeant/fleet. The two layouts have the same shape but
+// incompatible meaning: v1 stores per-repo metadata under
+// fleet/<task>/<repo>/, whereas v2 puts the actual git worktree there.
 func FleetDir(runID, repoName string) string {
 	base := os.Getenv("SERGEANT_FLEET_DIR")
 	if base == "" {
 		home, _ := os.UserHomeDir()
-		base = filepath.Join(home, ".local", "share", "sergeant", "fleet")
+		base = filepath.Join(home, ".local", "share", "sergeant-v2", "fleet")
 	}
 	return filepath.Join(base, runID, repoName)
 }

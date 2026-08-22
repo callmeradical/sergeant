@@ -1,0 +1,9 @@
+Change the default fleet state root so v2 no longer writes into v1's directory.
+
+In internal/dag/engine.go, FleetDir() currently defaults to ~/.local/share/sergeant/fleet when SERGEANT_FLEET_DIR is unset. That is v1's directory and v1 means something different by those paths: for v1, fleet/<task>/<repo>/ is a metadata directory containing status and worktree files, whereas v2 puts the actual git worktree there. Same shape, incompatible meaning.
+
+Required change: default to ~/.local/share/sergeant-v2/fleet instead. Keep the SERGEANT_FLEET_DIR override working exactly as it does now.
+
+Also add a test in internal/dag/engine_test.go named TestFleetDirDefaultsToV2Root that asserts, with SERGEANT_FLEET_DIR unset, FleetDir returns a path containing "sergeant-v2" and NOT the exact segment "share/sergeant/fleet". Use t.Setenv to clear the variable.
+
+Constraints: do not shell out to any bin/sgt-* script. Do not use tmux. Read AGENTS.md first. Run go build ./... and go test ./internal/... -count=1 before you finish.
