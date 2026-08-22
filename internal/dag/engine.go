@@ -141,14 +141,18 @@ func CommitRunOutput(ctx context.Context, runID, repoName, message string) (bool
 	return true, gitOutput(ctx, wt, "rev-parse", "--short", "HEAD"), nil
 }
 
-// sortedGateNames returns a repo's configured gate names in sorted order.
+// SortedGateNames returns a repo's configured gate names in sorted order.
 //
 // Gates run in sorted name order. Ranging over the gates map directly made
 // execution order random (Go randomises map iteration), so which gate failed
 // first varied between identical runs — and a run could report a different
 // failing gate each time. "Deterministic gate" has to mean deterministic
 // ordering too.
-func sortedGateNames(repoCfg config.Repo) []string {
+//
+// It is exported because anything that *describes* the workflow (the dashboard's
+// workflow graph) must present gates in the same order the engine executes them.
+// A second sort elsewhere would be a second source of truth, free to drift.
+func SortedGateNames(repoCfg config.Repo) []string {
 	if repoCfg.Factory == nil {
 		return nil
 	}
@@ -158,6 +162,23 @@ func sortedGateNames(repoCfg config.Repo) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// DefaultPipeline is the factory pipeline used for a repo that configures none.
+//
+// A fresh slice is returned on every call so no caller can mutate the default
+// out from under the next one.
+func DefaultPipeline() []string { return []string{"plan", "build", "test"} }
+
+// PipelineFor resolves the ordered phase names the engine will run for a repo.
+//
+// This is the single place the "configured pipeline, else the default" rule
+// lives, so a description of the workflow cannot disagree with its execution.
+func PipelineFor(repoCfg config.Repo) []string {
+	if repoCfg.Factory != nil && len(repoCfg.Factory.Pipeline) > 0 {
+		return append([]string(nil), repoCfg.Factory.Pipeline...)
+	}
+	return DefaultPipeline()
 }
 
 // RunStage executes a single multi-repo stage and its constituent intra-repo factories.
@@ -196,16 +217,13 @@ func (e *Engine) RunStage(ctx context.Context, runID string, stage *config.DAGSt
 		}
 
 		// Run factory pipeline phases
-		pipeline := []string{"plan", "build", "test"}
-		if repoCfg.Factory != nil && len(repoCfg.Factory.Pipeline) > 0 {
-			pipeline = repoCfg.Factory.Pipeline
-		}
+		pipeline := PipelineFor(repoCfg)
 
 		for _, phase := range pipeline {
 			switch phase {
 			case "test":
 				if repoCfg.Factory != nil && len(repoCfg.Factory.Gates) > 0 {
-					for _, gateName := range sortedGateNames(repoCfg) {
+					for _, gateName := range SortedGateNames(repoCfg) {
 						res, err := pr.RunCodeGate(ctx, gateName, repoCfg.Factory.Gates[gateName])
 						if err != nil || !res.Passed {
 							return fmt.Errorf("deterministic code gate %s failed on %s", gateName, repoName)
@@ -376,7 +394,7 @@ func (e *Engine) recordGateStage(ctx context.Context, runID, repoName, stage str
 		return nil, fmt.Errorf("repo %s not configured in project %s", repoName, e.Project.Name)
 	}
 
-	gateNames := sortedGateNames(repoCfg)
+	gateNames := SortedGateNames(repoCfg)
 	if len(gateNames) == 0 {
 		// Without a configured gate there is nothing deterministic to observe.
 		// RunStage's placeholder "echo" gate always passes, so accepting it here
