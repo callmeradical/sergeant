@@ -3,14 +3,20 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/callmeradical/sergeant/internal/naming"
 
-	_ "modernc.org/sqlite"
+	// Imported for its name, not only for its driver registration: classifying a
+	// unique-index violation requires the driver's error type, and that
+	// classification is what makes a dispatch idempotent.
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 type Store struct {
@@ -34,7 +40,14 @@ type RunRecord struct {
 	IntentID string `json:"intent_id"`
 	// Slug is a short, speakable label for the run (adverb-adjective-noun). It is
 	// a display and speech label only; ID remains the run's identity.
-	Slug      string    `json:"slug"`
+	Slug string `json:"slug"`
+	// RequestID is the caller's idempotency key (decision D10, from AHP's
+	// runAutomation). It is not sergeant's identifier for the run — ID is — it is
+	// the caller's statement that a second POST is a retry of the first rather
+	// than a new request. Empty means the caller supplied none, and two runs that
+	// supplied none never deduplicate against each other: the absent case is
+	// stored as SQL NULL, which a unique index treats as distinct.
+	RequestID string    `json:"request_id,omitempty"`
 	Status    string    `json:"status"` // running, passed, failed
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -185,6 +198,12 @@ func (s *Store) migrate() error {
 		slug TEXT NOT NULL DEFAULT '',
 		change_id TEXT NOT NULL DEFAULT '',
 		intent_id TEXT NOT NULL DEFAULT '',
+		-- request_id is deliberately nullable and deliberately has no DEFAULT ''.
+		-- The unique index below is what makes a dispatch idempotent, and SQLite
+		-- treats NULL as distinct in a unique index but '' as equal to itself. A
+		-- default of '' would therefore make the second keyless dispatch collide
+		-- with the first. See migrateAddIndexes.
+		request_id TEXT,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	);
@@ -222,6 +241,12 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.migrateAddColumns(); err != nil {
+		return err
+	}
+	// Indexes come after columns, not in the schema above: on a database created
+	// before request_id existed, CREATE INDEX would name a column that
+	// migrateAddColumns has not added yet and the whole open would fail.
+	if err := s.migrateAddIndexes(); err != nil {
 		return err
 	}
 	return s.backfillSlugs()
@@ -293,6 +318,11 @@ func (s *Store) migrateAddColumns() error {
 		{"runs", "change_id", "ALTER TABLE runs ADD COLUMN change_id TEXT NOT NULL DEFAULT ''"},
 		{"runs", "slug", "ALTER TABLE runs ADD COLUMN slug TEXT NOT NULL DEFAULT ''"},
 		{"runs", "intent_id", "ALTER TABLE runs ADD COLUMN intent_id TEXT NOT NULL DEFAULT ''"},
+		// No NOT NULL and no DEFAULT '', unlike every other column here. Every
+		// pre-existing run must arrive as NULL: '' is equal to itself under the
+		// unique index, so backfilling '' would make the index impossible to
+		// create over two or more legacy runs and would break the open entirely.
+		{"runs", "request_id", "ALTER TABLE runs ADD COLUMN request_id TEXT"},
 		{"bullets", "branch", "ALTER TABLE bullets ADD COLUMN branch TEXT NOT NULL DEFAULT ''"},
 		{"bullets", "worktree", "ALTER TABLE bullets ADD COLUMN worktree TEXT NOT NULL DEFAULT ''"},
 		{"bullets", "commit_sha", "ALTER TABLE bullets ADD COLUMN commit_sha TEXT NOT NULL DEFAULT ''"},
@@ -309,6 +339,29 @@ func (s *Store) migrateAddColumns() error {
 		if _, err := s.db.Exec(w.ddl); err != nil {
 			return fmt.Errorf("adding %s.%s: %w", w.table, w.column, err)
 		}
+	}
+	return nil
+}
+
+// requestIDIndex makes a dispatch idempotent under the caller's key.
+//
+// It is a database constraint rather than a check in the handler on purpose. Two
+// concurrent POSTs carrying the same key would both find nothing if they looked
+// before inserting, and both would then insert — the classic check-then-insert
+// race. A unique index cannot be raced: one insert wins and the other is refused
+// with SQLITE_CONSTRAINT_UNIQUE, which is the signal the handler turns into "here
+// is the run you already have".
+//
+// NULL is the absent case. SQLite considers two NULLs distinct for uniqueness, so
+// any number of dispatches may omit the key without deduplicating against each
+// other, which is what makes the key optional.
+const requestIDIndex = `CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_request_id ON runs(request_id)`
+
+// migrateAddIndexes creates the indexes the code depends on for correctness
+// rather than for speed. IF NOT EXISTS makes it idempotent across reopens.
+func (s *Store) migrateAddIndexes() error {
+	if _, err := s.db.Exec(requestIDIndex); err != nil {
+		return fmt.Errorf("creating the unique index on runs.request_id: %w", err)
 	}
 	return nil
 }
@@ -396,6 +449,21 @@ func (s *Store) assignSlug(r *RunRecord) error {
 	return nil
 }
 
+// ErrDuplicateRequestID reports that a run already exists for the caller's
+// idempotency key, so this insert was a retry rather than a new request.
+//
+// It is a distinct sentinel because the alternative — a generic error — is
+// indistinguishable from a disk failure, and the two demand opposite answers: a
+// retry is answered with the original run and a 200, a disk failure with a 500.
+var ErrDuplicateRequestID = errors.New("a run already exists for this request id")
+
+// CreateRun writes a run row.
+//
+// When the run carries a RequestID, this insert is also the claim on that key.
+// The claim is made by inserting and inspecting the failure, never by querying
+// first: a query would let two concurrent callers both observe an unused key. A
+// caller that receives ErrDuplicateRequestID should load the existing run with
+// GetRunByRequestID and answer with it.
 func (s *Store) CreateRun(r *RunRecord) error {
 	if err := s.assignSlug(r); err != nil {
 		return err
@@ -403,11 +471,71 @@ func (s *Store) CreateRun(r *RunRecord) error {
 	now := time.Now().UTC()
 	r.CreatedAt = now
 	r.UpdatedAt = now
+	// The key is normalised here rather than at the call site so that no caller
+	// can store a variant this lookup would then miss.
+	r.RequestID = strings.TrimSpace(r.RequestID)
 	_, err := s.db.Exec(
-		`INSERT INTO runs (id, project, task_id, status, brief, change_id, intent_id, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.Project, r.TaskID, r.Status, r.Brief, r.ChangeID, r.IntentID, r.Slug, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, project, task_id, status, brief, change_id, intent_id, slug, request_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.Project, r.TaskID, r.Status, r.Brief, r.ChangeID, r.IntentID, r.Slug,
+		nullableText(r.RequestID), r.CreatedAt, r.UpdatedAt,
 	)
+	if err != nil && isDuplicateRequestID(err) {
+		return fmt.Errorf("request id %q: %w", r.RequestID, ErrDuplicateRequestID)
+	}
 	return err
+}
+
+// nullableText binds an absent string as SQL NULL rather than as ”.
+//
+// This is the whole mechanism behind an optional idempotency key. Under a unique
+// index SQLite treats two NULLs as distinct and two empty strings as equal, so
+// binding ” would make the second dispatch that omitted a key collide with the
+// first.
+func nullableText(v string) interface{} {
+	if v == "" {
+		return nil
+	}
+	return v
+}
+
+// isDuplicateRequestID reports whether err is the unique index on
+// runs.request_id being violated, and not some other constraint.
+//
+// The result code alone is not enough. A duplicate run id is also reported as
+// SQLITE_CONSTRAINT_UNIQUE, and treating that as a repeated key would answer a
+// genuinely new dispatch with an unrelated run. SQLite names the offending index
+// column in the message, so the column name is checked too: if another unique
+// index is ever added to runs, this returns false and the caller reports a
+// failure rather than silently returning the wrong run.
+func isDuplicateRequestID(err error) bool {
+	var se *sqlite.Error
+	if !errors.As(err, &se) {
+		return false
+	}
+	if se.Code() != sqlite3.SQLITE_CONSTRAINT_UNIQUE {
+		return false
+	}
+	return strings.Contains(se.Error(), "runs.request_id")
+}
+
+// GetRunByRequestID loads the run that claimed an idempotency key.
+//
+// An empty key is not a key: returning the first run that happens to hold no key
+// would make every keyless dispatch deduplicate against it, so an empty key
+// reports ErrNoRows. ErrNoRows also distinguishes "no run ever claimed this key"
+// from a real failure.
+func (s *Store) GetRunByRequestID(requestID string) (*RunRecord, error) {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return nil, sql.ErrNoRows
+	}
+	r, err := scanRun(s.db.QueryRow(
+		`SELECT `+runColumns+` FROM runs WHERE request_id = ?`, requestID,
+	))
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
 }
 
 func (s *Store) UpdateRunStatus(runID, status string) error {
@@ -492,14 +620,21 @@ func (s *Store) GetLatestEnvelope(runID, repo string) (*EnvelopeRecord, error) {
 // the same order.
 const runColumns = `id, project, task_id, status,
 	COALESCE(brief, ''), COALESCE(change_id, ''), COALESCE(intent_id, ''), COALESCE(slug, ''),
-	created_at, updated_at`
+	COALESCE(request_id, ''), created_at, updated_at`
 
-func scanRun(rows *sql.Rows) (RunRecord, error) {
+// rowScanner is satisfied by both *sql.Row and *sql.Rows, so a single-row lookup
+// and a listing share one run-scanning helper instead of each maintaining its own
+// column order.
+type rowScanner interface {
+	Scan(dest ...interface{}) error
+}
+
+func scanRun(row rowScanner) (RunRecord, error) {
 	var r RunRecord
-	err := rows.Scan(
+	err := row.Scan(
 		&r.ID, &r.Project, &r.TaskID, &r.Status,
 		&r.Brief, &r.ChangeID, &r.IntentID, &r.Slug,
-		&r.CreatedAt, &r.UpdatedAt,
+		&r.RequestID, &r.CreatedAt, &r.UpdatedAt,
 	)
 	return r, err
 }
@@ -527,12 +662,14 @@ func (s *Store) ListRecentRuns(limit int) ([]RunRecord, error) {
 
 // GetRun loads one run by id. ErrNoRows distinguishes "no such run" from a real
 // failure, so a caller can answer 404 rather than 500.
+//
+// It reads runColumns like every other run query. It used to inline its own
+// column list, which is what runColumns exists to prevent: the list had fallen a
+// column behind, so a run loaded here reported no intent whatever it served.
 func (s *Store) GetRun(runID string) (*RunRecord, error) {
-	var r RunRecord
-	err := s.db.QueryRow(
-		`SELECT id, project, task_id, status, COALESCE(brief, ''), COALESCE(change_id, ''), COALESCE(slug, ''), created_at, updated_at FROM runs WHERE id = ?`,
-		runID,
-	).Scan(&r.ID, &r.Project, &r.TaskID, &r.Status, &r.Brief, &r.ChangeID, &r.Slug, &r.CreatedAt, &r.UpdatedAt)
+	r, err := scanRun(s.db.QueryRow(
+		`SELECT `+runColumns+` FROM runs WHERE id = ?`, runID,
+	))
 	if err != nil {
 		return nil, err
 	}
