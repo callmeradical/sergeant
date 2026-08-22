@@ -66,13 +66,27 @@ type BulletRecord struct {
 	IntentID  string    `json:"intent_id"`
 	Repo      string    `json:"repo"`
 	Position  int       `json:"position"` // merge order within the intent
-	Status    string    `json:"status"`   // pending, red, green, sealed, merged, failed
+	Status    string    `json:"status"`   // one of BulletStatuses()
 	Branch    string    `json:"branch,omitempty"`
 	Worktree  string    `json:"worktree,omitempty"`
 	CommitSHA string    `json:"commit_sha,omitempty"`
 	PRURL     string    `json:"pr_url,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// BulletStatuses is the full set of BulletRecord.Status values, in lifecycle
+// order: a bullet is created pending, records red then green evidence (D3), is
+// sealed into a PR, and is merged by a human (D6). failed is the terminal
+// alternative and sorts last because it can be reached from any earlier state.
+//
+// This exists as code rather than only as a comment because the dashboard renders
+// the lifecycle as the tail of the workflow graph. A hand-copied list in the UI
+// would be free to invent a status the store never writes.
+//
+// A fresh slice is returned on every call so no caller can mutate it.
+func BulletStatuses() []string {
+	return []string{"pending", "red", "green", "sealed", "merged", "failed"}
 }
 
 type EnvelopeRecord struct {

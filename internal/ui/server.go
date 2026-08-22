@@ -103,6 +103,7 @@ func (srv *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/run-details", srv.handleRunDetails)
 	mux.HandleFunc("/api/validate-intent", srv.handleValidateIntent)
 	mux.HandleFunc("/api/discover-workflow", srv.handleDiscoverWorkflow)
+	mux.HandleFunc("/api/workflow", srv.handleWorkflow)
 	mux.HandleFunc("/api/save-dag", srv.handleSaveDAG)
 	mux.HandleFunc("/api/dispatch", srv.handleDispatch)
 	mux.HandleFunc("/api/create-pr", srv.handleCreatePR)
