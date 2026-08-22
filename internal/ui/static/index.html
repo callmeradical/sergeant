@@ -117,6 +117,15 @@
             <span id="system-status-pill" aria-live="polite" aria-atomic="true" class="px-2 py-0.5 rounded text-[10px] font-bold bg-[#161b22] text-slate-300 border border-[#30363d]">
               No active run
             </span>
+            <!-- The run's own detail, including resume. Resume is offered here and
+                 not on a run card: a card is a navigation target, and a
+                 state-changing action there is one stray click from a scan
+                 gesture. -->
+            <button type="button" id="btn-open-run-detail" onclick="openRunDrawer(this)"
+              class="px-2 py-1 rounded bg-[#161b22] hover:bg-[#21262d] border border-[#30363d] text-[10px] font-bold text-slate-300 hover:text-white flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]">
+              <i class="fa-solid fa-circle-info text-[10px]" aria-hidden="true"></i>
+              Run detail
+            </button>
             <button type="button" id="btn-open-activity" onclick="openActivityDrawer(this)"
               class="px-2 py-1 rounded bg-[#161b22] hover:bg-[#21262d] border border-[#30363d] text-[10px] font-bold text-slate-300 hover:text-white flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14]">
               <i class="fa-regular fa-rectangle-list text-[10px]" aria-hidden="true"></i>
@@ -662,8 +671,10 @@
         const data = await res.json();
         setConnectionError(false);
         indexPhasesForDrawer(data.phases || []);
+        activeRunSkips = data.resume_skips || [];
         renderWorkflowGraph(current, data.phases || []);
         renderActivity(data.envelopes || []);
+        refreshRunDrawer(current);
       } catch (err) {
         setConnectionError(true);
         console.error("Failed fetching run details:", err);
@@ -680,6 +691,8 @@
       document.getElementById('workflow-graph').innerHTML =
         '<div class="text-[#8b949e] text-[11px]">No pipeline runs recorded for this project. Dispatch one from your agent session or <code class="text-slate-300">POST /api/dispatch</code>.</div>';
       drawerActivity = [];
+      activeRunSkips = [];
+      refreshRunDrawer(null);
       const envBadge = document.getElementById('activity-count');
       if (envBadge) envBadge.innerText = '0';
     }
@@ -807,6 +820,126 @@
           <div class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider mb-1">Output</div>
           ${outBlock}
         </div>`;
+    }
+
+    // ---- Run detail and resume -----------------------------------------------
+    //
+    // The phase names a resume would skip, exactly as the server derived them
+    // (/api/run-details resume_skips). They are held rather than recomputed here:
+    // "which phases already passed" is the rule POST /api/run-resume enforces, and
+    // a second derivation in this page could disagree with what the resume does.
+    let activeRunSkips = [];
+
+    function runDrawerTitle(run) {
+      if (!run) return 'No run selected';
+      return (run.slug || '').trim() || run.id;
+    }
+
+    // Renders the drawer body for one run.
+    //
+    // The resume control appears if and only if the served run says it may be
+    // resumed. This page holds no list of qualifying statuses: the server's
+    // refusal is authoritative, and a copy of its rule here would drift and start
+    // inviting actions the server rejects. An absent answer is not a yes, so a
+    // payload without the field offers nothing.
+    function runDetailHTML(run, skips) {
+      if (!run) return '<div class="text-[#8b949e]">No run selected.</div>';
+
+      const rows = [
+        ['Status', escapeHTML(run.status || '\u2014')],
+        ['Project', escapeHTML(run.project || '\u2014')],
+        ['Change', escapeHTML(run.change_id || '\u2014')],
+        ['Run id', `<code class="text-slate-300 break-all">${escapeHTML(run.id || '\u2014')}</code>`],
+        ['Started', escapeHTML(run.created_at ? relativeTime(run.created_at) : '\u2014')],
+        ['Updated', escapeHTML(run.updated_at ? relativeTime(run.updated_at) : '\u2014')],
+      ];
+      const meta = `
+        <dl class="grid grid-cols-[5.5rem_1fr] gap-x-3 gap-y-1">
+          ${rows.map(([k, v]) => `<dt class="text-[#8b949e]">${escapeHTML(k)}</dt><dd class="min-w-0">${v}</dd>`).join('')}
+        </dl>`;
+
+      if (!run.resumable) return meta;
+
+      // What the resume will not do, named before it is done. A resume that
+      // silently skipped four gates would leave the operator unable to tell
+      // whether those gates ever ran.
+      const names = (skips || []).filter(Boolean);
+      const skipBlock = names.length
+        ? `<ul class="list-disc pl-4 space-y-0.5 font-mono text-[10px] text-slate-300">
+             ${names.map(n => `<li>${escapeHTML(n)}</li>`).join('')}
+           </ul>`
+        : '<div class="text-[#8b949e]">No phase holds a passed record, so this resume skips none.</div>';
+
+      return `${meta}
+        <div class="p-2 rounded bg-[#161b22] border border-[#30363d] space-y-2">
+          <div class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider">Resume</div>
+          <div class="text-slate-300">Re-enters this run in the worktree and branch it already holds.</div>
+          <div>
+            <div class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider mb-1">Phases it will skip</div>
+            ${skipBlock}
+          </div>
+          <button type="button" id="btn-resume-run" onclick="resumeRun('${escapeAttr(run.id)}')"
+            class="px-2 py-1 rounded bg-[#161b22] hover:bg-[#21262d] border border-[#30363d] text-slate-300 hover:text-white text-[10px] font-bold flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+            <i class="fa-solid fa-rotate-left text-[10px]" aria-hidden="true"></i> Resume run
+          </button>
+          <div id="resume-refusal" role="alert" class="hidden text-rose-300 font-mono text-[10px] break-all"></div>
+        </div>`;
+    }
+
+    function openRunDrawer(opener) {
+      const run = allRuns.find(r => r.id === activeRunId) || null;
+      openDrawer(runDrawerTitle(run), 'run', runDetailHTML(run, activeRunSkips), opener);
+    }
+
+    // Keeps an open run drawer current. Called where run details arrive, so the
+    // resume control disappears the moment the served run stops offering it —
+    // including the transition the stream carries after a resume is accepted.
+    function refreshRunDrawer(run) {
+      if (!drawerIsOpen()) return;
+      if (document.getElementById('drawer-kind').textContent !== 'run') return;
+      document.getElementById('drawer-title').textContent = runDrawerTitle(run);
+      document.getElementById('drawer-body').innerHTML = runDetailHTML(run, activeRunSkips);
+    }
+
+    // Displays a refusal in the server's own words. This page did not decide the
+    // refusal and must not compose an explanation for it.
+    function showResumeRefusal(text) {
+      const el = document.getElementById('resume-refusal');
+      if (!el) return;
+      const reason = (text || '').trim();
+      el.textContent = reason;
+      if (reason === '') {
+        el.classList.add('hidden');
+      } else {
+        el.classList.remove('hidden');
+      }
+    }
+
+    async function resumeRun(runId) {
+      const names = (activeRunSkips || []).filter(Boolean);
+      const skipLine = names.length
+        ? `${names.length} phase(s) will be skipped: ${names.join(', ')}.`
+        : 'No phase holds a passed record, so every phase runs again.';
+      if (!confirm(`Resume run ${runId}?\n\n${skipLine}`)) return;
+
+      showResumeRefusal('');
+      try {
+        const res = await fetch('/api/run-resume', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: runId })
+        });
+        if (!res.ok) {
+          showResumeRefusal(await res.text());
+          return;
+        }
+        // Deliberately no read back. The run moving to running is a change the
+        // sequenced stream already publishes, and the existing render path applies
+        // it. Re-reading here would reintroduce the polling that was removed.
+      } catch (err) {
+        setConnectionError(true);
+        console.error('Failed calling /api/run-resume:', err);
+      }
     }
 
     function openPhaseDrawer(kind, name, opener) {
