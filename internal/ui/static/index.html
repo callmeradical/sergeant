@@ -1200,6 +1200,7 @@
         const res = await fetch(`/api/run-details?id=${runId}`);
         const data = await res.json();
         setConnectionError(false);
+        indexPhasesForDrawer(data.phases || []);
         renderLiveStitchMatrix(current, data.phases || [], data.envelopes || []);
         renderLiveContractInspector(data.envelopes || []);
       } catch (err) {
@@ -1274,6 +1275,13 @@
     let drawerPhaseIndex = new Map();
 
     function drawerKey(kind, name) { return (kind || '') + '\u0000' + name; }
+
+    // Built where phases arrive, not inside the matrix renderer: rendering and
+    // indexing are separate concerns, and the renderer is unit-tested in isolation.
+    function indexPhasesForDrawer(phases) {
+      drawerPhaseIndex = new Map();
+      (phases || []).forEach(p => drawerPhaseIndex.set(drawerKey(p.kind, p.name), p));
+    }
 
     function openDrawer(title, kind, bodyHTML, opener) {
       const d = document.getElementById('detail-drawer');
@@ -1391,10 +1399,8 @@
       const seenCols = new Set();
       const kindsByName = new Map(); // name -> Set(kind), to detect collisions
       const byRepo = new Map();
-      drawerPhaseIndex = new Map();
       list.forEach(p => {
         const key = colKey(p);
-        drawerPhaseIndex.set(drawerKey(p.kind, p.name), p);
         if (!seenCols.has(key)) {
           seenCols.add(key);
           cols.push({ key, kind: p.kind || '', name: p.name });
