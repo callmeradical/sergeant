@@ -1,9 +1,17 @@
-Change the default fleet state root so v2 no longer writes into v1's directory.
+Fix a UI bug: the stage matrix drops a phase when an agent phase and a code gate share the same name.
 
-In internal/dag/engine.go, FleetDir() currently defaults to ~/.local/share/sergeant/fleet when SERGEANT_FLEET_DIR is unset. That is v1's directory and v1 means something different by those paths: for v1, fleet/<task>/<repo>/ is a metadata directory containing status and worktree files, whereas v2 puts the actual git worktree there. Same shape, incompatible meaning.
+Reproduce: a project whose factory.pipeline contains "build" and whose factory.gates contains a gate also named "build" produces two phase records with the same name and different kind (agent vs code). The API returns both. The matrix renders only one, and the surviving cell is whichever was written last.
 
-Required change: default to ~/.local/share/sergeant-v2/fleet instead. Keep the SERGEANT_FLEET_DIR override working exactly as it does now.
+File: internal/ui/static/index.html, function renderLiveStitchMatrix.
 
-Also add a test in internal/dag/engine_test.go named TestFleetDirDefaultsToV2Root that asserts, with SERGEANT_FLEET_DIR unset, FleetDir returns a path containing "sergeant-v2" and NOT the exact segment "share/sergeant/fleet". Use t.Setenv to clear the variable.
+Current cause: columns and cells are keyed by phase name only. The code does roughly byRepo.get(p.repo).set(p.name, p), so the second phase with the same name overwrites the first.
 
-Constraints: do not shell out to any bin/sgt-* script. Do not use tmux. Read AGENTS.md first. Run go build ./... and go test ./internal/... -count=1 before you finish.
+Required fix:
+1. Key cells by the pair (kind, name) so an agent phase and a code gate with the same name both survive and both render.
+2. Column identity must also be that pair. Keep the plain phase name as the visible column label when that name is unique across kinds. Only when the same name appears with two different kinds, disambiguate the labels, for example "build (agent)" and "build (gate)".
+3. Preserve first-seen ordering of columns.
+4. Do not change any other rendering behaviour.
+
+Also add a regression test. There is a Playwright setup at /tmp/sergeant-e2e (run node scripts from that directory, import { chromium } from "playwright"). Write the test as a Go test if you can assert the rendering logic without a browser; otherwise add a small node script under /tmp/sergeant-e2e and describe in your summary exactly how you verified that both a build/agent phase and a build/code phase render as separate columns.
+
+Constraints: read AGENTS.md first. Do not shell out to any bin/sgt-* script. Do not use tmux. The HTML is embedded via //go:embed so run go build ./... and go test ./internal/... -count=1 before finishing.

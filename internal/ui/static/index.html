@@ -1403,21 +1403,45 @@
       // first appeared. Previously the table had fixed Build/Gate columns filled by
       // .find(kind==='agent'|'code'), which showed the FIRST agent phase under a
       // header reading "Build" and silently dropped every other phase.
-      const phaseNames = [];
+      //
+      // A column is identified by the (kind, name) pair, never by name alone. A
+      // pipeline stage and a code gate may legitimately share a name — factory
+      // pipeline "build" plus gate "build" — and keying on name alone let the
+      // phase written last overwrite the other, dropping it from the matrix.
+      const colKey = p => `${p.kind || ''}\u0000${p.name}`;
+      const cols = [];              // {key, kind, name} in first-seen order
+      const seenCols = new Set();
+      const kindsByName = new Map(); // name -> Set(kind), to detect collisions
       const byRepo = new Map();
       list.forEach(p => {
-        if (!phaseNames.includes(p.name)) phaseNames.push(p.name);
+        const key = colKey(p);
+        if (!seenCols.has(key)) {
+          seenCols.add(key);
+          cols.push({ key, kind: p.kind || '', name: p.name });
+        }
+        if (!kindsByName.has(p.name)) kindsByName.set(p.name, new Set());
+        kindsByName.get(p.name).add(p.kind || '');
         if (!byRepo.has(p.repo)) byRepo.set(p.repo, new Map());
-        byRepo.get(p.repo).set(p.name, p);
+        byRepo.get(p.repo).set(key, p);
       });
 
-      const cols = phaseNames.length ? phaseNames : [];
+      // The plain phase name is the label while it is unambiguous. Only a name
+      // carried by more than one kind is qualified, e.g. "build (agent)" and
+      // "build (gate)".
+      const KIND_LABEL = { agent: 'agent', code: 'gate' };
+      const colLabel = c => {
+        const kinds = kindsByName.get(c.name);
+        if (!kinds || kinds.size < 2) return c.name;
+        const qualifier = KIND_LABEL[c.kind] || c.kind;
+        return qualifier ? `${c.name} (${qualifier})` : c.name;
+      };
+
       const totalCols = cols.length + 2; // repository + phases + delivery
 
       thead.innerHTML = `
         <tr class="border-b border-[#21262d] bg-[#161b22] text-[#8b949e] uppercase text-[10px]">
           <th scope="col" class="p-2.5 w-36 border-r border-[#21262d]">Repository</th>
-          ${cols.map(n => `<th scope="col" class="p-2.5 border-r border-[#21262d]">${escapeHTML(n)}</th>`).join('')}
+          ${cols.map(c => `<th scope="col" class="p-2.5 border-r border-[#21262d]">${escapeHTML(colLabel(c))}</th>`).join('')}
           <th scope="col" class="p-2.5">Delivery</th>
         </tr>`;
 
@@ -1435,7 +1459,7 @@
                 <i class="fa-solid fa-code-branch text-[#8b949e]" aria-hidden="true"></i> ${escapeHTML(repo)}
               </div>
             </td>
-            ${cols.map(n => `<td class="p-2.5 border-r border-[#21262d] space-y-1 align-top">${phaseCellHTML(phaseMap.get(n))}</td>`).join('')}
+            ${cols.map(c => `<td class="p-2.5 border-r border-[#21262d] space-y-1 align-top">${phaseCellHTML(phaseMap.get(c.key))}</td>`).join('')}
             <td class="p-2.5 space-y-1 align-top">${deliveryCellHTML(envelopes, repo)}</td>
           </tr>`;
       }).join('');
