@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/callmeradical/sergeant/internal/naming"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -23,7 +25,10 @@ type RunRecord struct {
 	// ChangeID is the OpenSpec change this run is accountable to (decision O3).
 	// It is resolved before the run row is written, so a stored run always names
 	// the change whose openspec/changes/<id>/ directory travels in its PR.
-	ChangeID  string    `json:"change_id"`
+	ChangeID string `json:"change_id"`
+	// Slug is a short, speakable label for the run (adverb-adjective-noun). It is
+	// a display and speech label only; ID remains the run's identity.
+	Slug      string    `json:"slug"`
 	Status    string    `json:"status"` // running, passed, failed
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -149,6 +154,7 @@ func (s *Store) migrate() error {
 		task_id TEXT NOT NULL,
 		status TEXT NOT NULL,
 		brief TEXT NOT NULL DEFAULT '',
+		slug TEXT NOT NULL DEFAULT '',
 		change_id TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
@@ -221,6 +227,7 @@ func (s *Store) migrateAddColumns() error {
 	wanted := []struct{ table, column, ddl string }{
 		{"runs", "brief", "ALTER TABLE runs ADD COLUMN brief TEXT NOT NULL DEFAULT ''"},
 		{"runs", "change_id", "ALTER TABLE runs ADD COLUMN change_id TEXT NOT NULL DEFAULT ''"},
+		{"runs", "slug", "ALTER TABLE runs ADD COLUMN slug TEXT NOT NULL DEFAULT ''"},
 		{"bullets", "branch", "ALTER TABLE bullets ADD COLUMN branch TEXT NOT NULL DEFAULT ''"},
 		{"bullets", "worktree", "ALTER TABLE bullets ADD COLUMN worktree TEXT NOT NULL DEFAULT ''"},
 		{"bullets", "commit_sha", "ALTER TABLE bullets ADD COLUMN commit_sha TEXT NOT NULL DEFAULT ''"},
@@ -280,13 +287,60 @@ func (s *Store) hasColumn(table, column string) (bool, error) {
 	return false, rows.Err()
 }
 
+// terminalRunStatuses are the states after which a slug may be reused. A slug is
+// a speech label, so it only has to be unambiguous while the run is live.
+var terminalRunStatuses = map[string]bool{"passed": true, "failed": true, "cancelled": true}
+
+// assignSlug gives r a speakable label, avoiding any slug currently held by a
+// non-terminal run. The label is derived from the run id, so it is reproducible;
+// on collision it steps deterministically to the next candidate.
+func (s *Store) assignSlug(r *RunRecord) error {
+	if r.Slug != "" {
+		return nil
+	}
+	taken := map[string]bool{}
+	rows, err := s.db.Query(`SELECT COALESCE(slug, ''), status FROM runs WHERE slug != ''`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var slug, status string
+		if err := rows.Scan(&slug, &status); err != nil {
+			return err
+		}
+		if !terminalRunStatuses[status] {
+			taken[slug] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// naming.Combinations bounds this loop; in practice it exits on the first try.
+	for attempt := 0; attempt < 64; attempt++ {
+		candidate := naming.SlugAttempt(r.ID, attempt)
+		if !taken[candidate] {
+			r.Slug = candidate
+			return nil
+		}
+	}
+	// Every candidate collided with a live run. Fall back to the id rather than
+	// blocking the dispatch; the id is the real identity in any case.
+	r.Slug = r.ID
+	return nil
+}
+
 func (s *Store) CreateRun(r *RunRecord) error {
+	if err := s.assignSlug(r); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	r.CreatedAt = now
 	r.UpdatedAt = now
 	_, err := s.db.Exec(
-		`INSERT INTO runs (id, project, task_id, status, brief, change_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.Project, r.TaskID, r.Status, r.Brief, r.ChangeID, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, project, task_id, status, brief, change_id, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.Project, r.TaskID, r.Status, r.Brief, r.ChangeID, r.Slug, r.CreatedAt, r.UpdatedAt,
 	)
 	return err
 }
@@ -370,7 +424,7 @@ func (s *Store) GetLatestEnvelope(runID, repo string) (*EnvelopeRecord, error) {
 
 func (s *Store) ListRecentRuns(limit int) ([]RunRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT id, project, task_id, status, COALESCE(brief, ''), COALESCE(change_id, ''), created_at, updated_at FROM runs ORDER BY created_at DESC LIMIT ?`,
+		`SELECT id, project, task_id, status, COALESCE(brief, ''), COALESCE(change_id, ''), COALESCE(slug, ''), created_at, updated_at FROM runs ORDER BY created_at DESC LIMIT ?`,
 		limit,
 	)
 	if err != nil {
@@ -381,7 +435,7 @@ func (s *Store) ListRecentRuns(limit int) ([]RunRecord, error) {
 	var list []RunRecord
 	for rows.Next() {
 		var r RunRecord
-		if err := rows.Scan(&r.ID, &r.Project, &r.TaskID, &r.Status, &r.Brief, &r.ChangeID, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Project, &r.TaskID, &r.Status, &r.Brief, &r.ChangeID, &r.Slug, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, r)
@@ -578,7 +632,7 @@ func requireOneRow(res sql.Result, kind, id string) error {
 
 func (s *Store) ListRunsForProject(project string, limit int) ([]RunRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT id, project, task_id, status, COALESCE(brief, ''), COALESCE(change_id, ''), created_at, updated_at FROM runs WHERE project = ? ORDER BY created_at DESC LIMIT ?`,
+		`SELECT id, project, task_id, status, COALESCE(brief, ''), COALESCE(change_id, ''), COALESCE(slug, ''), created_at, updated_at FROM runs WHERE project = ? ORDER BY created_at DESC LIMIT ?`,
 		project, limit,
 	)
 	if err != nil {
@@ -589,7 +643,7 @@ func (s *Store) ListRunsForProject(project string, limit int) ([]RunRecord, erro
 	var list []RunRecord
 	for rows.Next() {
 		var r RunRecord
-		if err := rows.Scan(&r.ID, &r.Project, &r.TaskID, &r.Status, &r.Brief, &r.ChangeID, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Project, &r.TaskID, &r.Status, &r.Brief, &r.ChangeID, &r.Slug, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, r)

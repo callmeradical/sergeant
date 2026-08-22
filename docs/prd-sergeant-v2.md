@@ -142,6 +142,21 @@ workflow or by the model. The two are trusted differently (see D2).
   once its upstream bullets are reviewed and merged, observing real PR state to
   advance the chain. Sergeant never merges. So Sergeant is never the thing that made
   an irreversible change across several repos, which keeps R3.4 honest.
+- **D8 — The dashboard is a view of intents, and it renders the workflow from a
+  definition.** The primary list is intents, not runs. Selecting an intent shows its
+  bullets, one row per repository. Each bullet renders the workflow as a *definition*
+  with progress against it, so a stage that has not started is still visible rather
+  than absent. The definition is served from configuration (`factory.pipeline`,
+  `factory.gates`) plus the bullet lifecycle, so adding a gate changes the view with no
+  UI change. Runs and phases are drill-down evidence beneath a bullet, never the
+  top-level object.
+
+  Rationale: section 3a states that runs, phases, worktrees and sessions exist to serve
+  an intent and are not the thing being tracked. A dashboard whose primary object is the
+  run tracks precisely the wrong noun. Deriving columns from phases that already
+  executed also makes the view retrospective: it can answer "what happened" but not
+  "what happens next" or "where are we".
+
 - **D7 — v1 is not a dependency.** Sergeant must not shell out to `sgt-*`, adopt
   v1's fleet file layout, or reuse its supervision plumbing. Where a v1 capability
   is absent, that is unimplemented v2 scope.

@@ -1206,21 +1206,24 @@
           }
 
           btn.className = `w-full text-left p-2 rounded transition border text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] ${isSelected ? 'bg-[#161b22] border-[#58a6ff] shadow-sm' : 'bg-[#0b0e14] border-[#21262d] hover:border-[#30363d]'}`;
-          // The brief is what the operator actually thinks in. Identifying runs only
-          // by unix epoch forced them to diff the last four digits of near-identical
-          // ids to find the work they just dispatched.
+          // Label the run with its slug, not its brief. A brief is a paragraph and
+          // truncates to uselessness in a 187px card; a unix epoch forces the operator
+          // to diff the last four digits of near-identical ids. The slug is a fixed
+          // width, speakable label. The full brief lives in the detail header, where
+          // there is room for it, and stays in the tooltip here.
           const brief = (r.brief || '').trim();
+          const label = (r.slug || '').trim() || r.id;
           btn.innerHTML = `
             <div class="flex justify-between items-center gap-2">
-              <span class="text-[11px] font-semibold truncate ${isSelected ? 'text-white' : 'text-slate-200'}" title="${escapeAttr(brief || r.id)}">
-                ${escapeHTML(brief || r.id)}
+              <span class="text-[11px] font-semibold font-mono truncate ${isSelected ? 'text-white' : 'text-slate-200'}" title="${escapeAttr(brief || r.id)}">
+                ${escapeHTML(label)}
               </span>
               <span class="px-1 py-0.5 rounded text-[9px] font-bold border shrink-0 ${statusBg}">
                 ${statusIcon} ${escapeHTML(statusLabel)}
               </span>
             </div>
             <div class="flex justify-between items-center gap-2 mt-0.5 text-[10px] text-[#8b949e]">
-              <span class="truncate font-mono">${escapeHTML(r.project)}</span>
+              <span class="truncate">${escapeHTML(brief || r.project)}</span>
               <span class="shrink-0" title="${escapeAttr(r.created_at || '')}">${escapeHTML(relativeTime(r.created_at))}</span>
             </div>
           `;
@@ -1251,9 +1254,13 @@
 
     async function selectRun(runId) {
       activeRunId = runId;
-      document.getElementById('stage-run-badge').innerText = `Run: ${runId}`;
-      const briefEl = document.getElementById('active-run-brief');
       const selected = allRuns.find(x => x.id === runId);
+      // Show the speakable slug, with the canonical id available on hover.
+      const badge = document.getElementById('stage-run-badge');
+      const slug = (selected && selected.slug || '').trim();
+      badge.innerText = slug || runId;
+      badge.title = runId;
+      const briefEl = document.getElementById('active-run-brief');
       if (briefEl) {
         const bText = (selected && selected.brief || '').trim();
         briefEl.textContent = bText;
