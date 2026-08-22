@@ -30,13 +30,17 @@ they must be one expression rather than two that happen to match.
 
 #### Scenario: No source outside the helper names v1's fleet root
 
-- **WHEN** the Go sources under `internal/` are scanned for the path literal
+- **WHEN** the Go sources of the whole repository are scanned for the path literal
   `share/sergeant/fleet`
 - **THEN** no non-test occurrence exists outside the helper itself
 
 Fails today: `internal/ui/server.go` contains three. This is the scenario that
 holds the invariant — a test pinning the known call sites would pass again the
 moment a fifth was added.
+
+Scoped to `internal/` in the first version of this spec, which was a defect: the
+scan passed while `cmd/sergeant/main.go` went on building v1's root for every CLI
+run. An invariant restricted to one subtree only moves where it can be broken.
 
 ### Requirement: The worktree pane and prune operate on this engine's own runs
 
