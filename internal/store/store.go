@@ -431,11 +431,31 @@ func (s *Store) hasColumn(table, column string) (bool, error) {
 //
 // timed_out is here because a timed-out run is finished: it is listed as
 // resumable precisely because nothing resumes it by itself.
+//
+// interrupted is here for the same reason: the coordinator stopped, not the
+// work. A coordinator that just started is driving no runs, so any run it finds
+// marked running is unowned and is reconciled to interrupted on startup. That
+// reconciled status must be terminal so waiters and slug assignment treat it as
+// finished, even though resume can re-enter it.
 var terminalRunStatuses = map[string]bool{
-	"passed":    true,
-	"failed":    true,
-	"cancelled": true,
-	"timed_out": true,
+	"passed":      true,
+	"failed":      true,
+	"cancelled":   true,
+	"timed_out":   true,
+	"interrupted": true,
+}
+
+// ResumableRunStatuses are the run statuses the store considers resumable.
+//
+// This list lives in the store package so store-layer tests can assert on it
+// without importing the ui package. The server's ResumableStatuses slice must
+// agree with this list; both are derived from the same design decision.
+//
+// interrupted is resumable: the coordinator stopped, not the work. Nothing
+// judged the run; it was merely cut off. Recording it as failed would assert a
+// verdict no gate produced.
+func ResumableRunStatuses() []string {
+	return []string{"failed", "cancelled", "timed_out", "interrupted"}
 }
 
 // IsTerminalRunStatus reports whether a run in this status has finished.
