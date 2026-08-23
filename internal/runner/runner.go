@@ -414,10 +414,29 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 			}
 		}
 
-		_ = pr.Router.SaveEnvelope(&env)
+		// Generate the envelope id before the SaveEnvelope call so both the
+		// delivery record (DeliverEnvelope) and the envelope record (RecordEnvelope)
+		// use the same id. Previously the id was generated inside RecordEnvelope's
+		// argument, two lines after SaveEnvelope, so it could never match.
 		now := time.Now().UTC()
+		envelopeID := fmt.Sprintf("%s-%s-%d", pr.RepoName, phaseName, now.UnixNano())
+
+		// Wrap SaveEnvelope in DeliverEnvelope so the write is durably recorded
+		// with retry and idempotency (R5.3, R5.4). A failed write is no longer
+		// discarded: the delivery history shows what happened and the error is
+		// surfaced the same way other phase failures are.
+		//
+		// deliverErr is kept separate from lastErr (the agent-phase error) so that
+		// a successful retry does not inherit a previous iteration's lastErr value.
+		var deliverErr error
+		if de := pr.Store.DeliverEnvelope(envelopeID, pr.RepoName, func() error {
+			return pr.Router.SaveEnvelope(&env)
+		}); de != nil {
+			deliverErr = fmt.Errorf("delivering envelope for phase %s on %s: %w", phaseName, pr.RepoName, de)
+		}
+
 		_ = pr.Store.RecordEnvelope(&store.EnvelopeRecord{
-			ID:            fmt.Sprintf("%s-%s-%d", pr.RepoName, phaseName, now.UnixNano()),
+			ID:            envelopeID,
 			RunID:         pr.RunID,
 			Repo:          pr.RepoName,
 			Stage:         phaseName,
@@ -472,6 +491,11 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 			return nil, lastErr
 		}
 
+		// Agent succeeded. Surface any delivery failure so the caller can observe
+		// it; the delivery history already records the cause.
+		if deliverErr != nil {
+			return nil, deliverErr
+		}
 		return &env, nil
 	}
 
