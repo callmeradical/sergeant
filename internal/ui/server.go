@@ -125,6 +125,8 @@ func (srv *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/run-cancel", srv.handleRunCancel)
 	mux.HandleFunc("/api/run-resume", srv.handleRunResume)
 	mux.HandleFunc("/api/run-delete", srv.handleRunDelete)
+	mux.HandleFunc("/api/delivery-history", srv.handleDeliveryHistory)
+	mux.HandleFunc("/api/delivery-quarantine", srv.handleDeliveryQuarantine)
 	// The sequenced state stream. Clients follow this instead of re-reading
 	// /api/runs on a timer.
 	mux.HandleFunc("/api/stream", srv.handleStream)
@@ -1443,6 +1445,64 @@ func cancelNote(stopped bool) string {
 		return "Run cancelled and in-flight agent work signalled to stop."
 	}
 	return "No in-flight run found on this server; status recorded as cancelled only."
+}
+
+// handleDeliveryHistory answers a run-scoped view of delivery state, the
+// dashboard's substrate for R5.6. run_id is required — an empty result set for
+// a missing id would be indistinguishable from "this run truly has no
+// deliveries", so the two cases must not share a response shape.
+func (srv *Server) handleDeliveryHistory(w http.ResponseWriter, r *http.Request) {
+	runID := r.URL.Query().Get("run_id")
+	if runID == "" {
+		http.Error(w, "missing run_id", http.StatusBadRequest)
+		return
+	}
+
+	deliveries, err := srv.Store.ListDeliveriesForRun(runID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if deliveries == nil {
+		deliveries = []store.DeliveryRecord{}
+	}
+	writeJSON(w, http.StatusOK, deliveries)
+}
+
+// handleDeliveryQuarantine is a thin transport over Store.QuarantineDelivery.
+// It reconstructs nothing: quarantine only ever writes a record, so unlike
+// replay there is no attempt closure to recover. The store's guard (refusing
+// unless the delivery's latest state is dead_letter) is the only rule; this
+// handler must not weaken or duplicate it.
+func (srv *Server) handleDeliveryQuarantine(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		EnvelopeID string `json:"envelope_id"`
+		Consumer   string `json:"consumer"`
+		Reason     string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil ||
+		req.EnvelopeID == "" || req.Consumer == "" || req.Reason == "" {
+		http.Error(w, "invalid request body: envelope_id, consumer, and reason are all required", http.StatusBadRequest)
+		return
+	}
+
+	if err := srv.Store.QuarantineDelivery(req.EnvelopeID, req.Consumer, req.Reason); err != nil {
+		// The guard's own message, not a generic 500: this refusal is an expected
+		// outcome (the delivery is not dead_letter), not a server failure.
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":      "quarantined",
+		"envelope_id": req.EnvelopeID,
+		"consumer":    req.Consumer,
+	})
 }
 
 func (srv *Server) handleRunDelete(w http.ResponseWriter, r *http.Request) {

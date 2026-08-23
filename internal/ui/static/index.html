@@ -717,6 +717,7 @@
         activeRunSkips = data.resume_skips || [];
         renderWorkflowGraph(current, data.phases || []);
         renderActivity(data.envelopes || []);
+        fetchDeliveryHistory(runId);
         refreshRunDrawer(current);
       } catch (err) {
         setConnectionError(true);
@@ -734,6 +735,7 @@
       document.getElementById('workflow-graph').innerHTML =
         '<div class="text-[#8b949e] text-[11px]">No pipeline runs recorded for this project. Dispatch one from your agent session or <code class="text-slate-300">POST /api/dispatch</code>.</div>';
       drawerActivity = [];
+      drawerDeliveries = [];
       activeRunSkips = [];
       refreshRunDrawer(null);
       const envBadge = document.getElementById('activity-count');
@@ -1319,21 +1321,159 @@
       }, 120);
     });
 
+    // drawerDeliveries holds the current run's delivery history (R5.6), fetched
+    // alongside envelopes and rendered as a second section in the same
+    // "activity" drawer — not a second drawer kind an operator has to know to
+    // open separately (see design.md's rejected-alternatives note on the
+    // Workers drawer for why).
+    let drawerDeliveries = [];
+
+    function activityDrawerBodyHTML() {
+      return activityHTML(drawerActivity) + deliveriesHTML(drawerDeliveries);
+    }
+
     function openActivityDrawer(opener) {
       const n = drawerActivity.length;
-      openDrawer(`Activity (${n})`, 'activity', activityHTML(drawerActivity), opener);
+      openDrawer(`Activity (${n})`, 'activity', activityDrawerBodyHTML(), opener);
+    }
+
+    // Keeps an open activity drawer current. Called from both renderActivity and
+    // renderDeliveries so whichever of the two arrives first still redraws a
+    // consistent body instead of one section going stale until the other fetch
+    // lands.
+    function refreshActivityDrawer() {
+      if (!drawerIsOpen() || document.getElementById('drawer-kind').textContent !== 'activity') return;
+      document.getElementById('drawer-title').textContent = `Activity (${drawerActivity.length})`;
+      document.getElementById('drawer-body').innerHTML = activityDrawerBodyHTML();
     }
 
     function renderActivity(envelopes) {
       drawerActivity = envelopes || [];
       const badge = document.getElementById('activity-count');
-      const n = drawerActivity.length;
-      badge.innerText = String(n);
-      // If the drawer is already showing envelopes, keep it current.
-      if (drawerIsOpen() && document.getElementById('drawer-kind').textContent === 'activity') {
-        document.getElementById('drawer-title').textContent = `Activity (${n})`;
-        document.getElementById('drawer-body').innerHTML = activityHTML(drawerActivity);
+      badge.innerText = String(drawerActivity.length);
+      refreshActivityDrawer();
+    }
+
+    // Fetches this run's delivery history (R5.6) alongside its envelopes. A
+    // failed fetch renders no deliveries rather than leaving the previous run's
+    // deliveries on screen under the new run's id.
+    async function fetchDeliveryHistory(runId) {
+      try {
+        const res = await fetch(`/api/delivery-history?run_id=${encodeURIComponent(runId)}`);
+        if (!res.ok) { renderDeliveries([]); return; }
+        const data = await res.json();
+        renderDeliveries(data || []);
+      } catch (err) {
+        console.error('Failed fetching delivery history:', err);
+        renderDeliveries([]);
       }
+    }
+
+    function renderDeliveries(deliveries) {
+      drawerDeliveries = deliveries || [];
+      refreshActivityDrawer();
+    }
+
+    // Delivery state vocabulary, following the same shape as PHASE_LOOK.
+    // dead_letter is styled like a failed phase (rose) so it reads as the one
+    // state that needs operator action; quarantined reads as amber, a
+    // deliberate operator decision rather than a failure.
+    const DELIVERY_STATE_LOOK = {
+      pending:      { cls: 'text-[#8b949e]', icon: 'fa-regular fa-clock',            label: 'Pending' },
+      retrying:     { cls: 'text-amber-400', icon: 'fa-solid fa-rotate',             label: 'Retrying' },
+      leased:       { cls: 'text-[#58a6ff]', icon: 'fa-solid fa-hourglass-half',     label: 'Leased' },
+      delivered:    { cls: 'text-[#3fb950]', icon: 'fa-solid fa-circle-check',       label: 'Delivered' },
+      acknowledged: { cls: 'text-[#3fb950]', icon: 'fa-solid fa-circle-check',       label: 'Acknowledged' },
+      failed:       { cls: 'text-rose-400',  icon: 'fa-solid fa-circle-xmark',       label: 'Failed' },
+      dead_letter:  { cls: 'text-rose-400',  icon: 'fa-solid fa-skull-crossbones',   label: 'Dead letter' },
+      quarantined:  { cls: 'text-amber-300', icon: 'fa-solid fa-shield-halved',      label: 'Quarantined' },
+    };
+
+    function deliveryRowHTML(d) {
+      const look = DELIVERY_STATE_LOOK[d.state] || { cls: 'text-[#8b949e]', icon: 'fa-regular fa-circle', label: d.state || '—' };
+      const isDeadLetter = d.state === 'dead_letter';
+      // A dead_letter row is visually distinct: a rose-tinted card, matching the
+      // rose used for a failed phase elsewhere in this file, rather than the
+      // neutral card every other delivery state uses.
+      const cardCls = isDeadLetter
+        ? 'p-2.5 rounded bg-rose-950/30 border border-rose-800/60 space-y-1.5'
+        : 'p-2.5 rounded bg-[#161b22]/90 border border-[#30363d] space-y-1.5';
+
+      const quarantineBtn = isDeadLetter
+        ? `<button type="button" onclick="quarantineDelivery('${escapeAttr(d.envelope_id)}', '${escapeAttr(d.consumer)}')"
+             class="px-2 py-0.5 rounded bg-rose-900 hover:bg-rose-800 text-white text-[10px] font-bold flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400">
+             <i class="fa-solid fa-ban" aria-hidden="true"></i> Quarantine
+           </button>`
+        : '';
+
+      const errorBlock = d.error
+        ? `<div class="text-[10px] text-rose-400 break-all">${escapeHTML(d.error)}${d.error_class ? ` <span class="text-[#8b949e]">(${escapeHTML(d.error_class)})</span>` : ''}</div>`
+        : '';
+      const recoveryBlock = d.recovery_instructions
+        ? `<div class="text-[10px] text-amber-200/90 break-all">${escapeHTML(d.recovery_instructions)}</div>`
+        : '';
+
+      return `
+        <div class="${cardCls}">
+          <div class="flex justify-between items-center text-[10px] gap-2">
+            <span class="${look.cls} font-bold flex items-center gap-1.5 font-mono">
+              <i class="${look.icon}" aria-hidden="true"></i> ${escapeHTML(look.label)}
+            </span>
+            <span class="text-[#8b949e] font-mono">${d.created_at ? escapeHTML(new Date(d.created_at).toLocaleTimeString()) : ''}</span>
+          </div>
+          <div class="text-slate-300 text-[10px] font-mono truncate" title="${escapeAttr(d.consumer || '')}">${escapeHTML(d.consumer || '—')}</div>
+          <div class="flex justify-between items-center gap-2 text-[10px] text-[#8b949e]">
+            <span>Attempt ${escapeHTML(d.attempt != null ? d.attempt : '—')}</span>
+            ${quarantineBtn}
+          </div>
+          ${errorBlock}
+          ${recoveryBlock}
+        </div>`;
+    }
+
+    // Renders the run's delivery history as a section beneath its envelope
+    // activity, following activityHTML's structure and Tailwind conventions.
+    // Deliberately not a separate drawer kind — see the comment above
+    // drawerDeliveries.
+    function deliveriesHTML(deliveries) {
+      const list = deliveries || [];
+      const body = list.length === 0
+        ? '<div class="text-[#8b949e]">No deliveries recorded for this run yet.</div>'
+        : `<div class="space-y-1.5">${list.map(deliveryRowHTML).join('')}</div>`;
+      return `
+        <div class="pt-3 mt-3 border-t border-[#21262d] space-y-1.5">
+          <div class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider">Deliveries</div>
+          ${body}
+        </div>`;
+    }
+
+    // Quarantines a dead-lettered delivery. Replay is deliberately not offered
+    // here (see proposal.md's out-of-scope section) — quarantine is the one
+    // action this bullet exposes, because it only ever writes a record and
+    // needs no reconstruction of which attempt closure originally ran.
+    async function quarantineDelivery(envelopeId, consumer) {
+      const reason = prompt('Reason for quarantining this delivery:');
+      if (reason === null) return;
+      const trimmed = reason.trim();
+      if (!trimmed) {
+        alert('A reason is required to quarantine a delivery.');
+        return;
+      }
+      try {
+        const res = await fetch('/api/delivery-quarantine', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ envelope_id: envelopeId, consumer: consumer, reason: trimmed })
+        });
+        if (!res.ok) {
+          alert('Quarantine failed: ' + await res.text());
+          return;
+        }
+      } catch (err) {
+        alert('Quarantine failed: ' + err);
+        return;
+      }
+      if (activeRunId) fetchDeliveryHistory(activeRunId);
     }
 
     // Worktree leases, opened from the ambient "Workers" count in the status bar.

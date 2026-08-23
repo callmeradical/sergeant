@@ -813,3 +813,183 @@ func TestResumeRejectsAnUnknownRun(t *testing.T) {
 		t.Errorf("status = %d, want 404; body=%s", w.Code, w.Body.String())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// dashboard-shows-delivery-history-and-quarantine (R5.6, bullet 4/4)
+//
+// Store.ListDeliveryHistory, ReplayDelivery and QuarantineDelivery were
+// already covered directly in internal/store/delivery_test.go. These tests
+// cover the HTTP surface that exposes them, which nothing outside
+// internal/store called before this change.
+// ---------------------------------------------------------------------------
+
+// deliveryTestServer builds a server backed by a fresh store holding one run
+// and one envelope on it, so a test can deliver to it without repeating the
+// run/envelope bootstrap every time.
+func deliveryTestServer(t *testing.T) (mux http.Handler, st *store.Store, runID, envelopeID string) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "delivery.db")
+	var err error
+	st, err = store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	runID = "run-dh-1"
+	if err := st.CreateRun(&store.RunRecord{
+		ID: runID, Project: "test", TaskID: runID, Status: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	envelopeID = "env-dh-1"
+	if err := st.RecordEnvelope(&store.EnvelopeRecord{
+		ID: envelopeID, RunID: runID, Repo: "svc", Stage: "build", Summary: "test envelope",
+		Type: "phase.completed", SchemaVersion: "1", Producer: "sergeant/test", CorrelationID: runID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	return NewServer(st, 0).Handler(), st, runID, envelopeID
+}
+
+func getJSONResponse(t *testing.T, mux http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+	return w
+}
+
+// TestDeliveryHistoryReturnsRunsDeliveries covers spec scenario s-3: a GET
+// naming a run with recorded deliveries returns them as a JSON array carrying
+// state, attempt, error, error class and recovery instructions.
+func TestDeliveryHistoryReturnsRunsDeliveries(t *testing.T) {
+	mux, st, runID, envelopeID := deliveryTestServer(t)
+	const consumer = "/fleet/run-dh-1/svc"
+
+	if err := st.DeliverEnvelope(envelopeID, consumer, true, func() error { return nil }); err != nil {
+		t.Fatalf("DeliverEnvelope: %v", err)
+	}
+
+	w := getJSONResponse(t, mux, "/api/delivery-history?run_id="+runID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	var got []store.DeliveryRecord
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding response: %v; body=%s", err, w.Body.String())
+	}
+	if len(got) == 0 {
+		t.Fatal("expected at least one delivery row, got none")
+	}
+	for _, d := range got {
+		if d.EnvelopeID != envelopeID {
+			t.Errorf("delivery envelope_id = %q, want %q", d.EnvelopeID, envelopeID)
+		}
+		if d.Consumer != consumer {
+			t.Errorf("delivery consumer = %q, want %q", d.Consumer, consumer)
+		}
+	}
+	last := got[len(got)-1]
+	if last.State != "delivered" {
+		t.Errorf("last delivery state = %q, want delivered", last.State)
+	}
+}
+
+// TestDeliveryHistoryWithoutRunIDIsRefused covers spec scenario s-4: omitting
+// run_id must answer 400, not a server error or an empty result that could be
+// mistaken for "no deliveries".
+func TestDeliveryHistoryWithoutRunIDIsRefused(t *testing.T) {
+	mux, _, _, _ := deliveryTestServer(t)
+
+	w := getJSONResponse(t, mux, "/api/delivery-history")
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestDeliveryQuarantineSucceedsForDeadLetteredDelivery covers spec scenario
+// s-5: a POST naming a dead-lettered (envelope_id, consumer) pair with a
+// reason quarantines it, and a follow-up history request shows the
+// quarantined state and reason.
+func TestDeliveryQuarantineSucceedsForDeadLetteredDelivery(t *testing.T) {
+	mux, st, runID, envelopeID := deliveryTestServer(t)
+	const consumer = "/fleet/run-dh-1/dead-letter-target"
+
+	// Exhaust retries (non-critical, so DeliverEnvelope itself does not error)
+	// so the delivery reaches dead_letter.
+	_ = st.DeliverEnvelope(envelopeID, consumer, false, func() error {
+		return fmt.Errorf("permanent failure")
+	})
+
+	const reason = "poison message, will never succeed"
+	body := fmt.Sprintf(`{"envelope_id":%q,"consumer":%q,"reason":%q}`, envelopeID, consumer, reason)
+	w := postJSON(t, mux, "/api/delivery-quarantine", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Status     string `json:"status"`
+		EnvelopeID string `json:"envelope_id"`
+		Consumer   string `json:"consumer"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "quarantined" || resp.EnvelopeID != envelopeID || resp.Consumer != consumer {
+		t.Errorf("response = %+v, want status=quarantined envelope_id=%q consumer=%q", resp, envelopeID, consumer)
+	}
+
+	hw := getJSONResponse(t, mux, "/api/delivery-history?run_id="+runID)
+	var got []store.DeliveryRecord
+	if err := json.Unmarshal(hw.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 {
+		t.Fatal("expected delivery rows after quarantine, got none")
+	}
+	last := got[len(got)-1]
+	if last.State != "quarantined" {
+		t.Errorf("latest delivery state = %q, want quarantined", last.State)
+	}
+	if last.Error != reason {
+		t.Errorf("latest delivery reason = %q, want %q", last.Error, reason)
+	}
+}
+
+// TestDeliveryQuarantineRefusesNonDeadLetteredDelivery covers spec scenario
+// s-6: a POST naming a pair whose latest state is not dead_letter is refused
+// with an error, and no new delivery row is written.
+func TestDeliveryQuarantineRefusesNonDeadLetteredDelivery(t *testing.T) {
+	mux, st, _, envelopeID := deliveryTestServer(t)
+	const consumer = "/fleet/run-dh-1/healthy-target"
+
+	if err := st.DeliverEnvelope(envelopeID, consumer, true, func() error { return nil }); err != nil {
+		t.Fatalf("DeliverEnvelope: %v", err)
+	}
+
+	before, err := st.ListDeliveryHistory(envelopeID, consumer)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := fmt.Sprintf(`{"envelope_id":%q,"consumer":%q,"reason":"trying anyway"}`, envelopeID, consumer)
+	w := postJSON(t, mux, "/api/delivery-quarantine", body)
+	if w.Code == http.StatusOK {
+		t.Errorf("status = 200, want a refusal for a non-dead-lettered delivery")
+	}
+	if !strings.Contains(strings.ToLower(w.Body.String()), "dead_letter") {
+		t.Errorf("refusal does not explain the guard: %s", w.Body.String())
+	}
+
+	after, err := st.ListDeliveryHistory(envelopeID, consumer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("row count changed after a refused quarantine: before=%d after=%d", len(before), len(after))
+	}
+}

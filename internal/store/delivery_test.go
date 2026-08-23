@@ -402,6 +402,81 @@ func TestDeliveryThreeAttemptsShowsFullHistory(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// ListDeliveriesForRun (dashboard-shows-delivery-history-and-quarantine)
+// ---------------------------------------------------------------------------
+
+// TestListDeliveriesForRunReturnsAcrossEnvelopesAndConsumers covers scenario
+// s-1: a run that produced deliveries for more than one envelope and more than
+// one consumer must have all of them returned by the run-scoped listing, not
+// just the ones sharing a single (envelope_id, consumer) pair.
+func TestListDeliveriesForRunReturnsAcrossEnvelopesAndConsumers(t *testing.T) {
+	st, env1 := openDeliveryTestStore(t)
+	const runID = "run-del-1"
+
+	env2 := &EnvelopeRecord{
+		ID:            "env-del-2",
+		RunID:         runID,
+		Repo:          "test-repo",
+		Stage:         "build",
+		Summary:       "second envelope",
+		Type:          "phase.completed",
+		SchemaVersion: "1",
+		Producer:      "sergeant/test",
+		CorrelationID: runID,
+	}
+	if err := st.RecordEnvelope(env2); err != nil {
+		t.Fatalf("recording second envelope: %v", err)
+	}
+
+	const consumerA = "/fleet/run-del-1/consumer-a"
+	const consumerB = "/fleet/run-del-1/consumer-b"
+
+	if err := st.DeliverEnvelope(env1, consumerA, true, func() error { return nil }); err != nil {
+		t.Fatalf("DeliverEnvelope(env1, consumerA): %v", err)
+	}
+	if err := st.DeliverEnvelope(env2.ID, consumerB, true, func() error { return nil }); err != nil {
+		t.Fatalf("DeliverEnvelope(env2, consumerB): %v", err)
+	}
+
+	deliveries, err := st.ListDeliveriesForRun(runID)
+	if err != nil {
+		t.Fatalf("ListDeliveriesForRun: %v", err)
+	}
+
+	seenEnvelopes := map[string]bool{}
+	seenConsumers := map[string]bool{}
+	for _, d := range deliveries {
+		seenEnvelopes[d.EnvelopeID] = true
+		seenConsumers[d.Consumer] = true
+	}
+	if !seenEnvelopes[env1] || !seenEnvelopes[env2.ID] {
+		t.Errorf("expected deliveries for both envelopes %q and %q, got envelopes: %v", env1, env2.ID, seenEnvelopes)
+	}
+	if !seenConsumers[consumerA] || !seenConsumers[consumerB] {
+		t.Errorf("expected deliveries for both consumers %q and %q, got consumers: %v", consumerA, consumerB, seenConsumers)
+	}
+}
+
+// TestListDeliveriesForRunEmptyWhenNoDeliveries covers scenario s-2: a run that
+// exists but has never had a delivery recorded for it must return an empty,
+// non-nil slice — never an error, and never nil (which a JSON caller would
+// serialise as null instead of []).
+func TestListDeliveriesForRunEmptyWhenNoDeliveries(t *testing.T) {
+	st, _ := openDeliveryTestStore(t)
+
+	deliveries, err := st.ListDeliveriesForRun("run-del-1")
+	if err != nil {
+		t.Fatalf("ListDeliveriesForRun: %v", err)
+	}
+	if deliveries == nil {
+		t.Fatal("expected a non-nil empty slice, got nil")
+	}
+	if len(deliveries) != 0 {
+		t.Errorf("expected no deliveries, got %d: %v", len(deliveries), deliveries)
+	}
+}
+
 // stateList is a formatting helper for test failure messages.
 func stateList(history []DeliveryRecord) []string {
 	out := make([]string, len(history))
