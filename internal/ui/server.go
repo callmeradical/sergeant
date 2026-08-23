@@ -22,6 +22,7 @@ import (
 
 	"github.com/callmeradical/sergeant/internal/config"
 	"github.com/callmeradical/sergeant/internal/dag"
+	"github.com/callmeradical/sergeant/internal/graphify"
 	"github.com/callmeradical/sergeant/internal/handoff"
 	"github.com/callmeradical/sergeant/internal/naming"
 	"github.com/callmeradical/sergeant/internal/plan"
@@ -127,6 +128,7 @@ func (srv *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/run-delete", srv.handleRunDelete)
 	mux.HandleFunc("/api/delivery-history", srv.handleDeliveryHistory)
 	mux.HandleFunc("/api/delivery-quarantine", srv.handleDeliveryQuarantine)
+	mux.HandleFunc("/api/build-graph", srv.handleBuildGraph)
 	// The sequenced state stream. Clients follow this instead of re-reading
 	// /api/runs on a timer.
 	mux.HandleFunc("/api/stream", srv.handleStream)
@@ -1502,6 +1504,44 @@ func (srv *Server) handleDeliveryQuarantine(w http.ResponseWriter, r *http.Reque
 		"status":      "quarantined",
 		"envelope_id": req.EnvelopeID,
 		"consumer":    req.Consumer,
+	})
+}
+
+// handleBuildGraph triggers a project's cross-repository code graph build
+// (decision D9). It is the one explicit trigger this bullet adds — no CLI
+// binary, no dashboard button, no automatic dispatch-lifecycle hook.
+func (srv *Server) handleBuildGraph(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Project string `json:"project"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Project == "" {
+		http.Error(w, "invalid request body: project is required", http.StatusBadRequest)
+		return
+	}
+
+	proj, err := config.LoadProject(req.Project)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if proj.Graphify == nil {
+		http.Error(w, fmt.Sprintf("project %q has no graphify configuration", req.Project), http.StatusBadRequest)
+		return
+	}
+
+	if err := graphify.BuildProjectGraph(proj); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status": "built",
+		"output": proj.Graphify.Output,
 	})
 }
 

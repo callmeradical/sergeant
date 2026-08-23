@@ -145,6 +145,70 @@ func TestResolvedRetriesResolutionOrder(t *testing.T) {
 	}
 }
 
+// --- D9: project graphify configuration --------------------------------------
+
+// A project's graphify: block parses into typed fields, not just raw YAML.
+func TestGraphifyBlockParsesIntoTypedFields(t *testing.T) {
+	tempDir := t.TempDir()
+	yaml := `
+project: graph-test
+repos:
+  backend:
+    path: /tmp/backend
+    group: core
+  frontend:
+    path: /tmp/frontend
+    group: ui
+graphify:
+  output: /tmp/graph-test/graphify-out
+  include_groups: [core]
+  exclude_patterns: ["**/*.test.ts"]
+`
+	path := filepath.Join(tempDir, "graph-test.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := LoadProject(path)
+	if err != nil {
+		t.Fatalf("LoadProject: %v", err)
+	}
+	if proj.Graphify == nil {
+		t.Fatal("expected Graphify to be non-nil")
+	}
+	if proj.Graphify.Output != "/tmp/graph-test/graphify-out" {
+		t.Errorf("Output = %q, want /tmp/graph-test/graphify-out", proj.Graphify.Output)
+	}
+	if len(proj.Graphify.IncludeGroups) != 1 || proj.Graphify.IncludeGroups[0] != "core" {
+		t.Errorf("IncludeGroups = %v, want [core]", proj.Graphify.IncludeGroups)
+	}
+	if len(proj.Graphify.ExcludePatterns) != 1 || proj.Graphify.ExcludePatterns[0] != "**/*.test.ts" {
+		t.Errorf("ExcludePatterns = %v, want [**/*.test.ts]", proj.Graphify.ExcludePatterns)
+	}
+}
+
+// A project that declares no graphify: block has a nil Graphify, distinct
+// from a project that declared an empty block.
+func TestProjectWithoutGraphifyBlockHasNilGraphify(t *testing.T) {
+	tempDir := t.TempDir()
+	yaml := `
+project: no-graph
+repos:
+  svc:
+    path: /tmp/svc
+`
+	path := filepath.Join(tempDir, "no-graph.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := LoadProject(path)
+	if err != nil {
+		t.Fatalf("LoadProject: %v", err)
+	}
+	if proj.Graphify != nil {
+		t.Errorf("expected Graphify to be nil for a project with no graphify: block, got %+v", proj.Graphify)
+	}
+}
+
 // Omitting the field entirely preserves today's behaviour: one attempt, no retry.
 func TestRetriesOmittedMeansZero(t *testing.T) {
 	tempDir := t.TempDir()
