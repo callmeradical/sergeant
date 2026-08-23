@@ -459,6 +459,33 @@ func (s *Store) QuarantineDelivery(envelopeID, consumer, reason string) error {
 	return nil
 }
 
+// scanDeliveryRow reads one delivery row from r, handling the next_attempt_at
+// nullable DATETIME the same way scanEnvelope handles occurred_at/published_at.
+//
+// It exists so ListDeliveryHistory and ListDeliveriesForRun — one scoped to an
+// idempotency key, the other scoped to a run via a join to envelopes — share
+// one implementation of the 12-column scan instead of each maintaining its own
+// copy that could drift out of sync with DeliveryRecord.
+func scanDeliveryRow(r rowScanner) (DeliveryRecord, error) {
+	var rec DeliveryRecord
+	var nextAttemptStr sql.NullString
+	var createdStr, updatedStr string
+	if err := r.Scan(
+		&rec.ID, &rec.EnvelopeID, &rec.Consumer, &rec.State, &rec.Attempt,
+		&nextAttemptStr, &rec.Error, &rec.ErrorClass,
+		&rec.RecoveryInstructions,
+		&rec.IdempotencyKey, &createdStr, &updatedStr,
+	); err != nil {
+		return DeliveryRecord{}, err
+	}
+	if nextAttemptStr.Valid {
+		rec.NextAttemptAt = parseSQLiteTime(nextAttemptStr.String)
+	}
+	rec.CreatedAt = parseSQLiteTime(createdStr)
+	rec.UpdatedAt = parseSQLiteTime(updatedStr)
+	return rec, nil
+}
+
 // ListDeliveryHistory returns all delivery rows for the (envelopeID, consumer)
 // pair, ordered by created_at ascending. Because every state transition is an
 // INSERT, the result is the full history of the delivery chain.
@@ -489,22 +516,48 @@ func (s *Store) ListDeliveryHistory(envelopeID, consumer string) ([]DeliveryReco
 
 	var list []DeliveryRecord
 	for rows.Next() {
-		var r DeliveryRecord
-		var nextAttemptStr sql.NullString
-		var createdStr, updatedStr string
-		if err := rows.Scan(
-			&r.ID, &r.EnvelopeID, &r.Consumer, &r.State, &r.Attempt,
-			&nextAttemptStr, &r.Error, &r.ErrorClass,
-			&r.RecoveryInstructions,
-			&r.IdempotencyKey, &createdStr, &updatedStr,
-		); err != nil {
+		r, err := scanDeliveryRow(rows)
+		if err != nil {
 			return nil, err
 		}
-		if nextAttemptStr.Valid {
-			r.NextAttemptAt = parseSQLiteTime(nextAttemptStr.String)
+		list = append(list, r)
+	}
+	return list, rows.Err()
+}
+
+// ListDeliveriesForRun returns every delivery row belonging to any envelope of
+// runID, across all consumers, ordered by created_at then id ascending.
+// Unlike ListDeliveryHistory, which is scoped to one (envelope_id, consumer)
+// pair, this is the run-scoped view the dashboard needs: an operator looks at
+// a run, not a single delivery chain.
+//
+// It returns an empty, non-nil slice when the run has no recorded deliveries,
+// so a JSON caller serialises [] rather than null.
+func (s *Store) ListDeliveriesForRun(runID string) ([]DeliveryRecord, error) {
+	rows, err := s.db.Query(
+		// See ListDeliveryHistory's comment on why next_attempt_at is not
+		// wrapped in COALESCE.
+		`SELECT d.id, d.envelope_id, d.consumer, d.state, d.attempt,
+		        d.next_attempt_at, COALESCE(d.error, ''), COALESCE(d.error_class, ''),
+		        COALESCE(d.recovery_instructions, ''), d.idempotency_key,
+		        d.created_at, d.updated_at
+		 FROM deliveries d
+		 JOIN envelopes e ON e.id = d.envelope_id
+		 WHERE e.run_id = ?
+		 ORDER BY d.created_at ASC, d.id ASC`,
+		runID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	list := []DeliveryRecord{}
+	for rows.Next() {
+		r, err := scanDeliveryRow(rows)
+		if err != nil {
+			return nil, err
 		}
-		r.CreatedAt = parseSQLiteTime(createdStr)
-		r.UpdatedAt = parseSQLiteTime(updatedStr)
 		list = append(list, r)
 	}
 	return list, rows.Err()
