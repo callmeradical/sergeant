@@ -24,6 +24,7 @@ import (
 	"github.com/callmeradical/sergeant/internal/dag"
 	"github.com/callmeradical/sergeant/internal/handoff"
 	"github.com/callmeradical/sergeant/internal/naming"
+	"github.com/callmeradical/sergeant/internal/plan"
 	"github.com/callmeradical/sergeant/internal/runner"
 	"github.com/callmeradical/sergeant/internal/store"
 )
@@ -1177,7 +1178,7 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(context.Background())
 	srv.registerRun(taskID, cancel)
 
-	go srv.executeRun(ctx, cancel, engine, proj, taskID, strings.TrimSpace(req.Brief), targetRepos)
+	go srv.executeRun(ctx, cancel, engine, proj, taskID, strings.TrimSpace(req.Brief), targetRepos, change.Dir)
 
 	writeJSON(w, http.StatusOK, dispatchResponse(taskID, proj.Name, changeRepoName, change))
 }
@@ -1450,6 +1451,9 @@ func (srv *Server) handleRunDelete(w http.ResponseWriter, r *http.Request) {
 // with a passed record are skipped. Keeping one body means a resumed run cannot
 // drift from a dispatched one — commit behaviour, cancellation handling and
 // delivery reporting are identical by construction rather than by discipline.
+//
+// changeDir is the absolute path to the OpenSpec change directory (may be empty
+// for resume paths that do not carry it — those runs report no progress).
 func (srv *Server) executeRun(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -1458,9 +1462,34 @@ func (srv *Server) executeRun(
 	taskID string,
 	brief string,
 	repos []string,
+	changeDir string,
 ) {
 	defer cancel()
 	defer srv.finishRun(taskID)
+
+	// Sample .sergeant/plan.json periodically while the run is in flight and
+	// publish progress to the change stream so dashboard clients receive it over
+	// the existing SSE connection. The goroutine stops when ctx is cancelled.
+	//
+	// Sampling is done here (in the run goroutine) rather than in the stream
+	// handler so that N connected clients produce exactly one sampling tick, not
+	// N. A five-second interval keeps the dashboard feeling live without hammering
+	// the filesystem.
+	//
+	// A non-fatal error from appendRunProgress is silently ignored: the function
+	// already swallows errors internally.
+	go func() {
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				srv.appendRunProgress(taskID)
+			}
+		}
+	}()
 
 	// setTerminal refuses to overwrite a cancellation. Previously the goroutine
 	// unconditionally wrote "passed" at the end, silently reviving runs the
@@ -1472,6 +1501,11 @@ func (srv *Server) executeRun(
 		}
 		srv.recordTerminalRun(taskID, status)
 	}
+
+	// Thread the change directory into the engine so RunStage can seed
+	// .sergeant/plan.json into each worktree after prepareWorktree succeeds
+	// but before the first agent phase starts.
+	engine.ChangeDir = changeDir
 
 	var stages []config.DAGStage
 	if proj.DAG != nil && len(proj.DAG.Stages) > 0 {
@@ -1506,6 +1540,33 @@ func (srv *Server) executeRun(
 		}
 	}
 
+	// Sample plan progress on a background ticker while stages run. The ticker
+	// appends a progress change to the change sequence so dashboard clients
+	// learn about it over the existing SSE stream, with no new endpoint and no
+	// client-side polling. The design says "reads happen when the run is
+	// sampled — the same tick that already serves the change stream"; this is
+	// the write side of that tick.
+	//
+	// Rules:
+	//   - Sampling is best-effort: errors are silently swallowed (the plan file
+	//     must not be able to fail the run).
+	//   - The goroutine stops when ctx is cancelled or the stages loop exits.
+	//   - Sergeant only reads here; the agent is the sole writer after seeding.
+	progressCtx, stopProgress := context.WithCancel(ctx)
+	defer stopProgress()
+	go func() {
+		t := time.NewTicker(2 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-progressCtx.Done():
+				return
+			case <-t.C:
+				srv.appendRunProgress(taskID)
+			}
+		}
+	}()
+
 	for i := range stages {
 		if ctx.Err() != nil {
 			setTerminal("cancelled")
@@ -1524,6 +1585,12 @@ func (srv *Server) executeRun(
 		setTerminal("cancelled")
 		return
 	}
+
+	// Stop the progress sampling goroutine before the final sample, so the two
+	// cannot interleave. One more sample after all stages complete captures
+	// whatever the agent wrote last.
+	stopProgress()
+	srv.appendRunProgress(taskID)
 
 	commitAll()
 
@@ -1683,7 +1750,10 @@ func (srv *Server) handleRunResume(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	srv.registerRun(run.ID, cancel)
-	go srv.executeRun(ctx, cancel, engine, proj, run.ID, run.Brief, repos)
+	// Resume does not carry the change dir: the worktree (and its seeded
+	// plan.json) already exists from the original dispatch. Pass empty so
+	// SeedPlan is not re-run on resume, which would overwrite agent progress.
+	go srv.executeRun(ctx, cancel, engine, proj, run.ID, run.Brief, repos, "")
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "resumed",
@@ -1726,4 +1796,67 @@ func (srv *Server) passedPhaseNames(runID string) []string {
 		}
 	}
 	return out
+}
+
+// appendRunProgress samples .sergeant/plan.json from every worktree belonging
+// to runID and appends a progress change to the change sequence so dashboard
+// clients learn about it over the existing SSE stream.
+//
+// Rules:
+//   - If no worktree exists, or the plan file is absent or malformed, no change
+//     is appended ("no progress reported" ≠ "zero progress").
+//   - A plan change does NOT alter the run or phase status. Progress is reported,
+//     never proven.
+//   - The function is non-fatal: any error is silently swallowed so a broken
+//     plan file cannot stop the run.
+//
+// The function scans FleetDir(runID, *) — all per-repo subdirectories under the
+// run's fleet directory — so it covers multi-repo runs automatically.
+func (srv *Server) appendRunProgress(runID string) {
+	runDir := filepath.Join(dag.FleetRoot(), runID)
+	entries, err := os.ReadDir(runDir)
+	if err != nil {
+		// Fleet dir absent (e.g. run never reached worktree creation): no progress.
+		return
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		// Skip the shared handoff directory, which is not a repo worktree.
+		if entry.Name() == "handoff" {
+			continue
+		}
+		worktree := filepath.Join(runDir, entry.Name())
+		p := plan.ReadPlan(worktree)
+		if p == nil {
+			// Absent or malformed: no progress reported for this repo.
+			continue
+		}
+
+		// Build per-item status slice for the payload.
+		type itemStatus struct {
+			ID       string `json:"id"`
+			Status   string `json:"status"`
+			Scenario string `json:"scenario"`
+		}
+		items := make([]itemStatus, 0, len(p.Items))
+		for _, it := range p.Items {
+			items = append(items, itemStatus{
+				ID:       it.ID,
+				Status:   it.Status,
+				Scenario: it.Scenario,
+			})
+		}
+
+		payload := map[string]interface{}{
+			"run_id":   runID,
+			"repo":     entry.Name(),
+			"complete": p.Complete(),
+			"total":    p.Total(),
+			"items":    items,
+		}
+		_, _ = srv.Store.AppendChange(store.ChannelProgress, runID, payload)
+	}
 }

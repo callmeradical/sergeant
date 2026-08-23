@@ -44,6 +44,11 @@ const (
 	ChannelBullet   = "bullet"
 	ChannelPhase    = "phase"
 	ChannelEnvelope = "envelope"
+	// ChannelProgress carries a sampled progress snapshot for one run. Each
+	// change holds the current complete/total counts and the per-item statuses
+	// read from .sergeant/plan.json in the run's worktree. A nil plan (absent
+	// or malformed file) never produces a change on this channel.
+	ChannelProgress = "progress"
 )
 
 // ChangeRecord is one entry in the ordered sequence.

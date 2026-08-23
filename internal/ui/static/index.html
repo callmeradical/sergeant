@@ -138,6 +138,16 @@
           </div>
         </div>
 
+        <!-- Reported checklist progress. Populated from .sergeant/plan.json via
+             the ChannelProgress change stream. Shows one marker per item:
+             solid circle = complete, open circle = pending, spinner = in-progress.
+             "No progress reported" (not zero) when the plan is absent. Never
+             replaces the phase status pill — runs alongside it. -->
+        <div id="progress-panel" class="hidden border border-[#21262d] rounded bg-[#0b0e14] px-3 py-2">
+          <div id="progress-content" class="flex items-center gap-3 flex-wrap">
+          </div>
+        </div>
+
         <!-- Workflow graph. Nodes come from the workflow DEFINITION (/api/workflow),
              so a stage that has not started is still drawn, greyed. Live status is
              overlaid from phase records. This replaced a table whose cells happened to
@@ -226,6 +236,13 @@
     let selectedProject = "all";
     let loadedProjects = [];
     let activeStitchTab = "stages";
+
+    // progressByRun maps run_id → { complete, total, items } as last reported by
+    // a ChannelProgress change. A missing key means "no progress reported" — the
+    // operator sees an em dash rather than 0/N, because those are different
+    // statements. Progress is reported, never proven: it never changes a run's
+    // status display.
+    const progressByRun = new Map();
     let currentProjectDefinition = null;
     let hasGateFailures = false;
     let lastSelectedRunStatus = null;
@@ -510,6 +527,30 @@
           // there is room for it, and stays in the tooltip here.
           const brief = (r.brief || '').trim();
           const label = (r.slug || '').trim() || r.id;
+          // Progress markers: one per checklist item. Only rendered when progress
+          // has been reported. Absent plan = no markers (not zero). Progress is
+          // shown alongside the status pill, never in place of it (R2.6).
+          const prog = progressByRun.get(r.id);
+          let progressRow = '';
+          if (prog && prog.total > 0) {
+            const dots = (prog.items || []).map(item => {
+              const s = item.status || 'pending';
+              if (s === 'complete')
+                return `<i class="fa-solid fa-circle text-[#3fb950] text-[8px]" title="${escapeAttr(item.scenario || 'complete')}" aria-hidden="true"></i>`;
+              if (s === 'in_progress')
+                return `<i class="fa-solid fa-spinner fa-spin text-amber-400 text-[8px]" title="${escapeAttr(item.scenario || 'in progress')}" aria-hidden="true"></i>`;
+              return `<i class="fa-regular fa-circle text-[#6e7681] text-[8px]" title="${escapeAttr(item.scenario || 'pending')}" aria-hidden="true"></i>`;
+            }).join('');
+            progressRow = `
+              <div class="flex items-center gap-1 mt-0.5">
+                <span class="flex items-center gap-0.5 flex-wrap">${dots}</span>
+                <span class="text-[9px] text-[#6e7681] font-mono ml-1">${prog.complete}/${prog.total}</span>
+              </div>`;
+          } else if (prog && prog.total === 0) {
+            // Zero-scenario plan: change declared no scenarios.
+            progressRow = `<div class="text-[9px] text-[#6e7681] mt-0.5 italic">no scenarios</div>`;
+          }
+
           btn.innerHTML = `
             <div class="flex justify-between items-center gap-2">
               <span class="text-[11px] font-semibold font-mono truncate ${isSelected ? 'text-white' : 'text-slate-200'}" title="${escapeAttr(brief || r.id)}">
@@ -523,6 +564,7 @@
               <span class="truncate">${escapeHTML(brief || r.project)}</span>
               <span class="shrink-0" title="${escapeAttr(r.created_at || '')}">${escapeHTML(relativeTime(r.created_at))}</span>
             </div>
+            ${progressRow}
           `;
           existingMap.delete(r.id);
       });
@@ -614,6 +656,7 @@
 
     async function selectRun(runId) {
       activeRunId = runId;
+      renderProgressPanel();
       const selected = allRuns.find(x => x.id === runId);
       // Show the speakable slug, with the canonical id available on hover.
       const badge = document.getElementById('stage-run-badge');
@@ -695,6 +738,7 @@
       refreshRunDrawer(null);
       const envBadge = document.getElementById('activity-count');
       if (envBadge) envBadge.innerText = '0';
+      renderProgressPanel();
     }
 
     function escapeHTML(v) {
@@ -1464,6 +1508,72 @@
       scheduleRefresh();
     }
 
+    // ---- Reported checklist progress ----------------------------------------
+    //
+    // Progress is received on ChannelProgress change events, keyed by run id.
+    // The most recent snapshot per run is kept; items are per-repo but the
+    // dashboard shows one plan per run (the first repo that reports one).
+    //
+    // Truthfulness rules:
+    //   - A nil/absent plan renders "no progress reported", never zero.
+    //   - Progress never changes the run's status badge; it sits beside it.
+    //   - A fully-reported plan with a failing gate still renders as FAILED.
+
+    // progressByRun maps run_id → {complete, total, items[]}
+    // An absent key means no progress event has arrived yet for that run.
+    const progressByRun = new Map();
+
+    // renderProgressPanel redraws the progress panel for the currently active run.
+    function renderProgressPanel() {
+      const panel   = document.getElementById('progress-panel');
+      const content = document.getElementById('progress-content');
+      if (!panel || !content) return;
+
+      if (!activeRunId) {
+        panel.classList.add('hidden');
+        return;
+      }
+
+      const prog = progressByRun.get(activeRunId);
+      if (!prog) {
+        // No progress event received yet — hide the panel entirely.
+        // "No progress reported" is conveyed by the panel being absent, not
+        // by showing a zero-count row.
+        panel.classList.add('hidden');
+        return;
+      }
+
+      panel.classList.remove('hidden');
+
+      const { complete, total, items } = prog;
+
+      // Build markers: one per item.
+      let markers = '';
+      (items || []).forEach(item => {
+        const s = item.status || 'pending';
+        if (s === 'complete') {
+          markers += `<span title="${escapeAttr(item.scenario || '')}" aria-label="complete: ${escapeAttr(item.scenario || '')}" class="text-[#3fb950] text-[11px]"><i class="fa-solid fa-circle" aria-hidden="true"></i></span>`;
+        } else if (s === 'in_progress') {
+          markers += `<span title="${escapeAttr(item.scenario || '')}" aria-label="in progress: ${escapeAttr(item.scenario || '')}" class="text-amber-400 text-[11px]"><i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i></span>`;
+        } else {
+          markers += `<span title="${escapeAttr(item.scenario || '')}" aria-label="pending: ${escapeAttr(item.scenario || '')}" class="text-[#6e7681] text-[11px]"><i class="fa-regular fa-circle" aria-hidden="true"></i></span>`;
+        }
+      });
+
+      // Count label beneath markers.
+      const countLabel = `<span class="text-[10px] font-mono text-[#8b949e] shrink-0">${complete}/${total} reported</span>`;
+
+      // A zero-item plan means the change declared no scenarios.
+      const markersBlock = total === 0
+        ? `<span class="text-[10px] text-[#8b949e] italic">no scenarios declared</span>`
+        : `<span class="flex items-center gap-0.5 flex-wrap">${markers}</span>`;
+
+      content.innerHTML =
+        `<span class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider shrink-0">Reported</span>` +
+        markersBlock +
+        countLabel;
+    }
+
     // A change carries its own sequence number. Advancing lastSeq only forwards
     // means an out-of-order or replayed event cannot move the cursor backwards and
     // cause the same range to be requested again on reconnect.
@@ -1472,6 +1582,24 @@
       try { data = JSON.parse(ev.data) || {}; } catch (err) { data = {}; }
       if (typeof data.seq === 'number' && data.seq > lastSeq) lastSeq = data.seq;
       setConnectionError(false);
+
+      // Handle a progress change inline — no re-fetch needed. The change record
+      // shape is {seq, channel, entity_id, payload, created_at}. The payload
+      // field is the progress data object.
+      if (data.channel === 'progress') {
+        let prog = {};
+        try { prog = (typeof data.payload === 'string' ? JSON.parse(data.payload) : data.payload) || {}; } catch (e) {}
+        const runId = prog.run_id || data.entity_id;
+        if (runId) {
+          progressByRun.set(runId, {
+            complete: typeof prog.complete === 'number' ? prog.complete : 0,
+            total:    typeof prog.total    === 'number' ? prog.total    : 0,
+            items:    Array.isArray(prog.items) ? prog.items : [],
+          });
+          if (runId === activeRunId) renderProgressPanel();
+        }
+      }
+
       scheduleRefresh();
     }
 

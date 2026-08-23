@@ -322,7 +322,7 @@ func TestARepeatedRequestIDWritesNoSecondIntentOrBullet(t *testing.T) {
 // branch or an agent exists, so the fleet directory holds exactly one worktree
 // and the operator's checkout holds exactly one run branch.
 func TestARepeatedRequestIDCreatesNoSecondWorktreeBranchOrAgent(t *testing.T) {
-	mux, st, repoPath := gitDispatchFixture(t)
+	mux, st, repoPath := gitDispatchFixtureStandalone(t)
 	const changeID = "add-stripe-webhooks"
 	if err := os.MkdirAll(filepath.Join(repoPath, "openspec", "changes", changeID), 0o755); err != nil {
 		t.Fatal(err)
@@ -451,14 +451,18 @@ func TestConcurrentDispatchesWithOneRequestIDProduceOneRun(t *testing.T) {
 	}
 }
 
-// gitDispatchFixture is dispatchFixture with a real git repository, so a dispatch
-// actually reaches prepareWorktree. dispatchFixture's repos are plain
+// gitDispatchFixtureStandalone is dispatchFixture with a real git repository, so
+// a dispatch actually reaches prepareWorktree. dispatchFixture's repos are plain
 // directories, which the engine refuses to isolate, so no worktree is ever
 // created there and a worktree count would pass vacuously.
 //
 // The repo's factory declares a deterministic gate and no agent phase, so the run
 // completes without spawning an agent CLI that may not be installed.
-func gitDispatchFixture(t *testing.T) (mux http.Handler, st *store.Store, repoPath string) {
+//
+// This variant differs from gitDispatchFixture (in progress_test.go) in that it
+// creates its own temp directory and repo; progress_test.go's version accepts
+// pre-created paths so the test can write spec files before the server starts.
+func gitDispatchFixtureStandalone(t *testing.T) (mux http.Handler, st *store.Store, repoPath string) {
 	t.Helper()
 
 	base := t.TempDir()
