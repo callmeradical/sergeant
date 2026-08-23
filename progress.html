@@ -48,7 +48,8 @@ a{color:var(--muted)}
   <h1>Sergeant v2</h1>
   <p>Independent review. Written by the critic, not the builder.</p>
   <p class="meta">
-    Review 006 · 2026-08-23T04:0xZ · branch <code>v2</code> · head merged · 33 runs recorded
+    Review 007 · 2026-08-23 · branch <code>v2</code> · merge <code>bde2b2d</code> reviewed ·
+    "envelope delivery is durable, retried and idempotent (R5.3, R5.4)"
   </p>
 </header>
 
@@ -57,27 +58,40 @@ a{color:var(--muted)}
   <div class="grid">
     <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code></div></div>
     <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code> whole module</div></div>
-    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">8/8 pass</span></div><div class="small">128 named tests, <code>-count=1</code></div></div>
-    <div class="card"><div class="label">MCP delivery</div><div class="value"><span class="status">fixed</span></div><div class="small">both servers load: 34 + 7 tools</div></div>
-    <div class="card"><div class="label">Install burden</div><div class="value"><span class="status warn">overstated</span></div><div class="small">checker demands 9, v2 uses 5</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">9/9 pass</span></div><div class="small">227 named tests (incl. subtests), <code>-count=1</code></div></div>
+    <div class="card"><div class="label">R5.3 (durable, append-only)</div><div class="value"><span class="status">met</span></div><div class="small">deliveries table, insert-only, verified live</div></div>
+    <div class="card"><div class="label">R5.4 (state/retry/idempotency)</div><div class="value"><span class="status warn">partly met</span></div><div class="small">retry + idempotency real; two required fields absent</div></div>
+    <div class="card"><div class="label">Call-site wiring</div><div class="value"><span class="status">both real</span></div><div class="small">runner.go verified by test; dag/engine.go verified by hand + a throwaway test</div></div>
   </div>
-  <p><strong>Verdict:</strong> both high findings from Review 001 are closed with live evidence, not
-  unit tests alone. The install-prerequisite finding from Review 002 is mitigated but not resolved,
-  because resolving it means deciding v1's future. Two medium items remain open.
-  Not complete, and one decision is outstanding.</p>
+  <p><strong>Verdict:</strong> R5.3 is genuinely met — durability and the append-only history are real,
+  not just claimed. R5.4 is <strong>only partly met</strong>: bounded retry, an application+DB-enforced
+  idempotency key, and explicit states are real and correctly wired at both call sites. But two things
+  R5.4's own text names as required delivery metadata are absent from the actual data: the
+  <code>next_attempt_at</code> column is written for every row and is always <code>NULL</code>, including
+  on <code>retrying</code> rows, contradicting this change's own design doc; and there is no error
+  classification anywhere — only a raw, unclassified error string. Neither is disclosed as deferred in
+  <code>proposal.md</code>'s "out of scope" list, which only defers dead-lettering, an ack protocol, and
+  operator surfaces. This is the "green tests, quietly incomplete requirement" pattern this project has
+  hit before, just one level more subtle than last time: the code that exists is correct, but part of
+  what R5.4 asked for was never written and nothing failing calls that out.</p>
 </section>
 
 <section>
   <h2>What I inspected</h2>
   <table>
     <tr><th>Area</th><th>Method</th></tr>
-    <tr><td>Serving chain for this page</td><td><code>tailscale serve status</code>, <code>lsof</code> on 4387/8787, HTTP fetches</td></tr>
-    <tr><td>Build, vet, test</td><td>Ran all three from a clean tree; vet widened to <code>./...</code>, not just <code>internal/</code></td></tr>
-    <tr><td>Test quality</td><td>Two deliberate mutations, checking that tests fail when behaviour breaks</td></tr>
-    <tr><td>MCP tool reachability</td><td>Spoke JSON-RPC to the built binary and listed tools; resolved <code>mcp.json</code>'s target</td></tr>
-    <tr><td>Intent/bullet lifecycle</td><td>Source search for production callers; counted live rows by status</td></tr>
-    <tr><td>SSE snapshot cost</td><td>Measured bytes on the wire from <code>/api/stream</code></td></tr>
-    <tr><td>OpenSpec state</td><td><code>openspec validate</code> on the remaining open change</td></tr>
+    <tr><td>The merge itself</td><td><code>git show bde2b2d</code>, <code>git diff bde2b2d^1 bde2b2d^2</code> — read the real diff, not the commit message</td></tr>
+    <tr><td>Store-level delivery logic</td><td>Full read of <code>internal/store/delivery.go</code> and <code>delivery_test.go</code> (234 + 409 lines)</td></tr>
+    <tr><td>Runner call site</td><td>Read <code>internal/runner/runner.go</code> around <code>RunAgentPhase</code>; traced <code>deliverErr</code> through to its <code>return</code>; ran <code>TestAgentPhaseRecordsDurableDelivery</code></td></tr>
+    <tr><td>DAG engine call site</td><td>Read <code>internal/dag/engine.go</code>'s <code>RunStage</code>; traced the <code>DeliverEnvelope</code>-wrapped branch's error back to the caller; grepped for existing test coverage of <code>stage.After</code></td></tr>
+    <tr><td>Build / vet / test</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code> from a clean tree</td></tr>
+    <tr><td>Mutation testing (existing tests)</td><td>Disabled the idempotency skip; separately lowered <code>deliveryMaxAttempts</code> to 1; reverted both with <code>git checkout --</code></td></tr>
+    <tr><td>Coverage gap on the untested call site</td><td>Wrote and ran a throwaway test exercising <code>RunStage</code> with <code>stage.After</code> populated and a pre-existing upstream envelope, then deleted it</td></tr>
+    <tr><td><code>next_attempt_at</code> claim</td><td>Wrote and ran a throwaway test querying the raw SQLite column after a retry, then deleted it</td></tr>
+    <tr><td>Error classification</td><td><code>grep -n "class\|Classif" internal/store/delivery.go</code></td></tr>
+    <tr><td>Scope creep check</td><td><code>grep -rln "dead_letter\|DeadLetter\|Quarantine\|Replay"</code> across <code>internal/</code>, <code>cmd/</code></td></tr>
+    <tr><td>"Reuses R2.4's ceiling" claim</td><td>Read <code>config.ResolvedRetries</code> and <code>deliveryMaxAttempts</code>; checked whether the delivery path calls into config at all</td></tr>
+    <tr><td>v1 parity</td><td>Read <code>/Users/lars/Dev/sergeant/bin/_sgt-response-lock.sh</code> and the <code>sgt-msg-*</code> family</td></tr>
   </table>
 </section>
 
@@ -85,256 +99,142 @@ a{color:var(--muted)}
   <h2>Findings</h2>
 
   <div class="item bad">
-    <h3><span class="sev high">high</span> &nbsp; A coordinator crash creates permanently stuck runs (R6.3)</h3>
-    <p>Hit for real this round. The UI server was a child of a shell; an aborted command killed it, and
-    the in-flight run stayed <code>running</code> in the database with nothing executing it.</p>
-    <pre>run rust-newt-taipei      status: running     process: none
-POST /api/run-resume  -> refused: "is running and cannot be resumed"</pre>
-    <p class="small">Resume correctly refuses, because it cannot distinguish a live run from an orphan.
-    So the work was unrecoverable through any supported path — not running, and not resumable. R6.3
-    requires a restarted coordinator to "inspect the durable run and phase records and report the known
-    state"; nothing reconciles on startup.</p>
-    <p class="small"><strong>Worked around, not fixed.</strong> Cancelling first made it resumable, and
-    the run then completed. Sergeant was honest throughout — cancel reported
-    <em>"No in-flight run found on this server; status recorded as cancelled only."</em> The fix is
-    startup reconciliation: on boot, a run marked running that this process is not driving must be
-    moved to a terminal, resumable status. Not yet specified.</p>
-  </div>
+    <h3><span class="sev high">high</span> &nbsp; <code>next_attempt_at</code> is never populated — contradicts this change's own design doc and R5.4's text</h3>
+    <p><code>design.md</code> states plainly: "the delivery transitions to <code>retrying</code> with
+    <code>next_attempt_at</code> set". It is not set. <code>insertDeliveryRow</code>'s <code>INSERT</code>
+    statement never lists the column, on any state, including <code>retrying</code>:</p>
+    <pre>internal/store/delivery.go:99-104
+INSERT INTO deliveries
+ (id, envelope_id, consumer, state, attempt, error, idempotency_key, created_at, updated_at)
+ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              ^ next_attempt_at is a real column; it is not in this list, ever
 
-  <div class="item ok">
-    <h3><span class="sev low">shipped</span> &nbsp; Runs now report progress against their plan</h3>
-    <p>An agent phase used to report <code>running</code> and nothing else for most of a run. Sergeant
-    now seeds <code>.sergeant/plan.json</code> from the resolved change's scenarios before the agent
-    starts, the agent marks items as it works, and the existing change stream carries it.</p>
-    <pre>  ◐ ○ ○ ○ ○   0/5   0m00s  build
-  ● ○ ● ○ ○   2/5  13m01s  running
-  ● ● ● ● ●   5/5  13m08s  passed</pre>
-    <p class="small">Solid circle done, open circle not started, spinner in progress, count beneath. No
-    time estimate is offered, and that is deliberate: across five completed changes, plan size
-    correlates <em>negatively</em> with agent time (r = -0.91) — nine scenarios took 394s while four
-    took 1309s. A percentage bar would have been fabricated.</p>
-    <p class="small">Reported progress cannot change a status.
-    <code>TestFullyReportedPlanDoesNotPassFailedRun</code> holds the line: a fully reported plan beside a
-    failed gate renders as a failed run. Sergeant seeds the file and thereafter only reads it, and
-    resume deliberately does not re-seed, which would overwrite what the agent had reported.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">closed</span> &nbsp; R2.4 — retry policy is explicit and observable</h3>
-    <p class="small">Delivered by goose, the first requirement it has ever completed. <code>retries</code>
-    resolves repository-first then project default then zero, so an omitted field behaves exactly as
-    before. Gates are excluded deliberately: re-running a failed gate until it passes would turn
-    evidence into a lottery. Confirmed to discriminate — forcing the resolver back to a literal zero
-    fails <code>TestEnginePassesResolvedRetriesToAgentPhase</code> and
-    <code>TestEngineUsesRepoRetryOverride</code>.</p>
-  </div>
-
-  <div class="item bad">
-    <h3><span class="sev high">high</span> &nbsp; goose has never worked in v2 — every dispatch to it died before the model saw anything</h3>
-    <p>Found while switching the factory from opencode to goose. <code>BuildAgentCommand</code>
-    produced <code>goose run &lt;prompt&gt;</code>. <code>goose run</code> has no positional text
-    argument.</p>
-    <pre>$ goose run "Create a file named proof.txt containing the word ok"
-error: unexpected argument 'Create a file named proof.txt...' found
-  -> no file created, the prompt never reached the model</pre>
-    <p class="small"><code>ValidateAgent</code> accepts goose, so sergeant would dispatch happily and
-    report an ordinary agent failure. Nothing distinguished a malformed command from a model that
-    failed. Had the 12 remaining requirements been dispatched to goose first, all of them would have
-    failed this way.</p>
-    <p class="small"><strong>Closed in <code>f148859</code>.</strong> Now
-    <code>goose run --no-session --output-format json -t &lt;prompt&gt;</code>. Omitting
-    <code>-s/--interactive</code> matters as much as the <code>-t</code>: goose stays interactive after
-    processing input, so a headless phase would have waited on a terminal that is not there (R2.3).
-    Verified end to end — first successful goose run under sergeant:</p>
-    <pre>agent build  passed  4s     commit 435b7e1, README edited as asked
-code  build  passed  1s
-code  test   passed  5s
-code  vet    passed  0s</pre>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">designed</span> &nbsp; Cost capture — goose already records it, keyed by a column sergeant controls</h3>
-    <p>Costs were not captured anywhere. They do not need to be invented: goose writes per-session
-    usage and cost to <code>~/.local/share/goose/sessions/sessions.db</code>, and the
-    <code>sessions</code> table carries <code>working_dir</code>. Sergeant gives every run its own
-    worktree, so <code>working_dir</code> is a join key onto a run.</p>
-    <pre>sessions: working_dir, total_tokens, input_tokens, output_tokens,
-          accumulated_cost, cache_read_tokens, cache_write_tokens,
-          provider_name, model_config_json
-
-the goose smoke run above, queried by its worktree:
-  tok 15283  in 15263  out 20  cost $0.093  anthropic</pre>
-    <p class="small">This reuses the existing accounting rather than building a second one. tokenmeter
-    already prices spend across tools and tags it by directory pattern; a rule for the fleet root now
-    attributes dispatched work to the project instead of leaving it untagged. Sergeant's own job is to
-    record the measured tokens against the phase — cost is derived from a price table, and inventing
-    one would breach the rule against recording values not derived from stored state.</p>
-    <p class="small"><strong>Not yet implemented in sergeant.</strong> The design is verified against real
-    data; the store does not yet hold a usage record per phase. This is a new requirement, not one of
-    the 39.</p>
-  </div>
-
-  <div class="item bad">
-    <h3><span class="sev high">high</span> &nbsp; Install prerequisites describe v1's toolbelt, and are wrong both ways</h3>
-    <p><code>mise run check</code> declares <strong>9 required</strong> prerequisites. The v2 engine
-    invokes <strong>5</strong>. Derived from every <code>exec.Command</code> call site in
-    <code>internal/</code> and <code>cmd/sergeant/</code>, not from documentation.</p>
-    <pre>v2 actually invokes:   git (11 sites), gh (2), bash (gates),
-                       openspec (dispatch, O3), one agent CLI
-
-required but never invoked by v2:
-  yq        parses YAML in process via gopkg.in/yaml.v3
-  python3   no invocation anywhere
-  sqlite3   embedded via modernc.org/sqlite, no CLI involved
-  lsof      no invocation anywhere
-  td        only a YAML struct field named "td", not a call
-  tmux      no invocation — and forbidden as a factory dependency
-
-required by v2 but NEVER CHECKED:
-  openspec  internal/ui/openspec.go:172 exec.LookPath("openspec")</pre>
-    <p class="small">A user passes the check, having installed six things v2 does not use, then fails at
-    the first dispatch on the one thing nobody told them to install. The checker also lists
-    <strong>tmux as required</strong>, which contradicts both D7 and the operator's standing
-    instruction that tmux is not a factory dependency.</p>
-    <p class="small"><strong>Acted on:</strong> added <code>mise run check:v2</code> verifying exactly the five,
-    and naming the six it does not want so the difference is visible rather than folklore. Added
-    alongside <code>mise run check</code> rather than replacing it, since that task still serves the
-    v1 toolbelt and retiring it belongs to the A1 decision. Evidence: task runs clean, all five present.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">closed</span> &nbsp; The new MCP tools cannot be reached by any client</h3>
-    <p>The native server exposes all 7 tools including the two built for following a run.
-    But <code>mcp.json</code> — the file a client reads — names <code>./bin/sergeant-mcp</code>,
-    <strong>which does not exist</strong>. A client using the documented config starts no server at all.</p>
-    <pre>$ printf '...tools/list...' | sergeant mcp
-   sergeant_status
-   sergeant_get_brief
-   sergeant_run_gates
-   sergeant_emit_envelope
-   sergeant_seal_pr
-   sergeant_run_status      &lt;- new
-   sergeant_run_wait        &lt;- new
-
-$ cat mcp.json  ->  "command": "./bin/sergeant-mcp"
-$ ls -la bin/sergeant-mcp  ->  DOES NOT EXIST</pre>
-    <p class="small">I previously reported this as "MCP follow tools live". That was wrong: live in the
-    binary, dead in the configuration. The gap survived because the tools were verified by running the
-    binary directly — the binary worked, the config did not.</p>
-    <p class="small"><strong>Closed in <code>10a9160</code>.</strong> Fixed additively rather than by swapping:
-    A1's hold protects 34 real v1 tools, so replacing the entry to satisfy a review finding would have
-    discarded them. <code>mcp.json</code> now declares both servers, mise builds both binaries, and
-    <code>TestEveryServerDeclaredInMCPConfigIsBuildable</code> asserts against the configuration rather
-    than the binary. Confirmed to discriminate by adding a server naming a non-existent command.
-    Verified as a client would load it:</p>
-    <pre>sergeant      34 tools
-sergeant-v2    7 tools
-              -> sergeant_run_status
-              -> sergeant_run_wait
-exit 0</pre>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">closed</span> &nbsp; Nothing advances an intent or a bullet, so the primary table is wrong by design</h3>
-    <p>Dispatch now creates intents and bullets (D4). Nothing ever updates them.
-    <code>UpdateIntentStatus</code> and <code>UpdateBulletStatus</code> have no production callers —
-    only their own definitions and tests.</p>
-    <pre>intents:  in_progress 4   satisfied 2     &lt;- the 2 were set by hand, in SQL
-bullets:  pending     4   merged    4     &lt;- the 4 merged were set by hand, in SQL</pre>
-    <p class="small">Worse than the pre-D4 empty table: an empty table was honestly empty, whereas
-    permanently <code>in_progress</code> rows assert something untrue.</p>
-    <p class="small"><strong>Closed.</strong> <code>setTerminal</code> now advances the run's bullets, so a
-    dispatch and a resume share one path. Intent status is <em>derived</em> from its bullets rather than
-    assigned by a run, which makes D6 structural: <code>satisfied</code> needs every bullet at
-    <code>merged</code>, and <code>merged</code> is only reachable from observed PR state. Verified on
-    the live server, not only in unit tests — including the two cases most likely to be wrong:</p>
-    <pre>dispatch then cancel -> run=cancelled  bullet=pending  intent=in_progress
-dispatch that passes -> run=passed     bullet=green    intent=in_progress
-                                                       ^ D6 holds: work done, not delivered</pre>
-    <p class="small">Existing rows were deliberately not backfilled; the defect was the missing transition,
-    and hand-patching again would hide whether the fix works.</p>
+verified live (throwaway test, reverted):
+  state=pending   next_attempt_at=NULL error=""
+  state=retrying  next_attempt_at=NULL error="fail once"
+  state=delivered next_attempt_at=NULL error=""</pre>
+    <p class="small">R5.4's own text requires "lease/next-attempt timestamps" as part of what a delivery
+    record carries. <code>proposal.md</code>'s out-of-scope list defers dead-lettering, the ack protocol,
+    and operator surfaces — it does not defer this field. No test in <code>delivery_test.go</code> asserts
+    on <code>NextAttemptAt</code> at all, so nothing in the merged suite could have caught this. This is
+    not a design tradeoff that was made and documented (the "no sleep between retries" tradeoff in
+    <code>design.md</code> is explicitly documented and reasonable); this is the documented design not
+    matching the shipped code, on a field the requirement names explicitly.</p>
   </div>
 
   <div class="item warn">
-    <h3><span class="sev med">medium</span> &nbsp; The only third-party Go dependency exists solely for the v1 proxy</h3>
-    <p><code>go.mod</code> declared one direct requirement, <code>mark3labs/mcp-go</code>, imported by
-    exactly one file: <code>cmd/sergeant-mcp/main.go</code>, the v1 script proxy.
-    <code>internal/mcp</code> speaks JSON-RPC over <code>encoding/json</code> and needs no MCP library.</p>
-    <pre>with the v1 proxy:      43 modules, direct: mark3labs/mcp-go
-remove it and tidy:     34 modules, direct: yaml.v3 + modernc.org/sqlite
-                        still builds</pre>
-    <p class="small">Also found: <code>go mod tidy</code> had never been run since the v2 engine landed, so
-    <code>sqlite</code> and <code>yaml</code> were marked indirect despite being imported directly.
-    Tidied in <code>c6b9d5a</code>; the graph is unchanged at 43, only the declaration was wrong.
-    The 43&nbsp;&rarr;&nbsp;34 reduction is <em>not</em> performed here: it is a consequence of the A1
-    decision about v1's future, not a cleanup, and doing it silently would pre-empt that call.</p>
+    <h3><span class="sev med">medium</span> &nbsp; No error classification anywhere — only a raw error string</h3>
+    <p>R5.4: "... consumer identity, and error classification." <code>delivery.go</code> has one
+    <code>error TEXT</code> column, populated with <code>lastErr.Error()</code> verbatim. There is no
+    enum, tag, or derived category (transient vs. permanent, I/O vs. validation, etc.) anywhere in the
+    file — confirmed by <code>grep -n "class\|Classif" internal/store/delivery.go</code>, zero hits. A raw
+    message is useful to a human reading the row, but it is not a classification, and nothing computes
+    one. This may be intended to land with bullet 3 (dead-lettering, which needs a "reason" per R5.5), but
+    <code>proposal.md</code> does not say so — it is simply absent from both the proposal's scope and its
+    out-of-scope list.</p>
   </div>
 
   <div class="item warn">
-    <h3><span class="sev med">medium</span> &nbsp; Every SSE snapshot ships 31 KB, most of it prompt text</h3>
-    <p>Measured: <strong>31,304 bytes</strong> for a snapshot at 30 runs. The payload embeds each run's full
-    <code>brief</code>, and briefs here are multi-paragraph agent prompts. Sent on first connect and on
-    every reconnect or unknown-sequence recovery.</p>
-    <p class="small">Correct but it grows without bound with run count, and it is the exact path a flaky
-    connection retries. The run list does not need the brief; the drawer can fetch it per run.</p>
+    <h3><span class="sev med">medium</span> &nbsp; The DAG-engine call site is correctly wired but has zero test coverage in the merged commit</h3>
+    <p>The commit's whole stated reason for existing is closing "green tests coexisting with an unwired
+    production call site" — and it did close that, but only for one of the two call sites it names.
+    <code>TestAgentPhaseRecordsDurableDelivery</code> genuinely exercises <code>runner.RunAgentPhase</code>
+    end to end. No equivalent exists for <code>dag.Engine.RunStage</code>'s <code>DeliverEnvelope</code>-wrapped
+    <code>InjectHandoffToWorktree</code> branch:</p>
+    <pre>grep -rn "\.After\b" internal/dag/*.go internal/config/*.go
+  internal/config/config_test.go:63-64   <- only tests YAML parsing of After
+  internal/dag/engine.go:281             <- for _, upstream := range stage.After (the code under test)
+  (no dag test ever sets stage.After, so this branch never runs in CI)</pre>
+    <p class="small">I wrote a throwaway test (two upstream/downstream repos, a pre-recorded upstream
+    envelope, <code>stage.After = []string{"upstream"}</code>) and confirmed the branch works correctly:
+    the delivery reaches <code>delivered</code>, and the file lands under
+    <code>.sergeant/handoff/upstream/</code> in the downstream worktree. So this is not the CausationID bug
+    recurring — the code is right — but it shipped unverified by anything in the suite, on the exact call
+    site the commit message singles out by name. The next person to touch this branch has no regression
+    test protecting them.</p>
   </div>
 
   <div class="item warn">
-    <h3><span class="sev med">medium</span> &nbsp; The whole working tree is served over the tailnet</h3>
-    <p>This page is served by <code>python3 -m http.server 8787</code> with cwd
-    <code>/Users/lars/Dev/sergeant-v2</code>, proxied by tailscale from <code>:4387</code>.
-    Directory listing is on and source is readable.</p>
-    <pre>/                      -> HTTP 200  (directory listing)
-/internal/ui/server.go -> HTTP 200
-/.git/config           -> HTTP 404  (worktree: .git is a file, not a dir)</pre>
-    <p class="small">Tailnet-only, and no git history is exposed, so this was hygiene rather than an incident.</p>
-    <p class="small"><strong>Closed.</strong> The server now runs from
-    <code>~/.local/share/sergeant-v2/progress/</code>, holding only this page. Verified:</p>
-    <pre>/progress.html         -> HTTP 200
-/                      -> HTTP 200  (this page only)
-/internal/ui/server.go -> HTTP 404
-/mcp.json              -> HTTP 404</pre>
-  </div>
-
-  <div class="item warn">
-    <h3><span class="sev med">medium</span> &nbsp; One OpenSpec change is stuck and cannot archive</h3>
-    <p><code>serve-the-workflow-as-a-graph-definition-per</code> fails validation: no delta specs, no
-    scenarios. Its implementation was merged long ago. The change directory holds only
-    <code>.openspec.yaml</code>.</p>
-    <p class="small">Chain of custody is the stated reason OpenSpec was adopted (§3b). A merged change with no
-    spec is precisely the undocumented work it exists to prevent.</p>
-    <p class="small"><strong>Closed.</strong> Wrote the delta specs, proposal, design and tasks, marked
-    explicitly as retroactive rather than presented as if written before the work. Five scenarios,
-    including the one that actually holds the requirement: adding a gate to configuration must change
-    the served graph with no code change. Backed by the 5 existing tests in
-    <code>internal/ui/workflow_test.go</code>, which pass. Archived, folding its specs into
-    <code>openspec/specs/workflow-graph/</code>.</p>
+    <h3><span class="sev low">low</span> &nbsp; "Reuses the R2.4 retry ceiling" overstates what actually happened</h3>
+    <p>The commit message and <code>design.md</code> both frame <code>deliveryMaxAttempts = 3</code> as
+    reuse of "the retry ceiling already resolved for R2.4 ... rather than inventing a second one."
+    <code>config.Project.ResolvedRetries</code> is a per-project, YAML-configurable value with no fixed
+    default of 3 baked in, and <code>delivery.go</code> never calls it — <code>deliveryMaxAttempts</code>
+    is an independent, hardcoded <code>const</code>. The number happens to coincide with a plausible R2.4
+    value; the mechanism is not shared, and a project that configures R2.4's <code>retries</code> to
+    something other than 2 (giving 3 total attempts) now has two retry ceilings that can silently diverge.
+    Not a functional defect — a second ceiling is a legitimate design choice, just not the one described.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The tests discriminate — checked by mutation, not by reading</h3>
-    <p>Green test suites prove little on their own, so I broke the behaviour and confirmed failure.</p>
-    <pre>mutation 1: add "passed" to ResumableStatuses
-  -> FAIL TestResumeRefusesARunThatAlreadyPassed
-  -> FAIL TestTheDrawerRendersFromWhatTheServerActuallyServes
-
-mutation 2: force phasePassed() to always return false
-  -> FAIL TestResumeSkipsPhasesThatAlreadyPassed
-
-tree restored; go build ./... clean</pre>
-    <p class="small">Both mutations were caught, including one caught by a UI-level test, which indicates the
-    server/client rule really is shared rather than duplicated.</p>
+    <h3><span class="sev low">verified</span> &nbsp; R5.3 — durability and append-only history are real</h3>
+    <p>The <code>deliveries</code> table is genuinely insert-only: no <code>UPDATE</code> statement touches
+    it anywhere in the package. A pending row is provably written before the wrapped attempt resolves —
+    <code>TestDeliveryPendingRowExistsBeforeOutcomeKnown</code> blocks the attempt mid-flight on a channel
+    and reads the row while it is still pending, which is a real concurrency test, not a sequencing
+    assumption. Migration is wired correctly for pre-existing databases via
+    <code>migrateAddTables</code>, confirmed by reading <code>store.go:331-336</code>.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Build, vet and tests are genuinely clean</h3>
-    <pre>go build ./...              clean
-go vet ./...                clean   (whole module, not just internal/)
-go test ./internal/... -count=1
-  config 0.26s  dag 2.64s  handoff 0.31s  mcp 1.12s
-  naming 1.29s  runner 2.80s  store 1.66s  ui 3.72s
-  8/8 ok, 128 named tests passing</pre>
-    <p class="small"><code>internal/mcp</code> has tests for the first time. No package reports "no test files".</p>
+    <h3><span class="sev low">verified</span> &nbsp; Both real call sites are actually wired, not just present in the diff</h3>
+    <p>This is the exact bug class the review brief asked to hunt for again (after the earlier
+    <code>CausationID</code> incident), and it did not recur in the same shape. In
+    <code>runner.go</code>, <code>deliverErr</code> is captured separately from the agent's own
+    <code>lastErr</code> and returned from <code>RunAgentPhase</code> on the success path
+    (<code>runner.go:496-498</code>); that return is not swallowed by <code>dag/engine.go:352-355</code>,
+    which wraps it and returns it up through <code>RunStage</code>. In <code>engine.go</code>, the
+    <code>DeliverEnvelope</code>-wrapped injection's error is returned directly
+    (<code>engine.go:291-295</code>). Neither site discards the error with <code>_ =</code> anymore, and I
+    traced both all the way to their eventual caller rather than stopping at the call site itself.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Retry and idempotency are real, checked by mutation</h3>
+    <pre>mutation 1: comment out the idempotency `if already { return nil }` skip
+  -> FAIL TestDeliveryIdempotencyAfterSuccess
+  -> FAIL TestDeliveryIdempotencyKeyIsDerived
+     (caught via the DB's UNIQUE constraint on idempotency_key, not a clean
+      app-level rejection — the partial unique index is doing real work here)
+
+mutation 2: deliveryMaxAttempts 3 -> 1
+  -> FAIL TestDeliveryHistoryRetainedNotOverwritten
+  -> FAIL TestDeliveryAttemptCountIncrementsWithRetry
+  -> FAIL TestDeliveryRetriesUpToBound
+  -> FAIL TestDeliveryThreeAttemptsShowsFullHistory
+
+tree restored both times; go build ./... clean after each</pre>
+    <p class="small">Worth naming precisely: the idempotency guarantee here protects the <em>record</em> (a
+    second delivery cannot be recorded as delivered twice) via a DB-level partial unique index as backstop
+    behind the application check — described accurately in the code's own comments as closing a
+    check-then-insert race. It does not, by itself, prevent the wrapped <code>attempt()</code> side effect
+    from running twice if two callers raced for the same key before either reached the terminal insert;
+    the second caller's <code>attempt()</code> would still have run before its <code>delivered</code> row
+    is rejected. This is not exploitable today because both real call sites run synchronously,
+    single-goroutine, inside one phase's execution — but it is a latent gap if this mechanism is ever
+    reused by a concurrent caller, and it is worth naming now rather than rediscovering later.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; No scope creep into bullets 3/4</h3>
+    <pre>grep -rln "dead_letter\|DeadLetter\|Quarantine\|Replay" internal/ cmd/
+  -> 0 hits outside the state-vocabulary constant list in delivery.go itself
+no CLI/UI/MCP surface reads the deliveries table</pre>
+    <p class="small">Matches <code>tasks.md</code>: dead-lettering, replay/quarantine, and CLI/UI/MCP
+    operator surfaces are correctly left for bullets 3 and 4. <code>acknowledged</code> is in the state
+    vocabulary but nothing drives a row to it, exactly as <code>proposal.md</code> discloses.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Simpler than v1's mechanism, and a fair simplification for now</h3>
+    <p>v1's <code>_sgt-response-lock.sh</code> gets its idempotency guarantee from an flock'd directory plus
+    an archived proof record matched on response id, gate generation, and applied status — real, but
+    bespoke to one handoff and unqueryable as a set. v2's mechanism is one general table any consumer can
+    use, backed by the same store as everything else, which is the right direction for a Go-native
+    rewrite. v1's <code>sgt-msg-*</code> family (also SQLite-backed) has no retry/backoff/dead-letter
+    concept at all — v2's state machine and bounded retry are new capability relative to v1, not parity
+    work. The design doc's rejection of a background outbox dispatcher for two synchronous, in-process
+    call sites is reasonable and explicitly argued, not just asserted.</p>
   </div>
 </section>
 
@@ -342,154 +242,47 @@ go test ./internal/... -count=1
   <h2>Evidence index</h2>
   <table>
     <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
-    <tr><td>Build and vet clean</td><td><code>go build ./...</code>, <code>go vet ./...</code></td><td>pass</td></tr>
-    <tr><td>Tests pass</td><td><code>go test ./internal/... -count=1</code></td><td>8/8, 128 tests</td></tr>
-    <tr><td>Tests are meaningful</td><td>2 source mutations reverted after</td><td>both caught</td></tr>
-    <tr><td>MCP tools exist</td><td>JSON-RPC <code>tools/list</code> against the binary</td><td>7 tools present</td></tr>
-    <tr><td>MCP tools reachable by a client</td><td>resolve <code>mcp.json</code> command path</td><td><strong>fail — target missing</strong></td></tr>
-    <tr><td>Intent lifecycle advances</td><td>source search for callers; row counts</td><td><strong>fail — no callers</strong></td></tr>
-    <tr><td>Snapshot payload</td><td>byte count from <code>/api/stream</code></td><td>31,304 bytes</td></tr>
-    <tr><td>This page is reachable</td><td>HTTP fetch through the proxy target</td><td>HTTP 200</td></tr>
+    <tr><td>Build/vet/test clean</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 9/9 packages</td></tr>
+    <tr><td>Deliveries are append-only</td><td>read every writer in <code>delivery.go</code></td><td>insert-only, confirmed</td></tr>
+    <tr><td>Pending row precedes outcome</td><td><code>TestDeliveryPendingRowExistsBeforeOutcomeKnown</code>, a real concurrency test</td><td>pass</td></tr>
+    <tr><td>Runner call site wired to its caller</td><td>traced <code>deliverErr</code> return through <code>engine.go:352-355</code></td><td>confirmed, not swallowed</td></tr>
+    <tr><td>DAG engine call site wired to its caller</td><td>read <code>engine.go:291-295</code></td><td>confirmed, not swallowed</td></tr>
+    <tr><td>DAG engine call site actually works</td><td>throwaway test, two-repo handoff, reverted after</td><td>pass — untested in the merged suite, but correct</td></tr>
+    <tr><td>Idempotency mutation</td><td>disabled the skip; reverted</td><td>2 tests failed as expected (via DB constraint)</td></tr>
+    <tr><td>Retry-ceiling mutation</td><td><code>deliveryMaxAttempts</code> 3&rarr;1; reverted</td><td>4 tests failed as expected</td></tr>
+    <tr><td><code>next_attempt_at</code> is populated</td><td>throwaway test reading the raw column after a retry; reverted</td><td><strong>fail — always NULL</strong></td></tr>
+    <tr><td>Error classification exists</td><td><code>grep -n "class\|Classif" delivery.go</code></td><td><strong>fail — 0 hits</strong></td></tr>
+    <tr><td>No scope creep into bullets 3/4</td><td><code>grep -rln "dead_letter\|Quarantine\|Replay"</code></td><td>none found outside the enum</td></tr>
   </table>
 </section>
 
 <section>
-  <h2>Gap analysis — what remains between v1 and v2</h2>
-  <p class="small">Requested this round. Measured against the PRD's own numbered requirements rather
-  than against v1's script list, because D7 states that a v1 capability v2 lacks is
-  <em>unimplemented v2 scope</em>, not a gap to close by calling v1. Parity with v1 is not the target;
-  the PRD is.</p>
-
-  <div class="grid">
-    <div class="card"><div class="label">Numbered requirements</div><div class="value">39</div><div class="small">R1–R7</div></div>
-    <div class="card"><div class="label">Verified unmet</div><div class="value">11</div><div class="small">was 12; R2.4 closed</div></div>
-    <div class="card"><div class="label">v1 scripts</div><div class="value">33</div><div class="small">34 MCP tools wrapping them</div></div>
-    <div class="card"><div class="label">PRD conflicts</div><div class="value"><span class="status warn">2</span></div><div class="small">decisions outran the document</div></div>
-    <div class="card"><div class="label">Factory agent</div><div class="value">goose</div><div class="small">was opencode; goose was broken until <code>f148859</code></div></div>
-    <div class="card"><div class="label">Cost capture</div><div class="value"><span class="status warn">designed</span></div><div class="small">not yet stored per phase</div></div>
-  </div>
-
-  <h3 style="margin-top:26px">The remaining work, largest first</h3>
-
+  <h2>Verdict</h2>
   <div class="item bad">
-    <p><strong>R5 — notification/envelope transport. 7 of 7 unmet, and the single largest block.</strong></p>
-    <p class="small">The PRD asks for typed, versioned, schema-validated, immutable envelopes with
-    <code>envelope_id</code>, <code>schema_version</code>, <code>producer</code>,
-    <code>correlation_id</code>, <code>causation_id</code> and a full reference chain; a delivery state
-    machine over <code>pending / leased / delivered / acknowledged / retrying / failed /
-    dead_letter</code>; bounded retry with backoff and an idempotency key; dead-letter records with
-    auditable replay and quarantine; and CLI, UI and MCP surfaces over that same transport.</p>
-    <pre>required metadata:  ~15 fields + delivery state machine
-EnvelopeRecord has:  ID RunID Repo Stage Summary Artifacts Data CreatedAt
-                     (8 fields, no delivery state at all)
-grep dead_letter|leased|acknowledged in store: 0 hits</pre>
-    <p class="small">This is the v1 messaging family — <code>sgt-msg-send/recv/ack/list</code>,
-    <code>sgt-respond</code>, <code>sgt-ack-response</code>, <code>sgt-callback</code>,
-    <code>sgt-notify</code>, <code>sgt-wake</code> — restated as a durable Go transport. Estimated
-    <strong>4–6 bullets</strong>. Nothing here is started.</p>
+    <p><strong>R5.3: genuinely met.</strong> Append-only, durably persisted before acknowledgement, survives
+    process exit in the sense that matters (it is a committed SQLite row, not in-memory state) — verified
+    by reading every write path and by a real concurrency test, not by trusting the test suite's name.</p>
+    <p><strong>R5.4: only apparently fully met.</strong> State machine, attempt counting, consumer identity,
+    bounded retry, and a derived idempotency key are real and correctly wired at both call sites named in
+    the commit message. But two things R5.4's own sentence requires — lease/next-attempt timestamps and
+    error classification — are not actually produced by the shipped code, and nothing in the 409-line test
+    file would have caught either absence, because nothing asserts on those fields. The green suite proves
+    the parts of R5.4 that were tested, not all of R5.4.</p>
+    <p class="small">Severity-ranked: (1) <code>next_attempt_at</code> always <code>NULL</code>, contradicting
+    the change's own design doc — high, because it is a factual claim in the design doc that is simply
+    false against the shipped code, on a field the requirement names by name; (2) no error classification —
+    medium, plausibly deferred to bullet 3 but not stated as such; (3) the DAG-engine call site's total lack
+    of test coverage — medium, because it is exactly the class of risk this commit exists to close, just not
+    fully closed; (4) the "reuses R2.4's ceiling" claim and the record-level-only idempotency guarantee are
+    both low severity — accurate enough in practice today, worth naming, not worth blocking on.</p>
   </div>
-
-  <div class="item bad">
-    <p><strong>D9 — graphify as a native capability. Not started, and it gates the v1 retirement.</strong></p>
-    <pre>grep graphify in internal/**.go: 0 hits
-config.Project has no Graphify field (block is parsed and discarded)</pre>
-    <p class="small">This is the load-bearing one for A1. Until graphify exists natively, the v1 proxy
-    stays, and with it 9 extra Go modules, 6 spurious install prerequisites, and a D7-violating
-    shell-out path. Estimated <strong>2–3 bullets</strong>.</p>
-  </div>
-
-  <div class="item warn">
-    <p><strong>R4.4 / R4.5 — redaction and content minimisation. Not started.</strong></p>
-    <pre>grep redact|scrub|secret in internal/**.go: 0 hits</pre>
-    <p class="small">The PRD says redaction and retention "must be defined before production release",
-    so this is a release gate rather than a nice-to-have. Related evidence from Review 002: the SSE
-    snapshot ships every run's full brief, 31&nbsp;KB, which is exactly the
-    operational-metadata-versus-content distinction R4.5 asks for. Estimated
-    <strong>1–2 bullets</strong>.</p>
-  </div>
-
-  <div class="item warn">
-    <p><strong>R3.5 — human approval for authorising gates. Not started.</strong></p>
-    <pre>grep approval|awaiting_approval in internal/**.go: 0 hits</pre>
-    <p class="small">D5 names three legitimate interruptions: a plan awaiting approval, a blocked bullet,
-    and a bullet ready for an irreversible step. Only "blocked" is observable today, and only because a
-    run fails. Estimated <strong>2 bullets</strong>.</p>
-  </div>
-
-  <div class="item warn">
-    <p><strong>R2.4 — retry policy explicit and observable. Effectively unmet.</strong></p>
-    <pre>internal/dag/engine.go:310  pr.RunAgentPhase(ctx, phase, prompt, 0)
-                                                            ^ hardcoded
-no retry field in the project config schema</pre>
-    <p class="small">The parameter exists and is always zero. Estimated <strong>1 bullet</strong>.</p>
-  </div>
-
-  <h3 style="margin-top:26px">PRD conflicts — the document no longer matches the decisions</h3>
-
-  <div class="item warn">
-    <p><strong>R2.4 says every agent phase is "bounded by a strict timeout". It is not, deliberately.</strong></p>
-    <pre>docs/prd-sergeant-v2.md:346  "bounded by a strict timeout"
-internal/runner/runner.go:72  DefaultAgentTimeout = 0</pre>
-    <p class="small">The default was removed on purpose, after a 10-minute default killed a run that had
-    already committed passing work. The decision is right and the PRD is stale. A binding document that
-    contradicts the code trains people to ignore it.</p>
-  </div>
-
-  <div class="item warn">
-    <p><strong>R7.3 says the embedded UI can "refine supported project configuration". That was removed.</strong></p>
-    <p class="small">The dashboard is observation-only now; project YAML is edited in an editor. The
-    <code>/api/refine-project</code> endpoint still exists, so the capability is not gone, but the
-    requirement as written is false.</p>
-  </div>
-
-  <h3 style="margin-top:26px">v1 capabilities that are genuinely out of scope</h3>
-  <p class="small">Not every one of the 33 scripts is a gap. <code>sgt-td-*</code>,
-  <code>sgt-treehouse-init</code> and <code>sgt-no-mistakes-finding</code> integrate separate external
-  tools. <code>sgt-interactive-worker</code> is a tmux concept that D1's agent-driven path replaces
-  rather than reimplements — and tmux is excluded as a factory dependency. <code>sgt-drain</code> /
-  <code>sgt-undrain</code> pause a queue v2 does not have, since measured concurrency has never
-  exceeded one.</p>
-
-  <div class="item">
-    <p><strong>Total estimate: 10–14 bullets</strong>, of which R5 is roughly half. Plus one document
-    reconciliation pass and one owner decision (A1).</p>
-    <p class="small">Stated as bullets rather than time, because bullet size is the unit this factory
-    actually delivers in. Recent bullets have run 25s to 22min of agent time each, plus review. The
-    estimate covers reaching the PRD as written, not parity with v1.</p>
-  </div>
-</section>
-
-<section>
-  <h2>Blockers</h2>
-  <div class="item warn">
-    <p><strong>One decision outstanding: A1 / <code>td-ccc18b</code>.</strong> No longer blocking
-    delivery — the native tools are reachable as of <code>10a9160</code> without touching the hold.
-    It now blocks three cleanups that all reduce to the same question: does v1 stay?</p>
-    <p class="small">Cost of holding, measured: 9 extra modules in the Go graph, 6 spurious required
-    install prerequisites including tmux, and a shell-out path D7 forbids. Benefit of holding: 34
-    working tools that have no native replacement until graphify lands. I am not making this call.</p>
-  </div>
-</section>
-
-<section>
-  <h2>Next action</h2>
-  <p>Blocked on an owner decision, then in severity order:</p>
-  <div class="item warn"><strong>Decision needed — A1 / <code>td-ccc18b</code>.</strong>
-  <span class="small">The hold on moving off the v1 proxy now has a measured price on three axes:
-  it keeps a D7-violating shell-out path, it is the sole source of the third-party Go dependency
-  surface (43 modules against 34), and it is why the install checker still demands six tools v2
-  never runs. Keeping the hold is defensible — the proxy really does provide 34 working tools.
-  It should be a decision with the cost in view, not an oversight.</span></div>
-  <div class="item"><strong>1. Drop <code>brief</code> from the stream snapshot</strong>
-  <span class="small">and fetch it per run in the drawer. 31 KB per reconnect, growing with run count.</span></div>
-  <div class="item"><strong>2. Decide whether <code>mise run check</code> becomes v2's.</strong>
-  <span class="small"><code>check:v2</code> exists alongside it. Merging them means deciding v1's fate,
-  which is the same A1 call.</span></div>
 </section>
 
 <footer>
-  <p class="meta">Review 006 · findings above are reproduced from commands run against
-  <code>e0b4657</code> · no completion is claimed for any item lacking build or test evidence.</p>
+  <p class="meta">Review 007 · findings above are reproduced from commands run against <code>bde2b2d</code>
+  (merge) / <code>5289d83</code> (feature commit) · two throwaway verification tests were written, run, and
+  deleted; the working tree was confirmed clean (<code>git status --short</code>) before and after every
+  mutation.</p>
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
