@@ -2,6 +2,7 @@ package graphify
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -274,6 +275,50 @@ func TestBuildNeverLeavesOutputInAPartialState(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(output, "graph.json")); err != nil {
 		t.Errorf("expected graph.json to exist after publish: %v", err)
+	}
+}
+
+// TestPublishFailureRestoresPriorGraph is a regression for Review 012: the
+// original publish sequence deleted Output before confirming the rename of
+// the new graph into place succeeded, so a rename failure destroyed the
+// prior graph with nothing to restore it. This forces that rename to fail
+// (via the renamePublish seam, since real cross-filesystem rename failures
+// aren't reliably reproducible on a single-volume test machine) and asserts
+// the prior graph survives intact — matching v1 sgt-graphify's backup/
+// restore guarantee.
+func TestPublishFailureRestoresPriorGraph(t *testing.T) {
+	repo := newTestRepo(t, "svc", "main.go", "package main\nfunc main() {}\n")
+	output := filepath.Join(t.TempDir(), "published")
+	proj := &config.Project{
+		Name:     "publish-failure",
+		Repos:    map[string]config.Repo{"svc": {Path: repo}},
+		Graphify: &config.Graphify{Output: output},
+	}
+
+	if err := BuildProjectGraph(proj); err != nil {
+		t.Fatalf("seeding initial build: %v", err)
+	}
+	priorGraph, err := os.ReadFile(filepath.Join(output, "graph.json"))
+	if err != nil {
+		t.Fatalf("reading seeded graph: %v", err)
+	}
+
+	orig := renamePublish
+	renamePublish = func(oldpath, newpath string) error {
+		return errors.New("simulated rename failure (e.g. disk full, cross-device)")
+	}
+	defer func() { renamePublish = orig }()
+
+	if err := BuildProjectGraph(proj); err == nil {
+		t.Fatal("expected BuildProjectGraph to return an error when the publish rename fails")
+	}
+
+	restoredGraph, err := os.ReadFile(filepath.Join(output, "graph.json"))
+	if err != nil {
+		t.Fatalf("Output is missing after a failed publish — the prior graph was not restored: %v", err)
+	}
+	if string(restoredGraph) != string(priorGraph) {
+		t.Error("Output's content changed after a failed publish — the prior graph was not correctly restored")
 	}
 }
 

@@ -26,10 +26,16 @@ var runCommand = func(name string, args ...string) ([]byte, error) {
 }
 
 // publishHook, when non-nil, runs immediately before BuildProjectGraph
-// removes any prior Output and renames the scratch directory into place.
+// backs up any prior Output and renames the scratch directory into place.
 // Tests use it to pause a build mid-flight and assert Output is still fully
 // readable under the prior graph until the rename actually happens.
 var publishHook func()
+
+// renamePublish performs the final scratch-into-Output rename. It is a
+// package variable so a test can force this specific rename to fail (e.g. a
+// disk-full or permission error partway through publish) without needing a
+// real cross-filesystem boundary, to prove the prior graph survives.
+var renamePublish = os.Rename
 
 // BuildProjectGraph builds a graph for each participating repository in
 // proj, merges them into one cross-repository graph, and publishes the
@@ -109,11 +115,35 @@ func BuildProjectGraph(proj *config.Project) error {
 		publishHook()
 	}
 
-	if err := os.RemoveAll(proj.Graphify.Output); err != nil {
-		return fmt.Errorf("removing prior output at %s: %w", proj.Graphify.Output, err)
+	// Publish via move-aside, move-in, remove — matching v1's sgt-graphify
+	// crash-safety guarantee, ported rather than reinvented (its trap-based
+	// backup/restore mechanism does the same two same-filesystem renames with
+	// an inline rollback if the second one fails). Deleting the prior output
+	// before the new one is confirmed in place (the previous version of this
+	// function) meant a failed rename destroyed the prior graph with nothing
+	// to restore — masked on this machine only because APFS firmlinks put
+	// scratch and Output on the same volume, so the rename itself rarely
+	// fails; it is not masked in general.
+	output := proj.Graphify.Output
+	var backup string
+	if _, err := os.Stat(output); err == nil {
+		backup = filepath.Join(filepath.Dir(output), fmt.Sprintf(".sergeant-graphify-old-%d", time.Now().UnixNano()))
+		if err := os.Rename(output, backup); err != nil {
+			return fmt.Errorf("backing up prior output before publish: %w", err)
+		}
 	}
-	if err := os.Rename(scratch, proj.Graphify.Output); err != nil {
-		return fmt.Errorf("publishing graph to %s: %w", proj.Graphify.Output, err)
+	if err := renamePublish(scratch, output); err != nil {
+		if backup != "" {
+			// Best-effort restore, matching v1's inline recovery on the
+			// failed second mv — if this also fails there is nothing further
+			// to do, but the backup directory itself is left on disk rather
+			// than removed, so it is not silently lost.
+			_ = os.Rename(backup, output)
+		}
+		return fmt.Errorf("publishing graph to %s: %w", output, err)
+	}
+	if backup != "" {
+		_ = os.RemoveAll(backup)
 	}
 
 	return nil
