@@ -807,14 +807,25 @@ func causationIDValue(p *string) string {
 	return *p
 }
 
-// isDuplicateEnvelopeID reports whether err is a UNIQUE constraint violation on
-// envelopes.id rather than some other constraint.
+// isDuplicateEnvelopeID reports whether err is a constraint violation on
+// envelopes.id (its PRIMARY KEY) rather than some other constraint.
+//
+// envelopes.id is TEXT PRIMARY KEY, not a separate UNIQUE index, so a
+// duplicate insert raises SQLITE_CONSTRAINT_PRIMARYKEY (1555), not
+// SQLITE_CONSTRAINT_UNIQUE (2067) — checking only the latter (as this
+// function originally did) meant it never matched a real duplicate-id
+// insert, silently making ErrDuplicateEnvelopeID unreachable. Republication
+// was still refused either way, because the raw INSERT itself fails
+// regardless of how this classifier reads the error; the bug was that no
+// caller checking errors.Is(err, ErrDuplicateEnvelopeID) could ever see it.
 func isDuplicateEnvelopeID(err error) bool {
 	var se *sqlite.Error
 	if !errors.As(err, &se) {
 		return false
 	}
-	if se.Code() != sqlite3.SQLITE_CONSTRAINT_UNIQUE {
+	switch se.Code() {
+	case sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY, sqlite3.SQLITE_CONSTRAINT_UNIQUE:
+	default:
 		return false
 	}
 	return strings.Contains(se.Error(), "envelopes.id")

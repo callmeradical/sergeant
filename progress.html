@@ -48,60 +48,64 @@ a{color:var(--muted)}
   <h1>Sergeant v2</h1>
   <p>Independent review. Written by the critic, not the builder.</p>
   <p class="meta">
-    Review 010 · 2026-08-23 · branch <code>v2</code> · merge <code>806fb07</code> reviewed
-    (feature commit <code>9ad0ea7</code> onto <code>b957866</code>) ·
-    "dashboard shows delivery history and quarantine (R5.6)" · bullet 4 of 4, closes R5
+    Review 011 · 2026-08-23 · branch <code>v2</code> · merge <code>8e1c5e8</code> reviewed
+    (feature commit <code>5c2a1a2</code> onto <code>33ba588</code>) ·
+    "envelopes are typed, versioned and correlated (R5.1, R5.2, R5.7)" · bullet 1 of 4 —
+    the last of R5's four bullets to receive independent review, closing that gap
   </p>
 </header>
 
 <section>
   <h2>Current status</h2>
   <div class="grid">
-    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code></div></div>
-    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code> whole module</div></div>
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at <code>8e1c5e8</code>, scratch worktree</div></div>
+    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code>, whole module</div></div>
     <div class="card"><div class="label">Tests</div><div class="value"><span class="status">9/9 pass</span></div><div class="small"><code>go test ./internal/... -count=1</code>, all packages green</div></div>
-    <div class="card"><div class="label">R5.6 (dashboard delivery history/quarantine)</div><div class="value"><span class="status">genuinely met</span></div><div class="small">all 6 spec scenarios map to real, correct behavior</div></div>
-    <div class="card"><div class="label">Quarantine guard</div><div class="value"><span class="status">not duplicated</span></div><div class="small">mutation-tested myself; bypassing the store error broke the refusal test</div></div>
-    <div class="card"><div class="label">R5 overall (R5.1&ndash;R5.7)</div><div class="value"><span class="status warn">3 of 4 bullets independently reviewed</span></div><div class="small">bullet 1 (R5.1/R5.2/R5.7) has no recorded critic review</div></div>
+    <div class="card"><div class="label">Unwired call site (Review 007's bug shape)</div><div class="value"><span class="status">not found here</span></div><div class="small">all 4 real <code>RecordEnvelope</code> call sites correctly set correlation/causation</div></div>
+    <div class="card"><div class="label">Immutability guard</div><div class="value"><span class="status">real</span></div><div class="small">mutation-tested myself: swapping <code>INSERT</code> for <code>INSERT OR REPLACE</code> broke the refusal test</div></div>
+    <div class="card"><div class="label">Duplicate-id error classification</div><div class="value"><span class="status warn">broken, but silent</span></div><div class="small"><code>isDuplicateEnvelopeID</code> never actually fires — still present in current <code>v2</code> HEAD</div></div>
+    <div class="card"><div class="label">R5.1/R5.2/R5.7</div><div class="value"><span class="status">genuinely met</span></div><div class="small">with two non-blocking findings below</div></div>
+    <div class="card"><div class="label">R5 overall (all 4 bullets)</div><div class="value"><span class="status warn">now fully independently reviewed, not fully clean</span></div><div class="small">R5.4's Review 007 gap stands; this review adds one new low-impact defect</div></div>
   </div>
-  <p><strong>Verdict:</strong> R5.6 is <strong>genuinely met</strong>. <code>ListDeliveriesForRun</code> is a
-  correct <code>INNER JOIN</code> against <code>envelopes</code> filtered by <code>run_id</code>, sharing a new
-  <code>scanDeliveryRow</code> helper with the pre-existing <code>ListDeliveryHistory</code> exactly as
-  design.md specifies; it returns a non-nil empty slice, confirmed at both the store and handler layers and by
-  a test that decodes the actual HTTP JSON body rather than only inspecting the Go slice.
-  <code>handleDeliveryQuarantine</code> is a genuinely thin transport: it calls
-  <code>Store.QuarantineDelivery</code> once, does no pre-check of its own, and forwards the guard's own error
-  text with <code>409</code> instead of a generic <code>500</code>. I mutation-tested this myself by making the
-  handler swallow the store's error and confirmed
-  <code>TestDeliveryQuarantineRefusesNonDeadLetteredDelivery</code> failed exactly as predicted (a
-  non-dead-lettered delivery was silently quarantined), then reverted with <code>git checkout --</code>. The
-  claimed <code>getJSON</code>/<code>getJSONResponse</code> rename is real and leaves no collision. Scope
-  discipline holds: no replay endpoint, no MCP changes, <code>internal/mcp/server.go</code> untouched by the
-  diff. The dashboard wiring is real, not a dead function &mdash; <code>fetchDeliveryHistory</code> is called
-  from <code>selectRun</code> on every run selection, not only when the drawer happens to be open. One
-  pre-existing, non-blocking frontend weakness is noted below, and one process gap in the wider R5 arc is
-  significant enough to note in the overall verdict at the end of this review.</p>
+  <p><strong>Verdict:</strong> R5.1, R5.2 and R5.7 are <strong>genuinely met</strong>. This review exists
+  specifically to hunt for the failure shape Review 007 found in bullet 2 — a store-level implementation
+  that is correct in its own unit tests while a real production call site never actually wires the field.
+  <strong>That exact bug does not recur here.</strong> I read the diff for every one of the four real,
+  non-test call sites that publish an envelope in this codebase as of this commit
+  (<code>internal/mcp/server.go</code>'s <code>sergeant_emit_envelope</code> tool,
+  <code>internal/runner/runner.go</code>'s <code>RunAgentPhase</code>,
+  and <code>internal/ui/server.go</code>'s <code>handleCreatePR</code> and delivery-envelope write in
+  <code>executeRun</code>), and all four set <code>CorrelationID</code> to the run id and
+  <code>CausationID</code> to <code>Store.CausationFromLatest(runID, repo)</code> — a real lookup of the
+  previously published envelope for that run/repo, called before the new envelope is recorded, not a
+  hand-built test fixture. Immutability and the additive migration are both real and independently
+  confirmed by tests I ran myself, and by one mutation I applied and reverted. I did, however, find a
+  different real defect in the same "claims to do X, doesn't actually do X, nothing currently notices"
+  family: the duplicate-id error classifier checks the wrong SQLite extended error code and can never
+  actually match, detailed below. It does not break the immutability guarantee itself (the underlying
+  <code>INSERT</code> still fails and <code>RecordEnvelope</code> still returns a non-nil error), so R5.1's
+  required behavior holds — but the sentinel error the code claims to return is dead code, silently, and
+  the bug is still present in current <code>v2</code> HEAD.</p>
 </section>
 
 <section>
   <h2>What I inspected</h2>
   <table>
     <tr><th>Area</th><th>Method</th></tr>
-    <tr><td>The merge itself</td><td><code>git show 806fb07</code>, <code>git diff 806fb07^1 806fb07^2</code> &mdash; read the real diff (5 files, 528 insertions), not the commit message</td></tr>
-    <tr><td>Governing docs</td><td>Read <code>docs/prd-sergeant-v2.md</code> R5.6 text, and the full <code>proposal.md</code>/<code>design.md</code>/<code>tasks.md</code>/<code>specs/delivery-surfaces/spec.md</code> under <code>openspec/changes/dashboard-shows-delivery-history-and-quarantine/</code></td></tr>
-    <tr><td><code>ListDeliveriesForRun</code></td><td>Read the SQL directly in <code>internal/store/delivery.go</code>: <code>JOIN envelopes e ON e.id = d.envelope_id WHERE e.run_id = ?</code>, ordered <code>created_at ASC, id ASC</code>, initialized as <code>list := []DeliveryRecord{}</code> before the scan loop</td></tr>
-    <tr><td>Orphan-row risk on the join</td><td>Checked whether any code path deletes an envelope without deleting its run: only <code>Store.DeleteRun</code> deletes envelopes (by <code>run_id</code>), and it deletes the run row itself in the same call &mdash; the run this endpoint would be queried for no longer exists either, so the join cannot silently drop reachable rows. Deliveries are not deleted by <code>DeleteRun</code>, an existing gap unrelated to this diff.</td></tr>
-    <tr><td><code>scanDeliveryRow</code> sharing</td><td>Confirmed both <code>ListDeliveryHistory</code> and <code>ListDeliveriesForRun</code> now call the same extracted helper for the 12-column scan, replacing <code>ListDeliveryHistory</code>'s previously inline scan</td></tr>
-    <tr><td><code>handleDeliveryHistory</code> / <code>handleDeliveryQuarantine</code></td><td>Read both handlers directly in <code>internal/ui/server.go</code>; confirmed the quarantine handler has no guard logic of its own beyond required-field presence, and forwards <code>Store.QuarantineDelivery</code>'s error verbatim with <code>http.StatusConflict</code></td></tr>
-    <tr><td>Own mutation test</td><td>Edited <code>handleDeliveryQuarantine</code> to discard the store's error (<code>_ = err</code>) instead of returning it; ran <code>TestDeliveryQuarantineRefusesNonDeadLetteredDelivery</code>; confirmed it failed with <code>status = 200, want a refusal</code>; reverted with <code>git checkout -- internal/ui/server.go</code>; confirmed a clean tree</td></tr>
-    <tr><td>Empty-result behavior</td><td>Read <code>ListDeliveriesForRun</code>'s <code>list := []DeliveryRecord{}</code> initialization, <code>handleDeliveryHistory</code>'s redundant nil-guard, and <code>TestListDeliveriesForRunEmptyWhenNoDeliveries</code> (Go-level, asserts non-nil) &mdash; no test decodes the HTTP body for the zero-delivery case specifically, though the non-zero case's test does decode real JSON</td></tr>
-    <tr><td><code>getJSON</code> collision claim</td><td><code>grep -rn "func getJSON\b\|func getJSONResponse\|func postJSON"</code> across <code>internal/ui/*_test.go</code>: <code>getJSON</code> (4-arg, <code>fleet_paths_test.go:110</code>, pre-existing) and <code>getJSONResponse</code> (1-arg, <code>server_test.go:857</code>, new) coexist with no name collision and no leftover references to a renamed identifier</td></tr>
-    <tr><td>Frontend escaping</td><td>Read <code>deliveryRowHTML</code>/<code>deliveriesHTML</code> in <code>internal/ui/static/index.html</code>: every interpolated value (<code>look.label</code>, <code>created_at</code>, <code>consumer</code>, <code>attempt</code>, <code>error</code>, <code>error_class</code>, <code>recovery_instructions</code>) passes through <code>escapeHTML</code>/<code>escapeAttr</code>, matching <code>activityHTML</code>'s convention</td></tr>
-    <tr><td>Quarantine button wiring</td><td>Confirmed <code>onclick="quarantineDelivery('${escapeAttr(d.envelope_id)}', '${escapeAttr(d.consumer)}')"</code> passes both required arguments, and <code>quarantineDelivery</code> POSTs <code>{envelope_id, consumer, reason}</code> matching the handler's expected body exactly</td></tr>
-    <tr><td>Fetch-on-open, not a dead function</td><td>Traced <code>fetchDeliveryHistory</code>'s only call site: <code>selectRun(runId)</code>, called whenever a run is selected, alongside <code>renderActivity(data.envelopes)</code> &mdash; not gated behind the drawer being open, so drawer data is always current when opened</td></tr>
-    <tr><td>Scope discipline</td><td><code>git diff 806fb07^1 806fb07^2 --stat --name-only</code>: only <code>internal/store/delivery.go</code>, <code>internal/store/delivery_test.go</code>, <code>internal/ui/server.go</code>, <code>internal/ui/server_test.go</code>, <code>internal/ui/static/index.html</code>; grepped the diff for "replay": appears only in explanatory comments, never a new route or function call; <code>internal/mcp/</code> has zero lines in the diff</td></tr>
-    <tr><td>Build / vet / test</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code> from a clean tree</td></tr>
-    <tr><td>R5 arc history</td><td><code>git log --oneline --merges | grep R5</code> to enumerate all 4 bullets; <code>git log -p --all -- progress.html | grep</code> for any prior mention of bullet 1 (<code>8e1c5e8</code>, R5.1/R5.2/R5.7) &mdash; none found in the file's entire history</td></tr>
+    <tr><td>The merge itself</td><td><code>git show 8e1c5e8</code>, <code>git diff 8e1c5e8^1 8e1c5e8^2</code> — read the real diff (7 files, 876 insertions), not the commit message</td></tr>
+    <tr><td>Governing docs</td><td>Read the full <code>proposal.md</code>/<code>design.md</code>/<code>tasks.md</code>/<code>specs/envelope-schema/spec.md</code> under <code>openspec/changes/envelopes-are-typed-versioned-and-correlated/</code>, plus the PRD's R5.1/R5.2/R5.7 text and the "Notification and envelope transport" abstraction section</td></tr>
+    <tr><td>Every real <code>RecordEnvelope</code> call site</td><td><code>git grep -n "RecordEnvelope(" 8e1c5e8 -- '*.go' | grep -v _test.go</code>: exactly 4 non-test call sites (<code>mcp/server.go</code>, <code>runner.go</code>, <code>ui/server.go</code> ×2). Read each diff hunk directly</td></tr>
+    <tr><td><code>CorrelationID</code>/<code>CausationID</code> wiring</td><td>Confirmed each of the 4 sites sets <code>CorrelationID: runID</code> (or equivalent run-id variable) and <code>CausationID: Store.CausationFromLatest(runID, repo)</code>, called before <code>RecordEnvelope</code>, not after</td></tr>
+    <tr><td><code>GetLatestEnvelope</code> pre-existence</td><td><code>git show 8e1c5e8^1:internal/store/store.go | grep -n "func (s \*Store) GetLatestEnvelope"</code>: the function already existed before this commit (this commit only changed its internals to use the new shared <code>scanEnvelope</code> helper and the wider <code>envelopeColumns</code> select list). It is used by this same commit's own <code>CausationFromLatest</code> and by pre-existing UI code</td></tr>
+    <tr><td>Immutability, mutation-tested</td><td>In a scratch worktree at <code>8e1c5e8</code>, changed <code>INSERT INTO envelopes</code> to <code>INSERT OR REPLACE INTO envelopes</code>, reran <code>TestRecordEnvelopeRefusesRepublishOfExistingID</code>, confirmed it failed exactly as predicted, then <code>git checkout -- internal/store/store.go</code> and confirmed a clean tree and a rebuild</td></tr>
+    <tr><td>Duplicate-id classification, empirically</td><td>Wrote a standalone Go program against <code>modernc.org/sqlite</code> to insert a duplicate value into a <code>TEXT PRIMARY KEY</code> column and print the driver's extended error code: got <code>1555</code> (<code>SQLITE_CONSTRAINT_PRIMARYKEY</code>), not <code>2067</code> (<code>SQLITE_CONSTRAINT_UNIQUE</code>) — the code <code>isDuplicateEnvelopeID</code> actually checks for. Then added a throwaway probe test in the store package that calls <code>RecordEnvelope</code> twice with the same id and asserts <code>errors.Is(err, ErrDuplicateEnvelopeID)</code>: it is <strong>false</strong>. Removed the probe file afterward</td></tr>
+    <tr><td>Whether the classification bug is consumed anywhere</td><td><code>grep -rn "ErrDuplicateEnvelopeID" --include='*.go' .</code> against both the <code>8e1c5e8</code> worktree and current <code>v2</code> HEAD: only the declaration and the one (unreachable) wrapping site, no <code>errors.Is</code> caller anywhere in either tree</td></tr>
+    <tr><td>Whether the bug still exists in current <code>v2</code> HEAD</td><td>Read <code>internal/store/store.go</code> at current HEAD directly: <code>isDuplicateEnvelopeID</code> (line ~812) still checks <code>se.Code() != sqlite3.SQLITE_CONSTRAINT_UNIQUE</code>, unchanged since introduction; <code>git log -p --follow -- internal/store/store.go | grep</code> found no later commit touching it</td></tr>
+    <tr><td>Additive migration</td><td>Read <code>migrateAddColumns</code>'s 8 new <code>ALTER TABLE envelopes ADD COLUMN</code> entries (all <code>PRAGMA</code>-guarded via <code>hasColumn</code>); ran the existing <code>TestEnvelopeColumnsAddedOnReopen</code> (drops and recreates a pre-change <code>envelopes</code> table, reopens, asserts all 8 columns exist) and <code>TestOlderEnvelopeReadsBackWithEmptyType</code> (seeds a raw pre-migration row, reopens, asserts <code>Type == ""</code> and no read error) — both pass</td></tr>
+    <tr><td><code>CausationID</code> absent-vs-empty</td><td>Read the field (<code>*string</code>, nullable DB column), <code>causationIDValue</code>/<code>nullableText</code> (nil pointer → <code>""</code> → SQL <code>NULL</code>), and <code>scanEnvelope</code> (NULL → nil pointer). Ran <code>TestRecordEnvelopeFirstEnvelopeHasNoCausationID</code> and <code>TestOlderEnvelopeNullCausationIDIsNil</code> — both pass. Noted the one disclosed, non-manifesting edge case below</td></tr>
+    <tr><td>Test-level coverage of the 4 call sites specifically</td><td><code>runner_test.go</code> adds <code>TestAgentPhaseEnvelopesChainCausation</code>, whose own comment states it exists "because the store-level plumbing can be correct while every real call site still leaves <code>CausationID</code> nil" — exercises <code>RunAgentPhase</code> itself. No equivalent call-site-level test exists for the MCP <code>emit_envelope</code> tool (no <code>internal/mcp/server_test.go</code> file exists at this commit at all) or for either <code>ui/server.go</code> site</td></tr>
+    <tr><td>R5.1's full reference list vs. what shipped</td><td>R5.1 names <code>factory_id</code>, <code>project_id</code>, <code>repo_id</code>, <code>run_id</code>, <code>phase_id</code>, <code>assignment_id</code> "where applicable." Only <code>PhaseID</code> was added; <code>RunID</code>/<code>Repo</code> pre-existed. <code>grep -n "FactoryID\|type FactoryRecord\|AssignmentID\|ProjectID" internal/store/store.go</code>: zero hits anywhere in the store, at this commit or current HEAD — none of those three are modeled as first-class ID'd entities anywhere in this codebase, not only in this bullet</td></tr>
+    <tr><td>Build / vet / test</td><td><code>go build ./... && go vet ./... && go test ./internal/... -count=1</code> from a clean scratch worktree at <code>8e1c5e8</code>, created with <code>git worktree add /tmp/review-8e1c5e8 8e1c5e8</code> and removed with <code>git worktree remove /tmp/review-8e1c5e8 --force</code> afterward</td></tr>
   </table>
 </section>
 
@@ -109,119 +113,121 @@ a{color:var(--muted)}
   <h2>Findings</h2>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The join is correctly run-scoped and cannot silently drop reachable rows</h3>
-    <p><code>ListDeliveriesForRun</code>'s SQL is <code>SELECT ... FROM deliveries d JOIN envelopes e ON e.id =
-    d.envelope_id WHERE e.run_id = ?</code>. This is an <code>INNER JOIN</code>, which in principle could drop
-    a delivery whose envelope was deleted. I checked: the only code that deletes envelopes is
-    <code>Store.DeleteRun</code>, and it deletes the <code>runs</code> row in the same call &mdash; so by the
-    time an envelope for a given run could be gone, that run id is no longer a valid argument to this endpoint
-    either. There is no path that deletes an envelope while leaving its run queryable. (Deliveries themselves
-    are not deleted by <code>DeleteRun</code>, leaving orphaned delivery rows behind after a run deletion, but
-    that is a pre-existing gap in <code>DeleteRun</code>, not introduced or worsened by this diff, and it does
-    not affect this endpoint's correctness for any run that still exists.) The multi-envelope,
-    multi-consumer test (<code>TestListDeliveriesForRunReturnsAcrossEnvelopesAndConsumers</code>) genuinely
-    creates two distinct envelopes and two distinct consumers and asserts both are present, not a single
-    envelope queried twice under different consumer labels.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The unwired-call-site bug from Review 007 does not recur here</h3>
+    <p>This is the headline question this review exists to answer. All 4 real, non-test call sites that
+    publish an envelope in this codebase — <code>internal/mcp/server.go</code>'s <code>emit_envelope</code>
+    tool, <code>internal/runner/runner.go</code>'s <code>RunAgentPhase</code>, and
+    <code>internal/ui/server.go</code>'s <code>handleCreatePR</code> and the delivery envelope in
+    <code>executeRun</code> — set <code>CorrelationID</code> to the run id and <code>CausationID</code> to
+    <code>Store.CausationFromLatest(runID, repo)</code>, a genuine store lookup called immediately before
+    each envelope is built, not a value only ever set in a hand-constructed test record. This is exactly the
+    class of gap Review 007 found in bullet 2 (a real field that store-level tests covered but every
+    production call site left unset); it is not present in this bullet.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The quarantine guard is not duplicated or bypassed at the API layer, confirmed by my own mutation</h3>
-    <p><code>handleDeliveryQuarantine</code> decodes the request body, checks only for the three required
-    fields being non-empty, and then calls <code>srv.Store.QuarantineDelivery(req.EnvelopeID, req.Consumer,
-    req.Reason)</code> exactly once, returning its error verbatim (<code>409</code>) on failure. There is no
-    second dead-letter check anywhere in the handler that could drift from the store's own guard in
-    <code>QuarantineDelivery</code> (which calls <code>latestDeliveryState</code> and refuses unless it equals
-    <code>deliveryStateDeadLetter</code>). I edited the handler myself to discard the store's error
-    (<code>if err := ...; err != nil { _ = err }</code>, falling through to the success response) and reran
-    <code>TestDeliveryQuarantineRefusesNonDeadLetteredDelivery</code>: it failed with
-    <code>status = 200, want a refusal for a non-dead-lettered delivery</code> and the response body showed
-    <code>"status":"quarantined"</code> for a delivery that was never dead-lettered &mdash; exactly the guard
-    bypass the spec forbids. Reverted with <code>git checkout -- internal/ui/server.go</code>; confirmed a
-    clean tree with <code>git status --short</code> and a successful rebuild afterward.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Empty-result behavior is <code>[]</code>, not <code>null</code>, at both the store and HTTP layers</h3>
-    <p><code>ListDeliveriesForRun</code> initializes <code>list := []DeliveryRecord{}</code> before its scan
-    loop (unlike the older <code>ListDeliveryHistory</code>, which still declares <code>var list
-    []DeliveryRecord</code> and can return nil &mdash; a pre-existing inconsistency this diff did not
-    introduce and was not asked to fix). <code>handleDeliveryHistory</code> adds a redundant
-    <code>if deliveries == nil { deliveries = []store.DeliveryRecord{} }</code> guard, which is always
-    unreachable given the store-level initialization but is harmless defensive coding, not a bug.
-    <code>TestListDeliveriesForRunEmptyWhenNoDeliveries</code> asserts non-nil at the Go level. There is,
-    however, no test that decodes the actual HTTP response body for the zero-delivery case and asserts it is
-    the literal JSON <code>[]</code> rather than <code>null</code> &mdash; the non-zero-delivery test
-    (<code>TestDeliveryHistoryReturnsRunsDeliveries</code>) does decode a real JSON body, but the zero case is
-    only verified at the Go slice level. Given <code>encoding/json</code>'s well-known behavior of marshaling
-    a non-nil empty slice as <code>[]</code>, this is very unlikely to be wrong in practice, but it is a real
-    test-rigor gap relative to what the review brief asked to confirm, not something I could verify was
-    covered.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The <code>getJSON</code>/<code>getJSONResponse</code> rename is real, with no leftover collision</h3>
-    <p><code>fleet_paths_test.go:110</code> retains the pre-existing 4-argument
-    <code>getJSON(t, mux, method, path, reqBody, out)</code>, used by its own two call sites unaffected by this
-    diff. The new tests in <code>server_test.go</code> use a distinctly named 1-argument
-    <code>getJSONResponse(t, mux, path)</code> at line 857, plus the pre-existing (not newly introduced)
-    <code>postJSON</code> helper at line 735. No function name collides, and no code references a
-    <code>getJSON</code> call with the new helper's signature or vice versa.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The dashboard wiring is real: escaped, correctly argumented, and actually called on run selection</h3>
-    <p>Every value <code>deliveryRowHTML</code> interpolates into the DOM (<code>look.label</code>,
-    <code>created_at</code>, <code>consumer</code> in both its <code>title</code> attribute and text node,
-    <code>attempt</code>, <code>error</code>, <code>error_class</code>, <code>recovery_instructions</code>)
-    passes through <code>escapeHTML</code> or <code>escapeAttr</code>, matching <code>activityHTML</code>'s
-    existing convention exactly. The quarantine button's <code>onclick="quarantineDelivery('${escapeAttr(d.envelope_id)}',
-    '${escapeAttr(d.consumer)}')"</code> passes both arguments <code>quarantineDelivery</code> needs, which
-    itself POSTs <code>{envelope_id, consumer, reason}</code> matching the handler's expected body field names
-    exactly. <code>fetchDeliveryHistory(runId)</code> is called from <code>selectRun</code> immediately after
-    <code>renderActivity(data.envelopes || [])</code>, on every run selection &mdash; not only when a
-    drawer happens to already be open &mdash; so <code>drawerDeliveries</code> is populated before an operator
-    ever opens the drawer, and <code>refreshActivityDrawer</code> re-renders an already-open drawer from
-    either fetch, matching the design's stated intent that neither section goes stale waiting on the other.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; No scope creep: no replay surface, no MCP changes</h3>
-    <pre>git diff 806fb07^1 806fb07^2 --stat --name-only:
-  internal/store/delivery.go
-  internal/store/delivery_test.go
-  internal/ui/server.go
-  internal/ui/server_test.go
-  internal/ui/static/index.html
-
-grep -ni "replay" on the diff: 3 hits, all in explanatory comments
-  ("no attempt closure to recover", "Replay ... ReplayDelivery ... previously covered",
-  "Replay is deliberately not offered here") &mdash; zero new routes, zero new JS functions calling replay
-internal/mcp/: 0 lines touched</pre>
-    <p class="small">Matches <code>proposal.md</code>'s out-of-scope section and <code>tasks.md</code>'s
-    explicit "do not implement" list: no replay endpoint or UI action, no MCP tools, no project/repo/phase-
-    scoped delivery views, and <code>DeliverEnvelope</code>/<code>ReplayDelivery</code>/the state machine are
-    untouched by this diff.</p>
+    <h3><span class="sev low">verified</span> &nbsp; Immutability is real, confirmed by my own mutation</h3>
+    <p><code>RecordEnvelope</code> uses a plain <code>INSERT</code> (not <code>INSERT OR REPLACE</code>,
+    unlike the pre-existing pattern for phases) into <code>envelopes</code>, whose <code>id</code> column is
+    <code>TEXT PRIMARY KEY</code>, and returns <code>ErrDuplicateEnvelopeID</code>-wrapped (see below) or raw
+    error on conflict, writing nothing. I edited the SQL myself to <code>INSERT OR REPLACE</code> in a
+    scratch worktree, reran <code>TestRecordEnvelopeRefusesRepublishOfExistingID</code>, and it failed with
+    "expected an error when republishing an existing id, got nil" — exactly the silent-overwrite the guard
+    is supposed to prevent. Reverted with <code>git checkout --</code>; confirmed a clean tree and a
+    successful rebuild.</p>
   </div>
 
   <div class="item warn">
-    <h3><span class="sev med">warn</span> &nbsp; The quarantine button's inline <code>onclick</code> reuses a pre-existing HTML-entity-escaping pattern that does not actually protect a single-quoted JS string literal</h3>
-    <p><code>escapeAttr</code> is a bare alias for <code>escapeHTML</code>, which encodes <code>'</code> as
-    <code>&amp;#39;</code>. When that encoded value is placed inside <code>onclick="fn('...')"</code>, the
-    browser HTML-decodes the attribute value (restoring the literal <code>'</code>) <em>before</em> handing it
-    to the JS engine as inline event-handler source &mdash; so a <code>consumer</code> or
-    <code>envelope_id</code> value containing a single quote is not actually prevented from terminating the JS
-    string early and injecting script. This is a real weakness in the pattern, but it is <strong>not new to
-    this diff</strong>: the identical shape (<code>escapeAttr</code> value inside a single-quoted JS argument
-    inside a double-quoted <code>onclick</code>) already exists in this file at <code>resumeRun('${escapeAttr(run.id)}')</code>,
-    <code>openPhaseDrawer('${escapeAttr(phase.kind...)}', ...)</code>, and
-    <code>cleanActiveWorktrees('${escapeAttr(l.task_id)}')</code>, none of which this bullet touched. The new
-    <code>quarantineDelivery(...)</code> call follows the file's established (if imperfect) house convention
-    faithfully rather than introducing a new hole. <code>consumer</code> and <code>envelope_id</code> values
-    originate from this project's own worktree-path/repo-name conventions and delivery records, not from an
-    external or attacker-facing input channel today, which limits (but does not eliminate) real-world
-    exploitability. Not a defect specific to this bullet; flagged because the review brief asked whether
-    escaping matches the existing convention, and it does &mdash; the convention itself has this latent gap
-    across the whole file.</p>
+    <h3><span class="sev med">warn</span> &nbsp; The duplicate-id error classifier checks the wrong SQLite code and can never match — <code>ErrDuplicateEnvelopeID</code> is dead code, and the bug is still present in current <code>v2</code> HEAD</h3>
+    <p><code>isDuplicateEnvelopeID</code> returns true only when the driver error's extended code equals
+    <code>sqlite3.SQLITE_CONSTRAINT_UNIQUE</code> (2067). But <code>envelopes.id</code> is declared
+    <code>TEXT PRIMARY KEY</code>, not a separate <code>UNIQUE</code> index, and I confirmed empirically
+    (a standalone probe against <code>modernc.org/sqlite</code>, then a throwaway test calling
+    <code>RecordEnvelope</code> twice with the same id) that a duplicate insert into that column raises
+    extended code <code>1555</code> (<code>SQLITE_CONSTRAINT_PRIMARYKEY</code>), not 2067 — even though the
+    driver's own error <em>text</em> happens to read "UNIQUE constraint failed: envelopes.id", which is what
+    makes this easy to miss on a read-through. <code>isDuplicateEnvelopeID</code> therefore always returns
+    false for the exact case it exists to detect, and <code>errors.Is(err, ErrDuplicateEnvelopeID)</code> is
+    never true for any caller, anywhere — I grepped the whole repository, at this commit and at current
+    <code>v2</code> HEAD, and no code calls <code>errors.Is</code> against this sentinel at all, so the bug is
+    currently silent and has no observable behavioral consequence today: <code>RecordEnvelope</code> still
+    returns the raw (unwrapped, less friendly) driver error, which is still non-nil, so the actual required
+    behavior — refuse republication, write nothing — still holds, as confirmed by the mutation test above.
+    This is not the specific "unwired call site" bug this review was sent to hunt for, but it is the same
+    underlying failure shape: code that claims a specific, named behavior (classify this as a duplicate-id
+    conflict and return a friendly sentinel) which is not actually reachable, and nothing in the green test
+    suite notices because every existing test only asserts <code>err != nil</code>, never
+    <code>errors.Is(err, ErrDuplicateEnvelopeID)</code> or the wrapped message text. I confirmed this same
+    code, unchanged, is still present in current <code>v2</code> HEAD
+    (<code>internal/store/store.go</code>, <code>isDuplicateEnvelopeID</code>), inherited through bullets 2–4
+    with no later fix. Recommend either checking <code>SQLITE_CONSTRAINT_PRIMARYKEY</code> as well, or
+    matching on the error text's <code>"envelopes.id"</code> substring alone (as the sibling
+    <code>isDuplicateRequestID</code> already does for a genuine <code>UNIQUE INDEX</code>, where the code
+    check is actually meaningful and correctly differentiates a run-id collision from a request-id
+    collision).</p>
+  </div>
+
+  <div class="item warn">
+    <h3><span class="sev med">warn</span> &nbsp; 3 of the 4 real call sites have no call-site-level regression test for correlation/causation, only store-level tests and my own manual read-through</h3>
+    <p><code>internal/runner/runner_test.go</code> adds <code>TestAgentPhaseEnvelopesChainCausation</code>,
+    which exercises <code>RunAgentPhase</code> end to end and whose own comment names exactly the risk this
+    review was sent to check for. No equivalent exists for the MCP <code>sergeant_emit_envelope</code> tool
+    (there is no <code>internal/mcp/server_test.go</code> at this commit at all — the package's only test
+    files are <code>config_test.go</code> and <code>run_follow_test.go</code>, neither of which invokes
+    <code>emit_envelope</code>) or for either of the two <code>internal/ui/server.go</code> sites
+    (<code>handleCreatePR</code>, the delivery envelope in <code>executeRun</code>). I verified those three
+    sites are correctly wired by reading the diff directly, and I stand behind that verification, but it is
+    a real difference in test rigor between the one call site the builder specifically hardened against this
+    class of bug and the other three, which rely on the store's own unit tests plus a human read-through.
+    Given that Review 007's whole finding was exactly "the store's tests pass but a real call site doesn't
+    do this," a codebase this deliberate about testing that exact risk in one place and not the other three
+    is worth flagging even where, as here, manual verification did not turn up a defect.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Additive migration is real, not just claimed</h3>
+    <p>All 8 new columns are added through the established <code>hasColumn</code>-guarded
+    <code>ALTER TABLE ... ADD COLUMN</code> pattern already used for prior additive migrations
+    (<code>bullets.pr_url</code>, <code>phases.attempt</code>), each defaulting to <code>''</code> except
+    <code>causation_id</code> (left nullable) and the two <code>DATETIME</code> columns (defaulted to the
+    zero-time literal). <code>TestEnvelopeColumnsAddedOnReopen</code> drops and recreates a pre-change
+    <code>envelopes</code> table and confirms all 8 columns exist after reopening; and
+    <code>TestOlderEnvelopeReadsBackWithEmptyType</code> seeds a raw pre-migration row and confirms it reads
+    back with <code>Type == ""</code> and no error, not an invented value. Both pass. This is the one claim in
+    this bullet that already had a dedicated test in the original commit, and it holds up.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; <code>CausationID</code>'s absent-vs-empty distinction is real, with one disclosed and non-manifesting edge case</h3>
+    <p><code>CausationID</code> is a <code>*string</code>, backed by a nullable <code>causation_id</code>
+    column (deliberately not <code>NOT NULL DEFAULT ''</code>, unlike every other new text column).
+    <code>TestRecordEnvelopeFirstEnvelopeHasNoCausationID</code> and
+    <code>TestOlderEnvelopeNullCausationIDIsNil</code> both pass, at the direct read and at
+    <code>ListEnvelopesForRun</code>. One caveat, disclosed in the code's own comment rather than hidden:
+    <code>causationIDValue</code>/<code>nullableText</code> collapse a hypothetical non-nil pointer to
+    <code>""</code> into SQL <code>NULL</code> on write, so "something caused it but the id was not recorded"
+    (a non-nil pointer to an empty string) is not actually distinguishable from "nothing caused it" (a nil
+    pointer) if it ever occurred. The comment at the <code>CausationID</code> field declaration says exactly
+    this: "that case is not representable in the current design." Since every id in this codebase is
+    generated by <code>fmt.Sprintf</code> and is never empty, this never manifests in practice; noted as a
+    known, accepted, and correctly documented limitation, not a hidden defect.</p>
+  </div>
+
+  <div class="item warn">
+    <h3><span class="sev low">warn</span> &nbsp; <code>factory_id</code>, <code>project_id</code> and <code>assignment_id</code> from R5.1's reference list are not implemented, and the OpenSpec change does not say so explicitly</h3>
+    <p>R5.1 names six reference fields "where applicable": <code>factory_id</code>, <code>project_id</code>,
+    <code>repo_id</code>, <code>run_id</code>, <code>phase_id</code>, <code>assignment_id</code>. This bullet
+    added only <code>PhaseID</code> (design.md: "the missing link in the reference chain; run and repo
+    already exist"). <code>FactoryID</code>, <code>ProjectID</code> and <code>AssignmentID</code> are absent
+    from <code>EnvelopeRecord</code>, and design.md's "added metadata" section does not explicitly say why —
+    it only accounts for the fields it does add. On inspection this is a pre-existing, systemic gap rather
+    than something this bullet introduced or was uniquely responsible for closing: there is no
+    <code>FactoryRecord</code> type anywhere in the store, <code>RunRecord.Project</code> is a plain string
+    rather than an id, and this codebase has no separate "assignment" entity distinct from a phase — a
+    <code>PhaseRecord</code> already conflates the PRD's phase/assignment distinction. Given that, "where
+    applicable" plausibly excuses the omission, and inventing three new id fields that reference nothing else
+    in the system would not obviously improve correctness. Flagged as a documentation gap in the OpenSpec
+    artifacts (they should say this explicitly) rather than an implementation defect.</p>
   </div>
 
 </section>
@@ -230,77 +236,81 @@ internal/mcp/: 0 lines touched</pre>
   <h2>Evidence index</h2>
   <table>
     <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
-    <tr><td>Build/vet/test clean</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 9/9 packages</td></tr>
-    <tr><td>Join is run-scoped, no orphan-drop risk reachable in practice</td><td>read the SQL; traced every envelope-deleting code path (<code>DeleteRun</code>) and confirmed it also deletes the run itself</td><td>confirmed &mdash; no path deletes an envelope while its run stays queryable</td></tr>
-    <tr><td>Quarantine guard is not duplicated/bypassed at the API layer</td><td>mutated <code>handleDeliveryQuarantine</code> to swallow the store's error; reran the refusal test; reverted</td><td><code>TestDeliveryQuarantineRefusesNonDeadLetteredDelivery</code> failed exactly as predicted (200 instead of a refusal)</td></tr>
-    <tr><td>Empty result is <code>[]</code> not <code>null</code> (Go level)</td><td>read <code>list := []DeliveryRecord{}</code>; ran <code>TestListDeliveriesForRunEmptyWhenNoDeliveries</code></td><td>confirmed non-nil; no test decodes the HTTP body for this specific case</td></tr>
-    <tr><td><code>getJSON</code>/<code>getJSONResponse</code> collision claim</td><td><code>grep -rn "func getJSON\b\|func getJSONResponse\|func postJSON"</code> across <code>internal/ui/*_test.go</code></td><td>confirmed: distinct names, distinct signatures, no leftover references</td></tr>
-    <tr><td>Frontend escaping matches <code>activityHTML</code>'s convention</td><td>read <code>deliveryRowHTML</code>/<code>deliveriesHTML</code> line by line</td><td>confirmed &mdash; every interpolated value passes through <code>escapeHTML</code>/<code>escapeAttr</code></td></tr>
-    <tr><td><code>fetchDeliveryHistory</code> is wired, not dead code</td><td>traced its only call site in <code>selectRun</code></td><td>confirmed: called on every run selection</td></tr>
-    <tr><td>No scope creep (replay, MCP)</td><td><code>git diff --stat --name-only</code>; grep for "replay" in the diff; <code>internal/mcp/</code> diff line count</td><td>confirmed absent: 5 files touched, "replay" only in comments, 0 lines in <code>internal/mcp/</code></td></tr>
-    <tr><td>R5 bullet 1 (R5.1/R5.2/R5.7, merge <code>8e1c5e8</code>) has no recorded independent review</td><td><code>git log -p --all -- progress.html | grep</code> for R5.1/R5.2/R5.7/8e1c5e8/its change-name across the file's entire history</td><td>zero hits &mdash; confirmed absent</td></tr>
+    <tr><td>Build/vet/test clean at <code>8e1c5e8</code></td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code> in a scratch worktree</td><td>pass, 9/9 packages</td></tr>
+    <tr><td>All 4 real call sites set correlation/causation</td><td>read every non-test <code>RecordEnvelope</code> call site's diff directly</td><td>confirmed: <code>CorrelationID</code> = run id, <code>CausationID</code> = <code>CausationFromLatest(runID, repo)</code>, at all 4</td></tr>
+    <tr><td>Immutability is enforced, not just claimed</td><td>mutated <code>INSERT</code> → <code>INSERT OR REPLACE</code>; reran <code>TestRecordEnvelopeRefusesRepublishOfExistingID</code>; reverted</td><td>failed exactly as predicted, then confirmed clean revert</td></tr>
+    <tr><td>Duplicate-id classifier actually fires</td><td>standalone probe against <code>modernc.org/sqlite</code> for the real extended error code on a <code>TEXT PRIMARY KEY</code> duplicate, then a throwaway test asserting <code>errors.Is(err, ErrDuplicateEnvelopeID)</code></td><td>code is 1555 (<code>PRIMARYKEY</code>), not 2067 (<code>UNIQUE</code>); <code>errors.Is</code> is false — classifier never fires, in this commit and current HEAD</td></tr>
+    <tr><td>Additive migration reads pre-migration rows without error or invented values</td><td>ran <code>TestEnvelopeColumnsAddedOnReopen</code> and <code>TestOlderEnvelopeReadsBackWithEmptyType</code></td><td>both pass</td></tr>
+    <tr><td><code>CausationID</code> absent vs. empty is real</td><td>ran <code>TestRecordEnvelopeFirstEnvelopeHasNoCausationID</code>, <code>TestOlderEnvelopeNullCausationIDIsNil</code>; read <code>nullableText</code>/<code>causationIDValue</code></td><td>both pass; one disclosed, non-manifesting edge case in the collapse-to-NULL path</td></tr>
+    <tr><td><code>GetLatestEnvelope</code> exists and works, whether or not this commit calls it</td><td><code>git show 8e1c5e8^1:internal/store/store.go | grep</code> for the function</td><td>pre-existed this commit; used by this commit's own <code>CausationFromLatest</code> and by pre-existing UI code</td></tr>
+    <tr><td>Call-site test coverage is uneven across the 4 sites</td><td>read <code>runner_test.go</code>'s new test and its own stated purpose; grepped for equivalent tests touching the MCP tool and both UI sites</td><td>only <code>runner.go</code>'s call site has one; confirmed absent for the other 3, verified those 3 by manual read only</td></tr>
+    <tr><td><code>factory_id</code>/<code>project_id</code>/<code>assignment_id</code> not modeled</td><td><code>grep -n "FactoryID\|type FactoryRecord\|AssignmentID\|ProjectID" internal/store/store.go</code></td><td>zero hits, at this commit and current HEAD — systemic, not bullet-specific</td></tr>
   </table>
 </section>
 
 <section>
   <h2>Verdict</h2>
   <div class="item ok">
-    <p><strong>R5.6: genuinely met.</strong> <code>Store.ListDeliveriesForRun</code> correctly joins
-    <code>deliveries</code> to <code>envelopes</code> and filters by <code>run_id</code>, shares
-    <code>scanDeliveryRow</code> with <code>ListDeliveryHistory</code> as design.md specified, and returns a
-    non-nil empty slice. <code>GET /api/delivery-history</code> and <code>POST /api/delivery-quarantine</code>
-    are genuinely thin transports: the history endpoint 400s on a missing <code>run_id</code> and otherwise
-    returns the store's own result unmodified; the quarantine endpoint calls the store's guarded write exactly
-    once and forwards its refusal verbatim as a <code>409</code>, with no second check of its own that could
-    drift from the guard &mdash; I mutation-tested this myself, independent of the commit message's own
-    claimed test, and the bypass was caught. The dashboard's Deliveries section is real: correctly escaped,
-    correctly argumented, and fetched on every run selection rather than existing as inert code. Scope
-    discipline holds exactly to the proposal's boundaries: no replay surface, no MCP tools, no
-    project/repo/phase-scoped views. The <code>getJSON</code>/<code>getJSONResponse</code> rename claimed in
-    the commit message is real and leaves no collision.</p>
-    <p class="small">Two residual findings, neither blocking this bullet's verdict: a test-rigor gap (the
-    zero-delivery case is verified non-nil at the Go level but not decoded from an actual HTTP response body,
-    unlike the non-zero case), and a pre-existing, file-wide frontend weakness (inline <code>onclick</code>
-    handlers relying on <code>escapeAttr</code> alone do not actually protect a nested single-quoted JS string
-    literal from a value containing a quote) that this bullet reused faithfully rather than introduced.</p>
+    <p><strong>R5.1, R5.2, R5.7: genuinely met.</strong> <code>EnvelopeRecord</code> carries the metadata R5.1
+    names (short of three reference fields that are not modeled anywhere in this codebase, disclosed above,
+    not unique to this bullet). <code>RecordEnvelope</code> genuinely refuses publication missing a type,
+    schema version, producer, or correlation id, writing nothing on refusal — verified by the existing test
+    suite, which I ran myself. Immutability is real and I confirmed it by my own mutation, not only by reading
+    the test that claims it. The additive migration genuinely leaves pre-existing rows readable with an empty
+    type rather than erroring or inventing one, confirmed by tests that simulate a real pre-migration schema.
+    Most importantly for why this review exists: <strong>every one of the 4 real production call sites that
+    publish an envelope sets <code>CorrelationID</code> to the run id and <code>CausationID</code> to the
+    actual preceding envelope in that run/repo</strong> — the specific "store-level plumbing correct,
+    production call site unwired" failure shape that Review 007 found in bullet 2 does not recur here. A
+    different, lower-impact defect of the same general family was found instead: the duplicate-id error
+    classifier checks the wrong SQLite extended error code and can never actually match, making
+    <code>ErrDuplicateEnvelopeID</code> unreachable dead code — silent today only because nothing anywhere
+    calls <code>errors.Is</code> against it, and not a break of R5.1's actual required behavior, which the
+    underlying <code>INSERT</code> failure still delivers regardless of how the error gets classified. This
+    bug is still present, unfixed, in current <code>v2</code> HEAD and should be corrected there. A second,
+    lower-severity gap: only 1 of the 4 real call sites (<code>runner.go</code>) has a regression test written
+    specifically against the class of bug this review hunts for; the other 3 were verified by me manually,
+    not by an automated test that would catch a future regression.</p>
   </div>
 
   <div class="item warn">
-    <h3>R5 overall (R5.1&ndash;R5.7, all four bullets): mostly, but not fully, verified as genuinely delivered</h3>
-    <p>R5's four bullets are now all merged: <code>8e1c5e8</code> (R5.1/R5.2/R5.7, envelope identity),
-    <code>bde2b2d</code> (R5.3/R5.4, durable delivery), <code>d0edef7</code> (R5.5, dead-lettering), and
-    <code>806fb07</code> (R5.6, this review). Three of the four received an independent critic review with
-    live mutation testing: Review 007 found bullet 2 genuinely met for R5.3 but only <strong>partly</strong>
-    met for R5.4 (two fields R5.4's own text requires &mdash; a real <code>next_attempt_at</code> and error
-    classification &mdash; were absent from the actual data, undisclosed as deferred scope); Review 008 found
-    bullet 3 genuinely met, with a test-rigor gap on multi-episode/multi-attempt paths later closed by a
-    follow-up commit (<code>189ad06</code>); this review finds bullet 4 genuinely met. <strong>Bullet 1
-    (R5.1/R5.2/R5.7, merge <code>8e1c5e8</code>) has no independent critic review recorded anywhere in this
-    document's history</strong> &mdash; I searched the full git history of <code>progress.html</code> for any
-    mention of it and found none. Its own test suite is real and passes (19 tests covering envelope typing,
-    schema version, correlation/causation id propagation, republication refusal, and backward-compatible
-    reads of pre-migration rows, spot-checked and run by me during this review), but "the builder's own tests
-    pass" is exactly the standard every other R5 bullet was independently mutation-tested against and found at
-    least one real gap under, so its absence here is not proof of a problem, only proof that R5.1/R5.2/R5.7 has
-    never been checked to the same bar as the rest of R5. Given that R5.4's undisclosed gap was only caught
-    because Review 007 existed at all, I would not call all of R5 genuinely delivered without reservation:
-    R5.3, R5.5, and R5.6 hold up; R5.4 holds up only partially (a known, disclosed-in-Review-007 gap, not
-    re-litigated here); and R5.1/R5.2/R5.7 is unverified by anyone other than its own builder. Closing R5 as a
-    PRD milestone should not be read as "every sub-requirement independently confirmed" &mdash; one of the
-    four bullets was never put through the process the other three got.</p>
+    <h3>R5 overall (R5.1&ndash;R5.7, all four bullets): now fully independently reviewed, still not fully clean</h3>
+    <p>All four R5 bullets have now received an independent critic review with live mutation testing:
+    Review 007 found bullet 2 (<code>bde2b2d</code>) genuinely met for R5.3 but only <strong>partly</strong>
+    met for R5.4 (<code>next_attempt_at</code> and error classification claimed set but never populated,
+    undisclosed as deferred scope — that gap is not re-litigated here and stands as recorded); Review 008
+    found bullet 3 (<code>d0edef7</code>) genuinely met, with a test-rigor gap later closed by
+    <code>189ad06</code>; Review 010 found bullet 4 (<code>806fb07</code>) genuinely met; this review
+    (bullet 1, <code>8e1c5e8</code>) finds R5.1/R5.2/R5.7 genuinely met. <strong>The specific failure shape
+    this project has now shipped at least twice — a green test suite covering store-level plumbing while a
+    real call site or claimed field silently is not wired or does not work — was hunted for specifically in
+    this review and was not found in the form Review 007 identified it (an unwired call site).</strong> A
+    related instance of the same underlying failure shape (a claimed classification/behavior that is not
+    actually reachable, unnoticed by a passing test suite because no test asserts the specific claim) was
+    found instead, in the duplicate-id error classifier, with no current observable impact. Taken together:
+    R5.3, R5.5, R5.6 hold up without reservation; R5.4 holds up only partially (Review 007's disclosed gap,
+    unchanged); R5.1/R5.2/R5.7 holds up with two non-blocking findings recorded above. R5 as a whole should
+    be read as <strong>fully and independently reviewed across all seven sub-requirements and all four
+    bullets</strong> for the first time as of this review — but "independently reviewed" is not the same
+    claim as "defect-free": R5.4's known gap and this review's duplicate-id classifier bug are both real,
+    both currently unfixed in <code>v2</code> HEAD, and both worth a follow-up commit before R5 is called
+    closed without qualification.</p>
   </div>
 </section>
 
 <footer>
-  <p class="meta">Review 010 · findings above are reproduced from commands run against <code>806fb07</code>
-  (merge) / <code>9ad0ea7</code> (feature commit) · one mutation was applied and reverted
-  (<code>handleDeliveryQuarantine</code> edited to discard the store's guard error, confirmed the refusal test
-  fails, then <code>git checkout -- internal/ui/server.go</code>); the working tree was confirmed clean
-  (<code>git status --short</code>) and rebuildable before and after. Review 009 (R4.6, model/provider
-  provenance, merge <code>b071848</code>) previously found that requirement genuinely met; this review did not
-  re-verify R4.6. This review additionally found that R5 bullet 1 (R5.1/R5.2/R5.7, merge <code>8e1c5e8</code>)
-  has no independent critic review recorded in this document's history, unlike bullets 2, 3, and 4 &mdash;
-  noted above as the one open question in R5's overall closure.</p>
+  <p class="meta">Review 011 · findings above are reproduced from commands run against <code>8e1c5e8</code>
+  (merge) / <code>5c2a1a2</code> (feature commit), in a scratch worktree created with
+  <code>git worktree add /tmp/review-8e1c5e8 8e1c5e8</code> and removed with
+  <code>git worktree remove /tmp/review-8e1c5e8 --force</code> when finished — the real <code>v2</code>
+  branch and its working worktree were not modified. Two mutations were applied and reverted inside the
+  scratch worktree only: (1) <code>INSERT</code> → <code>INSERT OR REPLACE</code> in
+  <code>RecordEnvelope</code>, confirmed the republish-refusal test fails, then <code>git checkout --</code>;
+  (2) a throwaway probe test asserting <code>errors.Is(err, ErrDuplicateEnvelopeID)</code> on a real duplicate
+  insert, confirmed false, then the probe file was deleted. <code>git status --short</code> confirmed a clean
+  scratch worktree before removal. Reviews 007–010 were not re-run; their findings on bullets 2–4 are
+  reproduced above from this document's own prior text for the purpose of stating the R5-overall verdict, not
+  independently re-verified in this review.</p>
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 

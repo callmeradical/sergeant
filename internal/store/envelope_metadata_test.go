@@ -11,6 +11,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -303,8 +304,20 @@ func TestRecordEnvelopeRefusesRepublishOfExistingID(t *testing.T) {
 	e2 := minimalValidEnvelope() // same ID "env-valid-1"
 	e2.Summary = "overwritten summary"
 
-	if err := st.RecordEnvelope(e2); err == nil {
+	err := st.RecordEnvelope(e2)
+	if err == nil {
 		t.Fatal("expected an error when republishing an existing id, got nil")
+	}
+	// Regression (Review 011): envelopes.id is a PRIMARY KEY, not a separate
+	// UNIQUE index, so a duplicate insert raises SQLITE_CONSTRAINT_PRIMARYKEY,
+	// not SQLITE_CONSTRAINT_UNIQUE. isDuplicateEnvelopeID originally checked
+	// only the latter, so this specific sentinel was silently unreachable —
+	// republication was still refused (the raw INSERT fails either way), but
+	// no caller checking errors.Is(err, ErrDuplicateEnvelopeID) could ever see
+	// it. Asserting err == nil alone (as this test previously did) cannot
+	// catch that class of bug.
+	if !errors.Is(err, ErrDuplicateEnvelopeID) {
+		t.Errorf("expected errors.Is(err, ErrDuplicateEnvelopeID), got: %v", err)
 	}
 
 	// The stored record must be the original, not the new one.
