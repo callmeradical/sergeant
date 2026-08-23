@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -431,5 +432,272 @@ func TestSuccessfulFirstAttemptIsAttemptOne(t *testing.T) {
 	}
 	if final[0].Attempt != 1 {
 		t.Errorf("Attempt = %d, want 1", final[0].Attempt)
+	}
+}
+
+// --- R4.6: phases record their model and provider ---------------------------
+
+func payloadProvenance(t *testing.T, payload json.RawMessage) (model, provider string) {
+	t.Helper()
+	var m map[string]interface{}
+	if err := json.Unmarshal(payload, &m); err != nil {
+		t.Fatalf("payload is not valid JSON: %v (payload: %s)", err, payload)
+	}
+	modelVal, _ := m["model"].(string)
+	providerVal, _ := m["provider"].(string)
+	return modelVal, providerVal
+}
+
+// A goose phase whose raw output contains the startup banner records the
+// provider and model it names, even though sergeant synthesized the envelope
+// (the fake agent here writes no envelope.json of its own).
+func TestGooseAgentPhaseRecordsModelAndProvider(t *testing.T) {
+	dir := t.TempDir()
+	agent := fakeAgent(t, dir, "goose", "echo '● new session · anthropic claude-sonnet-4-6'")
+	pr, st := newRunner(t, agent, 10*time.Second)
+
+	env, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if env == nil {
+		t.Fatal("expected an envelope")
+	}
+
+	model, provider := payloadProvenance(t, env.Payload)
+	if model != "claude-sonnet-4-6" || provider != "anthropic" {
+		t.Errorf("envelope payload model/provider = %q/%q, want claude-sonnet-4-6/anthropic", model, provider)
+	}
+
+	phases, err := st.ListPhasesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var final []store.PhaseRecord
+	for _, p := range phases {
+		if p.Name == "build" && p.Kind == "agent" && p.Status != "running" {
+			final = append(final, p)
+		}
+	}
+	if len(final) != 1 {
+		t.Fatalf("expected 1 phase record, got %d", len(final))
+	}
+	model, provider = payloadProvenance(t, final[0].Payload)
+	if model != "claude-sonnet-4-6" || provider != "anthropic" {
+		t.Errorf("phase record model/provider = %q/%q, want claude-sonnet-4-6/anthropic", model, provider)
+	}
+}
+
+// An agent this project has no output parser for must never guess: its
+// phase's model/provider are empty, even when the raw output happens to
+// contain text that looks like goose's banner.
+func TestUnparsedAgentProvenanceIsEmptyNotGuessed(t *testing.T) {
+	dir := t.TempDir()
+	agent := fakeAgent(t, dir, "opencode", "echo '● new session · anthropic claude-sonnet-4-6'")
+	pr, st := newRunner(t, agent, 10*time.Second)
+
+	env, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	model, provider := payloadProvenance(t, env.Payload)
+	if model != "" || provider != "" {
+		t.Errorf("envelope payload model/provider = %q/%q, want empty/empty for an unparsed agent", model, provider)
+	}
+
+	phases, err := st.ListPhasesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var final []store.PhaseRecord
+	for _, p := range phases {
+		if p.Name == "build" && p.Kind == "agent" && p.Status != "running" {
+			final = append(final, p)
+		}
+	}
+	if len(final) != 1 {
+		t.Fatalf("expected 1 phase record, got %d", len(final))
+	}
+	model, provider = payloadProvenance(t, final[0].Payload)
+	if model != "" || provider != "" {
+		t.Errorf("phase record model/provider = %q/%q, want empty/empty for an unparsed agent", model, provider)
+	}
+}
+
+// A successful phase whose envelope was written by the agent itself (not
+// synthesized by sergeant) must still carry model/provider — provenance is
+// attached after both env-building branches converge, not only inside the
+// synthesized one.
+func TestAgentAuthoredEnvelopeStillGetsProvenance(t *testing.T) {
+	dir := t.TempDir()
+	script := `#!/bin/sh
+echo '` + "●" + ` new session ` + "·" + ` anthropic claude-sonnet-4-6'
+mkdir -p .sergeant
+cat > .sergeant/envelope.json <<'EOF'
+{"task_id":"run-1","repo":"svc","stage":"build","summary":"agent authored this envelope","payload":{"custom":"value"}}
+EOF
+exit 0
+`
+	agent := filepath.Join(dir, "goose")
+	if err := os.WriteFile(agent, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	pr, st := newRunner(t, agent, 10*time.Second)
+
+	env, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if env == nil {
+		t.Fatal("expected an envelope")
+	}
+	if env.Summary != "agent authored this envelope" {
+		t.Fatalf("envelope was not read from the agent-authored envelope.json: %+v", env)
+	}
+
+	var payloadMap map[string]interface{}
+	if err := json.Unmarshal(env.Payload, &payloadMap); err != nil {
+		t.Fatalf("payload is not valid JSON: %v", err)
+	}
+	if payloadMap["custom"] != "value" {
+		t.Errorf("agent-authored payload fields were lost; got %+v", payloadMap)
+	}
+	model, provider := payloadProvenance(t, env.Payload)
+	if model != "claude-sonnet-4-6" || provider != "anthropic" {
+		t.Errorf("agent-authored envelope model/provider = %q/%q, want claude-sonnet-4-6/anthropic", model, provider)
+	}
+
+	phases, err := st.ListPhasesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var final []store.PhaseRecord
+	for _, p := range phases {
+		if p.Name == "build" && p.Kind == "agent" && p.Status != "running" {
+			final = append(final, p)
+		}
+	}
+	if len(final) != 1 {
+		t.Fatalf("expected 1 phase record, got %d", len(final))
+	}
+	model, provider = payloadProvenance(t, final[0].Payload)
+	if model != "claude-sonnet-4-6" || provider != "anthropic" {
+		t.Errorf("phase record model/provider = %q/%q, want claude-sonnet-4-6/anthropic", model, provider)
+	}
+}
+
+// A goose phase whose output has no banner (malformed or missing) completes
+// exactly as it would without provenance parsing: the phase still passes, and
+// model/provider are empty rather than a guess.
+func TestBannerlessGooseOutputDoesNotFailPhase(t *testing.T) {
+	dir := t.TempDir()
+	agent := fakeAgent(t, dir, "goose", "echo 'not a recognisable banner at all'")
+	pr, st := newRunner(t, agent, 10*time.Second)
+
+	env, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if env == nil {
+		t.Fatal("expected an envelope")
+	}
+
+	model, provider := payloadProvenance(t, env.Payload)
+	if model != "" || provider != "" {
+		t.Errorf("envelope payload model/provider = %q/%q, want empty/empty for banner-less output", model, provider)
+	}
+
+	phases, err := st.ListPhasesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var final []store.PhaseRecord
+	for _, p := range phases {
+		if p.Name == "build" && p.Kind == "agent" {
+			final = append(final, p)
+		}
+	}
+	if len(final) != 1 || final[0].Status != "passed" {
+		t.Fatalf("expected 1 passed phase, got %+v", final)
+	}
+}
+
+// detectModelProvider must never panic, regardless of agent name or output shape.
+func TestDetectModelProviderNeverPanics(t *testing.T) {
+	cases := []struct {
+		agentExe string
+		output   string
+	}{
+		{"", ""},
+		{"goose", ""},
+		{"goose", "garbage \x00\xff bytes"},
+		{"/usr/local/bin/goose", "● new session · anthropic claude-sonnet-4-6"},
+		{"claude", "● new session · anthropic claude-sonnet-4-6"},
+	}
+	for _, tc := range cases {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("detectModelProvider(%q, %q) panicked: %v", tc.agentExe, tc.output, r)
+				}
+			}()
+			_, _ = detectModelProvider(tc.agentExe, tc.output)
+		}()
+	}
+}
+
+// annotatePayloadWithProvenance must leave a non-object payload unchanged
+// rather than error or panic.
+func TestAnnotatePayloadWithProvenanceLeavesNonObjectPayloadUnchanged(t *testing.T) {
+	cases := []json.RawMessage{
+		nil,
+		json.RawMessage(``),
+		json.RawMessage(`not json`),
+		json.RawMessage(`[1,2,3]`),
+		json.RawMessage(`"a string"`),
+	}
+	for _, payload := range cases {
+		got := annotatePayloadWithProvenance(payload, "some-model", "some-provider")
+		if string(got) != string(payload) {
+			t.Errorf("annotatePayloadWithProvenance(%q, ...) = %q, want unchanged", payload, got)
+		}
+	}
+}
+
+// annotatePayloadWithProvenance sets model/provider even when both are empty
+// strings — an explicit empty is the honest "not knowable" signal, distinct
+// from the key being absent.
+func TestAnnotatePayloadWithProvenanceSetsEmptyKeysExplicitly(t *testing.T) {
+	got := annotatePayloadWithProvenance(json.RawMessage(`{"agent":"opencode"}`), "", "")
+	var m map[string]interface{}
+	if err := json.Unmarshal(got, &m); err != nil {
+		t.Fatalf("result is not valid JSON: %v", err)
+	}
+	modelVal, hasModel := m["model"]
+	providerVal, hasProvider := m["provider"]
+	if !hasModel || modelVal != "" {
+		t.Errorf("model = %v (present=%v), want present and empty", modelVal, hasModel)
+	}
+	if !hasProvider || providerVal != "" {
+		t.Errorf("provider = %v (present=%v), want present and empty", providerVal, hasProvider)
+	}
+	if m["agent"] != "opencode" {
+		t.Errorf("existing key was lost: %+v", m)
+	}
+}
+
+// A payload of JSON null unmarshals successfully into a nil map; assigning
+// into it must not panic.
+func TestAnnotatePayloadWithProvenanceHandlesJSONNull(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("annotatePayloadWithProvenance panicked on JSON null payload: %v", r)
+		}
+	}()
+	got := annotatePayloadWithProvenance(json.RawMessage(`null`), "m", "p")
+	model, provider := payloadProvenance(t, got)
+	if model != "m" || provider != "p" {
+		t.Errorf("model/provider = %q/%q, want m/p", model, provider)
 	}
 }

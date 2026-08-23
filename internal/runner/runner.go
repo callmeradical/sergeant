@@ -59,6 +59,53 @@ func stripANSI(s string) string {
 	return ansiEscape.ReplaceAllString(s, "")
 }
 
+// gooseBanner matches goose's startup banner line, e.g.
+// "● new session · anthropic claude-sonnet-4-6", where the first captured
+// group is the provider and the second is the model.
+var gooseBanner = regexp.MustCompile(`new session\s*·\s*(\S+)\s+(\S+)`)
+
+// detectModelProvider extracts the model and provider an agent actually used
+// from its own output, where that is knowable. It returns empty strings when
+// the agent is not one this function recognises, or when recognised output
+// does not match the expected shape — a phase's provenance being unknown is
+// honest; a phase failing because provenance parsing panicked is not.
+func detectModelProvider(agentExe, rawOutput string) (provider, model string) {
+	switch filepath.Base(agentExe) {
+	case "goose":
+		m := gooseBanner.FindStringSubmatch(rawOutput)
+		if m == nil {
+			return "", ""
+		}
+		return m[1], m[2]
+	default:
+		return "", ""
+	}
+}
+
+// annotatePayloadWithProvenance adds model and provider to an existing
+// envelope payload without disturbing whatever else it carries. If payload is
+// not a JSON object (an agent-authored envelope could in principle write
+// something else), it is returned unchanged — provenance is additive
+// metadata, not a reason to reject a payload sergeant did not itself produce.
+func annotatePayloadWithProvenance(payload json.RawMessage, model, provider string) json.RawMessage {
+	var m map[string]interface{}
+	if err := json.Unmarshal(payload, &m); err != nil {
+		return payload
+	}
+	if m == nil {
+		// A payload of JSON null unmarshals into a nil map with no error; an
+		// assignment into a nil map panics, so it must be allocated first.
+		m = map[string]interface{}{}
+	}
+	m["model"] = model
+	m["provider"] = provider
+	b, err := json.Marshal(m)
+	if err != nil {
+		return payload
+	}
+	return json.RawMessage(b)
+}
+
 // marshalPayload builds a phase/envelope payload as real JSON.
 //
 // It must never be built with fmt.Sprintf and %q: Go's %q emits Go string
@@ -362,6 +409,7 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 		cmd.Stderr = &outBuf
 
 		runErr := cmd.Run()
+		provider, model := detectModelProvider(exe, outBuf.String())
 		cancel()
 		duration := time.Since(start).Milliseconds()
 
@@ -413,6 +461,8 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 				}),
 			}
 		}
+
+		env.Payload = annotatePayloadWithProvenance(env.Payload, model, provider)
 
 		// Generate the envelope id before the SaveEnvelope call so both the
 		// delivery record (DeliverEnvelope) and the envelope record (RecordEnvelope)
