@@ -48,7 +48,7 @@ a{color:var(--muted)}
   <h1>Sergeant v2</h1>
   <p>Independent review. Written by the critic, not the builder.</p>
   <p class="meta">
-    Review 005 · 2026-08-23T03:0xZ · branch <code>v2</code> · head merged · 33 runs recorded
+    Review 006 · 2026-08-23T04:0xZ · branch <code>v2</code> · head merged · 33 runs recorded
   </p>
 </header>
 
@@ -83,6 +83,51 @@ a{color:var(--muted)}
 
 <section>
   <h2>Findings</h2>
+
+  <div class="item bad">
+    <h3><span class="sev high">high</span> &nbsp; A coordinator crash creates permanently stuck runs (R6.3)</h3>
+    <p>Hit for real this round. The UI server was a child of a shell; an aborted command killed it, and
+    the in-flight run stayed <code>running</code> in the database with nothing executing it.</p>
+    <pre>run rust-newt-taipei      status: running     process: none
+POST /api/run-resume  -> refused: "is running and cannot be resumed"</pre>
+    <p class="small">Resume correctly refuses, because it cannot distinguish a live run from an orphan.
+    So the work was unrecoverable through any supported path — not running, and not resumable. R6.3
+    requires a restarted coordinator to "inspect the durable run and phase records and report the known
+    state"; nothing reconciles on startup.</p>
+    <p class="small"><strong>Worked around, not fixed.</strong> Cancelling first made it resumable, and
+    the run then completed. Sergeant was honest throughout — cancel reported
+    <em>"No in-flight run found on this server; status recorded as cancelled only."</em> The fix is
+    startup reconciliation: on boot, a run marked running that this process is not driving must be
+    moved to a terminal, resumable status. Not yet specified.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">shipped</span> &nbsp; Runs now report progress against their plan</h3>
+    <p>An agent phase used to report <code>running</code> and nothing else for most of a run. Sergeant
+    now seeds <code>.sergeant/plan.json</code> from the resolved change's scenarios before the agent
+    starts, the agent marks items as it works, and the existing change stream carries it.</p>
+    <pre>  ◐ ○ ○ ○ ○   0/5   0m00s  build
+  ● ○ ● ○ ○   2/5  13m01s  running
+  ● ● ● ● ●   5/5  13m08s  passed</pre>
+    <p class="small">Solid circle done, open circle not started, spinner in progress, count beneath. No
+    time estimate is offered, and that is deliberate: across five completed changes, plan size
+    correlates <em>negatively</em> with agent time (r = -0.91) — nine scenarios took 394s while four
+    took 1309s. A percentage bar would have been fabricated.</p>
+    <p class="small">Reported progress cannot change a status.
+    <code>TestFullyReportedPlanDoesNotPassFailedRun</code> holds the line: a fully reported plan beside a
+    failed gate renders as a failed run. Sergeant seeds the file and thereafter only reads it, and
+    resume deliberately does not re-seed, which would overwrite what the agent had reported.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">closed</span> &nbsp; R2.4 — retry policy is explicit and observable</h3>
+    <p class="small">Delivered by goose, the first requirement it has ever completed. <code>retries</code>
+    resolves repository-first then project default then zero, so an omitted field behaves exactly as
+    before. Gates are excluded deliberately: re-running a failed gate until it passes would turn
+    evidence into a lottery. Confirmed to discriminate — forcing the resolver back to a literal zero
+    fails <code>TestEnginePassesResolvedRetriesToAgentPhase</code> and
+    <code>TestEngineUsesRepoRetryOverride</code>.</p>
+  </div>
 
   <div class="item bad">
     <h3><span class="sev high">high</span> &nbsp; goose has never worked in v2 — every dispatch to it died before the model saw anything</h3>
@@ -317,7 +362,7 @@ go test ./internal/... -count=1
 
   <div class="grid">
     <div class="card"><div class="label">Numbered requirements</div><div class="value">39</div><div class="small">R1–R7</div></div>
-    <div class="card"><div class="label">Verified unmet</div><div class="value">12</div><div class="small">7 of them are R5 alone</div></div>
+    <div class="card"><div class="label">Verified unmet</div><div class="value">11</div><div class="small">was 12; R2.4 closed</div></div>
     <div class="card"><div class="label">v1 scripts</div><div class="value">33</div><div class="small">34 MCP tools wrapping them</div></div>
     <div class="card"><div class="label">PRD conflicts</div><div class="value"><span class="status warn">2</span></div><div class="small">decisions outran the document</div></div>
     <div class="card"><div class="label">Factory agent</div><div class="value">goose</div><div class="small">was opencode; goose was broken until <code>f148859</code></div></div>
@@ -443,7 +488,7 @@ internal/runner/runner.go:72  DefaultAgentTimeout = 0</pre>
 </section>
 
 <footer>
-  <p class="meta">Review 005 · findings above are reproduced from commands run against
+  <p class="meta">Review 006 · findings above are reproduced from commands run against
   <code>e0b4657</code> · no completion is claimed for any item lacking build or test evidence.</p>
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
