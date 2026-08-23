@@ -48,8 +48,8 @@ a{color:var(--muted)}
   <h1>Sergeant v2</h1>
   <p>Independent review. Written by the critic, not the builder.</p>
   <p class="meta">
-    Review 007 · 2026-08-23 · branch <code>v2</code> · merge <code>bde2b2d</code> reviewed ·
-    "envelope delivery is durable, retried and idempotent (R5.3, R5.4)"
+    Review 008 · 2026-08-23 · branch <code>v2</code> · merge <code>d0edef7</code> reviewed ·
+    "dead letters are durable, with replay and quarantine (R5.5)"
   </p>
 </header>
 
@@ -58,183 +58,228 @@ a{color:var(--muted)}
   <div class="grid">
     <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code></div></div>
     <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code> whole module</div></div>
-    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">9/9 pass</span></div><div class="small">227 named tests (incl. subtests), <code>-count=1</code></div></div>
-    <div class="card"><div class="label">R5.3 (durable, append-only)</div><div class="value"><span class="status">met</span></div><div class="small">deliveries table, insert-only, verified live</div></div>
-    <div class="card"><div class="label">R5.4 (state/retry/idempotency)</div><div class="value"><span class="status warn">partly met</span></div><div class="small">retry + idempotency real; two required fields absent</div></div>
-    <div class="card"><div class="label">Call-site wiring</div><div class="value"><span class="status">both real</span></div><div class="small">runner.go verified by test; dag/engine.go verified by hand + a throwaway test</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">9/9 pass</span></div><div class="small">242 named tests (incl. subtests), <code>-count=1</code></div></div>
+    <div class="card"><div class="label">R5.5 (dead-letter/replay/quarantine)</div><div class="value"><span class="status">genuinely met</span></div><div class="small">all 11 spec scenarios map to real, correct behavior</div></div>
+    <div class="card"><div class="label">Call-site wiring</div><div class="value"><span class="status">both real</span></div><div class="small"><code>critical=true</code> literal at both sites, confirmed by reading current code</div></div>
   </div>
-  <p><strong>Verdict:</strong> R5.3 is genuinely met — durability and the append-only history are real,
-  not just claimed. R5.4 is <strong>only partly met</strong>: bounded retry, an application+DB-enforced
-  idempotency key, and explicit states are real and correctly wired at both call sites. But two things
-  R5.4's own text names as required delivery metadata are absent from the actual data: the
-  <code>next_attempt_at</code> column is written for every row and is always <code>NULL</code>, including
-  on <code>retrying</code> rows, contradicting this change's own design doc; and there is no error
-  classification anywhere — only a raw, unclassified error string. Neither is disclosed as deferred in
-  <code>proposal.md</code>'s "out of scope" list, which only defers dead-lettering, an ack protocol, and
-  operator surfaces. This is the "green tests, quietly incomplete requirement" pattern this project has
-  hit before, just one level more subtle than last time: the code that exists is correct, but part of
-  what R5.4 asked for was never written and nothing failing calls that out.</p>
+  <p><strong>Verdict:</strong> R5.5 is <strong>genuinely met</strong>, not just apparently met. This is the first
+  of the last three R5-bullet reviews where the "green tests, quietly incomplete requirement" pattern
+  (Review 007's <code>next_attempt_at</code>/error-classification gap, the earlier <code>CausationID</code>
+  incident) did not recur. I could not make it recur either: two required mutation tests behaved exactly as the
+  commit message claims (with slightly more test breakage than claimed, not less), and three additional
+  probes I wrote myself — a second dead-letter episode after a failed replay, a replay that itself needs an
+  internal retry before succeeding, and a literal removal of the quarantine-refuses-replay guard — all
+  produced correct behavior or a correctly-failing test. The only real findings are a test-rigor gap (real
+  behavior is correct but under-tested for multi-episode/multi-attempt paths) and one over-cautious assertion
+  that is weaker than it looks. Neither blocks the R5.5 verdict.</p>
 </section>
 
 <section>
   <h2>What I inspected</h2>
   <table>
     <tr><th>Area</th><th>Method</th></tr>
-    <tr><td>The merge itself</td><td><code>git show bde2b2d</code>, <code>git diff bde2b2d^1 bde2b2d^2</code> — read the real diff, not the commit message</td></tr>
-    <tr><td>Store-level delivery logic</td><td>Full read of <code>internal/store/delivery.go</code> and <code>delivery_test.go</code> (234 + 409 lines)</td></tr>
-    <tr><td>Runner call site</td><td>Read <code>internal/runner/runner.go</code> around <code>RunAgentPhase</code>; traced <code>deliverErr</code> through to its <code>return</code>; ran <code>TestAgentPhaseRecordsDurableDelivery</code></td></tr>
-    <tr><td>DAG engine call site</td><td>Read <code>internal/dag/engine.go</code>'s <code>RunStage</code>; traced the <code>DeliverEnvelope</code>-wrapped branch's error back to the caller; grepped for existing test coverage of <code>stage.After</code></td></tr>
-    <tr><td>Build / vet / test</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code> from a clean tree</td></tr>
-    <tr><td>Mutation testing (existing tests)</td><td>Disabled the idempotency skip; separately lowered <code>deliveryMaxAttempts</code> to 1; reverted both with <code>git checkout --</code></td></tr>
-    <tr><td>Coverage gap on the untested call site</td><td>Wrote and ran a throwaway test exercising <code>RunStage</code> with <code>stage.After</code> populated and a pre-existing upstream envelope, then deleted it</td></tr>
-    <tr><td><code>next_attempt_at</code> claim</td><td>Wrote and ran a throwaway test querying the raw SQLite column after a retry, then deleted it</td></tr>
-    <tr><td>Error classification</td><td><code>grep -n "class\|Classif" internal/store/delivery.go</code></td></tr>
-    <tr><td>Scope creep check</td><td><code>grep -rln "dead_letter\|DeadLetter\|Quarantine\|Replay"</code> across <code>internal/</code>, <code>cmd/</code></td></tr>
-    <tr><td>"Reuses R2.4's ceiling" claim</td><td>Read <code>config.ResolvedRetries</code> and <code>deliveryMaxAttempts</code>; checked whether the delivery path calls into config at all</td></tr>
-    <tr><td>v1 parity</td><td>Read <code>/Users/lars/Dev/sergeant/bin/_sgt-response-lock.sh</code> and the <code>sgt-msg-*</code> family</td></tr>
+    <tr><td>The merge itself</td><td><code>git show d0edef7</code>, <code>git diff d0edef7^1 d0edef7^2</code> — read the real diff for all 5 changed files, not the commit message</td></tr>
+    <tr><td>Store-level dead-letter logic</td><td>Full read of <code>internal/store/delivery.go</code> (512 lines) and <code>delivery_test.go</code> (884 lines)</td></tr>
+    <tr><td>Call-site claims</td><td>Read the current <code>internal/runner/runner.go</code> (<code>RunAgentPhase</code>) and <code>internal/dag/engine.go</code> (<code>RunStage</code>) call sites directly, and their diff hunks in the merge</td></tr>
+    <tr><td>Spec-to-test mapping</td><td>Read all 11 Given/When/Then scenarios in <code>specs/dead-lettering/spec.md</code> and matched each to its named test in <code>delivery_test.go</code> one by one</td></tr>
+    <tr><td>Build / vet / test</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code> from a clean tree; also ran the full module's tests verbose to count pass/fail</td></tr>
+    <tr><td>Mutation 1 (per commit message)</td><td>Reverted the dead-lettering branch's <code>deliveryStateDeadLetter</code> back to <code>deliveryStateFailed</code>; ran the suite; reverted with <code>git checkout --</code></td></tr>
+    <tr><td>Mutation 2 (per commit message)</td><td>Removed the <code>case deliveryStateQuarantined</code> branch in <code>ReplayDelivery</code> and, separately, actually admitted <code>quarantined</code> into the "permitted" branch (a truer disabling of the guard); ran the suite each time; reverted both</td></tr>
+    <tr><td>Own mutation: multi-episode dead-letter cycle</td><td>Wrote and ran a throwaway test: dead-letter &rarr; replay fails again (second dead-letter episode) &rarr; quarantine &rarr; replay refused; confirmed correct behavior; deleted the test</td></tr>
+    <tr><td>Own mutation: replay with an internal retry</td><td>Wrote and ran a throwaway test: dead-letter after 3 attempts &rarr; replay fails once, succeeds on its second internal attempt; confirmed attempt numbering continues correctly (4, 5) and the retrying row lands correctly; deleted the test</td></tr>
+    <tr><td>Scope creep / scope gap check</td><td><code>grep -rn "DeliverEnvelope\|ReplayDelivery\|QuarantineDelivery\|UnquarantineDelivery" --include="*.go"</code> excluding tests, across the whole module</td></tr>
+    <tr><td><code>critical=false</code> honesty claim</td><td>Confirmed by reading, not trusting: both production call sites pass a literal <code>true</code>; grepped for any other call site — none exists</td></tr>
+    <tr><td>Migration correctness</td><td>Read <code>store.go</code>'s <code>migrateAddColumns</code> diff and confirmed <code>Open()</code> always runs it after <code>CREATE TABLE IF NOT EXISTS</code>, so the fresh-create DDL (which omits <code>recovery_instructions</code>) still ends up with the column on every open, not just upgraded databases</td></tr>
+    <tr><td>Dead code check</td><td>Read <code>insertDeliveryRowWithInstr</code> — confirmed it is a byte-for-byte pass-through of <code>insertDeliveryRow</code> with an identical signature, hiding no divergent behavior</td></tr>
   </table>
 </section>
 
 <section>
   <h2>Findings</h2>
 
-  <div class="item bad">
-    <h3><span class="sev high">high</span> &nbsp; <code>next_attempt_at</code> is never populated — contradicts this change's own design doc and R5.4's text</h3>
-    <p><code>design.md</code> states plainly: "the delivery transitions to <code>retrying</code> with
-    <code>next_attempt_at</code> set". It is not set. <code>insertDeliveryRow</code>'s <code>INSERT</code>
-    statement never lists the column, on any state, including <code>retrying</code>:</p>
-    <pre>internal/store/delivery.go:99-104
-INSERT INTO deliveries
- (id, envelope_id, consumer, state, attempt, error, idempotency_key, created_at, updated_at)
- VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                              ^ next_attempt_at is a real column; it is not in this list, ever
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Exhausted retries genuinely produce <code>dead_letter</code>, not <code>failed</code>, and it is load-bearing</h3>
+    <p>Reverting the exhaustion branch's <code>deliveryStateDeadLetter</code> to <code>deliveryStateFailed</code>
+    broke <strong>9</strong> tests, not the 5 the commit message names (the commit message undersells its own
+    coverage, not oversells it):</p>
+    <pre>git checkout mutation (dead_letter -> failed), go test ./internal/store/...:
+  FAIL TestDeliveryRetryExhaustionIsDeadLetter
+  FAIL TestDeliveryErrorIsClassified
+  FAIL TestDeadLetterExhaustedRetriesProducesDeadLetterNotFailed   (s-1)
+  FAIL TestDeadLetterRecordNamesEnvelopeReasonAndRecoveryInstructions (s-2)
+  FAIL TestDeadLetterNonCriticalDoesNotFailCallerButIsRecorded     (s-5)
+  FAIL TestDeadLetterCanBeReplayed                                 (s-6)
+  FAIL TestDeadLetterAlreadyResolvedIsNotReplayedTwice             (s-8)
+  FAIL TestDeadLetterCanBeQuarantinedWithReason                    (s-9)
+  FAIL TestDeadLetterQuarantinedDeliveryRefusesReplay              (s-11)
+tree restored with git checkout --; go build ./... clean after</pre>
+    <p class="small">The row genuinely carries the envelope id, the classified error, and a non-empty
+    <code>recovery_instructions</code> string (<code>TestDeadLetterRecordNamesEnvelopeReasonAndRecoveryInstructions</code>,
+    verified by reading the assertions, not just the test name). Prior attempt rows (pending, two retrying
+    rows) are retained alongside the dead-letter row, not replaced — confirmed by reading
+    <code>TestDeadLetterAttemptHistoryIsRetained</code> and independently by inspecting raw history output
+    in my own throwaway tests.</p>
+  </div>
 
-verified live (throwaway test, reverted):
-  state=pending   next_attempt_at=NULL error=""
-  state=retrying  next_attempt_at=NULL error="fail once"
-  state=delivered next_attempt_at=NULL error=""</pre>
-    <p class="small">R5.4's own text requires "lease/next-attempt timestamps" as part of what a delivery
-    record carries. <code>proposal.md</code>'s out-of-scope list defers dead-lettering, the ack protocol,
-    and operator surfaces — it does not defer this field. No test in <code>delivery_test.go</code> asserts
-    on <code>NextAttemptAt</code> at all, so nothing in the merged suite could have caught this. This is
-    not a design tradeoff that was made and documented (the "no sleep between retries" tradeoff in
-    <code>design.md</code> is explicitly documented and reasonable); this is the documented design not
-    matching the shipped code, on a field the requirement names explicitly.</p>
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Both call sites really pass <code>critical=true</code>, and <code>critical=false</code> is real, tested, and unused in production — exactly as claimed</h3>
+    <pre>internal/runner/runner.go:432:  pr.Store.DeliverEnvelope(envelopeID, pr.RepoName, true, func() error {...})
+internal/dag/engine.go:291:     e.Store.DeliverEnvelope(latestEnv.ID, worktreePath, true, func() error {...})
+
+grep -n "DeliverEnvelope" --include=*.go (excluding tests): only the two lines above
+  plus delivery.go's own definition/doc comments. No third call site.</pre>
+    <p class="small"><code>TestDeadLetterCriticalFailsCaller</code> (s-4) and
+    <code>TestDeadLetterNonCriticalDoesNotFailCallerButIsRecorded</code> (s-5) both genuinely exercise the
+    flag: s-4 asserts a non-nil error, s-5 asserts a nil error <em>and</em> that the dead-letter row still
+    exists — this is the distinction the spec draws explicitly ("a silently dropped notification and a
+    non-critical dead letter must not look the same from the store's point of view"), and the test checks
+    both halves, not just the return value. The honest-partial framing in <code>proposal.md</code>
+    ("mechanism real and tested, not yet exercised by any caller") is accurate; there is no hidden third
+    call site that secretly passes <code>false</code>.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; The quarantine-refuses-replay guard is a real guard, confirmed by actually disabling it</h3>
+    <p>My first attempt at this mutation (removing the <code>case deliveryStateQuarantined</code> arm from
+    <code>ReplayDelivery</code>'s switch) did <em>not</em> break any test, because the <code>switch</code>'s
+    <code>default</code> arm also refuses (any state that isn't <code>dead_letter</code>/<code>delivered</code>/
+    <code>acknowledged</code>/<code>""</code> falls through to the same "not dead_letter" refusal). That is
+    not a bug — refusal is still correctly enforced either way — but it means that specific code path is not
+    uniquely exercised by that mutation. I then made the guard <em>actually</em> permit a quarantined
+    delivery to replay (added <code>deliveryStateQuarantined</code> to the "permitted" case), which is a
+    faithful reproduction of "disable the guard":</p>
+    <pre>mutation: `case deliveryStateDeadLetter, deliveryStateQuarantined: // permitted`
+  -> FAIL TestDeadLetterQuarantinedDeliveryRefusesReplay (s-11)
+     "expected error when replaying a quarantined delivery, got nil"
+     "row count changed after refused replay: before=5 after=7"
+tree restored with git checkout --</pre>
+    <p class="small">So the guard is real and load-bearing, matching the commit message's claim, via the
+    row-count and call-count assertions in the same test. The mechanism works; see the next item for the
+    one assertion in that same test that is weaker than it looks.</p>
   </div>
 
   <div class="item warn">
-    <h3><span class="sev med">medium</span> &nbsp; No error classification anywhere — only a raw error string</h3>
-    <p>R5.4: "... consumer identity, and error classification." <code>delivery.go</code> has one
-    <code>error TEXT</code> column, populated with <code>lastErr.Error()</code> verbatim. There is no
-    enum, tag, or derived category (transient vs. permanent, I/O vs. validation, etc.) anywhere in the
-    file — confirmed by <code>grep -n "class\|Classif" internal/store/delivery.go</code>, zero hits. A raw
-    message is useful to a human reading the row, but it is not a classification, and nothing computes
-    one. This may be intended to land with bullet 3 (dead-lettering, which needs a "reason" per R5.5), but
-    <code>proposal.md</code> does not say so — it is simply absent from both the proposal's scope and its
-    out-of-scope list.</p>
+    <h3><span class="sev low">low</span> &nbsp; One assertion in s-11's test is weaker than it appears, though the test as a whole is not</h3>
+    <p><code>TestDeadLetterQuarantinedDeliveryRefusesReplay</code> asserts
+    <code>strings.Contains(err.Error(), "quarantine")</code> to check that the refusal "names the
+    quarantine," per the spec text. But the generic fallback error
+    (<code>"...latest state is %q, not dead_letter"</code>, with <code>latest="quarantined"</code>) also
+    contains the substring "quarantine" purely because Go's <code>%q</code> verb quotes the state name
+    itself — so this one assertion would pass even if the explicit <code>case deliveryStateQuarantined</code>
+    branch (with its more specific message, "delivery is quarantined") were deleted and the state fell
+    through to <code>default</code>. It is not, on its own, proof that the code recognizes quarantine as a
+    distinct case rather than an incidental string match. This does not change the verdict: the same test's
+    row-count and call-count assertions (see previous item) do catch a genuine guard removal, so the
+    guarantee the scenario cares about — a quarantined delivery cannot be replayed — is actually verified,
+    just not by the substring check specifically.</p>
   </div>
 
   <div class="item warn">
-    <h3><span class="sev med">medium</span> &nbsp; The DAG-engine call site is correctly wired but has zero test coverage in the merged commit</h3>
-    <p>The commit's whole stated reason for existing is closing "green tests coexisting with an unwired
-    production call site" — and it did close that, but only for one of the two call sites it names.
-    <code>TestAgentPhaseRecordsDurableDelivery</code> genuinely exercises <code>runner.RunAgentPhase</code>
-    end to end. No equivalent exists for <code>dag.Engine.RunStage</code>'s <code>DeliverEnvelope</code>-wrapped
-    <code>InjectHandoffToWorktree</code> branch:</p>
-    <pre>grep -rn "\.After\b" internal/dag/*.go internal/config/*.go
-  internal/config/config_test.go:63-64   <- only tests YAML parsing of After
-  internal/dag/engine.go:281             <- for _, upstream := range stage.After (the code under test)
-  (no dag test ever sets stage.After, so this branch never runs in CI)</pre>
-    <p class="small">I wrote a throwaway test (two upstream/downstream repos, a pre-recorded upstream
-    envelope, <code>stage.After = []string{"upstream"}</code>) and confirmed the branch works correctly:
-    the delivery reaches <code>delivered</code>, and the file lands under
-    <code>.sergeant/handoff/upstream/</code> in the downstream worktree. So this is not the CausationID bug
-    recurring — the code is right — but it shipped unverified by anything in the suite, on the exact call
-    site the commit message singles out by name. The next person to touch this branch has no regression
-    test protecting them.</p>
+    <h3><span class="sev med">medium</span> &nbsp; Multi-episode dead-letter cycles and multi-attempt replays are correct but have zero coverage in the merged suite</h3>
+    <p>The review brief specifically asked about this because it is exactly the kind of edge the shared
+    <code>deliverRetryLoop</code> refactor could get wrong: a delivery that is dead-lettered, replayed, fails
+    again (a second dead-letter episode), and is then quarantined or replayed again; and a replay that itself
+    needs more than one internal attempt before resolving. Neither path is exercised by any test in
+    <code>delivery_test.go</code> — every replay test either succeeds on the replay's first attempt
+    (<code>TestDeadLetterCanBeReplayed</code>, <code>TestDeadLetterAlreadyResolvedIsNotReplayedTwice</code>)
+    or is refused before an attempt is made. I wrote both cases myself:</p>
+    <pre>Second dead-letter episode (dead_letter -> replay fails 3x -> dead_letter -> quarantine -> replay refused):
+  history: pending(1) retrying(2) retrying(3) dead_letter(3)
+           pending(4) retrying(5) retrying(6) dead_letter(6)
+  quarantine succeeds (latest state correctly read as the SECOND dead_letter row, attempt=6)
+  further replay correctly refused
+  -> PASS (mechanism correct)
+
+Replay needing an internal retry (dead_letter after 3 attempts -> replay fails once, succeeds on 2nd try):
+  history: pending(1) retrying(2) retrying(3) dead_letter(3)
+           pending(4) retrying(5) delivered(5)
+  attempt numbering continues correctly from 4, not restarting at 1
+  -> PASS (mechanism correct)
+
+Both throwaway tests written, run, and deleted; tree confirmed clean after (git status --short).</pre>
+    <p class="small"><code>latestDeliveryState</code>'s <code>ORDER BY created_at DESC, id DESC</code>
+    correctly picked the second (later) <code>dead_letter</code> row in the first case, not the first one —
+    the mechanism is correct today. But nothing in the shipped suite protects this correctness going forward:
+    a future change to <code>deliverRetryLoop</code>'s attempt-numbering, or to
+    <code>latestDeliveryState</code>'s ordering, that broke either path would pass the entire merged test
+    file. This is a real coverage gap against the review brief's own stated risk ("check it actually produces
+    correct attempt numbering and history for a replay that itself needs multiple internal attempts, not
+    just a replay that succeeds on the first try") — the code passed my probe, but the shipped tests did not
+    ask the question.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; All 11 spec scenarios map to a real, correctly-matching test</h3>
+    <p>Walked <code>specs/dead-lettering/spec.md</code> scenario by scenario against
+    <code>delivery_test.go</code>:</p>
+    <pre>s-1  exhausted retries -> dead_letter, not failed        TestDeadLetterExhaustedRetriesProducesDeadLetterNotFailed
+s-2  envelope/reason/recovery instructions readable       TestDeadLetterRecordNamesEnvelopeReasonAndRecoveryInstructions
+s-3  attempt history retained                             TestDeadLetterAttemptHistoryIsRetained
+s-4  critical dead letter fails caller                     TestDeadLetterCriticalFailsCaller
+s-5  non-critical: nil to caller, record still exists      TestDeadLetterNonCriticalDoesNotFailCallerButIsRecorded
+s-6  dead letter can be replayed to delivered               TestDeadLetterCanBeReplayed
+s-7  replay refused when not dead_letter, no write          TestDeadLetterReplayRefusedWhenNotDeadLetter
+s-8  already-resolved dead letter not replayed twice         TestDeadLetterAlreadyResolvedIsNotReplayedTwice
+s-9  quarantine with reason, reason reads back               TestDeadLetterCanBeQuarantinedWithReason
+s-10 quarantine refused when not dead_letter, no write        TestDeadLetterQuarantineRefusedWhenNotDeadLetter
+s-11 quarantined delivery refuses replay, no write             TestDeadLetterQuarantinedDeliveryRefusesReplay</pre>
+    <p class="small">Each test's assertions genuinely match its scenario's Given/When/Then, not just its
+    name — I read every assertion, not only the test's title, since that is the exact gap Review 007 found
+    elsewhere in this project.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; No scope creep, and the explicitly-forbidden additions are genuinely absent</h3>
+    <pre>grep -rn "DeliverEnvelope|ReplayDelivery|QuarantineDelivery|UnquarantineDelivery" --include=*.go, excluding tests:
+  -> only internal/store/delivery.go (definitions/docs) and the two production call sites
+  -> no cmd/, no internal/ui, no internal/mcp hit
+  -> no UnquarantineDelivery function exists anywhere
+  -> no background sweep / scheduler touches the deliveries table</pre>
+    <p class="small">Matches <code>tasks.md</code> and <code>proposal.md</code>'s out-of-scope list exactly:
+    CLI/UI/MCP operator surfaces (R5.6, bullet 4), automatic replay sweeps, a configurable criticality
+    policy, and an unquarantine path are all absent, as required. The retry ceiling
+    (<code>deliveryMaxAttempts = 3</code>), idempotency key derivation, and the two wrapped functions'
+    write behavior are untouched by this diff — confirmed by reading the full <code>git diff</code>, not
+    just the file list.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Migration path is correct for both fresh and upgraded databases</h3>
+    <p>The <code>createDeliveriesTable</code> DDL constant itself was <em>not</em> updated to include
+    <code>recovery_instructions</code> — only <code>migrateAddColumns</code> gained a new
+    <code>{"deliveries", "recovery_instructions", "ALTER TABLE ..."}</code> entry, following the same
+    pattern already used for <code>error_class</code>. This looked at first read like it might leave a
+    freshly-created database without the column, but <code>Open()</code> unconditionally runs
+    <code>migrateAddColumns()</code> immediately after <code>CREATE TABLE IF NOT EXISTS</code> on every
+    open, including the very first one — so a brand-new database and an upgraded one converge on an
+    identical schema. <code>go test ./internal/store/...</code>, which opens a fresh temp-file database per
+    test, passing with <code>RecoveryInstructions</code> populated confirms this in practice, not just by
+    reading the code.</p>
   </div>
 
   <div class="item warn">
-    <h3><span class="sev low">low</span> &nbsp; "Reuses the R2.4 retry ceiling" overstates what actually happened</h3>
-    <p>The commit message and <code>design.md</code> both frame <code>deliveryMaxAttempts = 3</code> as
-    reuse of "the retry ceiling already resolved for R2.4 ... rather than inventing a second one."
-    <code>config.Project.ResolvedRetries</code> is a per-project, YAML-configurable value with no fixed
-    default of 3 baked in, and <code>delivery.go</code> never calls it — <code>deliveryMaxAttempts</code>
-    is an independent, hardcoded <code>const</code>. The number happens to coincide with a plausible R2.4
-    value; the mechanism is not shared, and a project that configures R2.4's <code>retries</code> to
-    something other than 2 (giving 3 total attempts) now has two retry ceilings that can silently diverge.
-    Not a functional defect — a second ceiling is a legitimate design choice, just not the one described.</p>
+    <h3><span class="sev low">low</span> &nbsp; <code>insertDeliveryRowWithInstr</code> is a pointless pass-through wrapper, harmless but worth naming</h3>
+    <p>The task description anticipated this exact function might "hide" something. It doesn't — it is a
+    byte-for-byte forward of every argument to <code>insertDeliveryRow</code>, which itself already gained
+    the <code>recoveryInstr</code> parameter in this same diff. The wrapper's own doc comment
+    ("...accepts an explicit recovery_instructions string...") describes something <code>insertDeliveryRow</code>
+    already does directly. This is dead indirection left over from what was probably an earlier draft of the
+    refactor, not a functional issue — confirmed harmless by direct comparison of the two function bodies.
+    Low severity: worth deleting for clarity, not worth blocking on.</p>
   </div>
 
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; R5.3 — durability and append-only history are real</h3>
-    <p>The <code>deliveries</code> table is genuinely insert-only: no <code>UPDATE</code> statement touches
-    it anywhere in the package. A pending row is provably written before the wrapped attempt resolves —
-    <code>TestDeliveryPendingRowExistsBeforeOutcomeKnown</code> blocks the attempt mid-flight on a channel
-    and reads the row while it is still pending, which is a real concurrency test, not a sequencing
-    assumption. Migration is wired correctly for pre-existing databases via
-    <code>migrateAddTables</code>, confirmed by reading <code>store.go:331-336</code>.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Both real call sites are actually wired, not just present in the diff</h3>
-    <p>This is the exact bug class the review brief asked to hunt for again (after the earlier
-    <code>CausationID</code> incident), and it did not recur in the same shape. In
-    <code>runner.go</code>, <code>deliverErr</code> is captured separately from the agent's own
-    <code>lastErr</code> and returned from <code>RunAgentPhase</code> on the success path
-    (<code>runner.go:496-498</code>); that return is not swallowed by <code>dag/engine.go:352-355</code>,
-    which wraps it and returns it up through <code>RunStage</code>. In <code>engine.go</code>, the
-    <code>DeliverEnvelope</code>-wrapped injection's error is returned directly
-    (<code>engine.go:291-295</code>). Neither site discards the error with <code>_ =</code> anymore, and I
-    traced both all the way to their eventual caller rather than stopping at the call site itself.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Retry and idempotency are real, checked by mutation</h3>
-    <pre>mutation 1: comment out the idempotency `if already { return nil }` skip
-  -> FAIL TestDeliveryIdempotencyAfterSuccess
-  -> FAIL TestDeliveryIdempotencyKeyIsDerived
-     (caught via the DB's UNIQUE constraint on idempotency_key, not a clean
-      app-level rejection — the partial unique index is doing real work here)
-
-mutation 2: deliveryMaxAttempts 3 -> 1
-  -> FAIL TestDeliveryHistoryRetainedNotOverwritten
-  -> FAIL TestDeliveryAttemptCountIncrementsWithRetry
-  -> FAIL TestDeliveryRetriesUpToBound
-  -> FAIL TestDeliveryThreeAttemptsShowsFullHistory
-
-tree restored both times; go build ./... clean after each</pre>
-    <p class="small">Worth naming precisely: the idempotency guarantee here protects the <em>record</em> (a
-    second delivery cannot be recorded as delivered twice) via a DB-level partial unique index as backstop
-    behind the application check — described accurately in the code's own comments as closing a
-    check-then-insert race. It does not, by itself, prevent the wrapped <code>attempt()</code> side effect
-    from running twice if two callers raced for the same key before either reached the terminal insert;
-    the second caller's <code>attempt()</code> would still have run before its <code>delivered</code> row
-    is rejected. This is not exploitable today because both real call sites run synchronously,
-    single-goroutine, inside one phase's execution — but it is a latent gap if this mechanism is ever
-    reused by a concurrent caller, and it is worth naming now rather than rediscovering later.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; No scope creep into bullets 3/4</h3>
-    <pre>grep -rln "dead_letter\|DeadLetter\|Quarantine\|Replay" internal/ cmd/
-  -> 0 hits outside the state-vocabulary constant list in delivery.go itself
-no CLI/UI/MCP surface reads the deliveries table</pre>
-    <p class="small">Matches <code>tasks.md</code>: dead-lettering, replay/quarantine, and CLI/UI/MCP
-    operator surfaces are correctly left for bullets 3 and 4. <code>acknowledged</code> is in the state
-    vocabulary but nothing drives a row to it, exactly as <code>proposal.md</code> discloses.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Simpler than v1's mechanism, and a fair simplification for now</h3>
-    <p>v1's <code>_sgt-response-lock.sh</code> gets its idempotency guarantee from an flock'd directory plus
-    an archived proof record matched on response id, gate generation, and applied status — real, but
-    bespoke to one handoff and unqueryable as a set. v2's mechanism is one general table any consumer can
-    use, backed by the same store as everything else, which is the right direction for a Go-native
-    rewrite. v1's <code>sgt-msg-*</code> family (also SQLite-backed) has no retry/backoff/dead-letter
-    concept at all — v2's state machine and bounded retry are new capability relative to v1, not parity
-    work. The design doc's rejection of a background outbox dispatcher for two synchronous, in-process
-    call sites is reasonable and explicitly argued, not just asserted.</p>
+  <div class="item warn">
+    <h3><span class="sev low">low</span> &nbsp; Inherited, not new: <code>ReplayDelivery</code>/<code>QuarantineDelivery</code>'s state-guard check is a non-atomic read-then-insert, same class of gap Review 007 flagged for <code>DeliverEnvelope</code></h3>
+    <p>Both new functions read <code>latestDeliveryState</code>, decide, then insert — with no transaction
+    wrapping the two — so two concurrent callers could both observe <code>dead_letter</code> and one insert a
+    <code>quarantined</code> row while the other's replay attempt is already in flight, producing a history
+    where "latest state" briefly disagrees with what an operator intended. This is not exploitable today:
+    <code>ReplayDelivery</code> and <code>QuarantineDelivery</code> have zero callers anywhere in the
+    codebase (bullet 4/R5.6 has not landed), so there is no concurrent caller to race. This is the same
+    tradeoff Review 007 named for <code>DeliverEnvelope</code>'s idempotency check, extended to two more
+    functions built on the same pattern, and it is equally undisclosed in <code>proposal.md</code> as a
+    known limitation. Worth naming now, as Review 007 did, rather than rediscovering it once bullet 4 adds a
+    caller.</p>
   </div>
 </section>
 
@@ -242,47 +287,53 @@ no CLI/UI/MCP surface reads the deliveries table</pre>
   <h2>Evidence index</h2>
   <table>
     <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
-    <tr><td>Build/vet/test clean</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 9/9 packages</td></tr>
-    <tr><td>Deliveries are append-only</td><td>read every writer in <code>delivery.go</code></td><td>insert-only, confirmed</td></tr>
-    <tr><td>Pending row precedes outcome</td><td><code>TestDeliveryPendingRowExistsBeforeOutcomeKnown</code>, a real concurrency test</td><td>pass</td></tr>
-    <tr><td>Runner call site wired to its caller</td><td>traced <code>deliverErr</code> return through <code>engine.go:352-355</code></td><td>confirmed, not swallowed</td></tr>
-    <tr><td>DAG engine call site wired to its caller</td><td>read <code>engine.go:291-295</code></td><td>confirmed, not swallowed</td></tr>
-    <tr><td>DAG engine call site actually works</td><td>throwaway test, two-repo handoff, reverted after</td><td>pass — untested in the merged suite, but correct</td></tr>
-    <tr><td>Idempotency mutation</td><td>disabled the skip; reverted</td><td>2 tests failed as expected (via DB constraint)</td></tr>
-    <tr><td>Retry-ceiling mutation</td><td><code>deliveryMaxAttempts</code> 3&rarr;1; reverted</td><td>4 tests failed as expected</td></tr>
-    <tr><td><code>next_attempt_at</code> is populated</td><td>throwaway test reading the raw column after a retry; reverted</td><td><strong>fail — always NULL</strong></td></tr>
-    <tr><td>Error classification exists</td><td><code>grep -n "class\|Classif" delivery.go</code></td><td><strong>fail — 0 hits</strong></td></tr>
-    <tr><td>No scope creep into bullets 3/4</td><td><code>grep -rln "dead_letter\|Quarantine\|Replay"</code></td><td>none found outside the enum</td></tr>
+    <tr><td>Build/vet/test clean</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 9/9 packages, 242 tests</td></tr>
+    <tr><td>Exhaustion produces <code>dead_letter</code> not <code>failed</code>, load-bearing</td><td>reverted to <code>failed</code>; reverted back</td><td>9 tests failed (commit message under-claimed at 5)</td></tr>
+    <tr><td>Quarantine-refuses-replay guard is real</td><td>admitted <code>quarantined</code> into the permitted branch; reverted</td><td>s-11 failed on row/call-count assertions, as claimed</td></tr>
+    <tr><td>s-11's substring assertion alone is weak</td><td>removed only the specific <code>case</code> arm (fell to <code>default</code>); reverted</td><td>no test failed — that one assertion alone would not have caught it</td></tr>
+    <tr><td>Both call sites pass <code>critical=true</code> literally</td><td>read <code>runner.go:432</code>, <code>engine.go:291</code> directly</td><td>confirmed, no hidden third call site</td></tr>
+    <tr><td>Second dead-letter episode + quarantine after failed replay</td><td>throwaway test, written/run/deleted</td><td>pass — correct, but untested in merged suite</td></tr>
+    <tr><td>Replay needing an internal retry (fail-then-succeed)</td><td>throwaway test, written/run/deleted</td><td>pass — correct, but untested in merged suite</td></tr>
+    <tr><td>No scope creep into bullet 4 (CLI/UI/MCP), no Unquarantine, no sweep</td><td><code>grep -rn</code> across the module excluding tests</td><td>confirmed absent</td></tr>
+    <tr><td>Migration adds <code>recovery_instructions</code> to both fresh and upgraded DBs</td><td>read <code>Open()</code>'s call order; ran the suite against fresh temp DBs</td><td>confirmed correct</td></tr>
+    <tr><td><code>insertDeliveryRowWithInstr</code> hides no divergent behavior</td><td>direct comparison against <code>insertDeliveryRow</code></td><td>confirmed pure pass-through</td></tr>
   </table>
 </section>
 
 <section>
   <h2>Verdict</h2>
-  <div class="item bad">
-    <p><strong>R5.3: genuinely met.</strong> Append-only, durably persisted before acknowledgement, survives
-    process exit in the sense that matters (it is a committed SQLite row, not in-memory state) — verified
-    by reading every write path and by a real concurrency test, not by trusting the test suite's name.</p>
-    <p><strong>R5.4: only apparently fully met.</strong> State machine, attempt counting, consumer identity,
-    bounded retry, and a derived idempotency key are real and correctly wired at both call sites named in
-    the commit message. But two things R5.4's own sentence requires — lease/next-attempt timestamps and
-    error classification — are not actually produced by the shipped code, and nothing in the 409-line test
-    file would have caught either absence, because nothing asserts on those fields. The green suite proves
-    the parts of R5.4 that were tested, not all of R5.4.</p>
-    <p class="small">Severity-ranked: (1) <code>next_attempt_at</code> always <code>NULL</code>, contradicting
-    the change's own design doc — high, because it is a factual claim in the design doc that is simply
-    false against the shipped code, on a field the requirement names by name; (2) no error classification —
-    medium, plausibly deferred to bullet 3 but not stated as such; (3) the DAG-engine call site's total lack
-    of test coverage — medium, because it is exactly the class of risk this commit exists to close, just not
-    fully closed; (4) the "reuses R2.4's ceiling" claim and the record-level-only idempotency guarantee are
-    both low severity — accurate enough in practice today, worth naming, not worth blocking on.</p>
+  <div class="item ok">
+    <p><strong>R5.5: genuinely met.</strong> Exhausted retries durably produce a <code>dead_letter</code>
+    row (not <code>failed</code>) carrying the envelope reference, classified error, and a non-empty
+    recovery-instructions string; the <code>critical</code> flag correctly gates whether a dead letter fails
+    its caller, and both real production call sites preserve prior behavior by passing a literal
+    <code>true</code>; <code>ReplayDelivery</code> and <code>QuarantineDelivery</code> are real, correctly
+    state-guarded, auditable actions over the same insert-only history, and both mechanisms hold up under
+    edge cases the merged suite itself does not test (a second dead-letter episode, a replay needing
+    multiple internal attempts) — I verified this myself rather than trusting the absence of a failing test.
+    All 11 spec scenarios have a test that genuinely matches its Given/When/Then, not just its name. No
+    scope creep into bullet 4's CLI/UI/MCP surfaces, no <code>UnquarantineDelivery</code>, no automatic
+    replay sweep.</p>
+    <p class="small">Severity-ranked residual findings, none of which change the verdict: (1) medium —
+    multi-episode dead-letter cycles and multi-attempt replays are correct but have zero test coverage in
+    the merged suite, so a future regression in <code>deliverRetryLoop</code>'s attempt-numbering or
+    <code>latestDeliveryState</code>'s ordering would not be caught; (2) low — one assertion inside s-11's
+    test (a substring check for "quarantine" in the error message) is weaker than it looks and would not by
+    itself catch the removal of the specific quarantine-detection branch, though the same test's other
+    assertions do; (3) low — <code>insertDeliveryRowWithInstr</code> is dead pass-through indirection,
+    harmless; (4) low, inherited from bullet 2 — the state-guard read-then-insert in
+    <code>ReplayDelivery</code>/<code>QuarantineDelivery</code> is not atomic, a latent gap once bullet 4
+    gives these functions a concurrent caller, not exploitable today.</p>
   </div>
 </section>
 
 <footer>
-  <p class="meta">Review 007 · findings above are reproduced from commands run against <code>bde2b2d</code>
-  (merge) / <code>5289d83</code> (feature commit) · two throwaway verification tests were written, run, and
-  deleted; the working tree was confirmed clean (<code>git status --short</code>) before and after every
-  mutation.</p>
+  <p class="meta">Review 008 · findings above are reproduced from commands run against <code>d0edef7</code>
+  (merge) / <code>03c8d50</code> (feature commit) · three throwaway verification tests were written, run, and
+  deleted; two required mutations (dead_letter&rarr;failed, quarantine-guard removal) plus one exploratory
+  mutation (a no-op removal of just the switch <code>case</code> arm) were applied and reverted with
+  <code>git checkout --</code>; the working tree was confirmed clean (<code>git status --short</code>) before
+  and after every mutation.</p>
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 

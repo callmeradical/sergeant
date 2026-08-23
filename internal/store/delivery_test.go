@@ -863,9 +863,13 @@ func TestDeadLetterQuarantinedDeliveryRefusesReplay(t *testing.T) {
 	if err == nil {
 		t.Error("s-11: expected error when replaying a quarantined delivery, got nil")
 	}
-	// The error must mention quarantine.
-	if err != nil && !strings.Contains(err.Error(), "quarantine") {
-		t.Errorf("s-11: expected error to mention quarantine, got: %v", err)
+	// The error must come from the quarantine-specific branch, not merely
+	// mention the state name in passing — "latest state is \"quarantined\",
+	// not dead_letter" would also match a bare substring check for
+	// "quarantine" if that branch were ever deleted and fell through to the
+	// generic not-dead_letter message, silently losing this guard.
+	if err != nil && !strings.Contains(err.Error(), "delivery is quarantined") {
+		t.Errorf("s-11: expected the quarantine-specific error, got: %v", err)
 	}
 	if called {
 		t.Error("s-11: attempt function must not be called when replay is refused for quarantined delivery")
@@ -879,5 +883,128 @@ func TestDeadLetterQuarantinedDeliveryRefusesReplay(t *testing.T) {
 	if len(rowsAfter) != len(rowsBefore) {
 		t.Errorf("s-11: row count changed after refused replay: before=%d after=%d (history: %v)",
 			len(rowsBefore), len(rowsAfter), stateList(rowsAfter))
+	}
+}
+
+// TestDeadLetterReplayThatItselfFailsRepeatedlyThenSucceeds covers a replay
+// that needs more than one internal attempt before it resolves — not just a
+// replay that succeeds on its first try. Regression for Review 008, which
+// verified this case by hand with a throwaway test but found zero coverage
+// for it in the merged suite: a future regression in deliverRetryLoop's
+// shared attempt-numbering logic could pass every other test and still be
+// broken here.
+func TestDeadLetterReplayThatItselfFailsRepeatedlyThenSucceeds(t *testing.T) {
+	st, envID := openDeliveryTestStore(t)
+	const consumer = "/fleet/run-del-1/dl-replay-retries"
+
+	// Exhaust the original delivery's retries (3 attempts, all fail) to reach
+	// dead_letter.
+	originalCalls := 0
+	if err := st.DeliverEnvelope(envID, consumer, true, func() error {
+		originalCalls++
+		return errors.New("original failure")
+	}); err == nil {
+		t.Fatal("expected the original delivery to exhaust and return an error")
+	}
+	if originalCalls != 3 {
+		t.Fatalf("expected 3 original attempts, got %d", originalCalls)
+	}
+
+	// Replay: fails twice, then succeeds on its third internal attempt.
+	replayCalls := 0
+	err := st.ReplayDelivery(envID, consumer, func() error {
+		replayCalls++
+		if replayCalls < 3 {
+			return errors.New("replay attempt failed")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected the replay to eventually succeed, got error: %v", err)
+	}
+	if replayCalls != 3 {
+		t.Fatalf("expected 3 replay attempts, got %d", replayCalls)
+	}
+
+	history, herr := st.ListDeliveryHistory(envID, consumer)
+	if herr != nil {
+		t.Fatal(herr)
+	}
+	last := history[len(history)-1]
+	if last.State != deliveryStateDelivered {
+		t.Fatalf("expected final state delivered, got %q (history: %v)", last.State, stateList(history))
+	}
+
+	// Attempt numbers must keep climbing across the replay, not restart at 1 —
+	// a replay is a continuation of the same delivery's history, not a fresh one.
+	prev := 0
+	for i, r := range history {
+		if r.Attempt < prev {
+			t.Errorf("row %d (%s): attempt %d < previous attempt %d, not monotonic across the replay", i, r.State, r.Attempt, prev)
+		}
+		prev = r.Attempt
+	}
+	if last.Attempt <= 3 {
+		t.Errorf("expected the replay's final attempt number to exceed the original 3 attempts, got %d", last.Attempt)
+	}
+}
+
+// TestDeadLetterMultipleEpisodesThenQuarantine covers a delivery that is
+// dead-lettered, replayed, fails again (a second dead-letter episode), and is
+// then quarantined — checking that latestDeliveryState still identifies the
+// true latest row across multiple episodes rather than an earlier one.
+// Regression for Review 008, which verified this by hand but found it
+// uncovered in the merged suite.
+func TestDeadLetterMultipleEpisodesThenQuarantine(t *testing.T) {
+	st, envID := openDeliveryTestStore(t)
+	const consumer = "/fleet/run-del-1/dl-multi-episode"
+
+	// First episode: exhaust retries to dead_letter.
+	if err := st.DeliverEnvelope(envID, consumer, true, func() error {
+		return errors.New("first failure")
+	}); err == nil {
+		t.Fatal("expected the first delivery to exhaust and return an error")
+	}
+
+	// Replay fails again — a second dead_letter episode.
+	if err := st.ReplayDelivery(envID, consumer, func() error {
+		return errors.New("second failure")
+	}); err == nil {
+		t.Fatal("expected the replay to exhaust again and return an error")
+	}
+
+	history, herr := st.ListDeliveryHistory(envID, consumer)
+	if herr != nil {
+		t.Fatal(herr)
+	}
+	deadLetterCount := 0
+	for _, r := range history {
+		if r.State == deliveryStateDeadLetter {
+			deadLetterCount++
+		}
+	}
+	if deadLetterCount != 2 {
+		t.Fatalf("expected 2 dead_letter episodes in history, got %d (history: %v)", deadLetterCount, stateList(history))
+	}
+
+	// Quarantine must succeed: the LATEST row is dead_letter (the second
+	// episode), even though an earlier dead_letter row also exists.
+	if err := st.QuarantineDelivery(envID, consumer, "gave up after two episodes"); err != nil {
+		t.Fatalf("expected quarantine to succeed after the second dead_letter episode, got: %v", err)
+	}
+
+	historyAfter, herr2 := st.ListDeliveryHistory(envID, consumer)
+	if herr2 != nil {
+		t.Fatal(herr2)
+	}
+	last := historyAfter[len(historyAfter)-1]
+	if last.State != deliveryStateQuarantined {
+		t.Fatalf("expected final state quarantined, got %q (history: %v)", last.State, stateList(historyAfter))
+	}
+
+	// A further replay must now be refused — quarantine wins over the fact
+	// that dead_letter rows exist in the history.
+	if err := st.ReplayDelivery(envID, consumer, func() error { return nil }); err == nil {
+		t.Error("expected replay to be refused after quarantine, even with prior dead_letter episodes in history")
 	}
 }
