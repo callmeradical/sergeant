@@ -994,6 +994,98 @@ func (s *Store) UpdateBulletStatus(bulletID, status string) error {
 	})
 }
 
+// AdvanceBulletsForRun moves every bullet the run carries to status, then
+// re-derives the run's intent from those bullets.
+//
+// A bullet belongs to an intent and a run names the intent it serves, so "the
+// bullets of a run" are the bullets of its intent. Advancing and re-deriving in
+// one call is what stops the two records stating different things about the same
+// work: there is no way to move a bullet through this method and leave the intent
+// reading the bullets as they were.
+//
+// It is idempotent. A resumed run reaches its terminal path a second time, and a
+// bullet already holding status is skipped rather than rewritten — rewriting
+// would bump updated_at and publish a transition event for a transition that did
+// not happen.
+func (s *Store) AdvanceBulletsForRun(runID, status string) error {
+	run, err := s.GetRun(runID)
+	if err != nil {
+		return fmt.Errorf("loading run %q to advance its bullets: %w", runID, err)
+	}
+	// Runs written before a dispatch persisted its intent carry no intent id.
+	// Empty means "no intent was recorded", never "the intent is unknown but
+	// exists", so there is nothing to advance and nothing to report.
+	if run.IntentID == "" {
+		return nil
+	}
+
+	bullets, err := s.ListBulletsForIntent(run.IntentID)
+	if err != nil {
+		return fmt.Errorf("listing the bullets of intent %q: %w", run.IntentID, err)
+	}
+	for _, b := range bullets {
+		if b.Status == status {
+			continue
+		}
+		if err := s.UpdateBulletStatus(b.ID, status); err != nil {
+			return fmt.Errorf("advancing bullet %q to %q: %w", b.ID, status, err)
+		}
+	}
+
+	_, err = s.RecomputeIntentStatus(run.IntentID)
+	return err
+}
+
+// RecomputeIntentStatus re-reads an intent's status from its bullets and stores
+// the answer, returning it.
+//
+// Intent status is derived, never assigned from a single run's outcome: an intent
+// may span several bullets and several runs, so no one run knows whether the
+// intent is complete. The store writes only when the derived status differs from
+// the stored one, so a recompute that changes nothing announces nothing.
+func (s *Store) RecomputeIntentStatus(intentID string) (string, error) {
+	intent, err := s.GetIntent(intentID)
+	if err != nil {
+		return "", fmt.Errorf("loading intent %q to derive its status: %w", intentID, err)
+	}
+	bullets, err := s.ListBulletsForIntent(intentID)
+	if err != nil {
+		return "", fmt.Errorf("listing the bullets of intent %q: %w", intentID, err)
+	}
+
+	derived := DeriveIntentStatus(bullets)
+	if derived == intent.Status {
+		return derived, nil
+	}
+	if err := s.UpdateIntentStatus(intentID, derived); err != nil {
+		return "", err
+	}
+	return derived, nil
+}
+
+// DeriveIntentStatus reads an intent's status from its bullets.
+//
+// An intent is satisfied only when every one of its bullets is merged, and merged
+// is reachable only from observed pull-request state. Decision D6 says sergeant
+// never merges, so this is what keeps "satisfied" out of reach of any automatic
+// transition: there is no argument to this function that a run outcome alone can
+// produce.
+//
+// The empty case is answered before the rule is applied. "Every bullet is merged"
+// is vacuously true for an empty set, which would silently satisfy an intent that
+// has had no work done against it.
+func DeriveIntentStatus(bullets []BulletRecord) string {
+	if len(bullets) == 0 {
+		return "in_progress"
+	}
+	for _, b := range bullets {
+		if b.Status != "merged" {
+			return "in_progress"
+		}
+	}
+	return "satisfied"
+}
+
 func requireOneRow(res sql.Result, kind, id string) error {
 	n, err := res.RowsAffected()
 	if err != nil {

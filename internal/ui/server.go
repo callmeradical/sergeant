@@ -1467,10 +1467,10 @@ func (srv *Server) executeRun(
 	// operator had stopped.
 	setTerminal := func(status string) {
 		if ctx.Err() != nil {
-			_ = srv.Store.UpdateRunStatus(taskID, "cancelled")
+			srv.recordTerminalRun(taskID, "cancelled")
 			return
 		}
-		_ = srv.Store.UpdateRunStatus(taskID, status)
+		srv.recordTerminalRun(taskID, status)
 	}
 
 	var stages []config.DAGStage
@@ -1508,7 +1508,7 @@ func (srv *Server) executeRun(
 
 	for i := range stages {
 		if ctx.Err() != nil {
-			_ = srv.Store.UpdateRunStatus(taskID, "cancelled")
+			setTerminal("cancelled")
 			return
 		}
 		if err := engine.RunStage(ctx, taskID, &stages[i]); err != nil {
@@ -1521,7 +1521,7 @@ func (srv *Server) executeRun(
 	}
 
 	if ctx.Err() != nil {
-		_ = srv.Store.UpdateRunStatus(taskID, "cancelled")
+		setTerminal("cancelled")
 		return
 	}
 
@@ -1542,6 +1542,60 @@ func (srv *Server) executeRun(
 	})
 
 	setTerminal("passed")
+}
+
+// recordTerminalRun writes a run's terminal status and advances the bullets that
+// status justifies.
+//
+// It is the single place a run's outcome becomes a fact about the work. Before
+// this, a run recorded passed or failed and its bullets stayed exactly as the
+// dispatch wrote them — a row written once and never updated, stating something
+// false for the whole life of the run.
+//
+// The bullet advance follows the run status write and never precedes it. Moving
+// bullets for an outcome the run row does not carry would make the two records
+// disagree about the same run.
+//
+// The intent is not touched here. Its status is derived from the bullets by the
+// store, because an intent may span several bullets and several runs, so no one
+// run knows whether the intent is complete.
+func (srv *Server) recordTerminalRun(runID, status string) {
+	if err := srv.Store.UpdateRunStatus(runID, status); err != nil {
+		log.Printf("sergeant: recording terminal status %s for run %s: %v", status, runID, err)
+		return
+	}
+	bulletStatus, advances := bulletStatusForRunOutcome(status)
+	if !advances {
+		return
+	}
+	if err := srv.Store.AdvanceBulletsForRun(runID, bulletStatus); err != nil {
+		log.Printf("sergeant: advancing the bullets of run %s to %s: %v", runID, bulletStatus, err)
+	}
+}
+
+// bulletStatusForRunOutcome maps a run's terminal status onto the bullet status
+// that outcome justifies. The second return is false when the outcome justifies
+// no move at all, which is not the same as mapping to an unchanged status: it is
+// the statement that this outcome concluded nothing about the bullets.
+//
+// passed becomes green, not sealed and not merged. The documented lifecycle is
+// pending → red → green → sealed → merged, and passing gates means the work
+// exists, not that it was reviewed, submitted or delivered (decision D6). sealed
+// stays owned by the pull-request path and merged by observed PR state.
+//
+// cancelled moves nothing. An operator stopping a run has concluded nothing about
+// the work, and recording failed would assert a judgment the operator did not
+// make. Every outcome not named here is treated the same way, so an outcome this
+// change did not reason about cannot silently be read as failure.
+func bulletStatusForRunOutcome(runStatus string) (string, bool) {
+	switch runStatus {
+	case "passed":
+		return "green", true
+	case "failed":
+		return "failed", true
+	default:
+		return "", false
+	}
 }
 
 // ResumableStatuses are the run statuses a resume accepts.
