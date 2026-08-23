@@ -48,7 +48,7 @@ a{color:var(--muted)}
   <h1>Sergeant v2</h1>
   <p>Independent review. Written by the critic, not the builder.</p>
   <p class="meta">
-    Review 004 · 2026-08-23T02:4xZ · branch <code>v2</code> · head merged · 33 runs recorded
+    Review 005 · 2026-08-23T03:0xZ · branch <code>v2</code> · head merged · 33 runs recorded
   </p>
 </header>
 
@@ -83,6 +83,51 @@ a{color:var(--muted)}
 
 <section>
   <h2>Findings</h2>
+
+  <div class="item bad">
+    <h3><span class="sev high">high</span> &nbsp; goose has never worked in v2 — every dispatch to it died before the model saw anything</h3>
+    <p>Found while switching the factory from opencode to goose. <code>BuildAgentCommand</code>
+    produced <code>goose run &lt;prompt&gt;</code>. <code>goose run</code> has no positional text
+    argument.</p>
+    <pre>$ goose run "Create a file named proof.txt containing the word ok"
+error: unexpected argument 'Create a file named proof.txt...' found
+  -> no file created, the prompt never reached the model</pre>
+    <p class="small"><code>ValidateAgent</code> accepts goose, so sergeant would dispatch happily and
+    report an ordinary agent failure. Nothing distinguished a malformed command from a model that
+    failed. Had the 12 remaining requirements been dispatched to goose first, all of them would have
+    failed this way.</p>
+    <p class="small"><strong>Closed in <code>f148859</code>.</strong> Now
+    <code>goose run --no-session --output-format json -t &lt;prompt&gt;</code>. Omitting
+    <code>-s/--interactive</code> matters as much as the <code>-t</code>: goose stays interactive after
+    processing input, so a headless phase would have waited on a terminal that is not there (R2.3).
+    Verified end to end — first successful goose run under sergeant:</p>
+    <pre>agent build  passed  4s     commit 435b7e1, README edited as asked
+code  build  passed  1s
+code  test   passed  5s
+code  vet    passed  0s</pre>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">designed</span> &nbsp; Cost capture — goose already records it, keyed by a column sergeant controls</h3>
+    <p>Costs were not captured anywhere. They do not need to be invented: goose writes per-session
+    usage and cost to <code>~/.local/share/goose/sessions/sessions.db</code>, and the
+    <code>sessions</code> table carries <code>working_dir</code>. Sergeant gives every run its own
+    worktree, so <code>working_dir</code> is a join key onto a run.</p>
+    <pre>sessions: working_dir, total_tokens, input_tokens, output_tokens,
+          accumulated_cost, cache_read_tokens, cache_write_tokens,
+          provider_name, model_config_json
+
+the goose smoke run above, queried by its worktree:
+  tok 15283  in 15263  out 20  cost $0.093  anthropic</pre>
+    <p class="small">This reuses the existing accounting rather than building a second one. tokenmeter
+    already prices spend across tools and tags it by directory pattern; a rule for the fleet root now
+    attributes dispatched work to the project instead of leaving it untagged. Sergeant's own job is to
+    record the measured tokens against the phase — cost is derived from a price table, and inventing
+    one would breach the rule against recording values not derived from stored state.</p>
+    <p class="small"><strong>Not yet implemented in sergeant.</strong> The design is verified against real
+    data; the store does not yet hold a usage record per phase. This is a new requirement, not one of
+    the 39.</p>
+  </div>
 
   <div class="item bad">
     <h3><span class="sev high">high</span> &nbsp; Install prerequisites describe v1's toolbelt, and are wrong both ways</h3>
@@ -275,6 +320,8 @@ go test ./internal/... -count=1
     <div class="card"><div class="label">Verified unmet</div><div class="value">12</div><div class="small">7 of them are R5 alone</div></div>
     <div class="card"><div class="label">v1 scripts</div><div class="value">33</div><div class="small">34 MCP tools wrapping them</div></div>
     <div class="card"><div class="label">PRD conflicts</div><div class="value"><span class="status warn">2</span></div><div class="small">decisions outran the document</div></div>
+    <div class="card"><div class="label">Factory agent</div><div class="value">goose</div><div class="small">was opencode; goose was broken until <code>f148859</code></div></div>
+    <div class="card"><div class="label">Cost capture</div><div class="value"><span class="status warn">designed</span></div><div class="small">not yet stored per phase</div></div>
   </div>
 
   <h3 style="margin-top:26px">The remaining work, largest first</h3>
@@ -396,7 +443,7 @@ internal/runner/runner.go:72  DefaultAgentTimeout = 0</pre>
 </section>
 
 <footer>
-  <p class="meta">Review 004 · findings above are reproduced from commands run against
+  <p class="meta">Review 005 · findings above are reproduced from commands run against
   <code>e0b4657</code> · no completion is claimed for any item lacking build or test evidence.</p>
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
