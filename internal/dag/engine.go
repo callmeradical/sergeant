@@ -271,8 +271,28 @@ func (e *Engine) RunStage(ctx context.Context, runID string, stage *config.DAGSt
 		// injected into expandPath(repoCfg.Path) — the operator's live checkout — and
 		// ran before any worktree existed, so upstream handoffs landed in the wrong
 		// tree entirely.
+		//
+		// Each injection is now wrapped in DeliverEnvelope when an envelope id is
+		// available for the upstream repo (R5.3, R5.4). The envelope id is resolved
+		// with GetLatestEnvelope; if that lookup fails (no envelope recorded yet for
+		// that upstream — the ordinary case for the first phase of a stage),
+		// InjectHandoffToWorktree is called directly with no delivery record,
+		// exactly as before. Consumer is the downstream worktree path.
 		for _, upstream := range stage.After {
-			_ = e.Router.InjectHandoffToWorktree(upstream, worktreePath)
+			latestEnv, envErr := e.Store.GetLatestEnvelope(runID, upstream)
+			if envErr != nil {
+				// No envelope recorded yet for this upstream repo. Call directly,
+				// untracked — there is nothing to key a delivery record on.
+				if injectErr := e.Router.InjectHandoffToWorktree(upstream, worktreePath); injectErr != nil {
+					return fmt.Errorf("injecting handoff from %s into %s: %w", upstream, worktreePath, injectErr)
+				}
+				continue
+			}
+			if deliverErr := e.Store.DeliverEnvelope(latestEnv.ID, worktreePath, func() error {
+				return e.Router.InjectHandoffToWorktree(upstream, worktreePath)
+			}); deliverErr != nil {
+				return fmt.Errorf("delivering handoff from upstream %s to worktree %s: %w", upstream, worktreePath, deliverErr)
+			}
 		}
 
 		// Seed .sergeant/plan.json BEFORE the first agent phase starts so the

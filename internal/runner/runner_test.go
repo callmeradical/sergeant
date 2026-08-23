@@ -188,6 +188,40 @@ func TestAgentPhaseSuccessStillPasses(t *testing.T) {
 	}
 }
 
+// R5.3/R5.4: RunAgentPhase's SaveEnvelope write is wrapped in DeliverEnvelope,
+// not just exercised by hand-built store calls. This is the same class of gap
+// found in envelope causation wiring: the store-level plumbing can be correct
+// while the real call site still discards its error with "_ = ...".
+func TestAgentPhaseRecordsDurableDelivery(t *testing.T) {
+	dir := t.TempDir()
+	agent := fakeAgent(t, dir, "agent.sh", "echo done")
+	pr, st := newRunner(t, agent, 10*time.Second)
+
+	if _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	envs, err := st.ListEnvelopesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(envs) != 1 {
+		t.Fatalf("expected 1 envelope, got %d", len(envs))
+	}
+
+	history, err := st.ListDeliveryHistory(envs[0].ID, pr.RepoName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) == 0 {
+		t.Fatal("expected delivery history for the phase's envelope, got none — SaveEnvelope is not wired through DeliverEnvelope")
+	}
+	last := history[len(history)-1]
+	if last.State != "delivered" {
+		t.Errorf("expected final delivery state 'delivered', got %q", last.State)
+	}
+}
+
 // R5.2: envelopes published within one run form a causation chain. The first
 // envelope of a run has no cause; a later one names the previous envelope as
 // its cause. This exercises RunAgentPhase itself, not just the store, because
