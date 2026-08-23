@@ -391,6 +391,10 @@ func (s *Store) migrateAddColumns() error {
 		// classification); a database that created the table before this column
 		// existed needs it added explicitly, same as every other column here.
 		{"deliveries", "error_class", "ALTER TABLE deliveries ADD COLUMN error_class TEXT NOT NULL DEFAULT ''"},
+		// recovery_instructions was added by R5.5 dead-lettering; a database that
+		// created the table before this column existed needs it added explicitly.
+		// DEFAULT '' so existing rows read back as empty rather than NULL.
+		{"deliveries", "recovery_instructions", "ALTER TABLE deliveries ADD COLUMN recovery_instructions TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, w := range wanted {
 		has, err := s.hasColumn(w.table, w.column)

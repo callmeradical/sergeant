@@ -429,7 +429,7 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 		// deliverErr is kept separate from lastErr (the agent-phase error) so that
 		// a successful retry does not inherit a previous iteration's lastErr value.
 		var deliverErr error
-		if de := pr.Store.DeliverEnvelope(envelopeID, pr.RepoName, func() error {
+		if de := pr.Store.DeliverEnvelope(envelopeID, pr.RepoName, true, func() error {
 			return pr.Router.SaveEnvelope(&env)
 		}); de != nil {
 			deliverErr = fmt.Errorf("delivering envelope for phase %s on %s: %w", phaseName, pr.RepoName, de)
