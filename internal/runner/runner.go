@@ -220,7 +220,22 @@ func BuildAgentCommand(agentCLI, model, prompt string) (string, []string, []stri
 		args = append(args, prompt)
 
 	case "goose":
-		args = []string{"run", prompt}
+		// `goose run` takes -t/--text or -i/--instructions; it has no positional
+		// text argument. The previous form, `goose run <prompt>`, was rejected
+		// outright with "error: unexpected argument", so every goose dispatch
+		// failed in a way indistinguishable from the agent itself failing. goose
+		// had never worked in v2.
+		//
+		// --no-session keeps a dispatched run from leaving session state behind,
+		// and omitting -s/--interactive matters more: goose continues in
+		// interactive mode after processing its input, which in a headless run
+		// means the phase waits on a terminal that is not there (R2.3).
+		//
+		// --output-format json makes goose's own per-session usage and cost
+		// reachable from the phase. goose records total/input/output tokens and
+		// accumulated_cost itself; asking for JSON is what keeps it from being
+		// discarded.
+		args = []string{"run", "--no-session", "--output-format", "json", "-t", prompt}
 		if model != "" {
 			env = append(env, fmt.Sprintf("GOOSE_MODEL=%s", model))
 		}
