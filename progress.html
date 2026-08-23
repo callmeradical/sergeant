@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="60">
+<title>Sergeant v2 — Review</title>
+<style>
+:root{--bg:#f5f4ed;--ink:#351e1c;--muted:#733635;--line:#a0c9cb;--accent:#ff6037;--ok:#2d6a4f;--warn:#9a6700;--bad:#a4133c}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:940px;margin:0 auto;padding:42px 24px 72px}
+header{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:28px}
+h1{font-weight:300;letter-spacing:-.04em;font-size:clamp(2.3rem,6vw,4.4rem);line-height:1;margin:0 0 12px}
+h2{font-size:1rem;text-transform:uppercase;letter-spacing:.12em;margin:0 0 14px;color:var(--muted)}
+h3{font-size:.95rem;margin:0 0 4px}
+p{margin:6px 0}
+.meta{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--muted)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin:22px 0}
+.card{border:1px solid var(--line);padding:16px;background:#faf9f2}
+.label{font-size:.72rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted)}
+.value{font-size:1.1rem;font-weight:600;margin-top:4px}
+.status{display:inline-block;padding:3px 9px;border-radius:99px;font-size:.78rem;font-weight:700;background:#dcefe5;color:var(--ok)}
+.status.warn{background:#fff0c2;color:var(--warn)}
+.status.bad{background:#ffd9e0;color:var(--bad)}
+section{margin:34px 0}
+.item{border-left:3px solid var(--line);padding:9px 14px;margin:12px 0;background:#faf9f2}
+.item.bad{border-color:var(--bad)}
+.item.warn{border-color:var(--warn)}
+.item.ok{border-color:var(--ok)}
+.small{font-size:.88rem;color:var(--muted)}
+code{font:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85em;background:#ececdc;padding:2px 5px}
+pre{background:#2b2b28;color:#e8e6dc;padding:12px 14px;overflow-x:auto;font-size:.78rem;line-height:1.5;margin:8px 0}
+table{border-collapse:collapse;width:100%;font-size:.88rem;margin:10px 0}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+footer{border-top:1px solid var(--line);padding-top:18px;margin-top:44px}
+a{color:var(--muted)}
+.sev{font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;padding:2px 7px;border-radius:3px}
+.sev.high{background:#ffd9e0;color:var(--bad)}
+.sev.med{background:#fff0c2;color:var(--warn)}
+.sev.low{background:#e4e4d8;color:var(--muted)}
+</style>
+</head>
+<body><main>
+
+<header>
+  <h1>Sergeant v2</h1>
+  <p>Independent review. Written by the critic, not the builder.</p>
+  <p class="meta">
+    Review 001 · 2026-08-23T00:48Z · branch <code>v2</code> · head <code>5b0d9bd</code> · 486 commits · 30 runs recorded
+  </p>
+</header>
+
+<section>
+  <h2>Current status</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code></div></div>
+    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code> whole module</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">8/8 pass</span></div><div class="small">128 named tests, <code>-count=1</code></div></div>
+    <div class="card"><div class="label">MCP delivery</div><div class="value"><span class="status bad">broken</span></div><div class="small">config points at a missing binary</div></div>
+  </div>
+  <p><strong>Verdict:</strong> the merged engine work is real and the tests discriminate. One shipped
+  capability is <em>not deliverable</em> to its intended consumer, and two bookkeeping paths are
+  unimplemented, so several records in the product's primary table are permanently wrong.
+  Not complete.</p>
+</section>
+
+<section>
+  <h2>What I inspected</h2>
+  <table>
+    <tr><th>Area</th><th>Method</th></tr>
+    <tr><td>Serving chain for this page</td><td><code>tailscale serve status</code>, <code>lsof</code> on 4387/8787, HTTP fetches</td></tr>
+    <tr><td>Build, vet, test</td><td>Ran all three from a clean tree; vet widened to <code>./...</code>, not just <code>internal/</code></td></tr>
+    <tr><td>Test quality</td><td>Two deliberate mutations, checking that tests fail when behaviour breaks</td></tr>
+    <tr><td>MCP tool reachability</td><td>Spoke JSON-RPC to the built binary and listed tools; resolved <code>mcp.json</code>'s target</td></tr>
+    <tr><td>Intent/bullet lifecycle</td><td>Source search for production callers; counted live rows by status</td></tr>
+    <tr><td>SSE snapshot cost</td><td>Measured bytes on the wire from <code>/api/stream</code></td></tr>
+    <tr><td>OpenSpec state</td><td><code>openspec validate</code> on the remaining open change</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Findings</h2>
+
+  <div class="item bad">
+    <h3><span class="sev high">high</span> &nbsp; The new MCP tools cannot be reached by any client</h3>
+    <p>The native server exposes all 7 tools including the two built for following a run.
+    But <code>mcp.json</code> — the file a client reads — names <code>./bin/sergeant-mcp</code>,
+    <strong>which does not exist</strong>. A client using the documented config starts no server at all.</p>
+    <pre>$ printf '...tools/list...' | sergeant mcp
+   sergeant_status
+   sergeant_get_brief
+   sergeant_run_gates
+   sergeant_emit_envelope
+   sergeant_seal_pr
+   sergeant_run_status      &lt;- new
+   sergeant_run_wait        &lt;- new
+
+$ cat mcp.json  ->  "command": "./bin/sergeant-mcp"
+$ ls -la bin/sergeant-mcp  ->  DOES NOT EXIST</pre>
+    <p class="small">The requirement "an agent can follow a run it dispatched" is implemented and tested
+    at the Go level and undeliverable at the integration level. I previously reported this as
+    "MCP follow tools live". That was wrong: live in the binary, dead in the configuration.
+    Related to the held item A1 (<code>td-ccc18b</code>), whose hold now has a measurable cost.</p>
+  </div>
+
+  <div class="item bad">
+    <h3><span class="sev high">high</span> &nbsp; Nothing advances an intent or a bullet, so the primary table is wrong by design</h3>
+    <p>Dispatch now creates intents and bullets (D4). Nothing ever updates them.
+    <code>UpdateIntentStatus</code> and <code>UpdateBulletStatus</code> have no production callers —
+    only their own definitions and tests.</p>
+    <pre>intents:  in_progress 4   satisfied 2     &lt;- the 2 were set by hand, in SQL
+bullets:  pending     4   merged    4     &lt;- the 4 merged were set by hand, in SQL</pre>
+    <p class="small">Every run that finishes leaves its intent at <code>in_progress</code> forever, including runs
+    that passed and runs that were cancelled. D8 makes the intent the dashboard's primary object, so
+    the primary object will show a status that is false for most rows. This is worse than the pre-D4
+    state: an empty table was honestly empty, whereas a table of permanently <code>in_progress</code>
+    intents asserts something untrue. That conflicts with the standing rule against displaying a value
+    not derived from stored state.</p>
+  </div>
+
+  <div class="item warn">
+    <h3><span class="sev med">medium</span> &nbsp; Every SSE snapshot ships 31 KB, most of it prompt text</h3>
+    <p>Measured: <strong>31,304 bytes</strong> for a snapshot at 30 runs. The payload embeds each run's full
+    <code>brief</code>, and briefs here are multi-paragraph agent prompts. Sent on first connect and on
+    every reconnect or unknown-sequence recovery.</p>
+    <p class="small">Correct but it grows without bound with run count, and it is the exact path a flaky
+    connection retries. The run list does not need the brief; the drawer can fetch it per run.</p>
+  </div>
+
+  <div class="item warn">
+    <h3><span class="sev med">medium</span> &nbsp; The whole working tree is served over the tailnet</h3>
+    <p>This page is served by <code>python3 -m http.server 8787</code> with cwd
+    <code>/Users/lars/Dev/sergeant-v2</code>, proxied by tailscale from <code>:4387</code>.
+    Directory listing is on and source is readable.</p>
+    <pre>/                      -> HTTP 200  (directory listing)
+/internal/ui/server.go -> HTTP 200
+/.git/config           -> HTTP 404  (worktree: .git is a file, not a dir)</pre>
+    <p class="small">Tailnet-only, and no git history is exposed, so this is hygiene rather than an
+    incident. Serving a dedicated directory holding only this page would remove it.</p>
+  </div>
+
+  <div class="item warn">
+    <h3><span class="sev med">medium</span> &nbsp; One OpenSpec change is stuck and cannot archive</h3>
+    <p><code>serve-the-workflow-as-a-graph-definition-per</code> fails validation: no delta specs, no
+    scenarios. Its implementation was merged long ago. The change directory holds only
+    <code>.openspec.yaml</code>.</p>
+    <p class="small">Chain of custody is the stated reason OpenSpec was adopted (§3b). A merged change with no
+    spec is precisely the undocumented work it exists to prevent. Either write the delta specs or set
+    <code>skip_specs: true</code> with a reason.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; The tests discriminate — checked by mutation, not by reading</h3>
+    <p>Green test suites prove little on their own, so I broke the behaviour and confirmed failure.</p>
+    <pre>mutation 1: add "passed" to ResumableStatuses
+  -> FAIL TestResumeRefusesARunThatAlreadyPassed
+  -> FAIL TestTheDrawerRendersFromWhatTheServerActuallyServes
+
+mutation 2: force phasePassed() to always return false
+  -> FAIL TestResumeSkipsPhasesThatAlreadyPassed
+
+tree restored; go build ./... clean</pre>
+    <p class="small">Both mutations were caught, including one caught by a UI-level test, which indicates the
+    server/client rule really is shared rather than duplicated.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Build, vet and tests are genuinely clean</h3>
+    <pre>go build ./...              clean
+go vet ./...                clean   (whole module, not just internal/)
+go test ./internal/... -count=1
+  config 0.26s  dag 2.64s  handoff 0.31s  mcp 1.12s
+  naming 1.29s  runner 2.80s  store 1.66s  ui 3.72s
+  8/8 ok, 128 named tests passing</pre>
+    <p class="small"><code>internal/mcp</code> has tests for the first time. No package reports "no test files".</p>
+  </div>
+</section>
+
+<section>
+  <h2>Evidence index</h2>
+  <table>
+    <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
+    <tr><td>Build and vet clean</td><td><code>go build ./...</code>, <code>go vet ./...</code></td><td>pass</td></tr>
+    <tr><td>Tests pass</td><td><code>go test ./internal/... -count=1</code></td><td>8/8, 128 tests</td></tr>
+    <tr><td>Tests are meaningful</td><td>2 source mutations reverted after</td><td>both caught</td></tr>
+    <tr><td>MCP tools exist</td><td>JSON-RPC <code>tools/list</code> against the binary</td><td>7 tools present</td></tr>
+    <tr><td>MCP tools reachable by a client</td><td>resolve <code>mcp.json</code> command path</td><td><strong>fail — target missing</strong></td></tr>
+    <tr><td>Intent lifecycle advances</td><td>source search for callers; row counts</td><td><strong>fail — no callers</strong></td></tr>
+    <tr><td>Snapshot payload</td><td>byte count from <code>/api/stream</code></td><td>31,304 bytes</td></tr>
+    <tr><td>This page is reachable</td><td>HTTP fetch through the proxy target</td><td>HTTP 200</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Blockers</h2>
+  <div class="item bad">
+    <p><strong>Nothing is blocked on a decision by me.</strong> One item needs an owner's call:
+    A1 / <code>td-ccc18b</code> is held pending graphify, and that hold is what leaves
+    <code>mcp.json</code> pointing at a non-existent v1 proxy. The native server is ready now, so the
+    hold's cost is that a merged, tested capability is unreachable. Holding remains legitimate;
+    it should be a decision rather than an oversight.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Next action</h2>
+  <p>In order, highest severity first:</p>
+  <div class="item"><strong>1. Repoint <code>mcp.json</code> at the native server.</strong>
+  <span class="small">Change the command to the built <code>sergeant mcp</code> subcommand, or build
+  <code>bin/sergeant-mcp</code> from the native path. Verify by listing tools through the config a
+  client would actually load, not by running the binary directly — that is the check that would have
+  caught this.</span></div>
+  <div class="item"><strong>2. Advance intents and bullets from the run lifecycle.</strong>
+  <span class="small">A run reaching a terminal state should move its intent and bullets. Needs a
+  decision on the mapping first, particularly whether a passed run means <code>satisfied</code> or
+  only <code>green</code>, since merging is still a human act (D6). Do not backfill the 4 stuck rows
+  by hand again; the fix is the missing transition, not the rows.</span></div>
+  <div class="item"><strong>3. Resolve the stuck OpenSpec change</strong>
+  <span class="small">— write its delta specs or record a <code>skip_specs</code> reason.</span></div>
+  <div class="item"><strong>4. Drop <code>brief</code> from the stream snapshot</strong>
+  <span class="small">and fetch it per run in the drawer.</span></div>
+  <div class="item"><strong>5. Serve this page from its own directory</strong>
+  <span class="small">rather than the repository root.</span></div>
+</section>
+
+<footer>
+  <p class="meta">Review 001 · findings above are reproduced from commands run against
+  <code>5b0d9bd</code> · no completion is claimed for any item lacking build or test evidence.</p>
+  <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
+</footer>
+
+</main></body>
+</html>

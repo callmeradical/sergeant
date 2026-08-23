@@ -4,6 +4,13 @@
     "sergeant": {
       "type": "stdio",
       "command": "./bin/sergeant-mcp"
+    },
+    "sergeant-v2": {
+      "type": "stdio",
+      "command": "./bin/sergeant",
+      "args": [
+        "mcp"
+      ]
     }
   }
 }

@@ -47,6 +47,9 @@ if command -v go &>/dev/null; then
   (cd "$REPO_DIR" && go build -ldflags="-s -w" -o bin/sergeant-mcp ./cmd/sergeant-mcp/) && \
     echo "  built: $REPO_DIR/bin/sergeant-mcp" || \
     echo "  WARNING: go build failed — sergeant-mcp not available"
+  (cd "$REPO_DIR" && go build -ldflags="-s -w" -o bin/sergeant ./cmd/sergeant/) && \
+    echo "  built: $REPO_DIR/bin/sergeant" || \
+    echo "  WARNING: go build failed — sergeant not available"
 else
   echo ""
   echo "NOTE: go not found — skipping sergeant-mcp build. Install Go 1.21+ and run 'mise run build'."
@@ -324,6 +327,14 @@ echo "Building sergeant-mcp..."
 go build -ldflags="-s -w -X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" \
   -o bin/sergeant-mcp ./cmd/sergeant-mcp/
 echo "Built: bin/sergeant-mcp"
+
+# mcp.json declares two servers, so both binaries must exist or a client fails to
+# start one of them. bin/sergeant serves the native v2 tools, including the run
+# following tools; building only sergeant-mcp is what left it stale at 5 tools
+# while the source had 7.
+echo "Building sergeant (native v2 engine + MCP)..."
+go build -ldflags="-s -w" -o bin/sergeant ./cmd/sergeant/
+echo "Built: bin/sergeant"
 """
 
 [tasks."build:all"]
