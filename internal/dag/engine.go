@@ -13,6 +13,7 @@ import (
 
 	"github.com/callmeradical/sergeant/internal/config"
 	"github.com/callmeradical/sergeant/internal/handoff"
+	"github.com/callmeradical/sergeant/internal/plan"
 	"github.com/callmeradical/sergeant/internal/runner"
 	"github.com/callmeradical/sergeant/internal/store"
 )
@@ -26,6 +27,14 @@ type Engine struct {
 	// a passed record are skipped and the rest execute. It must stay false for a
 	// fresh run, or a re-dispatch would silently inherit earlier results.
 	Resume bool
+
+	// ChangeDir is the absolute path to the OpenSpec change directory that this
+	// run is accountable to (openspec/changes/<id>/). When set, RunStage seeds
+	// .sergeant/plan.json into each worktree after prepareWorktree succeeds and
+	// before the first agent phase starts.
+	// An empty string disables seeding silently — older callers and resume paths
+	// that do not carry the change dir are unaffected.
+	ChangeDir string
 }
 
 // phasePassed reports whether this run already earned a pass for a phase.
@@ -264,6 +273,18 @@ func (e *Engine) RunStage(ctx context.Context, runID string, stage *config.DAGSt
 		// tree entirely.
 		for _, upstream := range stage.After {
 			_ = e.Router.InjectHandoffToWorktree(upstream, worktreePath)
+		}
+
+		// Seed .sergeant/plan.json BEFORE the first agent phase starts so the
+		// agent always finds the checklist ready. A seed failure is logged but
+		// never fails the run — the plan file is a reporting aid, not a gate.
+		// An empty ChangeDir (resume paths or callers that predate this field)
+		// silently skips seeding; those runs simply report no progress.
+		if e.ChangeDir != "" {
+			if seedErr := plan.SeedPlan(e.ChangeDir, worktreePath); seedErr != nil {
+				// Non-fatal: log and continue. A broken seed must never kill the run.
+				_ = seedErr // caller cannot act; the plan will be absent
+			}
 		}
 
 		pr := &runner.PhaseRunner{

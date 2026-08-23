@@ -22,6 +22,39 @@ import (
 // which cannot interpret terminal escapes, so they are stripped at capture time.
 var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][A-Za-z0-9]`)
 
+// planPromptExtension is appended to the agent prompt when .sergeant/plan.json
+// exists in the worktree. It instructs the agent how to report progress against
+// the seeded checklist.
+//
+// Rules reflected in the text:
+//   - Mark a single item "in_progress" when starting it; mark it "complete"
+//     when it is done. At most one item is in_progress at any time.
+//   - Never alter the "id" or "scenario" fields — sergeant uses them as stable
+//     identifiers.
+//   - Sergeant seeds the file and thereafter only reads it. The agent is the
+//     sole writer after seeding.
+const planPromptExtension = `
+
+## Progress reporting
+
+A checklist has been seeded into .sergeant/plan.json in your working directory.
+It contains one item per declared scenario for this change, each with:
+  - "id":       a stable identifier — do not change it
+  - "scenario": the scenario text — do not change it
+  - "status":   one of "pending", "in_progress", or "complete"
+
+As you work, update the file to reflect your progress:
+1. Before starting an item, set its "status" to "in_progress".
+2. When the item is done (test written and passing), set it to "complete".
+3. Only one item should be "in_progress" at a time.
+
+Example update for a single item:
+  {"id": "s-1", "scenario": "The checklist has one item per scenario", "status": "complete"}
+
+Read the file first, update the relevant item, and write the whole file back.
+Do not change any other field. Do not add or remove items.
+`
+
 func stripANSI(s string) string {
 	return ansiEscape.ReplaceAllString(s, "")
 }
@@ -283,6 +316,20 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 	// Create .sergeant state dir in worktree
 	stateDir := filepath.Join(pr.Worktree, ".sergeant")
 	_ = os.MkdirAll(stateDir, 0755)
+
+	// Extend the prompt with progress-reporting instructions when a plan file
+	// was seeded into the worktree. The instructions tell the agent what the
+	// file is, where it lives, and exactly how to update it.
+	//
+	// The extension is added here — after the worktree is available but before
+	// any agent invocation — so every retry attempt receives the same complete
+	// prompt. The plan file itself is not modified here; sergeant only seeds it
+	// (in Engine.RunStage) and thereafter only reads it. The agent is the sole
+	// writer after seeding.
+	planPath := filepath.Join(stateDir, "plan.json")
+	if _, planErr := os.Stat(planPath); planErr == nil {
+		prompt = prompt + planPromptExtension
+	}
 
 	promptFile := filepath.Join(stateDir, fmt.Sprintf("prompt_%s.txt", phaseName))
 	_ = os.WriteFile(promptFile, []byte(prompt), 0644)
