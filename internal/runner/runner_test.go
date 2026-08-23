@@ -188,6 +188,42 @@ func TestAgentPhaseSuccessStillPasses(t *testing.T) {
 	}
 }
 
+// R5.2: envelopes published within one run form a causation chain. The first
+// envelope of a run has no cause; a later one names the previous envelope as
+// its cause. This exercises RunAgentPhase itself, not just the store, because
+// the store-level plumbing can be correct while every real call site still
+// leaves CausationID nil.
+func TestAgentPhaseEnvelopesChainCausation(t *testing.T) {
+	dir := t.TempDir()
+	agent := fakeAgent(t, dir, "agent.sh", "echo done")
+	pr, st := newRunner(t, agent, 10*time.Second)
+
+	first, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	if err != nil {
+		t.Fatalf("unexpected error on first phase: %v", err)
+	}
+	second, err := pr.RunAgentPhase(context.Background(), "test", "brief", 0)
+	if err != nil {
+		t.Fatalf("unexpected error on second phase: %v", err)
+	}
+	_ = first
+	_ = second
+
+	envs, err := st.ListEnvelopesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(envs) != 2 {
+		t.Fatalf("expected 2 envelopes, got %d", len(envs))
+	}
+	if envs[0].CausationID != nil {
+		t.Errorf("first envelope CausationID = %v, want nil (absent)", envs[0].CausationID)
+	}
+	if envs[1].CausationID == nil || *envs[1].CausationID != envs[0].ID {
+		t.Errorf("second envelope CausationID = %v, want pointer to %q", envs[1].CausationID, envs[0].ID)
+	}
+}
+
 // An agent phase has no default deadline. Agent work has no predictable upper
 // bound, and a default budget silently kills productive work: run
 // sgt-1787427981 was killed at exactly the former 10m default having already

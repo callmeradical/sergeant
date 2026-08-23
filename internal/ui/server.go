@@ -641,14 +641,21 @@ func (srv *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 		summary = fmt.Sprintf("PR Ready (Local Branch '%s'): %s", branch, req.Title)
 	}
 
+	prNow := time.Now().UTC()
 	envRec := &store.EnvelopeRecord{
-		ID:        fmt.Sprintf("pr-%s-%d", req.RunID, time.Now().UnixNano()),
-		RunID:     req.RunID,
-		Repo:      req.Repo,
-		Stage:     "review",
-		Summary:   summary,
-		Artifacts: []string{prURL, ".sergeant/review.json"},
-		Data:      json.RawMessage(fmt.Sprintf(`{"pr_url": %q, "branch": %q, "remote_base": %q, "error": %q}`, prURL, branch, remoteBase, prError)),
+		ID:            fmt.Sprintf("pr-%s-%d", req.RunID, prNow.UnixNano()),
+		RunID:         req.RunID,
+		Repo:          req.Repo,
+		Stage:         "review",
+		Summary:       summary,
+		Artifacts:     []string{prURL, ".sergeant/review.json"},
+		Data:          json.RawMessage(fmt.Sprintf(`{"pr_url": %q, "branch": %q, "remote_base": %q, "error": %q}`, prURL, branch, remoteBase, prError)),
+		Type:          "pr.staged",
+		SchemaVersion: "1",
+		OccurredAt:    prNow,
+		Producer:      "sergeant/ui",
+		CorrelationID: req.RunID,
+		CausationID:   srv.Store.CausationFromLatest(req.RunID, req.Repo),
 	}
 	_ = srv.Store.RecordEnvelope(envRec)
 
@@ -1613,14 +1620,21 @@ func (srv *Server) executeRun(
 	// pull request exists — nothing in this path pushes a branch or calls the
 	// GitHub API. Opening the PR is an explicit human action via /api/create-pr.
 	delivery := srv.describeDelivery(proj, taskID)
+	deliveryNow := time.Now().UTC()
 	_ = srv.Store.RecordEnvelope(&store.EnvelopeRecord{
-		ID:        fmt.Sprintf("delivery-%s-%d", taskID, time.Now().UnixNano()),
-		RunID:     taskID,
-		Repo:      delivery.Repo,
-		Stage:     "review",
-		Summary:   delivery.Summary,
-		Artifacts: delivery.Artifacts,
-		Data:      marshalRaw(delivery),
+		ID:            fmt.Sprintf("delivery-%s-%d", taskID, deliveryNow.UnixNano()),
+		RunID:         taskID,
+		Repo:          delivery.Repo,
+		Stage:         "review",
+		Summary:       delivery.Summary,
+		Artifacts:     delivery.Artifacts,
+		Data:          marshalRaw(delivery),
+		Type:          "run.delivered",
+		SchemaVersion: "1",
+		OccurredAt:    deliveryNow,
+		Producer:      "sergeant/ui",
+		CorrelationID: taskID,
+		CausationID:   srv.Store.CausationFromLatest(taskID, delivery.Repo),
 	})
 
 	setTerminal("passed")
