@@ -1,0 +1,3 @@
+## 2025-02-20 - Cache os.Executable resolution in MCP server
+**Learning:** In the Go-based MCP server (`cmd/sergeant-mcp/main.go`), the `scriptDir()` function was making repeated system calls (`os.Executable`, `os.Getwd`, `filepath.EvalSymlinks`) for every single tool invocation. While minor per call, this represents unnecessary filesystem interaction on a highly repetitive path.
+**Action:** When a function relies on static environment properties (like the binary's location) and is called frequently, use `sync.Once` and a package-level variable to cache the result, turning a series of system calls into a fast in-memory lookup.

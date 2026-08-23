@@ -19,14 +19,31 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
+var (
+	scriptDirCached string
+	scriptDirOnce   sync.Once
+)
+
 // scriptDir returns the directory containing this binary, which must be the
 // same bin/ directory that holds the sgt-* shell scripts.
 func scriptDir() string {
+	// Optimization: scriptDir is called on every tool invocation.
+	// We cache the directory path after first resolution to avoid expensive
+	// system calls (os.Executable, os.Getwd, filepath.EvalSymlinks)
+	// for subsequent calls.
+	scriptDirOnce.Do(func() {
+		scriptDirCached = resolveScriptDir()
+	})
+	return scriptDirCached
+}
+
+func resolveScriptDir() string {
 	exe, err := os.Executable()
 	if err != nil {
 		// Fall back to the working directory.
