@@ -48,9 +48,9 @@ a{color:var(--muted)}
   <h1>Sergeant v2</h1>
   <p>Independent review. Written by the critic, not the builder.</p>
   <p class="meta">
-    Review 009 · 2026-08-23 · branch <code>v2</code> · merge <code>b071848</code> reviewed
-    (feature commit <code>84b481d</code> onto <code>d0edef7</code>) ·
-    "phases record their model and provider (R4.6)"
+    Review 010 · 2026-08-23 · branch <code>v2</code> · merge <code>806fb07</code> reviewed
+    (feature commit <code>9ad0ea7</code> onto <code>b957866</code>) ·
+    "dashboard shows delivery history and quarantine (R5.6)" · bullet 4 of 4, closes R5
   </p>
 </header>
 
@@ -60,42 +60,48 @@ a{color:var(--muted)}
     <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code></div></div>
     <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code> whole module</div></div>
     <div class="card"><div class="label">Tests</div><div class="value"><span class="status">9/9 pass</span></div><div class="small"><code>go test ./internal/... -count=1</code>, all packages green</div></div>
-    <div class="card"><div class="label">R4.6 (model/provider provenance)</div><div class="value"><span class="status">genuinely met</span></div><div class="small">all 4 spec scenarios map to real, correct behavior</div></div>
-    <div class="card"><div class="label">Call-site wiring</div><div class="value"><span class="status">both paths real</span></div><div class="small">mutation-tested myself; gating on the wrong branch broke exactly the predicted test</div></div>
+    <div class="card"><div class="label">R5.6 (dashboard delivery history/quarantine)</div><div class="value"><span class="status">genuinely met</span></div><div class="small">all 6 spec scenarios map to real, correct behavior</div></div>
+    <div class="card"><div class="label">Quarantine guard</div><div class="value"><span class="status">not duplicated</span></div><div class="small">mutation-tested myself; bypassing the store error broke the refusal test</div></div>
+    <div class="card"><div class="label">R5 overall (R5.1&ndash;R5.7)</div><div class="value"><span class="status warn">3 of 4 bullets independently reviewed</span></div><div class="small">bullet 1 (R5.1/R5.2/R5.7) has no recorded critic review</div></div>
   </div>
-  <p><strong>Verdict:</strong> R4.6 is <strong>genuinely met</strong>. This is the second consecutive review
-  (after Review 008's R5.5) where the "single call site covers both paths" claim — the exact bug shape that
-  recurred multiple times earlier in this project, including once in an R5.3/R5.4 DAG-engine call site — held
-  up under independent mutation testing rather than only under the builder's own claimed mutation test. I
-  moved <code>annotatePayloadWithProvenance</code>'s call site inside only the synthesized-envelope branch
-  myself, confirmed <code>TestAgentAuthoredEnvelopeStillGetsProvenance</code> failed with exactly the
-  predicted empty model/provider values while the other two provenance-path tests kept passing (proving the
-  suite discriminates precisely on this fault, not coincidentally), then reverted with
-  <code>git checkout --</code> and confirmed a clean tree. I also independently verified the regex's
-  load-bearing claim: the real production <code>sergeant.db</code> contains envelopes from actual historical
-  goose dispatches whose captured <code>raw_output</code> uses the exact byte sequence
-  <code>new session · anthropic claude-sonnet-4-6</code> with U+00B7 MIDDLE DOT — the same character the
-  regex and both test fixtures use, confirmed with Python's <code>unicodedata.name()</code> on the extracted
-  character itself, not assumed from a source comment. No scope creep found. One low-severity, non-blocking
-  observation is noted below.</p>
+  <p><strong>Verdict:</strong> R5.6 is <strong>genuinely met</strong>. <code>ListDeliveriesForRun</code> is a
+  correct <code>INNER JOIN</code> against <code>envelopes</code> filtered by <code>run_id</code>, sharing a new
+  <code>scanDeliveryRow</code> helper with the pre-existing <code>ListDeliveryHistory</code> exactly as
+  design.md specifies; it returns a non-nil empty slice, confirmed at both the store and handler layers and by
+  a test that decodes the actual HTTP JSON body rather than only inspecting the Go slice.
+  <code>handleDeliveryQuarantine</code> is a genuinely thin transport: it calls
+  <code>Store.QuarantineDelivery</code> once, does no pre-check of its own, and forwards the guard's own error
+  text with <code>409</code> instead of a generic <code>500</code>. I mutation-tested this myself by making the
+  handler swallow the store's error and confirmed
+  <code>TestDeliveryQuarantineRefusesNonDeadLetteredDelivery</code> failed exactly as predicted (a
+  non-dead-lettered delivery was silently quarantined), then reverted with <code>git checkout --</code>. The
+  claimed <code>getJSON</code>/<code>getJSONResponse</code> rename is real and leaves no collision. Scope
+  discipline holds: no replay endpoint, no MCP changes, <code>internal/mcp/server.go</code> untouched by the
+  diff. The dashboard wiring is real, not a dead function &mdash; <code>fetchDeliveryHistory</code> is called
+  from <code>selectRun</code> on every run selection, not only when the drawer happens to be open. One
+  pre-existing, non-blocking frontend weakness is noted below, and one process gap in the wider R5 arc is
+  significant enough to note in the overall verdict at the end of this review.</p>
 </section>
 
 <section>
   <h2>What I inspected</h2>
   <table>
     <tr><th>Area</th><th>Method</th></tr>
-    <tr><td>The merge itself</td><td><code>git show b071848</code>, <code>git diff b071848^1 b071848^2</code> — read the real diff (2 files, 318 insertions, 0 deletions), not the commit message</td></tr>
-    <tr><td>Governing docs</td><td>Read <code>docs/prd-sergeant-v2.md</code> R4.6 text, <code>openspec/changes/phases-record-their-model-and-provider/{proposal,design,tasks}.md</code> and <code>specs/phase-provenance/spec.md</code> in full</td></tr>
-    <tr><td><code>detectModelProvider</code></td><td>Read the function and its <code>gooseBanner</code> regexp directly in <code>internal/runner/runner.go</code></td></tr>
-    <tr><td><code>annotatePayloadWithProvenance</code></td><td>Read the function directly; confirmed it unmarshals into <code>map[string]interface{}</code>, allocates on nil (JSON <code>null</code>), sets both keys unconditionally, and returns the original payload unchanged on unmarshal or remarshal error</td></tr>
-    <tr><td>Call-site placement</td><td>Read <code>RunAgentPhase</code> lines 411&ndash;465: <code>detectModelProvider</code> called immediately after <code>cmd.Run()</code>; the <code>if os.ReadFile(...) == nil && !failed {...} else {...}</code> block (agent-authored vs. synthesized) at lines 442&ndash;463; <code>annotatePayloadWithProvenance</code> called once at line 465, after the block, before <code>DeliverEnvelope</code>/<code>SaveEnvelope</code> (482&ndash;484), <code>RecordEnvelope</code> (488) and <code>RecordPhase</code> (523)</td></tr>
+    <tr><td>The merge itself</td><td><code>git show 806fb07</code>, <code>git diff 806fb07^1 806fb07^2</code> &mdash; read the real diff (5 files, 528 insertions), not the commit message</td></tr>
+    <tr><td>Governing docs</td><td>Read <code>docs/prd-sergeant-v2.md</code> R5.6 text, and the full <code>proposal.md</code>/<code>design.md</code>/<code>tasks.md</code>/<code>specs/delivery-surfaces/spec.md</code> under <code>openspec/changes/dashboard-shows-delivery-history-and-quarantine/</code></td></tr>
+    <tr><td><code>ListDeliveriesForRun</code></td><td>Read the SQL directly in <code>internal/store/delivery.go</code>: <code>JOIN envelopes e ON e.id = d.envelope_id WHERE e.run_id = ?</code>, ordered <code>created_at ASC, id ASC</code>, initialized as <code>list := []DeliveryRecord{}</code> before the scan loop</td></tr>
+    <tr><td>Orphan-row risk on the join</td><td>Checked whether any code path deletes an envelope without deleting its run: only <code>Store.DeleteRun</code> deletes envelopes (by <code>run_id</code>), and it deletes the run row itself in the same call &mdash; the run this endpoint would be queried for no longer exists either, so the join cannot silently drop reachable rows. Deliveries are not deleted by <code>DeleteRun</code>, an existing gap unrelated to this diff.</td></tr>
+    <tr><td><code>scanDeliveryRow</code> sharing</td><td>Confirmed both <code>ListDeliveryHistory</code> and <code>ListDeliveriesForRun</code> now call the same extracted helper for the 12-column scan, replacing <code>ListDeliveryHistory</code>'s previously inline scan</td></tr>
+    <tr><td><code>handleDeliveryHistory</code> / <code>handleDeliveryQuarantine</code></td><td>Read both handlers directly in <code>internal/ui/server.go</code>; confirmed the quarantine handler has no guard logic of its own beyond required-field presence, and forwards <code>Store.QuarantineDelivery</code>'s error verbatim with <code>http.StatusConflict</code></td></tr>
+    <tr><td>Own mutation test</td><td>Edited <code>handleDeliveryQuarantine</code> to discard the store's error (<code>_ = err</code>) instead of returning it; ran <code>TestDeliveryQuarantineRefusesNonDeadLetteredDelivery</code>; confirmed it failed with <code>status = 200, want a refusal</code>; reverted with <code>git checkout -- internal/ui/server.go</code>; confirmed a clean tree</td></tr>
+    <tr><td>Empty-result behavior</td><td>Read <code>ListDeliveriesForRun</code>'s <code>list := []DeliveryRecord{}</code> initialization, <code>handleDeliveryHistory</code>'s redundant nil-guard, and <code>TestListDeliveriesForRunEmptyWhenNoDeliveries</code> (Go-level, asserts non-nil) &mdash; no test decodes the HTTP body for the zero-delivery case specifically, though the non-zero case's test does decode real JSON</td></tr>
+    <tr><td><code>getJSON</code> collision claim</td><td><code>grep -rn "func getJSON\b\|func getJSONResponse\|func postJSON"</code> across <code>internal/ui/*_test.go</code>: <code>getJSON</code> (4-arg, <code>fleet_paths_test.go:110</code>, pre-existing) and <code>getJSONResponse</code> (1-arg, <code>server_test.go:857</code>, new) coexist with no name collision and no leftover references to a renamed identifier</td></tr>
+    <tr><td>Frontend escaping</td><td>Read <code>deliveryRowHTML</code>/<code>deliveriesHTML</code> in <code>internal/ui/static/index.html</code>: every interpolated value (<code>look.label</code>, <code>created_at</code>, <code>consumer</code>, <code>attempt</code>, <code>error</code>, <code>error_class</code>, <code>recovery_instructions</code>) passes through <code>escapeHTML</code>/<code>escapeAttr</code>, matching <code>activityHTML</code>'s convention</td></tr>
+    <tr><td>Quarantine button wiring</td><td>Confirmed <code>onclick="quarantineDelivery('${escapeAttr(d.envelope_id)}', '${escapeAttr(d.consumer)}')"</code> passes both required arguments, and <code>quarantineDelivery</code> POSTs <code>{envelope_id, consumer, reason}</code> matching the handler's expected body exactly</td></tr>
+    <tr><td>Fetch-on-open, not a dead function</td><td>Traced <code>fetchDeliveryHistory</code>'s only call site: <code>selectRun(runId)</code>, called whenever a run is selected, alongside <code>renderActivity(data.envelopes)</code> &mdash; not gated behind the drawer being open, so drawer data is always current when opened</td></tr>
+    <tr><td>Scope discipline</td><td><code>git diff 806fb07^1 806fb07^2 --stat --name-only</code>: only <code>internal/store/delivery.go</code>, <code>internal/store/delivery_test.go</code>, <code>internal/ui/server.go</code>, <code>internal/ui/server_test.go</code>, <code>internal/ui/static/index.html</code>; grepped the diff for "replay": appears only in explanatory comments, never a new route or function call; <code>internal/mcp/</code> has zero lines in the diff</td></tr>
     <tr><td>Build / vet / test</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code> from a clean tree</td></tr>
-    <tr><td>Own mutation test</td><td>Moved the <code>annotatePayloadWithProvenance</code> call inside only the <code>else</code> (synthesized-envelope) branch; ran the three provenance-path tests; reverted with <code>git checkout --</code>; confirmed a clean tree with <code>git status --short</code> and a successful rebuild before and after</td></tr>
-    <tr><td><code>TestAgentAuthoredEnvelopeStillGetsProvenance</code></td><td>Read the full test body: it writes a real fake-agent shell script that emits the goose banner, <code>mkdir -p .sergeant</code>, writes its own <code>.sergeant/envelope.json</code> with a distinct summary/payload, and exits 0 — confirmed the test asserts <code>env.Summary == "agent authored this envelope"</code> (proving the agent-authored branch, not the synthesized-summary template, was taken) before checking model/provider</td></tr>
-    <tr><td>Regex character verification</td><td>Queried the real production store at <code>/Users/lars/.local/share/sergeant/sergeant.db</code> for envelopes with <code>agent":"goose"</code>; extracted a real captured banner from <code>raw_output</code>; confirmed with Python's <code>unicodedata.name()</code> that the separator byte is U+00B7 MIDDLE DOT and the regex matches it, extracting <code>("anthropic", "claude-sonnet-4-6")</code> correctly against real bytes, not just the fixture strings</td></tr>
-    <tr><td>Scope discipline</td><td><code>git diff b071848^1 b071848^2 --stat</code> touches only <code>internal/runner/runner.go</code> and its test file, 0 deletions; grepped the diff for <code>opencode</code>/<code>codex</code>/<code>"pi"</code>/token/cost additions — none found; confirmed <code>GOOSE_MODEL</code>/<code>pr.Model</code>/<code>BuildAgentCommand</code> request-side logic is untouched</td></tr>
-    <tr><td>Empty-string honesty</td><td>Read <code>annotatePayloadWithProvenance</code>: <code>m["model"] = model; m["provider"] = provider</code> run unconditionally, no early return for empty values; confirmed against <code>TestAnnotatePayloadWithProvenanceSetsEmptyKeysExplicitly</code>, which asserts both keys are present (<code>hasModel</code>/<code>hasProvider</code> true via comma-ok map access) and empty, not absent</td></tr>
-    <tr><td>Merge-order dependency</td><td><code>git log --oneline --merges</code> confirms <code>d0edef7</code> (R5.5, "bullet 3") merged before <code>b071848</code>, matching design.md's stated ordering constraint on the shared <code>RunAgentPhase</code> function</td></tr>
+    <tr><td>R5 arc history</td><td><code>git log --oneline --merges | grep R5</code> to enumerate all 4 bullets; <code>git log -p --all -- progress.html | grep</code> for any prior mention of bullet 1 (<code>8e1c5e8</code>, R5.1/R5.2/R5.7) &mdash; none found in the file's entire history</td></tr>
   </table>
 </section>
 
@@ -103,100 +109,121 @@ a{color:var(--muted)}
   <h2>Findings</h2>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The "single call site covers both paths" claim is real, confirmed by my own mutation, not the builder's</h3>
-    <p><code>annotatePayloadWithProvenance</code> is called exactly once, at <code>runner.go:465</code>, after
-    the <code>if data, err := os.ReadFile(envelopePath); err == nil &amp;&amp; !failed {...} else {...}</code>
-    block that builds <code>env</code> for either the agent-authored or sergeant-synthesized path, and before
-    every consumer of <code>env.Payload</code> (<code>Router.SaveEnvelope</code> via <code>DeliverEnvelope</code>,
-    <code>Store.RecordEnvelope</code>, <code>Store.RecordPhase</code>). I moved the call inside only the
-    <code>else</code> branch and reran the three provenance tests:
-    <code>TestAgentAuthoredEnvelopeStillGetsProvenance</code> failed exactly as predicted (<code>""/""</code>
-    instead of <code>claude-sonnet-4-6/anthropic</code>), while <code>TestGooseAgentPhaseRecordsModelAndProvider</code>
-    and <code>TestUnparsedAgentProvenanceIsEmptyNotGuessed</code> both still passed — proof the suite
-    discriminates precisely on this fault rather than failing for unrelated reasons. Reverted with
-    <code>git checkout -- internal/runner/runner.go</code>; confirmed a clean tree and a successful rebuild
-    afterward. This is the exact bug shape the review brief warned had recurred elsewhere in this project,
-    and here it is genuinely absent.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The join is correctly run-scoped and cannot silently drop reachable rows</h3>
+    <p><code>ListDeliveriesForRun</code>'s SQL is <code>SELECT ... FROM deliveries d JOIN envelopes e ON e.id =
+    d.envelope_id WHERE e.run_id = ?</code>. This is an <code>INNER JOIN</code>, which in principle could drop
+    a delivery whose envelope was deleted. I checked: the only code that deletes envelopes is
+    <code>Store.DeleteRun</code>, and it deletes the <code>runs</code> row in the same call &mdash; so by the
+    time an envelope for a given run could be gone, that run id is no longer a valid argument to this endpoint
+    either. There is no path that deletes an envelope while leaving its run queryable. (Deliveries themselves
+    are not deleted by <code>DeleteRun</code>, leaving orphaned delivery rows behind after a run deletion, but
+    that is a pre-existing gap in <code>DeleteRun</code>, not introduced or worsened by this diff, and it does
+    not affect this endpoint's correctness for any run that still exists.) The multi-envelope,
+    multi-consumer test (<code>TestListDeliveriesForRunReturnsAcrossEnvelopesAndConsumers</code>) genuinely
+    creates two distinct envelopes and two distinct consumers and asserts both are present, not a single
+    envelope queried twice under different consumer labels.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; <code>TestAgentAuthoredEnvelopeStillGetsProvenance</code> genuinely exercises the agent-authored path</h3>
-    <p>The test's fake agent is a real shell script (not the shared <code>fakeAgent</code> echo helper used
-    by the other tests) that prints the goose banner, then <code>mkdir -p .sergeant &amp;&amp; cat &gt;
-    .sergeant/envelope.json</code> with its own distinct <code>summary</code> ("agent authored this
-    envelope") and a <code>{"custom":"value"}</code> payload key, then exits 0. The test asserts
-    <code>env.Summary == "agent authored this envelope"</code> and <code>payloadMap["custom"] == "value"</code>
-    before checking model/provider — both assertions would fail if the code had silently fallen through to
-    the synthesized-summary template ("Phase build completed for svc"), so the test cannot be satisfied by
-    accidentally re-testing the synthesized path under a different name.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The quarantine guard is not duplicated or bypassed at the API layer, confirmed by my own mutation</h3>
+    <p><code>handleDeliveryQuarantine</code> decodes the request body, checks only for the three required
+    fields being non-empty, and then calls <code>srv.Store.QuarantineDelivery(req.EnvelopeID, req.Consumer,
+    req.Reason)</code> exactly once, returning its error verbatim (<code>409</code>) on failure. There is no
+    second dead-letter check anywhere in the handler that could drift from the store's own guard in
+    <code>QuarantineDelivery</code> (which calls <code>latestDeliveryState</code> and refuses unless it equals
+    <code>deliveryStateDeadLetter</code>). I edited the handler myself to discard the store's error
+    (<code>if err := ...; err != nil { _ = err }</code>, falling through to the success response) and reran
+    <code>TestDeliveryQuarantineRefusesNonDeadLetteredDelivery</code>: it failed with
+    <code>status = 200, want a refusal for a non-dead-lettered delivery</code> and the response body showed
+    <code>"status":"quarantined"</code> for a delivery that was never dead-lettered &mdash; exactly the guard
+    bypass the spec forbids. Reverted with <code>git checkout -- internal/ui/server.go</code>; confirmed a
+    clean tree with <code>git status --short</code> and a successful rebuild afterward.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The regex's separator character matches real production goose output, not just the fixtures</h3>
-    <p>The goose-agent envelopes already present in the live <code>sergeant.db</code> (from actual dispatches
-    on this project, unrelated to this change) contain <code>raw_output</code> text reading
-    <code>new session · anthropic claude-sonnet-4-6</code>. Extracting the separator byte and checking it
-    with Python's <code>unicodedata.name()</code> confirms it is U+00B7 MIDDLE DOT — exactly the character
-    <code>gooseBanner</code>'s regexp and both test fixtures use (source comments and fixtures could have
-    silently used a visually similar U+2022 BULLET or U+30FB without anyone noticing by eye; I did not rely
-    on eyeballing). Running the exact regex against the real extracted string via Python correctly captured
-    <code>("anthropic", "claude-sonnet-4-6")</code>. No ANSI escape bytes surround the banner in the real
-    capture either, corroborating design.md's claim that ANSI-stripping is not required before matching.</p>
+    <h3><span class="sev low">verified</span> &nbsp; Empty-result behavior is <code>[]</code>, not <code>null</code>, at both the store and HTTP layers</h3>
+    <p><code>ListDeliveriesForRun</code> initializes <code>list := []DeliveryRecord{}</code> before its scan
+    loop (unlike the older <code>ListDeliveryHistory</code>, which still declares <code>var list
+    []DeliveryRecord</code> and can return nil &mdash; a pre-existing inconsistency this diff did not
+    introduce and was not asked to fix). <code>handleDeliveryHistory</code> adds a redundant
+    <code>if deliveries == nil { deliveries = []store.DeliveryRecord{} }</code> guard, which is always
+    unreachable given the store-level initialization but is harmless defensive coding, not a bug.
+    <code>TestListDeliveriesForRunEmptyWhenNoDeliveries</code> asserts non-nil at the Go level. There is,
+    however, no test that decodes the actual HTTP response body for the zero-delivery case and asserts it is
+    the literal JSON <code>[]</code> rather than <code>null</code> &mdash; the non-zero-delivery test
+    (<code>TestDeliveryHistoryReturnsRunsDeliveries</code>) does decode a real JSON body, but the zero case is
+    only verified at the Go slice level. Given <code>encoding/json</code>'s well-known behavior of marshaling
+    a non-nil empty slice as <code>[]</code>, this is very unlikely to be wrong in practice, but it is a real
+    test-rigor gap relative to what the review brief asked to confirm, not something I could verify was
+    covered.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Empty model/provider are set as explicit keys, not omitted</h3>
-    <p><code>annotatePayloadWithProvenance</code> runs <code>m["model"] = model; m["provider"] = provider</code>
-    unconditionally — there is no early return or conditional guard for the empty-string case.
-    <code>TestAnnotatePayloadWithProvenanceSetsEmptyKeysExplicitly</code> asserts both keys are present
-    (<code>hasModel</code>/<code>hasProvider</code> via comma-ok map access) and equal to <code>""</code>,
-    which is the correct test for "known absent" vs. "key never set." A JSON <code>null</code> payload is
-    also handled: <code>json.Unmarshal</code> of <code>null</code> into a map produces a nil map with no
-    error, and the code allocates a fresh map before assigning into it, avoiding the nil-map-write panic;
-    <code>TestAnnotatePayloadWithProvenanceHandlesJSONNull</code> covers this directly.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The <code>getJSON</code>/<code>getJSONResponse</code> rename is real, with no leftover collision</h3>
+    <p><code>fleet_paths_test.go:110</code> retains the pre-existing 4-argument
+    <code>getJSON(t, mux, method, path, reqBody, out)</code>, used by its own two call sites unaffected by this
+    diff. The new tests in <code>server_test.go</code> use a distinctly named 1-argument
+    <code>getJSONResponse(t, mux, path)</code> at line 857, plus the pre-existing (not newly introduced)
+    <code>postJSON</code> helper at line 735. No function name collides, and no code references a
+    <code>getJSON</code> call with the new helper's signature or vice versa.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; No scope creep beyond the proposal's explicit boundaries</h3>
-    <pre>git diff b071848^1 b071848^2 --stat:
-  internal/runner/runner.go      |  50 ++++++++   (0 deletions)
-  internal/runner/runner_test.go | 268 +++++++++++++++++++++++++++++++++++++++++
-
-grep for opencode/codex/"pi"/token/cost additions in the diff: none
-GOOSE_MODEL / pr.Model / BuildAgentCommand: present in runner.go, untouched by this diff (pure addition)
-No cmd/, internal/ui, or internal/mcp files touched</pre>
-    <p class="small">Matches <code>tasks.md</code>'s out-of-scope list exactly: no parsing added for
-    <code>opencode</code>/<code>claude</code>/<code>codex</code>/<code>pi</code>, no token/cost fields, no
-    CLI/UI/MCP surface, and the request-side <code>pr.Model</code>/<code>GOOSE_MODEL</code> path is
-    unchanged. The diff is insert-only (0 deletions across both files), which independently corroborates
-    this — an insert-only diff cannot have silently altered existing request-side behavior.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The dashboard wiring is real: escaped, correctly argumented, and actually called on run selection</h3>
+    <p>Every value <code>deliveryRowHTML</code> interpolates into the DOM (<code>look.label</code>,
+    <code>created_at</code>, <code>consumer</code> in both its <code>title</code> attribute and text node,
+    <code>attempt</code>, <code>error</code>, <code>error_class</code>, <code>recovery_instructions</code>)
+    passes through <code>escapeHTML</code> or <code>escapeAttr</code>, matching <code>activityHTML</code>'s
+    existing convention exactly. The quarantine button's <code>onclick="quarantineDelivery('${escapeAttr(d.envelope_id)}',
+    '${escapeAttr(d.consumer)}')"</code> passes both arguments <code>quarantineDelivery</code> needs, which
+    itself POSTs <code>{envelope_id, consumer, reason}</code> matching the handler's expected body field names
+    exactly. <code>fetchDeliveryHistory(runId)</code> is called from <code>selectRun</code> immediately after
+    <code>renderActivity(data.envelopes || [])</code>, on every run selection &mdash; not only when a
+    drawer happens to already be open &mdash; so <code>drawerDeliveries</code> is populated before an operator
+    ever opens the drawer, and <code>refreshActivityDrawer</code> re-renders an already-open drawer from
+    either fetch, matching the design's stated intent that neither section goes stale waiting on the other.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; All 4 spec scenarios map to a real, correctly-matching test</h3>
-    <pre>specs/phase-provenance/spec.md scenario                              Test
-A goose phase's model/provider are recorded                          TestGooseAgentPhaseRecordsModelAndProvider
-An unrecognised agent's provenance is absent, not invented            TestUnparsedAgentProvenanceIsEmptyNotGuessed
-Provenance recorded whether or not agent wrote its own envelope       TestAgentAuthoredEnvelopeStillGetsProvenance
-Malformed/unrecognised output does not fail the phase                 TestBannerlessGooseOutputDoesNotFailPhase</pre>
-    <p class="small">Also covered beyond the spec's literal scenarios: <code>TestDetectModelProviderNeverPanics</code>
-    (empty/garbage-byte/absolute-path/wrong-agent inputs), and three direct unit tests of
-    <code>annotatePayloadWithProvenance</code> for non-object payloads, explicit-empty keys, and JSON
-    <code>null</code>. Each test's assertions genuinely match its scenario, not just its name.</p>
+    <h3><span class="sev low">verified</span> &nbsp; No scope creep: no replay surface, no MCP changes</h3>
+    <pre>git diff 806fb07^1 806fb07^2 --stat --name-only:
+  internal/store/delivery.go
+  internal/store/delivery_test.go
+  internal/ui/server.go
+  internal/ui/server_test.go
+  internal/ui/static/index.html
+
+grep -ni "replay" on the diff: 3 hits, all in explanatory comments
+  ("no attempt closure to recover", "Replay ... ReplayDelivery ... previously covered",
+  "Replay is deliberately not offered here") &mdash; zero new routes, zero new JS functions calling replay
+internal/mcp/: 0 lines touched</pre>
+    <p class="small">Matches <code>proposal.md</code>'s out-of-scope section and <code>tasks.md</code>'s
+    explicit "do not implement" list: no replay endpoint or UI action, no MCP tools, no project/repo/phase-
+    scoped delivery views, and <code>DeliverEnvelope</code>/<code>ReplayDelivery</code>/the state machine are
+    untouched by this diff.</p>
   </div>
 
   <div class="item warn">
-    <h3><span class="sev low">low</span> &nbsp; Un-anchored regex could in principle match agent-generated text, not just goose's own banner</h3>
-    <p><code>gooseBanner</code> is applied to the entire captured <code>outBuf.String()</code>, which for a
-    successful phase includes everything the agent printed, not just its startup banner. If the agent's own
-    generated output (e.g. a commit message, a code comment, or a quoted example) happened to contain the
-    literal substring <code>new session · word word</code>, <code>FindStringSubmatch</code> would return
-    that occurrence instead of (or ahead of) the real banner. In practice this is a non-issue today: goose
-    always emits its banner as the very first output before any agent-generated content, so the real banner
-    is always the leftmost match. This is a latent, low-severity risk worth naming rather than a real
-    defect — it does not currently misfire and the spec does not ask for anchoring, but design.md does not
-    discuss it as a rejected alternative the way its other design choices are discussed.</p>
+    <h3><span class="sev med">warn</span> &nbsp; The quarantine button's inline <code>onclick</code> reuses a pre-existing HTML-entity-escaping pattern that does not actually protect a single-quoted JS string literal</h3>
+    <p><code>escapeAttr</code> is a bare alias for <code>escapeHTML</code>, which encodes <code>'</code> as
+    <code>&amp;#39;</code>. When that encoded value is placed inside <code>onclick="fn('...')"</code>, the
+    browser HTML-decodes the attribute value (restoring the literal <code>'</code>) <em>before</em> handing it
+    to the JS engine as inline event-handler source &mdash; so a <code>consumer</code> or
+    <code>envelope_id</code> value containing a single quote is not actually prevented from terminating the JS
+    string early and injecting script. This is a real weakness in the pattern, but it is <strong>not new to
+    this diff</strong>: the identical shape (<code>escapeAttr</code> value inside a single-quoted JS argument
+    inside a double-quoted <code>onclick</code>) already exists in this file at <code>resumeRun('${escapeAttr(run.id)}')</code>,
+    <code>openPhaseDrawer('${escapeAttr(phase.kind...)}', ...)</code>, and
+    <code>cleanActiveWorktrees('${escapeAttr(l.task_id)}')</code>, none of which this bullet touched. The new
+    <code>quarantineDelivery(...)</code> call follows the file's established (if imperfect) house convention
+    faithfully rather than introducing a new hole. <code>consumer</code> and <code>envelope_id</code> values
+    originate from this project's own worktree-path/repo-name conventions and delivery records, not from an
+    external or attacker-facing input channel today, which limits (but does not eliminate) real-world
+    exploitability. Not a defect specific to this bullet; flagged because the review brief asked whether
+    escaping matches the existing convention, and it does &mdash; the convention itself has this latent gap
+    across the whole file.</p>
   </div>
+
 </section>
 
 <section>
@@ -204,49 +231,76 @@ Malformed/unrecognised output does not fail the phase                 TestBanner
   <table>
     <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
     <tr><td>Build/vet/test clean</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 9/9 packages</td></tr>
-    <tr><td>Single call site covers both env-building branches</td><td>gated the call inside only the synthesized <code>else</code> branch; reran the 3 provenance tests; reverted</td><td><code>TestAgentAuthoredEnvelopeStillGetsProvenance</code> failed exactly as predicted; the other two still passed</td></tr>
-    <tr><td><code>TestAgentAuthoredEnvelopeStillGetsProvenance</code> exercises the real agent-authored path</td><td>read the full test: fake agent writes its own <code>.sergeant/envelope.json</code>, exits 0, asserted <code>env.Summary</code> matches the agent's own text</td><td>confirmed — not a re-test of the synthesized path</td></tr>
-    <tr><td>Regex separator is U+00B7 MIDDLE DOT, matching real production output</td><td>extracted real <code>raw_output</code> from 8 goose-agent rows in <code>/Users/lars/.local/share/sergeant/sergeant.db</code>; ran <code>unicodedata.name()</code> and the exact Go regex (via Python) against the extracted bytes</td><td>confirmed match: <code>("anthropic", "claude-sonnet-4-6")</code></td></tr>
-    <tr><td>Empty model/provider set as explicit keys, not omitted</td><td>read <code>annotatePayloadWithProvenance</code>; confirmed via <code>TestAnnotatePayloadWithProvenanceSetsEmptyKeysExplicitly</code></td><td>confirmed — unconditional assignment, present-and-empty asserted</td></tr>
-    <tr><td>JSON <code>null</code> payload does not panic</td><td>read the nil-map allocation guard; ran <code>TestAnnotatePayloadWithProvenanceHandlesJSONNull</code></td><td>pass</td></tr>
-    <tr><td>No scope creep (other agents, tokens/cost, CLI/UI/MCP, request-side model)</td><td><code>git diff --stat</code> (2 files, 0 deletions), grep for forbidden additions, read <code>BuildAgentCommand</code>/<code>GOOSE_MODEL</code></td><td>confirmed absent / unchanged</td></tr>
-    <tr><td>Merge-order dependency on R5.5 respected</td><td><code>git log --oneline --merges</code></td><td>confirmed: <code>d0edef7</code> precedes <code>b071848</code></td></tr>
+    <tr><td>Join is run-scoped, no orphan-drop risk reachable in practice</td><td>read the SQL; traced every envelope-deleting code path (<code>DeleteRun</code>) and confirmed it also deletes the run itself</td><td>confirmed &mdash; no path deletes an envelope while its run stays queryable</td></tr>
+    <tr><td>Quarantine guard is not duplicated/bypassed at the API layer</td><td>mutated <code>handleDeliveryQuarantine</code> to swallow the store's error; reran the refusal test; reverted</td><td><code>TestDeliveryQuarantineRefusesNonDeadLetteredDelivery</code> failed exactly as predicted (200 instead of a refusal)</td></tr>
+    <tr><td>Empty result is <code>[]</code> not <code>null</code> (Go level)</td><td>read <code>list := []DeliveryRecord{}</code>; ran <code>TestListDeliveriesForRunEmptyWhenNoDeliveries</code></td><td>confirmed non-nil; no test decodes the HTTP body for this specific case</td></tr>
+    <tr><td><code>getJSON</code>/<code>getJSONResponse</code> collision claim</td><td><code>grep -rn "func getJSON\b\|func getJSONResponse\|func postJSON"</code> across <code>internal/ui/*_test.go</code></td><td>confirmed: distinct names, distinct signatures, no leftover references</td></tr>
+    <tr><td>Frontend escaping matches <code>activityHTML</code>'s convention</td><td>read <code>deliveryRowHTML</code>/<code>deliveriesHTML</code> line by line</td><td>confirmed &mdash; every interpolated value passes through <code>escapeHTML</code>/<code>escapeAttr</code></td></tr>
+    <tr><td><code>fetchDeliveryHistory</code> is wired, not dead code</td><td>traced its only call site in <code>selectRun</code></td><td>confirmed: called on every run selection</td></tr>
+    <tr><td>No scope creep (replay, MCP)</td><td><code>git diff --stat --name-only</code>; grep for "replay" in the diff; <code>internal/mcp/</code> diff line count</td><td>confirmed absent: 5 files touched, "replay" only in comments, 0 lines in <code>internal/mcp/</code></td></tr>
+    <tr><td>R5 bullet 1 (R5.1/R5.2/R5.7, merge <code>8e1c5e8</code>) has no recorded independent review</td><td><code>git log -p --all -- progress.html | grep</code> for R5.1/R5.2/R5.7/8e1c5e8/its change-name across the file's entire history</td><td>zero hits &mdash; confirmed absent</td></tr>
   </table>
 </section>
 
 <section>
   <h2>Verdict</h2>
   <div class="item ok">
-    <p><strong>R4.6: genuinely met.</strong> <code>detectModelProvider</code> correctly parses goose's real
-    startup banner for provider and model (verified against real production-captured bytes, not only test
-    fixtures), returns empty strings for every other supported agent and for unparseable goose output, and
-    never panics across malformed/edge-case inputs. <code>annotatePayloadWithProvenance</code> attaches
-    <code>model</code>/<code>provider</code> to any JSON-object payload, leaves non-object payloads
-    (including JSON <code>null</code>, after nil-map allocation) unchanged or safely defaulted, and sets both
-    keys explicitly even when empty — the honest "known absent" signal the design called for. The single
-    call site in <code>RunAgentPhase</code> is placed after both env-building branches converge and before
-    every downstream consumer of <code>env.Payload</code>; I mutation-tested this myself, independent of the
-    commit message's own claimed mutation test, and the guarantee held. All 4 spec scenarios in
-    <code>specs/phase-provenance/spec.md</code> have a test that genuinely matches its Given/When/Then. No
-    scope creep beyond the proposal's stated boundaries: no parsing added for other agents, no token/cost
-    fields, no CLI/UI/MCP surface, and <code>pr.Model</code>/<code>GOOSE_MODEL</code> request-side behavior
-    is untouched (the diff is insert-only).</p>
-    <p class="small">One residual finding, which does not change the verdict: low severity — the banner
-    regex is applied un-anchored against the agent's full captured output, so it could in principle match
-    agent-generated text elsewhere in the buffer rather than goose's own banner. Not exploitable today
-    because goose always emits its banner first and <code>FindStringSubmatch</code> returns the leftmost
-    match, but the tradeoff is not discussed in design.md the way its other design choices are.</p>
+    <p><strong>R5.6: genuinely met.</strong> <code>Store.ListDeliveriesForRun</code> correctly joins
+    <code>deliveries</code> to <code>envelopes</code> and filters by <code>run_id</code>, shares
+    <code>scanDeliveryRow</code> with <code>ListDeliveryHistory</code> as design.md specified, and returns a
+    non-nil empty slice. <code>GET /api/delivery-history</code> and <code>POST /api/delivery-quarantine</code>
+    are genuinely thin transports: the history endpoint 400s on a missing <code>run_id</code> and otherwise
+    returns the store's own result unmodified; the quarantine endpoint calls the store's guarded write exactly
+    once and forwards its refusal verbatim as a <code>409</code>, with no second check of its own that could
+    drift from the guard &mdash; I mutation-tested this myself, independent of the commit message's own
+    claimed test, and the bypass was caught. The dashboard's Deliveries section is real: correctly escaped,
+    correctly argumented, and fetched on every run selection rather than existing as inert code. Scope
+    discipline holds exactly to the proposal's boundaries: no replay surface, no MCP tools, no
+    project/repo/phase-scoped views. The <code>getJSON</code>/<code>getJSONResponse</code> rename claimed in
+    the commit message is real and leaves no collision.</p>
+    <p class="small">Two residual findings, neither blocking this bullet's verdict: a test-rigor gap (the
+    zero-delivery case is verified non-nil at the Go level but not decoded from an actual HTTP response body,
+    unlike the non-zero case), and a pre-existing, file-wide frontend weakness (inline <code>onclick</code>
+    handlers relying on <code>escapeAttr</code> alone do not actually protect a nested single-quoted JS string
+    literal from a value containing a quote) that this bullet reused faithfully rather than introduced.</p>
+  </div>
+
+  <div class="item warn">
+    <h3>R5 overall (R5.1&ndash;R5.7, all four bullets): mostly, but not fully, verified as genuinely delivered</h3>
+    <p>R5's four bullets are now all merged: <code>8e1c5e8</code> (R5.1/R5.2/R5.7, envelope identity),
+    <code>bde2b2d</code> (R5.3/R5.4, durable delivery), <code>d0edef7</code> (R5.5, dead-lettering), and
+    <code>806fb07</code> (R5.6, this review). Three of the four received an independent critic review with
+    live mutation testing: Review 007 found bullet 2 genuinely met for R5.3 but only <strong>partly</strong>
+    met for R5.4 (two fields R5.4's own text requires &mdash; a real <code>next_attempt_at</code> and error
+    classification &mdash; were absent from the actual data, undisclosed as deferred scope); Review 008 found
+    bullet 3 genuinely met, with a test-rigor gap on multi-episode/multi-attempt paths later closed by a
+    follow-up commit (<code>189ad06</code>); this review finds bullet 4 genuinely met. <strong>Bullet 1
+    (R5.1/R5.2/R5.7, merge <code>8e1c5e8</code>) has no independent critic review recorded anywhere in this
+    document's history</strong> &mdash; I searched the full git history of <code>progress.html</code> for any
+    mention of it and found none. Its own test suite is real and passes (19 tests covering envelope typing,
+    schema version, correlation/causation id propagation, republication refusal, and backward-compatible
+    reads of pre-migration rows, spot-checked and run by me during this review), but "the builder's own tests
+    pass" is exactly the standard every other R5 bullet was independently mutation-tested against and found at
+    least one real gap under, so its absence here is not proof of a problem, only proof that R5.1/R5.2/R5.7 has
+    never been checked to the same bar as the rest of R5. Given that R5.4's undisclosed gap was only caught
+    because Review 007 existed at all, I would not call all of R5 genuinely delivered without reservation:
+    R5.3, R5.5, and R5.6 hold up; R5.4 holds up only partially (a known, disclosed-in-Review-007 gap, not
+    re-litigated here); and R5.1/R5.2/R5.7 is unverified by anyone other than its own builder. Closing R5 as a
+    PRD milestone should not be read as "every sub-requirement independently confirmed" &mdash; one of the
+    four bullets was never put through the process the other three got.</p>
   </div>
 </section>
 
 <footer>
-  <p class="meta">Review 009 · findings above are reproduced from commands run against <code>b071848</code>
-  (merge) / <code>84b481d</code> (feature commit) · one mutation was applied and reverted
-  (<code>annotatePayloadWithProvenance</code>'s call site moved into only the synthesized-envelope branch);
-  the working tree was confirmed clean (<code>git status --short</code>) and rebuildable before and after.
-  Review 008 (R5.5, dead-lettering with replay/quarantine, merge <code>d0edef7</code>) previously found that
-  requirement genuinely met, with a test-rigor gap on multi-episode/multi-attempt paths that did not block
-  its verdict; this review did not re-verify R5.5.</p>
+  <p class="meta">Review 010 · findings above are reproduced from commands run against <code>806fb07</code>
+  (merge) / <code>9ad0ea7</code> (feature commit) · one mutation was applied and reverted
+  (<code>handleDeliveryQuarantine</code> edited to discard the store's guard error, confirmed the refusal test
+  fails, then <code>git checkout -- internal/ui/server.go</code>); the working tree was confirmed clean
+  (<code>git status --short</code>) and rebuildable before and after. Review 009 (R4.6, model/provider
+  provenance, merge <code>b071848</code>) previously found that requirement genuinely met; this review did not
+  re-verify R4.6. This review additionally found that R5 bullet 1 (R5.1/R5.2/R5.7, merge <code>8e1c5e8</code>)
+  has no independent critic review recorded in this document's history, unlike bullets 2, 3, and 4 &mdash;
+  noted above as the one open question in R5's overall closure.</p>
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
