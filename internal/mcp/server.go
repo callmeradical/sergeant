@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/callmeradical/sergeant/internal/config"
+	"github.com/callmeradical/sergeant/internal/graphify"
 	"github.com/callmeradical/sergeant/internal/runner"
 	"github.com/callmeradical/sergeant/internal/store"
 )
@@ -183,6 +184,46 @@ func Tools() []Tool {
 					},
 				},
 				"required": []string{"run_id"},
+			},
+		},
+		// The project graph (decision D9), exposed as query, explain, and
+		// affected — the same three operations the graphify binary already
+		// implements — so a dispatched agent can navigate a project by its
+		// graph rather than by grepping files.
+		{
+			Name:        "sergeant_graph_query",
+			Description: "Run a BFS graph query against a project's published code graph. Reports a clear error if no graph has been built for the project yet.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"project":  map[string]string{"type": "string", "description": "Project name"},
+					"question": map[string]string{"type": "string", "description": "The question to traverse the graph for"},
+				},
+				"required": []string{"project", "question"},
+			},
+		},
+		{
+			Name:        "sergeant_graph_explain",
+			Description: "Get a plain-language explanation of a node and its neighbors in a project's published code graph. Reports a clear error if no graph has been built for the project yet.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"project": map[string]string{"type": "string", "description": "Project name"},
+					"node":    map[string]string{"type": "string", "description": "The node to explain"},
+				},
+				"required": []string{"project", "node"},
+			},
+		},
+		{
+			Name:        "sergeant_graph_affected",
+			Description: "Reverse-traverse a project's published code graph to find nodes affected by a change to the named node. Reports a clear error if no graph has been built for the project yet.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"project": map[string]string{"type": "string", "description": "Project name"},
+					"node":    map[string]string{"type": "string", "description": "The node to find affected nodes for"},
+				},
+				"required": []string{"project", "node"},
 			},
 		},
 	}
@@ -388,9 +429,49 @@ func (s *MCPServer) executeTool(name string, args map[string]interface{}) (strin
 		runID, _ := args["run_id"].(string)
 		return s.runWait(runID, runWaitBound(args["timeout_seconds"]))
 
+	case "sergeant_graph_query":
+		projName, _ := args["project"].(string)
+		question, _ := args["question"].(string)
+		g, err := projectGraphify(projName)
+		if err != nil {
+			return "", err
+		}
+		return graphify.Query(g, question)
+
+	case "sergeant_graph_explain":
+		projName, _ := args["project"].(string)
+		node, _ := args["node"].(string)
+		g, err := projectGraphify(projName)
+		if err != nil {
+			return "", err
+		}
+		return graphify.Explain(g, node)
+
+	case "sergeant_graph_affected":
+		projName, _ := args["project"].(string)
+		node, _ := args["node"].(string)
+		g, err := projectGraphify(projName)
+		if err != nil {
+			return "", err
+		}
+		return graphify.Affected(g, node)
+
 	default:
 		return "", fmt.Errorf("unknown tool '%s'", name)
 	}
+}
+
+// projectGraphify loads projName and returns its graphify configuration, or
+// an error if the project has none declared.
+func projectGraphify(projName string) (*config.Graphify, error) {
+	proj, err := config.LoadProject(projName)
+	if err != nil {
+		return nil, err
+	}
+	if proj.Graphify == nil {
+		return nil, fmt.Errorf("project %q has no graphify configuration", projName)
+	}
+	return proj.Graphify, nil
 }
 
 func (s *MCPServer) sendResult(id interface{}, result interface{}) {

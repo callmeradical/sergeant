@@ -18,6 +18,27 @@ type Project struct {
 	Repos       map[string]Repo `yaml:"-" json:"repos"`
 	RawRepos    yaml.Node       `yaml:"repos" json:"-"`
 	DAG         *DAGConfig      `yaml:"dag,omitempty" json:"dag"`
+	// Graphify declares the project's cross-repository code graph (decision
+	// D9). A pointer so a project that declares no graphify: block has one
+	// that is nil, distinguishable from a project that declared an empty
+	// block.
+	Graphify *Graphify `yaml:"graphify,omitempty" json:"graphify"`
+}
+
+// Graphify declares a project's cross-repository code graph: which repos
+// participate and where the built graph is published.
+type Graphify struct {
+	// Output is the directory the merged graph is published to.
+	Output string `yaml:"output" json:"output"`
+	// IncludeGroups filters which repos participate, matched against each
+	// repo's Group. Empty means every repo in the project participates — the
+	// same "unset means everything" default other per-repo filters in this
+	// config already use.
+	IncludeGroups []string `yaml:"include_groups,omitempty" json:"include_groups"`
+	// ExcludePatterns is parsed and stored but not yet applied by
+	// BuildProjectGraph. A future change can implement it without another
+	// config migration.
+	ExcludePatterns []string `yaml:"exclude_patterns,omitempty" json:"exclude_patterns"`
 }
 
 // ProjectDefaults defines shared settings across repos.
