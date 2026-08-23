@@ -415,14 +415,22 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 		}
 
 		_ = pr.Router.SaveEnvelope(&env)
+		now := time.Now().UTC()
 		_ = pr.Store.RecordEnvelope(&store.EnvelopeRecord{
-			ID:        fmt.Sprintf("%s-%s-%d", pr.RepoName, phaseName, time.Now().UnixNano()),
-			RunID:     pr.RunID,
-			Repo:      pr.RepoName,
-			Stage:     phaseName,
-			Summary:   env.Summary,
-			Artifacts: env.Artifacts,
-			Data:      env.Payload,
+			ID:            fmt.Sprintf("%s-%s-%d", pr.RepoName, phaseName, now.UnixNano()),
+			RunID:         pr.RunID,
+			Repo:          pr.RepoName,
+			Stage:         phaseName,
+			Summary:       env.Summary,
+			Artifacts:     env.Artifacts,
+			Data:          env.Payload,
+			Type:          "phase.completed",
+			SchemaVersion: "1",
+			OccurredAt:    now,
+			Producer:      "sergeant/runner",
+			CorrelationID: pr.RunID,
+			CausationID:   pr.Store.CausationFromLatest(pr.RunID, pr.RepoName),
+			PhaseID:       phaseID,
 		})
 
 		phaseStatus := "passed"

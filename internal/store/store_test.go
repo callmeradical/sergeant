@@ -41,13 +41,18 @@ func TestStoreOperations(t *testing.T) {
 	}
 
 	env := &EnvelopeRecord{
-		ID:        "env-1",
-		RunID:     "run-123",
-		Repo:      "backend",
-		Stage:     "build",
-		Summary:   "Built payment API",
-		Artifacts: []string{"openapi.json"},
-		Data:      json.RawMessage(`{"endpoints": ["/pay"]}`),
+		ID:            "env-1",
+		RunID:         "run-123",
+		Repo:          "backend",
+		Stage:         "build",
+		Summary:       "Built payment API",
+		Artifacts:     []string{"openapi.json"},
+		Data:          json.RawMessage(`{"endpoints": ["/pay"]}`),
+		Type:          "phase.completed",
+		SchemaVersion: "1",
+		OccurredAt:    time.Now().UTC(),
+		Producer:      "sergeant/test",
+		CorrelationID: "run-123",
 	}
 	if err := st.RecordEnvelope(env); err != nil {
 		t.Fatalf("failed to record envelope: %v", err)

@@ -324,14 +324,21 @@ func (s *MCPServer) executeTool(name string, args map[string]interface{}) (strin
 		}
 
 		payloadBytes, _ := json.Marshal(args["payload"])
+		now := time.Now().UTC()
 		envRec := &store.EnvelopeRecord{
-			ID:        fmt.Sprintf("%s-%s-%d", repo, stage, time.Now().UnixNano()),
-			RunID:     runID,
-			Repo:      repo,
-			Stage:     stage,
-			Summary:   summary,
-			Artifacts: artifacts,
-			Data:      payloadBytes,
+			ID:            fmt.Sprintf("%s-%s-%d", repo, stage, now.UnixNano()),
+			RunID:         runID,
+			Repo:          repo,
+			Stage:         stage,
+			Summary:       summary,
+			Artifacts:     artifacts,
+			Data:          payloadBytes,
+			Type:          "phase.completed",
+			SchemaVersion: "1",
+			OccurredAt:    now,
+			Producer:      "sergeant/mcp",
+			CorrelationID: runID,
+			CausationID:   s.Store.CausationFromLatest(runID, repo),
 		}
 		if err := s.Store.RecordEnvelope(envRec); err != nil {
 			return "", err

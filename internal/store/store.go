@@ -136,6 +136,33 @@ type EnvelopeRecord struct {
 	Artifacts []string        `json:"artifacts"`
 	Data      json.RawMessage `json:"data"`
 	CreatedAt time.Time       `json:"created_at"`
+
+	// Metadata added by R5.1/R5.2 (envelopes-are-typed-versioned-and-correlated).
+	// Fields are empty for envelopes written before this change; that is the truth
+	// about them — no type was ever declared, so none is backfilled.
+
+	// Type names what this envelope is (e.g. "phase.completed").
+	Type string `json:"type"`
+	// SchemaVersion declares which payload shape this envelope carries.
+	SchemaVersion string `json:"schema_version"`
+	// OccurredAt is when the event happened — set by the caller.
+	// PublishedAt is when it was recorded by the store — set by RecordEnvelope.
+	// They are separate because collapsing them hides transport delay.
+	OccurredAt  time.Time `json:"occurred_at"`
+	PublishedAt time.Time `json:"published_at"`
+	// Producer names what emitted this envelope (e.g. "sergeant/runner").
+	Producer string `json:"producer"`
+	// CorrelationID is stable across all envelopes belonging to one run.
+	// It is set to the run id so the chain cannot drift from the records it
+	// describes.
+	CorrelationID string `json:"correlation_id"`
+	// CausationID is the id of the envelope that caused this one within the run.
+	// nil means absent (the first envelope of a run has no cause).
+	// A non-nil pointer to "" would mean "something caused it but was not
+	// recorded"; that case is not representable in the current design.
+	CausationID *string `json:"causation_id,omitempty"`
+	// PhaseID is the phase this envelope belongs to.
+	PhaseID string `json:"phase_id,omitempty"`
 }
 
 func Open(dbPath string) (*Store, error) {
@@ -342,6 +369,23 @@ func (s *Store) migrateAddColumns() error {
 		{"bullets", "pr_url", "ALTER TABLE bullets ADD COLUMN pr_url TEXT NOT NULL DEFAULT ''"},
 		// attempt is 1-based; 0 means "pre-dates this field" (unknown attempt count).
 		{"phases", "attempt", "ALTER TABLE phases ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0"},
+
+		// Envelope metadata added by R5.1/R5.2. DEFAULT '' so existing rows read
+		// back as empty rather than NULL, making the zero value the "no type
+		// declared" truth about pre-migration envelopes.
+		{"envelopes", "type", "ALTER TABLE envelopes ADD COLUMN type TEXT NOT NULL DEFAULT ''"},
+		{"envelopes", "schema_version", "ALTER TABLE envelopes ADD COLUMN schema_version TEXT NOT NULL DEFAULT ''"},
+		// occurred_at and published_at default to the epoch (zero time) so the
+		// DATETIME column is always parseable; callers distinguish "not set" from
+		// a real time by checking the zero value.
+		{"envelopes", "occurred_at", "ALTER TABLE envelopes ADD COLUMN occurred_at DATETIME NOT NULL DEFAULT '0001-01-01 00:00:00'"},
+		{"envelopes", "published_at", "ALTER TABLE envelopes ADD COLUMN published_at DATETIME NOT NULL DEFAULT '0001-01-01 00:00:00'"},
+		{"envelopes", "producer", "ALTER TABLE envelopes ADD COLUMN producer TEXT NOT NULL DEFAULT ''"},
+		{"envelopes", "correlation_id", "ALTER TABLE envelopes ADD COLUMN correlation_id TEXT NOT NULL DEFAULT ''"},
+		// causation_id is intentionally nullable: NULL means "no cause" (the first
+		// envelope of a run), which must be distinguishable from an empty string.
+		{"envelopes", "causation_id", "ALTER TABLE envelopes ADD COLUMN causation_id TEXT"},
+		{"envelopes", "phase_id", "ALTER TABLE envelopes ADD COLUMN phase_id TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, w := range wanted {
 		has, err := s.hasColumn(w.table, w.column)
@@ -685,16 +729,56 @@ func (s *Store) RecordPhase(p *PhaseRecord) error {
 	})
 }
 
+// ErrDuplicateEnvelopeID is returned when an envelope with the same id has
+// already been published. R5.1 requires immutability after publication.
+var ErrDuplicateEnvelopeID = errors.New("an envelope with this id has already been published")
+
+// RecordEnvelope validates, stamps PublishedAt and writes the envelope.
+//
+// Validation rules (all apply to new writes only; existing rows are unaffected):
+//   - Type must not be empty.
+//   - SchemaVersion must not be empty.
+//   - Producer must not be empty.
+//   - CorrelationID must not be empty.
+//   - The id must not already exist (immutability after publication).
+//
+// On any validation failure the function returns an error and writes nothing.
 func (s *Store) RecordEnvelope(e *EnvelopeRecord) error {
-	e.CreatedAt = time.Now().UTC()
+	// --- validation ---
+	if e.Type == "" {
+		return fmt.Errorf("envelope %q: type must not be empty", e.ID)
+	}
+	if e.SchemaVersion == "" {
+		return fmt.Errorf("envelope %q: schema_version must not be empty", e.ID)
+	}
+	if e.Producer == "" {
+		return fmt.Errorf("envelope %q: producer must not be empty", e.ID)
+	}
+	if e.CorrelationID == "" {
+		return fmt.Errorf("envelope %q: correlation_id must not be empty", e.ID)
+	}
+
+	// --- stamp ---
+	now := time.Now().UTC()
+	e.CreatedAt = now
+	e.PublishedAt = now
+
+	// --- write ---
 	artBytes, _ := json.Marshal(e.Artifacts)
 	dataStr := string(e.Data)
 	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO envelopes (id, run_id, repo, stage, summary, artifacts, data, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO envelopes
+		 (id, run_id, repo, stage, summary, artifacts, data, created_at,
+		  type, schema_version, occurred_at, published_at, producer, correlation_id, causation_id, phase_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID, e.RunID, e.Repo, e.Stage, e.Summary, string(artBytes), dataStr, e.CreatedAt,
+		e.Type, e.SchemaVersion, e.OccurredAt, e.PublishedAt, e.Producer, e.CorrelationID,
+		nullableText(causationIDValue(e.CausationID)), e.PhaseID,
 	)
 	if err != nil {
+		if isDuplicateEnvelopeID(err) {
+			return fmt.Errorf("envelope %q: %w", e.ID, ErrDuplicateEnvelopeID)
+		}
 		return err
 	}
 	return s.recordTransition(ChannelEnvelope, e.ID, map[string]interface{}{
@@ -703,6 +787,28 @@ func (s *Store) RecordEnvelope(e *EnvelopeRecord) error {
 		"repo":   e.Repo,
 		"stage":  e.Stage,
 	})
+}
+
+// causationIDValue dereferences a *string or returns "" (which nullableText
+// turns into SQL NULL) when the pointer is nil.
+func causationIDValue(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// isDuplicateEnvelopeID reports whether err is a UNIQUE constraint violation on
+// envelopes.id rather than some other constraint.
+func isDuplicateEnvelopeID(err error) bool {
+	var se *sqlite.Error
+	if !errors.As(err, &se) {
+		return false
+	}
+	if se.Code() != sqlite3.SQLITE_CONSTRAINT_UNIQUE {
+		return false
+	}
+	return strings.Contains(se.Error(), "envelopes.id")
 }
 
 // safeRawJSON guards the API against rows whose JSON was written by a buggy
@@ -722,21 +828,114 @@ func safeRawJSON(s string) json.RawMessage {
 	return json.RawMessage(wrapped)
 }
 
-func (s *Store) GetLatestEnvelope(runID, repo string) (*EnvelopeRecord, error) {
-	row := s.db.QueryRow(
-		`SELECT id, run_id, repo, stage, summary, artifacts, data, created_at FROM envelopes 
-		 WHERE run_id = ? AND repo = ? ORDER BY created_at DESC LIMIT 1`,
-		runID, repo,
-	)
+// envelopeColumns is the SELECT list shared by every envelope query so a column
+// added to EnvelopeRecord cannot be read by one path and silently omitted by
+// another. scanEnvelope consumes it in the same order.
+//
+// DATETIME columns that may be wrapped in COALESCE are scanned as strings and
+// parsed by scanEnvelope because the modernc/sqlite driver returns COALESCE
+// results as driver.Value (string), which cannot be Scan'd into time.Time
+// directly. The plain created_at column is selected without COALESCE and scanned
+// directly — the driver handles that case.
+const envelopeColumns = `id, run_id, repo, stage, summary,
+	COALESCE(artifacts, ''),
+	COALESCE(data, ''),
+	created_at,
+	COALESCE(type, ''),
+	COALESCE(schema_version, ''),
+	occurred_at,
+	published_at,
+	COALESCE(producer, ''),
+	COALESCE(correlation_id, ''),
+	causation_id,
+	COALESCE(phase_id, '')`
+
+// parseSQLiteTime parses the datetime string formats that the modernc/sqlite
+// driver stores DATETIME values in.  It returns the zero time for an empty or
+// unrecognised value so callers can distinguish "never set" from a real time.
+func parseSQLiteTime(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	formats := []string{
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02T15:04:05.999999999Z07:00",
+		"2006-01-02T15:04:05.999999999Z",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05Z",
+		"0001-01-01 00:00:00",
+		"0001-01-01T00:00:00Z",
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Time{}
+}
+
+// scanEnvelope reads one envelope row from r, handling the new nullable columns
+// so callers do not each have to duplicate the NULL-handling logic.
+//
+// The occurred_at and published_at DATETIME columns are scanned as sql.NullString
+// and parsed by parseSQLiteTime because the modernc/sqlite driver returns COALESCE
+// and nullable DATETIME results as strings, not time.Time values.
+func scanEnvelope(r rowScanner) (EnvelopeRecord, error) {
 	var e EnvelopeRecord
 	var artStr, dataStr string
-	err := row.Scan(&e.ID, &e.RunID, &e.Repo, &e.Stage, &e.Summary, &artStr, &dataStr, &e.CreatedAt)
+	var causationStr sql.NullString
+	var occurredStr, publishedStr sql.NullString
+	err := r.Scan(
+		&e.ID, &e.RunID, &e.Repo, &e.Stage, &e.Summary,
+		&artStr, &dataStr, &e.CreatedAt,
+		&e.Type, &e.SchemaVersion,
+		&occurredStr, &publishedStr,
+		&e.Producer, &e.CorrelationID,
+		&causationStr,
+		&e.PhaseID,
+	)
 	if err != nil {
-		return nil, err
+		return EnvelopeRecord{}, err
 	}
 	_ = json.Unmarshal([]byte(artStr), &e.Artifacts)
 	e.Data = safeRawJSON(dataStr)
+	if occurredStr.Valid {
+		e.OccurredAt = parseSQLiteTime(occurredStr.String)
+	}
+	if publishedStr.Valid {
+		e.PublishedAt = parseSQLiteTime(publishedStr.String)
+	}
+	if causationStr.Valid {
+		e.CausationID = &causationStr.String
+	}
+	return e, nil
+}
+
+func (s *Store) GetLatestEnvelope(runID, repo string) (*EnvelopeRecord, error) {
+	row := s.db.QueryRow(
+		`SELECT `+envelopeColumns+` FROM envelopes
+		 WHERE run_id = ? AND repo = ? ORDER BY created_at DESC LIMIT 1`,
+		runID, repo,
+	)
+	e, err := scanEnvelope(row)
+	if err != nil {
+		return nil, err
+	}
 	return &e, nil
+}
+
+// CausationFromLatest returns the id of the most recently published envelope
+// for runID/repo, or nil if there is none. Callers use this to set a new
+// envelope's CausationID: an envelope that follows another within a run names
+// it as its cause, and the first envelope of a run has no cause.
+func (s *Store) CausationFromLatest(runID, repo string) *string {
+	latest, err := s.GetLatestEnvelope(runID, repo)
+	if err != nil {
+		return nil
+	}
+	id := latest.ID
+	return &id
 }
 
 // runColumns is shared by every run query so a column added to RunRecord cannot
@@ -829,7 +1028,7 @@ func (s *Store) ListPhasesForRun(runID string) ([]PhaseRecord, error) {
 
 func (s *Store) ListEnvelopesForRun(runID string) ([]EnvelopeRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT id, run_id, repo, stage, summary, artifacts, data, created_at FROM envelopes WHERE run_id = ? ORDER BY created_at ASC`,
+		`SELECT `+envelopeColumns+` FROM envelopes WHERE run_id = ? ORDER BY created_at ASC`,
 		runID,
 	)
 	if err != nil {
@@ -839,17 +1038,13 @@ func (s *Store) ListEnvelopesForRun(runID string) ([]EnvelopeRecord, error) {
 
 	var list []EnvelopeRecord
 	for rows.Next() {
-		var e EnvelopeRecord
-		var artStr string
-		var dataStr string
-		if err := rows.Scan(&e.ID, &e.RunID, &e.Repo, &e.Stage, &e.Summary, &artStr, &dataStr, &e.CreatedAt); err != nil {
+		e, err := scanEnvelope(rows)
+		if err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal([]byte(artStr), &e.Artifacts)
-		e.Data = safeRawJSON(dataStr)
 		list = append(list, e)
 	}
-	return list, nil
+	return list, rows.Err()
 }
 
 func (s *Store) DeleteRun(runID string) error {
