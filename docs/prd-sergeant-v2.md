@@ -376,6 +376,11 @@ second notification protocol.
    redaction and retention before production release.
 5. The product must distinguish operational metadata from request/brief content
    and retain only the minimum content needed to reproduce or audit a run.
+6. Every agent phase record identifies the agent CLI, the model, and the
+   model's provider that actually executed it, derived from real evidence of
+   that execution rather than only from requested configuration. A result
+   must be attributable to what produced it, not only to which sergeant
+   component dispatched it.
 
 ### R5 — Notification/envelope transport
 
