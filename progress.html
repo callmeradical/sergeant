@@ -48,8 +48,9 @@ a{color:var(--muted)}
   <h1>Sergeant v2</h1>
   <p>Independent review. Written by the critic, not the builder.</p>
   <p class="meta">
-    Review 008 · 2026-08-23 · branch <code>v2</code> · merge <code>d0edef7</code> reviewed ·
-    "dead letters are durable, with replay and quarantine (R5.5)"
+    Review 009 · 2026-08-23 · branch <code>v2</code> · merge <code>b071848</code> reviewed
+    (feature commit <code>84b481d</code> onto <code>d0edef7</code>) ·
+    "phases record their model and provider (R4.6)"
   </p>
 </header>
 
@@ -58,39 +59,43 @@ a{color:var(--muted)}
   <div class="grid">
     <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code></div></div>
     <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code> whole module</div></div>
-    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">9/9 pass</span></div><div class="small">242 named tests (incl. subtests), <code>-count=1</code></div></div>
-    <div class="card"><div class="label">R5.5 (dead-letter/replay/quarantine)</div><div class="value"><span class="status">genuinely met</span></div><div class="small">all 11 spec scenarios map to real, correct behavior</div></div>
-    <div class="card"><div class="label">Call-site wiring</div><div class="value"><span class="status">both real</span></div><div class="small"><code>critical=true</code> literal at both sites, confirmed by reading current code</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">9/9 pass</span></div><div class="small"><code>go test ./internal/... -count=1</code>, all packages green</div></div>
+    <div class="card"><div class="label">R4.6 (model/provider provenance)</div><div class="value"><span class="status">genuinely met</span></div><div class="small">all 4 spec scenarios map to real, correct behavior</div></div>
+    <div class="card"><div class="label">Call-site wiring</div><div class="value"><span class="status">both paths real</span></div><div class="small">mutation-tested myself; gating on the wrong branch broke exactly the predicted test</div></div>
   </div>
-  <p><strong>Verdict:</strong> R5.5 is <strong>genuinely met</strong>, not just apparently met. This is the first
-  of the last three R5-bullet reviews where the "green tests, quietly incomplete requirement" pattern
-  (Review 007's <code>next_attempt_at</code>/error-classification gap, the earlier <code>CausationID</code>
-  incident) did not recur. I could not make it recur either: two required mutation tests behaved exactly as the
-  commit message claims (with slightly more test breakage than claimed, not less), and three additional
-  probes I wrote myself — a second dead-letter episode after a failed replay, a replay that itself needs an
-  internal retry before succeeding, and a literal removal of the quarantine-refuses-replay guard — all
-  produced correct behavior or a correctly-failing test. The only real findings are a test-rigor gap (real
-  behavior is correct but under-tested for multi-episode/multi-attempt paths) and one over-cautious assertion
-  that is weaker than it looks. Neither blocks the R5.5 verdict.</p>
+  <p><strong>Verdict:</strong> R4.6 is <strong>genuinely met</strong>. This is the second consecutive review
+  (after Review 008's R5.5) where the "single call site covers both paths" claim — the exact bug shape that
+  recurred multiple times earlier in this project, including once in an R5.3/R5.4 DAG-engine call site — held
+  up under independent mutation testing rather than only under the builder's own claimed mutation test. I
+  moved <code>annotatePayloadWithProvenance</code>'s call site inside only the synthesized-envelope branch
+  myself, confirmed <code>TestAgentAuthoredEnvelopeStillGetsProvenance</code> failed with exactly the
+  predicted empty model/provider values while the other two provenance-path tests kept passing (proving the
+  suite discriminates precisely on this fault, not coincidentally), then reverted with
+  <code>git checkout --</code> and confirmed a clean tree. I also independently verified the regex's
+  load-bearing claim: the real production <code>sergeant.db</code> contains envelopes from actual historical
+  goose dispatches whose captured <code>raw_output</code> uses the exact byte sequence
+  <code>new session · anthropic claude-sonnet-4-6</code> with U+00B7 MIDDLE DOT — the same character the
+  regex and both test fixtures use, confirmed with Python's <code>unicodedata.name()</code> on the extracted
+  character itself, not assumed from a source comment. No scope creep found. One low-severity, non-blocking
+  observation is noted below.</p>
 </section>
 
 <section>
   <h2>What I inspected</h2>
   <table>
     <tr><th>Area</th><th>Method</th></tr>
-    <tr><td>The merge itself</td><td><code>git show d0edef7</code>, <code>git diff d0edef7^1 d0edef7^2</code> — read the real diff for all 5 changed files, not the commit message</td></tr>
-    <tr><td>Store-level dead-letter logic</td><td>Full read of <code>internal/store/delivery.go</code> (512 lines) and <code>delivery_test.go</code> (884 lines)</td></tr>
-    <tr><td>Call-site claims</td><td>Read the current <code>internal/runner/runner.go</code> (<code>RunAgentPhase</code>) and <code>internal/dag/engine.go</code> (<code>RunStage</code>) call sites directly, and their diff hunks in the merge</td></tr>
-    <tr><td>Spec-to-test mapping</td><td>Read all 11 Given/When/Then scenarios in <code>specs/dead-lettering/spec.md</code> and matched each to its named test in <code>delivery_test.go</code> one by one</td></tr>
-    <tr><td>Build / vet / test</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code> from a clean tree; also ran the full module's tests verbose to count pass/fail</td></tr>
-    <tr><td>Mutation 1 (per commit message)</td><td>Reverted the dead-lettering branch's <code>deliveryStateDeadLetter</code> back to <code>deliveryStateFailed</code>; ran the suite; reverted with <code>git checkout --</code></td></tr>
-    <tr><td>Mutation 2 (per commit message)</td><td>Removed the <code>case deliveryStateQuarantined</code> branch in <code>ReplayDelivery</code> and, separately, actually admitted <code>quarantined</code> into the "permitted" branch (a truer disabling of the guard); ran the suite each time; reverted both</td></tr>
-    <tr><td>Own mutation: multi-episode dead-letter cycle</td><td>Wrote and ran a throwaway test: dead-letter &rarr; replay fails again (second dead-letter episode) &rarr; quarantine &rarr; replay refused; confirmed correct behavior; deleted the test</td></tr>
-    <tr><td>Own mutation: replay with an internal retry</td><td>Wrote and ran a throwaway test: dead-letter after 3 attempts &rarr; replay fails once, succeeds on its second internal attempt; confirmed attempt numbering continues correctly (4, 5) and the retrying row lands correctly; deleted the test</td></tr>
-    <tr><td>Scope creep / scope gap check</td><td><code>grep -rn "DeliverEnvelope\|ReplayDelivery\|QuarantineDelivery\|UnquarantineDelivery" --include="*.go"</code> excluding tests, across the whole module</td></tr>
-    <tr><td><code>critical=false</code> honesty claim</td><td>Confirmed by reading, not trusting: both production call sites pass a literal <code>true</code>; grepped for any other call site — none exists</td></tr>
-    <tr><td>Migration correctness</td><td>Read <code>store.go</code>'s <code>migrateAddColumns</code> diff and confirmed <code>Open()</code> always runs it after <code>CREATE TABLE IF NOT EXISTS</code>, so the fresh-create DDL (which omits <code>recovery_instructions</code>) still ends up with the column on every open, not just upgraded databases</td></tr>
-    <tr><td>Dead code check</td><td>Read <code>insertDeliveryRowWithInstr</code> — confirmed it is a byte-for-byte pass-through of <code>insertDeliveryRow</code> with an identical signature, hiding no divergent behavior</td></tr>
+    <tr><td>The merge itself</td><td><code>git show b071848</code>, <code>git diff b071848^1 b071848^2</code> — read the real diff (2 files, 318 insertions, 0 deletions), not the commit message</td></tr>
+    <tr><td>Governing docs</td><td>Read <code>docs/prd-sergeant-v2.md</code> R4.6 text, <code>openspec/changes/phases-record-their-model-and-provider/{proposal,design,tasks}.md</code> and <code>specs/phase-provenance/spec.md</code> in full</td></tr>
+    <tr><td><code>detectModelProvider</code></td><td>Read the function and its <code>gooseBanner</code> regexp directly in <code>internal/runner/runner.go</code></td></tr>
+    <tr><td><code>annotatePayloadWithProvenance</code></td><td>Read the function directly; confirmed it unmarshals into <code>map[string]interface{}</code>, allocates on nil (JSON <code>null</code>), sets both keys unconditionally, and returns the original payload unchanged on unmarshal or remarshal error</td></tr>
+    <tr><td>Call-site placement</td><td>Read <code>RunAgentPhase</code> lines 411&ndash;465: <code>detectModelProvider</code> called immediately after <code>cmd.Run()</code>; the <code>if os.ReadFile(...) == nil && !failed {...} else {...}</code> block (agent-authored vs. synthesized) at lines 442&ndash;463; <code>annotatePayloadWithProvenance</code> called once at line 465, after the block, before <code>DeliverEnvelope</code>/<code>SaveEnvelope</code> (482&ndash;484), <code>RecordEnvelope</code> (488) and <code>RecordPhase</code> (523)</td></tr>
+    <tr><td>Build / vet / test</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code> from a clean tree</td></tr>
+    <tr><td>Own mutation test</td><td>Moved the <code>annotatePayloadWithProvenance</code> call inside only the <code>else</code> (synthesized-envelope) branch; ran the three provenance-path tests; reverted with <code>git checkout --</code>; confirmed a clean tree with <code>git status --short</code> and a successful rebuild before and after</td></tr>
+    <tr><td><code>TestAgentAuthoredEnvelopeStillGetsProvenance</code></td><td>Read the full test body: it writes a real fake-agent shell script that emits the goose banner, <code>mkdir -p .sergeant</code>, writes its own <code>.sergeant/envelope.json</code> with a distinct summary/payload, and exits 0 — confirmed the test asserts <code>env.Summary == "agent authored this envelope"</code> (proving the agent-authored branch, not the synthesized-summary template, was taken) before checking model/provider</td></tr>
+    <tr><td>Regex character verification</td><td>Queried the real production store at <code>/Users/lars/.local/share/sergeant/sergeant.db</code> for envelopes with <code>agent":"goose"</code>; extracted a real captured banner from <code>raw_output</code>; confirmed with Python's <code>unicodedata.name()</code> that the separator byte is U+00B7 MIDDLE DOT and the regex matches it, extracting <code>("anthropic", "claude-sonnet-4-6")</code> correctly against real bytes, not just the fixture strings</td></tr>
+    <tr><td>Scope discipline</td><td><code>git diff b071848^1 b071848^2 --stat</code> touches only <code>internal/runner/runner.go</code> and its test file, 0 deletions; grepped the diff for <code>opencode</code>/<code>codex</code>/<code>"pi"</code>/token/cost additions — none found; confirmed <code>GOOSE_MODEL</code>/<code>pr.Model</code>/<code>BuildAgentCommand</code> request-side logic is untouched</td></tr>
+    <tr><td>Empty-string honesty</td><td>Read <code>annotatePayloadWithProvenance</code>: <code>m["model"] = model; m["provider"] = provider</code> run unconditionally, no early return for empty values; confirmed against <code>TestAnnotatePayloadWithProvenanceSetsEmptyKeysExplicitly</code>, which asserts both keys are present (<code>hasModel</code>/<code>hasProvider</code> true via comma-ok map access) and empty, not absent</td></tr>
+    <tr><td>Merge-order dependency</td><td><code>git log --oneline --merges</code> confirms <code>d0edef7</code> (R5.5, "bullet 3") merged before <code>b071848</code>, matching design.md's stated ordering constraint on the shared <code>RunAgentPhase</code> function</td></tr>
   </table>
 </section>
 
@@ -98,188 +103,99 @@ a{color:var(--muted)}
   <h2>Findings</h2>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Exhausted retries genuinely produce <code>dead_letter</code>, not <code>failed</code>, and it is load-bearing</h3>
-    <p>Reverting the exhaustion branch's <code>deliveryStateDeadLetter</code> to <code>deliveryStateFailed</code>
-    broke <strong>9</strong> tests, not the 5 the commit message names (the commit message undersells its own
-    coverage, not oversells it):</p>
-    <pre>git checkout mutation (dead_letter -> failed), go test ./internal/store/...:
-  FAIL TestDeliveryRetryExhaustionIsDeadLetter
-  FAIL TestDeliveryErrorIsClassified
-  FAIL TestDeadLetterExhaustedRetriesProducesDeadLetterNotFailed   (s-1)
-  FAIL TestDeadLetterRecordNamesEnvelopeReasonAndRecoveryInstructions (s-2)
-  FAIL TestDeadLetterNonCriticalDoesNotFailCallerButIsRecorded     (s-5)
-  FAIL TestDeadLetterCanBeReplayed                                 (s-6)
-  FAIL TestDeadLetterAlreadyResolvedIsNotReplayedTwice             (s-8)
-  FAIL TestDeadLetterCanBeQuarantinedWithReason                    (s-9)
-  FAIL TestDeadLetterQuarantinedDeliveryRefusesReplay              (s-11)
-tree restored with git checkout --; go build ./... clean after</pre>
-    <p class="small">The row genuinely carries the envelope id, the classified error, and a non-empty
-    <code>recovery_instructions</code> string (<code>TestDeadLetterRecordNamesEnvelopeReasonAndRecoveryInstructions</code>,
-    verified by reading the assertions, not just the test name). Prior attempt rows (pending, two retrying
-    rows) are retained alongside the dead-letter row, not replaced — confirmed by reading
-    <code>TestDeadLetterAttemptHistoryIsRetained</code> and independently by inspecting raw history output
-    in my own throwaway tests.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The "single call site covers both paths" claim is real, confirmed by my own mutation, not the builder's</h3>
+    <p><code>annotatePayloadWithProvenance</code> is called exactly once, at <code>runner.go:465</code>, after
+    the <code>if data, err := os.ReadFile(envelopePath); err == nil &amp;&amp; !failed {...} else {...}</code>
+    block that builds <code>env</code> for either the agent-authored or sergeant-synthesized path, and before
+    every consumer of <code>env.Payload</code> (<code>Router.SaveEnvelope</code> via <code>DeliverEnvelope</code>,
+    <code>Store.RecordEnvelope</code>, <code>Store.RecordPhase</code>). I moved the call inside only the
+    <code>else</code> branch and reran the three provenance tests:
+    <code>TestAgentAuthoredEnvelopeStillGetsProvenance</code> failed exactly as predicted (<code>""/""</code>
+    instead of <code>claude-sonnet-4-6/anthropic</code>), while <code>TestGooseAgentPhaseRecordsModelAndProvider</code>
+    and <code>TestUnparsedAgentProvenanceIsEmptyNotGuessed</code> both still passed — proof the suite
+    discriminates precisely on this fault rather than failing for unrelated reasons. Reverted with
+    <code>git checkout -- internal/runner/runner.go</code>; confirmed a clean tree and a successful rebuild
+    afterward. This is the exact bug shape the review brief warned had recurred elsewhere in this project,
+    and here it is genuinely absent.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Both call sites really pass <code>critical=true</code>, and <code>critical=false</code> is real, tested, and unused in production — exactly as claimed</h3>
-    <pre>internal/runner/runner.go:432:  pr.Store.DeliverEnvelope(envelopeID, pr.RepoName, true, func() error {...})
-internal/dag/engine.go:291:     e.Store.DeliverEnvelope(latestEnv.ID, worktreePath, true, func() error {...})
-
-grep -n "DeliverEnvelope" --include=*.go (excluding tests): only the two lines above
-  plus delivery.go's own definition/doc comments. No third call site.</pre>
-    <p class="small"><code>TestDeadLetterCriticalFailsCaller</code> (s-4) and
-    <code>TestDeadLetterNonCriticalDoesNotFailCallerButIsRecorded</code> (s-5) both genuinely exercise the
-    flag: s-4 asserts a non-nil error, s-5 asserts a nil error <em>and</em> that the dead-letter row still
-    exists — this is the distinction the spec draws explicitly ("a silently dropped notification and a
-    non-critical dead letter must not look the same from the store's point of view"), and the test checks
-    both halves, not just the return value. The honest-partial framing in <code>proposal.md</code>
-    ("mechanism real and tested, not yet exercised by any caller") is accurate; there is no hidden third
-    call site that secretly passes <code>false</code>.</p>
+    <h3><span class="sev low">verified</span> &nbsp; <code>TestAgentAuthoredEnvelopeStillGetsProvenance</code> genuinely exercises the agent-authored path</h3>
+    <p>The test's fake agent is a real shell script (not the shared <code>fakeAgent</code> echo helper used
+    by the other tests) that prints the goose banner, then <code>mkdir -p .sergeant &amp;&amp; cat &gt;
+    .sergeant/envelope.json</code> with its own distinct <code>summary</code> ("agent authored this
+    envelope") and a <code>{"custom":"value"}</code> payload key, then exits 0. The test asserts
+    <code>env.Summary == "agent authored this envelope"</code> and <code>payloadMap["custom"] == "value"</code>
+    before checking model/provider — both assertions would fail if the code had silently fallen through to
+    the synthesized-summary template ("Phase build completed for svc"), so the test cannot be satisfied by
+    accidentally re-testing the synthesized path under a different name.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The quarantine-refuses-replay guard is a real guard, confirmed by actually disabling it</h3>
-    <p>My first attempt at this mutation (removing the <code>case deliveryStateQuarantined</code> arm from
-    <code>ReplayDelivery</code>'s switch) did <em>not</em> break any test, because the <code>switch</code>'s
-    <code>default</code> arm also refuses (any state that isn't <code>dead_letter</code>/<code>delivered</code>/
-    <code>acknowledged</code>/<code>""</code> falls through to the same "not dead_letter" refusal). That is
-    not a bug — refusal is still correctly enforced either way — but it means that specific code path is not
-    uniquely exercised by that mutation. I then made the guard <em>actually</em> permit a quarantined
-    delivery to replay (added <code>deliveryStateQuarantined</code> to the "permitted" case), which is a
-    faithful reproduction of "disable the guard":</p>
-    <pre>mutation: `case deliveryStateDeadLetter, deliveryStateQuarantined: // permitted`
-  -> FAIL TestDeadLetterQuarantinedDeliveryRefusesReplay (s-11)
-     "expected error when replaying a quarantined delivery, got nil"
-     "row count changed after refused replay: before=5 after=7"
-tree restored with git checkout --</pre>
-    <p class="small">So the guard is real and load-bearing, matching the commit message's claim, via the
-    row-count and call-count assertions in the same test. The mechanism works; see the next item for the
-    one assertion in that same test that is weaker than it looks.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The regex's separator character matches real production goose output, not just the fixtures</h3>
+    <p>The goose-agent envelopes already present in the live <code>sergeant.db</code> (from actual dispatches
+    on this project, unrelated to this change) contain <code>raw_output</code> text reading
+    <code>new session · anthropic claude-sonnet-4-6</code>. Extracting the separator byte and checking it
+    with Python's <code>unicodedata.name()</code> confirms it is U+00B7 MIDDLE DOT — exactly the character
+    <code>gooseBanner</code>'s regexp and both test fixtures use (source comments and fixtures could have
+    silently used a visually similar U+2022 BULLET or U+30FB without anyone noticing by eye; I did not rely
+    on eyeballing). Running the exact regex against the real extracted string via Python correctly captured
+    <code>("anthropic", "claude-sonnet-4-6")</code>. No ANSI escape bytes surround the banner in the real
+    capture either, corroborating design.md's claim that ANSI-stripping is not required before matching.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Empty model/provider are set as explicit keys, not omitted</h3>
+    <p><code>annotatePayloadWithProvenance</code> runs <code>m["model"] = model; m["provider"] = provider</code>
+    unconditionally — there is no early return or conditional guard for the empty-string case.
+    <code>TestAnnotatePayloadWithProvenanceSetsEmptyKeysExplicitly</code> asserts both keys are present
+    (<code>hasModel</code>/<code>hasProvider</code> via comma-ok map access) and equal to <code>""</code>,
+    which is the correct test for "known absent" vs. "key never set." A JSON <code>null</code> payload is
+    also handled: <code>json.Unmarshal</code> of <code>null</code> into a map produces a nil map with no
+    error, and the code allocates a fresh map before assigning into it, avoiding the nil-map-write panic;
+    <code>TestAnnotatePayloadWithProvenanceHandlesJSONNull</code> covers this directly.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; No scope creep beyond the proposal's explicit boundaries</h3>
+    <pre>git diff b071848^1 b071848^2 --stat:
+  internal/runner/runner.go      |  50 ++++++++   (0 deletions)
+  internal/runner/runner_test.go | 268 +++++++++++++++++++++++++++++++++++++++++
+
+grep for opencode/codex/"pi"/token/cost additions in the diff: none
+GOOSE_MODEL / pr.Model / BuildAgentCommand: present in runner.go, untouched by this diff (pure addition)
+No cmd/, internal/ui, or internal/mcp files touched</pre>
+    <p class="small">Matches <code>tasks.md</code>'s out-of-scope list exactly: no parsing added for
+    <code>opencode</code>/<code>claude</code>/<code>codex</code>/<code>pi</code>, no token/cost fields, no
+    CLI/UI/MCP surface, and the request-side <code>pr.Model</code>/<code>GOOSE_MODEL</code> path is
+    unchanged. The diff is insert-only (0 deletions across both files), which independently corroborates
+    this — an insert-only diff cannot have silently altered existing request-side behavior.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; All 4 spec scenarios map to a real, correctly-matching test</h3>
+    <pre>specs/phase-provenance/spec.md scenario                              Test
+A goose phase's model/provider are recorded                          TestGooseAgentPhaseRecordsModelAndProvider
+An unrecognised agent's provenance is absent, not invented            TestUnparsedAgentProvenanceIsEmptyNotGuessed
+Provenance recorded whether or not agent wrote its own envelope       TestAgentAuthoredEnvelopeStillGetsProvenance
+Malformed/unrecognised output does not fail the phase                 TestBannerlessGooseOutputDoesNotFailPhase</pre>
+    <p class="small">Also covered beyond the spec's literal scenarios: <code>TestDetectModelProviderNeverPanics</code>
+    (empty/garbage-byte/absolute-path/wrong-agent inputs), and three direct unit tests of
+    <code>annotatePayloadWithProvenance</code> for non-object payloads, explicit-empty keys, and JSON
+    <code>null</code>. Each test's assertions genuinely match its scenario, not just its name.</p>
   </div>
 
   <div class="item warn">
-    <h3><span class="sev low">low</span> &nbsp; One assertion in s-11's test is weaker than it appears, though the test as a whole is not</h3>
-    <p><code>TestDeadLetterQuarantinedDeliveryRefusesReplay</code> asserts
-    <code>strings.Contains(err.Error(), "quarantine")</code> to check that the refusal "names the
-    quarantine," per the spec text. But the generic fallback error
-    (<code>"...latest state is %q, not dead_letter"</code>, with <code>latest="quarantined"</code>) also
-    contains the substring "quarantine" purely because Go's <code>%q</code> verb quotes the state name
-    itself — so this one assertion would pass even if the explicit <code>case deliveryStateQuarantined</code>
-    branch (with its more specific message, "delivery is quarantined") were deleted and the state fell
-    through to <code>default</code>. It is not, on its own, proof that the code recognizes quarantine as a
-    distinct case rather than an incidental string match. This does not change the verdict: the same test's
-    row-count and call-count assertions (see previous item) do catch a genuine guard removal, so the
-    guarantee the scenario cares about — a quarantined delivery cannot be replayed — is actually verified,
-    just not by the substring check specifically.</p>
-  </div>
-
-  <div class="item warn">
-    <h3><span class="sev med">medium</span> &nbsp; Multi-episode dead-letter cycles and multi-attempt replays are correct but have zero coverage in the merged suite</h3>
-    <p>The review brief specifically asked about this because it is exactly the kind of edge the shared
-    <code>deliverRetryLoop</code> refactor could get wrong: a delivery that is dead-lettered, replayed, fails
-    again (a second dead-letter episode), and is then quarantined or replayed again; and a replay that itself
-    needs more than one internal attempt before resolving. Neither path is exercised by any test in
-    <code>delivery_test.go</code> — every replay test either succeeds on the replay's first attempt
-    (<code>TestDeadLetterCanBeReplayed</code>, <code>TestDeadLetterAlreadyResolvedIsNotReplayedTwice</code>)
-    or is refused before an attempt is made. I wrote both cases myself:</p>
-    <pre>Second dead-letter episode (dead_letter -> replay fails 3x -> dead_letter -> quarantine -> replay refused):
-  history: pending(1) retrying(2) retrying(3) dead_letter(3)
-           pending(4) retrying(5) retrying(6) dead_letter(6)
-  quarantine succeeds (latest state correctly read as the SECOND dead_letter row, attempt=6)
-  further replay correctly refused
-  -> PASS (mechanism correct)
-
-Replay needing an internal retry (dead_letter after 3 attempts -> replay fails once, succeeds on 2nd try):
-  history: pending(1) retrying(2) retrying(3) dead_letter(3)
-           pending(4) retrying(5) delivered(5)
-  attempt numbering continues correctly from 4, not restarting at 1
-  -> PASS (mechanism correct)
-
-Both throwaway tests written, run, and deleted; tree confirmed clean after (git status --short).</pre>
-    <p class="small"><code>latestDeliveryState</code>'s <code>ORDER BY created_at DESC, id DESC</code>
-    correctly picked the second (later) <code>dead_letter</code> row in the first case, not the first one —
-    the mechanism is correct today. But nothing in the shipped suite protects this correctness going forward:
-    a future change to <code>deliverRetryLoop</code>'s attempt-numbering, or to
-    <code>latestDeliveryState</code>'s ordering, that broke either path would pass the entire merged test
-    file. This is a real coverage gap against the review brief's own stated risk ("check it actually produces
-    correct attempt numbering and history for a replay that itself needs multiple internal attempts, not
-    just a replay that succeeds on the first try") — the code passed my probe, but the shipped tests did not
-    ask the question.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; All 11 spec scenarios map to a real, correctly-matching test</h3>
-    <p>Walked <code>specs/dead-lettering/spec.md</code> scenario by scenario against
-    <code>delivery_test.go</code>:</p>
-    <pre>s-1  exhausted retries -> dead_letter, not failed        TestDeadLetterExhaustedRetriesProducesDeadLetterNotFailed
-s-2  envelope/reason/recovery instructions readable       TestDeadLetterRecordNamesEnvelopeReasonAndRecoveryInstructions
-s-3  attempt history retained                             TestDeadLetterAttemptHistoryIsRetained
-s-4  critical dead letter fails caller                     TestDeadLetterCriticalFailsCaller
-s-5  non-critical: nil to caller, record still exists      TestDeadLetterNonCriticalDoesNotFailCallerButIsRecorded
-s-6  dead letter can be replayed to delivered               TestDeadLetterCanBeReplayed
-s-7  replay refused when not dead_letter, no write          TestDeadLetterReplayRefusedWhenNotDeadLetter
-s-8  already-resolved dead letter not replayed twice         TestDeadLetterAlreadyResolvedIsNotReplayedTwice
-s-9  quarantine with reason, reason reads back               TestDeadLetterCanBeQuarantinedWithReason
-s-10 quarantine refused when not dead_letter, no write        TestDeadLetterQuarantineRefusedWhenNotDeadLetter
-s-11 quarantined delivery refuses replay, no write             TestDeadLetterQuarantinedDeliveryRefusesReplay</pre>
-    <p class="small">Each test's assertions genuinely match its scenario's Given/When/Then, not just its
-    name — I read every assertion, not only the test's title, since that is the exact gap Review 007 found
-    elsewhere in this project.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; No scope creep, and the explicitly-forbidden additions are genuinely absent</h3>
-    <pre>grep -rn "DeliverEnvelope|ReplayDelivery|QuarantineDelivery|UnquarantineDelivery" --include=*.go, excluding tests:
-  -> only internal/store/delivery.go (definitions/docs) and the two production call sites
-  -> no cmd/, no internal/ui, no internal/mcp hit
-  -> no UnquarantineDelivery function exists anywhere
-  -> no background sweep / scheduler touches the deliveries table</pre>
-    <p class="small">Matches <code>tasks.md</code> and <code>proposal.md</code>'s out-of-scope list exactly:
-    CLI/UI/MCP operator surfaces (R5.6, bullet 4), automatic replay sweeps, a configurable criticality
-    policy, and an unquarantine path are all absent, as required. The retry ceiling
-    (<code>deliveryMaxAttempts = 3</code>), idempotency key derivation, and the two wrapped functions'
-    write behavior are untouched by this diff — confirmed by reading the full <code>git diff</code>, not
-    just the file list.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Migration path is correct for both fresh and upgraded databases</h3>
-    <p>The <code>createDeliveriesTable</code> DDL constant itself was <em>not</em> updated to include
-    <code>recovery_instructions</code> — only <code>migrateAddColumns</code> gained a new
-    <code>{"deliveries", "recovery_instructions", "ALTER TABLE ..."}</code> entry, following the same
-    pattern already used for <code>error_class</code>. This looked at first read like it might leave a
-    freshly-created database without the column, but <code>Open()</code> unconditionally runs
-    <code>migrateAddColumns()</code> immediately after <code>CREATE TABLE IF NOT EXISTS</code> on every
-    open, including the very first one — so a brand-new database and an upgraded one converge on an
-    identical schema. <code>go test ./internal/store/...</code>, which opens a fresh temp-file database per
-    test, passing with <code>RecoveryInstructions</code> populated confirms this in practice, not just by
-    reading the code.</p>
-  </div>
-
-  <div class="item warn">
-    <h3><span class="sev low">low</span> &nbsp; <code>insertDeliveryRowWithInstr</code> is a pointless pass-through wrapper, harmless but worth naming</h3>
-    <p>The task description anticipated this exact function might "hide" something. It doesn't — it is a
-    byte-for-byte forward of every argument to <code>insertDeliveryRow</code>, which itself already gained
-    the <code>recoveryInstr</code> parameter in this same diff. The wrapper's own doc comment
-    ("...accepts an explicit recovery_instructions string...") describes something <code>insertDeliveryRow</code>
-    already does directly. This is dead indirection left over from what was probably an earlier draft of the
-    refactor, not a functional issue — confirmed harmless by direct comparison of the two function bodies.
-    Low severity: worth deleting for clarity, not worth blocking on.</p>
-  </div>
-
-  <div class="item warn">
-    <h3><span class="sev low">low</span> &nbsp; Inherited, not new: <code>ReplayDelivery</code>/<code>QuarantineDelivery</code>'s state-guard check is a non-atomic read-then-insert, same class of gap Review 007 flagged for <code>DeliverEnvelope</code></h3>
-    <p>Both new functions read <code>latestDeliveryState</code>, decide, then insert — with no transaction
-    wrapping the two — so two concurrent callers could both observe <code>dead_letter</code> and one insert a
-    <code>quarantined</code> row while the other's replay attempt is already in flight, producing a history
-    where "latest state" briefly disagrees with what an operator intended. This is not exploitable today:
-    <code>ReplayDelivery</code> and <code>QuarantineDelivery</code> have zero callers anywhere in the
-    codebase (bullet 4/R5.6 has not landed), so there is no concurrent caller to race. This is the same
-    tradeoff Review 007 named for <code>DeliverEnvelope</code>'s idempotency check, extended to two more
-    functions built on the same pattern, and it is equally undisclosed in <code>proposal.md</code> as a
-    known limitation. Worth naming now, as Review 007 did, rather than rediscovering it once bullet 4 adds a
-    caller.</p>
+    <h3><span class="sev low">low</span> &nbsp; Un-anchored regex could in principle match agent-generated text, not just goose's own banner</h3>
+    <p><code>gooseBanner</code> is applied to the entire captured <code>outBuf.String()</code>, which for a
+    successful phase includes everything the agent printed, not just its startup banner. If the agent's own
+    generated output (e.g. a commit message, a code comment, or a quoted example) happened to contain the
+    literal substring <code>new session · word word</code>, <code>FindStringSubmatch</code> would return
+    that occurrence instead of (or ahead of) the real banner. In practice this is a non-issue today: goose
+    always emits its banner as the very first output before any agent-generated content, so the real banner
+    is always the leftmost match. This is a latent, low-severity risk worth naming rather than a real
+    defect — it does not currently misfire and the spec does not ask for anchoring, but design.md does not
+    discuss it as a rejected alternative the way its other design choices are discussed.</p>
   </div>
 </section>
 
@@ -287,53 +203,50 @@ s-11 quarantined delivery refuses replay, no write             TestDeadLetterQua
   <h2>Evidence index</h2>
   <table>
     <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
-    <tr><td>Build/vet/test clean</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 9/9 packages, 242 tests</td></tr>
-    <tr><td>Exhaustion produces <code>dead_letter</code> not <code>failed</code>, load-bearing</td><td>reverted to <code>failed</code>; reverted back</td><td>9 tests failed (commit message under-claimed at 5)</td></tr>
-    <tr><td>Quarantine-refuses-replay guard is real</td><td>admitted <code>quarantined</code> into the permitted branch; reverted</td><td>s-11 failed on row/call-count assertions, as claimed</td></tr>
-    <tr><td>s-11's substring assertion alone is weak</td><td>removed only the specific <code>case</code> arm (fell to <code>default</code>); reverted</td><td>no test failed — that one assertion alone would not have caught it</td></tr>
-    <tr><td>Both call sites pass <code>critical=true</code> literally</td><td>read <code>runner.go:432</code>, <code>engine.go:291</code> directly</td><td>confirmed, no hidden third call site</td></tr>
-    <tr><td>Second dead-letter episode + quarantine after failed replay</td><td>throwaway test, written/run/deleted</td><td>pass — correct, but untested in merged suite</td></tr>
-    <tr><td>Replay needing an internal retry (fail-then-succeed)</td><td>throwaway test, written/run/deleted</td><td>pass — correct, but untested in merged suite</td></tr>
-    <tr><td>No scope creep into bullet 4 (CLI/UI/MCP), no Unquarantine, no sweep</td><td><code>grep -rn</code> across the module excluding tests</td><td>confirmed absent</td></tr>
-    <tr><td>Migration adds <code>recovery_instructions</code> to both fresh and upgraded DBs</td><td>read <code>Open()</code>'s call order; ran the suite against fresh temp DBs</td><td>confirmed correct</td></tr>
-    <tr><td><code>insertDeliveryRowWithInstr</code> hides no divergent behavior</td><td>direct comparison against <code>insertDeliveryRow</code></td><td>confirmed pure pass-through</td></tr>
+    <tr><td>Build/vet/test clean</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 9/9 packages</td></tr>
+    <tr><td>Single call site covers both env-building branches</td><td>gated the call inside only the synthesized <code>else</code> branch; reran the 3 provenance tests; reverted</td><td><code>TestAgentAuthoredEnvelopeStillGetsProvenance</code> failed exactly as predicted; the other two still passed</td></tr>
+    <tr><td><code>TestAgentAuthoredEnvelopeStillGetsProvenance</code> exercises the real agent-authored path</td><td>read the full test: fake agent writes its own <code>.sergeant/envelope.json</code>, exits 0, asserted <code>env.Summary</code> matches the agent's own text</td><td>confirmed — not a re-test of the synthesized path</td></tr>
+    <tr><td>Regex separator is U+00B7 MIDDLE DOT, matching real production output</td><td>extracted real <code>raw_output</code> from 8 goose-agent rows in <code>/Users/lars/.local/share/sergeant/sergeant.db</code>; ran <code>unicodedata.name()</code> and the exact Go regex (via Python) against the extracted bytes</td><td>confirmed match: <code>("anthropic", "claude-sonnet-4-6")</code></td></tr>
+    <tr><td>Empty model/provider set as explicit keys, not omitted</td><td>read <code>annotatePayloadWithProvenance</code>; confirmed via <code>TestAnnotatePayloadWithProvenanceSetsEmptyKeysExplicitly</code></td><td>confirmed — unconditional assignment, present-and-empty asserted</td></tr>
+    <tr><td>JSON <code>null</code> payload does not panic</td><td>read the nil-map allocation guard; ran <code>TestAnnotatePayloadWithProvenanceHandlesJSONNull</code></td><td>pass</td></tr>
+    <tr><td>No scope creep (other agents, tokens/cost, CLI/UI/MCP, request-side model)</td><td><code>git diff --stat</code> (2 files, 0 deletions), grep for forbidden additions, read <code>BuildAgentCommand</code>/<code>GOOSE_MODEL</code></td><td>confirmed absent / unchanged</td></tr>
+    <tr><td>Merge-order dependency on R5.5 respected</td><td><code>git log --oneline --merges</code></td><td>confirmed: <code>d0edef7</code> precedes <code>b071848</code></td></tr>
   </table>
 </section>
 
 <section>
   <h2>Verdict</h2>
   <div class="item ok">
-    <p><strong>R5.5: genuinely met.</strong> Exhausted retries durably produce a <code>dead_letter</code>
-    row (not <code>failed</code>) carrying the envelope reference, classified error, and a non-empty
-    recovery-instructions string; the <code>critical</code> flag correctly gates whether a dead letter fails
-    its caller, and both real production call sites preserve prior behavior by passing a literal
-    <code>true</code>; <code>ReplayDelivery</code> and <code>QuarantineDelivery</code> are real, correctly
-    state-guarded, auditable actions over the same insert-only history, and both mechanisms hold up under
-    edge cases the merged suite itself does not test (a second dead-letter episode, a replay needing
-    multiple internal attempts) — I verified this myself rather than trusting the absence of a failing test.
-    All 11 spec scenarios have a test that genuinely matches its Given/When/Then, not just its name. No
-    scope creep into bullet 4's CLI/UI/MCP surfaces, no <code>UnquarantineDelivery</code>, no automatic
-    replay sweep.</p>
-    <p class="small">Severity-ranked residual findings, none of which change the verdict: (1) medium —
-    multi-episode dead-letter cycles and multi-attempt replays are correct but have zero test coverage in
-    the merged suite, so a future regression in <code>deliverRetryLoop</code>'s attempt-numbering or
-    <code>latestDeliveryState</code>'s ordering would not be caught; (2) low — one assertion inside s-11's
-    test (a substring check for "quarantine" in the error message) is weaker than it looks and would not by
-    itself catch the removal of the specific quarantine-detection branch, though the same test's other
-    assertions do; (3) low — <code>insertDeliveryRowWithInstr</code> is dead pass-through indirection,
-    harmless; (4) low, inherited from bullet 2 — the state-guard read-then-insert in
-    <code>ReplayDelivery</code>/<code>QuarantineDelivery</code> is not atomic, a latent gap once bullet 4
-    gives these functions a concurrent caller, not exploitable today.</p>
+    <p><strong>R4.6: genuinely met.</strong> <code>detectModelProvider</code> correctly parses goose's real
+    startup banner for provider and model (verified against real production-captured bytes, not only test
+    fixtures), returns empty strings for every other supported agent and for unparseable goose output, and
+    never panics across malformed/edge-case inputs. <code>annotatePayloadWithProvenance</code> attaches
+    <code>model</code>/<code>provider</code> to any JSON-object payload, leaves non-object payloads
+    (including JSON <code>null</code>, after nil-map allocation) unchanged or safely defaulted, and sets both
+    keys explicitly even when empty — the honest "known absent" signal the design called for. The single
+    call site in <code>RunAgentPhase</code> is placed after both env-building branches converge and before
+    every downstream consumer of <code>env.Payload</code>; I mutation-tested this myself, independent of the
+    commit message's own claimed mutation test, and the guarantee held. All 4 spec scenarios in
+    <code>specs/phase-provenance/spec.md</code> have a test that genuinely matches its Given/When/Then. No
+    scope creep beyond the proposal's stated boundaries: no parsing added for other agents, no token/cost
+    fields, no CLI/UI/MCP surface, and <code>pr.Model</code>/<code>GOOSE_MODEL</code> request-side behavior
+    is untouched (the diff is insert-only).</p>
+    <p class="small">One residual finding, which does not change the verdict: low severity — the banner
+    regex is applied un-anchored against the agent's full captured output, so it could in principle match
+    agent-generated text elsewhere in the buffer rather than goose's own banner. Not exploitable today
+    because goose always emits its banner first and <code>FindStringSubmatch</code> returns the leftmost
+    match, but the tradeoff is not discussed in design.md the way its other design choices are.</p>
   </div>
 </section>
 
 <footer>
-  <p class="meta">Review 008 · findings above are reproduced from commands run against <code>d0edef7</code>
-  (merge) / <code>03c8d50</code> (feature commit) · three throwaway verification tests were written, run, and
-  deleted; two required mutations (dead_letter&rarr;failed, quarantine-guard removal) plus one exploratory
-  mutation (a no-op removal of just the switch <code>case</code> arm) were applied and reverted with
-  <code>git checkout --</code>; the working tree was confirmed clean (<code>git status --short</code>) before
-  and after every mutation.</p>
+  <p class="meta">Review 009 · findings above are reproduced from commands run against <code>b071848</code>
+  (merge) / <code>84b481d</code> (feature commit) · one mutation was applied and reverted
+  (<code>annotatePayloadWithProvenance</code>'s call site moved into only the synthesized-envelope branch);
+  the working tree was confirmed clean (<code>git status --short</code>) and rebuildable before and after.
+  Review 008 (R5.5, dead-lettering with replay/quarantine, merge <code>d0edef7</code>) previously found that
+  requirement genuinely met, with a test-rigor gap on multi-episode/multi-attempt paths that did not block
+  its verdict; this review did not re-verify R5.5.</p>
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
