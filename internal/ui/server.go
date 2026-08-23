@@ -136,6 +136,21 @@ func (srv *Server) Handler() http.Handler {
 }
 
 func (srv *Server) Start() error {
+	// Reconcile before binding the port. Any run the store still marks as
+	// running is unowned: a freshly started coordinator drives no runs by
+	// construction. Doing this before ListenAndServe closes the window where a
+	// client could observe a stale status and act on it (e.g. refuse a resume
+	// for a reason that stops being true the moment reconciliation finishes).
+	//
+	// ReconcileOrphanedRuns must NEVER be called again after this point. Mid-life
+	// it would reconcile a live run out from under itself.
+	if result, err := srv.Store.ReconcileOrphanedRuns(); err != nil {
+		log.Printf("sergeant: startup reconciliation failed: %v", err)
+	} else if result.RunsReconciled > 0 {
+		log.Printf("sergeant: reconciled %d orphaned run(s) and %d phase(s) to interrupted",
+			result.RunsReconciled, result.PhasesReconciled)
+	}
+
 	handler := srv.Handler()
 	addr := fmt.Sprintf("127.0.0.1:%d", srv.Port)
 	fmt.Printf("🌐 Sergeant Factory UI running at http://%s\n", addr)
@@ -1670,7 +1685,12 @@ func bulletStatusForRunOutcome(runStatus string) (string, bool) {
 // A passed run is excluded because re-running earned work can only lose it: a
 // flaky gate would turn a pass into a failure. A running run is excluded because
 // resuming it would put two agents in one worktree.
-var ResumableStatuses = []string{"failed", "cancelled", "timed_out"}
+//
+// interrupted is included: the coordinator stopped, not the work. Nothing judged
+// the run; it was cut off. ReconcileOrphanedRuns moves orphaned running runs to
+// this status at startup so the normal resume path recovers them without operator
+// archaeology.
+var ResumableStatuses = []string{"failed", "cancelled", "timed_out", "interrupted"}
 
 func isResumable(status string) bool {
 	for _, s := range ResumableStatuses {
