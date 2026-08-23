@@ -266,7 +266,8 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 	start := time.Now()
 	phaseID := fmt.Sprintf("%s-%s-%d", pr.RepoName, phaseName, time.Now().UnixNano())
 
-	// 1. Immediately record RUNNING phase state so UI updates in real-time
+	// 1. Immediately record RUNNING phase state so UI updates in real-time.
+	// Attempt 1 is recorded here; subsequent attempts get their own records.
 	initialPhase := &store.PhaseRecord{
 		ID:         phaseID,
 		RunID:      pr.RunID,
@@ -275,6 +276,7 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 		Kind:       "agent",
 		Status:     "running",
 		DurationMs: 0,
+		Attempt:    1,
 	}
 	_ = pr.Store.RecordPhase(initialPhase)
 
@@ -384,9 +386,15 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 		// Each attempt is its own phase record. Reusing one id made retries invisible,
 		// because INSERT OR REPLACE overwrote the previous attempt (PRD R2.4 requires
 		// retry policy to be observable).
+		//
+		// attempt is 0-based in the loop; Attempt in the record is 1-based.
+		// The first attempt reuses phaseID (overwriting the "running" sentinel that
+		// was written above with its final status). Subsequent attempts get a new ID
+		// so the previous attempt's record is preserved.
+		attemptNumber := attempt + 1
 		attemptID := phaseID
 		if attempt > 0 {
-			attemptID = fmt.Sprintf("%s-attempt%d", phaseID, attempt+1)
+			attemptID = fmt.Sprintf("%s-attempt%d", phaseID, attemptNumber)
 		}
 		_ = pr.Store.RecordPhase(&store.PhaseRecord{
 			ID:         attemptID,
@@ -398,6 +406,7 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 			Error:      failureReason,
 			DurationMs: duration,
 			Payload:    env.Payload,
+			Attempt:    attemptNumber,
 		})
 
 		if failed {
