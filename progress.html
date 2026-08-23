@@ -48,64 +48,53 @@ a{color:var(--muted)}
   <h1>Sergeant v2</h1>
   <p>Independent review. Written by the critic, not the builder.</p>
   <p class="meta">
-    Review 011 · 2026-08-23 · branch <code>v2</code> · merge <code>8e1c5e8</code> reviewed
-    (feature commit <code>5c2a1a2</code> onto <code>33ba588</code>) ·
-    "envelopes are typed, versioned and correlated (R5.1, R5.2, R5.7)" · bullet 1 of 4 —
-    the last of R5's four bullets to receive independent review, closing that gap
+    Review 012 · 2026-08-23 · branch <code>v2</code> · merge <code>8a2eb22</code> reviewed
+    (feature commit <code>65a058f</code>) ·
+    "graphify is a native v2 capability (D9, Task 1)"
   </p>
 </header>
 
 <section>
   <h2>Current status</h2>
   <div class="grid">
-    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at <code>8e1c5e8</code>, scratch worktree</div></div>
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at current <code>v2</code> HEAD</div></div>
     <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code>, whole module</div></div>
-    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">9/9 pass</span></div><div class="small"><code>go test ./internal/... -count=1</code>, all packages green</div></div>
-    <div class="card"><div class="label">Unwired call site (Review 007's bug shape)</div><div class="value"><span class="status">not found here</span></div><div class="small">all 4 real <code>RecordEnvelope</code> call sites correctly set correlation/causation</div></div>
-    <div class="card"><div class="label">Immutability guard</div><div class="value"><span class="status">real</span></div><div class="small">mutation-tested myself: swapping <code>INSERT</code> for <code>INSERT OR REPLACE</code> broke the refusal test</div></div>
-    <div class="card"><div class="label">Duplicate-id error classification</div><div class="value"><span class="status warn">broken, but silent</span></div><div class="small"><code>isDuplicateEnvelopeID</code> never actually fires — still present in current <code>v2</code> HEAD</div></div>
-    <div class="card"><div class="label">R5.1/R5.2/R5.7</div><div class="value"><span class="status">genuinely met</span></div><div class="small">with two non-blocking findings below</div></div>
-    <div class="card"><div class="label">R5 overall (all 4 bullets)</div><div class="value"><span class="status warn">now fully independently reviewed, not fully clean</span></div><div class="small">R5.4's Review 007 gap stands; this review adds one new low-impact defect</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">10/10 pass</span></div><div class="small"><code>go test ./internal/... -count=1</code>, all packages green, including a new <code>internal/graphify</code> package</div></div>
+    <div class="card"><div class="label">Scoping claim (v1 wraps a real binary)</div><div class="value"><span class="status">confirmed true</span></div><div class="small">read v1's script directly; ran <code>graphify --help</code> myself</div></div>
+    <div class="card"><div class="label">Zero-repos guard</div><div class="value"><span class="status">real, mutation-tested</span></div><div class="small">disabled it myself; the strengthened test caught it; reverted</div></div>
+    <div class="card"><div class="label">Atomic publish (no partial read)</div><div class="value"><span class="status">real, mutation-tested</span></div><div class="small">reordered the publish steps myself; the test caught it; reverted</div></div>
+    <div class="card"><div class="label">Crash / cross-filesystem safety</div><div class="value"><span class="status warn">regressed vs. v1</span></div><div class="small">no backup-and-restore like v1's <code>trap</code>; a failed <code>Rename</code> after <code>RemoveAll</code> destroys the prior graph with nothing to restore it</div></div>
+    <div class="card"><div class="label">"Must not call sgt-graphify" (D9/D7)</div><div class="value"><span class="status bad">true for new code, false for the system</span></div><div class="small"><code>cmd/sergeant-mcp</code>, still built and declared in <code>mcp.json</code>, exposes a live <code>sgt-graphify</code> tool</div></div>
+    <div class="card"><div class="label">exclude_patterns</div><div class="value"><span class="status">disclosed, unapplied</span></div><div class="small">field exists on <code>config.Graphify</code>; zero references in <code>internal/graphify/graphify.go</code></div></div>
+    <div class="card"><div class="label">Scope discipline</div><div class="value"><span class="status">held</span></div><div class="small">no CLI subcommand, no dashboard button, no report/cluster/watch code touched</div></div>
+    <div class="card"><div class="label">codesign identifier</div><div class="value"><span class="status">confirmed, but manual</span></div><div class="small"><code>Identifier=dev.sergeant.ui</code> on the installed <code>sgt-p</code> binary; no build-tooling reapplies it</div></div>
   </div>
-  <p><strong>Verdict:</strong> R5.1, R5.2 and R5.7 are <strong>genuinely met</strong>. This review exists
-  specifically to hunt for the failure shape Review 007 found in bullet 2 — a store-level implementation
-  that is correct in its own unit tests while a real production call site never actually wires the field.
-  <strong>That exact bug does not recur here.</strong> I read the diff for every one of the four real,
-  non-test call sites that publish an envelope in this codebase as of this commit
-  (<code>internal/mcp/server.go</code>'s <code>sergeant_emit_envelope</code> tool,
-  <code>internal/runner/runner.go</code>'s <code>RunAgentPhase</code>,
-  and <code>internal/ui/server.go</code>'s <code>handleCreatePR</code> and delivery-envelope write in
-  <code>executeRun</code>), and all four set <code>CorrelationID</code> to the run id and
-  <code>CausationID</code> to <code>Store.CausationFromLatest(runID, repo)</code> — a real lookup of the
-  previously published envelope for that run/repo, called before the new envelope is recorded, not a
-  hand-built test fixture. Immutability and the additive migration are both real and independently
-  confirmed by tests I ran myself, and by one mutation I applied and reverted. I did, however, find a
-  different real defect in the same "claims to do X, doesn't actually do X, nothing currently notices"
-  family: the duplicate-id error classifier checks the wrong SQLite extended error code and can never
-  actually match, detailed below. It does not break the immutability guarantee itself (the underlying
-  <code>INSERT</code> still fails and <code>RecordEnvelope</code> still returns a non-nil error), so R5.1's
-  required behavior holds — but the sentinel error the code claims to return is dead code, silently, and
-  the bug is still present in current <code>v2</code> HEAD.</p>
+  <p><strong>Verdict:</strong> D9's Task 1 is <strong>genuinely met for the code this bullet added</strong>,
+  and <strong>only apparently met for the decision as a whole</strong>. The "native, not a reimplementation"
+  framing holds up well against what v1 and the real <code>graphify</code> binary actually do — this is the
+  strongest-verified part of this review. But the decision text says flatly "must not call
+  <code>sgt-graphify</code>," and a live, currently-built, currently-declared code path in this same
+  repository does exactly that. See the findings below.</p>
 </section>
 
 <section>
   <h2>What I inspected</h2>
   <table>
     <tr><th>Area</th><th>Method</th></tr>
-    <tr><td>The merge itself</td><td><code>git show 8e1c5e8</code>, <code>git diff 8e1c5e8^1 8e1c5e8^2</code> — read the real diff (7 files, 876 insertions), not the commit message</td></tr>
-    <tr><td>Governing docs</td><td>Read the full <code>proposal.md</code>/<code>design.md</code>/<code>tasks.md</code>/<code>specs/envelope-schema/spec.md</code> under <code>openspec/changes/envelopes-are-typed-versioned-and-correlated/</code>, plus the PRD's R5.1/R5.2/R5.7 text and the "Notification and envelope transport" abstraction section</td></tr>
-    <tr><td>Every real <code>RecordEnvelope</code> call site</td><td><code>git grep -n "RecordEnvelope(" 8e1c5e8 -- '*.go' | grep -v _test.go</code>: exactly 4 non-test call sites (<code>mcp/server.go</code>, <code>runner.go</code>, <code>ui/server.go</code> ×2). Read each diff hunk directly</td></tr>
-    <tr><td><code>CorrelationID</code>/<code>CausationID</code> wiring</td><td>Confirmed each of the 4 sites sets <code>CorrelationID: runID</code> (or equivalent run-id variable) and <code>CausationID: Store.CausationFromLatest(runID, repo)</code>, called before <code>RecordEnvelope</code>, not after</td></tr>
-    <tr><td><code>GetLatestEnvelope</code> pre-existence</td><td><code>git show 8e1c5e8^1:internal/store/store.go | grep -n "func (s \*Store) GetLatestEnvelope"</code>: the function already existed before this commit (this commit only changed its internals to use the new shared <code>scanEnvelope</code> helper and the wider <code>envelopeColumns</code> select list). It is used by this same commit's own <code>CausationFromLatest</code> and by pre-existing UI code</td></tr>
-    <tr><td>Immutability, mutation-tested</td><td>In a scratch worktree at <code>8e1c5e8</code>, changed <code>INSERT INTO envelopes</code> to <code>INSERT OR REPLACE INTO envelopes</code>, reran <code>TestRecordEnvelopeRefusesRepublishOfExistingID</code>, confirmed it failed exactly as predicted, then <code>git checkout -- internal/store/store.go</code> and confirmed a clean tree and a rebuild</td></tr>
-    <tr><td>Duplicate-id classification, empirically</td><td>Wrote a standalone Go program against <code>modernc.org/sqlite</code> to insert a duplicate value into a <code>TEXT PRIMARY KEY</code> column and print the driver's extended error code: got <code>1555</code> (<code>SQLITE_CONSTRAINT_PRIMARYKEY</code>), not <code>2067</code> (<code>SQLITE_CONSTRAINT_UNIQUE</code>) — the code <code>isDuplicateEnvelopeID</code> actually checks for. Then added a throwaway probe test in the store package that calls <code>RecordEnvelope</code> twice with the same id and asserts <code>errors.Is(err, ErrDuplicateEnvelopeID)</code>: it is <strong>false</strong>. Removed the probe file afterward</td></tr>
-    <tr><td>Whether the classification bug is consumed anywhere</td><td><code>grep -rn "ErrDuplicateEnvelopeID" --include='*.go' .</code> against both the <code>8e1c5e8</code> worktree and current <code>v2</code> HEAD: only the declaration and the one (unreachable) wrapping site, no <code>errors.Is</code> caller anywhere in either tree</td></tr>
-    <tr><td>Whether the bug still exists in current <code>v2</code> HEAD</td><td>Read <code>internal/store/store.go</code> at current HEAD directly: <code>isDuplicateEnvelopeID</code> (line ~812) still checks <code>se.Code() != sqlite3.SQLITE_CONSTRAINT_UNIQUE</code>, unchanged since introduction; <code>git log -p --follow -- internal/store/store.go | grep</code> found no later commit touching it</td></tr>
-    <tr><td>Additive migration</td><td>Read <code>migrateAddColumns</code>'s 8 new <code>ALTER TABLE envelopes ADD COLUMN</code> entries (all <code>PRAGMA</code>-guarded via <code>hasColumn</code>); ran the existing <code>TestEnvelopeColumnsAddedOnReopen</code> (drops and recreates a pre-change <code>envelopes</code> table, reopens, asserts all 8 columns exist) and <code>TestOlderEnvelopeReadsBackWithEmptyType</code> (seeds a raw pre-migration row, reopens, asserts <code>Type == ""</code> and no read error) — both pass</td></tr>
-    <tr><td><code>CausationID</code> absent-vs-empty</td><td>Read the field (<code>*string</code>, nullable DB column), <code>causationIDValue</code>/<code>nullableText</code> (nil pointer → <code>""</code> → SQL <code>NULL</code>), and <code>scanEnvelope</code> (NULL → nil pointer). Ran <code>TestRecordEnvelopeFirstEnvelopeHasNoCausationID</code> and <code>TestOlderEnvelopeNullCausationIDIsNil</code> — both pass. Noted the one disclosed, non-manifesting edge case below</td></tr>
-    <tr><td>Test-level coverage of the 4 call sites specifically</td><td><code>runner_test.go</code> adds <code>TestAgentPhaseEnvelopesChainCausation</code>, whose own comment states it exists "because the store-level plumbing can be correct while every real call site still leaves <code>CausationID</code> nil" — exercises <code>RunAgentPhase</code> itself. No equivalent call-site-level test exists for the MCP <code>emit_envelope</code> tool (no <code>internal/mcp/server_test.go</code> file exists at this commit at all) or for either <code>ui/server.go</code> site</td></tr>
-    <tr><td>R5.1's full reference list vs. what shipped</td><td>R5.1 names <code>factory_id</code>, <code>project_id</code>, <code>repo_id</code>, <code>run_id</code>, <code>phase_id</code>, <code>assignment_id</code> "where applicable." Only <code>PhaseID</code> was added; <code>RunID</code>/<code>Repo</code> pre-existed. <code>grep -n "FactoryID\|type FactoryRecord\|AssignmentID\|ProjectID" internal/store/store.go</code>: zero hits anywhere in the store, at this commit or current HEAD — none of those three are modeled as first-class ID'd entities anywhere in this codebase, not only in this bullet</td></tr>
-    <tr><td>Build / vet / test</td><td><code>go build ./... && go vet ./... && go test ./internal/... -count=1</code> from a clean scratch worktree at <code>8e1c5e8</code>, created with <code>git worktree add /tmp/review-8e1c5e8 8e1c5e8</code> and removed with <code>git worktree remove /tmp/review-8e1c5e8 --force</code> afterward</td></tr>
+    <tr><td>The merge itself</td><td><code>git show 8a2eb22</code>, <code>git diff 8a2eb22^1 8a2eb22^2 --stat</code> — read the real diff (10 files, 1097 insertions, all additive), not the commit message</td></tr>
+    <tr><td>Governing docs</td><td>Read <code>proposal.md</code> in full, including its "scoping correction" section, under <code>openspec/changes/graphify-is-a-native-v2-capability/</code>, plus D9's text in <code>docs/prd-sergeant-v2.md</code></td></tr>
+    <tr><td>Whether the real <code>graphify</code> binary exists and does what's claimed</td><td>Ran <code>graphify --help</code> directly at <code>/Users/lars/.local/bin/graphify</code>: confirmed real subcommands <code>extract</code>, <code>merge-graphs</code>, <code>query</code>, <code>explain</code>, <code>affected</code>, among others</td></tr>
+    <tr><td>Whether v1's <code>sgt-graphify</code> is really a thin wrapper</td><td>Read <code>/Users/lars/Dev/sergeant/bin/sgt-graphify</code> directly (562 lines): confirmed lines 369/437 call <code>graphify extract</code> and <code>graphify merge-graphs</code> as external commands; the script itself does no parsing or graph algorithm work, only orchestration, path resolution, and atomic-publish bookkeeping around those two calls</td></tr>
+    <tr><td><code>internal/graphify/graphify.go</code> and <code>query.go</code></td><td>Read both files in full. <code>runCommand</code> is a package-level var wrapping <code>exec.Command</code>, used unmocked by every non-error-path test</td></tr>
+    <tr><td>Whether the tests are real or a stub</td><td>Ran <code>go test ./internal/graphify/... -v -count=1</code>: each test builds a real temporary git repo, shells out to the real <code>graphify extract</code> binary, and asserts on the real <code>graph.json</code> content. Wall-clock time per test (0.3–0.6s) is consistent with real subprocess/LLM-fallback extraction, not a mock</td></tr>
+    <tr><td>Zero-participating-repos guard, by mutation</td><td>Commented out the early-return guard in <code>BuildProjectGraph</code>, reran <code>TestZeroParticipatingReposIsBuildError</code>: it failed exactly as the commit message predicted (<code>graphify merge-graphs</code> was invoked with zero graph args), then reverted with <code>git checkout --</code> and confirmed a clean tree and a passing rerun</td></tr>
+    <tr><td>Atomic publish, by mutation</td><td>Reordered the code so <code>os.RemoveAll(Output)</code> runs <em>before</em> the <code>publishHook</code> pause instead of after it (a real non-atomic sequencing: old content deleted, new content not yet in place, while paused), reran <code>TestBuildNeverLeavesOutputInAPartialState</code>: it failed ("no such file or directory" reading the mid-flight graph), proving the test genuinely detects a broken publish order rather than only checking that some content exists at the end. Reverted with <code>git checkout --</code></td></tr>
+    <tr><td><code>exclude_patterns</code> usage</td><td><code>grep -rn "ExcludePatterns" internal/</code>: two hits, both in <code>internal/config/config.go</code>/<code>config_test.go</code> (field declaration and its round-trip test). Zero references anywhere in <code>internal/graphify/</code></td></tr>
+    <tr><td>MCP tools and missing-graph refusal</td><td>Read <code>internal/mcp/server.go</code>'s three new tool cases and <code>internal/graphify/query.go</code>'s <code>requireGraph</code>/<code>ErrNoGraph</code>. Read <code>internal/mcp/graph_test.go</code> and <code>internal/ui/build_graph_test.go</code>: both assert zero subprocess invocations (or a still-absent output directory) for a project with no graph built, not merely that an error string is returned</td></tr>
+    <tr><td>Scope discipline</td><td><code>git show 8a2eb22 --stat</code> confirmed no changes under <code>cmd/</code>; grepped all dashboard HTML/JS for <code>graphify</code>/<code>build-graph</code> (zero hits); confirmed no <code>GRAPH_REPORT</code>/cluster/watch code was touched</td></tr>
+    <tr><td>Whether <code>sgt-graphify</code> is reachable anywhere else in this repository</td><td>Grepped beyond the new package: found <code>cmd/sergeant-mcp/main.go</code> (a separate, pre-existing MCP-stdio binary, first added in commit <code>347e2c7</code>, predating this bullet) registers a tool literally named <code>sgt-graphify</code> that shells directly to the v1 script. Confirmed it is not dead code: <code>mise.toml</code>'s <code>[tasks.build]</code> builds it (<code>go build -o bin/sergeant-mcp ./cmd/sergeant-mcp/</code>) alongside <code>bin/sergeant</code>, and <code>mcp.json</code> declares both as live stdio servers side by side (<code>"sergeant"</code> → <code>./bin/sergeant-mcp</code>; <code>"sergeant-v2"</code> → <code>./bin/sergeant mcp</code>)</td></tr>
+    <tr><td>codesign / TCC story</td><td><code>codesign -dv ~/.local/share/sergeant-v2/bin/sgt-p</code>: confirmed <code>Identifier=dev.sergeant.ui</code>, matching the commit's claim exactly. Grepped <code>mise.toml</code> and <code>.goreleaser.yaml</code> for <code>codesign</code>: zero hits — nothing in the build tooling reapplies this on rebuild</td></tr>
+    <tr><td>Full suite</td><td><code>go build ./... && go vet ./... && go test ./internal/... -count=1</code> from the current <code>v2</code> working tree</td></tr>
   </table>
 </section>
 
@@ -113,121 +102,155 @@ a{color:var(--muted)}
   <h2>Findings</h2>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The unwired-call-site bug from Review 007 does not recur here</h3>
-    <p>This is the headline question this review exists to answer. All 4 real, non-test call sites that
-    publish an envelope in this codebase — <code>internal/mcp/server.go</code>'s <code>emit_envelope</code>
-    tool, <code>internal/runner/runner.go</code>'s <code>RunAgentPhase</code>, and
-    <code>internal/ui/server.go</code>'s <code>handleCreatePR</code> and the delivery envelope in
-    <code>executeRun</code> — set <code>CorrelationID</code> to the run id and <code>CausationID</code> to
-    <code>Store.CausationFromLatest(runID, repo)</code>, a genuine store lookup called immediately before
-    each envelope is built, not a value only ever set in a hand-constructed test record. This is exactly the
-    class of gap Review 007 found in bullet 2 (a real field that store-level tests covered but every
-    production call site left unset); it is not present in this bullet.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The scoping correction is true, not asserted</h3>
+    <p>This bullet's entire "native" framing rests on the claim that v1's <code>sgt-graphify</code> is itself a
+    thin bash wrapper around a separate, already-installed <code>graphify</code> binary. I did not take this on
+    faith: I ran <code>graphify --help</code> myself and got a real, substantial CLI with <code>extract</code>,
+    <code>merge-graphs</code>, <code>query</code>, <code>explain</code>, and <code>affected</code> among its
+    subcommands, and I read v1's 562-line script directly. It calls <code>graphify extract "$scan_root" --out
+    "$repo_root"</code> (line 369) and <code>graphify merge-graphs "${GRAPH_PATHS[@]}" --out
+    "$stage_output/graph.json"</code> (line 437) as external commands, and does no extraction or graph-algorithm
+    work of its own — only path resolution, filtering, and atomic-publish bookkeeping around those two calls.
+    The premise holds.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Immutability is real, confirmed by my own mutation</h3>
-    <p><code>RecordEnvelope</code> uses a plain <code>INSERT</code> (not <code>INSERT OR REPLACE</code>,
-    unlike the pre-existing pattern for phases) into <code>envelopes</code>, whose <code>id</code> column is
-    <code>TEXT PRIMARY KEY</code>, and returns <code>ErrDuplicateEnvelopeID</code>-wrapped (see below) or raw
-    error on conflict, writing nothing. I edited the SQL myself to <code>INSERT OR REPLACE</code> in a
-    scratch worktree, reran <code>TestRecordEnvelopeRefusesRepublishOfExistingID</code>, and it failed with
-    "expected an error when republishing an existing id, got nil" — exactly the silent-overwrite the guard
-    is supposed to prevent. Reverted with <code>git checkout --</code>; confirmed a clean tree and a
-    successful rebuild.</p>
-  </div>
-
-  <div class="item warn">
-    <h3><span class="sev med">warn</span> &nbsp; The duplicate-id error classifier checks the wrong SQLite code and can never match — <code>ErrDuplicateEnvelopeID</code> is dead code, and the bug is still present in current <code>v2</code> HEAD</h3>
-    <p><code>isDuplicateEnvelopeID</code> returns true only when the driver error's extended code equals
-    <code>sqlite3.SQLITE_CONSTRAINT_UNIQUE</code> (2067). But <code>envelopes.id</code> is declared
-    <code>TEXT PRIMARY KEY</code>, not a separate <code>UNIQUE</code> index, and I confirmed empirically
-    (a standalone probe against <code>modernc.org/sqlite</code>, then a throwaway test calling
-    <code>RecordEnvelope</code> twice with the same id) that a duplicate insert into that column raises
-    extended code <code>1555</code> (<code>SQLITE_CONSTRAINT_PRIMARYKEY</code>), not 2067 — even though the
-    driver's own error <em>text</em> happens to read "UNIQUE constraint failed: envelopes.id", which is what
-    makes this easy to miss on a read-through. <code>isDuplicateEnvelopeID</code> therefore always returns
-    false for the exact case it exists to detect, and <code>errors.Is(err, ErrDuplicateEnvelopeID)</code> is
-    never true for any caller, anywhere — I grepped the whole repository, at this commit and at current
-    <code>v2</code> HEAD, and no code calls <code>errors.Is</code> against this sentinel at all, so the bug is
-    currently silent and has no observable behavioral consequence today: <code>RecordEnvelope</code> still
-    returns the raw (unwrapped, less friendly) driver error, which is still non-nil, so the actual required
-    behavior — refuse republication, write nothing — still holds, as confirmed by the mutation test above.
-    This is not the specific "unwired call site" bug this review was sent to hunt for, but it is the same
-    underlying failure shape: code that claims a specific, named behavior (classify this as a duplicate-id
-    conflict and return a friendly sentinel) which is not actually reachable, and nothing in the green test
-    suite notices because every existing test only asserts <code>err != nil</code>, never
-    <code>errors.Is(err, ErrDuplicateEnvelopeID)</code> or the wrapped message text. I confirmed this same
-    code, unchanged, is still present in current <code>v2</code> HEAD
-    (<code>internal/store/store.go</code>, <code>isDuplicateEnvelopeID</code>), inherited through bullets 2–4
-    with no later fix. Recommend either checking <code>SQLITE_CONSTRAINT_PRIMARYKEY</code> as well, or
-    matching on the error text's <code>"envelopes.id"</code> substring alone (as the sibling
-    <code>isDuplicateRequestID</code> already does for a genuine <code>UNIQUE INDEX</code>, where the code
-    check is actually meaningful and correctly differentiates a run-id collision from a request-id
-    collision).</p>
-  </div>
-
-  <div class="item warn">
-    <h3><span class="sev med">warn</span> &nbsp; 3 of the 4 real call sites have no call-site-level regression test for correlation/causation, only store-level tests and my own manual read-through</h3>
-    <p><code>internal/runner/runner_test.go</code> adds <code>TestAgentPhaseEnvelopesChainCausation</code>,
-    which exercises <code>RunAgentPhase</code> end to end and whose own comment names exactly the risk this
-    review was sent to check for. No equivalent exists for the MCP <code>sergeant_emit_envelope</code> tool
-    (there is no <code>internal/mcp/server_test.go</code> at this commit at all — the package's only test
-    files are <code>config_test.go</code> and <code>run_follow_test.go</code>, neither of which invokes
-    <code>emit_envelope</code>) or for either of the two <code>internal/ui/server.go</code> sites
-    (<code>handleCreatePR</code>, the delivery envelope in <code>executeRun</code>). I verified those three
-    sites are correctly wired by reading the diff directly, and I stand behind that verification, but it is
-    a real difference in test rigor between the one call site the builder specifically hardened against this
-    class of bug and the other three, which rely on the store's own unit tests plus a human read-through.
-    Given that Review 007's whole finding was exactly "the store's tests pass but a real call site doesn't
-    do this," a codebase this deliberate about testing that exact risk in one place and not the other three
-    is worth flagging even where, as here, manual verification did not turn up a defect.</p>
+    <h3><span class="sev low">verified</span> &nbsp; <code>BuildProjectGraph</code> genuinely invokes the real binary for real work</h3>
+    <p>Nothing in <code>internal/graphify</code> is stubbed or mocked in the shipped tests. Every test builds an
+    actual temporary git repository with real committed files, then <code>BuildProjectGraph</code> shells out
+    to the real <code>graphify</code> binary via the unmocked <code>runCommand</code> package variable
+    (mocked only in the specific tests that exist to record invocation counts, and even then by wrapping —
+    not replacing — the real call). I ran the suite myself; per-test wall-clock time (0.3–0.6s for extraction
+    of a one-file repo) is consistent with a real subprocess invocation, not a canned mock response.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Additive migration is real, not just claimed</h3>
-    <p>All 8 new columns are added through the established <code>hasColumn</code>-guarded
-    <code>ALTER TABLE ... ADD COLUMN</code> pattern already used for prior additive migrations
-    (<code>bullets.pr_url</code>, <code>phases.attempt</code>), each defaulting to <code>''</code> except
-    <code>causation_id</code> (left nullable) and the two <code>DATETIME</code> columns (defaulted to the
-    zero-time literal). <code>TestEnvelopeColumnsAddedOnReopen</code> drops and recreates a pre-change
-    <code>envelopes</code> table and confirms all 8 columns exist after reopening; and
-    <code>TestOlderEnvelopeReadsBackWithEmptyType</code> seeds a raw pre-migration row and confirms it reads
-    back with <code>Type == ""</code> and no error, not an invented value. Both pass. This is the one claim in
-    this bullet that already had a dedicated test in the original commit, and it holds up.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The zero-participating-repos guard is real, confirmed by my own mutation</h3>
+    <p>The commit message's specific claim — that the original test only asserted <code>err != nil</code>,
+    which a missing guard would still satisfy indirectly via <code>graphify merge-graphs</code>'s own
+    zero-input rejection, and that the fix strengthened the assertion to zero subprocess invocations — is
+    accurate. I disabled the guard myself (commented out the early return in <code>BuildProjectGraph</code>)
+    and reran <code>TestZeroParticipatingReposIsBuildError</code>: it failed with "expected no graphify
+    invocations ... got: [[graphify merge-graphs --out ...]]" — exactly the failure the strengthened assertion
+    exists to catch. Reverted cleanly.</p>
+    <p class="small">One residual, non-blocking nuance: the "zero invocations" assertion is strong against
+    <em>this</em> implementation shape (which always reaches the <code>merge-graphs</code> call when
+    <code>len(repoGraphs) != 1</code>, including zero). A hypothetical future refactor that special-cased
+    zero repos to skip straight to writing an empty/missing <code>graph.json</code> without any subprocess
+    call would pass the "zero invocations" check while still being wrong — though the build's own
+    "merged graph is missing or empty" check immediately downstream would still catch that case and still
+    return an error either way, so the required behavior (zero repos is a build error, nothing gets
+    published) would still hold under that hypothetical. Not a defect in the current code; noted because the
+    task explicitly asked whether an even sneakier regression could hide behind this specific assertion.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; <code>CausationID</code>'s absent-vs-empty distinction is real, with one disclosed and non-manifesting edge case</h3>
-    <p><code>CausationID</code> is a <code>*string</code>, backed by a nullable <code>causation_id</code>
-    column (deliberately not <code>NOT NULL DEFAULT ''</code>, unlike every other new text column).
-    <code>TestRecordEnvelopeFirstEnvelopeHasNoCausationID</code> and
-    <code>TestOlderEnvelopeNullCausationIDIsNil</code> both pass, at the direct read and at
-    <code>ListEnvelopesForRun</code>. One caveat, disclosed in the code's own comment rather than hidden:
-    <code>causationIDValue</code>/<code>nullableText</code> collapse a hypothetical non-nil pointer to
-    <code>""</code> into SQL <code>NULL</code> on write, so "something caused it but the id was not recorded"
-    (a non-nil pointer to an empty string) is not actually distinguishable from "nothing caused it" (a nil
-    pointer) if it ever occurred. The comment at the <code>CausationID</code> field declaration says exactly
-    this: "that case is not representable in the current design." Since every id in this codebase is
-    generated by <code>fmt.Sprintf</code> and is never empty, this never manifests in practice; noted as a
-    known, accepted, and correctly documented limitation, not a hidden defect.</p>
+    <h3><span class="sev low">verified</span> &nbsp; Atomic publish (no partial read) is real, confirmed by my own mutation</h3>
+    <p><code>TestBuildNeverLeavesOutputInAPartialState</code> does prove what it claims, not just "old content
+    survives." It uses a real concurrency setup — a <code>publishHook</code> seam that pauses a second,
+    real <code>BuildProjectGraph</code> call mid-flight via a goroutine and a channel, while the main
+    goroutine reads <code>Output</code> and asserts it is byte-for-byte identical to the prior graph. I
+    mutated the publish ordering myself: moved <code>os.RemoveAll(proj.Graphify.Output)</code> to run
+    <em>before</em> the <code>publishHook</code> pause instead of after it — a real non-atomic sequencing,
+    since it creates a window where <code>Output</code> is deleted but the new content is not yet renamed
+    in. The test failed immediately ("no such file or directory" reading the mid-flight graph), proving the
+    test does detect a broken publish order and is not merely checking end-state. Reverted cleanly.</p>
   </div>
 
   <div class="item warn">
-    <h3><span class="sev low">warn</span> &nbsp; <code>factory_id</code>, <code>project_id</code> and <code>assignment_id</code> from R5.1's reference list are not implemented, and the OpenSpec change does not say so explicitly</h3>
-    <p>R5.1 names six reference fields "where applicable": <code>factory_id</code>, <code>project_id</code>,
-    <code>repo_id</code>, <code>run_id</code>, <code>phase_id</code>, <code>assignment_id</code>. This bullet
-    added only <code>PhaseID</code> (design.md: "the missing link in the reference chain; run and repo
-    already exist"). <code>FactoryID</code>, <code>ProjectID</code> and <code>AssignmentID</code> are absent
-    from <code>EnvelopeRecord</code>, and design.md's "added metadata" section does not explicitly say why —
-    it only accounts for the fields it does add. On inspection this is a pre-existing, systemic gap rather
-    than something this bullet introduced or was uniquely responsible for closing: there is no
-    <code>FactoryRecord</code> type anywhere in the store, <code>RunRecord.Project</code> is a plain string
-    rather than an id, and this codebase has no separate "assignment" entity distinct from a phase — a
-    <code>PhaseRecord</code> already conflates the PRD's phase/assignment distinction. Given that, "where
-    applicable" plausibly excuses the omission, and inventing three new id fields that reference nothing else
-    in the system would not obviously improve correctness. Flagged as a documentation gap in the OpenSpec
-    artifacts (they should say this explicitly) rather than an implementation defect.</p>
+    <h3><span class="sev med">warn</span> &nbsp; The publish step has no crash-safety or cross-filesystem safety net, unlike v1's design it claims to reimplement</h3>
+    <p><code>BuildProjectGraph</code>'s publish step is <code>os.RemoveAll(Output)</code> followed by
+    <code>os.Rename(scratch, Output)</code>, with no recovery path if the process dies, is killed, or the
+    <code>Rename</code> itself fails, between those two calls. If <code>Rename</code> fails — which happens
+    whenever the source and destination are on different filesystems (<code>EXDEV</code>), since
+    <code>scratch</code> is created via <code>os.MkdirTemp("", ...)</code> under the system default temp
+    directory (<code>$TMPDIR</code>/<code>/tmp</code>) with no guarantee it shares a volume with the
+    operator-configured <code>Graphify.Output</code> — the prior published graph has already been deleted by
+    <code>RemoveAll</code> and is not recoverable; the build simply returns an error having destroyed the
+    only copy of the graph. v1's <code>sgt-graphify</code>, which this proposal explicitly says it
+    reimplements "the same stage-verify-then-rename shape," in fact does more: it moves the old output aside
+    to a backup path (<code>mv</code>, not delete) rather than removing it, stages a
+    <code>_publish_parent_for_output</code> helper specifically so "the final rename never crosses
+    filesystem boundaries" (v1's own header comment), and registers an EXIT trap
+    (<code>_restore_old_output</code>) that restores the backup on any failure path. None of that survived
+    the port to Go. On this development machine the risk is currently masked: macOS APFS firmlinks put
+    <code>/tmp</code>, <code>$TMPDIR</code>, and <code>$HOME</code> on the same device
+    (confirmed via <code>os.stat().st_dev</code>), so <code>Rename</code> never actually crosses a
+    filesystem boundary here — which is also almost certainly why the existing tests never surface this,
+    since <code>t.TempDir()</code> for both scratch and output land on the same volume. But a different
+    disk, a tmpfs <code>/tmp</code> on Linux, or an external/network volume configured as
+    <code>graphify.output</code> would hit this. This is a real regression in operational safety against the
+    system being ported from, not something the proposal disclosed as an accepted gap, and not something any
+    test in this bullet exercises.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; <code>exclude_patterns</code> is disclosed-unapplied, not silently half-done</h3>
+    <p><code>config.Graphify.ExcludePatterns</code> exists, is documented in its own doc comment as "parsed
+    and stored but not yet applied by <code>BuildProjectGraph</code>," and a full grep of
+    <code>internal/graphify/</code> for <code>ExcludePatterns</code> returns zero hits. The proposal's "Out of
+    scope" section names this explicitly. The claim matches the code exactly.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; MCP tools and the HTTP endpoint refuse cleanly on a missing graph, with real invocation-count proof</h3>
+    <p><code>requireGraph</code> in <code>query.go</code> stats <code>graph.json</code> before any subprocess
+    is spawned and returns <code>ErrNoGraph</code> if it is missing or empty. This is exercised at two
+    layers, both with counters on the real <code>runCommand</code> seam rather than just checking an error
+    string: <code>TestQueryWithNoGraphBuiltIsAClearError</code> in <code>internal/graphify</code> and
+    <code>TestMCPGraphToolsWithNoGraphBuiltReturnClearError</code> in <code>internal/mcp</code> (the latter
+    also asserts the output directory is never created). Both pass.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Scope discipline held: no CLI, no dashboard UI, no report/cluster/watch code touched</h3>
+    <p><code>git show 8a2eb22 --stat</code> shows only <code>internal/config</code>, <code>internal/graphify</code>,
+    <code>internal/mcp</code>, and <code>internal/ui/server.go</code> changed — nothing under <code>cmd/</code>.
+    A repo-wide grep of dashboard HTML/JS for <code>graphify</code> or <code>build-graph</code> returns nothing.
+    <code>POST /api/build-graph</code> is the only new trigger, exactly as the proposal's "Out of scope"
+    section requires. No <code>GRAPH_REPORT.md</code>, clustering, <code>graphify watch</code>, or
+    global-graph code exists anywhere in this diff.</p>
+  </div>
+
+  <div class="item bad">
+    <h3><span class="sev high">bad</span> &nbsp; "Must not call <code>sgt-graphify</code>" is true of the code this bullet added, and false of the system as currently built and configured</h3>
+    <p>The commit message states, without qualification, that "no <code>sgt-graphify</code> process is ever
+    spawned" — proven, it says, by <code>TestBuildNeverSpawnsSgtGraphify</code>. That test is real and does
+    prove that <code>internal/graphify.BuildProjectGraph</code> never spawns it. But it is not the only code
+    path in this repository that can spawn <code>sgt-graphify</code>. <code>cmd/sergeant-mcp/main.go</code> —
+    a separate MCP stdio server, first added in commit <code>347e2c7</code> well before this bullet, and
+    <strong>not touched by this merge</strong> — is a generic wrapper that exposes every <code>bin/sgt-*</code>
+    v1 shell script as its own MCP tool, one of which is registered by name as <code>scriptName: "sgt-graphify"</code>,
+    <code>toolName: "sgt-graphify"</code> (lines 248–249). It is not dead code: <code>mise.toml</code>'s
+    <code>[tasks.build]</code> builds it (<code>go build -o bin/sergeant-mcp ./cmd/sergeant-mcp/</code>) every
+    time <code>bin/sergeant</code> is built, and <code>mcp.json</code> declares it as a live server named
+    <code>"sergeant"</code> alongside the new native server named <code>"sergeant-v2"</code>. Any agent client
+    configured against the <code>"sergeant"</code> server — which is the first and, per <code>mcp.json</code>'s
+    ordering, arguably the default-looking one — can call a tool named <code>sgt-graphify</code> and have it
+    shell directly to v1's bash script, in direct contradiction of D9's own text ("must not call
+    <code>sgt-graphify</code> (D7)") and of <code>AGENTS.md</code>'s "v1 is not a dependency" section, whose
+    listed prohibition ("do not call <code>sgt-dispatch</code>, <code>sgt-watch</code>, <code>sgt-respond</code>,
+    <code>sgt-validate</code>, <code>sgt-context</code>, or any other <code>bin/sgt-*</code> script") already
+    covers this by its own "or any other" clause. This predates the bullet under review and is not a
+    regression this merge introduced — but the merge's own claim of proof ("no <code>sgt-graphify</code>
+    process is ever spawned") is stated with a confidence the actual system does not support, and no finding
+    in this proposal or the merge commit discloses that this second, older MCP surface exists or that it
+    still offers exactly the thing D9 forbids. This is the single most important finding in this review: it
+    means D9's decision text is not actually enforced system-wide, only inside the one new code path built to
+    satisfy it.</p>
+  </div>
+
+  <div class="item warn">
+    <h3><span class="sev med">warn</span> &nbsp; The codesign fix that unblocked this dispatch is real but entirely manual, with nothing in the build tooling to reapply it</h3>
+    <p><code>codesign -dv ~/.local/share/sergeant-v2/bin/sgt-p</code> confirms
+    <code>Identifier=dev.sergeant.ui</code>, matching the commit's claim exactly, so the diagnosis and fix for
+    this cycle's dispatch failures appear to be real. But I grepped <code>mise.toml</code> and
+    <code>.goreleaser.yaml</code> for <code>codesign</code> and found nothing — the stable identifier is
+    applied by a one-off manual command the commit message documents in prose, not by any build task. The
+    commit message itself says this "must be applied after every future rebuild of this binary." Nothing in
+    the repository enforces that. The next person (or agent) who rebuilds <code>bin/sgt-p</code> without
+    knowing this history will silently reintroduce the exact TCC hang that cost 4 prior dispatch attempts,
+    with no test or CI check that would catch it before a headless launchd run hangs again.</p>
   </div>
 
 </section>
@@ -236,81 +259,65 @@ a{color:var(--muted)}
   <h2>Evidence index</h2>
   <table>
     <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
-    <tr><td>Build/vet/test clean at <code>8e1c5e8</code></td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code> in a scratch worktree</td><td>pass, 9/9 packages</td></tr>
-    <tr><td>All 4 real call sites set correlation/causation</td><td>read every non-test <code>RecordEnvelope</code> call site's diff directly</td><td>confirmed: <code>CorrelationID</code> = run id, <code>CausationID</code> = <code>CausationFromLatest(runID, repo)</code>, at all 4</td></tr>
-    <tr><td>Immutability is enforced, not just claimed</td><td>mutated <code>INSERT</code> → <code>INSERT OR REPLACE</code>; reran <code>TestRecordEnvelopeRefusesRepublishOfExistingID</code>; reverted</td><td>failed exactly as predicted, then confirmed clean revert</td></tr>
-    <tr><td>Duplicate-id classifier actually fires</td><td>standalone probe against <code>modernc.org/sqlite</code> for the real extended error code on a <code>TEXT PRIMARY KEY</code> duplicate, then a throwaway test asserting <code>errors.Is(err, ErrDuplicateEnvelopeID)</code></td><td>code is 1555 (<code>PRIMARYKEY</code>), not 2067 (<code>UNIQUE</code>); <code>errors.Is</code> is false — classifier never fires, in this commit and current HEAD</td></tr>
-    <tr><td>Additive migration reads pre-migration rows without error or invented values</td><td>ran <code>TestEnvelopeColumnsAddedOnReopen</code> and <code>TestOlderEnvelopeReadsBackWithEmptyType</code></td><td>both pass</td></tr>
-    <tr><td><code>CausationID</code> absent vs. empty is real</td><td>ran <code>TestRecordEnvelopeFirstEnvelopeHasNoCausationID</code>, <code>TestOlderEnvelopeNullCausationIDIsNil</code>; read <code>nullableText</code>/<code>causationIDValue</code></td><td>both pass; one disclosed, non-manifesting edge case in the collapse-to-NULL path</td></tr>
-    <tr><td><code>GetLatestEnvelope</code> exists and works, whether or not this commit calls it</td><td><code>git show 8e1c5e8^1:internal/store/store.go | grep</code> for the function</td><td>pre-existed this commit; used by this commit's own <code>CausationFromLatest</code> and by pre-existing UI code</td></tr>
-    <tr><td>Call-site test coverage is uneven across the 4 sites</td><td>read <code>runner_test.go</code>'s new test and its own stated purpose; grepped for equivalent tests touching the MCP tool and both UI sites</td><td>only <code>runner.go</code>'s call site has one; confirmed absent for the other 3, verified those 3 by manual read only</td></tr>
-    <tr><td><code>factory_id</code>/<code>project_id</code>/<code>assignment_id</code> not modeled</td><td><code>grep -n "FactoryID\|type FactoryRecord\|AssignmentID\|ProjectID" internal/store/store.go</code></td><td>zero hits, at this commit and current HEAD — systemic, not bullet-specific</td></tr>
+    <tr><td>Build/vet/test clean at current <code>v2</code> HEAD</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 10/10 packages</td></tr>
+    <tr><td><code>graphify</code> binary is real, already installed</td><td><code>graphify --help</code> run directly</td><td>confirmed: real CLI with <code>extract</code>/<code>merge-graphs</code>/<code>query</code>/<code>explain</code>/<code>affected</code></td></tr>
+    <tr><td>v1's <code>sgt-graphify</code> is a thin wrapper around it</td><td>read <code>/Users/lars/Dev/sergeant/bin/sgt-graphify</code> directly, lines 369 and 437</td><td>confirmed: calls <code>graphify extract</code> / <code>graphify merge-graphs</code> as external commands, does no extraction itself</td></tr>
+    <tr><td>Tests invoke the real binary, not a mock</td><td><code>go test ./internal/graphify/... -v -count=1</code></td><td>pass; real git repos built per test; wall-clock time consistent with real subprocess calls</td></tr>
+    <tr><td>Zero-repos guard is load-bearing</td><td>disabled the guard in <code>BuildProjectGraph</code>, reran <code>TestZeroParticipatingReposIsBuildError</code>, reverted</td><td>failed exactly as predicted (recorded a live <code>merge-graphs</code> call with zero args), then confirmed clean revert and a passing rerun</td></tr>
+    <tr><td>Atomic publish is load-bearing</td><td>moved <code>os.RemoveAll(Output)</code> before the <code>publishHook</code> pause, reran <code>TestBuildNeverLeavesOutputInAPartialState</code>, reverted</td><td>failed ("no such file or directory" reading mid-flight), then confirmed clean revert and a passing rerun</td></tr>
+    <tr><td><code>exclude_patterns</code> unapplied</td><td><code>grep -rn "ExcludePatterns" internal/</code></td><td>2 hits, both in <code>internal/config</code>; zero in <code>internal/graphify</code></td></tr>
+    <tr><td>MCP/HTTP layers never shell out for a missing graph</td><td>read <code>requireGraph</code>/<code>ErrNoGraph</code>; ran <code>TestQueryWithNoGraphBuiltIsAClearError</code> and <code>TestMCPGraphToolsWithNoGraphBuiltReturnClearError</code></td><td>both pass; both assert on real invocation counters, not just error strings</td></tr>
+    <tr><td>No CLI/dashboard scope creep</td><td><code>git show 8a2eb22 --stat</code>; grep of dashboard HTML/JS for <code>graphify</code>/<code>build-graph</code></td><td>no <code>cmd/</code> changes in this merge; zero dashboard hits</td></tr>
+    <tr><td>A second, live path to <code>sgt-graphify</code> exists</td><td>found <code>cmd/sergeant-mcp/main.go</code> lines 248–249; confirmed built by <code>mise.toml</code> <code>[tasks.build]</code>; confirmed declared as server <code>"sergeant"</code> in <code>mcp.json</code></td><td>real and live, predates this merge, undisclosed by it</td></tr>
+    <tr><td>codesign identifier matches the claimed fix</td><td><code>codesign -dv ~/.local/share/sergeant-v2/bin/sgt-p</code></td><td><code>Identifier=dev.sergeant.ui</code>, exact match; no build-tooling reapplies it on rebuild (grepped <code>mise.toml</code>/<code>.goreleaser.yaml</code>, zero hits)</td></tr>
   </table>
 </section>
 
 <section>
   <h2>Verdict</h2>
-  <div class="item ok">
-    <p><strong>R5.1, R5.2, R5.7: genuinely met.</strong> <code>EnvelopeRecord</code> carries the metadata R5.1
-    names (short of three reference fields that are not modeled anywhere in this codebase, disclosed above,
-    not unique to this bullet). <code>RecordEnvelope</code> genuinely refuses publication missing a type,
-    schema version, producer, or correlation id, writing nothing on refusal — verified by the existing test
-    suite, which I ran myself. Immutability is real and I confirmed it by my own mutation, not only by reading
-    the test that claims it. The additive migration genuinely leaves pre-existing rows readable with an empty
-    type rather than erroring or inventing one, confirmed by tests that simulate a real pre-migration schema.
-    Most importantly for why this review exists: <strong>every one of the 4 real production call sites that
-    publish an envelope sets <code>CorrelationID</code> to the run id and <code>CausationID</code> to the
-    actual preceding envelope in that run/repo</strong> — the specific "store-level plumbing correct,
-    production call site unwired" failure shape that Review 007 found in bullet 2 does not recur here. A
-    different, lower-impact defect of the same general family was found instead: the duplicate-id error
-    classifier checks the wrong SQLite extended error code and can never actually match, making
-    <code>ErrDuplicateEnvelopeID</code> unreachable dead code — silent today only because nothing anywhere
-    calls <code>errors.Is</code> against it, and not a break of R5.1's actual required behavior, which the
-    underlying <code>INSERT</code> failure still delivers regardless of how the error gets classified. This
-    bug is still present, unfixed, in current <code>v2</code> HEAD and should be corrected there. A second,
-    lower-severity gap: only 1 of the 4 real call sites (<code>runner.go</code>) has a regression test written
-    specifically against the class of bug this review hunts for; the other 3 were verified by me manually,
-    not by an automated test that would catch a future regression.</p>
-  </div>
-
   <div class="item warn">
-    <h3>R5 overall (R5.1&ndash;R5.7, all four bullets): now fully independently reviewed, still not fully clean</h3>
-    <p>All four R5 bullets have now received an independent critic review with live mutation testing:
-    Review 007 found bullet 2 (<code>bde2b2d</code>) genuinely met for R5.3 but only <strong>partly</strong>
-    met for R5.4 (<code>next_attempt_at</code> and error classification claimed set but never populated,
-    undisclosed as deferred scope — that gap is not re-litigated here and stands as recorded); Review 008
-    found bullet 3 (<code>d0edef7</code>) genuinely met, with a test-rigor gap later closed by
-    <code>189ad06</code>; Review 010 found bullet 4 (<code>806fb07</code>) genuinely met; this review
-    (bullet 1, <code>8e1c5e8</code>) finds R5.1/R5.2/R5.7 genuinely met. <strong>The specific failure shape
-    this project has now shipped at least twice — a green test suite covering store-level plumbing while a
-    real call site or claimed field silently is not wired or does not work — was hunted for specifically in
-    this review and was not found in the form Review 007 identified it (an unwired call site).</strong> A
-    related instance of the same underlying failure shape (a claimed classification/behavior that is not
-    actually reachable, unnoticed by a passing test suite because no test asserts the specific claim) was
-    found instead, in the duplicate-id error classifier, with no current observable impact. Taken together:
-    R5.3, R5.5, R5.6 hold up without reservation; R5.4 holds up only partially (Review 007's disclosed gap,
-    unchanged); R5.1/R5.2/R5.7 holds up with two non-blocking findings recorded above. R5 as a whole should
-    be read as <strong>fully and independently reviewed across all seven sub-requirements and all four
-    bullets</strong> for the first time as of this review — but "independently reviewed" is not the same
-    claim as "defect-free": R5.4's known gap and this review's duplicate-id classifier bug are both real,
-    both currently unfixed in <code>v2</code> HEAD, and both worth a follow-up commit before R5 is called
-    closed without qualification.</p>
+    <p><strong>D9 Task 1: partly met — genuinely met for the code this bullet added, only apparently met for
+    the decision as a whole.</strong> The scoping correction the proposal opens with is not spin: I
+    independently confirmed the real <code>graphify</code> binary exists, does the actual extraction and
+    graph-algorithm work, and that v1's <code>sgt-graphify</code> really is nothing more than bash
+    orchestration around it. "Native" genuinely means what the proposal says it means here — Go code owns
+    orchestration, configuration, and publication, while the real external tool still does the graph work —
+    and that framing holds up under scrutiny, not just under its own restatement. <code>BuildProjectGraph</code>
+    really invokes the real binary in its tests, not a stub. The two properties the commit message singles
+    out for extra proof — the zero-participating-repos guard and atomic, no-partial-read publishing — are
+    both genuinely tested, and I confirmed both myself by breaking each one with my own mutation and watching
+    the corresponding test catch it, then reverting. <code>exclude_patterns</code> is honestly disclosed as
+    unapplied rather than silently dropped. The three MCP tools and the one HTTP trigger are thin,
+    correctly-scoped wrappers that refuse cleanly — with real invocation-count proof, not just an error
+    string — when no graph has been built. No CLI subcommand or dashboard element was added, honoring the
+    proposal's explicit exclusions.</p>
+    <p>Two things keep this from a clean "genuinely met." First, and most important: the decision text's
+    actual, load-bearing requirement — "must not call <code>sgt-graphify</code>" — is not true of this
+    system as built and configured, only of the one new code path built to satisfy it. <code>cmd/sergeant-mcp</code>,
+    unrelated to this bullet's diff but still actively built and still declared in <code>mcp.json</code>
+    alongside the new server, exposes a tool literally named <code>sgt-graphify</code> that shells straight
+    to v1's script. The commit's claim that "no <code>sgt-graphify</code> process is ever spawned" is true of
+    <code>internal/graphify</code> and false of the repository as a whole, and nothing in the proposal or the
+    merge discloses this. Second, the atomic-publish implementation quietly dropped the crash-safety and
+    cross-filesystem guarantees v1's own version of "the same stage-verify-then-rename shape" actually had
+    (backup-and-restore on failure, same-filesystem staging) — a real regression, currently masked only by
+    this machine's single-volume APFS layout putting <code>/tmp</code> and the output directory on the same
+    device.</p>
   </div>
 </section>
 
 <footer>
-  <p class="meta">Review 011 · findings above are reproduced from commands run against <code>8e1c5e8</code>
-  (merge) / <code>5c2a1a2</code> (feature commit), in a scratch worktree created with
-  <code>git worktree add /tmp/review-8e1c5e8 8e1c5e8</code> and removed with
-  <code>git worktree remove /tmp/review-8e1c5e8 --force</code> when finished — the real <code>v2</code>
-  branch and its working worktree were not modified. Two mutations were applied and reverted inside the
-  scratch worktree only: (1) <code>INSERT</code> → <code>INSERT OR REPLACE</code> in
-  <code>RecordEnvelope</code>, confirmed the republish-refusal test fails, then <code>git checkout --</code>;
-  (2) a throwaway probe test asserting <code>errors.Is(err, ErrDuplicateEnvelopeID)</code> on a real duplicate
-  insert, confirmed false, then the probe file was deleted. <code>git status --short</code> confirmed a clean
-  scratch worktree before removal. Reviews 007–010 were not re-run; their findings on bullets 2–4 are
-  reproduced above from this document's own prior text for the purpose of stating the R5-overall verdict, not
-  independently re-verified in this review.</p>
+  <p class="meta">Review 012 · findings above are reproduced from commands run directly against the current
+  <code>v2</code> working tree (no worktree needed; nothing was left uncommitted). Two mutations were applied
+  and reverted in place: (1) the zero-participating-repos early return in
+  <code>internal/graphify/graphify.go</code> was commented out, <code>TestZeroParticipatingReposIsBuildError</code>
+  was rerun and failed as predicted, then <code>git checkout -- internal/graphify/graphify.go</code> restored
+  the file; (2) <code>os.RemoveAll(proj.Graphify.Output)</code> was moved to run before the
+  <code>publishHook</code> pause instead of after it, <code>TestBuildNeverLeavesOutputInAPartialState</code>
+  was rerun and failed as predicted, then the same <code>git checkout --</code> restored the file.
+  <code>git diff</code> and a clean full test run confirmed no residual changes before this review was
+  written. Review 011's findings (envelopes/R5) were not re-examined and are not restated here; they stand as
+  recorded in that review's own text, which this rewrite does not reproduce.</p>
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
