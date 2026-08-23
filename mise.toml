@@ -239,6 +239,60 @@ else
 fi
 """
 
+[tasks."check:v2"]
+description = "Verify the prerequisites the v2 Go engine actually uses"
+run = """
+#!/usr/bin/env bash
+# The v2 engine shells out to a much smaller set than v1. Everything below is
+# derived from exec.Command call sites in internal/ and cmd/sergeant/, not from
+# the v1 list: `mise run check` still requires yq, Python, tmux, lsof, sqlite3 and
+# td, none of which v2 invokes. tmux in particular is forbidden as a factory
+# dependency (D7). Conversely v1's check never looks for openspec, which v2 needs
+# for dispatch (O3, internal/ui/openspec.go).
+ok=true
+
+_need() {
+  local name="$1" cmd="$2" why="$3"
+  if command -v "$cmd" &>/dev/null; then
+    printf "  %-10s  ok   %s\\n" "$name" "$why"
+  else
+    printf "  %-10s  MISSING  %s\\n" "$name" "$why"
+    ok=false
+  fi
+}
+
+echo "v2 engine prerequisites:"
+_need git      git      "worktrees, branches, commits"
+_need bash     bash     "runs each configured quality gate"
+_need openspec openspec "dispatch resolves to a change (O3)"
+_need gh       gh       "opening a pull request"
+
+harness=""
+for h in opencode oc claude goose codex pi; do
+  if command -v "$h" &>/dev/null; then harness="$h"; break; fi
+done
+if [[ -n "$harness" ]]; then
+  printf "  %-10s  ok   %s\\n" "agent" "$harness"
+else
+  printf "  %-10s  MISSING  %s\\n" "agent" "one of: opencode oc claude goose codex pi"
+  ok=false
+fi
+
+echo ""
+echo "Not required by v2, despite appearing in 'mise run check':"
+echo "  yq, python3, tmux, lsof, sqlite3, td"
+echo "  v2 parses YAML in process, embeds SQLite via modernc.org/sqlite, and never uses tmux."
+
+if [[ "$ok" == true ]]; then
+  echo ""
+  echo "All v2 prerequisites present."
+else
+  echo ""
+  echo "Install the missing prerequisites before dispatching."
+  exit 1
+fi
+"""
+
 [tasks."test:docker:drain"]
 description = "Run the drain test suite in Docker (system Bash + Bash 3.2 passes)"
 run = """
