@@ -288,7 +288,7 @@ func (e *Engine) RunStage(ctx context.Context, runID string, stage *config.DAGSt
 				}
 				continue
 			}
-			if deliverErr := e.Store.DeliverEnvelope(latestEnv.ID, worktreePath, func() error {
+			if deliverErr := e.Store.DeliverEnvelope(latestEnv.ID, worktreePath, true, func() error {
 				return e.Router.InjectHandoffToWorktree(upstream, worktreePath)
 			}); deliverErr != nil {
 				return fmt.Errorf("delivering handoff from upstream %s to worktree %s: %w", upstream, worktreePath, deliverErr)
