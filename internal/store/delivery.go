@@ -1,8 +1,11 @@
 package store
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"io/fs"
 	"time"
 )
 
@@ -40,6 +43,7 @@ const createDeliveriesTable = `
 		attempt INTEGER NOT NULL DEFAULT 1,
 		next_attempt_at DATETIME,
 		error TEXT NOT NULL DEFAULT '',
+		error_class TEXT NOT NULL DEFAULT '',
 		idempotency_key TEXT NOT NULL,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
@@ -62,6 +66,7 @@ type DeliveryRecord struct {
 	Attempt        int       `json:"attempt"`
 	NextAttemptAt  time.Time `json:"next_attempt_at,omitempty"`
 	Error          string    `json:"error,omitempty"`
+	ErrorClass     string    `json:"error_class,omitempty"`
 	IdempotencyKey string    `json:"idempotency_key"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
@@ -69,9 +74,43 @@ type DeliveryRecord struct {
 
 // deliveryMaxAttempts is the fixed retry ceiling for DeliverEnvelope.
 //
-// Three total attempts matches this project's existing config.Defaults/
-// config.Repo retry resolution added for R2.4 (reused, not reinvented).
+// Three total attempts. This is an independent constant, not a reuse of
+// config.Project's R2.4 retry resolution: that value is per-project and
+// YAML-configurable, and this delivery path never calls into config. A
+// project that configures its R2.4 retries to something other than 2 now has
+// two retry ceilings that can diverge; that is an accepted tradeoff for now
+// because unifying them would make the store package depend on config for a
+// single integer, not because the two are actually the same mechanism.
 const deliveryMaxAttempts = 3
+
+// Delivery error classes. A delivery failure is classified from the Go error
+// value returned by the wrapped attempt so an operator reading delivery
+// history can distinguish failure kinds without parsing free-text messages
+// (R5.4: "error classification"). Both current call sites (SaveEnvelope,
+// InjectHandoffToWorktree) fail only via filesystem operations or context
+// cancellation, so the taxonomy is deliberately small; it grows as new
+// failure kinds are actually observed rather than being guessed in advance.
+const (
+	errorClassFilesystem = "filesystem"
+	errorClassCancelled  = "cancelled"
+	errorClassUnknown    = "unknown"
+)
+
+// classifyDeliveryError derives an error class from err. It returns "" for a
+// nil error (no failure to classify).
+func classifyDeliveryError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return errorClassCancelled
+	}
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) {
+		return errorClassFilesystem
+	}
+	return errorClassUnknown
+}
 
 // deliveryStates is the full set of valid delivery state values, matching R5.4.
 const (
@@ -92,15 +131,35 @@ func deliveryID(envelopeID string) string {
 
 // insertDeliveryRow writes one row to the deliveries table. It is the only
 // writer; no code in this package issues an UPDATE on deliveries.
-func (s *Store) insertDeliveryRow(envelopeID, consumer, state string, attempt int, errMsg string) error {
+//
+// nextAttemptAt is the zero time for a row that has no pending future attempt
+// (pending's first attempt is immediate; delivered and failed are terminal).
+// For a retrying row it is set to the time the retry is scheduled for — "now"
+// today, because both current call sites retry immediately in-process with no
+// backoff clock (see DeliverEnvelope's doc comment); the column exists so a
+// future backoff strategy has somewhere to record a real future time without
+// a schema change.
+//
+// failureErr is the live error value, not its message, so classifyDeliveryError
+// can inspect its real type (e.g. *fs.PathError) rather than a string that has
+// already lost that information. It is nil for a row that records no failure.
+func (s *Store) insertDeliveryRow(envelopeID, consumer, state string, attempt int, failureErr error, nextAttemptAt time.Time) error {
 	key := deliveryIdempotencyKey(envelopeID, consumer)
 	now := time.Now().UTC()
 	id := deliveryID(envelopeID)
+	var nextAttemptCol interface{}
+	if !nextAttemptAt.IsZero() {
+		nextAttemptCol = nextAttemptAt
+	}
+	errMsg := ""
+	if failureErr != nil {
+		errMsg = failureErr.Error()
+	}
 	_, err := s.db.Exec(
 		`INSERT INTO deliveries
-		 (id, envelope_id, consumer, state, attempt, error, idempotency_key, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, envelopeID, consumer, state, attempt, errMsg, key, now, now,
+		 (id, envelope_id, consumer, state, attempt, next_attempt_at, error, error_class, idempotency_key, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, envelopeID, consumer, state, attempt, nextAttemptCol, errMsg, classifyDeliveryError(failureErr), key, now, now,
 	)
 	return err
 }
@@ -162,7 +221,7 @@ func (s *Store) DeliverEnvelope(envelopeID, consumer string, attempt func() erro
 
 	// Insert the pending row before the first attempt so the record exists even
 	// if the process exits mid-delivery (R5.3 durability before acknowledgement).
-	if err := s.insertDeliveryRow(envelopeID, consumer, deliveryStatePending, 1, ""); err != nil {
+	if err := s.insertDeliveryRow(envelopeID, consumer, deliveryStatePending, 1, nil, time.Time{}); err != nil {
 		return fmt.Errorf("recording pending delivery for envelope %q consumer %q: %w", envelopeID, consumer, err)
 	}
 
@@ -171,23 +230,25 @@ func (s *Store) DeliverEnvelope(envelopeID, consumer string, attempt func() erro
 		lastErr = attempt()
 		if lastErr == nil {
 			// Success: record delivered and return.
-			if err := s.insertDeliveryRow(envelopeID, consumer, deliveryStateDelivered, attemptNum, ""); err != nil {
+			if err := s.insertDeliveryRow(envelopeID, consumer, deliveryStateDelivered, attemptNum, nil, time.Time{}); err != nil {
 				return fmt.Errorf("recording delivered delivery for envelope %q consumer %q: %w", envelopeID, consumer, err)
 			}
 			return nil
 		}
 
 		// Failure below the ceiling: record retrying with the next attempt number,
-		// then loop.
+		// then loop. next_attempt_at is "now" because the retry happens
+		// immediately in-process, with no backoff clock — see the doc comment
+		// on insertDeliveryRow.
 		if attemptNum < deliveryMaxAttempts {
-			if err := s.insertDeliveryRow(envelopeID, consumer, deliveryStateRetrying, attemptNum+1, lastErr.Error()); err != nil {
+			if err := s.insertDeliveryRow(envelopeID, consumer, deliveryStateRetrying, attemptNum+1, lastErr, time.Now().UTC()); err != nil {
 				return fmt.Errorf("recording retrying delivery for envelope %q consumer %q attempt %d: %w", envelopeID, consumer, attemptNum, err)
 			}
 			continue
 		}
 
 		// Ceiling reached: record failed and return the error.
-		if err := s.insertDeliveryRow(envelopeID, consumer, deliveryStateFailed, attemptNum, lastErr.Error()); err != nil {
+		if err := s.insertDeliveryRow(envelopeID, consumer, deliveryStateFailed, attemptNum, lastErr, time.Time{}); err != nil {
 			return fmt.Errorf("recording failed delivery for envelope %q consumer %q: %w", envelopeID, consumer, err)
 		}
 	}
@@ -201,8 +262,16 @@ func (s *Store) DeliverEnvelope(envelopeID, consumer string, attempt func() erro
 func (s *Store) ListDeliveryHistory(envelopeID, consumer string) ([]DeliveryRecord, error) {
 	key := deliveryIdempotencyKey(envelopeID, consumer)
 	rows, err := s.db.Query(
+		// next_attempt_at is deliberately NOT wrapped in COALESCE: the
+		// modernc/sqlite driver returns a COALESCE'd DATETIME using Go's
+		// time.Time.String() format ("2006-01-02 15:04:05.999999999 -0700 MST"),
+		// which parseSQLiteTime's format list does not include, so every row
+		// silently parsed back as the zero time regardless of what was stored —
+		// exactly the bug this column exists to not have. Selected plain, the
+		// driver returns the stored text as-is (or a true NULL), matching the
+		// same pattern already used for envelopes.occurred_at/published_at.
 		`SELECT id, envelope_id, consumer, state, attempt,
-		        COALESCE(next_attempt_at, ''), COALESCE(error, ''),
+		        next_attempt_at, COALESCE(error, ''), COALESCE(error_class, ''),
 		        idempotency_key, created_at, updated_at
 		 FROM deliveries
 		 WHERE idempotency_key = ?
@@ -217,15 +286,18 @@ func (s *Store) ListDeliveryHistory(envelopeID, consumer string) ([]DeliveryReco
 	var list []DeliveryRecord
 	for rows.Next() {
 		var r DeliveryRecord
-		var nextAttemptStr, createdStr, updatedStr string
+		var nextAttemptStr sql.NullString
+		var createdStr, updatedStr string
 		if err := rows.Scan(
 			&r.ID, &r.EnvelopeID, &r.Consumer, &r.State, &r.Attempt,
-			&nextAttemptStr, &r.Error,
+			&nextAttemptStr, &r.Error, &r.ErrorClass,
 			&r.IdempotencyKey, &createdStr, &updatedStr,
 		); err != nil {
 			return nil, err
 		}
-		r.NextAttemptAt = parseSQLiteTime(nextAttemptStr)
+		if nextAttemptStr.Valid {
+			r.NextAttemptAt = parseSQLiteTime(nextAttemptStr.String)
+		}
 		r.CreatedAt = parseSQLiteTime(createdStr)
 		r.UpdatedAt = parseSQLiteTime(updatedStr)
 		list = append(list, r)

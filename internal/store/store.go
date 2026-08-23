@@ -387,6 +387,10 @@ func (s *Store) migrateAddColumns() error {
 		// envelope of a run), which must be distinguishable from an empty string.
 		{"envelopes", "causation_id", "ALTER TABLE envelopes ADD COLUMN causation_id TEXT"},
 		{"envelopes", "phase_id", "ALTER TABLE envelopes ADD COLUMN phase_id TEXT NOT NULL DEFAULT ''"},
+		// error_class was added after deliveries first shipped (R5.4 error
+		// classification); a database that created the table before this column
+		// existed needs it added explicitly, same as every other column here.
+		{"deliveries", "error_class", "ALTER TABLE deliveries ADD COLUMN error_class TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, w := range wanted {
 		has, err := s.hasColumn(w.table, w.column)

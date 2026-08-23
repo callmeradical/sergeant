@@ -54,9 +54,10 @@ succeeded is not retried into a duplicate.
 
 ## Bounded retry
 
-A fixed retry ceiling (3 attempts, matching this project's existing
-`config.Defaults`/`config.Repo` retry resolution added for R2.4 — reused, not
-reinvented) governs both call sites. On failure below the ceiling, the delivery
+A fixed retry ceiling (3 attempts, an independent constant — not a call into
+`config.Defaults`/`config.Repo`'s per-project R2.4 retry resolution, which is
+YAML-configurable and could diverge from this number for a given project)
+governs both call sites. On failure below the ceiling, the delivery
 transitions to `retrying` with `next_attempt_at` set and the wrapping call
 retries immediately in-process (both current call sites are synchronous,
 in-memory file operations with no external backoff clock to wait on; "bounded

@@ -131,6 +131,78 @@ func TestRunStageRefusesNonGitRepo(t *testing.T) {
 	}
 }
 
+// R5.3/R5.4: RunStage's handoff injection from an upstream repo is wrapped in
+// Store.DeliverEnvelope, not just exercised by hand-built store calls. This is
+// the same class of gap found in envelope causation wiring, on the one real
+// call site the delivery-durability merge (bde2b2d) shipped with zero test
+// coverage (Review 007) — the runner.go call site had a regression test, this
+// one did not.
+func TestRunStageDeliversHandoffFromUpstreamEnvelope(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("SERGEANT_FLEET_DIR", filepath.Join(tempDir, "fleet"))
+
+	upstreamDir := filepath.Join(tempDir, "upstream")
+	newGitRepo(t, upstreamDir)
+	downstreamDir := filepath.Join(tempDir, "downstream")
+	newGitRepo(t, downstreamDir)
+
+	proj := &config.Project{
+		Name: "test-proj",
+		Repos: map[string]config.Repo{
+			"upstream":   {Path: upstreamDir},
+			"downstream": {
+				Path: downstreamDir,
+				Factory: &config.FactoryConfig{
+					Pipeline: []string{"test"},
+					Gates:    map[string]string{"unit-tests": "echo 'downstream gates ok'"},
+				},
+			},
+		},
+	}
+
+	engine := newEngine(t, proj)
+	const runID = "run-handoff-1"
+
+	if err := engine.Store.CreateRun(&store.RunRecord{ID: runID, Project: "test-proj", TaskID: runID, Status: "running"}); err != nil {
+		t.Fatalf("creating run: %v", err)
+	}
+	const envID = "env-upstream-1"
+	if err := engine.Store.RecordEnvelope(&store.EnvelopeRecord{
+		ID: envID, RunID: runID, Repo: "upstream", Stage: "build", Summary: "upstream done",
+		Type: "phase.completed", SchemaVersion: "1", Producer: "test", CorrelationID: runID,
+	}); err != nil {
+		t.Fatalf("recording upstream envelope: %v", err)
+	}
+	if err := engine.Router.SaveEnvelope(&handoff.Envelope{
+		TaskID: runID, Repo: "upstream", Stage: "build", Summary: "upstream done",
+	}); err != nil {
+		t.Fatalf("seeding upstream handoff file: %v", err)
+	}
+
+	stage := &config.DAGStage{Name: "downstream-stage", Repos: []string{"downstream"}, After: []string{"upstream"}}
+	if err := engine.RunStage(context.Background(), runID, stage); err != nil {
+		t.Fatalf("engine failed to run stage: %v", err)
+	}
+
+	downstreamWorktree := FleetDir(runID, "downstream")
+	injected := filepath.Join(downstreamWorktree, ".sergeant", "handoff", "upstream", "envelope_latest.json")
+	if _, err := os.Stat(injected); err != nil {
+		t.Fatalf("expected injected handoff file at %s: %v", injected, err)
+	}
+
+	history, err := engine.Store.ListDeliveryHistory(envID, downstreamWorktree)
+	if err != nil {
+		t.Fatalf("ListDeliveryHistory: %v", err)
+	}
+	if len(history) == 0 {
+		t.Fatal("expected delivery history for the upstream handoff, got none — InjectHandoffToWorktree is not wired through DeliverEnvelope")
+	}
+	last := history[len(history)-1]
+	if last.State != "delivered" {
+		t.Errorf("expected final delivery state 'delivered', got %q", last.State)
+	}
+}
+
 // Agent output must be committed so it survives worktree cleanup. Uncommitted
 // work in a fleet worktree exists nowhere else and is destroyed by prune.
 func TestCommitRunOutputMakesWorkRecoverable(t *testing.T) {

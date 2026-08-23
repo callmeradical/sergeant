@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"testing"
 )
@@ -406,4 +407,98 @@ func stateList(history []DeliveryRecord) []string {
 		out[i] = fmt.Sprintf("%s(attempt=%d)", r.State, r.Attempt)
 	}
 	return out
+}
+
+// TestDeliveryRetryingRowSetsNextAttemptAt covers the R5.4 "lease/next-attempt
+// timestamps" requirement: a retrying row must record when its next attempt
+// is scheduled, not leave the column NULL. Regression for Review 007, which
+// found next_attempt_at was declared in the schema but never populated by any
+// state, including retrying, so no test caught it.
+func TestDeliveryRetryingRowSetsNextAttemptAt(t *testing.T) {
+	st, envID := openDeliveryTestStore(t)
+
+	const consumer = "/fleet/run-del-1/next-attempt"
+
+	calls := 0
+	if err := st.DeliverEnvelope(envID, consumer, func() error {
+		calls++
+		if calls == 1 {
+			return errors.New("fail once")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("DeliverEnvelope: %v", err)
+	}
+
+	history, err := st.ListDeliveryHistory(envID, consumer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawRetrying bool
+	for _, r := range history {
+		if r.State != "retrying" {
+			continue
+		}
+		sawRetrying = true
+		if r.NextAttemptAt.IsZero() {
+			t.Errorf("retrying row has zero NextAttemptAt, want it set")
+		}
+	}
+	if !sawRetrying {
+		t.Fatal("expected a retrying row in history, found none")
+	}
+}
+
+// TestDeliveryErrorIsClassified covers the R5.4 "error classification"
+// requirement. Regression for Review 007, which found the error column held
+// only a raw, unclassified message.
+func TestDeliveryErrorIsClassified(t *testing.T) {
+	st, envID := openDeliveryTestStore(t)
+
+	const consumer = "/fleet/run-del-1/error-class"
+
+	err := st.DeliverEnvelope(envID, consumer, func() error {
+		return &fs.PathError{Op: "open", Path: "/does/not/exist", Err: fs.ErrNotExist}
+	})
+	if err == nil {
+		t.Fatal("expected DeliverEnvelope to return an error")
+	}
+
+	history, herr := st.ListDeliveryHistory(envID, consumer)
+	if herr != nil {
+		t.Fatal(herr)
+	}
+	last := history[len(history)-1]
+	if last.State != "failed" {
+		t.Fatalf("expected final state failed, got %q", last.State)
+	}
+	if last.ErrorClass != "filesystem" {
+		t.Errorf("expected error_class %q for a *fs.PathError, got %q", "filesystem", last.ErrorClass)
+	}
+}
+
+// TestDeliveryUnknownErrorIsClassifiedUnknown covers the default branch of the
+// classification: an error type the taxonomy does not recognise is "unknown",
+// not left blank — a blank class would be indistinguishable from "no failure
+// occurred".
+func TestDeliveryUnknownErrorIsClassifiedUnknown(t *testing.T) {
+	st, envID := openDeliveryTestStore(t)
+
+	const consumer = "/fleet/run-del-1/unknown-class"
+
+	err := st.DeliverEnvelope(envID, consumer, func() error {
+		return errors.New("something unclassifiable")
+	})
+	if err == nil {
+		t.Fatal("expected DeliverEnvelope to return an error")
+	}
+
+	history, herr := st.ListDeliveryHistory(envID, consumer)
+	if herr != nil {
+		t.Fatal(herr)
+	}
+	last := history[len(history)-1]
+	if last.ErrorClass != "unknown" {
+		t.Errorf("expected error_class %q for a generic error, got %q", "unknown", last.ErrorClass)
+	}
 }
