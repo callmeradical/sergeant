@@ -48,7 +48,7 @@ a{color:var(--muted)}
   <h1>Sergeant v2</h1>
   <p>Independent review. Written by the critic, not the builder.</p>
   <p class="meta">
-    Review 001 · 2026-08-23T00:48Z · branch <code>v2</code> · head <code>5b0d9bd</code> · 486 commits · 30 runs recorded
+    Review 002 · 2026-08-23T01:5xZ · branch <code>v2</code> · head <code>e0b4657</code> · 31 runs recorded
   </p>
 </header>
 
@@ -58,11 +58,13 @@ a{color:var(--muted)}
     <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code></div></div>
     <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code> whole module</div></div>
     <div class="card"><div class="label">Tests</div><div class="value"><span class="status">8/8 pass</span></div><div class="small">128 named tests, <code>-count=1</code></div></div>
-    <div class="card"><div class="label">MCP delivery</div><div class="value"><span class="status bad">broken</span></div><div class="small">config points at a missing binary</div></div>
+    <div class="card"><div class="label">MCP delivery</div><div class="value"><span class="status">fixed</span></div><div class="small">both servers load: 34 + 7 tools</div></div>
+    <div class="card"><div class="label">Install burden</div><div class="value"><span class="status warn">overstated</span></div><div class="small">checker demands 9, v2 uses 5</div></div>
   </div>
-  <p><strong>Verdict:</strong> the merged engine work is real and the tests discriminate. One shipped
-  capability is <em>not deliverable</em> to its intended consumer, and two bookkeeping paths are
-  unimplemented, so several records in the product's primary table are permanently wrong.
+  <p><strong>Verdict:</strong> two of the three highest findings from Review 001 are closed with
+  evidence. The intent lifecycle fix is dispatched and still running, so it is not claimed. A new
+  finding this round is the largest one for an end user: the documented install prerequisites
+  describe v1's toolbelt, not v2's engine, and are wrong in both directions.
   Not complete.</p>
 </section>
 
@@ -84,7 +86,35 @@ a{color:var(--muted)}
   <h2>Findings</h2>
 
   <div class="item bad">
-    <h3><span class="sev high">high</span> &nbsp; The new MCP tools cannot be reached by any client</h3>
+    <h3><span class="sev high">high</span> &nbsp; Install prerequisites describe v1's toolbelt, and are wrong both ways</h3>
+    <p><code>mise run check</code> declares <strong>9 required</strong> prerequisites. The v2 engine
+    invokes <strong>5</strong>. Derived from every <code>exec.Command</code> call site in
+    <code>internal/</code> and <code>cmd/sergeant/</code>, not from documentation.</p>
+    <pre>v2 actually invokes:   git (11 sites), gh (2), bash (gates),
+                       openspec (dispatch, O3), one agent CLI
+
+required but never invoked by v2:
+  yq        parses YAML in process via gopkg.in/yaml.v3
+  python3   no invocation anywhere
+  sqlite3   embedded via modernc.org/sqlite, no CLI involved
+  lsof      no invocation anywhere
+  td        only a YAML struct field named "td", not a call
+  tmux      no invocation — and forbidden as a factory dependency
+
+required by v2 but NEVER CHECKED:
+  openspec  internal/ui/openspec.go:172 exec.LookPath("openspec")</pre>
+    <p class="small">A user passes the check, having installed six things v2 does not use, then fails at
+    the first dispatch on the one thing nobody told them to install. The checker also lists
+    <strong>tmux as required</strong>, which contradicts both D7 and the operator's standing
+    instruction that tmux is not a factory dependency.</p>
+    <p class="small"><strong>Acted on:</strong> added <code>mise run check:v2</code> verifying exactly the five,
+    and naming the six it does not want so the difference is visible rather than folklore. Added
+    alongside <code>mise run check</code> rather than replacing it, since that task still serves the
+    v1 toolbelt and retiring it belongs to the A1 decision. Evidence: task runs clean, all five present.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">closed</span> &nbsp; The new MCP tools cannot be reached by any client</h3>
     <p>The native server exposes all 7 tools including the two built for following a run.
     But <code>mcp.json</code> — the file a client reads — names <code>./bin/sergeant-mcp</code>,
     <strong>which does not exist</strong>. A client using the documented config starts no server at all.</p>
@@ -99,10 +129,20 @@ a{color:var(--muted)}
 
 $ cat mcp.json  ->  "command": "./bin/sergeant-mcp"
 $ ls -la bin/sergeant-mcp  ->  DOES NOT EXIST</pre>
-    <p class="small">The requirement "an agent can follow a run it dispatched" is implemented and tested
-    at the Go level and undeliverable at the integration level. I previously reported this as
-    "MCP follow tools live". That was wrong: live in the binary, dead in the configuration.
-    Related to the held item A1 (<code>td-ccc18b</code>), whose hold now has a measurable cost.</p>
+    <p class="small">I previously reported this as "MCP follow tools live". That was wrong: live in the
+    binary, dead in the configuration. The gap survived because the tools were verified by running the
+    binary directly — the binary worked, the config did not.</p>
+    <p class="small"><strong>Closed in <code>10a9160</code>.</strong> Fixed additively rather than by swapping:
+    A1's hold protects 34 real v1 tools, so replacing the entry to satisfy a review finding would have
+    discarded them. <code>mcp.json</code> now declares both servers, mise builds both binaries, and
+    <code>TestEveryServerDeclaredInMCPConfigIsBuildable</code> asserts against the configuration rather
+    than the binary. Confirmed to discriminate by adding a server naming a non-existent command.
+    Verified as a client would load it:</p>
+    <pre>sergeant      34 tools
+sergeant-v2    7 tools
+              -> sergeant_run_status
+              -> sergeant_run_wait
+exit 0</pre>
   </div>
 
   <div class="item bad">
@@ -118,6 +158,21 @@ bullets:  pending     4   merged    4     &lt;- the 4 merged were set by hand, i
     state: an empty table was honestly empty, whereas a table of permanently <code>in_progress</code>
     intents asserts something untrue. That conflicts with the standing rule against displaying a value
     not derived from stored state.</p>
+  </div>
+
+  <div class="item warn">
+    <h3><span class="sev med">medium</span> &nbsp; The only third-party Go dependency exists solely for the v1 proxy</h3>
+    <p><code>go.mod</code> declared one direct requirement, <code>mark3labs/mcp-go</code>, imported by
+    exactly one file: <code>cmd/sergeant-mcp/main.go</code>, the v1 script proxy.
+    <code>internal/mcp</code> speaks JSON-RPC over <code>encoding/json</code> and needs no MCP library.</p>
+    <pre>with the v1 proxy:      43 modules, direct: mark3labs/mcp-go
+remove it and tidy:     34 modules, direct: yaml.v3 + modernc.org/sqlite
+                        still builds</pre>
+    <p class="small">Also found: <code>go mod tidy</code> had never been run since the v2 engine landed, so
+    <code>sqlite</code> and <code>yaml</code> were marked indirect despite being imported directly.
+    Tidied in <code>c6b9d5a</code>; the graph is unchanged at 43, only the declaration was wrong.
+    The 43&nbsp;&rarr;&nbsp;34 reduction is <em>not</em> performed here: it is a consequence of the A1
+    decision about v1's future, not a cleanup, and doing it silently would pre-empt that call.</p>
   </div>
 
   <div class="item warn">
@@ -137,8 +192,13 @@ bullets:  pending     4   merged    4     &lt;- the 4 merged were set by hand, i
     <pre>/                      -> HTTP 200  (directory listing)
 /internal/ui/server.go -> HTTP 200
 /.git/config           -> HTTP 404  (worktree: .git is a file, not a dir)</pre>
-    <p class="small">Tailnet-only, and no git history is exposed, so this is hygiene rather than an
-    incident. Serving a dedicated directory holding only this page would remove it.</p>
+    <p class="small">Tailnet-only, and no git history is exposed, so this was hygiene rather than an incident.</p>
+    <p class="small"><strong>Closed.</strong> The server now runs from
+    <code>~/.local/share/sergeant-v2/progress/</code>, holding only this page. Verified:</p>
+    <pre>/progress.html         -> HTTP 200
+/                      -> HTTP 200  (this page only)
+/internal/ui/server.go -> HTTP 404
+/mcp.json              -> HTTP 404</pre>
   </div>
 
   <div class="item warn">
@@ -147,8 +207,13 @@ bullets:  pending     4   merged    4     &lt;- the 4 merged were set by hand, i
     scenarios. Its implementation was merged long ago. The change directory holds only
     <code>.openspec.yaml</code>.</p>
     <p class="small">Chain of custody is the stated reason OpenSpec was adopted (§3b). A merged change with no
-    spec is precisely the undocumented work it exists to prevent. Either write the delta specs or set
-    <code>skip_specs: true</code> with a reason.</p>
+    spec is precisely the undocumented work it exists to prevent.</p>
+    <p class="small"><strong>Closed.</strong> Wrote the delta specs, proposal, design and tasks, marked
+    explicitly as retroactive rather than presented as if written before the work. Five scenarios,
+    including the one that actually holds the requirement: adding a gate to configuration must change
+    the served graph with no code change. Backed by the 5 existing tests in
+    <code>internal/ui/workflow_test.go</code>, which pass. Archived, folding its specs into
+    <code>openspec/specs/workflow-graph/</code>.</p>
   </div>
 
   <div class="item ok">
@@ -195,39 +260,39 @@ go test ./internal/... -count=1
 
 <section>
   <h2>Blockers</h2>
-  <div class="item bad">
-    <p><strong>Nothing is blocked on a decision by me.</strong> One item needs an owner's call:
-    A1 / <code>td-ccc18b</code> is held pending graphify, and that hold is what leaves
-    <code>mcp.json</code> pointing at a non-existent v1 proxy. The native server is ready now, so the
-    hold's cost is that a merged, tested capability is unreachable. Holding remains legitimate;
-    it should be a decision rather than an oversight.</p>
+  <div class="item warn">
+    <p><strong>One decision outstanding: A1 / <code>td-ccc18b</code>.</strong> No longer blocking
+    delivery — the native tools are reachable as of <code>10a9160</code> without touching the hold.
+    It now blocks three cleanups that all reduce to the same question: does v1 stay?</p>
+    <p class="small">Cost of holding, measured: 9 extra modules in the Go graph, 6 spurious required
+    install prerequisites including tmux, and a shell-out path D7 forbids. Benefit of holding: 34
+    working tools that have no native replacement until graphify lands. I am not making this call.</p>
   </div>
 </section>
 
 <section>
   <h2>Next action</h2>
-  <p>In order, highest severity first:</p>
-  <div class="item"><strong>1. Repoint <code>mcp.json</code> at the native server.</strong>
-  <span class="small">Change the command to the built <code>sergeant mcp</code> subcommand, or build
-  <code>bin/sergeant-mcp</code> from the native path. Verify by listing tools through the config a
-  client would actually load, not by running the binary directly — that is the check that would have
-  caught this.</span></div>
-  <div class="item"><strong>2. Advance intents and bullets from the run lifecycle.</strong>
-  <span class="small">A run reaching a terminal state should move its intent and bullets. Needs a
-  decision on the mapping first, particularly whether a passed run means <code>satisfied</code> or
-  only <code>green</code>, since merging is still a human act (D6). Do not backfill the 4 stuck rows
-  by hand again; the fix is the missing transition, not the rows.</span></div>
-  <div class="item"><strong>3. Resolve the stuck OpenSpec change</strong>
-  <span class="small">— write its delta specs or record a <code>skip_specs</code> reason.</span></div>
-  <div class="item"><strong>4. Drop <code>brief</code> from the stream snapshot</strong>
-  <span class="small">and fetch it per run in the drawer.</span></div>
-  <div class="item"><strong>5. Serve this page from its own directory</strong>
-  <span class="small">rather than the repository root.</span></div>
+  <p>Blocked on an owner decision, then in severity order:</p>
+  <div class="item warn"><strong>Decision needed — A1 / <code>td-ccc18b</code>.</strong>
+  <span class="small">The hold on moving off the v1 proxy now has a measured price on three axes:
+  it keeps a D7-violating shell-out path, it is the sole source of the third-party Go dependency
+  surface (43 modules against 34), and it is why the install checker still demands six tools v2
+  never runs. Keeping the hold is defensible — the proxy really does provide 34 working tools.
+  It should be a decision with the cost in view, not an oversight.</span></div>
+  <div class="item"><strong>1. Land the intent lifecycle change.</strong>
+  <span class="small">Dispatched as <code>umber-panther-macau</code>, running at the time of writing.
+  Not claimed until it passes gates and merges. This is the last of the two high findings from
+  Review 001.</span></div>
+  <div class="item"><strong>2. Drop <code>brief</code> from the stream snapshot</strong>
+  <span class="small">and fetch it per run in the drawer. 31 KB per reconnect, growing with run count.</span></div>
+  <div class="item"><strong>3. Decide whether <code>mise run check</code> becomes v2's.</strong>
+  <span class="small"><code>check:v2</code> exists alongside it. Merging them means deciding v1's fate,
+  which is the same A1 call.</span></div>
 </section>
 
 <footer>
-  <p class="meta">Review 001 · findings above are reproduced from commands run against
-  <code>5b0d9bd</code> · no completion is claimed for any item lacking build or test evidence.</p>
+  <p class="meta">Review 002 · findings above are reproduced from commands run against
+  <code>e0b4657</code> · no completion is claimed for any item lacking build or test evidence.</p>
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
