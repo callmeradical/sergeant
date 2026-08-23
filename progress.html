@@ -48,7 +48,7 @@ a{color:var(--muted)}
   <h1>Sergeant v2</h1>
   <p>Independent review. Written by the critic, not the builder.</p>
   <p class="meta">
-    Review 003 · 2026-08-23T02:2xZ · branch <code>v2</code> · head merged · 33 runs recorded
+    Review 004 · 2026-08-23T02:4xZ · branch <code>v2</code> · head merged · 33 runs recorded
   </p>
 </header>
 
@@ -264,6 +264,110 @@ go test ./internal/... -count=1
 </section>
 
 <section>
+  <h2>Gap analysis — what remains between v1 and v2</h2>
+  <p class="small">Requested this round. Measured against the PRD's own numbered requirements rather
+  than against v1's script list, because D7 states that a v1 capability v2 lacks is
+  <em>unimplemented v2 scope</em>, not a gap to close by calling v1. Parity with v1 is not the target;
+  the PRD is.</p>
+
+  <div class="grid">
+    <div class="card"><div class="label">Numbered requirements</div><div class="value">39</div><div class="small">R1–R7</div></div>
+    <div class="card"><div class="label">Verified unmet</div><div class="value">12</div><div class="small">7 of them are R5 alone</div></div>
+    <div class="card"><div class="label">v1 scripts</div><div class="value">33</div><div class="small">34 MCP tools wrapping them</div></div>
+    <div class="card"><div class="label">PRD conflicts</div><div class="value"><span class="status warn">2</span></div><div class="small">decisions outran the document</div></div>
+  </div>
+
+  <h3 style="margin-top:26px">The remaining work, largest first</h3>
+
+  <div class="item bad">
+    <p><strong>R5 — notification/envelope transport. 7 of 7 unmet, and the single largest block.</strong></p>
+    <p class="small">The PRD asks for typed, versioned, schema-validated, immutable envelopes with
+    <code>envelope_id</code>, <code>schema_version</code>, <code>producer</code>,
+    <code>correlation_id</code>, <code>causation_id</code> and a full reference chain; a delivery state
+    machine over <code>pending / leased / delivered / acknowledged / retrying / failed /
+    dead_letter</code>; bounded retry with backoff and an idempotency key; dead-letter records with
+    auditable replay and quarantine; and CLI, UI and MCP surfaces over that same transport.</p>
+    <pre>required metadata:  ~15 fields + delivery state machine
+EnvelopeRecord has:  ID RunID Repo Stage Summary Artifacts Data CreatedAt
+                     (8 fields, no delivery state at all)
+grep dead_letter|leased|acknowledged in store: 0 hits</pre>
+    <p class="small">This is the v1 messaging family — <code>sgt-msg-send/recv/ack/list</code>,
+    <code>sgt-respond</code>, <code>sgt-ack-response</code>, <code>sgt-callback</code>,
+    <code>sgt-notify</code>, <code>sgt-wake</code> — restated as a durable Go transport. Estimated
+    <strong>4–6 bullets</strong>. Nothing here is started.</p>
+  </div>
+
+  <div class="item bad">
+    <p><strong>D9 — graphify as a native capability. Not started, and it gates the v1 retirement.</strong></p>
+    <pre>grep graphify in internal/**.go: 0 hits
+config.Project has no Graphify field (block is parsed and discarded)</pre>
+    <p class="small">This is the load-bearing one for A1. Until graphify exists natively, the v1 proxy
+    stays, and with it 9 extra Go modules, 6 spurious install prerequisites, and a D7-violating
+    shell-out path. Estimated <strong>2–3 bullets</strong>.</p>
+  </div>
+
+  <div class="item warn">
+    <p><strong>R4.4 / R4.5 — redaction and content minimisation. Not started.</strong></p>
+    <pre>grep redact|scrub|secret in internal/**.go: 0 hits</pre>
+    <p class="small">The PRD says redaction and retention "must be defined before production release",
+    so this is a release gate rather than a nice-to-have. Related evidence from Review 002: the SSE
+    snapshot ships every run's full brief, 31&nbsp;KB, which is exactly the
+    operational-metadata-versus-content distinction R4.5 asks for. Estimated
+    <strong>1–2 bullets</strong>.</p>
+  </div>
+
+  <div class="item warn">
+    <p><strong>R3.5 — human approval for authorising gates. Not started.</strong></p>
+    <pre>grep approval|awaiting_approval in internal/**.go: 0 hits</pre>
+    <p class="small">D5 names three legitimate interruptions: a plan awaiting approval, a blocked bullet,
+    and a bullet ready for an irreversible step. Only "blocked" is observable today, and only because a
+    run fails. Estimated <strong>2 bullets</strong>.</p>
+  </div>
+
+  <div class="item warn">
+    <p><strong>R2.4 — retry policy explicit and observable. Effectively unmet.</strong></p>
+    <pre>internal/dag/engine.go:310  pr.RunAgentPhase(ctx, phase, prompt, 0)
+                                                            ^ hardcoded
+no retry field in the project config schema</pre>
+    <p class="small">The parameter exists and is always zero. Estimated <strong>1 bullet</strong>.</p>
+  </div>
+
+  <h3 style="margin-top:26px">PRD conflicts — the document no longer matches the decisions</h3>
+
+  <div class="item warn">
+    <p><strong>R2.4 says every agent phase is "bounded by a strict timeout". It is not, deliberately.</strong></p>
+    <pre>docs/prd-sergeant-v2.md:346  "bounded by a strict timeout"
+internal/runner/runner.go:72  DefaultAgentTimeout = 0</pre>
+    <p class="small">The default was removed on purpose, after a 10-minute default killed a run that had
+    already committed passing work. The decision is right and the PRD is stale. A binding document that
+    contradicts the code trains people to ignore it.</p>
+  </div>
+
+  <div class="item warn">
+    <p><strong>R7.3 says the embedded UI can "refine supported project configuration". That was removed.</strong></p>
+    <p class="small">The dashboard is observation-only now; project YAML is edited in an editor. The
+    <code>/api/refine-project</code> endpoint still exists, so the capability is not gone, but the
+    requirement as written is false.</p>
+  </div>
+
+  <h3 style="margin-top:26px">v1 capabilities that are genuinely out of scope</h3>
+  <p class="small">Not every one of the 33 scripts is a gap. <code>sgt-td-*</code>,
+  <code>sgt-treehouse-init</code> and <code>sgt-no-mistakes-finding</code> integrate separate external
+  tools. <code>sgt-interactive-worker</code> is a tmux concept that D1's agent-driven path replaces
+  rather than reimplements — and tmux is excluded as a factory dependency. <code>sgt-drain</code> /
+  <code>sgt-undrain</code> pause a queue v2 does not have, since measured concurrency has never
+  exceeded one.</p>
+
+  <div class="item">
+    <p><strong>Total estimate: 10–14 bullets</strong>, of which R5 is roughly half. Plus one document
+    reconciliation pass and one owner decision (A1).</p>
+    <p class="small">Stated as bullets rather than time, because bullet size is the unit this factory
+    actually delivers in. Recent bullets have run 25s to 22min of agent time each, plus review. The
+    estimate covers reaching the PRD as written, not parity with v1.</p>
+  </div>
+</section>
+
+<section>
   <h2>Blockers</h2>
   <div class="item warn">
     <p><strong>One decision outstanding: A1 / <code>td-ccc18b</code>.</strong> No longer blocking
@@ -292,7 +396,7 @@ go test ./internal/... -count=1
 </section>
 
 <footer>
-  <p class="meta">Review 003 · findings above are reproduced from commands run against
+  <p class="meta">Review 004 · findings above are reproduced from commands run against
   <code>e0b4657</code> · no completion is claimed for any item lacking build or test evidence.</p>
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
