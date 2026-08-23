@@ -737,3 +737,156 @@ func TestFreshRunDoesNotSkipPhases(t *testing.T) {
 		t.Errorf("gate ran %d time(s); a fresh run must execute every phase regardless of prior records", n-1)
 	}
 }
+
+// --- R2.4: retry policy is explicit and observable ---------------------------
+
+// The engine must pass the resolved retry count (not a hard-coded 0) to
+// RunAgentPhase. We observe this indirectly: with a project that configures
+// retries=1, a phase backed by a fake agent that always fails must produce
+// exactly 2 phase records (1 original + 1 retry).
+func TestEnginePassesResolvedRetriesToAgentPhase(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("SERGEANT_FLEET_DIR", filepath.Join(tempDir, "fleet"))
+
+	repoDir := filepath.Join(tempDir, "svc")
+	newGitRepo(t, repoDir)
+
+	// Write a fake agent that always exits non-zero.
+	binDir := filepath.Join(tempDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	fakeAgentPath := filepath.Join(binDir, "goose")
+	if err := os.WriteFile(fakeAgentPath, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	proj := &config.Project{
+		Name:     "retry-proj",
+		Defaults: config.ProjectDefaults{Agent: fakeAgentPath, Retries: 1},
+		Repos: map[string]config.Repo{
+			"svc": {Path: repoDir, Factory: &config.FactoryConfig{
+				Pipeline: []string{"plan"},
+			}},
+		},
+	}
+
+	eng := newEngine(t, proj)
+	runID := "run-retry-engine-1"
+
+	// The run must fail (agent always fails) — that's fine, we only care about the
+	// phase count.
+	_ = eng.RunStage(context.Background(), runID, &config.DAGStage{
+		Name: "s", Repos: []string{"svc"}, Brief: "do work",
+	})
+
+	phases, err := eng.Store.ListPhasesForRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var planPhases []store.PhaseRecord
+	for _, p := range phases {
+		if p.Name == "plan" {
+			planPhases = append(planPhases, p)
+		}
+	}
+	// retries=1 means 2 total attempts; hard-coded 0 would give only 1.
+	if got := len(planPhases); got != 2 {
+		t.Errorf("plan phases = %d, want 2 (1 attempt + 1 retry); engine may be ignoring the configured retry count", got)
+	}
+}
+
+// A failing deterministic gate must run exactly once even when a non-zero retry
+// count is configured. A gate's exit status is the evidence; re-running it to
+// get a different answer contradicts R2.5 and R2.6.
+func TestGateIsNeverRetriedEvenWithRetryCount(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("SERGEANT_FLEET_DIR", filepath.Join(tempDir, "fleet"))
+
+	repoDir := filepath.Join(tempDir, "svc")
+	newGitRepo(t, repoDir)
+
+	proj := &config.Project{
+		Name:     "retry-proj",
+		Defaults: config.ProjectDefaults{Retries: 3},
+		Repos: map[string]config.Repo{
+			"svc": {Path: repoDir, Factory: &config.FactoryConfig{
+				Pipeline: []string{"test"},
+				Gates:    map[string]string{"unit": "exit 1"},
+			}},
+		},
+	}
+
+	eng := newEngine(t, proj)
+	runID := "run-gate-no-retry-1"
+
+	_ = eng.RunStage(context.Background(), runID, &config.DAGStage{
+		Name: "s", Repos: []string{"svc"},
+	})
+
+	phases, err := eng.Store.ListPhasesForRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gatePhases []store.PhaseRecord
+	for _, p := range phases {
+		if p.Kind == "code" && p.Name == "unit" {
+			gatePhases = append(gatePhases, p)
+		}
+	}
+	if got := len(gatePhases); got != 1 {
+		t.Errorf("gate ran %d time(s), want exactly 1; gates must never be retried", got)
+	}
+}
+
+// A repo-level retry count overrides the project default in the engine.
+func TestEngineUsesRepoRetryOverride(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("SERGEANT_FLEET_DIR", filepath.Join(tempDir, "fleet"))
+
+	repoDir := filepath.Join(tempDir, "svc")
+	newGitRepo(t, repoDir)
+
+	binDir := filepath.Join(tempDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	fakeAgentPath := filepath.Join(binDir, "goose")
+	if err := os.WriteFile(fakeAgentPath, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	proj := &config.Project{
+		Name:     "retry-proj",
+		Defaults: config.ProjectDefaults{Agent: fakeAgentPath, Retries: 1},
+		Repos: map[string]config.Repo{
+			// repo override = 2 retries → 3 total attempts
+			"svc": {Path: repoDir, Retries: 2, Factory: &config.FactoryConfig{
+				Pipeline: []string{"plan"},
+			}},
+		},
+	}
+
+	eng := newEngine(t, proj)
+	runID := "run-retry-repo-override-1"
+
+	_ = eng.RunStage(context.Background(), runID, &config.DAGStage{
+		Name: "s", Repos: []string{"svc"}, Brief: "do work",
+	})
+
+	phases, err := eng.Store.ListPhasesForRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var planPhases []store.PhaseRecord
+	for _, p := range phases {
+		if p.Name == "plan" {
+			planPhases = append(planPhases, p)
+		}
+	}
+	if got := len(planPhases); got != 3 {
+		t.Errorf("plan phases = %d, want 3 (repo retries=2 overrides project default retries=1)", got)
+	}
+}

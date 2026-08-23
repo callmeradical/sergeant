@@ -22,17 +22,25 @@ type Project struct {
 
 // ProjectDefaults defines shared settings across repos.
 type ProjectDefaults struct {
-	Agent string `yaml:"agent,omitempty" json:"agent"` // e.g. "pi", "opencode", "claude"
-	Model string `yaml:"model,omitempty" json:"model"` // e.g. "anthropic/claude-3-7-sonnet"
+	Agent   string `yaml:"agent,omitempty" json:"agent"`     // e.g. "pi", "opencode", "claude"
+	Model   string `yaml:"model,omitempty" json:"model"`     // e.g. "anthropic/claude-3-7-sonnet"
+	Retries int    `yaml:"retries,omitempty" json:"retries"` // agent phase retry count (0 = one attempt, no retry)
 }
 
 // Repo represents a single repository managed in the project.
 type Repo struct {
-	Name        string         `yaml:"name,omitempty" json:"name"`
-	Path        string         `yaml:"path" json:"path"`
-	Role        string         `yaml:"role,omitempty" json:"role"`
-	Group       string         `yaml:"group,omitempty" json:"group"`
-	Factory     *FactoryConfig `yaml:"factory,omitempty" json:"factory"`
+	Name    string         `yaml:"name,omitempty" json:"name"`
+	Path    string         `yaml:"path" json:"path"`
+	Role    string         `yaml:"role,omitempty" json:"role"`
+	Group   string         `yaml:"group,omitempty" json:"group"`
+	Factory *FactoryConfig `yaml:"factory,omitempty" json:"factory"`
+	// Retries overrides Defaults.Retries for this repository. Zero means
+	// "not set here" — use the project default (which itself defaults to zero).
+	// Because zero is the Go default for int, a repo that omits the field cannot
+	// be distinguished from one that sets it to zero by value alone; the
+	// resolution rule is: if the repo's Retries is non-zero, use it; otherwise
+	// fall back to the project default.
+	Retries int `yaml:"retries,omitempty" json:"retries"`
 }
 
 // FactoryConfig defines the intra-repo software factory pipeline and quality gates.
@@ -114,6 +122,23 @@ func LoadProject(nameOrPath string) (*Project, error) {
 	}
 
 	return &p, nil
+}
+
+// ResolvedRetries returns the effective retry count for repoName.
+//
+// Resolution mirrors how AgentCLI is resolved for the pipeline today:
+//   - repo-level value if non-zero
+//   - project default if non-zero
+//   - zero (one attempt, no retry)
+//
+// Zero anywhere in the chain means "not configured at that level", not "retry
+// zero times". A project that omits the field behaves exactly as before this
+// field existed: one attempt, no retry.
+func (p *Project) ResolvedRetries(repoName string) int {
+	if repo, ok := p.Repos[repoName]; ok && repo.Retries != 0 {
+		return repo.Retries
+	}
+	return p.Defaults.Retries
 }
 
 func fileExists(p string) bool {

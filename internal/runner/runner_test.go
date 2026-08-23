@@ -246,3 +246,120 @@ func TestUnboundedAgentPhaseStillHonoursCancellation(t *testing.T) {
 	}
 	_ = st
 }
+
+// --- R2.4: attempt number on phase records -----------------------------------
+
+// Each attempt must produce a phase record with an attempt number starting at 1
+// and increasing by 1 with no gaps.
+func TestAttemptNumberStartsAtOneAndIncrements(t *testing.T) {
+	dir := t.TempDir()
+	agent := fakeAgent(t, dir, "agent.sh", "exit 1") // always fails
+	pr, st := newRunner(t, agent, 10*time.Second)
+
+	// 2 retries = 3 attempts total
+	_, _ = pr.RunAgentPhase(context.Background(), "build", "brief", 2)
+
+	phases, err := st.ListPhasesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(phases) != 3 {
+		t.Fatalf("expected 3 phase records, got %d", len(phases))
+	}
+	for i, p := range phases {
+		want := i + 1
+		if p.Attempt != want {
+			t.Errorf("phases[%d].Attempt = %d, want %d", i, p.Attempt, want)
+		}
+	}
+}
+
+// A phase that fails then succeeds must leave BOTH a failed and a passed record
+// with different attempt numbers. Collapsing them hides that a retry happened.
+func TestRetryKeepsBothFailedAndPassedRecord(t *testing.T) {
+	dir := t.TempDir()
+
+	// Script fails on attempt 1, passes on attempt 2 by counting invocations via a file.
+	countFile := filepath.Join(dir, "count")
+	script := `#!/bin/sh
+COUNT=0
+if [ -f "` + countFile + `" ]; then COUNT=$(cat "` + countFile + `"); fi
+COUNT=$((COUNT+1))
+echo $COUNT > "` + countFile + `"
+if [ "$COUNT" -lt 2 ]; then exit 1; fi
+exit 0`
+	agent := fakeAgent(t, dir, "agent.sh", script[len("#!/bin/sh\n"):])
+	// Rewrite fully (fakeAgent prepends #!/bin/sh):
+	if err := os.WriteFile(agent, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	pr, st := newRunner(t, agent, 10*time.Second)
+
+	env, err := pr.RunAgentPhase(context.Background(), "build", "brief", 1)
+	if err != nil {
+		t.Fatalf("expected success on retry, got: %v", err)
+	}
+	if env == nil {
+		t.Fatal("expected an envelope on success")
+	}
+
+	phases, err := st.ListPhasesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Filter to "build" agent phases only (skip initial "running" record)
+	var buildPhases []store.PhaseRecord
+	for _, p := range phases {
+		if p.Name == "build" && p.Kind == "agent" && p.Status != "running" {
+			buildPhases = append(buildPhases, p)
+		}
+	}
+	if len(buildPhases) != 2 {
+		t.Fatalf("expected 2 build phase records (failed + passed), got %d: %+v", len(buildPhases), buildPhases)
+	}
+	if buildPhases[0].Status != "failed" {
+		t.Errorf("first record status = %q, want failed", buildPhases[0].Status)
+	}
+	if buildPhases[1].Status != "passed" {
+		t.Errorf("second record status = %q, want passed", buildPhases[1].Status)
+	}
+	if buildPhases[0].Attempt == buildPhases[1].Attempt {
+		t.Errorf("both records have the same attempt number %d; they must differ", buildPhases[0].Attempt)
+	}
+	if buildPhases[0].Attempt != 1 {
+		t.Errorf("first record Attempt = %d, want 1", buildPhases[0].Attempt)
+	}
+	if buildPhases[1].Attempt != 2 {
+		t.Errorf("second record Attempt = %d, want 2", buildPhases[1].Attempt)
+	}
+}
+
+// A successful first-attempt phase must record Attempt=1.
+func TestSuccessfulFirstAttemptIsAttemptOne(t *testing.T) {
+	dir := t.TempDir()
+	agent := fakeAgent(t, dir, "agent.sh", "echo done")
+	pr, st := newRunner(t, agent, 10*time.Second)
+
+	_, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	phases, err := st.ListPhasesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var final []store.PhaseRecord
+	for _, p := range phases {
+		if p.Name == "build" && p.Kind == "agent" && p.Status != "running" {
+			final = append(final, p)
+		}
+	}
+	if len(final) != 1 {
+		t.Fatalf("expected 1 phase record, got %d", len(final))
+	}
+	if final[0].Attempt != 1 {
+		t.Errorf("Attempt = %d, want 1", final[0].Attempt)
+	}
+}

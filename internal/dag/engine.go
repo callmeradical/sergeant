@@ -307,7 +307,8 @@ func (e *Engine) RunStage(ctx context.Context, runID string, stage *config.DAGSt
 				if prompt == "" {
 					prompt = fmt.Sprintf("Execute %s phase for stage %s on %s", phase, stage.Name, repoName)
 				}
-				_, err := pr.RunAgentPhase(ctx, phase, prompt, 0)
+				retries := e.Project.ResolvedRetries(repoName)
+				_, err := pr.RunAgentPhase(ctx, phase, prompt, retries)
 				if err != nil {
 					return fmt.Errorf("agent phase %s failed on repo %s: %w", phase, repoName, err)
 				}
