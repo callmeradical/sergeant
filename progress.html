@@ -48,7 +48,7 @@ a{color:var(--muted)}
   <h1>Sergeant v2</h1>
   <p>Independent review. Written by the critic, not the builder.</p>
   <p class="meta">
-    Review 002 · 2026-08-23T01:5xZ · branch <code>v2</code> · head <code>e0b4657</code> · 31 runs recorded
+    Review 003 · 2026-08-23T02:2xZ · branch <code>v2</code> · head merged · 33 runs recorded
   </p>
 </header>
 
@@ -61,11 +61,10 @@ a{color:var(--muted)}
     <div class="card"><div class="label">MCP delivery</div><div class="value"><span class="status">fixed</span></div><div class="small">both servers load: 34 + 7 tools</div></div>
     <div class="card"><div class="label">Install burden</div><div class="value"><span class="status warn">overstated</span></div><div class="small">checker demands 9, v2 uses 5</div></div>
   </div>
-  <p><strong>Verdict:</strong> two of the three highest findings from Review 001 are closed with
-  evidence. The intent lifecycle fix is dispatched and still running, so it is not claimed. A new
-  finding this round is the largest one for an end user: the documented install prerequisites
-  describe v1's toolbelt, not v2's engine, and are wrong in both directions.
-  Not complete.</p>
+  <p><strong>Verdict:</strong> both high findings from Review 001 are closed with live evidence, not
+  unit tests alone. The install-prerequisite finding from Review 002 is mitigated but not resolved,
+  because resolving it means deciding v1's future. Two medium items remain open.
+  Not complete, and one decision is outstanding.</p>
 </section>
 
 <section>
@@ -145,19 +144,25 @@ sergeant-v2    7 tools
 exit 0</pre>
   </div>
 
-  <div class="item bad">
-    <h3><span class="sev high">high</span> &nbsp; Nothing advances an intent or a bullet, so the primary table is wrong by design</h3>
+  <div class="item ok">
+    <h3><span class="sev low">closed</span> &nbsp; Nothing advances an intent or a bullet, so the primary table is wrong by design</h3>
     <p>Dispatch now creates intents and bullets (D4). Nothing ever updates them.
     <code>UpdateIntentStatus</code> and <code>UpdateBulletStatus</code> have no production callers —
     only their own definitions and tests.</p>
     <pre>intents:  in_progress 4   satisfied 2     &lt;- the 2 were set by hand, in SQL
 bullets:  pending     4   merged    4     &lt;- the 4 merged were set by hand, in SQL</pre>
-    <p class="small">Every run that finishes leaves its intent at <code>in_progress</code> forever, including runs
-    that passed and runs that were cancelled. D8 makes the intent the dashboard's primary object, so
-    the primary object will show a status that is false for most rows. This is worse than the pre-D4
-    state: an empty table was honestly empty, whereas a table of permanently <code>in_progress</code>
-    intents asserts something untrue. That conflicts with the standing rule against displaying a value
-    not derived from stored state.</p>
+    <p class="small">Worse than the pre-D4 empty table: an empty table was honestly empty, whereas
+    permanently <code>in_progress</code> rows assert something untrue.</p>
+    <p class="small"><strong>Closed.</strong> <code>setTerminal</code> now advances the run's bullets, so a
+    dispatch and a resume share one path. Intent status is <em>derived</em> from its bullets rather than
+    assigned by a run, which makes D6 structural: <code>satisfied</code> needs every bullet at
+    <code>merged</code>, and <code>merged</code> is only reachable from observed PR state. Verified on
+    the live server, not only in unit tests — including the two cases most likely to be wrong:</p>
+    <pre>dispatch then cancel -> run=cancelled  bullet=pending  intent=in_progress
+dispatch that passes -> run=passed     bullet=green    intent=in_progress
+                                                       ^ D6 holds: work done, not delivered</pre>
+    <p class="small">Existing rows were deliberately not backfilled; the defect was the missing transition,
+    and hand-patching again would hide whether the fix works.</p>
   </div>
 
   <div class="item warn">
@@ -279,19 +284,15 @@ go test ./internal/... -count=1
   surface (43 modules against 34), and it is why the install checker still demands six tools v2
   never runs. Keeping the hold is defensible — the proxy really does provide 34 working tools.
   It should be a decision with the cost in view, not an oversight.</span></div>
-  <div class="item"><strong>1. Land the intent lifecycle change.</strong>
-  <span class="small">Dispatched as <code>umber-panther-macau</code>, running at the time of writing.
-  Not claimed until it passes gates and merges. This is the last of the two high findings from
-  Review 001.</span></div>
-  <div class="item"><strong>2. Drop <code>brief</code> from the stream snapshot</strong>
+  <div class="item"><strong>1. Drop <code>brief</code> from the stream snapshot</strong>
   <span class="small">and fetch it per run in the drawer. 31 KB per reconnect, growing with run count.</span></div>
-  <div class="item"><strong>3. Decide whether <code>mise run check</code> becomes v2's.</strong>
+  <div class="item"><strong>2. Decide whether <code>mise run check</code> becomes v2's.</strong>
   <span class="small"><code>check:v2</code> exists alongside it. Merging them means deciding v1's fate,
   which is the same A1 call.</span></div>
 </section>
 
 <footer>
-  <p class="meta">Review 002 · findings above are reproduced from commands run against
+  <p class="meta">Review 003 · findings above are reproduced from commands run against
   <code>e0b4657</code> · no completion is claimed for any item lacking build or test evidence.</p>
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
