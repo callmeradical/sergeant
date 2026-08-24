@@ -655,7 +655,7 @@ func (srv *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("loading run %q: %v", req.RunID, err), http.StatusInternalServerError)
 		return
 	}
-	branch := naming.BranchName(run.Type, run.ChangeID)
+	branch := naming.BranchNameForRun(run.ID, run.Type, run.ChangeID)
 	if req.Title == "" {
 		req.Title = fmt.Sprintf("feat(%s): verified patch for run [%s]", req.Project, req.RunID)
 	}
@@ -1699,7 +1699,7 @@ func gitOut(dir string, args ...string) string {
 func (srv *Server) describeDelivery(proj *config.Project, runID string) DeliveryReport {
 	branch := ""
 	if run, err := srv.Store.GetRun(runID); err == nil {
-		branch = naming.BranchName(run.Type, run.ChangeID)
+		branch = naming.BranchNameForRun(run.ID, run.Type, run.ChangeID)
 	}
 
 	// Report on the first repo that actually produced a worktree for this run.
