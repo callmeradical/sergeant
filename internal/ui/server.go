@@ -866,7 +866,7 @@ func (srv *Server) handleApprovePlan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	srv.createRunAndDispatch(w, proj, intent.Statement, targetRepos, change, "", changeRepoName, changeRepoPath)
+	srv.createRunAndDispatch(w, proj, intent.Statement, targetRepos, change, "", changeRepoName, changeRepoPath, intentID)
 }
 
 // handleRejectPlan is decision D2/D5(a)'s explicit rejection path. Rejecting
@@ -1420,7 +1420,7 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	srv.createRunAndDispatch(w, proj, brief, targetRepos, change, requestID, changeRepoName, changeRepoPath)
+	srv.createRunAndDispatch(w, proj, brief, targetRepos, change, requestID, changeRepoName, changeRepoPath, "")
 }
 
 // createRunAndDispatch is the run-creation-and-dispatch sequence a dispatch
@@ -1430,6 +1430,17 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 // "proposed". Sharing this one implementation is what makes the two paths
 // incapable of drifting from each other (design.md, "Approval reuses the
 // existing dispatch sequence, not a copy of it").
+//
+// existingIntentID is "" for a fresh, explicit-repos dispatch — the original
+// behavior, which mints its own intent and one bullet per target repo. An
+// approved plan passes its own (already-"in_progress") intent id here instead
+// of "": that intent and its bullets (already transitioned to "pending" by
+// the caller) are reused as-is rather than minted a second time. Without
+// this, approving a plan would leave its original intent frozen forever at
+// "in_progress"/"pending" — nothing ever advances it — while a second,
+// disconnected intent silently became the one actually tracked, doubling
+// the dashboard's primary object (D8) for what a human considers one piece
+// of work.
 func (srv *Server) createRunAndDispatch(
 	w http.ResponseWriter,
 	proj *config.Project,
@@ -1439,14 +1450,18 @@ func (srv *Server) createRunAndDispatch(
 	requestID string,
 	changeRepoName string,
 	changeRepoPath string,
+	existingIntentID string,
 ) {
 	taskID := naming.RunID()
 
 	// The intent id is derived from the run id rather than generated
 	// independently (decision D4), so it is known before the intent row exists.
 	// That is what lets the run be written first while still pointing at its
-	// intent.
-	intentID := taskID + "-intent"
+	// intent. An approved plan already has one; reuse it instead.
+	intentID := existingIntentID
+	if intentID == "" {
+		intentID = taskID + "-intent"
+	}
 
 	// The run row is inserted before the intent and the bullets, and it carries
 	// the idempotency key. This ordering is the mechanism, not a preference.
@@ -1482,29 +1497,32 @@ func (srv *Server) createRunAndDispatch(
 		return
 	}
 
-	// Decision D4: sergeant stores intents and bullets itself, and decision D8
-	// makes the intent the dashboard's primary noun.
-	if err := srv.Store.CreateIntent(&store.IntentRecord{
-		ID:        intentID,
-		Project:   proj.Name,
-		Statement: brief,
-		Status:    "in_progress",
-	}); err != nil {
-		http.Error(w, fmt.Sprintf("recording the intent for this dispatch: %v", err), http.StatusInternalServerError)
-		return
-	}
-	// One bullet per target repository, positioned in merge order. A bullet names
-	// exactly one repository: work in a second repository is a second bullet.
-	for i, repoName := range targetRepos {
-		if err := srv.Store.CreateBullet(&store.BulletRecord{
-			ID:       fmt.Sprintf("%s-b%d", taskID, i+1),
-			IntentID: intentID,
-			Repo:     repoName,
-			Position: i + 1,
-			Status:   "pending",
+	if existingIntentID == "" {
+		// Decision D4: sergeant stores intents and bullets itself, and decision
+		// D8 makes the intent the dashboard's primary noun.
+		if err := srv.Store.CreateIntent(&store.IntentRecord{
+			ID:        intentID,
+			Project:   proj.Name,
+			Statement: brief,
+			Status:    "in_progress",
 		}); err != nil {
-			http.Error(w, fmt.Sprintf("recording bullet %d of this dispatch: %v", i+1, err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("recording the intent for this dispatch: %v", err), http.StatusInternalServerError)
 			return
+		}
+		// One bullet per target repository, positioned in merge order. A bullet
+		// names exactly one repository: work in a second repository is a second
+		// bullet.
+		for i, repoName := range targetRepos {
+			if err := srv.Store.CreateBullet(&store.BulletRecord{
+				ID:       fmt.Sprintf("%s-b%d", taskID, i+1),
+				IntentID: intentID,
+				Repo:     repoName,
+				Position: i + 1,
+				Status:   "pending",
+			}); err != nil {
+				http.Error(w, fmt.Sprintf("recording bullet %d of this dispatch: %v", i+1, err), http.StatusInternalServerError)
+				return
+			}
 		}
 	}
 

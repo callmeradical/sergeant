@@ -231,6 +231,49 @@ func TestApprovingAProposedPlanStartsTheRealDispatchSequence(t *testing.T) {
 	}
 }
 
+// Approving a plan must reuse its own intent for the dispatched run, not mint
+// a second, disconnected one. Reusing createRunAndDispatch's normal
+// intent-minting behavior unconditionally would leave the approved plan's
+// original intent frozen forever at in_progress/pending — nothing ever
+// advances it — while a second intent silently became the one actually
+// tracked, doubling the dashboard's primary object (D8) for what a human
+// considers one piece of work.
+func TestApprovingAPlanDoesNotCreateASecondIntent(t *testing.T) {
+	mux, st, repoPath := gitDispatchFixtureStandalone(t)
+	const changeID = "add-stripe-webhooks"
+	if err := os.MkdirAll(filepath.Join(repoPath, "openspec", "changes", changeID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	intentID := proposePlan(t, mux, "add stripe webhooks", changeID)
+
+	w := doPlanAction(t, mux, http.MethodPost, "/api/plans/"+intentID+"/approve")
+	if w.Code != http.StatusOK {
+		t.Fatalf("approve = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var resp dispatchResp
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	waitForTerminalRun(t, st, resp.TaskID)
+
+	run, err := st.GetRun(resp.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.IntentID != intentID {
+		t.Fatalf("dispatched run's intent id = %q, want the approved plan's own intent id %q — a second intent was created instead of reusing the approved one", run.IntentID, intentID)
+	}
+
+	intents, err := st.ListIntentsForProject("o3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(intents) != 1 {
+		t.Fatalf("project holds %d intents after approval, want 1 (the approved plan's own): %+v", len(intents), intents)
+	}
+}
+
 // Rejecting a proposed plan ends it and starts nothing: no run is ever
 // created, and the intent's bullets are left "proposed" — the intent's own
 // terminal status is what makes them inert.
