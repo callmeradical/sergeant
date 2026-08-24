@@ -48,50 +48,48 @@ a{color:var(--muted)}
   <h1>Sergeant v2</h1>
   <p>Independent review. Written by the critic, not the builder.</p>
   <p class="meta">
-    Review 014 · 2026-08-23 · branch <code>v2</code> · merge <code>3c09daa</code> reviewed
-    (feature commits <code>9f4d0be</code>, <code>b600915</code>) ·
-    "captured output is redacted and bounded before storage (R4.4, R4.5 partial)"
+    Review 015 · 2026-08-23 · branch <code>v2</code> · commit <code>3c95c1b</code> reviewed ·
+    "fix(redact,runner): AKIA/AIza glued-suffix miss and agent-envelope redaction bypass (Review 014)"
   </p>
 </header>
 
 <section>
   <h2>Current status</h2>
   <div class="grid">
-    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at current <code>v2</code> HEAD (<code>3c09daa</code>)</div></div>
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at current <code>v2</code> HEAD (<code>3c95c1b</code>)</div></div>
     <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code>, whole module</div></div>
-    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">11/11 pass</span></div><div class="small"><code>go test ./internal/... -count=1</code>, all packages green</div></div>
-    <div class="card"><div class="label">Required pattern classes</div><div class="value"><span class="status">redact correctly</span></div><div class="small">provider key prefixes, <code>Authorization: Bearer</code>, <code>NAME=value</code> credential lines all redact per spec.md; tests assert both "<code>[REDACTED]</code> present" and "secret absent"</div></div>
-    <div class="card"><div class="label">Redact-before-truncate ordering</div><div class="value"><span class="status">real, mutation-tested</span></div><div class="small">confirmed at both call sites by grep; reverted the call at <code>RunCodeGate</code> myself, two tests failed, reverted cleanly</div></div>
-    <div class="card"><div class="label"><code>RunCodeGate.Command</code> leak</div><div class="value"><span class="status">fixed, verified</span></div><div class="small">the pre-merge fix (<code>b600915</code>) is real: <code>redact.Text(command)</code> now covers a secret embedded in the gate command itself, not just its output</div></div>
-    <div class="card"><div class="label">AKIA / AIza glued to trailing text</div><div class="value"><span class="status bad">unredacted — confirmed leak</span></div><div class="small">fixed-length patterns with a trailing <code>\b</code> silently fail to match when the key is immediately followed by more alphanumeric characters</div></div>
-    <div class="card"><div class="label">Agent-authored <code>envelope.json</code></div><div class="value"><span class="status bad">bypasses redaction entirely</span></div><div class="small">the <code>os.ReadFile(envelopePath)</code> success branch in <code>RunAgentPhase</code> never calls <code>redact.Text</code>/<code>redact.Truncate</code>; undisclosed in proposal.md</div></div>
-    <div class="card"><div class="label">Scope discipline</div><div class="value"><span class="status">held</span></div><div class="small">no config field added, <code>dag/engine.go</code> and <code>cmd.Env</code> lines untouched, no retention/deletion logic, no historical rows modified</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">11/11 packages pass</span></div><div class="small"><code>go test ./internal/... -count=1</code>, all packages green including the two new tests this commit adds</div></div>
+    <div class="card"><div class="label">Gap 1 — AKIA/AIza glued suffix</div><div class="value"><span class="status">fixed, verified</span></div><div class="small">trailing <code>\b</code> removed, floor changed to <code>{16,}</code>/<code>{35,}</code>; Review 014's exact repro now redacts</div></div>
+    <div class="card"><div class="label">Gap 2 — agent-envelope bypass</div><div class="value"><span class="status">fixed, verified</span></div><div class="small"><code>redact.Text(env.Summary)</code> and <code>redact.JSON(env.Payload)</code> now run unconditionally after either envelope-construction branch, confirmed at both branches and in persisted store rows</div></div>
+    <div class="card"><div class="label">Gap 1 edge cases</div><div class="value"><span class="status">no new leak</span></div><div class="small">glued AKIA-to-AKIA over-matches into one placeholder (safe, no leaked bytes); underscore-delimited suffix correctly left outside the match</div></div>
+    <div class="card"><div class="label">Gap 2 nested-array case</div><div class="value"><span class="status">redacted correctly</span></div><div class="small">secret inside an array inside an object inside the agent-authored payload is redacted in the returned envelope, <code>PhaseRecord.Payload</code>, and <code>EnvelopeRecord.Data</code></div></div>
+    <div class="card"><div class="label">Third gap, same family</div><div class="value"><span class="status bad">found — confirmed leak</span></div><div class="small"><code>RunCodeGate</code>'s <code>PhaseRecord.Error</code> field embeds raw, unredacted, unbounded gate stdout/stderr when the gate fails — a third call site never wired to <code>redact</code></div></div>
+    <div class="card"><div class="label">Mutation test (my own)</div><div class="value"><span class="status">real, confirmed</span></div><div class="small">commented out the two new redact calls in <code>RunAgentPhase</code>; <code>TestAgentAuthoredEnvelopeIsRedacted</code> failed on all 5 assertions; restored exactly, <code>git diff</code> empty afterward</div></div>
   </div>
-  <p><strong>Verdict:</strong> MEETS SPEC WITH CAVEATS. Every scenario literally named in
-  <code>specs/output-redaction/spec.md</code> — which scopes itself to "captured agent and gate output," i.e.
-  the <code>raw_output</code>/<code>Output</code> fields this bullet's two call sites touch — is implemented and
-  covered by tests that check the specific guarantee, not a generic truthiness check. But I found two genuine,
-  reproducible gaps beyond that literal scope: a regex boundary bug that leaves two of the eight named provider
-  key shapes completely unredacted in a plausible glued-text case, and a complete, untested, undisclosed
-  redaction bypass on a second real code path that carries exactly the kind of content R4.4 is about. Neither
-  is covered by any test in this diff. See findings below for exact reproductions.</p>
+  <p><strong>Verdict:</strong> MEETS SPEC WITH CAVEATS. Both gaps named in Review 014 are genuinely closed, independently
+  reproduced and mutation-tested by me. But the same "wired only some call sites" pattern — now flagged for the third
+  time across two consecutive reviews of this one bullet's lineage — recurs in a fourth place:
+  <code>RunCodeGate</code>'s failure-path <code>Error</code> string, and a fifth, weaker instance in
+  <code>internal/ui/server.go</code>'s create-PR envelope. See findings below for exact reproductions.</p>
 </section>
 
 <section>
   <h2>What I inspected</h2>
   <table>
     <tr><th>Area</th><th>Method</th></tr>
-    <tr><td>The merge itself</td><td><code>git show 3c09daa</code>, <code>git diff b012091..3c09daa</code> — read the real diff (4 files, 440 insertions, 3 deletions), not the commit message</td></tr>
-    <tr><td>Governing docs</td><td>Read <code>proposal.md</code>, <code>design.md</code>, <code>specs/output-redaction/spec.md</code>, and <code>tasks.md</code> in full under <code>openspec/changes/captured-output-is-redacted-and-bounded/</code></td></tr>
-    <tr><td><code>internal/redact/redact.go</code></td><td>Read <code>Text</code> and <code>Truncate</code> directly: <code>apiKeyPattern</code> (no leading <code>\b</code>, per its own doc comment, to catch secrets glued to preceding text), <code>bearerPattern</code>, <code>credentialLinePattern</code> (line-anchored, <code>(?im)^NAME=value$</code>)</td></tr>
-    <tr><td>Existing test quality</td><td>Read all of <code>redact_test.go</code>: every case checks <code>!strings.Contains(got, secret)</code> AND <code>strings.Contains(got, "[REDACTED]")</code> together, plus a same-placeholder check and a redact-then-truncate boundary test — genuinely specific, not generic truthiness</td></tr>
-    <tr><td>My own edge-case probe</td><td>Wrote a throwaway <code>_test.go</code> file (removed after, confirmed by <code>git status</code>) exercising 20+ inputs not in the shipped suite: secrets glued into JSON, URLs, quoted strings, shell <code>export</code> lines, multiple secrets per line, and secrets glued directly to trailing alphanumeric text on both sides</td></tr>
-    <tr><td>Call-site wiring in <code>internal/runner/runner.go</code></td><td><code>grep -n "redact\."</code>: <code>RunCodeGate</code> (lines 246, 251) and <code>RunAgentPhase</code> (line 464) both compute <code>redact.Truncate(redact.Text(stripANSI(...)), maxRawOutputBytes)</code> in that literal order, matching design.md's specified composition exactly</td></tr>
-    <tr><td><code>RunAgentPhase</code>'s agent-authored-envelope branch</td><td>Read lines 447–471 in full: when <code>os.ReadFile(envelopePath)</code> succeeds and the phase did not fail, <code>env</code> is populated entirely from <code>json.Unmarshal(data, &env)</code> with no call to <code>redact.Text</code>/<code>redact.Truncate</code> anywhere on that path or afterward (<code>annotatePayloadWithProvenance</code> only merges <code>model</code>/<code>provider</code> keys, it does not redact)</td></tr>
-    <tr><td>Confirming the envelope-bypass leak</td><td>Wrote and ran a throwaway test: a fake agent writes <code>.sergeant/envelope.json</code> with a real <code>sk-…</code> secret in its payload, then calls <code>RunAgentPhase</code> and inspects the returned envelope plus the persisted <code>PhaseRecord</code>/<code>EnvelopeRecord</code> rows; removed the file after (confirmed by <code>git status</code>)</td></tr>
-    <tr><td>Full suite</td><td><code>go build ./... && go vet ./... && go test ./internal/... -count=1</code> from the current <code>v2</code> working tree at HEAD <code>3c09daa</code></td></tr>
-    <tr><td>Mutation test on <code>RunCodeGate</code></td><td>Changed <code>cleaned := redact.Truncate(redact.Text(stripANSI(outBuf.String())), maxRawOutputBytes)</code> to <code>cleaned := stripANSI(outBuf.String())</code>; reran <code>TestRunCodeGateRedactsSecretsFromPersistedRecords</code> and <code>TestRunCodeGateBoundsOutputSize</code>; reverted with an <code>Edit</code> restoring the exact original text; confirmed <code>git diff internal/runner/runner.go</code> is empty afterward</td></tr>
-    <tr><td>Scope discipline</td><td><code>git diff b012091..3c09daa --stat -- internal/dag/engine.go</code> (empty); grepped the diff for <code>cmd.Env</code> (zero hits — untouched); grepped the diff for <code>internal/config</code> changes (none); grepped the whole diff for <code>retention</code>/<code>delete</code>/<code>ttl</code> (zero hits)</td></tr>
+    <tr><td>Prior review's claims</td><td>Read Review 014 in full via <code>git show c8921da -- progress.html</code> and the current file at that commit; did not assume either finding was real without reproducing it myself first</td></tr>
+    <tr><td>The fix commit itself</td><td><code>git show 3c95c1b</code> — read the full diff (4 files, 185 insertions), not the commit message</td></tr>
+    <tr><td><code>apiKeyPattern</code> after the fix</td><td>Read <code>internal/redact/redact.go</code>: confirmed <code>AKIA[A-Z0-9]{16,}</code> and <code>AIza[A-Za-z0-9_\-]{35,}</code> replace the old <code>{16}\b</code>/<code>{35}\b</code> forms — no leading or trailing <code>\b</code> on either alternative now, matching the other five prefixes' shape</td></tr>
+    <tr><td>Review 014's exact repro, rerun myself</td><td>Wrote a throwaway <code>_test.go</code> in <code>internal/redact</code> calling <code>Text("AKIAIOSFODNN7EXAMPLEXTRACHARS")</code> directly; removed the file after (confirmed by <code>git status --short</code>)</td></tr>
+    <tr><td>Edge cases not in the shipped suite</td><td>Same throwaway file: an AKIA key glued directly to a second AKIA key with no separator; an AKIA key glued to underscore-joined trailing text; two AKIA keys separated by one space; two AIza keys glued together; an under-floor AKIA-prefixed string</td></tr>
+    <tr><td><code>redact.JSON</code> and <code>redactValue</code></td><td>Read both in full: generic recursive walk over <code>string</code>/<code>[]interface{}</code>/<code>map[string]interface{}</code>/default, applying <code>Text</code> only to string leaves; malformed input returned unchanged</td></tr>
+    <tr><td>New call sites in <code>RunAgentPhase</code></td><td>Read runner.go lines ~470–480: <code>env.Summary = redact.Text(env.Summary)</code> and <code>env.Payload = redact.JSON(env.Payload)</code> sit immediately after the <code>if/else</code> that builds <code>env</code> from either branch — unconditional, so both the agent-authored-envelope branch and the synthesized-envelope branch pass through both calls</td></tr>
+    <tr><td>Agent-authored-envelope path, nested-array case</td><td>Wrote a throwaway test: fake agent writes <code>.sergeant/envelope.json</code> with a secret inside <code>payload.findings[0].note</code> (object inside array inside object); called <code>RunAgentPhase</code>; checked the returned envelope and read back <code>ListPhasesForRun</code>/<code>ListEnvelopesForRun</code> directly rather than trusting only the shipped test's own map-nested case; removed the file after (confirmed by <code>git status --short</code>)</td></tr>
+    <tr><td>Full suite</td><td><code>go build ./... && go vet ./... && go test ./internal/... -count=1</code> from the current <code>v2</code> working tree at HEAD <code>3c95c1b</code></td></tr>
+    <tr><td>Mutation test on gap 2's fix</td><td>Commented out both new lines (<code>env.Summary = redact.Text(env.Summary)</code> / <code>env.Payload = redact.JSON(env.Payload)</code>) in <code>internal/runner/runner.go</code>; reran <code>TestAgentAuthoredEnvelopeIsRedacted</code>; it failed on all 5 of its assertions (summary and payload leaked in the returned envelope, in <code>PhaseRecord.Payload</code>, and in <code>EnvelopeRecord.Data</code>); restored the exact original two lines via <code>Edit</code>; confirmed <code>git diff</code> empty</td></tr>
+    <tr><td>Search for a third gap in the same family</td><td><code>grep -n "RecordPhase\|RecordEnvelope\|Payload:\|Data:"</code> across <code>internal/runner/runner.go</code> and <code>internal/ui/server.go</code>; traced the provenance of every field feeding each call: <code>RunCodeGate</code>'s <code>GateResult</code> (built at runner.go:246–276), <code>RunAgentPhase</code>'s two branches, and both <code>RecordEnvelope</code> call sites in <code>server.go</code> (create-PR handler at line ~691, run-delivery handler at line ~1787)</td></tr>
+    <tr><td>Third-gap reproduction</td><td>Wrote a throwaway test: <code>RunCodeGate</code> with a command that echoes a secret and exits non-zero (<code>"echo 'AWS_CREDENTIAL="+secret+"'; exit 1"</code>); read the persisted <code>PhaseRecord.Error</code> field directly; removed the file after (confirmed by <code>git status --short</code>)</td></tr>
+    <tr><td><code>internal/ui/server.go</code>'s create-PR envelope</td><td>Read <code>handleCreatePR</code> and <code>runGHPRCreate</code>: <code>prError</code> is <code>strings.TrimSpace(string(out))</code> where <code>out</code> is <code>cmd.CombinedOutput()</code> from the real <code>gh pr create</code> subprocess, embedded verbatim into <code>EnvelopeRecord.Data</code>; confirmed <code>internal/ui/server.go</code> has zero references to <code>redact</code> anywhere (<code>grep -n "redact" internal/ui/server.go</code> — no hits)</td></tr>
   </table>
 </section>
 
@@ -99,202 +97,143 @@ a{color:var(--muted)}
   <h2>Findings</h2>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; <code>SealBulletForRun</code> is scoped to exactly one bullet, not the run's whole intent</h3>
-    <p>Design.md's stated reason for a new method instead of reusing <code>AdvanceBulletsForRun</code> — that
-    sealing is a per-repo fact, not a run-wide gate outcome — is genuinely implemented, not just asserted in a
-    comment. The function loops <code>ListBulletsForIntent</code>'s result and matches on <code>b.Repo ==
-    repo</code>, returning as soon as it finds (or refuses) that one bullet; it never calls
-    <code>UpdateBulletStatus</code> on any other bullet in the loop. <code>TestSealBulletForRunAffectsOnlyItsOwnRepoBullet</code>
-    proves this with a real multi-repo intent (<code>api</code> and <code>web</code> bullets), asserting the
-    <code>web</code> bullet is still <code>green</code> after sealing <code>api</code> — not merely that
-    sealing <code>api</code> succeeded.</p>
+    <h3><span class="sev low">verified</span> &nbsp; Gap 1 (AKIA/AIza glued-suffix miss) is genuinely fixed</h3>
+    <p>The new pattern drops the trailing <code>\b</code> and changes the fixed repetition counts
+    (<code>{16}</code>/<code>{35}</code>) to open-ended floors (<code>{16,}</code>/<code>{35,}</code>), exactly as
+    the commit message describes and exactly matching the shape the other five prefixes already used. I reran
+    Review 014's precise reproduction myself rather than trusting the shipped test:
+    <code>Text("AKIAIOSFODNN7EXAMPLEXTRACHARS")</code> now returns <code>"[REDACTED]"</code> — the full key no
+    longer leaks. The Google-key case behaves the same way. The two new tests in <code>redact_test.go</code>
+    (<code>TestTextRedactsProviderKeysGluedToTrailingText</code>) assert the same pairing this codebase's history
+    already established as the right one: secret absent <em>and</em> placeholder present, not a generic
+    truthiness check.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Refusal names the bullet's actual status, and writes nothing</h3>
-    <p>Both layers get this right and both are asserted specifically, not generically. At the store layer,
-    <code>SealBulletForRun</code>'s error text is
-    <code>fmt.Errorf("bullet %q for repo %q is %q, not green — refusing to seal", ...)</code>, and
-    <code>TestSealBulletForRunRefusesNonGreenBullets</code> checks <code>strings.Contains(err.Error(), status)</code>
-    for each of <code>pending</code>/<code>red</code>/<code>sealed</code>/<code>failed</code>, then re-reads the
-    bullet via <code>ListBulletsForIntent</code> to confirm its status did not change — a real no-write check, not
-    just "err != nil". At the HTTP layer, <code>TestCreatePRForNonGreenBulletIsRefusedAndNeverInvokesGH</code>
-    checks the same thing against the 409 response body. This is exactly the kind of specific assertion this
-    project's spec explicitly asked for (tasks.md: "assert this the same way this session has asserted 'no
-    subprocess invocation' elsewhere") and it is present, not skipped.</p>
+    <h3><span class="sev low">verified</span> &nbsp; Gap 1 edge cases: no new data loss, one cosmetic over-match</h3>
+    <p>I tried inputs not in the shipped suite. Two AKIA-shaped keys glued together with no separator
+    (<code>"AKIAIOSFODNN7EXAMPLEAKIAIOSFODNN7EXAMPLE2"</code>) collapse into a single <code>[REDACTED]</code>
+    rather than two — the greedy <code>{16,}</code> floor consumes both keys as one run of
+    <code>[A-Z0-9]</code> characters, since the embedded <code>AKIA</code> text is itself valid
+    <code>[A-Z0-9]</code>. This is over-matching, not a leak: no byte of either key survives in the output. It is
+    also the exact tradeoff the code's own doc comment accepts ("the rare over-match ... risks" is preferred to a
+    silent miss), so this is not a regression, just a confirmation the tradeoff is real and does not go further
+    than advertised. Two keys separated by a single space redact independently and correctly
+    (<code>"[REDACTED] [REDACTED]"</code>). A key glued to underscore-joined trailing text
+    (<code>"AKIAIOSFODNN7EXAMPLE_LOOKS_LIKE_MORE_KEY_DATA_HERE"</code>) redacts only up to the underscore, which is
+    correct — the underscore is not part of the key's own character class, so nothing past it was ever part of the
+    real secret. An under-floor string (<code>"AKIA1234"</code>, 4 chars after the prefix) is correctly left
+    untouched, matching the pre-existing 16/35-char minimum-length design.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The seal guard runs before <code>gh</code>, through a real dependency-injection seam, confirmed by my own mutation</h3>
-    <p><code>Server.GHPRCreate</code> is a genuine struct field (<code>func(repoPath, title, body, branch
-    string) ([]byte, error)</code>), defaulted in <code>NewServer</code> to the real subprocess call
-    (<code>runGHPRCreate</code>, a plain function wrapping <code>exec.Command("gh", "pr", "create", ...)</code>),
-    and <code>handleCreatePR</code> calls <code>srv.GHPRCreate(...)</code> rather than shelling out inline. This
-    is a real seam a test can substitute, not a status-code inference. I mutation-tested the ordering myself:
-    wrapped the <code>SealBulletForRun</code> guard block in <code>handleCreatePR</code> with <code>if false {
-    ... }</code>, disabling it entirely, and reran <code>TestCreatePRForNonGreenBulletIsRefusedAndNeverInvokesGH</code>
-    and <code>TestCreatePRForGreenBulletSucceedsAndSealsTheBullet</code>. Both failed exactly as expected: the
-    refusal test got HTTP 200 instead of 409 for all four non-green statuses (the request proceeded to create a
-    local worktree PR), and the seal-on-success test found the bullet still <code>green</code> instead of
-    <code>sealed</code> after a successful create-PR call. I reverted the exact original text and confirmed
-    <code>git diff</code> is empty afterward — this guard is load-bearing, not decorative.</p>
+    <h3><span class="sev low">verified</span> &nbsp; Gap 2 (agent-envelope redaction bypass) is genuinely fixed, on both branches</h3>
+    <p><code>env.Summary = redact.Text(env.Summary)</code> and <code>env.Payload = redact.JSON(env.Payload)</code>
+    sit immediately after the <code>if/else</code> that builds <code>env</code>, with no branch-specific
+    conditional around them — so both the agent-authored-envelope branch (<code>os.ReadFile</code> succeeds) and
+    the synthesized-envelope branch (the <code>else</code>) pass through both calls. This closes the gap the way
+    the commit message claims: "a future third envelope-construction path can't reintroduce the same gap by
+    omission" is accurate, since the calls are keyed to the shared <code>env</code> variable after the branch,
+    not duplicated inside each branch. <code>TestAgentAuthoredEnvelopeIsRedacted</code> genuinely exercises the
+    previously-broken branch (a fake agent script writes <code>.sergeant/envelope.json</code> itself) and checks
+    the returned envelope, <code>PhaseRecord.Payload</code>, and <code>EnvelopeRecord.Data</code> — I read
+    <code>ListPhasesForRun</code>/<code>ListEnvelopesForRun</code> myself rather than trusting the test file's own
+    assertions, and the persisted rows are genuinely clean.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; <code>gh pr create</code> is never invoked for a refused request, proven by a real call counter</h3>
-    <p><code>TestCreatePRForNonGreenBulletIsRefusedAndNeverInvokesGH</code> installs a stub on
-    <code>srv.GHPRCreate</code> that increments a local <code>ghCalls</code> counter and asserts
-    <code>ghCalls != 0</code> is a failure, for each of the four non-green statuses. This is precisely the
-    "recording wrapper... not just checking the HTTP status" tasks.md called for, and it is genuinely present —
-    not a weaker truthiness check that would still pass if the guard silently no-opped after invoking
-    <code>gh</code> anyway.</p>
+    <h3><span class="sev low">verified</span> &nbsp; Gap 2 holds at a nested-array depth not covered by the shipped test</h3>
+    <p>The shipped <code>TestJSONRedactsStringLeavesAtAnyDepth</code> covers a top-level string, a
+    map-nested string, and an array element, but not a string nested inside an object that is itself an element
+    of an array (a shape a real agent's structured findings would plausibly use). I wrote my own reproduction:
+    <code>payload.findings[0].note</code> holding a secret, with <code>findings</code> itself an array mixing an
+    object and a plain string. The result redacted correctly at every level:</p>
+    <pre>persisted EnvelopeRecord.Data = {"findings":[{"note":"leaked [REDACTED]"},"ordinary"],"model":"","provider":""}</pre>
+    <p>The plain-string array element (<code>"ordinary"</code>) survived untouched, confirming
+    <code>redactValue</code>'s recursion does not over-redact non-secret content at any depth.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; A successful seal is verified through the real listing endpoint, not internal state</h3>
-    <p><code>TestCreatePRForGreenBulletSucceedsAndSealsTheBullet</code> makes a real <code>POST
-    /api/create-pr</code> request, then makes a second real <code>GET /api/bullets?run_id=...</code> request and
-    decodes the JSON response to confirm the bullet reads back as <code>sealed</code>. This exercises the write
-    path and the read path as two independent real HTTP round-trips through the same <code>mux</code>, which is
-    stronger evidence than asserting against the store directly — a bug in <code>handleBullets</code>'s
-    intent-resolution logic would also be caught here, not just a bug in the write.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; <code>GET /api/bullets</code> matches every scenario in spec.md</h3>
-    <p>Missing <code>run_id</code> returns 400 (<code>TestGetBulletsWithoutRunIDIsRefused</code>). A run with no
-    intent id returns exactly <code>[]</code>, confirmed by an exact string comparison
-    (<code>strings.TrimSpace(w.Body.String()) != "[]"</code>) rather than just checking the response decodes —
-    this catches the specific bug class of returning literal <code>null</code>, which a naive
-    <code>var bullets []store.BulletRecord</code> would produce since Go's JSON encoder serializes a nil slice
-    as <code>null</code>. The handler avoids this correctly: it initializes <code>bullets :=
-    []store.BulletRecord{}</code> and only reassigns if the listed result is non-nil. One case is not
-    explicitly tested but I verified it by reading the code: an intent that exists but currently has zero
-    bullets. Because <code>ListBulletsForIntent</code> returns a nil slice for zero rows (its <code>var list
-    []BulletRecord</code> is never appended to), and <code>handleBullets</code> only overwrites the
-    pre-initialized empty slice when <code>listed != nil</code>, this case also correctly serializes to
-    <code>[]</code> — but no test exercises it, so a future refactor that removed the nil-guard would not be
-    caught by anything in this diff. Non-blocking: the current code is correct, only the test coverage for this
-    one path is thin.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Scope discipline held exactly as proposal.md's "Out of scope" section specifies</h3>
-    <p>The diff touches exactly 5 files, all under <code>internal/store</code> and <code>internal/ui</code>
-    (2 source files, 3 test files) — no <code>cmd/</code>, no dashboard HTML/JS/CSS, nothing else. A repo-wide
-    grep for <code>UnsealBullet</code> returns zero hits. A grep of the diff for notification-shaped terms
-    (<code>notif</code>, <code>slack</code>, <code>email</code>, <code>webhook</code>) returns zero hits. The
-    three existing references to the literal string <code>"merged"</code> in <code>internal/store/store.go</code>
-    (<code>BulletStatuses</code>, <code>BulletProgression</code>, and one unrelated check) are all outside this
-    diff's changed line ranges — confirmed by <code>git diff</code> showing no <code>+</code>/<code>-</code>
-    lines touching any of them. D5's interruptions (a) and (b) are explicitly and correctly left unimplemented,
-    matching the proposal's own stated reasoning (no existing hook point for either).</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; All three named pattern classes redact correctly, with specific test assertions</h3>
-    <p><code>redact.Text</code> correctly handles every scenario spec.md names: provider key prefixes
-    (<code>sk-</code>, <code>ghp_</code>/<code>gho_</code>/<code>ghu_</code>/<code>ghs_</code>/<code>ghr_</code>,
-    <code>AKIA</code>, <code>AIza</code>, <code>xox[bpoa]-</code>), an <code>Authorization: Bearer</code> header
-    (keeping the header name, replacing only the token), and a <code>NAME=value</code> credential-shaped line
-    (keeping <code>NAME</code>, replacing only <code>value</code>). <code>redact_test.go</code>'s assertions are
-    genuinely specific, not generic truthiness: every case checks <code>!strings.Contains(got, secret)</code>
-    <em>and</em> <code>strings.Contains(got, "[REDACTED]")</code> together, which is exactly the pairing this
-    project's own history flags as commonly missing. A dedicated test also confirms the placeholder never
-    encodes which pattern matched (no <code>REDACTED:</code>/<code>REDACTED_</code> variants).</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Redaction runs before truncation at both real call sites, confirmed by my own mutation</h3>
-    <p>Both <code>RunCodeGate</code> (runner.go:246) and <code>RunAgentPhase</code> (runner.go:464) compute
-    <code>redact.Truncate(redact.Text(stripANSI(outBuf.String())), maxRawOutputBytes)</code> in that literal
-    order — this is not just true of the pure functions in isolation, it is the actual composed call at both
-    real production call sites. I mutation-tested <code>RunCodeGate</code> myself: reverted its line to
-    <code>cleaned := stripANSI(outBuf.String())</code> (dropping redaction and truncation entirely), reran
-    <code>TestRunCodeGateRedactsSecretsFromPersistedRecords</code> and <code>TestRunCodeGateBoundsOutputSize</code>,
-    and both failed exactly as expected — the persisted <code>PhaseRecord.Payload</code> contained the raw
-    <code>AKIAIOSFODNN7EXAMPLE</code> secret verbatim, and a 200KB gate output was stored unbounded. Reverted the
-    exact original line; <code>git diff</code> confirmed empty afterward.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; <code>RunCodeGate.Command</code>'s pre-merge fix is real</h3>
-    <p>The commit history shows this bullet caught its own gap before merging: an intermediate commit
-    (<code>9f4d0be</code>) stored <code>Command: command</code> verbatim, and a follow-up fix
-    (<code>b600915</code>) changed it to <code>Command: redact.Text(command)</code>. I confirmed this is the
-    code that actually shipped, and that <code>TestRunCodeGateRedactsSecretsFromPersistedRecords</code>
-    genuinely exercises it: the test's fake gate command is
-    <code>"echo 'AWS_CREDENTIAL=" + secret + "'"</code> — the secret sits inside the <code>Command</code> string
-    itself, not only in what the command prints — and the test's <code>strings.Contains(payload, secret)</code>
-    check covers the whole marshaled <code>GateResult</code>, catching a regression in either field.</p>
+    <h3><span class="sev low">verified</span> &nbsp; Both fixes hold under my own mutation tests</h3>
+    <p>I did not just read the diff and trust it. For gap 2, I commented out the two new redact calls in
+    <code>internal/runner/runner.go</code> and reran <code>TestAgentAuthoredEnvelopeIsRedacted</code>: it failed
+    on every one of its five assertions (returned <code>Summary</code>, returned <code>Payload</code>, persisted
+    <code>PhaseRecord.Payload</code>, persisted <code>EnvelopeRecord.Data</code>), with the raw
+    <code>sk-…</code> secret visible in each. I then restored the exact original two lines via <code>Edit</code>
+    and confirmed <code>git diff</code> was empty before moving on. This is the same discipline Review 014
+    applied to <code>RunCodeGate</code>'s ordering and it holds up the same way here: the fix is load-bearing,
+    not decorative.</p>
   </div>
 
   <div class="item bad">
-    <h3><span class="sev med">bad</span> &nbsp; <code>AKIA</code>/<code>AIza</code> keys glued to trailing alphanumeric text are not redacted at all</h3>
-    <p><code>apiKeyPattern</code>'s doc comment explains that the leading <code>\b</code> was deliberately
-    dropped so a secret glued to <em>preceding</em> non-whitespace text still matches — and that fix (from
-    <code>b600915</code>) genuinely works; I confirmed it with my own probe inputs like
-    <code>"xsk-abc...NOPx"</code> and <code>{"key":"sk-abc...NOP"}</code>, all correctly redacted. But two of the
-    eight named prefixes, <code>AKIA[A-Z0-9]{16}\b</code> and <code>AIza[A-Za-z0-9_\-]{35}\b</code>, still carry
-    a <em>trailing</em> <code>\b</code> with a fixed repetition count. When a real key is immediately followed
-    by more alphanumeric characters with no delimiter, the regex requires a word-boundary transition that does
-    not exist at that position, and — because the count is fixed rather than open-ended — the engine cannot
-    back off to a shorter match either. The result is a complete miss, not a partial one.</p>
-    <p>Exact reproduction (run in <code>internal/redact</code>, calling the unexported <code>Text</code>):</p>
-    <pre>Text("AKIAIOSFODNN7EXAMPLEXTRACHARS")
-// output: "AKIAIOSFODNN7EXAMPLEXTRACHARS"  (unchanged — the full AWS key leaks verbatim)
-
-Text("AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWYEXTRACHARS")
-// output: "AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWYEXTRACHARS"  (unchanged)</pre>
-    <p>By contrast the other six prefixes (<code>sk-</code>, <code>gh[oprsu]_</code>, <code>xox[bpoa]-</code>)
-    use open-ended <code>{20,}</code>/<code>{10,}</code> quantifiers with no trailing <code>\b</code>, so the
-    same glued-suffix shape redacts correctly for them (over-redacting the trailing junk along with the key,
-    which is safe). This is a narrow but real and reproducible gap in exactly the class of input ("no separator
-    ... glued directly to adjacent non-whitespace text") the design doc's own comment says it set out to
-    close — it only closed the leading side for these two prefixes, not the trailing side.</p>
+    <h3><span class="sev med">bad</span> &nbsp; A third call site in the same family: <code>RunCodeGate</code>'s <code>PhaseRecord.Error</code> leaks raw, unredacted, unbounded gate output on failure</h3>
+    <p><code>RunCodeGate</code> (runner.go, ~line 259–276) builds <code>errStr</code> only when the gate command
+    fails:</p>
+    <pre>if !passed {
+    status = "failed"
+    if err != nil {
+        errStr = fmt.Sprintf("%v: %s", err, outBuf.String())
+    }
+}
+...
+phaseRec := &store.PhaseRecord{
+    ...
+    Error:      errStr,
+    ...
+}</pre>
+    <p><code>outBuf.String()</code> here is the raw command output — the same buffer that, three lines earlier,
+    is correctly passed through <code>redact.Truncate(redact.Text(stripANSI(outBuf.String())), maxRawOutputBytes)</code>
+    to build <code>cleaned</code>/<code>result.Output</code>. <code>errStr</code> is built from the same buffer a
+    second time, independently, with none of that processing applied — no <code>redact.Text</code>, no
+    <code>redact.Truncate</code>, no <code>stripANSI</code>. It is then stored directly into
+    <code>PhaseRecord.Error</code>, a field the store persists and the API/dashboard exposes
+    (<code>store.PhaseRecord.Error string \`json:"error,omitempty"\`</code>). This is exactly the same shape of
+    bug as both of Review 014's findings and this commit's own fix: a codepath sergeant did not build
+    field-by-field for the "safe" field, so it never received the same treatment as its sibling. The existing
+    test, <code>TestRunCodeGateRedactsSecretsFromPersistedRecords</code>, cannot catch this: its gate command is
+    <code>"echo 'AWS_CREDENTIAL="+secret+"'"</code> with no <code>exit 1</code>, so the gate always passes and
+    <code>errStr</code> is never populated in that test at all.</p>
+    <p>I confirmed this is a real, reproducible leak with a throwaway test (a gate command that echoes a secret
+    and then exits non-zero, exactly the shape of a test suite or lint tool that dumps an environment variable in
+    its failure output):</p>
+    <pre>res, _ := pr.RunCodeGate(ctx, "failing-gate", "echo 'AWS_CREDENTIAL="+secret+"'; exit 1")
+phases, _ := st.ListPhasesForRun("run-1")
+// phases[0].Error == "exit status 1: AWS_CREDENTIAL=AKIAIOSFODNN7EXAMPLE\n"
+//                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ raw secret, unredacted, unbounded</pre>
+    <p>Unlike <code>result.Output</code>, <code>errStr</code> is also never truncated — a failing gate that
+    produces megabytes of output before exiting non-zero would persist all of it into <code>PhaseRecord.Error</code>
+    with no <code>maxRawOutputBytes</code> bound at all, which is the same unbounded-storage risk R4.5 already
+    named and fixed for the sibling field.</p>
   </div>
 
-  <div class="item bad">
-    <h3><span class="sev high">bad</span> &nbsp; Agent-authored <code>envelope.json</code> completely bypasses redaction — undisclosed in proposal.md</h3>
-    <p><code>RunAgentPhase</code> has two ways to build the envelope it persists: synthesize one from
-    <code>outBuf</code> (the branch this bullet correctly redacts), or read one the agent wrote itself at
-    <code>.sergeant/envelope.json</code> (runner.go:447–451, taken whenever the file exists and the phase did
-    not fail). The second branch is <code>_ = json.Unmarshal(data, &env)</code> — nothing between that call and
-    the writes to <code>EnvelopeRecord.Data</code> and <code>PhaseRecord.Payload</code> touches
-    <code>redact.Text</code> or <code>redact.Truncate</code> at all. This is the exact mechanism the plan-file
-    progress-reporting feature (<code>planPromptExtension</code>, wired earlier this session) instructs agents
-    to use, so it is a live, reachable path, not a hypothetical one.</p>
-    <p>I confirmed the leak directly with a throwaway test: a fake agent script writes
-    <code>.sergeant/envelope.json</code> containing <code>{"payload":{"raw_output":"API_KEY=sk-abc...NOP"}}</code>,
-    then <code>RunAgentPhase</code> is called normally.</p>
-    <pre>env.Payload = {"model":"","provider":"","raw_output":"API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP"}
-// same raw secret also present verbatim in the persisted PhaseRecord.Payload
-// and in the persisted EnvelopeRecord.Data — neither field passes through redact.Text</pre>
-    <p>proposal.md's problem statement is built entirely around an agent taking a plausible, legitimate-looking
-    action (running <code>env</code>, <code>git remote -v</code>, or <code>cat</code>-ing a <code>.env</code>
-    file) and that content ending up unredacted in a durable record. An agent that reports that same content
-    through its own <code>envelope.json</code> instead of stdout hits exactly this gap, and the gap is not named
-    anywhere in proposal.md's "Out of scope" section — which lists subprocess env inheritance, the
-    metadata/content schema split, retention policy, and retroactive redaction as the accepted gaps, but says
-    nothing about this second envelope-construction path. tasks.md's own instruction is scoped narrowly enough
-    to explain why: it names only "the <code>raw_output</code>: <code>stripANSI(outBuf.String())</code> map
-    entry" in <code>RunAgentPhase</code>, i.e. the synthesized branch specifically, so the code is not in
-    violation of the literal task text — but the requirement text (R4.4: "must not retain credentials, tokens,
-    ... in logs, records, responses") and the spec's stated intent are not met on this path, and no test in this
-    diff (including the new <code>TestAgentAuthoredEnvelopeStillGetsProvenance</code>, which uses only
-    <code>{"custom":"value"}</code> as its payload) would ever catch a secret placed here.</p>
+  <div class="item warn">
+    <h3><span class="sev low">weaker instance, same family</span> &nbsp; <code>internal/ui/server.go</code>'s create-PR envelope embeds raw <code>gh</code> subprocess output unredacted</h3>
+    <p><code>handleCreatePR</code> calls <code>srv.GHPRCreate</code> (default implementation
+    <code>runGHPRCreate</code>, <code>cmd.CombinedOutput()</code> of a real <code>gh pr create</code> subprocess).
+    On failure, <code>prError := strings.TrimSpace(string(out))</code> is embedded directly into
+    <code>EnvelopeRecord.Data</code> via <code>fmt.Sprintf(...%q...)</code>, with no call to
+    <code>redact.Text</code> anywhere — I confirmed <code>internal/ui/server.go</code> has zero references to the
+    <code>redact</code> package at all. This is a weaker finding than the <code>RunCodeGate</code> one: <code>gh</code>
+    CLI error output is less likely than a project's own test/lint output to echo a credential, and I did not
+    construct a live reproduction (doing so would require a real or faked <code>gh</code> binary). I'm flagging
+    it because it fits the same provenance shape the task asked me to check for — durable content originating
+    from an external process, not synthesized by sergeant — and because <code>gh</code> failures routinely
+    include the value of malformed <code>--body</code>/<code>--title</code> arguments or auth diagnostics that
+    can carry a token in less common configurations (e.g. a misconfigured <code>GH_TOKEN</code> echoed in an
+    error). Non-blocking on its own, but it belongs on the same list as the <code>RunCodeGate.Error</code> finding
+    above rather than being treated as a one-off.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Scope discipline held exactly as proposal.md and tasks.md specify</h3>
-    <p>The diff touches exactly 4 files (2 source, 2 test), all under <code>internal/redact</code> and
-    <code>internal/runner</code>. <code>maxRawOutputBytes</code> is a package-level Go constant, not a config
-    field — <code>git diff b012091..3c09daa -- internal/config</code> is empty. <code>internal/dag/engine.go</code>
-    is untouched by this diff. Every <code>cmd.Env = append(os.Environ(), ...)</code> line in both
-    <code>internal/runner</code> and <code>internal/dag/engine.go</code> is unchanged — grepped the diff for
-    <code>cmd.Env</code> and found zero hits. No retention or deletion logic was added (grepped the diff for
-    <code>retention</code>/<code>delete</code>/<code>ttl</code>, zero hits), and nothing in this diff touches how
-    historical rows are read or written — the change only affects what gets written going forward.</p>
+    <h3><span class="sev low">verified</span> &nbsp; Scope discipline held</h3>
+    <p>The commit touches exactly 4 files (2 source, 2 test), all under <code>internal/redact</code> and
+    <code>internal/runner</code>. No config field was added for either fix. <code>annotatePayloadWithProvenance</code>
+    is unchanged and still runs after the new redact calls, so provenance metadata (<code>model</code>/<code>provider</code>)
+    is added to an already-redacted payload rather than the other way around — the ordering is correct, since
+    provenance values are not secret-shaped and redacting them would be meaningless, but it does mean a
+    provenance annotation added after redaction is never itself scanned; I checked and <code>model</code>/<code>provider</code>
+    values come only from <code>detectModelProvider</code>'s own regex capture groups against a fixed banner
+    shape, not from arbitrary agent-controlled text, so this is not a gap.</p>
   </div>
 
 </section>
@@ -304,60 +243,66 @@ Text("AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWYEXTRACHARS")
   <table>
     <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
     <tr><td>Build/vet/test clean at current <code>v2</code> HEAD</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 11/11 packages</td></tr>
-    <tr><td>All three named pattern classes redact correctly</td><td>read <code>redact.go</code>'s three regexes; ran <code>go test ./internal/redact/... -v</code></td><td>pass; every case asserts secret-absent AND placeholder-present together</td></tr>
-    <tr><td>Redaction runs before truncation, at both real call sites</td><td><code>grep -n "redact\." internal/runner/runner.go</code>; mutation-tested <code>RunCodeGate</code> by reverting its line to <code>stripANSI</code> only, reran <code>TestRunCodeGateRedactsSecretsFromPersistedRecords</code>/<code>TestRunCodeGateBoundsOutputSize</code>, reverted</td><td>both call sites compose <code>redact.Truncate(redact.Text(stripANSI(...)), maxRawOutputBytes)</code>; both tests failed with the mutation (raw secret + unbounded output persisted), then passed again after revert; <code>git diff</code> confirmed empty</td></tr>
-    <tr><td><code>RunCodeGate.Command</code> field no longer leaks</td><td>read the <code>b600915</code> fix (<code>Command: redact.Text(command)</code>); <code>TestRunCodeGateRedactsSecretsFromPersistedRecords</code> embeds the secret inside the command string itself</td><td>pass; the marshaled <code>GateResult</code>'s <code>command</code> field is redacted, not just <code>output</code></td></tr>
-    <tr><td><code>AKIA</code>/<code>AIza</code> glued to trailing alphanumeric text</td><td>my own throwaway probe: <code>redact.Text("AKIAIOSFODNN7EXAMPLEXTRACHARS")</code> and <code>redact.Text("AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWYEXTRACHARS")</code></td><td><strong>fails</strong>: both inputs returned completely unchanged, full raw key leaked</td></tr>
-    <tr><td>Agent-authored <code>envelope.json</code> bypasses redaction</td><td>my own throwaway test: fake agent writes <code>.sergeant/envelope.json</code> with <code>payload.raw_output</code> containing a real <code>sk-…</code> secret, calls <code>RunAgentPhase</code>, inspects the returned envelope and the persisted <code>PhaseRecord</code>/<code>EnvelopeRecord</code> rows</td><td><strong>fails</strong>: secret present verbatim in all three (returned envelope, <code>PhaseRecord.Payload</code>, <code>EnvelopeRecord.Data</code>)</td></tr>
-    <tr><td>No scope creep (config field, <code>dag/engine.go</code>, <code>cmd.Env</code>, retention/deletion)</td><td><code>git diff b012091..3c09daa --stat -- internal/dag/engine.go</code> and <code>-- internal/config</code>; grep the diff for <code>cmd.Env</code>, <code>retention</code>/<code>delete</code>/<code>ttl</code></td><td>zero hits on every scope-creep check; only 4 files changed, all under <code>internal/redact</code> and <code>internal/runner</code></td></tr>
+    <tr><td>Gap 1 fixed: Review 014's exact repro</td><td><code>redact.Text("AKIAIOSFODNN7EXAMPLEXTRACHARS")</code> and the AIza equivalent, run directly via a throwaway test</td><td>pass — both now return <code>"[REDACTED]"</code>, no raw key survives</td></tr>
+    <tr><td>Gap 1 edge cases: no new leak</td><td>throwaway probe: glued AKIA-to-AKIA, underscore-delimited suffix, space-separated pair, glued AIza-to-AIza, under-floor string</td><td>no unredacted secret bytes in any case; one benign over-match (two glued keys collapse to one placeholder) matching the code's documented tradeoff</td></tr>
+    <tr><td>Gap 2 fixed: agent-authored branch, both store rows</td><td><code>TestAgentAuthoredEnvelopeIsRedacted</code> read directly plus my own <code>ListPhasesForRun</code>/<code>ListEnvelopesForRun</code> inspection</td><td>pass — secret absent, placeholder present in returned envelope, <code>PhaseRecord.Payload</code>, and <code>EnvelopeRecord.Data</code></td></tr>
+    <tr><td>Gap 2 holds at array-nested depth</td><td>throwaway test: secret inside <code>payload.findings[0].note</code>, an object inside an array inside an object</td><td>pass — redacted at every level, non-secret array element untouched</td></tr>
+    <tr><td>Gap 2 fix is load-bearing (mutation test)</td><td>commented out <code>env.Summary = redact.Text(...)</code> / <code>env.Payload = redact.JSON(...)</code>; reran <code>TestAgentAuthoredEnvelopeIsRedacted</code>; restored exactly</td><td>test failed on all 5 assertions with the mutation; passed again after restore; <code>git diff</code> confirmed empty</td></tr>
+    <tr><td>Third gap: <code>RunCodeGate.Error</code> leaks on failure</td><td>throwaway test: failing gate command that echoes a secret, read <code>PhaseRecord.Error</code> back from the store</td><td><strong>fails</strong>: <code>phases[0].Error == "exit status 1: AWS_CREDENTIAL=AKIAIOSFODNN7EXAMPLE\n"</code>, raw secret persisted, also unbounded (no <code>maxRawOutputBytes</code> applied)</td></tr>
+    <tr><td>Fourth instance: create-PR envelope in <code>server.go</code></td><td>read <code>handleCreatePR</code>/<code>runGHPRCreate</code>; grepped <code>internal/ui/server.go</code> for <code>redact</code></td><td>zero hits — <code>prError</code> (raw <code>gh</code> subprocess output) is never redacted before <code>EnvelopeRecord.Data</code>; not independently reproduced with a live <code>gh</code> failure</td></tr>
+    <tr><td>No scope creep in the fix commit</td><td><code>git show 3c95c1b --stat</code></td><td>4 files changed, all under <code>internal/redact</code> and <code>internal/runner</code>; no config field added</td></tr>
   </table>
 </section>
 
 <section>
   <h2>Verdict</h2>
   <div class="item warn">
-    <p><strong>MEETS SPEC WITH CAVEATS.</strong> Every scenario literally named in
-    <code>specs/output-redaction/spec.md</code> is implemented and correctly tested: the three named pattern
-    classes redact while leaving surrounding text and NAME/header-name intact, truncation is bounded with a
-    visible marker, and redaction demonstrably runs before truncation at both real call sites — I confirmed the
-    ordering myself with a mutation test on <code>RunCodeGate</code>, not just by reading the source. The
-    pre-merge fix to <code>RunCodeGate.Command</code> (which the commit message credits to the dispatched
-    agent's own tests) is real and is itself exercised by a test that embeds the secret in the command string,
-    not only in its output. Scope discipline is complete: no config field for the size limit or patterns, no
-    changes to <code>internal/dag/engine.go</code> or any <code>cmd.Env</code> line, no retention/deletion
-    logic, no modification of historical rows.</p>
-    <p>Two caveats keep this from a clean "genuinely met," both with concrete reproductions above and neither
-    caught by any test in this diff. First: <code>AKIA</code> and <code>AIza</code>, two of the eight named
-    provider-key shapes, use a fixed-length pattern with a trailing <code>\b</code> that silently fails to match
-    when the real key is glued directly to more alphanumeric text with no delimiter — the full raw key then
-    leaks verbatim. This is the same class of boundary bug the pre-merge fix (<code>b600915</code>) explicitly
-    set out to close, but that fix only addressed the leading side for these two prefixes; the trailing side was
-    missed. Second, and more significant: <code>RunAgentPhase</code>'s agent-authored-<code>envelope.json</code>
-    branch — a live, reachable path already used by this session's own plan-file progress-reporting mechanism —
-    never calls <code>redact.Text</code> or <code>redact.Truncate</code> at all, so a secret an agent includes
-    in its own envelope payload is persisted to both <code>PhaseRecord.Payload</code> and
-    <code>EnvelopeRecord.Data</code> completely unredacted. This is not a violation of tasks.md's literal text,
-    which names only the synthesized-envelope <code>raw_output</code> map entry — but it is squarely within
-    R4.4's actual requirement text and proposal.md's own stated threat model (an agent's plausible, legitimate-
-    looking action putting secret content into a durable record), and proposal.md's "Out of scope" section does
-    not mention this second envelope-construction path at all. It is an undisclosed gap, not an accepted one.</p>
+    <p><strong>MEETS SPEC WITH CAVEATS.</strong> Both gaps Review 014 identified are genuinely, independently
+    verified as fixed. Gap 1 (<code>AKIA</code>/<code>AIza</code> glued-suffix miss): I reran Review 014's exact
+    reproduction myself and it now redacts correctly, and I could not find any new leak in several edge cases
+    beyond the shipped test suite — the only surprising behavior (two glued keys collapsing into one placeholder)
+    is a benign over-match, not a data loss, and matches the code's own documented tradeoff. Gap 2
+    (agent-authored-envelope bypass): the two new redact calls in <code>RunAgentPhase</code> run unconditionally
+    after either envelope-construction branch, so both the previously-broken branch and the always-correct branch
+    are covered; I verified this holds at a nested-array depth the shipped test does not exercise, checked the
+    actual persisted <code>PhaseRecord</code>/<code>EnvelopeRecord</code> rows myself rather than trusting the
+    test file's assertions, and confirmed the fix is load-bearing by reverting it, watching the shipped test fail
+    on all five of its assertions, and restoring the exact original text.</p>
+    <p>The caveat is a third instance of the exact same failure pattern, found by doing what Review 014's own
+    text warned would be necessary: exhaustively tracing every <code>RecordPhase</code>/<code>RecordEnvelope</code>
+    call site rather than assuming the two known gaps were the only ones. <code>RunCodeGate</code> builds its
+    <code>result.Output</code> field correctly, through <code>redact.Truncate(redact.Text(stripANSI(...)),
+    maxRawOutputBytes)</code> — but on gate failure it independently rebuilds an <code>errStr</code> from the
+    same raw output buffer a second time, with none of that processing applied, and persists it verbatim and
+    unbounded into <code>PhaseRecord.Error</code>. I reproduced this directly: a failing gate command that echoes
+    a secret leaves that secret, in full, in the store. A fourth, weaker instance sits in
+    <code>internal/ui/server.go</code>'s create-PR handler, which embeds raw <code>gh pr create</code> subprocess
+    output into <code>EnvelopeRecord.Data</code> with zero references to the <code>redact</code> package anywhere
+    in that file — not independently reproduced with a live failure, but the same provenance shape (external
+    process output reaching a durable record unfiltered) the task asked to be checked for. This exact "wired only
+    some call sites, not the sibling field/file" pattern has now recurred three times across two consecutive
+    reviews of this one bullet's lineage, which suggests the underlying risk is systemic rather than incidental:
+    any future redaction fix in this codebase should be paired with an exhaustive
+    <code>RecordPhase</code>/<code>RecordEnvelope</code> grep across the whole binary, not just the file the
+    previous finding lived in.</p>
   </div>
 </section>
 
 <footer>
-  <p class="meta">Review 014 · findings above are reproduced from commands run directly against the current
-  <code>v2</code> working tree at HEAD <code>3c09daa</code> (no worktree needed; nothing was left uncommitted).
-  One mutation was applied and reverted in place: <code>RunCodeGate</code>'s
-  <code>cleaned := redact.Truncate(redact.Text(stripANSI(outBuf.String())), maxRawOutputBytes)</code> line in
-  <code>internal/runner/runner.go</code> was reverted to <code>cleaned := stripANSI(outBuf.String())</code>;
-  <code>TestRunCodeGateRedactsSecretsFromPersistedRecords</code> and <code>TestRunCodeGateBoundsOutputSize</code>
-  were rerun and both failed as predicted (raw secret persisted; output left unbounded); the exact original
-  line was then restored via <code>Edit</code>. <code>git diff</code> and a clean full test run confirmed no
-  residual changes before this review was written. Two throwaway probe test files (one in
-  <code>internal/redact</code> exercising edge-case inputs, one in <code>internal/runner</code> confirming the
-  envelope-bypass leak) were written, run, and deleted; <code>git status</code> confirmed a clean tree before
-  this review was written. Review 013's findings (R3.5 bullet approval) were not re-examined and are not
-  restated here; they stand as recorded in that review's own text, which this rewrite does not reproduce.</p>
+  <p class="meta">Review 015 · findings above are reproduced from commands run directly against the current
+  <code>v2</code> working tree at HEAD <code>3c95c1b</code> (no worktree needed; nothing was left uncommitted).
+  One mutation was applied and reverted in place: <code>internal/runner/runner.go</code>'s
+  <code>env.Summary = redact.Text(env.Summary)</code> and <code>env.Payload = redact.JSON(env.Payload)</code>
+  lines were commented out; <code>TestAgentAuthoredEnvelopeIsRedacted</code> was rerun and failed on all 5
+  assertions as predicted; the exact original two lines were then restored via <code>Edit</code>. <code>git
+  diff</code> and a clean full test run confirmed no residual changes before this review was written. Three
+  throwaway probe test files (one in <code>internal/redact</code> exercising gap-1 edge cases, two in
+  <code>internal/runner</code> confirming gap 2's nested-array case and the third-gap
+  <code>RunCodeGate.Error</code> leak) were written, run, and deleted; <code>git status --short</code> confirmed a
+  clean tree before this review was written. Review 014's findings (the two original gaps) were independently
+  re-verified rather than trusted from its text; Reviews 001–013's findings were not re-examined and are not
+  restated here — they stand as recorded in their own text in git history, which this rewrite does not
+  reproduce.</p>
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
