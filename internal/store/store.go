@@ -102,14 +102,20 @@ type BulletRecord struct {
 	Worktree  string    `json:"worktree,omitempty"`
 	CommitSHA string    `json:"commit_sha,omitempty"`
 	PRURL     string    `json:"pr_url,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	// BlockedReason is a human-readable explanation of why the bullet is
+	// stuck. Empty unless Status is "blocked".
+	BlockedReason string    `json:"blocked_reason,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // BulletStatuses is the full set of BulletRecord.Status values, in lifecycle
 // order: a bullet is created pending, records red then green evidence (D3), is
-// sealed into a PR, and is merged by a human (D6). failed is the terminal
-// alternative and sorts last because it can be reached from any earlier state.
+// sealed into a PR, and is merged by a human (D6). failed and blocked are
+// terminal alternatives and sort last because either can be reached from any
+// earlier state. failed is what a stuck run's outcome wrote before this status
+// existed and remains a valid value for those historical rows; blocked, which
+// carries BlockedReason, is what a stuck run's outcome writes going forward.
 //
 // This exists as code rather than only as a comment because the dashboard renders
 // the lifecycle as the tail of the workflow graph. A hand-copied list in the UI
@@ -117,7 +123,7 @@ type BulletRecord struct {
 //
 // A fresh slice is returned on every call so no caller can mutate it.
 func BulletStatuses() []string {
-	return []string{"pending", "red", "green", "sealed", "merged", "failed"}
+	return []string{"pending", "red", "green", "sealed", "merged", "failed", "blocked"}
 }
 
 // BulletProgression is the ordered lifecycle a bullet advances through. It
@@ -221,6 +227,7 @@ const createBulletsTable = `
 		worktree TEXT NOT NULL DEFAULT '',
 		commit_sha TEXT NOT NULL DEFAULT '',
 		pr_url TEXT NOT NULL DEFAULT '',
+		blocked_reason TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL,
 		FOREIGN KEY (intent_id) REFERENCES intents(id)
@@ -369,6 +376,9 @@ func (s *Store) migrateAddColumns() error {
 		{"bullets", "worktree", "ALTER TABLE bullets ADD COLUMN worktree TEXT NOT NULL DEFAULT ''"},
 		{"bullets", "commit_sha", "ALTER TABLE bullets ADD COLUMN commit_sha TEXT NOT NULL DEFAULT ''"},
 		{"bullets", "pr_url", "ALTER TABLE bullets ADD COLUMN pr_url TEXT NOT NULL DEFAULT ''"},
+		// blocked_reason was added when "blocked" replaced "failed" as the
+		// outcome of a stuck run; existing rows have no reason to backfill.
+		{"bullets", "blocked_reason", "ALTER TABLE bullets ADD COLUMN blocked_reason TEXT NOT NULL DEFAULT ''"},
 		// attempt is 1-based; 0 means "pre-dates this field" (unknown attempt count).
 		{"phases", "attempt", "ALTER TABLE phases ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0"},
 
@@ -1213,6 +1223,7 @@ func (s *Store) ListBulletsForIntent(intentID string) ([]BulletRecord, error) {
 	rows, err := s.db.Query(
 		`SELECT id, intent_id, repo, position, status,
 		        COALESCE(branch, ''), COALESCE(worktree, ''), COALESCE(commit_sha, ''), COALESCE(pr_url, ''),
+		        COALESCE(blocked_reason, ''),
 		        created_at, updated_at
 		 FROM bullets WHERE intent_id = ? ORDER BY position ASC, created_at ASC, id ASC`,
 		intentID,
@@ -1228,6 +1239,7 @@ func (s *Store) ListBulletsForIntent(intentID string) ([]BulletRecord, error) {
 		if err := rows.Scan(
 			&b.ID, &b.IntentID, &b.Repo, &b.Position, &b.Status,
 			&b.Branch, &b.Worktree, &b.CommitSHA, &b.PRURL,
+			&b.BlockedReason,
 			&b.CreatedAt, &b.UpdatedAt,
 		); err != nil {
 			return nil, err
@@ -1257,8 +1269,11 @@ func (s *Store) UpdateBulletStatus(bulletID, status string) error {
 	})
 }
 
-// AdvanceBulletsForRun moves every bullet the run carries to status, then
-// re-derives the run's intent from those bullets.
+// AdvanceBulletsForRun moves every bullet the run carries to status, carrying
+// reason alongside it, then re-derives the run's intent from those bullets.
+// reason is only meaningful for "blocked" (BulletRecord.BlockedReason); every
+// other status is expected to pass "", the value BlockedReason holds for a
+// bullet that was never stuck.
 //
 // A bullet belongs to an intent and a run names the intent it serves, so "the
 // bullets of a run" are the bullets of its intent. Advancing and re-deriving in
@@ -1267,10 +1282,10 @@ func (s *Store) UpdateBulletStatus(bulletID, status string) error {
 // reading the bullets as they were.
 //
 // It is idempotent. A resumed run reaches its terminal path a second time, and a
-// bullet already holding status is skipped rather than rewritten — rewriting
-// would bump updated_at and publish a transition event for a transition that did
-// not happen.
-func (s *Store) AdvanceBulletsForRun(runID, status string) error {
+// bullet already holding status and reason is skipped rather than rewritten —
+// rewriting would bump updated_at and publish a transition event for a
+// transition that did not happen.
+func (s *Store) AdvanceBulletsForRun(runID, status, reason string) error {
 	run, err := s.GetRun(runID)
 	if err != nil {
 		return fmt.Errorf("loading run %q to advance its bullets: %w", runID, err)
@@ -1287,16 +1302,37 @@ func (s *Store) AdvanceBulletsForRun(runID, status string) error {
 		return fmt.Errorf("listing the bullets of intent %q: %w", run.IntentID, err)
 	}
 	for _, b := range bullets {
-		if b.Status == status {
+		if b.Status == status && b.BlockedReason == reason {
 			continue
 		}
-		if err := s.UpdateBulletStatus(b.ID, status); err != nil {
+		if err := s.updateBulletStatusAndReason(b.ID, status, reason); err != nil {
 			return fmt.Errorf("advancing bullet %q to %q: %w", b.ID, status, err)
 		}
 	}
 
 	_, err = s.RecomputeIntentStatus(run.IntentID)
 	return err
+}
+
+// updateBulletStatusAndReason is AdvanceBulletsForRun's write path: unlike
+// UpdateBulletStatus, it also sets BlockedReason, since a run outcome is the
+// only source of that field.
+func (s *Store) updateBulletStatusAndReason(bulletID, status, reason string) error {
+	res, err := s.db.Exec(
+		`UPDATE bullets SET status = ?, blocked_reason = ?, updated_at = ? WHERE id = ?`,
+		status, reason, time.Now().UTC(), bulletID,
+	)
+	if err != nil {
+		return err
+	}
+	if err := requireOneRow(res, "bullet", bulletID); err != nil {
+		return err
+	}
+	return s.recordTransition(ChannelBullet, bulletID, map[string]interface{}{
+		"transition": "status",
+		"id":         bulletID,
+		"status":     status,
+	})
 }
 
 // SealBulletForRun marks the bullet for (the intent behind runID, repo) as

@@ -1831,9 +1831,43 @@ func (srv *Server) recordTerminalRun(runID, status string) {
 	if !advances {
 		return
 	}
-	if err := srv.Store.AdvanceBulletsForRun(runID, bulletStatus); err != nil {
+	reason := srv.blockedReasonForRun(runID, bulletStatus)
+	if err := srv.Store.AdvanceBulletsForRun(runID, bulletStatus, reason); err != nil {
 		log.Printf("sergeant: advancing the bullets of run %s to %s: %v", runID, bulletStatus, err)
 	}
+}
+
+// blockedReasonForRun resolves the reason a run's bullets carry when they
+// become bulletStatus. It is only meaningful for "blocked" — every other
+// status carries no reason, because BlockedReason (D5(b)) exists to explain
+// why a bullet is stuck, not to annotate green or any other outcome.
+//
+// An agent's own envelope may have named why it could not proceed, in its
+// payload's blocked_reason key (design.md, "Where the reason comes from").
+// Envelopes are read in the order they were recorded, and the last one
+// naming a reason wins, so the run's most recent word on why it is stuck is
+// what a human sees. When no envelope named one, a synthesized reason is
+// used: sergeant dispatches a bullet's work exactly once per run and a run's
+// own retry budget is already exhausted by the time it concludes without
+// passing, so a human is never left with "blocked" and no explanation at all.
+func (srv *Server) blockedReasonForRun(runID, bulletStatus string) string {
+	if bulletStatus != "blocked" {
+		return ""
+	}
+	envelopes, err := srv.Store.ListEnvelopesForRun(runID)
+	if err != nil {
+		log.Printf("sergeant: loading envelopes for run %s to resolve a blocked reason: %v", runID, err)
+	}
+	var reason string
+	for _, e := range envelopes {
+		if r := handoff.BlockedReason(e.Data); r != "" {
+			reason = r
+		}
+	}
+	if reason == "" {
+		reason = "gates did not pass; no further automatic attempt available"
+	}
+	return reason
 }
 
 // bulletStatusForRunOutcome maps a run's terminal status onto the bullet status
@@ -1846,16 +1880,24 @@ func (srv *Server) recordTerminalRun(runID, status string) {
 // exists, not that it was reviewed, submitted or delivered (decision D6). sealed
 // stays owned by the pull-request path and merged by observed PR state.
 //
+// failed becomes blocked, carrying a reason (decision D5(b)): sergeant dispatches
+// a bullet's work exactly once per run and a run's own retry budget is already
+// exhausted by the time it concludes without passing, so a bullet reaching this
+// case already means no further automatic attempt is going to help — which is a
+// human decision point, not merely "one attempt among several did not pass".
+// This is a full replacement of "failed" as a run outcome going forward; failed
+// remains a valid, undisturbed value only on rows a run wrote before this change.
+//
 // cancelled moves nothing. An operator stopping a run has concluded nothing about
-// the work, and recording failed would assert a judgment the operator did not
+// the work, and recording blocked would assert a judgment the operator did not
 // make. Every outcome not named here is treated the same way, so an outcome this
-// change did not reason about cannot silently be read as failure.
+// change did not reason about cannot silently be read as stuck.
 func bulletStatusForRunOutcome(runStatus string) (string, bool) {
 	switch runStatus {
 	case "passed":
 		return "green", true
 	case "failed":
-		return "failed", true
+		return "blocked", true
 	default:
 		return "", false
 	}
