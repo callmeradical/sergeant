@@ -215,3 +215,63 @@ func TestRedactThenTruncateFullyRedactsSecretAtBoundary(t *testing.T) {
 		t.Errorf("expected the placeholder to survive truncation since it is far shorter than the raw secret: %q", got)
 	}
 }
+
+// AKIA and AIza used a fixed-length match anchored with a trailing \b. When
+// the real key is immediately followed by more alphanumeric text with no
+// delimiter, no boundary exists at that position and the fixed count cannot
+// back off, so the match fails entirely and the whole key leaks. The other
+// prefixes already use an open-ended "{n,}" floor with no trailing boundary;
+// AKIA/AIza must behave the same way.
+func TestTextRedactsProviderKeysGluedToTrailingText(t *testing.T) {
+	cases := []struct {
+		name string
+		key  string
+	}{
+		{"aws access key AKIA followed by more text", "AKIAIOSFODNN7EXAMPLEXTRACHARS"},
+		{"google api key AIza followed by more text", "AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWYEXTRACHARS"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Text(tc.key)
+			if strings.Contains(got, tc.key) {
+				t.Errorf("Text() left the original key in output: %q", got)
+			}
+			if !strings.Contains(got, "[REDACTED]") {
+				t.Errorf("Text() did not insert placeholder: %q", got)
+			}
+		})
+	}
+}
+
+// JSON must redact string leaves anywhere in an arbitrary JSON document,
+// since an envelope's payload is not always built by sergeant field-by-field
+// — a dispatched agent can write its own envelope.json.
+func TestJSONRedactsStringLeavesAtAnyDepth(t *testing.T) {
+	secret := "sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP"
+	input := fmt.Sprintf(`{"top":%q,"nested":{"deep":%q},"list":[%q,"ordinary"],"n":1,"b":true}`, secret, secret, secret)
+
+	got := string(JSON([]byte(input)))
+
+	if strings.Contains(got, secret) {
+		t.Errorf("JSON() left the original secret in output: %q", got)
+	}
+	if strings.Count(got, "[REDACTED]") != 3 {
+		t.Errorf("JSON() expected 3 redactions (top, nested, list), got: %q", got)
+	}
+	if !strings.Contains(got, "ordinary") {
+		t.Errorf("JSON() disturbed a non-secret string leaf: %q", got)
+	}
+	if !strings.Contains(got, `"n":1`) || !strings.Contains(got, `"b":true`) {
+		t.Errorf("JSON() disturbed non-string values: %q", got)
+	}
+}
+
+// Malformed JSON cannot be inspected, so it must survive unchanged rather
+// than being dropped or replaced with an error payload.
+func TestJSONLeavesMalformedInputUnchanged(t *testing.T) {
+	input := []byte(`{not valid json`)
+	got := JSON(input)
+	if string(got) != string(input) {
+		t.Errorf("JSON() altered malformed input: got %q, want %q", got, input)
+	}
+}

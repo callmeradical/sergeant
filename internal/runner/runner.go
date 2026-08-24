@@ -470,6 +470,14 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 			}
 		}
 
+		// An agent can write its own envelope.json (the branch above), whose
+		// Summary/Payload sergeant never built field-by-field and so never
+		// redacted at the point of construction — closing that gap here,
+		// unconditionally, covers both branches instead of trusting each new
+		// envelope-construction path to remember it.
+		env.Summary = redact.Text(env.Summary)
+		env.Payload = redact.JSON(env.Payload)
+
 		env.Payload = annotatePayloadWithProvenance(env.Payload, model, provider)
 
 		// Generate the envelope id before the SaveEnvelope call so both the

@@ -5,6 +5,7 @@
 package redact
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 )
@@ -18,16 +19,19 @@ const placeholder = "[REDACTED]"
 // apiKeyPattern matches common provider API key prefixes followed by the
 // alphanumeric (or, for Slack, alphanumeric-and-hyphen) run those real keys
 // use: sk- (OpenAI/Anthropic-style), ghp_/gho_/ghu_/ghs_/ghr_ (GitHub), AKIA
-// (AWS), AIza (Google), and xox[bpoa]- (Slack). No leading \b: these
-// prefixes are distinctive enough on their own, and a secret is often glued
-// directly to adjacent non-whitespace text (e.g. inside a quoted string or
-// URL) with no word boundary before it — requiring one there silently missed
-// real secrets, which is worse than the rare over-match a bare prefix risks.
+// (AWS), AIza (Google), and xox[bpoa]- (Slack). No leading or trailing \b on
+// any alternative: these prefixes are distinctive enough on their own, and a
+// secret is often glued directly to adjacent non-whitespace text (e.g.
+// inside a quoted string, URL, or followed by more characters appended by
+// whatever emitted it) with no word boundary at either edge — requiring one
+// silently missed real secrets, which is worse than the rare over-match an
+// open-ended quantifier risks. AKIA/AIza's minimum lengths use a "{n,}" floor
+// rather than a fixed "{n}\b" count for the same reason.
 var apiKeyPattern = regexp.MustCompile(
 	`sk-[A-Za-z0-9]{20,}` +
 		`|gh[oprsu]_[A-Za-z0-9]{20,}` +
-		`|AKIA[A-Z0-9]{16}\b` +
-		`|AIza[A-Za-z0-9_\-]{35}\b` +
+		`|AKIA[A-Z0-9]{16,}` +
+		`|AIza[A-Za-z0-9_\-]{35,}` +
 		`|xox[bpoa]-[A-Za-z0-9-]{10,}`,
 )
 
@@ -50,6 +54,50 @@ func Text(s string) string {
 	s = bearerPattern.ReplaceAllString(s, "${1}"+placeholder)
 	s = credentialLinePattern.ReplaceAllString(s, "${1}="+placeholder)
 	return s
+}
+
+// JSON walks an arbitrary JSON document and applies Text to every string
+// leaf, returning the re-marshaled result. It exists because an envelope's
+// payload is not always built by sergeant field-by-field — a dispatched
+// agent can write its own envelope.json, and that content must not bypass
+// redaction just because sergeant did not construct it itself. Malformed
+// JSON is returned unchanged: redaction cannot inspect what it cannot parse,
+// and refusing an otherwise-valid envelope over that would be a worse
+// failure than a heuristic miss.
+func JSON(data []byte) []byte {
+	if len(data) == 0 {
+		return data
+	}
+	var v interface{}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return data
+	}
+	out, err := json.Marshal(redactValue(v))
+	if err != nil {
+		return data
+	}
+	return out
+}
+
+func redactValue(v interface{}) interface{} {
+	switch t := v.(type) {
+	case string:
+		return Text(t)
+	case []interface{}:
+		out := make([]interface{}, len(t))
+		for i, e := range t {
+			out[i] = redactValue(e)
+		}
+		return out
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(t))
+		for k, e := range t {
+			out[k] = redactValue(e)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // Truncate caps s at maxBytes, appending a marker naming how many bytes were

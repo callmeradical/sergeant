@@ -587,6 +587,68 @@ exit 0
 	}
 }
 
+// An agent-authored envelope.json is not built by sergeant field-by-field,
+// so it is never redacted at the point of construction the way a synthesized
+// envelope's raw_output is. A secret the agent writes into its own summary
+// or payload must still be redacted before it reaches the returned envelope
+// or any persisted record — closing that gap is not optional just because
+// sergeant did not write the content itself.
+func TestAgentAuthoredEnvelopeIsRedacted(t *testing.T) {
+	dir := t.TempDir()
+	secret := "sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP"
+	script := `#!/bin/sh
+mkdir -p .sergeant
+cat > .sergeant/envelope.json <<EOF
+{"task_id":"run-1","repo":"svc","stage":"build","summary":"leaked ` + secret + `","payload":{"nested":{"note":"` + secret + `"}}}
+EOF
+exit 0
+`
+	agent := filepath.Join(dir, "goose")
+	if err := os.WriteFile(agent, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	pr, st := newRunner(t, agent, 10*time.Second)
+
+	env, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(env.Summary, secret) {
+		t.Errorf("returned envelope Summary leaked the secret: %q", env.Summary)
+	}
+	if !strings.Contains(env.Summary, "[REDACTED]") {
+		t.Errorf("returned envelope Summary was not redacted: %q", env.Summary)
+	}
+	if strings.Contains(string(env.Payload), secret) {
+		t.Errorf("returned envelope Payload leaked the secret: %s", env.Payload)
+	}
+	if !strings.Contains(string(env.Payload), "[REDACTED]") {
+		t.Errorf("returned envelope Payload was not redacted: %s", env.Payload)
+	}
+
+	phases, err := st.ListPhasesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(phases) != 1 {
+		t.Fatalf("expected 1 phase record, got %d", len(phases))
+	}
+	if strings.Contains(string(phases[0].Payload), secret) {
+		t.Errorf("persisted PhaseRecord.Payload leaked the secret: %s", phases[0].Payload)
+	}
+
+	envelopes, err := st.ListEnvelopesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(envelopes) != 1 {
+		t.Fatalf("expected 1 envelope record, got %d", len(envelopes))
+	}
+	if strings.Contains(string(envelopes[0].Data), secret) {
+		t.Errorf("persisted EnvelopeRecord.Data leaked the secret: %s", envelopes[0].Data)
+	}
+}
+
 // A goose phase whose output has no banner (malformed or missing) completes
 // exactly as it would without provenance parsing: the phase still passes, and
 // model/provider are empty rather than a guess.
