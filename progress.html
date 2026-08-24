@@ -48,62 +48,59 @@ a{color:var(--muted)}
   <h1>Sergeant v2</h1>
   <p>Independent review. Written by the critic, not the builder.</p>
   <p class="meta">
-    Review 022 · 2026-08-23 · branch <code>v2</code> · merge commit <code>c9d73cf</code> reviewed
-    (parents <code>e8d8011</code> / <code>b64a01f</code>, merge-base <code>169c6d1</code>) ·
-    "feat(graphify): exclude_patterns is honored (D9)" · current <code>v2</code> HEAD is
-    <code>494179e</code>, 8 commits ahead of <code>c9d73cf</code> (the D5b and D5a/D2 changes, their review
-    docs, and a later plan-approval fix — none touching <code>internal/graphify</code>); build/vet/test were
-    run at HEAD, not just at the reviewed commit
+    Review 023 · 2026-08-24 · branch <code>v2</code> · merge commit <code>fb9a87d</code> reviewed
+    (parents <code>901b099</code> / <code>cf29d66</code>, merge-base <code>8dfeb49</code>) ·
+    "feat(store,dag,ui,mcp,runner,naming): branch names carry their work type (O2)" · current <code>v2</code>
+    HEAD is <code>cc486c8</code>, 1 commit ahead of <code>fb9a87d</code> (a docs-only PRD/OpenSpec addition
+    for a later, unrelated "automated fleet cleanup" change — confirmed by <code>git show --stat cc486c8</code>,
+    no code files touched); build/vet/test were run at HEAD, not just at the reviewed commit
   </p>
 </header>
 
 <section>
   <h2>Current status</h2>
   <div class="grid">
-    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at HEAD <code>494179e</code></div></div>
-    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code>, whole module</div></div>
-    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">11/11 packages pass</span></div><div class="small"><code>go test ./internal/... -count=1</code>, including a real invocation of the <code>graphify</code> binary; a prior reviewer (Review 021) flagged a single-run flake in <code>internal/graphify</code> — I reran the flagged test 50 times and the whole package 20 times plus once with <code>-race</code>, all clean; see Findings</div></div>
-    <div class="card"><div class="label">Node/link/hyperedge drop by <code>source_file</code></div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>filterGraphFile</code> drops each element whose own <code>source_file</code> matches a pattern, tracking surviving node ids as it goes.</div></div>
-    <div class="card"><div class="label">Dangling-reference cleanup</div><div class="value"><span class="status">verified, real, mutation-tested</span></div><div class="small">A link/hyperedge whose own <code>source_file</code> did not match, but whose endpoint node was excluded, is separately dropped. I mutated both the link check and the hyperedge threshold independently; both predicted test failures occurred; both restored, <code>git diff</code> empty.</div></div>
-    <div class="card"><div class="label">Hyperedge &lt;2-endpoint rule</div><div class="value"><span class="status">verified, real, mutation-tested</span></div><div class="small">A hyperedge with fewer than 2 surviving node ids is dropped (<code>remaining &lt; 2</code>). Forced this branch to never trigger; <code>TestDanglingLinkAndHyperedgeAfterNodeExclusionAreRemoved</code> failed exactly as predicted; restored.</div></div>
-    <div class="card"><div class="label"><code>*</code> / <code>**</code> glob semantics</div><div class="value"><span class="status">verified, real</span></div><div class="small">Own throwaway cases beyond the shipped suite: <code>a/**/b</code> matches both <code>a/b</code> and <code>a/x/y/b</code>; <code>**/*.go</code> matches root-level <code>main.go</code>; a pattern with no <code>**</code> (e.g. <code>a/b</code>) correctly rejects <code>a/b/c</code> — exact segment count required. All passed.</div></div>
-    <div class="card"><div class="label">Field preservation (unknown top-level and per-element keys)</div><div class="value"><span class="status">verified, real</span></div><div class="small">Top-level document and every kept node/link/hyperedge are kept as <code>json.RawMessage</code>, never decoded into a lossy struct. Shipped test asserts full structural equality (<code>reflect.DeepEqual</code>) of a fixture with extra top-level keys (<code>directed</code>, <code>multigraph</code>, <code>graph</code>, <code>built_at_commit</code>) and extra per-element fields (<code>extra_field</code>, <code>weight</code>, <code>relation</code>) before and after filtering with <code>nil</code> and <code>{}</code> patterns.</div></div>
-    <div class="card"><div class="label">Wired before atomic publish</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>filterGraphFile</code> runs immediately after <code>mergedPath</code> is validated non-empty and before the manifest write, <code>publishHook</code>, and the backup-rename/publish sequence. A filter failure returns before <code>output</code> is touched.</div></div>
-    <div class="card"><div class="label">No third-party glob dependency</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>go.mod</code>/<code>go.sum</code> unchanged by this commit; still exactly 3 direct dependencies (<code>mcp-go</code>, <code>yaml.v3</code>, <code>modernc.org/sqlite</code>). The matcher is hand-written, using only <code>path.Match</code> per segment.</div></div>
-    <div class="card"><div class="label">Empty-patterns no-op</div><div class="value"><span class="status">verified, real</span></div><div class="small">Design.md's own pseudocode sketch would special-case empty patterns into a "no-op pass"; the shipped code instead always runs the same loop (<code>matchesAny</code> on an empty slice never matches), satisfying the "not a bypassed branch" requirement more literally than the design doc itself proposed.</div></div>
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at HEAD <code>cc486c8</code></div></div>
+    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code>, whole module, no output</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">11/11 packages pass</span></div><div class="small"><code>go test ./internal/... -count=1</code></div></div>
+    <div class="card"><div class="label">Duplicated branch-string construction</div><div class="value"><span class="status">genuinely eliminated</span></div><div class="small">Repo-wide grep for <code>"sergeant/</code> and <code>Sprintf("sergeant</code> finds zero remaining branch-name constructions; every remaining hit is an unrelated envelope <code>Producer</code> label (<code>"sergeant/ui"</code>, <code>"sergeant/runner"</code>, <code>"sergeant/mcp"</code>)</div></div>
+    <div class="card"><div class="label"><code>naming.BranchName</code> call sites</div><div class="value"><span class="status">5 of 5, all converged</span></div><div class="small"><code>dag/engine.go:148</code> (<code>prepareWorktree</code>), <code>ui/server.go:658</code> (<code>handleCreatePR</code>), <code>ui/server.go:1702</code> (<code>describeDelivery</code>), <code>mcp/server.go:429</code> (<code>sergeant_seal_pr</code>), <code>runner/runner.go:604</code> (<code>DeliverPullRequest</code> fallback) — all five load a real <code>RunRecord</code> via <code>Store.GetRun</code> first, none pass a literal</div></div>
+    <div class="card"><div class="label">Import cycle avoidance</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>internal/runner/runner.go</code> imports <code>handoff</code>, <code>naming</code>, <code>redact</code>, <code>store</code> — no <code>dag</code>. <code>internal/dag/engine.go</code> imports <code>runner</code>. The cycle the design doc describes is real and correctly avoided by putting <code>BranchName</code> in the dependency-free <code>naming</code> package.</div></div>
+    <div class="card"><div class="label">Validation placement &amp; vocabulary</div><div class="value"><span class="status">verified, exact</span></div><div class="small"><code>validateWorkType</code> runs immediately after body-decode/brief-check, before <code>config.LoadProject</code>, <code>ValidateAgent</code>, change resolution, and both the no-repos and explicit-repos branches. <code>validWorkTypes</code> is exactly <code>feat</code>/<code>fix</code>/<code>refactor</code>/<code>docs</code>/<code>chore</code>/<code>test</code> — matches proposal.md verbatim</div></div>
+    <div class="card"><div class="label">Column-list consolidation</div><div class="value"><span class="status">verified, complete</span></div><div class="small">Every <code>SELECT</code> against <code>runs</code>/<code>intents</code> (<code>GetRunByRequestID</code>, <code>ListRecentRuns</code>, <code>GetRun</code>, <code>ListRunsForProject</code>, <code>ReconcileOrphanedRuns</code>, <code>GetIntent</code>, <code>ListIntentsForProject</code>, <code>ListIntentsByStatus</code>) uses <code>runColumns</code>/<code>scanRun</code> or <code>intentColumns</code>/<code>scanIntent</code>; no hand-copied column list remains</div></div>
+    <div class="card"><div class="label">Plan-approval type reuse</div><div class="value"><span class="status">verified, real, mutation-tested independently</span></div><div class="small">Wrote my own throwaway test proposing a plan as <code>"refactor"</code> (a type the shipped test doesn't use), approved it, confirmed <code>run.Type == "refactor"</code>. Reverted <code>handleApprovePlan</code>'s <code>intent.Type</code> argument to <code>""</code>: both the shipped test and mine failed on the predicted symptom (empty type). Restored, deleted my throwaway file, tree confirmed clean.</div></div>
+    <div class="card"><div class="label">Real git branch name</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>go test ./internal/ui/... -run TestDispatchedBranchIsNamedByItsTypeAndChange -v</code> passes; the test asserts against <code>git rev-parse --abbrev-ref HEAD</code> in the actual worktree and <code>git show-ref</code> in the source repo, not a computed string</div></div>
+    <div class="card"><div class="label">Empty <code>Type</code>/<code>ChangeID</code> edge case</div><div class="value"><span class="status warn">real, unaddressed, non-blocking</span></div><div class="small">A pre-migration run/intent has <code>Type == ""</code> (proven by the shipped <code>TestOpenAddsTypeColumnsToAnOlderDatabase</code>). <code>describeDelivery</code> and <code>handleCreatePR</code> have no guard against this: for such a row, <code>naming.BranchName("", changeID)</code> silently produces <code>"/&lt;change-id&gt;"</code>, a branch name that does not match the real historical branch. See Findings.</div></div>
   </div>
-  <p><strong>Verdict:</strong> MEETS SPEC. Every scenario in <code>specs/graphify-exclusion/spec.md</code> is
-  genuinely implemented and genuinely tested against real fixtures, not generic truthiness. The pattern matcher's
-  <code>**</code>/<code>*</code> semantics hold under my own additional inputs, not just the shipped test cases.
-  Dangling-reference cleanup for both links and hyperedges is real and mutation-confirmed independently for both
-  code paths. Unknown fields, at every level (top-level document and within kept elements), are preserved by
-  construction (whole-element <code>json.RawMessage</code>, never a narrowing struct) — a stronger guarantee than
-  design.md's own struct-based sketch would have delivered had it been implemented literally. The filter is wired
-  before the atomic-publish step exactly as design.md specifies, so a filter failure cannot corrupt or partially
-  replace a prior published graph. No third-party dependency was added. No caveats found.</p>
+  <p><strong>Verdict:</strong> MEETS SPEC WITH CAVEATS. Every scenario in <code>specs/work-type/spec.md</code> is
+  genuinely implemented for the cases the spec actually describes (a dispatch made through this code, from now on).
+  The four-way hand-duplicated branch string is genuinely and completely consolidated into
+  <code>naming.BranchName</code>, the import-cycle reasoning for placing it in <code>internal/naming</code> rather
+  than leaving it in <code>internal/dag</code> is real (confirmed by reading <code>runner.go</code>'s own import
+  list, not just trusting <code>go build</code>), and the plan-approval type-reuse fix is independently
+  mutation-confirmed, not just present. The one caveat is real but narrow: rows written before this migration have
+  <code>Type == ""</code>, and the new call sites that read a run/intent back to compute its branch name have no
+  guard against that — they were not in scope for this change's proposal.md ("existing branches and
+  already-recorded runs are untouched"), but the proposal did not anticipate that new code, not just new data,
+  reads those old rows. See Findings for the concrete reproduction.</p>
 </section>
 
 <section>
   <h2>What I inspected</h2>
   <table>
     <tr><th>Area</th><th>Method</th></tr>
-    <tr><td>Binding spec</td><td>Read <code>openspec/changes/graphify-honors-exclude-patterns/{proposal,design,tasks}.md</code> and <code>specs/graphify-exclusion/spec.md</code> in full before reading any code</td></tr>
-    <tr><td>The merge commit's actual diff</td><td><code>git merge-base c9d73cf^1 c9d73cf^2</code> → <code>169c6d1</code>; <code>git diff 169c6d1 c9d73cf --stat</code> (5 files: <code>internal/config/config.go</code>, new <code>internal/graphify/exclude.go</code> + its test, <code>internal/graphify/graphify.go</code>, and <code>internal/ui/static/index.html</code>) and full diffs of each</td></tr>
-    <tr><td><code>filterGraphFile</code> (<code>internal/graphify/exclude.go</code>)</td><td>Read the full 199-line file: top-level document parsed as <code>map[string]json.RawMessage</code>; <code>nodes</code>/<code>links</code>/<code>hyperedges</code> each decoded as <code>[]json.RawMessage</code>, with only a small anonymous struct extracting <code>id</code>/<code>source_file</code>/<code>source</code>/<code>target</code>/<code>nodes</code> per element purely to decide keep-or-drop — the kept <code>json.RawMessage</code> itself, not a re-marshaled struct, is what's written back</td></tr>
-    <tr><td>Dangling-reference and &lt;2-endpoint logic</td><td>Read the exact lines: links check <code>!survivingIDs[l.Source] || !survivingIDs[l.Target]</code> (line 78); hyperedges count surviving members and require <code>remaining &gt;= 2</code> (lines 96–104)</td></tr>
-    <tr><td>Pattern matcher (<code>matchesAny</code>/<code>matchesPattern</code>/<code>matchSegments</code>)</td><td>Read the recursive segment matcher: a literal <code>"**"</code> segment either consumes zero segments (recurse on the rest of the pattern) or one-and-continues; non-<code>"**"</code> segments go through <code>path.Match</code> one-for-one, so segment count must match exactly when no <code>**</code> is present</td></tr>
-    <tr><td>My own matcher test cases beyond the shipped suite</td><td>Wrote a throwaway <code>zzscratch_test.go</code> with 12 cases including <code>a/**/b</code> vs <code>a/b</code> and <code>a/x/y/b</code> (both true), <code>a/**/b</code> vs <code>a/x/b/c</code> (false — trailing segment after <code>b</code>), <code>**/*.go</code> vs <code>main.go</code> at the root (true), <code>a/b</code> vs <code>a/b/c</code> and <code>a/b/c</code> vs <code>a/b</code> (both false — no <code>**</code>, segment counts must match), <code>**</code> alone matching everything including the empty string. Ran, all passed, deleted the file, confirmed <code>git status --porcelain</code> clean</td></tr>
-    <tr><td>Wiring into <code>BuildProjectGraph</code></td><td>Read <code>internal/graphify/graphify.go</code> lines 60–140: <code>filterGraphFile(mergedPath, ...)</code> called at line 99, immediately after the <code>os.Stat</code> non-empty check (lines 94–97) and before manifest construction (line 103), <code>publishHook()</code> (line 118), and the backup-rename/atomic-publish sequence (lines 131+)</td></tr>
-    <tr><td><code>config.go</code> diff</td><td><code>git diff 169c6d1 c9d73cf -- internal/config/config.go</code>: only the <code>ExcludePatterns</code> doc comment changed, from "parsed and stored but not yet applied" to describing the new glob semantics and call site; field type/tags unchanged</td></tr>
-    <tr><td>Unrelated UI diff in this commit</td><td><code>git diff 169c6d1 c9d73cf -- internal/ui/static/index.html</code>: a duplicate <code>const progressByRun</code> declaration removed. This is <code>e8d8011</code>'s own fix (parent 1 of this merge, landed on <code>v2</code> before the graphify branch was merged in), not part of the graphify feature itself — it appears in this diff only because the diff spans the full merge, not because the graphify task touched the dashboard</td></tr>
-    <tr><td><code>go.mod</code>/<code>go.sum</code></td><td><code>git diff 169c6d1 c9d73cf -- go.mod go.sum</code>: empty. Current <code>go.mod</code> still lists exactly 3 direct dependencies</td></tr>
-    <tr><td>Full suite at current HEAD</td><td><code>go build ./... && go vet ./... && go test ./internal/... -count=1</code> from <code>/Users/lars/Dev/sergeant-v2</code> at <code>494179e</code> (8 commits ahead of <code>c9d73cf</code>; none of those commits touch <code>internal/graphify</code>, confirmed by <code>git log --oneline c9d73cf..HEAD</code> and reading each commit's stat)</td></tr>
-    <tr><td><strong>Mutation test 1: link dangling-reference check</strong></td><td>Removed the <code>if !survivingIDs[l.Source] || !survivingIDs[l.Target] { continue }</code> block entirely; reran <code>TestDanglingLinkAndHyperedgeAfterNodeExclusionAreRemoved -v</code>; restored via <code>git checkout</code>; confirmed <code>git status --porcelain</code>/<code>git diff --stat</code> empty afterward</td></tr>
-    <tr><td><strong>Mutation test 2: hyperedge &lt;2-endpoint check</strong></td><td>Changed <code>if remaining &lt; 2</code> to <code>if false</code> (never drops); reran the same test; restored; confirmed clean tree</td></tr>
-    <tr><td>Field-preservation test quality</td><td>Read <code>TestEmptyExcludePatternsIsStructuralNoOp</code> (<code>exclude_test.go:191</code>): fixture includes 4 unrecognized top-level keys and 3 unrecognized per-element fields; asserts <code>reflect.DeepEqual</code> on the fully parsed <code>interface{}</code> tree before vs. after, for both <code>nil</code> and <code>{}</code> patterns — a structural-equality assertion, not merely "no error"</td></tr>
-    <tr><td>Test-quality spot check on the shipped suite</td><td>Read all 6 tests in <code>exclude_test.go</code>: each asserts exact surviving node ids / exact empty link-and-hyperedge slices via helper functions (<code>nodeIDs</code>, <code>containsID</code>), not generic truthiness; the integration test (<code>TestBuildProjectGraphAppliesExcludePatterns</code>) drives the real <code>graphify</code> binary through a real git repo, not a mock</td></tr>
-    <tr><td><code>runCommand</code> is the real binary, not a mock</td><td><code>grep -n "runCommand" internal/graphify/graphify.go</code>: a package-level <code>var</code> wrapping <code>exec.Command</code>-style execution, invoked with literal <code>"graphify"</code>; confirmed <code>which graphify</code> resolves to <code>/Users/lars/.local/bin/graphify</code> on this machine, and the integration test passed against it</td></tr>
-    <tr><td>Investigating Review 021's flagged single-run flake in this exact test</td><td>Review 021 (a different, concurrent review of the plan-approval fix at <code>494179e</code>) reported one failure of <code>TestDanglingLinkAndHyperedgeAfterNodeExclusionAreRemoved</code> out of two full-suite runs, and could not reproduce it in 35 further runs. I independently reran the flagged test 50 times (<code>-count=1</code> each) and the whole <code>internal/graphify</code> package 20 times plus once with <code>-race</code></td><td>0 failures in all 70+ of my own runs; race detector clean; consistent with Review 021's own conclusion that this is a rare, non-reproducible flake, not a defect in the exclusion logic itself</td></tr>
+    <tr><td>Binding spec</td><td>Read <code>openspec/changes/branch-names-carry-their-work-type/{proposal,design,tasks}.md</code> and <code>specs/work-type/spec.md</code> in full before reading any code</td></tr>
+    <tr><td>The merge commit's actual diff</td><td><code>git merge-base fb9a87d^1 fb9a87d^2</code> → <code>8dfeb49</code>; read <code>git diff 901b099 cf29d66</code> per touched file (<code>internal/naming/branch.go</code>+test, <code>internal/dag/engine.go</code>, <code>internal/ui/server.go</code>, <code>internal/mcp/server.go</code>, <code>internal/runner/runner.go</code>, <code>internal/store/store.go</code>) rather than trusting the commit message's own account</td></tr>
+    <tr><td>Repo-wide search for remaining hand-built branch strings</td><td><code>grep -rn '"sergeant/'</code> and <code>grep -rn 'Sprintf("sergeant'</code> across all <code>*.go</code> files (test and non-test); every hit is an envelope <code>Producer</code> label (<code>"sergeant/ui"</code>/<code>"sergeant/runner"</code>/<code>"sergeant/mcp"</code>), unrelated to branch naming; <code>grep -rn 'dag\.BranchName'</code> finds zero remaining references (the function was deleted, not left dead)</td></tr>
+    <tr><td>Every <code>naming.BranchName(</code> call site</td><td><code>grep -rn 'naming\.BranchName('</code> across the repo: 5 real call sites (<code>dag/engine.go:148</code>, <code>ui/server.go:658</code> and <code>:1702</code>, <code>mcp/server.go:429</code>, <code>runner/runner.go:604</code>), all reached via a <code>Store.GetRun</code> lookup first, plus test call sites (<code>naming/branch_test.go</code>, <code>ui/work_type_test.go</code>, <code>ui/dispatch_idempotency_test.go</code>, <code>dag/engine_test.go</code>, <code>runner/deliver_pr_test.go</code>, <code>mcp/seal_pr_branch_test.go</code>) that all pass literal, non-empty types (<code>"feat"</code>/<code>"fix"</code>/<code>"refactor"</code>)</td></tr>
+    <tr><td>Import cycle claim</td><td><code>grep -n '"github.com/callmeradical/sergeant/internal' internal/runner/runner.go</code>: imports <code>handoff</code>, <code>naming</code>, <code>redact</code>, <code>store</code>, no <code>dag</code>; confirmed <code>internal/dag/engine.go</code> imports <code>runner</code> (so the reverse import would cycle, matching design.md's stated reasoning); <code>go build ./...</code> succeeds, which is necessary but was not treated as sufficient — the import list itself was read</td></tr>
+    <tr><td><code>handleDispatch</code> validation ordering</td><td>Read <code>internal/ui/server.go</code> lines 1360–1487 in full: <code>validateWorkType(req.Type)</code> (line ~1391) runs after JSON decode and the brief-emptiness check, but strictly before <code>config.LoadProject</code>, <code>runner.ValidateAgent</code>, <code>changeRepo</code>/<code>resolveChange</code> (O3's change resolution), and both the no-repos (proposed-plan) and explicit-repos (<code>createRunAndDispatch</code>) branches</td></tr>
+    <tr><td>Fixed vocabulary</td><td>Read <code>validWorkTypes</code> (<code>internal/ui/server.go</code>): exactly <code>feat</code>, <code>fix</code>, <code>refactor</code>, <code>docs</code>, <code>chore</code>, <code>test</code> — 6 entries, matching proposal.md's stated set exactly, no more, no fewer</td></tr>
+    <tr><td>Column-list consolidation</td><td><code>grep -n 'FROM runs\|INTO runs\|FROM intents\|INTO intents\|runColumns\|intentColumns' internal/store/*.go</code>: every full-row <code>SELECT</code> (<code>GetRunByRequestID</code>, <code>ListRecentRuns</code>, <code>GetRun</code>, <code>ListRunsForProject</code>, <code>ReconcileOrphanedRuns</code> in <code>reconcile.go</code>, <code>GetIntent</code>, <code>ListIntentsForProject</code>, <code>ListIntentsByStatus</code>) uses the shared constant and <code>scanRun</code>/<code>scanIntent</code>; the two narrow queries that remain (<code>SELECT id FROM runs WHERE slug...</code>, <code>SELECT slug, status FROM runs WHERE slug != ''</code>) intentionally select a strict subset unrelated to <code>type</code>, not a missed column list</td></tr>
+    <tr><td>Plan-approval type reuse (own throwaway test)</td><td>Wrote <code>internal/ui/independent_review_throwaway_test.go</code>: proposed a plan with <code>type: "refactor"</code> (not the type the shipped <code>TestApprovingAPlanReusesItsRecordedType</code> uses, <code>"chore"</code>), approved it, asserted <code>run.Type == "refactor"</code> and non-empty. Ran, passed. Then reverted <code>handleApprovePlan</code>'s call to pass <code>""</code> instead of <code>intent.Type</code>, reran both my test and the shipped one: both failed with <code>run.Type == ""</code>, exactly the predicted symptom. Restored the file (<code>git diff --stat</code> confirmed empty), deleted my throwaway test, reran <code>go build ./... &amp;&amp; go test ./internal/ui/... -count=1</code> clean</td></tr>
+    <tr><td>Real git branch name</td><td><code>go test ./internal/ui/... -run TestDispatchedBranchIsNamedByItsTypeAndChange -v</code>: passed. Read the test itself (<code>internal/ui/work_type_test.go:282-323</code>): asserts <code>git rev-parse --abbrev-ref HEAD</code> in the real worktree equals <code>naming.BranchName("fix", changeID)</code>, and separately confirms the branch exists in the source repo via <code>git show-ref --verify --quiet refs/heads/&lt;branch&gt;</code> — real git state, not a computed string compared to itself</td></tr>
+    <tr><td>Full suite</td><td><code>cd /Users/lars/Dev/sergeant-v2 &amp;&amp; go build ./... &amp;&amp; go vet ./... &amp;&amp; go test ./internal/... -count=1</code> at current HEAD <code>cc486c8</code> (1 commit ahead of the reviewed merge, confirmed docs-only via <code>git show --stat cc486c8</code>)</td></tr>
+    <tr><td><strong>Mutation test: legacy row with empty <code>Type</code></strong></td><td>Read <code>internal/store/work_type_test.go</code>'s <code>TestOpenAddsTypeColumnsToAnOlderDatabase</code>: explicitly seeds a run row that predates the <code>type</code> column, reopens the store, and asserts <code>oldRun.Type == ""</code> ("nothing to backfill") — this is shipped, intentional behavior, not a bug in the migration. But <code>describeDelivery</code> (<code>internal/ui/server.go:1701-1702</code>) and <code>handleCreatePR</code> (<code>:652-658</code>) both call <code>naming.BranchName(run.Type, run.ChangeID)</code> unconditionally once <code>GetRun</code> succeeds, with no check for an empty <code>Type</code>; for such a row this produces <code>"/&lt;change-id&gt;"</code>, not the row's real historical branch (<code>"sergeant/&lt;run-id&gt;"</code>, the pre-this-change format). No test in the shipped diff exercises either of these two call sites against a <code>Type == ""</code> row</td></tr>
   </table>
 </section>
 
@@ -111,133 +108,39 @@ a{color:var(--muted)}
   <h2>Findings</h2>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Node/link/hyperedge exclusion by <code>source_file</code>, then dangling-reference cleanup, is exactly as design.md specifies</h3>
-    <p><code>filterGraphFile</code> makes two passes conceptually within one loop each: first, an element is
-    dropped outright if its own <code>source_file</code> matches any configured pattern (nodes recorded into
-    <code>survivingIDs</code> only if kept); second, for links and hyperedges whose own <code>source_file</code>
-    did <em>not</em> match, a further check drops them if they now reference a node id that filtering just removed
-    (links: either endpoint missing; hyperedges: fewer than 2 of their listed node ids still present). This exactly
-    matches all three scenarios in <code>specs/graphify-exclusion/spec.md</code>'s first requirement. The shipped
-    test <code>TestDanglingLinkAndHyperedgeAfterNodeExclusionAreRemoved</code> constructs precisely this case — a
-    link/hyperedge whose <code>source_file</code> is <code>keep.go</code> but whose target node's
-    <code>source_file</code> is <code>drop.go</code> — and asserts both are absent, not merely that no error
-    occurred.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The four independently hand-built <code>"sergeant/&lt;run-id&gt;"</code> constructions are genuinely gone, not just renamed</h3>
+    <p><code>dag.BranchName(runID)</code> is deleted outright (not left as a dead, unused function — <code>grep -rn 'dag\.BranchName'</code> and <code>grep -rn 'func BranchName'</code> both return nothing in <code>internal/dag</code>). The three <code>fmt.Sprintf("sergeant/...")</code> constructions in <code>ui/server.go</code>'s <code>handleCreatePR</code>, <code>mcp/server.go</code>'s <code>sergeant_seal_pr</code> case, and <code>runner/runner.go</code>'s <code>DeliverPullRequest</code> fallback are each replaced with a <code>Store.GetRun</code> lookup followed by <code>naming.BranchName(run.Type, run.ChangeID)</code>. A repo-wide grep for the literal substring <code>"sergeant/</code> turns up only <code>Producer</code> envelope labels (<code>"sergeant/ui"</code>, <code>"sergeant/runner"</code>, <code>"sergeant/mcp"</code>), a wholly unrelated field that happens to share the same string prefix by coincidence, not a missed branch-name construction.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified, mutation-tested independently for both branches</span> &nbsp; Dangling-reference cleanup is real code, not a test artifact of coincidental ordering</h3>
-    <p>I did not trust the shipped mutation coverage (there was none demonstrated in the diff) — I performed two
-    independent mutations myself. First, I deleted the link-side check entirely
-    (<code>if !survivingIDs[l.Source] || !survivingIDs[l.Target] { continue }</code>) and reran
-    <code>TestDanglingLinkAndHyperedgeAfterNodeExclusionAreRemoved</code>: it failed, reporting the dangling link
-    (<code>{n1 n2 keep.go}</code>) present when the test expects it absent — exactly the predicted symptom. I
-    restored the file with <code>git checkout</code> and confirmed <code>git status --porcelain</code> and
-    <code>git diff --stat</code> were both empty. Second, and separately, I changed the hyperedge threshold check
-    from <code>if remaining &lt; 2</code> to <code>if false</code> (so it never drops a hyperedge for having too
-    few surviving endpoints) and reran the same test: it failed again, this time reporting the dangling hyperedge
-    (<code>{[n1 n2] keep.go}</code>, only 1 real endpoint) present. Restored and reconfirmed a clean tree both
-    times. Both halves of the dangling-cleanup logic are load-bearing, not dead code the test would pass without.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The import-cycle justification for moving <code>BranchName</code> to <code>internal/naming</code> is real, not a pretext</h3>
+    <p><code>internal/runner/runner.go</code>'s import block is <code>handoff</code>, <code>naming</code>, <code>redact</code>, <code>store</code> — no <code>dag</code>. Separately, <code>internal/dag/engine.go</code> imports <code>runner</code> (for phase execution). Had <code>BranchName</code> stayed in <code>internal/dag</code> and <code>runner.DeliverPullRequest</code> needed to call it, <code>runner</code> would need to import <code>dag</code>, which already imports <code>runner</code> — a genuine cycle Go's compiler would reject. <code>internal/naming</code> has no internal-package imports at all (confirmed by reading its full import list), making it a correct, dependency-free home. I did not rely on <code>go build ./...</code> succeeding as the only evidence here, per the review brief's own caution that this is necessary but not sufficient — I read the actual import lists of both packages.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; <code>*</code>/<code>**</code> glob semantics are correct, including on inputs the shipped test suite does not cover</h3>
-    <p><code>matchSegments</code> splits both pattern and candidate path on <code>/</code> and recurses:
-    a <code>"**"</code> segment tries consuming zero segments first (recurse with the rest of the pattern
-    unchanged against the full remaining name), then backtracks to consume one name segment at a time if that
-    fails — correctly modeling "any number of segments, including zero." A non-<code>"**"</code> segment is
-    matched one-for-one against exactly one name segment via <code>path.Match</code> (which already handles
-    <code>*</code>/<code>?</code>/character classes within a segment), and the recursion's base case
-    (<code>len(pattern) == 0</code>) requires <code>len(name) == 0</code> too — so a pattern with no
-    <code>**</code> at all necessarily requires an exact segment count match. I wrote 12 of my own test cases in a
-    throwaway file (deleted after, tree confirmed clean) beyond the 3 patterns the shipped suite exercises
-    (<code>drop.go</code>, exact match; <code>vendor/**</code>, directory-recursive): <code>a/**/b</code> correctly
-    matches both <code>a/b</code> (zero segments consumed) and <code>a/x/y/b</code> (two segments consumed) but not
-    <code>a/x/b/c</code> (trailing segment after the required <code>b</code>); <code>**/*.go</code> matches
-    <code>main.go</code> sitting at the repository root (zero directory segments before the file); <code>a/b</code>
-    (no <code>**</code>) correctly rejects both <code>a/b/c</code> (too many name segments) and, symmetrically,
-    <code>a/b/c</code> as a pattern rejects <code>a/b</code> as a name (too few). All 12 passed on first run.</p>
+    <h3><span class="sev low">verified</span> &nbsp; <code>handleDispatch</code>'s work-type validation runs where design.md says it must, with the exact vocabulary</h3>
+    <p>Reading <code>internal/ui/server.go</code> lines 1360–1487 in sequence: JSON decode → brief-emptiness check → <strong><code>validateWorkType(req.Type)</code></strong> → <code>config.LoadProject</code> → <code>runner.ValidateAgent</code> → O3's change resolution (<code>changeRepo</code>/<code>resolveChange</code>) → the no-repos/explicit-repos fork. The type check is the first substantive validation after basic request-shape checks, strictly before anything that resolves a change, validates an agent, or writes a row — matching both design.md's stated placement ("mirrors <code>ValidateAgent</code>'s existing placement") and the spec's three scenarios (recognized accepted; missing refused; unrecognized refused, naming the valid set) verbatim. <code>validWorkTypes</code> is exactly <code>{feat, fix, refactor, docs, chore, test}</code> — 6 entries, matching proposal.md's stated set with no additions or omissions.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Every unrecognized field, at every level, survives filtering — the shipped implementation is stronger than design.md's own sketch</h3>
-    <p>The top-level <code>graph.json</code> document is parsed as <code>map[string]json.RawMessage</code>, so
-    keys other than <code>nodes</code>/<code>links</code>/<code>hyperedges</code> (e.g. <code>directed</code>,
-    <code>multigraph</code>, <code>graph</code>, <code>built_at_commit</code>) are never touched. More
-    significantly, each individual node/link/hyperedge is also carried as a whole <code>json.RawMessage</code>
-    through the keep/drop decision — the small anonymous structs in <code>filterGraphFile</code>
-    (<code>struct{ ID, SourceFile string }</code> etc.) exist purely to read the two or three fields the filtering
-    decision needs; they are never re-marshaled back out. This means a per-element field the design doc's own
-    pseudocode sketch (which used typed <code>Node</code>/<code>Link</code>/<code>Hyperedge</code> structs with
-    only the fields the pass touches) would have silently dropped on round-trip is, in the shipped code, preserved
-    by construction — the shipped implementation deviates from design.md's own sketch, for the better, on exactly
-    the point tasks.md calls out ("do not round-trip through a struct that silently drops unknown keys"). The
-    shipped test <code>TestEmptyExcludePatternsIsStructuralNoOp</code> proves this directly: its fixture carries 4
-    unrecognized top-level keys and 3 unrecognized per-element fields (<code>extra_field</code>, <code>weight</code>,
-    <code>relation</code>), and the test asserts <code>reflect.DeepEqual</code> between the fully-parsed
-    <code>interface{}</code> tree before and after filtering with both <code>nil</code> and <code>{}</code>
-    patterns — a structural-equality assertion, matching tasks.md's explicit requirement to check "byte-for-byte or
-    structurally, not just no error."</p>
+    <h3><span class="sev low">verified, complete</span> &nbsp; No hand-copied <code>runs</code>/<code>intents</code> column list was missed</h3>
+    <p>Every query that reads a full <code>RunRecord</code> or <code>IntentRecord</code> row — <code>GetRunByRequestID</code>, <code>ListRecentRuns</code>, <code>GetRun</code>, <code>ListRunsForProject</code>, and <code>ReconcileOrphanedRuns</code> (a different file, <code>internal/store/reconcile.go</code>, easy to miss in a same-file grep) for runs; <code>GetIntent</code>, <code>ListIntentsForProject</code>, <code>ListIntentsByStatus</code> for intents — uses the shared <code>runColumns</code>/<code>scanRun</code> or <code>intentColumns</code>/<code>scanIntent</code>, both newly introduced by this diff. I specifically checked <code>reconcile.go</code> because it is a separate file from <code>store.go</code> and the kind of query design.md's own grep instructions (<code>FROM runs</code>) would still have caught, but a less careful same-file-only search would not. Both <code>INSERT</code> statements (<code>CreateRun</code>, <code>CreateIntent</code>) list <code>type</code> explicitly alongside the other columns. The two remaining narrow queries (<code>SELECT id FROM runs WHERE slug...</code> for slug backfill, <code>SELECT slug, status FROM runs WHERE slug != ''</code>) are intentionally column-limited for a different purpose and were never full-row column lists to begin with.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The filter is wired before the atomic-publish step, exactly as design.md specifies</h3>
-    <p><code>BuildProjectGraph</code> calls <code>filterGraphFile(mergedPath, proj.Graphify.ExcludePatterns)</code>
-    at line 99 of <code>internal/graphify/graphify.go</code>, immediately after the merged graph is confirmed
-    non-empty (<code>os.Stat</code> check, lines 94–97) and strictly before the manifest is built and written
-    (line 103 onward), before <code>publishHook()</code> fires (line 118), and before the backup-rename/publish
-    sequence that moves <code>scratch</code> into <code>proj.Graphify.Output</code> (line 131 onward). A non-nil
-    error from <code>filterGraphFile</code> returns immediately, wrapped as <code>"applying exclude_patterns: %w"</code>,
-    before any code that touches <code>output</code> runs — matching design.md's stated guarantee that a filter
-    failure "cannot corrupt or partially replace the prior graph."</p>
+    <h3><span class="sev low">verified, mutation-tested independently</span> &nbsp; Plan approval genuinely reuses the plan's originally proposed type, not a re-derived one</h3>
+    <p>I did not trust the shipped <code>TestApprovingAPlanReusesItsRecordedType</code> alone. I wrote my own throwaway test proposing a plan with <code>type: "refactor"</code> — deliberately a different type than the shipped test's <code>"chore"</code>, so a coincidental default or hard-coded value in the handler could not pass both by accident — approved it through <code>POST /api/plans/{id}/approve</code>, and asserted the resulting run's <code>Type</code> was exactly <code>"refactor"</code> and non-empty. It passed. I then mutated <code>handleApprovePlan</code>'s call to <code>createRunAndDispatch</code>, changing the final argument from <code>intent.Type</code> to the literal <code>""</code>, and reran both my test and the shipped one: both failed, reporting <code>run.Type == ""</code> — exactly the predicted symptom of "re-derived instead of reused" degenerating to "not carried forward at all." I restored the file, confirmed <code>git diff --stat internal/ui/server.go</code> was empty, deleted my throwaway test file, and reran <code>go build ./... &amp;&amp; go test ./internal/ui/... -count=1</code> clean. This is the same class of bug as the change-reuse fix reviewed in this codebase's Review 020/021 history (<code>handleApprovePlan</code> previously re-resolved the OpenSpec change instead of reusing the one recorded at proposal time); this diff applies the identical "read the recorded fact back, don't re-derive" fix to the work type, and it is genuinely wired, not merely threaded through a signature that some caller ignores.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; No third-party glob dependency was added</h3>
-    <p><code>git diff 169c6d1 c9d73cf -- go.mod go.sum</code> is empty. The current <code>go.mod</code> still
-    declares exactly the same 3 direct dependencies design.md cites (<code>mcp-go</code>, <code>yaml.v3</code>,
-    <code>modernc.org/sqlite</code>); the matcher (<code>matchesAny</code>/<code>matchesPattern</code>/<code>matchSegments</code>)
-    is self-contained, using only <code>path.Match</code> from the standard library per path segment plus a
-    hand-written recursive segment walker for <code>**</code>.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The empty-patterns case runs the real code path, not a bypassed branch</h3>
-    <p>Design.md's own pseudocode sketch included a special case
-    (<code>if len(patterns) == 0 { return rewriteGraphFile(path, readGraphFile(path)) }</code>) — a distinct,
-    separately-exercised no-op branch. The shipped code has no such branch: <code>matchesAny</code> called with an
-    empty <code>patterns</code> slice simply never matches anything, so every node/link/hyperedge survives via the
-    exact same loop used when patterns are present. This is a stricter reading of design.md's stated intent ("the
-    same 'empty means everything' convention... always run the real code path with a no-op input") than design.md's
-    own sketch would have delivered literally. <code>TestEmptyExcludePatternsIsStructuralNoOp</code> exercises both
-    <code>nil</code> and <code>[]string{}</code> and gets identical, structurally-verified results for both.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified, out of scope for this diff</span> &nbsp; The UI diff in this merge is an unrelated pre-existing fix, not graphify scope creep</h3>
-    <p><code>git diff 169c6d1 c9d73cf --stat</code> includes <code>internal/ui/static/index.html</code> (11 lines).
-    Reading the diff shows it removes a duplicate <code>const progressByRun</code> declaration that was breaking the
-    dashboard's script parse. This is commit <code>e8d8011</code>'s own content — parent 1 of this merge, a fix
-    that landed on <code>v2</code> independently of the graphify feature branch (parent 2, <code>b64a01f</code>).
-    It appears in this diff only because a two-parent merge's diff against the merge-base necessarily includes both
-    parents' independent changes, not because <code>graphify-honors-exclude-patterns</code>'s own tasks.md scope
-    (which explicitly says "touches only <code>internal/graphify/graphify.go</code>... and a new small helper")
-    was exceeded. No graphify-related change touches the UI.</p>
+    <h3><span class="sev low">verified, real</span> &nbsp; The dispatched branch is actually named <code>&lt;type&gt;/&lt;change-id&gt;</code> in real git, and PR creation targets the same branch</h3>
+    <p><code>TestDispatchedBranchIsNamedByItsTypeAndChange</code> and <code>TestCreatePRTargetsTheExactBranchThatWasCreated</code> (both in <code>internal/ui/work_type_test.go</code>) both pass. The first checks <code>git rev-parse --abbrev-ref HEAD</code> inside the real fleet worktree and <code>git show-ref --verify --quiet refs/heads/&lt;branch&gt;</code> against the real source repo — genuine git state, not <code>naming.BranchName</code> compared against its own output. The second stubs <code>Server.GHPRCreate</code> to capture the branch argument <code>gh pr create</code> would have been invoked with, and separately checks the API response's own <code>branch</code> field — both equal the branch <code>git show-ref</code> confirms actually exists. This directly satisfies specs/work-type/spec.md's "Pull-request creation targets the same branch that was actually created" scenario with real, not computed, evidence.</p>
   </div>
 
   <div class="item warn">
-    <h3><span class="sev low">investigated, not reproducible, does not affect verdict</span> &nbsp; A sibling reviewer's flagged flake in this exact test could not be reproduced</h3>
-    <p>Review 021 (a concurrent, independent review of the unrelated plan-approval fix at <code>494179e</code>)
-    reported that one of its two full-suite runs saw <code>TestDanglingLinkAndHyperedgeAfterNodeExclusionAreRemoved</code>
-    fail once, and that 35 of its own targeted reruns afterward all passed. Because this is precisely the test I
-    relied on for my own dangling-reference mutation testing above, I investigated it independently rather than
-    assuming their non-reproduction result covered my use of it: I reran the single test 50 times
-    (<code>-count=1</code> per invocation) and the whole <code>internal/graphify</code> package 20 times, plus once
-    under <code>go test -race</code>. All 70+ runs passed; the race detector found nothing. The test and the
-    exclusion logic it covers do not depend on map iteration order for any observable output (the assertions check
-    set membership via <code>containsID</code>/slice-length, not order), so I see no mechanism by which
-    <code>filterGraphFile</code> itself would produce nondeterministic results. This is consistent with Review
-    021's own conclusion — an environmental, non-reproducible flake, not a defect in the exclusion logic — and does
-    not change my verdict.</p>
+    <h3><span class="sev med">real gap, non-blocking for this diff's own stated scope</span> &nbsp; A pre-migration run or intent has <code>Type == ""</code>, and two of the five <code>naming.BranchName</code> call sites have no guard against it</h3>
+    <p>The shipped <code>TestOpenAddsTypeColumnsToAnOlderDatabase</code> (<code>internal/store/work_type_test.go:85-183</code>) proves, deliberately and by design, that a run or intent row written before this migration reads back with <code>Type == ""</code> — "nothing to backfill" is the comment's own words, and this is the correct, intentional behavior for the migration itself. The gap is downstream of that: <code>describeDelivery</code> (<code>internal/ui/server.go:1701-1702</code>) does
+    <code>if run, err := srv.Store.GetRun(runID); err == nil { branch = naming.BranchName(run.Type, run.ChangeID) }</code> — <code>GetRun</code> succeeds for a legacy row (it has no reason not to), so <code>branch</code> becomes <code>naming.BranchName("", "&lt;change-id&gt;")</code> = <code>"/&lt;change-id&gt;"</code>, not the row's real historical branch, which is actually named <code>"sergeant/&lt;run-id&gt;"</code> (the pre-this-change format <code>dag.BranchName</code> used to compute correctly for exactly this case). <code>handleCreatePR</code> (<code>:652-658</code>) has the identical shape: it 500s only if <code>GetRun</code> itself errors, never if <code>Type</code> is empty, and would attempt <code>gh pr create --head "/&lt;change-id&gt;"</code> for a legacy run. I confirmed by direct inspection of <code>naming.BranchName</code>'s one-line body (<code>return workType + "/" + changeID</code>) that this is not a hypothetical — it is the literal, unconditional output for an empty <code>workType</code>. No test in this diff exercises <code>describeDelivery</code> or <code>handleCreatePR</code> against a <code>Type == ""</code> row; the shipped tests that reach these two functions all dispatch through the validated path, so they always carry a real type. Severity: this only affects runs and proposed intents already sitting in a database that predates this deploy — proposal.md's own out-of-scope section only disclaims <em>reclassifying</em> old rows, not the narrower, more specific fact that new code reading old rows now computes a wrong-but-plausible-looking value instead of erroring or falling back to the old format. This does not fail any scenario in <code>specs/work-type/spec.md</code>, all of which describe dispatches made through the validated path from now on — but it is a real, silent regression in <code>describeDelivery</code>'s branch report for any run that existed before this commit, and it was not evaluated in the builder's own stated verification (which covers "the branch created," not "the branch computed for a pre-existing run").</p>
   </div>
 
 </section>
@@ -246,76 +149,65 @@ a{color:var(--muted)}
   <h2>Evidence index</h2>
   <table>
     <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
-    <tr><td>Build/vet/test clean at HEAD <code>494179e</code></td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 11/11 packages</td></tr>
-    <tr><td>Node exclusion by <code>source_file</code></td><td><code>TestExcludedFileNodeIsRemoved</code></td><td>pass; exact surviving id asserted (<code>n1</code> only)</td></tr>
-    <tr><td>Link/hyperedge exclusion by own <code>source_file</code></td><td><code>TestExcludedFileLinkAndHyperedgeAreRemoved</code></td><td>pass; both nodes survive (neither excluded), link and hyperedge both empty</td></tr>
-    <tr><td>Dangling link/hyperedge removed after node exclusion</td><td><code>TestDanglingLinkAndHyperedgeAfterNodeExclusionAreRemoved</code></td><td>pass; only <code>n1</code> survives, both link and hyperedge slices empty</td></tr>
-    <tr><td>Recursive <code>**</code> excludes a whole directory, including deep nesting</td><td><code>TestRecursivePatternExcludesEntireDirectory</code> (<code>vendor/**</code> against a 2-level-deep file)</td><td>pass; only <code>n1</code> (outside <code>vendor/</code>) survives</td></tr>
-    <tr><td>Empty patterns produce structurally identical output</td><td><code>TestEmptyExcludePatternsIsStructuralNoOp</code>: <code>reflect.DeepEqual</code> on parsed <code>interface{}</code>, fixture with 4 extra top-level keys + 3 extra per-element fields, both <code>nil</code> and <code>{}</code> patterns</td><td>pass, both cases</td></tr>
-    <tr><td>Real end-to-end wiring into <code>BuildProjectGraph</code></td><td><code>TestBuildProjectGraphAppliesExcludePatterns</code>: real git repo, real <code>graphify extract</code> invocation, <code>ExcludePatterns: []string{"vendored.go"}</code></td><td>pass; published <code>graph.json</code> contains no <code>vendored.go</code> source files</td></tr>
-    <tr><td><strong>My mutation test 1: link dangling check</strong></td><td>Deleted the <code>!survivingIDs[l.Source] || !survivingIDs[l.Target]</code> block; reran <code>TestDanglingLinkAndHyperedgeAfterNodeExclusionAreRemoved</code>; restored</td><td><strong>fails as predicted</strong> (dangling link present); <code>git diff</code>/<code>git status --porcelain</code> empty after restore</td></tr>
-    <tr><td><strong>My mutation test 2: hyperedge &lt;2-endpoint check</strong></td><td>Changed <code>remaining &lt; 2</code> to <code>false</code>; reran the same test; restored</td><td><strong>fails as predicted</strong> (dangling hyperedge present); clean tree confirmed after restore</td></tr>
-    <tr><td><strong>My own 12 additional matcher test cases</strong></td><td>Throwaway <code>zzscratch_test.go</code>: <code>a/**/b</code> vs <code>a/b</code>/<code>a/x/y/b</code>/<code>a/x/b/c</code>; <code>**/*.go</code> vs root-level <code>main.go</code> and nested paths; <code>a/b</code> vs <code>a/b/c</code> and vice versa (no <code>**</code>, exact segment count); <code>**</code> alone vs arbitrary and empty names</td><td>all 12 pass; file deleted, <code>git status --porcelain</code> confirmed clean</td></tr>
-    <tr><td>No third-party glob dependency added</td><td><code>git diff 169c6d1 c9d73cf -- go.mod go.sum</code></td><td>empty diff; still 3 direct dependencies</td></tr>
-    <tr><td>Filter wired before atomic publish</td><td>Read <code>internal/graphify/graphify.go</code> lines 94–140</td><td><code>filterGraphFile</code> at line 99, strictly before manifest write (103), <code>publishHook</code> (118), and backup-rename/publish (131+)</td></tr>
-    <tr><td><code>config.go</code>'s doc-comment update matches the new behavior</td><td><code>git diff 169c6d1 c9d73cf -- internal/config/config.go</code></td><td>only the <code>ExcludePatterns</code> comment changed; field type/tags unchanged; <code>config_test.go</code> still parses <code>exclude_patterns</code> correctly</td></tr>
-    <tr><td>UI diff in this merge is unrelated to graphify</td><td>Read <code>internal/ui/static/index.html</code> diff and <code>e8d8011</code>'s own commit message/content</td><td>duplicate <code>const progressByRun</code> removal — parent 1's independent fix, not graphify scope</td></tr>
-    <tr><td>No graphify-affecting commits between <code>c9d73cf</code> and current HEAD</td><td><code>git log --oneline c9d73cf..HEAD</code> (8 commits) and their stats</td><td>all in D5b/D5a/D2/review-doc/plan-approval scope; none touch <code>internal/graphify</code></td></tr>
-    <tr><td>Review 021's flagged flake in this exact test is not reproducible</td><td>50 reruns of <code>TestDanglingLinkAndHyperedgeAfterNodeExclusionAreRemoved</code>, 20 reruns of the whole <code>internal/graphify</code> package, 1 run with <code>-race</code></td><td>0 failures across 70+ runs; race-clean</td></tr>
+    <tr><td>Build/vet/test clean at HEAD <code>cc486c8</code></td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 11/11 packages, vet silent</td></tr>
+    <tr><td>Zero remaining hand-built branch strings</td><td><code>grep -rn '"sergeant/'</code>, <code>grep -rn 'Sprintf("sergeant'</code>, <code>grep -rn 'dag\.BranchName'</code> across the whole repo</td><td>only unrelated <code>Producer</code> labels remain; <code>dag.BranchName</code> fully deleted</td></tr>
+    <tr><td>All 5 <code>naming.BranchName</code> call sites converged, real lookups</td><td><code>grep -rn 'naming\.BranchName('</code>: <code>dag/engine.go:148</code>, <code>ui/server.go:658,1702</code>, <code>mcp/server.go:429</code>, <code>runner/runner.go:604</code></td><td>all 5 preceded by a <code>Store.GetRun</code> call; no literal passed at any production call site</td></tr>
+    <tr><td><code>internal/runner</code> does not import <code>internal/dag</code></td><td><code>grep -n '"github.com/callmeradical/sergeant/internal' internal/runner/runner.go</code></td><td>imports <code>handoff</code>, <code>naming</code>, <code>redact</code>, <code>store</code> only</td></tr>
+    <tr><td><code>handleDispatch</code> validates type before change resolution and both branches</td><td>Read <code>internal/ui/server.go</code> lines 1360–1487</td><td>order confirmed: decode → brief check → <code>validateWorkType</code> → <code>LoadProject</code> → <code>ValidateAgent</code> → change resolution → fork</td></tr>
+    <tr><td>Fixed vocabulary matches proposal.md exactly</td><td>Read <code>validWorkTypes</code> map literal</td><td><code>feat, fix, refactor, docs, chore, test</code> — 6, no more, no fewer</td></tr>
+    <tr><td>Every run/intent SELECT uses the shared column list</td><td><code>grep -n 'FROM runs\|INTO runs\|FROM intents\|INTO intents\|runColumns\|intentColumns' internal/store/*.go</code>, including <code>reconcile.go</code></td><td>all 8 full-row queries use <code>runColumns</code>/<code>intentColumns</code> + <code>scanRun</code>/<code>scanIntent</code>; no hand-copied list found</td></tr>
+    <tr><td><strong>My own mutation test: plan-approval type reuse</strong></td><td>Threw away test proposing type <code>"refactor"</code>, approved, asserted <code>run.Type == "refactor"</code>; then reverted <code>handleApprovePlan</code>'s argument to <code>""</code> and reran both my test and the shipped <code>TestApprovingAPlanReusesItsRecordedType</code></td><td>both pass on the real code; both <strong>fail as predicted</strong> (<code>run.Type == ""</code>) on the mutation; restored, <code>git diff --stat</code> empty, throwaway file deleted</td></tr>
+    <tr><td>Real git branch name and PR-target branch match</td><td><code>go test ./internal/ui/... -run TestDispatchedBranchIsNamedByItsTypeAndChange -v</code>; read the test's own assertions</td><td>pass; asserts <code>git rev-parse --abbrev-ref HEAD</code> and <code>git show-ref</code> against real git, not a computed string; sibling <code>TestCreatePRTargetsTheExactBranchThatWasCreated</code> also passes as part of the full suite</td></tr>
+    <tr><td><strong>Empty-<code>Type</code> edge case</strong></td><td>Read <code>TestOpenAddsTypeColumnsToAnOlderDatabase</code> (proves legacy <code>Type == ""</code>); read <code>naming.BranchName</code>'s body; read <code>describeDelivery</code> and <code>handleCreatePR</code> for a guard</td><td>no guard exists; <code>naming.BranchName("", changeID)</code> = <code>"/&lt;change-id&gt;"</code> for a legacy run; not covered by any shipped test — reported as a caveat, not a blocking defect against this diff's own stated scenarios</td></tr>
+    <tr><td>Current HEAD is 1 commit ahead of the reviewed merge, docs-only</td><td><code>git log --oneline fb9a87d..HEAD</code>; <code>git show --stat cc486c8</code></td><td>1 commit, PRD/OpenSpec docs for an unrelated future change, no code files touched</td></tr>
   </table>
 </section>
 
 <section>
   <h2>Verdict</h2>
-  <div class="item ok">
-    <p><strong>MEETS SPEC.</strong> Every scenario in <code>specs/graphify-exclusion/spec.md</code> is genuinely
-    implemented and genuinely tested against real fixtures with exact assertions (specific surviving node ids,
-    specific empty slices, structural equality via <code>reflect.DeepEqual</code>), not generic truthiness. The
-    dangling-reference cleanup for both links and hyperedges is real, load-bearing code — I independently mutated
-    both the link-side check and the hyperedge &lt;2-endpoint threshold, and both mutations produced the predicted
-    test failure, then both were restored to a byte-identical <code>git diff</code>. The <code>*</code>/<code>**</code>
-    glob matcher is correct on the shipped test's own cases and on 12 additional cases of my own devising, including
-    the specific edge cases requested (zero-segment <code>**</code> match, <code>**</code> at pattern start matching
-    a root-level file, and a no-<code>**</code> pattern correctly requiring an exact segment count in both
-    directions). Every unrecognized field, at the top level and within each kept node/link/hyperedge, is preserved
-    by construction (whole-element <code>json.RawMessage</code>, never a narrowing struct) — the shipped
-    implementation is in fact stronger than design.md's own pseudocode sketch, which would have silently dropped
-    per-element unknown fields had it been implemented literally. The filter is wired into <code>BuildProjectGraph</code>
-    strictly before the manifest write and the atomic backup-rename/publish sequence, so a filter failure cannot
-    corrupt or partially replace a previously published graph. No third-party glob or pattern-matching dependency
-    was added to <code>go.mod</code>. The full test suite (11/11 packages, including a real invocation of the
-    external <code>graphify</code> binary through <code>TestBuildProjectGraphAppliesExcludePatterns</code>) passes
-    at current HEAD <code>494179e</code>, 8 commits ahead of the reviewed merge, none of which touch
-    <code>internal/graphify</code>. A sibling reviewer (Review 021) flagged a single-run flake in exactly the test I
-    used for my own dangling-reference mutation testing; I investigated it independently with 70+ additional runs
-    including a <code>-race</code> pass and could not reproduce it either, and found no mechanism in the code by
-    which it could be order-dependent — consistent with an environmental flake, not a defect. Separately, this
-    merge's diff also carries an 11-line UI fix (a duplicate <code>const progressByRun</code> declaration) — that
-    fix is parent 1's own independent content (<code>e8d8011</code>), not scope creep introduced by the graphify
-    change itself, whose own tasks.md scope (<code>internal/graphify/graphify.go</code> plus a new helper) is
-    respected exactly. No genuine gaps found.</p>
+  <div class="item warn">
+    <p><strong>MEETS SPEC WITH CAVEATS.</strong> Every scenario in <code>specs/work-type/spec.md</code> is genuinely
+    implemented: a dispatch without a recognized type is refused before any run, intent, or worktree exists; the
+    stated type is durably recorded on the run and, for a proposed plan, the intent; approving a plan reuses the
+    plan's originally recorded type rather than re-deriving or defaulting it (independently mutation-confirmed by me,
+    not just trusted from the shipped test); and the dispatched branch is genuinely named <code>&lt;type&gt;/&lt;change-id&gt;</code>
+    in real git, with <code>gh pr create</code> targeting that exact same branch. The four independently
+    hand-duplicated <code>"sergeant/&lt;run-id&gt;"</code> constructions this change set out to consolidate are
+    genuinely gone — a repo-wide grep confirms zero remaining hand-built branch-name literals, and all five real
+    call sites of <code>naming.BranchName</code> converge on a real <code>Store.GetRun</code> lookup, not a
+    passed-through literal. The import-cycle reasoning for relocating <code>BranchName</code> to
+    <code>internal/naming</code> is real, confirmed by reading <code>runner.go</code>'s own import list rather than
+    relying on <code>go build</code> succeeding alone. The <code>runColumns</code>/<code>intentColumns</code>
+    consolidation is complete, including a query in a separate file (<code>reconcile.go</code>) that a
+    same-file-only grep would have missed. The one caveat: a run or intent row written before this migration reads
+    back with <code>Type == ""</code> (proven by the shipped <code>TestOpenAddsTypeColumnsToAnOlderDatabase</code>),
+    and two of the five <code>naming.BranchName</code> call sites — <code>describeDelivery</code> and
+    <code>handleCreatePR</code> — have no guard against this, silently computing a malformed
+    <code>"/&lt;change-id&gt;"</code> branch name for such a row instead of the row's real historical
+    <code>"sergeant/&lt;run-id&gt;"</code> branch, or an explicit error. This does not fail any scenario the spec
+    actually states (all of which describe dispatches made through the validated path going forward), and
+    proposal.md explicitly disclaims reclassifying historical rows — but it does not address the narrower,
+    concrete fact that new code now reads old rows and produces a plausible-looking wrong answer rather than an
+    error, for as long as any pre-migration run or proposed plan exists in a database that has taken this upgrade.
+    This is a real, reportable gap, not a blocking defect against the diff's own stated scope. Build, vet, and the
+    full test suite (11/11 packages) are clean at current HEAD, one commit ahead of the reviewed merge, that one
+    commit being docs-only and unrelated.</p>
   </div>
 </section>
 
 <footer>
-  <p class="meta">Review 022 · findings above are reproduced from commands run directly against the current
-  <code>v2</code> working tree, comparing the merge commit <code>c9d73cf</code> against its merge-base
-  <code>169c6d1</code>, with build/vet/test rerun at current HEAD <code>494179e</code>. Two mutations were applied
-  and reverted in place, both in <code>internal/graphify/exclude.go</code>: (1) the link dangling-reference check
-  (<code>if !survivingIDs[l.Source] || !survivingIDs[l.Target] { continue }</code>) deleted entirely, reran
-  <code>TestDanglingLinkAndHyperedgeAfterNodeExclusionAreRemoved</code>, confirmed it failed on the predicted
-  symptom, restored via <code>git checkout</code>; (2) the hyperedge threshold (<code>if remaining &lt; 2</code>)
-  changed to <code>if false</code>, reran the same test, confirmed it failed on the predicted symptom, restored.
-  <code>git diff</code>/<code>git status --porcelain</code> confirmed empty after each restoration and again before
-  this review was written. A throwaway matcher test file (<code>internal/graphify/zzscratch_test.go</code>, 12
-  cases exercising <code>**</code>/<code>*</code> semantics beyond the shipped suite) was written, run, and deleted;
-  <code>git status --porcelain</code> confirmed clean before this review was written. This review's own attempt to
-  write itself as "Review 021" hit a concurrent write: another critic (reviewing the unrelated plan-approval fix at
-  <code>494179e</code>) had already committed its own Review 021 (<code>eb652c7</code>) between this review's first
-  read of <code>progress.html</code> and its write attempt. The file was re-read fresh, confirmed to show that
-  Review 021 as latest, and this entry renumbered to 022 rather than overwriting it. Prior review entries (001–021)
-  were not re-examined beyond reading Review 021's own text to investigate its flagged flake (see Findings); they
-  otherwise stand as recorded in their own text in git history, which this rewrite does not reproduce.</p>
+  <p class="meta">Review 023 · findings above are reproduced from commands run directly against the current
+  <code>v2</code> working tree, comparing the merge commit <code>fb9a87d</code> against its merge-base
+  <code>8dfeb49</code>, with build/vet/test rerun at current HEAD <code>cc486c8</code>. One throwaway test file
+  (<code>internal/ui/independent_review_throwaway_test.go</code>) was written to independently verify plan-approval
+  type reuse with a type (<code>"refactor"</code>) the shipped test suite does not use for that scenario; it was
+  run (passed), used to confirm a mutation of <code>handleApprovePlan</code> (its final argument to
+  <code>createRunAndDispatch</code> changed from <code>intent.Type</code> to <code>""</code>) produced the predicted
+  failure (<code>run.Type == ""</code>) in both my test and the shipped <code>TestApprovingAPlanReusesItsRecordedType</code>,
+  then the mutation was reverted and the throwaway file deleted. <code>git diff --stat internal/ui/server.go</code>
+  and <code>git status --short</code> were both confirmed empty/clean after restoration and again before this review
+  was written. Prior review entries (001–022) were not re-examined; they stand as recorded in their own text in git
+  history, which this rewrite does not reproduce.</p>
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
