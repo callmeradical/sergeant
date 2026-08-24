@@ -1189,6 +1189,17 @@
       return { placed, rows: rows.length, width: maxRight + GEO.padX, height: y - GEO.wrapGap + GEO.padY };
     }
 
+    // LIFECYCLE_MEANING explains each Delivery stage on hover \u2014 an operator
+    // reading "sealed" or "merged" for the first time has no other way to
+    // learn what sergeant means by them without reading the source.
+    const LIFECYCLE_MEANING = {
+      pending: 'Bullet created; no gate evidence recorded yet.',
+      red:     'A failing gate result has been recorded \u2014 proof the test was written before the fix (decision D3).',
+      green:   'All gates passed.',
+      sealed:  'A human explicitly approved this bullet\u2019s delivery by creating its pull request (only possible once green). Records that the approval happened, not that a PR necessarily exists on the host.',
+      merged:  'Sergeant observed this bullet\u2019s pull request as merged on the host. Sergeant never merges anything itself (decision D6) \u2014 this only reflects what actually happened.',
+    };
+
     function nodeCardHTML(node, phase, absolute) {
       const state = phase ? (NODE_LOOK[phase.status] ? phase.status : 'pending') : 'pending';
       const look = NODE_LOOK[state];
@@ -1197,15 +1208,18 @@
       const branch = (pl.branch || '').trim();
       const worktree = (pl.worktree || '').trim();
       const kindLabel = node.kind === 'gate' ? 'gate' : node.kind === 'lifecycle' ? 'delivery' : 'stage';
+      const meaning = node.kind === 'lifecycle' ? (LIFECYCLE_MEANING[node.label] || '') : '';
+      const titleAttr = meaning ? ` title="${escapeAttr(meaning)}"` : '';
 
       const clickable = !!phase;
       const tag = clickable ? 'button' : 'div';
       const pos = absolute ? `position:absolute;left:${absolute.x}px;top:${absolute.y}px;width:${GEO.nodeW}px;height:${GEO.nodeH}px;` : `width:${GEO.nodeW}px;height:${GEO.nodeH}px;`;
       const shell = clickable
-        ? `type="button" onclick="openPhaseDrawer('${escapeAttr(phase.kind || '')}','${escapeAttr(phase.name)}', this)"
-           aria-label="${escapeAttr(node.label + ' ' + kindLabel + ', ' + phase.status + (worktree ? ', worktree ' + worktree : '') + '. Open detail.')}"
+        ? `type="button" onclick="openPhaseDrawer('${escapeAttr(phase.kind || '')}','${escapeAttr(phase.name)}', this)"${titleAttr}
+           aria-label="${escapeAttr(node.label + ' ' + kindLabel + ', ' + phase.status + (worktree ? ', worktree ' + worktree : '') + (meaning ? '. ' + meaning : '') + '. Open detail.')}"
            class="group flex items-center gap-2 px-2.5 rounded-md border border-[#30363d] bg-[#161b22] hover:border-[#58a6ff] hover:bg-[#1c2430] cursor-pointer transition text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]"`
-        : `aria-label="${escapeAttr(node.label + ' ' + kindLabel + ', not started')}"
+        : `${titleAttr}
+           aria-label="${escapeAttr(node.label + ' ' + kindLabel + ', not started' + (meaning ? '. ' + meaning : ''))}"
            class="flex items-center gap-2 px-2.5 rounded-md border border-dashed border-[#30363d] bg-transparent"`;
 
       return `<${tag} style="${pos}" ${shell}>

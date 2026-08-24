@@ -117,6 +117,7 @@ func renderLaneWidth(t *testing.T, repo string, def workflowDefJSON, phases []st
 		"const escapeAttr = escapeHTML;",
 		extractJSFunction(t, src, "formatDuration"),
 		extractJSBlock(t, src, "const NODE_LOOK = {"),
+		extractJSBlock(t, src, "const LIFECYCLE_MEANING = {"),
 		extractJSBlock(t, src, "const GEO = {"),
 		extractJSFunction(t, src, "nodeCardHTML"),
 		extractJSFunction(t, src, "columnWidth"),
@@ -358,6 +359,26 @@ func TestGraphDeliveryWithNoBulletRendersAllNotStarted(t *testing.T) {
 		row := html[max(0, idx-200):min(idx+200, len(html))]
 		if !strings.Contains(row, "not started") {
 			t.Errorf("lifecycle node %q rendered as reached with no bullet present, want not-reached\nrow: %s", status, row)
+		}
+	}
+}
+
+// An operator seeing "sealed" or "merged" for the first time has no way to
+// learn what sergeant means by them without reading the source — every
+// lifecycle node must carry an explanatory tooltip.
+func TestGraphDeliveryNodesHaveExplanatoryTooltips(t *testing.T) {
+	def := defFor(lifecycleNodes()...)
+
+	html := renderLane(t, "svc", def, nil)
+
+	for _, status := range store.BulletProgression() {
+		idx := strings.Index(html, ">"+status+"<")
+		if idx < 0 {
+			t.Fatalf("lifecycle node %q not found in output\n%s", status, html)
+		}
+		row := html[max(0, idx-1500):min(idx+50, len(html))]
+		if !strings.Contains(row, `title="`) {
+			t.Errorf("lifecycle node %q has no title tooltip attribute\nrow: %s", status, row)
 		}
 	}
 }
