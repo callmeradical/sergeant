@@ -13,6 +13,7 @@ import (
 
 	"github.com/callmeradical/sergeant/internal/config"
 	"github.com/callmeradical/sergeant/internal/graphify"
+	"github.com/callmeradical/sergeant/internal/redact"
 	"github.com/callmeradical/sergeant/internal/runner"
 	"github.com/callmeradical/sergeant/internal/store"
 )
@@ -364,6 +365,11 @@ func (s *MCPServer) executeTool(name string, args map[string]interface{}) (strin
 			}
 		}
 
+		// summary and payload are supplied directly by the calling agent, not
+		// built by sergeant field-by-field — the same reason an agent-authored
+		// envelope.json must be redacted before it reaches a durable record
+		// (internal/runner.RunAgentPhase). This is a second, independent MCP
+		// entry point into the same table, so it needs the same guarantee.
 		payloadBytes, _ := json.Marshal(args["payload"])
 		now := time.Now().UTC()
 		envRec := &store.EnvelopeRecord{
@@ -371,9 +377,9 @@ func (s *MCPServer) executeTool(name string, args map[string]interface{}) (strin
 			RunID:         runID,
 			Repo:          repo,
 			Stage:         stage,
-			Summary:       summary,
+			Summary:       redact.Text(summary),
 			Artifacts:     artifacts,
-			Data:          payloadBytes,
+			Data:          redact.JSON(payloadBytes),
 			Type:          "phase.completed",
 			SchemaVersion: "1",
 			OccurredAt:    now,
