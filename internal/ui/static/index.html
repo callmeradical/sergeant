@@ -850,6 +850,13 @@
       }
       if (p.command) rows.push(['Command', `<code class="text-amber-300 break-all">${escapeHTML(p.command)}</code>`]);
       if (p.agent) rows.push(['Agent', `<code class="text-teal-300">${escapeHTML(p.agent)}</code>`]);
+      // R4.6: model/provider are derived from real evidence of what executed
+      // the phase (e.g. an agent's own startup banner), not from requested
+      // configuration — absent when that evidence could not be parsed
+      // (an agent this project does not yet recognize), so both render only
+      // when actually known rather than as a blank or guessed value.
+      if (p.model) rows.push(['Model', `<code class="text-teal-300">${escapeHTML(p.model)}</code>`]);
+      if (p.provider) rows.push(['Provider', `<code class="text-teal-300">${escapeHTML(p.provider)}</code>`]);
       if (p.attempt) rows.push(['Attempt', escapeHTML(p.attempt)]);
       if (phase.error) rows.push(['Error', `<span class="text-rose-400 break-all">${escapeHTML(phase.error)}</span>`]);
 
