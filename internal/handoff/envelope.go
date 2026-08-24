@@ -17,6 +17,27 @@ type Envelope struct {
 	Payload   json.RawMessage `json:"payload,omitempty"`
 }
 
+// BlockedReason reads an optional blocked_reason string out of an envelope
+// payload. It returns "" when payload is not a JSON object, carries no
+// blocked_reason key, or the key's value is not a string — never an error,
+// since a missing or malformed reason is the same "no reason given" case
+// this exists to distinguish from an agent that explained itself.
+//
+// payload is expected to already have passed through redact.JSON: this reads
+// whatever it is given without redacting, so a caller reading an unredacted
+// payload would leak an unredacted reason.
+func BlockedReason(payload json.RawMessage) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	var fields map[string]interface{}
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return ""
+	}
+	reason, _ := fields["blocked_reason"].(string)
+	return reason
+}
+
 // Router handles passing envelopes and exported artifacts between worktrees.
 type Router struct {
 	// BaseDir is <fleet root>/<run_id>/handoff, where the fleet root comes from

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,18 +127,98 @@ func TestAPassingRunLeavesItsIntentInProgress(t *testing.T) {
 	}
 }
 
-func TestAFailedRunRecordsFailureOnItsBullets(t *testing.T) {
+func TestAFailedRunBlocksItsBulletsWithASynthesizedReason(t *testing.T) {
 	srv, st := terminalRunFixture(t, "pending", "pending")
 
 	srv.recordTerminalRun("sgt-run", "failed")
 
-	for i, got := range bulletStatuses(t, st, "sgt-run-intent") {
-		if got != "failed" {
-			t.Errorf("bullet %d status = %q, want failed", i+1, got)
+	bullets, err := st.ListBulletsForIntent("sgt-run-intent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, b := range bullets {
+		if b.Status != "blocked" {
+			t.Errorf("bullet %d status = %q, want blocked", i+1, b.Status)
+		}
+		if b.BlockedReason == "" {
+			t.Errorf("bullet %d has no blocked reason; a human must never be left with blocked and no explanation", i+1)
 		}
 	}
 	if got := intentStatus(t, st, "sgt-run-intent"); got != "in_progress" {
-		t.Errorf("intent status = %q after a failed run, want in_progress", got)
+		t.Errorf("intent status = %q after a blocked run, want in_progress", got)
+	}
+}
+
+// D5(b): when the agent's own envelope named why it could not proceed, that
+// reason is recorded on the bullet verbatim, not the synthesized fallback.
+func TestAFailedRunBlocksItsBulletsWithTheAgentReportedReason(t *testing.T) {
+	srv, st := terminalRunFixture(t, "pending", "pending")
+
+	if err := st.RecordEnvelope(&store.EnvelopeRecord{
+		ID:            "env-1",
+		RunID:         "sgt-run",
+		Repo:          "api",
+		Stage:         "build",
+		Type:          "phase.completed",
+		SchemaVersion: "1",
+		Producer:      "sergeant/runner",
+		CorrelationID: "sgt-run",
+		Data:          []byte(`{"blocked_reason":"requirement is ambiguous; needs a human decision"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv.recordTerminalRun("sgt-run", "failed")
+
+	bullets, err := st.ListBulletsForIntent("sgt-run-intent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, b := range bullets {
+		if b.Status != "blocked" {
+			t.Errorf("bullet %d status = %q, want blocked", i+1, b.Status)
+		}
+		if b.BlockedReason != "requirement is ambiguous; needs a human decision" {
+			t.Errorf("bullet %d blocked reason = %q, want the agent-reported reason verbatim", i+1, b.BlockedReason)
+		}
+	}
+}
+
+// R4.4: a blocked reason is retained text like any other and must not carry a
+// secret forward. The store's RecordEnvelope choke point redacts Data before
+// it is ever persisted, so the reason recordTerminalRun reads back is already
+// redacted — this asserts that redaction survives all the way to the bullet.
+func TestABlockedReasonWithASecretIsRedactedOnTheBullet(t *testing.T) {
+	srv, st := terminalRunFixture(t, "pending")
+
+	secret := "sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP"
+	if err := st.RecordEnvelope(&store.EnvelopeRecord{
+		ID:            "env-1",
+		RunID:         "sgt-run",
+		Repo:          "api",
+		Stage:         "build",
+		Type:          "phase.completed",
+		SchemaVersion: "1",
+		Producer:      "sergeant/runner",
+		CorrelationID: "sgt-run",
+		Data:          []byte(`{"blocked_reason":"needs a key: ` + secret + `"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv.recordTerminalRun("sgt-run", "failed")
+
+	bullets, err := st.ListBulletsForIntent("sgt-run-intent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, b := range bullets {
+		if strings.Contains(b.BlockedReason, secret) {
+			t.Errorf("bullet %d blocked reason leaked the secret: %q", i+1, b.BlockedReason)
+		}
+		if !strings.Contains(b.BlockedReason, "[REDACTED]") {
+			t.Errorf("bullet %d blocked reason was not redacted: %q", i+1, b.BlockedReason)
+		}
 	}
 }
 
@@ -234,13 +315,19 @@ func TestADispatchedRunAdvancesItsBulletsThroughTheTerminalPath(t *testing.T) {
 	}
 
 	intentID := resp.TaskID + "-intent"
-	statuses := bulletStatuses(t, st, intentID)
-	if len(statuses) == 0 {
+	bullets, err := st.ListBulletsForIntent(intentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bullets) == 0 {
 		t.Fatal("dispatch wrote no bullets")
 	}
-	for i, s := range statuses {
-		if s != "failed" {
-			t.Errorf("bullet %d status = %q after the run failed, want failed; the terminal path did not advance it", i+1, s)
+	for i, b := range bullets {
+		if b.Status != "blocked" {
+			t.Errorf("bullet %d status = %q after the run failed, want blocked; the terminal path did not advance it", i+1, b.Status)
+		}
+		if b.BlockedReason == "" {
+			t.Errorf("bullet %d has no blocked reason", i+1)
 		}
 	}
 	if s := intentStatus(t, st, intentID); s != "in_progress" {

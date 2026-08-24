@@ -105,7 +105,7 @@ func TestAgentPhaseFailureIsNotRecordedAsPassed(t *testing.T) {
 			agent := fakeAgent(t, dir, "agent.sh", tc.body)
 			pr, st := newRunner(t, agent, tc.timeout)
 
-			env, err := pr.RunAgentPhase(context.Background(), "build", "do the thing", 0)
+			env, _, err := pr.RunAgentPhase(context.Background(), "build", "do the thing", 0)
 			if err == nil {
 				t.Fatal("expected an error from a failed agent, got nil")
 			}
@@ -156,7 +156,7 @@ func TestAgentPhaseFailureErrorIsRedacted(t *testing.T) {
 	agent := fakeAgent(t, dir, "agent.sh", "echo 'API_KEY="+secret+"'; exit 1")
 	pr, _ := newRunner(t, agent, 10*time.Second)
 
-	_, err := pr.RunAgentPhase(context.Background(), "build", "do the thing", 0)
+	_, _, err := pr.RunAgentPhase(context.Background(), "build", "do the thing", 0)
 	if err == nil {
 		t.Fatal("expected an error from a failed agent, got nil")
 	}
@@ -175,7 +175,7 @@ func TestAgentPhaseRetriesAreObservable(t *testing.T) {
 	agent := fakeAgent(t, dir, "agent.sh", "exit 1")
 	pr, st := newRunner(t, agent, 10*time.Second)
 
-	if _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 2); err == nil {
+	if _, _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 2); err == nil {
 		t.Fatal("expected failure after retries")
 	}
 
@@ -199,7 +199,7 @@ func TestAgentPhaseSuccessStillPasses(t *testing.T) {
 	agent := fakeAgent(t, dir, "agent.sh", "echo done")
 	pr, st := newRunner(t, agent, 10*time.Second)
 
-	env, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	env, _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestAgentPhaseRecordsDurableDelivery(t *testing.T) {
 	agent := fakeAgent(t, dir, "agent.sh", "echo done")
 	pr, st := newRunner(t, agent, 10*time.Second)
 
-	if _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0); err != nil {
+	if _, _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -256,11 +256,11 @@ func TestAgentPhaseEnvelopesChainCausation(t *testing.T) {
 	agent := fakeAgent(t, dir, "agent.sh", "echo done")
 	pr, st := newRunner(t, agent, 10*time.Second)
 
-	first, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	first, _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
 	if err != nil {
 		t.Fatalf("unexpected error on first phase: %v", err)
 	}
-	second, err := pr.RunAgentPhase(context.Background(), "test", "brief", 0)
+	second, _, err := pr.RunAgentPhase(context.Background(), "test", "brief", 0)
 	if err != nil {
 		t.Fatalf("unexpected error on second phase: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestUnboundedAgentPhaseStillHonoursCancellation(t *testing.T) {
 	go func() { time.Sleep(200 * time.Millisecond); cancel() }()
 
 	start := time.Now()
-	_, err := pr.RunAgentPhase(ctx, "build", "do the thing", 0)
+	_, _, err := pr.RunAgentPhase(ctx, "build", "do the thing", 0)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -351,7 +351,7 @@ func TestAttemptNumberStartsAtOneAndIncrements(t *testing.T) {
 	pr, st := newRunner(t, agent, 10*time.Second)
 
 	// 2 retries = 3 attempts total
-	_, _ = pr.RunAgentPhase(context.Background(), "build", "brief", 2)
+	_, _, _ = pr.RunAgentPhase(context.Background(), "build", "brief", 2)
 
 	phases, err := st.ListPhasesForRun("run-1")
 	if err != nil {
@@ -390,7 +390,7 @@ exit 0`
 
 	pr, st := newRunner(t, agent, 10*time.Second)
 
-	env, err := pr.RunAgentPhase(context.Background(), "build", "brief", 1)
+	env, _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 1)
 	if err != nil {
 		t.Fatalf("expected success on retry, got: %v", err)
 	}
@@ -435,7 +435,7 @@ func TestSuccessfulFirstAttemptIsAttemptOne(t *testing.T) {
 	agent := fakeAgent(t, dir, "agent.sh", "echo done")
 	pr, st := newRunner(t, agent, 10*time.Second)
 
-	_, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	_, _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -479,7 +479,7 @@ func TestGooseAgentPhaseRecordsModelAndProvider(t *testing.T) {
 	agent := fakeAgent(t, dir, "goose", "echo '● new session · anthropic claude-sonnet-4-6'")
 	pr, st := newRunner(t, agent, 10*time.Second)
 
-	env, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	env, _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -519,7 +519,7 @@ func TestUnparsedAgentProvenanceIsEmptyNotGuessed(t *testing.T) {
 	agent := fakeAgent(t, dir, "opencode", "echo '● new session · anthropic claude-sonnet-4-6'")
 	pr, st := newRunner(t, agent, 10*time.Second)
 
-	env, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	env, _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -568,7 +568,7 @@ exit 0
 	}
 	pr, st := newRunner(t, agent, 10*time.Second)
 
-	env, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	env, _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -632,7 +632,7 @@ exit 0
 	}
 	pr, st := newRunner(t, agent, 10*time.Second)
 
-	env, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	env, _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -672,6 +672,82 @@ exit 0
 	}
 }
 
+// D5(b): an agent can explain why it could not proceed via a blocked_reason
+// key nested in its envelope's own payload — not a new top-level Envelope
+// field, so it inherits payload redaction rather than needing its own
+// call site (design.md, "Where the reason comes from"). RunAgentPhase makes
+// that reason available to its caller alongside the envelope and error.
+func TestRunAgentPhaseReturnsAgentReportedBlockedReason(t *testing.T) {
+	dir := t.TempDir()
+	script := `#!/bin/sh
+mkdir -p .sergeant
+cat > .sergeant/envelope.json <<'EOF'
+{"task_id":"run-1","repo":"svc","stage":"build","summary":"could not proceed","payload":{"blocked_reason":"requirement is ambiguous; needs a human decision"}}
+EOF
+exit 0
+`
+	agent := filepath.Join(dir, "goose")
+	if err := os.WriteFile(agent, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	pr, _ := newRunner(t, agent, 10*time.Second)
+
+	_, blockedReason, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if blockedReason != "requirement is ambiguous; needs a human decision" {
+		t.Errorf("blockedReason = %q, want the agent-reported reason verbatim", blockedReason)
+	}
+}
+
+// An agent that names no blocked_reason gives RunAgentPhase nothing to
+// report: the second return is "", not a guess.
+func TestRunAgentPhaseReturnsNoBlockedReasonWhenAgentNamesNone(t *testing.T) {
+	dir := t.TempDir()
+	agent := fakeAgent(t, dir, "agent.sh", "echo done")
+	pr, _ := newRunner(t, agent, 10*time.Second)
+
+	_, blockedReason, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if blockedReason != "" {
+		t.Errorf("blockedReason = %q, want empty for an envelope that named none", blockedReason)
+	}
+}
+
+// R4.4: blocked_reason is read out of env.Payload after redact.JSON has
+// already run over it, so a secret-shaped reason must come back redacted,
+// the same as every other payload field.
+func TestRunAgentPhaseRedactsTheReturnedBlockedReason(t *testing.T) {
+	dir := t.TempDir()
+	secret := "sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP"
+	script := `#!/bin/sh
+mkdir -p .sergeant
+cat > .sergeant/envelope.json <<EOF
+{"task_id":"run-1","repo":"svc","stage":"build","summary":"could not proceed","payload":{"blocked_reason":"needs a key: ` + secret + `"}}
+EOF
+exit 0
+`
+	agent := filepath.Join(dir, "goose")
+	if err := os.WriteFile(agent, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	pr, _ := newRunner(t, agent, 10*time.Second)
+
+	_, blockedReason, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(blockedReason, secret) {
+		t.Errorf("returned blockedReason leaked the secret: %q", blockedReason)
+	}
+	if !strings.Contains(blockedReason, "[REDACTED]") {
+		t.Errorf("returned blockedReason was not redacted: %q", blockedReason)
+	}
+}
+
 // An agent-authored envelope's Artifacts field must be redacted before
 // pr.Router.SaveEnvelope writes it to the handoff file on disk, not only
 // before pr.Store.RecordEnvelope — SaveEnvelope runs first, and
@@ -696,7 +772,7 @@ exit 0
 	}
 	pr, st := newRunner(t, agent, 10*time.Second)
 
-	env, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	env, _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -740,7 +816,7 @@ func TestBannerlessGooseOutputDoesNotFailPhase(t *testing.T) {
 	agent := fakeAgent(t, dir, "goose", "echo 'not a recognisable banner at all'")
 	pr, st := newRunner(t, agent, 10*time.Second)
 
-	env, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	env, _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -781,7 +857,7 @@ func TestRunAgentPhaseRedactsSecretsFromPersistedRecords(t *testing.T) {
 	agent := fakeAgent(t, dir, "agent.sh", "echo 'API_KEY="+secret+"'")
 	pr, st := newRunner(t, agent, 10*time.Second)
 
-	env, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	env, _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -61,7 +61,7 @@ func TestAdvanceBulletsForRunMovesEveryBulletOfThatRunsIntent(t *testing.T) {
 	st, _ := openTestStore(t)
 	seedIntentRun(t, st, "run-a", "intent-a", "in_progress", "pending", "pending", "pending")
 
-	if err := st.AdvanceBulletsForRun("run-a", "green"); err != nil {
+	if err := st.AdvanceBulletsForRun("run-a", "green", ""); err != nil {
 		t.Fatalf("advancing bullets: %v", err)
 	}
 
@@ -80,7 +80,7 @@ func TestAdvanceBulletsForRunIsIdempotent(t *testing.T) {
 	st, _ := openTestStore(t)
 	seedIntentRun(t, st, "run-b", "intent-b", "in_progress", "pending", "pending")
 
-	if err := st.AdvanceBulletsForRun("run-b", "green"); err != nil {
+	if err := st.AdvanceBulletsForRun("run-b", "green", ""); err != nil {
 		t.Fatalf("first advance: %v", err)
 	}
 	first, err := st.ListBulletsForIntent("intent-b")
@@ -95,7 +95,7 @@ func TestAdvanceBulletsForRunIsIdempotent(t *testing.T) {
 	// The clock has to move, so an unwanted rewrite would be visible.
 	time.Sleep(10 * time.Millisecond)
 
-	if err := st.AdvanceBulletsForRun("run-b", "green"); err != nil {
+	if err := st.AdvanceBulletsForRun("run-b", "green", ""); err != nil {
 		t.Fatalf("second advance returned an error: %v", err)
 	}
 
@@ -132,7 +132,7 @@ func TestAdvanceBulletsForARunWithNoIntentIsANoOp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := st.AdvanceBulletsForRun("run-c", "green"); err != nil {
+	if err := st.AdvanceBulletsForRun("run-c", "green", ""); err != nil {
 		t.Errorf("advancing a run with no intent = %v, want nil", err)
 	}
 }
@@ -141,7 +141,7 @@ func TestAdvanceBulletsForARunWithNoIntentIsANoOp(t *testing.T) {
 // silent success: reporting nil would let executeRun believe it had moved work.
 func TestAdvanceBulletsForAnUnknownRunIsAnError(t *testing.T) {
 	st, _ := openTestStore(t)
-	if err := st.AdvanceBulletsForRun("no-such-run", "green"); err == nil {
+	if err := st.AdvanceBulletsForRun("no-such-run", "green", ""); err == nil {
 		t.Error("expected an error advancing the bullets of an unknown run")
 	}
 }
@@ -239,7 +239,7 @@ func TestAdvanceBulletsForRunRederivesTheIntent(t *testing.T) {
 	st, _ := openTestStore(t)
 	seedIntentRun(t, st, "run-f", "intent-f", "satisfied", "merged", "merged")
 
-	if err := st.AdvanceBulletsForRun("run-f", "green"); err != nil {
+	if err := st.AdvanceBulletsForRun("run-f", "green", ""); err != nil {
 		t.Fatalf("advancing bullets: %v", err)
 	}
 	if stored := intentStatusOf(t, st, "intent-f"); stored != "in_progress" {

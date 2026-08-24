@@ -352,8 +352,12 @@ func BuildAgentCommand(agentCLI, model, prompt string) (string, []string, []stri
 	return exe, args, env
 }
 
-// RunAgentPhase executes a bounded headless agent session and validates output envelope with fallback safety.
-func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt string, retries int) (*handoff.Envelope, error) {
+// RunAgentPhase executes a bounded headless agent session and validates output
+// envelope with fallback safety. The second return is the blocked_reason the
+// agent's own envelope named, if any — read from env.Payload after it has
+// already passed through redact.JSON, so a caller receives it exactly as
+// persisted. It is "" when the agent's envelope named none.
+func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt string, retries int) (*handoff.Envelope, string, error) {
 	start := time.Now()
 	phaseID := fmt.Sprintf("%s-%s-%d", pr.RepoName, phaseName, time.Now().UnixNano())
 
@@ -427,7 +431,7 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 		// Operator cancellation is not a phase failure. Let the run-level handler
 		// record "cancelled" rather than blaming the agent.
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, "", ctx.Err()
 		}
 
 		// PRD R2.6: a process exit cannot falsely mark a phase as passed. Previously
@@ -492,6 +496,12 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 		for i, a := range env.Artifacts {
 			env.Artifacts[i] = redact.Text(a)
 		}
+
+		// Read after redaction, not before: the reason must reach every caller
+		// (and, via RecordEnvelope below, the store) exactly as redacted, never
+		// as the agent originally wrote it (design.md, "Where the reason comes
+		// from").
+		blockedReason := handoff.BlockedReason(env.Payload)
 
 		env.Payload = annotatePayloadWithProvenance(env.Payload, model, provider)
 
@@ -569,18 +579,18 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 			if attempt < retries {
 				continue
 			}
-			return nil, lastErr
+			return nil, blockedReason, lastErr
 		}
 
 		// Agent succeeded. Surface any delivery failure so the caller can observe
 		// it; the delivery history already records the cause.
 		if deliverErr != nil {
-			return nil, deliverErr
+			return nil, blockedReason, deliverErr
 		}
-		return &env, nil
+		return &env, blockedReason, nil
 	}
 
-	return nil, lastErr
+	return nil, "", lastErr
 }
 
 // DeliverPullRequest automatically seals the worktree and opens a verified Pull Request via GitHub CLI.
