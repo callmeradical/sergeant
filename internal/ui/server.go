@@ -2045,9 +2045,15 @@ func (srv *Server) appendRunProgress(runID string) {
 		items := make([]itemStatus, 0, len(p.Items))
 		for _, it := range p.Items {
 			items = append(items, itemStatus{
-				ID:       it.ID,
-				Status:   it.Status,
-				Scenario: it.Scenario,
+				ID:     it.ID,
+				Status: it.Status,
+				// Scenario is sergeant-seeded from the spec and the agent is
+				// instructed not to alter it, but plan.json is a file the
+				// agent has raw write access to and nothing enforces that
+				// instruction in code — and AppendChange writes straight to
+				// the changes table via raw SQL, bypassing the
+				// RecordPhase/RecordEnvelope choke point entirely.
+				Scenario: redact.Text(it.Scenario),
 			})
 		}
 

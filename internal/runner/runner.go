@@ -474,12 +474,24 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 		}
 
 		// An agent can write its own envelope.json (the branch above), whose
-		// Summary/Payload sergeant never built field-by-field and so never
-		// redacted at the point of construction — closing that gap here,
+		// Summary/Payload/Artifacts sergeant never built field-by-field and so
+		// never redacted at the point of construction — closing that gap here,
 		// unconditionally, covers both branches instead of trusting each new
 		// envelope-construction path to remember it.
+		//
+		// This must happen BEFORE pr.Router.SaveEnvelope below, not only before
+		// pr.Store.RecordEnvelope: SaveEnvelope writes env to a handoff file on
+		// disk (which internal/dag.Engine then commits into downstream
+		// worktrees), and it runs first. Store.RecordEnvelope's own choke-point
+		// redaction on Artifacts happened to make the DB row look clean only
+		// because it mutates the same backing array env.Artifacts already
+		// points to — the on-disk file had already been written unredacted by
+		// then (Review 018).
 		env.Summary = redact.Text(env.Summary)
 		env.Payload = redact.JSON(env.Payload)
+		for i, a := range env.Artifacts {
+			env.Artifacts[i] = redact.Text(a)
+		}
 
 		env.Payload = annotatePayloadWithProvenance(env.Payload, model, provider)
 

@@ -374,6 +374,62 @@ func TestProgressChangeIsAppendedToStream(t *testing.T) {
 	}
 }
 
+// plan.json's Scenario text is sergeant-seeded from the spec and the agent is
+// instructed not to alter it, but the file is one the agent has raw write
+// access to and nothing enforces that instruction in code. AppendChange
+// writes straight to the changes table via raw SQL, bypassing the
+// RecordPhase/RecordEnvelope choke point entirely — this is what an agent
+// that ignored the instruction (or a plan.json corrupted by anything else
+// with filesystem access) would put on the SSE-fed progress stream.
+func TestProgressChangeRedactsScenarioText(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("SERGEANT_FLEET_DIR", filepath.Join(base, "fleet"))
+
+	st, err := store.Open(filepath.Join(base, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	if err := st.CreateRun(&store.RunRecord{
+		ID: "run-secret", Project: "p", TaskID: "run-secret", Status: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	secret := "sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP"
+	worktree := filepath.Join(base, "fleet", "run-secret", "repo1")
+	if err := os.MkdirAll(filepath.Join(worktree, ".sergeant"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := plan.Plan{Items: []plan.PlanItem{
+		{ID: "s-1", Scenario: "API_KEY=" + secret, Status: plan.StatusInProgress},
+	}}
+	planData, _ := json.MarshalIndent(p, "", "  ")
+	if err := os.WriteFile(filepath.Join(worktree, ".sergeant", "plan.json"), planData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := NewServer(st, 0)
+	seqBefore, _ := st.CurrentSequence()
+	srv.appendRunProgress("run-secret")
+
+	changes, err := st.ListChangesSince(seqBefore, 10)
+	if err != nil {
+		t.Fatalf("listing changes: %v", err)
+	}
+	if len(changes) == 0 {
+		t.Fatal("no change appended")
+	}
+	last := changes[len(changes)-1]
+	if strings.Contains(string(last.Payload), secret) {
+		t.Errorf("progress change payload leaked the secret: %s", last.Payload)
+	}
+	if !strings.Contains(string(last.Payload), "[REDACTED]") {
+		t.Errorf("progress change payload was not redacted: %s", last.Payload)
+	}
+}
+
 // TestProgressAbsentPlanAppendsNoChange verifies that a run with no worktree
 // (or a worktree without plan.json) does NOT append any progress change.
 // "No progress reported" and "zero progress" are different statements.

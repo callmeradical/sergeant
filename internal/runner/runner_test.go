@@ -672,6 +672,66 @@ exit 0
 	}
 }
 
+// An agent-authored envelope's Artifacts field must be redacted before
+// pr.Router.SaveEnvelope writes it to the handoff file on disk, not only
+// before pr.Store.RecordEnvelope — SaveEnvelope runs first, and
+// internal/dag.Engine commits that file into downstream worktrees. Checking
+// only the returned envelope or the DB row (as TestAgentAuthoredEnvelopeIsRedacted
+// does) would miss this: RecordEnvelope's own redaction mutates the same
+// backing array env.Artifacts already points to, after the unredacted bytes
+// were already on disk (Review 018).
+func TestAgentAuthoredEnvelopeArtifactsAreRedactedBeforeDiskWrite(t *testing.T) {
+	dir := t.TempDir()
+	secret := "sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP"
+	script := `#!/bin/sh
+mkdir -p .sergeant
+cat > .sergeant/envelope.json <<EOF
+{"task_id":"run-1","repo":"svc","stage":"build","summary":"ok","artifacts":["API_KEY=` + secret + `"],"payload":{}}
+EOF
+exit 0
+`
+	agent := filepath.Join(dir, "goose")
+	if err := os.WriteFile(agent, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	pr, st := newRunner(t, agent, 10*time.Second)
+
+	env, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, a := range env.Artifacts {
+		if strings.Contains(a, secret) {
+			t.Errorf("returned envelope Artifacts leaked the secret: %q", a)
+		}
+	}
+
+	handoffFile := filepath.Join(pr.Worktree, "handoff", "svc", "envelope_build.json")
+	onDisk, err := os.ReadFile(handoffFile)
+	if err != nil {
+		t.Fatalf("reading handoff file: %v", err)
+	}
+	if strings.Contains(string(onDisk), secret) {
+		t.Errorf("handoff file on disk leaked the secret: %s", onDisk)
+	}
+	if !strings.Contains(string(onDisk), "[REDACTED]") {
+		t.Errorf("handoff file on disk was not redacted: %s", onDisk)
+	}
+
+	envelopes, err := st.ListEnvelopesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(envelopes) != 1 {
+		t.Fatalf("expected 1 envelope record, got %d", len(envelopes))
+	}
+	for _, a := range envelopes[0].Artifacts {
+		if strings.Contains(a, secret) {
+			t.Errorf("persisted EnvelopeRecord.Artifacts leaked the secret: %q", a)
+		}
+	}
+}
+
 // A goose phase whose output has no banner (malformed or missing) completes
 // exactly as it would without provenance parsing: the phase still passes, and
 // model/provider are empty rather than a guess.
