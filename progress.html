@@ -211,5 +211,188 @@ a{color:var(--muted)}
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
+<hr style="border:none;border-top:2px solid var(--ink);margin:44px 0">
+
+<header>
+  <h1>Sergeant v2</h1>
+  <p>Independent review. Written by the critic, not the builder.</p>
+  <p class="meta">
+    Review 024 · 2026-08-24 · branch <code>v2</code> · commits <code>a9389a1</code>
+    ("feat(store,ui): automated fleet cleanup reclaims old terminal runs' worktrees",
+    merge of <code>d2ef334</code> and <code>50e8579</code>) and its follow-on
+    <code>ccc8caa</code> ("test(ui): cover reclaimFleetDir's running-run refusal directly")
+    reviewed against <code>openspec/changes/automated-fleet-cleanup/</code>, diffed from
+    <code>cc486c8</code> (the commit immediately before this feature's implementation
+    commit, previously reviewed in Review 023 as docs-only) · current <code>v2</code> HEAD
+    is <code>ccc8caa</code>, the tip of this feature; build/vet/test run at that HEAD, not
+    an earlier commit
+  </p>
+</header>
+
+<section>
+  <h2>Current status</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at HEAD <code>ccc8caa</code></div></div>
+    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code>, whole module, no output</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">11/11 packages pass</span></div><div class="small"><code>go test ./internal/... -count=1</code>, including the 4 new <code>internal/store/cleanup_test.go</code> tests and the 7 new <code>internal/ui/cleanup_test.go</code> tests</div></div>
+    <div class="card"><div class="label"><code>RunsEligibleForCleanup</code> query</div><div class="value"><span class="status">verified, exact</span></div><div class="small">Filters <code>status IN ('passed','failed','cancelled','interrupted') AND updated_at &lt;= ?</code>, and uses the shared <code>runColumns</code> constant and <code>scanRun</code> — no hand-copied column list</div></div>
+    <div class="card"><div class="label">Shared reclaim decision</div><div class="value"><span class="status">genuinely one function</span></div><div class="small"><code>reclaimFleetDir</code> is the single home of the running-check, <code>dirtyWorktreesUnder</code> check, and <code>os.RemoveAll</code>; both <code>handleCleanWorktrees</code> and <code>reclaimEligibleFleetDirs</code> call it — no duplicated copy of the logic exists anywhere</div></div>
+    <div class="card"><div class="label">Background loop actually started</div><div class="value"><span class="status">verified, real, not the dead-loop bug class</span></div><div class="small"><code>go srv.runFleetCleanupLoop(context.Background())</code> is a live statement inside <code>Server.Start()</code> (<code>internal/ui/server.go:185</code>), right after <code>ReconcileOrphanedRuns</code>; <code>Server.Start()</code> is itself called from <code>cmd/sergeant/main.go:163</code> — traced the full call chain, not just <code>grep</code>'d the function definition</div></div>
+    <div class="card"><div class="label">Fixed constants</div><div class="value"><span class="status">verified</span></div><div class="small"><code>fleetCleanupRetention = 7 * 24 * time.Hour</code>, <code>fleetCleanupInterval = 1 * time.Hour</code>; both untyped Go constants, no env var or config read anywhere near them</div></div>
+    <div class="card"><div class="label">Manual endpoint's request/response shape</div><div class="value"><span class="status">unchanged</span></div><div class="small"><code>handleCleanWorktrees</code>'s <code>task_id</code>/<code>dry_run</code>/<code>force</code> request fields and its <code>status</code>/<code>removed</code>/<code>skipped</code>/<code>count</code> response fields are byte-for-byte the same as before the refactor; only its per-directory decision now delegates to <code>reclaimFleetDir</code></div></div>
+    <div class="card"><div class="label">My own mutation test</div><div class="value"><span class="status">regression genuinely caught</span></div><div class="small">Changed <code>reclaimEligibleFleetDirs</code>'s call from <code>force=false</code> to <code>force=true</code>: <code>TestReclaimEligibleFleetDirsLeavesADirtyWorktree</code> failed exactly as predicted (worktree deleted); reverted, tree confirmed clean, full suite rerun green</div></div>
+    <div class="card"><div class="label">Nonexistent-fleet-dir skip path</div><div class="value"><span class="status warn">correct in code, untested</span></div><div class="small"><code>reclaimEligibleFleetDirs</code> does <code>os.Stat</code> before touching a directory and <code>continue</code>s on any error, matching design.md's "silently skipped, not an error" — but no test in the shipped diff exercises an eligible run whose fleet directory was never created. See Findings.</div></div>
+  </div>
+  <p><strong>Verdict:</strong> MEETS SPEC WITH CAVEATS. Every scenario in
+  <code>specs/fleet-cleanup/spec.md</code> is genuinely implemented and covered by a
+  meaningful, non-tautological test, the reclaim decision is genuinely unified into one
+  function shared by both callers, the background loop is genuinely wired into the real
+  server-startup path (not the dead-loop bug class this review was specifically asked to
+  scrutinize), and no test or code path touches a database row. The caveats are narrow and
+  non-blocking: no test proves the "fleet directory does not exist" skip path, and the
+  loop's own store-query failure path (log-and-return-until-next-tick) is verified by
+  reading, not by a dedicated test. See Findings for detail.</p>
+</section>
+
+<section>
+  <h2>What I inspected</h2>
+  <table>
+    <tr><th>Area</th><th>Method</th></tr>
+    <tr><td>Binding spec</td><td>Read <code>openspec/changes/automated-fleet-cleanup/{proposal,design,tasks}.md</code> and <code>specs/fleet-cleanup/spec.md</code> in full before reading any code</td></tr>
+    <tr><td>The actual diff</td><td><code>git diff cc486c8 HEAD -- internal/store/store.go internal/ui/server.go internal/store/cleanup_test.go internal/ui/cleanup_test.go</code>, read in full, plus <code>git show ccc8caa</code> for the follow-on commit in isolation</td></tr>
+    <tr><td><code>RunsEligibleForCleanup</code></td><td>Read the query text directly (<code>internal/store/store.go</code>): <code>SELECT runColumns FROM runs WHERE status IN ('passed','failed','cancelled','interrupted') AND updated_at &lt;= ? ORDER BY updated_at ASC</code>, then <code>scanRun</code> per row — confirmed both the terminal-status list and the cutoff condition are ANDed together in one query, not applied as a post-filter in Go</td></tr>
+    <tr><td>Shared reclaim function</td><td>Read <code>reclaimFleetDir</code>'s full body and both call sites: <code>handleCleanWorktrees</code> (passes <code>req.Force</code>/<code>req.DryRun</code>) and <code>reclaimEligibleFleetDirs</code> (passes <code>false, false</code> unconditionally) — confirmed via <code>grep -n 'reclaimFleetDir('</code> that exactly these 2 call sites exist, and the running-check/dirty-check/<code>RemoveAll</code> logic exists in exactly 1 place</td></tr>
+    <tr><td>Loop wiring</td><td><code>grep -n 'runFleetCleanupLoop' internal/ui/server.go</code>: defined once, invoked once via <code>go srv.runFleetCleanupLoop(context.Background())</code> inside <code>Server.Start()</code>; then <code>grep -n '\.Start()' cmd/sergeant/main.go</code> confirmed <code>server.Start()</code> is called at <code>main.go:163</code> — traced start to finish rather than trusting the function's existence alone, since this exact "defined but never started" bug class was flagged as a specific risk for this review</td></tr>
+    <tr><td>Test substance: running-run refusal</td><td>Read <code>TestReclaimEligibleFleetDirsNeverTouchesARunningRun</code> (fixture: <code>status: "running"</code>, backdated 30 days) and <code>TestReclaimFleetDirRefusesARunningRunWithoutForce</code> (calls <code>reclaimFleetDir</code> directly); ran both, both pass. The commit message for <code>ccc8caa</code> itself documents that mutation testing found the direct-call test had zero prior coverage — I independently re-derived the same conclusion by inspection: the automatic path never reaches the guard because the SQL already excludes <code>running</code>, so only the direct test exercises the guard's own code</td></tr>
+    <tr><td>Test substance: dirty-worktree refusal</td><td>Read <code>TestReclaimEligibleFleetDirsLeavesADirtyWorktree</code>: builds a real git repo with an untracked file under the fleet directory via <code>initDirtyGitRepo</code>, so <code>dirtyWorktreesUnder</code>'s real <code>git status --porcelain</code> invocation reports it dirty — not a stubbed or mocked dirty signal</td></tr>
+    <tr><td>Database-untouched claim</td><td>Read <code>TestReclaimEligibleFleetDirsLeavesDatabaseRecordsUntouched</code>: creates a run with a phase and an envelope, backdates it past the retention window, snapshots <code>GetRun</code>/<code>ListPhasesForRun</code>/<code>ListEnvelopesForRun</code> before and after <code>reclaimEligibleFleetDirs</code>, and asserts field-level equality (status, <code>UpdatedAt</code>, phase IDs/status, envelope IDs/summary) — not just row counts</td></tr>
+    <tr><td>Manual endpoint's unchanged behavior</td><td>Read <code>handleCleanWorktrees</code> in full, before and after: request struct (<code>task_id</code>/<code>dry_run</code>/<code>force</code>), <code>task_id</code> path-traversal validation, the 200-recent-runs status lookup, and the response map (<code>status</code>/<code>removed</code>/<code>skipped</code>/<code>count</code>) are identical; only the per-directory running/dirty/removal logic was replaced with a call to <code>reclaimFleetDir</code>, preserving even the original's silent non-removal on a <code>RemoveAll</code> error (no reason string, not counted as skipped)</td></tr>
+    <tr><td>Fixed constants, no config</td><td>Read <code>fleetCleanupRetention</code> and <code>fleetCleanupInterval</code>: both untyped <code>const</code> declarations; <code>grep -n 'Getenv\|flag\.' internal/ui/server.go</code> around the cleanup code finds nothing wiring either to configuration</td></tr>
+    <tr><td><strong>My own mutation test</strong></td><td>Edited <code>reclaimEligibleFleetDirs</code>'s call from <code>reclaimFleetDir(fleetDir, run.Status, false, false)</code> to <code>reclaimFleetDir(fleetDir, run.Status, true, false)</code> (force always on); reran <code>TestReclaimEligibleFleetDirsLeavesADirtyWorktree</code> and <code>TestReclaimEligibleFleetDirsNeverTouchesARunningRun</code></td></tr>
+    <tr><td>Nonexistent-fleet-dir path</td><td>Read <code>reclaimEligibleFleetDirs</code>: <code>if _, err := os.Stat(fleetDir); err != nil { continue }</code> before ever calling <code>reclaimFleetDir</code> — matches design.md's "silently skipped, not an error" for both a missing directory and, more broadly, any stat failure; <code>grep</code>'d <code>internal/ui/cleanup_test.go</code> for a test that creates an eligible DB row with no corresponding fleet directory — found none</td></tr>
+    <tr><td>Store-query-failure path</td><td>Read <code>reclaimEligibleFleetDirs</code>: on <code>RunsEligibleForCleanup</code> error, <code>log.Printf</code>s and <code>return</code>s — the function returns, but <code>runFleetCleanupLoop</code>'s <code>for {}</code>/<code>select</code> keeps running and will retry on the next hourly tick; no panic, no server crash. No test forces a store error to exercise this path directly</td></tr>
+    <tr><td>Full suite</td><td><code>cd /Users/lars/Dev/sergeant-v2 &amp;&amp; go build ./... &amp;&amp; go vet ./... &amp;&amp; go test ./internal/... -count=1</code> at HEAD <code>ccc8caa</code>; also ran <code>-run 'Reclaim'</code> and <code>-run 'TestRunsEligibleForCleanup'</code> individually with <code>-v</code> to read every subtest's own pass/fail rather than trusting the package-level summary alone</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Findings</h2>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; The eligibility query genuinely ANDs terminal status with the cutoff, using the shared column list</h3>
+    <p><code>RunsEligibleForCleanup</code>'s SQL is <code>SELECT runColumns FROM runs WHERE status IN ('passed','failed','cancelled','interrupted') AND updated_at &lt;= ? ORDER BY updated_at ASC</code>. Both conditions are in the same <code>WHERE</code> clause, not one applied in SQL and the other in Go — a run that is <code>running</code> can never be returned regardless of how old its <code>updated_at</code> is, and a terminal run newer than the cutoff can never be returned regardless of status. <code>internal/store/cleanup_test.go</code>'s 4 tests independently exercise each half of this: <code>TestRunsEligibleForCleanupFindsOldTerminalRuns</code> (positive case), <code>TestRunsEligibleForCleanupExcludesRecentlyTerminalRuns</code> (cutoff half), <code>TestRunsEligibleForCleanupExcludesRunningRunsRegardlessOfAge</code> (status half, deliberately backdated 30 days to prove age alone cannot win), and <code>TestRunsEligibleForCleanupCoversEveryTerminalStatus</code> (all 4 named statuses, not just <code>passed</code>). The query reuses <code>runColumns</code>/<code>scanRun</code>, the exact constant the codebase's own Review 023 confirmed was introduced to prevent hand-copied column lists from drifting — this new query did not reintroduce one.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; The reclaim decision is one function, not a duplicated copy</h3>
+    <p><code>reclaimFleetDir(fleetDir, runStatus, force, dryRun)</code> contains the running-check, the <code>dirtyWorktreesUnder</code> check, and the <code>os.RemoveAll</code> call. <code>grep -n 'reclaimFleetDir('</code> across <code>internal/ui/server.go</code> finds exactly 2 call sites: <code>handleCleanWorktrees</code> (passing the request's own <code>force</code>/<code>dry_run</code>) and <code>reclaimEligibleFleetDirs</code> (passing <code>false, false</code> unconditionally, matching design.md's explicit "automatic cleanup never overrides the uncommitted-changes guard"). The diff actually deletes the old inline copy of this logic from <code>handleCleanWorktrees</code> rather than leaving it alongside a new duplicate — before this change the running-check and dirty-check lived directly in the handler; after, both are gone from the handler body and live only inside <code>reclaimFleetDir</code>. There is exactly one place this logic can drift from itself.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified, specifically scrutinized</span> &nbsp; The background loop is actually started, not merely defined</h3>
+    <p>This review was asked to specifically scrutinize this bug class. Traced the full chain: <code>internal/ui/server.go:185</code> contains the live statement <code>go srv.runFleetCleanupLoop(context.Background())</code>, inside <code>Server.Start()</code>, placed immediately after the existing <code>ReconcileOrphanedRuns</code> startup call (matching design.md's stated precedent) and before the HTTP listener starts serving. <code>cmd/sergeant/main.go:163</code> calls <code>server.Start()</code> — confirmed by direct <code>grep</code>, not inference — so <code>runFleetCleanupLoop</code> genuinely runs for the lifetime of every real server process, not just in a test harness that calls it directly. This is not the "implemented but never wired" bug class found elsewhere in this project's history.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified, non-tautological</span> &nbsp; The 3 named tests each catch a real regression, confirmed by my own mutation</h3>
+    <p><code>TestReclaimEligibleFleetDirsNeverTouchesARunningRun</code> constructs a <code>status: "running"</code> run backdated 30 days and asserts its fleet directory survives <code>reclaimEligibleFleetDirs()</code> — this would fail if a future change ever widened <code>RunsEligibleForCleanup</code>'s status list to include <code>running</code>, or if <code>reclaimEligibleFleetDirs</code> ever called <code>reclaimFleetDir</code> with <code>force=true</code>. <code>TestReclaimEligibleFleetDirsLeavesADirtyWorktree</code> builds a real git repository with an uncommitted file under the fleet directory (not a mock), and I independently mutated <code>reclaimEligibleFleetDirs</code>'s call to pass <code>force=true</code>: this test failed exactly as predicted (worktree deleted, <code>mustExist</code> assertions reporting "no such file or directory"), while the running-run test still passed (confirming it is testing a genuinely different guard). I reverted the mutation, confirmed <code>git status --short internal/ui/server.go</code> was empty, and reran the full suite clean. <code>TestReclaimFleetDirRefusesARunningRunWithoutForce</code> (added in <code>ccc8caa</code>) calls <code>reclaimFleetDir</code> directly — its own commit message documents that this guard had zero coverage before this test existed (the automatic path never reaches it because the SQL already excludes <code>running</code>, and no prior test called the manual handler's refusal path either); deleting the inner check would have broken nothing until this test was added. All 3 are real, none are asserting a value the function trivially always returns.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; No database row is touched by the automatic path</h3>
+    <p><code>TestReclaimEligibleFleetDirsLeavesDatabaseRecordsUntouched</code> creates a run with a recorded phase and envelope, backdates the run past the 7-day cutoff, snapshots <code>GetRun</code>/<code>ListPhasesForRun</code>/<code>ListEnvelopesForRun</code> before and after calling <code>reclaimEligibleFleetDirs()</code>, and asserts field-level equality afterward (run status and <code>UpdatedAt</code>, phase IDs and statuses, envelope IDs and summaries) — not merely that row counts didn't change, which could pass even if a row were deleted and silently replaced. Separately, reading <code>reclaimFleetDir</code> and <code>reclaimEligibleFleetDirs</code> in full confirms neither calls any <code>Store</code> write method (<code>UPDATE</code>/<code>DELETE</code>/<code>Exec</code>) at all — the only side effect either function has is <code>os.RemoveAll</code> against a filesystem path. This matches proposal.md's explicit out-of-scope declaration and spec.md's "durable records" requirement exactly.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Retention window and tick interval are fixed constants, per the spec's explicit non-goal</h3>
+    <p><code>fleetCleanupRetention = 7 * 24 * time.Hour</code> and <code>fleetCleanupInterval = 1 * time.Hour</code> are both plain Go <code>const</code> declarations with no environment-variable or config-file read anywhere in <code>reclaimEligibleFleetDirs</code> or <code>runFleetCleanupLoop</code>. This matches proposal.md's explicit out-of-scope item ("A configurable retention period or schedule... fixed constants") and design.md's rejected-alternatives section verbatim.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; The manual endpoint's external behavior is unchanged</h3>
+    <p><code>handleCleanWorktrees</code>'s request struct (<code>task_id</code>/<code>dry_run</code>/<code>force</code>), its <code>task_id</code> path-traversal guard, its use of <code>ListRecentRuns(200)</code> for status lookup, and its response shape (<code>status</code>/<code>removed</code>/<code>skipped</code>/<code>count</code>) are byte-identical before and after this diff — confirmed by reading the full handler both before (<code>git show cc486c8:internal/ui/server.go</code>, the old inline logic) and after. The refactor even preserves a subtle original behavior: when <code>os.RemoveAll</code> itself fails, the original code silently did neither — not counted as removed, not reported as skipped — and <code>reclaimFleetDir</code>'s <code>return false, ""</code> on that same error path reproduces this exactly (the handler only appends to <code>skipped</code> when <code>reason != ""</code>). This is the kind of small original-behavior detail a naive refactor could easily have dropped.</p>
+  </div>
+
+  <div class="item warn">
+    <h3><span class="sev med">real gap, non-blocking</span> &nbsp; The "fleet directory does not exist" skip path is correct by inspection but has no test</h3>
+    <p>design.md and tasks.md both state: "A run whose fleet directory does not exist is skipped, not an error." <code>reclaimEligibleFleetDirs</code> implements this correctly — <code>if _, err := os.Stat(fleetDir); err != nil { continue }</code> runs before <code>reclaimFleetDir</code> is ever called, so a missing directory is silently skipped and never logged as an error or a reclaim. But no test in <code>internal/store/cleanup_test.go</code> or <code>internal/ui/cleanup_test.go</code> constructs an eligible database row with no corresponding fleet directory and asserts the pass completes without error or a spurious log line. The 5 scenarios named in <code>tasks.md</code>'s verification section (old-terminal-removed, recently-terminal-survives, running-never-touched, dirty-survives, database-untouched) are all covered — this specific edge case is design.md's own elaboration, not a named spec.md scenario, so its absence does not fail the binding spec, but it is exactly the kind of "run finished days ago and something else (a prior manual cleanup, a restart mid-creation) already removed the directory" case this feature will hit in real operation, and it is currently verified only by reading the code, not by a regression test.</p>
+  </div>
+
+  <div class="item warn">
+    <h3><span class="sev low">real gap, non-blocking</span> &nbsp; The loop's store-query-failure path is correct by inspection but has no dedicated test</h3>
+    <p>If <code>Store.RunsEligibleForCleanup</code> returns an error (e.g., a locked or corrupted database), <code>reclaimEligibleFleetDirs</code> logs it via <code>log.Printf</code> and returns — it does not panic, and does not propagate the error anywhere that would crash <code>runFleetCleanupLoop</code>'s <code>for</code>/<code>select</code>, which will simply try again on the next hourly tick. This is the right behavior and I confirmed it by reading the code path in full, but no test in the shipped diff forces a store error (e.g., by closing the database or querying a table that doesn't exist) to prove this in practice rather than by inspection alone. Lower severity than the missing-directory gap above because a query failure against a local SQLite file used continuously by the rest of the server for every other feature is a much rarer real-world event than "a fleet directory was already removed by something else."</p>
+  </div>
+
+</section>
+
+<section>
+  <h2>Evidence index</h2>
+  <table>
+    <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
+    <tr><td>Build/vet/test clean at HEAD <code>ccc8caa</code></td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 11/11 packages, vet silent</td></tr>
+    <tr><td>Eligibility query ANDs status and cutoff, uses <code>runColumns</code></td><td>Read <code>Store.RunsEligibleForCleanup</code>'s SQL text directly</td><td><code>WHERE status IN (...) AND updated_at &lt;= ?</code>, single query, <code>SELECT runColumns ... </code> + <code>scanRun</code></td></tr>
+    <tr><td>Reclaim logic unified, not duplicated</td><td><code>grep -n 'reclaimFleetDir(' internal/ui/server.go</code>; read <code>handleCleanWorktrees</code> before/after via <code>git show cc486c8:internal/ui/server.go</code></td><td>exactly 2 call sites, both delegating to the one function; the old inline copy is deleted, not left alongside a new one</td></tr>
+    <tr><td>Background loop actually started at server startup</td><td><code>grep -n 'runFleetCleanupLoop' internal/ui/server.go</code>; <code>grep -n '\.Start()' cmd/sergeant/main.go</code></td><td><code>go srv.runFleetCleanupLoop(context.Background())</code> inside <code>Server.Start()</code> (line 185); <code>server.Start()</code> called from <code>main.go:163</code> — real, not dead code</td></tr>
+    <tr><td><strong>My own mutation test: force override</strong></td><td>Changed <code>reclaimEligibleFleetDirs</code>'s call to <code>reclaimFleetDir(fleetDir, run.Status, true, false)</code>, reran <code>TestReclaimEligibleFleetDirsLeavesADirtyWorktree</code> and <code>TestReclaimEligibleFleetDirsNeverTouchesARunningRun</code></td><td>dirty-worktree test failed exactly as predicted (directory deleted); running-run test still passed (different guard); reverted, <code>git status --short</code> confirmed clean, full suite rerun green</td></tr>
+    <tr><td>Database rows genuinely untouched</td><td>Read <code>TestReclaimEligibleFleetDirsLeavesDatabaseRecordsUntouched</code>'s field-level before/after assertions; read <code>reclaimFleetDir</code>/<code>reclaimEligibleFleetDirs</code> for any <code>Store</code> write call</td><td>test passes with field-level equality checks; neither function calls any store write method — only <code>os.RemoveAll</code> against the filesystem</td></tr>
+    <tr><td>Fixed constants, no configuration</td><td>Read <code>fleetCleanupRetention</code>/<code>fleetCleanupInterval</code> declarations; <code>grep -n 'Getenv\|flag\.'</code> near the cleanup code</td><td>plain untyped <code>const</code>, 7 days and 1 hour; no env/config wiring found</td></tr>
+    <tr><td>Manual endpoint's request/response shape unchanged</td><td>Diffed <code>handleCleanWorktrees</code> before (<code>cc486c8</code>) vs. after (<code>ccc8caa</code>)</td><td>request struct, path-traversal guard, 200-recent-runs lookup, and response map identical; only the per-directory decision was extracted</td></tr>
+    <tr><td>Missing-fleet-directory skip path</td><td>Read <code>reclaimEligibleFleetDirs</code>'s <code>os.Stat</code> guard; searched <code>internal/ui/cleanup_test.go</code> for a covering test</td><td>code is correct (silent <code>continue</code>, no log, no error); no dedicated test found — reported as a caveat</td></tr>
+    <tr><td>Store-query-failure path</td><td>Read <code>reclaimEligibleFleetDirs</code>'s error branch on <code>RunsEligibleForCleanup</code></td><td>logs and returns; loop's <code>select</code> keeps ticking, no crash; no dedicated test forcing this path found</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Verdict</h2>
+  <div class="item warn">
+    <p><strong>MEETS SPEC WITH CAVEATS.</strong> Every scenario in
+    <code>specs/fleet-cleanup/spec.md</code> is genuinely implemented and backed by a
+    meaningful test: an old terminal run's worktree is reclaimed automatically, a
+    recently-terminal run's worktree is left alone, a running run is never touched
+    regardless of age, a worktree with uncommitted changes is never removed by the
+    automatic pass, and a reclaimed run's database row, phases, and envelopes are provably
+    unchanged (field-level, not just row-count checks). The eligibility query
+    (<code>RunsEligibleForCleanup</code>) genuinely ANDs terminal status with the retention
+    cutoff in one SQL statement and reuses <code>runColumns</code>/<code>scanRun</code>
+    rather than a hand-copied column list. The reclaim decision — running-check,
+    dirty-worktree check, removal — is genuinely extracted into the single function
+    <code>reclaimFleetDir</code>, called by both the existing manual handler and the new
+    automatic pass, with no duplicated copy left behind; I confirmed this by reading both
+    call sites and by mutating the automatic call to <code>force=true</code>, which broke
+    exactly the dirty-worktree test and nothing else, as predicted. The background loop is
+    genuinely started at real server startup — <code>go srv.runFleetCleanupLoop(...)</code>
+    inside <code>Server.Start()</code>, which is itself called from
+    <code>cmd/sergeant/main.go</code> — not merely defined and left uncalled, the specific
+    bug class this review was asked to scrutinize. The retention window (7 days) and tick
+    interval (1 hour) are fixed Go constants with no configuration path, matching the
+    proposal's explicit non-goal. The manual endpoint's request and response shape are
+    unchanged for external callers; only its internals were refactored to share logic,
+    down to preserving the original's subtle silent-non-removal behavior on a
+    <code>RemoveAll</code> failure. Two non-blocking caveats: the "fleet directory does not
+    exist" skip path (design.md's own elaboration, not a named spec.md scenario) is
+    correct by direct code inspection but has no regression test; and the loop's
+    store-query-failure path (log and retry next tick, never panic or crash the server) is
+    likewise correct by inspection but untested. Neither fails any scenario spec.md
+    actually states. Build, vet, and the full test suite (11/11 packages, including all 11
+    new cleanup-specific tests individually verified with <code>-v</code>) are clean at
+    current HEAD <code>ccc8caa</code>.</p>
+  </div>
+</section>
+
+<footer>
+  <p class="meta">Review 024 · findings above are reproduced from commands run directly
+  against the current <code>v2</code> working tree at HEAD <code>ccc8caa</code>, diffing
+  <code>cc486c8..HEAD</code> for the 4 files this change touches. One mutation was applied
+  directly to <code>internal/ui/server.go</code> (changing <code>reclaimEligibleFleetDirs</code>'s
+  call to <code>reclaimFleetDir</code> from <code>force=false</code> to <code>force=true</code>)
+  to independently confirm <code>TestReclaimEligibleFleetDirsLeavesADirtyWorktree</code> and
+  <code>TestReclaimEligibleFleetDirsNeverTouchesARunningRun</code> catch a real regression
+  rather than passing tautologically; it was reverted immediately after, confirmed by
+  <code>git status --short internal/ui/server.go</code> reporting no changes, and the full
+  suite was rerun clean afterward. No throwaway test files were left behind. Review 023 and
+  earlier entries were not re-examined; they stand as recorded above.</p>
+  <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
+</footer>
+
 </main></body>
 </html>
