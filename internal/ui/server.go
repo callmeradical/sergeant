@@ -133,6 +133,7 @@ func (srv *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/project-details", srv.handleProjectDetails)
 	mux.HandleFunc("/api/refine-project", srv.handleRefineProject)
 	mux.HandleFunc("/api/runs", srv.handleRuns)
+	mux.HandleFunc("/api/analytics", srv.handleAnalytics)
 	mux.HandleFunc("/api/run-details", srv.handleRunDetails)
 	mux.HandleFunc("/api/validate-intent", srv.handleValidateIntent)
 	mux.HandleFunc("/api/discover-workflow", srv.handleDiscoverWorkflow)
@@ -534,6 +535,22 @@ func (srv *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 		runs = []store.RunRecord{}
 	}
 	writeJSON(w, http.StatusOK, runPayloads(runs))
+}
+
+// handleAnalytics answers GET /api/analytics?project=<name>, matching
+// handleRuns' project/all scoping convention exactly: a named project
+// (anything but "" or "all") scopes to that project, and an omitted or
+// "all" param combines every project. Unlike handleRuns, ComputeWorkAnalytics
+// draws that distinction internally, so the handler just forwards the param.
+// A plain read like handleRuns: no request body, no side effects.
+func (srv *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
+	project := r.URL.Query().Get("project")
+	analytics, err := srv.Store.ComputeWorkAnalytics(project)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, analytics)
 }
 
 func (srv *Server) handleRunDetails(w http.ResponseWriter, r *http.Request) {

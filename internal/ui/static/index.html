@@ -178,6 +178,10 @@
         class="truncate rounded px-1 -mx-1 hover:text-white hover:bg-[#161b22] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
         Workers <span id="stat-workers-active" class="text-slate-300 font-bold">0</span>
       </button>
+      <button type="button" id="btn-open-analytics" onclick="openAnalyticsDrawer(this)"
+        class="truncate rounded px-1 -mx-1 hover:text-white hover:bg-[#161b22] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+        Work analytics
+      </button>
       <span id="stat-metrics-badge" class="truncate text-slate-300">&mdash;</span>
     </div>
     <div class="flex items-center gap-3 shrink-0">
@@ -1613,6 +1617,99 @@
             </div>
           </div>`).join('')}
         </div>`;
+    }
+
+    // ---- Work analytics drawer ------------------------------------------------
+    // A read-only aggregate over complete recorded history (not the 50-row
+    // "recent activity" window /api/runs uses), following the same
+    // fetch-then-openDrawer shape as openWorkersDrawer. analyticsHTML and
+    // analyticsBreakdownHTML are pure (data in, HTML string out) so they are
+    // unit-tested by executing them under real node, the same approach
+    // stage_matrix_test.go/phase_detail_test.go use for laneHTML/phaseDetailHTML.
+
+    // analyticsBreakdownHTML renders one labeled breakdown (outcome, work type,
+    // agent, model, or provider) as counts and percentages, sorted by count
+    // descending. The "" key — the explicit bucket for pre-O2 work types and
+    // unknown provenance — is relabeled via emptyLabel rather than shown as a
+    // blank line.
+    function analyticsBreakdownHTML(title, counts, total, emptyLabel) {
+      const entries = Object.keys(counts || {}).sort((a, b) => {
+        const diff = (counts[b] || 0) - (counts[a] || 0);
+        return diff !== 0 ? diff : a.localeCompare(b);
+      });
+      if (entries.length === 0) {
+        return `
+          <div class="space-y-1">
+            <div class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider">${escapeHTML(title)}</div>
+            <div class="text-[#8b949e]">No data recorded yet.</div>
+          </div>`;
+      }
+      const rows = entries.map(key => {
+        const count = counts[key] || 0;
+        const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+        const label = key === '' ? emptyLabel : key;
+        return `
+          <div class="flex items-center justify-between gap-2 text-[10px]">
+            <span class="text-slate-300 truncate">${escapeHTML(label)}</span>
+            <span class="text-[#8b949e] font-mono shrink-0">${count} (${pct}%)</span>
+          </div>`;
+      }).join('');
+      return `
+        <div class="space-y-1">
+          <div class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider">${escapeHTML(title)}</div>
+          <div class="space-y-0.5">${rows}</div>
+        </div>`;
+    }
+
+    // analyticsHTML is the drawer body for GET /api/analytics's response. Bullets
+    // shipped shows "no bullets recorded yet" instead of a bulletsMerged/0 divide
+    // (NaN%) when bullets_total is 0.
+    function analyticsHTML(data) {
+      const d = data || {};
+      const totalRuns = d.total_runs || 0;
+      const bulletsTotal = d.bullets_total || 0;
+      const bulletsMerged = d.bullets_merged || 0;
+
+      const bulletsSection = bulletsTotal === 0
+        ? `<div class="space-y-1">
+            <div class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider">Bullets shipped</div>
+            <div class="text-[#8b949e]">No bullets recorded yet.</div>
+          </div>`
+        : `<div class="space-y-1">
+            <div class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider">Bullets shipped</div>
+            <div class="flex items-center justify-between gap-2 text-[10px]">
+              <span class="text-slate-300">Merged</span>
+              <span class="text-[#8b949e] font-mono">${bulletsMerged} / ${bulletsTotal} (${Math.round((bulletsMerged / bulletsTotal) * 100)}%)</span>
+            </div>
+          </div>`;
+
+      return `
+        <div class="space-y-3">
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider">Total runs</span>
+            <span class="text-white font-mono font-bold">${totalRuns}</span>
+          </div>
+          ${analyticsBreakdownHTML('Outcome', d.by_status, totalRuns, '')}
+          ${analyticsBreakdownHTML('Work type', d.by_type, totalRuns, 'before work types were tracked')}
+          ${analyticsBreakdownHTML('Agent', d.by_agent, totalRuns, 'unknown')}
+          ${analyticsBreakdownHTML('Model', d.by_model, totalRuns, 'unknown')}
+          ${analyticsBreakdownHTML('Provider', d.by_provider, totalRuns, 'unknown')}
+          ${bulletsSection}
+        </div>`;
+    }
+
+    // openAnalyticsDrawer reads the project filter's current value
+    // (selectedProject, set by onProjectChange) rather than a second,
+    // independent notion of "current project" — the same value onProjectChange
+    // already sets for fetchRuns.
+    async function openAnalyticsDrawer(opener) {
+      try {
+        const res = await fetch(`/api/analytics?project=${encodeURIComponent(selectedProject)}`);
+        const data = await res.json();
+        openDrawer('Work analytics', 'analytics', analyticsHTML(data), opener);
+      } catch (err) {
+        alert("Failed loading work analytics: " + err);
+      }
     }
 
     function activityHTML(envelopes) {
