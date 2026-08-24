@@ -48,57 +48,52 @@ a{color:var(--muted)}
   <h1>Sergeant v2</h1>
   <p>Independent review. Written by the critic, not the builder.</p>
   <p class="meta">
-    Review 020 · 2026-08-23 · branch <code>v2</code> · merge commit <code>01fda48</code> reviewed
-    (parents <code>fcc28fd</code> / <code>f84becb</code>, merge-base <code>169c6d1</code>) ·
-    "feat(store,ui): a proposed plan awaits explicit approval (D5a, D2)" · current <code>v2</code> HEAD is
-    <code>01fda48</code> itself — this is the tip of the branch at review time
+    Review 021 · 2026-08-23 · branch <code>v2</code> · commit <code>494179e</code> reviewed
+    (parent <code>da26257</code>) ·
+    "fix(store,ui): plan approval reuses the change resolved at proposal time (Review 020)" ·
+    current <code>v2</code> HEAD is <code>494179e</code> itself
   </p>
 </header>
 
 <section>
   <h2>Current status</h2>
   <div class="grid">
-    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at <code>01fda48</code></div></div>
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at <code>494179e</code></div></div>
     <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code>, whole module</div></div>
-    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">11/11 packages pass</span></div><div class="small"><code>go test ./internal/... -count=1</code></div></div>
-    <div class="card"><div class="label">No-repos gate</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>handleDispatch</code>'s <code>len(req.Repos) == 0</code> branch creates a <code>proposed</code> intent + one <code>proposed</code> bullet per resolved repo and returns 202 before any run/worktree code runs. Confirmed with a real seam (empty temp fleet dir, zero <code>runs</code> rows), not just the HTTP status.</div></div>
-    <div class="card"><div class="label">Explicit-repos path</div><div class="value"><span class="status">verified, real</span></div><div class="small">Unchanged: still calls <code>createRunAndDispatch</code> immediately with <code>existingIntentID=""</code>, minting its own fresh intent + bullets exactly as before this feature.</div></div>
-    <div class="card"><div class="label">Intent-reuse fix (the flagged bug)</div><div class="value"><span class="status">verified, real, mutation-tested</span></div><div class="small"><code>handleApprovePlan</code> passes its own intent id into <code>createRunAndDispatch</code>; when non-empty, that function skips minting a second intent/bullets. I independently reverted the call to pass <code>""</code>: <code>TestApprovingAPlanDoesNotCreateASecondIntent</code> failed exactly as predicted (second intent, run's <code>IntentID</code> mismatched); restored, <code>git diff</code> empty.</div></div>
-    <div class="card"><div class="label">Approve/reject idempotency &amp; refusal</div><div class="value"><span class="status">verified, real</span></div><div class="small">Repeat-approve and repeat-reject are no-ops (1 run, unchanged status). Approving <code>abandoned</code> → 409. Rejecting <code>in_progress</code> → 409. Unknown intent → 404 for both. All by direct test read plus re-run.</div></div>
-    <div class="card"><div class="label"><code>GET /api/plans</code> / <code>GET /api/bullets?intent_id=</code></div><div class="value"><span class="status">verified, real</span></div><div class="small">Lists only <code>proposed</code> intents with bullets; excludes explicit-repos dispatches. <code>intent_id</code> direct lookup needs no run and returns empty (not error) for an unknown id.</div></div>
-    <div class="card"><div class="label"><code>BulletStatuses()</code> merge resolution</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>{"proposed","pending","red","green","sealed","merged","failed","blocked"}</code> — both D5a's <code>proposed</code> (prepended) and D5b's <code>failed</code>/<code>blocked</code> (kept terminal) present; no conflict markers anywhere in the tree; exactly one <code>BulletStatuses</code> definition.</div></div>
-    <div class="card"><div class="label">Bullet order across approval</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>ListBulletsForIntent</code> orders <code>position ASC</code>; <code>handleApprovePlan</code> builds <code>targetRepos</code> from that order; <code>createRunAndDispatch</code> never rewrites bullets when reusing an intent. No reordering possible.</div></div>
-    <div class="card"><div class="label">Change identity across propose→approve</div><div class="value"><span class="status bad">real bug found, introduced by this change</span></div><div class="small"><code>IntentRecord</code> has no <code>ChangeID</code> field, so a proposed plan does not remember which OpenSpec change it was resolved against. Approval re-resolves from scratch with different inputs than proposal used, and can silently pick a different repo and/or re-derive a different change id — in one reproduction, scaffolding a second, empty OpenSpec change directory under a different repo than the one the human's proposal actually used. See Findings.</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">11/11 packages pass</span></div><div class="small"><code>go test ./internal/... -count=1</code>; one incidental single-run flake in an unrelated package noted below, not reproducible over 35 further runs</div></div>
+    <div class="card"><div class="label">Migration</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>migrateAddColumns</code> gained two real <code>ALTER TABLE intents ADD COLUMN</code> entries (<code>change_id</code>, <code>change_repo</code>, both <code>TEXT NOT NULL DEFAULT ''</code>) alongside <code>createIntentsTable</code>'s matching new columns — a fresh DB and an upgraded old one both end up with the same schema.</div></div>
+    <div class="card"><div class="label">Every intents-table query updated</div><div class="value"><span class="status">verified, real, exhaustive</span></div><div class="small">Grepped every <code>FROM intents</code>/<code>INTO intents</code>/<code>UPDATE intents</code> in <code>store.go</code>: <code>CreateIntent</code>, <code>GetIntent</code>, <code>ListIntentsForProject</code>, <code>ListIntentsByStatus</code> all read/write both new columns with <code>COALESCE</code> guards; <code>UpdateIntentStatus</code> correctly touches only <code>status</code>/<code>updated_at</code> — nothing was missed.</div></div>
+    <div class="card"><div class="label">Proposal-time capture</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>handleDispatch</code>'s no-repos branch sets <code>ChangeID: change.ID, ChangeRepo: changeRepoName</code> from the values <code>changeRepo</code>/<code>resolveChange</code> already computed earlier in the same request, unconditionally, before the branch — not re-derived.</div></div>
+    <div class="card"><div class="label">Approval-time reuse</div><div class="value"><span class="status">verified, real, mutation-tested</span></div><div class="small"><code>handleApprovePlan</code> no longer calls <code>changeRepo</code> at all; it looks up <code>proj.Repos[intent.ChangeRepo]</code> directly and calls <code>resolveChange(changeRepoPath, intent.ChangeID, intent.Statement)</code>. I independently reverted both lines back to the original <code>changeRepo(proj, targetRepos)</code> / <code>resolveChange(changeRepoPath, "", intent.Statement)</code>, reran the regression test, and watched it fail on both assertions; restored, <code>git diff</code> confirmed empty.</div></div>
+    <div class="card"><div class="label">Regression test's own soundness</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>TestApprovingAPlanReusesTheOriginallyResolvedChangeNotASecondOne</code> uses brief <code>"a totally different brief text"</code> against explicit <code>change_id="add-stripe-webhooks"</code>. Traced <code>deriveChangeID</code> by hand: the brief slugifies to <code>a-totally-different-brief-text</code>, which is not <code>add-stripe-webhooks</code> — the test cannot pass by accident the way the commit message says an earlier draft did.</div></div>
+    <div class="card"><div class="label">Repo removed between propose and approve</div><div class="value"><span class="status">verified, real</span></div><div class="small">Wrote and ran a throwaway test that proposes a plan, then rewrites the project's YAML to drop the repo the change was resolved against, then approves. Result: <code>500</code> with <code>plan "…" 's change repository "svc" is no longer configured in project "o3"</code> — no panic, a legible operator-facing message. Deleted the throwaway file after; <code>git status --porcelain</code> confirmed clean.</div></div>
+    <div class="card"><div class="label">Bullet-order-through-approval (recheck)</div><div class="value"><span class="status">verified, real</span></div><div class="small">Position is written durably at bullet creation (<code>Position: i+1</code>) and read back via <code>ORDER BY position ASC, created_at ASC, id ASC</code> — this is already the carry-not-recompute pattern the fix applies to the change, so it was not itself a second instance of Review 020's bug. No other re-derivation found in the plan-approval flow.</div></div>
   </div>
-  <p><strong>Verdict:</strong> MEETS SPEC WITH CAVEATS. Every scenario in
-  <code>specs/plan-approval/spec.md</code> is genuinely implemented, genuinely tested, and the specific bug this
-  review was asked to independently re-verify (approval minting a second, disconnected intent) is genuinely fixed
-  and mutation-confirmed. The merge conflict in <code>store.go</code> is resolved correctly and completely. The
-  caveat is a new bug I found that is not covered by any scenario in the binding spec: the change (OpenSpec
-  planning record) a proposed plan was resolved against is not persisted on the intent, so approval can resolve a
-  <em>different</em> change than the one the human reviewed, up to and including silently scaffolding a duplicate,
-  empty change directory under a different repository. Concrete reproductions below.</p>
+  <p><strong>Verdict:</strong> MEETS SPEC. Review 020's specific finding — approval re-resolving the change with a
+  hardcoded empty change id and a freshly-recomputed repo, able to silently pick a different change or repository
+  than the one proposed and shown to the approving human — is genuinely fixed, mutation-confirmed by my own
+  independent revert/rerun/restore, and the fix's edge case (the resolved repo disappearing from config before
+  approval) degrades to a clear error rather than a panic or silent misbehavior. No blocking gaps found.</p>
 </section>
 
 <section>
   <h2>What I inspected</h2>
   <table>
     <tr><th>Area</th><th>Method</th></tr>
-    <tr><td>Binding spec</td><td>Read <code>openspec/changes/a-proposed-plan-awaits-explicit-approval/{proposal,design,tasks}.md</code> and <code>specs/plan-approval/spec.md</code> in full before reading any code</td></tr>
-    <tr><td>The merge commit's actual diff</td><td><code>git merge-base 01fda48^1 01fda48^2</code> → <code>169c6d1</code>; <code>git diff 169c6d1 01fda48</code> across all 9 changed files, plus <code>git diff fcc28fd 01fda48 -- internal/store/store.go</code> isolated to see exactly what the merge added on top of the D5b parent</td></tr>
-    <tr><td><code>handleDispatch</code>'s no-repos branch</td><td>Read <code>internal/ui/server.go</code> lines 1311–1424: <code>changeRepo</code>/<code>resolveChange</code> run first (O3, unconditional), then the <code>len(req.Repos)==0</code> gate creates the proposed intent+bullets and returns 202 before <code>createRunAndDispatch</code> is ever reached; explicit-repos falls through to the same call as before this feature</td></tr>
-    <tr><td><code>createRunAndDispatch</code>'s two call sites</td><td>Read lines 869 (<code>handleApprovePlan</code>, passes <code>intentID</code>) and 1423 (<code>handleDispatch</code>, passes <code>""</code>); read the function body (1444–1541): when <code>existingIntentID != ""</code>, the entire <code>CreateIntent</code>/<code>CreateBullet</code> block (1500–1527) is skipped — only a fresh <code>RunRecord</code> is written, pointing its <code>IntentID</code> at the reused intent</td></tr>
-    <tr><td><code>handleApprovePlan</code> / <code>handleRejectPlan</code></td><td>Read lines 805–924 in full: status-switch idempotency and refusal logic, <code>writePlanState</code> shared response helper</td></tr>
-    <tr><td>Store methods backing the flow</td><td>Read <code>ListBulletsForIntent</code> (orders <code>position ASC, created_at ASC, id ASC</code>), <code>ListIntentsByStatus</code>, <code>ListIntentsForProject</code>, <code>GetIntent</code>, <code>UpdateIntentStatus</code>, <code>UpdateBulletStatus</code>, <code>CreateIntent</code>/<code>CreateBullet</code> — confirmed <code>IntentRecord</code> has exactly 6 fields (<code>ID, Project, Statement, Status, CreatedAt, UpdatedAt</code>), no <code>ChangeID</code></td></tr>
-    <tr><td>Existing regression test for the flagged bug</td><td>Read <code>TestApprovingAPlanDoesNotCreateASecondIntent</code> (<code>internal/ui/plan_approval_test.go:241</code>): asserts <code>run.IntentID == intentID</code> and <code>len(ListIntentsForProject("o3")) == 1</code> — exactly the two claims the task asked me to independently verify</td></tr>
-    <tr><td>Full suite at <code>01fda48</code></td><td><code>go build ./... && go vet ./... && go test ./internal/... -count=1</code> from <code>/Users/lars/Dev/sergeant-v2</code></td></tr>
-    <tr><td><strong>Mutation test on the intent-reuse fix</strong></td><td>Edited <code>handleApprovePlan</code>'s call to <code>createRunAndDispatch(..., intentID)</code> down to <code>createRunAndDispatch(..., "")</code>; ran <code>TestApprovingAPlanDoesNotCreateASecondIntent -v</code>; failed with <code>run.IntentID</code> pointing at a freshly-minted second intent, exactly the predicted symptom; restored the exact original line; <code>git diff</code> and <code>git status --porcelain</code> confirmed empty</td></tr>
-    <tr><td>Conflict-marker sweep</td><td><code>grep -rn '&lt;&lt;&lt;&lt;&lt;&lt;&lt;\|=======\|&gt;&gt;&gt;&gt;&gt;&gt;&gt;'</code> across <code>internal/</code>: none; <code>grep -c '^func BulletStatuses'</code>: exactly 1</td></tr>
-    <tr><td>Bullet-order-preservation probe (task item 8)</td><td>Traced <code>ListBulletsForIntent</code>'s SQL <code>ORDER BY position ASC</code>, confirmed <code>handleApprovePlan</code> builds <code>targetRepos</code> by iterating that already-ordered slice, and confirmed <code>createRunAndDispatch</code> writes no bullets at all when <code>existingIntentID != ""</code> — the original rows, with their original <code>Position</code> values, are untouched</td></tr>
-    <tr><td><strong>My own throwaway repro #1: an explicit, non-brief-derived <code>change_id</code> across propose→approve</strong></td><td>Wrote a throwaway test: proposed a plan with <code>change_id="my-explicit-change"</code> and an unrelated brief whose derived slug differs; approved it; read the dispatched run's <code>ChangeID</code> back from the store. Deleted after; <code>git status --porcelain</code> confirmed clean</td></tr>
-    <tr><td><strong>My own throwaway repro #2: DAG-configured project, two eligible repos</strong></td><td>Wrote a throwaway test: two repos (<code>api</code> sorts first alphabetically, <code>web</code> is first in <code>dag.stages[0].repos</code>); the change directory exists only under <code>web</code> (where proposal-time <code>changeRepo(proj, [])</code> — DAG-order fallback — puts it); approved the plan and read the response's <code>change_repo</code>/<code>change_created</code>. Deleted after; <code>git status --porcelain</code> confirmed clean</td></tr>
-    <tr><td>Test-quality spot check on the shipped suite</td><td>Read all 11 tests in <code>plan_approval_test.go</code> plus the two server_test.go scenarios they build on: assertions check exact status codes, exact intent/bullet statuses, exact run counts via direct <code>SELECT COUNT(*)</code>, and (for the no-repos case) an actual empty temp fleet directory — not just "no error"</td></tr>
-    <tr><td>Stale-comment check</td><td><code>git log -p -S"mints a fresh run and a fresh intent" -- internal/ui/plan_approval_test.go</code>: the comment at line 210 (in <code>TestApprovingAProposedPlanStartsTheRealDispatchSequence</code>) claiming approval "mints ... a fresh intent of its own" was written in <code>f9faa53</code>, before the intent-reuse fix (<code>f84becb</code>), and was never updated to match the corrected behavior</td></tr>
+    <tr><td>The fix commit in full</td><td><code>git show 494179e</code> — all three changed files (<code>internal/store/store.go</code>, <code>internal/ui/server.go</code>, <code>internal/ui/plan_approval_test.go</code>) read in full, plus the commit message, without trusting its claims</td></tr>
+    <tr><td><code>IntentRecord</code>'s new fields</td><td>Read the struct diff: <code>ChangeID</code>/<code>ChangeRepo</code> added with a doc comment explaining exactly why re-resolution is unsafe (no caller-supplied change_id at approval time; repo selection can depend on argument order)</td></tr>
+    <tr><td><code>migrateAddColumns</code></td><td>Confirmed two new <code>{"intents", "change_id", "ALTER TABLE intents ADD COLUMN change_id TEXT NOT NULL DEFAULT ''"}</code> / <code>change_repo</code> entries alongside the existing <code>createIntentsTable</code> DDL update — both paths (fresh DB, migrated old DB) produce the same schema</td></tr>
+    <tr><td>Every SQL query against <code>intents</code></td><td><code>grep -n "FROM intents\|INTO intents\|UPDATE intents" internal/store/store.go</code>: 5 hits — <code>CreateIntent</code> (INSERT), <code>GetIntent</code>, <code>ListIntentsForProject</code>, <code>ListIntentsByStatus</code> (all 3 SELECTs updated with <code>COALESCE(change_id,''), COALESCE(change_repo,'')</code>), and <code>UpdateIntentStatus</code> (UPDATE, correctly untouched — it only ever sets <code>status</code>/<code>updated_at</code>)</td></tr>
+    <tr><td><code>handleDispatch</code>'s no-repos branch</td><td>Read the diff at <code>internal/ui/server.go</code>: <code>CreateIntent</code> now sets <code>ChangeID: change.ID, ChangeRepo: changeRepoName</code>, both already resolved earlier in the same function body before this branch — not re-derived here</td></tr>
+    <tr><td><code>handleApprovePlan</code></td><td>Read the diff: <code>changeRepo(proj, targetRepos)</code> call removed entirely; replaced with a direct <code>proj.Repos[intent.ChangeRepo]</code> lookup with an explicit not-found/empty-path guard returning a 500 with a legible message; <code>resolveChange</code> now called with <code>intent.ChangeID</code> instead of a hardcoded <code>""</code></td></tr>
+    <tr><td>New regression test</td><td>Ran <code>go test ./internal/ui/... -run TestApprovingAPlanReusesTheOriginallyResolvedChangeNotASecondOne -v -count=1</code> myself</td></tr>
+    <tr><td>False-negative risk in the test's own brief/change_id choice</td><td>Read <code>deriveChangeID</code> (<code>internal/ui/openspec.go:77</code>) by hand: lowercases, keeps <code>[a-z0-9]</code>, collapses any other run of characters to a single hyphen. Traced <code>"a totally different brief text"</code> through it token by token → <code>a-totally-different-brief-text</code>, confirmed distinct from the test's explicit <code>change_id</code> <code>add-stripe-webhooks</code></td></tr>
+    <tr><td><strong>Mutation test on the fix itself</strong></td><td>Edited <code>handleApprovePlan</code> in place, reverting to <code>changeRepoName, changeRepoPath, err := changeRepo(proj, targetRepos)</code> and <code>resolveChange(changeRepoPath, "", intent.Statement)</code>; rebuilt; reran the regression test; restored via <code>git checkout -- internal/ui/server.go</code>; confirmed <code>git status --porcelain</code> empty afterward</td></tr>
+    <tr><td><strong>My own throwaway repro: change repo removed from config between propose and approve</strong></td><td>Wrote <code>internal/ui/throwaway_repo_removed_test.go</code>: proposed a plan against fixture repo <code>svc</code>, then overwrote the project's YAML (via <code>$SERGEANT_CONFIG</code>) to drop <code>svc</code> and add an unrelated repo <code>other</code>, then approved, with a <code>recover()</code> guard to catch any panic. Ran it, read the output, deleted the file, confirmed <code>git status --porcelain</code> clean</td></tr>
+    <tr><td>Second instance of the same pattern (task item 5)</td><td>Traced <code>targetRepos</code>' construction in <code>handleApprovePlan</code> (built from <code>ListBulletsForIntent</code>'s already-<code>position ASC</code>-ordered result) and <code>createRunAndDispatch</code>'s bullet-handling (skips bullet creation entirely when <code>existingIntentID != ""</code>, so proposal-time <code>Position</code> values are never touched by approval) — this is already carry-not-recompute, not a second occurrence of the bug; found no other place in the plan-approval flow (propose → approve → dispatch) that re-derives a value instead of reusing a stored one</td></tr>
+    <tr><td>Sibling changes for the same pattern</td><td>Checked <code>openspec/changes/a-stuck-bullet-is-blocked-not-failed</code> and <code>openspec/changes/graphify-honors-exclude-patterns</code> — both are unrelated features (blocked-bullet terminal status; graphify exclude-pattern filtering) that do not touch the propose/approve time gap; no overlap with this fix's pattern found</td></tr>
+    <tr><td>Full suite at <code>494179e</code></td><td><code>go build ./... && go vet ./... && go test ./internal/... -count=1</code> from <code>/Users/lars/Dev/sergeant-v2</code>, run twice</td></tr>
+    <tr><td>Incidental flake investigation</td><td>One of the two full-suite runs showed <code>internal/graphify</code>'s <code>TestDanglingLinkAndHyperedgeAfterNodeExclusionAreRemoved</code> fail once; reran that single test 30 times and the full <code>internal/graphify</code> package 5 times, all passed — not reproducible, and the file (<code>exclude_test.go</code>) was last touched by an unrelated commit (<code>b64a01f</code>, the <code>graphify-honors-exclude-patterns</code> sibling change), not by <code>494179e</code></td></tr>
   </table>
 </section>
 
@@ -106,130 +101,111 @@ a{color:var(--muted)}
   <h2>Findings</h2>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The no-repos gate is exactly what D2 requires, and the explicit-repos path is untouched</h3>
-    <p><code>handleDispatch</code> resolves the change (O3) unconditionally, then branches on
-    <code>len(req.Repos) == 0</code>. That branch writes a <code>proposed</code> intent and one <code>proposed</code>
-    bullet per resolved repo, responds 202, and returns — <code>createRunAndDispatch</code> is never called on this
-    path. I confirmed this the way <code>tasks.md</code> demands: <code>TestDispatchWithNoReposCreatesAProposedPlanAndStartsNothing</code>
-    points <code>SERGEANT_FLEET_DIR</code> at a fresh empty temp directory and asserts it still has zero entries
-    after the dispatch, plus zero rows in the <code>runs</code> table — a real seam, not just an HTTP status check.
-    The explicit-repos branch is one unchanged line: <code>srv.createRunAndDispatch(w, proj, brief, targetRepos,
-    change, requestID, changeRepoName, changeRepoPath, "")</code>, and every pre-existing dispatch test that used to
-    rely on no-repos meaning "dispatch immediately" was updated to pass explicit <code>repos</code> — I checked each
-    of those diffs (<code>dispatch_idempotency_test.go</code>, <code>progress_test.go</code>, <code>stream_test.go</code>,
-    part of <code>run_lifecycle_test.go</code>) and they preserve their original assertions, just against the
-    explicit-repos path instead of the now-different no-repos path.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The migration is real and complete on both paths</h3>
+    <p><code>createIntentsTable</code> (fresh DB) and <code>migrateAddColumns</code> (existing DB) were both updated
+    in lockstep: <code>change_id TEXT NOT NULL DEFAULT ''</code> and <code>change_repo TEXT NOT NULL DEFAULT ''</code>
+    appear in the CREATE TABLE DDL and as two new <code>ALTER TABLE intents ADD COLUMN</code> entries in the
+    migration table, with a doc comment correctly noting existing rows "predate plan approval and have nothing to
+    backfill." A store opened against a database created before this commit would pick up both columns via the
+    migration path; a store created fresh already has them. I did not just read this — I ran the full
+    <code>internal/store</code> and <code>internal/ui</code> suites, which exercise fresh-DB creation via
+    <code>store.Open</code> in every test's temp directory, and they all pass, which would not be true if the DDL and
+    the Go struct/scan code disagreed on column count or order.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The flagged intent-reuse bug is genuinely fixed, and I mutation-tested it independently</h3>
-    <p><code>createRunAndDispatch</code> takes <code>existingIntentID</code>; when it is non-empty, the entire
-    "mint a fresh intent + bullets" block is skipped and only a new <code>RunRecord</code> is written, its
-    <code>IntentID</code> pointed at the reused id. <code>handleApprovePlan</code> passes its own <code>intentID</code>
-    (line 869); <code>handleDispatch</code>'s explicit-repos path still passes <code>""</code> (line 1423), so its
-    original minting behavior is unchanged. I did not just read <code>TestApprovingAPlanDoesNotCreateASecondIntent</code>
-    and trust it — I independently reverted the call at line 869 to pass <code>""</code> instead of <code>intentID</code>,
-    reran that exact test, and watched it fail with the predicted symptom: <code>run.IntentID</code> came back as a
-    freshly-minted second intent id, not the approved plan's own. Restored the line to its exact original text;
-    <code>git diff</code> and <code>git status --porcelain</code> both confirmed empty afterward. The existing test
-    itself asserts both halves of the claim the task asked me to verify: <code>run.IntentID == intentID</code> and
-    <code>len(ListIntentsForProject("o3")) == 1</code>.</p>
+    <h3><span class="sev low">verified</span> &nbsp; No query against the <code>intents</code> table was missed</h3>
+    <p>All four functions that touch intent rows by column list — <code>CreateIntent</code> (INSERT), <code>GetIntent</code>,
+    <code>ListIntentsForProject</code>, <code>ListIntentsByStatus</code> (all SELECT) — read or write both
+    <code>change_id</code>/<code>change_repo</code>, each SELECT wrapped in <code>COALESCE(..., '')</code> so a
+    pre-migration NULL (there shouldn't be any, given the <code>NOT NULL DEFAULT ''</code> column, but the existing
+    <code>statement</code> column gets the same defensive treatment) can never surface as a Go zero-value scan error.
+    <code>UpdateIntentStatus</code> was correctly left alone — approval only ever changes <code>status</code>, never
+    the change identity, so this is the right scope, not an oversight.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Approve/reject idempotency and refusal rules match every scenario in spec.md</h3>
-    <p><code>handleApprovePlan</code>: unknown intent → 404; <code>abandoned</code> → 409 (cannot approve a
-    rejected plan); already <code>in_progress</code>/beyond → 200, unchanged state, no second run
-    (<code>TestApprovingAnAlreadyApprovedPlanIsIdempotent</code> asserts exactly 1 row in <code>runs</code> after two
-    approvals). <code>handleRejectPlan</code>: unknown intent → 404; already <code>abandoned</code> → 200, no-op;
-    any other non-<code>proposed</code> status (e.g. <code>in_progress</code>) → 409. All four refusal/idempotency
-    scenarios in <code>specs/plan-approval/spec.md</code>'s "A human can explicitly approve or reject" requirement
-    have a dedicated test, and I re-ran the full <code>internal/ui</code> package to confirm all pass together, not
-    just individually.</p>
+    <h3><span class="sev low">verified</span> &nbsp; Proposal-time capture uses already-resolved values, not a second resolution</h3>
+    <p><code>handleDispatch</code> resolves <code>changeRepoName</code>/<code>changeRepoPath</code>/<code>change</code>
+    once, unconditionally, before branching on <code>len(req.Repos) == 0</code> (decision O3's ordering). The
+    no-repos branch's new <code>CreateIntent</code> call reads <code>change.ID</code> and <code>changeRepoName</code>
+    straight out of those already-computed local variables — there is no second call to <code>changeRepo</code> or
+    <code>resolveChange</code> anywhere in this branch. This is exactly the "durable capture at the point of first
+    resolution" the commit message claims.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; <code>GET /api/plans</code> and <code>GET /api/bullets?intent_id=</code> work as specified</h3>
-    <p><code>handlePlans</code> calls <code>ListIntentsByStatus("proposed")</code> and attaches each intent's
-    bullets; <code>TestProposedPlansAreListableWithTheirBullets</code> proves an explicit-repos dispatch (which
-    never enters <code>proposed</code>) does not leak into this list. <code>handleBullets</code>'s new
-    <code>intent_id</code> branch is a direct <code>ListBulletsForIntent</code> call with no run lookup, returns an
-    empty (not error) list for an unknown intent id, matching the "no run exists yet for a proposed plan" case
-    design.md calls out.</p>
+    <h3><span class="sev low">verified, mutation-tested</span> &nbsp; Approval reuses the captured change verbatim; I independently broke and restored the fix</h3>
+    <p><code>handleApprovePlan</code>'s <code>changeRepo(proj, targetRepos)</code> call is gone. In its place:
+    <code>changeRepoName := intent.ChangeRepo</code>, a direct <code>proj.Repos[changeRepoName]</code> lookup with an
+    explicit <code>!ok || strings.TrimSpace(repoCfg.Path) == ""</code> guard, and <code>resolveChange(changeRepoPath,
+    intent.ChangeID, intent.Statement)</code> — <code>intent.ChangeID</code> where the old code passed a literal
+    <code>""</code>. I did not stop at reading this. I reverted both lines back to their pre-fix form
+    (<code>changeRepo(proj, targetRepos)</code> / <code>resolveChange(changeRepoPath, "", intent.Statement)</code>),
+    rebuilt cleanly, and reran <code>TestApprovingAPlanReusesTheOriginallyResolvedChangeNotASecondOne</code>. It
+    failed on both assertions: the dispatched run's <code>ChangeID</code> came back as
+    <code>a-totally-different-brief-text</code> (re-derived from the brief) instead of the proposed
+    <code>add-stripe-webhooks</code>, and <code>openspec/changes/</code> held three entries
+    (<code>a-totally-different-brief-text</code>, <code>add-stripe-webhooks</code>, <code>archive</code>) instead of
+    one — a second change directory really was scaffolded, exactly as the commit message describes. I then restored
+    the file with <code>git checkout -- internal/ui/server.go</code> and confirmed <code>git status --porcelain</code>
+    was empty before continuing.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The <code>store.go</code> merge conflict resolution is complete and correct</h3>
-    <p><code>git diff fcc28fd 01fda48 -- internal/store/store.go</code> shows exactly the expected, minimal
-    resolution: <code>BulletStatuses()</code> changed from D5b's <code>{"pending","red","green","sealed","merged","failed","blocked"}</code>
-    to <code>{"proposed","pending","red","green","sealed","merged","failed","blocked"}</code> — D5a's <code>"proposed"</code>
-    prepended, D5b's <code>"failed"</code>/<code>"blocked"</code> kept as terminal alternatives exactly as the merge
-    commit message claims — plus the addition of <code>ListIntentsByStatus</code>, which is new code, not a
-    conflict resolution. No conflict markers anywhere in the tree; exactly one <code>BulletStatuses</code>
-    definition exists. The doc comment was also updated to describe the new first state, matching the array.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The regression test's brief/change_id pair cannot pass the bug by accident</h3>
+    <p>The commit message states this exact false-negative happened once during development. I checked it myself
+    rather than taking that on faith: <code>deriveChangeID</code> lowercases the brief and joins runs of
+    <code>[a-z0-9]</code> with single hyphens, dropping everything else. Applied by hand to
+    <code>"a totally different brief text"</code>, the result is <code>a-totally-different-brief-text</code> — seven
+    hyphen-joined words, none of which is <code>add-stripe-webhooks</code>'s <code>add</code>/<code>stripe</code>/<code>webhooks</code>.
+    Since the two ids are unmistakably different, a mutant that re-derives the change id from the brief instead of
+    reusing <code>intent.ChangeID</code> is guaranteed to produce a different, wrong id — which is exactly what the
+    mutation test above observed.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Bullet merge order cannot be disturbed by approval</h3>
-    <p>Task item 8's concern — could handing proposed bullets to <code>createRunAndDispatch</code> as
-    <code>targetRepos</code> reorder them — does not materialize. <code>ListBulletsForIntent</code>'s query is
-    <code>ORDER BY position ASC, created_at ASC, id ASC</code>; <code>handleApprovePlan</code> builds
-    <code>targetRepos</code> by iterating that already-ordered result in a single pass
-    (<code>for i, b := range bullets { targetRepos[i] = b.Repo }</code>); and because
-    <code>existingIntentID != ""</code> skips <code>createRunAndDispatch</code>'s bullet-creation block entirely,
-    the original rows — with their original <code>Position</code> values from proposal time — are never rewritten.
-    The only bullet mutation approval performs is <code>UpdateBulletStatus(b.ID, "pending")</code>, which does not
-    touch <code>Position</code>.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The repo-removed-before-approval edge case degrades cleanly, not with a panic</h3>
+    <p>Task item 4 asked what happens if <code>proj.Repos[intent.ChangeRepo]</code> no longer exists at approval
+    time — e.g. the project YAML is edited between proposal and approval to drop that repo. The fix's guard
+    (<code>!ok || strings.TrimSpace(repoCfg.Path) == ""</code>) handles this explicitly: I wrote a throwaway test
+    that proposes a plan against the fixture's only repo (<code>svc</code>), rewrites the project's YAML file
+    (located via <code>$SERGEANT_CONFIG</code>) to remove <code>svc</code> entirely and add an unrelated repo, then
+    approves, with a <code>recover()</code> around the HTTP call to catch any panic. Result: no panic, HTTP 500,
+    body <code>plan "sgt-…-intent"'s change repository "svc" is no longer configured in project "o3"</code> — a
+    legible, actionable message naming the plan and the missing repo, not a generic nil-pointer crash. Deleted the
+    throwaway file afterward (<code>git status --porcelain</code> confirmed clean).</p>
   </div>
 
-  <div class="item bad">
-    <h3><span class="sev high">real bug, introduced by this change, not covered by any spec.md scenario</span> &nbsp; A proposed plan's change is not persisted, so approval can silently resolve — or scaffold — a different one</h3>
-    <p><code>store.IntentRecord</code> has exactly six fields: <code>ID, Project, Statement, Status, CreatedAt,
-    UpdatedAt</code>. There is no <code>ChangeID</code>. At proposal time, <code>handleDispatch</code> resolves the
-    change via <code>changeRepo(proj, req.Repos)</code> / <code>resolveChange(changeRepoPath, req.ChangeID, req.Brief)</code>
-    <em>before</em> the no-repos gate — but the result is only used to possibly scaffold a directory on disk; it is
-    never written onto the <code>IntentRecord</code> it creates. At approval time, <code>handleApprovePlan</code>
-    re-resolves from scratch with different inputs: <code>changeRepo(proj, targetRepos)</code> (a non-empty list,
-    built from the bullets) and <code>resolveChange(changeRepoPath, "", intent.Statement)</code> — note the
-    hardcoded empty string, discarding whatever <code>change_id</code> the original request named.</p>
-    <p><strong>Reproduction 1 — explicit <code>change_id</code> discarded.</strong> Proposed a plan with
-    <code>change_id="my-explicit-change"</code> (directory pre-created) and brief <code>"totally unrelated free-text
-    intent"</code> (a brief that derives a different slug). Approving it returned
-    <code>"change_created":true, "change_id":"totally-unrelated-free-text-intent"</code> — a brand-new OpenSpec
-    change was scaffolded on disk under a re-derived id, and the dispatched run's <code>ChangeID</code> was that
-    re-derived id, not <code>my-explicit-change</code>. The human who named an explicit change when proposing the
-    plan gets a different, auto-scaffolded one governing the actual dispatched work.</p>
-    <p><strong>Reproduction 2 — DAG-configured project picks a different repo at approval than at proposal.</strong>
-    <code>changeRepo</code>'s non-empty-<code>requested</code> branch just picks the first configured repo in the
-    given list, in list order; its empty-<code>requested</code> (proposal-time, no-repos) branch instead prefers
-    <code>proj.DAG.Stages[0].Repos</code> order when a DAG is configured. With two repos — <code>api</code>
-    (alphabetically first) and <code>web</code> (first in the DAG's first stage) — and the change directory
-    existing only under <code>web</code> (where proposal-time resolution puts it), approving the plan resolved the
-    change under <code>api</code> instead, found no existing directory there, and again scaffolded a new, empty
-    change with the <strong>same change id</strong> under a <strong>different repository</strong>
-    (<code>"change_repo":"api","change_created":true</code>). The project now has two <code>add-stripe-webhooks</code>
-    change directories in two different repos — one real (under <code>web</code>, unreferenced by the dispatched
-    run), one empty (under <code>api</code>, the one actually recorded).</p>
-    <p>Neither reproduction requires an unusual setup: an explicit <code>change_id</code> whose slug doesn't match
-    the brief, and a project with a <code>dag:</code> block (a real, documented config field used for cross-repo
-    workflow ordering — not a test-only construct) are both ordinary. Both bugs stem from the same root cause: this
-    feature introduces a real time gap between "the change is resolved" (proposal) and "the run that change governs
-    is created" (approval) that did not exist before this feature — previously, resolution and dispatch happened in
-    one request, so there was nothing to drift. No scenario in <code>specs/plan-approval/spec.md</code> tests
-    change-identity continuity across that gap, which is presumably why this shipped without either the shipped
-    test suite or the "found and fixed before merge" pass catching it. This is a defect in this change's own new
-    code, not an inherited pre-existing gap (contrast Review 019's redaction finding).</p>
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; No second instance of "recompute instead of reuse" found in the plan-approval flow or its siblings</h3>
+    <p>Task item 5 asked whether anything else in the propose→approve→dispatch path is re-derived at approval time
+    instead of carried from proposal time, using bullet order as a candidate. Tracing it: bullets are written with
+    an explicit <code>Position: i+1</code> at creation time (both in the no-repos proposal branch and in
+    <code>createRunAndDispatch</code>'s explicit-repos branch), and <code>ListBulletsForIntent</code> reads them
+    back <code>ORDER BY position ASC, created_at ASC, id ASC</code> — a durable value written once and read back
+    by that same value, not recomputed from some other input. <code>handleApprovePlan</code> builds
+    <code>targetRepos</code> by iterating that already-ordered result in one pass, and
+    <code>createRunAndDispatch</code> skips its bullet-creation block entirely when reusing an existing intent, so
+    the original <code>Position</code> values are never rewritten. This was already the correct pattern before this
+    commit (Review 020 confirmed the same thing) and remains so. I also checked the two sibling OpenSpec changes in
+    the tree, <code>a-stuck-bullet-is-blocked-not-failed</code> and <code>graphify-honors-exclude-patterns</code>:
+    neither touches the propose/approve time gap this fix closes — one governs bullet terminal status
+    (blocked vs. failed), the other governs graphify's file exclusion during graph merge — so there is no
+    overlapping instance of the pattern in either.</p>
   </div>
 
   <div class="item warn">
-    <h3><span class="sev low">minor, cosmetic</span> &nbsp; A test comment describes the pre-fix behavior</h3>
-    <p><code>TestApprovingAProposedPlanStartsTheRealDispatchSequence</code> (<code>plan_approval_test.go:210</code>)
-    says the intent and bullets transition out of proposed "even though the dispatch sequence mints a fresh run and
-    a fresh intent of its own (the same thing an explicit-repos dispatch does)." <code>git log -S</code> confirms
-    this line was written in <code>f9faa53</code>, before the intent-reuse fix landed in <code>f84becb</code>, and
-    was never updated. It is now factually wrong — approval does <em>not</em> mint a second intent, which is the
-    entire point of the fix — but no assertion in that test depends on the false claim, so it costs nothing
-    functionally. Worth a one-line correction for a future reader who takes the comment at face value.</p>
+    <h3><span class="sev low">out of scope, not caused by this commit</span> &nbsp; One incidental single-run flake in an unrelated package</h3>
+    <p>One of two full-suite runs showed <code>internal/graphify</code>'s
+    <code>TestDanglingLinkAndHyperedgeAfterNodeExclusionAreRemoved</code> fail
+    (<code>links = [{n1 n2 keep.go}], want empty</code>). I reran that single test 30 times and the whole
+    <code>internal/graphify</code> package 5 more times; every rerun passed. <code>git log</code> shows
+    <code>exclude_test.go</code> was last touched by <code>b64a01f</code> ("Implement openspec change
+    graphify-honors-exclude-patterns, Task 1"), an unrelated sibling change, not by <code>494179e</code>. This
+    smells like map-iteration-order nondeterminism in the exclusion code under test, not anything introduced by the
+    fix under review. Flagging it because I ran the full suite as instructed and it did fail once, but it does not
+    bear on this review's verdict.</p>
   </div>
 
 </section>
@@ -238,77 +214,55 @@ a{color:var(--muted)}
   <h2>Evidence index</h2>
   <table>
     <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
-    <tr><td>Build/vet/test clean at <code>01fda48</code></td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 11/11 packages</td></tr>
-    <tr><td>No-repos dispatch creates a proposed plan and starts nothing</td><td><code>TestDispatchWithNoReposCreatesAProposedPlanAndStartsNothing</code>: empty temp fleet dir, zero <code>runs</code> rows</td><td>confirmed by reading the test and its seam, not just its pass/fail</td></tr>
-    <tr><td>Explicit-repos path unaffected</td><td>Read <code>handleDispatch</code> line 1423; diffed pre-existing tests updated to pass <code>repos</code> explicitly</td><td>identical call, same behavior as before this feature</td></tr>
-    <tr><td><strong>Mutation test on the intent-reuse fix</strong></td><td>Changed <code>createRunAndDispatch(..., intentID)</code> to <code>createRunAndDispatch(..., "")</code> at line 869; reran <code>TestApprovingAPlanDoesNotCreateASecondIntent -v</code>; restored</td><td><strong>fails as predicted</strong>: <code>run.IntentID</code> mismatched, pointing at a second minted intent; <code>git diff</code>/<code>git status --porcelain</code> empty after restore</td></tr>
-    <tr><td>Exactly one intent exists after approval; dispatched run's <code>IntentID</code> equals the proposed plan's own id</td><td><code>TestApprovingAPlanDoesNotCreateASecondIntent</code>'s own assertions: <code>run.IntentID != intentID</code> check and <code>len(intents) != 1</code> check</td><td>both pass at <code>01fda48</code>, both fail under the mutation above</td></tr>
-    <tr><td>Approve/reject idempotency and refusal</td><td><code>TestApprovingAnAlreadyApprovedPlanIsIdempotent</code>, <code>TestRejectingAnAlreadyRejectedPlanIsIdempotent</code>, <code>TestApprovingAnAbandonedPlanIsRefused</code>, <code>TestRejectingAnInProgressPlanIsRefused</code>, <code>TestApproveAndRejectRefuseAnUnknownIntent</code></td><td>all 5 pass; each checked against its own row-count/status assertion, not just the HTTP code</td></tr>
-    <tr><td><code>GET /api/plans</code> lists only proposed plans with bullets</td><td><code>TestProposedPlansAreListableWithTheirBullets</code></td><td>pass; explicit-repos dispatch confirmed absent from the list</td></tr>
-    <tr><td><code>GET /api/bullets?intent_id=</code> works with no run</td><td><code>TestBulletsEndpointAcceptsIntentIDDirectly</code></td><td>pass; unknown intent id returns empty list, 200</td></tr>
-    <tr><td><code>BulletStatuses()</code> merge is complete and correct</td><td><code>git diff fcc28fd 01fda48 -- internal/store/store.go</code>; <code>grep -c '^func BulletStatuses'</code>; conflict-marker sweep</td><td><code>{"proposed","pending","red","green","sealed","merged","failed","blocked"}</code>; exactly 1 definition; 0 conflict markers</td></tr>
-    <tr><td>Bullet order cannot be disturbed by approval</td><td>Read <code>ListBulletsForIntent</code>'s SQL and <code>handleApprovePlan</code>'s loop; confirmed <code>createRunAndDispatch</code> skips bullet writes when reusing an intent</td><td><code>Position</code> values from proposal time are never rewritten by approval</td></tr>
-    <tr><td><strong>My repro 1: explicit <code>change_id</code> discarded at approval</strong></td><td>Throwaway test: propose with <code>change_id="my-explicit-change"</code> + non-matching brief, approve, read run's <code>ChangeID</code></td><td><strong>bug confirmed</strong>: approval scaffolded and used <code>"totally-unrelated-free-text-intent"</code> instead, <code>change_created:true</code></td></tr>
-    <tr><td><strong>My repro 2: DAG-configured project resolves a different repo at approval than proposal</strong></td><td>Throwaway test: 2 repos, DAG stage order ≠ alphabetical order, change exists only under the DAG-preferred repo</td><td><strong>bug confirmed</strong>: approval resolved <code>change_repo:"api"</code> (alphabetical), not <code>"web"</code> (where proposal put it); scaffolded a second, empty change with the same id under <code>api</code></td></tr>
-    <tr><td>Both throwaway probes cleaned up</td><td><code>rm</code> both files; <code>git status --porcelain</code></td><td>empty — no leftover files</td></tr>
-    <tr><td>Stale test comment traced to before the fix</td><td><code>git log --all --oneline -S"mints a fresh run and a fresh intent" -- internal/ui/plan_approval_test.go</code></td><td>introduced in <code>f9faa53</code>, never updated by the fix commit <code>f84becb</code>; no assertion depends on it</td></tr>
-    <tr><td>No scope creep in <code>01fda48</code></td><td><code>git show 01fda48 --stat</code></td><td>9 files, all in <code>internal/{store,ui}</code> plus their tests; matches <code>tasks.md</code>'s single task</td></tr>
+    <tr><td>Build/vet/test clean at <code>494179e</code></td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code> (run twice)</td><td>pass, 11/11 packages both times (one incidental single-run flake in an unrelated package on the first run, not reproducible over 35 further targeted runs)</td></tr>
+    <tr><td>Migration adds both columns on both paths</td><td>Read <code>createIntentsTable</code> and <code>migrateAddColumns</code> diffs</td><td>both add <code>change_id</code>/<code>change_repo TEXT NOT NULL DEFAULT ''</code></td></tr>
+    <tr><td>Every <code>intents</code> query updated, none missed</td><td><code>grep -n "FROM intents\|INTO intents\|UPDATE intents" internal/store/store.go</code></td><td>5 hits, all correctly scoped (4 read/write both columns, 1 correctly does not)</td></tr>
+    <tr><td>Proposal-time capture uses already-resolved values</td><td>Read <code>handleDispatch</code>'s no-repos branch diff</td><td><code>CreateIntent</code> sets <code>ChangeID: change.ID, ChangeRepo: changeRepoName</code> from pre-existing locals, no second resolution call</td></tr>
+    <tr><td>New regression test passes at <code>494179e</code></td><td><code>go test ./internal/ui/... -run TestApprovingAPlanReusesTheOriginallyResolvedChangeNotASecondOne -v -count=1</code></td><td>PASS</td></tr>
+    <tr><td>Test's brief/change_id pair cannot false-pass</td><td>Traced <code>deriveChangeID("a totally different brief text")</code> by hand</td><td><code>a-totally-different-brief-text</code> ≠ <code>add-stripe-webhooks</code></td></tr>
+    <tr><td><strong>Mutation test on the fix</strong></td><td>Reverted <code>handleApprovePlan</code> to <code>changeRepo(proj, targetRepos)</code> / <code>resolveChange(changeRepoPath, "", intent.Statement)</code>; reran the regression test; restored via <code>git checkout --</code></td><td><strong>fails as predicted</strong>: run's <code>ChangeID</code> = <code>a-totally-different-brief-text</code> (wrong); <code>openspec/changes/</code> held 3 entries instead of 1; <code>git status --porcelain</code> empty after restore</td></tr>
+    <tr><td>Removed-repo-at-approval edge case</td><td>Throwaway test: propose against <code>svc</code>, rewrite project YAML to drop <code>svc</code>, approve, with a <code>recover()</code> guard</td><td>no panic; HTTP 500 with message naming the plan id and the missing repo <code>svc</code></td></tr>
+    <tr><td>Throwaway test file cleaned up</td><td><code>rm internal/ui/throwaway_repo_removed_test.go</code>; <code>git status --porcelain</code></td><td>empty — no leftover file</td></tr>
+    <tr><td>Bullet order is already carry-not-recompute (task item 5, no second bug instance)</td><td>Traced <code>Position: i+1</code> at creation and <code>ORDER BY position ASC</code> at read; confirmed <code>createRunAndDispatch</code> skips bullet writes when reusing an intent</td><td>no re-derivation found; pattern already correct, unchanged by this commit</td></tr>
+    <tr><td>Sibling changes checked for the same pattern</td><td>Read <code>openspec/changes/a-stuck-bullet-is-blocked-not-failed</code> and <code>openspec/changes/graphify-honors-exclude-patterns</code> proposals</td><td>neither touches the propose/approve gap; no overlap found</td></tr>
+    <tr><td>Incidental flake is not caused by this commit</td><td><code>git log</code> on <code>internal/graphify/exclude_test.go</code>; 30 reruns of the single test, 5 reruns of the package</td><td>last touched by unrelated commit <code>b64a01f</code>; not reproducible in 35 further runs</td></tr>
   </table>
 </section>
 
 <section>
   <h2>Verdict</h2>
-  <div class="item warn">
-    <p><strong>MEETS SPEC WITH CAVEATS.</strong> Every scenario in <code>specs/plan-approval/spec.md</code> is
-    genuinely implemented and genuinely tested: a no-repos dispatch creates a <code>proposed</code> plan and starts
-    nothing (verified against a real empty-fleet-directory seam, not just the HTTP response); an explicit-repos
-    dispatch is provably unaffected; proposed plans are listable with their bullets; approving starts the real
-    dispatch sequence; rejecting starts nothing and leaves the intent <code>abandoned</code>; both actions are
-    idempotent on repeat and refused outside their valid starting state. The specific defect this review was tasked
-    with independently re-verifying — <code>createRunAndDispatch</code> minting a second, disconnected intent on
-    approval — is genuinely fixed: I did not just read the regression test, I reverted the fix myself, watched the
-    test fail with the exact predicted symptom, and restored the code to a byte-identical <code>git diff</code>.
-    The manually-resolved merge conflict in <code>store.go</code>'s <code>BulletStatuses()</code> is complete and
-    correct, combining both sibling changes with no loss. Bullet merge order survives approval intact; I traced the
-    exact mechanism rather than trusting the absence of a failing test.</p>
-    <p>The caveat is a bug I found doing my own independent reproduction that is not exercised by any shipped test
-    or any scenario in the binding spec: a proposed plan does not remember which OpenSpec change it was resolved
-    against (<code>IntentRecord</code> has no <code>ChangeID</code> field), so <code>handleApprovePlan</code>
-    re-resolves the change from scratch at approval time, with different inputs than proposal time used
-    (<code>changeRepo(proj, targetRepos)</code> instead of <code>changeRepo(proj, req.Repos=[])</code>, and a
-    hardcoded empty <code>change_id</code> instead of whatever the caller originally named). I reproduced two
-    concrete failure modes: an explicitly-named <code>change_id</code> that doesn't match the brief's derived slug
-    is silently discarded and replaced with a freshly-scaffolded, differently-named change; and on a project with a
-    <code>dag:</code> block (an ordinary, documented config feature, not a test artifact) whose stage repo order
-    differs from alphabetical order, approval can resolve the change under a completely different repository than
-    proposal did, scaffolding a second, empty change directory with the same id in the wrong repo while the real,
-    populated one sits unreferenced. Both are silent — no error, <code>200 OK</code>, a dispatched run — and both
-    directly undermine O3's purpose (a durable, singular planning record governs the work), even though O3's literal
-    ordering rule ("the change is resolved before any run or worktree exists") is technically satisfied at both
-    points in time. This is new behavior this change introduces — the propose/approve time gap it creates is exactly
-    what makes drift possible; before this feature, resolution and dispatch happened in the same request and could
-    not drift apart. I recommend persisting the resolved change's identity (id and repo) on the <code>IntentRecord</code>
-    at proposal time and having <code>handleApprovePlan</code> reuse it verbatim rather than re-resolving.</p>
-    <p>Separately, a one-line test comment in <code>plan_approval_test.go</code> still describes the pre-fix
-    behavior (claims approval "mints ... a fresh intent of its own"); harmless since no assertion relies on it, but
-    worth correcting so a future reader isn't misled.</p>
+  <div class="item ok">
+    <p><strong>MEETS SPEC.</strong> This closes D5a's remaining gap (Review 020's finding) cleanly.
+    <code>store.IntentRecord</code> durably records the OpenSpec change (id and repo) at the moment it is first
+    resolved — either immediately for an explicit-repos dispatch's own bookkeeping non-use, or at proposal time for
+    a no-repos dispatch — via a real, correctly-ordered migration and consistent read/write across every query
+    against the <code>intents</code> table. <code>handleApprovePlan</code> no longer calls <code>changeRepo</code>
+    or <code>resolveChange</code> with fresh or empty inputs; it reuses <code>intent.ChangeRepo</code>/
+    <code>intent.ChangeID</code> verbatim, with an explicit, panic-free guard for the case where the recorded repo
+    is no longer configured by approval time. I independently confirmed the regression test is load-bearing (its
+    brief and change_id cannot coincidentally slugify to the same value), independently broke the fix and watched
+    the test fail with the exact predicted symptom on both assertions, and independently restored it to a
+    byte-identical working tree. I found no second instance of the same "recompute instead of reuse" pattern
+    elsewhere in the plan-approval flow or its two sibling in-flight changes. The one incidental issue I hit — a
+    single flaky failure in an unrelated <code>internal/graphify</code> test — traces to a different, pre-existing
+    commit and is not reproducible; it does not affect this verdict.</p>
   </div>
 </section>
 
 <footer>
-  <p class="meta">Review 020 · findings above are reproduced from commands run directly against the current
-  <code>v2</code> working tree at HEAD <code>01fda48</code>, the merge commit itself. One mutation was applied and
-  reverted in place: <code>internal/ui/server.go</code> line 869, <code>handleApprovePlan</code>'s call to
-  <code>createRunAndDispatch</code>, changed from passing <code>intentID</code> to passing <code>""</code>; the
-  regression test rerun and confirmed failing on the predicted assertion; the line restored to its exact original
-  text; <code>git diff</code>/<code>git status --porcelain</code> confirmed empty before writing this review. Two
-  throwaway probe test files (both in <code>internal/ui</code>: one proving an explicit <code>change_id</code> is
-  discarded at approval, one proving a DAG-configured project can resolve a different change repo at approval than
-  at proposal) were written, run, and deleted; <code>git status --porcelain</code> confirmed a clean tree before
-  this review was written. Review 019's uncommitted entry was committed by its own process
-  (<code>2989be2</code>) before this rewrite began, so no concurrent work was overwritten. Prior review entries
-  (001–019) were not re-examined; they stand as recorded in their own text in git history, which this rewrite does
-  not reproduce.</p>
+  <p class="meta">Review 021 · findings above are reproduced from commands run directly against the current
+  <code>v2</code> working tree at HEAD <code>494179e</code>. One mutation was applied and reverted in place:
+  <code>internal/ui/server.go</code>'s <code>handleApprovePlan</code>, its change-repo/change-resolution block
+  reverted to <code>changeRepo(proj, targetRepos)</code> / <code>resolveChange(changeRepoPath, "",
+  intent.Statement)</code>; the regression test rerun and confirmed failing on both predicted assertions; the file
+  restored via <code>git checkout -- internal/ui/server.go</code>; <code>git status --porcelain</code> confirmed
+  empty before writing this review. One throwaway probe test file
+  (<code>internal/ui/throwaway_repo_removed_test.go</code>, proving approval degrades to a clear 500 rather than a
+  panic when the recorded change repo is removed from project config between proposal and approval) was written,
+  run, and deleted; <code>git status --porcelain</code> confirmed a clean tree before this review was written.
+  Review 020's entry was committed by its own process (<code>b9f9760</code>) before this rewrite began, so no
+  concurrent work was overwritten. Prior review entries (001–020) were not re-examined; they stand as recorded in
+  their own text in git history, which this rewrite does not reproduce.</p>
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
