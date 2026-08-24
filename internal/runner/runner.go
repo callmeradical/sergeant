@@ -14,8 +14,14 @@ import (
 	"time"
 
 	"github.com/callmeradical/sergeant/internal/handoff"
+	"github.com/callmeradical/sergeant/internal/redact"
 	"github.com/callmeradical/sergeant/internal/store"
 )
+
+// maxRawOutputBytes bounds captured agent/gate output before it is written to
+// any durable record (R4.5). It is a fixed constant, not a config field: the
+// size limit is a bullet-scoped decision, not an operator-tunable policy.
+const maxRawOutputBytes = 64 * 1024
 
 // ansiEscape matches ANSI/VT100 control sequences emitted by interactive agent
 // CLIs. Agent stdout is stored as a JSON payload and rendered in a browser,
@@ -237,12 +243,14 @@ func (pr *PhaseRunner) RunCodeGate(ctx context.Context, name, command string) (*
 	err := cmd.Run()
 	duration := time.Since(start).Milliseconds()
 
+	cleaned := redact.Truncate(redact.Text(stripANSI(outBuf.String())), maxRawOutputBytes)
+
 	passed := (err == nil)
 	result := &GateResult{
 		GateName: name,
-		Command:  command,
+		Command:  redact.Text(command),
 		Passed:   passed,
-		Output:   stripANSI(outBuf.String()),
+		Output:   cleaned,
 		Worktree: pr.Worktree,
 		Branch:   pr.currentBranch(),
 	}
@@ -453,7 +461,7 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 				Summary:   summary,
 				Artifacts: []string{fmt.Sprintf(".sergeant/prompt_%s.txt", phaseName)},
 				Payload: marshalPayload(map[string]string{
-					"raw_output": stripANSI(outBuf.String()),
+					"raw_output": redact.Truncate(redact.Text(stripANSI(outBuf.String())), maxRawOutputBytes),
 					"agent":      exe,
 					"attempt":    fmt.Sprintf("%d/%d", attempt+1, retries+1),
 					"worktree":   pr.Worktree,
