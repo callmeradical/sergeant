@@ -48,53 +48,46 @@ a{color:var(--muted)}
   <h1>Sergeant v2</h1>
   <p>Independent review. Written by the critic, not the builder.</p>
   <p class="meta">
-    Review 012 · 2026-08-23 · branch <code>v2</code> · merge <code>8a2eb22</code> reviewed
-    (feature commit <code>65a058f</code>) ·
-    "graphify is a native v2 capability (D9, Task 1)"
+    Review 013 · 2026-08-23 · branch <code>v2</code> · merge <code>b012091</code> reviewed
+    (feature commit <code>8415cc1</code>) ·
+    "PR creation requires and records human approval (R3.5)"
   </p>
 </header>
 
 <section>
   <h2>Current status</h2>
   <div class="grid">
-    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at current <code>v2</code> HEAD</div></div>
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at current <code>v2</code> HEAD (<code>3c09daa</code>)</div></div>
     <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code>, whole module</div></div>
-    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">10/10 pass</span></div><div class="small"><code>go test ./internal/... -count=1</code>, all packages green, including a new <code>internal/graphify</code> package</div></div>
-    <div class="card"><div class="label">Scoping claim (v1 wraps a real binary)</div><div class="value"><span class="status">confirmed true</span></div><div class="small">read v1's script directly; ran <code>graphify --help</code> myself</div></div>
-    <div class="card"><div class="label">Zero-repos guard</div><div class="value"><span class="status">real, mutation-tested</span></div><div class="small">disabled it myself; the strengthened test caught it; reverted</div></div>
-    <div class="card"><div class="label">Atomic publish (no partial read)</div><div class="value"><span class="status">real, mutation-tested</span></div><div class="small">reordered the publish steps myself; the test caught it; reverted</div></div>
-    <div class="card"><div class="label">Crash / cross-filesystem safety</div><div class="value"><span class="status warn">regressed vs. v1</span></div><div class="small">no backup-and-restore like v1's <code>trap</code>; a failed <code>Rename</code> after <code>RemoveAll</code> destroys the prior graph with nothing to restore it</div></div>
-    <div class="card"><div class="label">"Must not call sgt-graphify" (D9/D7)</div><div class="value"><span class="status bad">true for new code, false for the system</span></div><div class="small"><code>cmd/sergeant-mcp</code>, still built and declared in <code>mcp.json</code>, exposes a live <code>sgt-graphify</code> tool</div></div>
-    <div class="card"><div class="label">exclude_patterns</div><div class="value"><span class="status">disclosed, unapplied</span></div><div class="small">field exists on <code>config.Graphify</code>; zero references in <code>internal/graphify/graphify.go</code></div></div>
-    <div class="card"><div class="label">Scope discipline</div><div class="value"><span class="status">held</span></div><div class="small">no CLI subcommand, no dashboard button, no report/cluster/watch code touched</div></div>
-    <div class="card"><div class="label">codesign identifier</div><div class="value"><span class="status">confirmed, but manual</span></div><div class="small"><code>Identifier=dev.sergeant.ui</code> on the installed <code>sgt-p</code> binary; no build-tooling reapplies it</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">11/11 pass</span></div><div class="small"><code>go test ./internal/... -count=1</code>, all packages green</div></div>
+    <div class="card"><div class="label"><code>SealBulletForRun</code> scoping</div><div class="value"><span class="status">confirmed, one bullet not the intent</span></div><div class="small">reads the run's intent via <code>GetRun</code>, matches the single bullet whose <code>Repo</code> equals the requested repo; sibling-repo bullet in the same intent left untouched, proven by a real test</div></div>
+    <div class="card"><div class="label">Refusal names the actual status</div><div class="value"><span class="status">confirmed</span></div><div class="small">error text and HTTP 409 body both contain the literal status (<code>pending</code>/<code>red</code>/<code>sealed</code>/<code>failed</code>), asserted with <code>strings.Contains</code>, not just "err != nil"</div></div>
+    <div class="card"><div class="label">Seal-before-<code>gh</code> ordering</div><div class="value"><span class="status">real, mutation-tested</span></div><div class="small">disabled the guard call myself; both the refusal test and the seal-on-success test failed; reverted, <code>git diff</code> confirmed empty</div></div>
+    <div class="card"><div class="label"><code>gh</code> never invoked for a refused request</div><div class="value"><span class="status">real DI seam, not a status check</span></div><div class="small"><code>Server.GHPRCreate</code> is a swappable struct field defaulting to <code>runGHPRCreate</code>; tests install a counting stub and assert <code>ghCalls == 0</code></div></div>
+    <div class="card"><div class="label"><code>GET /api/bullets</code></div><div class="value"><span class="status">matches spec exactly</span></div><div class="small">400 without <code>run_id</code>; <code>[]</code> (not <code>null</code>) for a run with no intent; sealed-write verified through this endpoint, not internal state</div></div>
+    <div class="card"><div class="label">Scope discipline</div><div class="value"><span class="status">held</span></div><div class="small">no <code>UnsealBullet</code>, no dashboard/HTML/JS change, no notification code, <code>merged</code> semantics untouched — 5 files changed, all Go store/server + tests</div></div>
   </div>
-  <p><strong>Verdict:</strong> D9's Task 1 is <strong>genuinely met for the code this bullet added</strong>,
-  and <strong>only apparently met for the decision as a whole</strong>. The "native, not a reimplementation"
-  framing holds up well against what v1 and the real <code>graphify</code> binary actually do — this is the
-  strongest-verified part of this review. But the decision text says flatly "must not call
-  <code>sgt-graphify</code>," and a live, currently-built, currently-declared code path in this same
-  repository does exactly that. See the findings below.</p>
+  <p><strong>Verdict:</strong> MEETS SPEC. Every scenario in <code>specs/bullet-approval/spec.md</code> is
+  implemented as written and covered by a test that asserts the specific guarantee (actual status text, a real
+  call counter, the real listing endpoint) rather than a generic truthiness check. I found no gaps that block
+  acceptance; see the one non-blocking test-coverage note below.</p>
 </section>
 
 <section>
   <h2>What I inspected</h2>
   <table>
     <tr><th>Area</th><th>Method</th></tr>
-    <tr><td>The merge itself</td><td><code>git show 8a2eb22</code>, <code>git diff 8a2eb22^1 8a2eb22^2 --stat</code> — read the real diff (10 files, 1097 insertions, all additive), not the commit message</td></tr>
-    <tr><td>Governing docs</td><td>Read <code>proposal.md</code> in full, including its "scoping correction" section, under <code>openspec/changes/graphify-is-a-native-v2-capability/</code>, plus D9's text in <code>docs/prd-sergeant-v2.md</code></td></tr>
-    <tr><td>Whether the real <code>graphify</code> binary exists and does what's claimed</td><td>Ran <code>graphify --help</code> directly at <code>/Users/lars/.local/bin/graphify</code>: confirmed real subcommands <code>extract</code>, <code>merge-graphs</code>, <code>query</code>, <code>explain</code>, <code>affected</code>, among others</td></tr>
-    <tr><td>Whether v1's <code>sgt-graphify</code> is really a thin wrapper</td><td>Read <code>/Users/lars/Dev/sergeant/bin/sgt-graphify</code> directly (562 lines): confirmed lines 369/437 call <code>graphify extract</code> and <code>graphify merge-graphs</code> as external commands; the script itself does no parsing or graph algorithm work, only orchestration, path resolution, and atomic-publish bookkeeping around those two calls</td></tr>
-    <tr><td><code>internal/graphify/graphify.go</code> and <code>query.go</code></td><td>Read both files in full. <code>runCommand</code> is a package-level var wrapping <code>exec.Command</code>, used unmocked by every non-error-path test</td></tr>
-    <tr><td>Whether the tests are real or a stub</td><td>Ran <code>go test ./internal/graphify/... -v -count=1</code>: each test builds a real temporary git repo, shells out to the real <code>graphify extract</code> binary, and asserts on the real <code>graph.json</code> content. Wall-clock time per test (0.3–0.6s) is consistent with real subprocess/LLM-fallback extraction, not a mock</td></tr>
-    <tr><td>Zero-participating-repos guard, by mutation</td><td>Commented out the early-return guard in <code>BuildProjectGraph</code>, reran <code>TestZeroParticipatingReposIsBuildError</code>: it failed exactly as the commit message predicted (<code>graphify merge-graphs</code> was invoked with zero graph args), then reverted with <code>git checkout --</code> and confirmed a clean tree and a passing rerun</td></tr>
-    <tr><td>Atomic publish, by mutation</td><td>Reordered the code so <code>os.RemoveAll(Output)</code> runs <em>before</em> the <code>publishHook</code> pause instead of after it (a real non-atomic sequencing: old content deleted, new content not yet in place, while paused), reran <code>TestBuildNeverLeavesOutputInAPartialState</code>: it failed ("no such file or directory" reading the mid-flight graph), proving the test genuinely detects a broken publish order rather than only checking that some content exists at the end. Reverted with <code>git checkout --</code></td></tr>
-    <tr><td><code>exclude_patterns</code> usage</td><td><code>grep -rn "ExcludePatterns" internal/</code>: two hits, both in <code>internal/config/config.go</code>/<code>config_test.go</code> (field declaration and its round-trip test). Zero references anywhere in <code>internal/graphify/</code></td></tr>
-    <tr><td>MCP tools and missing-graph refusal</td><td>Read <code>internal/mcp/server.go</code>'s three new tool cases and <code>internal/graphify/query.go</code>'s <code>requireGraph</code>/<code>ErrNoGraph</code>. Read <code>internal/mcp/graph_test.go</code> and <code>internal/ui/build_graph_test.go</code>: both assert zero subprocess invocations (or a still-absent output directory) for a project with no graph built, not merely that an error string is returned</td></tr>
-    <tr><td>Scope discipline</td><td><code>git show 8a2eb22 --stat</code> confirmed no changes under <code>cmd/</code>; grepped all dashboard HTML/JS for <code>graphify</code>/<code>build-graph</code> (zero hits); confirmed no <code>GRAPH_REPORT</code>/cluster/watch code was touched</td></tr>
-    <tr><td>Whether <code>sgt-graphify</code> is reachable anywhere else in this repository</td><td>Grepped beyond the new package: found <code>cmd/sergeant-mcp/main.go</code> (a separate, pre-existing MCP-stdio binary, first added in commit <code>347e2c7</code>, predating this bullet) registers a tool literally named <code>sgt-graphify</code> that shells directly to the v1 script. Confirmed it is not dead code: <code>mise.toml</code>'s <code>[tasks.build]</code> builds it (<code>go build -o bin/sergeant-mcp ./cmd/sergeant-mcp/</code>) alongside <code>bin/sergeant</code>, and <code>mcp.json</code> declares both as live stdio servers side by side (<code>"sergeant"</code> → <code>./bin/sergeant-mcp</code>; <code>"sergeant-v2"</code> → <code>./bin/sergeant mcp</code>)</td></tr>
-    <tr><td>codesign / TCC story</td><td><code>codesign -dv ~/.local/share/sergeant-v2/bin/sgt-p</code>: confirmed <code>Identifier=dev.sergeant.ui</code>, matching the commit's claim exactly. Grepped <code>mise.toml</code> and <code>.goreleaser.yaml</code> for <code>codesign</code>: zero hits — nothing in the build tooling reapplies this on rebuild</td></tr>
-    <tr><td>Full suite</td><td><code>go build ./... && go vet ./... && go test ./internal/... -count=1</code> from the current <code>v2</code> working tree</td></tr>
+    <tr><td>The merge itself</td><td><code>git show b012091</code>, <code>git diff 3919015..b012091</code> — read the real diff (5 files, 388 insertions, 10 deletions), not the commit message</td></tr>
+    <tr><td>Governing docs</td><td>Read <code>proposal.md</code>, <code>design.md</code>, <code>specs/bullet-approval/spec.md</code>, and <code>tasks.md</code> in full under <code>openspec/changes/a-sealed-bullet-awaits-explicit-approval/</code></td></tr>
+    <tr><td><code>Store.SealBulletForRun</code></td><td>Read the added function in <code>internal/store/store.go</code> directly: resolves the run via <code>GetRun</code>, refuses if <code>run.IntentID == ""</code>, loops <code>ListBulletsForIntent</code> results for the one bullet whose <code>Repo</code> matches, refuses (naming the actual status) unless <code>Status == "green"</code>, otherwise calls <code>UpdateBulletStatus(b.ID, "sealed")</code>; refuses if no bullet matches the repo at all</td></tr>
+    <tr><td>Store-level tests</td><td>Read all 6 new tests in <code>internal/store/store_test.go</code>: seals a green bullet; refuses each of <code>pending</code>/<code>red</code>/<code>sealed</code>/<code>failed</code> with <code>strings.Contains(err.Error(), status)</code> and a re-read confirming zero writes; leaves a sibling-repo bullet in the same intent untouched; refuses a run with no intent id; refuses a repo with no matching bullet</td></tr>
+    <tr><td><code>handleCreatePR</code> control flow</td><td>Read <code>internal/ui/server.go</code>: <code>srv.Store.SealBulletForRun(req.RunID, req.Repo)</code> runs immediately after request decoding, before <code>repoPath</code>/<code>remoteBase</code> resolution and before the <code>gh</code> call; a non-nil error responds 409 and returns without reaching the <code>gh</code> logic</td></tr>
+    <tr><td>The <code>gh</code> dependency-injection seam</td><td>Confirmed <code>Server.GHPRCreate func(repoPath, title, body, branch string) ([]byte, error)</code> is a real struct field, defaulted in <code>NewServer</code> to package-level <code>runGHPRCreate</code> (the actual <code>exec.Command("gh", "pr", "create", ...)</code>), and that <code>handleCreatePR</code> calls <code>srv.GHPRCreate(...)</code> rather than invoking <code>exec.Command</code> inline — a real seam, not a status-code proxy</td></tr>
+    <tr><td>UI-level tests</td><td>Read all 4 tests in new file <code>internal/ui/bullet_approval_test.go</code>: a table test over <code>pending</code>/<code>red</code>/<code>sealed</code>/<code>failed</code> asserts 409, the refusal body contains the actual status string, and a counter (<code>ghCalls</code>) on a stubbed <code>srv.GHPRCreate</code> is exactly 0; a green-bullet test asserts 200 and then re-reads the bullet's status as <code>sealed</code> through a live <code>GET /api/bullets</code> call, not internal state; two tests cover the no-intent-id-returns-<code>[]</code> and missing-<code>run_id</code>-returns-400 scenarios</td></tr>
+    <tr><td><code>handleBullets</code></td><td>Read the handler: 400 if <code>run_id</code> missing; 404 if the run doesn't resolve; initializes <code>bullets := []store.BulletRecord{}</code> and only overwrites it if <code>run.IntentID != ""</code> AND the listed result is non-nil — so both "no intent" and "intent exists but has zero bullets" (the latter not explicitly tested) correctly serialize to <code>[]</code>, never <code>null</code></td></tr>
+    <tr><td>Full suite</td><td><code>go build ./... && go vet ./... && go test ./internal/... -count=1</code> from the current <code>v2</code> working tree (HEAD <code>3c09daa</code>)</td></tr>
+    <tr><td>Mutation test on the seal-guard ordering</td><td>Wrapped the <code>if err := srv.Store.SealBulletForRun(...)</code> block in <code>handleCreatePR</code> with <code>if false { ... }</code>, disabling the guard entirely; reran the two relevant tests; reverted with an <code>Edit</code> restoring the exact original text; confirmed <code>git diff</code> is empty afterward</td></tr>
+    <tr><td>Scope discipline</td><td><code>git diff 3919015..b012091 --stat</code> confirmed only 5 Go files changed, all under <code>internal/store</code> and <code>internal/ui</code>; grepped the whole repo for <code>UnsealBullet</code> (zero hits) and the diff for notification-related terms (<code>notif</code>, <code>slack</code>, <code>email</code>, <code>webhook</code> — zero hits) and for any HTML/JS/CSS files touched (zero); grepped the diff and the current file for <code>"merged"</code> and confirmed all three references (<code>BulletStatuses</code>, <code>BulletProgression</code>, and one unrelated check at line 1355) predate this merge and are untouched by it</td></tr>
   </table>
 </section>
 
@@ -102,155 +95,106 @@ a{color:var(--muted)}
   <h2>Findings</h2>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The scoping correction is true, not asserted</h3>
-    <p>This bullet's entire "native" framing rests on the claim that v1's <code>sgt-graphify</code> is itself a
-    thin bash wrapper around a separate, already-installed <code>graphify</code> binary. I did not take this on
-    faith: I ran <code>graphify --help</code> myself and got a real, substantial CLI with <code>extract</code>,
-    <code>merge-graphs</code>, <code>query</code>, <code>explain</code>, and <code>affected</code> among its
-    subcommands, and I read v1's 562-line script directly. It calls <code>graphify extract "$scan_root" --out
-    "$repo_root"</code> (line 369) and <code>graphify merge-graphs "${GRAPH_PATHS[@]}" --out
-    "$stage_output/graph.json"</code> (line 437) as external commands, and does no extraction or graph-algorithm
-    work of its own — only path resolution, filtering, and atomic-publish bookkeeping around those two calls.
-    The premise holds.</p>
+    <h3><span class="sev low">verified</span> &nbsp; <code>SealBulletForRun</code> is scoped to exactly one bullet, not the run's whole intent</h3>
+    <p>Design.md's stated reason for a new method instead of reusing <code>AdvanceBulletsForRun</code> — that
+    sealing is a per-repo fact, not a run-wide gate outcome — is genuinely implemented, not just asserted in a
+    comment. The function loops <code>ListBulletsForIntent</code>'s result and matches on <code>b.Repo ==
+    repo</code>, returning as soon as it finds (or refuses) that one bullet; it never calls
+    <code>UpdateBulletStatus</code> on any other bullet in the loop. <code>TestSealBulletForRunAffectsOnlyItsOwnRepoBullet</code>
+    proves this with a real multi-repo intent (<code>api</code> and <code>web</code> bullets), asserting the
+    <code>web</code> bullet is still <code>green</code> after sealing <code>api</code> — not merely that
+    sealing <code>api</code> succeeded.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; <code>BuildProjectGraph</code> genuinely invokes the real binary for real work</h3>
-    <p>Nothing in <code>internal/graphify</code> is stubbed or mocked in the shipped tests. Every test builds an
-    actual temporary git repository with real committed files, then <code>BuildProjectGraph</code> shells out
-    to the real <code>graphify</code> binary via the unmocked <code>runCommand</code> package variable
-    (mocked only in the specific tests that exist to record invocation counts, and even then by wrapping —
-    not replacing — the real call). I ran the suite myself; per-test wall-clock time (0.3–0.6s for extraction
-    of a one-file repo) is consistent with a real subprocess invocation, not a canned mock response.</p>
+    <h3><span class="sev low">verified</span> &nbsp; Refusal names the bullet's actual status, and writes nothing</h3>
+    <p>Both layers get this right and both are asserted specifically, not generically. At the store layer,
+    <code>SealBulletForRun</code>'s error text is
+    <code>fmt.Errorf("bullet %q for repo %q is %q, not green — refusing to seal", ...)</code>, and
+    <code>TestSealBulletForRunRefusesNonGreenBullets</code> checks <code>strings.Contains(err.Error(), status)</code>
+    for each of <code>pending</code>/<code>red</code>/<code>sealed</code>/<code>failed</code>, then re-reads the
+    bullet via <code>ListBulletsForIntent</code> to confirm its status did not change — a real no-write check, not
+    just "err != nil". At the HTTP layer, <code>TestCreatePRForNonGreenBulletIsRefusedAndNeverInvokesGH</code>
+    checks the same thing against the 409 response body. This is exactly the kind of specific assertion this
+    project's spec explicitly asked for (tasks.md: "assert this the same way this session has asserted 'no
+    subprocess invocation' elsewhere") and it is present, not skipped.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The zero-participating-repos guard is real, confirmed by my own mutation</h3>
-    <p>The commit message's specific claim — that the original test only asserted <code>err != nil</code>,
-    which a missing guard would still satisfy indirectly via <code>graphify merge-graphs</code>'s own
-    zero-input rejection, and that the fix strengthened the assertion to zero subprocess invocations — is
-    accurate. I disabled the guard myself (commented out the early return in <code>BuildProjectGraph</code>)
-    and reran <code>TestZeroParticipatingReposIsBuildError</code>: it failed with "expected no graphify
-    invocations ... got: [[graphify merge-graphs --out ...]]" — exactly the failure the strengthened assertion
-    exists to catch. Reverted cleanly.</p>
-    <p class="small">One residual, non-blocking nuance: the "zero invocations" assertion is strong against
-    <em>this</em> implementation shape (which always reaches the <code>merge-graphs</code> call when
-    <code>len(repoGraphs) != 1</code>, including zero). A hypothetical future refactor that special-cased
-    zero repos to skip straight to writing an empty/missing <code>graph.json</code> without any subprocess
-    call would pass the "zero invocations" check while still being wrong — though the build's own
-    "merged graph is missing or empty" check immediately downstream would still catch that case and still
-    return an error either way, so the required behavior (zero repos is a build error, nothing gets
-    published) would still hold under that hypothetical. Not a defect in the current code; noted because the
-    task explicitly asked whether an even sneakier regression could hide behind this specific assertion.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The seal guard runs before <code>gh</code>, through a real dependency-injection seam, confirmed by my own mutation</h3>
+    <p><code>Server.GHPRCreate</code> is a genuine struct field (<code>func(repoPath, title, body, branch
+    string) ([]byte, error)</code>), defaulted in <code>NewServer</code> to the real subprocess call
+    (<code>runGHPRCreate</code>, a plain function wrapping <code>exec.Command("gh", "pr", "create", ...)</code>),
+    and <code>handleCreatePR</code> calls <code>srv.GHPRCreate(...)</code> rather than shelling out inline. This
+    is a real seam a test can substitute, not a status-code inference. I mutation-tested the ordering myself:
+    wrapped the <code>SealBulletForRun</code> guard block in <code>handleCreatePR</code> with <code>if false {
+    ... }</code>, disabling it entirely, and reran <code>TestCreatePRForNonGreenBulletIsRefusedAndNeverInvokesGH</code>
+    and <code>TestCreatePRForGreenBulletSucceedsAndSealsTheBullet</code>. Both failed exactly as expected: the
+    refusal test got HTTP 200 instead of 409 for all four non-green statuses (the request proceeded to create a
+    local worktree PR), and the seal-on-success test found the bullet still <code>green</code> instead of
+    <code>sealed</code> after a successful create-PR call. I reverted the exact original text and confirmed
+    <code>git diff</code> is empty afterward — this guard is load-bearing, not decorative.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Atomic publish (no partial read) is real, confirmed by my own mutation</h3>
-    <p><code>TestBuildNeverLeavesOutputInAPartialState</code> does prove what it claims, not just "old content
-    survives." It uses a real concurrency setup — a <code>publishHook</code> seam that pauses a second,
-    real <code>BuildProjectGraph</code> call mid-flight via a goroutine and a channel, while the main
-    goroutine reads <code>Output</code> and asserts it is byte-for-byte identical to the prior graph. I
-    mutated the publish ordering myself: moved <code>os.RemoveAll(proj.Graphify.Output)</code> to run
-    <em>before</em> the <code>publishHook</code> pause instead of after it — a real non-atomic sequencing,
-    since it creates a window where <code>Output</code> is deleted but the new content is not yet renamed
-    in. The test failed immediately ("no such file or directory" reading the mid-flight graph), proving the
-    test does detect a broken publish order and is not merely checking end-state. Reverted cleanly.</p>
+    <h3><span class="sev low">verified</span> &nbsp; <code>gh pr create</code> is never invoked for a refused request, proven by a real call counter</h3>
+    <p><code>TestCreatePRForNonGreenBulletIsRefusedAndNeverInvokesGH</code> installs a stub on
+    <code>srv.GHPRCreate</code> that increments a local <code>ghCalls</code> counter and asserts
+    <code>ghCalls != 0</code> is a failure, for each of the four non-green statuses. This is precisely the
+    "recording wrapper... not just checking the HTTP status" tasks.md called for, and it is genuinely present —
+    not a weaker truthiness check that would still pass if the guard silently no-opped after invoking
+    <code>gh</code> anyway.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; A successful seal is verified through the real listing endpoint, not internal state</h3>
+    <p><code>TestCreatePRForGreenBulletSucceedsAndSealsTheBullet</code> makes a real <code>POST
+    /api/create-pr</code> request, then makes a second real <code>GET /api/bullets?run_id=...</code> request and
+    decodes the JSON response to confirm the bullet reads back as <code>sealed</code>. This exercises the write
+    path and the read path as two independent real HTTP round-trips through the same <code>mux</code>, which is
+    stronger evidence than asserting against the store directly — a bug in <code>handleBullets</code>'s
+    intent-resolution logic would also be caught here, not just a bug in the write.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; <code>GET /api/bullets</code> matches every scenario in spec.md</h3>
+    <p>Missing <code>run_id</code> returns 400 (<code>TestGetBulletsWithoutRunIDIsRefused</code>). A run with no
+    intent id returns exactly <code>[]</code>, confirmed by an exact string comparison
+    (<code>strings.TrimSpace(w.Body.String()) != "[]"</code>) rather than just checking the response decodes —
+    this catches the specific bug class of returning literal <code>null</code>, which a naive
+    <code>var bullets []store.BulletRecord</code> would produce since Go's JSON encoder serializes a nil slice
+    as <code>null</code>. The handler avoids this correctly: it initializes <code>bullets :=
+    []store.BulletRecord{}</code> and only reassigns if the listed result is non-nil. One case is not
+    explicitly tested but I verified it by reading the code: an intent that exists but currently has zero
+    bullets. Because <code>ListBulletsForIntent</code> returns a nil slice for zero rows (its <code>var list
+    []BulletRecord</code> is never appended to), and <code>handleBullets</code> only overwrites the
+    pre-initialized empty slice when <code>listed != nil</code>, this case also correctly serializes to
+    <code>[]</code> — but no test exercises it, so a future refactor that removed the nil-guard would not be
+    caught by anything in this diff. Non-blocking: the current code is correct, only the test coverage for this
+    one path is thin.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Scope discipline held exactly as proposal.md's "Out of scope" section specifies</h3>
+    <p>The diff touches exactly 5 files, all under <code>internal/store</code> and <code>internal/ui</code>
+    (2 source files, 3 test files) — no <code>cmd/</code>, no dashboard HTML/JS/CSS, nothing else. A repo-wide
+    grep for <code>UnsealBullet</code> returns zero hits. A grep of the diff for notification-shaped terms
+    (<code>notif</code>, <code>slack</code>, <code>email</code>, <code>webhook</code>) returns zero hits. The
+    three existing references to the literal string <code>"merged"</code> in <code>internal/store/store.go</code>
+    (<code>BulletStatuses</code>, <code>BulletProgression</code>, and one unrelated check) are all outside this
+    diff's changed line ranges — confirmed by <code>git diff</code> showing no <code>+</code>/<code>-</code>
+    lines touching any of them. D5's interruptions (a) and (b) are explicitly and correctly left unimplemented,
+    matching the proposal's own stated reasoning (no existing hook point for either).</p>
   </div>
 
   <div class="item warn">
-    <h3><span class="sev med">warn</span> &nbsp; The publish step has no crash-safety or cross-filesystem safety net, unlike v1's design it claims to reimplement</h3>
-    <p><code>BuildProjectGraph</code>'s publish step is <code>os.RemoveAll(Output)</code> followed by
-    <code>os.Rename(scratch, Output)</code>, with no recovery path if the process dies, is killed, or the
-    <code>Rename</code> itself fails, between those two calls. If <code>Rename</code> fails — which happens
-    whenever the source and destination are on different filesystems (<code>EXDEV</code>), since
-    <code>scratch</code> is created via <code>os.MkdirTemp("", ...)</code> under the system default temp
-    directory (<code>$TMPDIR</code>/<code>/tmp</code>) with no guarantee it shares a volume with the
-    operator-configured <code>Graphify.Output</code> — the prior published graph has already been deleted by
-    <code>RemoveAll</code> and is not recoverable; the build simply returns an error having destroyed the
-    only copy of the graph. v1's <code>sgt-graphify</code>, which this proposal explicitly says it
-    reimplements "the same stage-verify-then-rename shape," in fact does more: it moves the old output aside
-    to a backup path (<code>mv</code>, not delete) rather than removing it, stages a
-    <code>_publish_parent_for_output</code> helper specifically so "the final rename never crosses
-    filesystem boundaries" (v1's own header comment), and registers an EXIT trap
-    (<code>_restore_old_output</code>) that restores the backup on any failure path. None of that survived
-    the port to Go. On this development machine the risk is currently masked: macOS APFS firmlinks put
-    <code>/tmp</code>, <code>$TMPDIR</code>, and <code>$HOME</code> on the same device
-    (confirmed via <code>os.stat().st_dev</code>), so <code>Rename</code> never actually crosses a
-    filesystem boundary here — which is also almost certainly why the existing tests never surface this,
-    since <code>t.TempDir()</code> for both scratch and output land on the same volume. But a different
-    disk, a tmpfs <code>/tmp</code> on Linux, or an external/network volume configured as
-    <code>graphify.output</code> would hit this. This is a real regression in operational safety against the
-    system being ported from, not something the proposal disclosed as an accepted gap, and not something any
-    test in this bullet exercises.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; <code>exclude_patterns</code> is disclosed-unapplied, not silently half-done</h3>
-    <p><code>config.Graphify.ExcludePatterns</code> exists, is documented in its own doc comment as "parsed
-    and stored but not yet applied by <code>BuildProjectGraph</code>," and a full grep of
-    <code>internal/graphify/</code> for <code>ExcludePatterns</code> returns zero hits. The proposal's "Out of
-    scope" section names this explicitly. The claim matches the code exactly.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; MCP tools and the HTTP endpoint refuse cleanly on a missing graph, with real invocation-count proof</h3>
-    <p><code>requireGraph</code> in <code>query.go</code> stats <code>graph.json</code> before any subprocess
-    is spawned and returns <code>ErrNoGraph</code> if it is missing or empty. This is exercised at two
-    layers, both with counters on the real <code>runCommand</code> seam rather than just checking an error
-    string: <code>TestQueryWithNoGraphBuiltIsAClearError</code> in <code>internal/graphify</code> and
-    <code>TestMCPGraphToolsWithNoGraphBuiltReturnClearError</code> in <code>internal/mcp</code> (the latter
-    also asserts the output directory is never created). Both pass.</p>
-  </div>
-
-  <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Scope discipline held: no CLI, no dashboard UI, no report/cluster/watch code touched</h3>
-    <p><code>git show 8a2eb22 --stat</code> shows only <code>internal/config</code>, <code>internal/graphify</code>,
-    <code>internal/mcp</code>, and <code>internal/ui/server.go</code> changed — nothing under <code>cmd/</code>.
-    A repo-wide grep of dashboard HTML/JS for <code>graphify</code> or <code>build-graph</code> returns nothing.
-    <code>POST /api/build-graph</code> is the only new trigger, exactly as the proposal's "Out of scope"
-    section requires. No <code>GRAPH_REPORT.md</code>, clustering, <code>graphify watch</code>, or
-    global-graph code exists anywhere in this diff.</p>
-  </div>
-
-  <div class="item bad">
-    <h3><span class="sev high">bad</span> &nbsp; "Must not call <code>sgt-graphify</code>" is true of the code this bullet added, and false of the system as currently built and configured</h3>
-    <p>The commit message states, without qualification, that "no <code>sgt-graphify</code> process is ever
-    spawned" — proven, it says, by <code>TestBuildNeverSpawnsSgtGraphify</code>. That test is real and does
-    prove that <code>internal/graphify.BuildProjectGraph</code> never spawns it. But it is not the only code
-    path in this repository that can spawn <code>sgt-graphify</code>. <code>cmd/sergeant-mcp/main.go</code> —
-    a separate MCP stdio server, first added in commit <code>347e2c7</code> well before this bullet, and
-    <strong>not touched by this merge</strong> — is a generic wrapper that exposes every <code>bin/sgt-*</code>
-    v1 shell script as its own MCP tool, one of which is registered by name as <code>scriptName: "sgt-graphify"</code>,
-    <code>toolName: "sgt-graphify"</code> (lines 248–249). It is not dead code: <code>mise.toml</code>'s
-    <code>[tasks.build]</code> builds it (<code>go build -o bin/sergeant-mcp ./cmd/sergeant-mcp/</code>) every
-    time <code>bin/sergeant</code> is built, and <code>mcp.json</code> declares it as a live server named
-    <code>"sergeant"</code> alongside the new native server named <code>"sergeant-v2"</code>. Any agent client
-    configured against the <code>"sergeant"</code> server — which is the first and, per <code>mcp.json</code>'s
-    ordering, arguably the default-looking one — can call a tool named <code>sgt-graphify</code> and have it
-    shell directly to v1's bash script, in direct contradiction of D9's own text ("must not call
-    <code>sgt-graphify</code> (D7)") and of <code>AGENTS.md</code>'s "v1 is not a dependency" section, whose
-    listed prohibition ("do not call <code>sgt-dispatch</code>, <code>sgt-watch</code>, <code>sgt-respond</code>,
-    <code>sgt-validate</code>, <code>sgt-context</code>, or any other <code>bin/sgt-*</code> script") already
-    covers this by its own "or any other" clause. This predates the bullet under review and is not a
-    regression this merge introduced — but the merge's own claim of proof ("no <code>sgt-graphify</code>
-    process is ever spawned") is stated with a confidence the actual system does not support, and no finding
-    in this proposal or the merge commit discloses that this second, older MCP surface exists or that it
-    still offers exactly the thing D9 forbids. This is the single most important finding in this review: it
-    means D9's decision text is not actually enforced system-wide, only inside the one new code path built to
-    satisfy it.</p>
-  </div>
-
-  <div class="item warn">
-    <h3><span class="sev med">warn</span> &nbsp; The codesign fix that unblocked this dispatch is real but entirely manual, with nothing in the build tooling to reapply it</h3>
-    <p><code>codesign -dv ~/.local/share/sergeant-v2/bin/sgt-p</code> confirms
-    <code>Identifier=dev.sergeant.ui</code>, matching the commit's claim exactly, so the diagnosis and fix for
-    this cycle's dispatch failures appear to be real. But I grepped <code>mise.toml</code> and
-    <code>.goreleaser.yaml</code> for <code>codesign</code> and found nothing — the stable identifier is
-    applied by a one-off manual command the commit message documents in prose, not by any build task. The
-    commit message itself says this "must be applied after every future rebuild of this binary." Nothing in
-    the repository enforces that. The next person (or agent) who rebuilds <code>bin/sgt-p</code> without
-    knowing this history will silently reintroduce the exact TCC hang that cost 4 prior dispatch attempts,
-    with no test or CI check that would catch it before a headless launchd run hangs again.</p>
+    <h3><span class="sev low">non-blocking</span> &nbsp; "Zero bullets for an existing intent" is untested at the HTTP layer</h3>
+    <p>As noted above, <code>handleBullets</code> correctly returns <code>[]</code> for an intent with zero
+    bullets, verified by reading the code (the nil-guard around <code>listed != nil</code>). But no test in
+    <code>bullet_approval_test.go</code> constructs this specific case (an intent that exists, is named by a
+    run, but currently has zero <code>BulletRecord</code> rows). Every other spec.md scenario is directly
+    tested; this one is only covered by code inspection. Not a defect — a correctness gap in test coverage,
+    not in behavior.</p>
   </div>
 
 </section>
@@ -259,65 +203,64 @@ a{color:var(--muted)}
   <h2>Evidence index</h2>
   <table>
     <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
-    <tr><td>Build/vet/test clean at current <code>v2</code> HEAD</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 10/10 packages</td></tr>
-    <tr><td><code>graphify</code> binary is real, already installed</td><td><code>graphify --help</code> run directly</td><td>confirmed: real CLI with <code>extract</code>/<code>merge-graphs</code>/<code>query</code>/<code>explain</code>/<code>affected</code></td></tr>
-    <tr><td>v1's <code>sgt-graphify</code> is a thin wrapper around it</td><td>read <code>/Users/lars/Dev/sergeant/bin/sgt-graphify</code> directly, lines 369 and 437</td><td>confirmed: calls <code>graphify extract</code> / <code>graphify merge-graphs</code> as external commands, does no extraction itself</td></tr>
-    <tr><td>Tests invoke the real binary, not a mock</td><td><code>go test ./internal/graphify/... -v -count=1</code></td><td>pass; real git repos built per test; wall-clock time consistent with real subprocess calls</td></tr>
-    <tr><td>Zero-repos guard is load-bearing</td><td>disabled the guard in <code>BuildProjectGraph</code>, reran <code>TestZeroParticipatingReposIsBuildError</code>, reverted</td><td>failed exactly as predicted (recorded a live <code>merge-graphs</code> call with zero args), then confirmed clean revert and a passing rerun</td></tr>
-    <tr><td>Atomic publish is load-bearing</td><td>moved <code>os.RemoveAll(Output)</code> before the <code>publishHook</code> pause, reran <code>TestBuildNeverLeavesOutputInAPartialState</code>, reverted</td><td>failed ("no such file or directory" reading mid-flight), then confirmed clean revert and a passing rerun</td></tr>
-    <tr><td><code>exclude_patterns</code> unapplied</td><td><code>grep -rn "ExcludePatterns" internal/</code></td><td>2 hits, both in <code>internal/config</code>; zero in <code>internal/graphify</code></td></tr>
-    <tr><td>MCP/HTTP layers never shell out for a missing graph</td><td>read <code>requireGraph</code>/<code>ErrNoGraph</code>; ran <code>TestQueryWithNoGraphBuiltIsAClearError</code> and <code>TestMCPGraphToolsWithNoGraphBuiltReturnClearError</code></td><td>both pass; both assert on real invocation counters, not just error strings</td></tr>
-    <tr><td>No CLI/dashboard scope creep</td><td><code>git show 8a2eb22 --stat</code>; grep of dashboard HTML/JS for <code>graphify</code>/<code>build-graph</code></td><td>no <code>cmd/</code> changes in this merge; zero dashboard hits</td></tr>
-    <tr><td>A second, live path to <code>sgt-graphify</code> exists</td><td>found <code>cmd/sergeant-mcp/main.go</code> lines 248–249; confirmed built by <code>mise.toml</code> <code>[tasks.build]</code>; confirmed declared as server <code>"sergeant"</code> in <code>mcp.json</code></td><td>real and live, predates this merge, undisclosed by it</td></tr>
-    <tr><td>codesign identifier matches the claimed fix</td><td><code>codesign -dv ~/.local/share/sergeant-v2/bin/sgt-p</code></td><td><code>Identifier=dev.sergeant.ui</code>, exact match; no build-tooling reapplies it on rebuild (grepped <code>mise.toml</code>/<code>.goreleaser.yaml</code>, zero hits)</td></tr>
+    <tr><td>Build/vet/test clean at current <code>v2</code> HEAD</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 11/11 packages</td></tr>
+    <tr><td><code>SealBulletForRun</code> refuses a non-green bullet, naming its actual status</td><td>read the function; ran <code>TestSealBulletForRunRefusesNonGreenBullets</code> (store) and <code>TestCreatePRForNonGreenBulletIsRefusedAndNeverInvokesGH</code> (HTTP), both table-tested over <code>pending</code>/<code>red</code>/<code>sealed</code>/<code>failed</code></td><td>both pass; both assert <code>strings.Contains(..., status)</code>, not generic truthiness</td></tr>
+    <tr><td>A refusal writes nothing</td><td><code>TestSealBulletForRunRefusesNonGreenBullets</code> re-reads via <code>ListBulletsForIntent</code> after each refusal</td><td>pass; bullet status unchanged in every case</td></tr>
+    <tr><td>Sealing affects only the one repo's bullet</td><td><code>TestSealBulletForRunAffectsOnlyItsOwnRepoBullet</code>, a real two-repo (<code>api</code>/<code>web</code>) intent</td><td>pass; <code>api</code> becomes <code>sealed</code>, <code>web</code> stays <code>green</code></td></tr>
+    <tr><td>Seal guard runs before <code>gh</code>, and blocks it</td><td>read <code>handleCreatePR</code>'s control flow; mutation-tested by wrapping the guard call in <code>if false {}</code>, rerunning the two relevant HTTP tests, reverting</td><td>both tests failed with the guard disabled (200 instead of 409; bullet stayed <code>green</code> instead of <code>sealed</code>); reverted with <code>git diff</code> confirmed empty</td></tr>
+    <tr><td><code>gh</code> is never invoked for a refused request</td><td><code>Server.GHPRCreate</code> DI seam read directly; <code>TestCreatePRForNonGreenBulletIsRefusedAndNeverInvokesGH</code>'s <code>ghCalls</code> counter</td><td>pass; a real swappable dependency, not a status-code proxy; <code>ghCalls == 0</code> in all four cases</td></tr>
+    <tr><td>A successful request seals the bullet, verified via the real API</td><td><code>TestCreatePRForGreenBulletSucceedsAndSealsTheBullet</code>: <code>POST /api/create-pr</code> then <code>GET /api/bullets</code></td><td>pass; bullet reads back as <code>sealed</code> through the listing endpoint, not internal state</td></tr>
+    <tr><td><code>GET /api/bullets</code> requires <code>run_id</code>, returns <code>[]</code> not <code>null</code></td><td><code>TestGetBulletsWithoutRunIDIsRefused</code>; <code>TestGetBulletsForRunWithNoIntentReturnsEmptyArray</code>'s exact string check <code>== "[]"</code></td><td>both pass</td></tr>
+    <tr><td>No scope creep (<code>UnsealBullet</code>, dashboard, notifications, <code>merged</code> semantics)</td><td><code>git diff 3919015..b012091 --stat</code>; grep for <code>UnsealBullet</code>, <code>notif</code>/<code>slack</code>/<code>email</code>/<code>webhook</code>, HTML/JS/CSS files, and <code>"merged"</code></td><td>5 Go files changed only; zero hits on all scope-creep greps; all 3 pre-existing <code>"merged"</code> references untouched by this diff</td></tr>
   </table>
 </section>
 
 <section>
   <h2>Verdict</h2>
-  <div class="item warn">
-    <p><strong>D9 Task 1: partly met — genuinely met for the code this bullet added, only apparently met for
-    the decision as a whole.</strong> The scoping correction the proposal opens with is not spin: I
-    independently confirmed the real <code>graphify</code> binary exists, does the actual extraction and
-    graph-algorithm work, and that v1's <code>sgt-graphify</code> really is nothing more than bash
-    orchestration around it. "Native" genuinely means what the proposal says it means here — Go code owns
-    orchestration, configuration, and publication, while the real external tool still does the graph work —
-    and that framing holds up under scrutiny, not just under its own restatement. <code>BuildProjectGraph</code>
-    really invokes the real binary in its tests, not a stub. The two properties the commit message singles
-    out for extra proof — the zero-participating-repos guard and atomic, no-partial-read publishing — are
-    both genuinely tested, and I confirmed both myself by breaking each one with my own mutation and watching
-    the corresponding test catch it, then reverting. <code>exclude_patterns</code> is honestly disclosed as
-    unapplied rather than silently dropped. The three MCP tools and the one HTTP trigger are thin,
-    correctly-scoped wrappers that refuse cleanly — with real invocation-count proof, not just an error
-    string — when no graph has been built. No CLI subcommand or dashboard element was added, honoring the
-    proposal's explicit exclusions.</p>
-    <p>Two things keep this from a clean "genuinely met." First, and most important: the decision text's
-    actual, load-bearing requirement — "must not call <code>sgt-graphify</code>" — is not true of this
-    system as built and configured, only of the one new code path built to satisfy it. <code>cmd/sergeant-mcp</code>,
-    unrelated to this bullet's diff but still actively built and still declared in <code>mcp.json</code>
-    alongside the new server, exposes a tool literally named <code>sgt-graphify</code> that shells straight
-    to v1's script. The commit's claim that "no <code>sgt-graphify</code> process is ever spawned" is true of
-    <code>internal/graphify</code> and false of the repository as a whole, and nothing in the proposal or the
-    merge discloses this. Second, the atomic-publish implementation quietly dropped the crash-safety and
-    cross-filesystem guarantees v1's own version of "the same stage-verify-then-rename shape" actually had
-    (backup-and-restore on failure, same-filesystem staging) — a real regression, currently masked only by
-    this machine's single-volume APFS layout putting <code>/tmp</code> and the output directory on the same
-    device.</p>
+  <div class="item ok">
+    <p><strong>MEETS SPEC.</strong> Every ADDED requirement and every scenario in
+    <code>specs/bullet-approval/spec.md</code> is implemented exactly as written, and every scenario is backed
+    by a test that asserts the specific guarantee the scenario names, not a generic truthiness or status-code
+    check. <code>Store.SealBulletForRun</code> resolves the run's intent, finds the single bullet matching the
+    requested repo (not the whole intent — confirmed by a real multi-repo test proving the sibling bullet is
+    untouched), refuses with an error naming the bullet's actual status unless it is <code>green</code>, and
+    writes nothing on refusal (confirmed by re-reading the bullet after a refused call, not just checking for a
+    non-nil error). <code>handleCreatePR</code> calls this guard immediately after decoding the request, before
+    any <code>gh</code> invocation, through a real dependency-injection seam (<code>Server.GHPRCreate</code>, a
+    swappable struct field defaulting to the real subprocess call) rather than a bare
+    <code>exec.Command</code> call — a test proves <code>gh</code> is never invoked for a refused request via an
+    actual call counter, exactly as tasks.md demanded. I confirmed the guard is load-bearing myself: disabling
+    it (wrapping the call in <code>if false {}</code>) made both the refusal test and the seal-on-success test
+    fail, and I reverted the change exactly, confirmed by an empty <code>git diff</code>. <code>GET
+    /api/bullets</code> requires <code>run_id</code> (400 if missing), returns the real bullet list for a run
+    with an intent, and returns <code>[]</code> — not <code>null</code>, verified by an exact string comparison
+    in the test, not just successful JSON decoding — for a run with no intent, and the code also correctly
+    handles (though does not explicitly test) the same empty-array behavior for an intent that exists but
+    currently has zero bullets. Scope discipline held completely: the diff touches exactly 5 Go files (2
+    source, 3 test), no <code>UnsealBullet</code> exists anywhere in the repository, no dashboard/HTML/JS/CSS
+    file was touched, no notification code was added, and the pre-existing <code>"merged"</code> status
+    semantics in <code>store.go</code> are untouched by this diff.</p>
+    <p>One non-blocking caveat: the "intent exists, zero bullets" branch of <code>handleBullets</code>'s
+    empty-array logic is correct by inspection but has no dedicated test, unlike the "no intent id" branch,
+    which does. This is a test-coverage gap, not a behavioral defect — I verified the code handles it correctly
+    by reading <code>ListBulletsForIntent</code>'s nil-slice-on-zero-rows behavior and
+    <code>handleBullets</code>'s <code>if listed != nil</code> guard around it.</p>
   </div>
 </section>
 
 <footer>
-  <p class="meta">Review 012 · findings above are reproduced from commands run directly against the current
-  <code>v2</code> working tree (no worktree needed; nothing was left uncommitted). Two mutations were applied
-  and reverted in place: (1) the zero-participating-repos early return in
-  <code>internal/graphify/graphify.go</code> was commented out, <code>TestZeroParticipatingReposIsBuildError</code>
-  was rerun and failed as predicted, then <code>git checkout -- internal/graphify/graphify.go</code> restored
-  the file; (2) <code>os.RemoveAll(proj.Graphify.Output)</code> was moved to run before the
-  <code>publishHook</code> pause instead of after it, <code>TestBuildNeverLeavesOutputInAPartialState</code>
-  was rerun and failed as predicted, then the same <code>git checkout --</code> restored the file.
-  <code>git diff</code> and a clean full test run confirmed no residual changes before this review was
-  written. Review 011's findings (envelopes/R5) were not re-examined and are not restated here; they stand as
-  recorded in that review's own text, which this rewrite does not reproduce.</p>
+  <p class="meta">Review 013 · findings above are reproduced from commands run directly against the current
+  <code>v2</code> working tree at HEAD <code>3c09daa</code> (no worktree needed; nothing was left
+  uncommitted). One mutation was applied and reverted in place: the
+  <code>srv.Store.SealBulletForRun(req.RunID, req.Repo)</code> guard call in
+  <code>internal/ui/server.go</code>'s <code>handleCreatePR</code> was wrapped in <code>if false { ... }</code>
+  to disable it entirely; <code>TestCreatePRForNonGreenBulletIsRefusedAndNeverInvokesGH</code> and
+  <code>TestCreatePRForGreenBulletSucceedsAndSealsTheBullet</code> were rerun and both failed as predicted
+  (409→200 for refusals; bullet stayed <code>green</code> instead of becoming <code>sealed</code>); the exact
+  original text was then restored via <code>Edit</code>. <code>git diff</code> and a clean full test run
+  confirmed no residual changes before this review was written. Review 012's findings (graphify/D9) were not
+  re-examined and are not restated here; they stand as recorded in that review's own text, which this rewrite
+  does not reproduce.</p>
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
