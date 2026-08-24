@@ -650,7 +650,12 @@ func (srv *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 		remoteBase = resolveGitRemoteURL(repoPath)
 	}
 
-	branch := fmt.Sprintf("sergeant/%s", req.RunID)
+	run, err := srv.Store.GetRun(req.RunID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("loading run %q: %v", req.RunID, err), http.StatusInternalServerError)
+		return
+	}
+	branch := naming.BranchName(run.Type, run.ChangeID)
 	if req.Title == "" {
 		req.Title = fmt.Sprintf("feat(%s): verified patch for run [%s]", req.Project, req.RunID)
 	}
@@ -874,7 +879,7 @@ func (srv *Server) handleApprovePlan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	srv.createRunAndDispatch(w, proj, intent.Statement, targetRepos, change, "", changeRepoName, changeRepoPath, intentID)
+	srv.createRunAndDispatch(w, proj, intent.Statement, targetRepos, change, "", changeRepoName, changeRepoPath, intentID, intent.Type)
 }
 
 // handleRejectPlan is decision D2/D5(a)'s explicit rejection path. Rejecting
@@ -1297,6 +1302,37 @@ func (srv *Server) handleSaveDAG(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// validWorkTypes is the fixed vocabulary decision O2 names for a dispatched
+// branch's <type>/<change-id> prefix. It is checked before anything else about
+// a dispatch — before change resolution, before either the no-repos or
+// explicit-repos branch runs — mirroring where ValidateAgent is checked: reject
+// what the engine cannot honor before any record exists.
+var validWorkTypes = map[string]bool{
+	"feat": true, "fix": true, "refactor": true,
+	"docs": true, "chore": true, "test": true,
+}
+
+// sortedWorkTypes returns validWorkTypes' keys in a stable order, so a refusal
+// names the valid set the same way on every call.
+func sortedWorkTypes() []string {
+	names := make([]string, 0, len(validWorkTypes))
+	for t := range validWorkTypes {
+		names = append(names, t)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// validateWorkType reports whether typ is one of the fixed work types a
+// dispatch may name. An empty or unrecognized value is refused, naming the
+// valid set, so the caller learns what would have been accepted.
+func validateWorkType(typ string) error {
+	if !validWorkTypes[typ] {
+		return fmt.Errorf("invalid or missing type %q: must be one of %s", typ, strings.Join(sortedWorkTypes(), ", "))
+	}
+	return nil
+}
+
 // targetRepositories is the list of repositories a dispatch acts on: the ones it
 // named, or every repository in the project when it named none.
 //
@@ -1327,6 +1363,11 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		Brief   string   `json:"brief"`
 		Repos   []string `json:"repos"`
 		Agent   string   `json:"agent"`
+		// Type is the work type a dispatch is accountable to (decision O2): one
+		// of feat, fix, refactor, docs, chore, test. It names the dispatched
+		// branch's <type>/ prefix and is refused if missing or unrecognized,
+		// before change resolution and before any run, intent or worktree exists.
+		Type string `json:"type"`
 		// ChangeID is optional. When empty, a change is derived from the brief and
 		// scaffolded (decision O3); when set, it must already exist.
 		ChangeID string `json:"change_id"`
@@ -1345,6 +1386,15 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 
 	if strings.TrimSpace(req.Brief) == "" {
 		http.Error(w, "Intent brief cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	// Decision O2: a dispatch must state its work type before change resolution
+	// and before either the no-repos or explicit-repos branch runs — the same
+	// "reject what the engine cannot honor before any record exists" placement
+	// as ValidateAgent below.
+	if err := validateWorkType(req.Type); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -1406,6 +1456,7 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 			Status:     "proposed",
 			ChangeID:   change.ID,
 			ChangeRepo: changeRepoName,
+			Type:       req.Type,
 		}); err != nil {
 			http.Error(w, fmt.Sprintf("recording the proposed plan: %v", err), http.StatusInternalServerError)
 			return
@@ -1434,7 +1485,7 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	srv.createRunAndDispatch(w, proj, brief, targetRepos, change, requestID, changeRepoName, changeRepoPath, "")
+	srv.createRunAndDispatch(w, proj, brief, targetRepos, change, requestID, changeRepoName, changeRepoPath, "", req.Type)
 }
 
 // createRunAndDispatch is the run-creation-and-dispatch sequence a dispatch
@@ -1465,6 +1516,7 @@ func (srv *Server) createRunAndDispatch(
 	changeRepoName string,
 	changeRepoPath string,
 	existingIntentID string,
+	workType string,
 ) {
 	taskID := naming.RunID()
 
@@ -1496,6 +1548,7 @@ func (srv *Server) createRunAndDispatch(
 		TaskID:    taskID,
 		Brief:     brief,
 		ChangeID:  change.ID,
+		Type:      workType,
 		IntentID:  intentID,
 		RequestID: requestID,
 		Status:    "running",
@@ -1644,7 +1697,10 @@ func gitOut(dir string, args ...string) string {
 // It never claims a pull request exists; opening one is an explicit human action
 // through /api/create-pr.
 func (srv *Server) describeDelivery(proj *config.Project, runID string) DeliveryReport {
-	branch := dag.BranchName(runID)
+	branch := ""
+	if run, err := srv.Store.GetRun(runID); err == nil {
+		branch = naming.BranchName(run.Type, run.ChangeID)
+	}
 
 	// Report on the first repo that actually produced a worktree for this run.
 	for repoName, rCfg := range proj.Repos {

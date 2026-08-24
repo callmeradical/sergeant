@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/callmeradical/sergeant/internal/handoff"
+	"github.com/callmeradical/sergeant/internal/naming"
 	"github.com/callmeradical/sergeant/internal/redact"
 	"github.com/callmeradical/sergeant/internal/store"
 )
@@ -596,7 +597,11 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 // DeliverPullRequest automatically seals the worktree and opens a verified Pull Request via GitHub CLI.
 func (pr *PhaseRunner) DeliverPullRequest(ctx context.Context, branch, title, body string) (string, error) {
 	if branch == "" {
-		branch = fmt.Sprintf("sergeant/%s-%s", pr.RunID, pr.RepoName)
+		run, err := pr.Store.GetRun(pr.RunID)
+		if err != nil {
+			return "", fmt.Errorf("resolving branch name for run %s: %w", pr.RunID, err)
+		}
+		branch = naming.BranchName(run.Type, run.ChangeID)
 	}
 	if title == "" {
 		title = fmt.Sprintf("feat(%s): verified automated patch [%s]", pr.RepoName, pr.RunID)

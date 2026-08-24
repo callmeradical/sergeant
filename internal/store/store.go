@@ -40,6 +40,11 @@ type RunRecord struct {
 	// It is resolved before the run row is written, so a stored run always names
 	// the change whose openspec/changes/<id>/ directory travels in its PR.
 	ChangeID string `json:"change_id"`
+	// Type is the work type this run was dispatched as (decision O2): one of
+	// feat, fix, refactor, docs, chore, test. It is resolved and validated
+	// before the run row is written, so a stored run always names the type its
+	// dispatched branch is named from.
+	Type string `json:"type"`
 	// IntentID names the intent this run serves (decision D4). It is derived from
 	// the run id rather than generated independently, so the link is
 	// reconstructible from either side without a join table. It reads empty for
@@ -96,8 +101,12 @@ type IntentRecord struct {
 	// proposal time.
 	ChangeID   string    `json:"change_id,omitempty"`
 	ChangeRepo string    `json:"change_repo,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	// Type is the work type a proposed plan was resolved with (decision O2),
+	// for the same reason ChangeID/ChangeRepo are recorded here: an approval
+	// reuses it verbatim rather than requiring the caller to state it again.
+	Type      string    `json:"type,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // BulletRecord is a tracer bullet: exactly ONE repository, a vertical slice
@@ -226,6 +235,7 @@ const createIntentsTable = `
 		status TEXT NOT NULL,
 		change_id TEXT NOT NULL DEFAULT '',
 		change_repo TEXT NOT NULL DEFAULT '',
+		type TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	);`
@@ -257,6 +267,7 @@ func (s *Store) migrate() error {
 		brief TEXT NOT NULL DEFAULT '',
 		slug TEXT NOT NULL DEFAULT '',
 		change_id TEXT NOT NULL DEFAULT '',
+		type TEXT NOT NULL DEFAULT '',
 		intent_id TEXT NOT NULL DEFAULT '',
 		-- request_id is deliberately nullable and deliberately has no DEFAULT ''.
 		-- The unique index below is what makes a dispatch idempotent, and SQLite
@@ -398,6 +409,11 @@ func (s *Store) migrateAddColumns() error {
 		// nothing to backfill.
 		{"intents", "change_id", "ALTER TABLE intents ADD COLUMN change_id TEXT NOT NULL DEFAULT ''"},
 		{"intents", "change_repo", "ALTER TABLE intents ADD COLUMN change_repo TEXT NOT NULL DEFAULT ''"},
+		// type is the work type (decision O2) a run/plan was dispatched or
+		// proposed as; existing rows predate the requirement and have nothing
+		// to backfill.
+		{"runs", "type", "ALTER TABLE runs ADD COLUMN type TEXT NOT NULL DEFAULT ''"},
+		{"intents", "type", "ALTER TABLE intents ADD COLUMN type TEXT NOT NULL DEFAULT ''"},
 		// attempt is 1-based; 0 means "pre-dates this field" (unknown attempt count).
 		{"phases", "attempt", "ALTER TABLE phases ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0"},
 
@@ -616,8 +632,8 @@ func (s *Store) CreateRun(r *RunRecord) error {
 	// can store a variant this lookup would then miss.
 	r.RequestID = strings.TrimSpace(r.RequestID)
 	_, err := s.db.Exec(
-		`INSERT INTO runs (id, project, task_id, status, brief, change_id, intent_id, slug, request_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.Project, r.TaskID, r.Status, r.Brief, r.ChangeID, r.IntentID, r.Slug,
+		`INSERT INTO runs (id, project, task_id, status, brief, change_id, type, intent_id, slug, request_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.Project, r.TaskID, r.Status, r.Brief, r.ChangeID, r.Type, r.IntentID, r.Slug,
 		nullableText(r.RequestID), r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil && isDuplicateRequestID(err) {
@@ -1012,7 +1028,7 @@ func (s *Store) CausationFromLatest(runID, repo string) *string {
 // be read by one lister and silently omitted by another. scanRun consumes it in
 // the same order.
 const runColumns = `id, project, task_id, status,
-	COALESCE(brief, ''), COALESCE(change_id, ''), COALESCE(intent_id, ''), COALESCE(slug, ''),
+	COALESCE(brief, ''), COALESCE(change_id, ''), COALESCE(type, ''), COALESCE(intent_id, ''), COALESCE(slug, ''),
 	COALESCE(request_id, ''), created_at, updated_at`
 
 // rowScanner is satisfied by both *sql.Row and *sql.Rows, so a single-row lookup
@@ -1026,7 +1042,7 @@ func scanRun(row rowScanner) (RunRecord, error) {
 	var r RunRecord
 	err := row.Scan(
 		&r.ID, &r.Project, &r.TaskID, &r.Status,
-		&r.Brief, &r.ChangeID, &r.IntentID, &r.Slug,
+		&r.Brief, &r.ChangeID, &r.Type, &r.IntentID, &r.Slug,
 		&r.RequestID, &r.CreatedAt, &r.UpdatedAt,
 	)
 	return r, err
@@ -1148,8 +1164,8 @@ func (s *Store) CreateIntent(i *IntentRecord) error {
 	i.CreatedAt = now
 	i.UpdatedAt = now
 	_, err := s.db.Exec(
-		`INSERT INTO intents (id, project, statement, status, change_id, change_repo, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		i.ID, i.Project, i.Statement, i.Status, i.ChangeID, i.ChangeRepo, i.CreatedAt, i.UpdatedAt,
+		`INSERT INTO intents (id, project, statement, status, change_id, change_repo, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		i.ID, i.Project, i.Statement, i.Status, i.ChangeID, i.ChangeRepo, i.Type, i.CreatedAt, i.UpdatedAt,
 	)
 	if err != nil {
 		return err
@@ -1162,13 +1178,26 @@ func (s *Store) CreateIntent(i *IntentRecord) error {
 	})
 }
 
-func (s *Store) GetIntent(intentID string) (*IntentRecord, error) {
-	row := s.db.QueryRow(
-		`SELECT id, project, COALESCE(statement, ''), status, COALESCE(change_id, ''), COALESCE(change_repo, ''), created_at, updated_at FROM intents WHERE id = ?`,
-		intentID,
-	)
+// intentColumns is the SELECT list shared by every intent query so a column
+// added to IntentRecord cannot be read by one lister and silently omitted by
+// another, the same reasoning as runColumns. scanIntent consumes it in the
+// same order.
+const intentColumns = `id, project, COALESCE(statement, ''), status,
+	COALESCE(change_id, ''), COALESCE(change_repo, ''), COALESCE(type, ''),
+	created_at, updated_at`
+
+func scanIntent(r rowScanner) (IntentRecord, error) {
 	var i IntentRecord
-	if err := row.Scan(&i.ID, &i.Project, &i.Statement, &i.Status, &i.ChangeID, &i.ChangeRepo, &i.CreatedAt, &i.UpdatedAt); err != nil {
+	err := r.Scan(&i.ID, &i.Project, &i.Statement, &i.Status, &i.ChangeID, &i.ChangeRepo, &i.Type, &i.CreatedAt, &i.UpdatedAt)
+	return i, err
+}
+
+func (s *Store) GetIntent(intentID string) (*IntentRecord, error) {
+	i, err := scanIntent(s.db.QueryRow(
+		`SELECT `+intentColumns+` FROM intents WHERE id = ?`,
+		intentID,
+	))
+	if err != nil {
 		return nil, err
 	}
 	return &i, nil
@@ -1176,7 +1205,7 @@ func (s *Store) GetIntent(intentID string) (*IntentRecord, error) {
 
 func (s *Store) ListIntentsForProject(project string) ([]IntentRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT id, project, COALESCE(statement, ''), status, COALESCE(change_id, ''), COALESCE(change_repo, ''), created_at, updated_at FROM intents WHERE project = ? ORDER BY created_at DESC, id ASC`,
+		`SELECT `+intentColumns+` FROM intents WHERE project = ? ORDER BY created_at DESC, id ASC`,
 		project,
 	)
 	if err != nil {
@@ -1186,8 +1215,8 @@ func (s *Store) ListIntentsForProject(project string) ([]IntentRecord, error) {
 
 	var list []IntentRecord
 	for rows.Next() {
-		var i IntentRecord
-		if err := rows.Scan(&i.ID, &i.Project, &i.Statement, &i.Status, &i.ChangeID, &i.ChangeRepo, &i.CreatedAt, &i.UpdatedAt); err != nil {
+		i, err := scanIntent(rows)
+		if err != nil {
 			return nil, err
 		}
 		list = append(list, i)
@@ -1202,7 +1231,7 @@ func (s *Store) ListIntentsForProject(project string) ([]IntentRecord, error) {
 // status rather than adding a parallel table is what surfaces it.
 func (s *Store) ListIntentsByStatus(status string) ([]IntentRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT id, project, COALESCE(statement, ''), status, COALESCE(change_id, ''), COALESCE(change_repo, ''), created_at, updated_at FROM intents WHERE status = ? ORDER BY created_at DESC, id ASC`,
+		`SELECT `+intentColumns+` FROM intents WHERE status = ? ORDER BY created_at DESC, id ASC`,
 		status,
 	)
 	if err != nil {
@@ -1212,8 +1241,8 @@ func (s *Store) ListIntentsByStatus(status string) ([]IntentRecord, error) {
 
 	var list []IntentRecord
 	for rows.Next() {
-		var i IntentRecord
-		if err := rows.Scan(&i.ID, &i.Project, &i.Statement, &i.Status, &i.ChangeID, &i.ChangeRepo, &i.CreatedAt, &i.UpdatedAt); err != nil {
+		i, err := scanIntent(rows)
+		if err != nil {
 			return nil, err
 		}
 		list = append(list, i)
