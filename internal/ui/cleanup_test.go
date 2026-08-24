@@ -252,3 +252,32 @@ func TestReclaimEligibleFleetDirsLeavesDatabaseRecordsUntouched(t *testing.T) {
 		}
 	}
 }
+
+// reclaimFleetDir's own running-run refusal has no other test: the automatic
+// pass never reaches it for a running run because RunsEligibleForCleanup's
+// SQL already excludes status "running" before reclaimFleetDir is ever
+// called. This is the only test exercising that refusal directly — the guard
+// the on-demand /api/clean-worktrees handler relies on for a run a human
+// asks to clean without --force.
+func TestReclaimFleetDirRefusesARunningRunWithoutForce(t *testing.T) {
+	dir := t.TempDir()
+	removed, reason := reclaimFleetDir(dir, "running", false, false)
+	if removed {
+		t.Errorf("removed = true, want false for a running run without force")
+	}
+	if reason == "" {
+		t.Errorf("reason = %q, want a non-empty explanation", reason)
+	}
+	mustExist(t, dir)
+}
+
+// force overrides the running-run refusal — matching handleCleanWorktrees's
+// existing documented on-demand behavior, which this change must not narrow.
+func TestReclaimFleetDirForceOverridesTheRunningRefusal(t *testing.T) {
+	dir := t.TempDir()
+	removed, _ := reclaimFleetDir(dir, "running", true, false)
+	if !removed {
+		t.Errorf("removed = false, want true when force is set")
+	}
+	mustNotExist(t, dir)
+}
