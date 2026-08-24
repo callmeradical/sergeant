@@ -1,0 +1,1 @@
+D5(b) — a bullet whose dispatched work exhausted its retries without reaching green, or whose agent explicitly says it needs a human decision, becomes blocked with a recorded reason, distinct from an ordinary mid-retry failure
