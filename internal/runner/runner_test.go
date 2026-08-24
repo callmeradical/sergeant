@@ -623,6 +623,152 @@ func TestBannerlessGooseOutputDoesNotFailPhase(t *testing.T) {
 	}
 }
 
+// --- output-redaction-and-bounded: R4.4/R4.5 -------------------------------
+
+// A fake agent that prints a secret-shaped string must never leak it into
+// the persisted PhaseRecord or EnvelopeRecord payload. This exercises the
+// real RunAgentPhase call site, not just redact.Text/Truncate in isolation:
+// a pure-function guarantee that is never wired into production output is no
+// guarantee at all.
+func TestRunAgentPhaseRedactsSecretsFromPersistedRecords(t *testing.T) {
+	dir := t.TempDir()
+	secret := "sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP"
+	agent := fakeAgent(t, dir, "agent.sh", "echo 'API_KEY="+secret+"'")
+	pr, st := newRunner(t, agent, 10*time.Second)
+
+	env, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if env == nil {
+		t.Fatal("expected an envelope")
+	}
+	if strings.Contains(string(env.Payload), secret) {
+		t.Errorf("returned envelope payload leaked the secret: %s", env.Payload)
+	}
+	if !strings.Contains(string(env.Payload), "[REDACTED]") {
+		t.Errorf("returned envelope payload was not redacted: %s", env.Payload)
+	}
+
+	phases, err := st.ListPhasesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var final []store.PhaseRecord
+	for _, p := range phases {
+		if p.Name == "build" && p.Kind == "agent" && p.Status != "running" {
+			final = append(final, p)
+		}
+	}
+	if len(final) != 1 {
+		t.Fatalf("expected 1 phase record, got %d", len(final))
+	}
+	if strings.Contains(string(final[0].Payload), secret) {
+		t.Errorf("persisted PhaseRecord.Payload leaked the secret: %s", final[0].Payload)
+	}
+	if !strings.Contains(string(final[0].Payload), "[REDACTED]") {
+		t.Errorf("persisted PhaseRecord.Payload was not redacted: %s", final[0].Payload)
+	}
+
+	envs, err := st.ListEnvelopesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(envs) != 1 {
+		t.Fatalf("expected 1 envelope record, got %d", len(envs))
+	}
+	if strings.Contains(string(envs[0].Data), secret) {
+		t.Errorf("persisted EnvelopeRecord.Data leaked the secret: %s", envs[0].Data)
+	}
+	if !strings.Contains(string(envs[0].Data), "[REDACTED]") {
+		t.Errorf("persisted EnvelopeRecord.Data was not redacted: %s", envs[0].Data)
+	}
+}
+
+// The same guarantee for RunCodeGate: a gate command that prints a
+// secret-shaped string must not leak it into the persisted PhaseRecord.
+func TestRunCodeGateRedactsSecretsFromPersistedRecords(t *testing.T) {
+	tempDir := t.TempDir()
+	st, err := store.Open(filepath.Join(tempDir, "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.CreateRun(&store.RunRecord{ID: "run-1", Project: "p", TaskID: "run-1", Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+
+	router := handoff.NewRouter(filepath.Join(tempDir, "handoff"))
+	pr := &PhaseRunner{
+		Store:    st,
+		Router:   router,
+		Worktree: tempDir,
+		RepoName: "backend",
+		RunID:    "run-1",
+	}
+
+	secret := "AKIAIOSFODNN7EXAMPLE"
+	res, err := pr.RunCodeGate(context.Background(), "secret-gate", "echo 'AWS_CREDENTIAL="+secret+"'")
+	if err != nil {
+		t.Fatalf("RunCodeGate error: %v", err)
+	}
+	if strings.Contains(res.Output, secret) {
+		t.Errorf("GateResult.Output leaked the secret: %q", res.Output)
+	}
+	if !strings.Contains(res.Output, "[REDACTED]") {
+		t.Errorf("GateResult.Output was not redacted: %q", res.Output)
+	}
+
+	phases, err := st.ListPhasesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(phases) != 1 {
+		t.Fatalf("expected 1 phase record, got %d", len(phases))
+	}
+	if strings.Contains(string(phases[0].Payload), secret) {
+		t.Errorf("persisted PhaseRecord.Payload leaked the secret: %s", phases[0].Payload)
+	}
+	if !strings.Contains(string(phases[0].Payload), "[REDACTED]") {
+		t.Errorf("persisted PhaseRecord.Payload was not redacted: %s", phases[0].Payload)
+	}
+}
+
+// A gate/agent whose output exceeds maxRawOutputBytes must be truncated with
+// a visible marker before it is persisted, exercised at the real call sites.
+func TestRunCodeGateBoundsOutputSize(t *testing.T) {
+	tempDir := t.TempDir()
+	st, err := store.Open(filepath.Join(tempDir, "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.CreateRun(&store.RunRecord{ID: "run-1", Project: "p", TaskID: "run-1", Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+
+	router := handoff.NewRouter(filepath.Join(tempDir, "handoff"))
+	pr := &PhaseRunner{
+		Store:    st,
+		Router:   router,
+		Worktree: tempDir,
+		RepoName: "backend",
+		RunID:    "run-1",
+	}
+
+	// Print well over maxRawOutputBytes of output.
+	res, err := pr.RunCodeGate(context.Background(), "big-gate", "yes | head -c 200000")
+	if err != nil {
+		t.Fatalf("RunCodeGate error: %v", err)
+	}
+	if len(res.Output) >= 200000 {
+		t.Errorf("GateResult.Output was not bounded: got %d bytes", len(res.Output))
+	}
+	if !strings.Contains(res.Output, "bytes cut") && !strings.Contains(res.Output, "TRUNCATED") {
+		t.Errorf("GateResult.Output has no visible truncation marker: last 100 bytes: %q", res.Output[len(res.Output)-100:])
+	}
+}
+
 // detectModelProvider must never panic, regardless of agent name or output shape.
 func TestDetectModelProviderNeverPanics(t *testing.T) {
 	cases := []struct {
