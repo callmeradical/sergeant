@@ -622,6 +622,34 @@ func waitForTerminalRun(t *testing.T, st *store.Store, runID string) {
 	t.Fatalf("run %s did not reach a terminal status within the deadline", runID)
 }
 
+// waitForBulletStatus polls until every bullet of intentID reports status, so
+// a test does not race recordTerminalRun's second, separate write (the bullet
+// advance that follows the run's terminal-status write).
+func waitForBulletStatus(t *testing.T, st *store.Store, intentID, status string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		bullets, err := st.ListBulletsForIntent(intentID)
+		if err != nil {
+			t.Fatalf("listing bullets for intent %s: %v", intentID, err)
+		}
+		if len(bullets) > 0 {
+			allMatch := true
+			for _, b := range bullets {
+				if b.Status != status {
+					allMatch = false
+					break
+				}
+			}
+			if allMatch {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("intent %s's bullets did not reach status %q within the deadline", intentID, status)
+}
+
 func keysOf(m map[string]interface{}) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {

@@ -356,9 +356,16 @@ func TestCreatePRTargetsTheExactBranchThatWasCreated(t *testing.T) {
 	}
 	waitForTerminalRun(t, st, resp.TaskID)
 
-	if run, err := st.GetRun(resp.TaskID); err != nil || run.Status != "passed" {
+	run, err := st.GetRun(resp.TaskID)
+	if err != nil || run.Status != "passed" {
 		t.Fatalf("run = %+v, err=%v; want a passed run so its bullet is green and create-pr's seal guard clears", run, err)
 	}
+	// recordTerminalRun writes the run's terminal status and then advances its
+	// bullet to green as two separate store writes (server.go's
+	// recordTerminalRun), so a reader can observe "passed" for a brief window
+	// before the bullet catches up. Wait for the bullet itself, not just the
+	// run, before relying on create-pr's green guard clearing.
+	waitForBulletStatus(t, st, run.IntentID, "green")
 
 	var capturedBranch string
 	srv.GHPRCreate = func(repoPath, title, body, branch string) ([]byte, error) {
