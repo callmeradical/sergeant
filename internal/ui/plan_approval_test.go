@@ -274,6 +274,58 @@ func TestApprovingAPlanDoesNotCreateASecondIntent(t *testing.T) {
 	}
 }
 
+// Approval must reuse the exact change (and its repo) resolved at proposal
+// time, not re-resolve a second time with different inputs. Review 020 found
+// that handleApprovePlan called resolveChange(changeRepoPath, "", ...) —
+// a literal empty change id — discarding whatever change_id the caller
+// named at proposal time and silently scaffolding a second, different
+// change from the brief instead of reusing the one already on disk.
+func TestApprovingAPlanReusesTheOriginallyResolvedChangeNotASecondOne(t *testing.T) {
+	mux, st, repoPath := gitDispatchFixtureStandalone(t)
+	// The brief deliberately does NOT slugify to changeID (deriveChangeID
+	// would turn it into "a-totally-different-brief-text"): if approval ever
+	// re-resolves from intent.Statement with an empty change id instead of
+	// reusing intent.ChangeID, it must derive and scaffold that different
+	// id, which this test can then tell apart from reusing changeID.
+	const changeID = "add-stripe-webhooks"
+	changeDir := filepath.Join(repoPath, "openspec", "changes", changeID)
+	if err := os.MkdirAll(changeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	intentID := proposePlan(t, mux, "a totally different brief text", changeID)
+
+	w := doPlanAction(t, mux, http.MethodPost, "/api/plans/"+intentID+"/approve")
+	if w.Code != http.StatusOK {
+		t.Fatalf("approve = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var resp dispatchResp
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	waitForTerminalRun(t, st, resp.TaskID)
+
+	run, err := st.GetRun(resp.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.ChangeID != changeID {
+		t.Errorf("dispatched run's change id = %q, want the originally proposed %q — approval re-resolved a different change instead of reusing it", run.ChangeID, changeID)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(repoPath, "openspec", "changes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != changeID {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("openspec/changes/ holds %v after approval, want exactly [%q] — a second change was scaffolded instead of reusing the original", names, changeID)
+	}
+}
+
 // Rejecting a proposed plan ends it and starts nothing: no run is ever
 // created, and the intent's bullets are left "proposed" — the intent's own
 // terminal status is what makes them inert.

@@ -81,12 +81,23 @@ type PhaseRecord struct {
 // IntentRecord is the primary durable object. An intent may span repositories;
 // the ordering between them lives in its bullets' Position values.
 type IntentRecord struct {
-	ID        string    `json:"id"`
-	Project   string    `json:"project"`
-	Statement string    `json:"statement"`
-	Status    string    `json:"status"` // proposed, approved, in_progress, satisfied, abandoned
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        string `json:"id"`
+	Project   string `json:"project"`
+	Statement string `json:"statement"`
+	Status    string `json:"status"` // proposed, approved, in_progress, satisfied, abandoned
+	// ChangeID and ChangeRepo record the OpenSpec change (decision O3) this
+	// intent was resolved against at the time it was created — proposed or
+	// dispatched immediately, either way. A proposed intent's approval must
+	// reuse these exact values rather than re-resolving the change a second
+	// time: re-resolving with different inputs (an approval request carries
+	// no caller-supplied change_id, and repo selection can depend on
+	// argument order) can silently pick a different repository or scaffold
+	// a second change, discarding whatever change_id the caller named at
+	// proposal time.
+	ChangeID   string    `json:"change_id,omitempty"`
+	ChangeRepo string    `json:"change_repo,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // BulletRecord is a tracer bullet: exactly ONE repository, a vertical slice
@@ -213,6 +224,8 @@ const createIntentsTable = `
 		project TEXT NOT NULL,
 		statement TEXT NOT NULL,
 		status TEXT NOT NULL,
+		change_id TEXT NOT NULL DEFAULT '',
+		change_repo TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	);`
@@ -380,6 +393,11 @@ func (s *Store) migrateAddColumns() error {
 		// blocked_reason was added when "blocked" replaced "failed" as the
 		// outcome of a stuck run; existing rows have no reason to backfill.
 		{"bullets", "blocked_reason", "ALTER TABLE bullets ADD COLUMN blocked_reason TEXT NOT NULL DEFAULT ''"},
+		// change_id/change_repo record the OpenSpec change an intent was
+		// resolved against; existing rows predate plan approval and have
+		// nothing to backfill.
+		{"intents", "change_id", "ALTER TABLE intents ADD COLUMN change_id TEXT NOT NULL DEFAULT ''"},
+		{"intents", "change_repo", "ALTER TABLE intents ADD COLUMN change_repo TEXT NOT NULL DEFAULT ''"},
 		// attempt is 1-based; 0 means "pre-dates this field" (unknown attempt count).
 		{"phases", "attempt", "ALTER TABLE phases ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0"},
 
@@ -1130,8 +1148,8 @@ func (s *Store) CreateIntent(i *IntentRecord) error {
 	i.CreatedAt = now
 	i.UpdatedAt = now
 	_, err := s.db.Exec(
-		`INSERT INTO intents (id, project, statement, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		i.ID, i.Project, i.Statement, i.Status, i.CreatedAt, i.UpdatedAt,
+		`INSERT INTO intents (id, project, statement, status, change_id, change_repo, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		i.ID, i.Project, i.Statement, i.Status, i.ChangeID, i.ChangeRepo, i.CreatedAt, i.UpdatedAt,
 	)
 	if err != nil {
 		return err
@@ -1146,11 +1164,11 @@ func (s *Store) CreateIntent(i *IntentRecord) error {
 
 func (s *Store) GetIntent(intentID string) (*IntentRecord, error) {
 	row := s.db.QueryRow(
-		`SELECT id, project, COALESCE(statement, ''), status, created_at, updated_at FROM intents WHERE id = ?`,
+		`SELECT id, project, COALESCE(statement, ''), status, COALESCE(change_id, ''), COALESCE(change_repo, ''), created_at, updated_at FROM intents WHERE id = ?`,
 		intentID,
 	)
 	var i IntentRecord
-	if err := row.Scan(&i.ID, &i.Project, &i.Statement, &i.Status, &i.CreatedAt, &i.UpdatedAt); err != nil {
+	if err := row.Scan(&i.ID, &i.Project, &i.Statement, &i.Status, &i.ChangeID, &i.ChangeRepo, &i.CreatedAt, &i.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &i, nil
@@ -1158,7 +1176,7 @@ func (s *Store) GetIntent(intentID string) (*IntentRecord, error) {
 
 func (s *Store) ListIntentsForProject(project string) ([]IntentRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT id, project, COALESCE(statement, ''), status, created_at, updated_at FROM intents WHERE project = ? ORDER BY created_at DESC, id ASC`,
+		`SELECT id, project, COALESCE(statement, ''), status, COALESCE(change_id, ''), COALESCE(change_repo, ''), created_at, updated_at FROM intents WHERE project = ? ORDER BY created_at DESC, id ASC`,
 		project,
 	)
 	if err != nil {
@@ -1169,7 +1187,7 @@ func (s *Store) ListIntentsForProject(project string) ([]IntentRecord, error) {
 	var list []IntentRecord
 	for rows.Next() {
 		var i IntentRecord
-		if err := rows.Scan(&i.ID, &i.Project, &i.Statement, &i.Status, &i.CreatedAt, &i.UpdatedAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.Project, &i.Statement, &i.Status, &i.ChangeID, &i.ChangeRepo, &i.CreatedAt, &i.UpdatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, i)
@@ -1184,7 +1202,7 @@ func (s *Store) ListIntentsForProject(project string) ([]IntentRecord, error) {
 // status rather than adding a parallel table is what surfaces it.
 func (s *Store) ListIntentsByStatus(status string) ([]IntentRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT id, project, COALESCE(statement, ''), status, created_at, updated_at FROM intents WHERE status = ? ORDER BY created_at DESC, id ASC`,
+		`SELECT id, project, COALESCE(statement, ''), status, COALESCE(change_id, ''), COALESCE(change_repo, ''), created_at, updated_at FROM intents WHERE status = ? ORDER BY created_at DESC, id ASC`,
 		status,
 	)
 	if err != nil {
@@ -1195,7 +1213,7 @@ func (s *Store) ListIntentsByStatus(status string) ([]IntentRecord, error) {
 	var list []IntentRecord
 	for rows.Next() {
 		var i IntentRecord
-		if err := rows.Scan(&i.ID, &i.Project, &i.Statement, &i.Status, &i.CreatedAt, &i.UpdatedAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.Project, &i.Statement, &i.Status, &i.ChangeID, &i.ChangeRepo, &i.CreatedAt, &i.UpdatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, i)

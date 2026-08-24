@@ -842,14 +842,22 @@ func (srv *Server) handleApprovePlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Decision O3 still applies: the change is resolved before any run row or
-	// worktree exists, exactly as an explicit-repos dispatch resolves it.
-	changeRepoName, changeRepoPath, err := changeRepo(proj, targetRepos)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	// Decision O3 still applies, but the change was already resolved once, at
+	// proposal time, and is reused here verbatim — not re-resolved. Calling
+	// changeRepo/resolveChange a second time, with different inputs than
+	// proposal time had (no caller-supplied change_id is available at
+	// approval time; repo selection can depend on argument order), could
+	// silently pick a different repository or scaffold a second change,
+	// discarding whatever change_id the caller named when the plan was
+	// proposed.
+	changeRepoName := intent.ChangeRepo
+	repoCfg, ok := proj.Repos[changeRepoName]
+	if !ok || strings.TrimSpace(repoCfg.Path) == "" {
+		http.Error(w, fmt.Sprintf("plan %q's change repository %q is no longer configured in project %q", intentID, changeRepoName, proj.Name), http.StatusInternalServerError)
 		return
 	}
-	change, err := resolveChange(changeRepoPath, "", intent.Statement)
+	changeRepoPath := repoCfg.Path
+	change, err := resolveChange(changeRepoPath, intent.ChangeID, intent.Statement)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1387,11 +1395,17 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	// request (decision D5(a): a human is notified and decides explicitly).
 	if len(req.Repos) == 0 {
 		intentID := naming.RunID() + "-intent"
+		// The change was already resolved above (decision O3), before this
+		// branch, using whatever the caller supplied. Recording it here is
+		// what lets approval reuse it verbatim instead of re-resolving with
+		// different inputs and silently picking a different change or repo.
 		if err := srv.Store.CreateIntent(&store.IntentRecord{
-			ID:        intentID,
-			Project:   proj.Name,
-			Statement: brief,
-			Status:    "proposed",
+			ID:         intentID,
+			Project:    proj.Name,
+			Statement:  brief,
+			Status:     "proposed",
+			ChangeID:   change.ID,
+			ChangeRepo: changeRepoName,
 		}); err != nil {
 			http.Error(w, fmt.Sprintf("recording the proposed plan: %v", err), http.StatusInternalServerError)
 			return
