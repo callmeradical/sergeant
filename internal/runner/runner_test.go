@@ -145,6 +145,29 @@ func TestAgentPhaseFailureIsNotRecordedAsPassed(t *testing.T) {
 	}
 }
 
+// On exhausted retries, RunAgentPhase returns an error built from a second,
+// independent read of the raw output buffer (to embed it for a human
+// debugging the failure) — that read must not bypass redaction, or a failing
+// agent that printed a secret leaks it into the returned error and, via
+// cmd/sergeant, straight to stderr (Review 016).
+func TestAgentPhaseFailureErrorIsRedacted(t *testing.T) {
+	dir := t.TempDir()
+	secret := "sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP"
+	agent := fakeAgent(t, dir, "agent.sh", "echo 'API_KEY="+secret+"'; exit 1")
+	pr, _ := newRunner(t, agent, 10*time.Second)
+
+	_, err := pr.RunAgentPhase(context.Background(), "build", "do the thing", 0)
+	if err == nil {
+		t.Fatal("expected an error from a failed agent, got nil")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("returned error leaked the secret: %v", err)
+	}
+	if !strings.Contains(err.Error(), "[REDACTED]") {
+		t.Errorf("returned error was not redacted: %v", err)
+	}
+}
+
 // PRD R2.4: retry policy must be explicit and observable. Each attempt gets its own
 // phase record; a single reused id made retries invisible via INSERT OR REPLACE.
 func TestAgentPhaseRetriesAreObservable(t *testing.T) {

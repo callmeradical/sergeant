@@ -553,7 +553,7 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 		})
 
 		if failed {
-			lastErr = fmt.Errorf("%s (output: %s)", failureReason, stripANSI(strings.TrimSpace(outBuf.String())))
+			lastErr = fmt.Errorf("%s (output: %s)", failureReason, redact.Text(stripANSI(strings.TrimSpace(outBuf.String()))))
 			if attempt < retries {
 				continue
 			}
@@ -610,5 +610,5 @@ func (pr *PhaseRunner) DeliverPullRequest(ctx context.Context, branch, title, bo
 		return fmt.Sprintf("Local PR branch ready at %s", branch), nil
 	}
 
-	return strings.TrimSpace(out.String()), nil
+	return redact.Text(strings.TrimSpace(out.String())), nil
 }

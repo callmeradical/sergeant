@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/callmeradical/sergeant/internal/naming"
+	"github.com/callmeradical/sergeant/internal/redact"
 
 	// Imported for its name, not only for its driver registration: classifying a
 	// unique-index violation requires the driver's error type, and that
@@ -702,6 +703,16 @@ func changedARow(res sql.Result) bool {
 
 func (s *Store) RecordPhase(p *PhaseRecord) error {
 	p.CreatedAt = time.Now().UTC()
+
+	// R4.4: redact here, at the one place every PhaseRecord passes through no
+	// matter which caller built it, rather than trusting each call site to
+	// remember to redact before constructing one. Point-fixing individual
+	// call sites (RunAgentPhase, RunCodeGate, sergeant_emit_envelope) closed
+	// specific leaks across several review rounds but kept missing others
+	// built the same way — this is the choke point instead of another one.
+	p.Error = redact.Text(p.Error)
+	p.Payload = redact.JSON(p.Payload)
+
 	payloadStr := ""
 	if len(p.Payload) > 0 {
 		payloadStr = string(p.Payload)
@@ -765,6 +776,16 @@ func (s *Store) RecordEnvelope(e *EnvelopeRecord) error {
 	}
 	if e.CorrelationID == "" {
 		return fmt.Errorf("envelope %q: correlation_id must not be empty", e.ID)
+	}
+
+	// --- redact (R4.4) ---
+	// The same choke-point reasoning as RecordPhase: every EnvelopeRecord
+	// passes through here regardless of which caller (RunAgentPhase, the MCP
+	// server, handleCreatePR, ...) built it.
+	e.Summary = redact.Text(e.Summary)
+	e.Data = redact.JSON(e.Data)
+	for i, a := range e.Artifacts {
+		e.Artifacts[i] = redact.Text(a)
 	}
 
 	// --- stamp ---

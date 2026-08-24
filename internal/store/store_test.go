@@ -636,3 +636,100 @@ func TestSealBulletForRunRefusesWhenNoBulletMatchesRepo(t *testing.T) {
 		t.Error("expected an error sealing a bullet for a repo the intent has no bullet for")
 	}
 }
+
+// R4.4: RecordPhase redacts at the single choke point every PhaseRecord
+// passes through, regardless of which caller built it. Five independent
+// call-site point-fixes (RunAgentPhase, RunCodeGate, sergeant_emit_envelope,
+// ...) each closed one leak but kept missing others built the same way
+// (progress.html Reviews 014-016) — this proves the guarantee holds here
+// even for a caller that never calls redact itself.
+func TestRecordPhaseRedactsErrorAndPayload(t *testing.T) {
+	st, _ := openTestStore(t)
+	if err := st.CreateRun(&RunRecord{ID: "run-1", Project: "p", TaskID: "run-1", Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+
+	secret := "sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP"
+	if err := st.RecordPhase(&PhaseRecord{
+		ID:      "phase-1",
+		RunID:   "run-1",
+		Repo:    "svc",
+		Name:    "build",
+		Kind:    "agent",
+		Status:  "failed",
+		Error:   "exited: " + secret,
+		Payload: json.RawMessage(`{"note":"` + secret + `"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	phases, err := st.ListPhasesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(phases) != 1 {
+		t.Fatalf("expected 1 phase, got %d", len(phases))
+	}
+	if strings.Contains(phases[0].Error, secret) {
+		t.Errorf("PhaseRecord.Error leaked the secret: %q", phases[0].Error)
+	}
+	if !strings.Contains(phases[0].Error, "[REDACTED]") {
+		t.Errorf("PhaseRecord.Error was not redacted: %q", phases[0].Error)
+	}
+	if strings.Contains(string(phases[0].Payload), secret) {
+		t.Errorf("PhaseRecord.Payload leaked the secret: %s", phases[0].Payload)
+	}
+	if !strings.Contains(string(phases[0].Payload), "[REDACTED]") {
+		t.Errorf("PhaseRecord.Payload was not redacted: %s", phases[0].Payload)
+	}
+}
+
+// Same guarantee for RecordEnvelope, including Artifacts — the field Review
+// 016 found unredacted in every call site that builds one (RunAgentPhase and
+// sergeant_emit_envelope alike), because no call site had ever redacted it.
+func TestRecordEnvelopeRedactsSummaryDataAndArtifacts(t *testing.T) {
+	st, _ := openTestStore(t)
+	if err := st.CreateRun(&RunRecord{ID: "run-1", Project: "p", TaskID: "run-1", Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+
+	secret := "sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP"
+	if err := st.RecordEnvelope(&EnvelopeRecord{
+		ID:            "env-1",
+		RunID:         "run-1",
+		Repo:          "svc",
+		Stage:         "build",
+		Summary:       "leaked " + secret,
+		Artifacts:     []string{"API_KEY=" + secret, "ordinary/path.txt"},
+		Data:          json.RawMessage(`{"note":"` + secret + `"}`),
+		Type:          "phase.completed",
+		SchemaVersion: "1",
+		Producer:      "test",
+		CorrelationID: "run-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	envelopes, err := st.ListEnvelopesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(envelopes) != 1 {
+		t.Fatalf("expected 1 envelope, got %d", len(envelopes))
+	}
+	e := envelopes[0]
+	if strings.Contains(e.Summary, secret) {
+		t.Errorf("EnvelopeRecord.Summary leaked the secret: %q", e.Summary)
+	}
+	if strings.Contains(string(e.Data), secret) {
+		t.Errorf("EnvelopeRecord.Data leaked the secret: %s", e.Data)
+	}
+	for _, a := range e.Artifacts {
+		if strings.Contains(a, secret) {
+			t.Errorf("EnvelopeRecord.Artifacts leaked the secret: %q", a)
+		}
+	}
+	if len(e.Artifacts) != 2 || !strings.Contains(e.Artifacts[0], "[REDACTED]") || e.Artifacts[1] != "ordinary/path.txt" {
+		t.Errorf("EnvelopeRecord.Artifacts unexpected: %+v", e.Artifacts)
+	}
+}
