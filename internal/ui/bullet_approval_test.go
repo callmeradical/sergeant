@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -125,6 +127,63 @@ func TestGetBulletsForRunWithNoIntentReturnsEmptyArray(t *testing.T) {
 	}
 	if got := strings.TrimSpace(w.Body.String()); got != "[]" {
 		t.Errorf("body = %q, want []", got)
+	}
+}
+
+// gh's own error output is stored into an EnvelopeRecord and returned in the
+// HTTP response, not just logged — it must go through redaction like any
+// other captured subprocess output (Review 015 flagged this call site was
+// still wired to none).
+func TestCreatePRRedactsSecretsFromFailedGHOutput(t *testing.T) {
+	srv, mux, runID := bulletApprovalFixture(t, "green")
+
+	repoDir := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repoDir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	runGit("init")
+	runGit("remote", "add", "origin", "https://github.com/example/repo.git")
+
+	projPath := filepath.Join(t.TempDir(), "proj.yaml")
+	projYAML := fmt.Sprintf("name: ba\nrepos:\n  svc:\n    path: %q\n", repoDir)
+	if err := os.WriteFile(projPath, []byte(projYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	secret := "AKIAIOSFODNN7EXAMPLE"
+	srv.GHPRCreate = func(repoPath, title, body, branch string) ([]byte, error) {
+		return []byte("error: authentication failed for token " + secret), fmt.Errorf("exit status 1")
+	}
+
+	body := fmt.Sprintf(`{"run_id":%q,"project":%q,"repo":"svc","title":"t","body":"b"}`, runID, projPath)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("POST", "/api/create-pr", strings.NewReader(body)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), secret) {
+		t.Errorf("HTTP response leaked the secret: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "[REDACTED]") {
+		t.Errorf("HTTP response was not redacted: %s", w.Body.String())
+	}
+
+	envelopes, err := srv.Store.ListEnvelopesForRun(runID)
+	if err != nil {
+		t.Fatalf("failed to list envelopes: %v", err)
+	}
+	if len(envelopes) != 1 {
+		t.Fatalf("expected 1 envelope, got %d", len(envelopes))
+	}
+	if strings.Contains(string(envelopes[0].Data), secret) {
+		t.Errorf("persisted EnvelopeRecord.Data leaked the secret: %s", envelopes[0].Data)
+	}
+	if !strings.Contains(string(envelopes[0].Data), "[REDACTED]") {
+		t.Errorf("persisted EnvelopeRecord.Data was not redacted: %s", envelopes[0].Data)
 	}
 }
 

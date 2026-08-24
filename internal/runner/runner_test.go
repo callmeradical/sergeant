@@ -796,6 +796,54 @@ func TestRunCodeGateRedactsSecretsFromPersistedRecords(t *testing.T) {
 	}
 }
 
+// A failing gate builds PhaseRecord.Error from a second, independent read of
+// the raw output buffer (to prefix it with the exec error) — that read must
+// reuse the already-redacted/bounded value, not the raw buffer a second
+// time, or the guarantee GateResult.Output enforces is bypassed for Error.
+func TestRunCodeGateRedactsSecretsFromFailureError(t *testing.T) {
+	tempDir := t.TempDir()
+	st, err := store.Open(filepath.Join(tempDir, "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.CreateRun(&store.RunRecord{ID: "run-1", Project: "p", TaskID: "run-1", Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+
+	router := handoff.NewRouter(filepath.Join(tempDir, "handoff"))
+	pr := &PhaseRunner{
+		Store:    st,
+		Router:   router,
+		Worktree: tempDir,
+		RepoName: "backend",
+		RunID:    "run-1",
+	}
+
+	secret := "AKIAIOSFODNN7EXAMPLE"
+	res, err := pr.RunCodeGate(context.Background(), "secret-gate", "echo 'AWS_CREDENTIAL="+secret+"'; exit 1")
+	if err != nil {
+		t.Fatalf("RunCodeGate error: %v", err)
+	}
+	if res.Passed {
+		t.Fatal("expected the gate to fail")
+	}
+
+	phases, err := st.ListPhasesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(phases) != 1 {
+		t.Fatalf("expected 1 phase record, got %d", len(phases))
+	}
+	if strings.Contains(phases[0].Error, secret) {
+		t.Errorf("persisted PhaseRecord.Error leaked the secret: %q", phases[0].Error)
+	}
+	if !strings.Contains(phases[0].Error, "[REDACTED]") {
+		t.Errorf("persisted PhaseRecord.Error was not redacted: %q", phases[0].Error)
+	}
+}
+
 // A gate/agent whose output exceeds maxRawOutputBytes must be truncated with
 // a visible marker before it is persisted, exercised at the real call sites.
 func TestRunCodeGateBoundsOutputSize(t *testing.T) {

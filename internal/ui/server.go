@@ -26,6 +26,7 @@ import (
 	"github.com/callmeradical/sergeant/internal/handoff"
 	"github.com/callmeradical/sergeant/internal/naming"
 	"github.com/callmeradical/sergeant/internal/plan"
+	"github.com/callmeradical/sergeant/internal/redact"
 	"github.com/callmeradical/sergeant/internal/runner"
 	"github.com/callmeradical/sergeant/internal/store"
 )
@@ -660,7 +661,10 @@ func (srv *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 		if err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), "https://") {
 			prURL = strings.TrimSpace(string(out))
 		} else {
-			prError = strings.TrimSpace(string(out))
+			// gh's own error output can echo back a credential-bearing remote
+			// URL or similar, and prError is persisted into an envelope and
+			// returned in the HTTP response, not just logged locally.
+			prError = redact.Text(strings.TrimSpace(string(out)))
 			prURL = fmt.Sprintf("%s/compare/%s?expand=1", remoteBase, branch)
 		}
 	} else {

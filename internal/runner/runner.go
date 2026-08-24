@@ -260,7 +260,10 @@ func (pr *PhaseRunner) RunCodeGate(ctx context.Context, name, command string) (*
 	if !passed {
 		status = "failed"
 		if err != nil {
-			errStr = fmt.Sprintf("%v: %s", err, outBuf.String())
+			// Reuse cleaned (already redacted and size-bounded), not outBuf
+			// directly — a second, independent read of the raw buffer here
+			// would bypass both guarantees Output above already applied.
+			errStr = fmt.Sprintf("%v: %s", err, cleaned)
 		}
 	}
 
