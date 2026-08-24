@@ -111,7 +111,9 @@
               <span id="active-matrix-project" class="text-teal-300 font-mono font-bold">None</span>
               <span id="active-run-meta" class="text-[#8b949e]"></span>
             </p>
-            <p id="active-run-brief" class="text-[11px] text-slate-200 mt-1 max-w-3xl"></p>
+            <div id="active-run-brief" class="text-[11px] text-slate-200 mt-1 max-w-3xl leading-relaxed whitespace-pre-wrap"></div>
+            <button type="button" id="active-run-brief-toggle" onclick="toggleRunBriefExpanded()" hidden
+              class="text-[10px] font-bold text-[#58a6ff] hover:text-[#79c0ff] mt-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] rounded">Show more</button>
           </div>
           <div class="flex items-center space-x-2">
             <span id="system-status-pill" aria-live="polite" aria-atomic="true" class="px-2 py-0.5 rounded text-[10px] font-bold bg-[#161b22] text-slate-300 border border-[#30363d]">
@@ -654,6 +656,38 @@
       }
     }
 
+    // A dispatch brief is often a dense, multi-sentence wall of text (every
+    // file/function it names, every scenario it must cover) — shown in full
+    // by default it pushes the actual pipeline view off screen. Truncate to
+    // one glance-able length with an explicit toggle, rather than either
+    // always showing everything or hiding it behind a click every time.
+    const BRIEF_TRUNCATE_AT = 240;
+    let briefExpanded = false;
+    let briefFullText = '';
+
+    function renderRunBrief(text) {
+      briefFullText = (text || '').trim();
+      briefExpanded = false;
+      paintRunBrief();
+    }
+
+    function paintRunBrief() {
+      const el = document.getElementById('active-run-brief');
+      const toggle = document.getElementById('active-run-brief-toggle');
+      if (!el || !toggle) return;
+      const full = briefFullText;
+      const needsToggle = full.length > BRIEF_TRUNCATE_AT;
+      el.textContent = (!briefExpanded && needsToggle) ? full.slice(0, BRIEF_TRUNCATE_AT).trimEnd() + '…' : full;
+      el.title = full;
+      toggle.hidden = !needsToggle;
+      toggle.textContent = briefExpanded ? 'Show less' : 'Show more';
+    }
+
+    function toggleRunBriefExpanded() {
+      briefExpanded = !briefExpanded;
+      paintRunBrief();
+    }
+
     async function selectRun(runId) {
       activeRunId = runId;
       renderProgressPanel();
@@ -663,12 +697,7 @@
       const slug = (selected && selected.slug || '').trim();
       badge.innerText = slug || runId;
       badge.title = runId;
-      const briefEl = document.getElementById('active-run-brief');
-      if (briefEl) {
-        const bText = (selected && selected.brief || '').trim();
-        briefEl.textContent = bText;
-        briefEl.title = bText;
-      }
+      renderRunBrief(selected && selected.brief);
       
       const current = allRuns.find(r => r.id === runId);
       const bannerStatus = document.getElementById('system-status-pill');
@@ -729,8 +758,7 @@
       document.getElementById('stage-run-badge').innerText = 'No run selected';
       const metaReset = document.getElementById('active-run-meta');
       if (metaReset) metaReset.innerText = '';
-      const briefReset = document.getElementById('active-run-brief');
-      if (briefReset) briefReset.textContent = '';
+      renderRunBrief('');
       document.getElementById('active-matrix-project').innerText = 'None';
       document.getElementById('workflow-graph').innerHTML =
         '<div class="text-[#8b949e] text-[11px]">No pipeline runs recorded for this project. Dispatch one from your agent session or <code class="text-slate-300">POST /api/dispatch</code>.</div>';
