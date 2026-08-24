@@ -1,0 +1,1 @@
+A terminal run's fleet worktree is automatically reclaimed after a fixed seven-day retention window — no human has to remember to call the existing manual cleanup action. Automatic reclaim reuses the exact same running-check and dirty-worktree safety rules the manual action already enforces; it never touches database rows.
