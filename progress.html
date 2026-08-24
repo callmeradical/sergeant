@@ -48,58 +48,61 @@ a{color:var(--muted)}
   <h1>Sergeant v2</h1>
   <p>Independent review. Written by the critic, not the builder.</p>
   <p class="meta">
-    Review 018 · 2026-08-23 · branch <code>v2</code> · commit <code>9933725</code> reviewed ·
-    "fix(store,runner): redact at the store choke point, not each call site" · supersedes Review 017's
-    incomplete MEETS SPEC verdict on the same commit
+    Review 019 · 2026-08-23 · branch <code>v2</code> · merge commit <code>fcc28fd</code> reviewed
+    (parents <code>c9d73cf</code> / <code>bccfc3c</code>, merge-base <code>169c6d1</code>) ·
+    "feat(store,runner,ui): a stuck bullet is blocked, not failed (D5b)" · current <code>v2</code> HEAD is
+    <code>01fda48</code>, three commits ahead of the reviewed merge; nothing in those three commits touches
+    <code>bulletStatusForRunOutcome</code>, <code>blockedReasonForRun</code>, or <code>BlockedReason</code>
   </p>
 </header>
 
 <section>
   <h2>Current status</h2>
   <div class="grid">
-    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at current <code>v2</code> HEAD</div></div>
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at current <code>v2</code> HEAD (<code>01fda48</code>)</div></div>
     <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code>, whole module</div></div>
     <div class="card"><div class="label">Tests</div><div class="value"><span class="status">11/11 packages pass</span></div><div class="small"><code>go test ./internal/... -count=1</code></div></div>
-    <div class="card"><div class="label">Choke-point claim, as far as it goes</div><div class="value"><span class="status">verified, real</span></div><div class="small">Every non-test <code>.RecordPhase(</code>/<code>.RecordEnvelope(</code> call site traced; <code>INTO phases</code>/<code>INTO envelopes</code> grepped whole-repo — <code>internal/store/store.go</code> is the only production writer of either table. Both functions' redaction lines mutation-tested independently; both fail exactly as predicted when disabled; both restored with an empty <code>git diff</code>.</div></div>
-    <div class="card"><div class="label">Extends to call sites never reviewed before</div><div class="value"><span class="status">verified, real</span></div><div class="small">Live reproductions against two call sites no prior review touched — <code>dag/engine.go</code>'s <code>RecordRedExemption</code> and <code>ui/server.go</code>'s run-delivery envelope — both came out redacted with zero call-site-specific code. The architecture's actual selling point holds, for the store.</div></div>
-    <div class="card"><div class="label">The two non-store fixes</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>TestAgentPhaseFailureErrorIsRedacted</code> and <code>TestDeliverPullRequestRedactsGHOutput</code> both pass and both genuinely exercise a secret through a real fake-agent/fake-<code>gh</code> subprocess.</div></div>
-    <div class="card"><div class="label">Blocking: the exact field this commit names is still leaking</div><div class="value"><span class="status bad">found — confirmed leak, reproduced live</span></div><div class="small"><code>RunAgentPhase</code>'s agent-authored-envelope branch writes <code>Artifacts</code> to a handoff <em>file</em> via <code>Router.SaveEnvelope</code> before <code>RecordEnvelope</code> ever runs. The store's redaction never reaches the file. See Findings.</div></div>
-    <div class="card"><div class="label">Residual: a third persisted+broadcast path, zero redaction</div><div class="value"><span class="status warn">found — real, lower severity</span></div><div class="small">The <code>changes</code> table (<code>AppendChange</code>, <code>ChannelProgress</code>) is neither a <code>PhaseRecord</code> nor an <code>EnvelopeRecord</code> and carries agent/spec-controlled <code>plan.json</code> text straight onto the public SSE stream unredacted.</div></div>
-    <div class="card"><div class="label">Review 017 itself</div><div class="value"><span class="status bad">superseded — missed the blocker</span></div><div class="small">Commit <code>65f70fc</code> reviewed the same commit, ran a real mutation-test and two real call-site probes, and reached <strong>MEETS SPEC</strong>. It never inspected <code>internal/handoff/envelope.go</code> or the ordering between <code>Router.SaveEnvelope</code> and <code>RecordEnvelope</code>, so it did not find the leak below. Not rewriting that commit's history; correcting the record here instead.</div></div>
+    <div class="card"><div class="label">failed → blocked mapping</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>bulletStatusForRunOutcome</code>'s <code>"failed"</code> case now returns <code>"blocked"</code>; <code>"passed"</code>→<code>"green"</code> and the cancelled/default no-op case are byte-for-byte unchanged.</div></div>
+    <div class="card"><div class="label">Reason resolution order</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>blockedReasonForRun</code> reads every envelope of the run in <code>created_at ASC</code> order and keeps the last non-empty <code>handoff.BlockedReason</code>; falls back to the synthesized reason only when none named one. Never empty.</div></div>
+    <div class="card"><div class="label">Redaction ordering in <code>RunAgentPhase</code></div><div class="value"><span class="status">verified, real</span></div><div class="small">Traced line-by-line: <code>env.Payload = redact.JSON(env.Payload)</code> (line 495) runs before <code>blockedReason := handoff.BlockedReason(env.Payload)</code> (line 504). <code>handoff.BlockedReason</code> is a plain map lookup on <code>payload.blocked_reason</code> — no new top-level <code>Envelope</code> field was added.</div></div>
+    <div class="card"><div class="label">Full-replacement claim</div><div class="value"><span class="status">verified, real</span></div><div class="small">Whole-repo grep of every <code>"failed"</code> literal and every <code>UpdateBulletStatus</code>/<code>AdvanceBulletsForRun</code> call site: <code>bulletStatusForRunOutcome</code> is still the only place that ever computed a bullet status from a run outcome. The other <code>"failed"</code> hits are phase/run/delivery-state literals, a different domain entirely.</div></div>
+    <div class="card"><div class="label">Mutation test</div><div class="value"><span class="status">verified, real</span></div><div class="small">Reverted the <code>"failed"</code> case back to returning <code>"failed"</code>; the 4 tests that depend on it (2 shipped for this feature, 2 shipped regression/dispatch tests) failed with the exact "want blocked" mismatches predicted; restored exactly; <code>git diff</code> confirmed empty.</div></div>
+    <div class="card"><div class="label">Test quality</div><div class="value"><span class="status">verified, real</span></div><div class="small">Reason tests assert the exact verbatim string, not just non-empty. Redaction tests assert both the specific secret's absence AND the <code>[REDACTED]</code> placeholder's presence, at both the <code>runner</code> and <code>ui</code> layers.</div></div>
+    <div class="card"><div class="label">Independent redaction probe</div><div class="value"><span class="status warn">real gap found — pre-existing, not introduced here</span></div><div class="small">A <code>ghp_</code>-shaped token embedded in an agent-reported <code>blocked_reason</code> is redacted correctly end-to-end into <code>BulletRecord.BlockedReason</code>. A <code>PASSWORD=...</code> credential embedded mid-sentence (not at true line-start) is <strong>not</strong> redacted, because <code>redact.go</code>'s <code>credentialLinePattern</code> is anchored to <code>^...$</code>. Confirmed this is a scope limit of <code>redact.Text</code> itself (reproduced in isolation, unrelated to this feature's own code), and Review 018 already disclosed a sibling case (URL userinfo credentials) for the same reason. See Findings.</div></div>
   </div>
-  <p><strong>Verdict:</strong> DOES NOT MEET SPEC. The choke-point architecture is genuinely sound for what it
-  actually touches — <code>Store.RecordPhase</code>/<code>RecordEnvelope</code> really are the only production
-  writers of their tables, the redaction really is load-bearing under mutation testing, and it really does protect
-  call sites nobody has reviewed yet. But the commit's own motivating example —
-  <code>EnvelopeRecord.Artifacts</code> in <code>RunAgentPhase</code>'s agent-authored-envelope branch, named in the
-  commit message as the "7th instance" — is not actually closed. It is closed for the row that lands in the
-  database. It is not closed for the file that lands on disk, because that file is written by a different function,
-  earlier in the same call, before the store's redaction ever runs. The choke point's own premise — "the one place
-  every record passes through no matter which caller built it" — is false for this call site:
-  <code>Router.SaveEnvelope</code> is a second, earlier choke point for the same content, and this commit did not
-  touch it.</p>
+  <p><strong>Verdict:</strong> MEETS SPEC WITH CAVEATS. Every requirement in
+  <code>specs/blocked-bullets/spec.md</code> is genuinely implemented and genuinely tested, the mutation test
+  confirms the core replacement is load-bearing rather than decorative, and the design's central claim — that
+  nesting <code>blocked_reason</code> inside <code>payload</code> gets redaction "for free" from the existing
+  choke point — checked out under direct code tracing and under my own throwaway reproduction for one secret
+  shape. The caveat is that "for free" also means "with the same pre-existing blind spots," and I found one
+  concretely: a non-line-anchored credential-shaped string in an agent's <code>blocked_reason</code> reaches
+  <code>BulletRecord.BlockedReason</code> unredacted. That gap belongs to <code>internal/redact</code>, predates
+  this commit, and is not a defect this commit introduced — but this commit is a new, human-facing surface
+  (a dashboard reason string) that inherits it, so a caveat rather than a silent MEETS SPEC.</p>
 </section>
 
 <section>
   <h2>What I inspected</h2>
   <table>
     <tr><th>Area</th><th>Method</th></tr>
-    <tr><td>The fix commit itself</td><td><code>git show 9933725</code> — read the full diff (5 files, 194 insertions), not the commit message</td></tr>
-    <tr><td><code>RecordPhase</code>/<code>RecordEnvelope</code> redact where the diff claims</td><td>Read <code>internal/store/store.go:704–815</code>: <code>p.Error</code>/<code>p.Payload</code> and <code>e.Summary</code>/<code>e.Data</code>/every <code>e.Artifacts[i]</code> are reassigned via <code>redact.Text</code>/<code>redact.JSON</code> before either function's SQL <code>INSERT</code></td></tr>
-    <tr><td>Complete enumeration of every <code>RecordPhase</code>/<code>RecordEnvelope</code> call site, repo-wide</td><td><code>grep -rn "\.RecordPhase(\|\.RecordEnvelope(" --include="*.go" .</code>; filtered to non-test callers: <code>dag/engine.go</code>, <code>runner/runner.go</code> (phase); <code>ui/server.go</code>, <code>runner/runner.go</code>, <code>mcp/server.go</code> (envelope) — every one calls the <code>Store</code> method, none constructs SQL directly</td></tr>
-    <tr><td>No second write path to either table exists</td><td><code>grep -rn "INTO phases\|INTO envelopes" --include="*.go" .</code> repo-wide: the only production match for each is inside <code>Store.RecordPhase</code>/<code>RecordEnvelope</code>; the one other <code>INTO envelopes</code> hit is a raw <code>db.Exec</code> in <code>envelope_metadata_test.go</code> deliberately bypassing <code>RecordEnvelope</code> to simulate a pre-migration legacy row — a test fixture, not a live path</td></tr>
-    <tr><td>Mutation test: <code>RecordPhase</code></td><td>Commented out <code>p.Error = redact.Text(p.Error)</code> / <code>p.Payload = redact.JSON(p.Payload)</code>; ran <code>TestRecordPhaseRedactsErrorAndPayload</code>; failed on all 4 assertions with the raw secret visible; restored exactly; <code>git diff</code> confirmed empty</td></tr>
-    <tr><td>Mutation test: <code>RecordEnvelope</code></td><td>Same procedure on <code>e.Summary</code>/<code>e.Data</code>/the <code>Artifacts</code> loop; ran <code>TestRecordEnvelopeRedactsSummaryDataAndArtifacts</code>; failed on all 4 assertions; restored; <code>git diff</code> confirmed empty</td></tr>
-    <tr><td>Shipped non-store tests</td><td><code>go test ./internal/runner/... -run "TestAgentPhaseFailureErrorIsRedacted|TestDeliverPullRequestRedactsGHOutput" -v -count=1</code>; read both tests' bodies to confirm each drives a secret through a real fake-agent/fake-<code>gh</code> subprocess</td></tr>
-    <tr><td>My own repro, call site #1 never reviewed before: <code>dag/engine.go</code>'s <code>RecordRedExemption</code></td><td>Threw away a test calling <code>RecordRedExemption</code> with a secret embedded in the caller-supplied <code>reason</code> string, which the function never redacts itself; read the persisted <code>PhaseRecord.Payload</code> back — redacted purely by passing through the store; deleted the test file after (confirmed by <code>git status --short</code>)</td></tr>
-    <tr><td>My own repro, call site #2 never reviewed before: <code>ui/server.go</code>'s run-delivery envelope (R5.6, not part of R4.4's review history)</td><td>Threw away a test that built a real git repo + worktree whose <code>origin</code> remote embeds a <code>ghp_</code>-shaped token, ran <code>srv.describeDelivery</code>, then <code>RecordEnvelope</code> the way <code>ui/server.go:1791</code> does; the persisted <code>Artifacts</code>/<code>Data</code> came back redacted with no call-site code touching <code>redact</code>; deleted the test file after</td></tr>
-    <tr><td>Full suite</td><td><code>go build ./... && go vet ./... && go test ./internal/... -count=1</code> from the current <code>v2</code> working tree</td></tr>
-    <tr><td><strong>Blocking repro: the handoff file</strong></td><td>Fake agent writes its own <code>.sergeant/envelope.json</code> with <code>"artifacts":["API_KEY="+secret]</code>; ran <code>RunAgentPhase</code>; read <code>&lt;handoff&gt;/svc/envelope_build.json</code> and <code>envelope_latest.json</code> directly off disk. Both contain the raw secret verbatim. The returned <code>*handoff.Envelope</code> and the persisted <code>EnvelopeRecord.Artifacts</code> both show <code>[REDACTED]</code> — but only because <code>RecordEnvelope</code> mutates the same backing array <code>env.Artifacts</code> shares, in place, after <code>SaveEnvelope</code> has already written it to disk. Deleted the test file after</td></tr>
-    <tr><td>Traced where the leaked file goes</td><td>Read <code>internal/handoff/envelope.go</code> (<code>SaveEnvelope</code>, <code>InjectHandoffToWorktree</code>) and <code>internal/dag/engine.go:279–292</code> (calls <code>InjectHandoffToWorktree</code> to copy an upstream repo's handoff files into a downstream repo's worktree at <code>.sergeant/handoff/&lt;upstream&gt;/</code> for multi-repo runs) and <code>internal/dag/engine.go:196–210</code> (<code>CommitRunOutput</code> runs <code>git add -A</code> unconditionally, with no code anywhere seeding or checking a <code>.gitignore</code> entry for <code>.sergeant/</code>). Not executed end-to-end through an actual multi-repo dispatch and commit — this is a traced, code-level consequence, not something I personally watched land in a git commit</td></tr>
-    <tr><td>Residual repro: the <code>changes</code> table has no redaction at all</td><td>Read <code>internal/store/changes.go</code>'s <code>AppendChange</code> — no <code>redact</code> reference anywhere in the file. Traced its one external caller, <code>ui/server.go</code>'s <code>appendRunProgress</code>, which reads <code>plan.json</code>'s <code>Scenario</code> field (agent/spec-controlled free text) straight into the payload. Live repro: wrote a <code>plan.json</code> with <code>Scenario: "uses API_KEY="+secret</code>, called <code>appendRunProgress</code>, read the row back via <code>ListChangesSince</code> — raw secret present, and this same table is what <code>/api/stream</code> serves over SSE. Deleted the test file after</td></tr>
-    <tr><td>Residual repro: <code>redact.Text</code>'s heuristic scope</td><td>Ran <code>redact.Text</code> directly on <code>"https://svc-user:hunter2ProdDbPassword@github.com/example/svc.git"</code> — a generic, non-API-key-shaped credential embedded in a URL survives untouched, because no pattern in <code>internal/redact/redact.go</code> matches it. Pre-existing limitation of the heuristic itself, unaffected by moving the redaction call site into the store</td></tr>
-    <tr><td>Re-checked Review 016's disclosed residuals</td><td><code>internal/ui/server.go</code>'s <code>handleBuildGraph</code> (~line 1604) still returns <code>graphify.BuildProjectGraph</code>'s raw subprocess-output-bearing error verbatim via <code>http.Error(w, err.Error(), …)</code>, unchanged since Review 016 and out of this commit's scope</td></tr>
-    <tr><td>Read Review 017's own methodology and verdict</td><td><code>git show 65f70fc -- progress.html</code> and the committed file itself: it independently ran the same mutation tests and two similar call-site probes I ran (with genuinely real, non-fabricated repros), and reached MEETS SPEC because its sweep of <code>internal/ui/server.go</code> and <code>internal/dag/engine.go</code> never opened <code>internal/handoff/envelope.go</code> or asked what happens to <code>env.Artifacts</code> before <code>RecordEnvelope</code> is called</td></tr>
+    <tr><td>Binding spec</td><td>Read <code>openspec/changes/a-stuck-bullet-is-blocked-not-failed/{proposal,design,tasks}.md</code> and <code>specs/blocked-bullets/spec.md</code> in full before reading any code</td></tr>
+    <tr><td>The merge commit's actual diff</td><td><code>git merge-base fcc28fd^1 fcc28fd^2</code> → <code>169c6d1</code>; <code>git diff 169c6d1 fcc28fd</code> across all 8 changed files (not the merge commit's own empty <code>git show</code>, which is a merge with no direct diff)</td></tr>
+    <tr><td><code>bulletStatusForRunOutcome</code></td><td>Read <code>internal/ui/server.go</code> lines ~2159–2168: <code>"passed"→"green"</code> unchanged, <code>"failed"→"blocked"</code> (was <code>"failed"→"failed"</code>), default (incl. cancelled) still <code>"", false</code></td></tr>
+    <tr><td><code>blockedReasonForRun</code></td><td>Read <code>internal/ui/server.go</code>'s new function (line 2117 onward): returns <code>""</code> immediately unless <code>bulletStatus == "blocked"</code>; lists envelopes via <code>ListEnvelopesForRun</code>, keeps the last non-empty <code>handoff.BlockedReason(e.Data)</code>, falls back to the fixed synthesized string</td></tr>
+    <tr><td>Envelope ordering matches the "last one wins" claim</td><td><code>internal/store/store.go</code>'s <code>ListEnvelopesForRun</code>: <code>ORDER BY created_at ASC</code> — confirms the loop's "last non-empty wins" logic really does mean "most recent envelope," not an arbitrary DB order</td></tr>
+    <tr><td><code>handoff.BlockedReason</code></td><td>Read <code>internal/handoff/envelope.go</code>'s new function: unmarshals <code>payload</code> into <code>map[string]interface{}</code>, returns <code>fields["blocked_reason"]</code> if it is a string, else <code>""</code> — no new field added to the <code>Envelope</code> struct itself</td></tr>
+    <tr><td>Redaction ordering inside <code>RunAgentPhase</code></td><td>Read <code>internal/runner/runner.go</code> lines 494–506 in sequence: <code>env.Payload = redact.JSON(env.Payload)</code> (495) runs, then <code>blockedReason := handoff.BlockedReason(env.Payload)</code> (504) reads the already-redacted value; <code>annotatePayloadWithProvenance</code> (506) then remarshals through <code>map[string]interface{}</code>, which preserves the <code>blocked_reason</code> key already read</td></tr>
+    <tr><td>Defense in depth at the store</td><td><code>internal/store/store.go</code>'s <code>RecordEnvelope</code> (the Review 018 choke point) also unconditionally redacts <code>e.Data</code> before <code>INSERT</code>, independent of whatever <code>RunAgentPhase</code> did — so <code>blockedReasonForRun</code> reading back through <code>ListEnvelopesForRun</code> is protected twice, not once</td></tr>
+    <tr><td><code>store.BulletStatuses()</code>/<code>BulletRecord</code></td><td>Read <code>internal/store/store.go</code>: <code>BulletStatuses()</code> now includes both <code>"failed"</code> and <code>"blocked"</code>; <code>BulletRecord.BlockedReason string</code> added, backed by a real <code>blocked_reason</code> column with a migration (<code>migrateAddColumns</code>) for existing databases</td></tr>
+    <tr><td><code>AdvanceBulletsForRun</code>'s new reason parameter</td><td>Signature is now <code>(runID, status, reason string) error</code>; <code>updateBulletStatusAndReason</code> writes both columns in one <code>UPDATE</code>; the idempotency check now compares <code>b.Status == status &amp;&amp; b.BlockedReason == reason</code>, not status alone</td></tr>
+    <tr><td>Whole-repo grep: is <code>bulletStatusForRunOutcome</code> really the only writer of a bullet's <code>"failed"</code>/<code>"blocked"</code> status</td><td><code>grep -rn '"failed"' internal/ --include="*.go"</code> and <code>grep -rn "UpdateBulletStatus\|AdvanceBulletsForRun" internal/ --include="*.go"</code>, both excluding tests: the only other <code>"failed"</code> literals are phase status, run status, and delivery-state constants — a different domain; the only other bullet-status writer is <code>server.go:863</code>'s plan-approval path, which only ever writes <code>"pending"</code> and is unrelated to run outcomes</td></tr>
+    <tr><td>Full suite at current HEAD</td><td><code>go build ./... && go vet ./... && go test ./internal/... -count=1</code> from <code>/Users/lars/Dev/sergeant-v2</code> at <code>01fda48</code></td></tr>
+    <tr><td><strong>Mutation test on the core replacement</strong></td><td>Edited <code>case "failed": return "blocked", true</code> back to <code>return "failed", true</code>; ran <code>go test ./internal/ui/... -run 'TestAFailedRun|TestADispatchedRunAdvances|TestABlockedReason' -v -count=1</code>; restored the exact original line; confirmed <code>git diff</code>/<code>git status --short</code> empty afterward</td></tr>
+    <tr><td>Test-quality check</td><td>Read <code>TestAFailedRunBlocksItsBulletsWithTheAgentReportedReason</code> (asserts the exact verbatim reason string) and <code>TestABlockedReasonWithASecretIsRedactedOnTheBullet</code>/<code>TestRunAgentPhaseRedactsTheReturnedBlockedReason</code> (each asserts <code>!strings.Contains(secret)</code> AND <code>strings.Contains("[REDACTED]")</code>, not just "changed")</td></tr>
+    <tr><td>My own throwaway repro #1: a different API-key shape than the shipped tests used</td><td>Wrote a throwaway test (<code>internal/ui</code>) driving a <code>ghp_</code>-shaped GitHub token and an inline <code>PASSWORD=</code> credential through <code>RecordEnvelope</code> → <code>srv.recordTerminalRun</code> → <code>ListBulletsForIntent</code>; the GitHub token came back as <code>[REDACTED]</code>; the inline password did not — deleted the test file after (<code>git status --short</code> confirmed clean)</td></tr>
+    <tr><td>Isolated the password-redaction miss to <code>internal/redact</code>, not this feature</td><td>Wrote a throwaway test directly against <code>redact.Text</code> (no <code>ui</code>/<code>runner</code>/<code>store</code> code involved): <code>credentialLinePattern</code>'s <code>(?im)^NAME=value$</code> anchors only match when the credential starts its own line; the same string embedded mid-sentence is returned unchanged; <code>PASSWORD=hunter2superSecret</code> alone on a line redacts correctly. Deleted the probe file after</td></tr>
+    <tr><td>Cross-checked against Review 018's own disclosed residual</td><td><code>git show bd58bd4 -- progress.html</code>: Review 018 already flagged <code>redact.Text</code> missing a generic credential embedded in a URL's userinfo, for the identical reason (no matching pattern) — corroborates that the gap found here is a known, pre-existing property of <code>internal/redact</code>, not something this commit's own code introduced</td></tr>
   </table>
 </section>
 
@@ -107,133 +110,109 @@ a{color:var(--muted)}
   <h2>Findings</h2>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The choke point is real: no code path bypasses <code>Store.RecordPhase</code>/<code>RecordEnvelope</code> to reach either table</h3>
-    <p>I enumerated every <code>.RecordPhase(</code> and <code>.RecordEnvelope(</code> call in the repo and every
-    <code>INTO phases</code>/<code>INTO envelopes</code> SQL literal in the repo. The only production writer of
-    either table is <code>internal/store/store.go</code>; the one other raw <code>INSERT INTO envelopes</code> is a
-    test fixture that deliberately bypasses <code>RecordEnvelope</code> to simulate a row written before a schema
-    migration — an intentional, documented, test-only exception, not a second production path. This part of the
-    claim is true, not aspirational.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The core mapping change is exactly what the spec requires, and nothing else moved</h3>
+    <p><code>bulletStatusForRunOutcome</code>'s <code>"failed"</code> case now returns <code>"blocked", true</code>
+    instead of <code>"failed", true</code>. The <code>"passed"→"green"</code> case and the <code>default</code>
+    case (which covers <code>"cancelled"</code> and any other run status) are textually unchanged. This matches all
+    four scenarios in <code>specs/blocked-bullets/spec.md</code> at the mapping level: agent-reported reason,
+    synthesized reason, passing run unaffected, cancelled run moves nothing.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Both redaction blocks are load-bearing, and both actually generalize to call sites no prior review examined</h3>
-    <p>Mutation testing confirms the code inside <code>RecordPhase</code>/<code>RecordEnvelope</code> is not
-    decorative: disabling either block fails the corresponding shipped test on every assertion, and restoring it
-    leaves <code>git diff</code> empty. I also built my own reproductions against two call sites this entire review
-    lineage (Reviews 013–017) never once looked at — <code>dag/engine.go</code>'s <code>RecordRedExemption</code>
-    (a caller-supplied <code>reason</code> string, never redacted at its own call site) and <code>ui/server.go</code>'s
-    run-delivery envelope at line 1791 (built by <code>describeDelivery</code> from git remote/worktree state, a
-    feature added for R5.6, not R4.4). Both came out redacted with a secret embedded, purely because they pass
-    through the store — no call-site code, no awareness of <code>redact</code> at either site. This is exactly what
-    "closes the guarantee for call sites that don't exist yet" is supposed to mean, and for the database it
-    delivers.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The reason lives inside <code>payload</code>, not a new top-level field, exactly as design.md requires</h3>
+    <p><code>handoff.BlockedReason(payload json.RawMessage) string</code> is a pure map lookup:
+    <code>json.Unmarshal</code> into <code>map[string]interface{}</code>, return
+    <code>fields["blocked_reason"]</code> if present and a string, else <code>""</code>. The <code>Envelope</code>
+    struct itself gained no new field. Design.md's stated reason for this choice — inheriting
+    <code>redact.JSON</code>'s existing call site instead of needing a new one — is real, not just asserted: I
+    traced the actual redaction call in <code>RunAgentPhase</code> and confirmed the read happens strictly after
+    it (next finding).</p>
   </div>
 
-  <div class="item bad">
-    <h3><span class="sev high">bad</span> &nbsp; The commit's own "7th instance" is not actually fixed: the handoff file it also lands in bypasses the store entirely</h3>
-    <p><code>RunAgentPhase</code>'s agent-authored-envelope branch (<code>internal/runner/runner.go</code>, around
-    line 452 onward) reads an agent's own <code>.sergeant/envelope.json</code> into <code>env</code>. Before this
-    commit, <code>env.Artifacts</code> was never redacted anywhere. The commit's stated fix is that
-    <code>RecordEnvelope</code> now redacts <code>Artifacts</code> unconditionally, closing the gap "for call sites
-    that don't exist yet." But look at the actual order of operations in <code>RunAgentPhase</code>:</p>
-    <pre>env.Summary = redact.Text(env.Summary)      // redacted here, before any write
-env.Payload = redact.JSON(env.Payload)      // redacted here, before any write
-...
-pr.Store.DeliverEnvelope(envelopeID, pr.RepoName, true, func() error {
-    return pr.Router.SaveEnvelope(&amp;env)      // writes env — including RAW Artifacts — to disk
-})
-...
-_ = pr.Store.RecordEnvelope(&amp;store.EnvelopeRecord{
-    ...
-    Artifacts: env.Artifacts,               // THEN redacted, in place, mutating the same backing array
-    ...
-})</pre>
-    <p><code>Router.SaveEnvelope</code> (<code>internal/handoff/envelope.go</code>) marshals <code>env</code> and
-    writes it to <code>&lt;fleet root&gt;/&lt;run&gt;/handoff/&lt;repo&gt;/envelope_&lt;stage&gt;.json</code> and
-    <code>envelope_latest.json</code> on disk. That write happens <em>before</em> <code>RecordEnvelope</code> ever
-    runs. I reproduced this directly: a fake agent writes its own <code>envelope.json</code> with
-    <code>"artifacts":["API_KEY="+secret]</code>; after <code>RunAgentPhase</code> returns, both handoff files on
-    disk contain the raw secret verbatim:</p>
-    <pre>envelope_build.json:  "artifacts": ["API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP"]
-envelope_latest.json: "artifacts": ["API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP"]</pre>
-    <p>Meanwhile the returned <code>*handoff.Envelope</code> and the persisted <code>EnvelopeRecord.Artifacts</code>
-    both show <code>[REDACTED]</code> — which looks like proof the fix works, but is actually a side effect of Go
-    slice aliasing: <code>Artifacts: env.Artifacts</code> in the <code>EnvelopeRecord</code> literal copies the
-    slice header, not the backing array, so when <code>RecordEnvelope</code> writes
-    <code>e.Artifacts[i] = redact.Text(a)</code> it mutates the exact same array <code>env.Artifacts</code> points
-    at — after the disk file was already written from it. This is also why Review 017's own probes, which checked
-    the returned value and the database row, did not catch it: both of those looked clean. The "protection" on the
-    returned envelope is additionally contingent on <code>RecordEnvelope</code> actually reaching that line; its
-    error is discarded (<code>_ = pr.Store.RecordEnvelope(...)</code>), so any early return from validation or a DB
-    error would leave even the in-memory copy unredacted, with nothing to signal it.</p>
-    <p>The disk file does not stay put. <code>internal/dag/engine.go:279–292</code> calls
-    <code>Router.InjectHandoffToWorktree</code> for every downstream repo in a multi-repo run, which copies every
-    file under the upstream repo's handoff directory — including the unredacted
-    <code>envelope_&lt;stage&gt;.json</code> — verbatim into
-    <code>&lt;downstream worktree&gt;/.sergeant/handoff/&lt;upstream repo&gt;/</code>. That path is inside a real
-    git worktree. <code>CommitRunOutput</code> (<code>internal/dag/engine.go:196–210</code>) then runs
-    <code>git add -A</code> unconditionally in that worktree with no code anywhere in sergeant seeding or checking a
-    <code>.gitignore</code> entry for <code>.sergeant/</code> — so whether the secret is swept into a real commit
-    depends entirely on whether the target repository happens to already ignore that directory on its own. I did
-    not run a full multi-repo dispatch through to an actual <code>git commit</code> to watch this land — that is a
-    traced consequence from reading the code, not an executed reproduction — but the mechanism that would carry the
-    secret from "unredacted file on disk" to "committed into the user's repository, PR'd, and pushed" is fully
-    present and unguarded.</p>
-    <p>This directly contradicts the commit's stated scope. The commit message names this exact field
-    (<code>EnvelopeRecord.Artifacts</code>) and this exact call site as the motivating "7th instance" the redesign
-    was meant to close. It closes the database row. It does not close the file, because the file is written by a
-    second, earlier function that touches the same data before the chosen choke point ever sees it.</p>
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Redaction-then-read ordering is correct in the one place it's claimed, and doubly enforced</h3>
+    <p><code>internal/runner/runner.go</code> line 495: <code>env.Payload = redact.JSON(env.Payload)</code>. Line
+    504: <code>blockedReason := handoff.BlockedReason(env.Payload)</code>. The comment directly above line 504
+    states this ordering is deliberate, and the code matches the comment. Line 506's
+    <code>annotatePayloadWithProvenance</code> then re-unmarshals/re-marshals the same payload to add
+    <code>model</code>/<code>provider</code> keys — I checked this preserves <code>blocked_reason</code> rather
+    than dropping it, since it round-trips through the same <code>map[string]interface{}</code> shape. Separately,
+    <code>internal/store/store.go</code>'s <code>RecordEnvelope</code> (the choke point Review 018 examined)
+    unconditionally redacts <code>e.Data</code> again before <code>INSERT</code>, so
+    <code>blockedReasonForRun</code>'s read-back through <code>ListEnvelopesForRun</code> is protected even if the
+    runner-level ordering were ever broken by a future edit. Two independent redaction passes on the same field,
+    not one fragile one.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; This really is a full replacement, not a parallel or inconsistent write path</h3>
+    <p>Grepped every <code>"failed"</code> string literal and every <code>UpdateBulletStatus</code>/<code>AdvanceBulletsForRun</code>
+    call site in <code>internal/</code>, excluding tests. <code>bulletStatusForRunOutcome</code> (called only from
+    <code>recordTerminalRun</code>, called only from the run-completion path) is the sole place that ever computed a
+    bullet status from a run outcome, both before and after this commit. The plan-approval path added later
+    (<code>server.go:863</code>) only ever writes <code>"pending"</code> for a freshly approved bullet and is
+    unreachable from a run outcome, so it cannot reintroduce a stray <code>"failed"</code> write. Historical rows
+    keep <code>"failed"</code> (no migration was written, matching the proposal's explicit out-of-scope item), and
+    <code>BulletStatuses()</code> documents both values.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Mutation test confirms the replacement is load-bearing</h3>
+    <p>Reverted <code>case "failed": return "blocked", true</code> to <code>return "failed", true</code>, leaving
+    everything else untouched. <code>TestAFailedRunBlocksItsBulletsWithASynthesizedReason</code>,
+    <code>TestAFailedRunBlocksItsBulletsWithTheAgentReportedReason</code>,
+    <code>TestABlockedReasonWithASecretIsRedactedOnTheBullet</code>, and
+    <code>TestADispatchedRunAdvancesItsBulletsThroughTheTerminalPath</code> all failed with exactly the predicted
+    mismatches: bullet status came back <code>"failed"</code> where the test wants <code>"blocked"</code>, and
+    <code>BlockedReason</code> came back empty in every case — because <code>blockedReasonForRun</code> itself
+    short-circuits to <code>""</code> whenever <code>bulletStatus != "blocked"</code>, so reverting the status
+    mapping alone was enough to silently suppress reason resolution too, exactly as the two are supposed to be
+    coupled. Restored the line to its exact original text; <code>git diff</code> and <code>git status --short</code>
+    both confirmed empty afterward.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Test quality meets the bar the task set</h3>
+    <p><code>TestAFailedRunBlocksItsBulletsWithTheAgentReportedReason</code> asserts
+    <code>b.BlockedReason != "requirement is ambiguous; needs a human decision"</code> — the exact string, not just
+    non-empty. <code>TestABlockedReasonWithASecretIsRedactedOnTheBullet</code> (ui layer) and
+    <code>TestRunAgentPhaseRedactsTheReturnedBlockedReason</code> (runner layer) both assert
+    <code>!strings.Contains(got, secret)</code> AND <code>strings.Contains(got, "[REDACTED]")</code> — absence of
+    the specific secret plus presence of the specific placeholder, not merely "some transformation happened." This
+    matches the standard the project's own redaction test suite (<code>internal/redact/redact_test.go</code>)
+    already holds itself to.</p>
   </div>
 
   <div class="item warn">
-    <h3><span class="sev med">residual, real but lower severity</span> &nbsp; The <code>changes</code> table is a third persisted-and-broadcast path with no redaction at all</h3>
-    <p><code>PhaseRecord</code> and <code>EnvelopeRecord</code> are not the only rows that get written and then
-    handed to a client. <code>internal/store/changes.go</code>'s <code>AppendChange</code> writes to the
-    <code>changes</code> table, which <code>/api/stream</code> serves live over SSE — and it has zero
-    <code>redact</code> reference anywhere in the file. Its one external caller,
-    <code>ui/server.go</code>'s <code>appendRunProgress</code>, reads each worktree's <code>.sergeant/plan.json</code>
-    and forwards each item's <code>Scenario</code> field — free text sourced from a spec's
-    <code>#### Scenario:</code> heading — directly into the broadcast payload. I reproduced this live: a
-    <code>plan.json</code> with <code>Scenario: "uses API_KEY="+secret</code> lands in
-    <code>ListChangesSince</code>'s result with the secret intact, unredacted, and that is the same row
-    <code>/api/stream</code> hands to every connected dashboard client.</p>
-    <p>I am calling this lower severity than the handoff-file finding because the content source is different: a
-    spec's Scenario heading is normally human-authored project documentation, not raw agent/subprocess output, so a
-    real secret landing there is less likely than in agent stdout or an agent-authored envelope. But the mechanism
-    is exactly the R4.4 shape — free text flows to a persisted, broadcast destination with no redaction anywhere in
-    the chain — and unlike the two functions this commit touched, nothing about the choke-point fix does anything
-    for this table, because it structurally isn't a <code>PhaseRecord</code> or <code>EnvelopeRecord</code>.</p>
-  </div>
-
-  <div class="item warn">
-    <h3><span class="sev low">residual, theoretical</span> &nbsp; <code>redact.Text</code>'s heuristic does not catch a generic, non-API-key-shaped credential</h3>
-    <p><code>redact.Text("https://svc-user:hunter2ProdDbPassword@github.com/example/svc.git")</code> returns the
-    string unchanged — none of <code>redact.go</code>'s patterns (provider API key prefixes, bearer tokens,
-    <code>NAME=value</code> lines) match a plain password embedded in a URL's userinfo. Not a regression from this
-    commit — the same shape Review 016 flagged as the <code>resolveGitRemoteURL</code> edge case, and moving the
-    redaction call site into the store does not change it: the heuristic itself has this scope regardless of where
-    it is invoked from.</p>
-  </div>
-
-  <div class="item warn">
-    <h3><span class="sev low">residual, carried forward unchanged from Review 016</span> &nbsp; <code>handleBuildGraph</code> still returns raw subprocess output in an HTTP error body</h3>
-    <p><code>internal/ui/server.go</code>'s <code>handleBuildGraph</code> still does
-    <code>http.Error(w, err.Error(), http.StatusInternalServerError)</code> where <code>err</code> can embed raw
-    <code>graphify extract</code>/<code>merge-graphs</code> subprocess output with no <code>redact</code> call
-    anywhere in the chain. Out of scope for this commit and unchanged since Review 016. Repeating it here only so
-    it is not mistaken for a new gap or forgotten as an old one.</p>
-  </div>
-
-  <div class="item warn">
-    <h3><span class="sev med">process note</span> &nbsp; Review 017 (commit <code>65f70fc</code>) reached MEETS SPEC in good faith but with an incomplete sweep</h3>
-    <p>Review 017 ran real mutation tests and two genuinely reproduced call-site probes — its work is not
-    fabricated, and its conclusions about the store choke point itself are correct as far as they go. It did not
-    open <code>internal/handoff/envelope.go</code> or trace what happens to an agent-authored envelope's
-    <code>Artifacts</code> between the moment it is read off disk and the moment it is (or isn't) redacted, which is
-    exactly where the blocking finding above lives. That commit is not being rewritten or reset; this review
-    supersedes its verdict on the record, the same way each review round in this file has always corrected the one
-    before it.</p>
+    <h3><span class="sev med">real gap, pre-existing in <code>internal/redact</code>, inherited by this feature</span> &nbsp; A credential-shaped <code>blocked_reason</code> embedded mid-sentence is not redacted</h3>
+    <p>I wrote a throwaway test driving two different secret shapes through the real end-to-end path
+    (<code>RecordEnvelope</code> → <code>srv.recordTerminalRun</code> → <code>ListBulletsForIntent</code>), neither
+    of which the shipped tests used: a GitHub personal-access-token shape (<code>ghp_...</code>) and an inline
+    <code>PASSWORD=...</code> credential, both inside one <code>blocked_reason</code> string:
+    <code>"pushed with token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 and PASSWORD=hunter2superSecret failed
+    auth"</code>. The persisted <code>BulletRecord.BlockedReason</code> came back as
+    <code>"pushed with token [REDACTED] and PASSWORD=hunter2superSecret failed auth"</code> — the GitHub token was
+    redacted; the password was not.</p>
+    <p>I isolated this to <code>internal/redact/redact.go</code> itself, with no <code>ui</code>/<code>runner</code>/<code>store</code>
+    code involved: <code>credentialLinePattern</code> is <code>(?im)^([A-Za-z0-9_.-]*(?:key|token|secret|password|credential)[A-Za-z0-9_.-]*)=(.+)$</code>.
+    The <code>^</code>/<code>$</code> anchors (multiline mode) require the credential to start its own line.
+    <code>redact.Text("PASSWORD=hunter2superSecret")</code> alone on a line redacts correctly to
+    <code>"PASSWORD=[REDACTED]"</code>; the identical text embedded mid-sentence does not match, because there is
+    no line break immediately before <code>PASSWORD</code>. <code>apiKeyPattern</code> (the pattern that caught the
+    GitHub token) has no such anchor and matches anywhere in the string, which is why that half of the same probe
+    came back clean.</p>
+    <p>This is not a defect this commit introduced. Review 018 (<code>bd58bd4</code>) already disclosed a sibling
+    case — a generic credential embedded in a URL's userinfo — for the identical underlying reason: no
+    <code>redact.go</code> pattern matches it. Design.md's own rationale for nesting <code>blocked_reason</code>
+    inside <code>payload</code> is to inherit the existing, already-tested redaction wiring "for free" instead of
+    adding a new call site — and that choice is sound engineering (a new call site is where redaction gaps have
+    historically been introduced in this project, per Reviews 013–018's history of finding exactly that). But
+    "inherits the existing wiring" necessarily also means "inherits the existing wiring's blind spots," and an
+    agent's own free-text explanation of why it is stuck is a plausible place for a credential to appear
+    mid-sentence rather than helpfully alone on its own line. R4.4's spec text for this change says a blocked
+    reason must be "redacted like any other retained free text" — which is true here in the literal sense (it goes
+    through the exact same <code>redact.Text</code> as everything else), but the underlying heuristic that
+    "like any other" points to has a known scope limit that a human-facing dashboard reason string now inherits.</p>
   </div>
 
 </section>
@@ -242,84 +221,79 @@ envelope_latest.json: "artifacts": ["API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEF
   <h2>Evidence index</h2>
   <table>
     <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
-    <tr><td>Build/vet/test clean at current <code>v2</code> HEAD</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 11/11 packages</td></tr>
-    <tr><td>Choke point has no bypass</td><td><code>grep -rn "\.RecordPhase(\|\.RecordEnvelope(" .</code> and <code>grep -rn "INTO phases\|INTO envelopes" .</code>, whole repo</td><td>only <code>internal/store/store.go</code> writes either table in production code; one test fixture intentionally bypasses it</td></tr>
-    <tr><td><code>RecordPhase</code>'s redaction is load-bearing</td><td>mutation test on <code>p.Error</code>/<code>p.Payload</code> lines, <code>TestRecordPhaseRedactsErrorAndPayload</code></td><td>failed on all 4 assertions with the mutation; passed again after restore; <code>git diff</code> empty</td></tr>
-    <tr><td><code>RecordEnvelope</code>'s redaction is load-bearing</td><td>mutation test on <code>e.Summary</code>/<code>e.Data</code>/<code>e.Artifacts</code>, <code>TestRecordEnvelopeRedactsSummaryDataAndArtifacts</code></td><td>failed on all 4 assertions with the mutation; passed again after restore; <code>git diff</code> empty</td></tr>
-    <tr><td>Choke point protects call sites never reviewed before (#1)</td><td>throwaway repro against <code>dag/engine.go</code>'s <code>RecordRedExemption</code> with a secret in <code>reason</code></td><td>redacted purely by passing through the store; zero call-site code</td></tr>
-    <tr><td>Choke point protects call sites never reviewed before (#2)</td><td>throwaway repro against <code>ui/server.go</code>'s run-delivery envelope with a <code>ghp_</code>-shaped token in a git remote URL</td><td>redacted purely by passing through the store; zero call-site code</td></tr>
-    <tr><td><code>RunAgentPhase</code>'s returned error is redacted</td><td><code>go test ./internal/runner/... -run TestAgentPhaseFailureErrorIsRedacted -v</code></td><td>pass; genuinely drives a secret through a real failing fake-agent subprocess</td></tr>
-    <tr><td><code>DeliverPullRequest</code>'s return value is redacted</td><td><code>go test ./internal/runner/... -run TestDeliverPullRequestRedactsGHOutput -v</code></td><td>pass; genuinely drives a secret through a real fake-<code>gh</code> subprocess</td></tr>
-    <tr><td><strong>Blocking: the handoff file bypasses the choke point</strong></td><td>throwaway repro: fake agent's own <code>envelope.json</code> with a secret in <code>artifacts</code>; read <code>envelope_build.json</code>/<code>envelope_latest.json</code> off disk directly after <code>RunAgentPhase</code></td><td><strong>fails</strong>: both files contain the raw secret verbatim, despite the returned envelope and persisted DB row both showing <code>[REDACTED]</code></td></tr>
-    <tr><td>Leaked handoff file propagates into other repos' worktrees</td><td>read <code>InjectHandoffToWorktree</code> and <code>CommitRunOutput</code></td><td>traced, not executed end-to-end: mechanism to reach a real git commit exists and is unguarded by sergeant itself</td></tr>
-    <tr><td>Residual: <code>changes</code> table has no redaction</td><td>throwaway repro: <code>plan.json</code> with a secret in <code>Scenario</code>, <code>appendRunProgress</code>, read back via <code>ListChangesSince</code></td><td><strong>fails</strong>: raw secret present in the row <code>/api/stream</code> broadcasts</td></tr>
-    <tr><td>Residual: <code>redact.Text</code> heuristic scope</td><td><code>redact.Text</code> on a URL with a generic (non-API-key-shaped) embedded password</td><td>returned unchanged — documents scope, not a regression from this commit</td></tr>
-    <tr><td>No scope creep in 9933725</td><td><code>git show 9933725 --stat</code></td><td>5 files, 194 insertions, all in <code>internal/store</code> and <code>internal/runner</code>; no config field added</td></tr>
-    <tr><td>Review 017's verdict and why it missed the blocker</td><td><code>git show 65f70fc -- progress.html</code></td><td>real mutation tests and probes, MEETS SPEC verdict; never opened <code>internal/handoff/envelope.go</code></td></tr>
+    <tr><td>Build/vet/test clean at current <code>v2</code> HEAD (<code>01fda48</code>)</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 11/11 packages</td></tr>
+    <tr><td><code>"passed"→"green"</code> and cancelled/default unaffected</td><td>Read <code>bulletStatusForRunOutcome</code>, lines ~2159–2168</td><td>textually identical to before this commit for those two branches</td></tr>
+    <tr><td><code>"failed"→"blocked"</code> is the only mapping change</td><td>Same read; <code>git diff 169c6d1 fcc28fd -- internal/ui/server.go</code></td><td>one line changed inside the switch, plus the new <code>blockedReasonForRun</code> function and its call site</td></tr>
+    <tr><td><code>blocked_reason</code> lives in <code>payload</code>, no new <code>Envelope</code> field</td><td>Read <code>internal/handoff/envelope.go</code>'s <code>Envelope</code> struct and new <code>BlockedReason</code> function</td><td>struct unchanged; <code>BlockedReason</code> is a map lookup on the existing <code>Payload json.RawMessage</code> field</td></tr>
+    <tr><td>Redaction precedes the read in <code>RunAgentPhase</code></td><td>Read lines 494–506 in source order</td><td><code>redact.JSON(env.Payload)</code> at 495; <code>handoff.BlockedReason(env.Payload)</code> at 504</td></tr>
+    <tr><td><code>blocked_reason</code> survives the later provenance annotation</td><td>Read <code>annotatePayloadWithProvenance</code>: unmarshal → add 2 keys → remarshal</td><td>round-trips through the same map; no key dropped</td></tr>
+    <tr><td>Envelope read order matches "last one wins"</td><td>Read <code>ListEnvelopesForRun</code>'s SQL: <code>ORDER BY created_at ASC</code></td><td>confirmed — the loop's last non-empty reason really is the most recent envelope's</td></tr>
+    <tr><td><code>store.BulletStatuses()</code> includes both <code>"failed"</code> and <code>"blocked"</code></td><td>Read <code>internal/store/store.go</code>'s <code>BulletStatuses()</code></td><td><code>{"proposed","pending","red","green","sealed","merged","failed","blocked"}</code></td></tr>
+    <tr><td><code>BulletRecord.BlockedReason</code> is real, persisted, migrated</td><td>Read the struct field, the <code>CREATE TABLE</code>, and <code>migrateAddColumns</code></td><td>column added with a migration for existing databases; scanned in <code>ListBulletsForIntent</code></td></tr>
+    <tr><td>Full-replacement claim: no other bullet-status writer exists</td><td><code>grep -rn '"failed"'</code> and <code>grep -rn "UpdateBulletStatus\|AdvanceBulletsForRun"</code> across <code>internal/</code>, non-test</td><td><code>bulletStatusForRunOutcome</code>/<code>recordTerminalRun</code> is the only run-outcome-driven bullet-status writer; other hits are a different domain (phase/run/delivery status) or the unrelated plan-approval <code>"pending"</code> write</td></tr>
+    <tr><td><strong>Mutation test on the core replacement</strong></td><td>Reverted <code>"failed"</code> case to <code>return "failed", true</code>; ran the 4 dependent tests; restored</td><td><strong>fails as predicted</strong>: status stays <code>"failed"</code>, <code>BlockedReason</code> comes back empty in every case; <code>git diff</code>/<code>git status --short</code> empty after restore</td></tr>
+    <tr><td>Reason tests assert the exact string, not just non-empty</td><td>Read <code>TestAFailedRunBlocksItsBulletsWithTheAgentReportedReason</code></td><td>asserts <code>b.BlockedReason == "requirement is ambiguous; needs a human decision"</code> verbatim</td></tr>
+    <tr><td>Redaction tests assert absence of secret AND presence of placeholder</td><td>Read <code>TestABlockedReasonWithASecretIsRedactedOnTheBullet</code>, <code>TestRunAgentPhaseRedactsTheReturnedBlockedReason</code></td><td>both assert <code>!strings.Contains(secret)</code> and <code>strings.Contains("[REDACTED]")</code></td></tr>
+    <tr><td>My own repro: a <code>ghp_</code> token in <code>blocked_reason</code> reaches <code>BulletRecord.BlockedReason</code> redacted</td><td>throwaway test, <code>internal/ui</code>, full path through <code>RecordEnvelope</code> → <code>recordTerminalRun</code></td><td>redacted correctly; deleted after, <code>git status --short</code> clean</td></tr>
+    <tr><td><strong>My own repro: an inline (non-line-start) <code>PASSWORD=...</code> in the same <code>blocked_reason</code> is not redacted</strong></td><td>same throwaway test, same run</td><td><strong>fails</strong>: password persisted verbatim in <code>BulletRecord.BlockedReason</code></td></tr>
+    <tr><td>Isolated the miss to <code>internal/redact</code>, unrelated to this feature's own code</td><td>throwaway probe directly against <code>redact.Text</code>: same string alone on its own line vs. mid-sentence</td><td>on-its-own-line redacts correctly; mid-sentence does not — <code>credentialLinePattern</code>'s <code>^...$</code> anchors are the cause</td></tr>
+    <tr><td>Corroboration: this is a known, pre-existing property of <code>redact.Text</code></td><td><code>git show bd58bd4 -- progress.html</code> (Review 018)</td><td>Review 018 already disclosed a sibling miss (URL userinfo credential) for the identical reason, on an unrelated commit</td></tr>
+    <tr><td>No scope creep in <code>fcc28fd</code></td><td><code>git show fcc28fd --stat</code></td><td>8 files, all in <code>internal/{store,runner,handoff,ui,dag}</code> plus their tests; matches <code>tasks.md</code>'s single task</td></tr>
   </table>
 </section>
 
 <section>
   <h2>Verdict</h2>
-  <div class="item bad">
-    <p><strong>DOES NOT MEET SPEC.</strong> The architectural move this commit makes is sound, and I verified that
-    claim adversarially: every production write to the <code>phases</code> and <code>envelopes</code> tables
-    genuinely goes through <code>Store.RecordPhase</code>/<code>RecordEnvelope</code>, the redaction inside both
-    functions is genuinely load-bearing under mutation testing, and I built live reproductions against two call
-    sites no prior review round had examined, both of which came out protected with no call-site-specific code at
-    all. If the claim had been "this closes the class of bug for the database," it would be true.</p>
-    <p>But the claim, in the commit's own words, is broader: it names <code>EnvelopeRecord.Artifacts</code> in
-    <code>RunAgentPhase</code>'s agent-authored-envelope branch as one of the two concrete leaks this redesign
-    exists to close. That specific leak is not closed:</p>
-    <ul>
-      <li><strong>Blocking:</strong> <code>Router.SaveEnvelope</code> writes the agent-authored envelope — including
-      its raw, unredacted <code>Artifacts</code> — to a handoff file on disk <em>before</em>
-      <code>RecordEnvelope</code> runs. The database row and the in-process return value both end up looking clean
-      only because of an incidental Go slice-aliasing side effect, not because the content was actually redacted
-      before it was persisted. The file itself, read directly after reproducing the scenario, still contains the
-      raw secret.</li>
-      <li><strong>Blocking, by traced consequence:</strong> that file is copied verbatim into every downstream
-      repository's worktree in a multi-repo run, and nothing in sergeant prevents <code>git add -A</code> from
-      committing it there, meaning the leak's ceiling is not "a row in a local sqlite file" but "committed into the
-      user's actual repository and pushed via the existing PR flow" — a strictly worse outcome than any of the nine
-      instances found across Reviews 013–016.</li>
-    </ul>
-    <p>Two further findings are disclosed as residuals rather than blockers: the <code>changes</code> table
-    (<code>AppendChange</code>) is a third, entirely unredacted persistence-and-broadcast path structurally outside
-    <code>PhaseRecord</code>/<code>EnvelopeRecord</code> altogether, reproduced live with a secret in a
-    <code>plan.json</code> Scenario field reaching the SSE stream — real, but the content source (spec text) makes a
-    genuine secret less likely than in agent/subprocess output. And <code>redact.Text</code>'s heuristic does not
-    catch a generic (non-API-key-shaped) credential embedded in a URL — a pre-existing scope limitation of the
-    heuristic itself, not new to this commit.</p>
-    <p>This review also corrects Review 017 (commit <code>65f70fc</code>), which reviewed the same commit with real
-    mutation tests and real call-site probes but reached MEETS SPEC because its sweep never opened
-    <code>internal/handoff/envelope.go</code>. That commit stands in git history uncorrected in place — this
-    entry supersedes its verdict rather than rewriting it.</p>
-    <p>The lesson is not "point-fix the handoff file too." The pattern across all review rounds so far is that every
-    time a fix has been scoped to "the places I can see this value get used," something has found a place that
-    wasn't checked. This round's version of that mistake is structural rather than a missed field: the redesign
-    correctly identified that the database write path had many callers and one true choke point, but did not check
-    whether the database write path was the <em>only</em> durable destination for the same in-memory value. It was
-    not. Before trusting a choke point, enumerate every function that persists or transmits the same struct, not
-    just every function that constructs it.</p>
+  <div class="item warn">
+    <p><strong>MEETS SPEC WITH CAVEATS.</strong> Every scenario in
+    <code>specs/blocked-bullets/spec.md</code> is genuinely implemented: <code>bulletStatusForRunOutcome</code>'s
+    <code>"failed"</code> case now yields <code>"blocked"</code> with <code>"passed"</code> and cancelled/default
+    left untouched; an agent-reported reason is threaded through verbatim from <code>payload.blocked_reason</code>
+    (not a new top-level <code>Envelope</code> field, matching design.md's explicit rejection of that alternative);
+    a run with no agent-reported reason still produces a non-empty synthesized one; and the reason is redacted
+    through the existing, already-tested <code>redact.JSON</code>/<code>RecordEnvelope</code> wiring rather than a
+    new call site. The mutation test confirms the core replacement is load-bearing, not decorative — reverting one
+    line breaks 4 tests in exactly the predicted way, and the fix restores to an empty <code>git diff</code>. The
+    whole-repo grep confirms this really is a full replacement: no other code path writes a bullet's status from a
+    run outcome. Test quality is genuinely good: reason assertions check the exact verbatim string, and redaction
+    assertions check both the specific secret's absence and the specific placeholder's presence, matching the bar
+    the project's own redaction suite holds itself to. <code>go build</code>, <code>go vet</code>, and
+    <code>go test ./internal/... -count=1</code> all pass clean at current HEAD.</p>
+    <p>The caveat is what I found doing my own independent redaction probe (task item 8), using secret shapes the
+    shipped tests did not use. A GitHub-token-shaped (<code>ghp_...</code>) secret inside an agent-reported
+    <code>blocked_reason</code> is redacted correctly end-to-end into <code>BulletRecord.BlockedReason</code>. A
+    <code>PASSWORD=...</code>-shaped credential embedded mid-sentence in the same field is not — it is retained
+    verbatim, because <code>internal/redact</code>'s <code>credentialLinePattern</code> only matches a credential
+    that starts its own line, and an agent's free-text explanation of why it is stuck has no reason to format itself
+    that way. I traced this to <code>internal/redact/redact.go</code> directly, with no code from this commit
+    involved, and confirmed via Review 018 (<code>bd58bd4</code>, an unrelated commit) that this is a known,
+    pre-existing scope limit of the heuristic, not something <code>fcc28fd</code> introduced.</p>
+    <p>I am not calling this a blocker, for the same reason design.md gives for the architectural choice in the
+    first place: reusing an existing, already-tested redaction call site is the right call, and the alternative
+    (a bespoke redaction pass for just this one field) is exactly the "new field, new call site, easy to forget"
+    shape that produced this project's worst redaction gaps historically (Reviews 013–018). But R4.4's spec text
+    for this change — "redacted like any other retained free text" — is true in the narrow sense (it goes through
+    the same function as everything else) while still leaving a real, reachable gap in the broader sense a reader
+    would reasonably assume: not every credential-shaped substring in a blocked reason is actually caught. This is
+    a caveat on the redaction guarantee this feature relies on, not on the feature's own logic, which is correctly
+    wired and correctly tested for what it does control.</p>
   </div>
 </section>
 
 <footer>
-  <p class="meta">Review 018 · findings above are reproduced from commands run directly against the current
-  <code>v2</code> working tree at HEAD <code>9933725</code> (no worktree needed; nothing was left uncommitted).
-  Two mutations were applied and reverted in place, one at a time: <code>internal/store/store.go</code>'s
-  <code>p.Error</code>/<code>p.Payload</code> redaction lines in <code>RecordPhase</code>, and its
-  <code>e.Summary</code>/<code>e.Data</code>/<code>e.Artifacts</code> redaction lines in <code>RecordEnvelope</code>.
-  Each was commented out, the corresponding shipped test was rerun and failed on every assertion, the file was
-  restored to its exact original text, and <code>git diff</code>/<code>git status --short</code> were confirmed
-  empty before moving to the next mutation. Six throwaway probe test files (in <code>internal/dag</code>,
-  <code>internal/ui</code> ×3, and <code>internal/runner</code> ×2) were written, run, and deleted to build live
-  reproductions of the choke point's reach and its one real gap; <code>git status --short</code> confirmed a clean
-  tree before this review was written. Reviews 001–016's findings were not re-examined beyond what was needed to
-  verify 9933725 and re-confirm its two disclosed residuals still stand. Review 017 (commit <code>65f70fc</code>)
-  was read in full and is credited above for the parts it verified correctly; this review does not restate Reviews
-  001–016 — they stand as recorded in their own text in git history, which this rewrite does not reproduce.</p>
+  <p class="meta">Review 019 · findings above are reproduced from commands run directly against the current
+  <code>v2</code> working tree at HEAD <code>01fda48</code>, reviewing merge commit <code>fcc28fd</code> (three
+  commits behind HEAD; nothing in between touches the reviewed code). One mutation was applied and reverted in
+  place: <code>internal/ui/server.go</code>'s <code>bulletStatusForRunOutcome</code>, <code>"failed"</code> case
+  changed from <code>return "blocked", true</code> to <code>return "failed", true</code>, the 4 dependent tests
+  rerun and confirmed failing on the predicted assertions, the line restored to its exact original text, and
+  <code>git diff</code>/<code>git status --short</code> confirmed empty before writing this review. Two throwaway
+  probe test files (one in <code>internal/ui</code> exercising the full <code>RecordEnvelope</code>→<code>recordTerminalRun</code>
+  path with two secret shapes, one in <code>internal/redact</code> isolating the miss to the package itself) were
+  written, run, and deleted; <code>git status --short</code> confirmed a clean tree before this review was written.
+  Prior review entries (001–018) were not re-examined beyond reading Review 018's disclosed residual to corroborate
+  that the redaction gap found here is pre-existing rather than new — they stand as recorded in their own text in
+  git history, which this rewrite does not reproduce.</p>
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
