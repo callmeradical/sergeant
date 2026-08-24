@@ -394,5 +394,177 @@ a{color:var(--muted)}
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
+<hr style="border:none;border-top:2px solid var(--ink);margin:44px 0">
+
+<header>
+  <h1>Sergeant v2</h1>
+  <p>Independent review. Written by the critic, not the builder.</p>
+  <p class="meta">
+    Review 025 · 2026-08-24 · branch <code>v2</code> · merge commit <code>de9c0db</code>
+    ("feat(store,ui): work analytics dashboard aggregates recorded history", merge of
+    <code>0bb1d25</code> into <code>826df12</code>) reviewed against
+    <code>openspec/changes/work-analytics-dashboard/</code>, diffed from <code>826df12</code>
+    (the commit immediately before this feature's implementation commit) · current
+    <code>v2</code> HEAD is <code>de9c0db</code>, the tip of this feature; build/vet/test run
+    at that HEAD, not an earlier commit
+  </p>
+</header>
+
+<section>
+  <h2>Current status</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at HEAD <code>de9c0db</code></div></div>
+    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code>, whole module, no output</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">11/11 packages pass</span></div><div class="small"><code>go test ./internal/... -count=1</code>, including 11 new <code>internal/store/analytics_test.go</code> tests, 2 new <code>internal/ui/analytics_drawer_test.go</code> node-executed tests, and 2 new <code>internal/ui/analytics_handler_test.go</code> tests</div></div>
+    <div class="card"><div class="label"><code>AllRunsForAnalytics</code> / <code>AllBulletsForAnalytics</code></div><div class="value"><span class="status">verified, genuinely unbounded</span></div><div class="small">No <code>LIMIT</code> in either query's SQL text; both match <code>handleRuns</code>' <code>project != "" &amp;&amp; project != "all"</code> scoping exactly</div></div>
+    <div class="card"><div class="label">Bucket invariant (<code>ByAgent</code>/<code>ByModel</code>/<code>ByProvider</code>)</div><div class="value"><span class="status">verified by construction + mutation</span></div><div class="small">Every run increments exactly one key per map unconditionally; I mutated the loop to skip the <code>""</code> increment and <code>TestComputeWorkAnalyticsUnknownProvenanceSumsToTotal</code> failed exactly as predicted</div></div>
+    <div class="card"><div class="label">Pre-O2 empty <code>Type</code></div><div class="value"><span class="status">bucketed, not dropped</span></div><div class="small"><code>wa.ByType[r.Type]++</code> unconditionally; <code>TestComputeWorkAnalyticsBucketsEmptyTypeExplicitly</code> covers it directly</div></div>
+    <div class="card"><div class="label">Drawer pattern</div><div class="value"><span class="status">matches <code>openWorkersDrawer</code> exactly</span></div><div class="small"><code>openAnalyticsDrawer</code> fetches then calls <code>openDrawer('Work analytics', 'analytics', analyticsHTML(data), opener)</code>, the identical shape as the Workers drawer; no new full-page view or routing mechanism</div></div>
+    <div class="card"><div class="label"><code>selectedProject</code> reuse</div><div class="value"><span class="status">confirmed pre-existing</span></div><div class="small">Declared at line 242, set by <code>onProjectChange()</code> at line 324, already read by <code>fetchRuns</code> at line 612 — <code>openAnalyticsDrawer</code> reads this same variable, not a second one</div></div>
+    <div class="card"><div class="label">Drawer render tests</div><div class="value"><span class="status">real node execution, real assertions</span></div><div class="small">Both tests run under actual <code>node</code> (confirmed not skipped) and assert rendered labels/percentages (<code>"goose"</code>, <code>"75%"</code>, <code>"1 / 2"</code>, <code>"50%"</code>) and the exact <code>"No bullets recorded yet"</code> zero-case string with no <code>NaN</code></div></div>
+    <div class="card"><div class="label">Third-party dependency</div><div class="value"><span class="status">none added</span></div><div class="small"><code>git diff 826df12 HEAD -- go.mod go.sum</code> is empty; the only <code>&lt;script src&gt;</code> in <code>index.html</code> is the pre-existing Tailwind CDN line, unchanged by this diff</div></div>
+    <div class="card"><div class="label"><code>GET /api/analytics</code> side effects</div><div class="value"><span class="status">none, confirmed end to end</span></div><div class="small"><code>handleAnalytics</code> → <code>ComputeWorkAnalytics</code> → <code>AllRunsForAnalytics</code>/<code>ListPhasesForRun</code>/<code>AllBulletsForAnalytics</code>; no <code>INSERT</code>/<code>UPDATE</code>/<code>DELETE</code>/<code>Exec</code> anywhere in the call chain</div></div>
+    <div class="card"><div class="label">Live endpoint sanity check</div><div class="value"><span class="status">internally consistent</span></div><div class="small"><code>curl /api/analytics?project=all</code> against the running server: <code>by_status</code>, <code>by_agent</code>, and <code>by_type</code> each sum to <code>total_runs</code> (59); shape matches <code>WorkAnalytics</code> exactly</div></div>
+  </div>
+  <p><strong>Verdict:</strong> MEETS SPEC. Every scenario in <code>specs/work-analytics/spec.md</code>
+  is genuinely implemented and backed by a meaningful, non-tautological test, the unbounded
+  source queries and the drawer both follow this codebase's established precedents exactly
+  (<code>RunsEligibleForCleanup</code> for the query shape, <code>openWorkersDrawer</code> for
+  the frontend shape), no third-party dependency or new full-page view was introduced, and
+  <code>GET /api/analytics</code> is a provably pure read. No caveats found. See Findings for
+  detail.</p>
+</section>
+
+<section>
+  <h2>What I inspected</h2>
+  <table>
+    <tr><th>Area</th><th>Method</th></tr>
+    <tr><td>Binding spec</td><td>Read <code>openspec/changes/work-analytics-dashboard/{proposal,design,tasks}.md</code> and <code>specs/work-analytics/spec.md</code> in full before reading any code</td></tr>
+    <tr><td>The actual diff</td><td><code>git diff 826df12 HEAD -- internal/store/analytics.go internal/store/analytics_test.go internal/ui/server.go internal/ui/static/index.html internal/ui/analytics_drawer_test.go internal/ui/analytics_handler_test.go</code>, read in full (897 lines)</td></tr>
+    <tr><td>Unbounded, project-scoped queries</td><td>Read <code>AllRunsForAnalytics</code>/<code>AllBulletsForAnalytics</code>'s SQL text directly: neither contains <code>LIMIT</code>; both gate the <code>WHERE</code> clause on <code>project != "" &amp;&amp; project != "all"</code>. Read <code>handleRuns</code> (<code>internal/ui/server.go:519</code>) to confirm this is the exact same convention: <code>if project != "" &amp;&amp; project != "all" { ListRunsForProject } else { ListRecentRuns }</code>. Read <code>handleAnalytics</code>: forwards the raw query param straight into <code>ComputeWorkAnalytics</code>, no separate scoping logic to drift from the store's</td></tr>
+    <tr><td>Bucket invariant</td><td>Read <code>ComputeWorkAnalytics</code>'s loop: <code>wa.ByAgent[prov.Agent]++</code>/<code>wa.ByModel[prov.Model]++</code>/<code>wa.ByProvider[prov.Provider]++</code> run unconditionally for every run, so by construction every run lands in exactly one key (possibly <code>""</code>) of each map. Then independently mutated the loop to <code>if prov.Agent != "" { wa.ByAgent[prov.Agent]++ }</code> (skipping the <code>""</code> increment) and reran <code>TestComputeWorkAnalyticsUnknownProvenanceSumsToTotal</code>: it failed with <code>ByAgent[""] = 0, want 2</code> and <code>sum(ByAgent) = 1, want 3</code>, exactly the predicted symptom. Reverted, confirmed <code>git diff --stat</code> empty, reran <code>go build ./... &amp;&amp; go vet ./... &amp;&amp; go test ./internal/... -count=1</code> clean</td></tr>
+    <tr><td>Pre-O2 empty-<code>Type</code> bucketing</td><td>Read <code>wa.ByType[r.Type]++</code> — unconditional map increment, no guard that could drop an empty string. Read <code>TestComputeWorkAnalyticsBucketsEmptyTypeExplicitly</code>: seeds one run with <code>Type: "feat"</code> and one with <code>Type: ""</code>, asserts both <code>ByType["feat"] == 1</code> and <code>ByType[""] == 1</code>, and that the two sum to <code>TotalRuns</code></td></tr>
+    <tr><td>Frontend drawer pattern</td><td>Read <code>openWorkersDrawer</code> (line 1588) and <code>openAnalyticsDrawer</code> (line 1704) side by side: identical <code>fetch → openDrawer(title, kind, bodyHTML, opener)</code> shape. <code>grep -n 'selectedProject'</code>: declared at line 242 (<code>let selectedProject = "all"</code>), assigned by <code>onProjectChange()</code> at line 324, already read by the existing <code>fetchRuns</code> URL construction at line 612 — a genuine pre-existing variable, not one this diff invented and only this diff reads</td></tr>
+    <tr><td>Node-executed drawer tests</td><td>Ran <code>go test ./internal/ui/... -run TestAnalyticsHTML -v</code> directly (not trusting the merge commit's own claim): both tests pass, and <code>which node</code> confirms <code>node</code> is present so neither is silently skipped. Read both tests' assertions: <code>TestAnalyticsHTMLKnownProvenanceBreakdown</code> checks for the literal strings <code>"goose"</code>, <code>"75%"</code> (3/4 rounded), <code>"claude-sonnet-4-6"</code>, <code>"anthropic"</code>, <code>"unknown"</code>, <code>"before work types were tracked"</code>, <code>"1 / 2"</code>, <code>"50%"</code> — real rendered content, not merely "no exception thrown." <code>TestAnalyticsHTMLZeroBulletsShowsNoNaN</code> asserts the literal string <code>"No bullets recorded yet"</code> and the absence of <code>"NaN"</code></td></tr>
+    <tr><td>No third-party dependency</td><td><code>git diff 826df12 HEAD -- go.mod go.sum</code>: empty. <code>grep -n '&lt;script src' internal/ui/static/index.html</code>: one hit, the Tailwind CDN line at line 7, confirmed present in <code>826df12</code> already via <code>git show 826df12:internal/ui/static/index.html | grep cdn.tailwindcss</code> — pre-existing, untouched</td></tr>
+    <tr><td><code>GET /api/analytics</code> purity</td><td>Read <code>handleAnalytics</code> in full: reads the query param, calls <code>ComputeWorkAnalytics</code>, writes JSON — no request body parsing, no write call. Read <code>ComputeWorkAnalytics</code>, <code>AllRunsForAnalytics</code>, <code>AllBulletsForAnalytics</code>, and <code>provenanceForRun</code> (which calls the existing <code>ListPhasesForRun</code>) end to end: every call is a <code>db.Query</code>, never <code>db.Exec</code> or an <code>UPDATE</code>/<code>INSERT</code>/<code>DELETE</code> statement</td></tr>
+    <tr><td>Live endpoint</td><td><code>curl -s "http://localhost:8484/api/analytics?project=all"</code> against the already-rebuilt-and-restarted server: <code>{"total_runs":59,"by_status":{"cancelled":7,"failed":5,"interrupted":5,"passed":42},...}</code> — 7+5+5+42=59=<code>total_runs</code>; <code>by_agent</code> (22+11+7+19=59) and <code>by_type</code> (57+2=59) both sum to the same total; response shape matches <code>WorkAnalytics</code>'s JSON tags exactly</td></tr>
+    <tr><td>Full suite</td><td><code>cd /Users/lars/Dev/sergeant-v2 &amp;&amp; go build ./... &amp;&amp; go vet ./... &amp;&amp; go test ./internal/... -count=1</code> at HEAD <code>de9c0db</code>, run twice (once before the mutation experiment, once after reverting it) — both times 11/11 packages pass</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Findings</h2>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; The source queries are genuinely unbounded and scope-match <code>handleRuns</code> exactly</h3>
+    <p><code>AllRunsForAnalytics</code>'s SQL is <code>SELECT runColumns FROM runs [WHERE project = ?] ORDER BY created_at ASC</code> and <code>AllBulletsForAnalytics</code>'s is <code>SELECT ... FROM bullets b JOIN intents i ON b.intent_id = i.id [WHERE i.project = ?]</code> — neither has a <code>LIMIT</code> clause anywhere, unlike <code>ListRecentRuns(50)</code>/<code>ListRunsForProject(project, 50)</code>, which <code>handleRuns</code> itself still uses for its own 50-row "recent activity" window. The <code>WHERE</code> clause on both new queries, and the query-param handling in <code>handleAnalytics</code>, all gate on the identical condition <code>project != "" &amp;&amp; project != "all"</code> that <code>handleRuns</code> (<code>internal/ui/server.go:519</code>) already uses. This is not a superficially similar convention re-typed — it is copied verbatim.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified, non-tautological</span> &nbsp; Every run lands in exactly one bucket per map, by construction, confirmed by my own mutation</h3>
+    <p><code>ComputeWorkAnalytics</code>'s loop increments <code>wa.ByAgent[prov.Agent]</code>, <code>wa.ByModel[prov.Model]</code>, and <code>wa.ByProvider[prov.Provider]</code> unconditionally for every run — there is no branch that could skip a run or double-count it, so the sum-equals-<code>TotalRuns</code> invariant holds structurally, not just because the shipped test happens to assert it. To confirm the shipped test would actually catch a regression rather than pass regardless, I edited the loop to <code>if prov.Agent != "" { wa.ByAgent[prov.Agent]++ }</code> (dropping the <code>""</code> increment, simulating a plausible "only count known agents" mistake) and reran <code>TestComputeWorkAnalyticsUnknownProvenanceSumsToTotal</code>: it failed with <code>ByAgent[""] = 0, want 2 unknown runs</code> and <code>sum(ByAgent) = 1, want 3</code>. I reverted the edit, confirmed <code>git diff --stat</code> reported nothing, and reran the full suite (<code>go build ./... &amp;&amp; go vet ./... &amp;&amp; go test ./internal/... -count=1</code>) clean.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Pre-O2 runs with an empty <code>Type</code> are bucketed, not dropped or miscounted</h3>
+    <p><code>wa.ByType[r.Type]++</code> is an unconditional Go map increment; an empty string is a valid map key like any other, so a pre-O2 run's empty <code>Type</code> lands in the <code>""</code> bucket rather than being skipped by some "if Type != \"\"" guard that does not exist in this code. <code>TestComputeWorkAnalyticsBucketsEmptyTypeExplicitly</code> proves this directly with a mixed <code>"feat"</code>/<code>""</code> fixture, and the frontend's <code>analyticsBreakdownHTML</code> relabels the <code>""</code> key as <code>"before work types were tracked"</code> (verified rendering under real <code>node</code> in <code>TestAnalyticsHTMLKnownProvenanceBreakdown</code>) rather than showing a blank line.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; The drawer follows the existing pattern; <code>selectedProject</code> is genuinely reused, not reinvented</h3>
+    <p><code>openAnalyticsDrawer</code>'s body is <code>fetch(...) → openDrawer('Work analytics', 'analytics', analyticsHTML(data), opener)</code>, the identical shape as <code>openWorkersDrawer</code>'s <code>fetchFleet() → openDrawer('Workers & worktrees (...)', 'workers', workersHTML(...), opener)</code>. No new routing mechanism, no new top-level view, and no change to <code>openDrawer</code>/<code>closeDrawer</code> themselves. <code>grep -n 'selectedProject'</code> across <code>index.html</code> shows it declared at line 242 and assigned by <code>onProjectChange()</code> at line 324 — both predate this diff — and already consumed by the existing <code>fetchRuns</code> logic at line 612. <code>openAnalyticsDrawer</code> reads this same variable via <code>encodeURIComponent(selectedProject)</code>; it does not read <code>#project-filter</code>'s value a second, independent way.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; The render-function tests execute real JavaScript and assert real rendered content</h3>
+    <p><code>internal/ui/analytics_drawer_test.go</code>'s <code>renderAnalytics</code> helper extracts <code>escapeHTML</code>, <code>analyticsBreakdownHTML</code>, and <code>analyticsHTML</code> out of the embedded <code>index.html</code> and executes them under a real <code>node</code> subprocess — the same <code>extractJSFunction</code> harness <code>stage_matrix_test.go</code>/<code>phase_detail_test.go</code> established. I ran <code>which node</code> (present) and <code>go test ./internal/ui/... -run TestAnalyticsHTML -v</code> directly: both tests pass and neither is skipped. <code>TestAnalyticsHTMLKnownProvenanceBreakdown</code> asserts the literal rendered strings <code>"goose"</code>, <code>"75%"</code> (the correctly-rounded 3-of-4 percentage), <code>"claude-sonnet-4-6"</code>, <code>"anthropic"</code>, the <code>"unknown"</code> label for the empty provenance bucket, <code>"before work types were tracked"</code> for the empty work-type bucket, and <code>"1 / 2"</code>/<code>"50%"</code> for the merged-bullets fraction — genuine content assertions, not "the script parsed without throwing." <code>TestAnalyticsHTMLZeroBulletsShowsNoNaN</code> asserts the exact string <code>"No bullets recorded yet"</code> and the literal absence of <code>"NaN"</code> anywhere in the output.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; No third-party dependency added, no new full-page view</h3>
+    <p><code>git diff 826df12 HEAD -- go.mod go.sum</code> produces no output — nothing was added to either file. <code>index.html</code> contains exactly one <code>&lt;script src&gt;</code>, the Tailwind CDN line at line 7, and <code>git show 826df12:internal/ui/static/index.html | grep cdn.tailwindcss</code> confirms this line predates the feature entirely. The new drawer is rendered entirely with the existing Tailwind utility classes already used by <code>workersHTML</code>/<code>phaseDetailHTML</code> — plain labeled lists and counts, no canvas, no SVG chart, no vendored library.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified end to end</span> &nbsp; <code>GET /api/analytics</code> has no side effects</h3>
+    <p><code>handleAnalytics</code> reads one query parameter and calls <code>ComputeWorkAnalytics</code>; <code>ComputeWorkAnalytics</code> calls <code>AllRunsForAnalytics</code>, <code>provenanceForRun</code> (which itself only calls the pre-existing <code>ListPhasesForRun</code>), and <code>AllBulletsForAnalytics</code> — every one of these is a <code>s.db.Query</code> call. None calls <code>s.db.Exec</code> or issues an <code>INSERT</code>/<code>UPDATE</code>/<code>DELETE</code> statement anywhere in the chain. The live server, already rebuilt and restarted with this code, was queried directly with <code>curl</code> and returned a well-formed, internally consistent response without needing any setup call first.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">observed, not a defect in this change</span> &nbsp; Live data shows <code>by_model</code>/<code>by_provider</code> 100% unknown despite <code>by_agent</code> having real values</h3>
+    <p>The live <code>/api/analytics?project=all</code> response shows <code>by_agent</code> correctly split across <code>claude</code>/<code>goose</code>/<code>opencode</code>/unknown, but <code>by_model</code> and <code>by_provider</code> are 100% (<code>59</code>/<code>59</code>) unknown, including for the 7 <code>goose</code> runs. Tracing this: the <code>"agent"</code> key is written into a phase's synthetic-envelope payload as the literal executable name (<code>internal/runner/runner.go:473</code>, <code>"agent": exe</code>) whenever the agent does not write its own <code>envelope.json</code>, independently of whether <code>detectModelProvider</code> (line 79) recognized the output — and <code>detectModelProvider</code> only recognizes <code>goose</code>'s own banner text (<code>"new session · &lt;provider&gt; &lt;model&gt;"</code>), returning empty strings if that exact banner is absent from the captured output (e.g. a resumed session, or output not from that code path). This is a pre-existing behavior of <code>internal/runner/runner.go</code>, not something this diff introduced, and it exercises exactly the disclosed, out-of-scope limitation named in this change's own proposal.md ("Extending <code>detectModelProvider</code> to recognize agents besides goose... not this change's problem to solve (R4.6)") and design.md ("the common case for every agent besides goose today"). The analytics feature is correctly and honestly surfacing real recorded data, including its gaps, exactly as spec.md's "counted as unknown, not omitted" scenario requires — it is not miscounting or hiding anything. Not a caveat against this change.</p>
+  </div>
+
+</section>
+
+<section>
+  <h2>Evidence index</h2>
+  <table>
+    <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
+    <tr><td>Build/vet/test clean at HEAD <code>de9c0db</code></td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 11/11 packages, vet silent</td></tr>
+    <tr><td>Source queries unbounded, scope-matched to <code>handleRuns</code></td><td>Read SQL text of <code>AllRunsForAnalytics</code>/<code>AllBulletsForAnalytics</code>; read <code>handleRuns</code>' scoping branch at <code>internal/ui/server.go:519</code></td><td>no <code>LIMIT</code> in either query; identical <code>project != "" &amp;&amp; project != "all"</code> gate in both the store queries and <code>handleAnalytics</code></td></tr>
+    <tr><td><strong>My own mutation test: bucket-skip</strong></td><td>Changed the loop to <code>if prov.Agent != "" { wa.ByAgent[prov.Agent]++ }</code>, reran <code>TestComputeWorkAnalyticsUnknownProvenanceSumsToTotal</code></td><td>failed exactly as predicted (<code>ByAgent[""] = 0, want 2</code>; <code>sum(ByAgent) = 1, want 3</code>); reverted, <code>git diff --stat</code> confirmed empty, full suite rerun green</td></tr>
+    <tr><td>Pre-O2 empty-<code>Type</code> bucketed</td><td>Read <code>wa.ByType[r.Type]++</code>; read <code>TestComputeWorkAnalyticsBucketsEmptyTypeExplicitly</code></td><td>unconditional increment, no drop path; test asserts <code>ByType[""] == 1</code> and sum equals <code>TotalRuns</code></td></tr>
+    <tr><td>Drawer pattern matches, <code>selectedProject</code> genuinely pre-existing</td><td>Compared <code>openWorkersDrawer</code> vs. <code>openAnalyticsDrawer</code>; <code>grep -n 'selectedProject' index.html</code></td><td>identical fetch/openDrawer shape; <code>selectedProject</code> declared line 242, set line 324, read by pre-existing <code>fetchRuns</code> at line 612 and now also by <code>openAnalyticsDrawer</code></td></tr>
+    <tr><td>Node-executed drawer tests assert real content</td><td><code>which node</code>; <code>go test ./internal/ui/... -run TestAnalyticsHTML -v</code>; read both tests' assertions</td><td><code>node</code> present, both tests pass (not skipped); assertions check literal labels/percentages (<code>"goose"</code>, <code>"75%"</code>, <code>"1 / 2"</code>, <code>"50%"</code>) and the exact <code>"No bullets recorded yet"</code>/no-<code>NaN</code> zero-case</td></tr>
+    <tr><td>No third-party dependency, no new full-page view</td><td><code>git diff 826df12 HEAD -- go.mod go.sum</code>; <code>grep '&lt;script src'</code> in <code>index.html</code>; <code>git show 826df12:...index.html | grep cdn.tailwindcss</code></td><td>go.mod/go.sum diff empty; only script tag is the pre-existing Tailwind CDN line, present before this diff</td></tr>
+    <tr><td><code>GET /api/analytics</code> is a pure read</td><td>Read <code>handleAnalytics</code>/<code>ComputeWorkAnalytics</code>/<code>AllRunsForAnalytics</code>/<code>AllBulletsForAnalytics</code>/<code>provenanceForRun</code> end to end</td><td>every data access is <code>db.Query</code>; no <code>Exec</code>/<code>INSERT</code>/<code>UPDATE</code>/<code>DELETE</code> anywhere in the chain</td></tr>
+    <tr><td>Live endpoint shape and internal consistency</td><td><code>curl -s "http://localhost:8484/api/analytics?project=all"</code></td><td><code>by_status</code> (7+5+5+42=59), <code>by_agent</code> (22+11+7+19=59), and <code>by_type</code> (57+2=59) each sum to <code>total_runs</code>=59; JSON keys match <code>WorkAnalytics</code>'s tags exactly</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Verdict</h2>
+  <div class="item ok">
+    <p><strong>MEETS SPEC.</strong> Every scenario named in <code>specs/work-analytics/spec.md</code>
+    is genuinely implemented and backed by a meaningful, non-tautological test: the total run
+    count and outcome breakdown reflect complete history past the 50-row window (proven with a
+    55-run and a 60-run fixture, not just asserted); the pre-O2 empty-<code>Type</code> bucket is
+    counted explicitly, not dropped; a run with known provenance is counted under its actual
+    agent/model/provider, and a run with none is counted under an explicit <code>""</code>/"unknown"
+    bucket in all three breakdowns, with the sum-equals-total invariant independently confirmed by
+    my own mutation of the aggregation loop (which broke exactly the test built to catch it, then
+    was cleanly reverted); merged-versus-total bullet counts are both shown, and the zero-bullets
+    case renders <code>"No bullets recorded yet"</code> rather than <code>NaN%</code>, verified under
+    real <code>node</code> execution of the actual embedded JavaScript, not a Go reimplementation of
+    it; and project scoping — one specific project, and "all projects" combining every project — is
+    proven not to commingle data, with dedicated tests for both. <code>AllRunsForAnalytics</code> and
+    <code>AllBulletsForAnalytics</code> are genuinely unbounded (no <code>LIMIT</code> anywhere in
+    their SQL) and match <code>handleRuns</code>' <code>project</code>/<code>all</code> scoping
+    convention exactly, at every layer (store, handler, and the frontend's fetch). The frontend
+    drawer is byte-for-byte the same pattern as the existing Workers drawer, reads the genuinely
+    pre-existing <code>selectedProject</code> variable rather than inventing a second notion of
+    "current project," and introduces no new full-page view, no new routing mechanism, and no
+    third-party charting dependency (confirmed via an empty <code>go.mod</code>/<code>go.sum</code>
+    diff and the dashboard's single, pre-existing Tailwind CDN script tag). <code>GET
+    /api/analytics</code> is a provably pure read down to its last called function. The one thing
+    worth naming without it being a caveat: the live server's real data shows <code>by_model</code>
+    and <code>by_provider</code> are currently 100% unknown even for <code>goose</code> runs, because
+    <code>detectModelProvider</code>'s banner-text match is narrower in practice than the <code>7</code>
+    <code>goose</code> runs recorded — but this is <code>internal/runner/runner.go</code>'s
+    pre-existing, already-disclosed limitation (R4.6), not a bug in this diff, and the analytics
+    feature is correctly surfacing it as "unknown," exactly as spec.md requires, rather than hiding
+    or miscounting it. Build, vet, and the full test suite (11/11 packages) are clean at current HEAD
+    <code>de9c0db</code>.</p>
+  </div>
+</section>
+
+<footer>
+  <p class="meta">Review 025 · findings above are reproduced from commands run directly against
+  the current <code>v2</code> working tree at HEAD <code>de9c0db</code>, diffing
+  <code>826df12..HEAD</code> for the 6 files this change touches. One mutation was applied
+  directly to <code>internal/store/analytics.go</code> (changing the <code>ByAgent</code>
+  increment in <code>ComputeWorkAnalytics</code>'s loop to skip the <code>""</code> bucket) to
+  independently confirm <code>TestComputeWorkAnalyticsUnknownProvenanceSumsToTotal</code> catches
+  a real regression rather than passing tautologically; it was reverted immediately after,
+  confirmed by an empty <code>git diff --stat</code>, and the full suite was rerun clean
+  afterward. No throwaway test files were left behind. The live dashboard server (already
+  rebuilt and restarted with this code, per the task) was queried directly with <code>curl</code>
+  rather than trusting the merge commit's own verification claim. Review 024 and earlier entries
+  were not re-examined; they stand as recorded above.</p>
+  <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
+</footer>
+
 </main></body>
 </html>
