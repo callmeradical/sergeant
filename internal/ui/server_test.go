@@ -431,7 +431,7 @@ func TestDispatchRecordsAnExistingChangeIDOnTheRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := postDispatch(t, mux, `{"project":"o3","brief":"add stripe webhooks","change_id":"`+changeID+`"}`)
+	w := postDispatch(t, mux, `{"project":"o3","brief":"add stripe webhooks","change_id":"`+changeID+`","repos":["svc"]}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
@@ -564,11 +564,18 @@ func TestDispatchPersistsItsIntentAndOneBulletPerTargetRepo(t *testing.T) {
 	}
 }
 
-// When a dispatch names no repositories every configured repository is a target,
-// and the bullet order must be reproducible. Map iteration order would give the
-// same dispatch a different merge order on every call.
-func TestDispatchWithNoReposBulletsEveryRepoInASortedOrder(t *testing.T) {
-	mux, st, repoPaths, _ := dispatchFixtureRepos(t, "worker", "api", "web")
+// Decision D2: a dispatch naming no repositories is an inferred decomposition
+// (it defaults to every project repository), and must be recorded as a plan
+// awaiting approval rather than executed. The bullet order must still be
+// reproducible — map iteration order would give the same dispatch a different
+// merge order on every call.
+func TestDispatchWithNoReposCreatesAProposedPlanAndStartsNothing(t *testing.T) {
+	mux, st, repoPaths, dbPath := dispatchFixtureRepos(t, "worker", "api", "web")
+
+	// A seam to prove no worktree is created: a fresh, known-empty directory
+	// that the dispatch/worktree machinery would write beneath if it ran at all.
+	fleetRoot := t.TempDir()
+	t.Setenv("SERGEANT_FLEET_DIR", fleetRoot)
 
 	// With no requested repos, changeRepo falls back to the sorted repo list, so
 	// api owns the change.
@@ -578,8 +585,23 @@ func TestDispatchWithNoReposBulletsEveryRepoInASortedOrder(t *testing.T) {
 	}
 
 	w := postDispatch(t, mux, `{"project":"o3","brief":"add stripe webhooks","change_id":"`+changeID+`"}`)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Status   string   `json:"status"`
+		IntentID string   `json:"intent_id"`
+		Repos    []string `json:"repos"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "proposed" {
+		t.Errorf("response status = %q, want proposed", resp.Status)
+	}
+	if resp.IntentID == "" {
+		t.Error("response carries no intent_id")
 	}
 
 	intents, err := st.ListIntentsForProject("o3")
@@ -589,6 +611,13 @@ func TestDispatchWithNoReposBulletsEveryRepoInASortedOrder(t *testing.T) {
 	if len(intents) != 1 {
 		t.Fatalf("got %d intents, want 1", len(intents))
 	}
+	if intents[0].Status != "proposed" {
+		t.Errorf("intent status = %q, want proposed", intents[0].Status)
+	}
+	if intents[0].ID != resp.IntentID {
+		t.Errorf("intent id = %q, want %q", intents[0].ID, resp.IntentID)
+	}
+
 	bullets, err := st.ListBulletsForIntent(intents[0].ID)
 	if err != nil {
 		t.Fatal(err)
@@ -596,6 +625,9 @@ func TestDispatchWithNoReposBulletsEveryRepoInASortedOrder(t *testing.T) {
 	var gotRepos []string
 	for _, b := range bullets {
 		gotRepos = append(gotRepos, b.Repo)
+		if b.Status != "proposed" {
+			t.Errorf("bullet %s status = %q, want proposed", b.ID, b.Status)
+		}
 	}
 	want := []string{"api", "web", "worker"}
 	if len(gotRepos) != len(want) {
@@ -605,6 +637,19 @@ func TestDispatchWithNoReposBulletsEveryRepoInASortedOrder(t *testing.T) {
 		if gotRepos[i] != want[i] {
 			t.Fatalf("bullet repos = %v, want %v", gotRepos, want)
 		}
+	}
+
+	// The proposed plan starts no work: no run row, and no worktree beneath the
+	// fleet directory this test configured.
+	if n := countRows(t, dbPath, "runs"); n != 0 {
+		t.Errorf("proposed-plan dispatch created %d run(s), want 0", n)
+	}
+	entries, err := os.ReadDir(fleetRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("proposed-plan dispatch left %d entr(y/ies) under the fleet root, want 0: %v", len(entries), entries)
 	}
 }
 

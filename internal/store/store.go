@@ -110,10 +110,11 @@ type BulletRecord struct {
 }
 
 // BulletStatuses is the full set of BulletRecord.Status values, in lifecycle
-// order: a bullet is created pending, records red then green evidence (D3), is
-// sealed into a PR, and is merged by a human (D6). failed and blocked are
-// terminal alternatives and sort last because either can be reached from any
-// earlier state. failed is what a stuck run's outcome wrote before this status
+// order: a bullet may first be proposed as part of a plan awaiting approval
+// (D2), then created pending, records red then green evidence (D3), is sealed
+// into a PR, and is merged by a human (D6). failed and blocked are terminal
+// alternatives and sort last because either can be reached from any earlier
+// state. failed is what a stuck run's outcome wrote before this status
 // existed and remains a valid value for those historical rows; blocked, which
 // carries BlockedReason, is what a stuck run's outcome writes going forward.
 //
@@ -123,7 +124,7 @@ type BulletRecord struct {
 //
 // A fresh slice is returned on every call so no caller can mutate it.
 func BulletStatuses() []string {
-	return []string{"pending", "red", "green", "sealed", "merged", "failed", "blocked"}
+	return []string{"proposed", "pending", "red", "green", "sealed", "merged", "failed", "blocked"}
 }
 
 // BulletProgression is the ordered lifecycle a bullet advances through. It
@@ -1159,6 +1160,32 @@ func (s *Store) ListIntentsForProject(project string) ([]IntentRecord, error) {
 	rows, err := s.db.Query(
 		`SELECT id, project, COALESCE(statement, ''), status, created_at, updated_at FROM intents WHERE project = ? ORDER BY created_at DESC, id ASC`,
 		project,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []IntentRecord
+	for rows.Next() {
+		var i IntentRecord
+		if err := rows.Scan(&i.ID, &i.Project, &i.Statement, &i.Status, &i.CreatedAt, &i.UpdatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, i)
+	}
+	return list, rows.Err()
+}
+
+// ListIntentsByStatus lists every intent in a given status, most recent first.
+//
+// This is how a plan awaiting approval (decision D2) is found: it is an intent
+// like any other, distinguished only by Status == "proposed", so listing by
+// status rather than adding a parallel table is what surfaces it.
+func (s *Store) ListIntentsByStatus(status string) ([]IntentRecord, error) {
+	rows, err := s.db.Query(
+		`SELECT id, project, COALESCE(statement, ''), status, created_at, updated_at FROM intents WHERE status = ? ORDER BY created_at DESC, id ASC`,
+		status,
 	)
 	if err != nil {
 		return nil, err

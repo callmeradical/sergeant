@@ -59,7 +59,7 @@ func TestDispatchWithARepeatedRequestIDReturnsTheOriginalRun(t *testing.T) {
 
 	body := dispatchBody(t, map[string]interface{}{
 		"project": "o3", "brief": "add stripe webhooks",
-		"change_id": changeID, "request_id": "retry-me",
+		"change_id": changeID, "request_id": "retry-me", "repos": []string{"svc"},
 	})
 
 	first := postDispatch(t, mux, body)
@@ -113,7 +113,7 @@ func TestARepeatedDispatchIsIndistinguishableFromTheOriginal(t *testing.T) {
 
 	body := dispatchBody(t, map[string]interface{}{
 		"project": "o3", "brief": "add stripe webhooks",
-		"change_id": changeID, "request_id": "retry-me",
+		"change_id": changeID, "request_id": "retry-me", "repos": []string{"svc"},
 	})
 
 	first := postDispatch(t, mux, body)
@@ -163,7 +163,7 @@ func TestDispatchWithARepeatedRequestIDInsideOneSecondDeduplicates(t *testing.T)
 
 	body := dispatchBody(t, map[string]interface{}{
 		"project": "o3", "brief": "add stripe webhooks",
-		"change_id": changeID, "request_id": "retry-me",
+		"change_id": changeID, "request_id": "retry-me", "repos": []string{"svc"},
 	})
 
 	start := time.Now()
@@ -202,7 +202,7 @@ func TestDispatchWithoutARequestIDCreatesANewRunEachTime(t *testing.T) {
 	}
 
 	body := dispatchBody(t, map[string]interface{}{
-		"project": "o3", "brief": "add stripe webhooks", "change_id": changeID,
+		"project": "o3", "brief": "add stripe webhooks", "change_id": changeID, "repos": []string{"svc"},
 	})
 
 	start := time.Now()
@@ -330,7 +330,7 @@ func TestARepeatedRequestIDCreatesNoSecondWorktreeBranchOrAgent(t *testing.T) {
 
 	body := dispatchBody(t, map[string]interface{}{
 		"project": "o3", "brief": "add stripe webhooks",
-		"change_id": changeID, "request_id": "retry-me",
+		"change_id": changeID, "request_id": "retry-me", "repos": []string{"svc"},
 	})
 
 	first := postDispatch(t, mux, body)
@@ -391,7 +391,7 @@ func TestConcurrentDispatchesWithOneRequestIDProduceOneRun(t *testing.T) {
 
 	body := dispatchBody(t, map[string]interface{}{
 		"project": "o3", "brief": "add stripe webhooks",
-		"change_id": changeID, "request_id": "retry-me",
+		"change_id": changeID, "request_id": "retry-me", "repos": []string{"svc"},
 	})
 
 	const callers = 8

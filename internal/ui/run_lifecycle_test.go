@@ -298,7 +298,7 @@ func TestADispatchedRunAdvancesItsBulletsThroughTheTerminalPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := postDispatch(t, mux, `{"project":"o3","brief":"add stripe webhooks","change_id":"`+changeID+`"}`)
+	w := postDispatch(t, mux, `{"project":"o3","brief":"add stripe webhooks","change_id":"`+changeID+`","repos":["svc"]}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}

@@ -364,6 +364,7 @@ func TestADispatchAppearsOnTheStreamAsARunAnIntentAndItsBullets(t *testing.T) {
 
 	res := postDispatch(t, mux, dispatchBody(t, map[string]interface{}{
 		"project": "o3", "brief": "add stripe webhooks", "change_id": changeID,
+		"repos": []string{"alpha", "beta"},
 	}))
 	if res.Code != http.StatusOK {
 		t.Fatalf("dispatch = %d, want 200; body=%s", res.Code, res.Body.String())

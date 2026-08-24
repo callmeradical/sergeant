@@ -141,6 +141,9 @@ func (srv *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/dispatch", srv.handleDispatch)
 	mux.HandleFunc("/api/create-pr", srv.handleCreatePR)
 	mux.HandleFunc("/api/bullets", srv.handleBullets)
+	mux.HandleFunc("/api/plans", srv.handlePlans)
+	mux.HandleFunc("/api/plans/{intent_id}/approve", srv.handleApprovePlan)
+	mux.HandleFunc("/api/plans/{intent_id}/reject", srv.handleRejectPlan)
 	mux.HandleFunc("/api/fleet", srv.handleFleet)
 	mux.HandleFunc("/api/clean-worktrees", srv.handleCleanWorktrees)
 	mux.HandleFunc("/api/run-cancel", srv.handleRunCancel)
@@ -703,16 +706,34 @@ func (srv *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleBullets answers a run-scoped view of bullet status (R3.5): the API
-// substrate that makes "which bullets are green and awaiting approval versus
-// already sealed" inspectable, the same guard SealBulletForRun enforces.
-// run_id is required for the same reason as handleDeliveryHistory's: an empty
-// result for a missing id would be indistinguishable from "this run truly has
-// no bullets".
+// handleBullets answers a run-scoped or intent-scoped view of bullet status
+// (R3.5): the API substrate that makes "which bullets are green and awaiting
+// approval versus already sealed" inspectable, the same guard SealBulletForRun
+// enforces.
+//
+// intent_id is a direct lookup, with no run to resolve through — a plan
+// awaiting approval (decision D2) has no run yet, and this is the dashboard's
+// existing bullet-listing behaviour, not a new concept. run_id remains
+// required when intent_id is absent, for the same reason as
+// handleDeliveryHistory's: an empty result for a missing id would be
+// indistinguishable from "this run truly has no bullets".
 func (srv *Server) handleBullets(w http.ResponseWriter, r *http.Request) {
+	if intentID := r.URL.Query().Get("intent_id"); intentID != "" {
+		bullets, err := srv.Store.ListBulletsForIntent(intentID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if bullets == nil {
+			bullets = []store.BulletRecord{}
+		}
+		writeJSON(w, http.StatusOK, bullets)
+		return
+	}
+
 	runID := r.URL.Query().Get("run_id")
 	if runID == "" {
-		http.Error(w, "missing run_id", http.StatusBadRequest)
+		http.Error(w, "missing run_id or intent_id", http.StatusBadRequest)
 		return
 	}
 
@@ -737,6 +758,169 @@ func (srv *Server) handleBullets(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, bullets)
+}
+
+// planEntry is what an operator reviews before deciding on a proposed plan
+// (decision D5(a)): the intent and every bullet it proposes.
+type planEntry struct {
+	Intent  store.IntentRecord   `json:"intent"`
+	Bullets []store.BulletRecord `json:"bullets"`
+}
+
+// handlePlans lists every plan awaiting approval (decision D2): intents with
+// status "proposed", each with its proposed bullets.
+func (srv *Server) handlePlans(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	intents, err := srv.Store.ListIntentsByStatus("proposed")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	plans := make([]planEntry, 0, len(intents))
+	for _, intent := range intents {
+		bullets, err := srv.Store.ListBulletsForIntent(intent.ID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if bullets == nil {
+			bullets = []store.BulletRecord{}
+		}
+		plans = append(plans, planEntry{Intent: intent, Bullets: bullets})
+	}
+
+	writeJSON(w, http.StatusOK, plans)
+}
+
+// handleApprovePlan is decision D2/D5(a)'s explicit approval gate. Approving is
+// the only way a proposed plan's work begins: on success it transitions the
+// intent and its bullets out of "proposed" and calls createRunAndDispatch —
+// the same run-creation-and-dispatch sequence an explicit-repos dispatch
+// already runs — over the plan's own bullets' repositories.
+func (srv *Server) handleApprovePlan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	intentID := r.PathValue("intent_id")
+
+	intent, err := srv.Store.GetIntent(intentID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("plan %q not found: %v", intentID, err), http.StatusNotFound)
+		return
+	}
+
+	if intent.Status != "proposed" {
+		if intent.Status == "abandoned" {
+			http.Error(w, fmt.Sprintf("plan %q was rejected and cannot be approved", intentID), http.StatusConflict)
+			return
+		}
+		// Already approved (or beyond): a repeat changes nothing and is not an
+		// error — the caller cannot tell an approval from its own retry.
+		srv.writePlanState(w, intentID)
+		return
+	}
+
+	bullets, err := srv.Store.ListBulletsForIntent(intentID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	targetRepos := make([]string, len(bullets))
+	for i, b := range bullets {
+		targetRepos[i] = b.Repo
+	}
+
+	proj, err := config.LoadProject(intent.Project)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("loading project %q: %v", intent.Project, err), http.StatusInternalServerError)
+		return
+	}
+
+	// Decision O3 still applies: the change is resolved before any run row or
+	// worktree exists, exactly as an explicit-repos dispatch resolves it.
+	changeRepoName, changeRepoPath, err := changeRepo(proj, targetRepos)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	change, err := resolveChange(changeRepoPath, "", intent.Statement)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := srv.Store.UpdateIntentStatus(intentID, "in_progress"); err != nil {
+		http.Error(w, fmt.Sprintf("approving plan %q: %v", intentID, err), http.StatusInternalServerError)
+		return
+	}
+	for _, b := range bullets {
+		if err := srv.Store.UpdateBulletStatus(b.ID, "pending"); err != nil {
+			http.Error(w, fmt.Sprintf("approving bullet %q: %v", b.ID, err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	srv.createRunAndDispatch(w, proj, intent.Statement, targetRepos, change, "", changeRepoName, changeRepoPath, intentID)
+}
+
+// handleRejectPlan is decision D2/D5(a)'s explicit rejection path. Rejecting
+// ends a proposed plan and starts nothing: the intent transitions to
+// "abandoned" and its bullets are left "proposed" — the intent's terminal
+// status alone is what makes them inert, so no bullet-level rejected status is
+// introduced.
+func (srv *Server) handleRejectPlan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	intentID := r.PathValue("intent_id")
+
+	intent, err := srv.Store.GetIntent(intentID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("plan %q not found: %v", intentID, err), http.StatusNotFound)
+		return
+	}
+
+	switch intent.Status {
+	case "abandoned":
+		// A repeat changes nothing and is not an error.
+		srv.writePlanState(w, intentID)
+		return
+	case "proposed":
+		if err := srv.Store.UpdateIntentStatus(intentID, "abandoned"); err != nil {
+			http.Error(w, fmt.Sprintf("rejecting plan %q: %v", intentID, err), http.StatusInternalServerError)
+			return
+		}
+		srv.writePlanState(w, intentID)
+	default:
+		http.Error(w, fmt.Sprintf("plan %q is %q, not proposed — refusing to reject", intentID, intent.Status), http.StatusConflict)
+	}
+}
+
+// writePlanState answers with an intent's current state and its bullets. Both
+// the idempotent-repeat branches of approve and reject, and a normal reject,
+// report the same shape: what the plan is now, not what changed.
+func (srv *Server) writePlanState(w http.ResponseWriter, intentID string) {
+	intent, err := srv.Store.GetIntent(intentID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	bullets, err := srv.Store.ListBulletsForIntent(intentID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if bullets == nil {
+		bullets = []store.BulletRecord{}
+	}
+	writeJSON(w, http.StatusOK, planEntry{Intent: *intent, Bullets: bullets})
 }
 
 func (srv *Server) handleFleet(w http.ResponseWriter, r *http.Request) {
@@ -1192,15 +1376,92 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	// work the engine actually performs cannot name different repositories.
 	targetRepos := targetRepositories(proj, req.Repos)
 
-	taskID := naming.RunID()
 	brief := strings.TrimSpace(req.Brief)
 	requestID := strings.TrimSpace(req.RequestID)
+
+	// Decision D2: a decomposition the caller did not state explicitly — the
+	// literal case D2 calls "inferred" — must be recorded as a plan awaiting
+	// approval, not executed. targetRepos falling back to every project
+	// repository is exactly that case. No run, worktree, branch or agent process
+	// is created on this path; approving or rejecting the plan is a separate
+	// request (decision D5(a): a human is notified and decides explicitly).
+	if len(req.Repos) == 0 {
+		intentID := naming.RunID() + "-intent"
+		if err := srv.Store.CreateIntent(&store.IntentRecord{
+			ID:        intentID,
+			Project:   proj.Name,
+			Statement: brief,
+			Status:    "proposed",
+		}); err != nil {
+			http.Error(w, fmt.Sprintf("recording the proposed plan: %v", err), http.StatusInternalServerError)
+			return
+		}
+		bullets := make([]store.BulletRecord, 0, len(targetRepos))
+		for i, repoName := range targetRepos {
+			b := store.BulletRecord{
+				ID:       fmt.Sprintf("%s-b%d", intentID, i+1),
+				IntentID: intentID,
+				Repo:     repoName,
+				Position: i + 1,
+				Status:   "proposed",
+			}
+			if err := srv.Store.CreateBullet(&b); err != nil {
+				http.Error(w, fmt.Sprintf("recording proposed bullet %d: %v", i+1, err), http.StatusInternalServerError)
+				return
+			}
+			bullets = append(bullets, b)
+		}
+		writeJSON(w, http.StatusAccepted, map[string]interface{}{
+			"status":    "proposed",
+			"intent_id": intentID,
+			"repos":     targetRepos,
+			"bullets":   bullets,
+		})
+		return
+	}
+
+	srv.createRunAndDispatch(w, proj, brief, targetRepos, change, requestID, changeRepoName, changeRepoPath, "")
+}
+
+// createRunAndDispatch is the run-creation-and-dispatch sequence a dispatch
+// performs once its target repositories are settled: it is what an
+// explicit-repos request in handleDispatch runs immediately, and what an
+// approved plan runs after its intent and bullets transition out of
+// "proposed". Sharing this one implementation is what makes the two paths
+// incapable of drifting from each other (design.md, "Approval reuses the
+// existing dispatch sequence, not a copy of it").
+//
+// existingIntentID is "" for a fresh, explicit-repos dispatch — the original
+// behavior, which mints its own intent and one bullet per target repo. An
+// approved plan passes its own (already-"in_progress") intent id here instead
+// of "": that intent and its bullets (already transitioned to "pending" by
+// the caller) are reused as-is rather than minted a second time. Without
+// this, approving a plan would leave its original intent frozen forever at
+// "in_progress"/"pending" — nothing ever advances it — while a second,
+// disconnected intent silently became the one actually tracked, doubling
+// the dashboard's primary object (D8) for what a human considers one piece
+// of work.
+func (srv *Server) createRunAndDispatch(
+	w http.ResponseWriter,
+	proj *config.Project,
+	brief string,
+	targetRepos []string,
+	change ChangeRef,
+	requestID string,
+	changeRepoName string,
+	changeRepoPath string,
+	existingIntentID string,
+) {
+	taskID := naming.RunID()
 
 	// The intent id is derived from the run id rather than generated
 	// independently (decision D4), so it is known before the intent row exists.
 	// That is what lets the run be written first while still pointing at its
-	// intent.
-	intentID := taskID + "-intent"
+	// intent. An approved plan already has one; reuse it instead.
+	intentID := existingIntentID
+	if intentID == "" {
+		intentID = taskID + "-intent"
+	}
 
 	// The run row is inserted before the intent and the bullets, and it carries
 	// the idempotency key. This ordering is the mechanism, not a preference.
@@ -1236,29 +1497,32 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Decision D4: sergeant stores intents and bullets itself, and decision D8
-	// makes the intent the dashboard's primary noun.
-	if err := srv.Store.CreateIntent(&store.IntentRecord{
-		ID:        intentID,
-		Project:   proj.Name,
-		Statement: brief,
-		Status:    "in_progress",
-	}); err != nil {
-		http.Error(w, fmt.Sprintf("recording the intent for this dispatch: %v", err), http.StatusInternalServerError)
-		return
-	}
-	// One bullet per target repository, positioned in merge order. A bullet names
-	// exactly one repository: work in a second repository is a second bullet.
-	for i, repoName := range targetRepos {
-		if err := srv.Store.CreateBullet(&store.BulletRecord{
-			ID:       fmt.Sprintf("%s-b%d", taskID, i+1),
-			IntentID: intentID,
-			Repo:     repoName,
-			Position: i + 1,
-			Status:   "pending",
+	if existingIntentID == "" {
+		// Decision D4: sergeant stores intents and bullets itself, and decision
+		// D8 makes the intent the dashboard's primary noun.
+		if err := srv.Store.CreateIntent(&store.IntentRecord{
+			ID:        intentID,
+			Project:   proj.Name,
+			Statement: brief,
+			Status:    "in_progress",
 		}); err != nil {
-			http.Error(w, fmt.Sprintf("recording bullet %d of this dispatch: %v", i+1, err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("recording the intent for this dispatch: %v", err), http.StatusInternalServerError)
 			return
+		}
+		// One bullet per target repository, positioned in merge order. A bullet
+		// names exactly one repository: work in a second repository is a second
+		// bullet.
+		for i, repoName := range targetRepos {
+			if err := srv.Store.CreateBullet(&store.BulletRecord{
+				ID:       fmt.Sprintf("%s-b%d", taskID, i+1),
+				IntentID: intentID,
+				Repo:     repoName,
+				Position: i + 1,
+				Status:   "pending",
+			}); err != nil {
+				http.Error(w, fmt.Sprintf("recording bullet %d of this dispatch: %v", i+1, err), http.StatusInternalServerError)
+				return
+			}
 		}
 	}
 
@@ -1271,7 +1535,7 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(context.Background())
 	srv.registerRun(taskID, cancel)
 
-	go srv.executeRun(ctx, cancel, engine, proj, taskID, strings.TrimSpace(req.Brief), targetRepos, change.Dir)
+	go srv.executeRun(ctx, cancel, engine, proj, taskID, brief, targetRepos, change.Dir)
 
 	writeJSON(w, http.StatusOK, dispatchResponse(taskID, proj.Name, changeRepoName, change))
 }
