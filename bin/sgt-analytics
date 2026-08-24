@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Local, privacy-safe Sergeant analytics ledger and report command."""
+import argparse, datetime as dt, json, os, statistics, sys, tempfile, uuid
+from pathlib import Path
+
+VERSION = "sergeant.analytics-event/v1"
+ALLOWED = {"event_id", "version", "timestamp", "project", "repo", "task_id", "type", "agent", "outcome", "started_at"}
+TYPES = {"dispatch_started", "terminal", "recovery"}
+OUTCOMES = {"completed", "failed", "orphaned", "recovered"}
+
+def ledger_path():
+    return Path(os.environ.get("SERGEANT_ANALYTICS_LEDGER", Path.home() / ".local/share/sergeant/analytics/events.ndjson"))
+
+def now():
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+def event(args):
+    e = {"event_id": str(uuid.uuid4()), "version": VERSION, "timestamp": now(), "type": args.type}
+    for k in ("project", "repo", "task_id", "agent", "outcome", "started_at"):
+        v = getattr(args, k, None)
+        if v:
+            e[k] = v[:128]
+    if e["type"] not in TYPES or ("outcome" in e and e["outcome"] not in OUTCOMES):
+        raise ValueError("invalid event type or outcome")
+    return e
+
+def append(e, path=None):
+    path = Path(path or ledger_path()); path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.with_name(path.name + ".lock")
+    try:
+        lock.mkdir()
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(e, sort_keys=True, separators=(",", ":")) + "\n")
+            f.flush(); os.fsync(f.fileno())
+    finally:
+        try: lock.rmdir()
+        except OSError: pass
+
+def read(path=None):
+    path = Path(path or ledger_path()); valid=[]; skipped=0
+    if not path.exists(): return valid, skipped
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            e=json.loads(line)
+            if not isinstance(e,dict) or e.get("version") != VERSION or e.get("type") not in TYPES: raise ValueError()
+            if set(e)-ALLOWED: raise ValueError()
+            valid.append(e)
+        except (ValueError, json.JSONDecodeError): skipped += 1
+    return valid, skipped
+
+def report(events):
+    started={e.get("task_id"):e for e in events if e["type"]=="dispatch_started" and e.get("task_id")}
+    durations=[]; failures={}
+    totals={"started":len([e for e in events if e["type"]=="dispatch_started"]), "completed":0,"failed":0,"orphaned":0,"recovered":len([e for e in events if e["type"]=="recovery"])}
+    for e in events:
+        if e["type"]=="terminal":
+            outcome=e.get("outcome", "failed")
+            if outcome in totals: totals[outcome]+=1
+            if outcome not in ("completed",): failures[outcome]=failures.get(outcome,0)+1
+            if e.get("task_id") in started:
+                try:
+                    a=dt.datetime.fromisoformat(started[e["task_id"]]["timestamp"].replace("Z","+00:00")); b=dt.datetime.fromisoformat(e["timestamp"].replace("Z","+00:00")); durations.append((b-a).total_seconds())
+                except (KeyError,ValueError): pass
+    durations.sort()
+    def pct(p): return durations[min(len(durations)-1, max(0, int((len(durations)-1)*p)))] if durations else None
+    return {"version":"sergeant.analytics-report/v1", "totals":totals, "success_rate": (totals["completed"]/totals["started"] if totals["started"] else 0), "duration_seconds":{"median":statistics.median(durations) if durations else None,"p95":pct(.95)}, "failure_categories":dict(sorted(failures.items())), "skipped_records":0}
+
+def main():
+    p=argparse.ArgumentParser(); p.add_argument("--json",action="store_true"); p.add_argument("--ledger",default=None); p.add_argument("--record",action="store_true"); p.add_argument("--type",choices=sorted(TYPES)); p.add_argument("--project"); p.add_argument("--repo"); p.add_argument("--task-id"); p.add_argument("--agent"); p.add_argument("--outcome",choices=sorted(OUTCOMES)); p.add_argument("--started-at")
+    a=p.parse_args(); path=a.ledger
+    try:
+        if a.record:
+            append(event(a), path); return 0
+        events, skipped=read(path); events=[e for e in events if (not a.project or e.get("project")==a.project) and (not a.repo or e.get("repo")==a.repo)]
+        r=report(events); r["skipped_records"]=skipped
+        if a.json: print(json.dumps(r, sort_keys=True))
+        else:
+            print("Sergeant analytics"); print("  started: {started}  completed: {completed}  failed: {failed}  orphaned: {orphaned}  recovered: {recovered}".format(**r["totals"])); print("  success rate: {:.1%}".format(r["success_rate"])); print("  duration median/p95: {}/{} seconds".format(r["duration_seconds"]["median"],r["duration_seconds"]["p95"]))
+        return 0
+    except (OSError, ValueError) as e:
+        print("analytics diagnostic: "+str(e), file=sys.stderr); return 0
+if __name__ == "__main__": sys.exit(main())
