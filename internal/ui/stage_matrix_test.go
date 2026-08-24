@@ -64,6 +64,24 @@ func extractJSBlock(t *testing.T, src, decl string) string {
 	return src[start : start+end+2]
 }
 
+// extractJSConst returns the source of a top-level `const NAME = ...;`
+// declaration, ending at the first semicolon after it. Unlike extractJSBlock
+// (which looks for the "};" that closes an object literal), this works for
+// any const value shape — an array literal like BULLET_PROGRESSION included.
+func extractJSConst(t *testing.T, src, name string) string {
+	t.Helper()
+	head := "const " + name + " = "
+	start := strings.Index(src, head)
+	if start < 0 {
+		t.Fatalf("const %s not found in index.html", name)
+	}
+	end := strings.Index(src[start:], ";")
+	if end < 0 {
+		t.Fatalf("const %s is unterminated", name)
+	}
+	return src[start : start+end+1]
+}
+
 // renderLane executes the workflow-graph node renderers from the embedded UI
 // against a definition and a set of phases, returning the HTML for one lane.
 //
@@ -71,10 +89,16 @@ func extractJSBlock(t *testing.T, src, decl string) string {
 // enclosing renderWorkflowGraph is async and fetches the definition over HTTP,
 // which is the part this test deliberately does not need.
 func renderLane(t *testing.T, repo string, def workflowDefJSON, phases []store.PhaseRecord) string {
-	return renderLaneWidth(t, repo, def, phases, 1200)
+	return renderLaneWidth(t, repo, def, phases, nil, 1200)
 }
 
-func renderLaneWidth(t *testing.T, repo string, def workflowDefJSON, phases []store.PhaseRecord, width int) string {
+// renderLaneWithBullet is renderLane plus a bullet, for tests exercising the
+// Delivery group's per-node lifecycle rendering (lifecyclePhaseForNode).
+func renderLaneWithBullet(t *testing.T, repo string, def workflowDefJSON, phases []store.PhaseRecord, bullet *store.BulletRecord) string {
+	return renderLaneWidth(t, repo, def, phases, bullet, 1200)
+}
+
+func renderLaneWidth(t *testing.T, repo string, def workflowDefJSON, phases []store.PhaseRecord, bullet *store.BulletRecord, width int) string {
 	t.Helper()
 
 	node, err := exec.LookPath("node")
@@ -98,6 +122,8 @@ func renderLaneWidth(t *testing.T, repo string, def workflowDefJSON, phases []st
 		extractJSFunction(t, src, "columnWidth"),
 		extractJSFunction(t, src, "cellHeight"),
 		extractJSFunction(t, src, "phaseForNode"),
+		extractJSConst(t, src, "BULLET_PROGRESSION"),
+		extractJSFunction(t, src, "lifecyclePhaseForNode"),
 		extractJSFunction(t, src, "buildGraphLayout"),
 		extractJSFunction(t, src, "positionLayout"),
 		extractJSFunction(t, src, "groupBoxHTML"),
@@ -113,16 +139,21 @@ func renderLaneWidth(t *testing.T, repo string, def workflowDefJSON, phases []st
 	if err != nil {
 		t.Fatalf("marshal phases: %v", err)
 	}
+	bulletJSON, err := json.Marshal(bullet) // marshals to the JS literal null for a nil bullet
+	if err != nil {
+		t.Fatalf("marshal bullet: %v", err)
+	}
 
 	harness := fmt.Sprintf(`
 %s
 
 const phases = %s || [];
+const bullet = %s;
 const byKey = new Map();
 phases.forEach(p => byKey.set((p.kind || '') + '\u0000' + p.name, p));
 
-process.stdout.write(laneHTML(%q, %s, byKey, %d));
-`, strings.Join(parts, "\n\n"), phasesJSON, repo, defJSON, width)
+process.stdout.write(laneHTML(%q, %s, byKey, bullet, %d));
+`, strings.Join(parts, "\n\n"), phasesJSON, bulletJSON, repo, defJSON, width)
 
 	dir := t.TempDir()
 	script := filepath.Join(dir, "lane.mjs")
@@ -267,6 +298,70 @@ func TestGraphNodeOmitsLocationWhenUnrecorded(t *testing.T) {
 	}
 }
 
+// lifecycleNodes builds the fixed Delivery group in store.BulletProgression
+// order, matching how internal/ui/workflow.go actually emits them.
+func lifecycleNodes() []WorkflowNode {
+	nodes := make([]WorkflowNode, 0, len(store.BulletProgression()))
+	for _, status := range store.BulletProgression() {
+		nodes = append(nodes, WorkflowNode{ID: "lifecycle:" + status, Label: status, Kind: NodeKindLifecycle, Group: "svc"})
+	}
+	return nodes
+}
+
+// A bullet's real lifecycle position must reach the dashboard: every stage at
+// or before the bullet's current status renders as reached, not "not
+// started" — the bug an operator reported as "delivery never goes green".
+func TestGraphDeliveryReflectsTheRealBulletStatus(t *testing.T) {
+	def := defFor(lifecycleNodes()...)
+	bullet := &store.BulletRecord{Repo: "svc", Status: "green"}
+
+	html := renderLaneWithBullet(t, "svc", def, nil, bullet)
+
+	for _, reached := range []string{"pending", "red", "green"} {
+		idx := strings.Index(html, reached)
+		if idx < 0 {
+			t.Fatalf("lifecycle node %q not found in output\n%s", reached, html)
+		}
+		// A reached node is rendered as a clickable-styled "passed" card (no
+		// "not started" text); scanning the row around the label is enough
+		// since each lifecycle card is self-contained.
+		row := html[idx-200:min(idx+200, len(html))]
+		if strings.Contains(row, "not started") {
+			t.Errorf("lifecycle node %q rendered as not-reached, want reached (green bullet already passed it)\nrow: %s", reached, row)
+		}
+	}
+	for _, notReached := range []string{"sealed", "merged"} {
+		idx := strings.Index(html, notReached)
+		if idx < 0 {
+			t.Fatalf("lifecycle node %q not found in output\n%s", notReached, html)
+		}
+		row := html[max(0, idx-200):min(idx+200, len(html))]
+		if !strings.Contains(row, "not started") {
+			t.Errorf("lifecycle node %q rendered as reached, want not-reached (a green bullet has not been sealed or merged)\nrow: %s", notReached, row)
+		}
+	}
+}
+
+// A run with no bullet (predates intent tracking, or none supplied) must
+// fall back to every lifecycle node rendering as not-reached — the
+// pre-existing behavior before bullet status was wired in — not an error.
+func TestGraphDeliveryWithNoBulletRendersAllNotStarted(t *testing.T) {
+	def := defFor(lifecycleNodes()...)
+
+	html := renderLane(t, "svc", def, nil)
+
+	for _, status := range store.BulletProgression() {
+		idx := strings.Index(html, status)
+		if idx < 0 {
+			t.Fatalf("lifecycle node %q not found in output\n%s", status, html)
+		}
+		row := html[max(0, idx-200):min(idx+200, len(html))]
+		if !strings.Contains(row, "not started") {
+			t.Errorf("lifecycle node %q rendered as reached with no bullet present, want not-reached\nrow: %s", status, row)
+		}
+	}
+}
+
 // The graph must wrap to a new row rather than scroll sideways: a pipeline you have
 // to scroll to read is a pipeline you cannot see.
 func TestGraphWrapsInsteadOfScrolling(t *testing.T) {
@@ -276,8 +371,8 @@ func TestGraphWrapsInsteadOfScrolling(t *testing.T) {
 	}
 	def := defFor(nodes...)
 
-	narrow := renderLaneWidth(t, "svc", def, nil, 700)
-	wide := renderLaneWidth(t, "svc", def, nil, 2400)
+	narrow := renderLaneWidth(t, "svc", def, nil, nil, 700)
+	wide := renderLaneWidth(t, "svc", def, nil, nil, 2400)
 
 	nh, nw := containerSize(t, narrow)
 	wh, ww := containerSize(t, wide)

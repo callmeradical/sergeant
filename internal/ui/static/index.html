@@ -1068,12 +1068,42 @@
           || null;
     }
 
+    // BULLET_PROGRESSION mirrors store.BulletProgression() (Go): the ordered
+    // lifecycle a bullet advances through, excluding "failed"/"blocked" —
+    // those are reachable from any earlier state, not a step after "merged",
+    // so they are not rendered as one of these fixed lifecycle nodes.
+    const BULLET_PROGRESSION = ['pending', 'red', 'green', 'sealed', 'merged'];
+
+    // lifecyclePhaseForNode turns a bullet's real status into the same
+    // {status: ...} shape phaseForNode returns, so a lifecycle node renders
+    // through the exact same nodeCardHTML/NODE_LOOK path a stage or gate
+    // does. A stage at or before the bullet's current position in
+    // BULLET_PROGRESSION has been reached ("passed"); anything after has
+    // not ("pending" — the existing null-phase fallback already renders
+    // this way, so returning null here is equivalent and cheaper).
+    //
+    // "failed"/"blocked" are not positions in BULLET_PROGRESSION, and a
+    // BulletRecord alone does not say which stage a stuck bullet last
+    // reached — asserting one here would overclaim what is actually known,
+    // so every lifecycle node still renders as not-reached for those two
+    // statuses, exactly as it did before bullet status was wired in at all.
+    function lifecyclePhaseForNode(node, bullet) {
+      if (!bullet) return null;
+      const bulletIdx = BULLET_PROGRESSION.indexOf(bullet.status);
+      if (bulletIdx === -1) return null;
+      const nodeIdx = BULLET_PROGRESSION.indexOf(node.label);
+      return nodeIdx <= bulletIdx ? { status: 'passed' } : null;
+    }
+
     // Columns come from the definition's shape, not from a hardcoded list:
-    // each pipeline stage is its own column, the gates share one column as a labelled
-    // group because the engine runs them all inside the test stage, and the delivery
-    // lifecycle collapses into one cell because nothing populates bullet status yet and
-    // five permanently-grey columns would be noise.
-    function buildGraphLayout(def, phaseByKey) {
+    // each pipeline stage is its own column, the gates share one column as a
+    // labelled group because the engine runs them all inside the test
+    // stage, and the delivery lifecycle is its own group whose per-node
+    // status comes from the run's actual bullet (bullet may be undefined
+    // for a run with no bullet yet, e.g. one predating intent tracking —
+    // every lifecycle node then falls back to not-reached, same as before
+    // bullet status was wired in).
+    function buildGraphLayout(def, phaseByKey, bullet) {
       const nodes = (def && def.nodes) ? def.nodes : [];
       const cols = [];
 
@@ -1093,7 +1123,7 @@
       if (life.length) {
         cols.push({ cells: [{
           type: 'group', label: 'Delivery',
-          items: life.map(n => ({ node: n, phase: null })),
+          items: life.map(n => ({ node: n, phase: lifecyclePhaseForNode(n, bullet) })),
         }] });
       }
       return cols;
@@ -1255,8 +1285,8 @@
       return `<svg width="${width}" height="${height}" class="absolute inset-0 pointer-events-none" aria-hidden="true">${paths}${dots}</svg>`;
     }
 
-    function laneHTML(repo, def, phaseByKey, availWidth) {
-      const cols = buildGraphLayout(def, phaseByKey);
+    function laneHTML(repo, def, phaseByKey, bullet, availWidth) {
+      const cols = buildGraphLayout(def, phaseByKey, bullet);
       if (cols.length === 0) {
         return `<div class="text-[#8b949e] text-[11px]">No workflow definition for ${escapeHTML(repo)}.</div>`;
       }
@@ -1301,13 +1331,34 @@
         phaseByRepo.get(p.repo).set((p.kind || '') + '\u0000' + p.name, p);
       });
 
+      const bulletByRepo = await bulletsForRun(run.id);
+
       const lanes = [];
       for (const repo of repos) {
         const def = await workflowDefFor(run.project, repo);
-        lanes.push(laneHTML(repo, def, phaseByRepo.get(repo) || new Map(), host.clientWidth - 24));
+        lanes.push(laneHTML(repo, def, phaseByRepo.get(repo) || new Map(), bulletByRepo.get(repo), host.clientWidth - 24));
       }
       host.innerHTML = lanes.join('');
       lastGraphRender = { run, phases: list };
+    }
+
+    // bulletsForRun answers repo -> bullet for the intent behind runId, so the
+    // workflow graph's Delivery group can render each bullet's real lifecycle
+    // position instead of always showing every stage as not-reached. A run
+    // with no intent (predates intent tracking) or a fetch failure both
+    // resolve to an empty map -- every lifecycle node then falls back to its
+    // pre-existing not-reached rendering, not an error.
+    async function bulletsForRun(runId) {
+      const byRepo = new Map();
+      try {
+        const res = await fetch(`/api/bullets?run_id=${encodeURIComponent(runId)}`);
+        if (!res.ok) return byRepo;
+        const bullets = await res.json() || [];
+        bullets.forEach(b => byRepo.set(b.repo, b));
+      } catch (err) {
+        console.error('Failed fetching bullets for run:', err);
+      }
+      return byRepo;
     }
 
     // Wrapping depends on the container width, so a resize has to re-lay-out.
