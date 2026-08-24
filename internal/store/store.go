@@ -1069,6 +1069,35 @@ func (s *Store) ListRecentRuns(limit int) ([]RunRecord, error) {
 	return list, rows.Err()
 }
 
+// RunsEligibleForCleanup returns terminal runs whose UpdatedAt is at or
+// before cutoff — used by the automatic fleet-cleanup pass so it does not
+// have to rely on ListRecentRuns' fixed 200-row window, which answers "is
+// this specific recent run still running", not "find every old terminal
+// run". A run in status "running" is never eligible, no matter how old.
+func (s *Store) RunsEligibleForCleanup(cutoff time.Time) ([]RunRecord, error) {
+	rows, err := s.db.Query(
+		`SELECT `+runColumns+` FROM runs
+		 WHERE status IN ('passed','failed','cancelled','interrupted')
+		   AND updated_at <= ?
+		 ORDER BY updated_at ASC`,
+		cutoff,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []RunRecord
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, r)
+	}
+	return list, rows.Err()
+}
+
 // GetRun loads one run by id. ErrNoRows distinguishes "no such run" from a real
 // failure, so a caller can answer 404 rather than 500.
 //

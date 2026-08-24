@@ -178,6 +178,12 @@ func (srv *Server) Start() error {
 			result.RunsReconciled, result.PhasesReconciled)
 	}
 
+	// Started once, here, alongside the reconciliation above — the same
+	// "something runs automatically as part of server lifecycle" precedent,
+	// not a new one. Runs for the lifetime of the process; there is no
+	// shutdown path today, so it is never cancelled.
+	go srv.runFleetCleanupLoop(context.Background())
+
 	handler := srv.Handler()
 	addr := fmt.Sprintf("127.0.0.1:%d", srv.Port)
 	fmt.Printf("🌐 Sergeant Factory UI running at http://%s\n", addr)
@@ -1034,34 +1040,15 @@ func (srv *Server) handleCleanWorktrees(w http.ResponseWriter, r *http.Request) 
 
 		targetPath := filepath.Join(fleetDir, entry.Name())
 		status := runStatusMap[entry.Name()]
-		if status == "running" && !req.Force {
-			skipped = append(skipped, SkippedLease{
-				Path:   targetPath,
-				Reason: "run still in progress",
-			})
+
+		ok, reason := reclaimFleetDir(targetPath, status, req.Force, req.DryRun)
+		if !ok {
+			if reason != "" {
+				skipped = append(skipped, SkippedLease{Path: targetPath, Reason: reason})
+			}
 			continue
 		}
-
-		// Never destroy unreviewed work by default. A completed run whose worktree
-		// still has uncommitted changes represents agent output that exists nowhere
-		// else; deleting it is unrecoverable.
-		if !req.Force {
-			if dirty := dirtyWorktreesUnder(targetPath); len(dirty) > 0 {
-				skipped = append(skipped, SkippedLease{
-					Path:   targetPath,
-					Reason: fmt.Sprintf("uncommitted changes in %s — commit or use force", strings.Join(dirty, ", ")),
-				})
-				continue
-			}
-		}
-
-		if !req.DryRun {
-			if err := os.RemoveAll(targetPath); err == nil {
-				removed = append(removed, targetPath)
-			}
-		} else {
-			removed = append(removed, targetPath)
-		}
+		removed = append(removed, targetPath)
 	}
 
 	statusStr := "cleaned"
@@ -1075,6 +1062,93 @@ func (srv *Server) handleCleanWorktrees(w http.ResponseWriter, r *http.Request) 
 		"skipped": skipped,
 		"count":   len(removed),
 	})
+}
+
+// reclaimFleetDir is the one reclaim decision behind both the on-demand
+// /api/clean-worktrees handler and the automatic background pass: a
+// still-running run is refused, and unless force is set, a worktree with
+// uncommitted changes is refused too. dryRun reports what would happen
+// without touching disk — the on-demand handler's preview mode; the
+// automatic pass always passes force=false and dryRun=false, so it never
+// applies a relaxed version of the on-demand safety rules.
+//
+// On a RemoveAll failure this reports not-removed with no reason, matching
+// handleCleanWorktrees's original behaviour: such a directory is neither
+// counted as removed nor reported as skipped.
+func reclaimFleetDir(fleetDir string, runStatus string, force bool, dryRun bool) (removed bool, skipReason string) {
+	if runStatus == "running" && !force {
+		return false, "run still in progress"
+	}
+
+	// Never destroy unreviewed work by default. A completed run whose worktree
+	// still has uncommitted changes represents agent output that exists nowhere
+	// else; deleting it is unrecoverable.
+	if !force {
+		if dirty := dirtyWorktreesUnder(fleetDir); len(dirty) > 0 {
+			return false, fmt.Sprintf("uncommitted changes in %s — commit or use force", strings.Join(dirty, ", "))
+		}
+	}
+
+	if dryRun {
+		return true, ""
+	}
+	if err := os.RemoveAll(fleetDir); err != nil {
+		return false, ""
+	}
+	return true, ""
+}
+
+// fleetCleanupRetention is how long a run must have sat in a terminal status
+// before its fleet worktree is reclaimed automatically. It is a fixed
+// constant, not configurable — a deliberate choice for this single-user,
+// local-first tool (see design.md's rejected alternatives).
+const fleetCleanupRetention = 7 * 24 * time.Hour
+
+// fleetCleanupInterval is how often the automatic pass runs. Fixed for the
+// same reason as fleetCleanupRetention.
+const fleetCleanupInterval = 1 * time.Hour
+
+// reclaimEligibleFleetDirs finds every run whose status has been terminal
+// longer than fleetCleanupRetention and reclaims its fleet worktree via
+// reclaimFleetDir — the same running-check and dirty-worktree check the
+// on-demand handler applies, always with force disabled. A run whose fleet
+// directory does not exist (already cleaned, or never created) is silently
+// skipped, not an error. It never deletes or modifies a database row: only
+// the on-disk worktree is touched.
+func (srv *Server) reclaimEligibleFleetDirs() {
+	runs, err := srv.Store.RunsEligibleForCleanup(time.Now().Add(-fleetCleanupRetention))
+	if err != nil {
+		log.Printf("sergeant: fleet cleanup: listing eligible runs: %v", err)
+		return
+	}
+
+	fleetRoot := dag.FleetRoot()
+	for _, run := range runs {
+		fleetDir := filepath.Join(fleetRoot, run.ID)
+		if _, err := os.Stat(fleetDir); err != nil {
+			continue
+		}
+		if removed, _ := reclaimFleetDir(fleetDir, run.Status, false, false); removed {
+			log.Printf("sergeant: fleet cleanup: reclaimed %s (run %s, status %s)", fleetDir, run.ID, run.Status)
+		}
+	}
+}
+
+// runFleetCleanupLoop ticks on fleetCleanupInterval for the lifetime of the
+// server, reclaiming fleet worktrees for runs that have been terminal past
+// the retention window. Started once, alongside Start's existing startup
+// reconciliation, and stops when ctx is cancelled.
+func (srv *Server) runFleetCleanupLoop(ctx context.Context) {
+	ticker := time.NewTicker(fleetCleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			srv.reclaimEligibleFleetDirs()
+		}
+	}
 }
 
 type IntentValidationResult struct {
