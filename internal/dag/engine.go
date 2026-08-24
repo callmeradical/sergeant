@@ -13,6 +13,7 @@ import (
 
 	"github.com/callmeradical/sergeant/internal/config"
 	"github.com/callmeradical/sergeant/internal/handoff"
+	"github.com/callmeradical/sergeant/internal/naming"
 	"github.com/callmeradical/sergeant/internal/plan"
 	"github.com/callmeradical/sergeant/internal/runner"
 	"github.com/callmeradical/sergeant/internal/store"
@@ -102,9 +103,6 @@ func FleetDir(runID, repoName string) string {
 	return filepath.Join(FleetRoot(), runID, repoName)
 }
 
-// BranchName is the per-run branch created inside the isolated worktree.
-func BranchName(runID string) string { return "sergeant/" + runID }
-
 func isGitRepo(dir string) bool {
 	cmd := exec.Command("git", "-C", dir, "rev-parse", "--git-dir")
 	return cmd.Run() == nil
@@ -119,7 +117,14 @@ func isGitRepo(dir string) bool {
 // AGENTS.md requires per-repo worktree isolation for dispatched work.
 //
 // Returns the directory to run in, whether it is isolated, and any setup error.
-func prepareWorktree(ctx context.Context, repoPath, runID, repoName string) (string, bool, error) {
+//
+// This is a method, not a free function, so it can look up the run's recorded
+// work type and OpenSpec change (e.Store.GetRun(runID)) to name the branch via
+// naming.BranchName — without threading new parameters through RunStage,
+// recordGateStage and executeRun. By the time a worktree is prepared for a
+// run, that run's row is always already durably written with its type
+// (design.md).
+func (e *Engine) prepareWorktree(ctx context.Context, repoPath, runID, repoName string) (string, bool, error) {
 	repoPath = expandPath(repoPath)
 
 	if !isGitRepo(repoPath) {
@@ -136,7 +141,11 @@ func prepareWorktree(ctx context.Context, repoPath, runID, repoName string) (str
 		return "", false, fmt.Errorf("creating fleet dir: %w", err)
 	}
 
-	branch := BranchName(runID)
+	run, err := e.Store.GetRun(runID)
+	if err != nil {
+		return "", false, fmt.Errorf("loading run %q to name its branch: %w", runID, err)
+	}
+	branch := naming.BranchName(run.Type, run.ChangeID)
 
 	// If the branch already exists, a previous attempt at this run id got far
 	// enough to create it, and it may carry commits. Attach to it as it stands.
@@ -259,7 +268,7 @@ func (e *Engine) RunStage(ctx context.Context, runID string, stage *config.DAGSt
 			return fmt.Errorf("repo %s not configured in project", repoName)
 		}
 
-		worktreePath, isolated, err := prepareWorktree(ctx, repoCfg.Path, runID, repoName)
+		worktreePath, isolated, err := e.prepareWorktree(ctx, repoCfg.Path, runID, repoName)
 		if err != nil {
 			return err
 		}
@@ -513,7 +522,7 @@ func (e *Engine) recordGateStage(ctx context.Context, runID, repoName, stage str
 		return nil, fmt.Errorf("repo %s configures no gates; %s-state evidence requires at least one deterministic gate", repoName, stage)
 	}
 
-	worktree, isolated, err := prepareWorktree(ctx, repoCfg.Path, runID, repoName)
+	worktree, isolated, err := e.prepareWorktree(ctx, repoCfg.Path, runID, repoName)
 	if err != nil {
 		return nil, err
 	}

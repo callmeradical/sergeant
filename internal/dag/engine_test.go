@@ -12,8 +12,32 @@ import (
 
 	"github.com/callmeradical/sergeant/internal/config"
 	"github.com/callmeradical/sergeant/internal/handoff"
+	"github.com/callmeradical/sergeant/internal/naming"
 	"github.com/callmeradical/sergeant/internal/store"
 )
+
+// testWorkType is the work type engine tests dispatch as, wherever the test is
+// not itself about which type was recorded. testBranch is the branch that
+// naming.BranchName produces for a run created with this type and a change id
+// equal to the run's own id — the same shape "sergeant/<run-id>" used to be.
+const testWorkType = "feat"
+
+func testBranch(runID string) string { return naming.BranchName(testWorkType, runID) }
+
+// createTestRun writes a run row carrying testWorkType and a change id equal
+// to its own run id, which is what prepareWorktree now requires to exist
+// before it can name a branch (e.Store.GetRun(runID)). Tests that only
+// exercise gate/agent-phase behaviour, not branch naming, use this so the
+// resulting branch is at least deterministic and derived from the run id.
+func createTestRun(t *testing.T, eng *Engine, project, runID, status string) {
+	t.Helper()
+	if err := eng.Store.CreateRun(&store.RunRecord{
+		ID: runID, Project: project, TaskID: runID, Status: status,
+		Type: testWorkType, ChangeID: runID,
+	}); err != nil {
+		t.Fatalf("creating run %s: %v", runID, err)
+	}
+}
 
 func git(t *testing.T, dir string, args ...string) {
 	t.Helper()
@@ -74,6 +98,7 @@ func TestRunStageIsolatesWorkInAWorktree(t *testing.T) {
 	}
 
 	engine := newEngine(t, proj)
+	createTestRun(t, engine, proj.Name, "run-tdd-1", "running")
 	stage := &config.DAGStage{Name: "build-and-test", Repos: []string{"backend"}}
 
 	if err := engine.RunStage(context.Background(), "run-tdd-1", stage); err != nil {
@@ -90,7 +115,7 @@ func TestRunStageIsolatesWorkInAWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading worktree branch: %v", err)
 	}
-	if got, want := strings.TrimSpace(string(out)), BranchName("run-tdd-1"); got != want {
+	if got, want := strings.TrimSpace(string(out)), testBranch("run-tdd-1"); got != want {
 		t.Errorf("worktree branch = %q, want %q", got, want)
 	}
 
@@ -163,9 +188,7 @@ func TestRunStageDeliversHandoffFromUpstreamEnvelope(t *testing.T) {
 	engine := newEngine(t, proj)
 	const runID = "run-handoff-1"
 
-	if err := engine.Store.CreateRun(&store.RunRecord{ID: runID, Project: "test-proj", TaskID: runID, Status: "running"}); err != nil {
-		t.Fatalf("creating run: %v", err)
-	}
+	createTestRun(t, engine, "test-proj", runID, "running")
 	const envID = "env-upstream-1"
 	if err := engine.Store.RecordEnvelope(&store.EnvelopeRecord{
 		ID: envID, RunID: runID, Repo: "upstream", Stage: "build", Summary: "upstream done",
@@ -212,8 +235,12 @@ func TestCommitRunOutputMakesWorkRecoverable(t *testing.T) {
 	src := filepath.Join(tempDir, "svc")
 	newGitRepo(t, src)
 
+	proj := &config.Project{Name: "p", Repos: map[string]config.Repo{"svc": {Path: src}}}
+	eng := newEngine(t, proj)
+	createTestRun(t, eng, proj.Name, "run-commit-1", "running")
+
 	ctx := context.Background()
-	wt, isolated, err := prepareWorktree(ctx, src, "run-commit-1", "svc")
+	wt, isolated, err := eng.prepareWorktree(ctx, src, "run-commit-1", "svc")
 	if err != nil || !isolated {
 		t.Fatalf("prepareWorktree: %v", err)
 	}
@@ -249,7 +276,7 @@ func TestCommitRunOutputMakesWorkRecoverable(t *testing.T) {
 	if err := os.RemoveAll(wt); err != nil {
 		t.Fatal(err)
 	}
-	branch := BranchName("run-commit-1")
+	branch := testBranch("run-commit-1")
 	if out := gitOutput(ctx, src, "cat-file", "-t", branch); out != "commit" {
 		t.Fatalf("branch %s did not survive worktree deletion (got %q)", branch, out)
 	}
@@ -281,6 +308,7 @@ func TestGatesRunInDeterministicOrder(t *testing.T) {
 		}
 		eng := newEngine(t, proj)
 		runID := "run-order-" + strconv.Itoa(int(time.Now().UnixNano()))
+		createTestRun(t, eng, proj.Name, runID, "running")
 		if err := eng.RunStage(context.Background(), runID, &config.DAGStage{Name: "s", Repos: []string{"svc"}}); err != nil {
 			t.Fatalf("RunStage: %v", err)
 		}
@@ -396,6 +424,7 @@ func TestRecordRedStateAcceptsAFailingGate(t *testing.T) {
 
 	eng := newEngine(t, tddProject("svc", src))
 	runID := "run-red-1"
+	createTestRun(t, eng, "tdd-proj", runID, "running")
 
 	evidence, err := eng.RecordRedState(context.Background(), runID, "svc")
 	if err != nil {
@@ -444,6 +473,7 @@ func TestRecordRedStateRefusesWhenEveryGatePasses(t *testing.T) {
 
 	eng := newEngine(t, tddProject("svc", src))
 	runID := "run-red-2"
+	createTestRun(t, eng, "tdd-proj", runID, "running")
 
 	evidence, err := eng.RecordRedState(context.Background(), runID, "svc")
 	if err == nil {
@@ -472,6 +502,7 @@ func TestRecordGreenStateRequiresEveryGateToPass(t *testing.T) {
 
 	eng := newEngine(t, tddProject("svc", src))
 	runID := "run-green-1"
+	createTestRun(t, eng, "tdd-proj", runID, "running")
 	ctx := context.Background()
 
 	if _, err := eng.RecordRedState(ctx, runID, "svc"); err != nil {
@@ -653,7 +684,11 @@ func TestPrepareWorktreeDoesNotDiscardCommitsOnAnExistingBranch(t *testing.T) {
 	newGitRepo(t, src)
 	t.Setenv("SERGEANT_FLEET_DIR", t.TempDir())
 
-	wt, _, err := prepareWorktree(ctx, src, "run-resume-1", "svc")
+	proj := &config.Project{Name: "p", Repos: map[string]config.Repo{"svc": {Path: src}}}
+	eng := newEngine(t, proj)
+	createTestRun(t, eng, proj.Name, "run-resume-1", "running")
+
+	wt, _, err := eng.prepareWorktree(ctx, src, "run-resume-1", "svc")
 	if err != nil {
 		t.Fatalf("first prepareWorktree: %v", err)
 	}
@@ -673,7 +708,7 @@ func TestPrepareWorktreeDoesNotDiscardCommitsOnAnExistingBranch(t *testing.T) {
 	// polite path, and a pruned fleet dir is the impolite one. Both must be safe.
 	git(t, src, "worktree", "remove", "--force", wt)
 
-	wt2, _, err := prepareWorktree(ctx, src, "run-resume-1", "svc")
+	wt2, _, err := eng.prepareWorktree(ctx, src, "run-resume-1", "svc")
 	if err != nil {
 		t.Fatalf("second prepareWorktree: %v", err)
 	}
@@ -723,6 +758,7 @@ func TestResumeSkipsPhasesThatAlreadyPassed(t *testing.T) {
 
 	if err := e.Store.CreateRun(&store.RunRecord{
 		ID: "run-r1", Project: "p", TaskID: "run-r1", Status: "failed",
+		Type: testWorkType, ChangeID: "run-r1",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -785,9 +821,7 @@ func TestFreshRunDoesNotSkipPhases(t *testing.T) {
 		},
 	}
 	e := newEngine(t, proj) // Resume defaults to false
-	if err := e.Store.CreateRun(&store.RunRecord{ID: "run-f1", Project: "p", TaskID: "run-f1", Status: "running"}); err != nil {
-		t.Fatal(err)
-	}
+	createTestRun(t, e, "p", "run-f1", "running")
 	if err := e.Store.RecordPhase(&store.PhaseRecord{
 		ID: "old", RunID: "run-f1", Repo: "svc", Name: "g", Kind: "code", Status: "passed",
 	}); err != nil {
@@ -846,6 +880,7 @@ func TestEnginePassesResolvedRetriesToAgentPhase(t *testing.T) {
 
 	eng := newEngine(t, proj)
 	runID := "run-retry-engine-1"
+	createTestRun(t, eng, proj.Name, runID, "running")
 
 	// The run must fail (agent always fails) — that's fine, we only care about the
 	// phase count.
@@ -892,6 +927,7 @@ func TestGateIsNeverRetriedEvenWithRetryCount(t *testing.T) {
 
 	eng := newEngine(t, proj)
 	runID := "run-gate-no-retry-1"
+	createTestRun(t, eng, proj.Name, runID, "running")
 
 	_ = eng.RunStage(context.Background(), runID, &config.DAGStage{
 		Name: "s", Repos: []string{"svc"},
@@ -943,6 +979,7 @@ func TestEngineUsesRepoRetryOverride(t *testing.T) {
 
 	eng := newEngine(t, proj)
 	runID := "run-retry-repo-override-1"
+	createTestRun(t, eng, proj.Name, runID, "running")
 
 	_ = eng.RunStage(context.Background(), runID, &config.DAGStage{
 		Name: "s", Repos: []string{"svc"}, Brief: "do work",

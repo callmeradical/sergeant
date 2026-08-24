@@ -354,7 +354,7 @@ func postDispatch(t *testing.T, mux http.Handler, body string) *httptest.Respons
 func TestDispatchWithUnknownChangeIDIsRejectedAndCreatesNoRun(t *testing.T) {
 	mux, st, repoPath := dispatchFixture(t)
 
-	w := postDispatch(t, mux, `{"project":"o3","brief":"add stripe webhooks","change_id":"no-such-change"}`)
+	w := postDispatch(t, mux, `{"project":"o3","brief":"add stripe webhooks","change_id":"no-such-change","type":"feat"}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}
@@ -387,7 +387,7 @@ func TestDispatchRejectsChangeIDThatIsAPath(t *testing.T) {
 		// Marshalled, not concatenated: a backslash in an id must reach the handler
 		// as data rather than as a broken JSON escape.
 		body, err := json.Marshal(map[string]string{
-			"project": "o3", "brief": "add stripe webhooks", "change_id": id,
+			"project": "o3", "brief": "add stripe webhooks", "change_id": id, "type": "feat",
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -431,7 +431,7 @@ func TestDispatchRecordsAnExistingChangeIDOnTheRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := postDispatch(t, mux, `{"project":"o3","brief":"add stripe webhooks","change_id":"`+changeID+`","repos":["svc"]}`)
+	w := postDispatch(t, mux, `{"project":"o3","brief":"add stripe webhooks","change_id":"`+changeID+`","repos":["svc"],"type":"feat"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
@@ -486,7 +486,7 @@ func TestDispatchPersistsItsIntentAndOneBulletPerTargetRepo(t *testing.T) {
 
 	const brief = "add stripe webhooks"
 	w := postDispatch(t, mux,
-		`{"project":"o3","brief":"`+brief+`","change_id":"`+changeID+`","repos":["api","web","worker"]}`)
+		`{"project":"o3","brief":"`+brief+`","change_id":"`+changeID+`","repos":["api","web","worker"],"type":"feat"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
@@ -584,7 +584,7 @@ func TestDispatchWithNoReposCreatesAProposedPlanAndStartsNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := postDispatch(t, mux, `{"project":"o3","brief":"add stripe webhooks","change_id":"`+changeID+`"}`)
+	w := postDispatch(t, mux, `{"project":"o3","brief":"add stripe webhooks","change_id":"`+changeID+`","type":"feat"}`)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202; body=%s", w.Code, w.Body.String())
 	}
@@ -660,7 +660,7 @@ func TestDispatchRejectedByChangeResolutionWritesNoIntentOrBullet(t *testing.T) 
 	mux, st, _, dbPath := dispatchFixtureRepos(t, "api", "web")
 
 	w := postDispatch(t, mux,
-		`{"project":"o3","brief":"add stripe webhooks","change_id":"no-such-change","repos":["api","web"]}`)
+		`{"project":"o3","brief":"add stripe webhooks","change_id":"no-such-change","repos":["api","web"],"type":"feat"}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}

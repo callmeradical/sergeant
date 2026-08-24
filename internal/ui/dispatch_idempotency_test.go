@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/callmeradical/sergeant/internal/dag"
+	"github.com/callmeradical/sergeant/internal/naming"
 	"github.com/callmeradical/sergeant/internal/store"
 )
 
@@ -59,7 +60,7 @@ func TestDispatchWithARepeatedRequestIDReturnsTheOriginalRun(t *testing.T) {
 
 	body := dispatchBody(t, map[string]interface{}{
 		"project": "o3", "brief": "add stripe webhooks",
-		"change_id": changeID, "request_id": "retry-me", "repos": []string{"svc"},
+		"change_id": changeID, "request_id": "retry-me", "repos": []string{"svc"}, "type": "feat",
 	})
 
 	first := postDispatch(t, mux, body)
@@ -113,7 +114,7 @@ func TestARepeatedDispatchIsIndistinguishableFromTheOriginal(t *testing.T) {
 
 	body := dispatchBody(t, map[string]interface{}{
 		"project": "o3", "brief": "add stripe webhooks",
-		"change_id": changeID, "request_id": "retry-me", "repos": []string{"svc"},
+		"change_id": changeID, "request_id": "retry-me", "repos": []string{"svc"}, "type": "feat",
 	})
 
 	first := postDispatch(t, mux, body)
@@ -163,7 +164,7 @@ func TestDispatchWithARepeatedRequestIDInsideOneSecondDeduplicates(t *testing.T)
 
 	body := dispatchBody(t, map[string]interface{}{
 		"project": "o3", "brief": "add stripe webhooks",
-		"change_id": changeID, "request_id": "retry-me", "repos": []string{"svc"},
+		"change_id": changeID, "request_id": "retry-me", "repos": []string{"svc"}, "type": "feat",
 	})
 
 	start := time.Now()
@@ -202,7 +203,7 @@ func TestDispatchWithoutARequestIDCreatesANewRunEachTime(t *testing.T) {
 	}
 
 	body := dispatchBody(t, map[string]interface{}{
-		"project": "o3", "brief": "add stripe webhooks", "change_id": changeID, "repos": []string{"svc"},
+		"project": "o3", "brief": "add stripe webhooks", "change_id": changeID, "repos": []string{"svc"}, "type": "feat",
 	})
 
 	start := time.Now()
@@ -274,7 +275,7 @@ func TestARepeatedRequestIDWritesNoSecondIntentOrBullet(t *testing.T) {
 
 	body := dispatchBody(t, map[string]interface{}{
 		"project": "o3", "brief": "add stripe webhooks", "change_id": changeID,
-		"repos": []string{"api", "web"}, "request_id": "retry-me",
+		"repos": []string{"api", "web"}, "request_id": "retry-me", "type": "feat",
 	})
 
 	if w := postDispatch(t, mux, body); w.Code != http.StatusOK {
@@ -330,7 +331,7 @@ func TestARepeatedRequestIDCreatesNoSecondWorktreeBranchOrAgent(t *testing.T) {
 
 	body := dispatchBody(t, map[string]interface{}{
 		"project": "o3", "brief": "add stripe webhooks",
-		"change_id": changeID, "request_id": "retry-me", "repos": []string{"svc"},
+		"change_id": changeID, "request_id": "retry-me", "repos": []string{"svc"}, "type": "feat",
 	})
 
 	first := postDispatch(t, mux, body)
@@ -363,7 +364,7 @@ func TestARepeatedRequestIDCreatesNoSecondWorktreeBranchOrAgent(t *testing.T) {
 	if len(branches) != 1 {
 		t.Fatalf("repo holds %d run branches, want 1: %v", len(branches), branches)
 	}
-	if want := dag.BranchName(resp.TaskID); branches[0] != want {
+	if want := naming.BranchName("feat", changeID); branches[0] != want {
 		t.Errorf("run branch = %q, want %q", branches[0], want)
 	}
 
@@ -391,7 +392,7 @@ func TestConcurrentDispatchesWithOneRequestIDProduceOneRun(t *testing.T) {
 
 	body := dispatchBody(t, map[string]interface{}{
 		"project": "o3", "brief": "add stripe webhooks",
-		"change_id": changeID, "request_id": "retry-me", "repos": []string{"svc"},
+		"change_id": changeID, "request_id": "retry-me", "repos": []string{"svc"}, "type": "feat",
 	})
 
 	const callers = 8
@@ -560,12 +561,13 @@ func worktreesUnder(t *testing.T, root string) []string {
 	return found
 }
 
-// runBranches lists the sergeant/* branches in a repository. One per executed
-// run; a second one would mean the repeat started work.
+// runBranches lists the feat/* branches in a repository (every test dispatch
+// in this file names "feat" as its type). One per executed run; a second one
+// would mean the repeat started work.
 func runBranches(t *testing.T, repoPath string) []string {
 	t.Helper()
 	out, err := exec.Command("git", "-C", repoPath, "for-each-ref",
-		"--format=%(refname:short)", "refs/heads/sergeant").Output()
+		"--format=%(refname:short)", "refs/heads/feat").Output()
 	if err != nil {
 		t.Fatalf("listing run branches: %v", err)
 	}

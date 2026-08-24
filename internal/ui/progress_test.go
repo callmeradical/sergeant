@@ -48,7 +48,7 @@ func TestPlanSeedItemCountMatchesDeclaredScenarios(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := postDispatch(t, mux, `{"project":"o3","brief":"add my feature","change_id":"`+changeID+`","repos":["svc"]}`)
+	w := postDispatch(t, mux, `{"project":"o3","brief":"add my feature","change_id":"`+changeID+`","repos":["svc"],"type":"feat"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("dispatch status = %d, want 200; body = %s", w.Code, w.Body.String())
 	}
@@ -94,7 +94,7 @@ func TestPlanSeedZeroScenariosWritesEmptyPlanNotMissingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := postDispatch(t, mux, `{"project":"o3","brief":"zero scenarios","change_id":"`+changeID+`","repos":["svc"]}`)
+	w := postDispatch(t, mux, `{"project":"o3","brief":"zero scenarios","change_id":"`+changeID+`","repos":["svc"],"type":"feat"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("dispatch status = %d, want 200; body = %s", w.Code, w.Body.String())
 	}
@@ -170,7 +170,7 @@ func TestFullyReportedPlanDoesNotPassFailedRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := postDispatch(t, mux, `{"project":"o3","brief":"full report test","change_id":"`+changeID+`","repos":["svc"]}`)
+	w := postDispatch(t, mux, `{"project":"o3","brief":"full report test","change_id":"`+changeID+`","repos":["svc"],"type":"feat"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("dispatch status = %d, want 200; body = %s", w.Code, w.Body.String())
 	}
@@ -259,7 +259,7 @@ func TestPlanSeedIsCalledDuringDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := postDispatch(t, mux, `{"project":"o3","brief":"timing check","change_id":"`+changeID+`","repos":["svc"]}`)
+	w := postDispatch(t, mux, `{"project":"o3","brief":"timing check","change_id":"`+changeID+`","repos":["svc"],"type":"feat"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("dispatch status = %d; body = %s", w.Code, w.Body.String())
 	}

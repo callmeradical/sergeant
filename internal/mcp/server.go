@@ -13,6 +13,7 @@ import (
 
 	"github.com/callmeradical/sergeant/internal/config"
 	"github.com/callmeradical/sergeant/internal/graphify"
+	"github.com/callmeradical/sergeant/internal/naming"
 	"github.com/callmeradical/sergeant/internal/redact"
 	"github.com/callmeradical/sergeant/internal/runner"
 	"github.com/callmeradical/sergeant/internal/store"
@@ -421,7 +422,11 @@ func (s *MCPServer) executeTool(name string, args map[string]interface{}) (strin
 			RunID:    runID,
 		}
 
-		msg, err := pr.DeliverPullRequest(context.Background(), fmt.Sprintf("sergeant/%s", runID), title, body)
+		run, err := s.Store.GetRun(runID)
+		if err != nil {
+			return "", fmt.Errorf("loading run %q to name its branch: %w", runID, err)
+		}
+		msg, err := pr.DeliverPullRequest(context.Background(), naming.BranchName(run.Type, run.ChangeID), title, body)
 		if err != nil {
 			return "", err
 		}

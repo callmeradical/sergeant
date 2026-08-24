@@ -33,7 +33,7 @@ func doPlanAction(t *testing.T, mux http.Handler, method, path string) *httptest
 // plan was recorded under.
 func proposePlan(t *testing.T, mux http.Handler, brief, changeID string) string {
 	t.Helper()
-	w := postDispatch(t, mux, `{"project":"o3","brief":"`+brief+`","change_id":"`+changeID+`"}`)
+	w := postDispatch(t, mux, `{"project":"o3","brief":"`+brief+`","change_id":"`+changeID+`","type":"feat"}`)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("propose dispatch = %d, want 202; body=%s", w.Code, w.Body.String())
 	}
@@ -60,7 +60,7 @@ func TestExplicitReposDispatchIsUnaffectedByPlanApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := postDispatch(t, mux, `{"project":"o3","brief":"add stripe webhooks","change_id":"`+changeID+`","repos":["alpha","beta"]}`)
+	w := postDispatch(t, mux, `{"project":"o3","brief":"add stripe webhooks","change_id":"`+changeID+`","repos":["alpha","beta"],"type":"feat"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (explicit repos bypass proposal); body=%s", w.Code, w.Body.String())
 	}
@@ -109,7 +109,7 @@ func TestProposedPlansAreListableWithTheirBullets(t *testing.T) {
 	intentID := proposePlan(t, mux, "add stripe webhooks", changeID)
 
 	// An explicit-repos dispatch must not show up as a plan awaiting approval.
-	explicit := postDispatch(t, mux, `{"project":"o3","brief":"unrelated work","change_id":"`+changeID+`","repos":["alpha"]}`)
+	explicit := postDispatch(t, mux, `{"project":"o3","brief":"unrelated work","change_id":"`+changeID+`","repos":["alpha"],"type":"feat"}`)
 	if explicit.Code != http.StatusOK {
 		t.Fatalf("explicit-repos dispatch = %d, want 200; body=%s", explicit.Code, explicit.Body.String())
 	}
@@ -448,7 +448,7 @@ func TestRejectingAnInProgressPlanIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := postDispatch(t, mux, `{"project":"o3","brief":"add stripe webhooks","change_id":"`+changeID+`","repos":["alpha"]}`)
+	w := postDispatch(t, mux, `{"project":"o3","brief":"add stripe webhooks","change_id":"`+changeID+`","repos":["alpha"],"type":"feat"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("explicit-repos dispatch = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
