@@ -1,0 +1,1 @@
+O2 — a dispatch must state its work type (feat/fix/refactor/docs/chore/test), refused before any run/intent/worktree exists if it doesn't; the type is durably recorded and the dispatched branch is actually named `<type>/<change-id>`, computed by one single-sourced function everywhere it matters (previously hand-duplicated in four places)
