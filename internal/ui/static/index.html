@@ -1658,10 +1658,13 @@
     //   - A nil/absent plan renders "no progress reported", never zero.
     //   - Progress never changes the run's status badge; it sits beside it.
     //   - A fully-reported plan with a failing gate still renders as FAILED.
-
-    // progressByRun maps run_id → {complete, total, items[]}
-    // An absent key means no progress event has arrived yet for that run.
-    const progressByRun = new Map();
+    //
+    // progressByRun itself is declared once, near the other top-level state
+    // (above) — a second `const progressByRun` was declared here too, which
+    // is a SyntaxError on redeclaration and silently failed the entire
+    // script's parse, breaking every dynamic part of this dashboard
+    // (project list, run list, everything) with no visible error short of
+    // opening the browser console.
 
     // renderProgressPanel redraws the progress panel for the currently active run.
     function renderProgressPanel() {
