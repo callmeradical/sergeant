@@ -48,61 +48,57 @@ a{color:var(--muted)}
   <h1>Sergeant v2</h1>
   <p>Independent review. Written by the critic, not the builder.</p>
   <p class="meta">
-    Review 019 · 2026-08-23 · branch <code>v2</code> · merge commit <code>fcc28fd</code> reviewed
-    (parents <code>c9d73cf</code> / <code>bccfc3c</code>, merge-base <code>169c6d1</code>) ·
-    "feat(store,runner,ui): a stuck bullet is blocked, not failed (D5b)" · current <code>v2</code> HEAD is
-    <code>01fda48</code>, three commits ahead of the reviewed merge; nothing in those three commits touches
-    <code>bulletStatusForRunOutcome</code>, <code>blockedReasonForRun</code>, or <code>BlockedReason</code>
+    Review 020 · 2026-08-23 · branch <code>v2</code> · merge commit <code>01fda48</code> reviewed
+    (parents <code>fcc28fd</code> / <code>f84becb</code>, merge-base <code>169c6d1</code>) ·
+    "feat(store,ui): a proposed plan awaits explicit approval (D5a, D2)" · current <code>v2</code> HEAD is
+    <code>01fda48</code> itself — this is the tip of the branch at review time
   </p>
 </header>
 
 <section>
   <h2>Current status</h2>
   <div class="grid">
-    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at current <code>v2</code> HEAD (<code>01fda48</code>)</div></div>
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at <code>01fda48</code></div></div>
     <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./...</code>, whole module</div></div>
     <div class="card"><div class="label">Tests</div><div class="value"><span class="status">11/11 packages pass</span></div><div class="small"><code>go test ./internal/... -count=1</code></div></div>
-    <div class="card"><div class="label">failed → blocked mapping</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>bulletStatusForRunOutcome</code>'s <code>"failed"</code> case now returns <code>"blocked"</code>; <code>"passed"</code>→<code>"green"</code> and the cancelled/default no-op case are byte-for-byte unchanged.</div></div>
-    <div class="card"><div class="label">Reason resolution order</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>blockedReasonForRun</code> reads every envelope of the run in <code>created_at ASC</code> order and keeps the last non-empty <code>handoff.BlockedReason</code>; falls back to the synthesized reason only when none named one. Never empty.</div></div>
-    <div class="card"><div class="label">Redaction ordering in <code>RunAgentPhase</code></div><div class="value"><span class="status">verified, real</span></div><div class="small">Traced line-by-line: <code>env.Payload = redact.JSON(env.Payload)</code> (line 495) runs before <code>blockedReason := handoff.BlockedReason(env.Payload)</code> (line 504). <code>handoff.BlockedReason</code> is a plain map lookup on <code>payload.blocked_reason</code> — no new top-level <code>Envelope</code> field was added.</div></div>
-    <div class="card"><div class="label">Full-replacement claim</div><div class="value"><span class="status">verified, real</span></div><div class="small">Whole-repo grep of every <code>"failed"</code> literal and every <code>UpdateBulletStatus</code>/<code>AdvanceBulletsForRun</code> call site: <code>bulletStatusForRunOutcome</code> is still the only place that ever computed a bullet status from a run outcome. The other <code>"failed"</code> hits are phase/run/delivery-state literals, a different domain entirely.</div></div>
-    <div class="card"><div class="label">Mutation test</div><div class="value"><span class="status">verified, real</span></div><div class="small">Reverted the <code>"failed"</code> case back to returning <code>"failed"</code>; the 4 tests that depend on it (2 shipped for this feature, 2 shipped regression/dispatch tests) failed with the exact "want blocked" mismatches predicted; restored exactly; <code>git diff</code> confirmed empty.</div></div>
-    <div class="card"><div class="label">Test quality</div><div class="value"><span class="status">verified, real</span></div><div class="small">Reason tests assert the exact verbatim string, not just non-empty. Redaction tests assert both the specific secret's absence AND the <code>[REDACTED]</code> placeholder's presence, at both the <code>runner</code> and <code>ui</code> layers.</div></div>
-    <div class="card"><div class="label">Independent redaction probe</div><div class="value"><span class="status warn">real gap found — pre-existing, not introduced here</span></div><div class="small">A <code>ghp_</code>-shaped token embedded in an agent-reported <code>blocked_reason</code> is redacted correctly end-to-end into <code>BulletRecord.BlockedReason</code>. A <code>PASSWORD=...</code> credential embedded mid-sentence (not at true line-start) is <strong>not</strong> redacted, because <code>redact.go</code>'s <code>credentialLinePattern</code> is anchored to <code>^...$</code>. Confirmed this is a scope limit of <code>redact.Text</code> itself (reproduced in isolation, unrelated to this feature's own code), and Review 018 already disclosed a sibling case (URL userinfo credentials) for the same reason. See Findings.</div></div>
+    <div class="card"><div class="label">No-repos gate</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>handleDispatch</code>'s <code>len(req.Repos) == 0</code> branch creates a <code>proposed</code> intent + one <code>proposed</code> bullet per resolved repo and returns 202 before any run/worktree code runs. Confirmed with a real seam (empty temp fleet dir, zero <code>runs</code> rows), not just the HTTP status.</div></div>
+    <div class="card"><div class="label">Explicit-repos path</div><div class="value"><span class="status">verified, real</span></div><div class="small">Unchanged: still calls <code>createRunAndDispatch</code> immediately with <code>existingIntentID=""</code>, minting its own fresh intent + bullets exactly as before this feature.</div></div>
+    <div class="card"><div class="label">Intent-reuse fix (the flagged bug)</div><div class="value"><span class="status">verified, real, mutation-tested</span></div><div class="small"><code>handleApprovePlan</code> passes its own intent id into <code>createRunAndDispatch</code>; when non-empty, that function skips minting a second intent/bullets. I independently reverted the call to pass <code>""</code>: <code>TestApprovingAPlanDoesNotCreateASecondIntent</code> failed exactly as predicted (second intent, run's <code>IntentID</code> mismatched); restored, <code>git diff</code> empty.</div></div>
+    <div class="card"><div class="label">Approve/reject idempotency &amp; refusal</div><div class="value"><span class="status">verified, real</span></div><div class="small">Repeat-approve and repeat-reject are no-ops (1 run, unchanged status). Approving <code>abandoned</code> → 409. Rejecting <code>in_progress</code> → 409. Unknown intent → 404 for both. All by direct test read plus re-run.</div></div>
+    <div class="card"><div class="label"><code>GET /api/plans</code> / <code>GET /api/bullets?intent_id=</code></div><div class="value"><span class="status">verified, real</span></div><div class="small">Lists only <code>proposed</code> intents with bullets; excludes explicit-repos dispatches. <code>intent_id</code> direct lookup needs no run and returns empty (not error) for an unknown id.</div></div>
+    <div class="card"><div class="label"><code>BulletStatuses()</code> merge resolution</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>{"proposed","pending","red","green","sealed","merged","failed","blocked"}</code> — both D5a's <code>proposed</code> (prepended) and D5b's <code>failed</code>/<code>blocked</code> (kept terminal) present; no conflict markers anywhere in the tree; exactly one <code>BulletStatuses</code> definition.</div></div>
+    <div class="card"><div class="label">Bullet order across approval</div><div class="value"><span class="status">verified, real</span></div><div class="small"><code>ListBulletsForIntent</code> orders <code>position ASC</code>; <code>handleApprovePlan</code> builds <code>targetRepos</code> from that order; <code>createRunAndDispatch</code> never rewrites bullets when reusing an intent. No reordering possible.</div></div>
+    <div class="card"><div class="label">Change identity across propose→approve</div><div class="value"><span class="status bad">real bug found, introduced by this change</span></div><div class="small"><code>IntentRecord</code> has no <code>ChangeID</code> field, so a proposed plan does not remember which OpenSpec change it was resolved against. Approval re-resolves from scratch with different inputs than proposal used, and can silently pick a different repo and/or re-derive a different change id — in one reproduction, scaffolding a second, empty OpenSpec change directory under a different repo than the one the human's proposal actually used. See Findings.</div></div>
   </div>
-  <p><strong>Verdict:</strong> MEETS SPEC WITH CAVEATS. Every requirement in
-  <code>specs/blocked-bullets/spec.md</code> is genuinely implemented and genuinely tested, the mutation test
-  confirms the core replacement is load-bearing rather than decorative, and the design's central claim — that
-  nesting <code>blocked_reason</code> inside <code>payload</code> gets redaction "for free" from the existing
-  choke point — checked out under direct code tracing and under my own throwaway reproduction for one secret
-  shape. The caveat is that "for free" also means "with the same pre-existing blind spots," and I found one
-  concretely: a non-line-anchored credential-shaped string in an agent's <code>blocked_reason</code> reaches
-  <code>BulletRecord.BlockedReason</code> unredacted. That gap belongs to <code>internal/redact</code>, predates
-  this commit, and is not a defect this commit introduced — but this commit is a new, human-facing surface
-  (a dashboard reason string) that inherits it, so a caveat rather than a silent MEETS SPEC.</p>
+  <p><strong>Verdict:</strong> MEETS SPEC WITH CAVEATS. Every scenario in
+  <code>specs/plan-approval/spec.md</code> is genuinely implemented, genuinely tested, and the specific bug this
+  review was asked to independently re-verify (approval minting a second, disconnected intent) is genuinely fixed
+  and mutation-confirmed. The merge conflict in <code>store.go</code> is resolved correctly and completely. The
+  caveat is a new bug I found that is not covered by any scenario in the binding spec: the change (OpenSpec
+  planning record) a proposed plan was resolved against is not persisted on the intent, so approval can resolve a
+  <em>different</em> change than the one the human reviewed, up to and including silently scaffolding a duplicate,
+  empty change directory under a different repository. Concrete reproductions below.</p>
 </section>
 
 <section>
   <h2>What I inspected</h2>
   <table>
     <tr><th>Area</th><th>Method</th></tr>
-    <tr><td>Binding spec</td><td>Read <code>openspec/changes/a-stuck-bullet-is-blocked-not-failed/{proposal,design,tasks}.md</code> and <code>specs/blocked-bullets/spec.md</code> in full before reading any code</td></tr>
-    <tr><td>The merge commit's actual diff</td><td><code>git merge-base fcc28fd^1 fcc28fd^2</code> → <code>169c6d1</code>; <code>git diff 169c6d1 fcc28fd</code> across all 8 changed files (not the merge commit's own empty <code>git show</code>, which is a merge with no direct diff)</td></tr>
-    <tr><td><code>bulletStatusForRunOutcome</code></td><td>Read <code>internal/ui/server.go</code> lines ~2159–2168: <code>"passed"→"green"</code> unchanged, <code>"failed"→"blocked"</code> (was <code>"failed"→"failed"</code>), default (incl. cancelled) still <code>"", false</code></td></tr>
-    <tr><td><code>blockedReasonForRun</code></td><td>Read <code>internal/ui/server.go</code>'s new function (line 2117 onward): returns <code>""</code> immediately unless <code>bulletStatus == "blocked"</code>; lists envelopes via <code>ListEnvelopesForRun</code>, keeps the last non-empty <code>handoff.BlockedReason(e.Data)</code>, falls back to the fixed synthesized string</td></tr>
-    <tr><td>Envelope ordering matches the "last one wins" claim</td><td><code>internal/store/store.go</code>'s <code>ListEnvelopesForRun</code>: <code>ORDER BY created_at ASC</code> — confirms the loop's "last non-empty wins" logic really does mean "most recent envelope," not an arbitrary DB order</td></tr>
-    <tr><td><code>handoff.BlockedReason</code></td><td>Read <code>internal/handoff/envelope.go</code>'s new function: unmarshals <code>payload</code> into <code>map[string]interface{}</code>, returns <code>fields["blocked_reason"]</code> if it is a string, else <code>""</code> — no new field added to the <code>Envelope</code> struct itself</td></tr>
-    <tr><td>Redaction ordering inside <code>RunAgentPhase</code></td><td>Read <code>internal/runner/runner.go</code> lines 494–506 in sequence: <code>env.Payload = redact.JSON(env.Payload)</code> (495) runs, then <code>blockedReason := handoff.BlockedReason(env.Payload)</code> (504) reads the already-redacted value; <code>annotatePayloadWithProvenance</code> (506) then remarshals through <code>map[string]interface{}</code>, which preserves the <code>blocked_reason</code> key already read</td></tr>
-    <tr><td>Defense in depth at the store</td><td><code>internal/store/store.go</code>'s <code>RecordEnvelope</code> (the Review 018 choke point) also unconditionally redacts <code>e.Data</code> before <code>INSERT</code>, independent of whatever <code>RunAgentPhase</code> did — so <code>blockedReasonForRun</code> reading back through <code>ListEnvelopesForRun</code> is protected twice, not once</td></tr>
-    <tr><td><code>store.BulletStatuses()</code>/<code>BulletRecord</code></td><td>Read <code>internal/store/store.go</code>: <code>BulletStatuses()</code> now includes both <code>"failed"</code> and <code>"blocked"</code>; <code>BulletRecord.BlockedReason string</code> added, backed by a real <code>blocked_reason</code> column with a migration (<code>migrateAddColumns</code>) for existing databases</td></tr>
-    <tr><td><code>AdvanceBulletsForRun</code>'s new reason parameter</td><td>Signature is now <code>(runID, status, reason string) error</code>; <code>updateBulletStatusAndReason</code> writes both columns in one <code>UPDATE</code>; the idempotency check now compares <code>b.Status == status &amp;&amp; b.BlockedReason == reason</code>, not status alone</td></tr>
-    <tr><td>Whole-repo grep: is <code>bulletStatusForRunOutcome</code> really the only writer of a bullet's <code>"failed"</code>/<code>"blocked"</code> status</td><td><code>grep -rn '"failed"' internal/ --include="*.go"</code> and <code>grep -rn "UpdateBulletStatus\|AdvanceBulletsForRun" internal/ --include="*.go"</code>, both excluding tests: the only other <code>"failed"</code> literals are phase status, run status, and delivery-state constants — a different domain; the only other bullet-status writer is <code>server.go:863</code>'s plan-approval path, which only ever writes <code>"pending"</code> and is unrelated to run outcomes</td></tr>
-    <tr><td>Full suite at current HEAD</td><td><code>go build ./... && go vet ./... && go test ./internal/... -count=1</code> from <code>/Users/lars/Dev/sergeant-v2</code> at <code>01fda48</code></td></tr>
-    <tr><td><strong>Mutation test on the core replacement</strong></td><td>Edited <code>case "failed": return "blocked", true</code> back to <code>return "failed", true</code>; ran <code>go test ./internal/ui/... -run 'TestAFailedRun|TestADispatchedRunAdvances|TestABlockedReason' -v -count=1</code>; restored the exact original line; confirmed <code>git diff</code>/<code>git status --short</code> empty afterward</td></tr>
-    <tr><td>Test-quality check</td><td>Read <code>TestAFailedRunBlocksItsBulletsWithTheAgentReportedReason</code> (asserts the exact verbatim reason string) and <code>TestABlockedReasonWithASecretIsRedactedOnTheBullet</code>/<code>TestRunAgentPhaseRedactsTheReturnedBlockedReason</code> (each asserts <code>!strings.Contains(secret)</code> AND <code>strings.Contains("[REDACTED]")</code>, not just "changed")</td></tr>
-    <tr><td>My own throwaway repro #1: a different API-key shape than the shipped tests used</td><td>Wrote a throwaway test (<code>internal/ui</code>) driving a <code>ghp_</code>-shaped GitHub token and an inline <code>PASSWORD=</code> credential through <code>RecordEnvelope</code> → <code>srv.recordTerminalRun</code> → <code>ListBulletsForIntent</code>; the GitHub token came back as <code>[REDACTED]</code>; the inline password did not — deleted the test file after (<code>git status --short</code> confirmed clean)</td></tr>
-    <tr><td>Isolated the password-redaction miss to <code>internal/redact</code>, not this feature</td><td>Wrote a throwaway test directly against <code>redact.Text</code> (no <code>ui</code>/<code>runner</code>/<code>store</code> code involved): <code>credentialLinePattern</code>'s <code>(?im)^NAME=value$</code> anchors only match when the credential starts its own line; the same string embedded mid-sentence is returned unchanged; <code>PASSWORD=hunter2superSecret</code> alone on a line redacts correctly. Deleted the probe file after</td></tr>
-    <tr><td>Cross-checked against Review 018's own disclosed residual</td><td><code>git show bd58bd4 -- progress.html</code>: Review 018 already flagged <code>redact.Text</code> missing a generic credential embedded in a URL's userinfo, for the identical reason (no matching pattern) — corroborates that the gap found here is a known, pre-existing property of <code>internal/redact</code>, not something this commit's own code introduced</td></tr>
+    <tr><td>Binding spec</td><td>Read <code>openspec/changes/a-proposed-plan-awaits-explicit-approval/{proposal,design,tasks}.md</code> and <code>specs/plan-approval/spec.md</code> in full before reading any code</td></tr>
+    <tr><td>The merge commit's actual diff</td><td><code>git merge-base 01fda48^1 01fda48^2</code> → <code>169c6d1</code>; <code>git diff 169c6d1 01fda48</code> across all 9 changed files, plus <code>git diff fcc28fd 01fda48 -- internal/store/store.go</code> isolated to see exactly what the merge added on top of the D5b parent</td></tr>
+    <tr><td><code>handleDispatch</code>'s no-repos branch</td><td>Read <code>internal/ui/server.go</code> lines 1311–1424: <code>changeRepo</code>/<code>resolveChange</code> run first (O3, unconditional), then the <code>len(req.Repos)==0</code> gate creates the proposed intent+bullets and returns 202 before <code>createRunAndDispatch</code> is ever reached; explicit-repos falls through to the same call as before this feature</td></tr>
+    <tr><td><code>createRunAndDispatch</code>'s two call sites</td><td>Read lines 869 (<code>handleApprovePlan</code>, passes <code>intentID</code>) and 1423 (<code>handleDispatch</code>, passes <code>""</code>); read the function body (1444–1541): when <code>existingIntentID != ""</code>, the entire <code>CreateIntent</code>/<code>CreateBullet</code> block (1500–1527) is skipped — only a fresh <code>RunRecord</code> is written, pointing its <code>IntentID</code> at the reused intent</td></tr>
+    <tr><td><code>handleApprovePlan</code> / <code>handleRejectPlan</code></td><td>Read lines 805–924 in full: status-switch idempotency and refusal logic, <code>writePlanState</code> shared response helper</td></tr>
+    <tr><td>Store methods backing the flow</td><td>Read <code>ListBulletsForIntent</code> (orders <code>position ASC, created_at ASC, id ASC</code>), <code>ListIntentsByStatus</code>, <code>ListIntentsForProject</code>, <code>GetIntent</code>, <code>UpdateIntentStatus</code>, <code>UpdateBulletStatus</code>, <code>CreateIntent</code>/<code>CreateBullet</code> — confirmed <code>IntentRecord</code> has exactly 6 fields (<code>ID, Project, Statement, Status, CreatedAt, UpdatedAt</code>), no <code>ChangeID</code></td></tr>
+    <tr><td>Existing regression test for the flagged bug</td><td>Read <code>TestApprovingAPlanDoesNotCreateASecondIntent</code> (<code>internal/ui/plan_approval_test.go:241</code>): asserts <code>run.IntentID == intentID</code> and <code>len(ListIntentsForProject("o3")) == 1</code> — exactly the two claims the task asked me to independently verify</td></tr>
+    <tr><td>Full suite at <code>01fda48</code></td><td><code>go build ./... && go vet ./... && go test ./internal/... -count=1</code> from <code>/Users/lars/Dev/sergeant-v2</code></td></tr>
+    <tr><td><strong>Mutation test on the intent-reuse fix</strong></td><td>Edited <code>handleApprovePlan</code>'s call to <code>createRunAndDispatch(..., intentID)</code> down to <code>createRunAndDispatch(..., "")</code>; ran <code>TestApprovingAPlanDoesNotCreateASecondIntent -v</code>; failed with <code>run.IntentID</code> pointing at a freshly-minted second intent, exactly the predicted symptom; restored the exact original line; <code>git diff</code> and <code>git status --porcelain</code> confirmed empty</td></tr>
+    <tr><td>Conflict-marker sweep</td><td><code>grep -rn '&lt;&lt;&lt;&lt;&lt;&lt;&lt;\|=======\|&gt;&gt;&gt;&gt;&gt;&gt;&gt;'</code> across <code>internal/</code>: none; <code>grep -c '^func BulletStatuses'</code>: exactly 1</td></tr>
+    <tr><td>Bullet-order-preservation probe (task item 8)</td><td>Traced <code>ListBulletsForIntent</code>'s SQL <code>ORDER BY position ASC</code>, confirmed <code>handleApprovePlan</code> builds <code>targetRepos</code> by iterating that already-ordered slice, and confirmed <code>createRunAndDispatch</code> writes no bullets at all when <code>existingIntentID != ""</code> — the original rows, with their original <code>Position</code> values, are untouched</td></tr>
+    <tr><td><strong>My own throwaway repro #1: an explicit, non-brief-derived <code>change_id</code> across propose→approve</strong></td><td>Wrote a throwaway test: proposed a plan with <code>change_id="my-explicit-change"</code> and an unrelated brief whose derived slug differs; approved it; read the dispatched run's <code>ChangeID</code> back from the store. Deleted after; <code>git status --porcelain</code> confirmed clean</td></tr>
+    <tr><td><strong>My own throwaway repro #2: DAG-configured project, two eligible repos</strong></td><td>Wrote a throwaway test: two repos (<code>api</code> sorts first alphabetically, <code>web</code> is first in <code>dag.stages[0].repos</code>); the change directory exists only under <code>web</code> (where proposal-time <code>changeRepo(proj, [])</code> — DAG-order fallback — puts it); approved the plan and read the response's <code>change_repo</code>/<code>change_created</code>. Deleted after; <code>git status --porcelain</code> confirmed clean</td></tr>
+    <tr><td>Test-quality spot check on the shipped suite</td><td>Read all 11 tests in <code>plan_approval_test.go</code> plus the two server_test.go scenarios they build on: assertions check exact status codes, exact intent/bullet statuses, exact run counts via direct <code>SELECT COUNT(*)</code>, and (for the no-repos case) an actual empty temp fleet directory — not just "no error"</td></tr>
+    <tr><td>Stale-comment check</td><td><code>git log -p -S"mints a fresh run and a fresh intent" -- internal/ui/plan_approval_test.go</code>: the comment at line 210 (in <code>TestApprovingAProposedPlanStartsTheRealDispatchSequence</code>) claiming approval "mints ... a fresh intent of its own" was written in <code>f9faa53</code>, before the intent-reuse fix (<code>f84becb</code>), and was never updated to match the corrected behavior</td></tr>
   </table>
 </section>
 
@@ -110,109 +106,130 @@ a{color:var(--muted)}
   <h2>Findings</h2>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The core mapping change is exactly what the spec requires, and nothing else moved</h3>
-    <p><code>bulletStatusForRunOutcome</code>'s <code>"failed"</code> case now returns <code>"blocked", true</code>
-    instead of <code>"failed", true</code>. The <code>"passed"→"green"</code> case and the <code>default</code>
-    case (which covers <code>"cancelled"</code> and any other run status) are textually unchanged. This matches all
-    four scenarios in <code>specs/blocked-bullets/spec.md</code> at the mapping level: agent-reported reason,
-    synthesized reason, passing run unaffected, cancelled run moves nothing.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The no-repos gate is exactly what D2 requires, and the explicit-repos path is untouched</h3>
+    <p><code>handleDispatch</code> resolves the change (O3) unconditionally, then branches on
+    <code>len(req.Repos) == 0</code>. That branch writes a <code>proposed</code> intent and one <code>proposed</code>
+    bullet per resolved repo, responds 202, and returns — <code>createRunAndDispatch</code> is never called on this
+    path. I confirmed this the way <code>tasks.md</code> demands: <code>TestDispatchWithNoReposCreatesAProposedPlanAndStartsNothing</code>
+    points <code>SERGEANT_FLEET_DIR</code> at a fresh empty temp directory and asserts it still has zero entries
+    after the dispatch, plus zero rows in the <code>runs</code> table — a real seam, not just an HTTP status check.
+    The explicit-repos branch is one unchanged line: <code>srv.createRunAndDispatch(w, proj, brief, targetRepos,
+    change, requestID, changeRepoName, changeRepoPath, "")</code>, and every pre-existing dispatch test that used to
+    rely on no-repos meaning "dispatch immediately" was updated to pass explicit <code>repos</code> — I checked each
+    of those diffs (<code>dispatch_idempotency_test.go</code>, <code>progress_test.go</code>, <code>stream_test.go</code>,
+    part of <code>run_lifecycle_test.go</code>) and they preserve their original assertions, just against the
+    explicit-repos path instead of the now-different no-repos path.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; The reason lives inside <code>payload</code>, not a new top-level field, exactly as design.md requires</h3>
-    <p><code>handoff.BlockedReason(payload json.RawMessage) string</code> is a pure map lookup:
-    <code>json.Unmarshal</code> into <code>map[string]interface{}</code>, return
-    <code>fields["blocked_reason"]</code> if present and a string, else <code>""</code>. The <code>Envelope</code>
-    struct itself gained no new field. Design.md's stated reason for this choice — inheriting
-    <code>redact.JSON</code>'s existing call site instead of needing a new one — is real, not just asserted: I
-    traced the actual redaction call in <code>RunAgentPhase</code> and confirmed the read happens strictly after
-    it (next finding).</p>
+    <h3><span class="sev low">verified</span> &nbsp; The flagged intent-reuse bug is genuinely fixed, and I mutation-tested it independently</h3>
+    <p><code>createRunAndDispatch</code> takes <code>existingIntentID</code>; when it is non-empty, the entire
+    "mint a fresh intent + bullets" block is skipped and only a new <code>RunRecord</code> is written, its
+    <code>IntentID</code> pointed at the reused id. <code>handleApprovePlan</code> passes its own <code>intentID</code>
+    (line 869); <code>handleDispatch</code>'s explicit-repos path still passes <code>""</code> (line 1423), so its
+    original minting behavior is unchanged. I did not just read <code>TestApprovingAPlanDoesNotCreateASecondIntent</code>
+    and trust it — I independently reverted the call at line 869 to pass <code>""</code> instead of <code>intentID</code>,
+    reran that exact test, and watched it fail with the predicted symptom: <code>run.IntentID</code> came back as a
+    freshly-minted second intent id, not the approved plan's own. Restored the line to its exact original text;
+    <code>git diff</code> and <code>git status --porcelain</code> both confirmed empty afterward. The existing test
+    itself asserts both halves of the claim the task asked me to verify: <code>run.IntentID == intentID</code> and
+    <code>len(ListIntentsForProject("o3")) == 1</code>.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Redaction-then-read ordering is correct in the one place it's claimed, and doubly enforced</h3>
-    <p><code>internal/runner/runner.go</code> line 495: <code>env.Payload = redact.JSON(env.Payload)</code>. Line
-    504: <code>blockedReason := handoff.BlockedReason(env.Payload)</code>. The comment directly above line 504
-    states this ordering is deliberate, and the code matches the comment. Line 506's
-    <code>annotatePayloadWithProvenance</code> then re-unmarshals/re-marshals the same payload to add
-    <code>model</code>/<code>provider</code> keys — I checked this preserves <code>blocked_reason</code> rather
-    than dropping it, since it round-trips through the same <code>map[string]interface{}</code> shape. Separately,
-    <code>internal/store/store.go</code>'s <code>RecordEnvelope</code> (the choke point Review 018 examined)
-    unconditionally redacts <code>e.Data</code> again before <code>INSERT</code>, so
-    <code>blockedReasonForRun</code>'s read-back through <code>ListEnvelopesForRun</code> is protected even if the
-    runner-level ordering were ever broken by a future edit. Two independent redaction passes on the same field,
-    not one fragile one.</p>
+    <h3><span class="sev low">verified</span> &nbsp; Approve/reject idempotency and refusal rules match every scenario in spec.md</h3>
+    <p><code>handleApprovePlan</code>: unknown intent → 404; <code>abandoned</code> → 409 (cannot approve a
+    rejected plan); already <code>in_progress</code>/beyond → 200, unchanged state, no second run
+    (<code>TestApprovingAnAlreadyApprovedPlanIsIdempotent</code> asserts exactly 1 row in <code>runs</code> after two
+    approvals). <code>handleRejectPlan</code>: unknown intent → 404; already <code>abandoned</code> → 200, no-op;
+    any other non-<code>proposed</code> status (e.g. <code>in_progress</code>) → 409. All four refusal/idempotency
+    scenarios in <code>specs/plan-approval/spec.md</code>'s "A human can explicitly approve or reject" requirement
+    have a dedicated test, and I re-ran the full <code>internal/ui</code> package to confirm all pass together, not
+    just individually.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; This really is a full replacement, not a parallel or inconsistent write path</h3>
-    <p>Grepped every <code>"failed"</code> string literal and every <code>UpdateBulletStatus</code>/<code>AdvanceBulletsForRun</code>
-    call site in <code>internal/</code>, excluding tests. <code>bulletStatusForRunOutcome</code> (called only from
-    <code>recordTerminalRun</code>, called only from the run-completion path) is the sole place that ever computed a
-    bullet status from a run outcome, both before and after this commit. The plan-approval path added later
-    (<code>server.go:863</code>) only ever writes <code>"pending"</code> for a freshly approved bullet and is
-    unreachable from a run outcome, so it cannot reintroduce a stray <code>"failed"</code> write. Historical rows
-    keep <code>"failed"</code> (no migration was written, matching the proposal's explicit out-of-scope item), and
-    <code>BulletStatuses()</code> documents both values.</p>
+    <h3><span class="sev low">verified</span> &nbsp; <code>GET /api/plans</code> and <code>GET /api/bullets?intent_id=</code> work as specified</h3>
+    <p><code>handlePlans</code> calls <code>ListIntentsByStatus("proposed")</code> and attaches each intent's
+    bullets; <code>TestProposedPlansAreListableWithTheirBullets</code> proves an explicit-repos dispatch (which
+    never enters <code>proposed</code>) does not leak into this list. <code>handleBullets</code>'s new
+    <code>intent_id</code> branch is a direct <code>ListBulletsForIntent</code> call with no run lookup, returns an
+    empty (not error) list for an unknown intent id, matching the "no run exists yet for a proposed plan" case
+    design.md calls out.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Mutation test confirms the replacement is load-bearing</h3>
-    <p>Reverted <code>case "failed": return "blocked", true</code> to <code>return "failed", true</code>, leaving
-    everything else untouched. <code>TestAFailedRunBlocksItsBulletsWithASynthesizedReason</code>,
-    <code>TestAFailedRunBlocksItsBulletsWithTheAgentReportedReason</code>,
-    <code>TestABlockedReasonWithASecretIsRedactedOnTheBullet</code>, and
-    <code>TestADispatchedRunAdvancesItsBulletsThroughTheTerminalPath</code> all failed with exactly the predicted
-    mismatches: bullet status came back <code>"failed"</code> where the test wants <code>"blocked"</code>, and
-    <code>BlockedReason</code> came back empty in every case — because <code>blockedReasonForRun</code> itself
-    short-circuits to <code>""</code> whenever <code>bulletStatus != "blocked"</code>, so reverting the status
-    mapping alone was enough to silently suppress reason resolution too, exactly as the two are supposed to be
-    coupled. Restored the line to its exact original text; <code>git diff</code> and <code>git status --short</code>
-    both confirmed empty afterward.</p>
+    <h3><span class="sev low">verified</span> &nbsp; The <code>store.go</code> merge conflict resolution is complete and correct</h3>
+    <p><code>git diff fcc28fd 01fda48 -- internal/store/store.go</code> shows exactly the expected, minimal
+    resolution: <code>BulletStatuses()</code> changed from D5b's <code>{"pending","red","green","sealed","merged","failed","blocked"}</code>
+    to <code>{"proposed","pending","red","green","sealed","merged","failed","blocked"}</code> — D5a's <code>"proposed"</code>
+    prepended, D5b's <code>"failed"</code>/<code>"blocked"</code> kept as terminal alternatives exactly as the merge
+    commit message claims — plus the addition of <code>ListIntentsByStatus</code>, which is new code, not a
+    conflict resolution. No conflict markers anywhere in the tree; exactly one <code>BulletStatuses</code>
+    definition exists. The doc comment was also updated to describe the new first state, matching the array.</p>
   </div>
 
   <div class="item ok">
-    <h3><span class="sev low">verified</span> &nbsp; Test quality meets the bar the task set</h3>
-    <p><code>TestAFailedRunBlocksItsBulletsWithTheAgentReportedReason</code> asserts
-    <code>b.BlockedReason != "requirement is ambiguous; needs a human decision"</code> — the exact string, not just
-    non-empty. <code>TestABlockedReasonWithASecretIsRedactedOnTheBullet</code> (ui layer) and
-    <code>TestRunAgentPhaseRedactsTheReturnedBlockedReason</code> (runner layer) both assert
-    <code>!strings.Contains(got, secret)</code> AND <code>strings.Contains(got, "[REDACTED]")</code> — absence of
-    the specific secret plus presence of the specific placeholder, not merely "some transformation happened." This
-    matches the standard the project's own redaction test suite (<code>internal/redact/redact_test.go</code>)
-    already holds itself to.</p>
+    <h3><span class="sev low">verified</span> &nbsp; Bullet merge order cannot be disturbed by approval</h3>
+    <p>Task item 8's concern — could handing proposed bullets to <code>createRunAndDispatch</code> as
+    <code>targetRepos</code> reorder them — does not materialize. <code>ListBulletsForIntent</code>'s query is
+    <code>ORDER BY position ASC, created_at ASC, id ASC</code>; <code>handleApprovePlan</code> builds
+    <code>targetRepos</code> by iterating that already-ordered result in a single pass
+    (<code>for i, b := range bullets { targetRepos[i] = b.Repo }</code>); and because
+    <code>existingIntentID != ""</code> skips <code>createRunAndDispatch</code>'s bullet-creation block entirely,
+    the original rows — with their original <code>Position</code> values from proposal time — are never rewritten.
+    The only bullet mutation approval performs is <code>UpdateBulletStatus(b.ID, "pending")</code>, which does not
+    touch <code>Position</code>.</p>
+  </div>
+
+  <div class="item bad">
+    <h3><span class="sev high">real bug, introduced by this change, not covered by any spec.md scenario</span> &nbsp; A proposed plan's change is not persisted, so approval can silently resolve — or scaffold — a different one</h3>
+    <p><code>store.IntentRecord</code> has exactly six fields: <code>ID, Project, Statement, Status, CreatedAt,
+    UpdatedAt</code>. There is no <code>ChangeID</code>. At proposal time, <code>handleDispatch</code> resolves the
+    change via <code>changeRepo(proj, req.Repos)</code> / <code>resolveChange(changeRepoPath, req.ChangeID, req.Brief)</code>
+    <em>before</em> the no-repos gate — but the result is only used to possibly scaffold a directory on disk; it is
+    never written onto the <code>IntentRecord</code> it creates. At approval time, <code>handleApprovePlan</code>
+    re-resolves from scratch with different inputs: <code>changeRepo(proj, targetRepos)</code> (a non-empty list,
+    built from the bullets) and <code>resolveChange(changeRepoPath, "", intent.Statement)</code> — note the
+    hardcoded empty string, discarding whatever <code>change_id</code> the original request named.</p>
+    <p><strong>Reproduction 1 — explicit <code>change_id</code> discarded.</strong> Proposed a plan with
+    <code>change_id="my-explicit-change"</code> (directory pre-created) and brief <code>"totally unrelated free-text
+    intent"</code> (a brief that derives a different slug). Approving it returned
+    <code>"change_created":true, "change_id":"totally-unrelated-free-text-intent"</code> — a brand-new OpenSpec
+    change was scaffolded on disk under a re-derived id, and the dispatched run's <code>ChangeID</code> was that
+    re-derived id, not <code>my-explicit-change</code>. The human who named an explicit change when proposing the
+    plan gets a different, auto-scaffolded one governing the actual dispatched work.</p>
+    <p><strong>Reproduction 2 — DAG-configured project picks a different repo at approval than at proposal.</strong>
+    <code>changeRepo</code>'s non-empty-<code>requested</code> branch just picks the first configured repo in the
+    given list, in list order; its empty-<code>requested</code> (proposal-time, no-repos) branch instead prefers
+    <code>proj.DAG.Stages[0].Repos</code> order when a DAG is configured. With two repos — <code>api</code>
+    (alphabetically first) and <code>web</code> (first in the DAG's first stage) — and the change directory
+    existing only under <code>web</code> (where proposal-time resolution puts it), approving the plan resolved the
+    change under <code>api</code> instead, found no existing directory there, and again scaffolded a new, empty
+    change with the <strong>same change id</strong> under a <strong>different repository</strong>
+    (<code>"change_repo":"api","change_created":true</code>). The project now has two <code>add-stripe-webhooks</code>
+    change directories in two different repos — one real (under <code>web</code>, unreferenced by the dispatched
+    run), one empty (under <code>api</code>, the one actually recorded).</p>
+    <p>Neither reproduction requires an unusual setup: an explicit <code>change_id</code> whose slug doesn't match
+    the brief, and a project with a <code>dag:</code> block (a real, documented config field used for cross-repo
+    workflow ordering — not a test-only construct) are both ordinary. Both bugs stem from the same root cause: this
+    feature introduces a real time gap between "the change is resolved" (proposal) and "the run that change governs
+    is created" (approval) that did not exist before this feature — previously, resolution and dispatch happened in
+    one request, so there was nothing to drift. No scenario in <code>specs/plan-approval/spec.md</code> tests
+    change-identity continuity across that gap, which is presumably why this shipped without either the shipped
+    test suite or the "found and fixed before merge" pass catching it. This is a defect in this change's own new
+    code, not an inherited pre-existing gap (contrast Review 019's redaction finding).</p>
   </div>
 
   <div class="item warn">
-    <h3><span class="sev med">real gap, pre-existing in <code>internal/redact</code>, inherited by this feature</span> &nbsp; A credential-shaped <code>blocked_reason</code> embedded mid-sentence is not redacted</h3>
-    <p>I wrote a throwaway test driving two different secret shapes through the real end-to-end path
-    (<code>RecordEnvelope</code> → <code>srv.recordTerminalRun</code> → <code>ListBulletsForIntent</code>), neither
-    of which the shipped tests used: a GitHub personal-access-token shape (<code>ghp_...</code>) and an inline
-    <code>PASSWORD=...</code> credential, both inside one <code>blocked_reason</code> string:
-    <code>"pushed with token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 and PASSWORD=hunter2superSecret failed
-    auth"</code>. The persisted <code>BulletRecord.BlockedReason</code> came back as
-    <code>"pushed with token [REDACTED] and PASSWORD=hunter2superSecret failed auth"</code> — the GitHub token was
-    redacted; the password was not.</p>
-    <p>I isolated this to <code>internal/redact/redact.go</code> itself, with no <code>ui</code>/<code>runner</code>/<code>store</code>
-    code involved: <code>credentialLinePattern</code> is <code>(?im)^([A-Za-z0-9_.-]*(?:key|token|secret|password|credential)[A-Za-z0-9_.-]*)=(.+)$</code>.
-    The <code>^</code>/<code>$</code> anchors (multiline mode) require the credential to start its own line.
-    <code>redact.Text("PASSWORD=hunter2superSecret")</code> alone on a line redacts correctly to
-    <code>"PASSWORD=[REDACTED]"</code>; the identical text embedded mid-sentence does not match, because there is
-    no line break immediately before <code>PASSWORD</code>. <code>apiKeyPattern</code> (the pattern that caught the
-    GitHub token) has no such anchor and matches anywhere in the string, which is why that half of the same probe
-    came back clean.</p>
-    <p>This is not a defect this commit introduced. Review 018 (<code>bd58bd4</code>) already disclosed a sibling
-    case — a generic credential embedded in a URL's userinfo — for the identical underlying reason: no
-    <code>redact.go</code> pattern matches it. Design.md's own rationale for nesting <code>blocked_reason</code>
-    inside <code>payload</code> is to inherit the existing, already-tested redaction wiring "for free" instead of
-    adding a new call site — and that choice is sound engineering (a new call site is where redaction gaps have
-    historically been introduced in this project, per Reviews 013–018's history of finding exactly that). But
-    "inherits the existing wiring" necessarily also means "inherits the existing wiring's blind spots," and an
-    agent's own free-text explanation of why it is stuck is a plausible place for a credential to appear
-    mid-sentence rather than helpfully alone on its own line. R4.4's spec text for this change says a blocked
-    reason must be "redacted like any other retained free text" — which is true here in the literal sense (it goes
-    through the exact same <code>redact.Text</code> as everything else), but the underlying heuristic that
-    "like any other" points to has a known scope limit that a human-facing dashboard reason string now inherits.</p>
+    <h3><span class="sev low">minor, cosmetic</span> &nbsp; A test comment describes the pre-fix behavior</h3>
+    <p><code>TestApprovingAProposedPlanStartsTheRealDispatchSequence</code> (<code>plan_approval_test.go:210</code>)
+    says the intent and bullets transition out of proposed "even though the dispatch sequence mints a fresh run and
+    a fresh intent of its own (the same thing an explicit-repos dispatch does)." <code>git log -S</code> confirms
+    this line was written in <code>f9faa53</code>, before the intent-reuse fix landed in <code>f84becb</code>, and
+    was never updated. It is now factually wrong — approval does <em>not</em> mint a second intent, which is the
+    entire point of the fix — but no assertion in that test depends on the false claim, so it costs nothing
+    functionally. Worth a one-line correction for a future reader who takes the comment at face value.</p>
   </div>
 
 </section>
@@ -221,79 +238,77 @@ a{color:var(--muted)}
   <h2>Evidence index</h2>
   <table>
     <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
-    <tr><td>Build/vet/test clean at current <code>v2</code> HEAD (<code>01fda48</code>)</td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 11/11 packages</td></tr>
-    <tr><td><code>"passed"→"green"</code> and cancelled/default unaffected</td><td>Read <code>bulletStatusForRunOutcome</code>, lines ~2159–2168</td><td>textually identical to before this commit for those two branches</td></tr>
-    <tr><td><code>"failed"→"blocked"</code> is the only mapping change</td><td>Same read; <code>git diff 169c6d1 fcc28fd -- internal/ui/server.go</code></td><td>one line changed inside the switch, plus the new <code>blockedReasonForRun</code> function and its call site</td></tr>
-    <tr><td><code>blocked_reason</code> lives in <code>payload</code>, no new <code>Envelope</code> field</td><td>Read <code>internal/handoff/envelope.go</code>'s <code>Envelope</code> struct and new <code>BlockedReason</code> function</td><td>struct unchanged; <code>BlockedReason</code> is a map lookup on the existing <code>Payload json.RawMessage</code> field</td></tr>
-    <tr><td>Redaction precedes the read in <code>RunAgentPhase</code></td><td>Read lines 494–506 in source order</td><td><code>redact.JSON(env.Payload)</code> at 495; <code>handoff.BlockedReason(env.Payload)</code> at 504</td></tr>
-    <tr><td><code>blocked_reason</code> survives the later provenance annotation</td><td>Read <code>annotatePayloadWithProvenance</code>: unmarshal → add 2 keys → remarshal</td><td>round-trips through the same map; no key dropped</td></tr>
-    <tr><td>Envelope read order matches "last one wins"</td><td>Read <code>ListEnvelopesForRun</code>'s SQL: <code>ORDER BY created_at ASC</code></td><td>confirmed — the loop's last non-empty reason really is the most recent envelope's</td></tr>
-    <tr><td><code>store.BulletStatuses()</code> includes both <code>"failed"</code> and <code>"blocked"</code></td><td>Read <code>internal/store/store.go</code>'s <code>BulletStatuses()</code></td><td><code>{"proposed","pending","red","green","sealed","merged","failed","blocked"}</code></td></tr>
-    <tr><td><code>BulletRecord.BlockedReason</code> is real, persisted, migrated</td><td>Read the struct field, the <code>CREATE TABLE</code>, and <code>migrateAddColumns</code></td><td>column added with a migration for existing databases; scanned in <code>ListBulletsForIntent</code></td></tr>
-    <tr><td>Full-replacement claim: no other bullet-status writer exists</td><td><code>grep -rn '"failed"'</code> and <code>grep -rn "UpdateBulletStatus\|AdvanceBulletsForRun"</code> across <code>internal/</code>, non-test</td><td><code>bulletStatusForRunOutcome</code>/<code>recordTerminalRun</code> is the only run-outcome-driven bullet-status writer; other hits are a different domain (phase/run/delivery status) or the unrelated plan-approval <code>"pending"</code> write</td></tr>
-    <tr><td><strong>Mutation test on the core replacement</strong></td><td>Reverted <code>"failed"</code> case to <code>return "failed", true</code>; ran the 4 dependent tests; restored</td><td><strong>fails as predicted</strong>: status stays <code>"failed"</code>, <code>BlockedReason</code> comes back empty in every case; <code>git diff</code>/<code>git status --short</code> empty after restore</td></tr>
-    <tr><td>Reason tests assert the exact string, not just non-empty</td><td>Read <code>TestAFailedRunBlocksItsBulletsWithTheAgentReportedReason</code></td><td>asserts <code>b.BlockedReason == "requirement is ambiguous; needs a human decision"</code> verbatim</td></tr>
-    <tr><td>Redaction tests assert absence of secret AND presence of placeholder</td><td>Read <code>TestABlockedReasonWithASecretIsRedactedOnTheBullet</code>, <code>TestRunAgentPhaseRedactsTheReturnedBlockedReason</code></td><td>both assert <code>!strings.Contains(secret)</code> and <code>strings.Contains("[REDACTED]")</code></td></tr>
-    <tr><td>My own repro: a <code>ghp_</code> token in <code>blocked_reason</code> reaches <code>BulletRecord.BlockedReason</code> redacted</td><td>throwaway test, <code>internal/ui</code>, full path through <code>RecordEnvelope</code> → <code>recordTerminalRun</code></td><td>redacted correctly; deleted after, <code>git status --short</code> clean</td></tr>
-    <tr><td><strong>My own repro: an inline (non-line-start) <code>PASSWORD=...</code> in the same <code>blocked_reason</code> is not redacted</strong></td><td>same throwaway test, same run</td><td><strong>fails</strong>: password persisted verbatim in <code>BulletRecord.BlockedReason</code></td></tr>
-    <tr><td>Isolated the miss to <code>internal/redact</code>, unrelated to this feature's own code</td><td>throwaway probe directly against <code>redact.Text</code>: same string alone on its own line vs. mid-sentence</td><td>on-its-own-line redacts correctly; mid-sentence does not — <code>credentialLinePattern</code>'s <code>^...$</code> anchors are the cause</td></tr>
-    <tr><td>Corroboration: this is a known, pre-existing property of <code>redact.Text</code></td><td><code>git show bd58bd4 -- progress.html</code> (Review 018)</td><td>Review 018 already disclosed a sibling miss (URL userinfo credential) for the identical reason, on an unrelated commit</td></tr>
-    <tr><td>No scope creep in <code>fcc28fd</code></td><td><code>git show fcc28fd --stat</code></td><td>8 files, all in <code>internal/{store,runner,handoff,ui,dag}</code> plus their tests; matches <code>tasks.md</code>'s single task</td></tr>
+    <tr><td>Build/vet/test clean at <code>01fda48</code></td><td><code>go build ./...</code>, <code>go vet ./...</code>, <code>go test ./internal/... -count=1</code></td><td>pass, 11/11 packages</td></tr>
+    <tr><td>No-repos dispatch creates a proposed plan and starts nothing</td><td><code>TestDispatchWithNoReposCreatesAProposedPlanAndStartsNothing</code>: empty temp fleet dir, zero <code>runs</code> rows</td><td>confirmed by reading the test and its seam, not just its pass/fail</td></tr>
+    <tr><td>Explicit-repos path unaffected</td><td>Read <code>handleDispatch</code> line 1423; diffed pre-existing tests updated to pass <code>repos</code> explicitly</td><td>identical call, same behavior as before this feature</td></tr>
+    <tr><td><strong>Mutation test on the intent-reuse fix</strong></td><td>Changed <code>createRunAndDispatch(..., intentID)</code> to <code>createRunAndDispatch(..., "")</code> at line 869; reran <code>TestApprovingAPlanDoesNotCreateASecondIntent -v</code>; restored</td><td><strong>fails as predicted</strong>: <code>run.IntentID</code> mismatched, pointing at a second minted intent; <code>git diff</code>/<code>git status --porcelain</code> empty after restore</td></tr>
+    <tr><td>Exactly one intent exists after approval; dispatched run's <code>IntentID</code> equals the proposed plan's own id</td><td><code>TestApprovingAPlanDoesNotCreateASecondIntent</code>'s own assertions: <code>run.IntentID != intentID</code> check and <code>len(intents) != 1</code> check</td><td>both pass at <code>01fda48</code>, both fail under the mutation above</td></tr>
+    <tr><td>Approve/reject idempotency and refusal</td><td><code>TestApprovingAnAlreadyApprovedPlanIsIdempotent</code>, <code>TestRejectingAnAlreadyRejectedPlanIsIdempotent</code>, <code>TestApprovingAnAbandonedPlanIsRefused</code>, <code>TestRejectingAnInProgressPlanIsRefused</code>, <code>TestApproveAndRejectRefuseAnUnknownIntent</code></td><td>all 5 pass; each checked against its own row-count/status assertion, not just the HTTP code</td></tr>
+    <tr><td><code>GET /api/plans</code> lists only proposed plans with bullets</td><td><code>TestProposedPlansAreListableWithTheirBullets</code></td><td>pass; explicit-repos dispatch confirmed absent from the list</td></tr>
+    <tr><td><code>GET /api/bullets?intent_id=</code> works with no run</td><td><code>TestBulletsEndpointAcceptsIntentIDDirectly</code></td><td>pass; unknown intent id returns empty list, 200</td></tr>
+    <tr><td><code>BulletStatuses()</code> merge is complete and correct</td><td><code>git diff fcc28fd 01fda48 -- internal/store/store.go</code>; <code>grep -c '^func BulletStatuses'</code>; conflict-marker sweep</td><td><code>{"proposed","pending","red","green","sealed","merged","failed","blocked"}</code>; exactly 1 definition; 0 conflict markers</td></tr>
+    <tr><td>Bullet order cannot be disturbed by approval</td><td>Read <code>ListBulletsForIntent</code>'s SQL and <code>handleApprovePlan</code>'s loop; confirmed <code>createRunAndDispatch</code> skips bullet writes when reusing an intent</td><td><code>Position</code> values from proposal time are never rewritten by approval</td></tr>
+    <tr><td><strong>My repro 1: explicit <code>change_id</code> discarded at approval</strong></td><td>Throwaway test: propose with <code>change_id="my-explicit-change"</code> + non-matching brief, approve, read run's <code>ChangeID</code></td><td><strong>bug confirmed</strong>: approval scaffolded and used <code>"totally-unrelated-free-text-intent"</code> instead, <code>change_created:true</code></td></tr>
+    <tr><td><strong>My repro 2: DAG-configured project resolves a different repo at approval than proposal</strong></td><td>Throwaway test: 2 repos, DAG stage order ≠ alphabetical order, change exists only under the DAG-preferred repo</td><td><strong>bug confirmed</strong>: approval resolved <code>change_repo:"api"</code> (alphabetical), not <code>"web"</code> (where proposal put it); scaffolded a second, empty change with the same id under <code>api</code></td></tr>
+    <tr><td>Both throwaway probes cleaned up</td><td><code>rm</code> both files; <code>git status --porcelain</code></td><td>empty — no leftover files</td></tr>
+    <tr><td>Stale test comment traced to before the fix</td><td><code>git log --all --oneline -S"mints a fresh run and a fresh intent" -- internal/ui/plan_approval_test.go</code></td><td>introduced in <code>f9faa53</code>, never updated by the fix commit <code>f84becb</code>; no assertion depends on it</td></tr>
+    <tr><td>No scope creep in <code>01fda48</code></td><td><code>git show 01fda48 --stat</code></td><td>9 files, all in <code>internal/{store,ui}</code> plus their tests; matches <code>tasks.md</code>'s single task</td></tr>
   </table>
 </section>
 
 <section>
   <h2>Verdict</h2>
   <div class="item warn">
-    <p><strong>MEETS SPEC WITH CAVEATS.</strong> Every scenario in
-    <code>specs/blocked-bullets/spec.md</code> is genuinely implemented: <code>bulletStatusForRunOutcome</code>'s
-    <code>"failed"</code> case now yields <code>"blocked"</code> with <code>"passed"</code> and cancelled/default
-    left untouched; an agent-reported reason is threaded through verbatim from <code>payload.blocked_reason</code>
-    (not a new top-level <code>Envelope</code> field, matching design.md's explicit rejection of that alternative);
-    a run with no agent-reported reason still produces a non-empty synthesized one; and the reason is redacted
-    through the existing, already-tested <code>redact.JSON</code>/<code>RecordEnvelope</code> wiring rather than a
-    new call site. The mutation test confirms the core replacement is load-bearing, not decorative — reverting one
-    line breaks 4 tests in exactly the predicted way, and the fix restores to an empty <code>git diff</code>. The
-    whole-repo grep confirms this really is a full replacement: no other code path writes a bullet's status from a
-    run outcome. Test quality is genuinely good: reason assertions check the exact verbatim string, and redaction
-    assertions check both the specific secret's absence and the specific placeholder's presence, matching the bar
-    the project's own redaction suite holds itself to. <code>go build</code>, <code>go vet</code>, and
-    <code>go test ./internal/... -count=1</code> all pass clean at current HEAD.</p>
-    <p>The caveat is what I found doing my own independent redaction probe (task item 8), using secret shapes the
-    shipped tests did not use. A GitHub-token-shaped (<code>ghp_...</code>) secret inside an agent-reported
-    <code>blocked_reason</code> is redacted correctly end-to-end into <code>BulletRecord.BlockedReason</code>. A
-    <code>PASSWORD=...</code>-shaped credential embedded mid-sentence in the same field is not — it is retained
-    verbatim, because <code>internal/redact</code>'s <code>credentialLinePattern</code> only matches a credential
-    that starts its own line, and an agent's free-text explanation of why it is stuck has no reason to format itself
-    that way. I traced this to <code>internal/redact/redact.go</code> directly, with no code from this commit
-    involved, and confirmed via Review 018 (<code>bd58bd4</code>, an unrelated commit) that this is a known,
-    pre-existing scope limit of the heuristic, not something <code>fcc28fd</code> introduced.</p>
-    <p>I am not calling this a blocker, for the same reason design.md gives for the architectural choice in the
-    first place: reusing an existing, already-tested redaction call site is the right call, and the alternative
-    (a bespoke redaction pass for just this one field) is exactly the "new field, new call site, easy to forget"
-    shape that produced this project's worst redaction gaps historically (Reviews 013–018). But R4.4's spec text
-    for this change — "redacted like any other retained free text" — is true in the narrow sense (it goes through
-    the same function as everything else) while still leaving a real, reachable gap in the broader sense a reader
-    would reasonably assume: not every credential-shaped substring in a blocked reason is actually caught. This is
-    a caveat on the redaction guarantee this feature relies on, not on the feature's own logic, which is correctly
-    wired and correctly tested for what it does control.</p>
+    <p><strong>MEETS SPEC WITH CAVEATS.</strong> Every scenario in <code>specs/plan-approval/spec.md</code> is
+    genuinely implemented and genuinely tested: a no-repos dispatch creates a <code>proposed</code> plan and starts
+    nothing (verified against a real empty-fleet-directory seam, not just the HTTP response); an explicit-repos
+    dispatch is provably unaffected; proposed plans are listable with their bullets; approving starts the real
+    dispatch sequence; rejecting starts nothing and leaves the intent <code>abandoned</code>; both actions are
+    idempotent on repeat and refused outside their valid starting state. The specific defect this review was tasked
+    with independently re-verifying — <code>createRunAndDispatch</code> minting a second, disconnected intent on
+    approval — is genuinely fixed: I did not just read the regression test, I reverted the fix myself, watched the
+    test fail with the exact predicted symptom, and restored the code to a byte-identical <code>git diff</code>.
+    The manually-resolved merge conflict in <code>store.go</code>'s <code>BulletStatuses()</code> is complete and
+    correct, combining both sibling changes with no loss. Bullet merge order survives approval intact; I traced the
+    exact mechanism rather than trusting the absence of a failing test.</p>
+    <p>The caveat is a bug I found doing my own independent reproduction that is not exercised by any shipped test
+    or any scenario in the binding spec: a proposed plan does not remember which OpenSpec change it was resolved
+    against (<code>IntentRecord</code> has no <code>ChangeID</code> field), so <code>handleApprovePlan</code>
+    re-resolves the change from scratch at approval time, with different inputs than proposal time used
+    (<code>changeRepo(proj, targetRepos)</code> instead of <code>changeRepo(proj, req.Repos=[])</code>, and a
+    hardcoded empty <code>change_id</code> instead of whatever the caller originally named). I reproduced two
+    concrete failure modes: an explicitly-named <code>change_id</code> that doesn't match the brief's derived slug
+    is silently discarded and replaced with a freshly-scaffolded, differently-named change; and on a project with a
+    <code>dag:</code> block (an ordinary, documented config feature, not a test artifact) whose stage repo order
+    differs from alphabetical order, approval can resolve the change under a completely different repository than
+    proposal did, scaffolding a second, empty change directory with the same id in the wrong repo while the real,
+    populated one sits unreferenced. Both are silent — no error, <code>200 OK</code>, a dispatched run — and both
+    directly undermine O3's purpose (a durable, singular planning record governs the work), even though O3's literal
+    ordering rule ("the change is resolved before any run or worktree exists") is technically satisfied at both
+    points in time. This is new behavior this change introduces — the propose/approve time gap it creates is exactly
+    what makes drift possible; before this feature, resolution and dispatch happened in the same request and could
+    not drift apart. I recommend persisting the resolved change's identity (id and repo) on the <code>IntentRecord</code>
+    at proposal time and having <code>handleApprovePlan</code> reuse it verbatim rather than re-resolving.</p>
+    <p>Separately, a one-line test comment in <code>plan_approval_test.go</code> still describes the pre-fix
+    behavior (claims approval "mints ... a fresh intent of its own"); harmless since no assertion relies on it, but
+    worth correcting so a future reader isn't misled.</p>
   </div>
 </section>
 
 <footer>
-  <p class="meta">Review 019 · findings above are reproduced from commands run directly against the current
-  <code>v2</code> working tree at HEAD <code>01fda48</code>, reviewing merge commit <code>fcc28fd</code> (three
-  commits behind HEAD; nothing in between touches the reviewed code). One mutation was applied and reverted in
-  place: <code>internal/ui/server.go</code>'s <code>bulletStatusForRunOutcome</code>, <code>"failed"</code> case
-  changed from <code>return "blocked", true</code> to <code>return "failed", true</code>, the 4 dependent tests
-  rerun and confirmed failing on the predicted assertions, the line restored to its exact original text, and
-  <code>git diff</code>/<code>git status --short</code> confirmed empty before writing this review. Two throwaway
-  probe test files (one in <code>internal/ui</code> exercising the full <code>RecordEnvelope</code>→<code>recordTerminalRun</code>
-  path with two secret shapes, one in <code>internal/redact</code> isolating the miss to the package itself) were
-  written, run, and deleted; <code>git status --short</code> confirmed a clean tree before this review was written.
-  Prior review entries (001–018) were not re-examined beyond reading Review 018's disclosed residual to corroborate
-  that the redaction gap found here is pre-existing rather than new — they stand as recorded in their own text in
-  git history, which this rewrite does not reproduce.</p>
+  <p class="meta">Review 020 · findings above are reproduced from commands run directly against the current
+  <code>v2</code> working tree at HEAD <code>01fda48</code>, the merge commit itself. One mutation was applied and
+  reverted in place: <code>internal/ui/server.go</code> line 869, <code>handleApprovePlan</code>'s call to
+  <code>createRunAndDispatch</code>, changed from passing <code>intentID</code> to passing <code>""</code>; the
+  regression test rerun and confirmed failing on the predicted assertion; the line restored to its exact original
+  text; <code>git diff</code>/<code>git status --porcelain</code> confirmed empty before writing this review. Two
+  throwaway probe test files (both in <code>internal/ui</code>: one proving an explicit <code>change_id</code> is
+  discarded at approval, one proving a DAG-configured project can resolve a different change repo at approval than
+  at proposal) were written, run, and deleted; <code>git status --porcelain</code> confirmed a clean tree before
+  this review was written. Review 019's uncommitted entry was committed by its own process
+  (<code>2989be2</code>) before this rewrite began, so no concurrent work was overwritten. Prior review entries
+  (001–019) were not re-examined; they stand as recorded in their own text in git history, which this rewrite does
+  not reproduce.</p>
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
