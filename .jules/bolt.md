@@ -1,0 +1,3 @@
+## 2024-05-24 - Filepath Resolution Anti-Pattern in Proxy Servers
+**Learning:** Resolving directory paths (`os.Executable`, `os.Getwd`, `filepath.EvalSymlinks`) inside the request handler of an MCP server proxy adds significant per-request overhead (~13,000ns vs ~2ns when cached) due to repeated syscalls. This is a common pattern when a Go server proxies commands to sibling scripts.
+**Action:** When building servers that proxy to scripts in the same directory, calculate the script directory once at startup or lazy-load it with `sync.Once`, rather than resolving it on every single proxy invocation.
