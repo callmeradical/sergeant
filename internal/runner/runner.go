@@ -248,7 +248,7 @@ func (pr *PhaseRunner) RunCodeGate(ctx context.Context, name, command string) (*
 	passed := (err == nil)
 	result := &GateResult{
 		GateName: name,
-		Command:  command,
+		Command:  redact.Text(command),
 		Passed:   passed,
 		Output:   cleaned,
 		Worktree: pr.Worktree,

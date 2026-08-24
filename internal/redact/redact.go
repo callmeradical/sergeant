@@ -18,13 +18,17 @@ const placeholder = "[REDACTED]"
 // apiKeyPattern matches common provider API key prefixes followed by the
 // alphanumeric (or, for Slack, alphanumeric-and-hyphen) run those real keys
 // use: sk- (OpenAI/Anthropic-style), ghp_/gho_/ghu_/ghs_/ghr_ (GitHub), AKIA
-// (AWS), AIza (Google), and xox[bpoa]- (Slack).
+// (AWS), AIza (Google), and xox[bpoa]- (Slack). No leading \b: these
+// prefixes are distinctive enough on their own, and a secret is often glued
+// directly to adjacent non-whitespace text (e.g. inside a quoted string or
+// URL) with no word boundary before it — requiring one there silently missed
+// real secrets, which is worse than the rare over-match a bare prefix risks.
 var apiKeyPattern = regexp.MustCompile(
-	`\bsk-[A-Za-z0-9]{20,}` +
-		`|\bgh[oprsu]_[A-Za-z0-9]{20,}` +
-		`|\bAKIA[A-Z0-9]{16}\b` +
-		`|\bAIza[A-Za-z0-9_\-]{35}\b` +
-		`|\bxox[bpoa]-[A-Za-z0-9-]{10,}`,
+	`sk-[A-Za-z0-9]{20,}` +
+		`|gh[oprsu]_[A-Za-z0-9]{20,}` +
+		`|AKIA[A-Z0-9]{16}\b` +
+		`|AIza[A-Za-z0-9_\-]{35}\b` +
+		`|xox[bpoa]-[A-Za-z0-9-]{10,}`,
 )
 
 // bearerPattern matches an `Authorization: Bearer <token>` header, case-
