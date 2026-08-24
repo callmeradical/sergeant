@@ -35,9 +35,10 @@ type Graphify struct {
 	// same "unset means everything" default other per-repo filters in this
 	// config already use.
 	IncludeGroups []string `yaml:"include_groups,omitempty" json:"include_groups"`
-	// ExcludePatterns is parsed and stored but not yet applied by
-	// BuildProjectGraph. A future change can implement it without another
-	// config migration.
+	// ExcludePatterns filters files out of the published graph by
+	// repo-relative path, gitignore-style ('*' one path segment, '**' any
+	// number of segments), applied by BuildProjectGraph after merge and
+	// before publish.
 	ExcludePatterns []string `yaml:"exclude_patterns,omitempty" json:"exclude_patterns"`
 }
 
