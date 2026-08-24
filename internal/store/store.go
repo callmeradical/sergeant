@@ -1278,6 +1278,37 @@ func (s *Store) AdvanceBulletsForRun(runID, status string) error {
 	return err
 }
 
+// SealBulletForRun marks the bullet for (the intent behind runID, repo) as
+// sealed, refusing unless it is currently green. A bullet is scoped to
+// exactly one repository, so unlike AdvanceBulletsForRun this updates one
+// bullet, not every bullet of the run's intent — sealing records that a human
+// approved THIS repo's delivery (R3.5), not the run's gate outcome. On any
+// refusal it writes nothing.
+func (s *Store) SealBulletForRun(runID, repo string) error {
+	run, err := s.GetRun(runID)
+	if err != nil {
+		return fmt.Errorf("loading run %q to seal its bullet: %w", runID, err)
+	}
+	if run.IntentID == "" {
+		return fmt.Errorf("run %q has no intent; nothing to seal", runID)
+	}
+
+	bullets, err := s.ListBulletsForIntent(run.IntentID)
+	if err != nil {
+		return fmt.Errorf("listing the bullets of intent %q: %w", run.IntentID, err)
+	}
+	for _, b := range bullets {
+		if b.Repo != repo {
+			continue
+		}
+		if b.Status != "green" {
+			return fmt.Errorf("bullet %q for repo %q is %q, not green — refusing to seal", b.ID, repo, b.Status)
+		}
+		return s.UpdateBulletStatus(b.ID, "sealed")
+	}
+	return fmt.Errorf("no bullet found for repo %q on intent %q", repo, run.IntentID)
+}
+
 // RecomputeIntentStatus re-reads an intent's status from its bullets and stores
 // the answer, returning it.
 //

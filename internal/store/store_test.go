@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -510,5 +511,128 @@ func TestUpdateStatusOnUnknownIDIsAnError(t *testing.T) {
 	}
 	if err := st.UpdateBulletStatus("missing-bullet", "merged"); err == nil {
 		t.Error("expected an error updating an unknown bullet")
+	}
+}
+
+// sealFixture creates an intent, one bullet per BulletRecord passed (stamping
+// its IntentID), and a run naming that intent — the minimal setup
+// SealBulletForRun needs, since it resolves the intent from the run.
+func sealFixture(t *testing.T, st *Store, intentID string, bullets ...*BulletRecord) *RunRecord {
+	t.Helper()
+	if err := st.CreateIntent(&IntentRecord{ID: intentID, Project: "p", Statement: "s", Status: "approved"}); err != nil {
+		t.Fatalf("failed to create intent: %v", err)
+	}
+	for _, b := range bullets {
+		b.IntentID = intentID
+		if err := st.CreateBullet(b); err != nil {
+			t.Fatalf("failed to create bullet %s: %v", b.ID, err)
+		}
+	}
+	run := &RunRecord{ID: "run-" + intentID, Project: "p", TaskID: "task-" + intentID, Status: "passed", IntentID: intentID}
+	if err := st.CreateRun(run); err != nil {
+		t.Fatalf("failed to create run: %v", err)
+	}
+	return run
+}
+
+// R3.5: a successful PR-creation request must durably record that a human
+// approved delivery. SealBulletForRun is what makes that transition, and a
+// green bullet is the one case it must permit.
+func TestSealBulletForRunSealsAGreenBullet(t *testing.T) {
+	st, _ := openTestStore(t)
+	run := sealFixture(t, st, "intent-seal-green", &BulletRecord{ID: "bullet-seal-green", Repo: "api", Position: 1, Status: "green"})
+
+	if err := st.SealBulletForRun(run.ID, "api"); err != nil {
+		t.Fatalf("SealBulletForRun returned an error for a green bullet: %v", err)
+	}
+
+	bullets, err := st.ListBulletsForIntent("intent-seal-green")
+	if err != nil {
+		t.Fatalf("failed to list bullets: %v", err)
+	}
+	if len(bullets) != 1 || bullets[0].Status != "sealed" {
+		t.Errorf("expected the bullet to be sealed, got %+v", bullets)
+	}
+}
+
+// R3.5 requires approval to be required, not merely possible: a bullet that
+// has not passed its gates (or has already been sealed, or failed) must
+// refuse, naming its actual status, and write nothing.
+func TestSealBulletForRunRefusesNonGreenBullets(t *testing.T) {
+	for _, status := range []string{"pending", "red", "sealed", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			st, _ := openTestStore(t)
+			intentID := "intent-seal-" + status
+			run := sealFixture(t, st, intentID, &BulletRecord{ID: "bullet-" + status, Repo: "api", Position: 1, Status: status})
+
+			err := st.SealBulletForRun(run.ID, "api")
+			if err == nil {
+				t.Fatalf("expected SealBulletForRun to refuse a %q bullet", status)
+			}
+			if !strings.Contains(err.Error(), status) {
+				t.Errorf("error does not name the bullet's actual status %q: %v", status, err)
+			}
+
+			bullets, listErr := st.ListBulletsForIntent(intentID)
+			if listErr != nil {
+				t.Fatalf("failed to list bullets: %v", listErr)
+			}
+			if len(bullets) != 1 || bullets[0].Status != status {
+				t.Errorf("a refused seal wrote something: got %+v, want status unchanged at %q", bullets, status)
+			}
+		})
+	}
+}
+
+// Sealing is a per-repo fact (design.md), so it must not reuse
+// AdvanceBulletsForRun's "every bullet of the intent" semantics: sealing one
+// repo's bullet must leave a sibling bullet in the same multi-repo intent
+// untouched.
+func TestSealBulletForRunAffectsOnlyItsOwnRepoBullet(t *testing.T) {
+	st, _ := openTestStore(t)
+	run := sealFixture(t, st, "intent-seal-multi",
+		&BulletRecord{ID: "bullet-multi-api", Repo: "api", Position: 1, Status: "green"},
+		&BulletRecord{ID: "bullet-multi-web", Repo: "web", Position: 2, Status: "green"},
+	)
+
+	if err := st.SealBulletForRun(run.ID, "api"); err != nil {
+		t.Fatalf("SealBulletForRun returned an error: %v", err)
+	}
+
+	bullets, err := st.ListBulletsForIntent("intent-seal-multi")
+	if err != nil {
+		t.Fatalf("failed to list bullets: %v", err)
+	}
+	byRepo := map[string]string{}
+	for _, b := range bullets {
+		byRepo[b.Repo] = b.Status
+	}
+	if byRepo["api"] != "sealed" {
+		t.Errorf("api bullet status = %q, want sealed", byRepo["api"])
+	}
+	if byRepo["web"] != "green" {
+		t.Errorf("sealing the api bullet changed the web bullet to %q, want it to stay green", byRepo["web"])
+	}
+}
+
+// A run written before intent tracking existed carries no intent id.
+// SealBulletForRun must refuse rather than seal nothing silently.
+func TestSealBulletForRunRefusesARunWithNoIntent(t *testing.T) {
+	st, _ := openTestStore(t)
+	if err := st.CreateRun(&RunRecord{ID: "run-no-intent", Project: "p", TaskID: "t", Status: "passed"}); err != nil {
+		t.Fatalf("failed to create run: %v", err)
+	}
+	if err := st.SealBulletForRun("run-no-intent", "api"); err == nil {
+		t.Error("expected an error sealing a bullet for a run with no intent")
+	}
+}
+
+// A repo the intent has no bullet for must refuse, not silently succeed.
+func TestSealBulletForRunRefusesWhenNoBulletMatchesRepo(t *testing.T) {
+	st, _ := openTestStore(t)
+	run := sealFixture(t, st, "intent-seal-nomatch", &BulletRecord{ID: "bullet-nomatch", Repo: "api", Position: 1, Status: "green"})
+
+	if err := st.SealBulletForRun(run.ID, "web"); err == nil {
+		t.Error("expected an error sealing a bullet for a repo the intent has no bullet for")
 	}
 }

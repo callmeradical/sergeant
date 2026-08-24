@@ -46,11 +46,22 @@ repos:
 	_ = os.WriteFile(filepath.Join(configDir, "better-than-boxes.yaml"), []byte(projYAML), 0644)
 
 	// 2. Create dummy run, phase, and envelope
+	// The run carries an intent with a green bullet for btb-app so the later
+	// POST /api/create-pr in this suite clears the R3.5 seal guard, which
+	// refuses to create a PR for a bullet that has not passed its gates.
+	const intentID = "intent-suite-1"
+	if err := st.CreateIntent(&store.IntentRecord{ID: intentID, Project: "better-than-boxes", Statement: "s", Status: "approved"}); err != nil {
+		t.Fatalf("failed to create intent: %v", err)
+	}
+	if err := st.CreateBullet(&store.BulletRecord{ID: "bullet-suite-1", IntentID: intentID, Repo: "btb-app", Position: 1, Status: "green"}); err != nil {
+		t.Fatalf("failed to create bullet: %v", err)
+	}
 	run := &store.RunRecord{
-		ID:      "run-suite-1",
-		Project: "better-than-boxes",
-		TaskID:  "task-suite-1",
-		Status:  "passed",
+		ID:       "run-suite-1",
+		Project:  "better-than-boxes",
+		TaskID:   "task-suite-1",
+		Status:   "passed",
+		IntentID: intentID,
 	}
 	if err := st.CreateRun(run); err != nil {
 		t.Fatalf("failed to create run: %v", err)
@@ -135,6 +146,7 @@ repos:
 	prPayload, _ := json.Marshal(map[string]interface{}{
 		"run_id":  "run-suite-1",
 		"project": "better-than-boxes",
+		"repo":    "btb-app",
 		"title":   "feat(btb-app): stripe webhooks verified",
 		"body":    "100% deterministic code gates passed",
 	})

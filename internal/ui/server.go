@@ -37,6 +37,14 @@ type Server struct {
 	Store *store.Store
 	Port  int
 
+	// GHPRCreate invokes `gh pr create` for a PR-creation request. It is a
+	// struct field defaulting to runGHPRCreate's real subprocess, not a bare
+	// exec.Command call inside handleCreatePR, so a test can substitute a
+	// recording stub and prove gh was never invoked for a request the seal
+	// guard refused — the same swap-a-dependency shape PhaseRunner.AgentCLI
+	// uses for the agent binary.
+	GHPRCreate func(repoPath, title, body, branch string) ([]byte, error)
+
 	// cancels holds one CancelFunc per in-flight run so that a cancel request can
 	// actually stop the work. Without it "Stop Run" only writes a status column
 	// that the dispatch goroutine later overwrites, and agents keep writing to
@@ -100,10 +108,20 @@ func NewServer(s *store.Store, port int) *Server {
 		port = 8484
 	}
 	return &Server{
-		Store:   s,
-		Port:    port,
-		cancels: map[string]context.CancelFunc{},
+		Store:      s,
+		Port:       port,
+		cancels:    map[string]context.CancelFunc{},
+		GHPRCreate: runGHPRCreate,
 	}
+}
+
+// runGHPRCreate is the real `gh pr create` invocation. It is a plain function,
+// not inlined into handleCreatePR, so NewServer can hand it to Server.GHPRCreate
+// as the default while a test swaps in a recording stub instead.
+func runGHPRCreate(repoPath, title, body, branch string) ([]byte, error) {
+	cmd := exec.Command("gh", "pr", "create", "--title", title, "--body", body, "--head", branch)
+	cmd.Dir = repoPath
+	return cmd.CombinedOutput()
 }
 
 func (srv *Server) Handler() http.Handler {
@@ -121,6 +139,7 @@ func (srv *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/save-dag", srv.handleSaveDAG)
 	mux.HandleFunc("/api/dispatch", srv.handleDispatch)
 	mux.HandleFunc("/api/create-pr", srv.handleCreatePR)
+	mux.HandleFunc("/api/bullets", srv.handleBullets)
 	mux.HandleFunc("/api/fleet", srv.handleFleet)
 	mux.HandleFunc("/api/clean-worktrees", srv.handleCleanWorktrees)
 	mux.HandleFunc("/api/run-cancel", srv.handleRunCancel)
@@ -596,6 +615,16 @@ func (srv *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// R3.5: human approval for a risky delivery action must be required, not
+	// merely possible. Sealing runs before gh is ever invoked, so a bullet that
+	// has not passed its gates refuses the whole request — this is what makes
+	// approval a real gate on the action rather than a status update tacked on
+	// after the fact.
+	if err := srv.Store.SealBulletForRun(req.RunID, req.Repo); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
 	proj, _ := config.LoadProject(req.Project)
 	repoPath := ""
 	if proj != nil && len(proj.Repos) > 0 {
@@ -627,9 +656,7 @@ func (srv *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 
 	if repoPath != "" && remoteBase != "" {
 		// Attempt real gh pr create in git repo if remote exists
-		cmd := exec.Command("gh", "pr", "create", "--title", req.Title, "--body", req.Body, "--head", branch)
-		cmd.Dir = repoPath
-		out, err := cmd.CombinedOutput()
+		out, err := srv.GHPRCreate(repoPath, req.Title, req.Body, branch)
 		if err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), "https://") {
 			prURL = strings.TrimSpace(string(out))
 		} else {
@@ -670,6 +697,42 @@ func (srv *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 		"branch": branch,
 		"error":  prError,
 	})
+}
+
+// handleBullets answers a run-scoped view of bullet status (R3.5): the API
+// substrate that makes "which bullets are green and awaiting approval versus
+// already sealed" inspectable, the same guard SealBulletForRun enforces.
+// run_id is required for the same reason as handleDeliveryHistory's: an empty
+// result for a missing id would be indistinguishable from "this run truly has
+// no bullets".
+func (srv *Server) handleBullets(w http.ResponseWriter, r *http.Request) {
+	runID := r.URL.Query().Get("run_id")
+	if runID == "" {
+		http.Error(w, "missing run_id", http.StatusBadRequest)
+		return
+	}
+
+	run, err := srv.Store.GetRun(runID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	// A run written before intent tracking existed carries no intent id; that
+	// is not an error, it means the run served no bullets sergeant can name.
+	bullets := []store.BulletRecord{}
+	if run.IntentID != "" {
+		listed, err := srv.Store.ListBulletsForIntent(run.IntentID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if listed != nil {
+			bullets = listed
+		}
+	}
+
+	writeJSON(w, http.StatusOK, bullets)
 }
 
 func (srv *Server) handleFleet(w http.ResponseWriter, r *http.Request) {
