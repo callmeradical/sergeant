@@ -96,6 +96,10 @@ func BuildProjectGraph(proj *config.Project) error {
 		return fmt.Errorf("merged graph at %s is missing or empty", mergedPath)
 	}
 
+	if err := filterGraphFile(mergedPath, proj.Graphify.ExcludePatterns); err != nil {
+		return fmt.Errorf("applying exclude_patterns: %w", err)
+	}
+
 	manifest := struct {
 		Repos   []string `json:"repos"`
 		BuiltAt string   `json:"built_at"`
