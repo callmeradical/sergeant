@@ -5,9 +5,9 @@ before:
     - go mod tidy
 
 builds:
-  - id: sergeant-mcp
-    main: ./cmd/sergeant-mcp/
-    binary: sergeant-mcp
+  - id: sergeant
+    main: ./cmd/sergeant/
+    binary: sergeant
     env:
       - CGO_ENABLED=0
     goos:
@@ -20,10 +20,10 @@ builds:
       - -s -w -X main.version={{.Version}}
 
 archives:
-  - id: sergeant-mcp
+  - id: sergeant
     builds:
-      - sergeant-mcp
-    name_template: "sergeant-mcp-{{ .Os }}-{{ .Arch }}"
+      - sergeant
+    name_template: "sergeant-{{ .Os }}-{{ .Arch }}"
     format: binary
 
 checksum:

@@ -26,8 +26,22 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/_sgt-lib.sh"
+DEV_ROOT="${DEV_ROOT:-$HOME/Dev}"
+
+# Absolute paths (/...) and home-relative paths (~...) pass through unchanged.
+# Everything else is resolved relative to DEV_ROOT.
+_resolve_path() {
+  local p="$1"
+  if [[ "$p" == /* ]]; then
+    echo "$p"
+  elif [[ "$p" == ~* ]]; then
+    echo "${p/#\~/$HOME}"
+  else
+    echo "$DEV_ROOT/$p"
+  fi
+}
+
+_die() { echo "ERROR: $*" >&2; exit 1; }
 
 # ── Config ────────────────────────────────────────────────────────────────────
 

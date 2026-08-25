@@ -1,10 +1,6 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
   "mcpServers": {
-    "sergeant": {
-      "type": "stdio",
-      "command": "./bin/sergeant-mcp"
-    },
     "sergeant-v2": {
       "type": "stdio",
       "command": "./bin/sergeant",

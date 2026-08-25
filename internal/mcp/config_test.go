@@ -45,8 +45,7 @@ func TestEveryServerDeclaredInMCPConfigIsBuildable(t *testing.T) {
 	// it. Asserting the source package exists catches a command path that no
 	// build target will ever satisfy.
 	sources := map[string]string{
-		"./bin/sergeant-mcp": "cmd/sergeant-mcp",
-		"./bin/sergeant":     "cmd/sergeant",
+		"./bin/sergeant": "cmd/sergeant",
 	}
 
 	for name, spec := range cfg.MCPServers {

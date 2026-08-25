@@ -17,5 +17,5 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: go build -o bin/sergeant-mcp ./cmd/sergeant-mcp/
+      - run: go build -o bin/sergeant ./cmd/sergeant/
       - run: go test ./... 2>/dev/null || true

@@ -4,7 +4,7 @@
 # ── Tasks ─────────────────────────────────────────────────────────────────────
 
 [tasks.install]
-description = "Symlink sgt-* scripts into ~/.local/bin so they're on your PATH"
+description = "Symlink wiki-daily-digest into ~/.local/bin and build the sergeant binary"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -18,9 +18,7 @@ TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
 mkdir -p "$TARGET_DIR"
 
 linked=0
-# Glob every sourced helper: enumerating them by name silently broke the install
-# whenever a new bin/_sgt-*.sh helper was added (bin/_sgt-review-axes.sh).
-for f in "$BIN_DIR"/sgt-* "$BIN_DIR"/_sgt-*.sh "$BIN_DIR/wiki-daily-digest"; do
+for f in "$BIN_DIR/wiki-daily-digest"; do
   [[ -f "$f" ]] || continue
   name="$(basename "$f")"
   ln -sf "$f" "$TARGET_DIR/$name"
@@ -40,19 +38,16 @@ done
 echo ""
 echo "Installed $linked scripts to $TARGET_DIR"
 
-# Build the Go MCP server if Go is available
+# Build the Go engine/MCP binary if Go is available
 if command -v go &>/dev/null; then
   echo ""
-  echo "Building sergeant-mcp..."
-  (cd "$REPO_DIR" && go build -ldflags="-s -w" -o bin/sergeant-mcp ./cmd/sergeant-mcp/) && \
-    echo "  built: $REPO_DIR/bin/sergeant-mcp" || \
-    echo "  WARNING: go build failed — sergeant-mcp not available"
+  echo "Building sergeant (native v2 engine + MCP)..."
   (cd "$REPO_DIR" && go build -ldflags="-s -w" -o bin/sergeant ./cmd/sergeant/) && \
     echo "  built: $REPO_DIR/bin/sergeant" || \
     echo "  WARNING: go build failed — sergeant not available"
 else
   echo ""
-  echo "NOTE: go not found — skipping sergeant-mcp build. Install Go 1.21+ and run 'mise run build'."
+  echo "NOTE: go not found — skipping sergeant build. Install Go 1.21+ and run 'mise run build'."
 fi
 
 # Check PATH
@@ -120,7 +115,7 @@ echo "Removed $removed git hooks."
 """
 
 [tasks.uninstall]
-description = "Remove sgt-* symlinks from ~/.local/bin"
+description = "Remove Sergeant symlinks from ~/.local/bin"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -128,7 +123,7 @@ set -euo pipefail
 TARGET_DIR="${SGT_INSTALL_DIR:-$HOME/.local/bin}"
 removed=0
 
-for f in "$TARGET_DIR"/sgt-* "$TARGET_DIR"/_sgt-*.sh "$TARGET_DIR/wiki-daily-digest"; do
+for f in "$TARGET_DIR/wiki-daily-digest"; do
   [[ -L "$f" ]] || continue
   # Only remove if it points back into the sergeant repo
   target="$(readlink "$f")"
@@ -144,111 +139,12 @@ echo "Removed $removed symlinks from $TARGET_DIR"
 """
 
 [tasks.check]
-description = "Verify required and optional dependencies are installed"
-run = """
-#!/usr/bin/env bash
-
-source "${MISE_PROJECT_ROOT:-.}/bin/_sgt-bash-version.sh"
-_sgt_require_running_bash || exit 1
-source "${MISE_PROJECT_ROOT:-.}/bin/_sgt-lib.sh"
-
-ok=true
-
-_check() {
-  local name="$1" cmd="$2" required="$3" hint="$4" ver_flag="${5:---version}"
-  if command -v "$cmd" &>/dev/null; then
-    version="$("$cmd" "$ver_flag" 2>&1 | head -1 | tr -d '\n')"
-    printf "  %-14s  ✓  %s\\n" "$name" "$version"
-  else
-    if [[ "$required" == "required" ]]; then
-      printf "  %-14s  ✗  MISSING — %s\\n" "$name" "$hint"
-      ok=false
-    else
-      printf "  %-14s  -  not installed (optional) — %s\\n" "$name" "$hint"
-    fi
-  fi
-}
-
-_check_td() {
-  local td_path td_version create_help
-  if ! td_path="$(command -v td 2>/dev/null)"; then
-    printf "  %-14s  ✗  MISSING — install Marcus td from github.com/marcus/td\\n" "td"
-    ok=false
-    return
-  fi
-
-  td_version="$(td --version 2>&1 || true)"
-  [[ -n "$td_version" ]] || td_version="version unknown"
-  create_help="$(td create --help 2>&1 || true)"
-
-  if _sgt_td_supported_version_output "$td_version" && \
-     [[ "$create_help" == *"--description"* ]] && \
-     [[ "$create_help" == *"--json"* ]] && \
-     [[ "$create_help" == *"--work-dir"* ]]; then
-    printf "  %-14s  ✓  %s\\n" "td" "$(printf '%s' "$td_version" | head -1 | tr -d '\n')"
-  else
-    printf "  %-14s  ✗  Unsupported — require Marcus td with create/json/work-dir support\\n" "td"
-    ok=false
-  fi
-}
-
-_check_agent_harness() {
-  local harness harness_path version
-
-  for harness in opencode goose claude; do
-    if harness_path="$(command -v "$harness" 2>/dev/null)"; then
-      version="$("$harness" --version 2>&1 | head -1 | tr -d '\n')"
-      [[ -n "$version" ]] || version="$harness_path"
-      printf "  %-14s  ✓  %s\\n" "agent" "$harness: $version"
-      return
-    fi
-  done
-
-  printf "  %-14s  ✗  MISSING — install OpenCode, Goose, or Claude for interactive worker dispatch\\n" "agent"
-  ok=false
-}
-
-echo "=== sergeant dependency check ==="
-echo ""
-echo "Required:"
-printf "  %-14s  ✓  %s\\n" "Bash" "${BASH_VERSION} (minimum 3.2)"
-_check "yq"         yq         required  "brew install yq"
-_check "Python"     python3     required  "install Python 3"
-_check "git"        git        required  "install Xcode command line tools"
-_check "gh"         gh         required  "brew install gh"
-_check "tmux"       tmux       required  "brew install tmux"                          "-V"
-_check "lsof"       lsof       required  "install lsof with your system package manager" "-v"
-_check "sqlite3"    sqlite3    required  "brew install sqlite3 (or system package manager)"
-_check_td
-_check_agent_harness
-
-echo ""
-echo "Optional:"
-_check "treehouse"  treehouse  optional  "https://github.com/kunchenguid/treehouse"
-_check "graphify"   graphify   optional  "https://github.com/kunchenguid/graphify"
-_check "no-mistakes" no-mistakes optional "install no-mistakes for final shipping validation"
-_check "mise"       mise       optional  "brew install mise"
-_check "go"          go         optional  "install Go 1.21+ from go.dev to build sergeant-mcp" "version"
-
-echo ""
-if $ok; then
-  echo "All required dependencies present."
-else
-  echo "Install missing required dependencies before using sergeant."
-  exit 1
-fi
-"""
-
-[tasks."check:v2"]
 description = "Verify the prerequisites the v2 Go engine actually uses"
 run = """
 #!/usr/bin/env bash
-# The v2 engine shells out to a much smaller set than v1. Everything below is
-# derived from exec.Command call sites in internal/ and cmd/sergeant/, not from
-# the v1 list: `mise run check` still requires yq, Python, tmux, lsof, sqlite3 and
-# td, none of which v2 invokes. tmux in particular is forbidden as a factory
-# dependency (D7). Conversely v1's check never looks for openspec, which v2 needs
-# for dispatch (O3, internal/ui/openspec.go).
+# Everything below is derived from exec.Command call sites in internal/ and
+# cmd/sergeant/. tmux is forbidden as a factory dependency (D7) and is not
+# checked for here.
 ok=true
 
 _need() {
@@ -278,11 +174,6 @@ else
   ok=false
 fi
 
-echo ""
-echo "Not required by v2, despite appearing in 'mise run check':"
-echo "  yq, python3, tmux, lsof, sqlite3, td"
-echo "  v2 parses YAML in process, embeds SQLite via modernc.org/sqlite, and never uses tmux."
-
 if [[ "$ok" == true ]]; then
   echo ""
   echo "All v2 prerequisites present."
@@ -291,65 +182,6 @@ else
   echo "Install the missing prerequisites before dispatching."
   exit 1
 fi
-"""
-
-[tasks."test:docker:drain"]
-description = "Run the drain test suite in Docker (system Bash + Bash 3.2 passes)"
-run = """
-#!/usr/bin/env bash
-# Runs the drain test suite in two Docker passes:
-#
-#   Pass 1 — Debian bookworm-slim (system Bash 5.x)
-#     Tests drain state helpers, sgt-drain --status (bug #82), drain lock
-#     functions (bug #81), and sgt-recover drain gating.
-#
-#   Pass 2 — bash:3.2 Alpine image
-#     Re-runs the same tests under Bash 3.2 to confirm Bash 3.2 compatibility.
-#
-# Prerequisites: Docker must be available.  The test image is built locally and
-# not pushed; the bash:3.2 image is pulled from Docker Hub on first use.
-
-set -euo pipefail
-REPO_DIR="$(git -C "${MISE_PROJECT_ROOT:-.}" rev-parse --show-toplevel)"
-
-SGT_BASH32_IMAGE="docker.io/library/bash:3.2@sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89"
-
-pass=0
-fail=0
-
-_docker_pass() {
-  local label="$1" image="$2" cmd="$3"
-  printf '\\n══ %s ══\\n' "$label"
-  if docker run --rm -v "${REPO_DIR}:/repo:ro" "$image" sh -c "$cmd"; then
-    printf '\\n✓  %s passed\\n' "$label"
-    pass=$((pass + 1))
-  else
-    printf '\\n✗  %s FAILED\\n' "$label" >&2
-    fail=$((fail + 1))
-  fi
-}
-
-# Build the Debian test image (cached after first build).
-printf 'Building sergeant-test image...\\n'
-docker build -q -f "${REPO_DIR}/Dockerfile.test" -t sergeant-test "${REPO_DIR}"
-printf 'Built.\\n'
-
-# Pass 1: system Bash (Debian bookworm-slim).
-_docker_pass "System Bash (Debian bookworm-slim)" \
-  sergeant-test \
-  "BASH32='' bash /repo/tests/run-drain-tests.sh"
-
-# Pass 2: Bash 3.2 (official Alpine image).
-# Sets BASH32 to the Alpine Bash binary path and SGT_MINIMUM_BASH for the
-# runtime-bash-test compatibility check.
-_docker_pass "Bash 3.2 (Alpine)" \
-  "$SGT_BASH32_IMAGE" \
-  "BASH32=/usr/local/bin/bash SGT_MINIMUM_BASH=/usr/local/bin/bash bash /repo/tests/run-drain-tests.sh"
-
-printf '\\n═══════════════════════════════════════════════════════════\\n'
-printf ' Docker drain suite: %d passed, %d failed\\n' "$pass" "$fail"
-printf '═══════════════════════════════════════════════════════════\\n'
-[[ $fail -eq 0 ]]
 """
 
 [tasks.update]
@@ -367,39 +199,31 @@ mise run install
 """
 
 [tasks.build]
-description = "Build the sergeant-mcp Go binary for the current OS/arch"
+description = "Build the sergeant Go binary for the current OS/arch"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
 REPO_DIR="$(git -C "${MISE_PROJECT_ROOT:-.}" rev-parse --show-toplevel)"
 cd "$REPO_DIR"
 if ! command -v go &>/dev/null; then
-  echo "ERROR: go not found. Install Go 1.21+ to build sergeant-mcp."
+  echo "ERROR: go not found. Install Go 1.21+ to build sergeant."
   exit 1
 fi
-echo "Building sergeant-mcp..."
-go build -ldflags="-s -w -X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" \
-  -o bin/sergeant-mcp ./cmd/sergeant-mcp/
-echo "Built: bin/sergeant-mcp"
-
-# mcp.json declares two servers, so both binaries must exist or a client fails to
-# start one of them. bin/sergeant serves the native v2 tools, including the run
-# following tools; building only sergeant-mcp is what left it stale at 5 tools
-# while the source had 7.
 echo "Building sergeant (native v2 engine + MCP)..."
-go build -ldflags="-s -w" -o bin/sergeant ./cmd/sergeant/
+go build -ldflags="-s -w -X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" \
+  -o bin/sergeant ./cmd/sergeant/
 echo "Built: bin/sergeant"
 """
 
 [tasks."build:all"]
-description = "Cross-compile sergeant-mcp for all supported platforms (darwin/linux x amd64/arm64)"
+description = "Cross-compile sergeant for all supported platforms (darwin/linux x amd64/arm64)"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
 REPO_DIR="$(git -C "${MISE_PROJECT_ROOT:-.}" rev-parse --show-toplevel)"
 cd "$REPO_DIR"
 if ! command -v go &>/dev/null; then
-  echo "ERROR: go not found. Install Go 1.21+ to build sergeant-mcp."
+  echo "ERROR: go not found. Install Go 1.21+ to build sergeant."
   exit 1
 fi
 VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
@@ -416,23 +240,23 @@ targets=(
 for target in "${targets[@]}"; do
   os="${target%/*}"
   arch="${target#*/}"
-  out="dist/sergeant-mcp-${os}-${arch}"
+  out="dist/sergeant-${os}-${arch}"
   echo "Building $out..."
-  GOOS="$os" GOARCH="$arch" go build -ldflags="$LDFLAGS" -o "$out" ./cmd/sergeant-mcp/
+  GOOS="$os" GOARCH="$arch" go build -ldflags="$LDFLAGS" -o "$out" ./cmd/sergeant/
 done
 
 echo ""
 echo "Built:"
-ls -lh dist/sergeant-mcp-*
+ls -lh dist/sergeant-*
 """
 
 [tasks."build:clean"]
-description = "Remove built binaries (bin/sergeant-mcp and dist/)"
+description = "Remove built binaries (bin/sergeant and dist/)"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
 REPO_DIR="$(git -C "${MISE_PROJECT_ROOT:-.}" rev-parse --show-toplevel)"
-rm -f "$REPO_DIR/bin/sergeant-mcp"
+rm -f "$REPO_DIR/bin/sergeant"
 rm -rf "$REPO_DIR/dist/"
 echo "Cleaned."
 """

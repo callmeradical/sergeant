@@ -1,12 +1,10 @@
 .DS_Store
 .todos/
-bin/sergeant-mcp
 dist/
 
 # design-critique snapshots (local)
 .impeccable/
 bin/sergeant
-bin/sergeant-mcp
 
 # per-run agent scratch written into worktrees
 .sergeant/
