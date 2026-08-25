@@ -1587,5 +1587,118 @@ a{color:var(--muted)}
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
+<header>
+  <h1>Sergeant v2</h1>
+  <p>Independent review. Written by the critic, not the builder.</p>
+  <p class="meta">
+    Review 033 · 2026-08-25 · branch <code>v2</code> · merge commit <code>1a19659</code>
+    ("merge: server-dispatch-execution-decomposition", merge of <code>396224c</code>
+    "refactor(ui): extract dispatch/execution state machine into dispatch.go" and
+    <code>d9456f4</code> "test(ui): catch a cancelled stage failure being recorded as failed"
+    into <code>1633cd5</code>) reviewed against
+    <code>openspec/changes/server-dispatch-execution-decomposition/{proposal,design,tasks}.md</code>,
+    <code>specs/dispatch-execution-decomposition/spec.md</code>, and
+    <code>docs/prd-server-execution-path-decomposition.md</code> · current <code>v2</code> HEAD is
+    <code>1a19659</code>; build/vet/test run at that HEAD
+  </p>
+</header>
+
+<section>
+  <h2>Current status</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code>, no output</div></div>
+    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./internal/...</code>, no output</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">clean except named environmental failures</span></div><div class="small"><code>go test ./internal/... -count=1</code> run both with the prescribed <code>-skip</code> (all 12 packages pass) and without it (exactly the same 10 named LLM-key-dependent tests fail — <code>TestBuildProjectGraphAppliesExcludePatterns</code>, <code>TestBuildProjectGraphMergesEveryParticipatingRepo</code>, <code>TestIncludeGroupsExcludesNonMatchingRepos</code>, <code>TestBuildNeverLeavesOutputInAPartialState</code>, <code>TestPublishFailureRestoresPriorGraph</code>, <code>TestBuildNeverSpawnsSgtGraphify</code>, <code>TestQueryAgainstABuiltGraphReturnsAnAnswer</code>, <code>TestExplainAndAffectedAreDistinctFromQuery</code>, <code>TestMCPGraphQueryAgainstABuiltGraphReturnsAnswer</code>, <code>TestBuildGraphEndpointBuildsAndPublishes</code> — all with <code>error: no LLM API key found</code>)</div></div>
+    <div class="card"><div class="label">Functions extracted</div><div class="value"><span class="status">exactly as design.md names</span></div><div class="small"><code>internal/ui/dispatch.go</code> holds <code>targetRepositories</code>, <code>handleDispatch</code>, <code>createRunAndDispatch</code>, <code>dispatchResponse</code>, <code>respondWithExistingRun</code>, <code>firstLine</code>, <code>marshalRaw</code>, <code>executeRun</code>, <code>recordTerminalRun</code>, <code>blockedReasonForRun</code>, <code>reposForRun</code>, <code>passedPhaseNames</code>, <code>appendRunProgress</code> — all removed from <code>server.go</code> (720 lines removed there, 761 added in the new file)</div></div>
+    <div class="card"><div class="label"><code>stageRunner</code> seam</div><div class="value"><span class="status">matches design.md exactly</span></div><div class="small"><code>type stageRunner interface { RunStage(ctx context.Context, runID string, stage *config.DAGStage) error }</code> — identical to design.md's text. <code>internal/dag/engine.go:282</code>'s <code>func (e *Engine) RunStage(ctx context.Context, runID string, stage *config.DAGStage) error</code> satisfies it with zero modification to <code>engine.go</code></div></div>
+    <div class="card"><div class="label">No new store interface</div><div class="value"><span class="status">confirmed</span></div><div class="small"><code>grep -n interface internal/ui/dispatch.go</code> returns only <code>stageRunner</code>'s declaration/doc comments and <code>map[string]interface{}</code> response literals — design.md's rejection of an 11-method <code>*store.Store</code> interface holds; every store call in the file stays direct and concrete</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Verbatim-move verification</h2>
+  <p>Extracted the named functions' bodies from <code>git show 1633cd5:internal/ui/server.go</code> (the
+  true pre-extraction state) and diffed each against its counterpart in <code>internal/ui/dispatch.go</code>.
+  <code>handleDispatch</code>, <code>dispatchResponse</code>, <code>respondWithExistingRun</code>,
+  <code>firstLine</code>, <code>marshalRaw</code>, <code>recordTerminalRun</code>,
+  <code>blockedReasonForRun</code>, <code>reposForRun</code>, <code>passedPhaseNames</code>,
+  <code>appendRunProgress</code>, and <code>targetRepositories</code> — 11 of the 13 named functions — are
+  byte-for-byte identical, including comments. The remaining two,
+  <code>createRunAndDispatch</code> and <code>executeRun</code>, differ only by the relocation of one
+  statement: <code>engine.ChangeDir = changeDir</code>, previously the first line inside <code>executeRun</code>
+  set on the concrete <code>*dag.Engine</code>, moved to <code>createRunAndDispatch</code> immediately before
+  <code>go srv.executeRun(...)</code> is called (<code>dispatch.go:316</code>), with a comment explaining why:
+  <code>executeRun</code>'s <code>engine</code> parameter is now the narrower <code>stageRunner</code>, which
+  has no <code>ChangeDir</code> field. The value is set on the same concrete <code>engine</code> before the
+  goroutine that would use it starts either way — no observable timing or behavior change, and directly
+  necessitated by the one seam this change was authorized to add. A repo-wide diff of the rest of
+  <code>server.go</code> against its pre-extraction copy shows zero added lines outside this — confirming no
+  other handler was touched.</p>
+  <table>
+    <tr><th>Check</th><th>Result</th></tr>
+    <tr><td>Spec scenario coverage — dispatch behavior unchanged</td><td>Pre-existing <code>server_test.go</code>'s <code>TestDispatchWithUnknownChangeIDIsRejectedAndCreatesNoRun</code>, <code>TestDispatchRecordsAnExistingChangeIDOnTheRun</code>, <code>TestDispatchPersistsItsIntentAndOneBulletPerTargetRepo</code>, and all of <code>dispatch_idempotency_test.go</code>'s 7 tests exist, untouched by this diff, and pass — confirmed by reading both files in full</td></tr>
+    <tr><td>Spec scenario coverage — stage order/terminal status</td><td><code>run_lifecycle_test.go</code>'s <code>TestADispatchedRunAdvancesItsBulletsThroughTheTerminalPath</code> and its <code>recordTerminalRun</code>/<code>blockedReasonForRun</code> tests (e.g. <code>TestAFailedRunBlocksItsBulletsWithASynthesizedReason</code>) are pre-existing and unmodified, confirmed by reading the file</td></tr>
+    <tr><td>Spec scenario coverage — stages run in order (new)</td><td><code>dispatch_execution_test.go</code>'s <code>TestExecuteRunRunsConfiguredStagesInOrder</code> drives a real <code>*dag.Engine</code> across two repos/stages and asserts an append-only order log matches the project's configured stage order</td></tr>
+    <tr><td>Spec scenario coverage — testable with a fake stage runner (new)</td><td><code>TestExecuteRunIsTestableWithAFakeStageRunner</code> drives <code>executeRun</code> directly (not through the HTTP path) with <code>fakeStageRunner</code>, asserting the recorded stage order and that the fleet root gains zero entries — genuinely proves the seam removes the real-worktree/real-agent dependency, not just that it type-checks</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Mid-session mutation-testing finding, independently reproduced</h2>
+  <p>The merge commit message claims the implementer mutation-tested <code>executeRun</code>'s
+  <code>setTerminal</code> cancellation guard (<code>if ctx.Err() != nil { record "cancelled" instead of the
+  caller's requested status }</code>, at the time this guard already pre-existed in <code>server.go</code>
+  before the move — confirmed by <code>grep -n setTerminal</code> against <code>git show
+  1633cd5:internal/ui/server.go</code>, so this is not new behavior, only newly covered) — removed it, found
+  the suite as it stood did NOT catch the mutation, and added
+  <code>TestStageFailureCausedByCancellationRecordsCancelledNotFailed</code> plus
+  <code>cancellingStageRunner</code> to close the gap. Reproduced independently rather than trusted: edited
+  <code>setTerminal</code> in <code>internal/ui/dispatch.go</code> to call
+  <code>srv.recordTerminalRun(taskID, status)</code> unconditionally, confirmed <code>go build ./...</code>
+  still succeeded (the mutation is not a type error, only a behavior regression), ran
+  <code>go test ./internal/ui/... -run TestStageFailureCausedByCancellationRecordsCancelledNotFailed -v</code>
+  and it failed exactly as claimed (<code>run status = "failed", want cancelled</code>), then ran the full
+  <code>go test ./internal/ui/...</code> suite with the mutation still applied: nothing else in the package
+  failed except this one test and the pre-existing, unrelated
+  <code>TestBuildGraphEndpointBuildsAndPublishes</code> environmental failure — no other test in the suite
+  would have caught this regression. Restored the file with <code>git checkout -- internal/ui/dispatch.go</code>
+  and confirmed <code>git diff</code> was empty and <code>go build ./...</code> clean again before finishing.
+  This is a genuine, independently-confirmed gap that existed in the prior test suite and is now closed —
+  treated here as resolved by the fix already in this merge, not as an open caveat.</p>
+</section>
+
+<section>
+  <h2>Verdict</h2>
+  <div class="item ok">
+    <p><strong>MEETS SPEC.</strong> <code>internal/ui/dispatch.go</code> holds exactly the 13 functions
+    design.md names, 11 of them byte-for-byte identical to their pre-extraction copies and the remaining two
+    differing only by the one relocation the <code>stageRunner</code> seam necessitates. The seam itself is
+    a verbatim match for design.md's text, and <code>*dag.Engine</code> satisfies it with zero modification.
+    No <code>*store.Store</code> interface was introduced, matching design.md's rejection of one. <code>go
+    build</code>, <code>go vet</code>, and <code>go test ./internal/...</code> are clean under the prescribed
+    <code>-skip</code>, and without it fail on exactly the same 10 pre-existing LLM-key-dependent tests. Every
+    scenario in <code>specs/dispatch-execution-decomposition/spec.md</code> has genuine, direct test coverage
+    — two new tests exercising <code>executeRun</code> directly (one with a real engine, one with a fake),
+    plus pre-existing coverage for the scenarios the design doc claimed were already covered, verified by
+    reading those files rather than trusting the claim. The mid-session mutation-testing finding — a real
+    gap in the prior suite around cancellation-vs-failure terminal status — was independently reproduced here
+    (mutation applied, confirmed only the new test catches it, confirmed nothing else does, file restored
+    cleanly) and is fully resolved by the test already added in this merge; it stands as a positive signal of
+    process rigor, not an open caveat. No HTTP route, response shape, or status code changed anywhere in
+    <code>server.go</code> outside the named functions.</p>
+  </div>
+</section>
+
+<footer>
+  <p class="meta">Review 033 · findings above are reproduced from commands run directly against the current
+  <code>v2</code> working tree at HEAD <code>1a19659</code>, diffing the two implementation commits against
+  their true merge-base <code>1633cd5</code> (<code>git show 1633cd5:internal/ui/server.go</code>) rather
+  than trusting the merge commit message. All 13 named functions were diffed individually; the mutation-test
+  claim in the merge message was independently reproduced end to end (mutate, build, run the named test,
+  run the full package, restore, confirm clean) rather than accepted on the implementer's word. Reviews 032
+  and earlier were not re-examined; they stand as recorded above.</p>
+  <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
+</footer>
+
 </main></body>
 </html>
