@@ -261,6 +261,53 @@ func TestExportFailureIsRetriedWithoutRerunningOriginalWrite(t *testing.T) {
 	}
 }
 
+// A failure on one record must not let a later record in the same batch be
+// delivered ahead of it — Tick stops at the first failure rather than
+// skipping past it, so delivery order across a retry is preserved. A fixture
+// where the failing record is followed by a record that CAN succeed is
+// required to catch this: if every record in a batch fails together (as in
+// TestExportFailureIsRetriedWithoutRerunningOriginalWrite's fixture),
+// stopping at the first failure and continuing past it produce the same
+// observable result, and a regression that delivers out of order would go
+// undetected.
+func TestExportFailureStopsBeforeALaterRecordThatWouldHaveSucceeded(t *testing.T) {
+	st := newTestStore(t)
+	intent := &store.IntentRecord{ID: "intent-order", Project: "proj", Statement: "s", Status: "approved"}
+	if err := st.CreateIntent(intent); err != nil {
+		t.Fatalf("CreateIntent: %v", err)
+	}
+	first := &store.BulletRecord{ID: "bullet-first", IntentID: intent.ID, Repo: "api", Position: 0, Status: "pending"}
+	if err := st.CreateBullet(first); err != nil {
+		t.Fatalf("CreateBullet(first): %v", err)
+	}
+	if err := st.UpdateBulletStatus(first.ID, "red"); err != nil {
+		t.Fatalf("UpdateBulletStatus(first): %v", err)
+	}
+	second := &store.BulletRecord{ID: "bullet-second", IntentID: intent.ID, Repo: "web", Position: 1, Status: "pending"}
+	if err := st.CreateBullet(second); err != nil {
+		t.Fatalf("CreateBullet(second): %v", err)
+	}
+
+	// first's status-change record precedes second's CreateBullet record in
+	// the change log, so failing first and letting second succeed puts a
+	// succeedable record after the failing one in the same Tick's batch.
+	target := &fakeTarget{
+		shouldFail: func(rec Record) bool {
+			return rec.Kind == "bullet" && rec.ID == first.ID
+		},
+	}
+	r := &Runner{Store: st, Target: target}
+
+	if err := r.Tick(context.Background()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if countBulletRecords(target.all(), second.ID) != 0 {
+		t.Fatalf("bullet %q was delivered before the earlier failing bullet %q was retried; "+
+			"delivery order was not preserved, got %+v", second.ID, first.ID, target.all())
+	}
+}
+
 func countBulletRecords(records []Record, bulletID string) int {
 	n := 0
 	for _, rec := range records {
