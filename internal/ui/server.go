@@ -45,6 +45,13 @@ type Server struct {
 	// uses for the agent binary.
 	GHPRCreate func(repoPath, title, body, branch string) ([]byte, error)
 
+	// RunShippingGate runs one shipping-gate command. It is a struct field
+	// defaulting to runner.RunShippingGate, not a bare call inside
+	// handleCreatePR, so a test can substitute a recording stub and prove no
+	// shipping-gate command ran for a project that declares none — the same
+	// swap-a-dependency shape GHPRCreate above already uses.
+	RunShippingGate func(ctx context.Context, name, command string, worktrees []string) (*runner.GateResult, error)
+
 	// cancels holds one CancelFunc per in-flight run so that a cancel request can
 	// actually stop the work. Without it "Stop Run" only writes a status column
 	// that the dispatch goroutine later overwrites, and agents keep writing to
@@ -116,12 +123,13 @@ func NewServer(s *store.Store, port int) *Server {
 		port = 8484
 	}
 	return &Server{
-		Store:      s,
-		Port:       port,
-		cancels:    map[string]context.CancelFunc{},
-		GHPRCreate: runGHPRCreate,
-		fleet:      newFleetCleaner(s),
-		delivery:   newDeliveryReporter(s),
+		Store:           s,
+		Port:            port,
+		cancels:         map[string]context.CancelFunc{},
+		GHPRCreate:      runGHPRCreate,
+		RunShippingGate: runner.RunShippingGate,
+		fleet:           newFleetCleaner(s),
+		delivery:        newDeliveryReporter(s),
 	}
 }
 
@@ -384,6 +392,21 @@ func (srv *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("loading run %q: %v", req.RunID, err), http.StatusInternalServerError)
 		return
 	}
+
+	// D5(c)/shipping-gate: the seal above may have been the last bullet an
+	// intent needed to reach sealed-or-merged. If so, this is the one point in
+	// the codebase where that condition is checked and the intent's shipping
+	// gate evaluated — exactly once per intent's path to the condition
+	// becoming true, not a recurring poll. This never fails or delays the
+	// PR-creation response below: a shipping-gate outcome is bookkeeping on
+	// the intent, not a precondition for the seal or PR action that already
+	// succeeded.
+	if run.IntentID != "" {
+		if bullets, berr := srv.Store.ListBulletsForIntent(run.IntentID); berr == nil && store.AllBulletsSealedOrMerged(bullets) {
+			srv.evaluateShippingGate(r.Context(), proj, run.IntentID, bullets)
+		}
+	}
+
 	branch := naming.BranchNameForRun(run.ID, run.Type, run.ChangeID)
 	if req.Title == "" {
 		req.Title = fmt.Sprintf("feat(%s): verified patch for run [%s]", req.Project, req.RunID)
@@ -438,6 +461,54 @@ func (srv *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 		"branch": branch,
 		"error":  prError,
 	})
+}
+
+// evaluateShippingGate runs an intent's configured shipping gates and records
+// the outcome. Callers must have already confirmed AllBulletsSealedOrMerged
+// for intentID — this does not re-check it — because the trigger is "the seal
+// that completed the condition", not a standing poll.
+//
+// A project with no ShippingGates configured records a pass immediately and
+// unconditionally, invoking no command, matching how FactoryConfig.Gates
+// already defaults to none (PRD: "A project with no configured shipping
+// gates passes trivially"). Otherwise every configured gate runs, in sorted
+// name order for the same determinism TestGatesRunInDeterministicOrder
+// already requires of per-bullet gates; the first failing gate's name becomes
+// the recorded reason.
+//
+// Errors recording the result are swallowed (matching every other
+// best-effort write in this handler, e.g. RecordEnvelope above): a shipping
+// gate is bookkeeping on the intent, not a precondition for the seal or PR
+// action that already succeeded.
+func (srv *Server) evaluateShippingGate(ctx context.Context, proj *config.Project, intentID string, bullets []store.BulletRecord) {
+	if proj == nil || len(proj.ShippingGates) == 0 {
+		_ = srv.Store.RecordShippingGateResult(intentID, true, "")
+		return
+	}
+
+	worktrees := make([]string, len(bullets))
+	for i, b := range bullets {
+		worktrees[i] = b.Worktree
+	}
+
+	names := make([]string, 0, len(proj.ShippingGates))
+	for name := range proj.ShippingGates {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	allPassed := true
+	var firstFailureReason string
+	for _, name := range names {
+		res, _ := srv.RunShippingGate(ctx, name, proj.ShippingGates[name], worktrees)
+		if res == nil || !res.Passed {
+			allPassed = false
+			if firstFailureReason == "" {
+				firstFailureReason = fmt.Sprintf("shipping gate %q failed", name)
+			}
+		}
+	}
+	_ = srv.Store.RecordShippingGateResult(intentID, allPassed, firstFailureReason)
 }
 
 // handleBullets answers a run-scoped or intent-scoped view of bullet status

@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -176,6 +177,99 @@ func TestDeriveIntentStatusReadsTheBullets(t *testing.T) {
 				t.Errorf("DeriveIntentStatus(%v) = %q, want %q", tc.statuses, got, tc.want)
 			}
 		})
+	}
+}
+
+// AllBulletsSealedOrMerged answers a different question than DeriveIntentStatus:
+// whether an intent's bullets are all at least at sealed, the condition that
+// makes the intent a candidate for its shipping gate. Asserted without a
+// database, the same reasoning as TestDeriveIntentStatusReadsTheBullets.
+//
+// Scenario: "An intent with some bullets not yet sealed has no shipping-gate
+// status" and "An intent with all bullets sealed evaluates its shipping gate"
+// (specs/shipping-gate/spec.md).
+func TestAllBulletsSealedOrMerged(t *testing.T) {
+	cases := []struct {
+		name     string
+		statuses []string
+		want     bool
+	}{
+		// Unlike DeriveIntentStatus, the empty case must be false: a vacuous
+		// true here would make an intent with no bullets at all a candidate
+		// for a shipping gate it never earned.
+		{"no bullets at all", nil, false},
+		{"mix of pending, red, green, and sealed", []string{"pending", "red", "green", "sealed"}, false},
+		{"one bullet still green", []string{"sealed", "green"}, false},
+		{"every bullet sealed", []string{"sealed", "sealed"}, true},
+		{"sealed and merged mix", []string{"sealed", "merged"}, true},
+		{"every bullet merged", []string{"merged", "merged"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bullets := make([]BulletRecord, 0, len(tc.statuses))
+			for _, s := range tc.statuses {
+				bullets = append(bullets, BulletRecord{Status: s})
+			}
+			if got := AllBulletsSealedOrMerged(bullets); got != tc.want {
+				t.Errorf("AllBulletsSealedOrMerged(%v) = %v, want %v", tc.statuses, got, tc.want)
+			}
+		})
+	}
+}
+
+// Scenario: "A failed shipping gate records which check failed"
+// (specs/shipping-gate/spec.md). The reason must name the check that failed,
+// mirroring how BulletRecord.BlockedReason already carries a human-readable
+// explanation.
+func TestRecordShippingGateResultRecordsFailureReason(t *testing.T) {
+	st, _ := openTestStore(t)
+	const intentID = "intent-sg-fail"
+	if err := st.CreateIntent(&IntentRecord{ID: intentID, Project: "p", Statement: "s", Status: "approved"}); err != nil {
+		t.Fatalf("creating intent: %v", err)
+	}
+
+	if err := st.RecordShippingGateResult(intentID, false, `shipping gate "security" failed`); err != nil {
+		t.Fatalf("RecordShippingGateResult: %v", err)
+	}
+
+	intent, err := st.GetIntent(intentID)
+	if err != nil {
+		t.Fatalf("loading intent: %v", err)
+	}
+	if intent.ShippingGateStatus != "failed" {
+		t.Errorf("ShippingGateStatus = %q, want %q", intent.ShippingGateStatus, "failed")
+	}
+	if !strings.Contains(intent.ShippingGateReason, "security") {
+		t.Errorf("ShippingGateReason = %q, want it to name the failed check", intent.ShippingGateReason)
+	}
+}
+
+// Scenario: "A passing shipping gate records no reason" (specs/shipping-gate/
+// spec.md). A pass must overwrite any previously stored reason with empty,
+// matching BlockedReason's "empty unless the status warrants one" rule.
+func TestRecordShippingGateResultPassRecordsNoReason(t *testing.T) {
+	st, _ := openTestStore(t)
+	const intentID = "intent-sg-pass"
+	if err := st.CreateIntent(&IntentRecord{ID: intentID, Project: "p", Statement: "s", Status: "approved"}); err != nil {
+		t.Fatalf("creating intent: %v", err)
+	}
+
+	if err := st.RecordShippingGateResult(intentID, false, "stale failure reason"); err != nil {
+		t.Fatalf("RecordShippingGateResult(fail): %v", err)
+	}
+	if err := st.RecordShippingGateResult(intentID, true, "ignored"); err != nil {
+		t.Fatalf("RecordShippingGateResult(pass): %v", err)
+	}
+
+	intent, err := st.GetIntent(intentID)
+	if err != nil {
+		t.Fatalf("loading intent: %v", err)
+	}
+	if intent.ShippingGateStatus != "passed" {
+		t.Errorf("ShippingGateStatus = %q, want %q", intent.ShippingGateStatus, "passed")
+	}
+	if intent.ShippingGateReason != "" {
+		t.Errorf("ShippingGateReason = %q, want empty for a pass, even though a prior failure had stored one", intent.ShippingGateReason)
 	}
 }
 

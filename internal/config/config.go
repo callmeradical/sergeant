@@ -29,6 +29,14 @@ type Project struct {
 	// that is nil, distinguishable from a project that declared an empty
 	// block.
 	Export *Export `yaml:"export,omitempty" json:"export"`
+	// ShippingGates are checks that run once every bullet of an intent has
+	// reached sealed (or merged), evaluating the intent as a whole rather than
+	// any single bullet. Same shape as FactoryConfig.Gates, but declared once
+	// per project: a shipping gate spans repos, so it cannot live on one
+	// repo's Factory the way a bullet gate does. A map already distinguishes
+	// "unset" (nil) from "declared empty" the same way FactoryConfig.Gates
+	// does, so no pointer wrapper is needed here.
+	ShippingGates map[string]string `yaml:"shipping_gates,omitempty" json:"shipping_gates"`
 }
 
 // Graphify declares a project's cross-repository code graph: which repos
