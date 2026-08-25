@@ -58,6 +58,10 @@ type Server struct {
 	// delivery owns delivery reporting (see delivery.go). It depends on
 	// runGetter rather than *store.Store directly.
 	delivery *deliveryReporter
+
+	// terminal owns embedded-terminal session state and PTY lifecycle (see
+	// terminal.go).
+	terminal *terminalManager
 }
 
 func (srv *Server) registerRun(runID string, cancel context.CancelFunc) {
@@ -122,6 +126,7 @@ func NewServer(s *store.Store, port int) *Server {
 		RunShippingGate: runner.RunShippingGate,
 		fleet:           newFleetCleaner(s),
 		delivery:        newDeliveryReporter(s),
+		terminal:        newTerminalManager(),
 	}
 }
 
@@ -165,6 +170,17 @@ func (srv *Server) Handler() http.Handler {
 	// The sequenced state stream. Clients follow this instead of re-reading
 	// /api/runs on a timer.
 	mux.HandleFunc("/api/stream", srv.handleStream)
+	mux.HandleFunc("/api/terminal-start", srv.handleTerminalStart)
+	mux.HandleFunc("/api/terminal-socket", srv.handleTerminalSocket)
+	mux.HandleFunc("/api/terminal-kill", srv.handleTerminalKill)
+
+	// Vendored xterm.js assets, served the same way index.html already is
+	// (via the embedded static/* glob), plus a long cache header: these
+	// files are versioned by filename choice, not auto-fingerprinted, so
+	// their content never changes under a given path.
+	mux.HandleFunc("/static/xterm.js", srv.handleStaticAsset("xterm.js", "text/javascript; charset=utf-8"))
+	mux.HandleFunc("/static/xterm.css", srv.handleStaticAsset("xterm.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("/static/xterm-addon-fit.js", srv.handleStaticAsset("xterm-addon-fit.js", "text/javascript; charset=utf-8"))
 
 	// Static assets
 	mux.HandleFunc("/", srv.handleIndex)
@@ -208,6 +224,22 @@ func (srv *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(data)
+}
+
+// handleStaticAsset serves one embedded static/* file with a long,
+// immutable cache header, mirroring handleIndex's embed.FS read but for a
+// file whose content is safe to cache indefinitely.
+func (srv *Server) handleStaticAsset(name, contentType string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		data, err := staticFS.ReadFile("static/" + name)
+		if err != nil {
+			http.Error(w, "asset not found", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		_, _ = w.Write(data)
+	}
 }
 
 func (srv *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
