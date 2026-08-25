@@ -1001,7 +1001,14 @@
       });
 
       term.onData((data) => {
-        if (socket.readyState === WebSocket.OPEN) socket.send(data);
+        // socket.send(string) always produces a WebSocket TEXT frame per the
+        // spec, regardless of socket.binaryType — that property only governs
+        // how incoming frames are delivered to JS. The server's read loop
+        // (internal/ui/terminal.go) only writes BINARY frames to the PTY and
+        // treats TEXT frames as the JSON resize control message, so sending
+        // keystrokes as text silently drops every one of them. Encode to
+        // bytes first so the browser actually sends a binary frame.
+        if (socket.readyState === WebSocket.OPEN) socket.send(new TextEncoder().encode(data));
       });
       term.onResize(({ cols, rows }) => {
         if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', cols, rows }));
