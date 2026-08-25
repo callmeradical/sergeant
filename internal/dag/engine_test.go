@@ -2,6 +2,7 @@ package dag
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -997,5 +998,122 @@ func TestEngineUsesRepoRetryOverride(t *testing.T) {
 	}
 	if got := len(planPhases); got != 3 {
 		t.Errorf("plan phases = %d, want 3 (repo retries=2 overrides project default retries=1)", got)
+	}
+}
+
+// readPromptFile reads the exact prompt RunAgentPhase wrote for phase in
+// repoName's worktree for runID — the one place runner.RunAgentPhase records
+// what it actually received, before any agent invocation.
+func readPromptFile(t *testing.T, runID, repoName, phase string) string {
+	t.Helper()
+	path := filepath.Join(FleetDir(runID, repoName), ".sergeant", fmt.Sprintf("prompt_%s.txt", phase))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading prompt file %s: %v", path, err)
+	}
+	return string(data)
+}
+
+// fakeAgentThatSucceeds writes a fake agent script to tempDir/bin/goose that
+// exits 0 immediately, and puts that directory first on PATH so
+// config.ProjectDefaults.Agent can point at it without a real agent CLI.
+func fakeAgentThatSucceeds(t *testing.T, tempDir string) string {
+	t.Helper()
+	binDir := filepath.Join(tempDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	fakeAgentPath := filepath.Join(binDir, "goose")
+	if err := os.WriteFile(fakeAgentPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	return fakeAgentPath
+}
+
+// Scenario: The UI-dispatched path's agent prompt includes the intent
+// statement and bullet state.
+func TestRunStagePromptIncludesIntentStatementAndBulletState(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("SERGEANT_FLEET_DIR", filepath.Join(tempDir, "fleet"))
+
+	repoDir := filepath.Join(tempDir, "svc")
+	newGitRepo(t, repoDir)
+	fakeAgentPath := fakeAgentThatSucceeds(t, tempDir)
+
+	proj := &config.Project{
+		Name:     "intent-proj",
+		Defaults: config.ProjectDefaults{Agent: fakeAgentPath},
+		Repos: map[string]config.Repo{
+			"svc": {Path: repoDir, Factory: &config.FactoryConfig{Pipeline: []string{"plan"}}},
+		},
+	}
+
+	eng := newEngine(t, proj)
+	const intentID = "intent-prompt-1"
+	if err := eng.Store.CreateIntent(&store.IntentRecord{
+		ID: intentID, Project: proj.Name, Statement: "add webhook retries", Status: "in_progress",
+	}); err != nil {
+		t.Fatalf("creating intent: %v", err)
+	}
+	if err := eng.Store.CreateBullet(&store.BulletRecord{
+		ID: intentID + "-b1", IntentID: intentID, Repo: "svc", Position: 1, Status: "pending",
+	}); err != nil {
+		t.Fatalf("creating bullet: %v", err)
+	}
+
+	runID := "run-prompt-1"
+	if err := eng.Store.CreateRun(&store.RunRecord{
+		ID: runID, Project: proj.Name, TaskID: runID, Status: "running",
+		Type: testWorkType, ChangeID: runID, IntentID: intentID,
+	}); err != nil {
+		t.Fatalf("creating run: %v", err)
+	}
+
+	stage := &config.DAGStage{Name: "s", Repos: []string{"svc"}, Brief: "raw operator text, must not be used"}
+	if err := eng.RunStage(context.Background(), runID, stage); err != nil {
+		t.Fatalf("engine failed to run stage: %v", err)
+	}
+
+	prompt := readPromptFile(t, runID, "svc", "plan")
+	if strings.Contains(prompt, "raw operator text") {
+		t.Errorf("prompt = %q, want the rendered intent brief, not stage.Brief", prompt)
+	}
+	for _, want := range []string{"add webhook retries", "svc", "Position: 1 of 1", "pending"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt = %q, want it to contain %q", prompt, want)
+		}
+	}
+}
+
+// Scenario: A run with no intent id still receives stage.Brief.
+func TestRunStageWithNoIntentIDStillReceivesStageBrief(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("SERGEANT_FLEET_DIR", filepath.Join(tempDir, "fleet"))
+
+	repoDir := filepath.Join(tempDir, "svc")
+	newGitRepo(t, repoDir)
+	fakeAgentPath := fakeAgentThatSucceeds(t, tempDir)
+
+	proj := &config.Project{
+		Name:     "no-intent-proj",
+		Defaults: config.ProjectDefaults{Agent: fakeAgentPath},
+		Repos: map[string]config.Repo{
+			"svc": {Path: repoDir, Factory: &config.FactoryConfig{Pipeline: []string{"plan"}}},
+		},
+	}
+
+	eng := newEngine(t, proj)
+	runID := "run-no-intent-1"
+	createTestRun(t, eng, proj.Name, runID, "running")
+
+	stage := &config.DAGStage{Name: "s", Repos: []string{"svc"}, Brief: "do the work exactly as typed"}
+	if err := eng.RunStage(context.Background(), runID, stage); err != nil {
+		t.Fatalf("engine failed to run stage: %v", err)
+	}
+
+	prompt := readPromptFile(t, runID, "svc", "plan")
+	if prompt != stage.Brief {
+		t.Errorf("prompt = %q, want exactly stage.Brief %q", prompt, stage.Brief)
 	}
 }
