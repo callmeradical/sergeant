@@ -305,7 +305,13 @@ func BuildAgentCommand(agentCLI, model, prompt string) (string, []string, []stri
 		args = append(args, prompt)
 
 	case "claude":
-		args = []string{"--print"}
+		// --dangerously-skip-permissions: a dispatched phase has no TTY, so
+		// claude's default permission mode cannot prompt for Write/Edit
+		// approval — it can only print the request and exit, consuming a
+		// full agent-phase attempt with zero code changes. Safe here because
+		// every dispatch already runs in an isolated git worktree on its own
+		// branch (internal/dag/engine.go), never the operator's checkout.
+		args = []string{"--print", "--dangerously-skip-permissions"}
 		if model != "" {
 			args = append(args, "--model", model)
 		}

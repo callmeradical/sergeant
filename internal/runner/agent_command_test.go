@@ -92,3 +92,21 @@ func TestGooseRequestsMachineReadableOutput(t *testing.T) {
 			"per-phase token and cost metadata is discarded", args)
 	}
 }
+
+// A dispatched claude phase has no TTY, so claude's default permission mode
+// cannot prompt for approval of the Write/Edit tools an implementation phase
+// needs — it can only print a request for approval and exit, producing zero
+// code changes while still consuming a full agent-phase attempt. This
+// regression was found running the real CLI headlessly: `claude --print
+// <prompt>` alone printed "I need your approval to write files in this
+// repo..." and returned, with no commit and no diff. The isolated worktree
+// D3/D4 already require for any dispatched work (internal/dag/engine.go) is
+// exactly the safety boundary that makes bypassing the prompt here safe.
+func TestClaudeIsInvokedWithoutPermissionPrompts(t *testing.T) {
+	_, args, _ := BuildAgentCommand("claude", "", "do the thing")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--dangerously-skip-permissions") {
+		t.Errorf("claude args %q lack --dangerously-skip-permissions; a headless dispatch "+
+			"cannot answer a permission prompt and will exit having written nothing", args)
+	}
+}
