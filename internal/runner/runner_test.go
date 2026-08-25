@@ -527,6 +527,104 @@ func TestGooseAgentPhaseRecordsModelAndProvider(t *testing.T) {
 	}
 }
 
+// claude never prints a parseable provenance banner the way goose does, but
+// its provider is still a real, derivable fact (not a guess): which backend
+// it talks to is an environment fact (CLAUDE_CODE_USE_BEDROCK/_VERTEX), and
+// which model it used is exactly whatever was requested via --model, known
+// to the caller already. Default environment (neither flag set) is
+// Anthropic directly.
+func TestClaudeAgentPhaseRecordsAnthropicProviderAndRequestedModel(t *testing.T) {
+	dir := t.TempDir()
+	agent := fakeAgent(t, dir, "claude", "exit 0")
+	pr, st := newRunner(t, agent, 10*time.Second)
+	pr.Model = "claude-sonnet-4-6"
+
+	env, _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	model, provider := payloadProvenance(t, env.Payload)
+	if model != "claude-sonnet-4-6" || provider != "anthropic" {
+		t.Errorf("envelope payload model/provider = %q/%q, want claude-sonnet-4-6/anthropic", model, provider)
+	}
+
+	phases, err := st.ListPhasesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var final []store.PhaseRecord
+	for _, p := range phases {
+		if p.Name == "build" && p.Kind == "agent" && p.Status != "running" {
+			final = append(final, p)
+		}
+	}
+	if len(final) != 1 {
+		t.Fatalf("expected 1 phase record, got %d", len(final))
+	}
+	model, provider = payloadProvenance(t, final[0].Payload)
+	if model != "claude-sonnet-4-6" || provider != "anthropic" {
+		t.Errorf("phase record model/provider = %q/%q, want claude-sonnet-4-6/anthropic", model, provider)
+	}
+}
+
+// A claude dispatch with no explicit --model still has a known provider
+// (an environment fact), but the specific model claude chose on its own is
+// genuinely unknown to sergeant — recording one would be exactly the guess
+// TestUnparsedAgentProvenanceIsEmptyNotGuessed already forbids for other
+// agents.
+func TestClaudeAgentWithNoRequestedModelLeavesModelEmpty(t *testing.T) {
+	dir := t.TempDir()
+	agent := fakeAgent(t, dir, "claude", "exit 0")
+	pr, _ := newRunner(t, agent, 10*time.Second)
+	// pr.Model left at its zero value: no --model was requested.
+
+	env, _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	model, provider := payloadProvenance(t, env.Payload)
+	if model != "" {
+		t.Errorf("model = %q, want empty — no --model was requested, so the actual model claude chose is unknown", model)
+	}
+	if provider != "anthropic" {
+		t.Errorf("provider = %q, want anthropic — the backend is a known environment fact regardless of which model was requested", provider)
+	}
+}
+
+// CLAUDE_CODE_USE_BEDROCK/CLAUDE_CODE_USE_VERTEX route claude through AWS/GCP
+// instead of Anthropic directly. claude subprocesses inherit this process's
+// environment (BuildAgentCommand sets no override for claude), so these are
+// exactly the variables the real CLI itself reads to decide.
+func TestClaudeAgentPhaseRecordsBedrockOrVertexProviderWhenConfigured(t *testing.T) {
+	cases := []struct {
+		envVar       string
+		wantProvider string
+	}{
+		{"CLAUDE_CODE_USE_BEDROCK", "bedrock"},
+		{"CLAUDE_CODE_USE_VERTEX", "vertex"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.wantProvider, func(t *testing.T) {
+			t.Setenv(tc.envVar, "1")
+			dir := t.TempDir()
+			agent := fakeAgent(t, dir, "claude", "exit 0")
+			pr, _ := newRunner(t, agent, 10*time.Second)
+
+			env, _, err := pr.RunAgentPhase(context.Background(), "build", "brief", 0)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			_, provider := payloadProvenance(t, env.Payload)
+			if provider != tc.wantProvider {
+				t.Errorf("provider = %q, want %q with %s=1", provider, tc.wantProvider, tc.envVar)
+			}
+		})
+	}
+}
+
 // An agent this project has no output parser for must never guess: its
 // phase's model/provider are empty, even when the raw output happens to
 // contain text that looks like goose's banner.
@@ -1073,7 +1171,7 @@ func TestDetectModelProviderNeverPanics(t *testing.T) {
 					t.Errorf("detectModelProvider(%q, %q) panicked: %v", tc.agentExe, tc.output, r)
 				}
 			}()
-			_, _ = detectModelProvider(tc.agentExe, tc.output)
+			_, _ = detectModelProvider(tc.agentExe, tc.output, "")
 		}()
 	}
 }

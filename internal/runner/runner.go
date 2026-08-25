@@ -76,7 +76,7 @@ var gooseBanner = regexp.MustCompile(`new session\s*·\s*(\S+)\s+(\S+)`)
 // the agent is not one this function recognises, or when recognised output
 // does not match the expected shape — a phase's provenance being unknown is
 // honest; a phase failing because provenance parsing panicked is not.
-func detectModelProvider(agentExe, rawOutput string) (provider, model string) {
+func detectModelProvider(agentExe, rawOutput, requestedModel string) (provider, model string) {
 	switch filepath.Base(agentExe) {
 	case "goose":
 		m := gooseBanner.FindStringSubmatch(rawOutput)
@@ -84,9 +84,42 @@ func detectModelProvider(agentExe, rawOutput string) (provider, model string) {
 			return "", ""
 		}
 		return m[1], m[2]
+	case "claude":
+		// claude prints no parseable provenance banner the way goose does,
+		// but provider is still a real fact, not a guess: which backend it
+		// talks to is an environment fact claude itself reads
+		// (CLAUDE_CODE_USE_BEDROCK/_VERTEX), and claude subprocesses inherit
+		// this process's environment (BuildAgentCommand sets no override for
+		// claude). requestedModel is returned as-is: when a caller asked for
+		// a specific model via --model, that IS the model, a fact known
+		// before the process even ran; when none was requested, the model
+		// claude chose on its own is genuinely unknown, and returning "" is
+		// what keeps that honest rather than guessing a current default that
+		// will silently go stale.
+		return claudeProvider(), requestedModel
 	default:
 		return "", ""
 	}
+}
+
+// claudeProvider reports which backend a claude invocation actually talks
+// to. CLAUDE_CODE_USE_BEDROCK/CLAUDE_CODE_USE_VERTEX are the real,
+// documented Claude Code variables that route through AWS Bedrock or GCP
+// Vertex AI instead of Anthropic directly; absent either, Anthropic is what
+// the CLI itself defaults to.
+func claudeProvider() string {
+	if truthyEnv("CLAUDE_CODE_USE_BEDROCK") {
+		return "bedrock"
+	}
+	if truthyEnv("CLAUDE_CODE_USE_VERTEX") {
+		return "vertex"
+	}
+	return "anthropic"
+}
+
+func truthyEnv(key string) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	return v == "1" || v == "true"
 }
 
 // annotatePayloadWithProvenance adds model and provider to an existing
@@ -492,7 +525,7 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 		cmd.Stderr = &outBuf
 
 		runErr := cmd.Run()
-		provider, model := detectModelProvider(exe, outBuf.String())
+		provider, model := detectModelProvider(exe, outBuf.String(), pr.Model)
 		cancel()
 		duration := time.Since(start).Milliseconds()
 
