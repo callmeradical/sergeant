@@ -1117,3 +1117,185 @@ func TestRunStageWithNoIntentIDStillReceivesStageBrief(t *testing.T) {
 		t.Errorf("prompt = %q, want exactly stage.Brief %q", prompt, stage.Brief)
 	}
 }
+
+// --- independent-review ------------------------------------------------------
+
+// Scenarios "A review phase is dispatched with the diff, not prior envelopes"
+// and "The review prompt builder has no access to prior envelopes" are the
+// same property, proven at reviewPrompt's real function signature: it takes a
+// diff string and stage/repo context only, no envelope parameter, so an
+// earlier phase's envelope content cannot appear in the built prompt no
+// matter what RunStage does around it.
+func TestReviewPromptExcludesPriorPhaseEnvelopeContent(t *testing.T) {
+	buildSummary := "build phase concluded: implemented the webhook retry logic exactly as planned"
+	testSummary := "test phase concluded: all unit tests pass with 100% coverage"
+	diff := "diff --git a/webhook.go b/webhook.go\n+func retry() {}\n"
+	stage := &config.DAGStage{Name: "build-and-test", Repos: []string{"svc"}}
+
+	prompt := reviewPrompt(diff, stage, "svc")
+
+	if !strings.Contains(prompt, diff) {
+		t.Errorf("prompt = %q, want it to contain the diff", prompt)
+	}
+	for _, leaked := range []string{buildSummary, testSummary} {
+		if strings.Contains(prompt, leaked) {
+			t.Errorf("prompt = %q, leaked a prior phase's envelope summary %q", prompt, leaked)
+		}
+	}
+}
+
+// Scenario: "A pipeline with no review phase runs unchanged." A repo whose
+// Factory.Pipeline never names "review" must see no review dispatch and an
+// outcome identical to before this change (a plain "test"-only pipeline
+// passing).
+func TestRunStagePipelineWithoutReviewIsUnaffected(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("SERGEANT_FLEET_DIR", filepath.Join(tempDir, "fleet"))
+
+	repoDir := filepath.Join(tempDir, "svc")
+	newGitRepo(t, repoDir)
+
+	proj := &config.Project{
+		Name: "no-review-proj",
+		Repos: map[string]config.Repo{
+			"svc": {Path: repoDir, Factory: &config.FactoryConfig{
+				Pipeline: []string{"test"},
+				Gates:    map[string]string{"unit": "true"},
+			}},
+		},
+	}
+	eng := newEngine(t, proj)
+	runID := "run-no-review-1"
+	createTestRun(t, eng, proj.Name, runID, "running")
+
+	if err := eng.RunStage(context.Background(), runID, &config.DAGStage{Name: "s", Repos: []string{"svc"}}); err != nil {
+		t.Fatalf("RunStage: %v", err)
+	}
+
+	phases, err := eng.Store.ListPhasesForRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range phases {
+		if p.Name == "review" {
+			t.Errorf("unexpected review phase recorded: %+v", p)
+		}
+	}
+	envelopes, err := eng.Store.ListEnvelopesForRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range envelopes {
+		if e.Stage == "review" {
+			t.Errorf("unexpected review envelope recorded: %+v", e)
+		}
+	}
+}
+
+// reviewAgentScript writes a fake agent that reports the given findings JSON
+// array as a "review" stage envelope. It never touches the diff itself —
+// RunStage's own DiffAgainstBase call is what is under test elsewhere.
+func reviewAgentScript(findingsJSON string) string {
+	return "#!/bin/sh\n" +
+		"mkdir -p .sergeant\n" +
+		"cat > .sergeant/envelope.json <<'EOF'\n" +
+		`{"task_id":"t","repo":"svc","stage":"review","summary":"reviewed","payload":{"findings":` + findingsJSON + `}}` + "\n" +
+		"EOF\n" +
+		"exit 0\n"
+}
+
+// Scenario: a review phase reporting only info/warning findings does not fail
+// the phase — the run proceeds to conclude on the rest of the pipeline.
+func TestRunStageReviewPhaseWithOnlyNonBlockingFindingsSucceeds(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("SERGEANT_FLEET_DIR", filepath.Join(tempDir, "fleet"))
+
+	repoDir := filepath.Join(tempDir, "svc")
+	newGitRepo(t, repoDir)
+
+	binDir := filepath.Join(tempDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	agentPath := filepath.Join(binDir, "goose")
+	findings := `[{"axis":"style","severity":"info","summary":"consider renaming x"},{"axis":"perf","severity":"warning","summary":"n+1 query"}]`
+	if err := os.WriteFile(agentPath, []byte(reviewAgentScript(findings)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	proj := &config.Project{
+		Name:     "review-proj",
+		Defaults: config.ProjectDefaults{Agent: agentPath},
+		Repos: map[string]config.Repo{
+			"svc": {Path: repoDir, Factory: &config.FactoryConfig{
+				Pipeline: []string{"review"},
+			}},
+		},
+	}
+	eng := newEngine(t, proj)
+	runID := "run-review-nonblocking-1"
+	createTestRun(t, eng, proj.Name, runID, "running")
+
+	if err := eng.RunStage(context.Background(), runID, &config.DAGStage{Name: "s", Repos: []string{"svc"}}); err != nil {
+		t.Fatalf("RunStage with only non-blocking findings should not fail: %v", err)
+	}
+
+	phases, err := eng.Store.ListPhasesForRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reviewPhase *store.PhaseRecord
+	for i := range phases {
+		if phases[i].Name == "review" {
+			reviewPhase = &phases[i]
+		}
+	}
+	if reviewPhase == nil {
+		t.Fatal("no review phase recorded")
+	}
+	if reviewPhase.Status != "passed" {
+		t.Errorf("review phase status = %q, want passed", reviewPhase.Status)
+	}
+}
+
+// Scenario: a review phase reporting a severity:"error" finding fails the
+// phase, mirroring how a failed gate fails the "test" phase — this is what
+// makes the run conclude "failed" so the existing blocked-bullet mechanism
+// takes over.
+func TestRunStageReviewPhaseWithBlockingFindingFailsTheStage(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("SERGEANT_FLEET_DIR", filepath.Join(tempDir, "fleet"))
+
+	repoDir := filepath.Join(tempDir, "svc")
+	newGitRepo(t, repoDir)
+
+	binDir := filepath.Join(tempDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	agentPath := filepath.Join(binDir, "goose")
+	findings := `[{"axis":"spec","severity":"error","summary":"diff does not implement the retry requirement"}]`
+	if err := os.WriteFile(agentPath, []byte(reviewAgentScript(findings)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	proj := &config.Project{
+		Name:     "review-proj",
+		Defaults: config.ProjectDefaults{Agent: agentPath},
+		Repos: map[string]config.Repo{
+			"svc": {Path: repoDir, Factory: &config.FactoryConfig{
+				Pipeline: []string{"review"},
+			}},
+		},
+	}
+	eng := newEngine(t, proj)
+	runID := "run-review-blocking-1"
+	createTestRun(t, eng, proj.Name, runID, "running")
+
+	err := eng.RunStage(context.Background(), runID, &config.DAGStage{Name: "s", Repos: []string{"svc"}})
+	if err == nil {
+		t.Fatal("expected RunStage to fail on a blocking review finding, got nil")
+	}
+}
