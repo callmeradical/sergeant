@@ -3,15 +3,6 @@ name: cross-repo-work
 description: Use when more than one repository owns a requested Sergeant outcome; decomposes ownership, dependencies, merge order, and acceptance before dispatch.
 ---
 
-> **V1 ONLY — DO NOT FOLLOW ON THE `v2` BRANCH.**
-> This procedure describes the v1 shell toolbelt (`bin/sgt-*`, tmux workers, the
-> v1 fleet layout). Decision D7 in `docs/prd-sergeant-v2.md` forbids v2 from
-> shelling out to v1 or reusing its supervision plumbing. If you reached this
-> file while working on v2, stop and read `AGENTS.md` instead. Where v2 lacks a
-> capability described here, that is unimplemented v2 scope, not a gap to close
-> by calling v1.
-
-
 # Skill: cross-repo-work
 
 Decompose a requested outcome across owning repositories and define dependency and
@@ -19,7 +10,7 @@ merge order before dispatch.
 
 ## When to use
 
-Load this skill when `sgt-context` shows that more than one repository owns the
+Load this skill when project context shows that more than one repository owns the
 requested outcome. Do not use it merely because a project contains multiple repos.
 
 Prerequisite: `load-project` has resolved repository paths, roles, groups, and
@@ -49,7 +40,9 @@ contract.
 ### 2. Define dependency order
 
 Create edges only when one repository's merged or deployed result is required by
-another. Use `prerequisite>dependent` notation accepted by `sgt-dispatch`.
+another. There is no `prerequisite>dependent` dispatch flag in v2 — state the
+order directly as the bullet order within the intent (decision D6); that order is
+what `POST /api/dispatch` and the shipping gate honor.
 
 Common evidence:
 
@@ -64,8 +57,10 @@ contract artifact or compatibility phase that breaks the cycle.
 
 ### 3. Inspect repository state
 
-Run `sgt-status <project>` and record non-main branches, uncommitted changes,
-behind/ahead state, active worktrees, and preserved workers for owning repos.
+For each owning repo, run `git status` and `git worktree list` in that repo's own
+path from the project YAML, and record non-main branches, uncommitted changes,
+behind/ahead state, and active worktrees. v2 has no fleet-wide multi-repo status
+command.
 
 Do not stash, reset, switch, or clean repository state during planning. Route an
 existing canonical branch/worktree to the worker brief, or stop for a decision when
@@ -75,7 +70,6 @@ state conflicts with the requested outcome.
 
 Each repository brief must include:
 
-- owning td task or creation requirement;
 - fixed point and preserved source state;
 - repository-specific tests, lint, typecheck, and build commands;
 - Standards and Spec review sources;
@@ -91,7 +85,8 @@ If the user requested planning only, stop after returning the repository briefs,
 acceptance evidence, and dependency graph. Do not dispatch or edit repositories.
 
 When the user requested implementation, load `dispatch` and execute through
-`sgt-dispatch`; the primary session must not edit several repositories directly.
+`POST /api/dispatch` — one dispatch call per repo/bullet; the primary session must
+not edit several repositories directly.
 
 After workers finish, reconcile:
 
@@ -99,7 +94,7 @@ After workers finish, reconcile:
 2. required CI and unresolved review threads;
 3. merge order from dependency edges;
 4. deployment order and cross-repo release notes;
-5. terminal td/fleet state and cleanup eligibility.
+5. terminal run/bullet status via `GET /api/bullets?run_id=` and cleanup eligibility.
 
 Do not report the cross-repo outcome complete until every owning repository has a
 terminal result or an explicit preserved blocker.

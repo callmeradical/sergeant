@@ -6,9 +6,16 @@ description: Use when the user says "to tickets", "create issues", "create td ta
 # To Tickets
 
 Turn a plan, specification, investigation, findings register, PR, or current
-conversation into implementation-ready td epics and tickets. Tickets are narrow,
-complete tracer bullets with explicit ownership, acceptance criteria, and blocking
-edges. Sergeant project configuration is the source of truth for repository scope.
+conversation into implementation-ready epics and tracer-bullet tickets. Tickets
+are narrow, complete tracer bullets with explicit ownership, acceptance criteria,
+and blocking edges. Sergeant project configuration is the source of truth for
+repository scope.
+
+v2's task-tracking is a read-only export (decision D4): Sergeant has no inbound
+integration that creates or mutates tasks in an external tracker. This skill
+produces the ticket breakdown and dispatches it through Sergeant's own Intent/
+Bullet records; it does not publish to, or otherwise write into, an external
+task tracker.
 
 ## Principles
 
@@ -20,7 +27,7 @@ edges. Sergeant project configuration is the source of truth for repository scop
 - Use expand-migrate-contract for mechanical changes that cannot remain green as a
   vertical slice.
 - Create epics for coherent programs, not as substitutes for executable tickets.
-- Never duplicate an existing td task or GitHub issue.
+- Never duplicate an existing open Sergeant intent or GitHub issue.
 - Preserve stable finding IDs such as `RBAC-P1-004` or `DATA-P0-002` in titles.
 - A ticket is not ready unless its acceptance criteria are observable and its
   blockers are accurate.
@@ -29,21 +36,16 @@ edges. Sergeant project configuration is the source of truth for repository scop
 
 When operating through Sergeant:
 
-1. Run `sgt-list` if the project name is not already established.
-2. Run `sgt-context <project>`.
-3. Run `sgt-td-list <project> --all --json` to deduplicate against every status.
-4. For architecture or codebase questions, use the existing graphify graph before
-   reading files individually.
+1. Run `GET /api/projects` or list `~/.config/sergeant/*.yaml` if the project
+   name is not already established.
+2. Run `GET /api/project-details?name=<project>`, or read the project YAML
+   directly.
+3. Run `GET /api/runs?project=<name>` and check for an existing open intent
+   targeting the same outcome — v2 has no external task list to deduplicate
+   against beyond Sergeant's own Intent/Bullet store.
+4. For architecture or codebase questions, use the existing Graphify graph
+   (`sergeant_graph_query` MCP tool) before reading files individually.
 5. Read any referenced issue, PR, specification, ADR, or findings register in full.
-
-If an owning repository has no td database, initialize it only after confirming it
-is a real project repository:
-
-```bash
-td init --work-dir /absolute/repo/path
-```
-
-Do not automatically add td instructions to repository guidance files.
 
 ## 2. Extract Decisions and Unknowns
 
@@ -109,88 +111,45 @@ the proposed breakdown first. For every ticket show:
 Ask only whether granularity, ownership, and blocking edges are correct. Do not ask
 the user to reconfirm decisions already made.
 
-## 5. Publish to td
+## 5. Task tracking is a stated gap, not a publish step
 
-Create local epics first so child tickets can reference real IDs:
+v2's task-tracking is a read-only export (decision D4). This skill does not
+create, update, or close tasks in an external tracker — there is no v2 command
+that does. Once the breakdown is confirmed, its durable record is the Intent and
+Bullet rows a dispatch creates in Sergeant's own store (see step 7 below), not an
+external ticket.
 
-```bash
-td create "<epic title>" \
-  --type epic \
-  --priority P1 \
-  --labels <comma-separated-labels> \
-  --description "<scope and cross-repo counterparts>" \
-  --acceptance "<epic completion gate>" \
-  --json
-```
+If the user wants the breakdown recorded in an external tracker as well, that is
+a separate, manual step outside this skill and outside Sergeant's current v2
+scope. Do not invent a command to do it.
 
-Create tickets in dependency order, blockers first:
+## 6. Validate the Breakdown
 
-```bash
-td create "<ticket title>" \
-  --type feature \
-  --priority P1 \
-  --parent <local-epic-id> \
-  --description "<what this vertical slice delivers>" \
-  --acceptance "<observable criteria>" \
-  --depends-on <local-blocker-id> \
-  --json
-```
+Before reporting the breakdown as ready:
 
-For an existing task, update rather than duplicate it:
-
-```bash
-td update <id> --parent <epic-id>
-td log <id> "Preserved branch/PR/worktree and cross-repo counterpart details"
-```
-
-Use `sgt-td-create` when one approved logical outcome needs matching task records in
-several registered repositories. Then add repository-specific details with `td log`.
-
-td dependencies are repository-local. For cross-repository blockers:
-
-- Record the counterpart repo and td ID in both descriptions or logs.
-- State the exact merge order.
-- Do not invent a native dependency edge that td cannot enforce across databases.
-
-Do not mark tasks `in_progress`; dispatch or a worker does that. New published tasks
-remain `open` until work begins.
-
-## 6. Validate the Graph
-
-After publishing:
-
-1. Run `sgt-td-list <project>` by priority.
-2. Run `td epic list` in every owning repository.
-3. Confirm each ticket has one parent epic.
-4. Confirm every dependency points in the correct direction.
-5. Confirm no circular or cross-repo pseudo-dependencies exist.
-6. Confirm preserved branches, PRs, and worktrees are logged.
-7. Close stale duplicates only with an explicit superseding task:
-
-```bash
-td close <duplicate-id> --admin "Superseded by <canonical-id>"
-```
+1. Confirm each ticket has one owning repository and one parent epic.
+2. Confirm every "blocked by" edge points in the correct direction.
+3. Confirm no circular or cross-repo pseudo-dependencies exist.
+4. Confirm preserved branches, PRs, and worktrees are named where they apply.
 
 ## 7. Report the Dispatch Frontier
 
 Return:
 
-- Epic IDs grouped by repository.
-- Ticket IDs grouped by priority and dependency wave.
+- Epics grouped by repository.
+- Tickets grouped by priority and dependency wave.
 - The **frontier**: tickets with no unfinished blockers.
 - Recommended concurrency: one worker per owning repository unless the project
   explicitly supports more.
-- Exact dispatch commands for the next wave:
-
-```bash
-sgt-dispatch <project> --td <ticket-id>
-```
+- Exact dispatch call for the next wave — `POST /api/dispatch` with `change_id`
+  set to the ticket's corresponding OpenSpec change id (decision O3), since
+  dispatch resolves to an OpenSpec change on v2, not an external ticket id.
 
 Do not dispatch unless the user asked to begin implementation.
 
 ## Ticket Quality Checklist
 
-Before publishing each ticket, verify:
+Before reporting each ticket as ready, verify:
 
 - [ ] One owning repository.
 - [ ] One independently verifiable outcome.
@@ -214,15 +173,15 @@ Before publishing each ticket, verify:
    - Acceptance: <concise observable criteria>
 ```
 
-## Output Template After Publishing
+## Output Template After Confirming
 
 ```markdown
 **Epics**
-- `<repo>` `<epic-id>`: <title>
+- `<repo>`: <title>
 
 **Frontier**
-- `<repo>` `<ticket-id>`: <title>
+- `<repo>`: <title>
 
 **Next Dispatch**
-`sgt-dispatch <project> --td <ticket-id>`
+`POST /api/dispatch` `{"project":"<project>","change_id":"<change-id>", ...}`
 ```

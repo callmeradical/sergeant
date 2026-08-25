@@ -3,42 +3,35 @@ name: load-project
 description: Use when a Sergeant project is named, registered, edited, synced, or graphed; resolves repository ownership, configuration, paths, and inherited instructions.
 ---
 
-> **V1 ONLY — DO NOT FOLLOW ON THE `v2` BRANCH.**
-> This procedure describes the v1 shell toolbelt (`bin/sgt-*`, tmux workers, the
-> v1 fleet layout). Decision D7 in `docs/prd-sergeant-v2.md` forbids v2 from
-> shelling out to v1 or reusing its supervision plumbing. If you reached this
-> file while working on v2, stop and read `AGENTS.md` instead. Where v2 lacks a
-> capability described here, that is unimplemented v2 scope, not a gap to close
-> by calling v1.
-
-
 # Skill: load-project
 
 Resolve Sergeant project ownership, configuration, and paths before work begins.
 
 ## When to use
 
-Load this skill when a project is named, registered, edited, synced, or graphed,
-or when repository ownership is not already established by `sgt-context` output.
+Load this skill when a project is named, registered, edited, or graphed, or when
+repository ownership is not already established by project-details output.
 
 ## Load project context
 
-1. If the project name is unknown, run `sgt-list` or `bin/sgt-list` and require
-   an exact registered name.
-2. Run `sgt-context <project>` or `bin/sgt-context <project>`.
+1. If the project name is unknown, run `GET /api/projects` or list
+   `~/.config/sergeant/*.yaml` and require an exact registered name.
+2. Run `GET /api/project-details?name=<project>`, or read the project YAML
+   directly via `internal/config.LoadProject`.
 3. From the output, record:
    - owning repository or repositories for the requested outcome;
-   - resolved absolute paths and clone state;
+   - resolved absolute paths;
    - group membership and repository roles;
    - inherited instructions in defaults, group, repository order;
    - configured Graphify output and included groups.
-4. Read a raw project YAML only when a required field is absent from the context
-   output.
-5. If a required repository is missing, run `sgt-sync <project>` only after the
-   requested work requires that repository. Stop if cloning or pull fails.
+4. Read a raw project YAML only when a required field is absent from the
+   project-details output.
+5. If a required repository's path does not exist, stop and report the exact
+   path from the project YAML. v2 does not clone repositories on an operator's
+   behalf — a missing or non-git path is refused, not fetched.
 
-Completion evidence is the `sgt-context` block showing every owning repository as
-cloned plus the instructions and paths that will govern execution.
+Completion evidence is the project-details response showing every owning
+repository's resolved path plus the instructions that will govern execution.
 
 ## Project registration and edits
 
@@ -50,12 +43,13 @@ Use this procedure when the user asks to add or change a project:
 3. Use absolute repository paths or paths relative to the global `dev_root`.
 4. Configure one project-level `graphify.output` outside source repositories when
    project Graphify is required.
-5. Run `sgt-list` and require the project to appear exactly once.
-6. Run `sgt-context <project>` and require every edited field needed by agents to
-   appear in resolved output.
-7. Run `sgt-sync <project>` only when repositories must be cloned or refreshed.
+5. Run `GET /api/projects` and require the project to appear exactly once.
+6. Run `GET /api/project-details?name=<project>` and require every edited field
+   needed by agents to appear in resolved output.
+7. If a repository path in the edited YAML does not exist on disk, report it and
+   stop — v2 does not clone or refresh repositories automatically.
 8. If validation fails, restore the prior YAML or leave the new file uncommitted
-   and report the exact command error.
+   and report the exact error.
 
 The schema source of truth remains `docs/schema.md`; do not duplicate its field
 reference in agent instructions.
@@ -64,14 +58,16 @@ reference in agent instructions.
 
 Use this procedure for project architecture questions or explicit graph updates:
 
-1. Read the Graphify path from `sgt-context <project>`.
+1. Read the Graphify path from `GET /api/project-details?name=<project>`.
 2. If no `graphify.output` is configured, stop and request or add the project-level
-   path before running Graphify.
-3. Run `sgt-graphify <project>` or `bin/sgt-graphify <project>`.
+   path before building the graph.
+3. `POST /api/build-graph` with `{"project": "<project>"}` (`internal/graphify.BuildProjectGraph`,
+   decision D9).
 4. Require `<graphify.output>/graph.json` and `GRAPH_REPORT.md` to exist after a
-   successful run.
-5. Use `graphify query` for focused questions; read `GRAPH_REPORT.md` for broad
-   architecture, community, and god-node context.
+   successful build.
+5. Use the `sergeant_graph_query`, `sergeant_graph_explain`, and
+   `sergeant_graph_affected` MCP tools for focused questions; read `GRAPH_REPORT.md`
+   for broad architecture, community, and god-node context.
 6. Do not publish generated graph output inside an owning source repository.
 
 ## Failure behavior
@@ -80,6 +76,6 @@ Use this procedure for project architecture questions or explicit graph updates:
 |---|---|
 | Project is unregistered | Stop and ask whether to register it. |
 | Required repo has no URL | Stop with the repo name and missing field. |
-| Required executable is missing | Report the executable and platform-neutral installation requirement; do not invent a fallback parser. |
-| Context and YAML disagree | Treat `sgt-context` failure as blocking and preserve the YAML for diagnosis. |
-| Graph output is stale | Run `sgt-graphify` only when architecture work requires a refresh or the user requests one. |
+| Required repo path does not exist | Report the exact path and stop; do not clone or invent a fallback. |
+| Project-details and YAML disagree | Treat the project-details failure as blocking and preserve the YAML for diagnosis. |
+| Graph output is stale | Rebuild via `POST /api/build-graph` only when architecture work requires a refresh or the user requests one. |

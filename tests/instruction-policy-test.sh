@@ -66,32 +66,41 @@ reject_text "AGENTS.md" "## Project YAML schema (summary)"
 reject_text "AGENTS.md" "## td task management integration"
 reject_text "AGENTS.md" "## Wiki integration"
 
-reject_text "skills/cross-repo-work/SKILL.md" 'git -C <path> checkout -b'
-reject_text "skills/cross-repo-work/SKILL.md" 'git -C <path> push -u origin'
-reject_text "skills/cross-repo-work/SKILL.md" 'gh pr create'
-
 reject_text "skills/dispatch/SKILL.md" "Ask for confirmation before dispatching."
 reject_text "skills/dispatch/SKILL.md" "remain alive, and wait"
-reject_text "skills/dispatch/SKILL.md" 'treehouse return <path> --force'
-require_text "skills/dispatch/SKILL.md" 'sgt-watch --sync <task-id>'
-require_text "skills/dispatch/SKILL.md" '--intent-file <path>'
-require_text "skills/dispatch/SKILL.md" "standard-isolated"
-require_text "skills/dispatch/SKILL.md" "auth, OAuth, security, secret, credential, payment, database, migration, stateful, production, destructive"
-require_text "skills/dispatch/SKILL.md" "mutation before validation"
-require_text "skills/dispatch/SKILL.md" "After two remediation cycles"
 require_text "docs/using-sergeant.md" '--intent-file intent.md'
 require_text "docs/using-sergeant.md" ".sergeant-intent.md"
 reject_text "AGENTS.md" 'no-mistakes axi run --intent "<the user'
 require_text "skills/cross-repo-work/SKILL.md" "If the user requested planning only"
-reject_text "docs/troubleshooting.md" "follow no-mistakes policy"
-require_text "docs/troubleshooting.md" "Do not authorize an in-run fix"
-require_text "docs/troubleshooting.md" 'sgt-watch --sync <task-id>'
-require_text "docs/troubleshooting.md" "tests/runtime-bash-test.sh"
-require_text "docs/troubleshooting.md" "docker.io/library/bash:3.2@sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89"
-# shellcheck disable=SC2016
-reject_text "docs/troubleshooting.md" 'Use `sgt-watch <task>`'
 require_text "docs/skills.md" "User-invoked orchestrators"
 require_text "docs/skills.md" "Model-invoked disciplines"
+
+reject_text "skills/dispatch/SKILL.md" "sgt-dispatch"
+reject_text "skills/dispatch/SKILL.md" "sgt-watch"
+reject_text "skills/dispatch/SKILL.md" "sgt-respond"
+reject_text "skills/dispatch/SKILL.md" "treehouse"
+require_text "skills/dispatch/SKILL.md" "POST /api/dispatch"
+require_text "skills/dispatch/SKILL.md" "POST /api/run-resume"
+reject_text "skills/cross-repo-work/SKILL.md" "sgt-context"
+reject_text "skills/cross-repo-work/SKILL.md" "sgt-status"
+reject_text "skills/cross-repo-work/SKILL.md" "sgt-dispatch"
+reject_text "skills/load-project/SKILL.md" "sgt-list"
+reject_text "skills/load-project/SKILL.md" "sgt-context"
+reject_text "skills/load-project/SKILL.md" "sgt-sync"
+reject_text "skills/load-project/SKILL.md" "sgt-graphify"
+reject_text "skills/wiki/SKILL.md" "sgt-dispatch"
+reject_text "skills/wiki/SKILL.md" "sgt-notify"
+reject_text "skills/wiki/SKILL.md" "sgt-cleanup"
+reject_text ".agents/skills/to-tickets/SKILL.md" "sgt-td-create"
+reject_text ".agents/skills/to-tickets/SKILL.md" "sgt-list"
+reject_text ".agents/skills/to-tickets/SKILL.md" "sgt-context"
+require_text ".agents/skills/to-tickets/SKILL.md" "read-only export"
+reject_text "docs/troubleshooting.md" "sgt-cleanup"
+reject_text "docs/troubleshooting.md" "sgt-sync"
+reject_text "schema/project.yaml.example" "sgt-graphify"
+reject_text "schema/project.yaml.example" "sgt-sync"
+reject_text "schema/project.yaml.example" "sgt-dag-run"
+reject_text "schema/project.yaml.example" "sgt-watch"
 
 require_text "skills/load-project/SKILL.md" "## Project registration and edits"
 require_text "skills/load-project/SKILL.md" "## Project Graphify"
