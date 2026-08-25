@@ -9,6 +9,7 @@ import (
 
 	"github.com/callmeradical/sergeant/internal/config"
 	"github.com/callmeradical/sergeant/internal/dag"
+	"github.com/callmeradical/sergeant/internal/export"
 	"github.com/callmeradical/sergeant/internal/handoff"
 	"github.com/callmeradical/sergeant/internal/mcp"
 	"github.com/callmeradical/sergeant/internal/naming"
@@ -159,7 +160,7 @@ func startUI() {
 	}
 	defer st.Close()
 
-	startExportRunners(st)
+	startExportRunners(st, export.Backends)
 
 	server := ui.NewServer(st, 8484)
 	if err := server.Start(); err != nil {
@@ -168,13 +169,14 @@ func startUI() {
 	}
 }
 
-// startExportRunners is the wiring point for internal/export.Runner: once a
-// Target implementation exists, this starts one Runner per project with an
-// Export block configured, in a goroutine alongside the HTTP server. No
-// Target implementation exists yet — which backend name resolves to which
-// Target is a separate, later decision — so today this only reports a
-// configured project rather than silently ignoring it.
-func startExportRunners(st *store.Store) {
+// startExportRunners is the wiring point for internal/export.Runner: for
+// each project with an Export block configured, it looks up
+// proj.Export.Backend in backends. A hit constructs that backend's Target,
+// builds a Runner, and starts it in its own goroutine alongside the HTTP
+// server. A miss reports exactly as before this change — which backend name
+// resolves to which Target is a separate, later decision, made by whatever
+// registers into the map passed here (export.Backends in production).
+func startExportRunners(st *store.Store, backends map[string]export.Constructor) {
 	projects, err := config.ListProjects()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "export: listing projects: %v\n", err)
@@ -184,6 +186,21 @@ func startExportRunners(st *store.Store) {
 		if proj.Export == nil {
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "export: project %q configures backend %q, but no export target implementation is registered yet; skipping\n", proj.Name, proj.Export.Backend)
+		ctor, ok := backends[proj.Export.Backend]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "export: project %q configures backend %q, but no export target implementation is registered yet; skipping\n", proj.Name, proj.Export.Backend)
+			continue
+		}
+		target, err := ctor(*proj.Export)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "export: project %q backend %q: %v\n", proj.Name, proj.Export.Backend, err)
+			continue
+		}
+		runner := &export.Runner{Store: st, Target: target}
+		go func(projectName string) {
+			if err := runner.Run(context.Background()); err != nil {
+				fmt.Fprintf(os.Stderr, "export: runner for project %q stopped: %v\n", projectName, err)
+			}
+		}(proj.Name)
 	}
 }
