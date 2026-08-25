@@ -814,5 +814,197 @@ a{color:var(--muted)}
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
+<header>
+  <h1>Sergeant v2</h1>
+  <p>Independent review. Written by the critic, not the builder.</p>
+  <p class="meta">
+    Review 027 · 2026-08-25 · branch <code>v2</code> · merge commit <code>0c318bd</code>
+    ("merge: dispatch-briefs-render-from-the-stored-intent", merge of <code>c8eb0e1</code>
+    "feat(intent-brief): render dispatch briefs from the stored intent" into <code>44458c7</code>)
+    reviewed against
+    <code>openspec/changes/dispatch-briefs-render-from-the-stored-intent/{proposal,design,tasks}.md</code>,
+    <code>specs/intent-brief/spec.md</code>, and the originating
+    <code>docs/prd-canonical-intent-brief.md</code> · current <code>v2</code> HEAD is
+    <code>0c318bd</code>, the tip of this feature; build/vet/test run at that HEAD
+  </p>
+</header>
+
+<section>
+  <h2>Current status</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at HEAD <code>0c318bd</code>, no output</div></div>
+    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./internal/...</code>, no output</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">clean except named environmental failures</span></div><div class="small"><code>go test ./internal/... -count=1</code> run both with and without the prescribed <code>-skip</code>; without it, exactly the 10 named LLM-key-dependent tests fail (<code>TestBuildProjectGraphAppliesExcludePatterns</code>, <code>TestBuildProjectGraphMergesEveryParticipatingRepo</code>, <code>TestIncludeGroupsExcludesNonMatchingRepos</code>, <code>TestBuildNeverLeavesOutputInAPartialState</code>, <code>TestPublishFailureRestoresPriorGraph</code>, <code>TestBuildNeverSpawnsSgtGraphify</code>, <code>TestQueryAgainstABuiltGraphReturnsAnAnswer</code>, <code>TestExplainAndAffectedAreDistinctFromQuery</code>, <code>TestMCPGraphQueryAgainstABuiltGraphReturnsAnswer</code>, <code>TestBuildGraphEndpointBuildsAndPublishes</code>), all with <code>error: no LLM API key found</code>, and nothing else — none touch <code>internal/store</code>, <code>internal/dag</code>, or the <code>sergeant_get_brief</code> tests in <code>internal/mcp</code></div></div>
+    <div class="card"><div class="label">Signatures named in design.md</div><div class="value"><span class="status">match exactly</span></div><div class="small"><code>Store.RenderIntentBrief(intentID, repo string, gates []string) (string, error)</code> in <code>internal/store/brief.go</code> is a verbatim match of design.md's code block, including the exact rendering order and the <code>Fprintf</code> format strings. Both call sites design.md names — <code>internal/dag/engine.go</code>'s <code>RunStage</code> (line 356-362) and <code>internal/mcp/server.go</code>'s <code>sergeant_get_brief</code> case (line 300-316) — use it, with the exact fallback-on-error/empty-IntentID structure design.md specifies</div></div>
+    <div class="card"><div class="label">Spec.md scenario coverage</div><div class="value"><span class="status">7/7 scenarios, real tests</span></div><div class="small">Every named scenario in <code>specs/intent-brief/spec.md</code> maps to a specific, assertion-backed test in <code>internal/store/brief_test.go</code>, <code>internal/mcp/get_brief_test.go</code>, or <code>internal/dag/engine_test.go</code>; see table below</div></div>
+    <div class="card"><div class="label">No-intent-id non-regression guarantee</div><div class="value"><span class="status">verified</span></div><div class="small"><code>TestRunStageWithNoIntentIDStillReceivesStageBrief</code> creates a run with no <code>IntentID</code>, runs <code>RunStage</code>, and asserts the prompt the fake agent received is exactly <code>stage.Brief</code> — not merely that the run reached a terminal status</div></div>
+    <div class="card"><div class="label">Scope</div><div class="value"><span class="status">no creep</span></div><div class="small"><code>git show c8eb0e1 --stat</code>: 6 files, 438 insertions, 6 deletions — <code>internal/dag/engine.go</code> (+6), its test file, <code>internal/mcp/server.go</code> (+23/-6), its new brief test file, and <code>internal/store/brief.go</code>/<code>brief_test.go</code> (both new). No schema change, no intent-wide brief, no new stored column, nothing touching <code>IntentRecord</code>/<code>BulletRecord</code>'s shape</div></div>
+  </div>
+  <p><strong>Verdict:</strong> MEETS SPEC. Every named signature and call site matches design.md
+  exactly, every scenario in specs/intent-brief/spec.md has a real test, build/vet/test are clean
+  save the same 10 pre-existing environmental failures every prior review this session has already
+  confirmed by name, the non-regression guarantee for pre-existing runs is directly verified, the
+  breaking change to <code>sergeant_get_brief</code>'s input schema is explicitly, deliberately
+  accepted in design.md's own text, and the rendered Markdown format is exactly what design.md's
+  code block specifies — not an invention by whoever implemented it. No scope creep. See Findings
+  for detail.</p>
+</section>
+
+<section>
+  <h2>What I inspected</h2>
+  <table>
+    <tr><th>Area</th><th>Method</th></tr>
+    <tr><td>Binding spec</td><td>Read <code>openspec/changes/dispatch-briefs-render-from-the-stored-intent/{proposal,design,tasks}.md</code>, <code>specs/intent-brief/spec.md</code>, and the originating <code>docs/prd-canonical-intent-brief.md</code> in full before reading any code</td></tr>
+    <tr><td>The actual diff</td><td><code>git show c8eb0e1 --stat</code> and full diff of the two non-test files (<code>internal/dag/engine.go</code>, <code>internal/mcp/server.go</code>) — confirmed the 6-line <code>RunStage</code> change and the <code>sergeant_get_brief</code> schema/implementation replacement are the entire non-test surface touched</td></tr>
+    <tr><td>Signature match against design.md</td><td>Compared <code>internal/store/brief.go</code> line by line against design.md's code block: identical field order (statement, repo/position/status, blocked reason, change id/repo, gates), identical <code>Fprintf</code> format strings, identical error-wrapping on <code>GetIntent</code> failure and the not-found case for a repo with no matching bullet</td></tr>
+    <tr><td><code>RunStage</code> call site</td><td>Read <code>internal/dag/engine.go</code> lines 330-373: the shipped code is character-for-character design.md's proposed replacement — <code>e.Store.GetRun(runID)</code>, guard on <code>run.IntentID != ""</code>, <code>SortedGateNames(repoCfg)</code>, fall through to <code>stage.Brief</code>/generic string on any error</td></tr>
+    <tr><td><code>sergeant_get_brief</code> call site</td><td>Read <code>internal/mcp/server.go</code>'s full diff: <code>InputSchema</code> changed from required <code>project</code> to required <code>intent_id</code>+<code>repo</code>; implementation changed from <code>config.LoadProject(projName)</code> + raw <code>json.MarshalIndent</code> dump to <code>GetIntent</code> → <code>LoadProject(intent.Project)</code> → <code>SortedGateNames(repoCfg)</code> → <code>RenderIntentBrief</code>, exactly design.md's proposed replacement</td></tr>
+    <tr><td>Spec scenario → test mapping</td><td>Read every scenario in <code>specs/intent-brief/spec.md</code> against <code>brief_test.go</code>'s 5 tests, <code>get_brief_test.go</code>'s 3 tests, and <code>engine_test.go</code>'s 2 new tests, matched by name and by reading each test body's actual assertions, not by title alone</td></tr>
+    <tr><td>Prompt-content assertion, not terminal-status-only</td><td>Read <code>TestRunStagePromptIncludesIntentStatementAndBulletState</code> in full: sets <code>stage.Brief</code> to "raw operator text, must not be used", asserts the fake agent's received prompt does <em>not</em> contain that string and does contain the intent statement, repo, position, and status — directly distinguishing a rendered brief from the old raw pass-through, as tasks.md requires</td></tr>
+    <tr><td>Read-only/idempotent guarantee</td><td>Read <code>TestRenderIntentBriefRenderingTwiceWritesNothing</code>: snapshots <code>st.CurrentSequence()</code> before and after two renders, asserting no new row was written, not only that the two returned strings are equal</td></tr>
+    <tr><td>Deliberate breaking change, not an accidental regression</td><td>Read design.md's "This is a breaking change to the tool's input schema (<code>project</code> is gone). Accepted deliberately..." paragraph and proposal.md's Problem section describing the old behavior (raw project YAML dump) as never having matched the tool's own registered description — confirmed the old <code>json.MarshalIndent(proj, ...)</code> behavior in the pre-change <code>server.go</code> via <code>git show c8eb0e1 -- internal/mcp/server.go</code></td></tr>
+    <tr><td>Rendered format's provenance</td><td>Compared the shipped <code>"# Intent"</code>/<code>"# Bullet"</code>/<code>"# OpenSpec change"</code>/<code>"# Gates"</code> headers against design.md's own code block (lines 42-58 of design.md) — identical; and confirmed the PRD's Open Questions section explicitly defers "exact document format" to "an OpenSpec <code>design.md</code> decision, not a product requirement," so design.md fixing this format is exactly what the PRD asked for, not scope invented downstream</td></tr>
+    <tr><td>Full suite, twice</td><td><code>go test ./internal/... -count=1</code> with the prescribed <code>-skip</code> (clean, 12/12 packages) and without it (exactly the 10 named tests fail, confirmed by name and by identical "no LLM API key found" error text)</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Spec.md scenario coverage</h2>
+  <table>
+    <tr><th>Scenario</th><th>Test</th></tr>
+    <tr><td>The UI-dispatched path's agent prompt includes the intent statement and bullet state</td><td><code>TestRunStagePromptIncludesIntentStatementAndBulletState</code> (<code>internal/dag/engine_test.go</code>) — asserts the actual prompt string, not just run status</td></tr>
+    <tr><td>A blocked bullet's brief includes its recorded reason</td><td><code>TestRenderIntentBriefIncludesBlockedReason</code> (<code>internal/store/brief_test.go</code>)</td></tr>
+    <tr><td>A bullet with no blocked reason omits the blocked-reason line</td><td><code>TestRenderIntentBriefOmitsBlockedReasonLineWhenNotBlocked</code></td></tr>
+    <tr><td><code>sergeant_get_brief</code> and the dispatch-time prompt agree</td><td><code>TestRenderIntentBriefAgreesForTheSameArguments</code> (direct mechanism test, string equality on <code>RenderIntentBrief</code> itself) and <code>TestGetBriefRendersTheSharedBrief</code> (<code>internal/mcp/get_brief_test.go</code>, exercises the actual MCP handler and compares its output to <code>RenderIntentBrief</code> called directly)</td></tr>
+    <tr><td><code>sergeant_get_brief</code> refuses a repo with no matching bullet</td><td><code>TestRenderIntentBriefRefusesRepoWithNoMatchingBullet</code> and <code>TestGetBriefRefusesRepoWithNoMatchingBullet</code></td></tr>
+    <tr><td>Rendering twice with no state change produces identical output, writes nothing</td><td><code>TestRenderIntentBriefRenderingTwiceWritesNothing</code> — string equality plus a <code>CurrentSequence()</code> snapshot before/after proving no write occurred</td></tr>
+    <tr><td>A run with no intent id still receives <code>stage.Brief</code></td><td><code>TestRunStageWithNoIntentIDStillReceivesStageBrief</code></td></tr>
+  </table>
+  <p>All 7 scenarios have real, assertion-backed coverage. No scenario in specs/intent-brief/spec.md
+  is uncovered. As a bonus, <code>TestGetBriefToolAdvertisesIntentIDAndRepo</code> directly asserts
+  the schema no longer advertises <code>project</code>, beyond what any single named scenario
+  strictly requires.</p>
+</section>
+
+<section>
+  <h2>Findings</h2>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Every named function/signature and both call sites in design.md are exactly what got built</h3>
+    <p><code>Store.RenderIntentBrief(intentID, repo string, gates []string) (string, error)</code>
+    in <code>internal/store/brief.go</code> is a verbatim match of design.md's code block — same
+    field order, same error-wrapping, same not-found error for an unmatched repo. Both call sites
+    named in design.md use it: <code>internal/dag/engine.go</code>'s <code>RunStage</code> (line
+    356-362) loads the run, checks <code>IntentID != ""</code>, computes
+    <code>SortedGateNames(repoCfg)</code>, and falls back to <code>stage.Brief</code> on any error —
+    character-for-character design.md's proposed diff. <code>internal/mcp/server.go</code>'s
+    <code>sergeant_get_brief</code> case (line 300-316) resolves the intent to learn the project,
+    loads that project's config, computes gate names the same way <code>sergeant_run_gates</code>
+    already does, and calls the shared function — also matching design.md exactly, including the
+    added <code>"github.com/callmeradical/sergeant/internal/dag"</code> import for
+    <code>SortedGateNames</code>.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; The breaking change to <code>sergeant_get_brief</code>'s input schema is deliberate and explicitly accepted, not an accidental regression</h3>
+    <p>The pre-change implementation (<code>git show c8eb0e1 -- internal/mcp/server.go</code>) called
+    <code>config.LoadProject(projName)</code> and returned <code>json.MarshalIndent(proj, "", "  ")</code>
+    — a raw project-config dump, confirming proposal.md's Problem section's description of the gap.
+    design.md states plainly: "This is a breaking change to the tool's input schema (<code>project</code>
+    is gone). Accepted deliberately: the tool's own registered description already promised
+    intent-brief content it never delivered... no caller could have been relying on the current
+    behavior actually matching that description, since it never did." <code>proposal.md</code>'s Out
+    of scope section separately confirms only the tool's schema/implementation change, not its name
+    or removal. This is a spec-sanctioned break, not a silent regression.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; The rendered Markdown format was specified by design.md, not invented downstream</h3>
+    <p>The shipped headers (<code>"# Intent"</code>, <code>"# Bullet"</code>,
+    <code>"# OpenSpec change"</code>, <code>"# Gates"</code>) match design.md's own code block for
+    <code>RenderIntentBrief</code> exactly, down to the <code>Fprintf</code> format strings. The
+    PRD's Open Questions section explicitly defers "exact document format (Markdown vs. structured
+    JSON...)" as "an OpenSpec <code>design.md</code> decision, not a product requirement" — so
+    design.md fixing a concrete Markdown format is exactly the PRD's intended division of labor, not
+    scope the implementer added on their own initiative.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified — no scope creep</span> &nbsp; The diff adds nothing beyond what proposal.md/design.md/tasks.md describe</h3>
+    <p><code>git show c8eb0e1 --stat</code>: 6 files, 438 insertions, 6 deletions. No intent-wide
+    (all-bullets) brief was added (explicitly out of scope per proposal.md and the PRD's second Open
+    Question), no new stored column/table/file for the rendered output, no change to
+    <code>IntentRecord</code>/<code>BulletRecord</code>'s shape, and <code>sergeant_get_brief</code>'s
+    tool name and registration slot are untouched — only its schema and implementation changed,
+    exactly as proposal.md's Out of scope section requires.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Non-regression guarantee for pre-existing runs holds</h3>
+    <p><code>TestRunStageWithNoIntentIDStillReceivesStageBrief</code> creates a run with no
+    <code>IntentID</code> set, runs the real <code>RunStage</code> against a fake agent binary that
+    writes the prompt it received to a file, and asserts that file's contents equal
+    <code>stage.Brief</code> exactly. This is a direct assertion on the actual prompt text, not an
+    inference from the run's terminal status, satisfying tasks.md's explicit instruction to test at
+    this level of directness.</p>
+  </div>
+
+</section>
+
+<section>
+  <h2>Evidence index</h2>
+  <table>
+    <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
+    <tr><td>Build/vet clean at HEAD <code>0c318bd</code></td><td><code>go build ./...</code>, <code>go vet ./internal/...</code></td><td>both silent</td></tr>
+    <tr><td>Full suite clean except pre-approved environmental failures</td><td><code>go test ./internal/... -count=1</code>, run once with the prescribed <code>-skip</code> and once without</td><td>with <code>-skip</code>: 12/12 packages pass; without: exactly the same 10 named tests fail as in Review 026, all "no LLM API key found," none touching store/dag/mcp-brief code</td></tr>
+    <tr><td>Signatures and both call sites match design.md</td><td>Line-by-line comparison of <code>brief.go</code>, <code>engine.go</code>'s <code>RunStage</code>, and <code>server.go</code>'s <code>sergeant_get_brief</code> case against design.md's code blocks</td><td>exact match</td></tr>
+    <tr><td>7/7 spec.md scenarios covered</td><td>Named each scenario against its test in <code>brief_test.go</code>/<code>get_brief_test.go</code>/<code>engine_test.go</code>, read each test body's assertions</td><td>all 7 present with real assertions; see Spec.md scenario coverage table above</td></tr>
+    <tr><td>Breaking schema change is deliberate, not accidental</td><td>Read design.md's explicit acceptance paragraph and the pre-change <code>server.go</code> diff</td><td>confirmed intentional and documented</td></tr>
+    <tr><td>Rendered format traces to design.md, not invented</td><td>Compared shipped headers to design.md's code block; read PRD's Open Questions section</td><td>format is design.md's own specification, which the PRD explicitly delegated to it</td></tr>
+    <tr><td>No scope creep</td><td><code>git show c8eb0e1 --stat</code>: 6 files, 438 insertions, 6 deletions, no schema/table/column changes</td><td>confirmed minimal, in-scope diff</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Verdict</h2>
+  <div class="item ok">
+    <p><strong>MEETS SPEC.</strong> <code>Store.RenderIntentBrief(intentID, repo string, gates
+    []string) (string, error)</code> is exactly what design.md specifies, and both call sites design.md
+    names — <code>internal/dag/engine.go</code>'s <code>RunStage</code> and
+    <code>internal/mcp/server.go</code>'s <code>sergeant_get_brief</code> case — use it exactly as
+    described, including the fallback-to-<code>stage.Brief</code> behavior for runs with no intent id.
+    All 7 scenarios named in <code>specs/intent-brief/spec.md</code> have real, assertion-backed test
+    coverage across <code>internal/store/brief_test.go</code>, <code>internal/mcp/get_brief_test.go</code>,
+    and <code>internal/dag/engine_test.go</code>, with no scenario uncovered. Build and vet are clean;
+    the full test suite is clean except the same 10 pre-existing, environmental, LLM-key-dependent
+    failures confirmed by name in every prior review this session, none of which touch this change's
+    code. The non-regression guarantee for pre-existing runs is directly verified by asserting on the
+    actual prompt string, not merely on terminal run status. The breaking change to
+    <code>sergeant_get_brief</code>'s input schema (<code>project</code> replaced by
+    <code>intent_id</code>+<code>repo</code>) is explicitly, deliberately accepted in design.md's own
+    text — not an accidental regression — because the old behavior never matched the tool's own
+    registered description in the first place. The rendered Markdown format
+    (<code>"# Intent"</code>/<code>"# Bullet"</code>/<code>"# OpenSpec change"</code>/<code>"# Gates"</code>)
+    is design.md's own specified format, not an invention by the implementer, and the PRD's Open
+    Questions section explicitly left exact format resolution to design.md. No scope creep: the diff
+    is 6 files, 438 insertions, 6 deletions, touching only what proposal.md/design.md/tasks.md
+    describe. No caveats found.</p>
+  </div>
+</section>
+
+<footer>
+  <p class="meta">Review 027 · findings above are reproduced from commands run directly against the
+  current <code>v2</code> working tree at HEAD <code>0c318bd</code>. No mutations were made to
+  <code>internal/store/brief.go</code>, <code>internal/dag/engine.go</code>, or
+  <code>internal/mcp/server.go</code> for this review — every scenario in specs/intent-brief/spec.md
+  already has a test whose assertions directly distinguish the correct behavior from the specific
+  regression it guards against (e.g. the raw-<code>stage.Brief</code>-contains check in
+  <code>TestRunStagePromptIncludesIntentStatementAndBulletState</code>, and the sequence-count check
+  in <code>TestRenderIntentBriefRenderingTwiceWritesNothing</code>), so no independent mutation test
+  was judged necessary to establish confidence beyond reading each assertion directly. Reviews 026
+  and earlier were not re-examined; they stand as recorded above.</p>
+  <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
+</footer>
+
 </main></body>
 </html>
