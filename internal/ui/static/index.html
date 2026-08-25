@@ -6,6 +6,7 @@
   <title>Sergeant — Software Factory Spine</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="/static/xterm.css">
   <style>
     @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700;800&display=swap');
     body {
@@ -182,6 +183,14 @@
         class="truncate rounded px-1 -mx-1 hover:text-white hover:bg-[#161b22] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
         Work analytics
       </button>
+      <!-- Embedded terminal (proposal.md): a real, Go-spawned shell PTY per
+           session, unrecorded and unattributed to any intent/bullet/phase.
+           Opens the bottom drawer; a fresh click with no sessions open starts
+           the first one instead of toggling an empty drawer. -->
+      <button type="button" id="btn-open-terminal" onclick="termSessions.size ? toggleTerminalDrawer() : startTerminalSession()"
+        class="truncate rounded px-1 -mx-1 hover:text-white hover:bg-[#161b22] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+        <i class="fa-solid fa-terminal" aria-hidden="true"></i> Terminal
+      </button>
       <span id="stat-metrics-badge" class="truncate text-slate-300">&mdash;</span>
     </div>
     <div class="flex items-center gap-3 shrink-0">
@@ -206,6 +215,31 @@
       </button>
     </div>
     <div id="drawer-body" class="flex-1 overflow-y-auto min-h-0 p-3 space-y-3 text-[11px]"></div>
+  </aside>
+
+  <!-- Terminal drawer.
+       Modeled on launchpad's PTY-backed terminal (proposal.md): a real shell
+       process per session, not a log or simulated output. Slides up from the
+       bottom rather than overlaying from the right like detail-drawer, since
+       this is a workspace the operator types into, not a read-only panel —
+       and unlike detail-drawer, closing it does not end the sessions inside;
+       only an explicit kill (per-tab close, or /api/terminal-kill) does. -->
+  <aside id="terminal-drawer" aria-label="Terminal" aria-hidden="true" inert
+    class="fixed left-0 right-0 bottom-0 h-[55vh] bg-[#0b0e14] border-t border-[#30363d] shadow-2xl z-40 flex flex-col translate-y-full transition-transform duration-150 ease-out motion-reduce:transition-none">
+    <div class="h-9 shrink-0 bg-[#161b22] border-b border-[#21262d] px-2 flex items-center justify-between gap-2">
+      <div id="terminal-tabs" class="flex-1 flex items-end gap-1 overflow-x-auto min-h-0" role="tablist" aria-label="Open terminal sessions"></div>
+      <div class="flex items-center gap-1 shrink-0">
+        <button type="button" onclick="startTerminalSession()" aria-label="New terminal" title="New terminal"
+          class="min-w-[28px] min-h-[28px] flex items-center justify-center rounded text-[#8b949e] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+          <i class="fa-solid fa-plus text-[10px]" aria-hidden="true"></i>
+        </button>
+        <button type="button" id="terminal-drawer-close" onclick="closeTerminalDrawer()" aria-label="Hide terminal drawer" title="Hide terminal drawer (sessions stay running)"
+          class="min-w-[28px] min-h-[28px] flex items-center justify-center rounded text-[#8b949e] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+          <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+        </button>
+      </div>
+    </div>
+    <div id="terminal-panes" class="relative flex-1 min-h-0"></div>
   </aside>
 
   <!-- Prune Preview Confirmation Modal -->
@@ -236,6 +270,8 @@
     </div>
   </div>
 
+  <script src="/static/xterm.js"></script>
+  <script src="/static/xterm-addon-fit.js"></script>
   <script>
     let activeRunId = null;
     let allRuns = [];
@@ -860,6 +896,189 @@
       return document.getElementById('detail-drawer').getAttribute('aria-hidden') === 'false';
     }
 
+    // ---- Embedded terminal -----------------------------------------------
+    // One xterm.js Terminal + one WebSocket per session (design.md's "one
+    // socket per session" protocol), independent of every other view on this
+    // page and of each other. Nothing here is recorded or attributed to an
+    // intent/bullet/phase (proposal.md's "out of scope") — it is unrecorded,
+    // manual operator action, same trust boundary as every other
+    // unrestricted local action this dashboard already exposes.
+    const termSessions = new Map(); // id -> { term, fitAddon, socket, el, cwd, shell }
+    let activeTermId = null;
+
+    function openTerminalDrawer() {
+      const d = document.getElementById('terminal-drawer');
+      d.setAttribute('aria-hidden', 'false');
+      d.removeAttribute('inert');
+      d.classList.remove('translate-y-full');
+      if (activeTermId) {
+        const sess = termSessions.get(activeTermId);
+        if (sess) setTimeout(() => { sess.fitAddon.fit(); sess.term.focus(); }, 60);
+      }
+    }
+
+    // Hides the drawer without touching any session — the PTYs behind it
+    // keep running, exactly like switching away from a terminal tab in any
+    // other terminal emulator. Only an explicit kill ends a session.
+    function closeTerminalDrawer() {
+      const d = document.getElementById('terminal-drawer');
+      d.setAttribute('aria-hidden', 'true');
+      d.setAttribute('inert', '');
+      d.classList.add('translate-y-full');
+    }
+
+    function toggleTerminalDrawer() {
+      const open = document.getElementById('terminal-drawer').getAttribute('aria-hidden') === 'false';
+      if (open) closeTerminalDrawer(); else openTerminalDrawer();
+    }
+
+    // startTerminalSession creates a new PTY-backed session and opens it in
+    // the drawer. opts.bulletId, when given, is the "resolve in worktree"
+    // entry point: the server resolves it to that bullet's real worktree
+    // path (design.md), not a path this page guesses at.
+    async function startTerminalSession(opts) {
+      const body = {};
+      if (opts && opts.bulletId) body.bullet_id = opts.bulletId;
+
+      let res;
+      try {
+        res = await fetch('/api/terminal-start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      } catch (err) {
+        alert('Failed starting terminal: ' + err);
+        return;
+      }
+      if (!res.ok) {
+        alert('Failed starting terminal: ' + (await res.text()));
+        return;
+      }
+      const info = await res.json();
+      createTermSession(info);
+      openTerminalDrawer();
+    }
+
+    function createTermSession(info) {
+      const pane = document.createElement('div');
+      pane.id = `term-pane-${info.id}`;
+      pane.className = 'absolute inset-0 p-1 hidden';
+      document.getElementById('terminal-panes').appendChild(pane);
+
+      const term = new Terminal({
+        convertEol: true,
+        cursorBlink: true,
+        fontFamily: "'JetBrains Mono', monospace",
+        fontSize: 12,
+        theme: { background: '#0b0e14', foreground: '#c9d1d9' },
+      });
+      const fitAddon = new FitAddon.FitAddon();
+      term.loadAddon(fitAddon);
+      term.open(pane);
+
+      const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const socket = new WebSocket(`${wsProto}://${location.host}/api/terminal-socket?id=${encodeURIComponent(info.id)}`);
+      socket.binaryType = 'arraybuffer';
+
+      socket.addEventListener('open', () => {
+        fitAddon.fit();
+        socket.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      });
+      socket.addEventListener('message', (ev) => {
+        if (typeof ev.data === 'string') {
+          let msg = null;
+          try { msg = JSON.parse(ev.data); } catch (err) { return; }
+          if (msg && msg.type === 'exit') {
+            term.write(`\r\n\x1b[90m[process exited with code ${msg.code}]\x1b[0m\r\n`);
+          }
+          return;
+        }
+        term.write(new Uint8Array(ev.data));
+      });
+      socket.addEventListener('close', () => {
+        term.write('\r\n\x1b[90m[connection closed]\x1b[0m\r\n');
+      });
+
+      term.onData((data) => {
+        if (socket.readyState === WebSocket.OPEN) socket.send(data);
+      });
+      term.onResize(({ cols, rows }) => {
+        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', cols, rows }));
+      });
+
+      termSessions.set(info.id, { term, fitAddon, socket, el: pane, cwd: info.cwd, shell: info.shell });
+      activateTermSession(info.id);
+    }
+
+    function terminalTabLabel(sess, fallback) {
+      const path = (sess.cwd || '').replace(/\/+$/, '');
+      return (path ? path.split('/').pop() : '') || fallback;
+    }
+
+    function renderTermTabs() {
+      const bar = document.getElementById('terminal-tabs');
+      const tabs = [];
+      let i = 0;
+      termSessions.forEach((sess, id) => {
+        i++;
+        const active = id === activeTermId;
+        const label = terminalTabLabel(sess, `Session ${i}`);
+        tabs.push(`
+          <span role="tab" aria-selected="${active}" class="shrink-0 flex items-center gap-1.5 px-2 py-1 rounded-t text-[10px] font-bold cursor-pointer ${active ? 'bg-[#0b0e14] text-white border border-[#30363d] border-b-0' : 'bg-[#161b22] text-[#8b949e] hover:text-white'}"
+            onclick="activateTermSession('${escapeAttr(id)}')">
+            <i class="fa-solid fa-terminal text-[9px]" aria-hidden="true"></i>
+            <span class="max-w-[8rem] truncate" title="${escapeAttr(sess.cwd || sess.shell || '')}">${escapeHTML(label)}</span>
+            <button type="button" onclick="event.stopPropagation(); killTermSession('${escapeAttr(id)}')" aria-label="Close terminal session" title="Close terminal session"
+              class="hover:text-rose-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]"><i class="fa-solid fa-xmark text-[9px]" aria-hidden="true"></i></button>
+          </span>`);
+      });
+      bar.innerHTML = tabs.join('');
+    }
+
+    function activateTermSession(id) {
+      activeTermId = id;
+      termSessions.forEach((sess, sid) => sess.el.classList.toggle('hidden', sid !== id));
+      renderTermTabs();
+      const sess = termSessions.get(id);
+      if (sess) setTimeout(() => { sess.fitAddon.fit(); sess.term.focus(); }, 0);
+    }
+
+    // killTermSession always calls /api/terminal-kill, even if the local
+    // session object is already gone — killing an unknown or already-dead
+    // id is not an error (design.md), so there is nothing to guard here.
+    async function killTermSession(id) {
+      const sess = termSessions.get(id);
+      if (sess) {
+        try { sess.socket.close(); } catch (err) { /* already closed */ }
+        sess.term.dispose();
+        sess.el.remove();
+        termSessions.delete(id);
+      }
+      try {
+        await fetch('/api/terminal-kill', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id }),
+        });
+      } catch (err) {
+        console.error('Failed killing terminal session:', err);
+      }
+
+      if (activeTermId === id) {
+        activeTermId = null;
+        const next = termSessions.keys().next();
+        if (!next.done) activateTermSession(next.value);
+      }
+      renderTermTabs();
+    }
+
+    window.addEventListener('resize', () => {
+      if (!activeTermId) return;
+      const sess = termSessions.get(activeTermId);
+      if (sess) sess.fitAddon.fit();
+    });
+
     // Renders whatever the phase payload actually holds. Gates store
     // {gate_name, command, passed, output}; agent phases store {agent, attempt,
     // raw_output}. Anything absent renders as an em dash rather than a guess.
@@ -927,23 +1146,43 @@
     // refusal is authoritative, and a copy of its rule here would drift and start
     // inviting actions the server rejects. An absent answer is not a yes, so a
     // payload without the field offers nothing.
-    function runDetailHTML(run, skips) {
+    function runDetailHTML(run, skips, blockedBullets) {
       if (!run) return '<div class="text-[#8b949e]">No run selected.</div>';
 
       const rows = [
-        ['Status', escapeHTML(run.status || '\u2014')],
-        ['Project', escapeHTML(run.project || '\u2014')],
-        ['Change', escapeHTML(run.change_id || '\u2014')],
-        ['Run id', `<code class="text-slate-300 break-all">${escapeHTML(run.id || '\u2014')}</code>`],
-        ['Started', escapeHTML(run.created_at ? relativeTime(run.created_at) : '\u2014')],
-        ['Updated', escapeHTML(run.updated_at ? relativeTime(run.updated_at) : '\u2014')],
+        ['Status', escapeHTML(run.status || '—')],
+        ['Project', escapeHTML(run.project || '—')],
+        ['Change', escapeHTML(run.change_id || '—')],
+        ['Run id', `<code class="text-slate-300 break-all">${escapeHTML(run.id || '—')}</code>`],
+        ['Started', escapeHTML(run.created_at ? relativeTime(run.created_at) : '—')],
+        ['Updated', escapeHTML(run.updated_at ? relativeTime(run.updated_at) : '—')],
       ];
       const meta = `
         <dl class="grid grid-cols-[5.5rem_1fr] gap-x-3 gap-y-1">
           ${rows.map(([k, v]) => `<dt class="text-[#8b949e]">${escapeHTML(k)}</dt><dd class="min-w-0">${v}</dd>`).join('')}
         </dl>`;
 
-      if (!run.resumable) return meta;
+      // "Resolve the underlying cause directly -- in the bullet's worktree"
+      // (skills/dispatch/SKILL.md Step 4, proposal.md's Problem statement):
+      // a blocked bullet with a known worktree gets a one-click path from
+      // "this is stuck" to a real shell open in the exact worktree that
+      // produced it. A bullet without a recorded worktree offers nothing
+      // here rather than guessing a path.
+      const blocked = (blockedBullets || []).filter(b => b.worktree);
+      const blockedBlock = blocked.length ? `
+        <div class="p-2 rounded bg-[#161b22] border border-[#30363d] space-y-2">
+          <div class="text-[9px] uppercase font-bold text-amber-400 tracking-wider">Blocked</div>
+          ${blocked.map(b => `
+            <div class="space-y-1">
+              <div class="text-slate-300"><span class="font-mono text-amber-300">${escapeHTML(b.repo)}</span> — ${escapeHTML(b.blocked_reason || 'Blocked; no reason recorded.')}</div>
+              <button type="button" onclick="startTerminalSession({bulletId: '${escapeAttr(b.id)}'})"
+                class="px-2 py-1 rounded bg-[#161b22] hover:bg-[#21262d] border border-[#30363d] text-slate-300 hover:text-white text-[10px] font-bold flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+                <i class="fa-solid fa-terminal text-[10px]" aria-hidden="true"></i> Resolve in ${escapeHTML(b.repo)} worktree
+              </button>
+            </div>`).join('')}
+        </div>` : '';
+
+      if (!run.resumable) return `${meta}${blockedBlock}`;
 
       // What the resume will not do, named before it is done. A resume that
       // silently skipped four gates would leave the operator unable to tell
@@ -955,7 +1194,7 @@
            </ul>`
         : '<div class="text-[#8b949e]">No phase holds a passed record, so this resume skips none.</div>';
 
-      return `${meta}
+      return `${meta}${blockedBlock}
         <div class="p-2 rounded bg-[#161b22] border border-[#30363d] space-y-2">
           <div class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider">Resume</div>
           <div class="text-slate-300">Re-enters this run in the worktree and branch it already holds.</div>
@@ -971,19 +1210,32 @@
         </div>`;
     }
 
-    function openRunDrawer(opener) {
+    // blockedBulletsForRun answers the blocked bullets behind runId's
+    // intent, reusing bulletsForRun's existing /api/bullets fetch (defined
+    // below) rather than a second endpoint. A run with no intent or a fetch
+    // failure both resolve to no blocked bullets, matching bulletsForRun's
+    // own no-bullets-is-not-an-error contract.
+    async function blockedBulletsForRun(runId) {
+      if (!runId) return [];
+      const byRepo = await bulletsForRun(runId);
+      return Array.from(byRepo.values()).filter(b => b.status === 'blocked');
+    }
+
+    async function openRunDrawer(opener) {
       const run = allRuns.find(r => r.id === activeRunId) || null;
-      openDrawer(runDrawerTitle(run), 'run', runDetailHTML(run, activeRunSkips), opener);
+      const blocked = run ? await blockedBulletsForRun(run.id) : [];
+      openDrawer(runDrawerTitle(run), 'run', runDetailHTML(run, activeRunSkips, blocked), opener);
     }
 
     // Keeps an open run drawer current. Called where run details arrive, so the
-    // resume control disappears the moment the served run stops offering it —
+    // resume control disappears the moment the served run stops offering it --
     // including the transition the stream carries after a resume is accepted.
-    function refreshRunDrawer(run) {
+    async function refreshRunDrawer(run) {
       if (!drawerIsOpen()) return;
       if (document.getElementById('drawer-kind').textContent !== 'run') return;
+      const blocked = run ? await blockedBulletsForRun(run.id) : [];
       document.getElementById('drawer-title').textContent = runDrawerTitle(run);
-      document.getElementById('drawer-body').innerHTML = runDetailHTML(run, activeRunSkips);
+      document.getElementById('drawer-body').innerHTML = runDetailHTML(run, activeRunSkips, blocked);
     }
 
     // Displays a refusal in the server's own words. This page did not decide the
