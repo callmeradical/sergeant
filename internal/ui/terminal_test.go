@@ -188,6 +188,84 @@ func TestStartingASessionSpawnsARealProcessAndReturnsItsIdentity(t *testing.T) {
 	}
 }
 
+// Scenario: listing sessions returns every live session so a page reload
+// can reconnect to what was already running instead of losing track of it
+// (the PTYs themselves survive a browser refresh — nothing here kills them
+// on disconnect — so the client needs a way to discover them again).
+func TestListingSessionsReturnsEveryLiveSession(t *testing.T) {
+	srv, ts := newTerminalTestServer(t)
+
+	first := startTerminal(t, ts, `{}`)
+	firstID := fmt.Sprint(first["id"])
+	t.Cleanup(func() { _ = srv.terminal.Kill(firstID) })
+
+	second := startTerminal(t, ts, `{}`)
+	secondID := fmt.Sprint(second["id"])
+	t.Cleanup(func() { _ = srv.terminal.Kill(secondID) })
+
+	res, err := http.Get(ts.URL + "/api/terminal-sessions")
+	if err != nil {
+		t.Fatalf("GET /api/terminal-sessions: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+
+	var sessions []map[string]interface{}
+	if err := json.NewDecoder(res.Body).Decode(&sessions); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("got %d sessions, want 2: %+v", len(sessions), sessions)
+	}
+
+	got := map[string]bool{}
+	for _, s := range sessions {
+		id, _ := s["id"].(string)
+		got[id] = true
+		if _, ok := s["pid"].(float64); !ok {
+			t.Errorf("session %q missing a numeric pid: %+v", id, s)
+		}
+		if _, ok := s["shell"].(string); !ok {
+			t.Errorf("session %q missing a shell string: %+v", id, s)
+		}
+	}
+	if !got[firstID] || !got[secondID] {
+		t.Errorf("expected both %q and %q in the listing, got %v", firstID, secondID, got)
+	}
+}
+
+// Scenario: killing a session removes it from the listing too — the
+// listing must reflect terminalManager's real state, not a separate record
+// that could drift from it.
+func TestListingSessionsExcludesAKilledSession(t *testing.T) {
+	srv, ts := newTerminalTestServer(t)
+
+	resp := startTerminal(t, ts, `{}`)
+	id := fmt.Sprint(resp["id"])
+
+	if err := srv.terminal.Kill(id); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+
+	res, err := http.Get(ts.URL + "/api/terminal-sessions")
+	if err != nil {
+		t.Fatalf("GET /api/terminal-sessions: %v", err)
+	}
+	defer res.Body.Close()
+
+	var sessions []map[string]interface{}
+	if err := json.NewDecoder(res.Body).Decode(&sessions); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	for _, s := range sessions {
+		if fmt.Sprint(s["id"]) == id {
+			t.Fatalf("killed session %q still appears in the listing: %+v", id, sessions)
+		}
+	}
+}
+
 // Scenario: "A client can send input and receive the shell's real output."
 // This is the one scenario that must exercise the actual WebSocket upgrade
 // path end-to-end, not call terminalManager methods directly.

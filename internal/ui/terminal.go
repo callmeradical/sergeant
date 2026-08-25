@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -20,6 +21,9 @@ import (
 // own" — only the latter gets an exit frame (design.md's frame protocol).
 type terminalSession struct {
 	id     string
+	seq    int // creation order; id is "term-<seq>", but sorting by id as a
+	// string would put "term-10" before "term-2" — List() sorts by this
+	// numeric field instead.
 	pty    *os.File
 	cmd    *exec.Cmd
 	pid    int
@@ -71,6 +75,7 @@ func (m *terminalManager) Start(cwd string, cols, rows int) (*terminalSession, e
 	m.nextID++
 	sess := &terminalSession{
 		id:    fmt.Sprintf("term-%d", m.nextID),
+		seq:   m.nextID,
 		pty:   f,
 		cmd:   cmd,
 		pid:   cmd.Process.Pid,
@@ -136,12 +141,48 @@ func (m *terminalManager) Get(id string) (*terminalSession, bool) {
 	return sess, ok
 }
 
+// List returns every live session, sorted by creation order (seq), so a
+// client reconnecting after a page reload gets its tabs back in the order
+// it created them, not map-iteration order.
+func (m *terminalManager) List() []*terminalSession {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*terminalSession, 0, len(m.sessions))
+	for _, sess := range m.sessions {
+		out = append(out, sess)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].seq < out[j].seq })
+	return out
+}
+
 // remove drops a session that the socket handler discovered had exited on
 // its own (as opposed to Kill, which removes the session itself).
 func (m *terminalManager) remove(id string) {
 	m.mu.Lock()
 	delete(m.sessions, id)
 	m.mu.Unlock()
+}
+
+// handleTerminalSessions lists every live session so a client can reconnect
+// to what was already running after a page reload, instead of losing track
+// of PTYs that are still alive on the server (nothing here kills a session
+// just because its WebSocket disconnected — see handleTerminalSocket).
+func (srv *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sessions := srv.terminal.List()
+	out := make([]map[string]interface{}, len(sessions))
+	for i, sess := range sessions {
+		out[i] = map[string]interface{}{
+			"id":    sess.id,
+			"pid":   sess.pid,
+			"shell": sess.shell,
+			"cwd":   sess.cwd,
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (srv *Server) handleTerminalStart(w http.ResponseWriter, r *http.Request) {

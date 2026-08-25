@@ -170,6 +170,7 @@ func (srv *Server) Handler() http.Handler {
 	// The sequenced state stream. Clients follow this instead of re-reading
 	// /api/runs on a timer.
 	mux.HandleFunc("/api/stream", srv.handleStream)
+	mux.HandleFunc("/api/terminal-sessions", srv.handleTerminalSessions)
 	mux.HandleFunc("/api/terminal-start", srv.handleTerminalStart)
 	mux.HandleFunc("/api/terminal-socket", srv.handleTerminalSocket)
 	mux.HandleFunc("/api/terminal-kill", srv.handleTerminalKill)
