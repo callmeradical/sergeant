@@ -150,6 +150,74 @@ func (f *fakeStageRunner) stagesRun() []string {
 	return append([]string(nil), f.ran...)
 }
 
+// cancellingStageRunner cancels ctx itself (simulating an agent process
+// killed by context cancellation, e.g. an operator's cancel request racing a
+// running stage) and returns the error engine.RunStage would return in that
+// case: a real *dag.Engine's underlying exec.CommandContext-driven process
+// returns a non-nil error when its context is cancelled, exactly this shape.
+type cancellingStageRunner struct {
+	cancel context.CancelFunc
+}
+
+func (c *cancellingStageRunner) RunStage(ctx context.Context, runID string, stage *config.DAGStage) error {
+	c.cancel()
+	return fmt.Errorf("stage killed: %w", ctx.Err())
+}
+
+// Scenario: a stage failing because it was cancelled records the run as
+// cancelled, not failed.
+//
+// setTerminal refuses to overwrite a cancellation (dispatch.go's own comment
+// names the prior bug this guards: the goroutine used to unconditionally
+// write the caller's requested status, silently turning an operator's
+// cancel into "failed"). The failure path — RunStage returns a non-nil
+// error, so the code calls setTerminal("failed") — is exactly where that
+// guard must fire when the error is a symptom of cancellation, not a real
+// gate/agent failure.
+func TestStageFailureCausedByCancellationRecordsCancelledNotFailed(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("SERGEANT_FLEET_DIR", filepath.Join(base, "fleet"))
+
+	proj := &config.Project{
+		Name: "cancel-race-proj",
+		DAG: &config.DAGConfig{
+			Name: "cancel-race-pipeline",
+			Stages: []config.DAGStage{
+				{Name: "stage-1", Repos: []string{"repoA"}},
+			},
+		},
+	}
+
+	st, err := store.Open(filepath.Join(base, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	srv := NewServer(st, 0)
+
+	const runID = "sgt-cancel-race-test"
+	if err := st.CreateRun(&store.RunRecord{
+		ID: runID, Project: proj.Name, TaskID: runID, Type: "feat", ChangeID: "fake-change", Status: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	fake := &cancellingStageRunner{}
+	fake.cancel = cancel
+	srv.executeRun(ctx, cancel, fake, proj, runID, "cancel race test", nil, "")
+
+	run, err := st.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != "cancelled" {
+		t.Errorf("run status = %q, want cancelled — a stage failure caused by the run's own "+
+			"cancellation must not be recorded as an ordinary failure", run.Status)
+	}
+}
+
 // Scenario: executeRun is testable with a fake stage runner.
 //
 // This is the point of the stageRunner seam: executeRun is driven end to end
