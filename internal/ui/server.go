@@ -17,8 +17,6 @@ import (
 	"sync"
 	"time"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/callmeradical/sergeant/internal/config"
 	"github.com/callmeradical/sergeant/internal/dag"
 	"github.com/callmeradical/sergeant/internal/graphify"
@@ -563,105 +561,6 @@ func (srv *Server) handleBullets(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, bullets)
-}
-
-func (srv *Server) handleDiscoverWorkflow(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		Project         string `json:"project"`
-		IntentArchetype string `json:"intent_archetype"`
-		QualityBar      string `json:"quality_bar"`
-		DeliveryMode    string `json:"delivery_mode"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Project == "" {
-		http.Error(w, "invalid discovery request", http.StatusBadRequest)
-		return
-	}
-
-	proj, err := config.LoadProject(req.Project)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("project '%s' not found: %v", req.Project, err), http.StatusBadRequest)
-		return
-	}
-
-	var stages []config.DAGStage
-	allRepos := []string{}
-	for rName := range proj.Repos {
-		allRepos = append(allRepos, rName)
-	}
-
-	stages = append(stages, config.DAGStage{
-		Name:  "feature-tdd-execution",
-		Repos: allRepos,
-		Brief: "Execute test-driven implementation with zero-token deterministic gate verification",
-	})
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"project":              proj.Name,
-		"archetype":            req.IntentArchetype,
-		"recommended_pipeline": stages,
-		"decision_rationale":   fmt.Sprintf("Discovered %d repos across topology. Synthesized %d stages.", len(proj.Repos), len(stages)),
-	})
-}
-
-func (srv *Server) handleSaveDAG(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		Project string            `json:"project"`
-		Stages  []config.DAGStage `json:"stages"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Project == "" {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	proj, err := config.LoadProject(req.Project)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("project '%s' not found: %v", req.Project, err), http.StatusBadRequest)
-		return
-	}
-
-	if proj.DAG == nil {
-		proj.DAG = &config.DAGConfig{
-			Name:        fmt.Sprintf("%s-pipeline", proj.Name),
-			Description: fmt.Sprintf("Automated pipeline for %s", proj.Name),
-		}
-	}
-	proj.DAG.Stages = req.Stages
-
-	cfgDir := os.Getenv("SERGEANT_CONFIG")
-	if cfgDir == "" {
-		home, _ := os.UserHomeDir()
-		cfgDir = filepath.Join(home, ".config", "sergeant")
-	}
-	filePath := filepath.Join(cfgDir, fmt.Sprintf("%s.yaml", proj.Name))
-
-	out, err := yaml.Marshal(proj)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("marshaling YAML: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	if err := os.WriteFile(filePath, out, 0644); err != nil {
-		http.Error(w, fmt.Sprintf("writing project YAML: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":  "saved",
-		"project": proj.Name,
-		"stages":  len(proj.DAG.Stages),
-	})
 }
 
 // targetRepositories is the list of repositories a dispatch acts on: the ones it
