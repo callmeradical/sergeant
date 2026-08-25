@@ -92,7 +92,7 @@ There is no structured response-message channel in v2. When a bullet is `blocked
 
 1. Read `GET /api/run-details?id=<run-id>` for the blocked reason.
 2. Resolve the underlying cause directly — in the bullet's worktree, under `~/.local/share/sergeant-v2/fleet/<run-id>/<repo>/`, or by fixing the OpenSpec change/spec mismatch a review finding named.
-3. `POST /api/run-resume` with `{"id": "<run-id>"}` — this is v2's actual, coarser equivalent of a response-message exchange: it resumes a `failed`, `blocked`, `cancelled`, `timed_out`, or `interrupted` run, skipping phases already recorded `passed`.
+3. `POST /api/run-resume` with `{"id": "<run-id>"}` — this is v2's actual, coarser equivalent of a response-message exchange. `blocked` is the bullet's status, not the run's; the run underneath it is `failed` (or `cancelled`/`timed_out`/`interrupted`), and resuming that run — skipping phases already recorded `passed` — is what gives the bullet a chance to leave `blocked`.
 
 There is no persistent interactive pane to attach to — a dispatched agent phase runs headlessly to completion or a bounded timeout.
 
