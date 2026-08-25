@@ -58,6 +58,10 @@
     <div class="flex items-center space-x-3">
       <div class="flex items-center space-x-2 text-[#8b949e] text-xs">
         <button type="button" id="btn-open-analytics" onclick="openAnalyticsDrawer(this)" aria-label="Work analytics" title="Work analytics" class="min-w-[44px] min-h-[44px] flex items-center justify-center hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14] rounded"><i class="fa-solid fa-chart-line"></i></button>
+        <button type="button" id="btn-open-workers" onclick="openWorkersDrawer(this)" aria-label="Workers" title="Workers" class="relative min-w-[44px] min-h-[44px] flex items-center justify-center hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14] rounded">
+          <i class="fa-solid fa-server"></i>
+          <span id="stat-workers-active" class="absolute top-1 right-1.5 min-w-[13px] h-[13px] px-0.5 flex items-center justify-center rounded-full bg-[#1f6feb] text-white text-[9px] font-bold leading-none">0</span>
+        </button>
         <button onclick="fetchRuns(); fetchFleet();" aria-label="Refresh state" title="Refresh state" class="min-w-[44px] min-h-[44px] flex items-center justify-center hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14] rounded"><i class="fa-solid fa-rotate-right"></i></button>
       </div>
     </div>
@@ -185,10 +189,6 @@
       <button type="button" id="btn-open-terminal" onclick="termSessions.size ? toggleTerminalDrawer() : startTerminalSession()"
         class="truncate flex items-center gap-1 rounded-sm px-1.5 -my-px py-px bg-[#1f6feb] hover:bg-[#388bfd] text-white font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
         <i class="fa-solid fa-terminal text-[9px]" aria-hidden="true"></i> Terminal
-      </button>
-      <button type="button" id="btn-open-workers" onclick="openWorkersDrawer(this)"
-        class="truncate rounded px-1 -mx-1 hover:text-white hover:bg-[#161b22] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-        Workers <span id="stat-workers-active" class="text-slate-300 font-bold">0</span>
       </button>
     </div>
     <div class="flex items-center gap-3 shrink-0">
