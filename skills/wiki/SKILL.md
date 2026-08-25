@@ -1,11 +1,3 @@
-> **V1 ONLY — DO NOT FOLLOW ON THE `v2` BRANCH.**
-> This procedure describes the v1 shell toolbelt (`bin/sgt-*`, tmux workers, the
-> v1 fleet layout). Decision D7 in `docs/prd-sergeant-v2.md` forbids v2 from
-> shelling out to v1 or reusing its supervision plumbing. If you reached this
-> file while working on v2, stop and read `AGENTS.md` instead. Where v2 lacks a
-> capability described here, that is unimplemented v2 scope, not a gap to close
-> by calling v1.
-
 # Skill: wiki
 
 Maintain Sergeant's automatic activity captures and curated daily session digest.
@@ -30,16 +22,12 @@ only when the wiki schema permits them.
 
 ## Automatic captures
 
-The following commands own capture creation:
-
-| Command | Captured event |
-|---|---|
-| `sgt-dispatch` | Fleet launch, task, project, branch, repositories, and brief metadata allowed by the capture schema |
-| `sgt-notify` | Escalation or terminal outcome plus PR URL when present |
-| `sgt-cleanup` | Worktree/fleet cleanup and final status |
-
-If a capture is missing, reproduce the owning command in a fixture or fix its
-capture adapter. Do not synthesize an automatic capture manually as a substitute.
+v2 has no automatic-capture mechanism today — no command writes a capture as a
+side effect of dispatch, escalation, or cleanup. This is a stated gap, not a
+command to invent: until one exists, treat dispatch, run, and bullet history as
+readable only via the store and API (`GET /api/runs`, `GET /api/run-details`,
+`GET /api/bullets`), and populate curated wiki pages from that state manually or
+via `wiki-daily-digest`.
 
 ## Daily digest
 

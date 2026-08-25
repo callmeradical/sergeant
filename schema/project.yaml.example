@@ -17,12 +17,13 @@ description: >
 
 # Required. Ordered list of repositories in this project.
 repos:
-  # Repo names used by sgt-graphify must match [A-Za-z0-9._-]+, cannot contain spaces,
+  # Repo names used by Graphify must match [A-Za-z0-9._-]+, cannot contain spaces,
   # and cannot be `.` or `..`.
   - name: myapp-api
     # Absolute path on disk. ~ is expanded to $HOME.
     path: ~/Dev/myapp/myapp-api
-    # Optional: git remote, used by sgt-sync to clone if path doesn't exist.
+    # Optional: git remote. v2 does not clone this automatically; the path
+    # must already exist on disk.
     url: git@github.com:myorg/myapp-api.git
     # Optional: logical group this repo belongs to (must match a groups key).
     group: backend
@@ -89,7 +90,8 @@ groups:
 graphify:
   # Required if graphify block is present. Published output directory for the
   # merged project graph; trailing / is fine, directory symlinks are preserved,
-  # and sgt-graphify only replaces it after a complete run.
+  # and a build (`POST /api/build-graph`, internal/graphify.BuildProjectGraph)
+  # only replaces it after a complete run.
   output: ~/Dev/myapp/graphify-out/
   # Optional. Only graph repos in these groups. Default: all repos.
   include_groups: [backend, frontend]
@@ -102,9 +104,9 @@ graphify:
     - "**/.git/**"
     - "**/dist/**"
 
-# Optional. DAG workflow definition for this project.
-# Run with: sgt-dag-run <project>
-# sgt-watch auto-advances the DAG when fleet tasks complete.
+# Optional. DAG workflow definition for this project. There is no standalone
+# DAG-trigger command on v2 — `dag:` stages are read by internal/dag.Engine
+# directly as part of whatever dispatch names this project, not run separately.
 dag:
   name: myapp-delivery           # DAG name in dagr (must be unique across all projects)
   description: "Delivery pipeline for myapp"

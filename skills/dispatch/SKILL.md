@@ -3,15 +3,6 @@ name: dispatch
 description: Plan and execute a cross-repo task by dispatching autonomous subagents — one per repo — each in an isolated git worktree.
 ---
 
-> **V1 ONLY — DO NOT FOLLOW ON THE `v2` BRANCH.**
-> This procedure describes the v1 shell toolbelt (`bin/sgt-*`, tmux workers, the
-> v1 fleet layout). Decision D7 in `docs/prd-sergeant-v2.md` forbids v2 from
-> shelling out to v1 or reusing its supervision plumbing. If you reached this
-> file while working on v2, stop and read `AGENTS.md` instead. Where v2 lacks a
-> capability described here, that is unimplemented v2 scope, not a gap to close
-> by calling v1.
-
-
 # Skill: dispatch
 
 Plan and execute a cross-repo task by dispatching autonomous subagents — one per repo — each in an isolated git worktree.
@@ -27,22 +18,15 @@ Load this skill when:
 
 Prerequisites:
 - **load-project** skill complete — you know the repos, paths, and instructions
-- **cross-repo-work** skill complete (or you've manually confirmed) — you know which repos, dependency order, and what each one needs to do
+- **cross-repo-work** skill complete (or you've manually confirmed) — you know which repos, merge order, and what each one needs to do
 
 ---
 
 ## Protocol
 
-### Step 0 — Check the td queue
+### Step 0 — Check for existing tracked work
 
-Before planning from scratch, see if the task already exists in td:
-
-```bash
-sgt-td-list <project>
-sgt-td-list <project> --priority P1
-```
-
-If the user's request maps to an open td task, use `--td <id>` when dispatching. The brief, branch name, and full task context are pulled from td automatically — and the worker's brief will include `td start`, `td log`, `td handoff`, and `td review` instructions so the task lifecycle is tracked end-to-end.
+v2's task-tracking is a read-only export (decision D4); there is no command that pulls a brief from an external tracker into a dispatch. If the user's request maps to an existing ticket in an external tracker, use it for context only — state the brief yourself in the dispatch call below. Sergeant's own durable record of the work is the Intent/Bullet rows a dispatch creates, not an external task.
 
 ### Step 1 — Confirm the plan
 
@@ -54,176 +38,108 @@ Repos to dispatch:
   smith        →  add POST /auth/google endpoint
   smith-app    →  add "Continue with Google" button + wire to API
 
-Dependency order:
-  smith-infra must complete before smith and smith-app can merge
+Merge order:
+  smith-infra before smith and smith-app
   (API reads the secret at startup; app talks to the API)
 
 Branch: feat/add-oauth
-Backend: local tmux
+Isolation: one git worktree per repo
 ```
 
-Confirm the plan is accurate before dispatching.
+Confirm the plan is accurate before dispatching. Merge order is stated as the bullet order within the intent (decision D6) — there is no per-dispatch dependency flag; see "Merge order" below.
 
 ### Step 2 — Dispatch
 
-**From a td task (preferred when one exists):**
+`POST /api/dispatch` with a JSON body:
+
+| Field | Description |
+|---|---|
+| `project` | Registered project name (required) |
+| `brief` | The work statement (required) |
+| `repos` | Target repo names; omit to record a proposed plan awaiting approval (decision D2) instead of dispatching immediately |
+| `agent` | Which agent CLI drives the phase; falls back to the project's default |
+| `type` | One of `feat`, `fix`, `refactor`, `docs`, `chore`, `test` (decision O2) — required, and names the dispatched branch's `<type>/` prefix |
+| `change_id` | An existing OpenSpec change id; when omitted, one is resolved from the brief and scaffolded (decision O3) |
+| `request_id` | Optional idempotency key (decision D10) — a repeat of the same key returns the original run instead of starting a duplicate |
+
+Example:
 
 ```bash
-# Auto-detects repo, derives brief and branch from the task
-sgt-dispatch <project> --td <task-id>
-
-# Override repo if the task touches more than the owning repo
-sgt-dispatch <project> --td <task-id> --repos smith,smith-app
+curl -X POST http://127.0.0.1:8484/api/dispatch \
+  -H 'content-type: application/json' \
+  -d '{"project":"myapp","brief":"Add Google OAuth","repos":["myapp-infra","myapp-api","myapp-app"],"agent":"claude","type":"feat","change_id":"add-oauth"}'
 ```
 
-**From a free-form brief:**
-
-```bash
-sgt-dispatch <project> "<brief>" \
-  --repos <repo1>,<repo2>,<repo3> \
-  --branch <branch-name> \
-  --deps "<prereq>><dependent>,..."
-```
-
-The script:
-1. Generates a task ID
-2. Creates a git worktree per repo at `<repo-path>/../<repo-name>-sgt-<task-id>/`
-3. Writes a `.sergeant-brief.md` into each worktree with: the mission, merged agent instructions, dependency notes, and delivery requirements
-4. Spawns an agent in each local tmux window
-5. Creates fleet state at `~/.local/share/sergeant/fleet/<task-id>/`
+Per dispatch call:
+1. An OpenSpec change is resolved (decision O3) before any run row, worktree, or branch exists — a failure here leaves nothing behind.
+2. A run record is created in the store.
+3. A git worktree is created per repo (plain `git worktree add`); a non-git or missing path is refused rather than cloned.
+4. Each repo's agent phase runs headlessly, receiving its brief via the `sergeant_get_brief` MCP tool or the equivalent rendered prompt the dispatch engine builds into the phase — both draw on the same rendering, so the two dispatch paths never describe the same work differently.
+5. Phase and envelope records are written to the store as the run progresses. There is no fleet file to sync and no tmux window.
 
 ### Step 3 — Monitor
 
-```bash
-bin/sgt-watch <task-id>
+```
+GET /api/runs?project=<name>          # list runs for a project
+GET /api/run-details?id=<run-id>      # phase-level detail for one run
 ```
 
-This polls every 5 seconds, syncs `.sergeant-status`, `.sergeant-message`, and `.sergeant-result` from worktrees into fleet state, and prints a live status table. `needs_input` and `blocked` are distinct nonterminal states: the watcher prints message changes and keeps running. A worker waiting on CI, review threads, or dependencies remains `in_progress` unless it needs to escalate.
+Status is read directly from the store — there is no separate sync step and no file to poll. `blocked` is a bullet status, not a run status; a run whose bullet is blocked keeps running until the bullet's cause is resolved.
 
-When a worker escalates:
+### Step 4 — Resolve a blocked bullet
 
-1. Read its context, evidence, exact question/blocker, recommendation, and options in the watcher output.
-2. Get the human decision; do not infer consequential intent.
-3. Run `sgt-respond <task-id> <repo> "<response>"`. Sergeant writes the response to fleet state and `.sergeant-response`, then nudges the recorded local tmux pane when available.
-4. The worker consumes/removes the response, clears `.sergeant-message`, logs the decision to td, returns to `in_progress`, and continues.
+There is no structured response-message channel in v2. When a bullet is `blocked`:
 
-You can also attach to the tmux session directly to observe or assist a worker:
+1. Read `GET /api/run-details?id=<run-id>` for the blocked reason.
+2. Resolve the underlying cause directly — in the bullet's worktree, under `~/.local/share/sergeant-v2/fleet/<run-id>/<repo>/`, or by fixing the OpenSpec change/spec mismatch a review finding named.
+3. `POST /api/run-resume` with `{"id": "<run-id>"}` — this is v2's actual, coarser equivalent of a response-message exchange: it resumes a `failed`, `blocked`, `cancelled`, `timed_out`, or `interrupted` run, skipping phases already recorded `passed`.
 
-```bash
-tmux attach -t sgt-<task-id>
-# Switch windows with: Ctrl-b <window-number>
-```
+There is no persistent interactive pane to attach to — a dispatched agent phase runs headlessly to completion or a bounded timeout.
 
-### Step 4 — Reconcile results
+### Step 5 — Reconcile results
 
-When all workers are done, review the PRs:
-- Verify each repo's completion evidence: pinned-base scope, focused/full validation, separate standards/spec review artifacts, an accessibility review artifact for UI-facing work, zero blocking findings, required CI, and resolved non-outdated review threads
-- Check dependency order: merge infra before API before app if there are runtime dependencies; a worker is not done until its dependency gate is satisfied
-- If any repo failed, read the failure reason from fleet state and decide: retry, fix manually, or reassign
-- Note any cross-repo implications in each PR description (e.g., "merge after smith-infra #42")
-- Do not reconcile or clean up a fleet merely because every worker has opened a PR; all completion gates must be met
+When every bullet is done, review the PRs:
+- Verify each repo's completion evidence: pinned-base scope, passing gates, and — when a review phase is configured — zero blocking findings and resolved non-outdated review threads
+- Check merge order: the intent's bullet order (decision D6) is the merge order; Sergeant releases a bullet's PR only once its upstream bullets are reviewed and merged
+- If a bullet failed, read its blocked/failed reason via `GET /api/run-details?id=` and decide: fix and `POST /api/run-resume`, or reassign
+- `GET /api/bullets?run_id=<run-id>` for the run's terminal bullet state
+- Note any cross-repo implications in each PR description
+- Do not report the run complete merely because every bullet opened a PR — `POST /api/create-pr` enforces the sealed-bullet gate and, once every bullet is sealed, the shipping gate
 
-```bash
-bin/sgt-watch --list      # see all tasks
-bin/sgt-cleanup <task-id> # remove worktrees and fleet state
-```
+Worktree cleanup is handled by the existing fleet-cleanup mechanism, not by a per-dispatch command.
 
 ---
 
-## Treehouse worktrees
+## Merge order
 
-Sergeant prefers [treehouse](https://github.com/kunchenguid/treehouse) for worktree management. Treehouse maintains a pool of pre-warmed worktrees per repo — leasing one is faster than `git worktree add` and cleanup is pooled.
-
-**Setup treehouse in the project's repos (one-time):**
-
-```bash
-bin/sgt-treehouse-init <project>                      # all repos
-bin/sgt-treehouse-init <project> --groups core,frontend,infra  # specific groups
-```
-
-This runs `treehouse init` in each repo and creates a `treehouse.toml`. Commit those files so the pool config is tracked.
-
-**How dispatch uses treehouse:**
-- If `treehouse.toml` exists in a repo → `treehouse get --lease --lease-holder "sgt-<task-id>-<repo>"`
-- Branch is checked out in the leased worktree: `git checkout -b <branch>`
-- Pool is in `~/.treehouse/<repo-slug>/<n>/<repo-name>/`
-- Cleanup via `treehouse return <path>`
-
-**If treehouse is not initialized** in a repo, dispatch falls back to plain `git worktree add` (sibling path: `<repo-parent>/<repo-name>-sgt-<task-id>/`).
-
----
-
-## Dependency ordering
-
-Use `--deps` to express ordering constraints:
-
-```
---deps "smith-infra>smith,smith-infra>smith-app"
-```
-
-This means: `smith-infra` must finish before `smith` and `smith-app`. The brief written into each dependent repo will include an instruction to wait for the prereq's `.sergeant-status` to read `done` before opening a PR.
-
-The workers themselves are responsible for honoring this. The brief makes it explicit.
+Merge order is a property of the intent itself, not a per-dispatch argument. There is no dependency-flag equivalent. State ordering as the bullet order the intent was decomposed into (decision D2) — the cross-repo-work skill produces that order before dispatch.
 
 ---
 
 ## Worker contract
 
-Each dispatched agent is expected to:
+Each dispatched agent phase is expected to:
 
-1. Read `.sergeant-brief.md` at session start
-2. Pin the fixed point, normally the merge-base with current `origin/main`, and record the base SHA, commit list, and diff scope
-3. Triage the full td issue/spec/comments, linked material, prior or redundant work, category, and readiness. Identify the originating spec or explicitly record that none exists
+1. Read its brief (rendered from the stored intent) at session start.
+2. Pin the fixed point, normally the merge-base with current `origin/main`, and record the base SHA, commit list, and diff scope.
+3. Triage the full spec/comments, linked material, prior or redundant work, category, and readiness. Identify the originating OpenSpec change (decision O3) or explicitly record that none exists.
 4. Route before implementation using the canonical engineering skill for that phase when available, in this order:
    - Huge/foggy work: surface `wayfinder`, `to-spec`, and Sergeant's custom `to-tickets` as HITL escalation/planning paths; do not silently execute them as implementation
    - Hard bug/performance: load `diagnosing-bugs`, then use a deterministic red command, minimal reproduction, falsifiable hypotheses, and one-variable instrumentation
    - Uncertain logic/UI: load `prototype`, create throwaway evidence for HITL feedback, and never promote prototype code directly
    - Approved implementation: load `tdd` before implementation and use tracer-bullet vertical slices
    - Merge/rebase conflict: load `resolving-merge-conflicts`, trace both intents, preserve both where possible, and never abort automatically
-5. Establish public behavioral seams from td/spec before tests. If a consequential seam is undecided, escalate `needs_input` rather than guessing
-6. Implement one vertical slice at a time: focused red test, minimum green implementation, then refactor. Reject tautological tests, internal mocking, horizontal test/implementation phases, and speculative refactoring
-7. For `needs_input` or `blocked`, write `.sergeant-message` and notify Sergeant. Consume/remove `.sergeant-response` when it arrives, clear the message, log the decision to td, restore `in_progress`, and continue
-8. Run focused tests and typechecking/lint regularly and the full required suite at the end. Do not run no-mistakes for routine worker completion, prototypes, investigations, documentation drafts, intermediate commits, or remediation loops; an explicit user instruction overrides this default
-9. At an explicit final shipping boundary only, after implementation and repository-native validation, run `no-mistakes axi run --intent-file <path>` (or `--intent "<objective and approved tradeoffs>"`), skip only proven-irrelevant gates, treat findings as validation-only, and stop at `checks-passed`. Safety-sensitive work — touching auth, OAuth, security, secret, credential, payment, database, migration, stateful, production, destructive operations — is the standard-isolated lighter path only when the objective does not trigger those classifiers. Readiness requires concrete State Transitions, Failure Windows, and Negative Test Matrix sections for stateful work.
-10. Route each no-mistakes finding through `sgt-no-mistakes-finding`: every actionable finding creates or updates separate deduplicated owning-repo td work; correctness/security/data-integrity/test and ask-user work is P1 and remains gated, warning debt is P2, informational debt is P3, and cosmetic/evidence noise is ignored. Never remediate findings in the validation run
-11. Load the canonical `code-review` skill when available for its review technique, but treat the shared axis list as authoritative and not that skill's axis count. Launch separate parallel subagents for the axes `bin/_sgt-review-axes.sh` names in `SGT_REVIEW_AXES_REQUIRED` — a standards axis over the pinned diff and documented standards plus concise Fowler smells, a spec axis over requirements and scope, and and a readiness axis, each axis described by `_sgt_review_axis_guidance` in `bin/_sgt-review-axes.sh` and reproduced verbatim in the generated brief. For UI-facing work identified by frontend, UI, visual, interaction, accessibility, or user-facing output language in the mission, repo role, repo group name or description, or inherited instructions, also launch the conditional accessibility axis. Keep evidence separate and skip the spec axis explicitly when no spec exists
-12. Route each axis's strict JSON artifact through `sgt-review-findings`, whose accepted `--axis` and `severity` vocabularies are the same `bin/_sgt-review-axes.sh` definition the generated brief demands, so the contract and the router cannot drift. The canonical severities, their accepted aliases, and their td priorities come from `SGT_REVIEW_SEVERITIES` and `SGT_REVIEW_SEVERITY_ALIASES` in `bin/_sgt-review-axes.sh`; the generated brief and `sgt-review-findings` with no arguments both print the current table. Only the `error` family publishes a blocking gate. Actionable findings become deduplicated owning-repo td tasks keyed by repo, axis, source, finding id, parent mission, and branch; blockers publish fleet state plus notification; and cosmetic/false-positive dispositions create no cards. Never persist review bodies, prompts, secrets, or credentials
-13. When a route fails after parsing, the router retains a sanitized findings artifact under `.sergeant-review-artifacts/<axis>-<source>/` and names the exact `sgt-review-findings <project> <repo> --retry <path> --worktree <path>` command; retry from that artifact rather than re-running the reviewer, and never delete a retained artifact that has not been retried
-14. A stored card revision the router cannot prove it authored is kept below a `--- Superseded revision (preserved) ---` separator and the card gains the `needs-reconciliation` label. The worker owning the finding merges the two accounts and removes that label; the router never clears it, so a card still carrying it has an open reconciliation obligation
-15. Keep one TD record per no-mistakes finding. Findings with the same originating run, head, owning module, and root cause share one serialized remediation worker/branch. Remediation never runs no-mistakes; before merging the group, rerun native tests and independent rereviews that verify mutation before validation, partial publication or rollback, and identity/provenance, then resume the retained run. After two remediation cycles, stop fix dispatch and require architectural/root-cause review plus a human decision
-16. Remediate all blocking repository-native test and independent-review findings, rerun affected tests and all required axes until each reports zero blocking findings. No-mistakes findings require a separate td dispatch
-17. Commit, open a PR, wait for required CI, resolve all non-outdated review threads, and satisfy dependency order
-18. For tracked work, log td decisions, handoff, then run `td review` only when implementation and review evidence are ready
-19. Write `.sergeant-result` and set `.sergeant-status=done` only after every gate passes. `failed: <exact reason>` is reserved for an unrecoverable terminal failure
+5. Establish public behavioral seams from the spec before tests. If a consequential seam is undecided, transition the bullet to `blocked` with an explicit reason rather than guessing.
+6. Implement one vertical slice at a time: focused red test, minimum green implementation, then refactor. Reject tautological tests, internal mocking, horizontal test/implementation phases, and speculative refactoring.
+7. When blocked, record the exact reason on the bullet rather than guessing; resolution is the fix-then-resume path in Step 4 above.
+8. Run focused tests and typechecking/lint regularly and the full required gate suite at the end. Gates run in sorted name order; a failed or timed-out phase records `failed`, never `passed`.
+9. Report findings via the envelope payload, read by the review phase if one is configured for this run. A blocking finding transitions the bullet to `blocked`, resolved as described in Step 4.
+10. Commit, open a PR, wait for required CI, resolve all non-outdated review threads, and satisfy merge order.
+11. A bullet reaches `sealed` only after every gate passes and, once configured review has run, carries zero blocking findings.
+
+Task tracking is out of scope for a dispatched agent to create or mutate — v2's task-tracking is a read-only export (decision D4); Intent/Bullet rows in Sergeant's own store are the durable record.
 
 If a canonical skill cannot be loaded, the generated brief's embedded rules remain mandatory for that phase.
-
-`sgt-watch` polls for those files and surfaces them.
-
----
-
-## td task creation
-
-When you dispatch from a freeform brief, `sgt-dispatch` creates exactly one td task in each target repo before spawning any worker. If td is unavailable, task creation fails, generated task metadata cannot be injected, or any selected repo does not get a generated task, dispatch aborts before spawning and rolls back the generated cards. `--td` dispatch keeps using the existing task instead of generating replacements.
-
-The generated task IDs are written into fleet state and injected into each worker's `.sergeant-brief.md` with the full `td start` / `td log` / `td handoff` / `td review` lifecycle.
-
-To create tasks manually without dispatching:
-```bash
-sgt-td-create <project> "<title>" --repos repo1,repo2 --priority P1
-```
-
----
-
-## Flags reference
-
-| Flag | Description |
-|---|---|
-| `--repos repo1,repo2` | Which repos to dispatch (required) |
-| `--td <task-id>` | Dispatch from an existing td task; brief derived from task title |
-| `--branch <name>` | Branch name used in all worktrees (default: derived from brief) |
-| `--deps "a>b,a>c"` | `a` must complete before `b` and `c` can merge |
-| `--dry-run` | Print what would happen, don't create worktrees or spawn agents |
 
 ---
 
@@ -231,8 +147,7 @@ sgt-td-create <project> "<title>" --repos repo1,repo2 --priority P1
 
 | Symptom | Fix |
 |---|---|
-| Worker stuck, no status update | `tmux attach -t sgt-<task-id>` and check the window |
-| Worktree creation fails | Check if branch already exists; use `--branch` with a unique name |
-| Fleet state is stale | Run `bin/sgt-watch --sync <task-id>` to force a one-shot sync |
-| Need to recover a waiting or orphaned worker | Use `bin/sgt-respond <task-id> <repo> "<response>"`; do not mark it done manually |
-| Need to retry a failed repo | Fix the underlying issue, then write both `.sergeant-result` and `.sergeant-status=done` only after every completion gate passes |
+| Worktree creation fails | Check if branch already exists; dispatch with a distinct brief/branch |
+| Bullet stuck at a phase | `GET /api/run-details?id=<run-id>` for the stalled phase |
+| Need to recover a blocked or failed run | Fix the underlying cause, then `POST /api/run-resume` with `{"id": "<run-id>"}` |
+| Need to retry a failed repo | Fix the underlying issue, then `POST /api/run-resume`; a bullet only reaches `sealed` after every gate passes |
