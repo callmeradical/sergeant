@@ -105,7 +105,7 @@ func TestReclaimEligibleFleetDirsRemovesOldTerminalRunWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv.reclaimEligibleFleetDirs()
+	srv.fleet.reclaimEligibleFleetDirs()
 
 	mustNotExist(t, fleetDir)
 }
@@ -125,7 +125,7 @@ func TestReclaimEligibleFleetDirsLeavesRecentlyTerminalRunWorktree(t *testing.T)
 		t.Fatal(err)
 	}
 
-	srv.reclaimEligibleFleetDirs()
+	srv.fleet.reclaimEligibleFleetDirs()
 
 	mustExist(t, fleetDir)
 }
@@ -146,7 +146,7 @@ func TestReclaimEligibleFleetDirsNeverTouchesARunningRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv.reclaimEligibleFleetDirs()
+	srv.fleet.reclaimEligibleFleetDirs()
 
 	mustExist(t, fleetDir)
 }
@@ -167,7 +167,7 @@ func TestReclaimEligibleFleetDirsLeavesADirtyWorktree(t *testing.T) {
 	repoWT := filepath.Join(fleetDir, "svc")
 	initDirtyGitRepo(t, repoWT)
 
-	srv.reclaimEligibleFleetDirs()
+	srv.fleet.reclaimEligibleFleetDirs()
 
 	mustExist(t, fleetDir)
 	mustExist(t, repoWT)
@@ -214,7 +214,7 @@ func TestReclaimEligibleFleetDirsLeavesDatabaseRecordsUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv.reclaimEligibleFleetDirs()
+	srv.fleet.reclaimEligibleFleetDirs()
 
 	mustNotExist(t, fleetDir)
 

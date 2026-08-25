@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
@@ -52,6 +51,14 @@ type Server struct {
 	// worktrees after the operator believes they were stopped.
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
+
+	// fleet owns fleet worktree views and reclaim decisions (see fleet.go). It
+	// depends on fleetRunSource rather than *store.Store directly.
+	fleet *fleetCleaner
+
+	// delivery owns delivery reporting (see delivery.go). It depends on
+	// runGetter rather than *store.Store directly.
+	delivery *deliveryReporter
 }
 
 func (srv *Server) registerRun(runID string, cancel context.CancelFunc) {
@@ -113,6 +120,8 @@ func NewServer(s *store.Store, port int) *Server {
 		Port:       port,
 		cancels:    map[string]context.CancelFunc{},
 		GHPRCreate: runGHPRCreate,
+		fleet:      newFleetCleaner(s),
+		delivery:   newDeliveryReporter(s),
 	}
 }
 
@@ -145,8 +154,8 @@ func (srv *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/plans", srv.handlePlans)
 	mux.HandleFunc("/api/plans/{intent_id}/approve", srv.handleApprovePlan)
 	mux.HandleFunc("/api/plans/{intent_id}/reject", srv.handleRejectPlan)
-	mux.HandleFunc("/api/fleet", srv.handleFleet)
-	mux.HandleFunc("/api/clean-worktrees", srv.handleCleanWorktrees)
+	mux.HandleFunc("/api/fleet", srv.fleet.handleFleet)
+	mux.HandleFunc("/api/clean-worktrees", srv.fleet.handleCleanWorktrees)
 	mux.HandleFunc("/api/run-cancel", srv.handleRunCancel)
 	mux.HandleFunc("/api/run-resume", srv.handleRunResume)
 	mux.HandleFunc("/api/run-delete", srv.handleRunDelete)
@@ -183,7 +192,7 @@ func (srv *Server) Start() error {
 	// "something runs automatically as part of server lifecycle" precedent,
 	// not a new one. Runs for the lifetime of the process; there is no
 	// shutdown path today, so it is never cancelled.
-	go srv.runFleetCleanupLoop(context.Background())
+	go srv.fleet.runFleetCleanupLoop(context.Background())
 
 	handler := srv.Handler()
 	addr := fmt.Sprintf("127.0.0.1:%d", srv.Port)
@@ -229,270 +238,6 @@ func (srv *Server) handleProjectDetails(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, proj)
 }
 
-func (srv *Server) handleRefineProject(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req refinePayload
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
-		http.Error(w, "invalid project payload", http.StatusBadRequest)
-		return
-	}
-	if strings.ContainsAny(req.Name, "/\\") || strings.Contains(req.Name, "..") {
-		http.Error(w, "invalid project name", http.StatusBadRequest)
-		return
-	}
-
-	cfgDir := os.Getenv("SERGEANT_CONFIG")
-	if cfgDir == "" {
-		home, _ := os.UserHomeDir()
-		cfgDir = filepath.Join(home, ".config", "sergeant")
-	}
-	_ = os.MkdirAll(cfgDir, 0755)
-
-	filePath := filepath.Join(cfgDir, fmt.Sprintf("%s.yaml", req.Name))
-
-	// Patch the existing document rather than serialising a Project struct.
-	//
-	// Two reasons this must not round-trip through config.Project:
-	//   1. Project.Repos is `yaml:"-"` while Project.RawRepos owns the `repos` key,
-	//      so marshalling a struct built from JSON emits `repos: null` and destroys
-	//      every repo, path, role, group, gate and pipeline in the file.
-	//   2. Any key the struct does not model (notably `dag:`) would be dropped.
-	// Editing the decoded document preserves everything we were not asked to change.
-	// Patch a yaml.Node tree, not a map. Marshalling a map would alphabetise every
-	// key and discard all comments — these files are hand-maintained, so that is
-	// itself a form of data loss. Node patching preserves order, comments and any
-	// key this server does not model.
-	doc := &yaml.Node{}
-	existed := false
-	if data, err := os.ReadFile(filePath); err == nil && len(strings.TrimSpace(string(data))) > 0 {
-		existed = true
-		var root yaml.Node
-		if err := yaml.Unmarshal(data, &root); err != nil {
-			http.Error(w, fmt.Sprintf("existing project YAML is not parseable, refusing to overwrite: %v", err), http.StatusConflict)
-			return
-		}
-		if len(root.Content) > 0 && root.Content[0].Kind == yaml.MappingNode {
-			doc = root.Content[0]
-		} else {
-			http.Error(w, "existing project YAML is not a mapping, refusing to overwrite", http.StatusConflict)
-			return
-		}
-	} else {
-		doc.Kind = yaml.MappingNode
-		doc.Tag = "!!map"
-	}
-
-	nodeSet(doc, "name", scalarNode(req.Name))
-	// `project:` is a read-side alias for `name:`; persisting it produces a junk key.
-	nodeDelete(doc, "project")
-
-	if req.Description != nil {
-		nodeSet(doc, "description", scalarNode(*req.Description))
-	}
-	if req.Defaults != nil && req.Defaults.Agent != nil {
-		defaults := nodeGet(doc, "defaults")
-		if defaults == nil || defaults.Kind != yaml.MappingNode {
-			defaults = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-			nodeSet(doc, "defaults", defaults)
-		}
-		nodeSet(defaults, "agent", scalarNode(*req.Defaults.Agent))
-	}
-
-	var unknownRepos []string
-	if len(req.Repos) > 0 {
-		unknownRepos = patchReposNode(nodeGet(doc, "repos"), req.Repos)
-	}
-
-	out, err := marshalYAMLDoc(doc)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("marshaling project YAML: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Write atomically so a failure cannot leave a truncated config behind.
-	tmp := filePath + ".tmp"
-	if err := os.WriteFile(tmp, out, 0644); err != nil {
-		http.Error(w, fmt.Sprintf("writing project YAML: %v", err), http.StatusInternalServerError)
-		return
-	}
-	if err := os.Rename(tmp, filePath); err != nil {
-		_ = os.Remove(tmp)
-		http.Error(w, fmt.Sprintf("replacing project YAML: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":        "saved",
-		"project":       req.Name,
-		"created":       !existed,
-		"unknown_repos": unknownRepos,
-		"preserved_dag": nodeGet(doc, "dag") != nil,
-	})
-}
-
-// --- yaml.Node helpers -------------------------------------------------------
-// A yaml.v3 MappingNode stores Content as a flat [key, value, key, value...] slice.
-
-func scalarNode(s string) *yaml.Node {
-	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: s}
-}
-
-func nodeGet(m *yaml.Node, key string) *yaml.Node {
-	if m == nil || m.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			return m.Content[i+1]
-		}
-	}
-	return nil
-}
-
-// nodeSet replaces a key's value in place (preserving its position and comments)
-// or appends the key if absent.
-func nodeSet(m *yaml.Node, key string, val *yaml.Node) {
-	if m.Kind != yaml.MappingNode {
-		m.Kind = yaml.MappingNode
-		m.Tag = "!!map"
-	}
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			m.Content[i+1] = val
-			return
-		}
-	}
-	m.Content = append(m.Content, scalarNode(key), val)
-}
-
-func nodeDelete(m *yaml.Node, key string) {
-	if m == nil || m.Kind != yaml.MappingNode {
-		return
-	}
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			m.Content = append(m.Content[:i], m.Content[i+2:]...)
-			return
-		}
-	}
-}
-
-func applyRepoPatchNode(repo *yaml.Node, p refineRepoPatch) {
-	if repo == nil || repo.Kind != yaml.MappingNode {
-		return
-	}
-	if p.Role != nil {
-		nodeSet(repo, "role", scalarNode(*p.Role))
-	}
-	// Gates are replaced wholesale because the client sends the complete set it
-	// rendered; merging key-by-key would make deleting a gate impossible.
-	if p.Factory != nil && p.Factory.Gates != nil {
-		factory := nodeGet(repo, "factory")
-		if factory == nil || factory.Kind != yaml.MappingNode {
-			factory = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-			nodeSet(repo, "factory", factory)
-		}
-		gates := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-		names := make([]string, 0, len(p.Factory.Gates))
-		for k := range p.Factory.Gates {
-			names = append(names, k)
-		}
-		sort.Strings(names) // stable output for a freshly built map
-		for _, k := range names {
-			gates.Content = append(gates.Content, scalarNode(k), scalarNode(p.Factory.Gates[k]))
-		}
-		nodeSet(factory, "gates", gates)
-	}
-}
-
-// patchReposNode applies patches to whichever repo shape the file uses (a sequence
-// of entries carrying `name:`, or a mapping keyed by name). Repos not already
-// present are reported rather than invented, since this payload carries no `path`.
-func patchReposNode(repos *yaml.Node, patches map[string]refineRepoPatch) []string {
-	var unknown []string
-	if repos == nil {
-		for name := range patches {
-			unknown = append(unknown, name)
-		}
-		sort.Strings(unknown)
-		return unknown
-	}
-
-	switch repos.Kind {
-	case yaml.SequenceNode:
-		seen := map[string]bool{}
-		for _, item := range repos.Content {
-			nameNode := nodeGet(item, "name")
-			if nameNode == nil {
-				continue
-			}
-			if p, ok := patches[nameNode.Value]; ok {
-				applyRepoPatchNode(item, p)
-				seen[nameNode.Value] = true
-			}
-		}
-		for name := range patches {
-			if !seen[name] {
-				unknown = append(unknown, name)
-			}
-		}
-
-	case yaml.MappingNode:
-		for name, p := range patches {
-			entry := nodeGet(repos, name)
-			if entry == nil {
-				unknown = append(unknown, name)
-				continue
-			}
-			applyRepoPatchNode(entry, p)
-		}
-
-	default:
-		for name := range patches {
-			unknown = append(unknown, name)
-		}
-	}
-
-	sort.Strings(unknown)
-	return unknown
-}
-
-func marshalYAMLDoc(doc *yaml.Node) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(2)
-	if err := enc.Encode(doc); err != nil {
-		_ = enc.Close()
-		return nil, err
-	}
-	if err := enc.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-// refinePayload models a partial update. Pointers and nil maps distinguish
-// "absent, leave alone" from "present and empty, set to empty".
-type refinePayload struct {
-	Name        string  `json:"name"`
-	Description *string `json:"description"`
-	Defaults    *struct {
-		Agent *string `json:"agent"`
-	} `json:"defaults"`
-	Repos map[string]refineRepoPatch `json:"repos"`
-}
-
-type refineRepoPatch struct {
-	Role    *string `json:"role"`
-	Factory *struct {
-		Gates map[string]string `json:"gates"`
-	} `json:"factory"`
-}
-
 // runPayload is a run as a client receives it: the stored record, plus the
 // server's answer to "may this run be resumed?".
 //
@@ -501,20 +246,6 @@ type refineRepoPatch struct {
 // statuses would be a second authority for one rule, and the two would drift into
 // offering an action the server rejects. Resumable is derived here from the same
 // ResumableStatuses that endpoint enforces, so there is exactly one list.
-type runPayload struct {
-	store.RunRecord
-	Resumable bool `json:"resumable"`
-}
-
-// runPayloads answers the resume question for every run in a list. It never
-// returns nil, so an empty list serialises as [] rather than null.
-func runPayloads(runs []store.RunRecord) []runPayload {
-	out := make([]runPayload, 0, len(runs))
-	for _, r := range runs {
-		out = append(out, runPayload{RunRecord: r, Resumable: isResumable(r.Status)})
-	}
-	return out
-}
 
 func (srv *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	project := r.URL.Query().Get("project")
@@ -596,31 +327,6 @@ func (srv *Server) handleRunDetails(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
-}
-
-func resolveGitRemoteURL(repoDir string) string {
-	if strings.HasPrefix(repoDir, "~/") {
-		home, _ := os.UserHomeDir()
-		repoDir = filepath.Join(home, repoDir[2:])
-	}
-	cmd := exec.Command("git", "-C", repoDir, "config", "--get", "remote.origin.url")
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	raw := strings.TrimSpace(string(out))
-	if strings.HasPrefix(raw, "git@github.com:") {
-		raw = strings.TrimPrefix(raw, "git@github.com:")
-		raw = strings.TrimSuffix(raw, ".git")
-		return "https://github.com/" + raw
-	}
-	if strings.HasPrefix(raw, "https://github.com/") {
-		return strings.TrimSuffix(raw, ".git")
-	}
-	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
-		return strings.TrimSuffix(raw, ".git")
-	}
-	return ""
 }
 
 func (srv *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
@@ -959,215 +665,6 @@ func (srv *Server) writePlanState(w http.ResponseWriter, intentID string) {
 	writeJSON(w, http.StatusOK, planEntry{Intent: *intent, Bullets: bullets})
 }
 
-func (srv *Server) handleFleet(w http.ResponseWriter, r *http.Request) {
-	fleetDir := dag.FleetRoot()
-
-	type WorktreeLease struct {
-		TaskID    string `json:"task_id"`
-		Path      string `json:"path"`
-		Status    string `json:"status"`
-		CreatedAt string `json:"created_at"`
-	}
-
-	recentRuns, _ := srv.Store.ListRecentRuns(200)
-	runStatusMap := make(map[string]string)
-	for _, r := range recentRuns {
-		runStatusMap[r.ID] = r.Status
-		runStatusMap[r.TaskID] = r.Status
-	}
-
-	var leases []WorktreeLease
-	entries, _ := os.ReadDir(fleetDir)
-	for _, entry := range entries {
-		if entry.IsDir() {
-			info, _ := entry.Info()
-			modTime := time.Now().Format(time.RFC3339)
-			if info != nil {
-				modTime = info.ModTime().Format(time.RFC3339)
-			}
-			st, ok := runStatusMap[entry.Name()]
-			if !ok {
-				st = "unknown"
-			}
-			leases = append(leases, WorktreeLease{
-				TaskID:    entry.Name(),
-				Path:      filepath.Join(fleetDir, entry.Name()),
-				Status:    st,
-				CreatedAt: modTime,
-			})
-		}
-	}
-	if leases == nil {
-		leases = []WorktreeLease{}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"allocated_worktrees": len(leases),
-		"leases":              leases,
-	})
-}
-
-func (srv *Server) handleCleanWorktrees(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		TaskID string `json:"task_id"`
-		DryRun bool   `json:"dry_run"`
-		Force  bool   `json:"force"`
-	}
-
-	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&req)
-	}
-
-	if req.TaskID != "" && (strings.Contains(req.TaskID, "/") || strings.Contains(req.TaskID, "..") || strings.Contains(req.TaskID, string(filepath.Separator))) {
-		http.Error(w, "invalid task_id", http.StatusBadRequest)
-		return
-	}
-
-	fleetDir := dag.FleetRoot()
-	_ = os.MkdirAll(fleetDir, 0755)
-
-	recentRuns, _ := srv.Store.ListRecentRuns(200)
-	runStatusMap := make(map[string]string)
-	for _, r := range recentRuns {
-		runStatusMap[r.ID] = r.Status
-		runStatusMap[r.TaskID] = r.Status
-	}
-
-	type SkippedLease struct {
-		Path   string `json:"path"`
-		Reason string `json:"reason"`
-	}
-
-	removed := []string{}
-	skipped := []SkippedLease{}
-
-	entries, _ := os.ReadDir(fleetDir)
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		if req.TaskID != "" && entry.Name() != req.TaskID {
-			continue
-		}
-
-		targetPath := filepath.Join(fleetDir, entry.Name())
-		status := runStatusMap[entry.Name()]
-
-		ok, reason := reclaimFleetDir(targetPath, status, req.Force, req.DryRun)
-		if !ok {
-			if reason != "" {
-				skipped = append(skipped, SkippedLease{Path: targetPath, Reason: reason})
-			}
-			continue
-		}
-		removed = append(removed, targetPath)
-	}
-
-	statusStr := "cleaned"
-	if req.DryRun {
-		statusStr = "preview"
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":  statusStr,
-		"removed": removed,
-		"skipped": skipped,
-		"count":   len(removed),
-	})
-}
-
-// reclaimFleetDir is the one reclaim decision behind both the on-demand
-// /api/clean-worktrees handler and the automatic background pass: a
-// still-running run is refused, and unless force is set, a worktree with
-// uncommitted changes is refused too. dryRun reports what would happen
-// without touching disk — the on-demand handler's preview mode; the
-// automatic pass always passes force=false and dryRun=false, so it never
-// applies a relaxed version of the on-demand safety rules.
-//
-// On a RemoveAll failure this reports not-removed with no reason, matching
-// handleCleanWorktrees's original behaviour: such a directory is neither
-// counted as removed nor reported as skipped.
-func reclaimFleetDir(fleetDir string, runStatus string, force bool, dryRun bool) (removed bool, skipReason string) {
-	if runStatus == "running" && !force {
-		return false, "run still in progress"
-	}
-
-	// Never destroy unreviewed work by default. A completed run whose worktree
-	// still has uncommitted changes represents agent output that exists nowhere
-	// else; deleting it is unrecoverable.
-	if !force {
-		if dirty := dirtyWorktreesUnder(fleetDir); len(dirty) > 0 {
-			return false, fmt.Sprintf("uncommitted changes in %s — commit or use force", strings.Join(dirty, ", "))
-		}
-	}
-
-	if dryRun {
-		return true, ""
-	}
-	if err := os.RemoveAll(fleetDir); err != nil {
-		return false, ""
-	}
-	return true, ""
-}
-
-// fleetCleanupRetention is how long a run must have sat in a terminal status
-// before its fleet worktree is reclaimed automatically. It is a fixed
-// constant, not configurable — a deliberate choice for this single-user,
-// local-first tool (see design.md's rejected alternatives).
-const fleetCleanupRetention = 7 * 24 * time.Hour
-
-// fleetCleanupInterval is how often the automatic pass runs. Fixed for the
-// same reason as fleetCleanupRetention.
-const fleetCleanupInterval = 1 * time.Hour
-
-// reclaimEligibleFleetDirs finds every run whose status has been terminal
-// longer than fleetCleanupRetention and reclaims its fleet worktree via
-// reclaimFleetDir — the same running-check and dirty-worktree check the
-// on-demand handler applies, always with force disabled. A run whose fleet
-// directory does not exist (already cleaned, or never created) is silently
-// skipped, not an error. It never deletes or modifies a database row: only
-// the on-disk worktree is touched.
-func (srv *Server) reclaimEligibleFleetDirs() {
-	runs, err := srv.Store.RunsEligibleForCleanup(time.Now().Add(-fleetCleanupRetention))
-	if err != nil {
-		log.Printf("sergeant: fleet cleanup: listing eligible runs: %v", err)
-		return
-	}
-
-	fleetRoot := dag.FleetRoot()
-	for _, run := range runs {
-		fleetDir := filepath.Join(fleetRoot, run.ID)
-		if _, err := os.Stat(fleetDir); err != nil {
-			continue
-		}
-		if removed, _ := reclaimFleetDir(fleetDir, run.Status, false, false); removed {
-			log.Printf("sergeant: fleet cleanup: reclaimed %s (run %s, status %s)", fleetDir, run.ID, run.Status)
-		}
-	}
-}
-
-// runFleetCleanupLoop ticks on fleetCleanupInterval for the lifetime of the
-// server, reclaiming fleet worktrees for runs that have been terminal past
-// the retention window. Started once, alongside Start's existing startup
-// reconciliation, and stops when ctx is cancelled.
-func (srv *Server) runFleetCleanupLoop(ctx context.Context) {
-	ticker := time.NewTicker(fleetCleanupInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			srv.reclaimEligibleFleetDirs()
-		}
-	}
-}
-
 type IntentValidationResult struct {
 	Valid          bool     `json:"valid"`
 	Score          int      `json:"score"`
@@ -1391,37 +888,6 @@ func (srv *Server) handleSaveDAG(w http.ResponseWriter, r *http.Request) {
 		"project": proj.Name,
 		"stages":  len(proj.DAG.Stages),
 	})
-}
-
-// validWorkTypes is the fixed vocabulary decision O2 names for a dispatched
-// branch's <type>/<change-id> prefix. It is checked before anything else about
-// a dispatch — before change resolution, before either the no-repos or
-// explicit-repos branch runs — mirroring where ValidateAgent is checked: reject
-// what the engine cannot honor before any record exists.
-var validWorkTypes = map[string]bool{
-	"feat": true, "fix": true, "refactor": true,
-	"docs": true, "chore": true, "test": true,
-}
-
-// sortedWorkTypes returns validWorkTypes' keys in a stable order, so a refusal
-// names the valid set the same way on every call.
-func sortedWorkTypes() []string {
-	names := make([]string, 0, len(validWorkTypes))
-	for t := range validWorkTypes {
-		names = append(names, t)
-	}
-	sort.Strings(names)
-	return names
-}
-
-// validateWorkType reports whether typ is one of the fixed work types a
-// dispatch may name. An empty or unrecognized value is refused, naming the
-// valid set, so the caller learns what would have been accepted.
-func validateWorkType(typ string) error {
-	if !validWorkTypes[typ] {
-		return fmt.Errorf("invalid or missing type %q: must be one of %s", typ, strings.Join(sortedWorkTypes(), ", "))
-	}
-	return nil
 }
 
 // targetRepositories is the list of repositories a dispatch acts on: the ones it
@@ -1761,128 +1227,6 @@ func (srv *Server) respondWithExistingRun(
 
 // DeliveryReport describes what a run actually produced on disk. Every field is
 // observed, never assumed. It deliberately has no "pr_url" unless a PR exists.
-type DeliveryReport struct {
-	Repo       string   `json:"repo"`
-	Worktree   string   `json:"worktree"`
-	Branch     string   `json:"branch"`
-	Commits    int      `json:"commits"`
-	Dirty      bool     `json:"dirty"`
-	Pushed     bool     `json:"pushed"`
-	RemoteBase string   `json:"remote_base,omitempty"`
-	CompareURL string   `json:"compare_url,omitempty"`
-	Summary    string   `json:"summary"`
-	Artifacts  []string `json:"artifacts"`
-	ReadyForPR bool     `json:"ready_for_pr"`
-}
-
-func gitOut(dir string, args ...string) string {
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
-
-// describeDelivery inspects the run's isolated worktree and reports its real state.
-// It never claims a pull request exists; opening one is an explicit human action
-// through /api/create-pr.
-func (srv *Server) describeDelivery(proj *config.Project, runID string) DeliveryReport {
-	branch := ""
-	if run, err := srv.Store.GetRun(runID); err == nil {
-		branch = naming.BranchNameForRun(run.ID, run.Type, run.ChangeID)
-	}
-
-	// Report on the first repo that actually produced a worktree for this run.
-	for repoName, rCfg := range proj.Repos {
-		wt := dag.FleetDir(runID, repoName)
-		if _, err := os.Stat(wt); err != nil {
-			continue
-		}
-
-		rep := DeliveryReport{Repo: repoName, Worktree: wt, Branch: branch}
-		rep.Dirty = gitOut(wt, "status", "--porcelain") != ""
-		if n := gitOut(wt, "rev-list", "--count", "HEAD", "^"+defaultBase(wt)); n != "" {
-			fmt.Sscanf(n, "%d", &rep.Commits)
-		}
-		rep.Pushed = gitOut(wt, "rev-parse", "--verify", "origin/"+branch) != ""
-		rep.RemoteBase = resolveGitRemoteURL(expandHome(rCfg.Path))
-		if rep.RemoteBase != "" && rep.Pushed {
-			rep.CompareURL = fmt.Sprintf("%s/compare/%s?expand=1", rep.RemoteBase, branch)
-		}
-
-		switch {
-		case rep.Commits == 0 && rep.Dirty:
-			rep.Summary = fmt.Sprintf("Uncommitted changes in worktree for %s — nothing committed yet", repoName)
-		case rep.Commits == 0:
-			rep.Summary = fmt.Sprintf("Run completed with no changes to %s", repoName)
-		case !rep.Pushed:
-			rep.Summary = fmt.Sprintf("%d commit(s) on %s in an isolated worktree — not pushed", rep.Commits, branch)
-			rep.ReadyForPR = true
-		default:
-			rep.Summary = fmt.Sprintf("%d commit(s) pushed to %s — ready to open a PR", rep.Commits, branch)
-			rep.ReadyForPR = true
-		}
-
-		rep.Artifacts = []string{wt}
-		if rep.CompareURL != "" {
-			rep.Artifacts = append(rep.Artifacts, rep.CompareURL)
-		}
-		return rep
-	}
-
-	return DeliveryReport{
-		Repo:      proj.Name,
-		Branch:    branch,
-		Summary:   "Run completed but produced no isolated worktree",
-		Artifacts: []string{},
-	}
-}
-
-// defaultBase resolves the branch a run should be diffed against.
-func defaultBase(dir string) string {
-	if ref := gitOut(dir, "symbolic-ref", "refs/remotes/origin/HEAD"); ref != "" {
-		return strings.TrimPrefix(ref, "refs/remotes/")
-	}
-	for _, c := range []string{"origin/main", "origin/master", "main", "master"} {
-		if gitOut(dir, "rev-parse", "--verify", c) != "" {
-			return c
-		}
-	}
-	return "HEAD"
-}
-
-func expandHome(p string) string {
-	if strings.HasPrefix(p, "~/") {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, p[2:])
-	}
-	return p
-}
-
-// dirtyWorktreesUnder returns the names of per-repo worktrees beneath a run's
-// fleet directory that still contain uncommitted changes.
-func dirtyWorktreesUnder(runDir string) []string {
-	entries, err := os.ReadDir(runDir)
-	if err != nil {
-		return nil
-	}
-	var dirty []string
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		repoWT := filepath.Join(runDir, e.Name())
-		if gitOut(repoWT, "rev-parse", "--git-dir") == "" {
-			continue // not a worktree
-		}
-		if gitOut(repoWT, "status", "--porcelain") != "" {
-			dirty = append(dirty, e.Name())
-		}
-	}
-	return dirty
-}
-
 // firstLine trims a brief down to a usable commit subject.
 func firstLine(s string) string {
 	s = strings.TrimSpace(s)
@@ -1932,13 +1276,6 @@ func (srv *Server) handleRunCancel(w http.ResponseWriter, r *http.Request) {
 		"was_running": stopped,
 		"note":        cancelNote(stopped),
 	})
-}
-
-func cancelNote(stopped bool) string {
-	if stopped {
-		return "Run cancelled and in-flight agent work signalled to stop."
-	}
-	return "No in-flight run found on this server; status recorded as cancelled only."
 }
 
 // handleDeliveryHistory answers a run-scoped view of delivery state, the
@@ -2211,7 +1548,7 @@ func (srv *Server) executeRun(
 	// Delivery. This reports what actually happened on disk. It does NOT claim a
 	// pull request exists — nothing in this path pushes a branch or calls the
 	// GitHub API. Opening the PR is an explicit human action via /api/create-pr.
-	delivery := srv.describeDelivery(proj, taskID)
+	delivery := srv.delivery.describeDelivery(proj, taskID)
 	deliveryNow := time.Now().UTC()
 	_ = srv.Store.RecordEnvelope(&store.EnvelopeRecord{
 		ID:            fmt.Sprintf("delivery-%s-%d", taskID, deliveryNow.UnixNano()),
@@ -2317,37 +1654,6 @@ func (srv *Server) blockedReasonForRun(runID, bulletStatus string) string {
 // the work, and recording blocked would assert a judgment the operator did not
 // make. Every outcome not named here is treated the same way, so an outcome this
 // change did not reason about cannot silently be read as stuck.
-func bulletStatusForRunOutcome(runStatus string) (string, bool) {
-	switch runStatus {
-	case "passed":
-		return "green", true
-	case "failed":
-		return "blocked", true
-	default:
-		return "", false
-	}
-}
-
-// ResumableStatuses are the run statuses a resume accepts.
-//
-// A passed run is excluded because re-running earned work can only lose it: a
-// flaky gate would turn a pass into a failure. A running run is excluded because
-// resuming it would put two agents in one worktree.
-//
-// interrupted is included: the coordinator stopped, not the work. Nothing judged
-// the run; it was cut off. ReconcileOrphanedRuns moves orphaned running runs to
-// this status at startup so the normal resume path recovers them without operator
-// archaeology.
-var ResumableStatuses = []string{"failed", "cancelled", "timed_out", "interrupted"}
-
-func isResumable(status string) bool {
-	for _, s := range ResumableStatuses {
-		if status == s {
-			return true
-		}
-	}
-	return false
-}
 
 // handleRunResume re-enters an existing run instead of starting a new one.
 //
