@@ -285,6 +285,53 @@ func (pr *PhaseRunner) RunCodeGate(ctx context.Context, name, command string) (*
 	return result, nil
 }
 
+// RunShippingGate executes a shipping-gate command across an intent's
+// bullets. Unlike RunCodeGate, it is not a *PhaseRunner method: a shipping
+// gate evaluates an intent as a whole, which may span several
+// repositories/worktrees, so there is no single pr.Worktree to run it in.
+// The command runs with cmd.Dir unset (the sergeant process's own working
+// directory) and SERGEANT_BULLET_WORKTREES set to the bullets' worktree
+// paths, comma-joined in merge order, in its environment — the substrate a
+// project's shipping-gate command needs to actually inspect more than one
+// repo.
+//
+// It reuses GateResult rather than a new struct: the pass/fail, redaction,
+// and timeout shape RunCodeGate already established is identical here, only
+// where the command runs and what tells it where to look differ. Worktree is
+// set to the same comma-joined list, so a shipping-gate result is auditable
+// the same way RunCodeGate's Worktree already is for a per-bullet gate.
+// Branch is left empty — a shipping gate spans potentially several branches
+// (one per bullet), and Branch is documented as a single value.
+//
+// It does not record a PhaseRecord: a shipping gate is evidence about an
+// intent, not any one run's phase, and has no *Store/*RunID/*RepoName to
+// attribute one to.
+func RunShippingGate(ctx context.Context, name, command string, worktrees []string) (*GateResult, error) {
+	gateCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(gateCtx, "bash", "-c", command)
+	superviseGroup(cmd)
+	joined := strings.Join(worktrees, ",")
+	cmd.Env = append(os.Environ(), "SERGEANT_BULLET_WORKTREES="+joined)
+
+	var outBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &outBuf
+
+	err := cmd.Run()
+
+	cleaned := redact.Truncate(redact.Text(stripANSI(outBuf.String())), maxRawOutputBytes)
+	passed := (err == nil)
+	return &GateResult{
+		GateName: name,
+		Command:  redact.Text(command),
+		Passed:   passed,
+		Output:   cleaned,
+		Worktree: joined,
+	}, nil
+}
+
 // DiffAgainstBase returns the unified diff of the worktree's current HEAD
 // against the branch it was created from, for a review phase's prompt.
 // Shells to git directly, the same way internal/dag/engine.go already

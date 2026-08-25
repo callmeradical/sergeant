@@ -105,8 +105,18 @@ type IntentRecord struct {
 	// for the same reason ChangeID/ChangeRepo are recorded here: an approval
 	// reuses it verbatim rather than requiring the caller to state it again.
 	Type      string    `json:"type,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	// ShippingGateStatus is "", "passed", or "failed". Empty means the intent's
+	// bullets have not all reached sealed/merged yet, OR they have and no
+	// shipping gates are configured for the project — in the latter case
+	// "passed" is written immediately (handleCreatePR), so a caller never has
+	// to distinguish "not evaluated" from "trivially passed" by reading config
+	// elsewhere.
+	ShippingGateStatus string `json:"shipping_gate_status,omitempty"`
+	// ShippingGateReason is set only when ShippingGateStatus is "failed",
+	// mirroring BulletRecord.BlockedReason's existing pattern exactly.
+	ShippingGateReason string    `json:"shipping_gate_reason,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 // BulletRecord is a tracer bullet: exactly ONE repository, a vertical slice
@@ -442,6 +452,12 @@ func (s *Store) migrateAddColumns() error {
 		// created the table before this column existed needs it added explicitly.
 		// DEFAULT '' so existing rows read back as empty rather than NULL.
 		{"deliveries", "recovery_instructions", "ALTER TABLE deliveries ADD COLUMN recovery_instructions TEXT NOT NULL DEFAULT ''"},
+		// shipping_gate_status/shipping_gate_reason were added by the intent-
+		// scoped shipping gate; existing rows predate it and have nothing to
+		// backfill, so an empty status reads back as "not yet evaluated", the
+		// same as a freshly created intent.
+		{"intents", "shipping_gate_status", "ALTER TABLE intents ADD COLUMN shipping_gate_status TEXT NOT NULL DEFAULT ''"},
+		{"intents", "shipping_gate_reason", "ALTER TABLE intents ADD COLUMN shipping_gate_reason TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, w := range wanted {
 		has, err := s.hasColumn(w.table, w.column)
@@ -1214,11 +1230,14 @@ func (s *Store) CreateIntent(i *IntentRecord) error {
 // same order.
 const intentColumns = `id, project, COALESCE(statement, ''), status,
 	COALESCE(change_id, ''), COALESCE(change_repo, ''), COALESCE(type, ''),
+	COALESCE(shipping_gate_status, ''), COALESCE(shipping_gate_reason, ''),
 	created_at, updated_at`
 
 func scanIntent(r rowScanner) (IntentRecord, error) {
 	var i IntentRecord
-	err := r.Scan(&i.ID, &i.Project, &i.Statement, &i.Status, &i.ChangeID, &i.ChangeRepo, &i.Type, &i.CreatedAt, &i.UpdatedAt)
+	err := r.Scan(&i.ID, &i.Project, &i.Statement, &i.Status, &i.ChangeID, &i.ChangeRepo, &i.Type,
+		&i.ShippingGateStatus, &i.ShippingGateReason,
+		&i.CreatedAt, &i.UpdatedAt)
 	return i, err
 }
 
@@ -1324,6 +1343,34 @@ func (s *Store) UpdateIntentStatus(intentID, status string) error {
 		"transition": "status",
 		"id":         intentID,
 		"status":     status,
+	})
+}
+
+// RecordShippingGateResult records the outcome of an intent's shipping gate.
+// Unlike AdvanceBulletsForRun, this never touches any BulletRecord — a
+// shipping-gate failure is evidence about the intent, not a bullet outcome, and
+// no individual bullet's honestly-earned sealed status changes because of it.
+func (s *Store) RecordShippingGateResult(intentID string, passed bool, reason string) error {
+	status := "passed"
+	if !passed {
+		status = "failed"
+	} else {
+		reason = "" // a pass never carries a reason, mirroring BlockedReason's rule
+	}
+	res, err := s.db.Exec(
+		`UPDATE intents SET shipping_gate_status = ?, shipping_gate_reason = ?, updated_at = ? WHERE id = ?`,
+		status, reason, time.Now().UTC(), intentID,
+	)
+	if err != nil {
+		return err
+	}
+	if err := requireOneRow(res, "intent", intentID); err != nil {
+		return err
+	}
+	return s.recordTransition(ChannelIntent, intentID, map[string]interface{}{
+		"transition":           "shipping_gate",
+		"id":                   intentID,
+		"shipping_gate_status": status,
 	})
 }
 
@@ -1545,6 +1592,31 @@ func DeriveIntentStatus(bullets []BulletRecord) string {
 		}
 	}
 	return "satisfied"
+}
+
+// AllBulletsSealedOrMerged reports whether every one of an intent's bullets has
+// reached sealed or merged — the condition that makes the intent, as a whole, a
+// candidate for its shipping gate. merged is accepted alongside sealed for
+// BulletProgression's documented ordering (sealed -> merged), though as of this
+// change nothing in the codebase ever writes "merged" to a bullet yet — no code
+// path observes real PR merge state. Accepting it now costs nothing and avoids
+// this predicate needing a second revision the day that path exists.
+//
+// The empty case is answered before the rule is applied — the opposite answer
+// from DeriveIntentStatus's empty case, because the two functions answer
+// different questions: "every bullet is sealed-or-merged" is vacuously true for
+// an empty set, which would trigger a shipping gate for an intent that has had
+// no bullets created against it at all.
+func AllBulletsSealedOrMerged(bullets []BulletRecord) bool {
+	if len(bullets) == 0 {
+		return false
+	}
+	for _, b := range bullets {
+		if b.Status != "sealed" && b.Status != "merged" {
+			return false
+		}
+	}
+	return true
 }
 
 func requireOneRow(res sql.Result, kind, id string) error {
