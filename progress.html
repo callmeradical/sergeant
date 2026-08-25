@@ -1210,5 +1210,114 @@ a{color:var(--muted)}
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
+<header>
+  <h1>Sergeant v2</h1>
+  <p>Independent review. Written by the critic, not the builder.</p>
+  <p class="meta">
+    Review 029 · 2026-08-25 · branch <code>v2</code> · merge commit <code>748e2e7</code>
+    ("merge: an-intent-ships-through-a-shipping-gate", merge of <code>bf42214</code>
+    "feat(shipping-gate): an intent ships through a shipping gate" into
+    <code>e86f751</code>) reviewed against
+    <code>openspec/changes/an-intent-ships-through-a-shipping-gate/{proposal,design,tasks}.md</code>,
+    <code>specs/shipping-gate/spec.md</code>, the originating
+    <code>docs/prd-intent-shipping-gate.md</code>, and
+    <code>openspec/changes/a-sealed-bullet-awaits-explicit-approval/design.md</code> (the
+    <code>SealBulletForRun</code>/<code>handleCreatePR</code> trigger point this change extends) ·
+    current <code>v2</code> HEAD is <code>748e2e7</code>, the tip of this feature and the fourth and
+    final change closing out AGENTS.md's listed v1-capability gaps; build/vet/test run at that HEAD
+  </p>
+</header>
+
+<section>
+  <h2>Current status</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at HEAD <code>748e2e7</code>, no output</div></div>
+    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./internal/...</code>, no output</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">clean except named environmental failures</span></div><div class="small"><code>go test ./internal/... -count=1</code> run both with the prescribed <code>-skip</code> (all 12 packages pass) and without it (exactly the same 10 named LLM-key-dependent tests fail — <code>TestBuildProjectGraphAppliesExcludePatterns</code>, <code>TestBuildProjectGraphMergesEveryParticipatingRepo</code>, <code>TestIncludeGroupsExcludesNonMatchingRepos</code>, <code>TestBuildNeverLeavesOutputInAPartialState</code>, <code>TestPublishFailureRestoresPriorGraph</code>, <code>TestBuildNeverSpawnsSgtGraphify</code>, <code>TestQueryAgainstABuiltGraphReturnsAnAnswer</code>, <code>TestExplainAndAffectedAreDistinctFromQuery</code>, <code>TestMCPGraphQueryAgainstABuiltGraphReturnsAnswer</code>, <code>TestBuildGraphEndpointBuildsAndPublishes</code> — all with <code>error: no LLM API key found</code>, none touching <code>internal/config</code>, <code>internal/store</code>, <code>internal/runner</code>, or the shipping-gate code in <code>internal/ui</code>)</div></div>
+    <div class="card"><div class="label">Signatures named in design.md</div><div class="value"><span class="status">match exactly</span></div><div class="small"><code>Project.ShippingGates map[string]string</code> (<code>internal/config/config.go:39</code>), <code>store.AllBulletsSealedOrMerged(bullets []BulletRecord) bool</code> and <code>Store.RecordShippingGateResult(intentID string, passed bool, reason string) error</code> (<code>internal/store/store.go:1610</code>, <code>:1353</code>), <code>IntentRecord.ShippingGateStatus</code>/<code>ShippingGateReason</code> (<code>store.go:114-117</code>), <code>runner.RunShippingGate(ctx, name, command string, worktrees []string) (*GateResult, error)</code> (<code>internal/runner/runner.go:309</code>), and <code>Server.evaluateShippingGate</code> plus the swappable <code>Server.RunShippingGate</code> field defaulting to <code>runner.RunShippingGate</code> (<code>internal/ui/server.go:53,130,483</code>) are all verbatim matches of design.md's code blocks</div></div>
+    <div class="card"><div class="label">Free function, not a method</div><div class="value"><span class="status">verified</span></div><div class="small"><code>PhaseRunner</code> (<code>internal/runner/runner.go:132-144</code>) holds a single <code>Worktree string</code>, <code>RepoName string</code>, <code>RunID string</code> — genuinely one-bullet-scoped. A shipping gate spans an intent's several bullets/worktrees/repos at once, so it structurally cannot be a <code>*PhaseRunner</code> method without redesigning that struct; design.md's stated reason holds up against the real type, not just its own prose</div></div>
+    <div class="card"><div class="label">Trigger condition</div><div class="value"><span class="status">verified precisely</span></div><div class="small"><code>handleCreatePR</code> (<code>internal/ui/server.go:340-408</code>): <code>SealBulletForRun</code> runs first and returns 409 on failure before anything else; only after it succeeds does the handler load the run and, if <code>run.IntentID != ""</code>, call <code>ListBulletsForIntent</code> and check <code>store.AllBulletsSealedOrMerged(bullets)</code> — same request, same synchronous call stack, no poll loop, no goroutine, no separate endpoint</div></div>
+    <div class="card"><div class="label">Never touches a bullet</div><div class="value"><span class="status">verified</span></div><div class="small"><code>grep -n "UpdateBulletStatus\|AdvanceBulletsForRun" internal/ui/server.go internal/store/store.go</code> filtered to shipping-gate lines: zero hits. <code>evaluateShippingGate</code> and <code>RecordShippingGateResult</code> call only <code>ListBulletsForIntent</code> (read) and an <code>UPDATE intents ...</code> SQL statement — no bullet table touched. <code>TestShippingGateFailureLeavesEveryBulletSealed</code> drives a real failing gate through <code>POST /api/create-pr</code> and then calls <code>ListBulletsForIntent</code> to assert both bullets still read <code>"sealed"</code> — a genuine post-failure query, not just an HTTP response shape check</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Spec.md scenario coverage</h2>
+  <table>
+    <tr><th>Scenario</th><th>Covering test</th><th>Result</th></tr>
+    <tr><td>An intent with some bullets not yet sealed has no shipping-gate status</td><td><code>TestAllBulletsSealedOrMerged</code> (<code>internal/store/lifecycle_test.go</code>), cases incl. "mix of pending, red, green, and sealed" and "one bullet still green" → <code>false</code></td><td>covered, direct predicate test as tasks.md required</td></tr>
+    <tr><td>An intent with all bullets sealed evaluates its shipping gate</td><td><code>TestAllBulletsSealedOrMerged</code> ("every bullet sealed"/"sealed and merged mix"/"every bullet merged" → <code>true</code>) plus the real trigger exercised end to end by <code>TestShippingGateFailureLeavesEveryBulletSealed</code> and <code>TestPassingShippingGateTriggersNoMergeAction</code></td><td>covered</td></tr>
+    <tr><td>No shipping gates configured records a pass with no command run</td><td><code>TestCreatePRWithNoShippingGatesConfiguredRecordsAPassWithNoCommandRun</code> (<code>internal/ui/shipping_gate_test.go</code>) — a real recording seam on <code>Server.RunShippingGate</code> counting invocations, asserted <code>== 0</code>, not just the final status</td><td>covered, proves zero commands, not just "passed"</td></tr>
+    <tr><td>A shipping-gate failure leaves every bullet sealed</td><td><code>TestShippingGateFailureLeavesEveryBulletSealed</code> — real <code>POST /api/create-pr</code> completing the last seal, gate configured as <code>exit 1</code>, then <code>ListBulletsForIntent</code> asserts both bullets still <code>"sealed"</code></td><td>covered</td></tr>
+    <tr><td>A failed shipping gate records which check failed</td><td><code>TestRecordShippingGateResultRecordsFailureReason</code> (store) and reinforced in <code>TestShippingGateFailureLeavesEveryBulletSealed</code>, both asserting the reason names <code>"security"</code></td><td>covered</td></tr>
+    <tr><td>A passing shipping gate records no reason</td><td><code>TestRecordShippingGateResultPassRecordsNoReason</code> — explicitly seeds a stale failure reason first, then proves a pass overwrites it to empty</td><td>covered</td></tr>
+    <tr><td>Sergeant never merges as a result of a shipping gate</td><td><code>TestPassingShippingGateTriggersNoMergeAction</code> — <code>GHPRCreate</code> call-counter asserted <code>== 1</code> (the request's own PR action only, none attributable to the gate)</td><td>covered</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Scope and wiring</h2>
+  <div class="item ok">
+    <h3><span class="sev low">verified — no scope creep</span> &nbsp; The diff adds nothing beyond what proposal.md/design.md/tasks.md describe</h3>
+    <p><code>git diff f2324fb..748e2e7 --stat</code> touches exactly
+    <code>internal/config/config.go</code> (+8), <code>internal/runner/runner.go</code> (+47) and its
+    new test file, <code>internal/store/store.go</code> (+78) and its new test file,
+    <code>internal/ui/server.go</code> (+83) and its new test file, plus
+    <code>progress.html</code>. No new HTTP endpoint, no dashboard UI element, no change to
+    <code>BulletRecord</code>, <code>AdvanceBulletsForRun</code>, or <code>RunCodeGate</code> — each
+    explicitly forbidden by tasks.md and confirmed absent by reading the diff directly.</p>
+  </div>
+  <div class="item ok">
+    <h3><span class="sev low">verified — reachable, not dead code</span> &nbsp; <code>evaluateShippingGate</code> sits on the real <code>POST /api/create-pr</code> path</h3>
+    <p><code>handleCreatePR</code> calls it directly at <code>server.go:406</code>, inside the same
+    handler every PR-creation request already goes through; the migration adding
+    <code>shipping_gate_status</code>/<code>shipping_gate_reason</code> columns is registered in the
+    same <code>wanted</code> slice every other additive column uses and applied on open. Three UI-level
+    tests (<code>TestCreatePRWithNoShippingGatesConfiguredRecordsAPassWithNoCommandRun</code>,
+    <code>TestShippingGateFailureLeavesEveryBulletSealed</code>,
+    <code>TestPassingShippingGateTriggersNoMergeAction</code>) drive the real HTTP handler end to end,
+    not a direct unit call to <code>evaluateShippingGate</code> alone.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Verdict</h2>
+  <div class="item ok">
+    <p><strong>MEETS SPEC.</strong> Every named function/behavior in design.md is real and matches
+    verbatim: <code>Project.ShippingGates</code>, <code>store.AllBulletsSealedOrMerged</code>,
+    <code>Store.RecordShippingGateResult</code>, <code>IntentRecord.ShippingGateStatus</code>/
+    <code>ShippingGateReason</code>, <code>runner.RunShippingGate</code> as a free function (confirmed
+    genuinely necessary against <code>PhaseRunner</code>'s single-worktree shape, not asserted on
+    faith), and <code>Server.evaluateShippingGate</code> wired behind the swappable
+    <code>Server.RunShippingGate</code> field. The trigger fires exactly once, synchronously, inside
+    <code>handleCreatePR</code>, immediately after <code>SealBulletForRun</code> succeeds — not on a
+    poll, not before every bullet is sealed. The "never touches a bullet" guarantee holds by grep and by
+    a real post-failure <code>ListBulletsForIntent</code> query, not just an HTTP response shape. The
+    "no gates configured passes trivially" claim is proven via a call-counting recording seam showing
+    zero invocations, not merely a stored "passed" status. D6 holds: nothing in the diff calls <code>gh</code>
+    or any merge action from the shipping-gate path, and a dedicated test proves <code>gh</code> is
+    invoked exactly once (the request's own PR action). All 7 scenarios in
+    <code>specs/shipping-gate/spec.md</code> have named, assertion-backed test coverage across
+    <code>internal/store/lifecycle_test.go</code>, <code>internal/runner/shipping_gate_test.go</code>, and
+    <code>internal/ui/shipping_gate_test.go</code>. The diff is exactly the files tasks.md scopes it to,
+    with no dashboard UI, new endpoint, or per-bullet mutation added. Build and vet are clean; the full
+    suite is clean except the same 10 pre-existing, environmental, LLM-key-dependent failures confirmed
+    by name in every prior review this session. No caveats found.</p>
+  </div>
+</section>
+
+<footer>
+  <p class="meta">Review 029 · findings above are reproduced from commands run directly against the
+  current <code>v2</code> working tree at HEAD <code>748e2e7</code>. No mutations were made to
+  <code>internal/config/config.go</code>, <code>internal/store/store.go</code>,
+  <code>internal/runner/runner.go</code>, or <code>internal/ui/server.go</code> for this review — the
+  three UI-level tests already isolate exactly the claims this review needed to check (zero-command
+  pass, bullet-untouched failure, no-merge-action pass) with recording seams and real post-request
+  queries, so no independent mutation test was judged necessary beyond reading each assertion directly.
+  This is the fourth and final change in the batch closing out AGENTS.md's listed v1-capability gaps.
+  Reviews 028 and earlier were not re-examined; they stand as recorded above.</p>
+  <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
+</footer>
+
 </main></body>
 </html>
