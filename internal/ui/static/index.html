@@ -174,7 +174,17 @@
        shouting. No pulse, no emoji, no unconditional reassurance. -->
   <footer class="shrink-0 h-6 border-t border-[#21262d] bg-[#0b0e14] px-3 flex items-center justify-between text-[10px] text-[#8b949e] font-mono">
     <div class="flex items-center gap-3 min-w-0">
-      <span class="truncate">Runs <span id="stat-total-runs" class="text-slate-300 font-bold">0</span></span>
+      <!-- Embedded terminal (proposal.md): a real, Go-spawned shell PTY per
+           session, unrecorded and unattributed to any intent/bullet/phase.
+           Opens the bottom drawer; a fresh click with no sessions open starts
+           the first one instead of toggling an empty drawer. Far-left of the
+           status bar and filled rather than the neutral pattern every other
+           footer button uses — the one primary action down here, VS Code/
+           launchpad-style, not just another ambient item. -->
+      <button type="button" id="btn-open-terminal" onclick="termSessions.size ? toggleTerminalDrawer() : startTerminalSession()"
+        class="truncate flex items-center gap-1 rounded-sm px-1.5 -my-px py-px bg-[#1f6feb] hover:bg-[#388bfd] text-white font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+        <i class="fa-solid fa-terminal text-[9px]" aria-hidden="true"></i> Terminal
+      </button>
       <button type="button" id="btn-open-workers" onclick="openWorkersDrawer(this)"
         class="truncate rounded px-1 -mx-1 hover:text-white hover:bg-[#161b22] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
         Workers <span id="stat-workers-active" class="text-slate-300 font-bold">0</span>
@@ -183,15 +193,6 @@
         class="truncate rounded px-1 -mx-1 hover:text-white hover:bg-[#161b22] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
         Work analytics
       </button>
-      <!-- Embedded terminal (proposal.md): a real, Go-spawned shell PTY per
-           session, unrecorded and unattributed to any intent/bullet/phase.
-           Opens the bottom drawer; a fresh click with no sessions open starts
-           the first one instead of toggling an empty drawer. -->
-      <button type="button" id="btn-open-terminal" onclick="termSessions.size ? toggleTerminalDrawer() : startTerminalSession()"
-        class="truncate rounded px-1 -mx-1 hover:text-white hover:bg-[#161b22] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-        <i class="fa-solid fa-terminal" aria-hidden="true"></i> Terminal
-      </button>
-      <span id="stat-metrics-badge" class="truncate text-slate-300">&mdash;</span>
     </div>
     <div class="flex items-center gap-3 shrink-0">
       <span id="last-updated">&mdash;</span>
@@ -503,9 +504,17 @@
       const countSpan = document.getElementById('sidebar-runs-count');
       const shown = allRuns.filter(runMatchesFilter);
 
-      countSpan.innerText = runFilter && shown.length !== allRuns.length
-        ? `${shown.length}/${allRuns.length}`
-        : String(allRuns.length);
+      if (runFilter && shown.length !== allRuns.length) {
+        countSpan.innerText = `${shown.length}/${allRuns.length}`;
+      } else {
+        // Passed-out-of-completed, not passed-out-of-all: a still-running
+        // run must never read as a failure just because it isn't done yet.
+        // Same "honest" ratio fetchRuns() used to write to a footer badge
+        // that the terminal drawer could cover; here it stays visible.
+        const passed = allRuns.filter(r => r.status === 'passed').length;
+        const done = allRuns.filter(r => ['passed', 'failed'].includes(r.status)).length;
+        countSpan.innerText = done ? `${passed}/${done}` : String(allRuns.length);
+      }
 
       if (allRuns.length === 0) {
         listContainer.innerHTML = '<div class="p-2 text-center text-[#8b949e] text-[10px]">No runs recorded.</div>';
@@ -655,15 +664,9 @@
           lastUpdatedEl.innerText = `Updated ${new Date().toLocaleTimeString()}`;
         }
 
-        document.getElementById('stat-total-runs').innerText = allRuns.length;
-
-        // Compute honest header pass metric
-        const passed = allRuns.filter(r => r.status === 'passed').length;
-        const done = allRuns.filter(r => ['passed', 'failed'].includes(r.status)).length;
-        const metricsBadge = document.getElementById('stat-metrics-badge');
-        if (metricsBadge) {
-          metricsBadge.innerText = done ? `${passed}/${done} passed` : 'No completed runs';
-        }
+        // The pass ratio this used to write to a footer badge now renders
+        // next to "Pipeline runs" in the sidebar instead (renderRunList),
+        // which stays visible when the terminal drawer covers the footer.
 
         // Check globally if any run has failed gates
         const hasFailedRun = allRuns.some(r => r.status === 'failed');
