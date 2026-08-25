@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/callmeradical/sergeant/internal/config"
+	"github.com/callmeradical/sergeant/internal/dag"
 	"github.com/callmeradical/sergeant/internal/graphify"
 	"github.com/callmeradical/sergeant/internal/naming"
 	"github.com/callmeradical/sergeant/internal/redact"
@@ -103,9 +104,10 @@ func Tools() []Tool {
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"project": map[string]string{"type": "string", "description": "Project name (e.g. cid-system, better-than-boxes)"},
+					"intent_id": map[string]string{"type": "string", "description": "Intent id to render a brief for"},
+					"repo":      map[string]string{"type": "string", "description": "Repository name (the bullet within the intent)"},
 				},
-				"required": []string{"project"},
+				"required": []string{"intent_id", "repo"},
 			},
 		},
 		{
@@ -296,13 +298,22 @@ func (s *MCPServer) executeTool(name string, args map[string]interface{}) (strin
 		return string(out), nil
 
 	case "sergeant_get_brief":
-		projName, _ := args["project"].(string)
-		proj, err := config.LoadProject(projName)
+		intentID, _ := args["intent_id"].(string)
+		repo, _ := args["repo"].(string)
+		intent, err := s.Store.GetIntent(intentID)
 		if err != nil {
 			return "", err
 		}
-		out, _ := json.MarshalIndent(proj, "", "  ")
-		return string(out), nil
+		proj, err := config.LoadProject(intent.Project)
+		if err != nil {
+			return "", err
+		}
+		repoCfg, ok := proj.Repos[repo]
+		if !ok {
+			return "", fmt.Errorf("repo %q not configured in project %q", repo, proj.Name)
+		}
+		gates := dag.SortedGateNames(repoCfg)
+		return s.Store.RenderIntentBrief(intentID, repo, gates)
 
 	case "sergeant_run_gates":
 		projName, _ := args["project"].(string)

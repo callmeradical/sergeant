@@ -354,6 +354,12 @@ func (e *Engine) RunStage(ctx context.Context, runID string, stage *config.DAGSt
 					continue
 				}
 				prompt := stage.Brief
+				if run, err := e.Store.GetRun(runID); err == nil && run.IntentID != "" {
+					gates := SortedGateNames(repoCfg)
+					if rendered, rerr := e.Store.RenderIntentBrief(run.IntentID, repoName, gates); rerr == nil {
+						prompt = rendered
+					}
+				}
 				if prompt == "" {
 					prompt = fmt.Sprintf("Execute %s phase for stage %s on %s", phase, stage.Name, repoName)
 				}
