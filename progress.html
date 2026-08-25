@@ -1499,5 +1499,93 @@ a{color:var(--muted)}
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
+<header>
+  <h1>Sergeant v2</h1>
+  <p>Independent review. Written by the critic, not the builder.</p>
+  <p class="meta">
+    Review 032 · 2026-08-25 · branch <code>v2</code> · merge commit <code>c0246e4</code>
+    ("merge: server-remaining-groups-decomposition", merge of <code>43a4e0f</code>
+    "refactor(ui): extract plan proposal/approval/rejection into plans.go",
+    <code>ed66718</code> "extract workflow discovery and DAG-save into workflow.go", and
+    <code>b749176</code> "extract run cancel/resume/delete into run_lifecycle.go" into
+    <code>b4eab99</code>) reviewed against
+    <code>openspec/changes/server-remaining-groups-decomposition/{proposal,design,tasks}.md</code>,
+    <code>specs/plans-workflow-run-lifecycle-decomposition/spec.md</code>, and the originating
+    <code>docs/prd-server-execution-path-decomposition.md</code> · current <code>v2</code> HEAD is
+    <code>c0246e4</code>; build/vet/test run at that HEAD
+  </p>
+</header>
+
+<section>
+  <h2>Current status</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code>, no output</div></div>
+    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./internal/...</code>, no output</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">clean except named environmental failures</span></div><div class="small"><code>go test ./internal/... -count=1</code> run both with the prescribed <code>-skip</code> (all 12 packages pass) and without it (exactly the same 10 named LLM-key-dependent tests fail — <code>TestBuildProjectGraphAppliesExcludePatterns</code>, <code>TestBuildProjectGraphMergesEveryParticipatingRepo</code>, <code>TestIncludeGroupsExcludesNonMatchingRepos</code>, <code>TestBuildNeverLeavesOutputInAPartialState</code>, <code>TestPublishFailureRestoresPriorGraph</code>, <code>TestBuildNeverSpawnsSgtGraphify</code>, <code>TestQueryAgainstABuiltGraphReturnsAnAnswer</code>, <code>TestExplainAndAffectedAreDistinctFromQuery</code>, <code>TestMCPGraphQueryAgainstABuiltGraphReturnsAnswer</code>, <code>TestBuildGraphEndpointBuildsAndPublishes</code> — all with <code>error: no LLM API key found</code>)</div></div>
+    <div class="card"><div class="label">Files extracted</div><div class="value"><span class="status">match design.md exactly</span></div><div class="small"><code>internal/ui/plans.go</code> holds <code>handlePlans</code>, <code>handleApprovePlan</code>, <code>handleRejectPlan</code>, <code>writePlanState</code>, <code>handleValidateIntent</code>; <code>internal/ui/workflow.go</code> gained <code>handleDiscoverWorkflow</code>/<code>handleSaveDAG</code> alongside its pre-existing <code>handleWorkflow</code>; <code>internal/ui/run_lifecycle.go</code> holds <code>handleRunCancel</code>, <code>handleRunDelete</code>, <code>handleRunResume</code> — all removed from <code>server.go</code> (<code>git diff 0065a2f b749176 --stat</code>: 533 lines removed from <code>server.go</code>, none added elsewhere but the three new files, plus two new test files)</div></div>
+    <div class="card"><div class="label">No new interfaces</div><div class="value"><span class="status">confirmed</span></div><div class="small"><code>grep -n interface internal/ui/{plans,workflow,run_lifecycle}.go</code> returns only <code>map[string]interface{}</code> response literals — zero interface type declarations in any of the three files</div></div>
+    <div class="card"><div class="label">Scope</div><div class="value"><span class="status">exactly the three named groups</span></div><div class="small"><code>git diff 0065a2f b749176 --stat</code> touches only <code>plans.go</code>, <code>workflow.go</code>, <code>run_lifecycle.go</code>, <code>server.go</code>, and the two new test files; <code>handleDispatch</code> (<code>server.go:585</code>), <code>createRunAndDispatch</code> (<code>server.go:739</code>), and <code>executeRun</code> (<code>server.go:1029</code>) remain untouched in <code>server.go</code>, confirming the out-of-scope dispatch/execution group named in proposal.md was not touched</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Behavior-preservation verification</h2>
+  <table>
+    <tr><th>Check</th><th>Result</th></tr>
+    <tr><td>Verbatim-move spot check</td><td><code>handleRunCancel</code> in <code>run_lifecycle.go</code> diffed byte-for-byte against <code>git show 0065a2f:internal/ui/server.go</code>'s copy: identical, including its cancel-then-record comment</td></tr>
+    <tr><td><code>plans.go</code> coverage</td><td>Pre-existing <code>internal/ui/plan_approval_test.go</code> (not touched by this change — absent from <code>git diff 0065a2f b749176 --stat</code>) exercises <code>/api/plans</code>, <code>/api/plans/{id}/approve</code>, <code>/api/plans/{id}/reject</code>, and <code>/api/bullets</code> through real <code>httptest</code> requests against <code>srv.Handler()</code>'s mux, covering listing, approval (including the real dispatch sequence and change-reuse regression from Review 020), rejection, idempotency of both, and refusal outside "proposed" — genuinely exercises the route, not a bypass</td></tr>
+    <tr><td><code>workflow.go</code> coverage</td><td><code>workflow_discovery_test.go</code>'s two tests POST to <code>/api/discover-workflow</code> via <code>postJSON(t, mux, ...)</code> against a real mux, checking response shape and the unknown-project 400 path — a real route, not a direct function call</td></tr>
+    <tr><td><code>run_lifecycle.go</code> coverage</td><td><code>run_cancel_delete_test.go</code>'s four tests POST to <code>/api/run-cancel</code> and <code>/api/run-delete</code> via <code>srv.Handler()</code>, checking response shape, stored run status, and that a registered cancel func is actually invoked (not just the status column, per the file's own regression comment); resume is covered by pre-existing <code>TestResumeRestartsAFailedRun</code> (<code>server_test.go:803</code>) and <code>reconcile_test.go</code>, both hitting <code>/api/run-resume</code> for real and re-run unmodified after the move</td></tr>
+    <tr><td>Spec scenario coverage</td><td>All 6 scenarios in <code>specs/plans-workflow-run-lifecycle-decomposition/spec.md</code> (approve, reject, discover-workflow, cancel, resume, delete) have real route-level test coverage, either new or pre-existing and re-run</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>design.md's "no new interface" reasoning</h2>
+  <p>design.md argues none of the three groups gets an interface seam: workflow/DAG-discovery has zero
+  <code>*store.Store</code> dependency (the same case <code>refine.go</code>/<code>bulletstate.go</code>
+  already established in the prior pass), and plans/run-lifecycle's existing tests already exercise the
+  handlers against a real store with no demonstrated blocker. This holds up under inspection — two of the
+  four already-landed groups from the prior session (<code>refine.go</code>, <code>bulletstate.go</code>)
+  likewise took no interface, so this is consistent precedent rather than a new excuse. The one open
+  question is that the parent <code>docs/prd-server-execution-path-decomposition.md</code>'s Proposal step
+  2 reads as a blanket instruction ("Extract one cohesive group at a time, each into its own file, with a
+  small (1-3 method) interface seam") without an explicit exception clause for zero-dependency groups —
+  design.md resolves this tension by citing the "premature abstraction" lesson from this session's own
+  Go-interfaces review, which is a defensible engineering call but is asserted rather than reconciled
+  against the PRD's literal wording. Not treated as a spec violation here, since the PRD's own precedent
+  (two of four prior groups took no interface) already establishes that "with an interface seam" was never
+  meant literally for every group.</p>
+</section>
+
+<section>
+  <h2>Verdict</h2>
+  <div class="item ok">
+    <p><strong>MEETS SPEC.</strong> <code>internal/ui/plans.go</code>, <code>workflow.go</code>, and
+    <code>run_lifecycle.go</code> exist and hold exactly the functions design.md named, moved verbatim
+    (spot-checked byte-for-byte). No new interface is introduced in any of the three files, and the stated
+    reasoning for skipping one holds up against the codebase's own precedent. <code>go build</code>,
+    <code>go vet</code>, and <code>go test ./internal/...</code> are clean under the prescribed
+    <code>-skip</code>, and without it fail on exactly the same 10 pre-existing LLM-key-dependent tests.
+    The pre-existing <code>plan_approval_test.go</code> and the two new characterization test files all
+    exercise real HTTP routes through the server's mux rather than bypassing them, and every scenario in
+    <code>specs/plans-workflow-run-lifecycle-decomposition/spec.md</code> has genuine coverage. Scope is
+    exactly the three named groups — <code>handleDispatch</code>/<code>createRunAndDispatch</code>/
+    <code>executeRun</code> are untouched, and no unrelated file appears in the implementation diff.</p>
+  </div>
+</section>
+
+<footer>
+  <p class="meta">Review 032 · findings above are reproduced from commands run directly against the
+  current <code>v2</code> working tree at HEAD <code>c0246e4</code>, diffing the three implementation
+  commits against their true merge-base <code>0065a2f</code> (<code>git diff 0065a2f b749176 --stat</code>)
+  rather than trusting the wider branch history in between. <code>plans.go</code>, <code>workflow.go</code>,
+  and <code>run_lifecycle.go</code> were read in full; <code>handleRunCancel</code> was diffed byte-for-byte
+  against the pre-extraction copy. All three new/existing test files were read in full to confirm they hit
+  real routes via <code>srv.Handler()</code>/<code>mux</code>, not direct function calls. Reviews 031 and
+  earlier were not re-examined; they stand as recorded above.</p>
+  <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
+</footer>
+
 </main></body>
 </html>
