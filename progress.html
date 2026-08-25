@@ -1319,5 +1319,109 @@ a{color:var(--muted)}
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
+<header>
+  <h1>Sergeant v2</h1>
+  <p>Independent review. Written by the critic, not the builder.</p>
+  <p class="meta">
+    Review 030 · 2026-08-25 · branch <code>v2</code> · merge commit <code>c0dea68</code>
+    ("merge: export-runner-starts-when-a-backend-is-registered", merge of
+    <code>bf512a1</code> "feat(export): start a Runner when a project's backend is
+    registered" into <code>d0aa848</code>) reviewed against
+    <code>openspec/changes/export-runner-starts-when-a-backend-is-registered/{proposal,design,tasks}.md</code>,
+    <code>specs/export-wiring/spec.md</code>, the originating
+    <code>docs/prd-export-runner-wiring.md</code>, and <code>progress.html</code>'s own Review 026
+    entry (the caveat this change closes) · current <code>v2</code> HEAD is <code>163191f</code>;
+    build/vet/test run at that HEAD
+  </p>
+</header>
+
+<section>
+  <h2>Current status</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code>, no output</div></div>
+    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./internal/...</code>, no output</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">clean except named environmental failures</span></div><div class="small"><code>go test ./internal/... ./cmd/... -count=1</code> run both with the prescribed <code>-skip</code> (all 13 packages pass, including <code>cmd/sergeant</code>) and without it (exactly the same 10 named LLM-key-dependent tests fail — <code>TestBuildProjectGraphAppliesExcludePatterns</code>, <code>TestBuildProjectGraphMergesEveryParticipatingRepo</code>, <code>TestIncludeGroupsExcludesNonMatchingRepos</code>, <code>TestBuildNeverLeavesOutputInAPartialState</code>, <code>TestPublishFailureRestoresPriorGraph</code>, <code>TestBuildNeverSpawnsSgtGraphify</code>, <code>TestQueryAgainstABuiltGraphReturnsAnAnswer</code>, <code>TestExplainAndAffectedAreDistinctFromQuery</code>, <code>TestMCPGraphQueryAgainstABuiltGraphReturnsAnswer</code>, <code>TestBuildGraphEndpointBuildsAndPublishes</code> — all with <code>error: no LLM API key found</code>, none touching <code>internal/export</code> or <code>cmd/sergeant</code>)</div></div>
+    <div class="card"><div class="label">Entities named in design.md</div><div class="value"><span class="status">match exactly</span></div><div class="small"><code>export.Constructor func(cfg config.Export) (Target, error)</code> and <code>export.Backends map[string]Constructor</code>, starting empty (<code>internal/export/registry.go</code>, verbatim); <code>startExportRunners(st *store.Store, backends map[string]export.Constructor)</code> (<code>cmd/sergeant/main.go:179</code>); its one call site, <code>startUI</code>, passes the production registry: <code>startExportRunners(st, export.Backends)</code> (<code>main.go:163</code>)</div></div>
+    <div class="card"><div class="label">Registry genuinely empty</div><div class="value"><span class="status">verified</span></div><div class="small"><code>internal/export/registry.go</code> declares <code>var Backends = map[string]Constructor{}</code> and nothing else — no placeholder/no-op backend registered anywhere in production code; <code>grep -rn "Backends\[" --include=*.go</code> (excluding <code>_test.go</code>) has zero hits</div></div>
+    <div class="card"><div class="label">Loop-capture bug class</div><div class="value"><span class="status">checked, not present</span></div><div class="small"><code>runner := &export.Runner{...}</code> is declared with <code>:=</code> inside the <code>for</code> loop body (a fresh binding every iteration, not hoisted), and the goroutine takes <code>proj.Name</code> as an explicit parameter (<code>go func(projectName string) {...}(proj.Name)</code>) rather than closing over the range variable directly — correct regardless of Go version, and moot anyway since <code>go.mod</code> pins go 1.26.5, well past Go 1.22's per-iteration loop-variable semantics</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Spec.md scenario coverage</h2>
+  <table>
+    <tr><th>Scenario</th><th>Covering test</th><th>Result</th></tr>
+    <tr><td>A project with a registered backend causes a Runner to start</td><td><code>TestRegisteredBackendStartsExporting</code> (<code>cmd/sergeant/export_runners_test.go</code>) — real bounded poll (<code>for target.calls.Load() == 0 { ... time.Sleep(5ms) }</code> against a 2s deadline), not a hardcoded sleep-then-assert; a real intent is seeded first so a nonzero call count can only mean the Runner actually ran and delivered</td><td>covered</td></tr>
+    <tr><td>An unknown backend name starts nothing</td><td><code>TestUnregisteredBackendNameStartsNothing</code> — asserts the test's own differently-named <code>Constructor</code> was never called (<code>constructed == 0</code>) and that stderr contains the exact pre-change string</td><td>covered</td></tr>
+    <tr><td>No export block starts nothing and reports nothing</td><td><code>TestNoExportBlockStartsAndReportsNothing</code> — asserts zero constructions and that stderr contains no mention of the project</td><td>covered</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Non-regression: exact stderr match</h2>
+  <div class="item ok">
+    <h3><span class="sev low">verified byte-for-byte</span> &nbsp; The unregistered-backend warning is character-identical to the pre-change text</h3>
+    <p>Pre-change (<code>git show cb2d9ac:cmd/sergeant/main.go</code>):
+    <code>"export: project %q configures backend %q, but no export target implementation is registered yet; skipping\n"</code>.
+    Post-change (<code>main.go</code>, miss branch): the identical format string, identical arguments
+    (<code>proj.Name</code>, <code>proj.Export.Backend</code>), identical destination (<code>os.Stderr</code>).
+    <code>TestUnregisteredBackendNameStartsNothing</code> asserts <code>strings.Contains(stderr, want)</code>
+    against that exact rendered string. No behavior changed for the unregistered case beyond what
+    design.md specified.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Scope and wiring</h2>
+  <div class="item ok">
+    <h3><span class="sev low">verified — no scope creep</span> &nbsp; The implementation commit touches exactly what tasks.md scopes it to</h3>
+    <p><code>git show bf512a1 --stat</code>: <code>cmd/sergeant/export_runners_test.go</code> (new, 201
+    lines), <code>cmd/sergeant/main.go</code> (+35/-9), <code>internal/export/registry.go</code> (new,
+    16 lines). No real <code>Target</code> backend implemented, no production registration into
+    <code>export.Backends</code>, no shutdown/restart handling added — all explicitly out of scope per
+    proposal.md and confirmed absent. (The wider merge commit <code>c0dea68</code> also carries three
+    unrelated openspec doc-only proposals for later changes already staged on <code>v2</code>; none
+    touch <code>internal/export</code>, <code>cmd/sergeant</code>, or any code path this change exercises.)</p>
+  </div>
+</section>
+
+<section>
+  <h2>Verdict</h2>
+  <div class="item ok">
+    <p><strong>MEETS SPEC.</strong> Every entity named in design.md is real and matches exactly:
+    <code>export.Constructor</code>, the empty <code>export.Backends</code> registry, the new
+    <code>startExportRunners(st, backends)</code> signature, and its one call site passing the
+    production registry. The core claim is proven by a genuine polling-with-timeout test — a registered
+    backend's <code>Target.Export</code> is called at least once, observed via a bounded poll loop
+    against a real seeded intent, not a fixed sleep followed by an assertion. The non-regression claim
+    holds byte-for-byte against the pre-change stderr string, confirmed by reading the commit before
+    this change. No placeholder backend was invented to populate the registry — it starts and stays
+    genuinely empty in production code. The classic goroutine-loop-variable-capture bug does not apply:
+    <code>runner</code> is freshly bound each iteration and the goroutine receives <code>proj.Name</code>
+    as an explicit parameter rather than closing over the range variable. All 3 scenarios in
+    <code>specs/export-wiring/spec.md</code> have named, assertion-backed coverage in
+    <code>cmd/sergeant/export_runners_test.go</code>, exercising <code>startExportRunners</code> directly
+    as tasks.md required. Build and vet are clean; the full suite (<code>./internal/...</code> and
+    <code>./cmd/...</code>) is clean except the same 10 pre-existing, environmental, LLM-key-dependent
+    failures confirmed by name against both the <code>-skip</code> and no-<code>-skip</code> runs. No
+    caveats found.</p>
+  </div>
+</section>
+
+<footer>
+  <p class="meta">Review 030 · findings above are reproduced from commands run directly against the
+  current <code>v2</code> working tree at HEAD <code>163191f</code>, against the merge commit
+  <code>c0dea68</code> and its sole implementation commit <code>bf512a1</code>. No mutations were made
+  to <code>internal/export/registry.go</code> or <code>cmd/sergeant/main.go</code> for this review —
+  the merge commit's own message already records a mutation test against the registry lookup guard
+  (bypassing the <code>ok</code> check, caught by <code>TestUnregisteredBackendNameStartsNothing</code>
+  via panic, restored, clean diff), and the existing bounded-poll test already isolates the one claim
+  (a registered backend's <code>Target</code> is actually invoked) an independent mutation would have
+  targeted, so no further mutation was judged necessary beyond reading each assertion directly. This
+  closes the caveat Review 026 raised against <code>task-tracking-is-a-readonly-export</code>. Reviews
+  029 and earlier were not re-examined; they stand as recorded above.</p>
+  <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
+</footer>
+
 </main></body>
 </html>
