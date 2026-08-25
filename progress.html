@@ -1006,5 +1006,209 @@ a{color:var(--muted)}
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
+<header>
+  <h1>Sergeant v2</h1>
+  <p>Independent review. Written by the critic, not the builder.</p>
+  <p class="meta">
+    Review 028 · 2026-08-25 · branch <code>v2</code> · merge commit <code>f2324fb</code>
+    ("merge: a-green-bullet-awaits-independent-review", merge of <code>603b98e</code>
+    "feat(review): a green bullet awaits independent review" into <code>f1f09a0</code>)
+    reviewed against
+    <code>openspec/changes/a-green-bullet-awaits-independent-review/{proposal,design,tasks}.md</code>,
+    <code>specs/independent-review/spec.md</code>, the originating
+    <code>docs/prd-independent-review-phase.md</code>, and
+    <code>openspec/changes/a-stuck-bullet-is-blocked-not-failed/proposal.md</code> (the mechanism this
+    change reuses) · current <code>v2</code> HEAD is <code>f2324fb</code>, the tip of this feature;
+    build/vet/test run at that HEAD
+  </p>
+</header>
+
+<section>
+  <h2>Current status</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at HEAD <code>f2324fb</code>, no output</div></div>
+    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./internal/...</code>, no output</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">clean except named environmental failures</span></div><div class="small"><code>go test ./internal/... -count=1</code> run both with the prescribed <code>-skip</code> (12/12 packages pass) and without it (exactly the same 10 named LLM-key-dependent tests fail — <code>TestBuildProjectGraphAppliesExcludePatterns</code>, <code>TestBuildProjectGraphMergesEveryParticipatingRepo</code>, <code>TestIncludeGroupsExcludesNonMatchingRepos</code>, <code>TestBuildNeverLeavesOutputInAPartialState</code>, <code>TestPublishFailureRestoresPriorGraph</code>, <code>TestBuildNeverSpawnsSgtGraphify</code>, <code>TestQueryAgainstABuiltGraphReturnsAnAnswer</code>, <code>TestExplainAndAffectedAreDistinctFromQuery</code>, <code>TestMCPGraphQueryAgainstABuiltGraphReturnsAnswer</code>, <code>TestBuildGraphEndpointBuildsAndPublishes</code> — all with <code>error: no LLM API key found</code>, none touching <code>internal/dag</code>, <code>internal/handoff</code>, <code>internal/runner</code>, or <code>internal/ui</code>)</div></div>
+    <div class="card"><div class="label">Signatures named in design.md</div><div class="value"><span class="status">match exactly</span></div><div class="small"><code>reviewPrompt(diff string, stage *config.DAGStage, repoName string) string</code> (<code>internal/dag/engine.go</code>), <code>handoff.ReviewFinding</code>/<code>ReviewFindings</code>/<code>HasBlockingFinding</code> (<code>internal/handoff/envelope.go</code>), and <code>PhaseRunner.DiffAgainstBase(ctx) (string, error)</code> (<code>internal/runner/runner.go</code>, shells to <code>git diff --merge-base HEAD</code>) are verbatim matches of design.md's code blocks</div></div>
+    <div class="card"><div class="label">Opt-in claim</div><div class="value"><span class="status">verified</span></div><div class="small"><code>DefaultPipeline()</code> (<code>internal/dag/engine.go:268</code>) still returns exactly <code>{"plan","build","test"}</code>, untouched by this diff — a factory with no configured <code>"review"</code> is entirely unaffected, confirmed both by reading <code>DefaultPipeline</code> and by <code>TestRunStagePipelineWithoutReviewIsUnaffected</code></div></div>
+    <div class="card"><div class="label">Independence structural claim</div><div class="value"><span class="status">verified</span></div><div class="small"><code>reviewPrompt</code>'s signature takes a diff string, a stage, and a repo name — no envelope, no prior-phase parameter of any kind. <code>TestReviewPromptExcludesPriorPhaseEnvelopeContent</code> calls the real function directly with two synthetic prior-phase summaries never passed into it and asserts neither appears in the output — it would fail if a future edit threaded an envelope parameter back in and accidentally interpolated its content</div></div>
+    <div class="card"><div class="label">Blocked-routing chain</div><div class="value"><span class="status">traced end to end</span></div><div class="small">A blocking finding → <code>RunStage</code> returns an error (<code>internal/dag/engine.go:385-387</code>) → run concludes <code>"failed"</code> → <code>bulletStatusForRunOutcome</code> (<code>internal/ui/bulletstate.go:72-81</code>, unmodified) maps <code>failed→blocked</code> → <code>blockedReasonForRun</code> (<code>internal/ui/server.go:1620-1650</code>) now checks <code>e.Stage == "review"</code> first and uses the joined blocking-finding summaries as the reason, falling through to <code>handoff.BlockedReason</code>/the synthesized string otherwise — each link read directly, not taken on the merge commit's own word</div></div>
+    <div class="card"><div class="label">Spec.md scenario coverage</div><div class="value"><span class="status">7/7 scenarios, real tests</span></div><div class="small">Every scenario in <code>specs/independent-review/spec.md</code> maps to a specific, assertion-backed test across <code>internal/dag/engine_test.go</code>, <code>internal/handoff/envelope_test.go</code>, <code>internal/runner/runner_test.go</code>, and <code>internal/ui/run_lifecycle_test.go</code>; see table below</div></div>
+    <div class="card"><div class="label">Scope</div><div class="value"><span class="status">no creep</span></div><div class="small"><code>git diff 603b98e^ 603b98e --stat</code>: 8 files, 578 insertions, 6 deletions — exactly <code>internal/dag/engine.go</code>+test, <code>internal/handoff/envelope.go</code>+test, <code>internal/runner/runner.go</code>+test, and <code>internal/ui/server.go</code>+<code>run_lifecycle_test.go</code>. <code>DefaultPipeline</code>, <code>AdvanceBulletsForRun</code>, <code>UpdateBulletStatus</code>, and <code>bulletStatusForRunOutcome</code> are byte-for-byte untouched; no dashboard UI, no per-axis phases, no external-tracker routing</div></div>
+    <div class="card"><div class="label">Reachability</div><div class="value"><span class="status">verified, not dead code</span></div><div class="small">The <code>case "review":</code> branch sits inside <code>RunStage</code>'s ordinary per-phase <code>switch</code>, reached whenever <code>pipeline := PipelineFor(repoCfg)</code> contains <code>"review"</code> — the same loop that dispatches every other phase, exercised end to end by <code>TestRunStageReviewPhaseWithOnlyNonBlockingFindingsSucceeds</code> and <code>TestRunStageReviewPhaseWithBlockingFindingFailsTheStage</code>, both of which drive a real fake-agent binary through <code>PhaseRunner.RunAgentPhase</code>, not a direct unit call to the case body</div></div>
+  </div>
+  <p><strong>Verdict:</strong> MEETS SPEC. Every named function/behavior in design.md is real and
+  matches verbatim, review is genuinely opt-in via an unmodified <code>DefaultPipeline</code>,
+  independence is structural (no envelope parameter, guarded by a real test), the blocked-routing
+  chain traces cleanly through unmodified existing mechanisms, all 7 spec.md scenarios have real
+  test coverage, the review case is reachable through the ordinary pipeline loop rather than dead
+  code, and the diff introduces no scope beyond proposal.md/design.md/tasks.md. No caveats found.</p>
+</section>
+
+<section>
+  <h2>What I inspected</h2>
+  <table>
+    <tr><th>Area</th><th>Method</th></tr>
+    <tr><td>Binding spec</td><td>Read <code>openspec/changes/a-green-bullet-awaits-independent-review/{proposal,design,tasks}.md</code>, <code>specs/independent-review/spec.md</code>, <code>docs/prd-independent-review-phase.md</code>, and <code>openspec/changes/a-stuck-bullet-is-blocked-not-failed/proposal.md</code> in full before reading any code</td></tr>
+    <tr><td>The actual diff</td><td><code>git diff 603b98e^ 603b98e --stat</code> and the merge commit <code>f2324fb</code>'s own stat — confirmed the merge is clean (no commits beyond <code>603b98e</code> squeezed in) and the implementation commit touches exactly 8 files, 578 insertions, 6 deletions</td></tr>
+    <tr><td><code>DefaultPipeline</code> / opt-in claim</td><td>Read <code>internal/dag/engine.go:268</code> directly: <code>func DefaultPipeline() []string { return []string{"plan", "build", "test"} }</code>, unchanged by this diff</td></tr>
+    <tr><td><code>RunStage</code>'s <code>"review"</code> case</td><td>Read <code>internal/dag/engine.go:371-387</code> in full: skips if already passed (<code>e.phasePassed</code>), collects the diff via <code>pr.DiffAgainstBase</code>, builds the prompt via <code>reviewPrompt</code>, dispatches via the existing <code>pr.RunAgentPhase</code>, and returns an error when <code>handoff.HasBlockingFinding</code> is true — sits inside the same per-phase <code>switch</code> as <code>"test"</code> and <code>default</code>, reached by the ordinary pipeline loop, not behind any dead branch</td></tr>
+    <tr><td><code>reviewPrompt</code>'s structural independence</td><td>Read the function at <code>internal/dag/engine.go:254-262</code>: signature is <code>(diff string, stage *config.DAGStage, repoName string) string</code> — no envelope or prior-phase parameter exists to pass. Read <code>TestReviewPromptExcludesPriorPhaseEnvelopeContent</code>: constructs two prior-phase summary strings never passed to <code>reviewPrompt</code>, calls it directly, and asserts neither leaked into the output — this would fail if a future change threaded envelope content back in</td></tr>
+    <tr><td><code>handoff.ReviewFinding</code>/<code>ReviewFindings</code>/<code>HasBlockingFinding</code></td><td>Read <code>internal/handoff/envelope.go:41-79</code>: fields <code>Axis</code>, <code>Severity</code>, <code>Summary</code>, <code>Disposition</code>; <code>ReviewFindings</code> decodes a <code>findings</code> key from payload, returning <code>nil</code> (never an error) on empty/malformed input; <code>HasBlockingFinding</code> checks for any <code>Severity == "error"</code> — verbatim match of design.md's code block</td></tr>
+    <tr><td><code>PhaseRunner.DiffAgainstBase</code></td><td>Read <code>internal/runner/runner.go:288-...</code>: shells to <code>git -C pr.Worktree diff --merge-base HEAD</code> via <code>exec.CommandContext</code>, exactly design.md's specified implementation and rationale (reusing what git already knows about the merge-base rather than tracking a parallel base ref)</td></tr>
+    <tr><td>Blocked-routing chain, traced not trusted</td><td>Read each link directly: <code>RunStage</code>'s error return on a blocking finding (<code>engine.go:385-387</code>) → <code>recordTerminalRun</code> writing <code>"failed"</code> and calling <code>bulletStatusForRunOutcome</code> (<code>internal/ui/server.go:1587-1600</code>) → <code>bulletStatusForRunOutcome</code>'s <code>failed→blocked, true</code> mapping (<code>internal/ui/bulletstate.go:72-81</code>, unmodified by this diff) → <code>blockedReasonForRun</code> (<code>internal/ui/server.go:1620-1650</code>), which now special-cases <code>e.Stage == "review"</code> ahead of <code>handoff.BlockedReason</code>, preserving "last envelope naming a reason wins"</td></tr>
+    <tr><td>Spec scenario → test mapping</td><td>Read every scenario in <code>specs/independent-review/spec.md</code> against the named tests in <code>internal/dag/engine_test.go</code>, <code>internal/handoff/envelope_test.go</code>, <code>internal/runner/runner_test.go</code>, and <code>internal/ui/run_lifecycle_test.go</code>, matched by name and by reading each test body's actual assertions</td></tr>
+    <tr><td>Round-trip through persistence, not just an in-memory struct</td><td>Read <code>TestReviewFindingsRoundTripThroughRunAgentPhase</code> in full: drives a real fake-agent script through <code>PhaseRunner.RunAgentPhase</code>, then reads the findings back out via <code>st.ListEnvelopesForRun</code> + <code>handoff.ReviewFindings</code> on the persisted (redacted) payload, asserting both entries and their severity/summary survive the store round trip</td></tr>
+    <tr><td>Full suite, twice</td><td><code>go test ./internal/... -count=1</code> with the prescribed <code>-skip</code> (clean, 12/12 packages) and without it (exactly the 10 named tests fail, confirmed by name and by identical "no LLM API key found" error text)</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Spec.md scenario coverage</h2>
+  <table>
+    <tr><th>Scenario</th><th>Test</th></tr>
+    <tr><td>A pipeline with no review phase runs unchanged</td><td><code>TestRunStagePipelineWithoutReviewIsUnaffected</code> (<code>internal/dag/engine_test.go</code>) — asserts no <code>"review"</code> phase or envelope is recorded when the pipeline never names it</td></tr>
+    <tr><td>A review phase is dispatched with the diff, not prior envelopes</td><td><code>TestReviewPromptExcludesPriorPhaseEnvelopeContent</code> (<code>internal/dag/engine_test.go</code>) — calls <code>reviewPrompt</code> directly, proves the exclusion is structural (the function's signature), not conventional</td></tr>
+    <tr><td>The review prompt builder has no access to prior envelopes</td><td>Same test as above, per tasks.md's explicit instruction that both scenarios share one direct-signature test</td></tr>
+    <tr><td>A blocking finding blocks the bullet with the finding's summary as the reason</td><td><code>TestABlockingReviewFindingBlocksTheBulletWithItsSummaryAsReason</code> (<code>internal/ui/run_lifecycle_test.go</code>) — records a real review envelope, calls <code>recordTerminalRun</code>, asserts <code>BulletRecord.BlockedReason</code> equals the finding's summary verbatim</td></tr>
+    <tr><td>Multiple blocking findings still produce one recorded reason</td><td><code>TestMultipleBlockingReviewFindingsProduceOneJoinedReason</code> — asserts the joined reason contains both findings' summaries</td></tr>
+    <tr><td>An info or warning finding does not block the bullet</td><td><code>TestRunStageReviewPhaseWithOnlyNonBlockingFindingsSucceeds</code> (drives a real fake-agent review dispatch, asserts the phase records <code>"passed"</code>) and <code>TestNonBlockingReviewFindingsDoNotSupplyABlockedReason</code> (asserts the synthesized fallback reason is used, not a non-blocking finding's text)</td></tr>
+    <tr><td>Recorded findings are readable after the run concludes</td><td><code>TestReviewFindingsRoundTripThroughRunAgentPhase</code> (<code>internal/runner/runner_test.go</code>) — round-trips through <code>RunAgentPhase</code> and <code>ListEnvelopesForRun</code>, not a hand-built in-memory struct</td></tr>
+  </table>
+  <p>All 7 scenarios have real, assertion-backed coverage. No scenario in specs/independent-review/spec.md
+  is uncovered. <code>TestRunStageReviewPhaseWithBlockingFindingFailsTheStage</code> additionally covers
+  the "blocking finding fails the phase" mechanics directly at the <code>RunStage</code> level, beyond
+  what any single named scenario strictly requires.</p>
+</section>
+
+<section>
+  <h2>Findings</h2>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Every named function/behavior in design.md is real and matches exactly</h3>
+    <p><code>reviewPrompt</code>, <code>handoff.ReviewFinding</code>/<code>ReviewFindings</code>/<code>HasBlockingFinding</code>,
+    <code>PhaseRunner.DiffAgainstBase</code>, the <code>case "review":</code> branch in <code>RunStage</code>,
+    and the extension to <code>blockedReasonForRun</code> all exist exactly where design.md says and match
+    its code blocks verbatim, including comments explaining the "why," down to the
+    <code>git diff --merge-base HEAD</code> shell-out and the redaction rationale for nesting findings
+    inside <code>Payload</code> rather than adding a new top-level <code>Envelope</code> field.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Review is genuinely opt-in; an unconfigured factory is unaffected</h3>
+    <p><code>DefaultPipeline()</code> (<code>internal/dag/engine.go:268</code>) still returns exactly
+    <code>[]string{"plan", "build", "test"}</code>, byte-for-byte unmodified by this diff.
+    <code>TestRunStagePipelineWithoutReviewIsUnaffected</code> proves this at the behavioral level too:
+    a factory pipeline naming only <code>"test"</code> produces no <code>"review"</code> phase record
+    and no <code>"review"</code> envelope.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Independence is structural, not conventional, and is guarded by a real test</h3>
+    <p><code>reviewPrompt(diff string, stage *config.DAGStage, repoName string) string</code> has no
+    parameter through which an envelope or prior-phase summary could flow — there is no slot to misuse.
+    <code>TestReviewPromptExcludesPriorPhaseEnvelopeContent</code> would catch a regression where a
+    future change threaded shared context back in: it builds two prior-phase envelope summary strings,
+    never passes them to <code>reviewPrompt</code>, and asserts neither appears in the constructed
+    prompt.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; The blocked-routing chain holds end to end, traced directly rather than assumed</h3>
+    <p>A blocking finding causes <code>RunStage</code> to return
+    <code>fmt.Errorf("review phase on %s reported a blocking finding", repoName)</code>
+    (<code>internal/dag/engine.go:385-387</code>). This propagates to the run concluding
+    <code>"failed"</code>, which <code>bulletStatusForRunOutcome</code>
+    (<code>internal/ui/bulletstate.go:72-81</code>, unmodified) maps to
+    <code>("blocked", true)</code>. <code>blockedReasonForRun</code>
+    (<code>internal/ui/server.go:1620-1650</code>) now checks <code>e.Stage == "review"</code> ahead of
+    the generic <code>handoff.BlockedReason</code> path, joining blocking findings' summaries with
+    <code>"; "</code> when present, while preserving the documented "last envelope naming a reason wins"
+    precedence for the run as a whole. <code>TestABlockingReviewFindingBlocksTheBulletWithItsSummaryAsReason</code>
+    and <code>TestMultipleBlockingReviewFindingsProduceOneJoinedReason</code> exercise this through the
+    real <code>recordTerminalRun</code> path, not a hand-simulated shortcut.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified — reachable, not dead code</span> &nbsp; The <code>"review"</code> case sits in the ordinary pipeline dispatch loop</h3>
+    <p><code>RunStage</code>'s <code>for _, phase := range pipeline { switch phase { ... } }</code> is the
+    same loop that dispatches <code>"test"</code> and every <code>default</code>-case agent phase;
+    <code>"review"</code> is reached whenever <code>PipelineFor(repoCfg)</code> includes it, with no
+    additional gate or flag required. <code>TestRunStageReviewPhaseWithOnlyNonBlockingFindingsSucceeds</code>
+    and <code>TestRunStageReviewPhaseWithBlockingFindingFailsTheStage</code> both drive a real fake-agent
+    binary through <code>PhaseRunner.RunAgentPhase</code> end to end, confirming the branch executes in
+    a real dispatch, not merely when called directly in a unit test.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified — no scope creep</span> &nbsp; The diff adds nothing beyond what proposal.md/design.md/tasks.md describe</h3>
+    <p><code>git diff 603b98e^ 603b98e --stat</code>: 8 files, 578 insertions, 6 deletions — exactly
+    <code>internal/dag/engine.go</code>+<code>engine_test.go</code>,
+    <code>internal/handoff/envelope.go</code>+<code>envelope_test.go</code>,
+    <code>internal/runner/runner.go</code>+<code>runner_test.go</code>, and
+    <code>internal/ui/server.go</code>+<code>run_lifecycle_test.go</code>. No addition to
+    <code>DefaultPipeline()</code>, no new store method for the state transition, no dashboard UI
+    element for findings, no per-axis review phases, no external-tracker routing — each explicitly
+    forbidden by tasks.md and confirmed absent by reading the diff directly. The merge commit
+    <code>f2324fb</code> contains no commits beyond <code>603b98e</code>.</p>
+  </div>
+
+</section>
+
+<section>
+  <h2>Evidence index</h2>
+  <table>
+    <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
+    <tr><td>Build/vet clean at HEAD <code>f2324fb</code></td><td><code>go build ./...</code>, <code>go vet ./internal/...</code></td><td>both silent</td></tr>
+    <tr><td>Full suite clean except pre-approved environmental failures</td><td><code>go test ./internal/... -count=1</code>, run once with the prescribed <code>-skip</code> and once without</td><td>with <code>-skip</code>: 12/12 packages pass; without: exactly the same 10 named tests fail as in Reviews 026/027, all "no LLM API key found," none touching dag/handoff/runner/ui-review code</td></tr>
+    <tr><td>Review is opt-in</td><td>Read <code>DefaultPipeline()</code> at <code>internal/dag/engine.go:268</code>; ran <code>TestRunStagePipelineWithoutReviewIsUnaffected</code></td><td>returns exactly <code>{"plan","build","test"}</code>, unmodified; unconfigured pipeline produces no review phase/envelope</td></tr>
+    <tr><td>Independence is structural</td><td>Read <code>reviewPrompt</code>'s signature; read <code>TestReviewPromptExcludesPriorPhaseEnvelopeContent</code></td><td>no envelope parameter exists; test proves exclusion at the function-signature level</td></tr>
+    <tr><td>Blocked-routing chain holds</td><td>Traced <code>RunStage</code> error → <code>recordTerminalRun</code> → <code>bulletStatusForRunOutcome</code> → <code>blockedReasonForRun</code> by reading each function directly</td><td>chain intact, each link confirmed in code, not summary</td></tr>
+    <tr><td>7/7 spec.md scenarios covered</td><td>Named each scenario against its test in <code>engine_test.go</code>/<code>envelope_test.go</code>/<code>runner_test.go</code>/<code>run_lifecycle_test.go</code>, read each test body's assertions</td><td>all 7 present with real assertions; see Spec.md scenario coverage table above</td></tr>
+    <tr><td>Reachability, not dead code</td><td>Read <code>RunStage</code>'s per-phase <code>switch</code>; ran the two review-phase <code>RunStage</code> tests that drive a real fake-agent dispatch</td><td>the <code>"review"</code> case executes in the ordinary pipeline loop under real dispatch</td></tr>
+    <tr><td>No scope creep</td><td><code>git diff 603b98e^ 603b98e --stat</code>: 8 files, 578 insertions, 6 deletions; merge commit contains no extra commits</td><td>confirmed minimal, in-scope diff</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Verdict</h2>
+  <div class="item ok">
+    <p><strong>MEETS SPEC.</strong> Every named function/behavior in design.md — <code>reviewPrompt</code>,
+    <code>handoff.ReviewFinding</code>/<code>ReviewFindings</code>/<code>HasBlockingFinding</code>,
+    <code>PhaseRunner.DiffAgainstBase</code>, the <code>case "review":</code> branch in
+    <code>RunStage</code>, and the extension to <code>blockedReasonForRun</code> — is real and matches
+    verbatim. <code>DefaultPipeline()</code> is unmodified and still returns
+    <code>{"plan","build","test"}</code>, confirming review is genuinely opt-in. Independence is
+    structural: <code>reviewPrompt</code>'s signature has no envelope parameter, and
+    <code>TestReviewPromptExcludesPriorPhaseEnvelopeContent</code> would fail if that were ever
+    reintroduced. The blocked-routing chain — blocking finding → <code>RunStage</code> error → run
+    <code>"failed"</code> → <code>bulletStatusForRunOutcome</code>'s unmodified <code>failed→blocked</code>
+    mapping → <code>blockedReasonForRun</code>'s new review-findings-first check — was traced link by
+    link in the actual source, not taken on the merge commit's own summary, and holds. All 7 scenarios
+    in <code>specs/independent-review/spec.md</code> have real, assertion-backed test coverage, including
+    a genuine store round trip for findings persistence and real fake-agent dispatches (not direct unit
+    calls) proving the <code>"review"</code> case is reachable in ordinary pipeline execution, not dead
+    code. Build and vet are clean; the full test suite is clean except the same 10 pre-existing,
+    environmental, LLM-key-dependent failures confirmed by name in every prior review this session. The
+    diff is 8 files, 578 insertions, 6 deletions, touching only what proposal.md/design.md/tasks.md
+    describe, with every explicitly forbidden addition (default pipeline inclusion, new store methods,
+    dashboard UI, per-axis phases, external-tracker routing) confirmed absent. No caveats found.</p>
+  </div>
+</section>
+
+<footer>
+  <p class="meta">Review 028 · findings above are reproduced from commands run directly against the
+  current <code>v2</code> working tree at HEAD <code>f2324fb</code>. No mutations were made to
+  <code>internal/dag/engine.go</code>, <code>internal/handoff/envelope.go</code>,
+  <code>internal/runner/runner.go</code>, or <code>internal/ui/server.go</code> for this review — every
+  scenario in specs/independent-review/spec.md already has a test whose assertions directly distinguish
+  the correct behavior from the specific regression it guards against (e.g. the structural-exclusion
+  assertion in <code>TestReviewPromptExcludesPriorPhaseEnvelopeContent</code>, and the persisted-payload
+  round trip in <code>TestReviewFindingsRoundTripThroughRunAgentPhase</code>), so no independent mutation
+  test was judged necessary to establish confidence beyond reading each assertion directly. Reviews 027
+  and earlier were not re-examined; they stand as recorded above.</p>
+  <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
+</footer>
+
 </main></body>
 </html>
