@@ -189,6 +189,16 @@ func (srv *Server) Handler() http.Handler {
 }
 
 func (srv *Server) Start() error {
+	// Acquire the single-instance lock before anything else, including
+	// reconciliation. ReconcileOrphanedRuns' soundness (see below) depends on
+	// there being exactly one coordinator; a second instance refusing to
+	// start here is what makes that true rather than merely documented.
+	lock, err := acquireUILock()
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+
 	// Reconcile before binding the port. Any run the store still marks as
 	// running is unowned: a freshly started coordinator drives no runs by
 	// construction. Doing this before ListenAndServe closes the window where a
