@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,6 +13,21 @@ import (
 	"github.com/callmeradical/sergeant/internal/handoff"
 	"github.com/callmeradical/sergeant/internal/store"
 )
+
+// runGit runs a git command in dir, failing the test on error. It exists
+// here (rather than reusing internal/dag's test helper) because runner_test
+// is a different package and has had no need for a git fixture until now.
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
+	}
+}
 
 func TestCodeGateExecution(t *testing.T) {
 	tempDir := t.TempDir()
@@ -1114,5 +1130,99 @@ func TestAnnotatePayloadWithProvenanceHandlesJSONNull(t *testing.T) {
 	model, provider := payloadProvenance(t, got)
 	if model != "m" || provider != "p" {
 		t.Errorf("model/provider = %q/%q, want m/p", model, provider)
+	}
+}
+
+// --- independent-review: DiffAgainstBase ------------------------------------
+
+// DiffAgainstBase feeds a review phase's prompt. A clean worktree has
+// nothing to review; an uncommitted change must show up as the diff.
+func TestDiffAgainstBaseReturnsUncommittedChanges(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init", "-q", "-b", "main")
+	runGit(t, dir, "commit", "--allow-empty", "-q", "-m", "seed")
+
+	pr := &PhaseRunner{Worktree: dir}
+
+	diff, err := pr.DiffAgainstBase(context.Background())
+	if err != nil {
+		t.Fatalf("DiffAgainstBase on a clean worktree: %v", err)
+	}
+	if diff != "" {
+		t.Errorf("diff = %q, want empty for a clean worktree", diff)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "feature.go"), []byte("package feature\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", "feature.go")
+
+	diff, err = pr.DiffAgainstBase(context.Background())
+	if err != nil {
+		t.Fatalf("DiffAgainstBase with an uncommitted change: %v", err)
+	}
+	if !strings.Contains(diff, "feature.go") {
+		t.Errorf("diff = %q, want it to mention feature.go", diff)
+	}
+	if !strings.Contains(diff, "package feature") {
+		t.Errorf("diff = %q, want it to contain the added content", diff)
+	}
+}
+
+func TestDiffAgainstBaseErrorsOutsideAGitRepo(t *testing.T) {
+	dir := t.TempDir() // not a git repository
+
+	pr := &PhaseRunner{Worktree: dir}
+	if _, err := pr.DiffAgainstBase(context.Background()); err == nil {
+		t.Fatal("expected an error diffing outside a git repository, got nil")
+	}
+}
+
+// --- independent-review: findings survive the envelope-recording path -----
+
+// Scenario: "Recorded findings are readable after the run concludes." A
+// review agent's findings must round-trip through the same
+// RunAgentPhase -> Store.RecordEnvelope path every other phase already uses,
+// not just via a hand-built in-memory struct.
+func TestReviewFindingsRoundTripThroughRunAgentPhase(t *testing.T) {
+	dir := t.TempDir()
+	script := `#!/bin/sh
+mkdir -p .sergeant
+cat > .sergeant/envelope.json <<'EOF'
+{"task_id":"run-1","repo":"svc","stage":"review","summary":"reviewed the diff","payload":{"findings":[{"axis":"spec","severity":"error","summary":"missing failing test","disposition":"add one"},{"axis":"style","severity":"info","summary":"consider renaming x","disposition":"optional"}]}}
+EOF
+exit 0
+`
+	agent := filepath.Join(dir, "goose")
+	if err := os.WriteFile(agent, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	pr, st := newRunner(t, agent, 10*time.Second)
+
+	env, _, err := pr.RunAgentPhase(context.Background(), "review", "review this diff", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if env == nil {
+		t.Fatal("expected an envelope")
+	}
+
+	envelopes, err := st.ListEnvelopesForRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(envelopes) != 1 {
+		t.Fatalf("expected 1 persisted envelope, got %d", len(envelopes))
+	}
+
+	findings := handoff.ReviewFindings(envelopes[0].Data)
+	if len(findings) != 2 {
+		t.Fatalf("findings read back from the persisted envelope = %+v, want 2", findings)
+	}
+	if !handoff.HasBlockingFinding(findings) {
+		t.Error("expected the persisted findings to still carry the blocking severity:error entry")
+	}
+	if findings[0].Summary != "missing failing test" || findings[1].Summary != "consider renaming x" {
+		t.Errorf("findings = %+v, want summaries preserved in order", findings)
 	}
 }

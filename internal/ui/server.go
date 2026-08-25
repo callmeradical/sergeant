@@ -1606,12 +1606,17 @@ func (srv *Server) recordTerminalRun(runID, status string) {
 //
 // An agent's own envelope may have named why it could not proceed, in its
 // payload's blocked_reason key (design.md, "Where the reason comes from").
-// Envelopes are read in the order they were recorded, and the last one
-// naming a reason wins, so the run's most recent word on why it is stuck is
-// what a human sees. When no envelope named one, a synthesized reason is
-// used: sergeant dispatches a bullet's work exactly once per run and a run's
-// own retry budget is already exhausted by the time it concludes without
-// passing, so a human is never left with "blocked" and no explanation at all.
+// A "review" phase's envelope instead carries a findings array
+// (a-green-bullet-awaits-independent-review); when it contains any
+// severity:"error" finding, that finding's Summary (joined, if more than
+// one) is the reason instead of falling through to handoff.BlockedReason or
+// the synthesized string for that envelope. Envelopes are read in the order
+// they were recorded, and the last one naming a reason wins either way, so
+// the run's most recent word on why it is stuck is what a human sees. When
+// no envelope named one, a synthesized reason is used: sergeant dispatches a
+// bullet's work exactly once per run and a run's own retry budget is already
+// exhausted by the time it concludes without passing, so a human is never
+// left with "blocked" and no explanation at all.
 func (srv *Server) blockedReasonForRun(runID, bulletStatus string) string {
 	if bulletStatus != "blocked" {
 		return ""
@@ -1622,6 +1627,18 @@ func (srv *Server) blockedReasonForRun(runID, bulletStatus string) string {
 	}
 	var reason string
 	for _, e := range envelopes {
+		if e.Stage == "review" {
+			if findings := handoff.ReviewFindings(e.Data); handoff.HasBlockingFinding(findings) {
+				var summaries []string
+				for _, f := range findings {
+					if f.Severity == "error" {
+						summaries = append(summaries, f.Summary)
+					}
+				}
+				reason = strings.Join(summaries, "; ")
+				continue
+			}
+		}
 		if r := handoff.BlockedReason(e.Data); r != "" {
 			reason = r
 		}

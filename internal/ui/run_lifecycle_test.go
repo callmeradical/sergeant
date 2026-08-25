@@ -222,6 +222,113 @@ func TestABlockedReasonWithASecretIsRedactedOnTheBullet(t *testing.T) {
 	}
 }
 
+// Scenario: "A blocking finding blocks the bullet with the finding's summary
+// as the reason." A review phase's envelope carrying a severity:"error"
+// finding must produce that finding's Summary as BlockedReason, the same way
+// an agent's own blocked_reason does — reusing a-stuck-bullet-is-blocked-not-failed's
+// mechanism exactly, not a new one.
+func TestABlockingReviewFindingBlocksTheBulletWithItsSummaryAsReason(t *testing.T) {
+	srv, st := terminalRunFixture(t, "pending")
+
+	if err := st.RecordEnvelope(&store.EnvelopeRecord{
+		ID:            "env-review-1",
+		RunID:         "sgt-run",
+		Repo:          "api",
+		Stage:         "review",
+		Type:          "phase.completed",
+		SchemaVersion: "1",
+		Producer:      "sergeant/runner",
+		CorrelationID: "sgt-run",
+		Data:          []byte(`{"findings":[{"axis":"spec","severity":"error","summary":"diff does not implement the retry requirement"}]}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv.recordTerminalRun("sgt-run", "failed")
+
+	bullets, err := st.ListBulletsForIntent("sgt-run-intent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, b := range bullets {
+		if b.Status != "blocked" {
+			t.Errorf("bullet %d status = %q, want blocked", i+1, b.Status)
+		}
+		if b.BlockedReason != "diff does not implement the retry requirement" {
+			t.Errorf("bullet %d blocked reason = %q, want the review finding's summary verbatim", i+1, b.BlockedReason)
+		}
+	}
+}
+
+// Scenario: "Multiple blocking findings still produce one recorded reason."
+func TestMultipleBlockingReviewFindingsProduceOneJoinedReason(t *testing.T) {
+	srv, st := terminalRunFixture(t, "pending")
+
+	if err := st.RecordEnvelope(&store.EnvelopeRecord{
+		ID:            "env-review-1",
+		RunID:         "sgt-run",
+		Repo:          "api",
+		Stage:         "review",
+		Type:          "phase.completed",
+		SchemaVersion: "1",
+		Producer:      "sergeant/runner",
+		CorrelationID: "sgt-run",
+		Data:          []byte(`{"findings":[{"axis":"spec","severity":"error","summary":"missing failing test"},{"axis":"security","severity":"error","summary":"secret written to a log file"}]}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv.recordTerminalRun("sgt-run", "failed")
+
+	bullets, err := st.ListBulletsForIntent("sgt-run-intent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, b := range bullets {
+		if b.Status != "blocked" {
+			t.Errorf("bullet %d status = %q, want blocked", i+1, b.Status)
+		}
+		for _, want := range []string{"missing failing test", "secret written to a log file"} {
+			if !strings.Contains(b.BlockedReason, want) {
+				t.Errorf("bullet %d blocked reason = %q, want it to include %q", i+1, b.BlockedReason, want)
+			}
+		}
+	}
+}
+
+// A review envelope's non-blocking findings must not be treated as a reason
+// on their own; blockedReasonForRun should fall through to the synthesized
+// text when a review envelope reports no blocking finding.
+func TestNonBlockingReviewFindingsDoNotSupplyABlockedReason(t *testing.T) {
+	srv, st := terminalRunFixture(t, "pending")
+
+	if err := st.RecordEnvelope(&store.EnvelopeRecord{
+		ID:            "env-review-1",
+		RunID:         "sgt-run",
+		Repo:          "api",
+		Stage:         "review",
+		Type:          "phase.completed",
+		SchemaVersion: "1",
+		Producer:      "sergeant/runner",
+		CorrelationID: "sgt-run",
+		Data:          []byte(`{"findings":[{"axis":"style","severity":"info","summary":"consider renaming x"}]}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv.recordTerminalRun("sgt-run", "failed")
+
+	bullets, err := st.ListBulletsForIntent("sgt-run-intent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, b := range bullets {
+		if b.BlockedReason != "gates did not pass; no further automatic attempt available" {
+			t.Errorf("bullet %d blocked reason = %q, want the synthesized fallback", i+1, b.BlockedReason)
+		}
+	}
+}
+
 // An operator stopping a run has concluded nothing about the work. Recording
 // failed would assert a judgment the operator did not make. This is the case a
 // "not passed means failed" mapping gets wrong.

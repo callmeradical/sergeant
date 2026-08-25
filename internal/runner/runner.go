@@ -285,6 +285,20 @@ func (pr *PhaseRunner) RunCodeGate(ctx context.Context, name, command string) (*
 	return result, nil
 }
 
+// DiffAgainstBase returns the unified diff of the worktree's current HEAD
+// against the branch it was created from, for a review phase's prompt.
+// Shells to git directly, the same way internal/dag/engine.go already
+// creates and inspects worktrees (os/exec, no library dependency) — no new
+// pattern introduced.
+func (pr *PhaseRunner) DiffAgainstBase(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", pr.Worktree, "diff", "--merge-base", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git diff in %s: %w", pr.Worktree, err)
+	}
+	return string(out), nil
+}
+
 // BuildAgentCommand formats CLI arguments for any supported agent harness with proper non-interactive headless flags.
 func BuildAgentCommand(agentCLI, model, prompt string) (string, []string, []string) {
 	exe := agentCLI

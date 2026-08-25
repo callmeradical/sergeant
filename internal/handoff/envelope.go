@@ -38,6 +38,49 @@ func BlockedReason(payload json.RawMessage) string {
 	return reason
 }
 
+// ReviewFinding is one judgment an independent review phase recorded about a
+// bullet's diff. Severity values below "error" (info, warning) are recorded
+// but change nothing; "error" fails the review phase, which — via the same
+// path a-stuck-bullet-is-blocked-not-failed already built — moves the bullet
+// to blocked, carrying Summary as BlockedReason.
+type ReviewFinding struct {
+	Axis        string `json:"axis"`
+	Severity    string `json:"severity"` // "error" | "warning" | "info"
+	Summary     string `json:"summary"`
+	Disposition string `json:"disposition"`
+}
+
+// ReviewFindings reads an optional findings array out of an envelope payload,
+// the same nesting BlockedReason already uses and for the same reason:
+// payload is already unconditionally redact.JSON'd before persistence, so
+// nesting here is redacted for free rather than needing a second call site.
+// Returns nil, never an error, for a payload that is not a JSON object,
+// carries no findings key, or whose findings do not decode — a malformed
+// report is "no findings", not a crash.
+func ReviewFindings(payload json.RawMessage) []ReviewFinding {
+	if len(payload) == 0 {
+		return nil
+	}
+	var fields struct {
+		Findings []ReviewFinding `json:"findings"`
+	}
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return nil
+	}
+	return fields.Findings
+}
+
+// HasBlockingFinding reports whether any finding is severity "error" — the
+// one predicate RunStage needs to decide whether a review phase passed.
+func HasBlockingFinding(findings []ReviewFinding) bool {
+	for _, f := range findings {
+		if f.Severity == "error" {
+			return true
+		}
+	}
+	return false
+}
+
 // Router handles passing envelopes and exported artifacts between worktrees.
 type Router struct {
 	// BaseDir is <fleet root>/<run_id>/handoff, where the fleet root comes from

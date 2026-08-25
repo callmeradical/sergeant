@@ -242,6 +242,25 @@ func SortedGateNames(repoCfg config.Repo) []string {
 	return names
 }
 
+// reviewPrompt builds the review agent's prompt from the diff and the
+// stage/repo context only — deliberately NOT from any prior phase's envelope
+// in this run. "Independent" (PRD) means the reviewer starts from the diff
+// and the spec, not from reading the implementing agent's own account of
+// itself; RunAgentPhase gives every phase a fresh headless process already,
+// so the only thing that can leak shared context is what this function
+// chooses to put in the prompt string — and its signature accepts no
+// envelope, making that exclusion structural rather than a convention to
+// remember.
+func reviewPrompt(diff string, stage *config.DAGStage, repoName string) string {
+	return fmt.Sprintf(
+		"Review this diff for repo %s against its intent and OpenSpec change, if one is referenced. "+
+			"Judge only what is in the diff and the referenced spec — you have not seen and must not assume "+
+			"the implementing agent's own reasoning. Report findings as JSON: "+
+			"{\"findings\":[{\"axis\":...,\"severity\":\"error\"|\"warning\"|\"info\",\"summary\":...,\"disposition\":...}]}.\n\nDiff:\n%s",
+		repoName, diff,
+	)
+}
+
 // DefaultPipeline is the factory pipeline used for a repo that configures none.
 //
 // A fresh slice is returned on every call so no caller can mutate the default
@@ -347,6 +366,24 @@ func (e *Engine) RunStage(ctx context.Context, runID string, stage *config.DAGSt
 					}
 				} else if !e.phasePassed(runID, repoName, "test") {
 					_, _ = pr.RunCodeGate(ctx, "test", "echo 'Deterministic gate passed'")
+				}
+
+			case "review":
+				if e.phasePassed(runID, repoName, "review") {
+					continue
+				}
+				diff, err := pr.DiffAgainstBase(ctx)
+				if err != nil {
+					return fmt.Errorf("collecting diff for review phase on %s: %w", repoName, err)
+				}
+				prompt := reviewPrompt(diff, stage, repoName)
+				env, _, err := pr.RunAgentPhase(ctx, "review", prompt, e.Project.ResolvedRetries(repoName))
+				if err != nil {
+					return fmt.Errorf("review phase failed on repo %s: %w", repoName, err)
+				}
+				findings := handoff.ReviewFindings(env.Payload)
+				if handoff.HasBlockingFinding(findings) {
+					return fmt.Errorf("review phase on %s reported a blocking finding", repoName)
 				}
 
 			default:
