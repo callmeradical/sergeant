@@ -1700,5 +1700,90 @@ a{color:var(--muted)}
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
+<header>
+  <h1>Sergeant v2</h1>
+  <p>Independent review. Written by the critic, not the builder.</p>
+  <p class="meta">
+    Review 034 · 2026-08-25 · branch <code>v2</code> · merge commit <code>1a8fba3</code>
+    ("merge: embedded-terminal", merge of <code>3920bea</code>
+    "feat(ui): embedded terminal — real PTY sessions in the dashboard" and
+    <code>ed772be</code> "test(ui): catch a missing exit-frame suppression on explicit kill"
+    into <code>ed03047</code>) reviewed against
+    <code>openspec/changes/embedded-terminal/{proposal,design,tasks}.md</code>,
+    <code>specs/embedded-terminal/spec.md</code>, and
+    <code>docs/prd-embedded-terminal.md</code> · current <code>v2</code> HEAD is
+    <code>1a8fba3</code>; build/vet/test run at that HEAD
+  </p>
+</header>
+
+<section>
+  <h2>Current status</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code>, no output</div></div>
+    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./internal/...</code>, no output</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">clean except named environmental failures</span></div><div class="small"><code>go test ./internal/... -count=1</code> run both with the prescribed <code>-skip</code> (all 12 packages pass) and without it (exactly the same 10 named LLM-key-dependent tests fail — <code>TestBuildProjectGraphAppliesExcludePatterns</code>, <code>TestBuildProjectGraphMergesEveryParticipatingRepo</code>, <code>TestIncludeGroupsExcludesNonMatchingRepos</code>, <code>TestBuildNeverLeavesOutputInAPartialState</code>, <code>TestPublishFailureRestoresPriorGraph</code>, <code>TestBuildNeverSpawnsSgtGraphify</code>, <code>TestQueryAgainstABuiltGraphReturnsAnAnswer</code>, <code>TestExplainAndAffectedAreDistinctFromQuery</code>, <code>TestMCPGraphQueryAgainstABuiltGraphReturnsAnswer</code>, <code>TestBuildGraphEndpointBuildsAndPublishes</code> — all with <code>error: no LLM API key found</code>)</div></div>
+    <div class="card"><div class="label"><code>terminalManager</code>/<code>terminalSession</code> shape</div><div class="value"><span class="status">matches design.md</span></div><div class="small"><code>internal/ui/terminal.go</code>'s two types carry exactly design.md's fields (<code>id</code>, <code>pty</code>, <code>cmd</code>, <code>pid</code>, <code>shell</code>, <code>cwd</code> plus a documented <code>killed atomic.Bool</code> not in the design snippet but needed for the exit-frame-suppression behavior design.md's own route section specifies) and exactly its five methods — <code>Start</code>/<code>Write</code>/<code>Resize</code>/<code>Kill</code>/<code>Get</code> — with matching signatures and behavior (idempotent no-op <code>Kill</code>, 80×24 default size)</div></div>
+    <div class="card"><div class="label">Route/frame protocol</div><div class="value"><span class="status">exact match</span></div><div class="small">All three routes (<code>terminal-start</code>, <code>terminal-socket</code>, <code>terminal-kill</code>) match design.md's request/response/frame shapes verbatim: binary frames both directions, a <code>{"type":"resize",...}</code> text frame client→server, a one-time <code>{"type":"exit","code":N}</code> text frame server→client only when the process exits on its own (never on an explicit kill), <code>cwd</code>/<code>bullet_id</code> mutually exclusive (400 on both), idempotent kill (<code>{"ok":true}</code> on unknown/dead ids)</div></div>
+    <div class="card"><div class="label">Test isolation</div><div class="value"><span class="status">confirmed</span></div><div class="small">Grepped <code>internal/ui/terminal_test.go</code> for <code>store.Open</code>/<code>8484</code>/<code>.Start()</code>: one hit, <code>store.Open(filepath.Join(t.TempDir(), "t.db"))</code>; no literal <code>8484</code>; no <code>.Start()</code> call anywhere — every test drives <code>httptest.NewServer(srv.Handler())</code> against an ephemeral port and a temp-dir store</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Spec scenario coverage</h2>
+  <p>All 10 named scenarios in <code>specs/embedded-terminal/spec.md</code> have a dedicated, real-process/real-WebSocket test in <code>internal/ui/terminal_test.go</code>: <code>TestStartingASessionSpawnsARealProcessAndReturnsItsIdentity</code>, <code>TestClientCanSendInputAndReceiveTheShellsRealOutput</code> (the one scenario design.md and tasks.md both flag as needing the actual WebSocket upgrade path, confirmed it dials a real socket rather than calling <code>terminalManager</code> directly), <code>TestInputToOneSessionDoesNotAppearInAnother</code>, <code>TestAnExplicitKillRequestTerminatesTheUnderlyingProcess</code>, <code>TestKillingAnUnknownOrAlreadyDeadSessionIsNotAnError</code>, <code>TestAProcessThatExitsOnItsOwnIsReportedBeforeTheSocketCloses</code>, <code>TestStartingASessionWithABulletIDSetsItsWorkingDirectory</code>, <code>TestAnExplicitCwdAndABulletIDAreMutuallyExclusive</code>, <code>TestAResizeControlMessageChangesThePTYsWindowSize</code>, and <code>TestServerDoesNotBindBeyondLoopbackForTerminalRoutes</code> (correctly tests the literal <code>127.0.0.1</code> address string per design.md's instruction not to invent a second binding mechanism). An 11th test, <code>TestAnExplicitKillSendsNoExitFrame</code>, was added by the mutation-testing pass documented below and covers the negative half of the exit-frame requirement no named scenario states on its own.</p>
+  <p>Scope check against proposal.md/design.md/tasks.md: the frontend diff (<code>index.html</code>) adds exactly the drawer/tabs/vendored-assets/"resolve in worktree" button design.md's "Frontend" section describes and nothing else — no new route, no new <code>Server</code> field, no new auth model beyond the documented <code>CheckOrigin: func(r) bool { return true }</code> (justified inline by the same loopback-trust argument proposal.md makes). <code>server.go</code>'s diff is exactly the three terminal routes, three static-asset routes for the vendored xterm files, and the one new <code>terminal *terminalManager</code> field — no scope creep found.</p>
+</section>
+
+<section>
+  <h2>Mutation-testing finding, independently reproduced</h2>
+  <p>The merge commit message claims the implementer mutation-tested the <code>sess.killed.Load()</code> guard in <code>handleTerminalSocket</code>'s PTY-read goroutine (the guard that suppresses the exit frame when the process died because of an explicit kill, not on its own), found the shipped suite as it stood before <code>ed772be</code> did not catch removing it, and added <code>TestAnExplicitKillSendsNoExitFrame</code> to close the gap. Reproduced independently: removed the <code>if sess.killed.Load() { return }</code> guard in <code>internal/ui/terminal.go</code> so the goroutine calls <code>sess.cmd.Wait()</code> unconditionally; <code>go build ./...</code> still succeeded (a behavior regression, not a type error); <code>go test ./internal/ui/... -run TestAnExplicitKillSendsNoExitFrame -v</code> failed exactly as claimed (<code>received an exit frame after an explicit kill request; want none, got [{"code":-1,"type":"exit"}]</code>); ran the full <code>go test ./internal/ui/...</code> suite with the mutation still applied and confirmed nothing else in the package caught it except this one test and the pre-existing, unrelated <code>TestBuildGraphEndpointBuildsAndPublishes</code> environmental failure. Restored with <code>git checkout -- internal/ui/terminal.go</code>, confirmed <code>git diff</code> was empty and <code>go build ./...</code> clean again.</p>
+</section>
+
+<section>
+  <h2>Anomaly investigation — mid-dispatch reconciliation of a live run</h2>
+  <p>The merge commit describes an unresolved anomaly: mid-dispatch, this run's row was briefly written to <code>status = "interrupted"</code> with a <code>reconciled:true</code> payload — the shape only <code>internal/store/reconcile.go</code>'s <code>ReconcileOrphanedRuns</code> produces, a function its own doc comment says must never run except once, at <code>Server.Start()</code>, before the listener binds. The merge author's own investigation (ps start time unchanged, no second process/binary found, no real sleep/wake event, new tests confirmed to use <code>httptest</code>+temp stores) found no cause. This review spent a bounded effort going further, using the real production DB directly rather than re-checking the same negative signals.</p>
+  <p><strong>The anomaly is real and durably recorded</strong>, not a misread: <code>sqlite3 ~/.local/share/sergeant/sergeant.db</code>'s append-only <code>changes</code> table (nothing in this codebase deletes from it — grepped for <code>DELETE FROM changes</code> outside test files and found none) holds, for entity <code>sgt-1787669565-c9cd84ef1</code>: seq 4846 "created"/running at 14:52:45 UTC, then a run of "progress" entries roughly every 2s, then at <strong>15:08:24.804621 UTC</strong> a <code>run</code>-channel entry <code>{"id":"sgt-...","reconciled":true,"status":"interrupted","terminal":true,"transition":"status"}</code> and a <code>phase</code>-channel entry with the same <code>reconciled:true</code> shape — sandwiched between two routine progress writes only ~1.7s and ~0.25s away, with the run's own progress snapshot already reporting all 10 spec scenarios "complete" at that moment — and finally the real "passed" terminal write at 15:14:25.768840 UTC, six minutes later. This proves <code>ReconcileOrphanedRuns</code> genuinely fired against the live production database while this run was still actually in flight, not merely that someone observed a stale read.</p>
+  <p>The currently-running <code>./bin/sergeant ui</code> process (pid confirmed via <code>ps -o lstart</code>) started at 11:20:33 local (15:20:33 UTC) — <em>after</em> both the 15:08:24 UTC anomalous write and the 15:14:25 UTC real completion — so it is not the culprit and its single-line <code>/private/tmp/sergeant-ui.log</code> (only "🌐 Sergeant Factory UI running...", timestamped to this later start) cannot be evidence of what happened earlier: whatever process wrote that log for the actual incident, if any, has been overwritten by every later start of the same redirected command. No launchd/plist auto-restart mechanism was found, and <code>ReconcileOrphanedRuns</code> has exactly one call site in the whole tree (<code>server.go</code>'s <code>Start()</code>) with no second one added by this or any recent commit (checked via <code>git log -S"ReconcileOrphanedRuns"</code> and a full-repo grep). No test in the whole <code>internal/...</code> tree calls <code>.Start()</code> (grepped every <code>_test.go</code> file, zero hits) and no <code>store.Open</code> call site resolves to the real default path except when passed an explicitly empty string, which no test does.</p>
+  <p><strong>A concrete, previously-unexamined mechanism was found that fits every known fact:</strong> <code>cmd/sergeant/main.go</code>'s <code>startUI()</code> (the <code>sergeant ui</code> subcommand, lines ~153-169) opens the real default DB path and calls <code>server.Start()</code> unconditionally — there is no lock, PID file, or "already running" check anywhere in it. <code>Start()</code> runs <code>ReconcileOrphanedRuns()</code> and <code>fmt.Printf</code>s its "running" banner <em>before</em> attempting <code>http.ListenAndServe</code>. A second, accidental invocation of <code>sergeant ui</code> while one is already bound to port 8484 would: open the same real sqlite file, successfully reconcile any run currently marked <code>running</code> (mutating it out from under the live process actually driving it), print the same startup banner, then fail at the bind step and exit — all within well under a second, leaving no surviving process, no distinguishable log line (the redirect target gets reopened/overwritten by every invocation), and a <code>ps</code> snapshot of the original long-lived process that never changed. This reproduces the exact fingerprint reported. No direct evidence (shell history was empty for this user account, no coredump, no surviving log) confirms a second invocation actually happened, so this is a well-fitting <em>hypothesis</em>, not a proven root cause — root cause remains open. The real, code-level hazard is unchanged either way: <code>ReconcileOrphanedRuns</code>'s "never call this twice" contract is enforced only by a comment, not by any lock, PID check, or guard against a second <code>Start()</code> call sharing the same database file.</p>
+</section>
+
+<section>
+  <h2>Verdict</h2>
+  <div class="item warn">
+    <p><strong>MEETS SPEC WITH CAVEATS.</strong> <code>internal/ui/terminal.go</code>'s types, methods, routes,
+    and frame protocol match design.md exactly; all 10 named scenarios in
+    <code>specs/embedded-terminal/spec.md</code> have genuine, real-PTY/real-WebSocket test coverage, including
+    the one scenario design.md/tasks.md specifically require to exercise the actual upgrade path; no scope
+    creep was found against proposal.md/design.md/tasks.md. <code>go build</code>/<code>go vet</code> are
+    clean, and <code>go test ./internal/...</code> is clean under the prescribed <code>-skip</code> and fails
+    on exactly the same 10 pre-existing, LLM-key-dependent tests without it. The merge's mutation-testing claim
+    (the <code>killed.Load()</code> exit-frame-suppression guard) was independently reproduced end to end —
+    mutate, build, run the named test and see it fail exactly as claimed, run the full package and confirm
+    nothing else catches it, restore, confirm clean. <strong>The caveat</strong>: this review independently
+    confirmed the merge's reported anomaly is real, not a misread — the production <code>changes</code> table
+    durably records <code>ReconcileOrphanedRuns</code> firing against this run while it was genuinely still in
+    flight, mid-dispatch, at 15:08:24 UTC, six minutes before its real completion — and found a concrete,
+    fitting (but unproven) mechanism: <code>cmd/sergeant/main.go</code>'s <code>startUI()</code> has no guard
+    against a second, accidental invocation reconciling the shared production database before failing to bind
+    the port. This caveat is explicitly non-blocking against every one of the 10 named
+    <code>spec.md</code> scenarios — none concern server lifecycle or reconciliation — and is recorded here as
+    a real, still-open hazard worth a dedicated follow-up change (a lock file, a PID check, or moving the
+    reconciliation call behind a guard that survives a second <code>Start()</code>), not as a defect in this
+    change's own correctness.</p>
+  </div>
+</section>
+
+<footer>
+  <p class="meta">Review 034 · findings above are reproduced from commands run directly against the current
+  <code>v2</code> working tree at HEAD <code>1a8fba3</code>, and, for the anomaly investigation, against the
+  real production database at <code>~/.local/share/sergeant/sergeant.db</code> (its <code>changes</code> table
+  directly, via <code>sqlite3</code>) rather than trusting the merge commit's own account of what it ruled
+  out. The mutation-testing claim was independently reproduced end to end (mutate, build, run the named test,
+  run the full package, restore, confirm clean) rather than accepted on the implementer's word. The anomaly's
+  root cause remains open; a fitting mechanism was identified but not proven. Reviews 033 and earlier were not
+  re-examined; they stand as recorded above.</p>
+  <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
+</footer>
+
 </main></body>
 </html>
