@@ -209,6 +209,58 @@ repos:
 	}
 }
 
+// --- task-tracking-is-a-readonly-export: project export configuration ------
+
+// A project's export: block parses into typed fields, not just raw YAML.
+func TestExportBlockParsesIntoTypedFields(t *testing.T) {
+	tempDir := t.TempDir()
+	yaml := `
+project: export-test
+repos:
+  svc:
+    path: /tmp/svc
+export:
+  backend: jira
+`
+	path := filepath.Join(tempDir, "export-test.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := LoadProject(path)
+	if err != nil {
+		t.Fatalf("LoadProject: %v", err)
+	}
+	if proj.Export == nil {
+		t.Fatal("expected Export to be non-nil")
+	}
+	if proj.Export.Backend != "jira" {
+		t.Errorf("Backend = %q, want jira", proj.Export.Backend)
+	}
+}
+
+// A project that declares no export: block has a nil Export, distinct from a
+// project that declared an empty block — the same distinction Graphify makes.
+func TestProjectWithoutExportBlockHasNilExport(t *testing.T) {
+	tempDir := t.TempDir()
+	yaml := `
+project: no-export
+repos:
+  svc:
+    path: /tmp/svc
+`
+	path := filepath.Join(tempDir, "no-export.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := LoadProject(path)
+	if err != nil {
+		t.Fatalf("LoadProject: %v", err)
+	}
+	if proj.Export != nil {
+		t.Errorf("expected Export to be nil for a project with no export: block, got %+v", proj.Export)
+	}
+}
+
 // Omitting the field entirely preserves today's behaviour: one attempt, no retry.
 func TestRetriesOmittedMeansZero(t *testing.T) {
 	tempDir := t.TempDir()

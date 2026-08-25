@@ -136,6 +136,20 @@ func TestListBulletsForIntentReturnsMergeOrder(t *testing.T) {
 		t.Errorf("unexpected repos: %q then %q", bullets[0].Repo, bullets[1].Repo)
 	}
 
+	// GetBullet resolves a single bullet by id alone, without already knowing
+	// its intent — the case internal/export.Runner is in when it only has a
+	// bullet id from the change log.
+	got, err := st.GetBullet("bullet-api")
+	if err != nil {
+		t.Fatalf("GetBullet: %v", err)
+	}
+	if got.IntentID != "intent-1" || got.Repo != "api" || got.Position != 1 {
+		t.Errorf("GetBullet returned %+v", got)
+	}
+	if _, err := st.GetBullet("no-such-bullet"); err == nil {
+		t.Error("expected an error for an unknown bullet id")
+	}
+
 	intents, err := st.ListIntentsForProject("payments")
 	if err != nil {
 		t.Fatalf("failed to list intents: %v", err)
@@ -281,6 +295,99 @@ func TestOpenAddsIntentAndBulletTablesToAnOlderDatabase(t *testing.T) {
 	}
 	if len(bullets) != 1 {
 		t.Fatalf("expected 1 bullet, got %d", len(bullets))
+	}
+}
+
+// internal/export.Runner's cursor is a table added by
+// task-tracking-is-a-readonly-export. A database created before it existed
+// must gain it on open, the same way intents/bullets already do.
+func TestOpenAddsExportCursorTableToAnOlderDatabase(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy-export-cursor.db")
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("first open failed: %v", err)
+	}
+	if _, err := st.db.Exec("DROP TABLE export_cursor"); err != nil {
+		t.Fatalf("failed to drop export_cursor: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
+
+	upgraded, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen of older database failed: %v", err)
+	}
+	defer upgraded.Close()
+
+	has, err := upgraded.hasTable("export_cursor")
+	if err != nil {
+		t.Fatalf("checking export_cursor: %v", err)
+	}
+	if !has {
+		t.Fatalf("export_cursor was not created on open")
+	}
+
+	if err := upgraded.SaveExportCursor(42); err != nil {
+		t.Fatalf("export_cursor table unusable after upgrade: %v", err)
+	}
+	seq, err := upgraded.LoadExportCursor()
+	if err != nil {
+		t.Fatalf("LoadExportCursor after upgrade: %v", err)
+	}
+	if seq != 42 {
+		t.Fatalf("LoadExportCursor = %d, want 42", seq)
+	}
+}
+
+// A store with no saved cursor reads back 0, the same starting point as an
+// unread changes log, and a saved cursor survives a reopen.
+func TestExportCursorPersistsAcrossReopen(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "export-cursor.db")
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open failed: %v", err)
+	}
+	seq, err := st.LoadExportCursor()
+	if err != nil {
+		t.Fatalf("LoadExportCursor: %v", err)
+	}
+	if seq != 0 {
+		t.Fatalf("LoadExportCursor on a fresh store = %d, want 0", seq)
+	}
+
+	if err := st.SaveExportCursor(7); err != nil {
+		t.Fatalf("SaveExportCursor: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
+
+	reopened, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen failed: %v", err)
+	}
+	defer reopened.Close()
+
+	seq, err = reopened.LoadExportCursor()
+	if err != nil {
+		t.Fatalf("LoadExportCursor after reopen: %v", err)
+	}
+	if seq != 7 {
+		t.Fatalf("LoadExportCursor after reopen = %d, want 7", seq)
+	}
+
+	if err := reopened.SaveExportCursor(9); err != nil {
+		t.Fatalf("SaveExportCursor overwrite: %v", err)
+	}
+	seq, err = reopened.LoadExportCursor()
+	if err != nil {
+		t.Fatalf("LoadExportCursor after overwrite: %v", err)
+	}
+	if seq != 9 {
+		t.Fatalf("LoadExportCursor after overwrite = %d, want 9", seq)
 	}
 }
 

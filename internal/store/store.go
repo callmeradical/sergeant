@@ -367,6 +367,7 @@ func (s *Store) migrateAddTables() error {
 		{"bullets", createBulletsTable},
 		{"changes", createChangesTable},
 		{"deliveries", createDeliveriesTable},
+		{"export_cursor", createExportCursorTable},
 	}
 	for _, w := range wanted {
 		has, err := s.hasTable(w.table)
@@ -1232,6 +1233,33 @@ func (s *Store) GetIntent(intentID string) (*IntentRecord, error) {
 	return &i, nil
 }
 
+// GetBullet resolves a single bullet by id.
+//
+// It exists alongside ListBulletsForIntent (which requires already knowing
+// the intent) because a caller that only has a bullet id — internal/export's
+// Runner, resolving a ChannelBullet change log entry whose payload carries
+// no intent_id — has no other way to reach the current row.
+func (s *Store) GetBullet(bulletID string) (*BulletRecord, error) {
+	var b BulletRecord
+	err := s.db.QueryRow(
+		`SELECT id, intent_id, repo, position, status,
+		        COALESCE(branch, ''), COALESCE(worktree, ''), COALESCE(commit_sha, ''), COALESCE(pr_url, ''),
+		        COALESCE(blocked_reason, ''),
+		        created_at, updated_at
+		 FROM bullets WHERE id = ?`,
+		bulletID,
+	).Scan(
+		&b.ID, &b.IntentID, &b.Repo, &b.Position, &b.Status,
+		&b.Branch, &b.Worktree, &b.CommitSHA, &b.PRURL,
+		&b.BlockedReason,
+		&b.CreatedAt, &b.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
 func (s *Store) ListIntentsForProject(project string) ([]IntentRecord, error) {
 	rows, err := s.db.Query(
 		`SELECT `+intentColumns+` FROM intents WHERE project = ? ORDER BY created_at DESC, id ASC`,
@@ -1549,4 +1577,41 @@ func (s *Store) ListRunsForProject(project string, limit int) ([]RunRecord, erro
 		list = append(list, r)
 	}
 	return list, rows.Err()
+}
+
+// createExportCursorTable holds internal/export.Runner's durable read
+// position in the changes log. id = 1 is a singleton-row constraint: there is
+// one export cursor for the whole store, matching changes' own single global
+// sequence — the log is one ordered stream regardless of how many projects or
+// targets read it, and per-target cursors are not needed until a second
+// Target actually exists.
+const createExportCursorTable = `
+	CREATE TABLE IF NOT EXISTS export_cursor (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		last_seq INTEGER NOT NULL DEFAULT 0
+	);`
+
+// LoadExportCursor reports the last change sequence number
+// internal/export.Runner has successfully exported past. A store that has
+// never saved a cursor reads back 0, the same starting point as an unread
+// changes log.
+func (s *Store) LoadExportCursor() (int64, error) {
+	var seq int64
+	err := s.db.QueryRow(`SELECT last_seq FROM export_cursor WHERE id = 1`).Scan(&seq)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return seq, nil
+}
+
+// SaveExportCursor persists the last change sequence number
+// internal/export.Runner has successfully exported past. It is INSERT OR
+// REPLACE, not update-and-check, because the row is a singleton that may not
+// exist yet on a store's first export.
+func (s *Store) SaveExportCursor(seq int64) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO export_cursor (id, last_seq) VALUES (1, ?)`, seq)
+	return err
 }
