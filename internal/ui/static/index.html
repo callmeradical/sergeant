@@ -231,6 +231,10 @@
           class="min-w-[28px] min-h-[28px] flex items-center justify-center rounded text-[#8b949e] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
           <i class="fa-solid fa-plus text-[10px]" aria-hidden="true"></i>
         </button>
+        <button type="button" id="terminal-fullscreen-toggle" onclick="toggleTerminalFullscreen()" aria-label="Maximize terminal" title="Maximize terminal"
+          class="min-w-[28px] min-h-[28px] flex items-center justify-center rounded text-[#8b949e] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
+          <i class="fa-solid fa-expand text-[10px]" aria-hidden="true"></i>
+        </button>
         <button type="button" id="terminal-drawer-close" onclick="closeTerminalDrawer()" aria-label="Minimize terminal" title="Minimize terminal (sessions keep running)"
           class="min-w-[28px] min-h-[28px] flex items-center justify-center rounded text-[#8b949e] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
           <i class="fa-solid fa-window-minimize" aria-hidden="true"></i>
@@ -945,6 +949,29 @@
     function toggleTerminalDrawer() {
       const open = document.getElementById('terminal-drawer').getAttribute('aria-hidden') === 'false';
       if (open) closeTerminalDrawer(); else openTerminalDrawer();
+    }
+
+    // Maximize swaps the docked h-[55vh] strip for the full height below the
+    // header (top-11, matching detail-drawer's own top offset) — no new
+    // animation needed since open/close already transitions translate-y
+    // independently of height. Persists across minimize/reopen, same as any
+    // terminal emulator's remembered panel size, until explicitly toggled off.
+    let terminalFullscreen = false;
+    function toggleTerminalFullscreen() {
+      terminalFullscreen = !terminalFullscreen;
+      const d = document.getElementById('terminal-drawer');
+      d.classList.toggle('h-[55vh]', !terminalFullscreen);
+      d.classList.toggle('top-11', terminalFullscreen);
+      const btn = document.getElementById('terminal-fullscreen-toggle');
+      btn.querySelector('i').classList.toggle('fa-expand', !terminalFullscreen);
+      btn.querySelector('i').classList.toggle('fa-compress', terminalFullscreen);
+      const label = terminalFullscreen ? 'Restore terminal size' : 'Maximize terminal';
+      btn.setAttribute('aria-label', label);
+      btn.setAttribute('title', label);
+      if (activeTermId) {
+        const sess = termSessions.get(activeTermId);
+        if (sess) setTimeout(() => sess.fitAddon.fit(), 60);
+      }
     }
 
     function terminalDrawerIsOpen() {
