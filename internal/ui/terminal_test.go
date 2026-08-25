@@ -239,6 +239,43 @@ func TestInputToOneSessionDoesNotAppearInAnother(t *testing.T) {
 }
 
 // Scenario: "An explicit kill request terminates the underlying process."
+// Scenario: an explicit kill sends no exit frame — design.md's frame
+// protocol reserves the "exit" text frame for a process that exits on its
+// own; an explicit kill request is the operator's own action, already
+// answered by terminal-kill's 200 response, so the socket simply closes.
+// terminalSession.killed is exactly the seam that tells the two apart.
+func TestAnExplicitKillSendsNoExitFrame(t *testing.T) {
+	_, ts := newTerminalTestServer(t)
+
+	resp := startTerminal(t, ts, `{}`)
+	id := fmt.Sprint(resp["id"])
+
+	client := dialTerminalSocket(t, ts, id)
+
+	killResp, err := http.Post(ts.URL+"/api/terminal-kill", "application/json", strings.NewReader(fmt.Sprintf(`{"id":%q}`, id)))
+	if err != nil {
+		t.Fatalf("POST /api/terminal-kill: %v", err)
+	}
+	defer killResp.Body.Close()
+	if killResp.StatusCode != http.StatusOK {
+		t.Fatalf("kill status = %d, want 200", killResp.StatusCode)
+	}
+
+	_, textFrames := client.readUntil("", 2*time.Second)
+	for _, tf := range textFrames {
+		var frame struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal([]byte(tf), &frame) == nil && frame.Type == "exit" {
+			t.Fatalf("received an exit frame after an explicit kill request; want none, got %v", textFrames)
+		}
+	}
+
+	if !client.waitClosed(2 * time.Second) {
+		t.Error("socket is still open after an explicit kill request; expected it closed")
+	}
+}
+
 func TestAnExplicitKillRequestTerminatesTheUnderlyingProcess(t *testing.T) {
 	srv, ts := newTerminalTestServer(t)
 
