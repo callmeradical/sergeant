@@ -566,5 +566,253 @@ a{color:var(--muted)}
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
+<hr style="border:none;border-top:2px solid var(--ink);margin:44px 0">
+
+<header>
+  <h1>Sergeant v2</h1>
+  <p>Independent review. Written by the critic, not the builder.</p>
+  <p class="meta">
+    Review 026 · 2026-08-25 · branch <code>v2</code> · merge commit <code>cb2d9ac</code>
+    ("merge: task-tracking-is-a-readonly-export", merge of <code>9a62bf9</code>
+    "feat(export): task tracking is a read-only export" into <code>15788e4</code>) reviewed
+    against <code>openspec/changes/task-tracking-is-a-readonly-export/{proposal,design,tasks}.md</code>
+    and <code>specs/task-export/spec.md</code> · current <code>v2</code> HEAD is <code>cb2d9ac</code>,
+    the tip of this feature; build/vet/test run at that HEAD
+  </p>
+</header>
+
+<section>
+  <h2>Current status</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code> at HEAD <code>cb2d9ac</code></div></div>
+    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./internal/...</code>, no output</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">clean except named environmental failures</span></div><div class="small"><code>go test ./internal/... -count=1</code> run both with and without the prescribed <code>-skip</code>; without it, exactly the 10 named LLM-key-dependent tests fail (<code>TestBuildProjectGraphAppliesExcludePatterns</code>, <code>TestBuildProjectGraphMergesEveryParticipatingRepo</code>, <code>TestIncludeGroupsExcludesNonMatchingRepos</code>, <code>TestBuildNeverLeavesOutputInAPartialState</code>, <code>TestPublishFailureRestoresPriorGraph</code>, <code>TestBuildNeverSpawnsSgtGraphify</code>, <code>TestQueryAgainstABuiltGraphReturnsAnAnswer</code>, <code>TestExplainAndAffectedAreDistinctFromQuery</code>, <code>TestMCPGraphQueryAgainstABuiltGraphReturnsAnswer</code>, <code>TestBuildGraphEndpointBuildsAndPublishes</code>) and nothing else — none touch <code>internal/export</code>, <code>internal/store</code>, or <code>internal/config</code></div></div>
+    <div class="card"><div class="label">Signatures named in design.md</div><div class="value"><span class="status">match exactly</span></div><div class="small"><code>export.Target.Export(ctx, rec) error</code>, <code>export.Record</code>'s 9 fields, <code>Runner{Store, Target, Interval}</code>, <code>Runner.Tick</code>/<code>Runner.Run</code>, <code>Store.LoadExportCursor() (int64, error)</code>, <code>Store.SaveExportCursor(seq int64) error</code>, <code>config.Project.Export *Export</code> — all present, all with the exact shape design.md specifies</div></div>
+    <div class="card"><div class="label">Spec.md scenario coverage</div><div class="value"><span class="status">9/9 scenarios, real tests</span></div><div class="small">Every named scenario in <code>specs/task-export/spec.md</code> maps to a specific test in <code>internal/export/runner_test.go</code> or <code>internal/store/store_test.go</code>; see table below</div></div>
+    <div class="card"><div class="label">Retry-without-rerunning-the-write guarantee</div><div class="value"><span class="status">mutation-verified independently</span></div><div class="small">Deleted <code>Tick</code>'s stop-on-failure <code>break</code> entirely (worse than the merge commit's own description) — <code>TestExportFailureIsRetriedWithoutRerunningOriginalWrite</code> failed exactly as predicted; restored, <code>git diff --stat</code> confirmed clean</div></div>
+    <div class="card"><div class="label"><code>export.Runner</code> wiring into <code>sergeant ui</code></div><div class="value"><span class="status">not wired — dead code outside tests</span></div><div class="small"><code>cmd/sergeant/main.go</code>'s <code>startExportRunners</code> never constructs an <code>export.Runner</code> or calls <code>.Run</code>; it only <code>fmt.Fprintf</code>s a warning to stderr for a project with an <code>Export</code> block and returns. <code>grep -rn "export\.Runner\|\.Run(ctx)" cmd/ internal/</code> (excluding <code>_test.go</code>) has zero constructor/call-site hits</div></div>
+  </div>
+  <p><strong>Verdict:</strong> MEETS SPEC WITH CAVEATS. The library-level implementation
+  (<code>internal/export</code>, the <code>store</code> cursor methods, and <code>config.Project.Export</code>)
+  matches design.md's named signatures exactly, every scenario in specs/task-export/spec.md has a
+  real, non-tautological test, and the PRD's hard out-of-band requirement is independently
+  mutation-verified. The caveat is <code>cmd/sergeant/main.go</code>'s <code>startExportRunners</code>,
+  which design.md's "Wiring" section and tasks.md both require to construct a <code>Runner</code>
+  and start <code>Run</code> in a goroutine, but which in the shipped diff only logs a stderr warning
+  and never constructs a <code>Runner</code> at all. See Findings for detail.</p>
+</section>
+
+<section>
+  <h2>What I inspected</h2>
+  <table>
+    <tr><th>Area</th><th>Method</th></tr>
+    <tr><td>Binding spec</td><td>Read <code>openspec/changes/task-tracking-is-a-readonly-export/{proposal,design,tasks}.md</code>, <code>specs/task-export/spec.md</code>, and the originating <code>docs/prd-task-tracking-export.md</code> in full before reading any code</td></tr>
+    <tr><td>The actual diff</td><td><code>git show cb2d9ac --stat</code> (8 files, 830 insertions, 0 deletions — new files only, no existing file rewritten in place other than additive edits to <code>store.go</code>/<code>config.go</code>/<code>main.go</code>); read <code>internal/export/export.go</code>, <code>internal/export/runner.go</code>, <code>internal/export/runner_test.go</code>, the new sections of <code>internal/store/store.go</code>/<code>store_test.go</code>, <code>internal/config/config.go</code>/<code>config_test.go</code>, and <code>cmd/sergeant/main.go</code> in full</td></tr>
+    <tr><td>Signature match against design.md</td><td>Compared <code>export.go</code>/<code>runner.go</code> line by line against design.md's code blocks: <code>Target</code>, <code>Record</code>'s field list and comments (<code>Repo</code> empty for intent, <code>Position -1</code> for intent, <code>Statement</code> empty for bullet), <code>Runner</code>'s three fields and <code>Run</code>'s signature, <code>createExportCursorTable</code>'s exact DDL, <code>config.Export</code>'s <code>Backend</code> field</td></tr>
+    <tr><td>Store wiring</td><td><code>grep -n "ExportCursor\|export_cursor\|migrateAddTables"</code> in <code>store.go</code>: <code>export_cursor</code> registered in <code>migrateAddTables</code>'s <code>wanted</code> slice (line 370) alongside <code>intents</code>/<code>bullets</code>/<code>changes</code>/<code>deliveries</code>, exactly as design.md specifies</td></tr>
+    <tr><td>Spec scenario → test mapping</td><td>Read every scenario in <code>specs/task-export/spec.md</code> against <code>runner_test.go</code>'s 9 tests and <code>store_test.go</code>'s 2 new tests, matched by name and assertion content, not by title alone</td></tr>
+    <tr><td>Out-of-band write-path independence</td><td>Read <code>TestBulletStatusUpdateSucceedsEvenThoughExportTargetIsUnreachable</code>: calls <code>Store.UpdateBulletStatus</code> directly, never constructs or ticks a <code>Runner</code>. Confirmed via <code>grep</code> that <code>UpdateBulletStatus</code> and every other intent/bullet write method in <code>store.go</code> has no call into <code>internal/export</code> anywhere — the independence is structural (no call site exists), not merely a timing race the test got lucky on</td></tr>
+    <tr><td><strong>My own mutation test: retry guarantee</strong></td><td>Edited <code>Tick</code> in <code>internal/export/runner.go</code>, deleting the <code>break</code> after a failed <code>Target.Export</code> call entirely (so the loop falls through to <code>advanced = c.Seq</code> unconditionally, advancing the cursor past a record that failed to deliver) — a more aggressive mutation than "replace break with continue," which I tried first and found the shipped test does <em>not</em> catch (both records in that test's batch fail together, so break-vs-continue makes no observable difference in this specific fixture)</td></tr>
+    <tr><td>Production wiring</td><td><code>grep -rn "export\.Runner\|\.Run(ctx)\|export\.Target\b" --include="*.go" cmd/ internal/ | grep -v _test.go</code>; read <code>cmd/sergeant/main.go</code>'s <code>startUI</code> (line 152) and <code>startExportRunners</code> (line 171) in full</td></tr>
+    <tr><td>Full suite, twice</td><td><code>go test ./internal/... -count=1</code> with the prescribed <code>-skip</code> (clean, 12/12 packages) and without it (exactly the 10 named tests fail, confirmed by name)</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Spec.md scenario coverage</h2>
+  <table>
+    <tr><th>Scenario</th><th>Test</th></tr>
+    <tr><td>A bullet status change is exported</td><td><code>TestBulletStatusChangeIsExported</code> (<code>internal/export/runner_test.go</code>)</td></tr>
+    <tr><td>An intent creation is exported</td><td><code>TestIntentCreationIsExported</code></td></tr>
+    <tr><td>Transitions are exported in the order they occurred</td><td><code>TestTransitionsExportedInOrder</code></td></tr>
+    <tr><td>A transition is not exported twice across a restart</td><td><code>TestTransitionNotExportedTwiceAcrossRestart</code> (exercises <code>LoadExportCursor</code> directly, per tasks.md's explicit instruction, not only by re-running the loop in-process); also <code>TestExportCursorPersistsAcrossReopen</code> and <code>TestOpenAddsExportCursorTableToAnOlderDatabase</code> in <code>internal/store/store_test.go</code></td></tr>
+    <tr><td>A bullet status update succeeds even though its export target is unreachable</td><td><code>TestBulletStatusUpdateSucceedsEvenThoughExportTargetIsUnreachable</code> — calls <code>Store.UpdateBulletStatus</code> directly, never touches <code>Runner</code>, as tasks.md requires</td></tr>
+    <tr><td>An export failure is retried on a later attempt without re-running the original write</td><td><code>TestExportFailureIsRetriedWithoutRerunningOriginalWrite</code> — asserts <code>UpdatedAt</code> unchanged between ticks; independently mutation-verified by this review</td></tr>
+    <tr><td>An intent's statement is redacted before export</td><td><code>TestIntentStatementIsRedactedBeforeExport</code></td></tr>
+    <tr><td>An exported record contains no worktree path, branch name, or PR URL</td><td><code>TestExportedRecordContainsNoWorktreeBranchOrPRURL</code> — marshals the <code>Record</code> to JSON and greps for all three leaked values</td></tr>
+    <tr><td>No target is configured</td><td><code>TestNoTargetConfiguredExportsNothing</code></td></tr>
+  </table>
+  <p>All 9 scenarios have real, assertion-backed coverage. No scenario in specs/task-export/spec.md
+  is uncovered.</p>
+</section>
+
+<section>
+  <h2>Findings</h2>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified</span> &nbsp; Every named function/signature in design.md is what actually got built</h3>
+    <p><code>internal/export/export.go</code>'s <code>Target</code> interface and <code>Record</code>
+    struct are a verbatim match of design.md's code block, including the exact field comments
+    (<code>Repo</code> empty for an intent record, <code>Position -1</code> for an intent record,
+    <code>Statement</code> empty for a bullet record). <code>Runner</code> has exactly the three
+    fields design.md names (<code>Store</code>, <code>Target</code>, <code>Interval</code>), and
+    <code>Run</code>'s doc comment restates design.md's own reasoning for polling
+    <code>ListChangesSince</code> instead of <code>SubscribeChanges</code> nearly word for word.
+    <code>Store.LoadExportCursor() (int64, error)</code> and
+    <code>Store.SaveExportCursor(seq int64) error</code> exist with those exact signatures;
+    <code>createExportCursorTable</code>'s DDL matches design.md's block character for character;
+    the table is registered in <code>migrateAddTables</code>'s <code>wanted</code> slice
+    (<code>store.go:370</code>) the same way <code>deliveries</code> already is.
+    <code>config.Project.Export *Export</code> follows the <code>Graphify</code> pattern exactly
+    (pointer, <code>omitempty</code>, no special-case save logic), confirmed by
+    <code>TestExportBlockParsesIntoTypedFields</code> and
+    <code>TestProjectWithoutExportBlockHasNilExport</code> mirroring
+    <code>TestGraphifyBlockParsesIntoTypedFields</code>/<code>TestProjectWithoutGraphifyBlockHasNilGraphify</code>
+    directly.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified, real, mutation-tested independently</span> &nbsp; The out-of-band write-path guarantee holds structurally, and the retry-without-rerun guarantee survives a harder mutation than the merge commit's own description</h3>
+    <p><code>Store.UpdateBulletStatus</code> and every other intent/bullet write path in
+    <code>store.go</code> has no call into <code>internal/export</code> anywhere — confirmed by
+    reading every write method, not just trusting the test's framing. This makes
+    <code>TestBulletStatusUpdateSucceedsEvenThoughExportTargetIsUnreachable</code> a proof of
+    structural independence, not a lucky race: there is no code path by which a <code>Target</code>
+    could affect this call even if the test were wrong. Separately, I mutation-tested
+    <code>Tick</code>'s retry guarantee myself rather than trusting the merge commit's claim: first
+    I tried the mutation literally described in the merge message's wording ("removed the
+    stop-on-export-failure <code>break</code>") by replacing it with <code>continue</code>, and found
+    <code>TestExportFailureIsRetriedWithoutRerunningOriginalWrite</code> does <em>not</em> catch this
+    specific variant, because every record in that test's first-tick batch fails together, so
+    <code>break</code> and <code>continue</code> produce an identical outcome in that fixture. I then
+    tried the more severe mutation of deleting the failure branch's exit entirely, letting the
+    cursor advance unconditionally past a record that failed delivery — the test caught this
+    immediately, failing with <code>expected bullet record eventually delivered, got [only the intent
+    record]</code>, i.e. the cursor had skipped the never-delivered bullet transition forever. I
+    restored the file and confirmed <code>git diff --stat internal/export/runner.go</code> was empty.
+    The core guarantee — a failed delivery can never be silently skipped — holds; the
+    break-vs-continue distinction is a minor, currently-unexercised edge (see next finding).</p>
+  </div>
+
+  <div class="item warn">
+    <h3><span class="sev low">minor, non-blocking</span> &nbsp; No test distinguishes "stop the batch on first failure" from "skip the failed record but keep processing the rest of the batch"</h3>
+    <p><code>Tick</code>'s loop <code>break</code>s on the first delivery failure within a batch,
+    which is a stricter behavior than the minimum spec.md's "An export failure is retried on a later
+    attempt without re-running the original write" scenario requires (that scenario only requires
+    the failed record itself to eventually deliver without a duplicate write, which a
+    <code>continue</code>-style skip-and-keep-going implementation would also satisfy). No shipped
+    test would fail if <code>break</code> were replaced with <code>continue</code>, because every
+    fixture that exercises a failure fails every record in the batch that a later record could
+    otherwise expose the difference on. This is not a defect — <code>break</code> is the more
+    conservative, strictly-ordered choice, and design.md's text ("a partial-batch failure leaves the
+    cursor at the last fully-exported <code>Seq</code>") is consistent with either reading — but it
+    means the specific choice of <code>break</code> over <code>continue</code> is unverified by the
+    test suite. Not blocking against any named spec.md scenario.</p>
+  </div>
+
+  <div class="item warn">
+    <h3><span class="sev med">real gap, not blocking against a named spec.md scenario, but a direct deviation from design.md/tasks.md</span> &nbsp; <code>export.Runner</code> is never constructed or started in <code>cmd/sergeant/main.go</code> — this is exactly the "implemented but never wired up" bug class this codebase has hit before</h3>
+    <p>design.md's "Wiring" section states plainly: "<code>cmd/sergeant/main.go</code>'s
+    <code>startUI</code>... constructs the <code>Runner</code> once, with a <code>Target</code>
+    resolved from whichever project(s) have an <code>Export</code> block configured (a project with
+    none constructs no <code>Target</code> and the loop simply has nothing to poll for), and starts
+    <code>Run</code> in a goroutine alongside the HTTP server." tasks.md repeats this as an explicit
+    checklist item: "Wire <code>Runner</code> into <code>cmd/sergeant/main.go</code>'s
+    <code>startUI</code>: construct a <code>Runner</code> per project with an <code>Export</code>
+    block configured and start <code>Run</code> in a goroutine alongside the HTTP server." The
+    shipped <code>startExportRunners</code> (<code>cmd/sergeant/main.go:171-189</code>) does neither:
+    it lists projects, and for any project with a non-nil <code>Export</code>, only
+    <code>fmt.Fprintf(os.Stderr, ...)</code>s a message that no target implementation is registered
+    yet, then returns. It never allocates an <code>export.Runner{}</code> value and never calls
+    <code>.Run</code> anywhere. <code>grep -rn "export\.Runner\|\.Run(ctx)\|export\.Target\b"
+    --include="*.go" cmd/ internal/ | grep -v _test.go</code> confirms zero non-test, non-comment
+    references to constructing a <code>Runner</code> or invoking <code>Run</code> in the entire
+    repository — the only hits are doc comments in <code>store.go</code>/<code>config.go</code> and
+    <code>main.go</code>'s own comment describing what it is supposed to do. Because no
+    <code>Target</code> implementation exists yet (correctly out of scope for this change), this
+    currently has zero externally observable effect — no operator can configure a working export
+    today regardless. But it also means the actual poll loop, cursor-advancing machinery this
+    change built and thoroughly unit-tested is not running inside <code>sergeant ui</code> at all,
+    contradicting the explicit "start <code>Run</code> in a goroutine" instruction both design.md and
+    tasks.md give. This is not blocking against any named scenario in
+    <code>specs/task-export/spec.md</code> — every one of those 9 scenarios is phrased in terms of
+    <code>Runner</code>/<code>Store</code> behavior directly and none tests through
+    <code>main.go</code> or <code>startUI</code> — but it is a genuine, unambiguous deviation from
+    design.md's design and tasks.md's own checklist, and the exact "wired signature that nothing
+    calls" pattern this review was specifically asked to check for.</p>
+  </div>
+
+  <div class="item ok">
+    <h3><span class="sev low">verified — no scope creep</span> &nbsp; The diff adds nothing beyond what proposal.md/design.md/tasks.md describe</h3>
+    <p><code>git show cb2d9ac --stat</code>: 8 files, all either new (<code>internal/export/*</code>)
+    or additive edits (<code>store.go</code>, <code>config.go</code>, <code>main.go</code>,
+    <code>config_test.go</code>). No <code>Target</code> implementation was added (explicitly out of
+    scope per proposal.md), no bidirectional method was added to the interface, no change touches
+    <code>recordTransition</code> or any of its callers (confirmed by reading every call site
+    listed in the proposal), and no channel besides <code>ChannelIntent</code>/<code>ChannelBullet</code>
+    is exported — <code>Tick</code>'s <code>default</code> case in <code>buildRecord</code> would
+    error on any other channel, but the calling loop's own filter (<code>if c.Channel !=
+    ChannelIntent && c.Channel != ChannelBullet { advanced = c.Seq; continue }</code>) means that
+    branch is unreachable in practice, matching the "not task-tracker-shaped" exclusion list in
+    proposal.md exactly.</p>
+  </div>
+
+</section>
+
+<section>
+  <h2>Evidence index</h2>
+  <table>
+    <tr><th>Claim</th><th>Evidence</th><th>Result</th></tr>
+    <tr><td>Build/vet clean at HEAD <code>cb2d9ac</code></td><td><code>go build ./...</code>, <code>go vet ./internal/...</code></td><td>both silent</td></tr>
+    <tr><td>Full suite clean except pre-approved environmental failures</td><td><code>go test ./internal/... -count=1</code>, run once with the prescribed <code>-skip</code> and once without</td><td>with <code>-skip</code>: 12/12 packages pass; without: exactly the 10 named tests fail, all in <code>internal/graphify</code>/<code>internal/mcp</code>/<code>internal/ui</code>, none touching export/store/config</td></tr>
+    <tr><td>Signatures match design.md</td><td>Line-by-line comparison of <code>export.go</code>/<code>runner.go</code>/<code>store.go</code>/<code>config.go</code> against design.md's code blocks</td><td>exact match, including field comments and DDL text</td></tr>
+    <tr><td>9/9 spec.md scenarios covered</td><td>Named each scenario against its test in <code>runner_test.go</code>/<code>store_test.go</code></td><td>all 9 present; see Spec.md scenario coverage table above</td></tr>
+    <tr><td>Out-of-band independence is structural</td><td>Read every intent/bullet write method in <code>store.go</code></td><td>zero calls into <code>internal/export</code> from any write path</td></tr>
+    <tr><td><strong>My own mutation test #1 (continue instead of break)</strong></td><td>Edited <code>Tick</code>, reran <code>TestExportFailureIsRetriedWithoutRerunningOriginalWrite</code></td><td>test still passed — does not distinguish break from continue in this fixture; noted as a minor, non-blocking gap</td></tr>
+    <tr><td><strong>My own mutation test #2 (delete failure branch's exit entirely)</strong></td><td>Edited <code>Tick</code> so the cursor advances unconditionally even after a failed delivery, reran the same test</td><td>failed exactly as predicted (<code>expected bullet record eventually delivered, got [only the intent record]</code>); reverted, <code>git diff --stat internal/export/runner.go</code> confirmed empty</td></tr>
+    <tr><td><strong>Production wiring check</strong></td><td><code>grep -rn "export\.Runner\|\.Run(ctx)\|export\.Target\b" --include="*.go" cmd/ internal/ | grep -v _test.go</code>; read <code>startUI</code>/<code>startExportRunners</code> in full</td><td>zero constructor/call-site hits outside comments; <code>startExportRunners</code> only logs a stderr warning and returns — <code>Runner</code> is never instantiated in any non-test code path</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Verdict</h2>
+  <div class="item warn">
+    <p><strong>MEETS SPEC WITH CAVEATS.</strong> Every named function and signature in design.md —
+    <code>export.Target</code>, <code>export.Record</code>, <code>export.Runner</code>,
+    <code>Runner.Tick</code>/<code>Runner.Run</code>, <code>Store.LoadExportCursor</code>/
+    <code>SaveExportCursor</code>/<code>ListChangesSince</code>, and <code>config.Project.Export</code>
+    — is exactly what got built, not an approximation. All 9 scenarios named in
+    <code>specs/task-export/spec.md</code> have real, assertion-backed test coverage in
+    <code>internal/export/runner_test.go</code> and <code>internal/store/store_test.go</code>, with
+    no scenario uncovered. Build and vet are clean; the full test suite is clean except the same 10
+    pre-existing, environmental, LLM-key-dependent failures confirmed by name (not just by count) in
+    every prior review this session. The PRD's hard requirement — an export failure must never block,
+    delay, or fail the underlying write — is proven both by <code>store.go</code> having no call path
+    into <code>internal/export</code> from any write method (structural, not timing-dependent) and by
+    my own mutation test against the retry-without-rerun guarantee, which caught a real regression
+    when I deleted the cursor's failure guard (a harder mutation than the merge commit's own
+    description named, since the described milder mutation — <code>break</code> replaced with
+    <code>continue</code> — turned out not to be distinguishable by the shipped test in its own
+    fixture; this is noted as a minor, non-blocking gap, not a defect). No scope creep: nothing beyond
+    proposal.md/design.md/tasks.md was added, and no <code>Target</code> implementation, inbound path,
+    or channel beyond intent/bullet was introduced. <strong>The one caveat that matters:</strong>
+    <code>cmd/sergeant/main.go</code>'s <code>startExportRunners</code> does not do what design.md's
+    "Wiring" section and tasks.md's checklist both explicitly require — it never constructs an
+    <code>export.Runner</code> and never calls <code>.Run</code> in a goroutine; it only prints a
+    stderr warning for a configured project and returns. <code>export.Runner</code> is fully
+    implemented and fully tested but is dead code with respect to any real Sergeant process today —
+    exactly the "implemented but never wired up" pattern this review was asked to check for by name.
+    This caveat is <strong>not blocking against any named scenario in specs/task-export/spec.md</strong>
+    (all 9 scenarios are phrased and tested at the <code>Runner</code>/<code>Store</code> level, none
+    exercise <code>main.go</code> or <code>startUI</code>), and it has no observable effect yet because
+    no <code>Target</code> backend exists to wire in regardless — but it is a direct, unambiguous
+    deviation from design.md and tasks.md, and whoever implements the first <code>Target</code> will
+    also need to actually wire the <code>Runner</code> up, since this diff did not.</p>
+  </div>
+</section>
+
+<footer>
+  <p class="meta">Review 026 · findings above are reproduced from commands run directly against the
+  current <code>v2</code> working tree at HEAD <code>cb2d9ac</code>. Two mutations were applied
+  directly to <code>internal/export/runner.go</code> (replacing <code>Tick</code>'s failure-branch
+  <code>break</code> with <code>continue</code>, then deleting the failure branch's exit entirely)
+  to independently test the retry-without-rerun guarantee described in the merge commit's own
+  message; both were reverted immediately after, confirmed by an empty <code>git diff --stat
+  internal/export/runner.go</code>, and the full suite was rerun clean afterward. No throwaway test
+  files were left behind. Review 025 and earlier entries were not re-examined; they stand as
+  recorded above.</p>
+  <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
+</footer>
+
 </main></body>
 </html>
