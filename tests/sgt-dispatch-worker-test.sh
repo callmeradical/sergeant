@@ -6,7 +6,8 @@ export TMUX=fixture TMUX_PANE=%11
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
-mkdir -p "$TEST_ROOT/config/callbacks" "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin" "$TEST_ROOT/repo"
+mkdir -p "$TEST_ROOT/config/callbacks" "$TEST_ROOT/fleet" "$TEST_ROOT/fake-bin" \
+  "$TEST_ROOT/home" "$TEST_ROOT/repo"
 ln -s "$ROOT_DIR/bin/sgt-review-findings" "$TEST_ROOT/fake-bin/sgt-review-findings"
 chmod 700 "$TEST_ROOT/config/callbacks" "$TEST_ROOT/fleet"
 cat > "$TEST_ROOT/config/callbacks/hermes-discord" <<'EOF'
@@ -20,6 +21,15 @@ name: test
 repos:
   - name: app
     path: $TEST_ROOT/repo
+EOF
+mkdir -p "$TEST_ROOT/repo2"
+cat > "$TEST_ROOT/config/test-two.yaml" <<EOF
+name: test-two
+repos:
+  - name: app
+    path: $TEST_ROOT/repo
+  - name: app2
+    path: $TEST_ROOT/repo2
 EOF
 cat > "$TEST_ROOT/fake-bin/tmux" <<'EOF'
 #!/usr/bin/env bash
@@ -72,23 +82,35 @@ case "$1" in
       [[ "$nonce" =~ ^[a-f0-9]{32}$ && -n "$notification_id" ]] || continue
       target_dir="$repo_state/notifications/$notification_id/targets/$nonce"
       token="$notification_id|$nonce"
+      [[ -d "$target_dir" ]] || continue
       printf '%s\n' "$token" > "$target_dir/accepted"
       printf '%s\n' "$token" > "$target_dir/delivered"
+      worktree="$(cat "$repo_state/worktree")"
+      mkdir -p "$worktree/.sergeant-notification-acks"
+      printf '%s\n' "$token" > "$worktree/.sergeant-notification-acks/$nonce"
     done
     fi
     if [[ "$*" == *'-t %11'* ]]; then
       printf '0|%%11|1111|111111|coordinator-command\n'
     else
-      printf '0|%%42|4242|123456|fixture-worker-command\n'
+      printf '%s\n' "${WORKER_PANE_IDENTITY:-0|%42|4242|123456|fixture-worker-command}"
     fi
     ;;
   new-window)
+    if [[ -n "${TMUX_WINDOW_COUNT:-}" ]]; then
+      window_count=0
+      [[ ! -f "$TMUX_WINDOW_COUNT" ]] || window_count="$(cat "$TMUX_WINDOW_COUNT")"
+      window_count=$((window_count + 1))
+      printf '%s\n' "$window_count" > "$TMUX_WINDOW_COUNT"
+      [[ -z "${FAIL_WINDOW_AT:-}" || "$window_count" != "$FAIL_WINDOW_AT" ]] || exit 7
+    fi
     [[ "${FAIL_WINDOW:-0}" == 0 ]] || exit 7
     if [[ "${AUTO_DELIVER:-1}" == 1 ]]; then
       for repo_state in "$SERGEANT_FLEET"/*/*; do
         [[ -d "$repo_state" ]] || continue
         [[ -f "$repo_state/notification_id" && -f "$repo_state/worktree" ]] || continue
         notification_id="$(cat "$repo_state/notification_id")"
+        nonce="$(cat "$repo_state/notification_target" 2>/dev/null || true)"
         worktree="$(cat "$repo_state/worktree")"
         printf '%s|0|%%42|4242|123456|fixture-worker-command\n' "$notification_id" \
           > "$worktree/.sergeant-notification-ack"
@@ -97,6 +119,11 @@ case "$1" in
         printf '0|%%42|4242|123456|fixture-worker-command\n' \
           > "$repo_state/notification_delivered_pane_identity"
         printf '%s\n' "$notification_id" > "$repo_state/notification_delivered"
+        if [[ "$nonce" =~ ^[a-f0-9]{32}$ ]]; then
+          mkdir -p "$worktree/.sergeant-notification-acks"
+          printf '%s|%s\n' "$notification_id" "$nonce" \
+            > "$worktree/.sergeant-notification-acks/$nonce"
+        fi
       done
     fi
     printf '%%42\n'
@@ -104,7 +131,7 @@ case "$1" in
   send-keys)
     [[ "${FAIL_SEND:-0}" == 0 ]] || exit 8
     ;;
-  kill-pane) ;;
+  kill-pane) [[ "${FAIL_KILL:-0}" == 0 ]] ;;
 esac
 EOF
 chmod +x "$TEST_ROOT/fake-bin/tmux"
@@ -146,7 +173,15 @@ case "${1:-}" in
     printf '[]\n'
     ;;
   create)
-    printf '{"id":"td-app-1"}\n'
+    if [[ "${TD_MULTI:-0}" == 1 ]]; then
+      td_count=0
+      [[ ! -f "$TD_MULTI_COUNT" ]] || td_count="$(cat "$TD_MULTI_COUNT")"
+      td_count=$((td_count + 1))
+      printf '%s\n' "$td_count" > "$TD_MULTI_COUNT"
+      printf '{"id":"td-app-%s"}\n' "$td_count"
+    else
+      printf '{"id":"td-app-1"}\n'
+    fi
     ;;
   delete)
     printf '{"id":"td-app-1","deleted":true}\n'
@@ -174,6 +209,36 @@ touch "$TEST_ROOT/repo/README.md"
 git -C "$TEST_ROOT/repo" add README.md
 git -C "$TEST_ROOT/repo" commit -qm fixture
 git -C "$TEST_ROOT/repo" remote add origin git@github.com:org/test.git
+git -C "$TEST_ROOT/repo2" init -q
+git -C "$TEST_ROOT/repo2" config user.name Test
+git -C "$TEST_ROOT/repo2" config user.email test@example.invalid
+touch "$TEST_ROOT/repo2/README.md"
+git -C "$TEST_ROOT/repo2" add README.md
+git -C "$TEST_ROOT/repo2" commit -qm fixture
+git -C "$TEST_ROOT/repo2" remote add origin git@github.com:org/test2.git
+
+cleanup_admission_fixture() {
+  local task_id="$1" repo_state repo_name source_repo worktree branch
+  for repo_state in "$TEST_ROOT/fleet/$task_id"/*; do
+    [[ -d "$repo_state" && -f "$repo_state/worktree" ]] || continue
+    repo_name="$(basename "$repo_state")"
+    case "$repo_name" in
+      app) source_repo="$TEST_ROOT/repo" ;;
+      app2) source_repo="$TEST_ROOT/repo2" ;;
+      *) continue ;;
+    esac
+    worktree="$(cat "$repo_state/worktree")"
+    branch="$(cat "$repo_state/branch" 2>/dev/null || true)"
+    git -C "$source_repo" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+    [[ -z "$branch" ]] || git -C "$source_repo" branch -D "$branch" >/dev/null 2>&1 || true
+  done
+  if [[ -e "$TEST_ROOT/fleet/$task_id/.callbacks/admission.json" ]]; then
+    env HOME="$TEST_ROOT/home" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+      SERGEANT_CALLBACKS="$TEST_ROOT/config/callbacks" \
+      "$ROOT_DIR/bin/sgt-callback" tombstone-admission "$task_id"
+  fi
+  rm -rf "$TEST_ROOT/fleet/$task_id"
+}
 
 REAL_DD="$(command -v dd)"
 cat > "$TEST_ROOT/fake-bin/dd" <<EOF
@@ -298,6 +363,431 @@ grep -Fq 'orphaned' "$brief"
 grep -Fq 'sgt-respond' "$brief"
 grep -Fq 'requires both .sergeant-status=done and a non-empty .sergeant-result' "$brief"
 
+# Correlated admission keeps request text out of argv and emits acceptance only
+# after dispatch has completed with a durable callback origin.
+printf 'Admit a bounded Hermes request.\n' > "$TEST_ROOT/hermes-brief"
+chmod 600 "$TEST_ROOT/hermes-brief"
+mkdir -p "$TEST_ROOT/wiki-home/.opencode/skills/write-to-wiki/scripts"
+cat > "$TEST_ROOT/wiki-home/.opencode/skills/write-to-wiki/scripts/write.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$WIKI_CAPTURE_LOG"
+EOF
+chmod 700 "$TEST_ROOT/wiki-home/.opencode/skills/write-to-wiki/scripts/write.sh"
+printf '' > "$TEST_ROOT/brief-empty"
+python3 -c 'import sys; sys.stdout.buffer.write(b"x" * 16385)' \
+  > "$TEST_ROOT/brief-oversized"
+printf '\377' > "$TEST_ROOT/brief-invalid-utf8"
+printf 'request\001control\n' > "$TEST_ROOT/brief-control"
+printf 'rm -rf /tmp/example\n' > "$TEST_ROOT/brief-shell"
+ln -s "$TEST_ROOT/hermes-brief" "$TEST_ROOT/brief-symlink"
+printf 'unsafe mode\n' > "$TEST_ROOT/brief-unsafe-mode"
+chmod 622 "$TEST_ROOT/brief-unsafe-mode"
+printf 'group readable\n' > "$TEST_ROOT/brief-mode-0640"
+chmod 640 "$TEST_ROOT/brief-mode-0640"
+printf 'world readable\n' > "$TEST_ROOT/brief-mode-0644"
+chmod 644 "$TEST_ROOT/brief-mode-0644"
+chmod 600 "$TEST_ROOT"/brief-empty "$TEST_ROOT"/brief-oversized \
+  "$TEST_ROOT"/brief-invalid-utf8 "$TEST_ROOT"/brief-control \
+  "$TEST_ROOT"/brief-shell
+for rejected_brief in empty oversized invalid-utf8 control shell symlink unsafe-mode \
+  mode-0640 mode-0644; do
+  fleet_count_before_rejection="$(find "$TEST_ROOT/fleet" -mindepth 1 \
+    -maxdepth 1 -type d | wc -l | tr -d ' ')"
+  set +e
+  rejected_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+    TMUX_LOG="$TEST_ROOT/rejected-$rejected_brief.log" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 "$ROOT_DIR/bin/sgt-dispatch" test \
+      --brief-file "$TEST_ROOT/brief-$rejected_brief" --repos app \
+      --origin-profile hermes-discord \
+      --correlation-id "req-rejected-$rejected_brief" --json 2>/dev/null)"
+  rejected_status=$?
+  set -e
+  fleet_count_after_rejection="$(find "$TEST_ROOT/fleet" -mindepth 1 \
+    -maxdepth 1 -type d | wc -l | tr -d ' ')"
+  [[ "$rejected_status" -ne 0 && -z "$rejected_output" ]]
+  [[ "$fleet_count_before_rejection" == "$fleet_count_after_rejection" ]]
+  [[ ! -e "$TEST_ROOT/rejected-$rejected_brief.log" ]]
+done
+
+set +e
+positional_admission_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/positional-admission.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 "$ROOT_DIR/bin/sgt-dispatch" test \
+    'Positional request text must not be accepted.' --repos app \
+    --origin-profile hermes-discord --correlation-id req-positional-001 \
+    --json 2>/dev/null)"
+positional_admission_status=$?
+set -e
+[[ "$positional_admission_status" -ne 0 && -z "$positional_admission_output" ]]
+[[ ! -e "$TEST_ROOT/positional-admission.log" ]]
+
+fleet_count_before_admission_failure="$(find "$TEST_ROOT/fleet" -mindepth 1 \
+  -maxdepth 1 -type d | wc -l | tr -d ' ')"
+set +e
+failed_admission_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/failed-admission.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test --brief-file "$TEST_ROOT/hermes-brief" \
+    --repos app --origin-profile missing-profile \
+    --correlation-id req-admission-failed --json \
+    2>"$TEST_ROOT/failed-admission.stderr")"
+failed_admission_status=$?
+set -e
+fleet_count_after_admission_failure="$(find "$TEST_ROOT/fleet" -mindepth 1 \
+  -maxdepth 1 -type d | wc -l | tr -d ' ')"
+[[ "$failed_admission_status" -ne 0 && -z "$failed_admission_output" ]]
+[[ "$fleet_count_before_admission_failure" == \
+  "$fleet_count_after_admission_failure" ]]
+[[ ! -e "$TEST_ROOT/failed-admission.log" ]]
+
+admission_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/admission.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" HOME="$TEST_ROOT/wiki-home" \
+  TD_LOG="$TEST_ROOT/admission-td.log" WIKI_CAPTURE_LOG="$TEST_ROOT/admission-wiki.log" \
+  SGT_WIKI_DISABLED=0 \
+  "$ROOT_DIR/bin/sgt-dispatch" test --brief-file "$TEST_ROOT/hermes-brief" \
+    --repos app --origin-profile hermes-discord \
+    --correlation-id req-admission-001 --json \
+    2>"$TEST_ROOT/admission.stderr")"
+admission_task_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["task_id"])' \
+  <<< "$admission_output")"
+python3 - "$admission_output" "$admission_task_id" <<'PY'
+import json
+import sys
+
+assert json.loads(sys.argv[1]) == {
+    "status": "accepted",
+    "task_id": sys.argv[2],
+    "correlation_id": "req-admission-001",
+}
+PY
+python3 - "$TEST_ROOT/fleet/$admission_task_id/.callbacks/origin.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+assert json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")) == {
+    "version": "sergeant.callback-origin/v1",
+    "profile": "hermes-discord",
+    "correlation_id": "req-admission-001",
+}
+PY
+grep -Fq '=== dispatch complete ===' "$TEST_ROOT/admission.stderr"
+if grep -Fq 'Admit a bounded Hermes request.' "$TEST_ROOT/admission.log"; then
+  printf 'Hermes request text reached the worker launch argv\n' >&2
+  exit 1
+fi
+for public_surface in "$TEST_ROOT/admission.stderr" "$TEST_ROOT/admission-td.log" \
+  "$TEST_ROOT/admission-wiki.log"; do
+  if grep -Fq 'Admit a bounded Hermes request.' "$public_surface"; then
+    printf 'Hermes request text reached public surface: %s\n' "$public_surface" >&2
+    exit 1
+  fi
+done
+if grep -RFq 'Admit a bounded Hermes request.' \
+    "$TEST_ROOT/fleet/$admission_task_id"; then
+  printf 'Hermes request text reached fleet task state\n' >&2
+  exit 1
+fi
+[[ "$admission_task_id" != *admit*bounded* ]]
+[[ "$(cat "$TEST_ROOT/fleet/$admission_task_id/app/branch")" == \
+  feat/hermes-correlated-code-work-request ]]
+admission_worktree="$(cat "$TEST_ROOT/fleet/$admission_task_id/app/worktree")"
+[[ "$admission_worktree" != *admit*bounded* ]]
+grep -Fq 'Admit a bounded Hermes request.' "$admission_worktree/.sergeant-brief.md"
+admission_fleet_count="$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 \
+  -type d | wc -l | tr -d ' ')"
+: > "$TEST_ROOT/admission-retry.log"
+chmod 644 "$TEST_ROOT/hermes-brief"
+set +e
+unsafe_retry_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/admission-unsafe-retry.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 "$ROOT_DIR/bin/sgt-dispatch" test \
+    --brief-file "$TEST_ROOT/hermes-brief" --repos app \
+    --origin-profile hermes-discord --correlation-id req-admission-001 \
+    --json 2>/dev/null)"
+unsafe_retry_status=$?
+set -e
+[[ "$unsafe_retry_status" -ne 0 && -z "$unsafe_retry_output" ]]
+[[ ! -e "$TEST_ROOT/admission-unsafe-retry.log" ]]
+chmod 600 "$TEST_ROOT/hermes-brief"
+mv "$TEST_ROOT/config/callbacks/hermes-discord" \
+  "$TEST_ROOT/config/callbacks/hermes-discord.unavailable"
+admission_retry_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/admission-retry.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  SERGEANT_AGENT=missing-harness SERGEANT_MODEL='invalid-model' \
+  "$ROOT_DIR/bin/sgt-dispatch" test --brief-file "$TEST_ROOT/hermes-brief" \
+    --repos app --origin-profile hermes-discord \
+    --correlation-id req-admission-001 --json 2>/dev/null)"
+[[ "$admission_retry_output" == "$admission_output" ]]
+[[ "$(find "$TEST_ROOT/fleet" -mindepth 1 -maxdepth 1 -type d | \
+  wc -l | tr -d ' ')" == "$admission_fleet_count" ]]
+[[ ! -s "$TEST_ROOT/admission-retry.log" ]]
+mv "$TEST_ROOT/config/callbacks/hermes-discord.unavailable" \
+  "$TEST_ROOT/config/callbacks/hermes-discord"
+cleanup_admission_fixture "$admission_task_id"
+: > "$TEST_ROOT/admission-cleaned-retry.log"
+admission_cleaned_retry="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/admission-cleaned-retry.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 "$ROOT_DIR/bin/sgt-dispatch" test \
+    --brief-file "$TEST_ROOT/hermes-brief" --repos app \
+    --origin-profile hermes-discord --correlation-id req-admission-001 \
+    --json 2>/dev/null)"
+[[ "$admission_cleaned_retry" == "$admission_output" ]]
+[[ ! -s "$TEST_ROOT/admission-cleaned-retry.log" ]]
+
+for crash_point in dispatch-after-admission-begin dispatch-td-create-returned \
+  dispatch-after-task-create dispatch-before-origin-register dispatch-after-origin-register \
+  dispatch-git-worktree-acquired \
+  dispatch-after-final-launch dispatch-before-admission-commit \
+  dispatch-after-admission-commit dispatch-before-admission-stdout \
+  dispatch-after-admission-stdout; do
+  crash_slug="${crash_point#dispatch-}"
+  crash_correlation="req-crash-$crash_slug"
+  set +e
+  crash_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+    TMUX_LOG="$TEST_ROOT/$crash_point.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 SGT_TEST_HOOKS=1 \
+    SGT_DISPATCH_FAIL_POINT="$crash_point" \
+    "$ROOT_DIR/bin/sgt-dispatch" test --brief-file "$TEST_ROOT/hermes-brief" \
+      --repos app --branch "feat/$crash_slug" --origin-profile hermes-discord \
+      --correlation-id "$crash_correlation" --json 2>/dev/null)"
+  crash_status=$?
+  set -e
+  [[ "$crash_status" -ne 0 ]]
+
+  pending_task_id=""
+  set +e
+  pending_task_id="$(env HOME="$TEST_ROOT/home" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SERGEANT_CALLBACKS="$TEST_ROOT/config/callbacks" \
+    "$ROOT_DIR/bin/sgt-callback" resolve-admission hermes-discord \
+      "$crash_correlation" 2>/dev/null)"
+  pending_status=$?
+  set -e
+  [[ "$pending_status" == 0 || "$pending_status" == 2 || "$pending_status" == 3 ]]
+
+  retry_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+    TMUX_LOG="$TEST_ROOT/$crash_point-retry.log" \
+    SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SGT_WIKI_DISABLED=1 "$ROOT_DIR/bin/sgt-dispatch" test \
+      --brief-file "$TEST_ROOT/hermes-brief" --repos app \
+      --branch "feat/$crash_slug" \
+      --origin-profile hermes-discord --correlation-id "$crash_correlation" \
+      --json 2>"$TEST_ROOT/$crash_point-retry.stderr")"
+  retry_task_id="$(python3 -c \
+    'import json,sys; print(json.load(sys.stdin)["task_id"])' <<< "$retry_output")"
+  if [[ "$pending_status" == 3 ]]; then
+    [[ "$retry_task_id" == "$pending_task_id" ]]
+  elif [[ "$pending_status" == 0 ]]; then
+    [[ "$retry_output" == "$pending_task_id" ]]
+  fi
+  if [[ -n "$crash_output" ]]; then
+    [[ "$retry_output" == "$crash_output" ]]
+  fi
+  cleanup_admission_fixture "$retry_task_id"
+done
+
+for crash_point in dispatch-after-admission-begin dispatch-td-create-returned \
+  dispatch-after-task-create dispatch-after-origin-register \
+  dispatch-git-worktree-acquired dispatch-after-final-launch \
+  dispatch-before-admission-commit dispatch-after-admission-commit \
+  dispatch-before-admission-stdout; do
+  crash_slug="sigkill-${crash_point#dispatch-}"
+  crash_correlation="req-$crash_slug"
+  set +e
+  PATH="$TEST_ROOT/fake-bin:$PATH" \
+    TMUX_LOG="$TEST_ROOT/$crash_slug.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 SGT_TEST_HOOKS=1 \
+    SGT_DISPATCH_CRASH_SIGNAL=KILL SGT_DISPATCH_FAIL_POINT="$crash_point" \
+    "$ROOT_DIR/bin/sgt-dispatch" test --brief-file "$TEST_ROOT/hermes-brief" \
+      --repos app --branch "feat/$crash_slug" --origin-profile hermes-discord \
+      --correlation-id "$crash_correlation" --json \
+      >"$TEST_ROOT/$crash_slug.stdout" 2>/dev/null
+  crash_status=$?
+  set -e
+  [[ "$crash_status" -ne 0 ]]
+
+  set +e
+  pending_task_id="$(env HOME="$TEST_ROOT/home" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+    SERGEANT_CALLBACKS="$TEST_ROOT/config/callbacks" \
+    "$ROOT_DIR/bin/sgt-callback" resolve-admission hermes-discord \
+      "$crash_correlation" 2>/dev/null)"
+  pending_status=$?
+  set -e
+  [[ "$pending_status" == 0 || "$pending_status" == 3 ]]
+
+  retry_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+    TMUX_LOG="$TEST_ROOT/$crash_slug-retry.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+    SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+    "$ROOT_DIR/bin/sgt-dispatch" test --brief-file "$TEST_ROOT/hermes-brief" \
+      --repos app --branch "feat/$crash_slug" --origin-profile hermes-discord \
+      --correlation-id "$crash_correlation" --json 2>/dev/null)"
+  retry_task_id="$(python3 -c \
+    'import json,sys; print(json.load(sys.stdin)["task_id"])' <<< "$retry_output")"
+  if [[ "$pending_status" == 3 ]]; then
+    [[ "$retry_task_id" == "$pending_task_id" ]]
+  else
+    [[ "$retry_output" == "$pending_task_id" ]]
+  fi
+  cleanup_admission_fixture "$retry_task_id"
+done
+
+# Rollback never targets a recycled pane whose live identity differs.
+set +e
+PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/recycled-pane-crash.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 SGT_TEST_HOOKS=1 SGT_DISPATCH_CRASH_SIGNAL=KILL \
+  SGT_DISPATCH_FAIL_POINT=dispatch-after-final-launch \
+  "$ROOT_DIR/bin/sgt-dispatch" test --brief-file "$TEST_ROOT/hermes-brief" \
+    --repos app --branch feat/recycled-pane --origin-profile hermes-discord \
+    --correlation-id req-recycled-pane --json >/dev/null 2>/dev/null
+recycled_crash_status=$?
+set -e
+[[ "$recycled_crash_status" -ne 0 ]]
+set +e
+PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/recycled-pane-retry.log" \
+  WORKER_PANE_IDENTITY='0|%42|9999|999999|unrelated-worker' \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 "$ROOT_DIR/bin/sgt-dispatch" test \
+    --brief-file "$TEST_ROOT/hermes-brief" --repos app \
+    --branch feat/recycled-pane --origin-profile hermes-discord \
+    --correlation-id req-recycled-pane --json >/dev/null \
+    2>"$TEST_ROOT/recycled-pane-retry.stderr"
+recycled_retry_status=$?
+set -e
+[[ "$recycled_retry_status" -ne 0 ]]
+grep -Fq 'could not verify and retire exact pre-admission worker' \
+  "$TEST_ROOT/recycled-pane-retry.stderr"
+if grep -Fq 'kill-pane -t %42' "$TEST_ROOT/recycled-pane-retry.log"; then
+  printf 'rollback killed a recycled pane\n' >&2
+  exit 1
+fi
+recycled_recovery="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/recycled-pane-recovery.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 "$ROOT_DIR/bin/sgt-dispatch" test \
+    --brief-file "$TEST_ROOT/hermes-brief" --repos app \
+    --branch feat/recycled-pane --origin-profile hermes-discord \
+    --correlation-id req-recycled-pane --json 2>/dev/null)"
+cleanup_admission_fixture "$(python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["task_id"])' <<< "$recycled_recovery")"
+
+# An exact pane whose kill operation fails is likewise preserved and retriable.
+set +e
+PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/kill-failure-crash.log" \
+  FAIL_KILL=1 SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 SGT_TEST_HOOKS=1 \
+  SGT_DISPATCH_FAIL_POINT=dispatch-after-final-launch \
+  "$ROOT_DIR/bin/sgt-dispatch" test --brief-file "$TEST_ROOT/hermes-brief" \
+    --repos app --branch feat/kill-failure --origin-profile hermes-discord \
+    --correlation-id req-kill-failure --json >/dev/null \
+    2>"$TEST_ROOT/kill-failure-crash.stderr"
+kill_failure_status=$?
+set -e
+[[ "$kill_failure_status" -ne 0 ]]
+grep -Fq 'could not verify and retire exact pre-admission worker' \
+  "$TEST_ROOT/kill-failure-crash.stderr"
+kill_failure_recovery="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/kill-failure-recovery.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 "$ROOT_DIR/bin/sgt-dispatch" test \
+    --brief-file "$TEST_ROOT/hermes-brief" --repos app \
+    --branch feat/kill-failure --origin-profile hermes-discord \
+    --correlation-id req-kill-failure --json 2>/dev/null)"
+cleanup_admission_fixture "$(python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["task_id"])' <<< "$kill_failure_recovery")"
+
+# A retry cannot promote or accept while the original still owns rollback.
+admission_barrier="$TEST_ROOT/admission-lock-race"
+PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/admission-race-original.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 SGT_TEST_HOOKS=1 \
+  SGT_TEST_ADMISSION_LOCK_BARRIER="$admission_barrier" \
+  "$ROOT_DIR/bin/sgt-dispatch" test --brief-file "$TEST_ROOT/hermes-brief" \
+    --repos app --branch feat/admission-lock-race \
+    --origin-profile hermes-discord --correlation-id req-admission-lock-race \
+    --json >"$TEST_ROOT/admission-race-original.stdout" \
+    2>"$TEST_ROOT/admission-race-original.stderr" &
+admission_original_pid=$!
+for _ in {1..500}; do
+  [[ -e "$admission_barrier.ready" ]] && break
+  sleep 0.01
+done
+[[ -e "$admission_barrier.ready" ]]
+PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/admission-race-retry.log" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SGT_WIKI_DISABLED=1 "$ROOT_DIR/bin/sgt-dispatch" test \
+    --brief-file "$TEST_ROOT/hermes-brief" --repos app \
+    --branch feat/admission-lock-race --origin-profile hermes-discord \
+    --correlation-id req-admission-lock-race --json \
+    >"$TEST_ROOT/admission-race-retry.stdout" \
+    2>"$TEST_ROOT/admission-race-retry.stderr" &
+admission_retry_pid=$!
+sleep 0.2
+[[ ! -s "$TEST_ROOT/admission-race-retry.stdout" ]]
+kill -TERM "$admission_original_pid"
+set +e
+wait "$admission_original_pid"
+admission_original_status=$?
+set -e
+[[ "$admission_original_status" -ne 0 ]]
+wait "$admission_retry_pid"
+admission_race_output="$(cat "$TEST_ROOT/admission-race-retry.stdout")"
+admission_race_task="$(python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["task_id"])' \
+  <<< "$admission_race_output")"
+[[ ! -s "$TEST_ROOT/admission-race-original.stdout" ]]
+cleanup_admission_fixture "$admission_race_task"
+
+# A second-repository launch failure is still pre-admission: the first pane,
+# both worktrees, generated td tasks, and callback task state are rolled back.
+: > "$TEST_ROOT/two-repo-window-count"
+: > "$TEST_ROOT/two-repo-td-count"
+set +e
+two_repo_output="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/two-repo.log" TMUX_WINDOW_COUNT="$TEST_ROOT/two-repo-window-count" \
+  FAIL_WINDOW_AT=2 TD_MULTI=1 TD_MULTI_COUNT="$TEST_ROOT/two-repo-td-count" \
+  TD_LOG="$TEST_ROOT/two-repo-td.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test-two --brief-file "$TEST_ROOT/hermes-brief" \
+    --repos app,app2 --branch feat/two-repo-admission --origin-profile hermes-discord \
+    --correlation-id req-two-repo-001 --json 2>/dev/null)"
+two_repo_status=$?
+set -e
+[[ "$two_repo_status" -ne 0 && -z "$two_repo_output" ]]
+set +e
+two_repo_task_id="$(env HOME="$TEST_ROOT/home" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SERGEANT_CALLBACKS="$TEST_ROOT/config/callbacks" \
+  "$ROOT_DIR/bin/sgt-callback" resolve-admission hermes-discord \
+    req-two-repo-001 2>/dev/null)"
+two_repo_pending_status=$?
+set -e
+[[ "$two_repo_pending_status" == 3 && -n "$two_repo_task_id" ]]
+[[ ! -e "$TEST_ROOT/fleet/$two_repo_task_id" ]]
+[[ ! -e "$TEST_ROOT/app-sgt-$two_repo_task_id" ]]
+[[ ! -e "$TEST_ROOT/app2-sgt-$two_repo_task_id" ]]
+grep -Fq 'kill-pane -t %42' "$TEST_ROOT/two-repo.log"
+[[ "$(grep -c '^delete ' "$TEST_ROOT/two-repo-td.log")" == 2 ]]
+
+: > "$TEST_ROOT/two-repo-window-count"
+two_repo_retry="$(PATH="$TEST_ROOT/fake-bin:$PATH" \
+  TMUX_LOG="$TEST_ROOT/two-repo-retry.log" \
+  TMUX_WINDOW_COUNT="$TEST_ROOT/two-repo-window-count" \
+  TD_MULTI=1 TD_MULTI_COUNT="$TEST_ROOT/two-repo-td-count" \
+  TD_LOG="$TEST_ROOT/two-repo-retry-td.log" SERGEANT_CONFIG="$TEST_ROOT/config" \
+  SERGEANT_FLEET="$TEST_ROOT/fleet" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test-two --brief-file "$TEST_ROOT/hermes-brief" \
+    --repos app,app2 --branch feat/two-repo-admission --origin-profile hermes-discord \
+    --correlation-id req-two-repo-001 --json 2>/dev/null)"
+[[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["task_id"])' \
+  <<< "$two_repo_retry")" == "$two_repo_task_id" ]]
+cleanup_admission_fixture "$two_repo_task_id"
+
 cat > "$TEST_ROOT/fake-bin/treehouse" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$1" == return ]]; then
@@ -386,7 +876,7 @@ printf '{"path":"%s","lease_id":"lease-dispatch-1","lease_holder":"%s","leased_a
   "$TREEHOUSE_TEST_PATH" "$4"
 EOF
 chmod +x "$TEST_ROOT/fake-bin/treehouse"
-touch "$TEST_ROOT/repo/treehouse.toml"
+printf 'root = "%s"\n' "$TEST_ROOT" > "$TEST_ROOT/repo/treehouse.toml"
 REAL_GIT="$(command -v git)" PATH="$TEST_ROOT/fake-bin:$PATH" \
   TREEHOUSE_TEST_PATH="$TEST_ROOT/treehouse-checkout" \
   TREEHOUSE_GET_LOG="$TEST_ROOT/treehouse-get.log" \
@@ -418,6 +908,8 @@ PY
 [[ "$(cat "$TEST_ROOT/treehouse-get.log")" == \
   "get --lease --lease-holder sgt-$treehouse_task_id-app --json" ]]
 rm "$TEST_ROOT/repo/treehouse.toml"
+ORIGINAL_HOME="$HOME"
+export HOME="$TEST_ROOT/home"
 
 # Interruption at the first instruction after Treehouse reports a successful
 # lease must use the pre-acquisition journal to return that exact lease and
@@ -775,6 +1267,7 @@ swap_holder="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["
   "return --force --if-lease-id lease-dispatch-1 --if-lease-holder $swap_holder $TEST_ROOT/treehouse-swap-checkout" ]]
 mv "$(dirname "$swap_record")" "$TEST_ROOT/treehouse-checkout-swap-state"
 rm "$TEST_ROOT/repo/treehouse.toml"
+export HOME="$ORIGINAL_HOME"
 
 for agent in goose claude; do
   PATH="$TEST_ROOT/fake-bin:$PATH" TMUX_LOG="$TEST_ROOT/$agent.log" \
