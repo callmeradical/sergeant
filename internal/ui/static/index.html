@@ -57,6 +57,7 @@
     <!-- Dispatch Stage CTA & Global Actions -->
     <div class="flex items-center space-x-3">
       <div class="flex items-center space-x-2 text-[#8b949e] text-xs">
+        <button type="button" id="btn-open-analytics" onclick="openAnalyticsDrawer(this)" aria-label="Work analytics" title="Work analytics" class="min-w-[44px] min-h-[44px] flex items-center justify-center hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14] rounded"><i class="fa-solid fa-chart-line"></i></button>
         <button onclick="fetchRuns(); fetchFleet();" aria-label="Refresh state" title="Refresh state" class="min-w-[44px] min-h-[44px] flex items-center justify-center hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14] rounded"><i class="fa-solid fa-rotate-right"></i></button>
       </div>
     </div>
@@ -189,10 +190,6 @@
         class="truncate rounded px-1 -mx-1 hover:text-white hover:bg-[#161b22] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
         Workers <span id="stat-workers-active" class="text-slate-300 font-bold">0</span>
       </button>
-      <button type="button" id="btn-open-analytics" onclick="openAnalyticsDrawer(this)"
-        class="truncate rounded px-1 -mx-1 hover:text-white hover:bg-[#161b22] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-        Work analytics
-      </button>
     </div>
     <div class="flex items-center gap-3 shrink-0">
       <span id="last-updated">&mdash;</span>
@@ -234,9 +231,9 @@
           class="min-w-[28px] min-h-[28px] flex items-center justify-center rounded text-[#8b949e] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
           <i class="fa-solid fa-plus text-[10px]" aria-hidden="true"></i>
         </button>
-        <button type="button" id="terminal-drawer-close" onclick="closeTerminalDrawer()" aria-label="Hide terminal drawer" title="Hide terminal drawer (sessions stay running)"
+        <button type="button" id="terminal-drawer-close" onclick="closeTerminalDrawer()" aria-label="Minimize terminal" title="Minimize terminal (sessions keep running)"
           class="min-w-[28px] min-h-[28px] flex items-center justify-center rounded text-[#8b949e] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff]">
-          <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+          <i class="fa-solid fa-window-minimize" aria-hidden="true"></i>
         </button>
       </div>
     </div>
@@ -873,6 +870,19 @@
       (phases || []).forEach(p => drawerPhaseIndex.set(drawerKey(p.kind, p.name), p));
     }
 
+    // detail-drawer and terminal-drawer are both non-modal and can be open
+    // at once; whichever the operator most recently opened should render on
+    // top of the other, not whichever happens to be later in the DOM (both
+    // shared a single fixed z-40 before this, so which one visually won was
+    // arbitrary DOM order, not operator intent).
+    function bringDrawerToFront(id) {
+      const front = document.getElementById(id);
+      const otherId = id === 'detail-drawer' ? 'terminal-drawer' : 'detail-drawer';
+      const other = document.getElementById(otherId);
+      if (front) front.style.zIndex = '41';
+      if (other) other.style.zIndex = '40';
+    }
+
     function openDrawer(title, kind, bodyHTML, opener) {
       const d = document.getElementById('detail-drawer');
       document.getElementById('drawer-title').textContent = title;
@@ -881,6 +891,7 @@
       d.setAttribute('aria-hidden', 'false');
       d.removeAttribute('inert');
       d.classList.remove('translate-x-full');
+      bringDrawerToFront('detail-drawer');
       drawerOpener = opener || document.activeElement;
       setTimeout(() => document.getElementById('drawer-close').focus(), 60);
     }
@@ -914,6 +925,7 @@
       d.setAttribute('aria-hidden', 'false');
       d.removeAttribute('inert');
       d.classList.remove('translate-y-full');
+      bringDrawerToFront('terminal-drawer');
       if (activeTermId) {
         const sess = termSessions.get(activeTermId);
         if (sess) setTimeout(() => { sess.fitAddon.fit(); sess.term.focus(); }, 60);
@@ -934,6 +946,26 @@
       const open = document.getElementById('terminal-drawer').getAttribute('aria-hidden') === 'false';
       if (open) closeTerminalDrawer(); else openTerminalDrawer();
     }
+
+    function terminalDrawerIsOpen() {
+      return document.getElementById('terminal-drawer').getAttribute('aria-hidden') === 'false';
+    }
+
+    // Clicking outside both non-modal drawers closes whichever of them are
+    // open — minimizing the terminal (sessions keep running) and hiding the
+    // detail drawer, same as their own explicit close/minimize controls.
+    // Registered on the CAPTURE phase so it runs before the click's own
+    // target handler (e.g. a footer button's onclick that opens a drawer):
+    // checking "is it open" before this click's own action mutates
+    // anything is what stops a click that OPENS a drawer from immediately
+    // reading as "outside" it and re-closing it in the same event.
+    // Clicking inside either drawer never closes anything here — only a
+    // click that lands outside both counts as "outside".
+    document.addEventListener('click', (e) => {
+      if (e.target.closest('#detail-drawer') || e.target.closest('#terminal-drawer')) return;
+      if (drawerIsOpen()) closeDrawer();
+      if (terminalDrawerIsOpen()) closeTerminalDrawer();
+    }, true);
 
     // startTerminalSession creates a new PTY-backed session and opens it in
     // the drawer. opts.bulletId, when given, is the "resolve in worktree"
@@ -961,6 +993,29 @@
       const info = await res.json();
       createTermSession(info);
       openTerminalDrawer();
+    }
+
+    // Reconnects to sessions still alive server-side from before a page
+    // reload. The PTYs behind them survive a browser refresh (nothing kills
+    // a session just because its WebSocket disconnected — see terminal.go's
+    // handleTerminalSocket), so without this a reload would silently strand
+    // real, running shells with no way back to them.
+    //
+    // Deliberately does not open the drawer — reconnecting must not
+    // surprise the operator by popping it open on every reload. Restored
+    // sessions are one click away via the footer's Terminal button, same as
+    // any other minimized session.
+    async function reconnectTerminalSessions() {
+      let sessions;
+      try {
+        const res = await fetch('/api/terminal-sessions');
+        if (!res.ok) return;
+        sessions = await res.json();
+      } catch (err) {
+        return; // best-effort; a fresh terminal is still one click away
+      }
+      if (!Array.isArray(sessions)) return;
+      sessions.forEach(info => createTermSession(info));
     }
 
     function createTermSession(info) {
@@ -1081,6 +1136,13 @@
         if (!next.done) activateTermSession(next.value);
       }
       renderTermTabs();
+
+      // Killing the last session must not leave the drawer open showing an
+      // empty tab bar and an empty pane — close it the same as if the
+      // operator had minimized it. Sessions keep running when merely
+      // minimized (closeTerminalDrawer's own contract); this path has none
+      // left to keep running.
+      if (termSessions.size === 0) closeTerminalDrawer();
     }
 
     window.addEventListener('resize', () => {
@@ -2232,6 +2294,7 @@
     fetchRuns();
     fetchFleet();
     subscribeToStream();
+    reconnectTerminalSessions();
   </script>
 </body>
 </html>
