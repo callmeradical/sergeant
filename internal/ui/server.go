@@ -55,6 +55,10 @@ type Server struct {
 	// fleet owns fleet worktree views and reclaim decisions (see fleet.go). It
 	// depends on fleetRunSource rather than *store.Store directly.
 	fleet *fleetCleaner
+
+	// delivery owns delivery reporting (see delivery.go). It depends on
+	// runGetter rather than *store.Store directly.
+	delivery *deliveryReporter
 }
 
 func (srv *Server) registerRun(runID string, cancel context.CancelFunc) {
@@ -117,6 +121,7 @@ func NewServer(s *store.Store, port int) *Server {
 		cancels:    map[string]context.CancelFunc{},
 		GHPRCreate: runGHPRCreate,
 		fleet:      newFleetCleaner(s),
+		delivery:   newDeliveryReporter(s),
 	}
 }
 
@@ -322,31 +327,6 @@ func (srv *Server) handleRunDetails(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
-}
-
-func resolveGitRemoteURL(repoDir string) string {
-	if strings.HasPrefix(repoDir, "~/") {
-		home, _ := os.UserHomeDir()
-		repoDir = filepath.Join(home, repoDir[2:])
-	}
-	cmd := exec.Command("git", "-C", repoDir, "config", "--get", "remote.origin.url")
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	raw := strings.TrimSpace(string(out))
-	if strings.HasPrefix(raw, "git@github.com:") {
-		raw = strings.TrimPrefix(raw, "git@github.com:")
-		raw = strings.TrimSuffix(raw, ".git")
-		return "https://github.com/" + raw
-	}
-	if strings.HasPrefix(raw, "https://github.com/") {
-		return strings.TrimSuffix(raw, ".git")
-	}
-	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
-		return strings.TrimSuffix(raw, ".git")
-	}
-	return ""
 }
 
 func (srv *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
@@ -1247,128 +1227,6 @@ func (srv *Server) respondWithExistingRun(
 
 // DeliveryReport describes what a run actually produced on disk. Every field is
 // observed, never assumed. It deliberately has no "pr_url" unless a PR exists.
-type DeliveryReport struct {
-	Repo       string   `json:"repo"`
-	Worktree   string   `json:"worktree"`
-	Branch     string   `json:"branch"`
-	Commits    int      `json:"commits"`
-	Dirty      bool     `json:"dirty"`
-	Pushed     bool     `json:"pushed"`
-	RemoteBase string   `json:"remote_base,omitempty"`
-	CompareURL string   `json:"compare_url,omitempty"`
-	Summary    string   `json:"summary"`
-	Artifacts  []string `json:"artifacts"`
-	ReadyForPR bool     `json:"ready_for_pr"`
-}
-
-func gitOut(dir string, args ...string) string {
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
-
-// describeDelivery inspects the run's isolated worktree and reports its real state.
-// It never claims a pull request exists; opening one is an explicit human action
-// through /api/create-pr.
-func (srv *Server) describeDelivery(proj *config.Project, runID string) DeliveryReport {
-	branch := ""
-	if run, err := srv.Store.GetRun(runID); err == nil {
-		branch = naming.BranchNameForRun(run.ID, run.Type, run.ChangeID)
-	}
-
-	// Report on the first repo that actually produced a worktree for this run.
-	for repoName, rCfg := range proj.Repos {
-		wt := dag.FleetDir(runID, repoName)
-		if _, err := os.Stat(wt); err != nil {
-			continue
-		}
-
-		rep := DeliveryReport{Repo: repoName, Worktree: wt, Branch: branch}
-		rep.Dirty = gitOut(wt, "status", "--porcelain") != ""
-		if n := gitOut(wt, "rev-list", "--count", "HEAD", "^"+defaultBase(wt)); n != "" {
-			fmt.Sscanf(n, "%d", &rep.Commits)
-		}
-		rep.Pushed = gitOut(wt, "rev-parse", "--verify", "origin/"+branch) != ""
-		rep.RemoteBase = resolveGitRemoteURL(expandHome(rCfg.Path))
-		if rep.RemoteBase != "" && rep.Pushed {
-			rep.CompareURL = fmt.Sprintf("%s/compare/%s?expand=1", rep.RemoteBase, branch)
-		}
-
-		switch {
-		case rep.Commits == 0 && rep.Dirty:
-			rep.Summary = fmt.Sprintf("Uncommitted changes in worktree for %s — nothing committed yet", repoName)
-		case rep.Commits == 0:
-			rep.Summary = fmt.Sprintf("Run completed with no changes to %s", repoName)
-		case !rep.Pushed:
-			rep.Summary = fmt.Sprintf("%d commit(s) on %s in an isolated worktree — not pushed", rep.Commits, branch)
-			rep.ReadyForPR = true
-		default:
-			rep.Summary = fmt.Sprintf("%d commit(s) pushed to %s — ready to open a PR", rep.Commits, branch)
-			rep.ReadyForPR = true
-		}
-
-		rep.Artifacts = []string{wt}
-		if rep.CompareURL != "" {
-			rep.Artifacts = append(rep.Artifacts, rep.CompareURL)
-		}
-		return rep
-	}
-
-	return DeliveryReport{
-		Repo:      proj.Name,
-		Branch:    branch,
-		Summary:   "Run completed but produced no isolated worktree",
-		Artifacts: []string{},
-	}
-}
-
-// defaultBase resolves the branch a run should be diffed against.
-func defaultBase(dir string) string {
-	if ref := gitOut(dir, "symbolic-ref", "refs/remotes/origin/HEAD"); ref != "" {
-		return strings.TrimPrefix(ref, "refs/remotes/")
-	}
-	for _, c := range []string{"origin/main", "origin/master", "main", "master"} {
-		if gitOut(dir, "rev-parse", "--verify", c) != "" {
-			return c
-		}
-	}
-	return "HEAD"
-}
-
-func expandHome(p string) string {
-	if strings.HasPrefix(p, "~/") {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, p[2:])
-	}
-	return p
-}
-
-// dirtyWorktreesUnder returns the names of per-repo worktrees beneath a run's
-// fleet directory that still contain uncommitted changes.
-func dirtyWorktreesUnder(runDir string) []string {
-	entries, err := os.ReadDir(runDir)
-	if err != nil {
-		return nil
-	}
-	var dirty []string
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		repoWT := filepath.Join(runDir, e.Name())
-		if gitOut(repoWT, "rev-parse", "--git-dir") == "" {
-			continue // not a worktree
-		}
-		if gitOut(repoWT, "status", "--porcelain") != "" {
-			dirty = append(dirty, e.Name())
-		}
-	}
-	return dirty
-}
-
 // firstLine trims a brief down to a usable commit subject.
 func firstLine(s string) string {
 	s = strings.TrimSpace(s)
@@ -1690,7 +1548,7 @@ func (srv *Server) executeRun(
 	// Delivery. This reports what actually happened on disk. It does NOT claim a
 	// pull request exists — nothing in this path pushes a branch or calls the
 	// GitHub API. Opening the PR is an explicit human action via /api/create-pr.
-	delivery := srv.describeDelivery(proj, taskID)
+	delivery := srv.delivery.describeDelivery(proj, taskID)
 	deliveryNow := time.Now().UTC()
 	_ = srv.Store.RecordEnvelope(&store.EnvelopeRecord{
 		ID:            fmt.Sprintf("delivery-%s-%d", taskID, deliveryNow.UnixNano()),
