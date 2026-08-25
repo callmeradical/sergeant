@@ -1423,5 +1423,81 @@ a{color:var(--muted)}
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
+<header>
+  <h1>Sergeant v2</h1>
+  <p>Independent review. Written by the critic, not the builder.</p>
+  <p class="meta">
+    Review 031 · 2026-08-25 · branch <code>v2</code> · merge commit <code>0065a2f</code>
+    ("merge: v2-native-skills-and-docs", merge of <code>a5bc085</code>
+    "docs: rewrite v2-native skills and docs (v2-native-skills-and-docs)" into
+    <code>dd53b52</code>) reviewed against
+    <code>openspec/changes/v2-native-skills-and-docs/{proposal,design,tasks}.md</code>,
+    <code>specs/v2-native-docs/spec.md</code>, and the originating
+    <code>docs/prd-v2-native-skills-and-docs.md</code> · current <code>v2</code> HEAD is
+    <code>0065a2f</code>; build/test run at that HEAD
+  </p>
+</header>
+
+<section>
+  <h2>Current status</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code>, no output</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">clean except named environmental failures</span></div><div class="small"><code>go test ./internal/... -count=1</code> with the prescribed <code>-skip</code>: all 12 packages pass — zero accidental code impact from what is a pure docs/test-assertion change</div></div>
+    <div class="card"><div class="label">Dead-command grep</div><div class="value"><span class="status">zero hits</span></div><div class="small"><code>grep -rn 'sgt-dispatch\|sgt-watch\|sgt-notify\|sgt-td-\|sgt-graphify\|sgt-sync\|sgt-dag-run\|sgt-list\|sgt-context' skills/ .agents/skills/to-tickets/ docs/troubleshooting.md schema/project.yaml.example</code> — no matches in any of the eight touched files</div></div>
+    <div class="card"><div class="label">instruction-policy-test.sh</div><div class="value"><span class="status">byte-identical baseline</span></div><div class="small">exactly 15 <code>FAIL:</code> lines, all naming <code>AGENTS.md</code> (<code>## Procedural skills</code>, <code>.sergeant-intent.md</code>, <code>td context &lt;id&gt; --work-dir &lt;owning-repo-path&gt;</code>, etc.) — none about the eight files this change touched; matches design.md's stated pre-existing baseline exactly</div></div>
+    <div class="card"><div class="label">Scope</div><div class="value"><span class="status">exactly the 9 named files</span></div><div class="small"><code>git show --stat 0065a2f</code>: the five banner-carrying <code>skills/*/SKILL.md</code> files, <code>.agents/skills/to-tickets/SKILL.md</code>, <code>docs/troubleshooting.md</code>, <code>schema/project.yaml.example</code>, and <code>tests/instruction-policy-test.sh</code> — nothing else; no historical/dated docs touched</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Content verification against design.md</h2>
+  <table>
+    <tr><th>File</th><th>Check</th><th>Result</th></tr>
+    <tr><td><code>skills/dispatch/SKILL.md</code></td><td>Banner removed; <code>POST /api/dispatch</code> body fields (<code>project, brief, repos, agent, type, change_id, request_id</code>) read against <code>handleDispatch</code>'s actual anonymous request struct (<code>internal/ui/server.go:989-1008</code>)</td><td>fields match exactly, including field-by-field decision citations (O2, O3, D10)</td></tr>
+    <tr><td><code>skills/dispatch/SKILL.md</code></td><td><code>POST /api/run-resume</code> body (<code>{"id": ...}</code>) against <code>handleRunResume</code> (<code>server.go:1759-1799</code>)</td><td>body shape matches; <strong>but</strong> the skill's step 4 and its troubleshooting table both state run-resume "resumes a <code>failed</code>, <code>blocked</code>, <code>cancelled</code>, <code>timed_out</code>, or <code>interrupted</code> run" — the real <code>ResumableStatuses</code> (<code>internal/ui/bulletstate.go:93</code>) is <code>{"failed", "cancelled", "timed_out", "interrupted"}</code>, with no <code>"blocked"</code>; <code>"blocked"</code> is exclusively a bullet status (<code>store.go:157</code>), never a run status — the same file's own Step 3 correctly says so ("<code>blocked</code> is a bullet status, not a run status"), directly contradicting Step 4's claim two paragraphs later</td></tr>
+    <tr><td><code>.agents/skills/to-tickets/SKILL.md</code></td><td>States the D4 read-only-export gap rather than inventing a v2 task-creation command</td><td>confirmed by direct reading: §5 "Task tracking is a stated gap, not a publish step" states plainly no <code>sgt-td-create</code>/<code>td create</code> equivalent exists; no invented command found</td></tr>
+    <tr><td>All five banner-carrying skills</td><td>"V1 ONLY — DO NOT FOLLOW" banner removed, replaced with real v2 procedure</td><td>confirmed absent in all five; each file's body describes the real <code>POST /api/*</code> surface, not a placeholder</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Verdict</h2>
+  <div class="item warn">
+    <p><strong>MEETS SPEC WITH CAVEATS.</strong> Every scenario in <code>specs/v2-native-docs/spec.md</code>
+    is satisfied by direct grep/read against the real files: no touched file references a deleted
+    <code>bin/sgt-*</code> command, <code>skills/dispatch/SKILL.md</code> names the real
+    <code>POST /api/dispatch</code> and <code>POST /api/run-resume</code> routes,
+    <code>.agents/skills/to-tickets/SKILL.md</code> states the D4 read-only-export gap explicitly rather
+    than inventing a command, and <code>tests/instruction-policy-test.sh</code>'s failure set is
+    byte-identical to the documented 15-failure <code>AGENTS.md</code> baseline before and after. Build
+    and the full <code>internal/...</code> suite are clean, confirming zero accidental code impact. Scope
+    is exactly the nine files named in tasks.md — no historical document or unrelated file touched.</p>
+    <p><strong>Caveat:</strong> <code>skills/dispatch/SKILL.md</code> Step 4 and its troubleshooting table
+    both claim <code>POST /api/run-resume</code> can resume a "<code>blocked</code>" run. The real
+    <code>ResumableStatuses</code> (<code>internal/ui/bulletstate.go:93</code>) is
+    <code>{"failed", "cancelled", "timed_out", "interrupted"}</code> — <code>"blocked"</code> is never a
+    run status (it is a bullet-only status per <code>internal/store/store.go:157</code>), and the same
+    skill file's own Step 3 says exactly that two paragraphs earlier ("<code>blocked</code> is a bullet
+    status, not a run status"). This is a genuine factual inaccuracy and a self-contradiction within one
+    rewritten file, not a hypothetical — a reader who takes Step 4 literally would call
+    <code>run-resume</code> on a run whose bullet is blocked but whose run status is something else
+    (most likely still <code>running</code>, per Step 3's own description), and the call would fail with
+    a 409 for a reason the doc doesn't anticipate. Everything else spot-checked against
+    <code>internal/ui/server.go</code>'s real handlers matches exactly.</p>
+  </div>
+</section>
+
+<footer>
+  <p class="meta">Review 031 · findings above are reproduced from commands run directly against the
+  current <code>v2</code> working tree at HEAD <code>0065a2f</code>, against the merge commit and its
+  sole implementation commit <code>a5bc085</code>. All eight touched skill/doc/schema files were read in
+  full, not sampled; the dead-command grep and the instruction-policy-test.sh baseline comparison were
+  run directly rather than trusted from the merge commit message. The <code>POST /api/dispatch</code> and
+  <code>POST /api/run-resume</code> request bodies were checked against the real Go structs in
+  <code>internal/ui/server.go</code>, which surfaced the run-resume "blocked" caveat above. Reviews 030
+  and earlier were not re-examined; they stand as recorded above.</p>
+  <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
+</footer>
+
 </main></body>
 </html>
