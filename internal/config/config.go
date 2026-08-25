@@ -23,6 +23,12 @@ type Project struct {
 	// that is nil, distinguishable from a project that declared an empty
 	// block.
 	Graphify *Graphify `yaml:"graphify,omitempty" json:"graphify"`
+	// Export declares an optional read-only task-tracking export target for
+	// this project (task-tracking-is-a-readonly-export). A pointer, following
+	// Graphify exactly, so a project that declares no export: block has one
+	// that is nil, distinguishable from a project that declared an empty
+	// block.
+	Export *Export `yaml:"export,omitempty" json:"export"`
 }
 
 // Graphify declares a project's cross-repository code graph: which repos
@@ -40,6 +46,16 @@ type Graphify struct {
 	// number of segments), applied by BuildProjectGraph after merge and
 	// before publish.
 	ExcludePatterns []string `yaml:"exclude_patterns,omitempty" json:"exclude_patterns"`
+}
+
+// Export declares an optional read-only task-tracking export target for a
+// project. A nil pointer (no export: block) is distinguished from an empty
+// one the same way Graphify already is.
+type Export struct {
+	// Backend names which internal/export.Target implementation to construct.
+	// The registry of valid names is an implementation decision for whoever
+	// adds the first Target, not fixed here.
+	Backend string `yaml:"backend" json:"backend"`
 }
 
 // ProjectDefaults defines shared settings across repos.

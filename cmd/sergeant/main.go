@@ -159,9 +159,31 @@ func startUI() {
 	}
 	defer st.Close()
 
+	startExportRunners(st)
+
 	server := ui.NewServer(st, 8484)
 	if err := server.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// startExportRunners is the wiring point for internal/export.Runner: once a
+// Target implementation exists, this starts one Runner per project with an
+// Export block configured, in a goroutine alongside the HTTP server. No
+// Target implementation exists yet — which backend name resolves to which
+// Target is a separate, later decision — so today this only reports a
+// configured project rather than silently ignoring it.
+func startExportRunners(st *store.Store) {
+	projects, err := config.ListProjects()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "export: listing projects: %v\n", err)
+		return
+	}
+	for _, proj := range projects {
+		if proj.Export == nil {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "export: project %q configures backend %q, but no export target implementation is registered yet; skipping\n", proj.Name, proj.Export.Backend)
 	}
 }
