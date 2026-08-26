@@ -81,6 +81,11 @@ machine-wide picture by polling the same shared files.
    an explicit client-side change to speak the shared-server transport,
    rather than relying solely on a compatibility shim to paper over the
    difference.
+8. The shared server bounds concurrent script-execution concurrency
+   (independent of how many clients are merely connected) so that many
+   simultaneously connected clients firing tool calls at once cannot grow
+   process/CPU usage unboundedly; there is no separate cap on the number of
+   connected client sessions themselves, since a session alone is cheap.
 
 ## Non-Goals
 
@@ -127,6 +132,8 @@ machine-wide picture by polling the same shared files.
 - Regression coverage for concurrent tool calls from multiple simulated
   clients against the shared server, including at least one call that shells
   out to the same SQLite-backed store from two overlapping calls.
+- Concurrent script-execution is bounded independently of connected-client
+  count; there is no separate cap on connected sessions themselves.
 
 ## Settled Decisions
 
@@ -182,16 +189,27 @@ machine-wide picture by polling the same shared files.
      is gated behind `SGT_TEST_HOOKS=1` and used only by this repo's own test
      fixtures; no normal interactive-agent instance sets these.
 
+6. **Connection ceiling: bound concurrent execution, not connection count.**
+   A connected client session itself is cheap — bookkeeping only, no
+   persistent per-client OS resource — so there is no need for a hard cap on
+   the number of simultaneously connected clients, and "connection pooling"
+   in the traditional sense (reusing a limited set of persistent downstream
+   connections) does not map cleanly onto this server: nothing today holds a
+   persistent downstream connection to pool. The actual scarce resource is
+   concurrent *script execution* — every tool call execs a real OS process —
+   which today is implicitly bounded to one at a time per client only
+   because each client has its own private server. Once shared, N clients
+   could fire tool calls concurrently against the one shared process, so the
+   shared server must bound concurrent script-execution concurrency
+   (independent of how many clients are merely connected), sized to the
+   machine's own capacity rather than growing unbounded with client count.
+   The SQLite-backed store already has its own busy-timeout for concurrent
+   access and needs no additional pooling layer on top. The exact bound
+   (a fixed concurrency limit, one scaled to CPU count, or something else)
+   is OpenSpec's job, not this PRD's.
+
 ## Open Questions
 
-1. Is there a maximum number of concurrent connected clients the shared
-   server needs to support, or any per-client resource ceiling, to bound the
-   shared process's own footprint? Connection pooling (bounding/reusing a
-   limited set of concurrent sessions or downstream resource handles, e.g.
-   for the SQLite-backed store, rather than growing unbounded with client
-   count) is worth evaluating here, but given the server's per-call cost is
-   dominated by exec-ing a short-lived script rather than a persistent
-   per-client resource, whether pooling is the right mechanism (versus a
-   simple concurrent-session cap) should be resolved once real concurrent-load
-   numbers exist — leaving this to OpenSpec-level design rather than
-   prescribing the mechanism here.
+None outstanding for this PRD; remaining implementation choices (exact
+discovery socket/lock format, transport library wiring, concurrency-limit
+formula) are OpenSpec's job.
