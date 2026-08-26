@@ -119,7 +119,7 @@ Description: $DESCRIPTION
 Originating intent: $INTENT
 
 Deduplication key: $marker"
-title="no-mistakes: $DESCRIPTION"
+title="$(_sgt_td_title "no-mistakes: " "$DESCRIPTION")"
 
 existing_json="$(td list --all --search "$marker" --json --work-dir "$repo_path")"
 existing_match="$(printf '%s' "$existing_json" | python3 -c '

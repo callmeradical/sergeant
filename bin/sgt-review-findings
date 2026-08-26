@@ -800,7 +800,7 @@ PY
     printf '%s: td %s deduplicated%s; remediation: %s\n' \
       "$finding_id" "$task_id" "$reopen_note" "$recommendation"
   else
-    result="$(td create "review: $summary" --type task --priority "$priority" \
+    result="$(td create "$(_sgt_td_title "review: " "$summary")" --type task --priority "$priority" \
       --labels independent-review,finding,"$AXIS" --description "$body" \
       --work-dir "$repo_path" --json 2>/dev/null)" || _routing_failure "failed to create td task"
     task_id="$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' 2>/dev/null)" \

@@ -557,6 +557,28 @@ _sgt_wiki_write() {
 _require_yq() {
   command -v yq &>/dev/null || _die "yq is required: brew install yq"
 }
+
+# _sgt_td_title <prefix> <text> — builds a td task title as "<prefix><text>",
+# truncated so the whole title never exceeds td's 200-character limit.
+# Callers' own field-parsing limits (e.g. a 240-char summary cap) are
+# independent of and can legitimately exceed td's own limit once a prefix is
+# added, so this is a second, separate bound applied only to the title —
+# never to a task's stored body/description, which must keep the caller's
+# full text regardless of what the title has to truncate (Deloitte support
+# #34, #40: a title-length failure previously left routing permanently
+# blocked, since a retained retry artifact replayed the same overlong text
+# on every retry with nothing to shorten it).
+_sgt_td_title() {
+  local prefix="$1" text="$2" limit=200
+  local budget=$(( limit - ${#prefix} ))
+  if [[ ${#text} -le $budget ]]; then
+    printf '%s%s\n' "$prefix" "$text"
+    return
+  fi
+  local ellipsis="..."
+  local keep=$(( budget - ${#ellipsis} ))
+  printf '%s%s%s\n' "$prefix" "${text:0:keep}" "$ellipsis"
+}
 _require_tmux() {
   command -v tmux &>/dev/null || _die "tmux is required: brew install tmux"
 }
