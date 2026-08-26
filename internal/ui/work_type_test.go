@@ -323,9 +323,9 @@ func TestDispatchedBranchIsNamedByItsTypeAndChange(t *testing.T) {
 }
 
 // Scenario: Pull-request creation targets the same branch that was created —
-// a seam recording what branch gh was invoked against, matching this
-// project's established pattern (Server.GHPRCreate) for verifying gh call
-// arguments.
+// a seam recording what branch the provider's Create was invoked against,
+// matching this project's established pattern (formerly Server.GHPRCreate,
+// now the changerequest provider seam) for verifying gh call arguments.
 func TestCreatePRTargetsTheExactBranchThatWasCreated(t *testing.T) {
 	srv, st, repoPath := gitDispatchFixtureStandaloneServer(t)
 	mux := srv.Handler()
@@ -333,8 +333,8 @@ func TestCreatePRTargetsTheExactBranchThatWasCreated(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repoPath, "openspec", "changes", changeID), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// A remote is required for handleCreatePR to actually invoke GHPRCreate
-	// rather than fall back to a "local://worktree/<branch>" URL.
+	// A remote is required for handleCreatePR to actually invoke the
+	// provider's Create rather than fall back to a "local://worktree/<branch>" URL.
 	if out, err := exec.Command("git", "-C", repoPath, "remote", "add", "origin",
 		"https://github.com/example/repo.git").CombinedOutput(); err != nil {
 		t.Fatalf("adding remote: %v: %s", err, out)
@@ -367,11 +367,8 @@ func TestCreatePRTargetsTheExactBranchThatWasCreated(t *testing.T) {
 	// run, before relying on create-pr's green guard clearing.
 	waitForBulletStatus(t, st, run.IntentID, "green")
 
-	var capturedBranch string
-	srv.GHPRCreate = func(repoPath, title, body, branch string) ([]byte, error) {
-		capturedBranch = branch
-		return []byte("https://github.com/example/repo/pull/1"), nil
-	}
+	fake := &fakeChangeRequestProvider{}
+	installFakeGitHubProvider(t, fake)
 
 	prBody := fmt.Sprintf(`{"run_id":%q,"project":"o3","repo":"svc","title":"t","body":"b"}`, resp.TaskID)
 	pw := postJSON(t, mux, "/api/create-pr", prBody)
@@ -380,8 +377,8 @@ func TestCreatePRTargetsTheExactBranchThatWasCreated(t *testing.T) {
 	}
 
 	want := naming.BranchName("fix", changeID)
-	if capturedBranch != want {
-		t.Errorf("gh pr create was invoked with branch %q, want %q (the branch actually created for this run)", capturedBranch, want)
+	if fake.lastHead != want {
+		t.Errorf("gh pr create was invoked with head %q, want %q (the branch actually created for this run)", fake.lastHead, want)
 	}
 	if !gitBranchExists(t, repoPath, want) {
 		t.Errorf("branch %q does not exist in the source repo %s", want, repoPath)

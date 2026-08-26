@@ -788,6 +788,17 @@
         setConnectionError(false);
         indexPhasesForDrawer(data.phases || []);
         activeRunSkips = data.resume_skips || [];
+        // Observed-change-request-merge-state: check every sealed bullet's
+        // real merge status on activation, not on a timer, so a just-observed
+        // merged/blocked transition shows up in this very render. Best-effort:
+        // a failure here (network error, no sealed bullets to check) must
+        // never block the rest of selectRun, matching bulletsForRun's own
+        // existing failure handling below.
+        try {
+          await fetch('/api/check-merge-status?run_id=' + encodeURIComponent(runId), { method: 'POST' });
+        } catch (mergeErr) {
+          console.error("Failed checking merge status:", mergeErr);
+        }
         renderWorkflowGraph(current, data.phases || []);
         renderActivity(data.envelopes || []);
         fetchDeliveryHistory(runId);

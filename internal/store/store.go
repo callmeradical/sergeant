@@ -60,10 +60,16 @@ type RunRecord struct {
 	// than a new request. Empty means the caller supplied none, and two runs that
 	// supplied none never deduplicate against each other: the absent case is
 	// stored as SQL NULL, which a unique index treats as distinct.
-	RequestID string    `json:"request_id,omitempty"`
-	Status    string    `json:"status"` // running, passed, failed
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	RequestID string `json:"request_id,omitempty"`
+	Status    string `json:"status"` // running, passed, failed
+	// BaseBranch is the branch the source repository was actually checked
+	// out on at the moment this run's worktree was first created, captured
+	// once by prepareWorktree and never overwritten on resume. Empty means
+	// the run predates this field (or its capture failed, e.g. a detached
+	// HEAD) — defaultBase falls back to its own guess in that case.
+	BaseBranch string    `json:"base_branch,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 type PhaseRecord struct {
@@ -469,6 +475,11 @@ func (s *Store) migrateAddColumns() error {
 		// rotation". Found by Review 036's critic.
 		{"retention_rollups", "cancelled_count", "ALTER TABLE retention_rollups ADD COLUMN cancelled_count INTEGER NOT NULL DEFAULT 0"},
 		{"retention_rollups", "interrupted_count", "ALTER TABLE retention_rollups ADD COLUMN interrupted_count INTEGER NOT NULL DEFAULT 0"},
+		// base_branch records the branch a run's worktree actually branched
+		// from (observed-change-request-merge-state); existing rows predate
+		// it and have nothing to backfill, so an empty value reads back as
+		// "unknown, guess" exactly like a run that never captured one.
+		{"runs", "base_branch", "ALTER TABLE runs ADD COLUMN base_branch TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, w := range wanted {
 		has, err := s.hasColumn(w.table, w.column)
@@ -660,9 +671,9 @@ func (s *Store) CreateRun(r *RunRecord) error {
 	// can store a variant this lookup would then miss.
 	r.RequestID = strings.TrimSpace(r.RequestID)
 	_, err := s.db.Exec(
-		`INSERT INTO runs (id, project, task_id, status, brief, change_id, type, intent_id, slug, request_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO runs (id, project, task_id, status, brief, change_id, type, intent_id, slug, request_id, base_branch, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.Project, r.TaskID, r.Status, r.Brief, r.ChangeID, r.Type, r.IntentID, r.Slug,
-		nullableText(r.RequestID), r.CreatedAt, r.UpdatedAt,
+		nullableText(r.RequestID), r.BaseBranch, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil && isDuplicateRequestID(err) {
 		// A refused key changed nothing, so nothing is appended to the sequence. A
@@ -760,6 +771,21 @@ func (s *Store) UpdateRunStatus(runID, status string) error {
 		"status":     status,
 		"terminal":   IsTerminalRunStatus(status),
 	})
+}
+
+// SetRunBaseBranch records the branch a run's worktree actually branched
+// from. Callers are responsible for the "only once" contract (see
+// dag.Engine.prepareWorktree's run.BaseBranch == "" guard) — this method
+// itself just writes what it is given.
+func (s *Store) SetRunBaseBranch(runID, branch string) error {
+	res, err := s.db.Exec(
+		`UPDATE runs SET base_branch = ?, updated_at = ? WHERE id = ?`,
+		branch, time.Now().UTC(), runID,
+	)
+	if err != nil {
+		return err
+	}
+	return requireOneRow(res, "run", runID)
 }
 
 // changedARow reports whether a statement actually modified something. A driver
@@ -1057,7 +1083,7 @@ func (s *Store) CausationFromLatest(runID, repo string) *string {
 // the same order.
 const runColumns = `id, project, task_id, status,
 	COALESCE(brief, ''), COALESCE(change_id, ''), COALESCE(type, ''), COALESCE(intent_id, ''), COALESCE(slug, ''),
-	COALESCE(request_id, ''), created_at, updated_at`
+	COALESCE(request_id, ''), COALESCE(base_branch, ''), created_at, updated_at`
 
 // rowScanner is satisfied by both *sql.Row and *sql.Rows, so a single-row lookup
 // and a listing share one run-scanning helper instead of each maintaining its own
@@ -1071,7 +1097,7 @@ func scanRun(row rowScanner) (RunRecord, error) {
 	err := row.Scan(
 		&r.ID, &r.Project, &r.TaskID, &r.Status,
 		&r.Brief, &r.ChangeID, &r.Type, &r.IntentID, &r.Slug,
-		&r.RequestID, &r.CreatedAt, &r.UpdatedAt,
+		&r.RequestID, &r.BaseBranch, &r.CreatedAt, &r.UpdatedAt,
 	)
 	return r, err
 }
@@ -1467,6 +1493,28 @@ func (s *Store) UpdateBulletStatus(bulletID, status string) error {
 	})
 }
 
+// SetBulletPRURL records the URL of a change request opened for a sealed
+// bullet — the durable field a bullet reads back afterward, not only the
+// evidence written into a pr.staged envelope. Reports an error when no
+// bullet has that id, the same convention UpdateBulletStatus follows.
+func (s *Store) SetBulletPRURL(bulletID, url string) error {
+	res, err := s.db.Exec(
+		`UPDATE bullets SET pr_url = ?, updated_at = ? WHERE id = ?`,
+		url, time.Now().UTC(), bulletID,
+	)
+	if err != nil {
+		return err
+	}
+	if err := requireOneRow(res, "bullet", bulletID); err != nil {
+		return err
+	}
+	return s.recordTransition(ChannelBullet, bulletID, map[string]interface{}{
+		"transition": "pr_url",
+		"id":         bulletID,
+		"pr_url":     url,
+	})
+}
+
 // AdvanceBulletsForRun moves every bullet the run carries to status, carrying
 // reason alongside it, then re-derives the run's intent from those bullets.
 // reason is only meaningful for "blocked" (BulletRecord.BlockedReason); every
@@ -1510,6 +1558,16 @@ func (s *Store) AdvanceBulletsForRun(runID, status, reason string) error {
 
 	_, err = s.RecomputeIntentStatus(run.IntentID)
 	return err
+}
+
+// AdvanceBulletStatus moves a single bullet to status, carrying reason
+// alongside it (meaningful only for "blocked", the same convention
+// AdvanceBulletsForRun's reason parameter already follows). It is the
+// single-bullet counterpart handleCheckMergeStatus needs: observing one
+// bullet's change-request merge state advances that one bullet, never
+// every bullet of the run's intent the way a run's terminal outcome does.
+func (s *Store) AdvanceBulletStatus(bulletID, status, reason string) error {
+	return s.updateBulletStatusAndReason(bulletID, status, reason)
 }
 
 // updateBulletStatusAndReason is AdvanceBulletsForRun's write path: unlike

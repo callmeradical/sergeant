@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -44,18 +45,16 @@ func bulletApprovalFixture(t *testing.T, bulletStatus string) (srv *Server, mux 
 
 // R3.5: a pull-request-creation request is refused when the target bullet is
 // not green, and — because approval must be required, not merely possible —
-// gh pr create must never run for a refused request. Recorded via
-// Server.GHPRCreate, not inferred from the HTTP status alone.
+// gh pr create must never run for a refused request. Recorded via the
+// changerequest provider seam, not inferred from the HTTP status alone.
 func TestCreatePRForNonGreenBulletIsRefusedAndNeverInvokesGH(t *testing.T) {
 	for _, status := range []string{"pending", "red", "sealed", "failed"} {
 		t.Run(status, func(t *testing.T) {
 			srv, mux, runID := bulletApprovalFixture(t, status)
+			_ = srv
 
-			ghCalls := 0
-			srv.GHPRCreate = func(repoPath, title, body, branch string) ([]byte, error) {
-				ghCalls++
-				return []byte("https://github.com/example/repo/pull/1"), nil
-			}
+			fake := &fakeChangeRequestProvider{}
+			installFakeGitHubProvider(t, fake)
 
 			body := fmt.Sprintf(`{"run_id":%q,"project":"ba","repo":"svc","title":"t","body":"b"}`, runID)
 			w := httptest.NewRecorder()
@@ -67,8 +66,8 @@ func TestCreatePRForNonGreenBulletIsRefusedAndNeverInvokesGH(t *testing.T) {
 			if !strings.Contains(w.Body.String(), status) {
 				t.Errorf("refusal does not name the bullet's actual status %q: %s", status, w.Body.String())
 			}
-			if ghCalls != 0 {
-				t.Errorf("gh pr create was invoked %d time(s) for a refused request, want 0", ghCalls)
+			if fake.createCalls != 0 {
+				t.Errorf("gh pr create was invoked %d time(s) for a refused request, want 0", fake.createCalls)
 			}
 		})
 	}
@@ -155,9 +154,11 @@ func TestCreatePRRedactsSecretsFromFailedGHOutput(t *testing.T) {
 	}
 
 	secret := "AKIAIOSFODNN7EXAMPLE"
-	srv.GHPRCreate = func(repoPath, title, body, branch string) ([]byte, error) {
-		return []byte("error: authentication failed for token " + secret), fmt.Errorf("exit status 1")
-	}
+	installFakeGitHubProvider(t, &fakeChangeRequestProvider{
+		createFn: func(ctx context.Context, repoPath, base, head, title, body string) (string, error) {
+			return "", fmt.Errorf("error: authentication failed for token %s", secret)
+		},
+	})
 
 	body := fmt.Sprintf(`{"run_id":%q,"project":%q,"repo":"svc","title":"t","body":"b"}`, runID, projPath)
 	w := httptest.NewRecorder()
