@@ -20,7 +20,13 @@ func gitOut(dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func resolveGitRemoteURL(repoDir string) string {
+// rawOriginRemote runs `git config --get remote.origin.url` in repoDir and
+// returns its untouched, trimmed output — or "" if there is no such
+// remote. Shared by resolveGitRemoteURL (which normalizes the result into
+// a browsable https://... URL) and handleCreatePR (which needs the raw
+// value, before any GitHub-specific normalization, to detect a
+// change-request provider from).
+func rawOriginRemote(repoDir string) string {
 	if strings.HasPrefix(repoDir, "~/") {
 		home, _ := os.UserHomeDir()
 		repoDir = filepath.Join(home, repoDir[2:])
@@ -30,7 +36,14 @@ func resolveGitRemoteURL(repoDir string) string {
 	if err != nil {
 		return ""
 	}
-	raw := strings.TrimSpace(string(out))
+	return strings.TrimSpace(string(out))
+}
+
+func resolveGitRemoteURL(repoDir string) string {
+	raw := rawOriginRemote(repoDir)
+	if raw == "" {
+		return ""
+	}
 	if strings.HasPrefix(raw, "git@github.com:") {
 		raw = strings.TrimPrefix(raw, "git@github.com:")
 		raw = strings.TrimSuffix(raw, ".git")
@@ -45,8 +58,15 @@ func resolveGitRemoteURL(repoDir string) string {
 	return ""
 }
 
-// defaultBase resolves the branch a run should be diffed against.
-func defaultBase(dir string) string {
+// defaultBase resolves the branch a run should be diffed against. recorded
+// is the run's own RunRecord.BaseBranch — the branch actually captured at
+// worktree-creation time — and short-circuits every guess below when
+// non-empty. A run predating that capture (recorded == "") falls back to
+// the original origin/HEAD / origin/main / main / master guess chain.
+func defaultBase(dir, recorded string) string {
+	if recorded != "" {
+		return recorded
+	}
 	if ref := gitOut(dir, "symbolic-ref", "refs/remotes/origin/HEAD"); ref != "" {
 		return strings.TrimPrefix(ref, "refs/remotes/")
 	}

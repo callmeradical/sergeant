@@ -7,13 +7,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os/exec"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/callmeradical/sergeant/internal/changerequest"
 	"github.com/callmeradical/sergeant/internal/config"
 	"github.com/callmeradical/sergeant/internal/graphify"
 	"github.com/callmeradical/sergeant/internal/naming"
@@ -28,14 +27,6 @@ var staticFS embed.FS
 type Server struct {
 	Store *store.Store
 	Port  int
-
-	// GHPRCreate invokes `gh pr create` for a PR-creation request. It is a
-	// struct field defaulting to runGHPRCreate's real subprocess, not a bare
-	// exec.Command call inside handleCreatePR, so a test can substitute a
-	// recording stub and prove gh was never invoked for a request the seal
-	// guard refused — the same swap-a-dependency shape PhaseRunner.AgentCLI
-	// uses for the agent binary.
-	GHPRCreate func(repoPath, title, body, branch string) ([]byte, error)
 
 	// RunShippingGate runs one shipping-gate command. It is a struct field
 	// defaulting to runner.RunShippingGate, not a bare call inside
@@ -125,22 +116,12 @@ func NewServer(s *store.Store, port int) *Server {
 		Store:           s,
 		Port:            port,
 		cancels:         map[string]context.CancelFunc{},
-		GHPRCreate:      runGHPRCreate,
 		RunShippingGate: runner.RunShippingGate,
 		fleet:           newFleetCleaner(s),
 		retention:       newRetentionRotator(s),
 		delivery:        newDeliveryReporter(s),
 		terminal:        newTerminalManager(),
 	}
-}
-
-// runGHPRCreate is the real `gh pr create` invocation. It is a plain function,
-// not inlined into handleCreatePR, so NewServer can hand it to Server.GHPRCreate
-// as the default while a test swaps in a recording stub instead.
-func runGHPRCreate(repoPath, title, body, branch string) ([]byte, error) {
-	cmd := exec.Command("gh", "pr", "create", "--title", title, "--body", body, "--head", branch)
-	cmd.Dir = repoPath
-	return cmd.CombinedOutput()
 }
 
 func (srv *Server) Handler() http.Handler {
@@ -159,6 +140,7 @@ func (srv *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/save-dag", srv.handleSaveDAG)
 	mux.HandleFunc("/api/dispatch", srv.handleDispatch)
 	mux.HandleFunc("/api/create-pr", srv.handleCreatePR)
+	mux.HandleFunc("/api/check-merge-status", srv.handleCheckMergeStatus)
 	mux.HandleFunc("/api/bullets", srv.handleBullets)
 	mux.HandleFunc("/api/plans", srv.handlePlans)
 	mux.HandleFunc("/api/plans/{intent_id}/approve", srv.handleApprovePlan)
@@ -440,8 +422,10 @@ func (srv *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 	}
 
 	remoteBase := ""
+	rawRemote := ""
 	if repoPath != "" {
 		remoteBase = resolveGitRemoteURL(repoPath)
+		rawRemote = rawOriginRemote(expandHome(repoPath))
 	}
 
 	run, err := srv.Store.GetRun(req.RunID)
@@ -458,9 +442,13 @@ func (srv *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 	// PR-creation response below: a shipping-gate outcome is bookkeeping on
 	// the intent, not a precondition for the seal or PR action that already
 	// succeeded.
+	var intentBullets []store.BulletRecord
 	if run.IntentID != "" {
-		if bullets, berr := srv.Store.ListBulletsForIntent(run.IntentID); berr == nil && store.AllBulletsSealedOrMerged(bullets) {
-			srv.evaluateShippingGate(r.Context(), proj, run.IntentID, bullets)
+		if bullets, berr := srv.Store.ListBulletsForIntent(run.IntentID); berr == nil {
+			intentBullets = bullets
+			if store.AllBulletsSealedOrMerged(bullets) {
+				srv.evaluateShippingGate(r.Context(), proj, run.IntentID, bullets)
+			}
 		}
 	}
 
@@ -472,20 +460,38 @@ func (srv *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 	var prURL string
 	var prError string
 
-	if repoPath != "" && remoteBase != "" {
-		// Attempt real gh pr create in git repo if remote exists
-		out, err := srv.GHPRCreate(repoPath, req.Title, req.Body, branch)
-		if err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), "https://") {
-			prURL = strings.TrimSpace(string(out))
+	switch {
+	case repoPath == "" || rawRemote == "":
+		prURL = fmt.Sprintf("local://worktree/%s", branch)
+	default:
+		// R7.5/observed-change-request-merge-state: the provider is detected
+		// from the repository's own remote, never configured. An unrecognized
+		// host is refused clearly, by name — the seal above already
+		// succeeded and is not reverted, but no change request is fabricated
+		// for a host with no registered provider.
+		providerName, perr := changerequest.DetectProvider(rawRemote)
+		if perr != nil {
+			http.Error(w, fmt.Sprintf("sealed, but no change request could be opened: %v", perr), http.StatusBadRequest)
+			return
+		}
+		provider := changerequest.Providers[providerName]
+		url, cerr := provider.Create(r.Context(), repoPath, run.BaseBranch, branch, req.Title, req.Body)
+		if cerr == nil {
+			prURL = url
+			for _, b := range intentBullets {
+				if b.Repo == req.Repo {
+					_ = srv.Store.SetBulletPRURL(b.ID, prURL)
+					break
+				}
+			}
 		} else {
-			// gh's own error output can echo back a credential-bearing remote
-			// URL or similar, and prError is persisted into an envelope and
-			// returned in the HTTP response, not just logged locally.
-			prError = redact.Text(strings.TrimSpace(string(out)))
+			// The provider's own error output can echo back a credential-
+			// bearing remote URL or similar, and prError is persisted into an
+			// envelope and returned in the HTTP response, not just logged
+			// locally.
+			prError = redact.Text(cerr.Error())
 			prURL = fmt.Sprintf("%s/compare/%s?expand=1", remoteBase, branch)
 		}
-	} else {
-		prURL = fmt.Sprintf("local://worktree/%s", branch)
 	}
 
 	summary := fmt.Sprintf("PR Staged: %s", req.Title)
@@ -518,6 +524,125 @@ func (srv *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 		"branch": branch,
 		"error":  prError,
 	})
+}
+
+// mergeCheckResult is one bullet's outcome from handleCheckMergeStatus —
+// either a new status (possibly unchanged from before the check) or an
+// error, never both silently dropped: a provider failure for one bullet is
+// reported here, not swallowed, and does not stop the rest of the run's
+// bullets from being checked.
+type mergeCheckResult struct {
+	BulletID string `json:"bullet_id"`
+	Repo     string `json:"repo"`
+	Status   string `json:"status,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// handleCheckMergeStatus is called when a run's pipeline view is activated
+// (index.html's selectRun), never on a timer (R7.5/
+// observed-change-request-merge-state — a background poll would call an
+// external host for every sealed bullet of every project, forever,
+// regardless of whether anyone is looking).
+//
+// For every sealed bullet of the named run with a recorded PRURL, it checks
+// the change request's real status through the provider seam:
+//   - merged into the run's recorded BaseBranch -> "merged"
+//   - merged into any other branch -> "blocked", with a reason naming both
+//     the expected and the actual branch
+//   - not yet merged -> left untouched at "sealed"
+//
+// A run with no sealed bullets carrying a PRURL triggers no provider call
+// at all — the loop below only reaches DetectProvider/Status for a bullet
+// that is both sealed and has one.
+func (srv *Server) handleCheckMergeStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	runID := r.URL.Query().Get("run_id")
+	if runID == "" {
+		http.Error(w, "run_id is required", http.StatusBadRequest)
+		return
+	}
+
+	run, err := srv.Store.GetRun(runID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("loading run %q: %v", runID, err), http.StatusInternalServerError)
+		return
+	}
+
+	results := []mergeCheckResult{}
+	if run.IntentID != "" {
+		if bullets, berr := srv.Store.ListBulletsForIntent(run.IntentID); berr == nil {
+			proj, _ := config.LoadProject(run.Project)
+			for _, b := range bullets {
+				if b.Status != "sealed" || b.PRURL == "" {
+					continue
+				}
+				results = append(results, srv.checkBulletMergeStatus(r.Context(), proj, run, b))
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"run_id":  runID,
+		"results": results,
+	})
+}
+
+// checkBulletMergeStatus checks and, if warranted, advances one sealed
+// bullet. Split out of handleCheckMergeStatus so one bullet's provider call
+// can never affect another's — each call here is independent and its own
+// error (if any) is captured on its own result, not returned to the caller.
+func (srv *Server) checkBulletMergeStatus(ctx context.Context, proj *config.Project, run *store.RunRecord, b store.BulletRecord) mergeCheckResult {
+	res := mergeCheckResult{BulletID: b.ID, Repo: b.Repo, Status: b.Status}
+
+	repoPath := ""
+	if proj != nil {
+		if rCfg, ok := proj.Repos[b.Repo]; ok {
+			repoPath = expandHome(rCfg.Path)
+		}
+	}
+	rawRemote := ""
+	if repoPath != "" {
+		rawRemote = rawOriginRemote(repoPath)
+	}
+	if rawRemote == "" {
+		res.Error = fmt.Sprintf("repo %q has no configured remote; cannot check merge status", b.Repo)
+		return res
+	}
+
+	providerName, perr := changerequest.DetectProvider(rawRemote)
+	if perr != nil {
+		res.Error = perr.Error()
+		return res
+	}
+	status, serr := changerequest.Providers[providerName].Status(ctx, repoPath, b.PRURL)
+	if serr != nil {
+		res.Error = serr.Error()
+		return res
+	}
+	if !status.Merged {
+		return res // not yet merged: left untouched at "sealed"
+	}
+
+	if status.MergedIntoBranch == run.BaseBranch {
+		if err := srv.Store.AdvanceBulletStatus(b.ID, "merged", ""); err != nil {
+			res.Error = err.Error()
+			return res
+		}
+		res.Status = "merged"
+		return res
+	}
+
+	reason := fmt.Sprintf("change request merged into %q, expected %q", status.MergedIntoBranch, run.BaseBranch)
+	if err := srv.Store.AdvanceBulletStatus(b.ID, "blocked", reason); err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	res.Status = "blocked"
+	res.Error = reason
+	return res
 }
 
 // evaluateShippingGate runs an intent's configured shipping gates and records

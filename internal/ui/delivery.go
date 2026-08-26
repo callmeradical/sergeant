@@ -51,8 +51,10 @@ func newDeliveryReporter(runs runGetter) *deliveryReporter {
 // through /api/create-pr.
 func (dr *deliveryReporter) describeDelivery(proj *config.Project, runID string) DeliveryReport {
 	branch := ""
+	baseBranch := ""
 	if run, err := dr.runs.GetRun(runID); err == nil {
 		branch = naming.BranchNameForRun(run.ID, run.Type, run.ChangeID)
+		baseBranch = run.BaseBranch
 	}
 
 	// Report on the first repo that actually produced a worktree for this run.
@@ -64,7 +66,7 @@ func (dr *deliveryReporter) describeDelivery(proj *config.Project, runID string)
 
 		rep := DeliveryReport{Repo: repoName, Worktree: wt, Branch: branch}
 		rep.Dirty = gitOut(wt, "status", "--porcelain") != ""
-		if n := gitOut(wt, "rev-list", "--count", "HEAD", "^"+defaultBase(wt)); n != "" {
+		if n := gitOut(wt, "rev-list", "--count", "HEAD", "^"+defaultBase(wt, baseBranch)); n != "" {
 			fmt.Sscanf(n, "%d", &rep.Commits)
 		}
 		rep.Pushed = gitOut(wt, "rev-parse", "--verify", "origin/"+branch) != ""

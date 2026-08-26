@@ -92,7 +92,7 @@ func postCreatePR(t *testing.T, mux http.Handler, runID, projPath string) *httpt
 // (specs/shipping-gate/spec.md). Proven via the recording seam around
 // Server.RunShippingGate — the same "did not invoke X" shape
 // TestCreatePRForNonGreenBulletIsRefusedAndNeverInvokesGH already uses for
-// GHPRCreate — not just by checking the final stored status.
+// the changerequest provider — not just by checking the final stored status.
 func TestCreatePRWithNoShippingGatesConfiguredRecordsAPassWithNoCommandRun(t *testing.T) {
 	srv, mux, runID, intentID, projPath := shippingGateFixture(t, nil)
 
@@ -101,9 +101,7 @@ func TestCreatePRWithNoShippingGatesConfiguredRecordsAPassWithNoCommandRun(t *te
 		gateCalls++
 		return &runner.GateResult{Passed: true}, nil
 	}
-	srv.GHPRCreate = func(repoPath, title, body, branch string) ([]byte, error) {
-		return []byte("https://github.com/example/repo/pull/1"), nil
-	}
+	installFakeGitHubProvider(t, &fakeChangeRequestProvider{})
 
 	w := postCreatePR(t, mux, runID, projPath)
 	if w.Code != http.StatusOK {
@@ -131,9 +129,7 @@ func TestCreatePRWithNoShippingGatesConfiguredRecordsAPassWithNoCommandRun(t *te
 // configured to fail — every bullet must still read as sealed afterward.
 func TestShippingGateFailureLeavesEveryBulletSealed(t *testing.T) {
 	srv, mux, runID, intentID, projPath := shippingGateFixture(t, map[string]string{"security": "exit 1"})
-	srv.GHPRCreate = func(repoPath, title, body, branch string) ([]byte, error) {
-		return []byte("https://github.com/example/repo/pull/1"), nil
-	}
+	installFakeGitHubProvider(t, &fakeChangeRequestProvider{})
 
 	w := postCreatePR(t, mux, runID, projPath)
 	if w.Code != http.StatusOK {
@@ -173,18 +169,15 @@ func TestShippingGateFailureLeavesEveryBulletSealed(t *testing.T) {
 func TestPassingShippingGateTriggersNoMergeAction(t *testing.T) {
 	srv, mux, runID, intentID, projPath := shippingGateFixture(t, map[string]string{"security": "true"})
 
-	ghCalls := 0
-	srv.GHPRCreate = func(repoPath, title, body, branch string) ([]byte, error) {
-		ghCalls++
-		return []byte("https://github.com/example/repo/pull/1"), nil
-	}
+	fake := &fakeChangeRequestProvider{}
+	installFakeGitHubProvider(t, fake)
 
 	w := postCreatePR(t, mux, runID, projPath)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
-	if ghCalls != 1 {
-		t.Errorf("gh pr create invoked %d time(s), want exactly 1 (the request's own PR action, none from the shipping gate)", ghCalls)
+	if fake.createCalls != 1 {
+		t.Errorf("gh pr create invoked %d time(s), want exactly 1 (the request's own PR action, none from the shipping gate)", fake.createCalls)
 	}
 
 	intent, err := srv.Store.GetIntent(intentID)

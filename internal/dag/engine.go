@@ -161,6 +161,21 @@ func (e *Engine) prepareWorktree(ctx context.Context, repoPath, runID, repoName 
 		args = append(args, "-b", branch, wt, "HEAD")
 	}
 
+	// Capture the run's real base branch exactly once, before the worktree
+	// is created. The run.BaseBranch == "" guard is what makes this "once,
+	// ever, per run": a resumed run whose worktree was removed but whose
+	// branch survived reaches this code again, and must not recapture (and
+	// potentially get a different, wrong answer if the operator's own
+	// checkout has since moved on) what the run's first attempt already
+	// correctly recorded. A failed gitOutput (e.g. a detached HEAD) leaves
+	// BaseBranch empty rather than recording garbage; defaultBase has its
+	// own fallback for that case.
+	if run.BaseBranch == "" {
+		if head := gitOutput(ctx, repoPath, "rev-parse", "--abbrev-ref", "HEAD"); head != "" {
+			_ = e.Store.SetRunBaseBranch(runID, head)
+		}
+	}
+
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", false, fmt.Errorf("creating worktree for %s: %v: %s", repoName, err, strings.TrimSpace(string(out)))
