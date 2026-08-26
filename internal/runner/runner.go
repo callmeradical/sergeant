@@ -266,9 +266,23 @@ func (pr *PhaseRunner) RunCodeGate(ctx context.Context, name, command string) (*
 	gateCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
+	// artifactDir is cleared and recreated before every gate, not just
+	// created once: RunCodeGate is called once per configured gate against
+	// the same pr.Worktree (internal/dag/engine.go runs gates in sorted
+	// order), and spec.md requires each command be given an empty directory
+	// — a shared, never-cleared path would leak one gate's files into the
+	// next gate's capture and misattribute them to the wrong phase.
+	artifactDir := filepath.Join(pr.Worktree, ".sergeant", "artifacts")
+	_ = os.RemoveAll(artifactDir)
+	_ = os.MkdirAll(artifactDir, 0o755)
+
 	cmd := exec.CommandContext(gateCtx, "bash", "-c", command)
 	superviseGroup(cmd)
 	cmd.Dir = pr.Worktree
+	// cmd.Env must default to os.Environ() plus this one addition: setting
+	// cmd.Env at all replaces the inherited environment entirely rather than
+	// extending it.
+	cmd.Env = append(os.Environ(), "SERGEANT_ARTIFACT_DIR="+artifactDir)
 
 	var outBuf bytes.Buffer
 	cmd.Stdout = &outBuf
@@ -315,6 +329,11 @@ func (pr *PhaseRunner) RunCodeGate(ctx context.Context, name, command string) (*
 	}
 
 	_ = pr.Store.RecordPhase(phaseRec)
+	// Capture happens synchronously, before this function returns — well
+	// before any worktree reclaim, which only ever considers a run's
+	// terminal state, reached after every one of its phases (including this
+	// one) has already returned.
+	captureArtifacts(pr.Store, pr.RunID, phaseRec.ID, pr.RepoName, artifactDir)
 	return result, nil
 }
 
@@ -501,6 +520,16 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 	for attempt := 0; attempt <= retries; attempt++ {
 		exe, args, extraEnv := BuildAgentCommand(pr.AgentCLI, pr.Model, prompt)
 
+		// artifactDir is cleared and recreated for every attempt, not just
+		// once: each retry is its own command execution and its own phase
+		// record (attemptID below), so spec.md's "empty directory" per
+		// command requires a fresh directory per attempt, not one shared
+		// across the whole retry loop.
+		artifactDir := filepath.Join(stateDir, "artifacts")
+		_ = os.RemoveAll(artifactDir)
+		_ = os.MkdirAll(artifactDir, 0o755)
+		extraEnv = append(extraEnv, "SERGEANT_ARTIFACT_DIR="+artifactDir)
+
 		// A zero budget means unbounded: derive a cancellable child so operator
 		// cancellation still propagates, but attach no deadline. Passing 0 to
 		// context.WithTimeout would produce an already-expired context and kill the
@@ -516,9 +545,11 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 		cmd := exec.CommandContext(phaseCtx, exe, args...)
 		superviseGroup(cmd)
 		cmd.Dir = pr.Worktree
-		if len(extraEnv) > 0 {
-			cmd.Env = append(os.Environ(), extraEnv...)
-		}
+		// extraEnv always has at least SERGEANT_ARTIFACT_DIR now, so cmd.Env
+		// is always set — and must be os.Environ() plus these additions,
+		// since setting cmd.Env at all replaces the inherited environment
+		// entirely rather than extending it.
+		cmd.Env = append(os.Environ(), extraEnv...)
 
 		var outBuf bytes.Buffer
 		cmd.Stdout = &outBuf
@@ -674,6 +705,11 @@ func (pr *PhaseRunner) RunAgentPhase(ctx context.Context, phaseName, prompt stri
 			Payload:    env.Payload,
 			Attempt:    attemptNumber,
 		})
+		// Capture happens synchronously here, before this attempt's result is
+		// returned or the loop continues to a retry — well before any
+		// worktree reclaim, which only ever considers a run's terminal
+		// state, reached after every phase attempt has already returned.
+		captureArtifacts(pr.Store, pr.RunID, attemptID, pr.RepoName, artifactDir)
 
 		if failed {
 			lastErr = fmt.Errorf("%s (output: %s)", failureReason, redact.Text(stripANSI(strings.TrimSpace(outBuf.String()))))

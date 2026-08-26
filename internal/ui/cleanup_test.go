@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/callmeradical/sergeant/internal/handoff"
+	"github.com/callmeradical/sergeant/internal/runner"
 	"github.com/callmeradical/sergeant/internal/store"
 
 	_ "modernc.org/sqlite"
@@ -269,6 +272,64 @@ func TestReclaimFleetDirRefusesARunningRunWithoutForce(t *testing.T) {
 		t.Errorf("reason = %q, want a non-empty explanation", reason)
 	}
 	mustExist(t, dir)
+}
+
+// TestCapturedArtifactOutlivesWorktreeReclaim covers pipeline-artifacts'
+// spec.md scenario "A captured artifact outlives its worktree": it exercises
+// the real reclaim mechanism (reclaimFleetDir, the same function
+// reclaimEligibleFleetDirs calls) directly against a worktree a gate command
+// actually ran in and captured an artifact from — not a stand-in for either
+// half of the ordering guarantee design.md states.
+func TestCapturedArtifactOutlivesWorktreeReclaim(t *testing.T) {
+	_, st, fleetRoot, _ := cleanupFixture(t)
+	t.Setenv("SERGEANT_ARTIFACTS_ROOT", t.TempDir())
+
+	const runID = "run-with-artifact"
+	if err := st.CreateRun(&store.RunRecord{ID: runID, Project: "p", TaskID: runID, Status: "passed"}); err != nil {
+		t.Fatal(err)
+	}
+
+	repoWT := filepath.Join(fleetRoot, runID, "svc")
+	if err := os.MkdirAll(repoWT, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	pr := &runner.PhaseRunner{
+		Store:    st,
+		Router:   handoff.NewRouter(t.TempDir()),
+		Worktree: repoWT,
+		RepoName: "svc",
+		RunID:    runID,
+	}
+	res, err := pr.RunCodeGate(context.Background(), "screenshot-gate",
+		`echo -n "evidence" > "$SERGEANT_ARTIFACT_DIR/shot.png"`)
+	if err != nil {
+		t.Fatalf("RunCodeGate: %v", err)
+	}
+	if !res.Passed {
+		t.Fatalf("expected gate to pass, output: %s", res.Output)
+	}
+
+	artifacts, err := st.ListArtifactsForRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("expected 1 artifact before reclaim, got %d: %+v", len(artifacts), artifacts)
+	}
+	artifactPath := artifacts[0].Path
+	mustExist(t, artifactPath)
+
+	fleetDir := filepath.Join(fleetRoot, runID)
+	removed, reason := reclaimFleetDir(fleetDir, "passed", false, false)
+	if !removed {
+		t.Fatalf("expected the worktree to be reclaimed, reason: %q", reason)
+	}
+	mustNotExist(t, fleetDir)
+
+	// The artifact was copied to a durable path outside fleetDir entirely
+	// (design.md), so reclaiming the worktree must not touch it.
+	mustExist(t, artifactPath)
 }
 
 // force overrides the running-run refusal — matching handleCleanWorktrees's
