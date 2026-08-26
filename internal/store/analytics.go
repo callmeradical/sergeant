@@ -189,6 +189,8 @@ func (s *Store) ComputeWorkAnalytics(project string) (WorkAnalytics, error) {
 		wa.TotalRuns += ru.RunCount
 		wa.ByStatus["passed"] += ru.PassedCount
 		wa.ByStatus["failed"] += ru.FailedCount
+		wa.ByStatus["cancelled"] += ru.CancelledCount
+		wa.ByStatus["interrupted"] += ru.InterruptedCount
 		for k, v := range ru.ByWorkType {
 			wa.ByType[k] += v
 		}

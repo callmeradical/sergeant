@@ -25,6 +25,8 @@ const createRetentionRollupsTable = `
 	  run_count            INTEGER NOT NULL DEFAULT 0,
 	  passed_count         INTEGER NOT NULL DEFAULT 0,
 	  failed_count         INTEGER NOT NULL DEFAULT 0,
+	  cancelled_count      INTEGER NOT NULL DEFAULT 0,
+	  interrupted_count    INTEGER NOT NULL DEFAULT 0,
 	  bullet_total         INTEGER NOT NULL DEFAULT 0,
 	  bullet_merged        INTEGER NOT NULL DEFAULT 0,
 	  by_work_type_json    TEXT NOT NULL DEFAULT '{}',
@@ -41,6 +43,12 @@ type RetentionRollup struct {
 	RunCount        int
 	PassedCount     int
 	FailedCount     int
+	// CancelledCount/InterruptedCount cover the other two statuses
+	// rotationEligibleStatusesSQL makes eligible for rotation — omitting
+	// them would silently drop a rotated cancelled/interrupted run's
+	// contribution to WorkAnalytics.ByStatus instead of folding it in.
+	CancelledCount   int
+	InterruptedCount int
 	// BulletTotal/BulletMerged record the bullet counts of rotated runs'
 	// intents at the moment each run rotated. Rotation never deletes bullets
 	// or intents (a bullet is shared by its intent across every run that ever
@@ -78,11 +86,13 @@ func (s *Store) GetRetentionRollup(project string) (*RetentionRollup, bool, erro
 	var computedStr, workTypeJSON, provenanceJSON string
 	err := s.db.QueryRow(
 		`SELECT project, computed_through, run_count, passed_count, failed_count,
+		        cancelled_count, interrupted_count,
 		        bullet_total, bullet_merged, by_work_type_json, by_provenance_json
 		 FROM retention_rollups WHERE project = ?`,
 		project,
 	).Scan(
 		&rec.Project, &computedStr, &rec.RunCount, &rec.PassedCount, &rec.FailedCount,
+		&rec.CancelledCount, &rec.InterruptedCount,
 		&rec.BulletTotal, &rec.BulletMerged, &workTypeJSON, &provenanceJSON,
 	)
 	if err == sql.ErrNoRows {
@@ -135,18 +145,22 @@ func (s *Store) upsertRetentionRollup(r *RetentionRollup) error {
 	_, err = s.db.Exec(
 		`INSERT INTO retention_rollups
 		   (project, computed_through, run_count, passed_count, failed_count,
+		    cancelled_count, interrupted_count,
 		    bullet_total, bullet_merged, by_work_type_json, by_provenance_json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(project) DO UPDATE SET
 		   computed_through   = excluded.computed_through,
 		   run_count          = excluded.run_count,
 		   passed_count       = excluded.passed_count,
 		   failed_count       = excluded.failed_count,
+		   cancelled_count    = excluded.cancelled_count,
+		   interrupted_count  = excluded.interrupted_count,
 		   bullet_total       = excluded.bullet_total,
 		   bullet_merged      = excluded.bullet_merged,
 		   by_work_type_json  = excluded.by_work_type_json,
 		   by_provenance_json = excluded.by_provenance_json`,
 		r.Project, r.ComputedThrough, r.RunCount, r.PassedCount, r.FailedCount,
+		r.CancelledCount, r.InterruptedCount,
 		r.BulletTotal, r.BulletMerged, string(workTypeJSON), string(provJSON),
 	)
 	return err
@@ -334,6 +348,10 @@ func (s *Store) foldRunIntoRollup(project string, run RunRecord, prov runProvena
 		current.PassedCount++
 	case "failed":
 		current.FailedCount++
+	case "cancelled":
+		current.CancelledCount++
+	case "interrupted":
+		current.InterruptedCount++
 	}
 	current.ByWorkType[run.Type]++
 	current.ByAgent[prov.Agent]++

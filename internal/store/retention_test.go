@@ -291,6 +291,50 @@ func TestComputeWorkAnalyticsTotalsUnchangedByRotation(t *testing.T) {
 	}
 }
 
+// TestComputeWorkAnalyticsTotalsUnchangedByRotationOfACancelledRun guards
+// against Review 036's finding: rotationEligibleStatusesSQL (which
+// RotateProject filters on) makes "cancelled" and "interrupted" runs
+// eligible for rotation, but retention_rollups' first cut only tracked
+// passed_count/failed_count — rotating a cancelled or interrupted run
+// silently dropped its ByStatus contribution instead of folding it in.
+func TestComputeWorkAnalyticsTotalsUnchangedByRotationOfACancelledRun(t *testing.T) {
+	st, _ := openTestStore(t)
+
+	const runID = "old-cancelled"
+	if err := st.CreateRun(&RunRecord{ID: runID, Project: "p", TaskID: runID, Status: "cancelled", Type: "feat"}); err != nil {
+		t.Fatal(err)
+	}
+	backdateRunCreatedAt(t, st, runID, time.Now().UTC().Add(-60*24*time.Hour))
+
+	before, err := st.ComputeWorkAnalytics("p")
+	if err != nil {
+		t.Fatalf("ComputeWorkAnalytics before rotation: %v", err)
+	}
+	if before.ByStatus["cancelled"] != 1 {
+		t.Fatalf("before.ByStatus[cancelled] = %d, want 1", before.ByStatus["cancelled"])
+	}
+
+	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	rotated, err := st.RotateProject("p", cutoff)
+	if err != nil {
+		t.Fatalf("RotateProject: %v", err)
+	}
+	if rotated != 1 {
+		t.Fatalf("rotated = %d, want 1", rotated)
+	}
+
+	after, err := st.ComputeWorkAnalytics("p")
+	if err != nil {
+		t.Fatalf("ComputeWorkAnalytics after rotation: %v", err)
+	}
+	if after.ByStatus["cancelled"] != before.ByStatus["cancelled"] {
+		t.Errorf("ByStatus[cancelled] changed: before=%d after=%d", before.ByStatus["cancelled"], after.ByStatus["cancelled"])
+	}
+	if after.TotalRuns != before.TotalRuns {
+		t.Errorf("TotalRuns changed: before=%d after=%d", before.TotalRuns, after.TotalRuns)
+	}
+}
+
 // A project with no rotation ever run against it (RotateProject never
 // called) never loses data — the store-level half of "a project with no
 // Retention configured never rotates anything." The config-level decision of

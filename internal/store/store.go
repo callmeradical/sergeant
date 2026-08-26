@@ -460,6 +460,15 @@ func (s *Store) migrateAddColumns() error {
 		// same as a freshly created intent.
 		{"intents", "shipping_gate_status", "ALTER TABLE intents ADD COLUMN shipping_gate_status TEXT NOT NULL DEFAULT ''"},
 		{"intents", "shipping_gate_reason", "ALTER TABLE intents ADD COLUMN shipping_gate_reason TEXT NOT NULL DEFAULT ''"},
+		// cancelled_count/interrupted_count were missing from
+		// retention_rollups' first cut despite rotationEligibleStatusesSQL
+		// (which RotateProject filters on) including both statuses --
+		// without them, rotating a cancelled or interrupted run silently
+		// dropped its contribution to WorkAnalytics.ByStatus instead of
+		// folding it in, violating spec.md's "aggregate totals unchanged by
+		// rotation". Found by Review 036's critic.
+		{"retention_rollups", "cancelled_count", "ALTER TABLE retention_rollups ADD COLUMN cancelled_count INTEGER NOT NULL DEFAULT 0"},
+		{"retention_rollups", "interrupted_count", "ALTER TABLE retention_rollups ADD COLUMN interrupted_count INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, w := range wanted {
 		has, err := s.hasColumn(w.table, w.column)
