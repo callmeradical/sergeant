@@ -268,7 +268,14 @@ def enumerate_portable_holders(markers, target_pid=None, descriptor_details=Fals
     streams.register(process.stderr, selectors.EVENT_READ, "stderr")
     output = {"stdout": bytearray(), "stderr": bytearray()}
     deadline = time.monotonic() + 10
-    limit = 1024 * 1024
+    # A fixed 1 MiB limit is exceeded by ordinary, correctly-functioning
+    # developer machines: this scans every open descriptor of every process
+    # the invoking user owns (not just the marker-holding candidates), so its
+    # size scales with total host fd-table volume, which is unrelated to how
+    # many workers Sergeant itself has running. Overridable for hosts that
+    # still need more headroom without a code change; still bounded, per the
+    # requirement that this remain a real, finite limit, not removed.
+    limit = int(os.environ.get("SERGEANT_PORTABLE_MARKER_LSOF_LIMIT", 16 * 1024 * 1024))
     try:
         while streams.get_map():
             remaining = deadline - time.monotonic()
@@ -357,8 +364,15 @@ def enumerate_portable_holders(markers, target_pid=None, descriptor_details=Fals
                 fail("portable lsof marker inode is malformed")
             inode = int(value)
         elif key == "n":
-            if descriptor is None or name is not None or not value:
+            if descriptor is None or name is not None:
                 fail("portable lsof marker name is malformed")
+            # An empty name is real, valid lsof output for descriptor types
+            # that have none to report (an anonymous pipe, a deleted file, a
+            # socket with no bound path) -- not evidence of corrupt evidence.
+            # Identity is proven by (device, inode) alone; name is cosmetic
+            # detail only ever surfaced via descriptor_details, so an empty
+            # string here is a harmless, valid value, not a reason to abort
+            # marker verification entirely.
             name = value
     finish_descriptor()
     if returncode == 1 and lines:
