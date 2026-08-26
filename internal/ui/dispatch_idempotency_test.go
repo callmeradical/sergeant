@@ -187,6 +187,16 @@ func TestDispatchWithARepeatedRequestIDInsideOneSecondDeduplicates(t *testing.T)
 	if len(runs) != 1 {
 		t.Fatalf("store holds %d runs after a same-second repeat, want 1: %+v", len(runs), runs)
 	}
+
+	// handleDispatch runs the actual pipeline in a background goroutine.
+	// dispatchFixture's t.Setenv(SERGEANT_CONFIG/SERGEANT_FLEET_DIR) is
+	// process-global, so a goroutine this test leaves running past its own
+	// return observes whatever a LATER test's dispatchFixture has since set
+	// those variables to, and writes to this test's already-closed store —
+	// "sql: database is closed" noise here, but real interference with
+	// whichever later test happens to be running concurrently. Waiting for
+	// this run to finish before returning closes the leak at its source.
+	waitForTerminalRun(t, st, runs[0].ID)
 }
 
 // Scenario: An omitted key remains valid.
@@ -257,6 +267,14 @@ func TestDispatchWithoutARequestIDCreatesANewRunEachTime(t *testing.T) {
 	if len(intents) != 2 {
 		t.Fatalf("store holds %d intents after two keyless dispatches, want 2: %+v", len(intents), intents)
 	}
+
+	// See the matching comment in TestDispatchWithARepeatedRequestIDInsideOneSecondDeduplicates:
+	// wait for both background dispatch goroutines to finish before this
+	// test's own store closes, so they cannot leak into a later test's
+	// dispatchFixture (which reassigns the same process-global
+	// SERGEANT_CONFIG/SERGEANT_FLEET_DIR env vars this test used).
+	waitForTerminalRun(t, st, a.TaskID)
+	waitForTerminalRun(t, st, b.TaskID)
 }
 
 // Scenario: A repeated key creates no side effects — the domain records half.
