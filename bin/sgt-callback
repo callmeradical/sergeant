@@ -467,7 +467,27 @@ def lock_admission(correlation: str, descriptor_text: str) -> None:
             info.st_uid != os.getuid() or \
             (info.st_dev, info.st_ino) != (path_info.st_dev, path_info.st_ino):
         fail("admission lock descriptor identity mismatch")
-    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    # A plain LOCK_EX blocks this preflight stage indefinitely whenever another
+    # correlated dispatch for the same task holds the lock longer than expected
+    # (or is itself stuck), with no way for the caller to distinguish "still
+    # working" from "will never finish" -- every other preflight bound in this
+    # codebase (response lock, drain lock) fails closed instead.  Poll with
+    # LOCK_NB against a deadline so a stuck holder produces a diagnosable
+    # timeout naming this stage, rather than an unbounded hang.
+    timeout = env_int("SERGEANT_ADMISSION_LOCK_TIMEOUT_SECS", 30, 1, 3600)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                fail(
+                    f"admission-lock: could not acquire admission lock for "
+                    f"correlation {correlation} after {timeout}s; another "
+                    f"dispatch for this task is still holding it"
+                )
+            time.sleep(0.1)
 
 
 def admission_lock_info(task_id: str) -> None:
