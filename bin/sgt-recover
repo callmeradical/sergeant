@@ -331,6 +331,42 @@ if ! command -v tmux >/dev/null 2>&1 || \
   _recover_die "Stall recovery failed: relaunch metadata is incomplete for $TASK_ID/$REPO"
 fi
 
+# ── 7b. Pre-flight: resolve and verify the current effort before relaunch ───
+# sgt-dispatch and sgt-session-resume both resolve SERGEANT_MODEL over the
+# durable fleet record and validate before launch; this relaunch path
+# reused whatever the stalled worker's fleet record said with no chance for
+# a changed SERGEANT_MODEL to apply, so a coordination policy update never
+# took effect on the very next relaunch and the worker silently inherited a
+# superseded effort. See Deloitte support #29.
+model_stored="$(cat "$REPO_DIR/agent_model" 2>/dev/null || true)"
+model_source_stored="$(cat "$REPO_DIR/agent_model_source" 2>/dev/null || true)"
+if [[ -n "${SERGEANT_MODEL:-}" ]]; then
+  recovery_model="$SERGEANT_MODEL"
+  recovery_model_source="env"
+elif [[ -n "$model_stored" && "$model_stored" != "$SGT_AGENT_MODEL_UNPINNED" ]]; then
+  recovery_model="$model_stored"
+  recovery_model_source="${model_source_stored:-fleet}"
+else
+  recovery_model="$SGT_AGENT_MODEL_UNPINNED"
+  recovery_model_source="unpinned"
+fi
+
+if [[ "$recovery_model_source" != "unpinned" ]]; then
+  if ! _sgt_is_agent_model_tuple "$recovery_model" || \
+     ! _sgt_resolve_agent_launch "$(basename "$agent")" "$recovery_model"; then
+    _escalate "recovery cannot honor the required model/effort $recovery_model for $(basename "$agent")"
+    _recover_die "Stall recovery refused: cannot honor required model/effort $recovery_model for $TASK_ID/$REPO"
+  fi
+fi
+
+# Persist a policy-driven tuple before relaunch: sgt-interactive-worker reads
+# only this durable record, never SERGEANT_MODEL, so a resolved env override
+# must land here before launch or the worker still starts at the stale effort.
+if [[ "$recovery_model_source" == "env" ]]; then
+  printf '%s\n' "$recovery_model"        > "$REPO_DIR/agent_model"
+  printf '%s\n' "$recovery_model_source" > "$REPO_DIR/agent_model_source"
+fi
+
 # ── 8. Pre-flight: verify old pane identity ──────────────────────────────────
 # Save the old pane reference for the deferred kill and for potential restore
 # on failure.  The identity check is done here (under lock, before any state
