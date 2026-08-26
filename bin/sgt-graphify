@@ -322,7 +322,14 @@ _extract_repo() {
   local _output_loc
   _output_loc="$(_location_canonical "$configured_output")"
   local output_paths=("$_output_loc")
-  local tar_exclude_args=("${TAR_EXCLUDE_ARGS[@]}")
+  # A project with no graphify.exclude_patterns leaves TAR_EXCLUDE_ARGS truly
+  # empty. Expanding an empty array's [@] under `set -u` is "unbound
+  # variable" on bash 3.2 (the system bash this project explicitly supports
+  # on macOS) — guard the copy instead of expanding it unconditionally.
+  local tar_exclude_args=()
+  if [[ ${#TAR_EXCLUDE_ARGS[@]} -gt 0 ]]; then
+    tar_exclude_args=("${TAR_EXCLUDE_ARGS[@]}")
+  fi
   # Also include the fully canonical form (follows all symlinks) in case the
   # canonical target itself falls inside a repo.
   if [[ "$graphify_output" != "$_output_loc" ]]; then
@@ -459,6 +466,30 @@ for artifact in graph.json manifest.json GRAPH_REPORT.md; do
     exit 1
   fi
 done
+
+# GH #257: graphify's own built_at_commit/"Built from commit" line reflects
+# whatever directory its git-detection happened to run against — in practice
+# wherever the operator's shell was when they invoked sgt-graphify (e.g. the
+# Sergeant checkout), not the indexed source repository. For the unambiguous
+# single-repo case, overwrite both with that repo's real HEAD. A multi-repo
+# merge has no single "the" source repository, so it is deliberately left
+# alone here rather than guessing which repo's HEAD should represent it.
+if [[ ${#SOURCE_ROOT_REPOS[@]} -eq 1 ]]; then
+  _actual_source_commit="$(git -C "${SOURCE_ROOT_PATHS[0]}" rev-parse HEAD 2>/dev/null || true)"
+  if [[ -n "$_actual_source_commit" ]]; then
+    yq -i -p=json -o=json ".built_at_commit = \"$_actual_source_commit\"" \
+      "$stage_output/graph.json" 2>/dev/null || true
+    if [[ -f "$stage_output/GRAPH_REPORT.md" ]]; then
+      _short_source_commit="${_actual_source_commit:0:8}"
+      _report_tmp="$(mktemp "$run_root/GRAPH_REPORT.md.XXXXXX")"
+      awk -v short="$_short_source_commit" '
+        /^- Built from commit: `[0-9a-f]+`$/ { print "- Built from commit: `" short "`"; next }
+        { print }
+      ' "$stage_output/GRAPH_REPORT.md" > "$_report_tmp"
+      mv "$_report_tmp" "$stage_output/GRAPH_REPORT.md"
+    fi
+  fi
+fi
 
 _write_graphify_root
 
