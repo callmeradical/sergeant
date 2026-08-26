@@ -1742,8 +1742,76 @@
         const def = await workflowDefFor(run.project, repo);
         lanes.push(laneHTML(repo, def, phaseByRepo.get(repo) || new Map(), bulletByRepo.get(repo), host.clientWidth - 24));
       }
-      host.innerHTML = lanes.join('');
+
+      const artifacts = await fetchArtifactsForRun(run.id);
+      host.innerHTML = lanes.join('') + artifactsSectionHTML(artifacts);
       lastGraphRender = { run, phases: list };
+    }
+
+    // fetchArtifactsForRun answers this run's captured pipeline artifacts
+    // (proposal.md's "pipeline artifacts", unrelated to internal/dag's
+    // upstream-handoff use of the same word). A fetch failure or non-OK
+    // response resolves to an empty list, the same "render nothing extra"
+    // behaviour bulletsForRun already uses for its own failure case.
+    async function fetchArtifactsForRun(runId) {
+      try {
+        const res = await fetch(`/api/artifacts?run_id=${encodeURIComponent(runId)}`);
+        if (!res.ok) return [];
+        return (await res.json()) || [];
+      } catch (err) {
+        console.error('Failed fetching artifacts for run:', err);
+        return [];
+      }
+    }
+
+    // artifactsSectionHTML renders the "Artifacts" section design.md places
+    // directly beneath the workflow graph's repo lanes, grouped by the
+    // phase that produced each artifact. Returns '' (no extra DOM, no empty
+    // heading) when the run has none — this section is additive, not a
+    // mandatory element every run shows.
+    function artifactsSectionHTML(artifacts) {
+      const list = artifacts || [];
+      if (list.length === 0) return '';
+
+      const byPhase = new Map();
+      list.forEach(a => {
+        if (!byPhase.has(a.phase_id)) byPhase.set(a.phase_id, []);
+        byPhase.get(a.phase_id).push(a);
+      });
+
+      const groups = [...byPhase.entries()].map(([phaseId, items]) => `
+        <div class="mb-3 last:mb-0">
+          <div class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider mb-1.5">${escapeHTML(phaseId)}</div>
+          <div class="flex flex-wrap gap-2">${items.map(artifactItemHTML).join('')}</div>
+        </div>`).join('');
+
+      return `
+        <section class="mt-5 pt-3 border-t border-[#21262d]" aria-label="Captured artifacts">
+          <div class="flex items-center gap-1.5 mb-2 font-mono text-[11px] font-bold text-white">
+            <i class="fa-solid fa-image text-[#8b949e] text-[9px]" aria-hidden="true"></i>Artifacts
+          </div>
+          ${groups}
+        </section>`;
+    }
+
+    // artifactItemHTML renders one artifacts-table row: an image thumbnail
+    // grid entry for a captured image, a plain filename link for anything
+    // else, or a dropped-count notice for the one synthetic row
+    // captureArtifacts writes when the per-phase cap was exceeded (never
+    // silently omitted — see specs/pipeline-artifacts).
+    function artifactItemHTML(a) {
+      if (a.dropped_count) {
+        return `<div class="text-[10px] text-amber-400 border border-[#21262d] rounded px-2 py-1.5" title="${escapeAttr(a.dropped_reason || '')}">
+          <i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i> ${a.dropped_count} artifact(s) dropped
+        </div>`;
+      }
+      const href = `/api/artifacts/${encodeURIComponent(a.id)}/content`;
+      if ((a.content_type || '').startsWith('image/')) {
+        return `<a href="${href}" target="_blank" rel="noopener" title="${escapeAttr(a.filename)}">
+          <img src="${href}" alt="${escapeAttr(a.filename)}" class="w-20 h-20 object-cover rounded border border-[#21262d] bg-[#0b0e14]">
+        </a>`;
+      }
+      return `<a href="${href}" target="_blank" rel="noopener" class="text-[11px] text-[#58a6ff] underline decoration-dotted">${escapeHTML(a.filename)}</a>`;
     }
 
     // bulletsForRun answers repo -> bullet for the intent behind runId, so the

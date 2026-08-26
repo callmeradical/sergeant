@@ -166,6 +166,8 @@ func (srv *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/run-delete", srv.handleRunDelete)
 	mux.HandleFunc("/api/delivery-history", srv.handleDeliveryHistory)
 	mux.HandleFunc("/api/delivery-quarantine", srv.handleDeliveryQuarantine)
+	mux.HandleFunc("/api/artifacts", srv.handleListArtifacts)
+	mux.HandleFunc("/api/artifacts/{id}/content", srv.handleArtifactContent)
 	mux.HandleFunc("/api/build-graph", srv.handleBuildGraph)
 	// The sequenced state stream. Clients follow this instead of re-reading
 	// /api/runs on a timer.

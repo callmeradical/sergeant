@@ -315,7 +315,7 @@ func (s *Store) migrate() error {
 		created_at DATETIME NOT NULL,
 		FOREIGN KEY (run_id) REFERENCES runs(id)
 	);
-	` + createIntentsTable + createBulletsTable + createChangesTable + createDeliveriesTable
+	` + createIntentsTable + createBulletsTable + createChangesTable + createDeliveriesTable + createArtifactsTable
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
 	}
@@ -378,6 +378,7 @@ func (s *Store) migrateAddTables() error {
 		{"changes", createChangesTable},
 		{"deliveries", createDeliveriesTable},
 		{"export_cursor", createExportCursorTable},
+		{"artifacts", createArtifactsTable},
 	}
 	for _, w := range wanted {
 		has, err := s.hasTable(w.table)
