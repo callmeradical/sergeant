@@ -85,7 +85,23 @@ _sgt_fd_identity() {
   local fd="$1" value
   value="$(stat -Lc '%d:%i' "/proc/$$/fd/$fd" 2>/dev/null || true)"
   if [[ -z "$value" ]]; then
-    value="$(stat -f '%d:%i' "/dev/fd/$fd" 2>/dev/null || true)"
+    # `stat -f '%d:%i' "/dev/fd/$fd"` looked like an equivalent non-Linux
+    # fallback, but it stats the *path* /dev/fd/$fd, which on macOS resolves
+    # through the synthetic fdesc filesystem: the inode passes through
+    # correctly but the reported device number is fdesc's own, not the real
+    # underlying file's -- so this always disagreed with an identity recorded
+    # from the real path (`stat -f '%d:%i'` on the file itself), failing
+    # every comparison unconditionally on macOS. A real fstat(2) on the fd
+    # itself (bypassing /dev/fd entirely) reports the true device, matching
+    # what _sgt-verify-owned-fd.py already does correctly in Python.
+    value="$(python3 -c '
+import os, sys
+try:
+    st = os.fstat(int(sys.argv[1]))
+except (OSError, ValueError):
+    raise SystemExit(1)
+print(f"{st.st_dev}:{st.st_ino}")
+' "$fd" 2>/dev/null || true)"
   fi
   [[ "$value" =~ ^[0-9]+:[0-9]+$ ]] || return 1
   printf '%s\n' "$value"
