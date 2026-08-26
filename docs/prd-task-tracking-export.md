@@ -73,7 +73,7 @@ tracker:
   use when this is implemented, not a product requirement.
 - **Migrating or importing existing v1 `td` task history.** v1 and v2 do not
   share a store; this PRD does not propose a one-time import.
-- **`docs/prds/tasks-axi-migration.md`.** That document specifies migrating
+- **`docs/archive/v1/prds/tasks-axi-migration.md`.** That document specifies migrating
   v1's own `_sgt-lib.sh` shell integration from `td` to Tasks AXI — it is a
   v1-scoped change to code this repository already deleted from `v2`
   (see the v1 shell-toolbelt removal). It is superseded, not extended, by

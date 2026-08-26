@@ -2,7 +2,7 @@
 
 Status: Draft
 
-Related research: `docs/research/tasks-axi-configurable-workflows.md`
+Related research: `docs/archive/v1/research/tasks-axi-configurable-workflows.md`
 
 Related epic: td-6986b6 "Wayfinder: replace td with Tasks AXI state machine"
 

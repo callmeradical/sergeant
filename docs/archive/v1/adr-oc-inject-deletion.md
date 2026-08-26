@@ -49,4 +49,4 @@ existed.
   and `skills/sergeant-help/SKILL.md` are removed.
 - `tests/oc-inject-test.sh` is deleted. The `SERGEANT_NOTIFY_TRANSPORT=tmux` assertion
   it contained is already covered by `tests/sgt-notify-test.sh`.
-- The audit finding `S-4` in `docs/audit-2026-07.md` is resolved by this deletion.
+- The audit finding `S-4` in `docs/archive/v1/audit-2026-07.md` is resolved by this deletion.

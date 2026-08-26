@@ -8,7 +8,7 @@ lines of tests, gutted `sgt-watch`, `sgt-respond`, and `sgt-dispatch`);
 `45cfd98` deprecated `oc-inject` and simplified `sgt-notify`. The findings
 below reflect work remaining after those changes.
 
-Audit source: `docs/audit-2026-07.md` and `docs/dead-code-2026-07.md`
+Audit source: `docs/archive/v1/audit-2026-07.md` and `docs/archive/v1/dead-code-2026-07.md`
 
 Related epic: td-4ffd5e "Code improvements" P0
 
@@ -285,7 +285,7 @@ the Anthropic API before shipping.
 
 ## Dead Code Removal
 
-All nine findings from `docs/dead-code-2026-07.md` must be resolved.
+All nine findings from `docs/archive/v1/dead-code-2026-07.md` must be resolved.
 
 | ID | File | Artifact | Resolution |
 |---|---|---|---|

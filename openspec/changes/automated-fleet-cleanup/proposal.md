@@ -6,7 +6,7 @@ One repository: `sergeant-v2`.
 
 ## Requirements served
 
-PRD: `docs/prd-automated-fleet-cleanup.md`.
+PRD: `docs/prd/archive/prd-automated-fleet-cleanup.md`.
 
 ## Problem
 

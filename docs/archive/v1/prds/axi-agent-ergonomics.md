@@ -5,7 +5,7 @@ Status: Draft — Phase 1 implementation in progress on
 
 Research baseline commit: `a6af6854056c77a7a1ed73e61b74cd7fead52e30`
 
-Related research: `docs/research/axi-agent-ergonomics-spike.md`
+Related research: `docs/archive/v1/research/axi-agent-ergonomics-spike.md`
 
 ---
 

@@ -81,7 +81,11 @@ Start with the [documentation index](docs/README.md):
 - [Using Sergeant](docs/using-sergeant.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Project YAML schema](docs/schema.md)
-- [Durable callback protocol](docs/callbacks.md)
+
+Note: this README and the four "What/Getting started/Skills/Using" docs
+above describe v1 (the removed `sgt-*` shell toolbelt) and have not yet
+been rewritten for v2 — see `docs/README.md` for what's current
+(`docs/architecture.md`, `docs/prd-sergeant-v2.md`, `openspec/`).
 
 ## Project YAML
 
