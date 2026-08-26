@@ -575,7 +575,18 @@ if [[ "${1:-}" == "--snapshot" ]]; then
 fi
 
 if [[ "${1:-}" == "--list" ]]; then
-  if [[ ! -d "$FLEET_DIR" ]] || [[ -z "$(ls -A "$FLEET_DIR" 2>/dev/null)" ]]; then
+  # "Empty" means no task *directory* exists, not merely no directory entry
+  # at all: a dot-prefixed lock file with no task directories makes
+  # `ls -A` non-empty even though there is nothing to list (GH #251).
+  _list_has_task_dir=0
+  if [[ -d "$FLEET_DIR" ]]; then
+    for _list_probe_dir in "$FLEET_DIR"/*/; do
+      [[ -d "$_list_probe_dir" ]] || continue
+      _list_has_task_dir=1
+      break
+    done
+  fi
+  if [[ "$_list_has_task_dir" -eq 0 ]]; then
     echo "No tasks found in $FLEET_DIR"
     exit 0
   fi
@@ -584,6 +595,7 @@ if [[ "${1:-}" == "--list" ]]; then
   echo "Fleet tasks (retained records, including terminal):"
   echo ""
   for task_dir in "$FLEET_DIR"/*/; do
+    [[ -d "$task_dir" ]] || continue
     task_id="$(basename "$task_dir")"
     started="$(cat "$task_dir/started" 2>/dev/null || echo "unknown")"
     brief="$(grep '^Brief:' "$task_dir/brief.md" 2>/dev/null | sed 's/^Brief: *//' | cut -c1-60 || echo "")"

@@ -450,3 +450,24 @@ set -e
 [[ "$drained_watch_status" -ne 0 && "$drained_watch_output" != *'All repos done.'* ]]
 
 printf 'sgt-watch drained status: ok\n'
+
+# --list: a fleet dir holding only a dot-prefixed lock file (no task
+# directories at all) must report "no tasks", not a phantom '*' task.
+# `ls -A "$FLEET_DIR"` sees the lock file and is non-empty, so the existing
+# "is the directory empty" early-exit does not fire; the unguarded
+# `for task_dir in "$FLEET_DIR"/*/` then iterates once with the literal,
+# unexpanded glob pattern when no directory matches it (GH #251).
+empty_fleet="$TEST_ROOT/empty-fleet"
+mkdir -p "$empty_fleet"
+touch "$empty_fleet/.fleet.lock"
+empty_list_output="$(SERGEANT_FLEET="$empty_fleet" "$ROOT/bin/sgt-watch" --list)"
+[[ "$empty_list_output" != *'*'* ]] || {
+  printf 'FAIL sgt-watch --list: phantom "*" task with only a lock file present: %s\n' "$empty_list_output" >&2
+  exit 1
+}
+[[ "$empty_list_output" == *'No tasks found'* ]] || {
+  printf 'FAIL sgt-watch --list: expected "No tasks found" with only a lock file present, got: %s\n' "$empty_list_output" >&2
+  exit 1
+}
+
+printf 'sgt-watch --list phantom task: ok\n'
