@@ -1,0 +1,29 @@
+schema: spec-driven
+
+context: |
+  This is sergeant v1: the bash/tmux toolbelt in bin/sgt-* plus the Go
+  cmd/sergeant-mcp MCP server that wraps it. Read AGENTS.md before changing
+  behaviour. sergeant-v2 (a separate Go-native rewrite under internal/) lives
+  on the v2 branch and is out of scope here -- do not conflate the two.
+
+  PRDs for v1 changes live at docs/prd-<slug>.md and must be approved (Status:
+  Draft -> approved) before an OpenSpec change proceeds past drafting.
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+# Example:
+#   context: |
+#     Tech stack: TypeScript, React, Node.js
+#     We use conventional commits
+#     Domain: e-commerce platform
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
