@@ -58,8 +58,8 @@
     <div class="flex items-center space-x-3">
       <div class="flex items-center space-x-2 text-[#8b949e] text-xs">
         <button type="button" id="btn-open-analytics" onclick="openAnalyticsDrawer(this)" aria-label="Work analytics" title="Work analytics" class="min-w-[44px] min-h-[44px] flex items-center justify-center hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14] rounded"><i class="fa-solid fa-chart-line"></i></button>
-        <button type="button" id="btn-open-workers" onclick="openWorkersDrawer(this)" aria-label="Workers" title="Workers" class="relative min-w-[44px] min-h-[44px] flex items-center justify-center hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14] rounded">
-          <i class="fa-solid fa-server"></i>
+        <button type="button" id="btn-open-workers" onclick="openWorkersDrawer(this)" aria-label="Worktrees" title="Allocated worktrees (includes retained, non-running ones)" class="relative min-w-[44px] min-h-[44px] flex items-center justify-center hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14] rounded">
+          <i class="fa-solid fa-folder-tree"></i>
           <span id="stat-workers-active" class="absolute top-1 right-1.5 min-w-[13px] h-[13px] px-0.5 flex items-center justify-center rounded-full bg-[#1f6feb] text-white text-[9px] font-bold leading-none">0</span>
         </button>
         <button onclick="fetchRuns(); fetchFleet();" aria-label="Refresh state" title="Refresh state" class="min-w-[44px] min-h-[44px] flex items-center justify-center hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#58a6ff] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0e14] rounded"><i class="fa-solid fa-rotate-right"></i></button>
@@ -490,7 +490,7 @@
 
         // Keep the drawer current if it is already showing workers.
         if (drawerIsOpen() && document.getElementById('drawer-kind').textContent === 'workers') {
-          document.getElementById('drawer-title').textContent = `Workers & worktrees (${drawerLeases.length})`;
+          document.getElementById('drawer-title').textContent = `Worktrees (${drawerLeases.length} allocated)`;
           document.getElementById('drawer-body').innerHTML = workersHTML(drawerLeases);
         }
       } catch (err) {
@@ -1938,7 +1938,7 @@
 
     function openWorkersDrawer(opener) {
       fetchFleet();
-      openDrawer(`Workers & worktrees (${drawerLeases.length})`, 'workers', workersHTML(drawerLeases), opener);
+      openDrawer(`Worktrees (${drawerLeases.length} allocated)`, 'workers', workersHTML(drawerLeases), opener);
     }
 
     function workersHTML(leases) {
