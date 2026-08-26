@@ -2102,6 +2102,27 @@
             </div>
           </div>`;
 
+      // retentionSection is absent entirely when the project declares no
+      // retention: block (d.retention is undefined) — "absent, not zero,"
+      // the same convention the API response itself follows, so an operator
+      // never confuses "not configured" with "configured but zero so far".
+      const retentionSection = !d.retention ? '' : `
+          <div class="space-y-1">
+            <div class="text-[9px] uppercase font-bold text-[#8b949e] tracking-wider">Data retention</div>
+            <div class="flex items-center justify-between gap-2 text-[10px]">
+              <span class="text-slate-300">Last rotation</span>
+              <span class="text-[#8b949e] font-mono">${d.retention.last_run_at || 'never run yet'}</span>
+            </div>
+            <div class="flex items-center justify-between gap-2 text-[10px]">
+              <span class="text-slate-300">Runs rotated</span>
+              <span class="text-[#8b949e] font-mono">${d.retention.runs_rotated || 0}</span>
+            </div>
+            <div class="flex items-center justify-between gap-2 text-[10px]">
+              <span class="text-slate-300">Artifacts rotated</span>
+              <span class="text-[#8b949e] font-mono">${d.retention.artifacts_rotated || 0}</span>
+            </div>
+          </div>`;
+
       return `
         <div class="space-y-3">
           <div class="flex items-center justify-between gap-2">
@@ -2114,6 +2135,7 @@
           ${analyticsBreakdownHTML('Model', d.by_model, totalRuns, 'unknown')}
           ${analyticsBreakdownHTML('Provider', d.by_provider, totalRuns, 'unknown')}
           ${bulletsSection}
+          ${retentionSection}
         </div>`;
     }
 

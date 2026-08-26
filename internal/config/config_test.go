@@ -261,6 +261,109 @@ repos:
 	}
 }
 
+// --- data-retention-and-rotation: project retention configuration ----------
+
+// A project that declares no retention: block has a nil Retention, distinct
+// from a project that declared an empty block — the same distinction
+// Graphify/Export already make. No run, phase, envelope, delivery, or
+// artifact belonging to such a project is ever rotated (spec.md's "A project
+// with no retention block never rotates").
+func TestProjectWithoutRetentionBlockHasNilRetention(t *testing.T) {
+	tempDir := t.TempDir()
+	yaml := `
+project: no-retention
+repos:
+  svc:
+    path: /tmp/svc
+`
+	path := filepath.Join(tempDir, "no-retention.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := LoadProject(path)
+	if err != nil {
+		t.Fatalf("LoadProject: %v", err)
+	}
+	if proj.Retention != nil {
+		t.Errorf("expected Retention to be nil for a project with no retention: block, got %+v", proj.Retention)
+	}
+}
+
+// A project's retention: block parses into typed fields, not just raw YAML.
+func TestRetentionBlockParsesIntoTypedFields(t *testing.T) {
+	tempDir := t.TempDir()
+	yaml := `
+project: retention-test
+repos:
+  svc:
+    path: /tmp/svc
+retention:
+  runs_after_days: 30
+  artifacts_after_days: 7
+`
+	path := filepath.Join(tempDir, "retention-test.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := LoadProject(path)
+	if err != nil {
+		t.Fatalf("LoadProject: %v", err)
+	}
+	if proj.Retention == nil {
+		t.Fatal("expected Retention to be non-nil")
+	}
+	if proj.Retention.RunsAfterDays != 30 {
+		t.Errorf("RunsAfterDays = %d, want 30", proj.Retention.RunsAfterDays)
+	}
+	if proj.Retention.ArtifactsAfterDays != 7 {
+		t.Errorf("ArtifactsAfterDays = %d, want 7", proj.Retention.ArtifactsAfterDays)
+	}
+}
+
+// A retention: block with a zero horizon fails to load with a clear error,
+// not a silently-accepted zero horizon that would rotate everything on the
+// first pass (spec.md's "A zero horizon is rejected, not silently accepted").
+func TestRetentionBlockWithZeroHorizonFailsToLoad(t *testing.T) {
+	tempDir := t.TempDir()
+	yaml := `
+project: zero-retention
+repos:
+  svc:
+    path: /tmp/svc
+retention:
+  runs_after_days: 0
+  artifacts_after_days: 7
+`
+	path := filepath.Join(tempDir, "zero-retention.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadProject(path); err == nil {
+		t.Fatal("expected LoadProject to fail for a retention block with runs_after_days: 0, got nil error")
+	}
+}
+
+// A negative horizon is rejected the same way a zero one is.
+func TestRetentionBlockWithNegativeHorizonFailsToLoad(t *testing.T) {
+	tempDir := t.TempDir()
+	yaml := `
+project: negative-retention
+repos:
+  svc:
+    path: /tmp/svc
+retention:
+  runs_after_days: 30
+  artifacts_after_days: -1
+`
+	path := filepath.Join(tempDir, "negative-retention.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadProject(path); err == nil {
+		t.Fatal("expected LoadProject to fail for a retention block with artifacts_after_days: -1, got nil error")
+	}
+}
+
 // Omitting the field entirely preserves today's behaviour: one attempt, no retry.
 func TestRetriesOmittedMeansZero(t *testing.T) {
 	tempDir := t.TempDir()

@@ -315,7 +315,7 @@ func (s *Store) migrate() error {
 		created_at DATETIME NOT NULL,
 		FOREIGN KEY (run_id) REFERENCES runs(id)
 	);
-	` + createIntentsTable + createBulletsTable + createChangesTable + createDeliveriesTable + createArtifactsTable
+	` + createIntentsTable + createBulletsTable + createChangesTable + createDeliveriesTable + createArtifactsTable + createRetentionRollupsTable
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
 	}
@@ -379,6 +379,7 @@ func (s *Store) migrateAddTables() error {
 		{"deliveries", createDeliveriesTable},
 		{"export_cursor", createExportCursorTable},
 		{"artifacts", createArtifactsTable},
+		{"retention_rollups", createRetentionRollupsTable},
 	}
 	for _, w := range wanted {
 		has, err := s.hasTable(w.table)
@@ -1087,6 +1088,15 @@ func (s *Store) ListRecentRuns(limit int) ([]RunRecord, error) {
 	return list, rows.Err()
 }
 
+// rotationEligibleStatusesSQL is the terminal-status list RunsEligibleForCleanup
+// and RotateProject (internal/store/retention.go) both filter on. It is a
+// single named literal, not two copies, so a future change to either list
+// cannot silently drift from the other. It excludes "timed_out" even though
+// IsTerminalRunStatus treats that status as terminal — narrower on purpose,
+// matching RunsEligibleForCleanup's already-shipped behavior, which this
+// does not change.
+const rotationEligibleStatusesSQL = `'passed','failed','cancelled','interrupted'`
+
 // RunsEligibleForCleanup returns terminal runs whose UpdatedAt is at or
 // before cutoff — used by the automatic fleet-cleanup pass so it does not
 // have to rely on ListRecentRuns' fixed 200-row window, which answers "is
@@ -1095,7 +1105,7 @@ func (s *Store) ListRecentRuns(limit int) ([]RunRecord, error) {
 func (s *Store) RunsEligibleForCleanup(cutoff time.Time) ([]RunRecord, error) {
 	rows, err := s.db.Query(
 		`SELECT `+runColumns+` FROM runs
-		 WHERE status IN ('passed','failed','cancelled','interrupted')
+		 WHERE status IN (`+rotationEligibleStatusesSQL+`)
 		   AND updated_at <= ?
 		 ORDER BY updated_at ASC`,
 		cutoff,
