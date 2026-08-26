@@ -193,6 +193,14 @@ _sgt_response_lock_acquire() {
   timeout="${SGT_RESPONSE_LOCK_TIMEOUT:-30}"
   [[ "$timeout" =~ ^[0-9]+$ ]] || { printf 'ERROR: Invalid response lock timeout: %s\n' "$timeout" >&2; return 1; }
   started=$SECONDS
+  # Every caller passes a directory it believes already exists (a fleet
+  # repo-state dir, a worktree), but nothing here has ever required that of
+  # its own accord -- a candidate/gate file write into a missing directory
+  # fails with the same opaque "No such file or directory" on every retry,
+  # since nothing about retrying creates the directory either (Deloitte
+  # support #38). mkdir -p is a no-op when the directory already exists, so
+  # this changes nothing for every caller whose directory is already there.
+  mkdir -p "$repo_state" || return 1
   owner_record="$(_sgt_response_lock_record_for_pid "$$")" || return 1
   printf '%s\n' "$owner_record" > "$candidate" || return 1
 
