@@ -22,6 +22,11 @@ import (
 type fleetRunSource interface {
 	ListRecentRuns(limit int) ([]store.RunRecord, error)
 	RunsEligibleForCleanup(cutoff time.Time) ([]store.RunRecord, error)
+	// ListBulletsForIntent joins a lease to the bullet actually occupying it
+	// (handleFleet's "what is using this worktree, and what state is it in"
+	// view) — a run's coarse status ("running") says nothing about whether
+	// a specific repo's bullet is red, green, or blocked.
+	ListBulletsForIntent(intentID string) ([]store.BulletRecord, error)
 }
 
 // fleetCleaner owns the fleet worktree views and reclaim decisions — both the
@@ -37,41 +42,86 @@ func newFleetCleaner(runs fleetRunSource) *fleetCleaner {
 	return &fleetCleaner{runs: runs}
 }
 
+// WorktreeLease is one repository's isolated worktree within a run's fleet
+// directory — the actual unit of disk/git state an operator wants to know
+// about, not the run directory containing it (a multi-repo run has one
+// worktree per repo, each with its own branch, dirty state, and bullet).
+type WorktreeLease struct {
+	TaskID       string `json:"task_id"`
+	Repo         string `json:"repo"`
+	Path         string `json:"path"`
+	Status       string `json:"status"`        // the owning run's status
+	BulletStatus string `json:"bullet_status"` // this repo's bullet status, "" if none found
+	Branch       string `json:"branch"`        // "" if not resolvable
+	Dirty        bool   `json:"dirty"`
+	CreatedAt    string `json:"created_at"`
+}
+
 func (fc *fleetCleaner) handleFleet(w http.ResponseWriter, r *http.Request) {
 	fleetDir := dag.FleetRoot()
 
-	type WorktreeLease struct {
-		TaskID    string `json:"task_id"`
-		Path      string `json:"path"`
-		Status    string `json:"status"`
-		CreatedAt string `json:"created_at"`
-	}
-
 	recentRuns, _ := fc.runs.ListRecentRuns(200)
-	runStatusMap := make(map[string]string)
+	runByTaskID := make(map[string]store.RunRecord)
 	for _, r := range recentRuns {
-		runStatusMap[r.ID] = r.Status
-		runStatusMap[r.TaskID] = r.Status
+		runByTaskID[r.ID] = r
+		runByTaskID[r.TaskID] = r
 	}
 
 	var leases []WorktreeLease
 	entries, _ := os.ReadDir(fleetDir)
 	for _, entry := range entries {
-		if entry.IsDir() {
-			info, _ := entry.Info()
-			modTime := time.Now().Format(time.RFC3339)
-			if info != nil {
-				modTime = info.ModTime().Format(time.RFC3339)
+		if !entry.IsDir() {
+			continue
+		}
+		taskID := entry.Name()
+		runDir := filepath.Join(fleetDir, taskID)
+		run, known := runByTaskID[taskID]
+		status := "unknown"
+		if known {
+			status = run.Status
+		}
+
+		bulletByRepo := map[string]string{}
+		if known && run.IntentID != "" {
+			if bullets, err := fc.runs.ListBulletsForIntent(run.IntentID); err == nil {
+				for _, b := range bullets {
+					bulletByRepo[b.Repo] = b.Status
+				}
 			}
-			st, ok := runStatusMap[entry.Name()]
-			if !ok {
-				st = "unknown"
+		}
+
+		repoEntries, _ := os.ReadDir(runDir)
+		found := false
+		for _, repoEntry := range repoEntries {
+			if !repoEntry.IsDir() {
+				continue
 			}
+			repoWT := filepath.Join(runDir, repoEntry.Name())
+			if gitOut(repoWT, "rev-parse", "--git-dir") == "" {
+				continue // not a real worktree
+			}
+			found = true
 			leases = append(leases, WorktreeLease{
-				TaskID:    entry.Name(),
-				Path:      filepath.Join(fleetDir, entry.Name()),
-				Status:    st,
-				CreatedAt: modTime,
+				TaskID:       taskID,
+				Repo:         repoEntry.Name(),
+				Path:         repoWT,
+				Status:       status,
+				BulletStatus: bulletByRepo[repoEntry.Name()],
+				Branch:       gitOut(repoWT, "rev-parse", "--abbrev-ref", "HEAD"),
+				Dirty:        gitOut(repoWT, "status", "--porcelain") != "",
+				CreatedAt:    dirModTime(repoWT),
+			})
+		}
+		if !found {
+			// No recognizable per-repo worktree inside — an empty, stray, or
+			// pre-this-change directory. Still reported, so a lease never
+			// silently disappears from the count an operator is about to
+			// prune against.
+			leases = append(leases, WorktreeLease{
+				TaskID:    taskID,
+				Path:      runDir,
+				Status:    status,
+				CreatedAt: dirModTime(runDir),
 			})
 		}
 	}
@@ -83,6 +133,16 @@ func (fc *fleetCleaner) handleFleet(w http.ResponseWriter, r *http.Request) {
 		"allocated_worktrees": len(leases),
 		"leases":              leases,
 	})
+}
+
+// dirModTime is dir's modification time, RFC3339, or "now" if it cannot be
+// read — matching handleFleet's pre-existing fallback for a stat failure.
+func dirModTime(dir string) string {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return time.Now().Format(time.RFC3339)
+	}
+	return info.ModTime().Format(time.RFC3339)
 }
 
 func (fc *fleetCleaner) handleCleanWorktrees(w http.ResponseWriter, r *http.Request) {

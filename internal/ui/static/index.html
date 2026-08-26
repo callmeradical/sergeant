@@ -2025,8 +2025,16 @@
         ${leases.map(l => `
           <div class="p-2 rounded bg-[#161b22] border border-[#30363d] space-y-1">
             <div class="flex items-center justify-between gap-2">
-              <span class="font-mono font-bold text-[#58a6ff] truncate">${escapeHTML(l.task_id)}</span>
-              <span class="text-[9px] px-1.5 py-0.5 rounded border border-[#30363d] text-[#8b949e] font-mono shrink-0">${escapeHTML(l.status || '—')}</span>
+              <span class="font-mono font-bold text-[#58a6ff] truncate">${escapeHTML(l.task_id)}${l.repo ? ' &middot; ' + escapeHTML(l.repo) : ''}</span>
+              <div class="flex items-center gap-1 shrink-0">
+                ${l.bullet_status ? `<span class="text-[9px] px-1.5 py-0.5 rounded border border-[#30363d] text-[#58a6ff] font-mono" title="Bullet status">${escapeHTML(l.bullet_status)}</span>` : ''}
+                <span class="text-[9px] px-1.5 py-0.5 rounded border border-[#30363d] text-[#8b949e] font-mono" title="Run status">${escapeHTML(l.status || '—')}</span>
+              </div>
+            </div>
+            <div class="flex items-center gap-2 text-[10px] text-[#8b949e]">
+              <i class="fa-solid fa-code-branch text-[8px]" aria-hidden="true"></i>
+              <span class="font-mono truncate">${escapeHTML(l.branch || 'not a worktree')}</span>
+              ${l.dirty ? '<span class="text-amber-400 shrink-0" title="Uncommitted changes"><i class="fa-solid fa-circle text-[6px]" aria-hidden="true"></i> dirty</span>' : ''}
             </div>
             <div class="font-mono text-[10px] text-slate-400 break-all" title="${escapeAttr(l.path || '')}">${escapeHTML(l.path || '—')}</div>
             <div class="flex items-center justify-between gap-2 text-[10px] text-[#8b949e]">
