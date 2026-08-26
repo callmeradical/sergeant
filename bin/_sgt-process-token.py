@@ -37,11 +37,18 @@ def pidfd_syscall_numbers():
     return None
 
 
+_LIBC_WITH_ERRNO = None
+
 def libc_pidfd_function(name):
     if force_pidfd_syscall():
         return None
-    return getattr(ctypes.CDLL(None, use_errno=True), name, None)
+    global _LIBC_WITH_ERRNO
+    if _LIBC_WITH_ERRNO is None:
+        _LIBC_WITH_ERRNO = ctypes.CDLL(None, use_errno=True)
+    return getattr(_LIBC_WITH_ERRNO, name, None)
 
+
+_LIBC_NO_ERRNO = None
 
 def pidfd_available():
     if (not force_pidfd_syscall() and hasattr(os, "pidfd_open") and
@@ -49,11 +56,13 @@ def pidfd_available():
         return True
     if not sys.platform.startswith("linux"):
         return False
-    libc = ctypes.CDLL(None)
-    if (not force_pidfd_syscall() and hasattr(libc, "pidfd_open") and
-            hasattr(libc, "pidfd_send_signal")):
+    global _LIBC_NO_ERRNO
+    if _LIBC_NO_ERRNO is None:
+        _LIBC_NO_ERRNO = ctypes.CDLL(None)
+    if (not force_pidfd_syscall() and hasattr(_LIBC_NO_ERRNO, "pidfd_open") and
+            hasattr(_LIBC_NO_ERRNO, "pidfd_send_signal")):
         return True
-    return hasattr(libc, "syscall") and pidfd_syscall_numbers() is not None
+    return hasattr(_LIBC_NO_ERRNO, "syscall") and pidfd_syscall_numbers() is not None
 
 
 def pidfd_open(pid):
