@@ -1785,5 +1785,117 @@ a{color:var(--muted)}
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
+<header>
+  <h1>Sergeant v2</h1>
+  <p>Independent review. Written by the critic, not the builder.</p>
+  <p class="meta">
+    Review 035 · 2026-08-25 · branch <code>v2</code> · merge commit <code>db0f3db</code>
+    ("feat(runner,ui): pipeline artifacts -- durable capture of gate/phase evidence",
+    merge of <code>6c175c7</code> "Implement OpenSpec change pipeline-artifacts. Before
+    writing anything: r[...]" into <code>4567d20</code>) reviewed against
+    <code>openspec/changes/pipeline-artifacts/{proposal,design,tasks}.md</code> and
+    <code>specs/pipeline-artifacts/spec.md</code> · current <code>v2</code> HEAD is
+    <code>db0f3db</code>; build/vet/test run at that HEAD
+  </p>
+</header>
+
+<section>
+  <h2>Current status</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code>, no output</div></div>
+    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./internal/...</code>, no output</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">clean under the prescribed skip list</span></div><div class="small">Ran the exact command <code>tasks.md</code> specifies: <code>go test ./internal/... -count=1 -skip '^(TestBuildProjectGraphAppliesExcludePatterns|...|TestBuildGraphEndpointBuildsAndPublishes)$'</code> — all 12 packages pass, including <code>internal/runner</code> (6.9s) and <code>internal/ui</code> (13.5s), the two packages this change touches</div></div>
+    <div class="card"><div class="label">Call sites wired</div><div class="value"><span class="status">confirmed, not just defined</span></div><div class="small"><code>grep -n SERGEANT_ARTIFACT_DIR\|captureArtifacts internal/runner/runner.go</code> shows both <code>RunCodeGate</code> (lines 275-336) and <code>RunAgentPhase</code> (lines 528-712) set the env var on <code>cmd.Env</code>/<code>extraEnv</code> and call <code>captureArtifacts</code> after their own <code>RecordPhase</code> — and <code>TestAgentPhaseCapturesArtifacts</code> proves the second site independently of the first, directly guarding this codebase's known "implemented but never called" bug class</div></div>
+    <div class="card"><div class="label">Durable path</div><div class="value"><span class="status">genuinely outside the worktree</span></div><div class="small"><code>artifactsRoot()</code> defaults to <code>~/.local/share/sergeant/artifacts</code>; <code>dag.FleetRoot()</code> (the worktree root <code>automated-fleet-cleanup</code> reclaims) defaults to the sibling-but-distinct <code>~/.local/share/sergeant-v2/fleet</code> — different subtrees entirely, not merely different subdirectories of the same reclaimed root</div></div>
+    <div class="card"><div class="label">Table + migration</div><div class="value"><span class="status">wired both ways</span></div><div class="small"><code>createArtifactsTable</code> appears both in <code>store.go</code>'s initial-schema string (line 318) and in <code>migrateAddTables</code>'s <code>wanted</code> list (line 381) — a pre-existing database gains the table too, not only a fresh one</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Spec scenario coverage</h2>
+  <table>
+    <tr><th>spec.md scenario</th><th>Covering test</th></tr>
+    <tr><td>A file written to the artifact directory is captured durably</td><td><code>TestGateArtifactIsCapturedDurably</code> (<code>internal/runner/artifacts_test.go</code>) — real <code>RunCodeGate</code>, reads the durable file's actual bytes back off disk</td></tr>
+    <tr><td>A command that writes nothing produces no artifacts</td><td><code>TestGateWithNoArtifactsProducesNoRecords</code></td></tr>
+    <tr><td>A captured artifact outlives its worktree</td><td><code>TestCapturedArtifactOutlivesWorktreeReclaim</code> (<code>internal/ui/cleanup_test.go</code>) — a real <code>RunCodeGate</code> call followed by a real <code>reclaimFleetDir</code> call, the same function <code>reclaimEligibleFleetDirs</code> uses; asserts the worktree is gone and the artifact file still exists</td></tr>
+    <tr><td>Exceeding the artifact cap is recorded, not silently dropped</td><td><code>TestExceedingArtifactCountCapIsRecordedNotDropped</code> covers the file-count half. The total-bytes half of the same scenario (<code>totalBytes+f.size &gt; maxArtifactTotalBytes</code>, <code>internal/runner/artifacts.go:106</code>) has <strong>no test in the shipped suite</strong> — see caveat below</td></tr>
+    <tr><td>A failing gate's artifacts are still captured</td><td><code>TestFailingGateStillCapturesArtifacts</code> — gate exits 1, artifact still recorded</td></tr>
+    <tr><td>A capture failure does not change the gate's own result</td><td><code>TestCaptureFailureDoesNotChangeGateResult</code> — durable root's parent path is a plain file so <code>os.MkdirAll</code> genuinely fails; asserts <code>res.Passed</code> is unaffected and a dropped-notice row exists</td></tr>
+    <tr><td>A run with captured artifacts shows them beneath its workflow graph</td><td>Backend substrate: <code>TestHandleListArtifactsReturnsCapturedArtifacts</code> and <code>TestArtifactCapturedByRealGateIsServedAsAnImage</code> (real <code>RunCodeGate</code> → real HTTP routes → asserts an <code>image/*</code> content type). The DOM half (<code>artifactsSectionHTML</code>/<code>artifactItemHTML</code> actually appending beneath <code>#workflow-graph</code>, grouped by <code>phase_id</code>) has no test in this repo (no frontend suite exists here) — see caveat below</td></tr>
+    <tr><td>A run with no artifacts shows no artifacts section</td><td>Same gap as above — no in-repo test; independently verified, see caveat below</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Independent verification beyond the shipped suite</h2>
+  <p><strong>Byte-cap branch.</strong> The shipped suite tests only the file-count half of the exceeding-cap
+  scenario. Wrote a throwaway test directly against <code>maxArtifactTotalBytes</code> (four ~8.3MB files, three
+  fit under the 25MB cap, the fourth must be dropped), ran it against the real <code>captureArtifacts</code>
+  path via <code>RunCodeGate</code>, confirmed <code>captured=3 droppedRows=1 droppedTotal=1</code> with
+  <code>DroppedReason</code> reading <code>"f03.bin: exceeded max total artifact bytes (26214400)"</code>, then
+  deleted the test — it was not added to the repo. The byte-cap branch works correctly; it is simply untested
+  by the merge as it stands.</p>
+  <p><strong>Frontend rendering.</strong> Extracted <code>fetchArtifactsForRun</code>/<code>artifactsSectionHTML</code>/<code>artifactItemHTML</code>
+  from <code>internal/ui/static/index.html</code> and ran them directly under Node against representative data:
+  an empty list produces exactly <code>""</code> (no section, no empty heading — matching design.md's "additive,
+  not mandatory" requirement); a populated list groups correctly by <code>phase_id</code>, renders an
+  <code>&lt;img&gt;</code> thumbnail for <code>image/png</code>, a plain underlined link for
+  <code>application/json</code>, and an amber dropped-count notice for a synthetic <code>dropped_count</code> row
+  — all three of <code>artifactItemHTML</code>'s branches confirmed correct by direct execution, not by reading
+  the code and trusting it.</p>
+  <p>Checked <code>tasks.md</code>'s Task 2 verification instruction — dispatch a gate that writes a real PNG,
+  confirm the thumbnail renders, and note that manual check in the PR description — against both implementation
+  commits' messages (<code>6c175c7</code> and the merge commit <code>db0f3db</code>). Neither mentions it: the
+  merge commit's otherwise-detailed "Verified before merging" list covers the diff review, the full test run,
+  and three mutation-testing exercises, but is silent on this specific manual check. No PR description, notes
+  file, or other artifact in the repo documents it either.</p>
+</section>
+
+<section>
+  <h2>Verdict</h2>
+  <div class="item warn">
+    <p><strong>MEETS SPEC WITH CAVEATS.</strong> <code>internal/runner/artifacts.go</code>,
+    <code>internal/store/artifact.go</code>, <code>internal/ui/artifacts.go</code>, and the
+    <code>index.html</code>/<code>server.go</code> diffs match design.md's contract exactly — table shape,
+    <code>ArtifactRecord</code> fields, the two route handlers, the <code>captureArtifacts</code> signature and
+    its bounded/best-effort/never-fails behavior, and the frontend's grouping-by-phase rendering. Both capture
+    call sites (<code>RunCodeGate</code> and <code>RunAgentPhase</code>) are genuinely wired, not merely defined
+    — <code>TestAgentPhaseCapturesArtifacts</code> proves the second site independently, directly addressing this
+    codebase's recurring "implemented but never called" bug class. The durability claim holds structurally, not
+    just in the one test that exercises it: <code>artifactsRoot()</code>'s default
+    (<code>~/.local/share/sergeant/artifacts</code>) and <code>dag.FleetRoot()</code>'s default
+    (<code>~/.local/share/sergeant-v2/fleet</code>) are disjoint subtrees, and
+    <code>TestCapturedArtifactOutlivesWorktreeReclaim</code> exercises the real <code>reclaimFleetDir</code>
+    mechanism end to end. The never-fails guarantee holds by construction: both call sites invoke
+    <code>captureArtifacts</code> only after their own <code>PhaseRecord</code>/<code>GateResult</code> is already
+    built, and the function itself never returns an error to its caller. <code>go build</code>/<code>go
+    vet</code>/<code>go test ./internal/...</code> are clean under <code>tasks.md</code>'s prescribed
+    <code>-skip</code>. <strong>Two caveats</strong>, neither a defect in shipped behavior — both independently
+    verified correct by this review, both gaps in verification evidence rather than in the code: (1) the
+    total-bytes half of spec.md's "Exceeding the artifact cap is recorded, not silently dropped" scenario has no
+    test in the merged suite (only the file-count half does); this review wrote and ran a throwaway test against
+    the real code confirming the byte-cap branch works, then deleted it — <strong>non-blocking</strong> against
+    the scenario's correctness, but the merge's own test coverage of it is incomplete. (2) The two dashboard
+    scenarios ("shows them beneath its workflow graph" / "shows no artifacts section") have no automated test
+    (consistent with this repo's no-frontend-test-suite precedent) and, contrary to tasks.md's explicit
+    instruction, no documented manual check either — neither implementation commit's message mentions dispatching
+    a gate and confirming the thumbnail rendered; this review extracted and ran the shipped JS under Node and
+    confirmed both scenarios' rendering logic is correct — <strong>non-blocking</strong> against actual behavior,
+    but a real process gap against tasks.md's own verification requirement for Task 2.</p>
+  </div>
+</section>
+
+<footer>
+  <p class="meta">Review 035 · findings above are reproduced from commands run directly against the current
+  <code>v2</code> working tree at HEAD <code>db0f3db</code>: <code>go build</code>/<code>go vet</code>/<code>go
+  test</code> were actually executed (not assumed from the merge message), every capture call site was located by
+  <code>grep</code> and read in full rather than trusted from design.md's line-number claims, the byte-cap branch
+  and the frontend rendering functions were independently exercised (a throwaway Go test, since deleted, and a
+  Node extraction of the shipped JS) rather than verified by code reading alone, and the absence of tasks.md's
+  required manual-check note was confirmed by reading both implementation commits' messages in full. Reviews 034
+  and earlier were not re-examined; they stand as recorded above.</p>
+  <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
+</footer>
+
 </main></body>
 </html>
