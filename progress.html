@@ -2047,5 +2047,135 @@ a{color:var(--muted)}
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
+<header>
+  <h1>Sergeant v2</h1>
+  <p>Independent review. Written by the critic, not the builder.</p>
+  <p class="meta">
+    Review 037 · 2026-08-26 · branch <code>v2</code> · merge commit <code>22a50c1</code>
+    ("feat(store,dag,ui): observed change-request merge state", merge of
+    <code>165cc83</code> "Implement OpenSpec change observed-change-request-merge-state" into
+    <code>137fe45</code> "feat(ui): show real worktree status, branch, and owner in the fleet
+    drawer") reviewed against
+    <code>openspec/changes/observed-change-request-merge-state/{proposal,design,tasks}.md</code>
+    and <code>specs/change-request-merge/spec.md</code> · current <code>v2</code> HEAD is
+    <code>22a50c1</code>; build/vet/test run at that HEAD
+  </p>
+</header>
+
+<section>
+  <h2>Current status</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code>, no output</div></div>
+    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./internal/...</code>, no output</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">clean under the prescribed skip list</span></div><div class="small">Ran the exact command tasks.md specifies: all 13 packages pass, including the new <code>internal/changerequest</code> (0.26s), <code>internal/dag</code> (8.9s), <code>internal/store</code> (3.0s), and <code>internal/ui</code> (16.2s)</div></div>
+    <div class="card"><div class="label"><code>handleCheckMergeStatus</code> wiring</div><div class="value"><span class="status">confirmed, not just defined</span></div><div class="small"><code>mux.HandleFunc("/api/check-merge-status", srv.handleCheckMergeStatus)</code> is present in <code>Handler()</code>'s route block, and <code>static/index.html</code>'s <code>selectRun</code> genuinely <code>await fetch(...)</code>s it before <code>renderWorkflowGraph</code> — this codebase's recurring "implemented but never wired up" bug class does not recur here</div></div>
+    <div class="card"><div class="label">D6 "never merges" invariant</div><div class="value"><span class="status">holds</span></div><div class="small"><code>grep exec.Command(Context)?</code> across <code>internal/changerequest</code> and the new <code>server.go</code> code shows exactly two subprocess calls: <code>gh pr create</code> (opens, does not merge) and <code>gh pr view --json state,mergedAt,baseRefName</code> (read-only). No merge/push invocation exists anywhere in the new mechanism</div></div>
+    <div class="card"><div class="label">Fleet drawer survival</div><div class="value"><span class="status">intact</span></div><div class="small">Review 036's target commit <code>137fe45</code> ("feat(ui): show real worktree status...") is still present in <code>git log</code> as this merge's other parent; <code>WorktreeLease</code>/<code>bullet_status</code> still present in <code>fleet.go</code>/<code>index.html</code>, and all 15 <code>Fleet</code>/<code>Worktree</code>-named tests pass unchanged, confirming the auto-merge of <code>index.html</code> did not clobber it</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Spec scenario coverage</h2>
+  <table>
+    <tr><th>spec.md scenario</th><th>Covering test</th></tr>
+    <tr><td>A run's first worktree creation records its real base branch</td><td><code>TestPrepareWorktreeRecordsTheSourceRepoRealBaseBranch</code> (<code>internal/dag/base_branch_test.go</code>) — real <code>prepareWorktree</code> against a real git repo checked out on <code>main</code></td></tr>
+    <tr><td>Resuming a run does not overwrite its recorded base branch</td><td><code>TestResumingARunDoesNotOverwriteItsRecordedBaseBranch</code> — removes the worktree, moves the source repo's own checkout to a different branch, resumes, confirms the recorded value is unchanged</td></tr>
+    <tr><td>A GitHub remote uses the GitHub provider automatically</td><td><code>TestDetectProviderRecognizesGitHubRemotes</code> (<code>internal/changerequest/changerequest_test.go</code>), both SSH and HTTPS forms; end-to-end through the real handler in <code>TestCreatePRPersistsTheChangeRequestURLOntoTheBullet</code></td></tr>
+    <tr><td>An unrecognized remote is refused clearly</td><td><code>TestDetectProviderRefusesUnrecognizedRemotes</code> (unit) and <code>TestCreatePRRefusesAnUnrecognizedRemoteWithoutFabricatingAChangeRequest</code> (<code>internal/ui/changerequest_seal_test.go</code>) — real 400 naming <code>gitlab.com</code>, bullet's <code>PRURL</code> stays empty, seal is not reverted</td></tr>
+    <tr><td>A successfully opened change request is readable from the bullet afterward</td><td><code>TestCreatePRPersistsTheChangeRequestURLOntoTheBullet</code> — <code>GetBullet</code> after a real <code>POST /api/create-pr</code>, not just the envelope</td></tr>
+    <tr><td>The change request names the run's recorded base branch</td><td><code>TestCreatePRCallsCreateWithTheRunsRecordedBaseBranch</code> — asserts the fake provider's <code>lastBase</code> equals the run's recorded <code>release/9.9</code>, a value that could not be produced by a guess</td></tr>
+    <tr><td>Activating a run's pipeline view checks its sealed bullets' merge state</td><td><code>selectRun</code>'s own diff (<code>index.html</code>) plus <code>TestCheckMergeStatusAdvancesToMergedWhenMergedIntoExpectedBase</code> exercising the endpoint it calls</td></tr>
+    <tr><td>A run with no sealed bullets triggers no provider call</td><td><code>TestCheckMergeStatusWithNoSealedBulletsIsACheapNoOp</code> — a green bullet and a sealed-but-no-<code>PRURL</code> bullet both present, asserts the fake provider's <code>Status</code> is invoked zero times</td></tr>
+    <tr><td>A merge into the expected base advances the bullet to merged</td><td><code>TestCheckMergeStatusAdvancesToMergedWhenMergedIntoExpectedBase</code></td></tr>
+    <tr><td>A change request still open leaves the bullet untouched</td><td><code>TestCheckMergeStatusLeavesAnOpenChangeRequestUntouchedAtSealed</code></td></tr>
+    <tr><td>A merge into an unexpected base blocks the bullet</td><td><code>TestCheckMergeStatusBlocksWhenMergedIntoUnexpectedBase</code> — asserts <code>status == "blocked"</code> (never <code>"merged"</code>, never left at <code>"sealed"</code>) and <code>BlockedReason</code> names both <code>"main"</code> and <code>"v2"</code></td></tr>
+    <tr><td>(tasks.md) one bullet's provider failure does not stop another's check</td><td><code>TestCheckMergeStatusOneBulletsFailureDoesNotStopAnother</code> — two bullets in different repos of the same run, one provider call fails, the other still advances to <code>merged</code>, and the response reports the failure rather than swallowing it</td></tr>
+    <tr><td>(tasks.md) the provider registry is actually populated, not just declared</td><td><code>TestGitHubProviderIsRegisteredInProvidersMap</code> — reads <code>Providers["github"]</code> directly rather than trusting <code>init()</code> ran</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Independent verification beyond the shipped suite</h2>
+  <p><strong>Multi-repo bullet resolution in <code>handleCheckMergeStatus</code>, checked directly.</strong>
+  Task brief item 6 asked whether <code>checkBulletMergeStatus</code> could get confused about which repo a
+  bullet belongs to on a run spanning multiple repos. Read <code>server.go</code>'s implementation: it resolves
+  <code>repoPath</code> from <code>proj.Repos[b.Repo]</code> — the bullet's own <code>Repo</code> field — not
+  from the request body's single <code>repo</code> parameter (that field belongs to <code>handleCreatePR</code>
+  only) and not from the first repo in the project map. <code>merge_status_test.go</code>'s fixture wires two
+  distinct repo names (<code>svc</code>, <code>svc2</code>) into the same project and
+  <code>TestCheckMergeStatusOneBulletsFailureDoesNotStopAnother</code> gives each its own bullet and its own
+  <code>PRURL</code>, then asserts they are checked and advanced independently — this is a real exercise of the
+  per-bullet resolution path, not an assumption from reading the code alone.</p>
+  <p><strong>D6 checked by exhaustive grep, not by trusting the doc comments.</strong> Searched every
+  <code>exec.Command</code>/<code>exec.CommandContext</code> call in <code>internal/changerequest</code> and
+  <code>internal/ui/server.go</code>'s new code: only <code>gh pr create</code> (in <code>githubProvider.Create</code>,
+  which opens a change request, exactly what proposal.md scopes it to) and <code>gh pr view ... --json
+  state,mergedAt,baseRefName</code> (read-only) exist. No path anywhere in the new mechanism runs <code>gh pr
+  merge</code>, <code>git merge</code>, or <code>git push</code>. The "never merges anything itself" invariant
+  (D6) genuinely holds in the merged code, not merely in its comments.</p>
+  <p><strong>tasks.md's Task 4 manual-check instruction was not documented as performed.</strong> tasks.md is
+  explicit: Task 4's verification is "the same command as Task 1, plus a manual check (no scripted frontend test
+  suite exists in this repo today): seal a bullet against a real or faked GitHub remote, open its run in the
+  dashboard, confirm the Delivery lane reflects <code>merged</code> once the underlying PR is actually merged —
+  note this manual check in the PR description." The merge commit's own message (<code>22a50c1</code>) lists what
+  was verified — diffing against merge-base, line-by-line review against the three spec documents, build/vet/test,
+  and five mutation tests — but does not mention this manual dashboard check anywhere, either as performed or as
+  explicitly skipped. This is a real gap against tasks.md's own stated verification bar for Task 4, but it is
+  procedural, not a code defect: every spec.md scenario this manual check would have exercised end-to-end already
+  has a real, independent automated test exercising the actual mechanism (the provider seam, the store writes,
+  the route registration, and the frontend's own <code>fetch</code> call in <code>selectRun</code>'s diff), so
+  there is no scenario left uncovered by anything other than a live GitHub round trip. Non-blocking.</p>
+  <p><strong>The <code>break</code> in <code>handleCreatePR</code>'s bullet-URL write, read directly.</strong> On
+  a successful <code>Create</code>, <code>handleCreatePR</code> loops <code>intentBullets</code> for the first
+  bullet whose <code>Repo == req.Repo</code> and writes the URL onto it, then <code>break</code>s. Since
+  <code>SealBulletForRun(req.RunID, req.Repo)</code> already sealed at most the run's own bullet(s) for that one
+  repo before this point, and nothing in this change request's scope introduces more than one bullet per repo
+  per intent, this is a faithful match for "find the bullet <code>SealBulletForRun</code> just sealed" as
+  design.md specifies (step 4) — not a latent multi-bullet-per-repo bug, since that shape does not exist
+  elsewhere in the schema either.</p>
+</section>
+
+<section>
+  <h2>Verdict</h2>
+  <div class="item warn">
+    <p><strong>MEETS SPEC WITH CAVEATS.</strong> Every ADDED requirement and every scenario in
+    <code>specs/change-request-merge/spec.md</code> has a real, independent test exercising the actual mechanism
+    (the provider seam swapped at <code>changerequest.Providers["github"]</code>, never a bypass of
+    <code>handleCreatePR</code>/<code>handleCheckMergeStatus</code> themselves) — see the coverage table above.
+    <code>go build</code>/<code>go vet</code>/<code>go test ./internal/...</code> are clean under tasks.md's
+    prescribed <code>-skip</code>, including the three new/changed packages (<code>changerequest</code>,
+    <code>dag</code>, <code>store</code>) and <code>ui</code>. <code>handleCheckMergeStatus</code> is genuinely
+    registered in the mux and genuinely called (awaited) from <code>selectRun</code>, not merely defined — the
+    codebase's recurring "implemented but never wired up" class does not recur here. The merged-into-wrong-base
+    path genuinely produces <code>blocked</code> with a reason naming both branches (proven against the real
+    store write, not a mock), never a silent <code>merged</code> or no-op. D6 ("Sergeant never merges anything
+    itself") holds under direct inspection of every subprocess call the new code makes: only <code>gh pr
+    create</code> (open) and <code>gh pr view</code> (read) exist; no merge or push path was added.
+    <code>handleCheckMergeStatus</code> correctly resolves each bullet's own repo via <code>proj.Repos[b.Repo]</code>,
+    proven by a two-repo test fixture that advances one bullet while the other's provider call fails. The
+    fleet-drawer <code>WorktreeLease</code> enrichment from the separately-committed <code>137fe45</code> survived
+    this merge's auto-merge of <code>index.html</code> intact, with all 15 of its tests still passing.
+    <strong>One caveat, non-blocking against every named spec.md scenario</strong>: tasks.md's Task 4 explicitly
+    required a manual dashboard check to be performed and noted in the PR description before merging; the merge
+    commit's own verification list does not mention it, either as done or as explicitly waived. This is a
+    documentation/process gap against tasks.md, not a functional defect — no spec.md scenario is left uncovered,
+    since automated tests independently exercise every mechanism that check would have exercised live.</p>
+  </div>
+</section>
+
+<footer>
+  <p class="meta">Review 037 · findings above are reproduced from commands run directly against the current
+  <code>v2</code> working tree at HEAD <code>22a50c1</code>: <code>go build</code>/<code>go vet</code>/<code>go
+  test ./internal/...</code> were actually executed under tasks.md's prescribed <code>-skip</code>, every scenario
+  in the coverage table above was matched to a specific test that was itself run individually with <code>-v</code>
+  to confirm it passes and genuinely names that scenario, the mux registration and <code>selectRun</code> call site
+  were read directly from <code>server.go</code> and <code>index.html</code> rather than assumed from the merge
+  message, every <code>exec.Command</code>/<code>exec.CommandContext</code> call site in the new code was
+  enumerated by grep to check D6 rather than trusted from doc comments, and the fleet-drawer survival was confirmed
+  by re-running its 15 named tests, not by diffing alone. Reviews 036 and earlier were not re-examined; they stand
+  as recorded above.</p>
+  <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
+</footer>
+
 </main></body>
 </html>
