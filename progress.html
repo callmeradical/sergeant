@@ -1897,5 +1897,155 @@ a{color:var(--muted)}
   <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
 </footer>
 
+<header>
+  <h1>Sergeant v2</h1>
+  <p>Independent review. Written by the critic, not the builder.</p>
+  <p class="meta">
+    Review 036 · 2026-08-26 · branch <code>v2</code> · merge commit <code>51e7612</code>
+    ("feat(store,ui): data retention and rotation -- opt-in DB/artifact rotation", merge of
+    <code>30c5853</code> "Implement OpenSpec change data-retention-and-rotation. Before writing
+    an[...]" into <code>b2c92fd</code> "fix(ui): stop two dispatch tests leaking a background
+    goroutine") reviewed against
+    <code>openspec/changes/data-retention-and-rotation/{proposal,design,tasks}.md</code> and
+    <code>specs/data-retention/spec.md</code>, plus the immediately preceding fix commit
+    <code>b2c92fd</code> on its own merits · current <code>v2</code> HEAD is <code>51e7612</code>;
+    build/vet/test run at that HEAD
+  </p>
+</header>
+
+<section>
+  <h2>Current status</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Build</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go build ./...</code>, no output</div></div>
+    <div class="card"><div class="label">Vet</div><div class="value"><span class="status">clean</span></div><div class="small"><code>go vet ./internal/...</code>, no output</div></div>
+    <div class="card"><div class="label">Tests</div><div class="value"><span class="status">clean under the prescribed skip list</span></div><div class="small">Ran the exact command tasks.md specifies: all 12 packages pass, including <code>internal/store</code> (6.2s) and <code>internal/ui</code> (26.0s), the two packages this change touches</div></div>
+    <div class="card"><div class="label"><code>runRetentionLoop</code> wiring</div><div class="value"><span class="status">confirmed, not just defined</span></div><div class="small"><code>git show 30c5853 -- internal/ui/server.go</code>: <code>retention: newRetentionRotator(s)</code> in <code>NewServer</code>, and <code>go srv.retention.runRetentionLoop(context.Background())</code> in <code>Start()</code> right alongside the pre-existing fleet-cleanup loop — this codebase's recurring "implemented but never called" bug class does not recur here</div></div>
+    <div class="card"><div class="label">Opt-in gate</div><div class="value"><span class="status">structurally exclusive</span></div><div class="small"><code>grep -rn RotateProject\|RotateArtifacts --include=*.go</code> shows exactly one production call site: <code>retentionRotator.rotateAll</code>, which skips every project with <code>p.Retention == nil</code> before calling either — there is no other path into rotation</div></div>
+    <div class="card"><div class="label"><code>internal/ui</code> re-run x3</div><div class="value"><span class="status">clean under the skip list; noise persists outside it</span></div><div class="small">3/3 clean runs under tasks.md's skip list. Without the skip, <code>TestBuildGraphEndpointBuildsAndPublishes</code> fails for its own known, unrelated reason (missing LLM API key) and "sql: database is closed" log lines reappear — see caveat below</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Spec scenario coverage</h2>
+  <table>
+    <tr><th>spec.md scenario</th><th>Covering test</th></tr>
+    <tr><td>A project with no retention block never rotates</td><td><code>TestRetentionRotatorSkipsProjectWithNoRetentionConfigured</code> (<code>internal/ui/retention_test.go</code>) — exercises the real loop (<code>retentionRotator.rotateAll</code>) against two real project YAMLs, not <code>RotateProject</code> in isolation; also <code>TestProjectNeverRotatedKeepsAllRunsRegardlessOfAge</code> at the store level</td></tr>
+    <tr><td>A zero horizon is rejected, not silently accepted</td><td><code>TestRetentionBlockWithZeroHorizonFailsToLoad</code> / <code>TestRetentionBlockWithNegativeHorizonFailsToLoad</code> (<code>internal/config/config_test.go</code>) — real <code>LoadProject</code> against a real YAML file on disk</td></tr>
+    <tr><td>A non-terminal run is never rotated</td><td><code>TestRotateProjectNeverRotatesANonTerminalRun</code></td></tr>
+    <tr><td>A run with an unmerged bullet is never rotated</td><td><code>TestRotateProjectNeverRotatesARunWithAnUnmergedBullet</code>, contrasted with the positive case <code>TestRotateProjectRotatesARunWhoseIntentIsFullyMerged</code> (also proves the intent and its bullet survive rotation untouched — <code>GetIntent</code>/<code>ListBulletsForIntent</code> both still resolve afterward)</td></tr>
+    <tr><td>Aggregate totals are unchanged by rotation</td><td><code>TestComputeWorkAnalyticsTotalsUnchangedByRotation</code> — real, but only exercises <code>passed</code>/<code>failed</code> outcomes; does not exercise <code>cancelled</code>/<code>interrupted</code>, which are also in <code>rotationEligibleStatusesSQL</code> and, per independent verification below, actually violate this scenario</td></tr>
+    <tr><td>An artifact past its own horizon is deleted before its parent run rotates</td><td><code>TestRotateArtifactsDeletesOldArtifactBeforeParentRunRotates</code> — real file on disk, real <code>os.Stat</code> check that it is gone, real parent-run survival check</td></tr>
+    <tr><td>An artifact newer than its horizon survives untouched</td><td><code>TestRotateArtifactsLeavesRecentArtifactUntouched</code></td></tr>
+    <tr><td>A completed rotation pass is visible to an operator</td><td><code>TestAnalyticsResponseReportsCompletedRotationPass</code> — real HTTP round trip through <code>handleAnalytics</code>, before-and-after a real <code>rotateAll()</code> pass; <code>TestAnalyticsResponseOmitsRetentionForUnconfiguredProject</code> covers the "absent, not zero" half</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Independent verification beyond the shipped suite</h2>
+  <p><strong>The one real defect this review found.</strong> <code>foldRunIntoRollup</code>
+  (<code>internal/store/retention.go</code>) only increments <code>PassedCount</code>/<code>FailedCount</code>
+  on a run's status — a plain <code>switch</code> with cases for exactly those two strings. But the eligibility
+  query it feeds from filters on <code>rotationEligibleStatusesSQL = 'passed','failed','cancelled','interrupted'</code>
+  — the same four-status list <code>RunsEligibleForCleanup</code> already uses, and design.md explicitly says
+  this reuse is intentional. A <code>cancelled</code> or <code>interrupted</code> run, once its intent (if any) is
+  fully merged and it is past cutoff, rotates exactly like a <code>passed</code>/<code>failed</code> one — its raw
+  row is deleted — but its contribution to <code>ByStatus["cancelled"]</code> / <code>ByStatus["interrupted"]</code>
+  is folded nowhere: <code>RetentionRollup</code> has no field for either, and <code>ComputeWorkAnalytics</code>'s
+  fold-in code only reads <code>ru.PassedCount</code>/<code>ru.FailedCount</code> back out. Wrote a throwaway
+  test in <code>internal/store</code>: created one <code>cancelled</code> run, backdated it, called
+  <code>ComputeWorkAnalytics</code> before and after a real <code>RotateProject</code> pass that rotated it
+  (<code>rotated == 1</code>). Result: <code>before.ByStatus = map[cancelled:1]</code>,
+  <code>after.ByStatus = map[failed:0 passed:0]</code> — the cancelled run's count is silently lost, not
+  preserved. This is a direct, reproduced violation of spec.md's "Aggregate totals are unchanged by rotation"
+  scenario for any run whose terminal status is <code>cancelled</code> or <code>interrupted</code>. The gap
+  traces back to design.md itself, not just the implementation: design.md's own <code>retention_rollups</code>
+  DDL only names <code>passed_count</code>/<code>failed_count</code>, even while the same document says
+  eligibility reuses the full four-status <code>RunsEligibleForCleanup</code> list — the implementation faithfully
+  built the schema design.md specified, which is itself missing two of the four statuses it claims to rotate. The
+  test was deleted after confirming the bug; it was not added to the repo.</p>
+  <p><strong>The <code>RotateArtifacts</code> cross-project caveat (design.md/retention.go's own documented
+  limitation).</strong> <code>artifacts</code> has no <code>project</code> column (confirmed by reading
+  <code>createArtifactsTable</code> in <code>internal/store/artifact.go</code> — only <code>run_id</code>), so
+  <code>RotateArtifacts(cutoff)</code> is global, not project-scoped. <code>rotateAll</code> calls it once per
+  configured project using that project's own artifact cutoff, so a project with a shorter
+  <code>artifacts_after_days</code> can rotate away another project's artifacts before that second project's own,
+  longer, horizon is reached. The code's own comment describes this accurately and does not oversell or undersell
+  it: it names the exact mechanism (no project scope on the table) and the exact consequence (early rotation
+  under mixed horizons), and correctly notes it is accepted rather than fixed. No spec.md scenario addresses
+  multi-project mixed horizons, and proposal.md's explicit out-of-scope list ("cross-project aggregation or
+  reporting") is adjacent to but does not quite cover this ("cross-project rotation blast radius" is a distinct
+  concern from aggregation) — this is a real, accurately-disclosed, non-blocking gap in the design's own scoping
+  rather than an implementation bug.</p>
+  <p><strong><code>b2c92fd</code>, reviewed on its own merits.</strong> The fix itself is real and correctly
+  scoped: <code>TestDispatchWithARepeatedRequestIDInsideOneSecondDeduplicates</code> and
+  <code>TestDispatchWithoutARequestIDCreatesANewRunEachTime</code> returned without waiting for the background
+  dispatch goroutine <code>handleDispatch</code> spawns per POST, which — given <code>dispatchFixture</code>'s
+  process-global <code>t.Setenv(SERGEANT_CONFIG/SERGEANT_FLEET_DIR)</code> — let a leaked goroutine from an
+  earlier test write into a later test's reassigned environment or its own already-closed store. Added
+  <code>waitForTerminalRun</code> calls close the leak at its source; this is a genuine test-isolation fix, not a
+  workaround for a production defect, and it does not touch or mask any of the four guarantees this review
+  independently checked (opt-in gating, terminal-status filter, unmerged-bullet refusal, artifact rotation) — all
+  four are real and exercised by tests unrelated to this fix. However, the commit message's broader claim —
+  "the internal/ui suite ... now runs clean 3/3 with no 'database is closed' noise, where it failed consistently
+  before" — does not hold as a general statement. Reproduced on this review's own re-runs: even with tasks.md's
+  prescribed <code>-skip</code> applied (package still reports <code>ok</code>), "sql: database is closed" log
+  lines still appear, originating from other, unrelated, pre-existing tests with the identical missing-wait
+  pattern — <code>TestResumeRestartsAFailedRun</code>, <code>TestReconciledPhaseIsNotListedAsSkippedOnResume</code>,
+  and the run-resume tests in <code>reconcile_test.go</code>/<code>resume_dashboard_test.go</code>/
+  <code>server_test.go</code>, none of which <code>b2c92fd</code> touched. Confirmed via a disposable worktree at
+  <code>df825e4</code> (the commit immediately before <code>b2c92fd</code>) that this exact noise pre-dates both
+  commits under review. <code>b2c92fd</code>'s own commit message names "four more tests in this file" with the
+  same pattern left as a deliberate, disclosed latent risk — but the noise this review reproduced comes from
+  tests in three other files entirely, which the commit message's "clean 3/3, no noise" claim does not
+  disclose. Non-blocking (no test anywhere fails because of it; it is log noise from a background write to a
+  closed store, not an assertion failure), but the commit's own verification claim overclaims what it actually
+  fixed.</p>
+</section>
+
+<section>
+  <h2>Verdict</h2>
+  <div class="item warn">
+    <p><strong>MEETS SPEC WITH CAVEATS.</strong> The core rotation mechanism is real and correctly wired:
+    <code>runRetentionLoop</code> is genuinely started from <code>Start()</code> (not merely defined), the
+    opt-in gate is structurally exclusive (the only production call sites of <code>RotateProject</code>/
+    <code>RotateArtifacts</code> are behind <code>p.Retention == nil</code>'s skip), a zero/negative horizon is
+    rejected at load time, non-terminal runs and runs with an unmerged bullet are both genuinely refused
+    (proven by tests exercising the real eligibility query, not a stand-in), bullets and intents are confirmed
+    to survive rotation untouched (design.md's "never deletes bullets/intents" claim holds in the merged code
+    and is directly tested, not merely asserted in a comment), and artifacts rotate on an independent,
+    genuinely shorter horizon. <code>go build</code>/<code>go vet</code>/<code>go test ./internal/...</code> are
+    clean under tasks.md's prescribed <code>-skip</code>, reproduced 3x for <code>internal/ui</code> specifically.
+    <strong>One caveat is blocking</strong> against a named spec.md scenario: "Aggregate totals are unchanged by
+    rotation" is violated for <code>cancelled</code>/<code>interrupted</code> runs — <code>foldRunIntoRollup</code>
+    only preserves <code>passed</code>/<code>failed</code> counts, silently losing the other two of the four
+    statuses <code>rotationEligibleStatusesSQL</code> itself makes eligible for rotation; reproduced directly
+    against the real code (<code>before.ByStatus[cancelled]=1</code>, <code>after.ByStatus[cancelled]</code>
+    absent). This is a real, user-visible corruption of historical analytics for an entire feature whose stated
+    purpose is that historical totals "stay accurate after the detailed rows are gone." <strong>Two caveats are
+    non-blocking</strong>: (1) <code>RotateArtifacts</code>'s lack of per-project scope is real but accurately
+    disclosed in its own doc comment, and no spec.md scenario covers or forbids the cross-project mixed-horizon
+    case it describes; (2) the separately-reviewed <code>b2c92fd</code> goroutine-leak fix is itself a genuine,
+    correctly-scoped test-isolation fix that does not mask any production defect in this feature, but its commit
+    message's claim of eliminating all "database is closed" noise from the <code>internal/ui</code> suite does
+    not hold — the same pre-existing pattern persists in other, unrelated tests this fix did not touch, confirmed
+    to pre-date both commits under review.</p>
+  </div>
+</section>
+
+<footer>
+  <p class="meta">Review 036 · findings above are reproduced from commands run directly against the current
+  <code>v2</code> working tree at HEAD <code>51e7612</code>: <code>go build</code>/<code>go vet</code>/<code>go
+  test</code> were actually executed under tasks.md's prescribed <code>-skip</code> (not assumed from the merge
+  message), <code>internal/ui</code> was re-run 3x both with and without that skip to check for the goroutine-leak
+  noise the parent commit claims to have eliminated, the sole production call sites of <code>RotateProject</code>/
+  <code>RotateArtifacts</code> were located by <code>grep</code> across the whole repo rather than trusted from
+  design.md, a disposable git worktree at <code>df825e4</code> was used to confirm the residual "database is
+  closed" noise pre-dates both commits under review, and the cancelled/interrupted rollup gap was confirmed by
+  writing, running, and then deleting a throwaway test directly against the real <code>RotateProject</code>/
+  <code>ComputeWorkAnalytics</code> code rather than by reading the switch statement and assuming its effect.
+  Reviews 035 and earlier were not re-examined; they stand as recorded above.</p>
+  <p class="meta">Rewritten by the critic after each review or discovery. Refreshes every 60 seconds.</p>
+</footer>
+
 </main></body>
 </html>
