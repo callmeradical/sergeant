@@ -29,6 +29,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_sgt-lib.sh"
 
+SCRIPT_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/wiki-daily-digest.XXXXXX")"
+trap 'rm -rf "$SCRIPT_TMP_DIR"' EXIT
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 OPENCODE_DB="${OPENCODE_DB:-$HOME/.local/share/opencode/opencode.db}"
@@ -193,13 +196,14 @@ _extract_claude_sessions() {
   local date="$1"
   [[ -d "$CLAUDE_PROJECTS_DIR" ]] || return 0
 
-  python3 - "$CLAUDE_PROJECTS_DIR" "$date" "$MAX_CHARS_PER_SESSION" <<'PYEOF'
+  python3 - "$CLAUDE_PROJECTS_DIR" "$date" "$MAX_CHARS_PER_SESSION" "$SCRIPT_TMP_DIR" <<'PYEOF'
 import sys, json, os, glob
 from datetime import datetime, timezone
 
 projects_dir = sys.argv[1]
 target_date  = sys.argv[2]
 max_chars    = int(sys.argv[3])
+tmp_dir      = sys.argv[4]
 
 for jsonl_path in sorted(glob.glob(os.path.join(projects_dir, '**', '*.jsonl'), recursive=True)):
     title = None
@@ -265,7 +269,7 @@ for jsonl_path in sorted(glob.glob(os.path.join(projects_dir, '**', '*.jsonl'), 
 
     print(f"{session_id}|{title}|{directory}|{dt_first.strftime('%Y-%m-%d %H:%M:%S')}|{dt_last.strftime('%Y-%m-%d %H:%M:%S')}|claude")
     # Write content to a temp file keyed by session_id for retrieval
-    tmp = f"/tmp/wiki_claude_{session_id}.txt"
+    tmp = os.path.join(tmp_dir, f"wiki_claude_{session_id}.txt")
     with open(tmp, 'w') as out:
         out.write(content)
 PYEOF
@@ -467,8 +471,8 @@ $content
       [[ -z "$sid" ]] && continue
       echo "  [claude] $title"
       content=""
-      tmp_file="/tmp/wiki_claude_${sid}.txt"
-      [[ -f "$tmp_file" ]] && content="$(cat "$tmp_file")" && rm -f "$tmp_file"
+      tmp_file="$SCRIPT_TMP_DIR/wiki_claude_${sid}.txt"
+      [[ -f "$tmp_file" ]] && content="$(cat "$tmp_file")"
       sessions_content+="### [claude] $title
 Directory: $directory | Time: $created → $updated
 
