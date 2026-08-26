@@ -37,6 +37,23 @@ type Project struct {
 	// "unset" (nil) from "declared empty" the same way FactoryConfig.Gates
 	// does, so no pointer wrapper is needed here.
 	ShippingGates map[string]string `yaml:"shipping_gates,omitempty" json:"shipping_gates"`
+	// Retention declares a project's data-rotation policy
+	// (data-retention-and-rotation). A pointer, following Export/Graphify
+	// exactly: nil means retention is disabled for this project,
+	// distinguishable from a declared block with zero horizons (which would
+	// rotate everything immediately and is very unlikely to be what an
+	// operator meant — see LoadProject's validation of this field).
+	Retention *Retention `yaml:"retention,omitempty" json:"retention"`
+}
+
+// Retention declares a project's data-rotation policy: a runs/phases/
+// envelopes/deliveries horizon and a separate, typically shorter, artifacts
+// horizon. Both are required to be positive when the block is present —
+// LoadProject rejects a declared block with a zero or negative horizon
+// rather than silently rotating everything on the first pass.
+type Retention struct {
+	RunsAfterDays      int `yaml:"runs_after_days" json:"runs_after_days"`
+	ArtifactsAfterDays int `yaml:"artifacts_after_days" json:"artifacts_after_days"`
 }
 
 // Graphify declares a project's cross-repository code graph: which repos
@@ -137,6 +154,19 @@ func LoadProject(nameOrPath string) (*Project, error) {
 	var p Project
 	if err := yaml.Unmarshal(data, &p); err != nil {
 		return nil, fmt.Errorf("parsing yaml in %s: %w", path, err)
+	}
+
+	// A declared retention: block with a zero or negative horizon is a config
+	// error, not "rotate everything now" — the same reasoning the field's own
+	// doc comment gives. An absent block (Retention == nil) is unvalidated:
+	// retention stays disabled for that project.
+	if p.Retention != nil {
+		if p.Retention.RunsAfterDays <= 0 || p.Retention.ArtifactsAfterDays <= 0 {
+			return nil, fmt.Errorf(
+				"parsing yaml in %s: retention block requires positive runs_after_days and artifacts_after_days, got %d and %d",
+				path, p.Retention.RunsAfterDays, p.Retention.ArtifactsAfterDays,
+			)
+		}
 	}
 
 	// Normalise project name

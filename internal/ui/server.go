@@ -55,6 +55,9 @@ type Server struct {
 	// depends on fleetRunSource rather than *store.Store directly.
 	fleet *fleetCleaner
 
+	// retention owns the background data-rotation pass (see retention.go).
+	retention *retentionRotator
+
 	// delivery owns delivery reporting (see delivery.go). It depends on
 	// runGetter rather than *store.Store directly.
 	delivery *deliveryReporter
@@ -125,6 +128,7 @@ func NewServer(s *store.Store, port int) *Server {
 		GHPRCreate:      runGHPRCreate,
 		RunShippingGate: runner.RunShippingGate,
 		fleet:           newFleetCleaner(s),
+		retention:       newRetentionRotator(s),
 		delivery:        newDeliveryReporter(s),
 		terminal:        newTerminalManager(),
 	}
@@ -223,6 +227,10 @@ func (srv *Server) Start() error {
 	// shutdown path today, so it is never cancelled.
 	go srv.fleet.runFleetCleanupLoop(context.Background())
 
+	// Same lifecycle precedent as the fleet-cleanup loop above: started once,
+	// runs for the process lifetime, never cancelled.
+	go srv.retention.runRetentionLoop(context.Background())
+
 	handler := srv.Handler()
 	addr := fmt.Sprintf("127.0.0.1:%d", srv.Port)
 	fmt.Printf("🌐 Sergeant Factory UI running at http://%s\n", addr)
@@ -319,6 +327,14 @@ func (srv *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 // "all" param combines every project. Unlike handleRuns, ComputeWorkAnalytics
 // draws that distinction internally, so the handler just forwards the param.
 // A plain read like handleRuns: no request body, no side effects.
+// analyticsResponse embeds WorkAnalytics so its fields flatten into the JSON
+// body exactly as before, adding one sibling key: Retention, present only
+// for a project with a retention: block configured.
+type analyticsResponse struct {
+	store.WorkAnalytics
+	Retention *retentionSummary `json:"retention,omitempty"`
+}
+
 func (srv *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	project := r.URL.Query().Get("project")
 	analytics, err := srv.Store.ComputeWorkAnalytics(project)
@@ -326,7 +342,11 @@ func (srv *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, analytics)
+	resp := analyticsResponse{
+		WorkAnalytics: analytics,
+		Retention:     srv.retentionSummaryFor(project),
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (srv *Server) handleRunDetails(w http.ResponseWriter, r *http.Request) {

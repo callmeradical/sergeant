@@ -175,5 +175,33 @@ func (s *Store) ComputeWorkAnalytics(project string) (WorkAnalytics, error) {
 		}
 	}
 
+	// Fold in whatever data-retention-and-rotation has already rotated away,
+	// so historical totals stay accurate after the detailed rows are gone —
+	// the same numbers an operator would have seen had nothing ever rotated.
+	// Bullets are deliberately excluded: rotation never deletes bullets or
+	// intents (see RetentionRollup's doc comment), so AllBulletsForAnalytics
+	// above already counts every one of them directly.
+	rollups, err := s.retentionRollupsFor(project)
+	if err != nil {
+		return WorkAnalytics{}, err
+	}
+	for _, ru := range rollups {
+		wa.TotalRuns += ru.RunCount
+		wa.ByStatus["passed"] += ru.PassedCount
+		wa.ByStatus["failed"] += ru.FailedCount
+		for k, v := range ru.ByWorkType {
+			wa.ByType[k] += v
+		}
+		for k, v := range ru.ByAgent {
+			wa.ByAgent[k] += v
+		}
+		for k, v := range ru.ByModel {
+			wa.ByModel[k] += v
+		}
+		for k, v := range ru.ByProvider {
+			wa.ByProvider[k] += v
+		}
+	}
+
 	return wa, nil
 }
