@@ -136,6 +136,60 @@ func TestExceedingArtifactCountCapIsRecordedNotDropped(t *testing.T) {
 	}
 }
 
+// TestExceedingArtifactTotalBytesCapIsRecordedNotDropped covers the total-bytes
+// half of spec.md's "Exceeding the artifact cap is recorded, not silently
+// dropped" — TestExceedingArtifactCountCapIsRecordedNotDropped above only
+// exercises the file-count half. Writes one file just under
+// maxArtifactTotalBytes (captured normally) followed by one small file that
+// pushes the running total over the byte cap (dropped, with a reason naming
+// the byte cap specifically, not the count cap).
+func TestExceedingArtifactTotalBytesCapIsRecordedNotDropped(t *testing.T) {
+	pr, st := newRunner(t, "", 0)
+	t.Setenv("SERGEANT_ARTIFACTS_ROOT", t.TempDir())
+
+	bigSize := maxArtifactTotalBytes - 1024
+	script := fmt.Sprintf(
+		`head -c %d /dev/zero > "$SERGEANT_ARTIFACT_DIR/a-big.bin"
+head -c 4096 /dev/zero > "$SERGEANT_ARTIFACT_DIR/b-small.bin"`,
+		bigSize)
+
+	res, err := pr.RunCodeGate(context.Background(), "big-files-gate", script)
+	if err != nil {
+		t.Fatalf("RunCodeGate: %v", err)
+	}
+	if !res.Passed {
+		t.Fatalf("expected gate to pass, output: %s", res.Output)
+	}
+
+	artifacts, err := st.ListArtifactsForRun(pr.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var captured, droppedRows int
+	var droppedReason string
+	for _, a := range artifacts {
+		if a.DroppedCount > 0 {
+			droppedRows++
+			droppedReason = a.DroppedReason
+			continue
+		}
+		captured++
+		if a.Filename != "a-big.bin" {
+			t.Errorf("expected only a-big.bin to be captured, got %s", a.Filename)
+		}
+	}
+	if captured != 1 {
+		t.Errorf("captured = %d, want exactly 1 (the file within the byte cap)", captured)
+	}
+	if droppedRows != 1 {
+		t.Fatalf("expected exactly one dropped-notice row, got %d: %+v", droppedRows, artifacts)
+	}
+	if !strings.Contains(droppedReason, "exceeded max total artifact bytes") {
+		t.Errorf("DroppedReason = %q, want it to name the byte cap specifically", droppedReason)
+	}
+}
+
 // TestFailingGateStillCapturesArtifacts covers spec.md's "A failing gate's
 // artifacts are still captured": capture is not conditioned on the gate
 // passing.
