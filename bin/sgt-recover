@@ -19,7 +19,7 @@
 # intended response generation" is not applicable to this path.
 #
 # Usage:
-#   sgt-recover <task-id> <repo>
+#   sgt-recover <task-id> <repo> [--model <tuple>]
 
 set -euo pipefail
 
@@ -44,10 +44,21 @@ source "$SCRIPT_DIR/_sgt-response-lock.sh"
 # shellcheck source=bin/_sgt-drain.sh
 source "$SCRIPT_DIR/_sgt-drain.sh"
 
-[[ $# -eq 2 ]] || _die "Usage: sgt-recover <task-id> <repo>"
+[[ $# -ge 2 ]] || _die "Usage: sgt-recover <task-id> <repo> [--model <tuple>]"
 
-TASK_ID="$1"
-REPO="$2"
+TASK_ID="$1"; shift
+REPO="$1";    shift
+
+MODEL_OVERRIDE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --model)
+      [[ -n "${2:-}" ]] || _die "--model requires provider/model or provider/model:variant"
+      MODEL_OVERRIDE="$2"; shift 2 ;;
+    *) _die "Unknown option: $1" ;;
+  esac
+done
+
 [[ "$TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid task ID: $TASK_ID"
 [[ "$REPO" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _die "Invalid repo: $REPO"
 
@@ -338,9 +349,17 @@ fi
 # a changed SERGEANT_MODEL to apply, so a coordination policy update never
 # took effect on the very next relaunch and the worker silently inherited a
 # superseded effort. See Deloitte support #29.
+#
+# --model additionally sits ahead of SERGEANT_MODEL in this chain (shared-mcp-
+# server change): an MCP caller invoking sgt-recover has no way to set the
+# shared server process's own environment per call, so an explicit flag is the
+# only way to honor a per-invocation override once the server is shared.
 model_stored="$(cat "$REPO_DIR/agent_model" 2>/dev/null || true)"
 model_source_stored="$(cat "$REPO_DIR/agent_model_source" 2>/dev/null || true)"
-if [[ -n "${SERGEANT_MODEL:-}" ]]; then
+if [[ -n "$MODEL_OVERRIDE" ]]; then
+  recovery_model="$MODEL_OVERRIDE"
+  recovery_model_source="flag"
+elif [[ -n "${SERGEANT_MODEL:-}" ]]; then
   recovery_model="$SERGEANT_MODEL"
   recovery_model_source="env"
 elif [[ -n "$model_stored" && "$model_stored" != "$SGT_AGENT_MODEL_UNPINNED" ]]; then
@@ -360,9 +379,10 @@ if [[ "$recovery_model_source" != "unpinned" ]]; then
 fi
 
 # Persist a policy-driven tuple before relaunch: sgt-interactive-worker reads
-# only this durable record, never SERGEANT_MODEL, so a resolved env override
-# must land here before launch or the worker still starts at the stale effort.
-if [[ "$recovery_model_source" == "env" ]]; then
+# only this durable record, never SERGEANT_MODEL, so a resolved flag or env
+# override must land here before launch or the worker still starts at the
+# stale effort.
+if [[ "$recovery_model_source" == "flag" || "$recovery_model_source" == "env" ]]; then
   printf '%s\n' "$recovery_model"        > "$REPO_DIR/agent_model"
   printf '%s\n' "$recovery_model_source" > "$REPO_DIR/agent_model_source"
 fi

@@ -1,8 +1,15 @@
-// cmd/sergeant-mcp/main.go — MCP stdio server wrapping all sgt-* scripts.
+// cmd/sergeant-mcp/main.go — the shared MCP server backend wrapping all
+// sgt-* scripts.
 //
 // Each Sergeant shell script is exposed as an MCP tool. Tools accept an "args"
 // string (raw CLI arguments, shell-quoted as needed) plus a "stdin" string for
 // commands that read from standard input (sgt-respond).
+//
+// This binary is the shared backend, not what mcp.json registers directly —
+// every harness instance's mcp.json points at cmd/sergeant-mcp-client, which
+// discovers or starts one shared instance of this binary per machine and
+// proxies stdio to it over a Unix socket. See
+// openspec/changes/shared-mcp-server.
 //
 // The binary must live in the same directory as the sgt-* scripts (bin/) so
 // that scriptDir() resolves correctly. Build with:
@@ -13,7 +20,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,15 +31,16 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/callmeradical/sergeant/internal/mcplock"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
-// scriptDir returns the directory containing this binary, which must be the
-// same bin/ directory that holds the sgt-* shell scripts.
+// resolveScriptDir returns the directory containing this binary, which must
+// be the same bin/ directory that holds the sgt-* shell scripts.
 // We memoize this to prevent expensive disk/syscall operations (os.Executable,
 // EvalSymlinks) on every tool invocation.
-var scriptDir = sync.OnceValue(func() string {
+var resolveScriptDir = sync.OnceValue(func() string {
 	exe, err := os.Executable()
 	if err != nil {
 		// Fall back to the working directory.
@@ -43,6 +54,17 @@ var scriptDir = sync.OnceValue(func() string {
 	}
 	return filepath.Dir(resolved)
 })
+
+// scriptDir returns the directory holding the sgt-* shell scripts.
+// SERGEANT_MCP_SCRIPT_DIR overrides it for test isolation; production
+// invocations never set it, so they always get resolveScriptDir()'s memoized
+// binary-relative path.
+func scriptDir() string {
+	if dir := os.Getenv("SERGEANT_MCP_SCRIPT_DIR"); dir != "" {
+		return dir
+	}
+	return resolveScriptDir()
+}
 
 // shellSplit splits a shell-style argument string honouring single and double
 // quotes. It does not handle backslash escapes or variable expansion — agents
@@ -73,6 +95,22 @@ func shellSplit(s string) []string {
 	return args
 }
 
+// execSemaphore bounds how many runScript invocations may have cmd.Run()
+// in flight at once, independent of how many clients are merely connected.
+// nil means unbounded (the pre-shared-server default before main() sizes it
+// to runtime.NumCPU()).
+var execSemaphore chan struct{}
+
+// acquireExecSlot blocks until an execution slot is free (or returns
+// immediately if execSemaphore is nil) and returns a func to release it.
+func acquireExecSlot() func() {
+	if execSemaphore == nil {
+		return func() {}
+	}
+	execSemaphore <- struct{}{}
+	return func() { <-execSemaphore }
+}
+
 // runScript shells out to a named script in the same directory as this binary.
 // stdin is optional — pass an empty string when not needed.
 func runScript(ctx context.Context, scriptName, rawArgs, stdinData string) (*mcp.CallToolResult, error) {
@@ -94,7 +132,9 @@ func runScript(ctx context.Context, scriptName, rawArgs, stdinData string) (*mcp
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
+	release := acquireExecSlot()
 	err := cmd.Run()
+	release()
 	if err != nil {
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg == "" {
@@ -129,7 +169,7 @@ var tools = []toolDef{
 		scriptName:  "sgt-dispatch",
 		toolName:    "sgt-dispatch",
 		description: "Dispatch subagents across repos in a project. Creates an isolated git worktree per repo, writes a mission brief, and spawns an agent in a local tmux window.",
-		argsDesc:    `CLI args: <project> ("<brief>" | --brief-file <path>) --repos repo1,repo2 [--td <id>] [--branch <name>] [--adopt-branch] [--deps "r1>r2"] [--agent opencode|goose|claude] [--model <tuple>] [--stage <name>] [--coordinator-pane <id>] [--managed-coordinator-pane] [--intent-file <path>] [--origin-profile <name>] [--correlation-id <id>] [--json (requires --brief-file; positional brief forbidden)] [--dry-run]`,
+		argsDesc:    `CLI args: <project> ("<brief>" | --brief-file <path>) --repos repo1,repo2 [--td <id>] [--branch <name>] [--adopt-branch] [--deps "r1>r2"] [--agent opencode|goose|claude] [--model <tuple>] [--tmux-session <name>] [--stage <name>] [--coordinator-pane <id>] [--managed-coordinator-pane] [--intent-file <path>] [--origin-profile <name>] [--correlation-id <id>] [--json (requires --brief-file; positional brief forbidden)] [--dry-run]`,
 	},
 	{
 		scriptName:  "sgt-watch",
@@ -185,7 +225,7 @@ var tools = []toolDef{
 		scriptName:  "sgt-recover",
 		toolName:    "sgt-recover",
 		description: "Attempt one bounded stall recovery for a stalled in-progress worker. Kills the stalled pane and relaunches a fresh worker.",
-		argsDesc:    `CLI args: <task-id> <repo>`,
+		argsDesc:    `CLI args: <task-id> <repo> [--model <tuple>]`,
 	},
 	{
 		scriptName:  "sgt-ack-response",
@@ -335,12 +375,11 @@ var tools = []toolDef{
 
 var version = "dev"
 
-func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
-		fmt.Println("sergeant-mcp version", version)
-		os.Exit(0)
-	}
-
+// newMCPServer builds the *server.MCPServer with the full tools table
+// registered, exactly as today — no tool behavior changes for the
+// shared-server split. Every AddTool handler still just execs the matching
+// bin/sgt-* script via runScript.
+func newMCPServer() *server.MCPServer {
 	s := server.NewMCPServer(
 		"sergeant",
 		"1.0.0",
@@ -374,10 +413,69 @@ func main() {
 		})
 	}
 
-	fmt.Fprintf(os.Stderr, "sergeant-mcp: %d tools registered (Go %s, pid %d)\n",
-		len(tools), runtime.Version(), os.Getpid())
+	return s
+}
 
-	if err := server.ServeStdio(s); err != nil {
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+		fmt.Println("sergeant-mcp version", version)
+		os.Exit(0)
+	}
+
+	// Every other invocation (bare, or the client's "sergeant-mcp --serve")
+	// runs the shared backend: this binary is no longer registered directly
+	// in mcp.json — cmd/sergeant-mcp-client is — so the only caller left is
+	// a client discovering or starting the shared server.
+	runServer()
+}
+
+// runServer acquires the shared-server lock and, on success, serves the MCP
+// tool set over a Unix socket for the lifetime of the process. If another
+// live server already holds the lock, this is a no-op exit(0): the caller
+// (a sergeant-mcp-client) is expected to connect to that server instead.
+func runServer() {
+	stateDir := mcplock.StateDir()
+	lockPath := mcplock.LockPath(stateDir)
+	sockPath := mcplock.SockPath(stateDir)
+
+	if err := mcplock.AcquireServerLock(lockPath, sockPath); err != nil {
+		if errors.Is(err, mcplock.ErrAlreadyRunning) {
+			fmt.Fprintf(os.Stderr, "sergeant-mcp: shared server already running: %v\n", err)
+			os.Exit(0)
+		}
+		fmt.Fprintf(os.Stderr, "sergeant-mcp: fatal: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Clear a stale socket file a prior unclean exit may have left behind;
+	// AcquireServerLock already proved no live server owns sockPath.
+	os.Remove(sockPath)
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sergeant-mcp: fatal: cannot listen on %s: %v\n", sockPath, err)
+		os.Exit(1)
+	}
+	defer os.Remove(sockPath)
+	if err := os.Chmod(sockPath, 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "sergeant-mcp: fatal: cannot chmod %s: %v\n", sockPath, err)
+		os.Exit(1)
+	}
+
+	execSemaphore = make(chan struct{}, runtime.NumCPU())
+
+	s := newMCPServer()
+	// WithStateLess: this server holds no meaningful per-process state (every
+	// tool call just execs a script and returns its output), and clients are
+	// thin stdio<->socket proxies that forward raw JSON-RPC frames without
+	// tracking an Mcp-Session-Id — so no client can carry a session header a
+	// stateful server would require.
+	streamable := server.NewStreamableHTTPServer(s, server.WithStateLess(true))
+	httpServer := &http.Server{Handler: streamable}
+
+	fmt.Fprintf(os.Stderr, "sergeant-mcp: %d tools registered (Go %s, pid %d), serving %s\n",
+		len(tools), runtime.Version(), os.Getpid(), sockPath)
+
+	if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fmt.Fprintf(os.Stderr, "sergeant-mcp: fatal: %v\n", err)
 		os.Exit(1)
 	}

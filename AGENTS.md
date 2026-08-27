@@ -57,10 +57,14 @@ sentence cannot change a decision or be checked after the work, remove it.
 
 ## Toolbelt
 
-Sergeant exposes all tools through a single MCP server (`bin/sergeant-mcp`, stdio
-transport) declared in `mcp.json`. When the harness supports MCP, invoke tools by
-their MCP name — identical to the script basename — rather than shelling out
-directly. Fall back to the `bin/sgt-*` script only when MCP is unavailable.
+Sergeant exposes all tools through a single MCP server declared in `mcp.json`
+(stdio transport, `bin/sergeant-mcp-client`) — a thin per-instance proxy that
+discovers or starts one shared `bin/sergeant-mcp` backend process per machine
+over a Unix socket, so every connected harness instance talks to the same
+backend instead of each spawning a private one. When the harness supports
+MCP, invoke tools by their MCP name — identical to the script basename —
+rather than shelling out directly. Fall back to the `bin/sgt-*` script only
+when MCP is unavailable.
 
 If a command in this table covers the operation, use it instead of reproducing
 the operation with ad hoc shell commands. The **MCP tool name** equals the script
@@ -84,7 +88,7 @@ name without the `bin/` prefix (e.g. `sgt-dispatch`, `sgt-watch`).
 | `bin/sgt-watch --snapshot [<task-id>] [--repo <repo>]` | `sgt-watch` | Bounded read-only JSON observation of whether Sergeant is verifiably working; never reconciles or mutates state |
 | `bin/sgt-respond <task-id> <repo>` | `sgt-respond` | Read a worker response from stdin and resume its loop |
 | `bin/sgt-wake <task-id> <repo>` | `sgt-wake` | Evaluate a waiting worker's durable wake condition and resume it when met |
-| `bin/sgt-recover <task-id> <repo>` | `sgt-recover` | Attempt one bounded stall recovery for a live-but-stalled in-progress worker |
+| `bin/sgt-recover <task-id> <repo> [--model <tuple>]` | `sgt-recover` | Attempt one bounded stall recovery for a live-but-stalled in-progress worker |
 | `bin/sgt-ack-response <task-id> <repo> <response-id>` | `sgt-ack-response` | Acknowledge one consumed response from the exact worker pane |
 | `bin/sgt-validate <task-id> <repo> [--skip <steps>] [--allow-argv-intent]` | `sgt-validate` | Launch coordinator-owned no-mistakes in a split worker-window pane |
 | `bin/sgt-validate <task-id> <repo> --claim-ownership` | `sgt-validate` | Take validation ownership from a gone or released dispatching pane, with identity proof and an audit record |

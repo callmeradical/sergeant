@@ -18,12 +18,30 @@ builds:
       - arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
+  - id: sergeant-mcp-client
+    main: ./cmd/sergeant-mcp-client/
+    binary: sergeant-mcp-client
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
 
 archives:
   - id: sergeant-mcp
     builds:
       - sergeant-mcp
     name_template: "sergeant-mcp-{{ .Os }}-{{ .Arch }}"
+    format: binary
+  - id: sergeant-mcp-client
+    builds:
+      - sergeant-mcp-client
+    name_template: "sergeant-mcp-client-{{ .Os }}-{{ .Arch }}"
     format: binary
 
 checksum:

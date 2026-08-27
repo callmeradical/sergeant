@@ -3,7 +3,7 @@
   "mcpServers": {
     "sergeant": {
       "type": "stdio",
-      "command": "./bin/sergeant-mcp"
+      "command": "./bin/sergeant-mcp-client"
     }
   }
 }

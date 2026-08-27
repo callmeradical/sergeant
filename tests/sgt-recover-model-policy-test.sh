@@ -206,4 +206,93 @@ cmp -s "$TEST_ROOT/model-source-before-3" "$repo_state/agent_model_source" || {
 
 printf 'sgt-recover leaves the durable record untouched with no current policy set: ok\n'
 
+# ── Scenario 4: --model flag overrides SERGEANT_MODEL, applied before launch ─
+# Mirrors scenario 2's shape (FAIL_WINDOW=1 so the launch itself fails for an
+# unrelated reason) but proves the flag -- not the env var -- wins and is
+# persisted as preflight, not as a side effect of a successful launch.
+
+_setup_stalled_worker "$repo_state" "$worktree"
+
+set +e
+EXPECTED_WORKER="$repo_state" SERGEANT_MODEL="anthropic/claude-opus-5" FAIL_WINDOW=1 \
+  KILL_LOG="$TEST_ROOT/kill4.log" \
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-recover" task-1 app --model anthropic/claude-haiku-4-5:high \
+  >/dev/null 2>&1
+status4=$?
+set -e
+
+[[ "$status4" -ne 0 ]] || {
+  printf 'FAIL: this scenario forces new-window to fail; recovery must not report success\n' >&2
+  exit 1
+}
+[[ "$(cat "$repo_state/agent_model")" == "anthropic/claude-haiku-4-5:high" ]] || {
+  printf 'FAIL: agent_model should be overridden by --model, got: %s\n' \
+    "$(cat "$repo_state/agent_model")" >&2
+  exit 1
+}
+[[ "$(cat "$repo_state/agent_model_source")" == "flag" ]] || {
+  printf 'FAIL: agent_model_source should record the flag source, got: %s\n' \
+    "$(cat "$repo_state/agent_model_source")" >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/kill4.log" ]] || {
+  printf 'FAIL: old pane must not be killed when the replacement launch fails\n' >&2
+  exit 1
+}
+
+printf 'sgt-recover --model takes precedence over SERGEANT_MODEL: ok\n'
+
+# ── Scenario 5: a malformed --model refuses closed and touches nothing ──────
+
+_setup_stalled_worker "$repo_state" "$worktree"
+cp "$repo_state/agent_model" "$TEST_ROOT/model-before-5"
+cp "$repo_state/agent_model_source" "$TEST_ROOT/model-source-before-5"
+
+set +e
+EXPECTED_WORKER="$repo_state" KILL_LOG="$TEST_ROOT/kill5.log" \
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-recover" task-1 app --model "not a valid tuple" \
+  >/dev/null 2>&1
+status5=$?
+set -e
+
+[[ "$status5" -ne 0 ]] || {
+  printf 'FAIL: recovery should refuse a malformed --model tuple\n' >&2
+  exit 1
+}
+cmp -s "$TEST_ROOT/model-before-5" "$repo_state/agent_model" || {
+  printf 'FAIL: agent_model must not change when --model is malformed\n' >&2
+  exit 1
+}
+[[ ! -s "$TEST_ROOT/kill5.log" ]] || {
+  printf 'FAIL: old pane must not be killed when --model is malformed\n' >&2
+  exit 1
+}
+
+printf 'sgt-recover refuses a malformed --model tuple without touching state: ok\n'
+
+# ── Scenario 6: omitting --model preserves today's env > fleet > unpinned ───
+
+_setup_stalled_worker "$repo_state" "$worktree"
+
+set +e
+EXPECTED_WORKER="$repo_state" FAIL_WINDOW=1 KILL_LOG="$TEST_ROOT/kill6.log" \
+  PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-recover" task-1 app >/dev/null 2>&1
+set -e
+
+[[ "$(cat "$repo_state/agent_model")" == "anthropic/claude-haiku-4-5" ]] || {
+  printf 'FAIL: omitting --model should preserve the stored fleet tuple, got: %s\n' \
+    "$(cat "$repo_state/agent_model")" >&2
+  exit 1
+}
+[[ "$(cat "$repo_state/agent_model_source")" == "dispatch" ]] || {
+  printf 'FAIL: omitting --model should preserve the stored fleet source, got: %s\n' \
+    "$(cat "$repo_state/agent_model_source")" >&2
+  exit 1
+}
+
+printf 'sgt-recover without --model preserves env > fleet > unpinned: ok\n'
+
 printf 'sgt-recover-model-policy: all tests passed\n'

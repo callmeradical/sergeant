@@ -42,13 +42,15 @@ done
 echo ""
 echo "Installed $linked scripts to $TARGET_DIR"
 
-# Build the Go MCP server if Go is available
+# Build the Go MCP server and its client proxy if Go is available
 if command -v go &>/dev/null; then
   echo ""
-  echo "Building sergeant-mcp..."
-  (cd "$REPO_DIR" && go build -ldflags="-s -w" -o bin/sergeant-mcp ./cmd/sergeant-mcp/) && \
-    echo "  built: $REPO_DIR/bin/sergeant-mcp" || \
-    echo "  WARNING: go build failed — sergeant-mcp not available"
+  echo "Building sergeant-mcp and sergeant-mcp-client..."
+  (cd "$REPO_DIR" && \
+    go build -ldflags="-s -w" -o bin/sergeant-mcp ./cmd/sergeant-mcp/ && \
+    go build -ldflags="-s -w" -o bin/sergeant-mcp-client ./cmd/sergeant-mcp-client/) && \
+    echo "  built: $REPO_DIR/bin/sergeant-mcp, $REPO_DIR/bin/sergeant-mcp-client" || \
+    echo "  WARNING: go build failed — sergeant-mcp/sergeant-mcp-client not available"
 else
   echo ""
   echo "NOTE: go not found — skipping sergeant-mcp build. Install Go 1.21+ and run 'mise run build'."
@@ -426,7 +428,7 @@ mise run install
 """
 
 [tasks.build]
-description = "Build the sergeant-mcp Go binary for the current OS/arch"
+description = "Build the sergeant-mcp Go binaries (server + client) for the current OS/arch"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -436,14 +438,18 @@ if ! command -v go &>/dev/null; then
   echo "ERROR: go not found. Install Go 1.21+ to build sergeant-mcp."
   exit 1
 fi
+VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
 echo "Building sergeant-mcp..."
-go build -ldflags="-s -w -X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" \
+go build -ldflags="-s -w -X main.version=$VERSION" \
   -o bin/sergeant-mcp ./cmd/sergeant-mcp/
-echo "Built: bin/sergeant-mcp"
+echo "Building sergeant-mcp-client..."
+go build -ldflags="-s -w -X main.version=$VERSION" \
+  -o bin/sergeant-mcp-client ./cmd/sergeant-mcp-client/
+echo "Built: bin/sergeant-mcp, bin/sergeant-mcp-client"
 """
 
 [tasks."build:all"]
-description = "Cross-compile sergeant-mcp for all supported platforms (darwin/linux x amd64/arm64)"
+description = "Cross-compile sergeant-mcp and sergeant-mcp-client for all supported platforms (darwin/linux x amd64/arm64)"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -467,9 +473,11 @@ targets=(
 for target in "${targets[@]}"; do
   os="${target%/*}"
   arch="${target#*/}"
-  out="dist/sergeant-mcp-${os}-${arch}"
-  echo "Building $out..."
-  GOOS="$os" GOARCH="$arch" go build -ldflags="$LDFLAGS" -o "$out" ./cmd/sergeant-mcp/
+  for pkg in sergeant-mcp sergeant-mcp-client; do
+    out="dist/${pkg}-${os}-${arch}"
+    echo "Building $out..."
+    GOOS="$os" GOARCH="$arch" go build -ldflags="$LDFLAGS" -o "$out" "./cmd/${pkg}/"
+  done
 done
 
 echo ""
@@ -478,12 +486,12 @@ ls -lh dist/sergeant-mcp-*
 """
 
 [tasks."build:clean"]
-description = "Remove built binaries (bin/sergeant-mcp and dist/)"
+description = "Remove built binaries (bin/sergeant-mcp, bin/sergeant-mcp-client, and dist/)"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
 REPO_DIR="$(git -C "${MISE_PROJECT_ROOT:-.}" rev-parse --show-toplevel)"
-rm -f "$REPO_DIR/bin/sergeant-mcp"
+rm -f "$REPO_DIR/bin/sergeant-mcp" "$REPO_DIR/bin/sergeant-mcp-client"
 rm -rf "$REPO_DIR/dist/"
 echo "Cleaned."
 """
