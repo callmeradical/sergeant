@@ -46,15 +46,24 @@ require_file "docs/archive/v1/skills.md"
 require_file "docs/archive/v1/using-sergeant.md"
 
 require_text "AGENTS.md" "## Procedural skills"
-require_text "AGENTS.md" "direct executor when requested"
 # shellcheck disable=SC2016
 require_text "AGENTS.md" '`sergeant-help`'
-require_text "AGENTS.md" "Never edit a default branch in direct mode"
-require_text "AGENTS.md" "Open a PR for every direct-mode implementation"
 require_text "AGENTS.md" ".sergeant-intent.md"
 require_text "AGENTS.md" "same canonical intent revision"
-require_text "AGENTS.md" "td context <id> --work-dir <owning-repo-path>"
-require_text "AGENTS.md" "ingest, backfill, regenerate, inspect, update, or change the wiki"
+
+# v1's "direct mode" (the coordinator implementing one repo's work in-session
+# instead of dispatching) is deliberately not part of v2: v2's AGENTS.md
+# states its two entry paths (agent-driven MCP, coordinator-driven
+# /api/dispatch) and that "adding a third, divergent execution model is a
+# bug." Direct mode would be exactly that third model, so v2's AGENTS.md
+# must not describe it -- confirmed with the user, not merely omitted.
+reject_text "AGENTS.md" "direct executor when requested"
+reject_text "AGENTS.md" "direct mode"
+reject_text "AGENTS.md" "td context <id> --work-dir"
+# Matches skills/wiki/SKILL.md's own "When to use" wording exactly, rather
+# than the older "...or change the wiki" phrasing this check used to assert.
+require_text "AGENTS.md" "ingest, backfill, regenerate, inspect, update, or change wiki output"
+require_text "skills/wiki/SKILL.md" "ingest, backfill, regenerate, inspect, update, or change wiki output"
 require_text "AGENTS.md" 'Sergeant-owned procedural skills live at `skills/<name>/SKILL.md`'
 require_text "AGENTS.md" "read that repository-local file directly"
 require_text "AGENTS.md" "takes precedence over any same-named registry skill"

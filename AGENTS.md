@@ -12,9 +12,11 @@ The `bin/sgt-*` shell toolbelt is **v1**. On this branch:
   `sgt-context`, or any other `bin/sgt-*` script.
 - Do **not** use tmux to run or supervise work.
 - Do **not** write into v1's fleet layout at `~/.local/share/sergeant/fleet`.
-- Where v1 has a capability v2 lacks (td tasks, canonical intent files,
+- Where v1 has a capability v2 lacks (file-based intent artifacts,
   independent review workers, the shipping gate), that is **unimplemented v2
-  scope**. Do not close the gap by shelling out to v1.
+  scope**. Do not close the gap by shelling out to v1. v2 does track a
+  canonical intent — see Domain model, below — just as a durable store row,
+  never a file.
 
 `main` still contains v1's instructions and they are correct for v1. Do not edit
 `main`.
@@ -32,18 +34,42 @@ Intent is the primary durable object. Runs, phases and worktrees exist to serve 
 intent. A bullet is scoped to exactly one repository; work in a second repository
 is a second bullet. The intent holds the merge order across its bullets.
 
+Every phase for a bullet renders its prompt from the same canonical intent revision via `Store.RenderIntentBrief(intentID, repo, gates)` — never a stale or hand-copied restatement. v2 has no `.sergeant-intent.md` or other worktree file carrying this; the intent's only durable form is the row in `store.Store`, addressed by `intentID`.
+
 ## Two ways in, one set of records
 
 1. **Agent-driven.** The operator launches their own agent CLI (opencode, codex,
    goose, pi, claude) in a terminal inside the project. That agent talks to
-   sergeant over MCP (`bin/sergeant-mcp`, declared in `mcp.json`):
+   sergeant over MCP — `sergeant mcp` (a subcommand of the `sergeant` binary,
+   declared in `mcp.json` as `{"command": "./bin/sergeant", "args": ["mcp"]}`;
+   there is no separate `sergeant-mcp` executable):
    `sergeant_get_brief`, `sergeant_run_gates`, `sergeant_emit_envelope`,
    `sergeant_seal_pr`, `sergeant_status`, `sergeant_run_status`,
-   `sergeant_run_wait`. Sergeant does not spawn or host the session.
+   `sergeant_run_wait`, `sergeant_graph_query`, `sergeant_graph_explain`,
+   `sergeant_graph_affected`. Sergeant does not spawn or host the session.
 2. **Coordinator-driven.** The operator dispatches from the UI
    (`POST /api/dispatch`) and sergeant runs bounded headless agent phases itself.
 
 Both create the same records. Adding a third, divergent execution model is a bug.
+
+## Procedural skills
+
+Load procedures only when their trigger applies:
+
+| Trigger | Skill | Owns |
+|---|---|---|
+| A project is named, registered, edited, synced, or graphed, or repository ownership isn't already established | `load-project` | Registry lookup, schema, context loading, project edits |
+| More than one repository owns the requested outcome | `cross-repo-work` | Repository decomposition, dependency and merge order, per-repo acceptance |
+| A task spans multiple repos and should run as parallel dispatched subagents | `dispatch` | `POST /api/dispatch`, worktree isolation, monitoring |
+| The user asks to ingest, backfill, regenerate, inspect, update, or change wiki output | `wiki` | Capture behavior, digest generation, schema ownership, index updates |
+| The user asks what Sergeant is, how to install/configure/use it, where skills come from, or how to diagnose an error | `sergeant-help` | Documentation lookup, command verification, help responses |
+
+Sergeant-owned procedural skills live at `skills/<name>/SKILL.md` in this
+repository. General software-engineering skills (not Sergeant-specific) live
+at `.agents/skills/<name>/SKILL.md` and are discovered from that canonical
+tree by Codex, OpenCode, and Claude.
+
+For every listed trigger, read that repository-local file directly; it is canonical and takes precedence over any same-named registry skill. A harness registry may assist loading but its omission does not make the skill unavailable. Do not ask the owner or stop solely because the registry omits the skill. Only stop and report the exact repository-local path when that file is absent or unreadable; do not reconstruct a partial protocol from memory.
 
 ## Rules that are enforced in code
 

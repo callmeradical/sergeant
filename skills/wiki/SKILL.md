@@ -4,8 +4,7 @@ Maintain Sergeant's automatic activity captures and curated daily session digest
 
 ## When to use
 
-Load this skill when the user asks to ingest, backfill, regenerate, inspect, or
-change wiki output. Do not load it for routine dispatch, notification, or cleanup;
+Load this skill when the user asks to ingest, backfill, regenerate, inspect, update, or change wiki output. Do not load it for routine dispatch, notification, or cleanup;
 those commands write automatic captures without coordinator action.
 
 ## Storage ownership
