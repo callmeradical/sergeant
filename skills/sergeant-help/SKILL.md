@@ -16,15 +16,18 @@ or `wiki` after the user has requested execution of those procedures.
 
 | Question | Primary document |
 |---|---|
-| Product and deployment model | `docs/what-is-sergeant.md` |
-| Installation and first project | `docs/getting-started.md` |
-| External and bundled skill sources | `docs/skills.md` |
-| Direct/dispatch workflows and commands | `docs/using-sergeant.md` |
+| Product and deployment model | `docs/architecture.md` |
+| Installation and first project | Not yet written for v2 — see `README.md`'s Quick start and `AGENTS.md`'s "Two ways in" section for the closest available guidance |
+| External and bundled skill sources | `docs/repo-scoped-skills.md` |
+| Direct/dispatch workflows and commands | `skills/dispatch/SKILL.md`, `skills/cross-repo-work/SKILL.md` |
 | Errors, stale runs, auth, gates, cleanup | `docs/troubleshooting.md` |
 | Project YAML fields | `docs/schema.md` |
 | The v2 HTTP API and MCP tool reference | `skills/dispatch/SKILL.md` |
-
 | Agent execution policy | `AGENTS.md` |
+
+v1's docs describing the removed `bin/sgt-*` toolbelt (`what-is-sergeant.md`,
+`getting-started.md`, `skills.md`, `using-sergeant.md`) were archived to
+`docs/archive/v1/` — do not cite them as current guidance.
 
 v2's command reference is `POST /api/*` routes (`internal/ui/server.go`) and MCP
 tools (`internal/mcp/server.go`'s `Tools()`), not `bin/sgt-*` — there is no shell

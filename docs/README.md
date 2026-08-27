@@ -34,26 +34,25 @@ the full v1/v2 distinction.
 - [Archived PRDs](prd/archive/) — PRDs whose OpenSpec change has been
   fully implemented and archived.
 
-## Not yet rewritten for v2
+## Not yet written for v2
 
-These describe v1 usage patterns (the removed `sgt-*` shell toolbelt,
-tmux-based workers) and still serve the *purpose* v2 needs answered — first
-install, what the product is, how to use it, which skills it vendors — but
-have not been rewritten to describe v2. Rewriting them was explicitly
-deferred as a separate scope decision by `openspec/changes/v2-native-skills-and-docs/`;
-treat their content as stale until that happens:
-
-- [What is Sergeant? (v1)](what-is-sergeant.md)
-- [Getting started (v1)](getting-started.md)
-- [Skills and their sources (v1)](skills.md)
-- [Using Sergeant (v1)](using-sergeant.md)
+No v2-native replacement exists yet for: first install/first project setup,
+what-is-Sergeant framing, or a skill-sources overview. The v1 docs that
+used to serve that purpose (`what-is-sergeant.md`, `getting-started.md`,
+`skills.md`, `using-sergeant.md`) described the removed `sgt-*` shell
+toolbelt and tmux-based workers throughout, with no accurate v2 procedure to
+substitute in-place — they have been archived to `docs/archive/v1/` (see
+Historical, below) rather than left live and stale. Until v2-native
+replacements are written, the closest available guidance is `README.md`'s
+Quick start and `AGENTS.md`'s "Two ways in" section.
 
 ## Historical
 
 [`docs/archive/v1/`](archive/v1/) holds documentation for the removed v1
 toolbelt kept for historical reference only: dated audits, ADRs, superseded
-research, and PRDs for work that either shipped in v1 or was superseded by
-v2's own PRDs (see `docs/prd-sergeant-v2.md`).
+research, PRDs for work that either shipped in v1 or was superseded by v2's
+own PRDs (see `docs/prd-sergeant-v2.md`), and the four v1-only usage docs
+named above.
 
 ## Documentation authority
 

@@ -33,13 +33,17 @@ require_file "skills/wiki/SKILL.md"
 require_file "skills/sergeant-help/SKILL.md"
 
 require_file "docs/README.md"
-require_file "docs/what-is-sergeant.md"
-require_file "docs/getting-started.md"
-require_file "docs/skills.md"
-require_file "docs/using-sergeant.md"
 require_file "docs/troubleshooting.md"
-require_text "docs/getting-started.md" "for agent in opencode goose claude"
-require_text "docs/getting-started.md" "Install OpenCode, Goose, or Claude before using Sergeant interactive dispatch."
+
+# what-is-sergeant.md, getting-started.md, skills.md, and using-sergeant.md
+# described the removed v1 sgt-* toolbelt throughout with no v2 procedure to
+# substitute in-place; they were archived to docs/archive/v1/ rather than
+# rewritten in place, so no live doc at those paths is required or checked
+# here.
+require_file "docs/archive/v1/what-is-sergeant.md"
+require_file "docs/archive/v1/getting-started.md"
+require_file "docs/archive/v1/skills.md"
+require_file "docs/archive/v1/using-sergeant.md"
 
 require_text "AGENTS.md" "## Procedural skills"
 require_text "AGENTS.md" "direct executor when requested"
@@ -59,8 +63,10 @@ require_text "AGENTS.md" "Only stop and report the exact repository-local path"
 require_text "AGENTS.md" "absent or unreadable; do not reconstruct a partial"
 reject_text "AGENTS.md" "If a required skill cannot be loaded, stop before the procedure"
 require_text "README.md" "docs/README.md"
-require_text "README.md" ".sergeant-intent.md"
-require_text "README.md" '--intent-file'
+reject_text "README.md" ".sergeant-intent.md"
+reject_text "README.md" '--intent-file'
+reject_text "README.md" "bin/sgt-"
+reject_text "README.md" "tmux new-session"
 reject_text "AGENTS.md" "gives one repository as the complete scope"
 reject_text "AGENTS.md" "## Project YAML schema (summary)"
 reject_text "AGENTS.md" "## td task management integration"
@@ -68,12 +74,8 @@ reject_text "AGENTS.md" "## Wiki integration"
 
 reject_text "skills/dispatch/SKILL.md" "Ask for confirmation before dispatching."
 reject_text "skills/dispatch/SKILL.md" "remain alive, and wait"
-require_text "docs/using-sergeant.md" '--intent-file intent.md'
-require_text "docs/using-sergeant.md" ".sergeant-intent.md"
 reject_text "AGENTS.md" 'no-mistakes axi run --intent "<the user'
 require_text "skills/cross-repo-work/SKILL.md" "If the user requested planning only"
-require_text "docs/skills.md" "User-invoked orchestrators"
-require_text "docs/skills.md" "Model-invoked disciplines"
 
 reject_text "skills/dispatch/SKILL.md" "sgt-dispatch"
 reject_text "skills/dispatch/SKILL.md" "sgt-watch"
