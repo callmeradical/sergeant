@@ -112,31 +112,44 @@ for ((i = 0; i < count; i++)); do
     [[ -z "$worktree" ]] || "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" 2>/dev/null || true
   fi
 
-  if [[ -n "$pid" && "$pid" =~ ^[1-9][0-9]*$ ]] && ! $marker_evidence_present; then
+  # Terminal state is only ever published for a worker this loop actually
+  # confirmed stopped (or independently proved already gone) — never merely
+  # attempted. A missing pid record or an unprovable identity must surface as
+  # a failure, not a silent false "stopped".
+  confirmed_stopped=false
+
+  if $marker_evidence_present; then
     # Marker-owning workers are retired exclusively through the pidfd holder
-    # boundary below, the same check-then-kill PID-reuse window sgt-drain-force
-    # already closes that way; direct signaling is only for workers with no
-    # marker capability recorded at all.
+    # boundary, the same check-then-kill PID-reuse window sgt-drain-force
+    # already closes that way; direct signaling never applies here.
+    if _sgt_retire_worker_marker_holders "$repo_dir"; then
+      confirmed_stopped=true
+    else
+      printf '  WARN: owned descendants could not be retired (%s/%s); fleet state preserved\n' \
+        "$task_id" "$repo_name" >&2
+    fi
+  elif [[ -n "$pid" && "$pid" =~ ^[1-9][0-9]*$ ]]; then
     if $FORCE; then
       actual_start="$(_sgt_process_identity "$pid" 2>/dev/null || true)"
       if [[ -n "$recorded_start" && -n "$actual_start" && \
             "$actual_start" == "$recorded_start" ]]; then
-        kill -KILL "$pid" 2>/dev/null || true
+        kill -KILL "$pid" 2>/dev/null && confirmed_stopped=true
       fi
     else
-      _sgt_terminate_verified_pid "$pid" "$recorded_start" "$GRACE_DECISECONDS" || \
-        printf '  INFO: pid %s identity unproven for %s/%s; direct signal skipped\n' \
-          "$pid" "$task_id" "$repo_name" >&2
+      _sgt_terminate_verified_pid "$pid" "$recorded_start" "$GRACE_DECISECONDS" && \
+        confirmed_stopped=true
     fi
+    $confirmed_stopped || \
+      printf '  WARN: pid %s identity unproven for %s/%s; not stopped\n' \
+        "$pid" "$task_id" "$repo_name" >&2
+  else
+    printf '  WARN: no worker pid recorded for %s/%s; cannot verify or stop\n' \
+      "$task_id" "$repo_name" >&2
   fi
 
-  if $marker_evidence_present; then
-    if ! _sgt_retire_worker_marker_holders "$repo_dir"; then
-      printf '  WARN: owned descendants could not be retired (%s/%s); fleet state preserved\n' \
-        "$task_id" "$repo_name" >&2
-      any_failed=true
-      continue
-    fi
+  if ! $confirmed_stopped; then
+    any_failed=true
+    continue
   fi
 
   [[ -n "$worktree" && -d "$worktree" ]] && \
@@ -144,6 +157,11 @@ for ((i = 0; i < count; i++)); do
   printf 'force-stopped\n' > "$repo_dir/status" || true
   printf '  stopped: %s/%s\n' "$task_id" "$repo_name"
 done
+
+# Capacity this run just freed should promote queued work without requiring a
+# separate sgt-watch --background monitor to happen to be running for some
+# other task at this exact moment.
+_sgt_dispatch_queue_promote_ready || true
 
 if $any_failed; then
   _die "some workers could not be fully stopped; state preserved for manual recovery"

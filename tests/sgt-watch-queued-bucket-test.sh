@@ -83,6 +83,29 @@ else
   _fail "sgt-watch --snapshot --project: expected totals.queued to stay 2, got '$queued_count2'"
 fi
 
+# ── bare `sgt-watch <task-id>` and `<task-id> --background` recognize a
+# queued-only task instead of dying "Task not found" ────────────────────────
+
+bg_out="$(SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-watch" queued-task-1 --background 2>&1)"
+bg_status=$?
+if [[ "$bg_status" -eq 0 && "$bg_out" == *"queued"* ]]; then
+  _pass "sgt-watch <task-id> --background: reports a queued-only task as queued instead of 'Task not found'"
+else
+  _fail "sgt-watch <task-id> --background: expected a queued report, got status=$bg_status: $bg_out"
+fi
+
+bare_fleet="$TEST_ROOT/bare-fleet"
+mkdir -p "$bare_fleet"
+SERGEANT_FLEET="$bare_fleet" _lib _sgt_dispatch_queue_enqueue bare-queued-task myproj app "brief"
+(
+  SERGEANT_FLEET="$bare_fleet" timeout 2 "$ROOT_DIR/bin/sgt-watch" bare-queued-task > "$TEST_ROOT/bare.out" 2>&1
+) || true
+if grep -q "queued" "$TEST_ROOT/bare.out" && ! grep -q "Task not found" "$TEST_ROOT/bare.out"; then
+  _pass "sgt-watch <task-id>: a queued-only task reports queued and polls instead of dying 'Task not found'"
+else
+  _fail "sgt-watch <task-id>: expected a queued report, got: $(cat "$TEST_ROOT/bare.out")"
+fi
+
 printf '\nsgt-watch-queued-bucket: %d passed' "$pass"
 if [[ "$fail" -gt 0 ]]; then
   printf ', %d FAILED\n' "$fail" >&2

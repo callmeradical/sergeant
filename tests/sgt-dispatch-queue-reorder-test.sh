@@ -91,6 +91,20 @@ else
   _fail "sgt-dispatch-queue --reorder: unknown task ID should fail"
 fi
 
+# A single-entry queue reorders without tripping bash 3.2's empty-array
+# expansion behavior under `set -u` (this repo's scripts run under
+# /usr/bin/env bash, which resolves to macOS's system bash 3.2).
+solo_fleet="$TEST_ROOT/solo-fleet"
+mkdir -p "$solo_fleet"
+SERGEANT_FLEET="$solo_fleet" _lib _sgt_dispatch_queue_enqueue solo-task proj repo "solo brief"
+solo_out="$(SERGEANT_FLEET="$solo_fleet" "$ROOT_DIR/bin/sgt-dispatch-queue" --reorder solo-task 1 2>&1)"
+solo_status=$?
+if [[ "$solo_status" -eq 0 && "$(cat "$solo_fleet/.dispatch-queue/solo-task/order")" == "1" ]]; then
+  _pass "sgt-dispatch-queue --reorder: a single-entry queue reorders cleanly"
+else
+  _fail "sgt-dispatch-queue --reorder: single-entry reorder failed: $solo_out"
+fi
+
 printf '\nsgt-dispatch-queue-reorder: %d passed' "$pass"
 if [[ "$fail" -gt 0 ]]; then
   printf ', %d FAILED\n' "$fail" >&2

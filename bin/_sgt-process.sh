@@ -234,17 +234,21 @@ _sgt_marker_history_digest() {
 
 # _sgt_terminate_verified_pid <pid> <recorded_start> [wait_deciseconds=50]
 #
-# The PID-identity-checked SIGTERM-then-poll-then-SIGKILL escalation shared by
-# sgt-drain-force and bin/sgt-stop-all (openspec/changes/dispatch-admission-control):
-# verifies the live process's exact start-time identity matches
-# <recorded_start> before signaling at all, so a PID recycled by an unrelated
-# process is never killed. Polls for exit up to wait_deciseconds (default 50 =
-# 5s) after SIGTERM, escalating to SIGKILL only if still alive.
+# The PID-identity-checked SIGTERM-then-poll-then-SIGKILL escalation used by
+# bin/sgt-stop-all (openspec/changes/dispatch-admission-control). sgt-drain-force
+# implements this same shape inline rather than calling this helper; it is not
+# yet refactored to share it. Verifies the live process's exact start-time
+# identity matches <recorded_start> before signaling at all, so a PID recycled
+# by an unrelated process is never killed. Polls for exit up to
+# wait_deciseconds (default 50 = 5s) after SIGTERM, escalating to SIGKILL only
+# if still alive.
 #
 # Returns:
-#   0  identity verified; process is gone (either it exited on its own or was
+#   0  nothing left to prove live (the pid was already gone), or identity was
+#      verified and the process is now gone (exited on its own, or was
 #      signaled and confirmed gone/killed)
-#   1  identity unproven (pid not alive, or recorded/actual start mismatch) —
+#   1  the pid argument is malformed, or the pid is alive but its identity
+#      could not be proven (recorded/actual start mismatch or unavailable) —
 #      no signal was sent
 _sgt_terminate_verified_pid() {
   local pid="$1" recorded_start="$2" wait_deciseconds="${3:-50}"

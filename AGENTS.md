@@ -93,6 +93,8 @@ name without the `bin/` prefix (e.g. `sgt-dispatch`, `sgt-watch`).
 | `bin/sgt-validate <task-id> <repo> [--skip <steps>] [--allow-argv-intent]` | `sgt-validate` | Launch coordinator-owned no-mistakes in a split worker-window pane |
 | `bin/sgt-validate <task-id> <repo> --claim-ownership` | `sgt-validate` | Take validation ownership from a gone or released dispatching pane, with identity proof and an audit record |
 | `bin/sgt-validate <task-id> <repo> --release-ownership` | `sgt-validate` | Release validation ownership from the recorded coordinator pane so another pane can claim it |
+| `bin/sgt-stop-all [--dry-run\|--yes] [--force]` | `sgt-stop-all` | Stop every verified-live worker pane machine-wide, no drain precondition; default tier attempts a durable-handoff capture then a grace period before SIGKILL, `--force` skips both |
+| `bin/sgt-dispatch-queue --reorder <task-id> <position>` | `sgt-dispatch-queue` | Manually reorder the durable dispatch admission queue (`$FLEET_DIR/.dispatch-queue/`) |
 | `bin/sgt-cleanup <task-id>` | `sgt-cleanup` | Remove worktrees + fleet state when done |
 | `bin/sgt-dag-run <project>` | `sgt-dag-run` | Create dagr DAG from project YAML `dag:` block and start a run; dispatches ready stages automatically (**requires dagr**) |
 | `bin/sgt-dag-dispatch-hook` | `sgt-dag-dispatch-hook` | Stage hook used internally by sgt-dag-run; called by dagr when a stage becomes ready (**requires dagr**) |

@@ -29,36 +29,26 @@ POSITION="${3:-}"
 [[ -d "$QUEUE_DIR/$TASK_ID" ]] || _die "No queued dispatch with task ID: $TASK_ID"
 
 declare -a ids=()
-declare -a orders=()
-for entry in "$QUEUE_DIR"/*/; do
-  [[ -d "$entry" ]] || continue
-  id="$(basename "${entry%/}")"
-  order="$(cat "${entry}order" 2>/dev/null || true)"
-  [[ "$order" =~ ^[0-9]+$ ]] || continue
+while IFS= read -r id; do
+  [[ -n "$id" ]] || continue
   ids+=("$id")
-  orders+=("$order")
-done
-
-count=${#ids[@]}
-for ((i = 1; i < count; i++)); do
-  j=$i
-  while ((j > 0)) && ((orders[j - 1] > orders[j])); do
-    tmp_o=${orders[j]}; orders[j]=${orders[j - 1]}; orders[j - 1]=$tmp_o
-    tmp_i=${ids[j]}; ids[j]=${ids[j - 1]}; ids[j - 1]=$tmp_i
-    ((j--))
-  done
-done
+done < <(_sgt_dispatch_queue_sorted_ids "$QUEUE_DIR")
 
 declare -a remaining=()
-for id in "${ids[@]}"; do
-  [[ "$id" == "$TASK_ID" ]] || remaining+=("$id")
-done
+if ((${#ids[@]} > 0)); then
+  for id in "${ids[@]}"; do
+    [[ "$id" == "$TASK_ID" ]] || remaining+=("$id")
+  done
+fi
 
 insert_index=$((POSITION - 1))
 ((insert_index < 0)) && insert_index=0
 ((insert_index > ${#remaining[@]})) && insert_index=${#remaining[@]}
 
-declare -a final=("${remaining[@]:0:insert_index}" "$TASK_ID" "${remaining[@]:insert_index}")
+declare -a final=()
+((insert_index <= 0)) || final+=("${remaining[@]:0:insert_index}")
+final+=("$TASK_ID")
+((insert_index >= ${#remaining[@]})) || final+=("${remaining[@]:insert_index}")
 
 rank=0
 for id in "${final[@]}"; do

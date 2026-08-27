@@ -1480,17 +1480,44 @@ fi
 # dispatch-task lock above, and before any worktree or pane is created, so a
 # queued call never reaches fleet/worktree/pane creation at all.
 #
-# The JSON/correlated-callback admission path (Hermes) has its own,
-# unrelated, already-transactional admission/idempotency system named
-# "admission" for a different purpose (request correlation, not worker
-# census); this budget/queue check does not apply to it.
-if ! $DRY_RUN && ! $JSON_OUTPUT; then
+# Applies uniformly to the --json/correlated-callback (Hermes) path too: the
+# spec makes no exception for it, and sgt-callback's own correlation-keyed
+# admission (a different "admission" -- request idempotency, not worker
+# census) already makes a queued-then-retried correlated call resolve back to
+# the exact same TASK_ID (see _sgt_dispatch_queue_enqueue's idempotent-retry
+# handling), so queuing a JSON call here does not disturb that contract.
+#
+# A --resume-task-id replay is exempt: _sgt_dispatch_queue_promote_ready
+# already checked live<budget immediately before invoking this exact call, and
+# re-running the same check here would let a promoted call silently re-queue
+# itself under a FRESH, later FIFO order (discarding the position it already
+# earned) whenever the machine's live count ticked up in the narrow window
+# between that check and this one -- reported back to the promoter as an
+# ordinary successful admission, not a requeue, since exit 0 looks identical
+# either way. A --json replay needs no such exemption: it never carries
+# --resume-task-id (correlation resolution already reuses the task_id), and a
+# same-content re-enqueue under that same task_id is the idempotent no-op
+# case above, so its original FIFO order is never disturbed either.
+if ! $DRY_RUN && [[ -z "$RESUME_TASK_ID" ]]; then
   _sgt_admission_live="$(_sgt_live_worker_census)"
   _sgt_admission_budget="$(_sgt_effective_worker_budget)"
   if [[ "$_sgt_admission_live" -ge "$_sgt_admission_budget" ]]; then
-    _sgt_dispatch_queue_enqueue "$TASK_ID" "$PROJECT" "$REPOS_ARG" "$BRIEF" "$TD_TASK_ID" || \
-      _die "Could not record dispatch as queued (task $TASK_ID)"
-    echo "queued: live=$_sgt_admission_live budget=$_sgt_admission_budget; task $TASK_ID will be admitted automatically as capacity frees up"
+    if $JSON_OUTPUT; then
+      # WORKER_BRIEF, not BRIEF: JSON_OUTPUT mode overwrites BRIEF with the
+      # generic "Hermes correlated code-work request" placeholder used only
+      # for td-title/branch derivation, while WORKER_BRIEF still carries the
+      # caller's real --brief-file content. Enqueuing the placeholder would
+      # replay a promoted worker with no real task description at all.
+      _sgt_dispatch_queue_enqueue "$TASK_ID" "$PROJECT" "$REPOS_ARG" "$WORKER_BRIEF" "$TD_TASK_ID" \
+        "$ORIGIN_PROFILE" "$CORRELATION_ID" || \
+        _die "Could not record dispatch as queued (task $TASK_ID)"
+      printf '{"status":"queued","task_id":"%s","correlation_id":"%s"}\n' \
+        "$TASK_ID" "$CORRELATION_ID" >&3
+    else
+      _sgt_dispatch_queue_enqueue "$TASK_ID" "$PROJECT" "$REPOS_ARG" "$WORKER_BRIEF" "$TD_TASK_ID" || \
+        _die "Could not record dispatch as queued (task $TASK_ID)"
+      echo "queued: live=$_sgt_admission_live budget=$_sgt_admission_budget; task $TASK_ID will be admitted automatically as capacity frees up"
+    fi
     exit 0
   fi
 fi
