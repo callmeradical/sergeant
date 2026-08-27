@@ -311,7 +311,7 @@ set +e
 no_token_out="$(_dispatch resume-no-token 'No token brief' --resume-task-id fixed-task-no-token 2>&1)"
 no_token_status=$?
 set -e
-if [[ "$no_token_status" -ne 0 && "$no_token_out" == *"promotion token"* ]]; then
+if [[ "$no_token_status" -ne 0 && "$no_token_out" == *"promotion proof"* ]]; then
   _pass "--resume-task-id: rejected outright without a matching promotion token (admission-control bypass guard)"
 else
   _fail "--resume-task-id: should require a valid promotion token; status=$no_token_status out=$no_token_out"
@@ -322,14 +322,62 @@ else
   _fail "--resume-task-id: a fleet task directory should not exist without a valid token"
 fi
 
+# A matching token alone, with no matching promoter_pid (process lineage), is
+# also rejected: a token-only forgery is exactly as easy for an unrelated
+# caller to construct as a genuine promotion, so the token check alone is not
+# sufficient proof (see bin/sgt-dispatch's --resume-task-id comment).
+mkdir -p "$TEST_ROOT/fleet/.dispatch-queue/.promoting-fixed-task-wrong-pid"
+printf 'test-token-wrong-pid\n' > "$TEST_ROOT/fleet/.dispatch-queue/.promoting-fixed-task-wrong-pid/promotion_token"
+printf '1\n' > "$TEST_ROOT/fleet/.dispatch-queue/.promoting-fixed-task-wrong-pid/promoter_pid"
+set +e
+wrong_pid_out="$(_dispatch resume-wrong-pid 'Wrong pid brief' --resume-task-id fixed-task-wrong-pid \
+  --promotion-token test-token-wrong-pid 2>&1)"
+wrong_pid_status=$?
+set -e
+if [[ "$wrong_pid_status" -ne 0 && "$wrong_pid_out" == *"promotion proof"* ]]; then
+  _pass "--resume-task-id: a matching token with a non-matching promoter_pid (process lineage) is still rejected"
+else
+  _fail "--resume-task-id: should require promoter_pid to match \$PPID too; status=$wrong_pid_status out=$wrong_pid_out"
+fi
+
 mkdir -p "$TEST_ROOT/fleet/.dispatch-queue/.promoting-fixed-task-abc123"
 printf 'test-token-abc123\n' > "$TEST_ROOT/fleet/.dispatch-queue/.promoting-fixed-task-abc123/promotion_token"
+printf '%s\n' "$$" > "$TEST_ROOT/fleet/.dispatch-queue/.promoting-fixed-task-abc123/promoter_pid"
 _dispatch resume-fixed 'Resume-fixed brief' --resume-task-id fixed-task-abc123 \
   --promotion-token test-token-abc123 >/dev/null
 if [[ -d "$TEST_ROOT/fleet/fixed-task-abc123/app" ]]; then
   _pass "--resume-task-id: dispatch reuses the exact given task ID instead of generating a random one"
 else
   _fail "--resume-task-id: expected fleet/fixed-task-abc123/app to exist"
+fi
+
+# ── 6. --resume-task-id combined with --json is a hard usage error ─────────
+# Never a legitimate combination: a --json replay reuses sgt-callback's own
+# correlation-keyed task-id resolution instead (see
+# _sgt_dispatch_queue_promote_ready), and TASK_ID resolution ignores
+# --resume-task-id whenever --json is set -- so silently ignoring the flag
+# there, rather than rejecting the combination outright, would leave the
+# admission-control gate (which is keyed only on --resume-task-id being
+# non-empty) skippable via --json too.
+
+json_resume_brief="$TEST_ROOT/json-resume-brief.txt"
+(umask 077; printf '%s' 'json resume combo brief' > "$json_resume_brief")
+mkdir -p "$TEST_ROOT/callbacks"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_ROOT/callbacks/testprofile"
+chmod 700 "$TEST_ROOT/callbacks/testprofile"
+set +e
+json_resume_out="$(env -u TMUX -u TMUX_PANE PATH="$TEST_ROOT/fake-bin:$PATH" \
+  SERGEANT_CONFIG="$TEST_ROOT/config" SERGEANT_FLEET="$TEST_ROOT/fleet" \
+  SERGEANT_CALLBACKS="$TEST_ROOT/callbacks" SGT_WIKI_DISABLED=1 \
+  "$ROOT_DIR/bin/sgt-dispatch" test --brief-file "$json_resume_brief" --repos app \
+  --json --origin-profile testprofile --correlation-id corr-json-resume-001 \
+  --resume-task-id fixed-task-abc123 2>&1)"
+json_resume_status=$?
+set -e
+if [[ "$json_resume_status" -ne 0 && "$json_resume_out" == *"cannot be combined"* ]]; then
+  _pass "--resume-task-id + --json: rejected as a hard usage error"
+else
+  _fail "--resume-task-id + --json: expected a 'cannot be combined' usage error; status=$json_resume_status out=$json_resume_out"
 fi
 
 printf '\nsgt-dispatch-admission-control: %d passed' "$pass"

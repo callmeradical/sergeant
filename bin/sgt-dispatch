@@ -689,19 +689,37 @@ if $JSON_OUTPUT; then
     kill -"${SGT_DISPATCH_CRASH_SIGNAL:-TERM}" "$$"
   fi
 elif [[ -n "$RESUME_TASK_ID" ]]; then
+  [[ "$RESUME_TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || \
+    _die "malformed --resume-task-id: $RESUME_TASK_ID"
   # --resume-task-id alone is not proof of anything: it is a plain CLI flag
   # any caller (including an MCP client, whose argv this tool passes through
   # unfiltered) could pass with a fabricated task ID purely to skip the
   # admission-control check below, which is gated on this flag being empty.
-  # The promotion token is minted fresh by _sgt_dispatch_queue_promote_ready
-  # and written into $FLEET_DIR/.dispatch-queue/.promoting-<id>/ only for the
-  # exact entry it is actively replaying, so requiring it here proves this
-  # call really is that replay and not an unrelated, unvetted one.
-  _sgt_resume_token_file="$FLEET_DIR/.dispatch-queue/.promoting-$RESUME_TASK_ID/promotion_token"
-  _sgt_resume_expected_token="$(cat "$_sgt_resume_token_file" 2>/dev/null || true)"
-  [[ -n "$_sgt_resume_expected_token" && "$_sgt_resume_expected_token" == "$PROMOTION_TOKEN" ]] || \
-    _die "invalid or missing promotion token for --resume-task-id: $RESUME_TASK_ID"
-  unset _sgt_resume_token_file _sgt_resume_expected_token
+  #
+  # A token file match alone is NOT sufficient proof either: $FLEET_DIR is an
+  # ordinary same-user directory, so any caller who can write two files can
+  # self-mint a "matching" token exactly as easily as a real promotion would.
+  # The additional, load-bearing check is process lineage: the real
+  # _sgt_dispatch_queue_promote_ready execs this exact binary as its own
+  # direct foreground child (never backgrounded, never through an
+  # intermediary), so a genuine resume's $PPID is always the promoter's own
+  # PID -- a kernel-assigned fact bash re-reads from the OS on every launch
+  # (verified: `env PPID=<forged> bash -c 'echo $PPID'` prints the real
+  # parent, not the forged one), not a value any caller can override via argv
+  # or environment. This still cannot distinguish a sufficiently determined
+  # same-user forger who inspects their own ambient $PPID and reproduces it
+  # deliberately -- there is no privilege boundary between "the coordinator"
+  # and any other same-user process in this codebase's trust model, and nothing
+  # here changes that -- but it closes the same bypass being reachable by
+  # merely passing two matching CLI arguments, which is what made the
+  # token-only check trivially, unintentionally reproducible.
+  _sgt_resume_promoting_dir="$FLEET_DIR/.dispatch-queue/.promoting-$RESUME_TASK_ID"
+  _sgt_resume_expected_token="$(cat "$_sgt_resume_promoting_dir/promotion_token" 2>/dev/null || true)"
+  _sgt_resume_promoter_pid="$(cat "$_sgt_resume_promoting_dir/promoter_pid" 2>/dev/null || true)"
+  [[ -n "$_sgt_resume_expected_token" && "$_sgt_resume_expected_token" == "$PROMOTION_TOKEN" && \
+     -n "$_sgt_resume_promoter_pid" && "$_sgt_resume_promoter_pid" == "$PPID" ]] || \
+    _die "invalid or missing promotion proof for --resume-task-id: $RESUME_TASK_ID"
+  unset _sgt_resume_promoting_dir _sgt_resume_expected_token _sgt_resume_promoter_pid
   TASK_ID="$RESUME_TASK_ID"
   ADMISSION_TX_DIR=""
 else
