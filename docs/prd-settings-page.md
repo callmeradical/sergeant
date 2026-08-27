@@ -159,23 +159,49 @@ project config — confirmed real and working for `Defaults.Agent`
 4. **Launch scope for this PRD: agent, model, dev-folder base, and
    feature flags.** `Retries` and the dispatch-admission budget are
    explicitly deferred, not launch-blocking.
+5. **The global settings file lives under `~/.config/sergeant/` on
+   macOS and Linux** — deliberately preserving v1's exact convention
+   rather than switching to Go's OS-idiomatic default (`os.UserConfigDir()`
+   returns `~/Library/Application Support` on macOS, not `~/.config`).
+   **On Windows, use the OS-appropriate location instead** (e.g.
+   `os.UserConfigDir()`'s own Windows result, typically
+   `%AppData%\sergeant`) rather than forcing the same Unix dotfile
+   convention onto a platform where it's foreign. Concretely: branch on
+   `runtime.GOOS`, hardcode `~/.config/sergeant` for `darwin`/`linux`,
+   defer to `os.UserConfigDir()` for everything else.
+6. **The per-provider model list is pulled from `models.dev`**
+   (`https://models.dev/api.json`), the same source the user's own
+   `token-meter` project already fetches from
+   (`TokenMeter/Pricing/PricingStore.swift`) — not a hand-maintained
+   static table and not a from-scratch live-query design. `token-meter`
+   already has a reusable Go client for this
+   (`github.com/lcromley/tokenmeter-client`'s `PricingStore`: fetches
+   `models.dev/api.json`, ETag-caches it to disk, keyed by
+   `providerID/modelID`) — reuse or vendor that fetch/cache logic rather
+   than reimplementing it, since the settings page needs the same
+   provider/model identifiers that package already parses out of the
+   same response (it happens to also carry pricing, which this PRD has
+   no use for, but the model-identity data is the same payload).
+7. **Feature flags get their own named block, in both tiers, not folded
+   into `Defaults`.** A `feature_flags:` (or similarly named) map of
+   flag-name to bool, present in both the global settings file and,
+   optionally, a project's YAML — every flag defaults to `false` unless
+   explicitly set `true` at either tier. This is a genuinely new block,
+   not an extension of `ProjectDefaults` (which is specifically about
+   per-dispatch agent/model/retries semantics, a different shape). By
+   the same reasoning, dev-folder-base also gets its own top-level key
+   rather than living inside `Defaults`.
 
 ## Open Questions
 
-1. Where does the known-good per-provider model list come from — a
-   static table shipped with the binary, or a live query to each
-   provider? A static table is simpler and matches how
-   `runner.SupportedAgents` already works, but risks going stale as
-   providers ship new models.
-2. What is the actual UI/config shape for a project-level override when
-   the field doesn't already exist in `ProjectDefaults` (dev-folder-base
-   and feature flags have no home in the schema today) — a new
-   top-level `Settings:` block in the project YAML, or extending
-   `Defaults`?
-3. Which feature flag(s) ship first, to prove the mechanism end-to-end?
-   None exist today to migrate, so this PRD needs at least one concrete
-   candidate to implement against rather than a purely speculative
-   registry.
-4. Should the global settings file live under `~/.config/sergeant/`
-   (matching v1's convention exactly) or somewhere v2-specific (e.g.
-   alongside the SQLite store's own directory)?
+1. Which feature flag(s) ship first, to prove the mechanism end-to-end?
+   The block shape and default-false semantics are settled, but no
+   flag exists today to migrate — this PRD needs at least one concrete
+   candidate to implement against rather than a purely speculative,
+   empty registry.
+2. Is `token-meter`/`tokenmeter-client` importable directly as a Go
+   module dependency from the `sergeant` repo (both are private under
+   the same GitHub owner — likely just a `go.mod` require plus normal
+   private-module auth, but worth confirming rather than assuming), or
+   does its model-identity logic need to be vendored/reimplemented
+   instead of imported?
