@@ -8,14 +8,17 @@ configuration" without becoming a second execution engine).
 
 ## Summary
 
-Sergeant v2 has no settings surface in its dashboard today. Project-level
-defaults already exist in the config schema and already have a
-patch-preserving API to edit them (`POST /api/refine-project`), but
-nothing in the UI calls it, and the patch payload itself doesn't cover
-every field the schema defines. This PRD adds a settings page to the
-dashboard, and closes the specific gap that motivated it: an operator
-should be able to configure, per project, which agent harness and which
-model a dispatch uses by default — without hand-editing YAML.
+Sergeant v2 has no settings surface today, at any level: no global
+settings store exists at all (confirmed — no `dev_root`, `DevRoot`, or
+equivalent global-config concept anywhere in `internal/config`, unlike
+v1's `~/.config/sergeant/config.yaml`), and the one piece of
+project-level settings machinery that does exist
+(`POST /api/refine-project`) has no UI calling it and doesn't cover every
+field the schema defines. This PRD adds a settings page with two tiers —
+**global defaults, overridable per project** — starting with agent,
+model, a base directory repos resolve under, and feature flags; agent
+and model additionally get a third tier, a per-dispatch override,
+mirroring how `Agent` already works on `/api/dispatch` today.
 
 ## Problem
 
@@ -26,6 +29,19 @@ general, comment-and-order-preserving YAML-node patch mechanism for
 project config — confirmed real and working for `Defaults.Agent`
 (`refinePayload.Defaults.Agent *string`). But:
 
+- **There is no global settings layer at all.** Every setting today is
+  either compiled-in or per-project. `config.LoadProject` resolves a
+  named project's own YAML file; nothing loads a machine-wide default
+  first. v1 had exactly this concept (`~/.config/sergeant/config.yaml`'s
+  `dev_root`), and v2 has no equivalent — a project that wants a setting
+  today must repeat it in every project file.
+- **Repo paths have no base-directory resolution.** `Repo.Path` is used
+  as-is (only `~/`-prefix expansion exists, inline in
+  `internal/mcp/server.go`'s `sergeant_run_gates` handler — not even in
+  `config.go` itself); there is no concept of "resolve this repo's path
+  relative to a configured base directory" the way v1's `dev_root`
+  worked. Adding a global "dev folder base" setting requires adding this
+  resolution, not just storing a string.
 - `refinePayload.Defaults` has no `Model` field at all — the patch
   mechanism was never extended to cover it, even though the underlying
   config schema already supports it.
@@ -38,98 +54,128 @@ project config — confirmed real and working for `Defaults.Agent`
   `claude`, `goose`, `codex`, `pi`, `copilot`) but has no equivalent
   `Model` override field, and no validation function for a model string
   exists anywhere (`Model` is accepted as an unvalidated free string).
-
-So the actual gap is narrower than "build agent/model configuration from
-scratch": the schema and half the patch mechanism already exist. What's
-missing is the settings page itself and the `Model` field in the patch
-payload — both agent and model are project-level defaults, each
-overridable per dispatch, exactly mirroring how `Agent` already behaves
-on `/api/dispatch` today.
+- **No feature-flag concept exists anywhere** in the codebase (confirmed
+  by grep — zero hits for any spelling of "feature flag"). This would be
+  new from scratch, not an existing mechanism missing a UI.
 
 ## Proposal
 
-1. **A settings page** in the dashboard, reachable from the existing
-   project-detail view, as a new panel/tab alongside the existing
-   run-list and delivery-status views R7.3 already describes.
-2. **Project-level default agent and model**, editable on that page,
-   backed by extending `refinePayload.Defaults` with `Model *string`
-   (mirroring the existing `Agent *string` field exactly) and wiring the
-   settings page to call `POST /api/refine-project`.
-3. **Validation surfaced in the UI, not just the API.** `ValidateAgent`
-   already exists server-side; the settings page should show the
-   accepted agent list (`runner.SupportedAgents`) as a real choice
-   control, not free text, so an operator can't save an unsupported
-   value. Model has no equivalent accepted-list validation today — see
-   Open Questions.
-4. **A per-dispatch override for both fields.** `/api/dispatch`'s
-   request body already accepts `Agent` as an optional override of the
-   project default (`req.Agent`, validated, applied over
-   `proj.Defaults.Agent` before the run starts). This PRD adds the
-   equivalent `Model` field to that same request body, applied over
-   `proj.Defaults.Model` the same way — so a caller (the dispatch UI, or
-   any other `/api/dispatch` caller) can use the configured default or
-   name a different agent/model for one specific run, without touching
-   settings.
-5. This page is also the natural home for the dispatch-admission-control
+1. **A new global settings store.** A single file (mirroring v1's
+   `~/.config/sergeant/config.yaml` precedent — e.g.
+   `~/.config/sergeant/settings.yaml`, distinct from any per-project
+   YAML) holding machine-wide defaults: agent, model, the dev-folder
+   base directory, and feature flags. Loaded once, read by every place
+   that currently only consults project-level `Defaults`.
+2. **Two-tier resolution for every setting: global default, overridable
+   per project.** A project's own `Defaults` (or a new per-project
+   settings block, for fields that don't already live in
+   `ProjectDefaults`) wins when set; otherwise the global value applies.
+   This is the general shape every setting on this page follows.
+3. **A settings page** in the dashboard with (at minimum, for this
+   PRD's launch scope) four sections: default agent, default model, dev
+   folder base, and feature flags — each showing its resolved value
+   (global vs. project-overridden) and which tier is in effect.
+4. **Agent and model additionally get a third tier: per-dispatch
+   override**, exactly mirroring `Agent`'s existing behavior on
+   `/api/dispatch` (`req.Agent` overrides `proj.Defaults.Agent` for one
+   call). This PRD adds the equivalent `Model` field to that same
+   request body. Dev-folder-base and feature flags are not given a
+   per-dispatch override in this PRD — a single dispatch call has no
+   natural per-call meaning for "use a different repo base directory"
+   or "toggle a flag for one run," so that tier is deliberately not
+   added for those two.
+5. **Validation surfaced in the UI, not just the API.** `ValidateAgent`
+   already exists server-side; the settings page shows the accepted
+   agent list (`runner.SupportedAgents`) as a real choice control, not
+   free text. **Model strings are validated too** (settled below) —
+   against a known-good list per provider, not accepted as free text.
+6. **Dev-folder-base resolution.** A repo path that is not already
+   absolute resolves relative to the configured dev-folder base (global
+   or project-overridden) — the actual missing mechanism identified in
+   Problem, not just a stored string with no effect.
+7. **Feature flags: a simple named boolean registry**, global default
+   per flag, overridable per project, checked at the specific call
+   sites that need to branch on them (which flags ship at launch is an
+   open question below, since none exist today to migrate).
+8. This page is also the natural home for the dispatch-admission-control
    budget setting from `docs/prd-dispatch-admission-control.md`'s first
    open question, if that PRD proceeds — one settings surface, not two.
 
 ## Non-Goals
 
-- Building a general-purpose settings framework for every possible
-  config field on day one. Agent/model defaults are the concrete,
-  requested starting point; the page's structure should not preclude
-  adding more settings later, but this PRD does not enumerate them.
+- Building a general-purpose settings framework that anticipates every
+  future field. This PRD's four sections (agent, model, dev-folder-base,
+  feature flags) are the concrete, requested launch scope; the page's
+  structure should not preclude adding more later, but this PRD does
+  not enumerate them.
 - Per-repo agent/model overrides beyond what already exists in the
   schema (`Repo` has no `Agent`/`Model` fields today — only
   project-level `Defaults` does). Adding repo-level overrides is a
   separate decision, not assumed here.
-- Changing `ValidateAgent`'s accepted list or adding model validation
-  logic beyond what's needed to surface the existing list in the UI.
+- A per-dispatch override for dev-folder-base or feature flags — see
+  Proposal item 4 for why.
 - Authentication/authorization for who can change settings. Matches the
   existing single-user, local-first, loopback-only trust model.
 
 ## Acceptance Criteria
 
-- A settings page exists in the dashboard and is reachable from the
-  project-detail view.
-- An operator can view and change a project's default agent from a
-  choice control populated from `runner.SupportedAgents`, and the
-  change persists via `POST /api/refine-project`.
-- An operator can view and change a project's default model, and the
-  change persists via the same endpoint (`refinePayload.Defaults.Model`
-  added, patch-preserving behavior unchanged for every other field).
-- Saving a new default takes effect on the next dispatch for that
-  project without requiring a server restart.
-- `/api/dispatch` accepts an optional `Model` field in its request body,
-  applied over the project's default model the same way `Agent` already
-  overrides `Defaults.Agent` — a caller that omits it gets the
-  configured default; a caller that sets it gets that run only.
-- Regression coverage: saving a settings change preserves every other
-  key in the project's YAML file byte-for-byte except the changed
-  field(s) (matching `refine.go`'s existing node-patch guarantee); a
-  dispatch with an explicit `Model` override produces a run using that
-  model regardless of the project's configured default.
+- A global settings store exists, is loaded once, and is consulted
+  wherever a setting is resolved.
+- A settings page exists in the dashboard, showing global defaults and
+  allowing project-level overrides, reachable from the project-detail
+  view for the project tier and from a top-level settings entry point
+  for the global tier.
+- An operator can view and change the default agent (choice control
+  populated from `runner.SupportedAgents`) and default model (choice
+  control populated from a known-good per-provider list) at both the
+  global and project tier; a project-level change persists via
+  `POST /api/refine-project` (`refinePayload.Defaults.Model` added).
+- Saving a new default takes effect on the next dispatch without
+  requiring a server restart.
+- `/api/dispatch` accepts an optional `Model` field, applied over the
+  resolved default (project override, else global) the same way `Agent`
+  already overrides `Defaults.Agent`.
+- A repo path that is not already absolute resolves relative to the
+  resolved dev-folder-base setting (project override, else global).
+- At least one feature flag exists end-to-end (global default,
+  project-overridable, read at a real call site) as a working example
+  of the mechanism, even if it flags something low-stakes for launch.
+- Regression coverage: saving a project-level override preserves every
+  other key in that project's YAML file byte-for-byte except the
+  changed field(s) (matching `refine.go`'s existing node-patch
+  guarantee); a dispatch with an explicit `Model` override produces a
+  run using that model regardless of any configured default at either
+  tier.
 
 ## Settled Decisions
 
-1. **Agent and model are project-level defaults, each overridable per
-   dispatch** — not project-default-only, and not per-call-only. This
-   mirrors `Agent`'s existing behavior on `/api/dispatch` exactly; this
-   PRD brings `Model` up to the same shape rather than inventing a
-   different one.
+1. **Two-tier settings: global default, overridable per project.** Not
+   project-scoped-only as originally drafted — a global layer is
+   required, and this PRD must build it since none exists today.
+2. **Agent and model get a third tier on top: per-dispatch override**,
+   mirroring `Agent`'s existing `/api/dispatch` behavior exactly.
+3. **Model strings are validated** against a known-good list per
+   provider, not accepted as free text.
+4. **Launch scope for this PRD: agent, model, dev-folder base, and
+   feature flags.** `Retries` and the dispatch-admission budget are
+   explicitly deferred, not launch-blocking.
 
 ## Open Questions
 
-1. Should the settings page validate model strings against a known-good
-   list per provider (the way agent already is), or accept free text
-   given the wide and fast-moving range of model identifiers? If
-   validated, where does that list come from — a static table, or a
-   live query to the provider?
-2. What other settings belong on this page at launch — is agent/model
-   the only field for v1 of this page, or should it also expose
-   `Retries` (already in `ProjectDefaults`) and the dispatch-admission
-   budget (if that PRD ships first)?
-3. Is there a global (cross-project) settings layer intended eventually
-   (e.g. a server-wide default agent/model applied when a project sets
-   none), or is every setting strictly project-scoped?
+1. Where does the known-good per-provider model list come from — a
+   static table shipped with the binary, or a live query to each
+   provider? A static table is simpler and matches how
+   `runner.SupportedAgents` already works, but risks going stale as
+   providers ship new models.
+2. What is the actual UI/config shape for a project-level override when
+   the field doesn't already exist in `ProjectDefaults` (dev-folder-base
+   and feature flags have no home in the schema today) — a new
+   top-level `Settings:` block in the project YAML, or extending
+   `Defaults`?
+3. Which feature flag(s) ship first, to prove the mechanism end-to-end?
+   None exist today to migrate, so this PRD needs at least one concrete
+   candidate to implement against rather than a purely speculative
+   registry.
+4. Should the global settings file live under `~/.config/sergeant/`
+   (matching v1's convention exactly) or somewhere v2-specific (e.g.
+   alongside the SQLite store's own directory)?
