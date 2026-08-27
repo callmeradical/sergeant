@@ -2049,26 +2049,42 @@ _path_device() {
 
 # ── Dispatch admission control (openspec/changes/dispatch-admission-control) ──
 
-# _sgt_live_worker_census
-# Machine-wide count of verified-live worker panes across every task, every
-# repo, every coordinator instance sharing $FLEET_DIR — not just workers this
-# invocation's own coordinator dispatched. A `status=in_progress` file alone is
-# not proof of life (a crashed pane can leave a stale in_progress record), so
-# this counts only records whose pane also proves live via the same identity
-# check sgt-watch/sgt-recover already trust (_sgt_pane_identity_matches).
-_sgt_live_worker_census() {
-  local count=0 task_dir repo_dir status
+# _sgt_live_worker_records
+# Prints "task_id<TAB>repo_name<TAB>repo_dir" for every verified-live worker
+# pane across every task, every repo, every coordinator instance sharing
+# $FLEET_DIR — not just workers this invocation's own coordinator dispatched.
+# A `status=in_progress` file alone is not proof of life (a crashed pane can
+# leave a stale in_progress record), so this yields only records whose pane
+# also proves live via the same identity check sgt-watch/sgt-recover already
+# trust (_sgt_pane_identity_matches). Shared by _sgt_live_worker_census
+# (which just counts lines) and bin/sgt-stop-all (which collects its
+# eligible-worker targets from this same enumeration), so exactly one
+# definition of "verified-live worker" exists.
+_sgt_live_worker_records() {
+  local task_dir repo_dir task_id repo_name status
   for task_dir in "$FLEET_DIR"/*/; do
     [[ -d "$task_dir" ]] || continue
+    task_id="$(basename "${task_dir%/}")"
+    [[ "$task_id" != ".dispatch-queue" ]] || continue
     for repo_dir in "$task_dir"*/; do
       [[ -d "$repo_dir" ]] || continue
       status="$(cat "$repo_dir/status" 2>/dev/null || true)"
       [[ "$status" == "in_progress" ]] || continue
       _sgt_pane_identity_matches "$(cat "$repo_dir/pane" 2>/dev/null || true)" \
         "$repo_dir" || continue
-      count=$((count + 1))
+      repo_name="$(basename "${repo_dir%/}")"
+      printf '%s\t%s\t%s\n' "$task_id" "$repo_name" "${repo_dir%/}"
     done
   done
+}
+
+# _sgt_live_worker_census
+# Machine-wide count of verified-live worker panes. See _sgt_live_worker_records.
+_sgt_live_worker_census() {
+  local count=0
+  while IFS=$'\t' read -r _ _ _; do
+    count=$((count + 1))
+  done < <(_sgt_live_worker_records)
   printf '%s\n' "$count"
 }
 

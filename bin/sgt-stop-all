@@ -52,25 +52,18 @@ GRACE_DECISECONDS="${SERGEANT_STOP_ALL_GRACE_DECISECONDS:-30}"
 
 # ── Collect every verified-live worker across the whole fleet ────────────────
 # Machine-wide by design (PRD settled decision): no --project/--repo scope
-# selector.
+# selector. Shares its "verified-live worker" definition with
+# _sgt_live_worker_census (bin/_sgt-lib.sh) via _sgt_live_worker_records, so
+# there is exactly one place that decides what counts as live.
 
 declare -a eligible_tasks=() eligible_repos=() eligible_dirs=()
 if [[ -d "$FLEET_DIR" ]]; then
-  for task_dir in "$FLEET_DIR"/*/; do
-    [[ -d "$task_dir" ]] || continue
-    task_id="$(basename "${task_dir%/}")"
-    [[ "$task_id" != ".dispatch-queue" ]] || continue
-    for repo_dir in "$task_dir"*/; do
-      [[ -d "$repo_dir" ]] || continue
-      status="$(cat "$repo_dir/status" 2>/dev/null || true)"
-      [[ "$status" == "in_progress" ]] || continue
-      _sgt_pane_identity_matches "$(cat "$repo_dir/pane" 2>/dev/null || true)" \
-        "$repo_dir" || continue
-      eligible_tasks+=("$task_id")
-      eligible_repos+=("$(basename "${repo_dir%/}")")
-      eligible_dirs+=("${repo_dir%/}")
-    done
-  done
+  while IFS=$'\t' read -r _swa_task_id _swa_repo_name _swa_repo_dir; do
+    [[ -n "$_swa_task_id" ]] || continue
+    eligible_tasks+=("$_swa_task_id")
+    eligible_repos+=("$_swa_repo_name")
+    eligible_dirs+=("$_swa_repo_dir")
+  done < <(_sgt_live_worker_records)
 fi
 
 count="${#eligible_tasks[@]}"
