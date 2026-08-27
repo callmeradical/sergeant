@@ -219,7 +219,7 @@ func (pr *PhaseRunner) gateTimeout() time.Duration {
 // SupportedAgents are the harnesses this native engine knows how to invoke.
 // An unrecognised name previously fell through to `exe [prompt]`, producing a
 // malformed command that failed in a way indistinguishable from agent failure.
-var SupportedAgents = []string{"opencode", "oc", "claude", "goose", "codex", "pi"}
+var SupportedAgents = []string{"opencode", "oc", "claude", "goose", "codex", "pi", "copilot"}
 
 // ValidateAgent reports whether the engine can drive the named harness.
 func ValidateAgent(agentCLI string) error {
@@ -464,6 +464,20 @@ func BuildAgentCommand(agentCLI, model, prompt string) (string, []string, []stri
 		} else {
 			args = []string{"-p", prompt}
 		}
+
+	case "copilot":
+		// -p takes the prompt as its value (unlike claude --print, which
+		// takes none), so it must be followed immediately by the prompt
+		// rather than have the prompt appended last. --allow-all-tools is a
+		// no-TTY dispatch's tool-approval bypass, the same role
+		// --dangerously-skip-permissions plays for claude. --no-ask-user
+		// disables copilot's ask_user tool so it can never stall a headless
+		// run waiting on clarification that has nowhere to go. No -C flag:
+		// working directory already comes from cmd.Dir at the shared call
+		// site, the same way every other harness gets it. No known model
+		// transport exists for copilot, so a requested model is not
+		// forwarded rather than guessed at.
+		args = []string{"-p", prompt, "--allow-all-tools", "--no-ask-user"}
 
 	default:
 		args = []string{prompt}

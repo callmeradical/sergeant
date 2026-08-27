@@ -24,6 +24,7 @@ func TestBuildAgentCommandPassesThePromptInAFormTheHarnessAccepts(t *testing.T) 
 		{agent: "goose", wantFlag: "-t", wantExtra: []string{"run", "--no-session"}},
 		{agent: "claude", wantFlag: "", wantExtra: []string{"--print"}},
 		{agent: "opencode", wantFlag: "", wantExtra: []string{"run"}},
+		{agent: "copilot", wantFlag: "-p", wantExtra: []string{"--allow-all-tools", "--no-ask-user"}},
 	}
 
 	for _, tc := range cases {
@@ -108,5 +109,70 @@ func TestClaudeIsInvokedWithoutPermissionPrompts(t *testing.T) {
 	if !strings.Contains(joined, "--dangerously-skip-permissions") {
 		t.Errorf("claude args %q lack --dangerously-skip-permissions; a headless dispatch "+
 			"cannot answer a permission prompt and will exit having written nothing", args)
+	}
+}
+
+// A dispatched copilot phase has no TTY, so --allow-all-tools bypasses
+// per-tool approval prompts the same way --dangerously-skip-permissions does
+// for claude, and --no-ask-user disables copilot's ask_user tool so it can
+// never stall a headless run waiting on clarification that has nowhere to
+// go. Verified against the real `copilot` v1.0.80 binary run headlessly with
+// both flags: it completed and exited 0 with no interactive prompt.
+func TestCopilotIsInvokedWithoutPermissionPromptsOrClarificationStalls(t *testing.T) {
+	_, args, _ := BuildAgentCommand("copilot", "", "do the thing")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--allow-all-tools") {
+		t.Errorf("copilot args %q lack --allow-all-tools; a headless dispatch "+
+			"cannot answer a tool-approval prompt and will exit having written nothing", args)
+	}
+	if !strings.Contains(joined, "--no-ask-user") {
+		t.Errorf("copilot args %q lack --no-ask-user; a headless dispatch has no TTY "+
+			"to answer an interactive clarification request", args)
+	}
+}
+
+// Working directory comes from cmd.Dir at the shared call site, the same way
+// every other harness gets it. Copilot's own -C flag is a second way to set
+// the same thing; using both risks disagreement between them, so copilot
+// must never receive -C from BuildAgentCommand.
+func TestCopilotDoesNotReceiveAWorkingDirectoryFlag(t *testing.T) {
+	_, args, _ := BuildAgentCommand("copilot", "", "do the thing")
+	for _, a := range args {
+		if a == "-C" {
+			t.Errorf("copilot args %q contain -C; working directory must come only from cmd.Dir", args)
+		}
+	}
+}
+
+// No confirmed model-selection transport (flag or env var) exists for
+// copilot. Requesting one must not fabricate an unconfirmed flag — the
+// argument list is identical with or without a requested model, aside from
+// the prompt itself.
+func TestCopilotDoesNotForwardARequestedModel(t *testing.T) {
+	_, withModel, _ := BuildAgentCommand("copilot", "anthropic/claude-opus-5", "do the thing")
+	_, withoutModel, _ := BuildAgentCommand("copilot", "", "do the thing")
+
+	for _, a := range withModel {
+		if a == "--model" {
+			t.Errorf("copilot args %q contain --model; no confirmed transport exists for this harness", withModel)
+		}
+	}
+	if strings.Join(withModel, " ") != strings.Join(withoutModel, " ") {
+		t.Errorf("copilot args differ with (%q) and without (%q) a requested model; they must be identical", withModel, withoutModel)
+	}
+}
+
+// copilot must be accepted the same way every other supported harness
+// already is: by bare name and by a full path whose final element is the
+// harness name, and an unrelated, unregistered name must still be rejected.
+func TestValidateAgentAcceptsCopilot(t *testing.T) {
+	if err := ValidateAgent("copilot"); err != nil {
+		t.Errorf("ValidateAgent(\"copilot\") = %v, want nil", err)
+	}
+	if err := ValidateAgent("/Users/lcromley/.local/bin/copilot"); err != nil {
+		t.Errorf("ValidateAgent(full path to copilot) = %v, want nil", err)
+	}
+	if err := ValidateAgent("not-a-real-agent"); err == nil {
+		t.Error("ValidateAgent(\"not-a-real-agent\") = nil, want an error naming the supported harnesses")
 	}
 }
