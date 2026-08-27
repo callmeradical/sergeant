@@ -130,5 +130,7 @@ link on its own.
 
 ## Task tracking
 
-Work is tracked in `td` under epic `td-6ca1f4`. Run `td list` and
-`td critical-path` in this worktree. Do not use `sgt-td-*`.
+Work is tracked with GitHub issues and pull requests on this repository.
+`td` was only used to bootstrap the v2 rewrite and is not part of this
+project's workflow; do not run `td` or `sgt-td-*` commands here, and do not
+depend on an epic id resolving in a local `td` database.
