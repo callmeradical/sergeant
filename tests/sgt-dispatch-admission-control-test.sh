@@ -299,10 +299,33 @@ else
 fi
 
 # ── 5. --resume-task-id reuses the exact given task ID on a fresh dispatch ──
+# Requires a matching promotion token recorded under .promoting-<id>/, the
+# same proof _sgt_dispatch_queue_promote_ready itself provides -- a bare
+# --resume-task-id with no token must not be honored (admission-control
+# bypass guard).
 
 rm -f "$MANAGED_EXISTS_FLAG" "$MANAGED_COMMAND_LOG" "$MANAGED_CREATE_LOG" \
   "$MANAGED_MARKER_LOG" "$WORKER_WINDOW_LOG"
-_dispatch resume-fixed 'Resume-fixed brief' --resume-task-id fixed-task-abc123 >/dev/null
+
+set +e
+no_token_out="$(_dispatch resume-no-token 'No token brief' --resume-task-id fixed-task-no-token 2>&1)"
+no_token_status=$?
+set -e
+if [[ "$no_token_status" -ne 0 && "$no_token_out" == *"promotion token"* ]]; then
+  _pass "--resume-task-id: rejected outright without a matching promotion token (admission-control bypass guard)"
+else
+  _fail "--resume-task-id: should require a valid promotion token; status=$no_token_status out=$no_token_out"
+fi
+if [[ ! -d "$TEST_ROOT/fleet/fixed-task-no-token" ]]; then
+  _pass "--resume-task-id: no fleet task directory is created without a valid token"
+else
+  _fail "--resume-task-id: a fleet task directory should not exist without a valid token"
+fi
+
+mkdir -p "$TEST_ROOT/fleet/.dispatch-queue/.promoting-fixed-task-abc123"
+printf 'test-token-abc123\n' > "$TEST_ROOT/fleet/.dispatch-queue/.promoting-fixed-task-abc123/promotion_token"
+_dispatch resume-fixed 'Resume-fixed brief' --resume-task-id fixed-task-abc123 \
+  --promotion-token test-token-abc123 >/dev/null
 if [[ -d "$TEST_ROOT/fleet/fixed-task-abc123/app" ]]; then
   _pass "--resume-task-id: dispatch reuses the exact given task ID instead of generating a random one"
 else

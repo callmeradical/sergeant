@@ -149,6 +149,16 @@ if [[ "$promoted_call" == *"proj"*"first brief"*"--repos"*"repo"*"--resume-task-
 else
   _fail "_sgt_dispatch_queue_promote_ready: replay args wrong: $promoted_call"
 fi
+if [[ "$promoted_call" == *"--promotion-token"* ]]; then
+  promoted_token="$(printf '%s\n' "$promoted_call" | grep -o -- '--promotion-token [^ ]*' | awk '{print $2}')"
+  if [[ -n "$promoted_token" && "$promoted_token" =~ ^[0-9a-f]{16}$ ]]; then
+    _pass "_sgt_dispatch_queue_promote_ready: replays with a fresh, well-formed promotion token"
+  else
+    _fail "_sgt_dispatch_queue_promote_ready: malformed promotion token: '$promoted_token'"
+  fi
+else
+  _fail "_sgt_dispatch_queue_promote_ready: replay is missing --promotion-token: $promoted_call"
+fi
 if [[ ! -d "$fleet_idle/.dispatch-queue/first-in" && ! -d "$fleet_idle/.dispatch-queue/.promoting-first-in" ]]; then
   _pass "_sgt_dispatch_queue_promote_ready: dequeues the promoted entry on success"
 else

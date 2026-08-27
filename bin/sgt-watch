@@ -653,6 +653,18 @@ if [[ "${1:-}" == "--list" ]]; then
       [[ -z "$_queue_brief" ]] || echo "    brief:   $_queue_brief"
       echo ""
     done
+    # A malformed queue entry (order present, project/repos missing) is
+    # quarantined here rather than silently blocking every healthy entry
+    # behind it forever (see _sgt_dispatch_queue_promote_ready) -- surfaced
+    # so it does not also accumulate invisibly.
+    for _poisoned_dir in "$FLEET_DIR/.dispatch-queue"/.poisoned-*/; do
+      [[ -d "$_poisoned_dir" ]] || continue
+      _poisoned_id="$(basename "${_poisoned_dir%/}")"
+      _poisoned_id="${_poisoned_id#.poisoned-}"
+      echo "  $_poisoned_id"
+      echo "    status:  poisoned (malformed queue entry; not blocking the queue)"
+      echo ""
+    done
   fi
   for task_dir in "$FLEET_DIR"/*/; do
     [[ "$(basename "$task_dir")" != ".dispatch-queue" ]] || continue

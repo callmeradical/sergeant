@@ -2143,6 +2143,17 @@ _sgt_dispatch_queue_enqueue() {
        "$(cat "$entry_dir/brief" 2>/dev/null || true)" == "$brief" ]] && return 0
     return 1
   fi
+  # A correlated retry can land while _sgt_dispatch_queue_promote_ready has
+  # this exact task_id parked at .promoting-<task_id> for the duration of its
+  # replayed dispatch call; without this check it would be invisible to the
+  # match above and mint a second, duplicate entry under the same task_id.
+  local promoting_dir="$queue_dir/.promoting-$task_id"
+  if [[ -e "$promoting_dir" ]]; then
+    [[ "$(cat "$promoting_dir/project" 2>/dev/null || true)" == "$project" && \
+       "$(cat "$promoting_dir/repos" 2>/dev/null || true)" == "$repos" && \
+       "$(cat "$promoting_dir/brief" 2>/dev/null || true)" == "$brief" ]] && return 0
+    return 1
+  fi
   counter_file="$queue_dir/.order-counter"
 
   _sgt_drain_lock_acquire_fd "$lock_fd" dispatch-queue-order \
@@ -2246,15 +2257,22 @@ _sgt_dispatch_queue_promote_ready() {
   # still-in-flight ".promoting-<task_id>" as "orphaned", reclaim it back into
   # the queue, and try to promote the very entry its live ancestor is already
   # promoting -- colliding on the same per-task dispatch lock.
-  local orphan orphan_task_id orphan_pid
+  # Liveness uses _sgt_drain_process_alive, not a bare `kill -0`: that helper
+  # also treats an undeterminable liveness (rc=2, e.g. EPERM against another
+  # user's live process) as "still alive", so an unverifiable promoter is
+  # never displaced -- the same rule this codebase already applies to lock
+  # ownership elsewhere.
+  local orphan orphan_task_id orphan_pid orphan_alive_rc
   for orphan in "$queue_dir"/.promoting-*/; do
     [[ -d "$orphan" ]] || continue
     orphan_task_id="$(basename "${orphan%/}")"
     orphan_task_id="${orphan_task_id#.promoting-}"
     [[ -n "$orphan_task_id" && ! -e "$queue_dir/$orphan_task_id" ]] || continue
     orphan_pid="$(cat "${orphan}promoter_pid" 2>/dev/null || true)"
-    if [[ "$orphan_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$orphan_pid" 2>/dev/null; then
-      continue
+    if [[ -n "$orphan_pid" ]]; then
+      orphan_alive_rc=0
+      _sgt_drain_process_alive "$orphan_pid" || orphan_alive_rc=$?
+      [[ "$orphan_alive_rc" -eq 1 ]] || continue
     fi
     mv "$orphan" "$queue_dir/$orphan_task_id" 2>/dev/null
   done
@@ -2290,9 +2308,20 @@ _sgt_dispatch_queue_promote_ready() {
   origin_profile="$(cat "${best_dir}origin_profile" 2>/dev/null || true)"
   correlation_id="$(cat "${best_dir}correlation_id" 2>/dev/null || true)"
 
+  # promoter_pid and promotion_token are written into best_dir BEFORE the
+  # rename, not into promoting_dir after it, so no reader can ever observe a
+  # ".promoting-<id>" directory that lacks them: a concurrent orphan-reclaim
+  # scan (this same function, run from a different process) must never treat
+  # a just-renamed, still-live promotion as orphaned for lack of a liveness
+  # marker that a two-step write would otherwise leave briefly missing.
+  local token
+  token="$(_sgt_drain_nonce)" || token=""
+  [[ -n "$token" ]] || return 0
+  printf '%s\n' "$$" > "${best_dir}promoter_pid" 2>/dev/null || return 0
+  printf '%s\n' "$token" > "${best_dir}promotion_token" 2>/dev/null || return 0
+
   local promoting_dir="$queue_dir/.promoting-$task_id"
   mv "$best_dir" "$promoting_dir" 2>/dev/null || return 0
-  printf '%s\n' "$$" > "$promoting_dir/promoter_pid" 2>/dev/null || true
 
   local dispatch_bin="$_SGT_LIB_DIR/sgt-dispatch"
   if [[ "${SGT_TEST_HOOKS:-}" == 1 && -n "${_SGT_DISPATCH_QUEUE_EXECUTABLE_OVERRIDE:-}" ]]; then
@@ -2302,7 +2331,11 @@ _sgt_dispatch_queue_promote_ready() {
   local -a args=()
   local brief_tmp=""
   if [[ -n "$origin_profile" && -n "$correlation_id" ]]; then
-    brief_tmp="$queue_dir/.brief-$task_id.$$.$RANDOM"
+    # --brief-file lives inside promoting_dir, not directly under queue_dir,
+    # so the existing orphan-reclaim scan's cleanup (rm -rf on success, mv
+    # back to a real queue entry on failure) also reclaims this temp file if
+    # the promoter itself is killed before reaching the rm/mv below.
+    brief_tmp="$promoting_dir/brief_file"
     if ! (umask 077; printf '%s' "$brief" > "$brief_tmp"); then
       rm -f "$brief_tmp"
       mv "$promoting_dir" "$best_dir" 2>/dev/null
@@ -2311,7 +2344,8 @@ _sgt_dispatch_queue_promote_ready() {
     args=("$project" --brief-file "$brief_tmp" --repos "$repos" --json \
       --origin-profile "$origin_profile" --correlation-id "$correlation_id")
   else
-    args=("$project" "$brief" --repos "$repos" --resume-task-id "$task_id")
+    args=("$project" "$brief" --repos "$repos" \
+      --resume-task-id "$task_id" --promotion-token "$token")
     [[ -z "$td_task" ]] || args+=(--td "$td_task")
   fi
 

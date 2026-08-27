@@ -106,6 +106,16 @@ else
   _fail "sgt-watch <task-id>: expected a queued report, got: $(cat "$TEST_ROOT/bare.out")"
 fi
 
+# ── a malformed/quarantined queue entry is surfaced, not invisible ─────────
+
+mkdir -p "$fleet/.dispatch-queue/.poisoned-broken-entry"
+poisoned_list_out="$(SERGEANT_FLEET="$fleet" "$ROOT_DIR/bin/sgt-watch" --list 2>&1)"
+if [[ "$poisoned_list_out" == *"broken-entry"* && "$poisoned_list_out" == *"poisoned"* ]]; then
+  _pass "sgt-watch --list: a quarantined .poisoned-* queue entry is surfaced, not invisible"
+else
+  _fail "sgt-watch --list: expected broken-entry reported as poisoned; got:\n$poisoned_list_out"
+fi
+
 printf '\nsgt-watch-queued-bucket: %d passed' "$pass"
 if [[ "$fail" -gt 0 ]]; then
   printf ', %d FAILED\n' "$fail" >&2

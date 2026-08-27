@@ -353,6 +353,7 @@ STAGE="implementation"
 DRY_RUN=false
 JSON_OUTPUT=false
 RESUME_TASK_ID=""
+PROMOTION_TOKEN=""
 
 # Brief is optional positional arg (not present when --td is used)
 if [[ $# -gt 0 && "${1:0:2}" != "--" ]]; then
@@ -368,8 +369,16 @@ while [[ $# -gt 0 ]]; do
       # (openspec/changes/dispatch-admission-control) to replay a previously
       # queued dispatch call under its already-allocated task ID, so a
       # promoted call never mints a second identity for the same admission.
+      # Requires --promotion-token (validated below) so an arbitrary caller
+      # cannot use this flag on its own to skip the admission-control check
+      # entirely by naming an unrelated or fabricated task ID.
       [[ -n "${2:-}" ]] || _die "--resume-task-id requires a task ID"
       RESUME_TASK_ID="$2"
+      shift 2
+      ;;
+    --promotion-token)
+      [[ -n "${2:-}" ]] || _die "--promotion-token requires a value"
+      PROMOTION_TOKEN="$2"
       shift 2
       ;;
     --branch)  BRANCH_ARG="$2";  shift 2 ;;
@@ -509,6 +518,16 @@ fi
 
 [[ -z "$AGENT_OVERRIDE" ]] || AGENT_CMD="$AGENT_OVERRIDE"
 [[ "$STAGE" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || _die "stage must be a lowercase slug: $STAGE"
+# --resume-task-id is never legitimately combined with --json: a correlated
+# replay reuses sgt-callback's own correlation-keyed task-id resolution
+# instead (see _sgt_dispatch_queue_promote_ready). Rejecting the combination
+# outright, rather than merely ignoring --resume-task-id in JSON mode as
+# TASK_ID resolution already does, closes an admission-control bypass: the
+# check below is gated on --resume-task-id being empty regardless of
+# --json, so silently ignoring it would still skip that check.
+if $JSON_OUTPUT && [[ -n "$RESUME_TASK_ID" ]]; then
+  _die "--resume-task-id cannot be combined with --json"
+fi
 
 # Coordinator pane selection is validated for shape here, before anything talks
 # to tmux, so a malformed or argument-injecting value never reaches a tmux call.
@@ -670,6 +689,19 @@ if $JSON_OUTPUT; then
     kill -"${SGT_DISPATCH_CRASH_SIGNAL:-TERM}" "$$"
   fi
 elif [[ -n "$RESUME_TASK_ID" ]]; then
+  # --resume-task-id alone is not proof of anything: it is a plain CLI flag
+  # any caller (including an MCP client, whose argv this tool passes through
+  # unfiltered) could pass with a fabricated task ID purely to skip the
+  # admission-control check below, which is gated on this flag being empty.
+  # The promotion token is minted fresh by _sgt_dispatch_queue_promote_ready
+  # and written into $FLEET_DIR/.dispatch-queue/.promoting-<id>/ only for the
+  # exact entry it is actively replaying, so requiring it here proves this
+  # call really is that replay and not an unrelated, unvetted one.
+  _sgt_resume_token_file="$FLEET_DIR/.dispatch-queue/.promoting-$RESUME_TASK_ID/promotion_token"
+  _sgt_resume_expected_token="$(cat "$_sgt_resume_token_file" 2>/dev/null || true)"
+  [[ -n "$_sgt_resume_expected_token" && "$_sgt_resume_expected_token" == "$PROMOTION_TOKEN" ]] || \
+    _die "invalid or missing promotion token for --resume-task-id: $RESUME_TASK_ID"
+  unset _sgt_resume_token_file _sgt_resume_expected_token
   TASK_ID="$RESUME_TASK_ID"
   ADMISSION_TX_DIR=""
 else
