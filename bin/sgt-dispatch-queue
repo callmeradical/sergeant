@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# sgt-dispatch-queue — Inspect and manually reorder the durable dispatch
+# admission queue ($FLEET_DIR/.dispatch-queue/), written by bin/sgt-dispatch
+# when a call exceeds the effective worker budget and promoted automatically
+# by sgt-watch's background cycle (openspec/changes/dispatch-admission-control).
+#
+# Usage:
+#   sgt-dispatch-queue --reorder <task-id> <position>
+#
+# <position> is the 1-based rank the task should occupy in the FIFO line
+# (1 = promoted next). Out-of-range positions clamp to the front/back.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+FLEET_DIR="${SERGEANT_FLEET:-$FLEET_DIR}"
+
+QUEUE_DIR="$FLEET_DIR/.dispatch-queue"
+
+[[ "${1:-}" == "--reorder" ]] || \
+  _die "Usage: sgt-dispatch-queue --reorder <task-id> <position>"
+TASK_ID="${2:-}"
+POSITION="${3:-}"
+[[ -n "$TASK_ID" && -n "$POSITION" ]] || \
+  _die "Usage: sgt-dispatch-queue --reorder <task-id> <position>"
+[[ "$POSITION" =~ ^[1-9][0-9]*$ ]] || _die "position must be a positive integer: $POSITION"
+[[ -d "$QUEUE_DIR/$TASK_ID" ]] || _die "No queued dispatch with task ID: $TASK_ID"
+
+declare -a ids=()
+while IFS= read -r id; do
+  [[ -n "$id" ]] || continue
+  ids+=("$id")
+done < <(_sgt_dispatch_queue_sorted_ids "$QUEUE_DIR")
+
+declare -a remaining=()
+if ((${#ids[@]} > 0)); then
+  for id in "${ids[@]}"; do
+    [[ "$id" == "$TASK_ID" ]] || remaining+=("$id")
+  done
+fi
+
+insert_index=$((POSITION - 1))
+((insert_index < 0)) && insert_index=0
+((insert_index > ${#remaining[@]})) && insert_index=${#remaining[@]}
+
+declare -a final=()
+((insert_index <= 0)) || final+=("${remaining[@]:0:insert_index}")
+final+=("$TASK_ID")
+((insert_index >= ${#remaining[@]})) || final+=("${remaining[@]:insert_index}")
+
+rank=0
+for id in "${final[@]}"; do
+  rank=$((rank + 1))
+  _sgt_replace_owned_file "$QUEUE_DIR/$id/order" "$rank" || \
+    _die "Could not persist reordered position for $id"
+done
+
+printf 'reordered: %s now at position %s of %s\n' "$TASK_ID" "$POSITION" "${#final[@]}"

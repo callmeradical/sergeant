@@ -2046,3 +2046,360 @@ _path_device() {
   [[ -n "$device" && "$device" != *$'\n'* ]] || return 1
   printf '%s\n' "$device"
 }
+
+# ── Dispatch admission control (openspec/changes/dispatch-admission-control) ──
+
+# _sgt_live_worker_records
+# Prints "task_id<TAB>repo_name<TAB>repo_dir" for every verified-live worker
+# pane across every task, every repo, every coordinator instance sharing
+# $FLEET_DIR — not just workers this invocation's own coordinator dispatched.
+# A `status=in_progress` file alone is not proof of life (a crashed pane can
+# leave a stale in_progress record), so this yields only records whose pane
+# also proves live via the same identity check sgt-watch/sgt-recover already
+# trust (_sgt_pane_identity_matches). Shared by _sgt_live_worker_census
+# (which just counts lines) and bin/sgt-stop-all (which collects its
+# eligible-worker targets from this same enumeration), so exactly one
+# definition of "verified-live worker" exists.
+_sgt_live_worker_records() {
+  local task_dir repo_dir task_id repo_name status
+  for task_dir in "$FLEET_DIR"/*/; do
+    [[ -d "$task_dir" ]] || continue
+    task_id="$(basename "${task_dir%/}")"
+    [[ "$task_id" != ".dispatch-queue" ]] || continue
+    for repo_dir in "$task_dir"*/; do
+      [[ -d "$repo_dir" ]] || continue
+      status="$(cat "$repo_dir/status" 2>/dev/null || true)"
+      [[ "$status" == "in_progress" ]] || continue
+      _sgt_pane_identity_matches "$(cat "$repo_dir/pane" 2>/dev/null || true)" \
+        "$repo_dir" || continue
+      repo_name="$(basename "${repo_dir%/}")"
+      printf '%s\t%s\t%s\n' "$task_id" "$repo_name" "${repo_dir%/}"
+    done
+  done
+}
+
+# _sgt_live_worker_census
+# Machine-wide count of verified-live worker panes. See _sgt_live_worker_records.
+_sgt_live_worker_census() {
+  local count=0
+  while IFS=$'\t' read -r _ _ _; do
+    count=$((count + 1))
+  done < <(_sgt_live_worker_records)
+  printf '%s\n' "$count"
+}
+
+# _sgt_system_pressure
+# Prints "<load_avg_1m> <available_mem_ratio> <cpu_count>" space-separated.
+_sgt_system_pressure() {
+  local load mem_ratio cpus
+  if [[ "$(uname)" == Darwin ]]; then
+    load="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')"
+    # Each "Pages <label>:" line's numeric value is always the last
+    # whitespace-separated field, not a fixed field index: "Pages wired down:"
+    # has an extra word before the count that a fixed $3 would misparse.
+    mem_ratio="$(vm_stat 2>/dev/null | awk '
+      /Pages free/ {free=$NF} /Pages active/ {active=$NF}
+      /Pages inactive/ {inactive=$NF} /Pages wired/ {wired=$NF}
+      END { total=free+active+inactive+wired
+            if (total>0) printf "%.2f", free/total; else print "1.00" }')"
+    cpus="$(sysctl -n hw.ncpu 2>/dev/null)"
+  else
+    load="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
+    mem_ratio="$(awk '/MemAvailable/{a=$2} /MemTotal/{t=$2}
+      END{ if (t>0) printf "%.2f", a/t; else print "1.00" }' /proc/meminfo 2>/dev/null)"
+    cpus="$(nproc 2>/dev/null)"
+  fi
+  printf '%s %s %s\n' "${load:-0}" "${mem_ratio:-1.00}" "${cpus:-1}"
+}
+
+# _sgt_effective_worker_budget
+# SERGEANT_DISPATCH_MAX_WORKERS overrides the CPU-derived nominal ceiling
+# outright (an explicit human-set number always wins). Otherwise the nominal
+# ceiling is derived from CPU count, then reduced when load or memory
+# pressure is already high. Never returns less than 1.
+_sgt_effective_worker_budget() {
+  local nominal load mem cpus
+  read -r load mem cpus < <(_sgt_system_pressure)
+  nominal="${SERGEANT_DISPATCH_MAX_WORKERS:-$((cpus * 2))}"
+  awk -v nominal="$nominal" -v load="$load" -v cpus="$cpus" -v mem="$mem" '
+    BEGIN {
+      budget = nominal
+      if (load > cpus) budget = int(budget * cpus / load)
+      if (mem < 0.15)  budget = int(budget / 2)
+      if (budget < 1) budget = 1
+      print budget
+    }'
+}
+
+# _sgt_dispatch_queue_enqueue <task_id> <project> <repos_csv> <brief> [td_task_id] [origin_profile] [correlation_id]
+#
+# Records a dispatch call that exceeded the effective worker budget as a
+# durable, FIFO-ordered entry under $FLEET_DIR/.dispatch-queue/<task_id>/ so it
+# is admitted automatically once capacity frees up (see
+# _sgt_dispatch_queue_promote_ready). FIFO position is a monotonically
+# increasing counter, read-and-incremented under an advisory lock so two
+# concurrent enqueues from different coordinator processes never collide.
+#
+# <origin_profile>/<correlation_id> are set only for a --json/correlated
+# dispatch call: sgt-callback's own correlation-keyed idempotency means a
+# retried call for the same correlation resolves to this exact task_id again,
+# so a retry while still queued must succeed as a no-op rather than collide
+# with the entry its own earlier attempt already wrote.
+_sgt_dispatch_queue_enqueue() {
+  local task_id="$1" project="$2" repos="$3" brief="$4" td_task="${5:-}"
+  local origin_profile="${6:-}" correlation_id="${7:-}"
+  local queue_dir entry_dir staging_dir counter_file order lock_fd=15
+  [[ -n "$task_id" && -n "$project" && -n "$repos" ]] || return 1
+  queue_dir="$FLEET_DIR/.dispatch-queue"
+  entry_dir="$queue_dir/$task_id"
+  mkdir -p "$queue_dir" || return 1
+  if [[ -e "$entry_dir" ]]; then
+    [[ "$(cat "$entry_dir/project" 2>/dev/null || true)" == "$project" && \
+       "$(cat "$entry_dir/repos" 2>/dev/null || true)" == "$repos" && \
+       "$(cat "$entry_dir/brief" 2>/dev/null || true)" == "$brief" ]] && return 0
+    return 1
+  fi
+  # A correlated retry can land while _sgt_dispatch_queue_promote_ready has
+  # this exact task_id parked at .promoting-<task_id> for the duration of its
+  # replayed dispatch call; without this check it would be invisible to the
+  # match above and mint a second, duplicate entry under the same task_id.
+  local promoting_dir="$queue_dir/.promoting-$task_id"
+  if [[ -e "$promoting_dir" ]]; then
+    [[ "$(cat "$promoting_dir/project" 2>/dev/null || true)" == "$project" && \
+       "$(cat "$promoting_dir/repos" 2>/dev/null || true)" == "$repos" && \
+       "$(cat "$promoting_dir/brief" 2>/dev/null || true)" == "$brief" ]] && return 0
+    return 1
+  fi
+  counter_file="$queue_dir/.order-counter"
+
+  _sgt_drain_lock_acquire_fd "$lock_fd" dispatch-queue-order \
+    "$queue_dir/.order-counter.lock" || return 1
+  order="$(cat "$counter_file" 2>/dev/null || true)"
+  [[ "$order" =~ ^[0-9]+$ ]] || order=0
+  order=$((order + 1))
+  if ! _sgt_replace_owned_file "$counter_file" "$order"; then
+    _sgt_drain_lock_release_fd "$lock_fd"
+    return 1
+  fi
+  _sgt_drain_lock_release_fd "$lock_fd"
+
+  # Staged in a scratch directory and moved into place in one atomic rename,
+  # so a crash or write failure partway through can never leave a durable
+  # $entry_dir with an order file but a missing project/repos/brief -- a
+  # partial entry that would otherwise wedge the queue forever, since it
+  # would keep winning "lowest order" on every later promotion cycle.
+  staging_dir="$queue_dir/.staging-$task_id.$$.$RANDOM"
+  mkdir "$staging_dir" || return 1
+  if ! {
+    _sgt_replace_owned_file "$staging_dir/order" "$order" &&
+    printf '%s\n' "$project" > "$staging_dir/project" &&
+    printf '%s\n' "$repos"   > "$staging_dir/repos" &&
+    printf '%s\n' "$brief"   > "$staging_dir/brief" &&
+    { [[ -z "$td_task" ]] || printf '%s\n' "$td_task" > "$staging_dir/td_task"; } &&
+    { [[ -z "$origin_profile" ]] || printf '%s\n' "$origin_profile" > "$staging_dir/origin_profile"; } &&
+    { [[ -z "$correlation_id" ]] || printf '%s\n' "$correlation_id" > "$staging_dir/correlation_id"; }
+  }; then
+    rm -rf "$staging_dir"
+    return 1
+  fi
+  mv "$staging_dir" "$entry_dir" 2>/dev/null || { rm -rf "$staging_dir"; return 1; }
+  return 0
+}
+
+# _sgt_dispatch_queue_sorted_ids <queue_dir>
+#
+# Prints the basename of every queue entry directly under <queue_dir> that has
+# a valid numeric `order` file, one per line, sorted ascending by that order
+# (lowest = next to promote). Shared by bin/sgt-dispatch-queue's --reorder and
+# bin/sgt-watch's --list so exactly one FIFO-ordering implementation exists.
+_sgt_dispatch_queue_sorted_ids() {
+  local queue_dir="$1" entry id order
+  local -a ids=() orders=()
+  for entry in "$queue_dir"/*/; do
+    [[ -d "$entry" ]] || continue
+    id="$(basename "${entry%/}")"
+    order="$(cat "${entry}order" 2>/dev/null || true)"
+    [[ "$order" =~ ^[0-9]+$ ]] || continue
+    ids+=("$id")
+    orders+=("$order")
+  done
+  local count=${#ids[@]} i j tmp_o tmp_i
+  for ((i = 1; i < count; i++)); do
+    j=$i
+    while ((j > 0)) && ((orders[j - 1] > orders[j])); do
+      tmp_o=${orders[j]}; orders[j]=${orders[j - 1]}; orders[j - 1]=$tmp_o
+      tmp_i=${ids[j]}; ids[j]=${ids[j - 1]}; ids[j - 1]=$tmp_i
+      ((j--))
+    done
+  done
+  ((count > 0)) || return 0
+  for id in "${ids[@]}"; do
+    printf '%s\n' "$id"
+  done
+}
+
+# _sgt_dispatch_queue_promote_ready
+#
+# Called once per sgt-watch cycle (see bin/sgt-watch's per-task loop). If the
+# live worker census is below the current effective budget and at least one
+# dispatch is queued, promotes the lowest-order valid entry by replaying the
+# original dispatch call. A plain call reuses its already-allocated task ID
+# via --resume-task-id, so no new task identity is minted for admitted work; a
+# --json/correlated original call instead replays with --json/--origin-profile
+# /--correlation-id, letting sgt-callback's own correlation-keyed idempotency
+# resolve it back to the same task ID (see the enqueue helper's comment).
+# Never raises: this is best-effort fleet-wide housekeeping piggybacked on an
+# existing poll cycle, not the caller's own dispatch, so a promotion failure
+# is reported to stderr and the entry is restored to the queue (preserving
+# its FIFO order) for a later attempt rather than dropped. A malformed entry
+# (order present but project/repos missing -- only reachable from a crash
+# mid-enqueue before this helper's atomic staged write existed, or from
+# manual tampering) is quarantined rather than silently re-selected forever,
+# which would otherwise starve every healthy entry behind it.
+_sgt_dispatch_queue_promote_ready() {
+  local queue_dir="$FLEET_DIR/.dispatch-queue"
+  [[ -d "$queue_dir" ]] || return 0
+
+  # Held from the orphan scan through claiming an entry (writing
+  # promoter_pid/promotion_token and the mv into .promoting-<id>), released
+  # before invoking dispatch_bin: without it, two sgt-watch --background
+  # loops for two different tasks (the routine multi-task case) can both
+  # observe live<budget before either's promotion materializes a new worker,
+  # and both promote -- transiently admitting more workers than the budget
+  # allows -- or race each other's writes into the very same selected entry.
+  # Not held across the dispatch_bin call itself, so unrelated concurrent
+  # promotions of DIFFERENT entries are never serialized behind one long-
+  # running replay.
+  local promote_lock_fd=16
+  _sgt_drain_lock_acquire_fd "$promote_lock_fd" dispatch-queue-promote \
+    "$queue_dir/.promote.lock" || return 0
+
+  # Reclaim any .promoting-* directory orphaned by a promoter killed between
+  # the mv-out and the follow-up rm/restore: every reader (this function,
+  # sgt-watch --list/--snapshot, sgt-dispatch-queue --reorder) globs "*/" ,
+  # which never matches a dot-prefixed directory, so an orphan would otherwise
+  # be invisible -- and the dispatch call it represents silently lost -- on
+  # every status surface forever.
+  #
+  # A promoting call's own resumed dispatch runs sgt-watch --sync-all
+  # internally, which reaches this same function again in a nested process:
+  # without the liveness check below, that nested call would see its own
+  # still-in-flight ".promoting-<task_id>" as "orphaned", reclaim it back into
+  # the queue, and try to promote the very entry its live ancestor is already
+  # promoting -- colliding on the same per-task dispatch lock.
+  # Liveness uses _sgt_drain_process_alive, not a bare `kill -0`: that helper
+  # also treats an undeterminable liveness (rc=2, e.g. EPERM against another
+  # user's live process) as "still alive", so an unverifiable promoter is
+  # never displaced -- the same rule this codebase already applies to lock
+  # ownership elsewhere.
+  local orphan orphan_task_id orphan_pid orphan_alive_rc
+  for orphan in "$queue_dir"/.promoting-*/; do
+    [[ -d "$orphan" ]] || continue
+    orphan_task_id="$(basename "${orphan%/}")"
+    orphan_task_id="${orphan_task_id#.promoting-}"
+    [[ -n "$orphan_task_id" && ! -e "$queue_dir/$orphan_task_id" ]] || continue
+    orphan_pid="$(cat "${orphan}promoter_pid" 2>/dev/null || true)"
+    if [[ -n "$orphan_pid" ]]; then
+      orphan_alive_rc=0
+      _sgt_drain_process_alive "$orphan_pid" || orphan_alive_rc=$?
+      [[ "$orphan_alive_rc" -eq 1 ]] || continue
+    fi
+    mv "$orphan" "$queue_dir/$orphan_task_id" 2>/dev/null
+  done
+
+  local live budget
+  live="$(_sgt_live_worker_census)"
+  budget="$(_sgt_effective_worker_budget)"
+  if [[ "$live" -ge "$budget" ]]; then
+    _sgt_drain_lock_release_fd "$promote_lock_fd"
+    return 0
+  fi
+
+  local id best_id="" entry project repos
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    entry="$queue_dir/$id/"
+    project="$(cat "${entry}project" 2>/dev/null || true)"
+    repos="$(cat "${entry}repos" 2>/dev/null || true)"
+    if [[ -z "$project" || -z "$repos" ]]; then
+      printf 'ERROR: dispatch-queue entry %s is malformed (missing project/repos); quarantined, not blocking the queue\n' \
+        "$id" >&2
+      mv "$entry" "$queue_dir/.poisoned-$id" 2>/dev/null
+      continue
+    fi
+    best_id="$id"
+    break
+  done < <(_sgt_dispatch_queue_sorted_ids "$queue_dir")
+  if [[ -z "$best_id" ]]; then
+    _sgt_drain_lock_release_fd "$promote_lock_fd"
+    return 0
+  fi
+
+  local best_dir="$queue_dir/$best_id/" task_id="$best_id"
+  local brief td_task origin_profile correlation_id
+  project="$(cat "${best_dir}project" 2>/dev/null || true)"
+  repos="$(cat "${best_dir}repos" 2>/dev/null || true)"
+  brief="$(cat "${best_dir}brief" 2>/dev/null || true)"
+  td_task="$(cat "${best_dir}td_task" 2>/dev/null || true)"
+  origin_profile="$(cat "${best_dir}origin_profile" 2>/dev/null || true)"
+  correlation_id="$(cat "${best_dir}correlation_id" 2>/dev/null || true)"
+
+  # promoter_pid and promotion_token are written into best_dir BEFORE the
+  # rename, not into promoting_dir after it, so no reader can ever observe a
+  # ".promoting-<id>" directory that lacks them: a concurrent orphan-reclaim
+  # scan (this same function, run from a different process) must never treat
+  # a just-renamed, still-live promotion as orphaned for lack of a liveness
+  # marker that a two-step write would otherwise leave briefly missing.
+  local token
+  token="$(_sgt_drain_nonce)" || token=""
+  if [[ -z "$token" ]] || \
+     ! printf '%s\n' "$$" > "${best_dir}promoter_pid" 2>/dev/null || \
+     ! printf '%s\n' "$token" > "${best_dir}promotion_token" 2>/dev/null; then
+    _sgt_drain_lock_release_fd "$promote_lock_fd"
+    return 0
+  fi
+
+  local promoting_dir="$queue_dir/.promoting-$task_id"
+  if ! mv "$best_dir" "$promoting_dir" 2>/dev/null; then
+    _sgt_drain_lock_release_fd "$promote_lock_fd"
+    return 0
+  fi
+  _sgt_drain_lock_release_fd "$promote_lock_fd"
+
+  local dispatch_bin="$_SGT_LIB_DIR/sgt-dispatch"
+  if [[ "${SGT_TEST_HOOKS:-}" == 1 && -n "${_SGT_DISPATCH_QUEUE_EXECUTABLE_OVERRIDE:-}" ]]; then
+    dispatch_bin="$_SGT_DISPATCH_QUEUE_EXECUTABLE_OVERRIDE"
+  fi
+
+  local -a args=()
+  local brief_tmp=""
+  if [[ -n "$origin_profile" && -n "$correlation_id" ]]; then
+    # --brief-file lives inside promoting_dir, not directly under queue_dir,
+    # so the existing orphan-reclaim scan's cleanup (rm -rf on success, mv
+    # back to a real queue entry on failure) also reclaims this temp file if
+    # the promoter itself is killed before reaching the rm/mv below.
+    brief_tmp="$promoting_dir/brief_file"
+    if ! (umask 077; printf '%s' "$brief" > "$brief_tmp"); then
+      rm -f "$brief_tmp"
+      mv "$promoting_dir" "$best_dir" 2>/dev/null
+      return 1
+    fi
+    args=("$project" --brief-file "$brief_tmp" --repos "$repos" --json \
+      --origin-profile "$origin_profile" --correlation-id "$correlation_id")
+  else
+    args=("$project" "$brief" --repos "$repos" \
+      --resume-task-id "$task_id" --promotion-token "$token")
+    [[ -z "$td_task" ]] || args+=(--td "$td_task")
+  fi
+
+  if "$dispatch_bin" "${args[@]}"; then
+    [[ -z "$brief_tmp" ]] || rm -f "$brief_tmp"
+    rm -rf "$promoting_dir"
+    return 0
+  fi
+  [[ -z "$brief_tmp" ]] || rm -f "$brief_tmp"
+  printf 'WARNING: promotion of queued dispatch %s failed; requeued\n' "$task_id" >&2
+  mv "$promoting_dir" "$best_dir" 2>/dev/null || \
+    printf 'ERROR: could not restore queue entry after failed promotion: %s\n' "$task_id" >&2
+  return 1
+}

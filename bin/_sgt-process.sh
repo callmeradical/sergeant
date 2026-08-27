@@ -231,3 +231,39 @@ _sgt_marker_history_digest() {
       "$history"
   fi
 }
+
+# _sgt_terminate_verified_pid <pid> <recorded_start> [wait_deciseconds=50]
+#
+# The PID-identity-checked SIGTERM-then-poll-then-SIGKILL escalation used by
+# bin/sgt-stop-all (openspec/changes/dispatch-admission-control). sgt-drain-force
+# implements this same shape inline rather than calling this helper; it is not
+# yet refactored to share it. Verifies the live process's exact start-time
+# identity matches <recorded_start> before signaling at all, so a PID recycled
+# by an unrelated process is never killed. Polls for exit up to
+# wait_deciseconds (default 50 = 5s) after SIGTERM, escalating to SIGKILL only
+# if still alive.
+#
+# Returns:
+#   0  nothing left to prove live (the pid was already gone), or identity was
+#      verified and the process is now gone (exited on its own, or was
+#      signaled and confirmed gone/killed)
+#   1  the pid argument is malformed, or the pid is alive but its identity
+#      could not be proven (recorded/actual start mismatch or unavailable) —
+#      no signal was sent
+_sgt_terminate_verified_pid() {
+  local pid="$1" recorded_start="$2" wait_deciseconds="${3:-50}"
+  local actual_start waited=0
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 0
+  actual_start="$(_sgt_process_identity "$pid" 2>/dev/null || true)"
+  [[ -n "$recorded_start" && -n "$actual_start" && \
+    "$actual_start" == "$recorded_start" ]] || return 1
+  kill -TERM "$pid" 2>/dev/null || return 0
+  while [[ "$waited" -lt "$wait_deciseconds" ]]; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+  return 0
+}

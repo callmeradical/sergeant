@@ -352,6 +352,8 @@ CORRELATION_ID=""
 STAGE="implementation"
 DRY_RUN=false
 JSON_OUTPUT=false
+RESUME_TASK_ID=""
+PROMOTION_TOKEN=""
 
 # Brief is optional positional arg (not present when --td is used)
 if [[ $# -gt 0 && "${1:0:2}" != "--" ]]; then
@@ -362,6 +364,23 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --repos)   REPOS_ARG="$2";   shift 2 ;;
     --td)      TD_TASK_ID="$2";  shift 2 ;;
+    --resume-task-id)
+      # Internal: used only by _sgt_dispatch_queue_promote_ready
+      # (openspec/changes/dispatch-admission-control) to replay a previously
+      # queued dispatch call under its already-allocated task ID, so a
+      # promoted call never mints a second identity for the same admission.
+      # Requires --promotion-token (validated below) so an arbitrary caller
+      # cannot use this flag on its own to skip the admission-control check
+      # entirely by naming an unrelated or fabricated task ID.
+      [[ -n "${2:-}" ]] || _die "--resume-task-id requires a task ID"
+      RESUME_TASK_ID="$2"
+      shift 2
+      ;;
+    --promotion-token)
+      [[ -n "${2:-}" ]] || _die "--promotion-token requires a value"
+      PROMOTION_TOKEN="$2"
+      shift 2
+      ;;
     --branch)  BRANCH_ARG="$2";  shift 2 ;;
     --adopt-branch) ADOPT_BRANCH=1; shift ;;
     --deps)    DEPS_ARG="$2";    shift 2 ;;
@@ -499,6 +518,16 @@ fi
 
 [[ -z "$AGENT_OVERRIDE" ]] || AGENT_CMD="$AGENT_OVERRIDE"
 [[ "$STAGE" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || _die "stage must be a lowercase slug: $STAGE"
+# --resume-task-id is never legitimately combined with --json: a correlated
+# replay reuses sgt-callback's own correlation-keyed task-id resolution
+# instead (see _sgt_dispatch_queue_promote_ready). Rejecting the combination
+# outright, rather than merely ignoring --resume-task-id in JSON mode as
+# TASK_ID resolution already does, closes an admission-control bypass: the
+# check below is gated on --resume-task-id being empty regardless of
+# --json, so silently ignoring it would still skip that check.
+if $JSON_OUTPUT && [[ -n "$RESUME_TASK_ID" ]]; then
+  _die "--resume-task-id cannot be combined with --json"
+fi
 
 # Coordinator pane selection is validated for shape here, before anything talks
 # to tmux, so a malformed or argument-injecting value never reaches a tmux call.
@@ -659,6 +688,40 @@ if $JSON_OUTPUT; then
         "${SGT_DISPATCH_FAIL_POINT:-}" == dispatch-after-admission-begin ]]; then
     kill -"${SGT_DISPATCH_CRASH_SIGNAL:-TERM}" "$$"
   fi
+elif [[ -n "$RESUME_TASK_ID" ]]; then
+  [[ "$RESUME_TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || \
+    _die "malformed --resume-task-id: $RESUME_TASK_ID"
+  # --resume-task-id alone is not proof of anything: it is a plain CLI flag
+  # any caller (including an MCP client, whose argv this tool passes through
+  # unfiltered) could pass with a fabricated task ID purely to skip the
+  # admission-control check below, which is gated on this flag being empty.
+  #
+  # A token file match alone is NOT sufficient proof either: $FLEET_DIR is an
+  # ordinary same-user directory, so any caller who can write two files can
+  # self-mint a "matching" token exactly as easily as a real promotion would.
+  # The additional, load-bearing check is process lineage: the real
+  # _sgt_dispatch_queue_promote_ready execs this exact binary as its own
+  # direct foreground child (never backgrounded, never through an
+  # intermediary), so a genuine resume's $PPID is always the promoter's own
+  # PID -- a kernel-assigned fact bash re-reads from the OS on every launch
+  # (verified: `env PPID=<forged> bash -c 'echo $PPID'` prints the real
+  # parent, not the forged one), not a value any caller can override via argv
+  # or environment. This still cannot distinguish a sufficiently determined
+  # same-user forger who inspects their own ambient $PPID and reproduces it
+  # deliberately -- there is no privilege boundary between "the coordinator"
+  # and any other same-user process in this codebase's trust model, and nothing
+  # here changes that -- but it closes the same bypass being reachable by
+  # merely passing two matching CLI arguments, which is what made the
+  # token-only check trivially, unintentionally reproducible.
+  _sgt_resume_promoting_dir="$FLEET_DIR/.dispatch-queue/.promoting-$RESUME_TASK_ID"
+  _sgt_resume_expected_token="$(cat "$_sgt_resume_promoting_dir/promotion_token" 2>/dev/null || true)"
+  _sgt_resume_promoter_pid="$(cat "$_sgt_resume_promoting_dir/promoter_pid" 2>/dev/null || true)"
+  [[ -n "$_sgt_resume_expected_token" && "$_sgt_resume_expected_token" == "$PROMOTION_TOKEN" && \
+     -n "$_sgt_resume_promoter_pid" && "$_sgt_resume_promoter_pid" == "$PPID" ]] || \
+    _die "invalid or missing promotion proof for --resume-task-id: $RESUME_TASK_ID"
+  unset _sgt_resume_promoting_dir _sgt_resume_expected_token _sgt_resume_promoter_pid
+  TASK_ID="$RESUME_TASK_ID"
+  ADMISSION_TX_DIR=""
 else
   slug="$(echo "$BRIEF" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//' | cut -c1-24 | sed 's/-$//')"
   TASK_ID="${slug}-$(_rand6)"
@@ -1456,6 +1519,56 @@ if ! $DRY_RUN; then
     DISPATCH_TD_ROLLBACK_PENDING=false
   elif [[ -e "$TASK_DIR" || -L "$TASK_DIR" ]]; then
     _die "Dispatch task ID collision after serialized ownership: $TASK_ID"
+  fi
+fi
+
+# ── Dispatch admission control (openspec/changes/dispatch-admission-control) ─
+# A machine-wide live-worker census, not just this coordinator's own dispatch
+# history: sgt-watch --sync-all below already walks every $FLEET_DIR/*/*/
+# record across every coordinator sharing $FLEET_DIR, and this reuses the same
+# tree. Checked immediately after TASK_ID is allocated under the serialized
+# dispatch-task lock above, and before any worktree or pane is created, so a
+# queued call never reaches fleet/worktree/pane creation at all.
+#
+# Applies uniformly to the --json/correlated-callback (Hermes) path too: the
+# spec makes no exception for it, and sgt-callback's own correlation-keyed
+# admission (a different "admission" -- request idempotency, not worker
+# census) already makes a queued-then-retried correlated call resolve back to
+# the exact same TASK_ID (see _sgt_dispatch_queue_enqueue's idempotent-retry
+# handling), so queuing a JSON call here does not disturb that contract.
+#
+# A --resume-task-id replay is exempt: _sgt_dispatch_queue_promote_ready
+# already checked live<budget immediately before invoking this exact call, and
+# re-running the same check here would let a promoted call silently re-queue
+# itself under a FRESH, later FIFO order (discarding the position it already
+# earned) whenever the machine's live count ticked up in the narrow window
+# between that check and this one -- reported back to the promoter as an
+# ordinary successful admission, not a requeue, since exit 0 looks identical
+# either way. A --json replay needs no such exemption: it never carries
+# --resume-task-id (correlation resolution already reuses the task_id), and a
+# same-content re-enqueue under that same task_id is the idempotent no-op
+# case above, so its original FIFO order is never disturbed either.
+if ! $DRY_RUN && [[ -z "$RESUME_TASK_ID" ]]; then
+  _sgt_admission_live="$(_sgt_live_worker_census)"
+  _sgt_admission_budget="$(_sgt_effective_worker_budget)"
+  if [[ "$_sgt_admission_live" -ge "$_sgt_admission_budget" ]]; then
+    if $JSON_OUTPUT; then
+      # WORKER_BRIEF, not BRIEF: JSON_OUTPUT mode overwrites BRIEF with the
+      # generic "Hermes correlated code-work request" placeholder used only
+      # for td-title/branch derivation, while WORKER_BRIEF still carries the
+      # caller's real --brief-file content. Enqueuing the placeholder would
+      # replay a promoted worker with no real task description at all.
+      _sgt_dispatch_queue_enqueue "$TASK_ID" "$PROJECT" "$REPOS_ARG" "$WORKER_BRIEF" "$TD_TASK_ID" \
+        "$ORIGIN_PROFILE" "$CORRELATION_ID" || \
+        _die "Could not record dispatch as queued (task $TASK_ID)"
+      printf '{"status":"queued","task_id":"%s","correlation_id":"%s"}\n' \
+        "$TASK_ID" "$CORRELATION_ID" >&3
+    else
+      _sgt_dispatch_queue_enqueue "$TASK_ID" "$PROJECT" "$REPOS_ARG" "$WORKER_BRIEF" "$TD_TASK_ID" || \
+        _die "Could not record dispatch as queued (task $TASK_ID)"
+      echo "queued: live=$_sgt_admission_live budget=$_sgt_admission_budget; task $TASK_ID will be admitted automatically as capacity frees up"
+    fi
+    exit 0
   fi
 fi
 

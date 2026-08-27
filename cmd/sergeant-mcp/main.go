@@ -216,6 +216,18 @@ var tools = []toolDef{
 		argsDesc:    `CLI args: --global [--dry-run] [--yes]  OR  --project <project> [--dry-run] [--yes]`,
 	},
 	{
+		scriptName:  "sgt-stop-all",
+		toolName:    "sgt-stop-all",
+		description: "Stop every verified-live worker pane on the machine, with no drain precondition. Default tier attempts a durable-handoff capture then a short grace period before SIGKILL; --force skips both for an immediate kill.",
+		argsDesc:    `CLI args: [--dry-run] [--yes] [--force]`,
+	},
+	{
+		scriptName:  "sgt-dispatch-queue",
+		toolName:    "sgt-dispatch-queue",
+		description: "Inspect and manually reorder the durable dispatch admission queue ($FLEET_DIR/.dispatch-queue/) written by sgt-dispatch when a call exceeds the effective worker budget.",
+		argsDesc:    `CLI args: --reorder <task-id> <position>`,
+	},
+	{
 		scriptName:  "sgt-cleanup",
 		toolName:    "sgt-cleanup",
 		description: "Remove worktrees and fleet state for a completed task. Handles both treehouse-leased and plain git worktrees.",
