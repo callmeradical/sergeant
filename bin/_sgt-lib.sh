@@ -2260,6 +2260,20 @@ _sgt_dispatch_queue_promote_ready() {
   local queue_dir="$FLEET_DIR/.dispatch-queue"
   [[ -d "$queue_dir" ]] || return 0
 
+  # Held from the orphan scan through claiming an entry (writing
+  # promoter_pid/promotion_token and the mv into .promoting-<id>), released
+  # before invoking dispatch_bin: without it, two sgt-watch --background
+  # loops for two different tasks (the routine multi-task case) can both
+  # observe live<budget before either's promotion materializes a new worker,
+  # and both promote -- transiently admitting more workers than the budget
+  # allows -- or race each other's writes into the very same selected entry.
+  # Not held across the dispatch_bin call itself, so unrelated concurrent
+  # promotions of DIFFERENT entries are never serialized behind one long-
+  # running replay.
+  local promote_lock_fd=16
+  _sgt_drain_lock_acquire_fd "$promote_lock_fd" dispatch-queue-promote \
+    "$queue_dir/.promote.lock" || return 0
+
   # Reclaim any .promoting-* directory orphaned by a promoter killed between
   # the mv-out and the follow-up rm/restore: every reader (this function,
   # sgt-watch --list/--snapshot, sgt-dispatch-queue --reorder) globs "*/" ,
@@ -2296,7 +2310,10 @@ _sgt_dispatch_queue_promote_ready() {
   local live budget
   live="$(_sgt_live_worker_census)"
   budget="$(_sgt_effective_worker_budget)"
-  [[ "$live" -lt "$budget" ]] || return 0
+  if [[ "$live" -ge "$budget" ]]; then
+    _sgt_drain_lock_release_fd "$promote_lock_fd"
+    return 0
+  fi
 
   local id best_id="" entry project repos
   while IFS= read -r id; do
@@ -2313,7 +2330,10 @@ _sgt_dispatch_queue_promote_ready() {
     best_id="$id"
     break
   done < <(_sgt_dispatch_queue_sorted_ids "$queue_dir")
-  [[ -n "$best_id" ]] || return 0
+  if [[ -z "$best_id" ]]; then
+    _sgt_drain_lock_release_fd "$promote_lock_fd"
+    return 0
+  fi
 
   local best_dir="$queue_dir/$best_id/" task_id="$best_id"
   local brief td_task origin_profile correlation_id
@@ -2332,12 +2352,19 @@ _sgt_dispatch_queue_promote_ready() {
   # marker that a two-step write would otherwise leave briefly missing.
   local token
   token="$(_sgt_drain_nonce)" || token=""
-  [[ -n "$token" ]] || return 0
-  printf '%s\n' "$$" > "${best_dir}promoter_pid" 2>/dev/null || return 0
-  printf '%s\n' "$token" > "${best_dir}promotion_token" 2>/dev/null || return 0
+  if [[ -z "$token" ]] || \
+     ! printf '%s\n' "$$" > "${best_dir}promoter_pid" 2>/dev/null || \
+     ! printf '%s\n' "$token" > "${best_dir}promotion_token" 2>/dev/null; then
+    _sgt_drain_lock_release_fd "$promote_lock_fd"
+    return 0
+  fi
 
   local promoting_dir="$queue_dir/.promoting-$task_id"
-  mv "$best_dir" "$promoting_dir" 2>/dev/null || return 0
+  if ! mv "$best_dir" "$promoting_dir" 2>/dev/null; then
+    _sgt_drain_lock_release_fd "$promote_lock_fd"
+    return 0
+  fi
+  _sgt_drain_lock_release_fd "$promote_lock_fd"
 
   local dispatch_bin="$_SGT_LIB_DIR/sgt-dispatch"
   if [[ "${SGT_TEST_HOOKS:-}" == 1 && -n "${_SGT_DISPATCH_QUEUE_EXECUTABLE_OVERRIDE:-}" ]]; then

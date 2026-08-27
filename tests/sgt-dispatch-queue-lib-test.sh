@@ -283,6 +283,55 @@ else
   _fail "_sgt_dispatch_queue_promote_ready: reclaimed or re-promoted a still-in-flight entry: $(cat "$promote_log")"
 fi
 
+# ── promote_ready: concurrent calls against one entry never double-promote
+# or leave a corrupted token behind ─────────────────────────────────────────
+# Multiple sgt-watch --background loops (one per actively-monitored task, the
+# routine case) call this once per cycle independently. A dedicated advisory
+# lock (dispatch-queue-promote) now serializes the select-write-mv sequence
+# fleet-wide specifically so two such calls can never race on selecting or
+# claiming the same entry; this sanity check asserts the externally-visible
+# property (exactly one promotion, one well-formed token survives) under
+# concurrent load rather than exercising the lock's own internal timing,
+# which is too fast in practice for a black-box test to reliably contend.
+
+fleet_race_promote="$TEST_ROOT/fleet-race-promote"
+mkdir -p "$fleet_race_promote"
+SERGEANT_FLEET="$fleet_race_promote" _lib _sgt_dispatch_queue_enqueue solo-race proj repo "solo race brief"
+
+concurrent_dispatch_fake="$fake_bin/sgt-dispatch-fake-concurrent"
+concurrent_log="$TEST_ROOT/concurrent-promote.log"
+cat > "$concurrent_dispatch_fake" <<EOF
+#!/usr/bin/env bash
+# A brief, real sleep makes the race window observable instead of the whole
+# critical section completing before a second concurrent caller even starts.
+sleep 0.2
+printf '%s\n' "\$*" >> "$concurrent_log"
+exit 0
+EOF
+chmod +x "$concurrent_dispatch_fake"
+
+: > "$concurrent_log"
+for _ in 1 2 3 4; do
+  ( PATH="$fake_bin:$PATH" SERGEANT_FLEET="$fleet_race_promote" SERGEANT_DISPATCH_MAX_WORKERS=4 \
+      SGT_TEST_HOOKS=1 _SGT_DISPATCH_QUEUE_EXECUTABLE_OVERRIDE="$concurrent_dispatch_fake" \
+      _lib _sgt_dispatch_queue_promote_ready ) &
+done
+wait
+
+promotion_count="$(grep -c . "$concurrent_log" 2>/dev/null || true)"
+if [[ "$promotion_count" == "1" ]]; then
+  _pass "_sgt_dispatch_queue_promote_ready: 4 concurrent callers promote the single queued entry exactly once"
+else
+  _fail "_sgt_dispatch_queue_promote_ready: expected exactly 1 promotion of the sole entry, got $promotion_count: $(cat "$concurrent_log")"
+fi
+concurrent_call="$(cat "$concurrent_log" 2>/dev/null || true)"
+concurrent_token="$(printf '%s\n' "$concurrent_call" | grep -o -- '--promotion-token [^ ]*' | awk '{print $2}')"
+if [[ -n "$concurrent_token" ]]; then
+  _pass "_sgt_dispatch_queue_promote_ready: the surviving promotion carries an intact, well-formed token (no cross-writer corruption)"
+else
+  _fail "_sgt_dispatch_queue_promote_ready: expected a promotion token in the surviving call: $concurrent_call"
+fi
+
 printf '\nsgt-dispatch-queue-lib: %d passed' "$pass"
 if [[ "$fail" -gt 0 ]]; then
   printf ', %d FAILED\n' "$fail" >&2
