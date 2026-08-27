@@ -49,24 +49,29 @@ mise run check
 
 ## Build the MCP server
 
-The shell scripts need no build step. The Go MCP server is optional:
+The shell scripts need no build step. The Go MCP server (a shared backend
+process, `sergeant-mcp`) and its per-instance client proxy
+(`sergeant-mcp-client`, what `mcp.json` actually registers) are optional:
 
 ```bash
-# Current OS/arch → bin/sergeant-mcp
+# Current OS/arch → bin/sergeant-mcp, bin/sergeant-mcp-client
 mise run build
 
 # Without mise
 go build -o bin/sergeant-mcp ./cmd/sergeant-mcp/
+go build -o bin/sergeant-mcp-client ./cmd/sergeant-mcp-client/
 
-# All platforms → dist/sergeant-mcp-{os}-{arch}
+# All platforms → dist/{sergeant-mcp,sergeant-mcp-client}-{os}-{arch}
 mise run build:all
 
 # Verify
 ./bin/sergeant-mcp --version
+./bin/sergeant-mcp-client --version
 ```
 
-The binary must stay in `bin/` alongside the `sgt-*` scripts — it resolves
-script paths relative to itself at runtime.
+Both binaries must stay in `bin/` alongside the `sgt-*` scripts — the server
+resolves script paths relative to itself, and the client looks for a sibling
+`sergeant-mcp` binary to start when no shared server is already running.
 
 ---
 

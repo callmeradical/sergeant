@@ -163,9 +163,13 @@ Require both `graph.json` and `GRAPH_REPORT.md` at the configured project output
 
 ## 8. Optional: build the MCP server
 
-`sergeant-mcp` is a Go binary that exposes every `sgt-*` script as an MCP tool
-over stdio, so any MCP-compatible host (Claude Desktop, Cursor, Continue, etc.)
-can call Sergeant commands directly without a tmux session.
+`sergeant-mcp` is a Go binary that exposes every `sgt-*` script as an MCP
+tool. It runs as one shared backend process per machine: each MCP-compatible
+host (Claude Desktop, Cursor, Continue, etc.) actually launches the thin
+`sergeant-mcp-client` proxy over stdio, which discovers an already-running
+`sergeant-mcp` and connects to it over a Unix socket, or starts one itself if
+none is running yet — so N connected host instances share one backend
+process instead of each spawning a private one.
 
 ### Prerequisites
 
@@ -175,28 +179,31 @@ can call Sergeant commands directly without a tmux session.
 ### Build
 
 ```bash
-# Quick build for the current OS/arch — output: bin/sergeant-mcp
+# Quick build for the current OS/arch — output: bin/sergeant-mcp, bin/sergeant-mcp-client
 mise run build
 
 # Without mise:
 go build -o bin/sergeant-mcp ./cmd/sergeant-mcp/
+go build -o bin/sergeant-mcp-client ./cmd/sergeant-mcp-client/
 
 # Cross-compile for all supported platforms (darwin/linux × amd64/arm64)
 mise run build:all
-# Output: dist/sergeant-mcp-{os}-{arch}
+# Output: dist/{sergeant-mcp,sergeant-mcp-client}-{os}-{arch}
 ```
 
 Verify:
 
 ```bash
 ./bin/sergeant-mcp --version
+./bin/sergeant-mcp-client --version
 ```
 
 ### Connect to an MCP host
 
 The repository ships `mcp.json` at the root — an [Agent Plugins](https://agent-plugins.org)
-manifest that points to `./bin/sergeant-mcp`. MCP hosts that auto-discover
-`mcp.json` will pick it up automatically after you build the binary.
+manifest that points to `./bin/sergeant-mcp-client`. MCP hosts that
+auto-discover `mcp.json` will pick it up automatically after you build both
+binaries.
 
 For hosts that require manual configuration add a stdio server entry:
 
@@ -205,14 +212,15 @@ For hosts that require manual configuration add a stdio server entry:
   "mcpServers": {
     "sergeant": {
       "type": "stdio",
-      "command": "/path/to/sergeant/bin/sergeant-mcp"
+      "command": "/path/to/sergeant/bin/sergeant-mcp-client"
     }
   }
 }
 ```
 
-The binary must remain in `bin/` (the same directory as the `sgt-*` scripts)
-because it resolves script paths relative to itself at runtime.
+Both binaries must remain in `bin/` (the same directory as the `sgt-*`
+scripts): the server resolves script paths relative to itself, and the
+client looks there for a sibling `sergeant-mcp` to start on demand.
 
 ### Available tools
 

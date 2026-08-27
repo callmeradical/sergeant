@@ -357,26 +357,32 @@ Agent-loaded skills for structured workflows:
 
 ## MCP server
 
-`sergeant-mcp` exposes every `sgt-*` script as an MCP tool over stdio, letting
-any MCP-compatible host (Claude Desktop, Cursor, Continue, etc.) call Sergeant
-commands without a tmux session.
+`sergeant-mcp` exposes every `sgt-*` script as an MCP tool, letting any
+MCP-compatible host (Claude Desktop, Cursor, Continue, etc.) call Sergeant
+commands without a tmux session. Every harness instance's own MCP connection
+goes through the thin `sergeant-mcp-client` proxy, which discovers or starts
+one shared `sergeant-mcp` backend process per machine over a Unix socket —
+so N connected instances share one process instead of each spawning a
+private one.
 
 ```bash
 # Build (requires Go 1.21+)
-mise run build           # bin/sergeant-mcp for current OS/arch
+mise run build           # bin/sergeant-mcp + bin/sergeant-mcp-client for current OS/arch
 mise run build:all       # dist/ for darwin/linux × amd64/arm64
 
 # Without mise:
 go build -o bin/sergeant-mcp ./cmd/sergeant-mcp/
+go build -o bin/sergeant-mcp-client ./cmd/sergeant-mcp-client/
 ```
 
 The repo ships `mcp.json` — an [Agent Plugins](https://agent-plugins.org) manifest
-that points to `./bin/sergeant-mcp`. Hosts that auto-discover `mcp.json` pick it
-up automatically after the build. For manual configuration add a stdio entry
-pointing to `bin/sergeant-mcp`.
+that points to `./bin/sergeant-mcp-client`. Hosts that auto-discover `mcp.json`
+pick it up automatically after the build. For manual configuration add a stdio
+entry pointing to `bin/sergeant-mcp-client`.
 
-The binary resolves script paths relative to itself, so it must stay in `bin/`
-alongside the `sgt-*` scripts.
+Both binaries resolve paths relative to themselves (the client looks for a
+sibling `sergeant-mcp`, and the server resolves `sgt-*` scripts the same way),
+so they must stay in `bin/` alongside the `sgt-*` scripts.
 
 See [Getting started §8](docs/getting-started.md#8-optional-build-the-mcp-server)
 for full setup instructions.

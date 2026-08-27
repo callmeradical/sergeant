@@ -344,6 +344,7 @@ TD_TASK_ID=""
 INTENT_FILE=""
 AGENT_OVERRIDE=""
 MODEL_ARG=""
+TMUX_SESSION_ARG=""
 COORDINATOR_PANE_ARG=""
 MANAGED_COORDINATOR=false
 ORIGIN_PROFILE=""
@@ -372,6 +373,11 @@ while [[ $# -gt 0 ]]; do
     --model)
       [[ -n "${2:-}" ]] || _die "--model requires provider/model or provider/model:variant"
       MODEL_ARG="$2"
+      shift 2
+      ;;
+    --tmux-session)
+      [[ -n "${2:-}" ]] || _die "--tmux-session requires a name"
+      TMUX_SESSION_ARG="$2"
       shift 2
       ;;
     --coordinator-pane)
@@ -687,8 +693,16 @@ _require_interactive_agent
 
 # All dispatches share a single "sgt" tmux session — each task gets its own
 # windows within it. This keeps tmux list-sessions clean.
-# Override with SERGEANT_TMUX_SESSION=<name> if you want task-scoped sessions.
-SGT_TMUX_SESSION="${SERGEANT_TMUX_SESSION:-sgt}"
+# Resolution: --tmux-session flag > SERGEANT_TMUX_SESSION env > "sgt" default.
+# The flag exists so an MCP caller behind a shared sergeant-mcp server process
+# (shared-mcp-server change) can pass a per-invocation session name instead of
+# depending on whichever SERGEANT_TMUX_SESSION the shared server process
+# happens to have inherited.
+if [[ -n "$TMUX_SESSION_ARG" ]]; then
+  SGT_TMUX_SESSION="$TMUX_SESSION_ARG"
+else
+  SGT_TMUX_SESSION="${SERGEANT_TMUX_SESSION:-sgt}"
+fi
 TMUX_SESSION="$SGT_TMUX_SESSION"
 
 PRIMARY_PANE_ID=""

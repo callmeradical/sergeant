@@ -57,6 +57,21 @@ writers succeeds in creating the real lock path; the loser detects the
 now-live PID and exits as a no-op server start (its would-be socket is
 never bound).
 
+**Known limitation, accepted:** `syscall.Kill(pid, 0)` confirms only that
+some process holds that PID, not that it is the same process the lock
+record was written for. Unlike `bin/_sgt-drain.sh`'s own lock (which also
+records and cross-checks a process start time, precisely to rule out this
+gap), a bare PID check cannot detect the case where the recorded server
+died and the OS later reused its PID for an unrelated live process before
+the lock is reclaimed — that reclaim would then never happen, since the
+recycled PID still answers "alive". This is accepted rather than closed
+with a start-time check: PID recycling onto an unrelated *live* process
+within the reclaim window is rare in practice, and this design's threat
+model is already the single-developer-machine one stated above (no
+multi-tenant auth, owner-only socket permissions) where the operator can
+manually clear a wedged lock file. A future change can add start-time
+verification if this proves to matter in practice.
+
 ## Execution concurrency bound
 
 `runScript` (`main.go:78`) gains a bounded acquire/release around the
