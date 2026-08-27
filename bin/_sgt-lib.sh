@@ -2046,3 +2046,169 @@ _path_device() {
   [[ -n "$device" && "$device" != *$'\n'* ]] || return 1
   printf '%s\n' "$device"
 }
+
+# ── Dispatch admission control (openspec/changes/dispatch-admission-control) ──
+
+# _sgt_live_worker_census
+# Machine-wide count of verified-live worker panes across every task, every
+# repo, every coordinator instance sharing $FLEET_DIR — not just workers this
+# invocation's own coordinator dispatched. A `status=in_progress` file alone is
+# not proof of life (a crashed pane can leave a stale in_progress record), so
+# this counts only records whose pane also proves live via the same identity
+# check sgt-watch/sgt-recover already trust (_sgt_pane_identity_matches).
+_sgt_live_worker_census() {
+  local count=0 task_dir repo_dir status
+  for task_dir in "$FLEET_DIR"/*/; do
+    [[ -d "$task_dir" ]] || continue
+    for repo_dir in "$task_dir"*/; do
+      [[ -d "$repo_dir" ]] || continue
+      status="$(cat "$repo_dir/status" 2>/dev/null || true)"
+      [[ "$status" == "in_progress" ]] || continue
+      _sgt_pane_identity_matches "$(cat "$repo_dir/pane" 2>/dev/null || true)" \
+        "$repo_dir" || continue
+      count=$((count + 1))
+    done
+  done
+  printf '%s\n' "$count"
+}
+
+# _sgt_system_pressure
+# Prints "<load_avg_1m> <available_mem_ratio> <cpu_count>" space-separated.
+_sgt_system_pressure() {
+  local load mem_ratio cpus
+  if [[ "$(uname)" == Darwin ]]; then
+    load="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')"
+    # Each "Pages <label>:" line's numeric value is always the last
+    # whitespace-separated field, not a fixed field index: "Pages wired down:"
+    # has an extra word before the count that a fixed $3 would misparse.
+    mem_ratio="$(vm_stat 2>/dev/null | awk '
+      /Pages free/ {free=$NF} /Pages active/ {active=$NF}
+      /Pages inactive/ {inactive=$NF} /Pages wired/ {wired=$NF}
+      END { total=free+active+inactive+wired
+            if (total>0) printf "%.2f", free/total; else print "1.00" }')"
+    cpus="$(sysctl -n hw.ncpu 2>/dev/null)"
+  else
+    load="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
+    mem_ratio="$(awk '/MemAvailable/{a=$2} /MemTotal/{t=$2}
+      END{ if (t>0) printf "%.2f", a/t; else print "1.00" }' /proc/meminfo 2>/dev/null)"
+    cpus="$(nproc 2>/dev/null)"
+  fi
+  printf '%s %s %s\n' "${load:-0}" "${mem_ratio:-1.00}" "${cpus:-1}"
+}
+
+# _sgt_effective_worker_budget
+# SERGEANT_DISPATCH_MAX_WORKERS overrides the CPU-derived nominal ceiling
+# outright (an explicit human-set number always wins). Otherwise the nominal
+# ceiling is derived from CPU count, then reduced when load or memory
+# pressure is already high. Never returns less than 1.
+_sgt_effective_worker_budget() {
+  local nominal load mem cpus
+  read -r load mem cpus < <(_sgt_system_pressure)
+  nominal="${SERGEANT_DISPATCH_MAX_WORKERS:-$((cpus * 2))}"
+  awk -v nominal="$nominal" -v load="$load" -v cpus="$cpus" -v mem="$mem" '
+    BEGIN {
+      budget = nominal
+      if (load > cpus) budget = int(budget * cpus / load)
+      if (mem < 0.15)  budget = int(budget / 2)
+      if (budget < 1) budget = 1
+      print budget
+    }'
+}
+
+# _sgt_dispatch_queue_enqueue <task_id> <project> <repos_csv> <brief> [td_task_id]
+#
+# Records a dispatch call that exceeded the effective worker budget as a
+# durable, FIFO-ordered entry under $FLEET_DIR/.dispatch-queue/<task_id>/ so it
+# is admitted automatically once capacity frees up (see
+# _sgt_dispatch_queue_promote_ready). FIFO position is a monotonically
+# increasing counter, read-and-incremented under an advisory lock so two
+# concurrent enqueues from different coordinator processes never collide.
+_sgt_dispatch_queue_enqueue() {
+  local task_id="$1" project="$2" repos="$3" brief="$4" td_task="${5:-}"
+  local queue_dir entry_dir counter_file order lock_fd=15
+  [[ -n "$task_id" && -n "$project" && -n "$repos" ]] || return 1
+  queue_dir="$FLEET_DIR/.dispatch-queue"
+  entry_dir="$queue_dir/$task_id"
+  mkdir -p "$entry_dir" || return 1
+  counter_file="$queue_dir/.order-counter"
+
+  _sgt_drain_lock_acquire_fd "$lock_fd" dispatch-queue-order \
+    "$queue_dir/.order-counter.lock" || return 1
+  order="$(cat "$counter_file" 2>/dev/null || true)"
+  [[ "$order" =~ ^[0-9]+$ ]] || order=0
+  order=$((order + 1))
+  if ! _sgt_replace_owned_file "$counter_file" "$order"; then
+    _sgt_drain_lock_release_fd "$lock_fd"
+    return 1
+  fi
+  _sgt_drain_lock_release_fd "$lock_fd"
+
+  _sgt_replace_owned_file "$entry_dir/order" "$order" || return 1
+  printf '%s\n' "$project" > "$entry_dir/project" || return 1
+  printf '%s\n' "$repos"   > "$entry_dir/repos"   || return 1
+  printf '%s\n' "$brief"   > "$entry_dir/brief"   || return 1
+  if [[ -n "$td_task" ]]; then
+    printf '%s\n' "$td_task" > "$entry_dir/td_task" || return 1
+  fi
+  return 0
+}
+
+# _sgt_dispatch_queue_promote_ready
+#
+# Called once per sgt-watch cycle (see bin/sgt-watch's per-task loop). If the
+# live worker census is below the current effective budget and at least one
+# dispatch is queued, promotes the lowest-order entry by replaying the
+# original dispatch call under its already-allocated task ID (--resume-task-id)
+# so no new task identity is minted for admitted work. Never raises: this is
+# best-effort fleet-wide housekeeping piggybacked on an existing poll cycle,
+# not the caller's own dispatch, so a promotion failure is reported to stderr
+# and the entry is restored to the queue (preserving its FIFO order) for a
+# later attempt rather than dropped.
+_sgt_dispatch_queue_promote_ready() {
+  local queue_dir="$FLEET_DIR/.dispatch-queue"
+  [[ -d "$queue_dir" ]] || return 0
+  local live budget
+  live="$(_sgt_live_worker_census)"
+  budget="$(_sgt_effective_worker_budget)"
+  [[ "$live" -lt "$budget" ]] || return 0
+
+  local entry order best_dir="" best_order=""
+  for entry in "$queue_dir"/*/; do
+    [[ -d "$entry" ]] || continue
+    order="$(cat "${entry}order" 2>/dev/null || true)"
+    [[ "$order" =~ ^[0-9]+$ ]] || continue
+    if [[ -z "$best_order" || "$order" -lt "$best_order" ]]; then
+      best_order="$order"
+      best_dir="$entry"
+    fi
+  done
+  [[ -n "$best_dir" ]] || return 0
+
+  local task_id project repos brief td_task
+  task_id="$(basename "${best_dir%/}")"
+  project="$(cat "${best_dir}project" 2>/dev/null || true)"
+  repos="$(cat "${best_dir}repos" 2>/dev/null || true)"
+  brief="$(cat "${best_dir}brief" 2>/dev/null || true)"
+  td_task="$(cat "${best_dir}td_task" 2>/dev/null || true)"
+  [[ -n "$task_id" && -n "$project" && -n "$repos" ]] || return 0
+
+  local promoting_dir="$queue_dir/.promoting-$task_id"
+  mv "$best_dir" "$promoting_dir" 2>/dev/null || return 0
+
+  local dispatch_bin="$_SGT_LIB_DIR/sgt-dispatch"
+  if [[ "${SGT_TEST_HOOKS:-}" == 1 && -n "${_SGT_DISPATCH_QUEUE_EXECUTABLE_OVERRIDE:-}" ]]; then
+    dispatch_bin="$_SGT_DISPATCH_QUEUE_EXECUTABLE_OVERRIDE"
+  fi
+
+  local -a args=("$project" "$brief" --repos "$repos" --resume-task-id "$task_id")
+  [[ -z "$td_task" ]] || args+=(--td "$td_task")
+
+  if "$dispatch_bin" "${args[@]}"; then
+    rm -rf "$promoting_dir"
+    return 0
+  fi
+  printf 'WARNING: promotion of queued dispatch %s failed; requeued\n' "$task_id" >&2
+  mv "$promoting_dir" "$best_dir" 2>/dev/null || \
+    printf 'ERROR: could not restore queue entry after failed promotion: %s\n' "$task_id" >&2
+  return 1
+}

@@ -448,6 +448,27 @@ if [[ "${1:-}" == "--snapshot" ]]; then
     _sq_busy="null"
     _sq_basis="no_verified_active_witness"
     _sq_total=0 _sq_needs=0 _sq_blocked=0 _sq_waiting=0 _sq_terminal=0 _sq_inprog=0 _sq_other=0
+    _sq_queued=0
+
+    # Queued dispatches (openspec/changes/dispatch-admission-control) have no
+    # fleet task directory yet, so they are counted from
+    # $FLEET_DIR/.dispatch-queue/ directly -- checked before the per-repo
+    # status read in _sq_count_dir below, since there is no such directory to
+    # read yet for a call still waiting on admission.
+    if [[ -d "$FLEET_DIR/.dispatch-queue" ]]; then
+      for _sq_qdir in "$FLEET_DIR/.dispatch-queue"/*/; do
+        [[ -d "$_sq_qdir" ]] || continue
+        if [[ -n "$snapshot_td" ]]; then
+          _sq_q_td="$(cat "${_sq_qdir}td_task" 2>/dev/null || true)"
+          [[ -n "$_sq_q_td" && "$_sq_q_td" == "$snapshot_td" ]] || continue
+        else
+          _sq_q_proj="$(cat "${_sq_qdir}project" 2>/dev/null || true)"
+          [[ "$_sq_q_proj" == "$snapshot_project" ]] || continue
+        fi
+        _sq_queued=$(( _sq_queued + 1 ))
+        _sq_total=$(( _sq_total + 1 ))
+      done
+    fi
 
     _sq_count_dir() {
       local _rd="$1"
@@ -511,6 +532,7 @@ if [[ "${1:-}" == "--snapshot" ]]; then
       printf 'fleet_terminal\t%d\n' "$_sq_terminal"
       printf 'fleet_in_progress\t%d\n' "$_sq_inprog"
       printf 'fleet_other\t%d\n' "$_sq_other"
+      printf 'fleet_queued\t%d\n' "$_sq_queued"
       _sq_project_state_facts "$_sq_proj_name" "$_sq_repo_count"
       _sq_coordinator_facts "$_RECENT_S"
     } | _sq_emit
@@ -581,6 +603,13 @@ if [[ "${1:-}" == "--list" ]]; then
   _list_has_task_dir=0
   if [[ -d "$FLEET_DIR" ]]; then
     for _list_probe_dir in "$FLEET_DIR"/*/; do
+      [[ -d "$_list_probe_dir" && "$(basename "$_list_probe_dir")" != ".dispatch-queue" ]] || continue
+      _list_has_task_dir=1
+      break
+    done
+  fi
+  if [[ "$_list_has_task_dir" -eq 0 && -d "$FLEET_DIR/.dispatch-queue" ]]; then
+    for _list_probe_dir in "$FLEET_DIR/.dispatch-queue"/*/; do
       [[ -d "$_list_probe_dir" ]] || continue
       _list_has_task_dir=1
       break
@@ -594,7 +623,44 @@ if [[ "${1:-}" == "--list" ]]; then
   # are active.  Use --snapshot for a machine-readable activity observation.
   echo "Fleet tasks (retained records, including terminal):"
   echo ""
+  # Queued dispatches (openspec/changes/dispatch-admission-control) have no
+  # task directory under $FLEET_DIR yet -- admission control never lets a
+  # queued call reach worktree/pane creation -- so they are listed from
+  # $FLEET_DIR/.dispatch-queue/ directly, checked before the per-repo status
+  # read below so a queued task is never mistaken for a hung preflight.
+  if [[ -d "$FLEET_DIR/.dispatch-queue" ]]; then
+    declare -a _queue_ids=() _queue_orders=()
+    for _queue_dir in "$FLEET_DIR/.dispatch-queue"/*/; do
+      [[ -d "$_queue_dir" ]] || continue
+      _queue_order="$(cat "${_queue_dir}order" 2>/dev/null || true)"
+      [[ "$_queue_order" =~ ^[0-9]+$ ]] || continue
+      _queue_ids+=("$(basename "${_queue_dir%/}")")
+      _queue_orders+=("$_queue_order")
+    done
+    _queue_count=${#_queue_ids[@]}
+    for ((_qi = 1; _qi < _queue_count; _qi++)); do
+      _qj=$_qi
+      while ((_qj > 0)) && ((_queue_orders[_qj - 1] > _queue_orders[_qj])); do
+        _qt=${_queue_orders[_qj]}; _queue_orders[_qj]=${_queue_orders[_qj - 1]}; _queue_orders[_qj - 1]=$_qt
+        _qt=${_queue_ids[_qj]}; _queue_ids[_qj]=${_queue_ids[_qj - 1]}; _queue_ids[_qj - 1]=$_qt
+        ((_qj--))
+      done
+    done
+    for ((_qi = 0; _qi < _queue_count; _qi++)); do
+      _queue_dir="$FLEET_DIR/.dispatch-queue/${_queue_ids[_qi]}/"
+      _queue_project="$(cat "${_queue_dir}project" 2>/dev/null || echo "unknown")"
+      _queue_repos="$(cat "${_queue_dir}repos" 2>/dev/null || echo "")"
+      _queue_brief="$(cat "${_queue_dir}brief" 2>/dev/null | cut -c1-60 || echo "")"
+      echo "  ${_queue_ids[_qi]}"
+      echo "    status:  queued (position $((_qi + 1)) of $_queue_count)"
+      echo "    project: $_queue_project"
+      echo "    repos:   $_queue_repos"
+      [[ -z "$_queue_brief" ]] || echo "    brief:   $_queue_brief"
+      echo ""
+    done
+  fi
   for task_dir in "$FLEET_DIR"/*/; do
+    [[ "$(basename "$task_dir")" != ".dispatch-queue" ]] || continue
     [[ -d "$task_dir" ]] || continue
     task_id="$(basename "$task_dir")"
     started="$(cat "$task_dir/started" 2>/dev/null || echo "unknown")"
@@ -2021,6 +2087,11 @@ LAST_SNAPSHOT=""
 HAVE_SNAPSHOT=false
 while true; do
   _sync_task "$TASK_ID"
+  # Fleet-wide dispatch-queue promotion (openspec/changes/dispatch-admission-control)
+  # piggybacks on this already-running per-task background cycle rather than a
+  # second, uncoordinated poller touching the same $FLEET_DIR. Best-effort: a
+  # promotion failure must never stop this task's own reconciliation loop.
+  _sgt_dispatch_queue_promote_ready 2>&2 || true
   current_snapshot=""
   notify_marker="$(cat "$TASK_DIR/notify" 2>/dev/null || true)"
   current_snapshot+="notify:$notify_marker "

@@ -72,6 +72,7 @@ def main():
                 "terminal": to_int(facts.get("fleet_terminal", "0")),
                 "in_progress": to_int(facts.get("fleet_in_progress", "0")),
                 "other": to_int(facts.get("fleet_other", "0")),
+                "queued": to_int(facts.get("fleet_queued", "0")),
             },
         }
     else:

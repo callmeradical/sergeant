@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# sgt-dispatch-queue — Inspect and manually reorder the durable dispatch
+# admission queue ($FLEET_DIR/.dispatch-queue/), written by bin/sgt-dispatch
+# when a call exceeds the effective worker budget and promoted automatically
+# by sgt-watch's background cycle (openspec/changes/dispatch-admission-control).
+#
+# Usage:
+#   sgt-dispatch-queue --reorder <task-id> <position>
+#
+# <position> is the 1-based rank the task should occupy in the FIFO line
+# (1 = promoted next). Out-of-range positions clamp to the front/back.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+FLEET_DIR="${SERGEANT_FLEET:-$FLEET_DIR}"
+
+QUEUE_DIR="$FLEET_DIR/.dispatch-queue"
+
+[[ "${1:-}" == "--reorder" ]] || \
+  _die "Usage: sgt-dispatch-queue --reorder <task-id> <position>"
+TASK_ID="${2:-}"
+POSITION="${3:-}"
+[[ -n "$TASK_ID" && -n "$POSITION" ]] || \
+  _die "Usage: sgt-dispatch-queue --reorder <task-id> <position>"
+[[ "$POSITION" =~ ^[1-9][0-9]*$ ]] || _die "position must be a positive integer: $POSITION"
+[[ -d "$QUEUE_DIR/$TASK_ID" ]] || _die "No queued dispatch with task ID: $TASK_ID"
+
+declare -a ids=()
+declare -a orders=()
+for entry in "$QUEUE_DIR"/*/; do
+  [[ -d "$entry" ]] || continue
+  id="$(basename "${entry%/}")"
+  order="$(cat "${entry}order" 2>/dev/null || true)"
+  [[ "$order" =~ ^[0-9]+$ ]] || continue
+  ids+=("$id")
+  orders+=("$order")
+done
+
+count=${#ids[@]}
+for ((i = 1; i < count; i++)); do
+  j=$i
+  while ((j > 0)) && ((orders[j - 1] > orders[j])); do
+    tmp_o=${orders[j]}; orders[j]=${orders[j - 1]}; orders[j - 1]=$tmp_o
+    tmp_i=${ids[j]}; ids[j]=${ids[j - 1]}; ids[j - 1]=$tmp_i
+    ((j--))
+  done
+done
+
+declare -a remaining=()
+for id in "${ids[@]}"; do
+  [[ "$id" == "$TASK_ID" ]] || remaining+=("$id")
+done
+
+insert_index=$((POSITION - 1))
+((insert_index < 0)) && insert_index=0
+((insert_index > ${#remaining[@]})) && insert_index=${#remaining[@]}
+
+declare -a final=("${remaining[@]:0:insert_index}" "$TASK_ID" "${remaining[@]:insert_index}")
+
+rank=0
+for id in "${final[@]}"; do
+  rank=$((rank + 1))
+  _sgt_replace_owned_file "$QUEUE_DIR/$id/order" "$rank" || \
+    _die "Could not persist reordered position for $id"
+done
+
+printf 'reordered: %s now at position %s of %s\n' "$TASK_ID" "$POSITION" "${#final[@]}"

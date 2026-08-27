@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# sgt-stop-all — Two-tier hard-stop for every verified-live worker pane on this
+# machine (openspec/changes/dispatch-admission-control).
+#
+# Independent of bin/sgt-drain / bin/sgt-drain-force: neither requires nor sets
+# a drain record, and this command works with no drain already active — a
+# saturated machine may never be able to reliably signal a drain to begin
+# with.  Targets are the same verified-live worker panes bin/sgt-dispatch's
+# admission census trusts (_sgt_pane_identity_matches), not a bare
+# `status=in_progress` file, and per-worker signaling reuses the same
+# PID-identity-checked escalation sgt-drain-force implements
+# (_sgt_terminate_verified_pid, bin/_sgt-process.sh) rather than reimplementing
+# it here.
+#
+# Usage:
+#   sgt-stop-all --dry-run          # preview eligible workers; stop nothing
+#   sgt-stop-all --yes              # default tier: best-effort durable-handoff
+#                                    # capture, then SIGTERM, short grace
+#                                    # period, then SIGKILL if still alive
+#   sgt-stop-all --force --yes      # immediate, unconditional SIGKILL; no
+#                                    # handoff attempt, no grace-period wait
+#
+# Environment:
+#   SERGEANT_FLEET                       Override fleet state directory
+#   SERGEANT_STOP_ALL_GRACE_DECISECONDS  Default tier's post-SIGTERM grace
+#                                         period before escalating to SIGKILL
+#                                         (default 30 = 3s)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_sgt-lib.sh
+source "$SCRIPT_DIR/_sgt-lib.sh"
+FLEET_DIR="${SERGEANT_FLEET:-$FLEET_DIR}"
+
+DRY_RUN=false
+CONFIRMED=false
+FORCE=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=true;  shift ;;
+    --yes)     CONFIRMED=true; shift ;;
+    --force)   FORCE=true;    shift ;;
+    *) _die "Unknown option: $1" ;;
+  esac
+done
+
+$DRY_RUN || $CONFIRMED || \
+  _die "sgt-stop-all requires --yes to confirm or --dry-run to preview targets"
+
+GRACE_DECISECONDS="${SERGEANT_STOP_ALL_GRACE_DECISECONDS:-30}"
+
+# ── Collect every verified-live worker across the whole fleet ────────────────
+# Machine-wide by design (PRD settled decision): no --project/--repo scope
+# selector.
+
+declare -a eligible_tasks=() eligible_repos=() eligible_dirs=()
+if [[ -d "$FLEET_DIR" ]]; then
+  for task_dir in "$FLEET_DIR"/*/; do
+    [[ -d "$task_dir" ]] || continue
+    task_id="$(basename "${task_dir%/}")"
+    [[ "$task_id" != ".dispatch-queue" ]] || continue
+    for repo_dir in "$task_dir"*/; do
+      [[ -d "$repo_dir" ]] || continue
+      status="$(cat "$repo_dir/status" 2>/dev/null || true)"
+      [[ "$status" == "in_progress" ]] || continue
+      _sgt_pane_identity_matches "$(cat "$repo_dir/pane" 2>/dev/null || true)" \
+        "$repo_dir" || continue
+      eligible_tasks+=("$task_id")
+      eligible_repos+=("$(basename "${repo_dir%/}")")
+      eligible_dirs+=("${repo_dir%/}")
+    done
+  done
+fi
+
+count="${#eligible_tasks[@]}"
+if [[ "$count" -eq 0 ]]; then
+  echo "no live workers to stop"
+  exit 0
+fi
+
+printf 'Live workers eligible for hard-stop (%s):\n' "$count"
+for ((i = 0; i < count; i++)); do
+  printf '  task: %s  repo: %s\n' "${eligible_tasks[$i]}" "${eligible_repos[$i]}"
+done
+
+if $DRY_RUN; then
+  echo "dry-run: no workers stopped"
+  exit 0
+fi
+
+# ── Execute hard-stop ─────────────────────────────────────────────────────────
+
+any_failed=false
+for ((i = 0; i < count; i++)); do
+  repo_dir="${eligible_dirs[$i]}"
+  task_id="${eligible_tasks[$i]}"
+  repo_name="${eligible_repos[$i]}"
+  worktree="$(cat "$repo_dir/worktree" 2>/dev/null || true)"
+  pid="$(cat "$repo_dir/worker_pid" 2>/dev/null || true)"
+  recorded_start="$(cat "$repo_dir/worker_process_start" 2>/dev/null || true)"
+  marker_evidence_present=false
+  if [[ -e "$repo_dir/worker_process_marker" || -L "$repo_dir/worker_process_marker" || \
+        -e "$repo_dir/worker_process_markers" || -L "$repo_dir/worker_process_markers" ]]; then
+    marker_evidence_present=true
+  fi
+
+  if ! $FORCE; then
+    # Best-effort last-known-state capture before signaling. Never waits for
+    # the worker's own cooperation; a missing/unverifiable worktree or a
+    # failed write is not fatal to the hard-stop itself.
+    [[ -z "$worktree" ]] || "$SCRIPT_DIR/sgt-td-memory" handoff "$repo_dir" "$worktree" 2>/dev/null || true
+  fi
+
+  if [[ -n "$pid" && "$pid" =~ ^[1-9][0-9]*$ ]] && ! $marker_evidence_present; then
+    # Marker-owning workers are retired exclusively through the pidfd holder
+    # boundary below, the same check-then-kill PID-reuse window sgt-drain-force
+    # already closes that way; direct signaling is only for workers with no
+    # marker capability recorded at all.
+    if $FORCE; then
+      actual_start="$(_sgt_process_identity "$pid" 2>/dev/null || true)"
+      if [[ -n "$recorded_start" && -n "$actual_start" && \
+            "$actual_start" == "$recorded_start" ]]; then
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
+    else
+      _sgt_terminate_verified_pid "$pid" "$recorded_start" "$GRACE_DECISECONDS" || \
+        printf '  INFO: pid %s identity unproven for %s/%s; direct signal skipped\n' \
+          "$pid" "$task_id" "$repo_name" >&2
+    fi
+  fi
+
+  if $marker_evidence_present; then
+    if ! _sgt_retire_worker_marker_holders "$repo_dir"; then
+      printf '  WARN: owned descendants could not be retired (%s/%s); fleet state preserved\n' \
+        "$task_id" "$repo_name" >&2
+      any_failed=true
+      continue
+    fi
+  fi
+
+  [[ -n "$worktree" && -d "$worktree" ]] && \
+    printf 'force-stopped\n' > "$worktree/.sergeant-status" 2>/dev/null || true
+  printf 'force-stopped\n' > "$repo_dir/status" || true
+  printf '  stopped: %s/%s\n' "$task_id" "$repo_name"
+done
+
+if $any_failed; then
+  _die "some workers could not be fully stopped; state preserved for manual recovery"
+fi
+exit 0
