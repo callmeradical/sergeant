@@ -41,10 +41,10 @@ project config — confirmed real and working for `Defaults.Agent`
 
 So the actual gap is narrower than "build agent/model configuration from
 scratch": the schema and half the patch mechanism already exist. What's
-missing is the settings page itself, the `Model` field in the patch
-payload, and (per the user's own framing of this request) confirming
-whether agent/model should be a project-level default, a per-dispatch
-choice, or both.
+missing is the settings page itself and the `Model` field in the patch
+payload — both agent and model are project-level defaults, each
+overridable per dispatch, exactly mirroring how `Agent` already behaves
+on `/api/dispatch` today.
 
 ## Proposal
 
@@ -61,7 +61,16 @@ choice, or both.
    control, not free text, so an operator can't save an unsupported
    value. Model has no equivalent accepted-list validation today — see
    Open Questions.
-4. This page is also the natural home for the dispatch-admission-control
+4. **A per-dispatch override for both fields.** `/api/dispatch`'s
+   request body already accepts `Agent` as an optional override of the
+   project default (`req.Agent`, validated, applied over
+   `proj.Defaults.Agent` before the run starts). This PRD adds the
+   equivalent `Model` field to that same request body, applied over
+   `proj.Defaults.Model` the same way — so a caller (the dispatch UI, or
+   any other `/api/dispatch` caller) can use the configured default or
+   name a different agent/model for one specific run, without touching
+   settings.
+5. This page is also the natural home for the dispatch-admission-control
    budget setting from `docs/prd-dispatch-admission-control.md`'s first
    open question, if that PRD proceeds — one settings surface, not two.
 
@@ -92,26 +101,35 @@ choice, or both.
   added, patch-preserving behavior unchanged for every other field).
 - Saving a new default takes effect on the next dispatch for that
   project without requiring a server restart.
+- `/api/dispatch` accepts an optional `Model` field in its request body,
+  applied over the project's default model the same way `Agent` already
+  overrides `Defaults.Agent` — a caller that omits it gets the
+  configured default; a caller that sets it gets that run only.
 - Regression coverage: saving a settings change preserves every other
   key in the project's YAML file byte-for-byte except the changed
-  field(s) (matching `refine.go`'s existing node-patch guarantee).
+  field(s) (matching `refine.go`'s existing node-patch guarantee); a
+  dispatch with an explicit `Model` override produces a run using that
+  model regardless of the project's configured default.
+
+## Settled Decisions
+
+1. **Agent and model are project-level defaults, each overridable per
+   dispatch** — not project-default-only, and not per-call-only. This
+   mirrors `Agent`'s existing behavior on `/api/dispatch` exactly; this
+   PRD brings `Model` up to the same shape rather than inventing a
+   different one.
 
 ## Open Questions
 
-1. Should model be a per-dispatch override too (mirroring `Agent`'s
-   existing `req.Agent` field on `/api/dispatch`), or project-default
-   only? The user's framing ("configure or set what agent type... what
-   model") suggests project-level defaults are the primary ask; a
-   per-call override can be a fast-follow if needed.
-2. Should the settings page validate model strings against a known-good
+1. Should the settings page validate model strings against a known-good
    list per provider (the way agent already is), or accept free text
    given the wide and fast-moving range of model identifiers? If
    validated, where does that list come from — a static table, or a
    live query to the provider?
-3. What other settings belong on this page at launch — is agent/model
+2. What other settings belong on this page at launch — is agent/model
    the only field for v1 of this page, or should it also expose
    `Retries` (already in `ProjectDefaults`) and the dispatch-admission
    budget (if that PRD ships first)?
-4. Is there a global (cross-project) settings layer intended eventually
+3. Is there a global (cross-project) settings layer intended eventually
    (e.g. a server-wide default agent/model applied when a project sets
    none), or is every setting strictly project-scoped?
