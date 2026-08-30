@@ -104,8 +104,8 @@ mkdir -p "$WIKI_SESSIONS_DIR"
 _extract_sessions() {
   local date="$1"
   local start_ts end_ts
-  start_ts="$(python3 -c "import datetime; print(int(datetime.datetime(*(int(x) for x in '$date'.split('-'))).timestamp() * 1000))")"
-  end_ts="$(python3 -c "import datetime; print(int((datetime.datetime(*(int(x) for x in '$date'.split('-'))) + datetime.timedelta(days=1)).timestamp() * 1000))")"
+  start_ts="$(python3 -c "import sys, datetime; print(int(datetime.datetime(*(int(x) for x in sys.argv[1].split('-'))).timestamp() * 1000))" "$date")"
+  end_ts="$(python3 -c "import sys, datetime; print(int((datetime.datetime(*(int(x) for x in sys.argv[1].split('-'))) + datetime.timedelta(days=1)).timestamp() * 1000))" "$date")"
 
   sqlite3 "$OPENCODE_DB" "
 SELECT
