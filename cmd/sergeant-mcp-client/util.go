@@ -1,8 +1,8 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
-	"strings"
 )
 
 // extractJSONRPCID returns the "id" field of a JSON-RPC line, if it has one.
@@ -29,12 +29,27 @@ func extractJSONRPCID(line string) (json.RawMessage, bool) {
 // to stdout as-is.
 func parseSSEData(body []byte) []string {
 	var out []string
-	for _, line := range strings.Split(string(body), "\n") {
-		line = strings.TrimRight(line, "\r")
-		if data, ok := strings.CutPrefix(line, "data:"); ok {
-			trimmed := strings.TrimSpace(data)
-			if trimmed != "" {
-				out = append(out, trimmed)
+	// ⚡ Bolt optimization: manual iteration with bytes.IndexByte to avoid allocating
+	// an intermediate slice and a full string copy of the payload stream.
+	for len(body) > 0 {
+		var lineBytes []byte
+		if i := bytes.IndexByte(body, '\n'); i >= 0 {
+			lineBytes = body[:i]
+			body = body[i+1:]
+		} else {
+			lineBytes = body
+			body = nil
+		}
+
+		if len(lineBytes) > 0 && lineBytes[len(lineBytes)-1] == '\r' {
+			lineBytes = lineBytes[:len(lineBytes)-1]
+		}
+
+		if bytes.HasPrefix(lineBytes, []byte("data:")) {
+			dataBytes := lineBytes[5:]
+			trimmed := bytes.TrimSpace(dataBytes)
+			if len(trimmed) > 0 {
+				out = append(out, string(trimmed))
 			}
 		}
 	}

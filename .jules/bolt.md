@@ -5,3 +5,6 @@
 ## 2024-08-27 - Python ctypes.CDLL load overhead in tight loops
 **Learning:** Found that invoking `ctypes.CDLL(None, use_errno=True)` within functions like `libc_pidfd_function` in `_sgt-process-token.py` (which are called continuously when iterating over all processes via `/proc`) is extremely slow, adding ~58µs of overhead per invocation compared to ~0.5µs for a cached lookup. This becomes a bottleneck during process discovery tasks involving thousands of PIDs.
 **Action:** When a fallback or standard system function requires loading a dynamic library via `ctypes.CDLL`, initialize it once at the module scope or memoize it lazily in a module-level variable to avoid repeated disk and linking overhead.
+## 2025-02-28 - Optimize SSE payload parsing allocations
+**Learning:** `strings.Split` in Go creates O(N) allocations for string slices and individual string segments, particularly costly in hot paths like payload parsing where an entire byte slice is converted to a string and then tokenized.
+**Action:** Replace `strings.Split` with manual loop traversal using `bytes.IndexByte` and zero-allocation slice operations, drastically reducing allocations in frequent streaming paths.
