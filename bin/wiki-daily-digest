@@ -325,7 +325,7 @@ $result
 _synthesize() {
   local prompt="$1"
   local tmp_prompt
-  tmp_prompt="$(mktemp)"
+  tmp_prompt="$(mktemp "$SCRIPT_TMP_DIR/prompt.XXXXXX")"
   printf '%s' "$prompt" > "$tmp_prompt"
 
   python3 - "$ANTHROPIC_KEY" "$MODEL" "$tmp_prompt" <<'PYEOF'
