@@ -91,9 +91,9 @@ command -v python3  &>/dev/null || _die "python3 is required"
 
 ANTHROPIC_KEY="$(python3 -c "
 import json, sys
-d = json.load(open('$OPENCODE_AUTH'))
+d = json.load(open(sys.argv[1]))
 print(d.get('anthropic', {}).get('key', ''))
-" 2>/dev/null)"
+" "$OPENCODE_AUTH" 2>/dev/null)"
 [[ -n "$ANTHROPIC_KEY" ]] || _die "No Anthropic key found in $OPENCODE_AUTH"
 
 mkdir -p "$WIKI_SESSIONS_DIR"
@@ -104,8 +104,8 @@ mkdir -p "$WIKI_SESSIONS_DIR"
 _extract_sessions() {
   local date="$1"
   local start_ts end_ts
-  start_ts="$(python3 -c "import datetime; print(int(datetime.datetime(*(int(x) for x in '$date'.split('-'))).timestamp() * 1000))")"
-  end_ts="$(python3 -c "import datetime; print(int((datetime.datetime(*(int(x) for x in '$date'.split('-'))) + datetime.timedelta(days=1)).timestamp() * 1000))")"
+  start_ts="$(python3 -c "import sys, datetime; print(int(datetime.datetime(*(int(x) for x in sys.argv[1].split('-'))).timestamp() * 1000))" "$date")"
+  end_ts="$(python3 -c "import sys, datetime; print(int((datetime.datetime(*(int(x) for x in sys.argv[1].split('-'))) + datetime.timedelta(days=1)).timestamp() * 1000))" "$date")"
 
   sqlite3 "$OPENCODE_DB" "
 SELECT
@@ -311,9 +311,9 @@ import sys, json
 tasks = json.load(sys.stdin)
 for t in tasks:
     updated = t.get('updated_at','')
-    if updated.startswith('$date') and t.get('status') in ('closed','review'):
+    if updated.startswith(sys.argv[1]) and t.get('status') in ('closed','review'):
         print(f'- [{t[\"id\"]}] {t[\"title\"]} [{t[\"status\"]}]')
-" 2>/dev/null || echo "")"
+" "$date" 2>/dev/null || echo "")"
     [[ -n "$result" ]] && tasks+="$repo_path:
 $result
 "
