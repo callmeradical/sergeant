@@ -29,7 +29,19 @@ func extractJSONRPCID(line string) (json.RawMessage, bool) {
 // to stdout as-is.
 func parseSSEData(body []byte) []string {
 	var out []string
-	for _, line := range strings.Split(string(body), "\n") {
+	// Performance optimization: manually iterate with strings.IndexByte
+	// rather than strings.Split to avoid allocating a large string slice.
+	s := string(body)
+	for len(s) > 0 {
+		var line string
+		if i := strings.IndexByte(s, '\n'); i >= 0 {
+			line = s[:i]
+			s = s[i+1:]
+		} else {
+			line = s
+			s = ""
+		}
+
 		line = strings.TrimRight(line, "\r")
 		if data, ok := strings.CutPrefix(line, "data:"); ok {
 			trimmed := strings.TrimSpace(data)

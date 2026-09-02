@@ -64,7 +64,19 @@ func ReadRecord(lockPath string) (*Record, error) {
 		return nil, err
 	}
 	rec := &Record{}
-	for _, line := range strings.Split(string(data), "\n") {
+	// Performance optimization: manually iterate with strings.IndexByte
+	// rather than strings.Split to avoid allocating a string slice.
+	s := string(data)
+	for len(s) > 0 {
+		var line string
+		if i := strings.IndexByte(s, '\n'); i >= 0 {
+			line = s[:i]
+			s = s[i+1:]
+		} else {
+			line = s
+			s = ""
+		}
+
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
