@@ -77,7 +77,12 @@ def pidfd_open(pid):
         numbers = pidfd_syscall_numbers()
         if numbers is None:
             raise NotImplementedError
-        syscall = ctypes.CDLL(None, use_errno=True).syscall
+        # ⚡ Bolt: Cache CDLL instance instead of reloading it every time for
+        # significant performance gains during thousands of process iterations
+        global _LIBC_WITH_ERRNO
+        if _LIBC_WITH_ERRNO is None:
+            _LIBC_WITH_ERRNO = ctypes.CDLL(None, use_errno=True)
+        syscall = _LIBC_WITH_ERRNO.syscall
         syscall.restype = ctypes.c_long
         descriptor = syscall(numbers[0], pid, 0)
     if descriptor < 0:
@@ -103,7 +108,12 @@ def pidfd_send_signal(descriptor, signum):
         numbers = pidfd_syscall_numbers()
         if numbers is None:
             raise NotImplementedError
-        syscall = ctypes.CDLL(None, use_errno=True).syscall
+        # ⚡ Bolt: Cache CDLL instance instead of reloading it every time for
+        # significant performance gains during thousands of process iterations
+        global _LIBC_WITH_ERRNO
+        if _LIBC_WITH_ERRNO is None:
+            _LIBC_WITH_ERRNO = ctypes.CDLL(None, use_errno=True)
+        syscall = _LIBC_WITH_ERRNO.syscall
         syscall.restype = ctypes.c_long
         result = syscall(numbers[1], descriptor, signum, None, 0)
     if result < 0:
