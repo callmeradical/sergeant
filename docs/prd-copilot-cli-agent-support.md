@@ -1,6 +1,6 @@
 # Product Requirements: Copilot CLI as a Supported Agent Backend
 
-Status: Draft, awaiting explicit human PRD approval
+Status: Reopened for CLI gap closure before Copilot SDK implementation
 
 Extends: `docs/prd-sergeant-v2.md` §3.1's agent-driven model, which already
 names opencode, codex, goose, pi, and claude as CLI harnesses an operator may
@@ -11,32 +11,27 @@ the other five.
 
 ## Summary
 
-`internal/runner/runner.go` is the single place that knows how to invoke each
-supported agent CLI non-interactively: a fixed allowlist (`SupportedAgents`,
-line 222) that `ValidateAgent` checks before any dispatch creates a run,
-worktree, or branch record, and a switch statement (`BuildAgentCommand`, line
-402) that builds the exact non-interactive, permission-bypassing argv/env for
-each named harness. Everything downstream of those two — `RunAgentPhase`, the
-dispatch and refine APIs, output capture, redaction, and timeout handling — is
-already agent-agnostic once a harness is registered there. This PRD adds
-`copilot` (GitHub's Copilot CLI, confirmed headless-capable as of the locally
-installed v1.0.80) as a seventh recognized harness, following the same pattern
-already established for `claude`, `codex`, `goose`, `opencode`/`oc`, and `pi`.
+`internal/runner/runner.go` owns runtime validation and non-interactive command
+construction for supported agent CLIs. `mise.toml` separately discovers
+installed harnesses before the Go binary exists, so repository-policy tests
+must keep that prerequisite list aligned with `runner.SupportedAgents`.
+This PRD defines `copilot` (GitHub's Copilot CLI, confirmed headless-capable with
+v1.0.80 and confirmed to expose `--model <model>` with v1.0.82) across both
+surfaces and the live operator documentation.
 
 ## Problem
 
-An operator whose day-to-day agent CLI is `copilot` cannot use it for
-coordinator-driven dispatch today. Naming `copilot` as the agent on a dispatch
-or refine request is rejected outright by `ValidateAgent` before a process is
-ever spawned ("unsupported agent \"copilot\": this engine can drive opencode,
-oc, claude, goose, codex, pi"). Even absent that guard, `BuildAgentCommand` has
-no `case "copilot"`, so it would fall through to the bare positional-prompt
-default (`args = []string{prompt}`) — the same failure mode `SupportedAgents`
-was introduced to prevent (see the comment at line 220-221): a malformed
-invocation with no headless flag and no permission-approval bypass, which in a
-no-TTY dispatch either hangs waiting for an approval prompt that has nowhere
-to go, or exits having done nothing, in a way indistinguishable from the agent
-itself failing.
+The first implementation registered and invoked Copilot correctly in the
+runner, but left three user-visible gaps:
+
+1. `mise run check` still reported no agent when Copilot was the only supported
+   harness on `PATH`.
+2. The repository-policy test exercised only OpenCode and Claude, so runtime
+   and prerequisite allowlists could drift without failing.
+3. `BuildAgentCommand` silently discarded a requested model even though current
+   Copilot exposes a measured `--model <model>` transport.
+
+Live setup documentation also omitted Copilot, contradicting the runtime.
 
 ## Proposal
 
@@ -59,21 +54,18 @@ itself failing.
   This keeps `copilot` consistent with the agent-agnostic caller contract
   every existing case already relies on, rather than introducing a
   per-harness way of setting the working directory.
-- **No other file changes.** `ValidateAgent`, `RunAgentPhase`, the dispatch API
-  (`internal/ui/dispatch.go`), the refine API (`internal/ui/refine.go`), and
-  output capture/redaction/timeout handling are already agent-agnostic once
-  `copilot` is registered in the two places above.
+- **Forward a requested model with `--model <model>`**, the transport measured
+  from Copilot CLI v1.0.82. Omit the flag when no model is requested.
+- **Recognize Copilot in `mise run check`** and make its controlled-PATH policy
+  test exercise every entry in `runner.SupportedAgents`.
+- **Update live supported-harness documentation** in `README.md`, `AGENTS.md`,
+  and the v2 PRD.
 
 ## Out of scope
 
 - Any UI change. There is no agent picker/dropdown for any harness today —
   agent name is a free-text field on the dispatch/refine request bodies, and
-  will accept `"copilot"` the same way it accepts `"claude"` once
-  `SupportedAgents` is updated.
-- **Model-selection support.** No `--model`-equivalent flag was found among
-  `copilot`'s documented scripting flags. Confirming whether one exists (and
-  what it is, if so) is left to implementation/design, not decided here — see
-  Open questions.
+  accepts `"copilot"` the same way it accepts `"claude"`.
 - **Provenance/model detection from `copilot`'s own output**
   (`detectModelProvider`, line 79). Today this is only implemented for
   `goose` (parses a startup banner) and `claude` (reads an env var); adding a
@@ -94,27 +86,20 @@ itself failing.
   different, older invocation path than `internal/runner/runner.go`'s
   `BuildAgentCommand`). Updating that table for `copilot` is documentation
   hygiene, not a functional requirement of this PRD.
+- **Copilot SDK integration.** Issue #1's SDK work begins only after this CLI
+  contract is complete.
 
 ## Open questions
 
-- **Does `copilot` expose any per-invocation model-selection mechanism** (flag
-  or env var)? This needs to be confirmed against the installed binary before
-  `BuildAgentCommand`'s case is finalized — this repo's existing convention
-  (see README's harness-transport table) is to measure a harness's real
-  behavior rather than infer it from documentation. If no such mechanism
-  exists, does a dispatch that requests a specific model for `copilot` need to
-  fail closed (reject at `ValidateAgent`/dispatch time), or is the model
-  request silently ignored for this harness only?
-- **Does `--allow-all-tools` plus `--no-ask-user` fully eliminate blocking
-  behavior in a no-TTY context**, or is there another interactive surface
-  (e.g., a first-run auth/login prompt) that needs to be ruled out
-  empirically first — the same way `goose`'s positional-prompt argument was
-  discovered to fail outright before its case was fixed?
 - **Should `copilot` request `--output-format json`** the way `goose` does, to
   make per-session usage/cost machine-readable and reachable from the phase
   record, or is plain text output (matching `claude`'s convention) sufficient
   for a first version?
 - **What is the minimum required `copilot` CLI version?** The flags in this
-  PRD were observed against the locally installed v1.0.80. Whether that is a
-  hard floor, and how/whether Sergeant should detect or document a version
-  mismatch, is not decided here.
+  PRD's headless base invocation were observed against v1.0.80, while
+  `--model` was confirmed against v1.0.82. Whether either is a hard floor, and
+  how/whether Sergeant should detect or document a version mismatch, is not
+  decided here.
+- **Should the SDK replace the subprocess harness or coexist as a separately
+  selected backend?** This belongs to issue #1's SDK OpenSpec, not this CLI
+  gap-closure.

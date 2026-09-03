@@ -144,21 +144,29 @@ func TestCopilotDoesNotReceiveAWorkingDirectoryFlag(t *testing.T) {
 	}
 }
 
-// No confirmed model-selection transport (flag or env var) exists for
-// copilot. Requesting one must not fabricate an unconfirmed flag — the
-// argument list is identical with or without a requested model, aside from
-// the prompt itself.
-func TestCopilotDoesNotForwardARequestedModel(t *testing.T) {
-	_, withModel, _ := BuildAgentCommand("copilot", "anthropic/claude-opus-5", "do the thing")
-	_, withoutModel, _ := BuildAgentCommand("copilot", "", "do the thing")
+// Copilot CLI exposes --model as its per-invocation model selector. Sergeant
+// must honor an explicit model without forcing a flag when the operator wants
+// Copilot's configured default.
+func TestCopilotForwardsRequestedModel(t *testing.T) {
+	const requestedModel = "claude-sonnet-4.6"
 
-	for _, a := range withModel {
-		if a == "--model" {
-			t.Errorf("copilot args %q contain --model; no confirmed transport exists for this harness", withModel)
+	_, withModel, _ := BuildAgentCommand("copilot", requestedModel, "do the thing")
+	modelFlag := -1
+	for i, arg := range withModel {
+		if arg == "--model" {
+			modelFlag = i
+			break
 		}
 	}
-	if strings.Join(withModel, " ") != strings.Join(withoutModel, " ") {
-		t.Errorf("copilot args differ with (%q) and without (%q) a requested model; they must be identical", withModel, withoutModel)
+	if modelFlag < 0 || modelFlag+1 >= len(withModel) || withModel[modelFlag+1] != requestedModel {
+		t.Errorf("copilot args %q do not forward --model %q", withModel, requestedModel)
+	}
+
+	_, withoutModel, _ := BuildAgentCommand("copilot", "", "do the thing")
+	for _, arg := range withoutModel {
+		if arg == "--model" {
+			t.Errorf("copilot args %q contain --model without a requested model", withoutModel)
+		}
 	}
 }
 

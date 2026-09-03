@@ -149,7 +149,7 @@ not this list, as ground truth if the two ever disagree:
 - `bash` — runs each project's configured quality gates
 - [`openspec`](https://github.com/Fission-AI/OpenSpec) — a dispatch resolves to a change before any run, intent, or worktree exists
 - `gh` — opening a pull request
-- A supported agent harness on `PATH`: `opencode`, `oc`, `claude`, `goose`, `codex`, or `pi`
+- A supported agent harness on `PATH`: `opencode`, `oc`, `claude`, `goose`, `codex`, `pi`, or `copilot`
 
 tmux is explicitly **not** a dependency — v2 does not use it, drive it, or
 require it for any command.
