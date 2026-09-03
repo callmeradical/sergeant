@@ -5,3 +5,6 @@
 ## 2024-08-27 - Python ctypes.CDLL load overhead in tight loops
 **Learning:** Found that invoking `ctypes.CDLL(None, use_errno=True)` within functions like `libc_pidfd_function` in `_sgt-process-token.py` (which are called continuously when iterating over all processes via `/proc`) is extremely slow, adding ~58µs of overhead per invocation compared to ~0.5µs for a cached lookup. This becomes a bottleneck during process discovery tasks involving thousands of PIDs.
 **Action:** When a fallback or standard system function requires loading a dynamic library via `ctypes.CDLL`, initialize it once at the module scope or memoize it lazily in a module-level variable to avoid repeated disk and linking overhead.
+## 2024-05-24 - Avoid strings.Split in hot loops for payload parsing
+**Learning:** Using `strings.Split` with type casting in a hot path, like parsing SSE payload data, causes an intermediate array allocation and type conversions which negatively impact performance.
+**Action:** Use `bytes.IndexByte` instead of `strings.Split` when parsing large payloads and iterating through lines in a stream. This allows for manual iteration over slices without the cost of unnecessary string allocations.
