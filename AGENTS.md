@@ -38,8 +38,8 @@ Every phase for a bullet renders its prompt from the same canonical intent revis
 
 ## Two ways in, one set of records
 
-1. **Agent-driven.** The operator launches their own agent CLI (opencode, codex,
-   goose, pi, claude, copilot) in a terminal inside the project. That agent talks to
+1. **Agent-driven.** The operator launches their own agent CLI (opencode/oc,
+   codex, goose, pi, claude, copilot) in a terminal inside the project. That agent talks to
    sergeant over MCP — `sergeant mcp` (a subcommand of the `sergeant` binary,
    declared in `mcp.json` as `{"command": "./bin/sergeant", "args": ["mcp"]}`;
    there is no separate `sergeant-mcp` executable):

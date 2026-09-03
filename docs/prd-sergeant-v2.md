@@ -22,8 +22,8 @@ bounded phase execution, handoff envelopes, and durable run/phase records.
 
 v2 has **two ways in, and both write the same records**:
 
-1. **Agent-driven.** The operator launches their own agent CLI (opencode, codex,
-   goose, pi, claude, copilot) in a terminal inside the project. That agent talks to
+1. **Agent-driven.** The operator launches their own agent CLI (opencode/oc,
+   codex, goose, pi, claude, copilot) in a terminal inside the project. That agent talks to
    Sergeant over MCP (`sergeant_get_brief`, `sergeant_run_gates`,
    `sergeant_emit_envelope`, `sergeant_seal_pr`, `sergeant_status`). Sergeant
    does not spawn, host, or multiplex the session; it is the system the agent
