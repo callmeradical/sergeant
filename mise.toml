@@ -164,13 +164,13 @@ _need openspec openspec "dispatch resolves to a change (O3)"
 _need gh       gh       "opening a pull request"
 
 harness=""
-for h in opencode oc claude goose codex pi; do
+for h in opencode oc claude goose codex pi copilot; do
   if command -v "$h" &>/dev/null; then harness="$h"; break; fi
 done
 if [[ -n "$harness" ]]; then
   printf "  %-10s  ok   %s\\n" "agent" "$harness"
 else
-  printf "  %-10s  MISSING  %s\\n" "agent" "one of: opencode oc claude goose codex pi"
+  printf "  %-10s  MISSING  %s\\n" "agent" "one of: opencode oc claude goose codex pi copilot"
   ok=false
 fi
 

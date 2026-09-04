@@ -65,23 +65,39 @@ introducing a second, harness-specific way to set it.
   model input
 - **THEN** the built arguments do not contain `-C`
 
-### Requirement: A requested model is not forwarded to copilot
+### Requirement: A requested model is forwarded to copilot
 
-No confirmed model-selection transport (flag or environment variable) is
-known for the `copilot` harness. Building the invocation for `copilot` SHALL
-NOT fabricate an unconfirmed flag: a model request SHALL be silently omitted
-from the built command for this harness until a real transport is confirmed
-and specified in a future change.
+Copilot CLI exposes `--model <model>` as its per-invocation model selector.
+Building the invocation for `copilot` SHALL forward a non-empty requested model
+through that measured transport and SHALL omit the flag when no model is
+requested.
 
-#### Scenario: A model request produces no model flag
+#### Scenario: A model request is forwarded
 
 - **WHEN** the engine builds a copilot invocation with a non-empty requested
   model
-- **THEN** the built arguments contain no `--model` flag or other
-  model-selection argument
+- **THEN** the built arguments contain `--model` immediately followed by the
+  exact requested model
 
-#### Scenario: No model requested behaves the same way
+#### Scenario: No model request emits no model flag
 
 - **WHEN** the engine builds a copilot invocation with no requested model
-- **THEN** the built arguments are identical to the case where a model was
-  requested, aside from the prompt itself
+- **THEN** the built arguments do not contain `--model`
+
+### Requirement: Prerequisite discovery recognizes every supported harness
+
+The repository's prerequisite check SHALL recognize every harness accepted by
+the runtime, including Copilot, so an operator is never told that no agent is
+installed when a usable supported agent is present.
+
+#### Scenario: Copilot alone satisfies the agent prerequisite
+
+- **WHEN** `mise run check` runs with required tools and `copilot` as the only
+  supported agent harness on `PATH`
+- **THEN** the check succeeds and reports Copilot as the available agent
+
+#### Scenario: Missing-agent guidance includes Copilot
+
+- **WHEN** `mise run check` runs with no supported agent harness on `PATH`
+- **THEN** the check fails and its supported-harness guidance includes
+  `copilot`

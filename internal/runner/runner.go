@@ -474,10 +474,11 @@ func BuildAgentCommand(agentCLI, model, prompt string) (string, []string, []stri
 		// disables copilot's ask_user tool so it can never stall a headless
 		// run waiting on clarification that has nowhere to go. No -C flag:
 		// working directory already comes from cmd.Dir at the shared call
-		// site, the same way every other harness gets it. No known model
-		// transport exists for copilot, so a requested model is not
-		// forwarded rather than guessed at.
+		// site, the same way every other harness gets it.
 		args = []string{"-p", prompt, "--allow-all-tools", "--no-ask-user"}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
 
 	default:
 		args = []string{prompt}

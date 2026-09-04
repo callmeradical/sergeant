@@ -16,6 +16,7 @@ var requiredFiles = []string{
 	"skills/sergeant-help/SKILL.md",
 
 	"docs/README.md",
+	"docs/installation.md",
 	"docs/troubleshooting.md",
 
 	// what-is-sergeant.md, getting-started.md, skills.md, and using-sergeant.md

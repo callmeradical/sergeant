@@ -1,12 +1,14 @@
 # Project YAML Schema
 
-A sergeant project lives at `~/.config/sergeant/<name>.yaml`. The filename (without extension) is the project identifier used by all `sgt-*` commands.
+A Sergeant project lives at `~/.config/sergeant/<name>.yaml`. The filename
+(without extension) is the project identifier used by the v2 dashboard, HTTP
+API, and MCP workflows.
 
 ---
 
 ## Global config
 
-`~/.config/sergeant/config.yaml` holds machine-wide settings:
+`~/.config/sergeant/config.yaml` holds optional machine-wide settings:
 
 ```yaml
 dev_root: ~/Dev   # root of your development directory
@@ -51,9 +53,9 @@ the profile ownership/mode rules and versioned consumer schema.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `name` | string | yes | Short identifier for this repo. Used in output and context blocks. For `sgt-graphify`, it must match `[A-Za-z0-9._-]+`, cannot contain spaces, and cannot be `.` or `..`, so Sergeant can safely prefix merged source paths with it. |
+| `name` | string | yes | Short identifier for this repo. Used in output and context blocks. For graph generation, it must match `[A-Za-z0-9._-]+`, cannot contain spaces, and cannot be `.` or `..`, so Sergeant can safely prefix merged source paths with it. |
 | `path` | string | yes | Path on disk. Absolute (`/...`) and home-relative (`~/...`) paths pass through. Relative paths are resolved from `dev_root` in `config.yaml`. |
-| `url` | string | no | Git remote URL. Used by `sgt-sync` to clone if path doesn't exist. |
+| `url` | string | no | Git remote URL metadata. v2 does not clone or sync a missing repository automatically. |
 | `group` | string | no | Group name this repo belongs to. Must match a key in `groups`. |
 | `role` | string | no | Human description of this repo's role in the project. Sergeant includes it in worker context and review routing. |
 | `agent_instructions` | string | no | Instructions injected into agent context when working in this repo. Overrides group-level instructions for the same repo and participates in merged review-routing context. |
@@ -76,9 +78,9 @@ Each key under `groups` is a group name. Value is a map with:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `output` | string | yes | Published output directory for the merged project graph. A trailing `/` is allowed. If this path is a directory symlink, `sgt-graphify` preserves the symlink and publishes into its target. Sergeant only replaces the published graph after a complete run and preserves existing `wiki/` and `memory/` directories. |
+| `output` | string | yes | Published output directory for the merged project graph. A trailing `/` is allowed. If this path is a directory symlink, Sergeant preserves the symlink and publishes into its target. Sergeant only replaces the published graph after a complete run and preserves existing `wiki/` and `memory/` directories. |
 | `include_groups` | list | no | Only graph repos belonging to these groups. Default: all repos. |
-| `exclude_patterns` | list | no | Glob patterns to exclude from graphify traversal (e.g., `**/node_modules/**`). Sergeant applies them before `graphify extract`, so they keep working with current Graphify CLIs that do not accept exclude flags. If `graphify.output` lives inside a source repo, Sergeant stages extraction outside that repo and excludes the configured output path so published graph artifacts are never re-ingested as source. |
+| `exclude_patterns` | list | no | Glob patterns to exclude from graph traversal (e.g., `**/node_modules/**`). Sergeant applies them before extraction. If `graphify.output` lives inside a source repo, Sergeant stages extraction outside that repo and excludes the configured output path so published graph artifacts are never re-ingested as source. |
 
 ---
 
@@ -98,10 +100,11 @@ Agent instruction prose is concatenated in this order:
 2. `groups.<group>.agent_instructions` — applies to all repos in that group
 3. `repos[].agent_instructions` — applies to a specific repo
 
-`sgt-context` emits every nonempty layer in one block. Later layers appear later
+The project-details and agent brief responses emit every nonempty layer in one
+block. Later layers appear later
 in the block; when directives conflict, the later repository-specific directive
 is the intended authority. Sergeant does not structurally merge or deduplicate
-free-form instruction prose, but `sgt-dispatch` still classifies review routing
+free-form instruction prose, but the dispatch pipeline still classifies review routing
 from a single normalized in-memory context built from the mission, repo role,
 repo group name, repo group description, and merged default/group/repository
 instructions.

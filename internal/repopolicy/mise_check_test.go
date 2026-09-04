@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/callmeradical/sergeant/internal/runner"
 )
 
 // TestMiseCheckValidatesV2EnginePrerequisites runs mise.toml's real
@@ -24,11 +26,8 @@ func TestMiseCheckValidatesV2EnginePrerequisites(t *testing.T) {
 	runCheck := func(agent string) (string, error) {
 		dir := t.TempDir()
 		writeRequiredStubs(dir)
-		switch agent {
-		case "opencode":
-			writeStub(t, dir, "opencode", "OpenCode 1.0")
-		case "claude":
-			writeStub(t, dir, "claude", "Claude Code 1.0")
+		if agent != "" {
+			writeStub(t, dir, agent, agent+" version 1.0")
 		}
 		cmd := exec.Command(checkScript)
 		cmd.Env = append(os.Environ(),
@@ -40,28 +39,24 @@ func TestMiseCheckValidatesV2EnginePrerequisites(t *testing.T) {
 	}
 
 	t.Run("no supported agent harness fails", func(t *testing.T) {
-		out, err := runCheck("none")
+		out, err := runCheck("")
 		if err == nil {
 			t.Errorf("dependency check did not fail when no supported agent harness was present:\n%s", out)
 		}
-		if !strings.Contains(out, "MISSING") || !strings.Contains(out, "opencode oc claude goose codex pi") {
+		if !strings.Contains(out, "MISSING") || !strings.Contains(out, strings.Join(runner.SupportedAgents, " ")) {
 			t.Errorf("dependency check did not fail when no supported agent harness was present:\n%s", out)
 		}
 	})
 
-	t.Run("opencode present passes", func(t *testing.T) {
-		out, err := runCheck("opencode")
-		if err != nil || !strings.Contains(out, "agent") || !strings.Contains(out, "ok   opencode") || !strings.Contains(out, "All v2 prerequisites present.") {
-			t.Errorf("dependency check did not pass with a supported agent harness:\n%s (err=%v)", out, err)
-		}
-	})
-
-	t.Run("claude present passes", func(t *testing.T) {
-		out, err := runCheck("claude")
-		if err != nil || !strings.Contains(out, "ok   claude") || !strings.Contains(out, "All v2 prerequisites present.") {
-			t.Errorf("dependency check did not accept Claude:\n%s (err=%v)", out, err)
-		}
-	})
+	for _, agent := range runner.SupportedAgents {
+		agent := agent
+		t.Run(agent+" present passes", func(t *testing.T) {
+			out, err := runCheck(agent)
+			if err != nil || !strings.Contains(out, "agent") || !strings.Contains(out, "ok   "+agent) || !strings.Contains(out, "All v2 prerequisites present.") {
+				t.Errorf("dependency check did not accept supported agent %q:\n%s (err=%v)", agent, out, err)
+			}
+		})
+	}
 
 	t.Run("missing openspec fails even with an agent present", func(t *testing.T) {
 		dir := t.TempDir()
