@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/callmeradical/sergeant/internal/mcplock"
@@ -131,13 +132,9 @@ func startServer(stateDir, lockPath string) (string, error) {
 	return "", fmt.Errorf("timed out waiting for shared server to start (lock=%s)", lockPath)
 }
 
-// serverExecutablePath locates the sibling sergeant-mcp binary next to this
-// client binary, the same convention cmd/sergeant-mcp's own scriptDir() uses
-// for the bin/sgt-* scripts. SERGEANT_MCP_SERVER_PATH overrides it for tests.
-func serverExecutablePath() (string, error) {
-	if p := os.Getenv("SERGEANT_MCP_SERVER_PATH"); p != "" {
-		return p, nil
-	}
+// resolveServerExecutablePath memoizes the expensive syscalls (os.Executable,
+// EvalSymlinks) needed to find the sibling sergeant-mcp binary.
+var resolveServerExecutablePath = sync.OnceValues(func() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve own executable path: %w", err)
@@ -147,6 +144,16 @@ func serverExecutablePath() (string, error) {
 		resolved = exe
 	}
 	return filepath.Join(filepath.Dir(resolved), "sergeant-mcp"), nil
+})
+
+// serverExecutablePath locates the sibling sergeant-mcp binary next to this
+// client binary, the same convention cmd/sergeant-mcp's own scriptDir() uses
+// for the bin/sgt-* scripts. SERGEANT_MCP_SERVER_PATH overrides it for tests.
+func serverExecutablePath() (string, error) {
+	if p := os.Getenv("SERGEANT_MCP_SERVER_PATH"); p != "" {
+		return p, nil
+	}
+	return resolveServerExecutablePath()
 }
 
 // httpClientFor returns an *http.Client whose transport always dials

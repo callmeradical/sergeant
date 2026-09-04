@@ -8,3 +8,6 @@
 ## 2024-05-24 - Avoid strings.Split in hot loops for payload parsing
 **Learning:** Using `strings.Split` with type casting in a hot path, like parsing SSE payload data, causes an intermediate array allocation and type conversions which negatively impact performance.
 **Action:** Use `bytes.IndexByte` instead of `strings.Split` when parsing large payloads and iterating through lines in a stream. This allows for manual iteration over slices without the cost of unnecessary string allocations.
+## 2024-09-04 - Memoize Expensive Syscalls in Client
+**Learning:** Found that `serverExecutablePath()` in `cmd/sergeant-mcp-client/main.go` invoked `os.Executable()` and `filepath.EvalSymlinks()` every time. Just like the learning from 2024-08-20 for the server side, this adds unnecessary ~14000ns per-call overhead for a fixed system value.
+**Action:** When computing fixed paths or system values (like the executable path or host platform info) in handlers or frequent paths, memoize the result using `sync.OnceValues` or package-level variables so it's calculated exactly once and returns immediately (sub-10ns overhead).
