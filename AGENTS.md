@@ -47,6 +47,9 @@ Every phase for a bullet renders its prompt from the same canonical intent revis
    `sergeant_seal_pr`, `sergeant_status`, `sergeant_run_status`,
    `sergeant_run_wait`, `sergeant_graph_query`, `sergeant_graph_explain`,
    `sergeant_graph_affected`. Sergeant does not spawn or host the session.
+   The repository `mcp.json` is a reference configuration; Copilot users must
+   register an absolute `bin/sergeant mcp` command in Copilot's user
+   configuration or a Copilot-discovered workspace `.mcp.json`.
 2. **Coordinator-driven.** The operator dispatches from the UI
    (`POST /api/dispatch`) and sergeant runs bounded headless agent phases itself.
 

@@ -17,7 +17,7 @@ or `wiki` after the user has requested execution of those procedures.
 | Question | Primary document |
 |---|---|
 | Product and deployment model | `docs/architecture.md` |
-| Installation and first project | Not yet written for v2 — see `README.md`'s Quick start and `AGENTS.md`'s "Two ways in" section for the closest available guidance |
+| Installation and first project | `docs/installation.md` |
 | External and bundled skill sources | `docs/repo-scoped-skills.md` |
 | Direct/dispatch workflows and commands | `skills/dispatch/SKILL.md`, `skills/cross-repo-work/SKILL.md` |
 | Errors, stale runs, auth, gates, cleanup | `docs/troubleshooting.md` |

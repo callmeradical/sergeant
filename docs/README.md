@@ -11,6 +11,7 @@ the full v1/v2 distinction.
 
 | Goal | Document |
 |---|---|
+| Install Sergeant and configure a first project or Copilot CLI | [Installation and first project](installation.md) |
 | Understand v2's architecture and design rationale | [Architecture overview](architecture.md) |
 | Read the binding product requirements and settled decisions | [PRD: Sergeant v2](prd-sergeant-v2.md) |
 | Diagnose API/server problems | [Troubleshooting](troubleshooting.md) |
@@ -19,10 +20,8 @@ the full v1/v2 distinction.
 
 ## Reference
 
-- [Project YAML schema](schema.md) — still the canonical v2 schema
-  reference (cited by `skills/load-project/SKILL.md`); its own prose still
-  names some deleted v1 commands (`sgt-*`), a known, not-yet-fixed staleness
-  gap distinct from the YAML shape itself, which is current.
+- [Project YAML schema](schema.md) — the canonical v2 schema reference
+  (cited by `skills/load-project/SKILL.md`).
 - [Repo-scoped worker skills](repo-scoped-skills.md) — current, matches the
   live `.agents/skills/` tree.
 - [Annotated project example](../schema/project.yaml.example)
@@ -34,17 +33,14 @@ the full v1/v2 distinction.
 - [Archived PRDs](prd/archive/) — PRDs whose OpenSpec change has been
   fully implemented and archived.
 
-## Not yet written for v2
+## Historical and planned documentation
 
-No v2-native replacement exists yet for: first install/first project setup,
-what-is-Sergeant framing, or a skill-sources overview. The v1 docs that
-used to serve that purpose (`what-is-sergeant.md`, `getting-started.md`,
-`skills.md`, `using-sergeant.md`) described the removed `sgt-*` shell
-toolbelt and tmux-based workers throughout, with no accurate v2 procedure to
-substitute in-place — they have been archived to `docs/archive/v1/` (see
-Historical, below) rather than left live and stale. Until v2-native
-replacements are written, the closest available guidance is `README.md`'s
-Quick start and `AGENTS.md`'s "Two ways in" section.
+The v1 docs that used to serve installation, usage, and skill-source
+questions (`what-is-sergeant.md`, `getting-started.md`, `skills.md`,
+`using-sergeant.md`) described the removed `sgt-*` shell toolbelt and tmux
+workers, so they remain under `docs/archive/v1/` for historical reference.
+The current v2 installation and first-project procedure is
+[installation.md](installation.md).
 
 ## Historical
 

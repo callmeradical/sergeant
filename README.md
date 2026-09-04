@@ -50,25 +50,26 @@ Each project is a YAML file. That file defines which repos belong to it, how the
 git clone https://github.com/callmeradical/sergeant
 cd sergeant
 
-# Register a project
+# Verify prerequisites and register a project
+mise run check
 mkdir -p ~/.config/sergeant
 cp schema/project.yaml.example ~/.config/sergeant/myproject.yaml
 # Edit it — set your repo names and absolute paths on disk
 
-# Build and start the engine, opening its dashboard, or launch your own
-# agent harness inside a repo and let it talk to Sergeant over MCP —
-# see AGENTS.md's "Two ways in" for both paths.
-mise run build
+# Install the binary and helper, or use `mise run build` for only the binary
+mise run install
 bin/sergeant ui
 ```
 
-Then talk to it:
+For the complete first-install walkthrough, including GitHub Copilot
+authentication and MCP registration, see
+[Install and set up Sergeant v2](docs/installation.md).
 
-```
-> load context for myproject
-> what repos are in this project?
-> go work on smith-api
-> add feature X across all repos
+Then validate the project:
+
+```bash
+curl -fsS http://127.0.0.1:8484/api/projects
+curl -fsS 'http://127.0.0.1:8484/api/project-details?name=myproject'
 ```
 
 ## Documentation
@@ -81,11 +82,13 @@ current, maintained map of what's v2-native versus historical. In brief:
 - [Repo-scoped worker skills](docs/repo-scoped-skills.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Project YAML schema](docs/schema.md)
+- [Installation and first project](docs/installation.md)
 
 v1's usage docs (what Sergeant is, getting started, skill sources, using
 Sergeant) described the removed `sgt-*` shell toolbelt throughout and have
 been archived to [`docs/archive/v1/`](docs/archive/v1/) rather than left
-live and stale — see `docs/README.md`'s "Not yet written for v2" section.
+live and stale. The supported v2 installation and Copilot setup path is
+[`docs/installation.md`](docs/installation.md).
 
 ## Project YAML
 
@@ -125,7 +128,9 @@ graphify:
   include_groups: [backend, frontend]
 ```
 
-Full schema reference: `docs/schema.md`. Annotated example: `schema/project.yaml.example`.
+Full schema reference: `docs/schema.md`. Annotated example:
+`schema/project.yaml.example`. The setup and validation sequence is in
+[`docs/installation.md`](docs/installation.md).
 
 ## Skills
 
