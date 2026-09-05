@@ -4,6 +4,7 @@
 package mcplock
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -64,8 +65,19 @@ func ReadRecord(lockPath string) (*Record, error) {
 		return nil, err
 	}
 	rec := &Record{}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
+	// Performance optimization: manually iterate over data using bytes.IndexByte
+	// to avoid allocating an intermediate string slice in this hot path.
+	for len(data) > 0 {
+		var lineBytes []byte
+		if i := bytes.IndexByte(data, '\n'); i >= 0 {
+			lineBytes = data[:i]
+			data = data[i+1:]
+		} else {
+			lineBytes = data
+			data = nil
+		}
+
+		line := strings.TrimSpace(string(lineBytes))
 		if line == "" {
 			continue
 		}
