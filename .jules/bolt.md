@@ -8,3 +8,6 @@
 ## 2024-05-24 - Avoid strings.Split in hot loops for payload parsing
 **Learning:** Using `strings.Split` with type casting in a hot path, like parsing SSE payload data, causes an intermediate array allocation and type conversions which negatively impact performance.
 **Action:** Use `bytes.IndexByte` instead of `strings.Split` when parsing large payloads and iterating through lines in a stream. This allows for manual iteration over slices without the cost of unnecessary string allocations.
+## 2024-09-05 - Avoid strings.Split for lock file parsing
+**Learning:** Parsing lock files using `strings.Split(string(data), "\n")` causes unnecessary large string allocations and slice allocations, impacting performance in repetitive polling scenarios.
+**Action:** Replace `strings.Split` with manual iteration using `bytes.IndexByte` and cast line-by-line to avoid allocating an intermediate string slice.
