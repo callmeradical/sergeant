@@ -99,9 +99,9 @@ command -v python3  &>/dev/null || _die "python3 is required"
 
 ANTHROPIC_KEY="$(python3 -c "
 import json, sys
-d = json.load(open('$OPENCODE_AUTH'))
+d = json.load(open(sys.argv[1]))
 print(d.get('anthropic', {}).get('key', ''))
-" 2>/dev/null)"
+" "$OPENCODE_AUTH" 2>/dev/null)"
 [[ -n "$ANTHROPIC_KEY" ]] || _die "No Anthropic key found in $OPENCODE_AUTH"
 
 mkdir -p "$WIKI_SESSIONS_DIR"
@@ -317,11 +317,12 @@ _fetch_td_tasks() {
     result="$(cd "$repo_path" && td list --all --json 2>/dev/null | python3 -c "
 import sys, json
 tasks = json.load(sys.stdin)
+target_date = sys.argv[1]
 for t in tasks:
     updated = t.get('updated_at','')
-    if updated.startswith('$date') and t.get('status') in ('closed','review'):
+    if updated.startswith(target_date) and t.get('status') in ('closed','review'):
         print(f'- [{t[\"id\"]}] {t[\"title\"]} [{t[\"status\"]}]')
-" 2>/dev/null || echo "")"
+" "$date" 2>/dev/null || echo "")"
     [[ -n "$result" ]] && tasks+="$repo_path:
 $result
 "

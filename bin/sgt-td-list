@@ -93,11 +93,11 @@ if $JSON_OUT; then
     tagged="$(echo "$tasks_json" | python3 -c "
 import sys, json
 tasks = json.load(sys.stdin)
-repo = '$rname'
+repo = sys.argv[1]
 for t in tasks:
     t['_repo'] = repo
 print(json.dumps(tasks))
-" 2>/dev/null || echo "[]")"
+" "$rname" 2>/dev/null || echo "[]")"
 
     combined="$(echo "$combined $tagged" | python3 -c "
 import sys, json
