@@ -11,3 +11,6 @@
 ## 2024-09-04 - Memoize Expensive Syscalls in Client
 **Learning:** Found that `serverExecutablePath()` in `cmd/sergeant-mcp-client/main.go` invoked `os.Executable()` and `filepath.EvalSymlinks()` every time. Just like the learning from 2024-08-20 for the server side, this adds unnecessary ~14000ns per-call overhead for a fixed system value.
 **Action:** When computing fixed paths or system values (like the executable path or host platform info) in handlers or frequent paths, memoize the result using `sync.OnceValues` or package-level variables so it's calculated exactly once and returns immediately (sub-10ns overhead).
+## 2024-09-04 - Avoid string-to-byte allocation in NewReader
+**Learning:** Found that `bytes.NewReader([]byte(line))` creates a new byte slice allocation from a string for every JSON-RPC request proxied in the `sergeant-mcp-client` hot path.
+**Action:** When a string needs to be read sequentially via `io.Reader`, use `strings.NewReader(line)` instead of converting it to a byte slice. This avoids redundant allocations in performance-critical paths.
