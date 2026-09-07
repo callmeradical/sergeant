@@ -205,7 +205,7 @@ _extract_claude_sessions() {
   [[ -d "$CLAUDE_PROJECTS_DIR" ]] || return 0
 
   python3 - "$CLAUDE_PROJECTS_DIR" "$date" "$MAX_CHARS_PER_SESSION" "$SCRIPT_TMP_DIR" <<'PYEOF'
-import sys, json, os, glob
+import sys, json, os, glob, tempfile
 from datetime import datetime, timezone
 
 projects_dir = sys.argv[1]
@@ -275,11 +275,12 @@ for jsonl_path in sorted(glob.glob(os.path.join(projects_dir, '**', '*.jsonl'), 
     content = ' '.join(content_parts)[:max_chars]
     session_id = os.path.splitext(os.path.basename(jsonl_path))[0]
 
-    print(f"{session_id}|{title}|{directory}|{dt_first.strftime('%Y-%m-%d %H:%M:%S')}|{dt_last.strftime('%Y-%m-%d %H:%M:%S')}|claude")
-    # Write content to a temp file keyed by session_id for retrieval
-    tmp = os.path.join(tmp_dir, f"wiki_claude_{session_id}.txt")
-    with open(tmp, 'w') as out:
+    # Write content to a secure temp file for retrieval
+    fd, tmp = tempfile.mkstemp(prefix="wiki_claude_", dir=tmp_dir, text=True)
+    with os.fdopen(fd, 'w') as out:
         out.write(content)
+
+    print(f"{session_id}|{title}|{directory}|{dt_first.strftime('%Y-%m-%d %H:%M:%S')}|{dt_last.strftime('%Y-%m-%d %H:%M:%S')}|{tmp}")
 PYEOF
 }
 
@@ -476,11 +477,10 @@ $content
   # Claude sessions (already fetched above)
   claude_raw="$claude_raw_check"
   if [[ -n "$claude_raw" ]]; then
-    while IFS='|' read -r sid title directory created updated tool; do
+    while IFS='|' read -r sid title directory created updated tmp_file; do
       [[ -z "$sid" ]] && continue
       echo "  [claude] $title"
       content=""
-      tmp_file="$SCRIPT_TMP_DIR/wiki_claude_${sid}.txt"
       [[ -f "$tmp_file" ]] && content="$(cat "$tmp_file")"
       sessions_content+="### [claude] $title
 Directory: $directory | Time: $created → $updated

@@ -6,3 +6,7 @@
 **Vulnerability:** Bash variables were interpolated directly into inline Python scripts (`python -c "import datetime; print('$date')"`), allowing attackers to execute arbitrary Python code if they could control the bash variable.
 **Learning:** String interpolation in shell commands calling interpreted languages (like Python, awk, sed) allows code injection.
 **Prevention:** Always pass variables to inline scripts as command-line arguments (e.g., `sys.argv[1]`) or via environment variables, rather than direct text replacement.
+## 2026-07-28 - [Predictable Temp File Name inside Secure Directory]
+**Vulnerability:** A script created a secure temporary directory (`mktemp -d`), but then used a predictable, hardcoded filename format (`wiki_claude_{session_id}.txt`) inside that directory via Python, risking predictable file operations.
+**Learning:** Even within securely created temporary directories, using predictable filenames derived directly from user or session data can re-introduce race conditions or predictability flaws if the directory isn't perfectly isolated.
+**Prevention:** Always use `tempfile.mkstemp()` in Python (or `mktemp` in Bash) to generate completely unique and unpredictable filenames, even when writing to an already secure temporary directory.
