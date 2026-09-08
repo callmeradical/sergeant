@@ -6,3 +6,7 @@
 **Vulnerability:** Bash variables were interpolated directly into inline Python scripts (`python -c "import datetime; print('$date')"`), allowing attackers to execute arbitrary Python code if they could control the bash variable.
 **Learning:** String interpolation in shell commands calling interpreted languages (like Python, awk, sed) allows code injection.
 **Prevention:** Always pass variables to inline scripts as command-line arguments (e.g., `sys.argv[1]`) or via environment variables, rather than direct text replacement.
+## 2026-07-28 - [SQL Injection via sqlite3 bash CLI]
+**Vulnerability:** SQL injection vulnerability found when passing bash variables directly into `sqlite3` command strings (e.g., `sqlite3 "$DB" "SELECT ... WHERE id = '$session_id'"`).
+**Learning:** Using string interpolation with the `sqlite3` bash command-line tool exposes the application to SQL injection if variables contain untrusted input.
+**Prevention:** Replace direct bash string interpolation into SQL commands with a Python script utilizing the `sqlite3` module to securely execute parameterized queries (e.g. `cursor.execute("SELECT ... WHERE id = ?", (session_id,))`).

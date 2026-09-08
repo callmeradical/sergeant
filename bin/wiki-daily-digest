@@ -135,15 +135,26 @@ ORDER BY s.time_created ASC;" 2>/dev/null
 _extract_session_content() {
   local session_id="$1"
   local content
-  content="$(sqlite3 "$OPENCODE_DB" "
-SELECT json_extract(p.data, '$.text')
-FROM part p
-JOIN message m ON p.message_id = m.id
-WHERE m.session_id = '$session_id'
-  AND json_extract(m.data, '$.role') = 'assistant'
-  AND json_extract(p.data, '$.type') = 'text'
-  AND length(json_extract(p.data, '$.text')) > 20
-ORDER BY p.time_created ASC;" 2>/dev/null | tr '\n' ' ')"
+  content="$(python3 -c '
+import sqlite3, sys
+try:
+    conn = sqlite3.connect(sys.argv[1])
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT json_extract(p.data, "$.text")
+        FROM part p
+        JOIN message m ON p.message_id = m.id
+        WHERE m.session_id = ?
+          AND json_extract(m.data, "$.role") = "assistant"
+          AND json_extract(p.data, "$.type") = "text"
+          AND length(json_extract(p.data, "$.text")) > 20
+        ORDER BY p.time_created ASC
+    """, (sys.argv[2],))
+    rows = cursor.fetchall()
+    print(" ".join(str(r[0]) for r in rows if r[0]))
+except Exception:
+    pass
+' "$OPENCODE_DB" "$session_id" 2>/dev/null)"
 
   # Truncate to MAX_CHARS
   echo "${content:0:$MAX_CHARS_PER_SESSION}"
@@ -172,29 +183,35 @@ _extract_goose_content() {
   [[ -f "$GOOSE_DB" ]] || return 0
 
   local content
-  content="$(sqlite3 "$GOOSE_DB" "
-SELECT substr(m.content_json, 1, 2000)
-FROM messages m
-WHERE m.session_id = '$session_id'
-  AND m.role = 'assistant'
-ORDER BY m.created_at ASC;" 2>/dev/null | python3 -c "
-import sys, json
-out = []
-for line in sys.stdin:
-    line = line.strip()
-    if not line: continue
-    try:
-        parts = json.loads(line)
-        if isinstance(parts, list):
-            for p in parts:
-                if isinstance(p, dict) and p.get('type') == 'text':
-                    out.append(p.get('text',''))
-        elif isinstance(parts, str):
-            out.append(parts)
-    except:
-        out.append(line)
-print(' '.join(out))
-" 2>/dev/null | tr '\n' ' ')"
+  content="$(python3 -c '
+import sqlite3, sys, json
+try:
+    conn = sqlite3.connect(sys.argv[1])
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT substr(m.content_json, 1, 2000)
+        FROM messages m
+        WHERE m.session_id = ?
+          AND m.role = "assistant"
+        ORDER BY m.created_at ASC
+    """, (sys.argv[2],))
+    out = []
+    for (content_json,) in cursor.fetchall():
+        if not content_json: continue
+        try:
+            parts = json.loads(content_json)
+            if isinstance(parts, list):
+                for p in parts:
+                    if isinstance(p, dict) and p.get("type") == "text":
+                        out.append(p.get("text", ""))
+            elif isinstance(parts, str):
+                out.append(parts)
+        except Exception:
+            out.append(content_json)
+    print(" ".join(out))
+except Exception:
+    pass
+' "$GOOSE_DB" "$session_id" 2>/dev/null)"
 
   echo "${content:0:$MAX_CHARS_PER_SESSION}"
 }
