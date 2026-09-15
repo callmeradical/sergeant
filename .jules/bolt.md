@@ -11,7 +11,9 @@
 ## 2024-09-04 - Memoize Expensive Syscalls in Client
 **Learning:** Found that `serverExecutablePath()` in `cmd/sergeant-mcp-client/main.go` invoked `os.Executable()` and `filepath.EvalSymlinks()` every time. Just like the learning from 2024-08-20 for the server side, this adds unnecessary ~14000ns per-call overhead for a fixed system value.
 **Action:** When computing fixed paths or system values (like the executable path or host platform info) in handlers or frequent paths, memoize the result using `sync.OnceValues` or package-level variables so it's calculated exactly once and returns immediately (sub-10ns overhead).
-
-## 2024-11-20 - Memoize Dynamic Library Load (`ctypes.CDLL`)
+## 2026-09-10 - Avoid bytes.NewReader([]byte(str)) in hot paths
+**Learning:** Found that converting strings to byte slices to use `bytes.NewReader` forces a memory allocation and slice copy. In hot paths, like proxying JSON-RPC requests, this creates unnecessary overhead and garbage collection pressure.
+**Action:** Use `strings.NewReader(str)` directly instead of `bytes.NewReader([]byte(str))` to eliminate the allocation overhead.
+## 2026-09-11 - Memoize Dynamic Library Load (`ctypes.CDLL`)
 **Learning:** Found that `ctypes.CDLL(None, use_errno=True)` within `pidfd_open` and `pidfd_send_signal` fallback paths in `_sgt-process-token.py` re-loaded the C library dynamically on every call, causing measurable per-call overhead, analogous to the learning about `libc_pidfd_function` from 2024-08-27.
 **Action:** Substituted the redundant inline `ctypes.CDLL` loads with the memoized module-level `_LIBC_WITH_ERRNO` global to eliminate repeated linking overhead.
