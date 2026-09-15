@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -177,7 +178,9 @@ func (p *proxy) sendOverSocket(line string) (*response, error) {
 	client := p.client
 	p.mu.Unlock()
 
-	req, err := http.NewRequest(http.MethodPost, requestURL, bytes.NewReader([]byte(line)))
+	// Use strings.NewReader instead of bytes.NewReader([]byte(line)) to avoid a memory allocation
+	// and slice copy on every JSON-RPC request line, reducing GC pressure in this hot path.
+	req, err := http.NewRequest(http.MethodPost, requestURL, strings.NewReader(line))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
