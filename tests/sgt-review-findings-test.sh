@@ -1208,7 +1208,7 @@ inv1_td="$(grep '^td-created-' "$TEST_ROOT/td-ids" | tail -1)"
 # (non-empty td-ids) rather than comparing raw task IDs across two reset calls.
 # Second invocation: different fleet task ID, same local finding ID "spec-1", different content.
 # The router must create a NEW td task (distinct dedup key) rather than refusing.
-inv1_list_entry="{\"id\":\"$inv1_td\",\"status\":\"open\",\"defer_until\":\"\",\"labels\":\"independent-review,finding,standards\",\"description\":$(python3 -c "import sys,json; print(json.dumps(open('$TEST_ROOT/td-desc').read()))" 2>/dev/null || printf '""')}"
+inv1_list_entry="{\"id\":\"$inv1_td\",\"status\":\"open\",\"defer_until\":\"\",\"labels\":\"independent-review,finding,standards\",\"description\":$(python3 -c "import sys,json; print(json.dumps(open(sys.argv[1]).read()))" "$TEST_ROOT/td-desc" 2>/dev/null || printf '""')}"
 TD_LIST_RESULT="[$inv1_list_entry]" ROUTER_TASK_ID=fleet-inv-2 \
   run_router "$TEST_ROOT/inv2.json"
 [[ "$status" -eq 0 ]] || {

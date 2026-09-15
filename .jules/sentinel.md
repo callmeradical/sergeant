@@ -6,3 +6,7 @@
 **Vulnerability:** Bash variables were interpolated directly into inline Python scripts (`python -c "import datetime; print('$date')"`), allowing attackers to execute arbitrary Python code if they could control the bash variable.
 **Learning:** String interpolation in shell commands calling interpreted languages (like Python, awk, sed) allows code injection.
 **Prevention:** Always pass variables to inline scripts as command-line arguments (e.g., `sys.argv[1]`) or via environment variables, rather than direct text replacement.
+## 2024-05-18 - Bash string interpolation in inline Python scripts
+**Vulnerability:** Bash variable interpolation inside `python3 -c "..."` script strings.
+**Learning:** This exposes the Python script to command injection and syntax errors if the Bash variables contain unescaped characters (like single quotes or newlines) that break the Python string literal boundary.
+**Prevention:** Pass Bash variables safely as command-line arguments (e.g. `sys.argv[1]`) or environment variables, avoiding string formatting bash variables into python scripts directly.
