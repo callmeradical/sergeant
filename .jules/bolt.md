@@ -11,3 +11,6 @@
 ## 2024-09-04 - Memoize Expensive Syscalls in Client
 **Learning:** Found that `serverExecutablePath()` in `cmd/sergeant-mcp-client/main.go` invoked `os.Executable()` and `filepath.EvalSymlinks()` every time. Just like the learning from 2024-08-20 for the server side, this adds unnecessary ~14000ns per-call overhead for a fixed system value.
 **Action:** When computing fixed paths or system values (like the executable path or host platform info) in handlers or frequent paths, memoize the result using `sync.OnceValues` or package-level variables so it's calculated exactly once and returns immediately (sub-10ns overhead).
+## 2025-02-23 - Avoid Re-proposing Merged strings.NewReader Optimization
+**Learning:** The `strings.NewReader` optimization in the JSON-RPC proxy hot path (`cmd/sergeant-mcp-client/main.go`) has already been shipped. Proposing it again is a redundant no-op caused by operating on a stale base.
+**Action:** Do not re-propose the `strings.NewReader` replacement for `bytes.NewReader` in the JSON-RPC proxy. Ensure optimizations are not already implemented before submitting.
