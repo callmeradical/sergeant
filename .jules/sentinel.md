@@ -6,3 +6,7 @@
 **Vulnerability:** Bash variables were interpolated directly into inline Python scripts (`python -c "import datetime; print('$date')"`), allowing attackers to execute arbitrary Python code if they could control the bash variable.
 **Learning:** String interpolation in shell commands calling interpreted languages (like Python, awk, sed) allows code injection.
 **Prevention:** Always pass variables to inline scripts as command-line arguments (e.g., `sys.argv[1]`) or via environment variables, rather than direct text replacement.
+## 2026-07-28 - Rejected Security Change: wiki-daily-digest Temp Files
+**Vulnerability:** None. The script used a predictable filename format (`wiki_claude_{session_id}.txt`) inside a temporary directory, which was mistakenly identified as a vulnerability.
+**Learning:** Filenames inside a private 0700 directory (created via `mktemp -d`) are not attacker-guessable and do not pose a predictable-temp-file vulnerability. Adding `tempfile.mkstemp` inside such a directory adds no security property and may cause regressions if it alters data formats (e.g. pipe-delimited fields).
+**Prevention:** Verify if a predictable filename is placed directly in a shared location (like `/tmp`) vs. inside a securely isolated 0700 temporary directory before flagging it as a vulnerability.
