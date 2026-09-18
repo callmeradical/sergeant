@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"strings"
 	"sync"
@@ -175,10 +174,13 @@ func (p *proxy) writeResponse(resp *response) {
 		return
 	}
 
-	mediaType, _, _ := mime.ParseMediaType(resp.contentType)
+	// Optimization: Use strings.HasPrefix instead of mime.ParseMediaType to prevent
+	// unnecessary memory allocations and parsing overhead in this hot path.
+	// We use strings.ToLower to correctly handle case-insensitive header matching.
+	// Expected impact: Eliminates a memory allocation per proxy response.
 	p.outMu.Lock()
 	defer p.outMu.Unlock()
-	if mediaType == "text/event-stream" {
+	if strings.HasPrefix(strings.ToLower(resp.contentType), "text/event-stream") {
 		for _, data := range parseSSEData(resp.body) {
 			fmt.Fprintf(p.stdout, "%s\n", data)
 		}
