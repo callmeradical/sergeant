@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"strings"
 	"sync"
@@ -175,10 +174,12 @@ func (p *proxy) writeResponse(resp *response) {
 		return
 	}
 
-	mediaType, _, _ := mime.ParseMediaType(resp.contentType)
+	// Performance optimization: Avoid mime.ParseMediaType to prevent allocations.
+	// Use strings.HasPrefix with strings.ToLower to check the prefix case-insensitively.
+	isSSE := strings.HasPrefix(strings.ToLower(resp.contentType), "text/event-stream")
 	p.outMu.Lock()
 	defer p.outMu.Unlock()
-	if mediaType == "text/event-stream" {
+	if isSSE {
 		for _, data := range parseSSEData(resp.body) {
 			fmt.Fprintf(p.stdout, "%s\n", data)
 		}

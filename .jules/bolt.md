@@ -16,4 +16,6 @@
 **Action:** Use `strings.NewReader(str)` directly instead of `bytes.NewReader([]byte(str))` to eliminate the allocation overhead.
 ## 2026-09-11 - Memoize Dynamic Library Load (`ctypes.CDLL`)
 **Learning:** Found that `ctypes.CDLL(None, use_errno=True)` within `pidfd_open` and `pidfd_send_signal` fallback paths in `_sgt-process-token.py` re-loaded the C library dynamically on every call, causing measurable per-call overhead, analogous to the learning about `libc_pidfd_function` from 2024-08-27.
-**Action:** Substituted the redundant inline `ctypes.CDLL` loads with the memoized module-level `_LIBC_WITH_ERRNO` global to eliminate repeated linking overhead.
+**Action:** Substituted the redundant inline `ctypes.CDLL` loads with the memoized module-level `_LIBC_WITH_ERRNO` global to eliminate repeated linking overhead.## 2026-09-12 - Avoid mime.ParseMediaType in hot paths
+**Learning:** Found that using `mime.ParseMediaType` for exact or prefix header matching (e.g. checking if a response is an SSE stream) allocates a map for media type parameters and parses the full string, creating unnecessary memory overhead in hot paths like proxying JSON-RPC requests.
+**Action:** Use `strings.HasPrefix` with `strings.ToLower` instead of `mime.ParseMediaType` when checking media types to eliminate memory allocations and reduce overhead.
