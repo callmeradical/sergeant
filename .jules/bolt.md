@@ -17,3 +17,7 @@
 ## 2026-09-11 - Memoize Dynamic Library Load (`ctypes.CDLL`)
 **Learning:** Found that `ctypes.CDLL(None, use_errno=True)` within `pidfd_open` and `pidfd_send_signal` fallback paths in `_sgt-process-token.py` re-loaded the C library dynamically on every call, causing measurable per-call overhead, analogous to the learning about `libc_pidfd_function` from 2024-08-27.
 **Action:** Substituted the redundant inline `ctypes.CDLL` loads with the memoized module-level `_LIBC_WITH_ERRNO` global to eliminate repeated linking overhead.
+
+## 2024-10-25 - Avoid mime.ParseMediaType for exact header matching
+**Learning:** Using `mime.ParseMediaType` for exact or prefix header matching in hot paths introduces unnecessary memory allocations.
+**Action:** When substituting with `strings.HasPrefix`, explicitly handle case-insensitivity (e.g., via `strings.ToLower`) to maintain HTTP standard compliance while preventing heavy parsing allocations.
