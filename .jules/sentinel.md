@@ -10,3 +10,7 @@
 **Vulnerability:** Bash variable interpolation inside `python3 -c "..."` script strings.
 **Learning:** This exposes the Python script to command injection and syntax errors if the Bash variables contain unescaped characters (like single quotes or newlines) that break the Python string literal boundary.
 **Prevention:** Pass Bash variables safely as command-line arguments (e.g. `sys.argv[1]`) or environment variables, avoiding string formatting bash variables into python scripts directly.
+## 2026-09-22 - Secure temporary file generation in wiki-daily-digest
+**Vulnerability:** A script created temporary files at predictable paths (`/tmp/wiki_claude_{session_id}.txt`) allowing potential local attackers to execute a symlink attack or view sensitive session content.
+**Learning:** Hardcoded predictable temporary file paths, especially those derived from predictable elements like session_ids, expose local file operations to race conditions.
+**Prevention:** Always use secure temporary file creation APIs like Python's `tempfile.NamedTemporaryFile` or Bash's `mktemp`, and pass the dynamically generated file path between components rather than assuming predictable names.
