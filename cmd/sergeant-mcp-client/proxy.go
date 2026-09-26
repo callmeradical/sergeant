@@ -174,8 +174,9 @@ func (p *proxy) writeResponse(resp *response) {
 		return
 	}
 
-	// Performance optimization: Avoid mime.ParseMediaType allocation for exact header matching
-	isEventStream := strings.HasPrefix(strings.ToLower(resp.contentType), "text/event-stream")
+	// Performance optimization: Avoid strings.ToLower allocation for case-insensitive prefix matching
+	prefix := "text/event-stream"
+	isEventStream := len(resp.contentType) >= len(prefix) && strings.EqualFold(resp.contentType[:len(prefix)], prefix)
 	p.outMu.Lock()
 	defer p.outMu.Unlock()
 	if isEventStream {
