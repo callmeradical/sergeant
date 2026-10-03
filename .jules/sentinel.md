@@ -14,3 +14,8 @@
 **Vulnerability:** A script created temporary files at predictable paths (`/tmp/wiki_claude_{session_id}.txt`) allowing potential local attackers to execute a symlink attack or view sensitive session content.
 **Learning:** Hardcoded predictable temporary file paths, especially those derived from predictable elements like session_ids, expose local file operations to race conditions.
 **Prevention:** Always use secure temporary file creation APIs like Python's `tempfile.NamedTemporaryFile` or Bash's `mktemp`, and pass the dynamically generated file path between components rather than assuming predictable names.
+
+## 2025-02-27 - SQL Injection in Daily Digest script
+**Vulnerability:** SQL injection vulnerabilities were present in `bin/wiki-daily-digest` where externally supplied variables (`$session_id` and `$date`) were directly interpolated into `sqlite3` string queries without proper sanitization.
+**Learning:** Internal tools that process externally populated databases (like SQLite) are still susceptible to SQL injection if string interpolation is used instead of parameterization or strict sanitization.
+**Prevention:** Always use safe parameter expansion (e.g. `${var//\'/\'\'}`) when interpolating Bash variables into SQLite queries to correctly escape single quotes, even in scripts not directly facing the public network.
