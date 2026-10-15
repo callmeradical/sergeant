@@ -14,3 +14,7 @@
 **Vulnerability:** A script created temporary files at predictable paths (`/tmp/wiki_claude_{session_id}.txt`) allowing potential local attackers to execute a symlink attack or view sensitive session content.
 **Learning:** Hardcoded predictable temporary file paths, especially those derived from predictable elements like session_ids, expose local file operations to race conditions.
 **Prevention:** Always use secure temporary file creation APIs like Python's `tempfile.NamedTemporaryFile` or Bash's `mktemp`, and pass the dynamically generated file path between components rather than assuming predictable names.
+## 2026-10-15 - SQL Injection in Bash SQLite interpolation
+**Vulnerability:** Bash scripts interpolating unescaped variables directly into `sqlite3` string literals allowed SQL injection (e.g., in `wiki-daily-digest`).
+**Learning:** SQLite's command-line tool lacks parameter binding for ad-hoc bash scripts, meaning all string variables must be manually escaped by doubling single quotes, even for seemingly safe data.
+**Prevention:** Always use bash parameter expansion like `${var//\'/\'\'}` to escape single quotes before interpolating variables into SQLite queries in bash scripts.
