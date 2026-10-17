@@ -21,3 +21,7 @@
 ## 2024-10-25 - Avoid mime.ParseMediaType for exact header matching
 **Learning:** Using `mime.ParseMediaType` for exact or prefix header matching in hot paths introduces unnecessary memory allocations.
 **Action:** When substituting with `strings.HasPrefix`, explicitly handle case-insensitivity (e.g., via `strings.ToLower`) to maintain HTTP standard compliance while preventing heavy parsing allocations.
+
+## 2024-10-17 - Zero-allocation prefix matching
+**Learning:** Found that `strings.ToLower` forces a memory allocation when checking if `resp.contentType` starts with "text/event-stream". This adds unnecessary overhead and GC pressure.
+**Action:** Use `len(str) >= len(prefix) && strings.EqualFold(str[:len(prefix)], prefix)` to achieve zero-allocation case-insensitive prefix matching.
