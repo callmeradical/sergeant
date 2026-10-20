@@ -139,7 +139,7 @@ _extract_session_content() {
 SELECT json_extract(p.data, '$.text')
 FROM part p
 JOIN message m ON p.message_id = m.id
-WHERE m.session_id = '$session_id'
+WHERE m.session_id = '${session_id//\'/\'\'}'
   AND json_extract(m.data, '$.role') = 'assistant'
   AND json_extract(p.data, '$.type') = 'text'
   AND length(json_extract(p.data, '$.text')) > 20
@@ -175,7 +175,7 @@ _extract_goose_content() {
   content="$(sqlite3 "$GOOSE_DB" "
 SELECT substr(m.content_json, 1, 2000)
 FROM messages m
-WHERE m.session_id = '$session_id'
+WHERE m.session_id = '${session_id//\'/\'\'}'
   AND m.role = 'assistant'
 ORDER BY m.created_at ASC;" 2>/dev/null | python3 -c "
 import sys, json
