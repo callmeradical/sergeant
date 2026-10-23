@@ -12,7 +12,12 @@ those commands write automatic captures without coordinator action.
 
 - `~/wiki/.captures/` contains automatic activity records written by Sergeant
   commands.
-- `~/wiki/` contains curated pages governed by `~/wiki/SCHEMA.md`.
+- `~/wiki/` contains curated pages governed by `~/wiki/SCHEMA.md`. It is an
+  [OKF v0.2](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
+  bundle shared by several machines through git.
+- Session digests are per host: `~/wiki/sessions/<hostname>-YYYY-MM-DD.md`, where
+  `<hostname>` is `hostname -s` (override with `WIKI_HOST`). Never write or regenerate
+  another host's digest.
 - `wiki-daily-digest` reads session history and captures, then writes curated
   session pages.
 
@@ -51,8 +56,12 @@ Procedure:
 3. Inspect the proposed session page for secret material, duplicate entities,
    incorrect PR/task outcomes, and unresolved generation errors.
 4. Run the non-dry command only after the preview satisfies the schema.
-5. Verify `~/wiki/sessions/YYYY-MM-DD.md` exists and `~/wiki/index.md` links it.
-6. Append or verify the schema-required ingest log entry.
+5. Verify `~/wiki/sessions/$(hostname -s)-YYYY-MM-DD.md` exists with `type: Session Digest`,
+   `host:` and `generated: { by, at }` frontmatter, and that `~/wiki/sessions/index.md`
+   lists it under the `## YYYY-MM-DD` heading.
+6. Verify the `* **Ingest**: <host>: …` bullet under that date's heading in `~/wiki/log.md`
+   (OKF §9: date-grouped, newest first).
+7. Commit and push the wiki (`git -C ~/wiki pull --rebase && git -C ~/wiki add -A && git -C ~/wiki commit && git -C ~/wiki push`).
 
 The digest must synthesize outcomes, decisions, blockers, and next state; it must
 not reproduce the conversation as a transcript.

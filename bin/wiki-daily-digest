@@ -4,7 +4,8 @@
 # Reads sessions from opencode, goose, and claude for a given date, extracts
 # meaningful assistant content, enriches with merged PRs and td task completions,
 # calls the Anthropic API (using ~/wiki/SCHEMA.md as instructions) to synthesize
-# a structured digest, and writes it to ~/wiki/sessions/YYYY-MM-DD.md.
+# a structured digest, and writes it to ~/wiki/sessions/<hostname>-YYYY-MM-DD.md
+# (OKF v0.2; one page per host per day, see ~/wiki/SCHEMA.md).
 #
 # Usage:
 #   wiki-daily-digest                    # synthesize today
@@ -40,6 +41,7 @@ CLAUDE_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
 OPENCODE_AUTH="${OPENCODE_AUTH:-$HOME/.local/share/opencode/auth.json}"
 WIKI_ROOT="${WIKI_ROOT:-$HOME/wiki}"
 WIKI_SESSIONS_DIR="$WIKI_ROOT/sessions"
+WIKI_HOST="${WIKI_HOST:-$(hostname -s)}"
 WIKI_SCHEMA="$WIKI_ROOT/SCHEMA.md"
 WRITE_SH="${WRITE_SH:-$HOME/.opencode/skills/write-to-wiki/scripts/write.sh}"
 MODEL="${WIKI_DIGEST_MODEL:-claude-haiku-4-5}"
@@ -376,10 +378,10 @@ PYEOF
   rm -f "$tmp_prompt"
 }
 
-# Write a session page
+# Write this host's session page (OKF v0.2) and update sessions/index.md + log.md
 _write_wiki_page() {
   local date="$1" body="$2"
-  local page="$WIKI_SESSIONS_DIR/$date.md"
+  local page="$WIKI_SESSIONS_DIR/$WIKI_HOST-$date.md"
 
   if $DRY_RUN; then
     echo "=== DRY RUN: would write to $page ==="
@@ -387,31 +389,57 @@ _write_wiki_page() {
     return
   fi
 
+  local summary now
+  summary="$(printf '%s\n' "$body" | awk '/^## Summary/{f=1;next} f&&/^## /{exit} f&&NF{sub(/^[[:space:]]+/,"");print;exit}' | cut -c1-160)"
+  [[ -n "$summary" ]] || summary="Daily digest for $WIKI_HOST on $date"
+  summary="${summary//\"/\'}"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  mkdir -p "$WIKI_SESSIONS_DIR"
   # Write the file directly (don't use write.sh — we want precise frontmatter)
   cat > "$page" <<EOF
 ---
-type: session
-title: $date
-description: Daily digest — $date
-tags: [session, smith, digest]
-updated: $date
+type: Session Digest
+host: $WIKI_HOST
+title: "$date: $WIKI_HOST daily digest"
+description: "$summary"
+tags: [session, digest]
+generated: { by: sergeant/wiki-daily-digest+$MODEL, at: $now }
 ---
 
 $body
 EOF
 
-  # Update wiki index if the session is new
-  if ! grep -q "$date" "$WIKI_ROOT/index.md" 2>/dev/null; then
-    # Extract one-line summary from body (first non-empty line after the heading)
-    local summary
-    summary="$(echo "$body" | grep -A2 "^## Summary" | tail -1 | sed 's/^[[:space:]]*//' | head -c 100)"
-    sed -i '' "/^## Sessions/a\\
-* [$date](sessions/$date.md) — ${summary:-daily digest}" \
-      "$WIKI_ROOT/index.md" 2>/dev/null || true
-  fi
+  # sessions/index.md (OKF §8) and log.md (OKF §9): date-grouped, newest first
+  python3 - "$WIKI_ROOT" "$WIKI_HOST" "$date" "$summary" <<'PY' || echo "  WARNING: index/log update failed; page kept at $page" >&2
+import os, re, sys
+root, host, date, summary = sys.argv[1:5]
 
-  # Append to log
-  echo "## [$date] ingest | daily digest from opencode session history" >> "$WIKI_ROOT/log.md"
+def upsert(path, title, date, line, key):
+    lines = open(path).read().splitlines() if os.path.exists(path) else [title, ""]
+    lines = [l for l in lines if key not in l]
+    heads = [(i, l[3:13]) for i, l in enumerate(lines) if re.match(r"^## \d{4}-\d{2}-\d{2}", l)]
+    hit = next((i for i, d in heads if d == date), None)
+    if hit is None:
+        pos = next((i for i, d in heads if d < date), None)
+        if pos is None:
+            pos = len(lines)
+            while pos and not lines[pos - 1].strip():
+                pos -= 1
+            lines[pos:pos] = ["", f"## {date}", line]
+        else:
+            lines[pos:pos] = [f"## {date}", line, ""]
+    else:
+        lines.insert(hit + 1, line)
+    open(path, "w").write(re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip() + "\n")
+
+rel = f"/sessions/{host}-{date}.md"
+upsert(os.path.join(root, "sessions", "index.md"), "# Sessions", date,
+       f"* [{host}]({rel}) - {summary}", f"]({rel})")
+upsert(os.path.join(root, "log.md"), "# Wiki Update Log", date,
+       f"* **Ingest**: {host}: daily digest [{date}]({rel}) from session history",
+       f"[{date}]({rel}) from session history")
+PY
 
   echo "  wrote: $page"
 }
@@ -422,8 +450,8 @@ for DATE in "${DATES[@]}"; do
   echo "=== wiki-daily-digest: $DATE ==="
 
   # Skip if already written (unless dry-run)
-  if [[ -f "$WIKI_SESSIONS_DIR/$DATE.md" ]] && ! $DRY_RUN; then
-    echo "  already exists: $WIKI_SESSIONS_DIR/$DATE.md — skipping (delete to re-run)"
+  if [[ -f "$WIKI_SESSIONS_DIR/$WIKI_HOST-$DATE.md" ]] && ! $DRY_RUN; then
+    echo "  already exists: $WIKI_SESSIONS_DIR/$WIKI_HOST-$DATE.md — skipping (delete to re-run)"
     continue
   fi
 
@@ -509,8 +537,8 @@ $content
 
   # Load the existing session page if it exists (for update-in-place)
   existing_session=""
-  if [[ -f "$WIKI_SESSIONS_DIR/$DATE.md" ]]; then
-    existing_session="$(cat "$WIKI_SESSIONS_DIR/$DATE.md")"
+  if [[ -f "$WIKI_SESSIONS_DIR/$WIKI_HOST-$DATE.md" ]]; then
+    existing_session="$(cat "$WIKI_SESSIONS_DIR/$WIKI_HOST-$DATE.md")"
   fi
 
   # Build synthesis prompt driven entirely by SCHEMA.md
@@ -527,7 +555,7 @@ $schema
 $index_context
 
 ---
-## Existing session page for $DATE (empty if none yet)
+## Existing session page for $WIKI_HOST on $DATE (empty if none yet)
 
 $existing_session
 
@@ -546,13 +574,15 @@ $sessions_content
 ---
 ## Your task
 
-Following the SCHEMA.md instructions exactly, write (or update) the sessions/ page for $DATE.
+Following the SCHEMA.md instructions exactly, write (or update) the sessions/ page for host $WIKI_HOST on $DATE
+(sessions/$WIKI_HOST-$DATE.md). The source material is from this host only.
 
 The sessions/ page format per SCHEMA.md:
-- One page per day with meaningful work
+- One page per host per day with meaningful work
 - A synthesized digest — not a raw log
 - Covers: what was worked on, decisions made, blockers hit, outcomes
-- Links to entities/decisions/features touched using wiki-relative paths
+- Links to entities/decisions/features touched using bundle-relative paths (/entities/smith.md, never ../)
+- Start with a '## Summary' heading followed by one sentence (used as the page description)
 
 Use the index to cross-link to existing entity/decision pages where relevant.
 If you identify new entities, decisions, or patterns worth a dedicated page, note them
