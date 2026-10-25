@@ -14,6 +14,10 @@
 **Vulnerability:** A script created temporary files at predictable paths (`/tmp/wiki_claude_{session_id}.txt`) allowing potential local attackers to execute a symlink attack or view sensitive session content.
 **Learning:** Hardcoded predictable temporary file paths, especially those derived from predictable elements like session_ids, expose local file operations to race conditions.
 **Prevention:** Always use secure temporary file creation APIs like Python's `tempfile.NamedTemporaryFile` or Bash's `mktemp`, and pass the dynamically generated file path between components rather than assuming predictable names.
+## 2025-03-05 - SQL Injection in Bash SQLite3 Scripts
+**Vulnerability:** Bash variables containing single quotes were interpolated directly into `sqlite3` query strings in `bin/wiki-daily-digest` (e.g., `WHERE m.session_id = '$session_id'`), allowing SQL injection if session IDs or dates contained quotes.
+**Learning:** Using `sqlite3 "SELECT ..."` with bash string interpolation is dangerous because SQLite strings use single quotes. The standard memory guideline mentions `_sgt_msg_q`, highlighting a pattern to escape single quotes via `${var//\'/\'\'}`.
+**Prevention:** Always escape single quotes in bash variables via parameter expansion (`${var//\'/\'\'}`) before interpolating them into single-quoted SQLite strings, or use an escaping helper function.
 ## 2026-07-28 - [API Key Leak via Process List]
 **Vulnerability:** Passing sensitive secrets (like API keys) as command-line arguments to inline Python scripts exposes them to all users on the system via the process list (`ps aux`).
 **Learning:** System process listings capture command-line arguments, making them a fundamentally insecure channel for transmitting secrets to subprocesses.
