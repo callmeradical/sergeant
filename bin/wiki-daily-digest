@@ -340,12 +340,12 @@ _synthesize() {
   tmp_prompt="$(mktemp "$SCRIPT_TMP_DIR/prompt.XXXXXX")"
   printf '%s' "$prompt" > "$tmp_prompt"
 
-  python3 - "$ANTHROPIC_KEY" "$MODEL" "$tmp_prompt" <<'PYEOF'
-import sys, json, urllib.request, urllib.error
+  ANTHROPIC_KEY="$ANTHROPIC_KEY" python3 - "$MODEL" "$tmp_prompt" <<'PYEOF'
+import sys, os, json, urllib.request, urllib.error
 
-api_key    = sys.argv[1]
-model      = sys.argv[2]
-prompt_file = sys.argv[3]
+api_key    = os.environ.get("ANTHROPIC_KEY", "")
+model      = sys.argv[1]
+prompt_file = sys.argv[2]
 
 with open(prompt_file) as f:
     prompt = f.read()

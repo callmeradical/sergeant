@@ -18,3 +18,7 @@
 **Vulnerability:** Bash variables containing single quotes were interpolated directly into `sqlite3` query strings in `bin/wiki-daily-digest` (e.g., `WHERE m.session_id = '$session_id'`), allowing SQL injection if session IDs or dates contained quotes.
 **Learning:** Using `sqlite3 "SELECT ..."` with bash string interpolation is dangerous because SQLite strings use single quotes. The standard memory guideline mentions `_sgt_msg_q`, highlighting a pattern to escape single quotes via `${var//\'/\'\'}`.
 **Prevention:** Always escape single quotes in bash variables via parameter expansion (`${var//\'/\'\'}`) before interpolating them into single-quoted SQLite strings, or use an escaping helper function.
+## 2026-07-28 - [API Key Leak via Process List]
+**Vulnerability:** Passing sensitive secrets (like API keys) as command-line arguments to inline Python scripts exposes them to all users on the system via the process list (`ps aux`).
+**Learning:** System process listings capture command-line arguments, making them a fundamentally insecure channel for transmitting secrets to subprocesses.
+**Prevention:** Always pass sensitive secrets to subprocesses via environment variables (which are excluded from standard `ps` output by default) or via standard input/IPC.
