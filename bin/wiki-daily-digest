@@ -298,9 +298,8 @@ _fetch_merged_prs() {
     [[ -d "$repo_path" ]] || continue
     local result
     result="$(cd "$repo_path" && gh pr list --state merged \
-      --json number,title,mergedAt,body \
-      --jq ".[] | select(.mergedAt | startswith(\"$date\")) | \"- [\(.number)] \(.title)\"" \
-      2>/dev/null || echo "")"
+      --json number,title,mergedAt,body 2>/dev/null | \
+      jq -r --arg date "$date" '.[] | select(.mergedAt | startswith($date)) | "- [\(.number)] \(.title)"' 2>/dev/null || echo "")"
     [[ -n "$result" ]] && prs+="$repo:
 $result
 "
