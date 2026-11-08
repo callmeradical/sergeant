@@ -53,6 +53,10 @@ def main():
     if len(sys.argv) != 4:
         fail()
     lock_path, candidate, expected = sys.argv[1:]
+    # Persistent flock anchor: never unlinked, on any path.  Unlinking it would
+    # let a waiter keep locking the orphaned inode while the next opener creates
+    # a fresh one, so two processes could retire and install the lock at once.
+    # See _sgt_response_lock_transition in bin/_sgt-response-lock.sh.
     gate_path = lock_path + ".transition"
     gate_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
     gate_flags |= getattr(os, "O_NOFOLLOW", 0)

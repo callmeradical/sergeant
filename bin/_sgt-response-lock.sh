@@ -141,6 +141,25 @@ _sgt_response_lock_record_is_this_process() {
   [[ "$expected" == "$(_sgt_process_start_token "$$")" ]]
 }
 
+# Serialize one compare/retire/install transition of the response lock.
+#
+# Retiring the old lock and linking the candidate is not atomic, so both
+# implementations below run it while holding an exclusive flock on a gate file
+# beside the lock: "<repo_state>/response.lock.transition".
+#
+# That gate is a PERSISTENT anchor and must never be unlinked, including on a
+# failure or rejection path.  A holder keeps its lock on an unlinked inode while
+# the next opener creates a fresh inode and acquires it immediately, so removing
+# the gate would let two processes retire and install the lock at the same time
+# and leave two owners of it.  The gate is therefore zero-byte, owner-private,
+# reused by every later acquisition, and removed only when the whole fleet state
+# directory is retired.
+#
+# Consequence for callers: a run refused after acquiring the response lock has
+# already created the gate, so a "this run must not mutate fleet state"
+# assertion has to exempt this one path by name — see
+# tests/sgt-cleanup-cross-filesystem-test.sh — rather than delete the gate.
+# tests/sgt-response-lock-gate-test.sh pins the invariant itself.
 _sgt_response_lock_transition() {
   local lock_path="$1" candidate="$2" expected="$3"
   local gate_path="${lock_path}.transition"
