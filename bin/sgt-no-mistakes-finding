@@ -127,9 +127,14 @@ import json
 import sys
 
 try:
-    items = json.load(sys.stdin) or []
+    items = json.load(sys.stdin)
 except json.JSONDecodeError as exc:
     raise SystemExit(f"td list returned invalid JSON: {exc}")
+
+if items is None:
+    items = []
+elif not isinstance(items, list):
+    raise SystemExit("td list returned non-list JSON; expected a list or null")
 
 marker = sys.argv[1]
 needle = f"Deduplication key: {marker}"

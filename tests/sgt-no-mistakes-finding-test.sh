@@ -250,6 +250,26 @@ if grep -Fq "create" "$TEST_ROOT/td.log" || grep -Fq "update" "$TEST_ROOT/td.log
   exit 1
 fi
 
+TD_LIST_RESULT='null' run_router --disposition td
+[[ "$status" -eq 0 && "$output" == *"td-created"* ]] || {
+  printf 'null td list result did not create finding work: %s\n' "$output" >&2
+  exit 1
+}
+assert_log_contains "create"
+
+for non_list_json in '{}' 'false' '0' '""' '{"id":"td-existing"}' 'true' '1' '"unexpected"'; do
+  TD_LIST_RESULT="$non_list_json" run_router --disposition td
+  [[ "$status" -ne 0 && "$output" == *"td list returned non-list JSON; expected a list or null"* ]] || {
+    printf 'non-list td JSON %s did not fail closed: %s\n' "$non_list_json" "$output" >&2
+    exit 1
+  }
+  assert_log_contains "list --all --search no-mistakes-finding:app:review-7 --json --work-dir $REPO"
+  if grep -Eq '^(create|update|reopen|defer) ' "$TEST_ROOT/td.log"; then
+    printf 'non-list td JSON %s mutated td state\n' "$non_list_json" >&2
+    exit 1
+  fi
+done
+
 run_router --severity error --kind security --disposition td
 [[ "$status" -ne 0 && "$output" == *"must gate"* ]] || {
   printf 'blocking finding was incorrectly deferred: %s\n' "$output" >&2
