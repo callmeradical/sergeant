@@ -58,11 +58,13 @@ unset SGT_INSTALL_DIR
 # and then delete the developer's pre-push hook as a side effect of running the
 # tests, and a hook the developer already owns would make the suite fail.
 FIXTURE_ROOT="$TEST_ROOT/checkout"
-mkdir -p "$FIXTURE_ROOT"
-cp -R "$ROOT_DIR/bin" "$FIXTURE_ROOT/bin"
-cp -R "$ROOT_DIR/scripts" "$FIXTURE_ROOT/scripts"
-cp -R "$ROOT_DIR/opencode" "$FIXTURE_ROOT/opencode"
-cp "$ROOT_DIR/mise.toml" "$FIXTURE_ROOT/mise.toml"
+# shellcheck source=tests/support/fixture-checkout.sh
+source "$ROOT_DIR/tests/support/fixture-checkout.sh"
+sgt_test_copy_checkout "$ROOT_DIR" "$FIXTURE_ROOT"
+[[ -f "$FIXTURE_ROOT/bin/sgt-bootstrap" && -f "$FIXTURE_ROOT/mise.toml" ]] || {
+  printf 'fixture checkout is incomplete: %s\n' "$FIXTURE_ROOT" >&2
+  exit 1
+}
 if command -v git >/dev/null 2>&1; then
   git init -q "$FIXTURE_ROOT"
 fi

@@ -69,13 +69,11 @@ PY
 # the real ROOT_DIR would delete the developer's installed pre-push hook as a
 # side effect of running the tests.
 FIXTURE_ROOT="$TEST_ROOT/checkout"
-mkdir -p "$FIXTURE_ROOT"
-cp -R "$ROOT_DIR/bin" "$FIXTURE_ROOT/bin"
-cp -R "$ROOT_DIR/scripts" "$FIXTURE_ROOT/scripts"
-if [[ -d "$ROOT_DIR/opencode" ]]; then
-  cp -R "$ROOT_DIR/opencode" "$FIXTURE_ROOT/opencode"
-fi
-cp "$ROOT_DIR/mise.toml" "$FIXTURE_ROOT/mise.toml"
+# shellcheck source=tests/support/fixture-checkout.sh
+source "$ROOT_DIR/tests/support/fixture-checkout.sh"
+sgt_test_copy_checkout "$ROOT_DIR" "$FIXTURE_ROOT"
+[[ -f "$FIXTURE_ROOT/bin/sgt-install" ]] || fail 'fixture checkout is missing bin/sgt-install'
+[[ -f "$FIXTURE_ROOT/mise.toml" ]] || fail 'fixture checkout is missing mise.toml'
 git init -q "$FIXTURE_ROOT"
 
 mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/home/.config/opencode/plugins"
