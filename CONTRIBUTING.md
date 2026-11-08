@@ -77,16 +77,45 @@ script paths relative to itself at runtime.
 The pre-push hook runs this automatically. To run it manually:
 
 ```bash
-# Both passes: Debian system Bash + Alpine Bash 3.2
+# Both passes: Debian system Bash + Bash 3.2
 mise run test:docker:drain
 
 # Skip in an emergency
 git push --no-verify
 ```
 
-The suite builds a local `sergeant-test` Docker image from `Dockerfile.test`,
-mounts the repo read-only, and runs `tests/run-drain-tests.sh`. No host state
-is touched.
+The suite builds two local Docker images, mounts the repo read-only, and runs
+`tests/run-drain-tests.sh` in each. No host state is touched.
+
+| Image | Dockerfile | Pass |
+|---|---|---|
+| `sergeant-test` | `Dockerfile.test` | Debian bookworm-slim, system Bash 5.x |
+| `sergeant-test-bash32` | `Dockerfile.bash32` | digest-pinned Bash 3.2 plus git, tmux, yq and python3 |
+
+`mise run test:docker:notification` runs the notification handshake suite the
+same way.
+
+### Suite skip policy
+
+`tests/run-drain-tests.sh` and `tests/run-notification-tests.sh` share
+`tests/lib/suite-policy.sh`, which enforces three rules:
+
+- **`git`, `tmux`, `yq` and `python3` are prerequisites.** A missing tool fails
+  the run in preflight; it never downgrades a case to a skip.
+- **A skip needs an allowlisted reason code.** The only one today is
+  `bash32-pass-not-selected`, for the container that deliberately runs the
+  system-Bash pass only (`BASH32=""`). Any other skip counts as a failure.
+- **A run that executed no case is never a success**, however many cases it
+  skipped.
+
+Before this policy the Bash 3.2 notification pass reported "0 passed, 0 failed,
+9 skipped" as a green tick on the pre-push gate, because the bare `bash:3.2`
+image had none of those four tools (td-5ab019).
+
+Set `BASH32` to a real Bash 3.2 to run the Bash 3.2 pass on the host
+(`BASH32=/bin/bash` on macOS), or `BASH32=""` to run the system-Bash pass only.
+An unset `BASH32` defaults to `/usr/local/bin/bash32` and fails the run if
+nothing is there — a wrong path used to skip the whole pass silently.
 
 ### Individual test files
 

@@ -102,16 +102,18 @@ printf 'global-state isolation: static declarations present: ok\n'
 # (yq, git, tmux, python3, jq) and takes ~8 minutes.
 #
 # It cannot run everywhere the static audit can. scripts/hooks/pre-push drives
-# this through test:docker:drain in two images, and the Bash 3.2 pass is the
-# pinned upstream bash:3.2 Alpine image mounted read-only, which ships none of
-# that toolchain (verified: yq, git, tmux, python3 and jq are all absent). The
-# Debian image in Dockerfile.test is missing yq. Running Part 2 there does not
-# find leaks, it just reports tooling gaps as suite failures.
+# this through test:docker:drain in two images. Both now ship most of that
+# toolchain: Dockerfile.test has git, tmux, python3 and yq, and Dockerfile.bash32
+# adds the same four on top of a digest-pinned Bash 3.2 (td-5ab019 — the Bash 3.2
+# pass used to run in the bare upstream bash:3.2 image, where every tool-guarded
+# case skipped and the pass still exited 0). jq is still absent from both, so
+# suites that need it would be reported as tooling gaps rather than leaks.
+#
+# Cost is the other reason: ~8 minutes per image, per push.
 #
 # So Part 2 is opt-in. Every environment still gets Part 1, which is the cheap
 # structural guarantee. Set SGT_ISOLATION_DYNAMIC=1 where the toolchain exists
-# to get the leak proof. A purpose-built Bash 3.2 toolchain image would let it
-# run everywhere; that is tracked separately.
+# to get the leak proof.
 if [[ "${SGT_ISOLATION_DYNAMIC:-0}" != "1" ]]; then
   printf 'global-state isolation: dynamic leak audit skipped (set SGT_ISOLATION_DYNAMIC=1 to run it)\n'
   exit 0

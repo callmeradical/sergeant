@@ -268,11 +268,18 @@ run = """
 #     Tests drain state helpers, sgt-drain --status (bug #82), drain lock
 #     functions (bug #81), and sgt-recover drain gating.
 #
-#   Pass 2 — bash:3.2 Alpine image
-#     Re-runs the same tests under Bash 3.2 to confirm Bash 3.2 compatibility.
+#   Pass 2 — sergeant-test-bash32 (Dockerfile.bash32)
+#     Re-runs the same tests under a real Bash 3.2 to confirm Bash 3.2
+#     compatibility.
 #
-# Prerequisites: Docker must be available.  The test image is built locally and
-# not pushed; the bash:3.2 image is pulled from Docker Hub on first use.
+#     This pass used to run in the upstream bash:3.2 image directly.  That image
+#     ships no git, tmux, yq or python3, so half the cases skipped and the pass
+#     still reported success (td-5ab019).  Dockerfile.bash32 adds those tools on
+#     top of the same digest-pinned Bash 3.2, and the runners now fail rather
+#     than skip when a required tool is missing.
+#
+# Prerequisites: Docker must be available.  Both test images are built locally
+# and not pushed; their base images are pulled from Docker Hub on first use.
 
 set -euo pipefail
 
@@ -304,8 +311,6 @@ REPO_DIR="$(cd "$REPO_DIR" 2>/dev/null && pwd -P)" || {
 # what let td-85b6bf go unnoticed until a correct branch was blocked by it.
 printf 'Validating tree: %s\\n' "$REPO_DIR"
 
-SGT_BASH32_IMAGE="docker.io/library/bash:3.2@sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89"
-
 pass=0
 fail=0
 
@@ -321,22 +326,26 @@ _docker_pass() {
   fi
 }
 
-# Build the Debian test image (cached after first build).
+# Build both test images (cached after first build).
 printf 'Building sergeant-test image...\\n'
 docker build -q -f "${REPO_DIR}/Dockerfile.test" -t sergeant-test "${REPO_DIR}"
+printf 'Building sergeant-test-bash32 image...\\n'
+docker build -q -f "${REPO_DIR}/Dockerfile.bash32" -t sergeant-test-bash32 "${REPO_DIR}"
 printf 'Built.\\n'
 
 # Pass 1: system Bash (Debian bookworm-slim).
+# BASH32='' opts out of the Bash 3.2 pass here: it runs as pass 2 below, in the
+# image built to run it.
 _docker_pass "System Bash (Debian bookworm-slim)" \
   sergeant-test \
   "BASH32='' bash /repo/tests/run-drain-tests.sh"
 
-# Pass 2: Bash 3.2 (official Alpine image).
-# Sets BASH32 to the Alpine Bash binary path and SGT_MINIMUM_BASH for the
-# runtime-bash-test compatibility check.
-_docker_pass "Bash 3.2 (Alpine)" \
-  "$SGT_BASH32_IMAGE" \
-  "BASH32=/usr/local/bin/bash SGT_MINIMUM_BASH=/usr/local/bin/bash bash /repo/tests/run-drain-tests.sh"
+# Pass 2: Bash 3.2 (Dockerfile.bash32 — digest-pinned Bash 3.2 plus git, tmux,
+# yq and python3, so no case skips for want of a tool).
+# SGT_MINIMUM_BASH is set for the runtime-bash-test compatibility check.
+_docker_pass "Bash 3.2 (Dockerfile.bash32)" \
+  sergeant-test-bash32 \
+  "BASH32=/usr/local/bin/bash32 SGT_MINIMUM_BASH=/usr/local/bin/bash32 bash /repo/tests/run-drain-tests.sh"
 
 printf '\\n═══════════════════════════════════════════════════════════\\n'
 printf ' Docker drain suite: %d passed, %d failed\\n' "$pass" "$fail"
@@ -354,9 +363,14 @@ run = """
 #     Tests the delivery handshake, per-harness contract, action-lease
 #     finalizer, convergence, and readiness gate.
 #
-#   Pass 2 — bash:3.2 Alpine image
-#     Re-runs the subset that does not require tmux (action-lease finalizer)
-#     under Bash 3.2 to confirm Bash 3.2 compatibility.
+#   Pass 2 — sergeant-test-bash32 (Dockerfile.bash32)
+#     Re-runs the action-lease finalizer and the per-harness handshake under a
+#     real Bash 3.2 to confirm Bash 3.2 compatibility.
+#
+#     This pass used to run in the upstream bash:3.2 image, which ships no git,
+#     tmux, yq or python3.  Every case skipped and the pass still reported
+#     "✓ passed" while executing zero assertions (td-5ab019).  Dockerfile.bash32
+#     supplies those tools on top of the same digest-pinned Bash 3.2.
 #
 # Prerequisites: Docker must be available.
 
@@ -376,8 +390,6 @@ REPO_DIR="$(cd "$REPO_DIR" 2>/dev/null && pwd -P)" || {
 }
 printf 'Validating tree: %s\\n' "$REPO_DIR"
 
-SGT_BASH32_IMAGE="docker.io/library/bash:3.2@sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89"
-
 pass=0
 fail=0
 
@@ -395,15 +407,19 @@ _docker_pass() {
 
 printf 'Building sergeant-test image...\\n'
 docker build -q -f "${REPO_DIR}/Dockerfile.test" -t sergeant-test "${REPO_DIR}"
+printf 'Building sergeant-test-bash32 image...\\n'
+docker build -q -f "${REPO_DIR}/Dockerfile.bash32" -t sergeant-test-bash32 "${REPO_DIR}"
 printf 'Built.\\n'
 
+# BASH32='' opts out of the Bash 3.2 pass here: it runs as pass 2 below, in the
+# image built to run it.
 _docker_pass "System Bash (Debian bookworm-slim)" \\
   sergeant-test \\
   "BASH32='' bash /repo/tests/run-notification-tests.sh"
 
-_docker_pass "Bash 3.2 (Alpine)" \\
-  "$SGT_BASH32_IMAGE" \\
-  "BASH32=/usr/local/bin/bash SGT_MINIMUM_BASH=/usr/local/bin/bash bash /repo/tests/run-notification-tests.sh"
+_docker_pass "Bash 3.2 (Dockerfile.bash32)" \\
+  sergeant-test-bash32 \\
+  "BASH32=/usr/local/bin/bash32 SGT_MINIMUM_BASH=/usr/local/bin/bash32 bash /repo/tests/run-notification-tests.sh"
 
 printf '\\n═══════════════════════════════════════════════════════════\\n'
 printf ' Docker notification suite: %d passed, %d failed\\n' "$pass" "$fail"

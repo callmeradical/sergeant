@@ -17,42 +17,47 @@
 #   mise run test:docker:drain
 #
 # Exit codes:
-#   0  all tests passed (or skipped)
-#   1  one or more tests failed
+#   0  every case executed and passed; any skip was an allowlisted, documented
+#      limitation and at least one case actually ran
+#   1  a case failed, a required tool was missing, BASH32 was misconfigured, or
+#      no case executed at all
+#
+# git, tmux, yq, and python3 are prerequisites, not optional conveniences.  This
+# runner used to degrade every case that needed them into a skip and still exit
+# 0, so the Bash 3.2 pass ran half its cases and reported success (td-5ab019).
+# Dockerfile.bash32 supplies all four under Bash 3.2.
 #
 # Environment variables:
 #   BASH32   path to Bash 3.2 binary (default: /usr/local/bin/bash32)
-#            set to "" to skip the Bash 3.2 pass; the mise task handles
-#            the Bash 3.2 pass in the official bash:3.2 Alpine image
+#            set to "" to run the system-Bash pass only; the mise task runs the
+#            Bash 3.2 pass in the dedicated Bash 3.2 image
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BASH32="${BASH32:-/usr/local/bin/bash32}"
+# Resolve the repo root with shell builtins only, so the tool preflight below
+# reports a missing-tool diagnosis instead of dying on `dirname: not found`.
+_SELF="${BASH_SOURCE[0]}"
+case "$_SELF" in
+  */*) _SELF_DIR="${_SELF%/*}" ;;
+  *) _SELF_DIR="." ;;
+esac
+ROOT_DIR="$(cd "$_SELF_DIR/.." && pwd)"
+BASH32="${BASH32-/usr/local/bin/bash32}"
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# shellcheck source=tests/lib/suite-policy.sh
+source "$ROOT_DIR/tests/lib/suite-policy.sh"
 
-pass=0
-fail=0
-skip=0
+# ── Preflight ─────────────────────────────────────────────────────────────────
+#
+# Fail before the first case rather than skipping through to a green summary.
 
-_run() {
-  local label="$1" shell="$2" script="$3"
-  printf '\n  %-12s  %s\n' "[$shell]" "$label"
-  if "$shell" "$script" 2>&1 | grep -v '^grep:.*No such file or directory' | sed 's/^/    /'; then
-    printf '    ✓ passed\n'
-    pass=$((pass + 1))
-  else
-    printf '    ✗ FAILED\n' >&2
-    fail=$((fail + 1))
-  fi
-}
+sgt_suite_reset
+sgt_suite_require_tools "drain suite" git tmux yq python3
+sgt_suite_require_bash32 "$BASH32"
 
-_skip() {
-  local label="$1" reason="$2"
-  printf '\n  %-12s  %s  (skipped: %s)\n' "[skip]" "$label" "$reason"
-  skip=$((skip + 1))
-}
+# Known-harmless noise filter for case output: some suites probe for files with
+# grep before they exist.
+_drain_noise_filter() { grep -v '^grep:.*No such file or directory'; }
 
 # ── Suite ─────────────────────────────────────────────────────────────────────
 
@@ -60,7 +65,7 @@ printf '════════════════════════
 printf ' Sergeant drain test suite\n'
 printf ' Repo:  %s\n' "$ROOT_DIR"
 printf ' Bash:  %s\n' "$(bash --version | head -1)"
-if [[ -x "$BASH32" ]]; then
+if [[ -n "$BASH32" ]]; then
   printf ' Bash32:%s\n' "$("$BASH32" --version 2>&1 | head -1)"
 fi
 printf '═══════════════════════════════════════════════════════════\n'
@@ -73,73 +78,53 @@ printf '\n── Pass 1: system Bash ──────────────�
 # the operator's real drain, fleet, or notification state.  It runs before the
 # drain suites deliberately, because a leaking suite must be caught before it is
 # given the chance to run against a live installation.
-_run "global state isolation guard" \
-  bash "$ROOT_DIR/tests/global-state-isolation-test.sh"
+sgt_suite_run "global state isolation guard" \
+  bash "$ROOT_DIR/tests/global-state-isolation-test.sh" _drain_noise_filter
 
 # Core drain state + --status (bug #82) + lock helpers (bug #81)
-_run "drain state, --status, lock helpers" \
-  bash "$ROOT_DIR/tests/sgt-drain-test.sh"
+sgt_suite_run "drain state, --status, lock helpers" \
+  bash "$ROOT_DIR/tests/sgt-drain-test.sh" _drain_noise_filter
 
 # sgt-respond drain admission gating (bug #81 — orphaned worker resume).
 # This test validates the full flow: drain active → response stored → drain_held
-# written → no new-window call.  Requires git for worktree ownership setup.
-if command -v git >/dev/null 2>&1; then
-  _run "sgt-respond drain admission" \
-    bash "$ROOT_DIR/tests/sgt-respond-drain-test.sh"
-else
-  _skip "sgt-respond drain admission" "git not available in this environment"
-fi
+# written → no new-window call.
+sgt_suite_run "sgt-respond drain admission" \
+  bash "$ROOT_DIR/tests/sgt-respond-drain-test.sh" _drain_noise_filter
 
-# sgt-recover drain gating (adjacent behaviour; requires git for fixture setup)
-if command -v git >/dev/null 2>&1; then
-  _run "sgt-recover drain gating" \
-    bash "$ROOT_DIR/tests/sgt-recover-drain-test.sh"
-else
-  _skip "sgt-recover drain gating" "git not available in this environment"
-fi
+# sgt-recover drain gating (adjacent behaviour)
+sgt_suite_run "sgt-recover drain gating" \
+  bash "$ROOT_DIR/tests/sgt-recover-drain-test.sh" _drain_noise_filter
 
 # sgt-drain-worker: _sgt_drain_write helper and drain detection in the worker
 # (covers _sgt_drain_write, _sgt_drain_global_active, _sgt_drain_project_active).
-# Requires git for fixture setup.
-if command -v git >/dev/null 2>&1; then
-  _run "drain write helper + worker drain detection" \
-    bash "$ROOT_DIR/tests/sgt-drain-worker-test.sh"
-else
-  _skip "drain write helper + worker drain detection" "git not available in this environment"
-fi
+sgt_suite_run "drain write helper + worker drain detection" \
+  bash "$ROOT_DIR/tests/sgt-drain-worker-test.sh" _drain_noise_filter
 
 # sgt-worker-drain: _watch_progress drain-signal write (cooperative drain for
-# interactive workers; requires tmux is absent — no tmux pane launched).
-_run "worker drain checkpoint + _watch_progress drain signal" \
-  bash "$ROOT_DIR/tests/sgt-worker-drain-test.sh"
+# interactive workers; no tmux pane launched).
+sgt_suite_run "worker drain checkpoint + _watch_progress drain signal" \
+  bash "$ROOT_DIR/tests/sgt-worker-drain-test.sh" _drain_noise_filter
 
 # ── Pass 2: Bash 3.2 ─────────────────────────────────────────────────────────
+#
+# The preflight already classified BASH32: a non-executable path failed the run,
+# and an empty one recorded the documented opt-out skip.
 
 printf '\n── Pass 2: Bash 3.2 ────────────────────────────────────────\n'
 
-if [[ -x "$BASH32" ]]; then
+if [[ -n "$BASH32" ]]; then
   # Drain state helpers must work under Bash 3.2 — this covers the core of
   # both bugs: --status (bug #82) and lock helpers (bug #81).
-  _run "drain state, --status, lock helpers" \
-    "$BASH32" "$ROOT_DIR/tests/sgt-drain-test.sh"
+  sgt_suite_run "drain state, --status, lock helpers" \
+    "$BASH32" "$ROOT_DIR/tests/sgt-drain-test.sh" _drain_noise_filter
 
-  # sgt-recover uses git worktrees for fixture setup and is skipped in the
-  # Bash 3.2 pass when git is unavailable (e.g. bash:3.2 Alpine image).
-  if command -v git >/dev/null 2>&1; then
-    _run "sgt-recover drain gating" \
-      "$BASH32" "$ROOT_DIR/tests/sgt-recover-drain-test.sh"
-  else
-    _skip "sgt-recover drain gating (Bash 3.2)" "git not available in this image"
-  fi
+  # sgt-recover uses git worktrees for fixture setup.
+  sgt_suite_run "sgt-recover drain gating" \
+    "$BASH32" "$ROOT_DIR/tests/sgt-recover-drain-test.sh" _drain_noise_filter
 else
-  _skip "Bash 3.2 pass" "BASH32 binary not found at $BASH32"
+  printf '\n  not selected in this container — see the documented skip above\n'
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
-printf '\n═══════════════════════════════════════════════════════════\n'
-printf ' Results: %d passed, %d failed, %d skipped\n' \
-  "$pass" "$fail" "$skip"
-printf '═══════════════════════════════════════════════════════════\n'
-
-[[ $fail -eq 0 ]]
+sgt_suite_verdict

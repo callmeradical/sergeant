@@ -1,0 +1,126 @@
+# Dockerfile.bash32 — Bash 3.2 test image for the Sergeant shell suites.
+#
+# Why this image exists (td-5ab019):
+#   The Bash 3.2 pass used to run directly in the upstream `bash:3.2` image.
+#   That image ships no git, tmux, yq, or python3, so every case guarded on
+#   those tools skipped and both runners exited 0 anyway — the notification pass
+#   reported "0 passed, 0 failed, 9 skipped" as a green tick on the pre-push
+#   gate, and half the drain cases skipped the same way.  A Bash 3.2
+#   incompatibility in any of those code paths could reach main behind a fully
+#   green gate.
+#
+#   Bash 3.2 support is a real constraint (it is the default /bin/bash on macOS),
+#   so the fix is to give the Bash 3.2 pass a complete environment rather than to
+#   delete it.
+#
+# Build:
+#   docker build -f Dockerfile.bash32 -t sergeant-test-bash32 .
+#
+# Run the drain suite (both passes under Bash 3.2):
+#   docker run --rm -v "$PWD:/repo:ro" sergeant-test-bash32
+#
+# Run the notification suite:
+#   docker run --rm -v "$PWD:/repo:ro" sergeant-test-bash32 \
+#     bash /repo/tests/run-notification-tests.sh
+#
+# The base image is pinned by digest, exactly as the mise test:docker:* tasks
+# used to pin it, so the Bash binary under test is byte-identical to the one the
+# vacuous pass claimed to exercise: GNU bash 3.2.57(1)-release, built against
+# musl on Alpine 3.22.  Nothing here replaces or rebuilds Bash — the tool
+# packages are additive, and the RUN step below fails the build if anything
+# shadows Bash 3.2 on PATH.
+FROM docker.io/library/bash:3.2@sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89
+
+# Tool dependencies of the drain and notification suites.
+#
+# Unpinned by package name, matching Dockerfile.test's apt-get layer: Alpine's
+# v3.22 branch drops exact package revisions as it receives updates, so pinning
+# them would turn every upstream patch into a broken build, while the thing that
+# actually decides what is under test — the Bash binary — is pinned by digest
+# above.
+#
+#   git       worktree fixtures in the drain, respond, recover and notification
+#             suites; without it those cases used to skip
+#   tmux      real tmux server for the delivery handshake, per-harness handshake
+#             and worker readiness cases
+#   python3   bin/_sgt-*.py helpers (response lock, owned-fd verification) and
+#             the portable-marker drain cases
+#   procps    ps/pgrep for pane and process convergence assertions
+#   lsof      open-file assertions in the lock and fd suites
+#   util-linux  flock and friends
+#   sqlite3   sgt-msg-* inbox storage
+#   coreutils, findutils, grep, sed, diffutils
+#             GNU behaviour the suites were written against (BusyBox `stat`
+#             lacks -c, BusyBox `find` lacks -newermt, BusyBox `grep` lacks -P);
+#             installed so a BusyBox difference cannot be mistaken for a Bash
+#             3.2 incompatibility
+#   zsh, dash test subjects, not conveniences: tmux runs the worker launch
+#             command through the pane default-shell, which is /bin/zsh on any
+#             default macOS install since Catalina (GH #228), and dash covers
+#             POSIX-only parsing
+#   curl, ca-certificates  used by the yq install below and by network-guard
+#             assertions
+RUN apk add --no-cache \
+      git \
+      tmux \
+      python3 \
+      procps \
+      lsof \
+      util-linux \
+      sqlite \
+      coreutils \
+      findutils \
+      grep \
+      sed \
+      diffutils \
+      zsh \
+      dash \
+      curl \
+      ca-certificates
+
+# yq parses project YAML in sgt-context, which sgt-dispatch calls during
+# preflight.  Installed from the mikefarah/yq release, NOT a distro `yq`
+# package: python-yq is a jq wrapper with different output semantics
+# (`yq '.name' file` prints `"test"` where mikefarah v4 prints `test`), and
+# sgt-context assigns that output straight into project names and repo paths, so
+# the wrong yq corrupts every resolved path silently instead of failing.
+#
+# Pinned by version and verified by checksum, matching Dockerfile.test.  The
+# release binaries are static Go builds, so they run unchanged against musl.
+ARG YQ_VERSION=v4.44.3
+ARG YQ_SHA256_AMD64=a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7
+ARG YQ_SHA256_ARM64=0e7e1524f68d91b3ff9b089872d185940ab0fa020a5a9052046ef10547023156
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64) yq_arch=amd64; yq_sha="$YQ_SHA256_AMD64" ;; \
+      aarch64|arm64) yq_arch=arm64; yq_sha="$YQ_SHA256_ARM64" ;; \
+      *) printf 'unsupported architecture for yq: %s\n' "$arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /usr/local/bin/yq \
+      "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${yq_arch}"; \
+    printf '%s  /usr/local/bin/yq\n' "$yq_sha" | sha256sum -c -; \
+    chmod +x /usr/local/bin/yq; \
+    yq --version | grep -Fq "$YQ_VERSION"
+
+# The suites default BASH32 to /usr/local/bin/bash32, so name the Bash 3.2
+# binary there as well as at its own path.  A symlink, not a copy: both names
+# must always resolve to the same binary.
+RUN ln -s /usr/local/bin/bash /usr/local/bin/bash32
+
+# Prove what is under test, and fail the build rather than the gate if it is
+# wrong.  A tool package that dragged in a newer Bash, or shadowed `bash` on
+# PATH, would silently turn this image back into a Bash 5 pass wearing a Bash
+# 3.2 label.
+RUN set -eux; \
+    bash --version | head -1; \
+    bash --version | head -1 | grep -Fq 'version 3.2'; \
+    bash32 --version | head -1 | grep -Fq 'version 3.2'; \
+    [ "$(command -v bash)" = /usr/local/bin/bash ]; \
+    for tool in git tmux yq python3; do command -v "$tool" >/dev/null; done
+
+WORKDIR /repo
+
+# Default: the drain suite, both passes under Bash 3.2.  BASH32 is left at its
+# default (/usr/local/bin/bash32), which this image provides.
+CMD ["bash", "/repo/tests/run-drain-tests.sh"]

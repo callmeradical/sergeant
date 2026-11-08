@@ -18,20 +18,25 @@ minimum_bash="${SGT_MINIMUM_BASH:-/bin/bash}"
 # shellcheck disable=SC2016
 version="$($minimum_bash -c 'printf "%s.%s\n" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"')"
 if [[ "$version" != "3.2" ]]; then
-  # Bash 3.2 not available natively.  Re-exec this test inside Docker using the
-  # pinned bash:3.2 image when Docker is available.
-  _bash32_image="docker.io/library/bash:3.2@sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89"
+  # Bash 3.2 not available natively.  Re-exec this test inside the repo-owned
+  # Bash 3.2 image when Docker has it.  That image pins the same upstream
+  # bash:3.2 digest this test used to name directly, and adds git, tmux, yq and
+  # python3 — a Bash 3.2 proof run in a toolless image proves very little
+  # (td-5ab019).
+  _bash32_image="sergeant-test-bash32"
   if command -v docker >/dev/null 2>&1 && \
      docker image inspect "$_bash32_image" >/dev/null 2>&1; then
     exec docker run --rm \
       -v "$ROOT_DIR:$ROOT_DIR:ro" \
       -v "/tmp:/tmp" \
-      -e "SGT_MINIMUM_BASH=/usr/local/bin/bash" \
+      -e "SGT_MINIMUM_BASH=/usr/local/bin/bash32" \
       "$_bash32_image" \
-      bash "$ROOT_DIR/tests/runtime-bash-test.sh" "$@"
+      bash32 "$ROOT_DIR/tests/runtime-bash-test.sh" "$@"
   fi
   printf 'runtime Bash regression requires Bash 3.2, found %s at %s\n' "$version" "$minimum_bash" >&2
-  printf 'Install Bash 3.2 or set SGT_MINIMUM_BASH; see docs/troubleshooting.md\n' >&2
+  printf 'Install Bash 3.2, set SGT_MINIMUM_BASH, or build the image:\n' >&2
+  printf '  docker build -f Dockerfile.bash32 -t %s .\n' "$_bash32_image" >&2
+  printf 'See docs/troubleshooting.md\n' >&2
   exit 1
 fi
 

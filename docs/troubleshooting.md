@@ -167,18 +167,24 @@ The host may run a newer Bash. Use this repository-owned Bash 3.2 runtime test
 when compatibility proof is required:
 
 ```bash
+docker build -q -f Dockerfile.bash32 -t sergeant-test-bash32 .
 docker run --rm \
-  -e SGT_MINIMUM_BASH=/usr/local/bin/bash \
+  -e SGT_MINIMUM_BASH=/usr/local/bin/bash32 \
   -v "$PWD":/workspace:ro \
   -w /workspace \
-  docker.io/library/bash:3.2@sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 \
-  /usr/local/bin/bash tests/runtime-bash-test.sh
+  sergeant-test-bash32 \
+  bash32 tests/runtime-bash-test.sh
 ```
 
 This mounts the repository read-only and runs the repository-owned runtime
 regression, including the `sgt-dispatch` Bash 3.2 parse and branch-name
 regression for shipped scripts. Parsing proof does not replace runtime proof
 unless the task acceptance explicitly permits parsing only.
+
+`Dockerfile.bash32` pins the same upstream `bash:3.2` digest this command used to
+name directly, and adds `git`, `tmux`, `yq` and `python3`. Without them every
+tool-guarded case skipped and the suite runners still exited 0 (td-5ab019), so
+prefer the image over the bare upstream one for any Bash 3.2 proof.
 
 ## Graphify output is wrong or recursive
 
