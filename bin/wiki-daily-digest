@@ -290,6 +290,7 @@ PYEOF
 _fetch_merged_prs() {
   local date="$1"
   if ! command -v gh &>/dev/null; then echo "(gh not available)"; return; fi
+  if ! command -v jq &>/dev/null; then echo "(jq not available)"; return; fi
 
   local prs=""
   for repo in ascend-arch-smith ascend-arch-smith-infra ascend-arch-smith-app ascend-arch-smith-integration; do
@@ -298,9 +299,8 @@ _fetch_merged_prs() {
     [[ -d "$repo_path" ]] || continue
     local result
     result="$(cd "$repo_path" && gh pr list --state merged \
-      --json number,title,mergedAt,body \
-      --jq ".[] | select(.mergedAt | startswith(\"$date\")) | \"- [\(.number)] \(.title)\"" \
-      2>/dev/null || echo "")"
+      --json number,title,mergedAt,body 2>/dev/null | \
+      jq -r --arg date "$date" '.[] | select(.mergedAt | startswith($date)) | "- [\(.number)] \(.title)"' || echo "")"
     [[ -n "$result" ]] && prs+="$repo:
 $result
 "
