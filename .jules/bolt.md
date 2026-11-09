@@ -24,3 +24,7 @@
 ## 2026-10-24 - Zero-allocation prefix matching
 **Learning:** In Go, case-insensitive prefix matching using `strings.HasPrefix(strings.ToLower(str), prefix)` forces a memory allocation and slice copy per check.
 **Action:** Use `len(str) >= len(prefix) && strings.EqualFold(str[:len(prefix)], prefix)` to eliminate GC pressure and allocations in hot paths like HTTP response parsing.
+
+## 2024-11-20 - Avoid strings.Builder and rune iteration in ASCII hot paths
+**Learning:** Found that iterating over strings with `range` (which implicitly decodes UTF-8 runes) and using `strings.Builder` for ASCII-only parsing adds overhead and memory allocations.
+**Action:** In Go hot paths parsing ASCII-based delimiters, replace `strings.Builder` and `range` string loops with a reusable `[]byte` buffer and direct byte indexing (`for i := 0; i < len(s); i++`) to significantly reduce memory allocations and execution time.
