@@ -69,28 +69,33 @@ func scriptDir() string {
 // shellSplit splits a shell-style argument string honouring single and double
 // quotes. It does not handle backslash escapes or variable expansion — agents
 // should quote values that contain spaces.
+//
+// Performance optimization: using a []byte buffer and manual iteration
+// instead of strings.Builder and a range loop (which implicitly decodes UTF-8
+// runes) significantly reduces memory allocations and execution time.
 func shellSplit(s string) []string {
 	var args []string
-	var cur strings.Builder
+	var cur []byte
 	inSingle, inDouble := false, false
 
-	for _, r := range s {
+	for i := 0; i < len(s); i++ {
+		b := s[i]
 		switch {
-		case r == '\'' && !inDouble:
+		case b == '\'' && !inDouble:
 			inSingle = !inSingle
-		case r == '"' && !inSingle:
+		case b == '"' && !inSingle:
 			inDouble = !inDouble
-		case (r == ' ' || r == '\t') && !inSingle && !inDouble:
-			if cur.Len() > 0 {
-				args = append(args, cur.String())
-				cur.Reset()
+		case (b == ' ' || b == '\t') && !inSingle && !inDouble:
+			if len(cur) > 0 {
+				args = append(args, string(cur))
+				cur = cur[:0]
 			}
 		default:
-			cur.WriteRune(r)
+			cur = append(cur, b)
 		}
 	}
-	if cur.Len() > 0 {
-		args = append(args, cur.String())
+	if len(cur) > 0 {
+		args = append(args, string(cur))
 	}
 	return args
 }
