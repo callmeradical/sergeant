@@ -22,3 +22,7 @@
 **Vulnerability:** Passing sensitive secrets (like API keys) as command-line arguments to inline Python scripts exposes them to all users on the system via the process list (`ps aux`).
 **Learning:** System process listings capture command-line arguments, making them a fundamentally insecure channel for transmitting secrets to subprocesses.
 **Prevention:** Always pass sensitive secrets to subprocesses via environment variables (which are excluded from standard `ps` output by default) or via standard input/IPC.
+## 2026-10-24 - [jq Command Injection via Bash String Interpolation]
+**Vulnerability:** Bash variables were interpolated directly into the `gh pr list --jq` filter string (`--jq ".[] | select(.mergedAt | startswith(\"$date\"))"`). This allowed arbitrary `jq` command injection if the `$date` variable was maliciously crafted (e.g. `\" or 1=1`).
+**Learning:** String interpolation in shell commands calling CLI tools with embedded jq filters (like `gh --jq`) allows command injection.
+**Prevention:** Avoid direct string interpolation in jq filters. For CLI tools with embedded jq that lack argument support, output raw JSON and pipe to a standalone `jq` command, passing variables securely using the `--arg` parameter (e.g., `jq -r --arg date "$date"`).
