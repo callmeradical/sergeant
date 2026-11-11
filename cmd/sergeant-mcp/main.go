@@ -71,26 +71,31 @@ func scriptDir() string {
 // should quote values that contain spaces.
 func shellSplit(s string) []string {
 	var args []string
-	var cur strings.Builder
+	var cur []byte
 	inSingle, inDouble := false, false
 
-	for _, r := range s {
+	// Performance optimization: Avoid strings.Builder and implicit UTF-8 rune decoding
+	// using range loop. Manually iterate over string bytes via direct indexing and use a
+	// reusable []byte buffer. This reduces memory allocations and CPU overhead in a hot path
+	// that only needs to parse ASCII delimiters.
+	for i := 0; i < len(s); i++ {
+		r := s[i]
 		switch {
 		case r == '\'' && !inDouble:
 			inSingle = !inSingle
 		case r == '"' && !inSingle:
 			inDouble = !inDouble
 		case (r == ' ' || r == '\t') && !inSingle && !inDouble:
-			if cur.Len() > 0 {
-				args = append(args, cur.String())
-				cur.Reset()
+			if len(cur) > 0 {
+				args = append(args, string(cur))
+				cur = cur[:0]
 			}
 		default:
-			cur.WriteRune(r)
+			cur = append(cur, r)
 		}
 	}
-	if cur.Len() > 0 {
-		args = append(args, cur.String())
+	if len(cur) > 0 {
+		args = append(args, string(cur))
 	}
 	return args
 }
