@@ -237,6 +237,28 @@ chmod 600 "$portable_state/worker_process_markers"
 PATH="$TEST_ROOT/bin:$PATH" _sgt_prepare_worker_process_marker "$portable_state"
 [[ "$(wc -l < "$portable_state/worker_process_markers")" -eq 1 ]]
 
+# BSD wc left-pads its count ("       1"). A relaunch with existing history must
+# still count lines correctly, not reject every padded count (GH #367).
+mkdir -p "$TEST_ROOT/padded-wc"
+real_wc="$(command -v wc)"
+cat > "$TEST_ROOT/padded-wc/wc" <<EOF
+#!/usr/bin/env bash
+printf '%8s\n' "\$("$real_wc" "\$@" | tr -d ' ')"
+EOF
+chmod +x "$TEST_ROOT/padded-wc/wc"
+[[ "$(PATH="$TEST_ROOT/padded-wc:$PATH" wc -l < /dev/null)" == '       0' ]]
+padded_state="$TEST_ROOT/padded-wc-state"
+mkdir -p "$padded_state"
+PATH="$TEST_ROOT/padded-wc:$TEST_ROOT/bin:$PATH" \
+  _sgt_prepare_worker_process_marker "$padded_state"
+if ! PATH="$TEST_ROOT/padded-wc:$TEST_ROOT/bin:$PATH" \
+  _sgt_prepare_worker_process_marker "$padded_state"; then
+  printf 'marker preparation rejected padded BSD wc history count\n' >&2
+  exit 1
+fi
+padded_generation="$(cut -d '|' -f1 "$padded_state/worker_process_marker")"
+grep -q "^$padded_generation|" "$padded_state/worker_process_markers"
+
 # A live portable holder is positive capability evidence. Without a race-free
 # process handle on this platform it is preserved and never signalled by PID.
 portable_identity="$(cut -d '|' -f2 "$portable_state/worker_process_marker")"

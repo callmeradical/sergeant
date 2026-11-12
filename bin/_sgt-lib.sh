@@ -1450,7 +1450,8 @@ _sgt_prepare_worker_process_marker() {
         return 1
       }
     fi
-    history_lines="$(wc -l < "$history_tmp" 2>/dev/null || true)"
+    # BSD wc left-pads its count; strip it so the numeric check holds on macOS.
+    history_lines="$(wc -l < "$history_tmp" 2>/dev/null | tr -d ' ' || true)"
     [[ "$history_lines" =~ ^[0-9]+$ && "$history_lines" -lt 64 ]] || {
       rm -f "$history_tmp" "$path"
       return 1
