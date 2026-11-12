@@ -677,6 +677,60 @@ assert_failed_launch_rolls_back_and_retries exit-during-success
 assert_failed_launch_rolls_back_and_retries exit-after-final-ack
 assert_failed_launch_rolls_back_and_retries final-ack-timeout
 
+# sgt-validation-worker writes a failed: status before its launch handshake, so
+# the coordinator rolls back and publishes no provenance; only the status
+# remains. A retry relaunches and keeps the failure as evidence (GH #372).
+printf 'failed: validation worker process marker validation failed\n' \
+  > "$repo_state/validation_status"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+[[ "$(cat "$repo_state/validation_status")" == launched ]]
+failed_archives=("$repo_state"/validation_status.failed.*)
+[[ "${#failed_archives[@]}" -eq 1 && -f "${failed_archives[0]}" ]]
+grep -Fqx 'failed: validation worker process marker validation failed' \
+  "${failed_archives[0]}"
+rm -f "${failed_archives[@]}"
+
+# A failed: status beside recorded launch provenance gets the exited:N checks:
+# refused while the validation pane is live, retried once it is gone.
+printf 'failed: validation worker stopped\n' > "$repo_state/validation_status"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'Validation pane is already recorded'* ]]
+[[ "$(cat "$repo_state/validation_status")" == 'failed: validation worker stopped' ]]
+failed_archives=("$repo_state"/validation_status.failed.*)
+[[ ! -e "${failed_archives[0]}" ]]
+rm -f "$concurrent_dir/pane-live"
+PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app >/dev/null
+[[ "$(cat "$repo_state/validation_status")" == launched ]]
+failed_archives=("$repo_state"/validation_status.failed.*)
+[[ "${#failed_archives[@]}" -eq 1 ]]
+grep -Fqx 'failed: validation worker stopped' "${failed_archives[0]}"
+rm -f "${failed_archives[@]}"
+cleanup_validation_state
+
+# Partial provenance beside a failed: status is not a clean rollback: refused.
+printf '%%77\n' > "$repo_state/validation_pane"
+printf 'failed: validation worker stopped\n' > "$repo_state/validation_status"
+set +e
+output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
+  TMUX_PANE=%11 SERGEANT_FLEET="$fleet" \
+  "$ROOT_DIR/bin/sgt-validate" task-1 app 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 && "$output" == *'provenance is incomplete'* ]]
+[[ "$(cat "$repo_state/validation_status")" == 'failed: validation worker stopped' ]]
+failed_archives=("$repo_state"/validation_status.failed.*)
+[[ ! -e "${failed_archives[0]}" ]]
+cleanup_validation_state
+
 set +e
 output="$(PATH="$fake_bin:$PATH" TMUX_LOG="$TEST_ROOT/tmux.log" \
   FAIL_TRANSITION=wrong-commit-ack SGT_VALIDATION_HANDSHAKE_ATTEMPTS=2 \
