@@ -1377,27 +1377,40 @@ _sgt_worker_process_marker_state_digest() {
     "$tuple_digest" =~ ^[0-9a-f]{64}$ ]] || return 1
   printf '%s\n' "$tuple_digest"
 }
+# On failure, _SGT_INHERITED_MARKER_FAILED_CHECK names the check that failed
+# as a fixed token (GH #373); it is empty after success.
 _sgt_validate_inherited_worker_marker() {
   local repo_dir="$1" marker generation identity fd path actual_identity actual_generation extra digest
+  _SGT_INHERITED_MARKER_FAILED_CHECK='preflight'
   _sgt_worker_process_marker_preflight "$repo_dir" || return 1
+  _SGT_INHERITED_MARKER_FAILED_CHECK='marker-read'
   marker="$(_sgt_read_owned_file \
     "$repo_dir/worker_process_marker" 2>/dev/null || true)"
   [[ -n "$marker" ]] || return 1
+  _SGT_INHERITED_MARKER_FAILED_CHECK='history-digest'
   digest="$(_sgt_marker_history_digest \
     "$repo_dir/worker_process_markers" "$marker" 2>/dev/null || true)"
   [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  _SGT_INHERITED_MARKER_FAILED_CHECK='marker-format'
   IFS='|' read -r generation identity fd path <<< "$marker"
   [[ "$generation" =~ ^[0-9a-f]{32}$ && "$identity" =~ ^[0-9]+:[0-9]+$ && \
     "$fd" == 198 && -n "$path" ]] || return 1
+  _SGT_INHERITED_MARKER_FAILED_CHECK='fd-identity'
   actual_identity="$(_sgt_fd_identity 198 2>/dev/null || true)"
   [[ "$actual_identity" == "$identity" ]] || return 1
+  _SGT_INHERITED_MARKER_FAILED_CHECK='marker-path-present'
   [[ ! -e "$path" && ! -L "$path" ]] || return 1
+  _SGT_INHERITED_MARKER_FAILED_CHECK='fd-read'
   IFS= read -r actual_generation <&198 || return 1
+  _SGT_INHERITED_MARKER_FAILED_CHECK='fd-generation'
   [[ "$actual_generation" == "$generation" ]] || return 1
+  _SGT_INHERITED_MARKER_FAILED_CHECK='fd-trailing-data'
   if IFS= read -r extra <&198; then
     return 1
   fi
+  _SGT_INHERITED_MARKER_FAILED_CHECK='marker-path-reappeared'
   [[ ! -e "$path" && ! -L "$path" ]] || return 1
+  _SGT_INHERITED_MARKER_FAILED_CHECK=
 }
 _sgt_prepare_worker_process_marker() {
   local repo_dir="$1" path generation identity marker launch_identity launch_floor history history_tmp history_backup="" history_lines history_has_portable platform platform_record="" desired_platform="" portable_marker=false old_history_present=false
