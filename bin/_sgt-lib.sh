@@ -2060,8 +2060,14 @@ _path_device() {
 # (which just counts lines) and bin/sgt-stop-all (which collects its
 # eligible-worker targets from this same enumeration), so exactly one
 # definition of "verified-live worker" exists.
+#
+# By default only `in_progress` records are yielded, which is what dispatch
+# admission counts. `--nonterminal` also yields `waiting`, `needs_input`, and
+# `blocked` records: those workers keep live panes too, and sgt-stop-all must
+# reach every live worker (GH #371).
 _sgt_live_worker_records() {
-  local task_dir repo_dir task_id repo_name status
+  local task_dir repo_dir task_id repo_name status nonterminal=false
+  [[ "${1:-}" != --nonterminal ]] || nonterminal=true
   for task_dir in "$FLEET_DIR"/*/; do
     [[ -d "$task_dir" ]] || continue
     task_id="$(basename "${task_dir%/}")"
@@ -2069,7 +2075,12 @@ _sgt_live_worker_records() {
     for repo_dir in "$task_dir"*/; do
       [[ -d "$repo_dir" ]] || continue
       status="$(cat "$repo_dir/status" 2>/dev/null || true)"
-      [[ "$status" == "in_progress" ]] || continue
+      if $nonterminal; then
+        [[ "$status" == in_progress || "$status" == waiting || \
+          "$status" == needs_input || "$status" == blocked ]] || continue
+      else
+        [[ "$status" == "in_progress" ]] || continue
+      fi
       _sgt_pane_identity_matches "$(cat "$repo_dir/pane" 2>/dev/null || true)" \
         "$repo_dir" || continue
       repo_name="$(basename "${repo_dir%/}")"

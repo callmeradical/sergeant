@@ -287,6 +287,57 @@ fi
 kill "$pid6" 2>/dev/null || true
 wait "$pid6" 2>/dev/null || true
 
+# ── 7. Every nonterminal status is a target, not just in_progress (GH #371) ──
+# waiting, needs_input, and blocked workers keep live panes; a hard-stop that
+# skips them leaves live workers behind. A terminal status is never a target.
+
+fleet7="$TEST_ROOT/fleet7"
+fake_bin7="$TEST_ROOT/fake-bin7"
+mkdir -p "$fake_bin7"
+cat > "$fake_bin7/tmux" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "display-message" ]]; then
+  for a in "$@"; do
+    [[ "$a" =~ ^%7[1-5]$ ]] && { printf '0|%s|100|10|cmd\n' "$a"; exit 0; }
+  done
+fi
+exit 1
+EOF
+chmod +x "$fake_bin7/tmux"
+pane_number=71
+for status7 in in_progress waiting needs_input blocked failed; do
+  repo7="$fleet7/task-7-$status7/app"
+  mkdir -p "$repo7"
+  printf '%s\n' "$status7" > "$repo7/status"
+  printf '%%%s\n' "$pane_number" > "$repo7/pane"
+  printf '0|%%%s|100|10|cmd\n' "$pane_number" > "$repo7/pane_identity"
+  chmod 600 "$repo7/pane_identity"
+  pane_number=$((pane_number + 1))
+done
+
+dry7="$(SERGEANT_FLEET="$fleet7" PATH="$fake_bin7:$PATH" \
+  "$ROOT_DIR/bin/sgt-stop-all" --dry-run 2>&1)"
+for status7 in in_progress waiting needs_input blocked; do
+  if [[ "$dry7" == *"task-7-$status7 "* ]]; then
+    _pass "sgt-stop-all --dry-run: targets a verified-live $status7 worker"
+  else
+    _fail "sgt-stop-all --dry-run: expected live $status7 worker listed; got: $dry7"
+  fi
+done
+if [[ "$dry7" != *"task-7-failed "* ]]; then
+  _pass "sgt-stop-all --dry-run: never targets a terminal-status worker"
+else
+  _fail "sgt-stop-all --dry-run: listed a terminal-status worker; got: $dry7"
+fi
+
+# Dispatch admission still counts only in_progress workers.
+census7="$(SERGEANT_FLEET="$fleet7" PATH="$fake_bin7:$PATH" _lib _sgt_live_worker_census)"
+if [[ "$census7" == 1 ]]; then
+  _pass "_sgt_live_worker_census: still counts only in_progress workers"
+else
+  _fail "_sgt_live_worker_census: expected 1 in_progress worker, got '$census7'"
+fi
+
 printf '\nsgt-stop-all: %d passed' "$pass"
 if [[ "$fail" -gt 0 ]]; then
   printf ', %d FAILED\n' "$fail" >&2
