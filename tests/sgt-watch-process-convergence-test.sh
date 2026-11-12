@@ -9,6 +9,9 @@ TMUX_SESSION="sgt-watch-process-convergence-$$"
 FIXTURE_PGIDS=""
 export TMUX_TMPDIR="$TEST_ROOT/tmux"
 mkdir -p "$TMUX_TMPDIR"
+# tmux ignores TMUX_TMPDIR while $TMUX is set, so drop any inherited pane
+# before the first tmux call; otherwise it reaches the caller's server (#369).
+unset TMUX TMUX_PANE
 
 cleanup_fixture() {
   local pgid pid pid_file

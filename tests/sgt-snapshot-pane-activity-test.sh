@@ -9,6 +9,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 export TMUX_TMPDIR="$TEST_ROOT/tmux"
 mkdir -p "$TMUX_TMPDIR"
+# tmux ignores TMUX_TMPDIR while $TMUX is set, so drop any inherited pane
+# before the first tmux call; otherwise it reaches the caller's server (#369).
+unset TMUX TMUX_PANE
 trap 'tmux kill-server >/dev/null 2>&1 || true; rm -rf "$TEST_ROOT"' EXIT
 
 fleet="$TEST_ROOT/fleet"

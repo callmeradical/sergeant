@@ -29,7 +29,16 @@
 #   tmux -L <socket> / tmux -S <path>      -- names a private socket per call
 #
 # Isolation must appear BEFORE the first tmux invocation; setting TMUX_TMPDIR
-# afterwards leaves the earlier calls on the default socket.
+# afterwards leaves the earlier calls on the default socket.  An EXIT trap that
+# calls tmux counts as an invocation: it can fire as soon as it is registered.
+#
+# TMUX_TMPDIR alone is not isolation (#369).  A tmux client ignores TMUX_TMPDIR
+# whenever $TMUX is set and connects to the server named there instead, so a
+# suite run from inside a tmux pane -- a developer's shell, or a Sergeant worker
+# validating this repository -- sends its kill-server/kill-session to the real
+# server.  A test that relies on TMUX_TMPDIR must therefore also clear TMUX at
+# top level (`unset TMUX TMUX_PANE`) before its first tmux invocation.  A
+# private socket named with -L/-S wins over $TMUX and needs no clearing.
 
 set -euo pipefail
 
@@ -65,8 +74,9 @@ for test_file in "$TESTS_DIR"/*.sh; do
   [[ "$name" != "$SELF" ]] || continue
 
   # First real tmux invocation at command position, ignoring comment lines.  The
-  # leading-context class keeps `sgt-tmux-helper` and similar from matching.
-  first_tmux="$(grep -nE "(^|[;&|(]|[[:space:]])tmux[[:space:]]+($SERVER_SUBCOMMANDS)" \
+  # leading-context class keeps `sgt-tmux-helper` and similar from matching; it
+  # admits a quote so `trap 'tmux kill-session ...' EXIT` counts as a call.
+  first_tmux="$(grep -nE "(^|[;&|(\"']|[[:space:]])tmux[[:space:]]+($SERVER_SUBCOMMANDS)" \
     "$test_file" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' | head -1 | cut -d: -f1 || true)"
 
   # A file that never talks to a tmux server has nothing to isolate.  Tests that
@@ -84,6 +94,21 @@ for test_file in "$TESTS_DIR"/*.sh; do
   elif (( first_isolation > first_tmux )); then
     offenders+="  $name: isolation at line $first_isolation comes after the first tmux call at line $first_tmux"$'\n'
   fi
+
+  # TMUX_TMPDIR must be paired with a top-level clear of TMUX.  Only a line that
+  # starts with `unset ... TMUX` or `export TMUX=` (empty) counts; a per-command
+  # `env -u TMUX` covers one call, not the file.
+  uses_tmpdir="$(grep -nE 'TMUX_TMPDIR=' "$test_file" 2>/dev/null \
+    | grep -vE '^[0-9]+:[[:space:]]*#' | head -1 || true)"
+  if [[ -n "$uses_tmpdir" ]]; then
+    first_clear="$(grep -nE '^[[:space:]]*(unset([[:space:]]+[A-Za-z_][A-Za-z0-9_]*)*[[:space:]]+TMUX|export[[:space:]]+TMUX=(""|'"''"')?)([[:space:]]|;|$)' \
+      "$test_file" 2>/dev/null | head -1 | cut -d: -f1 || true)"
+    if [[ -z "$first_clear" ]]; then
+      offenders+="  $name: relies on TMUX_TMPDIR but never clears TMUX (first tmux call line $first_tmux)"$'\n'
+    elif (( first_clear > first_tmux )); then
+      offenders+="  $name: TMUX is cleared at line $first_clear, after the first tmux call at line $first_tmux"$'\n'
+    fi
+  fi
 done
 
 (( checked > 0 )) || {
@@ -95,8 +120,9 @@ if [[ -n "$offenders" ]]; then
   printf 'FAIL: these tests drive a tmux server they do not own (td-be53d1):\n' >&2
   printf '%s' "$offenders" >&2
   # shellcheck disable=SC2016  # Literal advice text; $TEST_ROOT must not expand.
-  printf '\nFix: export TMUX_TMPDIR="$TEST_ROOT/tmux" (and mkdir -p it) before the\n' >&2
-  printf 'first tmux call, or scope every call with tmux -L <socket>.\n' >&2
+  printf '\nFix: unset TMUX TMUX_PANE, then export TMUX_TMPDIR="$TEST_ROOT/tmux" (and\n' >&2
+  printf 'mkdir -p it), before the first tmux call or tmux-calling trap; or scope\n' >&2
+  printf 'every call with tmux -L <socket>.\n' >&2
   exit 1
 fi
 

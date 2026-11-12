@@ -27,6 +27,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT_DIR/bin"
 TEST_ROOT="$(mktemp -d)"
 TMUX_SESSION="sgt-resume-notification-test-$$"
+# tmux ignores TMUX_TMPDIR while $TMUX is set, so drop any inherited pane and
+# confine tmux before the EXIT trap below can call it (#369).  This also keeps
+# sgt-session-resume from believing it runs inside a pane.
+unset TMUX TMUX_PANE
+export TMUX_TMPDIR="$TEST_ROOT/tmux"
 
 trap 'tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true; rm -rf "$TEST_ROOT"' EXIT
 
@@ -40,7 +45,6 @@ command -v python3 >/dev/null 2>&1 || { printf 'python3 is required\n' >&2; exit
 export SERGEANT_FLEET="$TEST_ROOT/fleet"
 export SERGEANT_CONFIG="$TEST_ROOT/config"
 export SERGEANT_DRAIN_DIR="$TEST_ROOT/drain"
-export TMUX_TMPDIR="$TEST_ROOT/tmux"
 export HOME="$TEST_ROOT/home"
 export SGT_WIKI_DISABLED=1
 export SGT_TEST_HOOKS=1
@@ -159,8 +163,6 @@ chmod 600 "$REPO_DIR/worker_process_markers"
 # ── Start a private tmux server ───────────────────────────────────────────────
 tmux new-session -d -s "$TMUX_SESSION" -n keepalive \
   "while :; do sleep 1; done"
-export TMUX=""      # ensure sgt-session-resume is not inside a pane
-export TMUX_PANE="" # likewise
 
 # ── Run sgt-session-resume ────────────────────────────────────────────────────
 resume_out="$TEST_ROOT/resume.out"

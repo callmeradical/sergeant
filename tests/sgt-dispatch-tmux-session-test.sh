@@ -153,11 +153,11 @@ state="$(printf '%s\n' "$TEST_ROOT"/fleet/explicit-session-*/app)"
   exit 1
 }
 grep -q -- '-t custom-session:' "$TEST_ROOT/explicit.log" || {
-  printf 'FAIL: tmux new-window was not targeted at custom-session\n' >&2
+  printf 'FAIL: new-window was not targeted at custom-session\n' >&2
   exit 1
 }
 grep -q -- '-s custom-session' "$TEST_ROOT/explicit.log" || {
-  printf 'FAIL: tmux new-session was not created for custom-session\n' >&2
+  printf 'FAIL: new-session was not created for custom-session\n' >&2
   exit 1
 }
 
