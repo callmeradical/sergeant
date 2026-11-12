@@ -19,6 +19,9 @@ TMUX_SESSION="sgt-interactive-worker-test-$$"
 # whole server down with them (td-be53d1).
 export TMUX_TMPDIR="$TEST_ROOT/tmux"
 mkdir -p "$TMUX_TMPDIR"
+# tmux ignores TMUX_TMPDIR while $TMUX is set, so drop any inherited pane
+# before the first tmux call; otherwise it reaches the caller's server (#369).
+unset TMUX TMUX_PANE
 trap 'tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true; rm -rf "$TEST_ROOT"' EXIT
 
 mkdir -p "$TEST_ROOT/fake-bin" "$TEST_ROOT/done/state" "$TEST_ROOT/done/worktree" \

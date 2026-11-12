@@ -21,6 +21,9 @@ TMUX_SESSION="sgt-interrupted-fallback-test-$$"
 # terminate path kills panes and process groups (td-be53d1).
 export TMUX_TMPDIR="$TEST_ROOT/tmux"
 mkdir -p "$TMUX_TMPDIR"
+# tmux ignores TMUX_TMPDIR while $TMUX is set, so drop any inherited pane
+# before the first tmux call; otherwise it reaches the caller's server (#369).
+unset TMUX TMUX_PANE
 trap 'tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true; rm -rf "$TEST_ROOT"' EXIT
 
 fake_bin="$TEST_ROOT/bin"
@@ -451,6 +454,9 @@ exit 1
 EOF
 chmod +x "$fake_bin/opencode"
 
+# The shimmed sgt-dispatch tests above export TMUX=fixture; the real tmux calls
+# below must not follow it away from TMUX_TMPDIR (#369).
+unset TMUX TMUX_PANE
 tmux new-session -d -s "$TMUX_SESSION" 2>/dev/null || true
 tmux new-window -d -t "$TMUX_SESSION:" -n worker-committed-orphan \
   "env PATH='$fake_bin:$PATH' \

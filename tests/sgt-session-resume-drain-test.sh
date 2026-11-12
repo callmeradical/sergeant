@@ -34,7 +34,7 @@ exit 0
 EOF
 chmod +x "$TEST_ROOT/fake-bin/opencode"
 export PATH="$TEST_ROOT/fake-bin:$PATH"
-unset TMUX
+unset TMUX TMUX_PANE
 
 pass=0
 fail=0
