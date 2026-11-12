@@ -606,12 +606,39 @@ _release_validation_lock() {
   _remove_validation_lock_identity "$VALIDATION_LOCK_IDENTITY" || return 1
   VALIDATION_LOCK_OWNED=false
 }
+# Keep a terminal failed: status as retry evidence rather than deleting it.
+_archive_failed_validation_status() {
+  ln "$REPO_STATE/validation_status" \
+    "$REPO_STATE/validation_status.failed.$(date -u +%Y%m%dT%H%M%SZ).$$" 2>/dev/null || \
+    _die "Failed to preserve failed validation status as evidence"
+}
 _reset_retryable_validation_state() {
   local status pane recorded_identity recorded_pid recorded_pgid recorded_start current_identity
   local current_start current_pgid live_pids checkout checkout_identity git_dir git_identity head owner
-  local owner_file provenance_mode quarantine cwd_pids
+  local owner_file provenance_mode quarantine cwd_pids path
   status="$(cat "$REPO_STATE/validation_status" 2>/dev/null || true)"
-  [[ "$status" =~ ^exited:[0-9]+$ ]] || return 0
+  # exited:N and failed: are the worker's only terminal statuses; launched and
+  # running are not retryable.
+  [[ "$status" =~ ^exited:[0-9]+$ || "$status" == failed:* ]] || return 0
+  if [[ "$status" == failed:* ]]; then
+    # The worker writes failed: before its launch handshake, so the launch rolled
+    # back without publishing provenance. Any recorded provenance takes the full
+    # exited:N verification below; with none, keep the failure as evidence and
+    # let the launch-state checks refuse any other leftover.
+    for path in "$REPO_STATE/validation_pane" "$REPO_STATE/validation_pane_identity" \
+      "$REPO_STATE/validation_pane_pid" "$REPO_STATE/validation_process_group" \
+      "$REPO_STATE/validation_process_start" "$VALIDATION_WORKTREE_RECORD" \
+      "$VALIDATION_WORKTREE"; do
+      _validation_path_exists "$path" && break
+      path=""
+    done
+    if [[ -z "$path" ]]; then
+      _archive_failed_validation_status
+      rm -f "$REPO_STATE/validation_status" || \
+        _die "Failed to clear failed validation status for retry"
+      return 0
+    fi
+  fi
 
   pane="$(cat "$REPO_STATE/validation_pane" 2>/dev/null || true)"
   recorded_identity="$(_sgt_read_owned_file "$REPO_STATE/validation_pane_identity" \
@@ -698,6 +725,7 @@ _reset_retryable_validation_state() {
       ;;
   esac
   rm -rf "$quarantine" || _die "Failed to remove finished validation snapshot: $checkout"
+  [[ "$status" != failed:* ]] || _archive_failed_validation_status
   rm -f "$REPO_STATE/validation_pane" "$REPO_STATE/validation_pane_identity" \
     "$REPO_STATE/validation_pane_pid" "$REPO_STATE/validation_process_group" \
     "$REPO_STATE/validation_process_start" "$REPO_STATE/validation-release" \
