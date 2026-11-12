@@ -1715,13 +1715,10 @@ _sgt_worktree_is_validation_clean() {
   local worktree="$1" untracked
   git -C "$worktree" diff --quiet --ignore-submodules -- && \
     git -C "$worktree" diff --cached --quiet --ignore-submodules -- || return 1
+  # No case statement here: Bash 3.2 reads a case pattern's `)` as the end of
+  # the command substitution, and `bash -n` cannot see it (GH #368).
   untracked="$(git -C "$worktree" ls-files --others --exclude-standard | \
-    while IFS= read -r path; do
-      case "$path" in
-        .sergeant-*) ;;
-        *) printf '%s\n' "$path" ;;
-      esac
-    done)"
+    grep -v '^\.sergeant-' || true)"
   [[ -z "$untracked" ]]
 }
 _sgt_td_normalize_version() {
