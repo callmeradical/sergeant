@@ -6,8 +6,8 @@
 # a drain record, and this command works with no drain already active — a
 # saturated machine may never be able to reliably signal a drain to begin
 # with.  Targets are the same verified-live worker panes bin/sgt-dispatch's
-# admission census trusts (_sgt_pane_identity_matches), not a bare
-# `status=in_progress` file, and per-worker signaling reuses the same
+# admission census trusts (_sgt_pane_identity_matches), not a bare status
+# file, in any nonterminal status, and per-worker signaling reuses the same
 # PID-identity-checked escalation sgt-drain-force implements
 # (_sgt_terminate_verified_pid, bin/_sgt-process.sh) rather than reimplementing
 # it here.
@@ -54,7 +54,9 @@ GRACE_DECISECONDS="${SERGEANT_STOP_ALL_GRACE_DECISECONDS:-30}"
 # Machine-wide by design (PRD settled decision): no --project/--repo scope
 # selector. Shares its "verified-live worker" definition with
 # _sgt_live_worker_census (bin/_sgt-lib.sh) via _sgt_live_worker_records, so
-# there is exactly one place that decides what counts as live.
+# there is exactly one place that decides what counts as live. Unlike the
+# census, it targets every nonterminal status: a waiting, needs_input, or
+# blocked worker keeps a live pane and must be stopped too.
 
 declare -a eligible_tasks=() eligible_repos=() eligible_dirs=()
 if [[ -d "$FLEET_DIR" ]]; then
@@ -63,7 +65,7 @@ if [[ -d "$FLEET_DIR" ]]; then
     eligible_tasks+=("$_swa_task_id")
     eligible_repos+=("$_swa_repo_name")
     eligible_dirs+=("$_swa_repo_dir")
-  done < <(_sgt_live_worker_records)
+  done < <(_sgt_live_worker_records --nonterminal)
 fi
 
 count="${#eligible_tasks[@]}"
