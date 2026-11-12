@@ -480,4 +480,79 @@ grep -Fq 'unsupported validation intent transport: plaintext' \
   exit 1
 }
 
+# ── process marker failure detail (GH #373) ─────────────────────────────────
+# A rejected inherited marker must name the failed check in validation_status
+# while keeping the original message as a prefix for existing consumers.
+launch_marker_worker() {
+  local dir="$1" marker_dir="$2"
+  tmux new-window -d -t "$TMUX_SESSION" -n "marker-$$-$RANDOM" -c "$worktree" \
+    "env PATH='$fake_bin:$PATH' '$ROOT_DIR/bin/sgt-validation-worker' '$dir' \
+    '$worktree' '$revision' intent-file '' '$marker_dir' 2>'$dir/worker.err'"
+  for _ in $(seq 1 200); do
+    [[ -s "$dir/validation_status" ]] && break
+    sleep 0.02
+  done
+}
+expect_marker_status() {
+  local dir="$1" check="$2" got
+  got="$(cat "$dir/validation_status" 2>/dev/null || echo empty)"
+  [[ "$got" == "failed: validation worker process marker validation failed: $check" ]] || {
+    printf 'marker failure detail: expected check %s, got: %s\n' "$check" "$got" >&2
+    exit 1
+  }
+}
+# No marker record at all fails the owned-file read.
+unread_state="$TEST_ROOT/marker-unread-state"
+new_transport_state "$unread_state"
+mkdir -p "$unread_state/marker"
+launch_marker_worker "$unread_state" "$unread_state/marker"
+expect_marker_status "$unread_state" marker-read
+# A valid marker whose file was never opened on fd 198 fails the fd identity.
+no_fd_state="$TEST_ROOT/marker-no-fd-state"
+new_transport_state "$no_fd_state"
+mkdir -p "$no_fd_state/marker"
+bash -c 'source "$1"; _sgt_prepare_worker_process_marker "$2"' _ \
+  "$ROOT_DIR/bin/_sgt-lib.sh" "$no_fd_state/marker"
+launch_marker_worker "$no_fd_state" "$no_fd_state/marker"
+expect_marker_status "$no_fd_state" fd-identity
+
+# The remaining checks are driven in-process; success leaves the check empty.
+marker_check_result() {
+  # shellcheck disable=SC2016  # Expanded by the inner bash.
+  "$BASH" -c '
+    source "$1"
+    dir="$2"
+    mode="$3"
+    mkdir -p "$dir"
+    _sgt_prepare_worker_process_marker "$dir" || exit 90
+    record="$(_sgt_read_owned_file "$dir/worker_process_marker")"
+    path="${record##*|}"
+    if [[ "$mode" == preflight ]]; then
+      rm -f "$dir/worker_process_markers"
+    elif [[ "$mode" == fd-trailing-data ]]; then
+      chmod 600 "$path"
+      printf "extra\n" >> "$path"
+    fi
+    exec 198< "$path"
+    [[ "$mode" == marker-path-present ]] || rm -f "$path"
+    if _sgt_validate_inherited_worker_marker "$dir" 2>/dev/null; then
+      printf "ok:%s\n" "${_SGT_INHERITED_MARKER_FAILED_CHECK-unset}"
+    else
+      printf "failed:%s\n" "${_SGT_INHERITED_MARKER_FAILED_CHECK-unset}"
+    fi
+  ' _ "$ROOT_DIR/bin/_sgt-lib.sh" "$TEST_ROOT/marker-check-$1" "$1"
+}
+for check in preflight marker-path-present fd-trailing-data; do
+  got="$(marker_check_result "$check")"
+  [[ "$got" == "failed:$check" ]] || {
+    printf 'marker check %s: got %s\n' "$check" "$got" >&2
+    exit 1
+  }
+done
+got="$(marker_check_result valid)"
+[[ "$got" == "ok:" ]] || {
+  printf 'valid marker: expected ok with no failed check, got %s\n' "$got" >&2
+  exit 1
+}
+
 printf 'sgt-validation-worker release handshake: ok\n'
