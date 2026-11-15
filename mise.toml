@@ -246,7 +246,7 @@ _check_agent_harness
 echo ""
 echo "Optional:"
 _check "treehouse"  treehouse  optional  "https://github.com/kunchenguid/treehouse"
-_check "graphify"   graphify   optional  "https://github.com/kunchenguid/graphify"
+_check "graphify"   graphify   optional  "uv tool install graphifyy (https://github.com/Graphify-Labs/graphify)"
 _check "no-mistakes" no-mistakes optional "install no-mistakes for final shipping validation"
 _check "mise"       mise       optional  "brew install mise"
 _check "go"          go         optional  "install Go 1.21+ from go.dev to build sergeant-mcp" "version"
