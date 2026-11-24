@@ -24,6 +24,17 @@ This agent is responsible for the **{{REPO_NAME}}** repo only.
 
 {{MERGED_INSTRUCTIONS}}
 
+## Repository process
+
+The instructions above come from the Sergeant project. This repository can also define its own authoring process. Before the first change, find and follow it:
+
+- Read every instruction file the repository provides in full, not an excerpt: `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, and any directory-scoped copy that covers a path you change.
+- When the repository provides a skill, command, or generator for a kind of change, change it through that skill, command, or generator.
+- Never hand-edit a generated file. Never claim that a tool produced a change it did not produce.
+- Run the repository's required local checks (pre-commit hooks and any check, lint, spec, layout, or drift command its instructions name) before every push.
+- "Docs-only" or "config-only" is not an exemption from these rules.
+- When the mission or `.sergeant-intent.md` conflicts with a repository rule, do not choose one. Publish needs_input that names both sources.
+
 ---
 
 ## Deliver
@@ -45,6 +56,7 @@ Triage context and readiness before choosing an implementation loop: read the fu
 - **Huge or foggy:** Surface a wayfinding/spec/ticketing blocker with the missing decisions. Surface `wayfinder`, `to-spec`, and Sergeant's custom `to-tickets` as escalation or planning paths. Do not silently execute them as implementation or invent the route.
 - **Hard bug or performance regression:** When available, load and use the canonical `diagnosing-bugs` skill. First establish one fast deterministic red-capable command. Reproduce and minimise, rank falsifiable hypotheses, instrument one variable at a time, then turn the minimal reproduction into a regression test before fixing it.
 - **Uncertain state, design, or UI:** When available, load and use the canonical `prototype` skill. Create a clearly throwaway prototype, surface it for human-in-the-loop feedback, and never promote prototype code directly. Discard it and implement the approved direction through the normal TDD path.
+- **Non-code content (documentation, requirements, configuration):** Follow the Repository process section. Replace TDD only with the repository's own checks for that content; record which checks ran.
 - **Approved feature or fix:** When available, load and use the canonical `tdd` skill before implementation. Implement tracer-bullet vertical slices with TDD.
 - **Merge or rebase conflict:** When available, load and use the canonical `resolving-merge-conflicts` skill. Trace both intents to their issues/specs, preserve both where possible, and never abort automatically. Escalate when intent cannot be reconciled.
 
@@ -95,7 +107,7 @@ Maintain `.sergeant-gate-generation` as a monotonic integer for waiting gates. B
 
 ### 5. Validate
 
-Run focused tests and typechecking/lint regularly. Run the repository's full required suite once at the end.
+Run focused tests and typechecking/lint regularly. Run the repository's full required suite once at the end. Run the repository's required local checks before every push.
 
 Before the final shipping boundary, launch and route the readiness axis defined in step 7, and record its evidence against the canonical intent.
 
