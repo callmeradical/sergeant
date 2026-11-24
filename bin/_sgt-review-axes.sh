@@ -42,7 +42,7 @@ _sgt_review_axis_valid() {
 _sgt_review_axis_guidance() {
   case "$1" in
     standards)
-      printf '%s' '- **Standards axis:** Review the diff versus the pinned merge-base against active repo instructions, AGENTS, CONTRIBUTING, and coding standards. Add a concise Fowler smell heuristic (duplication, long functions/modules, large parameter lists, feature envy, data clumps, primitive obsession, shotgun surgery, and inappropriate intimacy). Separate hard documented-standard violations from judgement-call smells, and skip findings enforced by tooling.'
+      printf '%s' '- **Standards axis:** Review the diff versus the pinned merge-base against active repo instructions, AGENTS, CONTRIBUTING, and coding standards. Add a concise Fowler smell heuristic (duplication, long functions/modules, large parameter lists, feature envy, data clumps, primitive obsession, shotgun surgery, and inappropriate intimacy). Separate hard documented-standard violations from judgement-call smells, and skip findings enforced by tooling. A breach of documented repository process is severity `error`: a change made by hand where the repository requires a skill, command, or generator; a hand-edited generated file; or a false claim that a tool produced a change.'
       ;;
     spec)
       printf '%s' '- **Spec axis:** Review against the originating td issue/spec/mission. Report missing or partial requirements, scope creep, and incorrectly implemented requirements. If no spec exists, report this axis as skipped/no spec.'

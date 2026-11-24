@@ -2,9 +2,15 @@
 
 set -euo pipefail
 export TMUX=fixture TMUX_PANE=%11
+# Every dispatch below stays live in fleet state, and the admission budget
+# defaults to twice the CPU count, so later dispatches would be queued without
+# a brief on small hosts. The test checks briefs, not admission control.
+export SERGEANT_DISPATCH_MAX_WORKERS=1000
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TEST_ROOT="$(mktemp -d)"
+# Resolve the physical path: macOS mktemp returns /var/..., a symlink to
+# /private/var, and the intent guard rejects any --intent-file under a symlink.
+TEST_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 mkdir -p \
@@ -35,6 +41,40 @@ EOF
 
 cat > "$TEST_ROOT/fake-bin/tmux" <<'EOF'
 #!/usr/bin/env bash
+# ── managed coordinator pane support (td-eb9942) ─────────────────────────────
+# sgt-dispatch creates its coordinator pane inside its own session (#235), so
+# this fixture must serve one, as tests/sgt-dispatch-worker-test.sh does.
+_sgt_coord_pane="%79"
+_sgt_coord_flag="$SERGEANT_FLEET/.coordinator-created"
+case "${1:-}" in
+  list-sessions) exit 0 ;;
+  list-panes)
+    if [[ "$*" == *sgt-coordinator* ]]; then
+      [[ -f "$_sgt_coord_flag" ]] && printf '%s\n' "$_sgt_coord_pane"
+      exit 0
+    fi
+    ;;
+  new-window)
+    if [[ "$*" == *sgt-coordinator* ]]; then
+      : > "$_sgt_coord_flag"
+      printf '%s\n' "$_sgt_coord_pane"
+      exit 0
+    fi
+    ;;
+  set-option)
+    [[ "$*" == *@sgt_coordinator* ]] && exit 0
+    ;;
+  display-message)
+    if [[ "$*" == *@sgt_coordinator* ]]; then
+      printf 'sergeant-managed-coordinator\n'
+      exit 0
+    fi
+    if [[ "$*" == *"-t $_sgt_coord_pane"* ]]; then
+      printf '0|%s|7979|797979|sgt-coordinator-reader\n' "$_sgt_coord_pane"
+      exit 0
+    fi
+    ;;
+esac
 case "${1:-}" in
   new-window)
     for repo_state in "$SERGEANT_FLEET"/*/*; do
@@ -71,6 +111,8 @@ esac
 exit 0
 EOF
 chmod +x "$TEST_ROOT/fake-bin/tmux"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_ROOT/fake-bin/opencode"
+chmod +x "$TEST_ROOT/fake-bin/opencode"
 
 cat > "$TEST_ROOT/fake-bin/td" <<'EOF'
 #!/usr/bin/env bash
@@ -395,6 +437,22 @@ assert_contains "Spec axis"
 assert_contains "If no spec exists, report this axis as skipped"
 assert_contains "Do not blend or rerank the axes"
 assert_not_contains "Accessibility axis"
+
+# A worker follows the repository's own authoring process, not only the
+# project YAML instructions (#386).
+assert_contains "## Repository process"
+assert_contains "Read every instruction file the repository provides in full"
+assert_contains "change it through that skill, command, or generator"
+assert_contains "Never hand-edit a generated file"
+assert_contains "Never claim that a tool produced a change it did not produce"
+assert_contains "\"Docs-only\" or \"config-only\" is not an exemption"
+assert_contains "Publish needs_input that names both sources"
+assert_contains "**Non-code content (documentation, requirements, configuration):**"
+assert_contains "Replace TDD only with the repository's own checks"
+assert_contains "Run the repository's required local checks"
+assert_contains "before every push"
+assert_contains "A breach of documented repository process is severity \`error\`"
+assert_order "## Active instructions" "## Repository process" "## Deliver"
 
 # The axis vocabulary the generated contract demands must be the same shared
 # definition the router validates against, so the two cannot drift (td-61a0c8).
