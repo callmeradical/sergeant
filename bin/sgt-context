@@ -36,7 +36,18 @@ if [[ -n "$desc" && "$desc" != "null" ]]; then
 fi
 
 # ── Defaults ────────────────────────────────────────────────────────────────
+# The project layer applies to every repository, so print it once here rather
+# than repeating it under each repository below.
 default_instructions="$(yq '.defaults.agent_instructions // ""' "$CONFIG_FILE")"
+
+if [[ -n "$default_instructions" && "$default_instructions" != "null" ]]; then
+  echo "## Project instructions"
+  echo ""
+  echo "These apply to every repository first; each repository's group and repo instructions below follow them."
+  echo ""
+  echo "$default_instructions" | sed 's/^/> /'
+  echo ""
+fi
 
 # ── Repos ───────────────────────────────────────────────────────────────────
 echo "## Repositories"
@@ -74,12 +85,8 @@ for ((i=0; i<repo_count; i++)); do
     echo "- **status:** NOT CLONED"
   fi
 
-  # Resolve instructions: defaults → group → repo
+  # Resolve instructions: group → repo (the project layer is printed once above)
   effective_instructions=""
-
-  if [[ -n "$default_instructions" && "$default_instructions" != "null" ]]; then
-    effective_instructions="$default_instructions"
-  fi
 
   if [[ -n "$group" && "$group" != "null" ]]; then
     group_instructions="$(yq ".groups.\"$group\".agent_instructions // \"\"" "$CONFIG_FILE")"
